@@ -1,0 +1,126 @@
+/* ST-BME 样式 */
+
+.st-bme-settings {
+    --bme-accent: #e94560;
+    --bme-accent-dim: rgba(233, 69, 96, 0.15);
+    --bme-surface: rgba(255, 255, 255, 0.03);
+    --bme-border: rgba(255, 255, 255, 0.08);
+}
+
+.st-bme-section {
+    padding: 8px 0;
+}
+
+.st-bme-section-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--bme-accent);
+    margin: 0 0 8px 0;
+    font-weight: 600;
+}
+
+.st-bme-section-title i {
+    margin-right: 4px;
+}
+
+.st-bme-hr {
+    border: none;
+    border-top: 1px solid var(--bme-border);
+    margin: 4px 0;
+}
+
+.st-bme-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 4px 0;
+}
+
+.st-bme-row label {
+    font-size: 12px;
+    flex-shrink: 0;
+    min-width: 100px;
+}
+
+.st-bme-row .text_pole {
+    max-width: 180px;
+}
+
+.st-bme-row .checkbox_label {
+    justify-content: flex-start;
+    gap: 8px;
+}
+
+.st-bme-row.st-bme-indent {
+    padding-left: 24px;
+}
+
+.st-bme-btn-group {
+    display: flex;
+    gap: 6px;
+    margin: 4px 0;
+}
+
+.st-bme-btn-group .menu_button {
+    flex: 1;
+    font-size: 12px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--bme-border);
+    transition: all 0.2s ease;
+}
+
+.st-bme-btn-group .menu_button:hover {
+    border-color: var(--bme-accent);
+    background: var(--bme-accent-dim);
+}
+
+.st-bme-btn-group .menu_button i {
+    margin-right: 4px;
+}
+
+/* v2: 子分区 */
+.st-bme-subsection {
+    position: relative;
+    padding: 6px 0 6px 4px;
+    margin: 4px 0;
+    border-left: 2px solid var(--bme-border);
+}
+
+/* v2: 优先级 badge */
+.st-bme-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    margin-bottom: 4px;
+}
+
+.st-bme-badge-p0 {
+    background: rgba(233, 69, 96, 0.25);
+    color: #e94560;
+    border: 1px solid rgba(233, 69, 96, 0.4);
+}
+
+.st-bme-badge-p1 {
+    background: rgba(255, 193, 7, 0.2);
+    color: #ffc107;
+    border: 1px solid rgba(255, 193, 7, 0.35);
+}
+
+.st-bme-badge-p2 {
+    background: rgba(76, 175, 80, 0.15);
+    color: #66bb6a;
+    border: 1px solid rgba(76, 175, 80, 0.3);
+}
+
+/* v2: 技术来源提示 */
+.st-bme-hint {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.35);
+    font-style: italic;
+}
