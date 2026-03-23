@@ -1,7 +1,72 @@
 // ST-BME: LLM 调用封装
 // 包装 ST 的 sendOpenAIRequest，提供结构化 JSON 输出和重试机制
 
+import { extension_settings } from "../../../extensions.js";
 import { sendOpenAIRequest } from "../../../openai.js";
+
+const MODULE_NAME = "st_bme";
+
+function getMemoryLLMConfig() {
+    const settings = extension_settings[MODULE_NAME] || {};
+    return {
+        apiUrl: String(settings.llmApiUrl || '').trim(),
+        apiKey: String(settings.llmApiKey || '').trim(),
+        model: String(settings.llmModel || '').trim(),
+    };
+}
+
+function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
+    return Boolean(config.apiUrl && config.model);
+}
+
+async function callDedicatedOpenAICompatible(messages, { signal } = {}) {
+    const config = getMemoryLLMConfig();
+    if (!hasDedicatedLLMConfig(config)) {
+        return await sendOpenAIRequest('quiet', messages, signal);
+    }
+
+    const url = `${config.apiUrl.replace(/\/+$/, '')}/chat/completions`;
+    const headers = {
+        'Content-Type': 'application/json',
+    };
+    if (config.apiKey) {
+        headers.Authorization = `Bearer ${config.apiKey}`;
+    }
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            model: config.model,
+            messages,
+            temperature: 0.2,
+            stream: false,
+        }),
+        signal,
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(
+            `Memory LLM API error ${response.status}: ${errorText || response.statusText}`,
+        );
+    }
+
+    const data = await response.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content === 'string') {
+        return content;
+    }
+
+    if (Array.isArray(content)) {
+        return content
+            .map((item) => item?.text || item?.content || '')
+            .join('')
+            .trim();
+    }
+
+    throw new Error('Memory LLM API returned an unexpected response format');
+}
 
 /**
  * 调用 LLM 并期望返回结构化 JSON
@@ -21,7 +86,7 @@ export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const response = await sendOpenAIRequest('quiet', messages);
+            const response = await callDedicatedOpenAICompatible(messages);
 
             if (!response || typeof response !== 'string') {
                 console.warn(`[ST-BME] LLM 返回空响应 (尝试 ${attempt + 1})`);
@@ -63,11 +128,37 @@ export async function callLLM(systemPrompt, userPrompt) {
     ];
 
     try {
-        const response = await sendOpenAIRequest('quiet', messages);
+        const response = await callDedicatedOpenAICompatible(messages);
         return response || null;
     } catch (e) {
         console.error('[ST-BME] LLM 调用失败:', e);
         return null;
+    }
+}
+
+/**
+ * 测试记忆 LLM 连通性
+ * 若未配置独立记忆 LLM，则测试当前 SillyTavern 聊天模型。
+ *
+ * @returns {Promise<{success: boolean, mode: string, error: string}>}
+ */
+export async function testLLMConnection() {
+    const config = getMemoryLLMConfig();
+    const mode = hasDedicatedLLMConfig(config)
+        ? `dedicated:${config.model}`
+        : 'sillytavern-current-model';
+
+    try {
+        const response = await callLLM(
+            '你是一个连接测试助手。请只回答 OK。',
+            '请只回复 OK',
+        );
+        if (typeof response === 'string' && response.trim().length > 0) {
+            return { success: true, mode, error: '' };
+        }
+        return { success: false, mode, error: 'API 返回空结果' };
+    } catch (e) {
+        return { success: false, mode, error: String(e) };
     }
 }
 

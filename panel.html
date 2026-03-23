@@ -33,6 +33,10 @@
             <i class="fa-solid fa-gear"></i>
             <span>操作</span>
           </button>
+          <button class="bme-tab-btn" data-tab="config">
+            <i class="fa-solid fa-sliders"></i>
+            <span>配置</span>
+          </button>
         </div>
 
         <div class="bme-tab-content">
@@ -135,6 +139,88 @@
               </button>
             </div>
           </div>
+
+          <!-- Config Tab -->
+          <div class="bme-tab-pane" id="bme-pane-config">
+            <div class="bme-config-card">
+              <div class="bme-section-header">记忆 LLM</div>
+              <div class="bme-config-help">
+                这里配置的是 ST-BME 的第二套记忆 LLM。留空时，提取/召回/概要/反思会复用当前 SillyTavern 聊天模型。
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-llm-url">LLM API 地址</label>
+                <input id="bme-setting-llm-url" class="bme-config-input" type="text" placeholder="https://api.openai.com/v1" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-llm-key">LLM API Key</label>
+                <input id="bme-setting-llm-key" class="bme-config-input" type="password" placeholder="sk-..." />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-llm-model">LLM 模型</label>
+                <input id="bme-setting-llm-model" class="bme-config-input" type="text" placeholder="gpt-4.1-mini / qwen-max / deepseek-chat" />
+              </div>
+              <div class="bme-config-row inline">
+                <label class="checkbox_label" for="bme-setting-recall-llm">
+                  <input id="bme-setting-recall-llm" type="checkbox" />
+                  <span>启用 LLM 精确召回</span>
+                </label>
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-recall-max-nodes">LLM 精确召回上限</label>
+                <input id="bme-setting-recall-max-nodes" class="bme-config-input" type="number" min="1" max="50" />
+              </div>
+              <div class="bme-config-actions">
+                <button class="menu_button" id="bme-test-llm">
+                  <i class="fa-solid fa-plug"></i> 测试记忆 LLM
+                </button>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header">Embedding</div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-url">Embedding API 地址</label>
+                <input id="bme-setting-embed-url" class="bme-config-input" type="text" placeholder="https://api.openai.com/v1" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-key">Embedding API Key</label>
+                <input id="bme-setting-embed-key" class="bme-config-input" type="password" placeholder="sk-..." />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-model">Embedding 模型</label>
+                <input id="bme-setting-embed-model" class="bme-config-input" type="text" placeholder="text-embedding-3-small" />
+              </div>
+              <div class="bme-config-actions">
+                <button class="menu_button" id="bme-test-embedding">
+                  <i class="fa-solid fa-plug"></i> 测试 Embedding
+                </button>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header">系统提示词</div>
+              <div class="bme-config-help">
+                为空时使用内置默认提取系统提示词。这里只覆盖“记忆提取”提示词，召回/概要/反思仍走内置模板。
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-extract-prompt">记忆提取系统提示词</label>
+                <textarea id="bme-setting-extract-prompt" class="bme-config-textarea" placeholder="留空则使用默认提取系统提示词"></textarea>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header">面板外观</div>
+              <div class="bme-config-row">
+                <label for="bme-setting-panel-theme">面板主题</label>
+                <select id="bme-setting-panel-theme" class="bme-config-input">
+                  <option value="crimson">Crimson Synth</option>
+                  <option value="cyan">Neon Cyan</option>
+                  <option value="amber">Amber Console</option>
+                  <option value="violet">Violet Haze</option>
+                </select>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -200,6 +286,10 @@
       <button class="bme-tab-btn" data-tab="actions">
         <i class="fa-solid fa-gear"></i>
         <span>操作</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="config">
+        <i class="fa-solid fa-sliders"></i>
+        <span>配置</span>
       </button>
     </div>
   </div>

@@ -674,6 +674,71 @@
     background: rgba(255, 82, 82, 0.1);
 }
 
+/* --- Config Tab --- */
+.bme-config-card {
+    background: var(--bme-surface-low);
+    border: 1px solid var(--bme-border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 10px;
+}
+
+.bme-config-help {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--bme-on-surface-dim);
+    margin-bottom: 10px;
+}
+
+.bme-config-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.bme-config-row.inline {
+    flex-direction: row;
+    align-items: center;
+}
+
+.bme-config-row label {
+    font-size: 11px;
+    color: var(--bme-on-surface);
+}
+
+.bme-config-input,
+.bme-config-textarea {
+    width: 100%;
+    background: var(--bme-surface-lowest);
+    border: 1px solid var(--bme-border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--bme-on-surface);
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.bme-config-input:focus,
+.bme-config-textarea:focus {
+    border-color: var(--bme-primary);
+    box-shadow: 0 0 0 2px var(--bme-primary-dim);
+}
+
+.bme-config-textarea {
+    min-height: 140px;
+    resize: vertical;
+    line-height: 1.5;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+.bme-config-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
 /* --- Mobile Bottom Tab Bar --- */
 .bme-panel-tabbar {
     display: none;

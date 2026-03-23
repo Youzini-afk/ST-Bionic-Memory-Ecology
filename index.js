@@ -29,6 +29,7 @@ import {
   getNode,
 } from "./graph.js";
 import { estimateTokens, formatInjection } from "./injector.js";
+import { testLLMConnection } from "./llm.js";
 import { retrieve } from "./retriever.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 
@@ -63,6 +64,11 @@ const defaultSettings = {
   graphWeight: 0.6,
   vectorWeight: 0.3,
   importanceWeight: 0.1,
+
+  // 记忆 LLM（留空时复用当前酒馆模型）
+  llmApiUrl: "",
+  llmApiKey: "",
+  llmModel: "",
 
   // Embedding API 配置
   embeddingApiUrl: "",
@@ -215,6 +221,14 @@ function getEmbeddingConfig() {
     apiKey: settings.embeddingApiKey,
     model: settings.embeddingModel,
   };
+}
+
+function updateModuleSettings(patch = {}) {
+  const settings = getSettings();
+  Object.assign(settings, patch);
+  extension_settings[MODULE_NAME] = settings;
+  saveSettingsDebounced();
+  return settings;
 }
 
 // ==================== 图状态持久化 ====================
@@ -759,6 +773,17 @@ async function onTestEmbedding() {
   }
 }
 
+async function onTestMemoryLLM() {
+  toastr.info("正在测试记忆 LLM 连通性...");
+  const result = await testLLMConnection();
+
+  if (result.success) {
+    toastr.success(`连接成功！模式: ${result.mode}`);
+  } else {
+    toastr.error(`连接失败: ${result.error}`);
+  }
+}
+
 async function onManualExtract() {
   if (isExtracting) return;
   if (!currentGraph) currentGraph = createEmptyGraph();
@@ -1160,6 +1185,14 @@ function bindSettingsUI() {
       getLastExtract: () => lastExtractedItems,
       getLastRecall: () => lastRecalledItems,
       getLastInjection: () => lastInjectionContent,
+      updateSettings: (patch) => {
+        const settings = updateModuleSettings(patch);
+        if (Object.prototype.hasOwnProperty.call(patch, "panelTheme")) {
+          _themesModule?.applyTheme(settings.panelTheme || "crimson");
+          _panelModule?.updatePanelTheme(settings.panelTheme || "crimson");
+        }
+        return settings;
+      },
       actions: {
         extract: onManualExtract,
         compress: onManualCompress,
@@ -1169,6 +1202,8 @@ function bindSettingsUI() {
         import: onImportGraph,
         rebuild: onRebuild,
         evolve: onManualEvolve,
+        testEmbedding: onTestEmbedding,
+        testMemoryLLM: onTestMemoryLLM,
       },
     });
 
@@ -1199,12 +1234,9 @@ function bindSettingsUI() {
       .val(settings.panelTheme || 'crimson')
       .on('change', function () {
         const theme = $(this).val();
-        const s = getSettings();
-        s.panelTheme = theme;
-        extension_settings[MODULE_NAME].panelTheme = theme;
+        updateModuleSettings({ panelTheme: theme });
         _themesModule?.applyTheme(theme);
         _panelModule?.updatePanelTheme(theme);
-        saveSettingsDebounced();
       });
 
     // 打开面板按钮

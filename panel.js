@@ -15,6 +15,7 @@ let _getSettings = null;
 let _getLastExtract = null;
 let _getLastRecall = null;
 let _getLastInjection = null;
+let _updateSettings = null;
 let _actionHandlers = {};
 
 async function loadLocalTemplate(templateName) {
@@ -35,6 +36,7 @@ export async function initPanel({
     getLastExtract,
     getLastRecall,
     getLastInjection,
+    updateSettings,
     actions,
 }) {
     _getGraph = getGraph;
@@ -42,6 +44,7 @@ export async function initPanel({
     _getLastExtract = getLastExtract;
     _getLastRecall = getLastRecall;
     _getLastInjection = getLastInjection;
+    _updateSettings = updateSettings;
     _actionHandlers = actions || {};
 
     overlayEl = document.getElementById("st-bme-panel-overlay");
@@ -61,6 +64,7 @@ export async function initPanel({
     _bindClose();
     _bindGraphControls();
     _bindActions();
+    _bindConfigControls();
 }
 
 /**
@@ -89,6 +93,7 @@ export function openPanel() {
     _refreshDashboard();
     _refreshGraph();
     _buildLegend();
+    _refreshConfigTab();
 }
 
 /**
@@ -137,6 +142,9 @@ function _switchTab(tabId) {
             break;
         case "injection":
             void _refreshInjectionPreview();
+            break;
+        case "config":
+            _refreshConfigTab();
             break;
         default:
             break;
@@ -429,11 +437,117 @@ function _bindActions() {
     }
 }
 
+function _refreshConfigTab() {
+    const settings = _getSettings?.() || {};
+
+    _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
+    _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
+    _setInputValue("bme-setting-llm-model", settings.llmModel || "");
+    _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
+    _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
+
+    _setInputValue("bme-setting-embed-url", settings.embeddingApiUrl || "");
+    _setInputValue("bme-setting-embed-key", settings.embeddingApiKey || "");
+    _setInputValue(
+        "bme-setting-embed-model",
+        settings.embeddingModel || "text-embedding-3-small",
+    );
+
+    _setInputValue("bme-setting-extract-prompt", settings.extractPrompt || "");
+    _setInputValue("bme-setting-panel-theme", settings.panelTheme || "crimson");
+}
+
+function _bindConfigControls() {
+    if (!panelEl || panelEl.dataset.bmeConfigBound === "true") return;
+
+    bindText("bme-setting-llm-url", (value) =>
+        _updateSettings?.({ llmApiUrl: value.trim() }),
+    );
+    bindText("bme-setting-llm-key", (value) =>
+        _updateSettings?.({ llmApiKey: value.trim() }),
+    );
+    bindText("bme-setting-llm-model", (value) =>
+        _updateSettings?.({ llmModel: value.trim() }),
+    );
+    bindCheckbox("bme-setting-recall-llm", (checked) =>
+        _updateSettings?.({ recallEnableLLM: checked }),
+    );
+    bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
+        _updateSettings?.({ recallMaxNodes: value }),
+    );
+
+    bindText("bme-setting-embed-url", (value) =>
+        _updateSettings?.({ embeddingApiUrl: value.trim() }),
+    );
+    bindText("bme-setting-embed-key", (value) =>
+        _updateSettings?.({ embeddingApiKey: value.trim() }),
+    );
+    bindText("bme-setting-embed-model", (value) =>
+        _updateSettings?.({ embeddingModel: value.trim() }),
+    );
+    bindText("bme-setting-extract-prompt", (value) =>
+        _updateSettings?.({ extractPrompt: value }),
+    );
+    bindText("bme-setting-panel-theme", (value) =>
+        _updateSettings?.({ panelTheme: value }),
+    );
+
+    document.getElementById("bme-test-llm")?.addEventListener("click", async () => {
+        await _actionHandlers.testMemoryLLM?.();
+    });
+    document.getElementById("bme-test-embedding")?.addEventListener("click", async () => {
+        await _actionHandlers.testEmbedding?.();
+    });
+
+    panelEl.dataset.bmeConfigBound = "true";
+}
+
+function bindText(id, onChange) {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.bmeBound === "true") return;
+    element.addEventListener("input", () => onChange(element.value));
+    element.addEventListener("change", () => onChange(element.value));
+    element.dataset.bmeBound = "true";
+}
+
+function bindCheckbox(id, onChange) {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.bmeBound === "true") return;
+    element.addEventListener("change", () => onChange(Boolean(element.checked)));
+    element.dataset.bmeBound = "true";
+}
+
+function bindNumber(id, fallback, min, max, onChange) {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.bmeBound === "true") return;
+    element.addEventListener("input", () => {
+        let value = Number.parseInt(element.value, 10);
+        if (!Number.isFinite(value)) value = fallback;
+        value = Math.min(max, Math.max(min, value));
+        onChange(value);
+    });
+    element.dataset.bmeBound = "true";
+}
+
 // ==================== 工具函数 ====================
 
 function _setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = String(text);
+}
+
+function _setInputValue(id, value) {
+    const el = document.getElementById(id);
+    if (el && el.value !== String(value ?? "")) {
+        el.value = String(value ?? "");
+    }
+}
+
+function _setCheckboxValue(id, checked) {
+    const el = document.getElementById(id);
+    if (el) {
+        el.checked = Boolean(checked);
+    }
 }
 
 function _escHtml(str) {
