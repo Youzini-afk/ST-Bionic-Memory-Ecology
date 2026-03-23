@@ -91,15 +91,6 @@ export function addNode(graph, node) {
 }
 
 /**
- * 获取所有活跃（未归档）节点
- * @param {GraphState} graph
- * @returns {Array}
- */
-export function getActiveNodes(graph) {
-  return graph.nodes.filter((n) => !n.archived);
-}
-
-/**
  * 根据 ID 获取节点
  * @param {GraphState} graph
  * @param {string} nodeId

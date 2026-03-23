@@ -1,7 +1,7 @@
 // ST-BME: LLM 调用封装
 // 包装 ST 的 sendOpenAIRequest，提供结构化 JSON 输出和重试机制
 
-import { sendOpenAIRequest } from '../../openai.js';
+import { sendOpenAIRequest } from "../../../openai.js";
 
 /**
  * 调用 LLM 并期望返回结构化 JSON

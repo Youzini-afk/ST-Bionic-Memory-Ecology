@@ -5,13 +5,13 @@ import {
   eventSource,
   event_types,
   saveSettingsDebounced,
-} from "../../../script.js";
+} from "../../../../script.js";
 import {
   extension_settings,
   getContext,
   renderExtensionTemplateAsync,
   saveMetadataDebounced,
-} from "../../extensions.js";
+} from "../../../extensions.js";
 
 import { compressAll, sleepCycle } from "./compressor.js";
 import { testConnection as testEmbeddingConnection } from "./embedding.js";
@@ -27,6 +27,7 @@ import {
   exportGraph,
   getGraphStats,
   importGraph,
+  getNode,
 } from "./graph.js";
 import { estimateTokens, formatInjection } from "./injector.js";
 import { retrieve } from "./retriever.js";
@@ -38,6 +39,7 @@ let _themesModule = null;
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
+const TEMPLATE_PATH = "third-party/ST-BME";
 
 // ==================== 默认设置 ====================
 
@@ -127,6 +129,65 @@ let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
 let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 
+function getNodeDisplayName(node) {
+  return (
+    node?.fields?.name ||
+    node?.fields?.title ||
+    node?.fields?.summary ||
+    node?.fields?.insight ||
+    node?.id ||
+    "—"
+  );
+}
+
+function toPanelNodeItem(node, meta = "") {
+  return {
+    id: node.id,
+    type: node.type,
+    name: getNodeDisplayName(node),
+    meta,
+  };
+}
+
+function updateLastExtractedItems(nodeIds = []) {
+  if (!currentGraph || !Array.isArray(nodeIds)) {
+    lastExtractedItems = [];
+    return;
+  }
+
+  lastExtractedItems = nodeIds
+    .map((id) => getNode(currentGraph, id))
+    .filter(Boolean)
+    .slice(-5)
+    .reverse()
+    .map((node) =>
+      toPanelNodeItem(
+        node,
+        `seq ${node.seqRange?.[1] ?? node.seq ?? 0} · ${new Date(
+          node.createdTime || Date.now(),
+        ).toLocaleTimeString()}`,
+      ),
+    );
+}
+
+function updateLastRecalledItems(nodeIds = []) {
+  if (!currentGraph || !Array.isArray(nodeIds)) {
+    lastRecalledItems = [];
+    return;
+  }
+
+  lastRecalledItems = nodeIds
+    .map((id) => getNode(currentGraph, id))
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((node) =>
+      toPanelNodeItem(
+        node,
+        `imp ${node.importance ?? 5} · seq ${node.seqRange?.[1] ?? node.seq ?? 0}`,
+      ),
+    );
+}
+
 // ==================== 设置管理 ====================
 
 function getSettings() {
@@ -164,6 +225,9 @@ function loadGraphFromChat() {
   const context = getContext();
   if (!context.chatMetadata) {
     currentGraph = createEmptyGraph();
+    lastExtractedItems = [];
+    lastRecalledItems = [];
+    lastInjectionContent = "";
     return;
   }
 
@@ -174,6 +238,10 @@ function loadGraphFromChat() {
   } else {
     currentGraph = createEmptyGraph();
   }
+
+  lastExtractedItems = [];
+  updateLastRecalledItems(currentGraph.lastRecallResult || []);
+  lastInjectionContent = "";
 }
 
 function saveGraphToChat() {
@@ -296,6 +364,69 @@ function clampFloat(value, fallback, min = 0, max = 1) {
   return Math.min(max, Math.max(min, num));
 }
 
+function getCurrentChatSeq(context = getContext()) {
+  const chat = context?.chat;
+  if (Array.isArray(chat) && chat.length > 0) {
+    return chat.length - 1;
+  }
+  return currentGraph?.lastProcessedSeq ?? 0;
+}
+
+async function handleExtractionSuccess(result, endIdx, settings) {
+  extractionCount++;
+  updateLastExtractedItems(result.newNodeIds || []);
+
+  if (settings.enableEvolution && result.newNodeIds?.length > 0) {
+    try {
+      await evolveMemories({
+        graph: currentGraph,
+        newNodeIds: result.newNodeIds,
+        embeddingConfig: getEmbeddingConfig(),
+        options: { neighborCount: settings.evoNeighborCount },
+      });
+    } catch (e) {
+      console.error("[ST-BME] 记忆进化失败:", e);
+    }
+  }
+
+  if (settings.enableSynopsis && extractionCount % settings.synopsisEveryN === 0) {
+    try {
+      await generateSynopsis({
+        graph: currentGraph,
+        schema: getSchema(),
+        currentSeq: endIdx,
+      });
+    } catch (e) {
+      console.error("[ST-BME] 概要生成失败:", e);
+    }
+  }
+
+  if (
+    settings.enableReflection &&
+    extractionCount % settings.reflectEveryN === 0
+  ) {
+    try {
+      await generateReflection({
+        graph: currentGraph,
+        currentSeq: endIdx,
+      });
+    } catch (e) {
+      console.error("[ST-BME] 反思生成失败:", e);
+    }
+  }
+
+  if (settings.enableSleepCycle && extractionCount % settings.sleepEveryN === 0) {
+    try {
+      sleepCycle(currentGraph, settings);
+    } catch (e) {
+      console.error("[ST-BME] 主动遗忘失败:", e);
+    }
+  }
+
+  await compressAll(currentGraph, getSchema(), getEmbeddingConfig());
+  saveGraphToChat();
+}
+
 /**
  * 提取管线：处理未提取的对话楼层
  */
@@ -383,68 +514,7 @@ async function runExtraction() {
     });
 
     if (result.success) {
-      extractionCount++;
-
-      // v2: A-MEM 记忆进化
-      if (settings.enableEvolution && result.newNodeIds?.length > 0) {
-        try {
-          await evolveMemories({
-            graph: currentGraph,
-            newNodeIds: result.newNodeIds,
-            embeddingConfig: getEmbeddingConfig(),
-            options: { neighborCount: settings.evoNeighborCount },
-          });
-        } catch (e) {
-          console.error("[ST-BME] 记忆进化失败:", e);
-        }
-      }
-
-      // v2: 全局故事概要（每 N 次提取更新一次）
-      if (
-        settings.enableSynopsis &&
-        extractionCount % settings.synopsisEveryN === 0
-      ) {
-        try {
-          await generateSynopsis({
-            graph: currentGraph,
-            schema: getSchema(),
-            currentSeq: endIdx,
-          });
-        } catch (e) {
-          console.error("[ST-BME] 概要生成失败:", e);
-        }
-      }
-
-      // v2: 反思条目（每 N 次提取生成一次）
-      if (
-        settings.enableReflection &&
-        extractionCount % settings.reflectEveryN === 0
-      ) {
-        try {
-          await generateReflection({
-            graph: currentGraph,
-            currentSeq: endIdx,
-          });
-        } catch (e) {
-          console.error("[ST-BME] 反思生成失败:", e);
-        }
-      }
-
-      // v2: 主动遗忘（每 N 次提取执行）
-      if (
-        settings.enableSleepCycle &&
-        extractionCount % settings.sleepEveryN === 0
-      ) {
-        try {
-          sleepCycle(currentGraph, settings);
-        } catch (e) {
-          console.error("[ST-BME] 主动遗忘失败:", e);
-        }
-      }
-
-      // 压缩检查
-      await compressAll(currentGraph, getSchema(), getEmbeddingConfig());
-      saveGraphToChat();
+      await handleExtractionSuccess(result, endIdx, settings);
     }
   } catch (e) {
     console.error("[ST-BME] 提取失败:", e);
@@ -534,6 +604,7 @@ async function runRecall() {
 
     // 保存召回结果和访问强化
     currentGraph.lastRecallResult = result.selectedNodeIds;
+    updateLastRecalledItems(result.selectedNodeIds || []);
     saveGraphToChat();
   } catch (e) {
     console.error("[ST-BME] 召回失败:", e);
@@ -591,6 +662,9 @@ async function onRebuild() {
   if (!confirm("确定要从当前聊天重建图谱？这将清除现有图谱数据。")) return;
 
   currentGraph = createEmptyGraph();
+  lastExtractedItems = [];
+  lastRecalledItems = [];
+  lastInjectionContent = "";
   saveGraphToChat();
 
   toastr.info("图谱已重置，将在下次生成时重新提取");
@@ -636,6 +710,9 @@ async function onImportGraph() {
     try {
       const text = await file.text();
       currentGraph = importGraph(text);
+      lastExtractedItems = [];
+      updateLastRecalledItems(currentGraph.lastRecallResult || []);
+      lastInjectionContent = "";
       saveGraphToChat();
       toastr.success("图谱已导入");
     } catch (err) {
@@ -682,6 +759,123 @@ async function onTestEmbedding() {
   } else {
     toastr.error(`连接失败: ${result.error}`);
   }
+}
+
+async function onManualExtract() {
+  if (isExtracting) return;
+  if (!currentGraph) currentGraph = createEmptyGraph();
+
+  const context = getContext();
+  const chat = context.chat;
+  if (!Array.isArray(chat) || chat.length === 0) {
+    toastr.info("当前聊天为空，暂无可提取内容");
+    return;
+  }
+
+  const assistantTurns = [];
+  for (let i = 0; i < chat.length; i++) {
+    if (chat[i].is_user === false && !chat[i].is_system) {
+      assistantTurns.push(i);
+    }
+  }
+
+  const lastProcessed = Number.isFinite(currentGraph.lastProcessedSeq)
+    ? currentGraph.lastProcessedSeq
+    : -1;
+  const pendingAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
+  if (pendingAssistantTurns.length === 0) {
+    toastr.info("没有待提取的新回复");
+    return;
+  }
+
+  const startIdx = pendingAssistantTurns[0];
+  const endIdx = pendingAssistantTurns[pendingAssistantTurns.length - 1];
+  const settings = getSettings();
+  const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
+  const contextStart = Math.max(0, startIdx - contextTurns * 2);
+  const messages = [];
+
+  for (let i = contextStart; i <= endIdx && i < chat.length; i++) {
+    const msg = chat[i];
+    if (msg.is_system) continue;
+    messages.push({
+      seq: i,
+      role: msg.is_user ? "user" : "assistant",
+      content: msg.mes || "",
+    });
+  }
+
+  isExtracting = true;
+  try {
+    const result = await extractMemories({
+      graph: currentGraph,
+      messages,
+      startSeq: startIdx,
+      endSeq: endIdx,
+      lastProcessedSeq: lastProcessed,
+      schema: getSchema(),
+      embeddingConfig: getEmbeddingConfig(),
+      extractPrompt: settings.extractPrompt || undefined,
+      v2Options: {
+        enablePreciseConflict: settings.enablePreciseConflict,
+        conflictThreshold: settings.conflictThreshold,
+      },
+    });
+
+    if (!result.success) {
+      toastr.warning("手动提取未返回有效结果");
+      return;
+    }
+
+    await handleExtractionSuccess(result, endIdx, settings);
+    toastr.success(
+      `提取完成：新建 ${result.newNodes}，更新 ${result.updatedNodes}，新边 ${result.newEdges}`,
+    );
+  } catch (e) {
+    console.error("[ST-BME] 手动提取失败:", e);
+    toastr.error(`手动提取失败: ${e.message || e}`);
+  } finally {
+    isExtracting = false;
+  }
+}
+
+async function onManualSleep() {
+  if (!currentGraph) return;
+  const result = sleepCycle(currentGraph, getSettings());
+  saveGraphToChat();
+  toastr.info(`执行完成：归档 ${result.forgotten} 个节点`);
+}
+
+async function onManualSynopsis() {
+  if (!currentGraph) return;
+  await generateSynopsis({
+    graph: currentGraph,
+    schema: getSchema(),
+    currentSeq: getCurrentChatSeq(),
+  });
+  saveGraphToChat();
+  toastr.success("概要生成完成");
+}
+
+async function onManualEvolve() {
+  if (!currentGraph) return;
+
+  const candidateIds = lastExtractedItems.map((item) => item.id).filter(Boolean);
+  if (candidateIds.length === 0) {
+    toastr.info("暂无最近提取节点可用于进化");
+    return;
+  }
+
+  const result = await evolveMemories({
+    graph: currentGraph,
+    newNodeIds: candidateIds,
+    embeddingConfig: getEmbeddingConfig(),
+    options: { neighborCount: getSettings().evoNeighborCount },
+  });
+  saveGraphToChat();
+  toastr.success(
+    `进化完成：${result.evolved} 次进化，${result.connections} 条链接，${result.updates} 个回溯更新`,
+  );
 }
 
 // ==================== 设置 UI ====================
@@ -935,15 +1129,16 @@ function bindSettingsUI() {
 // ==================== 初始化 ====================
 
 (async function init() {
-  // 加载设置面板 HTML
-  const settingsHtml = await renderExtensionTemplateAsync(
-    "third-party/st-bme",
-    "settings",
-  );
-  $("#extensions_settings2").append(settingsHtml);
-
-  // 绑定 UI
-  bindSettingsUI();
+  try {
+    const settingsHtml = await renderExtensionTemplateAsync(
+      TEMPLATE_PATH,
+      "settings",
+    );
+    $("#extensions_settings2").append(settingsHtml);
+    bindSettingsUI();
+  } catch (settingsError) {
+    console.error("[ST-BME] 设置面板加载失败:", settingsError);
+  }
 
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
@@ -964,12 +1159,12 @@ function bindSettingsUI() {
 
   try {
     // 动态加载面板模块
-    _panelModule = await import('./panel.js');
-    _themesModule = await import('./themes.js');
+    _panelModule = await import("./panel.js");
+    _themesModule = await import("./themes.js");
 
     // 应用主题
     const settings = getSettings();
-    _themesModule.applyTheme(settings.panelTheme || 'crimson');
+    _themesModule.applyTheme(settings.panelTheme || "crimson");
 
     // 初始化操控面板
     await _panelModule.initPanel({
@@ -977,64 +1172,16 @@ function bindSettingsUI() {
       getSettings: () => getSettings(),
       getLastExtract: () => lastExtractedItems,
       getLastRecall: () => lastRecalledItems,
+      getLastInjection: () => lastInjectionContent,
       actions: {
-        extract: async () => {
-          const context = getContext();
-          const chat = context.chat;
-          if (!chat || !chat.length) return;
-          const s = getSettings();
-          const result = await extractMemories(
-            currentGraph, chat, chat.length - 1, s.extractContextTurns,
-            getSchema(), getEmbeddingConfig(), s,
-          );
-          if (result?.newNodes?.length) {
-            lastExtractedItems = result.newNodes.map(n => ({
-              type: n.type, name: n.content?.name || '', time: new Date().toLocaleTimeString(),
-            })).slice(0, 5);
-          }
-          saveGraphToChat();
-        },
-        compress: async () => {
-          await compressAll(currentGraph, getSettings());
-          saveGraphToChat();
-        },
-        sleep: async () => {
-          await sleepCycle(currentGraph, getSettings());
-          saveGraphToChat();
-        },
-        synopsis: async () => {
-          await generateSynopsis(currentGraph, getSettings());
-          saveGraphToChat();
-        },
-        export: () => {
-          const json = exportGraph(currentGraph);
-          const blob = new Blob([json], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = 'st-bme-graph.json'; a.click();
-          URL.revokeObjectURL(url);
-        },
-        import: () => {
-          const input = document.createElement('input');
-          input.type = 'file'; input.accept = '.json';
-          input.addEventListener('change', async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            const text = await file.text();
-            currentGraph = importGraph(text);
-            saveGraphToChat();
-          });
-          input.click();
-        },
-        rebuild: async () => {
-          if (!confirm('确定要重建图谱吗？这将清除所有现有数据。')) return;
-          currentGraph = createEmptyGraph();
-          saveGraphToChat();
-        },
-        evolve: async () => {
-          await evolveMemories(currentGraph, getEmbeddingConfig(), getSettings());
-          saveGraphToChat();
-        },
+        extract: onManualExtract,
+        compress: onManualCompress,
+        sleep: onManualSleep,
+        synopsis: onManualSynopsis,
+        export: onExportGraph,
+        import: onImportGraph,
+        rebuild: onRebuild,
+        evolve: onManualEvolve,
       },
     });
 

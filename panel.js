@@ -1,38 +1,49 @@
 // ST-BME: 操控面板交互逻辑
 
-import { renderExtensionTemplateAsync } from '../../extensions.js';
-import { GraphRenderer } from './graph-renderer.js';
-import { getNodeColors } from './themes.js';
+import { renderExtensionTemplateAsync } from "../../../extensions.js";
+import { GraphRenderer } from "./graph-renderer.js";
+import { getNodeColors } from "./themes.js";
 
 let panelEl = null;
 let overlayEl = null;
 let graphRenderer = null;
 let mobileGraphRenderer = null;
-let isOpen = false;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
 let _getSettings = null;
 let _getLastExtract = null;
 let _getLastRecall = null;
+let _getLastInjection = null;
 let _actionHandlers = {};
 
 /**
  * 初始化面板（由 index.js 调用一次）
  */
-export async function initPanel({ getGraph, getSettings, getLastExtract, getLastRecall, actions }) {
+export async function initPanel({
+    getGraph,
+    getSettings,
+    getLastExtract,
+    getLastRecall,
+    getLastInjection,
+    actions,
+}) {
     _getGraph = getGraph;
     _getSettings = getSettings;
     _getLastExtract = getLastExtract;
     _getLastRecall = getLastRecall;
+    _getLastInjection = getLastInjection;
     _actionHandlers = actions || {};
 
-    // 加载 HTML 模板
-    const html = await renderExtensionTemplateAsync('third-party/st-bme', 'panel');
-    $('body').append(html);
+    overlayEl = document.getElementById("st-bme-panel-overlay");
+    panelEl = document.getElementById("st-bme-panel");
 
-    overlayEl = document.getElementById('st-bme-panel-overlay');
-    panelEl = document.getElementById('st-bme-panel');
+    if (!overlayEl || !panelEl) {
+        const html = await renderExtensionTemplateAsync("third-party/ST-BME", "panel");
+        $("body").append(html);
+        overlayEl = document.getElementById("st-bme-panel-overlay");
+        panelEl = document.getElementById("st-bme-panel");
+    }
 
     _bindTabs();
     _bindClose();
@@ -45,24 +56,21 @@ export async function initPanel({ getGraph, getSettings, getLastExtract, getLast
  */
 export function openPanel() {
     if (!overlayEl) return;
-    overlayEl.classList.add('active');
-    isOpen = true;
+    overlayEl.classList.add("active");
 
     const isMobile = _isMobile();
+    const settings = _getSettings?.() || {};
+    const themeName = settings.panelTheme || "crimson";
 
-    // 初始化桌面端图谱渲染器
-    const canvas = document.getElementById('bme-graph-canvas');
+    const canvas = document.getElementById("bme-graph-canvas");
     if (canvas && !graphRenderer && !isMobile) {
-        const settings = _getSettings?.() || {};
-        graphRenderer = new GraphRenderer(canvas, settings.panelTheme || 'crimson');
+        graphRenderer = new GraphRenderer(canvas, themeName);
         graphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
     }
 
-    // 初始化移动端 mini 图谱渲染器
-    const mobileCanvas = document.getElementById('bme-mobile-graph-canvas');
+    const mobileCanvas = document.getElementById("bme-mobile-graph-canvas");
     if (mobileCanvas && !mobileGraphRenderer && isMobile) {
-        const settings = _getSettings?.() || {};
-        mobileGraphRenderer = new GraphRenderer(mobileCanvas, settings.panelTheme || 'crimson');
+        mobileGraphRenderer = new GraphRenderer(mobileCanvas, themeName);
         mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
     }
 
@@ -76,24 +84,23 @@ export function openPanel() {
  */
 export function closePanel() {
     if (!overlayEl) return;
-    overlayEl.classList.remove('active');
-    isOpen = false;
+    overlayEl.classList.remove("active");
 }
 
 /**
  * 更新主题
  */
 export function updatePanelTheme(themeName) {
-    if (graphRenderer) graphRenderer.setTheme(themeName);
-    if (mobileGraphRenderer) mobileGraphRenderer.setTheme(themeName);
+    graphRenderer?.setTheme(themeName);
+    mobileGraphRenderer?.setTheme(themeName);
+    _buildLegend();
 }
 
 // ==================== Tab 切换 ====================
 
 function _bindTabs() {
-    // 桌面端 sidebar tabs + 手机端 bottom tabs
-    document.querySelectorAll('.bme-tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
+    panelEl?.querySelectorAll(".bme-tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
             const tabId = btn.dataset.tab;
             _switchTab(tabId);
         });
@@ -101,21 +108,26 @@ function _bindTabs() {
 }
 
 function _switchTab(tabId) {
-    // 更新所有 tab 按钮状态
-    document.querySelectorAll('.bme-tab-btn').forEach(b => {
-        b.classList.toggle('active', b.dataset.tab === tabId);
+    panelEl?.querySelectorAll(".bme-tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.tab === tabId);
     });
 
-    // 更新 pane 显示
-    document.querySelectorAll('.bme-tab-pane').forEach(p => {
-        p.classList.toggle('active', p.id === `bme-pane-${tabId}`);
+    panelEl?.querySelectorAll(".bme-tab-pane").forEach((pane) => {
+        pane.classList.toggle("active", pane.id === `bme-pane-${tabId}`);
     });
 
-    // 按需刷新内容
     switch (tabId) {
-        case 'dashboard': _refreshDashboard(); break;
-        case 'memory':    _refreshMemoryBrowser(); break;
-        case 'injection': _refreshInjectionPreview(); break;
+        case "dashboard":
+            _refreshDashboard();
+            break;
+        case "memory":
+            _refreshMemoryBrowser();
+            break;
+        case "injection":
+            void _refreshInjectionPreview();
+            break;
+        default:
+            break;
     }
 }
 
@@ -125,46 +137,46 @@ function _refreshDashboard() {
     const graph = _getGraph?.();
     if (!graph) return;
 
-    const activeNodes = graph.nodes.filter(n => !n.archived);
-    const archived = graph.nodes.filter(n => n.archived).length;
-    const total = graph.nodes.length;
-    const fragRate = total > 0 ? Math.round((archived / total) * 100) : 0;
+    const activeNodes = graph.nodes.filter((node) => !node.archived);
+    const archivedCount = graph.nodes.filter((node) => node.archived).length;
+    const totalNodes = graph.nodes.length;
+    const fragRate = totalNodes > 0 ? Math.round((archivedCount / totalNodes) * 100) : 0;
 
-    _setText('bme-stat-nodes', activeNodes.length);
-    _setText('bme-stat-edges', graph.edges.length);
-    _setText('bme-stat-archived', archived);
-    _setText('bme-stat-frag', fragRate + '%');
-    _setText('bme-status-meta', `NODES: ${activeNodes.length} | EDGES: ${graph.edges.length}`);
+    _setText("bme-stat-nodes", activeNodes.length);
+    _setText("bme-stat-edges", graph.edges.length);
+    _setText("bme-stat-archived", archivedCount);
+    _setText("bme-stat-frag", `${fragRate}%`);
+    _setText(
+        "bme-status-meta",
+        `NODES: ${activeNodes.length} | EDGES: ${graph.edges.length}`,
+    );
 
-    // 最近提取
-    const extractList = document.getElementById('bme-recent-extract');
-    if (extractList) {
-        const items = _getLastExtract?.() || [];
-        extractList.innerHTML = items.length ? items.map(item =>
-            `<li class="bme-recent-item">
-                <span class="bme-type-badge ${item.type}">${_typeLabel(item.type)}</span>
-                <div>
-                    <div class="bme-recent-text">${_escHtml(item.name || item.content?.name || '—')}</div>
-                    <div class="bme-recent-meta">${item.time || ''}</div>
-                </div>
-            </li>`
-        ).join('') : '<li class="bme-recent-item"><div class="bme-recent-text" style="color:var(--bme-on-surface-dim)">暂无数据</div></li>';
+    _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
+    _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
+}
+
+function _renderRecentList(elementId, items) {
+    const listEl = document.getElementById(elementId);
+    if (!listEl) return;
+
+    if (!items.length) {
+        listEl.innerHTML =
+            '<li class="bme-recent-item"><div class="bme-recent-text" style="color:var(--bme-on-surface-dim)">暂无数据</div></li>';
+        return;
     }
 
-    // 最近召回
-    const recallList = document.getElementById('bme-recent-recall');
-    if (recallList) {
-        const items = _getLastRecall?.() || [];
-        recallList.innerHTML = items.length ? items.map(item =>
-            `<li class="bme-recent-item">
+    listEl.innerHTML = items
+        .map((item) => {
+            const secondary = item.meta || item.time || "";
+            return `<li class="bme-recent-item">
                 <span class="bme-type-badge ${item.type}">${_typeLabel(item.type)}</span>
                 <div>
-                    <div class="bme-recent-text">${_escHtml(item.name || '—')}</div>
-                    <div class="bme-recent-meta">score: ${(item.score || 0).toFixed(2)}</div>
+                    <div class="bme-recent-text">${_escHtml(item.name || "—")}</div>
+                    <div class="bme-recent-meta">${_escHtml(secondary)}</div>
                 </div>
-            </li>`
-        ).join('') : '<li class="bme-recent-item"><div class="bme-recent-text" style="color:var(--bme-on-surface-dim)">暂无数据</div></li>';
-    }
+            </li>`;
+        })
+        .join("");
 }
 
 // ==================== 记忆浏览器 ====================
@@ -173,64 +185,69 @@ function _refreshMemoryBrowser() {
     const graph = _getGraph?.();
     if (!graph) return;
 
-    const searchInput = document.getElementById('bme-memory-search');
-    const filterSelect = document.getElementById('bme-memory-filter');
-    const listEl = document.getElementById('bme-memory-list');
+    const searchInput = document.getElementById("bme-memory-search");
+    const filterSelect = document.getElementById("bme-memory-filter");
+    const listEl = document.getElementById("bme-memory-list");
     if (!listEl) return;
 
-    const query = (searchInput?.value || '').toLowerCase();
-    const filter = filterSelect?.value || 'all';
+    const query = String(searchInput?.value || "").trim().toLowerCase();
+    const filter = filterSelect?.value || "all";
 
-    let nodes = graph.nodes.filter(n => !n.archived);
-    if (filter !== 'all') {
-        nodes = nodes.filter(n => n.type === filter);
+    let nodes = graph.nodes.filter((node) => !node.archived);
+    if (filter !== "all") {
+        nodes = nodes.filter((node) => node.type === filter);
     }
     if (query) {
-        nodes = nodes.filter(n => {
-            const name = (n.content?.name || n.content?.title || '').toLowerCase();
-            const text = JSON.stringify(n.content || {}).toLowerCase();
+        nodes = nodes.filter((node) => {
+            const name = getNodeDisplayName(node).toLowerCase();
+            const text = JSON.stringify(node.fields || {}).toLowerCase();
             return name.includes(query) || text.includes(query);
         });
     }
 
-    // 按 importance 降序
-    nodes.sort((a, b) => (b.importance || 5) - (a.importance || 5));
+    nodes.sort((a, b) => {
+        const importanceDiff = (b.importance || 5) - (a.importance || 5);
+        if (importanceDiff !== 0) return importanceDiff;
+        return (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0);
+    });
 
-    listEl.innerHTML = nodes.slice(0, 100).map(n => {
-        const name = n.content?.name || n.content?.title || n.id.slice(0, 8);
-        const snippet = _getNodeSnippet(n);
-        return `<li class="bme-memory-item" data-node-id="${n.id}">
-            <span class="bme-type-badge ${n.type}">${_typeLabel(n.type)}</span>
-            <div>
-                <div class="bme-memory-name">${_escHtml(name)}</div>
-                <div class="bme-memory-content">${_escHtml(snippet)}</div>
-                <div class="bme-memory-meta">
-                    <span>imp: ${n.importance || 5}</span>
-                    <span>acc: ${n.accessCount || 0}</span>
-                    <span>seq: ${n.seq || 0}</span>
+    listEl.innerHTML = nodes
+        .slice(0, 100)
+        .map((node) => {
+            const name = getNodeDisplayName(node);
+            const snippet = _getNodeSnippet(node);
+            return `<li class="bme-memory-item" data-node-id="${node.id}">
+                <span class="bme-type-badge ${node.type}">${_typeLabel(node.type)}</span>
+                <div>
+                    <div class="bme-memory-name">${_escHtml(name)}</div>
+                    <div class="bme-memory-content">${_escHtml(snippet)}</div>
+                    <div class="bme-memory-meta">
+                        <span>imp: ${node.importance || 5}</span>
+                        <span>acc: ${node.accessCount || 0}</span>
+                        <span>seq: ${node.seqRange?.[1] ?? node.seq ?? 0}</span>
+                    </div>
                 </div>
-            </div>
-        </li>`;
-    }).join('');
+            </li>`;
+        })
+        .join("");
 
-    // 点击事件
-    listEl.querySelectorAll('.bme-memory-item').forEach(el => {
-        el.addEventListener('click', () => {
+    listEl.querySelectorAll(".bme-memory-item").forEach((el) => {
+        el.addEventListener("click", () => {
             const nodeId = el.dataset.nodeId;
-            if (graphRenderer) graphRenderer.highlightNode(nodeId);
-            const node = graph.nodes.find(n => n.id === nodeId);
-            if (node) _showNodeDetail({ raw: node, type: node.type, name: node.content?.name || '' });
+            graphRenderer?.highlightNode(nodeId);
+            mobileGraphRenderer?.highlightNode(nodeId);
+            const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+            if (node) _showNodeDetail(node);
         });
     });
 
-    // 搜索绑定（防抖）
-    if (!searchInput._bmeBound) {
-        let timer;
-        searchInput.addEventListener('input', () => {
+    if (searchInput && !searchInput._bmeBound) {
+        let timer = null;
+        searchInput.addEventListener("input", () => {
             clearTimeout(timer);
             timer = setTimeout(() => _refreshMemoryBrowser(), 200);
         });
-        filterSelect?.addEventListener('change', () => _refreshMemoryBrowser());
+        filterSelect?.addEventListener("change", () => _refreshMemoryBrowser());
         searchInput._bmeBound = true;
     }
 }
@@ -238,24 +255,26 @@ function _refreshMemoryBrowser() {
 // ==================== 注入预览 ====================
 
 async function _refreshInjectionPreview() {
-    const graph = _getGraph?.();
-    const settings = _getSettings?.();
-    if (!graph || !settings) return;
-
-    const container = document.getElementById('bme-injection-content');
-    const tokenEl = document.getElementById('bme-injection-tokens');
+    const container = document.getElementById("bme-injection-content");
+    const tokenEl = document.getElementById("bme-injection-tokens");
     if (!container) return;
 
-    try {
-        // 动态导入注入器模块
-        const { estimateTokens, formatInjection } = await import('./injector.js');
-        const injection = formatInjection(graph, settings.nodeSchema || []);
-        const totalTokens = estimateTokens(injection);
+    const injection = String(_getLastInjection?.() || "").trim();
+    if (!injection) {
+        container.innerHTML =
+            '<div class="bme-injection-preview" style="color:var(--bme-on-surface-dim)">暂无注入内容。先完成一次召回或正常生成后再查看。</div>';
+        if (tokenEl) tokenEl.textContent = "";
+        return;
+    }
 
+    try {
+        const { estimateTokens } = await import("./injector.js");
+        const totalTokens = estimateTokens(injection);
         container.innerHTML = `<div class="bme-injection-preview">${_escHtml(injection)}</div>`;
         if (tokenEl) tokenEl.textContent = `≈ ${totalTokens} tokens`;
-    } catch (e) {
-        container.innerHTML = `<div class="bme-injection-preview" style="color:var(--bme-accent3)">预览生成失败: ${_escHtml(e.message)}</div>`;
+    } catch (error) {
+        container.innerHTML = `<div class="bme-injection-preview" style="color:var(--bme-accent3)">预览生成失败: ${_escHtml(error.message)}</div>`;
+        if (tokenEl) tokenEl.textContent = "";
     }
 }
 
@@ -264,85 +283,101 @@ async function _refreshInjectionPreview() {
 function _refreshGraph() {
     const graph = _getGraph?.();
     if (!graph) return;
-    if (graphRenderer) graphRenderer.loadGraph(graph);
-    if (mobileGraphRenderer) mobileGraphRenderer.loadGraph(graph);
+    graphRenderer?.loadGraph(graph);
+    mobileGraphRenderer?.loadGraph(graph);
 }
 
 function _buildLegend() {
-    const legendEl = document.getElementById('bme-graph-legend');
+    const legendEl = document.getElementById("bme-graph-legend");
     if (!legendEl) return;
 
     const settings = _getSettings?.() || {};
-    const colors = getNodeColors(settings.panelTheme || 'crimson');
+    const colors = getNodeColors(settings.panelTheme || "crimson");
     const types = [
-        { key: 'character', label: '角色' },
-        { key: 'event',     label: '事件' },
-        { key: 'location',  label: '地点' },
-        { key: 'thread',    label: '线索' },
-        { key: 'rule',      label: '规则' },
-        { key: 'synopsis',  label: '概要' },
+        { key: "character", label: "角色" },
+        { key: "event", label: "事件" },
+        { key: "location", label: "地点" },
+        { key: "thread", label: "主线" },
+        { key: "rule", label: "规则" },
+        { key: "synopsis", label: "概要" },
+        { key: "reflection", label: "反思" },
     ];
 
-    legendEl.innerHTML = types.map(t =>
-        `<span class="bme-legend-item">
-            <span class="bme-legend-dot" style="background:${colors[t.key]}"></span>
-            ${t.label}
-        </span>`
-    ).join('');
+    legendEl.innerHTML = types
+        .map(
+            (type) => `<span class="bme-legend-item">
+            <span class="bme-legend-dot" style="background:${colors[type.key]}"></span>
+            ${type.label}
+        </span>`,
+        )
+        .join("");
 }
 
 function _bindGraphControls() {
-    document.getElementById('bme-graph-zoom-in')?.addEventListener('click', () => graphRenderer?.zoomIn());
-    document.getElementById('bme-graph-zoom-out')?.addEventListener('click', () => graphRenderer?.zoomOut());
-    document.getElementById('bme-graph-reset')?.addEventListener('click', () => graphRenderer?.resetView());
+    document
+        .getElementById("bme-graph-zoom-in")
+        ?.addEventListener("click", () => graphRenderer?.zoomIn());
+    document
+        .getElementById("bme-graph-zoom-out")
+        ?.addEventListener("click", () => graphRenderer?.zoomOut());
+    document
+        .getElementById("bme-graph-reset")
+        ?.addEventListener("click", () => graphRenderer?.resetView());
 }
 
 // ==================== 节点详情 ====================
 
 function _showNodeDetail(node) {
-    const detailEl = document.getElementById('bme-node-detail');
-    const titleEl = document.getElementById('bme-detail-title');
-    const bodyEl = document.getElementById('bme-detail-body');
+    const detailEl = document.getElementById("bme-node-detail");
+    const titleEl = document.getElementById("bme-detail-title");
+    const bodyEl = document.getElementById("bme-detail-body");
     if (!detailEl || !titleEl || !bodyEl) return;
 
     const raw = node.raw || node;
-    const name = raw.content?.name || raw.content?.title || raw.id?.slice(0, 8) || '—';
-    titleEl.textContent = name;
+    const fields = raw.fields || {};
+    titleEl.textContent = getNodeDisplayName(raw);
 
-    const fields = [
-        { label: '类型', value: _typeLabel(raw.type) },
-        { label: 'ID', value: raw.id?.slice(0, 12) + '...' },
-        { label: '重要度', value: raw.importance || 5 },
-        { label: '访问次数', value: raw.accessCount || 0 },
-        { label: '序列号', value: raw.seq || 0 },
+    const items = [
+        { label: "类型", value: _typeLabel(raw.type) },
+        { label: "ID", value: raw.id || "—" },
+        { label: "重要度", value: raw.importance || 5 },
+        { label: "访问次数", value: raw.accessCount || 0 },
+        { label: "序列号", value: raw.seqRange?.[1] ?? raw.seq ?? 0 },
     ];
 
-    // 展示 content 字段
-    if (raw.content) {
-        for (const [k, v] of Object.entries(raw.content)) {
-            if (k === 'embedding') continue;
-            fields.push({ label: k, value: typeof v === 'object' ? JSON.stringify(v, null, 2) : v });
-        }
+    if (Array.isArray(raw.seqRange)) {
+        items.push({ label: "序列范围", value: `${raw.seqRange[0]} ~ ${raw.seqRange[1]}` });
+    }
+    if (Array.isArray(raw.clusters) && raw.clusters.length > 0) {
+        items.push({ label: "聚类标签", value: raw.clusters.join(", ") });
     }
 
-    bodyEl.innerHTML = fields.map(f =>
-        `<div class="bme-node-detail-field">
-            <label>${_escHtml(f.label)}</label>
-            <div class="value">${_escHtml(String(f.value))}</div>
-        </div>`
-    ).join('');
+    for (const [key, value] of Object.entries(fields)) {
+        items.push({
+            label: key,
+            value: typeof value === "object" ? JSON.stringify(value, null, 2) : value,
+        });
+    }
 
-    detailEl.classList.add('open');
+    bodyEl.innerHTML = items
+        .map(
+            (item) => `<div class="bme-node-detail-field">
+            <label>${_escHtml(item.label)}</label>
+            <div class="value">${_escHtml(String(item.value ?? "—"))}</div>
+        </div>`,
+        )
+        .join("");
+
+    detailEl.classList.add("open");
 }
 
 function _bindClose() {
-    document.getElementById('bme-panel-close')?.addEventListener('click', closePanel);
-    document.getElementById('bme-detail-close')?.addEventListener('click', () => {
-        document.getElementById('bme-node-detail')?.classList.remove('open');
+    document.getElementById("bme-panel-close")?.addEventListener("click", closePanel);
+    document.getElementById("bme-detail-close")?.addEventListener("click", () => {
+        document.getElementById("bme-node-detail")?.classList.remove("open");
     });
-    // 点击遮罩关闭
-    overlayEl?.addEventListener('click', (e) => {
-        if (e.target === overlayEl) closePanel();
+    overlayEl?.addEventListener("click", (event) => {
+        if (event.target === overlayEl) closePanel();
     });
 }
 
@@ -350,28 +385,33 @@ function _bindClose() {
 
 function _bindActions() {
     const bindings = {
-        'bme-act-extract':  'extract',
-        'bme-act-compress': 'compress',
-        'bme-act-sleep':    'sleep',
-        'bme-act-synopsis': 'synopsis',
-        'bme-act-export':   'export',
-        'bme-act-import':   'import',
-        'bme-act-rebuild':  'rebuild',
-        'bme-act-evolve':   'evolve',
+        "bme-act-extract": "extract",
+        "bme-act-compress": "compress",
+        "bme-act-sleep": "sleep",
+        "bme-act-synopsis": "synopsis",
+        "bme-act-export": "export",
+        "bme-act-import": "import",
+        "bme-act-rebuild": "rebuild",
+        "bme-act-evolve": "evolve",
     };
 
-    for (const [elId, actionKey] of Object.entries(bindings)) {
-        document.getElementById(elId)?.addEventListener('click', async () => {
+    for (const [elementId, actionKey] of Object.entries(bindings)) {
+        document.getElementById(elementId)?.addEventListener("click", async () => {
             const handler = _actionHandlers[actionKey];
-            if (handler) {
-                try {
-                    await handler();
-                    // 刷新面板
-                    _refreshDashboard();
-                    _refreshGraph();
-                } catch (e) {
-                    console.error(`[ST-BME] Action ${actionKey} failed:`, e);
+            if (!handler) return;
+
+            try {
+                await handler();
+                _refreshDashboard();
+                _refreshGraph();
+                if (document.getElementById("bme-pane-memory")?.classList.contains("active")) {
+                    _refreshMemoryBrowser();
                 }
+                if (document.getElementById("bme-pane-injection")?.classList.contains("active")) {
+                    await _refreshInjectionPreview();
+                }
+            } catch (error) {
+                console.error(`[ST-BME] Action ${actionKey} failed:`, error);
             }
         });
     }
@@ -385,29 +425,53 @@ function _setText(id, text) {
 }
 
 function _escHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
+    const div = document.createElement("div");
+    div.textContent = String(str ?? "");
     return div.innerHTML;
 }
 
 function _typeLabel(type) {
     const map = {
-        character: '角色', event: '事件', location: '地点',
-        thread: '线索', rule: '规则', synopsis: '概要', reflection: '反思',
+        character: "角色",
+        event: "事件",
+        location: "地点",
+        thread: "主线",
+        rule: "规则",
+        synopsis: "概要",
+        reflection: "反思",
     };
-    return map[type] || type || '—';
+    return map[type] || type || "—";
 }
 
 function _getNodeSnippet(node) {
-    const c = node.content || {};
-    if (c.description) return c.description;
-    if (c.summary) return c.summary;
-    if (c.what) return c.what;
-    const entries = Object.entries(c).filter(([k]) => k !== 'name' && k !== 'title' && k !== 'embedding');
-    if (entries.length) {
-        return entries.slice(0, 2).map(([k, v]) => `${k}: ${v}`).join('; ');
+    const fields = node.fields || {};
+    if (fields.summary) return fields.summary;
+    if (fields.state) return fields.state;
+    if (fields.constraint) return fields.constraint;
+    if (fields.insight) return fields.insight;
+    if (fields.traits) return fields.traits;
+
+    const entries = Object.entries(fields).filter(
+        ([key]) => !["name", "title", "summary", "embedding"].includes(key),
+    );
+    if (entries.length > 0) {
+        return entries
+            .slice(0, 2)
+            .map(([key, value]) => `${key}: ${value}`)
+            .join("; ");
     }
-    return '';
+    return "无补充字段";
+}
+
+function getNodeDisplayName(node) {
+    return (
+        node?.fields?.name ||
+        node?.fields?.title ||
+        node?.fields?.summary ||
+        node?.fields?.insight ||
+        node?.id?.slice(0, 8) ||
+        "—"
+    );
 }
 
 function _isMobile() {

@@ -86,7 +86,7 @@ export class GraphRenderer {
             const node = {
                 id: n.id,
                 type: n.type || 'event',
-                name: n.content?.name || n.content?.title || n.id.slice(0, 8),
+                name: getNodeDisplayName(n),
                 importance: n.importance || 5,
                 x: this.canvas.width / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 40,
                 y: this.canvas.height / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 40,
@@ -101,7 +101,7 @@ export class GraphRenderer {
 
         // 转换边
         this.edges = graph.edges
-            .filter(e => this.nodeMap.has(e.fromId) && this.nodeMap.has(e.toId))
+            .filter(e => !e.invalidAt && !e.expiredAt && this.nodeMap.has(e.fromId) && this.nodeMap.has(e.toId))
             .map(e => ({
                 from: this.nodeMap.get(e.fromId),
                 to: this.nodeMap.get(e.toId),
@@ -458,4 +458,15 @@ export class GraphRenderer {
         this.stopAnimation();
         this._resizeObserver?.disconnect();
     }
+}
+
+function getNodeDisplayName(node) {
+    return (
+        node?.fields?.name ||
+        node?.fields?.title ||
+        node?.fields?.summary ||
+        node?.fields?.insight ||
+        node?.id?.slice(0, 8) ||
+        '—'
+    );
 }
