@@ -9,9 +9,9 @@ import {
 import {
   extension_settings,
   getContext,
-  renderExtensionTemplateAsync,
   saveMetadataDebounced,
 } from "../../../extensions.js";
+import { renderTemplateAsync } from "../../../templates.js";
 
 import { compressAll, sleepCycle } from "./compressor.js";
 import { testConnection as testEmbeddingConnection } from "./embedding.js";
@@ -39,7 +39,15 @@ let _themesModule = null;
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
-const TEMPLATE_PATH = "third-party/ST-BME";
+
+async function loadLocalTemplate(templateName) {
+  const templatePath = new URL(`./${templateName}.html`, import.meta.url).pathname;
+  const html = await renderTemplateAsync(templatePath, {}, true, true, true);
+  if (typeof html !== "string" || html.trim().length === 0) {
+    throw new Error(`Template render returned empty content: ${templatePath}`);
+  }
+  return html;
+}
 
 // ==================== 默认设置 ====================
 
@@ -1130,11 +1138,10 @@ function bindSettingsUI() {
 
 (async function init() {
   try {
-    const settingsHtml = await renderExtensionTemplateAsync(
-      TEMPLATE_PATH,
-      "settings",
-    );
-    $("#extensions_settings2").append(settingsHtml);
+    if (!document.getElementById("st_bme_enabled")) {
+      const settingsHtml = await loadLocalTemplate("settings");
+      $("#extensions_settings2").append(settingsHtml);
+    }
     bindSettingsUI();
   } catch (settingsError) {
     console.error("[ST-BME] 设置面板加载失败:", settingsError);

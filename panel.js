@@ -1,6 +1,6 @@
 // ST-BME: 操控面板交互逻辑
 
-import { renderExtensionTemplateAsync } from "../../../extensions.js";
+import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeColors } from "./themes.js";
 
@@ -16,6 +16,15 @@ let _getLastExtract = null;
 let _getLastRecall = null;
 let _getLastInjection = null;
 let _actionHandlers = {};
+
+async function loadLocalTemplate(templateName) {
+    const templatePath = new URL(`./${templateName}.html`, import.meta.url).pathname;
+    const html = await renderTemplateAsync(templatePath, {}, true, true, true);
+    if (typeof html !== "string" || html.trim().length === 0) {
+        throw new Error(`Template render returned empty content: ${templatePath}`);
+    }
+    return html;
+}
 
 /**
  * 初始化面板（由 index.js 调用一次）
@@ -39,10 +48,13 @@ export async function initPanel({
     panelEl = document.getElementById("st-bme-panel");
 
     if (!overlayEl || !panelEl) {
-        const html = await renderExtensionTemplateAsync("third-party/ST-BME", "panel");
+        const html = await loadLocalTemplate("panel");
         $("body").append(html);
         overlayEl = document.getElementById("st-bme-panel-overlay");
         panelEl = document.getElementById("st-bme-panel");
+        if (!overlayEl || !panelEl) {
+            throw new Error("Panel template rendered but required DOM nodes were not found");
+        }
     }
 
     _bindTabs();
