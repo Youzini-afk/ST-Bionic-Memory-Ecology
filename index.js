@@ -94,6 +94,7 @@ const defaultSettings = {
   // ① 惊奇度分割（P2）
   enableSmartTrigger: false, // 启用惊奇度分割
   triggerPatterns: "", // 自定义触发正则
+  smartTriggerThreshold: 2, // 轻量触发阈值
 
   // ⑤ 主动遗忘（P2）
   enableSleepCycle: false, // 启用主动遗忘
@@ -168,6 +169,103 @@ function saveGraphToChat() {
 
 // ==================== 核心流程 ====================
 
+const DEFAULT_TRIGGER_KEYWORDS = [
+  "突然",
+  "没想到",
+  "原来",
+  "其实",
+  "发现",
+  "背叛",
+  "死亡",
+  "复活",
+  "恢复记忆",
+  "失忆",
+  "告白",
+  "暴露",
+  "秘密",
+  "计划",
+  "规则",
+  "契约",
+  "位置",
+  "地点",
+  "离开",
+  "来到",
+];
+
+function getSmartTriggerDecision(chat, lastProcessed, settings) {
+  const pendingMessages = chat
+    .slice(lastProcessed + 1)
+    .filter((msg) => !msg.is_system)
+    .map((msg) => ({
+      role: msg.is_user ? "user" : "assistant",
+      content: msg.mes || "",
+    }));
+
+  if (pendingMessages.length === 0) {
+    return { triggered: false, score: 0, reasons: [] };
+  }
+
+  const reasons = [];
+  let score = 0;
+  const combinedText = pendingMessages.map((m) => m.content).join("\n");
+
+  const keywordHits = DEFAULT_TRIGGER_KEYWORDS.filter((keyword) =>
+    combinedText.includes(keyword),
+  );
+  if (keywordHits.length > 0) {
+    score += Math.min(2, keywordHits.length);
+    reasons.push(`关键词: ${keywordHits.slice(0, 3).join(", ")}`);
+  }
+
+  const customPatterns = String(settings.triggerPatterns || "")
+    .split(/\r?\n|,/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const pattern of customPatterns) {
+    try {
+      const regex = new RegExp(pattern, "i");
+      if (regex.test(combinedText)) {
+        score += 2;
+        reasons.push(`自定义触发: ${pattern}`);
+        break;
+      }
+    } catch {
+      // 忽略无效正则，避免影响主流程
+    }
+  }
+
+  const roleSwitchCount = pendingMessages.reduce((count, message, index) => {
+    if (index === 0) return count;
+    return count + (message.role !== pendingMessages[index - 1].role ? 1 : 0);
+  }, 0);
+  if (roleSwitchCount >= 2) {
+    score += 1;
+    reasons.push("多轮往返互动");
+  }
+
+  const punctuationHits = (combinedText.match(/[!?！？]/g) || []).length;
+  if (punctuationHits >= 2) {
+    score += 1;
+    reasons.push("情绪/冲突波动");
+  }
+
+  const entityLikeHits =
+    combinedText.match(
+      /[A-Z][a-z]{2,}|[\u4e00-\u9fff]{2,6}(先生|小姐|王国|城|镇|村|学院|组织|公司|小队|军团)/g,
+    ) || [];
+  if (entityLikeHits.length > 0) {
+    score += 1;
+    reasons.push("疑似新实体/新地点");
+  }
+
+  const threshold = Math.max(1, settings.smartTriggerThreshold || 2);
+  return {
+    triggered: score >= threshold,
+    score,
+    reasons,
+  };
+}
+
 /**
  * 提取管线：处理未提取的对话楼层
  */
@@ -194,8 +292,17 @@ async function runExtraction() {
 
   if (unprocessedStarts.length === 0) return;
 
-  // 按 extractEvery 批次处理
-  if (unprocessedStarts.length < settings.extractEvery) return;
+  const smartTriggerDecision = settings.enableSmartTrigger
+    ? getSmartTriggerDecision(chat, lastProcessed, settings)
+    : { triggered: false, score: 0, reasons: [] };
+
+  // 按 extractEvery 批次处理；若启用智能触发，则允许提前提取
+  if (
+    unprocessedStarts.length < settings.extractEvery &&
+    !smartTriggerDecision.triggered
+  ) {
+    return;
+  }
 
   isExtracting = true;
 
@@ -219,7 +326,12 @@ async function runExtraction() {
       });
     }
 
-    console.log(`[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}`);
+    console.log(
+      `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
+        (smartTriggerDecision.triggered
+          ? ` [智能触发 score=${smartTriggerDecision.score}; ${smartTriggerDecision.reasons.join(" / ")}]`
+          : ""),
+    );
 
     const result = await extractMemories({
       graph: currentGraph,
@@ -695,6 +807,12 @@ function bindSettingsUI() {
     .prop("checked", settings.enableSmartTrigger)
     .on("change", function () {
       settings.enableSmartTrigger = $(this).prop("checked");
+      saveSettingsDebounced();
+    });
+  $("#st_bme_trigger_patterns")
+    .val(settings.triggerPatterns || "")
+    .on("input", function () {
+      settings.triggerPatterns = $(this).val();
       saveSettingsDebounced();
     });
 
