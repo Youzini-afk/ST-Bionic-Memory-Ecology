@@ -4,17 +4,17 @@
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 2;
+const GRAPH_VERSION = 3;
 
 /**
  * 生成 UUID v4
  */
 function uuid() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-        const r = (Math.random() * 16) | 0;
-        const v = c === 'x' ? r : (r & 0x3) | 0x8;
-        return v.toString(16);
-    });
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 /**
@@ -22,13 +22,13 @@ function uuid() {
  * @returns {GraphState}
  */
 export function createEmptyGraph() {
-    return {
-        version: GRAPH_VERSION,
-        lastProcessedSeq: 0,
-        nodes: [],
-        edges: [],
-        lastRecallResult: null,
-    };
+  return {
+    version: GRAPH_VERSION,
+    lastProcessedSeq: -1,
+    nodes: [],
+    edges: [],
+    lastRecallResult: null,
+  };
 }
 
 // ==================== 节点操作 ====================
@@ -39,33 +39,33 @@ export function createEmptyGraph() {
  * @returns {object} 新节点
  */
 export function createNode({
-    type,
-    fields = {},
-    seq = 0,
-    seqRange = null,
-    importance = 5.0,
-    clusters = [],
+  type,
+  fields = {},
+  seq = 0,
+  seqRange = null,
+  importance = 5.0,
+  clusters = [],
 }) {
-    const now = Date.now();
-    return {
-        id: uuid(),
-        type,
-        level: 0,
-        parentId: null,
-        childIds: [],
-        seq,
-        seqRange: seqRange || [seq, seq],
-        archived: false,
-        fields,
-        embedding: null,
-        importance: Math.max(0, Math.min(10, importance)),
-        accessCount: 0,
-        lastAccessTime: now,
-        createdTime: now,
-        prevId: null,
-        nextId: null,
-        clusters,
-    };
+  const now = Date.now();
+  return {
+    id: uuid(),
+    type,
+    level: 0,
+    parentId: null,
+    childIds: [],
+    seq,
+    seqRange: seqRange || [seq, seq],
+    archived: false,
+    fields,
+    embedding: null,
+    importance: Math.max(0, Math.min(10, importance)),
+    accessCount: 0,
+    lastAccessTime: now,
+    createdTime: now,
+    prevId: null,
+    nextId: null,
+    clusters,
+  };
 }
 
 /**
@@ -75,19 +75,19 @@ export function createNode({
  * @returns {object} 添加的节点
  */
 export function addNode(graph, node) {
-    // 同类型节点的时间链表：连接到最后一个同类型节点
-    const sameTypeNodes = graph.nodes
-        .filter(n => n.type === node.type && !n.archived && n.level === 0)
-        .sort((a, b) => a.seq - b.seq);
+  // 同类型节点的时间链表：连接到最后一个同类型节点
+  const sameTypeNodes = graph.nodes
+    .filter((n) => n.type === node.type && !n.archived && n.level === 0)
+    .sort((a, b) => a.seq - b.seq);
 
-    if (sameTypeNodes.length > 0) {
-        const lastNode = sameTypeNodes[sameTypeNodes.length - 1];
-        lastNode.nextId = node.id;
-        node.prevId = lastNode.id;
-    }
+  if (sameTypeNodes.length > 0) {
+    const lastNode = sameTypeNodes[sameTypeNodes.length - 1];
+    lastNode.nextId = node.id;
+    node.prevId = lastNode.id;
+  }
 
-    graph.nodes.push(node);
-    return node;
+  graph.nodes.push(node);
+  return node;
 }
 
 /**
@@ -97,7 +97,7 @@ export function addNode(graph, node) {
  * @returns {object|null}
  */
 export function getNode(graph, nodeId) {
-    return graph.nodes.find(n => n.id === nodeId) || null;
+  return graph.nodes.find((n) => n.id === nodeId) || null;
 }
 
 /**
@@ -108,16 +108,16 @@ export function getNode(graph, nodeId) {
  * @returns {boolean} 是否找到并更新
  */
 export function updateNode(graph, nodeId, updates) {
-    const node = getNode(graph, nodeId);
-    if (!node) return false;
+  const node = getNode(graph, nodeId);
+  if (!node) return false;
 
-    if (updates.fields) {
-        node.fields = { ...node.fields, ...updates.fields };
-        delete updates.fields;
-    }
+  if (updates.fields) {
+    node.fields = { ...node.fields, ...updates.fields };
+    delete updates.fields;
+  }
 
-    Object.assign(node, updates);
-    return true;
+  Object.assign(node, updates);
+  return true;
 }
 
 /**
@@ -127,39 +127,41 @@ export function updateNode(graph, nodeId, updates) {
  * @returns {boolean}
  */
 export function removeNode(graph, nodeId) {
-    const node = getNode(graph, nodeId);
-    if (!node) return false;
+  const node = getNode(graph, nodeId);
+  if (!node) return false;
 
-    // 修复时间链表
-    if (node.prevId) {
-        const prev = getNode(graph, node.prevId);
-        if (prev) prev.nextId = node.nextId;
+  // 修复时间链表
+  if (node.prevId) {
+    const prev = getNode(graph, node.prevId);
+    if (prev) prev.nextId = node.nextId;
+  }
+  if (node.nextId) {
+    const next = getNode(graph, node.nextId);
+    if (next) next.prevId = node.prevId;
+  }
+
+  // 递归删除子节点
+  for (const childId of node.childIds) {
+    removeNode(graph, childId);
+  }
+
+  // 从父节点中移除引用
+  if (node.parentId) {
+    const parent = getNode(graph, node.parentId);
+    if (parent) {
+      parent.childIds = parent.childIds.filter((id) => id !== nodeId);
     }
-    if (node.nextId) {
-        const next = getNode(graph, node.nextId);
-        if (next) next.prevId = node.prevId;
-    }
+  }
 
-    // 递归删除子节点
-    for (const childId of node.childIds) {
-        removeNode(graph, childId);
-    }
+  // 删除相关边
+  graph.edges = graph.edges.filter(
+    (e) => e.fromId !== nodeId && e.toId !== nodeId,
+  );
 
-    // 从父节点中移除引用
-    if (node.parentId) {
-        const parent = getNode(graph, node.parentId);
-        if (parent) {
-            parent.childIds = parent.childIds.filter(id => id !== nodeId);
-        }
-    }
+  // 删除节点本身
+  graph.nodes = graph.nodes.filter((n) => n.id !== nodeId);
 
-    // 删除相关边
-    graph.edges = graph.edges.filter(e => e.fromId !== nodeId && e.toId !== nodeId);
-
-    // 删除节点本身
-    graph.nodes = graph.nodes.filter(n => n.id !== nodeId);
-
-    return true;
+  return true;
 }
 
 /**
@@ -169,11 +171,11 @@ export function removeNode(graph, nodeId) {
  * @returns {object[]}
  */
 export function getActiveNodes(graph, typeFilter = null) {
-    let nodes = graph.nodes.filter(n => !n.archived);
-    if (typeFilter) {
-        nodes = nodes.filter(n => n.type === typeFilter);
-    }
-    return nodes;
+  let nodes = graph.nodes.filter((n) => !n.archived);
+  if (typeFilter) {
+    nodes = nodes.filter((n) => n.type === typeFilter);
+  }
+  return nodes;
 }
 
 /**
@@ -184,12 +186,20 @@ export function getActiveNodes(graph, typeFilter = null) {
  * @param {string} primaryKeyField - 主键字段名（默认 'name'）
  * @returns {object|null}
  */
-export function findLatestNode(graph, type, primaryKeyValue, primaryKeyField = 'name') {
-    const candidates = graph.nodes.filter(
-        n => n.type === type && !n.archived && n.fields[primaryKeyField] === primaryKeyValue,
-    );
-    if (candidates.length === 0) return null;
-    return candidates.sort((a, b) => b.seq - a.seq)[0];
+export function findLatestNode(
+  graph,
+  type,
+  primaryKeyValue,
+  primaryKeyField = "name",
+) {
+  const candidates = graph.nodes.filter(
+    (n) =>
+      n.type === type &&
+      !n.archived &&
+      n.fields[primaryKeyField] === primaryKeyValue,
+  );
+  if (candidates.length === 0) return null;
+  return candidates.sort((a, b) => b.seq - a.seq)[0];
 }
 
 // ==================== 边操作 ====================
@@ -199,20 +209,26 @@ export function findLatestNode(graph, type, primaryKeyValue, primaryKeyField = '
  * @param {object} params
  * @returns {object} 新边
  */
-export function createEdge({ fromId, toId, relation = 'related', strength = 0.8, edgeType = 0 }) {
-    return {
-        id: uuid(),
-        fromId,
-        toId,
-        relation,
-        strength: Math.max(0, Math.min(1, strength)),
-        edgeType,
-        createdTime: Date.now(),
-        // Graphiti 启发的时序字段
-        validAt: Date.now(),    // 关系生效时间
-        invalidAt: null,        // 关系失效时间（null = 当前有效）
-        expiredAt: null,        // 系统标记过期时间
-    };
+export function createEdge({
+  fromId,
+  toId,
+  relation = "related",
+  strength = 0.8,
+  edgeType = 0,
+}) {
+  return {
+    id: uuid(),
+    fromId,
+    toId,
+    relation,
+    strength: Math.max(0, Math.min(1, strength)),
+    edgeType,
+    createdTime: Date.now(),
+    // Graphiti 启发的时序字段
+    validAt: Date.now(), // 关系生效时间
+    invalidAt: null, // 关系失效时间（null = 当前有效）
+    expiredAt: null, // 系统标记过期时间
+  };
 }
 
 /**
@@ -222,23 +238,42 @@ export function createEdge({ fromId, toId, relation = 'related', strength = 0.8,
  * @returns {object|null} 添加的边或 null
  */
 export function addEdge(graph, edge) {
-    const from = getNode(graph, edge.fromId);
-    const to = getNode(graph, edge.toId);
-    if (!from || !to) return null;
-    if (edge.fromId === edge.toId) return null;
+  const from = getNode(graph, edge.fromId);
+  const to = getNode(graph, edge.toId);
+  if (!from || !to) return null;
+  if (edge.fromId === edge.toId) return null;
 
-    // 检查重复边
-    const existing = graph.edges.find(
-        e => e.fromId === edge.fromId && e.toId === edge.toId && e.relation === edge.relation,
+  const isCurrentEdgeValid = (candidate) => {
+    if (candidate.invalidAt) return false;
+    if (candidate.expiredAt) return false;
+    return true;
+  };
+
+  // 对当前有效边去重；历史边保留，避免历史污染当前检索
+  const existing = graph.edges.find(
+    (e) =>
+      e.fromId === edge.fromId &&
+      e.toId === edge.toId &&
+      e.relation === edge.relation &&
+      isCurrentEdgeValid(e),
+  );
+  if (existing) {
+    existing.strength = Math.max(existing.strength, edge.strength ?? 0);
+    existing.validAt = Math.max(
+      existing.validAt || 0,
+      edge.validAt || Date.now(),
     );
-    if (existing) {
-        // 更新已有边的强度
-        existing.strength = Math.max(existing.strength, edge.strength);
-        return existing;
+    if (edge.invalidAt) {
+      existing.invalidAt = edge.invalidAt;
     }
+    if (edge.expiredAt) {
+      existing.expiredAt = edge.expiredAt;
+    }
+    return existing;
+  }
 
-    graph.edges.push(edge);
-    return edge;
+  graph.edges.push(edge);
+  return edge;
 }
 
 /**
@@ -248,10 +283,10 @@ export function addEdge(graph, edge) {
  * @returns {boolean}
  */
 export function removeEdge(graph, edgeId) {
-    const idx = graph.edges.findIndex(e => e.id === edgeId);
-    if (idx === -1) return false;
-    graph.edges.splice(idx, 1);
-    return true;
+  const idx = graph.edges.findIndex((e) => e.id === edgeId);
+  if (idx === -1) return false;
+  graph.edges.splice(idx, 1);
+  return true;
 }
 
 /**
@@ -261,7 +296,7 @@ export function removeEdge(graph, edgeId) {
  * @returns {object[]}
  */
 export function getOutEdges(graph, nodeId) {
-    return graph.edges.filter(e => e.fromId === nodeId);
+  return graph.edges.filter((e) => e.fromId === nodeId);
 }
 
 /**
@@ -271,7 +306,7 @@ export function getOutEdges(graph, nodeId) {
  * @returns {object[]}
  */
 export function getInEdges(graph, nodeId) {
-    return graph.edges.filter(e => e.toId === nodeId);
+  return graph.edges.filter((e) => e.toId === nodeId);
 }
 
 /**
@@ -281,7 +316,7 @@ export function getInEdges(graph, nodeId) {
  * @returns {object[]}
  */
 export function getNodeEdges(graph, nodeId) {
-    return graph.edges.filter(e => e.fromId === nodeId || e.toId === nodeId);
+  return graph.edges.filter((e) => e.fromId === nodeId || e.toId === nodeId);
 }
 
 // ==================== 查询辅助 ====================
@@ -292,27 +327,27 @@ export function getNodeEdges(graph, nodeId) {
  * @returns {Map<string, Array<{targetId: string, strength: number, edgeType: number}>>}
  */
 export function buildAdjacencyMap(graph) {
-    const adj = new Map();
+  const adj = new Map();
 
-    for (const edge of graph.edges) {
-        // 正向
-        if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
-        adj.get(edge.fromId).push({
-            targetId: edge.toId,
-            strength: edge.strength,
-            edgeType: edge.edgeType,
-        });
+  for (const edge of graph.edges) {
+    if (!isEdgeActive(edge)) continue;
 
-        // 反向（图扩散是双向的）
-        if (!adj.has(edge.toId)) adj.set(edge.toId, []);
-        adj.get(edge.toId).push({
-            targetId: edge.fromId,
-            strength: edge.strength,
-            edgeType: edge.edgeType,
-        });
-    }
+    if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
+    adj.get(edge.fromId).push({
+      targetId: edge.toId,
+      strength: edge.strength,
+      edgeType: edge.edgeType,
+    });
 
-    return adj;
+    if (!adj.has(edge.toId)) adj.set(edge.toId, []);
+    adj.get(edge.toId).push({
+      targetId: edge.fromId,
+      strength: edge.strength,
+      edgeType: edge.edgeType,
+    });
+  }
+
+  return adj;
 }
 
 /**
@@ -322,32 +357,34 @@ export function buildAdjacencyMap(graph) {
  * @returns {Map}
  */
 export function buildTemporalAdjacencyMap(graph) {
-    const adj = new Map();
-    const now = Date.now();
+  const adj = new Map();
 
-    for (const edge of graph.edges) {
-        // 跳过已失效的边
-        if (edge.invalidAt && edge.invalidAt <= now) continue;
-        if (edge.expiredAt) continue;
+  for (const edge of graph.edges) {
+    if (!isEdgeActive(edge)) continue;
 
-        // 正向
-        if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
-        adj.get(edge.fromId).push({
-            targetId: edge.toId,
-            strength: edge.strength,
-            edgeType: edge.edgeType,
-        });
+    if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
+    adj.get(edge.fromId).push({
+      targetId: edge.toId,
+      strength: edge.strength,
+      edgeType: edge.edgeType,
+    });
 
-        // 反向
-        if (!adj.has(edge.toId)) adj.set(edge.toId, []);
-        adj.get(edge.toId).push({
-            targetId: edge.fromId,
-            strength: edge.strength,
-            edgeType: edge.edgeType,
-        });
-    }
+    if (!adj.has(edge.toId)) adj.set(edge.toId, []);
+    adj.get(edge.toId).push({
+      targetId: edge.fromId,
+      strength: edge.strength,
+      edgeType: edge.edgeType,
+    });
+  }
 
-    return adj;
+  return adj;
+}
+
+function isEdgeActive(edge, now = Date.now()) {
+  if (!edge) return false;
+  if (edge.invalidAt && edge.invalidAt <= now) return false;
+  if (edge.expiredAt && edge.expiredAt <= now) return false;
+  return true;
 }
 
 /**
@@ -355,7 +392,10 @@ export function buildTemporalAdjacencyMap(graph) {
  * @param {object} edge
  */
 export function invalidateEdge(edge) {
+  if (!edge) return;
+  if (!edge.invalidAt) {
     edge.invalidAt = Date.now();
+  }
 }
 
 /**
@@ -364,21 +404,21 @@ export function invalidateEdge(edge) {
  * @returns {object}
  */
 export function getGraphStats(graph) {
-    const activeNodes = graph.nodes.filter(n => !n.archived);
-    const archivedNodes = graph.nodes.filter(n => n.archived);
-    const typeCounts = {};
-    for (const node of activeNodes) {
-        typeCounts[node.type] = (typeCounts[node.type] || 0) + 1;
-    }
+  const activeNodes = graph.nodes.filter((n) => !n.archived);
+  const archivedNodes = graph.nodes.filter((n) => n.archived);
+  const typeCounts = {};
+  for (const node of activeNodes) {
+    typeCounts[node.type] = (typeCounts[node.type] || 0) + 1;
+  }
 
-    return {
-        totalNodes: graph.nodes.length,
-        activeNodes: activeNodes.length,
-        archivedNodes: archivedNodes.length,
-        totalEdges: graph.edges.length,
-        lastProcessedSeq: graph.lastProcessedSeq,
-        typeCounts,
-    };
+  return {
+    totalNodes: graph.nodes.length,
+    activeNodes: activeNodes.length,
+    archivedNodes: archivedNodes.length,
+    totalEdges: graph.edges.length,
+    lastProcessedSeq: graph.lastProcessedSeq,
+    typeCounts,
+  };
 }
 
 // ==================== 序列化 ====================
@@ -389,7 +429,7 @@ export function getGraphStats(graph) {
  * @returns {string}
  */
 export function serializeGraph(graph) {
-    return JSON.stringify(graph);
+  return JSON.stringify(graph);
 }
 
 /**
@@ -398,40 +438,75 @@ export function serializeGraph(graph) {
  * @returns {GraphState}
  */
 export function deserializeGraph(json) {
-    try {
-        const data = typeof json === 'string' ? JSON.parse(json) : json;
+  try {
+    const data = typeof json === "string" ? JSON.parse(json) : json;
 
-        if (!data || data.version === undefined) {
-            return createEmptyGraph();
-        }
-
-        // 版本迁移
-        if (data.version < GRAPH_VERSION) {
-            console.log(`[ST-BME] 图版本迁移 v${data.version} → v${GRAPH_VERSION}`);
-
-            // v1→v2 迁移：给旧边补充时序字段
-            if (data.version < 2 && data.edges) {
-                for (const edge of data.edges) {
-                    if (edge.validAt === undefined) edge.validAt = edge.createdTime || Date.now();
-                    if (edge.invalidAt === undefined) edge.invalidAt = null;
-                    if (edge.expiredAt === undefined) edge.expiredAt = null;
-                }
-            }
-
-            data.version = GRAPH_VERSION;
-        }
-
-        // 确保字段完整
-        data.nodes = data.nodes || [];
-        data.edges = data.edges || [];
-        data.lastProcessedSeq = data.lastProcessedSeq || 0;
-        data.lastRecallResult = data.lastRecallResult || null;
-
-        return data;
-    } catch (e) {
-        console.error('[ST-BME] 图反序列化失败:', e);
-        return createEmptyGraph();
+    if (!data || data.version === undefined) {
+      return createEmptyGraph();
     }
+
+    if (data.version < GRAPH_VERSION) {
+      console.log(`[ST-BME] 图版本迁移 v${data.version} → v${GRAPH_VERSION}`);
+
+      if (data.version < 2 && data.edges) {
+        for (const edge of data.edges) {
+          if (edge.validAt === undefined)
+            edge.validAt = edge.createdTime || Date.now();
+          if (edge.invalidAt === undefined) edge.invalidAt = null;
+          if (edge.expiredAt === undefined) edge.expiredAt = null;
+        }
+      }
+
+      if (data.version < 3) {
+        if (typeof data.lastProcessedSeq !== "number") {
+          data.lastProcessedSeq = -1;
+        }
+        for (const node of data.nodes || []) {
+          if (!Array.isArray(node.seqRange)) {
+            const seq = Number.isFinite(node.seq) ? node.seq : 0;
+            node.seqRange = [seq, seq];
+          }
+        }
+      }
+
+      data.version = GRAPH_VERSION;
+    }
+
+    data.nodes = (data.nodes || []).map((node) => {
+      const seq = Number.isFinite(node.seq) ? node.seq : 0;
+      return {
+        level: 0,
+        parentId: null,
+        childIds: [],
+        accessCount: 0,
+        lastAccessTime: node.createdTime || Date.now(),
+        prevId: null,
+        nextId: null,
+        clusters: [],
+        ...node,
+        seq,
+        seqRange: Array.isArray(node.seqRange) ? node.seqRange : [seq, seq],
+      };
+    });
+    data.edges = (data.edges || []).map((edge) => ({
+      createdTime: Date.now(),
+      validAt: edge?.createdTime || Date.now(),
+      invalidAt: null,
+      expiredAt: null,
+      ...edge,
+    }));
+    data.lastProcessedSeq = Number.isFinite(data.lastProcessedSeq)
+      ? data.lastProcessedSeq
+      : -1;
+    data.lastRecallResult = Array.isArray(data.lastRecallResult)
+      ? data.lastRecallResult
+      : null;
+
+    return data;
+  } catch (e) {
+    console.error("[ST-BME] 图反序列化失败:", e);
+    return createEmptyGraph();
+  }
 }
 
 /**
@@ -440,11 +515,11 @@ export function deserializeGraph(json) {
  * @returns {string} JSON 字符串
  */
 export function exportGraph(graph) {
-    const exportData = {
-        ...graph,
-        nodes: graph.nodes.map(n => ({ ...n, embedding: null })),
-    };
-    return JSON.stringify(exportData, null, 2);
+  const exportData = {
+    ...graph,
+    nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
+  };
+  return JSON.stringify(exportData, null, 2);
 }
 
 /**
@@ -453,10 +528,10 @@ export function exportGraph(graph) {
  * @returns {GraphState}
  */
 export function importGraph(json) {
-    const graph = deserializeGraph(json);
-    // 导入的节点需要重新生成 embedding
-    for (const node of graph.nodes) {
-        node.embedding = null;
-    }
-    return graph;
+  const graph = deserializeGraph(json);
+  // 导入的节点需要重新生成 embedding
+  for (const node of graph.nodes) {
+    node.embedding = null;
+  }
+  return graph;
 }

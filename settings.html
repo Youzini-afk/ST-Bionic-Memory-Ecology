@@ -23,8 +23,20 @@
             id="st_bme_extract_every"
             class="text_pole"
             min="1"
-            max="10"
+            max="50"
             value="1"
+          />
+        </div>
+
+        <div class="st-bme-row">
+          <label for="st_bme_extract_context_turns">提取上下文轮数</label>
+          <input
+            type="number"
+            id="st_bme_extract_context_turns"
+            class="text_pole"
+            min="0"
+            max="20"
+            value="2"
           />
         </div>
       </div>
@@ -47,6 +59,30 @@
             <input type="checkbox" id="st_bme_recall_llm" />
             <span>启用 LLM 精确召回</span>
           </label>
+        </div>
+
+        <div class="st-bme-row">
+          <label for="st_bme_recall_top_k">召回候选上限</label>
+          <input
+            type="number"
+            id="st_bme_recall_top_k"
+            class="text_pole"
+            min="1"
+            max="100"
+            value="15"
+          />
+        </div>
+
+        <div class="st-bme-row">
+          <label for="st_bme_recall_max_nodes">LLM 精确召回上限</label>
+          <input
+            type="number"
+            id="st_bme_recall_max_nodes"
+            class="text_pole"
+            min="1"
+            max="50"
+            value="8"
+          />
         </div>
 
         <div class="st-bme-row">
@@ -138,6 +174,18 @@
             />
           </div>
 
+          <div class="st-bme-row st-bme-indent">
+            <label for="st_bme_evo_consolidate_every">整理频率</label>
+            <input
+              type="number"
+              id="st_bme_evo_consolidate_every"
+              class="text_pole"
+              min="1"
+              max="500"
+              value="50"
+            />
+          </div>
+
           <div class="st-bme-row">
             <label class="checkbox_label" for="st_bme_precise_conflict">
               <input type="checkbox" id="st_bme_precise_conflict" />
@@ -215,6 +263,18 @@
             />
           </div>
 
+          <div class="st-bme-row st-bme-indent">
+            <label for="st_bme_smart_trigger_threshold">触发阈值</label>
+            <input
+              type="number"
+              id="st_bme_smart_trigger_threshold"
+              class="text_pole"
+              min="1"
+              max="10"
+              value="2"
+            />
+          </div>
+
           <div class="st-bme-row">
             <label class="checkbox_label" for="st_bme_sleep_cycle">
               <input type="checkbox" id="st_bme_sleep_cycle" />
@@ -231,6 +291,17 @@
               max="1.0"
               step="0.1"
               value="0.5"
+            />
+          </div>
+          <div class="st-bme-row st-bme-indent">
+            <label for="st_bme_sleep_every">每 N 次提取遗忘</label>
+            <input
+              type="number"
+              id="st_bme_sleep_every"
+              class="text_pole"
+              min="1"
+              max="200"
+              value="10"
             />
           </div>
 

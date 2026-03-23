@@ -13,6 +13,7 @@ import { getSchemaType } from "./schema.js";
 export function formatInjection(retrievalResult, schema) {
   const { coreNodes, recallNodes, groupedRecallNodes } = retrievalResult;
   const parts = [];
+  const appended = new Set();
 
   // ========== Core 常驻注入 ==========
   if (coreNodes.length > 0) {
@@ -24,7 +25,7 @@ export function formatInjection(retrievalResult, schema) {
       const typeDef = getSchemaType(schema, typeId);
       if (!typeDef) continue;
 
-      const table = formatTable(nodes, typeDef);
+      const table = formatTable(nodes, typeDef, appended);
       if (table) parts.push(table);
     }
   }
@@ -90,7 +91,7 @@ function appendBucket(parts, title, nodes, schema) {
     const typeDef = getSchemaType(schema, typeId);
     if (!typeDef) continue;
 
-    const table = formatTable(groupedNodes, typeDef);
+    const table = formatTable(groupedNodes, typeDef, appended);
     if (table) parts.push(table);
   }
 }
@@ -98,12 +99,22 @@ function appendBucket(parts, title, nodes, schema) {
 /**
  * 将同类型节点格式化为 Markdown 表格
  */
-function formatTable(nodes, typeDef) {
-  if (nodes.length === 0) return "";
+function formatTable(nodes, typeDef, appended = new Set()) {
+  if (!Array.isArray(nodes) || nodes.length === 0) return "";
+
+  const uniqueNodes = nodes.filter((node) => {
+    if (!node?.id || appended.has(node.id)) return false;
+    appended.add(node.id);
+    return true;
+  });
+
+  if (uniqueNodes.length === 0) return "";
 
   // 确定要展示的列（有实际数据的列）
   const activeCols = typeDef.columns.filter((col) =>
-    nodes.some((n) => n.fields[col.name]),
+    uniqueNodes.some(
+      (n) => n.fields?.[col.name] != null && n.fields[col.name] !== "",
+    ),
   );
 
   if (activeCols.length === 0) return "";
@@ -113,9 +124,9 @@ function formatTable(nodes, typeDef) {
   const separator = `| ${activeCols.map(() => "---").join(" | ")} |`;
 
   // 数据行
-  const rows = nodes.map((node) => {
+  const rows = uniqueNodes.map((node) => {
     const cells = activeCols.map((col) => {
-      const val = node.fields[col.name] || "";
+      const val = node.fields?.[col.name] ?? "";
       // 转义管道符，限制单元格长度
       return String(val)
         .replace(/\|/g, "\\|")

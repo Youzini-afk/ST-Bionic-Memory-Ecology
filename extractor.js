@@ -22,18 +22,22 @@ import { RELATION_TYPES } from "./schema.js";
  *
  * @param {object} params
  * @param {object} params.graph - 当前图状态
- * @param {Array<{role: string, content: string}>} params.messages - 要处理的对话消息
- * @param {number} params.startSeq - 起始楼层号
+ * @param {Array<{seq?: number, role: string, content: string}>} params.messages - 要处理的对话消息
+ * @param {number} params.startSeq - 本批处理的首个 assistant 消息 chat 索引
+ * @param {number} params.endSeq - 本批处理的末个 assistant 消息 chat 索引
+ * @param {number} [params.lastProcessedSeq] - 上次处理到的 chat 索引
  * @param {object[]} params.schema - 节点类型 Schema
  * @param {object} params.embeddingConfig - Embedding API 配置
  * @param {string} [params.extractPrompt] - 自定义提取提示词
  * @param {object} [params.v2Options] - v2 增强选项
- * @returns {Promise<{success: boolean, newNodes: number, updatedNodes: number, newEdges: number, newNodeIds: string[]}>}
+ * @returns {Promise<{success: boolean, newNodes: number, updatedNodes: number, newEdges: number, newNodeIds: string[], processedRange: [number, number]}>}
  */
 export async function extractMemories({
   graph,
   messages,
   startSeq,
+  endSeq,
+  lastProcessedSeq = -1,
   schema,
   embeddingConfig,
   extractPrompt,
@@ -46,17 +50,33 @@ export async function extractMemories({
       updatedNodes: 0,
       newEdges: 0,
       newNodeIds: [],
+      processedRange: [lastProcessedSeq, lastProcessedSeq],
     };
   }
 
   const enablePreciseConflict = v2Options.enablePreciseConflict ?? true;
   const conflictThreshold = v2Options.conflictThreshold ?? 0.85;
 
-  console.log(`[ST-BME] 提取开始: 楼层 ${startSeq}, ${messages.length} 条消息`);
+  const effectiveStartSeq = Number.isFinite(startSeq)
+    ? startSeq
+    : (messages.find((m) => Number.isFinite(m.seq))?.seq ??
+      lastProcessedSeq + 1);
+  const effectiveEndSeq = Number.isFinite(endSeq)
+    ? endSeq
+    : ([...messages].reverse().find((m) => Number.isFinite(m.seq))?.seq ??
+      effectiveStartSeq);
+  const currentSeq = effectiveEndSeq;
+
+  console.log(
+    `[ST-BME] 提取开始: chat[${effectiveStartSeq}..${effectiveEndSeq}], ${messages.length} 条消息`,
+  );
 
   // 构建对话文本
   const dialogueText = messages
-    .map((m) => `[${m.role}]: ${m.content}`)
+    .map((m) => {
+      const seqLabel = Number.isFinite(m.seq) ? `#${m.seq}` : "#?";
+      return `${seqLabel} [${m.role}]: ${m.content}`;
+    })
     .join("\n\n");
 
   // 构建当前图概览（让 LLM 知道已有哪些节点，避免重复）
@@ -89,7 +109,7 @@ export async function extractMemories({
     maxRetries: 2,
   });
 
-  if (!result || !result.operations) {
+  if (!result || !Array.isArray(result.operations)) {
     console.warn("[ST-BME] 提取 LLM 未返回有效操作");
     return {
       success: false,
@@ -97,6 +117,7 @@ export async function extractMemories({
       updatedNodes: 0,
       newEdges: 0,
       newNodeIds: [],
+      processedRange: [lastProcessedSeq, lastProcessedSeq],
     };
   }
 
@@ -107,6 +128,7 @@ export async function extractMemories({
       result.operations,
       embeddingConfig,
       conflictThreshold,
+      effectiveEndSeq,
     );
   }
 
@@ -122,7 +144,7 @@ export async function extractMemories({
           const createdId = handleCreate(
             graph,
             op,
-            startSeq,
+            currentSeq,
             schema,
             refMap,
             stats,
@@ -131,7 +153,7 @@ export async function extractMemories({
           break;
         }
         case "update":
-          handleUpdate(graph, op, stats);
+          handleUpdate(graph, op, currentSeq, stats);
           break;
         case "delete":
           handleDelete(graph, op, stats);
@@ -150,15 +172,22 @@ export async function extractMemories({
   // 为新建节点生成 embedding
   await generateNodeEmbeddings(graph, embeddingConfig);
 
-  // 更新处理进度
-  graph.lastProcessedSeq =
-    startSeq + messages.filter((m) => m.role === "assistant").length;
-
-  console.log(
-    `[ST-BME] 提取完成: 新建 ${stats.newNodes}, 更新 ${stats.updatedNodes}, 新边 ${stats.newEdges}`,
+  // 更新处理进度：统一记录为已处理到的末个 chat 索引
+  graph.lastProcessedSeq = Math.max(
+    graph.lastProcessedSeq ?? -1,
+    effectiveEndSeq,
   );
 
-  return { success: true, ...stats, newNodeIds };
+  console.log(
+    `[ST-BME] 提取完成: 新建 ${stats.newNodes}, 更新 ${stats.updatedNodes}, 新边 ${stats.newEdges}, lastProcessedSeq=${graph.lastProcessedSeq}`,
+  );
+
+  return {
+    success: true,
+    ...stats,
+    newNodeIds,
+    processedRange: [effectiveStartSeq, effectiveEndSeq],
+  };
 }
 
 /**
@@ -217,7 +246,7 @@ function handleCreate(graph, op, seq, schema, refMap, stats) {
 /**
  * 处理 update 操作
  */
-function handleUpdate(graph, op, stats) {
+function handleUpdate(graph, op, currentSeq, stats) {
   if (!op.nodeId) {
     console.warn("[ST-BME] update 操作缺少 nodeId");
     return;
@@ -233,8 +262,10 @@ function handleUpdate(graph, op, stats) {
   const nextFields = { ...previousFields, ...(op.fields || {}) };
   const changeSummary = buildFieldChangeSummary(previousFields, nextFields);
 
+  const updateSeq = Number.isFinite(op.seq) ? op.seq : currentSeq;
   const updated = updateNode(graph, op.nodeId, {
     fields: op.fields || {},
+    seq: Math.max(previousNode.seq || 0, updateSeq),
   });
 
   if (updated) {
@@ -242,19 +273,22 @@ function handleUpdate(graph, op, stats) {
     const node = getNode(graph, op.nodeId);
     if (node) {
       node.embedding = null;
-      node.seq = Math.max(node.seq || 0, op.seq || 0);
+      node.seq = Math.max(node.seq || 0, updateSeq);
       node.seqRange = [
-        Math.min(node.seqRange?.[0] ?? node.seq, op.seq || node.seq),
-        Math.max(node.seqRange?.[1] ?? node.seq, op.seq || node.seq),
+        Math.min(node.seqRange?.[0] ?? node.seq, updateSeq),
+        Math.max(node.seqRange?.[1] ?? node.seq, updateSeq),
       ];
     }
 
     // v2 Graphiti: 标记旧的 updates/temporal_update 边为失效
     const oldEdges = graph.edges.filter(
       (e) =>
-        e.toId === op.nodeId &&
-        (e.relation === "updates" || e.relation === "temporal_update") &&
-        !e.invalidAt,
+        !e.invalidAt &&
+        ((e.relation === "updates" && e.toId === op.nodeId) ||
+          (e.relation === "temporal_update" &&
+            e.toId === op.nodeId &&
+            op.sourceNodeId &&
+            e.fromId === op.sourceNodeId)),
     );
     for (const e of oldEdges) {
       invalidateEdge(e);
@@ -284,7 +318,7 @@ function handleUpdate(graph, op, stats) {
             previousNode.id,
           status: "resolved",
         },
-        seq: op.seq || previousNode.seq || 0,
+        seq: updateSeq,
         importance: Math.max(
           4,
           Math.min(8, op.importance ?? previousNode.importance ?? 5),
@@ -379,7 +413,10 @@ function handleLinks(graph, sourceId, links, refMap, stats) {
 async function generateNodeEmbeddings(graph, embeddingConfig) {
   if (!embeddingConfig?.apiUrl) return;
 
-  const needsEmbedding = graph.nodes.filter((n) => !n.embedding && !n.archived);
+  const needsEmbedding = graph.nodes.filter(
+    (n) =>
+      !n.archived && (!Array.isArray(n.embedding) || n.embedding.length === 0),
+  );
 
   if (needsEmbedding.length === 0) return;
 
@@ -410,7 +447,9 @@ async function generateNodeEmbeddings(graph, embeddingConfig) {
  * 构建图谱概览文本（给 LLM 看）
  */
 function buildGraphOverview(graph, schema) {
-  const activeNodes = graph.nodes.filter((n) => !n.archived);
+  const activeNodes = graph.nodes
+    .filter((n) => !n.archived)
+    .sort((a, b) => (a.seq || 0) - (b.seq || 0));
   if (activeNodes.length === 0) return "";
 
   const lines = [];
@@ -502,8 +541,11 @@ async function mem0ConflictCheck(
   operations,
   embeddingConfig,
   threshold,
+  fallbackSeq,
 ) {
-  const activeNodes = getActiveNodes(graph).filter((n) => n.embedding);
+  const activeNodes = getActiveNodes(graph).filter(
+    (n) => Array.isArray(n.embedding) && n.embedding.length > 0,
+  );
   if (activeNodes.length === 0) return;
 
   for (const op of operations) {
@@ -553,7 +595,8 @@ async function mem0ConflictCheck(
           );
           op.action = "update";
           op.nodeId = decision.targetId;
-          op.sourceNodeId = topMatch.id;
+          op.sourceNodeId = op.sourceNodeId || topMatch.id;
+          op.seq = Number.isFinite(op.seq) ? op.seq : fallbackSeq;
           if (decision.mergedFields) {
             op.fields = { ...op.fields, ...decision.mergedFields };
           }
@@ -627,7 +670,12 @@ export async function generateSynopsis({ graph, schema, currentSeq }) {
   if (existingSynopsis) {
     updateNode(graph, existingSynopsis.id, {
       fields: { summary: result.summary, scope: `楼 1 ~ ${currentSeq}` },
+      seq: Math.max(existingSynopsis.seq || 0, currentSeq),
     });
+    existingSynopsis.seqRange = [
+      Math.min(existingSynopsis.seqRange?.[0] ?? currentSeq, currentSeq),
+      Math.max(existingSynopsis.seqRange?.[1] ?? currentSeq, currentSeq),
+    ];
     existingSynopsis.embedding = null;
     console.log("[ST-BME] 全局概要已更新");
   } else {

@@ -32,12 +32,12 @@ const INHIBIT_EDGE_TYPE = 255;
  * 默认配置
  */
 const DEFAULT_OPTIONS = {
-    maxSteps: 2,            // 最大扩散步数
-    decayFactor: 0.6,       // 每步衰减因子
-    topK: 100,              // 每步保留的最大活跃节点数
-    minEnergy: 0.01,        // 最小有效能量（低于此值视为不活跃）
-    maxEnergy: 2.0,         // 能量上限
-    minEnergy_clamp: -2.0,  // 能量下限（抑制）
+  maxSteps: 2, // 最大扩散步数
+  decayFactor: 0.6, // 每步衰减因子
+  topK: 100, // 每步保留的最大活跃节点数
+  minEnergy: 0.01, // 最小有效能量（低于此值视为不活跃）
+  maxEnergy: 2.0, // 能量上限
+  minEnergy_clamp: -2.0, // 能量下限（抑制）
 };
 
 /**
@@ -58,85 +58,88 @@ const DEFAULT_OPTIONS = {
  *   nodeId → energy（正值=激活，负值=抑制）
  */
 export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
-    const opts = { ...DEFAULT_OPTIONS, ...options };
+  const opts = { ...DEFAULT_OPTIONS, ...options };
 
-    // Step 0: 初始化能量表
+  /** @type {Map<string, number>} */
+  let currentEnergy = new Map();
+
+  for (const seed of seedNodes || []) {
+    if (!seed?.id) continue;
+    const clamped = clampEnergy(Number(seed.energy) || 0, opts);
+    if (Math.abs(clamped) >= opts.minEnergy) {
+      const existing = currentEnergy.get(seed.id) || 0;
+      currentEnergy.set(seed.id, clampEnergy(existing + clamped, opts));
+    }
+  }
+
+  // 累积结果（所有步骤的最大能量）
+  /** @type {Map<string, number>} */
+  const result = new Map(currentEnergy);
+
+  // Step 1~N: 逐步扩散
+  for (let step = 0; step < opts.maxSteps; step++) {
     /** @type {Map<string, number>} */
-    let currentEnergy = new Map();
+    const nextEnergy = new Map();
 
-    for (const seed of seedNodes) {
-        const clamped = clampEnergy(seed.energy, opts);
-        if (Math.abs(clamped) >= opts.minEnergy) {
-            currentEnergy.set(seed.id, clamped);
+    // 对每个当前活跃节点，传播能量到邻居
+    for (const [nodeId, energy] of currentEnergy) {
+      const neighbors = adjacencyMap.get(nodeId);
+      if (!Array.isArray(neighbors) || neighbors.length === 0) continue;
+
+      for (const neighbor of neighbors) {
+        if (!neighbor?.targetId) continue;
+        let propagated =
+          energy * (Number(neighbor.strength) || 0) * opts.decayFactor;
+
+        // 抑制边：传递负能量
+        if (neighbor.edgeType === INHIBIT_EDGE_TYPE) {
+          propagated = -Math.abs(propagated);
         }
+
+        // 累加到邻居节点
+        const existing = nextEnergy.get(neighbor.targetId) || 0;
+        nextEnergy.set(neighbor.targetId, existing + propagated);
+      }
     }
 
-    // 累积结果（所有步骤的最大能量）
-    /** @type {Map<string, number>} */
-    const result = new Map(currentEnergy);
-
-    // Step 1~N: 逐步扩散
-    for (let step = 0; step < opts.maxSteps; step++) {
-        /** @type {Map<string, number>} */
-        const nextEnergy = new Map();
-
-        // 对每个当前活跃节点，传播能量到邻居
-        for (const [nodeId, energy] of currentEnergy) {
-            const neighbors = adjacencyMap.get(nodeId);
-            if (!neighbors) continue;
-
-            for (const neighbor of neighbors) {
-                // 计算传播能量
-                let propagated = energy * neighbor.strength * opts.decayFactor;
-
-                // 抑制边：传递负能量
-                if (neighbor.edgeType === INHIBIT_EDGE_TYPE) {
-                    propagated = -Math.abs(propagated);
-                }
-
-                // 累加到邻居节点
-                const existing = nextEnergy.get(neighbor.targetId) || 0;
-                nextEnergy.set(neighbor.targetId, existing + propagated);
-            }
-        }
-
-        // 钳位 + 过滤低能量
-        for (const [nodeId, energy] of nextEnergy) {
-            const clamped = clampEnergy(energy, opts);
-            if (Math.abs(clamped) < opts.minEnergy) {
-                nextEnergy.delete(nodeId);
-            } else {
-                nextEnergy.set(nodeId, clamped);
-            }
-        }
-
-        // 动态剪枝：只保留 Top-K
-        if (nextEnergy.size > opts.topK) {
-            const sorted = [...nextEnergy.entries()]
-                .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
-
-            nextEnergy.clear();
-            for (let i = 0; i < opts.topK && i < sorted.length; i++) {
-                nextEnergy.set(sorted[i][0], sorted[i][1]);
-            }
-        }
-
-        // 更新累积结果（取各步骤最大绝对值能量）
-        for (const [nodeId, energy] of nextEnergy) {
-            const existing = result.get(nodeId) || 0;
-            if (Math.abs(energy) > Math.abs(existing)) {
-                result.set(nodeId, energy);
-            }
-        }
-
-        // 准备下一步
-        currentEnergy = nextEnergy;
-
-        // 如果没有活跃节点了，提前终止
-        if (currentEnergy.size === 0) break;
+    // 钳位 + 过滤低能量
+    for (const [nodeId, energy] of nextEnergy) {
+      const clamped = clampEnergy(energy, opts);
+      if (Math.abs(clamped) < opts.minEnergy) {
+        nextEnergy.delete(nodeId);
+      } else {
+        nextEnergy.set(nodeId, clamped);
+      }
     }
 
-    return result;
+    // 动态剪枝：只保留 Top-K
+    if (nextEnergy.size > opts.topK) {
+      const sorted = [...nextEnergy.entries()].sort(
+        (a, b) => Math.abs(b[1]) - Math.abs(a[1]),
+      );
+
+      nextEnergy.clear();
+      for (let i = 0; i < opts.topK && i < sorted.length; i++) {
+        nextEnergy.set(sorted[i][0], sorted[i][1]);
+      }
+    }
+
+    // 更新累积结果（取各步骤最大绝对值能量）
+    for (const [nodeId, energy] of nextEnergy) {
+      const existing = result.get(nodeId) || 0;
+      if (Math.abs(energy) > Math.abs(existing)) {
+        result.set(nodeId, energy);
+      }
+    }
+
+    // 准备下一步
+    currentEnergy = nextEnergy;
+
+    // 如果没有活跃节点了，提前终止
+    if (currentEnergy.size === 0) break;
+  }
+
+  return result;
 }
 
 /**
@@ -146,7 +149,7 @@ export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
  * @returns {number}
  */
 function clampEnergy(energy, opts) {
-    return Math.max(opts.minEnergy_clamp, Math.min(opts.maxEnergy, energy));
+  return Math.max(opts.minEnergy_clamp, Math.min(opts.maxEnergy, energy));
 }
 
 /**
@@ -158,10 +161,13 @@ function clampEnergy(energy, opts) {
  * @returns {Array<{nodeId: string, energy: number}>} 按能量降序排列
  */
 export function diffuseAndRank(adjacencyMap, seeds, options = {}) {
-    const energyMap = propagateActivation(adjacencyMap, seeds, options);
+  const energyMap = propagateActivation(adjacencyMap, seeds, options);
 
-    return [...energyMap.entries()]
-        .filter(([_, energy]) => energy > 0)  // 只返回正能量（被激活的）
-        .map(([nodeId, energy]) => ({ nodeId, energy }))
-        .sort((a, b) => b.energy - a.energy);
+  return [...energyMap.entries()]
+    .filter(([_, energy]) => energy > 0)
+    .map(([nodeId, energy]) => ({ nodeId, energy }))
+    .sort((a, b) => {
+      if (b.energy !== a.energy) return b.energy - a.energy;
+      return String(a.nodeId).localeCompare(String(b.nodeId));
+    });
 }

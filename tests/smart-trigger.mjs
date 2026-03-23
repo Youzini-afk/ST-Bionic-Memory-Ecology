@@ -1,101 +1,35 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 
-function getSmartTriggerDecision(chat, lastProcessed, settings) {
-  const DEFAULT_TRIGGER_KEYWORDS = [
-    "突然",
-    "没想到",
-    "原来",
-    "其实",
-    "发现",
-    "背叛",
-    "死亡",
-    "复活",
-    "恢复记忆",
-    "失忆",
-    "告白",
-    "暴露",
-    "秘密",
-    "计划",
-    "规则",
-    "契约",
-    "位置",
-    "地点",
-    "离开",
-    "来到",
-  ];
-
-  const pendingMessages = chat
-    .slice(lastProcessed + 1)
-    .filter((msg) => !msg.is_system)
-    .map((msg) => ({
-      role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
-    }));
-
-  if (pendingMessages.length === 0) {
-    return { triggered: false, score: 0, reasons: [] };
-  }
-
-  const reasons = [];
-  let score = 0;
-  const combinedText = pendingMessages.map((m) => m.content).join("\n");
-
-  const keywordHits = DEFAULT_TRIGGER_KEYWORDS.filter((keyword) =>
-    combinedText.includes(keyword),
+async function loadSmartTriggerDecision() {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const indexPath = path.resolve(__dirname, "../index.js");
+  const source = await fs.readFile(indexPath, "utf8");
+  const keywordMatch = source.match(
+    /const DEFAULT_TRIGGER_KEYWORDS = \[[\s\S]*?\];/m,
   );
-  if (keywordHits.length > 0) {
-    score += Math.min(2, keywordHits.length);
-    reasons.push(`关键词: ${keywordHits.slice(0, 3).join(", ")}`);
+  const fnMatch = source.match(
+    /export function getSmartTriggerDecision\(chat, lastProcessed, settings\) \{[\s\S]*?^\}/m,
+  );
+
+  if (!keywordMatch || !fnMatch) {
+    throw new Error("无法从 index.js 提取 smart trigger 实现");
   }
 
-  const customPatterns = String(settings.triggerPatterns || "")
-    .split(/\r?\n|,/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const pattern of customPatterns) {
-    try {
-      const regex = new RegExp(pattern, "i");
-      if (regex.test(combinedText)) {
-        score += 2;
-        reasons.push(`自定义触发: ${pattern}`);
-        break;
-      }
-    } catch {
-      // ignore invalid regex
-    }
-  }
-
-  const roleSwitchCount = pendingMessages.reduce((count, message, index) => {
-    if (index === 0) return count;
-    return count + (message.role !== pendingMessages[index - 1].role ? 1 : 0);
-  }, 0);
-  if (roleSwitchCount >= 2) {
-    score += 1;
-    reasons.push("多轮往返互动");
-  }
-
-  const punctuationHits = (combinedText.match(/[!?！？]/g) || []).length;
-  if (punctuationHits >= 2) {
-    score += 1;
-    reasons.push("情绪/冲突波动");
-  }
-
-  const entityLikeHits =
-    combinedText.match(
-      /[A-Z][a-z]{2,}|[\u4e00-\u9fff]{2,6}(先生|小姐|王国|城|镇|村|学院|组织|公司|小队|军团)/g,
-    ) || [];
-  if (entityLikeHits.length > 0) {
-    score += 1;
-    reasons.push("疑似新实体/新地点");
-  }
-
-  const threshold = Math.max(1, settings.smartTriggerThreshold || 2);
-  return {
-    triggered: score >= threshold,
-    score,
-    reasons,
-  };
+  const context = vm.createContext({});
+  const script = new vm.Script(`
+${keywordMatch[0]}
+${fnMatch[0].replace("export function", "function")}
+this.getSmartTriggerDecision = getSmartTriggerDecision;
+`);
+  script.runInContext(context);
+  return context.getSmartTriggerDecision;
 }
+
+const getSmartTriggerDecision = await loadSmartTriggerDecision();
 
 const noTrigger = getSmartTriggerDecision(
   [
@@ -128,5 +62,30 @@ const customTrigger = getSmartTriggerDecision(
 );
 assert.equal(customTrigger.triggered, true);
 assert.ok(customTrigger.reasons.some((r) => r.includes("自定义触发")));
+
+const ignoresProcessedMessages = getSmartTriggerDecision(
+  [
+    { is_user: true, mes: "之前突然出现了秘密。" },
+    { is_user: false, mes: "这已经处理过。" },
+    { is_user: true, mes: "现在只是平静地走路。" },
+    { is_user: false, mes: "没有新的异常。" },
+  ],
+  1,
+  { triggerPatterns: "", smartTriggerThreshold: 2 },
+);
+assert.equal(ignoresProcessedMessages.triggered, false);
+assert.equal(ignoresProcessedMessages.score, 0);
+
+const ignoresBlankAndInvalidRegex = getSmartTriggerDecision(
+  [
+    { is_system: true, mes: "系统消息" },
+    { is_user: true, mes: "   " },
+    { is_user: false, mes: "Alpha城发生了什么？！" },
+  ],
+  -1,
+  { triggerPatterns: "([\n真相", smartTriggerThreshold: 2 },
+);
+assert.equal(ignoresBlankAndInvalidRegex.triggered, true);
+assert.ok(ignoresBlankAndInvalidRegex.reasons.includes("情绪/冲突波动"));
 
 console.log("smart-trigger tests passed");

@@ -30,7 +30,7 @@ import {
 } from "./graph.js";
 import { estimateTokens, formatInjection } from "./injector.js";
 import { retrieve } from "./retriever.js";
-import { DEFAULT_NODE_SCHEMA } from "./schema.js";
+import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
@@ -121,15 +121,23 @@ let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗�
 // ==================== 设置管理 ====================
 
 function getSettings() {
-  if (!extension_settings[MODULE_NAME]) {
-    extension_settings[MODULE_NAME] = { ...defaultSettings };
-  }
-  return extension_settings[MODULE_NAME];
+  const mergedSettings = {
+    ...defaultSettings,
+    ...(extension_settings[MODULE_NAME] || {}),
+  };
+  extension_settings[MODULE_NAME] = mergedSettings;
+  return mergedSettings;
 }
 
 function getSchema() {
   const settings = getSettings();
-  return settings.nodeTypeSchema || DEFAULT_NODE_SCHEMA;
+  const schema = settings.nodeTypeSchema || DEFAULT_NODE_SCHEMA;
+  const validation = validateSchema(schema);
+  if (!validation.valid) {
+    console.warn("[ST-BME] Schema 非法，回退到默认 Schema:", validation.errors);
+    return DEFAULT_NODE_SCHEMA;
+  }
+  return schema;
 }
 
 function getEmbeddingConfig() {
@@ -192,14 +200,15 @@ const DEFAULT_TRIGGER_KEYWORDS = [
   "来到",
 ];
 
-function getSmartTriggerDecision(chat, lastProcessed, settings) {
+export function getSmartTriggerDecision(chat, lastProcessed, settings) {
   const pendingMessages = chat
-    .slice(lastProcessed + 1)
+    .slice(Math.max(0, (lastProcessed ?? -1) + 1))
     .filter((msg) => !msg.is_system)
     .map((msg) => ({
       role: msg.is_user ? "user" : "assistant",
       content: msg.mes || "",
-    }));
+    }))
+    .filter((msg) => msg.content.trim().length > 0);
 
   if (pendingMessages.length === 0) {
     return { triggered: false, score: 0, reasons: [] };
@@ -266,6 +275,18 @@ function getSmartTriggerDecision(chat, lastProcessed, settings) {
   };
 }
 
+function clampInt(value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const num = Number.parseInt(value, 10);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+function clampFloat(value, fallback, min = 0, max = 1) {
+  const num = Number.parseFloat(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
 /**
  * 提取管线：处理未提取的对话楼层
  */
@@ -279,7 +300,7 @@ async function runExtraction() {
   const chat = context.chat;
   if (!chat || chat.length === 0) return;
 
-  // 找出 assistant 楼层序号
+  // lastProcessedSeq / startSeq / endSeq 统一使用 chat 数组索引语义
   const assistantTurns = [];
   for (let i = 0; i < chat.length; i++) {
     if (chat[i].is_user === false && !chat[i].is_system) {
@@ -287,40 +308,44 @@ async function runExtraction() {
     }
   }
 
-  const lastProcessed = currentGraph.lastProcessedSeq;
-  const unprocessedStarts = assistantTurns.filter((i) => i > lastProcessed);
+  const lastProcessed = Number.isFinite(currentGraph.lastProcessedSeq)
+    ? currentGraph.lastProcessedSeq
+    : -1;
+  const unprocessedAssistantTurns = assistantTurns.filter(
+    (i) => i > lastProcessed,
+  );
 
-  if (unprocessedStarts.length === 0) return;
+  if (unprocessedAssistantTurns.length === 0) return;
 
+  const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
   const smartTriggerDecision = settings.enableSmartTrigger
     ? getSmartTriggerDecision(chat, lastProcessed, settings)
     : { triggered: false, score: 0, reasons: [] };
 
-  // 按 extractEvery 批次处理；若启用智能触发，则允许提前提取
   if (
-    unprocessedStarts.length < settings.extractEvery &&
+    unprocessedAssistantTurns.length < extractEvery &&
     !smartTriggerDecision.triggered
   ) {
     return;
   }
 
+  const batchAssistantTurns = smartTriggerDecision.triggered
+    ? unprocessedAssistantTurns
+    : unprocessedAssistantTurns.slice(0, extractEvery);
+  const startIdx = batchAssistantTurns[0];
+  const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+
   isExtracting = true;
 
   try {
-    // 收集要处理的消息
-    const startIdx = unprocessedStarts[0];
-    const endIdx = unprocessedStarts[unprocessedStarts.length - 1];
-
-    // 包含上下文
-    const contextStart = Math.max(
-      0,
-      startIdx - settings.extractContextTurns * 2,
-    );
+    const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
+    const contextStart = Math.max(0, startIdx - contextTurns * 2);
     const messages = [];
     for (let i = contextStart; i <= endIdx && i < chat.length; i++) {
       const msg = chat[i];
       if (msg.is_system) continue;
       messages.push({
+        seq: i,
         role: msg.is_user ? "user" : "assistant",
         content: msg.mes || "",
       });
@@ -336,7 +361,9 @@ async function runExtraction() {
     const result = await extractMemories({
       graph: currentGraph,
       messages,
-      startSeq: endIdx,
+      startSeq: startIdx,
+      endSeq: endIdx,
+      lastProcessedSeq: lastProcessed,
       schema: getSchema(),
       embeddingConfig: getEmbeddingConfig(),
       extractPrompt: settings.extractPrompt || undefined,
@@ -478,7 +505,7 @@ async function runRecall() {
     });
 
     // 格式化注入文本
-    const injectionText = formatInjection(result, getSchema());
+    const injectionText = formatInjection(result, getSchema()).trim();
     lastInjectionContent = injectionText;
 
     if (injectionText) {
@@ -486,15 +513,15 @@ async function runRecall() {
       console.log(
         `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
       );
-
-      // 使用 ST 的 extension prompt API 注入
-      context.setExtensionPrompt(
-        MODULE_NAME,
-        injectionText,
-        1, // extension_prompt_types.IN_PROMPT
-        settings.injectDepth,
-      );
     }
+
+    // 无结果时也要清空旧注入，避免脏 prompt 残留
+    context.setExtensionPrompt(
+      MODULE_NAME,
+      injectionText,
+      1, // extension_prompt_types.IN_PROMPT
+      clampInt(settings.injectDepth, 4, 0, 9999),
+    );
 
     // 保存召回结果和访问强化
     currentGraph.lastRecallResult = result.selectedNodeIds;
@@ -665,7 +692,13 @@ function bindSettingsUI() {
   $("#st_bme_extract_every")
     .val(settings.extractEvery)
     .on("input", function () {
-      settings.extractEvery = Math.max(1, parseInt($(this).val()) || 1);
+      settings.extractEvery = clampInt($(this).val(), 1, 1, 50);
+      saveSettingsDebounced();
+    });
+  $("#st_bme_extract_context_turns")
+    .val(settings.extractContextTurns)
+    .on("input", function () {
+      settings.extractContextTurns = clampInt($(this).val(), 2, 0, 20);
       saveSettingsDebounced();
     });
 
@@ -685,11 +718,24 @@ function bindSettingsUI() {
       saveSettingsDebounced();
     });
 
+  $("#st_bme_recall_top_k")
+    .val(settings.recallTopK)
+    .on("input", function () {
+      settings.recallTopK = clampInt($(this).val(), 15, 1, 100);
+      saveSettingsDebounced();
+    });
+  $("#st_bme_recall_max_nodes")
+    .val(settings.recallMaxNodes)
+    .on("input", function () {
+      settings.recallMaxNodes = clampInt($(this).val(), 8, 1, 50);
+      saveSettingsDebounced();
+    });
+
   // 注入深度
   $("#st_bme_inject_depth")
     .val(settings.injectDepth)
     .on("input", function () {
-      settings.injectDepth = Math.max(0, parseInt($(this).val()) || 4);
+      settings.injectDepth = clampInt($(this).val(), 4, 0, 9999);
       saveSettingsDebounced();
     });
 
@@ -697,19 +743,19 @@ function bindSettingsUI() {
   $("#st_bme_graph_weight")
     .val(settings.graphWeight)
     .on("input", function () {
-      settings.graphWeight = parseFloat($(this).val()) || 0.6;
+      settings.graphWeight = clampFloat($(this).val(), 0.6, 0, 1);
       saveSettingsDebounced();
     });
   $("#st_bme_vector_weight")
     .val(settings.vectorWeight)
     .on("input", function () {
-      settings.vectorWeight = parseFloat($(this).val()) || 0.3;
+      settings.vectorWeight = clampFloat($(this).val(), 0.3, 0, 1);
       saveSettingsDebounced();
     });
   $("#st_bme_importance_weight")
     .val(settings.importanceWeight)
     .on("input", function () {
-      settings.importanceWeight = parseFloat($(this).val()) || 0.1;
+      settings.importanceWeight = clampFloat($(this).val(), 0.1, 0, 1);
       saveSettingsDebounced();
     });
 
@@ -754,7 +800,13 @@ function bindSettingsUI() {
   $("#st_bme_evo_neighbors")
     .val(settings.evoNeighborCount)
     .on("input", function () {
-      settings.evoNeighborCount = Math.max(1, parseInt($(this).val()) || 5);
+      settings.evoNeighborCount = clampInt($(this).val(), 5, 1, 20);
+      saveSettingsDebounced();
+    });
+  $("#st_bme_evo_consolidate_every")
+    .val(settings.evoConsolidateEvery)
+    .on("input", function () {
+      settings.evoConsolidateEvery = clampInt($(this).val(), 50, 1, 500);
       saveSettingsDebounced();
     });
 
@@ -768,7 +820,7 @@ function bindSettingsUI() {
   $("#st_bme_conflict_threshold")
     .val(settings.conflictThreshold)
     .on("input", function () {
-      settings.conflictThreshold = parseFloat($(this).val()) || 0.85;
+      settings.conflictThreshold = clampFloat($(this).val(), 0.85, 0.5, 0.99);
       saveSettingsDebounced();
     });
 
@@ -782,7 +834,7 @@ function bindSettingsUI() {
   $("#st_bme_synopsis_every")
     .val(settings.synopsisEveryN)
     .on("input", function () {
-      settings.synopsisEveryN = Math.max(1, parseInt($(this).val()) || 5);
+      settings.synopsisEveryN = clampInt($(this).val(), 5, 1, 100);
       saveSettingsDebounced();
     });
 
@@ -815,6 +867,12 @@ function bindSettingsUI() {
       settings.triggerPatterns = $(this).val();
       saveSettingsDebounced();
     });
+  $("#st_bme_smart_trigger_threshold")
+    .val(settings.smartTriggerThreshold)
+    .on("input", function () {
+      settings.smartTriggerThreshold = clampInt($(this).val(), 2, 1, 10);
+      saveSettingsDebounced();
+    });
 
   // P2: 主动遗忘
   $("#st_bme_sleep_cycle")
@@ -826,7 +884,13 @@ function bindSettingsUI() {
   $("#st_bme_forget_threshold")
     .val(settings.forgetThreshold)
     .on("input", function () {
-      settings.forgetThreshold = parseFloat($(this).val()) || 0.5;
+      settings.forgetThreshold = clampFloat($(this).val(), 0.5, 0.1, 1);
+      saveSettingsDebounced();
+    });
+  $("#st_bme_sleep_every")
+    .val(settings.sleepEveryN)
+    .on("input", function () {
+      settings.sleepEveryN = clampInt($(this).val(), 10, 1, 200);
       saveSettingsDebounced();
     });
 
@@ -840,7 +904,7 @@ function bindSettingsUI() {
   $("#st_bme_prob_chance")
     .val(settings.probRecallChance)
     .on("input", function () {
-      settings.probRecallChance = parseFloat($(this).val()) || 0.15;
+      settings.probRecallChance = clampFloat($(this).val(), 0.15, 0.01, 0.5);
       saveSettingsDebounced();
     });
 
@@ -854,7 +918,7 @@ function bindSettingsUI() {
   $("#st_bme_reflect_every")
     .val(settings.reflectEveryN)
     .on("input", function () {
-      settings.reflectEveryN = Math.max(3, parseInt($(this).val()) || 10);
+      settings.reflectEveryN = clampInt($(this).val(), 10, 1, 200);
       saveSettingsDebounced();
     });
 }

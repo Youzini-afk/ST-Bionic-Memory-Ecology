@@ -54,7 +54,12 @@ export async function retrieve({
   const enableProbRecall = options.enableProbRecall ?? false;
   const probRecallChance = options.probRecallChance ?? 0.15;
 
-  let activeNodes = getActiveNodes(graph);
+  let activeNodes = getActiveNodes(graph).filter(
+    (node) =>
+      !node.archived &&
+      Array.isArray(node.seqRange) &&
+      Number.isFinite(node.seqRange[1]),
+  );
 
   // v2 ⑦: 认知边界过滤（RoleRAG 启发）
   if (enableVisibility && visibilityFilter) {
@@ -62,6 +67,8 @@ export async function retrieve({
   }
 
   const nodeCount = activeNodes.length;
+  const normalizedTopK = Math.max(1, topK);
+  const normalizedMaxRecallNodes = Math.max(1, maxRecallNodes);
   console.log(
     `[ST-BME] 检索开始: ${nodeCount} 个活跃节点${enableVisibility ? " (认知边界已启用)" : ""}`,
   );
@@ -81,7 +88,7 @@ export async function retrieve({
       userMessage,
       activeNodes,
       embeddingConfig,
-      topK,
+      normalizedTopK,
     );
   }
 
@@ -129,6 +136,9 @@ export async function retrieve({
         maxSteps: 2,
         decayFactor: 0.6,
         topK: 100,
+      }).filter((item) => {
+        const node = getNode(graph, item.nodeId);
+        return node && !node.archived;
       });
     }
   }
@@ -203,14 +213,19 @@ export async function retrieve({
       candidateNodes,
       graph,
       schema,
-      maxRecallNodes,
+      normalizedMaxRecallNodes,
     );
   } else {
-    // 中等图：直接取 Top-N
-    selectedNodeIds = scoredNodes.slice(0, topK).map((s) => s.nodeId);
+    selectedNodeIds = scoredNodes
+      .slice(0, Math.min(normalizedTopK, scoredNodes.length))
+      .map((s) => s.nodeId);
   }
 
-  selectedNodeIds = reconstructSceneNodeIds(graph, selectedNodeIds, topK + 6);
+  selectedNodeIds = reconstructSceneNodeIds(
+    graph,
+    selectedNodeIds,
+    normalizedTopK + 6,
+  );
 
   // 访问强化
   const selectedNodes = selectedNodeIds
@@ -225,15 +240,19 @@ export async function retrieve({
   // 未被选中的高重要性节点有概率随机激活
   if (enableProbRecall && probRecallChance > 0) {
     const selectedSet = new Set(selectedNodeIds);
-    const candidates = activeNodes.filter(
-      (n) =>
-        !selectedSet.has(n.id) &&
-        n.importance >= 6 &&
-        n.type !== "synopsis" &&
-        n.type !== "rule",
-    );
+    const probability = Math.max(0.01, Math.min(0.5, probRecallChance));
+    const candidates = activeNodes
+      .filter(
+        (n) =>
+          !selectedSet.has(n.id) &&
+          n.importance >= 6 &&
+          n.type !== "synopsis" &&
+          n.type !== "rule",
+      )
+      .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+      .slice(0, 3);
     for (const c of candidates) {
-      if (Math.random() < probRecallChance) {
+      if (Math.random() < probability) {
         selectedNodeIds.push(c.id);
         console.log(
           `[ST-BME] 概率触发: ${c.fields?.name || c.fields?.summary || c.id}`,
@@ -261,7 +280,7 @@ async function vectorPreFilter(
     if (!queryVec) return [];
 
     const candidates = activeNodes
-      .filter((n) => n.embedding)
+      .filter((n) => Array.isArray(n.embedding) && n.embedding.length > 0)
       .map((n) => ({ nodeId: n.id, embedding: n.embedding }));
 
     return searchSimilar(queryVec, candidates, topK);
@@ -277,19 +296,21 @@ async function vectorPreFilter(
  */
 function extractEntityAnchors(userMessage, activeNodes) {
   const anchors = [];
+  const seen = new Set();
 
   for (const node of activeNodes) {
-    // 检查 name 字段
-    const name = node.fields?.name;
-    if (name && userMessage.includes(name)) {
-      anchors.push({ nodeId: node.id, entity: name });
-      continue;
-    }
+    const candidates = [node.fields?.name, node.fields?.title]
+      .filter((value) => typeof value === "string")
+      .map((value) => value.trim())
+      .filter((value) => value.length >= 2);
 
-    // 检查 title 字段
-    const title = node.fields?.title;
-    if (title && userMessage.includes(title)) {
-      anchors.push({ nodeId: node.id, entity: title });
+    for (const candidate of candidates) {
+      if (!userMessage.includes(candidate)) continue;
+      const key = `${node.id}:${candidate}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      anchors.push({ nodeId: node.id, entity: candidate });
+      break;
     }
   }
 
@@ -370,16 +391,20 @@ async function llmRecall(
  * @returns {object[]}
  */
 function filterByVisibility(nodes, characterName) {
+  if (!characterName || typeof characterName !== "string") return nodes;
   return nodes.filter((node) => {
-    // 没有 visibility 字段 → 对所有人可见
     if (!node.fields?.visibility) return true;
-    // visibility 是数组 → 检查当前角色是否在列表中
     if (Array.isArray(node.fields.visibility)) {
-      return node.fields.visibility.includes(characterName);
+      return (
+        node.fields.visibility.includes(characterName) ||
+        node.fields.visibility.includes("*")
+      );
     }
-    // visibility 是字符串（逗号分隔）→ 解析后检查
     if (typeof node.fields.visibility === "string") {
-      const visibleTo = node.fields.visibility.split(",").map((s) => s.trim());
+      const visibleTo = node.fields.visibility
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       return visibleTo.includes(characterName) || visibleTo.includes("*");
     }
     return true;
@@ -391,15 +416,16 @@ function filterByVisibility(nodes, characterName) {
  * 分离常驻注入（Core）和召回注入（Recall）
  */
 function buildResult(graph, selectedNodeIds, schema) {
-  const coreNodes = []; // 常驻注入
-  const recallNodes = []; // 召回注入
+  const coreNodes = [];
+  const recallNodes = [];
+  const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
     schema.filter((s) => s.alwaysInject).map((s) => s.id),
   );
 
-  const activeNodes = getActiveNodes(graph);
+  const activeNodes = getActiveNodes(graph).filter((node) => !node.archived);
 
   for (const node of activeNodes) {
     if (alwaysInjectTypes.has(node.type)) {
@@ -407,21 +433,23 @@ function buildResult(graph, selectedNodeIds, schema) {
     }
   }
 
-  for (const nodeId of selectedNodeIds) {
+  for (const nodeId of selectedSet) {
     const node = getNode(graph, nodeId);
-    if (!node) continue;
+    if (!node || node.archived) continue;
     if (!alwaysInjectTypes.has(node.type)) {
       recallNodes.push(node);
     }
   }
 
+  coreNodes.sort(compareNodeRecallOrder);
+  recallNodes.sort(compareNodeRecallOrder);
   const groupedRecallNodes = groupRecallNodes(recallNodes);
 
   return {
     coreNodes,
     recallNodes,
     groupedRecallNodes,
-    selectedNodeIds: [...selectedNodeIds],
+    selectedNodeIds: [...selectedSet],
     stats: {
       totalActive: activeNodes.length,
       coreCount: coreNodes.length,
@@ -439,14 +467,15 @@ function reconstructSceneNodeIds(graph, seedNodeIds, limit = 16) {
   const seen = new Set();
 
   function push(nodeId) {
-    if (!nodeId || seen.has(nodeId)) return;
+    if (!nodeId || seen.has(nodeId) || selected.length >= limit) return;
     const node = getNode(graph, nodeId);
     if (!node || node.archived) return;
     seen.add(nodeId);
     selected.push(nodeId);
   }
 
-  for (const nodeId of seedNodeIds) {
+  for (const nodeId of uniqueNodeIds(seedNodeIds)) {
+    if (selected.length >= limit) break;
     push(nodeId);
     const node = getNode(graph, nodeId);
     if (!node) continue;
@@ -455,26 +484,24 @@ function reconstructSceneNodeIds(graph, seedNodeIds, limit = 16) {
       expandEventScene(graph, node, push);
     } else if (node.type === "character" || node.type === "location") {
       const relatedEvents = getNodeEdges(graph, node.id)
-        .filter((e) => !e.invalidAt)
+        .filter(isUsableSceneEdge)
         .map((e) => (e.fromId === node.id ? e.toId : e.fromId))
         .map((id) => getNode(graph, id))
-        .filter((n) => n && n.type === "event")
-        .sort((a, b) => b.seq - a.seq)
+        .filter((n) => n && !n.archived && n.type === "event")
+        .sort(compareNodeRecallOrder)
         .slice(0, 2);
       for (const eventNode of relatedEvents) {
         push(eventNode.id);
         expandEventScene(graph, eventNode, push);
       }
     }
-
-    if (selected.length >= limit) break;
   }
 
   return selected.slice(0, limit);
 }
 
 function expandEventScene(graph, eventNode, push) {
-  const edges = getNodeEdges(graph, eventNode.id).filter((e) => !e.invalidAt);
+  const edges = getNodeEdges(graph, eventNode.id).filter(isUsableSceneEdge);
   for (const edge of edges) {
     const neighborId = edge.fromId === eventNode.id ? edge.toId : edge.fromId;
     const neighbor = getNode(graph, neighborId);
@@ -501,9 +528,25 @@ function expandEventScene(graph, eventNode, push) {
 
 function getTemporalNeighborEvents(graph, seq, excludeId) {
   return getActiveNodes(graph, "event")
-    .filter((n) => n.id !== excludeId)
-    .sort((a, b) => Math.abs(a.seq - seq) - Math.abs(b.seq - seq))
+    .filter((n) => n.id !== excludeId && !n.archived)
+    .sort((a, b) => {
+      const distance =
+        Math.abs((a.seq || 0) - seq) - Math.abs((b.seq || 0) - seq);
+      if (distance !== 0) return distance;
+      return (b.seq || 0) - (a.seq || 0);
+    })
     .slice(0, 2);
+}
+
+function isUsableSceneEdge(edge) {
+  return edge && !edge.invalidAt && !edge.expiredAt;
+}
+
+function compareNodeRecallOrder(a, b) {
+  const aSeq = a?.seqRange?.[1] ?? a?.seq ?? 0;
+  const bSeq = b?.seqRange?.[1] ?? b?.seq ?? 0;
+  if (bSeq !== aSeq) return bSeq - aSeq;
+  return (b.importance || 0) - (a.importance || 0);
 }
 
 function groupRecallNodes(nodes) {
