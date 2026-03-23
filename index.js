@@ -31,6 +31,8 @@ import {
 import { estimateTokens, formatInjection } from "./injector.js";
 import { retrieve } from "./retriever.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
+import { initPanel, openPanel, updatePanelTheme } from "./panel.js";
+import { applyTheme } from "./themes.js";
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
@@ -108,6 +110,9 @@ const defaultSettings = {
   // ⑩ 反思条目（P2）
   enableReflection: false, // 启用反思
   reflectEveryN: 10, // 每 N 次提取后反思
+
+  // UI 面板
+  panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet
 };
 
 // ==================== 状态 ====================
@@ -116,6 +121,8 @@ let currentGraph = null;
 let isExtracting = false;
 let isRecalling = false;
 let lastInjectionContent = "";
+let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
+let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 
 // ==================== 设置管理 ====================
@@ -951,5 +958,103 @@ function bindSettingsUI() {
   // 加载当前聊天的图谱
   loadGraphFromChat();
 
-  console.log("[ST-BME] 初始化完成");
+  // ==================== 操控面板初始化 ====================
+
+  // 应用主题
+  const settings = getSettings();
+  applyTheme(settings.panelTheme || 'crimson');
+
+  // 初始化操控面板
+  await initPanel({
+    getGraph: () => currentGraph,
+    getSettings: () => getSettings(),
+    getLastExtract: () => lastExtractedItems,
+    getLastRecall: () => lastRecalledItems,
+    actions: {
+      extract: async () => {
+        const context = getContext();
+        const chat = context.chat;
+        if (!chat || !chat.length) return;
+        const s = getSettings();
+        const result = await extractMemories(
+          currentGraph, chat, chat.length - 1, s.extractContextTurns,
+          getSchema(), getEmbeddingConfig(), s,
+        );
+        if (result?.newNodes?.length) {
+          lastExtractedItems = result.newNodes.map(n => ({
+            type: n.type, name: n.content?.name || '', time: new Date().toLocaleTimeString(),
+          })).slice(0, 5);
+        }
+        saveGraphToChat();
+      },
+      compress: async () => {
+        await compressAll(currentGraph, getSettings());
+        saveGraphToChat();
+      },
+      sleep: async () => {
+        await sleepCycle(currentGraph, getSettings());
+        saveGraphToChat();
+      },
+      synopsis: async () => {
+        await generateSynopsis(currentGraph, getSettings());
+        saveGraphToChat();
+      },
+      export: () => {
+        const json = exportGraph(currentGraph);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'st-bme-graph.json'; a.click();
+        URL.revokeObjectURL(url);
+      },
+      import: () => {
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = '.json';
+        input.addEventListener('change', async (e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+          const text = await file.text();
+          currentGraph = importGraph(text);
+          saveGraphToChat();
+        });
+        input.click();
+      },
+      rebuild: async () => {
+        if (!confirm('确定要重建图谱吗？这将清除所有现有数据。')) return;
+        currentGraph = createEmptyGraph();
+        saveGraphToChat();
+      },
+      evolve: async () => {
+        await evolveMemories(currentGraph, getEmbeddingConfig(), getSettings());
+        saveGraphToChat();
+      },
+    },
+  });
+
+  // 注入 Options 菜单按钮
+  const $menuItem = $('<div class="list-group-item flex-container flexGap5">')
+    .append('<i class="fa-solid fa-brain"></i>')
+    .append('<span>记忆图谱</span>')
+    .on('click', () => {
+      openPanel();
+      $('#options').hide();
+    });
+  $('#extensionsMenu .list-group').append($menuItem);
+
+  // 主题选择绑定（如果设置面板里有）
+  $('#st_bme_panel_theme')
+    .val(settings.panelTheme || 'crimson')
+    .on('change', function () {
+      const theme = $(this).val();
+      settings.panelTheme = theme;
+      extension_settings[MODULE_NAME].panelTheme = theme;
+      applyTheme(theme);
+      updatePanelTheme(theme);
+      saveSettingsDebounced();
+    });
+
+  // 设置面板中的"打开操控面板"按钮
+  $('#st_bme_btn_open_panel').on('click', () => openPanel());
+
+  console.log("[ST-BME] 初始化完成（含操控面板）");
 })();

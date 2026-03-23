@@ -1,0 +1,206 @@
+<div id="st-bme-panel-overlay">
+  <div id="st-bme-panel">
+    <!-- Header -->
+    <div class="bme-panel-header">
+      <div class="bme-panel-title">
+        <i class="fa-solid fa-brain"></i>
+        <span>ST-BME 记忆图谱</span>
+        <span class="bme-panel-subtitle" id="bme-panel-status">SYSTEM_ACTIVE</span>
+      </div>
+      <button class="bme-panel-close" id="bme-panel-close" title="关闭">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+
+    <!-- Body -->
+    <div class="bme-panel-body">
+      <!-- Sidebar (Desktop) -->
+      <div class="bme-panel-sidebar">
+        <div class="bme-tab-list">
+          <button class="bme-tab-btn active" data-tab="dashboard">
+            <i class="fa-solid fa-chart-simple"></i>
+            <span>总览</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="memory">
+            <i class="fa-solid fa-brain"></i>
+            <span>记忆</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="injection">
+            <i class="fa-solid fa-syringe"></i>
+            <span>注入</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="actions">
+            <i class="fa-solid fa-gear"></i>
+            <span>操作</span>
+          </button>
+        </div>
+
+        <div class="bme-tab-content">
+          <!-- Dashboard Tab -->
+          <div class="bme-tab-pane active" id="bme-pane-dashboard">
+            <div class="bme-stats-grid">
+              <div class="bme-stat-card">
+                <div class="bme-stat-label">活跃节点</div>
+                <div class="bme-stat-value" id="bme-stat-nodes">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label">边连接</div>
+                <div class="bme-stat-value" id="bme-stat-edges">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label">已归档</div>
+                <div class="bme-stat-value" id="bme-stat-archived">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label">碎片率</div>
+                <div class="bme-stat-value warning" id="bme-stat-frag">0%</div>
+              </div>
+            </div>
+
+            <!-- 移动端图谱预览（仅手机端可见） -->
+            <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
+              <canvas id="bme-mobile-graph-canvas"></canvas>
+              <span class="bme-mobile-graph-label">REALTIME</span>
+            </div>
+            <div class="bme-graph-statusbar bme-mobile-graph-status" id="bme-mobile-graph-status">
+              <span><span class="bme-status-dot"></span>NODE_SYNC_ACTIVE</span>
+            </div>
+
+            <div class="bme-section-header">最近提取</div>
+            <ul class="bme-recent-list" id="bme-recent-extract"></ul>
+
+            <div class="bme-section-header">最近召回</div>
+            <ul class="bme-recent-list" id="bme-recent-recall"></ul>
+          </div>
+
+          <!-- Memory Browser Tab -->
+          <div class="bme-tab-pane" id="bme-pane-memory">
+            <div class="bme-search-bar">
+              <input type="text" class="bme-search-input" id="bme-memory-search"
+                     placeholder="搜索记忆节点..." />
+              <select class="bme-filter-select" id="bme-memory-filter">
+                <option value="all">全部</option>
+                <option value="character">角色</option>
+                <option value="event">事件</option>
+                <option value="location">地点</option>
+                <option value="thread">线索</option>
+                <option value="rule">规则</option>
+                <option value="synopsis">概要</option>
+                <option value="reflection">反思</option>
+              </select>
+            </div>
+            <ul class="bme-memory-list" id="bme-memory-list"></ul>
+          </div>
+
+          <!-- Injection Preview Tab -->
+          <div class="bme-tab-pane" id="bme-pane-injection">
+            <div id="bme-injection-content"></div>
+            <div class="bme-injection-token-count" id="bme-injection-tokens"></div>
+          </div>
+
+          <!-- Actions Tab -->
+          <div class="bme-tab-pane" id="bme-pane-actions">
+            <div class="bme-action-grid">
+              <button class="bme-action-btn" id="bme-act-extract">
+                <i class="fa-solid fa-download"></i>
+                <span>手动提取</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-compress">
+                <i class="fa-solid fa-compress"></i>
+                <span>手动压缩</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-sleep">
+                <i class="fa-solid fa-moon"></i>
+                <span>执行遗忘</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-synopsis">
+                <i class="fa-solid fa-scroll"></i>
+                <span>更新概要</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-export">
+                <i class="fa-solid fa-file-export"></i>
+                <span>导出图谱</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-import">
+                <i class="fa-solid fa-file-import"></i>
+                <span>导入图谱</span>
+              </button>
+              <button class="bme-action-btn danger" id="bme-act-rebuild">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                <span>重建图谱</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-evolve">
+                <i class="fa-solid fa-dna"></i>
+                <span>强制进化</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Main Graph Area (Desktop) -->
+      <div class="bme-panel-main">
+        <div class="bme-graph-toolbar">
+          <div class="bme-graph-toolbar-title">
+            <i class="fa-solid fa-diagram-project"></i>
+            <span>实时图谱</span>
+          </div>
+          <div class="bme-graph-controls">
+            <button id="bme-graph-zoom-in" title="放大">
+              <i class="fa-solid fa-plus"></i>
+            </button>
+            <button id="bme-graph-zoom-out" title="缩小">
+              <i class="fa-solid fa-minus"></i>
+            </button>
+            <button id="bme-graph-reset" title="重置">
+              <i class="fa-solid fa-arrows-rotate"></i>
+            </button>
+          </div>
+        </div>
+
+        <canvas id="bme-graph-canvas"></canvas>
+
+        <div class="bme-graph-legend" id="bme-graph-legend"></div>
+
+        <div class="bme-graph-statusbar">
+          <span><span class="bme-status-dot"></span><span id="bme-status-text">READY</span></span>
+          <span id="bme-status-meta">NODES: 0 | EDGES: 0</span>
+        </div>
+
+        <!-- Node Detail Slide-in -->
+        <div class="bme-node-detail" id="bme-node-detail">
+          <div class="bme-node-detail-header">
+            <h3 id="bme-detail-title">节点详情</h3>
+            <button class="bme-panel-close" id="bme-detail-close">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+          <div id="bme-detail-body"></div>
+        </div>
+      </div>
+
+      <!-- Mobile Content Area (conditionally shown) -->
+      <div class="bme-mobile-content" id="bme-mobile-content" style="display:none;"></div>
+    </div>
+
+    <!-- Mobile Bottom Tab Bar -->
+    <div class="bme-panel-tabbar">
+      <button class="bme-tab-btn active" data-tab="dashboard">
+        <i class="fa-solid fa-chart-simple"></i>
+        <span>总览</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="memory">
+        <i class="fa-solid fa-brain"></i>
+        <span>记忆</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="injection">
+        <i class="fa-solid fa-syringe"></i>
+        <span>注入</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="actions">
+        <i class="fa-solid fa-gear"></i>
+        <span>操作</span>
+      </button>
+    </div>
+  </div>
+</div>
