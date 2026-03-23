@@ -60,11 +60,11 @@ export function formatInjection(retrievalResult, schema) {
       ),
     };
 
-    appendBucket(parts, "当前状态记忆", buckets.state, schema);
-    appendBucket(parts, "情景事件记忆", buckets.episodic, schema);
-    appendBucket(parts, "反思与长期锚点", buckets.reflective, schema);
-    appendBucket(parts, "规则与约束", buckets.rule, schema);
-    appendBucket(parts, "其他关联记忆", buckets.other, schema);
+    appendBucket(parts, "当前状态记忆", buckets.state, schema, appended);
+    appendBucket(parts, "情景事件记忆", buckets.episodic, schema, appended);
+    appendBucket(parts, "反思与长期锚点", buckets.reflective, schema, appended);
+    appendBucket(parts, "规则与约束", buckets.rule, schema, appended);
+    appendBucket(parts, "其他关联记忆", buckets.other, schema, appended);
   }
 
   return parts.join("\n");
@@ -82,7 +82,7 @@ function groupByType(nodes) {
   return map;
 }
 
-function appendBucket(parts, title, nodes, schema) {
+function appendBucket(parts, title, nodes, schema, appended) {
   if (!nodes || nodes.length === 0) return;
   parts.push(`## ${title}`);
 
