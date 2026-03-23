@@ -11,7 +11,6 @@ import {
   getContext,
   saveMetadataDebounced,
 } from "../../../extensions.js";
-import { renderTemplateAsync } from "../../../templates.js";
 
 import { compressAll, sleepCycle } from "./compressor.js";
 import { testConnection as testEmbeddingConnection } from "./embedding.js";
@@ -39,15 +38,6 @@ let _themesModule = null;
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
-
-async function loadLocalTemplate(templateName) {
-  const templatePath = new URL(`./${templateName}.html`, import.meta.url).pathname;
-  const html = await renderTemplateAsync(templatePath, {}, true, true, true);
-  if (typeof html !== "string" || html.trim().length === 0) {
-    throw new Error(`Template render returned empty content: ${templatePath}`);
-  }
-  return html;
-}
 
 // ==================== 默认设置 ====================
 
@@ -1137,16 +1127,6 @@ function bindSettingsUI() {
 // ==================== 初始化 ====================
 
 (async function init() {
-  try {
-    if (!document.getElementById("st_bme_enabled")) {
-      const settingsHtml = await loadLocalTemplate("settings");
-      $("#extensions_settings2").append(settingsHtml);
-    }
-    bindSettingsUI();
-  } catch (settingsError) {
-    console.error("[ST-BME] 设置面板加载失败:", settingsError);
-  }
-
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
   eventSource.on(
@@ -1192,15 +1172,27 @@ function bindSettingsUI() {
       },
     });
 
-    // 注入 Options 菜单按钮
-    const $menuItem = $('<div class="list-group-item flex-container flexGap5">')
-      .append('<i class="fa-solid fa-brain"></i>')
-      .append('<span>记忆图谱</span>')
-      .on('click', () => {
+    // 注入三条杠 Options 菜单按钮
+    if (!document.getElementById("option_st_bme_panel")) {
+      const $menuItem = $(`
+        <a id="option_st_bme_panel">
+          <i class="fa-lg fa-solid fa-brain"></i>
+          <span>记忆图谱</span>
+        </a>
+      `).on("click", () => {
         _panelModule?.openPanel();
-        $('#options').hide();
+        $("#options").hide();
       });
-    $('#extensionsMenu .list-group').append($menuItem);
+
+      const $optionsContent = $("#options .options-content");
+      const $anchor = $("#option_toggle_logprobs");
+
+      if ($anchor.length > 0) {
+        $anchor.after($menuItem);
+      } else if ($optionsContent.length > 0) {
+        $optionsContent.append($menuItem);
+      }
+    }
 
     // 主题选择绑定
     $('#st_bme_panel_theme')
