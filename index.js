@@ -31,8 +31,10 @@ import {
 import { estimateTokens, formatInjection } from "./injector.js";
 import { retrieve } from "./retriever.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
-import { initPanel, openPanel, updatePanelTheme } from "./panel.js";
-import { applyTheme } from "./themes.js";
+
+// 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
+let _panelModule = null;
+let _themesModule = null;
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
@@ -960,101 +962,112 @@ function bindSettingsUI() {
 
   // ==================== 操控面板初始化 ====================
 
-  // 应用主题
-  const settings = getSettings();
-  applyTheme(settings.panelTheme || 'crimson');
+  try {
+    // 动态加载面板模块
+    _panelModule = await import('./panel.js');
+    _themesModule = await import('./themes.js');
 
-  // 初始化操控面板
-  await initPanel({
-    getGraph: () => currentGraph,
-    getSettings: () => getSettings(),
-    getLastExtract: () => lastExtractedItems,
-    getLastRecall: () => lastRecalledItems,
-    actions: {
-      extract: async () => {
-        const context = getContext();
-        const chat = context.chat;
-        if (!chat || !chat.length) return;
-        const s = getSettings();
-        const result = await extractMemories(
-          currentGraph, chat, chat.length - 1, s.extractContextTurns,
-          getSchema(), getEmbeddingConfig(), s,
-        );
-        if (result?.newNodes?.length) {
-          lastExtractedItems = result.newNodes.map(n => ({
-            type: n.type, name: n.content?.name || '', time: new Date().toLocaleTimeString(),
-          })).slice(0, 5);
-        }
-        saveGraphToChat();
-      },
-      compress: async () => {
-        await compressAll(currentGraph, getSettings());
-        saveGraphToChat();
-      },
-      sleep: async () => {
-        await sleepCycle(currentGraph, getSettings());
-        saveGraphToChat();
-      },
-      synopsis: async () => {
-        await generateSynopsis(currentGraph, getSettings());
-        saveGraphToChat();
-      },
-      export: () => {
-        const json = exportGraph(currentGraph);
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'st-bme-graph.json'; a.click();
-        URL.revokeObjectURL(url);
-      },
-      import: () => {
-        const input = document.createElement('input');
-        input.type = 'file'; input.accept = '.json';
-        input.addEventListener('change', async (e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          const text = await file.text();
-          currentGraph = importGraph(text);
+    // 应用主题
+    const settings = getSettings();
+    _themesModule.applyTheme(settings.panelTheme || 'crimson');
+
+    // 初始化操控面板
+    await _panelModule.initPanel({
+      getGraph: () => currentGraph,
+      getSettings: () => getSettings(),
+      getLastExtract: () => lastExtractedItems,
+      getLastRecall: () => lastRecalledItems,
+      actions: {
+        extract: async () => {
+          const context = getContext();
+          const chat = context.chat;
+          if (!chat || !chat.length) return;
+          const s = getSettings();
+          const result = await extractMemories(
+            currentGraph, chat, chat.length - 1, s.extractContextTurns,
+            getSchema(), getEmbeddingConfig(), s,
+          );
+          if (result?.newNodes?.length) {
+            lastExtractedItems = result.newNodes.map(n => ({
+              type: n.type, name: n.content?.name || '', time: new Date().toLocaleTimeString(),
+            })).slice(0, 5);
+          }
           saveGraphToChat();
-        });
-        input.click();
+        },
+        compress: async () => {
+          await compressAll(currentGraph, getSettings());
+          saveGraphToChat();
+        },
+        sleep: async () => {
+          await sleepCycle(currentGraph, getSettings());
+          saveGraphToChat();
+        },
+        synopsis: async () => {
+          await generateSynopsis(currentGraph, getSettings());
+          saveGraphToChat();
+        },
+        export: () => {
+          const json = exportGraph(currentGraph);
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = 'st-bme-graph.json'; a.click();
+          URL.revokeObjectURL(url);
+        },
+        import: () => {
+          const input = document.createElement('input');
+          input.type = 'file'; input.accept = '.json';
+          input.addEventListener('change', async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const text = await file.text();
+            currentGraph = importGraph(text);
+            saveGraphToChat();
+          });
+          input.click();
+        },
+        rebuild: async () => {
+          if (!confirm('确定要重建图谱吗？这将清除所有现有数据。')) return;
+          currentGraph = createEmptyGraph();
+          saveGraphToChat();
+        },
+        evolve: async () => {
+          await evolveMemories(currentGraph, getEmbeddingConfig(), getSettings());
+          saveGraphToChat();
+        },
       },
-      rebuild: async () => {
-        if (!confirm('确定要重建图谱吗？这将清除所有现有数据。')) return;
-        currentGraph = createEmptyGraph();
-        saveGraphToChat();
-      },
-      evolve: async () => {
-        await evolveMemories(currentGraph, getEmbeddingConfig(), getSettings());
-        saveGraphToChat();
-      },
-    },
-  });
-
-  // 注入 Options 菜单按钮
-  const $menuItem = $('<div class="list-group-item flex-container flexGap5">')
-    .append('<i class="fa-solid fa-brain"></i>')
-    .append('<span>记忆图谱</span>')
-    .on('click', () => {
-      openPanel();
-      $('#options').hide();
     });
-  $('#extensionsMenu .list-group').append($menuItem);
 
-  // 主题选择绑定（如果设置面板里有）
-  $('#st_bme_panel_theme')
-    .val(settings.panelTheme || 'crimson')
-    .on('change', function () {
-      const theme = $(this).val();
-      settings.panelTheme = theme;
-      extension_settings[MODULE_NAME].panelTheme = theme;
-      applyTheme(theme);
-      updatePanelTheme(theme);
-      saveSettingsDebounced();
-    });
+    // 注入 Options 菜单按钮
+    const $menuItem = $('<div class="list-group-item flex-container flexGap5">')
+      .append('<i class="fa-solid fa-brain"></i>')
+      .append('<span>记忆图谱</span>')
+      .on('click', () => {
+        _panelModule?.openPanel();
+        $('#options').hide();
+      });
+    $('#extensionsMenu .list-group').append($menuItem);
 
-  // 设置面板中的"打开操控面板"按钮
-  $('#st_bme_btn_open_panel').on('click', () => openPanel());
+    // 主题选择绑定
+    $('#st_bme_panel_theme')
+      .val(settings.panelTheme || 'crimson')
+      .on('change', function () {
+        const theme = $(this).val();
+        const s = getSettings();
+        s.panelTheme = theme;
+        extension_settings[MODULE_NAME].panelTheme = theme;
+        _themesModule?.applyTheme(theme);
+        _panelModule?.updatePanelTheme(theme);
+        saveSettingsDebounced();
+      });
 
-  console.log("[ST-BME] 初始化完成（含操控面板）");
+    // 打开面板按钮
+    $('#st_bme_btn_open_panel').on('click', () => _panelModule?.openPanel());
+
+    console.log("[ST-BME] 操控面板初始化完成");
+  } catch (panelError) {
+    console.error("[ST-BME] 操控面板加载失败（核心功能不受影响）:", panelError);
+  }
+
+  console.log("[ST-BME] 初始化完成");
 })();
