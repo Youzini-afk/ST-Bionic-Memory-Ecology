@@ -915,10 +915,14 @@ async function handleExtractionSuccess(result, endIdx, settings) {
   };
 }
 
+function isAssistantChatMessage(message) {
+  return Boolean(message) && !message.is_user && !message.is_system;
+}
+
 function getAssistantTurns(chat) {
   const assistantTurns = [];
   for (let index = 0; index < chat.length; index++) {
-    if (chat[index].is_user === false && !chat[index].is_system) {
+    if (isAssistantChatMessage(chat[index])) {
       assistantTurns.push(index);
     }
   }
@@ -1456,18 +1460,24 @@ function onMessageSwiped() {
   inspectHistoryMutation("message-swiped");
 }
 
-async function onGenerationAfterCommands() {
-  await runExtraction();
-}
-
 async function onBeforeCombinePrompts() {
   await runRecall();
 }
 
-function onMessageReceived() {
+async function onMessageReceived() {
   // 新消息到达，图状态可能需要更新
   if (currentGraph) {
     saveGraphToChat();
+  }
+
+  const context = getContext();
+  const chat = context?.chat;
+  const lastMessage = Array.isArray(chat) && chat.length > 0
+    ? chat[chat.length - 1]
+    : null;
+
+  if (isAssistantChatMessage(lastMessage)) {
+    await runExtraction();
   }
 }
 
@@ -1884,10 +1894,6 @@ async function onReembedDirect() {
 
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-  eventSource.on(
-    event_types.GENERATION_AFTER_COMMANDS,
-    onGenerationAfterCommands,
-  );
   eventSource.on(
     event_types.GENERATE_BEFORE_COMBINE_PROMPTS,
     onBeforeCombinePrompts,
