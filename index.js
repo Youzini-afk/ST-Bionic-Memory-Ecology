@@ -177,6 +177,7 @@ let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 30000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
+const HISTORY_RECOVERY_SETTLE_MS = 80;
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -186,6 +187,8 @@ let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
 let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
+let pendingHistoryRecoveryTimer = null;
+let pendingHistoryRecoveryTrigger = "";
 
 function createUiStatus(text = "待命", meta = "", level = "idle") {
   return {
@@ -1332,6 +1335,31 @@ function notifyHistoryDirty(dirtyFrom, reason) {
   );
 }
 
+function scheduleImmediateHistoryRecovery(
+  trigger = "history-change",
+  delayMs = HISTORY_RECOVERY_SETTLE_MS,
+) {
+  if (!getSettings().enabled) return;
+
+  pendingHistoryRecoveryTrigger = trigger;
+  clearTimeout(pendingHistoryRecoveryTimer);
+  pendingHistoryRecoveryTimer = setTimeout(() => {
+    pendingHistoryRecoveryTimer = null;
+    const effectiveTrigger = pendingHistoryRecoveryTrigger || trigger;
+    pendingHistoryRecoveryTrigger = "";
+    if (!getSettings().enabled) return;
+
+    void recoverHistoryIfNeeded(`event:${effectiveTrigger}`)
+      .then(() => {
+        refreshPanelLiveState();
+      })
+      .catch((error) => {
+        console.error("[ST-BME] 事件触发的历史恢复失败:", error);
+        toastr.error(`历史恢复失败: ${error?.message || error}`);
+      });
+  }, delayMs);
+}
+
 function inspectHistoryMutation(trigger = "history-change") {
   if (!currentGraph) return { dirty: false, earliestAffectedFloor: null, reason: "" };
 
@@ -1557,6 +1585,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       }),
     );
     saveGraphToChat();
+    refreshPanelLiveState();
 
     toastr.success(
       usedFullRebuild
@@ -1580,6 +1609,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         }),
       );
       saveGraphToChat();
+      refreshPanelLiveState();
       toastr.warning("历史恢复已退化为全量重建");
       return true;
     } catch (fallbackError) {
@@ -1588,6 +1618,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         reason: String(fallbackError),
       });
       saveGraphToChat();
+      refreshPanelLiveState();
       toastr.error(`历史恢复失败: ${fallbackError?.message || fallbackError}`);
       return false;
     }
@@ -1829,6 +1860,9 @@ async function runRecall() {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
+  clearTimeout(pendingHistoryRecoveryTimer);
+  pendingHistoryRecoveryTimer = null;
+  pendingHistoryRecoveryTrigger = "";
   loadGraphFromChat();
   clearInjectionState();
   clearRecallInputTracking();
@@ -1846,15 +1880,33 @@ function onMessageSent(messageId) {
 }
 
 function onMessageDeleted() {
-  inspectHistoryMutation("message-deleted");
+  const detection = inspectHistoryMutation("message-deleted");
+  if (
+    detection.dirty ||
+    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
+  ) {
+    scheduleImmediateHistoryRecovery("message-deleted");
+  }
 }
 
 function onMessageEdited() {
-  inspectHistoryMutation("message-edited");
+  const detection = inspectHistoryMutation("message-edited");
+  if (
+    detection.dirty ||
+    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
+  ) {
+    scheduleImmediateHistoryRecovery("message-edited");
+  }
 }
 
 function onMessageSwiped() {
-  inspectHistoryMutation("message-swiped");
+  const detection = inspectHistoryMutation("message-swiped");
+  if (
+    detection.dirty ||
+    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
+  ) {
+    scheduleImmediateHistoryRecovery("message-swiped");
+  }
 }
 
 async function onBeforeCombinePrompts() {
