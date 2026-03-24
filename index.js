@@ -32,6 +32,7 @@ import {
 import { estimateTokens, formatInjection } from "./injector.js";
 import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
 import { getNodeDisplayName } from "./node-labels.js";
+import { showManagedBmeNotice } from "./notice.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
@@ -189,6 +190,12 @@ let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
 let pendingHistoryRecoveryTrigger = "";
+const stageNoticeHandles = {
+  extraction: null,
+  vector: null,
+  recall: null,
+  history: null,
+};
 
 function createUiStatus(text = "待命", meta = "", level = "idle") {
   return {
@@ -197,6 +204,99 @@ function createUiStatus(text = "待命", meta = "", level = "idle") {
     level,
     updatedAt: Date.now(),
   };
+}
+
+function normalizeStageNoticeLevel(level = "info") {
+  if (level === "running" || level === "idle") return "info";
+  if (level === "success" || level === "warning" || level === "error") {
+    return level;
+  }
+  return "info";
+}
+
+function getStageNoticeTitle(stage) {
+  switch (stage) {
+    case "extraction":
+      return "ST-BME 提取";
+    case "vector":
+      return "ST-BME 向量";
+    case "recall":
+      return "ST-BME 召回";
+    case "history":
+      return "ST-BME 历史恢复";
+    default:
+      return "ST-BME";
+  }
+}
+
+function getStageNoticeDuration(level = "info") {
+  switch (level) {
+    case "error":
+      return 5600;
+    case "warning":
+      return 4600;
+    case "success":
+      return 2800;
+    default:
+      return 3200;
+  }
+}
+
+function createNoticePanelAction() {
+  if (!_panelModule?.openPanel) return undefined;
+  return {
+    label: "打开面板",
+    kind: "neutral",
+    onClick: () => {
+      _panelModule?.openPanel?.();
+    },
+  };
+}
+
+function dismissStageNotice(stage) {
+  stageNoticeHandles[stage]?.dismiss?.();
+  stageNoticeHandles[stage] = null;
+}
+
+function dismissAllStageNotices() {
+  for (const stage of Object.keys(stageNoticeHandles)) {
+    dismissStageNotice(stage);
+  }
+}
+
+function updateStageNotice(
+  stage,
+  text,
+  meta = "",
+  level = "info",
+  options = {},
+) {
+  const noticeLevel = normalizeStageNoticeLevel(level);
+  const busy = options.busy ?? level === "running";
+  const persist = options.persist ?? busy;
+  const title = options.title || getStageNoticeTitle(stage);
+  const message = [text, meta].filter(Boolean).join("\n");
+  const input = {
+    title,
+    message,
+    level: noticeLevel,
+    busy,
+    persist,
+    duration_ms: options.duration_ms ?? getStageNoticeDuration(noticeLevel),
+    action:
+      options.action === undefined &&
+      (noticeLevel === "warning" || noticeLevel === "error")
+        ? createNoticePanelAction()
+        : options.action,
+  };
+
+  const currentHandle = stageNoticeHandles[stage];
+  if (!currentHandle || currentHandle.isClosed?.()) {
+    stageNoticeHandles[stage] = showManagedBmeNotice(input);
+    return;
+  }
+
+  currentHandle.update(input);
 }
 
 function createRecallInputRecord(overrides = {}) {
@@ -427,6 +527,9 @@ function clearInjectionState() {
   lastRecalledItems = [];
   lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
   runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  if (!isRecalling) {
+    dismissStageNotice("recall");
+  }
 
   try {
     const context = getContext();
@@ -473,6 +576,9 @@ function setLastExtractionStatus(
   } else {
     refreshPanelLiveState();
   }
+  updateStageNotice("extraction", text, meta, level, {
+    title: toastTitle,
+  });
   if (toastKind) {
     notifyStatusToast(`extract:${toastKind}`, toastKind, meta || text, toastTitle);
   }
@@ -490,6 +596,9 @@ function setLastVectorStatus(
   } else {
     refreshPanelLiveState();
   }
+  updateStageNotice("vector", text, meta, level, {
+    title: toastTitle,
+  });
   if (toastKind) {
     notifyStatusToast(`vector:${toastKind}`, toastKind, meta || text, toastTitle);
   }
@@ -507,6 +616,9 @@ function setLastRecallStatus(
   } else {
     refreshPanelLiveState();
   }
+  updateStageNotice("recall", text, meta, level, {
+    title: toastTitle,
+  });
   if (toastKind) {
     notifyStatusToast(`recall:${toastKind}`, toastKind, meta || text, toastTitle);
   }
@@ -881,6 +993,7 @@ function updateModuleSettings(patch = {}) {
     Object.prototype.hasOwnProperty.call(patch, "enabled") &&
     patch.enabled === false
   ) {
+    dismissAllStageNotices();
     try {
       const context = getContext();
       context.setExtensionPrompt(
@@ -1326,6 +1439,16 @@ function getLastProcessedAssistantFloor() {
 }
 
 function notifyHistoryDirty(dirtyFrom, reason) {
+  updateStageNotice(
+    "history",
+    "检测到楼层历史变化",
+    `将从楼层 ${dirtyFrom} 之后自动恢复${reason ? `\n${reason}` : ""}`,
+    "warning",
+    {
+      persist: true,
+      busy: true,
+    },
+  );
   const now = Date.now();
   if (now - lastHistoryWarningAt < 3000) return;
   lastHistoryWarningAt = now;
@@ -1355,6 +1478,16 @@ function scheduleImmediateHistoryRecovery(
       })
       .catch((error) => {
         console.error("[ST-BME] 事件触发的历史恢复失败:", error);
+        updateStageNotice(
+          "history",
+          "历史恢复失败",
+          error?.message || String(error),
+          "error",
+          {
+            busy: false,
+            persist: false,
+          },
+        );
         toastr.error(`历史恢复失败: ${error?.message || error}`);
       });
   }, delayMs);
@@ -1561,6 +1694,19 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   let replayedBatches = 0;
   let usedFullRebuild = false;
 
+  updateStageNotice(
+    "history",
+    "历史恢复中",
+    Number.isFinite(initialDirtyFrom)
+      ? `受影响起点楼层 ${initialDirtyFrom} · 正在回滚并重放`
+      : "正在回滚并重放受影响后缀",
+    "running",
+    {
+      persist: true,
+      busy: true,
+    },
+  );
+
   try {
     const recoveryPoint = findJournalRecoveryPoint(currentGraph, initialDirtyFrom);
     if (recoveryPoint) {
@@ -1586,6 +1732,16 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
     );
     saveGraphToChat();
     refreshPanelLiveState();
+    updateStageNotice(
+      "history",
+      usedFullRebuild ? "历史恢复完成（全量重建）" : "历史恢复完成",
+      `起点楼层 ${initialDirtyFrom} · 回放 ${replayedBatches} 批`,
+      usedFullRebuild ? "warning" : "success",
+      {
+        busy: false,
+        persist: false,
+      },
+    );
 
     toastr.success(
       usedFullRebuild
@@ -1610,6 +1766,16 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       );
       saveGraphToChat();
       refreshPanelLiveState();
+      updateStageNotice(
+        "history",
+        "历史恢复已退化为全量重建",
+        `起点楼层 ${initialDirtyFrom} · 回放 ${replayedBatches} 批`,
+        "warning",
+        {
+          busy: false,
+          persist: false,
+        },
+      );
       toastr.warning("历史恢复已退化为全量重建");
       return true;
     } catch (fallbackError) {
@@ -1619,6 +1785,16 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       });
       saveGraphToChat();
       refreshPanelLiveState();
+      updateStageNotice(
+        "history",
+        "历史恢复失败",
+        fallbackError?.message || String(fallbackError),
+        "error",
+        {
+          busy: false,
+          persist: false,
+        },
+      );
       toastr.error(`历史恢复失败: ${fallbackError?.message || fallbackError}`);
       return false;
     }
@@ -1863,6 +2039,7 @@ function onChatChanged() {
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = null;
   pendingHistoryRecoveryTrigger = "";
+  dismissAllStageNotices();
   loadGraphFromChat();
   clearInjectionState();
   clearRecallInputTracking();
