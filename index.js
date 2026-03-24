@@ -258,6 +258,7 @@ function getStageAbortLabel(stage) {
 function beginStageAbortController(stage) {
   const controller = new AbortController();
   stageAbortControllers[stage] = controller;
+  syncStageNoticeAbortAction(stage);
   return controller;
 }
 
@@ -357,6 +358,27 @@ function abortAllRunningStages() {
   for (const stage of Object.keys(stageAbortControllers)) {
     abortStage(stage);
   }
+}
+
+function getStageUiStatus(stage) {
+  switch (stage) {
+    case "extraction":
+      return lastExtractionStatus;
+    case "vector":
+      return lastVectorStatus;
+    case "recall":
+      return lastRecallStatus;
+    default:
+      return null;
+  }
+}
+
+function syncStageNoticeAbortAction(stage) {
+  const status = getStageUiStatus(stage);
+  if (!status || !stageNoticeHandles[stage]) return;
+  updateStageNotice(stage, status.text, status.meta, status.level, {
+    title: getStageNoticeTitle(stage),
+  });
 }
 
 function updateStageNotice(
@@ -2047,16 +2069,15 @@ async function runExtraction() {
     : unprocessedAssistantTurns.slice(0, extractEvery);
   const startIdx = batchAssistantTurns[0];
   const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+  isExtracting = true;
+  const extractionController = beginStageAbortController("extraction");
+  const extractionSignal = extractionController.signal;
   setLastExtractionStatus(
     "提取中",
     `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}`,
     "running",
     { syncRuntime: true },
   );
-
-  isExtracting = true;
-  const extractionController = beginStageAbortController("extraction");
-  const extractionSignal = extractionController.signal;
 
   try {
     const batchResult = await executeExtractionBatch({
