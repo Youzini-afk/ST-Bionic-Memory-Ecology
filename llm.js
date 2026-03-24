@@ -27,26 +27,33 @@ function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
     return Boolean(config.apiUrl && config.model);
 }
 
-async function callDedicatedOpenAICompatible(messages, { signal } = {}) {
+async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = false } = {}) {
     const config = getMemoryLLMConfig();
     if (!hasDedicatedLLMConfig(config)) {
         return await sendOpenAIRequest('quiet', messages, signal);
     }
 
+    const body = {
+        chat_completion_source: chat_completion_sources.OPENAI,
+        reverse_proxy: config.apiUrl,
+        proxy_password: config.apiKey || '',
+        model: config.model,
+        messages,
+        temperature: 0.2,
+        max_tokens: 1200,
+        max_completion_tokens: 1200,
+        stream: false,
+    };
+
+    // 强制 JSON 输出（OpenAI / 兼容 API 支持）
+    if (jsonMode) {
+        body.response_format = { type: 'json_object' };
+    }
+
     const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({
-            chat_completion_source: chat_completion_sources.OPENAI,
-            reverse_proxy: config.apiUrl,
-            proxy_password: config.apiKey || '',
-            model: config.model,
-            messages,
-            temperature: 0.2,
-            max_tokens: 1200,
-            max_completion_tokens: 1200,
-            stream: false,
-        }),
+        body: JSON.stringify(body),
         signal,
     });
 
@@ -100,7 +107,7 @@ export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const response = await callDedicatedOpenAICompatible(messages);
+            const response = await callDedicatedOpenAICompatible(messages, { jsonMode: true });
 
             if (!response || typeof response !== 'string') {
                 console.warn(`[ST-BME] LLM 返回空响应 (尝试 ${attempt + 1})`);
