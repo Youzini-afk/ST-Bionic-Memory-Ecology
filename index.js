@@ -31,6 +31,7 @@ import {
 } from "./graph.js";
 import { estimateTokens, formatInjection } from "./injector.js";
 import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
+import { getNodeDisplayName } from "./node-labels.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
@@ -188,17 +189,6 @@ function createUiStatus(text = "待命", meta = "", level = "idle") {
     level,
     updatedAt: Date.now(),
   };
-}
-
-function getNodeDisplayName(node) {
-  return (
-    node?.fields?.name ||
-    node?.fields?.title ||
-    node?.fields?.summary ||
-    node?.fields?.insight ||
-    node?.id ||
-    "—"
-  );
 }
 
 function toPanelNodeItem(node, meta = "") {

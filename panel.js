@@ -2,6 +2,7 @@
 
 import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
+import { getNodeDisplayName } from "./node-labels.js";
 import { getNodeColors } from "./themes.js";
 import {
     getSuggestedBackendModel,
@@ -21,7 +22,7 @@ const DEFAULT_PROMPTS = {
         "    {",
         '      "action": "create",',
         '      "type": "event",',
-        '      "fields": {"summary": "...", "participants": "...", "status": "ongoing"},',
+        '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
         '      "importance": 6,',
         '      "ref": "evt1",',
         '      "links": [',
@@ -41,6 +42,7 @@ const DEFAULT_PROMPTS = {
         "- 角色/地点节点：如果图中已有同名节点，用 update 而非 create",
         "- 不要虚构内容，只提取对话中有证据支持的信息",
         "- importance 范围 1-10，普通事件 5，关键转折 8+",
+        "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
         "- summary 应该是摘要抽象，不要复制原文",
     ].join("\n"),
 
@@ -1439,17 +1441,6 @@ function _getNodeSnippet(node) {
             .join("; ");
     }
     return "无补充字段";
-}
-
-function getNodeDisplayName(node) {
-    return (
-        node?.fields?.name ||
-        node?.fields?.title ||
-        node?.fields?.summary ||
-        node?.fields?.insight ||
-        node?.id?.slice(0, 8) ||
-        "—"
-    );
 }
 
 function _isMobile() {

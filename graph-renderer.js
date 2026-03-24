@@ -2,6 +2,7 @@
 // 零依赖，纯 Canvas 2D 实现
 
 import { getNodeColors } from './themes.js';
+import { getGraphNodeLabel, getNodeDisplayName } from './node-labels.js';
 
 /**
  * @typedef {Object} GraphNode
@@ -90,6 +91,7 @@ export class GraphRenderer {
                 id: n.id,
                 type: n.type || 'event',
                 name: getNodeDisplayName(n),
+                label: getGraphNodeLabel(n),
                 importance: n.importance || 5,
                 x: viewportWidth / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 40,
                 y: viewportHeight / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 40,
@@ -252,7 +254,7 @@ export class GraphRenderer {
             ctx.fillStyle = `rgba(255,255,255,${isHovered || isSelected ? 0.95 : 0.65})`;
             ctx.font = `${FORCE_CONFIG.labelFontSize}px Inter, sans-serif`;
             ctx.textAlign = 'center';
-            ctx.fillText(node.name, node.x, node.y + r + 14);
+            ctx.fillText(node.label || node.name, node.x, node.y + r + 14);
         }
 
         ctx.restore();
@@ -461,15 +463,4 @@ export class GraphRenderer {
         this.stopAnimation();
         this._resizeObserver?.disconnect();
     }
-}
-
-function getNodeDisplayName(node) {
-    return (
-        node?.fields?.name ||
-        node?.fields?.title ||
-        node?.fields?.summary ||
-        node?.fields?.insight ||
-        node?.id?.slice(0, 8) ||
-        '—'
-    );
 }

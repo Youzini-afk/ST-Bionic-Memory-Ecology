@@ -15,6 +15,10 @@ import {
   updateNode,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
+import {
+  ensureEventTitle,
+  getNodeDisplayName,
+} from "./node-labels.js";
 import { RELATION_TYPES } from "./schema.js";
 import {
   buildNodeVectorText,
@@ -206,6 +210,8 @@ export async function extractMemories({
  * 处理 create 操作
  */
 function handleCreate(graph, op, seq, schema, refMap, stats) {
+  const normalizedFields =
+    op.type === "event" ? ensureEventTitle(op.fields || {}) : (op.fields || {});
   const typeDef = schema.find((s) => s.id === op.type);
   if (!typeDef) {
     console.warn(`[ST-BME] 未知节点类型: ${op.type}`);
@@ -233,7 +239,7 @@ function handleCreate(graph, op, seq, schema, refMap, stats) {
   // 创建新节点
   const node = createNode({
     type: op.type,
-    fields: op.fields || {},
+    fields: normalizedFields,
     seq,
     importance: op.importance ?? 5.0,
     clusters: op.clusters || [],
@@ -271,7 +277,10 @@ function handleUpdate(graph, op, currentSeq, stats) {
   }
 
   const previousFields = { ...(previousNode.fields || {}) };
-  const nextFields = { ...previousFields, ...(op.fields || {}) };
+  const nextFields =
+    previousNode.type === "event"
+      ? ensureEventTitle({ ...previousFields, ...(op.fields || {}) })
+      : { ...previousFields, ...(op.fields || {}) };
   const changeSummary = buildFieldChangeSummary(previousFields, nextFields);
 
   const updateSeq = Number.isFinite(op.seq) ? op.seq : currentSeq;
@@ -323,6 +332,7 @@ function handleUpdate(graph, op, currentSeq, stats) {
       const updateEventNode = createNode({
         type: "event",
         fields: {
+          title: `${previousNode.fields?.name || previousNode.fields?.title || previousNode.type} 状态更新`,
           summary: `${previousNode.type} 状态更新：${changeSummary}`,
           participants:
             previousNode.fields?.name ||
@@ -462,9 +472,7 @@ function buildGraphOverview(graph, schema) {
     lines.push(`### ${typeDef.label} (${nodesOfType.length} 个节点)`);
     for (const node of nodesOfType.slice(-10)) {
       // 只展示最近 10 个
-      const summary =
-        node.fields.summary || node.fields.name || node.fields.title || "(无)";
-      lines.push(`  - [${node.id}] ${summary}`);
+      lines.push(`  - [${node.id}] ${getNodeDisplayName(node)}`);
     }
   }
 
@@ -503,7 +511,7 @@ function buildDefaultExtractPrompt(schema) {
     "    {",
     '      "action": "create",',
     '      "type": "event",',
-    '      "fields": {"summary": "...", "participants": "...", "status": "ongoing"},',
+    '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
     '      "importance": 6,',
     '      "ref": "evt1",',
     '      "links": [',
@@ -528,6 +536,7 @@ function buildDefaultExtractPrompt(schema) {
     "- temporal_update 关系用于实体状态的时序变化",
     "- 不要虚构内容，只提取对话中有证据支持的信息",
     "- importance 范围 1-10，普通事件 5，关键转折 8+",
+    "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
     "- summary 应该是摘要抽象，不要复制原文",
   ].join("\n");
 }

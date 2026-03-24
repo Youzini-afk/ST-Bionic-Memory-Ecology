@@ -27,6 +27,7 @@ export const DEFAULT_NODE_SCHEMA = [
     label: "事件",
     tableName: "event_table",
     columns: [
+      { name: "title", hint: "简短事件名（建议 6-18 字，用于图谱显示）", required: false },
       { name: "summary", hint: "事件摘要，包含因果关系和结果", required: true },
       { name: "participants", hint: "参与角色名，逗号分隔", required: false },
       {
