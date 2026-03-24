@@ -76,9 +76,27 @@ export async function retrieve({
   let vectorResults = [];
   let diffusionResults = [];
   let useLLM = false;
+  let llmMeta = {
+    enabled: enableLLMRecall,
+    status: enableLLMRecall ? "pending" : "disabled",
+    reason: enableLLMRecall ? "" : "LLM 精排已关闭",
+    candidatePool: 0,
+    selectedSeedCount: 0,
+  };
 
   if (nodeCount === 0) {
-    return buildResult(graph, [], schema);
+    return buildResult(graph, [], schema, {
+      retrieval: {
+        vectorHits: 0,
+        diffusionHits: 0,
+        scoredCandidates: 0,
+        llm: {
+          ...llmMeta,
+          status: enableLLMRecall ? "skipped" : "disabled",
+          reason: "当前没有可参与召回的活跃节点",
+        },
+      },
+    });
   }
 
   // ========== 第 1 层：向量预筛 ==========
@@ -208,7 +226,7 @@ export async function retrieve({
       0,
       Math.min(normalizedLlmCandidatePool, scoredNodes.length),
     );
-    selectedNodeIds = await llmRecall(
+    const llmResult = await llmRecall(
       userMessage,
       recentMessages,
       candidateNodes,
@@ -217,10 +235,25 @@ export async function retrieve({
       normalizedMaxRecallNodes,
       options.recallPrompt,
     );
+    selectedNodeIds = llmResult.selectedNodeIds;
+    llmMeta = {
+      enabled: true,
+      status: llmResult.status,
+      reason: llmResult.reason,
+      candidatePool: candidateNodes.length,
+      selectedSeedCount: llmResult.selectedNodeIds.length,
+    };
   } else {
     selectedNodeIds = scoredNodes
       .slice(0, Math.min(normalizedTopK, scoredNodes.length))
       .map((s) => s.nodeId);
+    llmMeta = {
+      enabled: false,
+      status: "disabled",
+      reason: "LLM 精排已关闭，直接采用评分排序",
+      candidatePool: 0,
+      selectedSeedCount: selectedNodeIds.length,
+    };
   }
 
   selectedNodeIds = reconstructSceneNodeIds(
@@ -265,7 +298,14 @@ export async function retrieve({
 
   selectedNodeIds = uniqueNodeIds(selectedNodeIds);
 
-  return buildResult(graph, selectedNodeIds, schema);
+  return buildResult(graph, selectedNodeIds, schema, {
+    retrieval: {
+      vectorHits: vectorResults.length,
+      diffusionHits: diffusionResults.length,
+      scoredCandidates: scoredNodes.length,
+      llm: llmMeta,
+    },
+  });
 }
 
 /**
@@ -374,14 +414,30 @@ async function llmRecall(
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {
     // 校验 ID 有效性
-    const validIds = result.selected_ids.filter((id) =>
-      candidates.some((c) => c.nodeId === id),
-    );
-    return validIds;
+    const validIds = uniqueNodeIds(
+      result.selected_ids.filter((id) =>
+        candidates.some((c) => c.nodeId === id),
+      ),
+    ).slice(0, maxNodes);
+
+    if (validIds.length > 0 || result.selected_ids.length === 0) {
+      return {
+        selectedNodeIds: validIds,
+        status: "llm",
+        reason:
+          validIds.length < result.selected_ids.length
+            ? "LLM 返回了部分无效或超限 ID，已自动裁剪"
+            : "LLM 精排完成",
+      };
+    }
   }
 
   // LLM 失败时回退到纯评分排序
-  return candidates.slice(0, maxNodes).map((c) => c.nodeId);
+  return {
+    selectedNodeIds: candidates.slice(0, maxNodes).map((c) => c.nodeId),
+    status: "fallback",
+    reason: "LLM 未返回有效 JSON 或有效候选，已回退到评分排序",
+  };
 }
 
 // ==================== v2 辅助函数 ====================
@@ -418,7 +474,7 @@ function filterByVisibility(nodes, characterName) {
  * 构建最终检索结果
  * 分离常驻注入（Core）和召回注入（Recall）
  */
-function buildResult(graph, selectedNodeIds, schema) {
+function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const coreNodes = [];
   const recallNodes = [];
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
@@ -453,6 +509,7 @@ function buildResult(graph, selectedNodeIds, schema) {
     recallNodes,
     groupedRecallNodes,
     selectedNodeIds: [...selectedSet],
+    meta,
     stats: {
       totalActive: activeNodes.length,
       coreCount: coreNodes.length,

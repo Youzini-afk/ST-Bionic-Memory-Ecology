@@ -84,6 +84,7 @@ const defaultSettings = {
   recallEnableGraphDiffusion: true, // 是否启用图扩散
   recallDiffusionTopK: 100, // 图扩散阶段保留的候选上限
   recallLlmCandidatePool: 30, // 传给 LLM 精排的候选池大小
+  recallLlmContextMessages: 4, // 传给 LLM 精排的最近非系统消息数
 
   // 注入设置
   injectPosition: "atDepth", // 注入位置
@@ -166,10 +167,16 @@ let isRecalling = false;
 let lastInjectionContent = "";
 let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
 let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
+let lastRecallStatus = {
+  text: "待命",
+  meta: "尚未执行召回",
+  level: "idle",
+};
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
 let isRecoveringHistory = false;
 let lastHistoryWarningAt = 0;
+let lastRecallFallbackNoticeAt = 0;
 
 function getNodeDisplayName(node) {
   return (
@@ -279,6 +286,11 @@ function ensureCurrentGraphRuntimeState() {
 function clearInjectionState() {
   lastInjectionContent = "";
   lastRecalledItems = [];
+  lastRecallStatus = {
+    text: "待命",
+    meta: "当前无有效注入内容",
+    level: "idle",
+  };
 
   try {
     const context = getContext();
@@ -291,6 +303,21 @@ function clearInjectionState() {
   } catch (error) {
     console.warn("[ST-BME] 清理旧注入失败:", error);
   }
+
+  refreshPanelLiveState();
+}
+
+function refreshPanelLiveState() {
+  _panelModule?.refreshLiveState?.();
+}
+
+function setLastRecallStatus(text, meta, level = "info") {
+  lastRecallStatus = {
+    text: String(text || "待命"),
+    meta: String(meta || ""),
+    level,
+  };
+  refreshPanelLiveState();
 }
 
 async function recordGraphMutation({
@@ -560,6 +587,12 @@ function updateModuleSettings(patch = {}) {
       );
       lastInjectionContent = "";
       lastRecalledItems = [];
+      lastRecallStatus = {
+        text: "已停用",
+        meta: "插件已关闭，注入内容已清空",
+        level: "idle",
+      };
+      refreshPanelLiveState();
     } catch (error) {
       console.warn("[ST-BME] 关闭插件时清理注入失败:", error);
     }
@@ -583,6 +616,11 @@ function loadGraphFromChat() {
     lastExtractedItems = [];
     lastRecalledItems = [];
     lastInjectionContent = "";
+    lastRecallStatus = {
+      text: "待命",
+      meta: "当前聊天尚未建立记忆图谱",
+      level: "idle",
+    };
     return;
   }
 
@@ -598,6 +636,11 @@ function loadGraphFromChat() {
   lastExtractedItems = [];
   updateLastRecalledItems(currentGraph.lastRecallResult || []);
   lastInjectionContent = "";
+  lastRecallStatus = {
+    text: "待命",
+    meta: "已加载聊天图谱，等待下一次召回",
+    level: "idle",
+  };
 }
 
 function saveGraphToChat() {
@@ -1186,22 +1229,39 @@ async function runRecall() {
     // 获取最新用户消息
     let userMessage = "";
     const recentMessages = [];
+    const recentContextMessageLimit = clampInt(
+      settings.recallLlmContextMessages,
+      4,
+      0,
+      20,
+    );
 
-    for (let i = chat.length - 1; i >= 0 && recentMessages.length < 4; i--) {
+    for (
+      let i = chat.length - 1;
+      i >= 0 && (!userMessage || recentMessages.length < recentContextMessageLimit);
+      i--
+    ) {
       const msg = chat[i];
       if (msg.is_system) continue;
 
       if (msg.is_user && !userMessage) {
         userMessage = msg.mes || "";
       }
-      recentMessages.unshift(
-        `[${msg.is_user ? "user" : "assistant"}]: ${msg.mes || ""}`,
-      );
+      if (recentMessages.length < recentContextMessageLimit) {
+        recentMessages.unshift(
+          `[${msg.is_user ? "user" : "assistant"}]: ${msg.mes || ""}`,
+        );
+      }
     }
 
     if (!userMessage) return;
 
     console.log("[ST-BME] 开始召回");
+    setLastRecallStatus(
+      "召回中",
+      `上下文 ${recentMessages.length} 条 · 当前用户消息长度 ${userMessage.length}`,
+      "running",
+    );
 
     const result = await retrieve({
       graph: currentGraph,
@@ -1235,6 +1295,12 @@ async function runRecall() {
     // 格式化注入文本
     const injectionText = formatInjection(result, getSchema()).trim();
     lastInjectionContent = injectionText;
+    const retrievalMeta = result?.meta?.retrieval || {};
+    const llmMeta = retrievalMeta.llm || {
+      status: settings.recallEnableLLM ? "unknown" : "disabled",
+      reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
+      candidatePool: 0,
+    };
 
     if (injectionText) {
       const tokens = estimateTokens(injectionText);
@@ -1255,10 +1321,40 @@ async function runRecall() {
     currentGraph.lastRecallResult = result.selectedNodeIds;
     updateLastRecalledItems(result.selectedNodeIds || []);
     saveGraphToChat();
+
+    const llmLabel =
+      llmMeta.status === "llm"
+        ? "LLM 精排完成"
+        : llmMeta.status === "fallback"
+          ? "LLM 回退评分"
+          : llmMeta.status === "disabled"
+            ? "仅评分排序"
+            : "召回完成";
+    setLastRecallStatus(
+      llmLabel,
+      `ctx ${recentMessages.length} · vector ${retrievalMeta.vectorHits ?? 0} · diffusion ${retrievalMeta.diffusionHits ?? 0} · llm pool ${llmMeta.candidatePool ?? 0} · recall ${result.stats.recallCount}`,
+      llmMeta.status === "fallback" ? "warning" : "success",
+    );
+
+    if (llmMeta.status === "fallback") {
+      const now = Date.now();
+      if (now - lastRecallFallbackNoticeAt > 15000) {
+        lastRecallFallbackNoticeAt = now;
+        toastr.warning(
+          llmMeta.reason || "LLM 精排未返回有效结果，已回退到评分排序",
+          "ST-BME 召回提示",
+          { timeOut: 4500 },
+        );
+      }
+    }
   } catch (e) {
     console.error("[ST-BME] 召回失败:", e);
+    const message = e?.message || String(e);
+    setLastRecallStatus("召回失败", message, "error");
+    toastr.error(`召回失败: ${message}`);
   } finally {
     isRecalling = false;
+    refreshPanelLiveState();
   }
 }
 
@@ -1669,6 +1765,7 @@ async function onReembedDirect() {
       getSettings: () => getSettings(),
       getLastExtract: () => lastExtractedItems,
       getLastRecall: () => lastRecalledItems,
+      getLastRecallStatus: () => lastRecallStatus,
       getLastInjection: () => lastInjectionContent,
       updateSettings: (patch) => {
         const settings = updateModuleSettings(patch);

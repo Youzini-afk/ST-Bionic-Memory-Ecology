@@ -165,6 +165,8 @@ assert.deepEqual(state.vectorCalls, [4]);
 assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCandidateCount, 2);
 assert.deepEqual(Array.from(llmPoolResult.selectedNodeIds), ["rule-2", "rule-1"]);
+assert.equal(llmPoolResult.meta.retrieval.llm.status, "llm");
+assert.equal(llmPoolResult.meta.retrieval.llm.candidatePool, 2);
 
 state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
@@ -187,5 +189,6 @@ await retrieve({
 assert.deepEqual(state.vectorCalls, [3]);
 assert.equal(state.diffusionCalls.length, 1);
 assert.equal(state.diffusionCalls[0].options.topK, 7);
+assert.equal(noStageResult.meta.retrieval.llm.status, "disabled");
 
 console.log("retrieval-config tests passed");

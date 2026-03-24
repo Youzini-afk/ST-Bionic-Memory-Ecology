@@ -120,6 +120,7 @@ let _getGraph = null;
 let _getSettings = null;
 let _getLastExtract = null;
 let _getLastRecall = null;
+let _getLastRecallStatus = null;
 let _getLastInjection = null;
 let _updateSettings = null;
 let _actionHandlers = {};
@@ -141,6 +142,7 @@ export async function initPanel({
     getSettings,
     getLastExtract,
     getLastRecall,
+    getLastRecallStatus,
     getLastInjection,
     updateSettings,
     actions,
@@ -149,6 +151,7 @@ export async function initPanel({
     _getSettings = getSettings;
     _getLastExtract = getLastExtract;
     _getLastRecall = getLastRecall;
+    _getLastRecallStatus = getLastRecallStatus;
     _getLastInjection = getLastInjection;
     _updateSettings = updateSettings;
     _actionHandlers = actions || {};
@@ -176,6 +179,7 @@ export async function initPanel({
         panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
     _applyWorkspaceMode();
     _syncConfigSectionState();
+    _refreshRuntimeStatus();
 }
 
 /**
@@ -204,6 +208,7 @@ export function openPanel() {
     const activeTabId =
         panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
     _switchTab(activeTabId);
+    _refreshRuntimeStatus();
     _refreshGraph();
     _buildLegend();
 }
@@ -224,6 +229,27 @@ export function updatePanelTheme(themeName) {
     mobileGraphRenderer?.setTheme(themeName);
     _buildLegend();
     _highlightThemeChoice(themeName);
+}
+
+export function refreshLiveState() {
+    if (!overlayEl?.classList.contains("active")) return;
+    _refreshRuntimeStatus();
+
+    switch (currentTabId) {
+        case "dashboard":
+            _refreshDashboard();
+            break;
+        case "memory":
+            _refreshMemoryBrowser();
+            break;
+        case "injection":
+            void _refreshInjectionPreview();
+            break;
+        default:
+            break;
+    }
+
+    _refreshGraph();
 }
 
 // ==================== Tab 切换 ====================
@@ -309,10 +335,6 @@ function _refreshDashboard() {
     _setText("bme-stat-edges", graph.edges.length);
     _setText("bme-stat-archived", archivedCount);
     _setText("bme-stat-frag", `${fragRate}%`);
-    _setText(
-        "bme-status-meta",
-        `NODES: ${activeNodes.length} | EDGES: ${graph.edges.length}`,
-    );
 
     const chatId = graph?.historyState?.chatId || "—";
     const lastProcessed = graph?.historyState?.lastProcessedAssistantFloor ?? -1;
@@ -321,6 +343,7 @@ function _refreshDashboard() {
     const vectorMode = graph?.vectorIndexState?.mode || "—";
     const vectorSource = graph?.vectorIndexState?.source || "—";
     const recovery = graph?.historyState?.lastRecoveryResult;
+    const recallStatus = _getLastRecallStatus?.() || {};
 
     _setText("bme-status-chat-id", chatId);
     _setText(
@@ -338,6 +361,10 @@ function _refreshDashboard() {
         recovery
             ? `${recovery.status} · from ${recovery.fromFloor ?? "—"} · ${recovery.reason || "—"}`
             : "暂无恢复记录",
+    );
+    _setText(
+        "bme-status-last-recall",
+        recallStatus.meta || "尚未执行召回",
     );
 
     _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
@@ -720,6 +747,10 @@ function _refreshConfigTab() {
         "bme-setting-recall-llm-candidate-pool",
         settings.recallLlmCandidatePool ?? 30,
     );
+    _setInputValue(
+        "bme-setting-recall-llm-context-messages",
+        settings.recallLlmContextMessages ?? 4,
+    );
     _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
     _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
     _setInputValue("bme-setting-vector-weight", settings.vectorWeight ?? 0.3);
@@ -891,6 +922,9 @@ function _bindConfigControls() {
     );
     bindNumber("bme-setting-recall-llm-candidate-pool", 30, 1, 100, (value) =>
         _patchSettings({ recallLlmCandidatePool: value }),
+    );
+    bindNumber("bme-setting-recall-llm-context-messages", 4, 0, 20, (value) =>
+        _patchSettings({ recallLlmContextMessages: value }),
     );
     bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
         _patchSettings({ injectDepth: value }),
@@ -1184,6 +1218,15 @@ function bindSelectModel(selectId, inputId, settingKey) {
 function _setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = String(text);
+}
+
+function _refreshRuntimeStatus() {
+    const recallStatus = _getLastRecallStatus?.() || {};
+    const text = recallStatus.text || "待命";
+    const meta = recallStatus.meta || "尚未执行召回";
+    _setText("bme-status-text", text);
+    _setText("bme-status-meta", meta);
+    _setText("bme-panel-status", text);
 }
 
 function _patchSettings(patch = {}, options = {}) {

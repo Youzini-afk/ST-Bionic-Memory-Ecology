@@ -126,6 +126,10 @@
                 <label>最近恢复</label>
                 <div class="bme-recent-meta" id="bme-status-recovery">—</div>
               </div>
+              <div class="bme-config-row">
+                <label>最近召回</label>
+                <div class="bme-recent-meta" id="bme-status-last-recall">—</div>
+              </div>
             </div>
 
             <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
@@ -748,7 +752,7 @@
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">LLM 精确召回</div>
-                      <div class="bme-config-card-subtitle">控制是否启用 LLM 精排，以及传给 LLM 的候选池大小与最终保留上限。</div>
+                      <div class="bme-config-card-subtitle">控制是否启用 LLM 精排，以及传给 LLM 的上下文消息数、候选池大小与最终保留上限。</div>
                     </div>
                     <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
                   </div>
@@ -756,6 +760,10 @@
                     <input id="bme-setting-recall-llm" type="checkbox" />
                     <span>启用 LLM 精排</span>
                   </label>
+                  <div class="bme-config-row bme-stage-param">
+                    <label for="bme-setting-recall-llm-context-messages">LLM 精排上下文消息数</label>
+                    <input id="bme-setting-recall-llm-context-messages" class="bme-config-input" type="number" min="0" max="20" />
+                  </div>
                   <div class="bme-config-row bme-stage-param">
                     <label for="bme-setting-recall-llm-candidate-pool">LLM 精排候选池</label>
                     <input id="bme-setting-recall-llm-candidate-pool" class="bme-config-input" type="number" min="1" max="100" />

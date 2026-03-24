@@ -32,6 +32,7 @@ assert.equal(defaultSettings.recallEnableVectorPrefilter, true);
 assert.equal(defaultSettings.recallEnableGraphDiffusion, true);
 assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
+assert.equal(defaultSettings.recallLlmContextMessages, 4);
 assert.equal(defaultSettings.injectDepth, 9999);
 
 console.log("default-settings tests passed");
