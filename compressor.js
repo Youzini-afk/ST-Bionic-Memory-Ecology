@@ -16,7 +16,7 @@ import { isDirectVectorConfig } from './vector-index.js';
  * @param {boolean} [params.force=false] - 忽略阈值强制压缩
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressType({ graph, typeDef, embeddingConfig, force = false }) {
+export async function compressType({ graph, typeDef, embeddingConfig, force = false, customPrompt }) {
     const compression = typeDef.compression;
     if (!compression || compression.mode !== 'hierarchical') {
         return { created: 0, archived: 0 };
@@ -33,6 +33,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
             level,
             embeddingConfig,
             force,
+            customPrompt,
         });
 
         totalCreated += result.created;
@@ -48,7 +49,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
 /**
  * 压缩特定层级的节点
  */
-async function compressLevel({ graph, typeDef, level, embeddingConfig, force }) {
+async function compressLevel({ graph, typeDef, level, embeddingConfig, force, customPrompt }) {
     const compression = typeDef.compression;
 
     // 获取该层级的活跃叶子节点
@@ -79,7 +80,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force }) 
         if (batch.length < 2) break; // 至少 2 个才压缩
 
         // 调用 LLM 总结
-        const summaryResult = await summarizeBatch(batch, typeDef);
+        const summaryResult = await summarizeBatch(batch, typeDef, customPrompt);
         if (!summaryResult) continue;
 
         // 创建压缩节点
@@ -152,7 +153,7 @@ function migrateBatchEdges(graph, batch, compressedNode) {
 /**
  * 调用 LLM 总结一批节点
  */
-async function summarizeBatch(nodes, typeDef) {
+async function summarizeBatch(nodes, typeDef, customPrompt) {
     const nodeDescriptions = nodes.map((n, i) => {
         const fieldsStr = Object.entries(n.fields)
             .filter(([_, v]) => v)
@@ -163,7 +164,7 @@ async function summarizeBatch(nodes, typeDef) {
 
     const instruction = typeDef.compression.instruction || '将以下节点压缩总结为一条精炼记录。';
 
-    const systemPrompt = [
+    const systemPrompt = customPrompt || [
         '你是一个记忆压缩器。将多个同类型节点总结为一条更高层级的压缩节点。',
         instruction,
         '',
@@ -190,13 +191,13 @@ async function summarizeBatch(nodes, typeDef) {
  * @param {boolean} [force=false]
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressAll(graph, schema, embeddingConfig, force = false) {
+export async function compressAll(graph, schema, embeddingConfig, force = false, customPrompt) {
     let totalCreated = 0;
     let totalArchived = 0;
 
     for (const typeDef of schema) {
         if (typeDef.compression?.mode === 'hierarchical') {
-            const result = await compressType({ graph, typeDef, embeddingConfig, force });
+            const result = await compressType({ graph, typeDef, embeddingConfig, force, customPrompt });
             totalCreated += result.created;
             totalArchived += result.archived;
         }

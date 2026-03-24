@@ -722,6 +722,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
         newNodeIds: result.newNodeIds,
         embeddingConfig: getEmbeddingConfig(),
         options: { neighborCount: settings.evoNeighborCount },
+        customPrompt: settings.evolutionPrompt || undefined,
       });
       postProcessArtifacts.push("evolution");
     } catch (e) {
@@ -735,6 +736,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
         graph: currentGraph,
         schema: getSchema(),
         currentSeq: endIdx,
+        customPrompt: settings.synopsisPrompt || undefined,
       });
       postProcessArtifacts.push("synopsis");
     } catch (e) {
@@ -750,6 +752,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
       await generateReflection({
         graph: currentGraph,
         currentSeq: endIdx,
+        customPrompt: settings.reflectionPrompt || undefined,
       });
       postProcessArtifacts.push("reflection");
     } catch (e) {
@@ -770,6 +773,8 @@ async function handleExtractionSuccess(result, endIdx, settings) {
     currentGraph,
     getSchema(),
     getEmbeddingConfig(),
+    false,
+    settings.compressPrompt || undefined,
   );
   if (compressionResult.created > 0 || compressionResult.archived > 0) {
     postProcessArtifacts.push("compression");
@@ -1189,6 +1194,7 @@ async function runRecall() {
         topK: settings.recallTopK,
         maxRecallNodes: settings.recallMaxNodes,
         enableLLMRecall: settings.recallEnableLLM,
+        recallPrompt: settings.recallPrompt || undefined,
         weights: {
           graphWeight: settings.graphWeight,
           vectorWeight: settings.vectorWeight,

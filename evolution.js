@@ -56,6 +56,7 @@ export async function evolveMemories({
     newNodeIds,
     embeddingConfig,
     options = {},
+    customPrompt,
 }) {
     const neighborCount = options.neighborCount ?? 5;
     const stats = { evolved: 0, connections: 0, updates: 0 };
@@ -114,7 +115,7 @@ export async function evolveMemories({
 
         try {
             const decision = await callLLMForJSON({
-                systemPrompt: EVOLUTION_SYSTEM_PROMPT,
+                systemPrompt: customPrompt || EVOLUTION_SYSTEM_PROMPT,
                 userPrompt,
                 maxRetries: 1,
             });

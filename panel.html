@@ -319,12 +319,38 @@
             <div class="bme-config-card">
               <div class="bme-section-header">系统提示词</div>
               <div class="bme-config-help">
-                为空时使用内置默认提取系统提示词。这里只覆盖“记忆提取”提示词，召回/概要/反思仍走内置模板。
+                留空时使用内置默认提示词。自定义后将完全替换对应环节的 system prompt。
               </div>
-              <div class="bme-config-row">
-                <label for="bme-setting-extract-prompt">记忆提取系统提示词</label>
-                <textarea id="bme-setting-extract-prompt" class="bme-config-textarea" placeholder="留空则使用默认提取系统提示词"></textarea>
-              </div>
+
+              <details class="bme-prompt-group">
+                <summary>📝 记忆提取</summary>
+                <textarea id="bme-setting-extract-prompt" class="bme-config-textarea" placeholder="留空 = 默认提取 prompt"></textarea>
+              </details>
+
+              <details class="bme-prompt-group">
+                <summary>🔍 智能召回</summary>
+                <textarea id="bme-setting-recall-prompt" class="bme-config-textarea" placeholder="留空 = 默认召回 prompt"></textarea>
+              </details>
+
+              <details class="bme-prompt-group">
+                <summary>🧬 记忆进化</summary>
+                <textarea id="bme-setting-evolution-prompt" class="bme-config-textarea" placeholder="留空 = 默认进化 prompt"></textarea>
+              </details>
+
+              <details class="bme-prompt-group">
+                <summary>📦 记忆压缩</summary>
+                <textarea id="bme-setting-compress-prompt" class="bme-config-textarea" placeholder="留空 = 默认压缩 prompt"></textarea>
+              </details>
+
+              <details class="bme-prompt-group">
+                <summary>📜 全局概要</summary>
+                <textarea id="bme-setting-synopsis-prompt" class="bme-config-textarea" placeholder="留空 = 默认概要 prompt"></textarea>
+              </details>
+
+              <details class="bme-prompt-group">
+                <summary>💭 反思生成</summary>
+                <textarea id="bme-setting-reflection-prompt" class="bme-config-textarea" placeholder="留空 = 默认反思 prompt"></textarea>
+              </details>
             </div>
 
             <div class="bme-config-card">

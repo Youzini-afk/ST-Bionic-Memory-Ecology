@@ -218,6 +218,7 @@ export async function retrieve({
       graph,
       schema,
       normalizedMaxRecallNodes,
+      options.recallPrompt,
     );
   } else {
     selectedNodeIds = scoredNodes
@@ -331,6 +332,7 @@ async function llmRecall(
   graph,
   schema,
   maxNodes,
+  customPrompt,
 ) {
   const contextStr = recentMessages.join("\n---\n");
   const candidateDescriptions = candidates
@@ -345,7 +347,7 @@ async function llmRecall(
     })
     .join("\n");
 
-  const systemPrompt = [
+  const systemPrompt = customPrompt || [
     "你是一个记忆召回分析器。",
     "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
     "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",

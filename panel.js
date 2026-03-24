@@ -531,6 +531,11 @@ function _refreshConfigTab() {
     );
 
     _setInputValue("bme-setting-extract-prompt", settings.extractPrompt || "");
+    _setInputValue("bme-setting-recall-prompt", settings.recallPrompt || "");
+    _setInputValue("bme-setting-evolution-prompt", settings.evolutionPrompt || "");
+    _setInputValue("bme-setting-compress-prompt", settings.compressPrompt || "");
+    _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || "");
+    _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || "");
     _setInputValue("bme-setting-panel-theme", settings.panelTheme || "crimson");
 }
 
@@ -602,6 +607,21 @@ function _bindConfigControls() {
     );
     bindText("bme-setting-extract-prompt", (value) =>
         _updateSettings?.({ extractPrompt: value }),
+    );
+    bindText("bme-setting-recall-prompt", (value) =>
+        _updateSettings?.({ recallPrompt: value }),
+    );
+    bindText("bme-setting-evolution-prompt", (value) =>
+        _updateSettings?.({ evolutionPrompt: value }),
+    );
+    bindText("bme-setting-compress-prompt", (value) =>
+        _updateSettings?.({ compressPrompt: value }),
+    );
+    bindText("bme-setting-synopsis-prompt", (value) =>
+        _updateSettings?.({ synopsisPrompt: value }),
+    );
+    bindText("bme-setting-reflection-prompt", (value) =>
+        _updateSettings?.({ reflectionPrompt: value }),
     );
     bindText("bme-setting-panel-theme", (value) =>
         _updateSettings?.({ panelTheme: value }),

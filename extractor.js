@@ -617,7 +617,7 @@ async function mem0ConflictCheck(
  * @param {number} params.currentSeq
  * @returns {Promise<void>}
  */
-export async function generateSynopsis({ graph, schema, currentSeq }) {
+export async function generateSynopsis({ graph, schema, currentSeq, customPrompt }) {
   const eventNodes = getActiveNodes(graph, "event").sort(
     (a, b) => a.seq - b.seq,
   );
@@ -639,7 +639,7 @@ export async function generateSynopsis({ graph, schema, currentSeq }) {
     .join("; ");
 
   const result = await callLLMForJSON({
-    systemPrompt: [
+    systemPrompt: customPrompt || [
       "你是故事概要生成器。根据事件线、角色和主线生成简洁的前情提要。",
       '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
       "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
@@ -686,7 +686,7 @@ export async function generateSynopsis({ graph, schema, currentSeq }) {
   }
 }
 
-export async function generateReflection({ graph, currentSeq }) {
+export async function generateReflection({ graph, currentSeq, customPrompt }) {
   const recentEvents = getActiveNodes(graph, "event")
     .sort((a, b) => b.seq - a.seq)
     .slice(0, 6)
@@ -726,7 +726,7 @@ export async function generateReflection({ graph, currentSeq }) {
     .join("\n");
 
   const result = await callLLMForJSON({
-    systemPrompt: [
+    systemPrompt: customPrompt || [
       "你是 RP 长期记忆系统的反思生成器。",
       '输出严格 JSON：{"insight":"...","trigger":"...","suggestion":"...","importance":1-10}',
       "insight 应总结最近情节中最值得长期保留的变化、关系趋势或潜在线索。",
