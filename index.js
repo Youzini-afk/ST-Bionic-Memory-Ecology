@@ -179,6 +179,7 @@ const LOCAL_VECTOR_TIMEOUT_MS = 30000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
 const HISTORY_RECOVERY_SETTLE_MS = 80;
+const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -190,6 +191,7 @@ let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
 let pendingHistoryRecoveryTrigger = "";
+let pendingHistoryMutationCheckTimers = [];
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -1584,6 +1586,13 @@ function notifyHistoryDirty(dirtyFrom, reason) {
   );
 }
 
+function clearPendingHistoryMutationChecks() {
+  for (const timer of pendingHistoryMutationCheckTimers) {
+    clearTimeout(timer);
+  }
+  pendingHistoryMutationCheckTimers = [];
+}
+
 function scheduleImmediateHistoryRecovery(
   trigger = "history-change",
   delayMs = HISTORY_RECOVERY_SETTLE_MS,
@@ -1617,6 +1626,49 @@ function scheduleImmediateHistoryRecovery(
         toastr.error(`历史恢复失败: ${error?.message || error}`);
       });
   }, delayMs);
+}
+
+function scheduleHistoryMutationRecheck(trigger = "history-change") {
+  if (!getSettings().enabled) return;
+
+  clearPendingHistoryMutationChecks();
+  clearTimeout(pendingHistoryRecoveryTimer);
+  pendingHistoryRecoveryTimer = null;
+  pendingHistoryRecoveryTrigger = "";
+
+  updateStageNotice(
+    "history",
+    "检测到楼层变动",
+    "正在等待宿主楼层状态稳定后重新核对图谱",
+    "warning",
+    {
+      persist: true,
+      busy: true,
+    },
+  );
+
+  for (const delayMs of HISTORY_MUTATION_RETRY_DELAYS_MS) {
+    const timer = setTimeout(() => {
+      pendingHistoryMutationCheckTimers = pendingHistoryMutationCheckTimers.filter(
+        (candidate) => candidate !== timer,
+      );
+      if (!getSettings().enabled) return;
+
+      const detection = inspectHistoryMutation(`settled:${trigger}`);
+      if (
+        detection.dirty ||
+        Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
+      ) {
+        clearPendingHistoryMutationChecks();
+        scheduleImmediateHistoryRecovery(trigger, 0);
+      } else if (pendingHistoryMutationCheckTimers.length === 0) {
+        dismissStageNotice("history");
+        refreshPanelLiveState();
+      }
+    }, delayMs);
+
+    pendingHistoryMutationCheckTimers.push(timer);
+  }
 }
 
 function inspectHistoryMutation(trigger = "history-change") {
@@ -2208,6 +2260,7 @@ async function runRecall() {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
+  clearPendingHistoryMutationChecks();
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = null;
   pendingHistoryRecoveryTrigger = "";
@@ -2230,33 +2283,18 @@ function onMessageSent(messageId) {
 }
 
 function onMessageDeleted() {
-  const detection = inspectHistoryMutation("message-deleted");
-  if (
-    detection.dirty ||
-    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
-  ) {
-    scheduleImmediateHistoryRecovery("message-deleted");
-  }
+  clearInjectionState();
+  scheduleHistoryMutationRecheck("message-deleted");
 }
 
 function onMessageEdited() {
-  const detection = inspectHistoryMutation("message-edited");
-  if (
-    detection.dirty ||
-    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
-  ) {
-    scheduleImmediateHistoryRecovery("message-edited");
-  }
+  clearInjectionState();
+  scheduleHistoryMutationRecheck("message-edited");
 }
 
 function onMessageSwiped() {
-  const detection = inspectHistoryMutation("message-swiped");
-  if (
-    detection.dirty ||
-    Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
-  ) {
-    scheduleImmediateHistoryRecovery("message-swiped");
-  }
+  clearInjectionState();
+  scheduleHistoryMutationRecheck("message-swiped");
 }
 
 async function onBeforeCombinePrompts() {
