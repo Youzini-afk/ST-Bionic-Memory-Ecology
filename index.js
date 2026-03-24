@@ -167,11 +167,6 @@ let isRecalling = false;
 let lastInjectionContent = "";
 let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
 let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
-let lastRecallStatus = {
-  text: "待命",
-  meta: "尚未执行召回",
-  level: "idle",
-};
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
 let isRecoveringHistory = false;
@@ -179,6 +174,21 @@ let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 30000;
+const STATUS_TOAST_THROTTLE_MS = 1500;
+let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
+let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
+let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
+let lastRecallStatus = createUiStatus("待命", "尚未执行召回", "idle");
+const lastStatusToastAt = {};
+
+function createUiStatus(text = "待命", meta = "", level = "idle") {
+  return {
+    text: String(text || "待命"),
+    meta: String(meta || ""),
+    level,
+    updatedAt: Date.now(),
+  };
+}
 
 function getNodeDisplayName(node) {
   return (
@@ -288,11 +298,8 @@ function ensureCurrentGraphRuntimeState() {
 function clearInjectionState() {
   lastInjectionContent = "";
   lastRecalledItems = [];
-  lastRecallStatus = {
-    text: "待命",
-    meta: "当前无有效注入内容",
-    level: "idle",
-  };
+  lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
 
   try {
     const context = getContext();
@@ -313,16 +320,73 @@ function refreshPanelLiveState() {
   _panelModule?.refreshLiveState?.();
 }
 
-function setLastRecallStatus(text, meta, level = "info") {
-  lastRecallStatus = {
-    text: String(text || "待命"),
-    meta: String(meta || ""),
-    level,
-  };
+function notifyStatusToast(key, kind, message, title = "ST-BME") {
+  const now = Date.now();
+  if (now - (lastStatusToastAt[key] || 0) < STATUS_TOAST_THROTTLE_MS) return;
+  lastStatusToastAt[key] = now;
+
+  const method = typeof toastr?.[kind] === "function" ? kind : "info";
+  toastr[method](message, title, { timeOut: 2200 });
+}
+
+function setRuntimeStatus(text, meta, level = "info") {
+  runtimeStatus = createUiStatus(text, meta, level);
   refreshPanelLiveState();
 }
 
+function setLastExtractionStatus(
+  text,
+  meta,
+  level = "info",
+  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 提取" } = {},
+) {
+  lastExtractionStatus = createUiStatus(text, meta, level);
+  if (syncRuntime) {
+    setRuntimeStatus(text, meta, level);
+  } else {
+    refreshPanelLiveState();
+  }
+  if (toastKind) {
+    notifyStatusToast(`extract:${toastKind}`, toastKind, meta || text, toastTitle);
+  }
+}
+
+function setLastVectorStatus(
+  text,
+  meta,
+  level = "info",
+  { syncRuntime = false, toastKind = "", toastTitle = "ST-BME 向量" } = {},
+) {
+  lastVectorStatus = createUiStatus(text, meta, level);
+  if (syncRuntime) {
+    setRuntimeStatus(text, meta, level);
+  } else {
+    refreshPanelLiveState();
+  }
+  if (toastKind) {
+    notifyStatusToast(`vector:${toastKind}`, toastKind, meta || text, toastTitle);
+  }
+}
+
+function setLastRecallStatus(
+  text,
+  meta,
+  level = "info",
+  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 召回" } = {},
+) {
+  lastRecallStatus = createUiStatus(text, meta, level);
+  if (syncRuntime) {
+    setRuntimeStatus(text, meta, level);
+  } else {
+    refreshPanelLiveState();
+  }
+  if (toastKind) {
+    notifyStatusToast(`recall:${toastKind}`, toastKind, meta || text, toastTitle);
+  }
+}
+
 function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
+  setLastExtractionStatus("提取失败", message, "warning", { syncRuntime: true });
   const now = Date.now();
   if (now - lastExtractionWarningAt < 5000) return;
   lastExtractionWarningAt = now;
@@ -362,6 +426,9 @@ function snapshotRuntimeUiState() {
     lastRecalledItems: Array.isArray(lastRecalledItems)
       ? lastRecalledItems.map((item) => ({ ...item }))
       : [],
+    runtimeStatus: { ...(runtimeStatus || {}) },
+    lastExtractionStatus: { ...(lastExtractionStatus || {}) },
+    lastVectorStatus: { ...(lastVectorStatus || {}) },
     lastRecallStatus: { ...(lastRecallStatus || {}) },
   };
 }
@@ -377,10 +444,20 @@ function restoreRuntimeUiState(snapshot = {}) {
   lastRecalledItems = Array.isArray(snapshot.lastRecalledItems)
     ? snapshot.lastRecalledItems.map((item) => ({ ...item }))
     : [];
+  runtimeStatus = {
+    ...createUiStatus("待命", "准备就绪", "idle"),
+    ...(snapshot.runtimeStatus || {}),
+  };
+  lastExtractionStatus = {
+    ...createUiStatus("待命", "尚未执行提取", "idle"),
+    ...(snapshot.lastExtractionStatus || {}),
+  };
+  lastVectorStatus = {
+    ...createUiStatus("待命", "尚未执行向量任务", "idle"),
+    ...(snapshot.lastVectorStatus || {}),
+  };
   lastRecallStatus = {
-    text: "待命",
-    meta: "尚未执行召回",
-    level: "idle",
+    ...createUiStatus("待命", "尚未执行召回", "idle"),
     ...(snapshot.lastRecallStatus || {}),
   };
   refreshPanelLiveState();
@@ -470,12 +547,25 @@ async function syncVectorState({
   range = null,
 } = {}) {
   ensureCurrentGraphRuntimeState();
+  const scopeLabel =
+    range && Number.isFinite(range.start) && Number.isFinite(range.end)
+      ? `范围 ${Math.min(range.start, range.end)}-${Math.max(range.start, range.end)}`
+      : "当前聊天";
+  setLastVectorStatus(
+    "向量处理中",
+    `${scopeLabel} · ${force ? "强制同步" : "增量同步"}`,
+    "running",
+    { syncRuntime: true },
+  );
   const config = getEmbeddingConfig();
   const validation = validateVectorConfig(config);
 
   if (!validation.valid) {
     currentGraph.vectorIndexState.lastWarning = validation.error;
     currentGraph.vectorIndexState.dirty = true;
+    setLastVectorStatus("向量不可用", validation.error, "warning", {
+      syncRuntime: false,
+    });
     return {
       insertedHashes: [],
       stats: getVectorIndexStats(currentGraph),
@@ -484,16 +574,27 @@ async function syncVectorState({
   }
 
   try {
-    return await syncGraphVectorIndex(currentGraph, config, {
+    const result = await syncGraphVectorIndex(currentGraph, config, {
       chatId: getCurrentChatId(),
       force,
       purge,
       range,
     });
+    setLastVectorStatus(
+      "向量完成",
+      `${scopeLabel} · indexed ${result.stats?.indexed ?? 0} · pending ${result.stats?.pending ?? 0}`,
+      "success",
+      { syncRuntime: false },
+    );
+    return result;
   } catch (error) {
     const message = error?.message || String(error) || "向量同步失败";
     markVectorStateDirty(message);
     console.error("[ST-BME] 向量同步失败:", error);
+    setLastVectorStatus("向量失败", message, "error", {
+      syncRuntime: true,
+      toastKind: "error",
+    });
     return {
       insertedHashes: [],
       stats: getVectorIndexStats(currentGraph),
@@ -663,11 +764,10 @@ function updateModuleSettings(patch = {}) {
       );
       lastInjectionContent = "";
       lastRecalledItems = [];
-      lastRecallStatus = {
-        text: "已停用",
-        meta: "插件已关闭，注入内容已清空",
-        level: "idle",
-      };
+      runtimeStatus = createUiStatus("已停用", "插件已关闭，注入内容已清空", "idle");
+      lastExtractionStatus = createUiStatus("已停用", "插件已关闭，自动提取已停止", "idle");
+      lastVectorStatus = createUiStatus("已停用", "插件已关闭，向量任务已停止", "idle");
+      lastRecallStatus = createUiStatus("已停用", "插件已关闭，注入内容已清空", "idle");
       refreshPanelLiveState();
     } catch (error) {
       console.warn("[ST-BME] 关闭插件时清理注入失败:", error);
@@ -692,11 +792,10 @@ function loadGraphFromChat() {
     lastExtractedItems = [];
     lastRecalledItems = [];
     lastInjectionContent = "";
-    lastRecallStatus = {
-      text: "待命",
-      meta: "当前聊天尚未建立记忆图谱",
-      level: "idle",
-    };
+    runtimeStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
+    lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
+    lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
+    lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
     return;
   }
 
@@ -712,11 +811,10 @@ function loadGraphFromChat() {
   lastExtractedItems = [];
   updateLastRecalledItems(currentGraph.lastRecallResult || []);
   lastInjectionContent = "";
-  lastRecallStatus = {
-    text: "待命",
-    meta: "已加载聊天图谱，等待下一次召回",
-    level: "idle",
-  };
+  runtimeStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次任务", "idle");
+  lastExtractionStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次提取", "idle");
+  lastVectorStatus = createUiStatus("待命", currentGraph.vectorIndexState?.lastWarning || "已加载聊天图谱，等待下一次向量任务", "idle");
+  lastRecallStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次召回", "idle");
 }
 
 function saveGraphToChat() {
@@ -1299,6 +1397,12 @@ async function runExtraction() {
     : unprocessedAssistantTurns.slice(0, extractEvery);
   const startIdx = batchAssistantTurns[0];
   const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+  setLastExtractionStatus(
+    "提取中",
+    `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}`,
+    "running",
+    { syncRuntime: true },
+  );
 
   isExtracting = true;
 
@@ -1318,7 +1422,15 @@ async function runExtraction() {
         "提取批次未返回有效结果";
       console.warn("[ST-BME] 提取批次未返回有效结果:", message);
       notifyExtractionIssue(message);
+      return;
     }
+
+    setLastExtractionStatus(
+      "提取完成",
+      `楼层 ${startIdx}-${endIdx} · 新建 ${batchResult.result?.newNodes || 0} · 更新 ${batchResult.result?.updatedNodes || 0} · 新边 ${batchResult.result?.newEdges || 0}`,
+      "success",
+      { syncRuntime: true },
+    );
   } catch (e) {
     console.error("[ST-BME] 提取失败:", e);
     notifyExtractionIssue(e?.message || String(e) || "自动提取失败");
@@ -1381,6 +1493,7 @@ async function runRecall() {
       "召回中",
       `上下文 ${recentMessages.length} 条 · 当前用户消息长度 ${userMessage.length}`,
       "running",
+      { syncRuntime: true },
     );
 
     const result = await retrieve({
@@ -1454,6 +1567,10 @@ async function runRecall() {
       llmLabel,
       `ctx ${recentMessages.length} · vector ${retrievalMeta.vectorHits ?? 0} · diffusion ${retrievalMeta.diffusionHits ?? 0} · llm pool ${llmMeta.candidatePool ?? 0} · recall ${result.stats.recallCount}`,
       llmMeta.status === "fallback" ? "warning" : "success",
+      {
+        syncRuntime: true,
+        toastKind: "",
+      },
     );
 
     if (llmMeta.status === "fallback") {
@@ -1470,7 +1587,10 @@ async function runRecall() {
   } catch (e) {
     console.error("[ST-BME] 召回失败:", e);
     const message = e?.message || String(e);
-    setLastRecallStatus("召回失败", message, "error");
+    setLastRecallStatus("召回失败", message, "error", {
+      syncRuntime: true,
+      toastKind: "",
+    });
     toastr.error(`召回失败: ${message}`);
   } finally {
     isRecalling = false;
@@ -1782,6 +1902,12 @@ async function onManualExtract() {
   const warnings = [];
 
   isExtracting = true;
+  setLastExtractionStatus(
+    "手动提取中",
+    `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
+    "running",
+    { syncRuntime: true, toastKind: "info", toastTitle: "ST-BME 手动提取" },
+  );
   try {
     while (true) {
       const pendingTurns = getAssistantTurns(chat).filter(
@@ -1825,6 +1951,12 @@ async function onManualExtract() {
     toastr.success(
       `提取完成：${totals.batches} 批，新建 ${totals.newNodes}，更新 ${totals.updatedNodes}，新边 ${totals.newEdges}`,
     );
+    setLastExtractionStatus(
+      "手动提取完成",
+      `${totals.batches} 批 · 新建 ${totals.newNodes} · 更新 ${totals.updatedNodes} · 新边 ${totals.newEdges}`,
+      "success",
+      { syncRuntime: true, toastKind: "success", toastTitle: "ST-BME 手动提取" },
+    );
     if (warnings.length > 0) {
       toastr.warning(
         warnings.slice(0, 2).join("；"),
@@ -1834,6 +1966,11 @@ async function onManualExtract() {
     }
   } catch (e) {
     console.error("[ST-BME] 手动提取失败:", e);
+    setLastExtractionStatus("手动提取失败", e?.message || String(e), "error", {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 手动提取",
+    });
     toastr.error(`手动提取失败: ${e.message || e}`);
   } finally {
     isExtracting = false;
@@ -1966,6 +2103,9 @@ async function onReembedDirect() {
       getSettings: () => getSettings(),
       getLastExtract: () => lastExtractedItems,
       getLastRecall: () => lastRecalledItems,
+      getRuntimeStatus: () => runtimeStatus,
+      getLastExtractionStatus: () => lastExtractionStatus,
+      getLastVectorStatus: () => lastVectorStatus,
       getLastRecallStatus: () => lastRecallStatus,
       getLastInjection: () => lastInjectionContent,
       updateSettings: (patch) => {

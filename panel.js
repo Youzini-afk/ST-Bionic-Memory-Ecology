@@ -120,6 +120,9 @@ let _getGraph = null;
 let _getSettings = null;
 let _getLastExtract = null;
 let _getLastRecall = null;
+let _getRuntimeStatus = null;
+let _getLastExtractionStatus = null;
+let _getLastVectorStatus = null;
 let _getLastRecallStatus = null;
 let _getLastInjection = null;
 let _updateSettings = null;
@@ -142,6 +145,9 @@ export async function initPanel({
     getSettings,
     getLastExtract,
     getLastRecall,
+    getRuntimeStatus,
+    getLastExtractionStatus,
+    getLastVectorStatus,
     getLastRecallStatus,
     getLastInjection,
     updateSettings,
@@ -151,6 +157,9 @@ export async function initPanel({
     _getSettings = getSettings;
     _getLastExtract = getLastExtract;
     _getLastRecall = getLastRecall;
+    _getRuntimeStatus = getRuntimeStatus;
+    _getLastExtractionStatus = getLastExtractionStatus;
+    _getLastVectorStatus = getLastVectorStatus;
     _getLastRecallStatus = getLastRecallStatus;
     _getLastInjection = getLastInjection;
     _updateSettings = updateSettings;
@@ -343,6 +352,8 @@ function _refreshDashboard() {
     const vectorMode = graph?.vectorIndexState?.mode || "—";
     const vectorSource = graph?.vectorIndexState?.source || "—";
     const recovery = graph?.historyState?.lastRecoveryResult;
+    const extractionStatus = _getLastExtractionStatus?.() || {};
+    const vectorStatus = _getLastVectorStatus?.() || {};
     const recallStatus = _getLastRecallStatus?.() || {};
 
     _setText("bme-status-chat-id", chatId);
@@ -361,6 +372,14 @@ function _refreshDashboard() {
         recovery
             ? `${recovery.status} · from ${recovery.fromFloor ?? "—"} · ${recovery.reason || "—"}`
             : "暂无恢复记录",
+    );
+    _setText(
+        "bme-status-last-extract",
+        extractionStatus.meta || "尚未执行提取",
+    );
+    _setText(
+        "bme-status-last-vector",
+        vectorStatus.meta || "尚未执行向量任务",
     );
     _setText(
         "bme-status-last-recall",
@@ -1223,9 +1242,9 @@ function _setText(id, text) {
 }
 
 function _refreshRuntimeStatus() {
-    const recallStatus = _getLastRecallStatus?.() || {};
-    const text = recallStatus.text || "待命";
-    const meta = recallStatus.meta || "尚未执行召回";
+    const runtimeStatus = _getRuntimeStatus?.() || {};
+    const text = runtimeStatus.text || "待命";
+    const meta = runtimeStatus.meta || "准备就绪";
     _setText("bme-status-text", text);
     _setText("bme-status-meta", meta);
     _setText("bme-panel-status", text);
