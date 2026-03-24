@@ -61,6 +61,26 @@
               </div>
             </div>
 
+            <div class="bme-config-card">
+              <div class="bme-section-header">运行状态</div>
+              <div class="bme-config-row">
+                <label>当前聊天</label>
+                <div class="bme-recent-meta" id="bme-status-chat-id">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>历史状态</label>
+                <div class="bme-recent-meta" id="bme-status-history">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>向量状态</label>
+                <div class="bme-recent-meta" id="bme-status-vector">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>最近恢复</label>
+                <div class="bme-recent-meta" id="bme-status-recovery">—</div>
+              </div>
+            </div>
+
             <!-- 移动端图谱预览（仅手机端可见） -->
             <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
               <canvas id="bme-mobile-graph-canvas"></canvas>
@@ -137,6 +157,32 @@
                 <i class="fa-solid fa-dna"></i>
                 <span>强制进化</span>
               </button>
+              <button class="bme-action-btn" id="bme-act-vector-rebuild">
+                <i class="fa-solid fa-database"></i>
+                <span>重建向量</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-vector-range">
+                <i class="fa-solid fa-layer-group"></i>
+                <span>范围重建</span>
+              </button>
+              <button class="bme-action-btn" id="bme-act-vector-reembed">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+                <span>直连重嵌</span>
+              </button>
+            </div>
+            <div class="bme-config-card" style="margin-top:16px">
+              <div class="bme-section-header">范围重建</div>
+              <div class="bme-config-help">
+                仅重建与指定楼层范围相交的节点向量。留空时默认按整段聊天处理。
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-range-start">起始楼层</label>
+                <input id="bme-range-start" class="bme-config-input" type="number" min="0" max="999999" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-range-end">结束楼层</label>
+                <input id="bme-range-end" class="bme-config-input" type="number" min="0" max="999999" />
+              </div>
             </div>
           </div>
 
@@ -207,7 +253,49 @@
             <div class="bme-config-card">
               <div class="bme-section-header">Embedding</div>
               <div class="bme-config-help">
-                图谱向量仍使用 OpenAI 兼容的 <code>/v1/embeddings</code> 接口。当前发布版不改酒馆本体，因此这里不会依赖额外宿主补丁；若目标服务不支持浏览器直连，请改用支持 CORS 的服务或本地可直连端点。
+                向量支持两种模式：后端索引优先，以及完全独立的直连兜底。后端模式会优先复用酒馆现成 provider；直连模式则继续使用你自己的第二套 URL/Key/Model。
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-mode">向量模式</label>
+                <select id="bme-setting-embed-mode" class="bme-config-input">
+                  <option value="backend">后端索引</option>
+                  <option value="direct">直连兜底</option>
+                </select>
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-backend-source">后端向量源</label>
+                <select id="bme-setting-embed-backend-source" class="bme-config-input">
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="cohere">Cohere</option>
+                  <option value="mistral">Mistral</option>
+                  <option value="electronhub">Electron Hub</option>
+                  <option value="chutes">Chutes</option>
+                  <option value="nanogpt">NanoGPT</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="llamacpp">llama.cpp</option>
+                  <option value="vllm">vLLM</option>
+                </select>
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-backend-model">后端模型</label>
+                <input id="bme-setting-embed-backend-model" class="bme-config-input" type="text" placeholder="text-embedding-3-small / nomic-embed-text / BAAI/bge-m3" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-embed-backend-url">后端 API 地址</label>
+                <input id="bme-setting-embed-backend-url" class="bme-config-input" type="text" placeholder="仅 Ollama / llama.cpp / vLLM 需要填写" />
+              </div>
+              <div class="bme-config-row inline">
+                <label class="checkbox_label" for="bme-setting-embed-auto-suffix">
+                  <input id="bme-setting-embed-auto-suffix" type="checkbox" />
+                  <span>自动补全 /embeddings 后缀</span>
+                </label>
+              </div>
+              <div class="bme-config-help">
+                如果当前页面是 HTTPS 而你填的是 HTTP，本地浏览器可能会拦截混合内容；远程部署时请优先使用 HTTPS 或宿主可访问的同源入口。
+              </div>
+              <div class="bme-config-help">
+                直连模式会使用下面这组独立配置：
               </div>
               <div class="bme-config-row">
                 <label for="bme-setting-embed-url">Embedding API 地址</label>

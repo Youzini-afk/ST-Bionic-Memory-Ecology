@@ -14,7 +14,6 @@ import {
 } from "../../../extensions.js";
 
 import { compressAll, sleepCycle } from "./compressor.js";
-import { testConnection as testEmbeddingConnection } from "./embedding.js";
 import { evolveMemories } from "./evolution.js";
 import {
   extractMemories,
@@ -32,7 +31,29 @@ import {
 import { estimateTokens, formatInjection } from "./injector.js";
 import { testLLMConnection } from "./llm.js";
 import { retrieve } from "./retriever.js";
+import {
+  appendBatchJournal,
+  buildRecoveryResult,
+  clearHistoryDirty,
+  cloneGraphSnapshot,
+  createBatchJournalEntry,
+  detectHistoryMutation,
+  findJournalRecoveryPoint,
+  markHistoryDirty,
+  normalizeGraphRuntimeState,
+  snapshotProcessedMessageHashes,
+} from "./runtime-state.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
+import {
+  BACKEND_VECTOR_SOURCES,
+  getVectorConfigFromSettings,
+  getVectorIndexStats,
+  isBackendVectorConfig,
+  isDirectVectorConfig,
+  syncGraphVectorIndex,
+  testVectorConnection,
+  validateVectorConfig,
+} from "./vector-index.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -77,6 +98,11 @@ const defaultSettings = {
   embeddingApiUrl: "",
   embeddingApiKey: "",
   embeddingModel: "text-embedding-3-small",
+  embeddingTransportMode: "backend",
+  embeddingBackendSource: "openai",
+  embeddingBackendModel: "text-embedding-3-small",
+  embeddingBackendApiUrl: "",
+  embeddingAutoSuffix: true,
 
   // Schema
   nodeTypeSchema: null, // null 表示使用默认
@@ -136,6 +162,8 @@ let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
 let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
+let isRecoveringHistory = false;
+let lastHistoryWarningAt = 0;
 
 function getNodeDisplayName(node) {
   return (
@@ -219,12 +247,185 @@ function getSchema() {
 }
 
 function getEmbeddingConfig() {
-  const settings = getSettings();
-  return {
-    apiUrl: settings.embeddingApiUrl,
-    apiKey: settings.embeddingApiKey,
-    model: settings.embeddingModel,
+  return getVectorConfigFromSettings(getSettings());
+}
+
+function getCurrentChatId(context = getContext()) {
+  return String(
+    context?.chatId ||
+      context?.getCurrentChatId?.() ||
+      "",
+  );
+}
+
+function ensureCurrentGraphRuntimeState() {
+  if (!currentGraph) {
+    currentGraph = createEmptyGraph();
+  }
+
+  currentGraph = normalizeGraphRuntimeState(currentGraph, getCurrentChatId());
+  return currentGraph;
+}
+
+function clearInjectionState() {
+  lastInjectionContent = "";
+  lastRecalledItems = [];
+
+  try {
+    const context = getContext();
+    context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
+  } catch (error) {
+    console.warn("[ST-BME] 清理旧注入失败:", error);
+  }
+}
+
+async function recordGraphMutation({
+  beforeSnapshot,
+  processedRange = null,
+  artifactTags = [],
+  syncRange = null,
+} = {}) {
+  ensureCurrentGraphRuntimeState();
+  const vectorSync = await syncVectorState({
+    force: true,
+    purge: isBackendVectorConfig(getEmbeddingConfig()) && !syncRange,
+    range: syncRange,
+  });
+  const afterSnapshot = cloneGraphSnapshot(currentGraph);
+  const effectiveRange = Array.isArray(processedRange)
+    ? processedRange
+    : [
+        getLastProcessedAssistantFloor(),
+        getLastProcessedAssistantFloor(),
+      ];
+
+  appendBatchJournal(
+    currentGraph,
+    createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
+      processedRange: effectiveRange,
+      postProcessArtifacts: computePostProcessArtifacts(
+        beforeSnapshot,
+        afterSnapshot,
+        artifactTags,
+      ),
+      vectorHashesInserted: vectorSync?.insertedHashes || [],
+    }),
+  );
+  saveGraphToChat();
+  return vectorSync;
+}
+
+function markVectorStateDirty(reason = "向量状态已标记为待重建") {
+  if (!currentGraph) return;
+  ensureCurrentGraphRuntimeState();
+  currentGraph.vectorIndexState.dirty = true;
+  currentGraph.vectorIndexState.lastWarning = reason;
+}
+
+function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
+  ensureCurrentGraphRuntimeState();
+  currentGraph.historyState.lastProcessedAssistantFloor = lastProcessedAssistantFloor;
+  currentGraph.historyState.processedMessageHashes = snapshotProcessedMessageHashes(
+    chat,
+    lastProcessedAssistantFloor,
+  );
+  currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
+}
+
+function computePostProcessArtifacts(beforeSnapshot, afterSnapshot, extraTags = []) {
+  const beforeNodeIds = new Set((beforeSnapshot?.nodes || []).map((node) => node.id));
+  const afterNodes = afterSnapshot?.nodes || [];
+  const tags = new Set(extraTags.filter(Boolean));
+
+  for (const node of afterNodes) {
+    if (!beforeNodeIds.has(node.id)) {
+      if (node.type === "synopsis") tags.add("synopsis");
+      if (node.type === "reflection") tags.add("reflection");
+      if (node.level > 0) tags.add("compression");
+    }
+  }
+
+  const beforeNodes = new Map((beforeSnapshot?.nodes || []).map((node) => [node.id, node]));
+  for (const node of afterNodes) {
+    const beforeNode = beforeNodes.get(node.id);
+    if (!beforeNode) continue;
+    if (!beforeNode.archived && node.archived) {
+      tags.add(node.level > 0 ? "compression-archive" : "sleep/archive");
+    }
+  }
+
+  return [...tags];
+}
+
+async function syncVectorState({
+  force = false,
+  purge = false,
+  range = null,
+} = {}) {
+  ensureCurrentGraphRuntimeState();
+  const config = getEmbeddingConfig();
+  const validation = validateVectorConfig(config);
+
+  if (!validation.valid) {
+    currentGraph.vectorIndexState.lastWarning = validation.error;
+    currentGraph.vectorIndexState.dirty = true;
+    return {
+      insertedHashes: [],
+      stats: getVectorIndexStats(currentGraph),
+      error: validation.error,
+    };
+  }
+
+  try {
+    return await syncGraphVectorIndex(currentGraph, config, {
+      chatId: getCurrentChatId(),
+      force,
+      purge,
+      range,
+    });
+  } catch (error) {
+    markVectorStateDirty(error?.message || "向量同步失败");
+    console.error("[ST-BME] 向量同步失败:", error);
+    return {
+      insertedHashes: [],
+      stats: getVectorIndexStats(currentGraph),
+      error: String(error),
+    };
+  }
+}
+
+async function ensureVectorReadyIfNeeded(reason = "vector-ready-check") {
+  if (!currentGraph) return;
+  ensureCurrentGraphRuntimeState();
+
+  if (!currentGraph.vectorIndexState?.dirty) return;
+
+  const config = getEmbeddingConfig();
+  const validation = validateVectorConfig(config);
+  if (!validation.valid) return;
+
+  const result = await syncVectorState({
+    force: true,
+    purge: isBackendVectorConfig(config),
+  });
+  currentGraph.vectorIndexState.lastWarning = "";
+  saveGraphToChat();
+  console.log("[ST-BME] 向量状态已自动修复:", reason, result.stats);
+}
+
+async function resetVectorStateForConfigChange(reason = "向量配置已变更") {
+  if (!currentGraph) return;
+  ensureCurrentGraphRuntimeState();
+  markVectorStateDirty(reason);
+  currentGraph.vectorIndexState.hashToNodeId = {};
+  currentGraph.vectorIndexState.nodeToHash = {};
+  currentGraph.vectorIndexState.lastStats = {
+    total: 0,
+    indexed: 0,
+    stale: 0,
+    pending: 0,
   };
+  saveGraphToChat();
 }
 
 function getPersistedSettingsSnapshot(settings = getSettings()) {
@@ -316,6 +517,16 @@ function scheduleServerSettingsSave() {
 }
 
 function updateModuleSettings(patch = {}) {
+  const vectorConfigKeys = new Set([
+    "embeddingApiUrl",
+    "embeddingApiKey",
+    "embeddingModel",
+    "embeddingTransportMode",
+    "embeddingBackendSource",
+    "embeddingBackendModel",
+    "embeddingBackendApiUrl",
+    "embeddingAutoSuffix",
+  ]);
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
@@ -335,6 +546,10 @@ function updateModuleSettings(patch = {}) {
     }
   }
 
+  if (Object.keys(patch).some((key) => vectorConfigKeys.has(key))) {
+    void resetVectorStateForConfigChange("Embedding 配置已变更，向量索引待重建");
+  }
+
   scheduleServerSettingsSave();
   return settings;
 }
@@ -343,8 +558,9 @@ function updateModuleSettings(patch = {}) {
 
 function loadGraphFromChat() {
   const context = getContext();
+  const chatId = getCurrentChatId(context);
   if (!context.chatMetadata) {
-    currentGraph = createEmptyGraph();
+    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
     lastExtractedItems = [];
     lastRecalledItems = [];
     lastInjectionContent = "";
@@ -353,12 +569,13 @@ function loadGraphFromChat() {
 
   const savedData = context.chatMetadata[GRAPH_METADATA_KEY];
   if (savedData) {
-    currentGraph = deserializeGraph(savedData);
+    currentGraph = normalizeGraphRuntimeState(deserializeGraph(savedData), chatId);
     console.log("[ST-BME] 从聊天数据加载图谱:", getGraphStats(currentGraph));
   } else {
-    currentGraph = createEmptyGraph();
+    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
   }
 
+  extractionCount = 0;
   lastExtractedItems = [];
   updateLastRecalledItems(currentGraph.lastRecallResult || []);
   lastInjectionContent = "";
@@ -368,6 +585,7 @@ function saveGraphToChat() {
   const context = getContext();
   if (!context.chatMetadata || !currentGraph) return;
 
+  ensureCurrentGraphRuntimeState();
   context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
   saveMetadataDebounced();
 }
@@ -493,6 +711,7 @@ function getCurrentChatSeq(context = getContext()) {
 }
 
 async function handleExtractionSuccess(result, endIdx, settings) {
+  const postProcessArtifacts = [];
   extractionCount++;
   updateLastExtractedItems(result.newNodeIds || []);
 
@@ -504,6 +723,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
         embeddingConfig: getEmbeddingConfig(),
         options: { neighborCount: settings.evoNeighborCount },
       });
+      postProcessArtifacts.push("evolution");
     } catch (e) {
       console.error("[ST-BME] 记忆进化失败:", e);
     }
@@ -516,6 +736,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
         schema: getSchema(),
         currentSeq: endIdx,
       });
+      postProcessArtifacts.push("synopsis");
     } catch (e) {
       console.error("[ST-BME] 概要生成失败:", e);
     }
@@ -530,6 +751,7 @@ async function handleExtractionSuccess(result, endIdx, settings) {
         graph: currentGraph,
         currentSeq: endIdx,
       });
+      postProcessArtifacts.push("reflection");
     } catch (e) {
       console.error("[ST-BME] 反思生成失败:", e);
     }
@@ -538,13 +760,322 @@ async function handleExtractionSuccess(result, endIdx, settings) {
   if (settings.enableSleepCycle && extractionCount % settings.sleepEveryN === 0) {
     try {
       sleepCycle(currentGraph, settings);
+      postProcessArtifacts.push("sleep");
     } catch (e) {
       console.error("[ST-BME] 主动遗忘失败:", e);
     }
   }
 
-  await compressAll(currentGraph, getSchema(), getEmbeddingConfig());
+  const compressionResult = await compressAll(
+    currentGraph,
+    getSchema(),
+    getEmbeddingConfig(),
+  );
+  if (compressionResult.created > 0 || compressionResult.archived > 0) {
+    postProcessArtifacts.push("compression");
+  }
+
+  const vectorSync = await syncVectorState();
+  return {
+    postProcessArtifacts,
+    vectorHashesInserted: vectorSync?.insertedHashes || [],
+    vectorStats: vectorSync?.stats || getVectorIndexStats(currentGraph),
+  };
+}
+
+function getAssistantTurns(chat) {
+  const assistantTurns = [];
+  for (let index = 0; index < chat.length; index++) {
+    if (chat[index].is_user === false && !chat[index].is_system) {
+      assistantTurns.push(index);
+    }
+  }
+  return assistantTurns;
+}
+
+function buildExtractionMessages(chat, startIdx, endIdx, settings) {
+  const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
+  const contextStart = Math.max(0, startIdx - contextTurns * 2);
+  const messages = [];
+
+  for (let index = contextStart; index <= endIdx && index < chat.length; index++) {
+    const msg = chat[index];
+    if (msg.is_system) continue;
+    messages.push({
+      seq: index,
+      role: msg.is_user ? "user" : "assistant",
+      content: msg.mes || "",
+    });
+  }
+
+  return messages;
+}
+
+function getLastProcessedAssistantFloor() {
+  ensureCurrentGraphRuntimeState();
+  return Number.isFinite(currentGraph?.historyState?.lastProcessedAssistantFloor)
+    ? currentGraph.historyState.lastProcessedAssistantFloor
+    : -1;
+}
+
+function notifyHistoryDirty(dirtyFrom, reason) {
+  const now = Date.now();
+  if (now - lastHistoryWarningAt < 3000) return;
+  lastHistoryWarningAt = now;
+  toastr.warning(
+    `检测到楼层历史变化，将从楼层 ${dirtyFrom} 之后自动恢复图谱`,
+    reason || "ST-BME 历史回退保护",
+  );
+}
+
+function inspectHistoryMutation(trigger = "history-change") {
+  if (!currentGraph) return { dirty: false, earliestAffectedFloor: null, reason: "" };
+
+  ensureCurrentGraphRuntimeState();
+  const context = getContext();
+  const chat = context?.chat;
+  const detection = detectHistoryMutation(chat, currentGraph.historyState);
+
+  if (detection.dirty) {
+    clearInjectionState();
+    markHistoryDirty(
+      currentGraph,
+      detection.earliestAffectedFloor,
+      detection.reason || trigger,
+    );
+    saveGraphToChat();
+    notifyHistoryDirty(detection.earliestAffectedFloor, detection.reason);
+    return detection;
+  }
+
+  if (trigger === "message-edited" || trigger === "message-swiped") {
+    clearInjectionState();
+  }
+
+  return detection;
+}
+
+async function purgeCurrentVectorCollection() {
+  if (!currentGraph?.vectorIndexState?.collectionId) return;
+
+  const response = await fetch("/api/vector/purge", {
+    method: "POST",
+    headers: getRequestHeaders(),
+    body: JSON.stringify({
+      collectionId: currentGraph.vectorIndexState.collectionId,
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText);
+    throw new Error(message || `HTTP ${response.status}`);
+  }
+}
+
+async function prepareVectorStateForReplay(fullReset = false) {
+  ensureCurrentGraphRuntimeState();
+  const config = getEmbeddingConfig();
+
+  if (isBackendVectorConfig(config)) {
+    try {
+      await purgeCurrentVectorCollection();
+    } catch (error) {
+      console.warn("[ST-BME] 清理后端向量索引失败，继续本地恢复:", error);
+    }
+    currentGraph.vectorIndexState.hashToNodeId = {};
+    currentGraph.vectorIndexState.nodeToHash = {};
+    currentGraph.vectorIndexState.dirty = true;
+    currentGraph.vectorIndexState.lastWarning = "历史恢复后需要重建后端向量索引";
+    return;
+  }
+
+  if (fullReset) {
+    currentGraph.vectorIndexState.hashToNodeId = {};
+    currentGraph.vectorIndexState.nodeToHash = {};
+    currentGraph.vectorIndexState.dirty = true;
+    currentGraph.vectorIndexState.lastWarning = "历史恢复后需要重嵌当前聊天向量";
+  }
+}
+
+async function executeExtractionBatch({
+  chat,
+  startIdx,
+  endIdx,
+  settings,
+  smartTriggerDecision = null,
+} = {}) {
+  ensureCurrentGraphRuntimeState();
+  const lastProcessed = getLastProcessedAssistantFloor();
+  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
+  const messages = buildExtractionMessages(chat, startIdx, endIdx, settings);
+
+  console.log(
+    `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
+      (smartTriggerDecision?.triggered
+        ? ` [智能触发 score=${smartTriggerDecision.score}; ${smartTriggerDecision.reasons.join(" / ")}]`
+        : ""),
+  );
+
+  const result = await extractMemories({
+    graph: currentGraph,
+    messages,
+    startSeq: startIdx,
+    endSeq: endIdx,
+    lastProcessedSeq: lastProcessed,
+    schema: getSchema(),
+    embeddingConfig: getEmbeddingConfig(),
+    extractPrompt: settings.extractPrompt || undefined,
+    v2Options: {
+      enablePreciseConflict: settings.enablePreciseConflict,
+      conflictThreshold: settings.conflictThreshold,
+    },
+  });
+
+  if (!result.success) {
+    return { success: false, result, effects: null };
+  }
+
+  const effects = await handleExtractionSuccess(result, endIdx, settings);
+  updateProcessedHistorySnapshot(chat, endIdx);
+
+  const afterSnapshot = cloneGraphSnapshot(currentGraph);
+  const postProcessArtifacts = computePostProcessArtifacts(
+    beforeSnapshot,
+    afterSnapshot,
+    effects?.postProcessArtifacts || [],
+  );
+  appendBatchJournal(
+    currentGraph,
+    createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
+      processedRange: [startIdx, endIdx],
+      postProcessArtifacts,
+      vectorHashesInserted: effects?.vectorHashesInserted || [],
+    }),
+  );
   saveGraphToChat();
+
+  return { success: true, result, effects };
+}
+
+async function replayExtractionFromHistory(chat, settings) {
+  let replayedBatches = 0;
+
+  while (true) {
+    const pendingAssistantTurns = getAssistantTurns(chat).filter(
+      (index) => index > getLastProcessedAssistantFloor(),
+    );
+    if (pendingAssistantTurns.length === 0) break;
+
+    const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
+    const batchAssistantTurns = pendingAssistantTurns.slice(0, extractEvery);
+    const startIdx = batchAssistantTurns[0];
+    const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+
+    const batchResult = await executeExtractionBatch({
+      chat,
+      startIdx,
+      endIdx,
+      settings,
+    });
+
+    if (!batchResult.success) {
+      throw new Error("历史恢复回放过程中出现提取失败");
+    }
+
+    replayedBatches++;
+  }
+
+  return replayedBatches;
+}
+
+async function recoverHistoryIfNeeded(trigger = "history-recovery") {
+  if (!currentGraph || isRecoveringHistory) {
+    return !isRecoveringHistory;
+  }
+
+  ensureCurrentGraphRuntimeState();
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat)) return true;
+
+  const detection = inspectHistoryMutation(trigger);
+  const dirtyFrom = currentGraph?.historyState?.historyDirtyFrom;
+  if (!detection.dirty && !Number.isFinite(dirtyFrom)) {
+    return true;
+  }
+
+  isRecoveringHistory = true;
+  clearInjectionState();
+
+  const chatId = getCurrentChatId(context);
+  const settings = getSettings();
+  const initialDirtyFrom = Number.isFinite(dirtyFrom)
+    ? dirtyFrom
+    : detection.earliestAffectedFloor;
+  let replayedBatches = 0;
+  let usedFullRebuild = false;
+
+  try {
+    const recoveryPoint = findJournalRecoveryPoint(currentGraph, initialDirtyFrom);
+    if (recoveryPoint) {
+      currentGraph = normalizeGraphRuntimeState(
+        recoveryPoint.snapshotBefore,
+        chatId,
+      );
+    } else {
+      currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+      usedFullRebuild = true;
+    }
+
+    await prepareVectorStateForReplay(usedFullRebuild);
+    replayedBatches = await replayExtractionFromHistory(chat, settings);
+
+    clearHistoryDirty(
+      currentGraph,
+      buildRecoveryResult(usedFullRebuild ? "full-rebuild" : "replayed", {
+        fromFloor: initialDirtyFrom,
+        batches: replayedBatches,
+        reason: detection.reason || currentGraph?.historyState?.lastMutationReason || trigger,
+      }),
+    );
+    saveGraphToChat();
+
+    toastr.success(
+      usedFullRebuild
+        ? "历史变化已触发全量重建"
+        : "历史变化已完成受影响后缀恢复",
+    );
+    return true;
+  } catch (error) {
+    console.error("[ST-BME] 历史恢复失败，尝试全量重建:", error);
+
+    try {
+      currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+      await prepareVectorStateForReplay(true);
+      replayedBatches = await replayExtractionFromHistory(chat, settings);
+      clearHistoryDirty(
+        currentGraph,
+        buildRecoveryResult("full-rebuild", {
+          fromFloor: 0,
+          batches: replayedBatches,
+          reason: `恢复失败后兜底全量重建: ${error?.message || error}`,
+        }),
+      );
+      saveGraphToChat();
+      toastr.warning("历史恢复已退化为全量重建");
+      return true;
+    } catch (fallbackError) {
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult("failed", {
+        fromFloor: initialDirtyFrom,
+        reason: String(fallbackError),
+      });
+      saveGraphToChat();
+      toastr.error(`历史恢复失败: ${fallbackError?.message || fallbackError}`);
+      return false;
+    }
+  } finally {
+    isRecoveringHistory = false;
+  }
 }
 
 /**
@@ -555,22 +1086,15 @@ async function runExtraction() {
 
   const settings = getSettings();
   if (!settings.enabled) return;
+  if (!(await recoverHistoryIfNeeded("auto-extract"))) return;
+  await ensureVectorReadyIfNeeded("pre-extract");
 
   const context = getContext();
   const chat = context.chat;
   if (!chat || chat.length === 0) return;
 
-  // lastProcessedSeq / startSeq / endSeq 统一使用 chat 数组索引语义
-  const assistantTurns = [];
-  for (let i = 0; i < chat.length; i++) {
-    if (chat[i].is_user === false && !chat[i].is_system) {
-      assistantTurns.push(i);
-    }
-  }
-
-  const lastProcessed = Number.isFinite(currentGraph.lastProcessedSeq)
-    ? currentGraph.lastProcessedSeq
-    : -1;
+  const assistantTurns = getAssistantTurns(chat);
+  const lastProcessed = getLastProcessedAssistantFloor();
   const unprocessedAssistantTurns = assistantTurns.filter(
     (i) => i > lastProcessed,
   );
@@ -598,43 +1122,16 @@ async function runExtraction() {
   isExtracting = true;
 
   try {
-    const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
-    const contextStart = Math.max(0, startIdx - contextTurns * 2);
-    const messages = [];
-    for (let i = contextStart; i <= endIdx && i < chat.length; i++) {
-      const msg = chat[i];
-      if (msg.is_system) continue;
-      messages.push({
-        seq: i,
-        role: msg.is_user ? "user" : "assistant",
-        content: msg.mes || "",
-      });
-    }
-
-    console.log(
-      `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
-        (smartTriggerDecision.triggered
-          ? ` [智能触发 score=${smartTriggerDecision.score}; ${smartTriggerDecision.reasons.join(" / ")}]`
-          : ""),
-    );
-
-    const result = await extractMemories({
-      graph: currentGraph,
-      messages,
-      startSeq: startIdx,
-      endSeq: endIdx,
-      lastProcessedSeq: lastProcessed,
-      schema: getSchema(),
-      embeddingConfig: getEmbeddingConfig(),
-      extractPrompt: settings.extractPrompt || undefined,
-      v2Options: {
-        enablePreciseConflict: settings.enablePreciseConflict,
-        conflictThreshold: settings.conflictThreshold,
-      },
+    const batchResult = await executeExtractionBatch({
+      chat,
+      startIdx,
+      endIdx,
+      settings,
+      smartTriggerDecision,
     });
 
-    if (result.success) {
-      await handleExtractionSuccess(result, endIdx, settings);
+    if (!batchResult.success) {
+      console.warn("[ST-BME] 提取批次未返回有效结果");
     }
   } catch (e) {
     console.error("[ST-BME] 提取失败:", e);
@@ -651,6 +1148,9 @@ async function runRecall() {
 
   const settings = getSettings();
   if (!settings.enabled || !settings.recallEnabled) return;
+  if (!(await recoverHistoryIfNeeded("pre-recall"))) return;
+
+  await ensureVectorReadyIfNeeded("pre-recall");
 
   const context = getContext();
   const chat = context.chat;
@@ -737,13 +1237,19 @@ async function runRecall() {
 
 function onChatChanged() {
   loadGraphFromChat();
-  lastInjectionContent = "";
-  try {
-    const context = getContext();
-    context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
-  } catch (error) {
-    console.warn("[ST-BME] 清理旧注入失败:", error);
-  }
+  clearInjectionState();
+}
+
+function onMessageDeleted() {
+  inspectHistoryMutation("message-deleted");
+}
+
+function onMessageEdited() {
+  inspectHistoryMutation("message-edited");
+}
+
+function onMessageSwiped() {
+  inspectHistoryMutation("message-swiped");
 }
 
 async function onGenerationAfterCommands() {
@@ -787,17 +1293,33 @@ async function onViewGraph() {
 async function onRebuild() {
   if (!confirm("确定要从当前聊天重建图谱？这将清除现有图谱数据。")) return;
 
-  currentGraph = createEmptyGraph();
-  lastExtractedItems = [];
-  lastRecalledItems = [];
-  lastInjectionContent = "";
-  saveGraphToChat();
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat)) {
+    toastr.warning("当前聊天上下文不可用，无法重建");
+    return;
+  }
 
-  toastr.info("图谱已重置，将在下次生成时重新提取");
+  currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());
+  currentGraph.batchJournal = [];
+  clearInjectionState();
+  await prepareVectorStateForReplay(true);
+  await replayExtractionFromHistory(chat, getSettings());
+  clearHistoryDirty(
+    currentGraph,
+    buildRecoveryResult("full-rebuild", {
+      fromFloor: 0,
+      batches: currentGraph.batchJournal.length,
+      reason: "用户手动触发全量重建",
+    }),
+  );
+  saveGraphToChat();
+  toastr.success("图谱与向量索引已按当前聊天全量重建");
 }
 
 async function onManualCompress() {
   if (!currentGraph) return;
+  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
 
   const result = await compressAll(
     currentGraph,
@@ -805,7 +1327,10 @@ async function onManualCompress() {
     getEmbeddingConfig(),
     false,
   );
-  saveGraphToChat();
+  await recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["compression"],
+  });
 
   toastr.info(`压缩完成: 新建 ${result.created}, 归档 ${result.archived}`);
 }
@@ -835,10 +1360,15 @@ async function onImportGraph() {
 
     try {
       const text = await file.text();
-      currentGraph = importGraph(text);
+      currentGraph = normalizeGraphRuntimeState(
+        importGraph(text),
+        getCurrentChatId(),
+      );
+      markVectorStateDirty("导入图谱后需要重建向量索引");
+      extractionCount = 0;
       lastExtractedItems = [];
       updateLastRecalledItems(currentGraph.lastRecallResult || []);
-      lastInjectionContent = "";
+      clearInjectionState();
       saveGraphToChat();
       toastr.success("图谱已导入");
     } catch (err) {
@@ -872,13 +1402,14 @@ async function onViewLastInjection() {
 
 async function onTestEmbedding() {
   const config = getEmbeddingConfig();
-  if (!config.apiUrl || !config.model) {
-    toastr.warning("请先配置 Embedding API 地址和模型");
+  const validation = validateVectorConfig(config);
+  if (!validation.valid) {
+    toastr.warning(validation.error);
     return;
   }
 
   toastr.info("正在测试 Embedding API 连通性...");
-  const result = await testEmbeddingConnection(config);
+  const result = await testVectorConnection(config, getCurrentChatId());
 
   if (result.success) {
     toastr.success(`连接成功！向量维度: ${result.dimensions}`);
@@ -900,7 +1431,9 @@ async function onTestMemoryLLM() {
 
 async function onManualExtract() {
   if (isExtracting) return;
-  if (!currentGraph) currentGraph = createEmptyGraph();
+  if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
+  await ensureVectorReadyIfNeeded("manual-extract");
+  if (!currentGraph) currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());
 
   const context = getContext();
   const chat = context.chat;
@@ -909,16 +1442,8 @@ async function onManualExtract() {
     return;
   }
 
-  const assistantTurns = [];
-  for (let i = 0; i < chat.length; i++) {
-    if (chat[i].is_user === false && !chat[i].is_system) {
-      assistantTurns.push(i);
-    }
-  }
-
-  const lastProcessed = Number.isFinite(currentGraph.lastProcessedSeq)
-    ? currentGraph.lastProcessedSeq
-    : -1;
+  const assistantTurns = getAssistantTurns(chat);
+  const lastProcessed = getLastProcessedAssistantFloor();
   const pendingAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
   if (pendingAssistantTurns.length === 0) {
     toastr.info("没有待提取的新回复");
@@ -928,45 +1453,22 @@ async function onManualExtract() {
   const startIdx = pendingAssistantTurns[0];
   const endIdx = pendingAssistantTurns[pendingAssistantTurns.length - 1];
   const settings = getSettings();
-  const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
-  const contextStart = Math.max(0, startIdx - contextTurns * 2);
-  const messages = [];
-
-  for (let i = contextStart; i <= endIdx && i < chat.length; i++) {
-    const msg = chat[i];
-    if (msg.is_system) continue;
-    messages.push({
-      seq: i,
-      role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
-    });
-  }
-
   isExtracting = true;
   try {
-    const result = await extractMemories({
-      graph: currentGraph,
-      messages,
-      startSeq: startIdx,
-      endSeq: endIdx,
-      lastProcessedSeq: lastProcessed,
-      schema: getSchema(),
-      embeddingConfig: getEmbeddingConfig(),
-      extractPrompt: settings.extractPrompt || undefined,
-      v2Options: {
-        enablePreciseConflict: settings.enablePreciseConflict,
-        conflictThreshold: settings.conflictThreshold,
-      },
+    const batchResult = await executeExtractionBatch({
+      chat,
+      startIdx,
+      endIdx,
+      settings,
     });
 
-    if (!result.success) {
+    if (!batchResult.success) {
       toastr.warning("手动提取未返回有效结果");
       return;
     }
 
-    await handleExtractionSuccess(result, endIdx, settings);
     toastr.success(
-      `提取完成：新建 ${result.newNodes}，更新 ${result.updatedNodes}，新边 ${result.newEdges}`,
+      `提取完成：新建 ${batchResult.result.newNodes}，更新 ${batchResult.result.updatedNodes}，新边 ${batchResult.result.newEdges}`,
     );
   } catch (e) {
     console.error("[ST-BME] 手动提取失败:", e);
@@ -978,19 +1480,27 @@ async function onManualExtract() {
 
 async function onManualSleep() {
   if (!currentGraph) return;
+  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   const result = sleepCycle(currentGraph, getSettings());
-  saveGraphToChat();
+  await recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["sleep"],
+  });
   toastr.info(`执行完成：归档 ${result.forgotten} 个节点`);
 }
 
 async function onManualSynopsis() {
   if (!currentGraph) return;
+  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   await generateSynopsis({
     graph: currentGraph,
     schema: getSchema(),
     currentSeq: getCurrentChatSeq(),
   });
-  saveGraphToChat();
+  await recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["synopsis"],
+  });
   toastr.success("概要生成完成");
 }
 
@@ -1003,16 +1513,53 @@ async function onManualEvolve() {
     return;
   }
 
+  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   const result = await evolveMemories({
     graph: currentGraph,
     newNodeIds: candidateIds,
     embeddingConfig: getEmbeddingConfig(),
     options: { neighborCount: getSettings().evoNeighborCount },
   });
-  saveGraphToChat();
+  await recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["evolution"],
+  });
   toastr.success(
     `进化完成：${result.evolved} 次进化，${result.connections} 条链接，${result.updates} 个回溯更新`,
   );
+}
+
+async function onRebuildVectorIndex(range = null) {
+  ensureCurrentGraphRuntimeState();
+  const config = getEmbeddingConfig();
+  const validation = validateVectorConfig(config);
+  if (!validation.valid) {
+    toastr.warning(validation.error);
+    return;
+  }
+
+  const result = await syncVectorState({
+    force: true,
+    purge: isBackendVectorConfig(config) && !range,
+    range,
+  });
+
+  saveGraphToChat();
+  toastr.success(
+    range
+      ? `范围向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`
+      : `当前聊天向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`,
+  );
+}
+
+async function onReembedDirect() {
+  const config = getEmbeddingConfig();
+  if (!isDirectVectorConfig(config)) {
+    toastr.info("当前不是直连模式，无需执行重嵌");
+    return;
+  }
+
+  await onRebuildVectorIndex();
 }
 
 // ==================== 设置 UI ====================
@@ -1279,6 +1826,12 @@ function bindSettingsUI() {
     onBeforeCombinePrompts,
   );
   eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+  eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
+  eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
+  eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
+  if (event_types.MESSAGE_UPDATED) {
+    eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
+  }
 
   // 加载当前聊天的图谱
   loadGraphFromChat();
@@ -1320,6 +1873,9 @@ function bindSettingsUI() {
         evolve: onManualEvolve,
         testEmbedding: onTestEmbedding,
         testMemoryLLM: onTestMemoryLLM,
+        rebuildVectorIndex: () => onRebuildVectorIndex(),
+        rebuildVectorRange: (range) => onRebuildVectorIndex(range),
+        reembedDirect: onReembedDirect,
       },
     });
 

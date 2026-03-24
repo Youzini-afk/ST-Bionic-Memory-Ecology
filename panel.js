@@ -3,6 +3,10 @@
 import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeColors } from "./themes.js";
+import {
+    getSuggestedBackendModel,
+    getVectorIndexStats,
+} from "./vector-index.js";
 
 let panelEl = null;
 let overlayEl = null;
@@ -169,6 +173,32 @@ function _refreshDashboard() {
     _setText(
         "bme-status-meta",
         `NODES: ${activeNodes.length} | EDGES: ${graph.edges.length}`,
+    );
+
+    const chatId = graph?.historyState?.chatId || "—";
+    const lastProcessed = graph?.historyState?.lastProcessedAssistantFloor ?? -1;
+    const dirtyFrom = graph?.historyState?.historyDirtyFrom;
+    const vectorStats = getVectorIndexStats(graph);
+    const vectorMode = graph?.vectorIndexState?.mode || "—";
+    const vectorSource = graph?.vectorIndexState?.source || "—";
+    const recovery = graph?.historyState?.lastRecoveryResult;
+
+    _setText("bme-status-chat-id", chatId);
+    _setText(
+        "bme-status-history",
+        Number.isFinite(dirtyFrom)
+            ? `脏区从楼层 ${dirtyFrom} 开始，已处理到 ${lastProcessed}`
+            : `干净，已处理到楼层 ${lastProcessed}`,
+    );
+    _setText(
+        "bme-status-vector",
+        `${vectorMode}/${vectorSource} · total ${vectorStats.total} · indexed ${vectorStats.indexed} · stale ${vectorStats.stale} · pending ${vectorStats.pending}`,
+    );
+    _setText(
+        "bme-status-recovery",
+        recovery
+            ? `${recovery.status} · from ${recovery.fromFloor ?? "—"} · ${recovery.reason || "—"}`
+            : "暂无恢复记录",
     );
 
     _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
@@ -413,6 +443,8 @@ function _bindActions() {
         "bme-act-import": "import",
         "bme-act-rebuild": "rebuild",
         "bme-act-evolve": "evolve",
+        "bme-act-vector-rebuild": "rebuildVectorIndex",
+        "bme-act-vector-reembed": "reembedDirect",
     };
 
     for (const [elementId, actionKey] of Object.entries(bindings)) {
@@ -435,6 +467,22 @@ function _bindActions() {
             }
         });
     }
+
+    document.getElementById("bme-act-vector-range")?.addEventListener("click", async () => {
+        try {
+            const start = _parseOptionalInt(document.getElementById("bme-range-start")?.value);
+            const end = _parseOptionalInt(document.getElementById("bme-range-end")?.value);
+            await _actionHandlers.rebuildVectorRange?.(
+                Number.isFinite(start) && Number.isFinite(end)
+                    ? { start, end }
+                    : null,
+            );
+            _refreshDashboard();
+            _refreshGraph();
+        } catch (error) {
+            console.error("[ST-BME] Action rebuildVectorRange failed:", error);
+        }
+    });
 }
 
 function _refreshConfigTab() {
@@ -460,6 +508,26 @@ function _refreshConfigTab() {
     _setInputValue(
         "bme-setting-embed-model",
         settings.embeddingModel || "text-embedding-3-small",
+    );
+    _setInputValue(
+        "bme-setting-embed-mode",
+        settings.embeddingTransportMode || "backend",
+    );
+    _setInputValue(
+        "bme-setting-embed-backend-source",
+        settings.embeddingBackendSource || "openai",
+    );
+    _setInputValue(
+        "bme-setting-embed-backend-model",
+        settings.embeddingBackendModel || getSuggestedBackendModel(settings.embeddingBackendSource || "openai"),
+    );
+    _setInputValue(
+        "bme-setting-embed-backend-url",
+        settings.embeddingBackendApiUrl || "",
+    );
+    _setCheckboxValue(
+        "bme-setting-embed-auto-suffix",
+        settings.embeddingAutoSuffix !== false,
     );
 
     _setInputValue("bme-setting-extract-prompt", settings.extractPrompt || "");
@@ -509,6 +577,28 @@ function _bindConfigControls() {
     );
     bindText("bme-setting-embed-model", (value) =>
         _updateSettings?.({ embeddingModel: value.trim() }),
+    );
+    bindText("bme-setting-embed-mode", (value) =>
+        _updateSettings?.({ embeddingTransportMode: value }),
+    );
+    bindText("bme-setting-embed-backend-source", (value) => {
+        const patch = { embeddingBackendSource: value };
+        const settings = _getSettings?.() || {};
+        const suggestedModel = getSuggestedBackendModel(value);
+        if (!settings.embeddingBackendModel || settings.embeddingBackendModel === getSuggestedBackendModel(settings.embeddingBackendSource || "openai")) {
+            patch.embeddingBackendModel = suggestedModel;
+        }
+        _updateSettings?.(patch);
+        _setInputValue("bme-setting-embed-backend-model", patch.embeddingBackendModel || settings.embeddingBackendModel || "");
+    });
+    bindText("bme-setting-embed-backend-model", (value) =>
+        _updateSettings?.({ embeddingBackendModel: value.trim() }),
+    );
+    bindText("bme-setting-embed-backend-url", (value) =>
+        _updateSettings?.({ embeddingBackendApiUrl: value.trim() }),
+    );
+    bindCheckbox("bme-setting-embed-auto-suffix", (checked) =>
+        _updateSettings?.({ embeddingAutoSuffix: checked }),
     );
     bindText("bme-setting-extract-prompt", (value) =>
         _updateSettings?.({ extractPrompt: value }),
@@ -573,6 +663,11 @@ function _setCheckboxValue(id, checked) {
     if (el) {
         el.checked = Boolean(checked);
     }
+}
+
+function _parseOptionalInt(value) {
+    const parsed = Number.parseInt(String(value ?? "").trim(), 10);
+    return Number.isFinite(parsed) ? parsed : null;
 }
 
 function _escHtml(str) {

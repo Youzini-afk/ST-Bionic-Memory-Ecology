@@ -4,7 +4,6 @@
 
 import { diffuseAndRank } from "./diffusion.js";
 import { hybridScore, reinforceAccessBatch } from "./dynamics.js";
-import { embedText, searchSimilar } from "./embedding.js";
 import {
   buildTemporalAdjacencyMap,
   getActiveNodes,
@@ -12,6 +11,7 @@ import {
   getNodeEdges,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
+import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
 
 /**
  * 自适应阈值
@@ -82,9 +82,13 @@ export async function retrieve({
   }
 
   // ========== 第 1 层：向量预筛 ==========
-  if (nodeCount >= STRATEGY_THRESHOLDS.SMALL && embeddingConfig?.apiUrl) {
+  if (
+    nodeCount >= STRATEGY_THRESHOLDS.SMALL &&
+    validateVectorConfig(embeddingConfig).valid
+  ) {
     console.log("[ST-BME] 第1层: 向量预筛");
     vectorResults = await vectorPreFilter(
+      graph,
       userMessage,
       activeNodes,
       embeddingConfig,
@@ -270,20 +274,20 @@ export async function retrieve({
  * 向量预筛选
  */
 async function vectorPreFilter(
+  graph,
   userMessage,
   activeNodes,
   embeddingConfig,
   topK,
 ) {
   try {
-    const queryVec = await embedText(userMessage, embeddingConfig);
-    if (!queryVec) return [];
-
-    const candidates = activeNodes
-      .filter((n) => Array.isArray(n.embedding) && n.embedding.length > 0)
-      .map((n) => ({ nodeId: n.id, embedding: n.embedding }));
-
-    return searchSimilar(queryVec, candidates, topK);
+    return await findSimilarNodesByText(
+      graph,
+      userMessage,
+      embeddingConfig,
+      topK,
+      activeNodes,
+    );
   } catch (e) {
     console.error("[ST-BME] 向量预筛失败:", e);
     return [];

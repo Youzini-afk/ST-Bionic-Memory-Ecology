@@ -2,8 +2,12 @@
 // 新节点写入后触发，回溯更新相关旧节点的 context/tags/links
 
 import { getActiveNodes, getNode, createEdge, addEdge } from './graph.js';
-import { searchSimilar } from './embedding.js';
 import { callLLMForJSON } from './llm.js';
+import {
+    buildNodeVectorText,
+    findSimilarNodesByText,
+    validateVectorConfig,
+} from './vector-index.js';
 
 /**
  * 进化系统提示词
@@ -57,8 +61,8 @@ export async function evolveMemories({
     const stats = { evolved: 0, connections: 0, updates: 0 };
 
     if (!newNodeIds || newNodeIds.length === 0) return stats;
-    if (!embeddingConfig?.apiUrl) {
-        console.log('[ST-BME] 记忆进化跳过：未配置 Embedding API');
+    if (!validateVectorConfig(embeddingConfig).valid) {
+        console.log('[ST-BME] 记忆进化跳过：向量配置不可用');
         return stats;
     }
 
@@ -67,16 +71,21 @@ export async function evolveMemories({
 
     for (const newId of newNodeIds) {
         const newNode = getNode(graph, newId);
-        if (!newNode || !newNode.embedding) continue;
+        if (!newNode) continue;
 
-        // 找最近邻（排除自身）
-        const candidates = activeNodes
-            .filter(n => n.id !== newId && n.embedding)
-            .map(n => ({ nodeId: n.id, embedding: n.embedding }));
+        const queryText = buildNodeVectorText(newNode);
+        if (!queryText) continue;
 
+        const candidates = activeNodes.filter(n => n.id !== newId);
         if (candidates.length === 0) continue;
 
-        const neighbors = searchSimilar(newNode.embedding, candidates, neighborCount);
+        const neighbors = await findSimilarNodesByText(
+            graph,
+            queryText,
+            embeddingConfig,
+            neighborCount,
+            candidates,
+        );
         if (neighbors.length === 0) continue;
 
         // 构建 LLM 上下文

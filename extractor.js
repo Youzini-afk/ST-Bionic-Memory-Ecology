@@ -2,7 +2,7 @@
 // 分析对话 → 提取节点和关系 → 更新图谱
 // v2: 融合 Mem0 精确对照 + Graphiti 时序边 + MemoRAG 全局概要
 
-import { embedBatch, embedText, searchSimilar } from "./embedding.js";
+import { embedBatch } from "./embedding.js";
 import {
   addEdge,
   addNode,
@@ -16,6 +16,12 @@ import {
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import { RELATION_TYPES } from "./schema.js";
+import {
+  buildNodeVectorText,
+  findSimilarNodesByText,
+  isDirectVectorConfig,
+  validateVectorConfig,
+} from "./vector-index.js";
 
 /**
  * 对未处理的对话楼层执行记忆提取
@@ -122,7 +128,7 @@ export async function extractMemories({
   }
 
   // ========== v2: Mem0 精确对照阶段 ==========
-  if (enablePreciseConflict && embeddingConfig?.apiUrl) {
+  if (enablePreciseConflict && validateVectorConfig(embeddingConfig).valid) {
     await mem0ConflictCheck(
       graph,
       result.operations,
@@ -411,7 +417,7 @@ function handleLinks(graph, sourceId, links, refMap, stats) {
  * 为缺少 embedding 的节点生成向量
  */
 async function generateNodeEmbeddings(graph, embeddingConfig) {
-  if (!embeddingConfig?.apiUrl) return;
+  if (!isDirectVectorConfig(embeddingConfig)) return;
 
   const needsEmbedding = graph.nodes.filter(
     (n) =>
@@ -420,17 +426,7 @@ async function generateNodeEmbeddings(graph, embeddingConfig) {
 
   if (needsEmbedding.length === 0) return;
 
-  const texts = needsEmbedding.map((n) => {
-    // 用主要字段拼文本
-    const parts = [];
-    if (n.fields.summary) parts.push(n.fields.summary);
-    if (n.fields.name) parts.push(n.fields.name);
-    if (n.fields.title) parts.push(n.fields.title);
-    if (n.fields.traits) parts.push(n.fields.traits);
-    if (n.fields.state) parts.push(n.fields.state);
-    if (n.fields.constraint) parts.push(n.fields.constraint);
-    return parts.join(" | ") || n.type;
-  });
+  const texts = needsEmbedding.map((node) => buildNodeVectorText(node) || node.type);
 
   console.log(`[ST-BME] 为 ${texts.length} 个节点生成 embedding`);
 
@@ -543,9 +539,10 @@ async function mem0ConflictCheck(
   threshold,
   fallbackSeq,
 ) {
-  const activeNodes = getActiveNodes(graph).filter(
-    (n) => Array.isArray(n.embedding) && n.embedding.length > 0,
-  );
+  const activeNodes = getActiveNodes(graph).filter((node) => {
+    const text = buildNodeVectorText(node);
+    return typeof text === "string" && text.length > 0;
+  });
   if (activeNodes.length === 0) return;
 
   for (const op of operations) {
@@ -556,14 +553,13 @@ async function mem0ConflictCheck(
     if (!factText) continue;
 
     try {
-      const factVec = await embedText(factText, embeddingConfig);
-      if (!factVec) continue;
-
-      const candidates = activeNodes.map((n) => ({
-        nodeId: n.id,
-        embedding: n.embedding,
-      }));
-      const similar = searchSimilar(factVec, candidates, 3);
+      const similar = await findSimilarNodesByText(
+        graph,
+        factText,
+        embeddingConfig,
+        3,
+        activeNodes,
+      );
 
       if (similar.length > 0 && similar[0].score > threshold) {
         const topMatch = graph.nodes.find((n) => n.id === similar[0].nodeId);

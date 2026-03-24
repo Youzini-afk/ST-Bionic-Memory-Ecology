@@ -4,6 +4,7 @@
 import { createNode, addNode, createEdge, addEdge, getActiveNodes, getNode } from './graph.js';
 import { callLLMForJSON } from './llm.js';
 import { embedText } from './embedding.js';
+import { isDirectVectorConfig } from './vector-index.js';
 
 /**
  * 对指定类型执行层级压缩
@@ -94,7 +95,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force }) 
         compressedNode.childIds = batch.map(n => n.id);
 
         // 生成 embedding
-        if (embeddingConfig?.apiUrl && summaryResult.fields.summary) {
+        if (isDirectVectorConfig(embeddingConfig) && summaryResult.fields.summary) {
             const vec = await embedText(summaryResult.fields.summary, embeddingConfig);
             if (vec) compressedNode.embedding = Array.from(vec);
         }

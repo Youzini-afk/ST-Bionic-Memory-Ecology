@@ -1,10 +1,17 @@
 // ST-BME: 图数据模型
 // 管理节点、边的 CRUD 操作，以及序列化到 chat_metadata
 
+import {
+  createDefaultBatchJournal,
+  createDefaultHistoryState,
+  createDefaultVectorIndexState,
+  normalizeGraphRuntimeState,
+} from "./runtime-state.js";
+
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 3;
+const GRAPH_VERSION = 4;
 
 /**
  * 生成 UUID v4
@@ -22,13 +29,16 @@ function uuid() {
  * @returns {GraphState}
  */
 export function createEmptyGraph() {
-  return {
+  return normalizeGraphRuntimeState({
     version: GRAPH_VERSION,
     lastProcessedSeq: -1,
     nodes: [],
     edges: [],
     lastRecallResult: null,
-  };
+    historyState: createDefaultHistoryState(),
+    vectorIndexState: createDefaultVectorIndexState(),
+    batchJournal: createDefaultBatchJournal(),
+  });
 }
 
 // ==================== 节点操作 ====================
@@ -481,6 +491,25 @@ export function deserializeGraph(json) {
         }
       }
 
+      if (data.version < 4) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          lastProcessedAssistantFloor: Number.isFinite(data.lastProcessedSeq)
+            ? data.lastProcessedSeq
+            : -1,
+        };
+        data.vectorIndexState = {
+          ...createDefaultVectorIndexState(),
+          ...(data.vectorIndexState || {}),
+          dirty: true,
+          lastWarning: "旧版本图谱已迁移，需要重建向量运行时状态",
+        };
+        data.batchJournal = Array.isArray(data.batchJournal)
+          ? data.batchJournal
+          : createDefaultBatchJournal();
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -513,8 +542,24 @@ export function deserializeGraph(json) {
     data.lastRecallResult = Array.isArray(data.lastRecallResult)
       ? data.lastRecallResult
       : null;
+    data.historyState = {
+      ...createDefaultHistoryState(),
+      ...(data.historyState || {}),
+      lastProcessedAssistantFloor: Number.isFinite(
+        data?.historyState?.lastProcessedAssistantFloor,
+      )
+        ? data.historyState.lastProcessedAssistantFloor
+        : data.lastProcessedSeq,
+    };
+    data.vectorIndexState = {
+      ...createDefaultVectorIndexState(data?.historyState?.chatId || ""),
+      ...(data.vectorIndexState || {}),
+    };
+    data.batchJournal = Array.isArray(data.batchJournal)
+      ? data.batchJournal
+      : createDefaultBatchJournal();
 
-    return data;
+    return normalizeGraphRuntimeState(data, data?.historyState?.chatId || "");
   } catch (e) {
     console.error("[ST-BME] 图反序列化失败:", e);
     return createEmptyGraph();
@@ -529,6 +574,17 @@ export function deserializeGraph(json) {
 export function exportGraph(graph) {
   const exportData = {
     ...graph,
+    historyState: {
+      ...createDefaultHistoryState(graph?.historyState?.chatId || ""),
+      lastProcessedAssistantFloor:
+        graph?.historyState?.lastProcessedAssistantFloor ?? graph?.lastProcessedSeq ?? -1,
+    },
+    vectorIndexState: {
+      ...createDefaultVectorIndexState(graph?.historyState?.chatId || ""),
+      dirty: true,
+      lastWarning: "导出图谱不包含运行时向量索引",
+    },
+    batchJournal: createDefaultBatchJournal(),
     nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
   };
   return JSON.stringify(exportData, null, 2);
@@ -540,10 +596,17 @@ export function exportGraph(graph) {
  * @returns {GraphState}
  */
 export function importGraph(json) {
-  const graph = deserializeGraph(json);
+  const graph = normalizeGraphRuntimeState(deserializeGraph(json));
   // 导入的节点需要重新生成 embedding
   for (const node of graph.nodes) {
     node.embedding = null;
   }
+  graph.batchJournal = createDefaultBatchJournal();
+  graph.historyState.processedMessageHashes = {};
+  graph.historyState.historyDirtyFrom = null;
+  graph.vectorIndexState.hashToNodeId = {};
+  graph.vectorIndexState.nodeToHash = {};
+  graph.vectorIndexState.dirty = true;
+  graph.vectorIndexState.lastWarning = "导入图谱后需要重建向量索引";
   return graph;
 }
