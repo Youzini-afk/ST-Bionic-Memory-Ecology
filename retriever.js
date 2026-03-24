@@ -13,6 +13,24 @@ import {
 import { callLLMForJSON } from "./llm.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
 
+function createAbortError(message = "操作已终止") {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError();
+  }
+}
+
 /**
  * 三层混合检索管线
  *
@@ -31,8 +49,10 @@ export async function retrieve({
   recentMessages = [],
   embeddingConfig,
   schema,
+  signal = undefined,
   options = {},
 }) {
+  throwIfAborted(signal);
   const topK = options.topK ?? 20;
   const maxRecallNodes = options.maxRecallNodes ?? 8;
   const enableLLMRecall = options.enableLLMRecall ?? true;
@@ -111,6 +131,7 @@ export async function retrieve({
       activeNodes,
       embeddingConfig,
       normalizedTopK,
+      signal,
     );
   }
 
@@ -234,6 +255,7 @@ export async function retrieve({
       schema,
       normalizedMaxRecallNodes,
       options.recallPrompt,
+      signal,
     );
     selectedNodeIds = llmResult.selectedNodeIds;
     llmMeta = {
@@ -317,6 +339,7 @@ async function vectorPreFilter(
   activeNodes,
   embeddingConfig,
   topK,
+  signal,
 ) {
   try {
     return await findSimilarNodesByText(
@@ -325,8 +348,12 @@ async function vectorPreFilter(
       embeddingConfig,
       topK,
       activeNodes,
+      signal,
     );
   } catch (e) {
+    if (isAbortError(e)) {
+      throw e;
+    }
     console.error("[ST-BME] 向量预筛失败:", e);
     return [];
   }
@@ -370,7 +397,9 @@ async function llmRecall(
   schema,
   maxNodes,
   customPrompt,
+  signal,
 ) {
+  throwIfAborted(signal);
   const contextStr = recentMessages.join("\n---\n");
   const candidateDescriptions = candidates
     .map((c) => {
@@ -410,6 +439,7 @@ async function llmRecall(
     systemPrompt,
     userPrompt,
     maxRetries: 1,
+    signal,
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

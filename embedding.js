@@ -8,6 +8,10 @@
 
 const EMBEDDING_REQUEST_TIMEOUT_MS = 45000;
 
+function isAbortError(error) {
+    return error?.name === 'AbortError';
+}
+
 function normalizeOpenAICompatibleBaseUrl(value) {
     return String(value || '')
         .trim()
@@ -63,7 +67,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = EMBEDDING_REQUEST
  * @param {string} config.model - 模型名（如 text-embedding-3-small）
  * @returns {Promise<Float64Array|null>} 向量或 null
  */
-export async function embedText(text, config) {
+export async function embedText(text, config, { signal } = {}) {
     const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
     if (!text || !apiUrl || !config?.model) {
         console.warn('[ST-BME] Embedding 配置不完整，跳过');
@@ -77,6 +81,7 @@ export async function embedText(text, config) {
                 'Content-Type': 'application/json',
                 ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
             },
+            signal,
             body: JSON.stringify({
                 model: config.model,
                 input: text,
@@ -99,6 +104,9 @@ export async function embedText(text, config) {
 
         return new Float64Array(vector);
     } catch (e) {
+        if (isAbortError(e)) {
+            throw e;
+        }
         console.error('[ST-BME] Embedding API 调用失败:', e);
         return null;
     }
@@ -111,7 +119,7 @@ export async function embedText(text, config) {
  * @param {object} config
  * @returns {Promise<(Float64Array|null)[]>}
  */
-export async function embedBatch(texts, config) {
+export async function embedBatch(texts, config, { signal } = {}) {
     const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
     if (!texts.length || !apiUrl || !config?.model) {
         return texts.map(() => null);
@@ -124,6 +132,7 @@ export async function embedBatch(texts, config) {
                 'Content-Type': 'application/json',
                 ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
             },
+            signal,
             body: JSON.stringify({
                 model: config.model,
                 input: texts,
@@ -153,6 +162,9 @@ export async function embedBatch(texts, config) {
             return null;
         });
     } catch (e) {
+        if (isAbortError(e)) {
+            throw e;
+        }
         console.error('[ST-BME] Embedding API 批量调用失败:', e);
         return texts.map(() => null);
     }

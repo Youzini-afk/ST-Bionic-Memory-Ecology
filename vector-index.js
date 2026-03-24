@@ -41,6 +41,18 @@ const BACKEND_STATUS_MODEL_SOURCES = {
   mistral: "mistralai",
 };
 
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : Object.assign(new Error("操作已终止"), { name: "AbortError" });
+  }
+}
+
 export const BACKEND_DEFAULT_MODELS = {
   openai: "text-embedding-3-small",
   openrouter: "openai/text-embedding-3-small",
@@ -338,10 +350,12 @@ function computeVectorStats(graph, desiredEntries) {
   };
 }
 
-async function purgeVectorCollection(collectionId) {
+async function purgeVectorCollection(collectionId, signal) {
+  throwIfAborted(signal);
   const response = await fetchWithTimeout("/api/vector/purge", {
     method: "POST",
     headers: getRequestHeaders(),
+    signal,
     body: JSON.stringify({ collectionId }),
   });
 
@@ -351,12 +365,14 @@ async function purgeVectorCollection(collectionId) {
   }
 }
 
-async function deleteVectorHashes(collectionId, config, hashes) {
+async function deleteVectorHashes(collectionId, config, hashes, signal) {
   if (!Array.isArray(hashes) || hashes.length === 0) return;
+  throwIfAborted(signal);
 
   const response = await fetchWithTimeout("/api/vector/delete", {
     method: "POST",
     headers: getRequestHeaders(),
+    signal,
     body: JSON.stringify({
       collectionId,
       hashes,
@@ -370,12 +386,14 @@ async function deleteVectorHashes(collectionId, config, hashes) {
   }
 }
 
-async function insertVectorEntries(collectionId, config, entries) {
+async function insertVectorEntries(collectionId, config, entries, signal) {
   if (!Array.isArray(entries) || entries.length === 0) return;
+  throwIfAborted(signal);
 
   const response = await fetchWithTimeout("/api/vector/insert", {
     method: "POST",
     headers: getRequestHeaders(),
+    signal,
     body: JSON.stringify({
       collectionId,
       items: entries.map((entry) => ({
@@ -410,11 +428,13 @@ export async function syncGraphVectorIndex(
     purge = false,
     force = false,
     range = null,
+    signal = undefined,
   } = {},
 ) {
   if (!graph || !config) {
     return { insertedHashes: [], stats: { total: 0, indexed: 0, stale: 0, pending: 0 } };
   }
+  throwIfAborted(signal);
 
   const validation = validateVectorConfig(config);
   if (!validation.valid) {
@@ -443,9 +463,9 @@ export async function syncGraphVectorIndex(
     const fullReset = purge || state.dirty || scopeChanged || (force && !hasConcreteRange);
 
     if (fullReset) {
-      await purgeVectorCollection(collectionId);
+      await purgeVectorCollection(collectionId, signal);
       resetVectorMappings(graph, config, chatId);
-      await insertVectorEntries(collectionId, config, desiredEntries);
+      await insertVectorEntries(collectionId, config, desiredEntries, signal);
       for (const entry of desiredEntries) {
         state.hashToNodeId[entry.hash] = entry.nodeId;
         state.nodeToHash[entry.nodeId] = entry.hash;
@@ -485,8 +505,8 @@ export async function syncGraphVectorIndex(
         entriesToInsert.push(entry);
       }
 
-      await deleteVectorHashes(collectionId, config, hashesToDelete);
-      await insertVectorEntries(collectionId, config, entriesToInsert);
+      await deleteVectorHashes(collectionId, config, hashesToDelete, signal);
+      await insertVectorEntries(collectionId, config, entriesToInsert, signal);
 
       for (const entry of entriesToInsert) {
         state.hashToNodeId[entry.hash] = entry.nodeId;
@@ -536,9 +556,11 @@ export async function syncGraphVectorIndex(
     }
 
     if (entriesToEmbed.length > 0) {
+      throwIfAborted(signal);
       const embeddings = await embedBatch(
         entriesToEmbed.map((entry) => entry.text),
         config,
+        { signal },
       );
 
       for (let index = 0; index < entriesToEmbed.length; index++) {
@@ -578,8 +600,10 @@ export async function findSimilarNodesByText(
   config,
   topK = 10,
   candidates = null,
+  signal = undefined,
 ) {
   if (!text || !graph || !config) return [];
+  throwIfAborted(signal);
 
   const candidateNodes = Array.isArray(candidates)
     ? candidates
@@ -588,7 +612,7 @@ export async function findSimilarNodesByText(
   if (candidateNodes.length === 0) return [];
 
   if (isDirectVectorConfig(config)) {
-    const queryVec = await embedText(text, config);
+    const queryVec = await embedText(text, config, { signal });
     if (!queryVec) return [];
 
     return searchSimilar(
@@ -609,6 +633,7 @@ export async function findSimilarNodesByText(
   const response = await fetchWithTimeout("/api/vector/query", {
     method: "POST",
     headers: getRequestHeaders(),
+    signal,
     body: JSON.stringify({
       collectionId: graph.vectorIndexState.collectionId,
       searchText: text,

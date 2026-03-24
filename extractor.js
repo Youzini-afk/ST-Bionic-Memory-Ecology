@@ -27,6 +27,24 @@ import {
   validateVectorConfig,
 } from "./vector-index.js";
 
+function createAbortError(message = "操作已终止") {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError();
+  }
+}
+
 /**
  * 对未处理的对话楼层执行记忆提取
  *
@@ -52,7 +70,9 @@ export async function extractMemories({
   embeddingConfig,
   extractPrompt,
   v2Options = {},
+  signal = undefined,
 }) {
+  throwIfAborted(signal);
   if (!messages || messages.length === 0) {
     return {
       success: true,
@@ -117,7 +137,9 @@ export async function extractMemories({
     systemPrompt,
     userPrompt,
     maxRetries: 2,
+    signal,
   });
+  throwIfAborted(signal);
 
   if (!result || !Array.isArray(result.operations)) {
     console.warn("[ST-BME] 提取 LLM 未返回有效操作");
@@ -140,6 +162,7 @@ export async function extractMemories({
       embeddingConfig,
       conflictThreshold,
       effectiveEndSeq,
+      signal,
     );
   }
 
@@ -182,8 +205,11 @@ export async function extractMemories({
 
   // 为新建节点生成 embedding。失败不应回滚整批图谱写入。
   try {
-    await generateNodeEmbeddings(graph, embeddingConfig);
+    await generateNodeEmbeddings(graph, embeddingConfig, signal);
   } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
     console.error("[ST-BME] 节点 embedding 生成失败，保留图谱写入:", error);
   }
 
@@ -432,8 +458,9 @@ function handleLinks(graph, sourceId, links, refMap, stats) {
 /**
  * 为缺少 embedding 的节点生成向量
  */
-async function generateNodeEmbeddings(graph, embeddingConfig) {
+async function generateNodeEmbeddings(graph, embeddingConfig, signal) {
   if (!isDirectVectorConfig(embeddingConfig)) return;
+  throwIfAborted(signal);
 
   const needsEmbedding = graph.nodes.filter(
     (n) =>
@@ -446,7 +473,7 @@ async function generateNodeEmbeddings(graph, embeddingConfig) {
 
   console.log(`[ST-BME] 为 ${texts.length} 个节点生成 embedding`);
 
-  const embeddings = await embedBatch(texts, embeddingConfig);
+  const embeddings = await embedBatch(texts, embeddingConfig, { signal });
 
   for (let i = 0; i < needsEmbedding.length; i++) {
     if (embeddings[i]) {
@@ -553,6 +580,7 @@ async function mem0ConflictCheck(
   embeddingConfig,
   threshold,
   fallbackSeq,
+  signal,
 ) {
   const activeNodes = getActiveNodes(graph).filter((node) => {
     const text = buildNodeVectorText(node);
@@ -568,12 +596,14 @@ async function mem0ConflictCheck(
     if (!factText) continue;
 
     try {
+      throwIfAborted(signal);
       const similar = await findSimilarNodesByText(
         graph,
         factText,
         embeddingConfig,
         3,
         activeNodes,
+        signal,
       );
 
       if (similar.length > 0 && similar[0].score > threshold) {
@@ -598,6 +628,7 @@ async function mem0ConflictCheck(
             `相似度: ${similar[0].score.toFixed(3)}`,
           ].join("\n"),
           maxRetries: 1,
+          signal,
         });
 
         if (decision?.action === "update" && decision.targetId) {
@@ -617,6 +648,9 @@ async function mem0ConflictCheck(
         }
       }
     } catch (e) {
+      if (isAbortError(e)) {
+        throw e;
+      }
       console.warn("[ST-BME] Mem0对照失败，保持原操作:", e.message);
     }
   }
@@ -632,7 +666,7 @@ async function mem0ConflictCheck(
  * @param {number} params.currentSeq
  * @returns {Promise<void>}
  */
-export async function generateSynopsis({ graph, schema, currentSeq, customPrompt }) {
+export async function generateSynopsis({ graph, schema, currentSeq, customPrompt, signal }) {
   const eventNodes = getActiveNodes(graph, "event").sort(
     (a, b) => a.seq - b.seq,
   );
@@ -670,6 +704,7 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
       threadSummary || "(无)",
     ].join("\n"),
     maxRetries: 1,
+    signal,
   });
 
   if (!result?.summary) return;
@@ -701,7 +736,7 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
   }
 }
 
-export async function generateReflection({ graph, currentSeq, customPrompt }) {
+export async function generateReflection({ graph, currentSeq, customPrompt, signal }) {
   const recentEvents = getActiveNodes(graph, "event")
     .sort((a, b) => b.seq - a.seq)
     .slice(0, 6)
@@ -763,6 +798,7 @@ export async function generateReflection({ graph, currentSeq, customPrompt }) {
       contradictionSummary || "(无)",
     ].join("\n"),
     maxRetries: 1,
+    signal,
   });
 
   if (!result?.insight) return null;

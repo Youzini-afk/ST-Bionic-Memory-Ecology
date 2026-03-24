@@ -9,6 +9,22 @@ import {
     validateVectorConfig,
 } from './vector-index.js';
 
+function createAbortError(message = '操作已终止') {
+    const error = new Error(message);
+    error.name = 'AbortError';
+    return error;
+}
+
+function isAbortError(error) {
+    return error?.name === 'AbortError';
+}
+
+function throwIfAborted(signal) {
+    if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : createAbortError();
+    }
+}
+
 /**
  * 进化系统提示词
  * 参考 A-MEM process_memory() 的进化决策 Prompt
@@ -57,6 +73,7 @@ export async function evolveMemories({
     embeddingConfig,
     options = {},
     customPrompt,
+    signal,
 }) {
     const neighborCount = options.neighborCount ?? 5;
     const stats = { evolved: 0, connections: 0, updates: 0 };
@@ -71,6 +88,7 @@ export async function evolveMemories({
     if (activeNodes.length < 2) return stats; // 至少需要 2 个节点才有进化意义
 
     for (const newId of newNodeIds) {
+        throwIfAborted(signal);
         const newNode = getNode(graph, newId);
         if (!newNode) continue;
 
@@ -86,6 +104,7 @@ export async function evolveMemories({
             embeddingConfig,
             neighborCount,
             candidates,
+            signal,
         );
         if (neighbors.length === 0) continue;
 
@@ -118,6 +137,7 @@ export async function evolveMemories({
                 systemPrompt: customPrompt || EVOLUTION_SYSTEM_PROMPT,
                 userPrompt,
                 maxRetries: 1,
+                signal,
             });
 
             if (!decision || !decision.should_evolve) continue;
@@ -188,6 +208,9 @@ export async function evolveMemories({
             }
 
         } catch (e) {
+            if (isAbortError(e)) {
+                throw e;
+            }
             console.error(`[ST-BME] 记忆进化失败 (${newId}):`, e);
         }
     }

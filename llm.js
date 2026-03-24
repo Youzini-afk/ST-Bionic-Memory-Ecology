@@ -254,6 +254,10 @@ function createCombinedAbortSignal(...signals) {
 // 自动检测：如果 API 不支持 response_format，记住并跳过
 let _jsonModeSupported = true;
 
+function isAbortError(error) {
+    return error?.name === 'AbortError';
+}
+
 async function callDedicatedOpenAICompatible(
     messages,
     { signal, jsonMode = false, maxCompletionTokens = null } = {},
@@ -364,7 +368,7 @@ async function _parseResponse(response) {
  * @param {string} [params.model] - 指定模型（留空使用当前配置）
  * @returns {Promise<object|null>} 解析后的 JSON 对象，或 null
  */
-export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 }) {
+export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2, signal } = {}) {
     let lastFailureReason = '';
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -376,6 +380,7 @@ export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 
                 lastFailureReason,
             );
             const response = await callDedicatedOpenAICompatible(messages, {
+                signal,
                 jsonMode: true,
                 maxCompletionTokens: attempt === 0
                     ? DEFAULT_JSON_COMPLETION_TOKENS
@@ -404,6 +409,9 @@ export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 
                 responseText.slice(0, 200),
             );
         } catch (e) {
+            if (isAbortError(e)) {
+                throw e;
+            }
             console.error(`[ST-BME] LLM 调用失败 (尝试 ${attempt + 1}):`, e);
             lastFailureReason = e?.message || String(e) || 'LLM 调用失败';
         }

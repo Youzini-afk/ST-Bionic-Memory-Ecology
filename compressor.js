@@ -6,6 +6,18 @@ import { callLLMForJSON } from './llm.js';
 import { embedText } from './embedding.js';
 import { isDirectVectorConfig } from './vector-index.js';
 
+function createAbortError(message = '操作已终止') {
+    const error = new Error(message);
+    error.name = 'AbortError';
+    return error;
+}
+
+function throwIfAborted(signal) {
+    if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : createAbortError();
+    }
+}
+
 /**
  * 对指定类型执行层级压缩
  *
@@ -16,7 +28,7 @@ import { isDirectVectorConfig } from './vector-index.js';
  * @param {boolean} [params.force=false] - 忽略阈值强制压缩
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressType({ graph, typeDef, embeddingConfig, force = false, customPrompt }) {
+export async function compressType({ graph, typeDef, embeddingConfig, force = false, customPrompt, signal }) {
     const compression = typeDef.compression;
     if (!compression || compression.mode !== 'hierarchical') {
         return { created: 0, archived: 0 };
@@ -27,6 +39,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
 
     // 从最低层级开始逐层压缩
     for (let level = 0; level < compression.maxDepth; level++) {
+        throwIfAborted(signal);
         const result = await compressLevel({
             graph,
             typeDef,
@@ -34,6 +47,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
             embeddingConfig,
             force,
             customPrompt,
+            signal,
         });
 
         totalCreated += result.created;
@@ -49,8 +63,9 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
 /**
  * 压缩特定层级的节点
  */
-async function compressLevel({ graph, typeDef, level, embeddingConfig, force, customPrompt }) {
+async function compressLevel({ graph, typeDef, level, embeddingConfig, force, customPrompt, signal }) {
     const compression = typeDef.compression;
+    throwIfAborted(signal);
 
     // 获取该层级的活跃叶子节点
     const levelNodes = getActiveNodes(graph, typeDef.id)
@@ -80,7 +95,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force, cu
         if (batch.length < 2) break; // 至少 2 个才压缩
 
         // 调用 LLM 总结
-        const summaryResult = await summarizeBatch(batch, typeDef, customPrompt);
+        const summaryResult = await summarizeBatch(batch, typeDef, customPrompt, signal);
         if (!summaryResult) continue;
 
         // 创建压缩节点
@@ -97,7 +112,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force, cu
 
         // 生成 embedding
         if (isDirectVectorConfig(embeddingConfig) && summaryResult.fields.summary) {
-            const vec = await embedText(summaryResult.fields.summary, embeddingConfig);
+            const vec = await embedText(summaryResult.fields.summary, embeddingConfig, { signal });
             if (vec) compressedNode.embedding = Array.from(vec);
         }
 
@@ -153,7 +168,7 @@ function migrateBatchEdges(graph, batch, compressedNode) {
 /**
  * 调用 LLM 总结一批节点
  */
-async function summarizeBatch(nodes, typeDef, customPrompt) {
+async function summarizeBatch(nodes, typeDef, customPrompt, signal) {
     const nodeDescriptions = nodes.map((n, i) => {
         const fieldsStr = Object.entries(n.fields)
             .filter(([_, v]) => v)
@@ -179,7 +194,7 @@ async function summarizeBatch(nodes, typeDef, customPrompt) {
 
     const userPrompt = `请压缩以下 ${nodes.length} 个 "${typeDef.label}" 节点：\n\n${nodeDescriptions}`;
 
-    return await callLLMForJSON({ systemPrompt, userPrompt, maxRetries: 1 });
+    return await callLLMForJSON({ systemPrompt, userPrompt, maxRetries: 1, signal });
 }
 
 /**
@@ -191,13 +206,14 @@ async function summarizeBatch(nodes, typeDef, customPrompt) {
  * @param {boolean} [force=false]
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressAll(graph, schema, embeddingConfig, force = false, customPrompt) {
+export async function compressAll(graph, schema, embeddingConfig, force = false, customPrompt, signal) {
     let totalCreated = 0;
     let totalArchived = 0;
 
     for (const typeDef of schema) {
+        throwIfAborted(signal);
         if (typeDef.compression?.mode === 'hierarchical') {
-            const result = await compressType({ graph, typeDef, embeddingConfig, force, customPrompt });
+            const result = await compressType({ graph, typeDef, embeddingConfig, force, customPrompt, signal });
             totalCreated += result.created;
             totalArchived += result.archived;
         }
