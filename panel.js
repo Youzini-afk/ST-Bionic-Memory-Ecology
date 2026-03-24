@@ -610,6 +610,7 @@ function _refreshConfigTab() {
         "bme-setting-embed-mode",
         settings.embeddingTransportMode || "backend",
     );
+    _toggleEmbedFields(settings.embeddingTransportMode || "backend");
     _setInputValue(
         "bme-setting-embed-backend-source",
         settings.embeddingBackendSource || "openai",
@@ -681,9 +682,10 @@ function _bindConfigControls() {
     bindText("bme-setting-embed-model", (value) =>
         _updateSettings?.({ embeddingModel: value.trim() }),
     );
-    bindText("bme-setting-embed-mode", (value) =>
-        _updateSettings?.({ embeddingTransportMode: value }),
-    );
+    bindText("bme-setting-embed-mode", (value) => {
+        _updateSettings?.({ embeddingTransportMode: value });
+        _toggleEmbedFields(value);
+    });
     bindText("bme-setting-embed-backend-source", (value) => {
         const patch = { embeddingBackendSource: value };
         const settings = _getSettings?.() || {};
@@ -794,6 +796,13 @@ function _highlightThemeOption(themeName) {
     panelEl.querySelectorAll(".bme-theme-option").forEach((opt) => {
         opt.classList.toggle("active", opt.dataset.theme === themeName);
     });
+}
+
+function _toggleEmbedFields(mode) {
+    const backendEl = document.getElementById("bme-embed-backend-fields");
+    const directEl = document.getElementById("bme-embed-direct-fields");
+    if (backendEl) backendEl.style.display = mode === "backend" ? "" : "none";
+    if (directEl) directEl.style.display = mode === "direct" ? "" : "none";
 }
 
 function _setInputValue(id, value) {
