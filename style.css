@@ -187,6 +187,8 @@
     font-size: 14px;
     font-weight: 600;
     color: var(--bme-primary, #e94560);
+    flex: 1;
+    min-width: 0;
 }
 
 .bme-panel-title i {
@@ -198,6 +200,35 @@
     color: var(--bme-on-surface-dim, rgba(228,225,230,0.6));
     margin-left: 8px;
     font-weight: 400;
+}
+
+.bme-theme-palette {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: 8px;
+}
+
+.bme-theme-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    background: var(--dot-color);
+    cursor: pointer;
+    padding: 0;
+    transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+    box-shadow: 0 0 0 0 transparent;
+}
+
+.bme-theme-dot:hover {
+    transform: scale(1.2);
+    box-shadow: 0 0 6px var(--dot-color);
+}
+
+.bme-theme-dot.active {
+    border-color: var(--bme-on-surface, #e4e1e6);
+    box-shadow: 0 0 8px var(--dot-color);
 }
 
 .bme-panel-close {

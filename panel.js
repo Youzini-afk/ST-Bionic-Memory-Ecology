@@ -633,7 +633,8 @@ function _refreshConfigTab() {
     _setInputValue("bme-setting-compress-prompt", settings.compressPrompt || DEFAULT_PROMPTS.compress);
     _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis);
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
-    _setInputValue("bme-setting-panel-theme", settings.panelTheme || "crimson");
+    // 主题调色盘高亮
+    _highlightThemeDot(settings.panelTheme || "crimson");
 }
 
 function _bindConfigControls() {
@@ -720,9 +721,15 @@ function _bindConfigControls() {
     bindText("bme-setting-reflection-prompt", (value) =>
         _updateSettings?.({ reflectionPrompt: value }),
     );
-    bindText("bme-setting-panel-theme", (value) =>
-        _updateSettings?.({ panelTheme: value }),
-    );
+    // 主题调色盘点击
+    panelEl.querySelectorAll(".bme-theme-dot").forEach((dot) => {
+        dot.addEventListener("click", () => {
+            const theme = dot.dataset.theme;
+            if (!theme) return;
+            _updateSettings?.({ panelTheme: theme });
+            _highlightThemeDot(theme);
+        });
+    });
 
     document.getElementById("bme-test-llm")?.addEventListener("click", async () => {
         await _actionHandlers.testMemoryLLM?.();
@@ -766,6 +773,13 @@ function bindNumber(id, fallback, min, max, onChange) {
 function _setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = String(text);
+}
+
+function _highlightThemeDot(themeName) {
+    if (!panelEl) return;
+    panelEl.querySelectorAll(".bme-theme-dot").forEach((dot) => {
+        dot.classList.toggle("active", dot.dataset.theme === themeName);
+    });
 }
 
 function _setInputValue(id, value) {
