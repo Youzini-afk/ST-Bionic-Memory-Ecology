@@ -548,6 +548,17 @@ function scheduleSendIntentHookRetry(delayMs = 400) {
   }, delayMs);
 }
 
+function registerBeforeCombinePrompts(listener) {
+  const makeFirst = globalThis.eventMakeFirst;
+  if (typeof makeFirst === "function") {
+    return makeFirst(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, listener);
+  }
+
+  console.warn("[ST-BME] eventMakeFirst 不可用，回退到普通事件注册");
+  eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, listener);
+  return null;
+}
+
 function installSendIntentHooks() {
   for (const cleanup of sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length)) {
     try {
@@ -1390,7 +1401,21 @@ function getRecallUserMessageSourceLabel(source) {
   }
 }
 
-function resolveRecallInput(chat, recentContextMessageLimit) {
+function resolveRecallInput(chat, recentContextMessageLimit, override = null) {
+  const overrideText = normalizeRecallInputText(override?.userMessage || "");
+  if (overrideText) {
+    return {
+      userMessage: overrideText,
+      source: String(override?.source || "override"),
+      sourceLabel: String(override?.sourceLabel || "发送前拦截"),
+      recentMessages: buildRecallRecentMessages(
+        chat,
+        recentContextMessageLimit,
+        override?.includeSyntheticUserMessage === false ? "" : overrideText,
+      ),
+    };
+  }
+
   const latestUserMessage = getLatestUserChatMessage(chat);
   const latestUserText = normalizeRecallInputText(latestUserMessage?.mes || "");
   const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
@@ -2123,7 +2148,7 @@ async function runExtraction() {
 /**
  * 召回管线：检索并注入记忆
  */
-async function runRecall() {
+async function runRecall(options = {}) {
   if (isRecalling || !currentGraph) return;
 
   const settings = getSettings();
@@ -2146,7 +2171,7 @@ async function runRecall() {
       0,
       20,
     );
-    const recallInput = resolveRecallInput(chat, recentContextMessageLimit);
+    const recallInput = resolveRecallInput(chat, recentContextMessageLimit, options);
     const userMessage = recallInput.userMessage;
     const recentMessages = recallInput.recentMessages;
 
@@ -2799,10 +2824,7 @@ async function onReembedDirect() {
   if (event_types.MESSAGE_SENT) {
     eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
   }
-  eventSource.on(
-    event_types.GENERATE_BEFORE_COMBINE_PROMPTS,
-    onBeforeCombinePrompts,
-  );
+  registerBeforeCombinePrompts(onBeforeCombinePrompts);
   eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
   eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
   eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
