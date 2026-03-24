@@ -930,6 +930,46 @@
     margin-top: 8px;
 }
 
+.bme-model-fetch-block {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: -2px;
+    margin-bottom: 12px;
+}
+
+.bme-config-secondary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: fit-content;
+    min-height: 38px;
+    padding: 0 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--bme-on-surface);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.bme-config-secondary-btn:hover {
+    border-color: var(--bme-primary);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--bme-primary);
+}
+
+.bme-config-secondary-btn i {
+    font-size: 12px;
+}
+
+.bme-model-select {
+    max-width: 100%;
+}
+
 .bme-config-test-btn {
     display: inline-flex !important;
     flex-direction: row !important;
@@ -1405,6 +1445,10 @@
     }
 
     .bme-config-actions {
+        width: 100%;
+    }
+
+    .bme-config-secondary-btn {
         width: 100%;
     }
 

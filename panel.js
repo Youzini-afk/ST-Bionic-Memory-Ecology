@@ -110,6 +110,9 @@ let graphRenderer = null;
 let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "api";
+let fetchedMemoryLLMModels = [];
+let fetchedBackendEmbeddingModels = [];
+let fetchedDirectEmbeddingModels = [];
 
 
 // 由 index.js 注入的引用
@@ -795,6 +798,7 @@ function _refreshConfigTab() {
     _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis);
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
 
+    _refreshFetchedModelSelects(settings);
     _refreshGuardedConfigStates(settings);
     _refreshStageCardStates(settings);
     _refreshPromptCardStates(settings);
@@ -1063,6 +1067,48 @@ function _bindConfigControls() {
     document.getElementById("bme-test-embedding")?.addEventListener("click", async () => {
         await _actionHandlers.testEmbedding?.();
     });
+    document.getElementById("bme-fetch-llm-models")?.addEventListener("click", async () => {
+        const result = await _actionHandlers.fetchMemoryLLMModels?.();
+        if (!result?.success) return;
+        fetchedMemoryLLMModels = result.models || [];
+        _renderFetchedModelOptions(
+            "bme-select-llm-model",
+            fetchedMemoryLLMModels,
+            (_getSettings?.() || {}).llmModel || "",
+        );
+    });
+    document.getElementById("bme-fetch-embed-backend-models")?.addEventListener("click", async () => {
+        const result = await _actionHandlers.fetchEmbeddingModels?.("backend");
+        if (!result?.success) return;
+        fetchedBackendEmbeddingModels = result.models || [];
+        _renderFetchedModelOptions(
+            "bme-select-embed-backend-model",
+            fetchedBackendEmbeddingModels,
+            (_getSettings?.() || {}).embeddingBackendModel || "",
+        );
+    });
+    document.getElementById("bme-fetch-embed-direct-models")?.addEventListener("click", async () => {
+        const result = await _actionHandlers.fetchEmbeddingModels?.("direct");
+        if (!result?.success) return;
+        fetchedDirectEmbeddingModels = result.models || [];
+        _renderFetchedModelOptions(
+            "bme-select-embed-direct-model",
+            fetchedDirectEmbeddingModels,
+            (_getSettings?.() || {}).embeddingModel || "",
+        );
+    });
+
+    bindSelectModel("bme-select-llm-model", "bme-setting-llm-model", "llmModel");
+    bindSelectModel(
+        "bme-select-embed-backend-model",
+        "bme-setting-embed-backend-model",
+        "embeddingBackendModel",
+    );
+    bindSelectModel(
+        "bme-select-embed-direct-model",
+        "bme-setting-embed-model",
+        "embeddingModel",
+    );
 
     panelEl.dataset.bmeConfigBound = "true";
 }
@@ -1118,6 +1164,17 @@ function bindPromptText(id, settingKey, promptKey) {
         if (!String(element.value || "").trim()) {
             _setInputValue(id, DEFAULT_PROMPTS[promptKey] || "");
         }
+    });
+    element.dataset.bmeBound = "true";
+}
+
+function bindSelectModel(selectId, inputId, settingKey) {
+    const element = document.getElementById(selectId);
+    if (!element || element.dataset.bmeBound === "true") return;
+    element.addEventListener("change", () => {
+        if (!element.value) return;
+        _setInputValue(inputId, element.value);
+        _patchSettings({ [settingKey]: element.value });
     });
     element.dataset.bmeBound = "true";
 }
@@ -1184,6 +1241,57 @@ function _refreshStageCardStates(settings = _getSettings?.() || {}) {
             });
         });
     });
+}
+
+function _refreshFetchedModelSelects(settings = _getSettings?.() || {}) {
+    _renderFetchedModelOptions(
+        "bme-select-llm-model",
+        fetchedMemoryLLMModels,
+        settings.llmModel || "",
+    );
+    _renderFetchedModelOptions(
+        "bme-select-embed-backend-model",
+        fetchedBackendEmbeddingModels,
+        settings.embeddingBackendModel || "",
+    );
+    _renderFetchedModelOptions(
+        "bme-select-embed-direct-model",
+        fetchedDirectEmbeddingModels,
+        settings.embeddingModel || "",
+    );
+}
+
+function _renderFetchedModelOptions(selectId, models, currentValue = "") {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+
+    const normalized = Array.isArray(models) ? models : [];
+    select.innerHTML = "";
+
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = normalized.length
+        ? "从拉取结果中选择模型"
+        : "暂无已拉取模型";
+    select.appendChild(placeholder);
+
+    normalized.forEach((model) => {
+        const option = document.createElement("option");
+        option.value = String(model?.id || "");
+        option.textContent = String(model?.label || model?.id || "");
+        select.appendChild(option);
+    });
+
+    if (
+        currentValue &&
+        normalized.some((model) => String(model?.id || "") === String(currentValue))
+    ) {
+        select.value = String(currentValue);
+    } else {
+        select.value = "";
+    }
+
+    select.style.display = normalized.length > 0 ? "" : "none";
 }
 
 function _refreshPromptCardStates(settings = _getSettings?.() || {}) {

@@ -367,6 +367,15 @@
                       placeholder="gpt-4.1-mini / qwen-max / deepseek-chat"
                     />
                   </div>
+                  <div class="bme-model-fetch-block">
+                    <button class="bme-config-secondary-btn" id="bme-fetch-llm-models" type="button">
+                      <i class="fa-solid fa-rotate"></i>
+                      <span>拉取模型</span>
+                    </button>
+                    <select id="bme-select-llm-model" class="bme-config-input bme-model-select" style="display:none">
+                      <option value="">从拉取结果中选择模型</option>
+                    </select>
+                  </div>
                   <div class="bme-config-actions">
                     <button class="bme-config-test-btn" id="bme-test-llm" type="button">
                       <i class="fa-solid fa-plug"></i>
@@ -417,6 +426,15 @@
                         placeholder="text-embedding-3-small / nomic-embed-text / BAAI/bge-m3"
                       />
                     </div>
+                    <div class="bme-model-fetch-block">
+                      <button class="bme-config-secondary-btn" id="bme-fetch-embed-backend-models" type="button">
+                        <i class="fa-solid fa-rotate"></i>
+                        <span>拉取模型</span>
+                      </button>
+                      <select id="bme-select-embed-backend-model" class="bme-config-input bme-model-select" style="display:none">
+                        <option value="">从拉取结果中选择模型</option>
+                      </select>
+                    </div>
                     <div class="bme-config-row">
                       <label for="bme-setting-embed-backend-url">后端 API 地址</label>
                       <input
@@ -465,6 +483,15 @@
                         type="text"
                         placeholder="text-embedding-3-small"
                       />
+                    </div>
+                    <div class="bme-model-fetch-block">
+                      <button class="bme-config-secondary-btn" id="bme-fetch-embed-direct-models" type="button">
+                        <i class="fa-solid fa-rotate"></i>
+                        <span>拉取模型</span>
+                      </button>
+                      <select id="bme-select-embed-direct-model" class="bme-config-input bme-model-select" style="display:none">
+                        <option value="">从拉取结果中选择模型</option>
+                      </select>
                     </div>
                   </div>
 

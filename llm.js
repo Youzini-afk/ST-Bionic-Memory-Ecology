@@ -27,6 +27,32 @@ function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
     return Boolean(config.apiUrl && config.model);
 }
 
+function normalizeModelList(items = []) {
+    if (!Array.isArray(items)) return [];
+
+    const seen = new Set();
+    const models = [];
+
+    for (const item of items) {
+        let id = "";
+        let label = "";
+
+        if (typeof item === "string") {
+            id = item.trim();
+            label = id;
+        } else if (item && typeof item === "object") {
+            id = String(item.id || item.name || item.value || item.slug || "").trim();
+            label = String(item.name || item.id || item.value || item.slug || "").trim();
+        }
+
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        models.push({ id, label: label || id });
+    }
+
+    return models;
+}
+
 // 自动检测：如果 API 不支持 response_format，记住并跳过
 let _jsonModeSupported = true;
 
@@ -203,6 +229,48 @@ export async function testLLMConnection() {
         return { success: false, mode, error: 'API 返回空结果' };
     } catch (e) {
         return { success: false, mode, error: String(e) };
+    }
+}
+
+export async function fetchMemoryLLMModels() {
+    const config = getMemoryLLMConfig();
+    if (!config.apiUrl) {
+        return {
+            success: false,
+            models: [],
+            error: "请先填写记忆 LLM API 地址",
+        };
+    }
+
+    try {
+        const response = await fetch("/api/backends/chat-completions/status", {
+            method: "POST",
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: chat_completion_sources.OPENAI,
+                reverse_proxy: config.apiUrl,
+                proxy_password: config.apiKey || "",
+            }),
+        });
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const message = payload?.error || payload?.message || response.statusText;
+            return { success: false, models: [], error: message || `HTTP ${response.status}` };
+        }
+
+        const models = normalizeModelList(payload?.data);
+        if (models.length === 0) {
+            return {
+                success: false,
+                models: [],
+                error: "未拉取到可用模型，请检查接口是否支持 /models",
+            };
+        }
+
+        return { success: true, models, error: "" };
+    } catch (error) {
+        return { success: false, models: [], error: String(error) };
     }
 }
 

@@ -30,7 +30,7 @@ import {
   getNode,
 } from "./graph.js";
 import { estimateTokens, formatInjection } from "./injector.js";
-import { testLLMConnection } from "./llm.js";
+import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
@@ -51,6 +51,7 @@ import {
   getVectorIndexStats,
   isBackendVectorConfig,
   isDirectVectorConfig,
+  fetchAvailableEmbeddingModels,
   syncGraphVectorIndex,
   testVectorConnection,
   validateVectorConfig,
@@ -251,8 +252,11 @@ function getSchema() {
   return schema;
 }
 
-function getEmbeddingConfig() {
-  return getVectorConfigFromSettings(getSettings());
+function getEmbeddingConfig(mode = null) {
+  const settings = getSettings();
+  return getVectorConfigFromSettings(
+    mode ? { ...settings, embeddingTransportMode: mode } : settings,
+  );
 }
 
 function getCurrentChatId(context = getContext()) {
@@ -1454,6 +1458,41 @@ async function onTestMemoryLLM() {
   }
 }
 
+async function onFetchMemoryLLMModels() {
+  toastr.info("正在拉取记忆 LLM 模型列表...");
+  const result = await fetchMemoryLLMModels();
+
+  if (result.success) {
+    toastr.success(`已拉取 ${result.models.length} 个记忆 LLM 模型`);
+  } else {
+    toastr.error(`拉取失败: ${result.error}`);
+  }
+
+  return result;
+}
+
+async function onFetchEmbeddingModels(mode = null) {
+  const config = getEmbeddingConfig(mode);
+  const targetMode = mode || config?.mode || "direct";
+  const validation = validateVectorConfig(config);
+  if (!validation.valid) {
+    toastr.warning(validation.error);
+    return { success: false, models: [], error: validation.error };
+  }
+
+  toastr.info("正在拉取 Embedding 模型列表...");
+  const result = await fetchAvailableEmbeddingModels(config);
+
+  if (result.success) {
+    const modeLabel = targetMode === "backend" ? "后端" : "直连";
+    toastr.success(`已拉取 ${result.models.length} 个${modeLabel} Embedding 模型`);
+  } else {
+    toastr.error(`拉取失败: ${result.error}`);
+  }
+
+  return result;
+}
+
 async function onManualExtract() {
   if (isExtracting) return;
   if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
@@ -1650,6 +1689,8 @@ async function onReembedDirect() {
         evolve: onManualEvolve,
         testEmbedding: onTestEmbedding,
         testMemoryLLM: onTestMemoryLLM,
+        fetchMemoryLLMModels: onFetchMemoryLLMModels,
+        fetchEmbeddingModels: onFetchEmbeddingModels,
         rebuildVectorIndex: () => onRebuildVectorIndex(),
         rebuildVectorRange: (range) => onRebuildVectorIndex(range),
         reembedDirect: onReembedDirect,

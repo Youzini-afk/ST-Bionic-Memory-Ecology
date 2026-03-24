@@ -27,6 +27,19 @@ const BACKEND_SOURCES_REQUIRING_API_URL = new Set([
   "vllm",
 ]);
 
+const MODEL_LIST_ENDPOINTS = {
+  openrouter: "/api/openrouter/models/embedding",
+  chutes: "/api/openai/chutes/models/embedding",
+  nanogpt: "/api/openai/nanogpt/models/embedding",
+  electronhub: "/api/openai/electronhub/models",
+};
+
+const BACKEND_STATUS_MODEL_SOURCES = {
+  openai: "openai",
+  cohere: "cohere",
+  mistral: "mistralai",
+};
+
 export const BACKEND_DEFAULT_MODELS = {
   openai: "text-embedding-3-small",
   openrouter: "openai/text-embedding-3-small",
@@ -638,4 +651,196 @@ export function getVectorIndexStats(graph) {
     return { total: 0, indexed: 0, stale: 0, pending: 0 };
   }
   return state.lastStats || { total: 0, indexed: 0, stale: 0, pending: 0 };
+}
+
+function normalizeModelOptions(items = [], { embeddingOnly = false } = {}) {
+  if (!Array.isArray(items)) return [];
+
+  const candidates = [];
+  for (const item of items) {
+    if (typeof item === "string") {
+      const id = item.trim();
+      if (id) candidates.push({ id, label: id, raw: item });
+      continue;
+    }
+
+    if (!item || typeof item !== "object") continue;
+    const id = String(item.id || item.name || item.label || item.slug || item.value || "").trim();
+    const label = String(item.label || item.name || item.id || item.slug || item.value || "").trim();
+    if (!id) continue;
+
+    if (
+      embeddingOnly &&
+      Array.isArray(item.endpoints) &&
+      !item.endpoints.includes("/v1/embeddings")
+    ) {
+      continue;
+    }
+
+    candidates.push({ id, label: label || id, raw: item });
+  }
+
+  const embeddingRegex =
+    /(embed|embedding|bge|e5|gte|nomic|voyage|mxbai|jina|minilm)/i;
+  const embeddingTagged = candidates.filter((item) => embeddingRegex.test(item.id) || embeddingRegex.test(item.label));
+  const source = embeddingTagged.length > 0 ? embeddingTagged : candidates;
+
+  const seen = new Set();
+  return source
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .map(({ id, label }) => ({ id, label }));
+}
+
+async function fetchJsonEndpoint(url, { method = "POST" } = {}) {
+  const response = await fetch(url, {
+    method,
+    headers: getRequestHeaders({ omitContentType: true }),
+  });
+
+  const payload = await response.json().catch(() => []);
+  if (!response.ok) {
+    throw new Error(
+      (typeof payload === "object" && payload?.error) ||
+        response.statusText ||
+        `HTTP ${response.status}`,
+    );
+  }
+
+  return payload;
+}
+
+async function fetchBackendStatusModelList(source) {
+  const chatCompletionSource = BACKEND_STATUS_MODEL_SOURCES[source];
+  if (!chatCompletionSource) {
+    throw new Error("当前后端向量源暂不支持自动拉取模型，请手动填写");
+  }
+
+  const response = await fetch("/api/backends/chat-completions/status", {
+    method: "POST",
+    headers: getRequestHeaders(),
+    body: JSON.stringify({
+      chat_completion_source: chatCompletionSource,
+    }),
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.error) {
+    throw new Error(
+      payload?.message || payload?.error || response.statusText || `HTTP ${response.status}`,
+    );
+  }
+
+  return normalizeModelOptions(payload?.data || payload, { embeddingOnly: false });
+}
+
+async function fetchOpenAICompatibleModelList(apiUrl, apiKey = "") {
+  const normalizedUrl = normalizeOpenAICompatibleBaseUrl(apiUrl);
+  if (!normalizedUrl) {
+    throw new Error("请先填写 API 地址");
+  }
+
+  const response = await fetch(`${normalizedUrl}/models`, {
+    method: "GET",
+    headers: {
+      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    },
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || payload?.message || response.statusText);
+  }
+
+  return normalizeModelOptions(payload?.data || payload, { embeddingOnly: false });
+}
+
+async function fetchOllamaModelList(apiUrl) {
+  const normalizedUrl = normalizeOpenAICompatibleBaseUrl(apiUrl).replace(/\/v1$/i, "");
+  if (!normalizedUrl) {
+    throw new Error("请先填写 Ollama API 地址");
+  }
+
+  const response = await fetch(`${normalizedUrl}/api/tags`, { method: "GET" });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload?.error || payload?.message || response.statusText);
+  }
+
+  return normalizeModelOptions(
+    Array.isArray(payload?.models)
+      ? payload.models.map((item) => ({
+          id: item?.model || item?.name,
+          name: item?.model || item?.name,
+        }))
+      : [],
+    { embeddingOnly: false },
+  );
+}
+
+export async function fetchAvailableEmbeddingModels(config) {
+  const validation = validateVectorConfig(config);
+  if (!validation.valid) {
+    return { success: false, models: [], error: validation.error };
+  }
+
+  try {
+    if (isDirectVectorConfig(config)) {
+      const models = normalizeModelOptions(
+        await fetchOpenAICompatibleModelList(config.apiUrl, config.apiKey),
+      );
+      if (models.length === 0) {
+        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+      }
+      return { success: true, models, error: "" };
+    }
+
+    if (config.source === "ollama") {
+      const models = await fetchOllamaModelList(config.apiUrl);
+      if (models.length === 0) {
+        return { success: false, models: [], error: "未拉取到可用 Ollama 模型" };
+      }
+      return { success: true, models, error: "" };
+    }
+
+    if (MODEL_LIST_ENDPOINTS[config.source]) {
+      const payload = await fetchJsonEndpoint(MODEL_LIST_ENDPOINTS[config.source]);
+      const models = normalizeModelOptions(payload, {
+        embeddingOnly: config.source === "electronhub",
+      });
+      if (models.length === 0) {
+        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+      }
+      return { success: true, models, error: "" };
+    }
+
+    if (BACKEND_STATUS_MODEL_SOURCES[config.source]) {
+      const models = await fetchBackendStatusModelList(config.source);
+      if (models.length === 0) {
+        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+      }
+      return { success: true, models, error: "" };
+    }
+
+    if (config.apiUrl) {
+      const models = normalizeModelOptions(
+        await fetchOpenAICompatibleModelList(config.apiUrl),
+      );
+      if (models.length === 0) {
+        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+      }
+      return { success: true, models, error: "" };
+    }
+
+    return {
+      success: false,
+      models: [],
+      error: "当前后端向量源暂不支持自动拉取模型，请手动填写",
+    };
+  } catch (error) {
+    return { success: false, models: [], error: String(error) };
+  }
 }
