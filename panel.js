@@ -108,6 +108,8 @@ let panelEl = null;
 let overlayEl = null;
 let graphRenderer = null;
 let mobileGraphRenderer = null;
+let currentTabId = "dashboard";
+let currentConfigSectionId = "api";
 
 
 // 由 index.js 注入的引用
@@ -167,6 +169,10 @@ export async function initPanel({
     _bindGraphControls();
     _bindActions();
     _bindConfigControls();
+    currentTabId =
+        panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
+    _applyWorkspaceMode();
+    _syncConfigSectionState();
 }
 
 /**
@@ -192,10 +198,11 @@ export function openPanel() {
         mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
     }
 
-    _refreshDashboard();
+    const activeTabId =
+        panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
+    _switchTab(activeTabId);
     _refreshGraph();
     _buildLegend();
-    _refreshConfigTab();
 }
 
 /**
@@ -213,6 +220,7 @@ export function updatePanelTheme(themeName) {
     graphRenderer?.setTheme(themeName);
     mobileGraphRenderer?.setTheme(themeName);
     _buildLegend();
+    _highlightThemeChoice(themeName);
 }
 
 // ==================== Tab 切换 ====================
@@ -227,15 +235,18 @@ function _bindTabs() {
 }
 
 function _switchTab(tabId) {
+    currentTabId = tabId || "dashboard";
     panelEl?.querySelectorAll(".bme-tab-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.tab === tabId);
+        btn.classList.toggle("active", btn.dataset.tab === currentTabId);
     });
 
     panelEl?.querySelectorAll(".bme-tab-pane").forEach((pane) => {
-        pane.classList.toggle("active", pane.id === `bme-pane-${tabId}`);
+        pane.classList.toggle("active", pane.id === `bme-pane-${currentTabId}`);
     });
 
-    switch (tabId) {
+    _applyWorkspaceMode();
+
+    switch (currentTabId) {
         case "dashboard":
             _refreshDashboard();
             break;
@@ -251,6 +262,33 @@ function _switchTab(tabId) {
         default:
             break;
     }
+}
+
+function _applyWorkspaceMode() {
+    if (!panelEl) return;
+    const isConfig = currentTabId === "config";
+    panelEl.classList.toggle("config-mode", isConfig);
+}
+
+function _switchConfigSection(sectionId) {
+    currentConfigSectionId = sectionId || "api";
+    _syncConfigSectionState();
+}
+
+function _syncConfigSectionState() {
+    if (!panelEl) return;
+    panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
+        btn.classList.toggle(
+            "active",
+            btn.dataset.configSection === currentConfigSectionId,
+        );
+    });
+    panelEl.querySelectorAll(".bme-config-section").forEach((section) => {
+        section.classList.toggle(
+            "active",
+            section.dataset.configSection === currentConfigSectionId,
+        );
+    });
 }
 
 // ==================== 总览 Tab ====================
@@ -624,18 +662,87 @@ function _refreshConfigTab() {
 
     _setCheckboxValue("bme-setting-enabled", settings.enabled ?? false);
     _setCheckboxValue("bme-setting-recall-enabled", settings.recallEnabled ?? true);
+    _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
+    _setCheckboxValue("bme-setting-evolution-enabled", settings.enableEvolution ?? true);
+    _setCheckboxValue(
+        "bme-setting-precise-conflict-enabled",
+        settings.enablePreciseConflict ?? true,
+    );
+    _setCheckboxValue("bme-setting-synopsis-enabled", settings.enableSynopsis ?? true);
+    _setCheckboxValue(
+        "bme-setting-visibility-enabled",
+        settings.enableVisibility ?? false,
+    );
+    _setCheckboxValue(
+        "bme-setting-cross-recall-enabled",
+        settings.enableCrossRecall ?? false,
+    );
+    _setCheckboxValue(
+        "bme-setting-smart-trigger-enabled",
+        settings.enableSmartTrigger ?? false,
+    );
+    _setCheckboxValue(
+        "bme-setting-sleep-cycle-enabled",
+        settings.enableSleepCycle ?? false,
+    );
+    _setCheckboxValue(
+        "bme-setting-prob-recall-enabled",
+        settings.enableProbRecall ?? false,
+    );
+    _setCheckboxValue(
+        "bme-setting-reflection-enabled",
+        settings.enableReflection ?? false,
+    );
+
     _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
     _setInputValue(
         "bme-setting-extract-context-turns",
         settings.extractContextTurns ?? 2,
     );
+    _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 15);
+    _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
     _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 4);
+    _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
+    _setInputValue("bme-setting-vector-weight", settings.vectorWeight ?? 0.3);
+    _setInputValue(
+        "bme-setting-importance-weight",
+        settings.importanceWeight ?? 0.1,
+    );
+    _setInputValue(
+        "bme-setting-evo-neighbor-count",
+        settings.evoNeighborCount ?? 5,
+    );
+    _setInputValue(
+        "bme-setting-evo-consolidate-every",
+        settings.evoConsolidateEvery ?? 50,
+    );
+    _setInputValue(
+        "bme-setting-conflict-threshold",
+        settings.conflictThreshold ?? 0.85,
+    );
+    _setInputValue("bme-setting-synopsis-every", settings.synopsisEveryN ?? 5);
+    _setInputValue(
+        "bme-setting-trigger-patterns",
+        settings.triggerPatterns || "",
+    );
+    _setInputValue(
+        "bme-setting-smart-trigger-threshold",
+        settings.smartTriggerThreshold ?? 2,
+    );
+    _setInputValue(
+        "bme-setting-forget-threshold",
+        settings.forgetThreshold ?? 0.5,
+    );
+    _setInputValue("bme-setting-sleep-every", settings.sleepEveryN ?? 10);
+    _setInputValue(
+        "bme-setting-prob-recall-chance",
+        settings.probRecallChance ?? 0.15,
+    );
+    _setInputValue("bme-setting-reflect-every", settings.reflectEveryN ?? 10);
 
     _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
     _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
     _setInputValue("bme-setting-llm-model", settings.llmModel || "");
-    _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
-    _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
 
     _setInputValue("bme-setting-embed-url", settings.embeddingApiUrl || "");
     _setInputValue("bme-setting-embed-key", settings.embeddingApiKey || "");
@@ -671,96 +778,221 @@ function _refreshConfigTab() {
     _setInputValue("bme-setting-compress-prompt", settings.compressPrompt || DEFAULT_PROMPTS.compress);
     _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis);
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
-    // 主题下拉菜单高亮
-    _highlightThemeOption(settings.panelTheme || "crimson");
+
+    _refreshGuardedConfigStates(settings);
+    _refreshPromptCardStates(settings);
+    _highlightThemeChoice(settings.panelTheme || "crimson");
+    _syncConfigSectionState();
 }
 
 function _bindConfigControls() {
     if (!panelEl || panelEl.dataset.bmeConfigBound === "true") return;
 
-    bindCheckbox("bme-setting-enabled", (checked) =>
-        _updateSettings?.({ enabled: checked }),
+    panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
+        if (btn.dataset.bmeBound === "true") return;
+        btn.addEventListener("click", () => {
+            _switchConfigSection(btn.dataset.configSection || "api");
+        });
+        btn.dataset.bmeBound = "true";
+    });
+
+    bindCheckbox("bme-setting-enabled", (checked) => {
+        _patchSettings({ enabled: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-recall-enabled", (checked) => {
+        _patchSettings({ recallEnabled: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-recall-llm", (checked) => {
+        _patchSettings({ recallEnableLLM: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-evolution-enabled", (checked) => {
+        _patchSettings({ enableEvolution: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-precise-conflict-enabled", (checked) => {
+        _patchSettings({ enablePreciseConflict: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-synopsis-enabled", (checked) => {
+        _patchSettings({ enableSynopsis: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-visibility-enabled", (checked) =>
+        _patchSettings({ enableVisibility: checked }),
     );
-    bindCheckbox("bme-setting-recall-enabled", (checked) =>
-        _updateSettings?.({ recallEnabled: checked }),
+    bindCheckbox("bme-setting-cross-recall-enabled", (checked) =>
+        _patchSettings({ enableCrossRecall: checked }),
     );
+    bindCheckbox("bme-setting-smart-trigger-enabled", (checked) => {
+        _patchSettings({ enableSmartTrigger: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-sleep-cycle-enabled", (checked) => {
+        _patchSettings({ enableSleepCycle: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-prob-recall-enabled", (checked) => {
+        _patchSettings({ enableProbRecall: checked });
+        _refreshGuardedConfigStates();
+    });
+    bindCheckbox("bme-setting-reflection-enabled", (checked) => {
+        _patchSettings({ enableReflection: checked });
+        _refreshGuardedConfigStates();
+    });
+
     bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
-        _updateSettings?.({ extractEvery: value }),
+        _patchSettings({ extractEvery: value }),
     );
     bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
-        _updateSettings?.({ extractContextTurns: value }),
+        _patchSettings({ extractContextTurns: value }),
+    );
+    bindNumber("bme-setting-recall-top-k", 15, 1, 100, (value) =>
+        _patchSettings({ recallTopK: value }),
+    );
+    bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
+        _patchSettings({ recallMaxNodes: value }),
     );
     bindNumber("bme-setting-inject-depth", 4, 0, 9999, (value) =>
-        _updateSettings?.({ injectDepth: value }),
+        _patchSettings({ injectDepth: value }),
+    );
+    bindFloat("bme-setting-graph-weight", 0.6, 0, 1, (value) =>
+        _patchSettings({ graphWeight: value }),
+    );
+    bindFloat("bme-setting-vector-weight", 0.3, 0, 1, (value) =>
+        _patchSettings({ vectorWeight: value }),
+    );
+    bindFloat("bme-setting-importance-weight", 0.1, 0, 1, (value) =>
+        _patchSettings({ importanceWeight: value }),
+    );
+    bindNumber("bme-setting-evo-neighbor-count", 5, 1, 20, (value) =>
+        _patchSettings({ evoNeighborCount: value }),
+    );
+    bindNumber("bme-setting-evo-consolidate-every", 50, 1, 500, (value) =>
+        _patchSettings({ evoConsolidateEvery: value }),
+    );
+    bindFloat("bme-setting-conflict-threshold", 0.85, 0.5, 0.99, (value) =>
+        _patchSettings({ conflictThreshold: value }),
+    );
+    bindNumber("bme-setting-synopsis-every", 5, 1, 100, (value) =>
+        _patchSettings({ synopsisEveryN: value }),
+    );
+    bindText("bme-setting-trigger-patterns", (value) =>
+        _patchSettings({ triggerPatterns: value }),
+    );
+    bindNumber("bme-setting-smart-trigger-threshold", 2, 1, 10, (value) =>
+        _patchSettings({ smartTriggerThreshold: value }),
+    );
+    bindFloat("bme-setting-forget-threshold", 0.5, 0.1, 1, (value) =>
+        _patchSettings({ forgetThreshold: value }),
+    );
+    bindNumber("bme-setting-sleep-every", 10, 1, 200, (value) =>
+        _patchSettings({ sleepEveryN: value }),
+    );
+    bindFloat("bme-setting-prob-recall-chance", 0.15, 0.01, 0.5, (value) =>
+        _patchSettings({ probRecallChance: value }),
+    );
+    bindNumber("bme-setting-reflect-every", 10, 1, 200, (value) =>
+        _patchSettings({ reflectEveryN: value }),
     );
 
     bindText("bme-setting-llm-url", (value) =>
-        _updateSettings?.({ llmApiUrl: value.trim() }),
+        _patchSettings({ llmApiUrl: value.trim() }),
     );
     bindText("bme-setting-llm-key", (value) =>
-        _updateSettings?.({ llmApiKey: value.trim() }),
+        _patchSettings({ llmApiKey: value.trim() }),
     );
     bindText("bme-setting-llm-model", (value) =>
-        _updateSettings?.({ llmModel: value.trim() }),
-    );
-    bindCheckbox("bme-setting-recall-llm", (checked) =>
-        _updateSettings?.({ recallEnableLLM: checked }),
-    );
-    bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
-        _updateSettings?.({ recallMaxNodes: value }),
+        _patchSettings({ llmModel: value.trim() }),
     );
 
     bindText("bme-setting-embed-url", (value) =>
-        _updateSettings?.({ embeddingApiUrl: value.trim() }),
+        _patchSettings({ embeddingApiUrl: value.trim() }),
     );
     bindText("bme-setting-embed-key", (value) =>
-        _updateSettings?.({ embeddingApiKey: value.trim() }),
+        _patchSettings({ embeddingApiKey: value.trim() }),
     );
     bindText("bme-setting-embed-model", (value) =>
-        _updateSettings?.({ embeddingModel: value.trim() }),
+        _patchSettings({ embeddingModel: value.trim() }),
     );
     bindText("bme-setting-embed-mode", (value) => {
-        _updateSettings?.({ embeddingTransportMode: value });
+        _patchSettings({ embeddingTransportMode: value });
         _toggleEmbedFields(value);
     });
     bindText("bme-setting-embed-backend-source", (value) => {
-        const patch = { embeddingBackendSource: value };
         const settings = _getSettings?.() || {};
+        const patch = { embeddingBackendSource: value };
         const suggestedModel = getSuggestedBackendModel(value);
-        if (!settings.embeddingBackendModel || settings.embeddingBackendModel === getSuggestedBackendModel(settings.embeddingBackendSource || "openai")) {
+        if (
+            !settings.embeddingBackendModel ||
+            settings.embeddingBackendModel ===
+                getSuggestedBackendModel(settings.embeddingBackendSource || "openai")
+        ) {
             patch.embeddingBackendModel = suggestedModel;
         }
-        _updateSettings?.(patch);
-        _setInputValue("bme-setting-embed-backend-model", patch.embeddingBackendModel || settings.embeddingBackendModel || "");
+        _patchSettings(patch);
+        _setInputValue(
+            "bme-setting-embed-backend-model",
+            patch.embeddingBackendModel || settings.embeddingBackendModel || "",
+        );
     });
     bindText("bme-setting-embed-backend-model", (value) =>
-        _updateSettings?.({ embeddingBackendModel: value.trim() }),
+        _patchSettings({ embeddingBackendModel: value.trim() }),
     );
     bindText("bme-setting-embed-backend-url", (value) =>
-        _updateSettings?.({ embeddingBackendApiUrl: value.trim() }),
+        _patchSettings({ embeddingBackendApiUrl: value.trim() }),
     );
     bindCheckbox("bme-setting-embed-auto-suffix", (checked) =>
-        _updateSettings?.({ embeddingAutoSuffix: checked }),
+        _patchSettings({ embeddingAutoSuffix: checked }),
     );
-    bindText("bme-setting-extract-prompt", (value) =>
-        _updateSettings?.({ extractPrompt: value }),
+
+    bindPromptText(
+        "bme-setting-extract-prompt",
+        "extractPrompt",
+        "extract",
     );
-    bindText("bme-setting-recall-prompt", (value) =>
-        _updateSettings?.({ recallPrompt: value }),
+    bindPromptText(
+        "bme-setting-recall-prompt",
+        "recallPrompt",
+        "recall",
     );
-    bindText("bme-setting-evolution-prompt", (value) =>
-        _updateSettings?.({ evolutionPrompt: value }),
+    bindPromptText(
+        "bme-setting-evolution-prompt",
+        "evolutionPrompt",
+        "evolution",
     );
-    bindText("bme-setting-compress-prompt", (value) =>
-        _updateSettings?.({ compressPrompt: value }),
+    bindPromptText(
+        "bme-setting-compress-prompt",
+        "compressPrompt",
+        "compress",
     );
-    bindText("bme-setting-synopsis-prompt", (value) =>
-        _updateSettings?.({ synopsisPrompt: value }),
+    bindPromptText(
+        "bme-setting-synopsis-prompt",
+        "synopsisPrompt",
+        "synopsis",
     );
-    bindText("bme-setting-reflection-prompt", (value) =>
-        _updateSettings?.({ reflectionPrompt: value }),
+    bindPromptText(
+        "bme-setting-reflection-prompt",
+        "reflectionPrompt",
+        "reflection",
     );
-    // 主题下拉菜单
+
+    panelEl.querySelectorAll(".bme-prompt-reset").forEach((button) => {
+        if (button.dataset.bmeBound === "true") return;
+        button.addEventListener("click", () => {
+            const settingKey = button.dataset.settingKey;
+            const promptKey = button.dataset.defaultPrompt;
+            const targetId = button.dataset.targetId;
+            if (!settingKey || !promptKey || !targetId) return;
+            _patchSettings({ [settingKey]: "" }, { refreshPrompts: true });
+            _setInputValue(targetId, DEFAULT_PROMPTS[promptKey] || "");
+            _refreshPromptCardStates();
+        });
+        button.dataset.bmeBound = "true";
+    });
+
     const pickerBtn = document.getElementById("bme-theme-picker-btn");
     const dropdown = document.getElementById("bme-theme-dropdown");
     if (pickerBtn && dropdown) {
@@ -772,17 +1004,25 @@ function _bindConfigControls() {
             opt.addEventListener("click", () => {
                 const theme = opt.dataset.theme;
                 if (!theme) return;
-                _updateSettings?.({ panelTheme: theme });
-                _highlightThemeOption(theme);
+                _patchSettings({ panelTheme: theme }, { refreshTheme: true });
                 dropdown.classList.remove("open");
             });
         });
-        // 点击外部关闭
         document.addEventListener("click", () => {
             dropdown.classList.remove("open");
         });
         dropdown.addEventListener("click", (e) => e.stopPropagation());
     }
+
+    panelEl.querySelectorAll(".bme-theme-card").forEach((card) => {
+        if (card.dataset.bmeBound === "true") return;
+        card.addEventListener("click", () => {
+            const theme = card.dataset.theme;
+            if (!theme) return;
+            _patchSettings({ panelTheme: theme }, { refreshTheme: true });
+        });
+        card.dataset.bmeBound = "true";
+    });
 
     document.getElementById("bme-test-llm")?.addEventListener("click", async () => {
         await _actionHandlers.testMemoryLLM?.();
@@ -821,6 +1061,34 @@ function bindNumber(id, fallback, min, max, onChange) {
     element.dataset.bmeBound = "true";
 }
 
+function bindFloat(id, fallback, min, max, onChange) {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.bmeBound === "true") return;
+    element.addEventListener("input", () => {
+        let value = Number.parseFloat(element.value);
+        if (!Number.isFinite(value)) value = fallback;
+        value = Math.min(max, Math.max(min, value));
+        onChange(value);
+    });
+    element.dataset.bmeBound = "true";
+}
+
+function bindPromptText(id, settingKey, promptKey) {
+    const element = document.getElementById(id);
+    if (!element || element.dataset.bmeBound === "true") return;
+    const update = () => {
+        _patchSettings({ [settingKey]: element.value }, { refreshPrompts: true });
+    };
+    element.addEventListener("input", update);
+    element.addEventListener("change", update);
+    element.addEventListener("blur", () => {
+        if (!String(element.value || "").trim()) {
+            _setInputValue(id, DEFAULT_PROMPTS[promptKey] || "");
+        }
+    });
+    element.dataset.bmeBound = "true";
+}
+
 // ==================== 工具函数 ====================
 
 function _setText(id, text) {
@@ -828,10 +1096,56 @@ function _setText(id, text) {
     if (el) el.textContent = String(text);
 }
 
-function _highlightThemeOption(themeName) {
+function _patchSettings(patch = {}, options = {}) {
+    const settings = _updateSettings?.(patch) || _getSettings?.() || {};
+    if (options.refreshGuards) _refreshGuardedConfigStates(settings);
+    if (options.refreshPrompts) _refreshPromptCardStates(settings);
+    if (options.refreshTheme) _highlightThemeChoice(settings.panelTheme || "crimson");
+    return settings;
+}
+
+function _highlightThemeChoice(themeName) {
     if (!panelEl) return;
     panelEl.querySelectorAll(".bme-theme-option").forEach((opt) => {
         opt.classList.toggle("active", opt.dataset.theme === themeName);
+    });
+    panelEl.querySelectorAll(".bme-theme-card").forEach((card) => {
+        card.classList.toggle("active", card.dataset.theme === themeName);
+    });
+}
+
+function _refreshGuardedConfigStates(settings = _getSettings?.() || {}) {
+    if (!panelEl) return;
+    panelEl.querySelectorAll(".bme-guarded-card").forEach((card) => {
+        const guardKeys = String(card.dataset.guardSettings || "")
+            .split(",")
+            .map((key) => key.trim())
+            .filter(Boolean);
+        const enabled = guardKeys.every((key) => Boolean(settings[key]));
+        card.classList.toggle("is-disabled", !enabled);
+        const note = card.querySelector(".bme-config-guard-note");
+        note?.classList.toggle("visible", !enabled);
+        card.querySelectorAll("input, select, textarea, button").forEach((element) => {
+            element.disabled = !enabled;
+        });
+    });
+}
+
+function _refreshPromptCardStates(settings = _getSettings?.() || {}) {
+    if (!panelEl) return;
+    panelEl.querySelectorAll(".bme-prompt-card").forEach((card) => {
+        const settingKey = card.dataset.settingKey;
+        const statusEl = card.querySelector(".bme-prompt-status");
+        const resetButton = card.querySelector(".bme-prompt-reset");
+        const isCustom = Boolean(String(settings?.[settingKey] || "").trim());
+        card.classList.toggle("is-custom", isCustom);
+        if (statusEl) {
+            statusEl.textContent = isCustom ? "已自定义" : "默认";
+            statusEl.classList.toggle("is-custom", isCustom);
+        }
+        if (resetButton) {
+            resetButton.disabled = !isCustom;
+        }
     });
 }
 

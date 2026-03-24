@@ -1,132 +1,5 @@
 /* ST-BME 样式 */
 
-.st-bme-settings {
-    --bme-accent: #e94560;
-    --bme-accent-dim: rgba(233, 69, 96, 0.15);
-    --bme-surface: rgba(255, 255, 255, 0.03);
-    --bme-border: rgba(255, 255, 255, 0.08);
-}
-
-.st-bme-section {
-    padding: 8px 0;
-}
-
-.st-bme-section-title {
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--bme-accent);
-    margin: 0 0 8px 0;
-    font-weight: 600;
-}
-
-.st-bme-section-title i {
-    margin-right: 4px;
-}
-
-.st-bme-hr {
-    border: none;
-    border-top: 1px solid var(--bme-border);
-    margin: 4px 0;
-}
-
-.st-bme-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 4px 0;
-}
-
-.st-bme-row label {
-    font-size: 12px;
-    flex-shrink: 0;
-    min-width: 100px;
-}
-
-.st-bme-row .text_pole {
-    max-width: 180px;
-}
-
-.st-bme-row .checkbox_label {
-    justify-content: flex-start;
-    gap: 8px;
-}
-
-.st-bme-row.st-bme-indent {
-    padding-left: 24px;
-}
-
-.st-bme-btn-group {
-    display: flex;
-    gap: 6px;
-    margin: 4px 0;
-}
-
-.st-bme-btn-group .menu_button {
-    flex: 1;
-    font-size: 12px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--bme-border);
-    transition: all 0.2s ease;
-}
-
-.st-bme-btn-group .menu_button:hover {
-    border-color: var(--bme-accent);
-    background: var(--bme-accent-dim);
-}
-
-.st-bme-btn-group .menu_button i {
-    margin-right: 4px;
-}
-
-/* v2: 子分区 */
-.st-bme-subsection {
-    position: relative;
-    padding: 6px 0 6px 4px;
-    margin: 4px 0;
-    border-left: 2px solid var(--bme-border);
-}
-
-/* v2: 优先级 badge */
-.st-bme-badge {
-    display: inline-block;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.5px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    margin-bottom: 4px;
-}
-
-.st-bme-badge-p0 {
-    background: rgba(233, 69, 96, 0.25);
-    color: #e94560;
-    border: 1px solid rgba(233, 69, 96, 0.4);
-}
-
-.st-bme-badge-p1 {
-    background: rgba(255, 193, 7, 0.2);
-    color: #ffc107;
-    border: 1px solid rgba(255, 193, 7, 0.35);
-}
-
-.st-bme-badge-p2 {
-    background: rgba(76, 175, 80, 0.15);
-    color: #66bb6a;
-    border: 1px solid rgba(76, 175, 80, 0.3);
-}
-
-/* v2: 技术来源提示 */
-.st-bme-hint {
-    font-size: 10px;
-    color: rgba(255, 255, 255, 0.35);
-    font-style: italic;
-}
-
-/* ==================== 操控面板 ==================== */
-
 /* --- Overlay --- */
 #st-bme-panel-overlay {
     position: fixed;
@@ -404,6 +277,89 @@
     padding: 12px;
 }
 
+.bme-config-sidebar {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 12px 16px;
+    overflow-y: auto;
+}
+
+.bme-config-sidebar-header {
+    padding: 0 2px;
+}
+
+.bme-config-sidebar-kicker,
+.bme-config-workspace-kicker,
+.bme-config-section-kicker {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    color: var(--bme-primary);
+    margin-bottom: 6px;
+}
+
+.bme-config-sidebar-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--bme-on-surface);
+    margin-bottom: 6px;
+}
+
+.bme-config-sidebar-help,
+.bme-config-workspace-desc,
+.bme-config-section-desc,
+.bme-config-card-subtitle {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--bme-on-surface-dim);
+}
+
+.bme-config-nav {
+    display: flex;
+    gap: 8px;
+}
+
+.bme-config-nav-desktop {
+    flex-direction: column;
+}
+
+.bme-config-nav-mobile {
+    display: none;
+}
+
+.bme-config-nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 1px solid var(--bme-border);
+    background: var(--bme-surface-low);
+    color: var(--bme-on-surface-dim);
+    border-radius: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, color 0.15s, transform 0.15s;
+    font-size: 12px;
+    text-align: left;
+}
+
+.bme-config-nav-btn:hover {
+    border-color: var(--bme-primary);
+    color: var(--bme-on-surface);
+    background: var(--bme-surface-high);
+}
+
+.bme-config-nav-btn.active {
+    border-color: var(--bme-primary);
+    color: var(--bme-primary);
+    background: var(--bme-primary-dim);
+}
+
+.bme-config-nav-btn i {
+    font-size: 13px;
+}
+
 .bme-tab-pane {
     display: none;
 }
@@ -515,6 +471,41 @@
     position: relative;
     background: var(--bme-surface-lowest, #0e0e11);
     overflow: hidden;
+}
+
+.bme-graph-workspace {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+}
+
+.bme-config-workspace {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    background:
+        radial-gradient(circle at top right, rgba(233, 69, 96, 0.1), transparent 32%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 20%),
+        var(--bme-surface-lowest, #0e0e11);
+}
+
+#st-bme-panel.config-mode .bme-tab-content {
+    display: none;
+}
+
+#st-bme-panel.config-mode .bme-config-sidebar {
+    display: flex;
+}
+
+#st-bme-panel.config-mode .bme-graph-workspace {
+    display: none;
+}
+
+#st-bme-panel.config-mode .bme-config-workspace {
+    display: flex;
 }
 
 .bme-graph-toolbar {
@@ -792,13 +783,82 @@
     background: rgba(255, 82, 82, 0.1);
 }
 
-/* --- Config Tab --- */
-.bme-config-card {
-    background: var(--bme-surface-low);
-    border: 1px solid var(--bme-border);
-    border-radius: 8px;
-    padding: 12px;
-    margin-bottom: 10px;
+/* --- Config Workspace --- */
+.bme-config-workspace-header {
+    padding: 20px 22px 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    flex-shrink: 0;
+}
+
+.bme-config-workspace-title,
+.bme-config-section-title {
+    margin: 0;
+    color: var(--bme-on-surface);
+}
+
+.bme-config-workspace-title {
+    font-size: 24px;
+    line-height: 1.2;
+    margin-bottom: 8px;
+}
+
+.bme-config-sections {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px 22px 22px;
+}
+
+.bme-config-section {
+    display: none;
+}
+
+.bme-config-section.active {
+    display: block;
+}
+
+.bme-config-section-head {
+    margin-bottom: 18px;
+}
+
+.bme-config-section-title {
+    font-size: 20px;
+    line-height: 1.25;
+    margin-bottom: 8px;
+}
+
+.bme-config-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 14px;
+}
+
+.bme-config-grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.bme-config-card,
+.bme-prompt-card {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.bme-config-card-head,
+.bme-prompt-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.bme-config-card-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--bme-on-surface);
+    margin-bottom: 4px;
 }
 
 .bme-config-help {
@@ -812,7 +872,11 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
+}
+
+.bme-config-row:last-child {
+    margin-bottom: 0;
 }
 
 .bme-config-row.inline {
@@ -821,21 +885,21 @@
 }
 
 .bme-config-row label {
-    font-size: 11px;
+    font-size: 12px;
     color: var(--bme-on-surface);
 }
 
 .bme-config-input,
 .bme-config-textarea {
     width: 100%;
-    background: var(--bme-surface-lowest);
-    border: 1px solid var(--bme-border);
-    border-radius: 6px;
-    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 10px 12px;
     color: var(--bme-on-surface);
     font-size: 12px;
     outline: none;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 
 .bme-config-input:focus,
@@ -844,49 +908,215 @@
     box-shadow: 0 0 0 2px var(--bme-primary-dim);
 }
 
+.bme-config-input:disabled,
+.bme-config-textarea:disabled {
+    background: rgba(255, 255, 255, 0.035);
+    color: rgba(255, 255, 255, 0.45);
+    cursor: not-allowed;
+}
+
 .bme-config-textarea {
-    min-height: 140px;
+    min-height: 180px;
     resize: vertical;
-    line-height: 1.5;
+    line-height: 1.55;
     font-family: 'Cascadia Code', 'Fira Code', monospace;
-}
-
-.bme-prompt-group {
-    margin-top: 8px;
-    border: 1px solid var(--bme-border);
-    border-radius: 6px;
-    overflow: hidden;
-}
-
-.bme-prompt-group summary {
-    padding: 8px 12px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--bme-on-surface);
-    background: var(--bme-surface-lowest);
-    user-select: none;
-    transition: background 0.15s;
-}
-
-.bme-prompt-group summary:hover {
-    background: var(--bme-surface-low);
-}
-
-.bme-prompt-group[open] summary {
-    border-bottom: 1px solid var(--bme-border);
-}
-
-.bme-prompt-group .bme-config-textarea {
-    border: none;
-    border-radius: 0;
-    min-height: 120px;
 }
 
 .bme-config-actions {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+    flex-wrap: wrap;
+}
+
+.bme-config-guard-note {
+    display: none;
+    align-self: center;
+    font-size: 11px;
+    color: var(--bme-accent3, #ffc107);
+    background: rgba(255, 193, 7, 0.12);
+    border: 1px solid rgba(255, 193, 7, 0.18);
+    border-radius: 999px;
+    padding: 5px 10px;
+}
+
+.bme-config-guard-note.visible {
+    display: inline-flex;
+}
+
+.bme-guarded-card.is-disabled {
+    opacity: 0.72;
+}
+
+.bme-config-placeholder {
+    background: var(--bme-surface-low);
+    border: 1px dashed var(--bme-border);
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.bme-config-placeholder-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--bme-on-surface);
+    margin-bottom: 6px;
+}
+
+.bme-config-placeholder-help {
+    font-size: 11px;
+    color: var(--bme-on-surface-dim);
+    line-height: 1.5;
+}
+
+.bme-toggle-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.bme-toggle-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    cursor: pointer;
+}
+
+.bme-toggle-item:hover {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.035);
+}
+
+.bme-toggle-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.bme-toggle-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--bme-on-surface);
+}
+
+.bme-toggle-desc {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--bme-on-surface-dim);
+}
+
+.bme-toggle-item input {
+    width: 18px;
+    height: 18px;
+    margin-top: 2px;
+    flex-shrink: 0;
+    accent-color: var(--bme-primary);
+}
+
+.bme-prompt-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.bme-prompt-status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 64px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--bme-on-surface-dim);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.bme-prompt-status.is-custom {
+    background: var(--bme-primary-dim);
+    color: var(--bme-primary);
+}
+
+.bme-prompt-reset:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.bme-theme-card-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.bme-theme-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--bme-on-surface);
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.bme-theme-card:hover {
+    border-color: var(--bme-primary);
+    transform: translateY(-1px);
+}
+
+.bme-theme-card.active {
+    border-color: var(--bme-primary);
+    background: var(--bme-primary-dim);
+}
+
+.bme-theme-card-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+
+.bme-theme-card-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.bme-theme-card-title {
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.bme-theme-card-desc {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--bme-on-surface-dim);
+}
+
+.bme-theme-card.active .bme-theme-card-desc {
+    color: var(--bme-primary-text, var(--bme-on-surface));
+}
+
+.bme-theme-card-check {
+    opacity: 0;
+    color: var(--bme-primary);
+}
+
+.bme-theme-card.active .bme-theme-card-check {
+    opacity: 1;
 }
 
 /* --- Mobile Bottom Tab Bar --- */
@@ -972,18 +1202,24 @@
 
 /* --- Scrollbar --- */
 .bme-tab-content::-webkit-scrollbar,
+.bme-config-sidebar::-webkit-scrollbar,
+.bme-config-sections::-webkit-scrollbar,
 .bme-injection-preview::-webkit-scrollbar,
 .bme-node-detail::-webkit-scrollbar {
     width: 4px;
 }
 
 .bme-tab-content::-webkit-scrollbar-track,
+.bme-config-sidebar::-webkit-scrollbar-track,
+.bme-config-sections::-webkit-scrollbar-track,
 .bme-injection-preview::-webkit-scrollbar-track,
 .bme-node-detail::-webkit-scrollbar-track {
     background: transparent;
 }
 
 .bme-tab-content::-webkit-scrollbar-thumb,
+.bme-config-sidebar::-webkit-scrollbar-thumb,
+.bme-config-sections::-webkit-scrollbar-thumb,
 .bme-injection-preview::-webkit-scrollbar-thumb,
 .bme-node-detail::-webkit-scrollbar-thumb {
     background: var(--bme-surface-highest);
@@ -1011,7 +1247,6 @@
         flex-direction: column;
     }
 
-    /* 手机端：sidebar 全宽显示，成为主内容区 */
     .bme-panel-sidebar {
         width: 100%;
         min-width: unset;
@@ -1019,27 +1254,81 @@
         border-right: none;
     }
 
-    /* 隐藏 sidebar 顶部 tab 列表，改用底部 tab bar */
     .bme-panel-sidebar > .bme-tab-list {
         display: none;
     }
 
-    /* 手机端 tab content 撑满剩余空间 */
     .bme-tab-content {
         padding: 12px 14px;
     }
 
-    /* 手机端：隐藏桌面端图谱区（大图谱） */
     .bme-panel-main {
         display: none;
     }
 
-    /* 手机端底部 Tab Bar 显示 */
     .bme-panel-tabbar {
         display: flex;
     }
 
-    /* 总览 Tab: 统计卡横向滚动 */
+    .bme-resize-handle,
+    .bme-config-sidebar {
+        display: none !important;
+    }
+
+    .bme-config-nav-mobile {
+        display: flex;
+        overflow-x: auto;
+        padding: 0 14px 6px;
+        margin-bottom: 4px;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .bme-config-nav-mobile .bme-config-nav-btn {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    .bme-config-nav-mobile::-webkit-scrollbar {
+        display: none;
+    }
+
+    .bme-config-workspace-header {
+        padding: 18px 14px 10px;
+    }
+
+    .bme-config-workspace-title {
+        font-size: 20px;
+    }
+
+    .bme-config-sections {
+        padding: 14px;
+    }
+
+    .bme-config-grid-2,
+    .bme-theme-card-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .bme-config-card-head,
+    .bme-prompt-card-head {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .bme-prompt-card-actions {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    #st-bme-panel.config-mode .bme-panel-sidebar {
+        display: none;
+    }
+
+    #st-bme-panel.config-mode .bme-panel-main {
+        display: flex;
+        flex: 1;
+    }
+
     .bme-stats-grid {
         display: flex;
         gap: 6px;
@@ -1053,7 +1342,6 @@
         flex-shrink: 0;
     }
 
-    /* 搜索栏改为纵向堆叠 */
     .bme-search-bar {
         flex-direction: column;
     }
@@ -1062,7 +1350,6 @@
         width: 100%;
     }
 
-    /* 操作按钮放大触控区域 */
     .bme-action-btn {
         padding: 18px 8px;
         font-size: 12px;
@@ -1072,7 +1359,6 @@
         font-size: 22px;
     }
 
-    /* 节点详情：手机端全宽覆盖 */
     .bme-node-detail {
         width: 100%;
     }
@@ -1081,7 +1367,6 @@
         font-size: 9px;
     }
 
-    /* 手机端图谱预览（嵌在总览 Tab 内） */
     .bme-mobile-graph-preview {
         display: block;
         height: 200px;
