@@ -176,11 +176,16 @@ let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 30000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
+const RECALL_INPUT_RECORD_TTL_MS = 60000;
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
 let lastRecallStatus = createUiStatus("待命", "尚未执行召回", "idle");
 const lastStatusToastAt = {};
+let pendingRecallSendIntent = createRecallInputRecord();
+let lastRecallSentUserMessage = createRecallInputRecord();
+let sendIntentHookCleanup = [];
+let sendIntentHookRetryTimer = null;
 
 function createUiStatus(text = "待命", meta = "", level = "idle") {
   return {
@@ -188,6 +193,17 @@ function createUiStatus(text = "待命", meta = "", level = "idle") {
     meta: String(meta || ""),
     level,
     updatedAt: Date.now(),
+  };
+}
+
+function createRecallInputRecord(overrides = {}) {
+  return {
+    text: "",
+    hash: "",
+    messageId: null,
+    source: "",
+    at: 0,
+    ...overrides,
   };
 }
 
@@ -237,6 +253,124 @@ function updateLastRecalledItems(nodeIds = []) {
         `imp ${node.importance ?? 5} · seq ${node.seqRange?.[1] ?? node.seq ?? 0}`,
       ),
     );
+}
+
+function normalizeRecallInputText(value) {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+function hashRecallInput(text) {
+  let hash = 0;
+  const normalized = normalizeRecallInputText(text);
+  for (let index = 0; index < normalized.length; index++) {
+    hash = (hash * 31 + normalized.charCodeAt(index)) >>> 0;
+  }
+  return normalized ? String(hash) : "";
+}
+
+function isFreshRecallInputRecord(record) {
+  return Boolean(
+    record?.text &&
+      record.at &&
+      Date.now() - record.at <= RECALL_INPUT_RECORD_TTL_MS,
+  );
+}
+
+function clearRecallInputTracking() {
+  pendingRecallSendIntent = createRecallInputRecord();
+  lastRecallSentUserMessage = createRecallInputRecord();
+}
+
+function recordRecallSendIntent(text, source = "dom-intent") {
+  const normalized = normalizeRecallInputText(text);
+  if (!normalized) return;
+
+  pendingRecallSendIntent = createRecallInputRecord({
+    text: normalized,
+    hash: hashRecallInput(normalized),
+    source,
+    at: Date.now(),
+  });
+}
+
+function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
+  const normalized = normalizeRecallInputText(text);
+  if (!normalized) return;
+
+  const hash = hashRecallInput(normalized);
+  lastRecallSentUserMessage = createRecallInputRecord({
+    text: normalized,
+    hash,
+    messageId: Number.isFinite(messageId) ? messageId : null,
+    source,
+    at: Date.now(),
+  });
+
+  if (pendingRecallSendIntent.hash && pendingRecallSendIntent.hash === hash) {
+    pendingRecallSendIntent = createRecallInputRecord();
+  }
+}
+
+function getSendTextareaValue() {
+  return String(document.getElementById("send_textarea")?.value ?? "");
+}
+
+function scheduleSendIntentHookRetry(delayMs = 400) {
+  clearTimeout(sendIntentHookRetryTimer);
+  sendIntentHookRetryTimer = setTimeout(() => {
+    sendIntentHookRetryTimer = null;
+    installSendIntentHooks();
+  }, delayMs);
+}
+
+function installSendIntentHooks() {
+  for (const cleanup of sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length)) {
+    try {
+      cleanup();
+    } catch (error) {
+      console.warn("[ST-BME] 清理发送意图钩子失败:", error);
+    }
+  }
+
+  const sendButton = document.getElementById("send_but");
+  const sendTextarea = document.getElementById("send_textarea");
+
+  if (sendButton) {
+    const captureSendIntent = () => {
+      recordRecallSendIntent(getSendTextareaValue(), "send-button");
+    };
+
+    sendButton.addEventListener("click", captureSendIntent, true);
+    sendButton.addEventListener("pointerup", captureSendIntent, true);
+    sendButton.addEventListener("touchend", captureSendIntent, true);
+    sendIntentHookCleanup.push(() => {
+      sendButton.removeEventListener("click", captureSendIntent, true);
+      sendButton.removeEventListener("pointerup", captureSendIntent, true);
+      sendButton.removeEventListener("touchend", captureSendIntent, true);
+    });
+  }
+
+  if (sendTextarea) {
+    const captureEnterIntent = (event) => {
+      if (
+        (event.key === "Enter" || event.key === "NumpadEnter") &&
+        !event.shiftKey
+      ) {
+        recordRecallSendIntent(getSendTextareaValue(), "textarea-enter");
+      }
+    };
+
+    sendTextarea.addEventListener("keydown", captureEnterIntent, true);
+    sendIntentHookCleanup.push(() => {
+      sendTextarea.removeEventListener("keydown", captureEnterIntent, true);
+    });
+  }
+
+  if (!sendButton || !sendTextarea) {
+    scheduleSendIntentHookRetry();
+  }
 }
 
 // ==================== 设置管理 ====================
@@ -937,6 +1071,120 @@ function clampFloat(value, fallback, min = 0, max = 1) {
   return Math.min(max, Math.max(min, num));
 }
 
+function formatRecallContextLine(message) {
+  return `[${message.is_user ? "user" : "assistant"}]: ${message.mes || ""}`;
+}
+
+function getLatestUserChatMessage(chat) {
+  if (!Array.isArray(chat)) return null;
+
+  for (let index = chat.length - 1; index >= 0; index--) {
+    const message = chat[index];
+    if (message?.is_system) continue;
+    if (message?.is_user) return message;
+  }
+
+  return null;
+}
+
+function getLastNonSystemChatMessage(chat) {
+  if (!Array.isArray(chat)) return null;
+
+  for (let index = chat.length - 1; index >= 0; index--) {
+    const message = chat[index];
+    if (!message?.is_system) return message;
+  }
+
+  return null;
+}
+
+function buildRecallRecentMessages(chat, limit, syntheticUserMessage = "") {
+  if (!Array.isArray(chat) || limit <= 0) return [];
+
+  const recentMessages = [];
+  for (let index = chat.length - 1; index >= 0 && recentMessages.length < limit; index--) {
+    const message = chat[index];
+    if (message?.is_system) continue;
+    recentMessages.unshift(formatRecallContextLine(message));
+  }
+
+  const normalizedSynthetic = normalizeRecallInputText(syntheticUserMessage);
+  if (!normalizedSynthetic) return recentMessages;
+
+  const syntheticLine = `[user]: ${normalizedSynthetic}`;
+  if (recentMessages[recentMessages.length - 1] !== syntheticLine) {
+    recentMessages.push(syntheticLine);
+    while (recentMessages.length > limit) {
+      recentMessages.shift();
+    }
+  }
+
+  return recentMessages;
+}
+
+function getRecallUserMessageSourceLabel(source) {
+  switch (source) {
+    case "send-intent":
+      return "发送意图";
+    case "chat-tail-user":
+      return "当前用户楼层";
+    case "message-sent":
+      return "已发送用户楼层";
+    case "chat-last-user":
+      return "历史最后用户楼层";
+    default:
+      return "未知";
+  }
+}
+
+function resolveRecallInput(chat, recentContextMessageLimit) {
+  const latestUserMessage = getLatestUserChatMessage(chat);
+  const latestUserText = normalizeRecallInputText(latestUserMessage?.mes || "");
+  const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
+  const tailUserText = lastNonSystemMessage?.is_user
+    ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
+    : "";
+  const pendingIntentText = isFreshRecallInputRecord(pendingRecallSendIntent)
+    ? pendingRecallSendIntent.text
+    : "";
+  const sentUserText = isFreshRecallInputRecord(lastRecallSentUserMessage)
+    ? lastRecallSentUserMessage.text
+    : "";
+
+  let userMessage = "";
+  let source = "";
+  let syntheticUserMessage = "";
+
+  if (pendingIntentText) {
+    userMessage = pendingIntentText;
+    source = "send-intent";
+    syntheticUserMessage = pendingIntentText;
+  } else if (tailUserText) {
+    userMessage = tailUserText;
+    source = "chat-tail-user";
+  } else if (sentUserText) {
+    userMessage = sentUserText;
+    source = "message-sent";
+    if (!latestUserText || latestUserText !== sentUserText) {
+      syntheticUserMessage = sentUserText;
+    }
+  } else if (latestUserText) {
+    userMessage = latestUserText;
+    source = "chat-last-user";
+  }
+
+  return {
+    userMessage,
+    source,
+    sourceLabel: getRecallUserMessageSourceLabel(source),
+    recentMessages: buildRecallRecentMessages(
+      chat,
+      recentContextMessageLimit,
+      syntheticUserMessage,
+    ),
+  };
+}
+
 function getCurrentChatSeq(context = getContext()) {
   const chat = context?.chat;
   if (Array.isArray(chat) && chat.length > 0) {
@@ -1448,43 +1696,33 @@ async function runRecall() {
   isRecalling = true;
 
   try {
-    // 获取最新用户消息
-    let userMessage = "";
-    const recentMessages = [];
     const recentContextMessageLimit = clampInt(
       settings.recallLlmContextMessages,
       4,
       0,
       20,
     );
-
-    for (
-      let i = chat.length - 1;
-      i >= 0 && (!userMessage || recentMessages.length < recentContextMessageLimit);
-      i--
-    ) {
-      const msg = chat[i];
-      if (msg.is_system) continue;
-
-      if (msg.is_user && !userMessage) {
-        userMessage = msg.mes || "";
-      }
-      if (recentMessages.length < recentContextMessageLimit) {
-        recentMessages.unshift(
-          `[${msg.is_user ? "user" : "assistant"}]: ${msg.mes || ""}`,
-        );
-      }
-    }
+    const recallInput = resolveRecallInput(chat, recentContextMessageLimit);
+    const userMessage = recallInput.userMessage;
+    const recentMessages = recallInput.recentMessages;
 
     if (!userMessage) return;
 
-    console.log("[ST-BME] 开始召回");
+    console.log("[ST-BME] 开始召回", {
+      source: recallInput.source,
+      sourceLabel: recallInput.sourceLabel,
+      userMessageLength: userMessage.length,
+      recentMessages: recentMessages.length,
+    });
     setLastRecallStatus(
       "召回中",
-      `上下文 ${recentMessages.length} 条 · 当前用户消息长度 ${userMessage.length}`,
+      `来源 ${recallInput.sourceLabel} · 上下文 ${recentMessages.length} 条 · 当前用户消息长度 ${userMessage.length}`,
       "running",
       { syncRuntime: true },
     );
+    if (recallInput.source === "send-intent") {
+      pendingRecallSendIntent = createRecallInputRecord();
+    }
 
     const result = await retrieve({
       graph: currentGraph,
@@ -1555,7 +1793,7 @@ async function runRecall() {
             : "召回完成";
     setLastRecallStatus(
       llmLabel,
-      `ctx ${recentMessages.length} · vector ${retrievalMeta.vectorHits ?? 0} · diffusion ${retrievalMeta.diffusionHits ?? 0} · llm pool ${llmMeta.candidatePool ?? 0} · recall ${result.stats.recallCount}`,
+      `${recallInput.sourceLabel} · ctx ${recentMessages.length} · vector ${retrievalMeta.vectorHits ?? 0} · diffusion ${retrievalMeta.diffusionHits ?? 0} · llm pool ${llmMeta.candidatePool ?? 0} · recall ${result.stats.recallCount}`,
       llmMeta.status === "fallback" ? "warning" : "success",
       {
         syncRuntime: true,
@@ -1593,6 +1831,18 @@ async function runRecall() {
 function onChatChanged() {
   loadGraphFromChat();
   clearInjectionState();
+  clearRecallInputTracking();
+  installSendIntentHooks();
+}
+
+function onMessageSent(messageId) {
+  const context = getContext();
+  const chat = context?.chat;
+  const message =
+    Array.isArray(chat) && Number.isFinite(messageId) ? chat[messageId] : null;
+
+  if (!message?.is_user) return;
+  recordRecallSentUserMessage(messageId, message.mes || "");
 }
 
 function onMessageDeleted() {
@@ -1615,6 +1865,10 @@ function onMessageReceived() {
   // 新消息到达，图状态可能需要更新
   if (currentGraph) {
     saveGraphToChat();
+  }
+
+  if (pendingRecallSendIntent.text && !isFreshRecallInputRecord(pendingRecallSendIntent)) {
+    pendingRecallSendIntent = createRecallInputRecord();
   }
 
   const context = getContext();
@@ -2058,9 +2312,13 @@ async function onReembedDirect() {
 
 (async function init() {
   await loadServerSettings();
+  installSendIntentHooks();
 
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+  if (event_types.MESSAGE_SENT) {
+    eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
+  }
   eventSource.on(
     event_types.GENERATE_BEFORE_COMBINE_PROMPTS,
     onBeforeCombinePrompts,
