@@ -666,6 +666,7 @@ function _bindActions() {
                 }
             } catch (error) {
                 console.error(`[ST-BME] Action ${actionKey} failed:`, error);
+                toastr.error(`操作失败: ${error?.message || error}`);
             }
         });
     }
@@ -683,6 +684,7 @@ function _bindActions() {
             _refreshGraph();
         } catch (error) {
             console.error("[ST-BME] Action rebuildVectorRange failed:", error);
+            toastr.error(`操作失败: ${error?.message || error}`);
         }
     });
 }

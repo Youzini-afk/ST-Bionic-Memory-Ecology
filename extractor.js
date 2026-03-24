@@ -119,6 +119,7 @@ export async function extractMemories({
     console.warn("[ST-BME] 提取 LLM 未返回有效操作");
     return {
       success: false,
+      error: "提取 LLM 未返回有效操作",
       newNodes: 0,
       updatedNodes: 0,
       newEdges: 0,
@@ -175,8 +176,12 @@ export async function extractMemories({
     }
   }
 
-  // 为新建节点生成 embedding
-  await generateNodeEmbeddings(graph, embeddingConfig);
+  // 为新建节点生成 embedding。失败不应回滚整批图谱写入。
+  try {
+    await generateNodeEmbeddings(graph, embeddingConfig);
+  } catch (error) {
+    console.error("[ST-BME] 节点 embedding 生成失败，保留图谱写入:", error);
+  }
 
   // 更新处理进度：统一记录为已处理到的末个 chat 索引
   graph.lastProcessedSeq = Math.max(
@@ -190,6 +195,7 @@ export async function extractMemories({
 
   return {
     success: true,
+    error: "",
     ...stats,
     newNodeIds,
     processedRange: [effectiveStartSeq, effectiveEndSeq],

@@ -320,6 +320,40 @@ function setLastRecallStatus(text, meta, level = "info") {
   refreshPanelLiveState();
 }
 
+function snapshotRuntimeUiState() {
+  return {
+    extractionCount,
+    lastInjectionContent,
+    lastExtractedItems: Array.isArray(lastExtractedItems)
+      ? lastExtractedItems.map((item) => ({ ...item }))
+      : [],
+    lastRecalledItems: Array.isArray(lastRecalledItems)
+      ? lastRecalledItems.map((item) => ({ ...item }))
+      : [],
+    lastRecallStatus: { ...(lastRecallStatus || {}) },
+  };
+}
+
+function restoreRuntimeUiState(snapshot = {}) {
+  extractionCount = Number.isFinite(snapshot.extractionCount)
+    ? snapshot.extractionCount
+    : 0;
+  lastInjectionContent = String(snapshot.lastInjectionContent || "");
+  lastExtractedItems = Array.isArray(snapshot.lastExtractedItems)
+    ? snapshot.lastExtractedItems.map((item) => ({ ...item }))
+    : [];
+  lastRecalledItems = Array.isArray(snapshot.lastRecalledItems)
+    ? snapshot.lastRecalledItems.map((item) => ({ ...item }))
+    : [];
+  lastRecallStatus = {
+    text: "待命",
+    meta: "尚未执行召回",
+    level: "idle",
+    ...(snapshot.lastRecallStatus || {}),
+  };
+  refreshPanelLiveState();
+}
+
 async function recordGraphMutation({
   beforeSnapshot,
   processedRange = null,
@@ -425,12 +459,13 @@ async function syncVectorState({
       range,
     });
   } catch (error) {
-    markVectorStateDirty(error?.message || "向量同步失败");
+    const message = error?.message || String(error) || "向量同步失败";
+    markVectorStateDirty(message);
     console.error("[ST-BME] 向量同步失败:", error);
     return {
       insertedHashes: [],
       stats: getVectorIndexStats(currentGraph),
-      error: String(error),
+      error: message,
     };
   }
 }
@@ -449,9 +484,18 @@ async function ensureVectorReadyIfNeeded(reason = "vector-ready-check") {
     force: true,
     purge: isBackendVectorConfig(config),
   });
+
+  if (result?.error) {
+    currentGraph.vectorIndexState.lastWarning = result.error;
+    saveGraphToChat();
+    console.warn("[ST-BME] 向量状态自动修复失败:", reason, result.error);
+    return result;
+  }
+
   currentGraph.vectorIndexState.lastWarning = "";
   saveGraphToChat();
   console.log("[ST-BME] 向量状态已自动修复:", reason, result.stats);
+  return result;
 }
 
 async function resetVectorStateForConfigChange(reason = "向量配置已变更") {
@@ -645,11 +689,20 @@ function loadGraphFromChat() {
 
 function saveGraphToChat() {
   const context = getContext();
-  if (!context.chatMetadata || !currentGraph) return;
+  if (!context || !currentGraph) return false;
+
+  if (
+    !context.chatMetadata ||
+    typeof context.chatMetadata !== "object" ||
+    Array.isArray(context.chatMetadata)
+  ) {
+    context.chatMetadata = {};
+  }
 
   ensureCurrentGraphRuntimeState();
   context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
   saveMetadataDebounced();
+  return true;
 }
 
 // ==================== 核心流程 ====================
@@ -774,6 +827,7 @@ function getCurrentChatSeq(context = getContext()) {
 
 async function handleExtractionSuccess(result, endIdx, settings) {
   const postProcessArtifacts = [];
+  const warnings = [];
   extractionCount++;
   updateLastExtractedItems(result.newNodeIds || []);
 
@@ -831,22 +885,33 @@ async function handleExtractionSuccess(result, endIdx, settings) {
     }
   }
 
-  const compressionResult = await compressAll(
-    currentGraph,
-    getSchema(),
-    getEmbeddingConfig(),
-    false,
-    settings.compressPrompt || undefined,
-  );
-  if (compressionResult.created > 0 || compressionResult.archived > 0) {
-    postProcessArtifacts.push("compression");
+  try {
+    const compressionResult = await compressAll(
+      currentGraph,
+      getSchema(),
+      getEmbeddingConfig(),
+      false,
+      settings.compressPrompt || undefined,
+    );
+    if (compressionResult.created > 0 || compressionResult.archived > 0) {
+      postProcessArtifacts.push("compression");
+    }
+  } catch (error) {
+    const message = error?.message || String(error) || "压缩阶段失败";
+    warnings.push(`压缩阶段失败: ${message}`);
+    console.error("[ST-BME] 记忆压缩失败:", error);
   }
 
   const vectorSync = await syncVectorState();
+  if (vectorSync?.error) {
+    warnings.push(`向量同步失败: ${vectorSync.error}`);
+  }
   return {
     postProcessArtifacts,
     vectorHashesInserted: vectorSync?.insertedHashes || [],
     vectorStats: vectorSync?.stats || getVectorIndexStats(currentGraph),
+    vectorError: vectorSync?.error || "",
+    warnings,
   };
 }
 
@@ -999,7 +1064,12 @@ async function executeExtractionBatch({
   });
 
   if (!result.success) {
-    return { success: false, result, effects: null };
+    return {
+      success: false,
+      result,
+      effects: null,
+      error: result?.error || "提取阶段未返回有效操作",
+    };
   }
 
   const effects = await handleExtractionSuccess(result, endIdx, settings);
@@ -1021,7 +1091,12 @@ async function executeExtractionBatch({
   );
   saveGraphToChat();
 
-  return { success: true, result, effects };
+  return {
+    success: true,
+    result,
+    effects,
+    error: effects?.vectorError || "",
+  };
 }
 
 async function replayExtractionFromHistory(chat, settings) {
@@ -1046,7 +1121,11 @@ async function replayExtractionFromHistory(chat, settings) {
     });
 
     if (!batchResult.success) {
-      throw new Error("历史恢复回放过程中出现提取失败");
+      throw new Error(
+        batchResult.error ||
+          batchResult?.result?.error ||
+          "历史恢复回放过程中出现提取失败",
+      );
     }
 
     replayedBatches++;
@@ -1425,21 +1504,49 @@ async function onRebuild() {
     return;
   }
 
+  const previousGraphSnapshot = currentGraph
+    ? cloneGraphSnapshot(currentGraph)
+    : cloneGraphSnapshot(
+        normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId()),
+      );
+  const previousUiState = snapshotRuntimeUiState();
+  const settings = getSettings();
+
   currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());
   currentGraph.batchJournal = [];
   clearInjectionState();
-  await prepareVectorStateForReplay(true);
-  await replayExtractionFromHistory(chat, getSettings());
-  clearHistoryDirty(
-    currentGraph,
-    buildRecoveryResult("full-rebuild", {
-      fromFloor: 0,
-      batches: currentGraph.batchJournal.length,
-      reason: "用户手动触发全量重建",
-    }),
-  );
-  saveGraphToChat();
-  toastr.success("图谱与向量索引已按当前聊天全量重建");
+
+  try {
+    await prepareVectorStateForReplay(true);
+    const replayedBatches = await replayExtractionFromHistory(chat, settings);
+    clearHistoryDirty(
+      currentGraph,
+      buildRecoveryResult("full-rebuild", {
+        fromFloor: 0,
+        batches: replayedBatches,
+        reason: "用户手动触发全量重建",
+      }),
+    );
+    saveGraphToChat();
+
+    if (currentGraph.vectorIndexState?.lastWarning) {
+      toastr.warning(
+        `图谱已重建，但向量索引仍待修复: ${currentGraph.vectorIndexState.lastWarning}`,
+      );
+    } else {
+      toastr.success("图谱与向量索引已按当前聊天全量重建");
+    }
+  } catch (error) {
+    currentGraph = normalizeGraphRuntimeState(
+      previousGraphSnapshot,
+      getCurrentChatId(),
+    );
+    restoreRuntimeUiState(previousUiState);
+    saveGraphToChat();
+    throw new Error(
+      `图谱重建失败，已恢复到重建前状态: ${error?.message || error}`,
+    );
+  }
 }
 
 async function onManualCompress() {
@@ -1592,7 +1699,7 @@ async function onFetchEmbeddingModels(mode = null) {
 async function onManualExtract() {
   if (isExtracting) return;
   if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
-  await ensureVectorReadyIfNeeded("manual-extract");
+  const vectorPrep = await ensureVectorReadyIfNeeded("manual-extract");
   if (!currentGraph) currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());
 
   const context = getContext();
@@ -1610,26 +1717,71 @@ async function onManualExtract() {
     return;
   }
 
-  const startIdx = pendingAssistantTurns[0];
-  const endIdx = pendingAssistantTurns[pendingAssistantTurns.length - 1];
   const settings = getSettings();
+  const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
+  const totals = {
+    newNodes: 0,
+    updatedNodes: 0,
+    newEdges: 0,
+    batches: 0,
+  };
+  const warnings = [];
+
+  if (vectorPrep?.error) {
+    warnings.push(`预检向量修复失败: ${vectorPrep.error}`);
+  }
+
   isExtracting = true;
   try {
-    const batchResult = await executeExtractionBatch({
-      chat,
-      startIdx,
-      endIdx,
-      settings,
-    });
+    while (true) {
+      const pendingTurns = getAssistantTurns(chat).filter(
+        (i) => i > getLastProcessedAssistantFloor(),
+      );
+      if (pendingTurns.length === 0) break;
 
-    if (!batchResult.success) {
-      toastr.warning("手动提取未返回有效结果");
+      const batchAssistantTurns = pendingTurns.slice(0, extractEvery);
+      const startIdx = batchAssistantTurns[0];
+      const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+      const batchResult = await executeExtractionBatch({
+        chat,
+        startIdx,
+        endIdx,
+        settings,
+      });
+
+      if (!batchResult.success) {
+        throw new Error(
+          batchResult.error ||
+            batchResult?.result?.error ||
+            "手动提取未返回有效结果",
+        );
+      }
+
+      totals.newNodes += batchResult.result.newNodes || 0;
+      totals.updatedNodes += batchResult.result.updatedNodes || 0;
+      totals.newEdges += batchResult.result.newEdges || 0;
+      totals.batches++;
+
+      if (Array.isArray(batchResult.effects?.warnings)) {
+        warnings.push(...batchResult.effects.warnings);
+      }
+    }
+
+    if (totals.batches === 0) {
+      toastr.info("没有待提取的新回复");
       return;
     }
 
     toastr.success(
-      `提取完成：新建 ${batchResult.result.newNodes}，更新 ${batchResult.result.updatedNodes}，新边 ${batchResult.result.newEdges}`,
+      `提取完成：${totals.batches} 批，新建 ${totals.newNodes}，更新 ${totals.updatedNodes}，新边 ${totals.newEdges}`,
     );
+    if (warnings.length > 0) {
+      toastr.warning(
+        warnings.slice(0, 2).join("；"),
+        "ST-BME 提取警告",
+        { timeOut: 5000 },
+      );
+    }
   } catch (e) {
     console.error("[ST-BME] 手动提取失败:", e);
     toastr.error(`手动提取失败: ${e.message || e}`);
@@ -1705,6 +1857,9 @@ async function onRebuildVectorIndex(range = null) {
   });
 
   saveGraphToChat();
+  if (result?.error) {
+    throw new Error(result.error);
+  }
   toastr.success(
     range
       ? `范围向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`
