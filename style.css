@@ -1006,6 +1006,32 @@
     opacity: 0.72;
 }
 
+.bme-stage-card.stage-disabled {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+.bme-inline-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--bme-on-surface);
+    cursor: pointer;
+}
+
+.bme-inline-checkbox input {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: var(--bme-primary);
+}
+
+.bme-stage-card.stage-disabled .bme-stage-param {
+    opacity: 0.6;
+}
+
 .bme-config-placeholder {
     background: var(--bme-surface-low);
     border: 1px dashed var(--bme-border);

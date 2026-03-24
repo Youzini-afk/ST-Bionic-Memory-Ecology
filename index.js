@@ -4,6 +4,7 @@
 import {
   eventSource,
   event_types,
+  extension_prompt_types,
   getRequestHeaders,
   saveSettingsDebounced,
 } from "../../../../script.js";
@@ -75,13 +76,17 @@ const defaultSettings = {
 
   // 召回设置
   recallEnabled: true,
-  recallTopK: 15, // 混合评分 Top-K
+  recallTopK: 20, // 向量预筛 Top-K
   recallMaxNodes: 8, // LLM 召回最大节点数
   recallEnableLLM: true, // 是否启用 LLM 精确召回
+  recallEnableVectorPrefilter: true, // 是否启用向量预筛
+  recallEnableGraphDiffusion: true, // 是否启用图扩散
+  recallDiffusionTopK: 100, // 图扩散阶段保留的候选上限
+  recallLlmCandidatePool: 30, // 传给 LLM 精排的候选池大小
 
   // 注入设置
   injectPosition: "atDepth", // 注入位置
-  injectDepth: 4, // 注入深度（atDepth 模式）
+  injectDepth: 9999, // IN_CHAT@Depth 注入深度，数值越大越靠前
   injectRole: 0, // 0=system, 1=user, 2=assistant
 
   // 混合评分权重
@@ -273,7 +278,12 @@ function clearInjectionState() {
 
   try {
     const context = getContext();
-    context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
+    context.setExtensionPrompt(
+      MODULE_NAME,
+      "",
+      extension_prompt_types.IN_CHAT,
+      0,
+    );
   } catch (error) {
     console.warn("[ST-BME] 清理旧注入失败:", error);
   }
@@ -538,7 +548,12 @@ function updateModuleSettings(patch = {}) {
   ) {
     try {
       const context = getContext();
-      context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
+      context.setExtensionPrompt(
+        MODULE_NAME,
+        "",
+        extension_prompt_types.IN_CHAT,
+        0,
+      );
       lastInjectionContent = "";
       lastRecalledItems = [];
     } catch (error) {
@@ -1194,6 +1209,10 @@ async function runRecall() {
         topK: settings.recallTopK,
         maxRecallNodes: settings.recallMaxNodes,
         enableLLMRecall: settings.recallEnableLLM,
+        enableVectorPrefilter: settings.recallEnableVectorPrefilter,
+        enableGraphDiffusion: settings.recallEnableGraphDiffusion,
+        diffusionTopK: settings.recallDiffusionTopK,
+        llmCandidatePool: settings.recallLlmCandidatePool,
         recallPrompt: settings.recallPrompt || undefined,
         weights: {
           graphWeight: settings.graphWeight,
@@ -1224,8 +1243,8 @@ async function runRecall() {
     context.setExtensionPrompt(
       MODULE_NAME,
       injectionText,
-      1, // extension_prompt_types.IN_PROMPT
-      clampInt(settings.injectDepth, 4, 0, 9999),
+      extension_prompt_types.IN_CHAT, // 当前注入走 IN_CHAT@Depth
+      clampInt(settings.injectDepth, 9999, 0, 9999),
     );
 
     // 保存召回结果和访问强化

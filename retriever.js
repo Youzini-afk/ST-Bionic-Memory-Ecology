@@ -14,15 +14,6 @@ import { callLLMForJSON } from "./llm.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
 
 /**
- * 自适应阈值
- */
-const STRATEGY_THRESHOLDS = {
-  SMALL: 20, // < 20 节点：跳过向量，全图 + LLM
-  MEDIUM: 200, // 20-200 节点：向量 + 图扩散 + 评分（不调 LLM）
-  // > 200 节点：三层全开
-};
-
-/**
  * 三层混合检索管线
  *
  * @param {object} params
@@ -42,9 +33,13 @@ export async function retrieve({
   schema,
   options = {},
 }) {
-  const topK = options.topK ?? 15;
+  const topK = options.topK ?? 20;
   const maxRecallNodes = options.maxRecallNodes ?? 8;
   const enableLLMRecall = options.enableLLMRecall ?? true;
+  const enableVectorPrefilter = options.enableVectorPrefilter ?? true;
+  const enableGraphDiffusion = options.enableGraphDiffusion ?? true;
+  const diffusionTopK = options.diffusionTopK ?? 100;
+  const llmCandidatePool = options.llmCandidatePool ?? 30;
   const weights = options.weights ?? {};
 
   // v2 options
@@ -69,6 +64,11 @@ export async function retrieve({
   const nodeCount = activeNodes.length;
   const normalizedTopK = Math.max(1, topK);
   const normalizedMaxRecallNodes = Math.max(1, maxRecallNodes);
+  const normalizedDiffusionTopK = Math.max(1, diffusionTopK);
+  const normalizedLlmCandidatePool = Math.max(
+    normalizedMaxRecallNodes,
+    llmCandidatePool,
+  );
   console.log(
     `[ST-BME] 检索开始: ${nodeCount} 个活跃节点${enableVisibility ? " (认知边界已启用)" : ""}`,
   );
@@ -83,7 +83,7 @@ export async function retrieve({
 
   // ========== 第 1 层：向量预筛 ==========
   if (
-    nodeCount >= STRATEGY_THRESHOLDS.SMALL &&
+    enableVectorPrefilter &&
     validateVectorConfig(embeddingConfig).valid
   ) {
     console.log("[ST-BME] 第1层: 向量预筛");
@@ -97,7 +97,7 @@ export async function retrieve({
   }
 
   // ========== 第 2 层：图扩散 ==========
-  if (nodeCount >= STRATEGY_THRESHOLDS.SMALL) {
+  if (enableGraphDiffusion) {
     console.log("[ST-BME] 第2层: PEDSA 图扩散");
     const entityAnchors = extractEntityAnchors(userMessage, activeNodes);
 
@@ -139,7 +139,7 @@ export async function retrieve({
       diffusionResults = diffuseAndRank(adjacencyMap, uniqueSeeds, {
         maxSteps: 2,
         decayFactor: 0.6,
-        topK: 100,
+        topK: normalizedDiffusionTopK,
       }).filter((item) => {
         const node = getNode(graph, item.nodeId);
         return node && !node.archived;
@@ -167,8 +167,8 @@ export async function retrieve({
     scoreMap.set(d.nodeId, entry);
   }
 
-  // 小图模式：所有节点都参与评分
-  if (nodeCount < STRATEGY_THRESHOLDS.SMALL) {
+  // 两个上游阶段都未产出候选时，退回到全部活跃节点参与评分
+  if (scoreMap.size === 0) {
     for (const node of activeNodes) {
       if (!scoreMap.has(node.id)) {
         scoreMap.set(node.id, { graphScore: 0, vectorScore: 0 });
@@ -198,10 +198,7 @@ export async function retrieve({
   scoredNodes.sort((a, b) => b.finalScore - a.finalScore);
 
   // 决定是否使用 LLM 精确召回
-  useLLM =
-    enableLLMRecall &&
-    (nodeCount < STRATEGY_THRESHOLDS.SMALL || // 小图：直接 LLM
-      nodeCount > STRATEGY_THRESHOLDS.MEDIUM); // 大图：LLM 精确
+  useLLM = enableLLMRecall;
 
   let selectedNodeIds;
 
@@ -209,7 +206,7 @@ export async function retrieve({
     console.log("[ST-BME] LLM 精确召回");
     const candidateNodes = scoredNodes.slice(
       0,
-      Math.min(30, scoredNodes.length),
+      Math.min(normalizedLlmCandidatePool, scoredNodes.length),
     );
     selectedNodeIds = await llmRecall(
       userMessage,

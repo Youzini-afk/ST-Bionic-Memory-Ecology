@@ -663,6 +663,14 @@ function _refreshConfigTab() {
     _setCheckboxValue("bme-setting-enabled", settings.enabled ?? false);
     _setCheckboxValue("bme-setting-recall-enabled", settings.recallEnabled ?? true);
     _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
+    _setCheckboxValue(
+        "bme-setting-recall-vector-prefilter-enabled",
+        settings.recallEnableVectorPrefilter ?? true,
+    );
+    _setCheckboxValue(
+        "bme-setting-recall-graph-diffusion-enabled",
+        settings.recallEnableGraphDiffusion ?? true,
+    );
     _setCheckboxValue("bme-setting-evolution-enabled", settings.enableEvolution ?? true);
     _setCheckboxValue(
         "bme-setting-precise-conflict-enabled",
@@ -699,9 +707,17 @@ function _refreshConfigTab() {
         "bme-setting-extract-context-turns",
         settings.extractContextTurns ?? 2,
     );
-    _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 15);
+    _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
     _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
-    _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 4);
+    _setInputValue(
+        "bme-setting-recall-diffusion-top-k",
+        settings.recallDiffusionTopK ?? 100,
+    );
+    _setInputValue(
+        "bme-setting-recall-llm-candidate-pool",
+        settings.recallLlmCandidatePool ?? 30,
+    );
+    _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
     _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
     _setInputValue("bme-setting-vector-weight", settings.vectorWeight ?? 0.3);
     _setInputValue(
@@ -780,6 +796,7 @@ function _refreshConfigTab() {
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
 
     _refreshGuardedConfigStates(settings);
+    _refreshStageCardStates(settings);
     _refreshPromptCardStates(settings);
     _highlightThemeChoice(settings.panelTheme || "crimson");
     _syncConfigSectionState();
@@ -803,10 +820,20 @@ function _bindConfigControls() {
     bindCheckbox("bme-setting-recall-enabled", (checked) => {
         _patchSettings({ recallEnabled: checked });
         _refreshGuardedConfigStates();
+        _refreshStageCardStates();
     });
     bindCheckbox("bme-setting-recall-llm", (checked) => {
         _patchSettings({ recallEnableLLM: checked });
         _refreshGuardedConfigStates();
+        _refreshStageCardStates();
+    });
+    bindCheckbox("bme-setting-recall-vector-prefilter-enabled", (checked) => {
+        _patchSettings({ recallEnableVectorPrefilter: checked });
+        _refreshStageCardStates();
+    });
+    bindCheckbox("bme-setting-recall-graph-diffusion-enabled", (checked) => {
+        _patchSettings({ recallEnableGraphDiffusion: checked });
+        _refreshStageCardStates();
     });
     bindCheckbox("bme-setting-evolution-enabled", (checked) => {
         _patchSettings({ enableEvolution: checked });
@@ -849,13 +876,19 @@ function _bindConfigControls() {
     bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
         _patchSettings({ extractContextTurns: value }),
     );
-    bindNumber("bme-setting-recall-top-k", 15, 1, 100, (value) =>
+    bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
         _patchSettings({ recallTopK: value }),
     );
     bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
         _patchSettings({ recallMaxNodes: value }),
     );
-    bindNumber("bme-setting-inject-depth", 4, 0, 9999, (value) =>
+    bindNumber("bme-setting-recall-diffusion-top-k", 100, 1, 300, (value) =>
+        _patchSettings({ recallDiffusionTopK: value }),
+    );
+    bindNumber("bme-setting-recall-llm-candidate-pool", 30, 1, 100, (value) =>
+        _patchSettings({ recallLlmCandidatePool: value }),
+    );
+    bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
         _patchSettings({ injectDepth: value }),
     );
     bindFloat("bme-setting-graph-weight", 0.6, 0, 1, (value) =>
@@ -1127,6 +1160,28 @@ function _refreshGuardedConfigStates(settings = _getSettings?.() || {}) {
         note?.classList.toggle("visible", !enabled);
         card.querySelectorAll("input, select, textarea, button").forEach((element) => {
             element.disabled = !enabled;
+        });
+    });
+}
+
+function _refreshStageCardStates(settings = _getSettings?.() || {}) {
+    if (!panelEl) return;
+    panelEl.querySelectorAll(".bme-stage-card").forEach((card) => {
+        const toggleId = card.dataset.stageToggleId;
+        const toggle = toggleId ? document.getElementById(toggleId) : null;
+        const cardDisabled = card.classList.contains("is-disabled");
+        const stageEnabled =
+            toggleId === "bme-setting-recall-llm"
+                ? settings.recallEnableLLM ?? true
+                : toggle
+                  ? Boolean(toggle.checked)
+                  : true;
+
+        card.classList.toggle("stage-disabled", !cardDisabled && !stageEnabled);
+        card.querySelectorAll(".bme-stage-param").forEach((section) => {
+            section.querySelectorAll("input, select, textarea, button").forEach((element) => {
+                element.disabled = cardDisabled || !stageEnabled;
+            });
         });
     });
 }

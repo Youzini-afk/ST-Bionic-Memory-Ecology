@@ -512,13 +512,6 @@
                       </span>
                       <input id="bme-setting-recall-enabled" type="checkbox" />
                     </label>
-                    <label class="bme-toggle-item" for="bme-setting-recall-llm">
-                      <span class="bme-toggle-copy">
-                        <span class="bme-toggle-title">启用 LLM 精确召回</span>
-                        <span class="bme-toggle-desc">让候选记忆经过额外的 LLM 精排筛选。</span>
-                      </span>
-                      <input id="bme-setting-recall-llm" type="checkbox" />
-                    </label>
                     <label class="bme-toggle-item" for="bme-setting-evolution-enabled">
                       <span class="bme-toggle-copy">
                         <span class="bme-toggle-title">启用记忆进化</span>
@@ -614,7 +607,7 @@
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">提取</div>
-                      <div class="bme-config-card-subtitle">控制自动提取的频率和上下文窗口。</div>
+                      <div class="bme-config-card-subtitle">控制自动提取的频率和按轮计的上下文窗口。默认 2 轮，通常约等于向前补 4 层普通消息。</div>
                     </div>
                   </div>
                   <div class="bme-config-row">
@@ -637,31 +630,57 @@
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">召回与注入</div>
-                      <div class="bme-config-card-subtitle">控制候选规模和最终注入层级。</div>
+                      <div class="bme-config-card-subtitle">控制最终注入层级。当前注入走 IN_CHAT@Depth，数值越大越靠前。</div>
                     </div>
                     <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
                   </div>
                   <div class="bme-config-row">
-                    <label for="bme-setting-recall-top-k">召回候选上限</label>
-                    <input id="bme-setting-recall-top-k" class="bme-config-input" type="number" min="1" max="100" />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-inject-depth">注入深度</label>
+                    <label for="bme-setting-inject-depth">注入深度（数值越大越靠前）</label>
                     <input id="bme-setting-inject-depth" class="bme-config-input" type="number" min="0" max="9999" />
                   </div>
                 </div>
 
-                <div class="bme-config-card bme-guarded-card" data-guard-settings="recallEnabled,recallEnableLLM">
+                <div
+                  class="bme-config-card bme-guarded-card bme-stage-card"
+                  data-guard-settings="recallEnabled"
+                  data-stage-toggle-id="bme-setting-recall-vector-prefilter-enabled"
+                >
                   <div class="bme-config-card-head">
                     <div>
-                      <div class="bme-config-card-title">LLM 精确召回</div>
-                      <div class="bme-config-card-subtitle">控制进入 LLM 精排阶段的节点数量。</div>
+                      <div class="bme-config-card-title">向量预筛</div>
+                      <div class="bme-config-card-subtitle">控制是否启用向量候选检索，以及向量阶段输出的 Top-K 宽度。</div>
                     </div>
                     <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
                   </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-max-nodes">LLM 精确召回上限</label>
-                    <input id="bme-setting-recall-max-nodes" class="bme-config-input" type="number" min="1" max="50" />
+                  <label class="bme-inline-checkbox" for="bme-setting-recall-vector-prefilter-enabled">
+                    <input id="bme-setting-recall-vector-prefilter-enabled" type="checkbox" />
+                    <span>启用向量预筛</span>
+                  </label>
+                  <div class="bme-config-row bme-stage-param">
+                    <label for="bme-setting-recall-top-k">向量预筛 Top-K</label>
+                    <input id="bme-setting-recall-top-k" class="bme-config-input" type="number" min="1" max="100" />
+                  </div>
+                </div>
+
+                <div
+                  class="bme-config-card bme-guarded-card bme-stage-card"
+                  data-guard-settings="recallEnabled"
+                  data-stage-toggle-id="bme-setting-recall-graph-diffusion-enabled"
+                >
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">图扩散</div>
+                      <div class="bme-config-card-subtitle">控制是否沿图结构继续扩散候选，以及扩散阶段保留的候选上限。</div>
+                    </div>
+                    <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
+                  </div>
+                  <label class="bme-inline-checkbox" for="bme-setting-recall-graph-diffusion-enabled">
+                    <input id="bme-setting-recall-graph-diffusion-enabled" type="checkbox" />
+                    <span>启用图扩散</span>
+                  </label>
+                  <div class="bme-config-row bme-stage-param">
+                    <label for="bme-setting-recall-diffusion-top-k">图扩散 Top-K</label>
+                    <input id="bme-setting-recall-diffusion-top-k" class="bme-config-input" type="number" min="1" max="300" />
                   </div>
                 </div>
 
@@ -669,7 +688,7 @@
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">混合评分</div>
-                      <div class="bme-config-card-subtitle">平衡图扩散、向量相似和重要度在召回中的占比。</div>
+                      <div class="bme-config-card-subtitle">评分层始终运行；下面 3 个权重共同决定图扩散、向量相似和重要度在召回中的占比。</div>
                     </div>
                     <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
                   </div>
@@ -691,6 +710,32 @@
                       max="1"
                       step="0.05"
                     />
+                  </div>
+                </div>
+
+                <div
+                  class="bme-config-card bme-guarded-card bme-stage-card"
+                  data-guard-settings="recallEnabled"
+                  data-stage-toggle-id="bme-setting-recall-llm"
+                >
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">LLM 精确召回</div>
+                      <div class="bme-config-card-subtitle">控制是否启用 LLM 精排，以及传给 LLM 的候选池大小与最终保留上限。</div>
+                    </div>
+                    <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
+                  </div>
+                  <label class="bme-inline-checkbox" for="bme-setting-recall-llm">
+                    <input id="bme-setting-recall-llm" type="checkbox" />
+                    <span>启用 LLM 精排</span>
+                  </label>
+                  <div class="bme-config-row bme-stage-param">
+                    <label for="bme-setting-recall-llm-candidate-pool">LLM 精排候选池</label>
+                    <input id="bme-setting-recall-llm-candidate-pool" class="bme-config-input" type="number" min="1" max="100" />
+                  </div>
+                  <div class="bme-config-row bme-stage-param">
+                    <label for="bme-setting-recall-max-nodes">LLM 最终选择上限</label>
+                    <input id="bme-setting-recall-max-nodes" class="bme-config-input" type="number" min="1" max="50" />
                   </div>
                 </div>
 
