@@ -386,6 +386,16 @@ async function deleteVectorHashes(collectionId, config, hashes, signal) {
   }
 }
 
+export async function deleteBackendVectorHashesForRecovery(
+  collectionId,
+  config,
+  hashes,
+  signal = undefined,
+) {
+  if (!collectionId || !isBackendVectorConfig(config)) return;
+  await deleteVectorHashes(collectionId, config, hashes, signal);
+}
+
 async function insertVectorEntries(collectionId, config, entries, signal) {
   if (!Array.isArray(entries) || entries.length === 0) return;
   throwIfAborted(signal);

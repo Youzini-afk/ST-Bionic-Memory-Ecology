@@ -44,11 +44,13 @@ import {
   findJournalRecoveryPoint,
   markHistoryDirty,
   normalizeGraphRuntimeState,
+  rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "./runtime-state.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 import {
   BACKEND_VECTOR_SOURCES,
+  deleteBackendVectorHashesForRecovery,
   getVectorConfigFromSettings,
   getVectorIndexStats,
   isBackendVectorConfig,
@@ -192,6 +194,9 @@ let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
 let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
+let skipBeforeCombineRecallUntil = 0;
+let lastPreGenerationRecallKey = "";
+let lastPreGenerationRecallAt = 0;
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -559,6 +564,17 @@ function registerBeforeCombinePrompts(listener) {
   return null;
 }
 
+function registerGenerationAfterCommands(listener) {
+  const makeFirst = globalThis.eventMakeFirst;
+  if (typeof makeFirst === "function") {
+    return makeFirst(event_types.GENERATION_AFTER_COMMANDS, listener);
+  }
+
+  console.warn("[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册");
+  eventSource.on(event_types.GENERATION_AFTER_COMMANDS, listener);
+  return null;
+}
+
 function installSendIntentHooks() {
   for (const cleanup of sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length)) {
     try {
@@ -839,6 +855,7 @@ async function recordGraphMutation({
   artifactTags = [],
   syncRange = null,
   signal = undefined,
+  extractionCountBefore = extractionCount,
 } = {}) {
   ensureCurrentGraphRuntimeState();
   const vectorSync = await syncVectorState({
@@ -865,6 +882,7 @@ async function recordGraphMutation({
         artifactTags,
       ),
       vectorHashesInserted: vectorSync?.insertedHashes || [],
+      extractionCountBefore,
     }),
   );
   saveGraphToChat();
@@ -1195,7 +1213,9 @@ function loadGraphFromChat() {
     currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
   }
 
-  extractionCount = 0;
+  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+    ? currentGraph.historyState.extractionCount
+    : 0;
   lastExtractedItems = [];
   updateLastRecalledItems(currentGraph.lastRecallResult || []);
   lastInjectionContent = "";
@@ -1218,6 +1238,7 @@ function saveGraphToChat() {
   }
 
   ensureCurrentGraphRuntimeState();
+  currentGraph.historyState.extractionCount = extractionCount;
   context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
   saveMetadataDebounced();
   return true;
@@ -1463,6 +1484,56 @@ function resolveRecallInput(chat, recentContextMessageLimit, override = null) {
   };
 }
 
+function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
+  if (params?.automatic_trigger || params?.quiet_prompt) {
+    return null;
+  }
+
+  const generationType = String(type || "").trim() || "normal";
+  if (!["normal", "continue", "regenerate", "swipe"].includes(generationType)) {
+    return null;
+  }
+
+  if (generationType === "normal") {
+    const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
+    const tailUserText = lastNonSystemMessage?.is_user
+      ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
+      : "";
+    const textareaText = normalizeRecallInputText(
+      pendingRecallSendIntent.text || getSendTextareaValue(),
+    );
+    const userMessage = tailUserText || textareaText;
+    if (!userMessage) return null;
+
+    return {
+      overrideUserMessage: userMessage,
+      overrideSource: tailUserText ? "chat-tail-user" : "send-intent",
+      overrideSourceLabel: tailUserText ? "当前用户楼层" : "发送意图",
+      includeSyntheticUserMessage: !tailUserText,
+    };
+  }
+
+  const latestUserText = normalizeRecallInputText(
+    getLatestUserChatMessage(chat)?.mes || lastRecallSentUserMessage.text,
+  );
+  if (!latestUserText) return null;
+
+  return {
+    overrideUserMessage: latestUserText,
+    overrideSource: "chat-last-user",
+    overrideSourceLabel: "历史最后用户楼层",
+    includeSyntheticUserMessage: false,
+  };
+}
+
+function buildPreGenerationRecallKey(type, options = {}) {
+  return [
+    getCurrentChatId(),
+    String(type || "normal").trim() || "normal",
+    hashRecallInput(options.overrideUserMessage || ""),
+  ].join(":");
+}
+
 function getCurrentChatSeq(context = getContext()) {
   const chat = context?.chat;
   if (Array.isArray(chat) && chat.length > 0) {
@@ -1476,6 +1547,8 @@ async function handleExtractionSuccess(result, endIdx, settings, signal = undefi
   const warnings = [];
   throwIfAborted(signal, "提取已终止");
   extractionCount++;
+  ensureCurrentGraphRuntimeState();
+  currentGraph.historyState.extractionCount = extractionCount;
   updateLastExtractedItems(result.newNodeIds || []);
 
   if (settings.enableEvolution && result.newNodeIds?.length > 0) {
@@ -1606,6 +1679,96 @@ function buildExtractionMessages(chat, startIdx, endIdx, settings) {
   return messages;
 }
 
+function getChatIndexForPlayableSeq(chat, playableSeq) {
+  if (!Array.isArray(chat) || !Number.isFinite(playableSeq)) return null;
+
+  let currentSeq = -1;
+  for (let index = 0; index < chat.length; index++) {
+    const message = chat[index];
+    if (message?.is_system) continue;
+    currentSeq++;
+    if (currentSeq >= playableSeq) {
+      return index;
+    }
+  }
+
+  return chat.length;
+}
+
+function getChatIndexForAssistantSeq(chat, assistantSeq) {
+  if (!Array.isArray(chat) || !Number.isFinite(assistantSeq)) return null;
+
+  let currentSeq = -1;
+  for (let index = 0; index < chat.length; index++) {
+    if (!isAssistantChatMessage(chat[index])) continue;
+    currentSeq++;
+    if (currentSeq >= assistantSeq) {
+      return index;
+    }
+  }
+
+  return chat.length;
+}
+
+function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
+  if (!meta || typeof meta !== "object") return null;
+
+  const candidates = [];
+  if (Number.isFinite(meta.messageId)) {
+    candidates.push({
+      floor: meta.messageId,
+      source: `${trigger}-meta`,
+    });
+  }
+  if (Number.isFinite(meta.deletedPlayableSeqFrom)) {
+    const floor = getChatIndexForPlayableSeq(chat, meta.deletedPlayableSeqFrom);
+    if (Number.isFinite(floor)) {
+      candidates.push({
+        floor,
+        source: `${trigger}-meta`,
+      });
+    }
+  }
+  if (Number.isFinite(meta.deletedAssistantSeqFrom)) {
+    const floor = getChatIndexForAssistantSeq(chat, meta.deletedAssistantSeqFrom);
+    if (Number.isFinite(floor)) {
+      candidates.push({
+        floor,
+        source: `${trigger}-meta`,
+      });
+    }
+  }
+  if (Number.isFinite(meta.playableSeq)) {
+    const floor = getChatIndexForPlayableSeq(chat, meta.playableSeq);
+    if (Number.isFinite(floor)) {
+      candidates.push({
+        floor,
+        source: `${trigger}-meta`,
+      });
+    }
+  }
+  if (Number.isFinite(meta.assistantSeq)) {
+    const floor = getChatIndexForAssistantSeq(chat, meta.assistantSeq);
+    if (Number.isFinite(floor)) {
+      candidates.push({
+        floor,
+        source: `${trigger}-meta`,
+      });
+    }
+  }
+  if (trigger !== "message-deleted" && Number.isFinite(primaryArg)) {
+    candidates.push({
+      floor: primaryArg,
+      source: `${trigger}-meta`,
+    });
+  }
+
+  if (candidates.length === 0) return null;
+  return candidates.reduce((earliest, current) =>
+    current.floor < earliest.floor ? current : earliest,
+  );
+}
+
 function getLastProcessedAssistantFloor() {
   ensureCurrentGraphRuntimeState();
   return Number.isFinite(currentGraph?.historyState?.lastProcessedAssistantFloor)
@@ -1675,7 +1838,7 @@ function scheduleImmediateHistoryRecovery(
   }, delayMs);
 }
 
-function scheduleHistoryMutationRecheck(trigger = "history-change") {
+function scheduleHistoryMutationRecheck(trigger = "history-change", primaryArg = null, meta = null) {
   if (!getSettings().enabled) return;
 
   clearPendingHistoryMutationChecks();
@@ -1701,7 +1864,7 @@ function scheduleHistoryMutationRecheck(trigger = "history-change") {
       );
       if (!getSettings().enabled) return;
 
-      const detection = inspectHistoryMutation(`settled:${trigger}`);
+      const detection = inspectHistoryMutation(`settled:${trigger}`, primaryArg, meta);
       if (
         detection.dirty ||
         Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
@@ -1718,12 +1881,39 @@ function scheduleHistoryMutationRecheck(trigger = "history-change") {
   }
 }
 
-function inspectHistoryMutation(trigger = "history-change") {
+function inspectHistoryMutation(trigger = "history-change", primaryArg = null, meta = null) {
   if (!currentGraph) return { dirty: false, earliestAffectedFloor: null, reason: "" };
 
   ensureCurrentGraphRuntimeState();
   const context = getContext();
   const chat = context?.chat;
+  const metaDetection = resolveDirtyFloorFromMutationMeta(
+    trigger,
+    primaryArg,
+    meta,
+    chat,
+  );
+  if (
+    metaDetection &&
+    Number.isFinite(metaDetection.floor) &&
+    metaDetection.floor <= getLastProcessedAssistantFloor()
+  ) {
+    clearInjectionState();
+    markHistoryDirty(
+      currentGraph,
+      metaDetection.floor,
+      `${trigger} 元数据检测到楼层变动`,
+      metaDetection.source,
+    );
+    saveGraphToChat();
+    notifyHistoryDirty(metaDetection.floor, `${trigger} 元数据检测到楼层变动`);
+    return {
+      dirty: true,
+      earliestAffectedFloor: metaDetection.floor,
+      reason: `${trigger} 元数据检测到楼层变动`,
+      source: metaDetection.source,
+    };
+  }
   const detection = detectHistoryMutation(chat, currentGraph.historyState);
 
   if (detection.dirty) {
@@ -1732,10 +1922,14 @@ function inspectHistoryMutation(trigger = "history-change") {
       currentGraph,
       detection.earliestAffectedFloor,
       detection.reason || trigger,
+      "hash-recheck",
     );
     saveGraphToChat();
     notifyHistoryDirty(detection.earliestAffectedFloor, detection.reason);
-    return detection;
+    return {
+      ...detection,
+      source: "hash-recheck",
+    };
   }
 
   if (trigger === "message-edited" || trigger === "message-swiped") {
@@ -1763,23 +1957,31 @@ async function purgeCurrentVectorCollection(signal = undefined) {
   }
 }
 
-async function prepareVectorStateForReplay(fullReset = false, signal = undefined) {
+async function prepareVectorStateForReplay(
+  fullReset = false,
+  signal = undefined,
+  { skipBackendPurge = false } = {},
+) {
   ensureCurrentGraphRuntimeState();
   const config = getEmbeddingConfig();
 
   if (isBackendVectorConfig(config)) {
-    try {
-      await purgeCurrentVectorCollection(signal);
-    } catch (error) {
-      if (isAbortError(error)) {
-        throw error;
+    if (!skipBackendPurge) {
+      try {
+        await purgeCurrentVectorCollection(signal);
+      } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+        console.warn("[ST-BME] 清理后端向量索引失败，继续本地恢复:", error);
       }
-      console.warn("[ST-BME] 清理后端向量索引失败，继续本地恢复:", error);
+      currentGraph.vectorIndexState.hashToNodeId = {};
+      currentGraph.vectorIndexState.nodeToHash = {};
     }
-    currentGraph.vectorIndexState.hashToNodeId = {};
-    currentGraph.vectorIndexState.nodeToHash = {};
     currentGraph.vectorIndexState.dirty = true;
-    currentGraph.vectorIndexState.lastWarning = "历史恢复后需要重建后端向量索引";
+    currentGraph.vectorIndexState.lastWarning = skipBackendPurge
+      ? "历史恢复后需要修复受影响后缀的后端向量索引"
+      : "历史恢复后需要重建后端向量索引";
     return;
   }
 
@@ -1802,6 +2004,7 @@ async function executeExtractionBatch({
   ensureCurrentGraphRuntimeState();
   throwIfAborted(signal, "提取已终止");
   const lastProcessed = getLastProcessedAssistantFloor();
+  const extractionCountBefore = extractionCount;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   const messages = buildExtractionMessages(chat, startIdx, endIdx, settings);
 
@@ -1852,6 +2055,7 @@ async function executeExtractionBatch({
       processedRange: [startIdx, endIdx],
       postProcessArtifacts,
       vectorHashesInserted: effects?.vectorHashesInserted || [],
+      extractionCountBefore,
     }),
   );
   saveGraphToChat();
@@ -1901,6 +2105,29 @@ async function replayExtractionFromHistory(chat, settings, signal = undefined) {
   return replayedBatches;
 }
 
+function collectAffectedInsertedHashes(affectedJournals = []) {
+  const hashes = new Set();
+  for (const journal of affectedJournals) {
+    const insertedHashes =
+      journal?.vectorDelta?.insertedHashes ||
+      journal?.vectorHashesInserted ||
+      [];
+    for (const hash of insertedHashes) {
+      if (hash) hashes.add(hash);
+    }
+  }
+  return [...hashes];
+}
+
+function rollbackAffectedJournals(graph, affectedJournals = []) {
+  for (let index = affectedJournals.length - 1; index >= 0; index--) {
+    rollbackBatch(graph, affectedJournals[index]);
+  }
+  graph.batchJournal = Array.isArray(graph.batchJournal)
+    ? graph.batchJournal.slice(0, Math.max(0, graph.batchJournal.length - affectedJournals.length))
+    : [];
+}
+
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   if (!currentGraph || isRecoveringHistory) {
     return !isRecoveringHistory;
@@ -1927,6 +2154,8 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
     : detection.earliestAffectedFloor;
   let replayedBatches = 0;
   let usedFullRebuild = false;
+  let recoveryPath = "full-rebuild";
+  let affectedBatchCount = 0;
   const historyController = beginStageAbortController("history");
   const historySignal = historyController.signal;
 
@@ -1946,33 +2175,71 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   try {
     throwIfAborted(historySignal, "历史恢复已终止");
     const recoveryPoint = findJournalRecoveryPoint(currentGraph, initialDirtyFrom);
-    if (recoveryPoint) {
+    if (recoveryPoint?.path === "reverse-journal") {
+      recoveryPath = "reverse-journal";
+      affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
+      const config = getEmbeddingConfig();
+      const insertedHashes = collectAffectedInsertedHashes(
+        recoveryPoint.affectedJournals,
+      );
+      rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
+      currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
+      extractionCount = currentGraph.historyState.extractionCount || 0;
+
+      if (isBackendVectorConfig(config) && insertedHashes.length > 0) {
+        await deleteBackendVectorHashesForRecovery(
+          currentGraph.vectorIndexState.collectionId,
+          config,
+          insertedHashes,
+          historySignal,
+        );
+      }
+      await prepareVectorStateForReplay(false, historySignal, {
+        skipBackendPurge: isBackendVectorConfig(config),
+      });
+    } else if (recoveryPoint?.path === "legacy-snapshot") {
+      recoveryPath = "legacy-snapshot";
+      affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
       currentGraph = normalizeGraphRuntimeState(
         recoveryPoint.snapshotBefore,
         chatId,
       );
+      extractionCount = currentGraph.historyState.extractionCount || 0;
+      await prepareVectorStateForReplay(false, historySignal);
     } else {
+      recoveryPath = "full-rebuild";
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
       usedFullRebuild = true;
+      extractionCount = 0;
+      await prepareVectorStateForReplay(true, historySignal);
     }
 
-    await prepareVectorStateForReplay(usedFullRebuild, historySignal);
     replayedBatches = await replayExtractionFromHistory(chat, settings, historySignal);
 
     clearHistoryDirty(
       currentGraph,
-      buildRecoveryResult(usedFullRebuild ? "full-rebuild" : "replayed", {
+      buildRecoveryResult(
+        usedFullRebuild ? "full-rebuild" : "replayed",
+        {
         fromFloor: initialDirtyFrom,
         batches: replayedBatches,
+        path: recoveryPath,
+        detectionSource:
+          detection.source ||
+          currentGraph?.historyState?.lastMutationSource ||
+          "hash-recheck",
+        affectedBatchCount,
+        replayedBatchCount: replayedBatches,
         reason: detection.reason || currentGraph?.historyState?.lastMutationReason || trigger,
-      }),
+        },
+      ),
     );
     saveGraphToChat();
     refreshPanelLiveState();
     updateStageNotice(
       "history",
       usedFullRebuild ? "历史恢复完成（全量重建）" : "历史恢复完成",
-      `起点楼层 ${initialDirtyFrom} · 回放 ${replayedBatches} 批`,
+      `path ${recoveryPath} · 起点楼层 ${initialDirtyFrom} · 受影响 ${affectedBatchCount} 批 · 回放 ${replayedBatches} 批`,
       usedFullRebuild ? "warning" : "success",
       {
         busy: false,
@@ -2005,6 +2272,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
 
     try {
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+      extractionCount = 0;
       await prepareVectorStateForReplay(true, historySignal);
       replayedBatches = await replayExtractionFromHistory(chat, settings, historySignal);
       clearHistoryDirty(
@@ -2012,6 +2280,13 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         buildRecoveryResult("full-rebuild", {
           fromFloor: 0,
           batches: replayedBatches,
+          path: "full-rebuild",
+          detectionSource:
+            detection.source ||
+            currentGraph?.historyState?.lastMutationSource ||
+            "hash-recheck",
+          affectedBatchCount,
+          replayedBatchCount: replayedBatches,
           reason: `恢复失败后兜底全量重建: ${error?.message || error}`,
         }),
       );
@@ -2020,7 +2295,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       updateStageNotice(
         "history",
         "历史恢复已退化为全量重建",
-        `起点楼层 ${initialDirtyFrom} · 回放 ${replayedBatches} 批`,
+        `path full-rebuild · 起点楼层 ${initialDirtyFrom} · 回放 ${replayedBatches} 批`,
         "warning",
         {
           busy: false,
@@ -2032,6 +2307,13 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
     } catch (fallbackError) {
       currentGraph.historyState.lastRecoveryResult = buildRecoveryResult("failed", {
         fromFloor: initialDirtyFrom,
+        path: recoveryPath,
+        detectionSource:
+          detection.source ||
+          currentGraph?.historyState?.lastMutationSource ||
+          "hash-recheck",
+        affectedBatchCount,
+        replayedBatchCount: replayedBatches,
         reason: String(fallbackError),
       });
       saveGraphToChat();
@@ -2145,23 +2427,115 @@ async function runExtraction() {
   }
 }
 
+function getRecallHookLabel(hookName = "") {
+  switch (hookName) {
+    case "GENERATION_AFTER_COMMANDS":
+      return "hook GENERATION_AFTER_COMMANDS";
+    case "GENERATE_BEFORE_COMBINE_PROMPTS":
+      return "hook GENERATE_BEFORE_COMBINE_PROMPTS";
+    default:
+      return "";
+  }
+}
+
+function applyRecallInjection(context, settings, recallInput, recentMessages, result) {
+  const injectionText = formatInjection(result, getSchema()).trim();
+  lastInjectionContent = injectionText;
+  const retrievalMeta = result?.meta?.retrieval || {};
+  const llmMeta = retrievalMeta.llm || {
+    status: settings.recallEnableLLM ? "unknown" : "disabled",
+    reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
+    candidatePool: 0,
+  };
+
+  if (injectionText) {
+    const tokens = estimateTokens(injectionText);
+    console.log(
+      `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
+    );
+  }
+
+  context.setExtensionPrompt(
+    MODULE_NAME,
+    injectionText,
+    extension_prompt_types.IN_CHAT,
+    clampInt(settings.injectDepth, 9999, 0, 9999),
+  );
+
+  currentGraph.lastRecallResult = result.selectedNodeIds;
+  updateLastRecalledItems(result.selectedNodeIds || []);
+  saveGraphToChat();
+
+  const llmLabel =
+    llmMeta.status === "llm"
+      ? "LLM 精排完成"
+      : llmMeta.status === "fallback"
+        ? "LLM 回退评分"
+        : llmMeta.status === "disabled"
+          ? "仅评分排序"
+          : "召回完成";
+  const hookLabel = getRecallHookLabel(recallInput.hookName);
+  setLastRecallStatus(
+    llmLabel,
+    [
+      hookLabel,
+      recallInput.sourceLabel,
+      `ctx ${recentMessages.length}`,
+      `vector ${retrievalMeta.vectorHits ?? 0}`,
+      `diffusion ${retrievalMeta.diffusionHits ?? 0}`,
+      `llm pool ${llmMeta.candidatePool ?? 0}`,
+      `recall ${result.stats.recallCount}`,
+    ].filter(Boolean).join(" · "),
+    llmMeta.status === "fallback" ? "warning" : "success",
+    {
+      syncRuntime: true,
+      toastKind: "",
+    },
+  );
+
+  if (llmMeta.status === "fallback") {
+    const now = Date.now();
+    if (now - lastRecallFallbackNoticeAt > 15000) {
+      lastRecallFallbackNoticeAt = now;
+      toastr.warning(
+        llmMeta.reason || "LLM 精排未返回有效结果，已回退到评分排序",
+        "ST-BME 召回提示",
+        { timeOut: 4500 },
+      );
+    }
+  }
+
+  return { injectionText, retrievalMeta, llmMeta };
+}
+
 /**
  * 召回管线：检索并注入记忆
  */
 async function runRecall(options = {}) {
-  if (isRecalling || !currentGraph) return;
+  if (isRecalling || !currentGraph) return false;
 
   const settings = getSettings();
-  if (!settings.enabled || !settings.recallEnabled) return;
-  if (!(await recoverHistoryIfNeeded("pre-recall"))) return;
+  if (!settings.enabled || !settings.recallEnabled) return false;
+  if (!(await recoverHistoryIfNeeded("pre-recall"))) return false;
 
   const context = getContext();
   const chat = context.chat;
-  if (!chat || chat.length === 0) return;
+  if (!chat || chat.length === 0) return false;
 
   isRecalling = true;
   const recallController = beginStageAbortController("recall");
   const recallSignal = recallController.signal;
+  if (options.signal) {
+    if (options.signal.aborted) {
+      recallController.abort(options.signal.reason || createAbortError("宿主已终止生成"));
+    } else {
+      options.signal.addEventListener(
+        "abort",
+        () => recallController.abort(options.signal.reason || createAbortError("宿主已终止生成")),
+        { once: true },
+      );
+    }
+  }
 
   try {
     await ensureVectorReadyIfNeeded("pre-recall", recallSignal);
@@ -2175,17 +2549,25 @@ async function runRecall(options = {}) {
     const userMessage = recallInput.userMessage;
     const recentMessages = recallInput.recentMessages;
 
-    if (!userMessage) return;
+    if (!userMessage) return false;
+
+    recallInput.hookName = options.hookName || "";
 
     console.log("[ST-BME] 开始召回", {
       source: recallInput.source,
       sourceLabel: recallInput.sourceLabel,
+      hookName: recallInput.hookName,
       userMessageLength: userMessage.length,
       recentMessages: recentMessages.length,
     });
     setLastRecallStatus(
       "召回中",
-      `来源 ${recallInput.sourceLabel} · 上下文 ${recentMessages.length} 条 · 当前用户消息长度 ${userMessage.length}`,
+      [
+        getRecallHookLabel(recallInput.hookName),
+        `来源 ${recallInput.sourceLabel}`,
+        `上下文 ${recentMessages.length} 条`,
+        `当前用户消息长度 ${userMessage.length}`,
+      ].filter(Boolean).join(" · "),
       "running",
       { syncRuntime: true },
     );
@@ -2223,71 +2605,14 @@ async function runRecall(options = {}) {
       },
     });
 
-    // 格式化注入文本
-    const injectionText = formatInjection(result, getSchema()).trim();
-    lastInjectionContent = injectionText;
-    const retrievalMeta = result?.meta?.retrieval || {};
-    const llmMeta = retrievalMeta.llm || {
-      status: settings.recallEnableLLM ? "unknown" : "disabled",
-      reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
-      candidatePool: 0,
-    };
-
-    if (injectionText) {
-      const tokens = estimateTokens(injectionText);
-      console.log(
-        `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
-      );
-    }
-
-    // 无结果时也要清空旧注入，避免脏 prompt 残留
-    context.setExtensionPrompt(
-      MODULE_NAME,
-      injectionText,
-      extension_prompt_types.IN_CHAT, // 当前注入走 IN_CHAT@Depth
-      clampInt(settings.injectDepth, 9999, 0, 9999),
-    );
-
-    // 保存召回结果和访问强化
-    currentGraph.lastRecallResult = result.selectedNodeIds;
-    updateLastRecalledItems(result.selectedNodeIds || []);
-    saveGraphToChat();
-
-    const llmLabel =
-      llmMeta.status === "llm"
-        ? "LLM 精排完成"
-        : llmMeta.status === "fallback"
-          ? "LLM 回退评分"
-          : llmMeta.status === "disabled"
-            ? "仅评分排序"
-            : "召回完成";
-    setLastRecallStatus(
-      llmLabel,
-      `${recallInput.sourceLabel} · ctx ${recentMessages.length} · vector ${retrievalMeta.vectorHits ?? 0} · diffusion ${retrievalMeta.diffusionHits ?? 0} · llm pool ${llmMeta.candidatePool ?? 0} · recall ${result.stats.recallCount}`,
-      llmMeta.status === "fallback" ? "warning" : "success",
-      {
-        syncRuntime: true,
-        toastKind: "",
-      },
-    );
-
-    if (llmMeta.status === "fallback") {
-      const now = Date.now();
-      if (now - lastRecallFallbackNoticeAt > 15000) {
-        lastRecallFallbackNoticeAt = now;
-        toastr.warning(
-          llmMeta.reason || "LLM 精排未返回有效结果，已回退到评分排序",
-          "ST-BME 召回提示",
-          { timeOut: 4500 },
-        );
-      }
-    }
+    applyRecallInjection(context, settings, recallInput, recentMessages, result);
+    return true;
   } catch (e) {
     if (isAbortError(e)) {
       setLastRecallStatus("召回已终止", e?.message || "已手动终止当前召回", "warning", {
         syncRuntime: true,
       });
-      return;
+      return false;
     }
     console.error("[ST-BME] 召回失败:", e);
     const message = e?.message || String(e);
@@ -2296,6 +2621,7 @@ async function runRecall(options = {}) {
       toastKind: "",
     });
     toastr.error(`召回失败: ${message}`);
+    return false;
   } finally {
     finishStageAbortController("recall", recallController);
     isRecalling = false;
@@ -2310,6 +2636,9 @@ function onChatChanged() {
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = null;
   pendingHistoryRecoveryTrigger = "";
+  skipBeforeCombineRecallUntil = 0;
+  lastPreGenerationRecallKey = "";
+  lastPreGenerationRecallAt = 0;
   abortAllRunningStages();
   dismissAllStageNotices();
   loadGraphFromChat();
@@ -2328,23 +2657,56 @@ function onMessageSent(messageId) {
   recordRecallSentUserMessage(messageId, message.mes || "");
 }
 
-function onMessageDeleted() {
+function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   clearInjectionState();
-  scheduleHistoryMutationRecheck("message-deleted");
+  scheduleHistoryMutationRecheck("message-deleted", chatLengthOrMessageId, meta);
 }
 
-function onMessageEdited() {
+function onMessageEdited(messageId, meta = null) {
   clearInjectionState();
-  scheduleHistoryMutationRecheck("message-edited");
+  scheduleHistoryMutationRecheck("message-edited", messageId, meta);
 }
 
-function onMessageSwiped() {
+function onMessageSwiped(messageId, meta = null) {
   clearInjectionState();
-  scheduleHistoryMutationRecheck("message-swiped");
+  scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+}
+
+async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
+  if (dryRun) return;
+
+  const context = getContext();
+  const chat = context?.chat;
+  const recallOptions = buildGenerationAfterCommandsRecallInput(type, params, chat);
+  if (!recallOptions?.overrideUserMessage) return;
+
+  const recallKey = buildPreGenerationRecallKey(type, recallOptions);
+  const recentlyHandled =
+    lastPreGenerationRecallKey === recallKey &&
+    Date.now() - lastPreGenerationRecallAt < 1500;
+  if (recentlyHandled) {
+    return;
+  }
+
+  const didRecall = await runRecall({
+    ...recallOptions,
+    hookName: "GENERATION_AFTER_COMMANDS",
+    signal: params?.signal,
+  });
+
+  if (didRecall) {
+    lastPreGenerationRecallKey = recallKey;
+    lastPreGenerationRecallAt = Date.now();
+    skipBeforeCombineRecallUntil = Date.now() + 1500;
+  }
 }
 
 async function onBeforeCombinePrompts() {
-  await runRecall();
+  if (skipBeforeCombineRecallUntil > Date.now()) {
+    skipBeforeCombineRecallUntil = 0;
+    return;
+  }
+  await runRecall({ hookName: "GENERATE_BEFORE_COMBINE_PROMPTS" });
 }
 
 function onMessageReceived() {
@@ -2426,6 +2788,10 @@ async function onRebuild() {
       buildRecoveryResult("full-rebuild", {
         fromFloor: 0,
         batches: replayedBatches,
+        path: "full-rebuild",
+        detectionSource: "manual-rebuild",
+        affectedBatchCount: currentGraph.batchJournal?.length || 0,
+        replayedBatchCount: replayedBatches,
         reason: "用户手动触发全量重建",
       }),
     );
@@ -2824,6 +3190,7 @@ async function onReembedDirect() {
   if (event_types.MESSAGE_SENT) {
     eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
   }
+  registerGenerationAfterCommands(onGenerationAfterCommands);
   registerBeforeCombinePrompts(onBeforeCombinePrompts);
   eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
   eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);

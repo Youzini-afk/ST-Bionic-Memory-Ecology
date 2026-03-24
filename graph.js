@@ -11,7 +11,7 @@ import {
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 4;
+const GRAPH_VERSION = 5;
 
 /**
  * 生成 UUID v4
@@ -510,6 +510,20 @@ export function deserializeGraph(json) {
           : createDefaultBatchJournal();
       }
 
+      if (data.version < 5) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          extractionCount: Number.isFinite(data?.historyState?.extractionCount)
+            ? data.historyState.extractionCount
+            : 0,
+          lastMutationSource: String(data?.historyState?.lastMutationSource || ""),
+        };
+        data.batchJournal = Array.isArray(data.batchJournal)
+          ? data.batchJournal
+          : createDefaultBatchJournal();
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -550,6 +564,10 @@ export function deserializeGraph(json) {
       )
         ? data.historyState.lastProcessedAssistantFloor
         : data.lastProcessedSeq,
+      extractionCount: Number.isFinite(data?.historyState?.extractionCount)
+        ? data.historyState.extractionCount
+        : 0,
+      lastMutationSource: String(data?.historyState?.lastMutationSource || ""),
     };
     data.vectorIndexState = {
       ...createDefaultVectorIndexState(data?.historyState?.chatId || ""),

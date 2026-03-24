@@ -5,6 +5,7 @@ import {
   createBatchJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
+  rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "../runtime-state.js";
 import { createEmptyGraph } from "../graph.js";
@@ -43,8 +44,29 @@ assert.equal(truncatedDetection.earliestAffectedFloor, 2);
 const graph = createEmptyGraph();
 graph.historyState.chatId = "chat-history-test";
 const beforeSnapshot = cloneGraphSnapshot(graph);
+graph.nodes.push({
+  id: "node-1",
+  type: "event",
+  fields: { title: "旧事件", summary: "旧摘要" },
+  seq: 1,
+  seqRange: [1, 1],
+  archived: false,
+  embedding: null,
+  importance: 5,
+  accessCount: 0,
+  lastAccessTime: Date.now(),
+  createdTime: Date.now(),
+  level: 0,
+  parentId: null,
+  childIds: [],
+  prevId: null,
+  nextId: null,
+  clusters: [],
+});
 graph.lastProcessedSeq = 3;
 graph.historyState.lastProcessedAssistantFloor = 3;
+graph.historyState.processedMessageHashes = hashes;
+graph.historyState.extractionCount = 4;
 const afterSnapshot = cloneGraphSnapshot(graph);
 appendBatchJournal(
   graph,
@@ -52,15 +74,18 @@ appendBatchJournal(
     processedRange: [1, 3],
     postProcessArtifacts: ["compression"],
     vectorHashesInserted: [1234],
+    extractionCountBefore: 0,
   }),
 );
 
 const recoveryPoint = findJournalRecoveryPoint(graph, 2);
 assert.ok(recoveryPoint);
-assert.equal(recoveryPoint.journal.processedRange[1], 3);
-assert.equal(
-  recoveryPoint.snapshotBefore.historyState.lastProcessedAssistantFloor,
-  -1,
-);
+assert.equal(recoveryPoint.path, "reverse-journal");
+assert.equal(recoveryPoint.affectedJournals[0].processedRange[1], 3);
+
+rollbackBatch(graph, recoveryPoint.affectedJournals[0]);
+assert.equal(graph.nodes.length, 0);
+assert.equal(graph.historyState.lastProcessedAssistantFloor, -1);
+assert.equal(graph.historyState.extractionCount, 0);
 
 console.log("runtime-history tests passed");

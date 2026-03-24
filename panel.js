@@ -372,7 +372,15 @@ function _refreshDashboard() {
     _setText(
         "bme-status-recovery",
         recovery
-            ? `${recovery.status} · from ${recovery.fromFloor ?? "—"} · ${recovery.reason || "—"}`
+            ? [
+                recovery.status || "—",
+                recovery.path ? `path ${recovery.path}` : "",
+                recovery.detectionSource ? `src ${recovery.detectionSource}` : "",
+                recovery.fromFloor != null ? `from ${recovery.fromFloor}` : "",
+                recovery.affectedBatchCount != null ? `affected ${recovery.affectedBatchCount}` : "",
+                recovery.replayedBatchCount != null ? `replayed ${recovery.replayedBatchCount}` : "",
+                recovery.reason || "",
+            ].filter(Boolean).join(" · ")
             : "暂无恢复记录",
     );
     _setText(
