@@ -27,6 +27,9 @@ function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
     return Boolean(config.apiUrl && config.model);
 }
 
+// 自动检测：如果 API 不支持 response_format，记住并跳过
+let _jsonModeSupported = true;
+
 async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = false } = {}) {
     const config = getMemoryLLMConfig();
     if (!hasDedicatedLLMConfig(config)) {
@@ -45,8 +48,8 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         stream: false,
     };
 
-    // 强制 JSON 输出（OpenAI / 兼容 API 支持）
-    if (jsonMode) {
+    // 强制 JSON 输出（仅当 API 支持时）
+    if (jsonMode && _jsonModeSupported) {
         body.response_format = { type: 'json_object' };
     }
 
@@ -56,6 +59,26 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         body: JSON.stringify(body),
         signal,
     });
+
+    // 如果 400 且带了 response_format，可能是 API 不支持，降级重试
+    if (!response.ok && response.status === 400 && jsonMode && _jsonModeSupported) {
+        console.warn('[ST-BME] API 不支持 response_format，降级为普通模式');
+        _jsonModeSupported = false;
+        // 去掉 response_format 重试
+        delete body.response_format;
+        const retryResponse = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(body),
+            signal,
+        });
+        return await _parseResponse(retryResponse);
+    }
+
+    return await _parseResponse(response);
+}
+
+async function _parseResponse(response) {
 
     const responseText = await response.text().catch(() => '');
     let data;
