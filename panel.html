@@ -143,9 +143,37 @@
           <!-- Config Tab -->
           <div class="bme-tab-pane" id="bme-pane-config">
             <div class="bme-config-card">
+              <div class="bme-section-header">基础开关</div>
+              <div class="bme-config-row inline">
+                <label class="checkbox_label" for="bme-setting-enabled">
+                  <input id="bme-setting-enabled" type="checkbox" />
+                  <span>启用 ST-BME 自动记忆</span>
+                </label>
+              </div>
+              <div class="bme-config-row inline">
+                <label class="checkbox_label" for="bme-setting-recall-enabled">
+                  <input id="bme-setting-recall-enabled" type="checkbox" />
+                  <span>启用生成前记忆召回</span>
+                </label>
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-extract-every">每 N 条回复提取</label>
+                <input id="bme-setting-extract-every" class="bme-config-input" type="number" min="1" max="50" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-extract-context-turns">提取上下文轮数</label>
+                <input id="bme-setting-extract-context-turns" class="bme-config-input" type="number" min="0" max="20" />
+              </div>
+              <div class="bme-config-row">
+                <label for="bme-setting-inject-depth">注入深度</label>
+                <input id="bme-setting-inject-depth" class="bme-config-input" type="number" min="0" max="9999" />
+              </div>
+            </div>
+
+            <div class="bme-config-card">
               <div class="bme-section-header">记忆 LLM</div>
               <div class="bme-config-help">
-                这里配置的是 ST-BME 的第二套记忆 LLM。留空时，提取/召回/概要/反思会复用当前 SillyTavern 聊天模型。
+                这里配置的是 ST-BME 的第二套记忆 LLM。留空时，提取/召回/概要/反思会复用当前 SillyTavern 聊天模型；填写后会通过 SillyTavern 现有后端代理转发到 OpenAI 兼容接口，不要求改酒馆本体。
               </div>
               <div class="bme-config-row">
                 <label for="bme-setting-llm-url">LLM API 地址</label>
@@ -178,6 +206,9 @@
 
             <div class="bme-config-card">
               <div class="bme-section-header">Embedding</div>
+              <div class="bme-config-help">
+                图谱向量仍使用 OpenAI 兼容的 <code>/v1/embeddings</code> 接口。当前发布版不改酒馆本体，因此这里不会依赖额外宿主补丁；若目标服务不支持浏览器直连，请改用支持 CORS 的服务或本地可直连端点。
+              </div>
               <div class="bme-config-row">
                 <label for="bme-setting-embed-url">Embedding API 地址</label>
                 <input id="bme-setting-embed-url" class="bme-config-input" type="text" placeholder="https://api.openai.com/v1" />

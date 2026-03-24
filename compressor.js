@@ -1,7 +1,7 @@
 // ST-BME: 层级压缩引擎
 // 超过阈值的节点被 LLM 总结为更高层级的压缩节点
 
-import { createNode, addNode, getActiveNodes, getNode } from './graph.js';
+import { createNode, addNode, createEdge, addEdge, getActiveNodes, getNode } from './graph.js';
 import { callLLMForJSON } from './llm.js';
 import { embedText } from './embedding.js';
 
@@ -100,6 +100,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force }) 
         }
 
         addNode(graph, compressedNode);
+        migrateBatchEdges(graph, batch, compressedNode);
         created++;
 
         // 归档子节点
@@ -111,6 +112,40 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force }) 
     }
 
     return { created, archived };
+}
+
+function migrateBatchEdges(graph, batch, compressedNode) {
+    const batchIds = new Set(batch.map(node => node.id));
+    const activeNodeIds = new Set(getActiveNodes(graph).map(node => node.id));
+
+    for (const edge of graph.edges) {
+        if (edge.invalidAt || edge.expiredAt) continue;
+
+        const fromInside = batchIds.has(edge.fromId);
+        const toInside = batchIds.has(edge.toId);
+        if (!fromInside && !toInside) continue;
+        if (fromInside && toInside) continue;
+
+        const newFromId = fromInside ? compressedNode.id : edge.fromId;
+        const newToId = toInside ? compressedNode.id : edge.toId;
+
+        if (newFromId === newToId) continue;
+        if (!activeNodeIds.has(newFromId) || !activeNodeIds.has(newToId)) continue;
+        if (!getNode(graph, newFromId) || !getNode(graph, newToId)) continue;
+
+        const migratedEdge = createEdge({
+            fromId: newFromId,
+            toId: newToId,
+            relation: edge.relation,
+            strength: edge.strength,
+            edgeType: edge.edgeType,
+        });
+        migratedEdge.validAt = edge.validAt ?? migratedEdge.validAt;
+        migratedEdge.invalidAt = edge.invalidAt ?? migratedEdge.invalidAt;
+        migratedEdge.expiredAt = edge.expiredAt ?? migratedEdge.expiredAt;
+
+        addEdge(graph, migratedEdge);
+    }
 }
 
 /**

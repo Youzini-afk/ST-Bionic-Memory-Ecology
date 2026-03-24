@@ -440,6 +440,15 @@ function _bindActions() {
 function _refreshConfigTab() {
     const settings = _getSettings?.() || {};
 
+    _setCheckboxValue("bme-setting-enabled", settings.enabled ?? false);
+    _setCheckboxValue("bme-setting-recall-enabled", settings.recallEnabled ?? true);
+    _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
+    _setInputValue(
+        "bme-setting-extract-context-turns",
+        settings.extractContextTurns ?? 2,
+    );
+    _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 4);
+
     _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
     _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
     _setInputValue("bme-setting-llm-model", settings.llmModel || "");
@@ -459,6 +468,22 @@ function _refreshConfigTab() {
 
 function _bindConfigControls() {
     if (!panelEl || panelEl.dataset.bmeConfigBound === "true") return;
+
+    bindCheckbox("bme-setting-enabled", (checked) =>
+        _updateSettings?.({ enabled: checked }),
+    );
+    bindCheckbox("bme-setting-recall-enabled", (checked) =>
+        _updateSettings?.({ recallEnabled: checked }),
+    );
+    bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
+        _updateSettings?.({ extractEvery: value }),
+    );
+    bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
+        _updateSettings?.({ extractContextTurns: value }),
+    );
+    bindNumber("bme-setting-inject-depth", 4, 0, 9999, (value) =>
+        _updateSettings?.({ injectDepth: value }),
+    );
 
     bindText("bme-setting-llm-url", (value) =>
         _updateSettings?.({ llmApiUrl: value.trim() }),

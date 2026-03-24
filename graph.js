@@ -328,9 +328,15 @@ export function getNodeEdges(graph, nodeId) {
  */
 export function buildAdjacencyMap(graph) {
   const adj = new Map();
+  const activeNodeIds = new Set(
+    graph.nodes.filter((node) => !node.archived).map((node) => node.id),
+  );
 
   for (const edge of graph.edges) {
     if (!isEdgeActive(edge)) continue;
+    if (!activeNodeIds.has(edge.fromId) || !activeNodeIds.has(edge.toId)) {
+      continue;
+    }
 
     if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
     adj.get(edge.fromId).push({
@@ -358,9 +364,15 @@ export function buildAdjacencyMap(graph) {
  */
 export function buildTemporalAdjacencyMap(graph) {
   const adj = new Map();
+  const activeNodeIds = new Set(
+    graph.nodes.filter((node) => !node.archived).map((node) => node.id),
+  );
 
   for (const edge of graph.edges) {
     if (!isEdgeActive(edge)) continue;
+    if (!activeNodeIds.has(edge.fromId) || !activeNodeIds.has(edge.toId)) {
+      continue;
+    }
 
     if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
     adj.get(edge.fromId).push({

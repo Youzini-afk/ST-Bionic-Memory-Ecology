@@ -6,6 +6,13 @@
  * 调用外部 API 获取文本向量，并提供暴力搜索 cosine 相似度
  */
 
+function normalizeOpenAICompatibleBaseUrl(value) {
+    return String(value || '')
+        .trim()
+        .replace(/\/+(chat\/completions|embeddings)$/i, '')
+        .replace(/\/+$/, '');
+}
+
 /**
  * 调用外部 Embedding API
  *
@@ -17,19 +24,18 @@
  * @returns {Promise<Float64Array|null>} 向量或 null
  */
 export async function embedText(text, config) {
-    if (!text || !config.apiUrl || !config.apiKey || !config.model) {
+    const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
+    if (!text || !apiUrl || !config?.model) {
         console.warn('[ST-BME] Embedding 配置不完整，跳过');
         return null;
     }
 
     try {
-        const url = `${config.apiUrl.replace(/\/+$/, '')}/embeddings`;
-
-        const response = await fetch(url, {
+        const response = await fetch(`${apiUrl}/embeddings`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`,
+                ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
             },
             body: JSON.stringify({
                 model: config.model,
@@ -66,18 +72,17 @@ export async function embedText(text, config) {
  * @returns {Promise<(Float64Array|null)[]>}
  */
 export async function embedBatch(texts, config) {
-    if (!texts.length || !config.apiUrl || !config.apiKey || !config.model) {
+    const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
+    if (!texts.length || !apiUrl || !config?.model) {
         return texts.map(() => null);
     }
 
     try {
-        const url = `${config.apiUrl.replace(/\/+$/, '')}/embeddings`;
-
-        const response = await fetch(url, {
+        const response = await fetch(`${apiUrl}/embeddings`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${config.apiKey}`,
+                ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
             },
             body: JSON.stringify({
                 model: config.model,

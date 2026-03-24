@@ -77,19 +77,22 @@ export class GraphRenderer {
      */
     loadGraph(graph) {
         this.nodeMap.clear();
+        const dpr = window.devicePixelRatio || 1;
+        const viewportWidth = this.canvas.width / dpr;
+        const viewportHeight = this.canvas.height / dpr;
 
         // 转换节点
         const activeNodes = graph.nodes.filter(n => !n.archived);
         this.nodes = activeNodes.map((n, i) => {
             const angle = (2 * Math.PI * i) / activeNodes.length;
-            const r = Math.min(this.canvas.width, this.canvas.height) * 0.3;
+            const r = Math.min(viewportWidth, viewportHeight) * 0.3;
             const node = {
                 id: n.id,
                 type: n.type || 'event',
                 name: getNodeDisplayName(n),
                 importance: n.importance || 5,
-                x: this.canvas.width / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 40,
-                y: this.canvas.height / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 40,
+                x: viewportWidth / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 40,
+                y: viewportHeight / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 40,
                 vx: 0,
                 vy: 0,
                 pinned: false,

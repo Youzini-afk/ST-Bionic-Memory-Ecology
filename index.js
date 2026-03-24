@@ -4,6 +4,7 @@
 import {
   eventSource,
   event_types,
+  getRequestHeaders,
   saveSettingsDebounced,
 } from "../../../../script.js";
 import {
@@ -39,6 +40,8 @@ let _themesModule = null;
 
 const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
+const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
+const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
 // ==================== 默认设置 ====================
 
@@ -132,6 +135,7 @@ let lastInjectionContent = "";
 let lastExtractedItems = [];  // 最近提取的节点（面板展示用）
 let lastRecalledItems = [];   // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
+let serverSettingsSaveTimer = null;
 
 function getNodeDisplayName(node) {
   return (
@@ -223,11 +227,115 @@ function getEmbeddingConfig() {
   };
 }
 
+function getPersistedSettingsSnapshot(settings = getSettings()) {
+  const persisted = {};
+  for (const key of Object.keys(defaultSettings)) {
+    persisted[key] = settings[key];
+  }
+  return persisted;
+}
+
+function mergePersistedSettings(loaded = {}) {
+  const merged = { ...defaultSettings };
+  for (const key of Object.keys(defaultSettings)) {
+    if (Object.prototype.hasOwnProperty.call(loaded, key)) {
+      merged[key] = loaded[key];
+    }
+  }
+  return merged;
+}
+
+function encodeBase64Utf8(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ""));
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  return btoa(binary);
+}
+
+async function loadServerSettings() {
+  try {
+    const response = await fetch(
+      `${SERVER_SETTINGS_URL}?t=${Date.now()}`,
+      { cache: "no-store" },
+    );
+
+    if (response.status === 404) {
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(response.statusText || `HTTP ${response.status}`);
+    }
+
+    const loaded = await response.json();
+    if (loaded && typeof loaded === "object" && !Array.isArray(loaded)) {
+      extension_settings[MODULE_NAME] = mergePersistedSettings(loaded);
+      saveSettingsDebounced();
+    }
+  } catch (error) {
+    console.warn("[ST-BME] 读取服务端设置失败，回退到本地运行时设置:", error);
+  }
+}
+
+async function saveServerSettings(settings = getSettings()) {
+  const payload = JSON.stringify(
+    getPersistedSettingsSnapshot(settings),
+    null,
+    2,
+  );
+
+  const response = await fetch("/api/files/upload", {
+    method: "POST",
+    headers: getRequestHeaders(),
+    body: JSON.stringify({
+      name: SERVER_SETTINGS_FILENAME,
+      data: encodeBase64Utf8(payload),
+    }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText);
+    throw new Error(message || `HTTP ${response.status}`);
+  }
+}
+
+function scheduleServerSettingsSave() {
+  clearTimeout(serverSettingsSaveTimer);
+  serverSettingsSaveTimer = setTimeout(async () => {
+    try {
+      await saveServerSettings();
+    } catch (error) {
+      console.error("[ST-BME] 保存服务端设置失败:", error);
+    }
+  }, 300);
+}
+
 function updateModuleSettings(patch = {}) {
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
   saveSettingsDebounced();
+
+  if (
+    Object.prototype.hasOwnProperty.call(patch, "enabled") &&
+    patch.enabled === false
+  ) {
+    try {
+      const context = getContext();
+      context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
+      lastInjectionContent = "";
+      lastRecalledItems = [];
+    } catch (error) {
+      console.warn("[ST-BME] 关闭插件时清理注入失败:", error);
+    }
+  }
+
+  scheduleServerSettingsSave();
   return settings;
 }
 
@@ -630,6 +738,12 @@ async function runRecall() {
 function onChatChanged() {
   loadGraphFromChat();
   lastInjectionContent = "";
+  try {
+    const context = getContext();
+    context.setExtensionPrompt(MODULE_NAME, "", 1, 0);
+  } catch (error) {
+    console.warn("[ST-BME] 清理旧注入失败:", error);
+  }
 }
 
 async function onGenerationAfterCommands() {
@@ -758,8 +872,8 @@ async function onViewLastInjection() {
 
 async function onTestEmbedding() {
   const config = getEmbeddingConfig();
-  if (!config.apiUrl || !config.apiKey) {
-    toastr.warning("请先配置 Embedding API 地址和 Key");
+  if (!config.apiUrl || !config.model) {
+    toastr.warning("请先配置 Embedding API 地址和模型");
     return;
   }
 
@@ -1152,6 +1266,8 @@ function bindSettingsUI() {
 // ==================== 初始化 ====================
 
 (async function init() {
+  await loadServerSettings();
+
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
   eventSource.on(
@@ -1228,19 +1344,6 @@ function bindSettingsUI() {
         $optionsContent.append($menuItem);
       }
     }
-
-    // 主题选择绑定
-    $('#st_bme_panel_theme')
-      .val(settings.panelTheme || 'crimson')
-      .on('change', function () {
-        const theme = $(this).val();
-        updateModuleSettings({ panelTheme: theme });
-        _themesModule?.applyTheme(theme);
-        _panelModule?.updatePanelTheme(theme);
-      });
-
-    // 打开面板按钮
-    $('#st_bme_btn_open_panel').on('click', () => _panelModule?.openPanel());
 
     console.log("[ST-BME] 操控面板初始化完成");
   } catch (panelError) {

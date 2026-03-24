@@ -2,17 +2,25 @@
 // 包装 ST 的 sendOpenAIRequest，提供结构化 JSON 输出和重试机制
 
 import { extension_settings } from "../../../extensions.js";
-import { sendOpenAIRequest } from "../../../openai.js";
+import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
+import { getRequestHeaders } from "../../../../script.js";
 
 const MODULE_NAME = "st_bme";
 
 function getMemoryLLMConfig() {
     const settings = extension_settings[MODULE_NAME] || {};
     return {
-        apiUrl: String(settings.llmApiUrl || '').trim(),
+        apiUrl: normalizeOpenAICompatibleBaseUrl(settings.llmApiUrl),
         apiKey: String(settings.llmApiKey || '').trim(),
         model: String(settings.llmModel || '').trim(),
     };
+}
+
+function normalizeOpenAICompatibleBaseUrl(value) {
+    return String(value || '')
+        .trim()
+        .replace(/\/+(chat\/completions|embeddings)$/i, '')
+        .replace(/\/+$/, '');
 }
 
 function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
@@ -25,34 +33,40 @@ async function callDedicatedOpenAICompatible(messages, { signal } = {}) {
         return await sendOpenAIRequest('quiet', messages, signal);
     }
 
-    const url = `${config.apiUrl.replace(/\/+$/, '')}/chat/completions`;
-    const headers = {
-        'Content-Type': 'application/json',
-    };
-    if (config.apiKey) {
-        headers.Authorization = `Bearer ${config.apiKey}`;
-    }
-
-    const response = await fetch(url, {
+    const response = await fetch('/api/backends/chat-completions/generate', {
         method: 'POST',
-        headers,
+        headers: getRequestHeaders(),
         body: JSON.stringify({
+            chat_completion_source: chat_completion_sources.OPENAI,
+            reverse_proxy: config.apiUrl,
+            proxy_password: config.apiKey || '',
             model: config.model,
             messages,
             temperature: 0.2,
+            max_tokens: 1200,
+            max_completion_tokens: 1200,
             stream: false,
         }),
         signal,
     });
 
-    if (!response.ok) {
-        const errorText = await response.text().catch(() => '');
-        throw new Error(
-            `Memory LLM API error ${response.status}: ${errorText || response.statusText}`,
-        );
+    const responseText = await response.text().catch(() => '');
+    let data;
+
+    try {
+        data = responseText ? JSON.parse(responseText) : {};
+    } catch {
+        data = { error: { message: responseText || response.statusText } };
     }
 
-    const data = await response.json();
+    if (!response.ok) {
+        const message = data?.error?.message || response.statusText;
+        throw new Error(`Memory LLM proxy error ${response.status}: ${message}`);
+    }
+
+    if (data?.error?.message) {
+        throw new Error(`Memory LLM proxy error: ${data.error.message}`);
+    }
     const content = data?.choices?.[0]?.message?.content;
     if (typeof content === 'string') {
         return content;
