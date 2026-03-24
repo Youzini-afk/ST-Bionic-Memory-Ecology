@@ -33,6 +33,7 @@ const MODEL_LIST_ENDPOINTS = {
   nanogpt: "/api/openai/nanogpt/models/embedding",
   electronhub: "/api/openai/electronhub/models",
 };
+const VECTOR_REQUEST_TIMEOUT_MS = 30000;
 
 const BACKEND_STATUS_MODEL_SOURCES = {
   openai: "openai",
@@ -52,6 +53,44 @@ export const BACKEND_DEFAULT_MODELS = {
   llamacpp: "text-embedding-3-small",
   vllm: "BAAI/bge-m3",
 };
+
+function createCombinedAbortSignal(...signals) {
+  const validSignals = signals.filter(Boolean);
+  if (validSignals.length <= 1) {
+    return validSignals[0] || undefined;
+  }
+
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+    return AbortSignal.any(validSignals);
+  }
+
+  const controller = new AbortController();
+  for (const signal of validSignals) {
+    if (signal.aborted) {
+      controller.abort();
+      return controller.signal;
+    }
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = VECTOR_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = options.signal
+    ? createCombinedAbortSignal(options.signal, controller.signal)
+    : controller.signal;
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 export function normalizeOpenAICompatibleBaseUrl(value, autoSuffix = true) {
   let normalized = String(value || "")
@@ -300,7 +339,7 @@ function computeVectorStats(graph, desiredEntries) {
 }
 
 async function purgeVectorCollection(collectionId) {
-  const response = await fetch("/api/vector/purge", {
+  const response = await fetchWithTimeout("/api/vector/purge", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({ collectionId }),
@@ -315,7 +354,7 @@ async function purgeVectorCollection(collectionId) {
 async function deleteVectorHashes(collectionId, config, hashes) {
   if (!Array.isArray(hashes) || hashes.length === 0) return;
 
-  const response = await fetch("/api/vector/delete", {
+  const response = await fetchWithTimeout("/api/vector/delete", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({
@@ -334,7 +373,7 @@ async function deleteVectorHashes(collectionId, config, hashes) {
 async function insertVectorEntries(collectionId, config, entries) {
   if (!Array.isArray(entries) || entries.length === 0) return;
 
-  const response = await fetch("/api/vector/insert", {
+  const response = await fetchWithTimeout("/api/vector/insert", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({
@@ -567,7 +606,7 @@ export async function findSimilarNodesByText(
   const validation = validateVectorConfig(config);
   if (!validation.valid) return [];
 
-  const response = await fetch("/api/vector/query", {
+  const response = await fetchWithTimeout("/api/vector/query", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({
@@ -618,7 +657,7 @@ export async function testVectorConnection(config, chatId = "connection-test") {
   }
 
   try {
-    const response = await fetch("/api/vector/query", {
+    const response = await fetchWithTimeout("/api/vector/query", {
       method: "POST",
       headers: getRequestHeaders(),
       body: JSON.stringify({
@@ -696,7 +735,7 @@ function normalizeModelOptions(items = [], { embeddingOnly = false } = {}) {
 }
 
 async function fetchJsonEndpoint(url, { method = "POST" } = {}) {
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     method,
     headers: getRequestHeaders({ omitContentType: true }),
   });
@@ -719,7 +758,7 @@ async function fetchBackendStatusModelList(source) {
     throw new Error("当前后端向量源暂不支持自动拉取模型，请手动填写");
   }
 
-  const response = await fetch("/api/backends/chat-completions/status", {
+  const response = await fetchWithTimeout("/api/backends/chat-completions/status", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({
@@ -743,7 +782,7 @@ async function fetchOpenAICompatibleModelList(apiUrl, apiKey = "") {
     throw new Error("请先填写 API 地址");
   }
 
-  const response = await fetch(`${normalizedUrl}/models`, {
+  const response = await fetchWithTimeout(`${normalizedUrl}/models`, {
     method: "GET",
     headers: {
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
@@ -764,7 +803,7 @@ async function fetchOllamaModelList(apiUrl) {
     throw new Error("请先填写 Ollama API 地址");
   }
 
-  const response = await fetch(`${normalizedUrl}/api/tags`, { method: "GET" });
+  const response = await fetchWithTimeout(`${normalizedUrl}/api/tags`, { method: "GET" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload?.error || payload?.message || response.statusText);

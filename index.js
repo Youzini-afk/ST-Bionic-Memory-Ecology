@@ -178,6 +178,7 @@ let isRecoveringHistory = false;
 let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
+const LOCAL_VECTOR_TIMEOUT_MS = 30000;
 
 function getNodeDisplayName(node) {
   return (
@@ -326,6 +327,29 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
   if (now - lastExtractionWarningAt < 5000) return;
   lastExtractionWarningAt = now;
   toastr.warning(message, title, { timeOut: 4500 });
+}
+
+async function fetchLocalWithTimeout(url, options = {}, timeoutMs = LOCAL_VECTOR_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let signal = controller.signal;
+  if (options.signal) {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+      signal = AbortSignal.any([options.signal, controller.signal]);
+    } else {
+      signal = controller.signal;
+      options.signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function snapshotRuntimeUiState() {
@@ -1002,7 +1026,7 @@ function inspectHistoryMutation(trigger = "history-change") {
 async function purgeCurrentVectorCollection() {
   if (!currentGraph?.vectorIndexState?.collectionId) return;
 
-  const response = await fetch("/api/vector/purge", {
+  const response = await fetchLocalWithTimeout("/api/vector/purge", {
     method: "POST",
     headers: getRequestHeaders(),
     body: JSON.stringify({
@@ -1245,10 +1269,6 @@ async function runExtraction() {
   const settings = getSettings();
   if (!settings.enabled) return;
   if (!(await recoverHistoryIfNeeded("auto-extract"))) return;
-  const vectorPrep = await ensureVectorReadyIfNeeded("pre-extract");
-  if (vectorPrep?.error) {
-    notifyExtractionIssue(`提取前向量修复失败: ${vectorPrep.error}`);
-  }
 
   const context = getContext();
   const chat = context.chat;
@@ -1481,7 +1501,7 @@ async function onBeforeCombinePrompts() {
   await runRecall();
 }
 
-async function onMessageReceived() {
+function onMessageReceived() {
   // 新消息到达，图状态可能需要更新
   if (currentGraph) {
     saveGraphToChat();
@@ -1494,7 +1514,12 @@ async function onMessageReceived() {
     : null;
 
   if (isAssistantChatMessage(lastMessage)) {
-    await runExtraction();
+    queueMicrotask(() => {
+      void runExtraction().catch((error) => {
+        console.error("[ST-BME] 异步自动提取失败:", error);
+        notifyExtractionIssue(error?.message || String(error) || "自动提取失败");
+      });
+    });
   }
 }
 
@@ -1729,7 +1754,6 @@ async function onManualExtract() {
     return;
   }
   if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
-  const vectorPrep = await ensureVectorReadyIfNeeded("manual-extract");
   if (!currentGraph) currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());
 
   const context = getContext();
@@ -1756,10 +1780,6 @@ async function onManualExtract() {
     batches: 0,
   };
   const warnings = [];
-
-  if (vectorPrep?.error) {
-    warnings.push(`预检向量修复失败: ${vectorPrep.error}`);
-  }
 
   isExtracting = true;
   try {
