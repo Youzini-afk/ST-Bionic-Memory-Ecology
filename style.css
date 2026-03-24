@@ -924,9 +924,67 @@
 
 .bme-config-actions {
     display: flex;
-    justify-content: flex-end;
+    justify-content: flex-start;
     gap: 8px;
     flex-wrap: wrap;
+    margin-top: 8px;
+}
+
+.bme-config-test-btn {
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-width: 164px;
+    min-height: 42px;
+    padding: 0 16px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.02)),
+        rgba(0, 0, 0, 0.22);
+    color: var(--bme-on-surface);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap !important;
+    writing-mode: horizontal-tb !important;
+    text-orientation: mixed !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    transition:
+        border-color 0.15s,
+        background 0.15s,
+        color 0.15s,
+        transform 0.15s,
+        box-shadow 0.15s;
+}
+
+.bme-config-test-btn:hover {
+    border-color: var(--bme-primary);
+    background:
+        linear-gradient(180deg, rgba(233, 69, 96, 0.16), rgba(233, 69, 96, 0.08)),
+        rgba(0, 0, 0, 0.3);
+    color: var(--bme-primary-text, var(--bme-on-surface));
+    transform: translateY(-1px);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 8px 20px rgba(0, 0, 0, 0.2);
+}
+
+.bme-config-test-btn:active {
+    transform: translateY(0);
+}
+
+.bme-config-test-btn i {
+    color: var(--bme-primary);
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.bme-config-test-btn span {
+    display: block;
 }
 
 .bme-config-guard-note {
@@ -1318,6 +1376,14 @@
     .bme-prompt-card-actions {
         width: 100%;
         justify-content: space-between;
+    }
+
+    .bme-config-actions {
+        width: 100%;
+    }
+
+    .bme-config-test-btn {
+        width: 100%;
     }
 
     #st-bme-panel.config-mode .bme-panel-sidebar {
