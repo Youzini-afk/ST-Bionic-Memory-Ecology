@@ -7,6 +7,9 @@ import { getRequestHeaders } from "../../../../script.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 60000;
+const DEFAULT_TEXT_COMPLETION_TOKENS = 1200;
+const DEFAULT_JSON_COMPLETION_TOKENS = 2200;
+const RETRY_JSON_COMPLETION_TOKENS = 3200;
 
 function getMemoryLLMConfig() {
     const settings = extension_settings[MODULE_NAME] || {};
@@ -102,6 +105,86 @@ function extractContentFromResponsePayload(payload) {
     return '';
 }
 
+function normalizeLLMResponsePayload(payload) {
+    if (typeof payload === 'string') {
+        return {
+            content: payload.trim(),
+            finishReason: '',
+            reasoningContent: '',
+            raw: payload,
+        };
+    }
+
+    const choice = payload?.choices?.[0] || {};
+    const message = choice?.message || {};
+    return {
+        content: extractContentFromResponsePayload(payload).trim(),
+        finishReason: String(choice?.finish_reason || ''),
+        reasoningContent: typeof message?.reasoning_content === 'string'
+            ? message.reasoning_content
+            : '',
+        raw: payload,
+    };
+}
+
+function createGenericJsonSchema() {
+    return {
+        name: 'st_bme_json_response',
+        description: 'A well-formed JSON object for programmatic parsing.',
+        strict: false,
+        value: {
+            type: 'object',
+            additionalProperties: true,
+        },
+    };
+}
+
+function looksLikeTruncatedJson(text) {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return false;
+
+    const openBraces = (trimmed.match(/\{/g) || []).length;
+    const closeBraces = (trimmed.match(/\}/g) || []).length;
+    const openBrackets = (trimmed.match(/\[/g) || []).length;
+    const closeBrackets = (trimmed.match(/\]/g) || []).length;
+
+    if (openBraces > closeBraces || openBrackets > closeBrackets) {
+        return true;
+    }
+
+    if (/```(?:json)?/i.test(trimmed) && !/```[\s]*$/i.test(trimmed)) {
+        return true;
+    }
+
+    return false;
+}
+
+function buildJsonAttemptMessages(systemPrompt, userPrompt, attempt, reason = '') {
+    const systemParts = [
+        systemPrompt,
+        '输出要求补充：只输出一个紧凑的 JSON 对象。',
+        '禁止 markdown 代码块、禁止解释、禁止前后缀、禁止省略号。',
+        '如果需要重新生成，请直接从头输出完整 JSON，不要续写上一次内容。',
+    ];
+
+    const userParts = [userPrompt];
+    if (attempt > 0) {
+        userParts.push(
+            reason
+                ? `上一次输出失败原因：${reason}`
+                : '上一次输出未能被程序解析。',
+        );
+        userParts.push('请重新输出一个完整、紧凑、可直接 JSON.parse 的 JSON 对象。');
+    } else {
+        userParts.push('请直接输出紧凑 JSON 对象，不要包含任何额外文本。');
+    }
+
+    return [
+        { role: 'system', content: systemParts.join('\n\n') },
+        { role: 'user', content: userParts.join('\n\n') },
+    ];
+}
+
 async function fetchWithTimeout(url, options = {}, timeoutMs = LLM_REQUEST_TIMEOUT_MS) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -143,16 +226,30 @@ function createCombinedAbortSignal(...signals) {
 // 自动检测：如果 API 不支持 response_format，记住并跳过
 let _jsonModeSupported = true;
 
-async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = false } = {}) {
+async function callDedicatedOpenAICompatible(
+    messages,
+    { signal, jsonMode = false, maxCompletionTokens = null } = {},
+) {
     const config = getMemoryLLMConfig();
     if (!hasDedicatedLLMConfig(config)) {
-        const payload = await sendOpenAIRequest('quiet', messages, signal);
-        const content = extractContentFromResponsePayload(payload);
-        if (typeof content === 'string' && content.trim().length > 0) {
-            return content.trim();
+        const payload = await sendOpenAIRequest(
+            'quiet',
+            messages,
+            signal,
+            jsonMode ? { jsonSchema: createGenericJsonSchema() } : {},
+        );
+        const normalized = normalizeLLMResponsePayload(payload);
+        if (typeof normalized.content === 'string' && normalized.content.trim().length > 0) {
+            return normalized;
         }
         throw new Error('SillyTavern current model returned an unexpected response format');
     }
+
+    const completionTokens = Number.isFinite(maxCompletionTokens)
+        ? maxCompletionTokens
+        : jsonMode
+            ? DEFAULT_JSON_COMPLETION_TOKENS
+            : DEFAULT_TEXT_COMPLETION_TOKENS;
 
     const body = {
         chat_completion_source: chat_completion_sources.OPENAI,
@@ -160,15 +257,16 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         proxy_password: config.apiKey || '',
         model: config.model,
         messages,
-        temperature: 0.2,
-        max_tokens: 1200,
-        max_completion_tokens: 1200,
+        temperature: jsonMode ? 0 : 0.2,
+        max_tokens: completionTokens,
+        max_completion_tokens: completionTokens,
         stream: false,
     };
 
-    // 强制 JSON 输出（仅当 API 支持时）
-    if (jsonMode && _jsonModeSupported) {
-        body.response_format = { type: 'json_object' };
+    if (jsonMode) {
+        body.json_schema = createGenericJsonSchema();
+        body.reasoning_effort = 'low';
+        body.verbosity = 'low';
     }
 
     const response = await fetchWithTimeout('/api/backends/chat-completions/generate', {
@@ -178,12 +276,13 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         signal,
     });
 
-    // 如果 400 且带了 response_format，可能是 API 不支持，降级重试
+    // 如果 400 且带了 structured output，可能是 API 不支持，降级重试
     if (!response.ok && response.status === 400 && jsonMode && _jsonModeSupported) {
-        console.warn('[ST-BME] API 不支持 response_format，降级为普通模式');
+        console.warn('[ST-BME] API 不支持 structured output，降级为普通 JSON 提示模式');
         _jsonModeSupported = false;
-        // 去掉 response_format 重试
-        delete body.response_format;
+        delete body.json_schema;
+        delete body.reasoning_effort;
+        delete body.verbosity;
         const retryResponse = await fetchWithTimeout('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -215,9 +314,9 @@ async function _parseResponse(response) {
     if (data?.error?.message) {
         throw new Error(`Memory LLM proxy error: ${data.error.message}`);
     }
-    const content = extractContentFromResponsePayload(data);
-    if (typeof content === 'string' && content.length > 0) {
-        return content;
+    const normalized = normalizeLLMResponsePayload(data);
+    if (typeof normalized.content === 'string' && normalized.content.length > 0) {
+        return normalized;
     }
 
     throw new Error('Memory LLM API returned an unexpected response format');
@@ -234,35 +333,47 @@ async function _parseResponse(response) {
  * @returns {Promise<object|null>} 解析后的 JSON 对象，或 null
  */
 export async function callLLMForJSON({ systemPrompt, userPrompt, maxRetries = 2 }) {
-    const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-    ];
+    let lastFailureReason = '';
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const response = await callDedicatedOpenAICompatible(messages, { jsonMode: true });
+            const messages = buildJsonAttemptMessages(
+                systemPrompt,
+                userPrompt,
+                attempt,
+                lastFailureReason,
+            );
+            const response = await callDedicatedOpenAICompatible(messages, {
+                jsonMode: true,
+                maxCompletionTokens: attempt === 0
+                    ? DEFAULT_JSON_COMPLETION_TOKENS
+                    : RETRY_JSON_COMPLETION_TOKENS,
+            });
+            const responseText = response?.content || '';
 
-            if (!response || typeof response !== 'string') {
+            if (!responseText || typeof responseText !== 'string') {
                 console.warn(`[ST-BME] LLM 返回空响应 (尝试 ${attempt + 1})`);
+                lastFailureReason = '返回空响应';
                 continue;
             }
 
             // 尝试解析 JSON
-            const parsed = extractJSON(response);
+            const parsed = extractJSON(responseText);
             if (parsed !== null) {
                 return parsed;
             }
 
-            console.warn(`[ST-BME] LLM 响应无法解析为 JSON (尝试 ${attempt + 1}):`, response.slice(0, 200));
-
-            // 重试时在 user prompt 中追加提示
-            if (attempt < maxRetries) {
-                messages.push({ role: 'assistant', content: response });
-                messages.push({ role: 'user', content: '你的上一次输出无法被解析为有效 JSON。请严格按照要求的 JSON 格式重新输出，不要包含 markdown 代码块标记或其他非 JSON 文本。' });
-            }
+            const truncated = response.finishReason === 'length' || looksLikeTruncatedJson(responseText);
+            lastFailureReason = truncated
+                ? '输出因长度限制被截断，请重新输出更紧凑的完整 JSON'
+                : '输出不是有效 JSON，请严格返回紧凑 JSON 对象';
+            console.warn(
+                `[ST-BME] LLM 响应无法解析为 JSON (尝试 ${attempt + 1}, finish=${response.finishReason || 'unknown'}):`,
+                responseText.slice(0, 200),
+            );
         } catch (e) {
             console.error(`[ST-BME] LLM 调用失败 (尝试 ${attempt + 1}):`, e);
+            lastFailureReason = e?.message || String(e) || 'LLM 调用失败';
         }
     }
 
@@ -284,7 +395,7 @@ export async function callLLM(systemPrompt, userPrompt) {
 
     try {
         const response = await callDedicatedOpenAICompatible(messages);
-        return response || null;
+        return response?.content || null;
     } catch (e) {
         console.error('[ST-BME] LLM 调用失败:', e);
         return null;
