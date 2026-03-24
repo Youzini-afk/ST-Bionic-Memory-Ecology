@@ -177,6 +177,7 @@ let serverSettingsSaveTimer = null;
 let isRecoveringHistory = false;
 let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
+let lastExtractionWarningAt = 0;
 
 function getNodeDisplayName(node) {
   return (
@@ -318,6 +319,13 @@ function setLastRecallStatus(text, meta, level = "info") {
     level,
   };
   refreshPanelLiveState();
+}
+
+function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
+  const now = Date.now();
+  if (now - lastExtractionWarningAt < 5000) return;
+  lastExtractionWarningAt = now;
+  toastr.warning(message, title, { timeOut: 4500 });
 }
 
 function snapshotRuntimeUiState() {
@@ -1237,7 +1245,10 @@ async function runExtraction() {
   const settings = getSettings();
   if (!settings.enabled) return;
   if (!(await recoverHistoryIfNeeded("auto-extract"))) return;
-  await ensureVectorReadyIfNeeded("pre-extract");
+  const vectorPrep = await ensureVectorReadyIfNeeded("pre-extract");
+  if (vectorPrep?.error) {
+    notifyExtractionIssue(`提取前向量修复失败: ${vectorPrep.error}`);
+  }
 
   const context = getContext();
   const chat = context.chat;
@@ -1281,10 +1292,16 @@ async function runExtraction() {
     });
 
     if (!batchResult.success) {
-      console.warn("[ST-BME] 提取批次未返回有效结果");
+      const message =
+        batchResult.error ||
+        batchResult?.result?.error ||
+        "提取批次未返回有效结果";
+      console.warn("[ST-BME] 提取批次未返回有效结果:", message);
+      notifyExtractionIssue(message);
     }
   } catch (e) {
     console.error("[ST-BME] 提取失败:", e);
+    notifyExtractionIssue(e?.message || String(e) || "自动提取失败");
   } finally {
     isExtracting = false;
   }
@@ -1707,7 +1724,10 @@ async function onFetchEmbeddingModels(mode = null) {
 }
 
 async function onManualExtract() {
-  if (isExtracting) return;
+  if (isExtracting) {
+    toastr.info("记忆提取正在进行中，请稍候");
+    return;
+  }
   if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
   const vectorPrep = await ensureVectorReadyIfNeeded("manual-extract");
   if (!currentGraph) currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId());

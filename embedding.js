@@ -6,11 +6,51 @@
  * 调用外部 API 获取文本向量，并提供暴力搜索 cosine 相似度
  */
 
+const EMBEDDING_REQUEST_TIMEOUT_MS = 45000;
+
 function normalizeOpenAICompatibleBaseUrl(value) {
     return String(value || '')
         .trim()
         .replace(/\/+(chat\/completions|embeddings)$/i, '')
         .replace(/\/+$/, '');
+}
+
+function createCombinedAbortSignal(...signals) {
+    const validSignals = signals.filter(Boolean);
+    if (validSignals.length <= 1) {
+        return validSignals[0] || undefined;
+    }
+
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+        return AbortSignal.any(validSignals);
+    }
+
+    const controller = new AbortController();
+    for (const signal of validSignals) {
+        if (signal.aborted) {
+            controller.abort();
+            return controller.signal;
+        }
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    return controller.signal;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = EMBEDDING_REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = options.signal
+        ? createCombinedAbortSignal(options.signal, controller.signal)
+        : controller.signal;
+
+    try {
+        return await fetch(url, {
+            ...options,
+            signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
 }
 
 /**
@@ -31,7 +71,7 @@ export async function embedText(text, config) {
     }
 
     try {
-        const response = await fetch(`${apiUrl}/embeddings`, {
+        const response = await fetchWithTimeout(`${apiUrl}/embeddings`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -78,7 +118,7 @@ export async function embedBatch(texts, config) {
     }
 
     try {
-        const response = await fetch(`${apiUrl}/embeddings`, {
+        const response = await fetchWithTimeout(`${apiUrl}/embeddings`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

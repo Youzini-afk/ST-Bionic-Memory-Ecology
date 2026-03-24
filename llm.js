@@ -6,6 +6,7 @@ import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
 import { getRequestHeaders } from "../../../../script.js";
 
 const MODULE_NAME = "st_bme";
+const LLM_REQUEST_TIMEOUT_MS = 60000;
 
 function getMemoryLLMConfig() {
     const settings = extension_settings[MODULE_NAME] || {};
@@ -53,13 +54,104 @@ function normalizeModelList(items = []) {
     return models;
 }
 
+function extractContentFromResponsePayload(payload) {
+    if (typeof payload === 'string') {
+        return payload;
+    }
+
+    if (Array.isArray(payload)) {
+        return payload
+            .map((item) => item?.text || item?.content || '')
+            .join('')
+            .trim();
+    }
+
+    if (!payload || typeof payload !== 'object') {
+        return '';
+    }
+
+    const messageContent = payload?.choices?.[0]?.message?.content;
+    if (typeof messageContent === 'string') {
+        return messageContent;
+    }
+
+    if (Array.isArray(messageContent)) {
+        return messageContent
+            .map((item) => item?.text || item?.content || '')
+            .join('')
+            .trim();
+    }
+
+    const textContent =
+        payload?.choices?.[0]?.text ??
+        payload?.text ??
+        payload?.message?.content ??
+        payload?.content;
+
+    if (typeof textContent === 'string') {
+        return textContent;
+    }
+
+    if (Array.isArray(textContent)) {
+        return textContent
+            .map((item) => item?.text || item?.content || '')
+            .join('')
+            .trim();
+    }
+
+    return '';
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = LLM_REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = options.signal
+        ? createCombinedAbortSignal(options.signal, controller.signal)
+        : controller.signal;
+
+    try {
+        return await fetch(url, {
+            ...options,
+            signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function createCombinedAbortSignal(...signals) {
+    const validSignals = signals.filter(Boolean);
+    if (validSignals.length <= 1) {
+        return validSignals[0] || undefined;
+    }
+
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') {
+        return AbortSignal.any(validSignals);
+    }
+
+    const controller = new AbortController();
+    for (const signal of validSignals) {
+        if (signal.aborted) {
+            controller.abort();
+            return controller.signal;
+        }
+        signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    return controller.signal;
+}
+
 // 自动检测：如果 API 不支持 response_format，记住并跳过
 let _jsonModeSupported = true;
 
 async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = false } = {}) {
     const config = getMemoryLLMConfig();
     if (!hasDedicatedLLMConfig(config)) {
-        return await sendOpenAIRequest('quiet', messages, signal);
+        const payload = await sendOpenAIRequest('quiet', messages, signal);
+        const content = extractContentFromResponsePayload(payload);
+        if (typeof content === 'string' && content.trim().length > 0) {
+            return content.trim();
+        }
+        throw new Error('SillyTavern current model returned an unexpected response format');
     }
 
     const body = {
@@ -79,7 +171,7 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         body.response_format = { type: 'json_object' };
     }
 
-    const response = await fetch('/api/backends/chat-completions/generate', {
+    const response = await fetchWithTimeout('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(body),
@@ -92,7 +184,7 @@ async function callDedicatedOpenAICompatible(messages, { signal, jsonMode = fals
         _jsonModeSupported = false;
         // 去掉 response_format 重试
         delete body.response_format;
-        const retryResponse = await fetch('/api/backends/chat-completions/generate', {
+        const retryResponse = await fetchWithTimeout('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify(body),
@@ -123,16 +215,9 @@ async function _parseResponse(response) {
     if (data?.error?.message) {
         throw new Error(`Memory LLM proxy error: ${data.error.message}`);
     }
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content === 'string') {
+    const content = extractContentFromResponsePayload(data);
+    if (typeof content === 'string' && content.length > 0) {
         return content;
-    }
-
-    if (Array.isArray(content)) {
-        return content
-            .map((item) => item?.text || item?.content || '')
-            .join('')
-            .trim();
     }
 
     throw new Error('Memory LLM API returned an unexpected response format');
