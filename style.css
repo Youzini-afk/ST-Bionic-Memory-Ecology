@@ -311,6 +311,40 @@
     overflow: hidden;
 }
 
+.bme-resize-handle {
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.15s;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 10;
+}
+
+.bme-resize-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 3px;
+    height: 32px;
+    border-radius: 2px;
+    background: var(--bme-on-surface-dim, rgba(228,225,230,0.3));
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.bme-resize-handle:hover,
+.bme-resize-handle.dragging {
+    background: var(--bme-primary-dim, rgba(233, 69, 96, 0.15));
+}
+
+.bme-resize-handle:hover::after,
+.bme-resize-handle.dragging::after {
+    opacity: 1;
+}
+
 /* --- Sidebar (Desktop) --- */
 .bme-panel-sidebar {
     width: 280px;

@@ -163,6 +163,7 @@ export async function initPanel({
 
     _bindTabs();
     _bindClose();
+    _bindResizeHandle();
     _bindGraphControls();
     _bindActions();
     _bindConfigControls();
@@ -525,6 +526,42 @@ function _bindClose() {
     });
     overlayEl?.addEventListener("click", (event) => {
         if (event.target === overlayEl) closePanel();
+    });
+}
+
+function _bindResizeHandle() {
+    const handle = document.getElementById("bme-resize-handle");
+    const sidebar = panelEl?.querySelector(".bme-panel-sidebar");
+    if (!handle || !sidebar) return;
+
+    let dragging = false;
+    let startX = 0;
+    let startWidth = 0;
+
+    handle.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        dragging = true;
+        startX = e.clientX;
+        startWidth = sidebar.offsetWidth;
+        handle.classList.add("dragging");
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (!dragging) return;
+        const delta = e.clientX - startX;
+        const newWidth = Math.max(180, Math.min(600, startWidth + delta));
+        sidebar.style.width = newWidth + "px";
+        sidebar.style.minWidth = newWidth + "px";
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (!dragging) return;
+        dragging = false;
+        handle.classList.remove("dragging");
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
     });
 }
 
