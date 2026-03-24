@@ -633,8 +633,8 @@ function _refreshConfigTab() {
     _setInputValue("bme-setting-compress-prompt", settings.compressPrompt || DEFAULT_PROMPTS.compress);
     _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis);
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
-    // 主题调色盘高亮
-    _highlightThemeDot(settings.panelTheme || "crimson");
+    // 主题下拉菜单高亮
+    _highlightThemeOption(settings.panelTheme || "crimson");
 }
 
 function _bindConfigControls() {
@@ -721,15 +721,29 @@ function _bindConfigControls() {
     bindText("bme-setting-reflection-prompt", (value) =>
         _updateSettings?.({ reflectionPrompt: value }),
     );
-    // 主题调色盘点击
-    panelEl.querySelectorAll(".bme-theme-dot").forEach((dot) => {
-        dot.addEventListener("click", () => {
-            const theme = dot.dataset.theme;
-            if (!theme) return;
-            _updateSettings?.({ panelTheme: theme });
-            _highlightThemeDot(theme);
+    // 主题下拉菜单
+    const pickerBtn = document.getElementById("bme-theme-picker-btn");
+    const dropdown = document.getElementById("bme-theme-dropdown");
+    if (pickerBtn && dropdown) {
+        pickerBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            dropdown.classList.toggle("open");
         });
-    });
+        dropdown.querySelectorAll(".bme-theme-option").forEach((opt) => {
+            opt.addEventListener("click", () => {
+                const theme = opt.dataset.theme;
+                if (!theme) return;
+                _updateSettings?.({ panelTheme: theme });
+                _highlightThemeOption(theme);
+                dropdown.classList.remove("open");
+            });
+        });
+        // 点击外部关闭
+        document.addEventListener("click", () => {
+            dropdown.classList.remove("open");
+        });
+        dropdown.addEventListener("click", (e) => e.stopPropagation());
+    }
 
     document.getElementById("bme-test-llm")?.addEventListener("click", async () => {
         await _actionHandlers.testMemoryLLM?.();
@@ -775,10 +789,10 @@ function _setText(id, text) {
     if (el) el.textContent = String(text);
 }
 
-function _highlightThemeDot(themeName) {
+function _highlightThemeOption(themeName) {
     if (!panelEl) return;
-    panelEl.querySelectorAll(".bme-theme-dot").forEach((dot) => {
-        dot.classList.toggle("active", dot.dataset.theme === themeName);
+    panelEl.querySelectorAll(".bme-theme-option").forEach((opt) => {
+        opt.classList.toggle("active", opt.dataset.theme === themeName);
     });
 }
 

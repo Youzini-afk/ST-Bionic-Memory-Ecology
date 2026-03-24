@@ -7,11 +7,24 @@
         <span>ST-BME 记忆图谱</span>
         <span class="bme-panel-subtitle" id="bme-panel-status">SYSTEM_ACTIVE</span>
       </div>
-      <div class="bme-theme-palette">
-        <button class="bme-theme-dot" data-theme="crimson" title="赤红" style="--dot-color: #e94560"></button>
-        <button class="bme-theme-dot" data-theme="cyan" title="青蓝" style="--dot-color: #00e5ff"></button>
-        <button class="bme-theme-dot" data-theme="amber" title="琥珀" style="--dot-color: #ffb300"></button>
-        <button class="bme-theme-dot" data-theme="violet" title="紫雾" style="--dot-color: #b388ff"></button>
+      <div class="bme-theme-picker">
+        <button class="bme-theme-picker-btn" id="bme-theme-picker-btn" title="切换主题">
+          <i class="fa-solid fa-palette"></i>
+        </button>
+        <div class="bme-theme-dropdown" id="bme-theme-dropdown">
+          <button class="bme-theme-option" data-theme="crimson">
+            <span class="bme-theme-swatch" style="background: #e94560"></span>赤红合成
+          </button>
+          <button class="bme-theme-option" data-theme="cyan">
+            <span class="bme-theme-swatch" style="background: #00e5ff"></span>霓虹青蓝
+          </button>
+          <button class="bme-theme-option" data-theme="amber">
+            <span class="bme-theme-swatch" style="background: #ffb300"></span>琥珀终端
+          </button>
+          <button class="bme-theme-option" data-theme="violet">
+            <span class="bme-theme-swatch" style="background: #b388ff"></span>紫雾迷离
+          </button>
+        </div>
       </div>
       <button class="bme-panel-close" id="bme-panel-close" title="关闭">
         <i class="fa-solid fa-xmark"></i>
