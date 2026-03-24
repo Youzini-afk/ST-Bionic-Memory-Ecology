@@ -139,6 +139,34 @@ function createGenericJsonSchema() {
     };
 }
 
+function buildYamlObject(value, indent = 0) {
+    const pad = ' '.repeat(indent);
+
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => {
+                if (item && typeof item === 'object') {
+                    return `${pad}-\n${buildYamlObject(item, indent + 2)}`;
+                }
+                return `${pad}- ${JSON.stringify(item)}`;
+            })
+            .join('\n');
+    }
+
+    if (value && typeof value === 'object') {
+        return Object.entries(value)
+            .map(([key, item]) => {
+                if (item && typeof item === 'object') {
+                    return `${pad}${key}:\n${buildYamlObject(item, indent + 2)}`;
+                }
+                return `${pad}${key}: ${JSON.stringify(item)}`;
+            })
+            .join('\n');
+    }
+
+    return `${pad}${JSON.stringify(value)}`;
+}
+
 function looksLikeTruncatedJson(text) {
     const trimmed = String(text || '').trim();
     if (!trimmed) return false;
@@ -252,9 +280,13 @@ async function callDedicatedOpenAICompatible(
             : DEFAULT_TEXT_COMPLETION_TOKENS;
 
     const body = {
-        chat_completion_source: chat_completion_sources.OPENAI,
-        reverse_proxy: config.apiUrl,
-        proxy_password: config.apiKey || '',
+        chat_completion_source: chat_completion_sources.CUSTOM,
+        custom_url: config.apiUrl,
+        custom_include_headers: config.apiKey
+            ? buildYamlObject({
+                Authorization: `Bearer ${config.apiKey}`,
+            })
+            : '',
         model: config.model,
         messages,
         temperature: jsonMode ? 0 : 0.2,
@@ -264,9 +296,11 @@ async function callDedicatedOpenAICompatible(
     };
 
     if (jsonMode) {
-        body.json_schema = createGenericJsonSchema();
-        body.reasoning_effort = 'low';
-        body.verbosity = 'low';
+        body.custom_include_body = buildYamlObject({
+            response_format: {
+                type: 'json_object',
+            },
+        });
     }
 
     const response = await fetchWithTimeout('/api/backends/chat-completions/generate', {
@@ -278,11 +312,9 @@ async function callDedicatedOpenAICompatible(
 
     // 如果 400 且带了 structured output，可能是 API 不支持，降级重试
     if (!response.ok && response.status === 400 && jsonMode && _jsonModeSupported) {
-        console.warn('[ST-BME] API 不支持 structured output，降级为普通 JSON 提示模式');
+        console.warn('[ST-BME] API 不支持 json mode，降级为普通 JSON 提示模式');
         _jsonModeSupported = false;
-        delete body.json_schema;
-        delete body.reasoning_effort;
-        delete body.verbosity;
+        delete body.custom_include_body;
         const retryResponse = await fetchWithTimeout('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: getRequestHeaders(),
