@@ -148,30 +148,30 @@ const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "基础生成参数",
     fields: [
-      { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number" },
-      { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number" },
-      { key: "reply_count", label: "回复次数", type: "number" },
-      { key: "stream", label: "流式输出", type: "tri_bool" },
-      { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01 },
-      { key: "top_p", label: "Top P", type: "range", min: 0, max: 1, step: 0.01 },
-      { key: "top_k", label: "Top K", type: "number" },
-      { key: "top_a", label: "Top A", type: "range", min: 0, max: 1, step: 0.01 },
-      { key: "min_p", label: "Min P", type: "range", min: 0, max: 1, step: 0.01 },
-      { key: "seed", label: "随机种子 (Seed)", type: "number" },
+      { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number", defaultValue: 4096 },
+      { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number", defaultValue: 2048 },
+      { key: "reply_count", label: "回复次数", type: "number", defaultValue: 1 },
+      { key: "stream", label: "流式输出", type: "tri_bool", defaultValue: false },
+      { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01, defaultValue: 0.7 },
+      { key: "top_p", label: "Top P", type: "range", min: 0, max: 1, step: 0.01, defaultValue: 1 },
+      { key: "top_k", label: "Top K", type: "number", defaultValue: 0 },
+      { key: "top_a", label: "Top A", type: "range", min: 0, max: 1, step: 0.01, defaultValue: 0 },
+      { key: "min_p", label: "Min P", type: "range", min: 0, max: 1, step: 0.01, defaultValue: 0 },
+      { key: "seed", label: "随机种子 (Seed)", type: "number", defaultValue: "" },
     ],
   },
   {
     title: "惩罚参数",
     fields: [
-      { key: "frequency_penalty", label: "频率惩罚", type: "range", min: -2, max: 2, step: 0.01 },
-      { key: "presence_penalty", label: "存在惩罚", type: "range", min: -2, max: 2, step: 0.01 },
-      { key: "repetition_penalty", label: "重复惩罚", type: "range", min: 0, max: 3, step: 0.01 },
+      { key: "frequency_penalty", label: "频率惩罚", type: "range", min: -2, max: 2, step: 0.01, defaultValue: 0 },
+      { key: "presence_penalty", label: "存在惩罚", type: "range", min: -2, max: 2, step: 0.01, defaultValue: 0 },
+      { key: "repetition_penalty", label: "重复惩罚", type: "range", min: 0, max: 3, step: 0.01, defaultValue: 1 },
     ],
   },
   {
     title: "行为参数",
     fields: [
-      { key: "squash_system_messages", label: "合并系统消息", type: "tri_bool" },
+      { key: "squash_system_messages", label: "合并系统消息", type: "tri_bool", defaultValue: false },
       {
         key: "reasoning_effort",
         label: "推理努力度",
@@ -183,12 +183,13 @@ const TASK_PROFILE_GENERATION_GROUPS = [
           { value: "medium", label: "中" },
           { value: "high", label: "高" },
         ],
+        defaultValue: "",
       },
-      { key: "request_thoughts", label: "请求思考过程", type: "tri_bool" },
-      { key: "enable_function_calling", label: "函数调用", type: "tri_bool" },
-      { key: "enable_web_search", label: "网页搜索", type: "tri_bool" },
-      { key: "character_name_prefix", label: "角色名前缀", type: "text" },
-      { key: "wrap_user_messages_in_quotes", label: "用户消息加引号", type: "tri_bool" },
+      { key: "request_thoughts", label: "请求思考过程", type: "tri_bool", defaultValue: false },
+      { key: "enable_function_calling", label: "函数调用", type: "tri_bool", defaultValue: false },
+      { key: "enable_web_search", label: "网页搜索", type: "tri_bool", defaultValue: false },
+      { key: "character_name_prefix", label: "角色名前缀", type: "text", defaultValue: "" },
+      { key: "wrap_user_messages_in_quotes", label: "用户消息加引号", type: "tri_bool", defaultValue: false },
     ],
   },
 ];
@@ -2385,9 +2386,11 @@ function _renderTaskBlockEditor(state) {
 }
 
 function _renderGenerationField(field, value) {
+  const effectiveValue = (value != null && value !== "") ? value : field.defaultValue;
+
   if (field.type === "tri_bool") {
     const currentValue =
-      value === true ? "true" : value === false ? "false" : "";
+      effectiveValue === true ? "true" : effectiveValue === false ? "false" : "";
     return `
       <div class="bme-config-row">
         <label>${_escHtml(field.label)}</label>
@@ -2420,7 +2423,7 @@ function _renderGenerationField(field, value) {
           ${(field.options || [])
             .map(
               (item) => `
-                <option value="${_escHtml(item.value)}" ${item.value === String(value ?? "") ? "selected" : ""}>
+                <option value="${_escHtml(item.value)}" ${item.value === String(effectiveValue ?? "") ? "selected" : ""}>
                   ${_escHtml(item.label)}
                 </option>
               `,
@@ -2432,7 +2435,7 @@ function _renderGenerationField(field, value) {
   }
 
   if (field.type === "range") {
-    const numValue = value != null && value !== "" ? Number(value) : "";
+    const numValue = effectiveValue != null && effectiveValue !== "" ? Number(effectiveValue) : "";
     const displayValue = numValue !== "" ? numValue : field.min ?? 0;
     return `
       <div class="bme-config-row">
@@ -2471,7 +2474,7 @@ function _renderGenerationField(field, value) {
         class="bme-config-input"
         type="${field.type === "text" ? "text" : "number"}"
         ${field.step ? `step="${field.step}"` : ""}
-        value="${_escHtml(value ?? "")}"
+        value="${_escHtml(effectiveValue ?? "")}"
         placeholder="留空 = 跟随默认"
         data-generation-key="${_escHtml(field.key)}"
         data-value-type="${field.type === "text" ? "text" : "number"}"
