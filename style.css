@@ -1985,3 +1985,66 @@
     border-radius: 0 0 6px 6px;
   }
 }
+
+/* ═══════ Help Tip (? 图标 + 气泡) ═══════ */
+.bme-help-tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 4px;
+}
+
+.bme-help-tip__trigger {
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(160, 140, 200, 0.35);
+  background: rgba(160, 140, 200, 0.18);
+  color: rgba(240, 230, 252, 0.9);
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+  transition: transform 0.15s ease, background 0.2s ease, border-color 0.2s ease;
+  padding: 0;
+  line-height: 1;
+}
+
+.bme-help-tip__trigger:hover,
+.bme-help-tip__trigger:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(180, 160, 220, 0.6);
+  background: rgba(180, 160, 220, 0.35);
+  outline: none;
+}
+
+.bme-help-tip__bubble {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 99999;
+  width: min(20rem, calc(100vw - 2rem));
+  border-radius: 10px;
+  border: 1px solid rgba(160, 140, 200, 0.3);
+  background: rgba(18, 14, 28, 0.92);
+  color: rgba(240, 235, 250, 0.95);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: normal;
+  display: none;
+  pointer-events: none;
+}
+
+.bme-help-tip:hover .bme-help-tip__bubble,
+.bme-help-tip__trigger:focus + .bme-help-tip__bubble {
+  display: block;
+  pointer-events: auto;
+}

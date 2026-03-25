@@ -2166,7 +2166,7 @@ function _renderTaskBlockEditor(state) {
     </div>
 
     <div class="bme-config-row">
-      <label>块名称</label>
+      <label>块名称${_helpTip("用于工作区列表显示。修改后立即生效。")}</label>
       <input
         class="bme-config-input"
         type="text"
@@ -2178,7 +2178,7 @@ function _renderTaskBlockEditor(state) {
 
     <div class="bme-task-field-grid">
       <div class="bme-config-row">
-        <label>角色</label>
+        <label>角色${_helpTip("决定此块内容以什么角色发送给 LLM。system = 系统指令，user = 用户输入，assistant = 模型回复。")}</label>
         <select class="bme-config-input" data-block-field="role">
           ${TASK_PROFILE_ROLE_OPTIONS.map(
             (item) => `
@@ -2190,7 +2190,7 @@ function _renderTaskBlockEditor(state) {
         </select>
       </div>
       <div class="bme-config-row">
-        <label>注入方式</label>
+        <label>注入方式${_helpTip("追加 = 拼接到同角色消息末尾。前置 = 拼接到同角色消息开头。")}</label>
         <select class="bme-config-input" data-block-field="injectionMode">
           ${TASK_PROFILE_INJECTION_OPTIONS.map(
             (item) => `
@@ -2222,13 +2222,13 @@ function _renderTaskBlockEditor(state) {
       block.type === "builtin"
         ? `
             <div class="bme-config-row">
-              <label>内置来源</label>
+              <label>内置来源${_helpTip("运行时自动从任务上下文注入的数据。不同任务类型使用不同来源。")}</label>
               <select class="bme-config-input" data-block-field="sourceKey">
                 ${builtinOptions}
               </select>
             </div>
             <div class="bme-config-row">
-              <label>覆盖内容（可选）</label>
+              <label>覆盖内容（可选）${_helpTip("留空时自动从 sourceKey 对应的上下文数据读取。填写后将覆盖自动注入的内容。")}</label>
               <textarea
                 class="bme-config-textarea"
                 data-block-field="content"
@@ -2261,7 +2261,7 @@ function _renderTaskBlockEditor(state) {
             `
           : `
               <div class="bme-config-row">
-                <label>块内容</label>
+                <label>块内容${_helpTip("直接编写的 prompt 文本。支持 {{userMessage}} / {{recentMessages}} / {{schema}} 等变量模板。")}</label>
                 <textarea
                   class="bme-config-textarea"
                   data-block-field="content"
@@ -2928,6 +2928,11 @@ function _sanitizeFileName(fileName = "profile.json") {
 
 function _cloneJson(value) {
   return JSON.parse(JSON.stringify(value ?? null));
+}
+
+function _helpTip(text) {
+  if (!text) return "";
+  return `<span class="bme-help-tip"><button type="button" class="bme-help-tip__trigger" aria-label="帮助">?</button><span class="bme-help-tip__bubble">${_escHtml(text)}</span></span>`;
 }
 
 function _getTaskBlockTypeLabel(type) {
