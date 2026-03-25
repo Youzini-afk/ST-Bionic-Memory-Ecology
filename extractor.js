@@ -15,17 +15,11 @@ import {
   updateNode,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import {
-  ensureEventTitle,
-  getNodeDisplayName,
-} from "./node-labels.js";
+import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
 import { buildTaskPrompt } from "./prompt-builder.js";
-import { applyTaskRegex } from "./task-regex.js";
 import { RELATION_TYPES } from "./schema.js";
-import {
-  buildNodeVectorText,
-  isDirectVectorConfig,
-} from "./vector-index.js";
+import { applyTaskRegex } from "./task-regex.js";
+import { buildNodeVectorText, isDirectVectorConfig } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
   const error = new Error(message);
@@ -39,9 +33,7 @@ function isAbortError(error) {
 
 function throwIfAborted(signal) {
   if (signal?.aborted) {
-    throw signal.reason instanceof Error
-      ? signal.reason
-      : createAbortError();
+    throw signal.reason instanceof Error ? signal.reason : createAbortError();
   }
 }
 
@@ -83,8 +75,6 @@ export async function extractMemories({
       processedRange: [lastProcessedSeq, lastProcessedSeq],
     };
   }
-
-
 
   const effectiveStartSeq = Number.isFinite(startSeq)
     ? startSeq
@@ -134,7 +124,9 @@ export async function extractMemories({
     settings,
     "extract",
     "finalPrompt",
-    promptBuild.systemPrompt || extractPrompt || buildDefaultExtractPrompt(schema),
+    promptBuild.systemPrompt ||
+      extractPrompt ||
+      buildDefaultExtractPrompt(schema),
   );
 
   // 用户提示词
@@ -175,12 +167,11 @@ export async function extractMemories({
     };
   }
 
-
-
   // 执行操作
   const stats = { newNodes: 0, updatedNodes: 0, newEdges: 0 };
   const newNodeIds = []; // v2: 收集新建节点 ID（用于进化引擎）
   const refMap = new Map();
+  const operationErrors = [];
 
   for (const op of result.operations) {
     try {
@@ -206,12 +197,27 @@ export async function extractMemories({
         case "_skip":
           // Mem0 对照判定为重复，跳过
           break;
-        default:
-          console.warn(`[ST-BME] 未知操作类型: ${op.action}`);
+        default: {
+          const message = `[ST-BME] 未知操作类型: ${op?.action ?? "<missing>"}`;
+          console.warn(message, op);
+          operationErrors.push(message);
+          break;
+        }
       }
     } catch (e) {
       console.error(`[ST-BME] 操作执行失败:`, op, e);
+      operationErrors.push(e?.message || String(e));
     }
+  }
+
+  if (operationErrors.length > 0) {
+    return {
+      success: false,
+      error: operationErrors.join(" | "),
+      ...stats,
+      newNodeIds,
+      processedRange: [effectiveStartSeq, effectiveEndSeq],
+    };
   }
 
   // 为新建节点生成 embedding。失败不应回滚整批图谱写入。
@@ -248,7 +254,7 @@ export async function extractMemories({
  */
 function handleCreate(graph, op, seq, schema, refMap, stats) {
   const normalizedFields =
-    op.type === "event" ? ensureEventTitle(op.fields || {}) : (op.fields || {});
+    op.type === "event" ? ensureEventTitle(op.fields || {}) : op.fields || {};
   const typeDef = schema.find((s) => s.id === op.type);
   if (!typeDef) {
     console.warn(`[ST-BME] 未知节点类型: ${op.type}`);
@@ -480,7 +486,9 @@ async function generateNodeEmbeddings(graph, embeddingConfig, signal) {
 
   if (needsEmbedding.length === 0) return;
 
-  const texts = needsEmbedding.map((node) => buildNodeVectorText(node) || node.type);
+  const texts = needsEmbedding.map(
+    (node) => buildNodeVectorText(node) || node.type,
+  );
 
   console.log(`[ST-BME] 为 ${texts.length} 个节点生成 embedding`);
 
@@ -591,7 +599,14 @@ function buildDefaultExtractPrompt(schema) {
  * @param {number} params.currentSeq
  * @returns {Promise<void>}
  */
-export async function generateSynopsis({ graph, schema, currentSeq, customPrompt, signal, settings = {} }) {
+export async function generateSynopsis({
+  graph,
+  schema,
+  currentSeq,
+  customPrompt,
+  signal,
+  settings = {},
+}) {
   const eventNodes = getActiveNodes(graph, "event").sort(
     (a, b) => a.seq - b.seq,
   );
@@ -623,11 +638,13 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
     settings,
     "synopsis",
     "finalPrompt",
-    synopsisPromptBuild.systemPrompt || customPrompt || [
-      "你是故事概要生成器。根据事件线、角色和主线生成简洁的前情提要。",
-      '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
-      "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
-    ].join("\n"),
+    synopsisPromptBuild.systemPrompt ||
+      customPrompt ||
+      [
+        "你是故事概要生成器。根据事件线、角色和主线生成简洁的前情提要。",
+        '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
+        "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
+      ].join("\n"),
   );
 
   const result = await callLLMForJSON({
@@ -677,7 +694,13 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
   }
 }
 
-export async function generateReflection({ graph, currentSeq, customPrompt, signal, settings = {} }) {
+export async function generateReflection({
+  graph,
+  currentSeq,
+  customPrompt,
+  signal,
+  settings = {},
+}) {
   const recentEvents = getActiveNodes(graph, "event")
     .sort((a, b) => b.seq - a.seq)
     .slice(0, 6)
@@ -728,14 +751,16 @@ export async function generateReflection({ graph, currentSeq, customPrompt, sign
     settings,
     "reflection",
     "finalPrompt",
-    reflectionPromptBuild.systemPrompt || customPrompt || [
-      "你是 RP 长期记忆系统的反思生成器。",
-      '输出严格 JSON：{"insight":"...","trigger":"...","suggestion":"...","importance":1-10}',
-      "insight 应总结最近情节中最值得长期保留的变化、关系趋势或潜在线索。",
-      "trigger 说明触发这条反思的关键事件或矛盾。",
-      "suggestion 给出后续检索或叙事上值得关注的提示。",
-      "不要复述全部事件，要提炼高层结论。",
-    ].join("\n"),
+    reflectionPromptBuild.systemPrompt ||
+      customPrompt ||
+      [
+        "你是 RP 长期记忆系统的反思生成器。",
+        '输出严格 JSON：{"insight":"...","trigger":"...","suggestion":"...","importance":1-10}',
+        "insight 应总结最近情节中最值得长期保留的变化、关系趋势或潜在线索。",
+        "trigger 说明触发这条反思的关键事件或矛盾。",
+        "suggestion 给出后续检索或叙事上值得关注的提示。",
+        "不要复述全部事件，要提炼高层结论。",
+      ].join("\n"),
   );
 
   const result = await callLLMForJSON({

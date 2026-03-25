@@ -614,6 +614,7 @@ export async function syncGraphVectorIndex(
       }
     }
 
+    let directSyncHadFailures = false;
     if (entriesToEmbed.length > 0) {
       throwIfAborted(signal);
       const embeddings = await embedBatch(
@@ -634,6 +635,8 @@ export async function syncGraphVectorIndex(
           state.hashToNodeId[entry.hash] = entry.nodeId;
           state.nodeToHash[entry.nodeId] = entry.hash;
           insertedHashes.push(entry.hash);
+        } else {
+          directSyncHadFailures = true;
         }
       }
     }
@@ -642,10 +645,16 @@ export async function syncGraphVectorIndex(
     state.source = "direct";
     state.modelScope = getVectorModelScope(config);
     state.collectionId = collectionId;
+    state.dirty = directSyncHadFailures;
+    state.lastWarning = directSyncHadFailures
+      ? "部分节点 embedding 生成失败，向量索引仍待修复"
+      : "";
   }
 
-  state.dirty = false;
-  state.lastWarning = "";
+  if (state.mode !== "direct") {
+    state.dirty = false;
+    state.lastWarning = "";
+  }
   state.lastSyncAt = Date.now();
   state.lastStats = computeVectorStats(
     graph,

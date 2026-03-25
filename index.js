@@ -33,6 +33,10 @@ import { estimateTokens, formatInjection } from "./injector.js";
 import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
 import { getNodeDisplayName } from "./node-labels.js";
 import { showManagedBmeNotice } from "./notice.js";
+import {
+  createDefaultTaskProfiles,
+  migrateLegacyTaskProfiles,
+} from "./prompt-profiles.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
@@ -59,7 +63,6 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector-index.js";
-import { createDefaultTaskProfiles, migrateLegacyTaskProfiles } from "./prompt-profiles.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -198,9 +201,8 @@ let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
 let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
-let skipBeforeCombineRecallUntil = 0;
-let lastPreGenerationRecallKey = "";
-let lastPreGenerationRecallAt = 0;
+const generationRecallTransactions = new Map();
+const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -956,6 +958,15 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
   currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
 }
 
+function shouldAdvanceProcessedHistory(batchStatus) {
+  if (!batchStatus || typeof batchStatus !== "object") return false;
+  return (
+    batchStatus.completed === true &&
+    batchStatus.outcome === "success" &&
+    batchStatus.consistency === "strong"
+  );
+}
+
 function computePostProcessArtifacts(
   beforeSnapshot,
   afterSnapshot,
@@ -1648,6 +1659,111 @@ function buildPreGenerationRecallKey(type, options = {}) {
   ].join(":");
 }
 
+function cleanupGenerationRecallTransactions(now = Date.now()) {
+  for (const [
+    transactionId,
+    transaction,
+  ] of generationRecallTransactions.entries()) {
+    if (
+      !transaction ||
+      now - (transaction.updatedAt || 0) > GENERATION_RECALL_TRANSACTION_TTL_MS
+    ) {
+      generationRecallTransactions.delete(transactionId);
+    }
+  }
+}
+
+function buildGenerationRecallTransactionId(chatId, generationType, recallKey) {
+  return [
+    String(chatId || ""),
+    String(generationType || "normal").trim() || "normal",
+    String(recallKey || ""),
+  ].join(":");
+}
+
+function beginGenerationRecallTransaction({
+  chatId,
+  generationType = "normal",
+  recallKey = "",
+} = {}) {
+  const normalizedChatId = String(chatId || "");
+  const normalizedGenerationType =
+    String(generationType || "normal").trim() || "normal";
+  const normalizedRecallKey = String(recallKey || "");
+  if (!normalizedChatId || !normalizedRecallKey) return null;
+
+  cleanupGenerationRecallTransactions();
+  const transactionId = buildGenerationRecallTransactionId(
+    normalizedChatId,
+    normalizedGenerationType,
+    normalizedRecallKey,
+  );
+  const now = Date.now();
+  const transaction = generationRecallTransactions.get(transactionId) || {
+    id: transactionId,
+    chatId: normalizedChatId,
+    generationType: normalizedGenerationType,
+    recallKey: normalizedRecallKey,
+    hookStates: {},
+    createdAt: now,
+  };
+  transaction.updatedAt = now;
+  generationRecallTransactions.set(transactionId, transaction);
+  return transaction;
+}
+
+function markGenerationRecallTransactionHookState(
+  transaction,
+  hookName,
+  state = "completed",
+) {
+  if (!transaction?.id || !hookName) return transaction;
+  transaction.hookStates ||= {};
+  transaction.hookStates[hookName] = state;
+  transaction.updatedAt = Date.now();
+  generationRecallTransactions.set(transaction.id, transaction);
+  return transaction;
+}
+
+function shouldRunRecallForTransaction(transaction, hookName) {
+  if (!hookName) return true;
+  if (!transaction) return true;
+  const hookStates = transaction.hookStates || {};
+  if (hookStates[hookName] === "completed") {
+    return false;
+  }
+  if (
+    hookName === "GENERATE_BEFORE_COMBINE_PROMPTS" &&
+    hookStates.GENERATION_AFTER_COMMANDS === "completed"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function createGenerationRecallContext({
+  hookName,
+  generationType = "normal",
+  recallOptions = {},
+  chatId = getCurrentChatId(),
+} = {}) {
+  const recallKey =
+    recallOptions.recallKey ||
+    buildPreGenerationRecallKey(generationType, recallOptions);
+  const transaction = beginGenerationRecallTransaction({
+    chatId,
+    generationType,
+    recallKey,
+  });
+  return {
+    hookName,
+    generationType,
+    recallKey,
+    transaction,
+    shouldRun: shouldRunRecallForTransaction(transaction, hookName),
+  };
+}
+
 function getCurrentChatSeq(context = getContext()) {
   const chat = context?.chat;
   if (Array.isArray(chat) && chat.length > 0) {
@@ -1656,19 +1772,129 @@ function getCurrentChatSeq(context = getContext()) {
   return currentGraph?.lastProcessedSeq ?? 0;
 }
 
+const BATCH_STAGE_ORDER = ["core", "structural", "semantic", "finalize"];
+const BATCH_STAGE_SEVERITY = {
+  success: 0,
+  partial: 1,
+  failed: 2,
+};
+
+function createBatchStageStatus(stage, consistency = "strong") {
+  return {
+    stage,
+    outcome: "success",
+    consistency,
+    warnings: [],
+    errors: [],
+    artifacts: [],
+  };
+}
+
+function createBatchStatusSkeleton({ processedRange, extractionCountBefore }) {
+  return {
+    model: "layered-batch-v1",
+    processedRange: Array.isArray(processedRange)
+      ? [...processedRange]
+      : [-1, -1],
+    extractionCountBefore: Number.isFinite(extractionCountBefore)
+      ? extractionCountBefore
+      : extractionCount,
+    extractionCountAfter: Number.isFinite(extractionCount)
+      ? extractionCount
+      : 0,
+    stages: {
+      core: createBatchStageStatus("core", "strong"),
+      structural: createBatchStageStatus("structural", "weak"),
+      semantic: createBatchStageStatus("semantic", "weak"),
+      finalize: createBatchStageStatus("finalize", "strong"),
+    },
+    outcome: "success",
+    consistency: "strong",
+    completed: false,
+    warnings: [],
+    errors: [],
+  };
+}
+
+function setBatchStageOutcome(status, stage, outcome, message = "") {
+  const stageStatus = status?.stages?.[stage];
+  if (!stageStatus) return;
+  const nextSeverity = BATCH_STAGE_SEVERITY[outcome] ?? 0;
+  const previousSeverity = BATCH_STAGE_SEVERITY[stageStatus.outcome] ?? 0;
+  if (nextSeverity >= previousSeverity) {
+    stageStatus.outcome = outcome;
+  }
+  if (!message) return;
+  if (outcome === "failed") {
+    stageStatus.errors.push(message);
+  } else if (outcome === "partial") {
+    stageStatus.warnings.push(message);
+  }
+}
+
+function pushBatchStageArtifact(status, stage, artifact) {
+  const stageStatus = status?.stages?.[stage];
+  if (!stageStatus || !artifact) return;
+  if (!stageStatus.artifacts.includes(artifact)) {
+    stageStatus.artifacts.push(artifact);
+  }
+}
+
+function finalizeBatchStatus(status) {
+  const stages = status?.stages || {};
+  const structuralOutcome = stages.structural?.outcome || "success";
+  const semanticOutcome = stages.semantic?.outcome || "success";
+  const finalizeOutcome = stages.finalize?.outcome || "failed";
+  const outcomeList = BATCH_STAGE_ORDER.map(
+    (stage) => stages[stage]?.outcome || "success",
+  );
+
+  if (finalizeOutcome !== "success") {
+    status.outcome = "failed";
+  } else if (outcomeList.includes("failed")) {
+    status.outcome = "failed";
+  } else if (structuralOutcome === "partial" || semanticOutcome === "partial") {
+    status.outcome = "partial";
+  } else {
+    status.outcome = "success";
+  }
+
+  status.consistency =
+    finalizeOutcome === "success" &&
+    stages.core?.outcome === "success" &&
+    stages.structural?.outcome === "success"
+      ? "strong"
+      : "weak";
+  status.completed = finalizeOutcome === "success";
+  status.extractionCountAfter = Number.isFinite(extractionCount)
+    ? extractionCount
+    : status.extractionCountAfter;
+  status.warnings = BATCH_STAGE_ORDER.flatMap(
+    (stage) => stages[stage]?.warnings || [],
+  );
+  status.errors = BATCH_STAGE_ORDER.flatMap(
+    (stage) => stages[stage]?.errors || [],
+  );
+  return status;
+}
+
 async function handleExtractionSuccess(
   result,
   endIdx,
   settings,
   signal = undefined,
+  status = createBatchStatusSkeleton({
+    processedRange: [endIdx, endIdx],
+    extractionCountBefore: extractionCount,
+  }),
 ) {
   const postProcessArtifacts = [];
-  const warnings = [];
   throwIfAborted(signal, "提取已终止");
   extractionCount++;
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
   updateLastExtractedItems(result.newNodeIds || []);
+  setBatchStageOutcome(status, "core", "success");
 
   if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
     try {
@@ -1684,8 +1910,16 @@ async function handleExtractionSuccess(
         signal,
       });
       postProcessArtifacts.push("consolidation");
+      pushBatchStageArtifact(status, "structural", "consolidation");
     } catch (e) {
       if (isAbortError(e)) throw e;
+      const message = e?.message || String(e) || "记忆整合阶段失败";
+      setBatchStageOutcome(
+        status,
+        "structural",
+        "partial",
+        `记忆整合失败: ${message}`,
+      );
       console.error("[ST-BME] 记忆整合失败:", e);
     }
   }
@@ -1703,8 +1937,16 @@ async function handleExtractionSuccess(
         signal,
       });
       postProcessArtifacts.push("synopsis");
+      pushBatchStageArtifact(status, "semantic", "synopsis");
     } catch (e) {
       if (isAbortError(e)) throw e;
+      const message = e?.message || String(e) || "概要生成阶段失败";
+      setBatchStageOutcome(
+        status,
+        "semantic",
+        "failed",
+        `概要生成失败: ${message}`,
+      );
       console.error("[ST-BME] 概要生成失败:", e);
     }
   }
@@ -1721,8 +1963,16 @@ async function handleExtractionSuccess(
         signal,
       });
       postProcessArtifacts.push("reflection");
+      pushBatchStageArtifact(status, "semantic", "reflection");
     } catch (e) {
       if (isAbortError(e)) throw e;
+      const message = e?.message || String(e) || "反思生成阶段失败";
+      setBatchStageOutcome(
+        status,
+        "semantic",
+        "failed",
+        `反思生成失败: ${message}`,
+      );
       console.error("[ST-BME] 反思生成失败:", e);
     }
   }
@@ -1734,7 +1984,15 @@ async function handleExtractionSuccess(
     try {
       sleepCycle(currentGraph, settings);
       postProcessArtifacts.push("sleep");
+      pushBatchStageArtifact(status, "semantic", "sleep");
     } catch (e) {
+      const message = e?.message || String(e) || "主动遗忘阶段失败";
+      setBatchStageOutcome(
+        status,
+        "semantic",
+        "failed",
+        `主动遗忘失败: ${message}`,
+      );
       console.error("[ST-BME] 主动遗忘失败:", e);
     }
   }
@@ -1752,27 +2010,63 @@ async function handleExtractionSuccess(
     );
     if (compressionResult.created > 0 || compressionResult.archived > 0) {
       postProcessArtifacts.push("compression");
+      pushBatchStageArtifact(status, "structural", "compression");
     }
   } catch (error) {
     if (isAbortError(error)) throw error;
     const message = error?.message || String(error) || "压缩阶段失败";
-    warnings.push(`压缩阶段失败: ${message}`);
+    setBatchStageOutcome(
+      status,
+      "structural",
+      "partial",
+      `压缩阶段失败: ${message}`,
+    );
     console.error("[ST-BME] 记忆压缩失败:", error);
   }
 
-  const vectorSync = await syncVectorState({ signal });
+  let vectorSync = null;
+  try {
+    vectorSync = await syncVectorState({ signal });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    const message = error?.message || String(error) || "向量同步阶段失败";
+    setBatchStageOutcome(
+      status,
+      "finalize",
+      "failed",
+      `向量同步失败: ${message}`,
+    );
+    return {
+      postProcessArtifacts,
+      vectorHashesInserted: [],
+      vectorStats: getVectorIndexStats(currentGraph),
+      vectorError: message,
+      warnings: status.warnings,
+      batchStatus: finalizeBatchStatus(status),
+    };
+  }
+
   if (vectorSync?.aborted) {
     throw createAbortError(vectorSync.error || "提取已终止");
   }
   if (vectorSync?.error) {
-    warnings.push(`向量同步失败: ${vectorSync.error}`);
+    setBatchStageOutcome(
+      status,
+      "finalize",
+      "failed",
+      `向量同步失败: ${vectorSync.error}`,
+    );
+  } else {
+    setBatchStageOutcome(status, "finalize", "success");
   }
+
   return {
     postProcessArtifacts,
     vectorHashesInserted: vectorSync?.insertedHashes || [],
     vectorStats: vectorSync?.stats || getVectorIndexStats(currentGraph),
     vectorError: vectorSync?.error || "",
-    warnings,
+    warnings: status.warnings,
+    batchStatus: finalizeBatchStatus(status),
   };
 }
 
@@ -2160,6 +2454,15 @@ async function prepareVectorStateForReplay(
       currentGraph.vectorIndexState.nodeToHash = {};
     }
     currentGraph.vectorIndexState.dirty = true;
+    if (!currentGraph.vectorIndexState.dirtyReason) {
+      currentGraph.vectorIndexState.dirtyReason = skipBackendPurge
+        ? "history-recovery-replay"
+        : "history-recovery-reset";
+    }
+    if (fullReset) {
+      currentGraph.vectorIndexState.replayRequiredNodeIds = [];
+      currentGraph.vectorIndexState.pendingRepairFromFloor = 0;
+    }
     currentGraph.vectorIndexState.lastWarning = skipBackendPurge
       ? "历史恢复后需要修复受影响后缀的后端向量索引"
       : "历史恢复后需要重建后端向量索引";
@@ -2169,7 +2472,10 @@ async function prepareVectorStateForReplay(
   if (fullReset) {
     currentGraph.vectorIndexState.hashToNodeId = {};
     currentGraph.vectorIndexState.nodeToHash = {};
+    currentGraph.vectorIndexState.replayRequiredNodeIds = [];
     currentGraph.vectorIndexState.dirty = true;
+    currentGraph.vectorIndexState.dirtyReason = "history-recovery-reset";
+    currentGraph.vectorIndexState.pendingRepairFromFloor = 0;
     currentGraph.vectorIndexState.lastWarning =
       "历史恢复后需要重嵌当前聊天向量";
   }
@@ -2189,6 +2495,10 @@ async function executeExtractionBatch({
   const extractionCountBefore = extractionCount;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   const messages = buildExtractionMessages(chat, startIdx, endIdx, settings);
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [startIdx, endIdx],
+    extractionCountBefore,
+  });
 
   console.log(
     `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
@@ -2211,21 +2521,41 @@ async function executeExtractionBatch({
   });
 
   if (!result.success) {
+    setBatchStageOutcome(
+      batchStatus,
+      "core",
+      "failed",
+      result?.error || "提取阶段未返回有效操作",
+    );
+    finalizeBatchStatus(batchStatus);
+    currentGraph.historyState.lastBatchStatus = batchStatus;
     return {
       success: false,
       result,
       effects: null,
+      batchStatus,
       error: result?.error || "提取阶段未返回有效操作",
     };
   }
 
+  setBatchStageOutcome(batchStatus, "core", "success");
   const effects = await handleExtractionSuccess(
     result,
     endIdx,
     settings,
     signal,
+    batchStatus,
   );
-  updateProcessedHistorySnapshot(chat, endIdx);
+  const finalizedBatchStatus =
+    effects?.batchStatus || finalizeBatchStatus(batchStatus);
+  currentGraph.historyState.lastBatchStatus = {
+    ...finalizedBatchStatus,
+    historyAdvanced: shouldAdvanceProcessedHistory(finalizedBatchStatus),
+  };
+
+  if (currentGraph.historyState.lastBatchStatus.historyAdvanced) {
+    updateProcessedHistorySnapshot(chat, endIdx);
+  }
 
   const afterSnapshot = cloneGraphSnapshot(currentGraph);
   const postProcessArtifacts = computePostProcessArtifacts(
@@ -2245,10 +2575,15 @@ async function executeExtractionBatch({
   saveGraphToChat();
 
   return {
-    success: true,
+    success: finalizedBatchStatus.completed,
     result,
     effects,
-    error: effects?.vectorError || "",
+    batchStatus: finalizedBatchStatus,
+    error: finalizedBatchStatus.completed
+      ? ""
+      : effects?.vectorError ||
+        finalizedBatchStatus.errors?.[0] ||
+        "批次未完成 finalize 闭环",
   };
 }
 
@@ -2289,18 +2624,41 @@ async function replayExtractionFromHistory(chat, settings, signal = undefined) {
   return replayedBatches;
 }
 
-function collectAffectedInsertedHashes(affectedJournals = []) {
-  const hashes = new Set();
-  for (const journal of affectedJournals) {
-    const insertedHashes =
-      journal?.vectorDelta?.insertedHashes ||
-      journal?.vectorHashesInserted ||
-      [];
-    for (const hash of insertedHashes) {
-      if (hash) hashes.add(hash);
-    }
+function applyRecoveryPlanToVectorState(
+  recoveryPlan,
+  dirtyFallbackFloor = null,
+) {
+  ensureCurrentGraphRuntimeState();
+  const vectorState = currentGraph.vectorIndexState;
+  const replayRequiredNodeIds = new Set(
+    Array.isArray(vectorState.replayRequiredNodeIds)
+      ? vectorState.replayRequiredNodeIds.filter(Boolean)
+      : [],
+  );
+
+  for (const nodeId of recoveryPlan?.replayRequiredNodeIds || []) {
+    if (nodeId) replayRequiredNodeIds.add(nodeId);
   }
-  return [...hashes];
+
+  vectorState.replayRequiredNodeIds = [...replayRequiredNodeIds];
+  vectorState.dirty = true;
+  vectorState.dirtyReason =
+    recoveryPlan?.dirtyReason ||
+    vectorState.dirtyReason ||
+    "history-recovery-replay";
+  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
+    ? dirtyFallbackFloor
+    : currentGraph.historyState?.historyDirtyFrom;
+  vectorState.pendingRepairFromFloor = Number.isFinite(
+    recoveryPlan?.pendingRepairFromFloor,
+  )
+    ? recoveryPlan.pendingRepairFromFloor
+    : Number.isFinite(fallbackFloor)
+      ? fallbackFloor
+      : null;
+  vectorState.lastWarning = recoveryPlan?.legacyGapFallback
+    ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
+    : "历史恢复后需要修复受影响后缀的向量索引";
 }
 
 function rollbackAffectedJournals(graph, affectedJournals = []) {
@@ -2370,18 +2728,23 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       recoveryPath = "reverse-journal";
       affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
       const config = getEmbeddingConfig();
-      const insertedHashes = collectAffectedInsertedHashes(
+      const recoveryPlan = buildReverseJournalRecoveryPlan(
         recoveryPoint.affectedJournals,
+        initialDirtyFrom,
       );
       rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
       currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
       extractionCount = currentGraph.historyState.extractionCount || 0;
+      applyRecoveryPlanToVectorState(recoveryPlan, initialDirtyFrom);
 
-      if (isBackendVectorConfig(config) && insertedHashes.length > 0) {
+      if (
+        isBackendVectorConfig(config) &&
+        recoveryPlan.backendDeleteHashes.length > 0
+      ) {
         await deleteBackendVectorHashesForRecovery(
           currentGraph.vectorIndexState.collectionId,
           config,
-          insertedHashes,
+          recoveryPlan.backendDeleteHashes,
           historySignal,
         );
       }
@@ -2926,33 +3289,58 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
   );
   if (!recallOptions?.overrideUserMessage) return;
 
-  const recallKey = buildPreGenerationRecallKey(type, recallOptions);
-  const recentlyHandled =
-    lastPreGenerationRecallKey === recallKey &&
-    Date.now() - lastPreGenerationRecallAt < 1500;
-  if (recentlyHandled) {
+  const recallContext = createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: String(type || "normal").trim() || "normal",
+    recallOptions,
+  });
+  if (!recallContext.shouldRun) {
     return;
   }
 
+  markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    "running",
+  );
   const didRecall = await runRecall({
     ...recallOptions,
-    hookName: "GENERATION_AFTER_COMMANDS",
+    recallKey: recallContext.recallKey,
+    hookName: recallContext.hookName,
     signal: params?.signal,
   });
 
-  if (didRecall) {
-    lastPreGenerationRecallKey = recallKey;
-    lastPreGenerationRecallAt = Date.now();
-    skipBeforeCombineRecallUntil = Date.now() + 1500;
-  }
+  markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    didRecall ? "completed" : "pending",
+  );
 }
 
 async function onBeforeCombinePrompts() {
-  if (skipBeforeCombineRecallUntil > Date.now()) {
-    skipBeforeCombineRecallUntil = 0;
+  const recallContext = createGenerationRecallContext({
+    hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+    generationType: "normal",
+    recallOptions: {},
+  });
+  if (!recallContext.shouldRun) {
     return;
   }
-  await runRecall({ hookName: "GENERATE_BEFORE_COMBINE_PROMPTS" });
+
+  markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    "running",
+  );
+  const didRecall = await runRecall({
+    recallKey: recallContext.recallKey,
+    hookName: recallContext.hookName,
+  });
+  markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    didRecall ? "completed" : "pending",
+  );
 }
 
 function onMessageReceived() {
@@ -3502,6 +3890,8 @@ async function onReembedDirect() {
       getLastExtractionStatus: () => lastExtractionStatus,
       getLastVectorStatus: () => lastVectorStatus,
       getLastRecallStatus: () => lastRecallStatus,
+      getLastBatchStatus: () =>
+        currentGraph?.historyState?.lastBatchStatus || null,
       getLastInjection: () => lastInjectionContent,
       updateSettings: (patch) => {
         const settings = updateModuleSettings(patch);
