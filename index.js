@@ -1749,7 +1749,8 @@ function isAssistantChatMessage(message) {
 
 function getAssistantTurns(chat) {
   const assistantTurns = [];
-  for (let index = 0; index < chat.length; index++) {
+  // 从 index 1 开始：index 0 是角色卡首条消息（greeting），不参与提取
+  for (let index = 1; index < chat.length; index++) {
     if (isAssistantChatMessage(chat[index])) {
       assistantTurns.push(index);
     }
