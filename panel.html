@@ -692,10 +692,10 @@
               </div>
 
               <details
-                class="bme-config-card"
+                class="bme-config-card bme-collapsible-card"
                 id="bme-advanced-network-settings"
               >
-                <summary class="bme-config-card-head">
+                <summary class="bme-config-card-head bme-collapsible-summary">
                   <div>
                     <div class="bme-config-card-title">高级网络设置</div>
                     <div class="bme-config-card-subtitle">
@@ -703,6 +703,9 @@
                       LLM、Embedding、后端向量与本地向量请求超时。
                     </div>
                   </div>
+                  <span class="bme-collapsible-indicator" aria-hidden="true">
+                    <i class="fa-solid fa-chevron-down"></i>
+                  </span>
                 </summary>
                 <div class="bme-config-row">
                   <label for="bme-setting-timeout-ms">统一超时（毫秒）</label>
