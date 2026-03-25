@@ -363,6 +363,23 @@ export function createBuiltinPromptBlock(taskType, sourceKey = "", overrides = {
   });
 }
 
+export function createLegacyPromptBlock(taskType, overrides = {}) {
+  const legacyField = LEGACY_PROMPT_FIELD_MAP[taskType] || "";
+  return normalizePromptBlock(taskType, {
+    id: createPromptBlockId(taskType),
+    name: "默认提示词",
+    type: "legacyPrompt",
+    enabled: true,
+    role: "system",
+    sourceKey: "",
+    sourceField: legacyField,
+    content: "",
+    injectionMode: "append",
+    order: 0,
+    ...overrides,
+  });
+}
+
 export function createLocalRegexRule(taskType, overrides = {}) {
   return normalizeRegexLocalRule(
     {

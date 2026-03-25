@@ -7,6 +7,7 @@ import {
   cloneTaskProfile,
   createBuiltinPromptBlock,
   createCustomPromptBlock,
+  createLegacyPromptBlock,
   createLocalRegexRule,
   ensureTaskProfiles,
   exportTaskProfile as serializeTaskProfile,
@@ -1680,6 +1681,15 @@ async function _handleTaskProfileWorkspaceClick(event) {
         return { selectBlockId: nextBlock.id };
       });
       return;
+    case "add-legacy-block":
+      _updateCurrentTaskProfile((draft, context) => {
+        const nextBlock = createLegacyPromptBlock(context.taskType, {
+          order: draft.blocks.length,
+        });
+        draft.blocks.push(nextBlock);
+        return { selectBlockId: nextBlock.id };
+      });
+      return;
     case "add-builtin-block": {
       const select = document.getElementById("bme-task-builtin-select");
       const sourceKey = String(select?.value || "").trim();
@@ -1946,6 +1956,9 @@ function _renderTaskPromptTab(state) {
           <div class="bme-task-toolbar-inline">
             <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
               + 自定义块
+            </button>
+            <button class="bme-config-secondary-btn" data-task-action="add-legacy-block" type="button">
+              + 默认提示词
             </button>
             <span class="bme-task-action-sep"></span>
             <select id="bme-task-builtin-select" class="bme-config-input bme-task-builtin-select">
