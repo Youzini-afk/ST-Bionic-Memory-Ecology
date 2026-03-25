@@ -215,14 +215,16 @@ function collectLocalRules(regexConfig = {}) {
     .filter((rule) => rule.enabled && rule.findRegex);
 }
 
-function shouldApplyRuleForStage(rule, stage = "") {
+function shouldApplyRuleForStage(rule, stage = "", stagesConfig = {}) {
+  // 将细粒度的 stage 名映射到 input / output 两大类
   if (PROMPT_STAGES.has(stage)) {
-    return rule.destinationFlags.prompt !== false;
+    return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
   }
   if (OUTPUT_STAGES.has(stage)) {
-    return true;
+    return stagesConfig.output !== false;
   }
-  return rule.destinationFlags.prompt !== false;
+  // 未知 stage 回退到 input
+  return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
 }
 
 function shouldApplyRuleForRole(rule, role = "system") {
@@ -280,18 +282,8 @@ export function applyTaskRegex(
     return input;
   }
 
-  const stageEnabled = regexConfig?.stages?.[stage] === true;
-  if (!stageEnabled) {
-    pushDebug(debugCollector, {
-      taskType,
-      stage,
-      enabled: true,
-      appliedRules: [],
-      sourceCount: { tavern: 0, local: 0 },
-      skipped: "stage_disabled",
-    });
-    return input;
-  }
+  // 阶段检查已移到 shouldApplyRuleForStage 中，无需单独 gate
+  const stagesConfig = regexConfig?.stages || {};
 
   const tavernRules = collectTavernRules(regexConfig);
   const localRules = collectLocalRules(regexConfig);
@@ -300,7 +292,7 @@ export function applyTaskRegex(
   let output = input;
 
   for (const rule of orderedRules) {
-    if (!shouldApplyRuleForStage(rule, stage)) continue;
+    if (!shouldApplyRuleForStage(rule, stage, stagesConfig)) continue;
     if (!shouldApplyRuleForRole(rule, role)) continue;
 
     const result = applyOneRule(output, rule, stage);

@@ -108,15 +108,8 @@ const TASK_PROFILE_GENERATION_GROUPS = [
 ];
 
 const TASK_PROFILE_REGEX_STAGES = [
-  { key: "finalPrompt", label: "最终 Prompt", desc: "最终 system prompt" },
-  { key: "input.userMessage", label: "用户消息", desc: "用户消息进入编排前" },
-  { key: "input.recentMessages", label: "近期消息", desc: "最近消息进入编排前" },
-  { key: "input.candidateText", label: "候选文本", desc: "候选节点文本进入编排前" },
-  { key: "input.finalPrompt", label: "组装后 Prompt", desc: "最终 assembled prompt" },
-  { key: "rawResponse", label: "原始返回", desc: "模型原始输出" },
-  { key: "beforeParse", label: "解析前", desc: "解析 JSON 前" },
-  { key: "output.rawResponse", label: "输出原始响应", desc: "输出阶段原始响应" },
-  { key: "output.beforeParse", label: "输出解析前", desc: "输出阶段解析前" },
+  { key: "input", label: "输入阶段", desc: "对发送给 LLM 的 prompt 执行正则替换。" },
+  { key: "output", label: "输出阶段", desc: "对 LLM 返回的结果执行正则替换。" },
 ];
 
 let panelEl = null;
@@ -1996,9 +1989,9 @@ function _renderTaskRegexTab(state) {
             .join("")}
         </div>
 
-        <div class="bme-task-section-label">输入阶段</div>
+        <div class="bme-task-section-label">执行阶段</div>
         <div class="bme-task-toggle-list">
-          ${TASK_PROFILE_REGEX_STAGES.filter((s) => !s.key.startsWith("output.") && s.key !== "rawResponse" && s.key !== "beforeParse").map(
+          ${TASK_PROFILE_REGEX_STAGES.map(
             (stage) => `
               <label class="bme-toggle-item">
                 <span class="bme-toggle-copy">
@@ -2008,26 +2001,7 @@ function _renderTaskRegexTab(state) {
                 <input
                   type="checkbox"
                   data-regex-stage="${_escHtml(stage.key)}"
-                  ${(regex.stages?.[stage.key] ?? false) ? "checked" : ""}
-                />
-              </label>
-            `,
-          ).join("")}
-        </div>
-
-        <div class="bme-task-section-label">输出阶段</div>
-        <div class="bme-task-toggle-list">
-          ${TASK_PROFILE_REGEX_STAGES.filter((s) => s.key.startsWith("output.") || s.key === "rawResponse" || s.key === "beforeParse").map(
-            (stage) => `
-              <label class="bme-toggle-item">
-                <span class="bme-toggle-copy">
-                  <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
-                  <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
-                </span>
-                <input
-                  type="checkbox"
-                  data-regex-stage="${_escHtml(stage.key)}"
-                  ${(regex.stages?.[stage.key] ?? false) ? "checked" : ""}
+                  ${(regex.stages?.[stage.key] ?? true) ? "checked" : ""}
                 />
               </label>
             `,
@@ -2812,7 +2786,7 @@ function _normalizeTaskProfileDraft(profile = {}) {
   const draft = profile || {};
   draft.blocks = _normalizeTaskBlocks(draft.blocks);
   draft.regex = {
-    enabled: false,
+    enabled: true,
     inheritStRegex: true,
     sources: {
       global: true,
@@ -2820,15 +2794,8 @@ function _normalizeTaskProfileDraft(profile = {}) {
       character: true,
     },
     stages: {
-      finalPrompt: true,
-      "input.userMessage": false,
-      "input.recentMessages": false,
-      "input.candidateText": false,
-      "input.finalPrompt": false,
-      rawResponse: false,
-      beforeParse: false,
-      "output.rawResponse": false,
-      "output.beforeParse": false,
+      input: true,
+      output: true,
     },
     localRules: [],
     ...(draft.regex || {}),
@@ -2839,15 +2806,8 @@ function _normalizeTaskProfileDraft(profile = {}) {
       ...(draft.regex?.sources || {}),
     },
     stages: {
-      finalPrompt: true,
-      "input.userMessage": false,
-      "input.recentMessages": false,
-      "input.candidateText": false,
-      "input.finalPrompt": false,
-      rawResponse: false,
-      beforeParse: false,
-      "output.rawResponse": false,
-      "output.beforeParse": false,
+      input: true,
+      output: true,
       ...(draft.regex?.stages || {}),
     },
     localRules: Array.isArray(draft.regex?.localRules)
