@@ -14,7 +14,17 @@ async function loadDefaultSettings() {
     throw new Error("无法从 index.js 提取 defaultSettings");
   }
 
-  const context = vm.createContext({});
+  const context = vm.createContext({
+    createDefaultTaskProfiles() {
+      return {
+        extract: { activeProfileId: "default", profiles: [] },
+        recall: { activeProfileId: "default", profiles: [] },
+        compress: { activeProfileId: "default", profiles: [] },
+        synopsis: { activeProfileId: "default", profiles: [] },
+        reflection: { activeProfileId: "default", profiles: [] },
+      };
+    },
+  });
   const script = new vm.Script(`
 ${settingsMatch[0]}
 this.defaultSettings = defaultSettings;
@@ -34,5 +44,9 @@ assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
 assert.equal(defaultSettings.recallLlmContextMessages, 4);
 assert.equal(defaultSettings.injectDepth, 9999);
+assert.equal(defaultSettings.taskProfilesVersion, 1);
+assert.ok(defaultSettings.taskProfiles);
+assert.ok(defaultSettings.taskProfiles.extract);
+assert.ok(defaultSettings.taskProfiles.recall);
 
 console.log("default-settings tests passed");

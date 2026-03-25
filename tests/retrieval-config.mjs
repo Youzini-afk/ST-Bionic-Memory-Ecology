@@ -90,6 +90,12 @@ const graph = createGraph();
 const helpers = createGraphHelpers(graph);
 const retrieve = await loadRetrieve({
   ...helpers,
+  buildTaskPrompt() {
+    return { systemPrompt: "" };
+  },
+  applyTaskRegex(_settings, _taskType, _stage, text) {
+    return text;
+  },
   hybridScore: ({ graphScore = 0, vectorScore = 0, importance = 0 }) =>
     graphScore + vectorScore + importance,
   reinforceAccessBatch() {},

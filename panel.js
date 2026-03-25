@@ -3,6 +3,21 @@
 import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "./node-labels.js";
+import {
+  cloneTaskProfile,
+  createBuiltinPromptBlock,
+  createCustomPromptBlock,
+  createLocalRegexRule,
+  ensureTaskProfiles,
+  exportTaskProfile as serializeTaskProfile,
+  getBuiltinBlockDefinitions,
+  getLegacyPromptFieldForTask,
+  getTaskTypeOptions,
+  importTaskProfile as parseImportedTaskProfile,
+  restoreDefaultTaskProfile,
+  setActiveTaskProfileId,
+  upsertTaskProfile,
+} from "./prompt-profiles.js";
 import { getNodeColors } from "./themes.js";
 import {
   getSuggestedBackendModel,
@@ -105,12 +120,173 @@ const DEFAULT_PROMPTS = {
   ].join("\n"),
 };
 
+const TASK_PROFILE_TABS = [
+  { id: "prompt", label: "Prompt 编排" },
+  { id: "generation", label: "生成参数" },
+  { id: "regex", label: "正则" },
+];
+
+const TASK_PROFILE_ROLE_OPTIONS = [
+  { value: "system", label: "system" },
+  { value: "user", label: "user" },
+  { value: "assistant", label: "assistant" },
+];
+
+const TASK_PROFILE_INJECTION_OPTIONS = [
+  { value: "append", label: "追加" },
+  { value: "prepend", label: "前置" },
+  { value: "relative", label: "相对" },
+];
+
+const TASK_PROFILE_BOOLEAN_OPTIONS = [
+  { value: "", label: "跟随默认" },
+  { value: "true", label: "开启" },
+  { value: "false", label: "关闭" },
+];
+
+const TASK_PROFILE_GENERATION_GROUPS = [
+  {
+    title: "基础生成参数",
+    fields: [
+      { key: "max_context_tokens", label: "max_context_tokens", type: "number" },
+      {
+        key: "max_completion_tokens",
+        label: "max_completion_tokens",
+        type: "number",
+      },
+      { key: "reply_count", label: "reply_count", type: "number" },
+      { key: "stream", label: "stream", type: "tri_bool" },
+      {
+        key: "temperature",
+        label: "temperature",
+        type: "number",
+        step: "0.01",
+      },
+      { key: "top_p", label: "top_p", type: "number", step: "0.01" },
+      { key: "top_k", label: "top_k", type: "number" },
+      { key: "top_a", label: "top_a", type: "number", step: "0.01" },
+      { key: "min_p", label: "min_p", type: "number", step: "0.01" },
+      { key: "seed", label: "seed", type: "number" },
+    ],
+  },
+  {
+    title: "惩罚参数",
+    fields: [
+      {
+        key: "frequency_penalty",
+        label: "frequency_penalty",
+        type: "number",
+        step: "0.01",
+      },
+      {
+        key: "presence_penalty",
+        label: "presence_penalty",
+        type: "number",
+        step: "0.01",
+      },
+      {
+        key: "repetition_penalty",
+        label: "repetition_penalty",
+        type: "number",
+        step: "0.01",
+      },
+    ],
+  },
+  {
+    title: "行为参数",
+    fields: [
+      {
+        key: "squash_system_messages",
+        label: "squash_system_messages",
+        type: "tri_bool",
+      },
+      {
+        key: "reasoning_effort",
+        label: "reasoning_effort",
+        type: "enum",
+        options: [
+          { value: "", label: "跟随默认" },
+          { value: "minimal", label: "minimal" },
+          { value: "low", label: "low" },
+          { value: "medium", label: "medium" },
+          { value: "high", label: "high" },
+        ],
+      },
+      {
+        key: "request_thoughts",
+        label: "request_thoughts",
+        type: "tri_bool",
+      },
+      {
+        key: "enable_function_calling",
+        label: "enable_function_calling",
+        type: "tri_bool",
+      },
+      {
+        key: "enable_web_search",
+        label: "enable_web_search",
+        type: "tri_bool",
+      },
+      {
+        key: "character_name_prefix",
+        label: "character_name_prefix",
+        type: "text",
+      },
+      {
+        key: "wrap_user_messages_in_quotes",
+        label: "wrap_user_messages_in_quotes",
+        type: "tri_bool",
+      },
+    ],
+  },
+];
+
+const TASK_PROFILE_REGEX_STAGES = [
+  { key: "finalPrompt", label: "finalPrompt", desc: "最终 system prompt" },
+  {
+    key: "input.userMessage",
+    label: "input.userMessage",
+    desc: "用户消息进入编排前",
+  },
+  {
+    key: "input.recentMessages",
+    label: "input.recentMessages",
+    desc: "最近消息进入编排前",
+  },
+  {
+    key: "input.candidateText",
+    label: "input.candidateText",
+    desc: "候选节点文本进入编排前",
+  },
+  {
+    key: "input.finalPrompt",
+    label: "input.finalPrompt",
+    desc: "最终 assembled prompt",
+  },
+  { key: "rawResponse", label: "rawResponse", desc: "模型原始输出" },
+  { key: "beforeParse", label: "beforeParse", desc: "解析 JSON 前" },
+  {
+    key: "output.rawResponse",
+    label: "output.rawResponse",
+    desc: "输出阶段原始响应",
+  },
+  {
+    key: "output.beforeParse",
+    label: "output.beforeParse",
+    desc: "输出阶段解析前",
+  },
+];
+
 let panelEl = null;
 let overlayEl = null;
 let graphRenderer = null;
 let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "api";
+let currentTaskProfileTaskType = "extract";
+let currentTaskProfileTabId = "prompt";
+let currentTaskProfileBlockId = "";
+let currentTaskProfileRuleId = "";
 let fetchedMemoryLLMModels = [];
 let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
@@ -949,6 +1125,7 @@ function _refreshConfigTab() {
   _refreshGuardedConfigStates(settings);
   _refreshStageCardStates(settings);
   _refreshPromptCardStates(settings);
+  _refreshTaskProfileWorkspace(settings);
   _highlightThemeChoice(settings.panelTheme || "crimson");
   _syncConfigSectionState();
 }
@@ -1145,6 +1322,7 @@ function _bindConfigControls() {
     "reflectionPrompt",
     "reflection",
   );
+  _bindTaskProfileWorkspace();
 
   panelEl.querySelectorAll(".bme-prompt-reset").forEach((button) => {
     if (button.dataset.bmeBound === "true") return;
@@ -1319,6 +1497,1556 @@ function bindSelectModel(selectId, inputId, settingKey) {
   element.dataset.bmeBound = "true";
 }
 
+function _bindTaskProfileWorkspace() {
+  const workspace = document.getElementById("bme-task-profile-workspace");
+  const importInput = document.getElementById("bme-task-profile-import");
+  if (!workspace) return;
+
+  if (workspace.dataset.bmeBound !== "true") {
+    workspace.addEventListener("click", (event) => {
+      void _handleTaskProfileWorkspaceClick(event);
+    });
+    workspace.addEventListener("input", (event) => {
+      _handleTaskProfileWorkspaceInput(event);
+    });
+    workspace.addEventListener("change", (event) => {
+      _handleTaskProfileWorkspaceChange(event);
+    });
+    workspace.dataset.bmeBound = "true";
+  }
+
+  if (importInput && importInput.dataset.bmeBound !== "true") {
+    importInput.addEventListener("change", async () => {
+      const file = importInput.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const settings = _getSettings?.() || {};
+        const imported = parseImportedTaskProfile(
+          settings.taskProfiles || {},
+          text,
+        );
+        currentTaskProfileTaskType = imported.taskType || currentTaskProfileTaskType;
+        currentTaskProfileBlockId = imported.profile?.blocks?.[0]?.id || "";
+        currentTaskProfileRuleId =
+          imported.profile?.regex?.localRules?.[0]?.id || "";
+        _patchTaskProfiles(imported.taskProfiles);
+        toastr.success("预设导入成功", "ST-BME");
+      } catch (error) {
+        console.error("[ST-BME] 导入任务预设失败:", error);
+        toastr.error(`预设导入失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        importInput.value = "";
+      }
+    });
+    importInput.dataset.bmeBound = "true";
+  }
+}
+
+function _handleTaskProfileWorkspaceInput(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  if (target.id === "bme-task-profile-name") {
+    _updateCurrentTaskProfile(
+      (draft) => {
+        draft.name = String(target.value || "").trim() || draft.name;
+      },
+      { refresh: false },
+    );
+    return;
+  }
+
+  if (target.matches("[data-block-field]")) {
+    _persistSelectedBlockField(target, false);
+    return;
+  }
+
+  if (target.matches("[data-generation-key]")) {
+    _persistGenerationField(target, false);
+    return;
+  }
+
+  if (
+    target.matches("[data-regex-rule-field]") ||
+    target.matches("[data-regex-rule-source]") ||
+    target.matches("[data-regex-rule-destination]")
+  ) {
+    _persistSelectedRegexRuleField(target, false);
+  }
+}
+
+function _handleTaskProfileWorkspaceChange(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+
+  if (target.id === "bme-task-profile-select") {
+    const settings = _getSettings?.() || {};
+    const nextTaskProfiles = setActiveTaskProfileId(
+      settings.taskProfiles || {},
+      currentTaskProfileTaskType,
+      target.value,
+    );
+    currentTaskProfileBlockId = "";
+    currentTaskProfileRuleId = "";
+    _patchTaskProfiles(nextTaskProfiles);
+    return;
+  }
+
+  if (target.matches("[data-block-field]")) {
+    _persistSelectedBlockField(target, true);
+    return;
+  }
+
+  if (target.matches("[data-generation-key]")) {
+    _persistGenerationField(target, true);
+    return;
+  }
+
+  if (target.matches("[data-regex-field]")) {
+    _persistRegexConfigField(target, false);
+    return;
+  }
+
+  if (target.matches("[data-regex-source]")) {
+    _persistRegexSourceField(target, false);
+    return;
+  }
+
+  if (target.matches("[data-regex-stage]")) {
+    _persistRegexStageField(target, false);
+    return;
+  }
+
+  if (
+    target.matches("[data-regex-rule-field]") ||
+    target.matches("[data-regex-rule-source]") ||
+    target.matches("[data-regex-rule-destination]")
+  ) {
+    _persistSelectedRegexRuleField(target, true);
+  }
+}
+
+function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
+  const taskProfiles = ensureTaskProfiles(settings);
+  const taskTypeOptions = getTaskTypeOptions();
+
+  if (!taskTypeOptions.some((item) => item.id === currentTaskProfileTaskType)) {
+    currentTaskProfileTaskType = taskTypeOptions[0]?.id || "extract";
+  }
+
+  if (!TASK_PROFILE_TABS.some((item) => item.id === currentTaskProfileTabId)) {
+    currentTaskProfileTabId = TASK_PROFILE_TABS[0]?.id || "prompt";
+  }
+
+  const bucket = taskProfiles[currentTaskProfileTaskType] || {
+    activeProfileId: "default",
+    profiles: [],
+  };
+  const profile =
+    bucket.profiles.find((item) => item.id === bucket.activeProfileId) ||
+    bucket.profiles[0] ||
+    null;
+  const blocks = _sortTaskBlocks(profile?.blocks || []);
+  const regexRules = Array.isArray(profile?.regex?.localRules)
+    ? profile.regex.localRules
+    : [];
+
+  if (!blocks.some((block) => block.id === currentTaskProfileBlockId)) {
+    currentTaskProfileBlockId = blocks[0]?.id || "";
+  }
+  if (!regexRules.some((rule) => rule.id === currentTaskProfileRuleId)) {
+    currentTaskProfileRuleId = regexRules[0]?.id || "";
+  }
+
+  return {
+    settings,
+    taskProfiles,
+    taskTypeOptions,
+    taskType: currentTaskProfileTaskType,
+    taskTabId: currentTaskProfileTabId,
+    bucket,
+    profile,
+    blocks,
+    selectedBlock:
+      blocks.find((block) => block.id === currentTaskProfileBlockId) || null,
+    regexRules,
+    selectedRule:
+      regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
+    builtinBlockDefinitions: getBuiltinBlockDefinitions(),
+  };
+}
+
+function _refreshTaskProfileWorkspace(settings = _getSettings?.() || {}) {
+  const workspace = document.getElementById("bme-task-profile-workspace");
+  if (!workspace) return;
+
+  const state = _getTaskProfileWorkspaceState(settings);
+  workspace.innerHTML = _renderTaskProfileWorkspace(state);
+}
+
+function _patchTaskProfiles(taskProfiles, extraPatch = {}, options = {}) {
+  return _patchSettings(
+    {
+      taskProfilesVersion: 1,
+      taskProfiles,
+      ...extraPatch,
+    },
+    {
+      refreshTaskWorkspace: options.refresh !== false,
+    },
+  );
+}
+
+async function _handleTaskProfileWorkspaceClick(event) {
+  const actionEl = event.target.closest("[data-task-action]");
+  if (!actionEl) return;
+
+  const action = actionEl.dataset.taskAction || "";
+  const state = _getTaskProfileWorkspaceState();
+  const selectedProfile = state.profile;
+  if (!selectedProfile && action !== "switch-task-type") return;
+
+  switch (action) {
+    case "switch-task-type":
+      currentTaskProfileTaskType =
+        actionEl.dataset.taskType || currentTaskProfileTaskType;
+      currentTaskProfileBlockId = "";
+      currentTaskProfileRuleId = "";
+      _refreshTaskProfileWorkspace();
+      return;
+    case "switch-task-tab":
+      currentTaskProfileTabId =
+        actionEl.dataset.taskTab || currentTaskProfileTabId;
+      _refreshTaskProfileWorkspace();
+      return;
+    case "select-block":
+      currentTaskProfileBlockId = actionEl.dataset.blockId || "";
+      _refreshTaskProfileWorkspace();
+      return;
+    case "select-regex-rule":
+      currentTaskProfileRuleId = actionEl.dataset.ruleId || "";
+      _refreshTaskProfileWorkspace();
+      return;
+    case "add-custom-block":
+      _updateCurrentTaskProfile((draft, context) => {
+        const nextBlock = createCustomPromptBlock(context.taskType, {
+          name: `自定义块 ${draft.blocks.length + 1}`,
+          order: draft.blocks.length,
+        });
+        draft.blocks.push(nextBlock);
+        return { selectBlockId: nextBlock.id };
+      });
+      return;
+    case "add-builtin-block": {
+      const select = document.getElementById("bme-task-builtin-select");
+      const sourceKey = String(select?.value || "").trim();
+      if (!sourceKey) {
+        toastr.info("先选择一个内置块来源", "ST-BME");
+        return;
+      }
+      _updateCurrentTaskProfile((draft, context) => {
+        const nextBlock = createBuiltinPromptBlock(context.taskType, sourceKey, {
+          order: draft.blocks.length,
+        });
+        draft.blocks.push(nextBlock);
+        return { selectBlockId: nextBlock.id };
+      });
+      return;
+    }
+    case "move-block-up":
+      _moveTaskBlock(actionEl.dataset.blockId, -1);
+      return;
+    case "move-block-down":
+      _moveTaskBlock(actionEl.dataset.blockId, 1);
+      return;
+    case "toggle-block-enabled":
+      _updateCurrentTaskProfile((draft) => {
+        const blocks = _sortTaskBlocks(draft.blocks);
+        const block = blocks.find((item) => item.id === actionEl.dataset.blockId);
+        if (!block) return null;
+        block.enabled = block.enabled === false;
+        draft.blocks = _normalizeTaskBlocks(blocks);
+        return { selectBlockId: block.id };
+      });
+      return;
+    case "delete-block":
+      _deleteTaskBlock(actionEl.dataset.blockId);
+      return;
+    case "save-profile":
+      _patchTaskProfiles(state.taskProfiles, {}, { refresh: true });
+      toastr.success("当前预设已保存", "ST-BME");
+      return;
+    case "rename-profile": {
+      const nameInput = document.getElementById("bme-task-profile-name");
+      const nextName = String(nameInput?.value || "").trim();
+      if (!nextName) {
+        toastr.info("预设名称不能为空", "ST-BME");
+        return;
+      }
+      _updateCurrentTaskProfile((draft) => {
+        draft.name = nextName;
+      });
+      toastr.success("预设名称已更新", "ST-BME");
+      return;
+    }
+    case "save-as-profile": {
+      const suggestedName = `${selectedProfile.name || "预设"} 副本`;
+      const nextName = window.prompt("请输入新预设名称", suggestedName);
+      if (nextName == null) return;
+      const trimmedName = String(nextName).trim();
+      if (!trimmedName) {
+        toastr.info("预设名称不能为空", "ST-BME");
+        return;
+      }
+      const nextProfile = cloneTaskProfile(selectedProfile, {
+        taskType: currentTaskProfileTaskType,
+        name: trimmedName,
+      });
+      currentTaskProfileBlockId = nextProfile.blocks?.[0]?.id || "";
+      currentTaskProfileRuleId = nextProfile.regex?.localRules?.[0]?.id || "";
+      const nextTaskProfiles = upsertTaskProfile(
+        state.taskProfiles,
+        currentTaskProfileTaskType,
+        nextProfile,
+        { setActive: true },
+      );
+      _patchTaskProfiles(nextTaskProfiles);
+      toastr.success("已另存为新预设", "ST-BME");
+      return;
+    }
+    case "export-profile":
+      _downloadTaskProfile(state.taskProfiles, currentTaskProfileTaskType, selectedProfile);
+      return;
+    case "import-profile":
+      document.getElementById("bme-task-profile-import")?.click();
+      return;
+    case "restore-default-profile": {
+      const confirmed = window.confirm(
+        "这会重建当前任务的默认预设，并切换到默认预设。是否继续？",
+      );
+      if (!confirmed) return;
+      const nextTaskProfiles = restoreDefaultTaskProfile(
+        state.taskProfiles,
+        currentTaskProfileTaskType,
+      );
+      const legacyField = getLegacyPromptFieldForTask(currentTaskProfileTaskType);
+      currentTaskProfileBlockId = "";
+      currentTaskProfileRuleId = "";
+      _patchTaskProfiles(
+        nextTaskProfiles,
+        legacyField ? { [legacyField]: "" } : {},
+      );
+      toastr.success("默认预设已恢复", "ST-BME");
+      return;
+    }
+    case "add-regex-rule":
+      _updateCurrentTaskProfile((draft, context) => {
+        const localRules = Array.isArray(draft.regex?.localRules)
+          ? draft.regex.localRules
+          : [];
+        const nextRule = createLocalRegexRule(context.taskType, {
+          script_name: `本地规则 ${localRules.length + 1}`,
+        });
+        draft.regex = {
+          ...(draft.regex || {}),
+          localRules: [...localRules, nextRule],
+        };
+        return { selectRuleId: nextRule.id };
+      });
+      return;
+    case "delete-regex-rule":
+      _deleteRegexRule(actionEl.dataset.ruleId);
+      return;
+    default:
+      return;
+  }
+}
+
+function _renderTaskProfileWorkspace(state) {
+  if (!state.profile) {
+    return `
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">任务预设不可用</div>
+        <div class="bme-config-help">当前没有可编辑的任务预设数据。</div>
+      </div>
+    `;
+  }
+
+  const taskMeta =
+    state.taskTypeOptions.find((item) => item.id === state.taskType) ||
+    state.taskTypeOptions[0];
+  const profileUpdatedAt = _formatTaskProfileTime(state.profile.updatedAt);
+
+  return `
+    <div class="bme-task-shell">
+      <div class="bme-task-header">
+        <div class="bme-task-type-tabs">
+          ${state.taskTypeOptions
+            .map(
+              (item) => `
+                <button
+                  class="bme-task-type-btn ${item.id === state.taskType ? "active" : ""}"
+                  data-task-action="switch-task-type"
+                  data-task-type="${_escHtml(item.id)}"
+                  type="button"
+                >
+                  <span>${_escHtml(item.label)}</span>
+                </button>
+              `,
+            )
+            .join("")}
+        </div>
+
+        <div class="bme-config-card bme-task-header-card">
+          <div class="bme-config-card-head">
+            <div>
+              <div class="bme-config-card-title">
+                ${_escHtml(taskMeta?.label || state.taskType)} 任务预设
+              </div>
+              <div class="bme-config-card-subtitle">
+                ${_escHtml(taskMeta?.description || "")}
+              </div>
+            </div>
+            <div class="bme-task-profile-badges">
+              <span class="bme-task-pill ${state.profile.builtin ? "is-builtin" : ""}">
+                ${state.profile.builtin ? "内置" : "自定义"}
+              </span>
+              <span class="bme-task-pill">更新于 ${_escHtml(profileUpdatedAt)}</span>
+            </div>
+          </div>
+
+          <div class="bme-task-header-grid">
+            <div class="bme-config-row">
+              <label for="bme-task-profile-select">当前预设</label>
+              <select id="bme-task-profile-select" class="bme-config-input">
+                ${state.bucket.profiles
+                  .map(
+                    (profile) => `
+                      <option
+                        value="${_escHtml(profile.id)}"
+                        ${profile.id === state.profile.id ? "selected" : ""}
+                      >
+                        ${_escHtml(profile.name)}${profile.builtin ? " · 内置" : ""}
+                      </option>
+                    `,
+                  )
+                  .join("")}
+              </select>
+            </div>
+            <div class="bme-config-row">
+              <label for="bme-task-profile-name">预设名称</label>
+              <input
+                id="bme-task-profile-name"
+                class="bme-config-input"
+                type="text"
+                value="${_escHtml(state.profile.name || "")}"
+                placeholder="输入预设名称"
+              />
+            </div>
+          </div>
+
+          <div class="bme-task-header-actions">
+            <button class="menu_button" data-task-action="rename-profile" type="button">重命名</button>
+            <button class="menu_button" data-task-action="save-profile" type="button">保存</button>
+            <button class="menu_button" data-task-action="save-as-profile" type="button">另存为</button>
+            <button class="menu_button" data-task-action="import-profile" type="button">导入</button>
+            <button class="menu_button" data-task-action="export-profile" type="button">导出</button>
+            <button class="menu_button" data-task-action="restore-default-profile" type="button">恢复默认</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bme-task-subtabs">
+        ${TASK_PROFILE_TABS.map(
+          (tab) => `
+            <button
+              class="bme-task-subtab-btn ${tab.id === state.taskTabId ? "active" : ""}"
+              data-task-action="switch-task-tab"
+              data-task-tab="${_escHtml(tab.id)}"
+              type="button"
+            >
+              ${_escHtml(tab.label)}
+            </button>
+          `,
+        ).join("")}
+      </div>
+
+      <div class="bme-task-tab-body">
+        ${
+          state.taskTabId === "generation"
+            ? _renderTaskGenerationTab(state)
+            : state.taskTabId === "regex"
+              ? _renderTaskRegexTab(state)
+              : _renderTaskPromptTab(state)
+        }
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskPromptTab(state) {
+  return `
+    <div class="bme-task-editor-grid">
+      <div class="bme-config-card">
+        <div class="bme-config-card-head">
+          <div>
+            <div class="bme-config-card-title">Prompt 块列表</div>
+            <div class="bme-config-card-subtitle">
+              通过顺序、启停与角色控制最终请求的编排方式。
+            </div>
+          </div>
+        </div>
+
+        <div class="bme-task-toolbar-row">
+          <button class="menu_button" data-task-action="add-custom-block" type="button">
+            新增自定义块
+          </button>
+          <div class="bme-task-toolbar-inline">
+            <select id="bme-task-builtin-select" class="bme-config-input">
+              ${state.builtinBlockDefinitions
+                .map(
+                  (item) => `
+                    <option value="${_escHtml(item.sourceKey)}">
+                      ${_escHtml(item.name)} · ${_escHtml(item.sourceKey)}
+                    </option>
+                  `,
+                )
+                .join("")}
+            </select>
+            <button class="menu_button" data-task-action="add-builtin-block" type="button">
+              新增内置块
+            </button>
+          </div>
+        </div>
+
+        <div class="bme-task-list">
+          ${state.blocks.length
+            ? state.blocks
+                .map((block, index) => _renderTaskBlockListItem(block, index, state))
+                .join("")
+            : `
+                <div class="bme-task-empty">
+                  当前预设还没有块。可以先新增一个自定义块或内置块。
+                </div>
+              `}
+        </div>
+      </div>
+
+      <div class="bme-config-card">
+        ${_renderTaskBlockEditor(state)}
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskGenerationTab(state) {
+  return `
+    <div class="bme-task-generation-grid">
+      ${TASK_PROFILE_GENERATION_GROUPS.map(
+        (group) => `
+          <div class="bme-config-card">
+            <div class="bme-config-card-head">
+              <div>
+                <div class="bme-config-card-title">${_escHtml(group.title)}</div>
+                <div class="bme-config-card-subtitle">
+                  留空表示不强制下发，由模型或 provider 默认值决定。
+                </div>
+              </div>
+            </div>
+            <div class="bme-task-field-grid">
+              ${group.fields
+                .map((field) =>
+                  _renderGenerationField(field, state.profile.generation?.[field.key]),
+                )
+                .join("")}
+            </div>
+          </div>
+        `,
+      ).join("")}
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">运行时说明</div>
+        <div class="bme-config-help">
+          这里配置的是完整版 generation options。实际请求发送前，仍会根据模型能力做过滤，避免把不支持的字段直接下发给 provider。
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskRegexTab(state) {
+  const regex = state.profile.regex || {};
+  return `
+    <div class="bme-task-regex-grid">
+      <div class="bme-config-card">
+        <div class="bme-config-card-head">
+          <div>
+            <div class="bme-config-card-title">复用与阶段</div>
+            <div class="bme-config-card-subtitle">
+              任务预设可复用酒馆正则，并叠加当前任务自己的附加规则。
+            </div>
+          </div>
+        </div>
+
+        <div class="bme-task-toggle-list">
+          <label class="bme-toggle-item">
+            <span class="bme-toggle-copy">
+              <span class="bme-toggle-title">启用任务正则</span>
+              <span class="bme-toggle-desc">关闭后当前预设不执行任何任务级正则。</span>
+            </span>
+            <input
+              type="checkbox"
+              data-regex-field="enabled"
+              ${regex.enabled ? "checked" : ""}
+            />
+          </label>
+
+          <label class="bme-toggle-item">
+            <span class="bme-toggle-copy">
+              <span class="bme-toggle-title">复用酒馆正则</span>
+              <span class="bme-toggle-desc">读取 global / preset / character 正则来源。</span>
+            </span>
+            <input
+              type="checkbox"
+              data-regex-field="inheritStRegex"
+              ${regex.inheritStRegex !== false ? "checked" : ""}
+            />
+          </label>
+        </div>
+
+        <div class="bme-task-section-label">复用来源</div>
+        <div class="bme-task-toggle-list">
+          ${[
+            ["global", "全局"],
+            ["preset", "当前预设"],
+            ["character", "角色卡"],
+          ]
+            .map(
+              ([key, label]) => `
+                <label class="bme-toggle-item">
+                  <span class="bme-toggle-copy">
+                    <span class="bme-toggle-title">${label}</span>
+                    <span class="bme-toggle-desc">启用 ${label} 来源的 Tavern 正则。</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-regex-source="${key}"
+                    ${(regex.sources?.[key] ?? true) ? "checked" : ""}
+                  />
+                </label>
+              `,
+            )
+            .join("")}
+        </div>
+
+        <div class="bme-task-section-label">应用阶段</div>
+        <div class="bme-task-toggle-list">
+          ${TASK_PROFILE_REGEX_STAGES.map(
+            (stage) => `
+              <label class="bme-toggle-item">
+                <span class="bme-toggle-copy">
+                  <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
+                  <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
+                </span>
+                <input
+                  type="checkbox"
+                  data-regex-stage="${_escHtml(stage.key)}"
+                  ${(regex.stages?.[stage.key] ?? false) ? "checked" : ""}
+                />
+              </label>
+            `,
+          ).join("")}
+        </div>
+      </div>
+
+      <div class="bme-config-card">
+        <div class="bme-config-card-head">
+          <div>
+            <div class="bme-config-card-title">本地附加规则</div>
+            <div class="bme-config-card-subtitle">
+              本地规则只作用于当前任务预设，不会污染宿主酒馆配置。
+            </div>
+          </div>
+          <button class="menu_button" data-task-action="add-regex-rule" type="button">
+            新增规则
+          </button>
+        </div>
+
+        <div class="bme-task-list">
+          ${state.regexRules.length
+            ? state.regexRules
+                .map((rule, index) => _renderRegexRuleListItem(rule, index, state))
+                .join("")
+            : `
+                <div class="bme-task-empty">
+                  当前预设还没有本地正则规则。
+                </div>
+              `}
+        </div>
+      </div>
+
+      <div class="bme-config-card">
+        ${_renderRegexRuleEditor(state)}
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskBlockListItem(block, index, state) {
+  const isSelected = block.id === state.selectedBlock?.id;
+  return `
+    <div class="bme-task-list-entry">
+      <button
+        class="bme-task-list-item ${isSelected ? "active" : ""}"
+        data-task-action="select-block"
+        data-block-id="${_escHtml(block.id)}"
+        type="button"
+      >
+        <span class="bme-task-list-index">#${index + 1}</span>
+        <span class="bme-task-list-copy">
+          <span class="bme-task-list-title">
+            ${_escHtml(block.name || _getTaskBlockTypeLabel(block.type))}
+          </span>
+          <span class="bme-task-list-meta">
+            ${_escHtml(_getTaskBlockTypeLabel(block.type))} · ${_escHtml(block.role || "system")} · ${block.enabled ? "启用" : "停用"}
+          </span>
+        </span>
+      </button>
+      <div class="bme-task-inline-actions">
+        <button
+          class="menu_button bme-task-mini-btn"
+          data-task-action="move-block-up"
+          data-block-id="${_escHtml(block.id)}"
+          type="button"
+        >
+          上移
+        </button>
+        <button
+          class="menu_button bme-task-mini-btn"
+          data-task-action="move-block-down"
+          data-block-id="${_escHtml(block.id)}"
+          type="button"
+        >
+          下移
+        </button>
+        <button
+          class="menu_button bme-task-mini-btn"
+          data-task-action="toggle-block-enabled"
+          data-block-id="${_escHtml(block.id)}"
+          type="button"
+        >
+          ${block.enabled ? "停用" : "启用"}
+        </button>
+        <button
+          class="menu_button bme-task-mini-btn"
+          data-task-action="delete-block"
+          data-block-id="${_escHtml(block.id)}"
+          type="button"
+          ${block.type === "custom" ? "" : "disabled"}
+        >
+          删除
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskBlockEditor(state) {
+  const block = state.selectedBlock;
+  if (!block) {
+    return `
+      <div class="bme-config-card-title">块详情</div>
+      <div class="bme-config-help">从左侧列表选择一个块进行编辑。</div>
+    `;
+  }
+
+  const builtinOptions = state.builtinBlockDefinitions
+    .map(
+      (item) => `
+        <option
+          value="${_escHtml(item.sourceKey)}"
+          ${item.sourceKey === block.sourceKey ? "selected" : ""}
+        >
+          ${_escHtml(item.name)} · ${_escHtml(item.sourceKey)}
+        </option>
+      `,
+    )
+    .join("");
+  const legacyField = getLegacyPromptFieldForTask(state.taskType);
+  const legacyValue =
+    legacyField && block.type === "legacyPrompt"
+      ? state.settings?.[legacyField] || block.content || ""
+      : block.content || "";
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">块详情</div>
+        <div class="bme-config-card-subtitle">
+          当前块会直接写回到任务预设中。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_getTaskBlockTypeLabel(block.type))}</span>
+    </div>
+
+    <div class="bme-config-row">
+      <label>块名称</label>
+      <input
+        class="bme-config-input"
+        type="text"
+        data-block-field="name"
+        value="${_escHtml(block.name || "")}"
+        placeholder="用于工作区显示"
+      />
+    </div>
+
+    <div class="bme-task-field-grid">
+      <div class="bme-config-row">
+        <label>角色</label>
+        <select class="bme-config-input" data-block-field="role">
+          ${TASK_PROFILE_ROLE_OPTIONS.map(
+            (item) => `
+              <option value="${item.value}" ${item.value === block.role ? "selected" : ""}>
+                ${item.label}
+              </option>
+            `,
+          ).join("")}
+        </select>
+      </div>
+      <div class="bme-config-row">
+        <label>注入方式</label>
+        <select class="bme-config-input" data-block-field="injectionMode">
+          ${TASK_PROFILE_INJECTION_OPTIONS.map(
+            (item) => `
+              <option
+                value="${item.value}"
+                ${item.value === (block.injectionMode || "append") ? "selected" : ""}
+              >
+                ${item.label}
+              </option>
+            `,
+          ).join("")}
+        </select>
+      </div>
+    </div>
+
+    <label class="bme-toggle-item bme-task-editor-toggle">
+      <span class="bme-toggle-copy">
+        <span class="bme-toggle-title">启用此块</span>
+        <span class="bme-toggle-desc">停用后会从最终 prompt 编排中跳过。</span>
+      </span>
+      <input
+        type="checkbox"
+        data-block-field="enabled"
+        ${block.enabled ? "checked" : ""}
+      />
+    </label>
+
+    ${
+      block.type === "builtin"
+        ? `
+            <div class="bme-config-row">
+              <label>内置来源</label>
+              <select class="bme-config-input" data-block-field="sourceKey">
+                ${builtinOptions}
+              </select>
+            </div>
+            <div class="bme-config-row">
+              <label>覆盖内容（可选）</label>
+              <textarea
+                class="bme-config-textarea"
+                data-block-field="content"
+                placeholder="留空时从 sourceKey 对应的任务上下文读取。"
+              >${_escHtml(block.content || "")}</textarea>
+            </div>
+          `
+        : block.type === "legacyPrompt"
+          ? `
+              <div class="bme-task-note">
+                当前块与旧版 prompt 字段保持兼容。留空时运行时会回退到内置默认 prompt。
+              </div>
+              <div class="bme-config-row">
+                <label>兼容字段</label>
+                <input
+                  class="bme-config-input"
+                  type="text"
+                  value="${_escHtml(legacyField || block.sourceField || "")}"
+                  readonly
+                />
+              </div>
+              <div class="bme-config-row">
+                <label>兼容 prompt 内容</label>
+                <textarea
+                  class="bme-config-textarea"
+                  data-block-field="content"
+                  placeholder="留空 = 继续使用内置默认 prompt"
+                >${_escHtml(legacyValue)}</textarea>
+              </div>
+            `
+          : `
+              <div class="bme-config-row">
+                <label>块内容</label>
+                <textarea
+                  class="bme-config-textarea"
+                  data-block-field="content"
+                  placeholder="支持 {{userMessage}} / {{recentMessages}} / {{schema}} 等轻量变量。"
+                >${_escHtml(block.content || "")}</textarea>
+              </div>
+            `
+    }
+  `;
+}
+
+function _renderGenerationField(field, value) {
+  if (field.type === "tri_bool") {
+    const currentValue =
+      value === true ? "true" : value === false ? "false" : "";
+    return `
+      <div class="bme-config-row">
+        <label>${_escHtml(field.label)}</label>
+        <select
+          class="bme-config-input"
+          data-generation-key="${_escHtml(field.key)}"
+          data-value-type="tri_bool"
+        >
+          ${TASK_PROFILE_BOOLEAN_OPTIONS.map(
+            (item) => `
+              <option value="${item.value}" ${item.value === currentValue ? "selected" : ""}>
+                ${item.label}
+              </option>
+            `,
+          ).join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  if (field.type === "enum") {
+    return `
+      <div class="bme-config-row">
+        <label>${_escHtml(field.label)}</label>
+        <select
+          class="bme-config-input"
+          data-generation-key="${_escHtml(field.key)}"
+          data-value-type="text"
+        >
+          ${(field.options || [])
+            .map(
+              (item) => `
+                <option value="${_escHtml(item.value)}" ${item.value === String(value ?? "") ? "selected" : ""}>
+                  ${_escHtml(item.label)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-row">
+      <label>${_escHtml(field.label)}</label>
+      <input
+        class="bme-config-input"
+        type="${field.type === "text" ? "text" : "number"}"
+        ${field.step ? `step="${field.step}"` : ""}
+        value="${_escHtml(value ?? "")}"
+        placeholder="留空 = 跟随默认"
+        data-generation-key="${_escHtml(field.key)}"
+        data-value-type="${field.type === "text" ? "text" : "number"}"
+      />
+    </div>
+  `;
+}
+
+function _renderRegexRuleListItem(rule, index, state) {
+  const isSelected = rule.id === state.selectedRule?.id;
+  return `
+    <div class="bme-task-list-entry">
+      <button
+        class="bme-task-list-item ${isSelected ? "active" : ""}"
+        data-task-action="select-regex-rule"
+        data-rule-id="${_escHtml(rule.id)}"
+        type="button"
+      >
+        <span class="bme-task-list-index">#${index + 1}</span>
+        <span class="bme-task-list-copy">
+          <span class="bme-task-list-title">${_escHtml(rule.script_name || `本地规则 ${index + 1}`)}</span>
+          <span class="bme-task-list-meta">
+            ${rule.enabled ? "启用" : "停用"} · ${_escHtml(rule.find_regex || "(未填写 find_regex)")}
+          </span>
+        </span>
+      </button>
+      <div class="bme-task-inline-actions">
+        <button
+          class="menu_button bme-task-mini-btn"
+          data-task-action="delete-regex-rule"
+          data-rule-id="${_escHtml(rule.id)}"
+          type="button"
+        >
+          删除
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function _renderRegexRuleEditor(state) {
+  const rule = state.selectedRule;
+  if (!rule) {
+    return `
+      <div class="bme-config-card-title">规则详情</div>
+      <div class="bme-config-help">从左侧规则列表选择一条规则进行编辑。</div>
+    `;
+  }
+
+  const trimStrings = Array.isArray(rule.trim_strings)
+    ? rule.trim_strings.join("\n")
+    : String(rule.trim_strings || "");
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">规则详情</div>
+        <div class="bme-config-card-subtitle">
+          字段尽量与 Tavern 正则结构保持对齐，方便后续导入导出与对照。
+        </div>
+      </div>
+      <span class="bme-task-pill">${rule.enabled ? "启用中" : "已停用"}</span>
+    </div>
+
+    <div class="bme-config-row">
+      <label>script_name</label>
+      <input
+        class="bme-config-input"
+        type="text"
+        data-regex-rule-field="script_name"
+        value="${_escHtml(rule.script_name || "")}"
+      />
+    </div>
+
+    <label class="bme-toggle-item bme-task-editor-toggle">
+      <span class="bme-toggle-copy">
+        <span class="bme-toggle-title">启用此规则</span>
+        <span class="bme-toggle-desc">停用后该规则不再参与当前任务预设处理。</span>
+      </span>
+      <input
+        type="checkbox"
+        data-regex-rule-field="enabled"
+        ${rule.enabled ? "checked" : ""}
+      />
+    </label>
+
+    <div class="bme-config-row">
+      <label>find_regex</label>
+      <textarea
+        class="bme-config-textarea"
+        data-regex-rule-field="find_regex"
+        placeholder="/pattern/g"
+      >${_escHtml(rule.find_regex || "")}</textarea>
+    </div>
+
+    <div class="bme-config-row">
+      <label>replace_string</label>
+      <textarea
+        class="bme-config-textarea"
+        data-regex-rule-field="replace_string"
+        placeholder="替换后的文本"
+      >${_escHtml(rule.replace_string || "")}</textarea>
+    </div>
+
+    <div class="bme-config-row">
+      <label>trim_strings</label>
+      <textarea
+        class="bme-config-textarea"
+        data-regex-rule-field="trim_strings"
+        placeholder="每行一个要裁掉的字符串"
+      >${_escHtml(trimStrings)}</textarea>
+    </div>
+
+    <div class="bme-task-field-grid">
+      <div class="bme-config-row">
+        <label>min_depth</label>
+        <input
+          class="bme-config-input"
+          type="number"
+          data-regex-rule-field="min_depth"
+          value="${_escHtml(rule.min_depth ?? 0)}"
+        />
+      </div>
+      <div class="bme-config-row">
+        <label>max_depth</label>
+        <input
+          class="bme-config-input"
+          type="number"
+          data-regex-rule-field="max_depth"
+          value="${_escHtml(rule.max_depth ?? 9999)}"
+        />
+      </div>
+    </div>
+
+    <div class="bme-task-section-label">source</div>
+    <div class="bme-task-toggle-list">
+      <label class="bme-toggle-item">
+        <span class="bme-toggle-copy">
+          <span class="bme-toggle-title">user_input</span>
+          <span class="bme-toggle-desc">允许作用于 user / 输入侧文本。</span>
+        </span>
+        <input
+          type="checkbox"
+          data-regex-rule-source="user_input"
+          ${(rule.source?.user_input ?? true) ? "checked" : ""}
+        />
+      </label>
+      <label class="bme-toggle-item">
+        <span class="bme-toggle-copy">
+          <span class="bme-toggle-title">ai_output</span>
+          <span class="bme-toggle-desc">允许作用于 assistant / 输出侧文本。</span>
+        </span>
+        <input
+          type="checkbox"
+          data-regex-rule-source="ai_output"
+          ${(rule.source?.ai_output ?? true) ? "checked" : ""}
+        />
+      </label>
+    </div>
+
+    <div class="bme-task-section-label">destination</div>
+    <div class="bme-task-toggle-list">
+      <label class="bme-toggle-item">
+        <span class="bme-toggle-copy">
+          <span class="bme-toggle-title">prompt</span>
+          <span class="bme-toggle-desc">应用到 prompt / 输入构建链路。</span>
+        </span>
+        <input
+          type="checkbox"
+          data-regex-rule-destination="prompt"
+          ${(rule.destination?.prompt ?? true) ? "checked" : ""}
+        />
+      </label>
+      <label class="bme-toggle-item">
+        <span class="bme-toggle-copy">
+          <span class="bme-toggle-title">display</span>
+          <span class="bme-toggle-desc">应用到展示层替换链路。</span>
+        </span>
+        <input
+          type="checkbox"
+          data-regex-rule-destination="display"
+          ${rule.destination?.display ? "checked" : ""}
+        />
+      </label>
+    </div>
+  `;
+}
+
+function _moveTaskBlock(blockId, direction) {
+  if (!blockId || !Number.isFinite(direction) || direction === 0) return;
+  _updateCurrentTaskProfile((draft) => {
+    const blocks = _sortTaskBlocks(draft.blocks);
+    const index = blocks.findIndex((item) => item.id === blockId);
+    const targetIndex = index + direction;
+    if (index < 0 || targetIndex < 0 || targetIndex >= blocks.length) {
+      return null;
+    }
+    [blocks[index], blocks[targetIndex]] = [blocks[targetIndex], blocks[index]];
+    draft.blocks = _normalizeTaskBlocks(blocks);
+    return { selectBlockId: blockId };
+  });
+}
+
+function _deleteTaskBlock(blockId) {
+  if (!blockId) return;
+  _updateCurrentTaskProfile((draft) => {
+    const blocks = _sortTaskBlocks(draft.blocks);
+    const index = blocks.findIndex((item) => item.id === blockId);
+    if (index < 0) return null;
+    const block = blocks[index];
+    if (block.type !== "custom") {
+      toastr.info("只有自定义块可以删除", "ST-BME");
+      return null;
+    }
+    blocks.splice(index, 1);
+    draft.blocks = _normalizeTaskBlocks(blocks);
+    return {
+      selectBlockId: blocks[Math.max(0, index - 1)]?.id || blocks[0]?.id || "",
+    };
+  });
+}
+
+function _deleteRegexRule(ruleId) {
+  if (!ruleId) return;
+  _updateCurrentTaskProfile((draft) => {
+    const localRules = Array.isArray(draft.regex?.localRules)
+      ? [...draft.regex.localRules]
+      : [];
+    const index = localRules.findIndex((item) => item.id === ruleId);
+    if (index < 0) return null;
+    localRules.splice(index, 1);
+    draft.regex = {
+      ...(draft.regex || {}),
+      localRules,
+    };
+    return {
+      selectRuleId:
+        localRules[Math.max(0, index - 1)]?.id || localRules[0]?.id || "",
+    };
+  });
+}
+
+function _persistSelectedBlockField(target, refresh) {
+  const field = target.dataset.blockField;
+  if (!field) return;
+
+  _updateCurrentTaskProfile(
+    (draft, context) => {
+      const blocks = _sortTaskBlocks(draft.blocks);
+      const block = blocks.find((item) => item.id === currentTaskProfileBlockId);
+      if (!block) return null;
+
+      const rawValue =
+        target instanceof HTMLInputElement && target.type === "checkbox"
+          ? Boolean(target.checked)
+          : target.value;
+
+      let extraSettingsPatch = {};
+      if (field === "enabled") {
+        block.enabled = Boolean(rawValue);
+      } else if (field === "content" && block.type === "legacyPrompt") {
+        block.content = String(rawValue || "");
+        const legacyField = getLegacyPromptFieldForTask(context.taskType);
+        if (legacyField) {
+          extraSettingsPatch[legacyField] = block.content;
+        }
+      } else {
+        block[field] = String(rawValue || "");
+      }
+
+      draft.blocks = _normalizeTaskBlocks(blocks);
+      return {
+        extraSettingsPatch,
+        selectBlockId: block.id,
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistGenerationField(target, refresh) {
+  const key = target.dataset.generationKey;
+  const valueType = target.dataset.valueType || "text";
+  if (!key) return;
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      draft.generation = {
+        ...(draft.generation || {}),
+        [key]: _parseTaskWorkspaceValue(target, valueType),
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistRegexConfigField(target, refresh) {
+  const key = target.dataset.regexField;
+  if (!key) return;
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      draft.regex = {
+        ...(draft.regex || {}),
+        [key]:
+          target instanceof HTMLInputElement && target.type === "checkbox"
+            ? Boolean(target.checked)
+            : target.value,
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistRegexSourceField(target, refresh) {
+  const sourceKey = target.dataset.regexSource;
+  if (!sourceKey) return;
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      draft.regex = {
+        ...(draft.regex || {}),
+        sources: {
+          ...(draft.regex?.sources || {}),
+          [sourceKey]: Boolean(target.checked),
+        },
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistRegexStageField(target, refresh) {
+  const stageKey = target.dataset.regexStage;
+  if (!stageKey) return;
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      draft.regex = {
+        ...(draft.regex || {}),
+        stages: {
+          ...(draft.regex?.stages || {}),
+          [stageKey]: Boolean(target.checked),
+        },
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistSelectedRegexRuleField(target, refresh) {
+  _updateCurrentTaskProfile(
+    (draft) => {
+      const localRules = Array.isArray(draft.regex?.localRules)
+        ? [...draft.regex.localRules]
+        : [];
+      const rule = localRules.find((item) => item.id === currentTaskProfileRuleId);
+      if (!rule) return null;
+
+      if (target.dataset.regexRuleField) {
+        const field = target.dataset.regexRuleField;
+        if (target instanceof HTMLInputElement && target.type === "checkbox") {
+          rule[field] = Boolean(target.checked);
+        } else if (["min_depth", "max_depth"].includes(field)) {
+          const parsed = Number.parseInt(String(target.value || "").trim(), 10);
+          rule[field] = Number.isFinite(parsed) ? parsed : 0;
+        } else if (field === "trim_strings") {
+          rule[field] = String(target.value || "");
+        } else {
+          rule[field] = String(target.value || "");
+        }
+      }
+
+      if (target.dataset.regexRuleSource) {
+        const sourceKey = target.dataset.regexRuleSource;
+        rule.source = {
+          ...(rule.source || {}),
+          [sourceKey]: Boolean(target.checked),
+        };
+      }
+
+      if (target.dataset.regexRuleDestination) {
+        const destinationKey = target.dataset.regexRuleDestination;
+        rule.destination = {
+          ...(rule.destination || {}),
+          [destinationKey]: Boolean(target.checked),
+        };
+      }
+
+      draft.regex = {
+        ...(draft.regex || {}),
+        localRules,
+      };
+      return { selectRuleId: rule.id };
+    },
+    { refresh },
+  );
+}
+
+function _updateCurrentTaskProfile(mutator, options = {}) {
+  const settings = _getSettings?.() || {};
+  const taskProfiles = ensureTaskProfiles(settings);
+  const taskType = currentTaskProfileTaskType;
+  const bucket = taskProfiles[taskType];
+  const activeProfile =
+    bucket?.profiles?.find((item) => item.id === bucket.activeProfileId) ||
+    bucket?.profiles?.[0];
+
+  if (!activeProfile) return null;
+
+  const draft = _normalizeTaskProfileDraft(_cloneJson(activeProfile));
+  const mutationResult = mutator?.(draft, {
+      settings,
+      taskProfiles,
+      taskType,
+      bucket,
+      activeProfile,
+    });
+
+  if (mutationResult === null) return null;
+
+  const result = mutationResult || {};
+
+  const nextProfile = _normalizeTaskProfileDraft(result.profile || draft);
+  const nextTaskProfiles = upsertTaskProfile(taskProfiles, taskType, nextProfile, {
+    setActive: true,
+  });
+
+  if (Object.prototype.hasOwnProperty.call(result, "selectBlockId")) {
+    currentTaskProfileBlockId = result.selectBlockId || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "selectRuleId")) {
+    currentTaskProfileRuleId = result.selectRuleId || "";
+  }
+
+  return _patchTaskProfiles(
+    nextTaskProfiles,
+    result.extraSettingsPatch || {},
+    {
+      refresh: result.refresh === undefined ? options.refresh !== false : result.refresh,
+    },
+  );
+}
+
+function _normalizeTaskProfileDraft(profile = {}) {
+  const draft = profile || {};
+  draft.blocks = _normalizeTaskBlocks(draft.blocks);
+  draft.regex = {
+    enabled: false,
+    inheritStRegex: true,
+    sources: {
+      global: true,
+      preset: true,
+      character: true,
+    },
+    stages: {
+      finalPrompt: true,
+      "input.userMessage": false,
+      "input.recentMessages": false,
+      "input.candidateText": false,
+      "input.finalPrompt": false,
+      rawResponse: false,
+      beforeParse: false,
+      "output.rawResponse": false,
+      "output.beforeParse": false,
+    },
+    localRules: [],
+    ...(draft.regex || {}),
+    sources: {
+      global: true,
+      preset: true,
+      character: true,
+      ...(draft.regex?.sources || {}),
+    },
+    stages: {
+      finalPrompt: true,
+      "input.userMessage": false,
+      "input.recentMessages": false,
+      "input.candidateText": false,
+      "input.finalPrompt": false,
+      rawResponse: false,
+      beforeParse: false,
+      "output.rawResponse": false,
+      "output.beforeParse": false,
+      ...(draft.regex?.stages || {}),
+    },
+    localRules: Array.isArray(draft.regex?.localRules)
+      ? draft.regex.localRules.map((rule) => ({
+          ...rule,
+          source: {
+            user_input: true,
+            ai_output: true,
+            ...(rule?.source || {}),
+          },
+          destination: {
+            prompt: true,
+            display: false,
+            ...(rule?.destination || {}),
+          },
+        }))
+      : [],
+  };
+  return draft;
+}
+
+function _normalizeTaskBlocks(blocks = []) {
+  return _sortTaskBlocks(blocks).map((block, index) => ({
+    ...block,
+    order: index,
+  }));
+}
+
+function _sortTaskBlocks(blocks = []) {
+  return [...(Array.isArray(blocks) ? blocks : [])].sort((a, b) => {
+    const orderA = Number.isFinite(Number(a?.order)) ? Number(a.order) : 0;
+    const orderB = Number.isFinite(Number(b?.order)) ? Number(b.order) : 0;
+    return orderA - orderB;
+  });
+}
+
+function _parseTaskWorkspaceValue(target, valueType = "text") {
+  if (valueType === "tri_bool") {
+    if (target.value === "true") return true;
+    if (target.value === "false") return false;
+    return null;
+  }
+
+  if (valueType === "number") {
+    const raw = String(target.value || "").trim();
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return String(target.value || "").trim();
+}
+
+function _downloadTaskProfile(taskProfiles, taskType, profile) {
+  try {
+    const payload = serializeTaskProfile(taskProfiles, taskType, profile?.id || "");
+    const fileName = _sanitizeFileName(
+      `st-bme-${taskType}-${profile?.name || "profile"}.json`,
+    );
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toastr.success("预设导出成功", "ST-BME");
+  } catch (error) {
+    console.error("[ST-BME] 导出任务预设失败:", error);
+    toastr.error(`预设导出失败: ${error?.message || error}`, "ST-BME");
+  }
+}
+
+function _sanitizeFileName(fileName = "profile.json") {
+  return String(fileName || "profile.json").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
+}
+
+function _cloneJson(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+function _getTaskBlockTypeLabel(type) {
+  const typeMap = {
+    custom: "自定义块",
+    builtin: "内置块",
+    legacyPrompt: "兼容块",
+  };
+  return typeMap[type] || type || "块";
+}
+
+function _formatTaskProfileTime(raw) {
+  if (!raw) return "刚刚";
+  try {
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return "刚刚";
+    return date.toLocaleString("zh-CN", {
+      hour12: false,
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "刚刚";
+  }
+}
+
 // ==================== 工具函数 ====================
 
 function _setText(id, text) {
@@ -1339,6 +3067,7 @@ function _patchSettings(patch = {}, options = {}) {
   const settings = _updateSettings?.(patch) || _getSettings?.() || {};
   if (options.refreshGuards) _refreshGuardedConfigStates(settings);
   if (options.refreshPrompts) _refreshPromptCardStates(settings);
+  if (options.refreshTaskWorkspace) _refreshTaskProfileWorkspace(settings);
   if (options.refreshTheme)
     _highlightThemeChoice(settings.panelTheme || "crimson");
   return settings;

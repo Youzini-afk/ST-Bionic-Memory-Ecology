@@ -110,7 +110,7 @@
               type="button"
             >
               <i class="fa-solid fa-scroll"></i>
-              <span>系统提示词</span>
+              <span>任务预设</span>
             </button>
             <button
               class="bme-config-nav-btn"
@@ -393,7 +393,7 @@
               <div class="bme-config-workspace-kicker">配置</div>
               <h2 class="bme-config-workspace-title">ST-BME 配置工作区</h2>
               <p class="bme-config-workspace-desc">
-                在这里集中配置第二记忆模型、功能开关、细粒度参数、系统提示词和面板主题。
+                在这里集中配置第二记忆模型、功能开关、细粒度参数、任务预设和面板主题。
               </p>
             </div>
           </div>
@@ -429,7 +429,7 @@
               type="button"
             >
               <i class="fa-solid fa-scroll"></i>
-              <span>系统提示词</span>
+              <span>任务预设</span>
             </button>
             <button
               class="bme-config-nav-btn"
@@ -1386,208 +1386,19 @@
 
             <section class="bme-config-section" data-config-section="prompts">
               <div class="bme-config-section-head">
-                <div class="bme-config-section-kicker">系统提示词</div>
-                <h3 class="bme-config-section-title">
-                  覆盖各阶段默认 system prompt
-                </h3>
+                <div class="bme-config-section-kicker">任务预设</div>
+                <h3 class="bme-config-section-title">任务预设工作区</h3>
                 <p class="bme-config-section-desc">
-                  留空即回退到内置默认提示词。点击“恢复默认”会清空对应设置并立即回填默认文本。
+                  在这里为每个任务维护独立预设，统一配置 prompt 编排、生成参数和正则规则。
                 </p>
               </div>
-
-              <div class="bme-config-grid">
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="extractPrompt"
-                  data-default-prompt="extract"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">记忆提取</div>
-                      <div class="bme-config-card-subtitle">
-                        用于结构化抽取当前批次对话中的新增记忆。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="extractPrompt"
-                        data-default-prompt="extract"
-                        data-target-id="bme-setting-extract-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-extract-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认提取 prompt"
-                  ></textarea>
-                </div>
-
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="recallPrompt"
-                  data-default-prompt="recall"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">智能召回</div>
-                      <div class="bme-config-card-subtitle">
-                        用于对候选记忆进行语义判断和精排解释。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="recallPrompt"
-                        data-default-prompt="recall"
-                        data-target-id="bme-setting-recall-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-recall-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认召回 prompt"
-                  ></textarea>
-                </div>
-
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="consolidationPrompt"
-                  data-default-prompt="consolidation"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">记忆整合</div>
-                      <div class="bme-config-card-subtitle">
-                        用于分析新记忆与旧记忆的冲突、去重和进化关系。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="consolidationPrompt"
-                        data-default-prompt="consolidation"
-                        data-target-id="bme-setting-consolidation-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-consolidation-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认整合 prompt"
-                  ></textarea>
-                </div>
-
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="compressPrompt"
-                  data-default-prompt="compress"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">记忆压缩</div>
-                      <div class="bme-config-card-subtitle">
-                        用于合并高层摘要节点并保留关键信息。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="compressPrompt"
-                        data-default-prompt="compress"
-                        data-target-id="bme-setting-compress-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-compress-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认压缩 prompt"
-                  ></textarea>
-                </div>
-
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="synopsisPrompt"
-                  data-default-prompt="synopsis"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">全局概要</div>
-                      <div class="bme-config-card-subtitle">
-                        用于生成故事主线的阶段性前情提要。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="synopsisPrompt"
-                        data-default-prompt="synopsis"
-                        data-target-id="bme-setting-synopsis-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-synopsis-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认概要 prompt"
-                  ></textarea>
-                </div>
-
-                <div
-                  class="bme-prompt-card"
-                  data-setting-key="reflectionPrompt"
-                  data-default-prompt="reflection"
-                >
-                  <div class="bme-prompt-card-head">
-                    <div>
-                      <div class="bme-config-card-title">反思生成</div>
-                      <div class="bme-config-card-subtitle">
-                        用于抽取长期叙事中的趋势、触发点和建议。
-                      </div>
-                    </div>
-                    <div class="bme-prompt-card-actions">
-                      <span class="bme-prompt-status"></span>
-                      <button
-                        class="menu_button bme-prompt-reset"
-                        data-setting-key="reflectionPrompt"
-                        data-default-prompt="reflection"
-                        data-target-id="bme-setting-reflection-prompt"
-                        type="button"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-                  </div>
-                  <textarea
-                    id="bme-setting-reflection-prompt"
-                    class="bme-config-textarea"
-                    placeholder="留空 = 默认反思 prompt"
-                  ></textarea>
-                </div>
-              </div>
+              <div id="bme-task-profile-workspace" class="bme-task-profile-workspace"></div>
+              <input
+                id="bme-task-profile-import"
+                type="file"
+                accept=".json,application/json"
+                hidden
+              />
             </section>
 
             <section

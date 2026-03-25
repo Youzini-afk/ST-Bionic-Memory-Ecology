@@ -59,6 +59,7 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector-index.js";
+import { createDefaultTaskProfiles, migrateLegacyTaskProfiles } from "./prompt-profiles.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -120,6 +121,13 @@ const defaultSettings = {
 
   // 自定义提示词
   extractPrompt: "",
+  recallPrompt: "",
+  consolidationPrompt: "",
+  compressPrompt: "",
+  synopsisPrompt: "",
+  reflectionPrompt: "",
+  taskProfilesVersion: 1,
+  taskProfiles: createDefaultTaskProfiles(),
 
   // ====== v2 增强设置 ======
 
@@ -631,6 +639,9 @@ function getSettings() {
     ...defaultSettings,
     ...(extension_settings[MODULE_NAME] || {}),
   };
+  const migrated = migrateLegacyTaskProfiles(mergedSettings);
+  mergedSettings.taskProfilesVersion = migrated.taskProfilesVersion;
+  mergedSettings.taskProfiles = migrated.taskProfiles;
   extension_settings[MODULE_NAME] = mergedSettings;
   return mergedSettings;
 }
@@ -1669,7 +1680,7 @@ async function handleExtractionSuccess(
           neighborCount: settings.consolidationNeighborCount,
           conflictThreshold: settings.consolidationThreshold,
         },
-        customPrompt: settings.consolidationPrompt || undefined,
+        settings,
         signal,
       });
       postProcessArtifacts.push("consolidation");
@@ -1688,7 +1699,7 @@ async function handleExtractionSuccess(
         graph: currentGraph,
         schema: getSchema(),
         currentSeq: endIdx,
-        customPrompt: settings.synopsisPrompt || undefined,
+        settings,
         signal,
       });
       postProcessArtifacts.push("synopsis");
@@ -1706,7 +1717,7 @@ async function handleExtractionSuccess(
       await generateReflection({
         graph: currentGraph,
         currentSeq: endIdx,
-        customPrompt: settings.reflectionPrompt || undefined,
+        settings,
         signal,
       });
       postProcessArtifacts.push("reflection");
@@ -1735,8 +1746,9 @@ async function handleExtractionSuccess(
       getSchema(),
       getEmbeddingConfig(),
       false,
-      settings.compressPrompt || undefined,
+      undefined,
       signal,
+      settings,
     );
     if (compressionResult.created > 0 || compressionResult.archived > 0) {
       postProcessArtifacts.push("compression");
@@ -2193,7 +2205,8 @@ async function executeExtractionBatch({
     lastProcessedSeq: lastProcessed,
     schema: getSchema(),
     embeddingConfig: getEmbeddingConfig(),
-    extractPrompt: settings.extractPrompt || undefined,
+    extractPrompt: undefined,
+    settings,
     signal,
   });
 
@@ -2795,6 +2808,7 @@ async function runRecall(options = {}) {
       embeddingConfig: getEmbeddingConfig(),
       schema: getSchema(),
       signal: recallSignal,
+      settings,
       options: {
         topK: settings.recallTopK,
         maxRecallNodes: settings.recallMaxNodes,
@@ -2803,7 +2817,7 @@ async function runRecall(options = {}) {
         enableGraphDiffusion: settings.recallEnableGraphDiffusion,
         diffusionTopK: settings.recallDiffusionTopK,
         llmCandidatePool: settings.recallLlmCandidatePool,
-        recallPrompt: settings.recallPrompt || undefined,
+        recallPrompt: undefined,
         weights: {
           graphWeight: settings.graphWeight,
           vectorWeight: settings.vectorWeight,
@@ -3065,6 +3079,9 @@ async function onManualCompress() {
     getSchema(),
     getEmbeddingConfig(),
     false,
+    undefined,
+    undefined,
+    getSettings(),
   );
   await recordGraphMutation({
     beforeSnapshot,
@@ -3353,6 +3370,8 @@ async function onManualSynopsis() {
     graph: currentGraph,
     schema: getSchema(),
     currentSeq: getCurrentChatSeq(),
+    customPrompt: undefined,
+    settings: getSettings(),
   });
   await recordGraphMutation({
     beforeSnapshot,
@@ -3377,6 +3396,8 @@ async function onManualEvolve() {
     graph: currentGraph,
     newNodeIds: candidateIds,
     embeddingConfig: getEmbeddingConfig(),
+    customPrompt: undefined,
+    settings: getSettings(),
     options: {
       neighborCount: getSettings().consolidationNeighborCount,
       conflictThreshold: getSettings().consolidationThreshold,

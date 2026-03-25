@@ -19,6 +19,8 @@ import {
   ensureEventTitle,
   getNodeDisplayName,
 } from "./node-labels.js";
+import { buildTaskPrompt } from "./prompt-builder.js";
+import { applyTaskRegex } from "./task-regex.js";
 import { RELATION_TYPES } from "./schema.js";
 import {
   buildNodeVectorText,
@@ -68,6 +70,7 @@ export async function extractMemories({
   embeddingConfig,
   extractPrompt,
   signal = undefined,
+  settings = {},
 }) {
   throwIfAborted(signal);
   if (!messages || messages.length === 0) {
@@ -110,9 +113,29 @@ export async function extractMemories({
 
   // 构建 Schema 描述
   const schemaDescription = buildSchemaDescription(schema);
+  const currentRange =
+    messages.length > 0
+      ? `${messages[0]?.seq ?? "?"} ~ ${messages[messages.length - 1]?.seq ?? "?"}`
+      : "";
+
+  const promptBuild = buildTaskPrompt(settings, "extract", {
+    taskName: "extract",
+    schema: schemaDescription,
+    schemaDescription,
+    recentMessages: dialogueText,
+    dialogueText,
+    graphStats: graphOverview,
+    graphOverview,
+    currentRange,
+  });
 
   // 系统提示词
-  const systemPrompt = extractPrompt || buildDefaultExtractPrompt(schema);
+  const systemPrompt = applyTaskRegex(
+    settings,
+    "extract",
+    "finalPrompt",
+    promptBuild.systemPrompt || extractPrompt || buildDefaultExtractPrompt(schema),
+  );
 
   // 用户提示词
   const userPrompt = [
@@ -134,6 +157,8 @@ export async function extractMemories({
     userPrompt,
     maxRetries: 2,
     signal,
+    taskType: "extract",
+    additionalMessages: promptBuild.customMessages || [],
   });
   throwIfAborted(signal);
 
@@ -566,7 +591,7 @@ function buildDefaultExtractPrompt(schema) {
  * @param {number} params.currentSeq
  * @returns {Promise<void>}
  */
-export async function generateSynopsis({ graph, schema, currentSeq, customPrompt, signal }) {
+export async function generateSynopsis({ graph, schema, currentSeq, customPrompt, signal, settings = {} }) {
   const eventNodes = getActiveNodes(graph, "event").sort(
     (a, b) => a.seq - b.seq,
   );
@@ -587,12 +612,26 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
     .map((n) => `${n.fields.title}: ${n.fields.status || "active"}`)
     .join("; ");
 
-  const result = await callLLMForJSON({
-    systemPrompt: customPrompt || [
+  const synopsisPromptBuild = buildTaskPrompt(settings, "synopsis", {
+    taskName: "synopsis",
+    eventSummary: eventSummaries,
+    characterSummary: charSummary || "(无)",
+    threadSummary: threadSummary || "(无)",
+    graphStats: `event=${eventNodes.length}, character=${characterNodes.length}, thread=${threadNodes.length}`,
+  });
+  const synopsisSystemPrompt = applyTaskRegex(
+    settings,
+    "synopsis",
+    "finalPrompt",
+    synopsisPromptBuild.systemPrompt || customPrompt || [
       "你是故事概要生成器。根据事件线、角色和主线生成简洁的前情提要。",
       '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
       "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
     ].join("\n"),
+  );
+
+  const result = await callLLMForJSON({
+    systemPrompt: synopsisSystemPrompt,
     userPrompt: [
       "## 事件时间线",
       eventSummaries,
@@ -605,6 +644,8 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
     ].join("\n"),
     maxRetries: 1,
     signal,
+    taskType: "synopsis",
+    additionalMessages: synopsisPromptBuild.customMessages || [],
   });
 
   if (!result?.summary) return;
@@ -636,7 +677,7 @@ export async function generateSynopsis({ graph, schema, currentSeq, customPrompt
   }
 }
 
-export async function generateReflection({ graph, currentSeq, customPrompt, signal }) {
+export async function generateReflection({ graph, currentSeq, customPrompt, signal, settings = {} }) {
   const recentEvents = getActiveNodes(graph, "event")
     .sort((a, b) => b.seq - a.seq)
     .slice(0, 6)
@@ -675,8 +716,19 @@ export async function generateReflection({ graph, currentSeq, customPrompt, sign
     .map((e) => `${e.fromId} -> ${e.toId} (${e.relation})`)
     .join("\n");
 
-  const result = await callLLMForJSON({
-    systemPrompt: customPrompt || [
+  const reflectionPromptBuild = buildTaskPrompt(settings, "reflection", {
+    taskName: "reflection",
+    eventSummary,
+    characterSummary: characterSummary || "(无)",
+    threadSummary: threadSummary || "(无)",
+    contradictionSummary: contradictionSummary || "(无)",
+    graphStats: `event=${recentEvents.length}, character=${recentCharacters.length}, thread=${recentThreads.length}`,
+  });
+  const reflectionSystemPrompt = applyTaskRegex(
+    settings,
+    "reflection",
+    "finalPrompt",
+    reflectionPromptBuild.systemPrompt || customPrompt || [
       "你是 RP 长期记忆系统的反思生成器。",
       '输出严格 JSON：{"insight":"...","trigger":"...","suggestion":"...","importance":1-10}',
       "insight 应总结最近情节中最值得长期保留的变化、关系趋势或潜在线索。",
@@ -684,6 +736,10 @@ export async function generateReflection({ graph, currentSeq, customPrompt, sign
       "suggestion 给出后续检索或叙事上值得关注的提示。",
       "不要复述全部事件，要提炼高层结论。",
     ].join("\n"),
+  );
+
+  const result = await callLLMForJSON({
+    systemPrompt: reflectionSystemPrompt,
     userPrompt: [
       "## 最近事件",
       eventSummary,
@@ -699,6 +755,8 @@ export async function generateReflection({ graph, currentSeq, customPrompt, sign
     ].join("\n"),
     maxRetries: 1,
     signal,
+    taskType: "reflection",
+    additionalMessages: reflectionPromptBuild.customMessages || [],
   });
 
   if (!result?.insight) return null;

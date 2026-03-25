@@ -13,6 +13,8 @@ async function loadVectorHelpers() {
     source.match(/export const BACKEND_VECTOR_SOURCES = \[[\s\S]*?\];/m)?.[0],
     source.match(/export const BACKEND_DEFAULT_MODELS = \{[\s\S]*?\};/m)?.[0],
     source.match(/const BACKEND_SOURCES_REQUIRING_API_URL = new Set\([\s\S]*?\);/m)?.[0],
+    source.match(/const VECTOR_REQUEST_TIMEOUT_MS = \d+;/m)?.[0],
+    source.match(/function getConfiguredTimeoutMs\(config = \{\}\) \{[\s\S]*?^\}/m)?.[0],
     source.match(/export function normalizeOpenAICompatibleBaseUrl\(value, autoSuffix = true\) \{[\s\S]*?^\}/m)?.[0],
     source.match(/export function getVectorConfigFromSettings\(settings = \{\}\) \{[\s\S]*?^\}/m)?.[0],
     source.match(/export function isBackendVectorConfig\(config\) \{[\s\S]*?^\}/m)?.[0],
@@ -20,7 +22,7 @@ async function loadVectorHelpers() {
     source.match(/export function validateVectorConfig\(config\) \{[\s\S]*?^\}/m)?.[0],
   ].filter(Boolean);
 
-  if (pieces.length < 8) {
+  if (pieces.length < 10) {
     throw new Error("无法从 vector-index.js 提取向量配置辅助函数");
   }
 

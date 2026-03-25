@@ -4,6 +4,7 @@
 import { getRequestHeaders } from "../../../../script.js";
 import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
+import { resolveTaskGenerationOptions } from "./generation-options.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
@@ -203,6 +204,7 @@ function buildJsonAttemptMessages(
   userPrompt,
   attempt,
   reason = "",
+  additionalMessages = [],
 ) {
   const systemParts = [
     systemPrompt,
@@ -223,10 +225,23 @@ function buildJsonAttemptMessages(
     userParts.push("请直接输出紧凑 JSON 对象，不要包含任何额外文本。");
   }
 
-  return [
-    { role: "system", content: systemParts.join("\n\n") },
-    { role: "user", content: userParts.join("\n\n") },
-  ];
+  const messages = [];
+  const normalizedSystemPrompt = systemParts.join("\n\n").trim();
+  if (normalizedSystemPrompt) {
+    messages.push({ role: "system", content: normalizedSystemPrompt });
+  }
+
+  for (const message of additionalMessages || []) {
+    if (!message || typeof message !== "object") continue;
+    const role = String(message.role || "").trim().toLowerCase();
+    const content = String(message.content || "").trim();
+    if (!content) continue;
+    if (!["system", "user", "assistant"].includes(role)) continue;
+    messages.push({ role, content });
+  }
+
+  messages.push({ role: "user", content: userParts.join("\n\n") });
+  return messages;
 }
 
 async function fetchWithTimeout(
@@ -294,10 +309,33 @@ function isAbortError(error) {
 
 async function callDedicatedOpenAICompatible(
   messages,
-  { signal, jsonMode = false, maxCompletionTokens = null } = {},
+  {
+    signal,
+    jsonMode = false,
+    maxCompletionTokens = null,
+    taskType = "",
+  } = {},
 ) {
   const config = getMemoryLLMConfig();
-  if (!hasDedicatedLLMConfig(config)) {
+  const settings = extension_settings[MODULE_NAME] || {};
+  const hasDedicatedConfig = hasDedicatedLLMConfig(config);
+  const generationResolved = taskType
+    ? resolveTaskGenerationOptions(settings, taskType, {
+        max_completion_tokens: Number.isFinite(maxCompletionTokens)
+          ? maxCompletionTokens
+          : jsonMode
+            ? DEFAULT_JSON_COMPLETION_TOKENS
+            : DEFAULT_TEXT_COMPLETION_TOKENS,
+      }, {
+        mode: hasDedicatedConfig
+          ? "dedicated-openai-compatible"
+          : "sillytavern-current-model",
+      })
+    : {
+        filtered: {},
+        removed: [],
+      };
+  if (!hasDedicatedConfig) {
     const payload = await sendOpenAIRequest(
       "quiet",
       messages,
@@ -321,6 +359,12 @@ async function callDedicatedOpenAICompatible(
     : jsonMode
       ? DEFAULT_JSON_COMPLETION_TOKENS
       : DEFAULT_TEXT_COMPLETION_TOKENS;
+  const filteredGeneration = generationResolved.filtered || {};
+  const resolvedCompletionTokens = Number.isFinite(
+    filteredGeneration.max_completion_tokens,
+  )
+    ? filteredGeneration.max_completion_tokens
+    : completionTokens;
 
   const body = {
     chat_completion_source: chat_completion_sources.CUSTOM,
@@ -332,11 +376,36 @@ async function callDedicatedOpenAICompatible(
       : "",
     model: config.model,
     messages,
-    temperature: jsonMode ? 0 : 0.2,
-    max_tokens: completionTokens,
-    max_completion_tokens: completionTokens,
-    stream: false,
+    temperature: filteredGeneration.temperature ?? (jsonMode ? 0 : 0.2),
+    max_tokens: resolvedCompletionTokens,
+    max_completion_tokens: resolvedCompletionTokens,
+    stream: filteredGeneration.stream ?? false,
   };
+
+  const optionalGenerationFields = [
+    "top_p",
+    "top_k",
+    "top_a",
+    "min_p",
+    "seed",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "squash_system_messages",
+    "reasoning_effort",
+    "request_thoughts",
+    "enable_function_calling",
+    "enable_web_search",
+    "wrap_user_messages_in_quotes",
+    "reply_count",
+    "max_context_tokens",
+    "character_name_prefix",
+  ];
+
+  for (const field of optionalGenerationFields) {
+    if (!Object.prototype.hasOwnProperty.call(filteredGeneration, field)) continue;
+    body[field] = filteredGeneration[field];
+  }
 
   if (jsonMode) {
     body.custom_include_body = buildYamlObject({
@@ -424,6 +493,8 @@ export async function callLLMForJSON({
   userPrompt,
   maxRetries = 2,
   signal,
+  taskType = "",
+  additionalMessages = [],
 } = {}) {
   let lastFailureReason = "";
 
@@ -434,10 +505,12 @@ export async function callLLMForJSON({
         userPrompt,
         attempt,
         lastFailureReason,
+        additionalMessages,
       );
       const response = await callDedicatedOpenAICompatible(messages, {
         signal,
         jsonMode: true,
+        taskType,
         maxCompletionTokens:
           attempt === 0
             ? DEFAULT_JSON_COMPLETION_TOKENS

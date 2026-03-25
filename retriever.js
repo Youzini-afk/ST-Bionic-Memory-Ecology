@@ -11,6 +11,8 @@ import {
   getNodeEdges,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
+import { buildTaskPrompt } from "./prompt-builder.js";
+import { applyTaskRegex } from "./task-regex.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -51,6 +53,7 @@ export async function retrieve({
   schema,
   signal = undefined,
   options = {},
+  settings = {},
 }) {
   throwIfAborted(signal);
   const topK = options.topK ?? 20;
@@ -255,6 +258,7 @@ export async function retrieve({
       schema,
       normalizedMaxRecallNodes,
       options.recallPrompt,
+      settings,
       signal,
     );
     selectedNodeIds = llmResult.selectedNodeIds;
@@ -397,6 +401,7 @@ async function llmRecall(
   schema,
   maxNodes,
   customPrompt,
+  settings = {},
   signal,
 ) {
   throwIfAborted(signal);
@@ -413,14 +418,27 @@ async function llmRecall(
     })
     .join("\n");
 
-  const systemPrompt = customPrompt || [
-    "你是一个记忆召回分析器。",
-    "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
-    "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
-    `最多选择 ${maxNodes} 个节点。`,
-    "输出严格的 JSON 格式：",
-    '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
-  ].join("\n");
+  const recallPromptBuild = buildTaskPrompt(settings, "recall", {
+    taskName: "recall",
+    recentMessages: contextStr || "(无)",
+    userMessage,
+    candidateNodes: candidateDescriptions,
+    candidateText: candidateDescriptions,
+    graphStats: `candidate_count=${candidates.length}`,
+  });
+  const systemPrompt = applyTaskRegex(
+    settings,
+    "recall",
+    "finalPrompt",
+    recallPromptBuild.systemPrompt || customPrompt || [
+      "你是一个记忆召回分析器。",
+      "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
+      "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
+      `最多选择 ${maxNodes} 个节点。`,
+      "输出严格的 JSON 格式：",
+      '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
+    ].join("\n"),
+  );
 
   const userPrompt = [
     "## 最近对话上下文",
@@ -440,6 +458,8 @@ async function llmRecall(
     userPrompt,
     maxRetries: 1,
     signal,
+    taskType: "recall",
+    additionalMessages: recallPromptBuild.customMessages || [],
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

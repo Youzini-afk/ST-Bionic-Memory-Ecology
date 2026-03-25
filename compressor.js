@@ -4,6 +4,8 @@
 import { createNode, addNode, createEdge, addEdge, getActiveNodes, getNode } from './graph.js';
 import { callLLMForJSON } from './llm.js';
 import { embedText } from './embedding.js';
+import { buildTaskPrompt } from './prompt-builder.js';
+import { applyTaskRegex } from './task-regex.js';
 import { isDirectVectorConfig } from './vector-index.js';
 
 function createAbortError(message = '操作已终止') {
@@ -28,7 +30,7 @@ function throwIfAborted(signal) {
  * @param {boolean} [params.force=false] - 忽略阈值强制压缩
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressType({ graph, typeDef, embeddingConfig, force = false, customPrompt, signal }) {
+export async function compressType({ graph, typeDef, embeddingConfig, force = false, customPrompt, signal, settings = {} }) {
     const compression = typeDef.compression;
     if (!compression || compression.mode !== 'hierarchical') {
         return { created: 0, archived: 0 };
@@ -48,6 +50,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
             force,
             customPrompt,
             signal,
+            settings,
         });
 
         totalCreated += result.created;
@@ -63,7 +66,7 @@ export async function compressType({ graph, typeDef, embeddingConfig, force = fa
 /**
  * 压缩特定层级的节点
  */
-async function compressLevel({ graph, typeDef, level, embeddingConfig, force, customPrompt, signal }) {
+async function compressLevel({ graph, typeDef, level, embeddingConfig, force, customPrompt, signal, settings = {} }) {
     const compression = typeDef.compression;
     throwIfAborted(signal);
 
@@ -95,7 +98,7 @@ async function compressLevel({ graph, typeDef, level, embeddingConfig, force, cu
         if (batch.length < 2) break; // 至少 2 个才压缩
 
         // 调用 LLM 总结
-        const summaryResult = await summarizeBatch(batch, typeDef, customPrompt, signal);
+        const summaryResult = await summarizeBatch(batch, typeDef, customPrompt, signal, settings);
         if (!summaryResult) continue;
 
         // 创建压缩节点
@@ -168,7 +171,7 @@ function migrateBatchEdges(graph, batch, compressedNode) {
 /**
  * 调用 LLM 总结一批节点
  */
-async function summarizeBatch(nodes, typeDef, customPrompt, signal) {
+async function summarizeBatch(nodes, typeDef, customPrompt, signal, settings = {}) {
     const nodeDescriptions = nodes.map((n, i) => {
         const fieldsStr = Object.entries(n.fields)
             .filter(([_, v]) => v)
@@ -179,7 +182,18 @@ async function summarizeBatch(nodes, typeDef, customPrompt, signal) {
 
     const instruction = typeDef.compression.instruction || '将以下节点压缩总结为一条精炼记录。';
 
-    const systemPrompt = customPrompt || [
+    const compressPromptBuild = buildTaskPrompt(settings, 'compress', {
+        taskName: 'compress',
+        nodeContent: nodeDescriptions,
+        candidateNodes: nodeDescriptions,
+        currentRange: `${nodes[0]?.seq ?? '?'} ~ ${nodes[nodes.length - 1]?.seq ?? '?'}`,
+        graphStats: `node_count=${nodes.length}, node_type=${typeDef.id}`,
+    });
+    const systemPrompt = applyTaskRegex(
+        settings,
+        'compress',
+        'finalPrompt',
+        compressPromptBuild.systemPrompt || customPrompt || [
         '你是一个记忆压缩器。将多个同类型节点总结为一条更高层级的压缩节点。',
         instruction,
         '',
@@ -190,11 +204,19 @@ async function summarizeBatch(nodes, typeDef, customPrompt, signal) {
         '- 保留关键信息：因果关系、不可逆结果、未解决伏笔',
         '- 去除重复和低信息密度内容',
         '- 压缩后文本应精炼，目标 150 字左右',
-    ].join('\n');
+    ].join('\n'),
+    );
 
     const userPrompt = `请压缩以下 ${nodes.length} 个 "${typeDef.label}" 节点：\n\n${nodeDescriptions}`;
 
-    return await callLLMForJSON({ systemPrompt, userPrompt, maxRetries: 1, signal });
+    return await callLLMForJSON({
+        systemPrompt,
+        userPrompt,
+        maxRetries: 1,
+        signal,
+        taskType: 'compress',
+        additionalMessages: compressPromptBuild.customMessages || [],
+    });
 }
 
 /**
@@ -206,14 +228,14 @@ async function summarizeBatch(nodes, typeDef, customPrompt, signal) {
  * @param {boolean} [force=false]
  * @returns {Promise<{created: number, archived: number}>}
  */
-export async function compressAll(graph, schema, embeddingConfig, force = false, customPrompt, signal) {
+export async function compressAll(graph, schema, embeddingConfig, force = false, customPrompt, signal, settings = {}) {
     let totalCreated = 0;
     let totalArchived = 0;
 
     for (const typeDef of schema) {
         throwIfAborted(signal);
         if (typeDef.compression?.mode === 'hierarchical') {
-            const result = await compressType({ graph, typeDef, embeddingConfig, force, customPrompt, signal });
+            const result = await compressType({ graph, typeDef, embeddingConfig, force, customPrompt, signal, settings });
             totalCreated += result.created;
             totalArchived += result.archived;
         }

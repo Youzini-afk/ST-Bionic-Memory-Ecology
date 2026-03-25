@@ -5,6 +5,8 @@
 import { embedBatch, searchSimilar } from './embedding.js';
 import { addEdge, createEdge, getActiveNodes, getNode } from './graph.js';
 import { callLLMForJSON } from './llm.js';
+import { buildTaskPrompt } from './prompt-builder.js';
+import { applyTaskRegex } from './task-regex.js';
 import {
     buildNodeVectorText,
     findSimilarNodesByText,
@@ -106,6 +108,7 @@ export async function consolidateMemories({
     options = {},
     customPrompt,
     signal,
+    settings = {},
 }) {
     const neighborCount = options.neighborCount ?? 5;
     const conflictThreshold = options.conflictThreshold ?? 0.85;
@@ -268,12 +271,25 @@ export async function consolidateMemories({
     const userPrompt = userPromptSections.join('\n\n');
 
     let decision;
+    const consolidationPromptBuild = buildTaskPrompt(settings, 'consolidation', {
+        taskName: 'consolidation',
+        candidateNodes: userPrompt,
+        candidateText: userPrompt,
+        graphStats: `new_entries=${newEntries.length}, threshold=${conflictThreshold}`,
+    });
     try {
         decision = await callLLMForJSON({
-            systemPrompt: customPrompt || CONSOLIDATION_SYSTEM_PROMPT,
+            systemPrompt: applyTaskRegex(
+                settings,
+                'consolidation',
+                'finalPrompt',
+                consolidationPromptBuild.systemPrompt || customPrompt || CONSOLIDATION_SYSTEM_PROMPT,
+            ),
             userPrompt,
             maxRetries: 1,
             signal,
+            taskType: 'consolidation',
+            additionalMessages: consolidationPromptBuild.customMessages || [],
         });
     } catch (e) {
         if (isAbortError(e)) throw e;
