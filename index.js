@@ -1816,6 +1816,7 @@ function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
 
   const candidates = [];
   const isDeleteTrigger = String(trigger || "").includes("message-deleted");
+  const minExtractableFloor = getMinExtractableAssistantFloor(chat);
 
   // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近“被删区间起点”，
   // 因此这里额外向前退一层，避免恢复仍停留在被删楼层对应的旧图谱边界。
@@ -1829,7 +1830,9 @@ function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
     const floor = getChatIndexForPlayableSeq(chat, meta.deletedPlayableSeqFrom);
     if (Number.isFinite(floor)) {
       candidates.push({
-        floor: Math.max(0, floor - 1),
+        floor: Number.isFinite(minExtractableFloor)
+          ? Math.max(minExtractableFloor, floor - 1)
+          : Math.max(0, floor - 1),
         source: `${trigger}-meta-delete-boundary`,
       });
     }
@@ -1841,7 +1844,9 @@ function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
     );
     if (Number.isFinite(floor)) {
       candidates.push({
-        floor: Math.max(0, floor - 1),
+        floor: Number.isFinite(minExtractableFloor)
+          ? Math.max(minExtractableFloor, floor - 1)
+          : Math.max(0, floor - 1),
         source: `${trigger}-meta-delete-boundary`,
       });
     }
@@ -1884,6 +1889,22 @@ function getLastProcessedAssistantFloor() {
   )
     ? currentGraph.historyState.lastProcessedAssistantFloor
     : -1;
+}
+
+function getMinExtractableAssistantFloor(chat) {
+  const assistantTurns = getAssistantTurns(chat);
+  return assistantTurns.length > 0 ? assistantTurns[0] : null;
+}
+
+function clampRecoveryStartFloor(chat, floor) {
+  if (!Number.isFinite(floor)) return floor;
+
+  const minExtractableFloor = getMinExtractableAssistantFloor(chat);
+  if (!Number.isFinite(minExtractableFloor)) {
+    return floor;
+  }
+
+  return Math.max(floor, minExtractableFloor);
 }
 
 function notifyHistoryDirty(dirtyFrom, reason) {
@@ -2285,9 +2306,10 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
 
   const chatId = getCurrentChatId(context);
   const settings = getSettings();
-  const initialDirtyFrom = Number.isFinite(dirtyFrom)
+  const initialDirtyFromRaw = Number.isFinite(dirtyFrom)
     ? dirtyFrom
     : detection.earliestAffectedFloor;
+  const initialDirtyFrom = clampRecoveryStartFloor(chat, initialDirtyFromRaw);
   let replayedBatches = 0;
   let usedFullRebuild = false;
   let recoveryPath = "full-rebuild";
