@@ -195,39 +195,15 @@ const TASK_PROFILE_GENERATION_GROUPS = [
 ];
 
 const TASK_PROFILE_REGEX_STAGES = [
-  { key: "finalPrompt", label: "finalPrompt", desc: "最终 system prompt" },
-  {
-    key: "input.userMessage",
-    label: "input.userMessage",
-    desc: "用户消息进入编排前",
-  },
-  {
-    key: "input.recentMessages",
-    label: "input.recentMessages",
-    desc: "最近消息进入编排前",
-  },
-  {
-    key: "input.candidateText",
-    label: "input.candidateText",
-    desc: "候选节点文本进入编排前",
-  },
-  {
-    key: "input.finalPrompt",
-    label: "input.finalPrompt",
-    desc: "最终 assembled prompt",
-  },
-  { key: "rawResponse", label: "rawResponse", desc: "模型原始输出" },
-  { key: "beforeParse", label: "beforeParse", desc: "解析 JSON 前" },
-  {
-    key: "output.rawResponse",
-    label: "output.rawResponse",
-    desc: "输出阶段原始响应",
-  },
-  {
-    key: "output.beforeParse",
-    label: "output.beforeParse",
-    desc: "输出阶段解析前",
-  },
+  { key: "finalPrompt", label: "最终 Prompt", desc: "最终 system prompt" },
+  { key: "input.userMessage", label: "用户消息", desc: "用户消息进入编排前" },
+  { key: "input.recentMessages", label: "近期消息", desc: "最近消息进入编排前" },
+  { key: "input.candidateText", label: "候选文本", desc: "候选节点文本进入编排前" },
+  { key: "input.finalPrompt", label: "组装后 Prompt", desc: "最终 assembled prompt" },
+  { key: "rawResponse", label: "原始返回", desc: "模型原始输出" },
+  { key: "beforeParse", label: "解析前", desc: "解析 JSON 前" },
+  { key: "output.rawResponse", label: "输出原始响应", desc: "输出阶段原始响应" },
+  { key: "output.beforeParse", label: "输出解析前", desc: "输出阶段解析前" },
 ];
 
 let panelEl = null;
@@ -2255,7 +2231,7 @@ function _renderTaskBlockEditor(state) {
           value="${_escHtml(item.sourceKey)}"
           ${item.sourceKey === block.sourceKey ? "selected" : ""}
         >
-          ${_escHtml(item.name)} · ${_escHtml(item.sourceKey)}
+          ${_escHtml(item.name)}
         </option>
       `,
     )
@@ -2540,7 +2516,7 @@ function _renderRegexRuleEditor(state) {
     </div>
 
     <div class="bme-config-row">
-      <label>script_name</label>
+      <label>规则名称</label>
       <input
         class="bme-config-input"
         type="text"
@@ -2562,7 +2538,7 @@ function _renderRegexRuleEditor(state) {
     </label>
 
     <div class="bme-config-row">
-      <label>find_regex</label>
+      <label>查找正则 (find_regex)</label>
       <textarea
         class="bme-config-textarea"
         data-regex-rule-field="find_regex"
@@ -2571,7 +2547,7 @@ function _renderRegexRuleEditor(state) {
     </div>
 
     <div class="bme-config-row">
-      <label>replace_string</label>
+      <label>替换文本 (replace_string)</label>
       <textarea
         class="bme-config-textarea"
         data-regex-rule-field="replace_string"
@@ -2580,7 +2556,7 @@ function _renderRegexRuleEditor(state) {
     </div>
 
     <div class="bme-config-row">
-      <label>trim_strings</label>
+      <label>裁剪字符串 (trim_strings)</label>
       <textarea
         class="bme-config-textarea"
         data-regex-rule-field="trim_strings"
@@ -2590,7 +2566,7 @@ function _renderRegexRuleEditor(state) {
 
     <div class="bme-task-field-grid">
       <div class="bme-config-row">
-        <label>min_depth</label>
+        <label>最小深度</label>
         <input
           class="bme-config-input"
           type="number"
@@ -2599,7 +2575,7 @@ function _renderRegexRuleEditor(state) {
         />
       </div>
       <div class="bme-config-row">
-        <label>max_depth</label>
+        <label>最大深度</label>
         <input
           class="bme-config-input"
           type="number"
@@ -2609,11 +2585,11 @@ function _renderRegexRuleEditor(state) {
       </div>
     </div>
 
-    <div class="bme-task-section-label">source</div>
+    <div class="bme-task-section-label">数据来源</div>
     <div class="bme-task-toggle-list">
       <label class="bme-toggle-item">
         <span class="bme-toggle-copy">
-          <span class="bme-toggle-title">user_input</span>
+          <span class="bme-toggle-title">用户输入</span>
           <span class="bme-toggle-desc">允许作用于 user / 输入侧文本。</span>
         </span>
         <input
@@ -2624,7 +2600,7 @@ function _renderRegexRuleEditor(state) {
       </label>
       <label class="bme-toggle-item">
         <span class="bme-toggle-copy">
-          <span class="bme-toggle-title">ai_output</span>
+          <span class="bme-toggle-title">AI 输出</span>
           <span class="bme-toggle-desc">允许作用于 assistant / 输出侧文本。</span>
         </span>
         <input
@@ -2635,12 +2611,12 @@ function _renderRegexRuleEditor(state) {
       </label>
     </div>
 
-    <div class="bme-task-section-label">destination</div>
+    <div class="bme-task-section-label">作用目标</div>
     <div class="bme-task-toggle-list">
       <label class="bme-toggle-item">
         <span class="bme-toggle-copy">
-          <span class="bme-toggle-title">prompt</span>
-          <span class="bme-toggle-desc">应用到 prompt / 输入构建链路。</span>
+          <span class="bme-toggle-title">Prompt 构建</span>
+          <span class="bme-toggle-desc">应用到 prompt 输入构建链路。</span>
         </span>
         <input
           type="checkbox"
@@ -2650,7 +2626,7 @@ function _renderRegexRuleEditor(state) {
       </label>
       <label class="bme-toggle-item">
         <span class="bme-toggle-copy">
-          <span class="bme-toggle-title">display</span>
+          <span class="bme-toggle-title">界面展示</span>
           <span class="bme-toggle-desc">应用到展示层替换链路。</span>
         </span>
         <input
