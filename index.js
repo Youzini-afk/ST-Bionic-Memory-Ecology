@@ -73,6 +73,7 @@ const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
 const defaultSettings = {
   enabled: false,
+  timeoutMs: 300000,
 
   // 提取设置
   extractEvery: 1, // 每 N 条 assistant 回复提取一次
@@ -172,7 +173,7 @@ let isRecoveringHistory = false;
 let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
-const LOCAL_VECTOR_TIMEOUT_MS = 30000;
+const LOCAL_VECTOR_TIMEOUT_MS = 300000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
 const HISTORY_RECOVERY_SETTLE_MS = 80;
@@ -645,6 +646,13 @@ function getSchema() {
   return schema;
 }
 
+function getConfiguredTimeoutMs(settings = getSettings()) {
+  const timeoutMs = Number(settings?.timeoutMs);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : LOCAL_VECTOR_TIMEOUT_MS;
+}
+
 function getEmbeddingConfig(mode = null) {
   const settings = getSettings();
   return getVectorConfigFromSettings(
@@ -795,10 +803,19 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
 async function fetchLocalWithTimeout(
   url,
   options = {},
-  timeoutMs = LOCAL_VECTOR_TIMEOUT_MS,
+  timeoutMs = getConfiguredTimeoutMs(),
 ) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new DOMException(`本地请求超时 (${Math.round(timeoutMs / 1000)}s)`, 'AbortError')), timeoutMs);
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException(
+          `本地请求超时 (${Math.round(timeoutMs / 1000)}s)`,
+          "AbortError",
+        ),
+      ),
+    timeoutMs,
+  );
   let signal = controller.signal;
   if (options.signal) {
     if (
@@ -808,9 +825,13 @@ async function fetchLocalWithTimeout(
       signal = AbortSignal.any([options.signal, controller.signal]);
     } else {
       signal = controller.signal;
-      options.signal.addEventListener("abort", () => controller.abort(options.signal.reason), {
-        once: true,
-      });
+      options.signal.addEventListener(
+        "abort",
+        () => controller.abort(options.signal.reason),
+        {
+          once: true,
+        },
+      );
     }
   }
 

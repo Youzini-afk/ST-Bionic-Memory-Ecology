@@ -3,10 +3,7 @@
 import { getRequestHeaders } from "../../../../script.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "./graph.js";
-import {
-  buildVectorCollectionId,
-  stableHashString,
-} from "./runtime-state.js";
+import { buildVectorCollectionId, stableHashString } from "./runtime-state.js";
 
 export const BACKEND_VECTOR_SOURCES = [
   "openai",
@@ -33,7 +30,14 @@ const MODEL_LIST_ENDPOINTS = {
   nanogpt: "/api/openai/nanogpt/models/embedding",
   electronhub: "/api/openai/electronhub/models",
 };
-const VECTOR_REQUEST_TIMEOUT_MS = 30000;
+const VECTOR_REQUEST_TIMEOUT_MS = 300000;
+
+function getConfiguredTimeoutMs(config = {}) {
+  const timeoutMs = Number(config?.timeoutMs);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : VECTOR_REQUEST_TIMEOUT_MS;
+}
 
 const BACKEND_STATUS_MODEL_SOURCES = {
   openai: "openai",
@@ -72,7 +76,10 @@ function createCombinedAbortSignal(...signals) {
     return validSignals[0] || undefined;
   }
 
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+  if (
+    typeof AbortSignal !== "undefined" &&
+    typeof AbortSignal.any === "function"
+  ) {
     return AbortSignal.any(validSignals);
   }
 
@@ -82,14 +89,29 @@ function createCombinedAbortSignal(...signals) {
       controller.abort(signal.reason);
       return controller.signal;
     }
-    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+    signal.addEventListener("abort", () => controller.abort(signal.reason), {
+      once: true,
+    });
   }
   return controller.signal;
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = VECTOR_REQUEST_TIMEOUT_MS) {
+async function fetchWithTimeout(
+  url,
+  options = {},
+  timeoutMs = VECTOR_REQUEST_TIMEOUT_MS,
+) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new DOMException(`向量请求超时 (${Math.round(timeoutMs / 1000)}s)`, 'AbortError')), timeoutMs);
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException(
+          `向量请求超时 (${Math.round(timeoutMs / 1000)}s)`,
+          "AbortError",
+        ),
+      ),
+    timeoutMs,
+  );
   const signal = options.signal
     ? createCombinedAbortSignal(options.signal, controller.signal)
     : controller.signal;
@@ -126,14 +148,20 @@ export function getVectorConfigFromSettings(settings = {}) {
     return {
       mode,
       source: "direct",
-      apiUrl: normalizeOpenAICompatibleBaseUrl(settings.embeddingApiUrl, autoSuffix),
+      apiUrl: normalizeOpenAICompatibleBaseUrl(
+        settings.embeddingApiUrl,
+        autoSuffix,
+      ),
       apiKey: String(settings.embeddingApiKey || "").trim(),
       model: String(settings.embeddingModel || "").trim(),
       autoSuffix,
+      timeoutMs: getConfiguredTimeoutMs(settings),
     };
   }
 
-  const source = BACKEND_VECTOR_SOURCES.includes(settings.embeddingBackendSource)
+  const source = BACKEND_VECTOR_SOURCES.includes(
+    settings.embeddingBackendSource,
+  )
     ? settings.embeddingBackendSource
     : "openai";
 
@@ -149,6 +177,7 @@ export function getVectorConfigFromSettings(settings = {}) {
       settings.embeddingBackendModel || BACKEND_DEFAULT_MODELS[source] || "",
     ).trim(),
     autoSuffix,
+    timeoutMs: getConfiguredTimeoutMs(settings),
   };
 }
 
@@ -202,10 +231,7 @@ export function validateVectorConfig(config) {
     return { valid: false, error: "请填写后端向量模型" };
   }
 
-  if (
-    BACKEND_SOURCES_REQUIRING_API_URL.has(config.source) &&
-    !config.apiUrl
-  ) {
+  if (BACKEND_SOURCES_REQUIRING_API_URL.has(config.source) && !config.apiUrl) {
     return { valid: false, error: "当前后端向量源需要填写 API 地址" };
   }
 
@@ -319,7 +345,9 @@ function buildDesiredVectorEntries(graph, config, range = null) {
 
 function computeVectorStats(graph, desiredEntries) {
   const state = graph.vectorIndexState || {};
-  const desiredByNodeId = new Map(desiredEntries.map((entry) => [entry.nodeId, entry]));
+  const desiredByNodeId = new Map(
+    desiredEntries.map((entry) => [entry.nodeId, entry]),
+  );
   const nodeToHash = state.nodeToHash || {};
   const hashToNodeId = state.hashToNodeId || {};
 
@@ -352,12 +380,16 @@ function computeVectorStats(graph, desiredEntries) {
 
 async function purgeVectorCollection(collectionId, signal) {
   throwIfAborted(signal);
-  const response = await fetchWithTimeout("/api/vector/purge", {
-    method: "POST",
-    headers: getRequestHeaders(),
-    signal,
-    body: JSON.stringify({ collectionId }),
-  });
+  const response = await fetchWithTimeout(
+    "/api/vector/purge",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      signal,
+      body: JSON.stringify({ collectionId }),
+    },
+    getConfiguredTimeoutMs(),
+  );
 
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
@@ -369,16 +401,20 @@ async function deleteVectorHashes(collectionId, config, hashes, signal) {
   if (!Array.isArray(hashes) || hashes.length === 0) return;
   throwIfAborted(signal);
 
-  const response = await fetchWithTimeout("/api/vector/delete", {
-    method: "POST",
-    headers: getRequestHeaders(),
-    signal,
-    body: JSON.stringify({
-      collectionId,
-      hashes,
-      ...buildBackendSourceRequest(config),
-    }),
-  });
+  const response = await fetchWithTimeout(
+    "/api/vector/delete",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      signal,
+      body: JSON.stringify({
+        collectionId,
+        hashes,
+        ...buildBackendSourceRequest(config),
+      }),
+    },
+    getConfiguredTimeoutMs(config),
+  );
 
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
@@ -400,20 +436,24 @@ async function insertVectorEntries(collectionId, config, entries, signal) {
   if (!Array.isArray(entries) || entries.length === 0) return;
   throwIfAborted(signal);
 
-  const response = await fetchWithTimeout("/api/vector/insert", {
-    method: "POST",
-    headers: getRequestHeaders(),
-    signal,
-    body: JSON.stringify({
-      collectionId,
-      items: entries.map((entry) => ({
-        hash: entry.hash,
-        text: entry.text,
-        index: entry.index,
-      })),
-      ...buildBackendSourceRequest(config),
-    }),
-  });
+  const response = await fetchWithTimeout(
+    "/api/vector/insert",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      signal,
+      body: JSON.stringify({
+        collectionId,
+        items: entries.map((entry) => ({
+          hash: entry.hash,
+          text: entry.text,
+          index: entry.index,
+        })),
+        ...buildBackendSourceRequest(config),
+      }),
+    },
+    getConfiguredTimeoutMs(config),
+  );
 
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
@@ -442,7 +482,10 @@ export async function syncGraphVectorIndex(
   } = {},
 ) {
   if (!graph || !config) {
-    return { insertedHashes: [], stats: { total: 0, indexed: 0, stale: 0, pending: 0 } };
+    return {
+      insertedHashes: [],
+      stats: { total: 0, indexed: 0, stale: 0, pending: 0 },
+    };
   }
   throwIfAborted(signal);
 
@@ -454,14 +497,16 @@ export async function syncGraphVectorIndex(
   }
 
   const state = graph.vectorIndexState;
-  const collectionId = buildVectorCollectionId(chatId || graph?.historyState?.chatId);
+  const collectionId = buildVectorCollectionId(
+    chatId || graph?.historyState?.chatId,
+  );
   const desiredEntries = buildDesiredVectorEntries(graph, config, range);
-  const desiredByNodeId = new Map(desiredEntries.map((entry) => [entry.nodeId, entry]));
+  const desiredByNodeId = new Map(
+    desiredEntries.map((entry) => [entry.nodeId, entry]),
+  );
   const insertedHashes = [];
   const hasConcreteRange =
-    range &&
-    Number.isFinite(range.start) &&
-    Number.isFinite(range.end);
+    range && Number.isFinite(range.start) && Number.isFinite(range.end);
   const rangedNodeIds = new Set(desiredEntries.map((entry) => entry.nodeId));
 
   if (isBackendVectorConfig(config)) {
@@ -470,7 +515,8 @@ export async function syncGraphVectorIndex(
       state.source !== config.source ||
       state.modelScope !== getVectorModelScope(config) ||
       state.collectionId !== collectionId;
-    const fullReset = purge || state.dirty || scopeChanged || (force && !hasConcreteRange);
+    const fullReset =
+      purge || state.dirty || scopeChanged || (force && !hasConcreteRange);
 
     if (fullReset) {
       await purgeVectorCollection(collectionId, signal);
@@ -537,8 +583,11 @@ export async function syncGraphVectorIndex(
     for (const entry of desiredEntries) {
       hashByNodeId[entry.nodeId] = entry.hash;
       const currentHash = state.nodeToHash?.[entry.nodeId];
-      const node = graph.nodes.find((candidate) => candidate.id === entry.nodeId);
-      const hasEmbedding = Array.isArray(node?.embedding) && node.embedding.length > 0;
+      const node = graph.nodes.find(
+        (candidate) => candidate.id === entry.nodeId,
+      );
+      const hasEmbedding =
+        Array.isArray(node?.embedding) && node.embedding.length > 0;
 
       if (!force && !currentHash && hasEmbedding) {
         state.hashToNodeId[entry.hash] = entry.nodeId;
@@ -575,7 +624,9 @@ export async function syncGraphVectorIndex(
 
       for (let index = 0; index < entriesToEmbed.length; index++) {
         const entry = entriesToEmbed[index];
-        const node = graph.nodes.find((candidate) => candidate.id === entry.nodeId);
+        const node = graph.nodes.find(
+          (candidate) => candidate.id === entry.nodeId,
+        );
         if (!node) continue;
 
         if (embeddings[index]) {
@@ -596,7 +647,10 @@ export async function syncGraphVectorIndex(
   state.dirty = false;
   state.lastWarning = "";
   state.lastSyncAt = Date.now();
-  state.lastStats = computeVectorStats(graph, buildDesiredVectorEntries(graph, config));
+  state.lastStats = computeVectorStats(
+    graph,
+    buildDesiredVectorEntries(graph, config),
+  );
 
   return {
     insertedHashes,
@@ -628,7 +682,9 @@ export async function findSimilarNodesByText(
     return searchSimilar(
       queryVec,
       candidateNodes
-        .filter((node) => Array.isArray(node.embedding) && node.embedding.length > 0)
+        .filter(
+          (node) => Array.isArray(node.embedding) && node.embedding.length > 0,
+        )
         .map((node) => ({
           nodeId: node.id,
           embedding: node.embedding,
@@ -640,18 +696,22 @@ export async function findSimilarNodesByText(
   const validation = validateVectorConfig(config);
   if (!validation.valid) return [];
 
-  const response = await fetchWithTimeout("/api/vector/query", {
-    method: "POST",
-    headers: getRequestHeaders(),
-    signal,
-    body: JSON.stringify({
-      collectionId: graph.vectorIndexState.collectionId,
-      searchText: text,
-      topK,
-      threshold: 0,
-      ...buildBackendSourceRequest(config),
-    }),
-  });
+  const response = await fetchWithTimeout(
+    "/api/vector/query",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      signal,
+      body: JSON.stringify({
+        collectionId: graph.vectorIndexState.collectionId,
+        searchText: text,
+        topK,
+        threshold: 0,
+        ...buildBackendSourceRequest(config),
+      }),
+    },
+    getConfiguredTimeoutMs(config),
+  );
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => response.statusText);
@@ -692,17 +752,21 @@ export async function testVectorConnection(config, chatId = "connection-test") {
   }
 
   try {
-    const response = await fetchWithTimeout("/api/vector/query", {
-      method: "POST",
-      headers: getRequestHeaders(),
-      body: JSON.stringify({
-        collectionId: buildVectorCollectionId(chatId),
-        searchText: "test connection",
-        topK: 1,
-        threshold: 0,
-        ...buildBackendSourceRequest(config),
-      }),
-    });
+    const response = await fetchWithTimeout(
+      "/api/vector/query",
+      {
+        method: "POST",
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+          collectionId: buildVectorCollectionId(chatId),
+          searchText: "test connection",
+          topK: 1,
+          threshold: 0,
+          ...buildBackendSourceRequest(config),
+        }),
+      },
+      getConfiguredTimeoutMs(config),
+    );
 
     const payload = await response.text().catch(() => "");
     if (!response.ok) {
@@ -739,8 +803,12 @@ function normalizeModelOptions(items = [], { embeddingOnly = false } = {}) {
     }
 
     if (!item || typeof item !== "object") continue;
-    const id = String(item.id || item.name || item.label || item.slug || item.value || "").trim();
-    const label = String(item.label || item.name || item.id || item.slug || item.value || "").trim();
+    const id = String(
+      item.id || item.name || item.label || item.slug || item.value || "",
+    ).trim();
+    const label = String(
+      item.label || item.name || item.id || item.slug || item.value || "",
+    ).trim();
     if (!id) continue;
 
     if (
@@ -756,7 +824,9 @@ function normalizeModelOptions(items = [], { embeddingOnly = false } = {}) {
 
   const embeddingRegex =
     /(embed|embedding|bge|e5|gte|nomic|voyage|mxbai|jina|minilm)/i;
-  const embeddingTagged = candidates.filter((item) => embeddingRegex.test(item.id) || embeddingRegex.test(item.label));
+  const embeddingTagged = candidates.filter(
+    (item) => embeddingRegex.test(item.id) || embeddingRegex.test(item.label),
+  );
   const source = embeddingTagged.length > 0 ? embeddingTagged : candidates;
 
   const seen = new Set();
@@ -793,22 +863,30 @@ async function fetchBackendStatusModelList(source) {
     throw new Error("当前后端向量源暂不支持自动拉取模型，请手动填写");
   }
 
-  const response = await fetchWithTimeout("/api/backends/chat-completions/status", {
-    method: "POST",
-    headers: getRequestHeaders(),
-    body: JSON.stringify({
-      chat_completion_source: chatCompletionSource,
-    }),
-  });
+  const response = await fetchWithTimeout(
+    "/api/backends/chat-completions/status",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      body: JSON.stringify({
+        chat_completion_source: chatCompletionSource,
+      }),
+    },
+  );
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.error) {
     throw new Error(
-      payload?.message || payload?.error || response.statusText || `HTTP ${response.status}`,
+      payload?.message ||
+        payload?.error ||
+        response.statusText ||
+        `HTTP ${response.status}`,
     );
   }
 
-  return normalizeModelOptions(payload?.data || payload, { embeddingOnly: false });
+  return normalizeModelOptions(payload?.data || payload, {
+    embeddingOnly: false,
+  });
 }
 
 async function fetchOpenAICompatibleModelList(apiUrl, apiKey = "") {
@@ -826,19 +904,28 @@ async function fetchOpenAICompatibleModelList(apiUrl, apiKey = "") {
 
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload?.error?.message || payload?.message || response.statusText);
+    throw new Error(
+      payload?.error?.message || payload?.message || response.statusText,
+    );
   }
 
-  return normalizeModelOptions(payload?.data || payload, { embeddingOnly: false });
+  return normalizeModelOptions(payload?.data || payload, {
+    embeddingOnly: false,
+  });
 }
 
 async function fetchOllamaModelList(apiUrl) {
-  const normalizedUrl = normalizeOpenAICompatibleBaseUrl(apiUrl).replace(/\/v1$/i, "");
+  const normalizedUrl = normalizeOpenAICompatibleBaseUrl(apiUrl).replace(
+    /\/v1$/i,
+    "",
+  );
   if (!normalizedUrl) {
     throw new Error("请先填写 Ollama API 地址");
   }
 
-  const response = await fetchWithTimeout(`${normalizedUrl}/api/tags`, { method: "GET" });
+  const response = await fetchWithTimeout(`${normalizedUrl}/api/tags`, {
+    method: "GET",
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(payload?.error || payload?.message || response.statusText);
@@ -867,7 +954,11 @@ export async function fetchAvailableEmbeddingModels(config) {
         await fetchOpenAICompatibleModelList(config.apiUrl, config.apiKey),
       );
       if (models.length === 0) {
-        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+        return {
+          success: false,
+          models: [],
+          error: "未拉取到可用 Embedding 模型",
+        };
       }
       return { success: true, models, error: "" };
     }
@@ -875,18 +966,28 @@ export async function fetchAvailableEmbeddingModels(config) {
     if (config.source === "ollama") {
       const models = await fetchOllamaModelList(config.apiUrl);
       if (models.length === 0) {
-        return { success: false, models: [], error: "未拉取到可用 Ollama 模型" };
+        return {
+          success: false,
+          models: [],
+          error: "未拉取到可用 Ollama 模型",
+        };
       }
       return { success: true, models, error: "" };
     }
 
     if (MODEL_LIST_ENDPOINTS[config.source]) {
-      const payload = await fetchJsonEndpoint(MODEL_LIST_ENDPOINTS[config.source]);
+      const payload = await fetchJsonEndpoint(
+        MODEL_LIST_ENDPOINTS[config.source],
+      );
       const models = normalizeModelOptions(payload, {
         embeddingOnly: config.source === "electronhub",
       });
       if (models.length === 0) {
-        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+        return {
+          success: false,
+          models: [],
+          error: "未拉取到可用 Embedding 模型",
+        };
       }
       return { success: true, models, error: "" };
     }
@@ -894,7 +995,11 @@ export async function fetchAvailableEmbeddingModels(config) {
     if (BACKEND_STATUS_MODEL_SOURCES[config.source]) {
       const models = await fetchBackendStatusModelList(config.source);
       if (models.length === 0) {
-        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+        return {
+          success: false,
+          models: [],
+          error: "未拉取到可用 Embedding 模型",
+        };
       }
       return { success: true, models, error: "" };
     }
@@ -904,7 +1009,11 @@ export async function fetchAvailableEmbeddingModels(config) {
         await fetchOpenAICompatibleModelList(config.apiUrl),
       );
       if (models.length === 0) {
-        return { success: false, models: [], error: "未拉取到可用 Embedding 模型" };
+        return {
+          success: false,
+          models: [],
+          error: "未拉取到可用 Embedding 模型",
+        };
       }
       return { success: true, models, error: "" };
     }
