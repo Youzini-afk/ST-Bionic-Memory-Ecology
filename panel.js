@@ -54,28 +54,30 @@ const DEFAULT_PROMPTS = {
         '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
     ].join("\n"),
 
-    evolution: [
-        "你是一个记忆进化分析器。当新的记忆加入知识图谱时，你需要分析它与现有记忆的关系。",
+    consolidation: [
+        "你是一个记忆整合分析器。当新记忆加入知识图谱时，你需要同时完成两项任务：",
         "",
-        "你的任务：",
-        "1. 判断新记忆是否揭示了与旧记忆相关的新信息",
-        "2. 如果是，决定如何更新旧记忆的描述和分类",
-        "3. 建立新旧记忆之间的有意义连接",
+        "任务一：冲突检测",
+        "- skip: 新记忆与已有记忆完全重复",
+        "- merge: 新记忆是对旧记忆的修正/补充",
+        "- keep: 新记忆是全新信息",
+        "",
+        "任务二：进化分析（仅 action=keep 时）",
+        "- 建立关联连接",
+        "- 反向更新旧记忆",
         "",
         "输出严格 JSON：",
         "{",
-        '  "should_evolve": true/false,',
-        '  "reason": "进化理由",',
-        '  "suggested_connections": ["旧记忆ID"],',
-        '  "neighbor_updates": [',
-        '    {"nodeId": "旧节点ID", "newContext": "修正描述", "newTags": ["标签"]}',
-        "  ]",
+        '  "action": "keep"|"merge"|"skip",',
+        '  "merge_target_id": "旧节点ID",',
+        '  "merged_fields": {},',
+        '  "reason": "理由",',
+        '  "evolution": {',
+        '    "should_evolve": true/false,',
+        '    "connections": ["旧记忆ID"],',
+        '    "neighbor_updates": [{"nodeId": "旧节点ID", "newContext": "修正描述", "newTags": ["标签"]}]',
+        "  }",
         "}",
-        "",
-        "进化规则：",
-        "- 仅当新信息确实改变了对旧记忆的理解时才触发进化",
-        "- 例如：揭露卧底身份 → 修正该角色之前事件中的动机描述",
-        "- 不要对无关记忆强行建立联系",
     ].join("\n"),
 
     compress: [
@@ -732,11 +734,7 @@ function _refreshConfigTab() {
         "bme-setting-recall-graph-diffusion-enabled",
         settings.recallEnableGraphDiffusion ?? true,
     );
-    _setCheckboxValue("bme-setting-evolution-enabled", settings.enableEvolution ?? true);
-    _setCheckboxValue(
-        "bme-setting-precise-conflict-enabled",
-        settings.enablePreciseConflict ?? true,
-    );
+    _setCheckboxValue("bme-setting-consolidation-enabled", settings.enableConsolidation ?? true);
     _setCheckboxValue("bme-setting-synopsis-enabled", settings.enableSynopsis ?? true);
     _setCheckboxValue(
         "bme-setting-visibility-enabled",
@@ -790,16 +788,12 @@ function _refreshConfigTab() {
         settings.importanceWeight ?? 0.1,
     );
     _setInputValue(
-        "bme-setting-evo-neighbor-count",
-        settings.evoNeighborCount ?? 5,
+        "bme-setting-consolidation-neighbor-count",
+        settings.consolidationNeighborCount ?? 5,
     );
     _setInputValue(
-        "bme-setting-evo-consolidate-every",
-        settings.evoConsolidateEvery ?? 50,
-    );
-    _setInputValue(
-        "bme-setting-conflict-threshold",
-        settings.conflictThreshold ?? 0.85,
+        "bme-setting-consolidation-threshold",
+        settings.consolidationThreshold ?? 0.85,
     );
     _setInputValue("bme-setting-synopsis-every", settings.synopsisEveryN ?? 5);
     _setInputValue(
@@ -855,7 +849,7 @@ function _refreshConfigTab() {
 
     _setInputValue("bme-setting-extract-prompt", settings.extractPrompt || DEFAULT_PROMPTS.extract);
     _setInputValue("bme-setting-recall-prompt", settings.recallPrompt || DEFAULT_PROMPTS.recall);
-    _setInputValue("bme-setting-evolution-prompt", settings.evolutionPrompt || DEFAULT_PROMPTS.evolution);
+    _setInputValue("bme-setting-consolidation-prompt", settings.consolidationPrompt || DEFAULT_PROMPTS.consolidation);
     _setInputValue("bme-setting-compress-prompt", settings.compressPrompt || DEFAULT_PROMPTS.compress);
     _setInputValue("bme-setting-synopsis-prompt", settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis);
     _setInputValue("bme-setting-reflection-prompt", settings.reflectionPrompt || DEFAULT_PROMPTS.reflection);
@@ -901,12 +895,8 @@ function _bindConfigControls() {
         _patchSettings({ recallEnableGraphDiffusion: checked });
         _refreshStageCardStates();
     });
-    bindCheckbox("bme-setting-evolution-enabled", (checked) => {
-        _patchSettings({ enableEvolution: checked });
-        _refreshGuardedConfigStates();
-    });
-    bindCheckbox("bme-setting-precise-conflict-enabled", (checked) => {
-        _patchSettings({ enablePreciseConflict: checked });
+    bindCheckbox("bme-setting-consolidation-enabled", (checked) => {
+        _patchSettings({ enableConsolidation: checked });
         _refreshGuardedConfigStates();
     });
     bindCheckbox("bme-setting-synopsis-enabled", (checked) => {
@@ -969,14 +959,11 @@ function _bindConfigControls() {
     bindFloat("bme-setting-importance-weight", 0.1, 0, 1, (value) =>
         _patchSettings({ importanceWeight: value }),
     );
-    bindNumber("bme-setting-evo-neighbor-count", 5, 1, 20, (value) =>
-        _patchSettings({ evoNeighborCount: value }),
+    bindNumber("bme-setting-consolidation-neighbor-count", 5, 1, 20, (value) =>
+        _patchSettings({ consolidationNeighborCount: value }),
     );
-    bindNumber("bme-setting-evo-consolidate-every", 50, 1, 500, (value) =>
-        _patchSettings({ evoConsolidateEvery: value }),
-    );
-    bindFloat("bme-setting-conflict-threshold", 0.85, 0.5, 0.99, (value) =>
-        _patchSettings({ conflictThreshold: value }),
+    bindFloat("bme-setting-consolidation-threshold", 0.85, 0.5, 0.99, (value) =>
+        _patchSettings({ consolidationThreshold: value }),
     );
     bindNumber("bme-setting-synopsis-every", 5, 1, 100, (value) =>
         _patchSettings({ synopsisEveryN: value }),
@@ -1061,9 +1048,9 @@ function _bindConfigControls() {
         "recall",
     );
     bindPromptText(
-        "bme-setting-evolution-prompt",
-        "evolutionPrompt",
-        "evolution",
+        "bme-setting-consolidation-prompt",
+        "consolidationPrompt",
+        "consolidation",
     );
     bindPromptText(
         "bme-setting-compress-prompt",

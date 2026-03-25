@@ -15,7 +15,7 @@ import {
 } from "../../../extensions.js";
 
 import { compressAll, sleepCycle } from "./compressor.js";
-import { evolveMemories } from "./evolution.js";
+import { consolidateMemories } from "./consolidator.js";
 import {
   extractMemories,
   generateReflection,
@@ -122,14 +122,10 @@ const defaultSettings = {
 
   // ====== v2 增强设置 ======
 
-  // ③ A-MEM 记忆进化
-  enableEvolution: true, // 启用记忆进化
-  evoNeighborCount: 5, // 近邻搜索数量
-  evoConsolidateEvery: 50, // 每 N 次进化后整理
-
-  // ② Mem0 精确对照
-  enablePreciseConflict: true, // 启用精确对照
-  conflictThreshold: 0.85, // 相似度阈值
+  // ③ 记忆整合（合并精确对照 + 记忆进化）
+  enableConsolidation: true, // 启用记忆整合
+  consolidationNeighborCount: 5, // 近邻搜索数量
+  consolidationThreshold: 0.85, // 冲突判定相似度阈值
 
   // ⑨ 全局故事概要
   enableSynopsis: true, // 启用全局概要
@@ -1642,20 +1638,23 @@ async function handleExtractionSuccess(
   currentGraph.historyState.extractionCount = extractionCount;
   updateLastExtractedItems(result.newNodeIds || []);
 
-  if (settings.enableEvolution && result.newNodeIds?.length > 0) {
+  if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
     try {
-      await evolveMemories({
+      await consolidateMemories({
         graph: currentGraph,
         newNodeIds: result.newNodeIds,
         embeddingConfig: getEmbeddingConfig(),
-        options: { neighborCount: settings.evoNeighborCount },
-        customPrompt: settings.evolutionPrompt || undefined,
+        options: {
+          neighborCount: settings.consolidationNeighborCount,
+          conflictThreshold: settings.consolidationThreshold,
+        },
+        customPrompt: settings.consolidationPrompt || undefined,
         signal,
       });
-      postProcessArtifacts.push("evolution");
+      postProcessArtifacts.push("consolidation");
     } catch (e) {
       if (isAbortError(e)) throw e;
-      console.error("[ST-BME] 记忆进化失败:", e);
+      console.error("[ST-BME] 记忆整合失败:", e);
     }
   }
 
@@ -2173,10 +2172,6 @@ async function executeExtractionBatch({
     schema: getSchema(),
     embeddingConfig: getEmbeddingConfig(),
     extractPrompt: settings.extractPrompt || undefined,
-    v2Options: {
-      enablePreciseConflict: settings.enablePreciseConflict,
-      conflictThreshold: settings.conflictThreshold,
-    },
     signal,
   });
 
@@ -3356,18 +3351,21 @@ async function onManualEvolve() {
   }
 
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-  const result = await evolveMemories({
+  const result = await consolidateMemories({
     graph: currentGraph,
     newNodeIds: candidateIds,
     embeddingConfig: getEmbeddingConfig(),
-    options: { neighborCount: getSettings().evoNeighborCount },
+    options: {
+      neighborCount: getSettings().consolidationNeighborCount,
+      conflictThreshold: getSettings().consolidationThreshold,
+    },
   });
   await recordGraphMutation({
     beforeSnapshot,
-    artifactTags: ["evolution"],
+    artifactTags: ["consolidation"],
   });
   toastr.success(
-    `进化完成：${result.evolved} 次进化，${result.connections} 条链接，${result.updates} 个回溯更新`,
+    `整合完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}`,
   );
 }
 

@@ -551,19 +551,12 @@
                       </span>
                       <input id="bme-setting-recall-enabled" type="checkbox" />
                     </label>
-                    <label class="bme-toggle-item" for="bme-setting-evolution-enabled">
+                    <label class="bme-toggle-item" for="bme-setting-consolidation-enabled">
                       <span class="bme-toggle-copy">
-                        <span class="bme-toggle-title">启用记忆进化</span>
-                        <span class="bme-toggle-desc">根据新提取结果反向修正既有记忆。</span>
+                        <span class="bme-toggle-title">启用记忆整合</span>
+                        <span class="bme-toggle-desc">去重/冲突检测 + 反向修正既有记忆 + 建立关联边。</span>
                       </span>
-                      <input id="bme-setting-evolution-enabled" type="checkbox" />
-                    </label>
-                    <label class="bme-toggle-item" for="bme-setting-precise-conflict-enabled">
-                      <span class="bme-toggle-copy">
-                        <span class="bme-toggle-title">启用精确对照</span>
-                        <span class="bme-toggle-desc">识别与既有记忆冲突或需要修订的片段。</span>
-                      </span>
-                      <input id="bme-setting-precise-conflict-enabled" type="checkbox" />
+                      <input id="bme-setting-consolidation-enabled" type="checkbox" />
                     </label>
                     <label class="bme-toggle-item" for="bme-setting-synopsis-enabled">
                       <span class="bme-toggle-copy">
@@ -782,42 +775,22 @@
                   </div>
                 </div>
 
-                <div class="bme-config-card bme-guarded-card" data-guard-settings="enableEvolution">
+                <div class="bme-config-card bme-guarded-card" data-guard-settings="enableConsolidation">
                   <div class="bme-config-card-head">
                     <div>
-                      <div class="bme-config-card-title">进化</div>
-                      <div class="bme-config-card-subtitle">控制邻域搜索规模和整理频率。</div>
+                      <div class="bme-config-card-title">记忆整合</div>
+                      <div class="bme-config-card-subtitle">控制近邻搜索规模和冲突判定阈值。</div>
                     </div>
                     <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
                   </div>
                   <div class="bme-config-row">
-                    <label for="bme-setting-evo-neighbor-count">近邻数量</label>
-                    <input id="bme-setting-evo-neighbor-count" class="bme-config-input" type="number" min="1" max="20" />
+                    <label for="bme-setting-consolidation-neighbor-count">近邻数量</label>
+                    <input id="bme-setting-consolidation-neighbor-count" class="bme-config-input" type="number" min="1" max="20" />
                   </div>
                   <div class="bme-config-row">
-                    <label for="bme-setting-evo-consolidate-every">整理频率</label>
+                    <label for="bme-setting-consolidation-threshold">冲突判定阈值</label>
                     <input
-                      id="bme-setting-evo-consolidate-every"
-                      class="bme-config-input"
-                      type="number"
-                      min="1"
-                      max="500"
-                    />
-                  </div>
-                </div>
-
-                <div class="bme-config-card bme-guarded-card" data-guard-settings="enablePreciseConflict">
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">冲突对照</div>
-                      <div class="bme-config-card-subtitle">调整对照阶段的判定阈值。</div>
-                    </div>
-                    <div class="bme-config-guard-note">在“功能开关”中启用后生效。</div>
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-conflict-threshold">对照阈值</label>
-                    <input
-                      id="bme-setting-conflict-threshold"
+                      id="bme-setting-consolidation-threshold"
                       class="bme-config-input"
                       type="number"
                       min="0.5"
@@ -986,26 +959,26 @@
                   <textarea id="bme-setting-recall-prompt" class="bme-config-textarea" placeholder="留空 = 默认召回 prompt"></textarea>
                 </div>
 
-                <div class="bme-prompt-card" data-setting-key="evolutionPrompt" data-default-prompt="evolution">
+                <div class="bme-prompt-card" data-setting-key="consolidationPrompt" data-default-prompt="consolidation">
                   <div class="bme-prompt-card-head">
                     <div>
-                      <div class="bme-config-card-title">记忆进化</div>
-                      <div class="bme-config-card-subtitle">用于分析新记忆如何修正或连接既有节点。</div>
+                      <div class="bme-config-card-title">记忆整合</div>
+                      <div class="bme-config-card-subtitle">用于分析新记忆与旧记忆的冲突、去重和进化关系。</div>
                     </div>
                     <div class="bme-prompt-card-actions">
                       <span class="bme-prompt-status"></span>
                       <button
                         class="menu_button bme-prompt-reset"
-                        data-setting-key="evolutionPrompt"
-                        data-default-prompt="evolution"
-                        data-target-id="bme-setting-evolution-prompt"
+                        data-setting-key="consolidationPrompt"
+                        data-default-prompt="consolidation"
+                        data-target-id="bme-setting-consolidation-prompt"
                         type="button"
                       >
                         恢复默认
                       </button>
                     </div>
                   </div>
-                  <textarea id="bme-setting-evolution-prompt" class="bme-config-textarea" placeholder="留空 = 默认进化 prompt"></textarea>
+                  <textarea id="bme-setting-consolidation-prompt" class="bme-config-textarea" placeholder="留空 = 默认整合 prompt"></textarea>
                 </div>
 
                 <div class="bme-prompt-card" data-setting-key="compressPrompt" data-default-prompt="compress">

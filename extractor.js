@@ -22,9 +22,7 @@ import {
 import { RELATION_TYPES } from "./schema.js";
 import {
   buildNodeVectorText,
-  findSimilarNodesByText,
   isDirectVectorConfig,
-  validateVectorConfig,
 } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -69,7 +67,6 @@ export async function extractMemories({
   schema,
   embeddingConfig,
   extractPrompt,
-  v2Options = {},
   signal = undefined,
 }) {
   throwIfAborted(signal);
@@ -84,8 +81,7 @@ export async function extractMemories({
     };
   }
 
-  const enablePreciseConflict = v2Options.enablePreciseConflict ?? true;
-  const conflictThreshold = v2Options.conflictThreshold ?? 0.85;
+
 
   const effectiveStartSeq = Number.isFinite(startSeq)
     ? startSeq
@@ -154,17 +150,7 @@ export async function extractMemories({
     };
   }
 
-  // ========== v2: Mem0 精确对照阶段 ==========
-  if (enablePreciseConflict && validateVectorConfig(embeddingConfig).valid) {
-    await mem0ConflictCheck(
-      graph,
-      result.operations,
-      embeddingConfig,
-      conflictThreshold,
-      effectiveEndSeq,
-      signal,
-    );
-  }
+
 
   // 执行操作
   const stats = { newNodes: 0, updatedNodes: 0, newEdges: 0 };
@@ -569,92 +555,6 @@ function buildDefaultExtractPrompt(schema) {
 }
 
 // ==================== v2 增强功能 ====================
-
-/**
- * Mem0 启发的精确对照
- * 对每条 create 操作搜索近邻，高相似度时让 LLM 判断 add/update/skip
- */
-async function mem0ConflictCheck(
-  graph,
-  operations,
-  embeddingConfig,
-  threshold,
-  fallbackSeq,
-  signal,
-) {
-  const activeNodes = getActiveNodes(graph).filter((node) => {
-    const text = buildNodeVectorText(node);
-    return typeof text === "string" && text.length > 0;
-  });
-  if (activeNodes.length === 0) return;
-
-  for (const op of operations) {
-    if (op.action !== "create") continue;
-
-    const factText =
-      op.fields?.summary || op.fields?.name || op.fields?.title || "";
-    if (!factText) continue;
-
-    try {
-      throwIfAborted(signal);
-      const similar = await findSimilarNodesByText(
-        graph,
-        factText,
-        embeddingConfig,
-        3,
-        activeNodes,
-        signal,
-      );
-
-      if (similar.length > 0 && similar[0].score > threshold) {
-        const topMatch = graph.nodes.find((n) => n.id === similar[0].nodeId);
-        if (!topMatch) continue;
-
-        const topFields = Object.entries(topMatch.fields)
-          .map(([k, v]) => `${k}: ${v}`)
-          .join(", ");
-
-        const decision = await callLLMForJSON({
-          systemPrompt: [
-            "判断新信息与已有记忆的关系。输出严格 JSON：",
-            '{"action": "add"|"update"|"skip", "targetId": "旧节点ID", "mergedFields": {}}',
-            "- add: 新信息完全不同，应新建",
-            "- update: 新信息是对旧记忆的修正/补充",
-            "- skip: 与旧记忆完全重复",
-          ].join("\n"),
-          userPrompt: [
-            `新信息: [${op.type}] ${factText}`,
-            `最相似旧记忆: [${topMatch.id}] 类型=${topMatch.type}, ${topFields}`,
-            `相似度: ${similar[0].score.toFixed(3)}`,
-          ].join("\n"),
-          maxRetries: 1,
-          signal,
-        });
-
-        if (decision?.action === "update" && decision.targetId) {
-          console.log(
-            `[ST-BME] Mem0对照: create->update (${decision.targetId})`,
-          );
-          op.action = "update";
-          op.nodeId = decision.targetId;
-          op.sourceNodeId = op.sourceNodeId || topMatch.id;
-          op.seq = Number.isFinite(op.seq) ? op.seq : fallbackSeq;
-          if (decision.mergedFields) {
-            op.fields = { ...op.fields, ...decision.mergedFields };
-          }
-        } else if (decision?.action === "skip") {
-          console.log("[ST-BME] Mem0对照: create->skip (重复)");
-          op.action = "_skip";
-        }
-      }
-    } catch (e) {
-      if (isAbortError(e)) {
-        throw e;
-      }
-      console.warn("[ST-BME] Mem0对照失败，保持原操作:", e.message);
-    }
-  }
-}
 
 /**
  * 全局故事概要生成（MemoRAG 启发）
