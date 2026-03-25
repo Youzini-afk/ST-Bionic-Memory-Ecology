@@ -30,7 +30,22 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks[0].type, "legacyPrompt");
+assert.equal(extractProfile.blocks.length, 3);
+assert.deepEqual(
+  extractProfile.blocks.map((block) => block.name),
+  ["角色定义", "输出格式", "行为规则"],
+);
+assert.ok(
+  extractProfile.blocks.every((block) => block.type === "custom"),
+);
+assert.equal(
+  extractProfile.metadata.legacyPromptField,
+  "extractPrompt",
+);
+assert.equal(
+  extractProfile.metadata.legacyPromptSnapshot,
+  "旧提取提示",
+);
 
 const defaults = createDefaultTaskProfiles();
 assert.ok(defaults.extract.profiles.length > 0);

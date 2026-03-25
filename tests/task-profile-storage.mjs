@@ -51,12 +51,17 @@ const activeProfile = getActiveTaskProfile(
   "extract",
 );
 assert.equal(activeProfile.name, "激进提取");
-assert.equal(activeProfile.blocks.length, 3);
-assert.equal(activeProfile.blocks[1].type, "builtin");
-assert.equal(activeProfile.blocks[1].sourceKey, "userMessage");
-assert.equal(activeProfile.blocks[1].injectionMode, "prepend");
-assert.equal(activeProfile.blocks[2].type, "custom");
-assert.equal(activeProfile.blocks[2].role, "user");
+assert.equal(activeProfile.blocks.length, 5);
+const builtinBlock = activeProfile.blocks.find(
+  (block) => block.type === "builtin" && block.sourceKey === "userMessage",
+);
+const customBlock = activeProfile.blocks.find(
+  (block) => block.type === "custom" && block.name === "补充说明",
+);
+assert.ok(builtinBlock);
+assert.equal(builtinBlock.injectionMode, "prepend");
+assert.ok(customBlock);
+assert.equal(customBlock.role, "user");
 assert.equal(activeProfile.regex.localRules.length, 1);
 assert.equal(activeProfile.regex.localRules[0].script_name, "裁边");
 
@@ -72,7 +77,11 @@ assert.equal(exported.profile.name, "激进提取");
 const imported = importTaskProfile(updatedProfiles, JSON.stringify(exported));
 assert.equal(imported.taskType, "extract");
 assert.notEqual(imported.profile.id, clonedProfile.id);
-assert.equal(imported.profile.blocks[1].sourceKey, "userMessage");
+assert.ok(
+  imported.profile.blocks.some(
+    (block) => block.type === "builtin" && block.sourceKey === "userMessage",
+  ),
+);
 
 const restoredProfiles = restoreDefaultTaskProfile(imported.taskProfiles, "extract");
 const restoredActive = getActiveTaskProfile(

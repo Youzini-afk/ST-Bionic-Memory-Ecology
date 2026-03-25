@@ -340,6 +340,7 @@ export function createDefaultTaskProfiles() {
 }
 
 export function createDefaultTaskProfile(taskType) {
+  const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
   const defaults = DEFAULT_TASK_BLOCKS[taskType] || {};
   return {
     id: DEFAULT_PROFILE_ID,
