@@ -1947,12 +1947,12 @@ function _renderTaskProfileWorkspace(state) {
           </div>
 
           <div class="bme-task-header-actions">
-            <button class="menu_button" data-task-action="rename-profile" type="button">重命名</button>
-            <button class="menu_button" data-task-action="save-profile" type="button">保存</button>
-            <button class="menu_button" data-task-action="save-as-profile" type="button">另存为</button>
-            <button class="menu_button" data-task-action="import-profile" type="button">导入</button>
-            <button class="menu_button" data-task-action="export-profile" type="button">导出</button>
-            <button class="menu_button" data-task-action="restore-default-profile" type="button">恢复默认</button>
+            <button class="bme-config-secondary-btn" data-task-action="rename-profile" type="button">重命名</button>
+            <button class="bme-config-secondary-btn" data-task-action="save-profile" type="button">保存</button>
+            <button class="bme-config-secondary-btn" data-task-action="save-as-profile" type="button">另存为</button>
+            <button class="bme-config-secondary-btn" data-task-action="import-profile" type="button">导入</button>
+            <button class="bme-config-secondary-btn" data-task-action="export-profile" type="button">导出</button>
+            <button class="bme-config-secondary-btn" data-task-action="restore-default-profile" type="button">恢复默认</button>
           </div>
         </div>
       </div>
@@ -1999,7 +1999,7 @@ function _renderTaskPromptTab(state) {
         </div>
 
         <div class="bme-task-toolbar-row">
-          <button class="menu_button" data-task-action="add-custom-block" type="button">
+          <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
             新增自定义块
           </button>
           <div class="bme-task-toolbar-inline">
@@ -2014,7 +2014,7 @@ function _renderTaskPromptTab(state) {
                 )
                 .join("")}
             </select>
-            <button class="menu_button" data-task-action="add-builtin-block" type="button">
+            <button class="bme-config-secondary-btn" data-task-action="add-builtin-block" type="button">
               新增内置块
             </button>
           </div>
@@ -2167,7 +2167,7 @@ function _renderTaskRegexTab(state) {
               本地规则只作用于当前任务预设，不会污染宿主酒馆配置。
             </div>
           </div>
-          <button class="menu_button" data-task-action="add-regex-rule" type="button">
+          <button class="bme-config-secondary-btn" data-task-action="add-regex-rule" type="button">
             新增规则
           </button>
         </div>
@@ -2214,7 +2214,7 @@ function _renderTaskBlockListItem(block, index, state) {
       </button>
       <div class="bme-task-inline-actions">
         <button
-          class="menu_button bme-task-mini-btn"
+          class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="move-block-up"
           data-block-id="${_escHtml(block.id)}"
           type="button"
@@ -2222,7 +2222,7 @@ function _renderTaskBlockListItem(block, index, state) {
           上移
         </button>
         <button
-          class="menu_button bme-task-mini-btn"
+          class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="move-block-down"
           data-block-id="${_escHtml(block.id)}"
           type="button"
@@ -2230,7 +2230,7 @@ function _renderTaskBlockListItem(block, index, state) {
           下移
         </button>
         <button
-          class="menu_button bme-task-mini-btn"
+          class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="toggle-block-enabled"
           data-block-id="${_escHtml(block.id)}"
           type="button"
@@ -2238,7 +2238,7 @@ function _renderTaskBlockListItem(block, index, state) {
           ${block.enabled ? "停用" : "启用"}
         </button>
         <button
-          class="menu_button bme-task-mini-btn"
+          class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="delete-block"
           data-block-id="${_escHtml(block.id)}"
           type="button"
@@ -2480,7 +2480,7 @@ function _renderRegexRuleListItem(rule, index, state) {
       </button>
       <div class="bme-task-inline-actions">
         <button
-          class="menu_button bme-task-mini-btn"
+          class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="delete-regex-rule"
           data-rule-id="${_escHtml(rule.id)}"
           type="button"

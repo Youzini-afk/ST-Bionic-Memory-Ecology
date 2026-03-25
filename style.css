@@ -1454,6 +1454,10 @@
 
 .bme-task-mini-btn {
   min-width: 0;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+  border-radius: 8px;
 }
 
 .bme-task-empty,
