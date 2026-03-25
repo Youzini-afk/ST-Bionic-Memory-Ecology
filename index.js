@@ -141,9 +141,9 @@ const defaultSettings = {
   synopsisEveryN: 5, // 每 N 次提取后更新概要
 
   // ⑥ 认知边界过滤（P1）
-  enableVisibility: false, // 启用认知边界
+  enableVisibility: true, // 启用认知边界
   // ⑦ 双记忆交叉检索（P1）
-  enableCrossRecall: false, // 启用交叉检索
+  enableCrossRecall: true, // 启用交叉检索
 
   // ① 惊奇度分割（P2）
   enableSmartTrigger: false, // 启用惊奇度分割
