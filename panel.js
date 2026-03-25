@@ -2661,7 +2661,8 @@ function _moveTaskBlock(blockId, direction) {
       return null;
     }
     [blocks[index], blocks[targetIndex]] = [blocks[targetIndex], blocks[index]];
-    draft.blocks = _normalizeTaskBlocks(blocks);
+    // 直接重新编号，不要再 sort（否则会按旧 order 排回去）
+    draft.blocks = blocks.map((block, i) => ({ ...block, order: i }));
     return { selectBlockId: blockId };
   });
 }
