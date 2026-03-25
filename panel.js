@@ -2239,7 +2239,7 @@ function _renderTaskBlockEditor(state) {
   const legacyField = getLegacyPromptFieldForTask(state.taskType);
   const legacyValue =
     legacyField && block.type === "legacyPrompt"
-      ? state.settings?.[legacyField] || block.content || ""
+      ? state.settings?.[legacyField] || block.content || (DEFAULT_PROMPTS[state.taskType]?.join?.("\n") ?? "") || ""
       : block.content || "";
 
   return `
