@@ -2163,10 +2163,13 @@ function _renderTaskBlockEditor(state) {
         </div>
       </div>
       <span class="bme-task-pill">${_escHtml(_getTaskBlockTypeLabel(block.type))}</span>
+      ${block.type === "builtin" ? _helpTip(
+        (state.builtinBlockDefinitions.find((d) => d.sourceKey === block.sourceKey) || {}).description || ""
+      ) : ""}
     </div>
 
     <div class="bme-config-row">
-      <label>块名称${_helpTip("用于工作区列表显示。修改后立即生效。")}</label>
+      <label>块名称</label>
       <input
         class="bme-config-input"
         type="text"
@@ -2178,7 +2181,7 @@ function _renderTaskBlockEditor(state) {
 
     <div class="bme-task-field-grid">
       <div class="bme-config-row">
-        <label>角色${_helpTip("决定此块内容以什么角色发送给 LLM。system = 系统指令，user = 用户输入，assistant = 模型回复。")}</label>
+        <label>角色</label>
         <select class="bme-config-input" data-block-field="role">
           ${TASK_PROFILE_ROLE_OPTIONS.map(
             (item) => `
@@ -2190,7 +2193,7 @@ function _renderTaskBlockEditor(state) {
         </select>
       </div>
       <div class="bme-config-row">
-        <label>注入方式${_helpTip("追加 = 拼接到同角色消息末尾。前置 = 拼接到同角色消息开头。")}</label>
+        <label>注入方式</label>
         <select class="bme-config-input" data-block-field="injectionMode">
           ${TASK_PROFILE_INJECTION_OPTIONS.map(
             (item) => `
@@ -2261,7 +2264,7 @@ function _renderTaskBlockEditor(state) {
             `
           : `
               <div class="bme-config-row">
-                <label>块内容${_helpTip("直接编写的 prompt 文本。支持 {{userMessage}} / {{recentMessages}} / {{schema}} 等变量模板。")}</label>
+                <label>块内容</label>
                 <textarea
                   class="bme-config-textarea"
                   data-block-field="content"
