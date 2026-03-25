@@ -148,8 +148,8 @@ const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "基础生成参数",
     fields: [
-      { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number", defaultValue: 4096 },
-      { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number", defaultValue: 2048 },
+      { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number", defaultValue: "" },
+      { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number", defaultValue: "" },
       { key: "reply_count", label: "回复次数", type: "number", defaultValue: 1 },
       { key: "stream", label: "流式输出", type: "tri_bool", defaultValue: false },
       { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01, defaultValue: 0.7 },
