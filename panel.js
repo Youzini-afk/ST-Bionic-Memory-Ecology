@@ -2206,7 +2206,6 @@ function _renderTaskBlockListItem(block, index, state) {
           data-task-action="delete-block"
           data-block-id="${_escHtml(block.id)}"
           type="button"
-          ${block.type === "legacyPrompt" ? "disabled" : ""}
         >
           删除
         </button>
@@ -2661,10 +2660,7 @@ function _deleteTaskBlock(blockId) {
     const index = blocks.findIndex((item) => item.id === blockId);
     if (index < 0) return null;
     const block = blocks[index];
-    if (block.type === "legacyPrompt") {
-      toastr.info("兼容块不可删除", "ST-BME");
-      return null;
-    }
+
     blocks.splice(index, 1);
     draft.blocks = _normalizeTaskBlocks(blocks);
     return {
