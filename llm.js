@@ -215,7 +215,7 @@ function buildJsonAttemptMessages(systemPrompt, userPrompt, attempt, reason = ''
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = LLM_REQUEST_TIMEOUT_MS) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const timeout = setTimeout(() => controller.abort(new DOMException(`LLM 请求超时 (${Math.round(timeoutMs / 1000)}s)`, 'AbortError')), timeoutMs);
     const signal = options.signal
         ? createCombinedAbortSignal(options.signal, controller.signal)
         : controller.signal;
@@ -243,10 +243,10 @@ function createCombinedAbortSignal(...signals) {
     const controller = new AbortController();
     for (const signal of validSignals) {
         if (signal.aborted) {
-            controller.abort();
+            controller.abort(signal.reason);
             return controller.signal;
         }
-        signal.addEventListener('abort', () => controller.abort(), { once: true });
+        signal.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
     }
     return controller.signal;
 }

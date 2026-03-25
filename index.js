@@ -798,7 +798,7 @@ async function fetchLocalWithTimeout(
   timeoutMs = LOCAL_VECTOR_TIMEOUT_MS,
 ) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new DOMException(`本地请求超时 (${Math.round(timeoutMs / 1000)}s)`, 'AbortError')), timeoutMs);
   let signal = controller.signal;
   if (options.signal) {
     if (
@@ -808,7 +808,7 @@ async function fetchLocalWithTimeout(
       signal = AbortSignal.any([options.signal, controller.signal]);
     } else {
       signal = controller.signal;
-      options.signal.addEventListener("abort", () => controller.abort(), {
+      options.signal.addEventListener("abort", () => controller.abort(options.signal.reason), {
         once: true,
       });
     }
