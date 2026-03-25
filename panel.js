@@ -7,8 +7,8 @@ import {
   cloneTaskProfile,
   createBuiltinPromptBlock,
   createCustomPromptBlock,
-  createLegacyPromptBlock,
   createLocalRegexRule,
+  DEFAULT_TASK_BLOCKS,
   ensureTaskProfiles,
   exportTaskProfile as serializeTaskProfile,
   getBuiltinBlockDefinitions,
@@ -25,101 +25,13 @@ import {
   getVectorIndexStats,
 } from "./vector-index.js";
 
-// ==================== 默认 Prompt 文本 ====================
-// 这些文本会显示在配置页中，供用户查看和修改
-const DEFAULT_PROMPTS = {
-  extract: [
-    "你是一个记忆提取分析器。从对话中提取结构化记忆节点并存入知识图谱。",
-    "",
-    "输出格式为严格 JSON：",
-    "{",
-    '  "thought": "你对本段对话的分析（事件/角色变化/新信息）",',
-    '  "operations": [',
-    "    {",
-    '      "action": "create",',
-    '      "type": "event",',
-    '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
-    '      "importance": 6,',
-    '      "ref": "evt1",',
-    '      "links": [',
-    '        {"targetNodeId": "existing-id", "relation": "involved_in", "strength": 0.9}',
-    "      ]",
-    "    },",
-    "    {",
-    '      "action": "update",',
-    '      "nodeId": "existing-node-id",',
-    '      "fields": {"state": "新的状态"}',
-    "    }",
-    "  ]",
-    "}",
-    "",
-    "规则：",
-    "- 每批对话最多创建 1 个事件节点，多个子事件合并为一条",
-    "- 角色/地点节点：如果图中已有同名节点，用 update 而非 create",
-    "- 不要虚构内容，只提取对话中有证据支持的信息",
-    "- importance 范围 1-10，普通事件 5，关键转折 8+",
-    "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
-    "- summary 应该是摘要抽象，不要复制原文",
-  ].join("\n"),
-
-  recall: [
-    "你是一个记忆召回分析器。",
-    "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
-    "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
-    "输出严格的 JSON 格式：",
-    '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
-  ].join("\n"),
-
-  consolidation: [
-    "你是一个记忆整合分析器。当新记忆加入知识图谱时，你需要同时完成两项任务：",
-    "",
-    "任务一：冲突检测",
-    "- skip: 新记忆与已有记忆完全重复",
-    "- merge: 新记忆是对旧记忆的修正/补充",
-    "- keep: 新记忆是全新信息",
-    "",
-    "任务二：进化分析（仅 action=keep 时）",
-    "- 建立关联连接",
-    "- 反向更新旧记忆",
-    "",
-    "输出严格 JSON：",
-    '{ "results": [',
-    '  { "node_id": "新记忆节点ID",',
-    '    "action": "keep"|"merge"|"skip",',
-    '    "merge_target_id": "旧节点ID (仅merge)",',
-    '    "reason": "理由",',
-    '    "evolution": { "should_evolve": true/false, "connections": ["旧记忆ID"], "neighbor_updates": [...] }',
-    "  }",
-    "] }",
-  ].join("\n"),
-
-  compress: [
-    "你是一个记忆压缩器。将多个同类型节点总结为一条更高层级的压缩节点。",
-    "",
-    "输出格式为严格 JSON：",
-    '{"fields": {"summary": "...", ...}}',
-    "",
-    "规则：",
-    "- 保留关键信息：因果关系、不可逆结果、未解决伏笔",
-    "- 去除重复和低信息密度内容",
-    "- 压缩后文本应精炼，目标 150 字左右",
-  ].join("\n"),
-
-  synopsis: [
-    "你是故事概要生成器。根据事件线、角色和主线生成简洁的前情提要。",
-    '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
-    "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
-  ].join("\n"),
-
-  reflection: [
-    "你是 RP 长期记忆系统的反思生成器。",
-    '输出严格 JSON：{"insight":"...","trigger":"...","suggestion":"...","importance":1-10}',
-    "insight 应总结最近情节中最值得长期保留的变化、关系趋势或潜在线索。",
-    "trigger 说明触发这条反思的关键事件或矛盾。",
-    "suggestion 给出后续检索或叙事上值得关注的提示。",
-    "不要复述全部事件，要提炼高层结论。",
-  ].join("\n"),
-};
+// 从 DEFAULT_TASK_BLOCKS 派生的合并文本（用于旧版兼容回退）
+const DEFAULT_PROMPTS = Object.fromEntries(
+  Object.entries(DEFAULT_TASK_BLOCKS).map(([key, { role, format, rules }]) => [
+    key,
+    [role, format, rules].filter(Boolean).join("\n\n"),
+  ]),
+);
 
 const TASK_PROFILE_TABS = [
   { id: "generation", label: "生成参数" },
@@ -1681,15 +1593,6 @@ async function _handleTaskProfileWorkspaceClick(event) {
         return { selectBlockId: nextBlock.id };
       });
       return;
-    case "add-legacy-block":
-      _updateCurrentTaskProfile((draft, context) => {
-        const nextBlock = createLegacyPromptBlock(context.taskType, {
-          order: draft.blocks.length,
-        });
-        draft.blocks.push(nextBlock);
-        return { selectBlockId: nextBlock.id };
-      });
-      return;
     case "add-builtin-block": {
       const select = document.getElementById("bme-task-builtin-select");
       const sourceKey = String(select?.value || "").trim();
@@ -1956,9 +1859,6 @@ function _renderTaskPromptTab(state) {
           <div class="bme-task-toolbar-inline">
             <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
               + 自定义块
-            </button>
-            <button class="bme-config-secondary-btn" data-task-action="add-legacy-block" type="button">
-              + 默认提示词
             </button>
             <span class="bme-task-action-sep"></span>
             <select id="bme-task-builtin-select" class="bme-config-input bme-task-builtin-select">
