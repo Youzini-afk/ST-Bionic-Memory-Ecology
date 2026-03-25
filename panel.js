@@ -677,10 +677,35 @@ function _bindActions() {
         "bme-act-vector-reembed": "reembedDirect",
     };
 
+    const actionLabels = {
+        extract: "手动提取",
+        compress: "手动压缩",
+        sleep: "执行遗忘",
+        synopsis: "更新概要",
+        export: "导出图谱",
+        import: "导入图谱",
+        rebuild: "重建图谱",
+        evolve: "强制进化",
+        rebuildVectorIndex: "重建向量",
+        reembedDirect: "直连重嵌",
+    };
+
     for (const [elementId, actionKey] of Object.entries(bindings)) {
-        document.getElementById(elementId)?.addEventListener("click", async () => {
+        const btn = document.getElementById(elementId);
+        if (!btn) continue;
+
+        btn.addEventListener("click", async () => {
             const handler = _actionHandlers[actionKey];
             if (!handler) return;
+
+            const label = actionLabels[actionKey] || actionKey;
+
+            // 防止重复点击
+            if (btn.disabled) return;
+            btn.disabled = true;
+            btn.style.opacity = "0.5";
+
+            toastr.info(`${label} 进行中…`, "ST-BME", { timeOut: 2000 });
 
             try {
                 await handler();
@@ -692,14 +717,24 @@ function _bindActions() {
                 if (document.getElementById("bme-pane-injection")?.classList.contains("active")) {
                     await _refreshInjectionPreview();
                 }
+                toastr.success(`${label} 完成`, "ST-BME");
             } catch (error) {
                 console.error(`[ST-BME] Action ${actionKey} failed:`, error);
-                toastr.error(`操作失败: ${error?.message || error}`);
+                toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
+            } finally {
+                btn.disabled = false;
+                btn.style.opacity = "";
             }
         });
     }
 
     document.getElementById("bme-act-vector-range")?.addEventListener("click", async () => {
+        const btn = document.getElementById("bme-act-vector-range");
+        if (btn?.disabled) return;
+        if (btn) { btn.disabled = true; btn.style.opacity = "0.5"; }
+
+        toastr.info("范围重建 进行中…", "ST-BME", { timeOut: 2000 });
+
         try {
             const start = _parseOptionalInt(document.getElementById("bme-range-start")?.value);
             const end = _parseOptionalInt(document.getElementById("bme-range-end")?.value);
@@ -710,9 +745,12 @@ function _bindActions() {
             );
             _refreshDashboard();
             _refreshGraph();
+            toastr.success("范围重建 完成", "ST-BME");
         } catch (error) {
             console.error("[ST-BME] Action rebuildVectorRange failed:", error);
-            toastr.error(`操作失败: ${error?.message || error}`);
+            toastr.error(`范围重建 失败: ${error?.message || error}`, "ST-BME");
+        } finally {
+            if (btn) { btn.disabled = false; btn.style.opacity = ""; }
         }
     });
 }
