@@ -121,8 +121,8 @@ const DEFAULT_PROMPTS = {
 };
 
 const TASK_PROFILE_TABS = [
-  { id: "prompt", label: "Prompt 编排" },
   { id: "generation", label: "生成参数" },
+  { id: "prompt", label: "Prompt 编排" },
   { id: "regex", label: "正则" },
 ];
 
@@ -284,7 +284,7 @@ let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "api";
 let currentTaskProfileTaskType = "extract";
-let currentTaskProfileTabId = "prompt";
+let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
 let currentTaskProfileRuleId = "";
 let fetchedMemoryLLMModels = [];
@@ -1636,7 +1636,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   }
 
   if (!TASK_PROFILE_TABS.some((item) => item.id === currentTaskProfileTabId)) {
-    currentTaskProfileTabId = TASK_PROFILE_TABS[0]?.id || "prompt";
+    currentTaskProfileTabId = TASK_PROFILE_TABS[0]?.id || "generation";
   }
 
   const bucket = taskProfiles[currentTaskProfileTaskType] || {
@@ -1916,7 +1916,7 @@ function _renderTaskProfileWorkspace(state) {
             </div>
           </div>
 
-          <div class="bme-task-header-grid">
+          <div class="bme-task-header-fields">
             <div class="bme-config-row">
               <label for="bme-task-profile-select">当前预设</label>
               <select id="bme-task-profile-select" class="bme-config-input">
@@ -1947,12 +1947,14 @@ function _renderTaskProfileWorkspace(state) {
           </div>
 
           <div class="bme-task-header-actions">
-            <button class="bme-config-secondary-btn" data-task-action="rename-profile" type="button">重命名</button>
             <button class="bme-config-secondary-btn" data-task-action="save-profile" type="button">保存</button>
+            <button class="bme-config-secondary-btn" data-task-action="rename-profile" type="button">重命名</button>
             <button class="bme-config-secondary-btn" data-task-action="save-as-profile" type="button">另存为</button>
+            <span class="bme-task-action-sep"></span>
             <button class="bme-config-secondary-btn" data-task-action="import-profile" type="button">导入</button>
             <button class="bme-config-secondary-btn" data-task-action="export-profile" type="button">导出</button>
-            <button class="bme-config-secondary-btn" data-task-action="restore-default-profile" type="button">恢复默认</button>
+            <span class="bme-task-action-sep"></span>
+            <button class="bme-config-secondary-btn bme-task-btn-danger" data-task-action="restore-default-profile" type="button">恢复默认</button>
           </div>
         </div>
       </div>
@@ -1999,25 +2001,27 @@ function _renderTaskPromptTab(state) {
         </div>
 
         <div class="bme-task-toolbar-row">
-          <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
-            新增自定义块
-          </button>
           <div class="bme-task-toolbar-inline">
-            <select id="bme-task-builtin-select" class="bme-config-input">
+            <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
+              + 自定义块
+            </button>
+            <span class="bme-task-action-sep"></span>
+            <select id="bme-task-builtin-select" class="bme-config-input bme-task-builtin-select">
               ${state.builtinBlockDefinitions
                 .map(
                   (item) => `
                     <option value="${_escHtml(item.sourceKey)}">
-                      ${_escHtml(item.name)} · ${_escHtml(item.sourceKey)}
+                      ${_escHtml(item.name)}
                     </option>
                   `,
                 )
                 .join("")}
             </select>
             <button class="bme-config-secondary-btn" data-task-action="add-builtin-block" type="button">
-              新增内置块
+              + 内置块
             </button>
           </div>
+          <span class="bme-task-block-count">${state.blocks.length} 个块</span>
         </div>
 
         <div class="bme-task-list">
@@ -2042,7 +2046,7 @@ function _renderTaskPromptTab(state) {
 
 function _renderTaskGenerationTab(state) {
   return `
-    <div class="bme-task-generation-grid">
+    <div class="bme-task-tab-body">
       ${TASK_PROFILE_GENERATION_GROUPS.map(
         (group) => `
           <div class="bme-config-card">
@@ -2064,11 +2068,8 @@ function _renderTaskGenerationTab(state) {
           </div>
         `,
       ).join("")}
-      <div class="bme-config-card">
-        <div class="bme-config-card-title">运行时说明</div>
-        <div class="bme-config-help">
-          这里配置的是完整版 generation options。实际请求发送前，仍会根据模型能力做过滤，避免把不支持的字段直接下发给 provider。
-        </div>
+      <div class="bme-task-note">
+        <strong>运行时说明</strong> — 这里配置的是完整版 generation options。实际请求发送前，仍会根据模型能力做过滤，避免把不支持的字段直接下发给 provider。
       </div>
     </div>
   `;
@@ -2077,7 +2078,8 @@ function _renderTaskGenerationTab(state) {
 function _renderTaskRegexTab(state) {
   const regex = state.profile.regex || {};
   return `
-    <div class="bme-task-regex-grid">
+    <div class="bme-task-tab-body">
+      <div class="bme-task-regex-top">
       <div class="bme-config-card">
         <div class="bme-config-card-head">
           <div>
@@ -2139,9 +2141,28 @@ function _renderTaskRegexTab(state) {
             .join("")}
         </div>
 
-        <div class="bme-task-section-label">应用阶段</div>
+        <div class="bme-task-section-label">输入阶段</div>
         <div class="bme-task-toggle-list">
-          ${TASK_PROFILE_REGEX_STAGES.map(
+          ${TASK_PROFILE_REGEX_STAGES.filter((s) => !s.key.startsWith("output.") && s.key !== "rawResponse" && s.key !== "beforeParse").map(
+            (stage) => `
+              <label class="bme-toggle-item">
+                <span class="bme-toggle-copy">
+                  <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
+                  <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
+                </span>
+                <input
+                  type="checkbox"
+                  data-regex-stage="${_escHtml(stage.key)}"
+                  ${(regex.stages?.[stage.key] ?? false) ? "checked" : ""}
+                />
+              </label>
+            `,
+          ).join("")}
+        </div>
+
+        <div class="bme-task-section-label">输出阶段</div>
+        <div class="bme-task-toggle-list">
+          ${TASK_PROFILE_REGEX_STAGES.filter((s) => s.key.startsWith("output.") || s.key === "rawResponse" || s.key === "beforeParse").map(
             (stage) => `
               <label class="bme-toggle-item">
                 <span class="bme-toggle-copy">
@@ -2168,7 +2189,7 @@ function _renderTaskRegexTab(state) {
             </div>
           </div>
           <button class="bme-config-secondary-btn" data-task-action="add-regex-rule" type="button">
-            新增规则
+            + 新增规则
           </button>
         </div>
 
@@ -2183,6 +2204,7 @@ function _renderTaskRegexTab(state) {
                 </div>
               `}
         </div>
+      </div>
       </div>
 
       <div class="bme-config-card">
