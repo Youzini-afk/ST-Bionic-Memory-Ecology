@@ -1506,6 +1506,69 @@
   margin-bottom: 12px;
 }
 
+/* ── 滑动条组件 ── */
+
+.bme-range-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bme-range-input {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.bme-range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--bme-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid rgba(0, 0, 0, 0.3);
+  transition: box-shadow 0.15s ease;
+}
+
+.bme-range-input::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(233, 69, 96, 0.15);
+}
+
+.bme-range-input::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--bme-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid rgba(0, 0, 0, 0.3);
+}
+
+.bme-range-input::-moz-range-track {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+}
+
+.bme-range-number {
+  width: 72px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.bme-range-value {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--bme-primary);
+  margin-left: 6px;
+}
+
 .bme-task-section-label {
   margin: 16px 0 10px;
   font-size: 11px;

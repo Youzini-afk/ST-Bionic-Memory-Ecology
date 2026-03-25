@@ -148,95 +148,47 @@ const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "基础生成参数",
     fields: [
-      { key: "max_context_tokens", label: "max_context_tokens", type: "number" },
-      {
-        key: "max_completion_tokens",
-        label: "max_completion_tokens",
-        type: "number",
-      },
-      { key: "reply_count", label: "reply_count", type: "number" },
-      { key: "stream", label: "stream", type: "tri_bool" },
-      {
-        key: "temperature",
-        label: "temperature",
-        type: "number",
-        step: "0.01",
-      },
-      { key: "top_p", label: "top_p", type: "number", step: "0.01" },
-      { key: "top_k", label: "top_k", type: "number" },
-      { key: "top_a", label: "top_a", type: "number", step: "0.01" },
-      { key: "min_p", label: "min_p", type: "number", step: "0.01" },
-      { key: "seed", label: "seed", type: "number" },
+      { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number" },
+      { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number" },
+      { key: "reply_count", label: "回复次数", type: "number" },
+      { key: "stream", label: "流式输出", type: "tri_bool" },
+      { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01 },
+      { key: "top_p", label: "Top P", type: "range", min: 0, max: 1, step: 0.01 },
+      { key: "top_k", label: "Top K", type: "number" },
+      { key: "top_a", label: "Top A", type: "range", min: 0, max: 1, step: 0.01 },
+      { key: "min_p", label: "Min P", type: "range", min: 0, max: 1, step: 0.01 },
+      { key: "seed", label: "随机种子 (Seed)", type: "number" },
     ],
   },
   {
     title: "惩罚参数",
     fields: [
-      {
-        key: "frequency_penalty",
-        label: "frequency_penalty",
-        type: "number",
-        step: "0.01",
-      },
-      {
-        key: "presence_penalty",
-        label: "presence_penalty",
-        type: "number",
-        step: "0.01",
-      },
-      {
-        key: "repetition_penalty",
-        label: "repetition_penalty",
-        type: "number",
-        step: "0.01",
-      },
+      { key: "frequency_penalty", label: "频率惩罚", type: "range", min: -2, max: 2, step: 0.01 },
+      { key: "presence_penalty", label: "存在惩罚", type: "range", min: -2, max: 2, step: 0.01 },
+      { key: "repetition_penalty", label: "重复惩罚", type: "range", min: 0, max: 3, step: 0.01 },
     ],
   },
   {
     title: "行为参数",
     fields: [
-      {
-        key: "squash_system_messages",
-        label: "squash_system_messages",
-        type: "tri_bool",
-      },
+      { key: "squash_system_messages", label: "合并系统消息", type: "tri_bool" },
       {
         key: "reasoning_effort",
-        label: "reasoning_effort",
+        label: "推理努力度",
         type: "enum",
         options: [
           { value: "", label: "跟随默认" },
-          { value: "minimal", label: "minimal" },
-          { value: "low", label: "low" },
-          { value: "medium", label: "medium" },
-          { value: "high", label: "high" },
+          { value: "minimal", label: "最低" },
+          { value: "low", label: "低" },
+          { value: "medium", label: "中" },
+          { value: "high", label: "高" },
         ],
       },
-      {
-        key: "request_thoughts",
-        label: "request_thoughts",
-        type: "tri_bool",
-      },
-      {
-        key: "enable_function_calling",
-        label: "enable_function_calling",
-        type: "tri_bool",
-      },
-      {
-        key: "enable_web_search",
-        label: "enable_web_search",
-        type: "tri_bool",
-      },
-      {
-        key: "character_name_prefix",
-        label: "character_name_prefix",
-        type: "text",
-      },
-      {
-        key: "wrap_user_messages_in_quotes",
-        label: "wrap_user_messages_in_quotes",
-        type: "tri_bool",
-      },
+      { key: "request_thoughts", label: "请求思考过程", type: "tri_bool" },
+      { key: "enable_function_calling", label: "函数调用", type: "tri_bool" },
+      { key: "enable_web_search", label: "网页搜索", type: "tri_bool" },
+      { key: "character_name_prefix", label: "角色名前缀", type: "text" },
+      { key: "wrap_user_messages_in_quotes", label: "用户消息加引号", type: "tri_bool" },
     ],
   },
 ];
@@ -1563,6 +1515,19 @@ function _handleTaskProfileWorkspaceInput(event) {
   }
 
   if (target.matches("[data-generation-key]")) {
+    // 滑动条 ↔ 数字输入 同步
+    const group = target.closest(".bme-range-group");
+    if (group) {
+      const key = target.dataset.generationKey;
+      const sibling = group.querySelector(
+        target.type === "range" ? `.bme-range-number` : `.bme-range-input`,
+      );
+      if (sibling) sibling.value = target.value;
+      // 更新 label 上的值显示
+      const row = target.closest(".bme-config-row");
+      const badge = row?.querySelector(".bme-range-value");
+      if (badge) badge.textContent = target.value || "默认";
+    }
     _persistGenerationField(target, false);
     return;
   }
@@ -2462,6 +2427,39 @@ function _renderGenerationField(field, value) {
             )
             .join("")}
         </select>
+      </div>
+    `;
+  }
+
+  if (field.type === "range") {
+    const numValue = value != null && value !== "" ? Number(value) : "";
+    const displayValue = numValue !== "" ? numValue : field.min ?? 0;
+    return `
+      <div class="bme-config-row">
+        <label>${_escHtml(field.label)} <span class="bme-range-value">${numValue !== "" ? numValue : "默认"}</span></label>
+        <div class="bme-range-group">
+          <input
+            class="bme-range-input"
+            type="range"
+            min="${field.min ?? 0}"
+            max="${field.max ?? 1}"
+            step="${field.step ?? 0.01}"
+            value="${displayValue}"
+            data-generation-key="${_escHtml(field.key)}"
+            data-value-type="number"
+          />
+          <input
+            class="bme-config-input bme-range-number"
+            type="number"
+            min="${field.min ?? 0}"
+            max="${field.max ?? 1}"
+            step="${field.step ?? 0.01}"
+            value="${_escHtml(numValue)}"
+            placeholder="默认"
+            data-generation-key="${_escHtml(field.key)}"
+            data-value-type="number"
+          />
+        </div>
       </div>
     `;
   }
