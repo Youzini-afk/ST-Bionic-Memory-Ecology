@@ -5,13 +5,51 @@ import { getRequestHeaders } from "../../../../script.js";
 import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
 import { resolveTaskGenerationOptions } from "./generation-options.js";
-import { recordTaskLlmRequest } from "./runtime-debug.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const RETRY_JSON_COMPLETION_TOKENS = 3200;
+
+function cloneRuntimeDebugValue(value, fallback = null) {
+  if (value == null) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback ?? value;
+  }
+}
+
+function getRuntimeDebugState() {
+  const stateKey = "__stBmeRuntimeDebugState";
+  if (
+    !globalThis[stateKey] ||
+    typeof globalThis[stateKey] !== "object"
+  ) {
+    globalThis[stateKey] = {
+      hostCapabilities: null,
+      taskPromptBuilds: {},
+      taskLlmRequests: {},
+      injections: {},
+      updatedAt: "",
+    };
+  }
+  return globalThis[stateKey];
+}
+
+function recordTaskLlmRequest(taskType, snapshot = {}) {
+  const normalizedTaskType = String(taskType || "").trim() || "unknown";
+  const state = getRuntimeDebugState();
+  state.taskLlmRequests[normalizedTaskType] = {
+    updatedAt: new Date().toISOString(),
+    ...cloneRuntimeDebugValue(snapshot, {}),
+  };
+  state.updatedAt = new Date().toISOString();
+}
 
 function getLlmTestOverride(name) {
   const override = globalThis.__stBmeTestOverrides?.llm?.[name];

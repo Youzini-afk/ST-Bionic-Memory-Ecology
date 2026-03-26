@@ -2,7 +2,6 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
-import { recordTaskPromptBuild } from "./runtime-debug.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
 
 const WORLD_INFO_VARIABLE_KEYS = [
@@ -14,6 +13,45 @@ const WORLD_INFO_VARIABLE_KEYS = [
   "activatedWorldInfoNames",
   "taskAdditionalMessages",
 ];
+
+function cloneRuntimeDebugValue(value, fallback = null) {
+  if (value == null) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback ?? value;
+  }
+}
+
+function getRuntimeDebugState() {
+  const stateKey = "__stBmeRuntimeDebugState";
+  if (
+    !globalThis[stateKey] ||
+    typeof globalThis[stateKey] !== "object"
+  ) {
+    globalThis[stateKey] = {
+      hostCapabilities: null,
+      taskPromptBuilds: {},
+      taskLlmRequests: {},
+      injections: {},
+      updatedAt: "",
+    };
+  }
+  return globalThis[stateKey];
+}
+
+function recordTaskPromptBuild(taskType, snapshot = {}) {
+  const normalizedTaskType = String(taskType || "").trim() || "unknown";
+  const state = getRuntimeDebugState();
+  state.taskPromptBuilds[normalizedTaskType] = {
+    updatedAt: new Date().toISOString(),
+    ...cloneRuntimeDebugValue(snapshot, {}),
+  };
+  state.updatedAt = new Date().toISOString();
+}
 
 function getByPath(target, path) {
   return String(path || "")

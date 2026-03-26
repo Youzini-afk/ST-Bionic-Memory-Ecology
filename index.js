@@ -60,11 +60,6 @@ import {
   rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "./runtime-state.js";
-import {
-  getRuntimeDebugSnapshot as readRuntimeDebugSnapshot,
-  recordHostCapabilitySnapshot,
-  recordInjectionSnapshot,
-} from "./runtime-debug.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 import {
   deleteBackendVectorHashesForRecovery,
@@ -86,6 +81,75 @@ const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
 const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
 const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
+
+function cloneRuntimeDebugValue(value, fallback = null) {
+  if (value == null) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback ?? value;
+  }
+}
+
+function getRuntimeDebugState() {
+  const stateKey = "__stBmeRuntimeDebugState";
+  if (
+    !globalThis[stateKey] ||
+    typeof globalThis[stateKey] !== "object"
+  ) {
+    globalThis[stateKey] = {
+      hostCapabilities: null,
+      taskPromptBuilds: {},
+      taskLlmRequests: {},
+      injections: {},
+      updatedAt: "",
+    };
+  }
+  return globalThis[stateKey];
+}
+
+function touchRuntimeDebugState() {
+  const state = getRuntimeDebugState();
+  state.updatedAt = new Date().toISOString();
+  return state;
+}
+
+function recordHostCapabilitySnapshot(snapshot = null) {
+  const state = touchRuntimeDebugState();
+  state.hostCapabilities = cloneRuntimeDebugValue(snapshot, null);
+}
+
+function recordInjectionSnapshot(kind, snapshot = {}) {
+  const normalizedKind = String(kind || "").trim() || "default";
+  const state = touchRuntimeDebugState();
+  state.injections[normalizedKind] = {
+    updatedAt: new Date().toISOString(),
+    ...cloneRuntimeDebugValue(snapshot, {}),
+  };
+}
+
+function readRuntimeDebugSnapshot() {
+  const state = getRuntimeDebugState();
+  return cloneRuntimeDebugValue(
+    {
+      hostCapabilities: state.hostCapabilities,
+      taskPromptBuilds: state.taskPromptBuilds,
+      taskLlmRequests: state.taskLlmRequests,
+      injections: state.injections,
+      updatedAt: state.updatedAt,
+    },
+    {
+      hostCapabilities: null,
+      taskPromptBuilds: {},
+      taskLlmRequests: {},
+      injections: {},
+      updatedAt: "",
+    },
+  );
+}
 
 // ==================== 默认设置 ====================
 

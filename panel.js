@@ -25,13 +25,27 @@ import {
   getVectorIndexStats,
 } from "./vector-index.js";
 
-// 从 DEFAULT_TASK_BLOCKS 派生的合并文本（用于旧版兼容回退）
-const DEFAULT_PROMPTS = Object.fromEntries(
-  Object.entries(DEFAULT_TASK_BLOCKS).map(([key, { role, format, rules }]) => [
-    key,
-    [role, format, rules].filter(Boolean).join("\n\n"),
-  ]),
-);
+let defaultPromptCache = null;
+
+function getDefaultPrompts() {
+  if (defaultPromptCache) {
+    return defaultPromptCache;
+  }
+
+  const prompts = {};
+  for (const [key, block] of Object.entries(DEFAULT_TASK_BLOCKS || {})) {
+    prompts[key] = [block?.role, block?.format, block?.rules]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  defaultPromptCache = prompts;
+  return prompts;
+}
+
+function getDefaultPromptText(taskType = "") {
+  return getDefaultPrompts()[taskType] || "";
+}
 
 const TASK_PROFILE_TABS = [
   { id: "generation", label: "生成参数" },
@@ -1028,27 +1042,27 @@ function _refreshConfigTab() {
 
   _setInputValue(
     "bme-setting-extract-prompt",
-    settings.extractPrompt || DEFAULT_PROMPTS.extract,
+    settings.extractPrompt || getDefaultPromptText("extract"),
   );
   _setInputValue(
     "bme-setting-recall-prompt",
-    settings.recallPrompt || DEFAULT_PROMPTS.recall,
+    settings.recallPrompt || getDefaultPromptText("recall"),
   );
   _setInputValue(
     "bme-setting-consolidation-prompt",
-    settings.consolidationPrompt || DEFAULT_PROMPTS.consolidation,
+    settings.consolidationPrompt || getDefaultPromptText("consolidation"),
   );
   _setInputValue(
     "bme-setting-compress-prompt",
-    settings.compressPrompt || DEFAULT_PROMPTS.compress,
+    settings.compressPrompt || getDefaultPromptText("compress"),
   );
   _setInputValue(
     "bme-setting-synopsis-prompt",
-    settings.synopsisPrompt || DEFAULT_PROMPTS.synopsis,
+    settings.synopsisPrompt || getDefaultPromptText("synopsis"),
   );
   _setInputValue(
     "bme-setting-reflection-prompt",
-    settings.reflectionPrompt || DEFAULT_PROMPTS.reflection,
+    settings.reflectionPrompt || getDefaultPromptText("reflection"),
   );
 
   _refreshFetchedModelSelects(settings);
@@ -1262,7 +1276,7 @@ function _bindConfigControls() {
       const targetId = button.dataset.targetId;
       if (!settingKey || !promptKey || !targetId) return;
       _patchSettings({ [settingKey]: "" }, { refreshPrompts: true });
-      _setInputValue(targetId, DEFAULT_PROMPTS[promptKey] || "");
+      _setInputValue(targetId, getDefaultPromptText(promptKey));
       _refreshPromptCardStates();
     });
     button.dataset.bmeBound = "true";
@@ -1410,7 +1424,7 @@ function bindPromptText(id, settingKey, promptKey) {
   element.addEventListener("change", update);
   element.addEventListener("blur", () => {
     if (!String(element.value || "").trim()) {
-      _setInputValue(id, DEFAULT_PROMPTS[promptKey] || "");
+      _setInputValue(id, getDefaultPromptText(promptKey));
     }
   });
   element.dataset.bmeBound = "true";
@@ -2498,7 +2512,7 @@ function _renderTaskBlockEditor(state) {
   const legacyField = getLegacyPromptFieldForTask(state.taskType);
   const legacyValue =
     legacyField && block.type === "legacyPrompt"
-      ? state.settings?.[legacyField] || block.content || DEFAULT_PROMPTS[state.taskType] || ""
+      ? state.settings?.[legacyField] || block.content || getDefaultPromptText(state.taskType) || ""
       : block.content || "";
 
   return `
