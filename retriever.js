@@ -13,6 +13,7 @@ import {
 import { callLLMForJSON } from "./llm.js";
 import { buildTaskPrompt } from "./prompt-builder.js";
 import { applyTaskRegex } from "./task-regex.js";
+import { getSTContextForPrompt } from "./st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -425,6 +426,7 @@ async function llmRecall(
     candidateNodes: candidateDescriptions,
     candidateText: candidateDescriptions,
     graphStats: `candidate_count=${candidates.length}`,
+    ...getSTContextForPrompt(),
   });
   const systemPrompt = applyTaskRegex(
     settings,

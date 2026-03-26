@@ -12,6 +12,7 @@ import {
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import { buildTaskPrompt } from "./prompt-builder.js";
+import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { isDirectVectorConfig } from "./vector-index.js";
 
@@ -234,6 +235,7 @@ async function summarizeBatch(
     candidateNodes: nodeDescriptions,
     currentRange: `${nodes[0]?.seq ?? "?"} ~ ${nodes[nodes.length - 1]?.seq ?? "?"}`,
     graphStats: `node_count=${nodes.length}, node_type=${typeDef.id}`,
+    ...getSTContextForPrompt(),
   });
   const systemPrompt = applyTaskRegex(
     settings,

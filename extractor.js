@@ -19,6 +19,7 @@ import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
 import { buildTaskPrompt } from "./prompt-builder.js";
 import { RELATION_TYPES } from "./schema.js";
 import { applyTaskRegex } from "./task-regex.js";
+import { getSTContextForPrompt } from "./st-context.js";
 import { buildNodeVectorText, isDirectVectorConfig } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -117,6 +118,7 @@ export async function extractMemories({
     graphStats: graphOverview,
     graphOverview,
     currentRange,
+    ...getSTContextForPrompt(),
   });
 
   // 系统提示词
@@ -633,6 +635,7 @@ export async function generateSynopsis({
     characterSummary: charSummary || "(无)",
     threadSummary: threadSummary || "(无)",
     graphStats: `event=${eventNodes.length}, character=${characterNodes.length}, thread=${threadNodes.length}`,
+    ...getSTContextForPrompt(),
   });
   const synopsisSystemPrompt = applyTaskRegex(
     settings,
@@ -746,6 +749,7 @@ export async function generateReflection({
     threadSummary: threadSummary || "(无)",
     contradictionSummary: contradictionSummary || "(无)",
     graphStats: `event=${recentEvents.length}, character=${recentCharacters.length}, thread=${recentThreads.length}`,
+    ...getSTContextForPrompt(),
   });
   const reflectionSystemPrompt = applyTaskRegex(
     settings,

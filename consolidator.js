@@ -6,6 +6,7 @@ import { embedBatch, searchSimilar } from "./embedding.js";
 import { addEdge, createEdge, getActiveNodes, getNode } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import { buildTaskPrompt } from "./prompt-builder.js";
+import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import {
   buildNodeVectorText,
@@ -298,6 +299,7 @@ export async function consolidateMemories({
     candidateNodes: userPrompt,
     candidateText: userPrompt,
     graphStats: `new_entries=${newEntries.length}, threshold=${conflictThreshold}`,
+    ...getSTContextForPrompt(),
   });
   try {
     decision = await callLLMForJSON({
