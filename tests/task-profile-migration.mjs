@@ -15,7 +15,7 @@ const legacySettings = {
 };
 
 const migrated = migrateLegacyTaskProfiles(legacySettings);
-assert.equal(migrated.taskProfilesVersion, 2);
+assert.equal(migrated.taskProfilesVersion, 3);
 assert.ok(migrated.taskProfiles);
 assert.ok(migrated.taskProfiles.extract);
 assert.ok(migrated.taskProfiles.recall);
@@ -71,12 +71,12 @@ assert.deepEqual(
     "system",
     "system",
     "system",
-    "user",
-    "user",
-    "user",
-    "user",
     "system",
     "system",
+    "system",
+    "system",
+    "user",
+    "user",
   ],
 );
 assert.equal(
@@ -207,11 +207,18 @@ assert.equal(upgradedLegacyDefault.blocks.length, 11);
 assert.equal(upgradedLegacyDefault.blocks[0].content, "保留我自己的角色定义");
 assert.equal(upgradedLegacyDefault.blocks[9].content, "保留我自己的输出格式");
 assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的行为规则");
+assert.equal(upgradedLegacyDefault.blocks[9].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[10].role, "user");
 assert.deepEqual(
   upgradedLegacyDefault.blocks
     .slice(5, 9)
     .map((block) => block.sourceKey),
   ["recentMessages", "graphStats", "schema", "currentRange"],
+);
+assert.ok(
+  upgradedLegacyDefault.blocks
+    .slice(1, 9)
+    .every((block) => block.role === "system"),
 );
 
 console.log("task-profile-migration tests passed");

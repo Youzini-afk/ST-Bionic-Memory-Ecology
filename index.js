@@ -209,7 +209,7 @@ const defaultSettings = {
   compressPrompt: "",
   synopsisPrompt: "",
   reflectionPrompt: "",
-  taskProfilesVersion: 2,
+  taskProfilesVersion: 3,
   taskProfiles: createDefaultTaskProfiles(),
 
   // ====== v2 增强设置 ======

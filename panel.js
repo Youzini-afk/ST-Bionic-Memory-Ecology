@@ -1705,7 +1705,7 @@ function _refreshTaskProfileWorkspace(settings = _getSettings?.() || {}) {
 function _patchTaskProfiles(taskProfiles, extraPatch = {}, options = {}) {
   return _patchSettings(
     {
-      taskProfilesVersion: 2,
+      taskProfilesVersion: 3,
       taskProfiles,
       ...extraPatch,
     },

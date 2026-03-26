@@ -60,6 +60,7 @@ const customBlock = activeProfile.blocks.find(
 );
 assert.ok(builtinBlock);
 assert.equal(builtinBlock.injectionMode, "prepend");
+assert.equal(builtinBlock.role, "system");
 assert.ok(customBlock);
 assert.equal(customBlock.role, "user");
 assert.equal(activeProfile.regex.localRules.length, 1);

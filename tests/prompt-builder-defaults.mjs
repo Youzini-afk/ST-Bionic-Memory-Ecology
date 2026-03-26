@@ -36,7 +36,7 @@ const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompt-builder
 const { createDefaultTaskProfiles } = await import("../prompt-profiles.js");
 
 const settings = {
-  taskProfilesVersion: 2,
+  taskProfilesVersion: 3,
   taskProfiles: createDefaultTaskProfiles(),
 };
 
@@ -51,6 +51,16 @@ const extractPromptBuild = await buildTaskPrompt(settings, "extract", {
 });
 const extractPayload = buildTaskLlmPayload(extractPromptBuild, "fallback-user");
 assert.equal(extractPayload.userPrompt, "");
+assert.equal(
+  extractPayload.promptMessages.filter((message) => message.role === "user").length,
+  2,
+);
+assert.deepEqual(
+  extractPayload.promptMessages
+    .filter((message) => message.role === "user")
+    .map((message) => message.blockName),
+  ["输出格式", "行为规则"],
+);
 assert.deepEqual(
   extractPayload.promptMessages
     .map((message) => message.sourceKey)
@@ -76,6 +86,10 @@ const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
 });
 const recallPayload = buildTaskLlmPayload(recallPromptBuild, "fallback-user");
 assert.equal(recallPayload.userPrompt, "");
+assert.equal(
+  recallPayload.promptMessages.filter((message) => message.role === "user").length,
+  2,
+);
 assert.deepEqual(
   recallPayload.promptMessages
     .map((message) => message.sourceKey)
