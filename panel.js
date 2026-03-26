@@ -87,7 +87,7 @@ const TASK_PROFILE_GENERATION_GROUPS = [
       { key: "squash_system_messages", label: "合并系统消息", type: "tri_bool", defaultValue: false },
       {
         key: "reasoning_effort",
-        label: "推理努力度",
+        label: "推理强度",
         type: "enum",
         options: [
           { value: "", label: "跟随默认" },
