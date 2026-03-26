@@ -377,7 +377,6 @@ async function callDedicatedOpenAICompatible(
     model: config.model,
     messages,
     temperature: filteredGeneration.temperature ?? (jsonMode ? 0 : 0.2),
-    max_tokens: resolvedCompletionTokens,
     max_completion_tokens: resolvedCompletionTokens,
     stream: filteredGeneration.stream ?? false,
   };
