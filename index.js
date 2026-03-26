@@ -269,6 +269,7 @@ const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
 const HISTORY_RECOVERY_SETTLE_MS = 80;
 const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
+const GRAPH_LOAD_RETRY_DELAYS_MS = [120, 450, 1200, 2500];
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -281,6 +282,8 @@ let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
 let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
+let pendingGraphLoadRetryTimer = null;
+let pendingGraphLoadRetryChatId = "";
 const generationRecallTransactions = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const stageNoticeHandles = {
@@ -943,6 +946,91 @@ function ensureCurrentGraphRuntimeState() {
   return currentGraph;
 }
 
+function clearPendingGraphLoadRetry({ resetChatId = true } = {}) {
+  if (pendingGraphLoadRetryTimer) {
+    clearTimeout(pendingGraphLoadRetryTimer);
+    pendingGraphLoadRetryTimer = null;
+  }
+
+  if (resetChatId) {
+    pendingGraphLoadRetryChatId = "";
+  }
+}
+
+function isGraphLoadRetryPending(chatId = getCurrentChatId()) {
+  const normalizedChatId = String(chatId || "");
+  return Boolean(normalizedChatId) && pendingGraphLoadRetryChatId === normalizedChatId;
+}
+
+function isGraphEffectivelyEmpty(graph) {
+  if (!graph || typeof graph !== "object") {
+    return true;
+  }
+
+  const stats = getGraphStats(graph);
+  if ((stats.totalNodes || 0) > 0 || (stats.totalEdges || 0) > 0) {
+    return false;
+  }
+  if (Number.isFinite(stats.lastProcessedSeq) && stats.lastProcessedSeq >= 0) {
+    return false;
+  }
+  if (Array.isArray(graph.batchJournal) && graph.batchJournal.length > 0) {
+    return false;
+  }
+  if (
+    graph.lastRecallResult &&
+    (!Array.isArray(graph.lastRecallResult) ||
+      graph.lastRecallResult.length > 0)
+  ) {
+    return false;
+  }
+  if (
+    Object.keys(graph?.historyState?.processedMessageHashes || {}).length > 0
+  ) {
+    return false;
+  }
+  if (Object.keys(graph?.vectorIndexState?.hashToNodeId || {}).length > 0) {
+    return false;
+  }
+
+  return true;
+}
+
+function scheduleGraphLoadRetry(
+  chatId,
+  reason = "metadata-pending",
+  attemptIndex = 0,
+) {
+  const normalizedChatId = String(chatId || "");
+  const delayMs = GRAPH_LOAD_RETRY_DELAYS_MS[attemptIndex];
+  if (!normalizedChatId || !Number.isFinite(delayMs)) {
+    clearPendingGraphLoadRetry();
+    return false;
+  }
+
+  clearPendingGraphLoadRetry({ resetChatId: false });
+  pendingGraphLoadRetryChatId = normalizedChatId;
+  console.debug(
+    `[ST-BME] 图谱元数据尚未就绪，${delayMs}ms 后重试加载（chat=${normalizedChatId}，attempt=${attemptIndex + 1}，reason=${reason}）`,
+  );
+
+  pendingGraphLoadRetryTimer = setTimeout(() => {
+    pendingGraphLoadRetryTimer = null;
+    if (getCurrentChatId() !== normalizedChatId) {
+      clearPendingGraphLoadRetry();
+      return;
+    }
+
+    loadGraphFromChat({
+      attemptIndex: attemptIndex + 1,
+      expectedChatId: normalizedChatId,
+      source: `retry:${reason}`,
+    });
+  }, delayMs);
+
+  return true;
+}
+
 function clearInjectionState() {
   lastInjectionContent = "";
   lastRecalledItems = [];
@@ -1535,89 +1623,185 @@ function updateModuleSettings(patch = {}) {
 
 // ==================== 图状态持久化 ====================
 
-function loadGraphFromChat() {
+function loadGraphFromChat(options = {}) {
+  const {
+    attemptIndex = 0,
+    expectedChatId = "",
+    source = "direct-load",
+  } = options;
   const context = getContext();
   const chatId = getCurrentChatId(context);
-  if (!context.chatMetadata) {
-    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
-    lastExtractedItems = [];
-    lastRecalledItems = [];
-    lastInjectionContent = "";
-    runtimeStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
-    lastExtractionStatus = createUiStatus(
-      "待命",
-      "当前聊天尚未执行提取",
-      "idle",
-    );
-    lastVectorStatus = createUiStatus(
-      "待命",
-      "当前聊天尚未执行向量任务",
-      "idle",
-    );
-    lastRecallStatus = createUiStatus(
-      "待命",
-      "当前聊天尚未建立记忆图谱",
-      "idle",
-    );
-    return;
+  const normalizedExpectedChatId = String(expectedChatId || "");
+  if (attemptIndex === 0) {
+    clearPendingGraphLoadRetry();
   }
 
-  const savedData = context.chatMetadata[GRAPH_METADATA_KEY];
-  if (savedData) {
+  if (
+    normalizedExpectedChatId &&
+    chatId &&
+    normalizedExpectedChatId !== chatId
+  ) {
+    clearPendingGraphLoadRetry();
+    return false;
+  }
+
+  const hasChatMetadata =
+    context?.chatMetadata &&
+    typeof context.chatMetadata === "object" &&
+    !Array.isArray(context.chatMetadata);
+  const savedData = hasChatMetadata
+    ? context.chatMetadata[GRAPH_METADATA_KEY]
+    : undefined;
+  const shouldRetry =
+    Boolean(chatId) &&
+    (savedData == null || savedData === "") &&
+    attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
+
+  if (savedData != null && savedData !== "") {
+    clearPendingGraphLoadRetry();
     currentGraph = normalizeGraphRuntimeState(
       deserializeGraph(savedData),
       chatId,
     );
-    console.log("[ST-BME] 从聊天数据加载图谱:", getGraphStats(currentGraph));
-  } else {
-    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+    extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+      ? currentGraph.historyState.extractionCount
+      : 0;
+    lastExtractedItems = [];
+    updateLastRecalledItems(currentGraph.lastRecallResult || []);
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus(
+      "待命",
+      "已加载聊天图谱，等待下一次任务",
+      "idle",
+    );
+    lastExtractionStatus = createUiStatus(
+      "待命",
+      "已加载聊天图谱，等待下一次提取",
+      "idle",
+    );
+    lastVectorStatus = createUiStatus(
+      "待命",
+      currentGraph.vectorIndexState?.lastWarning ||
+        "已加载聊天图谱，等待下一次向量任务",
+      "idle",
+    );
+    lastRecallStatus = createUiStatus(
+      "待命",
+      "已加载聊天图谱，等待下一次召回",
+      "idle",
+    );
+
+    console.log("[ST-BME] 从聊天数据加载图谱:", {
+      chatId,
+      source,
+      attemptIndex,
+      ...getGraphStats(currentGraph),
+    });
+    refreshPanelLiveState();
+    return true;
   }
 
-  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
-    ? currentGraph.historyState.extractionCount
-    : 0;
+  if (shouldRetry) {
+    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+    extractionCount = 0;
+    lastExtractedItems = [];
+    lastRecalledItems = [];
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus(
+      "待命",
+      "正在等待聊天元数据加载，暂不覆盖现有图谱",
+      "idle",
+    );
+    lastExtractionStatus = createUiStatus(
+      "待命",
+      "正在等待聊天元数据加载",
+      "idle",
+    );
+    lastVectorStatus = createUiStatus(
+      "待命",
+      "正在等待聊天元数据加载",
+      "idle",
+    );
+    lastRecallStatus = createUiStatus(
+      "待命",
+      "正在等待聊天元数据加载",
+      "idle",
+    );
+    scheduleGraphLoadRetry(
+      chatId,
+      hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
+      attemptIndex,
+    );
+    refreshPanelLiveState();
+    return false;
+  }
+
+  clearPendingGraphLoadRetry();
+  currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+  extractionCount = 0;
   lastExtractedItems = [];
-  updateLastRecalledItems(currentGraph.lastRecallResult || []);
+  lastRecalledItems = [];
   lastInjectionContent = "";
+
+  const noChatLoaded = !chatId;
   runtimeStatus = createUiStatus(
     "待命",
-    "已加载聊天图谱，等待下一次任务",
+    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未建立记忆图谱",
     "idle",
   );
   lastExtractionStatus = createUiStatus(
     "待命",
-    "已加载聊天图谱，等待下一次提取",
+    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未执行提取",
     "idle",
   );
   lastVectorStatus = createUiStatus(
     "待命",
-    currentGraph.vectorIndexState?.lastWarning ||
-      "已加载聊天图谱，等待下一次向量任务",
+    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未执行向量任务",
     "idle",
   );
   lastRecallStatus = createUiStatus(
     "待命",
-    "已加载聊天图谱，等待下一次召回",
+    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未建立记忆图谱",
     "idle",
   );
+  refreshPanelLiveState();
+  return false;
 }
 
 function saveGraphToChat() {
   const context = getContext();
   if (!context || !currentGraph) return false;
-
-  if (
-    !context.chatMetadata ||
-    typeof context.chatMetadata !== "object" ||
-    Array.isArray(context.chatMetadata)
-  ) {
-    context.chatMetadata = {};
-  }
+  const chatId = getCurrentChatId(context);
 
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
-  context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
-  saveMetadataDebounced();
+
+  if (isGraphLoadRetryPending(chatId) && isGraphEffectivelyEmpty(currentGraph)) {
+    console.warn(
+      `[ST-BME] 图谱元数据仍在加载中，已跳过空图写回（chat=${chatId}）`,
+    );
+    return false;
+  }
+
+  if (typeof context.updateChatMetadata === "function") {
+    context.updateChatMetadata({ [GRAPH_METADATA_KEY]: currentGraph });
+  } else {
+    if (
+      !context.chatMetadata ||
+      typeof context.chatMetadata !== "object" ||
+      Array.isArray(context.chatMetadata)
+    ) {
+      context.chatMetadata = {};
+    }
+    context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
+  }
+
+  if (typeof context.saveMetadataDebounced === "function") {
+    context.saveMetadataDebounced();
+  } else {
+    saveMetadataDebounced();
+  }
+
   return true;
 }
 
@@ -3609,6 +3793,7 @@ function onChatChanged() {
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = null;
   pendingHistoryRecoveryTrigger = "";
+  clearPendingGraphLoadRetry();
   skipBeforeCombineRecallUntil = 0;
   lastPreGenerationRecallKey = "";
   lastPreGenerationRecallAt = 0;
@@ -4357,6 +4542,7 @@ async function onReembedDirect() {
   }
 
   // 加载当前聊天的图谱
+  clearPendingGraphLoadRetry();
   loadGraphFromChat();
 
   // ==================== 操控面板初始化 ====================
