@@ -3760,12 +3760,25 @@ async function onReroll({ fromFloor } = {}) {
   // 确定回滚起点
   let targetFloor = Number.isFinite(fromFloor) ? fromFloor : null;
   if (targetFloor === null) {
-    // 默认：回滚到最新 AI 楼
-    targetFloor = getLastProcessedAssistantFloor();
-    if (targetFloor < 0) {
-      toastr.info("尚未有过提取记录，无需重 Roll");
+    // 默认：重做最新 AI 楼
+    const assistantTurns = getAssistantTurns(chat);
+    if (assistantTurns.length === 0) {
+      toastr.info("聊天中没有 AI 回复");
       return;
     }
+    targetFloor = assistantTurns[assistantTurns.length - 1];
+  }
+
+  const lastProcessed = getLastProcessedAssistantFloor();
+  const alreadyExtracted = targetFloor <= lastProcessed;
+
+  if (!alreadyExtracted) {
+    // 目标楼层未提取过 → 直接走手动提取即可，不需要回滚
+    toastr.info("该楼层尚未提取，直接执行提取…", "ST-BME 重 Roll", {
+      timeOut: 2000,
+    });
+    await onManualExtract();
+    return;
   }
 
   console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
