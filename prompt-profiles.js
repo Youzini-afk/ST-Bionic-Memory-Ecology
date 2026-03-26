@@ -517,7 +517,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "",
         sourceField: "",
         content: defaults.role || "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 0,
       },
       {
@@ -529,7 +529,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "charDescription",
         sourceField: "",
         content: "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 1,
       },
       {
@@ -541,7 +541,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "userPersona",
         sourceField: "",
         content: "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 2,
       },
       {
@@ -553,7 +553,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "worldInfoBefore",
         sourceField: "",
         content: "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 3,
       },
       {
@@ -565,7 +565,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "worldInfoAfter",
         sourceField: "",
         content: "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 4,
       },
       {
@@ -577,7 +577,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "",
         sourceField: "",
         content: defaults.format || "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 5,
       },
       {
@@ -589,7 +589,7 @@ export function createDefaultTaskProfile(taskType) {
         sourceKey: "",
         sourceField: "",
         content: defaults.rules || "",
-        injectionMode: "append",
+        injectionMode: "relative",
         order: 6,
       },
     ],
