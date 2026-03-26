@@ -30,112 +30,144 @@ const originalGetCharWorldbookNames = globalThis.getCharWorldbookNames;
 const originalGetWorldbook = globalThis.getWorldbook;
 const originalGetLorebookEntries = globalThis.getLorebookEntries;
 
-const constantEntry = {
-  uid: 1,
-  name: "常驻设定",
-  comment: "常驻设定",
-  content: "这里是常驻世界设定。",
-  enabled: true,
-  position: {
-    type: "before_character_definition",
-    role: "system",
-    depth: 0,
-    order: 10,
-  },
-  strategy: {
-    type: "constant",
-    keys: [],
-    keys_secondary: { logic: "and_any", keys: [] },
-  },
-  probability: 100,
-  extra: {},
-};
-
-const dynEntry = {
-  uid: 2,
-  name: "Dyn/线索",
-  comment: "线索条目",
-  content: "隐藏线索：<%= charName %> 正在调查。",
-  enabled: false,
-  position: {
-    type: "before_character_definition",
-    role: "system",
-    depth: 0,
-    order: 20,
-  },
-  strategy: {
-    type: "selective",
-    keys: ["调查"],
-    keys_secondary: { logic: "and_any", keys: [] },
-  },
-  probability: 100,
-  extra: {},
-};
-
-const controllerEntry = {
-  uid: 3,
-  name: "EW/Controller/Main",
-  comment: "控制器",
-  content: '<%= await getwi("Dyn/线索") %>',
-  enabled: true,
-  position: {
-    type: "before_character_definition",
-    role: "system",
-    depth: 0,
-    order: 30,
-  },
-  strategy: {
-    type: "constant",
-    keys: [],
-    keys_secondary: { logic: "and_any", keys: [] },
-  },
-  probability: 100,
-  extra: {},
-};
-
-const atDepthEntry = {
-  uid: 4,
-  name: "深度注入",
-  comment: "深度注入",
-  content: "这是一条 atDepth 消息。",
-  enabled: true,
-  position: {
-    type: "at_depth_as_system",
-    role: "system",
-    depth: 2,
-    order: 5,
-  },
-  strategy: {
-    type: "constant",
-    keys: [],
-    keys_secondary: { logic: "and_any", keys: [] },
-  },
-  probability: 100,
-  extra: {},
-};
-
-function createConstantWorldbookEntry(uid, name, content, comment = "") {
+function createWorldbookEntry({
+  uid,
+  name,
+  comment = name,
+  content,
+  enabled = true,
+  positionType = "before_character_definition",
+  role = "system",
+  depth = 0,
+  order = 10,
+  strategyType = "constant",
+  keys = [],
+  keysSecondary = [],
+}) {
   return {
     uid,
     name,
     comment,
     content,
-    enabled: true,
+    enabled,
     position: {
-      type: "before_character_definition",
-      role: "system",
-      depth: 0,
-      order: 10,
+      type: positionType,
+      role,
+      depth,
+      order,
     },
     strategy: {
-      type: "constant",
-      keys: [],
-      keys_secondary: { logic: "and_any", keys: [] },
+      type: strategyType,
+      keys,
+      keys_secondary: { logic: "and_any", keys: keysSecondary },
     },
     probability: 100,
     extra: {},
   };
 }
+
+function createConstantWorldbookEntry(uid, name, content, comment = name) {
+  return createWorldbookEntry({
+    uid,
+    name,
+    comment,
+    content,
+  });
+}
+
+const constantEntry = createWorldbookEntry({
+  uid: 1,
+  name: "常驻设定",
+  comment: "常驻设定",
+  content: "这里是常驻世界设定。",
+  order: 10,
+});
+
+const dynEntry = createWorldbookEntry({
+  uid: 2,
+  name: "EW/Dyn/线索",
+  comment: "线索条目",
+  content: "隐藏线索：<%= charName %> 正在调查。",
+  enabled: false,
+  strategyType: "selective",
+  keys: ["调查"],
+  order: 15,
+});
+
+const inlineSummaryEntry = createWorldbookEntry({
+  uid: 3,
+  name: "普通 EJS 汇总",
+  comment: "EJS 汇总",
+  content: '控制摘要：<%= await getwi("EW/Dyn/线索") %>',
+  order: 20,
+});
+
+const extensionLiteralEntry = createWorldbookEntry({
+  uid: 4,
+  name: "扩展语义正文",
+  comment: "扩展语义正文",
+  content: "@@generate\n[GENERATE:Test]\n扩展语义只是普通文本。",
+  order: 25,
+});
+
+const externalInlineEntry = createWorldbookEntry({
+  uid: 5,
+  name: "外部书汇总",
+  comment: "外部书汇总",
+  content: '外部补充：<%= await getwi("bonus-book", "Bonus 条目") %>',
+  order: 26,
+});
+
+const forceControlEntry = createWorldbookEntry({
+  uid: 6,
+  name: "普通 EJS 控制",
+  comment: "EJS 控制",
+  content: '<% await activewi("强制 after") %>',
+  order: 30,
+});
+
+const forcedAfterEntry = createWorldbookEntry({
+  uid: 7,
+  name: "强制 after",
+  comment: "强制后置",
+  content: "这是被 EJS 强制激活的后置条目。",
+  positionType: "after_character_definition",
+  strategyType: "selective",
+  keys: ["永远不会命中"],
+  order: 40,
+});
+
+const atDepthEntry = createWorldbookEntry({
+  uid: 8,
+  name: "深度注入",
+  comment: "深度注入",
+  content: "这是一条 atDepth 消息。",
+  positionType: "at_depth_as_system",
+  depth: 2,
+  order: 5,
+});
+
+const bonusEntry = createWorldbookEntry({
+  uid: 101,
+  name: "Bonus 条目",
+  comment: "Bonus 条目",
+  content: "来自 bonus-book 的补充内容。",
+  order: 10,
+});
+
+const worldbooksByName = {
+  "main-book": [
+    constantEntry,
+    dynEntry,
+    inlineSummaryEntry,
+    extensionLiteralEntry,
+    externalInlineEntry,
+    forceControlEntry,
+    forcedAfterEntry,
+    atDepthEntry,
+  ],
+  "bonus-book": [bonusEntry],
+};
 
 try {
   globalThis.SillyTavern = {
@@ -153,13 +185,13 @@ try {
     primary: "main-book",
     additional: [],
   });
-  globalThis.getWorldbook = async () => [
-    constantEntry,
-    dynEntry,
-    controllerEntry,
-    atDepthEntry,
-  ];
-  globalThis.getLorebookEntries = async () => [];
+  globalThis.getWorldbook = async (worldbookName) =>
+    worldbooksByName[worldbookName] || [];
+  globalThis.getLorebookEntries = async (worldbookName) =>
+    (worldbooksByName[worldbookName] || []).map((entry) => ({
+      uid: entry.uid,
+      comment: entry.comment,
+    }));
 
   const { resolveTaskWorldInfo } = await import("../task-worldinfo.js");
   const { buildTaskPrompt } = await import("../prompt-builder.js");
@@ -185,14 +217,30 @@ try {
 
   assert.deepEqual(
     worldInfo.beforeEntries.map((entry) => entry.name),
-    ["常驻设定", "线索条目"],
+    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总"],
   );
-  assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
-  assert.equal(worldInfo.debug.controllerPulledCount, 1);
+  assert.deepEqual(worldInfo.afterEntries.map((entry) => entry.name), ["强制后置"]);
   assert.equal(worldInfo.additionalMessages.length, 1);
+  assert.equal(worldInfo.additionalMessages[0].content, "这是一条 atDepth 消息。");
+  assert.match(worldInfo.beforeText, /控制摘要：隐藏线索：Alice 正在调查。/);
+  assert.match(worldInfo.beforeText, /外部补充：来自 bonus-book 的补充内容。/);
+  assert.match(worldInfo.beforeText, /@@generate/);
+  assert.match(worldInfo.beforeText, /\[GENERATE:Test\]/);
+  assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
+  assert.equal(worldInfo.debug.ejsInlinePullCount, 2);
+  assert.equal(worldInfo.debug.ejsForcedActivationCount, 1);
+  assert.equal(worldInfo.debug.resolvePassCount >= 2, true);
+  assert.deepEqual(worldInfo.debug.forcedActivatedEntries.map((entry) => entry.name), [
+    "强制后置",
+  ]);
+  assert.deepEqual(
+    worldInfo.debug.inlinePulledEntries.map((entry) => entry.name).sort(),
+    ["Bonus 条目", "线索条目"].sort(),
+  );
+  assert.deepEqual(worldInfo.debug.lazyLoadedWorldbooks, ["bonus-book"]);
   assert.equal(
-    worldInfo.additionalMessages[0].content,
-    "这是一条 atDepth 消息。",
+    worldInfo.debug.warnings.some((warning) => warning.includes("旧 EW 命名条目")),
+    true,
   );
 
   const settings = {
@@ -217,11 +265,20 @@ try {
               },
               {
                 id: "b2",
+                type: "builtin",
+                sourceKey: "worldInfoAfter",
+                role: "system",
+                enabled: true,
+                order: 1,
+                injectionMode: "append",
+              },
+              {
+                id: "b3",
                 type: "custom",
                 content: "角色: {{charName}}",
                 role: "user",
                 enabled: true,
-                order: 1,
+                order: 2,
                 injectionMode: "append",
               },
             ],
@@ -239,7 +296,10 @@ try {
   });
 
   assert.match(promptBuild.systemPrompt, /这里是常驻世界设定/);
-  assert.match(promptBuild.systemPrompt, /隐藏线索：Alice 正在调查/);
+  assert.match(promptBuild.systemPrompt, /控制摘要：隐藏线索：Alice 正在调查/);
+  assert.match(promptBuild.systemPrompt, /扩展语义只是普通文本/);
+  assert.match(promptBuild.systemPrompt, /来自 bonus-book 的补充内容/);
+  assert.doesNotMatch(promptBuild.systemPrompt, /getwi|<%=?/);
   assert.equal(
     promptBuild.privateTaskMessages.length,
     2,
@@ -251,41 +311,44 @@ try {
   );
   assert.deepEqual(
     promptBuild.hostInjections.before.map((entry) => entry.name),
-    ["常驻设定", "线索条目"],
+    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总"],
   );
+  assert.deepEqual(
+    promptBuild.hostInjections.after.map((entry) => entry.name),
+    ["强制后置"],
+  );
+  assert.equal(promptBuild.hostInjections.atDepth.length, 1);
+  assert.equal(promptBuild.hostInjections.atDepth[0].depth, 2);
   assert.equal(promptBuild.hostInjectionPlan.before.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.before[0].blockId, "b1");
   assert.equal(promptBuild.hostInjectionPlan.before[0].sourceKey, "worldInfoBefore");
   assert.deepEqual(promptBuild.hostInjectionPlan.before[0].entryNames, [
     "常驻设定",
-    "线索条目",
+    "EJS 汇总",
+    "扩展语义正文",
+    "外部书汇总",
   ]);
-  assert.equal(promptBuild.hostInjections.after.length, 0);
-  assert.equal(promptBuild.hostInjections.atDepth.length, 1);
-  assert.equal(promptBuild.hostInjections.atDepth[0].depth, 2);
+  assert.equal(promptBuild.hostInjectionPlan.after.length, 1);
+  assert.equal(promptBuild.hostInjectionPlan.after[0].blockId, "b2");
+  assert.equal(promptBuild.hostInjectionPlan.after[0].sourceKey, "worldInfoAfter");
+  assert.deepEqual(promptBuild.hostInjectionPlan.after[0].entryNames, ["强制后置"]);
   assert.equal(promptBuild.hostInjectionPlan.atDepth.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.atDepth[0].entryName, "深度注入");
   assert.equal(typeof promptBuild.debug.worldInfoCacheHit, "boolean");
-  assert.doesNotMatch(promptBuild.systemPrompt, /getwi|<%=?/);
   assert.deepEqual(
     promptBuild.renderedBlocks.map((block) => block.delivery),
-    ["host.before", "private.message"],
+    ["host.before", "host.after", "private.message"],
   );
   assert.equal(promptBuild.additionalMessages.length, 1);
-  assert.equal(
-    promptBuild.additionalMessages[0].content,
-    "这是一条 atDepth 消息。",
-  );
+  assert.equal(promptBuild.additionalMessages[0].content, "这是一条 atDepth 消息。");
 
   const { initializeHostAdapter } = await import("../host-adapter/index.js");
   const partialBridgeCalls = [];
   const partialBridgeEntriesByWorldbook = {
-    "main-book": [createConstantWorldbookEntry(11, "主书原名", "主书内容。")],
-    "side-book": [createConstantWorldbookEntry(12, "支线原名", "支线内容。")],
-    "persona-book": [
-      createConstantWorldbookEntry(13, "人格原名", "人格内容。"),
-    ],
-    "chat-book": [createConstantWorldbookEntry(14, "聊天原名", "聊天内容。")],
+    "main-book": [createConstantWorldbookEntry(11, "主书原名", "主书内容。", "主书注释")],
+    "side-book": [createConstantWorldbookEntry(12, "支线原名", "支线内容。", "支线注释")],
+    "persona-book": [createConstantWorldbookEntry(13, "人格原名", "人格内容。", "人格注释")],
+    "chat-book": [createConstantWorldbookEntry(14, "聊天原名", "聊天内容。", "聊天注释")],
   };
 
   globalThis.SillyTavern = {
@@ -313,12 +376,10 @@ try {
     );
   };
   globalThis.getLorebookEntries = async (worldbookName) =>
-    ({
-      "main-book": [{ uid: 11, comment: "主书注释" }],
-      "side-book": [{ uid: 12, comment: "支线注释" }],
-      "persona-book": [{ uid: 13, comment: "人格注释" }],
-      "chat-book": [{ uid: 14, comment: "聊天注释" }],
-    })[worldbookName] || [];
+    (partialBridgeEntriesByWorldbook[worldbookName] || []).map((entry) => ({
+      uid: entry.uid,
+      comment: entry.comment,
+    }));
 
   initializeHostAdapter({
     worldbookProvider: {

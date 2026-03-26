@@ -65,13 +65,13 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     sourceKey: "worldInfoBefore",
     name: "世界书前块",
     role: "system",
-    description: "注入 EW 同款世界书引擎解析后的 before 桶内容，支持角色主/附加世界书、用户设定世界书、聊天世界书，以及世界书条目中的 EJS / getwi。",
+    description: "注入按酒馆世界书规则解析后的 before 桶内容，支持角色主/附加世界书、用户设定世界书、聊天世界书，以及世界书条目中的 EJS / getwi。",
   },
   {
     sourceKey: "worldInfoAfter",
     name: "世界书后块",
     role: "system",
-    description: "注入 EW 同款世界书引擎解析后的 after 桶内容。atDepth 条目不会出现在这里，而是自动并入额外消息链路。",
+    description: "注入按酒馆世界书规则解析后的 after 桶内容。atDepth 条目不会出现在这里，而是自动并入额外消息链路。",
   },
   {
     sourceKey: "outputRules",

@@ -14,10 +14,8 @@ const EJS_RUNTIME_STATUS = {
 
 const FALLBACK_LODASH = {
   get: getByPath,
-  set: setByPath,
-  unset: unsetByPath,
-  cloneDeep: cloneDeep,
-  escapeRegExp: escapeRegExp,
+  cloneDeep,
+  escapeRegExp,
   sum(values = []) {
     return (Array.isArray(values) ? values : []).reduce(
       (total, value) => total + (Number(value) || 0),
@@ -63,6 +61,15 @@ function createTaskEjsRuntimeUnavailableError(backend, content = "") {
   return error;
 }
 
+function createTaskEjsUnsupportedHelperError(helperName, args = []) {
+  const error = new Error(`task-ejs unsupported helper: ${String(helperName || "unknown")}`);
+  error.name = "TaskEjsUnsupportedHelperError";
+  error.code = "st_bme_task_ejs_unsupported_helper";
+  error.helperName = String(helperName || "unknown");
+  error.args = Array.isArray(args) ? cloneDeep(args) : [];
+  return error;
+}
+
 async function ensureEjsRuntime() {
   const currentState = getCurrentEjsRuntimeState();
   if (currentState.isAvailable) {
@@ -73,10 +80,7 @@ async function ensureEjsRuntime() {
   }
 
   ejsRuntimeStatePromise = (async () => {
-    const hadWindow = Object.prototype.hasOwnProperty.call(
-      globalThis,
-      "window",
-    );
+    const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, "window");
     const previousWindow = globalThis.window;
     let importError = null;
 
@@ -119,10 +123,6 @@ function resolveHostSnapshot(injectedSnapshot) {
     return injectedSnapshot;
   }
   return getSTContextSnapshot();
-}
-
-function getStContext(injectedSnapshot) {
-  return resolveHostSnapshot(injectedSnapshot).snapshot.raw || {};
 }
 
 function getStChat(injectedSnapshot) {
@@ -189,43 +189,6 @@ function getByPath(target, path, defaultValue = undefined) {
   return result === undefined ? defaultValue : result;
 }
 
-function setByPath(target, path, value) {
-  const segments = String(path || "")
-    .split(".")
-    .filter(Boolean);
-  if (segments.length === 0 || target == null || typeof target !== "object") {
-    return;
-  }
-
-  let cursor = target;
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    const key = segments[index];
-    if (cursor[key] == null || typeof cursor[key] !== "object") {
-      cursor[key] = {};
-    }
-    cursor = cursor[key];
-  }
-  cursor[segments[segments.length - 1]] = value;
-}
-
-function unsetByPath(target, path) {
-  const segments = String(path || "")
-    .split(".")
-    .filter(Boolean);
-  if (segments.length === 0 || target == null || typeof target !== "object") {
-    return;
-  }
-
-  let cursor = target;
-  for (let index = 0; index < segments.length - 1; index += 1) {
-    cursor = cursor?.[segments[index]];
-    if (cursor == null || typeof cursor !== "object") {
-      return;
-    }
-  }
-  delete cursor[segments[segments.length - 1]];
-}
-
 function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -238,6 +201,13 @@ function normalizeIdentifier(value) {
   return String(value || "")
     .trim()
     .toLowerCase();
+}
+
+function normalizeRole(role) {
+  const normalized = String(role || "system").trim().toLowerCase();
+  return ["system", "user", "assistant"].includes(normalized)
+    ? normalized
+    : "system";
 }
 
 function processChatMessage(message) {
@@ -271,7 +241,7 @@ export function substituteTaskEjsParams(
   });
 }
 
-function createVariableState(hostSnapshot) {
+function createReadOnlyVariableState(hostSnapshot) {
   const snapshot = resolveHostSnapshot(hostSnapshot).snapshot;
   const chat = snapshot.chat.messages || [];
   const lastMessage = chat[chat.length - 1] || {};
@@ -283,7 +253,7 @@ function createVariableState(hostSnapshot) {
   const globalVars = cloneDeep(snapshot.variables.global || {});
   const localVars = cloneDeep(snapshot.variables.local || {});
 
-  return {
+  return Object.freeze({
     globalVars,
     localVars,
     messageVars,
@@ -292,15 +262,7 @@ function createVariableState(hostSnapshot) {
       ...localVars,
       ...messageVars,
     },
-  };
-}
-
-function rebuildVariableCache(state) {
-  state.cacheVars = {
-    ...state.globalVars,
-    ...state.localVars,
-    ...state.messageVars,
-  };
+  });
 }
 
 function getVariable(state, path, options = {}) {
@@ -317,21 +279,23 @@ function getVariable(state, path, options = {}) {
   return getByPath(state.cacheVars, path, options.defaults);
 }
 
-function setVariable(state, path, value, options = {}) {
-  const scope = normalizeIdentifier(options.scope) || "message";
-  const target =
-    scope === "global"
-      ? state.globalVars
-      : scope === "local"
-        ? state.localVars
-        : state.messageVars;
-
-  if (value === undefined) {
-    unsetByPath(target, path);
-  } else {
-    setByPath(target, path, cloneDeep(value));
-  }
-  rebuildVariableCache(state);
+function normalizeRenderEntry(entry = {}) {
+  return {
+    uid: Number(entry.uid) || 0,
+    name: normalizeEntryKey(entry.name),
+    comment: normalizeEntryKey(entry.comment),
+    content: String(entry.content || ""),
+    worldbook: normalizeEntryKey(entry.worldbook),
+    role: normalizeRole(entry.role),
+    position: Number(entry.position ?? 0),
+    depth: Number(entry.depth ?? 0),
+    order: Number(entry.order ?? 100),
+    enabled: entry.enabled !== false,
+    activationDebug:
+      entry.activationDebug && typeof entry.activationDebug === "object"
+        ? cloneDeep(entry.activationDebug)
+        : null,
+  };
 }
 
 function registerEntryLookup(lookup, key, entry) {
@@ -340,16 +304,75 @@ function registerEntryLookup(lookup, key, entry) {
   lookup.set(normalizedKey, entry);
 }
 
-function activationKey(entry) {
-  return `${entry.worldbook}::${entry.comment || entry.name}`;
+function registerEntries(renderCtx, entries = []) {
+  for (const rawEntry of Array.isArray(entries) ? entries : []) {
+    const entry = normalizeRenderEntry(rawEntry);
+    renderCtx.entries.push(entry);
+    registerEntryLookup(renderCtx.allEntries, entry.name, entry);
+    registerEntryLookup(renderCtx.allEntries, entry.comment, entry);
+
+    if (!renderCtx.entriesByWorldbook.has(entry.worldbook)) {
+      renderCtx.entriesByWorldbook.set(entry.worldbook, new Map());
+    }
+    const worldbookLookup = renderCtx.entriesByWorldbook.get(entry.worldbook);
+    registerEntryLookup(worldbookLookup, entry.name, entry);
+    registerEntryLookup(worldbookLookup, entry.comment, entry);
+  }
 }
 
-function findEntry(
-  renderCtx,
-  currentWorldbook,
-  worldbookOrEntry,
-  entryNameOrData,
-) {
+function activationKey(entry) {
+  return [entry.worldbook, entry.uid || entry.comment || entry.name].join("::");
+}
+
+function recordRenderWarning(renderCtx, warning) {
+  const text = String(warning || "").trim();
+  if (!text) return;
+  if (!Array.isArray(renderCtx?.warnings)) {
+    renderCtx.warnings = [];
+  }
+  if (!renderCtx.warnings.includes(text)) {
+    renderCtx.warnings.push(text);
+  }
+}
+
+async function ensureWorldbookEntriesLoaded(renderCtx, worldbookName) {
+  const normalizedWorldbook = normalizeEntryKey(worldbookName);
+  if (!normalizedWorldbook) {
+    return false;
+  }
+  if (renderCtx.entriesByWorldbook.has(normalizedWorldbook)) {
+    return true;
+  }
+  if (renderCtx.worldbookLoadAttempts.has(normalizedWorldbook)) {
+    return renderCtx.entriesByWorldbook.has(normalizedWorldbook);
+  }
+  if (typeof renderCtx.loadWorldbookEntries !== "function") {
+    return false;
+  }
+
+  renderCtx.worldbookLoadAttempts.add(normalizedWorldbook);
+  try {
+    const loadedEntries = await renderCtx.loadWorldbookEntries(normalizedWorldbook);
+    registerEntries(renderCtx, loadedEntries);
+    if ((Array.isArray(loadedEntries) ? loadedEntries : []).length > 0) {
+      renderCtx.lazyLoadedWorldbooks.add(normalizedWorldbook);
+      return true;
+    }
+  } catch (error) {
+    recordRenderWarning(
+      renderCtx,
+      `lazy load worldbook failed: ${normalizedWorldbook}`,
+    );
+    console.warn(
+      `[ST-BME] task-ejs 懒加载世界书失败: ${normalizedWorldbook}`,
+      error,
+    );
+  }
+
+  return renderCtx.entriesByWorldbook.has(normalizedWorldbook);
+}
+
+async function resolveEntry(renderCtx, currentWorldbook, worldbookOrEntry, entryNameOrData) {
   const explicitWorldbook =
     typeof entryNameOrData === "string"
       ? normalizeEntryKey(worldbookOrEntry)
@@ -366,11 +389,20 @@ function findEntry(
     return renderCtx.entriesByWorldbook.get(worldbook)?.get(identifier);
   };
 
-  return (
+  let resolved =
     lookupInWorldbook(explicitWorldbook) ||
     lookupInWorldbook(fallbackWorldbook) ||
-    renderCtx.allEntries.get(identifier)
-  );
+    renderCtx.allEntries.get(identifier);
+
+  if (!resolved && explicitWorldbook) {
+    await ensureWorldbookEntriesLoaded(renderCtx, explicitWorldbook);
+    resolved =
+      lookupInWorldbook(explicitWorldbook) ||
+      lookupInWorldbook(fallbackWorldbook) ||
+      renderCtx.allEntries.get(identifier);
+  }
+
+  return resolved;
 }
 
 async function activateWorldInfoInContext(
@@ -380,32 +412,35 @@ async function activateWorldInfoInContext(
   entryOrForce,
   maybeForce,
 ) {
-  const force = typeof entryOrForce === "boolean" ? entryOrForce : maybeForce;
-  const explicitWorldbook = typeof entryOrForce === "string" ? world : null;
-  const identifier = typeof entryOrForce === "string" ? entryOrForce : world;
-  const entry = identifier
-    ? findEntry(renderCtx, currentWorldbook, explicitWorldbook, identifier)
-    : undefined;
+  const hasExplicitWorldbook = typeof entryOrForce === "string";
+  const identifier = normalizeEntryKey(hasExplicitWorldbook ? entryOrForce : world);
+  const explicitWorldbook = hasExplicitWorldbook ? normalizeEntryKey(world) : "";
+  const entry = await resolveEntry(
+    renderCtx,
+    currentWorldbook,
+    explicitWorldbook || identifier,
+    hasExplicitWorldbook ? identifier : undefined,
+  );
 
   if (!entry) {
+    recordRenderWarning(
+      renderCtx,
+      `activewi target not found: ${explicitWorldbook ? `${explicitWorldbook}/` : ""}${identifier}`,
+    );
     return null;
   }
 
-  const normalizedEntry = force
-    ? {
-        ...entry,
-        content: String(entry.content || "").replaceAll("@@dont_activate", ""),
-      }
-    : entry;
+  const normalizedEntry = normalizeRenderEntry({
+    ...entry,
+    content: String(entry.content || "").replaceAll("@@dont_activate", ""),
+  });
 
-  renderCtx.activatedEntries.set(
-    activationKey(normalizedEntry),
-    normalizedEntry,
-  );
+  renderCtx.forcedActivatedEntries.set(activationKey(normalizedEntry), normalizedEntry);
   return {
     world: normalizedEntry.worldbook,
     comment: normalizedEntry.comment || normalizedEntry.name,
     content: normalizedEntry.content,
+    forced: typeof maybeForce === "boolean" ? maybeForce : typeof entryOrForce === "boolean",
   };
 }
 
@@ -415,7 +450,7 @@ async function getwi(
   worldbookOrEntry,
   entryNameOrData,
 ) {
-  const entry = findEntry(
+  const entry = await resolveEntry(
     renderCtx,
     currentWorldbook,
     worldbookOrEntry,
@@ -427,23 +462,30 @@ async function getwi(
 
   const entryKey = activationKey(entry);
   if (renderCtx.renderStack.has(entryKey)) {
+    recordRenderWarning(
+      renderCtx,
+      `recursive getwi blocked: ${entry.comment || entry.name}`,
+    );
     console.warn(
       `[ST-BME] task-ejs 检测到循环 getwi: ${entry.comment || entry.name}`,
     );
-    return substituteTaskEjsParams(entry.content, renderCtx.templateContext);
+    return "";
   }
 
   if (renderCtx.renderStack.size >= renderCtx.maxRecursion) {
+    recordRenderWarning(
+      renderCtx,
+      `getwi recursion limit reached: ${entry.comment || entry.name}`,
+    );
     console.warn(
       `[ST-BME] task-ejs 超过最大递归深度: ${renderCtx.maxRecursion}`,
     );
-    return substituteTaskEjsParams(entry.content, renderCtx.templateContext);
+    return "";
   }
 
-  const processed = substituteTaskEjsParams(
-    entry.content,
-    renderCtx.templateContext,
-  );
+  const processed = substituteTaskEjsParams(entry.content, renderCtx.templateContext, {
+    hostSnapshot: renderCtx.hostSnapshot,
+  });
   let finalContent = processed;
 
   if (processed.includes("<%")) {
@@ -461,20 +503,18 @@ async function getwi(
     }
   }
 
-  if (!renderCtx.pulledEntries.has(entryKey)) {
-    renderCtx.pulledEntries.set(entryKey, {
-      name: entry.name,
-      comment: entry.comment,
-      content: finalContent,
-      worldbook: entry.worldbook,
-    });
-  }
+  renderCtx.inlinePulledEntries.set(entryKey, {
+    name: entry.name,
+    comment: entry.comment,
+    content: finalContent,
+    worldbook: entry.worldbook,
+  });
 
-  return finalContent;
+  return String(finalContent || "");
 }
 
-function getChatMessageCompat(index, role) {
-  const chat = getStChat()
+function getChatMessageCompat(renderCtx, index, role) {
+  const chat = getStChat(renderCtx?.hostSnapshot)
     .filter((message) => {
       if (!role) return true;
       if (role === "user") return Boolean(message?.is_user);
@@ -487,12 +527,9 @@ function getChatMessageCompat(index, role) {
   return chat[resolvedIndex] || "";
 }
 
-function getChatMessagesCompat(
-  startOrCount = getStChat().length,
-  endOrRole,
-  role,
-) {
-  const allMessages = getStChat().map((message, index) => ({
+function getChatMessagesCompat(renderCtx, startOrCount, endOrRole, role) {
+  const chat = getStChat(renderCtx?.hostSnapshot);
+  const allMessages = chat.map((message, index) => ({
     raw: message,
     id: index,
     text: processChatMessage(message),
@@ -529,10 +566,11 @@ function getChatMessagesCompat(
     .map((item) => item.text);
 }
 
-function matchChatMessagesCompat(pattern) {
-  const regex =
-    typeof pattern === "string" ? new RegExp(pattern, "i") : pattern;
-  return getStChat().some((message) => regex.test(processChatMessage(message)));
+function matchChatMessagesCompat(renderCtx, pattern) {
+  const regex = typeof pattern === "string" ? new RegExp(pattern, "i") : pattern;
+  return getStChat(renderCtx?.hostSnapshot).some((message) =>
+    regex.test(processChatMessage(message)),
+  );
 }
 
 function rethrow(err, str, filename, lineNumber, esc) {
@@ -553,55 +591,55 @@ function rethrow(err, str, filename, lineNumber, esc) {
   throw err;
 }
 
+function makeUnsupportedHelper(helperName) {
+  return (...args) => {
+    throw createTaskEjsUnsupportedHelperError(helperName, args);
+  };
+}
+
+function getCurrentActivatedEntries(renderCtx) {
+  return Array.isArray(renderCtx?.currentActivatedEntries)
+    ? renderCtx.currentActivatedEntries
+    : [];
+}
+
 export function createTaskEjsRenderContext(entries = [], options = {}) {
   const hostSnapshot = resolveHostSnapshot(options.hostSnapshot);
-  const normalizedEntries = (Array.isArray(entries) ? entries : []).map(
-    (entry) => ({
-      name: normalizeEntryKey(entry?.name),
-      comment: normalizeEntryKey(entry?.comment),
-      content: String(entry?.content || ""),
-      worldbook: normalizeEntryKey(entry?.worldbook),
-    }),
-  );
-
-  const allEntries = new Map();
-  const entriesByWorldbook = new Map();
-
-  for (const entry of normalizedEntries) {
-    registerEntryLookup(allEntries, entry.name, entry);
-    registerEntryLookup(allEntries, entry.comment, entry);
-
-    if (!entriesByWorldbook.has(entry.worldbook)) {
-      entriesByWorldbook.set(entry.worldbook, new Map());
-    }
-    const worldbookLookup = entriesByWorldbook.get(entry.worldbook);
-    registerEntryLookup(worldbookLookup, entry.name, entry);
-    registerEntryLookup(worldbookLookup, entry.comment, entry);
-  }
-
-  return {
-    entries: normalizedEntries,
-    allEntries,
-    entriesByWorldbook,
+  const renderCtx = {
+    entries: [],
+    allEntries: new Map(),
+    entriesByWorldbook: new Map(),
     renderStack: new Set(),
+    worldbookLoadAttempts: new Set(),
+    lazyLoadedWorldbooks: new Set(),
+    warnings: [],
     maxRecursion:
-      Number.isFinite(Number(options.maxRecursion)) &&
-      Number(options.maxRecursion) > 0
+      Number.isFinite(Number(options.maxRecursion)) && Number(options.maxRecursion) > 0
         ? Number(options.maxRecursion)
         : DEFAULT_MAX_RECURSION,
     hostSnapshot,
-    variableState: createVariableState(hostSnapshot),
-    activatedEntries: new Map(),
-    pulledEntries: new Map(),
+    variableState: createReadOnlyVariableState(hostSnapshot),
+    currentActivatedEntries: Array.isArray(options.currentActivatedEntries)
+      ? options.currentActivatedEntries.map((entry) => normalizeRenderEntry(entry))
+      : [],
+    forcedActivatedEntries: new Map(),
+    inlinePulledEntries: new Map(),
     ejsRuntimeStatus: EJS_RUNTIME_STATUS.FAILED,
     ejsRuntimeFallback: false,
     ejsLastError: null,
+    loadWorldbookEntries:
+      typeof options.loadWorldbookEntries === "function"
+        ? options.loadWorldbookEntries
+        : null,
     templateContext: {
       ...(options.templateContext || {}),
       hostSnapshot: hostSnapshot.snapshot,
       stSnapshot: hostSnapshot.snapshot,
     },
   };
+
+  registerEntries(renderCtx, entries);
+  return renderCtx;
 }
 
 export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
@@ -616,29 +654,20 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         : String(backend.error)
       : null;
   }
+
   const hostSnapshot = resolveHostSnapshot(renderCtx?.hostSnapshot);
   const snapshot = hostSnapshot.snapshot;
+  const processed = substituteTaskEjsParams(content, renderCtx?.templateContext, {
+    hostSnapshot,
+  });
+
   if (!runtime) {
-    const substituted = substituteTaskEjsParams(content, renderCtx?.templateContext, {
-      hostSnapshot,
-    });
-    if (substituted.includes("<%")) {
-      throw createTaskEjsRuntimeUnavailableError(backend, substituted);
+    if (processed.includes("<%")) {
+      throw createTaskEjsRuntimeUnavailableError(backend, processed);
     }
-    console.warn(
-      "[ST-BME] task-ejs 未找到可用 ejs runtime，回退为轻量变量替换:",
-      backend,
-    );
-    return substituted;
+    return processed;
   }
 
-  const processed = substituteTaskEjsParams(
-    content,
-    renderCtx?.templateContext,
-    {
-      hostSnapshot,
-    },
-  );
   if (!processed.includes("<%")) {
     return processed;
   }
@@ -651,12 +680,47 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
       ? renderCtx.templateContext.user_input
       : snapshot.chat.lastUserMessage || "";
 
+  const unsupported = {
+    setvar: makeUnsupportedHelper("setvar"),
+    setLocalVar: makeUnsupportedHelper("setLocalVar"),
+    setGlobalVar: makeUnsupportedHelper("setGlobalVar"),
+    setMessageVar: makeUnsupportedHelper("setMessageVar"),
+    incvar: makeUnsupportedHelper("incvar"),
+    decvar: makeUnsupportedHelper("decvar"),
+    delvar: makeUnsupportedHelper("delvar"),
+    insvar: makeUnsupportedHelper("insvar"),
+    incLocalVar: makeUnsupportedHelper("incLocalVar"),
+    incGlobalVar: makeUnsupportedHelper("incGlobalVar"),
+    incMessageVar: makeUnsupportedHelper("incMessageVar"),
+    decLocalVar: makeUnsupportedHelper("decLocalVar"),
+    decGlobalVar: makeUnsupportedHelper("decGlobalVar"),
+    decMessageVar: makeUnsupportedHelper("decMessageVar"),
+    patchVariables: makeUnsupportedHelper("patchVariables"),
+    getprp: makeUnsupportedHelper("getprp"),
+    getpreset: makeUnsupportedHelper("getpreset"),
+    getPresetPrompt: makeUnsupportedHelper("getPresetPrompt"),
+    execute: makeUnsupportedHelper("execute"),
+    define: makeUnsupportedHelper("define"),
+    getqr: makeUnsupportedHelper("getqr"),
+    getQuickReply: makeUnsupportedHelper("getQuickReply"),
+    selectActivatedEntries: makeUnsupportedHelper("selectActivatedEntries"),
+    activateWorldInfoByKeywords: makeUnsupportedHelper("activateWorldInfoByKeywords"),
+    activateRegex: makeUnsupportedHelper("activateRegex"),
+    injectPrompt: makeUnsupportedHelper("injectPrompt"),
+    getPromptsInjected: makeUnsupportedHelper("getPromptsInjected"),
+    hasPromptsInjected: makeUnsupportedHelper("hasPromptsInjected"),
+    jsonPatch: makeUnsupportedHelper("jsonPatch"),
+  };
+
   const context = {
     _: utilityLib,
     console,
     userName: snapshot.user.name,
     charName: snapshot.character.name,
     assistantName: snapshot.character.name,
+    charDescription: snapshot.character.description || "",
+    userPersona: snapshot.persona.text || "",
+    currentTime: snapshot.time.current || "",
     characterId: snapshot.character.id,
     hostSnapshot: snapshot,
     stSnapshot: snapshot,
@@ -667,9 +731,11 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
       return renderCtx.variableState.cacheVars;
     },
     get lastUserMessageId() {
-      return chat.findLastIndex
-        ? chat.findLastIndex((message) => message?.is_user)
-        : [...chat].reverse().findIndex((message) => message?.is_user);
+      if (typeof chat.findLastIndex === "function") {
+        return chat.findLastIndex((message) => message?.is_user);
+      }
+      const reversedIndex = [...chat].reverse().findIndex((message) => message?.is_user);
+      return reversedIndex < 0 ? -1 : chat.length - 1 - reversedIndex;
     },
     get lastUserMessage() {
       return (
@@ -689,18 +755,19 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
       return workflowUserInput;
     },
     get lastCharMessageId() {
-      return chat.findLastIndex
-        ? chat.findLastIndex(
-            (message) => !message?.is_user && !message?.is_system,
-          )
-        : [...chat]
-            .reverse()
-            .findIndex((message) => !message?.is_user && !message?.is_system);
+      if (typeof chat.findLastIndex === "function") {
+        return chat.findLastIndex(
+          (message) => !message?.is_user && !message?.is_system,
+        );
+      }
+      const reversedIndex = [...chat]
+        .reverse()
+        .findIndex((message) => !message?.is_user && !message?.is_system);
+      return reversedIndex < 0 ? -1 : chat.length - 1 - reversedIndex;
     },
     get lastCharMessage() {
       return (
-        chat.findLast?.((message) => !message?.is_user && !message?.is_system)
-          ?.mes ||
+        chat.findLast?.((message) => !message?.is_user && !message?.is_system)?.mes ||
         [...chat]
           .reverse()
           .find((message) => !message?.is_user && !message?.is_system)?.mes ||
@@ -745,8 +812,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         worldbookOrEntry,
         entryNameOrData,
       ),
-    getvar: (path, options) =>
-      getVariable(renderCtx.variableState, path, options),
+    getvar: (path, options) => getVariable(renderCtx.variableState, path, options),
     getLocalVar: (path, options = {}) =>
       getVariable(renderCtx.variableState, path, {
         ...options,
@@ -762,51 +828,13 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         ...options,
         scope: "message",
       }),
-    setvar: (path, value, options = {}) =>
-      setVariable(renderCtx.variableState, path, value, options),
-    setLocalVar: (path, value, options = {}) =>
-      setVariable(renderCtx.variableState, path, value, {
-        ...options,
-        scope: "local",
-      }),
-    setGlobalVar: (path, value, options = {}) =>
-      setVariable(renderCtx.variableState, path, value, {
-        ...options,
-        scope: "global",
-      }),
-    setMessageVar: (path, value, options = {}) =>
-      setVariable(renderCtx.variableState, path, value, {
-        ...options,
-        scope: "message",
-      }),
-    incvar: () => undefined,
-    decvar: () => undefined,
-    delvar: () => undefined,
-    insvar: () => undefined,
-    incLocalVar: () => undefined,
-    incGlobalVar: () => undefined,
-    incMessageVar: () => undefined,
-    decLocalVar: () => undefined,
-    decGlobalVar: () => undefined,
-    decMessageVar: () => undefined,
-    patchVariables: () => undefined,
-    getChatMessage: (id, role) => getChatMessageCompat(id, role),
-    getChatMessages: (startOrCount, endOrRole, role) =>
-      getChatMessagesCompat(startOrCount, endOrRole, role),
-    matchChatMessages: (pattern) => matchChatMessagesCompat(pattern),
+    getChatMessage: (id, role) => getChatMessageCompat(renderCtx, id, role),
+    getChatMessages: (startOrCount = getStChat(hostSnapshot).length, endOrRole, role) =>
+      getChatMessagesCompat(renderCtx, startOrCount, endOrRole, role),
+    matchChatMessages: (pattern) => matchChatMessagesCompat(renderCtx, pattern),
     getchr: () => snapshot.character.description || "",
-    getchar: undefined,
-    getChara: undefined,
-    getprp: async () => "",
-    getpreset: async () => "",
-    getPresetPrompt: async () => "",
-    execute: async () => "",
-    define: () => undefined,
     evalTemplate: async (innerContent, data = {}) =>
       evalTaskEjsTemplate(innerContent, renderCtx, data),
-    getqr: async () => "",
-    getQuickReply: async () => "",
-    findVariables: () => ({}),
     getWorldInfoData: async () =>
       renderCtx.entries.map((entry) => ({
         comment: entry.comment || entry.name,
@@ -814,7 +842,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         world: entry.worldbook,
       })),
     getWorldInfoActivatedData: async () =>
-      [...renderCtx.activatedEntries.values()].map((entry) => ({
+      getCurrentActivatedEntries(renderCtx).map((entry) => ({
         comment: entry.comment || entry.name,
         content: entry.content,
         world: entry.worldbook,
@@ -825,11 +853,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         content: entry.content,
         world: entry.worldbook,
       })),
-    selectActivatedEntries: () => [],
-    activateWorldInfoByKeywords: async () => [],
-    getEnabledLoreBooks: () => [
-      ...new Set(renderCtx.entries.map((entry) => entry.worldbook)),
-    ],
+    getEnabledLoreBooks: () => [...new Set(renderCtx.entries.map((entry) => entry.worldbook))],
     activewi: async (world, entryOrForce, maybeForce) =>
       activateWorldInfoInContext(
         renderCtx,
@@ -846,11 +870,6 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
         entryOrForce,
         maybeForce,
       ),
-    activateRegex: () => undefined,
-    injectPrompt: () => undefined,
-    getPromptsInjected: () => [],
-    hasPromptsInjected: () => false,
-    jsonPatch: () => undefined,
     parseJSON: (raw) => {
       try {
         return JSON.parse(raw);
@@ -860,6 +879,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
     },
     print: (...parts) =>
       parts.filter((part) => part !== undefined && part !== null).join(""),
+    ...unsupported,
     ...extraEnv,
   };
 
@@ -887,8 +907,11 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
       renderCtx.ejsLastError =
         error instanceof Error ? error.message : String(error);
     }
-    console.warn("[ST-BME] task-ejs 渲染失败，回退原文本:", error);
-    return processed;
+    if (error?.code === "st_bme_task_ejs_unsupported_helper") {
+      throw error;
+    }
+    console.warn("[ST-BME] task-ejs 渲染失败:", error);
+    throw error;
   }
 }
 

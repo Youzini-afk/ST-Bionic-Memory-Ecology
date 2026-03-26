@@ -1,6 +1,6 @@
 // ST-BME: 任务级世界书激活引擎
-// 复刻 Evolution_World 的世界书来源、激活与 EJS 渲染主逻辑，
-// 但只接入 ST-BME 的任务预设系统，不引入完整工作流调度层。
+// 对标 SillyTavern 原生世界书扫描逻辑，并在私有 prompt 组装阶段
+// 提供最小 EJS 配合能力，用于 getwi / activewi。
 
 import {
   createTaskEjsRenderContext,
@@ -36,34 +36,9 @@ const DEPTH_MAPPING = {
 };
 
 const DEFAULT_DEPTH = 4;
-const DEFAULT_CONTROLLER_ENTRY_PREFIX = "EW/Controller/";
+const DEFAULT_MAX_RESOLVE_PASSES = 10;
 const WORLDINFO_CACHE_TTL_MS = 3000;
-const KNOWN_DECORATORS = [
-  "@@activate",
-  "@@dont_activate",
-  "@@message_formatting",
-  "@@generate",
-  "@@generate_before",
-  "@@generate_after",
-  "@@render",
-  "@@render_before",
-  "@@render_after",
-  "@@dont_preload",
-  "@@initial_variables",
-  "@@always_enabled",
-  "@@only_preload",
-  "@@iframe",
-  "@@preprocessing",
-  "@@if",
-  "@@private",
-];
-
-const SPECIAL_NAME_MARKERS = [
-  "[GENERATE:",
-  "[RENDER:",
-  "@INJECT",
-  "[InitialVariables]",
-];
+const KNOWN_DECORATORS = ["@@activate", "@@dont_activate"];
 
 let worldbookEntriesCache = {
   key: "",
@@ -219,32 +194,40 @@ function simpleHash(input = "") {
 }
 
 function parseDecorators(content = "") {
-  const decorators = [];
-  const cleanLines = [];
+  const rawContent = String(content || "");
+  if (!rawContent.startsWith("@@")) {
+    return {
+      decorators: [],
+      cleanContent: rawContent,
+    };
+  }
 
-  for (const line of String(content || "").split("\n")) {
-    const trimmed = line.trim();
-    const matched = KNOWN_DECORATORS.find((decorator) =>
-      trimmed.startsWith(decorator),
-    );
-    if (matched) {
-      const firstSpace = trimmed.indexOf(" ");
-      decorators.push(firstSpace > 0 ? trimmed.slice(0, firstSpace) : trimmed);
-    } else {
-      cleanLines.push(line);
+  const lines = rawContent.split("\n");
+  const decorators = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = String(lines[index] || "");
+    if (!line.startsWith("@@")) {
+      break;
     }
+    if (line.startsWith("@@@")) {
+      break;
+    }
+    const matched = KNOWN_DECORATORS.find((decorator) =>
+      line.startsWith(decorator),
+    );
+    if (!matched) {
+      break;
+    }
+    decorators.push(line);
+    index += 1;
   }
 
   return {
     decorators,
-    cleanContent: cleanLines.join("\n").trim(),
+    cleanContent: index > 0 ? lines.slice(index).join("\n") : rawContent,
   };
-}
-
-function isSpecialEntryByComment(comment = "") {
-  return SPECIAL_NAME_MARKERS.some((marker) =>
-    String(comment).includes(marker),
-  );
 }
 
 function normalizeEntry(raw = {}, worldbookName = "") {
@@ -494,27 +477,6 @@ function selectActivatedEntries(
       continue;
     }
     if (entry.decorators.includes("@@dont_activate")) continue;
-    if (entry.decorators.includes("@@only_preload")) continue;
-
-    const specialDecorators = [
-      "@@generate",
-      "@@generate_before",
-      "@@generate_after",
-      "@@render",
-      "@@render_before",
-      "@@render_after",
-      "@@initial_variables",
-      "@@preprocessing",
-      "@@iframe",
-    ];
-    if (
-      entry.decorators.some((decorator) =>
-        specialDecorators.includes(decorator),
-      )
-    ) {
-      continue;
-    }
-    if (isSpecialEntryByComment(entry.comment)) continue;
 
     if (entry.keys.length === 0) continue;
     const matchedPrimary = entry.keys
@@ -649,16 +611,52 @@ function selectActivatedEntries(
   return ungrouped.concat(matched).sort(sortEntries);
 }
 
-async function collectAllWorldbookEntries() {
+async function loadNormalizedWorldbookEntries(worldbookHost, worldbookName) {
+  const normalizedName = normalizeKey(worldbookName);
+  if (!normalizedName || typeof worldbookHost?.getWorldbook !== "function") {
+    return [];
+  }
+
+  const entries = await worldbookHost.getWorldbook(normalizedName);
+  let commentByUid = new Map();
+  if (typeof worldbookHost?.getLorebookEntries === "function") {
+    try {
+      const loreEntries = await worldbookHost.getLorebookEntries(normalizedName);
+      commentByUid = new Map(
+        (Array.isArray(loreEntries) ? loreEntries : []).map((entry) => [
+          entry.uid,
+          String(entry.comment ?? ""),
+        ]),
+      );
+    } catch (error) {
+      console.debug(
+        `[ST-BME] task-worldinfo 读取 lorebook comment 失败: ${normalizedName}`,
+        error,
+      );
+    }
+  }
+
+  return (Array.isArray(entries) ? entries : []).map((entry) =>
+    normalizeEntry(
+      {
+        ...entry,
+        comment: commentByUid.get(entry.uid) ?? entry.comment ?? "",
+      },
+      normalizedName,
+    ),
+  );
+}
+
+async function collectAllWorldbookEntries(worldbookHost = null) {
+  const resolvedWorldbookHost = worldbookHost || (await getWorldbookHost());
   const {
     getWorldbook,
-    getLorebookEntries,
     getCharWorldbookNames,
     sourceLabel,
     fallback,
     capabilityStatus,
     snapshotRevision,
-  } = await getWorldbookHost();
+  } = resolvedWorldbookHost;
   const ctx = getStContext();
   const debug = {
     sourceLabel,
@@ -777,36 +775,11 @@ async function collectAllWorldbookEntries() {
     loadedNames.add(normalizedName);
 
     try {
-      const entries = await getWorldbook(normalizedName);
-      let commentByUid = new Map();
-      if (getLorebookEntries) {
-        try {
-          const loreEntries = await getLorebookEntries(normalizedName);
-          commentByUid = new Map(
-            (Array.isArray(loreEntries) ? loreEntries : []).map((entry) => [
-              entry.uid,
-              String(entry.comment ?? ""),
-            ]),
-          );
-        } catch (error) {
-          console.debug(
-            `[ST-BME] task-worldinfo 读取 lorebook comment 失败: ${normalizedName} [${sourceTag}]`,
-            error,
-          );
-        }
-      }
-
-      for (const entry of Array.isArray(entries) ? entries : []) {
-        allEntries.push(
-          normalizeEntry(
-            {
-              ...entry,
-              comment: commentByUid.get(entry.uid) ?? entry.comment ?? "",
-            },
-            normalizedName,
-          ),
-        );
-      }
+      const entries = await loadNormalizedWorldbookEntries(
+        resolvedWorldbookHost,
+        normalizedName,
+      );
+      allEntries.push(...entries);
     } catch (error) {
       console.debug(
         `[ST-BME] task-worldinfo 读取世界书失败: ${normalizedName} [${sourceTag}]`,
@@ -876,7 +849,6 @@ function normalizeResolvedEntry(entry = {}, fallbackIndex = 0) {
             ...entry.activationDebug,
           }
         : null,
-    controllerSource: String(entry.controllerSource || ""),
   };
 }
 
@@ -956,6 +928,48 @@ function buildActivationSourceTexts({
   return uniq(texts.map((text) => String(text).trim()).filter(Boolean));
 }
 
+function getEntryIdentity(entry = {}) {
+  return `${entry.worldbook}:${entry.uid}:${entry.name}`;
+}
+
+function toActivationMap(entries = []) {
+  const map = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    map.set(getEntryIdentity(entry), entry);
+  }
+  return map;
+}
+
+function warnLegacyEntryNames(entries = [], warnings = []) {
+  const legacyNames = uniq(
+    (Array.isArray(entries) ? entries : [])
+      .map((entry) => String(entry?.name || "").trim())
+      .filter(
+        (name) => name.startsWith("EW/Controller/") || name.startsWith("EW/Dyn/"),
+      ),
+  );
+
+  if (legacyNames.length === 0) {
+    return;
+  }
+
+  const warning =
+    `检测到旧 EW 命名条目 (${legacyNames.join(", ")})；这些条目现在只按普通世界书条目处理，不再有专用魔法行为`;
+  if (!warnings.includes(warning)) {
+    warnings.push(warning);
+  }
+  console.warn(`[ST-BME] task-worldinfo ${warning}`);
+}
+
+function mergeActivationDebug(entry = {}, overrides = {}) {
+  return {
+    ...(entry.activationDebug && typeof entry.activationDebug === "object"
+      ? entry.activationDebug
+      : {}),
+    ...overrides,
+  };
+}
+
 export async function resolveTaskWorldInfo({
   settings = {},
   chatMessages = [],
@@ -983,8 +997,13 @@ export async function resolveTaskWorldInfo({
       activatedEntryCount: 0,
       constantActivatedCount: 0,
       selectiveActivatedCount: 0,
-      controllerActivatedCount: 0,
-      controllerPulledCount: 0,
+      ejsForcedActivationCount: 0,
+      ejsInlinePullCount: 0,
+      resolvePassCount: 0,
+      forcedActivatedEntries: [],
+      inlinePulledEntries: [],
+      lazyLoadedWorldbooks: [],
+      recursionWarnings: [],
       cache: {
         hit: false,
         key: "",
@@ -1001,7 +1020,8 @@ export async function resolveTaskWorldInfo({
   };
 
   try {
-    const collected = await collectAllWorldbookEntries();
+    const worldbookHost = await getWorldbookHost();
+    const collected = await collectAllWorldbookEntries(worldbookHost);
     const allEntries = Array.isArray(collected?.entries) ? collected.entries : [];
     result.allEntries = allEntries;
     result.debug = {
@@ -1021,6 +1041,7 @@ export async function resolveTaskWorldInfo({
     if (allEntries.length === 0) {
       return result;
     }
+    warnLegacyEntryNames(allEntries, result.debug.warnings);
 
     const triggerTexts = buildActivationSourceTexts({
       chatMessages,
@@ -1038,91 +1059,195 @@ export async function resolveTaskWorldInfo({
         : String(ejsBackend.error)
       : "";
 
-    const activated = selectActivatedEntries(allEntries, trigger, {
+    const normalizedTemplateContext = {
       ...templateContext,
       user_input: userMessage || templateContext?.user_input || "",
-    });
-    result.debug.activatedEntryCount = activated.length;
-    result.debug.constantActivatedCount = activated.filter(
-      (entry) => entry.activationDebug?.mode === "constant",
-    ).length;
-    result.debug.selectiveActivatedCount = activated.filter(
-      (entry) => entry.activationDebug?.mode === "selective",
-    ).length;
-    result.debug.controllerActivatedCount = activated.filter((entry) =>
-      entry.name.startsWith(String(
-        settings.worldInfoControllerEntryPrefix ||
-          settings.controller_entry_prefix ||
-          DEFAULT_CONTROLLER_ENTRY_PREFIX,
-      )),
-    ).length;
-    if (activated.length === 0) {
+    };
+    const initialActivated = selectActivatedEntries(
+      allEntries,
+      trigger,
+      normalizedTemplateContext,
+    );
+    if (initialActivated.length === 0) {
       return result;
     }
 
+    const allActivated = toActivationMap(initialActivated);
+    const aggregatedForcedEntries = new Map();
+    const aggregatedInlineEntries = new Map();
+    const recursionWarnings = new Set();
+    const knownWorldbooks = new Set(
+      allEntries.map((entry) => entry.worldbook).filter(Boolean),
+    );
+    const lazyLoadWorldbookEntries = async (worldbookName) => {
+      const normalizedWorldbook = normalizeKey(worldbookName);
+      if (!normalizedWorldbook || knownWorldbooks.has(normalizedWorldbook)) {
+        return [];
+      }
+      const lazyEntries = await loadNormalizedWorldbookEntries(
+        worldbookHost,
+        normalizedWorldbook,
+      );
+      knownWorldbooks.add(normalizedWorldbook);
+      return lazyEntries;
+    };
+
     const renderCtx = createTaskEjsRenderContext(
       allEntries.map((entry) => ({
+        uid: entry.uid,
         name: entry.name,
         comment: entry.comment,
         content: entry.cleanContent || entry.content,
         worldbook: entry.worldbook,
+        role: entry.role,
+        position: entry.position,
+        depth: entry.depth,
+        order: entry.order,
+        activationDebug: entry.activationDebug,
       })),
       {
-        templateContext: {
-          ...templateContext,
-          user_input: userMessage || templateContext?.user_input || "",
-        },
+        templateContext: normalizedTemplateContext,
+        currentActivatedEntries: [...allActivated.values()],
+        loadWorldbookEntries: lazyLoadWorldbookEntries,
       },
     );
 
-    const controllerPrefix =
-      settings.worldInfoControllerEntryPrefix ||
-      settings.controller_entry_prefix ||
-      DEFAULT_CONTROLLER_ENTRY_PREFIX;
+    const maxResolvePasses =
+      Number.isFinite(Number(settings.worldInfoMaxResolvePasses)) &&
+      Number(settings.worldInfoMaxResolvePasses) > 0
+        ? Number(settings.worldInfoMaxResolvePasses)
+        : DEFAULT_MAX_RESOLVE_PASSES;
 
     const beforeEntries = [];
     const afterEntries = [];
     const atDepthEntries = [];
     let resolvedIndex = 0;
+    let finalResolvedEntries = [];
+    let hitResolveCap = false;
 
-    for (const entry of activated) {
-      renderCtx.pulledEntries.clear();
+    for (let pass = 0; pass < maxResolvePasses; pass += 1) {
+      result.debug.resolvePassCount = pass + 1;
+      renderCtx.currentActivatedEntries = [...allActivated.values()];
+      renderCtx.forcedActivatedEntries.clear();
+      renderCtx.inlinePulledEntries.clear();
+      renderCtx.warnings = [];
+      finalResolvedEntries = [];
+      resolvedIndex = 0;
 
-      const sourceContent = entry.cleanContent || entry.content;
-      const isControllerEntry = entry.name.startsWith(String(controllerPrefix || ""));
-      let renderedContent = sourceContent;
-      try {
-        renderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
-          world_info: {
-            comment: entry.comment || entry.name,
-            name: entry.name,
-            world: entry.worldbook,
-          },
-        });
-      } catch (error) {
-        result.debug.warnings.push(
-          error?.code === "st_bme_task_ejs_runtime_unavailable"
-            ? `世界书条目 ${entry.name} 依赖 EJS runtime，当前已跳过`
-            : `世界书条目 ${entry.name} 渲染失败，已跳过`,
-        );
-        console.warn(
-          `[ST-BME] task-worldinfo 渲染世界书条目失败: ${entry.name}`,
-          error,
-        );
-        if (
-          error?.code === "st_bme_task_ejs_runtime_unavailable" &&
-          !result.debug.ejsLastError
-        ) {
-          result.debug.ejsLastError =
-            error instanceof Error ? error.message : String(error);
+      const activatedEntries = [...allActivated.values()].sort(sortEntries);
+
+      for (const entry of activatedEntries) {
+        const sourceContent = entry.cleanContent || entry.content;
+        let renderedContent = sourceContent;
+        try {
+          renderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
+            world_info: {
+              comment: entry.comment || entry.name,
+              name: entry.name,
+              world: entry.worldbook,
+            },
+          });
+        } catch (error) {
+          const warning =
+            error?.code === "st_bme_task_ejs_unsupported_helper"
+              ? `世界书条目 ${entry.name} 调用了不支持的 helper: ${error.helperName}`
+              : error?.code === "st_bme_task_ejs_runtime_unavailable"
+                ? `世界书条目 ${entry.name} 依赖 EJS runtime，当前已跳过`
+                : `世界书条目 ${entry.name} 渲染失败，已跳过`;
+          if (!result.debug.warnings.includes(warning)) {
+            result.debug.warnings.push(warning);
+          }
+          console.warn(
+            `[ST-BME] task-worldinfo 渲染世界书条目失败: ${entry.name}`,
+            error,
+          );
+          if (
+            error?.code === "st_bme_task_ejs_runtime_unavailable" &&
+            !result.debug.ejsLastError
+          ) {
+            result.debug.ejsLastError =
+              error instanceof Error ? error.message : String(error);
+          }
+          renderedContent = "";
         }
-        renderedContent = "";
+
+        for (const warning of renderCtx.warnings || []) {
+          recursionWarnings.add(String(warning || ""));
+        }
+
+        const trimmedContent = String(renderedContent || "").trim();
+        if (!trimmedContent) {
+          continue;
+        }
+
+        finalResolvedEntries.push(
+          normalizeResolvedEntry(
+            {
+              name: entry.comment || entry.name,
+              sourceName: entry.name,
+              worldbook: entry.worldbook,
+              content: trimmedContent,
+              role: entry.role,
+              position: entry.position,
+              depth: entry.depth,
+              order: entry.order,
+              activationDebug: entry.activationDebug,
+            },
+            resolvedIndex++,
+          ),
+        );
       }
 
-      if (!isControllerEntry && !String(renderedContent || "").trim()) {
-        continue;
+      for (const pulledEntry of renderCtx.inlinePulledEntries.values()) {
+        const key = `${pulledEntry.worldbook}:${pulledEntry.name}`;
+        if (!aggregatedInlineEntries.has(key)) {
+          aggregatedInlineEntries.set(key, {
+            name: pulledEntry.comment || pulledEntry.name,
+            sourceName: pulledEntry.name,
+            worldbook: pulledEntry.worldbook,
+          });
+        }
       }
 
+      let discoveredNewActivation = false;
+      for (const forcedEntry of renderCtx.forcedActivatedEntries.values()) {
+        const key = getEntryIdentity(forcedEntry);
+        if (!aggregatedForcedEntries.has(key)) {
+          aggregatedForcedEntries.set(key, {
+            name: forcedEntry.comment || forcedEntry.name,
+            sourceName: forcedEntry.name,
+            worldbook: forcedEntry.worldbook,
+          });
+        }
+        if (!allActivated.has(key)) {
+          allActivated.set(key, {
+            ...forcedEntry,
+            activationDebug: mergeActivationDebug(forcedEntry, {
+              mode: "ejs-forced",
+            }),
+          });
+          discoveredNewActivation = true;
+        }
+      }
+
+      if (!discoveredNewActivation) {
+        break;
+      }
+
+      if (pass + 1 >= maxResolvePasses) {
+        hitResolveCap = true;
+      }
+    }
+
+    if (hitResolveCap) {
+      const warning = `世界书 EJS 激活达到递归上限 ${maxResolvePasses}，已停止继续展开`;
+      if (!result.debug.warnings.includes(warning)) {
+        result.debug.warnings.push(warning);
+      }
+      recursionWarnings.add(warning);
+    }
+
+    for (const entry of finalResolvedEntries) {
       const bucketName = classifyPosition(entry);
       const bucket =
         bucketName === "before"
@@ -1130,57 +1255,7 @@ export async function resolveTaskWorldInfo({
           : bucketName === "after"
             ? afterEntries
             : atDepthEntries;
-
-      if (isControllerEntry) {
-        for (const pulledEntry of renderCtx.pulledEntries.values()) {
-          if (!String(pulledEntry.content || "").trim()) continue;
-          if (
-            pulledEntry.worldbook === entry.worldbook &&
-            pulledEntry.name === entry.name
-          ) {
-            continue;
-          }
-          bucket.push(
-            normalizeResolvedEntry(
-              {
-                name: pulledEntry.comment || pulledEntry.name,
-                sourceName: pulledEntry.name,
-                worldbook: pulledEntry.worldbook,
-                content: pulledEntry.content,
-                role: entry.role,
-                position: entry.position,
-                depth: entry.depth,
-                order: entry.order,
-                activationDebug: {
-                  ...(entry.activationDebug || {}),
-                  mode: "controller-pulled",
-                },
-                controllerSource: entry.name,
-              },
-              resolvedIndex++,
-            ),
-          );
-          result.debug.controllerPulledCount += 1;
-        }
-        continue;
-      }
-
-      bucket.push(
-        normalizeResolvedEntry(
-          {
-            name: entry.comment || entry.name,
-            sourceName: entry.name,
-            worldbook: entry.worldbook,
-            content: renderedContent,
-            role: entry.role,
-            position: entry.position,
-            depth: entry.depth,
-            order: entry.order,
-            activationDebug: entry.activationDebug,
-          },
-          resolvedIndex++,
-        ),
-      );
+      bucket.push(entry);
     }
 
     result.beforeEntries = beforeEntries;
@@ -1189,33 +1264,48 @@ export async function resolveTaskWorldInfo({
     result.beforeText = buildWorldInfoText(result.beforeEntries);
     result.afterText = buildWorldInfoText(result.afterEntries);
     result.additionalMessages = buildAdditionalMessages(result.atDepthEntries);
+    result.debug.activatedEntryCount = allActivated.size;
+    result.debug.constantActivatedCount = [...allActivated.values()].filter(
+      (entry) => entry.activationDebug?.mode === "constant",
+    ).length;
+    result.debug.selectiveActivatedCount = [...allActivated.values()].filter(
+      (entry) =>
+        entry.activationDebug?.mode === "selective" ||
+        entry.activationDebug?.mode === "forced",
+    ).length;
+    result.debug.ejsForcedActivationCount = aggregatedForcedEntries.size;
+    result.debug.ejsInlinePullCount = aggregatedInlineEntries.size;
+    result.debug.forcedActivatedEntries = [...aggregatedForcedEntries.values()];
+    result.debug.inlinePulledEntries = [...aggregatedInlineEntries.values()];
+    result.debug.lazyLoadedWorldbooks = [...renderCtx.lazyLoadedWorldbooks];
+    result.debug.recursionWarnings = [...recursionWarnings];
     result.debug.resolvedEntries = [
       ...result.beforeEntries.map((entry) => ({
         name: entry.name,
         bucket: "before",
         sourceName: entry.sourceName,
+        worldbook: entry.worldbook,
         activationMode: entry.activationDebug?.mode || "",
         matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
         matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
-        controllerSource: entry.controllerSource || "",
       })),
       ...result.afterEntries.map((entry) => ({
         name: entry.name,
         bucket: "after",
         sourceName: entry.sourceName,
+        worldbook: entry.worldbook,
         activationMode: entry.activationDebug?.mode || "",
         matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
         matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
-        controllerSource: entry.controllerSource || "",
       })),
       ...result.atDepthEntries.map((entry) => ({
         name: entry.name,
         bucket: "atDepth",
         sourceName: entry.sourceName,
+        worldbook: entry.worldbook,
         activationMode: entry.activationDebug?.mode || "",
         matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
         matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
-        controllerSource: entry.controllerSource || "",
       })),
     ];
     result.activatedEntryNames = uniq(
@@ -1223,8 +1313,8 @@ export async function resolveTaskWorldInfo({
         ...result.beforeEntries.map((entry) => entry.name),
         ...result.afterEntries.map((entry) => entry.name),
         ...result.atDepthEntries.map((entry) => entry.name),
-        ...[...renderCtx.activatedEntries.values()].map(
-          (entry) => entry.comment || entry.name,
+        ...[...aggregatedForcedEntries.values()].map(
+          (entry) => entry.name || entry.sourceName,
         ),
       ].filter(Boolean),
     );

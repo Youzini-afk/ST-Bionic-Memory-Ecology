@@ -129,6 +129,12 @@ try {
       if (template === "<% broken") {
         throw new Error("Unexpected end of input");
       }
+      if (template === "<% await execute() %>") {
+        return async function compiled(locals) {
+          await locals.execute();
+          return "";
+        };
+      }
       return async function compiled(locals) {
         return [
           locals.charName,
@@ -166,6 +172,13 @@ try {
     "Alice|User|persona-book|chat-book|7|library|最后一句|char-book|最后一句|function",
   );
   assert.deepEqual(compileCalls, ["<%= 1 %>", "<%= 1 %>"]);
+
+  await assert.rejects(
+    () => evalTaskEjsTemplate("<% await execute() %>", renderCtx),
+    (error) =>
+      error?.code === "st_bme_task_ejs_unsupported_helper" &&
+      error?.helperName === "execute",
+  );
 
   const syntaxError = await checkTaskEjsSyntax("<% broken");
   assert.equal(syntaxError, "Unexpected end of input");
