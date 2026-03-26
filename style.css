@@ -1669,6 +1669,114 @@
   min-height: 160px;
 }
 
+.bme-task-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.bme-debug-kv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bme-debug-kv-item {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.bme-debug-kv-key {
+  font-size: 11px;
+  color: var(--bme-on-surface-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.bme-debug-kv-value {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bme-on-surface);
+  word-break: break-word;
+}
+
+.bme-debug-capability-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bme-debug-capability-item {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bme-debug-capability-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.bme-debug-capability-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+}
+
+.bme-debug-capability-desc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-debug-details {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.bme-debug-details summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+  list-style: none;
+}
+
+.bme-debug-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.bme-debug-pre {
+  margin: 0;
+  padding: 0 14px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--bme-on-surface);
+  font-family:
+    "JetBrains Mono",
+    "Cascadia Code",
+    "Fira Code",
+    Consolas,
+    monospace;
+}
+
+.bme-debug-empty {
+  padding: 0 14px 14px;
+  font-size: 12px;
+  color: var(--bme-on-surface-dim);
+}
+
 .bme-theme-card-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1932,8 +2040,14 @@
   .bme-theme-card-grid,
   .bme-task-field-grid,
   .bme-task-editor-grid,
-  .bme-task-regex-top {
+  .bme-task-regex-top,
+  .bme-task-debug-grid {
     grid-template-columns: 1fr;
+  }
+
+  .bme-debug-kv-item {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
   .bme-config-card-head,

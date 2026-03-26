@@ -1,11 +1,73 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import vm from "node:vm";
 
+const extensionsShimSource = [
+  "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
+  "export function getContext(...args) {",
+  "  return globalThis.SillyTavern?.getContext?.(...args) || null;",
+  "}",
+].join("\n");
+const scriptShimSource = [
+  "export function getRequestHeaders() {",
+  "  return { 'Content-Type': 'application/json' };",
+  "}",
+].join("\n");
+const openAiShimSource = [
+  "export const chat_completion_sources = { CUSTOM: 'custom', OPENAI: 'openai' };",
+  "export async function sendOpenAIRequest(...args) {",
+  "  if (typeof globalThis.__p0SendOpenAIRequest === 'function') {",
+  "    return await globalThis.__p0SendOpenAIRequest(...args);",
+  "  }",
+  "  return { choices: [{ message: { content: '{}' } }] };",
+  "}",
+].join("\n");
+
+const extensionsShimUrl = `data:text/javascript,${encodeURIComponent(
+  extensionsShimSource,
+)}`;
+const scriptShimUrl = `data:text/javascript,${encodeURIComponent(
+  scriptShimSource,
+)}`;
+const openAiShimUrl = `data:text/javascript,${encodeURIComponent(
+  openAiShimSource,
+)}`;
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "../../../extensions.js") {
+      return {
+        shortCircuit: true,
+        url: extensionsShimUrl,
+      };
+    }
+    if (specifier === "../../../../script.js") {
+      return {
+        shortCircuit: true,
+        url: scriptShimUrl,
+      };
+    }
+    if (specifier === "../../../openai.js") {
+      return {
+        shortCircuit: true,
+        url: openAiShimUrl,
+      };
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
 const require = createRequire(import.meta.url);
 const originalRequire = globalThis.require;
+const originalP0ExtensionSettings = globalThis.__p0ExtensionSettings;
+const originalP0SendOpenAIRequest = globalThis.__p0SendOpenAIRequest;
+const originalStBmeTestOverrides = globalThis.__stBmeTestOverrides;
+globalThis.__p0ExtensionSettings = {
+  st_bme: {},
+};
+globalThis.__stBmeTestOverrides = {};
 globalThis.require = require;
 
 const { createEmptyGraph, createNode, addNode, createEdge, addEdge } =
@@ -27,6 +89,24 @@ if (originalRequire === undefined) {
   delete globalThis.require;
 } else {
   globalThis.require = originalRequire;
+}
+
+if (originalP0ExtensionSettings === undefined) {
+  delete globalThis.__p0ExtensionSettings;
+} else {
+  globalThis.__p0ExtensionSettings = originalP0ExtensionSettings;
+}
+
+if (originalP0SendOpenAIRequest === undefined) {
+  delete globalThis.__p0SendOpenAIRequest;
+} else {
+  globalThis.__p0SendOpenAIRequest = originalP0SendOpenAIRequest;
+}
+
+if (originalStBmeTestOverrides === undefined) {
+  delete globalThis.__stBmeTestOverrides;
+} else {
+  globalThis.__stBmeTestOverrides = originalStBmeTestOverrides;
 }
 
 const schema = [
@@ -56,12 +136,12 @@ function createBatchStageHarness() {
   const indexPath = path.resolve("./index.js");
   return fs.readFile(indexPath, "utf8").then((source) => {
     const marker = "function isAssistantChatMessage(message) {";
-    const start = source.indexOf("const BATCH_STAGE_ORDER =");
+    const start = source.indexOf("function shouldAdvanceProcessedHistory(");
     const end = source.indexOf(marker);
     if (start < 0 || end < 0 || end <= start) {
       throw new Error("无法从 index.js 提取批次状态机定义");
     }
-    const snippet = source.slice(start, end);
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
     const context = {
       console,
       result: null,
@@ -103,13 +183,18 @@ function createGenerationRecallHarness() {
     if (start < 0 || end < 0 || end <= start) {
       throw new Error("无法从 index.js 提取生成召回事务定义");
     }
-    const snippet = source.slice(start, end);
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
     const context = {
       console,
       Date,
       Map,
       setTimeout,
       clearTimeout,
+      document: {
+        getElementById() {
+          return null;
+        },
+      },
       result: null,
       currentGraph: {},
       isRecalling: false,
@@ -132,14 +217,11 @@ function createGenerationRecallHarness() {
           ? [...chat, { is_user: true, mes: syntheticUserMessage }]
           : [...chat],
       getContext: () => ({
+        chatId: "chat-main",
         chat: context.chat,
       }),
       chat: [],
       runRecallCalls: [],
-      runRecall: async (options = {}) => {
-        context.runRecallCalls.push({ ...options });
-        return true;
-      },
     };
     vm.createContext(context);
     vm.runInContext(
@@ -147,8 +229,32 @@ function createGenerationRecallHarness() {
       context,
       { filename: indexPath },
     );
+    context.runRecall = async (options = {}) => {
+      context.runRecallCalls.push({ ...options });
+      return true;
+    };
     return context;
   });
+}
+
+function pushTestOverrides(patch = {}) {
+  const previous = globalThis.__stBmeTestOverrides || {};
+  globalThis.__stBmeTestOverrides = {
+    ...previous,
+    ...patch,
+    llm: {
+      ...(previous.llm || {}),
+      ...(patch.llm || {}),
+    },
+    embedding: {
+      ...(previous.embedding || {}),
+      ...(patch.embedding || {}),
+    },
+  };
+
+  return () => {
+    globalThis.__stBmeTestOverrides = previous;
+  };
 }
 
 function makeEvent(seq, title) {
@@ -186,13 +292,18 @@ async function testCompressorMigratesEdgesToCompressedNode() {
     }),
   );
 
-  const originalSummarize = llm.callLLMForJSON;
-  llm.callLLMForJSON = async () => ({
-    fields: {
-      title: "压缩事件",
-      summary: "合并摘要",
-      participants: "Alice",
-      status: "done",
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          fields: {
+            title: "压缩事件",
+            summary: "合并摘要",
+            participants: "Alice",
+            status: "done",
+          },
+        };
+      },
     },
   });
 
@@ -220,7 +331,7 @@ async function testCompressorMigratesEdgesToCompressedNode() {
     );
     assert.ok(migrated);
   } finally {
-    llm.callLLMForJSON = originalSummarize;
+    restoreOverrides();
   }
 }
 
@@ -233,8 +344,13 @@ async function testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure() {
   graph.vectorIndexState.dirty = true;
   graph.vectorIndexState.lastWarning = "旧 warning";
 
-  const originalEmbedBatch = embedding.embedBatch;
-  embedding.embedBatch = async () => [[0.1, 0.2], null];
+  const restoreOverrides = pushTestOverrides({
+    embedding: {
+      async embedBatch() {
+        return [[0.1, 0.2], null];
+      },
+    },
+  });
 
   try {
     const result = await syncGraphVectorIndex(
@@ -262,7 +378,7 @@ async function testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure() {
     );
     assert.equal(second.embedding, null);
   } finally {
-    embedding.embedBatch = originalEmbedBatch;
+    restoreOverrides();
   }
 }
 
@@ -292,20 +408,29 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
   addNode(graph, target);
   addNode(graph, incoming);
 
-  const originalFindSimilar = embedding.searchSimilar;
-  const originalEmbedBatch = embedding.embedBatch;
-  const originalCall = llm.callLLMForJSON;
-  embedding.embedBatch = async () => [[0.2, 0.3]];
-  embedding.searchSimilar = async () => [{ nodeId: target.id, score: 0.99 }];
-  llm.callLLMForJSON = async () => ({
-    results: [
-      {
-        node_id: incoming.id,
-        action: "merge",
-        merge_target_id: "missing-node-id",
-        reason: "故意触发无效 merge target 回退",
+  const restoreOverrides = pushTestOverrides({
+    embedding: {
+      async embedBatch() {
+        return [[0.2, 0.3]];
       },
-    ],
+      searchSimilar() {
+        return [{ nodeId: target.id, score: 0.99 }];
+      },
+    },
+    llm: {
+      async callLLMForJSON() {
+        return {
+          results: [
+            {
+              node_id: incoming.id,
+              action: "merge",
+              merge_target_id: "missing-node-id",
+              reason: "故意触发无效 merge target 回退",
+            },
+          ],
+        };
+      },
+    },
   });
 
   try {
@@ -326,17 +451,20 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
     assert.equal(incoming.archived, false);
     assert.deepEqual(target.embedding, [0.9, 0.1]);
   } finally {
-    embedding.searchSimilar = originalFindSimilar;
-    embedding.embedBatch = originalEmbedBatch;
-    llm.callLLMForJSON = originalCall;
+    restoreOverrides();
   }
 }
 
 async function testExtractorFailsOnUnknownOperation() {
   const graph = createEmptyGraph();
-  const originalCall = llm.callLLMForJSON;
-  llm.callLLMForJSON = async () => ({
-    operations: [{ action: "nonsense", foo: 1 }],
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [{ action: "nonsense", foo: 1 }],
+        };
+      },
+    },
   });
 
   try {
@@ -354,7 +482,7 @@ async function testExtractorFailsOnUnknownOperation() {
     assert.match(result.error, /未知操作类型/);
     assert.equal(graph.lastProcessedSeq, -1);
   } finally {
-    llm.callLLMForJSON = originalCall;
+    restoreOverrides();
   }
 }
 
@@ -371,6 +499,7 @@ async function testConsolidatorMergeUpdatesSeqRange() {
       status: "active",
     },
   });
+  target.embedding = [0.8, 0.2];
   const incoming = createNode({
     type: "event",
     seq: 8,
@@ -385,25 +514,41 @@ async function testConsolidatorMergeUpdatesSeqRange() {
   addNode(graph, target);
   addNode(graph, incoming);
 
-  const originalFindSimilar = embedding.searchSimilar;
-  const originalCall = llm.callLLMForJSON;
-  embedding.searchSimilar = async () => [{ nodeId: target.id, score: 0.99 }];
-  llm.callLLMForJSON = async () => ({
-    results: [
-      {
-        node_id: incoming.id,
-        action: "merge",
-        merge_target_id: target.id,
-        merged_fields: { summary: "合并后摘要" },
+  const restoreOverrides = pushTestOverrides({
+    embedding: {
+      async embedBatch() {
+        return [[0.4, 0.5]];
       },
-    ],
+      searchSimilar() {
+        return [{ nodeId: target.id, score: 0.99 }];
+      },
+    },
+    llm: {
+      async callLLMForJSON() {
+        return {
+          results: [
+            {
+              node_id: incoming.id,
+              action: "merge",
+              merge_target_id: target.id,
+              merged_fields: { summary: "合并后摘要" },
+            },
+          ],
+        };
+      },
+    },
   });
 
   try {
     const stats = await consolidateMemories({
       graph,
       newNodeIds: [incoming.id],
-      embeddingConfig: null,
+      embeddingConfig: {
+        mode: "direct",
+        source: "direct",
+        apiUrl: "https://example.com/v1",
+        model: "text-embedding-3-small",
+      },
       settings: {},
     });
 
@@ -414,8 +559,7 @@ async function testConsolidatorMergeUpdatesSeqRange() {
     assert.equal(target.embedding, null);
     assert.equal(incoming.archived, true);
   } finally {
-    embedding.searchSimilar = originalFindSimilar;
-    llm.callLLMForJSON = originalCall;
+    restoreOverrides();
   }
 }
 
@@ -423,17 +567,17 @@ async function testBatchJournalVectorDeltaCapturesRecoveryFields() {
   const before = normalizeGraphRuntimeState(createEmptyGraph(), "chat-a");
   const after = normalizeGraphRuntimeState(createEmptyGraph(), "chat-a");
   const beforeNode = createNode({
-    id: "node-before",
     type: "event",
     seq: 1,
     fields: { title: "旧", summary: "旧", participants: "A", status: "old" },
   });
+  beforeNode.id = "node-before";
   const afterNode = createNode({
-    id: "node-before",
     type: "event",
     seq: 1,
     fields: { title: "新", summary: "新", participants: "A", status: "new" },
   });
+  afterNode.id = "node-before";
   addNode(before, beforeNode);
   addNode(after, afterNode);
   before.vectorIndexState.hashToNodeId = { hash_old: "node-before" };
@@ -550,7 +694,6 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
   const before = normalizeGraphRuntimeState(createEmptyGraph(), "chat-replay");
   const after = normalizeGraphRuntimeState(createEmptyGraph(), "chat-replay");
   const stableNode = createNode({
-    id: "node-stable",
     type: "event",
     seq: 1,
     fields: {
@@ -560,8 +703,8 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
       status: "stable",
     },
   });
+  stableNode.id = "node-stable";
   const touchedBefore = createNode({
-    id: "node-touched",
     type: "event",
     seq: 2,
     fields: {
@@ -571,8 +714,8 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
       status: "old",
     },
   });
+  touchedBefore.id = "node-touched";
   const touchedAfter = createNode({
-    id: "node-touched",
     type: "event",
     seq: 5,
     fields: {
@@ -582,8 +725,8 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
       status: "updated",
     },
   });
+  touchedAfter.id = "node-touched";
   const appendedNode = createNode({
-    id: "node-appended",
     type: "event",
     seq: 6,
     fields: {
@@ -593,6 +736,7 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
       status: "new",
     },
   });
+  appendedNode.id = "node-appended";
   addNode(before, stableNode);
   addNode(before, touchedBefore);
   addNode(after, stableNode);

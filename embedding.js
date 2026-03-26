@@ -11,6 +11,11 @@ import { extension_settings } from "../../../extensions.js";
 const MODULE_NAME = "st_bme";
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000;
 
+function getEmbeddingTestOverride(name) {
+  const override = globalThis.__stBmeTestOverrides?.embedding?.[name];
+  return typeof override === "function" ? override : null;
+}
+
 function getConfiguredTimeoutMs(
   settings = extension_settings[MODULE_NAME] || {},
 ) {
@@ -98,6 +103,11 @@ async function fetchWithTimeout(
  * @returns {Promise<Float64Array|null>} 向量或 null
  */
 export async function embedText(text, config, { signal } = {}) {
+  const override = getEmbeddingTestOverride("embedText");
+  if (override) {
+    return await override(text, config, { signal });
+  }
+
   const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
   if (!text || !apiUrl || !config?.model) {
     console.warn("[ST-BME] Embedding 配置不完整，跳过");
@@ -159,6 +169,11 @@ export async function embedText(text, config, { signal } = {}) {
  * @returns {Promise<(Float64Array|null)[]>}
  */
 export async function embedBatch(texts, config, { signal } = {}) {
+  const override = getEmbeddingTestOverride("embedBatch");
+  if (override) {
+    return await override(texts, config, { signal });
+  }
+
   const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
   if (!texts.length || !apiUrl || !config?.model) {
     return texts.map(() => null);
@@ -256,6 +271,11 @@ export function cosineSimilarity(vecA, vecB) {
  * @returns {Array<{nodeId: string, score: number}>} 按相似度降序
  */
 export function searchSimilar(queryVec, candidates, topK = 20) {
+  const override = getEmbeddingTestOverride("searchSimilar");
+  if (override) {
+    return override(queryVec, candidates, topK);
+  }
+
   if (!queryVec || candidates.length === 0) return [];
 
   const scored = candidates

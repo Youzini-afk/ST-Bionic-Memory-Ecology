@@ -51,12 +51,15 @@ export async function compressType({
   if (!compression || compression.mode !== "hierarchical") {
     return { created: 0, archived: 0 };
   }
+  const maxDepth = Number.isFinite(Number(compression.maxDepth))
+    ? Math.max(1, Number(compression.maxDepth))
+    : 1;
 
   let totalCreated = 0;
   let totalArchived = 0;
 
   // 从最低层级开始逐层压缩
-  for (let level = 0; level < compression.maxDepth; level++) {
+  for (let level = 0; level < maxDepth; level++) {
     throwIfAborted(signal);
     const result = await compressLevel({
       graph,
@@ -93,6 +96,9 @@ async function compressLevel({
   settings = {},
 }) {
   const compression = typeDef.compression;
+  const fanIn = Number.isFinite(Number(compression.fanIn))
+    ? Math.max(2, Number(compression.fanIn))
+    : 2;
   throwIfAborted(signal);
 
   // 获取该层级的活跃叶子节点
@@ -101,18 +107,24 @@ async function compressLevel({
     .sort((a, b) => a.seq - b.seq);
 
   const threshold = force
-    ? Math.max(2, compression.fanIn)
-    : compression.threshold;
-  const keepRecent = force ? 0 : compression.keepRecentLeaves;
+    ? fanIn
+    : Number.isFinite(Number(compression.threshold))
+      ? Math.max(2, Number(compression.threshold))
+      : fanIn;
+  const keepRecent = force
+    ? 0
+    : Number.isFinite(Number(compression.keepRecentLeaves))
+      ? Math.max(0, Number(compression.keepRecentLeaves))
+      : 0;
 
-  // 不够阈值，无需压缩
-  if (levelNodes.length <= threshold) {
+  // 不够阈值，无需压缩；强制压缩时只要求满足 fanIn
+  if (force ? levelNodes.length < fanIn : levelNodes.length <= threshold) {
     return { created: 0, archived: 0 };
   }
 
   // 排除最近的节点
   const compressible = levelNodes.slice(0, levelNodes.length - keepRecent);
-  if (compressible.length < compression.fanIn) {
+  if (compressible.length < fanIn) {
     return { created: 0, archived: 0 };
   }
 
@@ -120,8 +132,8 @@ async function compressLevel({
   let archived = 0;
 
   // 按 fanIn 分组压缩
-  for (let i = 0; i < compressible.length; i += compression.fanIn) {
-    const batch = compressible.slice(i, i + compression.fanIn);
+  for (let i = 0; i < compressible.length; i += fanIn) {
+    const batch = compressible.slice(i, i + fanIn);
     if (batch.length < 2) break; // 至少 2 个才压缩
 
     // 调用 LLM 总结

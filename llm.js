@@ -5,12 +5,18 @@ import { getRequestHeaders } from "../../../../script.js";
 import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
 import { resolveTaskGenerationOptions } from "./generation-options.js";
+import { recordTaskLlmRequest } from "./runtime-debug.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const RETRY_JSON_COMPLETION_TOKENS = 3200;
+
+function getLlmTestOverride(name) {
+  const override = globalThis.__stBmeTestOverrides?.llm?.[name];
+  return typeof override === "function" ? override : null;
+}
 
 function getMemoryLLMConfig() {
   const settings = extension_settings[MODULE_NAME] || {};
@@ -364,6 +370,23 @@ async function callDedicatedOpenAICompatible(
         filtered: {},
         removed: [],
       };
+  recordTaskLlmRequest(taskType || privateRequestSource, {
+    requestSource: privateRequestSource,
+    taskType: String(taskType || "").trim(),
+    jsonMode,
+    dedicatedConfig: hasDedicatedConfig,
+    route: hasDedicatedConfig
+      ? "dedicated-openai-compatible"
+      : "sillytavern-current-model",
+    model: hasDedicatedConfig ? config.model : "sillytavern-current-model",
+    apiUrl: hasDedicatedConfig ? config.apiUrl : "",
+    messages,
+    generation: generationResolved.generation || {},
+    filteredGeneration: generationResolved.filtered || {},
+    removedGeneration: generationResolved.removed || [],
+    capabilityMode: generationResolved.capabilityMode || "",
+    maxCompletionTokens,
+  });
   if (!hasDedicatedConfig) {
     const payload = await sendOpenAIRequest(
       "quiet",
@@ -445,6 +468,23 @@ async function callDedicatedOpenAICompatible(
       },
     });
   }
+
+  recordTaskLlmRequest(taskType || privateRequestSource, {
+    requestSource: privateRequestSource,
+    taskType: String(taskType || "").trim(),
+    jsonMode,
+    dedicatedConfig: true,
+    route: "dedicated-openai-compatible",
+    model: config.model,
+    apiUrl: config.apiUrl,
+    messages,
+    generation: generationResolved.generation || {},
+    filteredGeneration,
+    removedGeneration: generationResolved.removed || [],
+    capabilityMode: generationResolved.capabilityMode || "",
+    resolvedCompletionTokens,
+    requestBody: body,
+  });
 
   const response = await fetchWithTimeout(
     "/api/backends/chat-completions/generate",
@@ -528,6 +568,19 @@ export async function callLLMForJSON({
   requestSource = "",
   additionalMessages = [],
 } = {}) {
+  const override = getLlmTestOverride("callLLMForJSON");
+  if (override) {
+    return await override({
+      systemPrompt,
+      userPrompt,
+      maxRetries,
+      signal,
+      taskType,
+      requestSource,
+      additionalMessages,
+    });
+  }
+
   const privateRequestSource = resolvePrivateRequestSource(
     taskType,
     requestSource,
@@ -597,6 +650,11 @@ export async function callLLMForJSON({
  * @returns {Promise<string|null>}
  */
 export async function callLLM(systemPrompt, userPrompt, options = {}) {
+  const override = getLlmTestOverride("callLLM");
+  if (override) {
+    return await override(systemPrompt, userPrompt, options);
+  }
+
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },

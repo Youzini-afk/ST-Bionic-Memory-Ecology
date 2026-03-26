@@ -60,6 +60,11 @@ import {
   rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "./runtime-state.js";
+import {
+  getRuntimeDebugSnapshot as readRuntimeDebugSnapshot,
+  recordHostCapabilitySnapshot,
+  recordInjectionSnapshot,
+} from "./runtime-debug.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 import {
   deleteBackendVectorHashesForRecovery,
@@ -671,7 +676,7 @@ function initializeHostCapabilityBridge(options = {}) {
 }
 
 function buildHostCapabilityErrorStatus(error) {
-  return {
+  const snapshot = {
     available: false,
     mode: "error",
     fallbackReason:
@@ -685,6 +690,8 @@ function buildHostCapabilityErrorStatus(error) {
     snapshotRevision: -1,
     snapshotCreatedAt: "",
   };
+  recordHostCapabilitySnapshot(snapshot);
+  return snapshot;
 }
 
 export function getHostCapabilityStatus(options = {}) {
@@ -695,9 +702,11 @@ export function getHostCapabilityStatus(options = {}) {
   delete normalizedOptions.refresh;
 
   try {
-    return shouldRefresh
+    const snapshot = shouldRefresh
       ? refreshHostCapabilitySnapshot(normalizedOptions)
       : getHostCapabilitySnapshot();
+    recordHostCapabilitySnapshot(snapshot);
+    return snapshot;
   } catch (error) {
     console.warn("[ST-BME] 读取宿主桥接状态失败:", error);
     return buildHostCapabilityErrorStatus(error);
@@ -721,6 +730,18 @@ export function getHostCapability(name, options = {}) {
     console.warn("[ST-BME] 读取宿主桥接能力失败:", error);
     return getHostCapabilityStatus(options)?.[normalizedName] || null;
   }
+}
+
+export function getPanelRuntimeDebugSnapshot(options = {}) {
+  const shouldRefreshHost = options?.refreshHost === true;
+  const hostCapabilities = shouldRefreshHost
+    ? refreshHostCapabilityStatus()
+    : getHostCapabilityStatus();
+
+  return {
+    hostCapabilities,
+    runtimeDebug: readRuntimeDebugSnapshot(),
+  };
 }
 
 function getSchema() {
@@ -857,6 +878,17 @@ function clearInjectionState() {
   lastRecalledItems = [];
   lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
   runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  recordInjectionSnapshot("recall", {
+    injectionText: "",
+    selectedNodeIds: [],
+    retrievalMeta: {},
+    llmMeta: {},
+    transport: {
+      applied: false,
+      source: "cleared",
+      mode: "cleared",
+    },
+  });
   if (!isRecalling) {
     dismissStageNotice("recall");
   }
@@ -1773,25 +1805,31 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     return null;
   }
 
-  if (generationType === "normal") {
-    const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
-    const tailUserText = lastNonSystemMessage?.is_user
-      ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
-      : "";
-    const textareaText = normalizeRecallInputText(
-      pendingRecallSendIntent.text || getSendTextareaValue(),
-    );
-    const userMessage = tailUserText || textareaText;
-    if (!userMessage) return null;
+  return generationType === "normal"
+    ? buildNormalGenerationRecallInput(chat)
+    : buildHistoryGenerationRecallInput(chat);
+}
 
-    return {
-      overrideUserMessage: userMessage,
-      overrideSource: tailUserText ? "chat-tail-user" : "send-intent",
-      overrideSourceLabel: tailUserText ? "当前用户楼层" : "发送意图",
-      includeSyntheticUserMessage: !tailUserText,
-    };
-  }
+function buildNormalGenerationRecallInput(chat) {
+  const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
+  const tailUserText = lastNonSystemMessage?.is_user
+    ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
+    : "";
+  const textareaText = normalizeRecallInputText(
+    pendingRecallSendIntent.text || getSendTextareaValue(),
+  );
+  const userMessage = tailUserText || textareaText;
+  if (!userMessage) return null;
 
+  return {
+    overrideUserMessage: userMessage,
+    overrideSource: tailUserText ? "chat-tail-user" : "send-intent",
+    overrideSourceLabel: tailUserText ? "当前用户楼层" : "发送意图",
+    includeSyntheticUserMessage: !tailUserText,
+  };
+}
+
+function buildHistoryGenerationRecallInput(chat) {
   const latestUserText = normalizeRecallInputText(
     getLatestUserChatMessage(chat)?.mes || lastRecallSentUserMessage.text,
   );
@@ -3179,7 +3217,20 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
     );
   }
 
-  applyModuleInjectionPrompt(injectionText, settings);
+  const injectionTransport = applyModuleInjectionPrompt(injectionText, settings);
+  recordInjectionSnapshot("recall", {
+    taskType: "recall",
+    source: recallInput.source,
+    sourceLabel: recallInput.sourceLabel,
+    hookName: recallInput.hookName,
+    recentMessages,
+    selectedNodeIds: result.selectedNodeIds || [],
+    retrievalMeta,
+    llmMeta,
+    stats: result.stats || {},
+    injectionText,
+    transport: injectionTransport,
+  });
 
   currentGraph.lastRecallResult = result.selectedNodeIds;
   updateLastRecalledItems(result.selectedNodeIds || []);
@@ -3455,10 +3506,16 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
 }
 
 async function onBeforeCombinePrompts() {
+  const context = getContext();
+  const chat = context?.chat;
+  const recallOptions =
+    buildNormalGenerationRecallInput(chat) ||
+    buildHistoryGenerationRecallInput(chat) ||
+    {};
   const recallContext = createGenerationRecallContext({
     hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
     generationType: "normal",
-    recallOptions: {},
+    recallOptions,
   });
   if (!recallContext.shouldRun) {
     return;
@@ -3470,6 +3527,7 @@ async function onBeforeCombinePrompts() {
     "running",
   );
   const didRecall = await runRecall({
+    ...recallOptions,
     recallKey: recallContext.recallKey,
     hookName: recallContext.hookName,
   });
@@ -4107,6 +4165,8 @@ async function onReembedDirect() {
       getLastBatchStatus: () =>
         currentGraph?.historyState?.lastBatchStatus || null,
       getLastInjection: () => lastInjectionContent,
+      getRuntimeDebugSnapshot: (options = {}) =>
+        getPanelRuntimeDebugSnapshot(options),
       updateSettings: (patch) => {
         const settings = updateModuleSettings(patch);
         if (Object.prototype.hasOwnProperty.call(patch, "panelTheme")) {

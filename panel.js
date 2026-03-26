@@ -37,6 +37,7 @@ const TASK_PROFILE_TABS = [
   { id: "generation", label: "生成参数" },
   { id: "prompt", label: "Prompt 编排" },
   { id: "regex", label: "正则" },
+  { id: "debug", label: "调试预览" },
 ];
 
 const TASK_PROFILE_ROLE_OPTIONS = [
@@ -136,6 +137,7 @@ let _getLastExtractionStatus = null;
 let _getLastVectorStatus = null;
 let _getLastRecallStatus = null;
 let _getLastInjection = null;
+let _getRuntimeDebugSnapshot = null;
 let _updateSettings = null;
 let _actionHandlers = {};
 
@@ -162,6 +164,7 @@ export async function initPanel({
   getLastVectorStatus,
   getLastRecallStatus,
   getLastInjection,
+  getRuntimeDebugSnapshot,
   updateSettings,
   actions,
 }) {
@@ -174,6 +177,7 @@ export async function initPanel({
   _getLastVectorStatus = getLastVectorStatus;
   _getLastRecallStatus = getLastRecallStatus;
   _getLastInjection = getLastInjection;
+  _getRuntimeDebugSnapshot = getRuntimeDebugSnapshot;
   _updateSettings = updateSettings;
   _actionHandlers = actions || {};
 
@@ -273,6 +277,14 @@ export function refreshLiveState() {
       break;
     default:
       break;
+  }
+
+  if (
+    currentTabId === "config" &&
+    currentConfigSectionId === "prompts" &&
+    currentTaskProfileTabId === "debug"
+  ) {
+    _refreshTaskProfileWorkspace();
   }
 
   _refreshGraph();
@@ -1561,6 +1573,10 @@ function _handleTaskProfileWorkspaceChange(event) {
 function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   const taskProfiles = ensureTaskProfiles(settings);
   const taskTypeOptions = getTaskTypeOptions();
+  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {
+    hostCapabilities: null,
+    runtimeDebug: null,
+  };
 
   if (!taskTypeOptions.some((item) => item.id === currentTaskProfileTaskType)) {
     currentTaskProfileTaskType = taskTypeOptions[0]?.id || "extract";
@@ -1605,6 +1621,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     selectedRule:
       regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
     builtinBlockDefinitions: getBuiltinBlockDefinitions(),
+    runtimeDebug,
   };
 }
 
@@ -1649,6 +1666,12 @@ async function _handleTaskProfileWorkspaceClick(event) {
     case "switch-task-tab":
       currentTaskProfileTabId =
         actionEl.dataset.taskTab || currentTaskProfileTabId;
+      _refreshTaskProfileWorkspace();
+      return;
+    case "refresh-task-debug":
+      if (typeof _getRuntimeDebugSnapshot === "function") {
+        _getRuntimeDebugSnapshot({ refreshHost: true });
+      }
       _refreshTaskProfileWorkspace();
       return;
     case "select-block":
@@ -1911,7 +1934,9 @@ function _renderTaskProfileWorkspace(state) {
             ? _renderTaskGenerationTab(state)
             : state.taskTabId === "regex"
               ? _renderTaskRegexTab(state)
-              : _renderTaskPromptTab(state)
+              : state.taskTabId === "debug"
+                ? _renderTaskDebugTab(state)
+                : _renderTaskPromptTab(state)
         }
       </div>
     </div>
@@ -2124,6 +2149,271 @@ function _renderTaskRegexTab(state) {
       </div>
     </div>
   `;
+}
+
+function _renderTaskDebugTab(state) {
+  const hostCapabilities = state.runtimeDebug?.hostCapabilities || null;
+  const runtimeDebug = state.runtimeDebug?.runtimeDebug || {};
+  const promptBuild = runtimeDebug?.taskPromptBuilds?.[state.taskType] || null;
+  const llmRequest = runtimeDebug?.taskLlmRequests?.[state.taskType] || null;
+  const recallInjection = runtimeDebug?.injections?.recall || null;
+
+  return `
+    <div class="bme-task-tab-body">
+      <div class="bme-task-toolbar-row">
+        <div class="bme-task-note">
+          这里展示的是最近一次真实运行留下的调试快照，不是静态配置推演。没有数据时，先跑一次对应任务即可。
+        </div>
+        <button class="bme-config-secondary-btn" data-task-action="refresh-task-debug" type="button">
+          刷新状态
+        </button>
+      </div>
+
+      <div class="bme-task-debug-grid">
+        <div class="bme-config-card">
+          ${_renderTaskDebugHostCard(hostCapabilities)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderTaskDebugPromptCard(state.taskType, promptBuild)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderTaskDebugLlmCard(state.taskType, llmRequest)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderTaskDebugInjectionCard(recallInjection)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _renderTaskDebugHostCard(hostCapabilities) {
+  if (!hostCapabilities) {
+    return `
+      <div class="bme-config-card-title">宿主桥接状态</div>
+      <div class="bme-config-help">当前还没有宿主桥接快照。</div>
+    `;
+  }
+
+  const capabilityNames = ["context", "worldbook", "regex", "injection"];
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">宿主桥接状态</div>
+        <div class="bme-config-card-subtitle">
+          当前插件和 SillyTavern 的接轨情况。
+        </div>
+      </div>
+      <span class="bme-task-pill ${hostCapabilities.available ? "is-builtin" : ""}">
+        ${hostCapabilities.mode || (hostCapabilities.available ? "available" : "unavailable")}
+      </span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">总状态</span>
+        <span class="bme-debug-kv-value">${_escHtml(hostCapabilities.available ? "可用" : "不可用")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">说明</span>
+        <span class="bme-debug-kv-value">${_escHtml(hostCapabilities.fallbackReason || "无")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">快照版本</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(hostCapabilities.snapshotRevision ?? "—"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">快照时间</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatTaskProfileTime(hostCapabilities.snapshotCreatedAt))}</span>
+      </div>
+    </div>
+    <div class="bme-task-section-label">分项能力</div>
+    <div class="bme-debug-capability-list">
+      ${capabilityNames
+        .map((name) => {
+          const capability = hostCapabilities[name] || {};
+          return `
+            <div class="bme-debug-capability-item">
+              <div class="bme-debug-capability-head">
+                <span class="bme-debug-capability-title">${_escHtml(name)}</span>
+                <span class="bme-task-pill ${capability.available ? "is-builtin" : ""}">
+                  ${_escHtml(capability.mode || (capability.available ? "available" : "unavailable"))}
+                </span>
+              </div>
+              <div class="bme-debug-capability-desc">
+                ${_escHtml(capability.fallbackReason || "无")}
+              </div>
+            </div>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function _renderTaskDebugPromptCard(taskType, promptBuild) {
+  if (!promptBuild) {
+    return `
+      <div class="bme-config-card-title">最近 Prompt 组装</div>
+      <div class="bme-config-help">当前任务还没有最近一次 prompt 组装快照。</div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最近 Prompt 组装</div>
+        <div class="bme-config-card-subtitle">
+          任务 ${_escHtml(taskType)} 最近一次真实编排结果。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(promptBuild.updatedAt))}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">预设</span>
+        <span class="bme-debug-kv-value">${_escHtml(promptBuild.profileName || promptBuild.profileId || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">块数量</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.renderedBlockCount ?? promptBuild.renderedBlocks?.length ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">宿主注入</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.hostInjectionPlanCount ?? promptBuild.debug?.hostInjectionCount ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">私有消息</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.privateTaskMessageCount ?? promptBuild.privateTaskMessages?.length ?? 0))}</span>
+      </div>
+    </div>
+    ${_renderDebugDetails("渲染后的块", promptBuild.renderedBlocks)}
+    ${_renderDebugDetails("宿主注入计划", promptBuild.hostInjectionPlan || null)}
+    ${_renderDebugDetails("宿主注入描述", promptBuild.hostInjections)}
+    ${_renderDebugDetails("私有任务消息", promptBuild.privateTaskMessages)}
+    ${_renderDebugDetails("系统提示词", promptBuild.systemPrompt || "")}
+  `;
+}
+
+function _renderTaskDebugLlmCard(taskType, llmRequest) {
+  if (!llmRequest) {
+    return `
+      <div class="bme-config-card-title">最近实际下发参数</div>
+      <div class="bme-config-help">当前任务还没有最近一次 LLM 请求快照。</div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最近实际下发参数</div>
+        <div class="bme-config-card-subtitle">
+          任务 ${_escHtml(taskType)} 最近一次走私有请求层时的实际发送信息。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(llmRequest.updatedAt))}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">请求来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.requestSource || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">请求路径</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.route || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">模型</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.model || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">能力过滤模式</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.capabilityMode || "—")}</span>
+      </div>
+    </div>
+    ${_renderDebugDetails("实际保留参数", llmRequest.filteredGeneration || {})}
+    ${_renderDebugDetails("被过滤掉的参数", llmRequest.removedGeneration || [])}
+    ${_renderDebugDetails("最终消息列表", llmRequest.messages || [])}
+    ${_renderDebugDetails("最终请求体", llmRequest.requestBody || null)}
+  `;
+}
+
+function _renderTaskDebugInjectionCard(injectionSnapshot) {
+  if (!injectionSnapshot) {
+    return `
+      <div class="bme-config-card-title">最近注入结果</div>
+      <div class="bme-config-help">还没有最近一次召回注入快照。</div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最近注入结果</div>
+        <div class="bme-config-card-subtitle">
+          展示最近一次召回后的注入文本和宿主投递方式。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(injectionSnapshot.sourceLabel || injectionSnapshot.source || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">触发钩子</span>
+        <span class="bme-debug-kv-value">${_escHtml(injectionSnapshot.hookName || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">选中节点数</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(injectionSnapshot.selectedNodeIds?.length ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">宿主投递</span>
+        <span class="bme-debug-kv-value">${_escHtml(injectionSnapshot.transport?.source || "—")} / ${_escHtml(injectionSnapshot.transport?.mode || "—")}</span>
+      </div>
+    </div>
+    ${_renderDebugDetails("召回统计", {
+      retrievalMeta: injectionSnapshot.retrievalMeta || {},
+      llmMeta: injectionSnapshot.llmMeta || {},
+      stats: injectionSnapshot.stats || {},
+      transport: injectionSnapshot.transport || {},
+    })}
+    ${_renderDebugDetails("最终注入文本", injectionSnapshot.injectionText || "")}
+  `;
+}
+
+function _renderDebugDetails(title, value) {
+  const isEmptyArray = Array.isArray(value) && value.length === 0;
+  const isEmptyObject =
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0;
+  const isEmpty = value == null || value === "" || isEmptyArray || isEmptyObject;
+
+  return `
+    <details class="bme-debug-details" ${isEmpty ? "" : "open"}>
+      <summary>${_escHtml(title)}</summary>
+      ${
+        isEmpty
+          ? '<div class="bme-debug-empty">暂无内容</div>'
+          : `<pre class="bme-debug-pre">${_escHtml(_stringifyDebugValue(value))}</pre>`
+      }
+    </details>
+  `;
+}
+
+function _stringifyDebugValue(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function _renderTaskBlockListItem(block, index, state) {

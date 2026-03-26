@@ -2,6 +2,7 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
+import { recordTaskPromptBuild } from "./runtime-debug.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
 
 const WORLD_INFO_VARIABLE_KEYS = [
@@ -119,6 +120,98 @@ function buildWorldInfoResolution(worldInfoContext = {}) {
         .map((entry) => createHostInjectionEntry(entry, "atDepth"))
         .filter((entry) => entry.content),
     },
+  };
+}
+
+function sortInjectionEntries(entries = []) {
+  return [...entries].sort((left, right) => {
+    const orderLeft = Number.isFinite(Number(left?.order))
+      ? Number(left.order)
+      : 0;
+    const orderRight = Number.isFinite(Number(right?.order))
+      ? Number(right.order)
+      : 0;
+    return orderLeft - orderRight;
+  });
+}
+
+function createHostInjectionPlanEntry(block = {}, position, extra = {}) {
+  return {
+    source: "block",
+    origin: "profile-block",
+    position,
+    role: normalizeRole(block.role),
+    content: String(block.content || "").trim(),
+    blockId: String(block.id || ""),
+    blockName: String(block.name || ""),
+    sourceKey: String(block.sourceKey || ""),
+    injectionMode: normalizeInjectionMode(block.injectionMode),
+    order: Number.isFinite(Number(block.order)) ? Number(block.order) : 0,
+    ...extra,
+  };
+}
+
+function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
+  const beforeEntryNames = (
+    Array.isArray(worldInfoResolution.beforeEntries)
+      ? worldInfoResolution.beforeEntries
+      : []
+  )
+    .map((entry) => String(entry?.name || entry?.sourceName || "").trim())
+    .filter(Boolean);
+  const afterEntryNames = (
+    Array.isArray(worldInfoResolution.afterEntries)
+      ? worldInfoResolution.afterEntries
+      : []
+  )
+    .map((entry) => String(entry?.name || entry?.sourceName || "").trim())
+    .filter(Boolean);
+  const atDepthEntries = Array.isArray(worldInfoResolution.injections?.atDepth)
+    ? worldInfoResolution.injections.atDepth
+    : [];
+
+  const plan = {
+    before: [],
+    after: [],
+    atDepth: [],
+  };
+
+  for (const block of renderedBlocks) {
+    if (!block?.content) continue;
+
+    if (block.delivery === "host.before") {
+      plan.before.push(
+        createHostInjectionPlanEntry(block, "before", {
+          entryNames: beforeEntryNames,
+          entryCount: beforeEntryNames.length,
+        }),
+      );
+      continue;
+    }
+
+    if (block.delivery === "host.after") {
+      plan.after.push(
+        createHostInjectionPlanEntry(block, "after", {
+          entryNames: afterEntryNames,
+          entryCount: afterEntryNames.length,
+        }),
+      );
+    }
+  }
+
+  for (const entry of atDepthEntries) {
+    if (!entry?.content) continue;
+    plan.atDepth.push({
+      ...entry,
+      origin: "worldInfo-entry",
+      entryName: String(entry.name || entry.sourceName || "").trim(),
+    });
+  }
+
+  return {
+    before: sortInjectionEntries(plan.before),
+    after: sortInjectionEntries(plan.after),
+    atDepth: sortInjectionEntries(plan.atDepth),
   };
 }
 
@@ -281,10 +374,15 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     ...customMessages,
     ...worldInfoResolution.additionalMessages,
   ];
+  const hostInjectionPlan = buildHostInjectionPlan(
+    renderedBlocks,
+    worldInfoResolution,
+  );
 
-  return {
+  const result = {
     profile,
     hostInjections: worldInfoResolution.injections,
+    hostInjectionPlan,
     privateTaskPrompt: {
       systemPrompt,
       messages: privateTaskMessages,
@@ -318,11 +416,30 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         worldInfoResolution.injections.before.length +
         worldInfoResolution.injections.after.length +
         worldInfoResolution.injections.atDepth.length,
+      hostInjectionPlanCount:
+        hostInjectionPlan.before.length +
+        hostInjectionPlan.after.length +
+        hostInjectionPlan.atDepth.length,
       customMessageCount: customMessages.length,
       additionalMessageCount: worldInfoResolution.additionalMessages.length,
       privateTaskMessageCount: privateTaskMessages.length,
     },
   };
+
+  recordTaskPromptBuild(taskType, {
+    taskType,
+    profileId: profile?.id || "",
+    profileName: profile?.name || "",
+    systemPrompt,
+    privateTaskMessages,
+    renderedBlocks,
+    hostInjections: worldInfoResolution.injections,
+    hostInjectionPlan,
+    worldInfoResolution,
+    debug: result.debug,
+  });
+
+  return result;
 }
 
 export function interpolateVariables(template, context = {}) {

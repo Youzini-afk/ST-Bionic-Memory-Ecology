@@ -237,9 +237,19 @@ try {
     promptBuild.hostInjections.before.map((entry) => entry.name),
     ["常驻设定", "EW/Controller/Main", "线索条目"],
   );
+  assert.equal(promptBuild.hostInjectionPlan.before.length, 1);
+  assert.equal(promptBuild.hostInjectionPlan.before[0].blockId, "b1");
+  assert.equal(promptBuild.hostInjectionPlan.before[0].sourceKey, "worldInfoBefore");
+  assert.deepEqual(promptBuild.hostInjectionPlan.before[0].entryNames, [
+    "常驻设定",
+    "EW/Controller/Main",
+    "线索条目",
+  ]);
   assert.equal(promptBuild.hostInjections.after.length, 0);
   assert.equal(promptBuild.hostInjections.atDepth.length, 1);
   assert.equal(promptBuild.hostInjections.atDepth[0].depth, 2);
+  assert.equal(promptBuild.hostInjectionPlan.atDepth.length, 1);
+  assert.equal(promptBuild.hostInjectionPlan.atDepth[0].entryName, "深度注入");
   assert.deepEqual(
     promptBuild.renderedBlocks.map((block) => block.delivery),
     ["host.before", "private.message"],
