@@ -616,7 +616,7 @@ export function createDefaultTaskProfile(taskType) {
       wrap_user_messages_in_quotes: null,
     },
     regex: {
-      enabled: false,
+      enabled: true,
       inheritStRegex: true,
       sources: {
         global: true,
