@@ -430,15 +430,18 @@ function buildJsonAttemptMessages(
   attempt,
   reason = "",
   additionalMessages = [],
+  promptMessages = [],
 ) {
   const systemParts = [
-    systemPrompt,
     "输出要求补充：只输出一个紧凑的 JSON 对象。",
     "禁止 markdown 代码块、禁止解释、禁止前后缀、禁止省略号。",
     "如果需要重新生成，请直接从头输出完整 JSON，不要续写上一次内容。",
   ];
 
-  const userParts = [userPrompt];
+  const userParts = [];
+  if (String(userPrompt || "").trim()) {
+    userParts.push(String(userPrompt || "").trim());
+  }
   if (attempt > 0) {
     userParts.push(
       reason ? `上一次输出失败原因：${reason}` : "上一次输出未能被程序解析。",
@@ -450,8 +453,79 @@ function buildJsonAttemptMessages(
     userParts.push("请直接输出紧凑 JSON 对象，不要包含任何额外文本。");
   }
 
+  const normalizedPromptMessages = Array.isArray(promptMessages)
+    ? promptMessages
+        .map((message) => {
+          if (!message || typeof message !== "object") return null;
+          const role = String(message.role || "").trim().toLowerCase();
+          const content = String(message.content || "").trim();
+          if (!["system", "user", "assistant"].includes(role) || !content) {
+            return null;
+          }
+          return { role, content };
+        })
+        .filter(Boolean)
+    : [];
+
+  const systemSupplement = [systemPrompt, ...systemParts]
+    .filter((part) => String(part || "").trim())
+    .join("\n\n")
+    .trim();
+  const userSupplement = userParts.join("\n\n").trim();
+
+  if (normalizedPromptMessages.length > 0) {
+    const messages = normalizedPromptMessages.map((message) => ({ ...message }));
+    const firstSystemIndex = messages.findIndex(
+      (message) => message.role === "system",
+    );
+
+    if (systemSupplement) {
+      if (firstSystemIndex >= 0) {
+        messages[firstSystemIndex] = {
+          ...messages[firstSystemIndex],
+          content: [
+            messages[firstSystemIndex].content,
+            systemSupplement,
+          ]
+            .filter((part) => String(part || "").trim())
+            .join("\n\n"),
+        };
+      } else {
+        messages.unshift({ role: "system", content: systemSupplement });
+      }
+    }
+
+    if (userSupplement) {
+      const hasFallbackUserPrompt = Boolean(String(userPrompt || "").trim());
+      const lastUserIndex = [...messages]
+        .reverse()
+        .findIndex((message) => message.role === "user");
+      const resolvedLastUserIndex =
+        lastUserIndex >= 0 ? messages.length - 1 - lastUserIndex : -1;
+
+      if (resolvedLastUserIndex >= 0 && !hasFallbackUserPrompt) {
+        messages[resolvedLastUserIndex] = {
+          ...messages[resolvedLastUserIndex],
+          content: [
+            messages[resolvedLastUserIndex].content,
+            userSupplement,
+          ]
+            .filter((part) => String(part || "").trim())
+            .join("\n\n"),
+        };
+      } else {
+        messages.push({ role: "user", content: userSupplement });
+      }
+    }
+
+    return messages;
+  }
+
   const messages = [];
-  const normalizedSystemPrompt = systemParts.join("\n\n").trim();
+  const normalizedSystemPrompt = [systemPrompt, ...systemParts]
+    .filter((part) => String(part || "").trim())
+    .join("\n\n")
+    .trim();
   if (normalizedSystemPrompt) {
     messages.push({ role: "system", content: normalizedSystemPrompt });
   }
@@ -796,6 +870,7 @@ export async function callLLMForJSON({
   taskType = "",
   requestSource = "",
   additionalMessages = [],
+  promptMessages = [],
   debugContext = null,
 } = {}) {
   const override = getLlmTestOverride("callLLMForJSON");
@@ -808,6 +883,7 @@ export async function callLLMForJSON({
       taskType,
       requestSource,
       additionalMessages,
+      promptMessages,
       debugContext,
     });
   }
@@ -827,6 +903,7 @@ export async function callLLMForJSON({
         attempt,
         lastFailureReason,
         additionalMessages,
+        promptMessages,
       );
       const response = await callDedicatedOpenAICompatible(messages, {
         signal,

@@ -2352,7 +2352,7 @@ function _renderTaskDebugPromptCard(taskType, promptBuild) {
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">私有消息</span>
-        <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.privateTaskMessageCount ?? promptBuild.privateTaskMessages?.length ?? 0))}</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.executionMessageCount ?? promptBuild.executionMessages?.length ?? promptBuild.privateTaskMessages?.length ?? 0))}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">EJS 状态</span>
@@ -2368,11 +2368,11 @@ function _renderTaskDebugPromptCard(taskType, promptBuild) {
       </div>
     </div>
     ${_renderDebugDetails("实际投递路径", promptBuild.debug?.effectivePath || null)}
-    ${_renderDebugDetails("渲染后的块", promptBuild.renderedBlocks)}
-    ${_renderDebugDetails("注入计划（推导）", promptBuild.hostInjectionPlan || null)}
-    ${_renderDebugDetails("世界书注入内容（当前实际仍走私有 prompt）", promptBuild.hostInjections)}
-    ${_renderDebugDetails("私有任务消息", promptBuild.privateTaskMessages)}
-    ${_renderDebugDetails("系统提示词", promptBuild.systemPrompt || "")}
+    ${_renderDebugDetails("渲染后的块（按配置顺序）", promptBuild.renderedBlocks)}
+    ${_renderDebugDetails("实际执行消息序列", promptBuild.executionMessages || promptBuild.privateTaskMessages || null)}
+    ${_renderDebugDetails("系统提示词（兼容视图）", promptBuild.systemPrompt || "")}
+    ${_renderDebugDetails("世界书桶内容（诊断）", promptBuild.hostInjections)}
+    ${_renderDebugDetails("世界书块命中计划（诊断）", promptBuild.hostInjectionPlan || null)}
     ${_renderDebugDetails("世界书调试", promptBuild.worldInfo?.debug || promptBuild.worldInfoResolution?.debug || null)}
   `;
 }

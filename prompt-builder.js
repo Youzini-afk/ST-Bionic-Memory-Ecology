@@ -68,11 +68,13 @@ export function buildTaskExecutionDebugContext(
 
   return {
     promptAssembly: {
-      mode: "private-task-prompt",
+      mode: "ordered-private-messages",
       hostInjectionPlanMode:
         promptDebug.hostInjectionPlanMode || "diagnostic-plan-only",
       privateTaskMessageCount: Number(
-        promptDebug.privateTaskMessageCount ??
+        promptDebug.executionMessageCount ??
+          promptBuild?.executionMessages?.length ??
+          promptDebug.privateTaskMessageCount ??
           promptBuild?.privateTaskMessages?.length ??
           0,
       ),
@@ -128,6 +130,22 @@ function normalizeInjectionMode(mode) {
     return value;
   }
   return "append";
+}
+
+function createExecutionMessage(
+  role,
+  content,
+  extra = {},
+) {
+  const trimmedContent = String(content || "").trim();
+  if (!trimmedContent) {
+    return null;
+  }
+  return {
+    role: normalizeRole(role),
+    content: trimmedContent,
+    ...extra,
+  };
 }
 
 function stringifyInterpolatedValue(value) {
@@ -277,7 +295,10 @@ function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
   for (const block of renderedBlocks) {
     if (!block?.content) continue;
 
-    if (block.delivery === "host.before") {
+    if (
+      block.type === "builtin" &&
+      String(block.sourceKey || "") === "worldInfoBefore"
+    ) {
       plan.before.push(
         createHostInjectionPlanEntry(block, "before", {
           entryNames: beforeEntryNames,
@@ -287,7 +308,10 @@ function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
       continue;
     }
 
-    if (block.delivery === "host.after") {
+    if (
+      block.type === "builtin" &&
+      String(block.sourceKey || "") === "worldInfoAfter"
+    ) {
       plan.after.push(
         createHostInjectionPlanEntry(block, "after", {
           entryNames: afterEntryNames,
@@ -314,21 +338,25 @@ function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
 }
 
 function resolveBlockDelivery(block = {}) {
+  return normalizeRole(block.role) === "system"
+    ? "private.system"
+    : "private.message";
+}
+
+function getBlockDiagnosticInjectionPosition(block = {}) {
   if (
     block.type === "builtin" &&
     String(block.sourceKey || "") === "worldInfoBefore"
   ) {
-    return "host.before";
+    return "before";
   }
   if (
     block.type === "builtin" &&
     String(block.sourceKey || "") === "worldInfoAfter"
   ) {
-    return "host.after";
+    return "after";
   }
-  return normalizeRole(block.role) === "system"
-    ? "private.system"
-    : "private.message";
+  return "";
 }
 
 function profileRequiresWorldInfo(profile) {
@@ -411,7 +439,11 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 
   let systemPrompt = "";
   const customMessages = [];
+  const executionMessages = [];
   const renderedBlocks = [];
+  let userRoleBlockCount = 0;
+  let assistantRoleBlockCount = 0;
+  let systemRoleBlockCount = 0;
 
   for (const block of blocks) {
     if (!block || block.enabled === false) continue;
@@ -449,10 +481,24 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         : block._orderIndex,
       injectionMode: mode,
       delivery: resolveBlockDelivery(block),
-      effectiveDelivery: role === "system" ? "private.system" : "private.message",
+      effectiveDelivery: resolveBlockDelivery(block),
+      diagnosticInjectionPosition: getBlockDiagnosticInjectionPosition(block),
     });
 
+    const executionMessage = createExecutionMessage(role, content, {
+      source: "profile-block",
+      blockId: String(block.id || ""),
+      blockName: String(block.name || ""),
+      blockType: String(block.type || "custom"),
+      sourceKey: String(block.sourceKey || ""),
+      injectionMode: mode,
+    });
+    if (executionMessage) {
+      executionMessages.push(executionMessage);
+    }
+
     if (role === "system") {
+      systemRoleBlockCount += 1;
       if (!systemPrompt) {
         systemPrompt = content;
       } else if (mode === "prepend") {
@@ -463,10 +509,28 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       continue;
     }
 
+    if (role === "user") {
+      userRoleBlockCount += 1;
+    } else if (role === "assistant") {
+      assistantRoleBlockCount += 1;
+    }
     if (mode === "prepend") {
       customMessages.unshift({ role, content });
     } else {
       customMessages.push({ role, content });
+    }
+  }
+
+  for (const message of worldInfoResolution.additionalMessages || []) {
+    const executionMessage = createExecutionMessage(
+      message.role,
+      message.content,
+      {
+        source: "worldInfo-atDepth",
+      },
+    );
+    if (executionMessage) {
+      executionMessages.push(executionMessage);
     }
   }
 
@@ -487,6 +551,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       systemPrompt,
       messages: privateTaskMessages,
     },
+    executionMessages,
     privateTaskMessages,
     renderedBlocks,
     worldInfoResolution,
@@ -525,16 +590,19 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       customMessageCount: customMessages.length,
       additionalMessageCount: worldInfoResolution.additionalMessages.length,
       privateTaskMessageCount: privateTaskMessages.length,
+      executionMessageCount: executionMessages.length,
+      userRoleBlockCount,
+      assistantRoleBlockCount,
+      systemRoleBlockCount,
       effectiveDelivery: {
-        systemBlocks: "private.system",
-        customMessages: "private.message",
-        worldInfoBeforeAfter: "private.system (host injection plan is diagnostic only)",
-        worldInfoAtDepth: "private.message",
+        profileBlocks: "ordered-private-messages",
+        worldInfoBeforeAfter: "inline-in-ordered-messages",
+        worldInfoAtDepth: "appended-private-messages",
       },
       worldInfoCacheHit: Boolean(worldInfoResolution.debug?.cache?.hit),
       ejsRuntimeStatus: worldInfoResolution.debug?.ejsRuntimeStatus || "",
       effectivePath: {
-        promptAssembly: "private-task-prompt",
+        promptAssembly: "ordered-private-messages",
         hostInjectionPlan: "diagnostic-plan-only",
         ejs:
           worldInfoResolution.debug?.ejsRuntimeStatus ||
@@ -555,6 +623,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     profileName: profile?.name || "",
     systemPrompt,
     privateTaskMessages,
+    executionMessages,
     renderedBlocks,
     hostInjections: worldInfoResolution.injections,
     hostInjectionPlan,
@@ -563,6 +632,39 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   });
 
   return result;
+}
+
+export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
+  const executionMessages = Array.isArray(promptBuild?.executionMessages)
+    ? promptBuild.executionMessages
+        .map((message) =>
+          createExecutionMessage(message.role, message.content, {
+            source: String(message.source || ""),
+            blockId: String(message.blockId || ""),
+            blockName: String(message.blockName || ""),
+            blockType: String(message.blockType || ""),
+            sourceKey: String(message.sourceKey || ""),
+            injectionMode: String(message.injectionMode || ""),
+          }),
+        )
+        .filter(Boolean)
+    : [];
+
+  const hasUserMessage = executionMessages.some(
+    (message) => message.role === "user",
+  );
+
+  return {
+    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    userPrompt: hasUserMessage ? "" : String(fallbackUserPrompt || ""),
+    promptMessages: executionMessages,
+    additionalMessages:
+      executionMessages.length > 0
+        ? []
+        : Array.isArray(promptBuild?.privateTaskMessages)
+          ? promptBuild.privateTaskMessages
+          : [],
+  };
 }
 
 export function interpolateVariables(template, context = {}) {

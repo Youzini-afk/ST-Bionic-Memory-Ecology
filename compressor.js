@@ -11,7 +11,11 @@ import {
   getNode,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
+import {
+  buildTaskExecutionDebugContext,
+  buildTaskLlmPayload,
+  buildTaskPrompt,
+} from "./prompt-builder.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { isDirectVectorConfig } from "./vector-index.js";
@@ -26,6 +30,21 @@ function createTaskLlmDebugContext(promptBuild, regexInput) {
   return typeof buildTaskExecutionDebugContext === "function"
     ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
     : null;
+}
+
+function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
+  if (typeof buildTaskLlmPayload === "function") {
+    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
+  }
+
+  return {
+    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    userPrompt: String(fallbackUserPrompt || ""),
+    promptMessages: [],
+    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
+      ? promptBuild.privateTaskMessages
+      : [],
+  };
 }
 
 function throwIfAborted(signal) {
@@ -279,10 +298,14 @@ async function summarizeBatch(
   );
 
   const userPrompt = `请压缩以下 ${nodes.length} 个 "${typeDef.label}" 节点：\n\n${nodeDescriptions}`;
+  const promptPayload = resolveTaskPromptPayload(
+    compressPromptBuild,
+    userPrompt,
+  );
 
   return await callLLMForJSON({
-    systemPrompt,
-    userPrompt,
+    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+    userPrompt: promptPayload.userPrompt,
     maxRetries: 1,
     signal,
     taskType: "compress",
@@ -290,11 +313,8 @@ async function summarizeBatch(
       compressPromptBuild,
       compressRegexInput,
     ),
-    additionalMessages:
-      compressPromptBuild.privateTaskMessages || [
-        ...(compressPromptBuild.customMessages || []),
-        ...(compressPromptBuild.additionalMessages || []),
-      ],
+    promptMessages: promptPayload.promptMessages,
+    additionalMessages: promptPayload.additionalMessages,
   });
 }
 

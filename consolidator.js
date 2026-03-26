@@ -5,7 +5,11 @@
 import { embedBatch, searchSimilar } from "./embedding.js";
 import { addEdge, createEdge, getActiveNodes, getNode } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
+import {
+  buildTaskExecutionDebugContext,
+  buildTaskLlmPayload,
+  buildTaskPrompt,
+} from "./prompt-builder.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import {
@@ -25,6 +29,21 @@ function createTaskLlmDebugContext(promptBuild, regexInput) {
   return typeof buildTaskExecutionDebugContext === "function"
     ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
     : null;
+}
+
+function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
+  if (typeof buildTaskLlmPayload === "function") {
+    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
+  }
+
+  return {
+    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    userPrompt: String(fallbackUserPrompt || ""),
+    promptMessages: [],
+    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
+      ? promptBuild.privateTaskMessages
+      : [],
+  };
 }
 
 function isAbortError(error) {
@@ -318,10 +337,15 @@ export async function consolidateMemories({
     consolidationRegexInput,
     "system",
   );
+  const promptPayload = resolveTaskPromptPayload(
+    consolidationPromptBuild,
+    userPrompt,
+  );
   try {
     decision = await callLLMForJSON({
-      systemPrompt: consolidationSystemPrompt,
-      userPrompt,
+      systemPrompt:
+        promptPayload.systemPrompt || consolidationSystemPrompt,
+      userPrompt: promptPayload.userPrompt,
       maxRetries: 1,
       signal,
       taskType: "consolidation",
@@ -329,11 +353,8 @@ export async function consolidateMemories({
         consolidationPromptBuild,
         consolidationRegexInput,
       ),
-      additionalMessages:
-        consolidationPromptBuild.privateTaskMessages || [
-          ...(consolidationPromptBuild.customMessages || []),
-          ...(consolidationPromptBuild.additionalMessages || []),
-        ],
+      promptMessages: promptPayload.promptMessages,
+      additionalMessages: promptPayload.additionalMessages,
     });
   } catch (e) {
     if (isAbortError(e)) throw e;

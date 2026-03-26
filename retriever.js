@@ -11,7 +11,11 @@ import {
   getNodeEdges,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
+import {
+  buildTaskExecutionDebugContext,
+  buildTaskLlmPayload,
+  buildTaskPrompt,
+} from "./prompt-builder.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
@@ -26,6 +30,21 @@ function createTaskLlmDebugContext(promptBuild, regexInput) {
   return typeof buildTaskExecutionDebugContext === "function"
     ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
     : null;
+}
+
+function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
+  if (typeof buildTaskLlmPayload === "function") {
+    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
+  }
+
+  return {
+    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    userPrompt: String(fallbackUserPrompt || ""),
+    promptMessages: [],
+    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
+      ? promptBuild.privateTaskMessages
+      : [],
+  };
 }
 
 function isAbortError(error) {
@@ -463,10 +482,11 @@ async function llmRecall(
     "",
     "请选择最相关的节点并输出 JSON。",
   ].join("\n");
+  const promptPayload = resolveTaskPromptPayload(recallPromptBuild, userPrompt);
 
   const result = await callLLMForJSON({
-    systemPrompt,
-    userPrompt,
+    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+    userPrompt: promptPayload.userPrompt,
     maxRetries: 1,
     signal,
     taskType: "recall",
@@ -474,11 +494,8 @@ async function llmRecall(
       recallPromptBuild,
       recallRegexInput,
     ),
-    additionalMessages:
-      recallPromptBuild.privateTaskMessages || [
-        ...(recallPromptBuild.customMessages || []),
-        ...(recallPromptBuild.additionalMessages || []),
-      ],
+    promptMessages: promptPayload.promptMessages,
+    additionalMessages: promptPayload.additionalMessages,
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

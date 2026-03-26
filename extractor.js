@@ -16,7 +16,11 @@ import {
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
-import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
+import {
+  buildTaskExecutionDebugContext,
+  buildTaskLlmPayload,
+  buildTaskPrompt,
+} from "./prompt-builder.js";
 import { RELATION_TYPES } from "./schema.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { getSTContextForPrompt } from "./st-context.js";
@@ -32,6 +36,21 @@ function createTaskLlmDebugContext(promptBuild, regexInput) {
   return typeof buildTaskExecutionDebugContext === "function"
     ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
     : null;
+}
+
+function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
+  if (typeof buildTaskLlmPayload === "function") {
+    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
+  }
+
+  return {
+    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    userPrompt: String(fallbackUserPrompt || ""),
+    promptMessages: [],
+    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
+      ? promptBuild.privateTaskMessages
+      : [],
+  };
 }
 
 function isAbortError(error) {
@@ -153,20 +172,18 @@ export async function extractMemories({
     "",
     "请分析对话，按 JSON 格式输出操作列表。",
   ].join("\n");
+  const promptPayload = resolveTaskPromptPayload(promptBuild, userPrompt);
 
   // 调用 LLM
   const result = await callLLMForJSON({
-    systemPrompt,
-    userPrompt,
+    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+    userPrompt: promptPayload.userPrompt,
     maxRetries: 2,
     signal,
     taskType: "extract",
     debugContext: createTaskLlmDebugContext(promptBuild, extractRegexInput),
-    additionalMessages:
-      promptBuild.privateTaskMessages || [
-        ...(promptBuild.customMessages || []),
-        ...(promptBuild.additionalMessages || []),
-      ],
+    promptMessages: promptPayload.promptMessages,
+    additionalMessages: promptPayload.additionalMessages,
   });
   throwIfAborted(signal);
 
@@ -667,9 +684,7 @@ export async function generateSynopsis({
     "system",
   );
 
-  const result = await callLLMForJSON({
-    systemPrompt: synopsisSystemPrompt,
-    userPrompt: [
+  const synopsisUserPrompt = [
       "## 事件时间线",
       eventSummaries,
       "",
@@ -678,7 +693,15 @@ export async function generateSynopsis({
       "",
       "## 活跃主线",
       threadSummary || "(无)",
-    ].join("\n"),
+    ].join("\n");
+  const synopsisPromptPayload = resolveTaskPromptPayload(
+    synopsisPromptBuild,
+    synopsisUserPrompt,
+  );
+
+  const result = await callLLMForJSON({
+    systemPrompt: synopsisPromptPayload.systemPrompt || synopsisSystemPrompt,
+    userPrompt: synopsisPromptPayload.userPrompt,
     maxRetries: 1,
     signal,
     taskType: "synopsis",
@@ -686,11 +709,8 @@ export async function generateSynopsis({
       synopsisPromptBuild,
       synopsisRegexInput,
     ),
-    additionalMessages:
-      synopsisPromptBuild.privateTaskMessages || [
-        ...(synopsisPromptBuild.customMessages || []),
-        ...(synopsisPromptBuild.additionalMessages || []),
-      ],
+    promptMessages: synopsisPromptPayload.promptMessages,
+    additionalMessages: synopsisPromptPayload.additionalMessages,
   });
 
   if (!result?.summary) return;
@@ -795,9 +815,7 @@ export async function generateReflection({
     "system",
   );
 
-  const result = await callLLMForJSON({
-    systemPrompt: reflectionSystemPrompt,
-    userPrompt: [
+  const reflectionUserPrompt = [
       "## 最近事件",
       eventSummary,
       "",
@@ -809,7 +827,16 @@ export async function generateReflection({
       "",
       "## 已知矛盾",
       contradictionSummary || "(无)",
-    ].join("\n"),
+    ].join("\n");
+  const reflectionPromptPayload = resolveTaskPromptPayload(
+    reflectionPromptBuild,
+    reflectionUserPrompt,
+  );
+
+  const result = await callLLMForJSON({
+    systemPrompt:
+      reflectionPromptPayload.systemPrompt || reflectionSystemPrompt,
+    userPrompt: reflectionPromptPayload.userPrompt,
     maxRetries: 1,
     signal,
     taskType: "reflection",
@@ -817,11 +844,8 @@ export async function generateReflection({
       reflectionPromptBuild,
       reflectionRegexInput,
     ),
-    additionalMessages:
-      reflectionPromptBuild.privateTaskMessages || [
-        ...(reflectionPromptBuild.customMessages || []),
-        ...(reflectionPromptBuild.additionalMessages || []),
-      ],
+    promptMessages: reflectionPromptPayload.promptMessages,
+    additionalMessages: reflectionPromptPayload.additionalMessages,
   });
 
   if (!result?.insight) return null;

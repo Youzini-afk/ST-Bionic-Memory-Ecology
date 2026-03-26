@@ -335,9 +335,14 @@ try {
   assert.equal(promptBuild.hostInjectionPlan.atDepth.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.atDepth[0].entryName, "深度注入");
   assert.equal(typeof promptBuild.debug.worldInfoCacheHit, "boolean");
+  assert.equal(promptBuild.executionMessages.length, 4);
+  assert.deepEqual(
+    promptBuild.executionMessages.map((message) => message.role),
+    ["system", "system", "user", "system"],
+  );
   assert.deepEqual(
     promptBuild.renderedBlocks.map((block) => block.delivery),
-    ["host.before", "host.after", "private.message"],
+    ["private.system", "private.system", "private.message"],
   );
   assert.equal(promptBuild.additionalMessages.length, 1);
   assert.equal(promptBuild.additionalMessages[0].content, "这是一条 atDepth 消息。");
