@@ -7,6 +7,7 @@
  */
 
 import { extension_settings } from "../../../extensions.js";
+import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 
 const MODULE_NAME = "st_bme";
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000;
@@ -19,10 +20,14 @@ function getEmbeddingTestOverride(name) {
 function getConfiguredTimeoutMs(
   settings = extension_settings[MODULE_NAME] || {},
 ) {
-  const timeoutMs = Number(settings?.timeoutMs);
-  return Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? timeoutMs
-    : EMBEDDING_REQUEST_TIMEOUT_MS;
+  return typeof resolveConfiguredTimeoutMs === "function"
+    ? resolveConfiguredTimeoutMs(settings, EMBEDDING_REQUEST_TIMEOUT_MS)
+    : (() => {
+        const timeoutMs = Number(settings?.timeoutMs);
+        return Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : EMBEDDING_REQUEST_TIMEOUT_MS;
+      })();
 }
 
 function isAbortError(error) {
@@ -131,7 +136,7 @@ export async function embedText(text, config, { signal } = {}) {
           input: text,
         }),
       },
-      getConfiguredTimeoutMs(),
+      getConfiguredTimeoutMs(config),
     );
 
     if (!response.ok) {
@@ -196,7 +201,7 @@ export async function embedBatch(texts, config, { signal } = {}) {
           input: texts,
         }),
       },
-      getConfiguredTimeoutMs(),
+      getConfiguredTimeoutMs(config),
     );
 
     if (!response.ok) {

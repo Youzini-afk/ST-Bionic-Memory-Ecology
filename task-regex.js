@@ -319,16 +319,26 @@ function collectLocalRules(regexConfig = {}) {
 }
 
 function shouldApplyRuleForStage(rule, stage = "", stagesConfig = {}) {
-  // 将细粒度的 stage 名映射到 input / output 两大类
-  if (PROMPT_STAGES.has(stage)) {
+  const normalizedStage = String(stage || "").trim();
+  if (
+    normalizedStage &&
+    Object.prototype.hasOwnProperty.call(stagesConfig, normalizedStage)
+  ) {
+    return (
+      stagesConfig[normalizedStage] !== false &&
+      rule.destinationFlags.prompt !== false
+    );
+  }
+  if (PROMPT_STAGES.has(normalizedStage)) {
     return (
       stagesConfig.input !== false && rule.destinationFlags.prompt !== false
     );
   }
-  if (OUTPUT_STAGES.has(stage)) {
-    return stagesConfig.output !== false;
+  if (OUTPUT_STAGES.has(normalizedStage)) {
+    return (
+      stagesConfig.output !== false && rule.destinationFlags.prompt !== false
+    );
   }
-  // 未知 stage 回退到 input
   return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
 }
 

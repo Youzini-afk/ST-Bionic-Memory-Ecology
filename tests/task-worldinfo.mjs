@@ -164,6 +164,17 @@ try {
   const { resolveTaskWorldInfo } = await import("../task-worldinfo.js");
   const { buildTaskPrompt } = await import("../prompt-builder.js");
 
+  const emptyTriggerWorldInfo = await resolveTaskWorldInfo({
+    chatMessages: [],
+    userMessage: "",
+    templateContext: {},
+  });
+  assert.equal(
+    emptyTriggerWorldInfo.beforeEntries.some((entry) => entry.name === "常驻设定"),
+    true,
+    "constant world info should still resolve without trigger text",
+  );
+
   const worldInfo = await resolveTaskWorldInfo({
     templateContext: {
       recentMessages: "我们继续调查那条线索",
@@ -174,8 +185,10 @@ try {
 
   assert.deepEqual(
     worldInfo.beforeEntries.map((entry) => entry.name),
-    ["常驻设定", "EW/Controller/Main", "线索条目"],
+    ["常驻设定", "线索条目"],
   );
+  assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
+  assert.equal(worldInfo.debug.controllerPulledCount, 1);
   assert.equal(worldInfo.additionalMessages.length, 1);
   assert.equal(
     worldInfo.additionalMessages[0].content,
@@ -238,14 +251,13 @@ try {
   );
   assert.deepEqual(
     promptBuild.hostInjections.before.map((entry) => entry.name),
-    ["常驻设定", "EW/Controller/Main", "线索条目"],
+    ["常驻设定", "线索条目"],
   );
   assert.equal(promptBuild.hostInjectionPlan.before.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.before[0].blockId, "b1");
   assert.equal(promptBuild.hostInjectionPlan.before[0].sourceKey, "worldInfoBefore");
   assert.deepEqual(promptBuild.hostInjectionPlan.before[0].entryNames, [
     "常驻设定",
-    "EW/Controller/Main",
     "线索条目",
   ]);
   assert.equal(promptBuild.hostInjections.after.length, 0);
@@ -253,6 +265,8 @@ try {
   assert.equal(promptBuild.hostInjections.atDepth[0].depth, 2);
   assert.equal(promptBuild.hostInjectionPlan.atDepth.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.atDepth[0].entryName, "深度注入");
+  assert.equal(typeof promptBuild.debug.worldInfoCacheHit, "boolean");
+  assert.doesNotMatch(promptBuild.systemPrompt, /getwi|<%=?/);
   assert.deepEqual(
     promptBuild.renderedBlocks.map((block) => block.delivery),
     ["host.before", "private.message"],

@@ -11,7 +11,7 @@ import {
   getNode,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskPrompt } from "./prompt-builder.js";
+import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { isDirectVectorConfig } from "./vector-index.js";
@@ -20,6 +20,12 @@ function createAbortError(message = "操作已终止") {
   const error = new Error(message);
   error.name = "AbortError";
   return error;
+}
+
+function createTaskLlmDebugContext(promptBuild, regexInput) {
+  return typeof buildTaskExecutionDebugContext === "function"
+    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
+    : null;
 }
 
 function throwIfAborted(signal) {
@@ -249,6 +255,7 @@ async function summarizeBatch(
     graphStats: `node_count=${nodes.length}, node_type=${typeDef.id}`,
     ...getSTContextForPrompt(),
   });
+  const compressRegexInput = { entries: [] };
   const systemPrompt = applyTaskRegex(
     settings,
     "compress",
@@ -267,6 +274,8 @@ async function summarizeBatch(
         "- 去除重复和低信息密度内容",
         "- 压缩后文本应精炼，目标 150 字左右",
       ].join("\n"),
+    compressRegexInput,
+    "system",
   );
 
   const userPrompt = `请压缩以下 ${nodes.length} 个 "${typeDef.label}" 节点：\n\n${nodeDescriptions}`;
@@ -277,6 +286,10 @@ async function summarizeBatch(
     maxRetries: 1,
     signal,
     taskType: "compress",
+    debugContext: createTaskLlmDebugContext(
+      compressPromptBuild,
+      compressRegexInput,
+    ),
     additionalMessages:
       compressPromptBuild.privateTaskMessages || [
         ...(compressPromptBuild.customMessages || []),

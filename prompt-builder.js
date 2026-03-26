@@ -53,6 +53,60 @@ function recordTaskPromptBuild(taskType, snapshot = {}) {
   state.updatedAt = new Date().toISOString();
 }
 
+export function buildTaskExecutionDebugContext(
+  promptBuild = null,
+  options = {},
+) {
+  const promptDebug = promptBuild?.debug || {};
+  const worldInfoDebug =
+    promptBuild?.worldInfo?.debug || promptBuild?.worldInfoResolution?.debug || {};
+  const worldInfoHit =
+    Number(promptDebug.worldInfoBeforeCount || 0) +
+      Number(promptDebug.worldInfoAfterCount || 0) +
+      Number(promptDebug.worldInfoAtDepthCount || 0) >
+    0;
+
+  return {
+    promptAssembly: {
+      mode: "private-task-prompt",
+      hostInjectionPlanMode:
+        promptDebug.hostInjectionPlanMode || "diagnostic-plan-only",
+      privateTaskMessageCount: Number(
+        promptDebug.privateTaskMessageCount ??
+          promptBuild?.privateTaskMessages?.length ??
+          0,
+      ),
+    },
+    promptBuild: {
+      taskType: String(promptDebug.taskType || ""),
+      profileId: String(promptDebug.profileId || ""),
+      profileName: String(promptDebug.profileName || ""),
+      renderedBlockCount: Number(promptDebug.renderedBlockCount || 0),
+      privateTaskMessageCount: Number(promptDebug.privateTaskMessageCount || 0),
+    },
+    effectiveDelivery:
+      promptDebug.effectiveDelivery && typeof promptDebug.effectiveDelivery === "object"
+        ? cloneRuntimeDebugValue(promptDebug.effectiveDelivery, {})
+        : null,
+    ejsRuntimeStatus: String(
+      promptDebug.ejsRuntimeStatus || worldInfoDebug.ejsRuntimeStatus || "",
+    ),
+    worldInfo: {
+      requested: promptDebug.worldInfoRequested !== false,
+      hit: worldInfoHit,
+      cacheHit: Boolean(promptDebug.worldInfoCacheHit),
+      beforeCount: Number(promptDebug.worldInfoBeforeCount || 0),
+      afterCount: Number(promptDebug.worldInfoAfterCount || 0),
+      atDepthCount: Number(promptDebug.worldInfoAtDepthCount || 0),
+      loadMs: Number(worldInfoDebug.loadMs || 0),
+    },
+    regexInput:
+      options.regexInput && typeof options.regexInput === "object"
+        ? cloneRuntimeDebugValue(options.regexInput, {})
+        : null,
+  };
+}
+
 function getByPath(target, path) {
   return String(path || "")
     .split(".")
@@ -99,6 +153,7 @@ function buildEmptyWorldInfoContext() {
     worldInfoAtDepthEntries: [],
     activatedWorldInfoNames: [],
     taskAdditionalMessages: [],
+    worldInfoDebug: null,
   };
 }
 
@@ -147,6 +202,11 @@ function buildWorldInfoResolution(worldInfoContext = {}) {
       ? worldInfoContext.activatedWorldInfoNames
       : [],
     additionalMessages,
+    debug:
+      worldInfoContext.worldInfoDebug &&
+      typeof worldInfoContext.worldInfoDebug === "object"
+        ? worldInfoContext.worldInfoDebug
+        : null,
     injections: {
       before: beforeEntries
         .map((entry) => createHostInjectionEntry(entry, "before"))
@@ -338,6 +398,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       worldInfoAtDepthEntries: worldInfo.atDepthEntries || [],
       activatedWorldInfoNames: worldInfo.activatedEntryNames || [],
       taskAdditionalMessages: worldInfo.additionalMessages || [],
+      worldInfoDebug: worldInfo.debug || null,
     };
   }
 
@@ -388,6 +449,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         : block._orderIndex,
       injectionMode: mode,
       delivery: resolveBlockDelivery(block),
+      effectiveDelivery: role === "system" ? "private.system" : "private.message",
     });
 
     if (role === "system") {
@@ -438,6 +500,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       afterEntries: worldInfoResolution.afterEntries,
       atDepthEntries: worldInfoResolution.atDepthEntries,
       activatedEntryNames: worldInfoResolution.activatedEntryNames,
+      debug: worldInfoResolution.debug,
     },
     debug: {
       taskType,
@@ -458,9 +521,31 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         hostInjectionPlan.before.length +
         hostInjectionPlan.after.length +
         hostInjectionPlan.atDepth.length,
+      hostInjectionPlanMode: "diagnostic-plan-only",
       customMessageCount: customMessages.length,
       additionalMessageCount: worldInfoResolution.additionalMessages.length,
       privateTaskMessageCount: privateTaskMessages.length,
+      effectiveDelivery: {
+        systemBlocks: "private.system",
+        customMessages: "private.message",
+        worldInfoBeforeAfter: "private.system (host injection plan is diagnostic only)",
+        worldInfoAtDepth: "private.message",
+      },
+      worldInfoCacheHit: Boolean(worldInfoResolution.debug?.cache?.hit),
+      ejsRuntimeStatus: worldInfoResolution.debug?.ejsRuntimeStatus || "",
+      effectivePath: {
+        promptAssembly: "private-task-prompt",
+        hostInjectionPlan: "diagnostic-plan-only",
+        ejs:
+          worldInfoResolution.debug?.ejsRuntimeStatus ||
+          "unknown",
+        worldInfo:
+          worldInfoRequested !== false
+            ? worldInfoResolution.activatedEntryNames.length > 0
+              ? "matched"
+              : "requested-but-missed"
+            : "disabled",
+      },
     },
   };
 

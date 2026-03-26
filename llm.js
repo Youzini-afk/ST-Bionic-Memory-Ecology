@@ -5,12 +5,16 @@ import { getRequestHeaders } from "../../../../script.js";
 import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
 import { resolveTaskGenerationOptions } from "./generation-options.js";
+import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
+import { applyTaskRegex } from "./task-regex.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const RETRY_JSON_COMPLETION_TOKENS = 3200;
+const SENSITIVE_DEBUG_KEY_PATTERN =
+  /^(authorization|proxy_password|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)$/i;
 
 function cloneRuntimeDebugValue(value, fallback = null) {
   if (value == null) {
@@ -22,6 +26,57 @@ function cloneRuntimeDebugValue(value, fallback = null) {
   } catch {
     return fallback ?? value;
   }
+}
+
+function redactSensitiveString(value) {
+  return String(value ?? "")
+    .replace(/(Bearer\s+)[^\s"'\r\n]+/gi, "$1[REDACTED]")
+    .replace(
+      /(Authorization\s*:\s*Bearer\s+)[^\s"'\r\n]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/(proxy_password\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]");
+}
+
+function redactSensitiveValue(value, currentKey = "") {
+  if (value == null) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveValue(item, currentKey));
+  }
+
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [
+        key,
+        redactSensitiveValue(entryValue, key),
+      ]),
+    );
+  }
+
+  if (typeof value === "string") {
+    if (SENSITIVE_DEBUG_KEY_PATTERN.test(String(currentKey || ""))) {
+      return value ? "[REDACTED]" : "";
+    }
+    return redactSensitiveString(value);
+  }
+
+  if (SENSITIVE_DEBUG_KEY_PATTERN.test(String(currentKey || ""))) {
+    return "[REDACTED]";
+  }
+
+  return value;
+}
+
+function sanitizeLlmDebugSnapshot(snapshot = {}) {
+  const cloned = cloneRuntimeDebugValue(snapshot, {});
+  const redacted = redactSensitiveValue(cloned);
+  if (redacted && typeof redacted === "object" && !Array.isArray(redacted)) {
+    redacted.redacted = true;
+  }
+  return redacted;
 }
 
 function getRuntimeDebugState() {
@@ -41,12 +96,17 @@ function getRuntimeDebugState() {
   return globalThis[stateKey];
 }
 
-function recordTaskLlmRequest(taskType, snapshot = {}) {
+function recordTaskLlmRequest(taskType, snapshot = {}, options = {}) {
   const normalizedTaskType = String(taskType || "").trim() || "unknown";
   const state = getRuntimeDebugState();
+  const shouldMerge = options?.merge === true;
+  const previousSnapshot = shouldMerge
+    ? cloneRuntimeDebugValue(state.taskLlmRequests[normalizedTaskType], {})
+    : {};
   state.taskLlmRequests[normalizedTaskType] = {
+    ...previousSnapshot,
     updatedAt: new Date().toISOString(),
-    ...cloneRuntimeDebugValue(snapshot, {}),
+    ...sanitizeLlmDebugSnapshot(snapshot),
   };
   state.updatedAt = new Date().toISOString();
 }
@@ -67,10 +127,131 @@ function getMemoryLLMConfig() {
 }
 
 function getConfiguredTimeoutMs(settings = {}) {
-  const timeoutMs = Number(settings?.timeoutMs);
-  return Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? timeoutMs
-    : LLM_REQUEST_TIMEOUT_MS;
+  return typeof resolveConfiguredTimeoutMs === "function"
+    ? resolveConfiguredTimeoutMs(settings, LLM_REQUEST_TIMEOUT_MS)
+    : (() => {
+        const timeoutMs = Number(settings?.timeoutMs);
+        return Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : LLM_REQUEST_TIMEOUT_MS;
+      })();
+}
+
+function normalizeRegexDebugEntries(debugCollector = null) {
+  if (!Array.isArray(debugCollector?.entries)) {
+    return [];
+  }
+  return debugCollector.entries.map((entry) => ({
+    taskType: String(entry?.taskType || ""),
+    stage: String(entry?.stage || ""),
+    enabled: entry?.enabled !== false,
+    appliedRules: Array.isArray(entry?.appliedRules)
+      ? entry.appliedRules.map((rule) => ({
+          id: String(rule?.id || ""),
+          source: String(rule?.source || ""),
+          error: String(rule?.error || ""),
+        }))
+      : [],
+    sourceCount: {
+      tavern: Number(entry?.sourceCount?.tavern || 0),
+      local: Number(entry?.sourceCount?.local || 0),
+    },
+  }));
+}
+
+function applyTaskOutputRegexStages(taskType, text) {
+  const normalizedTaskType = String(taskType || "").trim();
+  const rawText = typeof text === "string" ? text : "";
+  if (!normalizedTaskType || !rawText) {
+    return {
+      cleanedText: rawText,
+      debug: {
+        changed: false,
+        applied: false,
+        stages: [],
+        rawLength: rawText.length,
+        cleanedLength: rawText.length,
+      },
+    };
+  }
+
+  const settings = extension_settings[MODULE_NAME] || {};
+  const regexDebug = { entries: [] };
+  const afterRawStage = applyTaskRegex(
+    settings,
+    normalizedTaskType,
+    "output.rawResponse",
+    rawText,
+    regexDebug,
+    "assistant",
+  );
+  const cleanedText = applyTaskRegex(
+    settings,
+    normalizedTaskType,
+    "output.beforeParse",
+    afterRawStage,
+    regexDebug,
+    "assistant",
+  );
+  const normalizedEntries = normalizeRegexDebugEntries(regexDebug);
+  const applied = normalizedEntries.some(
+    (entry) => entry.appliedRules.length > 0,
+  );
+
+  return {
+    cleanedText,
+    debug: {
+      changed: cleanedText !== rawText,
+      applied,
+      rawLength: rawText.length,
+      cleanedLength: cleanedText.length,
+      stages: normalizedEntries,
+    },
+  };
+}
+
+function buildEffectiveLlmRoute(
+  hasDedicatedConfig,
+  privateRequestSource,
+  taskType = "",
+) {
+  const dedicated = Boolean(hasDedicatedConfig);
+  return {
+    taskType: String(taskType || "").trim(),
+    requestSource: String(privateRequestSource || "").trim(),
+    llm: dedicated ? "dedicated-memory-llm" : "sillytavern-current-model",
+    transport: dedicated
+      ? "dedicated-openai-compatible"
+      : "sillytavern-current-model",
+  };
+}
+
+function buildPromptExecutionSummary(debugContext = null) {
+  if (!debugContext || typeof debugContext !== "object") {
+    return null;
+  }
+
+  return {
+    promptAssembly:
+      debugContext.promptAssembly && typeof debugContext.promptAssembly === "object"
+        ? cloneRuntimeDebugValue(debugContext.promptAssembly, {})
+        : null,
+    promptBuild:
+      debugContext.promptBuild && typeof debugContext.promptBuild === "object"
+        ? cloneRuntimeDebugValue(debugContext.promptBuild, {})
+        : null,
+    effectiveDelivery:
+      debugContext.effectiveDelivery &&
+      typeof debugContext.effectiveDelivery === "object"
+        ? cloneRuntimeDebugValue(debugContext.effectiveDelivery, {})
+        : null,
+    ejsRuntimeStatus: String(debugContext.ejsRuntimeStatus || ""),
+    worldInfo:
+      debugContext.worldInfo && typeof debugContext.worldInfo === "object"
+        ? cloneRuntimeDebugValue(debugContext.worldInfo, {})
+        : null,
+    regexInput: normalizeRegexDebugEntries(debugContext.regexInput),
+  };
 }
 
 function normalizeOpenAICompatibleBaseUrl(value) {
@@ -423,6 +604,11 @@ async function callDedicatedOpenAICompatible(
     filteredGeneration: generationResolved.filtered || {},
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
+    effectiveRoute: buildEffectiveLlmRoute(
+      hasDedicatedConfig,
+      privateRequestSource,
+      taskType,
+    ),
     maxCompletionTokens,
   });
   if (!hasDedicatedConfig) {
@@ -521,6 +707,11 @@ async function callDedicatedOpenAICompatible(
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
     resolvedCompletionTokens,
+    effectiveRoute: buildEffectiveLlmRoute(
+      true,
+      privateRequestSource,
+      taskType,
+    ),
     requestBody: body,
   });
 
@@ -605,6 +796,7 @@ export async function callLLMForJSON({
   taskType = "",
   requestSource = "",
   additionalMessages = [],
+  debugContext = null,
 } = {}) {
   const override = getLlmTestOverride("callLLMForJSON");
   if (override) {
@@ -616,6 +808,7 @@ export async function callLLMForJSON({
       taskType,
       requestSource,
       additionalMessages,
+      debugContext,
     });
   }
 
@@ -624,6 +817,7 @@ export async function callLLMForJSON({
     requestSource,
   );
   let lastFailureReason = "";
+  const promptExecutionSummary = buildPromptExecutionSummary(debugContext);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -645,6 +839,17 @@ export async function callLLMForJSON({
             : RETRY_JSON_COMPLETION_TOKENS,
       });
       const responseText = response?.content || "";
+      const outputCleanup = applyTaskOutputRegexStages(taskType, responseText);
+      recordTaskLlmRequest(
+        taskType || privateRequestSource,
+        {
+          responseCleaning: outputCleanup.debug,
+          promptExecution: promptExecutionSummary,
+        },
+        {
+          merge: true,
+        },
+      );
 
       if (!responseText || typeof responseText !== "string") {
         console.warn(`[ST-BME] LLM 返回空响应 (尝试 ${attempt + 1})`);
@@ -653,14 +858,14 @@ export async function callLLMForJSON({
       }
 
       // 尝试解析 JSON
-      const parsed = extractJSON(responseText);
+      const parsed = extractJSON(outputCleanup.cleanedText);
       if (parsed !== null) {
         return parsed;
       }
 
       const truncated =
         response.finishReason === "length" ||
-        looksLikeTruncatedJson(responseText);
+        looksLikeTruncatedJson(outputCleanup.cleanedText);
       lastFailureReason = truncated
         ? "输出因长度限制被截断，请重新输出更紧凑的完整 JSON"
         : "输出不是有效 JSON，请严格返回紧凑 JSON 对象";

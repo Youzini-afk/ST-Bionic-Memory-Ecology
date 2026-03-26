@@ -263,6 +263,108 @@ try {
     local: 1,
   });
 
+  const outputGuardSettings = {
+    taskProfiles: {
+      extract: {
+        activeProfileId: "output-guard",
+        profiles: [
+          {
+            id: "output-guard",
+            name: "Output Guard",
+            taskType: "extract",
+            builtin: false,
+            blocks: [],
+            regex: {
+              enabled: true,
+              inheritStRegex: false,
+              stages: {
+                input: true,
+                output: true,
+                "output.rawResponse": true,
+              },
+              localRules: [
+                createRule("display-only-output", "/美化/g", "<b>美化</b>", {
+                  destination: {
+                    prompt: false,
+                    display: true,
+                  },
+                }),
+                createRule("prompt-output", "/JSON/g", "DONE", {
+                  destination: {
+                    prompt: true,
+                    display: false,
+                  },
+                }),
+              ],
+            },
+          },
+        ],
+      },
+    },
+  };
+  const outputGuardDebug = { entries: [] };
+  const outputGuardResult = applyTaskRegex(
+    outputGuardSettings,
+    "extract",
+    "output.rawResponse",
+    "JSON 美化",
+    outputGuardDebug,
+    "assistant",
+  );
+  assert.equal(outputGuardResult, "DONE 美化");
+  assert.deepEqual(
+    outputGuardDebug.entries[0].appliedRules.map((item) => item.id),
+    ["prompt-output"],
+  );
+
+  const exactStageSettings = {
+    taskProfilesVersion: 1,
+    taskProfiles: {
+      extract: {
+        activeProfileId: "default",
+        profiles: [
+          {
+            id: "default",
+            taskType: "extract",
+            regex: {
+              enabled: true,
+              inheritStRegex: false,
+              sources: {
+                global: false,
+                preset: false,
+                character: false,
+              },
+              stages: {
+                output: true,
+                "output.rawResponse": false,
+                "output.beforeParse": true,
+              },
+              localRules: [
+                createRule("exact-stage", "/JSON/g", "DONE", {
+                  destination: {
+                    prompt: true,
+                    display: false,
+                  },
+                }),
+              ],
+            },
+          },
+        ],
+      },
+    },
+  };
+  const exactStageDebug = { entries: [] };
+  const exactStageResult = applyTaskRegex(
+    exactStageSettings,
+    "extract",
+    "output.rawResponse",
+    "JSON",
+    exactStageDebug,
+    "assistant",
+  );
+  assert.equal(exactStageResult, "JSON");
+  assert.deepEqual(exactStageDebug.entries[0].appliedRules, []);
+
   console.log("task-regex tests passed");
 } finally {
   if (originalSillyTavern === undefined) {

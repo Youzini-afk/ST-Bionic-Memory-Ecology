@@ -49,6 +49,7 @@ import {
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
+  buildReverseJournalRecoveryPlan,
   buildRecoveryResult,
   clearHistoryDirty,
   cloneGraphSnapshot,
@@ -72,6 +73,7 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector-index.js";
+import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -820,10 +822,14 @@ function getSchema() {
 }
 
 function getConfiguredTimeoutMs(settings = getSettings()) {
-  const timeoutMs = Number(settings?.timeoutMs);
-  return Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? timeoutMs
-    : LOCAL_VECTOR_TIMEOUT_MS;
+  return typeof resolveConfiguredTimeoutMs === "function"
+    ? resolveConfiguredTimeoutMs(settings, LOCAL_VECTOR_TIMEOUT_MS)
+    : (() => {
+        const timeoutMs = Number(settings?.timeoutMs);
+        return Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : LOCAL_VECTOR_TIMEOUT_MS;
+      })();
 }
 
 function getEmbeddingConfig(mode = null) {
@@ -2929,6 +2935,120 @@ function rollbackAffectedJournals(graph, affectedJournals = []) {
     : [];
 }
 
+function pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
+  if (!graph?.historyState?.processedMessageHashes) return;
+  if (!Number.isFinite(fromFloor)) return;
+
+  const hashes = graph.historyState.processedMessageHashes;
+  for (const key of Object.keys(hashes)) {
+    if (Number(key) >= fromFloor) {
+      delete hashes[key];
+    }
+  }
+}
+
+async function rollbackGraphForReroll(targetFloor, context = getContext()) {
+  ensureCurrentGraphRuntimeState();
+  const chatId = getCurrentChatId(context);
+  const recoveryPoint = findJournalRecoveryPoint(currentGraph, targetFloor);
+
+  if (!recoveryPoint) {
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: targetFloor,
+      effectiveFromFloor: null,
+      recoveryPath: "unavailable",
+      affectedBatchCount: 0,
+      error:
+        "未找到可用的回滚点，无法安全重新提取。请先执行一次历史恢复或重新提取更早的批次。",
+    };
+  }
+
+  clearInjectionState();
+  lastExtractedItems = [];
+
+  const config = getEmbeddingConfig();
+  const recoveryPath = recoveryPoint.path || "unknown";
+  const affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
+
+  if (recoveryPath === "reverse-journal") {
+    const recoveryPlan = buildReverseJournalRecoveryPlan(
+      recoveryPoint.affectedJournals,
+      targetFloor,
+    );
+    rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
+    currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
+    extractionCount = currentGraph.historyState.extractionCount || 0;
+    applyRecoveryPlanToVectorState(recoveryPlan, targetFloor);
+
+    if (
+      isBackendVectorConfig(config) &&
+      recoveryPlan.backendDeleteHashes.length > 0
+    ) {
+      await deleteBackendVectorHashesForRecovery(
+        currentGraph.vectorIndexState.collectionId,
+        config,
+        recoveryPlan.backendDeleteHashes,
+      );
+    }
+
+    await prepareVectorStateForReplay(false, undefined, {
+      skipBackendPurge: isBackendVectorConfig(config),
+    });
+  } else if (recoveryPath === "legacy-snapshot") {
+    currentGraph = normalizeGraphRuntimeState(recoveryPoint.snapshotBefore, chatId);
+    extractionCount = currentGraph.historyState.extractionCount || 0;
+    await prepareVectorStateForReplay(false);
+  } else {
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: targetFloor,
+      effectiveFromFloor: null,
+      recoveryPath,
+      affectedBatchCount,
+      error: `不支持的回滚路径: ${recoveryPath}`,
+    };
+  }
+
+  const effectiveFromFloor = Number.isFinite(
+    currentGraph.historyState?.lastProcessedAssistantFloor,
+  )
+    ? currentGraph.historyState.lastProcessedAssistantFloor + 1
+    : 0;
+
+  pruneProcessedMessageHashesFromFloor(currentGraph, effectiveFromFloor);
+  currentGraph.lastProcessedSeq =
+    currentGraph.historyState?.lastProcessedAssistantFloor ?? -1;
+  clearHistoryDirty(
+    currentGraph,
+    buildRecoveryResult("reroll-rollback", {
+      fromFloor: targetFloor,
+      effectiveFromFloor,
+      path: recoveryPath,
+      affectedBatchCount,
+      detectionSource: "manual-reroll",
+      reason: "manual-reroll",
+    }),
+  );
+  saveGraphToChat();
+  refreshPanelLiveState();
+
+  return {
+    success: true,
+    rollbackPerformed: true,
+    extractionTriggered: false,
+    requestedFloor: targetFloor,
+    effectiveFromFloor,
+    recoveryPath,
+    affectedBatchCount,
+    error: "",
+  };
+}
+
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   if (!currentGraph || isRecoveringHistory) {
     return !isRecoveringHistory;
@@ -4002,18 +4122,45 @@ async function onManualExtract() {
 async function onReroll({ fromFloor } = {}) {
   if (isExtracting) {
     toastr.info("记忆提取正在进行中，请稍候");
-    return;
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "busy",
+      affectedBatchCount: 0,
+      error: "记忆提取正在进行中",
+    };
   }
   if (!currentGraph) {
     toastr.info("图谱为空，无需重 Roll");
-    return;
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "empty-graph",
+      affectedBatchCount: 0,
+      error: "图谱为空",
+    };
   }
 
   const context = getContext();
   const chat = context.chat;
   if (!Array.isArray(chat) || chat.length === 0) {
     toastr.info("当前聊天为空");
-    return;
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "empty-chat",
+      affectedBatchCount: 0,
+      error: "当前聊天为空",
+    };
   }
 
   // 确定回滚起点
@@ -4023,7 +4170,16 @@ async function onReroll({ fromFloor } = {}) {
     const assistantTurns = getAssistantTurns(chat);
     if (assistantTurns.length === 0) {
       toastr.info("聊天中没有 AI 回复");
-      return;
+      return {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: null,
+        effectiveFromFloor: null,
+        recoveryPath: "no-assistant-turn",
+        affectedBatchCount: 0,
+        error: "聊天中没有 AI 回复",
+      };
     }
     targetFloor = assistantTurns[assistantTurns.length - 1];
   }
@@ -4037,42 +4193,40 @@ async function onReroll({ fromFloor } = {}) {
       timeOut: 2000,
     });
     await onManualExtract();
-    return;
+    return {
+      success: true,
+      rollbackPerformed: false,
+      extractionTriggered: true,
+      requestedFloor: targetFloor,
+      effectiveFromFloor: lastProcessed + 1,
+      recoveryPath: "direct-extract",
+      affectedBatchCount: 0,
+      extractionStatus: lastExtractionStatus?.level || "idle",
+      error: "",
+    };
   }
 
   console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
-
-  // 1. 找到受影响的 journal 并回滚
-  const recovery = findJournalRecoveryPoint(currentGraph, targetFloor);
-  if (recovery && recovery.affectedJournals?.length > 0) {
-    rollbackAffectedJournals(currentGraph, recovery.affectedJournals);
-    console.log(`[ST-BME] 已回滚 ${recovery.affectedJournals.length} 个 batch`);
+  const rollbackResult = await rollbackGraphForReroll(targetFloor, context);
+  if (!rollbackResult.success) {
+    toastr.error(rollbackResult.error, "ST-BME 重 Roll");
+    return rollbackResult;
   }
 
-  // 2. 重置提取指针
-  const newFloor = targetFloor - 1;
-  currentGraph.historyState.lastProcessedAssistantFloor = newFloor;
-  currentGraph.lastProcessedSeq = newFloor;
+  const rerollDesc =
+    rollbackResult.effectiveFromFloor !== targetFloor
+      ? `已按批次边界回滚到楼层 ${rollbackResult.effectiveFromFloor} 开始重新提取…`
+      : `已回滚到楼层 ${targetFloor} 开始重新提取…`;
+  toastr.info(rerollDesc, "ST-BME 重 Roll", {
+    timeOut: 2500,
+  });
 
-  // 3. 清理 processedMessageHashes 中 >= targetFloor 的条目
-  const hashes = currentGraph.historyState.processedMessageHashes || {};
-  for (const key of Object.keys(hashes)) {
-    if (Number(key) >= targetFloor) {
-      delete hashes[key];
-    }
-  }
-
-  // 4. 保存回滚后的状态
-  saveGraph();
-
-  toastr.info(
-    `已回滚到楼层 ${targetFloor} 之前，开始重新提取…`,
-    "ST-BME 重 Roll",
-    { timeOut: 2000 },
-  );
-
-  // 5. 触发重新提取（复用手动提取逻辑）
   await onManualExtract();
+  return {
+    ...rollbackResult,
+    extractionTriggered: true,
+    extractionStatus: lastExtractionStatus?.level || "idle",
+  };
 }
 
 async function onManualSleep() {

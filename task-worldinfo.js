@@ -5,6 +5,7 @@
 import {
   createTaskEjsRenderContext,
   evalTaskEjsTemplate,
+  inspectTaskEjsRuntimeBackend,
   substituteTaskEjsParams,
 } from "./task-ejs.js";
 
@@ -36,6 +37,7 @@ const DEPTH_MAPPING = {
 
 const DEFAULT_DEPTH = 4;
 const DEFAULT_CONTROLLER_ENTRY_PREFIX = "EW/Controller/";
+const WORLDINFO_CACHE_TTL_MS = 3000;
 const KNOWN_DECORATORS = [
   "@@activate",
   "@@dont_activate",
@@ -63,6 +65,14 @@ const SPECIAL_NAME_MARKERS = [
   "[InitialVariables]",
 ];
 
+let worldbookEntriesCache = {
+  key: "",
+  createdAt: 0,
+  expiresAt: 0,
+  entries: [],
+  debug: null,
+};
+
 function getStContext() {
   try {
     return globalThis.SillyTavern?.getContext?.() || {};
@@ -85,7 +95,9 @@ async function getWorldbookHost() {
 
   try {
     const { getHostAdapter } = await import("./host-adapter/index.js");
-    const worldbookHost = getHostAdapter?.()?.worldbook || null;
+    const adapter = getHostAdapter?.() || null;
+    const adapterSnapshot = adapter?.getSnapshot?.() || null;
+    const worldbookHost = adapter?.worldbook || null;
     if (typeof worldbookHost?.getWorldbook === "function") {
       const capabilitySupport = worldbookHost.readCapabilitySupport?.() || {};
       const bridgeGetLorebookEntries =
@@ -132,6 +144,7 @@ async function getWorldbookHost() {
           supplementedCapabilities: Object.freeze(supplementedCapabilities),
           missingCapabilities: Object.freeze(missingCapabilities),
         }),
+        snapshotRevision: Number(adapterSnapshot?.snapshotRevision || 0),
       };
     }
   } catch (error) {
@@ -160,6 +173,7 @@ async function getWorldbookHost() {
       supplementedCapabilities: Object.freeze([]),
       missingCapabilities: Object.freeze(missingCapabilities),
     }),
+    snapshotRevision: 0,
   };
 }
 
@@ -444,7 +458,21 @@ function selectActivatedEntries(
   templateContext = {},
 ) {
   const activationSeedBase = simpleHash(String(trigger || ""));
-  const activated = new Set();
+  const activated = new Map();
+
+  const addActivated = (entry, activationDebug = {}) => {
+    const key = `${entry.worldbook}:${entry.uid}:${entry.name}`;
+    activated.set(key, {
+      ...entry,
+      activationDebug: {
+        mode: activationDebug.mode || "",
+        matchedPrimaryKey: activationDebug.matchedPrimaryKey || "",
+        matchedSecondaryKeys: Array.isArray(activationDebug.matchedSecondaryKeys)
+          ? activationDebug.matchedSecondaryKeys
+          : [],
+      },
+    });
+  };
 
   for (const entry of entries) {
     if (!entry.enabled) continue;
@@ -457,12 +485,12 @@ function selectActivatedEntries(
     }
 
     if (entry.constant) {
-      activated.add(entry);
+      addActivated(entry, { mode: "constant" });
       continue;
     }
 
     if (entry.decorators.includes("@@activate")) {
-      activated.add(entry);
+      addActivated(entry, { mode: "forced" });
       continue;
     }
     if (entry.decorators.includes("@@dont_activate")) continue;
@@ -496,12 +524,16 @@ function selectActivatedEntries(
 
     const hasSecondaryKeys = entry.selective && entry.keysSecondary.length > 0;
     if (!hasSecondaryKeys) {
-      activated.add(entry);
+      addActivated(entry, {
+        mode: "selective",
+        matchedPrimaryKey: matchedPrimary,
+      });
       continue;
     }
 
     let hasAnyMatch = false;
     let hasAllMatch = true;
+    const matchedSecondaryKeys = [];
 
     for (const secondaryKey of entry.keysSecondary) {
       const substituted = substituteTaskEjsParams(
@@ -513,25 +545,42 @@ function selectActivatedEntries(
         matchKeys(trigger, substituted.trim(), entry);
       if (hasMatch) hasAnyMatch = true;
       if (!hasMatch) hasAllMatch = false;
+      if (hasMatch) matchedSecondaryKeys.push(substituted.trim());
 
       if (entry.selectiveLogic === WI_LOGIC.AND_ANY && hasMatch) {
-        activated.add(entry);
+        addActivated(entry, {
+          mode: "selective",
+          matchedPrimaryKey: matchedPrimary,
+          matchedSecondaryKeys,
+        });
         break;
       }
 
       if (entry.selectiveLogic === WI_LOGIC.NOT_ALL && !hasMatch) {
-        activated.add(entry);
+        addActivated(entry, {
+          mode: "selective",
+          matchedPrimaryKey: matchedPrimary,
+          matchedSecondaryKeys,
+        });
         break;
       }
     }
 
     if (entry.selectiveLogic === WI_LOGIC.NOT_ANY && !hasAnyMatch) {
-      activated.add(entry);
+      addActivated(entry, {
+        mode: "selective",
+        matchedPrimaryKey: matchedPrimary,
+        matchedSecondaryKeys,
+      });
       continue;
     }
 
     if (entry.selectiveLogic === WI_LOGIC.AND_ALL && hasAllMatch) {
-      activated.add(entry);
+      addActivated(entry, {
+        mode: "selective",
+        matchedPrimaryKey: matchedPrimary,
+        matchedSecondaryKeys,
+      });
     }
   }
 
@@ -539,7 +588,7 @@ function selectActivatedEntries(
     return [];
   }
 
-  const grouped = groupBy([...activated], (entry) => entry.group || "");
+  const grouped = groupBy([...activated.values()], (entry) => entry.group || "");
   const ungrouped = grouped[""] || [];
   if (ungrouped.length > 0 && Object.keys(grouped).length <= 1) {
     return ungrouped.sort(sortEntries);
@@ -608,9 +657,30 @@ async function collectAllWorldbookEntries() {
     sourceLabel,
     fallback,
     capabilityStatus,
+    snapshotRevision,
   } = await getWorldbookHost();
+  const ctx = getStContext();
+  const debug = {
+    sourceLabel,
+    fallback,
+    capabilityStatus,
+    snapshotRevision: Number(snapshotRevision || 0),
+    requestedWorldbooks: [],
+    loadedWorldbooks: [],
+    worldbookCount: 0,
+    cache: {
+      hit: false,
+      key: "",
+      ageMs: 0,
+      ttlMs: WORLDINFO_CACHE_TTL_MS,
+    },
+    loadMs: 0,
+  };
   if (!getWorldbook) {
-    return [];
+    return {
+      entries: [],
+      debug,
+    };
   }
 
   const sourceTag = `${sourceLabel}${fallback ? ", fallback" : ""}`;
@@ -628,8 +698,78 @@ async function collectAllWorldbookEntries() {
     );
   }
 
+  const charWorldbooks = {
+    primary: "",
+    additional: [],
+  };
+  if (getCharWorldbookNames) {
+    try {
+      const resolved = getCharWorldbookNames("current") || {};
+      charWorldbooks.primary = normalizeKey(resolved.primary);
+      charWorldbooks.additional = Array.isArray(resolved.additional)
+        ? resolved.additional.map((name) => normalizeKey(name)).filter(Boolean)
+        : [];
+    } catch (error) {
+      console.debug(
+        `[ST-BME] task-worldinfo 读取角色世界书失败 [${sourceTag}]`,
+        error,
+      );
+    }
+  }
+
+  const personaLorebook =
+    ctx.extensionSettings?.persona_description_lorebook ||
+    ctx.powerUserSettings?.persona_description_lorebook ||
+    ctx.power_user?.persona_description_lorebook ||
+    "";
+  const chatLorebook = ctx.chatMetadata?.world || "";
+
+  const requestedWorldbooks = uniq(
+    [
+      charWorldbooks.primary,
+      ...(charWorldbooks.additional || []),
+      personaLorebook,
+      chatLorebook,
+    ]
+      .map((name) => normalizeKey(name))
+      .filter(Boolean),
+  );
+  debug.requestedWorldbooks = requestedWorldbooks;
+
+  const cacheKey = JSON.stringify({
+    chatId: ctx.chatId || globalThis.getCurrentChatId?.() || "",
+    characterId: ctx.characterId ?? "",
+    requestedWorldbooks,
+    sourceLabel,
+    fallback,
+    snapshotRevision: Number(snapshotRevision || 0),
+  });
+  debug.cache.key = cacheKey;
+
+  if (
+    worldbookEntriesCache.key === cacheKey &&
+    worldbookEntriesCache.expiresAt > Date.now()
+  ) {
+    return {
+      entries: worldbookEntriesCache.entries,
+      debug: {
+        ...debug,
+        loadedWorldbooks:
+          worldbookEntriesCache.debug?.loadedWorldbooks || requestedWorldbooks,
+        worldbookCount: worldbookEntriesCache.entries.length,
+        loadMs: worldbookEntriesCache.debug?.loadMs || 0,
+        cache: {
+          ...debug.cache,
+          hit: true,
+          ageMs: Math.max(0, Date.now() - worldbookEntriesCache.createdAt),
+        },
+      },
+    };
+  }
+
   const allEntries = [];
   const loadedNames = new Set();
+  const startedAt = Date.now();
 
   async function loadWorldbookOnce(worldbookName) {
     const normalizedName = normalizeKey(worldbookName);
@@ -675,39 +815,27 @@ async function collectAllWorldbookEntries() {
     }
   }
 
-  if (getCharWorldbookNames) {
-    try {
-      const charWorldbooks = getCharWorldbookNames("current") || {};
-      if (charWorldbooks.primary) {
-        await loadWorldbookOnce(charWorldbooks.primary);
-      }
-      for (const additional of charWorldbooks.additional || []) {
-        await loadWorldbookOnce(additional);
-      }
-    } catch (error) {
-      console.debug(
-        `[ST-BME] task-worldinfo 读取角色世界书失败 [${sourceTag}]`,
-        error,
-      );
-    }
+  for (const worldbookName of requestedWorldbooks) {
+    await loadWorldbookOnce(worldbookName);
   }
 
-  const ctx = getStContext();
-  const personaLorebook =
-    ctx.extensionSettings?.persona_description_lorebook ||
-    ctx.powerUserSettings?.persona_description_lorebook ||
-    ctx.power_user?.persona_description_lorebook ||
-    "";
-  if (personaLorebook) {
-    await loadWorldbookOnce(personaLorebook);
-  }
+  debug.loadedWorldbooks = [...loadedNames];
+  debug.worldbookCount = allEntries.length;
+  debug.loadMs = Date.now() - startedAt;
+  worldbookEntriesCache = {
+    key: cacheKey,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + WORLDINFO_CACHE_TTL_MS,
+    entries: allEntries,
+    debug: {
+      ...debug,
+    },
+  };
 
-  const chatLorebook = ctx.chatMetadata?.world || "";
-  if (chatLorebook) {
-    await loadWorldbookOnce(chatLorebook);
-  }
-
-  return allEntries;
+  return {
+    entries: allEntries,
+    debug,
+  };
 }
 
 function classifyPosition(entry) {
@@ -742,6 +870,13 @@ function normalizeResolvedEntry(entry = {}, fallbackIndex = 0) {
     depth: Number(entry.depth ?? 0),
     order: Number(entry.order ?? 100),
     index: fallbackIndex,
+    activationDebug:
+      entry.activationDebug && typeof entry.activationDebug === "object"
+        ? {
+            ...entry.activationDebug,
+          }
+        : null,
+    controllerSource: String(entry.controllerSource || ""),
   };
 }
 
@@ -836,11 +971,53 @@ export async function resolveTaskWorldInfo({
     additionalMessages: [],
     activatedEntryNames: [],
     allEntries: [],
+    debug: {
+      sourceLabel: "",
+      fallback: false,
+      capabilityStatus: null,
+      snapshotRevision: 0,
+      requestedWorldbooks: [],
+      loadedWorldbooks: [],
+      worldbookCount: 0,
+      triggerLength: 0,
+      activatedEntryCount: 0,
+      constantActivatedCount: 0,
+      selectiveActivatedCount: 0,
+      controllerActivatedCount: 0,
+      controllerPulledCount: 0,
+      cache: {
+        hit: false,
+        key: "",
+        ageMs: 0,
+        ttlMs: WORLDINFO_CACHE_TTL_MS,
+      },
+      loadMs: 0,
+      ejsRuntimeStatus: "",
+      ejsRuntimeFallback: false,
+      ejsLastError: "",
+      warnings: [],
+      resolvedEntries: [],
+    },
   };
 
   try {
-    const allEntries = await collectAllWorldbookEntries();
+    const collected = await collectAllWorldbookEntries();
+    const allEntries = Array.isArray(collected?.entries) ? collected.entries : [];
     result.allEntries = allEntries;
+    result.debug = {
+      ...result.debug,
+      ...(collected?.debug || {}),
+      cache: {
+        ...result.debug.cache,
+        ...(collected?.debug?.cache || {}),
+      },
+      warnings: Array.isArray(result.debug.warnings)
+        ? result.debug.warnings
+        : [],
+      resolvedEntries: Array.isArray(result.debug.resolvedEntries)
+        ? result.debug.resolvedEntries
+        : [],
+    };
     if (allEntries.length === 0) {
       return result;
     }
@@ -851,14 +1028,34 @@ export async function resolveTaskWorldInfo({
       templateContext,
     });
     const trigger = triggerTexts.join("\n\n");
-    if (!trigger.trim()) {
-      return result;
-    }
+    result.debug.triggerLength = trigger.length;
+    const ejsBackend = await inspectTaskEjsRuntimeBackend();
+    result.debug.ejsRuntimeStatus = ejsBackend.status || "";
+    result.debug.ejsRuntimeFallback = Boolean(ejsBackend.isFallback);
+    result.debug.ejsLastError = ejsBackend.error
+      ? ejsBackend.error instanceof Error
+        ? ejsBackend.error.message
+        : String(ejsBackend.error)
+      : "";
 
     const activated = selectActivatedEntries(allEntries, trigger, {
       ...templateContext,
       user_input: userMessage || templateContext?.user_input || "",
     });
+    result.debug.activatedEntryCount = activated.length;
+    result.debug.constantActivatedCount = activated.filter(
+      (entry) => entry.activationDebug?.mode === "constant",
+    ).length;
+    result.debug.selectiveActivatedCount = activated.filter(
+      (entry) => entry.activationDebug?.mode === "selective",
+    ).length;
+    result.debug.controllerActivatedCount = activated.filter((entry) =>
+      entry.name.startsWith(String(
+        settings.worldInfoControllerEntryPrefix ||
+          settings.controller_entry_prefix ||
+          DEFAULT_CONTROLLER_ENTRY_PREFIX,
+      )),
+    ).length;
     if (activated.length === 0) {
       return result;
     }
@@ -892,6 +1089,7 @@ export async function resolveTaskWorldInfo({
       renderCtx.pulledEntries.clear();
 
       const sourceContent = entry.cleanContent || entry.content;
+      const isControllerEntry = entry.name.startsWith(String(controllerPrefix || ""));
       let renderedContent = sourceContent;
       try {
         renderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
@@ -902,13 +1100,26 @@ export async function resolveTaskWorldInfo({
           },
         });
       } catch (error) {
+        result.debug.warnings.push(
+          error?.code === "st_bme_task_ejs_runtime_unavailable"
+            ? `世界书条目 ${entry.name} 依赖 EJS runtime，当前已跳过`
+            : `世界书条目 ${entry.name} 渲染失败，已跳过`,
+        );
         console.warn(
           `[ST-BME] task-worldinfo 渲染世界书条目失败: ${entry.name}`,
           error,
         );
+        if (
+          error?.code === "st_bme_task_ejs_runtime_unavailable" &&
+          !result.debug.ejsLastError
+        ) {
+          result.debug.ejsLastError =
+            error instanceof Error ? error.message : String(error);
+        }
+        renderedContent = "";
       }
 
-      if (!String(renderedContent || "").trim()) {
+      if (!isControllerEntry && !String(renderedContent || "").trim()) {
         continue;
       }
 
@@ -920,23 +1131,7 @@ export async function resolveTaskWorldInfo({
             ? afterEntries
             : atDepthEntries;
 
-      if (entry.name.startsWith(String(controllerPrefix || ""))) {
-        bucket.push(
-          normalizeResolvedEntry(
-            {
-              name: entry.name,
-              sourceName: entry.name,
-              worldbook: entry.worldbook,
-              content: sourceContent,
-              role: entry.role,
-              position: entry.position,
-              depth: entry.depth,
-              order: entry.order,
-            },
-            resolvedIndex++,
-          ),
-        );
-
+      if (isControllerEntry) {
         for (const pulledEntry of renderCtx.pulledEntries.values()) {
           if (!String(pulledEntry.content || "").trim()) continue;
           if (
@@ -956,10 +1151,16 @@ export async function resolveTaskWorldInfo({
                 position: entry.position,
                 depth: entry.depth,
                 order: entry.order,
+                activationDebug: {
+                  ...(entry.activationDebug || {}),
+                  mode: "controller-pulled",
+                },
+                controllerSource: entry.name,
               },
               resolvedIndex++,
             ),
           );
+          result.debug.controllerPulledCount += 1;
         }
         continue;
       }
@@ -975,6 +1176,7 @@ export async function resolveTaskWorldInfo({
             position: entry.position,
             depth: entry.depth,
             order: entry.order,
+            activationDebug: entry.activationDebug,
           },
           resolvedIndex++,
         ),
@@ -987,6 +1189,35 @@ export async function resolveTaskWorldInfo({
     result.beforeText = buildWorldInfoText(result.beforeEntries);
     result.afterText = buildWorldInfoText(result.afterEntries);
     result.additionalMessages = buildAdditionalMessages(result.atDepthEntries);
+    result.debug.resolvedEntries = [
+      ...result.beforeEntries.map((entry) => ({
+        name: entry.name,
+        bucket: "before",
+        sourceName: entry.sourceName,
+        activationMode: entry.activationDebug?.mode || "",
+        matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
+        matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
+        controllerSource: entry.controllerSource || "",
+      })),
+      ...result.afterEntries.map((entry) => ({
+        name: entry.name,
+        bucket: "after",
+        sourceName: entry.sourceName,
+        activationMode: entry.activationDebug?.mode || "",
+        matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
+        matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
+        controllerSource: entry.controllerSource || "",
+      })),
+      ...result.atDepthEntries.map((entry) => ({
+        name: entry.name,
+        bucket: "atDepth",
+        sourceName: entry.sourceName,
+        activationMode: entry.activationDebug?.mode || "",
+        matchedPrimaryKey: entry.activationDebug?.matchedPrimaryKey || "",
+        matchedSecondaryKeys: entry.activationDebug?.matchedSecondaryKeys || [],
+        controllerSource: entry.controllerSource || "",
+      })),
+    ];
     result.activatedEntryNames = uniq(
       [
         ...result.beforeEntries.map((entry) => entry.name),

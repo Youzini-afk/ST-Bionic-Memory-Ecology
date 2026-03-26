@@ -11,7 +11,7 @@ import {
   getNodeEdges,
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskPrompt } from "./prompt-builder.js";
+import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
@@ -20,6 +20,12 @@ function createAbortError(message = "操作已终止") {
   const error = new Error(message);
   error.name = "AbortError";
   return error;
+}
+
+function createTaskLlmDebugContext(promptBuild, regexInput) {
+  return typeof buildTaskExecutionDebugContext === "function"
+    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
+    : null;
 }
 
 function isAbortError(error) {
@@ -428,6 +434,7 @@ async function llmRecall(
     graphStats: `candidate_count=${candidates.length}`,
     ...getSTContextForPrompt(),
   });
+  const recallRegexInput = { entries: [] };
   const systemPrompt = applyTaskRegex(
     settings,
     "recall",
@@ -440,6 +447,8 @@ async function llmRecall(
       "输出严格的 JSON 格式：",
       '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
     ].join("\n"),
+    recallRegexInput,
+    "system",
   );
 
   const userPrompt = [
@@ -461,6 +470,10 @@ async function llmRecall(
     maxRetries: 1,
     signal,
     taskType: "recall",
+    debugContext: createTaskLlmDebugContext(
+      recallPromptBuild,
+      recallRegexInput,
+    ),
     additionalMessages:
       recallPromptBuild.privateTaskMessages || [
         ...(recallPromptBuild.customMessages || []),

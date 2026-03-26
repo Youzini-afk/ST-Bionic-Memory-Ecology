@@ -5,7 +5,7 @@
 import { embedBatch, searchSimilar } from "./embedding.js";
 import { addEdge, createEdge, getActiveNodes, getNode } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
-import { buildTaskPrompt } from "./prompt-builder.js";
+import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { applyTaskRegex } from "./task-regex.js";
 import {
@@ -19,6 +19,12 @@ function createAbortError(message = "操作已终止") {
   const error = new Error(message);
   error.name = "AbortError";
   return error;
+}
+
+function createTaskLlmDebugContext(promptBuild, regexInput) {
+  return typeof buildTaskExecutionDebugContext === "function"
+    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
+    : null;
 }
 
 function isAbortError(error) {
@@ -301,20 +307,28 @@ export async function consolidateMemories({
     graphStats: `new_entries=${newEntries.length}, threshold=${conflictThreshold}`,
     ...getSTContextForPrompt(),
   });
+  const consolidationRegexInput = { entries: [] };
+  const consolidationSystemPrompt = applyTaskRegex(
+    settings,
+    "consolidation",
+    "finalPrompt",
+    consolidationPromptBuild.systemPrompt ||
+      customPrompt ||
+      CONSOLIDATION_SYSTEM_PROMPT,
+    consolidationRegexInput,
+    "system",
+  );
   try {
     decision = await callLLMForJSON({
-      systemPrompt: applyTaskRegex(
-        settings,
-        "consolidation",
-        "finalPrompt",
-        consolidationPromptBuild.systemPrompt ||
-          customPrompt ||
-          CONSOLIDATION_SYSTEM_PROMPT,
-      ),
+      systemPrompt: consolidationSystemPrompt,
       userPrompt,
       maxRetries: 1,
       signal,
       taskType: "consolidation",
+      debugContext: createTaskLlmDebugContext(
+        consolidationPromptBuild,
+        consolidationRegexInput,
+      ),
       additionalMessages:
         consolidationPromptBuild.privateTaskMessages || [
           ...(consolidationPromptBuild.customMessages || []),

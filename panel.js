@@ -444,23 +444,41 @@ function _renderRecentList(elementId, items) {
   if (!listEl) return;
 
   if (!items.length) {
-    listEl.innerHTML =
-      '<li class="bme-recent-item"><div class="bme-recent-text" style="color:var(--bme-on-surface-dim)">暂无数据</div></li>';
+    const li = document.createElement("li");
+    li.className = "bme-recent-item";
+    const text = document.createElement("div");
+    text.className = "bme-recent-text";
+    text.style.color = "var(--bme-on-surface-dim)";
+    text.textContent = "暂无数据";
+    li.appendChild(text);
+    listEl.replaceChildren(li);
     return;
   }
 
-  listEl.innerHTML = items
-    .map((item) => {
-      const secondary = item.meta || item.time || "";
-      return `<li class="bme-recent-item">
-                <span class="bme-type-badge ${item.type}">${_typeLabel(item.type)}</span>
-                <div>
-                    <div class="bme-recent-text">${_escHtml(item.name || "—")}</div>
-                    <div class="bme-recent-meta">${_escHtml(secondary)}</div>
-                </div>
-            </li>`;
-    })
-    .join("");
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    const secondary = item.meta || item.time || "";
+    const li = document.createElement("li");
+    li.className = "bme-recent-item";
+
+    const badge = document.createElement("span");
+    badge.className = `bme-type-badge ${_safeCssToken(item.type)}`;
+    badge.textContent = _typeLabel(item.type);
+    li.appendChild(badge);
+
+    const content = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "bme-recent-text";
+    title.textContent = item.name || "—";
+    const meta = document.createElement("div");
+    meta.className = "bme-recent-meta";
+    meta.textContent = secondary;
+    content.append(title, meta);
+    li.appendChild(content);
+
+    fragment.appendChild(li);
+  });
+  listEl.replaceChildren(fragment);
 }
 
 // ==================== 记忆浏览器 ====================
@@ -497,25 +515,43 @@ function _refreshMemoryBrowser() {
     return (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0);
   });
 
-  listEl.innerHTML = nodes
-    .slice(0, 100)
-    .map((node) => {
-      const name = getNodeDisplayName(node);
-      const snippet = _getNodeSnippet(node);
-      return `<li class="bme-memory-item" data-node-id="${node.id}">
-                <span class="bme-type-badge ${node.type}">${_typeLabel(node.type)}</span>
-                <div>
-                    <div class="bme-memory-name">${_escHtml(name)}</div>
-                    <div class="bme-memory-content">${_escHtml(snippet)}</div>
-                    <div class="bme-memory-meta">
-                        <span>imp: ${node.importance || 5}</span>
-                        <span>acc: ${node.accessCount || 0}</span>
-                        <span>seq: ${node.seqRange?.[1] ?? node.seq ?? 0}</span>
-                    </div>
-                </div>
-            </li>`;
-    })
-    .join("");
+  const fragment = document.createDocumentFragment();
+  nodes.slice(0, 100).forEach((node) => {
+    const name = getNodeDisplayName(node);
+    const snippet = _getNodeSnippet(node);
+    const li = document.createElement("li");
+    li.className = "bme-memory-item";
+    li.dataset.nodeId = String(node.id || "");
+
+    const badge = document.createElement("span");
+    badge.className = `bme-type-badge ${_safeCssToken(node.type)}`;
+    badge.textContent = _typeLabel(node.type);
+    li.appendChild(badge);
+
+    const content = document.createElement("div");
+    const title = document.createElement("div");
+    title.className = "bme-memory-name";
+    title.textContent = name;
+    const body = document.createElement("div");
+    body.className = "bme-memory-content";
+    body.textContent = snippet;
+    const meta = document.createElement("div");
+    meta.className = "bme-memory-meta";
+    ["imp", "acc", "seq"].forEach((key, index) => {
+      const span = document.createElement("span");
+      span.textContent =
+        index === 0
+          ? `imp: ${node.importance || 5}`
+          : index === 1
+            ? `acc: ${node.accessCount || 0}`
+            : `seq: ${node.seqRange?.[1] ?? node.seq ?? 0}`;
+      meta.appendChild(span);
+    });
+    content.append(title, body, meta);
+    li.appendChild(content);
+    fragment.appendChild(li);
+  });
+  listEl.replaceChildren(fragment);
 
   listEl.querySelectorAll(".bme-memory-item").forEach((el) => {
     el.addEventListener("click", () => {
@@ -547,8 +583,11 @@ async function _refreshInjectionPreview() {
 
   const injection = String(_getLastInjection?.() || "").trim();
   if (!injection) {
-    container.innerHTML =
-      '<div class="bme-injection-preview" style="color:var(--bme-on-surface-dim)">暂无注入内容。先完成一次召回或正常生成后再查看。</div>';
+    const empty = document.createElement("div");
+    empty.className = "bme-injection-preview";
+    empty.style.color = "var(--bme-on-surface-dim)";
+    empty.textContent = "暂无注入内容。先完成一次召回或正常生成后再查看。";
+    container.replaceChildren(empty);
     if (tokenEl) tokenEl.textContent = "";
     return;
   }
@@ -556,10 +595,17 @@ async function _refreshInjectionPreview() {
   try {
     const { estimateTokens } = await import("./injector.js");
     const totalTokens = estimateTokens(injection);
-    container.innerHTML = `<div class="bme-injection-preview">${_escHtml(injection)}</div>`;
+    const preview = document.createElement("div");
+    preview.className = "bme-injection-preview";
+    preview.textContent = injection;
+    container.replaceChildren(preview);
     if (tokenEl) tokenEl.textContent = `≈ ${totalTokens} tokens`;
   } catch (error) {
-    container.innerHTML = `<div class="bme-injection-preview" style="color:var(--bme-accent3)">预览生成失败: ${_escHtml(error.message)}</div>`;
+    const failure = document.createElement("div");
+    failure.className = "bme-injection-preview";
+    failure.style.color = "var(--bme-accent3)";
+    failure.textContent = `预览生成失败: ${error.message}`;
+    container.replaceChildren(failure);
     if (tokenEl) tokenEl.textContent = "";
   }
 }
@@ -589,14 +635,18 @@ function _buildLegend() {
     { key: "reflection", label: "反思" },
   ];
 
-  legendEl.innerHTML = types
-    .map(
-      (type) => `<span class="bme-legend-item">
-            <span class="bme-legend-dot" style="background:${colors[type.key]}"></span>
-            ${type.label}
-        </span>`,
-    )
-    .join("");
+  const fragment = document.createDocumentFragment();
+  types.forEach((type) => {
+    const item = document.createElement("span");
+    item.className = "bme-legend-item";
+    const dot = document.createElement("span");
+    dot.className = "bme-legend-dot";
+    dot.style.background = colors[type.key] || "";
+    item.appendChild(dot);
+    item.append(document.createTextNode(type.label));
+    fragment.appendChild(item);
+  });
+  legendEl.replaceChildren(fragment);
 }
 
 function _bindGraphControls() {
@@ -648,14 +698,19 @@ function _showNodeDetail(node) {
     });
   }
 
-  bodyEl.innerHTML = items
-    .map(
-      (item) => `<div class="bme-node-detail-field">
-            <label>${_escHtml(item.label)}</label>
-            <div class="value">${_escHtml(String(item.value ?? "—"))}</div>
-        </div>`,
-    )
-    .join("");
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "bme-node-detail-field";
+    const label = document.createElement("label");
+    label.textContent = item.label;
+    const value = document.createElement("div");
+    value.className = "value";
+    value.textContent = String(item.value ?? "—");
+    row.append(label, value);
+    fragment.appendChild(row);
+  });
+  bodyEl.replaceChildren(fragment);
 
   detailEl.classList.add("open");
 }
@@ -1856,7 +1911,7 @@ function _renderTaskProfileWorkspace(state) {
                 <button
                   class="bme-task-type-btn ${item.id === state.taskType ? "active" : ""}"
                   data-task-action="switch-task-type"
-                  data-task-type="${_escHtml(item.id)}"
+                  data-task-type="${_escAttr(item.id)}"
                   type="button"
                 >
                   <span>${_escHtml(item.label)}</span>
@@ -1892,7 +1947,7 @@ function _renderTaskProfileWorkspace(state) {
                   .map(
                     (profile) => `
                       <option
-                        value="${_escHtml(profile.id)}"
+                        value="${_escAttr(profile.id)}"
                         ${profile.id === state.profile.id ? "selected" : ""}
                       >
                         ${_escHtml(profile.name)}${profile.builtin ? " · 内置" : ""}
@@ -1908,7 +1963,7 @@ function _renderTaskProfileWorkspace(state) {
                 id="bme-task-profile-name"
                 class="bme-config-input"
                 type="text"
-                value="${_escHtml(state.profile.name || "")}"
+                value="${_escAttr(state.profile.name || "")}"
                 placeholder="输入预设名称"
               />
             </div>
@@ -1933,7 +1988,7 @@ function _renderTaskProfileWorkspace(state) {
             <button
               class="bme-task-subtab-btn ${tab.id === state.taskTabId ? "active" : ""}"
               data-task-action="switch-task-tab"
-              data-task-tab="${_escHtml(tab.id)}"
+              data-task-tab="${_escAttr(tab.id)}"
               type="button"
             >
               ${_escHtml(tab.label)}
@@ -1980,7 +2035,7 @@ function _renderTaskPromptTab(state) {
               ${state.builtinBlockDefinitions
                 .map(
                   (item) => `
-                    <option value="${_escHtml(item.sourceKey)}">
+                    <option value="${_escAttr(item.sourceKey)}">
                       ${_escHtml(item.name)}
                     </option>
                   `,
@@ -2122,7 +2177,7 @@ function _renderTaskRegexTab(state) {
                 </span>
                 <input
                   type="checkbox"
-                  data-regex-stage="${_escHtml(stage.key)}"
+                  data-regex-stage="${_escAttr(stage.key)}"
                   ${(regex.stages?.[stage.key] ?? true) ? "checked" : ""}
                 />
               </label>
@@ -2292,19 +2347,33 @@ function _renderTaskDebugPromptCard(taskType, promptBuild) {
         <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.renderedBlockCount ?? promptBuild.renderedBlocks?.length ?? 0))}</span>
       </div>
       <div class="bme-debug-kv-item">
-        <span class="bme-debug-kv-key">宿主注入</span>
+        <span class="bme-debug-kv-key">注入计划</span>
         <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.hostInjectionPlanCount ?? promptBuild.debug?.hostInjectionCount ?? 0))}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">私有消息</span>
         <span class="bme-debug-kv-value">${_escHtml(String(promptBuild.debug?.privateTaskMessageCount ?? promptBuild.privateTaskMessages?.length ?? 0))}</span>
       </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">EJS 状态</span>
+        <span class="bme-debug-kv-value">${_escHtml(promptBuild.debug?.ejsRuntimeStatus || "unknown")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">世界书</span>
+        <span class="bme-debug-kv-value">${_escHtml(promptBuild.debug?.effectivePath?.worldInfo || "unknown")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">世界书缓存</span>
+        <span class="bme-debug-kv-value">${_escHtml(promptBuild.debug?.worldInfoCacheHit ? "命中" : "未命中")}</span>
+      </div>
     </div>
+    ${_renderDebugDetails("实际投递路径", promptBuild.debug?.effectivePath || null)}
     ${_renderDebugDetails("渲染后的块", promptBuild.renderedBlocks)}
-    ${_renderDebugDetails("宿主注入计划", promptBuild.hostInjectionPlan || null)}
-    ${_renderDebugDetails("宿主注入描述", promptBuild.hostInjections)}
+    ${_renderDebugDetails("注入计划（推导）", promptBuild.hostInjectionPlan || null)}
+    ${_renderDebugDetails("世界书注入内容（当前实际仍走私有 prompt）", promptBuild.hostInjections)}
     ${_renderDebugDetails("私有任务消息", promptBuild.privateTaskMessages)}
     ${_renderDebugDetails("系统提示词", promptBuild.systemPrompt || "")}
+    ${_renderDebugDetails("世界书调试", promptBuild.worldInfo?.debug || promptBuild.worldInfoResolution?.debug || null)}
   `;
 }
 
@@ -2343,7 +2412,22 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
         <span class="bme-debug-kv-key">能力过滤模式</span>
         <span class="bme-debug-kv-value">${_escHtml(llmRequest.capabilityMode || "—")}</span>
       </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">调试脱敏</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.redacted ? "已脱敏" : "未标记")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">实际路径</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.effectiveRoute?.llm || llmRequest.route || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">输出清洗</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.responseCleaning?.applied ? "已生效" : "未生效")}</span>
+      </div>
     </div>
+    ${_renderDebugDetails("提示词执行摘要", llmRequest.promptExecution || null)}
+    ${_renderDebugDetails("实际请求路径", llmRequest.effectiveRoute || null)}
+    ${_renderDebugDetails("输出清洗", llmRequest.responseCleaning || null)}
     ${_renderDebugDetails("实际保留参数", llmRequest.filteredGeneration || {})}
     ${_renderDebugDetails("被过滤掉的参数", llmRequest.removedGeneration || [])}
     ${_renderDebugDetails("最终消息列表", llmRequest.messages || [])}
@@ -2437,7 +2521,7 @@ function _renderTaskBlockListItem(block, index, state) {
       <button
         class="bme-task-list-item ${isSelected ? "active" : ""}"
         data-task-action="select-block"
-        data-block-id="${_escHtml(block.id)}"
+        data-block-id="${_escAttr(block.id)}"
         type="button"
       >
         <span class="bme-task-list-index">#${index + 1}</span>
@@ -2454,7 +2538,7 @@ function _renderTaskBlockListItem(block, index, state) {
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="move-block-up"
-          data-block-id="${_escHtml(block.id)}"
+          data-block-id="${_escAttr(block.id)}"
           type="button"
         >
           上移
@@ -2462,7 +2546,7 @@ function _renderTaskBlockListItem(block, index, state) {
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="move-block-down"
-          data-block-id="${_escHtml(block.id)}"
+          data-block-id="${_escAttr(block.id)}"
           type="button"
         >
           下移
@@ -2470,7 +2554,7 @@ function _renderTaskBlockListItem(block, index, state) {
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="toggle-block-enabled"
-          data-block-id="${_escHtml(block.id)}"
+          data-block-id="${_escAttr(block.id)}"
           type="button"
         >
           ${block.enabled ? "停用" : "启用"}
@@ -2478,7 +2562,7 @@ function _renderTaskBlockListItem(block, index, state) {
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="delete-block"
-          data-block-id="${_escHtml(block.id)}"
+          data-block-id="${_escAttr(block.id)}"
           type="button"
         >
           删除
@@ -2501,7 +2585,7 @@ function _renderTaskBlockEditor(state) {
     .map(
       (item) => `
         <option
-          value="${_escHtml(item.sourceKey)}"
+          value="${_escAttr(item.sourceKey)}"
           ${item.sourceKey === block.sourceKey ? "selected" : ""}
         >
           ${_escHtml(item.name)}
@@ -2531,13 +2615,13 @@ function _renderTaskBlockEditor(state) {
 
     <div class="bme-config-row">
       <label>块名称</label>
-      <input
-        class="bme-config-input"
-        type="text"
-        data-block-field="name"
-        value="${_escHtml(block.name || "")}"
-        placeholder="用于工作区显示"
-      />
+        <input
+          class="bme-config-input"
+          type="text"
+          data-block-field="name"
+          value="${_escAttr(block.name || "")}"
+          placeholder="用于工作区显示"
+        />
     </div>
 
     <div class="bme-task-field-grid">
@@ -2624,7 +2708,7 @@ function _renderTaskBlockEditor(state) {
                 <input
                   class="bme-config-input"
                   type="text"
-                  value="${_escHtml(legacyField || block.sourceField || "")}"
+                  value="${_escAttr(legacyField || block.sourceField || "")}"
                   readonly
                 />
               </div>
@@ -2662,7 +2746,7 @@ function _renderGenerationField(field, value) {
         <label>${_escHtml(field.label)}</label>
         <select
           class="bme-config-input"
-          data-generation-key="${_escHtml(field.key)}"
+          data-generation-key="${_escAttr(field.key)}"
           data-value-type="tri_bool"
         >
           ${TASK_PROFILE_BOOLEAN_OPTIONS.map(
@@ -2683,13 +2767,13 @@ function _renderGenerationField(field, value) {
         <label>${_escHtml(field.label)}</label>
         <select
           class="bme-config-input"
-          data-generation-key="${_escHtml(field.key)}"
+          data-generation-key="${_escAttr(field.key)}"
           data-value-type="text"
         >
           ${(field.options || [])
             .map(
               (item) => `
-                <option value="${_escHtml(item.value)}" ${item.value === String(effectiveValue ?? "") ? "selected" : ""}>
+                <option value="${_escAttr(item.value)}" ${item.value === String(effectiveValue ?? "") ? "selected" : ""}>
                   ${_escHtml(item.label)}
                 </option>
               `,
@@ -2714,7 +2798,7 @@ function _renderGenerationField(field, value) {
             max="${field.max ?? 1}"
             step="${field.step ?? 0.01}"
             value="${displayValue}"
-            data-generation-key="${_escHtml(field.key)}"
+            data-generation-key="${_escAttr(field.key)}"
             data-value-type="number"
           />
           <input
@@ -2723,9 +2807,9 @@ function _renderGenerationField(field, value) {
             min="${field.min ?? 0}"
             max="${field.max ?? 1}"
             step="${field.step ?? 0.01}"
-            value="${_escHtml(numValue)}"
+            value="${_escAttr(numValue)}"
             placeholder="默认"
-            data-generation-key="${_escHtml(field.key)}"
+            data-generation-key="${_escAttr(field.key)}"
             data-value-type="number"
           />
         </div>
@@ -2740,9 +2824,9 @@ function _renderGenerationField(field, value) {
         class="bme-config-input"
         type="${field.type === "text" ? "text" : "number"}"
         ${field.step ? `step="${field.step}"` : ""}
-        value="${_escHtml(effectiveValue ?? "")}"
+        value="${_escAttr(effectiveValue ?? "")}"
         placeholder="留空 = 跟随默认"
-        data-generation-key="${_escHtml(field.key)}"
+        data-generation-key="${_escAttr(field.key)}"
         data-value-type="${field.type === "text" ? "text" : "number"}"
       />
     </div>
@@ -2756,7 +2840,7 @@ function _renderRegexRuleListItem(rule, index, state) {
       <button
         class="bme-task-list-item ${isSelected ? "active" : ""}"
         data-task-action="select-regex-rule"
-        data-rule-id="${_escHtml(rule.id)}"
+        data-rule-id="${_escAttr(rule.id)}"
         type="button"
       >
         <span class="bme-task-list-index">#${index + 1}</span>
@@ -2771,7 +2855,7 @@ function _renderRegexRuleListItem(rule, index, state) {
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
           data-task-action="delete-regex-rule"
-          data-rule-id="${_escHtml(rule.id)}"
+          data-rule-id="${_escAttr(rule.id)}"
           type="button"
         >
           删除
@@ -2807,12 +2891,12 @@ function _renderRegexRuleEditor(state) {
 
     <div class="bme-config-row">
       <label>规则名称</label>
-      <input
-        class="bme-config-input"
-        type="text"
-        data-regex-rule-field="script_name"
-        value="${_escHtml(rule.script_name || "")}"
-      />
+        <input
+          class="bme-config-input"
+          type="text"
+          data-regex-rule-field="script_name"
+          value="${_escAttr(rule.script_name || "")}"
+        />
     </div>
 
     <label class="bme-toggle-item bme-task-editor-toggle">
@@ -2861,7 +2945,7 @@ function _renderRegexRuleEditor(state) {
           class="bme-config-input"
           type="number"
           data-regex-rule-field="min_depth"
-          value="${_escHtml(rule.min_depth ?? 0)}"
+          value="${_escAttr(rule.min_depth ?? 0)}"
         />
       </div>
       <div class="bme-config-row">
@@ -2870,7 +2954,7 @@ function _renderRegexRuleEditor(state) {
           class="bme-config-input"
           type="number"
           data-regex-rule-field="max_depth"
-          value="${_escHtml(rule.max_depth ?? 9999)}"
+          value="${_escAttr(rule.max_depth ?? 9999)}"
         />
       </div>
     </div>
@@ -3503,6 +3587,24 @@ function _escHtml(str) {
   const div = document.createElement("div");
   div.textContent = String(str ?? "");
   return div.innerHTML;
+}
+
+function _escAttr(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function _safeCssToken(value, fallback = "unknown") {
+  const token = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return token || fallback;
 }
 
 function _typeLabel(type) {

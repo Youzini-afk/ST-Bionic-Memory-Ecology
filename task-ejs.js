@@ -52,6 +52,17 @@ function getCurrentEjsRuntimeState() {
   return buildEjsRuntimeState(runtime, EJS_RUNTIME_STATUS.PRIMARY);
 }
 
+function createTaskEjsRuntimeUnavailableError(backend, content = "") {
+  const error = new Error(
+    `task-ejs runtime unavailable (${backend?.status || EJS_RUNTIME_STATUS.FAILED})`,
+  );
+  error.name = "TaskEjsRuntimeUnavailableError";
+  error.code = "st_bme_task_ejs_runtime_unavailable";
+  error.backend = backend || null;
+  error.content = String(content || "");
+  return error;
+}
+
 async function ensureEjsRuntime() {
   const currentState = getCurrentEjsRuntimeState();
   if (currentState.isAvailable) {
@@ -582,6 +593,9 @@ export function createTaskEjsRenderContext(entries = [], options = {}) {
     variableState: createVariableState(hostSnapshot),
     activatedEntries: new Map(),
     pulledEntries: new Map(),
+    ejsRuntimeStatus: EJS_RUNTIME_STATUS.FAILED,
+    ejsRuntimeFallback: false,
+    ejsLastError: null,
     templateContext: {
       ...(options.templateContext || {}),
       hostSnapshot: hostSnapshot.snapshot,
@@ -593,16 +607,29 @@ export function createTaskEjsRenderContext(entries = [], options = {}) {
 export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
   const backend = await resolveTaskEjsBackend();
   const runtime = backend.runtime;
+  if (renderCtx && typeof renderCtx === "object") {
+    renderCtx.ejsRuntimeStatus = backend.status;
+    renderCtx.ejsRuntimeFallback = Boolean(backend.isFallback);
+    renderCtx.ejsLastError = backend.error
+      ? backend.error instanceof Error
+        ? backend.error.message
+        : String(backend.error)
+      : null;
+  }
   const hostSnapshot = resolveHostSnapshot(renderCtx?.hostSnapshot);
   const snapshot = hostSnapshot.snapshot;
   if (!runtime) {
-    console.warn(
-      "[ST-BME] task-ejs 未找到可用 ejs runtime，跳过渲染:",
-      backend,
-    );
-    return substituteTaskEjsParams(content, renderCtx?.templateContext, {
+    const substituted = substituteTaskEjsParams(content, renderCtx?.templateContext, {
       hostSnapshot,
     });
+    if (substituted.includes("<%")) {
+      throw createTaskEjsRuntimeUnavailableError(backend, substituted);
+    }
+    console.warn(
+      "[ST-BME] task-ejs 未找到可用 ejs runtime，回退为轻量变量替换:",
+      backend,
+    );
+    return substituted;
   }
 
   const processed = substituteTaskEjsParams(
@@ -856,6 +883,10 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
     );
     return result ?? "";
   } catch (error) {
+    if (renderCtx && typeof renderCtx === "object") {
+      renderCtx.ejsLastError =
+        error instanceof Error ? error.message : String(error);
+    }
     console.warn("[ST-BME] task-ejs 渲染失败，回退原文本:", error);
     return processed;
   }

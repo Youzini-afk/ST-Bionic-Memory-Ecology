@@ -3,6 +3,7 @@
 import { getRequestHeaders } from "../../../../script.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "./graph.js";
+import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { buildVectorCollectionId, stableHashString } from "./runtime-state.js";
 
 export const BACKEND_VECTOR_SOURCES = [
@@ -33,10 +34,14 @@ const MODEL_LIST_ENDPOINTS = {
 const VECTOR_REQUEST_TIMEOUT_MS = 300000;
 
 function getConfiguredTimeoutMs(config = {}) {
-  const timeoutMs = Number(config?.timeoutMs);
-  return Number.isFinite(timeoutMs) && timeoutMs > 0
-    ? timeoutMs
-    : VECTOR_REQUEST_TIMEOUT_MS;
+  return typeof resolveConfiguredTimeoutMs === "function"
+    ? resolveConfiguredTimeoutMs(config, VECTOR_REQUEST_TIMEOUT_MS)
+    : (() => {
+        const timeoutMs = Number(config?.timeoutMs);
+        return Number.isFinite(timeoutMs) && timeoutMs > 0
+          ? timeoutMs
+          : VECTOR_REQUEST_TIMEOUT_MS;
+      })();
 }
 
 const BACKEND_STATUS_MODEL_SOURCES = {

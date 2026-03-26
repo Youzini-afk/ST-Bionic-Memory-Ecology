@@ -16,7 +16,7 @@ import {
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
-import { buildTaskPrompt } from "./prompt-builder.js";
+import { buildTaskExecutionDebugContext, buildTaskPrompt } from "./prompt-builder.js";
 import { RELATION_TYPES } from "./schema.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { getSTContextForPrompt } from "./st-context.js";
@@ -26,6 +26,12 @@ function createAbortError(message = "操作已终止") {
   const error = new Error(message);
   error.name = "AbortError";
   return error;
+}
+
+function createTaskLlmDebugContext(promptBuild, regexInput) {
+  return typeof buildTaskExecutionDebugContext === "function"
+    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
+    : null;
 }
 
 function isAbortError(error) {
@@ -122,6 +128,7 @@ export async function extractMemories({
   });
 
   // 系统提示词
+  const extractRegexInput = { entries: [] };
   const systemPrompt = applyTaskRegex(
     settings,
     "extract",
@@ -129,6 +136,8 @@ export async function extractMemories({
     promptBuild.systemPrompt ||
       extractPrompt ||
       buildDefaultExtractPrompt(schema),
+    extractRegexInput,
+    "system",
   );
 
   // 用户提示词
@@ -152,6 +161,7 @@ export async function extractMemories({
     maxRetries: 2,
     signal,
     taskType: "extract",
+    debugContext: createTaskLlmDebugContext(promptBuild, extractRegexInput),
     additionalMessages:
       promptBuild.privateTaskMessages || [
         ...(promptBuild.customMessages || []),
@@ -641,6 +651,7 @@ export async function generateSynopsis({
     graphStats: `event=${eventNodes.length}, character=${characterNodes.length}, thread=${threadNodes.length}`,
     ...getSTContextForPrompt(),
   });
+  const synopsisRegexInput = { entries: [] };
   const synopsisSystemPrompt = applyTaskRegex(
     settings,
     "synopsis",
@@ -652,6 +663,8 @@ export async function generateSynopsis({
         '输出 JSON：{"summary": "前情提要文本（200字以内）"}',
         "要求：涵盖核心冲突、关键转折、主要角色当前状态。",
       ].join("\n"),
+    synopsisRegexInput,
+    "system",
   );
 
   const result = await callLLMForJSON({
@@ -669,6 +682,10 @@ export async function generateSynopsis({
     maxRetries: 1,
     signal,
     taskType: "synopsis",
+    debugContext: createTaskLlmDebugContext(
+      synopsisPromptBuild,
+      synopsisRegexInput,
+    ),
     additionalMessages:
       synopsisPromptBuild.privateTaskMessages || [
         ...(synopsisPromptBuild.customMessages || []),
@@ -759,6 +776,7 @@ export async function generateReflection({
     graphStats: `event=${recentEvents.length}, character=${recentCharacters.length}, thread=${recentThreads.length}`,
     ...getSTContextForPrompt(),
   });
+  const reflectionRegexInput = { entries: [] };
   const reflectionSystemPrompt = applyTaskRegex(
     settings,
     "reflection",
@@ -773,6 +791,8 @@ export async function generateReflection({
         "suggestion 给出后续检索或叙事上值得关注的提示。",
         "不要复述全部事件，要提炼高层结论。",
       ].join("\n"),
+    reflectionRegexInput,
+    "system",
   );
 
   const result = await callLLMForJSON({
@@ -793,6 +813,10 @@ export async function generateReflection({
     maxRetries: 1,
     signal,
     taskType: "reflection",
+    debugContext: createTaskLlmDebugContext(
+      reflectionPromptBuild,
+      reflectionRegexInput,
+    ),
     additionalMessages:
       reflectionPromptBuild.privateTaskMessages || [
         ...(reflectionPromptBuild.customMessages || []),
