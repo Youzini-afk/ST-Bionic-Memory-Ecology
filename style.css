@@ -25,17 +25,20 @@
 #st-bme-panel {
   width: 82vw;
   height: 72vh;
-  max-width: 1200px;
-  max-height: 800px;
+  min-width: 480px;
+  min-height: 360px;
+  max-width: 96vw;
+  max-height: 92vh;
   background: var(--bme-surface, #131316);
   border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
   border-radius: 8px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
   transform: translateY(12px) scale(0.98);
   transition: transform 0.25s ease;
+  resize: both;
 }
 
 #st-bme-panel-overlay.active #st-bme-panel {
