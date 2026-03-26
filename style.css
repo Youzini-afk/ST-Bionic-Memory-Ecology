@@ -781,6 +781,48 @@
 }
 
 /* --- Actions Tab --- */
+.bme-action-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.bme-action-group {
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.bme-action-group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.bme-action-group-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+}
+
+.bme-action-group-sub {
+  font-size: 11px;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-action-group-extra {
+  margin-top: 10px;
+}
+
+.bme-action-range-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
 .bme-action-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

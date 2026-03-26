@@ -227,100 +227,106 @@
           </div>
 
           <div class="bme-tab-pane" id="bme-pane-actions">
-            <div class="bme-action-grid">
-              <button class="bme-action-btn" id="bme-act-extract" type="button">
-                <i class="fa-solid fa-download"></i>
-                <span>手动提取</span>
-              </button>
-              <button
-                class="bme-action-btn"
-                id="bme-act-compress"
-                type="button"
-              >
-                <i class="fa-solid fa-compress"></i>
-                <span>手动压缩</span>
-              </button>
-              <button class="bme-action-btn" id="bme-act-sleep" type="button">
-                <i class="fa-solid fa-moon"></i>
-                <span>执行遗忘</span>
-              </button>
-              <button
-                class="bme-action-btn"
-                id="bme-act-synopsis"
-                type="button"
-              >
-                <i class="fa-solid fa-scroll"></i>
-                <span>更新概要</span>
-              </button>
-              <button class="bme-action-btn" id="bme-act-export" type="button">
-                <i class="fa-solid fa-file-export"></i>
-                <span>导出图谱</span>
-              </button>
-              <button class="bme-action-btn" id="bme-act-import" type="button">
-                <i class="fa-solid fa-file-import"></i>
-                <span>导入图谱</span>
-              </button>
-              <button
-                class="bme-action-btn danger"
-                id="bme-act-rebuild"
-                type="button"
-              >
-                <i class="fa-solid fa-triangle-exclamation"></i>
-                <span>重建图谱</span>
-              </button>
-              <button class="bme-action-btn" id="bme-act-evolve" type="button">
-                <i class="fa-solid fa-dna"></i>
-                <span>强制进化</span>
-              </button>
-              <button
-                class="bme-action-btn"
-                id="bme-act-vector-rebuild"
-                type="button"
-              >
-                <i class="fa-solid fa-database"></i>
-                <span>重建向量</span>
-              </button>
-              <button
-                class="bme-action-btn"
-                id="bme-act-vector-range"
-                type="button"
-              >
-                <i class="fa-solid fa-layer-group"></i>
-                <span>范围重建</span>
-              </button>
-              <button
-                class="bme-action-btn"
-                id="bme-act-vector-reembed"
-                type="button"
-              >
-                <i class="fa-solid fa-wand-magic-sparkles"></i>
-                <span>直连重嵌</span>
-              </button>
-            </div>
-            <div class="bme-config-card" style="margin-top: 16px">
-              <div class="bme-section-header">范围重建</div>
-              <div class="bme-config-help">
-                仅重建与指定楼层范围相交的节点向量。留空时默认按整段聊天处理。
+            <div class="bme-action-groups">
+              <!-- 记忆操作 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title">📝 记忆操作</span>
+                  <span class="bme-action-group-sub">调用 LLM 处理记忆节点</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-extract" type="button">
+                    <i class="fa-solid fa-download"></i>
+                    <span>手动提取</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-compress" type="button">
+                    <i class="fa-solid fa-compress"></i>
+                    <span>手动压缩</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-synopsis" type="button">
+                    <i class="fa-solid fa-scroll"></i>
+                    <span>更新概要</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-evolve" type="button">
+                    <i class="fa-solid fa-dna"></i>
+                    <span>强制进化</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-sleep" type="button">
+                    <i class="fa-solid fa-moon"></i>
+                    <span>执行遗忘</span>
+                  </button>
+                </div>
               </div>
-              <div class="bme-config-row">
-                <label for="bme-range-start">起始楼层</label>
-                <input
-                  id="bme-range-start"
-                  class="bme-config-input"
-                  type="number"
-                  min="0"
-                  max="999999"
-                />
+
+              <!-- 向量操作 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title">🔢 向量操作</span>
+                  <span class="bme-action-group-sub">调用 Embedding API 计算节点向量</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-vector-rebuild" type="button">
+                    <i class="fa-solid fa-database"></i>
+                    <span>重建向量</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-vector-range" type="button">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <span>范围重建</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-vector-reembed" type="button">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    <span>直连重嵌</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    范围重建：仅重建与指定楼层范围相交的节点向量。留空时默认按整段聊天处理。
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-range-start">起始楼层</label>
+                      <input
+                        id="bme-range-start"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-range-end">结束楼层</label>
+                      <input
+                        id="bme-range-end"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div class="bme-config-row">
-                <label for="bme-range-end">结束楼层</label>
-                <input
-                  id="bme-range-end"
-                  class="bme-config-input"
-                  type="number"
-                  min="0"
-                  max="999999"
-                />
+
+              <!-- 图谱管理 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title">⚠️ 图谱管理</span>
+                  <span class="bme-action-group-sub">导入导出与危险操作</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-export" type="button">
+                    <i class="fa-solid fa-file-export"></i>
+                    <span>导出图谱</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-import" type="button">
+                    <i class="fa-solid fa-file-import"></i>
+                    <span>导入图谱</span>
+                  </button>
+                  <button class="bme-action-btn danger" id="bme-act-rebuild" type="button">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span>重建图谱</span>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
