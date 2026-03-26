@@ -8,8 +8,8 @@ import { resolveTaskGenerationOptions } from "./generation-options.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
-const DEFAULT_TEXT_COMPLETION_TOKENS = 1200;
-const DEFAULT_JSON_COMPLETION_TOKENS = 2200;
+const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
+const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const RETRY_JSON_COMPLETION_TOKENS = 3200;
 
 function getMemoryLLMConfig() {
@@ -376,9 +376,12 @@ async function callDedicatedOpenAICompatible(
       : "",
     model: config.model,
     messages,
-    temperature: filteredGeneration.temperature ?? (jsonMode ? 0 : 0.2),
+    temperature: filteredGeneration.temperature ?? 1,
     max_completion_tokens: resolvedCompletionTokens,
     stream: filteredGeneration.stream ?? false,
+    frequency_penalty: filteredGeneration.frequency_penalty ?? 0,
+    presence_penalty: filteredGeneration.presence_penalty ?? 0,
+    top_p: filteredGeneration.top_p ?? 1,
   };
 
   const optionalGenerationFields = [
