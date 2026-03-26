@@ -2197,22 +2197,36 @@ function _renderTaskBlockEditor(state) {
 
     ${
       block.type === "builtin"
-        ? `
+        ? (() => {
+            const externalSourceMap = {
+              charDescription: "角色卡描述",
+              userPersona: "用户 Persona 设定",
+              worldInfoBefore: "World Info (↑ Char)",
+              worldInfoAfter: "World Info (↓ Char)",
+            };
+            const externalLabel = externalSourceMap[block.sourceKey];
+            return `
             <div class="bme-config-row">
               <label>内置来源${_helpTip("运行时自动从任务上下文注入的数据。不同任务类型使用不同来源。")}</label>
               <select class="bme-config-input" data-block-field="sourceKey">
                 ${builtinOptions}
               </select>
             </div>
-            <div class="bme-config-row">
-              <label>覆盖内容（可选）${_helpTip("留空时自动从 sourceKey 对应的上下文数据读取。填写后将覆盖自动注入的内容。")}</label>
-              <textarea
-                class="bme-config-textarea"
-                data-block-field="content"
-                placeholder="留空时从 sourceKey 对应的任务上下文读取。"
-              >${_escHtml(block.content || "")}</textarea>
-            </div>
-          `
+            ${externalLabel
+              ? `<div class="bme-task-note" style="text-align:center;padding:1rem;opacity:0.7;">
+                   此提示词的内容是从其他地方提取的，无法在此处进行编辑。<br/>
+                   来源：<strong>${externalLabel}</strong>
+                 </div>`
+              : `<div class="bme-config-row">
+                   <label>覆盖内容（可选）${_helpTip("留空时自动从 sourceKey 对应的上下文数据读取。填写后将覆盖自动注入的内容。")}</label>
+                   <textarea
+                     class="bme-config-textarea"
+                     data-block-field="content"
+                     placeholder="留空时从 sourceKey 对应的任务上下文读取。"
+                   >${_escHtml(block.content || "")}</textarea>
+                 </div>`
+            }`;
+          })()
         : block.type === "legacyPrompt"
           ? `
               <div class="bme-task-note">
