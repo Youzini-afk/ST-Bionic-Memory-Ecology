@@ -152,10 +152,11 @@ export async function extractMemories({
     maxRetries: 2,
     signal,
     taskType: "extract",
-    additionalMessages: [
-      ...(promptBuild.customMessages || []),
-      ...(promptBuild.additionalMessages || []),
-    ],
+    additionalMessages:
+      promptBuild.privateTaskMessages || [
+        ...(promptBuild.customMessages || []),
+        ...(promptBuild.additionalMessages || []),
+      ],
   });
   throwIfAborted(signal);
 
@@ -668,10 +669,11 @@ export async function generateSynopsis({
     maxRetries: 1,
     signal,
     taskType: "synopsis",
-    additionalMessages: [
-      ...(synopsisPromptBuild.customMessages || []),
-      ...(synopsisPromptBuild.additionalMessages || []),
-    ],
+    additionalMessages:
+      synopsisPromptBuild.privateTaskMessages || [
+        ...(synopsisPromptBuild.customMessages || []),
+        ...(synopsisPromptBuild.additionalMessages || []),
+      ],
   });
 
   if (!result?.summary) return;
@@ -791,10 +793,11 @@ export async function generateReflection({
     maxRetries: 1,
     signal,
     taskType: "reflection",
-    additionalMessages: [
-      ...(reflectionPromptBuild.customMessages || []),
-      ...(reflectionPromptBuild.additionalMessages || []),
-    ],
+    additionalMessages:
+      reflectionPromptBuild.privateTaskMessages || [
+        ...(reflectionPromptBuild.customMessages || []),
+        ...(reflectionPromptBuild.additionalMessages || []),
+      ],
   });
 
   if (!result?.insight) return null;

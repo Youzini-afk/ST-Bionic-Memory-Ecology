@@ -461,10 +461,11 @@ async function llmRecall(
     maxRetries: 1,
     signal,
     taskType: "recall",
-    additionalMessages: [
-      ...(recallPromptBuild.customMessages || []),
-      ...(recallPromptBuild.additionalMessages || []),
-    ],
+    additionalMessages:
+      recallPromptBuild.privateTaskMessages || [
+        ...(recallPromptBuild.customMessages || []),
+        ...(recallPromptBuild.additionalMessages || []),
+      ],
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

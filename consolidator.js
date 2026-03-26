@@ -315,10 +315,11 @@ export async function consolidateMemories({
       maxRetries: 1,
       signal,
       taskType: "consolidation",
-      additionalMessages: [
-        ...(consolidationPromptBuild.customMessages || []),
-        ...(consolidationPromptBuild.additionalMessages || []),
-      ],
+      additionalMessages:
+        consolidationPromptBuild.privateTaskMessages || [
+          ...(consolidationPromptBuild.customMessages || []),
+          ...(consolidationPromptBuild.additionalMessages || []),
+        ],
     });
   } catch (e) {
     if (isAbortError(e)) throw e;

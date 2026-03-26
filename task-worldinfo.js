@@ -71,9 +71,96 @@ function getStContext() {
   }
 }
 
-function getWorldbookApi(name) {
+function getLegacyWorldbookApi(name) {
   const fn = globalThis[name];
   return typeof fn === "function" ? fn : null;
+}
+
+async function getWorldbookHost() {
+  const legacyGetWorldbook = getLegacyWorldbookApi("getWorldbook");
+  const legacyGetLorebookEntries = getLegacyWorldbookApi("getLorebookEntries");
+  const legacyGetCharWorldbookNames = getLegacyWorldbookApi(
+    "getCharWorldbookNames",
+  );
+
+  try {
+    const { getHostAdapter } = await import("./host-adapter/index.js");
+    const worldbookHost = getHostAdapter?.()?.worldbook || null;
+    if (typeof worldbookHost?.getWorldbook === "function") {
+      const capabilitySupport = worldbookHost.readCapabilitySupport?.() || {};
+      const bridgeGetLorebookEntries =
+        typeof worldbookHost.getLorebookEntries === "function"
+          ? worldbookHost.getLorebookEntries
+          : null;
+      const bridgeGetCharWorldbookNames =
+        typeof worldbookHost.getCharWorldbookNames === "function"
+          ? worldbookHost.getCharWorldbookNames
+          : null;
+      const supplementedCapabilities = [];
+      const missingCapabilities = [];
+
+      const resolvedGetLorebookEntries =
+        bridgeGetLorebookEntries || legacyGetLorebookEntries;
+      if (!bridgeGetLorebookEntries) {
+        if (resolvedGetLorebookEntries) {
+          supplementedCapabilities.push("getLorebookEntries");
+        } else {
+          missingCapabilities.push("getLorebookEntries");
+        }
+      }
+
+      const resolvedGetCharWorldbookNames =
+        bridgeGetCharWorldbookNames || legacyGetCharWorldbookNames;
+      if (!bridgeGetCharWorldbookNames) {
+        if (resolvedGetCharWorldbookNames) {
+          supplementedCapabilities.push("getCharWorldbookNames");
+        } else {
+          missingCapabilities.push("getCharWorldbookNames");
+        }
+      }
+
+      return {
+        getWorldbook: worldbookHost.getWorldbook,
+        getLorebookEntries: resolvedGetLorebookEntries,
+        getCharWorldbookNames: resolvedGetCharWorldbookNames,
+        sourceLabel: capabilitySupport.sourceLabel || "host-adapter.worldbook",
+        fallback:
+          Boolean(capabilitySupport.fallback) ||
+          supplementedCapabilities.length > 0,
+        capabilityStatus: Object.freeze({
+          mode: capabilitySupport.mode || "unknown",
+          supplementedCapabilities: Object.freeze(supplementedCapabilities),
+          missingCapabilities: Object.freeze(missingCapabilities),
+        }),
+      };
+    }
+  } catch (error) {
+    console.debug(
+      "[ST-BME] task-worldinfo 读取 worldbook bridge 失败，回退到 legacy 宿主接口",
+      error,
+    );
+  }
+
+  const missingCapabilities = [];
+  if (typeof legacyGetLorebookEntries !== "function") {
+    missingCapabilities.push("getLorebookEntries");
+  }
+  if (typeof legacyGetCharWorldbookNames !== "function") {
+    missingCapabilities.push("getCharWorldbookNames");
+  }
+
+  return {
+    getWorldbook: legacyGetWorldbook,
+    getLorebookEntries: legacyGetLorebookEntries,
+    getCharWorldbookNames: legacyGetCharWorldbookNames,
+    sourceLabel: "legacy.globalThis",
+    fallback: true,
+    capabilityStatus: Object.freeze({
+      mode: "legacy",
+      supplementedCapabilities: Object.freeze([]),
+      missingCapabilities: Object.freeze(missingCapabilities),
+    }),
+  };
 }
 
 function normalizeKey(value) {
@@ -141,7 +228,9 @@ function parseDecorators(content = "") {
 }
 
 function isSpecialEntryByComment(comment = "") {
-  return SPECIAL_NAME_MARKERS.some((marker) => String(comment).includes(marker));
+  return SPECIAL_NAME_MARKERS.some((marker) =>
+    String(comment).includes(marker),
+  );
 }
 
 function normalizeEntry(raw = {}, worldbookName = "") {
@@ -183,9 +272,7 @@ function normalizeEntry(raw = {}, worldbookName = "") {
     positionType === "after_author_note"
   ) {
     position = WI_POSITION.ANBottom;
-  } else if (
-    positionType === "at_depth_as_assistant"
-  ) {
+  } else if (positionType === "at_depth_as_assistant") {
     position = WI_POSITION.atDepth;
     role = "assistant";
   } else if (positionType === "at_depth_as_user") {
@@ -288,7 +375,9 @@ function matchKeys(haystack = "", needle = "", entry) {
   const source = entry.caseSensitive ? haystack : haystack.toLowerCase();
   const target = entry.caseSensitive
     ? String(needle || "").trim()
-    : String(needle || "").trim().toLowerCase();
+    : String(needle || "")
+        .trim()
+        .toLowerCase();
 
   if (!target) return false;
 
@@ -349,7 +438,11 @@ function sortEntries(a, b) {
   );
 }
 
-function selectActivatedEntries(entries = [], trigger = "", templateContext = {}) {
+function selectActivatedEntries(
+  entries = [],
+  trigger = "",
+  templateContext = {},
+) {
   const activationSeedBase = simpleHash(String(trigger || ""));
   const activated = new Set();
 
@@ -386,7 +479,11 @@ function selectActivatedEntries(entries = [], trigger = "", templateContext = {}
       "@@preprocessing",
       "@@iframe",
     ];
-    if (entry.decorators.some((decorator) => specialDecorators.includes(decorator))) {
+    if (
+      entry.decorators.some((decorator) =>
+        specialDecorators.includes(decorator),
+      )
+    ) {
       continue;
     }
     if (isSpecialEntryByComment(entry.comment)) continue;
@@ -407,9 +504,13 @@ function selectActivatedEntries(entries = [], trigger = "", templateContext = {}
     let hasAllMatch = true;
 
     for (const secondaryKey of entry.keysSecondary) {
-      const substituted = substituteTaskEjsParams(secondaryKey, templateContext);
+      const substituted = substituteTaskEjsParams(
+        secondaryKey,
+        templateContext,
+      );
       const hasMatch =
-        substituted.trim() !== "" && matchKeys(trigger, substituted.trim(), entry);
+        substituted.trim() !== "" &&
+        matchKeys(trigger, substituted.trim(), entry);
       if (hasMatch) hasAnyMatch = true;
       if (!hasMatch) hasAllMatch = false;
 
@@ -455,7 +556,9 @@ function selectActivatedEntries(entries = [], trigger = "", templateContext = {}
 
     const prioritized = members.filter((entry) => entry.groupOverride);
     if (prioritized.length > 0) {
-      const topOrder = Math.min(...prioritized.map((entry) => entry.order ?? 100));
+      const topOrder = Math.min(
+        ...prioritized.map((entry) => entry.order ?? 100),
+      );
       matched.push(
         prioritized.find((entry) => (entry.order ?? 100) <= topOrder) ||
           prioritized[0],
@@ -468,7 +571,10 @@ function selectActivatedEntries(entries = [], trigger = "", templateContext = {}
       const scores = members.map((entry) => getScore(trigger, entry));
       const topScore = Math.max(...scores);
       if (topScore > 0) {
-        const winnerIndex = Math.max(scores.findIndex((score) => score >= topScore), 0);
+        const winnerIndex = Math.max(
+          scores.findIndex((score) => score >= topScore),
+          0,
+        );
         matched.push(members[winnerIndex]);
         continue;
       }
@@ -495,13 +601,33 @@ function selectActivatedEntries(entries = [], trigger = "", templateContext = {}
 }
 
 async function collectAllWorldbookEntries() {
-  const getWorldbook = getWorldbookApi("getWorldbook");
+  const {
+    getWorldbook,
+    getLorebookEntries,
+    getCharWorldbookNames,
+    sourceLabel,
+    fallback,
+    capabilityStatus,
+  } = await getWorldbookHost();
   if (!getWorldbook) {
     return [];
   }
 
-  const getLorebookEntries = getWorldbookApi("getLorebookEntries");
-  const getCharWorldbookNames = getWorldbookApi("getCharWorldbookNames");
+  const sourceTag = `${sourceLabel}${fallback ? ", fallback" : ""}`;
+  const supplementedCapabilities =
+    capabilityStatus?.supplementedCapabilities || [];
+  const missingCapabilities = capabilityStatus?.missingCapabilities || [];
+  if (supplementedCapabilities.length > 0) {
+    console.debug(
+      `[ST-BME] task-worldinfo worldbook bridge 已通过 legacy 补齐关键能力: ${supplementedCapabilities.join(", ")} [${sourceTag}]`,
+    );
+  }
+  if (missingCapabilities.length > 0) {
+    console.warn(
+      `[ST-BME] task-worldinfo worldbook host 缺失关键能力，将显式降级相关旧语义: ${missingCapabilities.join(", ")} [${sourceTag}]`,
+    );
+  }
+
   const allEntries = [];
   const loadedNames = new Set();
 
@@ -524,7 +650,7 @@ async function collectAllWorldbookEntries() {
           );
         } catch (error) {
           console.debug(
-            `[ST-BME] task-worldinfo 读取 lorebook comment 失败: ${normalizedName}`,
+            `[ST-BME] task-worldinfo 读取 lorebook comment 失败: ${normalizedName} [${sourceTag}]`,
             error,
           );
         }
@@ -543,7 +669,7 @@ async function collectAllWorldbookEntries() {
       }
     } catch (error) {
       console.debug(
-        `[ST-BME] task-worldinfo 读取世界书失败: ${normalizedName}`,
+        `[ST-BME] task-worldinfo 读取世界书失败: ${normalizedName} [${sourceTag}]`,
         error,
       );
     }
@@ -559,7 +685,10 @@ async function collectAllWorldbookEntries() {
         await loadWorldbookOnce(additional);
       }
     } catch (error) {
-      console.debug("[ST-BME] task-worldinfo 读取角色世界书失败", error);
+      console.debug(
+        `[ST-BME] task-worldinfo 读取角色世界书失败 [${sourceTag}]`,
+        error,
+      );
     }
   }
 
@@ -603,7 +732,9 @@ function normalizeResolvedEntry(entry = {}, fallbackIndex = 0) {
     : "system";
   return {
     name: normalizeKey(entry.name),
-    sourceName: normalizeKey(entry.sourceName || entry.source_name || entry.name),
+    sourceName: normalizeKey(
+      entry.sourceName || entry.source_name || entry.name,
+    ),
     worldbook: normalizeKey(entry.worldbook),
     content: String(entry.content || ""),
     role,
@@ -642,7 +773,11 @@ function buildWorldInfoText(entries = []) {
     .join("\n\n");
 }
 
-function buildActivationSourceTexts({ chatMessages = [], userMessage = "", templateContext = {} } = {}) {
+function buildActivationSourceTexts({
+  chatMessages = [],
+  userMessage = "",
+  templateContext = {},
+} = {}) {
   const texts = [];
 
   if (Array.isArray(chatMessages)) {

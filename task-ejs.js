@@ -1,8 +1,16 @@
 // ST-BME: 任务级 EJS / 世界书渲染引擎
 // 仅用于世界书条目渲染，不开放给用户自定义 prompt 块。
 
+import { getSTContextSnapshot } from "./st-context.js";
+
 const DEFAULT_MAX_RECURSION = 10;
-let ejsRuntimePromise = null;
+let ejsRuntimeStatePromise = null;
+
+const EJS_RUNTIME_STATUS = {
+  PRIMARY: "primary",
+  FALLBACK: "fallback",
+  FAILED: "failed",
+};
 
 const FALLBACK_LODASH = {
   get: getByPath,
@@ -26,17 +34,40 @@ function getEjsRuntime() {
   return globalThis.ejs || null;
 }
 
-async function ensureEjsRuntime() {
-  if (globalThis.ejs) {
-    return globalThis.ejs;
+function buildEjsRuntimeState(runtime, status, error = null) {
+  return {
+    runtime: runtime || null,
+    status,
+    isAvailable: Boolean(runtime),
+    isFallback: status === EJS_RUNTIME_STATUS.FALLBACK,
+    error: error || null,
+  };
+}
+
+function getCurrentEjsRuntimeState() {
+  const runtime = getEjsRuntime();
+  if (!runtime) {
+    return buildEjsRuntimeState(null, EJS_RUNTIME_STATUS.FAILED);
   }
-  if (ejsRuntimePromise) {
-    return await ejsRuntimePromise;
+  return buildEjsRuntimeState(runtime, EJS_RUNTIME_STATUS.PRIMARY);
+}
+
+async function ensureEjsRuntime() {
+  const currentState = getCurrentEjsRuntimeState();
+  if (currentState.isAvailable) {
+    return currentState;
+  }
+  if (ejsRuntimeStatePromise) {
+    return await ejsRuntimeStatePromise;
   }
 
-  ejsRuntimePromise = (async () => {
-    const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, "window");
+  ejsRuntimeStatePromise = (async () => {
+    const hadWindow = Object.prototype.hasOwnProperty.call(
+      globalThis,
+      "window",
+    );
     const previousWindow = globalThis.window;
+    let importError = null;
 
     if (!hadWindow) {
       globalThis.window = globalThis;
@@ -45,6 +76,7 @@ async function ensureEjsRuntime() {
     try {
       await import("./vendor/ejs.js");
     } catch (error) {
+      importError = error;
       console.warn("[ST-BME] task-ejs 加载 vendor/ejs.js 失败:", error);
     } finally {
       if (!hadWindow) {
@@ -54,27 +86,71 @@ async function ensureEjsRuntime() {
       }
     }
 
-    return globalThis.ejs || null;
+    const runtime = getEjsRuntime();
+    if (runtime) {
+      return buildEjsRuntimeState(runtime, EJS_RUNTIME_STATUS.FALLBACK);
+    }
+    return buildEjsRuntimeState(null, EJS_RUNTIME_STATUS.FAILED, importError);
   })();
 
-  return await ejsRuntimePromise;
+  return await ejsRuntimeStatePromise;
 }
 
-function getStContext() {
-  try {
-    return globalThis.SillyTavern?.getContext?.() || {};
-  } catch {
-    return {};
+async function resolveTaskEjsBackend(options = {}) {
+  if (options.ensureRuntime === false) {
+    return getCurrentEjsRuntimeState();
   }
+  return await ensureEjsRuntime();
 }
 
-function getStChat() {
-  try {
-    const ctx = getStContext();
-    return Array.isArray(ctx.chat) ? ctx.chat : [];
-  } catch {
-    return [];
+function resolveHostSnapshot(injectedSnapshot) {
+  if (injectedSnapshot?.snapshot) {
+    return injectedSnapshot;
   }
+  return getSTContextSnapshot();
+}
+
+function getStContext(injectedSnapshot) {
+  return resolveHostSnapshot(injectedSnapshot).snapshot.raw || {};
+}
+
+function getStChat(injectedSnapshot) {
+  return resolveHostSnapshot(injectedSnapshot).snapshot.chat.messages || [];
+}
+
+function buildTemplateContext(templateContext = {}, hostSnapshot) {
+  const resolvedHost = resolveHostSnapshot(hostSnapshot);
+  const snapshot = resolvedHost.snapshot;
+  const promptAliases = resolvedHost.prompt || {};
+  const lastUserMessage =
+    typeof templateContext.user_input === "string"
+      ? templateContext.user_input
+      : snapshot.chat.lastUserMessage || "";
+
+  return {
+    user: snapshot.user.name,
+    char: snapshot.character.name,
+    userName: promptAliases.userName || snapshot.user.name,
+    charName: promptAliases.charName || snapshot.character.name,
+    persona: promptAliases.userPersona || snapshot.persona.text,
+    userPersona: promptAliases.userPersona || snapshot.persona.text,
+    charDescription:
+      promptAliases.charDescription || snapshot.character.description,
+    currentTime: promptAliases.currentTime || snapshot.time.current,
+    stSnapshot: snapshot,
+    hostSnapshot: snapshot,
+    lastUserMessage,
+    last_user_message: lastUserMessage,
+    userInput: lastUserMessage,
+    user_input: lastUserMessage,
+    original: "",
+    input: "",
+    lastMessage: "",
+    lastMessageId: "",
+    newline: "\n",
+    trim: "",
+    ...templateContext,
+  };
 }
 
 function cloneDeep(value) {
@@ -148,54 +224,28 @@ function normalizeEntryKey(value) {
 }
 
 function normalizeIdentifier(value) {
-  return String(value || "").trim().toLowerCase();
+  return String(value || "")
+    .trim()
+    .toLowerCase();
 }
 
 function processChatMessage(message) {
   return String(message?.mes ?? message?.message ?? message?.content ?? "");
 }
 
-function buildTemplateContext(templateContext = {}) {
-  const ctx = getStContext();
-  const chat = getStChat();
-  const lastUserMessage =
-    typeof templateContext.user_input === "string"
-      ? templateContext.user_input
-      : chat.findLast?.((message) => message?.is_user)?.mes ||
-        [...chat].reverse().find((message) => message?.is_user)?.mes ||
-        "";
-
-  return {
-    user: ctx.name1 || "",
-    char: ctx.name2 || "",
-    userName: ctx.name1 || "",
-    charName: ctx.name2 || "",
-    persona:
-      ctx.powerUserSettings?.persona_description ||
-      ctx.extensionSettings?.persona_description ||
-      ctx.name1_description ||
-      ctx.persona ||
-      "",
-    lastUserMessage,
-    last_user_message: lastUserMessage,
-    userInput: lastUserMessage,
-    user_input: lastUserMessage,
-    original: "",
-    input: "",
-    lastMessage: "",
-    lastMessageId: "",
-    newline: "\n",
-    trim: "",
-    ...templateContext,
-  };
-}
-
-export function substituteTaskEjsParams(text, templateContext = {}) {
+export function substituteTaskEjsParams(
+  text,
+  templateContext = {},
+  options = {},
+) {
   if (!text || !String(text).includes("{{")) {
     return String(text || "");
   }
 
-  const context = buildTemplateContext(templateContext);
+  const context = buildTemplateContext(
+    templateContext,
+    options.hostSnapshot || templateContext.hostSnapshot,
+  );
   return String(text).replace(/\{\{\s*([a-zA-Z0-9_.$]+)\s*\}\}/g, (_, path) => {
     const value = getByPath(context, path);
     if (value == null) return "";
@@ -210,17 +260,17 @@ export function substituteTaskEjsParams(text, templateContext = {}) {
   });
 }
 
-function createVariableState() {
-  const ctx = getStContext();
-  const chat = getStChat();
+function createVariableState(hostSnapshot) {
+  const snapshot = resolveHostSnapshot(hostSnapshot).snapshot;
+  const chat = snapshot.chat.messages || [];
   const lastMessage = chat[chat.length - 1] || {};
   const swipeId = Number(lastMessage?.swipe_id ?? 0);
   const messageVars =
     lastMessage?.variables && typeof lastMessage.variables === "object"
       ? cloneDeep(lastMessage.variables[swipeId] || {})
       : {};
-  const globalVars = cloneDeep(ctx.extensionSettings?.variables?.global || {});
-  const localVars = cloneDeep(ctx.chatMetadata?.variables || {});
+  const globalVars = cloneDeep(snapshot.variables.global || {});
+  const localVars = cloneDeep(snapshot.variables.local || {});
 
   return {
     globalVars,
@@ -283,9 +333,16 @@ function activationKey(entry) {
   return `${entry.worldbook}::${entry.comment || entry.name}`;
 }
 
-function findEntry(renderCtx, currentWorldbook, worldbookOrEntry, entryNameOrData) {
+function findEntry(
+  renderCtx,
+  currentWorldbook,
+  worldbookOrEntry,
+  entryNameOrData,
+) {
   const explicitWorldbook =
-    typeof entryNameOrData === "string" ? normalizeEntryKey(worldbookOrEntry) : "";
+    typeof entryNameOrData === "string"
+      ? normalizeEntryKey(worldbookOrEntry)
+      : "";
   const fallbackWorldbook = normalizeEntryKey(currentWorldbook);
   const identifier = normalizeEntryKey(
     typeof entryNameOrData === "string" ? entryNameOrData : worldbookOrEntry,
@@ -330,7 +387,10 @@ async function activateWorldInfoInContext(
       }
     : entry;
 
-  renderCtx.activatedEntries.set(activationKey(normalizedEntry), normalizedEntry);
+  renderCtx.activatedEntries.set(
+    activationKey(normalizedEntry),
+    normalizedEntry,
+  );
   return {
     world: normalizedEntry.worldbook,
     comment: normalizedEntry.comment || normalizedEntry.name,
@@ -416,7 +476,11 @@ function getChatMessageCompat(index, role) {
   return chat[resolvedIndex] || "";
 }
 
-function getChatMessagesCompat(startOrCount = getStChat().length, endOrRole, role) {
+function getChatMessagesCompat(
+  startOrCount = getStChat().length,
+  endOrRole,
+  role,
+) {
   const allMessages = getStChat().map((message, index) => ({
     raw: message,
     id: index,
@@ -443,7 +507,9 @@ function getChatMessagesCompat(startOrCount = getStChat().length, endOrRole, rol
   if (typeof endOrRole === "string") {
     const filtered = filterByRole(allMessages, endOrRole);
     return (
-      startOrCount > 0 ? filtered.slice(0, startOrCount) : filtered.slice(startOrCount)
+      startOrCount > 0
+        ? filtered.slice(0, startOrCount)
+        : filtered.slice(startOrCount)
     ).map((item) => item.text);
   }
 
@@ -477,12 +543,15 @@ function rethrow(err, str, filename, lineNumber, esc) {
 }
 
 export function createTaskEjsRenderContext(entries = [], options = {}) {
-  const normalizedEntries = (Array.isArray(entries) ? entries : []).map((entry) => ({
-    name: normalizeEntryKey(entry?.name),
-    comment: normalizeEntryKey(entry?.comment),
-    content: String(entry?.content || ""),
-    worldbook: normalizeEntryKey(entry?.worldbook),
-  }));
+  const hostSnapshot = resolveHostSnapshot(options.hostSnapshot);
+  const normalizedEntries = (Array.isArray(entries) ? entries : []).map(
+    (entry) => ({
+      name: normalizeEntryKey(entry?.name),
+      comment: normalizeEntryKey(entry?.comment),
+      content: String(entry?.content || ""),
+      worldbook: normalizeEntryKey(entry?.worldbook),
+    }),
+  );
 
   const allEntries = new Map();
   const entriesByWorldbook = new Map();
@@ -509,50 +578,63 @@ export function createTaskEjsRenderContext(entries = [], options = {}) {
       Number(options.maxRecursion) > 0
         ? Number(options.maxRecursion)
         : DEFAULT_MAX_RECURSION,
-    variableState: createVariableState(),
+    hostSnapshot,
+    variableState: createVariableState(hostSnapshot),
     activatedEntries: new Map(),
     pulledEntries: new Map(),
     templateContext: {
       ...(options.templateContext || {}),
+      hostSnapshot: hostSnapshot.snapshot,
+      stSnapshot: hostSnapshot.snapshot,
     },
   };
 }
 
-export async function evalTaskEjsTemplate(
-  content,
-  renderCtx,
-  extraEnv = {},
-) {
-  const runtime = await ensureEjsRuntime();
+export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
+  const backend = await resolveTaskEjsBackend();
+  const runtime = backend.runtime;
+  const hostSnapshot = resolveHostSnapshot(renderCtx?.hostSnapshot);
+  const snapshot = hostSnapshot.snapshot;
   if (!runtime) {
-    console.warn("[ST-BME] task-ejs 未找到全局 ejs 运行时，跳过渲染");
-    return substituteTaskEjsParams(content, renderCtx?.templateContext);
+    console.warn(
+      "[ST-BME] task-ejs 未找到可用 ejs runtime，跳过渲染:",
+      backend,
+    );
+    return substituteTaskEjsParams(content, renderCtx?.templateContext, {
+      hostSnapshot,
+    });
   }
 
-  const processed = substituteTaskEjsParams(content, renderCtx?.templateContext);
+  const processed = substituteTaskEjsParams(
+    content,
+    renderCtx?.templateContext,
+    {
+      hostSnapshot,
+    },
+  );
   if (!processed.includes("<%")) {
     return processed;
   }
 
-  const stCtx = getStContext();
-  const chat = getStChat();
+  const stCtx = snapshot.raw || {};
+  const chat = snapshot.chat.messages || [];
   const utilityLib = getUtilityLib();
   const workflowUserInput =
     typeof renderCtx?.templateContext?.user_input === "string"
       ? renderCtx.templateContext.user_input
-      : chat.findLast?.((message) => message?.is_user)?.mes ||
-        [...chat].reverse().find((message) => message?.is_user)?.mes ||
-        "";
+      : snapshot.chat.lastUserMessage || "";
 
   const context = {
     _: utilityLib,
     console,
-    userName: stCtx.name1 || "",
-    charName: stCtx.name2 || "",
-    assistantName: stCtx.name2 || "",
-    characterId: stCtx.characterId,
+    userName: snapshot.user.name,
+    charName: snapshot.character.name,
+    assistantName: snapshot.character.name,
+    characterId: snapshot.character.id,
+    hostSnapshot: snapshot,
+    stSnapshot: snapshot,
     get chatId() {
-      return stCtx.chatId || globalThis.getCurrentChatId?.() || "";
+      return snapshot.chat.id || "";
     },
     get variables() {
       return renderCtx.variableState.cacheVars;
@@ -560,9 +642,7 @@ export async function evalTaskEjsTemplate(
     get lastUserMessageId() {
       return chat.findLastIndex
         ? chat.findLastIndex((message) => message?.is_user)
-        : [...chat]
-            .reverse()
-            .findIndex((message) => message?.is_user);
+        : [...chat].reverse().findIndex((message) => message?.is_user);
     },
     get lastUserMessage() {
       return (
@@ -583,7 +663,9 @@ export async function evalTaskEjsTemplate(
     },
     get lastCharMessageId() {
       return chat.findLastIndex
-        ? chat.findLastIndex((message) => !message?.is_user && !message?.is_system)
+        ? chat.findLastIndex(
+            (message) => !message?.is_user && !message?.is_system,
+          )
         : [...chat]
             .reverse()
             .findIndex((message) => !message?.is_user && !message?.is_system);
@@ -602,44 +684,25 @@ export async function evalTaskEjsTemplate(
       return chat.length - 1;
     },
     get charLoreBook() {
-      try {
-        const characters = stCtx.characters;
-        const charId = stCtx.characterId;
-        return characters?.[charId]?.data?.extensions?.world || "";
-      } catch {
-        return "";
-      }
+      return snapshot.worldbook.character || "";
     },
     get userLoreBook() {
-      return (
-        stCtx.extensionSettings?.persona_description_lorebook ||
-        stCtx.powerUserSettings?.persona_description_lorebook ||
-        stCtx.power_user?.persona_description_lorebook ||
-        ""
-      );
+      return snapshot.worldbook.persona || "";
     },
     get chatLoreBook() {
-      return stCtx.chatMetadata?.world || "";
+      return snapshot.worldbook.chat || "";
     },
     get charAvatar() {
-      try {
-        const characters = stCtx.characters;
-        const charId = stCtx.characterId;
-        return characters?.[charId]?.avatar
-          ? `/characters/${characters[charId].avatar}`
-          : "";
-      } catch {
-        return "";
-      }
+      return snapshot.character.avatar || "";
     },
-    userAvatar: "",
+    userAvatar: snapshot.user.avatar || "",
     groups: stCtx.groups || [],
-    groupId: stCtx.selectedGroupId ?? null,
+    groupId: snapshot.host.meta.selectedGroupId,
     get model() {
-      return stCtx.onlineStatus || "";
+      return snapshot.host.meta.onlineStatus || "";
     },
     get SillyTavern() {
-      return getStContext();
+      return stCtx;
     },
     getwi: (worldbookOrEntry, entryNameOrData) =>
       getwi(
@@ -704,20 +767,7 @@ export async function evalTaskEjsTemplate(
     getChatMessages: (startOrCount, endOrRole, role) =>
       getChatMessagesCompat(startOrCount, endOrRole, role),
     matchChatMessages: (pattern) => matchChatMessagesCompat(pattern),
-    getchr: () => {
-      try {
-        const characters = stCtx.characters;
-        const charId = stCtx.characterId;
-        const character = characters?.[charId];
-        return (
-          character?.description ||
-          character?.data?.description ||
-          ""
-        );
-      } catch {
-        return "";
-      }
-    },
+    getchr: () => snapshot.character.description || "",
     getchar: undefined,
     getChara: undefined,
     getprp: async () => "",
@@ -750,8 +800,9 @@ export async function evalTaskEjsTemplate(
       })),
     selectActivatedEntries: () => [],
     activateWorldInfoByKeywords: async () => [],
-    getEnabledLoreBooks: () =>
-      [...new Set(renderCtx.entries.map((entry) => entry.worldbook))],
+    getEnabledLoreBooks: () => [
+      ...new Set(renderCtx.entries.map((entry) => entry.worldbook)),
+    ],
     activewi: async (world, entryOrForce, maybeForce) =>
       activateWorldInfoInContext(
         renderCtx,
@@ -781,9 +832,7 @@ export async function evalTaskEjsTemplate(
       }
     },
     print: (...parts) =>
-      parts
-        .filter((part) => part !== undefined && part !== null)
-        .join(""),
+      parts.filter((part) => part !== undefined && part !== null).join(""),
     ...extraEnv,
   };
 
@@ -813,17 +862,24 @@ export async function evalTaskEjsTemplate(
 }
 
 export async function renderTaskEjsContent(content, templateContext = {}) {
-  const processed = substituteTaskEjsParams(content, templateContext);
+  const hostSnapshot = resolveHostSnapshot(templateContext.hostSnapshot);
+  const processed = substituteTaskEjsParams(content, templateContext, {
+    hostSnapshot,
+  });
   if (!processed.includes("<%")) {
     return processed;
   }
 
-  const renderCtx = createTaskEjsRenderContext([], { templateContext });
+  const renderCtx = createTaskEjsRenderContext([], {
+    templateContext,
+    hostSnapshot,
+  });
   return await evalTaskEjsTemplate(processed, renderCtx);
 }
 
-export function checkTaskEjsSyntax(content) {
-  const runtime = getEjsRuntime();
+export async function checkTaskEjsSyntax(content) {
+  const backend = await resolveTaskEjsBackend();
+  const runtime = backend.runtime;
   if (!runtime || !String(content || "").includes("<%")) {
     return null;
   }
@@ -839,4 +895,8 @@ export function checkTaskEjsSyntax(content) {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+export async function inspectTaskEjsRuntimeBackend(options = {}) {
+  return await resolveTaskEjsBackend(options);
 }

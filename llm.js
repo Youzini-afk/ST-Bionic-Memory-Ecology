@@ -244,6 +244,30 @@ function buildJsonAttemptMessages(
   return messages;
 }
 
+function resolvePrivateRequestSource(
+  taskType = "",
+  requestSource = "",
+  { allowAnonymous = false } = {},
+) {
+  const normalizedRequestSource = String(requestSource || "").trim();
+  if (normalizedRequestSource) {
+    return normalizedRequestSource;
+  }
+
+  const normalizedTaskType = String(taskType || "").trim();
+  if (normalizedTaskType) {
+    return `task:${normalizedTaskType}`;
+  }
+
+  if (allowAnonymous) {
+    return "adhoc";
+  }
+
+  throw new Error(
+    "ST-BME private LLM requests require taskType or requestSource",
+  );
+}
+
 async function fetchWithTimeout(
   url,
   options = {},
@@ -314,8 +338,13 @@ async function callDedicatedOpenAICompatible(
     jsonMode = false,
     maxCompletionTokens = null,
     taskType = "",
+    requestSource = "",
   } = {},
 ) {
+  const privateRequestSource = resolvePrivateRequestSource(
+    taskType,
+    requestSource,
+  );
   const config = getMemoryLLMConfig();
   const settings = extension_settings[MODULE_NAME] || {};
   const hasDedicatedConfig = hasDedicatedLLMConfig(config);
@@ -350,7 +379,7 @@ async function callDedicatedOpenAICompatible(
       return normalized;
     }
     throw new Error(
-      "SillyTavern current model returned an unexpected response format",
+      `${privateRequestSource}: SillyTavern current model returned an unexpected response format`,
     );
   }
 
@@ -496,8 +525,13 @@ export async function callLLMForJSON({
   maxRetries = 2,
   signal,
   taskType = "",
+  requestSource = "",
   additionalMessages = [],
 } = {}) {
+  const privateRequestSource = resolvePrivateRequestSource(
+    taskType,
+    requestSource,
+  );
   let lastFailureReason = "";
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -513,6 +547,7 @@ export async function callLLMForJSON({
         signal,
         jsonMode: true,
         taskType,
+        requestSource: privateRequestSource,
         maxCompletionTokens:
           attempt === 0
             ? DEFAULT_JSON_COMPLETION_TOKENS
@@ -561,14 +596,19 @@ export async function callLLMForJSON({
  * @param {string} userPrompt
  * @returns {Promise<string|null>}
  */
-export async function callLLM(systemPrompt, userPrompt) {
+export async function callLLM(systemPrompt, userPrompt, options = {}) {
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
 
   try {
-    const response = await callDedicatedOpenAICompatible(messages);
+    const response = await callDedicatedOpenAICompatible(messages, {
+      signal: options.signal,
+      taskType: options.taskType || "",
+      requestSource:
+        options.requestSource || options.source || "diagnostic:call-llm",
+    });
     return response?.content || null;
   } catch (e) {
     console.error("[ST-BME] LLM 调用失败:", e);
@@ -592,6 +632,9 @@ export async function testLLMConnection() {
     const response = await callLLM(
       "你是一个连接测试助手。请只回答 OK。",
       "请只回复 OK",
+      {
+        requestSource: "diagnostic:test-connection",
+      },
     );
     if (typeof response === "string" && response.trim().length > 0) {
       return { success: true, mode, error: "" };

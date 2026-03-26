@@ -30,13 +30,22 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 3);
+assert.equal(extractProfile.blocks.length, 7);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
-  ["角色定义", "输出格式", "行为规则"],
+  [
+    "角色定义",
+    "角色描述",
+    "用户设定",
+    "世界书前块",
+    "世界书后块",
+    "输出格式",
+    "行为规则",
+  ],
 );
-assert.ok(
-  extractProfile.blocks.every((block) => block.type === "custom"),
+assert.deepEqual(
+  extractProfile.blocks.map((block) => block.type),
+  ["custom", "builtin", "builtin", "builtin", "builtin", "custom", "custom"],
 );
 assert.equal(
   extractProfile.metadata.legacyPromptField,

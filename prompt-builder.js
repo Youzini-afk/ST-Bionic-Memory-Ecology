@@ -63,6 +63,83 @@ function buildEmptyWorldInfoContext() {
   };
 }
 
+function createHostInjectionEntry(
+  entry = {},
+  position = "after",
+  source = "worldInfo",
+) {
+  return {
+    source,
+    position,
+    role: normalizeRole(entry.role),
+    content: String(entry.content || "").trim(),
+    name: String(entry.name || ""),
+    sourceName: String(entry.sourceName || entry.name || ""),
+    worldbook: String(entry.worldbook || ""),
+    depth:
+      position === "atDepth" && Number.isFinite(Number(entry.depth))
+        ? Number(entry.depth)
+        : null,
+    order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : 0,
+  };
+}
+
+function buildWorldInfoResolution(worldInfoContext = {}) {
+  const beforeEntries = Array.isArray(worldInfoContext.worldInfoBeforeEntries)
+    ? worldInfoContext.worldInfoBeforeEntries
+    : [];
+  const afterEntries = Array.isArray(worldInfoContext.worldInfoAfterEntries)
+    ? worldInfoContext.worldInfoAfterEntries
+    : [];
+  const atDepthEntries = Array.isArray(worldInfoContext.worldInfoAtDepthEntries)
+    ? worldInfoContext.worldInfoAtDepthEntries
+    : [];
+  const additionalMessages = Array.isArray(worldInfoContext.taskAdditionalMessages)
+    ? worldInfoContext.taskAdditionalMessages
+    : [];
+
+  return {
+    beforeText: String(worldInfoContext.worldInfoBefore || ""),
+    afterText: String(worldInfoContext.worldInfoAfter || ""),
+    beforeEntries,
+    afterEntries,
+    atDepthEntries,
+    activatedEntryNames: Array.isArray(worldInfoContext.activatedWorldInfoNames)
+      ? worldInfoContext.activatedWorldInfoNames
+      : [],
+    additionalMessages,
+    injections: {
+      before: beforeEntries
+        .map((entry) => createHostInjectionEntry(entry, "before"))
+        .filter((entry) => entry.content),
+      after: afterEntries
+        .map((entry) => createHostInjectionEntry(entry, "after"))
+        .filter((entry) => entry.content),
+      atDepth: atDepthEntries
+        .map((entry) => createHostInjectionEntry(entry, "atDepth"))
+        .filter((entry) => entry.content),
+    },
+  };
+}
+
+function resolveBlockDelivery(block = {}) {
+  if (
+    block.type === "builtin" &&
+    String(block.sourceKey || "") === "worldInfoBefore"
+  ) {
+    return "host.before";
+  }
+  if (
+    block.type === "builtin" &&
+    String(block.sourceKey || "") === "worldInfoAfter"
+  ) {
+    return "host.after";
+  }
+  return normalizeRole(block.role) === "system"
+    ? "private.system"
+    : "private.message";
+}
+
 function profileRequiresWorldInfo(profile) {
   const blocks = Array.isArray(profile?.blocks) ? profile.blocks : [];
   for (const block of blocks) {
@@ -138,9 +215,11 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     ...emptyWorldInfo,
     ...resolvedWorldInfo,
   };
+  const worldInfoResolution = buildWorldInfoResolution(resolvedContext);
 
   let systemPrompt = "";
   const customMessages = [];
+  const renderedBlocks = [];
 
   for (const block of blocks) {
     if (!block || block.enabled === false) continue;
@@ -165,6 +244,21 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     if (!String(content || "").trim()) continue;
 
     const mode = normalizeInjectionMode(block.injectionMode);
+    renderedBlocks.push({
+      id: String(block.id || ""),
+      name: String(block.name || ""),
+      type: String(block.type || "custom"),
+      role,
+      sourceKey: String(block.sourceKey || ""),
+      sourceField: String(block.sourceField || ""),
+      content,
+      order: Number.isFinite(Number(block.order))
+        ? Number(block.order)
+        : block._orderIndex,
+      injectionMode: mode,
+      delivery: resolveBlockDelivery(block),
+    });
+
     if (role === "system") {
       if (!systemPrompt) {
         systemPrompt = content;
@@ -183,18 +277,31 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
   }
 
+  const privateTaskMessages = [
+    ...customMessages,
+    ...worldInfoResolution.additionalMessages,
+  ];
+
   return {
     profile,
+    hostInjections: worldInfoResolution.injections,
+    privateTaskPrompt: {
+      systemPrompt,
+      messages: privateTaskMessages,
+    },
+    privateTaskMessages,
+    renderedBlocks,
+    worldInfoResolution,
     systemPrompt,
     customMessages,
-    additionalMessages: resolvedContext.taskAdditionalMessages || [],
+    additionalMessages: worldInfoResolution.additionalMessages,
     worldInfo: {
-      beforeText: resolvedContext.worldInfoBefore,
-      afterText: resolvedContext.worldInfoAfter,
-      beforeEntries: resolvedContext.worldInfoBeforeEntries,
-      afterEntries: resolvedContext.worldInfoAfterEntries,
-      atDepthEntries: resolvedContext.worldInfoAtDepthEntries,
-      activatedEntryNames: resolvedContext.activatedWorldInfoNames,
+      beforeText: worldInfoResolution.beforeText,
+      afterText: worldInfoResolution.afterText,
+      beforeEntries: worldInfoResolution.beforeEntries,
+      afterEntries: worldInfoResolution.afterEntries,
+      atDepthEntries: worldInfoResolution.atDepthEntries,
+      activatedEntryNames: worldInfoResolution.activatedEntryNames,
     },
     debug: {
       taskType,
@@ -202,11 +309,18 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       profileName: profile?.name || "",
       usedLegacyPrompt: Boolean(legacyPrompt),
       blockCount: blocks.length,
+      renderedBlockCount: renderedBlocks.length,
       worldInfoRequested,
-      worldInfoBeforeCount: resolvedContext.worldInfoBeforeEntries.length,
-      worldInfoAfterCount: resolvedContext.worldInfoAfterEntries.length,
-      worldInfoAtDepthCount: resolvedContext.worldInfoAtDepthEntries.length,
-      additionalMessageCount: resolvedContext.taskAdditionalMessages.length,
+      worldInfoBeforeCount: worldInfoResolution.beforeEntries.length,
+      worldInfoAfterCount: worldInfoResolution.afterEntries.length,
+      worldInfoAtDepthCount: worldInfoResolution.atDepthEntries.length,
+      hostInjectionCount:
+        worldInfoResolution.injections.before.length +
+        worldInfoResolution.injections.after.length +
+        worldInfoResolution.injections.atDepth.length,
+      customMessageCount: customMessages.length,
+      additionalMessageCount: worldInfoResolution.additionalMessages.length,
+      privateTaskMessageCount: privateTaskMessages.length,
     },
   };
 }

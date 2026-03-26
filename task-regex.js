@@ -3,6 +3,7 @@
 // 同时叠加任务本地规则，并按任务阶段执行。
 
 import { extension_settings, getContext } from "../../../extensions.js";
+import { getHostAdapter } from "./host-adapter/index.js";
 import { getActiveTaskProfile } from "./prompt-profiles.js";
 
 const HTML_TAG_PATTERN =
@@ -26,7 +27,9 @@ const OUTPUT_STAGES = new Set([
 
 function isBeautificationReplace(text = "") {
   const normalized = String(text || "");
-  return HTML_TAG_PATTERN.test(normalized) || HTML_ATTR_PATTERN.test(normalized);
+  return (
+    HTML_TAG_PATTERN.test(normalized) || HTML_ATTR_PATTERN.test(normalized)
+  );
 }
 
 function parseRegexFromString(regexStr = "") {
@@ -88,7 +91,9 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
       prompt: destination
         ? Boolean(destination.prompt)
         : raw.promptOnly !== true,
-      display: destination ? Boolean(destination.display) : Boolean(raw.markdownOnly),
+      display: destination
+        ? Boolean(destination.display)
+        : Boolean(raw.markdownOnly),
     },
     sourceType: fallbackSource,
     raw,
@@ -113,21 +118,115 @@ function readArrayPath(root, paths = []) {
   return [];
 }
 
-function collectViaApi(sourceType) {
-  const getter = globalThis?.getTavernRegexes;
-  if (typeof getter !== "function") return [];
+function getLegacyRegexApi(name) {
+  const fn = globalThis?.[name];
+  return typeof fn === "function" ? fn : null;
+}
+
+function getRegexHost() {
+  const legacyGetTavernRegexes = getLegacyRegexApi("getTavernRegexes");
+  const legacyIsCharacterTavernRegexesEnabled = getLegacyRegexApi(
+    "isCharacterTavernRegexesEnabled",
+  );
+
   try {
-    if (sourceType === "global") return getter({ type: "global" }) || [];
-    if (sourceType === "preset") return getter({ type: "preset", name: "in_use" }) || [];
+    const regexHost = getHostAdapter?.()?.regex || null;
+    if (typeof regexHost?.getTavernRegexes === "function") {
+      const capabilitySupport = regexHost.readCapabilitySupport?.() || {};
+      const supplementedCapabilities = [];
+      const missingCapabilities = [];
+      const resolvedCharacterToggle =
+        typeof regexHost.isCharacterTavernRegexesEnabled === "function"
+          ? regexHost.isCharacterTavernRegexesEnabled
+          : legacyIsCharacterTavernRegexesEnabled;
+
+      if (typeof regexHost.isCharacterTavernRegexesEnabled !== "function") {
+        if (resolvedCharacterToggle) {
+          supplementedCapabilities.push("isCharacterTavernRegexesEnabled");
+        } else {
+          missingCapabilities.push("isCharacterTavernRegexesEnabled");
+        }
+      }
+
+      return {
+        getTavernRegexes: regexHost.getTavernRegexes,
+        isCharacterTavernRegexesEnabled: resolvedCharacterToggle,
+        sourceLabel: capabilitySupport.sourceLabel || "host-adapter.regex",
+        fallback:
+          Boolean(capabilitySupport.fallback) ||
+          supplementedCapabilities.length > 0,
+        capabilityStatus: Object.freeze({
+          mode: capabilitySupport.mode || "unknown",
+          supplementedCapabilities: Object.freeze(supplementedCapabilities),
+          missingCapabilities: Object.freeze(missingCapabilities),
+        }),
+      };
+    }
+  } catch (error) {
+    console.debug(
+      "[ST-BME] task-regex 读取 regex bridge 失败，回退到 legacy 宿主接口",
+      error,
+    );
+  }
+
+  const missingCapabilities = [];
+  if (typeof legacyGetTavernRegexes !== "function") {
+    missingCapabilities.push("getTavernRegexes");
+  }
+  if (typeof legacyIsCharacterTavernRegexesEnabled !== "function") {
+    missingCapabilities.push("isCharacterTavernRegexesEnabled");
+  }
+
+  return {
+    getTavernRegexes: legacyGetTavernRegexes,
+    isCharacterTavernRegexesEnabled: legacyIsCharacterTavernRegexesEnabled,
+    sourceLabel: "legacy.globalThis",
+    fallback: true,
+    capabilityStatus: Object.freeze({
+      mode: "legacy",
+      supplementedCapabilities: Object.freeze([]),
+      missingCapabilities: Object.freeze(missingCapabilities),
+    }),
+  };
+}
+
+function collectViaApi(sourceType, regexHost = null) {
+  const getter = regexHost?.getTavernRegexes;
+  if (typeof getter !== "function") {
+    return { supported: false, items: [] };
+  }
+
+  const success = (items) => ({
+    supported: true,
+    items: Array.isArray(items) ? items : [],
+  });
+
+  const unsupported = () => ({ supported: false, items: [] });
+
+  try {
+    if (sourceType === "global") {
+      return success(getter({ type: "global" }));
+    }
+    if (sourceType === "preset") {
+      return success(getter({ type: "preset", name: "in_use" }));
+    }
     if (sourceType === "character") {
-      const checkEnabled = globalThis?.isCharacterTavernRegexesEnabled;
-      if (typeof checkEnabled === "function" && !checkEnabled()) return [];
-      return getter({ type: "character", name: "current" }) || [];
+      const checkEnabled = regexHost?.isCharacterTavernRegexesEnabled;
+      if (
+        typeof checkEnabled !== "function" &&
+        regexHost?.capabilityStatus?.mode === "partial"
+      ) {
+        return unsupported();
+      }
+      if (typeof checkEnabled === "function" && !checkEnabled()) {
+        return success([]);
+      }
+      return success(getter({ type: "character", name: "current" }));
     }
   } catch {
-    return [];
+    return unsupported();
   }
-  return [];
+  return unsupported();
 }
 
 function collectTavernRules(regexConfig = {}) {
@@ -145,6 +244,7 @@ function collectTavernRules(regexConfig = {}) {
   const extSettings = context?.extensionSettings || extension_settings || {};
   const oaiSettings =
     context?.chatCompletionSettings || globalThis?.oai_settings || {};
+  const regexHost = getRegexHost();
   const collected = [];
   const seen = new Set();
 
@@ -160,9 +260,9 @@ function collectTavernRules(regexConfig = {}) {
   };
 
   if (enabledSources.global) {
-    const viaApi = collectViaApi("global");
-    if (viaApi.length > 0) {
-      pushRules(viaApi, "global");
+    const viaApi = collectViaApi("global", regexHost);
+    if (viaApi.supported) {
+      pushRules(viaApi.items, "global");
     } else {
       pushRules(
         readArrayPath(extSettings, [["regex"], ["regex", "regex_scripts"]]),
@@ -172,21 +272,24 @@ function collectTavernRules(regexConfig = {}) {
   }
 
   if (enabledSources.preset) {
-    const viaApi = collectViaApi("preset");
-    if (viaApi.length > 0) {
-      pushRules(viaApi, "preset");
+    const viaApi = collectViaApi("preset", regexHost);
+    if (viaApi.supported) {
+      pushRules(viaApi.items, "preset");
     } else {
       pushRules(
-        readArrayPath(oaiSettings, [["regex_scripts"], ["extensions", "regex_scripts"]]),
+        readArrayPath(oaiSettings, [
+          ["regex_scripts"],
+          ["extensions", "regex_scripts"],
+        ]),
         "preset",
       );
     }
   }
 
   if (enabledSources.character) {
-    const viaApi = collectViaApi("character");
-    if (viaApi.length > 0) {
-      pushRules(viaApi, "character");
+    const viaApi = collectViaApi("character", regexHost);
+    if (viaApi.supported) {
+      pushRules(viaApi.items, "character");
     } else {
       const charId = context?.characterId;
       const characters = context?.characters;
@@ -218,7 +321,9 @@ function collectLocalRules(regexConfig = {}) {
 function shouldApplyRuleForStage(rule, stage = "", stagesConfig = {}) {
   // 将细粒度的 stage 名映射到 input / output 两大类
   if (PROMPT_STAGES.has(stage)) {
-    return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
+    return (
+      stagesConfig.input !== false && rule.destinationFlags.prompt !== false
+    );
   }
   if (OUTPUT_STAGES.has(stage)) {
     return stagesConfig.output !== false;

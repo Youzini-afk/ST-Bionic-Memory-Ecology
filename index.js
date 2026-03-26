@@ -5,6 +5,7 @@ import {
   eventSource,
   event_types,
   extension_prompt_types,
+  extension_prompt_roles,
   getRequestHeaders,
   saveSettingsDebounced,
 } from "../../../../script.js";
@@ -29,6 +30,14 @@ import {
   getNode,
   importGraph,
 } from "./graph.js";
+import {
+  HOST_ADAPTER_STATE_SEMANTICS,
+  getHostAdapter,
+  getHostCapabilitySnapshot,
+  initializeHostAdapter,
+  readHostCapability,
+  refreshHostCapabilitySnapshot,
+} from "./host-adapter/index.js";
 import { estimateTokens, formatInjection } from "./injector.js";
 import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
 import { getNodeDisplayName } from "./node-labels.js";
@@ -648,6 +657,72 @@ function getSettings() {
   return mergedSettings;
 }
 
+function initializeHostCapabilityBridge(options = {}) {
+  try {
+    initializeHostAdapter({
+      getContext,
+      ...options,
+    });
+  } catch (error) {
+    console.warn("[ST-BME] 宿主桥接初始化失败:", error);
+  }
+
+  return getHostCapabilityStatus();
+}
+
+function buildHostCapabilityErrorStatus(error) {
+  return {
+    available: false,
+    mode: "error",
+    fallbackReason:
+      error instanceof Error ? error.message : String(error || "未知错误"),
+    versionHints: {
+      stateSemantics: HOST_ADAPTER_STATE_SEMANTICS,
+      refreshMode: "manual-rebuild",
+    },
+    stateSemantics: HOST_ADAPTER_STATE_SEMANTICS,
+    refreshMode: "manual-rebuild",
+    snapshotRevision: -1,
+    snapshotCreatedAt: "",
+  };
+}
+
+export function getHostCapabilityStatus(options = {}) {
+  const normalizedOptions =
+    options && typeof options === "object" ? { ...options } : {};
+  const shouldRefresh = normalizedOptions.refresh === true;
+
+  delete normalizedOptions.refresh;
+
+  try {
+    return shouldRefresh
+      ? refreshHostCapabilitySnapshot(normalizedOptions)
+      : getHostCapabilitySnapshot();
+  } catch (error) {
+    console.warn("[ST-BME] 读取宿主桥接状态失败:", error);
+    return buildHostCapabilityErrorStatus(error);
+  }
+}
+
+export function refreshHostCapabilityStatus(options = {}) {
+  return getHostCapabilityStatus({
+    ...options,
+    refresh: true,
+  });
+}
+
+export function getHostCapability(name, options = {}) {
+  const normalizedName = String(name || "").trim();
+  if (!normalizedName) return null;
+
+  try {
+    return readHostCapability(normalizedName, options) || null;
+  } catch (error) {
+    console.warn("[ST-BME] 读取宿主桥接能力失败:", error);
+    return getHostCapabilityStatus(options)?.[normalizedName] || null;
+  }
+}
+
 function getSchema() {
   const settings = getSettings();
   const schema = settings.nodeTypeSchema || DEFAULT_NODE_SCHEMA;
@@ -677,6 +752,97 @@ function getCurrentChatId(context = getContext()) {
   return String(context?.chatId || context?.getCurrentChatId?.() || "");
 }
 
+function resolveInjectionPromptType(settings = {}) {
+  const normalized = String(settings?.injectPosition || "atDepth")
+    .trim()
+    .toLowerCase();
+
+  switch (normalized) {
+    case "none":
+      return extension_prompt_types.NONE;
+    case "beforeprompt":
+    case "before_prompt":
+    case "before-prompt":
+      return extension_prompt_types.BEFORE_PROMPT;
+    case "inprompt":
+    case "in_prompt":
+    case "in-prompt":
+      return extension_prompt_types.IN_PROMPT;
+    case "atdepth":
+    case "at_depth":
+    case "inchat":
+    case "in_chat":
+    case "chat":
+    default:
+      return extension_prompt_types.IN_CHAT;
+  }
+}
+
+function resolveInjectionPromptRole(settings = {}) {
+  switch (Number(settings?.injectRole)) {
+    case 1:
+      return extension_prompt_roles.USER;
+    case 2:
+      return extension_prompt_roles.ASSISTANT;
+    default:
+      return extension_prompt_roles.SYSTEM;
+  }
+}
+
+function applyModuleInjectionPrompt(content = "", settings = getSettings()) {
+  const position = resolveInjectionPromptType(settings);
+  const depth =
+    position === extension_prompt_types.IN_CHAT
+      ? clampInt(settings?.injectDepth, 9999, 0, 9999)
+      : 0;
+  const role = resolveInjectionPromptRole(settings);
+  const adapter = getHostAdapter?.();
+  const injectionHost = adapter?.injection;
+
+  if (
+    typeof injectionHost?.setExtensionPrompt === "function" &&
+    injectionHost.setExtensionPrompt(
+      MODULE_NAME,
+      content,
+      position,
+      depth,
+      false,
+      role,
+    )
+  ) {
+    return {
+      applied: true,
+      source: "host-adapter",
+      mode: injectionHost.readInjectionSupport?.()?.mode || "",
+      position,
+      depth,
+      role,
+    };
+  }
+
+  const context = getContext();
+  if (typeof context?.setExtensionPrompt === "function") {
+    context.setExtensionPrompt(MODULE_NAME, content, position, depth, false, role);
+    return {
+      applied: true,
+      source: "context",
+      mode: "legacy-context-setter",
+      position,
+      depth,
+      role,
+    };
+  }
+
+  return {
+    applied: false,
+    source: "unavailable",
+    mode: "unavailable",
+    position,
+    depth,
+    role,
+  };
+}
+
 function ensureCurrentGraphRuntimeState() {
   if (!currentGraph) {
     currentGraph = createEmptyGraph();
@@ -696,13 +862,7 @@ function clearInjectionState() {
   }
 
   try {
-    const context = getContext();
-    context.setExtensionPrompt(
-      MODULE_NAME,
-      "",
-      extension_prompt_types.IN_CHAT,
-      0,
-    );
+    applyModuleInjectionPrompt("", getSettings());
   } catch (error) {
     console.warn("[ST-BME] 清理旧注入失败:", error);
   }
@@ -1232,13 +1392,7 @@ function updateModuleSettings(patch = {}) {
     abortAllRunningStages();
     dismissAllStageNotices();
     try {
-      const context = getContext();
-      context.setExtensionPrompt(
-        MODULE_NAME,
-        "",
-        extension_prompt_types.IN_CHAT,
-        0,
-      );
+      applyModuleInjectionPrompt("", settings);
       lastInjectionContent = "";
       lastRecalledItems = [];
       runtimeStatus = createUiStatus(
@@ -3008,13 +3162,7 @@ function getRecallHookLabel(hookName = "") {
   }
 }
 
-function applyRecallInjection(
-  context,
-  settings,
-  recallInput,
-  recentMessages,
-  result,
-) {
+function applyRecallInjection(settings, recallInput, recentMessages, result) {
   const injectionText = formatInjection(result, getSchema()).trim();
   lastInjectionContent = injectionText;
   const retrievalMeta = result?.meta?.retrieval || {};
@@ -3031,12 +3179,7 @@ function applyRecallInjection(
     );
   }
 
-  context.setExtensionPrompt(
-    MODULE_NAME,
-    injectionText,
-    extension_prompt_types.IN_CHAT,
-    clampInt(settings.injectDepth, 9999, 0, 9999),
-  );
+  applyModuleInjectionPrompt(injectionText, settings);
 
   currentGraph.lastRecallResult = result.selectedNodeIds;
   updateLastRecalledItems(result.selectedNodeIds || []);
@@ -3195,13 +3338,7 @@ async function runRecall(options = {}) {
       },
     });
 
-    applyRecallInjection(
-      context,
-      settings,
-      recallInput,
-      recentMessages,
-      result,
-    );
+    applyRecallInjection(settings, recallInput, recentMessages, result);
     return true;
   } catch (e) {
     if (isAbortError(e)) {
@@ -3787,9 +3924,7 @@ async function onReroll({ fromFloor } = {}) {
   const recovery = findJournalRecoveryPoint(currentGraph, targetFloor);
   if (recovery && recovery.affectedJournals?.length > 0) {
     rollbackAffectedJournals(currentGraph, recovery.affectedJournals);
-    console.log(
-      `[ST-BME] 已回滚 ${recovery.affectedJournals.length} 个 batch`,
-    );
+    console.log(`[ST-BME] 已回滚 ${recovery.affectedJournals.length} 个 batch`);
   }
 
   // 2. 重置提取指针
@@ -3927,6 +4062,7 @@ async function onReembedDirect() {
 
 (async function init() {
   await loadServerSettings();
+  initializeHostCapabilityBridge();
   installSendIntentHooks();
 
   // 注册事件钩子

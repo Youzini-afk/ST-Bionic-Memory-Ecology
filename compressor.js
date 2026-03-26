@@ -265,10 +265,11 @@ async function summarizeBatch(
     maxRetries: 1,
     signal,
     taskType: "compress",
-    additionalMessages: [
-      ...(compressPromptBuild.customMessages || []),
-      ...(compressPromptBuild.additionalMessages || []),
-    ],
+    additionalMessages:
+      compressPromptBuild.privateTaskMessages || [
+        ...(compressPromptBuild.customMessages || []),
+        ...(compressPromptBuild.additionalMessages || []),
+      ],
   });
 }
 
