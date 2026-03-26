@@ -22,6 +22,7 @@ async function loadDefaultSettings() {
         compress: { activeProfileId: "default", profiles: [] },
         synopsis: { activeProfileId: "default", profiles: [] },
         reflection: { activeProfileId: "default", profiles: [] },
+        consolidation: { activeProfileId: "default", profiles: [] },
       };
     },
   });
@@ -44,7 +45,7 @@ assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
 assert.equal(defaultSettings.recallLlmContextMessages, 4);
 assert.equal(defaultSettings.injectDepth, 9999);
-assert.equal(defaultSettings.taskProfilesVersion, 1);
+assert.equal(defaultSettings.taskProfilesVersion, 2);
 assert.ok(defaultSettings.taskProfiles);
 assert.ok(defaultSettings.taskProfiles.extract);
 assert.ok(defaultSettings.taskProfiles.recall);

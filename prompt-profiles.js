@@ -147,7 +147,7 @@ const BUILTIN_BLOCK_DEFINITIONS = [
   },
 ];
 
-const DEFAULT_TASK_PROFILE_VERSION = 1;
+const DEFAULT_TASK_PROFILE_VERSION = 2;
 const DEFAULT_PROFILE_ID = "default";
 
 const LEGACY_PROMPT_FIELD_MAP = {
@@ -375,6 +375,230 @@ const DEFAULT_TASK_BLOCKS = {
   },
 };
 
+const COMMON_DEFAULT_BLOCK_BLUEPRINTS = [
+  {
+    id: "default-role",
+    name: "角色定义",
+    type: "custom",
+    role: "system",
+    contentKey: "role",
+  },
+  {
+    id: "default-char-desc",
+    name: "角色描述",
+    type: "builtin",
+    role: "system",
+    sourceKey: "charDescription",
+  },
+  {
+    id: "default-user-persona",
+    name: "用户设定",
+    type: "builtin",
+    role: "system",
+    sourceKey: "userPersona",
+  },
+  {
+    id: "default-wi-before",
+    name: "世界书前块",
+    type: "builtin",
+    role: "system",
+    sourceKey: "worldInfoBefore",
+  },
+  {
+    id: "default-wi-after",
+    name: "世界书后块",
+    type: "builtin",
+    role: "system",
+    sourceKey: "worldInfoAfter",
+  },
+];
+
+const TASK_CONTEXT_BLOCK_BLUEPRINTS = {
+  extract: [
+    {
+      id: "default-recent-messages",
+      name: "最近消息",
+      type: "builtin",
+      role: "user",
+      sourceKey: "recentMessages",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+    {
+      id: "default-schema",
+      name: "Schema",
+      type: "builtin",
+      role: "user",
+      sourceKey: "schema",
+    },
+    {
+      id: "default-current-range",
+      name: "当前范围",
+      type: "builtin",
+      role: "user",
+      sourceKey: "currentRange",
+    },
+  ],
+  recall: [
+    {
+      id: "default-recent-messages",
+      name: "最近消息",
+      type: "builtin",
+      role: "user",
+      sourceKey: "recentMessages",
+    },
+    {
+      id: "default-user-message",
+      name: "用户消息",
+      type: "builtin",
+      role: "user",
+      sourceKey: "userMessage",
+    },
+    {
+      id: "default-candidate-nodes",
+      name: "候选节点",
+      type: "builtin",
+      role: "user",
+      sourceKey: "candidateNodes",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+  ],
+  consolidation: [
+    {
+      id: "default-candidate-nodes",
+      name: "候选节点",
+      type: "builtin",
+      role: "user",
+      sourceKey: "candidateNodes",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+  ],
+  compress: [
+    {
+      id: "default-node-content",
+      name: "节点内容",
+      type: "builtin",
+      role: "user",
+      sourceKey: "nodeContent",
+    },
+    {
+      id: "default-current-range",
+      name: "当前范围",
+      type: "builtin",
+      role: "user",
+      sourceKey: "currentRange",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+  ],
+  synopsis: [
+    {
+      id: "default-event-summary",
+      name: "事件摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "eventSummary",
+    },
+    {
+      id: "default-character-summary",
+      name: "角色摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "characterSummary",
+    },
+    {
+      id: "default-thread-summary",
+      name: "主线摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "threadSummary",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+  ],
+  reflection: [
+    {
+      id: "default-event-summary",
+      name: "事件摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "eventSummary",
+    },
+    {
+      id: "default-character-summary",
+      name: "角色摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "characterSummary",
+    },
+    {
+      id: "default-thread-summary",
+      name: "主线摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "threadSummary",
+    },
+    {
+      id: "default-contradiction-summary",
+      name: "矛盾摘要",
+      type: "builtin",
+      role: "user",
+      sourceKey: "contradictionSummary",
+    },
+    {
+      id: "default-graph-stats",
+      name: "图统计",
+      type: "builtin",
+      role: "user",
+      sourceKey: "graphStats",
+    },
+  ],
+};
+
+const DEFAULT_TRAILING_BLOCK_BLUEPRINTS = [
+  {
+    id: "default-format",
+    name: "输出格式",
+    type: "custom",
+    role: "system",
+    contentKey: "format",
+  },
+  {
+    id: "default-rules",
+    name: "行为规则",
+    type: "custom",
+    role: "system",
+    contentKey: "rules",
+  },
+];
+
 export { DEFAULT_TASK_BLOCKS };
 
 function nowIso() {
@@ -494,9 +718,91 @@ export function createDefaultTaskProfiles() {
   return profiles;
 }
 
+function buildDefaultTaskProfileBlocks(taskType) {
+  const defaults = DEFAULT_TASK_BLOCKS[taskType] || {};
+  const blueprints = [
+    ...COMMON_DEFAULT_BLOCK_BLUEPRINTS,
+    ...(TASK_CONTEXT_BLOCK_BLUEPRINTS[taskType] || []),
+    ...DEFAULT_TRAILING_BLOCK_BLUEPRINTS,
+  ];
+
+  return blueprints.map((blueprint, index) => ({
+    id: blueprint.id,
+    name: blueprint.name,
+    type: blueprint.type,
+    enabled: true,
+    role: blueprint.role,
+    sourceKey: blueprint.sourceKey || "",
+    sourceField: "",
+    content:
+      blueprint.type === "custom"
+        ? String(defaults?.[blueprint.contentKey] || "")
+        : "",
+    injectionMode: "relative",
+    order: index,
+  }));
+}
+
+function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
+  const canonicalBlocks = buildDefaultTaskProfileBlocks(taskType);
+  const existingById = new Map(
+    (Array.isArray(existingBlocks) ? existingBlocks : [])
+      .filter((block) => block && typeof block === "object")
+      .map((block) => [String(block.id || ""), block]),
+  );
+  const merged = canonicalBlocks.map((canonicalBlock, index) => {
+    const existing = existingById.get(canonicalBlock.id);
+    if (!existing) {
+      return {
+        ...canonicalBlock,
+        order: index,
+      };
+    }
+
+    return {
+      ...canonicalBlock,
+      ...existing,
+      id: canonicalBlock.id,
+      name:
+        typeof existing.name === "string" && existing.name
+          ? existing.name
+          : canonicalBlock.name,
+      type: canonicalBlock.type,
+      role:
+        typeof existing.role === "string" && existing.role
+          ? existing.role
+          : canonicalBlock.role,
+      sourceKey: canonicalBlock.sourceKey || "",
+      content:
+        canonicalBlock.type === "custom"
+          ? typeof existing.content === "string"
+            ? existing.content
+            : canonicalBlock.content
+          : typeof existing.content === "string"
+            ? existing.content
+            : "",
+      injectionMode:
+        typeof existing.injectionMode === "string" && existing.injectionMode
+          ? existing.injectionMode
+          : canonicalBlock.injectionMode,
+      order: index,
+    };
+  });
+
+  const canonicalIds = new Set(canonicalBlocks.map((block) => block.id));
+  const extraBlocks = (Array.isArray(existingBlocks) ? existingBlocks : [])
+    .filter((block) => block && typeof block === "object")
+    .filter((block) => !canonicalIds.has(String(block.id || "")))
+    .map((block, index) => ({
+      ...block,
+      order: canonicalBlocks.length + index,
+    }));
+
+  return [...merged, ...extraBlocks];
+}
+
 export function createDefaultTaskProfile(taskType) {
   const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
-  const defaults = DEFAULT_TASK_BLOCKS[taskType] || {};
   return {
     id: DEFAULT_PROFILE_ID,
     name: "默认预设",
@@ -507,92 +813,7 @@ export function createDefaultTaskProfile(taskType) {
     description: getDefaultProfileDescription(taskType),
     promptMode: "block-based",
     updatedAt: nowIso(),
-    blocks: [
-      {
-        id: "default-role",
-        name: "角色定义",
-        type: "custom",
-        enabled: true,
-        role: "system",
-        sourceKey: "",
-        sourceField: "",
-        content: defaults.role || "",
-        injectionMode: "relative",
-        order: 0,
-      },
-      {
-        id: "default-char-desc",
-        name: "角色描述",
-        type: "builtin",
-        enabled: true,
-        role: "system",
-        sourceKey: "charDescription",
-        sourceField: "",
-        content: "",
-        injectionMode: "relative",
-        order: 1,
-      },
-      {
-        id: "default-user-persona",
-        name: "用户设定",
-        type: "builtin",
-        enabled: true,
-        role: "system",
-        sourceKey: "userPersona",
-        sourceField: "",
-        content: "",
-        injectionMode: "relative",
-        order: 2,
-      },
-      {
-        id: "default-wi-before",
-        name: "世界书前块",
-        type: "builtin",
-        enabled: true,
-        role: "system",
-        sourceKey: "worldInfoBefore",
-        sourceField: "",
-        content: "",
-        injectionMode: "relative",
-        order: 3,
-      },
-      {
-        id: "default-wi-after",
-        name: "世界书后块",
-        type: "builtin",
-        enabled: true,
-        role: "system",
-        sourceKey: "worldInfoAfter",
-        sourceField: "",
-        content: "",
-        injectionMode: "relative",
-        order: 4,
-      },
-      {
-        id: "default-format",
-        name: "输出格式",
-        type: "custom",
-        enabled: true,
-        role: "system",
-        sourceKey: "",
-        sourceField: "",
-        content: defaults.format || "",
-        injectionMode: "relative",
-        order: 5,
-      },
-      {
-        id: "default-rules",
-        name: "行为规则",
-        type: "custom",
-        enabled: true,
-        role: "system",
-        sourceKey: "",
-        sourceField: "",
-        content: defaults.rules || "",
-        injectionMode: "relative",
-        order: 6,
-      },
-    ],
+    blocks: buildDefaultTaskProfileBlocks(taskType),
     generation: {
       max_context_tokens: null,
       max_completion_tokens: null,
@@ -758,14 +979,18 @@ export function ensureTaskProfiles(settings = {}) {
 export function normalizeTaskProfile(taskType, profile = {}, settings = {}) {
   const base = createDefaultTaskProfile(taskType);
   const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
-  const blocks =
+  const isBuiltinDefaultProfile =
+    String(profile?.id || base.id) === DEFAULT_PROFILE_ID &&
+    profile?.builtin !== false;
+  const rawBlocks =
     Array.isArray(profile.blocks) && profile.blocks.length > 0
-      ? profile.blocks.map((block, index) =>
-          normalizePromptBlock(taskType, block, index),
-        )
-      : base.blocks.map((block, index) =>
-          normalizePromptBlock(taskType, block, index),
-        );
+      ? isBuiltinDefaultProfile
+        ? mergeDefaultTaskProfileBlocks(taskType, profile.blocks)
+        : profile.blocks
+      : base.blocks;
+  const blocks = rawBlocks.map((block, index) =>
+    normalizePromptBlock(taskType, block, index),
+  );
 
   return {
     ...base,

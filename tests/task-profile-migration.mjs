@@ -15,7 +15,7 @@ const legacySettings = {
 };
 
 const migrated = migrateLegacyTaskProfiles(legacySettings);
-assert.equal(migrated.taskProfilesVersion, 1);
+assert.equal(migrated.taskProfilesVersion, 2);
 assert.ok(migrated.taskProfiles);
 assert.ok(migrated.taskProfiles.extract);
 assert.ok(migrated.taskProfiles.recall);
@@ -30,7 +30,7 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 7);
+assert.equal(extractProfile.blocks.length, 11);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
   [
@@ -39,13 +39,45 @@ assert.deepEqual(
     "用户设定",
     "世界书前块",
     "世界书后块",
+    "最近消息",
+    "图统计",
+    "Schema",
+    "当前范围",
     "输出格式",
     "行为规则",
   ],
 );
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.type),
-  ["custom", "builtin", "builtin", "builtin", "builtin", "custom", "custom"],
+  [
+    "custom",
+    "builtin",
+    "builtin",
+    "builtin",
+    "builtin",
+    "builtin",
+    "builtin",
+    "builtin",
+    "builtin",
+    "custom",
+    "custom",
+  ],
+);
+assert.deepEqual(
+  extractProfile.blocks.map((block) => block.role),
+  [
+    "system",
+    "system",
+    "system",
+    "system",
+    "system",
+    "user",
+    "user",
+    "user",
+    "user",
+    "system",
+    "system",
+  ],
 );
 assert.equal(
   extractProfile.metadata.legacyPromptField,
@@ -62,5 +94,124 @@ assert.ok(defaults.recall.profiles.length > 0);
 assert.ok(defaults.compress.profiles.length > 0);
 assert.ok(defaults.synopsis.profiles.length > 0);
 assert.ok(defaults.reflection.profiles.length > 0);
+assert.deepEqual(
+  defaults.recall.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "default-role",
+    "charDescription",
+    "userPersona",
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "recentMessages",
+    "userMessage",
+    "candidateNodes",
+    "graphStats",
+    "default-format",
+    "default-rules",
+  ],
+);
+assert.deepEqual(
+  defaults.synopsis.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "default-role",
+    "charDescription",
+    "userPersona",
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "eventSummary",
+    "characterSummary",
+    "threadSummary",
+    "graphStats",
+    "default-format",
+    "default-rules",
+  ],
+);
+
+const upgradedLegacyDefault = getActiveTaskProfile(
+  {
+    taskProfilesVersion: 1,
+    taskProfiles: {
+      extract: {
+        activeProfileId: "default",
+        profiles: [
+          {
+            id: "default",
+            taskType: "extract",
+            builtin: true,
+            blocks: [
+              {
+                id: "default-role",
+                name: "角色定义",
+                type: "custom",
+                role: "system",
+                content: "保留我自己的角色定义",
+                order: 0,
+              },
+              {
+                id: "default-char-desc",
+                name: "角色描述",
+                type: "builtin",
+                role: "system",
+                sourceKey: "charDescription",
+                order: 1,
+              },
+              {
+                id: "default-user-persona",
+                name: "用户设定",
+                type: "builtin",
+                role: "system",
+                sourceKey: "userPersona",
+                order: 2,
+              },
+              {
+                id: "default-wi-before",
+                name: "世界书前块",
+                type: "builtin",
+                role: "system",
+                sourceKey: "worldInfoBefore",
+                order: 3,
+              },
+              {
+                id: "default-wi-after",
+                name: "世界书后块",
+                type: "builtin",
+                role: "system",
+                sourceKey: "worldInfoAfter",
+                order: 4,
+              },
+              {
+                id: "default-format",
+                name: "输出格式",
+                type: "custom",
+                role: "system",
+                content: "保留我自己的输出格式",
+                order: 5,
+              },
+              {
+                id: "default-rules",
+                name: "行为规则",
+                type: "custom",
+                role: "system",
+                content: "保留我自己的行为规则",
+                order: 6,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  },
+  "extract",
+);
+assert.equal(upgradedLegacyDefault.blocks.length, 11);
+assert.equal(upgradedLegacyDefault.blocks[0].content, "保留我自己的角色定义");
+assert.equal(upgradedLegacyDefault.blocks[9].content, "保留我自己的输出格式");
+assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的行为规则");
+assert.deepEqual(
+  upgradedLegacyDefault.blocks
+    .slice(5, 9)
+    .map((block) => block.sourceKey),
+  ["recentMessages", "graphStats", "schema", "currentRange"],
+);
 
 console.log("task-profile-migration tests passed");
