@@ -94,15 +94,16 @@ ST-BME 的处理方式是：
 1. 打开 SillyTavern → 扩展 → 安装扩展
 2. 输入仓库地址：
    ```
-   https://github.com/pjm0616/ST-Bionic-Memory-Ecology
+   https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology
    ```
+   注意：请粘贴仓库根地址，不要使用像 `/graphs/code-frequency` 这样的 GitHub 子页面地址。
 3. 刷新页面
 
 ### 方法二：手动安装
 
 ```bash
 cd SillyTavern/data/default-user/extensions/third-party
-git clone https://github.com/pjm0616/ST-Bionic-Memory-Ecology.git st-bme
+git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 
 重启 SillyTavern 即可。
