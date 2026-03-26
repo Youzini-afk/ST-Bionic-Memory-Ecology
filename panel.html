@@ -255,6 +255,26 @@
                     <i class="fa-solid fa-moon"></i>
                     <span>执行遗忘</span>
                   </button>
+                  <button class="bme-action-btn" id="bme-act-reroll" type="button">
+                    <i class="fa-solid fa-rotate"></i>
+                    <span>重新提取</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    重新提取：回滚指定楼层及之后的提取结果并重做。留空则只重做最新 AI 楼。
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-reroll-floor">起始楼层</label>
+                    <input
+                      id="bme-reroll-floor"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="999999"
+                      placeholder="留空 = 最新 AI 楼"
+                    />
+                  </div>
                 </div>
               </div>
 

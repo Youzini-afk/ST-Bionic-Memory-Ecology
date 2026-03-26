@@ -3740,6 +3740,71 @@ async function onManualExtract() {
   }
 }
 
+async function onReroll({ fromFloor } = {}) {
+  if (isExtracting) {
+    toastr.info("记忆提取正在进行中，请稍候");
+    return;
+  }
+  if (!currentGraph) {
+    toastr.info("图谱为空，无需重 Roll");
+    return;
+  }
+
+  const context = getContext();
+  const chat = context.chat;
+  if (!Array.isArray(chat) || chat.length === 0) {
+    toastr.info("当前聊天为空");
+    return;
+  }
+
+  // 确定回滚起点
+  let targetFloor = Number.isFinite(fromFloor) ? fromFloor : null;
+  if (targetFloor === null) {
+    // 默认：回滚到最新 AI 楼
+    targetFloor = getLastProcessedAssistantFloor();
+    if (targetFloor < 0) {
+      toastr.info("尚未有过提取记录，无需重 Roll");
+      return;
+    }
+  }
+
+  console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
+
+  // 1. 找到受影响的 journal 并回滚
+  const recovery = findJournalRecoveryPoint(currentGraph, targetFloor);
+  if (recovery && recovery.affectedJournals?.length > 0) {
+    rollbackAffectedJournals(currentGraph, recovery.affectedJournals);
+    console.log(
+      `[ST-BME] 已回滚 ${recovery.affectedJournals.length} 个 batch`,
+    );
+  }
+
+  // 2. 重置提取指针
+  const newFloor = targetFloor - 1;
+  currentGraph.historyState.lastProcessedAssistantFloor = newFloor;
+  currentGraph.lastProcessedSeq = newFloor;
+
+  // 3. 清理 processedMessageHashes 中 >= targetFloor 的条目
+  const hashes = currentGraph.historyState.processedMessageHashes || {};
+  for (const key of Object.keys(hashes)) {
+    if (Number(key) >= targetFloor) {
+      delete hashes[key];
+    }
+  }
+
+  // 4. 保存回滚后的状态
+  saveGraph();
+
+  toastr.info(
+    `已回滚到楼层 ${targetFloor} 之前，开始重新提取…`,
+    "ST-BME 重 Roll",
+    { timeOut: 2000 },
+  );
+
+  // 5. 触发重新提取（复用手动提取逻辑）
+  await onManualExtract();
+}
+
 async function onManualSleep() {
   if (!currentGraph) return;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
@@ -3917,6 +3982,7 @@ async function onReembedDirect() {
         rebuildVectorIndex: () => onRebuildVectorIndex(),
         rebuildVectorRange: (range) => onRebuildVectorIndex(range),
         reembedDirect: onReembedDirect,
+        reroll: onReroll,
       },
     });
 

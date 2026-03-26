@@ -828,6 +828,52 @@ function _bindActions() {
         }
       }
     });
+
+  // 重新提取 (reroll) 绑定
+  document
+    .getElementById("bme-act-reroll")
+    ?.addEventListener("click", async () => {
+      const btn = document.getElementById("bme-act-reroll");
+      if (btn?.disabled) return;
+
+      const floorStr = document.getElementById("bme-reroll-floor")?.value;
+      const fromFloor = _parseOptionalInt(floorStr);
+      const desc = Number.isFinite(fromFloor)
+        ? `从楼层 ${fromFloor} 开始回滚并重新提取`
+        : "回滚最新 AI 楼并重新提取";
+
+      if (!confirm(`确认要重新提取吗？\n\n${desc}\n\n已提取的记忆节点将被回滚。`)) {
+        return;
+      }
+
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = "0.5";
+      }
+
+      try {
+        await _actionHandlers.reroll?.({
+          fromFloor: Number.isFinite(fromFloor) ? fromFloor : undefined,
+        });
+        _refreshDashboard();
+        _refreshGraph();
+        if (
+          document
+            .getElementById("bme-pane-memory")
+            ?.classList.contains("active")
+        ) {
+          _refreshMemoryBrowser();
+        }
+      } catch (error) {
+        console.error("[ST-BME] Action reroll failed:", error);
+        toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.style.opacity = "";
+        }
+      }
+    });
 }
 
 function _refreshConfigTab() {
