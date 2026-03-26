@@ -195,6 +195,7 @@ export async function initPanel({
   _bindTabs();
   _bindClose();
   _bindResizeHandle();
+  _bindPanelResize();
   _bindGraphControls();
   _bindActions();
   _bindConfigControls();
@@ -211,6 +212,8 @@ export async function initPanel({
 export function openPanel() {
   if (!overlayEl) return;
   overlayEl.classList.add("active");
+
+  _restorePanelSize();
 
   const isMobile = _isMobile();
   const settings = _getSettings?.() || {};
@@ -677,6 +680,40 @@ function _bindResizeHandle() {
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
   });
+}
+
+const PANEL_SIZE_KEY = "st-bme-panel-size";
+let _panelResizeTimer = null;
+
+function _bindPanelResize() {
+  if (!panelEl || typeof ResizeObserver === "undefined") return;
+  const observer = new ResizeObserver(() => {
+    clearTimeout(_panelResizeTimer);
+    _panelResizeTimer = setTimeout(() => {
+      if (!overlayEl?.classList.contains("active")) return;
+      const w = panelEl.offsetWidth;
+      const h = panelEl.offsetHeight;
+      if (w > 0 && h > 0) {
+        try {
+          localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify({ w, h }));
+        } catch { /* ignore */ }
+      }
+    }, 300);
+  });
+  observer.observe(panelEl);
+}
+
+function _restorePanelSize() {
+  if (!panelEl) return;
+  try {
+    const raw = localStorage.getItem(PANEL_SIZE_KEY);
+    if (!raw) return;
+    const { w, h } = JSON.parse(raw);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 200 && h > 200) {
+      panelEl.style.width = w + "px";
+      panelEl.style.height = h + "px";
+    }
+  } catch { /* ignore */ }
 }
 
 // ==================== 操作绑定 ====================
