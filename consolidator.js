@@ -294,7 +294,7 @@ export async function consolidateMemories({
   const userPrompt = userPromptSections.join("\n\n");
 
   let decision;
-  const consolidationPromptBuild = buildTaskPrompt(settings, "consolidation", {
+  const consolidationPromptBuild = await buildTaskPrompt(settings, "consolidation", {
     taskName: "consolidation",
     candidateNodes: userPrompt,
     candidateText: userPrompt,
@@ -315,7 +315,10 @@ export async function consolidateMemories({
       maxRetries: 1,
       signal,
       taskType: "consolidation",
-      additionalMessages: consolidationPromptBuild.customMessages || [],
+      additionalMessages: [
+        ...(consolidationPromptBuild.customMessages || []),
+        ...(consolidationPromptBuild.additionalMessages || []),
+      ],
     });
   } catch (e) {
     if (isAbortError(e)) throw e;

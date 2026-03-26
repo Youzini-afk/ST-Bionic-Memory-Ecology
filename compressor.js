@@ -229,7 +229,7 @@ async function summarizeBatch(
   const instruction =
     typeDef.compression.instruction || "将以下节点压缩总结为一条精炼记录。";
 
-  const compressPromptBuild = buildTaskPrompt(settings, "compress", {
+  const compressPromptBuild = await buildTaskPrompt(settings, "compress", {
     taskName: "compress",
     nodeContent: nodeDescriptions,
     candidateNodes: nodeDescriptions,
@@ -265,7 +265,10 @@ async function summarizeBatch(
     maxRetries: 1,
     signal,
     taskType: "compress",
-    additionalMessages: compressPromptBuild.customMessages || [],
+    additionalMessages: [
+      ...(compressPromptBuild.customMessages || []),
+      ...(compressPromptBuild.additionalMessages || []),
+    ],
   });
 }
 

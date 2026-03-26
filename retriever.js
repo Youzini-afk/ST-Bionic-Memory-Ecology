@@ -419,7 +419,7 @@ async function llmRecall(
     })
     .join("\n");
 
-  const recallPromptBuild = buildTaskPrompt(settings, "recall", {
+  const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
     taskName: "recall",
     recentMessages: contextStr || "(无)",
     userMessage,
@@ -461,7 +461,10 @@ async function llmRecall(
     maxRetries: 1,
     signal,
     taskType: "recall",
-    additionalMessages: recallPromptBuild.customMessages || [],
+    additionalMessages: [
+      ...(recallPromptBuild.customMessages || []),
+      ...(recallPromptBuild.additionalMessages || []),
+    ],
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

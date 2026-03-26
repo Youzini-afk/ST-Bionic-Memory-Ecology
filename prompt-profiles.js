@@ -50,6 +50,30 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     description: "注入任务级系统指令。可用于添加通用约束或全局规则。提示：可创建多个自定义块并设置不同角色（system/user/assistant）来实现多轮对话式 prompt 编排，利用 few-shot 引导 LLM 遵守格式。可用变量：{{charName}}、{{userName}}、{{charDescription}}、{{userPersona}}、{{currentTime}}。",
   },
   {
+    sourceKey: "charDescription",
+    name: "角色描述",
+    role: "system",
+    description: "注入当前角色卡的描述正文。适合需要把角色设定直接并入任务 prompt 的预设。",
+  },
+  {
+    sourceKey: "userPersona",
+    name: "用户设定",
+    role: "system",
+    description: "注入当前用户 Persona / 用户设定。适合让任务在生成时参考玩家长期设定。",
+  },
+  {
+    sourceKey: "worldInfoBefore",
+    name: "世界书前块",
+    role: "system",
+    description: "注入 EW 同款世界书引擎解析后的 before 桶内容，支持角色主/附加世界书、用户设定世界书、聊天世界书，以及世界书条目中的 EJS / getwi。",
+  },
+  {
+    sourceKey: "worldInfoAfter",
+    name: "世界书后块",
+    role: "system",
+    description: "注入 EW 同款世界书引擎解析后的 after 桶内容。atDepth 条目不会出现在这里，而是自动并入额外消息链路。",
+  },
+  {
     sourceKey: "outputRules",
     name: "输出规则",
     role: "system",

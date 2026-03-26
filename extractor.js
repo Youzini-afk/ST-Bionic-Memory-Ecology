@@ -109,7 +109,7 @@ export async function extractMemories({
       ? `${messages[0]?.seq ?? "?"} ~ ${messages[messages.length - 1]?.seq ?? "?"}`
       : "";
 
-  const promptBuild = buildTaskPrompt(settings, "extract", {
+  const promptBuild = await buildTaskPrompt(settings, "extract", {
     taskName: "extract",
     schema: schemaDescription,
     schemaDescription,
@@ -152,7 +152,10 @@ export async function extractMemories({
     maxRetries: 2,
     signal,
     taskType: "extract",
-    additionalMessages: promptBuild.customMessages || [],
+    additionalMessages: [
+      ...(promptBuild.customMessages || []),
+      ...(promptBuild.additionalMessages || []),
+    ],
   });
   throwIfAborted(signal);
 
@@ -629,7 +632,7 @@ export async function generateSynopsis({
     .map((n) => `${n.fields.title}: ${n.fields.status || "active"}`)
     .join("; ");
 
-  const synopsisPromptBuild = buildTaskPrompt(settings, "synopsis", {
+  const synopsisPromptBuild = await buildTaskPrompt(settings, "synopsis", {
     taskName: "synopsis",
     eventSummary: eventSummaries,
     characterSummary: charSummary || "(无)",
@@ -665,7 +668,10 @@ export async function generateSynopsis({
     maxRetries: 1,
     signal,
     taskType: "synopsis",
-    additionalMessages: synopsisPromptBuild.customMessages || [],
+    additionalMessages: [
+      ...(synopsisPromptBuild.customMessages || []),
+      ...(synopsisPromptBuild.additionalMessages || []),
+    ],
   });
 
   if (!result?.summary) return;
@@ -742,7 +748,7 @@ export async function generateReflection({
     .map((e) => `${e.fromId} -> ${e.toId} (${e.relation})`)
     .join("\n");
 
-  const reflectionPromptBuild = buildTaskPrompt(settings, "reflection", {
+  const reflectionPromptBuild = await buildTaskPrompt(settings, "reflection", {
     taskName: "reflection",
     eventSummary,
     characterSummary: characterSummary || "(无)",
@@ -785,7 +791,10 @@ export async function generateReflection({
     maxRetries: 1,
     signal,
     taskType: "reflection",
-    additionalMessages: reflectionPromptBuild.customMessages || [],
+    additionalMessages: [
+      ...(reflectionPromptBuild.customMessages || []),
+      ...(reflectionPromptBuild.additionalMessages || []),
+    ],
   });
 
   if (!result?.insight) return null;

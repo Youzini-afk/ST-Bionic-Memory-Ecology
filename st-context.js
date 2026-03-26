@@ -22,7 +22,9 @@ export function getSTContextForPrompt() {
     return {
       userPersona:
         ctx.powerUserSettings?.persona_description ||
+        ctx.extensionSettings?.persona_description ||
         ctx.name1_description ||
+        ctx.persona ||
         "",
       charDescription:
         char?.description ||

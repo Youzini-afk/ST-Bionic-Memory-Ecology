@@ -124,6 +124,9 @@ const retrieve = await loadRetrieve({
       .filter((line) => line.trim().startsWith("[")).length;
     return { selected_ids: ["rule-2", "rule-1"] };
   },
+  getSTContextForPrompt() {
+    return {};
+  },
 });
 
 state.vectorCalls.length = 0;
