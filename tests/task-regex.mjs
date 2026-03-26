@@ -13,7 +13,10 @@ const extensionsShimUrl = `data:text/javascript,${encodeURIComponent(
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "../../../extensions.js") {
+    if (
+      specifier === "../../../extensions.js" ||
+      specifier === "../../../../extensions.js"
+    ) {
       return {
         shortCircuit: true,
         url: extensionsShimUrl,
