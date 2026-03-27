@@ -755,7 +755,7 @@ function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
     if (!existing) {
       return {
         ...canonicalBlock,
-        order: index,
+        order: Number.isFinite(Number(canonicalBlock.order)) ? Number(canonicalBlock.order) : index,
       };
     }
 
@@ -782,7 +782,7 @@ function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
         typeof existing.injectionMode === "string" && existing.injectionMode
           ? existing.injectionMode
           : canonicalBlock.injectionMode,
-      order: index,
+      order: Number.isFinite(Number(existing.order)) ? Number(existing.order) : index,
     };
   });
 
@@ -792,7 +792,7 @@ function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
     .filter((block) => !canonicalIds.has(String(block.id || "")))
     .map((block, index) => ({
       ...block,
-      order: canonicalBlocks.length + index,
+      order: Number.isFinite(Number(block.order)) ? Number(block.order) : canonicalBlocks.length + index,
     }));
 
   return [...merged, ...extraBlocks];
