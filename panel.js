@@ -334,7 +334,6 @@ function _onFabSingleClick() {
 
 async function _onFabDoubleClick() {
   if (!_actionHandlers.reroll) return;
-  if (!confirm("确认重新提取最新 AI 楼？")) return;
 
   try {
     _fabEl?.setAttribute("data-status", "running");
