@@ -1095,21 +1095,35 @@
                   </div>
                 </div>
 
-                <div
-                  class="bme-config-card bme-guarded-card"
+                <details
+                  class="bme-config-card bme-guarded-card bme-collapsible-card"
                   data-guard-settings="recallEnabled"
+                  id="bme-recall-advanced-settings"
                 >
-                  <div class="bme-config-card-head">
+                  <summary class="bme-config-card-head bme-collapsible-summary">
                     <div>
-                      <div class="bme-config-card-title">召回增强</div>
+                      <div class="bme-config-card-title">召回高级增强</div>
                       <div class="bme-config-card-subtitle">
-                        调整种子构建、扩散回拉、多样性去重和共现补强。
+                        默认折叠；收纳多意图、时间链、DPP、多项补强和弱信号召回。
                       </div>
                     </div>
-                    <div class="bme-config-guard-note">
-                      在“功能开关”中启用后生效。
+                    <div class="bme-collapsible-meta">
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <span class="bme-collapsible-indicator" aria-hidden="true">
+                        <i class="fa-solid fa-chevron-down"></i>
+                      </span>
                     </div>
+                  </summary>
+                  <div class="bme-config-help">
+                    这些参数更适合在主召回链已经稳定后再微调。想先求稳，保持默认值即可。
                   </div>
+                  <div class="bme-config-subgroup">
+                    <div class="bme-config-subgroup-title">召回增强</div>
+                    <div class="bme-config-subgroup-desc">
+                      调整种子构建、扩散回拉、多样性去重和共现补强。
+                    </div>
                   <label
                     class="bme-inline-checkbox"
                     for="bme-setting-recall-multi-intent-enabled"
@@ -1238,7 +1252,86 @@
                       max="50"
                     />
                   </div>
-                </div>
+                  </div>
+                  <div class="bme-config-subgroup">
+                    <div class="bme-config-subgroup-title">弱信号召回</div>
+                    <div class="bme-config-subgroup-desc">
+                      仅在直连 embedding 且本地有足够向量时使用，用于补抓被主主题压住的弱线索。
+                    </div>
+                    <label
+                      class="bme-inline-checkbox"
+                      for="bme-setting-recall-residual-enabled"
+                    >
+                      <input
+                        id="bme-setting-recall-residual-enabled"
+                        type="checkbox"
+                      />
+                      <span>启用弱信号残差召回</span>
+                    </label>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-recall-residual-basis-max-nodes"
+                        >语义基底节点上限</label
+                      >
+                      <input
+                        id="bme-setting-recall-residual-basis-max-nodes"
+                        class="bme-config-input"
+                        type="number"
+                        min="2"
+                        max="64"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-recall-nmf-topics"
+                        >NMF 主题数</label
+                      >
+                      <input
+                        id="bme-setting-recall-nmf-topics"
+                        class="bme-config-input"
+                        type="number"
+                        min="2"
+                        max="64"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-recall-nmf-novelty-threshold"
+                        >新颖度阈值</label
+                      >
+                      <input
+                        id="bme-setting-recall-nmf-novelty-threshold"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-recall-residual-threshold"
+                        >残差阈值</label
+                      >
+                      <input
+                        id="bme-setting-recall-residual-threshold"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="10"
+                        step="0.01"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-recall-residual-top-k"
+                        >残差二次检索 Top-K</label
+                      >
+                      <input
+                        id="bme-setting-recall-residual-top-k"
+                        class="bme-config-input"
+                        type="number"
+                        min="1"
+                        max="20"
+                      />
+                    </div>
+                  </div>
+                </details>
 
                 <div
                   class="bme-config-card bme-guarded-card"
@@ -1351,95 +1444,6 @@
                       type="number"
                       min="1"
                       max="50"
-                    />
-                  </div>
-                </div>
-
-                <div
-                  class="bme-config-card bme-guarded-card"
-                  data-guard-settings="recallEnabled"
-                >
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">弱信号召回</div>
-                      <div class="bme-config-card-subtitle">
-                        仅在直连 embedding 且本地有足够向量时使用，用于补抓被主主题压住的弱线索。
-                      </div>
-                    </div>
-                    <div class="bme-config-guard-note">
-                      在“功能开关”中启用后生效。
-                    </div>
-                  </div>
-                  <label
-                    class="bme-inline-checkbox"
-                    for="bme-setting-recall-residual-enabled"
-                  >
-                    <input
-                      id="bme-setting-recall-residual-enabled"
-                      type="checkbox"
-                    />
-                    <span>启用弱信号残差召回</span>
-                  </label>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-residual-basis-max-nodes"
-                      >语义基底节点上限</label
-                    >
-                    <input
-                      id="bme-setting-recall-residual-basis-max-nodes"
-                      class="bme-config-input"
-                      type="number"
-                      min="2"
-                      max="64"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-nmf-topics"
-                      >NMF 主题数</label
-                    >
-                    <input
-                      id="bme-setting-recall-nmf-topics"
-                      class="bme-config-input"
-                      type="number"
-                      min="2"
-                      max="64"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-nmf-novelty-threshold"
-                      >新颖度阈值</label
-                    >
-                    <input
-                      id="bme-setting-recall-nmf-novelty-threshold"
-                      class="bme-config-input"
-                      type="number"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-residual-threshold"
-                      >残差阈值</label
-                    >
-                    <input
-                      id="bme-setting-recall-residual-threshold"
-                      class="bme-config-input"
-                      type="number"
-                      min="0"
-                      max="10"
-                      step="0.01"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-residual-top-k"
-                      >残差二次检索 Top-K</label
-                    >
-                    <input
-                      id="bme-setting-recall-residual-top-k"
-                      class="bme-config-input"
-                      type="number"
-                      min="1"
-                      max="20"
                     />
                   </div>
                 </div>
