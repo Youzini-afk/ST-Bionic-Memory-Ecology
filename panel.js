@@ -140,6 +140,7 @@ let currentTaskProfileRuleId = "";
 let fetchedMemoryLLMModels = [];
 let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
+let viewportSyncBound = false;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -163,6 +164,71 @@ async function loadLocalTemplate(templateName) {
     throw new Error(`Template render returned empty content: ${templatePath}`);
   }
   return html;
+}
+
+function mountPanelHtml(html) {
+  const markup = String(html || "").trim();
+  if (!markup) {
+    throw new Error("Panel template markup is empty");
+  }
+
+  if (document.body?.insertAdjacentHTML) {
+    document.body.insertAdjacentHTML("beforebegin", markup);
+    return;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  const fragment = template.content.cloneNode(true);
+  document.documentElement?.appendChild(fragment);
+}
+
+function ensureOverlayMountedAtRoot() {
+  if (!overlayEl) return;
+
+  const root = document.documentElement;
+  const body = document.body;
+  if (!root) return;
+
+  if (overlayEl.parentElement === root && overlayEl.nextElementSibling === body) {
+    return;
+  }
+
+  if (body?.parentElement === root) {
+    root.insertBefore(overlayEl, body);
+    return;
+  }
+
+  root.appendChild(overlayEl);
+}
+
+function syncViewportCssVars() {
+  const rootStyle = document.documentElement?.style;
+  if (!rootStyle) return;
+
+  const viewport = window.visualViewport;
+  const width = Math.max(
+    1,
+    Math.round(viewport?.width || window.innerWidth || 0),
+  );
+  const height = Math.max(
+    1,
+    Math.round(viewport?.height || window.innerHeight || 0),
+  );
+
+  rootStyle.setProperty("--bme-viewport-width", `${width}px`);
+  rootStyle.setProperty("--bme-viewport-height", `${height}px`);
+}
+
+function bindViewportSync() {
+  if (viewportSyncBound) return;
+  viewportSyncBound = true;
+
+  const update = () => syncViewportCssVars();
+  window.addEventListener("resize", update);
+  window.addEventListener("orientationchange", update);
+  window.visualViewport?.addEventListener("resize", update);
+  window.visualViewport?.addEventListener("scroll", update);
 }
 
 /**
@@ -200,7 +266,7 @@ export async function initPanel({
 
   if (!overlayEl || !panelEl) {
     const html = await loadLocalTemplate("panel");
-    $("body").append(html);
+    mountPanelHtml(html);
     overlayEl = document.getElementById("st-bme-panel-overlay");
     panelEl = document.getElementById("st-bme-panel");
     if (!overlayEl || !panelEl) {
@@ -209,6 +275,10 @@ export async function initPanel({
       );
     }
   }
+
+  ensureOverlayMountedAtRoot();
+  bindViewportSync();
+  syncViewportCssVars();
 
   _bindTabs();
   _bindClose();
@@ -410,6 +480,8 @@ export function updateFloatingBallStatus(status = "idle", tooltipText = "") {
  */
 export function openPanel() {
   if (!overlayEl) return;
+  ensureOverlayMountedAtRoot();
+  syncViewportCssVars();
   overlayEl.classList.add("active");
 
   _restorePanelSize();
@@ -973,6 +1045,11 @@ function _bindPanelResize() {
 
 function _restorePanelSize() {
   if (!panelEl) return;
+  if (_isMobile()) {
+    panelEl.style.width = "";
+    panelEl.style.height = "";
+    return;
+  }
   try {
     const raw = localStorage.getItem(PANEL_SIZE_KEY);
     if (!raw) return;
