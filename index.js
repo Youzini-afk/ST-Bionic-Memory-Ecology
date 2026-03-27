@@ -416,11 +416,11 @@ function getStageNoticeTitle(stage) {
 function getStageNoticeDuration(level = "info") {
   switch (level) {
     case "error":
-      return 5600;
+      return 6000;
     case "warning":
-      return 4600;
+      return 5000;
     case "success":
-      return 2800;
+      return 3000;
     default:
       return 3200;
   }
@@ -2967,6 +2967,16 @@ async function executeExtractionBatch({
     extractPrompt: undefined,
     settings,
     signal,
+    onStreamProgress: ({ previewText, receivedChars }) => {
+      const preview = previewText?.length > 80
+        ? "…" + previewText.slice(-80)
+        : previewText || "";
+      setLastExtractionStatus(
+        "AI 生成中",
+        `${preview}\n已接收 ${receivedChars} 字符`,
+        "running",
+      );
+    },
   });
 
   if (!result.success) {
@@ -3737,6 +3747,17 @@ async function runRecall(options = {}) {
       schema: getSchema(),
       signal: recallSignal,
       settings,
+      onStreamProgress: ({ previewText, receivedChars }) => {
+        const preview = previewText?.length > 80
+          ? "…" + previewText.slice(-80)
+          : previewText || "";
+        setLastRecallStatus(
+          "AI 生成中",
+          `${preview}\n已接收 ${receivedChars} 字符`,
+          "running",
+          { syncRuntime: true },
+        );
+      },
       options: {
         topK: settings.recallTopK,
         maxRecallNodes: settings.recallMaxNodes,

@@ -80,6 +80,7 @@ export async function retrieve({
   signal = undefined,
   options = {},
   settings = {},
+  onStreamProgress = null,
 }) {
   throwIfAborted(signal);
   const topK = options.topK ?? 20;
@@ -286,6 +287,7 @@ export async function retrieve({
       options.recallPrompt,
       settings,
       signal,
+      onStreamProgress,
     );
     selectedNodeIds = llmResult.selectedNodeIds;
     llmMeta = {
@@ -429,6 +431,7 @@ async function llmRecall(
   customPrompt,
   settings = {},
   signal,
+  onStreamProgress = null,
 ) {
   throwIfAborted(signal);
   const contextStr = recentMessages.join("\n---\n");
@@ -496,6 +499,7 @@ async function llmRecall(
     ),
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayload.additionalMessages,
+    onStreamProgress,
   });
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {

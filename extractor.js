@@ -89,6 +89,7 @@ export async function extractMemories({
   extractPrompt,
   signal = undefined,
   settings = {},
+  onStreamProgress = null,
 }) {
   throwIfAborted(signal);
   if (!messages || messages.length === 0) {
@@ -184,6 +185,7 @@ export async function extractMemories({
     debugContext: createTaskLlmDebugContext(promptBuild, extractRegexInput),
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayload.additionalMessages,
+    onStreamProgress,
   });
   throwIfAborted(signal);
 

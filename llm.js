@@ -836,7 +836,7 @@ function isAbortError(error) {
 
 async function parseDedicatedStreamingResponse(
   response,
-  { taskKey = "", streamState = null } = {},
+  { taskKey = "", streamState = null, onStreamProgress = null } = {},
 ) {
   const reader = response?.body?.getReader?.();
   if (!reader) {
@@ -938,6 +938,15 @@ async function parseDedicatedStreamingResponse(
             streamState.previewText,
             deltaText,
           );
+          if (typeof onStreamProgress === "function") {
+            try {
+              onStreamProgress({
+                previewText: streamState.previewText,
+                chunkCount: streamState.chunkCount,
+                receivedChars: streamState.receivedChars,
+              });
+            } catch {}
+          }
         }
 
         if (reasoningDelta) {
@@ -1004,6 +1013,7 @@ async function executeDedicatedRequest(
     jsonMode = false,
     taskKey = "",
     streamState = null,
+    onStreamProgress = null,
   } = {},
 ) {
   const requestBody = cloneRuntimeDebugValue(body, {}) || {};
@@ -1064,6 +1074,7 @@ async function executeDedicatedRequest(
       return await parseDedicatedStreamingResponse(response, {
         taskKey,
         streamState,
+        onStreamProgress,
       });
     }
 
@@ -1079,6 +1090,7 @@ async function callDedicatedOpenAICompatible(
     maxCompletionTokens = null,
     taskType = "",
     requestSource = "",
+    onStreamProgress = null,
   } = {},
 ) {
   const privateRequestSource = resolvePrivateRequestSource(
@@ -1246,6 +1258,7 @@ async function callDedicatedOpenAICompatible(
       jsonMode,
       taskKey,
       streamState,
+      onStreamProgress,
     });
   } catch (error) {
     if (
@@ -1332,6 +1345,7 @@ export async function callLLMForJSON({
   additionalMessages = [],
   promptMessages = [],
   debugContext = null,
+  onStreamProgress = null,
 } = {}) {
   const override = getLlmTestOverride("callLLMForJSON");
   if (override) {
@@ -1370,6 +1384,7 @@ export async function callLLMForJSON({
         jsonMode: true,
         taskType,
         requestSource: privateRequestSource,
+        onStreamProgress,
         maxCompletionTokens:
           attempt === 0
             ? DEFAULT_JSON_COMPLETION_TOKENS
