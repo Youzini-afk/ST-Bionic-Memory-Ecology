@@ -12,7 +12,6 @@ const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
-const RETRY_JSON_COMPLETION_TOKENS = 3200;
 const STREAM_DEBUG_PREVIEW_MAX_CHARS = 1200;
 const STREAM_DEBUG_UPDATE_INTERVAL_MS = 120;
 const SENSITIVE_DEBUG_KEY_PATTERN =
@@ -1389,10 +1388,7 @@ export async function callLLMForJSON({
         taskType,
         requestSource: privateRequestSource,
         onStreamProgress,
-        maxCompletionTokens:
-          attempt === 0
-            ? DEFAULT_JSON_COMPLETION_TOKENS
-            : RETRY_JSON_COMPLETION_TOKENS,
+        maxCompletionTokens: DEFAULT_JSON_COMPLETION_TOKENS,
       });
       const responseText = response?.content || "";
       const outputCleanup = applyTaskOutputRegexStages(taskType, responseText);

@@ -335,8 +335,86 @@ async function testDedicatedStreamingAbortDoesNotLeaveActiveState() {
   }
 }
 
+async function testJsonRetryKeepsProfileCompletionTokens() {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+
+    if (fetchCount === 1) {
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: "not-json",
+              },
+              finish_reason: "stop",
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+          },
+        },
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: '{"ok":true}',
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+  };
+
+  try {
+    await withStreamingSettings(
+      {
+        stream: false,
+        max_completion_tokens: 7777,
+      },
+      async () => {
+        const result = await llm.callLLMForJSON({
+          systemPrompt: "system",
+          userPrompt: "user",
+          maxRetries: 1,
+          taskType: "extract",
+          requestSource: "test:json-retry-keeps-profile-tokens",
+        });
+
+        assert.deepEqual(result, { ok: true });
+        assert.equal(fetchCount, 2);
+
+        const snapshot = getSnapshot("extract");
+        assert.ok(snapshot);
+        assert.equal(snapshot.requestBody?.max_completion_tokens, 7777);
+        assert.equal(snapshot.filteredGeneration?.max_completion_tokens, 7777);
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 await testDedicatedStreamingSuccess();
 await testDedicatedStreamingFallsBackToNonStream();
 await testDedicatedStreamingAbortDoesNotLeaveActiveState();
+await testJsonRetryKeepsProfileCompletionTokens();
 
 console.log("llm-streaming tests passed");
