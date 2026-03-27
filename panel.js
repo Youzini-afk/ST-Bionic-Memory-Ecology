@@ -80,7 +80,7 @@ const TASK_PROFILE_GENERATION_GROUPS = [
       { key: "max_completion_tokens", label: "最大补全 Tokens", type: "number", defaultValue: "" },
       { key: "reply_count", label: "回复次数", type: "number", defaultValue: 1 },
       { key: "stream", label: "流式输出", type: "tri_bool", defaultValue: false },
-      { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01, defaultValue: 0.7 },
+      { key: "temperature", label: "温度 (Temperature)", type: "range", min: 0, max: 2, step: 0.01, defaultValue: 1 },
       { key: "top_p", label: "Top P", type: "range", min: 0, max: 1, step: 0.01, defaultValue: 1 },
       { key: "top_k", label: "Top K", type: "number", defaultValue: 0 },
       { key: "top_a", label: "Top A", type: "range", min: 0, max: 1, step: 0.01, defaultValue: 0 },
@@ -2074,6 +2074,25 @@ async function _handleTaskProfileWorkspaceClick(event) {
     case "import-all-profiles":
       document.getElementById("bme-task-profile-import-all")?.click();
       return;
+    case "restore-all-profiles": {
+      const confirmed = window.confirm(
+        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响。是否继续？",
+      );
+      if (!confirmed) return;
+      const taskTypes = getTaskTypeOptions().map((t) => t.id);
+      let restored = state.taskProfiles;
+      const extraPatch = {};
+      for (const tt of taskTypes) {
+        restored = restoreDefaultTaskProfile(restored, tt);
+        const lf = getLegacyPromptFieldForTask(tt);
+        if (lf) extraPatch[lf] = "";
+      }
+      currentTaskProfileBlockId = "";
+      currentTaskProfileRuleId = "";
+      _patchTaskProfiles(restored, extraPatch);
+      toastr.success(`已恢复全部 ${taskTypes.length} 个任务的默认预设`, "ST-BME");
+      return;
+    }
     case "restore-default-profile": {
       const confirmed = window.confirm(
         "这会重建当前任务的默认预设，并切换到默认预设。是否继续？",
@@ -2155,6 +2174,9 @@ function _renderTaskProfileWorkspace(state) {
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
             <i class="fa-solid fa-file-import" style="margin-right:4px"></i>导入全部
+          </button>
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
+            <i class="fa-solid fa-arrows-rotate" style="margin-right:4px"></i>恢复全部
           </button>
         </div>
 
