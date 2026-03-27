@@ -2087,14 +2087,12 @@
 
 @media (max-width: 768px) {
   #st-bme-panel-overlay {
-    align-items: stretch;
-    justify-content: stretch;
+    flex-direction: column;
   }
 
   #st-bme-panel {
-    position: absolute;
-    inset: 0;
-    width: auto;
+    flex: 1 1 0;
+    width: 100vw;
     height: auto;
     max-width: none;
     max-height: none;
