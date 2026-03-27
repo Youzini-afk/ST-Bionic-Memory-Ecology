@@ -183,48 +183,151 @@ function mountPanelHtml(html) {
   document.documentElement?.appendChild(fragment);
 }
 
-function ensureOverlayMountedAtRoot() {
-  if (!overlayEl) return;
-
+function ensureNodeMountedAtRoot(node, { beforeBody = false } = {}) {
+  if (!node) return;
   const root = document.documentElement;
   const body = document.body;
   if (!root) return;
 
-  if (overlayEl.parentElement === root && overlayEl.nextElementSibling === body) {
+  if (beforeBody && body?.parentElement === root) {
+    if (node.parentElement === root && node.nextElementSibling === body) {
+      return;
+    }
+    root.insertBefore(node, body);
     return;
   }
 
-  if (body?.parentElement === root) {
-    root.insertBefore(overlayEl, body);
+  if (node.parentElement === root) {
     return;
   }
 
-  root.appendChild(overlayEl);
+  root.appendChild(node);
+}
+
+function ensureOverlayMountedAtRoot() {
+  ensureNodeMountedAtRoot(overlayEl, { beforeBody: true });
+}
+
+function ensureFabMountedAtRoot() {
+  ensureNodeMountedAtRoot(_fabEl);
+}
+
+function getViewportMetrics() {
+  const viewport = window.visualViewport;
+  return {
+    width: Math.max(
+      1,
+      Math.round(viewport?.width || window.innerWidth || 0),
+    ),
+    height: Math.max(
+      1,
+      Math.round(viewport?.height || window.innerHeight || 0),
+    ),
+  };
 }
 
 function syncViewportCssVars() {
   const rootStyle = document.documentElement?.style;
   if (!rootStyle) return;
 
-  const viewport = window.visualViewport;
-  const width = Math.max(
-    1,
-    Math.round(viewport?.width || window.innerWidth || 0),
-  );
-  const height = Math.max(
-    1,
-    Math.round(viewport?.height || window.innerHeight || 0),
-  );
+  const { width, height } = getViewportMetrics();
 
   rootStyle.setProperty("--bme-viewport-width", `${width}px`);
   rootStyle.setProperty("--bme-viewport-height", `${height}px`);
+}
+
+function getFabFallbackSize() {
+  return _isMobile() ? 54 : 46;
+}
+
+function getFabSize(fab = _fabEl) {
+  if (fab) {
+    const rect = fab.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return {
+        width: rect.width,
+        height: rect.height,
+      };
+    }
+  }
+
+  const fallback = getFabFallbackSize();
+  return {
+    width: fallback,
+    height: fallback,
+  };
+}
+
+function getDefaultFabPosition(fab = _fabEl) {
+  const { width: viewportWidth, height: viewportHeight } = getViewportMetrics();
+  const { width, height } = getFabSize(fab);
+  const sideGap = _isMobile() ? 14 : 16;
+  const bottomGap = _isMobile() ? 96 : 80;
+
+  return {
+    x: Math.max(sideGap, viewportWidth - width - sideGap),
+    y: Math.max(sideGap, viewportHeight - height - bottomGap),
+  };
+}
+
+function clampFabPosition(position = {}, fab = _fabEl) {
+  const { width: viewportWidth, height: viewportHeight } = getViewportMetrics();
+  const { width, height } = getFabSize(fab);
+  const margin = _isMobile() ? 10 : 8;
+  const maxX = Math.max(margin, viewportWidth - width - margin);
+  const maxY = Math.max(margin, viewportHeight - height - margin);
+  const x = Number.isFinite(position?.x) ? position.x : maxX;
+  const y = Number.isFinite(position?.y) ? position.y : maxY;
+
+  return {
+    x: Math.min(Math.max(margin, Math.round(x)), Math.round(maxX)),
+    y: Math.min(Math.max(margin, Math.round(y)), Math.round(maxY)),
+  };
+}
+
+function applyFabPosition(position = {}, fab = _fabEl) {
+  if (!fab) return;
+  const clamped = clampFabPosition(position, fab);
+  fab.style.left = `${clamped.x}px`;
+  fab.style.top = `${clamped.y}px`;
+  fab.style.right = "auto";
+  fab.style.bottom = "auto";
+}
+
+function syncFabPosition() {
+  if (!_fabEl) return;
+
+  ensureFabMountedAtRoot();
+  const mode = _fabEl.dataset.positionMode || "default";
+  if (mode === "saved") {
+    const currentX = Number.parseFloat(_fabEl.style.left);
+    const currentY = Number.parseFloat(_fabEl.style.top);
+    const fallback =
+      _loadFabPosition() ||
+      getDefaultFabPosition(_fabEl);
+    const next = clampFabPosition(
+      {
+        x: Number.isFinite(currentX) ? currentX : fallback.x,
+        y: Number.isFinite(currentY) ? currentY : fallback.y,
+      },
+      _fabEl,
+    );
+    applyFabPosition(next, _fabEl);
+    _saveFabPosition(next.x, next.y);
+    return;
+  }
+
+  applyFabPosition(getDefaultFabPosition(_fabEl), _fabEl);
 }
 
 function bindViewportSync() {
   if (viewportSyncBound) return;
   viewportSyncBound = true;
 
-  const update = () => syncViewportCssVars();
+  const update = () => {
+    syncViewportCssVars();
+    syncFabPosition();
+  };
   window.addEventListener("resize", update);
   window.addEventListener("orientationchange", update);
   window.visualViewport?.addEventListener("resize", update);
@@ -311,7 +414,13 @@ function _getFabVisible() {
 
 function _setFabVisible(visible) {
   try { localStorage.setItem(FAB_VISIBLE_KEY, String(visible)); } catch {}
-  if (_fabEl) _fabEl.style.display = visible ? "flex" : "none";
+  if (_fabEl) {
+    ensureFabMountedAtRoot();
+    _fabEl.style.display = visible ? "flex" : "none";
+    if (visible) {
+      syncFabPosition();
+    }
+  }
   const btn = panelEl?.querySelector("#bme-fab-toggle-btn");
   if (btn) btn.setAttribute("data-active", String(visible));
 }
@@ -327,7 +436,13 @@ function _bindFabToggle() {
 }
 
 function _initFloatingBall() {
-  if (document.getElementById("bme-floating-ball")) return;
+  const existing = document.getElementById("bme-floating-ball");
+  if (existing) {
+    _fabEl = existing;
+    ensureFabMountedAtRoot();
+    syncFabPosition();
+    return;
+  }
 
   const fab = document.createElement("div");
   fab.id = "bme-floating-ball";
@@ -336,8 +451,8 @@ function _initFloatingBall() {
     <i class="fa-solid fa-brain bme-fab-icon"></i>
     <span class="bme-fab-tooltip">BME 记忆图谱</span>
   `;
-  document.body.appendChild(fab);
   _fabEl = fab;
+  ensureFabMountedAtRoot();
 
   // 应用可见性
   if (!_getFabVisible()) fab.style.display = "none";
@@ -345,13 +460,11 @@ function _initFloatingBall() {
   // 恢复位置
   const saved = _loadFabPosition();
   if (saved) {
-    fab.style.left = `${saved.x}px`;
-    fab.style.top = `${saved.y}px`;
-    fab.style.right = "auto";
-    fab.style.bottom = "auto";
+    fab.dataset.positionMode = "saved";
+    applyFabPosition(saved, fab);
   } else {
-    fab.style.right = "16px";
-    fab.style.bottom = "80px";
+    fab.dataset.positionMode = "default";
+    syncFabPosition();
   }
 
   // 拖拽 + 点击逻辑
@@ -383,17 +496,13 @@ function _initFloatingBall() {
     if (!hasMoved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
     hasMoved = true;
 
-    let newX = fabStartX + dx;
-    let newY = fabStartY + dy;
-    // 限制在视口内
-    const size = 46;
-    newX = Math.max(0, Math.min(window.innerWidth - size, newX));
-    newY = Math.max(0, Math.min(window.innerHeight - size, newY));
-
-    fab.style.left = `${newX}px`;
-    fab.style.top = `${newY}px`;
-    fab.style.right = "auto";
-    fab.style.bottom = "auto";
+    applyFabPosition(
+      {
+        x: fabStartX + dx,
+        y: fabStartY + dy,
+      },
+      fab,
+    );
   }
 
   function onPointerUp(e) {
@@ -403,7 +512,11 @@ function _initFloatingBall() {
 
     if (hasMoved) {
       // 拖拽结束 → 保存位置
-      _saveFabPosition(parseInt(fab.style.left), parseInt(fab.style.top));
+      fab.dataset.positionMode = "saved";
+      _saveFabPosition(
+        Number.parseInt(fab.style.left, 10),
+        Number.parseInt(fab.style.top, 10),
+      );
       return;
     }
 

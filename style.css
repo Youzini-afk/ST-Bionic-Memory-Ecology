@@ -2628,3 +2628,22 @@
   opacity: 1;
 }
 
+@media (max-width: 768px) {
+  #bme-floating-ball {
+    width: 54px;
+    height: 54px;
+    border-width: 2px;
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.42),
+      0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+  }
+
+  #bme-floating-ball .bme-fab-icon {
+    font-size: 21px;
+  }
+
+  #bme-floating-ball .bme-fab-tooltip {
+    display: none;
+  }
+}
+
