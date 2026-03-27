@@ -1095,35 +1095,21 @@
                   </div>
                 </div>
 
-                <details
-                  class="bme-config-card bme-guarded-card bme-collapsible-card"
+                <div
+                  class="bme-config-card bme-guarded-card"
                   data-guard-settings="recallEnabled"
-                  id="bme-recall-advanced-settings"
                 >
-                  <summary class="bme-config-card-head bme-collapsible-summary">
+                  <div class="bme-config-card-head">
                     <div>
-                      <div class="bme-config-card-title">召回高级增强</div>
+                      <div class="bme-config-card-title">召回增强</div>
                       <div class="bme-config-card-subtitle">
-                        默认折叠；收纳多意图、时间链、DPP、多项补强和弱信号召回。
+                        先调多意图、扩散回拉和时间链；更后面的候选整理与弱信号补抓收进折叠里。
                       </div>
                     </div>
-                    <div class="bme-collapsible-meta">
-                      <div class="bme-config-guard-note">
-                        在“功能开关”中启用后生效。
-                      </div>
-                      <span class="bme-collapsible-indicator" aria-hidden="true">
-                        <i class="fa-solid fa-chevron-down"></i>
-                      </span>
+                    <div class="bme-config-guard-note">
+                      在“功能开关”中启用后生效。
                     </div>
-                  </summary>
-                  <div class="bme-config-help">
-                    这些参数更适合在主召回链已经稳定后再微调。想先求稳，保持默认值即可。
                   </div>
-                  <div class="bme-config-subgroup">
-                    <div class="bme-config-subgroup-title">召回增强</div>
-                    <div class="bme-config-subgroup-desc">
-                      调整种子构建、扩散回拉、多样性去重和共现补强。
-                    </div>
                   <label
                     class="bme-inline-checkbox"
                     for="bme-setting-recall-multi-intent-enabled"
@@ -1182,156 +1168,177 @@
                       step="0.01"
                     />
                   </div>
-                  <label
-                    class="bme-inline-checkbox"
-                    for="bme-setting-recall-diversity-enabled"
+                  <details
+                    class="bme-config-subdetails bme-collapsible-card"
+                    id="bme-recall-advanced-settings"
                   >
-                    <input
-                      id="bme-setting-recall-diversity-enabled"
-                      type="checkbox"
-                    />
-                    <span>启用 DPP 多样性去重</span>
-                  </label>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-dpp-candidate-multiplier"
-                      >DPP 候选倍率</label
-                    >
-                    <input
-                      id="bme-setting-recall-dpp-candidate-multiplier"
-                      class="bme-config-input"
-                      type="number"
-                      min="1"
-                      max="10"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-dpp-quality-weight"
-                      >DPP 质量权重</label
-                    >
-                    <input
-                      id="bme-setting-recall-dpp-quality-weight"
-                      class="bme-config-input"
-                      type="number"
-                      min="0"
-                      max="10"
-                      step="0.1"
-                    />
-                  </div>
-                  <label
-                    class="bme-inline-checkbox"
-                    for="bme-setting-recall-cooccurrence-enabled"
-                  >
-                    <input
-                      id="bme-setting-recall-cooccurrence-enabled"
-                      type="checkbox"
-                    />
-                    <span>启用共现补强</span>
-                  </label>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-cooccurrence-scale"
-                      >共现补强系数</label
-                    >
-                    <input
-                      id="bme-setting-recall-cooccurrence-scale"
-                      class="bme-config-input"
-                      type="number"
-                      min="0"
-                      max="10"
-                      step="0.01"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-setting-recall-cooccurrence-max-neighbors"
-                      >每个锚点最多补强邻居</label
-                    >
-                    <input
-                      id="bme-setting-recall-cooccurrence-max-neighbors"
-                      class="bme-config-input"
-                      type="number"
-                      min="1"
-                      max="50"
-                    />
-                  </div>
-                  </div>
-                  <div class="bme-config-subgroup">
-                    <div class="bme-config-subgroup-title">弱信号召回</div>
-                    <div class="bme-config-subgroup-desc">
-                      仅在直连 embedding 且本地有足够向量时使用，用于补抓被主主题压住的弱线索。
-                    </div>
-                    <label
-                      class="bme-inline-checkbox"
-                      for="bme-setting-recall-residual-enabled"
-                    >
-                      <input
-                        id="bme-setting-recall-residual-enabled"
-                        type="checkbox"
-                      />
-                      <span>启用弱信号残差召回</span>
-                    </label>
-                    <div class="bme-config-row">
-                      <label for="bme-setting-recall-residual-basis-max-nodes"
-                        >语义基底节点上限</label
+                    <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                      <div>
+                        <div class="bme-config-subgroup-title">更多高级项</div>
+                        <div class="bme-config-subgroup-desc">
+                          从 DPP 多样性去重开始，收纳共现补强和弱信号残差召回。
+                        </div>
+                      </div>
+                      <span class="bme-collapsible-indicator" aria-hidden="true">
+                        <i class="fa-solid fa-chevron-down"></i>
+                      </span>
+                    </summary>
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-subgroup-title">DPP 与共现补强</div>
+                      <div class="bme-config-subgroup-desc">
+                        用来减少重复候选，并在需要时轻推经常一起出现的相关节点。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-diversity-enabled"
                       >
-                      <input
-                        id="bme-setting-recall-residual-basis-max-nodes"
-                        class="bme-config-input"
-                        type="number"
-                        min="2"
-                        max="64"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-setting-recall-nmf-topics"
-                        >NMF 主题数</label
+                        <input
+                          id="bme-setting-recall-diversity-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用 DPP 多样性去重</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-dpp-candidate-multiplier"
+                          >DPP 候选倍率</label
+                        >
+                        <input
+                          id="bme-setting-recall-dpp-candidate-multiplier"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="10"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-dpp-quality-weight"
+                          >DPP 质量权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-dpp-quality-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="10"
+                          step="0.1"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-cooccurrence-enabled"
                       >
-                      <input
-                        id="bme-setting-recall-nmf-topics"
-                        class="bme-config-input"
-                        type="number"
-                        min="2"
-                        max="64"
-                      />
+                        <input
+                          id="bme-setting-recall-cooccurrence-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用共现补强</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-cooccurrence-scale"
+                          >共现补强系数</label
+                        >
+                        <input
+                          id="bme-setting-recall-cooccurrence-scale"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="10"
+                          step="0.01"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-cooccurrence-max-neighbors"
+                          >每个锚点最多补强邻居</label
+                        >
+                        <input
+                          id="bme-setting-recall-cooccurrence-max-neighbors"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50"
+                        />
+                      </div>
                     </div>
-                    <div class="bme-config-row">
-                      <label for="bme-setting-recall-nmf-novelty-threshold"
-                        >新颖度阈值</label
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-subgroup-title">弱信号召回</div>
+                      <div class="bme-config-subgroup-desc">
+                        仅在直连 embedding 且本地有足够向量时使用，用于补抓被主主题压住的弱线索。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-residual-enabled"
                       >
-                      <input
-                        id="bme-setting-recall-nmf-novelty-threshold"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="1"
-                        step="0.01"
-                      />
+                        <input
+                          id="bme-setting-recall-residual-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用弱信号残差召回</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-residual-basis-max-nodes"
+                          >语义基底节点上限</label
+                        >
+                        <input
+                          id="bme-setting-recall-residual-basis-max-nodes"
+                          class="bme-config-input"
+                          type="number"
+                          min="2"
+                          max="64"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-nmf-topics"
+                          >NMF 主题数</label
+                        >
+                        <input
+                          id="bme-setting-recall-nmf-topics"
+                          class="bme-config-input"
+                          type="number"
+                          min="2"
+                          max="64"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-nmf-novelty-threshold"
+                          >新颖度阈值</label
+                        >
+                        <input
+                          id="bme-setting-recall-nmf-novelty-threshold"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-residual-threshold"
+                          >残差阈值</label
+                        >
+                        <input
+                          id="bme-setting-recall-residual-threshold"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="10"
+                          step="0.01"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-residual-top-k"
+                          >残差二次检索 Top-K</label
+                        >
+                        <input
+                          id="bme-setting-recall-residual-top-k"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="20"
+                        />
+                      </div>
                     </div>
-                    <div class="bme-config-row">
-                      <label for="bme-setting-recall-residual-threshold"
-                        >残差阈值</label
-                      >
-                      <input
-                        id="bme-setting-recall-residual-threshold"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="10"
-                        step="0.01"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-setting-recall-residual-top-k"
-                        >残差二次检索 Top-K</label
-                      >
-                      <input
-                        id="bme-setting-recall-residual-top-k"
-                        class="bme-config-input"
-                        type="number"
-                        min="1"
-                        max="20"
-                      />
-                    </div>
-                  </div>
-                </details>
+                  </details>
+                </div>
 
                 <div
                   class="bme-config-card bme-guarded-card"

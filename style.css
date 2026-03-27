@@ -990,11 +990,6 @@
     background 0.2s ease;
 }
 
-.bme-collapsible-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
 
 .bme-collapsible-card[open] .bme-collapsible-indicator {
   transform: rotate(180deg);
@@ -1033,6 +1028,20 @@
   font-size: 11px;
   line-height: 1.5;
   color: var(--bme-on-surface-dim);
+  margin-bottom: 12px;
+}
+
+.bme-config-subdetails {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bme-config-subdetails-summary {
+  margin-bottom: 0;
+}
+
+.bme-config-subdetails[open] > summary {
   margin-bottom: 12px;
 }
 
@@ -2411,3 +2420,4 @@
 #bme-floating-ball:hover .bme-fab-tooltip {
   opacity: 1;
 }
+
