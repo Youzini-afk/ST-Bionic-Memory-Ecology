@@ -1255,9 +1255,9 @@ function _refreshConfigTab() {
   );
   _setInputValue(
     "bme-setting-embed-mode",
-    settings.embeddingTransportMode || "backend",
+    settings.embeddingTransportMode || "direct",
   );
-  _toggleEmbedFields(settings.embeddingTransportMode || "backend");
+  _toggleEmbedFields(settings.embeddingTransportMode || "direct");
   _setInputValue(
     "bme-setting-embed-backend-source",
     settings.embeddingBackendSource || "openai",

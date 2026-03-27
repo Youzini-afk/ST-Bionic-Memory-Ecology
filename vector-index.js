@@ -146,7 +146,7 @@ export function normalizeOpenAICompatibleBaseUrl(value, autoSuffix = true) {
 
 export function getVectorConfigFromSettings(settings = {}) {
   const mode =
-    settings.embeddingTransportMode === "direct" ? "direct" : "backend";
+    settings.embeddingTransportMode === "backend" ? "backend" : "direct";
   const autoSuffix = settings.embeddingAutoSuffix !== false;
 
   if (mode === "direct") {

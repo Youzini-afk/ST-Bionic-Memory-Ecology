@@ -193,7 +193,7 @@ const defaultSettings = {
   embeddingApiUrl: "",
   embeddingApiKey: "",
   embeddingModel: "text-embedding-3-small",
-  embeddingTransportMode: "backend",
+  embeddingTransportMode: "direct",
   embeddingBackendSource: "openai",
   embeddingBackendModel: "text-embedding-3-small",
   embeddingBackendApiUrl: "",
@@ -243,7 +243,7 @@ const defaultSettings = {
   probRecallChance: 0.15, // 触发概率
 
   // ⑩ 反思条目（P2）
-  enableReflection: false, // 启用反思
+  enableReflection: true, // 启用反思
   reflectEveryN: 10, // 每 N 次提取后反思
 
   // UI 面板

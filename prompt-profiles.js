@@ -1,5 +1,7 @@
 // ST-BME: 任务预设与兼容迁移层
 
+import { DEFAULT_TASK_PROFILE_TEMPLATES } from "./default-task-profile-templates.js";
+
 const TASK_TYPES = [
   "extract",
   "recall",
@@ -163,7 +165,7 @@ const LEGACY_PROMPT_FIELD_MAP = {
 // 默认预设拆块定义：每个任务 → 3 段（角色定义 / 输出格式 / 行为规则）
 // ═══════════════════════════════════════════════════
 
-const DEFAULT_TASK_BLOCKS = {
+const FALLBACK_DEFAULT_TASK_BLOCKS = {
   extract: {
     role: [
       "你是记忆提取执行 AI。从对话中提取结构化记忆节点，写入知识图谱。",
@@ -605,6 +607,52 @@ const DEFAULT_TRAILING_BLOCK_BLUEPRINTS = [
   },
 ];
 
+function getDefaultTaskProfileTemplate(taskType) {
+  const template = DEFAULT_TASK_PROFILE_TEMPLATES?.[taskType];
+  if (!template || typeof template !== "object") {
+    return null;
+  }
+  return cloneJson(template);
+}
+
+function buildDefaultTaskBlockTripletsFromTemplate(taskType) {
+  const template = getDefaultTaskProfileTemplate(taskType);
+  const blocks = Array.isArray(template?.blocks) ? template.blocks : [];
+  const getContent = (blockId) =>
+    String(
+      blocks.find((block) => String(block?.id || "") === blockId)?.content || "",
+    );
+  return {
+    heading: getContent("default-heading"),
+    role: getContent("default-role"),
+    format: getContent("default-format"),
+    rules: getContent("default-rules"),
+  };
+}
+
+const DEFAULT_TASK_BLOCKS = Object.fromEntries(
+  TASK_TYPES.map((taskType) => [
+    taskType,
+    (() => {
+      const fromTemplate = buildDefaultTaskBlockTripletsFromTemplate(taskType);
+      if (
+        fromTemplate.heading ||
+        fromTemplate.role ||
+        fromTemplate.format ||
+        fromTemplate.rules
+      ) {
+        return fromTemplate;
+      }
+      return FALLBACK_DEFAULT_TASK_BLOCKS[taskType] || {
+        heading: "",
+        role: "",
+        format: "",
+        rules: "",
+      };
+    })(),
+  ]),
+);
+
 export { DEFAULT_TASK_BLOCKS };
 
 function nowIso() {
@@ -725,6 +773,22 @@ export function createDefaultTaskProfiles() {
 }
 
 function buildDefaultTaskProfileBlocks(taskType) {
+  const template = getDefaultTaskProfileTemplate(taskType);
+  if (Array.isArray(template?.blocks) && template.blocks.length > 0) {
+    return template.blocks.map((block, index) => ({
+      id: String(block?.id || createPromptBlockId(taskType)),
+      name: typeof block?.name === "string" ? block.name : "",
+      type: typeof block?.type === "string" ? block.type : "custom",
+      enabled: block?.enabled !== false,
+      role: normalizeRole(block?.role),
+      sourceKey: typeof block?.sourceKey === "string" ? block.sourceKey : "",
+      sourceField: typeof block?.sourceField === "string" ? block.sourceField : "",
+      content: typeof block?.content === "string" ? block.content : "",
+      injectionMode: normalizeInjectionMode(block?.injectionMode || "relative"),
+      order: Number.isFinite(Number(block?.order)) ? Number(block.order) : index,
+    }));
+  }
+
   const defaults = DEFAULT_TASK_BLOCKS[taskType] || {};
   const blueprints = [
     ...COMMON_DEFAULT_BLOCK_BLUEPRINTS,
@@ -806,7 +870,7 @@ function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
   return [...merged, ...extraBlocks];
 }
 
-export function createDefaultTaskProfile(taskType) {
+function createFallbackDefaultTaskProfile(taskType) {
   const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
   return {
     id: DEFAULT_PROFILE_ID,
@@ -863,6 +927,63 @@ export function createDefaultTaskProfile(taskType) {
       localRules: [],
     },
     metadata: {
+      migratedFromLegacy: false,
+      legacyPromptField,
+    },
+  };
+}
+
+export function createDefaultTaskProfile(taskType) {
+  const template = getDefaultTaskProfileTemplate(taskType);
+  if (!template) {
+    return createFallbackDefaultTaskProfile(taskType);
+  }
+
+  const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
+  const fallback = createFallbackDefaultTaskProfile(taskType);
+  return {
+    ...fallback,
+    ...template,
+    id: DEFAULT_PROFILE_ID,
+    name: String(template?.name || fallback.name),
+    taskType,
+    version: DEFAULT_TASK_PROFILE_VERSION,
+    builtin: true,
+    enabled: template?.enabled !== false,
+    description:
+      typeof template?.description === "string"
+        ? template.description
+        : fallback.description,
+    promptMode: String(template?.promptMode || fallback.promptMode),
+    updatedAt:
+      typeof template?.updatedAt === "string" && template.updatedAt
+        ? template.updatedAt
+        : nowIso(),
+    blocks: buildDefaultTaskProfileBlocks(taskType),
+    generation: {
+      ...fallback.generation,
+      ...(template?.generation || {}),
+    },
+    regex: {
+      ...fallback.regex,
+      ...(template?.regex || {}),
+      sources: {
+        ...fallback.regex.sources,
+        ...(template?.regex?.sources || {}),
+      },
+      stages: {
+        ...fallback.regex.stages,
+        ...(template?.regex?.stages || {}),
+      },
+      localRules: Array.isArray(template?.regex?.localRules)
+        ? template.regex.localRules.map((rule, index) =>
+            normalizeRegexLocalRule(rule, taskType, index),
+          )
+        : [],
+    },
+    metadata: {
+      ...fallback.metadata,
+      ...(template?.metadata || {}),
       migratedFromLegacy: false,
       legacyPromptField,
     },

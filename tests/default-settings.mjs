@@ -45,6 +45,8 @@ assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
 assert.equal(defaultSettings.recallLlmContextMessages, 4);
 assert.equal(defaultSettings.injectDepth, 9999);
+assert.equal(defaultSettings.enableReflection, true);
+assert.equal(defaultSettings.embeddingTransportMode, "direct");
 assert.equal(defaultSettings.taskProfilesVersion, 3);
 assert.ok(defaultSettings.taskProfiles);
 assert.ok(defaultSettings.taskProfiles.extract);

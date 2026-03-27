@@ -210,7 +210,7 @@ const upgradedLegacyDefault = getActiveTaskProfile(
 );
 assert.equal(upgradedLegacyDefault.blocks.length, 12);
 assert.equal(upgradedLegacyDefault.blocks[0].name, "抬头");
-assert.equal(upgradedLegacyDefault.blocks[0].content, "");
+assert.match(upgradedLegacyDefault.blocks[0].content, /虚拟的世界/);
 assert.equal(upgradedLegacyDefault.blocks[0].role, "system");
 assert.equal(upgradedLegacyDefault.blocks[0].injectionMode, "relative");
 assert.equal(upgradedLegacyDefault.blocks[1].content, "保留我自己的角色定义");

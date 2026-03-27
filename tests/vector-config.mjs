@@ -62,6 +62,14 @@ assert.equal(directConfig.mode, "direct");
 assert.equal(directConfig.apiUrl, "https://example.com/v1");
 assert.equal(validateVectorConfig(directConfig).valid, true);
 
+const defaultModeConfig = getVectorConfigFromSettings({
+  embeddingApiUrl: "https://example.com/v1/embeddings",
+  embeddingApiKey: "sk-test",
+  embeddingModel: "text-embedding-3-small",
+});
+assert.equal(defaultModeConfig.mode, "direct");
+assert.equal(validateVectorConfig(defaultModeConfig).valid, true);
+
 const invalidBackendConfig = getVectorConfigFromSettings({
   embeddingTransportMode: "backend",
   embeddingBackendSource: "vllm",
