@@ -1377,6 +1377,19 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  align-items: center;
+}
+
+.bme-bulk-profile-btn {
+  font-size: 12px;
+  padding: 0 10px;
+  min-height: 28px;
+  opacity: 0.72;
+  transition: opacity 0.15s;
+}
+
+.bme-bulk-profile-btn:hover {
+  opacity: 1;
 }
 
 .bme-task-type-btn,

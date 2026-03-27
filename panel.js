@@ -1721,6 +1721,49 @@ function _bindTaskProfileWorkspace() {
     });
     importInput.dataset.bmeBound = "true";
   }
+
+  const importAllInput = document.getElementById("bme-task-profile-import-all");
+  if (importAllInput && importAllInput.dataset.bmeBound !== "true") {
+    importAllInput.addEventListener("change", async () => {
+      const file = importAllInput.files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (parsed?.format !== "st-bme-all-task-profiles" || !parsed?.profiles) {
+          throw new Error("文件格式不正确，请选择「导出全部」生成的文件");
+        }
+        const settings = _getSettings?.() || {};
+        let mergedProfiles = settings.taskProfiles || {};
+        let importedCount = 0;
+        for (const [taskType, entry] of Object.entries(parsed.profiles)) {
+          try {
+            const imported = parseImportedTaskProfile(
+              mergedProfiles,
+              entry,
+              taskType,
+            );
+            mergedProfiles = imported.taskProfiles;
+            importedCount++;
+          } catch (innerError) {
+            console.warn(`[ST-BME] 跳过导入任务 ${taskType}:`, innerError);
+          }
+        }
+        if (importedCount === 0) {
+          toastr.warning("没有成功导入任何预设", "ST-BME");
+          return;
+        }
+        _patchTaskProfiles(mergedProfiles);
+        toastr.success(`已导入 ${importedCount} 个任务预设`, "ST-BME");
+      } catch (error) {
+        console.error("[ST-BME] 导入全部预设失败:", error);
+        toastr.error(`导入全部预设失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        importAllInput.value = "";
+      }
+    });
+    importAllInput.dataset.bmeBound = "true";
+  }
 }
 
 function _handleTaskProfileWorkspaceInput(event) {
@@ -2025,6 +2068,12 @@ async function _handleTaskProfileWorkspaceClick(event) {
     case "import-profile":
       document.getElementById("bme-task-profile-import")?.click();
       return;
+    case "export-all-profiles":
+      _downloadAllTaskProfiles(state.taskProfiles);
+      return;
+    case "import-all-profiles":
+      document.getElementById("bme-task-profile-import-all")?.click();
+      return;
     case "restore-default-profile": {
       const confirmed = window.confirm(
         "这会重建当前任务的默认预设，并切换到默认预设。是否继续？",
@@ -2100,6 +2149,13 @@ function _renderTaskProfileWorkspace(state) {
               `,
             )
             .join("")}
+          <span style="flex:1"></span>
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
+            <i class="fa-solid fa-file-export" style="margin-right:4px"></i>导出全部
+          </button>
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
+            <i class="fa-solid fa-file-import" style="margin-right:4px"></i>导入全部
+          </button>
         </div>
 
         <div class="bme-config-card bme-task-header-card">
@@ -3553,6 +3609,46 @@ function _downloadTaskProfile(taskProfiles, taskType, profile) {
 
 function _sanitizeFileName(fileName = "profile.json") {
   return String(fileName || "profile.json").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
+}
+
+function _downloadAllTaskProfiles(taskProfiles) {
+  try {
+    const taskTypes = getTaskTypeOptions().map((t) => t.id);
+    const profiles = {};
+    for (const taskType of taskTypes) {
+      try {
+        const exported = serializeTaskProfile(taskProfiles, taskType);
+        profiles[taskType] = exported;
+      } catch {
+        // skip missing
+      }
+    }
+    if (Object.keys(profiles).length === 0) {
+      toastr.warning("没有可导出的预设", "ST-BME");
+      return;
+    }
+    const payload = {
+      format: "st-bme-all-task-profiles",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      profiles,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = _sanitizeFileName("st-bme-all-profiles.json");
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    toastr.success(`已导出 ${Object.keys(profiles).length} 个任务预设`, "ST-BME");
+  } catch (error) {
+    console.error("[ST-BME] 导出全部预设失败:", error);
+    toastr.error(`导出全部预设失败: ${error?.message || error}`, "ST-BME");
+  }
 }
 
 function _cloneJson(value) {
