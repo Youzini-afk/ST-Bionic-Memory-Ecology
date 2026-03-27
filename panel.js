@@ -506,6 +506,12 @@ function _switchTab(tabId) {
     pane.classList.toggle("active", pane.id === `bme-pane-${currentTabId}`);
   });
 
+  // ⑥ 移动端图谱 tab 全屏覆盖
+  const mainEl = panelEl?.querySelector(".bme-panel-main");
+  if (mainEl) {
+    mainEl.classList.toggle("mobile-visible", currentTabId === "graph");
+  }
+
   _applyWorkspaceMode();
 
   switch (currentTabId) {

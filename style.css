@@ -25,8 +25,8 @@
 #st-bme-panel {
   width: 82vw;
   height: 72vh;
-  min-width: 480px;
-  min-height: 360px;
+  min-width: 320px;
+  min-height: 320px;
   max-width: 96vw;
   max-height: 92vh;
   background: var(--bme-surface, #131316);
@@ -2041,6 +2041,48 @@
   display: none;
 }
 
+/* ═══════ ⑤ 高级设置折叠 (desktop+mobile) ═══════ */
+
+.bme-advanced-settings {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bme-advanced-settings > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--bme-on-surface-dim);
+  padding: 8px 0;
+  list-style: none;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.bme-advanced-settings > summary:hover {
+  color: var(--bme-on-surface);
+}
+
+.bme-advanced-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.bme-advanced-settings > summary::after {
+  content: "▸";
+  font-size: 12px;
+  transition: transform 0.2s ease;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-advanced-settings[open] > summary::after {
+  transform: rotate(90deg);
+  color: var(--bme-primary);
+}
+
 /* ==================== 响应式 ==================== */
 
 @media (max-width: 768px) {
@@ -2050,6 +2092,8 @@
     max-width: none;
     max-height: none;
     border-radius: 0;
+    min-width: 0;
+    resize: none;
   }
 
   .bme-panel-body {
@@ -2075,8 +2119,33 @@
     display: none;
   }
 
+  /* ⑥ 图谱 tab 移动端全屏覆盖 */
+  .bme-panel-main.mobile-visible {
+    display: flex;
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    border-radius: 0;
+  }
+
+  .bme-panel-main.mobile-visible ~ .bme-panel-tabbar {
+    z-index: 21;
+  }
+
+  /* ② 底部 Tabbar safe-area + 触控增大 */
   .bme-panel-tabbar {
     display: flex;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .bme-panel-tabbar .bme-tab-btn {
+    min-height: 52px;
+    gap: 3px;
+    font-size: 10px;
+  }
+
+  .bme-panel-tabbar .bme-tab-btn i {
+    font-size: 18px;
   }
 
   .bme-resize-handle,
@@ -2084,33 +2153,49 @@
     display: none !important;
   }
 
+  /* ④ 设置导航 pill + scroll-snap */
   .bme-config-nav-mobile {
     display: flex;
     overflow-x: auto;
-    padding: 0 14px 6px;
+    padding: 0 14px 8px;
     margin-bottom: 4px;
     -webkit-overflow-scrolling: touch;
-  }
-
-  .bme-config-nav-mobile .bme-config-nav-btn {
-    flex: 0 0 auto;
-    white-space: nowrap;
+    gap: 6px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
   }
 
   .bme-config-nav-mobile::-webkit-scrollbar {
     display: none;
   }
 
+  .bme-config-nav-mobile .bme-config-nav-btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    scroll-snap-align: start;
+    padding: 10px 14px;
+    min-height: 44px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  /* ⑦ Config mode 移动端 */
   .bme-config-workspace-header {
-    padding: 18px 14px 10px;
+    padding: 14px 14px 8px;
   }
 
   .bme-config-workspace-title {
-    font-size: 20px;
+    font-size: 18px;
   }
 
   .bme-config-sections {
     padding: 14px;
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .bme-config-section-title {
+    font-size: 16px;
   }
 
   .bme-config-grid-2,
@@ -2120,6 +2205,16 @@
   .bme-task-regex-top,
   .bme-task-debug-grid {
     grid-template-columns: 1fr;
+  }
+
+  .bme-config-card,
+  .bme-prompt-card {
+    padding: 14px;
+    border-radius: 12px;
+  }
+
+  .bme-config-card-title {
+    font-size: 13px;
   }
 
   .bme-debug-kv-item {
@@ -2138,6 +2233,84 @@
     justify-content: space-between;
   }
 
+  #st-bme-panel.config-mode .bme-panel-sidebar {
+    display: none;
+  }
+
+  #st-bme-panel.config-mode .bme-panel-main {
+    display: flex;
+    flex: 1;
+  }
+
+  .bme-config-workspace {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* ③ 通用触控目标 44px */
+  .bme-config-input,
+  .bme-config-textarea,
+  .bme-filter-select {
+    min-height: 44px;
+    font-size: 14px;
+    border-radius: 10px;
+  }
+
+  .bme-config-secondary-btn {
+    width: 100%;
+    min-height: 44px;
+    font-size: 13px;
+  }
+
+  .bme-config-test-btn {
+    width: 100%;
+    min-height: 46px;
+  }
+
+  .bme-config-actions {
+    width: 100%;
+  }
+
+  .bme-inline-checkbox {
+    min-height: 44px;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 13px;
+  }
+
+  .bme-inline-checkbox input {
+    width: 20px;
+    height: 20px;
+  }
+
+  .bme-toggle-item {
+    padding: 14px;
+  }
+
+  .bme-toggle-item input[type="checkbox"] {
+    width: 44px;
+    height: 24px;
+    min-width: 44px;
+  }
+
+  .bme-toggle-item input[type="checkbox"]::after {
+    width: 18px;
+    height: 18px;
+  }
+
+  .bme-toggle-item input[type="checkbox"]:checked::after {
+    transform: translateX(20px);
+  }
+
+  .bme-config-row label {
+    font-size: 13px;
+  }
+
+  .bme-config-row {
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  /* ⑧ 任务预设工作区触控优化 */
   .bme-task-toolbar-row,
   .bme-task-header-actions,
   .bme-task-inline-actions,
@@ -2150,6 +2323,9 @@
     overflow-x: auto;
     flex-wrap: nowrap;
     padding-bottom: 4px;
+    gap: 6px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
   }
 
   .bme-task-type-tabs::-webkit-scrollbar,
@@ -2161,35 +2337,59 @@
   .bme-task-subtab-btn {
     flex: 0 0 auto;
     white-space: nowrap;
+    scroll-snap-align: start;
+    min-height: 40px;
+    padding: 0 16px;
+    font-size: 13px;
   }
 
-  .bme-config-actions {
-    width: 100%;
+  .bme-bulk-profile-btn {
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 11px;
   }
 
-  .bme-config-secondary-btn {
-    width: 100%;
+  .bme-task-list-item {
+    padding: 14px;
+    gap: 10px;
   }
 
-  .bme-config-test-btn {
-    width: 100%;
+  .bme-task-list-index {
+    min-width: 40px;
+    height: 32px;
   }
 
-  #st-bme-panel.config-mode .bme-panel-sidebar {
-    display: none;
+  .bme-task-field-grid {
+    gap: 10px;
   }
 
-  #st-bme-panel.config-mode .bme-panel-main {
-    display: flex;
+  .bme-task-header-actions {
+    gap: 6px;
+  }
+
+  .bme-task-header-actions .bme-config-secondary-btn {
     flex: 1;
+    min-width: 0;
+    padding: 0 10px;
+    font-size: 11px;
   }
 
+  .bme-task-builtin-select {
+    max-width: 100%;
+  }
+
+  /* Dashboard 统计卡片横向滚动 */
   .bme-stats-grid {
     display: flex;
     gap: 6px;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     padding-bottom: 4px;
+    scrollbar-width: none;
+  }
+
+  .bme-stats-grid::-webkit-scrollbar {
+    display: none;
   }
 
   .bme-stats-grid .bme-stat-card {
@@ -2197,6 +2397,7 @@
     flex-shrink: 0;
   }
 
+  /* 搜索栏 */
   .bme-search-bar {
     flex-direction: column;
   }
@@ -2205,23 +2406,28 @@
     width: 100%;
   }
 
+  /* 操作按钮增大 */
   .bme-action-btn {
     padding: 18px 8px;
     font-size: 12px;
+    min-height: 80px;
   }
 
   .bme-action-btn i {
     font-size: 22px;
   }
 
+  /* 节点详情移动端全宽 */
   .bme-node-detail {
     width: 100%;
   }
 
+  /* 图例 */
   .bme-graph-legend {
     font-size: 9px;
   }
 
+  /* 移动端图谱预览 */
   .bme-mobile-graph-preview {
     display: block;
     height: 200px;
