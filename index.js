@@ -1076,6 +1076,9 @@ function notifyStatusToast(key, kind, message, title = "ST-BME") {
 function setRuntimeStatus(text, meta, level = "info") {
   runtimeStatus = createUiStatus(text, meta, level);
   refreshPanelLiveState();
+  // 同步悬浮球状态
+  const fabStatus = level === "info" ? "idle" : level;
+  _panelModule?.updateFloatingBallStatus?.(fabStatus, text || "BME 记忆图谱");
 }
 
 function setLastExtractionStatus(

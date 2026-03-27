@@ -2243,3 +2243,104 @@
   display: block;
   pointer-events: auto;
 }
+
+/* --- Floating Ball (悬浮球) --- */
+#bme-floating-ball {
+  position: fixed;
+  z-index: 9998;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: rgba(30, 30, 40, 0.75);
+  backdrop-filter: blur(12px) saturate(120%);
+  -webkit-backdrop-filter: blur(12px) saturate(120%);
+  border: 1.5px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255,255,255,0.05) inset;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: box-shadow 0.3s ease, transform 0.15s ease, border-color 0.3s ease;
+}
+
+#bme-floating-ball:hover {
+  transform: scale(1.08);
+  border-color: var(--bme-accent, #e1415d);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 12px var(--bme-accent, #e1415d40);
+}
+
+#bme-floating-ball:active {
+  cursor: grabbing;
+  transform: scale(0.95);
+}
+
+#bme-floating-ball .bme-fab-icon {
+  font-size: 18px;
+  color: rgba(255, 255, 255, 0.85);
+  pointer-events: none;
+  transition: color 0.3s ease;
+}
+
+#bme-floating-ball:hover .bme-fab-icon {
+  color: var(--bme-accent, #e1415d);
+}
+
+/* Status ring */
+#bme-floating-ball::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  transition: border-color 0.3s ease;
+  pointer-events: none;
+}
+
+#bme-floating-ball[data-status="running"]::after {
+  border-color: var(--bme-accent, #e1415d);
+  animation: bme-fab-pulse 1.5s ease-in-out infinite;
+}
+
+#bme-floating-ball[data-status="success"]::after {
+  border-color: var(--bme-accent2, #4edea3);
+}
+
+#bme-floating-ball[data-status="error"]::after {
+  border-color: #f44336;
+}
+
+#bme-floating-ball[data-status="warning"]::after {
+  border-color: #ffc107;
+}
+
+@keyframes bme-fab-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Tooltip */
+#bme-floating-ball .bme-fab-tooltip {
+  position: absolute;
+  right: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(20, 20, 28, 0.92);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.8);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+#bme-floating-ball:hover .bme-fab-tooltip {
+  opacity: 1;
+}
+

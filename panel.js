@@ -222,6 +222,159 @@ export async function initPanel({
   _applyWorkspaceMode();
   _syncConfigSectionState();
   _refreshRuntimeStatus();
+  _initFloatingBall();
+}
+
+// ==================== 悬浮球 ====================
+
+const FAB_STORAGE_KEY = "bme-fab-position";
+let _fabEl = null;
+
+function _initFloatingBall() {
+  if (document.getElementById("bme-floating-ball")) return;
+
+  const fab = document.createElement("div");
+  fab.id = "bme-floating-ball";
+  fab.setAttribute("data-status", "idle");
+  fab.innerHTML = `
+    <i class="fa-solid fa-brain bme-fab-icon"></i>
+    <span class="bme-fab-tooltip">BME 记忆图谱</span>
+  `;
+  document.body.appendChild(fab);
+  _fabEl = fab;
+
+  // 恢复位置
+  const saved = _loadFabPosition();
+  if (saved) {
+    fab.style.left = `${saved.x}px`;
+    fab.style.top = `${saved.y}px`;
+    fab.style.right = "auto";
+    fab.style.bottom = "auto";
+  } else {
+    fab.style.right = "16px";
+    fab.style.bottom = "80px";
+  }
+
+  // 拖拽 + 点击逻辑
+  let isDragging = false;
+  let hasMoved = false;
+  let startX = 0, startY = 0;
+  let fabStartX = 0, fabStartY = 0;
+  let clickTimer = null;
+
+  const DRAG_THRESHOLD = 5;
+  const DBLCLICK_DELAY = 280;
+
+  function onPointerDown(e) {
+    isDragging = true;
+    hasMoved = false;
+    startX = e.clientX;
+    startY = e.clientY;
+    const rect = fab.getBoundingClientRect();
+    fabStartX = rect.left;
+    fabStartY = rect.top;
+    fab.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function onPointerMove(e) {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!hasMoved && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+    hasMoved = true;
+
+    let newX = fabStartX + dx;
+    let newY = fabStartY + dy;
+    // 限制在视口内
+    const size = 46;
+    newX = Math.max(0, Math.min(window.innerWidth - size, newX));
+    newY = Math.max(0, Math.min(window.innerHeight - size, newY));
+
+    fab.style.left = `${newX}px`;
+    fab.style.top = `${newY}px`;
+    fab.style.right = "auto";
+    fab.style.bottom = "auto";
+  }
+
+  function onPointerUp(e) {
+    if (!isDragging) return;
+    isDragging = false;
+    fab.releasePointerCapture(e.pointerId);
+
+    if (hasMoved) {
+      // 拖拽结束 → 保存位置
+      _saveFabPosition(parseInt(fab.style.left), parseInt(fab.style.top));
+      return;
+    }
+
+    // 非拖拽 → 处理单击/双击
+    if (clickTimer) {
+      // 第二次点击 → 双击 → 重 Roll
+      clearTimeout(clickTimer);
+      clickTimer = null;
+      _onFabDoubleClick();
+    } else {
+      // 第一次点击 → 等待双击
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        _onFabSingleClick();
+      }, DBLCLICK_DELAY);
+    }
+  }
+
+  fab.addEventListener("pointerdown", onPointerDown);
+  document.addEventListener("pointermove", onPointerMove);
+  document.addEventListener("pointerup", onPointerUp);
+}
+
+function _onFabSingleClick() {
+  openPanel();
+}
+
+async function _onFabDoubleClick() {
+  if (!_actionHandlers.reroll) return;
+  if (!confirm("确认重新提取最新 AI 楼？")) return;
+
+  try {
+    _fabEl?.setAttribute("data-status", "running");
+    await _actionHandlers.reroll({});
+    _fabEl?.setAttribute("data-status", "success");
+    _refreshDashboard();
+    _refreshGraph();
+    setTimeout(() => {
+      const status = _getRuntimeStatus?.() || {};
+      _fabEl?.setAttribute("data-status", status.status || "idle");
+    }, 3000);
+  } catch (err) {
+    console.error("[ST-BME] FAB reroll failed:", err);
+    _fabEl?.setAttribute("data-status", "error");
+  }
+}
+
+function _loadFabPosition() {
+  try {
+    const raw = localStorage.getItem(FAB_STORAGE_KEY);
+    if (!raw) return null;
+    const pos = JSON.parse(raw);
+    if (Number.isFinite(pos.x) && Number.isFinite(pos.y)) return pos;
+  } catch {}
+  return null;
+}
+
+function _saveFabPosition(x, y) {
+  try {
+    localStorage.setItem(FAB_STORAGE_KEY, JSON.stringify({ x, y }));
+  } catch {}
+}
+
+export function updateFloatingBallStatus(status = "idle", tooltipText = "") {
+  if (!_fabEl) return;
+  _fabEl.setAttribute("data-status", status);
+  if (tooltipText) {
+    const tip = _fabEl.querySelector(".bme-fab-tooltip");
+    if (tip) tip.textContent = tooltipText;
+  }
 }
 
 /**
