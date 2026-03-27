@@ -96,14 +96,61 @@ const retrieve = await loadRetrieve({
   applyTaskRegex(_settings, _taskType, _stage, text) {
     return text;
   },
+  splitIntentSegments(text) {
+    if (String(text).includes("和")) {
+      return String(text).split("和").map((item) => item.trim());
+    }
+    return [];
+  },
+  mergeVectorResults(groups, limit) {
+    const merged = new Map();
+    let rawHitCount = 0;
+    for (const group of groups) {
+      for (const item of group) {
+        rawHitCount += 1;
+        const existing = merged.get(item.nodeId);
+        if (!existing || item.score > existing.score) {
+          merged.set(item.nodeId, item);
+        }
+      }
+    }
+    return {
+      rawHitCount,
+      results: [...merged.values()].slice(0, limit),
+    };
+  },
+  collectSupplementalAnchorNodeIds() {
+    return [];
+  },
+  isEligibleAnchorNode(node) {
+    return Boolean(node?.fields?.title || node?.fields?.name);
+  },
+  createCooccurrenceIndex() {
+    return { map: new Map(), source: "batchJournal", batchCount: 0, pairCount: 0 };
+  },
+  applyCooccurrenceBoost(baseScores) {
+    return { scores: new Map(baseScores), boostedNodes: [] };
+  },
+  applyDiversitySampling(candidates, { k }) {
+    return {
+      applied: true,
+      reason: "",
+      selected: candidates.slice(0, k).reverse(),
+      beforeCount: candidates.length,
+      afterCount: Math.min(k, candidates.length),
+    };
+  },
+  async runResidualRecall() {
+    return { triggered: false, hits: [], skipReason: "residual-disabled-test" };
+  },
   hybridScore: ({ graphScore = 0, vectorScore = 0, importance = 0 }) =>
     graphScore + vectorScore + importance,
   reinforceAccessBatch() {},
   validateVectorConfig() {
     return { valid: true };
   },
-  async findSimilarNodesByText(_graph, _message, _embeddingConfig, topK) {
-    state.vectorCalls.push(topK);
+  async findSimilarNodesByText(_graph, message, _embeddingConfig, topK) {
+    state.vectorCalls.push({ topK, message });
     return [
       { nodeId: "rule-1", score: 0.9 },
       { nodeId: "rule-2", score: 0.8 },
@@ -124,8 +171,8 @@ const retrieve = await loadRetrieve({
       .filter((line) => line.trim().startsWith("[")).length;
     return { selected_ids: ["rule-2", "rule-1"] };
   },
-  getSTContextForPrompt() {
-    return {};
+    getSTContextForPrompt() {
+      return {};
   },
 });
 
@@ -149,7 +196,7 @@ const noStageResult = await retrieve({
 assert.equal(state.vectorCalls.length, 0);
 assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCalls.length, 0);
-assert.deepEqual(Array.from(noStageResult.selectedNodeIds), ["rule-1", "rule-2"]);
+assert.deepEqual(Array.from(noStageResult.selectedNodeIds), ["rule-2", "rule-1"]);
 
 state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
@@ -170,12 +217,16 @@ const llmPoolResult = await retrieve({
     llmCandidatePool: 2,
   },
 });
-assert.deepEqual(state.vectorCalls, [4]);
+assert.deepEqual(state.vectorCalls, [{ topK: 4, message: "请根据规则给出结论" }]);
 assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCandidateCount, 2);
 assert.deepEqual(Array.from(llmPoolResult.selectedNodeIds), ["rule-2", "rule-1"]);
 assert.equal(llmPoolResult.meta.retrieval.llm.status, "llm");
 assert.equal(llmPoolResult.meta.retrieval.llm.candidatePool, 2);
+assert.equal(llmPoolResult.meta.retrieval.vectorMergedHits, 3);
+assert.equal(llmPoolResult.meta.retrieval.diversityApplied, true);
+assert.equal(llmPoolResult.meta.retrieval.candidatePoolBeforeDpp, 3);
+assert.equal(llmPoolResult.meta.retrieval.candidatePoolAfterDpp, 2);
 
 state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
@@ -193,11 +244,21 @@ await retrieve({
     enableGraphDiffusion: true,
     diffusionTopK: 7,
     enableLLMRecall: false,
+    enableMultiIntent: true,
+    multiIntentMaxSegments: 4,
+    enableTemporalLinks: true,
+    temporalLinkStrength: 0.2,
+    teleportAlpha: 0.15,
   },
 });
-assert.deepEqual(state.vectorCalls, [3]);
+assert.equal(state.vectorCalls.length, 3);
+assert.deepEqual(
+  state.vectorCalls.map((item) => item.topK),
+  [3, 3, 3],
+);
 assert.equal(state.diffusionCalls.length, 1);
 assert.equal(state.diffusionCalls[0].options.topK, 7);
+assert.equal(state.diffusionCalls[0].options.teleportAlpha, 0.15);
 assert.equal(noStageResult.meta.retrieval.llm.status, "disabled");
 
 console.log("retrieval-config tests passed");

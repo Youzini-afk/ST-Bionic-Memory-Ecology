@@ -61,16 +61,30 @@ const replacementEdge = createEdge({
 assert.ok(addEdge(graph, replacementEdge));
 assert.notEqual(replacementEdge.id, historicalEdge.id);
 
-const adjacencyMap = buildTemporalAdjacencyMap(graph);
+const adjacencyMap = buildTemporalAdjacencyMap(graph, {
+  includeTemporalLinks: true,
+  temporalLinkStrength: 0.2,
+});
 const event1Neighbors = adjacencyMap.get(event1.id) || [];
-assert.equal(event1Neighbors.length, 1);
-assert.equal(event1Neighbors[0].targetId, character.id);
-assert.equal(event1Neighbors[0].strength, 0.7);
+assert.equal(adjacencyMap.syntheticEdgeCount, 1);
+assert.ok(
+  event1Neighbors.some(
+    (item) => item.targetId === character.id && item.strength === 0.7,
+  ),
+);
+assert.ok(
+  event1Neighbors.some(
+    (item) => item.targetId === event2.id && item.strength === 0.2,
+  ),
+);
 
 const diffusion = diffuseAndRank(adjacencyMap, [
   { id: event2.id, energy: 1 },
   { id: event2.id, energy: 0.5 },
-]);
+], {
+  teleportAlpha: 0.15,
+});
 assert.ok(diffusion.some((item) => item.nodeId === character.id));
+assert.ok(diffusion.some((item) => item.nodeId === event1.id));
 
 console.log("graph-retrieval tests passed");

@@ -1156,6 +1156,26 @@ function _refreshConfigTab() {
     settings.recallEnableGraphDiffusion ?? true,
   );
   _setCheckboxValue(
+    "bme-setting-recall-multi-intent-enabled",
+    settings.recallEnableMultiIntent ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-recall-temporal-links-enabled",
+    settings.recallEnableTemporalLinks ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-recall-diversity-enabled",
+    settings.recallEnableDiversitySampling ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-recall-cooccurrence-enabled",
+    settings.recallEnableCooccurrenceBoost ?? false,
+  );
+  _setCheckboxValue(
+    "bme-setting-recall-residual-enabled",
+    settings.recallEnableResidualRecall ?? false,
+  );
+  _setCheckboxValue(
     "bme-setting-consolidation-enabled",
     settings.enableConsolidation ?? true,
   );
@@ -1206,6 +1226,54 @@ function _refreshConfigTab() {
   _setInputValue(
     "bme-setting-recall-llm-context-messages",
     settings.recallLlmContextMessages ?? 4,
+  );
+  _setInputValue(
+    "bme-setting-recall-multi-intent-max-segments",
+    settings.recallMultiIntentMaxSegments ?? 4,
+  );
+  _setInputValue(
+    "bme-setting-recall-teleport-alpha",
+    settings.recallTeleportAlpha ?? 0.15,
+  );
+  _setInputValue(
+    "bme-setting-recall-temporal-link-strength",
+    settings.recallTemporalLinkStrength ?? 0.2,
+  );
+  _setInputValue(
+    "bme-setting-recall-dpp-candidate-multiplier",
+    settings.recallDppCandidateMultiplier ?? 3,
+  );
+  _setInputValue(
+    "bme-setting-recall-dpp-quality-weight",
+    settings.recallDppQualityWeight ?? 1.0,
+  );
+  _setInputValue(
+    "bme-setting-recall-cooccurrence-scale",
+    settings.recallCooccurrenceScale ?? 0.1,
+  );
+  _setInputValue(
+    "bme-setting-recall-cooccurrence-max-neighbors",
+    settings.recallCooccurrenceMaxNeighbors ?? 10,
+  );
+  _setInputValue(
+    "bme-setting-recall-residual-basis-max-nodes",
+    settings.recallResidualBasisMaxNodes ?? 24,
+  );
+  _setInputValue(
+    "bme-setting-recall-nmf-topics",
+    settings.recallNmfTopics ?? 15,
+  );
+  _setInputValue(
+    "bme-setting-recall-nmf-novelty-threshold",
+    settings.recallNmfNoveltyThreshold ?? 0.4,
+  );
+  _setInputValue(
+    "bme-setting-recall-residual-threshold",
+    settings.recallResidualThreshold ?? 0.3,
+  );
+  _setInputValue(
+    "bme-setting-recall-residual-top-k",
+    settings.recallResidualTopK ?? 5,
   );
   _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
   _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
@@ -1343,6 +1411,21 @@ function _bindConfigControls() {
     _patchSettings({ recallEnableGraphDiffusion: checked });
     _refreshStageCardStates();
   });
+  bindCheckbox("bme-setting-recall-multi-intent-enabled", (checked) => {
+    _patchSettings({ recallEnableMultiIntent: checked });
+  });
+  bindCheckbox("bme-setting-recall-temporal-links-enabled", (checked) => {
+    _patchSettings({ recallEnableTemporalLinks: checked });
+  });
+  bindCheckbox("bme-setting-recall-diversity-enabled", (checked) => {
+    _patchSettings({ recallEnableDiversitySampling: checked });
+  });
+  bindCheckbox("bme-setting-recall-cooccurrence-enabled", (checked) => {
+    _patchSettings({ recallEnableCooccurrenceBoost: checked });
+  });
+  bindCheckbox("bme-setting-recall-residual-enabled", (checked) => {
+    _patchSettings({ recallEnableResidualRecall: checked });
+  });
   bindCheckbox("bme-setting-consolidation-enabled", (checked) => {
     _patchSettings({ enableConsolidation: checked });
     _refreshGuardedConfigStates();
@@ -1394,6 +1477,66 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-recall-llm-context-messages", 4, 0, 20, (value) =>
     _patchSettings({ recallLlmContextMessages: value }),
+  );
+  bindNumber(
+    "bme-setting-recall-multi-intent-max-segments",
+    4,
+    1,
+    8,
+    (value) => _patchSettings({ recallMultiIntentMaxSegments: value }),
+  );
+  bindFloat("bme-setting-recall-teleport-alpha", 0.15, 0, 1, (value) =>
+    _patchSettings({ recallTeleportAlpha: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-temporal-link-strength",
+    0.2,
+    0,
+    1,
+    (value) => _patchSettings({ recallTemporalLinkStrength: value }),
+  );
+  bindNumber(
+    "bme-setting-recall-dpp-candidate-multiplier",
+    3,
+    1,
+    10,
+    (value) => _patchSettings({ recallDppCandidateMultiplier: value }),
+  );
+  bindFloat("bme-setting-recall-dpp-quality-weight", 1.0, 0, 10, (value) =>
+    _patchSettings({ recallDppQualityWeight: value }),
+  );
+  bindFloat("bme-setting-recall-cooccurrence-scale", 0.1, 0, 10, (value) =>
+    _patchSettings({ recallCooccurrenceScale: value }),
+  );
+  bindNumber(
+    "bme-setting-recall-cooccurrence-max-neighbors",
+    10,
+    1,
+    50,
+    (value) => _patchSettings({ recallCooccurrenceMaxNeighbors: value }),
+  );
+  bindNumber(
+    "bme-setting-recall-residual-basis-max-nodes",
+    24,
+    2,
+    64,
+    (value) => _patchSettings({ recallResidualBasisMaxNodes: value }),
+  );
+  bindNumber("bme-setting-recall-nmf-topics", 15, 2, 64, (value) =>
+    _patchSettings({ recallNmfTopics: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-nmf-novelty-threshold",
+    0.4,
+    0,
+    1,
+    (value) => _patchSettings({ recallNmfNoveltyThreshold: value }),
+  );
+  bindFloat("bme-setting-recall-residual-threshold", 0.3, 0, 10, (value) =>
+    _patchSettings({ recallResidualThreshold: value }),
+  );
+  bindNumber("bme-setting-recall-residual-top-k", 5, 1, 20, (value) =>
+    _patchSettings({ recallResidualTopK: value }),
   );
   bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
     _patchSettings({ injectDepth: value }),

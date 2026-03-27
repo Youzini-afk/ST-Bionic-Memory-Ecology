@@ -173,6 +173,23 @@ const defaultSettings = {
   recallDiffusionTopK: 100, // 图扩散阶段保留的候选上限
   recallLlmCandidatePool: 30, // 传给 LLM 精排的候选池大小
   recallLlmContextMessages: 4, // 传给 LLM 精排的最近非系统消息数
+  recallEnableMultiIntent: true,
+  recallMultiIntentMaxSegments: 4,
+  recallTeleportAlpha: 0.15,
+  recallEnableTemporalLinks: true,
+  recallTemporalLinkStrength: 0.2,
+  recallEnableDiversitySampling: true,
+  recallDppCandidateMultiplier: 3,
+  recallDppQualityWeight: 1.0,
+  recallEnableCooccurrenceBoost: false,
+  recallCooccurrenceScale: 0.1,
+  recallCooccurrenceMaxNeighbors: 10,
+  recallEnableResidualRecall: false,
+  recallResidualBasisMaxNodes: 24,
+  recallNmfTopics: 15,
+  recallNmfNoveltyThreshold: 0.4,
+  recallResidualThreshold: 0.3,
+  recallResidualTopK: 5,
 
   // 注入设置
   injectPosition: "atDepth", // 注入位置
@@ -3637,7 +3654,13 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       recallInput.sourceLabel,
       `ctx ${recentMessages.length}`,
       `vector ${retrievalMeta.vectorHits ?? 0}`,
+      retrievalMeta.vectorMergedHits
+        ? `merged ${retrievalMeta.vectorMergedHits}`
+        : "",
       `diffusion ${retrievalMeta.diffusionHits ?? 0}`,
+      retrievalMeta.candidatePoolAfterDpp
+        ? `dpp ${retrievalMeta.candidatePoolAfterDpp}`
+        : "",
       `llm pool ${llmMeta.candidatePool ?? 0}`,
       `recall ${result.stats.recallCount}`,
     ]
@@ -3782,6 +3805,30 @@ async function runRecall(options = {}) {
         enableCrossRecall: settings.enableCrossRecall ?? false,
         enableProbRecall: settings.enableProbRecall ?? false,
         probRecallChance: settings.probRecallChance ?? 0.15,
+        enableMultiIntent: settings.recallEnableMultiIntent ?? true,
+        multiIntentMaxSegments: settings.recallMultiIntentMaxSegments ?? 4,
+        teleportAlpha: settings.recallTeleportAlpha ?? 0.15,
+        enableTemporalLinks: settings.recallEnableTemporalLinks ?? true,
+        temporalLinkStrength: settings.recallTemporalLinkStrength ?? 0.2,
+        enableDiversitySampling:
+          settings.recallEnableDiversitySampling ?? true,
+        dppCandidateMultiplier:
+          settings.recallDppCandidateMultiplier ?? 3,
+        dppQualityWeight: settings.recallDppQualityWeight ?? 1.0,
+        enableCooccurrenceBoost:
+          settings.recallEnableCooccurrenceBoost ?? false,
+        cooccurrenceScale: settings.recallCooccurrenceScale ?? 0.1,
+        cooccurrenceMaxNeighbors:
+          settings.recallCooccurrenceMaxNeighbors ?? 10,
+        enableResidualRecall:
+          settings.recallEnableResidualRecall ?? false,
+        residualBasisMaxNodes:
+          settings.recallResidualBasisMaxNodes ?? 24,
+        residualNmfTopics: settings.recallNmfTopics ?? 15,
+        residualNmfNoveltyThreshold:
+          settings.recallNmfNoveltyThreshold ?? 0.4,
+        residualThreshold: settings.recallResidualThreshold ?? 0.3,
+        residualTopK: settings.recallResidualTopK ?? 5,
       },
     });
 

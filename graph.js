@@ -372,10 +372,16 @@ export function buildAdjacencyMap(graph) {
  * @param {GraphState} graph
  * @returns {Map}
  */
-export function buildTemporalAdjacencyMap(graph) {
+export function buildTemporalAdjacencyMap(graph, options = {}) {
   const adj = new Map();
+  adj.syntheticEdgeCount = 0;
   const activeNodeIds = new Set(
     graph.nodes.filter((node) => !node.archived).map((node) => node.id),
+  );
+  const includeTemporalLinks = options.includeTemporalLinks !== false;
+  const temporalLinkStrength = Math.max(
+    0,
+    Math.min(1, Number(options.temporalLinkStrength) || 0.2),
   );
 
   for (const edge of graph.edges) {
@@ -384,22 +390,44 @@ export function buildTemporalAdjacencyMap(graph) {
       continue;
     }
 
-    if (!adj.has(edge.fromId)) adj.set(edge.fromId, []);
-    adj.get(edge.fromId).push({
-      targetId: edge.toId,
-      strength: edge.strength,
-      edgeType: edge.edgeType,
-    });
+    addAdjacencyPair(adj, edge.fromId, edge.toId, edge.strength, edge.edgeType);
+  }
 
-    if (!adj.has(edge.toId)) adj.set(edge.toId, []);
-    adj.get(edge.toId).push({
-      targetId: edge.fromId,
-      strength: edge.strength,
-      edgeType: edge.edgeType,
-    });
+  if (includeTemporalLinks && temporalLinkStrength > 0) {
+    const activeNodes = graph.nodes.filter(
+      (node) => !node.archived && activeNodeIds.has(node.id),
+    );
+    const seenPairs = new Set();
+
+    for (const node of activeNodes) {
+      for (const neighborId of [node.prevId, node.nextId]) {
+        if (!neighborId || !activeNodeIds.has(neighborId)) continue;
+        const key = [node.id, neighborId].sort().join("::");
+        if (seenPairs.has(key)) continue;
+        seenPairs.add(key);
+        addAdjacencyPair(adj, node.id, neighborId, temporalLinkStrength, 0);
+        adj.syntheticEdgeCount += 1;
+      }
+    }
   }
 
   return adj;
+}
+
+function addAdjacencyPair(adj, fromId, toId, strength, edgeType) {
+  if (!adj.has(fromId)) adj.set(fromId, []);
+  adj.get(fromId).push({
+    targetId: toId,
+    strength,
+    edgeType,
+  });
+
+  if (!adj.has(toId)) adj.set(toId, []);
+  adj.get(toId).push({
+    targetId: fromId,
+    strength,
+    edgeType,
+  });
 }
 
 function isEdgeActive(edge, now = Date.now()) {

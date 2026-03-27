@@ -38,6 +38,8 @@ const DEFAULT_OPTIONS = {
   minEnergy: 0.01, // 最小有效能量（低于此值视为不活跃）
   maxEnergy: 2.0, // 能量上限
   minEnergy_clamp: -2.0, // 能量下限（抑制）
+  teleportAlpha: 0.0, // PPR 回拉概率
+  inhibitMultiplier: 2.0, // 抑制边负向传播倍率
 };
 
 /**
@@ -59,16 +61,21 @@ const DEFAULT_OPTIONS = {
  */
 export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
   const opts = { ...DEFAULT_OPTIONS, ...options };
+  const teleportAlpha = clamp01(opts.teleportAlpha);
 
   /** @type {Map<string, number>} */
   let currentEnergy = new Map();
+  /** @type {Map<string, number>} */
+  const initialEnergy = new Map();
 
   for (const seed of seedNodes || []) {
     if (!seed?.id) continue;
     const clamped = clampEnergy(Number(seed.energy) || 0, opts);
     if (Math.abs(clamped) >= opts.minEnergy) {
       const existing = currentEnergy.get(seed.id) || 0;
-      currentEnergy.set(seed.id, clampEnergy(existing + clamped, opts));
+      const next = clampEnergy(existing + clamped, opts);
+      currentEnergy.set(seed.id, next);
+      initialEnergy.set(seed.id, next);
     }
   }
 
@@ -89,11 +96,18 @@ export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
       for (const neighbor of neighbors) {
         if (!neighbor?.targetId) continue;
         let propagated =
-          energy * (Number(neighbor.strength) || 0) * opts.decayFactor;
+          energy *
+          (Number(neighbor.strength) || 0) *
+          opts.decayFactor *
+          (1 - teleportAlpha);
 
         // 抑制边：传递负能量
         if (neighbor.edgeType === INHIBIT_EDGE_TYPE) {
-          propagated = -Math.abs(propagated);
+          propagated =
+            -Math.abs(energy) *
+            (Number(neighbor.strength) || 0) *
+            opts.decayFactor *
+            (Number(opts.inhibitMultiplier) || 1);
         }
 
         // 累加到邻居节点
@@ -109,6 +123,20 @@ export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
         nextEnergy.delete(nodeId);
       } else {
         nextEnergy.set(nodeId, clamped);
+      }
+    }
+
+    if (teleportAlpha > 0) {
+      for (const [nodeId, seedEnergy] of initialEnergy) {
+        const current = nextEnergy.get(nodeId) || 0;
+        const teleported =
+          (1 - teleportAlpha) * current + teleportAlpha * seedEnergy;
+        const clamped = clampEnergy(teleported, opts);
+        if (Math.abs(clamped) >= opts.minEnergy) {
+          nextEnergy.set(nodeId, clamped);
+        } else {
+          nextEnergy.delete(nodeId);
+        }
       }
     }
 
@@ -150,6 +178,10 @@ export function propagateActivation(adjacencyMap, seedNodes, options = {}) {
  */
 function clampEnergy(energy, opts) {
   return Math.max(opts.minEnergy_clamp, Math.min(opts.maxEnergy, energy));
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, Number(value) || 0));
 }
 
 /**
