@@ -376,6 +376,13 @@ const DEFAULT_TASK_BLOCKS = {
 
 const COMMON_DEFAULT_BLOCK_BLUEPRINTS = [
   {
+    id: "default-heading",
+    name: "抬头",
+    type: "custom",
+    role: "system",
+    content: "",
+  },
+  {
     id: "default-role",
     name: "角色定义",
     type: "custom",
@@ -735,7 +742,9 @@ function buildDefaultTaskProfileBlocks(taskType) {
     sourceField: "",
     content:
       blueprint.type === "custom"
-        ? String(defaults?.[blueprint.contentKey] || "")
+        ? typeof blueprint.content === "string"
+          ? blueprint.content
+          : String(defaults?.[blueprint.contentKey] || "")
         : "",
     injectionMode: "relative",
     order: index,

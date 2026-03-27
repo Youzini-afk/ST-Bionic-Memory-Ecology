@@ -30,10 +30,11 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 11);
+assert.equal(extractProfile.blocks.length, 12);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
   [
+    "抬头",
     "角色定义",
     "角色描述",
     "用户设定",
@@ -51,6 +52,7 @@ assert.deepEqual(
   extractProfile.blocks.map((block) => block.type),
   [
     "custom",
+    "custom",
     "builtin",
     "builtin",
     "builtin",
@@ -66,6 +68,7 @@ assert.deepEqual(
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.role),
   [
+    "system",
     "system",
     "system",
     "system",
@@ -97,6 +100,7 @@ assert.ok(defaults.reflection.profiles.length > 0);
 assert.deepEqual(
   defaults.recall.profiles[0].blocks.map((block) => block.sourceKey || block.id),
   [
+    "default-heading",
     "default-role",
     "charDescription",
     "userPersona",
@@ -113,6 +117,7 @@ assert.deepEqual(
 assert.deepEqual(
   defaults.synopsis.profiles[0].blocks.map((block) => block.sourceKey || block.id),
   [
+    "default-heading",
     "default-role",
     "charDescription",
     "userPersona",
@@ -203,21 +208,25 @@ const upgradedLegacyDefault = getActiveTaskProfile(
   },
   "extract",
 );
-assert.equal(upgradedLegacyDefault.blocks.length, 11);
-assert.equal(upgradedLegacyDefault.blocks[0].content, "保留我自己的角色定义");
-assert.equal(upgradedLegacyDefault.blocks[9].content, "保留我自己的输出格式");
-assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的行为规则");
-assert.equal(upgradedLegacyDefault.blocks[9].role, "user");
+assert.equal(upgradedLegacyDefault.blocks.length, 12);
+assert.equal(upgradedLegacyDefault.blocks[0].name, "抬头");
+assert.equal(upgradedLegacyDefault.blocks[0].content, "");
+assert.equal(upgradedLegacyDefault.blocks[0].role, "system");
+assert.equal(upgradedLegacyDefault.blocks[0].injectionMode, "relative");
+assert.equal(upgradedLegacyDefault.blocks[1].content, "保留我自己的角色定义");
+assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的输出格式");
+assert.equal(upgradedLegacyDefault.blocks[11].content, "保留我自己的行为规则");
 assert.equal(upgradedLegacyDefault.blocks[10].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[11].role, "user");
 assert.deepEqual(
   upgradedLegacyDefault.blocks
-    .slice(5, 9)
+    .slice(6, 10)
     .map((block) => block.sourceKey),
   ["recentMessages", "graphStats", "schema", "currentRange"],
 );
 assert.ok(
   upgradedLegacyDefault.blocks
-    .slice(1, 9)
+    .slice(0, 10)
     .every((block) => block.role === "system"),
 );
 
