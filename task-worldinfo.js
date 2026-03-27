@@ -8,6 +8,11 @@ import {
   inspectTaskEjsRuntimeBackend,
   substituteTaskEjsParams,
 } from "./task-ejs.js";
+import {
+  isLikelyMvuWorldInfoContent,
+  isMvuTaggedWorldInfoNameOrComment,
+  sanitizeMvuContent,
+} from "./mvu-compat.js";
 
 const WI_POSITION = {
   before: 0,
@@ -45,8 +50,129 @@ let worldbookEntriesCache = {
   createdAt: 0,
   expiresAt: 0,
   entries: [],
+  blockedContents: [],
+  ignoredEntries: [],
+  ignoredLookup: new Map(),
   debug: null,
 };
+
+function buildIgnoredEntryLookupKey(worldbookName, identifier) {
+  return `${normalizeKey(worldbookName)}::${normalizeKey(identifier)}`;
+}
+
+function createMvuCollector() {
+  return {
+    blockedContents: [],
+    filteredEntries: [],
+    lazyFilteredEntries: [],
+    ignoredLookup: new Map(),
+    seenEntries: new Set(),
+  };
+}
+
+function registerIgnoredEntryLookup(collector, worldbookName, identifier, meta) {
+  const normalizedIdentifier = normalizeKey(identifier);
+  if (!collector || !normalizedIdentifier) return;
+  collector.ignoredLookup.set(
+    buildIgnoredEntryLookupKey(worldbookName, normalizedIdentifier),
+    meta,
+  );
+}
+
+function registerIgnoredWorldInfoEntry(
+  collector,
+  entry = {},
+  reason = "",
+  { lazy = false } = {},
+) {
+  if (!collector || !entry) return;
+
+  const worldbook = normalizeKey(entry.worldbook);
+  const name = normalizeKey(entry.name);
+  const comment = normalizeKey(entry.comment);
+  const content = String(entry.cleanContent || entry.content || "").trim();
+  const identity = `${worldbook}:${entry.uid || 0}:${name}:${reason}`;
+  const meta = {
+    worldbook,
+    name: comment || name,
+    sourceName: name,
+    reason: String(reason || ""),
+  };
+
+  registerIgnoredEntryLookup(collector, worldbook, name, meta);
+  registerIgnoredEntryLookup(collector, worldbook, comment, meta);
+
+  if (collector.seenEntries.has(identity)) {
+    return;
+  }
+  collector.seenEntries.add(identity);
+
+  if (content) {
+    collector.blockedContents.push(content);
+  }
+
+  if (lazy) {
+    collector.lazyFilteredEntries.push(meta);
+  } else {
+    collector.filteredEntries.push(meta);
+  }
+}
+
+function findIgnoredWorldInfoEntry(collector, worldbookName, identifier) {
+  if (!collector || !normalizeKey(identifier)) {
+    return null;
+  }
+
+  const normalizedWorldbook = normalizeKey(worldbookName);
+  const normalizedIdentifier = normalizeKey(identifier);
+  const exact = collector.ignoredLookup.get(
+    buildIgnoredEntryLookupKey(normalizedWorldbook, normalizedIdentifier),
+  );
+  if (exact) {
+    return exact;
+  }
+
+  if (normalizedWorldbook) {
+    return null;
+  }
+
+  for (const [lookupKey, value] of collector.ignoredLookup.entries()) {
+    if (lookupKey.endsWith(`::${normalizedIdentifier}`)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getMvuIgnoreReason(entry = {}) {
+  if (isMvuTaggedWorldInfoNameOrComment(entry.name, entry.comment)) {
+    return "mvu_tagged";
+  }
+  if (isLikelyMvuWorldInfoContent(entry.cleanContent || entry.content)) {
+    return "mvu_content";
+  }
+  return "";
+}
+
+function buildMvuDebugSummary(collector) {
+  const filteredEntries = Array.isArray(collector?.filteredEntries)
+    ? collector.filteredEntries
+    : [];
+  const lazyFilteredEntries = Array.isArray(collector?.lazyFilteredEntries)
+    ? collector.lazyFilteredEntries
+    : [];
+  const blockedContents = Array.isArray(collector?.blockedContents)
+    ? collector.blockedContents
+    : [];
+
+  return {
+    filteredEntryCount: filteredEntries.length,
+    filteredEntries: [...filteredEntries, ...lazyFilteredEntries],
+    blockedContentsCount: uniq(blockedContents.map((item) => String(item || "").trim()).filter(Boolean)).length,
+    lazyFilteredEntryCount: lazyFilteredEntries.length,
+  };
+}
 
 function getStContext() {
   try {
@@ -611,7 +737,11 @@ function selectActivatedEntries(
   return ungrouped.concat(matched).sort(sortEntries);
 }
 
-async function loadNormalizedWorldbookEntries(worldbookHost, worldbookName) {
+async function loadNormalizedWorldbookEntries(
+  worldbookHost,
+  worldbookName,
+  { mvuCollector = null, lazy = false } = {},
+) {
   const normalizedName = normalizeKey(worldbookName);
   if (!normalizedName || typeof worldbookHost?.getWorldbook !== "function") {
     return [];
@@ -636,15 +766,26 @@ async function loadNormalizedWorldbookEntries(worldbookHost, worldbookName) {
     }
   }
 
-  return (Array.isArray(entries) ? entries : []).map((entry) =>
-    normalizeEntry(
+  const normalizedEntries = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const normalizedEntry = normalizeEntry(
       {
         ...entry,
         comment: commentByUid.get(entry.uid) ?? entry.comment ?? "",
       },
       normalizedName,
-    ),
-  );
+    );
+    const ignoreReason = getMvuIgnoreReason(normalizedEntry);
+    if (ignoreReason) {
+      registerIgnoredWorldInfoEntry(mvuCollector, normalizedEntry, ignoreReason, {
+        lazy,
+      });
+      continue;
+    }
+    normalizedEntries.push(normalizedEntry);
+  }
+
+  return normalizedEntries;
 }
 
 async function collectAllWorldbookEntries(worldbookHost = null) {
@@ -750,12 +891,16 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
   ) {
     return {
       entries: worldbookEntriesCache.entries,
+      blockedContents: worldbookEntriesCache.blockedContents,
+      ignoredEntries: worldbookEntriesCache.ignoredEntries,
+      ignoredLookup: worldbookEntriesCache.ignoredLookup,
       debug: {
         ...debug,
         loadedWorldbooks:
           worldbookEntriesCache.debug?.loadedWorldbooks || requestedWorldbooks,
         worldbookCount: worldbookEntriesCache.entries.length,
         loadMs: worldbookEntriesCache.debug?.loadMs || 0,
+        mvu: worldbookEntriesCache.debug?.mvu || buildMvuDebugSummary(null),
         cache: {
           ...debug.cache,
           hit: true,
@@ -768,6 +913,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
   const allEntries = [];
   const loadedNames = new Set();
   const startedAt = Date.now();
+  const mvuCollector = createMvuCollector();
 
   async function loadWorldbookOnce(worldbookName) {
     const normalizedName = normalizeKey(worldbookName);
@@ -778,6 +924,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
       const entries = await loadNormalizedWorldbookEntries(
         resolvedWorldbookHost,
         normalizedName,
+        { mvuCollector },
       );
       allEntries.push(...entries);
     } catch (error) {
@@ -795,11 +942,15 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
   debug.loadedWorldbooks = [...loadedNames];
   debug.worldbookCount = allEntries.length;
   debug.loadMs = Date.now() - startedAt;
+  debug.mvu = buildMvuDebugSummary(mvuCollector);
   worldbookEntriesCache = {
     key: cacheKey,
     createdAt: Date.now(),
     expiresAt: Date.now() + WORLDINFO_CACHE_TTL_MS,
     entries: allEntries,
+    blockedContents: [...mvuCollector.blockedContents],
+    ignoredEntries: [...debug.mvu.filteredEntries],
+    ignoredLookup: new Map(mvuCollector.ignoredLookup),
     debug: {
       ...debug,
     },
@@ -807,6 +958,9 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
 
   return {
     entries: allEntries,
+    blockedContents: [...mvuCollector.blockedContents],
+    ignoredEntries: [...debug.mvu.filteredEntries],
+    ignoredLookup: new Map(mvuCollector.ignoredLookup),
     debug,
   };
 }
@@ -1016,6 +1170,7 @@ export async function resolveTaskWorldInfo({
       ejsLastError: "",
       warnings: [],
       resolvedEntries: [],
+      mvu: buildMvuDebugSummary(null),
     },
   };
 
@@ -1023,7 +1178,20 @@ export async function resolveTaskWorldInfo({
     const worldbookHost = await getWorldbookHost();
     const collected = await collectAllWorldbookEntries(worldbookHost);
     const allEntries = Array.isArray(collected?.entries) ? collected.entries : [];
+    const blockedContents = Array.isArray(collected?.blockedContents)
+      ? collected.blockedContents
+      : [];
+    const ignoredLookup =
+      collected?.ignoredLookup instanceof Map
+        ? collected.ignoredLookup
+        : new Map();
     result.allEntries = allEntries;
+    Object.defineProperty(result, "__mvuBlockedContents", {
+      value: blockedContents,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    });
     result.debug = {
       ...result.debug,
       ...(collected?.debug || {}),
@@ -1037,6 +1205,10 @@ export async function resolveTaskWorldInfo({
       resolvedEntries: Array.isArray(result.debug.resolvedEntries)
         ? result.debug.resolvedEntries
         : [],
+      mvu:
+        collected?.debug?.mvu && typeof collected.debug.mvu === "object"
+          ? { ...collected.debug.mvu }
+          : buildMvuDebugSummary(null),
     };
     if (allEntries.length === 0) {
       return result;
@@ -1076,6 +1248,15 @@ export async function resolveTaskWorldInfo({
     const aggregatedForcedEntries = new Map();
     const aggregatedInlineEntries = new Map();
     const recursionWarnings = new Set();
+    const lazyMvuCollector = {
+      blockedContents,
+      filteredEntries: Array.isArray(result.debug.mvu.filteredEntries)
+        ? result.debug.mvu.filteredEntries
+        : [],
+      lazyFilteredEntries: [],
+      ignoredLookup,
+      seenEntries: new Set(),
+    };
     const knownWorldbooks = new Set(
       allEntries.map((entry) => entry.worldbook).filter(Boolean),
     );
@@ -1087,8 +1268,29 @@ export async function resolveTaskWorldInfo({
       const lazyEntries = await loadNormalizedWorldbookEntries(
         worldbookHost,
         normalizedWorldbook,
+        {
+          mvuCollector: lazyMvuCollector,
+          lazy: true,
+        },
       );
       knownWorldbooks.add(normalizedWorldbook);
+      const newLazyIgnoredEntries = [...lazyMvuCollector.lazyFilteredEntries];
+      result.debug.mvu = {
+        ...result.debug.mvu,
+        blockedContentsCount: uniq(
+          blockedContents.map((item) => String(item || "").trim()).filter(Boolean),
+        ).length,
+        filteredEntries: [
+          ...(Array.isArray(result.debug.mvu.filteredEntries)
+            ? result.debug.mvu.filteredEntries
+            : []),
+          ...newLazyIgnoredEntries,
+        ],
+        lazyFilteredEntryCount:
+          Number(result.debug.mvu.lazyFilteredEntryCount || 0) +
+          newLazyIgnoredEntries.length,
+      };
+      lazyMvuCollector.lazyFilteredEntries = [];
       return lazyEntries;
     };
 
@@ -1109,6 +1311,12 @@ export async function resolveTaskWorldInfo({
         templateContext: normalizedTemplateContext,
         currentActivatedEntries: [...allActivated.values()],
         loadWorldbookEntries: lazyLoadWorldbookEntries,
+        resolveIgnoredEntry: (worldbookName, identifier) =>
+          findIgnoredWorldInfoEntry(
+            { ignoredLookup },
+            worldbookName,
+            identifier,
+          ),
       },
     );
 
@@ -1175,7 +1383,17 @@ export async function resolveTaskWorldInfo({
           recursionWarnings.add(String(warning || ""));
         }
 
-        const trimmedContent = String(renderedContent || "").trim();
+        const mvuSanitized = sanitizeMvuContent(renderedContent, {
+          mode: "aggressive",
+          blockedContents,
+        });
+        if (mvuSanitized.dropped) {
+          const warning = `世界书条目 ${entry.name} 渲染结果命中 MVU 规则，已跳过`;
+          if (!result.debug.warnings.includes(warning)) {
+            result.debug.warnings.push(warning);
+          }
+        }
+        const trimmedContent = String(mvuSanitized.text || "").trim();
         if (!trimmedContent) {
           continue;
         }

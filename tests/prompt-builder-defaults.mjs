@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 
 const extensionsShimSource = [
+  "export const extension_settings = {};",
   "export function getContext() {",
   "  return {",
   "    chat: [],",

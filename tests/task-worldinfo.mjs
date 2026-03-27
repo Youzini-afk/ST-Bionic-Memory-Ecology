@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 
 const extensionsShimSource = [
+  "export const extension_settings = {};",
   "export function getContext(...args) {",
   "  return globalThis.SillyTavern?.getContext?.(...args) || null;",
   "}",
@@ -147,12 +148,44 @@ const atDepthEntry = createWorldbookEntry({
   order: 5,
 });
 
+const mvuTaggedEntry = createWorldbookEntry({
+  uid: 9,
+  name: "[mvu_update] 状态同步",
+  comment: "MVU tagged",
+  content: "这一条不应该进入结果。",
+  order: 28,
+});
+
+const mvuHeuristicEntry = createWorldbookEntry({
+  uid: 10,
+  name: "MVU 启发式条目",
+  comment: "MVU heuristic",
+  content: "<status_current_variable>secret=true</status_current_variable>",
+  order: 29,
+});
+
+const mvuLazyProbeEntry = createWorldbookEntry({
+  uid: 11,
+  name: "MVU 懒加载探测",
+  comment: "MVU 懒加载探测",
+  content: 'MVU lazy: <%= await getwi("bonus-book", "Bonus MVU") %>',
+  order: 27,
+});
+
 const bonusEntry = createWorldbookEntry({
   uid: 101,
   name: "Bonus 条目",
   comment: "Bonus 条目",
   content: "来自 bonus-book 的补充内容。",
   order: 10,
+});
+
+const bonusMvuEntry = createWorldbookEntry({
+  uid: 102,
+  name: "Bonus MVU",
+  comment: "Bonus MVU",
+  content: "变量更新规则:\ntype: sync\n当前时间: 12:00",
+  order: 20,
 });
 
 const worldbooksByName = {
@@ -162,11 +195,14 @@ const worldbooksByName = {
     inlineSummaryEntry,
     extensionLiteralEntry,
     externalInlineEntry,
+    mvuLazyProbeEntry,
     forceControlEntry,
     forcedAfterEntry,
     atDepthEntry,
+    mvuTaggedEntry,
+    mvuHeuristicEntry,
   ],
-  "bonus-book": [bonusEntry],
+  "bonus-book": [bonusEntry, bonusMvuEntry],
 };
 
 try {
@@ -217,16 +253,18 @@ try {
 
   assert.deepEqual(
     worldInfo.beforeEntries.map((entry) => entry.name),
-    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总"],
+    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总", "MVU 懒加载探测"],
   );
   assert.deepEqual(worldInfo.afterEntries.map((entry) => entry.name), ["强制后置"]);
   assert.equal(worldInfo.additionalMessages.length, 1);
   assert.equal(worldInfo.additionalMessages[0].content, "这是一条 atDepth 消息。");
   assert.match(worldInfo.beforeText, /控制摘要：隐藏线索：Alice 正在调查。/);
   assert.match(worldInfo.beforeText, /外部补充：来自 bonus-book 的补充内容。/);
+  assert.match(worldInfo.beforeText, /MVU lazy:/);
   assert.match(worldInfo.beforeText, /@@generate/);
   assert.match(worldInfo.beforeText, /\[GENERATE:Test\]/);
   assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
+  assert.doesNotMatch(worldInfo.beforeText, /status_current_variable|变量更新规则|updatevariable/i);
   assert.equal(worldInfo.debug.ejsInlinePullCount, 2);
   assert.equal(worldInfo.debug.ejsForcedActivationCount, 1);
   assert.equal(worldInfo.debug.resolvePassCount >= 2, true);
@@ -238,8 +276,21 @@ try {
     ["Bonus 条目", "线索条目"].sort(),
   );
   assert.deepEqual(worldInfo.debug.lazyLoadedWorldbooks, ["bonus-book"]);
+  assert.equal(worldInfo.debug.mvu.filteredEntryCount, 2);
+  assert.equal(worldInfo.debug.mvu.lazyFilteredEntryCount, 1);
+  assert.equal(worldInfo.debug.mvu.blockedContentsCount, 3);
+  assert.deepEqual(
+    worldInfo.debug.mvu.filteredEntries.map((entry) => entry.sourceName).sort(),
+    ["[mvu_update] 状态同步", "MVU 启发式条目", "Bonus MVU"].sort(),
+  );
   assert.equal(
     worldInfo.debug.warnings.some((warning) => warning.includes("旧 EW 命名条目")),
+    true,
+  );
+  assert.equal(
+    worldInfo.debug.recursionWarnings.some((warning) =>
+      warning.includes("mvu filtered world info blocked"),
+    ),
     true,
   );
 
@@ -299,7 +350,9 @@ try {
   assert.match(promptBuild.systemPrompt, /控制摘要：隐藏线索：Alice 正在调查/);
   assert.match(promptBuild.systemPrompt, /扩展语义只是普通文本/);
   assert.match(promptBuild.systemPrompt, /来自 bonus-book 的补充内容/);
+  assert.match(promptBuild.systemPrompt, /MVU lazy:/);
   assert.doesNotMatch(promptBuild.systemPrompt, /getwi|<%=?/);
+  assert.doesNotMatch(promptBuild.systemPrompt, /status_current_variable|变量更新规则|updatevariable/i);
   assert.equal(
     promptBuild.privateTaskMessages.length,
     2,
@@ -311,7 +364,7 @@ try {
   );
   assert.deepEqual(
     promptBuild.hostInjections.before.map((entry) => entry.name),
-    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总"],
+    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总", "MVU 懒加载探测"],
   );
   assert.deepEqual(
     promptBuild.hostInjections.after.map((entry) => entry.name),
@@ -327,6 +380,7 @@ try {
     "EJS 汇总",
     "扩展语义正文",
     "外部书汇总",
+    "MVU 懒加载探测",
   ]);
   assert.equal(promptBuild.hostInjectionPlan.after.length, 1);
   assert.equal(promptBuild.hostInjectionPlan.after[0].blockId, "b2");
@@ -346,6 +400,7 @@ try {
   );
   assert.equal(promptBuild.additionalMessages.length, 1);
   assert.equal(promptBuild.additionalMessages[0].content, "这是一条 atDepth 消息。");
+  assert.equal(promptBuild.debug.mvu.sanitizedFieldCount >= 0, true);
 
   const { initializeHostAdapter } = await import("../host-adapter/index.js");
   const partialBridgeCalls = [];

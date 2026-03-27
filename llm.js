@@ -256,6 +256,10 @@ function buildPromptExecutionSummary(debugContext = null) {
       debugContext.worldInfo && typeof debugContext.worldInfo === "object"
         ? cloneRuntimeDebugValue(debugContext.worldInfo, {})
         : null,
+    mvu:
+      debugContext.mvu && typeof debugContext.mvu === "object"
+        ? cloneRuntimeDebugValue(debugContext.mvu, {})
+        : null,
     regexInput: normalizeRegexDebugEntries(debugContext.regexInput),
   };
 }

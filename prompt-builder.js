@@ -2,7 +2,9 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
+import { sanitizeMvuContent } from "./mvu-compat.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
+import { applyTaskRegex } from "./task-regex.js";
 
 const WORLD_INFO_VARIABLE_KEYS = [
   "worldInfoBefore",
@@ -13,6 +15,34 @@ const WORLD_INFO_VARIABLE_KEYS = [
   "activatedWorldInfoNames",
   "taskAdditionalMessages",
 ];
+
+const INPUT_CONTEXT_MVU_FIELDS = [
+  "userMessage",
+  "recentMessages",
+  "dialogueText",
+  "candidateText",
+  "candidateNodes",
+  "nodeContent",
+  "eventSummary",
+  "characterSummary",
+  "threadSummary",
+  "contradictionSummary",
+  "charDescription",
+  "userPersona",
+];
+
+const INPUT_REGEX_STAGE_BY_FIELD = {
+  userMessage: "input.userMessage",
+  recentMessages: "input.recentMessages",
+  dialogueText: "input.recentMessages",
+  candidateText: "input.candidateText",
+  candidateNodes: "input.candidateText",
+  nodeContent: "input.candidateText",
+  eventSummary: "input.candidateText",
+  characterSummary: "input.candidateText",
+  threadSummary: "input.candidateText",
+  contradictionSummary: "input.candidateText",
+};
 
 function cloneRuntimeDebugValue(value, fallback = null) {
   if (value == null) {
@@ -51,6 +81,19 @@ function recordTaskPromptBuild(taskType, snapshot = {}) {
     ...cloneRuntimeDebugValue(snapshot, {}),
   };
   state.updatedAt = new Date().toISOString();
+}
+
+function mergeRegexCollectors(...collectors) {
+  const mergedEntries = [];
+  for (const collector of collectors) {
+    if (!Array.isArray(collector?.entries)) {
+      continue;
+    }
+    mergedEntries.push(...collector.entries);
+  }
+  return {
+    entries: mergedEntries,
+  };
 }
 
 export function buildTaskExecutionDebugContext(
@@ -102,10 +145,20 @@ export function buildTaskExecutionDebugContext(
       atDepthCount: Number(promptDebug.worldInfoAtDepthCount || 0),
       loadMs: Number(worldInfoDebug.loadMs || 0),
     },
-    regexInput:
-      options.regexInput && typeof options.regexInput === "object"
-        ? cloneRuntimeDebugValue(options.regexInput, {})
+    mvu:
+      promptDebug.mvu && typeof promptDebug.mvu === "object"
+        ? cloneRuntimeDebugValue(promptDebug.mvu, {})
         : null,
+    regexInput:
+      (() => {
+        const merged = mergeRegexCollectors(
+          promptBuild?.regexInput,
+          options.regexInput,
+        );
+        return Array.isArray(merged.entries) && merged.entries.length > 0
+          ? cloneRuntimeDebugValue(merged, {})
+          : null;
+      })(),
   };
 }
 
@@ -173,6 +226,317 @@ function buildEmptyWorldInfoContext() {
     taskAdditionalMessages: [],
     worldInfoDebug: null,
   };
+}
+
+function createEmptyMvuPromptDebug() {
+  return {
+    sanitizedFieldCount: 0,
+    sanitizedFields: [],
+    finalMessageStripCount: 0,
+    worldInfoBlockedContentHits: 0,
+  };
+}
+
+function pushMvuPromptDebugEntry(debugState, entry = {}) {
+  if (!debugState || !entry || (!entry.changed && !entry.dropped)) {
+    return;
+  }
+
+  debugState.sanitizedFields.push({
+    name: String(entry.name || ""),
+    stage: String(entry.stage || ""),
+    changed: Boolean(entry.changed),
+    dropped: Boolean(entry.dropped),
+    reasons: Array.isArray(entry.reasons) ? [...entry.reasons] : [],
+    blockedHitCount: Number(entry.blockedHitCount || 0),
+  });
+  debugState.sanitizedFieldCount = debugState.sanitizedFields.length;
+}
+
+function sanitizeTaskPromptText(
+  settings = {},
+  taskType,
+  text,
+  {
+    mode = "aggressive",
+    blockedContents = [],
+    regexStage = "",
+    role = "system",
+    regexCollector = null,
+  } = {},
+) {
+  const originalText = typeof text === "string" ? text : "";
+  const mvuResult = sanitizeMvuContent(originalText, {
+    mode,
+    blockedContents,
+  });
+  const afterMvu = String(mvuResult.text || "");
+  const finalText = regexStage
+    ? applyTaskRegex(
+        settings,
+        taskType,
+        regexStage,
+        afterMvu,
+        regexCollector,
+        role,
+      )
+    : afterMvu;
+
+  return {
+    text: finalText,
+    changed: finalText !== originalText,
+    dropped: Boolean(mvuResult.dropped),
+    reasons: Array.isArray(mvuResult.reasons) ? mvuResult.reasons : [],
+    blockedHitCount: Number(mvuResult.blockedHitCount || 0),
+    artifactRemovedCount: Number(mvuResult.artifactRemovedCount || 0),
+  };
+}
+
+function sanitizeChatMessageList(
+  settings = {},
+  taskType,
+  chatMessages = [],
+  debugState = null,
+  regexCollector = null,
+) {
+  if (!Array.isArray(chatMessages) || chatMessages.length === 0) {
+    return [];
+  }
+
+  return chatMessages
+    .map((message, index) => {
+      const rawContent =
+        typeof message === "string"
+          ? message
+          : typeof message?.content === "string"
+            ? message.content
+            : typeof message?.mes === "string"
+              ? message.mes
+              : "";
+      const sanitized = sanitizeTaskPromptText(settings, taskType, rawContent, {
+        mode: "aggressive",
+        regexStage: "input.recentMessages",
+        role: "system",
+        regexCollector,
+      });
+      pushMvuPromptDebugEntry(debugState, {
+        name: `chatMessages[${index}]`,
+        stage: "input.recentMessages",
+        ...sanitized,
+      });
+      if (!sanitized.text.trim()) {
+        return null;
+      }
+      if (typeof message === "string") {
+        return sanitized.text;
+      }
+      if (message && typeof message === "object") {
+        return {
+          ...message,
+          content:
+            typeof message.content === "string"
+              ? sanitized.text
+              : message.content,
+          mes:
+            typeof message.mes === "string"
+              ? sanitized.text
+              : message.mes,
+        };
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function sanitizePromptContextInputs(
+  settings = {},
+  taskType,
+  context = {},
+  debugState = null,
+  regexCollector = null,
+) {
+  const sanitizedContext = {
+    ...context,
+  };
+
+  for (const fieldName of INPUT_CONTEXT_MVU_FIELDS) {
+    const value = sanitizedContext[fieldName];
+    if (typeof value !== "string") {
+      continue;
+    }
+    const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
+    const sanitized = sanitizeTaskPromptText(settings, taskType, value, {
+      mode: "aggressive",
+      regexStage,
+      role: "system",
+      regexCollector,
+    });
+    sanitizedContext[fieldName] = sanitized.text;
+    pushMvuPromptDebugEntry(debugState, {
+      name: fieldName,
+      stage: regexStage,
+      ...sanitized,
+    });
+  }
+
+  if (Array.isArray(sanitizedContext.chatMessages)) {
+    sanitizedContext.chatMessages = sanitizeChatMessageList(
+      settings,
+      taskType,
+      sanitizedContext.chatMessages,
+      debugState,
+      regexCollector,
+    );
+  }
+
+  return sanitizedContext;
+}
+
+function sanitizeWorldInfoEntries(
+  settings = {},
+  taskType,
+  entries = [],
+  blockedContents = [],
+  debugState = null,
+  regexCollector = null,
+) {
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => {
+      const sanitized = sanitizeTaskPromptText(
+        settings,
+        taskType,
+        String(entry?.content || ""),
+        {
+          mode: "aggressive",
+          blockedContents,
+          regexStage: "input.finalPrompt",
+          role: entry?.role || "system",
+          regexCollector,
+        },
+      );
+      debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
+      if (sanitized.changed || sanitized.dropped) {
+        debugState.finalMessageStripCount += 1;
+      }
+      if (!sanitized.text.trim()) {
+        return null;
+      }
+      return {
+        ...entry,
+        content: sanitized.text,
+        index:
+          Number.isFinite(Number(entry?.index))
+            ? Number(entry.index)
+            : index,
+      };
+    })
+    .filter(Boolean);
+}
+
+function sanitizeWorldInfoContext(
+  settings = {},
+  taskType,
+  worldInfo = null,
+  debugState = null,
+  regexCollector = null,
+) {
+  const rawDebug =
+    worldInfo?.debug && typeof worldInfo.debug === "object"
+      ? worldInfo.debug
+      : null;
+  const blockedContentsCount = Number(rawDebug?.mvu?.blockedContentsCount || 0);
+  const blockedContents = [];
+  if (blockedContentsCount > 0 && Array.isArray(rawDebug?.mvu?.filteredEntries)) {
+    // Use only the structural count for debug; blocked content strings stay internal
+    // on the world info object via the non-enumerable runtime property below.
+  }
+
+  const runtimeBlockedContents = Array.isArray(worldInfo?.__mvuBlockedContents)
+    ? worldInfo.__mvuBlockedContents
+    : [];
+
+  const beforeEntries = sanitizeWorldInfoEntries(
+    settings,
+    taskType,
+    worldInfo?.beforeEntries,
+    runtimeBlockedContents,
+    debugState,
+    regexCollector,
+  );
+  const afterEntries = sanitizeWorldInfoEntries(
+    settings,
+    taskType,
+    worldInfo?.afterEntries,
+    runtimeBlockedContents,
+    debugState,
+    regexCollector,
+  );
+  const atDepthEntries = sanitizeWorldInfoEntries(
+    settings,
+    taskType,
+    worldInfo?.atDepthEntries,
+    runtimeBlockedContents,
+    debugState,
+    regexCollector,
+  );
+  const additionalMessages = (Array.isArray(worldInfo?.additionalMessages)
+    ? worldInfo.additionalMessages
+    : []
+  )
+    .map((message) => {
+      const sanitized = sanitizeTaskPromptText(
+        settings,
+        taskType,
+        String(message?.content || ""),
+        {
+          mode: "aggressive",
+          blockedContents: runtimeBlockedContents,
+          regexStage: "input.finalPrompt",
+          role: message?.role || "system",
+          regexCollector,
+        },
+      );
+      debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
+      if (sanitized.changed || sanitized.dropped) {
+        debugState.finalMessageStripCount += 1;
+      }
+      if (!sanitized.text.trim()) {
+        return null;
+      }
+      return {
+        ...message,
+        content: sanitized.text,
+      };
+    })
+    .filter(Boolean);
+
+  const beforeText = beforeEntries.map((entry) => entry.content).join("\n\n");
+  const afterText = afterEntries.map((entry) => entry.content).join("\n\n");
+  const activatedEntryNames = [
+    ...beforeEntries.map((entry) => entry.name),
+    ...afterEntries.map((entry) => entry.name),
+    ...atDepthEntries.map((entry) => entry.name),
+  ].filter(Boolean);
+
+  const sanitizedWorldInfo = {
+    beforeEntries,
+    afterEntries,
+    atDepthEntries,
+    beforeText,
+    afterText,
+    additionalMessages,
+    activatedEntryNames: [...new Set(activatedEntryNames)],
+    debug: rawDebug,
+  };
+
+  Object.defineProperty(sanitizedWorldInfo, "__mvuBlockedContents", {
+    value: [...runtimeBlockedContents],
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+
+  return sanitizedWorldInfo;
 }
 
 function createHostInjectionEntry(
@@ -394,6 +758,15 @@ function extractWorldInfoChatMessages(context = {}) {
 export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const profile = getActiveTaskProfile(settings, taskType);
   const legacyPrompt = getLegacyPromptForTask(settings, taskType);
+  const promptRegexInput = { entries: [] };
+  const mvuPromptDebug = createEmptyMvuPromptDebug();
+  const sanitizedInputContext = sanitizePromptContextInputs(
+    settings,
+    taskType,
+    context,
+    mvuPromptDebug,
+    promptRegexInput,
+  );
   const rawBlocks = Array.isArray(profile?.blocks) ? profile.blocks : [];
   const blocks = rawBlocks
     .map((block, index) => ({ ...block, _orderIndex: index }))
@@ -410,28 +783,41 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const worldInfoRequested = profileRequiresWorldInfo(profile);
   const emptyWorldInfo = buildEmptyWorldInfoContext();
   let resolvedWorldInfo = emptyWorldInfo;
+  let worldInfoRuntimeBlockedContents = [];
 
   if (worldInfoRequested) {
     const worldInfo = await resolveTaskWorldInfo({
       settings,
-      chatMessages: extractWorldInfoChatMessages(context),
-      userMessage: String(context.userMessage || ""),
-      templateContext: context,
+      chatMessages: extractWorldInfoChatMessages(sanitizedInputContext),
+      userMessage: String(sanitizedInputContext.userMessage || ""),
+      templateContext: sanitizedInputContext,
     });
+    const sanitizedWorldInfo = sanitizeWorldInfoContext(
+      settings,
+      taskType,
+      worldInfo,
+      mvuPromptDebug,
+      promptRegexInput,
+    );
+    worldInfoRuntimeBlockedContents = Array.isArray(
+      sanitizedWorldInfo.__mvuBlockedContents,
+    )
+      ? sanitizedWorldInfo.__mvuBlockedContents
+      : [];
     resolvedWorldInfo = {
-      worldInfoBefore: worldInfo.beforeText || "",
-      worldInfoAfter: worldInfo.afterText || "",
-      worldInfoBeforeEntries: worldInfo.beforeEntries || [],
-      worldInfoAfterEntries: worldInfo.afterEntries || [],
-      worldInfoAtDepthEntries: worldInfo.atDepthEntries || [],
-      activatedWorldInfoNames: worldInfo.activatedEntryNames || [],
-      taskAdditionalMessages: worldInfo.additionalMessages || [],
-      worldInfoDebug: worldInfo.debug || null,
+      worldInfoBefore: sanitizedWorldInfo.beforeText || "",
+      worldInfoAfter: sanitizedWorldInfo.afterText || "",
+      worldInfoBeforeEntries: sanitizedWorldInfo.beforeEntries || [],
+      worldInfoAfterEntries: sanitizedWorldInfo.afterEntries || [],
+      worldInfoAtDepthEntries: sanitizedWorldInfo.atDepthEntries || [],
+      activatedWorldInfoNames: sanitizedWorldInfo.activatedEntryNames || [],
+      taskAdditionalMessages: sanitizedWorldInfo.additionalMessages || [],
+      worldInfoDebug: sanitizedWorldInfo.debug || null,
     };
   }
 
   const resolvedContext = {
-    ...context,
+    ...sanitizedInputContext,
     ...emptyWorldInfo,
     ...resolvedWorldInfo,
   };
@@ -464,6 +850,25 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     } else if (block.type === "custom") {
       content = interpolateVariables(block.content || "", resolvedContext);
     }
+
+    const sanitizedBlockContent = sanitizeTaskPromptText(
+      settings,
+      taskType,
+      content,
+      {
+        mode: "final-safe",
+        blockedContents: worldInfoRuntimeBlockedContents,
+        regexStage: "input.finalPrompt",
+        role,
+        regexCollector: promptRegexInput,
+      },
+    );
+    mvuPromptDebug.worldInfoBlockedContentHits +=
+      sanitizedBlockContent.blockedHitCount;
+    if (sanitizedBlockContent.changed || sanitizedBlockContent.dropped) {
+      mvuPromptDebug.finalMessageStripCount += 1;
+    }
+    content = sanitizedBlockContent.text;
 
     if (!String(content || "").trim()) continue;
 
@@ -554,6 +959,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     executionMessages,
     privateTaskMessages,
     renderedBlocks,
+    regexInput: promptRegexInput,
     worldInfoResolution,
     systemPrompt,
     customMessages,
@@ -601,6 +1007,15 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       },
       worldInfoCacheHit: Boolean(worldInfoResolution.debug?.cache?.hit),
       ejsRuntimeStatus: worldInfoResolution.debug?.ejsRuntimeStatus || "",
+      mvu: {
+        sanitizedFieldCount: mvuPromptDebug.sanitizedFieldCount,
+        sanitizedFields: cloneRuntimeDebugValue(
+          mvuPromptDebug.sanitizedFields,
+          [],
+        ),
+        finalMessageStripCount: mvuPromptDebug.finalMessageStripCount,
+        worldInfoBlockedContentHits: mvuPromptDebug.worldInfoBlockedContentHits,
+      },
       effectivePath: {
         promptAssembly: "ordered-private-messages",
         hostInjectionPlan: "diagnostic-plan-only",
@@ -617,6 +1032,15 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     },
   };
 
+  Object.defineProperty(result, "__mvuRuntime", {
+    value: {
+      blockedContents: [...worldInfoRuntimeBlockedContents],
+    },
+    configurable: true,
+    enumerable: false,
+    writable: false,
+  });
+
   recordTaskPromptBuild(taskType, {
     taskType,
     profileId: profile?.id || "",
@@ -628,6 +1052,8 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     hostInjections: worldInfoResolution.injections,
     hostInjectionPlan,
     worldInfoResolution,
+    mvu: result.debug.mvu,
+    regexInput: promptRegexInput,
     debug: result.debug,
   });
 
@@ -635,6 +1061,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 }
 
 export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
+  const runtimeMvu = promptBuild?.__mvuRuntime || {};
   const executionMessages = Array.isArray(promptBuild?.executionMessages)
     ? promptBuild.executionMessages
         .map((message) =>
@@ -653,10 +1080,21 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
   const hasUserMessage = executionMessages.some(
     (message) => message.role === "user",
   );
+  const sanitizedFallbackUserPrompt = sanitizeTaskPromptText(
+    {},
+    promptBuild?.debug?.taskType || "",
+    String(fallbackUserPrompt || ""),
+    {
+      mode: "final-safe",
+      blockedContents: Array.isArray(runtimeMvu?.blockedContents)
+        ? runtimeMvu.blockedContents
+        : [],
+    },
+  ).text;
 
   return {
     systemPrompt: String(promptBuild?.systemPrompt || ""),
-    userPrompt: hasUserMessage ? "" : String(fallbackUserPrompt || ""),
+    userPrompt: hasUserMessage ? "" : sanitizedFallbackUserPrompt,
     promptMessages: executionMessages,
     additionalMessages:
       executionMessages.length > 0

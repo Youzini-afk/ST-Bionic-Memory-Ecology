@@ -402,6 +402,22 @@ async function resolveEntry(renderCtx, currentWorldbook, worldbookOrEntry, entry
       renderCtx.allEntries.get(identifier);
   }
 
+  if (
+    !resolved &&
+    typeof renderCtx.resolveIgnoredEntry === "function"
+  ) {
+    const ignoredEntry =
+      renderCtx.resolveIgnoredEntry(explicitWorldbook || fallbackWorldbook, identifier) ||
+      renderCtx.resolveIgnoredEntry("", identifier);
+    if (ignoredEntry) {
+      const descriptor = ignoredEntry.sourceName || ignoredEntry.name || identifier;
+      recordRenderWarning(
+        renderCtx,
+        `mvu filtered world info blocked: ${ignoredEntry.worldbook ? `${ignoredEntry.worldbook}/` : ""}${descriptor}`,
+      );
+    }
+  }
+
   return resolved;
 }
 
@@ -630,6 +646,10 @@ export function createTaskEjsRenderContext(entries = [], options = {}) {
     loadWorldbookEntries:
       typeof options.loadWorldbookEntries === "function"
         ? options.loadWorldbookEntries
+        : null,
+    resolveIgnoredEntry:
+      typeof options.resolveIgnoredEntry === "function"
+        ? options.resolveIgnoredEntry
         : null,
     templateContext: {
       ...(options.templateContext || {}),

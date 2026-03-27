@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const extensionsShimSource = [
@@ -34,6 +35,8 @@ const scriptShimUrl = `data:text/javascript,${encodeURIComponent(
 const openAiShimUrl = `data:text/javascript,${encodeURIComponent(
   openAiShimSource,
 )}`;
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const indexPath = path.resolve(moduleDir, "../index.js");
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -138,7 +141,6 @@ const schema = [
 ];
 
 function createBatchStageHarness() {
-  const indexPath = path.resolve("./index.js");
   return fs.readFile(indexPath, "utf8").then((source) => {
     const marker = "function isAssistantChatMessage(message) {";
     const start = source.indexOf("function shouldAdvanceProcessedHistory(");
@@ -181,7 +183,6 @@ function createBatchStageHarness() {
 }
 
 function createGenerationRecallHarness() {
-  const indexPath = path.resolve("./index.js");
   return fs.readFile(indexPath, "utf8").then((source) => {
     const start = source.indexOf("const RECALL_INPUT_RECORD_TTL_MS = 60000;");
     const end = source.indexOf("function onMessageReceived() {");
@@ -243,7 +244,6 @@ function createGenerationRecallHarness() {
 }
 
 function createRerollHarness() {
-  const indexPath = path.resolve("./index.js");
   return fs.readFile(indexPath, "utf8").then((source) => {
     const helperStart = source.indexOf(
       "function pruneProcessedMessageHashesFromFloor(",
