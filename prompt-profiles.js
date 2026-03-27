@@ -826,7 +826,7 @@ export function createDefaultTaskProfile(taskType) {
       presence_penalty: null,
       repetition_penalty: null,
       squash_system_messages: null,
-      reasoning_effort: null,
+      reasoning_effort: ["extract", "recall", "consolidation"].includes(taskType) ? "low" : null,
       request_thoughts: null,
       enable_function_calling: null,
       enable_web_search: null,
