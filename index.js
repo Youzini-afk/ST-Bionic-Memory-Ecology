@@ -493,6 +493,7 @@ function updateStageNotice(
     level: noticeLevel,
     busy,
     persist,
+    marquee: options.noticeMarquee ?? false,
     duration_ms: options.duration_ms ?? getStageNoticeDuration(noticeLevel),
     action:
       options.action === undefined
@@ -1085,7 +1086,7 @@ function setLastExtractionStatus(
   text,
   meta,
   level = "info",
-  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 提取" } = {},
+  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 提取", noticeMarquee = false } = {},
 ) {
   lastExtractionStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
@@ -1095,6 +1096,7 @@ function setLastExtractionStatus(
   }
   updateStageNotice("extraction", text, meta, level, {
     title: toastTitle,
+    noticeMarquee,
   });
   if (toastKind) {
     notifyStatusToast(
@@ -1135,7 +1137,7 @@ function setLastRecallStatus(
   text,
   meta,
   level = "info",
-  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 召回" } = {},
+  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 召回", noticeMarquee = false } = {},
 ) {
   lastRecallStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
@@ -1145,6 +1147,7 @@ function setLastRecallStatus(
   }
   updateStageNotice("recall", text, meta, level, {
     title: toastTitle,
+    noticeMarquee,
   });
   if (toastKind) {
     notifyStatusToast(
@@ -2968,13 +2971,14 @@ async function executeExtractionBatch({
     settings,
     signal,
     onStreamProgress: ({ previewText, receivedChars }) => {
-      const preview = previewText?.length > 80
-        ? "…" + previewText.slice(-80)
+      const preview = previewText?.length > 60
+        ? "…" + previewText.slice(-60)
         : previewText || "";
       setLastExtractionStatus(
         "AI 生成中",
-        `${preview}\n已接收 ${receivedChars} 字符`,
+        `${preview}  [${receivedChars}字]`,
         "running",
+        { noticeMarquee: true },
       );
     },
   });
@@ -3748,14 +3752,14 @@ async function runRecall(options = {}) {
       signal: recallSignal,
       settings,
       onStreamProgress: ({ previewText, receivedChars }) => {
-        const preview = previewText?.length > 80
-          ? "…" + previewText.slice(-80)
+        const preview = previewText?.length > 60
+          ? "…" + previewText.slice(-60)
           : previewText || "";
         setLastRecallStatus(
           "AI 生成中",
-          `${preview}\n已接收 ${receivedChars} 字符`,
+          `${preview}  [${receivedChars}字]`,
           "running",
-          { syncRuntime: true },
+          { syncRuntime: true, noticeMarquee: true },
         );
       },
       options: {

@@ -115,6 +115,17 @@ function ensureStyle(doc) {
       word-break: break-word;
     }
 
+    .st-bme-notice__message--marquee {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", monospace;
+      font-size: 12.5px;
+      color: rgba(240, 246, 255, 0.72);
+      mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
+      -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
+    }
+
     .st-bme-notice__actions {
       display: flex;
       gap: 8px;
@@ -285,6 +296,11 @@ function applyNoticeState(item, input, progress) {
   const message = item.querySelector(".st-bme-notice__message");
   if (message) {
     message.textContent = input.message || "";
+    if (input.marquee) {
+      message.classList.add("st-bme-notice__message--marquee");
+    } else {
+      message.classList.remove("st-bme-notice__message--marquee");
+    }
   }
 
   const actionWrap = item.querySelector(".st-bme-notice__actions");
