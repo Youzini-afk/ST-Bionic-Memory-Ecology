@@ -2094,6 +2094,7 @@
     border-radius: 0;
     min-width: 0;
     resize: none;
+    overflow: hidden;
   }
 
   .bme-panel-body {
