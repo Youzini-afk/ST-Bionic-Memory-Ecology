@@ -815,7 +815,7 @@ export function createDefaultTaskProfile(taskType) {
       max_context_tokens: null,
       max_completion_tokens: null,
       reply_count: null,
-      stream: false,
+      stream: true,
       temperature: null,
       top_p: null,
       top_k: null,
