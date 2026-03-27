@@ -62,6 +62,7 @@ assert.equal(defaultSettings.recallNmfNoveltyThreshold, 0.4);
 assert.equal(defaultSettings.recallResidualThreshold, 0.3);
 assert.equal(defaultSettings.recallResidualTopK, 5);
 assert.equal(defaultSettings.injectDepth, 9999);
+assert.equal(defaultSettings.enabled, true);
 assert.equal(defaultSettings.enableReflection, true);
 assert.equal(defaultSettings.embeddingTransportMode, "direct");
 assert.equal(defaultSettings.taskProfilesVersion, 3);

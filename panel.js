@@ -1224,7 +1224,7 @@ function _bindActions() {
 function _refreshConfigTab() {
   const settings = _getSettings?.() || {};
 
-  _setCheckboxValue("bme-setting-enabled", settings.enabled ?? false);
+  _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,

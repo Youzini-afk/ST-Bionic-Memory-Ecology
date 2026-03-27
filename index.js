@@ -156,7 +156,7 @@ function readRuntimeDebugSnapshot() {
 // ==================== 默认设置 ====================
 
 const defaultSettings = {
-  enabled: false,
+  enabled: true,
   timeoutMs: 300000,
 
   // 提取设置
