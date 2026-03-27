@@ -223,12 +223,38 @@ export async function initPanel({
   _syncConfigSectionState();
   _refreshRuntimeStatus();
   _initFloatingBall();
+  _bindFabToggle();
 }
 
 // ==================== 悬浮球 ====================
 
 const FAB_STORAGE_KEY = "bme-fab-position";
+const FAB_VISIBLE_KEY = "bme-fab-visible";
 let _fabEl = null;
+
+function _getFabVisible() {
+  try {
+    const val = localStorage.getItem(FAB_VISIBLE_KEY);
+    return val === null ? true : val === "true";
+  } catch { return true; }
+}
+
+function _setFabVisible(visible) {
+  try { localStorage.setItem(FAB_VISIBLE_KEY, String(visible)); } catch {}
+  if (_fabEl) _fabEl.style.display = visible ? "flex" : "none";
+  const btn = panelEl?.querySelector("#bme-fab-toggle-btn");
+  if (btn) btn.setAttribute("data-active", String(visible));
+}
+
+function _bindFabToggle() {
+  const btn = panelEl?.querySelector("#bme-fab-toggle-btn");
+  if (!btn) return;
+  btn.setAttribute("data-active", String(_getFabVisible()));
+  btn.addEventListener("click", () => {
+    const next = !_getFabVisible();
+    _setFabVisible(next);
+  });
+}
 
 function _initFloatingBall() {
   if (document.getElementById("bme-floating-ball")) return;
@@ -242,6 +268,9 @@ function _initFloatingBall() {
   `;
   document.body.appendChild(fab);
   _fabEl = fab;
+
+  // 应用可见性
+  if (!_getFabVisible()) fab.style.display = "none";
 
   // 恢复位置
   const saved = _loadFabPosition();

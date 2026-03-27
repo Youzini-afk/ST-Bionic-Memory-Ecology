@@ -83,6 +83,35 @@
   margin-right: 4px;
 }
 
+.bme-fab-toggle-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--bme-on-surface-dim);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 14px;
+  transition: all 0.15s;
+  margin-right: 2px;
+}
+
+.bme-fab-toggle-btn:hover {
+  background: var(--bme-surface-highest);
+  color: var(--bme-primary);
+}
+
+.bme-fab-toggle-btn[data-active="true"] {
+  color: var(--bme-primary);
+}
+
+.bme-fab-toggle-btn[data-active="false"] {
+  opacity: 0.45;
+}
+
 .bme-theme-picker-btn {
   width: 28px;
   height: 28px;
