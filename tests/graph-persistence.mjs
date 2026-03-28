@@ -270,6 +270,26 @@ result = {
 {
   const harness = await createGraphPersistenceHarness({
     chatId: "",
+    globalChatId: "",
+    chatMetadata: {},
+    characterId: "",
+    groupId: null,
+    chat: [],
+  });
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "no-chat-empty-host-state",
+  });
+  const live = harness.api.getGraphPersistenceLiveState();
+
+  assert.equal(result.loadState, "no-chat");
+  assert.equal(live.loadState, "no-chat");
+  assert.equal(live.writesBlocked, true);
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
     globalChatId: "chat-global",
     chatMetadata: {
       st_bme_graph: createMeaningfulGraph("chat-global", "global"),
@@ -466,11 +486,13 @@ result = {
 {
   const harness = await createGraphPersistenceHarness({
     chatId: "chat-empty-confirmed",
-    chatMetadata: {},
+    chatMetadata: {
+      integrity: "meta-ready-empty",
+    },
   });
   const result = harness.api.loadGraphFromChat({
-    attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
-    source: "timeout-empty",
+    attemptIndex: 0,
+    source: "ready-empty",
   });
   const live = harness.api.getGraphPersistenceLiveState();
 
@@ -499,12 +521,14 @@ result = {
 
   const reader = await createGraphPersistenceHarness({
     chatId: "chat-promote",
-    chatMetadata: {},
+    chatMetadata: {
+      integrity: "meta-ready-promote",
+    },
     sessionStore: sharedSession,
   });
   const result = reader.api.loadGraphFromChat({
-    attemptIndex: reader.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
-    source: "promote-after-timeout",
+    attemptIndex: 0,
+    source: "promote-when-metadata-ready",
   });
   const live = reader.api.getGraphPersistenceLiveState();
 

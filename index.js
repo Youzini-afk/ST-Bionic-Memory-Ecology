@@ -1174,11 +1174,13 @@ function hasLikelySelectedChatContext(context = getContext()) {
     return false;
   }
 
-  const hasChatMetadata =
+  const hasMeaningfulChatMetadata =
     context.chatMetadata &&
     typeof context.chatMetadata === "object" &&
-    !Array.isArray(context.chatMetadata);
-  const hasChatMessages = Array.isArray(context.chat);
+    !Array.isArray(context.chatMetadata) &&
+    Object.keys(context.chatMetadata).length > 0;
+  const hasChatMessages =
+    Array.isArray(context.chat) && context.chat.length > 0;
   const hasCharacterId =
     context.characterId !== undefined &&
     context.characterId !== null &&
@@ -1188,7 +1190,30 @@ function hasLikelySelectedChatContext(context = getContext()) {
     context.groupId !== null &&
     String(context.groupId).trim() !== "";
 
-  return hasChatMetadata || hasChatMessages || hasCharacterId || hasGroupId;
+  return (
+    hasMeaningfulChatMetadata ||
+    hasChatMessages ||
+    hasCharacterId ||
+    hasGroupId
+  );
+}
+
+function isHostChatMetadataReady(context = getContext()) {
+  if (
+    !context?.chatMetadata ||
+    typeof context.chatMetadata !== "object" ||
+    Array.isArray(context.chatMetadata)
+  ) {
+    return false;
+  }
+
+  const metadata = context.chatMetadata;
+  // SillyTavern 在 CHAT_CHANGED 之前会为已加载聊天补上 integrity。
+  if (normalizeChatIdCandidate(metadata.integrity)) {
+    return true;
+  }
+
+  return Object.keys(metadata).length > 0;
 }
 
 function resolveCurrentChatIdentity(context = getContext()) {
@@ -2324,6 +2349,7 @@ function loadGraphFromChat(options = {}) {
     context?.chatMetadata &&
     typeof context.chatMetadata === "object" &&
     !Array.isArray(context.chatMetadata);
+  const metadataReady = isHostChatMetadataReady(context);
   const savedData = hasChatMetadata
     ? context.chatMetadata[GRAPH_METADATA_KEY]
     : undefined;
@@ -2432,7 +2458,7 @@ function loadGraphFromChat(options = {}) {
       "warning",
     );
 
-    if (hasChatMetadata && !shouldRetry) {
+    if (metadataReady) {
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
         chatId,
         reason: "shadow-snapshot-promoted",
@@ -2508,32 +2534,40 @@ function loadGraphFromChat(options = {}) {
   lastRecalledItems = [];
   lastInjectionContent = "";
 
-  if (shouldRetry) {
+  if (!metadataReady) {
     runtimeStatus = createUiStatus(
       "待命",
-      "正在加载当前聊天图谱，暂不写回图谱元数据",
-      "idle",
+      shouldRetry
+        ? "正在加载当前聊天图谱，暂不写回图谱元数据"
+        : "聊天元数据未就绪，已暂停图谱写回",
+      shouldRetry ? "idle" : "warning",
     );
     lastExtractionStatus = createUiStatus(
       "待命",
-      "正在等待聊天图谱元数据加载",
-      "idle",
+      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，暂不允许修改图谱",
+      shouldRetry ? "idle" : "warning",
     );
     lastVectorStatus = createUiStatus(
       "待命",
-      "正在等待聊天图谱元数据加载",
-      "idle",
+      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，暂不允许修改图谱",
+      shouldRetry ? "idle" : "warning",
     );
     lastRecallStatus = createUiStatus(
       "待命",
-      "正在等待聊天图谱元数据加载",
-      "idle",
+      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，图谱处于保护状态",
+      shouldRetry ? "idle" : "warning",
     );
-    applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
+    applyGraphLoadState(
+      shouldRetry ? GRAPH_LOAD_STATES.LOADING : GRAPH_LOAD_STATES.BLOCKED,
+      {
       chatId,
       reason: hasChatMetadata
-        ? "graph-metadata-missing"
-        : "chat-metadata-missing",
+        ? shouldRetry
+          ? "graph-metadata-missing"
+          : "graph-metadata-timeout"
+        : shouldRetry
+          ? "chat-metadata-missing"
+          : "chat-metadata-timeout",
       attemptIndex,
       revision: 0,
       lastPersistedRevision: 0,
@@ -2544,17 +2578,24 @@ function loadGraphFromChat(options = {}) {
       shadowSnapshotUpdatedAt: "",
       shadowSnapshotReason: "",
       writesBlocked: true,
-    });
-    scheduleGraphLoadRetry(
-      chatId,
-      hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
-      attemptIndex,
+      },
     );
+    if (shouldRetry) {
+      scheduleGraphLoadRetry(
+        chatId,
+        hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
+        attemptIndex,
+      );
+    } else {
+      clearPendingGraphLoadRetry();
+    }
     refreshPanelLiveState();
     return {
       success: false,
       loaded: false,
-      loadState: GRAPH_LOAD_STATES.LOADING,
+      loadState: shouldRetry
+        ? GRAPH_LOAD_STATES.LOADING
+        : GRAPH_LOAD_STATES.BLOCKED,
       reason: graphPersistenceState.reason,
       chatId,
       attemptIndex,
@@ -2563,43 +2604,30 @@ function loadGraphFromChat(options = {}) {
   }
 
   clearPendingGraphLoadRetry();
-  const confirmedState = hasChatMetadata
-    ? GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-    : GRAPH_LOAD_STATES.BLOCKED;
+  const confirmedState = GRAPH_LOAD_STATES.EMPTY_CONFIRMED;
   runtimeStatus = createUiStatus(
     "待命",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-      ? "当前聊天还没有图谱"
-      : "聊天元数据未就绪，已暂停图谱写回",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
+    "当前聊天还没有图谱",
+    "idle",
   );
   lastExtractionStatus = createUiStatus(
     "待命",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-      ? "当前聊天尚未执行提取"
-      : "聊天元数据未就绪，暂不允许修改图谱",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
+    "当前聊天尚未执行提取",
+    "idle",
   );
   lastVectorStatus = createUiStatus(
     "待命",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-      ? "当前聊天尚未执行向量任务"
-      : "聊天元数据未就绪，暂不允许修改图谱",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
+    "当前聊天尚未执行向量任务",
+    "idle",
   );
   lastRecallStatus = createUiStatus(
     "待命",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-      ? "当前聊天尚未建立记忆图谱"
-      : "聊天元数据未就绪，图谱处于保护状态",
-    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
+    "当前聊天尚未建立记忆图谱",
+    "idle",
   );
   applyGraphLoadState(confirmedState, {
     chatId,
-    reason:
-      confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
-        ? "metadata-confirmed-empty"
-        : "chat-metadata-timeout",
+    reason: "metadata-confirmed-empty",
     attemptIndex,
     revision: 0,
     lastPersistedRevision: 0,
@@ -2609,11 +2637,9 @@ function loadGraphFromChat(options = {}) {
     shadowSnapshotRevision: 0,
     shadowSnapshotUpdatedAt: "",
     shadowSnapshotReason: "",
-    writesBlocked: confirmedState !== GRAPH_LOAD_STATES.EMPTY_CONFIRMED,
+    writesBlocked: false,
   });
-  if (confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED) {
-    removeGraphShadowSnapshot(chatId);
-  }
+  removeGraphShadowSnapshot(chatId);
   refreshPanelLiveState();
   return {
     success: false,
