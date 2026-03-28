@@ -612,6 +612,7 @@ export function openPanel() {
   if (!overlayEl) return;
   ensureOverlayMountedAtRoot();
   syncViewportCssVars();
+  _actionHandlers.syncGraphLoad?.();
   overlayEl.classList.add("active");
 
   _restorePanelSize();

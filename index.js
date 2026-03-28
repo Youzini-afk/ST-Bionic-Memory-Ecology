@@ -94,6 +94,7 @@ const GRAPH_LOAD_STATES = Object.freeze({
 });
 const GRAPH_LOAD_PENDING_CHAT_ID = "__pending_chat__";
 const GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX = `${MODULE_NAME}:graph-shadow:`;
+const GRAPH_STARTUP_RECONCILE_DELAYS_MS = [150, 600, 1800, 4000];
 
 function cloneRuntimeDebugValue(value, fallback = null) {
   if (value == null) {
@@ -1605,6 +1606,85 @@ function scheduleGraphLoadRetry(
   }, delayMs);
 
   return true;
+}
+
+function shouldSyncGraphLoadFromLiveContext(
+  context = getContext(),
+  { force = false } = {},
+) {
+  if (force) {
+    return true;
+  }
+
+  const chatIdentity = resolveCurrentChatIdentity(context);
+  const liveChatId = chatIdentity.chatId;
+  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const liveMetadataReady = isHostChatMetadataReady(context);
+
+  if (liveChatId && liveChatId !== stateChatId) {
+    return true;
+  }
+
+  if (
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.NO_CHAT &&
+    (liveChatId || chatIdentity.hasLikelySelectedChat)
+  ) {
+    return true;
+  }
+
+  if (
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
+    liveMetadataReady
+  ) {
+    return true;
+  }
+
+  if (
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+    liveMetadataReady
+  ) {
+    return true;
+  }
+
+  if (
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED &&
+    (liveChatId || liveMetadataReady)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function syncGraphLoadFromLiveContext(options = {}) {
+  const { source = "live-context-sync", force = false } = options;
+  const context = getContext();
+  if (!shouldSyncGraphLoadFromLiveContext(context, { force })) {
+    return {
+      synced: false,
+      reason: "no-sync-needed",
+      loadState: graphPersistenceState.loadState,
+      chatId: graphPersistenceState.chatId,
+    };
+  }
+
+  const result = loadGraphFromChat({
+    source,
+  });
+  return {
+    synced: true,
+    ...result,
+  };
+}
+
+function scheduleStartupGraphReconciliation() {
+  for (const delayMs of GRAPH_STARTUP_RECONCILE_DELAYS_MS) {
+    setTimeout(() => {
+      syncGraphLoadFromLiveContext({
+        source: `startup-reconcile:${delayMs}`,
+      });
+    }, delayMs);
+  }
 }
 
 function clearInjectionState() {
@@ -4775,10 +4855,19 @@ function onChatChanged() {
   lastPreGenerationRecallAt = 0;
   abortAllRunningStages();
   dismissAllStageNotices();
-  loadGraphFromChat();
+  syncGraphLoadFromLiveContext({
+    source: "chat-changed",
+    force: true,
+  });
   clearInjectionState();
   clearRecallInputTracking();
   installSendIntentHooks();
+}
+
+function onChatLoaded() {
+  syncGraphLoadFromLiveContext({
+    source: "chat-loaded",
+  });
 }
 
 function onMessageSent(messageId) {
@@ -5597,6 +5686,9 @@ async function onReembedDirect() {
 
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
+  if (event_types.CHAT_LOADED) {
+    eventSource.on(event_types.CHAT_LOADED, onChatLoaded);
+  }
   if (event_types.MESSAGE_SENT) {
     eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
   }
@@ -5612,7 +5704,11 @@ async function onReembedDirect() {
 
   // 加载当前聊天的图谱
   clearPendingGraphLoadRetry();
-  loadGraphFromChat();
+  syncGraphLoadFromLiveContext({
+    source: "initial-load",
+    force: true,
+  });
+  scheduleStartupGraphReconciliation();
 
   // ==================== 操控面板初始化 ====================
 
@@ -5650,6 +5746,10 @@ async function onReembedDirect() {
         return settings;
       },
       actions: {
+        syncGraphLoad: () =>
+          syncGraphLoadFromLiveContext({
+            source: "panel-open-sync",
+          }),
         extract: onManualExtract,
         compress: onManualCompress,
         sleep: onManualSleep,

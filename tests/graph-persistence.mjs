@@ -224,6 +224,7 @@ result = {
   maybeCaptureGraphShadowSnapshot,
   loadGraphFromChat,
   saveGraphToChat,
+  syncGraphLoadFromLiveContext,
   onMessageReceived,
   applyGraphLoadState,
   maybeFlushQueuedGraphPersist,
@@ -302,6 +303,83 @@ result = {
 
   assert.equal(result.loadState, "loaded");
   assert.equal(harness.api.getCurrentGraph().historyState.chatId, "chat-global");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
+    globalChatId: "",
+    chatMetadata: {},
+  });
+  const lateGraph = createMeaningfulGraph("chat-late", "late");
+  harness.api.setChatContext({
+    chatId: "chat-late",
+    chatMetadata: {
+      integrity: "chat-late-ready",
+      st_bme_graph: lateGraph,
+    },
+    characterId: "char-late",
+    groupId: null,
+    chat: [{ is_user: true, mes: "late load" }],
+    updateChatMetadata(patch) {
+      const base =
+        this.chatMetadata &&
+        typeof this.chatMetadata === "object" &&
+        !Array.isArray(this.chatMetadata)
+          ? this.chatMetadata
+          : {};
+      this.chatMetadata = {
+        ...base,
+        ...(patch || {}),
+      };
+    },
+    saveMetadataDebounced() {},
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "late-context-sync",
+  });
+
+  assert.equal(result.synced, true);
+  assert.equal(result.loadState, "loaded");
+  assert.equal(harness.api.getCurrentGraph().historyState.chatId, "chat-late");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
+    globalChatId: "",
+    chatMetadata: {},
+  });
+  harness.api.setChatContext({
+    chatId: "chat-empty-live",
+    chatMetadata: {
+      integrity: "chat-empty-live-ready",
+    },
+    characterId: "char-empty-live",
+    groupId: null,
+    chat: [{ is_user: true, mes: "hello" }],
+    updateChatMetadata(patch) {
+      const base =
+        this.chatMetadata &&
+        typeof this.chatMetadata === "object" &&
+        !Array.isArray(this.chatMetadata)
+          ? this.chatMetadata
+          : {};
+      this.chatMetadata = {
+        ...base,
+        ...(patch || {}),
+      };
+    },
+    saveMetadataDebounced() {},
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "late-empty-sync",
+  });
+
+  assert.equal(result.synced, true);
+  assert.equal(result.loadState, "empty-confirmed");
 }
 
 {
