@@ -543,6 +543,38 @@
   position: relative;
 }
 
+.bme-graph-overlay {
+  position: absolute;
+  inset: 58px 18px 52px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(6, 7, 10, 0.72);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.bme-graph-overlay.active {
+  display: flex;
+}
+
+.bme-graph-overlay__text {
+  max-width: 320px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--bme-on-surface);
+}
+
+.bme-mobile-graph-preview .bme-graph-overlay {
+  inset: 0;
+  border-radius: 0;
+}
+
 .bme-config-workspace {
   display: none;
   flex: 1;
@@ -883,6 +915,32 @@
 
 .bme-action-btn i {
   font-size: 18px;
+}
+
+.bme-action-btn:disabled,
+.bme-action-btn.is-runtime-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--bme-on-surface-dim);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.bme-action-btn:disabled:hover,
+.bme-action-btn.is-runtime-disabled:hover {
+  border-color: rgba(255, 255, 255, 0.06);
+  color: var(--bme-on-surface-dim);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.bme-action-guard-banner {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 197, 79, 0.25);
+  background: rgba(255, 197, 79, 0.08);
+  color: #ffd27a;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .bme-action-btn.danger:hover {

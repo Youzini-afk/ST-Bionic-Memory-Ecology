@@ -72,6 +72,20 @@ const TASK_PROFILE_BOOLEAN_OPTIONS = [
   { value: "false", label: "关闭" },
 ];
 
+const GRAPH_WRITE_ACTION_IDS = [
+  "bme-act-extract",
+  "bme-act-compress",
+  "bme-act-sleep",
+  "bme-act-synopsis",
+  "bme-act-evolve",
+  "bme-act-import",
+  "bme-act-rebuild",
+  "bme-act-vector-rebuild",
+  "bme-act-vector-range",
+  "bme-act-vector-reembed",
+  "bme-act-reroll",
+];
+
 const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "基础生成参数",
@@ -153,6 +167,7 @@ let _getLastVectorStatus = null;
 let _getLastRecallStatus = null;
 let _getLastInjection = null;
 let _getRuntimeDebugSnapshot = null;
+let _getGraphPersistenceState = null;
 let _updateSettings = null;
 let _actionHandlers = {};
 
@@ -348,6 +363,7 @@ export async function initPanel({
   getLastRecallStatus,
   getLastInjection,
   getRuntimeDebugSnapshot,
+  getGraphPersistenceState,
   updateSettings,
   actions,
 }) {
@@ -361,6 +377,7 @@ export async function initPanel({
   _getLastRecallStatus = getLastRecallStatus;
   _getLastInjection = getLastInjection;
   _getRuntimeDebugSnapshot = getRuntimeDebugSnapshot;
+  _getGraphPersistenceState = getGraphPersistenceState;
   _updateSettings = updateSettings;
   _actionHandlers = actions || {};
 
@@ -748,7 +765,31 @@ function _syncConfigSectionState() {
 
 function _refreshDashboard() {
   const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
   if (!graph) return;
+
+  if (!_canRenderGraphData(loadInfo) && loadInfo.loadState !== "empty-confirmed") {
+    _setText("bme-stat-nodes", "—");
+    _setText("bme-stat-edges", "—");
+    _setText("bme-stat-archived", "—");
+    _setText("bme-stat-frag", "—");
+    _setText("bme-status-chat-id", loadInfo.chatId || "—");
+    _setText("bme-status-history", _getGraphLoadLabel(loadInfo.loadState));
+    _setText("bme-status-vector", "等待聊天图谱元数据加载");
+    _setText("bme-status-recovery", "等待聊天图谱元数据加载");
+    _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
+    _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
+    _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
+    _renderStatefulListPlaceholder(
+      document.getElementById("bme-recent-extract"),
+      _getGraphLoadLabel(loadInfo.loadState),
+    );
+    _renderStatefulListPlaceholder(
+      document.getElementById("bme-recent-recall"),
+      _getGraphLoadLabel(loadInfo.loadState),
+    );
+    return;
+  }
 
   const activeNodes = graph.nodes.filter((node) => !node.archived);
   const archivedCount = graph.nodes.filter((node) => node.archived).length;
@@ -761,7 +802,7 @@ function _refreshDashboard() {
   _setText("bme-stat-archived", archivedCount);
   _setText("bme-stat-frag", `${fragRate}%`);
 
-  const chatId = graph?.historyState?.chatId || "—";
+  const chatId = loadInfo.chatId || graph?.historyState?.chatId || "—";
   const lastProcessed = graph?.historyState?.lastProcessedAssistantFloor ?? -1;
   const dirtyFrom = graph?.historyState?.historyDirtyFrom;
   const vectorStats = getVectorIndexStats(graph);
@@ -771,13 +812,21 @@ function _refreshDashboard() {
   const extractionStatus = _getLastExtractionStatus?.() || {};
   const vectorStatus = _getLastVectorStatus?.() || {};
   const recallStatus = _getLastRecallStatus?.() || {};
+  const historyPrefix =
+    loadInfo.loadState === "shadow-restored"
+      ? "临时恢复 · "
+      : loadInfo.loadState === "blocked" && loadInfo.shadowSnapshotUsed
+        ? "保护模式 · "
+        : "";
 
   _setText("bme-status-chat-id", chatId);
   _setText(
     "bme-status-history",
-    Number.isFinite(dirtyFrom)
-      ? `脏区从楼层 ${dirtyFrom} 开始，已处理到 ${lastProcessed}`
-      : `干净，已处理到楼层 ${lastProcessed}`,
+    `${historyPrefix}${
+      Number.isFinite(dirtyFrom)
+        ? `脏区从楼层 ${dirtyFrom} 开始，已处理到 ${lastProcessed}`
+        : `干净，已处理到楼层 ${lastProcessed}`
+    }`,
   );
   _setText(
     "bme-status-vector",
@@ -857,12 +906,22 @@ function _renderRecentList(elementId, items) {
 
 function _refreshMemoryBrowser() {
   const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
   if (!graph) return;
 
   const searchInput = document.getElementById("bme-memory-search");
   const filterSelect = document.getElementById("bme-memory-filter");
   const listEl = document.getElementById("bme-memory-list");
   if (!listEl) return;
+
+  const canRenderGraph = _canRenderGraphData(loadInfo);
+  if (searchInput) searchInput.disabled = !canRenderGraph;
+  if (filterSelect) filterSelect.disabled = !canRenderGraph;
+
+  if (!canRenderGraph && loadInfo.loadState !== "empty-confirmed") {
+    _renderStatefulListPlaceholder(listEl, _getGraphLoadLabel(loadInfo.loadState));
+    return;
+  }
 
   const query = String(searchInput?.value || "")
     .trim()
@@ -886,6 +945,11 @@ function _refreshMemoryBrowser() {
     if (importanceDiff !== 0) return importanceDiff;
     return (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0);
   });
+
+  if (!nodes.length && loadInfo.loadState === "empty-confirmed") {
+    _renderStatefulListPlaceholder(listEl, "当前聊天还没有图谱");
+    return;
+  }
 
   const fragment = document.createDocumentFragment();
   nodes.slice(0, 100).forEach((node) => {
@@ -1221,7 +1285,10 @@ function _bindActions() {
       toastr.info(`${label} 进行中…`, "ST-BME", { timeOut: 2000 });
 
       try {
-        await handler();
+        const result = await handler();
+        if (result?.cancelled) {
+          return;
+        }
         _refreshDashboard();
         _refreshGraph();
         if (
@@ -1238,13 +1305,17 @@ function _bindActions() {
         ) {
           await _refreshInjectionPreview();
         }
-        toastr.success(`${label} 完成`, "ST-BME");
+        if (!result?.handledToast) {
+          toastr.success(`${label} 完成`, "ST-BME");
+        }
       } catch (error) {
         console.error(`[ST-BME] Action ${actionKey} failed:`, error);
-        toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
+        if (!error?._stBmeToastHandled) {
+          toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
+        }
       } finally {
-        btn.disabled = false;
         btn.style.opacity = "";
+        _refreshGraphAvailabilityState();
       }
     });
   }
@@ -1281,9 +1352,9 @@ function _bindActions() {
         toastr.error(`范围重建 失败: ${error?.message || error}`, "ST-BME");
       } finally {
         if (btn) {
-          btn.disabled = false;
           btn.style.opacity = "";
         }
+        _refreshGraphAvailabilityState();
       }
     });
 
@@ -1327,9 +1398,9 @@ function _bindActions() {
         toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
       } finally {
         if (btn) {
-          btn.disabled = false;
           btn.style.opacity = "";
         }
+        _refreshGraphAvailabilityState();
       }
     });
 }
@@ -2824,6 +2895,7 @@ function _renderTaskDebugTab(state) {
   const promptBuild = runtimeDebug?.taskPromptBuilds?.[state.taskType] || null;
   const llmRequest = runtimeDebug?.taskLlmRequests?.[state.taskType] || null;
   const recallInjection = runtimeDebug?.injections?.recall || null;
+  const graphPersistence = runtimeDebug?.graphPersistence || null;
 
   return `
     <div class="bme-task-tab-body">
@@ -2841,6 +2913,9 @@ function _renderTaskDebugTab(state) {
           ${_renderTaskDebugHostCard(hostCapabilities)}
         </div>
         <div class="bme-config-card">
+          ${_renderTaskDebugGraphPersistenceCard(graphPersistence)}
+        </div>
+        <div class="bme-config-card">
           ${_renderTaskDebugPromptCard(state.taskType, promptBuild)}
         </div>
         <div class="bme-config-card">
@@ -2851,6 +2926,62 @@ function _renderTaskDebugTab(state) {
         </div>
       </div>
     </div>
+  `;
+}
+
+function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
+  if (!graphPersistence) {
+    return `
+      <div class="bme-config-card-title">图谱持久化状态</div>
+      <div class="bme-config-help">当前还没有图谱加载/持久化快照。</div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">图谱持久化状态</div>
+        <div class="bme-config-card-subtitle">
+          最近一次图谱加载与写回协调结果。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(graphPersistence.loadState || "unknown")}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">聊天</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.chatId || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">原因</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.reason || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">尝试次数</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.attemptIndex ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">当前 revision</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.graphRevision ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">最近已持久化 revision</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.lastPersistedRevision ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">排队中的 revision</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.queuedPersistRevision ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">影子快照</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.shadowSnapshotUsed ? "已接管" : "未使用")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">写保护</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.writesBlocked ? "已启用" : "未启用")}</span>
+      </div>
+    </div>
+    ${_renderDebugDetails("图谱持久化详情", graphPersistence)}
   `;
 }
 
@@ -4054,6 +4185,104 @@ function _setText(id, text) {
   if (el) el.textContent = String(text);
 }
 
+function _getGraphPersistenceSnapshot() {
+  return _getGraphPersistenceState?.() || {
+    loadState: "no-chat",
+    reason: "",
+    writesBlocked: true,
+    shadowSnapshotUsed: false,
+    pendingPersist: false,
+    chatId: "",
+  };
+}
+
+function _getGraphLoadLabel(loadState = "") {
+  switch (loadState) {
+    case "loading":
+      return "正在加载当前聊天图谱";
+    case "shadow-restored":
+      return "已从本次会话临时恢复，正在等待正式聊天元数据";
+    case "empty-confirmed":
+      return "当前聊天还没有图谱";
+    case "blocked":
+      return "聊天元数据未就绪，已暂停图谱写回以保护旧数据";
+    case "loaded":
+      return "聊天图谱已加载";
+    case "no-chat":
+    default:
+      return "当前尚未进入聊天";
+  }
+}
+
+function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
+  return (
+    loadInfo.loadState === "loaded" ||
+    loadInfo.loadState === "empty-confirmed" ||
+    loadInfo.shadowSnapshotUsed === true
+  );
+}
+
+function _isGraphWriteBlocked(loadInfo = _getGraphPersistenceSnapshot()) {
+  return Boolean(loadInfo.writesBlocked);
+}
+
+function _renderStatefulListPlaceholder(listEl, text) {
+  if (!listEl) return;
+  const li = document.createElement("li");
+  li.className = "bme-recent-item";
+  const content = document.createElement("div");
+  content.className = "bme-recent-text";
+  content.style.color = "var(--bme-on-surface-dim)";
+  content.textContent = text;
+  li.appendChild(content);
+  listEl.replaceChildren(li);
+}
+
+function _refreshGraphAvailabilityState() {
+  const loadInfo = _getGraphPersistenceSnapshot();
+  const banner = document.getElementById("bme-action-guard-banner");
+  const graphOverlay = document.getElementById("bme-graph-overlay");
+  const graphOverlayText = document.getElementById("bme-graph-overlay-text");
+  const mobileOverlay = document.getElementById("bme-mobile-graph-overlay");
+  const mobileOverlayText = document.getElementById("bme-mobile-graph-overlay-text");
+  const blocked = _isGraphWriteBlocked(loadInfo);
+  const loadLabel = _getGraphLoadLabel(loadInfo.loadState);
+
+  GRAPH_WRITE_ACTION_IDS.forEach((id) => {
+    const button = document.getElementById(id);
+    if (!button) return;
+    button.disabled = blocked;
+    button.classList.toggle("is-runtime-disabled", blocked);
+    button.title = blocked ? loadLabel : "";
+  });
+
+  if (banner) {
+    const shouldShowBanner = blocked;
+    banner.hidden = !shouldShowBanner;
+    banner.textContent = shouldShowBanner ? loadLabel : "";
+  }
+
+  const shouldShowOverlay =
+    loadInfo.loadState === "loading" ||
+    loadInfo.loadState === "shadow-restored" ||
+    loadInfo.loadState === "blocked";
+
+  if (graphOverlay) {
+    graphOverlay.hidden = !shouldShowOverlay;
+    graphOverlay.classList.toggle("active", shouldShowOverlay);
+  }
+  if (graphOverlayText) {
+    graphOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+  }
+  if (mobileOverlay) {
+    mobileOverlay.hidden = !shouldShowOverlay;
+    mobileOverlay.classList.toggle("active", shouldShowOverlay);
+  }
+  if (mobileOverlayText) {
+    mobileOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+  }
+}
+
 function _refreshRuntimeStatus() {
   const runtimeStatus = _getRuntimeStatus?.() || {};
   const text = runtimeStatus.text || "待命";
@@ -4061,6 +4290,7 @@ function _refreshRuntimeStatus() {
   _setText("bme-status-text", text);
   _setText("bme-status-meta", meta);
   _setText("bme-panel-status", text);
+  _refreshGraphAvailabilityState();
 }
 
 function _patchSettings(patch = {}, options = {}) {

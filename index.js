@@ -29,6 +29,7 @@ import {
   getGraphStats,
   getNode,
   importGraph,
+  serializeGraph,
 } from "./graph.js";
 import {
   HOST_ADAPTER_STATE_SEMANTICS,
@@ -83,6 +84,15 @@ const MODULE_NAME = "st_bme";
 const GRAPH_METADATA_KEY = "st_bme_graph";
 const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
 const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
+const GRAPH_LOAD_STATES = Object.freeze({
+  NO_CHAT: "no-chat",
+  LOADING: "loading",
+  LOADED: "loaded",
+  SHADOW_RESTORED: "shadow-restored",
+  EMPTY_CONFIRMED: "empty-confirmed",
+  BLOCKED: "blocked",
+});
+const GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX = `${MODULE_NAME}:graph-shadow:`;
 
 function cloneRuntimeDebugValue(value, fallback = null) {
   if (value == null) {
@@ -107,6 +117,7 @@ function getRuntimeDebugState() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      graphPersistence: null,
       updatedAt: "",
     };
   }
@@ -133,6 +144,11 @@ function recordInjectionSnapshot(kind, snapshot = {}) {
   };
 }
 
+function recordGraphPersistenceSnapshot(snapshot = null) {
+  const state = touchRuntimeDebugState();
+  state.graphPersistence = cloneRuntimeDebugValue(snapshot, null);
+}
+
 function readRuntimeDebugSnapshot() {
   const state = getRuntimeDebugState();
   return cloneRuntimeDebugValue(
@@ -141,6 +157,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: state.taskPromptBuilds,
       taskLlmRequests: state.taskLlmRequests,
       injections: state.injections,
+      graphPersistence: state.graphPersistence,
       updatedAt: state.updatedAt,
     },
     {
@@ -148,6 +165,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      graphPersistence: null,
       updatedAt: "",
     },
   );
@@ -291,6 +309,7 @@ let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
 let lastRecallStatus = createUiStatus("待命", "尚未执行召回", "idle");
+let graphPersistenceState = createGraphPersistenceState();
 const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
@@ -323,6 +342,279 @@ function createUiStatus(text = "待命", meta = "", level = "idle") {
     level,
     updatedAt: Date.now(),
   };
+}
+
+function createGraphPersistenceState() {
+  return {
+    loadState: "no-chat",
+    chatId: "",
+    reason: "当前尚未进入聊天",
+    attemptIndex: 0,
+    revision: 0,
+    lastPersistedRevision: 0,
+    queuedPersistRevision: 0,
+    shadowSnapshotUsed: false,
+    shadowSnapshotRevision: 0,
+    shadowSnapshotUpdatedAt: "",
+    shadowSnapshotReason: "",
+    lastPersistReason: "",
+    writesBlocked: false,
+    pendingPersist: false,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function getGraphShadowSnapshotStorageKey(chatId = "") {
+  const normalizedChatId = String(chatId || "").trim();
+  if (!normalizedChatId) return "";
+  return `${GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX}${encodeURIComponent(normalizedChatId)}`;
+}
+
+function readGraphShadowSnapshot(chatId = "") {
+  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
+  if (!storageKey) return null;
+
+  try {
+    const raw = globalThis.sessionStorage?.getItem(storageKey);
+    if (!raw) return null;
+    const snapshot = JSON.parse(raw);
+    if (
+      !snapshot ||
+      typeof snapshot !== "object" ||
+      String(snapshot.chatId || "") !== String(chatId || "") ||
+      typeof snapshot.serializedGraph !== "string" ||
+      !snapshot.serializedGraph
+    ) {
+      return null;
+    }
+    return {
+      chatId: String(snapshot.chatId || ""),
+      revision: Number.isFinite(snapshot.revision)
+        ? snapshot.revision
+        : 0,
+      serializedGraph: snapshot.serializedGraph,
+      updatedAt: String(snapshot.updatedAt || ""),
+      reason: String(snapshot.reason || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeGraphShadowSnapshot(
+  chatId = "",
+  graph = currentGraph,
+  { revision = graphPersistenceState.revision, reason = "" } = {},
+) {
+  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
+  if (!storageKey || !graph) return false;
+
+  try {
+    const serializedGraph = serializeGraph(graph);
+    globalThis.sessionStorage?.setItem(
+      storageKey,
+      JSON.stringify({
+        chatId: String(chatId || ""),
+        revision: Number.isFinite(revision) ? revision : 0,
+        serializedGraph,
+        updatedAt: new Date().toISOString(),
+        reason: String(reason || ""),
+      }),
+    );
+    return true;
+  } catch (error) {
+    console.warn("[ST-BME] 写入会话图谱临时快照失败:", error);
+    return false;
+  }
+}
+
+function removeGraphShadowSnapshot(chatId = "") {
+  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
+  if (!storageKey) return false;
+
+  try {
+    globalThis.sessionStorage?.removeItem(storageKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getGraphPersistenceLiveState() {
+  const snapshot = {
+    loadState: graphPersistenceState.loadState,
+    chatId: graphPersistenceState.chatId,
+    reason: graphPersistenceState.reason,
+    attemptIndex: graphPersistenceState.attemptIndex,
+    graphRevision: graphPersistenceState.revision,
+    lastPersistedRevision: graphPersistenceState.lastPersistedRevision,
+    queuedPersistRevision: graphPersistenceState.queuedPersistRevision,
+    shadowSnapshotUsed: graphPersistenceState.shadowSnapshotUsed,
+    shadowSnapshotRevision: graphPersistenceState.shadowSnapshotRevision,
+    shadowSnapshotUpdatedAt: graphPersistenceState.shadowSnapshotUpdatedAt,
+    shadowSnapshotReason: graphPersistenceState.shadowSnapshotReason,
+    lastPersistReason: graphPersistenceState.lastPersistReason,
+    writesBlocked: graphPersistenceState.writesBlocked,
+    pendingPersist: graphPersistenceState.pendingPersist,
+    canWriteToMetadata: isGraphMetadataWriteAllowed(
+      graphPersistenceState.loadState,
+    ),
+    updatedAt: graphPersistenceState.updatedAt,
+  };
+  return cloneRuntimeDebugValue(snapshot, snapshot);
+}
+
+function syncGraphPersistenceDebugState() {
+  recordGraphPersistenceSnapshot(getGraphPersistenceLiveState());
+}
+
+function updateGraphPersistenceState(patch = {}) {
+  graphPersistenceState = {
+    ...graphPersistenceState,
+    ...(patch || {}),
+    updatedAt: new Date().toISOString(),
+  };
+  syncGraphPersistenceDebugState();
+  return graphPersistenceState;
+}
+
+function bumpGraphRevision(reason = "graph-mutation") {
+  const nextRevision =
+    Math.max(
+      graphPersistenceState.revision || 0,
+      graphPersistenceState.lastPersistedRevision || 0,
+      graphPersistenceState.queuedPersistRevision || 0,
+    ) + 1;
+  updateGraphPersistenceState({
+    revision: nextRevision,
+    lastPersistReason: String(reason || graphPersistenceState.lastPersistReason || ""),
+  });
+  return nextRevision;
+}
+
+function isGraphMetadataWriteAllowed(loadState = graphPersistenceState.loadState) {
+  return (
+    loadState === GRAPH_LOAD_STATES.LOADED ||
+    loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+  );
+}
+
+function isGraphReadable(loadState = graphPersistenceState.loadState) {
+  return (
+    loadState === GRAPH_LOAD_STATES.LOADED ||
+    loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ||
+    loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
+    (loadState === GRAPH_LOAD_STATES.BLOCKED &&
+      graphPersistenceState.shadowSnapshotUsed)
+  );
+}
+
+function createGraphLoadUiStatus() {
+  const state = graphPersistenceState.loadState;
+  const chatId = graphPersistenceState.chatId || getCurrentChatId();
+  switch (state) {
+    case GRAPH_LOAD_STATES.NO_CHAT:
+      return createUiStatus("待命", "当前尚未进入聊天", "idle");
+    case GRAPH_LOAD_STATES.LOADING:
+      return createUiStatus(
+        "图谱加载中",
+        chatId
+          ? `正在读取聊天 ${chatId} 的图谱元数据`
+          : "正在等待聊天上下文准备完成",
+        "running",
+      );
+    case GRAPH_LOAD_STATES.SHADOW_RESTORED:
+      return createUiStatus(
+        "图谱临时恢复",
+        "已从本次会话临时恢复，正在等待正式聊天元数据",
+        "warning",
+      );
+    case GRAPH_LOAD_STATES.EMPTY_CONFIRMED:
+      return createUiStatus(
+        "图谱待命",
+        chatId ? "当前聊天还没有图谱" : "当前尚未进入聊天",
+        "idle",
+      );
+    case GRAPH_LOAD_STATES.BLOCKED:
+      return createUiStatus(
+        "图谱加载受阻",
+        "聊天元数据未就绪，已暂停图谱写回以保护旧数据",
+        "warning",
+      );
+    case GRAPH_LOAD_STATES.LOADED:
+    default:
+      return createUiStatus("待命", "已加载聊天图谱，等待下一次任务", "idle");
+  }
+}
+
+function getPanelRuntimeStatus() {
+  const graphStatus = createGraphLoadUiStatus();
+  if (
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING ||
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED ||
+    graphPersistenceState.loadState === GRAPH_LOAD_STATES.NO_CHAT
+  ) {
+    return graphStatus;
+  }
+  return runtimeStatus;
+}
+
+function getGraphMutationBlockReason(operationLabel = "当前操作") {
+  switch (graphPersistenceState.loadState) {
+    case GRAPH_LOAD_STATES.LOADING:
+      return `${operationLabel}已暂停：正在加载当前聊天图谱。`;
+    case GRAPH_LOAD_STATES.SHADOW_RESTORED:
+      return `${operationLabel}已暂停：当前图谱还在临时恢复状态，等待正式聊天元数据。`;
+    case GRAPH_LOAD_STATES.BLOCKED:
+      return `${operationLabel}已暂停：聊天元数据未就绪，已启用写保护。`;
+    case GRAPH_LOAD_STATES.NO_CHAT:
+      return `${operationLabel}已暂停：当前尚未进入聊天。`;
+    default:
+      return `${operationLabel}暂不可用。`;
+  }
+}
+
+function ensureGraphMutationReady(operationLabel = "当前操作", { notify = true } = {}) {
+  if (isGraphMetadataWriteAllowed()) return true;
+  if (notify) {
+    toastr.info(getGraphMutationBlockReason(operationLabel), "ST-BME");
+  }
+  return false;
+}
+
+function applyGraphLoadState(
+  loadState,
+  {
+    chatId = getCurrentChatId(),
+    reason = "",
+    attemptIndex = 0,
+    shadowSnapshotUsed = false,
+    shadowSnapshotRevision = 0,
+    shadowSnapshotUpdatedAt = "",
+    shadowSnapshotReason = "",
+    revision = graphPersistenceState.revision,
+    lastPersistedRevision = graphPersistenceState.lastPersistedRevision,
+    queuedPersistRevision = graphPersistenceState.queuedPersistRevision,
+    pendingPersist = graphPersistenceState.pendingPersist,
+    writesBlocked = !isGraphMetadataWriteAllowed(loadState),
+  } = {},
+) {
+  updateGraphPersistenceState({
+    loadState,
+    chatId: String(chatId || ""),
+    reason: String(reason || ""),
+    attemptIndex,
+    revision,
+    lastPersistedRevision,
+    queuedPersistRevision,
+    shadowSnapshotUsed,
+    shadowSnapshotRevision,
+    shadowSnapshotUpdatedAt,
+    shadowSnapshotReason,
+    pendingPersist,
+    writesBlocked,
+  });
 }
 
 function normalizeStageNoticeLevel(level = "info") {
@@ -1014,6 +1306,168 @@ function isGraphEffectivelyEmpty(graph) {
   return true;
 }
 
+function buildGraphPersistResult({
+  saved = false,
+  queued = false,
+  blocked = false,
+  reason = "",
+  loadState = graphPersistenceState.loadState,
+  revision = graphPersistenceState.revision,
+} = {}) {
+  return {
+    saved,
+    queued,
+    blocked,
+    reason: String(reason || ""),
+    loadState,
+    revision: Number.isFinite(revision) ? revision : 0,
+  };
+}
+
+function maybeCaptureGraphShadowSnapshot(reason = "runtime-shadow") {
+  const chatId = graphPersistenceState.chatId || getCurrentChatId();
+  if (!chatId || !currentGraph) return false;
+  const hasMeaningfulGraphData =
+    !isGraphEffectivelyEmpty(currentGraph) ||
+    graphPersistenceState.shadowSnapshotUsed ||
+    graphPersistenceState.lastPersistedRevision > 0;
+  if (!hasMeaningfulGraphData) return false;
+  return writeGraphShadowSnapshot(chatId, currentGraph, {
+    revision: graphPersistenceState.revision,
+    reason,
+  });
+}
+
+function persistGraphToChatMetadata(
+  context = getContext(),
+  { reason = "graph-persist", revision = graphPersistenceState.revision } = {},
+) {
+  if (!context || !currentGraph) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      reason: "missing-context-or-graph",
+      revision,
+    });
+  }
+
+  const chatId = getCurrentChatId(context);
+  if (!chatId) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      reason: "missing-chat-id",
+      revision,
+    });
+  }
+
+  if (typeof context.updateChatMetadata === "function") {
+    context.updateChatMetadata({ [GRAPH_METADATA_KEY]: currentGraph });
+  } else {
+    if (
+      !context.chatMetadata ||
+      typeof context.chatMetadata !== "object" ||
+      Array.isArray(context.chatMetadata)
+    ) {
+      context.chatMetadata = {};
+    }
+    context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
+  }
+
+  if (typeof context.saveMetadataDebounced === "function") {
+    context.saveMetadataDebounced();
+  } else {
+    saveMetadataDebounced();
+  }
+
+  applyGraphLoadState(graphPersistenceState.loadState, {
+    chatId,
+    reason: graphPersistenceState.reason,
+    attemptIndex: graphPersistenceState.attemptIndex,
+    shadowSnapshotUsed: graphPersistenceState.shadowSnapshotUsed,
+    shadowSnapshotRevision: graphPersistenceState.shadowSnapshotRevision,
+    shadowSnapshotUpdatedAt: graphPersistenceState.shadowSnapshotUpdatedAt,
+    shadowSnapshotReason: graphPersistenceState.shadowSnapshotReason,
+    revision,
+    lastPersistedRevision: revision,
+    queuedPersistRevision: 0,
+    pendingPersist: false,
+    writesBlocked: false,
+  });
+  updateGraphPersistenceState({
+    lastPersistReason: String(reason || ""),
+  });
+
+  return buildGraphPersistResult({
+    saved: true,
+    reason,
+    loadState: graphPersistenceState.loadState,
+    revision,
+  });
+}
+
+function queueGraphPersist(
+  reason = "graph-persist-blocked",
+  revision = graphPersistenceState.revision,
+) {
+  maybeCaptureGraphShadowSnapshot(reason);
+  updateGraphPersistenceState({
+    queuedPersistRevision: Math.max(
+      graphPersistenceState.queuedPersistRevision || 0,
+      revision || 0,
+    ),
+    pendingPersist: true,
+    writesBlocked: true,
+    lastPersistReason: String(reason || ""),
+  });
+
+  return buildGraphPersistResult({
+    queued: true,
+    blocked: true,
+    reason,
+    loadState: graphPersistenceState.loadState,
+    revision,
+  });
+}
+
+function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
+  if (!currentGraph || !isGraphMetadataWriteAllowed()) {
+    return buildGraphPersistResult({
+      queued: graphPersistenceState.pendingPersist,
+      blocked: !isGraphMetadataWriteAllowed(),
+      reason: isGraphMetadataWriteAllowed()
+        ? "missing-current-graph"
+        : "write-protected",
+    });
+  }
+
+  if (
+    !graphPersistenceState.pendingPersist &&
+    graphPersistenceState.queuedPersistRevision <=
+      graphPersistenceState.lastPersistedRevision
+  ) {
+    return buildGraphPersistResult({
+      saved: false,
+      reason: "no-queued-persist",
+    });
+  }
+
+  const targetRevision = Math.max(
+    graphPersistenceState.revision || 0,
+    graphPersistenceState.queuedPersistRevision || 0,
+  );
+  if (targetRevision > (graphPersistenceState.revision || 0)) {
+    updateGraphPersistenceState({
+      revision: targetRevision,
+    });
+  }
+
+  return persistGraphToChatMetadata(getContext(), {
+    reason,
+    revision: targetRevision,
+  });
+}
+
 function scheduleGraphLoadRetry(
   chatId,
   reason = "metadata-pending",
@@ -1245,6 +1699,7 @@ function snapshotRuntimeUiState() {
     lastExtractionStatus: { ...(lastExtractionStatus || {}) },
     lastVectorStatus: { ...(lastVectorStatus || {}) },
     lastRecallStatus: { ...(lastRecallStatus || {}) },
+    graphPersistenceState: getGraphPersistenceLiveState(),
   };
 }
 
@@ -1275,6 +1730,9 @@ function restoreRuntimeUiState(snapshot = {}) {
     ...createUiStatus("待命", "尚未执行召回", "idle"),
     ...(snapshot.lastRecallStatus || {}),
   };
+  if (snapshot.graphPersistenceState) {
+    updateGraphPersistenceState(snapshot.graphPersistenceState);
+  }
   refreshPanelLiveState();
 }
 
@@ -1311,7 +1769,7 @@ async function recordGraphMutation({
       extractionCountBefore,
     }),
   );
-  saveGraphToChat();
+  saveGraphToChat({ reason: "record-graph-mutation" });
   return vectorSync;
 }
 
@@ -1454,6 +1912,7 @@ async function ensureVectorReadyIfNeeded(
 ) {
   if (!currentGraph) return;
   ensureCurrentGraphRuntimeState();
+  if (!isGraphMetadataWriteAllowed()) return;
 
   if (!currentGraph.vectorIndexState?.dirty) return;
 
@@ -1469,13 +1928,13 @@ async function ensureVectorReadyIfNeeded(
 
   if (result?.error) {
     currentGraph.vectorIndexState.lastWarning = result.error;
-    saveGraphToChat();
+    saveGraphToChat({ reason: "vector-auto-repair-failed" });
     console.warn("[ST-BME] 向量状态自动修复失败:", reason, result.error);
     return result;
   }
 
   currentGraph.vectorIndexState.lastWarning = "";
-  saveGraphToChat();
+  saveGraphToChat({ reason: "vector-auto-repair-succeeded" });
   console.log("[ST-BME] 向量状态已自动修复:", reason, result.stats);
   return result;
 }
@@ -1492,7 +1951,7 @@ async function resetVectorStateForConfigChange(reason = "向量配置已变更")
     stale: 0,
     pending: 0,
   };
-  saveGraphToChat();
+  saveGraphToChat({ reason: "vector-config-reset" });
 }
 
 function getPersistedSettingsSnapshot(settings = getSettings()) {
@@ -1665,7 +2124,50 @@ function loadGraphFromChat(options = {}) {
     normalizedExpectedChatId !== chatId
   ) {
     clearPendingGraphLoadRetry();
-    return false;
+    return {
+      success: false,
+      loaded: false,
+      loadState: graphPersistenceState.loadState,
+      reason: "expected-chat-mismatch",
+      chatId,
+      attemptIndex,
+    };
+  }
+
+  if (!chatId) {
+    clearPendingGraphLoadRetry();
+    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), "");
+    extractionCount = 0;
+    lastExtractedItems = [];
+    lastRecalledItems = [];
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus("待命", "当前尚未进入聊天", "idle");
+    lastExtractionStatus = createUiStatus("待命", "当前尚未进入聊天", "idle");
+    lastVectorStatus = createUiStatus("待命", "当前尚未进入聊天", "idle");
+    lastRecallStatus = createUiStatus("待命", "当前尚未进入聊天", "idle");
+    applyGraphLoadState(GRAPH_LOAD_STATES.NO_CHAT, {
+      chatId: "",
+      reason: "no-chat",
+      attemptIndex,
+      revision: 0,
+      lastPersistedRevision: 0,
+      queuedPersistRevision: 0,
+      pendingPersist: false,
+      shadowSnapshotUsed: false,
+      shadowSnapshotRevision: 0,
+      shadowSnapshotUpdatedAt: "",
+      shadowSnapshotReason: "",
+      writesBlocked: true,
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      loaded: false,
+      loadState: GRAPH_LOAD_STATES.NO_CHAT,
+      reason: "no-chat",
+      chatId: "",
+      attemptIndex,
+    };
   }
 
   const hasChatMetadata =
@@ -1675,12 +2177,11 @@ function loadGraphFromChat(options = {}) {
   const savedData = hasChatMetadata
     ? context.chatMetadata[GRAPH_METADATA_KEY]
     : undefined;
-  const shouldRetry =
-    Boolean(chatId) &&
-    (savedData == null || savedData === "") &&
-    attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
+  const hasOfficialGraph = savedData != null && savedData !== "";
+  const shadowSnapshot = hasOfficialGraph ? null : readGraphShadowSnapshot(chatId);
+  const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
 
-  if (savedData != null && savedData !== "") {
+  if (hasOfficialGraph) {
     clearPendingGraphLoadRetry();
     currentGraph = normalizeGraphRuntimeState(
       deserializeGraph(savedData),
@@ -1713,6 +2214,27 @@ function loadGraphFromChat(options = {}) {
       "已加载聊天图谱，等待下一次召回",
       "idle",
     );
+    const officialRevision = Math.max(
+      1,
+      shadowSnapshot?.revision || 0,
+      graphPersistenceState.lastPersistedRevision || 0,
+      graphPersistenceState.revision || 0,
+    );
+    applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+      chatId,
+      reason: source,
+      attemptIndex,
+      revision: officialRevision,
+      lastPersistedRevision: officialRevision,
+      queuedPersistRevision: 0,
+      pendingPersist: false,
+      shadowSnapshotUsed: false,
+      shadowSnapshotRevision: 0,
+      shadowSnapshotUpdatedAt: "",
+      shadowSnapshotReason: "",
+      writesBlocked: false,
+    });
+    removeGraphShadowSnapshot(chatId);
 
     console.log("[ST-BME] 从聊天数据加载图谱:", {
       chatId,
@@ -1721,111 +2243,294 @@ function loadGraphFromChat(options = {}) {
       ...getGraphStats(currentGraph),
     });
     refreshPanelLiveState();
-    return true;
+    return {
+      success: true,
+      loaded: true,
+      loadState: GRAPH_LOAD_STATES.LOADED,
+      reason: source,
+      chatId,
+      attemptIndex,
+      shadowSnapshotUsed: false,
+    };
   }
 
-  if (shouldRetry) {
-    currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
-    extractionCount = 0;
-    lastExtractedItems = [];
-    lastRecalledItems = [];
-    lastInjectionContent = "";
-    runtimeStatus = createUiStatus(
-      "待命",
-      "正在等待聊天元数据加载，暂不覆盖现有图谱",
-      "idle",
+  if (shadowSnapshot) {
+    currentGraph = normalizeGraphRuntimeState(
+      deserializeGraph(shadowSnapshot.serializedGraph),
+      chatId,
     );
+    extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+      ? currentGraph.historyState.extractionCount
+      : 0;
+    lastExtractedItems = [];
+    updateLastRecalledItems(currentGraph.lastRecallResult || []);
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus("待命", "已从本次会话临时恢复图谱", "idle");
     lastExtractionStatus = createUiStatus(
       "待命",
-      "正在等待聊天元数据加载",
-      "idle",
+      "图谱处于临时恢复状态，等待正式元数据",
+      "warning",
     );
     lastVectorStatus = createUiStatus(
       "待命",
-      "正在等待聊天元数据加载",
-      "idle",
+      "图谱处于临时恢复状态，等待正式元数据",
+      "warning",
     );
     lastRecallStatus = createUiStatus(
       "待命",
-      "正在等待聊天元数据加载",
-      "idle",
+      "图谱处于临时恢复状态，等待正式元数据",
+      "warning",
     );
-    scheduleGraphLoadRetry(
+
+    if (hasChatMetadata && !shouldRetry) {
+      applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+        chatId,
+        reason: "shadow-snapshot-promoted",
+        attemptIndex,
+        revision: Math.max(shadowSnapshot.revision || 0, 1),
+        lastPersistedRevision: 0,
+        queuedPersistRevision: Math.max(shadowSnapshot.revision || 0, 1),
+        pendingPersist: true,
+        shadowSnapshotUsed: true,
+        shadowSnapshotRevision: Math.max(shadowSnapshot.revision || 0, 1),
+        shadowSnapshotUpdatedAt: shadowSnapshot.updatedAt,
+        shadowSnapshotReason: shadowSnapshot.reason,
+        writesBlocked: false,
+      });
+      const persistResult = maybeFlushQueuedGraphPersist(
+        "shadow-snapshot-promoted",
+      );
+      refreshPanelLiveState();
+      return {
+        success: Boolean(persistResult.saved),
+        loaded: true,
+        loadState: GRAPH_LOAD_STATES.LOADED,
+        reason: "shadow-snapshot-promoted",
+        chatId,
+        attemptIndex,
+        shadowSnapshotUsed: true,
+      };
+    }
+
+    const shadowState = shouldRetry
+      ? GRAPH_LOAD_STATES.SHADOW_RESTORED
+      : GRAPH_LOAD_STATES.BLOCKED;
+    applyGraphLoadState(shadowState, {
       chatId,
-      hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
+      reason: shouldRetry
+        ? "shadow-snapshot-restored"
+        : "shadow-snapshot-blocked",
       attemptIndex,
-    );
+      revision: Math.max(shadowSnapshot.revision || 0, 1),
+      lastPersistedRevision: 0,
+      queuedPersistRevision: Math.max(shadowSnapshot.revision || 0, 1),
+      pendingPersist: true,
+      shadowSnapshotUsed: true,
+      shadowSnapshotRevision: Math.max(shadowSnapshot.revision || 0, 1),
+      shadowSnapshotUpdatedAt: shadowSnapshot.updatedAt,
+      shadowSnapshotReason: shadowSnapshot.reason,
+      writesBlocked: true,
+    });
+    if (shouldRetry) {
+      scheduleGraphLoadRetry(
+        chatId,
+        hasChatMetadata ? "official-graph-missing-shadow" : "chat-metadata-missing-shadow",
+        attemptIndex,
+      );
+    } else {
+      clearPendingGraphLoadRetry();
+    }
     refreshPanelLiveState();
-    return false;
+    return {
+      success: false,
+      loaded: false,
+      loadState: shadowState,
+      reason: graphPersistenceState.reason,
+      chatId,
+      attemptIndex,
+      shadowSnapshotUsed: true,
+    };
   }
 
-  clearPendingGraphLoadRetry();
   currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
   extractionCount = 0;
   lastExtractedItems = [];
   lastRecalledItems = [];
   lastInjectionContent = "";
 
-  const noChatLoaded = !chatId;
+  if (shouldRetry) {
+    runtimeStatus = createUiStatus(
+      "待命",
+      "正在加载当前聊天图谱，暂不写回图谱元数据",
+      "idle",
+    );
+    lastExtractionStatus = createUiStatus(
+      "待命",
+      "正在等待聊天图谱元数据加载",
+      "idle",
+    );
+    lastVectorStatus = createUiStatus(
+      "待命",
+      "正在等待聊天图谱元数据加载",
+      "idle",
+    );
+    lastRecallStatus = createUiStatus(
+      "待命",
+      "正在等待聊天图谱元数据加载",
+      "idle",
+    );
+    applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
+      chatId,
+      reason: hasChatMetadata
+        ? "graph-metadata-missing"
+        : "chat-metadata-missing",
+      attemptIndex,
+      revision: 0,
+      lastPersistedRevision: 0,
+      queuedPersistRevision: 0,
+      pendingPersist: false,
+      shadowSnapshotUsed: false,
+      shadowSnapshotRevision: 0,
+      shadowSnapshotUpdatedAt: "",
+      shadowSnapshotReason: "",
+      writesBlocked: true,
+    });
+    scheduleGraphLoadRetry(
+      chatId,
+      hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
+      attemptIndex,
+    );
+    refreshPanelLiveState();
+    return {
+      success: false,
+      loaded: false,
+      loadState: GRAPH_LOAD_STATES.LOADING,
+      reason: graphPersistenceState.reason,
+      chatId,
+      attemptIndex,
+      shadowSnapshotUsed: false,
+    };
+  }
+
+  clearPendingGraphLoadRetry();
+  const confirmedState = hasChatMetadata
+    ? GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+    : GRAPH_LOAD_STATES.BLOCKED;
   runtimeStatus = createUiStatus(
     "待命",
-    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未建立记忆图谱",
-    "idle",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+      ? "当前聊天还没有图谱"
+      : "聊天元数据未就绪，已暂停图谱写回",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
   );
   lastExtractionStatus = createUiStatus(
     "待命",
-    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未执行提取",
-    "idle",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+      ? "当前聊天尚未执行提取"
+      : "聊天元数据未就绪，暂不允许修改图谱",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
   );
   lastVectorStatus = createUiStatus(
     "待命",
-    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未执行向量任务",
-    "idle",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+      ? "当前聊天尚未执行向量任务"
+      : "聊天元数据未就绪，暂不允许修改图谱",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
   );
   lastRecallStatus = createUiStatus(
     "待命",
-    noChatLoaded ? "当前尚未进入聊天" : "当前聊天尚未建立记忆图谱",
-    "idle",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+      ? "当前聊天尚未建立记忆图谱"
+      : "聊天元数据未就绪，图谱处于保护状态",
+    confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ? "idle" : "warning",
   );
+  applyGraphLoadState(confirmedState, {
+    chatId,
+    reason:
+      confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+        ? "metadata-confirmed-empty"
+        : "chat-metadata-timeout",
+    attemptIndex,
+    revision: 0,
+    lastPersistedRevision: 0,
+    queuedPersistRevision: 0,
+    pendingPersist: false,
+    shadowSnapshotUsed: false,
+    shadowSnapshotRevision: 0,
+    shadowSnapshotUpdatedAt: "",
+    shadowSnapshotReason: "",
+    writesBlocked: confirmedState !== GRAPH_LOAD_STATES.EMPTY_CONFIRMED,
+  });
+  if (confirmedState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED) {
+    removeGraphShadowSnapshot(chatId);
+  }
   refreshPanelLiveState();
-  return false;
+  return {
+    success: false,
+    loaded: false,
+    loadState: confirmedState,
+    reason: graphPersistenceState.reason,
+    chatId,
+    attemptIndex,
+    shadowSnapshotUsed: false,
+  };
 }
 
-function saveGraphToChat() {
+function saveGraphToChat(options = {}) {
   const context = getContext();
-  if (!context || !currentGraph) return false;
+  if (!context || !currentGraph) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      reason: "missing-context-or-graph",
+    });
+  }
   const chatId = getCurrentChatId(context);
+  const {
+    reason = "graph-save",
+    markMutation = true,
+    captureShadow = true,
+  } = options;
 
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
+  if (!chatId) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      reason: "missing-chat-id",
+    });
+  }
 
-  if (isGraphLoadRetryPending(chatId) && isGraphEffectivelyEmpty(currentGraph)) {
+  const revision = markMutation
+    ? bumpGraphRevision(reason)
+    : graphPersistenceState.revision || 0;
+
+  if (captureShadow) {
+    maybeCaptureGraphShadowSnapshot(reason);
+  }
+
+  if (!isGraphMetadataWriteAllowed()) {
     console.warn(
-      `[ST-BME] 图谱元数据仍在加载中，已跳过空图写回（chat=${chatId}）`,
+      `[ST-BME] 图谱写回已被安全保护拦截（chat=${chatId}，state=${graphPersistenceState.loadState}，reason=${reason}）`,
     );
-    return false;
+    return queueGraphPersist(reason, revision);
   }
 
-  if (typeof context.updateChatMetadata === "function") {
-    context.updateChatMetadata({ [GRAPH_METADATA_KEY]: currentGraph });
-  } else {
-    if (
-      !context.chatMetadata ||
-      typeof context.chatMetadata !== "object" ||
-      Array.isArray(context.chatMetadata)
-    ) {
-      context.chatMetadata = {};
-    }
-    context.chatMetadata[GRAPH_METADATA_KEY] = currentGraph;
-  }
+  return persistGraphToChatMetadata(context, {
+    reason,
+    revision,
+  });
+}
 
-  if (typeof context.saveMetadataDebounced === "function") {
-    context.saveMetadataDebounced();
-  } else {
-    saveMetadataDebounced();
-  }
+function handleGraphShadowSnapshotPageHide() {
+  maybeCaptureGraphShadowSnapshot("pagehide");
+}
 
-  return true;
+function handleGraphShadowSnapshotVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    maybeCaptureGraphShadowSnapshot("visibility-hidden");
+  }
 }
 
 // ==================== 核心流程 ====================
@@ -2849,7 +3554,7 @@ function inspectHistoryMutation(
       metaReason,
       metaDetection.source,
     );
-    saveGraphToChat();
+    saveGraphToChat({ reason: "history-dirty-meta-detection" });
     notifyHistoryDirty(metaDetection.floor, metaReason);
     return {
       dirty: true,
@@ -2868,7 +3573,7 @@ function inspectHistoryMutation(
       detection.reason || trigger,
       "hash-recheck",
     );
-    saveGraphToChat();
+    saveGraphToChat({ reason: "history-dirty-hash-recheck" });
     notifyHistoryDirty(detection.earliestAffectedFloor, detection.reason);
     return {
       ...detection,
@@ -3052,7 +3757,7 @@ async function executeExtractionBatch({
       extractionCountBefore,
     }),
   );
-  saveGraphToChat();
+  saveGraphToChat({ reason: "extraction-batch-complete" });
 
   return {
     success: finalizedBatchStatus.completed,
@@ -3252,7 +3957,7 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       reason: "manual-reroll",
     }),
   );
-  saveGraphToChat();
+  saveGraphToChat({ reason: "reroll-rollback-complete" });
   refreshPanelLiveState();
 
   return {
@@ -3386,7 +4091,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           trigger,
       }),
     );
-    saveGraphToChat();
+    saveGraphToChat({ reason: "history-recovery-complete" });
     refreshPanelLiveState();
     updateStageNotice(
       "history",
@@ -3417,7 +4122,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           persist: false,
         },
       );
-      saveGraphToChat();
+      saveGraphToChat({ reason: "history-recovery-aborted" });
       return false;
     }
     console.error("[ST-BME] 历史恢复失败，尝试全量重建:", error);
@@ -3446,7 +4151,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           reason: `恢复失败后兜底全量重建: ${error?.message || error}`,
         }),
       );
-      saveGraphToChat();
+      saveGraphToChat({ reason: "history-recovery-fallback-rebuild" });
       refreshPanelLiveState();
       updateStageNotice(
         "history",
@@ -3475,7 +4180,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           reason: String(fallbackError),
         },
       );
-      saveGraphToChat();
+      saveGraphToChat({ reason: "history-recovery-failed" });
       refreshPanelLiveState();
       updateStageNotice(
         "history",
@@ -3504,6 +4209,15 @@ async function runExtraction() {
 
   const settings = getSettings();
   if (!settings.enabled) return;
+  if (!ensureGraphMutationReady("自动提取", { notify: false })) {
+    setLastExtractionStatus(
+      "等待图谱加载",
+      getGraphMutationBlockReason("自动提取"),
+      "warning",
+      { syncRuntime: true },
+    );
+    return;
+  }
   if (!(await recoverHistoryIfNeeded("auto-extract"))) return;
 
   const context = getContext();
@@ -3636,7 +4350,7 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
 
   currentGraph.lastRecallResult = result.selectedNodeIds;
   updateLastRecalledItems(result.selectedNodeIds || []);
-  saveGraphToChat();
+  saveGraphToChat({ reason: "recall-result-updated" });
 
   const llmLabel =
     llmMeta.status === "llm"
@@ -3696,7 +4410,18 @@ async function runRecall(options = {}) {
 
   const settings = getSettings();
   if (!settings.enabled || !settings.recallEnabled) return false;
-  if (!(await recoverHistoryIfNeeded("pre-recall"))) return false;
+  if (!isGraphReadable()) {
+    setLastRecallStatus(
+      "等待图谱加载",
+      getGraphMutationBlockReason("召回"),
+      "warning",
+      { syncRuntime: true },
+    );
+    return false;
+  }
+  if (isGraphMetadataWriteAllowed()) {
+    if (!(await recoverHistoryIfNeeded("pre-recall"))) return false;
+  }
 
   const context = getContext();
   const chat = context.chat;
@@ -3985,7 +4710,14 @@ async function onBeforeCombinePrompts() {
 function onMessageReceived() {
   // 新消息到达，图状态可能需要更新
   if (currentGraph) {
-    saveGraphToChat();
+    if (isGraphMetadataWriteAllowed()) {
+      saveGraphToChat({
+        reason: "message-received-passive-sync",
+        markMutation: false,
+      });
+    } else {
+      maybeCaptureGraphShadowSnapshot("message-received-passive-sync");
+    }
   }
 
   if (
@@ -4037,6 +4769,7 @@ async function onViewGraph() {
 
 async function onRebuild() {
   if (!confirm("确定要从当前聊天重建图谱？这将清除现有图谱数据。")) return;
+  if (!ensureGraphMutationReady("重建图谱")) return;
 
   const context = getContext();
   const chat = context?.chat;
@@ -4075,7 +4808,7 @@ async function onRebuild() {
         reason: "用户手动触发全量重建",
       }),
     );
-    saveGraphToChat();
+    saveGraphToChat({ reason: "manual-rebuild-complete" });
 
     if (currentGraph.vectorIndexState?.lastWarning) {
       toastr.warning(
@@ -4090,7 +4823,7 @@ async function onRebuild() {
       getCurrentChatId(),
     );
     restoreRuntimeUiState(previousUiState);
-    saveGraphToChat();
+    saveGraphToChat({ reason: "manual-rebuild-restore-previous" });
     throw new Error(
       `图谱重建失败，已恢复到重建前状态: ${error?.message || error}`,
     );
@@ -4099,6 +4832,7 @@ async function onRebuild() {
 
 async function onManualCompress() {
   if (!currentGraph) return;
+  if (!ensureGraphMutationReady("手动压缩")) return;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
 
   const result = await compressAll(
@@ -4134,31 +4868,83 @@ async function onExportGraph() {
 }
 
 async function onImportGraph() {
+  if (!ensureGraphMutationReady("导入图谱")) {
+    return { cancelled: true };
+  }
   const input = document.createElement("input");
   input.type = "file";
   input.accept = ".json";
-  input.onchange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let focusTimer = null;
 
-    try {
-      const text = await file.text();
-      currentGraph = normalizeGraphRuntimeState(
-        importGraph(text),
-        getCurrentChatId(),
-      );
-      markVectorStateDirty("导入图谱后需要重建向量索引");
-      extractionCount = 0;
-      lastExtractedItems = [];
-      updateLastRecalledItems(currentGraph.lastRecallResult || []);
-      clearInjectionState();
-      saveGraphToChat();
-      toastr.success("图谱已导入");
-    } catch (err) {
-      toastr.error(`导入失败: ${err.message}`);
-    }
-  };
-  input.click();
+    const cleanup = () => {
+      if (focusTimer) {
+        clearTimeout(focusTimer);
+        focusTimer = null;
+      }
+      input.onchange = null;
+      window.removeEventListener("focus", onWindowFocus, true);
+    };
+
+    const finish = (value, isError = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (isError) {
+        reject(value);
+      } else {
+        resolve(value);
+      }
+    };
+
+    const onWindowFocus = () => {
+      focusTimer = setTimeout(() => {
+        if (!settled) {
+          finish({ cancelled: true });
+        }
+      }, 180);
+    };
+
+    window.addEventListener("focus", onWindowFocus, true);
+    input.addEventListener(
+      "cancel",
+      () => {
+        finish({ cancelled: true });
+      },
+      { once: true },
+    );
+    input.onchange = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) {
+        finish({ cancelled: true });
+        return;
+      }
+
+      try {
+        const text = await file.text();
+        currentGraph = normalizeGraphRuntimeState(
+          importGraph(text),
+          getCurrentChatId(),
+        );
+        markVectorStateDirty("导入图谱后需要重建向量索引");
+        extractionCount = 0;
+        lastExtractedItems = [];
+        updateLastRecalledItems(currentGraph.lastRecallResult || []);
+        clearInjectionState();
+        saveGraphToChat({ reason: "graph-import-complete" });
+        toastr.success("图谱已导入");
+        finish({ imported: true, handledToast: true });
+      } catch (err) {
+        const error =
+          err instanceof Error ? err : new Error(String(err || "导入失败"));
+        toastr.error(`导入失败: ${error.message}`);
+        error._stBmeToastHandled = true;
+        finish(error, true);
+      }
+    };
+    input.click();
+  });
 }
 
 async function onViewLastInjection() {
@@ -4254,6 +5040,7 @@ async function onManualExtract() {
     toastr.info("记忆提取正在进行中，请稍候");
     return;
   }
+  if (!ensureGraphMutationReady("手动提取")) return;
   if (!(await recoverHistoryIfNeeded("manual-extract"))) return;
   if (!currentGraph)
     currentGraph = normalizeGraphRuntimeState(
@@ -4393,6 +5180,27 @@ async function onReroll({ fromFloor } = {}) {
       error: "记忆提取正在进行中",
     };
   }
+  if (
+    typeof ensureGraphMutationReady === "function" &&
+    !ensureGraphMutationReady("重新提取")
+  ) {
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: Number.isFinite(fromFloor) ? fromFloor : null,
+      effectiveFromFloor: null,
+      recoveryPath:
+        typeof graphPersistenceState === "object"
+          ? graphPersistenceState.loadState
+          : "graph-not-ready",
+      affectedBatchCount: 0,
+      error:
+        typeof getGraphMutationBlockReason === "function"
+          ? getGraphMutationBlockReason("重新提取")
+          : "重新提取已暂停：图谱尚未就绪。",
+    };
+  }
   if (!currentGraph) {
     toastr.info("图谱为空，无需重 Roll");
     return {
@@ -4491,6 +5299,7 @@ async function onReroll({ fromFloor } = {}) {
 
 async function onManualSleep() {
   if (!currentGraph) return;
+  if (!ensureGraphMutationReady("执行遗忘")) return;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   const result = sleepCycle(currentGraph, getSettings());
   await recordGraphMutation({
@@ -4502,6 +5311,7 @@ async function onManualSleep() {
 
 async function onManualSynopsis() {
   if (!currentGraph) return;
+  if (!ensureGraphMutationReady("更新概要")) return;
   const beforeSnapshot = cloneGraphSnapshot(currentGraph);
   await generateSynopsis({
     graph: currentGraph,
@@ -4519,6 +5329,7 @@ async function onManualSynopsis() {
 
 async function onManualEvolve() {
   if (!currentGraph) return;
+  if (!ensureGraphMutationReady("强制进化")) return;
 
   const candidateIds = lastExtractedItems
     .map((item) => item.id)
@@ -4550,6 +5361,7 @@ async function onManualEvolve() {
 }
 
 async function onRebuildVectorIndex(range = null) {
+  if (!ensureGraphMutationReady(range ? "范围重建向量" : "重建向量")) return;
   ensureCurrentGraphRuntimeState();
   const config = getEmbeddingConfig();
   const validation = validateVectorConfig(config);
@@ -4567,7 +5379,7 @@ async function onRebuildVectorIndex(range = null) {
       signal: vectorController.signal,
     });
 
-    saveGraphToChat();
+    saveGraphToChat({ reason: "vector-rebuild-complete" });
     if (result?.aborted) {
       return;
     }
@@ -4598,8 +5410,14 @@ async function onReembedDirect() {
 
 (async function init() {
   await loadServerSettings();
+  syncGraphPersistenceDebugState();
   initializeHostCapabilityBridge();
   installSendIntentHooks();
+  globalThis.addEventListener?.("pagehide", handleGraphShadowSnapshotPageHide);
+  document.addEventListener(
+    "visibilitychange",
+    handleGraphShadowSnapshotVisibilityChange,
+  );
 
   // 注册事件钩子
   eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
@@ -4637,7 +5455,7 @@ async function onReembedDirect() {
       getSettings: () => getSettings(),
       getLastExtract: () => lastExtractedItems,
       getLastRecall: () => lastRecalledItems,
-      getRuntimeStatus: () => runtimeStatus,
+      getRuntimeStatus: () => getPanelRuntimeStatus(),
       getLastExtractionStatus: () => lastExtractionStatus,
       getLastVectorStatus: () => lastVectorStatus,
       getLastRecallStatus: () => lastRecallStatus,
@@ -4646,6 +5464,7 @@ async function onReembedDirect() {
       getLastInjection: () => lastInjectionContent,
       getRuntimeDebugSnapshot: (options = {}) =>
         getPanelRuntimeDebugSnapshot(options),
+      getGraphPersistenceState: () => getGraphPersistenceLiveState(),
       updateSettings: (patch) => {
         const settings = updateModuleSettings(patch);
         if (Object.prototype.hasOwnProperty.call(patch, "panelTheme")) {

@@ -188,6 +188,11 @@
 
             <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
               <canvas id="bme-mobile-graph-canvas"></canvas>
+              <div class="bme-graph-overlay" id="bme-mobile-graph-overlay" hidden>
+                <div class="bme-graph-overlay__text" id="bme-mobile-graph-overlay-text">
+                  正在加载当前聊天图谱
+                </div>
+              </div>
               <span class="bme-mobile-graph-label">REALTIME</span>
             </div>
             <div
@@ -236,6 +241,7 @@
 
           <div class="bme-tab-pane" id="bme-pane-actions">
             <div class="bme-action-groups">
+              <div class="bme-action-guard-banner" id="bme-action-guard-banner" hidden></div>
               <!-- 记忆操作 -->
               <div class="bme-action-group">
                 <div class="bme-action-group-header">
@@ -395,6 +401,11 @@
           </div>
 
           <canvas id="bme-graph-canvas"></canvas>
+          <div class="bme-graph-overlay" id="bme-graph-overlay" hidden>
+            <div class="bme-graph-overlay__text" id="bme-graph-overlay-text">
+              正在加载当前聊天图谱
+            </div>
+          </div>
 
           <div class="bme-graph-legend" id="bme-graph-legend"></div>
 
