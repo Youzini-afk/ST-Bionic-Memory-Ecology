@@ -91,6 +91,10 @@ async function createGraphPersistenceHarness({
   chatId = "chat-test",
   chatMetadata = undefined,
   sessionStore = null,
+  globalChatId = "",
+  characterId = "",
+  groupId = null,
+  chat = [],
 } = {}) {
   const timers = new Map();
   let nextTimerId = 1;
@@ -136,6 +140,12 @@ async function createGraphPersistenceHarness({
         return null;
       },
     },
+    SillyTavern: {
+      getCurrentChatId() {
+        return runtimeContext.__globalChatId;
+      },
+    },
+    __globalChatId: String(globalChatId || ""),
     refreshPanelLiveState() {
       runtimeContext.__panelRefreshCount += 1;
     },
@@ -173,6 +183,9 @@ async function createGraphPersistenceHarness({
     __chatContext: {
       chatId,
       chatMetadata,
+      characterId,
+      groupId,
+      chat,
       updateChatMetadata(patch) {
         const base =
           this.chatMetadata &&
@@ -252,6 +265,43 @@ result = {
     runtimeContext,
     sessionStore: storage.__store,
   };
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
+    globalChatId: "chat-global",
+    chatMetadata: {
+      st_bme_graph: createMeaningfulGraph("chat-global", "global"),
+    },
+  });
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "global-chat-id",
+  });
+
+  assert.equal(result.loadState, "loaded");
+  assert.equal(harness.api.getCurrentGraph().historyState.chatId, "chat-global");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
+    globalChatId: "",
+    characterId: "char-1",
+    chatMetadata: undefined,
+    chat: [{ is_user: true, mes: "hello" }],
+  });
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "pending-chat-context",
+  });
+  const live = harness.api.getGraphPersistenceLiveState();
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(live.loadState, "loading");
+  assert.equal(live.reason, "chat-id-missing");
+  assert.equal(live.writesBlocked, true);
 }
 
 {

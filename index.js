@@ -92,6 +92,7 @@ const GRAPH_LOAD_STATES = Object.freeze({
   EMPTY_CONFIRMED: "empty-confirmed",
   BLOCKED: "blocked",
 });
+const GRAPH_LOAD_PENDING_CHAT_ID = "__pending_chat__";
 const GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX = `${MODULE_NAME}:graph-shadow:`;
 
 function cloneRuntimeDebugValue(value, fallback = null) {
@@ -1152,8 +1153,68 @@ function getEmbeddingConfig(mode = null) {
   );
 }
 
+function normalizeChatIdCandidate(value = "") {
+  return String(value ?? "").trim();
+}
+
+function readGlobalCurrentChatId() {
+  try {
+    return normalizeChatIdCandidate(
+      globalThis.SillyTavern?.getCurrentChatId?.() ||
+        globalThis.getCurrentChatId?.() ||
+        "",
+    );
+  } catch {
+    return "";
+  }
+}
+
+function hasLikelySelectedChatContext(context = getContext()) {
+  if (!context || typeof context !== "object") {
+    return false;
+  }
+
+  const hasChatMetadata =
+    context.chatMetadata &&
+    typeof context.chatMetadata === "object" &&
+    !Array.isArray(context.chatMetadata);
+  const hasChatMessages = Array.isArray(context.chat);
+  const hasCharacterId =
+    context.characterId !== undefined &&
+    context.characterId !== null &&
+    String(context.characterId).trim() !== "";
+  const hasGroupId =
+    context.groupId !== undefined &&
+    context.groupId !== null &&
+    String(context.groupId).trim() !== "";
+
+  return hasChatMetadata || hasChatMessages || hasCharacterId || hasGroupId;
+}
+
+function resolveCurrentChatIdentity(context = getContext()) {
+  const candidates = [
+    context?.chatId,
+    context?.getCurrentChatId?.(),
+    readGlobalCurrentChatId(),
+    context?.chatMetadata?.chat_id,
+    context?.chatMetadata?.chatId,
+    context?.chatMetadata?.session_id,
+    context?.chatMetadata?.sessionId,
+  ];
+
+  const chatId =
+    candidates
+      .map((candidate) => normalizeChatIdCandidate(candidate))
+      .find(Boolean) || "";
+
+  return {
+    chatId,
+    hasLikelySelectedChat: hasLikelySelectedChatContext(context),
+  };
+}
+
 function getCurrentChatId(context = getContext()) {
-  return String(context?.chatId || context?.getCurrentChatId?.() || "");
+  return resolveCurrentChatIdentity(context).chatId;
 }
 
 function resolveInjectionPromptType(settings = {}) {
@@ -1472,30 +1533,48 @@ function scheduleGraphLoadRetry(
   chatId,
   reason = "metadata-pending",
   attemptIndex = 0,
+  { allowPendingChat = false, expectedChatId = "" } = {},
 ) {
   const normalizedChatId = String(chatId || "");
+  const normalizedExpectedChatId = String(
+    expectedChatId || normalizedChatId || "",
+  );
   const delayMs = GRAPH_LOAD_RETRY_DELAYS_MS[attemptIndex];
-  if (!normalizedChatId || !Number.isFinite(delayMs)) {
+  if ((!normalizedChatId && !allowPendingChat) || !Number.isFinite(delayMs)) {
     clearPendingGraphLoadRetry();
     return false;
   }
 
   clearPendingGraphLoadRetry({ resetChatId: false });
-  pendingGraphLoadRetryChatId = normalizedChatId;
+  pendingGraphLoadRetryChatId =
+    normalizedChatId || (allowPendingChat ? GRAPH_LOAD_PENDING_CHAT_ID : "");
   console.debug(
-    `[ST-BME] 图谱元数据尚未就绪，${delayMs}ms 后重试加载（chat=${normalizedChatId}，attempt=${attemptIndex + 1}，reason=${reason}）`,
+    `[ST-BME] 图谱元数据尚未就绪，${delayMs}ms 后重试加载（chat=${normalizedChatId || "pending"}，attempt=${attemptIndex + 1}，reason=${reason}）`,
   );
 
   pendingGraphLoadRetryTimer = setTimeout(() => {
     pendingGraphLoadRetryTimer = null;
-    if (getCurrentChatId() !== normalizedChatId) {
+    const currentChatId = getCurrentChatId();
+    if (
+      normalizedExpectedChatId &&
+      currentChatId &&
+      currentChatId !== normalizedExpectedChatId
+    ) {
+      clearPendingGraphLoadRetry();
+      return;
+    }
+    if (
+      !allowPendingChat &&
+      normalizedChatId &&
+      currentChatId !== normalizedChatId
+    ) {
       clearPendingGraphLoadRetry();
       return;
     }
 
     loadGraphFromChat({
       attemptIndex: attemptIndex + 1,
-      expectedChatId: normalizedChatId,
+      expectedChatId: normalizedExpectedChatId,
       source: `retry:${reason}`,
     });
   }, delayMs);
@@ -2112,7 +2191,8 @@ function loadGraphFromChat(options = {}) {
     source = "direct-load",
   } = options;
   const context = getContext();
-  const chatId = getCurrentChatId(context);
+  const chatIdentity = resolveCurrentChatIdentity(context);
+  const chatId = chatIdentity.chatId;
   const normalizedExpectedChatId = String(expectedChatId || "");
   if (attemptIndex === 0) {
     clearPendingGraphLoadRetry();
@@ -2135,6 +2215,76 @@ function loadGraphFromChat(options = {}) {
   }
 
   if (!chatId) {
+    const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
+    if (chatIdentity.hasLikelySelectedChat) {
+      currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), "");
+      extractionCount = 0;
+      lastExtractedItems = [];
+      lastRecalledItems = [];
+      lastInjectionContent = "";
+      runtimeStatus = createUiStatus(
+        "图谱加载中",
+        "正在等待当前聊天会话 ID 与元数据就绪",
+        shouldRetry ? "running" : "warning",
+      );
+      lastExtractionStatus = createUiStatus(
+        "待命",
+        shouldRetry
+          ? "正在等待当前聊天会话 ID 就绪"
+          : "当前聊天会话 ID 长时间未就绪，已暂停修改图谱",
+        shouldRetry ? "idle" : "warning",
+      );
+      lastVectorStatus = createUiStatus(
+        "待命",
+        shouldRetry
+          ? "正在等待当前聊天会话 ID 就绪"
+          : "当前聊天会话 ID 长时间未就绪，已暂停修改图谱",
+        shouldRetry ? "idle" : "warning",
+      );
+      lastRecallStatus = createUiStatus(
+        "待命",
+        shouldRetry
+          ? "正在等待当前聊天会话 ID 就绪"
+          : "当前聊天会话 ID 长时间未就绪，已暂停图谱写回",
+        shouldRetry ? "idle" : "warning",
+      );
+      applyGraphLoadState(
+        shouldRetry ? GRAPH_LOAD_STATES.LOADING : GRAPH_LOAD_STATES.BLOCKED,
+        {
+          chatId: "",
+          reason: shouldRetry ? "chat-id-missing" : "chat-id-timeout",
+          attemptIndex,
+          revision: 0,
+          lastPersistedRevision: 0,
+          queuedPersistRevision: 0,
+          pendingPersist: false,
+          shadowSnapshotUsed: false,
+          shadowSnapshotRevision: 0,
+          shadowSnapshotUpdatedAt: "",
+          shadowSnapshotReason: "",
+          writesBlocked: true,
+        },
+      );
+      if (shouldRetry) {
+        scheduleGraphLoadRetry("", "chat-id-missing", attemptIndex, {
+          allowPendingChat: true,
+        });
+      } else {
+        clearPendingGraphLoadRetry();
+      }
+      refreshPanelLiveState();
+      return {
+        success: false,
+        loaded: false,
+        loadState: shouldRetry
+          ? GRAPH_LOAD_STATES.LOADING
+          : GRAPH_LOAD_STATES.BLOCKED,
+        reason: shouldRetry ? "chat-id-missing" : "chat-id-timeout",
+        chatId: "",
+        attemptIndex,
+      };
+    }
+
     clearPendingGraphLoadRetry();
     currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), "");
     extractionCount = 0;
