@@ -302,9 +302,14 @@ async function summarizeBatch(
     compressPromptBuild,
     userPrompt,
   );
+  const llmSystemPrompt =
+    Array.isArray(promptPayload.promptMessages) &&
+    promptPayload.promptMessages.length > 0
+      ? String(promptPayload.systemPrompt || "")
+      : String(promptPayload.systemPrompt || systemPrompt || "");
 
   return await callLLMForJSON({
-    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+    systemPrompt: llmSystemPrompt,
     userPrompt: promptPayload.userPrompt,
     maxRetries: 1,
     signal,

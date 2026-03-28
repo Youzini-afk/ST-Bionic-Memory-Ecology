@@ -174,10 +174,15 @@ export async function extractMemories({
     "请分析对话，按 JSON 格式输出操作列表。",
   ].join("\n");
   const promptPayload = resolveTaskPromptPayload(promptBuild, userPrompt);
+  const llmSystemPrompt =
+    Array.isArray(promptPayload.promptMessages) &&
+    promptPayload.promptMessages.length > 0
+      ? String(promptPayload.systemPrompt || "")
+      : String(promptPayload.systemPrompt || systemPrompt || "");
 
   // 调用 LLM
   const result = await callLLMForJSON({
-    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+    systemPrompt: llmSystemPrompt,
     userPrompt: promptPayload.userPrompt,
     maxRetries: 2,
     signal,

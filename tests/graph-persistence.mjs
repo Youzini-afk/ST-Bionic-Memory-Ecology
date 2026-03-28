@@ -28,7 +28,7 @@ function extractSnippet(startMarker, endMarker) {
 
 const persistencePrelude = extractSnippet(
   'const MODULE_NAME = "st_bme";',
-  "function clearInjectionState() {",
+  "function clearInjectionState(options = {}) {",
 );
 const persistenceCore = extractSnippet(
   "function loadGraphFromChat(options = {}) {",

@@ -1093,7 +1093,8 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
   ).text;
 
   return {
-    systemPrompt: String(promptBuild?.systemPrompt || ""),
+    systemPrompt:
+      executionMessages.length > 0 ? "" : String(promptBuild?.systemPrompt || ""),
     userPrompt: hasUserMessage ? "" : sanitizedFallbackUserPrompt,
     promptMessages: executionMessages,
     additionalMessages:

@@ -341,10 +341,14 @@ export async function consolidateMemories({
     consolidationPromptBuild,
     userPrompt,
   );
+  const llmSystemPrompt =
+    Array.isArray(promptPayload.promptMessages) &&
+    promptPayload.promptMessages.length > 0
+      ? String(promptPayload.systemPrompt || "")
+      : String(promptPayload.systemPrompt || consolidationSystemPrompt || "");
   try {
     decision = await callLLMForJSON({
-      systemPrompt:
-        promptPayload.systemPrompt || consolidationSystemPrompt,
+      systemPrompt: llmSystemPrompt,
       userPrompt: promptPayload.userPrompt,
       maxRetries: 1,
       signal,

@@ -51,6 +51,7 @@ const extractPromptBuild = await buildTaskPrompt(settings, "extract", {
   currentRange: "1 ~ 2",
 });
 const extractPayload = buildTaskLlmPayload(extractPromptBuild, "fallback-user");
+assert.equal(extractPayload.systemPrompt, "");
 assert.equal(extractPayload.userPrompt, "");
 assert.equal(
   extractPayload.promptMessages.filter((message) => message.role === "user").length,
@@ -86,6 +87,7 @@ const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
   graphStats: "candidate_count=2",
 });
 const recallPayload = buildTaskLlmPayload(recallPromptBuild, "fallback-user");
+assert.equal(recallPayload.systemPrompt, "");
 assert.equal(recallPayload.userPrompt, "");
 assert.equal(
   recallPayload.promptMessages.filter((message) => message.role === "user").length,

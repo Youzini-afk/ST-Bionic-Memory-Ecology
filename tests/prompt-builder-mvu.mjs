@@ -258,6 +258,7 @@ try {
   };
 
   const payload = buildTaskLlmPayload(promptBuild, "unused fallback");
+  assert.equal(payload.systemPrompt, "");
   const result = await llm.callLLMForJSON({
     systemPrompt: payload.systemPrompt,
     userPrompt: payload.userPrompt,

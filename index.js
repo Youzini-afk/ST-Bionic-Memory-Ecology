@@ -292,6 +292,8 @@ const defaultSettings = {
 let currentGraph = null;
 let isExtracting = false;
 let isRecalling = false;
+let activeRecallPromise = null;
+let recallRunSequence = 0;
 let lastInjectionContent = "";
 let lastExtractedItems = []; // 最近提取的节点（面板展示用）
 let lastRecalledItems = []; // 最近召回的节点（面板展示用）
@@ -322,6 +324,9 @@ let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
 let pendingGraphLoadRetryTimer = null;
 let pendingGraphLoadRetryChatId = "";
+let skipBeforeCombineRecallUntil = 0;
+let lastPreGenerationRecallKey = "";
+let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const stageNoticeHandles = {
@@ -694,6 +699,38 @@ function abortStage(stage) {
   if (!controller || controller.signal.aborted) return false;
   controller.abort(createAbortError(`${getStageAbortLabel(stage)}已终止`));
   return true;
+}
+
+function abortRecallStageWithReason(reason = "召回已终止") {
+  const controller = stageAbortControllers.recall;
+  if (!controller || controller.signal.aborted) return false;
+  controller.abort(createAbortError(reason));
+  return true;
+}
+
+async function waitForActiveRecallToSettle(timeoutMs = 1800) {
+  const pending = activeRecallPromise;
+  if (!pending) {
+    return {
+      settled: !isRecalling,
+      timedOut: false,
+    };
+  }
+
+  let settled = false;
+  await Promise.race([
+    Promise.resolve(pending)
+      .catch(() => {})
+      .then(() => {
+        settled = true;
+      }),
+    new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+
+  return {
+    settled: settled || !isRecalling,
+    timedOut: !settled && isRecalling,
+  };
 }
 
 function buildAbortStageAction(stage) {
@@ -1687,11 +1724,19 @@ function scheduleStartupGraphReconciliation() {
   }
 }
 
-function clearInjectionState() {
+function clearInjectionState(options = {}) {
+  const {
+    preserveRecallStatus = false,
+    preserveRuntimeStatus = preserveRecallStatus,
+  } = options;
   lastInjectionContent = "";
   lastRecalledItems = [];
-  lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
-  runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  if (!preserveRecallStatus) {
+    lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  }
+  if (!preserveRuntimeStatus) {
+    runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  }
   recordInjectionSnapshot("recall", {
     injectionText: "",
     selectedNodeIds: [],
@@ -1703,7 +1748,7 @@ function clearInjectionState() {
       mode: "cleared",
     },
   });
-  if (!isRecalling) {
+  if (!isRecalling && !preserveRecallStatus) {
     dismissStageNotice("recall");
   }
 
@@ -3155,20 +3200,103 @@ function markGenerationRecallTransactionHookState(
   return transaction;
 }
 
+function clearGenerationRecallTransactionsForChat(
+  chatId = getCurrentChatId(),
+  { clearAll = false } = {},
+) {
+  let removed = 0;
+  const normalizedChatId = String(chatId || "");
+  if (clearAll || !normalizedChatId) {
+    removed = generationRecallTransactions.size;
+    generationRecallTransactions.clear();
+    return removed;
+  }
+
+  for (const [transactionId, transaction] of generationRecallTransactions.entries()) {
+    if (String(transaction?.chatId || "") !== normalizedChatId) continue;
+    generationRecallTransactions.delete(transactionId);
+    removed += 1;
+  }
+
+  return removed;
+}
+
+function isTerminalGenerationRecallHookState(state = "") {
+  return ["completed", "failed", "aborted", "skipped"].includes(
+    String(state || ""),
+  );
+}
+
 function shouldRunRecallForTransaction(transaction, hookName) {
   if (!hookName) return true;
   if (!transaction) return true;
   const hookStates = transaction.hookStates || {};
-  if (hookStates[hookName] === "completed") {
+  if (isTerminalGenerationRecallHookState(hookStates[hookName])) {
     return false;
   }
   if (
     hookName === "GENERATE_BEFORE_COMBINE_PROMPTS" &&
-    hookStates.GENERATION_AFTER_COMMANDS === "completed"
+    isTerminalGenerationRecallHookState(hookStates.GENERATION_AFTER_COMMANDS)
   ) {
     return false;
   }
   return true;
+}
+
+function createRecallRunResult(status = "completed", extra = {}) {
+  const normalizedStatus = String(status || "skipped").trim() || "skipped";
+  return {
+    ok: normalizedStatus === "completed",
+    didRecall: normalizedStatus === "completed",
+    status: normalizedStatus,
+    ...extra,
+  };
+}
+
+function getGenerationRecallHookStateFromResult(result) {
+  const status = String(result?.status || "").trim();
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "aborted":
+    case "superseded":
+      return "aborted";
+    default:
+      return "skipped";
+  }
+}
+
+function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") {
+  const hadActiveRecall = Boolean(
+    isRecalling ||
+      (stageAbortControllers.recall &&
+        !stageAbortControllers.recall.signal?.aborted),
+  );
+  if (hadActiveRecall) {
+    abortRecallStageWithReason(`${reason}，当前召回已取消`);
+  }
+
+  clearGenerationRecallTransactionsForChat();
+  clearRecallInputTracking();
+  clearInjectionState({
+    preserveRecallStatus: hadActiveRecall,
+    preserveRuntimeStatus: hadActiveRecall,
+  });
+
+  if (hadActiveRecall) {
+    setLastRecallStatus(
+      "召回已取消",
+      `${reason}，等待新的召回请求`,
+      "warning",
+      {
+        syncRuntime: true,
+      },
+    );
+  }
+
+  return hadActiveRecall;
 }
 
 function createGenerationRecallContext({
@@ -4648,7 +4776,7 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
     if (now - lastRecallFallbackNoticeAt > 15000) {
       lastRecallFallbackNoticeAt = now;
       toastr.warning(
-        llmMeta.reason || "LLM 精排未返回有效结果，已回退到评分排序",
+        llmMeta.reason || "LLM 精排未成功，已改用评分排序并继续注入记忆",
         "ST-BME 召回提示",
         { timeOut: 4500 },
       );
@@ -4662,184 +4790,240 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
  * 召回管线：检索并注入记忆
  */
 async function runRecall(options = {}) {
-  if (isRecalling || !currentGraph) return false;
-
-  const settings = getSettings();
-  if (!settings.enabled || !settings.recallEnabled) return false;
-  if (!isGraphReadable()) {
-    setLastRecallStatus(
-      "等待图谱加载",
-      getGraphMutationBlockReason("召回"),
-      "warning",
-      { syncRuntime: true },
-    );
-    return false;
-  }
-  if (isGraphMetadataWriteAllowed()) {
-    if (!(await recoverHistoryIfNeeded("pre-recall"))) return false;
-  }
-
-  const context = getContext();
-  const chat = context.chat;
-  if (!chat || chat.length === 0) return false;
-
-  isRecalling = true;
-  const recallController = beginStageAbortController("recall");
-  const recallSignal = recallController.signal;
-  if (options.signal) {
-    if (options.signal.aborted) {
-      recallController.abort(
-        options.signal.reason || createAbortError("宿主已终止生成"),
-      );
-    } else {
-      options.signal.addEventListener(
-        "abort",
-        () =>
-          recallController.abort(
-            options.signal.reason || createAbortError("宿主已终止生成"),
-          ),
-        { once: true },
-      );
-    }
-  }
-
-  try {
-    await ensureVectorReadyIfNeeded("pre-recall", recallSignal);
-    const recentContextMessageLimit = clampInt(
-      settings.recallLlmContextMessages,
-      4,
-      0,
-      20,
-    );
-    const recallInput = resolveRecallInput(
-      chat,
-      recentContextMessageLimit,
-      options,
-    );
-    const userMessage = recallInput.userMessage;
-    const recentMessages = recallInput.recentMessages;
-
-    if (!userMessage) return false;
-
-    recallInput.hookName = options.hookName || "";
-
-    console.log("[ST-BME] 开始召回", {
-      source: recallInput.source,
-      sourceLabel: recallInput.sourceLabel,
-      hookName: recallInput.hookName,
-      userMessageLength: userMessage.length,
-      recentMessages: recentMessages.length,
-    });
-    setLastRecallStatus(
-      "召回中",
-      [
-        getRecallHookLabel(recallInput.hookName),
-        `来源 ${recallInput.sourceLabel}`,
-        `上下文 ${recentMessages.length} 条`,
-        `当前用户消息长度 ${userMessage.length}`,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-      "running",
-      { syncRuntime: true },
-    );
-    if (recallInput.source === "send-intent") {
-      pendingRecallSendIntent = createRecallInputRecord();
-    }
-
-    const result = await retrieve({
-      graph: currentGraph,
-      userMessage,
-      recentMessages,
-      embeddingConfig: getEmbeddingConfig(),
-      schema: getSchema(),
-      signal: recallSignal,
-      settings,
-      onStreamProgress: ({ previewText, receivedChars }) => {
-        const preview = previewText?.length > 60
-          ? "…" + previewText.slice(-60)
-          : previewText || "";
-        setLastRecallStatus(
-          "AI 生成中",
-          `${preview}  [${receivedChars}字]`,
-          "running",
-          { syncRuntime: true, noticeMarquee: true },
-        );
-      },
-      options: {
-        topK: settings.recallTopK,
-        maxRecallNodes: settings.recallMaxNodes,
-        enableLLMRecall: settings.recallEnableLLM,
-        enableVectorPrefilter: settings.recallEnableVectorPrefilter,
-        enableGraphDiffusion: settings.recallEnableGraphDiffusion,
-        diffusionTopK: settings.recallDiffusionTopK,
-        llmCandidatePool: settings.recallLlmCandidatePool,
-        recallPrompt: undefined,
-        weights: {
-          graphWeight: settings.graphWeight,
-          vectorWeight: settings.vectorWeight,
-          importanceWeight: settings.importanceWeight,
-        },
-        // v2 options
-        enableVisibility: settings.enableVisibility ?? false,
-        visibilityFilter: context.name2 || null,
-        enableCrossRecall: settings.enableCrossRecall ?? false,
-        enableProbRecall: settings.enableProbRecall ?? false,
-        probRecallChance: settings.probRecallChance ?? 0.15,
-        enableMultiIntent: settings.recallEnableMultiIntent ?? true,
-        multiIntentMaxSegments: settings.recallMultiIntentMaxSegments ?? 4,
-        teleportAlpha: settings.recallTeleportAlpha ?? 0.15,
-        enableTemporalLinks: settings.recallEnableTemporalLinks ?? true,
-        temporalLinkStrength: settings.recallTemporalLinkStrength ?? 0.2,
-        enableDiversitySampling:
-          settings.recallEnableDiversitySampling ?? true,
-        dppCandidateMultiplier:
-          settings.recallDppCandidateMultiplier ?? 3,
-        dppQualityWeight: settings.recallDppQualityWeight ?? 1.0,
-        enableCooccurrenceBoost:
-          settings.recallEnableCooccurrenceBoost ?? false,
-        cooccurrenceScale: settings.recallCooccurrenceScale ?? 0.1,
-        cooccurrenceMaxNeighbors:
-          settings.recallCooccurrenceMaxNeighbors ?? 10,
-        enableResidualRecall:
-          settings.recallEnableResidualRecall ?? false,
-        residualBasisMaxNodes:
-          settings.recallResidualBasisMaxNodes ?? 24,
-        residualNmfTopics: settings.recallNmfTopics ?? 15,
-        residualNmfNoveltyThreshold:
-          settings.recallNmfNoveltyThreshold ?? 0.4,
-        residualThreshold: settings.recallResidualThreshold ?? 0.3,
-        residualTopK: settings.recallResidualTopK ?? 5,
-      },
-    });
-
-    applyRecallInjection(settings, recallInput, recentMessages, result);
-    return true;
-  } catch (e) {
-    if (isAbortError(e)) {
+  if (isRecalling) {
+    abortRecallStageWithReason("旧召回已取消，正在启动新的召回");
+    const settle = await waitForActiveRecallToSettle();
+    if (!settle.settled && isRecalling) {
       setLastRecallStatus(
-        "召回已终止",
-        e?.message || "已手动终止当前召回",
+        "召回忙",
+        "上一轮召回仍在清理，请稍后重试",
         "warning",
         {
           syncRuntime: true,
         },
       );
-      return false;
+      return createRecallRunResult("skipped", {
+        reason: "上一轮召回仍在清理",
+      });
     }
-    console.error("[ST-BME] 召回失败:", e);
-    const message = e?.message || String(e);
-    setLastRecallStatus("召回失败", message, "error", {
-      syncRuntime: true,
-      toastKind: "",
-    });
-    toastr.error(`召回失败: ${message}`);
-    return false;
-  } finally {
-    finishStageAbortController("recall", recallController);
-    isRecalling = false;
-    refreshPanelLiveState();
   }
+
+  if (!currentGraph) {
+    return createRecallRunResult("skipped", {
+      reason: "当前无图谱",
+    });
+  }
+
+  const settings = getSettings();
+  if (!settings.enabled || !settings.recallEnabled) {
+    return createRecallRunResult("skipped", {
+      reason: "召回功能未启用",
+    });
+  }
+  if (!isGraphReadable()) {
+    const reason = getGraphMutationBlockReason("召回");
+    setLastRecallStatus("等待图谱加载", reason, "warning", {
+      syncRuntime: true,
+    });
+    return createRecallRunResult("skipped", {
+      reason,
+    });
+  }
+  if (isGraphMetadataWriteAllowed()) {
+    if (!(await recoverHistoryIfNeeded("pre-recall"))) {
+      return createRecallRunResult("skipped", {
+        reason: "历史恢复未就绪",
+      });
+    }
+  }
+
+  const context = getContext();
+  const chat = context.chat;
+  if (!chat || chat.length === 0) {
+    return createRecallRunResult("skipped", {
+      reason: "当前聊天为空",
+    });
+  }
+
+  const runId = ++recallRunSequence;
+  let recallPromise = null;
+  recallPromise = (async () => {
+    isRecalling = true;
+    const recallController = beginStageAbortController("recall");
+    const recallSignal = recallController.signal;
+    if (options.signal) {
+      if (options.signal.aborted) {
+        recallController.abort(
+          options.signal.reason || createAbortError("宿主已终止生成"),
+        );
+      } else {
+        options.signal.addEventListener(
+          "abort",
+          () =>
+            recallController.abort(
+              options.signal.reason || createAbortError("宿主已终止生成"),
+            ),
+          { once: true },
+        );
+      }
+    }
+
+    try {
+      await ensureVectorReadyIfNeeded("pre-recall", recallSignal);
+      const recentContextMessageLimit = clampInt(
+        settings.recallLlmContextMessages,
+        4,
+        0,
+        20,
+      );
+      const recallInput = resolveRecallInput(
+        chat,
+        recentContextMessageLimit,
+        options,
+      );
+      const userMessage = recallInput.userMessage;
+      const recentMessages = recallInput.recentMessages;
+
+      if (!userMessage) {
+        return createRecallRunResult("skipped", {
+          reason: "当前没有可用于召回的用户输入",
+        });
+      }
+
+      recallInput.hookName = options.hookName || "";
+
+      console.log("[ST-BME] 开始召回", {
+        source: recallInput.source,
+        sourceLabel: recallInput.sourceLabel,
+        hookName: recallInput.hookName,
+        userMessageLength: userMessage.length,
+        recentMessages: recentMessages.length,
+        runId,
+      });
+      setLastRecallStatus(
+        "召回中",
+        [
+          getRecallHookLabel(recallInput.hookName),
+          `来源 ${recallInput.sourceLabel}`,
+          `上下文 ${recentMessages.length} 条`,
+          `当前用户消息长度 ${userMessage.length}`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        "running",
+        { syncRuntime: true },
+      );
+      if (recallInput.source === "send-intent") {
+        pendingRecallSendIntent = createRecallInputRecord();
+      }
+
+      const result = await retrieve({
+        graph: currentGraph,
+        userMessage,
+        recentMessages,
+        embeddingConfig: getEmbeddingConfig(),
+        schema: getSchema(),
+        signal: recallSignal,
+        settings,
+        onStreamProgress: ({ previewText, receivedChars }) => {
+          const preview = previewText?.length > 60
+            ? "…" + previewText.slice(-60)
+            : previewText || "";
+          setLastRecallStatus(
+            "AI 生成中",
+            `${preview}  [${receivedChars}字]`,
+            "running",
+            { syncRuntime: true, noticeMarquee: true },
+          );
+        },
+        options: {
+          topK: settings.recallTopK,
+          maxRecallNodes: settings.recallMaxNodes,
+          enableLLMRecall: settings.recallEnableLLM,
+          enableVectorPrefilter: settings.recallEnableVectorPrefilter,
+          enableGraphDiffusion: settings.recallEnableGraphDiffusion,
+          diffusionTopK: settings.recallDiffusionTopK,
+          llmCandidatePool: settings.recallLlmCandidatePool,
+          recallPrompt: undefined,
+          weights: {
+            graphWeight: settings.graphWeight,
+            vectorWeight: settings.vectorWeight,
+            importanceWeight: settings.importanceWeight,
+          },
+          // v2 options
+          enableVisibility: settings.enableVisibility ?? false,
+          visibilityFilter: context.name2 || null,
+          enableCrossRecall: settings.enableCrossRecall ?? false,
+          enableProbRecall: settings.enableProbRecall ?? false,
+          probRecallChance: settings.probRecallChance ?? 0.15,
+          enableMultiIntent: settings.recallEnableMultiIntent ?? true,
+          multiIntentMaxSegments: settings.recallMultiIntentMaxSegments ?? 4,
+          teleportAlpha: settings.recallTeleportAlpha ?? 0.15,
+          enableTemporalLinks: settings.recallEnableTemporalLinks ?? true,
+          temporalLinkStrength: settings.recallTemporalLinkStrength ?? 0.2,
+          enableDiversitySampling:
+            settings.recallEnableDiversitySampling ?? true,
+          dppCandidateMultiplier:
+            settings.recallDppCandidateMultiplier ?? 3,
+          dppQualityWeight: settings.recallDppQualityWeight ?? 1.0,
+          enableCooccurrenceBoost:
+            settings.recallEnableCooccurrenceBoost ?? false,
+          cooccurrenceScale: settings.recallCooccurrenceScale ?? 0.1,
+          cooccurrenceMaxNeighbors:
+            settings.recallCooccurrenceMaxNeighbors ?? 10,
+          enableResidualRecall:
+            settings.recallEnableResidualRecall ?? false,
+          residualBasisMaxNodes:
+            settings.recallResidualBasisMaxNodes ?? 24,
+          residualNmfTopics: settings.recallNmfTopics ?? 15,
+          residualNmfNoveltyThreshold:
+            settings.recallNmfNoveltyThreshold ?? 0.4,
+          residualThreshold: settings.recallResidualThreshold ?? 0.3,
+          residualTopK: settings.recallResidualTopK ?? 5,
+        },
+      });
+
+      applyRecallInjection(settings, recallInput, recentMessages, result);
+      return createRecallRunResult("completed", {
+        reason: "召回完成",
+        selectedNodeIds: result.selectedNodeIds || [],
+      });
+    } catch (e) {
+      if (isAbortError(e)) {
+        setLastRecallStatus(
+          "召回已终止",
+          e?.message || "已手动终止当前召回",
+          "warning",
+          {
+            syncRuntime: true,
+          },
+        );
+        return createRecallRunResult("aborted", {
+          reason: e?.message || "召回已终止",
+        });
+      }
+      console.error("[ST-BME] 召回失败:", e);
+      const message = e?.message || String(e);
+      setLastRecallStatus("召回失败", message, "error", {
+        syncRuntime: true,
+        toastKind: "",
+      });
+      toastr.error(`召回失败: ${message}`);
+      return createRecallRunResult("failed", {
+        reason: message,
+      });
+    } finally {
+      finishStageAbortController("recall", recallController);
+      isRecalling = false;
+      if (activeRecallPromise === recallPromise) {
+        activeRecallPromise = null;
+      }
+      refreshPanelLiveState();
+    }
+  })();
+
+  activeRecallPromise = recallPromise;
+  return await recallPromise;
 }
 
 // ==================== 事件钩子 ====================
@@ -4853,6 +5037,7 @@ function onChatChanged() {
   skipBeforeCombineRecallUntil = 0;
   lastPreGenerationRecallKey = "";
   lastPreGenerationRecallAt = 0;
+  clearGenerationRecallTransactionsForChat("", { clearAll: true });
   abortAllRunningStages();
   dismissAllStageNotices();
   syncGraphLoadFromLiveContext({
@@ -4881,7 +5066,7 @@ function onMessageSent(messageId) {
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
-  clearInjectionState();
+  invalidateRecallAfterHistoryMutation("消息已删除");
   scheduleHistoryMutationRecheck(
     "message-deleted",
     chatLengthOrMessageId,
@@ -4890,12 +5075,12 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
 }
 
 function onMessageEdited(messageId, meta = null) {
-  clearInjectionState();
+  invalidateRecallAfterHistoryMutation("消息已编辑");
   scheduleHistoryMutationRecheck("message-edited", messageId, meta);
 }
 
 function onMessageSwiped(messageId, meta = null) {
-  clearInjectionState();
+  invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
   scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
 }
 
@@ -4925,7 +5110,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
     recallContext.hookName,
     "running",
   );
-  const didRecall = await runRecall({
+  const recallResult = await runRecall({
     ...recallOptions,
     recallKey: recallContext.recallKey,
     hookName: recallContext.hookName,
@@ -4935,7 +5120,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
   markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
-    didRecall ? "completed" : "pending",
+    getGenerationRecallHookStateFromResult(recallResult),
   );
 }
 
@@ -4960,7 +5145,7 @@ async function onBeforeCombinePrompts() {
     recallContext.hookName,
     "running",
   );
-  const didRecall = await runRecall({
+  const recallResult = await runRecall({
     ...recallOptions,
     recallKey: recallContext.recallKey,
     hookName: recallContext.hookName,
@@ -4968,7 +5153,7 @@ async function onBeforeCombinePrompts() {
   markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
-    didRecall ? "completed" : "pending",
+    getGenerationRecallHookStateFromResult(recallResult),
   );
 }
 

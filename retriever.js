@@ -57,6 +57,37 @@ function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
   };
 }
 
+function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
+  const hasPromptMessages =
+    Array.isArray(promptPayload?.promptMessages) &&
+    promptPayload.promptMessages.length > 0;
+  if (hasPromptMessages) {
+    return String(promptPayload?.systemPrompt || "");
+  }
+  return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
+}
+
+function buildRecallFallbackReason(llmResult) {
+  const failureType = String(llmResult?.errorType || "").trim();
+  const failureReason = String(llmResult?.failureReason || "").trim();
+  switch (failureType) {
+    case "timeout":
+      return "LLM 精排请求超时，已回退到评分排序";
+    case "empty-response":
+      return "LLM 精排返回空响应，已回退到评分排序";
+    case "truncated-json":
+      return "LLM 精排输出被截断，已回退到评分排序";
+    case "invalid-json":
+      return "LLM 精排未返回有效 JSON，已回退到评分排序";
+    case "provider-error":
+      return failureReason
+        ? `LLM 精排调用失败（${failureReason}），已回退到评分排序`
+        : "LLM 精排调用失败，已回退到评分排序";
+    default:
+      return failureReason || "LLM 精排未返回可用结果，已回退到评分排序";
+  }
+}
+
 function isAbortError(error) {
   return error?.name === "AbortError";
 }
@@ -535,6 +566,7 @@ export async function retrieve({
       enabled: true,
       status: llmResult.status,
       reason: llmResult.reason,
+      fallbackType: llmResult.fallbackType || "",
       candidatePool: llmCandidates.length,
       selectedSeedCount: llmResult.selectedNodeIds.length,
     };
@@ -562,7 +594,7 @@ export async function retrieve({
   selectedNodeIds = reconstructSceneNodeIds(
     graph,
     selectedNodeIds,
-    normalizedTopK + 6,
+    normalizedMaxRecallNodes,
   );
 
   // 访问强化
@@ -597,7 +629,10 @@ export async function retrieve({
     }
   }
 
-  selectedNodeIds = uniqueNodeIds(selectedNodeIds);
+  selectedNodeIds = uniqueNodeIds(selectedNodeIds).slice(
+    0,
+    normalizedMaxRecallNodes,
+  );
   retrievalMeta.llm = llmMeta;
   retrievalMeta.timings.total = roundMs(nowMs() - startedAt);
 
@@ -809,8 +844,8 @@ async function llmRecall(
   ].join("\n");
   const promptPayload = resolveTaskPromptPayload(recallPromptBuild, userPrompt);
 
-  const result = await callLLMForJSON({
-    systemPrompt: promptPayload.systemPrompt || systemPrompt,
+  const llmResult = await callLLMForJSON({
+    systemPrompt: resolveTaskLlmSystemPrompt(promptPayload, systemPrompt),
     userPrompt: promptPayload.userPrompt,
     maxRetries: 1,
     signal,
@@ -822,7 +857,9 @@ async function llmRecall(
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayload.additionalMessages,
     onStreamProgress,
+    returnFailureDetails: true,
   });
+  const result = llmResult?.ok ? llmResult.data : null;
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {
     // 校验 ID 有效性
@@ -845,10 +882,16 @@ async function llmRecall(
   }
 
   // LLM 失败时回退到纯评分排序
+  const fallbackReason = llmResult?.ok
+    ? Array.isArray(result?.selected_ids)
+      ? "LLM 返回的候选 ID 无效，已回退到评分排序"
+      : "LLM 返回了无法识别的 JSON 结构，已回退到评分排序"
+    : buildRecallFallbackReason(llmResult);
   return {
     selectedNodeIds: candidates.slice(0, maxNodes).map((c) => c.nodeId),
     status: "fallback",
-    reason: "LLM 未返回有效 JSON 或有效候选，已回退到评分排序",
+    reason: fallbackReason,
+    fallbackType: llmResult?.ok ? "invalid-candidate" : llmResult?.errorType || "unknown",
   };
 }
 

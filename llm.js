@@ -1446,6 +1446,7 @@ export async function callLLMForJSON({
   promptMessages = [],
   debugContext = null,
   onStreamProgress = null,
+  returnFailureDetails = false,
 } = {}) {
   const override = getLlmTestOverride("callLLMForJSON");
   if (override) {
@@ -1459,6 +1460,8 @@ export async function callLLMForJSON({
       additionalMessages,
       promptMessages,
       debugContext,
+      onStreamProgress,
+      returnFailureDetails,
     });
   }
 
@@ -1467,6 +1470,7 @@ export async function callLLMForJSON({
     requestSource,
   );
   let lastFailureReason = "";
+  let lastFailureType = "";
   const promptExecutionSummary = buildPromptExecutionSummary(debugContext);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -1503,18 +1507,28 @@ export async function callLLMForJSON({
       if (!responseText || typeof responseText !== "string") {
         console.warn(`[ST-BME] LLM 返回空响应 (尝试 ${attempt + 1})`);
         lastFailureReason = "返回空响应";
+        lastFailureType = "empty-response";
         continue;
       }
 
       // 尝试解析 JSON
       const parsed = extractJSON(outputCleanup.cleanedText);
       if (parsed !== null) {
-        return parsed;
+        return returnFailureDetails
+          ? {
+              ok: true,
+              data: parsed,
+              attempts: attempt + 1,
+              errorType: "",
+              failureReason: "",
+            }
+          : parsed;
       }
 
       const truncated =
         response.finishReason === "length" ||
         looksLikeTruncatedJson(outputCleanup.cleanedText);
+      lastFailureType = truncated ? "truncated-json" : "invalid-json";
       lastFailureReason = truncated
         ? "输出因长度限制被截断，请重新输出更紧凑的完整 JSON"
         : "输出不是有效 JSON，请严格返回紧凑 JSON 对象";
@@ -1524,11 +1538,38 @@ export async function callLLMForJSON({
       );
     } catch (e) {
       if (isAbortError(e)) {
-        throw e;
+        const abortMessage = e?.message || String(e) || "LLM 调用已终止";
+        const isTimeoutAbort =
+          !signal?.aborted && /超时/i.test(String(abortMessage || ""));
+        if (!isTimeoutAbort) {
+          throw e;
+        }
+        console.error(`[ST-BME] LLM 调用超时 (尝试 ${attempt + 1}):`, e);
+        lastFailureReason = abortMessage;
+        lastFailureType = "timeout";
+        continue;
       }
       console.error(`[ST-BME] LLM 调用失败 (尝试 ${attempt + 1}):`, e);
       lastFailureReason = e?.message || String(e) || "LLM 调用失败";
+      lastFailureType = "provider-error";
     }
+  }
+
+  if (returnFailureDetails) {
+    const failureSnapshot = {
+      ok: false,
+      data: null,
+      attempts: maxRetries + 1,
+      errorType: lastFailureType || "unknown",
+      failureReason: lastFailureReason || "LLM 未返回可解析 JSON",
+    };
+    recordTaskLlmRequest(taskType || privateRequestSource, {
+      jsonFailure: failureSnapshot,
+      promptExecution: promptExecutionSummary,
+    }, {
+      merge: true,
+    });
+    return failureSnapshot;
   }
 
   return null;

@@ -237,7 +237,7 @@ function createGenerationRecallHarness() {
     );
     context.runRecall = async (options = {}) => {
       context.runRecallCalls.push({ ...options });
-      return true;
+      return { status: "completed", didRecall: true, ok: true };
     };
     return context;
   });
@@ -1296,6 +1296,31 @@ async function testGenerationRecallDifferentKeyCanRunAgain() {
   );
 }
 
+async function testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "同一条但本次跳过" }];
+  harness.runRecall = async (options = {}) => {
+    harness.runRecallCalls.push({ ...options });
+    return {
+      status: "skipped",
+      didRecall: false,
+      ok: false,
+      reason: "测试跳过",
+    };
+  };
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.result.generationRecallTransactions.size,
+    1,
+  );
+  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  assert.equal(transaction.hookStates.GENERATION_AFTER_COMMANDS, "skipped");
+}
+
 async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   const harness = await createRerollHarness();
   harness.chat = [
@@ -1644,6 +1669,7 @@ await testProcessedHistoryAdvanceRequiresCompleteStrongSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDifferentKeyCanRunAgain();
+await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testRerollRejectsMissingRecoveryPoint();
 await testRerollFallsBackToDirectExtractForUnprocessedFloor();
