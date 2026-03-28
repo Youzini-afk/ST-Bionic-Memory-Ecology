@@ -486,9 +486,11 @@ function normalizeModelList(items = []) {
       id = item.trim();
       label = id;
     } else if (item && typeof item === "object") {
-      id = String(item.id || item.name || item.value || item.slug || "").trim();
+      id = String(
+        item.id || item.name || item.label || item.value || item.slug || "",
+      ).trim();
       label = String(
-        item.name || item.id || item.value || item.slug || "",
+        item.label || item.name || item.id || item.value || item.slug || "",
       ).trim();
     }
 
@@ -498,6 +500,101 @@ function normalizeModelList(items = []) {
   }
 
   return models;
+}
+
+function extractModelListPayload(payload = {}) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+
+  if (Array.isArray(payload.models)) {
+    return payload.models;
+  }
+
+  if (Array.isArray(payload.data)) {
+    return payload.data;
+  }
+
+  if (payload.data && typeof payload.data === "object") {
+    if (Array.isArray(payload.data.models)) {
+      return payload.data.models;
+    }
+    if (Array.isArray(payload.data.data)) {
+      return payload.data.data;
+    }
+  }
+
+  return [];
+}
+
+function buildDedicatedAuthHeaderString(apiKey = "") {
+  const normalized = String(apiKey || "").trim();
+  return normalized ? `Authorization: Bearer ${normalized}` : "";
+}
+
+function buildDedicatedStatusRequestVariants(config = getMemoryLLMConfig()) {
+  const customVariant = {
+    mode: "custom",
+    body: {
+      chat_completion_source: chat_completion_sources.CUSTOM,
+      custom_url: config.apiUrl,
+      custom_include_headers: buildDedicatedAuthHeaderString(config.apiKey),
+      reverse_proxy: config.apiUrl,
+      proxy_password: "",
+    },
+  };
+
+  const legacyOpenAiVariant = {
+    mode: "openai-reverse-proxy",
+    body: {
+      chat_completion_source: chat_completion_sources.OPENAI,
+      reverse_proxy: config.apiUrl,
+      proxy_password: config.apiKey || "",
+    },
+  };
+
+  return [customVariant, legacyOpenAiVariant];
+}
+
+async function requestDedicatedStatusModels(
+  variant,
+  { timeoutMs = LLM_REQUEST_TIMEOUT_MS } = {},
+) {
+  const response = await fetchWithTimeout(
+    "/api/backends/chat-completions/status",
+    {
+      method: "POST",
+      headers: getRequestHeaders(),
+      body: JSON.stringify(variant.body),
+    },
+    timeoutMs,
+  );
+
+  const rawText = await response.text().catch(() => "");
+  let payload = {};
+  try {
+    payload = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    payload = {};
+  }
+
+  if (!response.ok || payload?.error) {
+    throw new Error(
+      extractErrorMessageFromPayload(payload) ||
+        rawText ||
+        response.statusText ||
+        `HTTP ${response.status}`,
+    );
+  }
+
+  return {
+    payload,
+    models: normalizeModelList(extractModelListPayload(payload)),
+  };
 }
 
 function extractContentFromResponsePayload(payload) {
@@ -1508,37 +1605,32 @@ export async function fetchMemoryLLMModels() {
     };
   }
 
+  const variants = buildDedicatedStatusRequestVariants(config);
+  const errors = [];
+
   try {
-    const response = await fetch("/api/backends/chat-completions/status", {
-      method: "POST",
-      headers: getRequestHeaders(),
-      body: JSON.stringify({
-        chat_completion_source: chat_completion_sources.OPENAI,
-        reverse_proxy: config.apiUrl,
-        proxy_password: config.apiKey || "",
-      }),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = payload?.error || payload?.message || response.statusText;
-      return {
-        success: false,
-        models: [],
-        error: message || `HTTP ${response.status}`,
-      };
+    for (const variant of variants) {
+      try {
+        const result = await requestDedicatedStatusModels(variant, {
+          timeoutMs: config.timeoutMs,
+        });
+        if (result.models.length > 0) {
+          return { success: true, models: result.models, error: "" };
+        }
+        errors.push(`${variant.mode}:empty`);
+      } catch (error) {
+        errors.push(`${variant.mode}:${String(error?.message || error)}`);
+      }
     }
 
-    const models = normalizeModelList(payload?.data);
-    if (models.length === 0) {
-      return {
-        success: false,
-        models: [],
-        error: "未拉取到可用模型，请检查接口是否支持 /models",
-      };
-    }
-
-    return { success: true, models, error: "" };
+    return {
+      success: false,
+      models: [],
+      error:
+        errors.length > 0
+          ? `未拉取到可用模型。尝试结果: ${errors.join(" | ")}`
+          : "未拉取到可用模型，请检查接口是否支持模型列表接口",
+    };
   } catch (error) {
     return { success: false, models: [], error: String(error) };
   }
