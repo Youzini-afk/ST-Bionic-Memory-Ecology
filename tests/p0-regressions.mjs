@@ -372,6 +372,9 @@ function createRerollHarness() {
       refreshPanelLiveState() {
         context.refreshPanelCalls += 1;
       },
+      setRuntimeStatus(text, meta = "", level = "info") {
+        context.runtimeStatus = { text, meta, level };
+      },
       clearInjectionState() {
         context.clearInjectionCalls += 1;
       },
@@ -1384,7 +1387,7 @@ async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   assert.equal(harness.prepareVectorStateCalls.length, 1);
   assert.equal(harness.prepareVectorStateCalls[0][2].skipBackendPurge, true);
   assert.equal(harness.saveGraphToChatCalls, 1);
-  assert.equal(harness.refreshPanelCalls, 1);
+  assert.equal(harness.refreshPanelCalls, 2);
   assert.equal(harness.clearInjectionCalls, 1);
   assert.equal(harness.onManualExtractCalls, 1);
   assert.equal(harness.currentGraph.historyState.processedMessageHashes[3], undefined);

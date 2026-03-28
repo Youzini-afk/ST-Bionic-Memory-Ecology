@@ -2084,7 +2084,7 @@ async function syncVectorState({
     currentGraph.vectorIndexState.lastWarning = validation.error;
     currentGraph.vectorIndexState.dirty = true;
     setLastVectorStatus("向量不可用", validation.error, "warning", {
-      syncRuntime: false,
+      syncRuntime: true,
     });
     return {
       insertedHashes: [],
@@ -2105,13 +2105,13 @@ async function syncVectorState({
       "向量完成",
       `${scopeLabel} · indexed ${result.stats?.indexed ?? 0} · pending ${result.stats?.pending ?? 0}`,
       "success",
-      { syncRuntime: false },
+      { syncRuntime: true },
     );
     return result;
   } catch (error) {
     if (isAbortError(error)) {
       setLastVectorStatus("向量已终止", scopeLabel, "warning", {
-        syncRuntime: false,
+        syncRuntime: true,
       });
       return {
         insertedHashes: [],
@@ -5235,6 +5235,11 @@ async function onRebuild() {
       );
   const previousUiState = snapshotRuntimeUiState();
   const settings = getSettings();
+  setRuntimeStatus(
+    "图谱重建中",
+    `当前聊天 ${Array.isArray(chat) ? chat.length : 0} 条消息`,
+    "running",
+  );
 
   currentGraph = normalizeGraphRuntimeState(
     createEmptyGraph(),
@@ -5259,12 +5264,30 @@ async function onRebuild() {
       }),
     );
     saveGraphToChat({ reason: "manual-rebuild-complete" });
+    setLastExtractionStatus(
+      "图谱重建完成",
+      `已回放 ${replayedBatches} 批提取`,
+      "success",
+      {
+        syncRuntime: false,
+      },
+    );
 
     if (currentGraph.vectorIndexState?.lastWarning) {
+      setRuntimeStatus(
+        "图谱重建完成",
+        `已回放 ${replayedBatches} 批，但向量仍待修复`,
+        "warning",
+      );
       toastr.warning(
         `图谱已重建，但向量索引仍待修复: ${currentGraph.vectorIndexState.lastWarning}`,
       );
     } else {
+      setRuntimeStatus(
+        "图谱重建完成",
+        `已回放 ${replayedBatches} 批，图谱与向量索引已刷新`,
+        "success",
+      );
       toastr.success("图谱与向量索引已按当前聊天全量重建");
     }
   } catch (error) {
@@ -5274,9 +5297,19 @@ async function onRebuild() {
     );
     restoreRuntimeUiState(previousUiState);
     saveGraphToChat({ reason: "manual-rebuild-restore-previous" });
+    setLastExtractionStatus(
+      "图谱重建失败",
+      error?.message || String(error),
+      "error",
+      {
+        syncRuntime: true,
+      },
+    );
     throw new Error(
       `图谱重建失败，已恢复到重建前状态: ${error?.message || error}`,
     );
+  } finally {
+    refreshPanelLiveState();
   }
 }
 
@@ -5569,6 +5602,14 @@ async function onManualExtract() {
     }
 
     if (totals.batches === 0) {
+      setLastExtractionStatus(
+        "无待提取内容",
+        "没有新的 assistant 回复需要处理",
+        "info",
+        {
+          syncRuntime: true,
+        },
+      );
       toastr.info("没有待提取的新回复");
       return;
     }
@@ -5613,6 +5654,7 @@ async function onManualExtract() {
   } finally {
     finishStageAbortController("extraction", extractionController);
     isExtracting = false;
+    refreshPanelLiveState();
   }
 }
 
@@ -5702,6 +5744,14 @@ async function onReroll({ fromFloor } = {}) {
     targetFloor = assistantTurns[assistantTurns.length - 1];
   }
 
+  setRuntimeStatus(
+    "重新提取中",
+    Number.isFinite(targetFloor)
+      ? `准备从楼层 ${targetFloor} 开始回滚并重新提取`
+      : "准备回滚最新 AI 楼并重新提取",
+    "running",
+  );
+
   const lastProcessed = getLastProcessedAssistantFloor();
   const alreadyExtracted = targetFloor <= lastProcessed;
 
@@ -5727,6 +5777,11 @@ async function onReroll({ fromFloor } = {}) {
   console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
   const rollbackResult = await rollbackGraphForReroll(targetFloor, context);
   if (!rollbackResult.success) {
+    setRuntimeStatus(
+      "重新提取失败",
+      rollbackResult.error || "回滚失败",
+      "error",
+    );
     toastr.error(rollbackResult.error, "ST-BME 重 Roll");
     return rollbackResult;
   }
@@ -5740,6 +5795,7 @@ async function onReroll({ fromFloor } = {}) {
   });
 
   await onManualExtract();
+  refreshPanelLiveState();
   return {
     ...rollbackResult,
     extractionTriggered: true,
@@ -5843,6 +5899,7 @@ async function onRebuildVectorIndex(range = null) {
     );
   } finally {
     finishStageAbortController("vector", vectorController);
+    refreshPanelLiveState();
   }
 }
 

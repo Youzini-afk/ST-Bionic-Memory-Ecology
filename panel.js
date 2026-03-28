@@ -1316,6 +1316,7 @@ function _bindActions() {
         }
       } finally {
         btn.style.opacity = "";
+        _refreshRuntimeStatus();
         _refreshGraphAvailabilityState();
       }
     });
@@ -1355,6 +1356,7 @@ function _bindActions() {
         if (btn) {
           btn.style.opacity = "";
         }
+        _refreshRuntimeStatus();
         _refreshGraphAvailabilityState();
       }
     });
@@ -1401,6 +1403,7 @@ function _bindActions() {
         if (btn) {
           btn.style.opacity = "";
         }
+        _refreshRuntimeStatus();
         _refreshGraphAvailabilityState();
       }
     });
