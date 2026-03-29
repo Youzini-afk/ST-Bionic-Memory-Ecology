@@ -65,6 +65,9 @@ const originalExtensionSettings = globalThis.__promptBuilderMvuExtensionSettings
 const originalContext = globalThis.__promptBuilderMvuContext;
 const originalSendOpenAIRequest = globalThis.__promptBuilderMvuSendOpenAIRequest;
 const originalFetch = globalThis.fetch;
+const originalGetWorldbook = globalThis.getWorldbook;
+const originalGetLorebookEntries = globalThis.getLorebookEntries;
+const originalGetCharWorldbookNames = globalThis.getCharWorldbookNames;
 
 globalThis.require = require;
 globalThis.__promptBuilderMvuExtensionSettings = {
@@ -81,6 +84,38 @@ globalThis.__promptBuilderMvuContext = {
   name2: "Alice",
   chatId: "mvu-test-chat",
 };
+
+function createWorldbookEntry({
+  uid,
+  name,
+  comment = name,
+  content,
+  strategyType = "constant",
+  keys = [],
+  enabled = true,
+  order = 10,
+}) {
+  return {
+    uid,
+    name,
+    comment,
+    content,
+    enabled,
+    position: {
+      type: "before_character_definition",
+      role: "system",
+      depth: 0,
+      order,
+    },
+    strategy: {
+      type: strategyType,
+      keys,
+      keys_secondary: { logic: "and_any", keys: [] },
+    },
+    probability: 100,
+    extra: {},
+  };
+}
 
 try {
   const extensionsApi = await import("../../../../extensions.js");
@@ -150,6 +185,18 @@ try {
       injectionMode: "append",
       order: recallProfile.blocks.length,
     });
+    recallProfile.blocks.push({
+      id: "mvu-chat-custom",
+      name: "聊天对象检查",
+      type: "custom",
+      enabled: true,
+      role: "system",
+      sourceKey: "",
+      sourceField: "",
+      content: "聊天对象 {{chatMessages}}",
+      injectionMode: "append",
+      order: recallProfile.blocks.length,
+    });
 
     return {
       llmApiUrl: "https://example.com/v1",
@@ -171,20 +218,62 @@ try {
     userPersona: "变量更新规则:\ntype: state\n当前时间: 12:00",
     recentMessages:
       "最近消息 <status_current_variable>hp=3</status_current_variable> BAD_RECENT",
+    chatMessages: [
+      {
+        role: "assistant",
+        content: "聊天内容 BAD_RECENT",
+        variables: {
+          0: {
+            stat_data: { hp: [3, "状态更新"] },
+            display_data: { hp: "2->3" },
+            delta_data: { hp: "2->3" },
+          },
+        },
+        debugStatus: "{{get_message_variable::display_data.hp}} BAD_RECENT",
+      },
+    ],
     userMessage:
-      "用户输入 <updatevariable>secret</updatevariable> BAD_USER",
-    candidateNodes: "候选节点 BAD_CANDIDATE",
-    candidateText: "候选节点 BAD_CANDIDATE",
+      "用户输入 <updatevariable>secret</updatevariable> {{get_message_variable::stat_data.hp}} BAD_USER",
+    candidateNodes: [
+      {
+        id: "node-1",
+        summary: "候选节点 BAD_CANDIDATE <StatusPlaceHolderImpl/>",
+        variables: {
+          0: {
+            stat_data: { 地点: "学校" },
+            display_data: { 地点: "教室" },
+          },
+        },
+        note: "{{get_message_variable::stat_data.地点}} BAD_CANDIDATE",
+      },
+    ],
+    candidateText:
+      "候选节点 BAD_CANDIDATE {{get_message_variable::stat_data.地点}}",
     graphStats: "candidate_count=1",
   });
 
   assert.match(promptBuild.systemPrompt, /GOOD_RECENT/);
-  assert.match(JSON.stringify(promptBuild.executionMessages), /GOOD_USER/);
   assert.match(JSON.stringify(promptBuild.executionMessages), /GOOD_CANDIDATE/);
   assert.match(promptBuild.systemPrompt, /FINAL_GOOD/);
+  assert.equal(
+    promptBuild.debug.mvu.sanitizedFields.some((entry) => entry.name === "userMessage"),
+    true,
+  );
+  assert.equal(
+    promptBuild.debug.mvu.sanitizedFields.some((entry) =>
+      String(entry.name || "").startsWith("candidateNodes[0].variables"),
+    ),
+    true,
+  );
+  assert.equal(
+    promptBuild.debug.mvu.sanitizedFields.some((entry) =>
+      String(entry.name || "").startsWith("chatMessages[0].variables"),
+    ),
+    true,
+  );
   assert.doesNotMatch(
     JSON.stringify(promptBuild),
-    /status_current_variable|updatevariable|StatusPlaceHolderImpl/i,
+    /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.equal(promptBuild.debug.mvu.sanitizedFieldCount >= 4, true);
   assert.equal(promptBuild.debug.mvu.finalMessageStripCount >= 1, true);
@@ -234,6 +323,112 @@ try {
   );
   assert.equal(systemOnlyPayload.userPrompt, "fallback text");
 
+  const rawWorldInfoEntries = [
+    createWorldbookEntry({
+      uid: 101,
+      name: "raw-trigger",
+      comment: "原始触发命中",
+      content: "世界书原始触发成功。",
+      strategyType: "selective",
+      keys: ["星火密令"],
+      order: 10,
+    }),
+    createWorldbookEntry({
+      uid: 102,
+      name: "raw-ejs",
+      comment: "原始 EJS 命中",
+      content:
+        '<%= user_input.includes("星火密令") ? "EJS 看到了原始 MVU 信号。" : "EJS 丢失了原始 MVU 信号。" %>',
+      order: 20,
+    }),
+  ];
+
+  globalThis.getCharWorldbookNames = () => ({
+    primary: "mvu-raw-worldbook",
+    additional: [],
+  });
+  globalThis.getWorldbook = async (worldbookName) =>
+    worldbookName === "mvu-raw-worldbook" ? rawWorldInfoEntries : [];
+  globalThis.getLorebookEntries = async (worldbookName) =>
+    (worldbookName === "mvu-raw-worldbook" ? rawWorldInfoEntries : []).map(
+      (entry) => ({
+        uid: entry.uid,
+        comment: entry.comment,
+      }),
+    );
+  globalThis.__promptBuilderMvuContext = {
+    ...globalThis.__promptBuilderMvuContext,
+    chatId: "mvu-raw-trigger-chat",
+    chatMetadata: {},
+    extensionSettings: {},
+    powerUserSettings: {},
+  };
+
+  const rawWorldInfoSettings = buildSettings();
+  rawWorldInfoSettings.taskProfiles.recall = {
+    activeProfileId: "raw-worldinfo",
+    profiles: [
+      {
+        id: "raw-worldinfo",
+        name: "raw worldinfo",
+        taskType: "recall",
+        builtin: false,
+        blocks: [
+          {
+            id: "wi-before",
+            name: "世界书前块",
+            type: "builtin",
+            enabled: true,
+            role: "system",
+            sourceKey: "worldInfoBefore",
+            sourceField: "",
+            content: "",
+            injectionMode: "append",
+            order: 0,
+          },
+          {
+            id: "recent-messages",
+            name: "最近消息",
+            type: "builtin",
+            enabled: true,
+            role: "system",
+            sourceKey: "recentMessages",
+            sourceField: "",
+            content: "",
+            injectionMode: "append",
+            order: 1,
+          },
+        ],
+        generation: createDefaultTaskProfiles().recall.profiles[0].generation,
+        regex: {
+          enabled: false,
+          inheritStRegex: false,
+          stages: {},
+          localRules: [],
+        },
+      },
+    ],
+  };
+
+  const rawWorldInfoPromptBuild = await buildTaskPrompt(rawWorldInfoSettings, "recall", {
+    taskName: "recall",
+    recentMessages: "最近消息",
+    userMessage:
+      "继续 <status_current_variable>星火密令</status_current_variable>",
+    chatMessages: [],
+  });
+
+  assert.match(rawWorldInfoPromptBuild.systemPrompt, /世界书原始触发成功/);
+  assert.match(rawWorldInfoPromptBuild.systemPrompt, /EJS 看到了原始 MVU 信号/);
+  assert.doesNotMatch(
+    rawWorldInfoPromptBuild.systemPrompt,
+    /status_current_variable/i,
+  );
+  assert.equal(
+    rawWorldInfoPromptBuild.debug.effectivePath?.worldInfoInputContext,
+    "raw-context-for-trigger-and-ejs",
+  );
+
   const capturedBodies = [];
   globalThis.fetch = async (_url, options = {}) => {
     capturedBodies.push(JSON.parse(String(options.body || "{}")));
@@ -273,7 +468,7 @@ try {
   assert.equal(capturedBodies.length, 1);
   assert.doesNotMatch(
     JSON.stringify(capturedBodies[0].messages),
-    /status_current_variable|updatevariable|StatusPlaceHolderImpl/i,
+    /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
 
   const runtimePromptBuild =
@@ -285,15 +480,15 @@ try {
   assert.ok(runtimeLlmRequest);
   assert.doesNotMatch(
     JSON.stringify(runtimePromptBuild.executionMessages),
-    /status_current_variable|updatevariable|StatusPlaceHolderImpl/i,
+    /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.doesNotMatch(
     JSON.stringify(runtimeLlmRequest.messages),
-    /status_current_variable|updatevariable|StatusPlaceHolderImpl/i,
+    /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.doesNotMatch(
     JSON.stringify(runtimeLlmRequest.requestBody?.messages || []),
-    /status_current_variable|updatevariable|StatusPlaceHolderImpl/i,
+    /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.deepEqual(
     runtimeLlmRequest.messages,
@@ -331,4 +526,22 @@ try {
   }
 
   globalThis.fetch = originalFetch;
+
+  if (originalGetWorldbook === undefined) {
+    delete globalThis.getWorldbook;
+  } else {
+    globalThis.getWorldbook = originalGetWorldbook;
+  }
+
+  if (originalGetLorebookEntries === undefined) {
+    delete globalThis.getLorebookEntries;
+  } else {
+    globalThis.getLorebookEntries = originalGetLorebookEntries;
+  }
+
+  if (originalGetCharWorldbookNames === undefined) {
+    delete globalThis.getCharWorldbookNames;
+  } else {
+    globalThis.getCharWorldbookNames = originalGetCharWorldbookNames;
+  }
 }

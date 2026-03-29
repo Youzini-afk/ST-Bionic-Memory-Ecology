@@ -20,6 +20,12 @@ assert.equal(
   ),
   true,
 );
+assert.equal(
+  isLikelyMvuWorldInfoContent(
+    '{"stat_data":{"地点":"学校"},"display_data":{"地点":"教室"}}',
+  ),
+  true,
+);
 assert.equal(isLikelyMvuWorldInfoContent("正常世界设定"), false);
 
 const aggressive = sanitizeMvuContent(
@@ -44,6 +50,16 @@ const finalSafe = sanitizeMvuContent(
 assert.equal(finalSafe.dropped, false);
 assert.equal(finalSafe.text, "说明文字\n尾巴");
 assert.deepEqual(finalSafe.reasons, ["artifact_stripped"]);
+
+const macroSafe = sanitizeMvuContent(
+  "地点={{get_message_variable::stat_data.地点}}\n<%- SafeGetValue(msg_data.地点) %>",
+  {
+    mode: "final-safe",
+  },
+);
+assert.equal(macroSafe.dropped, false);
+assert.equal(macroSafe.text, "地点=");
+assert.deepEqual(macroSafe.reasons, ["artifact_stripped"]);
 
 const blocked = sanitizeMvuContent("前缀\n被拦截条目\n后缀", {
   mode: "final-safe",

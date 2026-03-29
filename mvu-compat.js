@@ -11,11 +11,24 @@ const MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX =
   /\n?<status_current_variables?>[\s\S]*?<\/status_current_variables?>/gi;
 const MVU_STATUS_CURRENT_VARIABLE_DETECT_REGEX =
   /<status_current_variables?>[\s\S]*?<\/status_current_variables?>/i;
+const MVU_MESSAGE_VARIABLE_MACRO_REGEX =
+  /\{\{\s*get_message_variable::(?:stat_data|display_data|delta_data)(?:\.[^}]+)?\s*}}/gi;
+const MVU_GETVAR_REFERENCE_REGEX =
+  /getvar\(\s*["'](?:stat_data|display_data|delta_data)["']\s*\)/gi;
+const MVU_STATEFUL_TEMPLATE_TAG_REGEX =
+  /<%[-=]?[\s\S]*?(?:SafeGetValue|getvar\(\s*["'](?:stat_data|display_data|delta_data)["']\s*\)|\b(?:stat_data|display_data|delta_data)\b)[\s\S]*?%>/gi;
+const EJS_TEMPLATE_TAG_REGEX = /<%[-=]?[\s\S]*?%>/gi;
 const MVU_VARIABLE_OUTPUT_ENTRY_REGEX = /变量输出格式:\s*[\s\S]*?<UpdateVariable>/i;
 const MVU_VARIABLE_RULES_ENTRY_REGEX =
   /变量更新规则:\s*[\s\S]*?(?:type:\s*|check:\s*|当前时间:|近期事务:)/i;
 const MVU_FORMAT_EMPHASIS_ENTRY_REGEX =
   /(?:变量输出格式强调|格式强调[：:]?-?变量更新规则|格式强调[：:]?-?剧情演绎|The following must be inserted to the end of (?:each )?reply,? and cannot be omitted)[\s\S]*?format:\s*\|-?/i;
+const MVU_STATE_OBJECT_FIELD_REGEX =
+  /["']?(?:stat_data|display_data|delta_data)["']?\s*:/i;
+const MVU_STATE_PATH_REFERENCE_REGEX =
+  /\b(?:stat_data|display_data|delta_data)(?:\.[\w$\u4e00-\u9fff\[\]"'-]+){1,}/i;
+const MVU_STATE_HELPER_REFERENCE_REGEX =
+  /\b(?:SafeGetValue\([^)]*(?:stat_data|display_data|delta_data)[^)]*\)|message_data\[\d+\]\.data\.(?:stat_data|display_data|delta_data))\b/i;
 
 function uniq(values = []) {
   return [...new Set((Array.isArray(values) ? values : []).filter(Boolean))];
@@ -45,6 +58,14 @@ function countRegexMatches(text = "", regex) {
   return count;
 }
 
+function matchesRegex(text = "", regex) {
+  if (!text || !(regex instanceof RegExp)) {
+    return false;
+  }
+
+  return new RegExp(regex.source, regex.flags).test(text);
+}
+
 function stripMvuPromptArtifactsDetailed(content = "") {
   const input = normalizeText(content);
   if (!input) {
@@ -55,15 +76,28 @@ function stripMvuPromptArtifactsDetailed(content = "") {
     };
   }
 
+  const statefulTemplateTagCount = countRegexMatches(
+    input,
+    MVU_STATEFUL_TEMPLATE_TAG_REGEX,
+  );
   const artifactRemovedCount =
     countRegexMatches(input, MVU_UPDATE_BLOCK_REGEX) +
     countRegexMatches(input, MVU_STATUS_PLACEHOLDER_REGEX) +
-    countRegexMatches(input, MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX);
+    countRegexMatches(input, MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX) +
+    countRegexMatches(input, MVU_MESSAGE_VARIABLE_MACRO_REGEX) +
+    countRegexMatches(input, MVU_GETVAR_REFERENCE_REGEX) +
+    statefulTemplateTagCount;
 
-  const stripped = input
+  let stripped = input
     .replace(MVU_UPDATE_BLOCK_REGEX, "")
     .replace(MVU_STATUS_PLACEHOLDER_REGEX, "")
-    .replace(MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX, "");
+    .replace(MVU_STATUS_CURRENT_VARIABLE_REPLACE_REGEX, "")
+    .replace(MVU_MESSAGE_VARIABLE_MACRO_REGEX, "")
+    .replace(MVU_GETVAR_REFERENCE_REGEX, "")
+    .replace(MVU_STATEFUL_TEMPLATE_TAG_REGEX, "");
+  if (statefulTemplateTagCount > 0) {
+    stripped = stripped.replace(EJS_TEMPLATE_TAG_REGEX, "");
+  }
 
   const normalized = collapseWhitespace(stripped);
   return {
@@ -125,12 +159,27 @@ export function isLikelyMvuWorldInfoContent(content = "") {
   if (!normalized) {
     return false;
   }
+  const stateKeyMentionCount =
+    normalized.match(/\b(?:stat_data|display_data|delta_data)\b/gi)?.length || 0;
+
+  const stateSignals = [
+    MVU_MESSAGE_VARIABLE_MACRO_REGEX,
+    MVU_GETVAR_REFERENCE_REGEX,
+    MVU_STATE_OBJECT_FIELD_REGEX,
+    MVU_STATE_PATH_REFERENCE_REGEX,
+    MVU_STATE_HELPER_REFERENCE_REGEX,
+  ].reduce(
+    (count, pattern) => count + (matchesRegex(normalized, pattern) ? 1 : 0),
+    0,
+  );
 
   return (
-    MVU_STATUS_CURRENT_VARIABLE_DETECT_REGEX.test(normalized) ||
-    MVU_VARIABLE_OUTPUT_ENTRY_REGEX.test(normalized) ||
-    MVU_VARIABLE_RULES_ENTRY_REGEX.test(normalized) ||
-    MVU_FORMAT_EMPHASIS_ENTRY_REGEX.test(normalized)
+    matchesRegex(normalized, MVU_STATUS_CURRENT_VARIABLE_DETECT_REGEX) ||
+    matchesRegex(normalized, MVU_VARIABLE_OUTPUT_ENTRY_REGEX) ||
+    matchesRegex(normalized, MVU_VARIABLE_RULES_ENTRY_REGEX) ||
+    matchesRegex(normalized, MVU_FORMAT_EMPHASIS_ENTRY_REGEX) ||
+    stateSignals >= 2 ||
+    (stateSignals >= 1 && stateKeyMentionCount >= 2)
   );
 }
 
