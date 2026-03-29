@@ -81,6 +81,9 @@ import {
   onExportGraphController,
   onImportGraphController,
   onManualCompressController,
+  onManualEvolveController,
+  onManualSleepController,
+  onManualSynopsisController,
   onRebuildVectorIndexController,
   onRebuildController,
   onTestEmbeddingController,
@@ -4812,66 +4815,43 @@ async function onReroll({ fromFloor } = {}) {
 }
 
 async function onManualSleep() {
-  if (!currentGraph) return;
-  if (!ensureGraphMutationReady("执行遗忘")) return;
-  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-  const result = sleepCycle(currentGraph, getSettings());
-  await recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["sleep"],
+  return await onManualSleepController({
+    cloneGraphSnapshot,
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    getSettings,
+    recordGraphMutation,
+    sleepCycle,
+    toastr,
   });
-  toastr.info(`执行完成：归档 ${result.forgotten} 个节点`);
 }
 
 async function onManualSynopsis() {
-  if (!currentGraph) return;
-  if (!ensureGraphMutationReady("更新概要")) return;
-  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-  await generateSynopsis({
-    graph: currentGraph,
-    schema: getSchema(),
-    currentSeq: getCurrentChatSeq(),
-    customPrompt: undefined,
-    settings: getSettings(),
+  return await onManualSynopsisController({
+    cloneGraphSnapshot,
+    ensureGraphMutationReady,
+    generateSynopsis,
+    getCurrentChatSeq,
+    getCurrentGraph: () => currentGraph,
+    getSchema,
+    getSettings,
+    recordGraphMutation,
+    toastr,
   });
-  await recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["synopsis"],
-  });
-  toastr.success("概要生成完成");
 }
 
 async function onManualEvolve() {
-  if (!currentGraph) return;
-  if (!ensureGraphMutationReady("强制进化")) return;
-
-  const candidateIds = lastExtractedItems
-    .map((item) => item.id)
-    .filter(Boolean);
-  if (candidateIds.length === 0) {
-    toastr.info("暂无最近提取节点可用于进化");
-    return;
-  }
-
-  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-  const result = await consolidateMemories({
-    graph: currentGraph,
-    newNodeIds: candidateIds,
-    embeddingConfig: getEmbeddingConfig(),
-    customPrompt: undefined,
-    settings: getSettings(),
-    options: {
-      neighborCount: getSettings().consolidationNeighborCount,
-      conflictThreshold: getSettings().consolidationThreshold,
-    },
+  return await onManualEvolveController({
+    cloneGraphSnapshot,
+    consolidateMemories,
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    getEmbeddingConfig,
+    getLastExtractedItems: () => lastExtractedItems,
+    getSettings,
+    recordGraphMutation,
+    toastr,
   });
-  await recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["consolidation"],
-  });
-  toastr.success(
-    `整合完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}`,
-  );
 }
 
 async function onRebuildVectorIndex(range = null) {

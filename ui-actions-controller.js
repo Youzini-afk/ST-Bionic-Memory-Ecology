@@ -378,3 +378,72 @@ export async function onReembedDirectController(runtime) {
 
   await runtime.onRebuildVectorIndex();
 }
+
+export async function onManualSleepController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("执行遗忘")) return;
+
+  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+  const result = runtime.sleepCycle(graph, runtime.getSettings());
+  await runtime.recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["sleep"],
+  });
+  runtime.toastr.info(`执行完成：归档 ${result.forgotten} 个节点`);
+}
+
+export async function onManualSynopsisController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("更新概要")) return;
+
+  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+  await runtime.generateSynopsis({
+    graph,
+    schema: runtime.getSchema(),
+    currentSeq: runtime.getCurrentChatSeq(),
+    customPrompt: undefined,
+    settings: runtime.getSettings(),
+  });
+  await runtime.recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["synopsis"],
+  });
+  runtime.toastr.success("概要生成完成");
+}
+
+export async function onManualEvolveController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("强制进化")) return;
+
+  const candidateIds = runtime.getLastExtractedItems()
+    .map((item) => item.id)
+    .filter(Boolean);
+  if (candidateIds.length === 0) {
+    runtime.toastr.info("暂无最近提取节点可用于进化");
+    return;
+  }
+
+  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+  const settings = runtime.getSettings();
+  const result = await runtime.consolidateMemories({
+    graph,
+    newNodeIds: candidateIds,
+    embeddingConfig: runtime.getEmbeddingConfig(),
+    customPrompt: undefined,
+    settings,
+    options: {
+      neighborCount: settings.consolidationNeighborCount,
+      conflictThreshold: settings.consolidationThreshold,
+    },
+  });
+  await runtime.recordGraphMutation({
+    beforeSnapshot,
+    artifactTags: ["consolidation"],
+  });
+  runtime.toastr.success(
+    `整合完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}`,
+  );
+}
