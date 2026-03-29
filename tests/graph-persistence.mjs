@@ -228,6 +228,7 @@ async function createGraphPersistenceHarness({
     formatRecallContextLine,
     cloneGraphForPersistence,
     cloneRuntimeDebugValue,
+    onMessageReceivedController,
     getGraphPersistenceMeta,
     getGraphPersistedRevision,
     getGraphShadowSnapshotStorageKey,
