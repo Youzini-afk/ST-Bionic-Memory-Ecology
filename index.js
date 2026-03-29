@@ -80,6 +80,7 @@ import {
   onFetchMemoryLLMModelsController,
   onExportGraphController,
   onManualCompressController,
+  onRebuildController,
   onTestEmbeddingController,
   onTestMemoryLLMController,
   onViewLastInjectionController,
@@ -4492,99 +4493,32 @@ async function onViewGraph() {
 }
 
 async function onRebuild() {
-  if (!confirm("确定要从当前聊天重建图谱？这将清除现有图谱数据。")) return;
-  if (!ensureGraphMutationReady("重建图谱")) return;
-
-  const context = getContext();
-  const chat = context?.chat;
-  if (!Array.isArray(chat)) {
-    toastr.warning("当前聊天上下文不可用，无法重建");
-    return;
-  }
-
-  const previousGraphSnapshot = currentGraph
-    ? cloneGraphSnapshot(currentGraph)
-    : cloneGraphSnapshot(
-        normalizeGraphRuntimeState(createEmptyGraph(), getCurrentChatId()),
-      );
-  const previousUiState = snapshotRuntimeUiState();
-  const settings = getSettings();
-  setRuntimeStatus(
-    "图谱重建中",
-    `当前聊天 ${Array.isArray(chat) ? chat.length : 0} 条消息`,
-    "running",
-  );
-
-  currentGraph = normalizeGraphRuntimeState(
-    createEmptyGraph(),
-    getCurrentChatId(),
-  );
-  currentGraph.batchJournal = [];
-  clearInjectionState();
-
-  try {
-    await prepareVectorStateForReplay(true);
-    const replayedBatches = await replayExtractionFromHistory(chat, settings);
-    clearHistoryDirty(
-      currentGraph,
-      buildRecoveryResult("full-rebuild", {
-        fromFloor: 0,
-        batches: replayedBatches,
-        path: "full-rebuild",
-        detectionSource: "manual-rebuild",
-        affectedBatchCount: currentGraph.batchJournal?.length || 0,
-        replayedBatchCount: replayedBatches,
-        reason: "用户手动触发全量重建",
-      }),
-    );
-    saveGraphToChat({ reason: "manual-rebuild-complete" });
-    setLastExtractionStatus(
-      "图谱重建完成",
-      `已回放 ${replayedBatches} 批提取`,
-      "success",
-      {
-        syncRuntime: false,
-      },
-    );
-
-    if (currentGraph.vectorIndexState?.lastWarning) {
-      setRuntimeStatus(
-        "图谱重建完成",
-        `已回放 ${replayedBatches} 批，但向量仍待修复`,
-        "warning",
-      );
-      toastr.warning(
-        `图谱已重建，但向量索引仍待修复: ${currentGraph.vectorIndexState.lastWarning}`,
-      );
-    } else {
-      setRuntimeStatus(
-        "图谱重建完成",
-        `已回放 ${replayedBatches} 批，图谱与向量索引已刷新`,
-        "success",
-      );
-      toastr.success("图谱与向量索引已按当前聊天全量重建");
-    }
-  } catch (error) {
-    currentGraph = normalizeGraphRuntimeState(
-      previousGraphSnapshot,
-      getCurrentChatId(),
-    );
-    restoreRuntimeUiState(previousUiState);
-    saveGraphToChat({ reason: "manual-rebuild-restore-previous" });
-    setLastExtractionStatus(
-      "图谱重建失败",
-      error?.message || String(error),
-      "error",
-      {
-        syncRuntime: true,
-      },
-    );
-    throw new Error(
-      `图谱重建失败，已恢复到重建前状态: ${error?.message || error}`,
-    );
-  } finally {
-    refreshPanelLiveState();
-  }
+  return await onRebuildController({
+    buildRecoveryResult,
+    clearHistoryDirty,
+    clearInjectionState,
+    cloneGraphSnapshot,
+    confirm,
+    createEmptyGraph,
+    ensureGraphMutationReady,
+    getContext,
+    getCurrentChatId,
+    getCurrentGraph: () => currentGraph,
+    getSettings,
+    normalizeGraphRuntimeState,
+    prepareVectorStateForReplay,
+    refreshPanelLiveState,
+    replayExtractionFromHistory,
+    restoreRuntimeUiState,
+    saveGraphToChat,
+    setCurrentGraph: (graph) => {
+      currentGraph = graph;
+    },
+    setLastExtractionStatus,
+    setRuntimeStatus,
+    snapshotRuntimeUiState,
+    toastr,
+  });
 }
 
 async function onManualCompress() {

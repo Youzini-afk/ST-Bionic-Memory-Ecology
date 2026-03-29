@@ -146,3 +146,102 @@ export async function onViewLastInjectionController(runtime) {
 
   runtime.document.body.appendChild(popup);
 }
+
+export async function onRebuildController(runtime) {
+  if (!runtime.confirm("确定要从当前聊天重建图谱？这将清除现有图谱数据。")) {
+    return;
+  }
+  if (!runtime.ensureGraphMutationReady("重建图谱")) return;
+
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat)) {
+    runtime.toastr.warning("当前聊天上下文不可用，无法重建");
+    return;
+  }
+
+  const previousGraphSnapshot = runtime.getCurrentGraph()
+    ? runtime.cloneGraphSnapshot(runtime.getCurrentGraph())
+    : runtime.cloneGraphSnapshot(
+        runtime.normalizeGraphRuntimeState(
+          runtime.createEmptyGraph(),
+          runtime.getCurrentChatId(),
+        ),
+      );
+  const previousUiState = runtime.snapshotRuntimeUiState();
+  const settings = runtime.getSettings();
+  runtime.setRuntimeStatus(
+    "图谱重建中",
+    `当前聊天 ${Array.isArray(chat) ? chat.length : 0} 条消息`,
+    "running",
+  );
+
+  const nextGraph = runtime.normalizeGraphRuntimeState(
+    runtime.createEmptyGraph(),
+    runtime.getCurrentChatId(),
+  );
+  nextGraph.batchJournal = [];
+  runtime.setCurrentGraph(nextGraph);
+  runtime.clearInjectionState();
+
+  try {
+    await runtime.prepareVectorStateForReplay(true);
+    const replayedBatches = await runtime.replayExtractionFromHistory(chat, settings);
+    runtime.clearHistoryDirty(
+      runtime.getCurrentGraph(),
+      runtime.buildRecoveryResult("full-rebuild", {
+        fromFloor: 0,
+        batches: replayedBatches,
+        path: "full-rebuild",
+        detectionSource: "manual-rebuild",
+        affectedBatchCount: runtime.getCurrentGraph().batchJournal?.length || 0,
+        replayedBatchCount: replayedBatches,
+        reason: "用户手动触发全量重建",
+      }),
+    );
+    runtime.saveGraphToChat({ reason: "manual-rebuild-complete" });
+    runtime.setLastExtractionStatus(
+      "图谱重建完成",
+      `已回放 ${replayedBatches} 批提取`,
+      "success",
+      {
+        syncRuntime: false,
+      },
+    );
+
+    if (runtime.getCurrentGraph().vectorIndexState?.lastWarning) {
+      runtime.setRuntimeStatus(
+        "图谱重建完成",
+        `已回放 ${replayedBatches} 批，但向量仍待修复`,
+        "warning",
+      );
+      runtime.toastr.warning(
+        `图谱已重建，但向量索引仍待修复: ${runtime.getCurrentGraph().vectorIndexState.lastWarning}`,
+      );
+    } else {
+      runtime.setRuntimeStatus(
+        "图谱重建完成",
+        `已回放 ${replayedBatches} 批，图谱与向量索引已刷新`,
+        "success",
+      );
+      runtime.toastr.success("图谱与向量索引已按当前聊天全量重建");
+    }
+  } catch (error) {
+    runtime.setCurrentGraph(
+      runtime.normalizeGraphRuntimeState(
+        previousGraphSnapshot,
+        runtime.getCurrentChatId(),
+      ),
+    );
+    runtime.restoreRuntimeUiState(previousUiState);
+    runtime.saveGraphToChat({ reason: "manual-rebuild-restore-previous" });
+    runtime.setLastExtractionStatus("图谱重建失败", error?.message || String(error), "error", {
+      syncRuntime: true,
+    });
+    throw new Error(
+      `图谱重建失败，已恢复到重建前状态: ${error?.message || error}`,
+    );
+  } finally {
+    runtime.refreshPanelLiveState();
+  }
+}

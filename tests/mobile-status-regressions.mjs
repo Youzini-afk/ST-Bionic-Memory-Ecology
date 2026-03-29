@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { onManualExtractController } from "../extraction-controller.js";
+import { onRebuildController } from "../ui-actions-controller.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(__dirname, "../index.js");
@@ -240,6 +241,7 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
     },
     saveGraphToChat() {},
     restoreRuntimeUiState() {},
+    onRebuildController,
     result: null,
   };
   vm.createContext(context);
