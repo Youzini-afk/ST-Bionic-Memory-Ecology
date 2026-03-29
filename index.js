@@ -123,6 +123,18 @@ import {
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
 } from "./graph-persistence.js";
+import {
+  buildExtractionMessages,
+  clampRecoveryStartFloor,
+  getAssistantTurns,
+  getChatIndexForAssistantSeq,
+  getChatIndexForPlayableSeq,
+  getMinExtractableAssistantFloor,
+  isAssistantChatMessage,
+  pruneProcessedMessageHashesFromFloor,
+  resolveDirtyFloorFromMutationMeta,
+  rollbackAffectedJournals,
+} from "./chat-history.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -3540,174 +3552,6 @@ async function handleExtractionSuccess(
   };
 }
 
-function isAssistantChatMessage(message) {
-  return Boolean(message) && !message.is_user && !message.is_system;
-}
-
-function getAssistantTurns(chat) {
-  const assistantTurns = [];
-  // 从 index 1 开始：index 0 是角色卡首条消息（greeting），不参与提取
-  for (let index = 1; index < chat.length; index++) {
-    if (isAssistantChatMessage(chat[index])) {
-      assistantTurns.push(index);
-    }
-  }
-  return assistantTurns;
-}
-
-function buildExtractionMessages(chat, startIdx, endIdx, settings) {
-  const contextTurns = clampInt(settings.extractContextTurns, 2, 0, 20);
-  const contextStart = Math.max(0, startIdx - contextTurns * 2);
-  const messages = [];
-
-  for (
-    let index = contextStart;
-    index <= endIdx && index < chat.length;
-    index++
-  ) {
-    const msg = chat[index];
-    if (msg.is_system) continue;
-    messages.push({
-      seq: index,
-      role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
-    });
-  }
-
-  return messages;
-}
-
-function getChatIndexForPlayableSeq(chat, playableSeq) {
-  if (!Array.isArray(chat) || !Number.isFinite(playableSeq)) return null;
-
-  let currentSeq = -1;
-  for (let index = 0; index < chat.length; index++) {
-    const message = chat[index];
-    if (message?.is_system) continue;
-    currentSeq++;
-    if (currentSeq >= playableSeq) {
-      return index;
-    }
-  }
-
-  return chat.length;
-}
-
-function getChatIndexForAssistantSeq(chat, assistantSeq) {
-  if (!Array.isArray(chat) || !Number.isFinite(assistantSeq)) return null;
-
-  let currentSeq = -1;
-  for (let index = 0; index < chat.length; index++) {
-    if (!isAssistantChatMessage(chat[index])) continue;
-    currentSeq++;
-    if (currentSeq >= assistantSeq) {
-      return index;
-    }
-  }
-
-  return chat.length;
-}
-
-function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
-  if (!meta || typeof meta !== "object") return null;
-
-  const candidates = [];
-  const isDeleteTrigger = String(trigger || "").includes("message-deleted");
-  const minExtractableFloor = getMinExtractableAssistantFloor(chat);
-
-  // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近“被删区间起点”，
-  // 因此这里额外向前退一层，避免恢复仍停留在被删楼层对应的旧图谱边界。
-  if (!isDeleteTrigger && Number.isFinite(meta.messageId)) {
-    candidates.push({
-      floor: meta.messageId,
-      source: `${trigger}-meta`,
-    });
-  }
-  if (Number.isFinite(meta.deletedPlayableSeqFrom)) {
-    const floor = getChatIndexForPlayableSeq(chat, meta.deletedPlayableSeqFrom);
-    if (Number.isFinite(floor)) {
-      candidates.push({
-        floor: Number.isFinite(minExtractableFloor)
-          ? Math.max(minExtractableFloor, floor - 1)
-          : Math.max(0, floor - 1),
-        source: `${trigger}-meta-delete-boundary`,
-      });
-    }
-  }
-  if (Number.isFinite(meta.deletedAssistantSeqFrom)) {
-    const floor = getChatIndexForAssistantSeq(
-      chat,
-      meta.deletedAssistantSeqFrom,
-    );
-    if (Number.isFinite(floor)) {
-      candidates.push({
-        floor: Number.isFinite(minExtractableFloor)
-          ? Math.max(minExtractableFloor, floor - 1)
-          : Math.max(0, floor - 1),
-        source: `${trigger}-meta-delete-boundary`,
-      });
-    }
-  }
-  if (!isDeleteTrigger && Number.isFinite(meta.playableSeq)) {
-    const floor = getChatIndexForPlayableSeq(chat, meta.playableSeq);
-    if (Number.isFinite(floor)) {
-      candidates.push({
-        floor,
-        source: `${trigger}-meta`,
-      });
-    }
-  }
-  if (!isDeleteTrigger && Number.isFinite(meta.assistantSeq)) {
-    const floor = getChatIndexForAssistantSeq(chat, meta.assistantSeq);
-    if (Number.isFinite(floor)) {
-      candidates.push({
-        floor,
-        source: `${trigger}-meta`,
-      });
-    }
-  }
-  if (!isDeleteTrigger && Number.isFinite(primaryArg)) {
-    candidates.push({
-      floor: primaryArg,
-      source: `${trigger}-meta`,
-    });
-  }
-
-  if (candidates.length === 0) return null;
-  const validCandidates = Number.isFinite(minExtractableFloor)
-    ? candidates.filter((c) => c.floor >= minExtractableFloor)
-    : candidates;
-  if (validCandidates.length === 0) return null;
-  return validCandidates.reduce((earliest, current) =>
-    current.floor < earliest.floor ? current : earliest,
-  );
-}
-
-function getLastProcessedAssistantFloor() {
-  ensureCurrentGraphRuntimeState();
-  return Number.isFinite(
-    currentGraph?.historyState?.lastProcessedAssistantFloor,
-  )
-    ? currentGraph.historyState.lastProcessedAssistantFloor
-    : -1;
-}
-
-function getMinExtractableAssistantFloor(chat) {
-  const assistantTurns = getAssistantTurns(chat);
-  return assistantTurns.length > 0 ? assistantTurns[0] : null;
-}
-
-function clampRecoveryStartFloor(chat, floor) {
-  if (!Number.isFinite(floor)) return floor;
-
-  const minExtractableFloor = getMinExtractableAssistantFloor(chat);
-  if (!Number.isFinite(minExtractableFloor)) {
-    return floor;
-  }
-
-  return Math.max(floor, minExtractableFloor);
-}
-
 function notifyHistoryDirty(dirtyFrom, reason) {
   updateStageNotice(
     "history",
@@ -4150,30 +3994,6 @@ function applyRecoveryPlanToVectorState(
   vectorState.lastWarning = recoveryPlan?.legacyGapFallback
     ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
     : "历史恢复后需要修复受影响后缀的向量索引";
-}
-
-function rollbackAffectedJournals(graph, affectedJournals = []) {
-  for (let index = affectedJournals.length - 1; index >= 0; index--) {
-    rollbackBatch(graph, affectedJournals[index]);
-  }
-  graph.batchJournal = Array.isArray(graph.batchJournal)
-    ? graph.batchJournal.slice(
-        0,
-        Math.max(0, graph.batchJournal.length - affectedJournals.length),
-      )
-    : [];
-}
-
-function pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
-  if (!graph?.historyState?.processedMessageHashes) return;
-  if (!Number.isFinite(fromFloor)) return;
-
-  const hashes = graph.historyState.processedMessageHashes;
-  for (const key of Object.keys(hashes)) {
-    if (Number(key) >= fromFloor) {
-      delete hashes[key];
-    }
-  }
 }
 
 async function rollbackGraphForReroll(targetFloor, context = getContext()) {

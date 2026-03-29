@@ -42,6 +42,17 @@ import {
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
 } from "../graph-persistence.js";
+import {
+  buildExtractionMessages,
+  clampRecoveryStartFloor,
+  getAssistantTurns,
+  getChatIndexForAssistantSeq,
+  getChatIndexForPlayableSeq,
+  getMinExtractableAssistantFloor,
+  isAssistantChatMessage,
+  pruneProcessedMessageHashesFromFloor,
+  rollbackAffectedJournals,
+} from "../chat-history.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -180,7 +191,7 @@ const schema = [
 
 function createBatchStageHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
-    const marker = "function isAssistantChatMessage(message) {";
+    const marker = "function notifyHistoryDirty(dirtyFrom, reason) {";
     const start = source.indexOf("function shouldAdvanceProcessedHistory(");
     const end = source.indexOf(marker);
     if (start < 0 || end < 0 || end <= start) {
@@ -309,26 +320,21 @@ function createGenerationRecallHarness() {
 
 function createRerollHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
-    const helperStart = source.indexOf(
-      "function pruneProcessedMessageHashesFromFloor(",
-    );
-    const helperEnd = source.indexOf("async function recoverHistoryIfNeeded(");
+    const rollbackStart = source.indexOf("async function rollbackGraphForReroll(");
+    const rollbackEnd = source.indexOf("async function recoverHistoryIfNeeded(");
     const rerollStart = source.indexOf("async function onReroll(");
     const rerollEnd = source.indexOf("async function onManualSleep()");
     if (
-      helperStart < 0 ||
-      helperEnd < 0 ||
+      rollbackStart < 0 ||
+      rollbackEnd < 0 ||
       rerollStart < 0 ||
       rerollEnd < 0 ||
-      helperEnd <= helperStart ||
+      rollbackEnd <= rollbackStart ||
       rerollEnd <= rerollStart
     ) {
       throw new Error("无法从 index.js 提取 reroll 定义");
     }
-    const snippet = [
-      source.slice(helperStart, helperEnd),
-      source.slice(rerollStart, rerollEnd),
-    ]
+    const snippet = [source.slice(rollbackStart, rollbackEnd), source.slice(rerollStart, rerollEnd)]
       .join("\n")
       .replace(/^export\s+/gm, "");
     const context = {
@@ -414,6 +420,9 @@ function createRerollHarness() {
       async deleteBackendVectorHashesForRecovery(...args) {
         context.deletedHashesCalls.push(args);
       },
+      pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
+        return pruneProcessedMessageHashesFromFloor(graph, fromFloor);
+      },
       async prepareVectorStateForReplay(...args) {
         context.prepareVectorStateCalls.push(args);
       },
@@ -459,7 +468,7 @@ function createRerollHarness() {
     };
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { pruneProcessedMessageHashesFromFloor, rollbackGraphForReroll, onReroll };`,
+      `${snippet}\nresult = { rollbackGraphForReroll, onReroll };`,
       context,
       { filename: indexPath },
     );
