@@ -464,6 +464,12 @@ let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
 let persistedRecallUiRefreshTimer = null;
+let persistedRecallUiRefreshObserver = null;
+let persistedRecallUiRefreshSession = 0;
+const PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [0, 80, 180, 320, 500];
+const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
+const persistedRecallUiDiagnosticTimestamps = new Map();
+const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const stageNoticeHandles = {
   extraction: null,
@@ -965,6 +971,32 @@ function getMessageRecallRecord(messageIndex) {
   return readPersistedRecallFromUserMessage(chat, messageIndex);
 }
 
+function debugWithThrottle(cache, key, ...args) {
+  const now = Date.now();
+  const lastAt = cache.get(key) || 0;
+  if (now - lastAt < PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS) return;
+  cache.set(key, now);
+  console.debug(...args);
+}
+
+function debugPersistedRecallUi(reason, details = null, throttleKey = reason) {
+  const suffix = details ? ` ${JSON.stringify(details)}` : "";
+  debugWithThrottle(
+    persistedRecallUiDiagnosticTimestamps,
+    `ui:${throttleKey}`,
+    `[ST-BME] Recall Card UI: ${reason}${suffix}`,
+  );
+}
+
+function debugPersistedRecallPersistence(reason, details = null, throttleKey = reason) {
+  const suffix = details ? ` ${JSON.stringify(details)}` : "";
+  debugWithThrottle(
+    persistedRecallPersistDiagnosticTimestamps,
+    `persist:${throttleKey}`,
+    `[ST-BME] Recall Card persist: ${reason}${suffix}`,
+  );
+}
+
 function persistRecallInjectionRecord({
   recallInput = {},
   result = {},
@@ -987,7 +1019,22 @@ function persistRecallInjectionRecord({
     resolvedTargetIndex = lastRecallSentUserMessage.messageId;
   }
 
-  if (!Number.isFinite(resolvedTargetIndex)) return null;
+  if (!Number.isFinite(resolvedTargetIndex)) {
+    debugPersistedRecallPersistence("目标 user 楼层解析失败", {
+      generationType,
+      explicitTargetUserMessageIndex: recallInput?.targetUserMessageIndex,
+      lastSentUserMessageId: lastRecallSentUserMessage?.messageId,
+    });
+    return null;
+  }
+
+  if (!chat[resolvedTargetIndex]?.is_user) {
+    debugPersistedRecallPersistence("目标楼层不是 user 消息，跳过持久化", {
+      targetUserMessageIndex: resolvedTargetIndex,
+      messageKeys: Object.keys(chat[resolvedTargetIndex] || {}),
+    });
+    return null;
+  }
 
   const record = buildPersistedRecallRecord(
     {
@@ -1001,7 +1048,17 @@ function persistRecallInjectionRecord({
     },
     readPersistedRecallFromUserMessage(chat, resolvedTargetIndex),
   );
+  if (!String(record?.injectionText || "").trim()) {
+    debugPersistedRecallPersistence("无有效 injectionText，跳过持久化", {
+      targetUserMessageIndex: resolvedTargetIndex,
+      selectedNodeCount: Array.isArray(result?.selectedNodeIds) ? result.selectedNodeIds.length : 0,
+    });
+    return null;
+  }
   if (!writePersistedRecallToUserMessage(chat, resolvedTargetIndex, record)) {
+    debugPersistedRecallPersistence("写入 user 楼层失败", {
+      targetUserMessageIndex: resolvedTargetIndex,
+    });
     return null;
   }
 
@@ -1111,8 +1168,61 @@ function applyFinalRecallInjectionForGeneration({
   };
 }
 
-function resolveMessageIndexFromElement(messageElement, fallbackIndex = null) {
-  if (!messageElement) return Number.isFinite(fallbackIndex) ? fallbackIndex : null;
+function clearPersistedRecallMessageUiObserver() {
+  try {
+    persistedRecallUiRefreshObserver?.disconnect?.();
+  } catch (error) {
+    console.warn("[ST-BME] Recall Card UI observer disconnect 失败:", error);
+  }
+  persistedRecallUiRefreshObserver = null;
+}
+
+function isDomNodeAttached(node) {
+  if (!node) return false;
+  if (node.isConnected === true) return true;
+  return typeof document?.contains === "function" ? document.contains(node) : true;
+}
+
+function cleanupRecallCardElement(cardElement) {
+  if (!cardElement) return;
+  try {
+    cardElement._bmeDestroyRenderer?.();
+  } catch (error) {
+    console.warn("[ST-BME] Recall Card renderer 清理失败:", error);
+  }
+  cardElement.remove?.();
+}
+
+function cleanupLegacyRecallBadges(messageElement) {
+  if (!messageElement?.querySelectorAll) return;
+  const oldBadges = Array.from(messageElement.querySelectorAll(".st-bme-recall-badge") || []);
+  for (const oldBadge of oldBadges) oldBadge.remove();
+}
+
+function cleanupRecallArtifacts(messageElement, keepMessageIndex = null) {
+  if (!messageElement?.querySelectorAll) return;
+
+  cleanupLegacyRecallBadges(messageElement);
+
+  const existingCards = Array.from(messageElement.querySelectorAll(".bme-recall-card") || []);
+  for (const card of existingCards) {
+    if (keepMessageIndex !== null && card.dataset?.messageIndex === String(keepMessageIndex)) {
+      continue;
+    }
+    cleanupRecallCardElement(card);
+  }
+}
+
+function parseStableMessageIndex(candidate) {
+  const normalized = String(candidate ?? "").trim();
+  if (!normalized) return null;
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number.parseInt(normalized, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function resolveMessageIndexFromElement(messageElement) {
+  if (!messageElement) return null;
 
   const candidates = [
     messageElement.getAttribute?.("mesid"),
@@ -1121,12 +1231,173 @@ function resolveMessageIndexFromElement(messageElement, fallbackIndex = null) {
     messageElement.dataset?.mesid,
     messageElement.dataset?.messageId,
   ];
+
   for (const candidate of candidates) {
-    const parsed = Number.parseInt(candidate, 10);
-    if (Number.isFinite(parsed)) return parsed;
+    const parsed = parseStableMessageIndex(candidate);
+    if (parsed !== null) return parsed;
   }
 
-  return Number.isFinite(fallbackIndex) ? fallbackIndex : null;
+  return null;
+}
+
+function resolveRecallCardAnchor(messageElement) {
+  if (!messageElement || !isDomNodeAttached(messageElement)) return null;
+  const mesBlock = messageElement.querySelector?.(".mes_block");
+  if (isDomNodeAttached(mesBlock)) return mesBlock;
+
+  const mesTextParent = messageElement.querySelector?.(".mes_text")?.parentElement;
+  if (isDomNodeAttached(mesTextParent)) return mesTextParent;
+
+  return isDomNodeAttached(messageElement) ? messageElement : null;
+}
+
+function buildPersistedRecallUiRetryDelays(initialDelayMs = 0) {
+  const normalizedInitial = Math.max(0, Number.parseInt(initialDelayMs, 10) || 0);
+  if (!normalizedInitial) return [...PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS];
+  return [
+    normalizedInitial,
+    ...PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS.filter((delay) => delay > normalizedInitial),
+  ];
+}
+
+function summarizePersistedRecallRefreshStatus(summary) {
+  if (summary.renderedCount > 0) return "rendered";
+  if (summary.waitingMessageIndices.length > 0) return "waiting_dom";
+  if (summary.anchorFailureIndices.length > 0) return "missing_message_anchor";
+  if (summary.skippedNonUserIndices.length > 0) return "skipped_non_user";
+  if (summary.persistedRecordCount === 0) return "missing_recall_record";
+  return "missing_message_anchor";
+}
+
+function refreshPersistedRecallMessageUi() {
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat) || typeof document?.getElementById !== "function") {
+    return {
+      status: "missing_chat_root",
+      renderedCount: 0,
+      persistedRecordCount: 0,
+      waitingMessageIndices: [],
+      anchorFailureIndices: [],
+      skippedNonUserIndices: [],
+    };
+  }
+
+  const chatRoot = document.getElementById("chat");
+  if (!chatRoot) {
+    debugPersistedRecallUi("缺少 #chat 根节点");
+    return {
+      status: "missing_chat_root",
+      renderedCount: 0,
+      persistedRecordCount: 0,
+      waitingMessageIndices: [],
+      anchorFailureIndices: [],
+      skippedNonUserIndices: [],
+    };
+  }
+
+  const themeName = getSettings()?.panelTheme || "crimson";
+  const callbacks = getRecallCardCallbacks();
+  const messageElementMap = new Map();
+  const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
+  for (const messageElement of messageElements) {
+    cleanupLegacyRecallBadges(messageElement);
+    const messageIndex = resolveMessageIndexFromElement(messageElement);
+    if (!Number.isFinite(messageIndex)) {
+      debugPersistedRecallUi("消息 DOM 缺少稳定索引属性，跳过挂载", {
+        className: messageElement.className || "",
+      }, "missing-stable-message-index");
+      continue;
+    }
+    if (messageElementMap.has(messageIndex)) {
+      debugPersistedRecallUi("检测到重复消息 DOM 索引，保留首个锚点", {
+        messageIndex,
+      }, `duplicate-message-index:${messageIndex}`);
+      cleanupRecallArtifacts(messageElement);
+      continue;
+    }
+    messageElementMap.set(messageIndex, messageElement);
+  }
+
+  const summary = {
+    status: "missing_recall_record",
+    renderedCount: 0,
+    persistedRecordCount: 0,
+    waitingMessageIndices: [],
+    anchorFailureIndices: [],
+    skippedNonUserIndices: [],
+  };
+
+  for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
+    const message = chat[messageIndex];
+    const messageElement = messageElementMap.get(messageIndex) || null;
+    const existingCard = messageElement?.querySelector?.(
+      `.bme-recall-card[data-message-index="${messageIndex}"]`,
+    ) || null;
+
+    if (!message?.is_user) {
+      if (existingCard) cleanupRecallCardElement(existingCard);
+      const unexpectedRecord = readPersistedRecallFromUserMessage(chat, messageIndex);
+      if (unexpectedRecord) {
+        summary.skippedNonUserIndices.push(messageIndex);
+        debugPersistedRecallUi("非 user 楼层存在持久召回记录，已跳过挂载", {
+          messageIndex,
+        }, `skipped-non-user:${messageIndex}`);
+      }
+      continue;
+    }
+
+    const record = readPersistedRecallFromUserMessage(chat, messageIndex);
+    if (!record?.injectionText) {
+      if (existingCard) cleanupRecallCardElement(existingCard);
+      continue;
+    }
+
+    summary.persistedRecordCount += 1;
+    if (!messageElement) {
+      summary.waitingMessageIndices.push(messageIndex);
+      debugPersistedRecallUi("目标 user 楼层 DOM 未就绪，等待后续刷新", {
+        messageIndex,
+      }, `waiting-dom:${messageIndex}`);
+      continue;
+    }
+
+    const anchor = resolveRecallCardAnchor(messageElement);
+    if (!anchor) {
+      cleanupRecallCardElement(existingCard);
+      summary.anchorFailureIndices.push(messageIndex);
+      debugPersistedRecallUi("目标 user 楼层锚点解析失败，跳过挂载", {
+        messageIndex,
+      }, `missing-anchor:${messageIndex}`);
+      continue;
+    }
+
+    cleanupRecallArtifacts(messageElement, messageIndex);
+    const currentCard = messageElement.querySelector?.(
+      `.bme-recall-card[data-message-index="${messageIndex}"]`,
+    ) || null;
+
+    if (currentCard) {
+      updateRecallCardData(currentCard, record);
+    } else {
+      const card = createRecallCardElement({
+        messageIndex,
+        record,
+        userMessageText: message.mes || "",
+        graph: currentGraph,
+        themeName,
+        callbacks,
+      });
+      anchor.appendChild(card);
+    }
+    summary.renderedCount += 1;
+  }
+
+  summary.status = summarizePersistedRecallRefreshStatus(summary);
+  if (summary.status === "missing_recall_record") {
+    debugPersistedRecallUi("当前无有效持久召回记录可渲染");
+  }
+  return summary;
 }
 
 function getRecallCardCallbacks() {
@@ -1190,96 +1461,67 @@ function getRecallCardCallbacks() {
   };
 }
 
+function armPersistedRecallMessageUiObserver(sessionId, runAttempt) {
+  clearPersistedRecallMessageUiObserver();
+  const chatRoot = document?.getElementById?.("chat");
+  const ObserverCtor = globalThis.MutationObserver;
+  if (!chatRoot || typeof ObserverCtor !== "function") return false;
 
-function refreshPersistedRecallMessageUi() {
-  const context = getContext();
-  const chat = context?.chat;
-  if (!Array.isArray(chat) || typeof document?.getElementById !== "function") return;
-
-  const chatRoot = document.getElementById("chat");
-  if (!chatRoot) return;
-
-  const themeName = getSettings()?.panelTheme || "crimson";
-  const callbacks = getRecallCardCallbacks();
-
-  const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
-  for (let fallbackIndex = 0; fallbackIndex < messageElements.length; fallbackIndex++) {
-    const messageElement = messageElements[fallbackIndex];
-    const messageIndex = resolveMessageIndexFromElement(messageElement, fallbackIndex);
-    if (!Number.isFinite(messageIndex)) continue;
-
-    // Clean up old-style badges (migration from v1)
-    const oldBadges = Array.from(
-      messageElement.querySelectorAll?.(".st-bme-recall-badge") || [],
-    );
-    for (const oldBadge of oldBadges) oldBadge.remove();
-
-    // Find existing card
-    const existingCards = Array.from(
-      messageElement.querySelectorAll?.(".bme-recall-card") || [],
-    );
-    let existingCard = null;
-    for (const card of existingCards) {
-      if (card.dataset.messageIndex === String(messageIndex)) {
-        existingCard = card;
-      } else {
-        card._bmeDestroyRenderer?.();
-        card.remove();
-      }
-    }
-
-    const message = chat[messageIndex];
-    if (!message?.is_user) {
-      if (existingCard) {
-        existingCard._bmeDestroyRenderer?.();
-        existingCard.remove();
-      }
-      continue;
-    }
-
-    const record = readPersistedRecallFromUserMessage(chat, messageIndex);
-    if (!record?.injectionText) {
-      if (existingCard) {
-        existingCard._bmeDestroyRenderer?.();
-        existingCard.remove();
-      }
-      continue;
-    }
-
-    if (existingCard) {
-      // Update data without rebuilding (preserves expanded state)
-      updateRecallCardData(existingCard, record);
-    } else {
-      // Create new card
-      const card = createRecallCardElement({
-        messageIndex,
-        record,
-        userMessageText: message.mes || "",
-        graph: currentGraph,
-        themeName,
-        callbacks,
-      });
-
-      const anchor =
-        messageElement.querySelector?.(".mes_block") ||
-        messageElement.querySelector?.(".mes_text")?.parentElement ||
-        messageElement;
-      anchor.appendChild(card);
-    }
-  }
+  persistedRecallUiRefreshObserver = new ObserverCtor(() => {
+    if (sessionId !== persistedRecallUiRefreshSession) return;
+    clearPersistedRecallMessageUiObserver();
+    runAttempt();
+  });
+  persistedRecallUiRefreshObserver.observe(chatRoot, { childList: true, subtree: true });
+  return true;
 }
 
-function schedulePersistedRecallMessageUiRefresh(delayMs = 120) {
+function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
   clearTimeout(persistedRecallUiRefreshTimer);
-  persistedRecallUiRefreshTimer = setTimeout(() => {
+  clearPersistedRecallMessageUiObserver();
+
+  const retryDelays = buildPersistedRecallUiRetryDelays(delayMs);
+  const sessionId = ++persistedRecallUiRefreshSession;
+  let attemptIndex = 0;
+
+  const runAttempt = () => {
+    if (sessionId !== persistedRecallUiRefreshSession) return;
     persistedRecallUiRefreshTimer = null;
-    refreshPersistedRecallMessageUi();
-  }, Math.max(16, Number.parseInt(delayMs, 10) || 120));
+    const summary = refreshPersistedRecallMessageUi();
+    const shouldRetry =
+      (summary.status === "missing_chat_root" ||
+        summary.status === "waiting_dom" ||
+        summary.status === "missing_message_anchor") &&
+      attemptIndex < retryDelays.length - 1;
+
+    if (!shouldRetry) {
+      clearPersistedRecallMessageUiObserver();
+      return;
+    }
+
+    armPersistedRecallMessageUiObserver(sessionId, runAttempt);
+    attemptIndex += 1;
+    persistedRecallUiRefreshTimer = setTimeout(runAttempt, retryDelays[attemptIndex]);
+  };
+
+  persistedRecallUiRefreshTimer = setTimeout(runAttempt, retryDelays[attemptIndex]);
+}
+
+function cleanupPersistedRecallMessageUi() {
+  clearTimeout(persistedRecallUiRefreshTimer);
+  persistedRecallUiRefreshTimer = null;
+  clearPersistedRecallMessageUiObserver();
+  const chatRoot = document.getElementById("chat");
+  if (!chatRoot?.querySelectorAll) return;
+  for (const messageElement of Array.from(chatRoot.querySelectorAll(".mes"))) {
+    cleanupRecallArtifacts(messageElement);
+  }
 }
 
 async function rerunRecallForMessage(messageIndex) {
   const chat = getContext()?.chat;
   const message = Array.isArray(chat) ? chat[messageIndex] : null;
+  cleanupPersistedRecallMessageUi();
   if (!message?.is_user) {
     toastr.info("仅用户消息支持重新召回");
     return null;

@@ -69,6 +69,7 @@ import {
   markPersistedRecallManualEdit,
 } from "../recall-persistence.js";
 
+const waitForTick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
   "export function getContext(...args) {",
@@ -547,6 +548,521 @@ function pushTestOverrides(patch = {}) {
   return () => {
     globalThis.__stBmeTestOverrides = previous;
   };
+}
+
+
+class FakeClassList {
+  constructor(owner) {
+    this.owner = owner;
+    this.tokens = new Set();
+  }
+
+  setFromString(value = "") {
+    this.tokens = new Set(String(value || "").split(/\s+/).filter(Boolean));
+  }
+
+  add(...tokens) {
+    for (const token of tokens) {
+      if (token) this.tokens.add(token);
+    }
+    this.owner._syncClassName();
+  }
+
+  remove(...tokens) {
+    for (const token of tokens) this.tokens.delete(token);
+    this.owner._syncClassName();
+  }
+
+  contains(token) {
+    return this.tokens.has(token);
+  }
+
+  toggle(token, force) {
+    if (force === true) {
+      this.tokens.add(token);
+      this.owner._syncClassName();
+      return true;
+    }
+    if (force === false) {
+      this.tokens.delete(token);
+      this.owner._syncClassName();
+      return false;
+    }
+    if (this.tokens.has(token)) {
+      this.tokens.delete(token);
+      this.owner._syncClassName();
+      return false;
+    }
+    this.tokens.add(token);
+    this.owner._syncClassName();
+    return true;
+  }
+
+  toString() {
+    return [...this.tokens].join(" ");
+  }
+}
+
+class FakeElement {
+  constructor(tagName, ownerDocument) {
+    this.tagName = String(tagName || "div").toUpperCase();
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.parentElement = null;
+    this.dataset = {};
+    this.attributes = new Map();
+    this.eventListeners = new Map();
+    this.classList = new FakeClassList(this);
+    this._className = "";
+    this.id = "";
+    this.textContent = "";
+    this.innerHTML = "";
+    this.disabled = false;
+  }
+
+  _syncClassName() {
+    this._className = this.classList.toString();
+  }
+
+  get className() {
+    return this._className;
+  }
+
+  set className(value) {
+    this._className = String(value || "");
+    this.classList.setFromString(this._className);
+    this._className = this.classList.toString();
+  }
+
+  get parentNode() {
+    return this.parentElement;
+  }
+
+  setAttribute(name, value) {
+    const key = String(name || "");
+    const normalized = String(value ?? "");
+    this.attributes.set(key, normalized);
+    if (key === "id") {
+      this.id = normalized;
+    } else if (key === "class") {
+      this.classList.setFromString(normalized);
+      this.className = this.classList.toString();
+    } else if (key.startsWith("data-")) {
+      const datasetKey = key
+        .slice(5)
+        .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      this.dataset[datasetKey] = normalized;
+    }
+  }
+
+  getAttribute(name) {
+    const key = String(name || "");
+    if (this.attributes.has(key)) return this.attributes.get(key);
+    if (key === "id") return this.id || null;
+    if (key === "class") return this.className || null;
+    if (key.startsWith("data-")) {
+      const datasetKey = key
+        .slice(5)
+        .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      return this.dataset[datasetKey] ?? null;
+    }
+    return null;
+  }
+
+  appendChild(child) {
+    if (!child) return child;
+    if (child.parentElement) {
+      child.parentElement.removeChild(child);
+    }
+    child.parentElement = this;
+    child.ownerDocument = this.ownerDocument;
+    this.children.push(child);
+    this.ownerDocument?._notifyMutation({ type: "childList", target: this, addedNodes: [child] });
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) {
+      this.children.splice(index, 1);
+      child.parentElement = null;
+      this.ownerDocument?._notifyMutation({ type: "childList", target: this, removedNodes: [child] });
+    }
+    return child;
+  }
+
+  remove() {
+    this.parentElement?.removeChild(this);
+  }
+
+  addEventListener(type, handler) {
+    const key = String(type || "");
+    const handlers = this.eventListeners.get(key) || [];
+    handlers.push(handler);
+    this.eventListeners.set(key, handlers);
+  }
+
+  dispatchEvent(event = {}) {
+    const key = String(event.type || "");
+    const handlers = this.eventListeners.get(key) || [];
+    for (const handler of handlers) {
+      handler({
+        stopPropagation() {},
+        preventDefault() {},
+        ...event,
+        target: this,
+        currentTarget: this,
+      });
+    }
+  }
+
+  click() {
+    this.dispatchEvent({ type: "click" });
+  }
+
+  get isConnected() {
+    return Boolean(this.parentElement) || this === this.ownerDocument?.body;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+
+  querySelectorAll(selector) {
+    return this.ownerDocument?._querySelectorAll(selector, this) || [];
+  }
+}
+
+class FakeDocument {
+  constructor() {
+    this.body = new FakeElement("body", this);
+    this._observers = new Set();
+  }
+
+  createElement(tagName) {
+    return new FakeElement(tagName, this);
+  }
+
+  contains(node) {
+    return Boolean(this._flatten(this.body).includes(node));
+  }
+
+  getElementById(id) {
+    return this._flatten(this.body).find((node) => node.id === id) || null;
+  }
+
+  querySelector(selector) {
+    return this.body.querySelector(selector);
+  }
+
+  querySelectorAll(selector) {
+    return this.body.querySelectorAll(selector);
+  }
+
+  _flatten(root) {
+    const nodes = [];
+    const visit = (node) => {
+      nodes.push(node);
+      for (const child of node.children) visit(child);
+    };
+    visit(root);
+    return nodes;
+  }
+
+  _matchesSimple(node, selector) {
+    if (!selector) return false;
+    if (selector.startsWith("#")) {
+      return node.id === selector.slice(1);
+    }
+    const attrMatches = [...selector.matchAll(/\[([^=\]]+)="([^\]]*)"\]/g)];
+    const attrless = selector.replace(/\[[^\]]+\]/g, "");
+    const classMatches = [...attrless.matchAll(/\.([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+    const tagMatch = attrless.match(/^[A-Za-z][A-Za-z0-9_-]*/);
+    if (tagMatch && node.tagName.toLowerCase() !== tagMatch[0].toLowerCase()) return false;
+    for (const className of classMatches) {
+      if (!node.classList.contains(className)) return false;
+    }
+    for (const [, rawName, expected] of attrMatches) {
+      const actual = node.getAttribute(rawName);
+      if (String(actual ?? "") !== expected) return false;
+    }
+    return true;
+  }
+
+  _matchesSelectorChain(node, segments) {
+    if (!segments.length) return false;
+    if (!this._matchesSimple(node, segments[segments.length - 1])) return false;
+    let current = node.parentElement;
+    for (let index = segments.length - 2; index >= 0; index--) {
+      while (current && !this._matchesSimple(current, segments[index])) {
+        current = current.parentElement;
+      }
+      if (!current) return false;
+      current = current.parentElement;
+    }
+    return true;
+  }
+
+  _querySelectorAll(selector, scopeRoot) {
+    const segments = String(selector || "").trim().split(/\s+/).filter(Boolean);
+    const nodes = this._flatten(scopeRoot);
+    return nodes.filter((node) => node !== scopeRoot && this._matchesSelectorChain(node, segments));
+  }
+
+  _registerObserver(observer) {
+    this._observers.add(observer);
+  }
+
+  _unregisterObserver(observer) {
+    this._observers.delete(observer);
+  }
+
+  _notifyMutation(record) {
+    for (const observer of this._observers) {
+      observer._notify(record);
+    }
+  }
+}
+
+class FakeMutationObserver {
+  constructor(callback, documentRef) {
+    this.callback = callback;
+    this.documentRef = documentRef;
+    this.active = false;
+  }
+
+  observe() {
+    this.active = true;
+    this.documentRef._registerObserver(this);
+  }
+
+  disconnect() {
+    this.active = false;
+    this.documentRef._unregisterObserver(this);
+  }
+
+  _notify(record) {
+    if (!this.active) return;
+    queueMicrotask(() => {
+      if (this.active) this.callback([record]);
+    });
+  }
+}
+
+function createDomHarness(chat) {
+  const document = new FakeDocument();
+  const chatRoot = document.createElement("div");
+  chatRoot.setAttribute("id", "chat");
+  document.body.appendChild(chatRoot);
+  const observerClass = class extends FakeMutationObserver {
+    constructor(callback) {
+      super(callback, document);
+    }
+  };
+  return { document, chatRoot, MutationObserver: observerClass, chat };
+}
+
+function createMessageElement(document, messageIndex, { stableId = true, withMesBlock = true, isUser = true } = {}) {
+  const mes = document.createElement("div");
+  mes.classList.add("mes");
+  if (stableId) mes.setAttribute("mesid", String(messageIndex));
+  if (isUser) mes.classList.add("user_mes");
+  const block = document.createElement("div");
+  block.classList.add("mes_block");
+  const textWrap = document.createElement("div");
+  textWrap.classList.add("mes_text");
+  if (withMesBlock) {
+    block.appendChild(textWrap);
+    mes.appendChild(block);
+  } else {
+    mes.appendChild(textWrap);
+  }
+  return mes;
+}
+
+function appendLegacyBadge(document, messageElement) {
+  const badge = document.createElement("div");
+  badge.classList.add("st-bme-recall-badge");
+  messageElement.appendChild(badge);
+  return badge;
+}
+
+async function createRecallUiHarness({ chat, graph = { nodes: [], edges: [] } } = {}) {
+  const harness = createDomHarness(chat);
+  const previousDocument = globalThis.document;
+  globalThis.document = harness.document;
+  const source = await fs.readFile(indexPath, "utf8");
+  const start = source.indexOf("function debugWithThrottle(");
+  const end = source.indexOf("async function rerunRecallForMessage(");
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error("无法从 index.js 提取 Recall UI 逻辑");
+  }
+  const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+  const context = {
+    console,
+    Date,
+    JSON,
+    Math,
+    Map,
+    Set,
+    Array,
+    Number,
+    String,
+    Object,
+    RegExp,
+    parseInt: Number.parseInt,
+    setTimeout,
+    clearTimeout,
+    queueMicrotask,
+    document: harness.document,
+    currentGraph: graph,
+    persistedRecallUiRefreshTimer: null,
+    persistedRecallUiRefreshObserver: null,
+    persistedRecallUiRefreshSession: 0,
+    PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS: [0, 10, 20],
+    PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS: 0,
+    persistedRecallUiDiagnosticTimestamps: new Map(),
+    persistedRecallPersistDiagnosticTimestamps: new Map(),
+    getContext: () => ({ chat }),
+    getSettings: () => ({ panelTheme: "crimson" }),
+    triggerChatMetadataSave: () => "debounced",
+    estimateTokens: (text = "") => String(text || "").trim().split(/\s+/).filter(Boolean).length || 1,
+    toastr: {
+      success() {},
+      warning() {},
+      info() {},
+    },
+    openRecallSidebar() {},
+    readPersistedRecallFromUserMessage,
+    removePersistedRecallFromUserMessage,
+    writePersistedRecallToUserMessage,
+    buildPersistedRecallRecord,
+    markPersistedRecallManualEdit,
+    createRecallCardElement: null,
+    updateRecallCardData: null,
+    globalThis: null,
+    result: null,
+  };
+  context.globalThis = context;
+  const recallUiModule = await import("../recall-message-ui.js");
+  context.createRecallCardElement = recallUiModule.createRecallCardElement;
+  context.updateRecallCardData = recallUiModule.updateRecallCardData;
+  context.MutationObserver = harness.MutationObserver;
+  vm.createContext(context);
+  vm.runInContext(
+    `${snippet}\nresult = { refreshPersistedRecallMessageUi, schedulePersistedRecallMessageUiRefresh, cleanupPersistedRecallMessageUi, resolveMessageIndexFromElement, resolveRecallCardAnchor };`,
+    context,
+    { filename: indexPath },
+  );
+  return {
+    ...harness,
+    context,
+    api: context.result,
+    restoreGlobals() {
+      globalThis.document = previousDocument;
+    },
+  };
+}
+
+async function testRecallCardMountsOnStandardUserMessageDom() {
+  const chat = [
+    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    const summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "rendered");
+    assert.equal(summary.renderedCount, 1);
+    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
+    assert.equal(harness.chatRoot.querySelectorAll(".mes_block .bme-recall-card").length, 1);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardSkipsMountWithoutStableMessageIndex() {
+  const chat = [
+    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, { stableId: false, withMesBlock: true, isUser: true });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    const summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "waiting_dom");
+    assert.deepEqual(Array.from(summary.waitingMessageIndices), [0]);
+    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 0);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardDelayedDomInsertionEventuallyRenders() {
+  const chat = [
+    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  try {
+    harness.api.schedulePersistedRecallMessageUiRefresh();
+    await waitForTick();
+    const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+    harness.chatRoot.appendChild(messageElement);
+    await waitForTick();
+    await waitForTick();
+    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardDoesNotMountOnNonUserFloor() {
+  const chat = [
+    { is_user: false, mes: "assistant-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: false });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    const summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "skipped_non_user");
+    assert.deepEqual(Array.from(summary.skippedNonUserIndices), [0]);
+    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 0);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates() {
+  const chat = [
+    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1", "n2"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  const staleCard = harness.document.createElement("div");
+  staleCard.classList.add("bme-recall-card");
+  staleCard.dataset.messageIndex = "999";
+  staleCard._bmeDestroyRenderer = () => {
+    staleCard.dataset.destroyed = "1";
+  };
+  appendLegacyBadge(harness.document, messageElement);
+  messageElement.appendChild(staleCard);
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    harness.api.refreshPersistedRecallMessageUi();
+
+    assert.equal(harness.chatRoot.querySelectorAll(".st-bme-recall-badge").length, 0);
+    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
+    assert.equal(staleCard.dataset.destroyed, "1");
+  } finally {
+    harness.restoreGlobals();
+  }
 }
 
 function makeEvent(seq, title) {
@@ -1950,6 +2466,11 @@ await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
+await testRecallCardMountsOnStandardUserMessageDom();
+await testRecallCardSkipsMountWithoutStableMessageIndex();
+await testRecallCardDelayedDomInsertionEventuallyRenders();
+await testRecallCardDoesNotMountOnNonUserFloor();
+await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testRerollRejectsMissingRecoveryPoint();
