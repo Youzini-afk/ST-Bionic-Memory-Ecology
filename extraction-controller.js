@@ -365,3 +365,167 @@ export async function onManualExtractController(runtime) {
     runtime.refreshPanelLiveState();
   }
 }
+
+export async function onRerollController(runtime, { fromFloor } = {}) {
+  if (runtime.getIsExtracting?.()) {
+    runtime.toastr?.info?.("记忆提取正在进行中，请稍候");
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "busy",
+      affectedBatchCount: 0,
+      error: "记忆提取正在进行中",
+    };
+  }
+
+  if (
+    typeof runtime.ensureGraphMutationReady === "function" &&
+    !runtime.ensureGraphMutationReady("重新提取")
+  ) {
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: Number.isFinite(fromFloor) ? fromFloor : null,
+      effectiveFromFloor: null,
+      recoveryPath: runtime.getGraphPersistenceState?.()?.loadState || "graph-not-ready",
+      affectedBatchCount: 0,
+      error:
+        typeof runtime.getGraphMutationBlockReason === "function"
+          ? runtime.getGraphMutationBlockReason("重新提取")
+          : "重新提取已暂停：图谱尚未就绪。",
+    };
+  }
+
+  if (!runtime.getCurrentGraph?.()) {
+    runtime.toastr?.info?.("图谱为空，无需重 Roll");
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "empty-graph",
+      affectedBatchCount: 0,
+      error: "图谱为空",
+    };
+  }
+
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat) || chat.length === 0) {
+    runtime.toastr?.info?.("当前聊天为空");
+    return {
+      success: false,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: null,
+      effectiveFromFloor: null,
+      recoveryPath: "empty-chat",
+      affectedBatchCount: 0,
+      error: "当前聊天为空",
+    };
+  }
+
+  let targetFloor = Number.isFinite(fromFloor) ? fromFloor : null;
+  if (targetFloor === null) {
+    const assistantTurns = runtime.getAssistantTurns(chat);
+    if (assistantTurns.length === 0) {
+      runtime.toastr?.info?.("聊天中没有 AI 回复");
+      return {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: null,
+        effectiveFromFloor: null,
+        recoveryPath: "no-assistant-turn",
+        affectedBatchCount: 0,
+        error: "聊天中没有 AI 回复",
+      };
+    }
+    targetFloor = assistantTurns[assistantTurns.length - 1];
+  }
+
+  runtime.setRuntimeStatus(
+    "重新提取中",
+    Number.isFinite(targetFloor)
+      ? `准备从楼层 ${targetFloor} 开始回滚并重新提取`
+      : "准备回滚最新 AI 楼并重新提取",
+    "running",
+  );
+
+  const lastProcessed = runtime.getLastProcessedAssistantFloor();
+  const alreadyExtracted = targetFloor <= lastProcessed;
+
+  if (!alreadyExtracted) {
+    runtime.toastr?.info?.("该楼层尚未提取，直接执行提取…", "ST-BME 重 Roll", {
+      timeOut: 2000,
+    });
+    await runtime.onManualExtract();
+    return {
+      success: true,
+      rollbackPerformed: false,
+      extractionTriggered: true,
+      requestedFloor: targetFloor,
+      effectiveFromFloor: lastProcessed + 1,
+      recoveryPath: "direct-extract",
+      affectedBatchCount: 0,
+      extractionStatus: runtime.getLastExtractionStatusLevel?.() || "idle",
+      error: "",
+    };
+  }
+
+  runtime.console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
+  let rollbackResult;
+  try {
+    rollbackResult = await runtime.rollbackGraphForReroll(targetFloor, context);
+  } catch (e) {
+    if (runtime.isAbortError(e)) {
+      runtime.setRuntimeStatus(
+        "重新提取已取消",
+        e.message || "聊天已切换",
+        "warning",
+      );
+      return {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: targetFloor,
+        effectiveFromFloor: null,
+        recoveryPath: "aborted",
+        affectedBatchCount: 0,
+        error: e.message || "聊天已切换，重新提取已取消",
+      };
+    }
+    throw e;
+  }
+
+  if (!rollbackResult?.success) {
+    runtime.setRuntimeStatus(
+      "重新提取失败",
+      rollbackResult.error || "回滚失败",
+      "error",
+    );
+    runtime.toastr?.error?.(rollbackResult.error, "ST-BME 重 Roll");
+    return rollbackResult;
+  }
+
+  const rerollDesc =
+    rollbackResult.effectiveFromFloor !== targetFloor
+      ? `已按批次边界回滚到楼层 ${rollbackResult.effectiveFromFloor} 开始重新提取…`
+      : `已回滚到楼层 ${targetFloor} 开始重新提取…`;
+  runtime.toastr?.info?.(rerollDesc, "ST-BME 重 Roll", {
+    timeOut: 2500,
+  });
+
+  await runtime.onManualExtract();
+  runtime.refreshPanelLiveState();
+  return {
+    ...rollbackResult,
+    extractionTriggered: true,
+    extractionStatus: runtime.getLastExtractionStatusLevel?.() || "idle",
+  };
+}

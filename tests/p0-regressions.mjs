@@ -57,6 +57,7 @@ import {
   onBeforeCombinePromptsController,
   onGenerationAfterCommandsController,
 } from "../event-binding.js";
+import { onRerollController } from "../extraction-controller.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -461,7 +462,17 @@ function createRerollHarness() {
         context.onManualExtractCalls += 1;
         context.lastExtractionStatus = { level: context.manualExtractLevel };
       },
+      ensureGraphMutationReady() {
+        return true;
+      },
+      getGraphMutationBlockReason() {
+        return "graph-not-ready";
+      },
+      graphPersistenceState: {
+        loadState: "loaded",
+      },
       createUiStatus,
+      onRerollController,
       isAbortError: (e) => e?.name === "AbortError",
       assertRecoveryChatStillActive() {
         // no-op in test
