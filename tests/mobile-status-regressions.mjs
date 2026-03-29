@@ -69,6 +69,13 @@ function createBaseStatusContext() {
   };
 }
 
+function testIndexDefinesLastProcessedAssistantFloorHelper() {
+  assert.match(
+    indexSource,
+    /function\s+getLastProcessedAssistantFloor\s*\(/,
+  );
+}
+
 async function testVectorSyncTerminalStateUpdatesRuntime() {
   const context = {
     ...createBaseStatusContext(),
@@ -191,6 +198,7 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
   const chat = [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }];
   const context = {
     ...createBaseStatusContext(),
+    __confirmHost: true,
     currentGraph: {
       vectorIndexState: {
         lastWarning: "",
@@ -198,6 +206,7 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
       batchJournal: [],
     },
     confirm() {
+      assert.equal(this?.__confirmHost, true);
       return true;
     },
     ensureGraphMutationReady() {
@@ -257,6 +266,7 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
   assert.equal(context.runtimeStatus.level, "success");
 }
 
+testIndexDefinesLastProcessedAssistantFloorHelper();
 await testVectorSyncTerminalStateUpdatesRuntime();
 await testManualExtractNoBatchesDoesNotStayRunning();
 await testManualRebuildSetsTerminalRuntimeStatus();

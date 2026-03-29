@@ -1137,6 +1137,35 @@ function buildMessageRecallBadgeTitle(messageIndex, record) {
   return lines.join("\n");
 }
 
+function createMessageRecallBadgeElement(messageIndex, record) {
+  const badge = document.createElement("button");
+  badge.type = "button";
+  badge.className = "st-bme-recall-badge";
+  badge.textContent = "🧠";
+  badge.dataset.messageIndex = String(messageIndex);
+  badge.style.marginInlineStart = "6px";
+  badge.style.padding = "0 4px";
+  badge.style.borderRadius = "10px";
+  badge.style.border = "1px solid var(--SmartThemeBorderColor, #666)";
+  badge.style.background = "var(--SmartThemeQuoteColor, rgba(120, 120, 120, 0.18))";
+  badge.style.cursor = "pointer";
+  badge.style.fontSize = "12px";
+  badge.style.lineHeight = "1.4";
+
+  badge.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const indexFromDataset = Number.parseInt(badge.dataset.messageIndex, 10);
+    void onMessageRecallBadgeClick(
+      Number.isFinite(indexFromDataset) ? indexFromDataset : messageIndex,
+    );
+  });
+
+  badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
+  badge.dataset.updatedAt = String(record?.updatedAt || "");
+  return badge;
+}
+
 function refreshPersistedRecallMessageUi() {
   const context = getContext();
   const chat = context?.chat;
@@ -1145,58 +1174,57 @@ function refreshPersistedRecallMessageUi() {
   const chatRoot = document.getElementById("chat");
   if (!chatRoot) return;
 
-  chatRoot
-    .querySelectorAll?.(".st-bme-recall-badge")
-    ?.forEach?.((badge) => badge.remove());
-
   const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
   for (let fallbackIndex = 0; fallbackIndex < messageElements.length; fallbackIndex++) {
     const messageElement = messageElements[fallbackIndex];
     const messageIndex = resolveMessageIndexFromElement(messageElement, fallbackIndex);
     if (!Number.isFinite(messageIndex)) continue;
 
+    const existingBadges = Array.from(
+      messageElement.querySelectorAll?.(".st-bme-recall-badge") || [],
+    );
+    const existingBadge = existingBadges[0] || null;
+    for (let index = 1; index < existingBadges.length; index++) {
+      existingBadges[index].remove();
+    }
+
     const message = chat[messageIndex];
-    if (!message?.is_user) continue;
+    if (!message?.is_user) {
+      existingBadge?.remove();
+      continue;
+    }
 
     const record = readPersistedRecallFromUserMessage(chat, messageIndex);
-    if (!record?.injectionText) continue;
+    if (!record?.injectionText) {
+      existingBadge?.remove();
+      continue;
+    }
 
-    const badge = document.createElement("button");
-    badge.type = "button";
-    badge.className = "st-bme-recall-badge";
-    badge.textContent = "🧠";
-    badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
+    const badge = existingBadge || createMessageRecallBadgeElement(messageIndex, record);
     badge.dataset.messageIndex = String(messageIndex);
-    badge.style.marginInlineStart = "6px";
-    badge.style.padding = "0 4px";
-    badge.style.borderRadius = "10px";
-    badge.style.border = "1px solid var(--SmartThemeBorderColor, #666)";
-    badge.style.background = "var(--SmartThemeQuoteColor, rgba(120, 120, 120, 0.18))";
-    badge.style.cursor = "pointer";
-    badge.style.fontSize = "12px";
-    badge.style.lineHeight = "1.4";
+    const nextUpdatedAt = String(record.updatedAt || "");
+    if (badge.dataset.updatedAt !== nextUpdatedAt) {
+      badge.dataset.updatedAt = nextUpdatedAt;
+      badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
+    }
 
-    badge.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void onMessageRecallBadgeClick(messageIndex);
-    });
-
-    const anchor =
-      messageElement.querySelector(".mes_buttons") ||
-      messageElement.querySelector(".mes_title") ||
-      messageElement.querySelector(".mes_header") ||
-      messageElement;
-    anchor.appendChild(badge);
+    if (!existingBadge) {
+      const anchor =
+        messageElement.querySelector?.(".mes_buttons") ||
+        messageElement.querySelector?.(".mes_title") ||
+        messageElement.querySelector?.(".mes_header") ||
+        messageElement;
+      anchor.appendChild(badge);
+    }
   }
 }
 
-function schedulePersistedRecallMessageUiRefresh(delayMs = 16) {
+function schedulePersistedRecallMessageUiRefresh(delayMs = 120) {
   clearTimeout(persistedRecallUiRefreshTimer);
   persistedRecallUiRefreshTimer = setTimeout(() => {
     persistedRecallUiRefreshTimer = null;
     refreshPersistedRecallMessageUi();
-  }, Math.max(0, Number.parseInt(delayMs, 10) || 0));
+  }, Math.max(16, Number.parseInt(delayMs, 10) || 120));
 }
 
 function showMessageRecallDetail(messageIndex, record) {
@@ -2307,6 +2335,17 @@ function restoreRuntimeUiState(snapshot = {}) {
     updateGraphPersistenceState(snapshot.graphPersistenceState);
   }
   refreshPanelLiveState();
+}
+
+function getLastProcessedAssistantFloor() {
+  const historyFloor = Number(currentGraph?.historyState?.lastProcessedAssistantFloor);
+  if (Number.isFinite(historyFloor)) {
+    return historyFloor;
+  }
+
+  const legacySeq = Number(currentGraph?.lastProcessedSeq);
+  if (Number.isFinite(legacySeq)) return legacySeq;
+  return -1;
 }
 
 async function recordGraphMutation({
@@ -4898,7 +4937,12 @@ async function onRebuild() {
     clearHistoryDirty,
     clearInjectionState,
     cloneGraphSnapshot,
-    confirm,
+    confirm: (message) => {
+      if (typeof globalThis.confirm === "function") {
+        return globalThis.confirm(message);
+      }
+      return false;
+    },
     createEmptyGraph,
     ensureGraphMutationReady,
     getContext,
