@@ -57,9 +57,17 @@ import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
 import { getNodeDisplayName } from "./node-labels.js";
 import { showManagedBmeNotice } from "./notice.js";
 import {
+  installSendIntentHooksController,
+  registerBeforeCombinePromptsController,
+  registerCoreEventHooksController,
+  registerGenerationAfterCommandsController,
+  scheduleSendIntentHookRetryController,
+} from "./event-binding.js";
+import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
+import { initializePanelBridgeController } from "./panel-bridge.js";
 import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { retrieve } from "./retriever.js";
 import {
@@ -914,86 +922,57 @@ function getSendTextareaValue() {
 }
 
 function scheduleSendIntentHookRetry(delayMs = 400) {
-  clearTimeout(sendIntentHookRetryTimer);
-  sendIntentHookRetryTimer = setTimeout(() => {
-    sendIntentHookRetryTimer = null;
-    installSendIntentHooks();
-  }, delayMs);
+  return scheduleSendIntentHookRetryController(
+    {
+      clearTimeout,
+      getSendIntentHookRetryTimer: () => sendIntentHookRetryTimer,
+      installSendIntentHooks,
+      setSendIntentHookRetryTimer: (timer) => {
+        sendIntentHookRetryTimer = timer;
+      },
+      setTimeout,
+    },
+    delayMs,
+  );
 }
 
 function registerBeforeCombinePrompts(listener) {
-  const makeFirst = globalThis.eventMakeFirst;
-  if (typeof makeFirst === "function") {
-    return makeFirst(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, listener);
-  }
-
-  console.warn("[ST-BME] eventMakeFirst 不可用，回退到普通事件注册");
-  eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, listener);
-  return null;
+  return registerBeforeCombinePromptsController(
+    {
+      console,
+      eventSource,
+      eventTypes: event_types,
+      getEventMakeFirst: () => globalThis.eventMakeFirst,
+    },
+    listener,
+  );
 }
 
 function registerGenerationAfterCommands(listener) {
-  const makeFirst = globalThis.eventMakeFirst;
-  if (typeof makeFirst === "function") {
-    return makeFirst(event_types.GENERATION_AFTER_COMMANDS, listener);
-  }
-
-  console.warn(
-    "[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册",
+  return registerGenerationAfterCommandsController(
+    {
+      console,
+      eventSource,
+      eventTypes: event_types,
+      getEventMakeFirst: () => globalThis.eventMakeFirst,
+    },
+    listener,
   );
-  eventSource.on(event_types.GENERATION_AFTER_COMMANDS, listener);
-  return null;
 }
 
 function installSendIntentHooks() {
-  for (const cleanup of sendIntentHookCleanup.splice(
-    0,
-    sendIntentHookCleanup.length,
-  )) {
-    try {
-      cleanup();
-    } catch (error) {
-      console.warn("[ST-BME] 清理发送意图钩子失败:", error);
-    }
-  }
-
-  const sendButton = document.getElementById("send_but");
-  const sendTextarea = document.getElementById("send_textarea");
-
-  if (sendButton) {
-    const captureSendIntent = () => {
-      recordRecallSendIntent(getSendTextareaValue(), "send-button");
-    };
-
-    sendButton.addEventListener("click", captureSendIntent, true);
-    sendButton.addEventListener("pointerup", captureSendIntent, true);
-    sendButton.addEventListener("touchend", captureSendIntent, true);
-    sendIntentHookCleanup.push(() => {
-      sendButton.removeEventListener("click", captureSendIntent, true);
-      sendButton.removeEventListener("pointerup", captureSendIntent, true);
-      sendButton.removeEventListener("touchend", captureSendIntent, true);
-    });
-  }
-
-  if (sendTextarea) {
-    const captureEnterIntent = (event) => {
-      if (
-        (event.key === "Enter" || event.key === "NumpadEnter") &&
-        !event.shiftKey
-      ) {
-        recordRecallSendIntent(getSendTextareaValue(), "textarea-enter");
-      }
-    };
-
-    sendTextarea.addEventListener("keydown", captureEnterIntent, true);
-    sendIntentHookCleanup.push(() => {
-      sendTextarea.removeEventListener("keydown", captureEnterIntent, true);
-    });
-  }
-
-  if (!sendButton || !sendTextarea) {
-    scheduleSendIntentHookRetry();
-  }
+  return installSendIntentHooksController({
+    console,
+    consumeSendIntentHookCleanup: () =>
+      sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length),
+    document,
+    getSendTextareaValue,
+    pushSendIntentHookCleanup: (cleanup) => {
+      sendIntentHookCleanup.push(cleanup);
+    },
+    recordRecallSendIntent,
+    scheduleSendIntentHookRetry,
+  });
 }
 
 // ==================== 设置管理 ====================
@@ -5146,22 +5125,23 @@ async function onReembedDirect() {
   );
 
   // 注册事件钩子
-  eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-  if (event_types.CHAT_LOADED) {
-    eventSource.on(event_types.CHAT_LOADED, onChatLoaded);
-  }
-  if (event_types.MESSAGE_SENT) {
-    eventSource.on(event_types.MESSAGE_SENT, onMessageSent);
-  }
-  registerGenerationAfterCommands(onGenerationAfterCommands);
-  registerBeforeCombinePrompts(onBeforeCombinePrompts);
-  eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
-  eventSource.on(event_types.MESSAGE_DELETED, onMessageDeleted);
-  eventSource.on(event_types.MESSAGE_EDITED, onMessageEdited);
-  eventSource.on(event_types.MESSAGE_SWIPED, onMessageSwiped);
-  if (event_types.MESSAGE_UPDATED) {
-    eventSource.on(event_types.MESSAGE_UPDATED, onMessageEdited);
-  }
+  registerCoreEventHooksController({
+    eventSource,
+    eventTypes: event_types,
+    handlers: {
+      onBeforeCombinePrompts,
+      onChatChanged,
+      onChatLoaded,
+      onGenerationAfterCommands,
+      onMessageDeleted,
+      onMessageEdited,
+      onMessageReceived,
+      onMessageSent,
+      onMessageSwiped,
+    },
+    registerBeforeCombinePrompts,
+    registerGenerationAfterCommands,
+  });
 
   // 加载当前聊天的图谱
   clearPendingGraphLoadRetry();
@@ -5173,89 +5153,57 @@ async function onReembedDirect() {
 
   // ==================== 操控面板初始化 ====================
 
-  try {
-    // 动态加载面板模块
-    _panelModule = await import("./panel.js");
-    _themesModule = await import("./themes.js");
-
-    // 应用主题
-    const settings = getSettings();
-    _themesModule.applyTheme(settings.panelTheme || "crimson");
-
-    // 初始化操控面板
-    await _panelModule.initPanel({
-      getGraph: () => currentGraph,
-      getSettings: () => getSettings(),
-      getLastExtract: () => lastExtractedItems,
-      getLastRecall: () => lastRecalledItems,
-      getRuntimeStatus: () => getPanelRuntimeStatus(),
-      getLastExtractionStatus: () => lastExtractionStatus,
-      getLastVectorStatus: () => lastVectorStatus,
-      getLastRecallStatus: () => lastRecallStatus,
-      getLastBatchStatus: () =>
-        currentGraph?.historyState?.lastBatchStatus || null,
-      getLastInjection: () => lastInjectionContent,
-      getRuntimeDebugSnapshot: (options = {}) =>
-        getPanelRuntimeDebugSnapshot(options),
-      getGraphPersistenceState: () => getGraphPersistenceLiveState(),
-      updateSettings: (patch) => {
-        const settings = updateModuleSettings(patch);
-        if (Object.prototype.hasOwnProperty.call(patch, "panelTheme")) {
-          _themesModule?.applyTheme(settings.panelTheme || "crimson");
-          _panelModule?.updatePanelTheme(settings.panelTheme || "crimson");
-        }
-        return settings;
-      },
-      actions: {
-        syncGraphLoad: () =>
-          syncGraphLoadFromLiveContext({
-            source: "panel-open-sync",
-          }),
-        extract: onManualExtract,
-        compress: onManualCompress,
-        sleep: onManualSleep,
-        synopsis: onManualSynopsis,
-        export: onExportGraph,
-        import: onImportGraph,
-        rebuild: onRebuild,
-        evolve: onManualEvolve,
-        testEmbedding: onTestEmbedding,
-        testMemoryLLM: onTestMemoryLLM,
-        fetchMemoryLLMModels: onFetchMemoryLLMModels,
-        fetchEmbeddingModels: onFetchEmbeddingModels,
-        rebuildVectorIndex: () => onRebuildVectorIndex(),
-        rebuildVectorRange: (range) => onRebuildVectorIndex(range),
-        reembedDirect: onReembedDirect,
-        reroll: onReroll,
-      },
-    });
-
-    // 注入三条杠 Options 菜单按钮
-    if (!document.getElementById("option_st_bme_panel")) {
-      const $menuItem = $(`
-        <a id="option_st_bme_panel">
-          <i class="fa-lg fa-solid fa-brain"></i>
-          <span>记忆图谱</span>
-        </a>
-      `).on("click", () => {
-        _panelModule?.openPanel();
-        $("#options").hide();
-      });
-
-      const $optionsContent = $("#options .options-content");
-      const $anchor = $("#option_toggle_logprobs");
-
-      if ($anchor.length > 0) {
-        $anchor.after($menuItem);
-      } else if ($optionsContent.length > 0) {
-        $optionsContent.append($menuItem);
-      }
-    }
-
-    console.log("[ST-BME] 操控面板初始化完成");
-  } catch (panelError) {
-    console.error("[ST-BME] 操控面板加载失败（核心功能不受影响）:", panelError);
-  }
+  await initializePanelBridgeController({
+    $,
+    actions: {
+      syncGraphLoad: () =>
+        syncGraphLoadFromLiveContext({
+          source: "panel-open-sync",
+        }),
+      extract: onManualExtract,
+      compress: onManualCompress,
+      sleep: onManualSleep,
+      synopsis: onManualSynopsis,
+      export: onExportGraph,
+      import: onImportGraph,
+      rebuild: onRebuild,
+      evolve: onManualEvolve,
+      testEmbedding: onTestEmbedding,
+      testMemoryLLM: onTestMemoryLLM,
+      fetchMemoryLLMModels: onFetchMemoryLLMModels,
+      fetchEmbeddingModels: onFetchEmbeddingModels,
+      rebuildVectorIndex: () => onRebuildVectorIndex(),
+      rebuildVectorRange: (range) => onRebuildVectorIndex(range),
+      reembedDirect: onReembedDirect,
+      reroll: onReroll,
+    },
+    console,
+    document,
+    getGraph: () => currentGraph,
+    getGraphPersistenceState: () => getGraphPersistenceLiveState(),
+    getLastBatchStatus: () => currentGraph?.historyState?.lastBatchStatus || null,
+    getLastExtract: () => lastExtractedItems,
+    getLastExtractionStatus: () => lastExtractionStatus,
+    getLastInjection: () => lastInjectionContent,
+    getLastRecall: () => lastRecalledItems,
+    getLastRecallStatus: () => lastRecallStatus,
+    getLastVectorStatus: () => lastVectorStatus,
+    getPanelModule: () => _panelModule,
+    getRuntimeDebugSnapshot: (options = {}) =>
+      getPanelRuntimeDebugSnapshot(options),
+    getRuntimeStatus: () => getPanelRuntimeStatus(),
+    getSettings,
+    getThemesModule: () => _themesModule,
+    importPanelModule: async () => await import("./panel.js"),
+    importThemesModule: async () => await import("./themes.js"),
+    setPanelModule: (module) => {
+      _panelModule = module;
+    },
+    setThemesModule: (module) => {
+      _themesModule = module;
+    },
+    updateSettings: updateModuleSettings,
+  });
 
   console.log("[ST-BME] 初始化完成");
 })();
