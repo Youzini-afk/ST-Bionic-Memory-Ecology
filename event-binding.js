@@ -107,3 +107,63 @@ export function registerCoreEventHooksController(runtime) {
     eventSource.on(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
   }
 }
+
+export function onChatChangedController(runtime) {
+  runtime.clearPendingHistoryMutationChecks();
+  runtime.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
+  runtime.setPendingHistoryRecoveryTimer(null);
+  runtime.setPendingHistoryRecoveryTrigger("");
+  runtime.clearPendingGraphLoadRetry();
+  runtime.setSkipBeforeCombineRecallUntil(0);
+  runtime.setLastPreGenerationRecallKey("");
+  runtime.setLastPreGenerationRecallAt(0);
+  runtime.clearGenerationRecallTransactionsForChat("", { clearAll: true });
+  runtime.abortAllRunningStages();
+  runtime.dismissAllStageNotices();
+  runtime.syncGraphLoadFromLiveContext({
+    source: "chat-changed",
+    force: true,
+  });
+  runtime.clearInjectionState();
+  runtime.clearRecallInputTracking();
+  runtime.installSendIntentHooks();
+}
+
+export function onChatLoadedController(runtime) {
+  runtime.syncGraphLoadFromLiveContext({
+    source: "chat-loaded",
+  });
+}
+
+export function onMessageSentController(runtime, messageId) {
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  const message =
+    Array.isArray(chat) && Number.isFinite(messageId) ? chat[messageId] : null;
+
+  if (!message?.is_user) return;
+  runtime.recordRecallSentUserMessage(messageId, message.mes || "");
+}
+
+export function onMessageDeletedController(
+  runtime,
+  chatLengthOrMessageId,
+  meta = null,
+) {
+  runtime.invalidateRecallAfterHistoryMutation("消息已删除");
+  runtime.scheduleHistoryMutationRecheck(
+    "message-deleted",
+    chatLengthOrMessageId,
+    meta,
+  );
+}
+
+export function onMessageEditedController(runtime, messageId, meta = null) {
+  runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
+  runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
+}
+
+export function onMessageSwipedController(runtime, messageId, meta = null) {
+  runtime.invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
+  runtime.scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+}

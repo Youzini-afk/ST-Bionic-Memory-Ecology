@@ -58,6 +58,12 @@ import { getNodeDisplayName } from "./node-labels.js";
 import { showManagedBmeNotice } from "./notice.js";
 import {
   installSendIntentHooksController,
+  onChatChangedController,
+  onChatLoadedController,
+  onMessageDeletedController,
+  onMessageEditedController,
+  onMessageSentController,
+  onMessageSwipedController,
   registerBeforeCombinePromptsController,
   registerCoreEventHooksController,
   registerGenerationAfterCommandsController,
@@ -4323,59 +4329,83 @@ async function runRecall(options = {}) {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
-  clearPendingHistoryMutationChecks();
-  clearTimeout(pendingHistoryRecoveryTimer);
-  pendingHistoryRecoveryTimer = null;
-  pendingHistoryRecoveryTrigger = "";
-  clearPendingGraphLoadRetry();
-  skipBeforeCombineRecallUntil = 0;
-  lastPreGenerationRecallKey = "";
-  lastPreGenerationRecallAt = 0;
-  clearGenerationRecallTransactionsForChat("", { clearAll: true });
-  abortAllRunningStages();
-  dismissAllStageNotices();
-  syncGraphLoadFromLiveContext({
-    source: "chat-changed",
-    force: true,
+  return onChatChangedController({
+    abortAllRunningStages,
+    clearGenerationRecallTransactionsForChat,
+    clearInjectionState,
+    clearPendingGraphLoadRetry,
+    clearPendingHistoryMutationChecks,
+    clearRecallInputTracking,
+    clearTimeout,
+    dismissAllStageNotices,
+    getPendingHistoryRecoveryTimer: () => pendingHistoryRecoveryTimer,
+    installSendIntentHooks,
+    setLastPreGenerationRecallAt: (value) => {
+      lastPreGenerationRecallAt = value;
+    },
+    setLastPreGenerationRecallKey: (value) => {
+      lastPreGenerationRecallKey = value;
+    },
+    setPendingHistoryRecoveryTimer: (value) => {
+      pendingHistoryRecoveryTimer = value;
+    },
+    setPendingHistoryRecoveryTrigger: (value) => {
+      pendingHistoryRecoveryTrigger = value;
+    },
+    setSkipBeforeCombineRecallUntil: (value) => {
+      skipBeforeCombineRecallUntil = value;
+    },
+    syncGraphLoadFromLiveContext,
   });
-  clearInjectionState();
-  clearRecallInputTracking();
-  installSendIntentHooks();
 }
 
 function onChatLoaded() {
-  syncGraphLoadFromLiveContext({
-    source: "chat-loaded",
+  return onChatLoadedController({
+    syncGraphLoadFromLiveContext,
   });
 }
 
 function onMessageSent(messageId) {
-  const context = getContext();
-  const chat = context?.chat;
-  const message =
-    Array.isArray(chat) && Number.isFinite(messageId) ? chat[messageId] : null;
-
-  if (!message?.is_user) return;
-  recordRecallSentUserMessage(messageId, message.mes || "");
+  return onMessageSentController(
+    {
+      getContext,
+      recordRecallSentUserMessage,
+    },
+    messageId,
+  );
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
-  invalidateRecallAfterHistoryMutation("消息已删除");
-  scheduleHistoryMutationRecheck(
-    "message-deleted",
+  return onMessageDeletedController(
+    {
+      invalidateRecallAfterHistoryMutation,
+      scheduleHistoryMutationRecheck,
+    },
     chatLengthOrMessageId,
     meta,
   );
 }
 
 function onMessageEdited(messageId, meta = null) {
-  invalidateRecallAfterHistoryMutation("消息已编辑");
-  scheduleHistoryMutationRecheck("message-edited", messageId, meta);
+  return onMessageEditedController(
+    {
+      invalidateRecallAfterHistoryMutation,
+      scheduleHistoryMutationRecheck,
+    },
+    messageId,
+    meta,
+  );
 }
 
 function onMessageSwiped(messageId, meta = null) {
-  invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
-  scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+  return onMessageSwipedController(
+    {
+      invalidateRecallAfterHistoryMutation,
+      scheduleHistoryMutationRecheck,
+    },
+    messageId,
+    meta,
+  );
 }
 
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
