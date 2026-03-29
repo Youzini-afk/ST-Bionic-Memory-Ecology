@@ -76,6 +76,13 @@ import {
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
 import {
+  onFetchEmbeddingModelsController,
+  onFetchMemoryLLMModelsController,
+  onTestEmbeddingController,
+  onTestMemoryLLMController,
+  onViewGraphController,
+} from "./ui-actions-controller.js";
+import {
   createNoticePanelActionController,
   initializePanelBridgeController,
   refreshPanelLiveStateController,
@@ -4474,24 +4481,11 @@ function onMessageReceived() {
 // ==================== UI 操作 ====================
 
 async function onViewGraph() {
-  if (!currentGraph) {
-    toastr.warning("当前没有加载的图谱");
-    return;
-  }
-
-  const stats = getGraphStats(currentGraph);
-  const statsText = [
-    `节点: ${stats.activeNodes} 活跃 / ${stats.archivedNodes} 归档`,
-    `边: ${stats.totalEdges}`,
-    `最后处理楼层: ${stats.lastProcessedSeq}`,
-    `类型分布: ${
-      Object.entries(stats.typeCounts)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(", ") || "(空)"
-    }`,
-  ].join("\n");
-
-  toastr.info(statsText, "ST-BME 图谱状态", { timeOut: 10000 });
+  return await onViewGraphController({
+    getCurrentGraph: () => currentGraph,
+    getGraphStats,
+    toastr,
+  });
 }
 
 async function onRebuild() {
@@ -4730,69 +4724,39 @@ async function onViewLastInjection() {
 }
 
 async function onTestEmbedding() {
-  const config = getEmbeddingConfig();
-  const validation = validateVectorConfig(config);
-  if (!validation.valid) {
-    toastr.warning(validation.error);
-    return;
-  }
-
-  toastr.info("正在测试 Embedding API 连通性...");
-  const result = await testVectorConnection(config, getCurrentChatId());
-
-  if (result.success) {
-    toastr.success(`连接成功！向量维度: ${result.dimensions}`);
-  } else {
-    toastr.error(`连接失败: ${result.error}`);
-  }
+  return await onTestEmbeddingController({
+    getCurrentChatId,
+    getEmbeddingConfig,
+    testVectorConnection,
+    toastr,
+    validateVectorConfig,
+  });
 }
 
 async function onTestMemoryLLM() {
-  toastr.info("正在测试记忆 LLM 连通性...");
-  const result = await testLLMConnection();
-
-  if (result.success) {
-    toastr.success(`连接成功！模式: ${result.mode}`);
-  } else {
-    toastr.error(`连接失败: ${result.error}`);
-  }
+  return await onTestMemoryLLMController({
+    testLLMConnection,
+    toastr,
+  });
 }
 
 async function onFetchMemoryLLMModels() {
-  toastr.info("正在拉取记忆 LLM 模型列表...");
-  const result = await fetchMemoryLLMModels();
-
-  if (result.success) {
-    toastr.success(`已拉取 ${result.models.length} 个记忆 LLM 模型`);
-  } else {
-    toastr.error(`拉取失败: ${result.error}`);
-  }
-
-  return result;
+  return await onFetchMemoryLLMModelsController({
+    fetchMemoryLLMModels,
+    toastr,
+  });
 }
 
 async function onFetchEmbeddingModels(mode = null) {
-  const config = getEmbeddingConfig(mode);
-  const targetMode = mode || config?.mode || "direct";
-  const validation = validateVectorConfig(config);
-  if (!validation.valid) {
-    toastr.warning(validation.error);
-    return { success: false, models: [], error: validation.error };
-  }
-
-  toastr.info("正在拉取 Embedding 模型列表...");
-  const result = await fetchAvailableEmbeddingModels(config);
-
-  if (result.success) {
-    const modeLabel = targetMode === "backend" ? "后端" : "直连";
-    toastr.success(
-      `已拉取 ${result.models.length} 个${modeLabel} Embedding 模型`,
-    );
-  } else {
-    toastr.error(`拉取失败: ${result.error}`);
-  }
-
-  return result;
+  return await onFetchEmbeddingModelsController(
+    {
+      fetchAvailableEmbeddingModels,
+      getEmbeddingConfig,
+      toastr,
+      validateVectorConfig,
+    },
+    mode,
+  );
 }
 
 async function onManualExtract() {
