@@ -220,3 +220,197 @@ export function applyRecallInjectionController(
 
   return { injectionText, retrievalMeta, llmMeta };
 }
+
+export async function runRecallController(runtime, options = {}) {
+  if (runtime.getIsRecalling()) {
+    runtime.abortRecallStageWithReason("旧召回已取消，正在启动新的召回");
+    const settle = await runtime.waitForActiveRecallToSettle();
+    if (!settle.settled && runtime.getIsRecalling()) {
+      runtime.setLastRecallStatus(
+        "召回忙",
+        "上一轮召回仍在清理，请稍后重试",
+        "warning",
+        {
+          syncRuntime: true,
+        },
+      );
+      return runtime.createRecallRunResult("skipped", {
+        reason: "上一轮召回仍在清理",
+      });
+    }
+  }
+
+  if (!runtime.getCurrentGraph()) {
+    return runtime.createRecallRunResult("skipped", {
+      reason: "当前无图谱",
+    });
+  }
+
+  const settings = runtime.getSettings();
+  if (!settings.enabled || !settings.recallEnabled) {
+    return runtime.createRecallRunResult("skipped", {
+      reason: "召回功能未启用",
+    });
+  }
+  if (!runtime.isGraphReadable()) {
+    const reason = runtime.getGraphMutationBlockReason("召回");
+    runtime.setLastRecallStatus("等待图谱加载", reason, "warning", {
+      syncRuntime: true,
+    });
+    return runtime.createRecallRunResult("skipped", {
+      reason,
+    });
+  }
+  if (runtime.isGraphMetadataWriteAllowed()) {
+    if (!(await runtime.recoverHistoryIfNeeded("pre-recall"))) {
+      return runtime.createRecallRunResult("skipped", {
+        reason: "历史恢复未就绪",
+      });
+    }
+  }
+
+  const context = runtime.getContext();
+  const chat = context.chat;
+  if (!chat || chat.length === 0) {
+    return runtime.createRecallRunResult("skipped", {
+      reason: "当前聊天为空",
+    });
+  }
+
+  const runId = runtime.nextRecallRunSequence();
+  let recallPromise = null;
+  recallPromise = (async () => {
+    runtime.setIsRecalling(true);
+    const recallController = runtime.beginStageAbortController("recall");
+    const recallSignal = recallController.signal;
+    if (options.signal) {
+      if (options.signal.aborted) {
+        recallController.abort(
+          options.signal.reason || runtime.createAbortError("宿主已终止生成"),
+        );
+      } else {
+        options.signal.addEventListener(
+          "abort",
+          () =>
+            recallController.abort(
+              options.signal.reason || runtime.createAbortError("宿主已终止生成"),
+            ),
+          { once: true },
+        );
+      }
+    }
+
+    try {
+      await runtime.ensureVectorReadyIfNeeded("pre-recall", recallSignal);
+      const recentContextMessageLimit = runtime.clampInt(
+        settings.recallLlmContextMessages,
+        4,
+        0,
+        20,
+      );
+      const recallInput = runtime.resolveRecallInput(
+        chat,
+        recentContextMessageLimit,
+        options,
+      );
+      const userMessage = recallInput.userMessage;
+      const recentMessages = recallInput.recentMessages;
+
+      if (!userMessage) {
+        return runtime.createRecallRunResult("skipped", {
+          reason: "当前没有可用于召回的用户输入",
+        });
+      }
+
+      recallInput.hookName = options.hookName || "";
+
+      runtime.console.log("[ST-BME] 开始召回", {
+        source: recallInput.source,
+        sourceLabel: recallInput.sourceLabel,
+        hookName: recallInput.hookName,
+        userMessageLength: userMessage.length,
+        recentMessages: recentMessages.length,
+        runId,
+      });
+      runtime.setLastRecallStatus(
+        "召回中",
+        [
+          runtime.getRecallHookLabel(recallInput.hookName),
+          `来源 ${recallInput.sourceLabel}`,
+          `上下文 ${recentMessages.length} 条`,
+          `当前用户消息长度 ${userMessage.length}`,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        "running",
+        { syncRuntime: true },
+      );
+      if (recallInput.source === "send-intent") {
+        runtime.setPendingRecallSendIntent(runtime.createRecallInputRecord());
+      }
+
+      const result = await runtime.retrieve({
+        graph: runtime.getCurrentGraph(),
+        userMessage,
+        recentMessages,
+        embeddingConfig: runtime.getEmbeddingConfig(),
+        schema: runtime.getSchema(),
+        signal: recallSignal,
+        settings,
+        onStreamProgress: ({ previewText, receivedChars }) => {
+          const preview =
+            previewText?.length > 60
+              ? "…" + previewText.slice(-60)
+              : previewText || "";
+          runtime.setLastRecallStatus(
+            "AI 生成中",
+            `${preview}  [${receivedChars}字]`,
+            "running",
+            { syncRuntime: true, noticeMarquee: true },
+          );
+        },
+        options: runtime.buildRecallRetrieveOptions(settings, context),
+      });
+
+      runtime.applyRecallInjection(settings, recallInput, recentMessages, result);
+      return runtime.createRecallRunResult("completed", {
+        reason: "召回完成",
+        selectedNodeIds: result.selectedNodeIds || [],
+      });
+    } catch (e) {
+      if (runtime.isAbortError(e)) {
+        runtime.setLastRecallStatus(
+          "召回已终止",
+          e?.message || "已手动终止当前召回",
+          "warning",
+          {
+            syncRuntime: true,
+          },
+        );
+        return runtime.createRecallRunResult("aborted", {
+          reason: e?.message || "召回已终止",
+        });
+      }
+      runtime.console.error("[ST-BME] 召回失败:", e);
+      const message = e?.message || String(e);
+      runtime.setLastRecallStatus("召回失败", message, "error", {
+        syncRuntime: true,
+        toastKind: "",
+      });
+      runtime.toastr.error(`召回失败: ${message}`);
+      return runtime.createRecallRunResult("failed", {
+        reason: message,
+      });
+    } finally {
+      runtime.finishStageAbortController("recall", recallController);
+      runtime.setIsRecalling(false);
+      if (runtime.getActiveRecallPromise() === recallPromise) {
+        runtime.setActiveRecallPromise(null);
+      }
+      runtime.refreshPanelLiveState();
+    }
+  })();
+
+  runtime.setActiveRecallPromise(recallPromise);
+  return await recallPromise;
+}

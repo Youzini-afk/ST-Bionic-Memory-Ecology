@@ -123,3 +123,102 @@ export async function executeExtractionBatchController(
         "批次未完成 finalize 闭环",
   };
 }
+
+export async function runExtractionController(runtime) {
+  if (runtime.getIsExtracting() || !runtime.getCurrentGraph()) return;
+
+  const settings = runtime.getSettings();
+  if (!settings.enabled) return;
+  if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
+    runtime.setLastExtractionStatus(
+      "等待图谱加载",
+      runtime.getGraphMutationBlockReason("自动提取"),
+      "warning",
+      { syncRuntime: true },
+    );
+    return;
+  }
+  if (!(await runtime.recoverHistoryIfNeeded("auto-extract"))) return;
+
+  const context = runtime.getContext();
+  const chat = context.chat;
+  if (!chat || chat.length === 0) return;
+
+  const assistantTurns = runtime.getAssistantTurns(chat);
+  const lastProcessed = runtime.getLastProcessedAssistantFloor();
+  const unprocessedAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
+
+  if (unprocessedAssistantTurns.length === 0) return;
+
+  const extractEvery = runtime.clampInt(settings.extractEvery, 1, 1, 50);
+  const smartTriggerDecision = settings.enableSmartTrigger
+    ? runtime.getSmartTriggerDecision(chat, lastProcessed, settings)
+    : { triggered: false, score: 0, reasons: [] };
+
+  if (
+    unprocessedAssistantTurns.length < extractEvery &&
+    !smartTriggerDecision.triggered
+  ) {
+    return;
+  }
+
+  const batchAssistantTurns = smartTriggerDecision.triggered
+    ? unprocessedAssistantTurns
+    : unprocessedAssistantTurns.slice(0, extractEvery);
+  const startIdx = batchAssistantTurns[0];
+  const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+  runtime.setIsExtracting(true);
+  const extractionController = runtime.beginStageAbortController("extraction");
+  const extractionSignal = extractionController.signal;
+  runtime.setLastExtractionStatus(
+    "提取中",
+    `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}`,
+    "running",
+    { syncRuntime: true },
+  );
+
+  try {
+    const batchResult = await runtime.executeExtractionBatch({
+      chat,
+      startIdx,
+      endIdx,
+      settings,
+      smartTriggerDecision,
+      signal: extractionSignal,
+    });
+
+    if (!batchResult.success) {
+      const message =
+        batchResult.error ||
+        batchResult?.result?.error ||
+        "提取批次未返回有效结果";
+      runtime.console.warn("[ST-BME] 提取批次未返回有效结果:", message);
+      runtime.notifyExtractionIssue(message);
+      return;
+    }
+
+    runtime.setLastExtractionStatus(
+      "提取完成",
+      `楼层 ${startIdx}-${endIdx} · 新建 ${batchResult.result?.newNodes || 0} · 更新 ${batchResult.result?.updatedNodes || 0} · 新边 ${batchResult.result?.newEdges || 0}`,
+      "success",
+      { syncRuntime: true },
+    );
+  } catch (e) {
+    if (runtime.isAbortError(e)) {
+      runtime.setLastExtractionStatus(
+        "提取已终止",
+        e?.message || "已手动终止当前提取",
+        "warning",
+        {
+          syncRuntime: true,
+        },
+      );
+      return;
+    }
+    runtime.console.error("[ST-BME] 提取失败:", e);
+    runtime.notifyExtractionIssue(e?.message || String(e) || "自动提取失败");
+  } finally {
+    runtime.finishStageAbortController("extraction", extractionController);
+    runtime.setIsExtracting(false);
+  }
+}
