@@ -330,3 +330,51 @@ export async function onImportGraphController(runtime) {
     input.click();
   });
 }
+
+export async function onRebuildVectorIndexController(runtime, range = null) {
+  if (!runtime.ensureGraphMutationReady(range ? "范围重建向量" : "重建向量")) return;
+  runtime.ensureCurrentGraphRuntimeState();
+
+  const config = runtime.getEmbeddingConfig();
+  const validation = runtime.validateVectorConfig(config);
+  if (!validation.valid) {
+    runtime.toastr.warning(validation.error);
+    return;
+  }
+
+  const vectorController = runtime.beginStageAbortController("vector");
+  try {
+    const result = await runtime.syncVectorState({
+      force: true,
+      purge: runtime.isBackendVectorConfig(config) && !range,
+      range,
+      signal: vectorController.signal,
+    });
+
+    runtime.saveGraphToChat({ reason: "vector-rebuild-complete" });
+    if (result?.aborted) {
+      return;
+    }
+    if (result?.error) {
+      throw new Error(result.error);
+    }
+    runtime.toastr.success(
+      range
+        ? `范围向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`
+        : `当前聊天向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`,
+    );
+  } finally {
+    runtime.finishStageAbortController("vector", vectorController);
+    runtime.refreshPanelLiveState();
+  }
+}
+
+export async function onReembedDirectController(runtime) {
+  const config = runtime.getEmbeddingConfig();
+  if (!runtime.isDirectVectorConfig(config)) {
+    runtime.toastr.info("当前不是直连模式，无需执行重嵌");
+    return;
+  }
+
+  await runtime.onRebuildVectorIndex();
+}

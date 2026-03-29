@@ -81,9 +81,11 @@ import {
   onExportGraphController,
   onImportGraphController,
   onManualCompressController,
+  onRebuildVectorIndexController,
   onRebuildController,
   onTestEmbeddingController,
   onTestMemoryLLMController,
+  onReembedDirectController,
   onViewLastInjectionController,
   onViewGraphController,
 } from "./ui-actions-controller.js";
@@ -4873,50 +4875,32 @@ async function onManualEvolve() {
 }
 
 async function onRebuildVectorIndex(range = null) {
-  if (!ensureGraphMutationReady(range ? "范围重建向量" : "重建向量")) return;
-  ensureCurrentGraphRuntimeState();
-  const config = getEmbeddingConfig();
-  const validation = validateVectorConfig(config);
-  if (!validation.valid) {
-    toastr.warning(validation.error);
-    return;
-  }
-
-  const vectorController = beginStageAbortController("vector");
-  try {
-    const result = await syncVectorState({
-      force: true,
-      purge: isBackendVectorConfig(config) && !range,
-      range,
-      signal: vectorController.signal,
-    });
-
-    saveGraphToChat({ reason: "vector-rebuild-complete" });
-    if (result?.aborted) {
-      return;
-    }
-    if (result?.error) {
-      throw new Error(result.error);
-    }
-    toastr.success(
-      range
-        ? `范围向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`
-        : `当前聊天向量重建完成：indexed=${result.stats.indexed}, pending=${result.stats.pending}`,
-    );
-  } finally {
-    finishStageAbortController("vector", vectorController);
-    refreshPanelLiveState();
-  }
+  return await onRebuildVectorIndexController(
+    {
+      beginStageAbortController,
+      ensureCurrentGraphRuntimeState,
+      ensureGraphMutationReady,
+      finishStageAbortController,
+      getEmbeddingConfig,
+      isBackendVectorConfig,
+      refreshPanelLiveState,
+      saveGraphToChat,
+      syncVectorState,
+      toastr,
+      validateVectorConfig,
+    },
+    range,
+  );
 }
 
 async function onReembedDirect() {
-  const config = getEmbeddingConfig();
-  if (!isDirectVectorConfig(config)) {
-    toastr.info("当前不是直连模式，无需执行重嵌");
-    return;
-  }
-
-  await onRebuildVectorIndex();
+  return await onReembedDirectController({
+    getEmbeddingConfig,
+    isDirectVectorConfig,
+    onRebuildVectorIndex: async () =>
+      await onRebuildVectorIndex(),
+    toastr,
+  });
 }
 
 // ==================== 初始化 ====================
