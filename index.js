@@ -78,8 +78,11 @@ import {
 import {
   onFetchEmbeddingModelsController,
   onFetchMemoryLLMModelsController,
+  onExportGraphController,
+  onManualCompressController,
   onTestEmbeddingController,
   onTestMemoryLLMController,
+  onViewLastInjectionController,
   onViewGraphController,
 } from "./ui-actions-controller.js";
 import {
@@ -4585,40 +4588,26 @@ async function onRebuild() {
 }
 
 async function onManualCompress() {
-  if (!currentGraph) return;
-  if (!ensureGraphMutationReady("手动压缩")) return;
-  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-
-  const result = await compressAll(
-    currentGraph,
-    getSchema(),
-    getEmbeddingConfig(),
-    false,
-    undefined,
-    undefined,
-    getSettings(),
-  );
-  await recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["compression"],
+  return await onManualCompressController({
+    cloneGraphSnapshot,
+    compressAll,
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    getEmbeddingConfig,
+    getSchema,
+    getSettings,
+    recordGraphMutation,
+    toastr,
   });
-
-  toastr.info(`压缩完成: 新建 ${result.created}, 归档 ${result.archived}`);
 }
 
 async function onExportGraph() {
-  if (!currentGraph) return;
-
-  const json = exportGraph(currentGraph);
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `st-bme-graph-${Date.now()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-
-  toastr.success("图谱已导出");
+  return await onExportGraphController({
+    document,
+    exportGraph,
+    getCurrentGraph: () => currentGraph,
+    toastr,
+  });
 }
 
 async function onImportGraph() {
@@ -4702,25 +4691,11 @@ async function onImportGraph() {
 }
 
 async function onViewLastInjection() {
-  if (!lastInjectionContent) {
-    toastr.info("暂无注入内容");
-    return;
-  }
-
-  // 简单弹窗显示
-  const popup = document.createElement("div");
-  popup.style.cssText =
-    "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1a2e;color:#eee;padding:24px;border-radius:12px;max-width:80vw;max-height:80vh;overflow:auto;z-index:99999;white-space:pre-wrap;font-size:13px;box-shadow:0 8px 32px rgba(0,0,0,0.5);";
-  popup.textContent = lastInjectionContent;
-
-  const close = document.createElement("button");
-  close.textContent = "关闭";
-  close.style.cssText =
-    "position:absolute;top:8px;right:12px;background:#e94560;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;";
-  close.onclick = () => popup.remove();
-  popup.appendChild(close);
-
-  document.body.appendChild(popup);
+  return await onViewLastInjectionController({
+    document,
+    getLastInjectionContent: () => lastInjectionContent,
+    toastr,
+  });
 }
 
 async function onTestEmbedding() {
