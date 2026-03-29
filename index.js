@@ -4,8 +4,8 @@
 import {
   eventSource,
   event_types,
-  extension_prompt_types,
   extension_prompt_roles,
+  extension_prompt_types,
   getRequestHeaders,
   saveMetadata,
   saveSettingsDebounced,
@@ -48,11 +48,12 @@ import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
+import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
-  buildReverseJournalRecoveryPlan,
   buildRecoveryResult,
+  buildReverseJournalRecoveryPlan,
   clearHistoryDirty,
   cloneGraphSnapshot,
   createBatchJournalEntry,
@@ -75,7 +76,6 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector-index.js";
-import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -193,7 +193,9 @@ function triggerChatMetadataSave(
 ) {
   if (immediate) {
     const immediateSave =
-      typeof context?.saveMetadata === "function" ? context.saveMetadata : saveMetadata;
+      typeof context?.saveMetadata === "function"
+        ? context.saveMetadata
+        : saveMetadata;
     if (typeof immediateSave === "function") {
       try {
         const result = immediateSave.call(context);
@@ -217,6 +219,16 @@ function triggerChatMetadataSave(
   return "debounced";
 }
 
+function cloneGraphForPersistence(
+  graph = currentGraph,
+  chatId = getCurrentChatId(),
+) {
+  return normalizeGraphRuntimeState(
+    deserializeGraph(serializeGraph(graph)),
+    chatId,
+  );
+}
+
 function shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot) {
   if (!shadowSnapshot) return false;
   const shadowRevision = Number(shadowSnapshot.revision || 0);
@@ -226,10 +238,7 @@ function shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot) {
 
 function getRuntimeDebugState() {
   const stateKey = "__stBmeRuntimeDebugState";
-  if (
-    !globalThis[stateKey] ||
-    typeof globalThis[stateKey] !== "object"
-  ) {
+  if (!globalThis[stateKey] || typeof globalThis[stateKey] !== "object") {
     globalThis[stateKey] = {
       hostCapabilities: null,
       taskPromptBuilds: {},
@@ -476,6 +485,7 @@ function createGraphPersistenceState() {
     revision: 0,
     lastPersistedRevision: 0,
     queuedPersistRevision: 0,
+    queuedPersistChatId: "",
     queuedPersistMode: "",
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: "",
@@ -517,9 +527,7 @@ function readGraphShadowSnapshot(chatId = "") {
     }
     return {
       chatId: String(snapshot.chatId || ""),
-      revision: Number.isFinite(snapshot.revision)
-        ? snapshot.revision
-        : 0,
+      revision: Number.isFinite(snapshot.revision) ? snapshot.revision : 0,
       serializedGraph: snapshot.serializedGraph,
       updatedAt: String(snapshot.updatedAt || ""),
       reason: String(snapshot.reason || ""),
@@ -577,6 +585,7 @@ function getGraphPersistenceLiveState() {
     graphRevision: graphPersistenceState.revision,
     lastPersistedRevision: graphPersistenceState.lastPersistedRevision,
     queuedPersistRevision: graphPersistenceState.queuedPersistRevision,
+    queuedPersistChatId: graphPersistenceState.queuedPersistChatId,
     shadowSnapshotUsed: graphPersistenceState.shadowSnapshotUsed,
     shadowSnapshotRevision: graphPersistenceState.shadowSnapshotRevision,
     shadowSnapshotUpdatedAt: graphPersistenceState.shadowSnapshotUpdatedAt,
@@ -587,13 +596,15 @@ function getGraphPersistenceLiveState() {
     writesBlocked: graphPersistenceState.writesBlocked,
     pendingPersist: graphPersistenceState.pendingPersist,
     queuedPersistMode: graphPersistenceState.queuedPersistMode,
-    queuedPersistRotateIntegrity: graphPersistenceState.queuedPersistRotateIntegrity,
+    queuedPersistRotateIntegrity:
+      graphPersistenceState.queuedPersistRotateIntegrity,
     queuedPersistReason: graphPersistenceState.queuedPersistReason,
     canWriteToMetadata: isGraphMetadataWriteAllowed(
       graphPersistenceState.loadState,
     ),
     updatedAt: graphPersistenceState.updatedAt,
   };
+
   return cloneRuntimeDebugValue(snapshot, snapshot);
 }
 
@@ -620,12 +631,16 @@ function bumpGraphRevision(reason = "graph-mutation") {
     ) + 1;
   updateGraphPersistenceState({
     revision: nextRevision,
-    lastPersistReason: String(reason || graphPersistenceState.lastPersistReason || ""),
+    lastPersistReason: String(
+      reason || graphPersistenceState.lastPersistReason || "",
+    ),
   });
   return nextRevision;
 }
 
-function isGraphMetadataWriteAllowed(loadState = graphPersistenceState.loadState) {
+function isGraphMetadataWriteAllowed(
+  loadState = graphPersistenceState.loadState,
+) {
   return (
     loadState === GRAPH_LOAD_STATES.LOADED ||
     loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
@@ -708,7 +723,10 @@ function getGraphMutationBlockReason(operationLabel = "当前操作") {
   }
 }
 
-function ensureGraphMutationReady(operationLabel = "当前操作", { notify = true } = {}) {
+function ensureGraphMutationReady(
+  operationLabel = "当前操作",
+  { notify = true } = {},
+) {
   if (isGraphMetadataWriteAllowed()) return true;
   if (notify) {
     toastr.info(getGraphMutationBlockReason(operationLabel), "ST-BME");
@@ -773,6 +791,16 @@ function throwIfAborted(signal, message = "操作已终止") {
     throw signal.reason instanceof Error
       ? signal.reason
       : createAbortError(message);
+  }
+}
+
+function assertRecoveryChatStillActive(expectedChatId, label = '') {
+  if (!expectedChatId) return;
+  const currentId = getCurrentChatId();
+  if (currentId && currentId !== expectedChatId) {
+    throw createAbortError(
+      `历史恢复已终止：聊天已从 ${expectedChatId} 切换到 ${currentId}${label ? ` (${label})` : ''}`
+    );
   }
 }
 
@@ -1355,10 +1383,7 @@ function hasLikelySelectedChatContext(context = getContext()) {
     String(context.groupId).trim() !== "";
 
   return (
-    hasMeaningfulChatMetadata ||
-    hasChatMessages ||
-    hasCharacterId ||
-    hasGroupId
+    hasMeaningfulChatMetadata || hasChatMessages || hasCharacterId || hasGroupId
   );
 }
 
@@ -1476,7 +1501,14 @@ function applyModuleInjectionPrompt(content = "", settings = getSettings()) {
 
   const context = getContext();
   if (typeof context?.setExtensionPrompt === "function") {
-    context.setExtensionPrompt(MODULE_NAME, content, position, depth, false, role);
+    context.setExtensionPrompt(
+      MODULE_NAME,
+      content,
+      position,
+      depth,
+      false,
+      role,
+    );
     return {
       applied: true,
       source: "context",
@@ -1519,7 +1551,10 @@ function clearPendingGraphLoadRetry({ resetChatId = true } = {}) {
 
 function isGraphLoadRetryPending(chatId = getCurrentChatId()) {
   const normalizedChatId = String(chatId || "");
-  return Boolean(normalizedChatId) && pendingGraphLoadRetryChatId === normalizedChatId;
+  return (
+    Boolean(normalizedChatId) &&
+    pendingGraphLoadRetryChatId === normalizedChatId
+  );
 }
 
 function isGraphEffectivelyEmpty(graph) {
@@ -1618,6 +1653,13 @@ function persistGraphToChatMetadata(
   }
 
   const nextIntegrity = getChatMetadataIntegrity(context);
+  const persistedGraph = cloneGraphForPersistence(currentGraph, chatId);
+  stampGraphPersistenceMeta(persistedGraph, {
+    revision,
+    reason,
+    chatId,
+    integrity: nextIntegrity,
+  });
   stampGraphPersistenceMeta(currentGraph, {
     revision,
     reason,
@@ -1625,7 +1667,7 @@ function persistGraphToChatMetadata(
     integrity: nextIntegrity,
   });
   writeChatMetadataPatch(context, {
-    [GRAPH_METADATA_KEY]: currentGraph,
+    [GRAPH_METADATA_KEY]: persistedGraph,
   });
   const saveMode = triggerChatMetadataSave(context, { immediate });
 
@@ -1640,6 +1682,7 @@ function persistGraphToChatMetadata(
     revision,
     lastPersistedRevision: revision,
     queuedPersistRevision: 0,
+    queuedPersistChatId: "",
     pendingPersist: false,
     writesBlocked: false,
   });
@@ -1648,6 +1691,7 @@ function persistGraphToChatMetadata(
     lastPersistReason: String(reason || ""),
     lastPersistMode: saveMode,
     metadataIntegrity: String(nextIntegrity || ""),
+    queuedPersistChatId: "",
     queuedPersistMode: "",
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: "",
@@ -1667,12 +1711,14 @@ function queueGraphPersist(
   revision = graphPersistenceState.revision,
   { immediate = true } = {},
 ) {
+  const queuedChatId = graphPersistenceState.chatId || getCurrentChatId();
   maybeCaptureGraphShadowSnapshot(reason);
   updateGraphPersistenceState({
     queuedPersistRevision: Math.max(
       graphPersistenceState.queuedPersistRevision || 0,
       revision || 0,
     ),
+    queuedPersistChatId: String(queuedChatId || ""),
     queuedPersistMode: immediate ? "immediate" : "debounced",
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: String(reason || ""),
@@ -1710,6 +1756,19 @@ function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
     return buildGraphPersistResult({
       saved: false,
       reason: "no-queued-persist",
+    });
+  }
+
+  const activeChatId = getCurrentChatId();
+  const queuedChatId = String(graphPersistenceState.queuedPersistChatId || "");
+  if (queuedChatId && activeChatId && queuedChatId !== activeChatId) {
+    return buildGraphPersistResult({
+      saved: false,
+      queued: graphPersistenceState.pendingPersist,
+      blocked: true,
+      reason: "queued-chat-mismatch",
+      revision: graphPersistenceState.queuedPersistRevision,
+      saveMode: graphPersistenceState.queuedPersistMode,
     });
   }
 
@@ -1924,7 +1983,12 @@ function setLastExtractionStatus(
   text,
   meta,
   level = "info",
-  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 提取", noticeMarquee = false } = {},
+  {
+    syncRuntime = true,
+    toastKind = "",
+    toastTitle = "ST-BME 提取",
+    noticeMarquee = false,
+  } = {},
 ) {
   lastExtractionStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
@@ -1975,7 +2039,12 @@ function setLastRecallStatus(
   text,
   meta,
   level = "info",
-  { syncRuntime = true, toastKind = "", toastTitle = "ST-BME 召回", noticeMarquee = false } = {},
+  {
+    syncRuntime = true,
+    toastKind = "",
+    toastTitle = "ST-BME 召回",
+    noticeMarquee = false,
+  } = {},
 ) {
   lastRecallStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
@@ -2545,6 +2614,7 @@ function loadGraphFromChat(options = {}) {
           revision: 0,
           lastPersistedRevision: 0,
           queuedPersistRevision: 0,
+          queuedPersistChatId: "",
           pendingPersist: false,
           shadowSnapshotUsed: false,
           shadowSnapshotRevision: 0,
@@ -2590,6 +2660,7 @@ function loadGraphFromChat(options = {}) {
       revision: 0,
       lastPersistedRevision: 0,
       queuedPersistRevision: 0,
+      queuedPersistChatId: "",
       pendingPersist: false,
       shadowSnapshotUsed: false,
       shadowSnapshotRevision: 0,
@@ -2621,20 +2692,28 @@ function loadGraphFromChat(options = {}) {
   const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
 
   if (hasOfficialGraph) {
-    const officialGraph = normalizeGraphRuntimeState(
-      deserializeGraph(savedData),
+    const officialGraph = cloneGraphForPersistence(
+      normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
       chatId,
     );
-    const officialRevision = Math.max(1, getGraphPersistedRevision(officialGraph));
+    const officialRevision = Math.max(
+      1,
+      getGraphPersistedRevision(officialGraph),
+    );
     const metadataIntegrity = getChatMetadataIntegrity(context);
 
     if (shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot)) {
       clearPendingGraphLoadRetry();
-      currentGraph = normalizeGraphRuntimeState(
-        deserializeGraph(shadowSnapshot.serializedGraph),
+      currentGraph = cloneGraphForPersistence(
+        normalizeGraphRuntimeState(
+          deserializeGraph(shadowSnapshot.serializedGraph),
+          chatId,
+        ),
         chatId,
       );
-      extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+      extractionCount = Number.isFinite(
+        currentGraph?.historyState?.extractionCount,
+      )
         ? currentGraph.historyState.extractionCount
         : 0;
       lastExtractedItems = [];
@@ -2697,7 +2776,9 @@ function loadGraphFromChat(options = {}) {
 
     clearPendingGraphLoadRetry();
     currentGraph = officialGraph;
-    extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+    extractionCount = Number.isFinite(
+      currentGraph?.historyState?.extractionCount,
+    )
       ? currentGraph.historyState.extractionCount
       : 0;
     lastExtractedItems = [];
@@ -2731,6 +2812,7 @@ function loadGraphFromChat(options = {}) {
       revision: officialRevision,
       lastPersistedRevision: officialRevision,
       queuedPersistRevision: 0,
+      queuedPersistChatId: "",
       pendingPersist: false,
       shadowSnapshotUsed: false,
       shadowSnapshotRevision: 0,
@@ -2770,7 +2852,9 @@ function loadGraphFromChat(options = {}) {
       deserializeGraph(shadowSnapshot.serializedGraph),
       chatId,
     );
-    extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+    extractionCount = Number.isFinite(
+      currentGraph?.historyState?.extractionCount,
+    )
       ? currentGraph.historyState.extractionCount
       : 0;
     lastExtractedItems = [];
@@ -2858,7 +2942,9 @@ function loadGraphFromChat(options = {}) {
     if (shouldRetry) {
       scheduleGraphLoadRetry(
         chatId,
-        hasChatMetadata ? "official-graph-missing-shadow" : "chat-metadata-missing-shadow",
+        hasChatMetadata
+          ? "official-graph-missing-shadow"
+          : "chat-metadata-missing-shadow",
         attemptIndex,
       );
     } else {
@@ -2892,40 +2978,47 @@ function loadGraphFromChat(options = {}) {
     );
     lastExtractionStatus = createUiStatus(
       "待命",
-      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，暂不允许修改图谱",
+      shouldRetry
+        ? "正在等待聊天图谱元数据加载"
+        : "聊天元数据未就绪，暂不允许修改图谱",
       shouldRetry ? "idle" : "warning",
     );
     lastVectorStatus = createUiStatus(
       "待命",
-      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，暂不允许修改图谱",
+      shouldRetry
+        ? "正在等待聊天图谱元数据加载"
+        : "聊天元数据未就绪，暂不允许修改图谱",
       shouldRetry ? "idle" : "warning",
     );
     lastRecallStatus = createUiStatus(
       "待命",
-      shouldRetry ? "正在等待聊天图谱元数据加载" : "聊天元数据未就绪，图谱处于保护状态",
+      shouldRetry
+        ? "正在等待聊天图谱元数据加载"
+        : "聊天元数据未就绪，图谱处于保护状态",
       shouldRetry ? "idle" : "warning",
     );
     applyGraphLoadState(
       shouldRetry ? GRAPH_LOAD_STATES.LOADING : GRAPH_LOAD_STATES.BLOCKED,
       {
-      chatId,
-      reason: hasChatMetadata
-        ? shouldRetry
-          ? "graph-metadata-missing"
-          : "graph-metadata-timeout"
-        : shouldRetry
-          ? "chat-metadata-missing"
-          : "chat-metadata-timeout",
-      attemptIndex,
-      revision: 0,
-      lastPersistedRevision: 0,
-      queuedPersistRevision: 0,
-      pendingPersist: false,
-      shadowSnapshotUsed: false,
-      shadowSnapshotRevision: 0,
-      shadowSnapshotUpdatedAt: "",
-      shadowSnapshotReason: "",
-      writesBlocked: true,
+        chatId,
+        reason: hasChatMetadata
+          ? shouldRetry
+            ? "graph-metadata-missing"
+            : "graph-metadata-timeout"
+          : shouldRetry
+            ? "chat-metadata-missing"
+            : "chat-metadata-timeout",
+        attemptIndex,
+        revision: 0,
+        lastPersistedRevision: 0,
+        queuedPersistRevision: 0,
+        queuedPersistChatId: "",
+        pendingPersist: false,
+        shadowSnapshotUsed: false,
+        shadowSnapshotRevision: 0,
+        shadowSnapshotUpdatedAt: "",
+        shadowSnapshotReason: "",
+        writesBlocked: true,
       },
     );
     if (shouldRetry) {
@@ -2953,26 +3046,10 @@ function loadGraphFromChat(options = {}) {
 
   clearPendingGraphLoadRetry();
   const confirmedState = GRAPH_LOAD_STATES.EMPTY_CONFIRMED;
-  runtimeStatus = createUiStatus(
-    "待命",
-    "当前聊天还没有图谱",
-    "idle",
-  );
-  lastExtractionStatus = createUiStatus(
-    "待命",
-    "当前聊天尚未执行提取",
-    "idle",
-  );
-  lastVectorStatus = createUiStatus(
-    "待命",
-    "当前聊天尚未执行向量任务",
-    "idle",
-  );
-  lastRecallStatus = createUiStatus(
-    "待命",
-    "当前聊天尚未建立记忆图谱",
-    "idle",
-  );
+  runtimeStatus = createUiStatus("待命", "当前聊天还没有图谱", "idle");
+  lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
+  lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
+  lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
   applyGraphLoadState(confirmedState, {
     chatId,
     reason: "metadata-confirmed-empty",
@@ -2980,6 +3057,7 @@ function loadGraphFromChat(options = {}) {
     revision: 0,
     lastPersistedRevision: 0,
     queuedPersistRevision: 0,
+    queuedPersistChatId: "",
     pendingPersist: false,
     shadowSnapshotUsed: false,
     shadowSnapshotRevision: 0,
@@ -3460,7 +3538,10 @@ function clearGenerationRecallTransactionsForChat(
     return removed;
   }
 
-  for (const [transactionId, transaction] of generationRecallTransactions.entries()) {
+  for (const [
+    transactionId,
+    transaction,
+  ] of generationRecallTransactions.entries()) {
     if (String(transaction?.chatId || "") !== normalizedChatId) continue;
     generationRecallTransactions.delete(transactionId);
     removed += 1;
@@ -3519,8 +3600,8 @@ function getGenerationRecallHookStateFromResult(result) {
 function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") {
   const hadActiveRecall = Boolean(
     isRecalling ||
-      (stageAbortControllers.recall &&
-        !stageAbortControllers.recall.signal?.aborted),
+    (stageAbortControllers.recall &&
+      !stageAbortControllers.recall.signal?.aborted),
   );
   if (hadActiveRecall) {
     abortRecallStageWithReason(`${reason}，当前召回已取消`);
@@ -4010,7 +4091,11 @@ function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, chat) {
   }
 
   if (candidates.length === 0) return null;
-  return candidates.reduce((earliest, current) =>
+  const validCandidates = Number.isFinite(minExtractableFloor)
+    ? candidates.filter((c) => c.floor >= minExtractableFloor)
+    : candidates;
+  if (validCandidates.length === 0) return null;
+  return validCandidates.reduce((earliest, current) =>
     current.floor < earliest.floor ? current : earliest,
   );
 }
@@ -4073,6 +4158,7 @@ function scheduleImmediateHistoryRecovery(
 ) {
   if (!getSettings().enabled) return;
 
+  const scheduledChatId = getCurrentChatId();
   pendingHistoryRecoveryTrigger = trigger;
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = setTimeout(() => {
@@ -4080,6 +4166,7 @@ function scheduleImmediateHistoryRecovery(
     const effectiveTrigger = pendingHistoryRecoveryTrigger || trigger;
     pendingHistoryRecoveryTrigger = "";
     if (!getSettings().enabled) return;
+    if (getCurrentChatId() !== scheduledChatId) return;
 
     void recoverHistoryIfNeeded(`event:${effectiveTrigger}`)
       .then(() => {
@@ -4109,6 +4196,7 @@ function scheduleHistoryMutationRecheck(
 ) {
   if (!getSettings().enabled) return;
 
+  const scheduledChatId = getCurrentChatId();
   clearPendingHistoryMutationChecks();
   clearTimeout(pendingHistoryRecoveryTimer);
   pendingHistoryRecoveryTimer = null;
@@ -4132,6 +4220,7 @@ function scheduleHistoryMutationRecheck(
           (candidate) => candidate !== timer,
         );
       if (!getSettings().enabled) return;
+      if (getCurrentChatId() !== scheduledChatId) return;
 
       const detection = inspectHistoryMutation(
         `settled:${trigger}`,
@@ -4325,9 +4414,10 @@ async function executeExtractionBatch({
     settings,
     signal,
     onStreamProgress: ({ previewText, receivedChars }) => {
-      const preview = previewText?.length > 60
-        ? "…" + previewText.slice(-60)
-        : previewText || "";
+      const preview =
+        previewText?.length > 60
+          ? "…" + previewText.slice(-60)
+          : previewText || "";
       setLastExtractionStatus(
         "AI 生成中",
         `${preview}  [${receivedChars}字]`,
@@ -4404,11 +4494,12 @@ async function executeExtractionBatch({
   };
 }
 
-async function replayExtractionFromHistory(chat, settings, signal = undefined) {
+async function replayExtractionFromHistory(chat, settings, signal = undefined, expectedChatId = undefined) {
   let replayedBatches = 0;
 
   while (true) {
     throwIfAborted(signal, "历史恢复已终止");
+    assertRecoveryChatStillActive(expectedChatId, 'replay-loop');
     const pendingAssistantTurns = getAssistantTurns(chat).filter(
       (index) => index > getLastProcessedAssistantFloor(),
     );
@@ -4542,6 +4633,7 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       isBackendVectorConfig(config) &&
       recoveryPlan.backendDeleteHashes.length > 0
     ) {
+      assertRecoveryChatStillActive(chatId, 'reroll-pre-vector');
       await deleteBackendVectorHashesForRecovery(
         currentGraph.vectorIndexState.collectionId,
         config,
@@ -4549,11 +4641,15 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       );
     }
 
+    assertRecoveryChatStillActive(chatId, 'reroll-pre-prepare');
     await prepareVectorStateForReplay(false, undefined, {
       skipBackendPurge: isBackendVectorConfig(config),
     });
   } else if (recoveryPath === "legacy-snapshot") {
-    currentGraph = normalizeGraphRuntimeState(recoveryPoint.snapshotBefore, chatId);
+    currentGraph = normalizeGraphRuntimeState(
+      recoveryPoint.snapshotBefore,
+      chatId,
+    );
     extractionCount = currentGraph.historyState.extractionCount || 0;
     await prepareVectorStateForReplay(false);
   } else {
@@ -4672,6 +4768,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         isBackendVectorConfig(config) &&
         recoveryPlan.backendDeleteHashes.length > 0
       ) {
+        assertRecoveryChatStillActive(chatId, 'pre-backend-delete');
         await deleteBackendVectorHashesForRecovery(
           currentGraph.vectorIndexState.collectionId,
           config,
@@ -4699,10 +4796,12 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       await prepareVectorStateForReplay(true, historySignal);
     }
 
+    assertRecoveryChatStillActive(chatId, 'pre-replay');
     replayedBatches = await replayExtractionFromHistory(
       chat,
       settings,
       historySignal,
+      chatId,
     );
 
     clearHistoryDirty(
@@ -4763,10 +4862,12 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
       extractionCount = 0;
       await prepareVectorStateForReplay(true, historySignal);
+      assertRecoveryChatStillActive(chatId, 'pre-fallback-replay');
       replayedBatches = await replayExtractionFromHistory(
         chat,
         settings,
         historySignal,
+        chatId,
       );
       clearHistoryDirty(
         currentGraph,
@@ -4965,7 +5066,10 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
     );
   }
 
-  const injectionTransport = applyModuleInjectionPrompt(injectionText, settings);
+  const injectionTransport = applyModuleInjectionPrompt(
+    injectionText,
+    settings,
+  );
   recordInjectionSnapshot("recall", {
     taskType: "recall",
     source: recallInput.source,
@@ -5174,9 +5278,10 @@ async function runRecall(options = {}) {
         signal: recallSignal,
         settings,
         onStreamProgress: ({ previewText, receivedChars }) => {
-          const preview = previewText?.length > 60
-            ? "…" + previewText.slice(-60)
-            : previewText || "";
+          const preview =
+            previewText?.length > 60
+              ? "…" + previewText.slice(-60)
+              : previewText || "";
           setLastRecallStatus(
             "AI 生成中",
             `${preview}  [${receivedChars}字]`,
@@ -5211,18 +5316,15 @@ async function runRecall(options = {}) {
           temporalLinkStrength: settings.recallTemporalLinkStrength ?? 0.2,
           enableDiversitySampling:
             settings.recallEnableDiversitySampling ?? true,
-          dppCandidateMultiplier:
-            settings.recallDppCandidateMultiplier ?? 3,
+          dppCandidateMultiplier: settings.recallDppCandidateMultiplier ?? 3,
           dppQualityWeight: settings.recallDppQualityWeight ?? 1.0,
           enableCooccurrenceBoost:
             settings.recallEnableCooccurrenceBoost ?? false,
           cooccurrenceScale: settings.recallCooccurrenceScale ?? 0.1,
           cooccurrenceMaxNeighbors:
             settings.recallCooccurrenceMaxNeighbors ?? 10,
-          enableResidualRecall:
-            settings.recallEnableResidualRecall ?? false,
-          residualBasisMaxNodes:
-            settings.recallResidualBasisMaxNodes ?? 24,
+          enableResidualRecall: settings.recallEnableResidualRecall ?? false,
+          residualBasisMaxNodes: settings.recallResidualBasisMaxNodes ?? 24,
           residualNmfTopics: settings.recallNmfTopics ?? 15,
           residualNmfNoveltyThreshold:
             settings.recallNmfNoveltyThreshold ?? 0.4,
