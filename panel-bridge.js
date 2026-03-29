@@ -2,6 +2,25 @@ function resolvePanelTheme(settings) {
   return settings?.panelTheme || "crimson";
 }
 
+export function createNoticePanelActionController(runtime) {
+  if (!runtime.getPanelModule()?.openPanel) return undefined;
+  return {
+    label: "打开面板",
+    kind: "neutral",
+    onClick: () => {
+      runtime.getPanelModule()?.openPanel?.();
+    },
+  };
+}
+
+export function refreshPanelLiveStateController(runtime) {
+  runtime.getPanelModule()?.refreshLiveState?.();
+}
+
+export function openPanelController(runtime) {
+  runtime.getPanelModule()?.openPanel?.();
+}
+
 function injectOptionsMenuEntry(runtime) {
   if (runtime.document.getElementById("option_st_bme_panel")) {
     return;
@@ -13,7 +32,7 @@ function injectOptionsMenuEntry(runtime) {
       <span>记忆图谱</span>
     </a>
   `).on("click", () => {
-    runtime.getPanelModule()?.openPanel?.();
+    openPanelController(runtime);
     runtime.$("#options").hide();
   });
 

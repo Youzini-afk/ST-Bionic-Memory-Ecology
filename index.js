@@ -67,7 +67,11 @@ import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
-import { initializePanelBridgeController } from "./panel-bridge.js";
+import {
+  createNoticePanelActionController,
+  initializePanelBridgeController,
+  refreshPanelLiveStateController,
+} from "./panel-bridge.js";
 import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { retrieve } from "./retriever.js";
 import {
@@ -747,14 +751,9 @@ function buildAbortStageAction(stage) {
 }
 
 function createNoticePanelAction() {
-  if (!_panelModule?.openPanel) return undefined;
-  return {
-    label: "打开面板",
-    kind: "neutral",
-    onClick: () => {
-      _panelModule?.openPanel?.();
-    },
-  };
+  return createNoticePanelActionController({
+    getPanelModule: () => _panelModule,
+  });
 }
 
 function dismissStageNotice(stage) {
@@ -1714,7 +1713,9 @@ function clearInjectionState(options = {}) {
 }
 
 function refreshPanelLiveState() {
-  _panelModule?.refreshLiveState?.();
+  refreshPanelLiveStateController({
+    getPanelModule: () => _panelModule,
+  });
 }
 
 function notifyStatusToast(key, kind, message, title = "ST-BME") {
