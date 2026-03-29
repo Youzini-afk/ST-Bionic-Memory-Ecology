@@ -79,6 +79,7 @@ import {
   onFetchEmbeddingModelsController,
   onFetchMemoryLLMModelsController,
   onExportGraphController,
+  onImportGraphController,
   onManualCompressController,
   onRebuildController,
   onTestEmbeddingController,
@@ -4545,82 +4546,28 @@ async function onExportGraph() {
 }
 
 async function onImportGraph() {
-  if (!ensureGraphMutationReady("导入图谱")) {
-    return { cancelled: true };
-  }
-  const input = document.createElement("input");
-  input.type = "file";
-  input.accept = ".json";
-  return await new Promise((resolve, reject) => {
-    let settled = false;
-    let focusTimer = null;
-
-    const cleanup = () => {
-      if (focusTimer) {
-        clearTimeout(focusTimer);
-        focusTimer = null;
-      }
-      input.onchange = null;
-      window.removeEventListener("focus", onWindowFocus, true);
-    };
-
-    const finish = (value, isError = false) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (isError) {
-        reject(value);
-      } else {
-        resolve(value);
-      }
-    };
-
-    const onWindowFocus = () => {
-      focusTimer = setTimeout(() => {
-        if (!settled) {
-          finish({ cancelled: true });
-        }
-      }, 180);
-    };
-
-    window.addEventListener("focus", onWindowFocus, true);
-    input.addEventListener(
-      "cancel",
-      () => {
-        finish({ cancelled: true });
-      },
-      { once: true },
-    );
-    input.onchange = async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) {
-        finish({ cancelled: true });
-        return;
-      }
-
-      try {
-        const text = await file.text();
-        currentGraph = normalizeGraphRuntimeState(
-          importGraph(text),
-          getCurrentChatId(),
-        );
-        markVectorStateDirty("导入图谱后需要重建向量索引");
-        extractionCount = 0;
-        lastExtractedItems = [];
-        updateLastRecalledItems(currentGraph.lastRecallResult || []);
-        clearInjectionState();
-        saveGraphToChat({ reason: "graph-import-complete" });
-        toastr.success("图谱已导入");
-        finish({ imported: true, handledToast: true });
-      } catch (err) {
-        const error =
-          err instanceof Error ? err : new Error(String(err || "导入失败"));
-        toastr.error(`导入失败: ${error.message}`);
-        error._stBmeToastHandled = true;
-        finish(error, true);
-      }
-    };
-    input.click();
+  return await onImportGraphController({
+    clearInjectionState,
+    clearTimeout,
+    document,
+    ensureGraphMutationReady,
+    getCurrentChatId,
+    importGraph,
+    markVectorStateDirty,
+    normalizeGraphRuntimeState,
+    saveGraphToChat,
+    setCurrentGraph: (graph) => {
+      currentGraph = graph;
+    },
+    setExtractionCount: (value) => {
+      extractionCount = value;
+    },
+    setLastExtractedItems: (items) => {
+      lastExtractedItems = items;
+    },
+    toastr,
+    updateLastRecalledItems,
+    window,
   });
 }
 

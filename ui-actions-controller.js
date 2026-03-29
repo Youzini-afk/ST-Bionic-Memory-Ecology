@@ -245,3 +245,88 @@ export async function onRebuildController(runtime) {
     runtime.refreshPanelLiveState();
   }
 }
+
+export async function onImportGraphController(runtime) {
+  if (!runtime.ensureGraphMutationReady("导入图谱")) {
+    return { cancelled: true };
+  }
+
+  const input = runtime.document.createElement("input");
+  input.type = "file";
+  input.accept = ".json";
+
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let focusTimer = null;
+
+    const cleanup = () => {
+      if (focusTimer) {
+        runtime.clearTimeout(focusTimer);
+        focusTimer = null;
+      }
+      input.onchange = null;
+      runtime.window.removeEventListener("focus", onWindowFocus, true);
+    };
+
+    const finish = (value, isError = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (isError) {
+        reject(value);
+      } else {
+        resolve(value);
+      }
+    };
+
+    const onWindowFocus = () => {
+      focusTimer = setTimeout(() => {
+        if (!settled) {
+          finish({ cancelled: true });
+        }
+      }, 180);
+    };
+
+    runtime.window.addEventListener("focus", onWindowFocus, true);
+    input.addEventListener(
+      "cancel",
+      () => {
+        finish({ cancelled: true });
+      },
+      { once: true },
+    );
+
+    input.onchange = async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) {
+        finish({ cancelled: true });
+        return;
+      }
+
+      try {
+        const text = await file.text();
+        const importedGraph = runtime.normalizeGraphRuntimeState(
+          runtime.importGraph(text),
+          runtime.getCurrentChatId(),
+        );
+        runtime.setCurrentGraph(importedGraph);
+        runtime.markVectorStateDirty("导入图谱后需要重建向量索引");
+        runtime.setExtractionCount(0);
+        runtime.setLastExtractedItems([]);
+        runtime.updateLastRecalledItems(importedGraph.lastRecallResult || []);
+        runtime.clearInjectionState();
+        runtime.saveGraphToChat({ reason: "graph-import-complete" });
+        runtime.toastr.success("图谱已导入");
+        finish({ imported: true, handledToast: true });
+      } catch (err) {
+        const error =
+          err instanceof Error ? err : new Error(String(err || "导入失败"));
+        runtime.toastr.error(`导入失败: ${error.message}`);
+        error._stBmeToastHandled = true;
+        finish(error, true);
+      }
+    };
+
+    input.click();
+  });
+}
