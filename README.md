@@ -290,6 +290,7 @@ ST-BME/
 ├── injector.js        # 召回结果格式化注入
 ├── runtime-state.js   # 运行时状态：楼层 hash、dirty 标记、恢复日志
 ├── recall-persistence.js # 持久召回记录（message.extra.bme_recall）
+├── recall-message-ui.js # 消息级召回卡片 UI（子图渲染 + 侧边栏编辑）
 ├── vector-index.js    # 向量索引管理（backend / direct 双模式）
 ├── embedding.js       # 直连 Embedding API 封装
 ├── llm.js             # 记忆 LLM 请求封装
@@ -366,11 +367,14 @@ ST-BME/
 
 消息级 UI：
 
-- 带有 `bme_recall` 的用户气泡会显示 🧠 badge。
-- 点击 badge 可进行：查看详情 / 手动编辑 / 删除 / 重新召回。
-- 手动编辑后会将 `manuallyEdited=true`。
-- 重新召回成功后会覆盖记录并重置 `manuallyEdited=false`。
-- 删除会移除该楼层的持久召回记录。
+- 带有 `bme_recall` 的用户消息会显示内联卡片（含用户消息 + 🧠 召回条 + 记忆数 badge）。
+- 点击召回条展开，显示**力导向子图**（仅渲染被召回的节点和它们之间的边，复用 `GraphRenderer`）。
+- 子图中节点可拖拽/缩放，点击节点打开**右侧边栏**查看节点详情。
+- 操作按钮（展开态底部）：
+  - **✏️ 编辑**：打开侧边栏编辑注入文本（实时 token 计数），保存后标记 `manuallyEdited=true`。
+  - **🗑 删除**：二次确认（按钮变红 3s 超时重置），确认后移除持久召回记录。
+  - **🔄 重新召回**：重新执行召回并覆盖记录，`manuallyEdited` 重置为 `false`。
+- 不再使用 `prompt()` / `alert()` / `confirm()` 浏览器原生对话框。
 
 兼容性说明：
 

@@ -17,7 +17,7 @@ import { getGraphNodeLabel, getNodeDisplayName } from './node-labels.js';
  * @property {boolean} pinned
  */
 
-const FORCE_CONFIG = {
+const DEFAULT_FORCE_CONFIG = {
     repulsion: 500,         // 库仑斥力常数
     springLength: 120,      // 弹簧自然长度
     springK: 0.08,          // 弹簧刚度
@@ -34,9 +34,17 @@ const FORCE_CONFIG = {
 export class GraphRenderer {
     /**
      * @param {HTMLCanvasElement} canvas
-     * @param {string} themeName
+     * @param {string|object} [options] - 主题名称字符串（向后兼容）或配置对象
+     *   options.theme {string} - 主题名称
+     *   options.forceConfig {object} - 力导向参数覆盖
+     *   options.onNodeClick {function} - 节点点击回调
+     *   options.onNodeDoubleClick {function} - 节点双击回调
      */
-    constructor(canvas, themeName = 'crimson') {
+    constructor(canvas, options = 'crimson') {
+        const isLegacy = typeof options === 'string';
+        const themeName = isLegacy ? options : (options?.theme || 'crimson');
+        const forceOverride = isLegacy ? {} : (options?.forceConfig || {});
+
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
         this.nodes = [];
@@ -44,6 +52,7 @@ export class GraphRenderer {
         this.nodeMap = new Map();
         this.colors = getNodeColors(themeName);
         this.themeName = themeName;
+        this.config = { ...DEFAULT_FORCE_CONFIG, ...forceOverride };
 
         // View transform
         this.scale = 1;
@@ -64,7 +73,9 @@ export class GraphRenderer {
         this.animId = null;
 
         // Callbacks
-        this.onNodeSelect = null;
+        this.onNodeSelect = isLegacy ? null : (options?.onNodeSelect || null);
+        this.onNodeClick = isLegacy ? null : (options?.onNodeClick || null);
+        this.onNodeDoubleClick = isLegacy ? null : (options?.onNodeDoubleClick || null);
 
         this._bindEvents();
         this._resizeObserver = new ResizeObserver(() => this._resize());
@@ -138,7 +149,7 @@ export class GraphRenderer {
     // ==================== 力导向计算 ====================
 
     _applyForces() {
-        const { nodes, edges } = this;
+        const { nodes, edges, config } = this;
         const W = this.canvas.width / window.devicePixelRatio;
         const H = this.canvas.height / window.devicePixelRatio;
         const cx = W / 2, cy = H / 2;
@@ -149,7 +160,7 @@ export class GraphRenderer {
                 const a = nodes[i], b = nodes[j];
                 let dx = b.x - a.x, dy = b.y - a.y;
                 let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                let force = FORCE_CONFIG.repulsion / (dist * dist);
+                let force = config.repulsion / (dist * dist);
                 let fx = (dx / dist) * force;
                 let fy = (dy / dist) * force;
                 if (!a.pinned) { a.vx -= fx; a.vy -= fy; }
@@ -162,8 +173,8 @@ export class GraphRenderer {
             const { from, to, strength } = edge;
             let dx = to.x - from.x, dy = to.y - from.y;
             let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            let displacement = dist - FORCE_CONFIG.springLength;
-            let force = FORCE_CONFIG.springK * displacement * strength;
+            let displacement = dist - config.springLength;
+            let force = config.springK * displacement * strength;
             let fx = (dx / dist) * force;
             let fy = (dy / dist) * force;
             if (!from.pinned) { from.vx += fx; from.vy += fy; }
@@ -173,15 +184,15 @@ export class GraphRenderer {
         // 向心力
         for (const node of nodes) {
             if (node.pinned) continue;
-            node.vx += (cx - node.x) * FORCE_CONFIG.centerGravity;
-            node.vy += (cy - node.y) * FORCE_CONFIG.centerGravity;
+            node.vx += (cx - node.x) * config.centerGravity;
+            node.vy += (cy - node.y) * config.centerGravity;
         }
 
         // 更新位置
         for (const node of nodes) {
             if (node.pinned) continue;
-            node.vx *= FORCE_CONFIG.damping;
-            node.vy *= FORCE_CONFIG.damping;
+            node.vx *= config.damping;
+            node.vy *= config.damping;
             node.x += node.vx;
             node.y += node.vy;
             // 边界约束
@@ -252,7 +263,7 @@ export class GraphRenderer {
 
             // 标签
             ctx.fillStyle = `rgba(255,255,255,${isHovered || isSelected ? 0.95 : 0.65})`;
-            ctx.font = `${FORCE_CONFIG.labelFontSize}px Inter, sans-serif`;
+            ctx.font = `${this.config.labelFontSize}px Inter, sans-serif`;
             ctx.textAlign = 'center';
             ctx.fillText(node.label || node.name, node.x, node.y + r + 14);
         }
@@ -261,9 +272,11 @@ export class GraphRenderer {
     }
 
     _drawGrid(W, H) {
+        const sp = this.config.gridSpacing;
+        if (!sp || sp <= 0) return;
+
         const ctx = this.ctx;
-        const sp = FORCE_CONFIG.gridSpacing;
-        ctx.strokeStyle = FORCE_CONFIG.gridColor;
+        ctx.strokeStyle = this.config.gridColor;
         ctx.lineWidth = 0.5;
         const startX = Math.floor(-this.offsetX / this.scale / sp) * sp;
         const startY = Math.floor(-this.offsetY / this.scale / sp) * sp;
@@ -285,8 +298,8 @@ export class GraphRenderer {
     }
 
     _nodeRadius(node) {
-        const min = FORCE_CONFIG.minNodeRadius;
-        const max = FORCE_CONFIG.maxNodeRadius;
+        const min = this.config.minNodeRadius;
+        const max = this.config.maxNodeRadius;
         return min + ((node.importance || 5) / 10) * (max - min);
     }
 
@@ -305,7 +318,7 @@ export class GraphRenderer {
 
     _tick() {
         if (!this.animating) return;
-        if (this.iteration < FORCE_CONFIG.maxIterations) {
+        if (this.iteration < this.config.maxIterations) {
             this._applyForces();
             this.iteration++;
         }
@@ -361,6 +374,7 @@ export class GraphRenderer {
         const { x, y } = this._canvasToWorld(e.clientX, e.clientY);
         const node = this._findNodeAt(x, y);
         this.lastMouse = { x: e.clientX, y: e.clientY };
+        this._dragStartMouse = { x: e.clientX, y: e.clientY };
 
         if (node) {
             this.dragNode = node;
@@ -399,14 +413,22 @@ export class GraphRenderer {
         if (this.dragNode) {
             this.dragNode.pinned = false;
             if (this.isDragging) {
+                const start = this._dragStartMouse || { x: 0, y: 0 };
+                const dx = (this.lastMouse.x - start.x);
+                const dy = (this.lastMouse.y - start.y);
+                const movedDistance = Math.sqrt(dx * dx + dy * dy);
                 // 如果拖动距离很小，视为点击选中
-                this.selectedNode = this.dragNode;
-                if (this.onNodeSelect) this.onNodeSelect(this.dragNode);
+                if (movedDistance < 6) {
+                    this.selectedNode = this.dragNode;
+                    if (this.onNodeSelect) this.onNodeSelect(this.dragNode);
+                    if (this.onNodeClick) this.onNodeClick(this.dragNode);
+                }
             }
         }
         this.dragNode = null;
         this.isDragging = false;
         this.isPanning = false;
+        this._dragStartMouse = null;
     }
 
     _onWheel(e) {
@@ -431,6 +453,7 @@ export class GraphRenderer {
         if (node) {
             this.selectedNode = node;
             if (this.onNodeSelect) this.onNodeSelect(node);
+            if (this.onNodeDoubleClick) this.onNodeDoubleClick(node);
             this._render();
         }
     }

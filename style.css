@@ -2705,3 +2705,434 @@
   }
 }
 
+
+/* --- Recall Message Card --- */
+
+.bme-recall-card {
+  margin-top: 8px;
+  background: var(--bme-surface-container, #1f1f22);
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-left: 3px solid var(--bme-primary, #e94560);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.bme-recall-user-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 4px;
+  font-size: 12px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  font-weight: 500;
+}
+
+.bme-recall-user-text {
+  padding: 4px 14px 10px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--bme-on-surface, #e4e1e6);
+  word-break: break-word;
+}
+
+/* --- Recall Bar (collapse/expand trigger) --- */
+
+.bme-recall-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--bme-surface-low, #1b1b1e);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+  border-top: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+}
+
+.bme-recall-bar:hover {
+  background: var(--bme-surface-high, #2a2a2d);
+}
+
+.bme-recall-bar-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.bme-recall-bar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bme-on-surface, #e4e1e6);
+  flex-shrink: 0;
+}
+
+.bme-recall-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 10px;
+  background: var(--bme-primary-dim, rgba(233, 69, 96, 0.15));
+  color: var(--bme-primary-text, #ffb2b7);
+  flex-shrink: 0;
+}
+
+.bme-recall-token-hint {
+  font-size: 11px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.bme-recall-expand-arrow {
+  font-size: 12px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  transition: transform 0.25s ease;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.bme-recall-card.expanded .bme-recall-expand-arrow {
+  transform: rotate(90deg);
+}
+
+/* --- Recall Body (expanded content) --- */
+
+.bme-recall-body {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition:
+    max-height 0.3s ease,
+    opacity 0.25s ease;
+}
+
+.bme-recall-card.expanded .bme-recall-body {
+  max-height: 600px;
+  opacity: 1;
+}
+
+.bme-recall-canvas-wrap {
+  width: 100%;
+  height: 250px;
+  position: relative;
+  background: var(--bme-surface-lowest, #0e0e11);
+  border-radius: 0;
+}
+
+.bme-recall-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bme-recall-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 120px;
+  font-size: 12px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  font-style: italic;
+}
+
+/* --- Recall Meta --- */
+
+.bme-recall-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  border-top: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+}
+
+.bme-recall-meta-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  background: var(--bme-accent3, #ffc107);
+  color: #000;
+}
+
+/* --- Recall Actions --- */
+
+.bme-recall-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 14px 10px;
+}
+
+.bme-recall-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  background: var(--bme-surface-low, #1b1b1e);
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+  white-space: nowrap;
+}
+
+.bme-recall-action-btn:hover {
+  background: var(--bme-surface-high, #2a2a2d);
+  border-color: var(--bme-border-active, rgba(233, 69, 96, 0.4));
+  color: var(--bme-on-surface, #e4e1e6);
+}
+
+.bme-recall-action-btn.danger {
+  background: rgba(233, 69, 96, 0.2);
+  border-color: var(--bme-primary, #e94560);
+  color: var(--bme-primary, #e94560);
+}
+
+.bme-recall-action-btn.loading {
+  pointer-events: none;
+  opacity: 0.7;
+}
+
+@keyframes bme-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.bme-recall-action-btn.loading .bme-recall-btn-icon {
+  animation: bme-spin 1s linear infinite;
+}
+
+/* --- Recall Sidebar --- */
+
+.bme-recall-sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.bme-recall-sidebar-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bme-recall-sidebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(400px, 90vw);
+  height: 100vh;
+  z-index: 10001;
+  background: var(--bme-surface-container, #1f1f22);
+  border-left: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 0.25s ease;
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.4);
+}
+
+.bme-recall-sidebar.open {
+  transform: translateX(0);
+}
+
+.bme-recall-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+.bme-recall-sidebar-header-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bme-primary, #e94560);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bme-recall-sidebar-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+
+.bme-recall-sidebar-close:hover {
+  background: var(--bme-surface-highest, #353438);
+  color: var(--bme-on-surface, #e4e1e6);
+}
+
+.bme-recall-sidebar-node-info {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  font-size: 12px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bme-recall-sidebar-node-info-row {
+  display: flex;
+  gap: 8px;
+}
+
+.bme-recall-sidebar-node-info-label {
+  font-weight: 600;
+  color: var(--bme-on-surface, #e4e1e6);
+  min-width: 48px;
+}
+
+.bme-recall-sidebar-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bme-recall-sidebar-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+}
+
+.bme-recall-sidebar-textarea {
+  width: 100%;
+  min-height: 200px;
+  padding: 10px;
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--bme-surface-low, #1b1b1e);
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  color: var(--bme-on-surface, #e4e1e6);
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+
+.bme-recall-sidebar-textarea:focus {
+  outline: none;
+  border-color: var(--bme-border-active, rgba(233, 69, 96, 0.4));
+}
+
+.bme-recall-sidebar-readonly {
+  width: 100%;
+  min-height: 120px;
+  padding: 10px;
+  font-family: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--bme-surface-low, #1b1b1e);
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  color: var(--bme-on-surface, #e4e1e6);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  max-height: 40vh;
+}
+
+.bme-recall-sidebar-token-hint {
+  font-size: 11px;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  font-feature-settings: 'tnum';
+}
+
+.bme-recall-sidebar-footer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  flex-shrink: 0;
+}
+
+.bme-recall-sidebar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+  white-space: nowrap;
+}
+
+.bme-recall-sidebar-btn.primary {
+  background: var(--bme-primary-dim, rgba(233, 69, 96, 0.15));
+  border: 1px solid var(--bme-primary, #e94560);
+  color: var(--bme-primary-text, #ffb2b7);
+}
+
+.bme-recall-sidebar-btn.primary:hover {
+  background: var(--bme-primary-glow, rgba(233, 69, 96, 0.35));
+}
+
+.bme-recall-sidebar-btn.secondary {
+  background: transparent;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+}
+
+.bme-recall-sidebar-btn.secondary:hover {
+  background: var(--bme-surface-high, #2a2a2d);
+  color: var(--bme-on-surface, #e4e1e6);
+}
+
+/* --- Recall Card Responsive --- */
+
+@media (max-width: 768px) {
+  .bme-recall-canvas-wrap {
+    height: 180px;
+  }
+
+  .bme-recall-sidebar {
+    width: 100vw;
+  }
+
+  .bme-recall-actions {
+    gap: 4px;
+  }
+
+  .bme-recall-action-btn {
+    padding: 4px 8px;
+    font-size: 10px;
+  }
+}

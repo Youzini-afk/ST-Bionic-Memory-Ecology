@@ -196,6 +196,12 @@ import {
   resolveGenerationTargetUserMessageIndex,
   writePersistedRecallToUserMessage,
 } from "./recall-persistence.js";
+import {
+  createRecallCardElement,
+  openRecallSidebar,
+  updateRecallCardData,
+} from "./recall-message-ui.js";
+
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -1123,48 +1129,67 @@ function resolveMessageIndexFromElement(messageElement, fallbackIndex = null) {
   return Number.isFinite(fallbackIndex) ? fallbackIndex : null;
 }
 
-function buildMessageRecallBadgeTitle(messageIndex, record) {
-  const lines = [`ST-BME 持久召回 · 楼层 ${messageIndex}`];
-  if (record?.manuallyEdited) {
-    lines.push("来源：手动编辑");
-  }
-  if (Number.isFinite(record?.generationCount)) {
-    lines.push(`已回退使用：${record.generationCount} 次`);
-  }
-  if (record?.updatedAt) {
-    lines.push(`更新：${record.updatedAt}`);
-  }
-  return lines.join("\n");
+function getRecallCardCallbacks() {
+  return {
+    onEdit: (messageIndex) => {
+      const record = getMessageRecallRecord(messageIndex);
+      if (!record) return;
+      openRecallSidebar({
+        mode: "edit",
+        messageIndex,
+        record,
+        node: null,
+        graph: currentGraph,
+        callbacks: {
+          onSave: (idx, newText) => {
+            const edited = editMessageRecallRecord(idx, newText);
+            if (edited) {
+              toastr.success("已保存手动编辑");
+            } else {
+              toastr.warning("编辑失败：注入文本不能为空");
+            }
+            schedulePersistedRecallMessageUiRefresh();
+          },
+          estimateTokens,
+        },
+      });
+    },
+    onDelete: (messageIndex) => {
+      if (removeMessageRecallRecord(messageIndex)) {
+        toastr.success("已删除持久召回注入");
+        schedulePersistedRecallMessageUiRefresh();
+      }
+    },
+    onRerunRecall: async (messageIndex) => {
+      const result = await rerunRecallForMessage(messageIndex);
+      if (result?.status === "completed") {
+        toastr.success("重新召回完成");
+      }
+      schedulePersistedRecallMessageUiRefresh();
+    },
+    onNodeClick: (messageIndex, node) => {
+      const record = getMessageRecallRecord(messageIndex);
+      if (!record) return;
+      openRecallSidebar({
+        mode: "view",
+        messageIndex,
+        record,
+        node,
+        graph: currentGraph,
+        callbacks: {
+          onSave: (idx, newText) => {
+            const edited = editMessageRecallRecord(idx, newText);
+            if (edited) toastr.success("已保存手动编辑");
+            else toastr.warning("编辑失败：注入文本不能为空");
+            schedulePersistedRecallMessageUiRefresh();
+          },
+          estimateTokens,
+        },
+      });
+    },
+  };
 }
 
-function createMessageRecallBadgeElement(messageIndex, record) {
-  const badge = document.createElement("button");
-  badge.type = "button";
-  badge.className = "st-bme-recall-badge";
-  badge.textContent = "🧠";
-  badge.dataset.messageIndex = String(messageIndex);
-  badge.style.marginInlineStart = "6px";
-  badge.style.padding = "0 4px";
-  badge.style.borderRadius = "10px";
-  badge.style.border = "1px solid var(--SmartThemeBorderColor, #666)";
-  badge.style.background = "var(--SmartThemeQuoteColor, rgba(120, 120, 120, 0.18))";
-  badge.style.cursor = "pointer";
-  badge.style.fontSize = "12px";
-  badge.style.lineHeight = "1.4";
-
-  badge.addEventListener("click", (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const indexFromDataset = Number.parseInt(badge.dataset.messageIndex, 10);
-    void onMessageRecallBadgeClick(
-      Number.isFinite(indexFromDataset) ? indexFromDataset : messageIndex,
-    );
-  });
-
-  badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
-  badge.dataset.updatedAt = String(record?.updatedAt || "");
-  return badge;
-}
 
 function refreshPersistedRecallMessageUi() {
   const context = getContext();
@@ -1174,47 +1199,72 @@ function refreshPersistedRecallMessageUi() {
   const chatRoot = document.getElementById("chat");
   if (!chatRoot) return;
 
+  const themeName = getSettings()?.panelTheme || "crimson";
+  const callbacks = getRecallCardCallbacks();
+
   const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
   for (let fallbackIndex = 0; fallbackIndex < messageElements.length; fallbackIndex++) {
     const messageElement = messageElements[fallbackIndex];
     const messageIndex = resolveMessageIndexFromElement(messageElement, fallbackIndex);
     if (!Number.isFinite(messageIndex)) continue;
 
-    const existingBadges = Array.from(
+    // Clean up old-style badges (migration from v1)
+    const oldBadges = Array.from(
       messageElement.querySelectorAll?.(".st-bme-recall-badge") || [],
     );
-    const existingBadge = existingBadges[0] || null;
-    for (let index = 1; index < existingBadges.length; index++) {
-      existingBadges[index].remove();
+    for (const oldBadge of oldBadges) oldBadge.remove();
+
+    // Find existing card
+    const existingCards = Array.from(
+      messageElement.querySelectorAll?.(".bme-recall-card") || [],
+    );
+    let existingCard = null;
+    for (const card of existingCards) {
+      if (card.dataset.messageIndex === String(messageIndex)) {
+        existingCard = card;
+      } else {
+        card._bmeDestroyRenderer?.();
+        card.remove();
+      }
     }
 
     const message = chat[messageIndex];
     if (!message?.is_user) {
-      existingBadge?.remove();
+      if (existingCard) {
+        existingCard._bmeDestroyRenderer?.();
+        existingCard.remove();
+      }
       continue;
     }
 
     const record = readPersistedRecallFromUserMessage(chat, messageIndex);
     if (!record?.injectionText) {
-      existingBadge?.remove();
+      if (existingCard) {
+        existingCard._bmeDestroyRenderer?.();
+        existingCard.remove();
+      }
       continue;
     }
 
-    const badge = existingBadge || createMessageRecallBadgeElement(messageIndex, record);
-    badge.dataset.messageIndex = String(messageIndex);
-    const nextUpdatedAt = String(record.updatedAt || "");
-    if (badge.dataset.updatedAt !== nextUpdatedAt) {
-      badge.dataset.updatedAt = nextUpdatedAt;
-      badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
-    }
+    if (existingCard) {
+      // Update data without rebuilding (preserves expanded state)
+      updateRecallCardData(existingCard, record);
+    } else {
+      // Create new card
+      const card = createRecallCardElement({
+        messageIndex,
+        record,
+        userMessageText: message.mes || "",
+        graph: currentGraph,
+        themeName,
+        callbacks,
+      });
 
-    if (!existingBadge) {
       const anchor =
-        messageElement.querySelector?.(".mes_buttons") ||
-        messageElement.querySelector?.(".mes_title") ||
-        messageElement.querySelector?.(".mes_header") ||
+        messageElement.querySelector?.(".mes_block") ||
+        messageElement.querySelector?.(".mes_text")?.parentElement ||
         messageElement;
-      anchor.appendChild(badge);
+      anchor.appendChild(card);
     }
   }
 }
@@ -1225,22 +1275,6 @@ function schedulePersistedRecallMessageUiRefresh(delayMs = 120) {
     persistedRecallUiRefreshTimer = null;
     refreshPersistedRecallMessageUi();
   }, Math.max(16, Number.parseInt(delayMs, 10) || 120));
-}
-
-function showMessageRecallDetail(messageIndex, record) {
-  const details = [
-    `楼层: ${messageIndex}`,
-    `来源: ${record.recallSource || "unknown"}`,
-    `Hook: ${record.hookName || "-"}`,
-    `tokenEstimate: ${record.tokenEstimate || 0}`,
-    `generationCount: ${record.generationCount || 0}`,
-    `manuallyEdited: ${record.manuallyEdited ? "true" : "false"}`,
-    `updatedAt: ${record.updatedAt || "-"}`,
-    "",
-    "注入内容：",
-    record.injectionText || "(empty)",
-  ].join("\n");
-  globalThis.alert?.(details);
 }
 
 async function rerunRecallForMessage(messageIndex) {
@@ -1273,57 +1307,6 @@ async function rerunRecallForMessage(messageIndex) {
   return result;
 }
 
-async function onMessageRecallBadgeClick(messageIndex) {
-  const record = getMessageRecallRecord(messageIndex);
-  if (!record) {
-    toastr.info("该楼层暂无持久召回记录");
-    schedulePersistedRecallMessageUiRefresh();
-    return;
-  }
-
-  const choiceRaw = globalThis.prompt?.(
-    [
-      `ST-BME 持久召回（楼层 ${messageIndex}）`,
-      "1 查看详情",
-      "2 手动编辑",
-      "3 删除",
-      "4 重新召回",
-      "请输入序号：",
-    ].join("\n"),
-    "1",
-  );
-  const choice = String(choiceRaw || "").trim().toLowerCase();
-  if (!choice) return;
-
-  if (choice === "1" || choice === "view" || choice === "detail") {
-    showMessageRecallDetail(messageIndex, record);
-  } else if (choice === "2" || choice === "edit") {
-    const nextText = globalThis.prompt?.(
-      `编辑楼层 ${messageIndex} 的持久召回注入文本：`,
-      record.injectionText || "",
-    );
-    if (nextText !== null && nextText !== undefined) {
-      const edited = editMessageRecallRecord(messageIndex, nextText);
-      if (edited) {
-        toastr.success("已保存手动编辑并标记 manuallyEdited=true");
-      } else {
-        toastr.warning("编辑失败：注入文本不能为空");
-      }
-    }
-  } else if (choice === "3" || choice === "delete") {
-    const confirmed = globalThis.confirm?.(`确认删除楼层 ${messageIndex} 的持久召回注入？`);
-    if (confirmed && removeMessageRecallRecord(messageIndex)) {
-      toastr.success("已删除持久召回注入");
-    }
-  } else if (choice === "4" || choice === "reroll" || choice === "recall") {
-    const rerunResult = await rerunRecallForMessage(messageIndex);
-    if (rerunResult?.status === "completed") {
-      toastr.success("重新召回完成，已覆盖持久召回记录");
-    }
-  }
-
-  schedulePersistedRecallMessageUiRefresh();
-}
 
 function getSendTextareaValue() {
   return String(document.getElementById("send_textarea")?.value ?? "");
