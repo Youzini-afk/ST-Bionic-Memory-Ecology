@@ -222,3 +222,146 @@ export async function runExtractionController(runtime) {
     runtime.setIsExtracting(false);
   }
 }
+
+export async function onManualExtractController(runtime) {
+  if (runtime.getIsExtracting()) {
+    runtime.toastr.info("记忆提取正在进行中，请稍候");
+    return;
+  }
+  if (!runtime.ensureGraphMutationReady("手动提取")) return;
+  if (!(await runtime.recoverHistoryIfNeeded("manual-extract"))) return;
+  if (!runtime.getCurrentGraph()) {
+    runtime.setCurrentGraph(
+      runtime.normalizeGraphRuntimeState(
+        runtime.createEmptyGraph(),
+        runtime.getCurrentChatId(),
+      ),
+    );
+  }
+
+  const context = runtime.getContext();
+  const chat = context.chat;
+  if (!Array.isArray(chat) || chat.length === 0) {
+    runtime.toastr.info("当前聊天为空，暂无可提取内容");
+    return;
+  }
+
+  const assistantTurns = runtime.getAssistantTurns(chat);
+  const lastProcessed = runtime.getLastProcessedAssistantFloor();
+  const pendingAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
+  if (pendingAssistantTurns.length === 0) {
+    runtime.toastr.info("没有待提取的新回复");
+    return;
+  }
+
+  const settings = runtime.getSettings();
+  const extractEvery = runtime.clampInt(settings.extractEvery, 1, 1, 50);
+  const totals = {
+    newNodes: 0,
+    updatedNodes: 0,
+    newEdges: 0,
+    batches: 0,
+  };
+  const warnings = [];
+
+  runtime.setIsExtracting(true);
+  const extractionController = runtime.beginStageAbortController("extraction");
+  const extractionSignal = extractionController.signal;
+  runtime.setLastExtractionStatus(
+    "手动提取中",
+    `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
+    "running",
+    { syncRuntime: true, toastKind: "info", toastTitle: "ST-BME 手动提取" },
+  );
+  try {
+    while (true) {
+      const pendingTurns = runtime
+        .getAssistantTurns(chat)
+        .filter((i) => i > runtime.getLastProcessedAssistantFloor());
+      if (pendingTurns.length === 0) break;
+
+      const batchAssistantTurns = pendingTurns.slice(0, extractEvery);
+      const startIdx = batchAssistantTurns[0];
+      const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+      const batchResult = await runtime.executeExtractionBatch({
+        chat,
+        startIdx,
+        endIdx,
+        settings,
+        signal: extractionSignal,
+      });
+
+      if (!batchResult.success) {
+        throw new Error(
+          batchResult.error ||
+            batchResult?.result?.error ||
+            "手动提取未返回有效结果",
+        );
+      }
+
+      totals.newNodes += batchResult.result.newNodes || 0;
+      totals.updatedNodes += batchResult.result.updatedNodes || 0;
+      totals.newEdges += batchResult.result.newEdges || 0;
+      totals.batches++;
+
+      if (Array.isArray(batchResult.effects?.warnings)) {
+        warnings.push(...batchResult.effects.warnings);
+      }
+    }
+
+    if (totals.batches === 0) {
+      runtime.setLastExtractionStatus(
+        "无待提取内容",
+        "没有新的 assistant 回复需要处理",
+        "info",
+        {
+          syncRuntime: true,
+        },
+      );
+      runtime.toastr.info("没有待提取的新回复");
+      return;
+    }
+
+    runtime.toastr.success(
+      `提取完成：${totals.batches} 批，新建 ${totals.newNodes}，更新 ${totals.updatedNodes}，新边 ${totals.newEdges}`,
+    );
+    runtime.setLastExtractionStatus(
+      "手动提取完成",
+      `${totals.batches} 批 · 新建 ${totals.newNodes} · 更新 ${totals.updatedNodes} · 新边 ${totals.newEdges}`,
+      "success",
+      {
+        syncRuntime: true,
+        toastKind: "success",
+        toastTitle: "ST-BME 手动提取",
+      },
+    );
+    if (warnings.length > 0) {
+      runtime.toastr.warning(warnings.slice(0, 2).join("；"), "ST-BME 提取警告", {
+        timeOut: 5000,
+      });
+    }
+  } catch (e) {
+    if (runtime.isAbortError(e)) {
+      runtime.setLastExtractionStatus(
+        "手动提取已终止",
+        e?.message || "已手动终止当前提取",
+        "warning",
+        {
+          syncRuntime: true,
+        },
+      );
+      return;
+    }
+    runtime.console.error("[ST-BME] 手动提取失败:", e);
+    runtime.setLastExtractionStatus("手动提取失败", e?.message || String(e), "error", {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 手动提取",
+    });
+    runtime.toastr.error(`手动提取失败: ${e.message || e}`);
+  } finally {
+    runtime.finishStageAbortController("extraction", extractionController);
+    runtime.setIsExtracting(false);
+    runtime.refreshPanelLiveState();
+  }
+}

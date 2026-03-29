@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { onManualExtractController } from "../extraction-controller.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(__dirname, "../index.js");
@@ -167,6 +168,7 @@ async function testManualExtractNoBatchesDoesNotStayRunning() {
     isAbortError() {
       return false;
     },
+    onManualExtractController,
     finishStageAbortController() {},
     result: null,
   };
