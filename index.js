@@ -1780,6 +1780,32 @@ function hasLikelySelectedChatContext(context = getContext()) {
   );
 }
 
+function hasHostMetadataReadySignal(metadata = {}) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+
+  if (normalizeChatIdCandidate(metadata.integrity)) {
+    return true;
+  }
+
+  const chatIdentityCandidates = [
+    metadata.chat_id,
+    metadata.chatId,
+    metadata.session_id,
+    metadata.sessionId,
+  ];
+  if (
+    chatIdentityCandidates.some((candidate) =>
+      Boolean(normalizeChatIdCandidate(candidate)),
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function isHostChatMetadataReady(context = getContext()) {
   if (
     !context?.chatMetadata ||
@@ -1790,12 +1816,10 @@ function isHostChatMetadataReady(context = getContext()) {
   }
 
   const metadata = context.chatMetadata;
-  // SillyTavern 在 CHAT_CHANGED 之前会为已加载聊天补上 integrity。
-  if (normalizeChatIdCandidate(metadata.integrity)) {
-    return true;
-  }
+  // 仅接受宿主“强信号”，避免把中间态/占位 metadata 误判为 ready。
+  if (hasHostMetadataReadySignal(metadata)) return true;
 
-  return Object.keys(metadata).length > 0;
+  return false;
 }
 
 function resolveCurrentChatIdentity(context = getContext()) {
@@ -5139,6 +5163,7 @@ function onMessageReceived() {
     isAssistantChatMessage,
     isFreshRecallInputRecord,
     isGraphMetadataWriteAllowed,
+    syncGraphLoadFromLiveContext,
     maybeCaptureGraphShadowSnapshot,
     maybeFlushQueuedGraphPersist,
     notifyExtractionIssue,

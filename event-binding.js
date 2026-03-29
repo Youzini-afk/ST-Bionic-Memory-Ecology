@@ -263,6 +263,17 @@ export async function onBeforeCombinePromptsController(runtime) {
 }
 
 export function onMessageReceivedController(runtime) {
+  const loadState = runtime.getGraphPersistenceState?.()?.loadState || "";
+  if (
+    loadState === "loading" ||
+    loadState === "shadow-restored" ||
+    loadState === "blocked"
+  ) {
+    runtime.syncGraphLoadFromLiveContext?.({
+      source: "message-received-reconcile",
+    });
+  }
+
   if (runtime.getCurrentGraph()) {
     if (
       runtime.getGraphPersistenceState()?.pendingPersist &&

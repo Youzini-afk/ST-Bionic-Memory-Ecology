@@ -528,6 +528,52 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-metadata-placeholder",
+    chatMetadata: {
+      placeholder: "host-loading",
+    },
+  });
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "metadata-placeholder-not-ready",
+  });
+  const live = harness.api.getGraphPersistenceLiveState();
+
+  assert.equal(
+    result.loadState,
+    "loading",
+    "无 integrity 的占位 metadata 不能视作 ready",
+  );
+  assert.equal(
+    result.reason,
+    "graph-metadata-missing",
+    "应继续等待正式 graph metadata",
+  );
+  assert.equal(live.writesBlocked, true);
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-metadata-chatid-ready",
+    chatMetadata: {
+      chatId: "chat-metadata-chatid-ready",
+    },
+  });
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "metadata-chatid-ready",
+  });
+
+  assert.equal(result.loadState, "empty-confirmed");
+  assert.equal(
+    harness.api.getGraphPersistenceLiveState().writesBlocked,
+    false,
+    "当 metadata 提供 chatId/sessionId 等强信号时，可进入 ready-empty",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "",
     globalChatId: "",
     characterId: "char-1",
@@ -637,6 +683,45 @@ result = {
   assert.ok(
     harness.api.readGraphShadowSnapshot("chat-message"),
     "onMessageReceived 应只做会话快照兜底",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-late-reconcile",
+    chatMetadata: undefined,
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(createEmptyGraph(), "chat-late-reconcile"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "blocked",
+    chatId: "chat-late-reconcile",
+    reason: "chat-metadata-timeout",
+    revision: 2,
+    writesBlocked: true,
+  });
+  harness.api.setChatContext({
+    ...harness.api.getChatContext(),
+    chatId: "chat-late-reconcile",
+    chatMetadata: {
+      integrity: "chat-late-reconcile-ready",
+      st_bme_graph: createMeaningfulGraph("chat-late-reconcile", "late-official"),
+    },
+  });
+
+  harness.api.onMessageReceived();
+
+  const live = harness.api.getGraphPersistenceLiveState();
+  assert.equal(
+    live.loadState,
+    "loaded",
+    "BLOCKED 后 onMessageReceived 应触发元数据重探测并自动恢复",
+  );
+  assert.equal(live.writesBlocked, false);
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-late-official",
   );
 }
 
