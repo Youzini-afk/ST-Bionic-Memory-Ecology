@@ -57,13 +57,17 @@ export function resolveRecallInputController(
   runtime,
 ) {
   const overrideText = runtime.normalizeRecallInputText(
-    override?.userMessage || "",
+    override?.userMessage || override?.overrideUserMessage || "",
   );
   if (overrideText) {
     return {
       userMessage: overrideText,
-      source: String(override?.source || "override"),
-      sourceLabel: String(override?.sourceLabel || "发送前拦截"),
+      generationType: String(override?.generationType || "normal"),
+      targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex) ? override.targetUserMessageIndex : null,
+      source: String(override?.source || override?.overrideSource || "override"),
+      sourceLabel: String(
+        override?.sourceLabel || override?.overrideSourceLabel || "发送前拦截",
+      ),
       recentMessages: runtime.buildRecallRecentMessages(
         chat,
         recentContextMessageLimit,
@@ -115,6 +119,8 @@ export function resolveRecallInputController(
 
   return {
     userMessage,
+    generationType: "normal",
+    targetUserMessageIndex: null,
     source,
     sourceLabel: runtime.getRecallUserMessageSourceLabel(source),
     recentMessages: runtime.buildRecallRecentMessages(
@@ -149,6 +155,7 @@ export function applyRecallInjectionController(
     runtime.console.log(
       `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
     );
+    runtime.persistRecallInjectionRecord?.({ recallInput, result, injectionText, tokenEstimate: tokens });
   }
 
   const injectionTransport = runtime.applyModuleInjectionPrompt(
@@ -372,10 +379,16 @@ export async function runRecallController(runtime, options = {}) {
         options: runtime.buildRecallRetrieveOptions(settings, context),
       });
 
-      runtime.applyRecallInjection(settings, recallInput, recentMessages, result);
+      const applied = runtime.applyRecallInjection(
+        settings,
+        recallInput,
+        recentMessages,
+        result,
+      );
       return runtime.createRecallRunResult("completed", {
         reason: "召回完成",
         selectedNodeIds: result.selectedNodeIds || [],
+        injectionText: applied?.injectionText || "",
       });
     } catch (e) {
       if (runtime.isAbortError(e)) {

@@ -58,6 +58,16 @@ import {
   onGenerationAfterCommandsController,
 } from "../event-binding.js";
 import { onRerollController } from "../extraction-controller.js";
+import {
+  buildPersistedRecallRecord,
+  readPersistedRecallFromUserMessage,
+  removePersistedRecallFromUserMessage,
+  resolveFinalRecallInjectionSource,
+  resolveGenerationTargetUserMessageIndex,
+  writePersistedRecallToUserMessage,
+  bumpPersistedRecallGenerationCount,
+  markPersistedRecallManualEdit,
+} from "../recall-persistence.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -290,6 +300,7 @@ function createGenerationRecallHarness() {
       }),
       chat: [],
       runRecallCalls: [],
+      applyFinalCalls: [],
       createRecallInputRecord,
       createRecallRunResult,
       hashRecallInput,
@@ -310,6 +321,24 @@ function createGenerationRecallHarness() {
       GRAPH_PERSISTENCE_META_KEY,
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
+      readPersistedRecallFromUserMessage: () => null,
+      resolveFinalRecallInjectionSource: ({ freshRecallResult = null } = {}) => ({
+        source: freshRecallResult?.didRecall ? "fresh" : "none",
+        injectionText: String(freshRecallResult?.injectionText || ""),
+        record: null,
+      }),
+      bumpPersistedRecallGenerationCount: () => null,
+      applyModuleInjectionPrompt: () => ({}),
+      getSettings: () => ({}),
+      triggerChatMetadataSave: () => "debounced",
+      refreshPanelLiveState: () => {},
+      resolveGenerationTargetUserMessageIndex: (chat = [], { generationType } = {}) => {
+        const normalized = String(generationType || "normal");
+        if (!Array.isArray(chat) || chat.length === 0) return null;
+        if (normalized === "normal") return chat[chat.length - 1]?.is_user ? chat.length - 1 : null;
+        for (let index = chat.length - 1; index >= 0; index--) if (chat[index]?.is_user) return index;
+        return null;
+      },
     };
     vm.createContext(context);
     vm.runInContext(
@@ -317,11 +346,150 @@ function createGenerationRecallHarness() {
       context,
       { filename: indexPath },
     );
+    context.applyFinalRecallInjectionForGeneration = (payload = {}) => {
+      context.applyFinalCalls.push({ ...payload });
+      return {
+        source: "fresh",
+        targetUserMessageIndex: null,
+      };
+    };
     context.runRecall = async (options = {}) => {
       context.runRecallCalls.push({ ...options });
       return { status: "completed", didRecall: true, ok: true };
     };
     return context;
+  });
+}
+
+function createMessageRecallUiHarness() {
+  return fs.readFile(indexPath, "utf8").then((source) => {
+    const start = source.indexOf("function getMessageRecallRecord(messageIndex) {");
+    const end = source.indexOf("function getSendTextareaValue() {");
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error("无法从 index.js 提取消息级召回 UI 定义");
+    }
+
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const chat = [
+      {
+        is_user: true,
+        mes: "u0",
+        extra: {
+          bme_recall: {
+            version: 1,
+            injectionText: "persisted-memory",
+            selectedNodeIds: ["n1"],
+            recallInput: "u0",
+            recallSource: "chat-last-user",
+            hookName: "GENERATION_AFTER_COMMANDS",
+            tokenEstimate: 16,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+            generationCount: 0,
+            manuallyEdited: false,
+          },
+        },
+      },
+    ];
+
+    const badgeHost = {
+      children: [],
+      appendChild(child) {
+        child.parent = this;
+        this.children.push(child);
+      },
+    };
+    const messageEl = {
+      dataset: {},
+      getAttribute(name) {
+        if (name === "mesid" || name === "data-mesid") return "0";
+        return null;
+      },
+      querySelector(selector) {
+        if (selector === ".mes_buttons") return badgeHost;
+        return null;
+      },
+    };
+    const chatRoot = {
+      querySelectorAll(selector) {
+        if (selector === ".mes") return [messageEl];
+        if (selector === ".st-bme-recall-badge") {
+          return badgeHost.children.filter(
+            (child) => child.className === "st-bme-recall-badge",
+          );
+        }
+        return [];
+      },
+    };
+
+    const context = {
+      console,
+      Date,
+      clearTimeout,
+      setTimeout,
+      result: null,
+      persistedRecallUiRefreshTimer: null,
+      lastInjectionContent: "",
+      lastRecallSentUserMessage: createRecallInputRecord(),
+      runtimeStatus: createUiStatus("待命", "", "idle"),
+      getContext: () => ({ chat }),
+      document: {
+        getElementById(id) {
+          return id === "chat" ? chatRoot : null;
+        },
+        createElement() {
+          return {
+            className: "",
+            textContent: "",
+            dataset: {},
+            style: {},
+            listeners: {},
+            parent: null,
+            addEventListener(type, handler) {
+              this.listeners[type] = handler;
+            },
+            remove() {
+              if (!this.parent?.children) return;
+              this.parent.children = this.parent.children.filter((item) => item !== this);
+            },
+          };
+        },
+      },
+      readPersistedRecallFromUserMessage,
+      writePersistedRecallToUserMessage,
+      removePersistedRecallFromUserMessage,
+      markPersistedRecallManualEdit,
+      bumpPersistedRecallGenerationCount,
+      buildPersistedRecallRecord,
+      resolveGenerationTargetUserMessageIndex,
+      resolveFinalRecallInjectionSource,
+      normalizeRecallInputText,
+      estimateTokens: (text = "") => String(text || "").length,
+      triggerChatMetadataSave: () => "debounced",
+      getSettings: () => ({}),
+      applyModuleInjectionPrompt: () => ({}),
+      createUiStatus,
+      refreshPanelLiveState: () => {},
+      runRecall: async () => ({ status: "completed", didRecall: true, injectionText: "fresh" }),
+      applyFinalRecallInjectionForGeneration: () => ({ source: "fresh" }),
+      toastr: { info() {}, success() {}, warning() {}, error() {} },
+      promptResponses: [],
+      prompt(defaultText = "") {
+        return context.promptResponses.length > 0 ? context.promptResponses.shift() : defaultText;
+      },
+      confirm: () => true,
+      alertMessages: [],
+      alert(message) {
+        context.alertMessages.push(String(message || ""));
+      },
+    };
+    vm.createContext(context);
+    vm.runInContext(
+      `${snippet}\nresult = { refreshPersistedRecallMessageUi, onMessageRecallBadgeClick };`,
+      context,
+      { filename: indexPath },
+    );
+    return { context, chat, badgeHost };
   });
 }
 
@@ -1419,6 +1587,130 @@ async function testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine() {
   assert.equal(transaction.hookStates.GENERATION_AFTER_COMMANDS, "skipped");
 }
 
+async function testGenerationRecallAppliesFinalInjectionOncePerTransaction() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "同一轮仅一次最终注入" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.applyFinalCalls.length, 1);
+  assert.equal(harness.applyFinalCalls[0].generationType, "normal");
+}
+
+async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
+  const chat = [
+    { is_user: true, mes: "u0" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+  ];
+
+  const record = buildPersistedRecallRecord({
+    injectionText: "fresh-memory",
+    selectedNodeIds: ["n1", "n2"],
+    recallInput: "u2",
+    recallSource: "chat-last-user",
+    hookName: "GENERATION_AFTER_COMMANDS",
+    tokenEstimate: 24,
+    manuallyEdited: false,
+    nowIso: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(writePersistedRecallToUserMessage(chat, 2, record), true);
+
+  const loaded = readPersistedRecallFromUserMessage(chat, 2);
+  assert.ok(loaded);
+  assert.equal(loaded.injectionText, "fresh-memory");
+  assert.equal(loaded.generationCount, 0);
+  assert.equal(loaded.manuallyEdited, false);
+
+  chat[2].mes = "u2 edited";
+  assert.equal(readPersistedRecallFromUserMessage(chat, 2)?.injectionText, "fresh-memory");
+
+  const bumped = bumpPersistedRecallGenerationCount(chat, 2);
+  assert.equal(bumped?.generationCount, 1);
+
+  const edited = markPersistedRecallManualEdit(
+    chat,
+    2,
+    true,
+    "2026-01-01T00:00:01.000Z",
+  );
+  assert.equal(edited?.manuallyEdited, true);
+  assert.equal(edited?.updatedAt, "2026-01-01T00:00:01.000Z");
+
+  const overwrite = buildPersistedRecallRecord(
+    {
+      injectionText: "system-rerecall",
+      selectedNodeIds: ["n3"],
+      recallInput: "u2 edited",
+      recallSource: "message-floor-rerecall",
+      hookName: "MESSAGE_RECALL_BADGE_RERUN",
+      tokenEstimate: 30,
+      manuallyEdited: false,
+      nowIso: "2026-01-01T00:00:02.000Z",
+    },
+    readPersistedRecallFromUserMessage(chat, 2),
+  );
+  assert.equal(writePersistedRecallToUserMessage(chat, 2, overwrite), true);
+  const overwritten = readPersistedRecallFromUserMessage(chat, 2);
+  assert.equal(overwritten?.manuallyEdited, false);
+  assert.equal(overwritten?.injectionText, "system-rerecall");
+
+  assert.equal(removePersistedRecallFromUserMessage(chat, 2), true);
+  assert.equal(readPersistedRecallFromUserMessage(chat, 2), null);
+  assert.equal(readPersistedRecallFromUserMessage([{ is_user: true, mes: "legacy" }], 0), null);
+}
+
+async function testPersistentRecallSourceResolutionAndTargetRouting() {
+  const chat = [
+    { is_user: true, mes: "u0" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a3" },
+  ];
+
+  assert.equal(resolveGenerationTargetUserMessageIndex(chat, { generationType: "normal" }), null);
+  assert.equal(resolveGenerationTargetUserMessageIndex(chat, { generationType: "continue" }), 2);
+
+  const withTailUser = [...chat, { is_user: true, mes: "u4" }];
+  assert.equal(resolveGenerationTargetUserMessageIndex(withTailUser, { generationType: "normal" }), 4);
+
+  const freshWins = resolveFinalRecallInjectionSource({
+    freshRecallResult: { status: "completed", didRecall: true, injectionText: "fresh" },
+    persistedRecord: { injectionText: "persisted" },
+  });
+  assert.equal(freshWins.source, "fresh");
+  assert.equal(freshWins.injectionText, "fresh");
+
+  const fallback = resolveFinalRecallInjectionSource({
+    freshRecallResult: { status: "skipped", didRecall: false, injectionText: "" },
+    persistedRecord: { injectionText: "persisted" },
+  });
+  assert.equal(fallback.source, "persisted");
+  assert.equal(fallback.injectionText, "persisted");
+}
+
+async function testMessageRecallUiBadgeEntryPoints() {
+  const { context, chat, badgeHost } = await createMessageRecallUiHarness();
+  context.result.refreshPersistedRecallMessageUi();
+  assert.equal(badgeHost.children.length, 1);
+  assert.equal(typeof badgeHost.children[0].listeners.click, "function");
+
+  context.promptResponses = ["1"];
+  await context.result.onMessageRecallBadgeClick(0);
+  assert.equal(context.alertMessages.length, 1);
+
+  context.promptResponses = ["2", "edited-by-user"];
+  await context.result.onMessageRecallBadgeClick(0);
+  const edited = readPersistedRecallFromUserMessage(chat, 0);
+  assert.equal(edited?.injectionText, "edited-by-user");
+  assert.equal(edited?.manuallyEdited, true);
+
+  context.promptResponses = ["3"];
+  await context.result.onMessageRecallBadgeClick(0);
+  assert.equal(readPersistedRecallFromUserMessage(chat, 0), null);
+}
+
 async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   const harness = await createRerollHarness();
   harness.chat = [
@@ -1768,6 +2060,10 @@ await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
+await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
+await testPersistentRecallDataLayerLifecycleAndCompatibility();
+await testPersistentRecallSourceResolutionAndTargetRouting();
+await testMessageRecallUiBadgeEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testRerollRejectsMissingRecoveryPoint();
 await testRerollFallsBackToDirectExtractForUnprocessedFloor();

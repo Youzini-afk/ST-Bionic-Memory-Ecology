@@ -186,6 +186,16 @@ import {
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
 } from "./chat-history.js";
+import {
+  buildPersistedRecallRecord,
+  bumpPersistedRecallGenerationCount,
+  markPersistedRecallManualEdit,
+  readPersistedRecallFromUserMessage,
+  removePersistedRecallFromUserMessage,
+  resolveFinalRecallInjectionSource,
+  resolveGenerationTargetUserMessageIndex,
+  writePersistedRecallToUserMessage,
+} from "./recall-persistence.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -447,6 +457,7 @@ let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
+let persistedRecallUiRefreshTimer = null;
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const stageNoticeHandles = {
   extraction: null,
@@ -941,6 +952,349 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
   if (pendingRecallSendIntent.hash && pendingRecallSendIntent.hash === hash) {
     pendingRecallSendIntent = createRecallInputRecord();
   }
+}
+
+function getMessageRecallRecord(messageIndex) {
+  const chat = getContext()?.chat;
+  return readPersistedRecallFromUserMessage(chat, messageIndex);
+}
+
+function persistRecallInjectionRecord({
+  recallInput = {},
+  result = {},
+  injectionText = "",
+  tokenEstimate = 0,
+} = {}) {
+  const chat = getContext()?.chat;
+  if (!Array.isArray(chat)) return null;
+
+  const generationType = String(recallInput?.generationType || "normal").trim() || "normal";
+  let resolvedTargetIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
+    ? recallInput.targetUserMessageIndex
+    : resolveGenerationTargetUserMessageIndex(chat, { generationType });
+
+  if (
+    !Number.isFinite(resolvedTargetIndex) &&
+    Number.isFinite(lastRecallSentUserMessage?.messageId) &&
+    chat[lastRecallSentUserMessage.messageId]?.is_user
+  ) {
+    resolvedTargetIndex = lastRecallSentUserMessage.messageId;
+  }
+
+  if (!Number.isFinite(resolvedTargetIndex)) return null;
+
+  const record = buildPersistedRecallRecord(
+    {
+      injectionText,
+      selectedNodeIds: result?.selectedNodeIds || [],
+      recallInput: String(recallInput?.userMessage || ""),
+      recallSource: String(recallInput?.source || ""),
+      hookName: String(recallInput?.hookName || ""),
+      tokenEstimate,
+      manuallyEdited: false,
+    },
+    readPersistedRecallFromUserMessage(chat, resolvedTargetIndex),
+  );
+  if (!writePersistedRecallToUserMessage(chat, resolvedTargetIndex, record)) {
+    return null;
+  }
+
+  triggerChatMetadataSave(getContext(), { immediate: false });
+  return {
+    index: resolvedTargetIndex,
+    record,
+  };
+}
+
+function removeMessageRecallRecord(messageIndex) {
+  const chat = getContext()?.chat;
+  if (!Array.isArray(chat)) return false;
+  const removed = removePersistedRecallFromUserMessage(chat, messageIndex);
+  if (removed) {
+    triggerChatMetadataSave(getContext(), { immediate: false });
+  }
+  return removed;
+}
+
+function editMessageRecallRecord(messageIndex, nextInjectionText) {
+  const chat = getContext()?.chat;
+  if (!Array.isArray(chat)) return null;
+  const current = readPersistedRecallFromUserMessage(chat, messageIndex);
+  if (!current) return null;
+
+  const normalizedText = normalizeRecallInputText(nextInjectionText);
+  if (!normalizedText) return null;
+  const nowIso = new Date().toISOString();
+  const nextRecord = {
+    ...current,
+    injectionText: normalizedText,
+    tokenEstimate: estimateTokens(normalizedText),
+    updatedAt: nowIso,
+  };
+  if (!writePersistedRecallToUserMessage(chat, messageIndex, nextRecord)) {
+    return null;
+  }
+  const edited = markPersistedRecallManualEdit(chat, messageIndex, true, nowIso);
+  if (!edited) return null;
+
+  triggerChatMetadataSave(getContext(), { immediate: false });
+  return edited;
+}
+
+function applyFinalRecallInjectionForGeneration({
+  generationType = "normal",
+  freshRecallResult = null,
+} = {}) {
+  const chat = getContext()?.chat;
+  if (!Array.isArray(chat)) {
+    applyModuleInjectionPrompt("", getSettings());
+    return { source: "none", targetUserMessageIndex: null, usedText: "" };
+  }
+
+  let targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+    generationType,
+  });
+  if (
+    !Number.isFinite(targetUserMessageIndex) &&
+    Number.isFinite(lastRecallSentUserMessage?.messageId) &&
+    chat[lastRecallSentUserMessage.messageId]?.is_user
+  ) {
+    targetUserMessageIndex = lastRecallSentUserMessage.messageId;
+  }
+
+  const persistedRecord = Number.isFinite(targetUserMessageIndex)
+    ? readPersistedRecallFromUserMessage(chat, targetUserMessageIndex)
+    : null;
+  const resolved = resolveFinalRecallInjectionSource({
+    freshRecallResult,
+    persistedRecord,
+  });
+
+  if (resolved.source === "persisted") {
+    applyModuleInjectionPrompt(resolved.injectionText || "", getSettings());
+  } else if (resolved.source === "none") {
+    applyModuleInjectionPrompt("", getSettings());
+  }
+
+  if (resolved.source === "persisted" && Number.isFinite(targetUserMessageIndex)) {
+    bumpPersistedRecallGenerationCount(chat, targetUserMessageIndex);
+    triggerChatMetadataSave(getContext(), { immediate: false });
+  }
+
+  if (resolved.source === "fresh") {
+    runtimeStatus = createUiStatus(
+      "召回已注入",
+      "本轮已使用最新召回结果",
+      "success",
+    );
+  } else if (resolved.source === "persisted") {
+    lastInjectionContent = resolved.injectionText || "";
+    runtimeStatus = createUiStatus("召回回退", "已使用消息楼层持久化注入", "info");
+  } else {
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+  }
+  refreshPanelLiveState();
+  schedulePersistedRecallMessageUiRefresh();
+
+  return {
+    source: resolved.source,
+    isFallback: resolved.source === "persisted",
+    targetUserMessageIndex,
+    usedText: resolved.injectionText || "",
+  };
+}
+
+function resolveMessageIndexFromElement(messageElement, fallbackIndex = null) {
+  if (!messageElement) return Number.isFinite(fallbackIndex) ? fallbackIndex : null;
+
+  const candidates = [
+    messageElement.getAttribute?.("mesid"),
+    messageElement.getAttribute?.("data-mesid"),
+    messageElement.getAttribute?.("data-message-id"),
+    messageElement.dataset?.mesid,
+    messageElement.dataset?.messageId,
+  ];
+  for (const candidate of candidates) {
+    const parsed = Number.parseInt(candidate, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  return Number.isFinite(fallbackIndex) ? fallbackIndex : null;
+}
+
+function buildMessageRecallBadgeTitle(messageIndex, record) {
+  const lines = [`ST-BME 持久召回 · 楼层 ${messageIndex}`];
+  if (record?.manuallyEdited) {
+    lines.push("来源：手动编辑");
+  }
+  if (Number.isFinite(record?.generationCount)) {
+    lines.push(`已回退使用：${record.generationCount} 次`);
+  }
+  if (record?.updatedAt) {
+    lines.push(`更新：${record.updatedAt}`);
+  }
+  return lines.join("\n");
+}
+
+function refreshPersistedRecallMessageUi() {
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat) || typeof document?.getElementById !== "function") return;
+
+  const chatRoot = document.getElementById("chat");
+  if (!chatRoot) return;
+
+  chatRoot
+    .querySelectorAll?.(".st-bme-recall-badge")
+    ?.forEach?.((badge) => badge.remove());
+
+  const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
+  for (let fallbackIndex = 0; fallbackIndex < messageElements.length; fallbackIndex++) {
+    const messageElement = messageElements[fallbackIndex];
+    const messageIndex = resolveMessageIndexFromElement(messageElement, fallbackIndex);
+    if (!Number.isFinite(messageIndex)) continue;
+
+    const message = chat[messageIndex];
+    if (!message?.is_user) continue;
+
+    const record = readPersistedRecallFromUserMessage(chat, messageIndex);
+    if (!record?.injectionText) continue;
+
+    const badge = document.createElement("button");
+    badge.type = "button";
+    badge.className = "st-bme-recall-badge";
+    badge.textContent = "🧠";
+    badge.title = buildMessageRecallBadgeTitle(messageIndex, record);
+    badge.dataset.messageIndex = String(messageIndex);
+    badge.style.marginInlineStart = "6px";
+    badge.style.padding = "0 4px";
+    badge.style.borderRadius = "10px";
+    badge.style.border = "1px solid var(--SmartThemeBorderColor, #666)";
+    badge.style.background = "var(--SmartThemeQuoteColor, rgba(120, 120, 120, 0.18))";
+    badge.style.cursor = "pointer";
+    badge.style.fontSize = "12px";
+    badge.style.lineHeight = "1.4";
+
+    badge.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void onMessageRecallBadgeClick(messageIndex);
+    });
+
+    const anchor =
+      messageElement.querySelector(".mes_buttons") ||
+      messageElement.querySelector(".mes_title") ||
+      messageElement.querySelector(".mes_header") ||
+      messageElement;
+    anchor.appendChild(badge);
+  }
+}
+
+function schedulePersistedRecallMessageUiRefresh(delayMs = 16) {
+  clearTimeout(persistedRecallUiRefreshTimer);
+  persistedRecallUiRefreshTimer = setTimeout(() => {
+    persistedRecallUiRefreshTimer = null;
+    refreshPersistedRecallMessageUi();
+  }, Math.max(0, Number.parseInt(delayMs, 10) || 0));
+}
+
+function showMessageRecallDetail(messageIndex, record) {
+  const details = [
+    `楼层: ${messageIndex}`,
+    `来源: ${record.recallSource || "unknown"}`,
+    `Hook: ${record.hookName || "-"}`,
+    `tokenEstimate: ${record.tokenEstimate || 0}`,
+    `generationCount: ${record.generationCount || 0}`,
+    `manuallyEdited: ${record.manuallyEdited ? "true" : "false"}`,
+    `updatedAt: ${record.updatedAt || "-"}`,
+    "",
+    "注入内容：",
+    record.injectionText || "(empty)",
+  ].join("\n");
+  globalThis.alert?.(details);
+}
+
+async function rerunRecallForMessage(messageIndex) {
+  const chat = getContext()?.chat;
+  const message = Array.isArray(chat) ? chat[messageIndex] : null;
+  if (!message?.is_user) {
+    toastr.info("仅用户消息支持重新召回");
+    return null;
+  }
+
+  const userMessage = normalizeRecallInputText(message.mes || "");
+  if (!userMessage) {
+    toastr.info("该楼层内容为空，无法重新召回");
+    return null;
+  }
+
+  const result = await runRecall({
+    overrideUserMessage: userMessage,
+    overrideSource: "message-floor-rerecall",
+    overrideSourceLabel: `用户楼层 ${messageIndex}`,
+    generationType: "history",
+    targetUserMessageIndex: messageIndex,
+    includeSyntheticUserMessage: false,
+    hookName: "MESSAGE_RECALL_BADGE_RERUN",
+  });
+  applyFinalRecallInjectionForGeneration({
+    generationType: "history",
+    freshRecallResult: result,
+  });
+  return result;
+}
+
+async function onMessageRecallBadgeClick(messageIndex) {
+  const record = getMessageRecallRecord(messageIndex);
+  if (!record) {
+    toastr.info("该楼层暂无持久召回记录");
+    schedulePersistedRecallMessageUiRefresh();
+    return;
+  }
+
+  const choiceRaw = globalThis.prompt?.(
+    [
+      `ST-BME 持久召回（楼层 ${messageIndex}）`,
+      "1 查看详情",
+      "2 手动编辑",
+      "3 删除",
+      "4 重新召回",
+      "请输入序号：",
+    ].join("\n"),
+    "1",
+  );
+  const choice = String(choiceRaw || "").trim().toLowerCase();
+  if (!choice) return;
+
+  if (choice === "1" || choice === "view" || choice === "detail") {
+    showMessageRecallDetail(messageIndex, record);
+  } else if (choice === "2" || choice === "edit") {
+    const nextText = globalThis.prompt?.(
+      `编辑楼层 ${messageIndex} 的持久召回注入文本：`,
+      record.injectionText || "",
+    );
+    if (nextText !== null && nextText !== undefined) {
+      const edited = editMessageRecallRecord(messageIndex, nextText);
+      if (edited) {
+        toastr.success("已保存手动编辑并标记 manuallyEdited=true");
+      } else {
+        toastr.warning("编辑失败：注入文本不能为空");
+      }
+    }
+  } else if (choice === "3" || choice === "delete") {
+    const confirmed = globalThis.confirm?.(`确认删除楼层 ${messageIndex} 的持久召回注入？`);
+    if (confirmed && removeMessageRecallRecord(messageIndex)) {
+      toastr.success("已删除持久召回注入");
+    }
+  } else if (choice === "4" || choice === "reroll" || choice === "recall") {
+    const rerunResult = await rerunRecallForMessage(messageIndex);
+    if (rerunResult?.status === "completed") {
+      toastr.success("重新召回完成，已覆盖持久召回记录");
+    }
+  }
+
+  schedulePersistedRecallMessageUiRefresh();
 }
 
 function getSendTextareaValue() {
@@ -3100,9 +3454,32 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     return null;
   }
 
-  return generationType === "normal"
-    ? buildNormalGenerationRecallInput(chat)
-    : buildHistoryGenerationRecallInput(chat);
+  const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+    generationType,
+  });
+  if (!Number.isFinite(targetUserMessageIndex)) {
+    return {
+      generationType,
+      targetUserMessageIndex: null,
+    };
+  }
+
+  if (generationType !== "normal") {
+    const historyInput = buildHistoryGenerationRecallInput(chat);
+    if (!historyInput) {
+      return {
+        generationType,
+        targetUserMessageIndex,
+      };
+    }
+    return {
+      ...historyInput,
+      generationType,
+      targetUserMessageIndex,
+    };
+  }
+
+  return buildNormalGenerationRecallInput(chat);
 }
 
 function buildNormalGenerationRecallInput(chat) {
@@ -3110,6 +3487,7 @@ function buildNormalGenerationRecallInput(chat) {
   const tailUserText = lastNonSystemMessage?.is_user
     ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
     : "";
+  const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, { generationType: "normal" });
   const textareaText = normalizeRecallInputText(
     pendingRecallSendIntent.text || getSendTextareaValue(),
   );
@@ -3118,6 +3496,8 @@ function buildNormalGenerationRecallInput(chat) {
 
   return {
     overrideUserMessage: userMessage,
+    generationType: "normal",
+    targetUserMessageIndex,
     overrideSource: tailUserText ? "chat-tail-user" : "send-intent",
     overrideSourceLabel: tailUserText ? "当前用户楼层" : "发送意图",
     includeSyntheticUserMessage: !tailUserText,
@@ -3129,20 +3509,33 @@ function buildHistoryGenerationRecallInput(chat) {
     getLatestUserChatMessage(chat)?.mes || lastRecallSentUserMessage.text,
   );
   if (!latestUserText) return null;
+  const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+    generationType: "history",
+  });
 
   return {
     overrideUserMessage: latestUserText,
-    overrideSource: "chat-last-user",
-    overrideSourceLabel: "历史最后用户楼层",
+    generationType: "history",
+    targetUserMessageIndex,
+    overrideSource: Number.isFinite(targetUserMessageIndex)
+      ? "chat-last-user"
+      : "chat-last-user-missing",
+    overrideSourceLabel: Number.isFinite(targetUserMessageIndex) ? "历史最后用户楼层" : "历史用户楼层缺失",
     includeSyntheticUserMessage: false,
   };
 }
 
 function buildPreGenerationRecallKey(type, options = {}) {
+  const targetUserMessageIndex = Number.isFinite(options.targetUserMessageIndex)
+    ? options.targetUserMessageIndex
+    : "none";
+  const seedText =
+    options.overrideUserMessage || options.userMessage || `@target:${targetUserMessageIndex}`;
+
   return [
     getCurrentChatId(),
     String(type || "normal").trim() || "normal",
-    hashRecallInput(options.overrideUserMessage || ""),
+    hashRecallInput(seedText),
   ].join(":");
 }
 
@@ -4230,6 +4623,7 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
     recentMessages,
     result,
     {
+      persistRecallInjectionRecord,
       applyModuleInjectionPrompt,
       console,
       estimateTokens,
@@ -4361,6 +4755,7 @@ function onChatChanged() {
     dismissAllStageNotices,
     getPendingHistoryRecoveryTimer: () => pendingHistoryRecoveryTimer,
     installSendIntentHooks,
+    refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     setLastPreGenerationRecallAt: (value) => {
       lastPreGenerationRecallAt = value;
     },
@@ -4382,6 +4777,7 @@ function onChatChanged() {
 
 function onChatLoaded() {
   return onChatLoadedController({
+    refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     syncGraphLoadFromLiveContext,
   });
 }
@@ -4391,6 +4787,7 @@ function onMessageSent(messageId) {
     {
       getContext,
       recordRecallSentUserMessage,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     },
     messageId,
   );
@@ -4400,6 +4797,7 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   return onMessageDeletedController(
     {
       invalidateRecallAfterHistoryMutation,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
     chatLengthOrMessageId,
@@ -4411,6 +4809,7 @@ function onMessageEdited(messageId, meta = null) {
   return onMessageEditedController(
     {
       invalidateRecallAfterHistoryMutation,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
     messageId,
@@ -4422,6 +4821,7 @@ function onMessageSwiped(messageId, meta = null) {
   return onMessageSwipedController(
     {
       invalidateRecallAfterHistoryMutation,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
     messageId,
@@ -4432,6 +4832,7 @@ function onMessageSwiped(messageId, meta = null) {
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
   return await onGenerationAfterCommandsController(
     {
+      applyFinalRecallInjectionForGeneration,
       buildGenerationAfterCommandsRecallInput,
       createGenerationRecallContext,
       getContext,
@@ -4447,6 +4848,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
 
 async function onBeforeCombinePrompts() {
   return await onBeforeCombinePromptsController({
+    applyFinalRecallInjectionForGeneration,
     buildHistoryGenerationRecallInput,
     buildNormalGenerationRecallInput,
     createGenerationRecallContext,
@@ -4473,6 +4875,7 @@ function onMessageReceived() {
     notifyExtractionIssue,
     queueMicrotask,
     runExtraction,
+    refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     setPendingRecallSendIntent: (record) => {
       pendingRecallSendIntent = record;
     },
@@ -4829,5 +5232,6 @@ async function onReembedDirect() {
     updateSettings: updateModuleSettings,
   });
 
+  schedulePersistedRecallMessageUiRefresh(120);
   console.log("[ST-BME] 初始化完成");
 })();

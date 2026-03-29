@@ -127,12 +127,14 @@ export function onChatChangedController(runtime) {
   runtime.clearInjectionState();
   runtime.clearRecallInputTracking();
   runtime.installSendIntentHooks();
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export function onChatLoadedController(runtime) {
   runtime.syncGraphLoadFromLiveContext({
     source: "chat-loaded",
   });
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export function onMessageSentController(runtime, messageId) {
@@ -143,6 +145,7 @@ export function onMessageSentController(runtime, messageId) {
 
   if (!message?.is_user) return;
   runtime.recordRecallSentUserMessage(messageId, message.mes || "");
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export function onMessageDeletedController(
@@ -156,16 +159,19 @@ export function onMessageDeletedController(
     chatLengthOrMessageId,
     meta,
   );
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export function onMessageEditedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export function onMessageSwipedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
   runtime.scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+  runtime.refreshPersistedRecallMessageUi?.();
 }
 
 export async function onGenerationAfterCommandsController(
@@ -183,7 +189,7 @@ export async function onGenerationAfterCommandsController(
     params,
     chat,
   );
-  if (!recallOptions?.overrideUserMessage) return;
+  if (!recallOptions) return;
 
   const recallContext = runtime.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
@@ -211,6 +217,11 @@ export async function onGenerationAfterCommandsController(
     recallContext.hookName,
     runtime.getGenerationRecallHookStateFromResult(recallResult),
   );
+
+  runtime.applyFinalRecallInjectionForGeneration({
+    generationType: recallContext.generationType,
+    freshRecallResult: recallResult,
+  });
 }
 
 export async function onBeforeCombinePromptsController(runtime) {
@@ -244,6 +255,11 @@ export async function onBeforeCombinePromptsController(runtime) {
     recallContext.hookName,
     runtime.getGenerationRecallHookStateFromResult(recallResult),
   );
+
+  runtime.applyFinalRecallInjectionForGeneration({
+    generationType: recallContext.generationType,
+    freshRecallResult: recallResult,
+  });
 }
 
 export function onMessageReceivedController(runtime) {
@@ -280,4 +296,5 @@ export function onMessageReceivedController(runtime) {
       });
     });
   }
+  runtime.refreshPersistedRecallMessageUi?.();
 }

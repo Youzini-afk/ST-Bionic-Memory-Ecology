@@ -289,6 +289,7 @@ ST-BME/
 ├── retriever.js       # 向量候选、图扩散、混合评分、召回
 ├── injector.js        # 召回结果格式化注入
 ├── runtime-state.js   # 运行时状态：楼层 hash、dirty 标记、恢复日志
+├── recall-persistence.js # 持久召回记录（message.extra.bme_recall）
 ├── vector-index.js    # 向量索引管理（backend / direct 双模式）
 ├── embedding.js       # 直连 Embedding API 封装
 ├── llm.js             # 记忆 LLM 请求封装
@@ -311,6 +312,7 @@ ST-BME/
 - **图谱数据** → `chat_metadata.st_bme_graph`（跟随聊天保存）
 - **插件设置** → SillyTavern 的 `extension_settings.st_bme`
 - **向量索引** → 后端模式走酒馆 API；直连模式存在节点内
+- **召回持久注入** → `chat[x].extra.bme_recall`（消息级）
 
 ### 事件挂载
 
@@ -336,6 +338,44 @@ ST-BME/
 - **Recalled**（动态）：根据当前对话召回
 
 每层内进一步按用途分桶：当前状态 / 情景事件 / 反思锚点 / 规则约束。
+
+### 持久召回注入（`message.extra.bme_recall`）
+
+从本版本开始，召回注入支持消息级持久化，存放在对应用户楼层：
+
+- 路径：`chat[x].extra.bme_recall`
+- 主要字段：
+  - `version`
+  - `injectionText`
+  - `selectedNodeIds`
+  - `recallInput`
+  - `recallSource`
+  - `hookName`
+  - `tokenEstimate`
+  - `createdAt` / `updatedAt`
+  - `generationCount`（**仅**在该持久注入被实际用作生成回退时递增）
+  - `manuallyEdited`（仅表示来源是否为人工编辑）
+
+注入优先级（避免双重注入）：
+
+1. **本轮有新召回成功**：仅使用新召回注入（临时注入），并覆盖写入目标用户楼层的 `bme_recall`。
+2. **本轮无新召回结果**：仅从“当前生成对应的用户楼层”读取 `bme_recall` 作为回退注入。
+3. **两者都无**：清空注入。
+
+> `manuallyEdited` 不参与优先级判断，不会强制覆盖系统召回。
+
+消息级 UI：
+
+- 带有 `bme_recall` 的用户气泡会显示 🧠 badge。
+- 点击 badge 可进行：查看详情 / 手动编辑 / 删除 / 重新召回。
+- 手动编辑后会将 `manuallyEdited=true`。
+- 重新召回成功后会覆盖记录并重置 `manuallyEdited=false`。
+- 删除会移除该楼层的持久召回记录。
+
+兼容性说明：
+
+- 旧聊天（无 `extra` 或无 `bme_recall`）会自动按“无持久记录”处理，不会报错。
+- badge 依赖酒馆消息 DOM 的楼层索引属性；若第三方主题重写消息结构，可能需要额外适配。
 
 ---
 
