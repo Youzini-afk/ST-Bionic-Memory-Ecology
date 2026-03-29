@@ -1486,8 +1486,13 @@ function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
 
   const runAttempt = () => {
     if (sessionId !== persistedRecallUiRefreshSession) return;
-    persistedRecallUiRefreshTimer = null;
+    if (persistedRecallUiRefreshTimer) {
+      clearTimeout(persistedRecallUiRefreshTimer);
+      persistedRecallUiRefreshTimer = null;
+    }
+
     const summary = refreshPersistedRecallMessageUi();
+
     const shouldRetry =
       (summary.status === "missing_chat_root" ||
         summary.status === "waiting_dom" ||

@@ -1007,13 +1007,24 @@ async function testRecallCardDelayedDomInsertionEventuallyRenders() {
   ];
   const harness = await createRecallUiHarness({ chat });
   try {
+    let updateCalls = 0;
+    const originalUpdateRecallCardData = harness.context.updateRecallCardData;
+    harness.context.updateRecallCardData = (...args) => {
+      updateCalls += 1;
+      return originalUpdateRecallCardData(...args);
+    };
+
     harness.api.schedulePersistedRecallMessageUiRefresh();
     await waitForTick();
     const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
     harness.chatRoot.appendChild(messageElement);
     await waitForTick();
     await waitForTick();
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await waitForTick();
+
     assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
+    assert.equal(updateCalls, 0, "observer 先触发后不应再被旧 timeout 重复刷新");
   } finally {
     harness.restoreGlobals();
   }
