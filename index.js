@@ -23,6 +23,13 @@ import {
   generateReflection,
   generateSynopsis,
 } from "./extractor.js";
+import { executeExtractionBatchController } from "./extraction-controller.js";
+import {
+  applyRecallInjectionController,
+  buildRecallRecentMessagesController,
+  getRecallUserMessageSourceLabelController,
+  resolveRecallInputController,
+} from "./recall-controller.js";
 import {
   createEmptyGraph,
   deserializeGraph,
@@ -3048,108 +3055,27 @@ function getLastNonSystemChatMessage(chat) {
 }
 
 function buildRecallRecentMessages(chat, limit, syntheticUserMessage = "") {
-  if (!Array.isArray(chat) || limit <= 0) return [];
-
-  const recentMessages = [];
-  for (
-    let index = chat.length - 1;
-    index >= 0 && recentMessages.length < limit;
-    index--
-  ) {
-    const message = chat[index];
-    if (message?.is_system) continue;
-    recentMessages.unshift(formatRecallContextLine(message));
-  }
-
-  const normalizedSynthetic = normalizeRecallInputText(syntheticUserMessage);
-  if (!normalizedSynthetic) return recentMessages;
-
-  const syntheticLine = `[user]: ${normalizedSynthetic}`;
-  if (recentMessages[recentMessages.length - 1] !== syntheticLine) {
-    recentMessages.push(syntheticLine);
-    while (recentMessages.length > limit) {
-      recentMessages.shift();
-    }
-  }
-
-  return recentMessages;
+  return buildRecallRecentMessagesController(chat, limit, syntheticUserMessage, {
+    formatRecallContextLine,
+    normalizeRecallInputText,
+  });
 }
 
 function getRecallUserMessageSourceLabel(source) {
-  switch (source) {
-    case "send-intent":
-      return "发送意图";
-    case "chat-tail-user":
-      return "当前用户楼层";
-    case "message-sent":
-      return "已发送用户楼层";
-    case "chat-last-user":
-      return "历史最后用户楼层";
-    default:
-      return "未知";
-  }
+  return getRecallUserMessageSourceLabelController(source);
 }
 
 function resolveRecallInput(chat, recentContextMessageLimit, override = null) {
-  const overrideText = normalizeRecallInputText(override?.userMessage || "");
-  if (overrideText) {
-    return {
-      userMessage: overrideText,
-      source: String(override?.source || "override"),
-      sourceLabel: String(override?.sourceLabel || "发送前拦截"),
-      recentMessages: buildRecallRecentMessages(
-        chat,
-        recentContextMessageLimit,
-        override?.includeSyntheticUserMessage === false ? "" : overrideText,
-      ),
-    };
-  }
-
-  const latestUserMessage = getLatestUserChatMessage(chat);
-  const latestUserText = normalizeRecallInputText(latestUserMessage?.mes || "");
-  const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
-  const tailUserText = lastNonSystemMessage?.is_user
-    ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
-    : "";
-  const pendingIntentText = isFreshRecallInputRecord(pendingRecallSendIntent)
-    ? pendingRecallSendIntent.text
-    : "";
-  const sentUserText = isFreshRecallInputRecord(lastRecallSentUserMessage)
-    ? lastRecallSentUserMessage.text
-    : "";
-
-  let userMessage = "";
-  let source = "";
-  let syntheticUserMessage = "";
-
-  if (pendingIntentText) {
-    userMessage = pendingIntentText;
-    source = "send-intent";
-    syntheticUserMessage = pendingIntentText;
-  } else if (tailUserText) {
-    userMessage = tailUserText;
-    source = "chat-tail-user";
-  } else if (sentUserText) {
-    userMessage = sentUserText;
-    source = "message-sent";
-    if (!latestUserText || latestUserText !== sentUserText) {
-      syntheticUserMessage = sentUserText;
-    }
-  } else if (latestUserText) {
-    userMessage = latestUserText;
-    source = "chat-last-user";
-  }
-
-  return {
-    userMessage,
-    source,
-    sourceLabel: getRecallUserMessageSourceLabel(source),
-    recentMessages: buildRecallRecentMessages(
-      chat,
-      recentContextMessageLimit,
-      syntheticUserMessage,
-    ),
-  };
+  return resolveRecallInputController(chat, recentContextMessageLimit, override, {
+    buildRecallRecentMessages,
+    getLastNonSystemChatMessage,
+    getLatestUserChatMessage,
+    getRecallUserMessageSourceLabel,
+    isFreshRecallInputRecord,
+    lastRecallSentUserMessage,
+    normalizeRecallInputText,
+    pendingRecallSendIntent,
+  });
 }
 
 function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
@@ -3811,114 +3737,33 @@ async function executeExtractionBatch({
   smartTriggerDecision = null,
   signal = undefined,
 } = {}) {
-  ensureCurrentGraphRuntimeState();
-  throwIfAborted(signal, "提取已终止");
-  const lastProcessed = getLastProcessedAssistantFloor();
-  const extractionCountBefore = extractionCount;
-  const beforeSnapshot = cloneGraphSnapshot(currentGraph);
-  const messages = buildExtractionMessages(chat, startIdx, endIdx, settings);
-  const batchStatus = createBatchStatusSkeleton({
-    processedRange: [startIdx, endIdx],
-    extractionCountBefore,
-  });
-
-  console.log(
-    `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
-      (smartTriggerDecision?.triggered
-        ? ` [智能触发 score=${smartTriggerDecision.score}; ${smartTriggerDecision.reasons.join(" / ")}]`
-        : ""),
-  );
-
-  const result = await extractMemories({
-    graph: currentGraph,
-    messages,
-    startSeq: startIdx,
-    endSeq: endIdx,
-    lastProcessedSeq: lastProcessed,
-    schema: getSchema(),
-    embeddingConfig: getEmbeddingConfig(),
-    extractPrompt: undefined,
-    settings,
-    signal,
-    onStreamProgress: ({ previewText, receivedChars }) => {
-      const preview =
-        previewText?.length > 60
-          ? "…" + previewText.slice(-60)
-          : previewText || "";
-      setLastExtractionStatus(
-        "AI 生成中",
-        `${preview}  [${receivedChars}字]`,
-        "running",
-        { noticeMarquee: true },
-      );
+  return await executeExtractionBatchController(
+    {
+      appendBatchJournal,
+      buildExtractionMessages,
+      cloneGraphSnapshot,
+      computePostProcessArtifacts,
+      console,
+      createBatchJournalEntry,
+      createBatchStatusSkeleton,
+      ensureCurrentGraphRuntimeState,
+      extractMemories,
+      finalizeBatchStatus,
+      getCurrentGraph: () => currentGraph,
+      getEmbeddingConfig,
+      getExtractionCount: () => extractionCount,
+      getLastProcessedAssistantFloor,
+      getSchema,
+      handleExtractionSuccess,
+      saveGraphToChat,
+      setBatchStageOutcome,
+      setLastExtractionStatus,
+      shouldAdvanceProcessedHistory,
+      throwIfAborted,
+      updateProcessedHistorySnapshot,
     },
-  });
-
-  if (!result.success) {
-    setBatchStageOutcome(
-      batchStatus,
-      "core",
-      "failed",
-      result?.error || "提取阶段未返回有效操作",
-    );
-    finalizeBatchStatus(batchStatus, extractionCount);
-    currentGraph.historyState.lastBatchStatus = batchStatus;
-    return {
-      success: false,
-      result,
-      effects: null,
-      batchStatus,
-      error: result?.error || "提取阶段未返回有效操作",
-    };
-  }
-
-  setBatchStageOutcome(batchStatus, "core", "success");
-  const effects = await handleExtractionSuccess(
-    result,
-    endIdx,
-    settings,
-    signal,
-    batchStatus,
+    { chat, startIdx, endIdx, settings, smartTriggerDecision, signal },
   );
-  const finalizedBatchStatus =
-    effects?.batchStatus || finalizeBatchStatus(batchStatus, extractionCount);
-  currentGraph.historyState.lastBatchStatus = {
-    ...finalizedBatchStatus,
-    historyAdvanced: shouldAdvanceProcessedHistory(finalizedBatchStatus),
-  };
-
-  if (currentGraph.historyState.lastBatchStatus.historyAdvanced) {
-    updateProcessedHistorySnapshot(chat, endIdx);
-  }
-
-  const afterSnapshot = cloneGraphSnapshot(currentGraph);
-  const postProcessArtifacts = computePostProcessArtifacts(
-    beforeSnapshot,
-    afterSnapshot,
-    effects?.postProcessArtifacts || [],
-  );
-  appendBatchJournal(
-    currentGraph,
-    createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
-      processedRange: [startIdx, endIdx],
-      postProcessArtifacts,
-      vectorHashesInserted: effects?.vectorHashesInserted || [],
-      extractionCountBefore,
-    }),
-  );
-  saveGraphToChat({ reason: "extraction-batch-complete" });
-
-  return {
-    success: finalizedBatchStatus.completed,
-    result,
-    effects,
-    batchStatus: finalizedBatchStatus,
-    error: finalizedBatchStatus.completed
-      ? ""
-      : effects?.vectorError ||
-        finalizedBatchStatus.errors?.[0] ||
-        "批次未完成 finalize 闭环",
-  };
 }
 
 async function replayExtractionFromHistory(chat, settings, signal = undefined, expectedChatId = undefined) {
@@ -4442,92 +4287,35 @@ async function runExtraction() {
 }
 
 function applyRecallInjection(settings, recallInput, recentMessages, result) {
-  const injectionText = formatInjection(result, getSchema()).trim();
-  lastInjectionContent = injectionText;
-  const retrievalMeta = result?.meta?.retrieval || {};
-  const llmMeta = retrievalMeta.llm || {
-    status: settings.recallEnableLLM ? "unknown" : "disabled",
-    reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
-    candidatePool: 0,
-  };
-
-  if (injectionText) {
-    const tokens = estimateTokens(injectionText);
-    console.log(
-      `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
-    );
-  }
-
-  const injectionTransport = applyModuleInjectionPrompt(
-    injectionText,
+  return applyRecallInjectionController(
     settings,
-  );
-  recordInjectionSnapshot("recall", {
-    taskType: "recall",
-    source: recallInput.source,
-    sourceLabel: recallInput.sourceLabel,
-    hookName: recallInput.hookName,
+    recallInput,
     recentMessages,
-    selectedNodeIds: result.selectedNodeIds || [],
-    retrievalMeta,
-    llmMeta,
-    stats: result.stats || {},
-    injectionText,
-    transport: injectionTransport,
-  });
-
-  currentGraph.lastRecallResult = result.selectedNodeIds;
-  updateLastRecalledItems(result.selectedNodeIds || []);
-  saveGraphToChat({ reason: "recall-result-updated" });
-
-  const llmLabel =
-    llmMeta.status === "llm"
-      ? "LLM 精排完成"
-      : llmMeta.status === "fallback"
-        ? "LLM 回退评分"
-        : llmMeta.status === "disabled"
-          ? "仅评分排序"
-          : "召回完成";
-  const hookLabel = getRecallHookLabel(recallInput.hookName);
-  setLastRecallStatus(
-    llmLabel,
-    [
-      hookLabel,
-      recallInput.sourceLabel,
-      `ctx ${recentMessages.length}`,
-      `vector ${retrievalMeta.vectorHits ?? 0}`,
-      retrievalMeta.vectorMergedHits
-        ? `merged ${retrievalMeta.vectorMergedHits}`
-        : "",
-      `diffusion ${retrievalMeta.diffusionHits ?? 0}`,
-      retrievalMeta.candidatePoolAfterDpp
-        ? `dpp ${retrievalMeta.candidatePoolAfterDpp}`
-        : "",
-      `llm pool ${llmMeta.candidatePool ?? 0}`,
-      `recall ${result.stats.recallCount}`,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    llmMeta.status === "fallback" ? "warning" : "success",
+    result,
     {
-      syncRuntime: true,
-      toastKind: "",
+      applyModuleInjectionPrompt,
+      console,
+      estimateTokens,
+      formatInjection,
+      getLastRecallFallbackNoticeAt: () => lastRecallFallbackNoticeAt,
+      getRecallHookLabel,
+      getSchema,
+      recordInjectionSnapshot,
+      saveGraphToChat,
+      setCurrentGraphLastRecallResult: (selectedNodeIds) => {
+        currentGraph.lastRecallResult = selectedNodeIds;
+      },
+      setLastInjectionContent: (value) => {
+        lastInjectionContent = value;
+      },
+      setLastRecallFallbackNoticeAt: (value) => {
+        lastRecallFallbackNoticeAt = value;
+      },
+      setLastRecallStatus,
+      toastr,
+      updateLastRecalledItems,
     },
   );
-
-  if (llmMeta.status === "fallback") {
-    const now = Date.now();
-    if (now - lastRecallFallbackNoticeAt > 15000) {
-      lastRecallFallbackNoticeAt = now;
-      toastr.warning(
-        llmMeta.reason || "LLM 精排未成功，已改用评分排序并继续注入记忆",
-        "ST-BME 召回提示",
-        { timeOut: 4500 },
-      );
-    }
-  }
-
-  return { injectionText, retrievalMeta, llmMeta };
 }
 
 /**
