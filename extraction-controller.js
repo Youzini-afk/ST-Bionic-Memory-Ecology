@@ -223,7 +223,7 @@ export async function runExtractionController(runtime) {
   }
 }
 
-export async function onManualExtractController(runtime) {
+export async function onManualExtractController(runtime, options = {}) {
   if (runtime.getIsExtracting()) {
     runtime.toastr.info("记忆提取正在进行中，请稍候");
     return;
@@ -271,6 +271,7 @@ export async function onManualExtractController(runtime) {
     "手动提取中",
     `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
     "running",
+
     { syncRuntime: true, toastKind: "info", toastTitle: "ST-BME 手动提取" },
   );
   try {
@@ -306,6 +307,10 @@ export async function onManualExtractController(runtime) {
 
       if (Array.isArray(batchResult.effects?.warnings)) {
         warnings.push(...batchResult.effects.warnings);
+      }
+
+      if (options?.drainAll === false) {
+        break;
       }
     }
 
@@ -521,7 +526,7 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     timeOut: 2500,
   });
 
-  await runtime.onManualExtract();
+  await runtime.onManualExtract({ drainAll: false });
   runtime.refreshPanelLiveState();
   return {
     ...rollbackResult,

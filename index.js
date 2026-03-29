@@ -5058,7 +5058,7 @@ async function onFetchEmbeddingModels(mode = null) {
   );
 }
 
-async function onManualExtract() {
+async function onManualExtract(options = {}) {
   return await onManualExtractController({
     beginStageAbortController,
     clampInt,
@@ -5086,7 +5086,7 @@ async function onManualExtract() {
     },
     setLastExtractionStatus,
     toastr,
-  });
+  }, options);
 }
 
 async function onReroll({ fromFloor } = {}) {

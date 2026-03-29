@@ -28,7 +28,7 @@ const vectorSnippet = extractSnippet(
   "async function ensureVectorReadyIfNeeded(",
 );
 const manualExtractSnippet = extractSnippet(
-  "async function onManualExtract() {",
+  "async function onManualExtract(options = {}) {",
   "async function onReroll(",
 );
 const rebuildSnippet = extractSnippet(
