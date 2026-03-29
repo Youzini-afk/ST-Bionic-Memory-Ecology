@@ -245,3 +245,39 @@ export async function onBeforeCombinePromptsController(runtime) {
     runtime.getGenerationRecallHookStateFromResult(recallResult),
   );
 }
+
+export function onMessageReceivedController(runtime) {
+  if (runtime.getCurrentGraph()) {
+    if (
+      runtime.getGraphPersistenceState()?.pendingPersist &&
+      runtime.isGraphMetadataWriteAllowed()
+    ) {
+      runtime.maybeFlushQueuedGraphPersist("message-received-pending-flush");
+    }
+    runtime.maybeCaptureGraphShadowSnapshot("message-received-passive-sync");
+  }
+
+  const pendingRecallSendIntent = runtime.getPendingRecallSendIntent();
+  if (
+    pendingRecallSendIntent?.text &&
+    !runtime.isFreshRecallInputRecord(pendingRecallSendIntent)
+  ) {
+    runtime.setPendingRecallSendIntent(runtime.createRecallInputRecord());
+  }
+
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  const lastMessage =
+    Array.isArray(chat) && chat.length > 0 ? chat[chat.length - 1] : null;
+
+  if (runtime.isAssistantChatMessage(lastMessage)) {
+    runtime.queueMicrotask(() => {
+      void runtime.runExtraction().catch((error) => {
+        runtime.console.error("[ST-BME] 异步自动提取失败:", error);
+        runtime.notifyExtractionIssue(
+          error?.message || String(error) || "自动提取失败",
+        );
+      });
+    });
+  }
+}

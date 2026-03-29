@@ -64,6 +64,7 @@ import {
   onGenerationAfterCommandsController,
   onMessageDeletedController,
   onMessageEditedController,
+  onMessageReceivedController,
   onMessageSentController,
   onMessageSwipedController,
   registerBeforeCombinePromptsController,
@@ -4456,36 +4457,25 @@ async function onBeforeCombinePrompts() {
 }
 
 function onMessageReceived() {
-  // 新消息到达，图状态可能需要更新
-  if (currentGraph) {
-    if (graphPersistenceState.pendingPersist && isGraphMetadataWriteAllowed()) {
-      maybeFlushQueuedGraphPersist("message-received-pending-flush");
-    }
-    maybeCaptureGraphShadowSnapshot("message-received-passive-sync");
-  }
-
-  if (
-    pendingRecallSendIntent.text &&
-    !isFreshRecallInputRecord(pendingRecallSendIntent)
-  ) {
-    pendingRecallSendIntent = createRecallInputRecord();
-  }
-
-  const context = getContext();
-  const chat = context?.chat;
-  const lastMessage =
-    Array.isArray(chat) && chat.length > 0 ? chat[chat.length - 1] : null;
-
-  if (isAssistantChatMessage(lastMessage)) {
-    queueMicrotask(() => {
-      void runExtraction().catch((error) => {
-        console.error("[ST-BME] 异步自动提取失败:", error);
-        notifyExtractionIssue(
-          error?.message || String(error) || "自动提取失败",
-        );
-      });
-    });
-  }
+  return onMessageReceivedController({
+    console,
+    createRecallInputRecord,
+    getContext,
+    getCurrentGraph: () => currentGraph,
+    getGraphPersistenceState: () => graphPersistenceState,
+    getPendingRecallSendIntent: () => pendingRecallSendIntent,
+    isAssistantChatMessage,
+    isFreshRecallInputRecord,
+    isGraphMetadataWriteAllowed,
+    maybeCaptureGraphShadowSnapshot,
+    maybeFlushQueuedGraphPersist,
+    notifyExtractionIssue,
+    queueMicrotask,
+    runExtraction,
+    setPendingRecallSendIntent: (record) => {
+      pendingRecallSendIntent = record;
+    },
+  });
 }
 
 // ==================== UI 操作 ====================

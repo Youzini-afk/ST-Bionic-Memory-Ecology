@@ -48,6 +48,7 @@ import {
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
 } from "../graph-persistence.js";
+import { onMessageReceivedController } from "../event-binding.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
