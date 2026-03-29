@@ -76,6 +76,32 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector-index.js";
+import {
+  BATCH_STAGE_ORDER,
+  BATCH_STAGE_SEVERITY,
+  clampFloat,
+  clampInt,
+  createBatchStageStatus,
+  createBatchStatusSkeleton,
+  createGraphPersistenceState,
+  createRecallInputRecord,
+  createRecallRunResult,
+  createUiStatus,
+  finalizeBatchStatus,
+  formatRecallContextLine,
+  getGenerationRecallHookStateFromResult,
+  getRecallHookLabel,
+  getStageNoticeDuration,
+  getStageNoticeTitle,
+  hashRecallInput,
+  isFreshRecallInputRecord,
+  isTerminalGenerationRecallHookState,
+  normalizeRecallInputText,
+  normalizeStageNoticeLevel,
+  pushBatchStageArtifact,
+  setBatchStageOutcome,
+  shouldRunRecallForTransaction,
+} from "./ui-status.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -467,41 +493,6 @@ const stageAbortControllers = {
   history: null,
 };
 
-function createUiStatus(text = "待命", meta = "", level = "idle") {
-  return {
-    text: String(text || "待命"),
-    meta: String(meta || ""),
-    level,
-    updatedAt: Date.now(),
-  };
-}
-
-function createGraphPersistenceState() {
-  return {
-    loadState: "no-chat",
-    chatId: "",
-    reason: "当前尚未进入聊天",
-    attemptIndex: 0,
-    revision: 0,
-    lastPersistedRevision: 0,
-    queuedPersistRevision: 0,
-    queuedPersistChatId: "",
-    queuedPersistMode: "",
-    queuedPersistRotateIntegrity: false,
-    queuedPersistReason: "",
-    shadowSnapshotUsed: false,
-    shadowSnapshotRevision: 0,
-    shadowSnapshotUpdatedAt: "",
-    shadowSnapshotReason: "",
-    lastPersistReason: "",
-    lastPersistMode: "",
-    metadataIntegrity: "",
-    writesBlocked: false,
-    pendingPersist: false,
-    updatedAt: new Date().toISOString(),
-  };
-}
-
 function getGraphShadowSnapshotStorageKey(chatId = "") {
   const normalizedChatId = String(chatId || "").trim();
   if (!normalizedChatId) return "";
@@ -768,14 +759,6 @@ function applyGraphLoadState(
   });
 }
 
-function normalizeStageNoticeLevel(level = "info") {
-  if (level === "running" || level === "idle") return "info";
-  if (level === "success" || level === "warning" || level === "error") {
-    return level;
-  }
-  return "info";
-}
-
 function createAbortError(message = "操作已终止") {
   const error = new Error(message);
   error.name = "AbortError";
@@ -900,34 +883,6 @@ function buildAbortStageAction(stage) {
   };
 }
 
-function getStageNoticeTitle(stage) {
-  switch (stage) {
-    case "extraction":
-      return "ST-BME 提取";
-    case "vector":
-      return "ST-BME 向量";
-    case "recall":
-      return "ST-BME 召回";
-    case "history":
-      return "ST-BME 历史恢复";
-    default:
-      return "ST-BME";
-  }
-}
-
-function getStageNoticeDuration(level = "info") {
-  switch (level) {
-    case "error":
-      return 6000;
-    case "warning":
-      return 5000;
-    case "success":
-      return 3000;
-    default:
-      return 3200;
-  }
-}
-
 function createNoticePanelAction() {
   if (!_panelModule?.openPanel) return undefined;
   return {
@@ -1016,17 +971,6 @@ function updateStageNotice(
   currentHandle.update(input);
 }
 
-function createRecallInputRecord(overrides = {}) {
-  return {
-    text: "",
-    hash: "",
-    messageId: null,
-    source: "",
-    at: 0,
-    ...overrides,
-  };
-}
-
 function toPanelNodeItem(node, meta = "") {
   return {
     id: node.id,
@@ -1073,29 +1017,6 @@ function updateLastRecalledItems(nodeIds = []) {
         `imp ${node.importance ?? 5} · seq ${node.seqRange?.[1] ?? node.seq ?? 0}`,
       ),
     );
-}
-
-function normalizeRecallInputText(value) {
-  return String(value ?? "")
-    .replace(/\r\n/g, "\n")
-    .trim();
-}
-
-function hashRecallInput(text) {
-  let hash = 0;
-  const normalized = normalizeRecallInputText(text);
-  for (let index = 0; index < normalized.length; index++) {
-    hash = (hash * 31 + normalized.charCodeAt(index)) >>> 0;
-  }
-  return normalized ? String(hash) : "";
-}
-
-function isFreshRecallInputRecord(record) {
-  return Boolean(
-    record?.text &&
-    record.at &&
-    Date.now() - record.at <= RECALL_INPUT_RECORD_TTL_MS,
-  );
 }
 
 function clearRecallInputTracking() {
@@ -3260,22 +3181,6 @@ export function getSmartTriggerDecision(chat, lastProcessed, settings) {
   };
 }
 
-function clampInt(value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
-  const num = Number.parseInt(value, 10);
-  if (!Number.isFinite(num)) return fallback;
-  return Math.min(max, Math.max(min, num));
-}
-
-function clampFloat(value, fallback, min = 0, max = 1) {
-  const num = Number.parseFloat(value);
-  if (!Number.isFinite(num)) return fallback;
-  return Math.min(max, Math.max(min, num));
-}
-
-function formatRecallContextLine(message) {
-  return `[${message.is_user ? "user" : "assistant"}]: ${message.mes || ""}`;
-}
-
 function getLatestUserChatMessage(chat) {
   if (!Array.isArray(chat)) return null;
 
@@ -3550,53 +3455,6 @@ function clearGenerationRecallTransactionsForChat(
   return removed;
 }
 
-function isTerminalGenerationRecallHookState(state = "") {
-  return ["completed", "failed", "aborted", "skipped"].includes(
-    String(state || ""),
-  );
-}
-
-function shouldRunRecallForTransaction(transaction, hookName) {
-  if (!hookName) return true;
-  if (!transaction) return true;
-  const hookStates = transaction.hookStates || {};
-  if (isTerminalGenerationRecallHookState(hookStates[hookName])) {
-    return false;
-  }
-  if (
-    hookName === "GENERATE_BEFORE_COMBINE_PROMPTS" &&
-    isTerminalGenerationRecallHookState(hookStates.GENERATION_AFTER_COMMANDS)
-  ) {
-    return false;
-  }
-  return true;
-}
-
-function createRecallRunResult(status = "completed", extra = {}) {
-  const normalizedStatus = String(status || "skipped").trim() || "skipped";
-  return {
-    ok: normalizedStatus === "completed",
-    didRecall: normalizedStatus === "completed",
-    status: normalizedStatus,
-    ...extra,
-  };
-}
-
-function getGenerationRecallHookStateFromResult(result) {
-  const status = String(result?.status || "").trim();
-  switch (status) {
-    case "completed":
-      return "completed";
-    case "failed":
-      return "failed";
-    case "aborted":
-    case "superseded":
-      return "aborted";
-    default:
-      return "skipped";
-  }
-}
-
 function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") {
   const hadActiveRecall = Boolean(
     isRecalling ||
@@ -3657,112 +3515,6 @@ function getCurrentChatSeq(context = getContext()) {
     return chat.length - 1;
   }
   return currentGraph?.lastProcessedSeq ?? 0;
-}
-
-const BATCH_STAGE_ORDER = ["core", "structural", "semantic", "finalize"];
-const BATCH_STAGE_SEVERITY = {
-  success: 0,
-  partial: 1,
-  failed: 2,
-};
-
-function createBatchStageStatus(stage, consistency = "strong") {
-  return {
-    stage,
-    outcome: "success",
-    consistency,
-    warnings: [],
-    errors: [],
-    artifacts: [],
-  };
-}
-
-function createBatchStatusSkeleton({ processedRange, extractionCountBefore }) {
-  return {
-    model: "layered-batch-v1",
-    processedRange: Array.isArray(processedRange)
-      ? [...processedRange]
-      : [-1, -1],
-    extractionCountBefore: Number.isFinite(extractionCountBefore)
-      ? extractionCountBefore
-      : extractionCount,
-    extractionCountAfter: Number.isFinite(extractionCount)
-      ? extractionCount
-      : 0,
-    stages: {
-      core: createBatchStageStatus("core", "strong"),
-      structural: createBatchStageStatus("structural", "weak"),
-      semantic: createBatchStageStatus("semantic", "weak"),
-      finalize: createBatchStageStatus("finalize", "strong"),
-    },
-    outcome: "success",
-    consistency: "strong",
-    completed: false,
-    warnings: [],
-    errors: [],
-  };
-}
-
-function setBatchStageOutcome(status, stage, outcome, message = "") {
-  const stageStatus = status?.stages?.[stage];
-  if (!stageStatus) return;
-  const nextSeverity = BATCH_STAGE_SEVERITY[outcome] ?? 0;
-  const previousSeverity = BATCH_STAGE_SEVERITY[stageStatus.outcome] ?? 0;
-  if (nextSeverity >= previousSeverity) {
-    stageStatus.outcome = outcome;
-  }
-  if (!message) return;
-  if (outcome === "failed") {
-    stageStatus.errors.push(message);
-  } else if (outcome === "partial") {
-    stageStatus.warnings.push(message);
-  }
-}
-
-function pushBatchStageArtifact(status, stage, artifact) {
-  const stageStatus = status?.stages?.[stage];
-  if (!stageStatus || !artifact) return;
-  if (!stageStatus.artifacts.includes(artifact)) {
-    stageStatus.artifacts.push(artifact);
-  }
-}
-
-function finalizeBatchStatus(status) {
-  const stages = status?.stages || {};
-  const structuralOutcome = stages.structural?.outcome || "success";
-  const semanticOutcome = stages.semantic?.outcome || "success";
-  const finalizeOutcome = stages.finalize?.outcome || "failed";
-  const outcomeList = BATCH_STAGE_ORDER.map(
-    (stage) => stages[stage]?.outcome || "success",
-  );
-
-  if (finalizeOutcome !== "success") {
-    status.outcome = "failed";
-  } else if (outcomeList.includes("failed")) {
-    status.outcome = "failed";
-  } else if (structuralOutcome === "partial" || semanticOutcome === "partial") {
-    status.outcome = "partial";
-  } else {
-    status.outcome = "success";
-  }
-
-  status.consistency =
-    finalizeOutcome === "success" &&
-    stages.core?.outcome === "success" &&
-    stages.structural?.outcome === "success"
-      ? "strong"
-      : "weak";
-  status.completed = finalizeOutcome === "success";
-  status.extractionCountAfter = Number.isFinite(extractionCount)
-    ? extractionCount
-    : status.extractionCountAfter;
-  status.warnings = BATCH_STAGE_ORDER.flatMap(
-    (stage) => stages[stage]?.warnings || [],
-  );
-  status.errors = BATCH_STAGE_ORDER.flatMap(
-    (stage) => stages[stage]?.errors || [],
-  );
-  return status;
 }
 
 async function handleExtractionSuccess(
@@ -3929,7 +3681,7 @@ async function handleExtractionSuccess(
       vectorStats: getVectorIndexStats(currentGraph),
       vectorError: message,
       warnings: status.warnings,
-      batchStatus: finalizeBatchStatus(status),
+      batchStatus: finalizeBatchStatus(status, extractionCount),
     };
   }
 
@@ -3953,7 +3705,7 @@ async function handleExtractionSuccess(
     vectorStats: vectorSync?.stats || getVectorIndexStats(currentGraph),
     vectorError: vectorSync?.error || "",
     warnings: status.warnings,
-    batchStatus: finalizeBatchStatus(status),
+    batchStatus: finalizeBatchStatus(status, extractionCount),
   };
 }
 
@@ -4434,7 +4186,7 @@ async function executeExtractionBatch({
       "failed",
       result?.error || "提取阶段未返回有效操作",
     );
-    finalizeBatchStatus(batchStatus);
+    finalizeBatchStatus(batchStatus, extractionCount);
     currentGraph.historyState.lastBatchStatus = batchStatus;
     return {
       success: false,
@@ -4454,7 +4206,7 @@ async function executeExtractionBatch({
     batchStatus,
   );
   const finalizedBatchStatus =
-    effects?.batchStatus || finalizeBatchStatus(batchStatus);
+    effects?.batchStatus || finalizeBatchStatus(batchStatus, extractionCount);
   currentGraph.historyState.lastBatchStatus = {
     ...finalizedBatchStatus,
     historyAdvanced: shouldAdvanceProcessedHistory(finalizedBatchStatus),
@@ -5035,17 +4787,6 @@ async function runExtraction() {
   } finally {
     finishStageAbortController("extraction", extractionController);
     isExtracting = false;
-  }
-}
-
-function getRecallHookLabel(hookName = "") {
-  switch (hookName) {
-    case "GENERATION_AFTER_COMMANDS":
-      return "hook GENERATION_AFTER_COMMANDS";
-    case "GENERATE_BEFORE_COMBINE_PROMPTS":
-      return "hook GENERATE_BEFORE_COMBINE_PROMPTS";
-    default:
-      return "";
   }
 }
 

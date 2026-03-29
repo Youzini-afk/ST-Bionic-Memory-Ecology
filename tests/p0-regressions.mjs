@@ -4,6 +4,32 @@ import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import {
+  BATCH_STAGE_ORDER,
+  BATCH_STAGE_SEVERITY,
+  clampFloat,
+  clampInt,
+  createBatchStageStatus,
+  createBatchStatusSkeleton,
+  createGraphPersistenceState,
+  createRecallInputRecord,
+  createRecallRunResult,
+  createUiStatus,
+  finalizeBatchStatus,
+  formatRecallContextLine,
+  getGenerationRecallHookStateFromResult,
+  getRecallHookLabel,
+  getStageNoticeDuration,
+  getStageNoticeTitle,
+  hashRecallInput,
+  isFreshRecallInputRecord,
+  isTerminalGenerationRecallHookState,
+  normalizeRecallInputText,
+  normalizeStageNoticeLevel,
+  pushBatchStageArtifact,
+  setBatchStageOutcome,
+  shouldRunRecallForTransaction,
+} from "../ui-status.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -171,6 +197,14 @@ function createBatchStageHarness() {
       throwIfAborted: () => {},
       isAbortError: () => false,
       createAbortError: (message) => new Error(message),
+      BATCH_STAGE_ORDER,
+      BATCH_STAGE_SEVERITY,
+      createBatchStageStatus,
+      createBatchStatusSkeleton,
+      setBatchStageOutcome,
+      pushBatchStageArtifact,
+      finalizeBatchStatus,
+      createUiStatus,
     };
     vm.createContext(context);
     vm.runInContext(
@@ -228,6 +262,20 @@ function createGenerationRecallHarness() {
       }),
       chat: [],
       runRecallCalls: [],
+      createRecallInputRecord,
+      createRecallRunResult,
+      hashRecallInput,
+      normalizeRecallInputText,
+      isFreshRecallInputRecord,
+      isTerminalGenerationRecallHookState,
+      shouldRunRecallForTransaction,
+      getGenerationRecallHookStateFromResult,
+      createUiStatus,
+      createGraphPersistenceState,
+      getRecallHookLabel,
+      getStageNoticeTitle,
+      getStageNoticeDuration,
+      normalizeStageNoticeLevel,
     };
     vm.createContext(context);
     vm.runInContext(
@@ -381,6 +429,11 @@ function createRerollHarness() {
       async onManualExtract() {
         context.onManualExtractCalls += 1;
         context.lastExtractionStatus = { level: context.manualExtractLevel };
+      },
+      createUiStatus,
+      isAbortError: (e) => e?.name === "AbortError",
+      assertRecoveryChatStillActive() {
+        // no-op in test
       },
       toastr: {
         info() {},

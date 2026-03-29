@@ -12,6 +12,21 @@ import {
   serializeGraph,
 } from "../graph.js";
 import { normalizeGraphRuntimeState } from "../runtime-state.js";
+import {
+  createUiStatus,
+  createGraphPersistenceState,
+  createRecallInputRecord,
+  createRecallRunResult,
+  normalizeStageNoticeLevel,
+  getStageNoticeTitle,
+  getStageNoticeDuration,
+  normalizeRecallInputText,
+  hashRecallInput,
+  isFreshRecallInputRecord,
+  clampInt,
+  clampFloat,
+  formatRecallContextLine,
+} from "../ui-status.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
@@ -176,6 +191,19 @@ async function createGraphPersistenceHarness({
     deserializeGraph,
     getGraphStats,
     getNode,
+    createUiStatus,
+    createGraphPersistenceState,
+    createRecallInputRecord,
+    createRecallRunResult,
+    normalizeStageNoticeLevel,
+    getStageNoticeTitle,
+    getStageNoticeDuration,
+    normalizeRecallInputText,
+    hashRecallInput,
+    isFreshRecallInputRecord,
+    clampInt,
+    clampFloat,
+    formatRecallContextLine,
     createDefaultTaskProfiles() {
       return {
         extract: { activeProfileId: "default", profiles: [] },
