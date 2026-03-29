@@ -87,6 +87,26 @@ function createMeaningfulGraph(chatId = "chat-test", suffix = "base") {
   return normalizeGraphRuntimeState(graph, chatId);
 }
 
+function stampPersistedGraph(
+  graph,
+  {
+    revision = 1,
+    integrity = "",
+    chatId = graph?.historyState?.chatId || "",
+    reason = "test",
+  } = {},
+) {
+  graph.__stBmePersistence = {
+    revision,
+    integrity,
+    chatId,
+    reason,
+    updatedAt: new Date().toISOString(),
+    sessionId: "test-session",
+  };
+  return graph;
+}
+
 async function createGraphPersistenceHarness({
   chatId = "chat-test",
   chatMetadata = undefined,
@@ -168,10 +188,14 @@ async function createGraphPersistenceHarness({
     getContext() {
       return runtimeContext.__chatContext;
     },
+    async saveMetadata() {
+      runtimeContext.__globalImmediateSaveCalls += 1;
+    },
     saveMetadataDebounced() {
       runtimeContext.__globalSaveCalls += 1;
     },
     __globalSaveCalls: 0,
+    __globalImmediateSaveCalls: 0,
     isAssistantChatMessage() {
       return false;
     },
@@ -201,8 +225,12 @@ async function createGraphPersistenceHarness({
       saveMetadataDebounced() {
         runtimeContext.__contextSaveCalls += 1;
       },
+      async saveMetadata() {
+        runtimeContext.__contextImmediateSaveCalls += 1;
+      },
     },
     __contextSaveCalls: 0,
+    __contextImmediateSaveCalls: 0,
   };
 
   runtimeContext.globalThis = runtimeContext;
@@ -455,7 +483,9 @@ result = {
     reason: "loading-empty-save",
     markMutation: false,
   });
-  assert.equal(result.blocked, true);
+  assert.equal(result.blocked, false);
+  assert.equal(result.queued, false);
+  assert.equal(result.reason, "passive-empty-graph-skipped");
   assert.equal(
     harness.api.readGraphShadowSnapshot("chat-empty"),
     null,
@@ -536,10 +566,14 @@ result = {
     { revision: 3, reason: "stale-shadow" },
   );
 
-  const officialGraph = createMeaningfulGraph("chat-official", "official");
+  const officialGraph = stampPersistedGraph(
+    createMeaningfulGraph("chat-official", "official"),
+    { revision: 6, integrity: "official-integrity" },
+  );
   const reader = await createGraphPersistenceHarness({
     chatId: "chat-official",
     chatMetadata: {
+      integrity: "official-integrity",
       st_bme_graph: officialGraph,
     },
     sessionStore: sharedSession,
@@ -558,6 +592,55 @@ result = {
     reader.api.readGraphShadowSnapshot("chat-official"),
     null,
     "正式元数据到位后应清理影子快照",
+  );
+}
+
+{
+  const sharedSession = new Map();
+  const writer = await createGraphPersistenceHarness({
+    chatId: "chat-shadow-newer",
+    chatMetadata: undefined,
+    sessionStore: sharedSession,
+  });
+  writer.api.writeGraphShadowSnapshot(
+    "chat-shadow-newer",
+    createMeaningfulGraph("chat-shadow-newer", "shadow-newer"),
+    { revision: 9, reason: "pagehide-refresh" },
+  );
+
+  const officialGraph = stampPersistedGraph(
+    createMeaningfulGraph("chat-shadow-newer", "official-older"),
+    { revision: 3, integrity: "integrity-official-older" },
+  );
+  const reader = await createGraphPersistenceHarness({
+    chatId: "chat-shadow-newer",
+    chatMetadata: {
+      integrity: "integrity-official-older",
+      st_bme_graph: officialGraph,
+    },
+    sessionStore: sharedSession,
+  });
+  const result = reader.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "official-older-than-shadow",
+  });
+
+  assert.equal(result.loadState, "loaded");
+  assert.equal(result.reason, "shadow-snapshot-newer-than-official");
+  assert.equal(
+    reader.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-shadow-newer",
+  );
+  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 1);
+  assert.equal(
+    reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes?.[0]?.fields
+      ?.title,
+    "事件-shadow-newer",
+  );
+  assert.equal(
+    reader.api.readGraphShadowSnapshot("chat-shadow-newer"),
+    null,
+    "影子快照补写成功后应被清理",
   );
 }
 
@@ -581,6 +664,73 @@ result = {
   assert.equal(
     harness.api.readRuntimeDebugSnapshot().graphPersistence?.loadState,
     "empty-confirmed",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-empty-confirmed-passive",
+    chatMetadata: {
+      integrity: "meta-ready-empty-passive",
+    },
+  });
+  harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "ready-empty-passive",
+  });
+
+  harness.api.onMessageReceived();
+
+  assert.equal(
+    harness.runtimeContext.__contextImmediateSaveCalls,
+    0,
+    "空聊天的被动同步不应触发立即保存",
+  );
+  assert.equal(
+    harness.runtimeContext.__contextSaveCalls,
+    0,
+    "空聊天的被动同步不应触发防抖保存",
+  );
+  assert.equal(
+    harness.runtimeContext.__chatContext.chatMetadata?.st_bme_graph,
+    undefined,
+    "empty-confirmed 状态下不能把空图被动写回 metadata",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-create-first-graph",
+    chatMetadata: {
+      integrity: "integrity-before-first-save",
+    },
+  });
+  harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "ready-for-first-save",
+  });
+  harness.api.setCurrentGraph(
+    createMeaningfulGraph("chat-create-first-graph", "first-save"),
+  );
+
+  const result = harness.api.saveGraphToChat({
+    reason: "first-meaningful-graph",
+  });
+
+  assert.equal(result.saved, true);
+  assert.equal(result.saveMode, "immediate");
+  assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 1);
+  assert.equal(harness.runtimeContext.__contextSaveCalls, 0);
+  assert.equal(
+    harness.runtimeContext.__chatContext.chatMetadata?.integrity ===
+      "integrity-before-first-save",
+    false,
+    "真正改图后应轮换 metadata.integrity，阻止旧页面覆盖",
+  );
+  assert.equal(
+    harness.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.__stBmePersistence
+      ?.revision > 0,
+    true,
   );
 }
 
@@ -615,7 +765,8 @@ result = {
     reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes?.length,
     1,
   );
-  assert.equal(reader.runtimeContext.__contextSaveCalls, 1);
+  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 1);
+  assert.equal(reader.runtimeContext.__contextSaveCalls, 0);
   assert.equal(live.lastPersistedRevision, 9);
   assert.equal(live.pendingPersist, false);
 }
