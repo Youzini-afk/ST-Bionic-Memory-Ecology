@@ -1086,16 +1086,20 @@ function _buildLegend() {
   legendEl.replaceChildren(fragment);
 }
 
+function _getActiveGraphRenderer() {
+  return mobileGraphRenderer || graphRenderer;
+}
+
 function _bindGraphControls() {
   document
     .getElementById("bme-graph-zoom-in")
-    ?.addEventListener("click", () => graphRenderer?.zoomIn());
+    ?.addEventListener("click", () => _getActiveGraphRenderer()?.zoomIn());
   document
     .getElementById("bme-graph-zoom-out")
-    ?.addEventListener("click", () => graphRenderer?.zoomOut());
+    ?.addEventListener("click", () => _getActiveGraphRenderer()?.zoomOut());
   document
     .getElementById("bme-graph-reset")
-    ?.addEventListener("click", () => graphRenderer?.resetView());
+    ?.addEventListener("click", () => _getActiveGraphRenderer()?.resetView());
 }
 
 // ==================== 节点详情 ====================

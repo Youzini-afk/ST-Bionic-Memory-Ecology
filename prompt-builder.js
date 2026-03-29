@@ -1336,6 +1336,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     rawExecutionMessages,
     {
       blockedContents,
+      regexStage: "",
     },
   );
 
@@ -1349,6 +1350,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     {
       mode: "final-safe",
       blockedContents,
+      regexStage: "",
     },
   ).text;
   const additionalMessages =
@@ -1362,6 +1364,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
             : [],
           {
             blockedContents,
+            regexStage: "",
           },
         );
 

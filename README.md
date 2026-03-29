@@ -192,7 +192,7 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 | LLM 最终选择上限 | 8 | LLM 精排后最多保留多少条记忆 |
 | 图扩散 Top-K | 100 | 图扩散阶段最多保留多少个候选 |
 | 注入深度 | 9999 | 当前走 IN_CHAT@Depth，数值越大越靠前插入 |
-| Token 预算 | 1500 | 注入的最大 token 估算 |
+| Token 估算 | — | 注入内容的 token 估算（仅用于展示，当前版本不强制裁剪） |
 
 ---
 

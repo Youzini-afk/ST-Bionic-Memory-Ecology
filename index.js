@@ -6121,8 +6121,26 @@ async function onReroll({ fromFloor } = {}) {
   }
 
   console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
-  const rollbackResult = await rollbackGraphForReroll(targetFloor, context);
-  if (!rollbackResult.success) {
+  let rollbackResult;
+  try {
+    rollbackResult = await rollbackGraphForReroll(targetFloor, context);
+  } catch (e) {
+    if (isAbortError(e)) {
+      setRuntimeStatus('重新提取已取消', e.message || '聊天已切换', 'warning');
+      return {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: targetFloor,
+        effectiveFromFloor: null,
+        recoveryPath: 'aborted',
+        affectedBatchCount: 0,
+        error: e.message || '聊天已切换，重新提取已取消',
+      };
+    }
+    throw e;
+  }
+  if (!rollbackResult?.success) {
     setRuntimeStatus(
       "重新提取失败",
       rollbackResult.error || "回滚失败",
