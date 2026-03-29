@@ -27,6 +27,27 @@ import {
   clampFloat,
   formatRecallContextLine,
 } from "../ui-status.js";
+import {
+  cloneGraphForPersistence,
+  cloneRuntimeDebugValue,
+  getGraphPersistenceMeta,
+  getGraphPersistedRevision,
+  getGraphShadowSnapshotStorageKey,
+  GRAPH_LOAD_PENDING_CHAT_ID,
+  GRAPH_LOAD_STATES,
+  GRAPH_METADATA_KEY,
+  GRAPH_PERSISTENCE_META_KEY,
+  GRAPH_PERSISTENCE_SESSION_ID,
+  GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX,
+  GRAPH_STARTUP_RECONCILE_DELAYS_MS,
+  MODULE_NAME,
+  readGraphShadowSnapshot,
+  removeGraphShadowSnapshot,
+  shouldPreferShadowSnapshotOverOfficial,
+  stampGraphPersistenceMeta,
+  writeChatMetadataPatch,
+  writeGraphShadowSnapshot,
+} from "../graph-persistence.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
@@ -42,7 +63,7 @@ function extractSnippet(startMarker, endMarker) {
 }
 
 const persistencePrelude = extractSnippet(
-  'const MODULE_NAME = "st_bme";',
+  'const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";',
   "function clearInjectionState(options = {}) {",
 );
 const persistenceCore = extractSnippet(
@@ -204,6 +225,64 @@ async function createGraphPersistenceHarness({
     clampInt,
     clampFloat,
     formatRecallContextLine,
+    cloneGraphForPersistence,
+    cloneRuntimeDebugValue,
+    getGraphPersistenceMeta,
+    getGraphPersistedRevision,
+    getGraphShadowSnapshotStorageKey,
+    GRAPH_LOAD_PENDING_CHAT_ID,
+    GRAPH_LOAD_STATES,
+    GRAPH_METADATA_KEY,
+    GRAPH_PERSISTENCE_META_KEY,
+    GRAPH_PERSISTENCE_SESSION_ID,
+    GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX,
+    GRAPH_STARTUP_RECONCILE_DELAYS_MS,
+    MODULE_NAME,
+    readGraphShadowSnapshot,
+    removeGraphShadowSnapshot,
+    shouldPreferShadowSnapshotOverOfficial,
+    stampGraphPersistenceMeta,
+    writeChatMetadataPatch,
+    writeGraphShadowSnapshot,
+    // Shadow snapshot functions need VM-local sessionStorage overrides
+    // because imported versions use the outer globalThis (no sessionStorage)
+    readGraphShadowSnapshot(chatId = "") {
+      const key = getGraphShadowSnapshotStorageKey(chatId);
+      if (!key) return null;
+      try {
+        const raw = storage.getItem(key);
+        if (!raw) return null;
+        const snap = JSON.parse(raw);
+        if (!snap || String(snap.chatId || "") !== String(chatId || "") ||
+            typeof snap.serializedGraph !== "string" || !snap.serializedGraph) return null;
+        return {
+          chatId: String(snap.chatId || ""),
+          revision: Number.isFinite(snap.revision) ? snap.revision : 0,
+          serializedGraph: snap.serializedGraph,
+          updatedAt: String(snap.updatedAt || ""),
+          reason: String(snap.reason || ""),
+        };
+      } catch { return null; }
+    },
+    writeGraphShadowSnapshot(chatId = "", graph = null, { revision = 0, reason = "" } = {}) {
+      const key = getGraphShadowSnapshotStorageKey(chatId);
+      if (!key || !graph) return false;
+      try {
+        storage.setItem(key, JSON.stringify({
+          chatId: String(chatId || ""),
+          revision: Number.isFinite(revision) ? revision : 0,
+          serializedGraph: serializeGraph(graph),
+          updatedAt: new Date().toISOString(),
+          reason: String(reason || ""),
+        }));
+        return true;
+      } catch { return false; }
+    },
+    removeGraphShadowSnapshot(chatId = "") {
+      const key = getGraphShadowSnapshotStorageKey(chatId);
+      if (!key) return false;
+      try { storage.removeItem(key); return true; } catch { return false; }
+    },
     createDefaultTaskProfiles() {
       return {
         extract: { activeProfileId: "default", profiles: [] },

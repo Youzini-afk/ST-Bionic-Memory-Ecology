@@ -30,6 +30,18 @@ import {
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
 } from "../ui-status.js";
+import {
+  cloneRuntimeDebugValue,
+  GRAPH_LOAD_STATES,
+  GRAPH_METADATA_KEY,
+  GRAPH_PERSISTENCE_META_KEY,
+  GRAPH_PERSISTENCE_SESSION_ID,
+  MODULE_NAME,
+  readGraphShadowSnapshot,
+  stampGraphPersistenceMeta,
+  writeChatMetadataPatch,
+  writeGraphShadowSnapshot,
+} from "../graph-persistence.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -276,6 +288,10 @@ function createGenerationRecallHarness() {
       getStageNoticeTitle,
       getStageNoticeDuration,
       normalizeStageNoticeLevel,
+      MODULE_NAME,
+      GRAPH_LOAD_STATES,
+      GRAPH_METADATA_KEY,
+      GRAPH_PERSISTENCE_META_KEY,
     };
     vm.createContext(context);
     vm.runInContext(

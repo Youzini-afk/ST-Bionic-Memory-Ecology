@@ -102,115 +102,37 @@ import {
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
 } from "./ui-status.js";
+import {
+  cloneGraphForPersistence,
+  cloneRuntimeDebugValue,
+  getGraphPersistenceMeta,
+  getGraphPersistedRevision,
+  getGraphShadowSnapshotStorageKey,
+  GRAPH_LOAD_PENDING_CHAT_ID,
+  GRAPH_LOAD_STATES,
+  GRAPH_METADATA_KEY,
+  GRAPH_PERSISTENCE_META_KEY,
+  GRAPH_PERSISTENCE_SESSION_ID,
+  GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX,
+  GRAPH_STARTUP_RECONCILE_DELAYS_MS,
+  MODULE_NAME,
+  readGraphShadowSnapshot,
+  removeGraphShadowSnapshot,
+  shouldPreferShadowSnapshotOverOfficial,
+  stampGraphPersistenceMeta,
+  writeChatMetadataPatch,
+  writeGraphShadowSnapshot,
+} from "./graph-persistence.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
 let _themesModule = null;
 
-const MODULE_NAME = "st_bme";
-const GRAPH_METADATA_KEY = "st_bme_graph";
-const GRAPH_PERSISTENCE_META_KEY = "__stBmePersistence";
 const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
 const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
-const GRAPH_LOAD_STATES = Object.freeze({
-  NO_CHAT: "no-chat",
-  LOADING: "loading",
-  LOADED: "loaded",
-  SHADOW_RESTORED: "shadow-restored",
-  EMPTY_CONFIRMED: "empty-confirmed",
-  BLOCKED: "blocked",
-});
-const GRAPH_LOAD_PENDING_CHAT_ID = "__pending_chat__";
-const GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX = `${MODULE_NAME}:graph-shadow:`;
-const GRAPH_STARTUP_RECONCILE_DELAYS_MS = [150, 600, 1800, 4000];
-
-function cloneRuntimeDebugValue(value, fallback = null) {
-  if (value == null) {
-    return fallback;
-  }
-
-  try {
-    return JSON.parse(JSON.stringify(value));
-  } catch {
-    return fallback ?? value;
-  }
-}
-
-function createLocalIntegritySlug() {
-  const nativeUuid = globalThis.crypto?.randomUUID?.();
-  if (nativeUuid) return nativeUuid;
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
-    const random = Math.floor(Math.random() * 16);
-    const value = char === "x" ? random : (random & 0x3) | 0x8;
-    return value.toString(16);
-  });
-}
-
-const GRAPH_PERSISTENCE_SESSION_ID = createLocalIntegritySlug();
-
-function getGraphPersistenceMeta(graph = currentGraph) {
-  if (!graph || typeof graph !== "object" || Array.isArray(graph)) {
-    return null;
-  }
-  const meta = graph[GRAPH_PERSISTENCE_META_KEY];
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return null;
-  }
-  return meta;
-}
-
-function getGraphPersistedRevision(graph = currentGraph) {
-  const revision = Number(getGraphPersistenceMeta(graph)?.revision);
-  return Number.isFinite(revision) && revision > 0 ? revision : 0;
-}
-
-function stampGraphPersistenceMeta(
-  graph = currentGraph,
-  {
-    revision = graphPersistenceState.revision,
-    reason = "",
-    chatId = getCurrentChatId(),
-    integrity = "",
-  } = {},
-) {
-  if (!graph || typeof graph !== "object" || Array.isArray(graph)) {
-    return null;
-  }
-
-  const existingMeta = getGraphPersistenceMeta(graph) || {};
-  const nextMeta = {
-    ...existingMeta,
-    revision: Number.isFinite(revision) && revision > 0 ? revision : 0,
-    updatedAt: new Date().toISOString(),
-    sessionId: GRAPH_PERSISTENCE_SESSION_ID,
-    reason: String(reason || ""),
-    chatId: String(chatId || existingMeta.chatId || ""),
-    integrity: String(integrity || existingMeta.integrity || ""),
-  };
-  graph[GRAPH_PERSISTENCE_META_KEY] = nextMeta;
-  return nextMeta;
-}
 
 function getChatMetadataIntegrity(context = getContext()) {
   return normalizeChatIdCandidate(context?.chatMetadata?.integrity);
-}
-
-function writeChatMetadataPatch(context = getContext(), patch = {}) {
-  if (!context) return false;
-  if (typeof context.updateChatMetadata === "function") {
-    context.updateChatMetadata(patch);
-    return true;
-  }
-
-  if (
-    !context.chatMetadata ||
-    typeof context.chatMetadata !== "object" ||
-    Array.isArray(context.chatMetadata)
-  ) {
-    context.chatMetadata = {};
-  }
-  Object.assign(context.chatMetadata, patch || {});
-  return true;
 }
 
 function triggerChatMetadataSave(
@@ -243,23 +165,6 @@ function triggerChatMetadataSave(
   }
   saveMetadataDebounced();
   return "debounced";
-}
-
-function cloneGraphForPersistence(
-  graph = currentGraph,
-  chatId = getCurrentChatId(),
-) {
-  return normalizeGraphRuntimeState(
-    deserializeGraph(serializeGraph(graph)),
-    chatId,
-  );
-}
-
-function shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot) {
-  if (!shadowSnapshot) return false;
-  const shadowRevision = Number(shadowSnapshot.revision || 0);
-  const officialRevision = getGraphPersistedRevision(officialGraph);
-  return shadowRevision > 0 && shadowRevision > officialRevision;
 }
 
 function getRuntimeDebugState() {
@@ -492,80 +397,6 @@ const stageAbortControllers = {
   recall: null,
   history: null,
 };
-
-function getGraphShadowSnapshotStorageKey(chatId = "") {
-  const normalizedChatId = String(chatId || "").trim();
-  if (!normalizedChatId) return "";
-  return `${GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX}${encodeURIComponent(normalizedChatId)}`;
-}
-
-function readGraphShadowSnapshot(chatId = "") {
-  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
-  if (!storageKey) return null;
-
-  try {
-    const raw = globalThis.sessionStorage?.getItem(storageKey);
-    if (!raw) return null;
-    const snapshot = JSON.parse(raw);
-    if (
-      !snapshot ||
-      typeof snapshot !== "object" ||
-      String(snapshot.chatId || "") !== String(chatId || "") ||
-      typeof snapshot.serializedGraph !== "string" ||
-      !snapshot.serializedGraph
-    ) {
-      return null;
-    }
-    return {
-      chatId: String(snapshot.chatId || ""),
-      revision: Number.isFinite(snapshot.revision) ? snapshot.revision : 0,
-      serializedGraph: snapshot.serializedGraph,
-      updatedAt: String(snapshot.updatedAt || ""),
-      reason: String(snapshot.reason || ""),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writeGraphShadowSnapshot(
-  chatId = "",
-  graph = currentGraph,
-  { revision = graphPersistenceState.revision, reason = "" } = {},
-) {
-  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
-  if (!storageKey || !graph) return false;
-
-  try {
-    const serializedGraph = serializeGraph(graph);
-    globalThis.sessionStorage?.setItem(
-      storageKey,
-      JSON.stringify({
-        chatId: String(chatId || ""),
-        revision: Number.isFinite(revision) ? revision : 0,
-        serializedGraph,
-        updatedAt: new Date().toISOString(),
-        reason: String(reason || ""),
-      }),
-    );
-    return true;
-  } catch (error) {
-    console.warn("[ST-BME] 写入会话图谱临时快照失败:", error);
-    return false;
-  }
-}
-
-function removeGraphShadowSnapshot(chatId = "") {
-  const storageKey = getGraphShadowSnapshotStorageKey(chatId);
-  if (!storageKey) return false;
-
-  try {
-    globalThis.sessionStorage?.removeItem(storageKey);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function getGraphPersistenceLiveState() {
   const snapshot = {
