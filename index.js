@@ -1596,7 +1596,6 @@ function persistGraphToChatMetadata(
     reason = "graph-persist",
     revision = graphPersistenceState.revision,
     immediate = false,
-    rotateIntegrity = false,
   } = {},
 ) {
   if (!context || !currentGraph) {
@@ -1618,9 +1617,7 @@ function persistGraphToChatMetadata(
     });
   }
 
-  const nextIntegrity = rotateIntegrity
-    ? createLocalIntegritySlug()
-    : getChatMetadataIntegrity(context);
+  const nextIntegrity = getChatMetadataIntegrity(context);
   stampGraphPersistenceMeta(currentGraph, {
     revision,
     reason,
@@ -1629,7 +1626,6 @@ function persistGraphToChatMetadata(
   });
   writeChatMetadataPatch(context, {
     [GRAPH_METADATA_KEY]: currentGraph,
-    ...(nextIntegrity ? { integrity: nextIntegrity } : {}),
   });
   const saveMode = triggerChatMetadataSave(context, { immediate });
 
@@ -1669,7 +1665,7 @@ function persistGraphToChatMetadata(
 function queueGraphPersist(
   reason = "graph-persist-blocked",
   revision = graphPersistenceState.revision,
-  { immediate = true, rotateIntegrity = true } = {},
+  { immediate = true } = {},
 ) {
   maybeCaptureGraphShadowSnapshot(reason);
   updateGraphPersistenceState({
@@ -1678,7 +1674,7 @@ function queueGraphPersist(
       revision || 0,
     ),
     queuedPersistMode: immediate ? "immediate" : "debounced",
-    queuedPersistRotateIntegrity: Boolean(rotateIntegrity),
+    queuedPersistRotateIntegrity: false,
     queuedPersistReason: String(reason || ""),
     pendingPersist: true,
     writesBlocked: true,
@@ -1731,7 +1727,6 @@ function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
     reason,
     revision: targetRevision,
     immediate: graphPersistenceState.queuedPersistMode !== "debounced",
-    rotateIntegrity: graphPersistenceState.queuedPersistRotateIntegrity,
   });
 }
 
@@ -2682,7 +2677,7 @@ function loadGraphFromChat(options = {}) {
       updateGraphPersistenceState({
         metadataIntegrity,
         queuedPersistMode: "immediate",
-        queuedPersistRotateIntegrity: true,
+        queuedPersistRotateIntegrity: false,
         queuedPersistReason: "shadow-snapshot-newer-than-official",
       });
       const persistResult = maybeFlushQueuedGraphPersist(
@@ -2816,7 +2811,7 @@ function loadGraphFromChat(options = {}) {
       updateGraphPersistenceState({
         metadataIntegrity: getChatMetadataIntegrity(context),
         queuedPersistMode: "immediate",
-        queuedPersistRotateIntegrity: true,
+        queuedPersistRotateIntegrity: false,
         queuedPersistReason: "shadow-snapshot-promoted",
       });
       const persistResult = maybeFlushQueuedGraphPersist(
@@ -2855,7 +2850,7 @@ function loadGraphFromChat(options = {}) {
     });
     updateGraphPersistenceState({
       queuedPersistMode: "immediate",
-      queuedPersistRotateIntegrity: true,
+      queuedPersistRotateIntegrity: false,
       queuedPersistReason: shouldRetry
         ? "shadow-snapshot-restored"
         : "shadow-snapshot-blocked",
@@ -3026,7 +3021,6 @@ function saveGraphToChat(options = {}) {
     markMutation = true,
     captureShadow = true,
     immediate = markMutation,
-    rotateIntegrity = markMutation,
   } = options;
 
   ensureCurrentGraphRuntimeState();
@@ -3068,14 +3062,13 @@ function saveGraphToChat(options = {}) {
     console.warn(
       `[ST-BME] 图谱写回已被安全保护拦截（chat=${chatId}，state=${graphPersistenceState.loadState}，reason=${reason}）`,
     );
-    return queueGraphPersist(reason, revision, { immediate, rotateIntegrity });
+    return queueGraphPersist(reason, revision, { immediate });
   }
 
   return persistGraphToChatMetadata(context, {
     reason,
     revision,
     immediate,
-    rotateIntegrity,
   });
 }
 

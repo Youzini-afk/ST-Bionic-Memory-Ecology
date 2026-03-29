@@ -638,6 +638,11 @@ result = {
     "事件-shadow-newer",
   );
   assert.equal(
+    reader.runtimeContext.__chatContext.chatMetadata?.integrity,
+    "integrity-official-older",
+    "影子快照补写正式图谱时不能改写宿主 metadata.integrity",
+  );
+  assert.equal(
     reader.api.readGraphShadowSnapshot("chat-shadow-newer"),
     null,
     "影子快照补写成功后应被清理",
@@ -724,8 +729,8 @@ result = {
   assert.equal(
     harness.runtimeContext.__chatContext.chatMetadata?.integrity ===
       "integrity-before-first-save",
-    false,
-    "真正改图后应轮换 metadata.integrity，阻止旧页面覆盖",
+    true,
+    "插件保存图谱时不能改写宿主 metadata.integrity",
   );
   assert.equal(
     harness.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.__stBmePersistence
@@ -764,6 +769,11 @@ result = {
   assert.equal(
     reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes?.length,
     1,
+  );
+  assert.equal(
+    reader.runtimeContext.__chatContext.chatMetadata?.integrity,
+    "meta-ready-promote",
+    "metadata 就绪后提升影子快照时不能改写宿主 metadata.integrity",
   );
   assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 1);
   assert.equal(reader.runtimeContext.__contextSaveCalls, 0);
