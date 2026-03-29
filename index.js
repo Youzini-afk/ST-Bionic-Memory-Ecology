@@ -1063,6 +1063,11 @@ function persistRecallInjectionRecord({
   }
 
   triggerChatMetadataSave(getContext(), { immediate: false });
+  debugPersistedRecallPersistence("召回记录已写入 user 楼层", {
+    targetUserMessageIndex: resolvedTargetIndex,
+    injectionTextLength: String(record?.injectionText || "").length,
+    selectedNodeCount: Array.isArray(record?.selectedNodeIds) ? record.selectedNodeIds.length : 0,
+  }, `persist-success:${resolvedTargetIndex}`);
   return {
     index: resolvedTargetIndex,
     record,
@@ -1396,6 +1401,12 @@ function refreshPersistedRecallMessageUi() {
   summary.status = summarizePersistedRecallRefreshStatus(summary);
   if (summary.status === "missing_recall_record") {
     debugPersistedRecallUi("当前无有效持久召回记录可渲染");
+  } else if (summary.renderedCount > 0) {
+    debugPersistedRecallUi("Recall Card 挂载完成", {
+      renderedCount: summary.renderedCount,
+      persistedRecordCount: summary.persistedRecordCount,
+      waitingDom: summary.waitingMessageIndices.length,
+    }, `rendered:${summary.renderedCount}`);
   }
   return summary;
 }
