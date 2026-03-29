@@ -60,6 +60,8 @@ import {
   installSendIntentHooksController,
   onChatChangedController,
   onChatLoadedController,
+  onBeforeCombinePromptsController,
+  onGenerationAfterCommandsController,
   onMessageDeletedController,
   onMessageEditedController,
   onMessageSentController,
@@ -4409,76 +4411,31 @@ function onMessageSwiped(messageId, meta = null) {
 }
 
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
-  if (dryRun) return;
-
-  const context = getContext();
-  const chat = context?.chat;
-  const recallOptions = buildGenerationAfterCommandsRecallInput(
+  return await onGenerationAfterCommandsController(
+    {
+      buildGenerationAfterCommandsRecallInput,
+      createGenerationRecallContext,
+      getContext,
+      getGenerationRecallHookStateFromResult,
+      markGenerationRecallTransactionHookState,
+      runRecall,
+    },
     type,
     params,
-    chat,
-  );
-  if (!recallOptions?.overrideUserMessage) return;
-
-  const recallContext = createGenerationRecallContext({
-    hookName: "GENERATION_AFTER_COMMANDS",
-    generationType: String(type || "normal").trim() || "normal",
-    recallOptions,
-  });
-  if (!recallContext.shouldRun) {
-    return;
-  }
-
-  markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    "running",
-  );
-  const recallResult = await runRecall({
-    ...recallOptions,
-    recallKey: recallContext.recallKey,
-    hookName: recallContext.hookName,
-    signal: params?.signal,
-  });
-
-  markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    getGenerationRecallHookStateFromResult(recallResult),
+    dryRun,
   );
 }
 
 async function onBeforeCombinePrompts() {
-  const context = getContext();
-  const chat = context?.chat;
-  const recallOptions =
-    buildNormalGenerationRecallInput(chat) ||
-    buildHistoryGenerationRecallInput(chat) ||
-    {};
-  const recallContext = createGenerationRecallContext({
-    hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
-    generationType: "normal",
-    recallOptions,
+  return await onBeforeCombinePromptsController({
+    buildHistoryGenerationRecallInput,
+    buildNormalGenerationRecallInput,
+    createGenerationRecallContext,
+    getContext,
+    getGenerationRecallHookStateFromResult,
+    markGenerationRecallTransactionHookState,
+    runRecall,
   });
-  if (!recallContext.shouldRun) {
-    return;
-  }
-
-  markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    "running",
-  );
-  const recallResult = await runRecall({
-    ...recallOptions,
-    recallKey: recallContext.recallKey,
-    hookName: recallContext.hookName,
-  });
-  markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    getGenerationRecallHookStateFromResult(recallResult),
-  );
 }
 
 function onMessageReceived() {

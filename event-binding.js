@@ -167,3 +167,81 @@ export function onMessageSwipedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
   runtime.scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
 }
+
+export async function onGenerationAfterCommandsController(
+  runtime,
+  type,
+  params = {},
+  dryRun = false,
+) {
+  if (dryRun) return;
+
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  const recallOptions = runtime.buildGenerationAfterCommandsRecallInput(
+    type,
+    params,
+    chat,
+  );
+  if (!recallOptions?.overrideUserMessage) return;
+
+  const recallContext = runtime.createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: String(type || "normal").trim() || "normal",
+    recallOptions,
+  });
+  if (!recallContext.shouldRun) {
+    return;
+  }
+
+  runtime.markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    "running",
+  );
+  const recallResult = await runtime.runRecall({
+    ...recallOptions,
+    recallKey: recallContext.recallKey,
+    hookName: recallContext.hookName,
+    signal: params?.signal,
+  });
+
+  runtime.markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    runtime.getGenerationRecallHookStateFromResult(recallResult),
+  );
+}
+
+export async function onBeforeCombinePromptsController(runtime) {
+  const context = runtime.getContext();
+  const chat = context?.chat;
+  const recallOptions =
+    runtime.buildNormalGenerationRecallInput(chat) ||
+    runtime.buildHistoryGenerationRecallInput(chat) ||
+    {};
+  const recallContext = runtime.createGenerationRecallContext({
+    hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+    generationType: "normal",
+    recallOptions,
+  });
+  if (!recallContext.shouldRun) {
+    return;
+  }
+
+  runtime.markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    "running",
+  );
+  const recallResult = await runtime.runRecall({
+    ...recallOptions,
+    recallKey: recallContext.recallKey,
+    hookName: recallContext.hookName,
+  });
+  runtime.markGenerationRecallTransactionHookState(
+    recallContext.transaction,
+    recallContext.hookName,
+    runtime.getGenerationRecallHookStateFromResult(recallResult),
+  );
+}

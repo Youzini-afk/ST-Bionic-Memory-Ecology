@@ -53,6 +53,10 @@ import {
   pruneProcessedMessageHashesFromFloor,
   rollbackAffectedJournals,
 } from "../chat-history.js";
+import {
+  onBeforeCombinePromptsController,
+  onGenerationAfterCommandsController,
+} from "../event-binding.js";
 
 const extensionsShimSource = [
   "export const extension_settings = globalThis.__p0ExtensionSettings || {};",
@@ -303,6 +307,8 @@ function createGenerationRecallHarness() {
       GRAPH_LOAD_STATES,
       GRAPH_METADATA_KEY,
       GRAPH_PERSISTENCE_META_KEY,
+      onBeforeCombinePromptsController,
+      onGenerationAfterCommandsController,
     };
     vm.createContext(context);
     vm.runInContext(
