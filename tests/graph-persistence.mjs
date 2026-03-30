@@ -883,6 +883,86 @@ result = {
 }
 
 {
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-sync-refresh-merge",
+    chatMetadata: {
+      integrity: "chat-sync-refresh-merge-ready",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-sync-refresh-merge", "stale-runtime-merge"),
+      "chat-sync-refresh-merge",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-sync-refresh-merge",
+    reason: "runtime-stale",
+    revision: 3,
+    lastPersistedRevision: 3,
+    dbReady: true,
+    writesBlocked: false,
+  });
+  harness.api.setIndexedDbSnapshot(
+    buildSnapshotFromGraph(
+      createMeaningfulGraph("chat-sync-refresh-merge", "fresh-indexeddb-merge"),
+      {
+        chatId: "chat-sync-refresh-merge",
+        revision: 8,
+      },
+    ),
+  );
+
+  const runtimeOptions = harness.api.buildBmeSyncRuntimeOptions();
+  await runtimeOptions.onSyncApplied({
+    chatId: "chat-sync-refresh-merge",
+    action: "merge",
+  });
+
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-fresh-indexeddb-merge",
+    "merge 后应刷新当前运行时图谱",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-sync-refresh-active",
+    chatMetadata: {
+      integrity: "chat-sync-refresh-active-ready",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-sync-refresh-active", "active-runtime"),
+      "chat-sync-refresh-active",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-sync-refresh-active",
+    reason: "runtime-active",
+    revision: 4,
+    dbReady: true,
+    writesBlocked: false,
+  });
+
+  const runtimeOptions = harness.api.buildBmeSyncRuntimeOptions();
+  await runtimeOptions.onSyncApplied({
+    chatId: "chat-sync-refresh-other",
+    action: "download",
+  });
+
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-active-runtime",
+    "active chat 与 sync payload chat 不一致时不应覆盖当前运行时图谱",
+  );
+}
+
+{
   const sharedSession = new Map();
   const writer = await createGraphPersistenceHarness({
     chatId: "chat-shadow",

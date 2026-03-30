@@ -200,13 +200,14 @@ export async function onGenerationAfterCommandsController(
     return;
   }
 
+  const runtimeRecallOptions = recallContext.recallOptions || recallOptions || {};
   runtime.markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
     "running",
   );
   const recallResult = await runtime.runRecall({
-    ...recallOptions,
+    ...runtimeRecallOptions,
     recallKey: recallContext.recallKey,
     hookName: recallContext.hookName,
     signal: params?.signal,
@@ -240,13 +241,14 @@ export async function onBeforeCombinePromptsController(runtime) {
     return;
   }
 
+  const runtimeRecallOptions = recallContext.recallOptions || recallOptions || {};
   runtime.markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
     "running",
   );
   const recallResult = await runtime.runRecall({
-    ...recallOptions,
+    ...runtimeRecallOptions,
     recallKey: recallContext.recallKey,
     hookName: recallContext.hookName,
   });

@@ -712,7 +712,12 @@ async function testSyncAppliedHook() {
   const mergeResult = await syncNow("chat-hook-merge", runtime);
   assert.equal(mergeResult.action, "merge");
 
+  assert.equal(downloadResult.revision, 3);
+  assert.equal(mergeResult.revision, 5);
+
   assert.deepEqual(hookCalls.map((item) => item.action), ["download", "merge"]);
+  assert.deepEqual(hookCalls.map((item) => item.chatId), ["chat-hook-download", "chat-hook-merge"]);
+  assert.deepEqual(hookCalls.map((item) => item.revision), [3, 5]);
 }
 
 async function main() {

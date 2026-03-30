@@ -1929,6 +1929,91 @@ async function testGenerationRecallTransactionDedupesDoubleHookBySameKey() {
   assert.equal(harness.runRecallCalls[0].hookName, "GENERATION_AFTER_COMMANDS");
 }
 
+async function testGenerationRecallTransactionDedupesReverseHookOrder() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "逆序同轮输入" }];
+
+  await harness.result.onBeforeCombinePrompts();
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATE_BEFORE_COMBINE_PROMPTS",
+  );
+}
+
+async function testGenerationRecallHistoryModesUseSameBindingAcrossHooks() {
+  for (const generationType of ["continue", "regenerate", "swipe"]) {
+    const harness = await createGenerationRecallHarness();
+    const userMessage = `历史输入-${generationType}`;
+    harness.chat = [
+      { is_user: true, mes: userMessage },
+      { is_user: false, mes: "assistant-tail" },
+    ];
+
+    await harness.result.onGenerationAfterCommands(generationType, {}, false);
+    await harness.result.onBeforeCombinePrompts();
+
+    assert.equal(harness.runRecallCalls.length, 1, `${generationType} 应只执行一次召回`);
+    assert.equal(harness.runRecallCalls[0].hookName, "GENERATION_AFTER_COMMANDS");
+    assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
+    assert.equal(harness.runRecallCalls[0].overrideUserMessage, userMessage);
+  }
+}
+
+async function testGenerationRecallFrozenBindingSurvivesCrossHookInputDrift() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "稳定输入-A" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  harness.chat = [{ is_user: true, mes: "稳定输入-B" }];
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(harness.runRecallCalls[0].overrideUserMessage, "稳定输入-A");
+}
+
+async function testGenerationRecallSkipsUntilTargetUserFloorAvailable() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: false, mes: "assistant-only" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  assert.equal(harness.runRecallCalls.length, 0);
+
+  harness.chat = [{ is_user: true, mes: "补齐 user 楼层" }];
+  await harness.result.onBeforeCombinePrompts();
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATE_BEFORE_COMBINE_PROMPTS",
+  );
+}
+
+async function testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "同 key 连续生成" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  assert.equal(harness.runRecallCalls.length, 2);
+  assert.equal(harness.runRecallCalls[0].recallKey, harness.runRecallCalls[1].recallKey);
+}
+
+async function testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "同 key 重复生成" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  transaction.updatedAt = Date.now() - 5000;
+  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  assert.equal(harness.runRecallCalls.length, 2);
+}
+
 async function testGenerationRecallBeforeCombineRunsStandalone() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "仅 before combine" }];
@@ -2471,6 +2556,12 @@ await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
 await testProcessedHistoryAdvanceRequiresCompleteStrongSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
+await testGenerationRecallTransactionDedupesReverseHookOrder();
+await testGenerationRecallHistoryModesUseSameBindingAcrossHooks();
+await testGenerationRecallFrozenBindingSurvivesCrossHookInputDrift();
+await testGenerationRecallSkipsUntilTargetUserFloorAvailable();
+await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
+await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();

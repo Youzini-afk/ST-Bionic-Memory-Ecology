@@ -278,16 +278,33 @@ export function isTerminalGenerationRecallHookState(state = "") {
 export function shouldRunRecallForTransaction(transaction, hookName) {
   if (!hookName) return true;
   if (!transaction) return true;
+
   const hookStates = transaction.hookStates || {};
-  if (isTerminalGenerationRecallHookState(hookStates[hookName])) {
-    return false;
-  }
+  const currentHookState = hookStates[hookName];
   if (
-    hookName === "GENERATE_BEFORE_COMBINE_PROMPTS" &&
-    isTerminalGenerationRecallHookState(hookStates.GENERATION_AFTER_COMMANDS)
+    currentHookState === "running" ||
+    isTerminalGenerationRecallHookState(currentHookState)
   ) {
     return false;
   }
+
+  const peerHookName =
+    hookName === "GENERATION_AFTER_COMMANDS"
+      ? "GENERATE_BEFORE_COMBINE_PROMPTS"
+      : hookName === "GENERATE_BEFORE_COMBINE_PROMPTS"
+        ? "GENERATION_AFTER_COMMANDS"
+        : "";
+
+  if (!peerHookName) return true;
+
+  const peerHookState = hookStates[peerHookName];
+  if (
+    peerHookState === "running" ||
+    isTerminalGenerationRecallHookState(peerHookState)
+  ) {
+    return false;
+  }
+
   return true;
 }
 

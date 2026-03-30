@@ -483,6 +483,7 @@ const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
 const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
+const GENERATION_RECALL_HOOK_BRIDGE_MS = 1200;
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -4686,10 +4687,12 @@ function buildPreGenerationRecallKey(type, options = {}) {
   const seedText =
     options.overrideUserMessage || options.userMessage || `@target:${targetUserMessageIndex}`;
 
+  const normalizedChatId = normalizeChatIdCandidate(options.chatId || getCurrentChatId());
+
   return [
-    getCurrentChatId(),
+    normalizedChatId,
     String(type || "normal").trim() || "normal",
-    hashRecallInput(seedText),
+    hashRecallInput(seedText || ""),
   ].join(":");
 }
 
@@ -4707,6 +4710,90 @@ function cleanupGenerationRecallTransactions(now = Date.now()) {
   }
 }
 
+function getGenerationRecallPeerHookName(hookName = "") {
+  const normalized = String(hookName || "").trim();
+  if (normalized === "GENERATION_AFTER_COMMANDS") {
+    return "GENERATE_BEFORE_COMBINE_PROMPTS";
+  }
+  if (normalized === "GENERATE_BEFORE_COMBINE_PROMPTS") {
+    return "GENERATION_AFTER_COMMANDS";
+  }
+  return "";
+}
+
+function isGenerationRecallTransactionWithinBridgeWindow(
+  transaction,
+  now = Date.now(),
+) {
+  if (!transaction) return false;
+  return now - Number(transaction.updatedAt || transaction.createdAt || 0) <= GENERATION_RECALL_HOOK_BRIDGE_MS;
+}
+
+function normalizeGenerationRecallTransactionType(generationType = "normal") {
+  const normalized = String(generationType || "normal").trim() || "normal";
+  return normalized === "normal" ? "normal" : "history";
+}
+
+function freezeGenerationRecallOptionsForTransaction(
+  chat,
+  generationType = "normal",
+  recallOptions = {},
+) {
+  if (!Array.isArray(chat)) return null;
+
+  const optionGenerationType = String(
+    recallOptions?.generationType || generationType || "normal",
+  ).trim() || "normal";
+  const normalizedGenerationType = optionGenerationType;
+
+  let targetUserMessageIndex = Number.isFinite(recallOptions?.targetUserMessageIndex)
+    ? Math.floor(Number(recallOptions.targetUserMessageIndex))
+    : resolveGenerationTargetUserMessageIndex(chat, {
+        generationType: normalizedGenerationType,
+      });
+
+  if (!Number.isFinite(targetUserMessageIndex)) {
+    return null;
+  }
+  targetUserMessageIndex = Math.floor(targetUserMessageIndex);
+
+  const targetUserMessage = chat[targetUserMessageIndex];
+  if (!targetUserMessage?.is_user) {
+    return null;
+  }
+
+  const frozenUserMessage = normalizeRecallInputText(
+    targetUserMessage?.mes ||
+      recallOptions?.overrideUserMessage ||
+      recallOptions?.userMessage ||
+      "",
+  );
+  if (!frozenUserMessage) {
+    return null;
+  }
+
+  const source =
+    String(recallOptions?.overrideSource || recallOptions?.source || "").trim() ||
+    (normalizeGenerationRecallTransactionType(normalizedGenerationType) === "normal"
+      ? "chat-tail-user"
+      : "chat-last-user");
+  const sourceLabel =
+    String(
+      recallOptions?.overrideSourceLabel ||
+        recallOptions?.sourceLabel ||
+        getRecallUserMessageSourceLabel(source),
+    ).trim() || getRecallUserMessageSourceLabel(source);
+
+  return {
+    generationType: normalizedGenerationType,
+    targetUserMessageIndex,
+    overrideUserMessage: frozenUserMessage,
+    overrideSource: source,
+    overrideSourceLabel: sourceLabel,
+    includeSyntheticUserMessage: false,
+  };
+}
+
 function buildGenerationRecallTransactionId(chatId, generationType, recallKey) {
   return [
     String(chatId || ""),
@@ -4719,6 +4806,7 @@ function beginGenerationRecallTransaction({
   chatId,
   generationType = "normal",
   recallKey = "",
+  forceNew = false,
 } = {}) {
   const normalizedChatId = String(chatId || "");
   const normalizedGenerationType =
@@ -4732,18 +4820,96 @@ function beginGenerationRecallTransaction({
     normalizedGenerationType,
     normalizedRecallKey,
   );
+
   const now = Date.now();
-  const transaction = generationRecallTransactions.get(transactionId) || {
+  const existingTransaction = generationRecallTransactions.get(transactionId) || null;
+  if (
+    existingTransaction &&
+    isGenerationRecallTransactionWithinBridgeWindow(existingTransaction, now) &&
+    !forceNew
+  ) {
+    existingTransaction.updatedAt = now;
+    generationRecallTransactions.set(transactionId, existingTransaction);
+    return existingTransaction;
+  }
+
+  const transaction = {
     id: transactionId,
     chatId: normalizedChatId,
     generationType: normalizedGenerationType,
     recallKey: normalizedRecallKey,
     hookStates: {},
     createdAt: now,
+    frozenRecallOptions: null,
   };
   transaction.updatedAt = now;
   generationRecallTransactions.set(transactionId, transaction);
   return transaction;
+}
+
+function findRecentGenerationRecallTransactionForChat(
+  chatId = getCurrentChatId(),
+  now = Date.now(),
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  let latestTransaction = null;
+  for (const transaction of generationRecallTransactions.values()) {
+    if (!transaction || String(transaction.chatId || "") !== normalizedChatId) continue;
+    if (!isGenerationRecallTransactionWithinBridgeWindow(transaction, now)) continue;
+    if (!latestTransaction || Number(transaction.updatedAt || 0) > Number(latestTransaction.updatedAt || 0)) {
+      latestTransaction = transaction;
+    }
+  }
+
+  return latestTransaction;
+}
+
+function shouldReuseRecentGenerationRecallTransaction(
+  transaction,
+  hookName,
+  recallKey = "",
+  now = Date.now(),
+) {
+  if (!transaction || !hookName) return false;
+  if (!isGenerationRecallTransactionWithinBridgeWindow(transaction, now)) {
+    return false;
+  }
+
+  const hookStates = transaction.hookStates || {};
+  const normalizedRecallKey = String(recallKey || "");
+  const transactionRecallKey = String(transaction.recallKey || "");
+
+  if (Object.values(hookStates).includes("running")) {
+    return true;
+  }
+
+  const peerHookName = getGenerationRecallPeerHookName(hookName);
+  const peerHookState = peerHookName ? hookStates[peerHookName] : "";
+  if (peerHookState) {
+    return true;
+  }
+
+  const ownState = hookStates[hookName];
+  if (ownState) {
+    return ownState === "running";
+  }
+
+  if (!Object.keys(hookStates).length) {
+    if (!transactionRecallKey) {
+      return true;
+    }
+    if (!normalizedRecallKey) {
+      return false;
+    }
+    if (normalizedRecallKey !== transactionRecallKey) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 function markGenerationRecallTransactionHookState(
@@ -4820,20 +4986,102 @@ function createGenerationRecallContext({
   recallOptions = {},
   chatId = getCurrentChatId(),
 } = {}) {
-  const recallKey =
-    recallOptions.recallKey ||
-    buildPreGenerationRecallKey(generationType, recallOptions);
-  const transaction = beginGenerationRecallTransaction({
-    chatId,
+  const context = getContext();
+  const chat = context?.chat;
+  const normalizedChatId = normalizeChatIdCandidate(
+    chatId || context?.chatId || getCurrentChatId(),
+  );
+
+  const frozenRecallOptions = freezeGenerationRecallOptionsForTransaction(
+    chat,
     generationType,
-    recallKey,
-  });
+    recallOptions,
+  );
+  if (!frozenRecallOptions) {
+    return {
+      hookName,
+      generationType,
+      recallKey: "",
+      transaction: null,
+      recallOptions: null,
+      shouldRun: false,
+    };
+  }
+
+  const transactionGenerationType = normalizeGenerationRecallTransactionType(
+    frozenRecallOptions.generationType || generationType,
+  );
+  const fallbackRecallKey =
+    recallOptions.recallKey ||
+    buildPreGenerationRecallKey(transactionGenerationType, {
+      ...frozenRecallOptions,
+      chatId: normalizedChatId,
+      userMessage: frozenRecallOptions.overrideUserMessage,
+    });
+
+  const now = Date.now();
+  const recentTransaction = findRecentGenerationRecallTransactionForChat(
+    normalizedChatId,
+    now,
+  );
+  let transaction = recentTransaction;
+  if (
+    !shouldReuseRecentGenerationRecallTransaction(
+      transaction,
+      hookName,
+      fallbackRecallKey,
+      now,
+    )
+  ) {
+    transaction = beginGenerationRecallTransaction({
+      chatId: normalizedChatId,
+      generationType: transactionGenerationType,
+      recallKey: fallbackRecallKey,
+      forceNew: true,
+    });
+  }
+
+  if (!transaction) {
+    return {
+      hookName,
+      generationType,
+      recallKey: "",
+      transaction: null,
+      recallOptions: null,
+      shouldRun: false,
+    };
+  }
+
+  if (!transaction.frozenRecallOptions || typeof transaction.frozenRecallOptions !== "object") {
+    transaction.frozenRecallOptions = {
+      ...frozenRecallOptions,
+    };
+  }
+  if (!String(transaction.recallKey || "").trim()) {
+    transaction.recallKey = fallbackRecallKey;
+  }
+  if (!String(transaction.generationType || "").trim()) {
+    transaction.generationType = transactionGenerationType;
+  }
+  transaction.updatedAt = now;
+  generationRecallTransactions.set(transaction.id, transaction);
+
+  const boundRecallOptions = {
+    ...(transaction.frozenRecallOptions || frozenRecallOptions),
+    recallKey: transaction.recallKey,
+    generationType: transaction.frozenRecallOptions?.generationType || generationType,
+  };
+
+  const recallKey = String(transaction.recallKey || fallbackRecallKey || "");
+  const shouldRun = shouldRunRecallForTransaction(transaction, hookName);
+
   return {
     hookName,
-    generationType,
+    generationType: boundRecallOptions.generationType,
     recallKey,
     transaction,
-    shouldRun: shouldRunRecallForTransaction(transaction, hookName),
+    recallOptions: boundRecallOptions,
+    shouldRun,
   };
 }
 
