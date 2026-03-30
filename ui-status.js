@@ -48,6 +48,17 @@ export function createGraphPersistenceState() {
     metadataIntegrity: "",
     writesBlocked: false,
     pendingPersist: false,
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: false,
+    indexedDbRevision: 0,
+    indexedDbLastError: "",
+    syncState: "idle",
+    lastSyncUploadedAt: 0,
+    lastSyncDownloadedAt: 0,
+    lastSyncedRevision: 0,
+    lastSyncError: "",
+    dualWriteLastResult: null,
     updatedAt: new Date().toISOString(),
   };
 }

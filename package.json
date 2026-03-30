@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "triviumdb": "^0.4.41"
+  },
+  "devDependencies": {
+    "dexie": "4.0.8",
+    "fake-indexeddb": "^6.2.5"
+  }
+}

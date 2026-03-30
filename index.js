@@ -16,6 +16,18 @@ import {
   saveMetadataDebounced,
 } from "../../../extensions.js";
 
+import { BmeChatManager } from "./bme-chat-manager.js";
+import {
+  buildGraphFromSnapshot,
+  buildSnapshotFromGraph,
+  ensureDexieLoaded,
+} from "./bme-db.js";
+import {
+  autoSyncOnChatChange,
+  autoSyncOnVisibility,
+  scheduleUpload,
+  syncNow,
+} from "./bme-sync.js";
 import { compressAll, sleepCycle } from "./compressor.js";
 import { consolidateMemories } from "./consolidator.js";
 import {
@@ -483,6 +495,28 @@ const stageAbortControllers = {
   recall: null,
   history: null,
 };
+let bmeChatManager = null;
+let bmeChatManagerUnavailableWarned = false;
+const bmeIndexedDbSnapshotCacheByChatId = new Map();
+const bmeIndexedDbLoadInFlightByChatId = new Map();
+const bmeIndexedDbWriteInFlightByChatId = new Map();
+const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
+const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
+const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = new Set([GRAPH_LOAD_STATES.LOADING, GRAPH_LOAD_STATES.BLOCKED, GRAPH_LOAD_STATES.NO_CHAT, GRAPH_LOAD_STATES.SHADOW_RESTORED]);
+
+function isGraphLoadStateDbReady(loadState = graphPersistenceState.loadState) {
+  return (
+    loadState === GRAPH_LOAD_STATES.LOADED ||
+    loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
+  );
+}
+
+function normalizeGraphSyncState(value = "idle") {
+  const normalized = String(value || "idle").trim().toLowerCase();
+  if (["idle", "syncing", "warning", "error"].includes(normalized)) return normalized;
+  return "idle";
+}
+
 
 function getGraphPersistenceLiveState() {
   const snapshot = {
@@ -511,6 +545,18 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.loadState,
     ),
     updatedAt: graphPersistenceState.updatedAt,
+    storagePrimary: graphPersistenceState.storagePrimary || "indexeddb",
+    storageMode: graphPersistenceState.storageMode || "indexeddb",
+    dbReady:
+      graphPersistenceState.dbReady ?? isGraphLoadStateDbReady(graphPersistenceState.loadState),
+    indexedDbRevision: graphPersistenceState.indexedDbRevision || 0,
+    indexedDbLastError: graphPersistenceState.indexedDbLastError || "",
+    syncState: normalizeGraphSyncState(graphPersistenceState.syncState),
+    lastSyncUploadedAt: Number(graphPersistenceState.lastSyncUploadedAt) || 0,
+    lastSyncDownloadedAt: Number(graphPersistenceState.lastSyncDownloadedAt) || 0,
+    lastSyncedRevision: Number(graphPersistenceState.lastSyncedRevision) || 0,
+    lastSyncError: String(graphPersistenceState.lastSyncError || ""),
+    dualWriteLastResult: cloneRuntimeDebugValue(graphPersistenceState.dualWriteLastResult, null),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -575,7 +621,7 @@ function createGraphLoadUiStatus() {
       return createUiStatus(
         "图谱加载中",
         chatId
-          ? `正在读取聊天 ${chatId} 的图谱元数据`
+          ? `正在读取聊天 ${chatId} 的 IndexedDB 图谱`
           : "正在等待聊天上下文准备完成",
         "running",
       );
@@ -594,7 +640,7 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.BLOCKED:
       return createUiStatus(
         "图谱加载受阻",
-        "聊天元数据未就绪，已暂停图谱写回以保护旧数据",
+        "当前图谱尚未完成 IndexedDB 初始化",
         "warning",
       );
     case GRAPH_LOAD_STATES.LOADED:
@@ -606,6 +652,7 @@ function createGraphLoadUiStatus() {
 function getPanelRuntimeStatus() {
   const graphStatus = createGraphLoadUiStatus();
   if (
+    !graphPersistenceState.dbReady ||
     graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING ||
     graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
     graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED ||
@@ -617,17 +664,26 @@ function getPanelRuntimeStatus() {
 }
 
 function getGraphMutationBlockReason(operationLabel = "当前操作") {
+  const loadState = graphPersistenceState.loadState;
+  if (!getCurrentChatId()) {
+    return `${operationLabel}已暂停：当前尚未进入聊天。`;
+  }
+
+  if (graphPersistenceState.dbReady || isGraphLoadStateDbReady(loadState)) {
+    return `${operationLabel}暂不可用。`;
+  }
+
   switch (graphPersistenceState.loadState) {
     case GRAPH_LOAD_STATES.LOADING:
-      return `${operationLabel}已暂停：正在加载当前聊天图谱。`;
+      return `${operationLabel}已暂停：正在加载 IndexedDB 图谱。`;
     case GRAPH_LOAD_STATES.SHADOW_RESTORED:
-      return `${operationLabel}已暂停：当前图谱还在临时恢复状态，等待正式聊天元数据。`;
+      return `${operationLabel}已暂停：当前图谱仍处于旧恢复状态，请等待 IndexedDB 初始化完成。`;
     case GRAPH_LOAD_STATES.BLOCKED:
-      return `${operationLabel}已暂停：聊天元数据未就绪，已启用写保护。`;
+      return `${operationLabel}已暂停：IndexedDB 初始化受阻，请稍后重试。`;
     case GRAPH_LOAD_STATES.NO_CHAT:
       return `${operationLabel}已暂停：当前尚未进入聊天。`;
     default:
-      return `${operationLabel}暂不可用。`;
+      return `${operationLabel}已暂停：图谱尚未完成初始化。`;
   }
 }
 
@@ -635,7 +691,7 @@ function ensureGraphMutationReady(
   operationLabel = "当前操作",
   { notify = true } = {},
 ) {
-  if (isGraphMetadataWriteAllowed()) return true;
+  if (graphPersistenceState.dbReady || isGraphLoadStateDbReady()) return true;
   if (notify) {
     toastr.info(getGraphMutationBlockReason(operationLabel), "ST-BME");
   }
@@ -656,6 +712,7 @@ function applyGraphLoadState(
     lastPersistedRevision = graphPersistenceState.lastPersistedRevision,
     queuedPersistRevision = graphPersistenceState.queuedPersistRevision,
     pendingPersist = graphPersistenceState.pendingPersist,
+    dbReady = isGraphLoadStateDbReady(loadState),
     writesBlocked = !isGraphMetadataWriteAllowed(loadState),
   } = {},
 ) {
@@ -673,6 +730,8 @@ function applyGraphLoadState(
     shadowSnapshotReason,
     pendingPersist,
     writesBlocked,
+    dbReady,
+    storageMode: "indexeddb",
   });
 }
 
@@ -1859,6 +1918,774 @@ function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
 }
 
+function buildBmeSyncRuntimeOptions(extra = {}) {
+  return {
+    getDb: async (chatId) => {
+      const manager = ensureBmeChatManager();
+      if (!manager) {
+        throw new Error("BmeChatManager 不可用");
+      }
+      return await manager.getCurrentDb(chatId);
+    },
+    getCurrentChatId: () => getCurrentChatId(),
+    getRequestHeaders,
+    ...extra,
+  };
+}
+
+async function syncIndexedDbMetaToPersistenceState(
+  chatId,
+  { syncState = "idle", lastSyncError = "" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  try {
+    const manager = ensureBmeChatManager();
+    if (!manager) return null;
+    const db = await manager.getCurrentDb(normalizedChatId);
+    const [revision, lastSyncUploadedAt, lastSyncDownloadedAt, lastSyncedRevision] =
+      await Promise.all([
+        db.getRevision(),
+        db.getMeta("lastSyncUploadedAt", 0),
+        db.getMeta("lastSyncDownloadedAt", 0),
+        db.getMeta("lastSyncedRevision", 0),
+      ]);
+
+    const patch = {
+      storagePrimary: "indexeddb",
+      storageMode: "indexeddb",
+      indexedDbRevision: normalizeIndexedDbRevision(revision),
+      syncState: normalizeGraphSyncState(syncState),
+      lastSyncUploadedAt: Number(lastSyncUploadedAt) || 0,
+      lastSyncDownloadedAt: Number(lastSyncDownloadedAt) || 0,
+      lastSyncedRevision: Number(lastSyncedRevision) || 0,
+      lastSyncError: String(lastSyncError || ""),
+    };
+
+    updateGraphPersistenceState(patch);
+    return patch;
+  } catch (error) {
+    console.warn("[ST-BME] 读取 IndexedDB 同步元数据失败:", error);
+    updateGraphPersistenceState({
+      syncState: "error",
+      lastSyncError: error?.message || String(error),
+    });
+    return null;
+  }
+}
+
+async function runBmeAutoSyncForChat(source = "unknown", chatId = "") {
+  const normalizedChatId = String(chatId || "").trim();
+  if (!normalizedChatId) return { synced: false, reason: "missing-chat-id" };
+
+  updateGraphPersistenceState({
+    syncState: "syncing",
+    lastSyncError: "",
+  });
+
+  try {
+    const syncResult = await autoSyncOnChatChange(
+      normalizedChatId,
+      buildBmeSyncRuntimeOptions({
+        trigger: source,
+        reason: String(source || "chat-change"),
+      }),
+    );
+
+    await syncIndexedDbMetaToPersistenceState(normalizedChatId, {
+      syncState: syncResult?.synced ? "idle" : "warning",
+      lastSyncError: syncResult?.error || "",
+    });
+
+    return syncResult;
+  } catch (error) {
+    await syncIndexedDbMetaToPersistenceState(normalizedChatId, {
+      syncState: "error",
+      lastSyncError: error?.message || String(error),
+    });
+    throw error;
+  }
+}
+
+function ensureBmeChatManager() {
+  if (typeof BmeChatManager !== "function") {
+    if (!bmeChatManagerUnavailableWarned) {
+      console.warn("[ST-BME] BmeChatManager 不可用，IndexedDB 能力暂时停用");
+      bmeChatManagerUnavailableWarned = true;
+    }
+    return null;
+  }
+
+  if (!bmeChatManager) {
+    bmeChatManager = new BmeChatManager();
+  }
+  return bmeChatManager;
+}
+
+function scheduleBmeIndexedDbTask(task) {
+  const scheduler =
+    typeof globalThis.queueMicrotask === "function"
+      ? globalThis.queueMicrotask.bind(globalThis)
+      : (callback) => setTimeout(callback, 0);
+
+  scheduler(() => {
+    Promise.resolve()
+      .then(task)
+      .catch((error) => {
+        console.warn("[ST-BME] IndexedDB 后台任务失败:", error);
+      });
+  });
+}
+
+async function syncBmeChatManagerWithCurrentChat(
+  source = "unknown",
+  context = getContext(),
+) {
+  const manager = ensureBmeChatManager();
+  if (!manager) {
+    return {
+      chatId: "",
+      opened: false,
+      skipped: true,
+      reason: "manager-unavailable",
+    };
+  }
+  const chatId = getCurrentChatId(context);
+
+  if (!chatId) {
+    await manager.closeCurrent();
+    console.debug("[ST-BME] IndexedDB 会话已关闭（无活动聊天）", {
+      source,
+    });
+    return {
+      chatId: "",
+      opened: false,
+      skipped: false,
+    };
+  }
+
+  const db = await manager.switchChat(chatId);
+  console.debug("[ST-BME] IndexedDB 会话已同步", {
+    source,
+    chatId,
+  });
+  return {
+    chatId,
+    opened: Boolean(db),
+    skipped: false,
+  };
+}
+
+function scheduleBmeIndexedDbWarmup(source = "init") {
+  scheduleBmeIndexedDbTask(async () => {
+    await ensureDexieLoaded();
+    await syncBmeChatManagerWithCurrentChat(source);
+  });
+}
+
+function normalizeIndexedDbRevision(value, fallbackValue = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return Math.max(0, Number(fallbackValue) || 0);
+  }
+  return Math.floor(parsed);
+}
+
+function isIndexedDbSnapshotMeaningful(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+
+  if (Array.isArray(snapshot.nodes) && snapshot.nodes.length > 0) return true;
+  if (Array.isArray(snapshot.edges) && snapshot.edges.length > 0) return true;
+  if (Array.isArray(snapshot.tombstones) && snapshot.tombstones.length > 0) return true;
+
+  const state = snapshot.state || {};
+  if (Number.isFinite(Number(state.lastProcessedFloor)) && Number(state.lastProcessedFloor) >= 0) {
+    return true;
+  }
+  if (Number.isFinite(Number(state.extractionCount)) && Number(state.extractionCount) > 0) {
+    return true;
+  }
+
+  const runtimeHistoryState = snapshot.meta?.runtimeHistoryState;
+  if (
+    runtimeHistoryState &&
+    typeof runtimeHistoryState === "object" &&
+    !Array.isArray(runtimeHistoryState)
+  ) {
+    if (
+      Number.isFinite(Number(runtimeHistoryState.lastProcessedAssistantFloor)) &&
+      Number(runtimeHistoryState.lastProcessedAssistantFloor) >= 0
+    ) {
+      return true;
+    }
+    if (
+      runtimeHistoryState.processedMessageHashes &&
+      typeof runtimeHistoryState.processedMessageHashes === "object" &&
+      !Array.isArray(runtimeHistoryState.processedMessageHashes) &&
+      Object.keys(runtimeHistoryState.processedMessageHashes).length > 0
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function cacheIndexedDbSnapshot(chatId, snapshot = null) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
+  bmeIndexedDbSnapshotCacheByChatId.set(normalizedChatId, {
+    chatId: normalizedChatId,
+    revision: normalizeIndexedDbRevision(snapshot?.meta?.revision),
+    snapshot,
+    updatedAt: Date.now(),
+  });
+}
+
+function readCachedIndexedDbSnapshot(chatId) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+  const cacheEntry = bmeIndexedDbSnapshotCacheByChatId.get(normalizedChatId);
+  if (!cacheEntry?.snapshot) return null;
+  return cacheEntry.snapshot;
+}
+
+function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  const legacyGraph = context?.chatMetadata?.[GRAPH_METADATA_KEY];
+  if (!legacyGraph) return null;
+
+  try {
+    const hydratedLegacyGraph =
+      typeof legacyGraph === "string" ? deserializeGraph(legacyGraph) : legacyGraph;
+    return cloneGraphForPersistence(
+      normalizeGraphRuntimeState(hydratedLegacyGraph, normalizedChatId),
+      normalizedChatId,
+    );
+  } catch (error) {
+    console.warn("[ST-BME] 读取 legacy chat_metadata 图谱失败:", error);
+    return null;
+  }
+}
+
+async function maybeMigrateLegacyGraphToIndexedDb(
+  chatId,
+  context = getContext(),
+  { source = "unknown", db = null } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return {
+      migrated: false,
+      reason: "migration-missing-chat-id",
+      chatId: "",
+    };
+  }
+
+  const inFlightMigration = bmeIndexedDbLegacyMigrationInFlightByChatId.get(
+    normalizedChatId,
+  );
+  if (inFlightMigration) {
+    return await inFlightMigration;
+  }
+
+  const migrationTask = (async () => {
+    try {
+      const manager = ensureBmeChatManager();
+      if (!manager) {
+        return {
+          migrated: false,
+          reason: "migration-manager-unavailable",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+      if (!targetDb) {
+        return {
+          migrated: false,
+          reason: "migration-db-unavailable",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const contextChatId = resolveCurrentChatIdentity(context).chatId;
+      if (contextChatId && contextChatId !== normalizedChatId) {
+        return {
+          migrated: false,
+          reason: "migration-context-chat-mismatch",
+          chatId: normalizedChatId,
+          contextChatId,
+        };
+      }
+
+      const migrationCompletedAt = Number(
+        await targetDb.getMeta("migrationCompletedAt", 0),
+      );
+      if (Number.isFinite(migrationCompletedAt) && migrationCompletedAt > 0) {
+        return {
+          migrated: false,
+          reason: "migration-already-completed",
+          chatId: normalizedChatId,
+          migrationCompletedAt,
+        };
+      }
+
+      const legacyGraph = readLegacyGraphFromChatMetadata(normalizedChatId, context);
+      if (!legacyGraph) {
+        return {
+          migrated: false,
+          reason: "migration-legacy-graph-missing",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const emptyStatus = await targetDb.isEmpty();
+      if (!emptyStatus?.empty) {
+        return {
+          migrated: false,
+          reason: "migration-indexeddb-not-empty",
+          chatId: normalizedChatId,
+          emptyStatus,
+        };
+      }
+
+      const legacyRevision = Math.max(
+        normalizeIndexedDbRevision(getGraphPersistedRevision(legacyGraph), 0),
+        1,
+      );
+      const migrationResult = await targetDb.importLegacyGraph(legacyGraph, {
+        source: "chat_metadata",
+        revision: legacyRevision,
+      });
+      if (!migrationResult?.migrated) {
+        return {
+          migrated: false,
+          reason: migrationResult?.reason || "migration-skipped",
+          chatId: normalizedChatId,
+          migrationResult,
+        };
+      }
+
+      const postMigrationSnapshot = await targetDb.exportSnapshot();
+      cacheIndexedDbSnapshot(normalizedChatId, postMigrationSnapshot);
+      console.debug("[ST-BME] legacy chat_metadata 图谱迁移完成", {
+        source,
+        chatId: normalizedChatId,
+        revision:
+          postMigrationSnapshot?.meta?.revision || migrationResult?.revision || 0,
+        imported: migrationResult.imported,
+      });
+
+      let syncResult = {
+        synced: false,
+        reason: "post-migration-sync-skipped",
+        chatId: normalizedChatId,
+      };
+      try {
+        syncResult = await syncNow(
+          normalizedChatId,
+          buildBmeSyncRuntimeOptions({
+            reason: "post-migration",
+            trigger: `${String(source || "migration")}:post-migration`,
+          }),
+        );
+      } catch (syncError) {
+        console.warn("[ST-BME] legacy 迁移后立即同步失败:", syncError);
+        syncResult = {
+          synced: false,
+          reason: "post-migration-sync-failed",
+          chatId: normalizedChatId,
+          error: syncError?.message || String(syncError),
+        };
+      }
+
+      return {
+        migrated: true,
+        reason: "migration-completed",
+        chatId: normalizedChatId,
+        migrationResult,
+        snapshot: postMigrationSnapshot,
+        syncResult,
+      };
+    } catch (error) {
+      console.warn("[ST-BME] legacy chat_metadata 迁移失败:", error);
+      return {
+        migrated: false,
+        reason: "migration-failed",
+        chatId: normalizedChatId,
+        error: error?.message || String(error),
+      };
+    }
+  })().finally(() => {
+    if (
+      bmeIndexedDbLegacyMigrationInFlightByChatId.get(normalizedChatId) ===
+      migrationTask
+    ) {
+      bmeIndexedDbLegacyMigrationInFlightByChatId.delete(normalizedChatId);
+    }
+  });
+
+  bmeIndexedDbLegacyMigrationInFlightByChatId.set(normalizedChatId, migrationTask);
+  return await migrationTask;
+}
+
+function applyIndexedDbEmptyToRuntime(
+  chatId,
+  { source = "indexeddb-empty", attemptIndex = 0 } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-missing-chat-id",
+      chatId: "",
+      attemptIndex,
+    };
+  }
+
+  currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), normalizedChatId);
+  extractionCount = 0;
+  lastExtractedItems = [];
+  lastRecalledItems = [];
+  lastInjectionContent = "";
+  runtimeStatus = createUiStatus("待命", "当前聊天还没有图谱", "idle");
+  lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
+  lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
+  lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.EMPTY_CONFIRMED, {
+    chatId: normalizedChatId,
+    reason: `indexeddb-empty:${String(source || "indexeddb-empty")}`,
+    attemptIndex,
+    revision: 0,
+    lastPersistedRevision: 0,
+    queuedPersistRevision: 0,
+    queuedPersistChatId: "",
+    pendingPersist: false,
+    shadowSnapshotUsed: false,
+    shadowSnapshotRevision: 0,
+    shadowSnapshotUpdatedAt: "",
+    shadowSnapshotReason: "",
+    dbReady: true,
+    writesBlocked: false,
+  });
+
+  updateGraphPersistenceState({
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: true,
+    indexedDbRevision: 0,
+    indexedDbLastError: "",
+    dualWriteLastResult: {
+      action: "load",
+      source: String(source || "indexeddb-empty"),
+      success: true,
+      empty: true,
+      at: Date.now(),
+    },
+  });
+
+  refreshPanelLiveState();
+  return {
+    success: true,
+    loaded: false,
+    emptyConfirmed: true,
+    loadState: GRAPH_LOAD_STATES.EMPTY_CONFIRMED,
+    reason: `indexeddb-empty:${String(source || "indexeddb-empty")}`,
+    chatId: normalizedChatId,
+    attemptIndex,
+  };
+}
+
+
+function applyIndexedDbSnapshotToRuntime(
+  chatId,
+  snapshot,
+  { source = "indexeddb", attemptIndex = 0 } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot)) {
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-empty",
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
+
+  const revision = Math.max(1, normalizeIndexedDbRevision(snapshot?.meta?.revision));
+  const graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
+    chatId: normalizedChatId,
+  });
+  currentGraph = cloneGraphForPersistence(
+    normalizeGraphRuntimeState(graphFromSnapshot, normalizedChatId),
+    normalizedChatId,
+  );
+
+  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+    ? currentGraph.historyState.extractionCount
+    : 0;
+  lastExtractedItems = [];
+  updateLastRecalledItems(currentGraph.lastRecallResult || []);
+  lastInjectionContent = "";
+  runtimeStatus = createUiStatus(
+    "待命",
+    "已从 IndexedDB 加载聊天图谱",
+    "idle",
+  );
+  lastExtractionStatus = createUiStatus(
+    "待命",
+    "已从 IndexedDB 加载聊天图谱，等待下一次提取",
+    "idle",
+  );
+  lastVectorStatus = createUiStatus(
+    "待命",
+    currentGraph.vectorIndexState?.lastWarning ||
+      "已从 IndexedDB 加载聊天图谱，等待下一次向量任务",
+    "idle",
+  );
+  lastRecallStatus = createUiStatus(
+    "待命",
+    "已从 IndexedDB 加载聊天图谱，等待下一次召回",
+    "idle",
+  );
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+    chatId: normalizedChatId,
+    reason: `indexeddb:${source}`,
+    attemptIndex,
+    revision,
+    lastPersistedRevision: Math.max(
+      graphPersistenceState.lastPersistedRevision || 0,
+      revision,
+    ),
+    queuedPersistRevision: 0,
+    pendingPersist: false,
+    shadowSnapshotUsed: false,
+    shadowSnapshotRevision: 0,
+    shadowSnapshotUpdatedAt: "",
+    shadowSnapshotReason: "",
+    writesBlocked: false,
+  });
+  updateGraphPersistenceState({
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: true,
+    indexedDbRevision: revision,
+    metadataIntegrity: getChatMetadataIntegrity(getContext()) || graphPersistenceState.metadataIntegrity,
+    indexedDbLastError: "",
+    lastSyncError: "",
+    dualWriteLastResult: {
+      action: "load",
+      source: String(source || "indexeddb"),
+      revision,
+      at: Date.now(),
+    },
+  });
+
+  removeGraphShadowSnapshot(normalizedChatId);
+  refreshPanelLiveState();
+  console.debug("[ST-BME] 已从 IndexedDB 加载图谱", {
+    chatId: normalizedChatId,
+    source,
+    revision,
+    ...getGraphStats(currentGraph),
+  });
+
+  return {
+    success: true,
+    loaded: true,
+    loadState: GRAPH_LOAD_STATES.LOADED,
+    reason: `indexeddb:${source}`,
+    chatId: normalizedChatId,
+    attemptIndex,
+    shadowSnapshotUsed: false,
+    revision,
+  };
+}
+
+async function loadGraphFromIndexedDb(
+  chatId,
+  {
+    source = "indexeddb-probe",
+    attemptIndex = 0,
+    allowOverride = false,
+    applyEmptyState = false,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-missing-chat-id",
+      chatId: "",
+      attemptIndex,
+    };
+  }
+
+  try {
+    const manager = ensureBmeChatManager();
+    if (!manager) {
+      return {
+        success: false,
+        loaded: false,
+        reason: "indexeddb-manager-unavailable",
+        chatId: normalizedChatId,
+        attemptIndex,
+      };
+    }
+    const db = await manager.getCurrentDb(normalizedChatId);
+
+    const migrationResult = await maybeMigrateLegacyGraphToIndexedDb(
+      normalizedChatId,
+      getContext(),
+      {
+        source,
+        db,
+      },
+    );
+
+    if (migrationResult?.migrated) {
+      const migratedRevision = normalizeIndexedDbRevision(
+        migrationResult?.snapshot?.meta?.revision || migrationResult?.migrationResult?.revision,
+      );
+      updateGraphPersistenceState({
+        storagePrimary: "indexeddb",
+        storageMode: "indexeddb",
+        indexedDbRevision: migratedRevision,
+        indexedDbLastError: "",
+        lastSyncError: "",
+        dualWriteLastResult: {
+          action: "migration",
+          source: "chat_metadata",
+          success: true,
+          chatId: normalizedChatId,
+          revision: migratedRevision,
+          reason: migrationResult?.reason || "migration-completed",
+          at: Date.now(),
+          syncResult: cloneRuntimeDebugValue(migrationResult?.syncResult, null),
+        },
+      });
+    } else if (migrationResult?.reason === "migration-failed") {
+      updateGraphPersistenceState({
+        indexedDbLastError: String(migrationResult?.error || "migration-failed"),
+        dualWriteLastResult: {
+          action: "migration",
+          source: "chat_metadata",
+          success: false,
+          error: String(migrationResult?.error || "migration-failed"),
+          at: Date.now(),
+        },
+      });
+    }
+
+    const snapshot = migrationResult?.snapshot || (await db.exportSnapshot());
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+
+    if (!isIndexedDbSnapshotMeaningful(snapshot)) {
+      if (
+        applyEmptyState &&
+        getCurrentChatId() === normalizedChatId
+      ) {
+        return applyIndexedDbEmptyToRuntime(normalizedChatId, {
+          source,
+          attemptIndex,
+        });
+      }
+      return {
+        success: false,
+        loaded: false,
+        reason: "indexeddb-empty",
+        chatId: normalizedChatId,
+        attemptIndex,
+      };
+    }
+
+    const snapshotRevision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
+    const shouldAllowOverride =
+      allowOverride ||
+      BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(graphPersistenceState.loadState) ||
+      graphPersistenceState.storagePrimary === "indexeddb" ||
+      snapshotRevision >= normalizeIndexedDbRevision(graphPersistenceState.revision);
+
+    if (!shouldAllowOverride) {
+      return {
+        success: false,
+        loaded: false,
+        reason: "indexeddb-stale",
+        chatId: normalizedChatId,
+        attemptIndex,
+        revision: snapshotRevision,
+      };
+    }
+
+    if (getCurrentChatId() !== normalizedChatId) {
+      return {
+        success: false,
+        loaded: false,
+        reason: "indexeddb-chat-switched",
+        chatId: normalizedChatId,
+        attemptIndex,
+        revision: snapshotRevision,
+      };
+    }
+
+    return applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
+      source,
+      attemptIndex,
+    });
+  } catch (error) {
+    console.warn("[ST-BME] IndexedDB 读取失败，回退 metadata:", error);
+    updateGraphPersistenceState({
+      indexedDbLastError: error?.message || String(error),
+      dualWriteLastResult: {
+        action: "load",
+        source: String(source || "indexeddb"),
+        success: false,
+        error: error?.message || String(error),
+        at: Date.now(),
+      },
+    });
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-read-failed",
+      chatId: normalizedChatId,
+      attemptIndex,
+      error,
+    };
+  }
+}
+
+function scheduleIndexedDbGraphProbe(chatId, options = {}) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || bmeIndexedDbLoadInFlightByChatId.has(normalizedChatId)) {
+    return;
+  }
+
+  scheduleBmeIndexedDbTask(() => {
+    const loadPromise = loadGraphFromIndexedDb(normalizedChatId, options)
+      .catch((error) => {
+        console.warn("[ST-BME] IndexedDB 后台加载失败:", error);
+      })
+      .finally(() => {
+        if (bmeIndexedDbLoadInFlightByChatId.get(normalizedChatId) === loadPromise) {
+          bmeIndexedDbLoadInFlightByChatId.delete(normalizedChatId);
+        }
+      });
+
+    bmeIndexedDbLoadInFlightByChatId.set(normalizedChatId, loadPromise);
+    return loadPromise;
+  });
+}
+
 function resolveInjectionPromptType(settings = {}) {
   const normalized = String(settings?.injectPosition || "atDepth")
     .trim()
@@ -2119,6 +2946,9 @@ function persistGraphToChatMetadata(
     lastPersistReason: String(reason || ""),
     lastPersistMode: saveMode,
     metadataIntegrity: String(nextIntegrity || ""),
+    storagePrimary: "metadata",
+    storageMode: "metadata",
+    indexedDbLastError: "",
     queuedPersistChatId: "",
     queuedPersistMode: "",
     queuedPersistRotateIntegrity: false,
@@ -2274,46 +3104,19 @@ function shouldSyncGraphLoadFromLiveContext(
   context = getContext(),
   { force = false } = {},
 ) {
-  if (force) {
-    return true;
-  }
+  if (force) return true;
 
   const chatIdentity = resolveCurrentChatIdentity(context);
   const liveChatId = chatIdentity.chatId;
   const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
-  const liveMetadataReady = isHostChatMetadataReady(context);
 
-  if (liveChatId && liveChatId !== stateChatId) {
+  if (liveChatId !== stateChatId) return true;
+
+  if (!liveChatId && graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT) {
     return true;
   }
 
-  if (
-    graphPersistenceState.loadState === GRAPH_LOAD_STATES.NO_CHAT &&
-    (liveChatId || chatIdentity.hasLikelySelectedChat)
-  ) {
-    return true;
-  }
-
-  if (
-    graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
-    liveMetadataReady
-  ) {
-    return true;
-  }
-
-  if (
-    graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
-    liveMetadataReady
-  ) {
-    return true;
-  }
-
-  if (
-    graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED &&
-    (liveChatId || liveMetadataReady)
-  ) {
-    return true;
-  }
+  if (liveChatId && !graphPersistenceState.dbReady) return true;
 
   return false;
 }
@@ -2330,12 +3133,58 @@ function syncGraphLoadFromLiveContext(options = {}) {
     };
   }
 
-  const result = loadGraphFromChat({
-    source,
+  const chatId = resolveCurrentChatIdentity(context).chatId;
+  if (!chatId) {
+    const result = loadGraphFromChat({
+      source,
+      attemptIndex: 0,
+    });
+    return {
+      synced: true,
+      ...result,
+    };
+  }
+
+  const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
+  if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
+    const result = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
+      source: `${source}:indexeddb-cache`,
+      attemptIndex: 0,
+    });
+    return {
+      synced: true,
+      ...result,
+    };
+  }
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
+    chatId,
+    reason: `indexeddb-sync:${String(source || "live-context-sync")}`,
+    attemptIndex: 0,
+    dbReady: false,
+    writesBlocked: true,
   });
+  updateGraphPersistenceState({
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: false,
+    indexedDbLastError: "",
+  });
+  scheduleIndexedDbGraphProbe(chatId, {
+    source: `${source}:indexeddb-probe`,
+    allowOverride: true,
+    applyEmptyState: true,
+  });
+  refreshPanelLiveState();
+
   return {
     synced: true,
-    ...result,
+    success: false,
+    loaded: false,
+    loadState: GRAPH_LOAD_STATES.LOADING,
+    reason: "indexeddb-loading",
+    chatId,
+    attemptIndex: 0,
   };
 }
 
@@ -3012,6 +3861,26 @@ function loadGraphFromChat(options = {}) {
     };
   }
 
+  if (chatId) {
+    const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
+    if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
+      const cachedResult = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
+        source: `${source}:indexeddb-cache`,
+        attemptIndex,
+      });
+      if (cachedResult?.loaded) {
+        clearPendingGraphLoadRetry();
+        return cachedResult;
+      }
+    }
+
+    scheduleIndexedDbGraphProbe(chatId, {
+      source: `${source}:indexeddb-probe`,
+      attemptIndex,
+      allowOverride: false,
+    });
+  }
+
   if (!chatId) {
     const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
     if (chatIdentity.hasLikelySelectedChat) {
@@ -3199,6 +4068,10 @@ function loadGraphFromChat(options = {}) {
         queuedPersistMode: "immediate",
         queuedPersistRotateIntegrity: false,
         queuedPersistReason: "shadow-snapshot-newer-than-official",
+        storagePrimary: "metadata",
+        storageMode: "metadata",
+        indexedDbRevision: Math.max(graphPersistenceState.indexedDbRevision || 0, officialRevision),
+        indexedDbLastError: "",
       });
       const persistResult = maybeFlushQueuedGraphPersist(
         "shadow-snapshot-newer-than-official",
@@ -3267,6 +4140,9 @@ function loadGraphFromChat(options = {}) {
       queuedPersistMode: "",
       queuedPersistRotateIntegrity: false,
       queuedPersistReason: "",
+      storagePrimary: "metadata",
+      storageMode: "metadata",
+      indexedDbLastError: "",
     });
     removeGraphShadowSnapshot(chatId);
 
@@ -3338,6 +4214,9 @@ function loadGraphFromChat(options = {}) {
         queuedPersistMode: "immediate",
         queuedPersistRotateIntegrity: false,
         queuedPersistReason: "shadow-snapshot-promoted",
+        storagePrimary: "metadata",
+        storageMode: "metadata",
+        indexedDbLastError: "",
       });
       const persistResult = maybeFlushQueuedGraphPersist(
         "shadow-snapshot-promoted",
@@ -3379,6 +4258,9 @@ function loadGraphFromChat(options = {}) {
       queuedPersistReason: shouldRetry
         ? "shadow-snapshot-restored"
         : "shadow-snapshot-blocked",
+      storagePrimary: "metadata",
+      storageMode: "metadata",
+      indexedDbLastError: "",
     });
     if (shouldRetry) {
       scheduleGraphLoadRetry(
@@ -3511,6 +4393,9 @@ function loadGraphFromChat(options = {}) {
     queuedPersistMode: "",
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: "",
+    storagePrimary: "metadata",
+    storageMode: "metadata",
+    indexedDbLastError: "",
   });
   removeGraphShadowSnapshot(chatId);
   refreshPanelLiveState();
@@ -3523,6 +4408,156 @@ function loadGraphFromChat(options = {}) {
     attemptIndex,
     shadowSnapshotUsed: false,
   };
+}
+
+async function saveGraphToIndexedDb(
+  chatId,
+  graph,
+  { revision = 0, reason = "graph-save" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !graph) {
+    return {
+      saved: false,
+      chatId: normalizedChatId,
+      reason: "indexeddb-missing-chat-or-graph",
+      revision: normalizeIndexedDbRevision(revision),
+    };
+  }
+
+  try {
+    const manager = ensureBmeChatManager();
+    if (!manager) {
+      return {
+        saved: false,
+        chatId: normalizedChatId,
+        reason: "indexeddb-manager-unavailable",
+        revision: normalizeIndexedDbRevision(revision),
+      };
+    }
+    const db = await manager.getCurrentDb(normalizedChatId);
+    const baseSnapshot =
+      readCachedIndexedDbSnapshot(normalizedChatId) || (await db.exportSnapshot());
+    const snapshot = buildSnapshotFromGraph(graph, {
+      chatId: normalizedChatId,
+      revision,
+      baseSnapshot,
+      lastModified: Date.now(),
+      meta: {
+        storagePrimary: "indexeddb",
+        lastMutationReason: String(reason || "graph-save"),
+      },
+    });
+    const importResult = await db.importSnapshot(snapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      revision,
+      markSyncDirty: true,
+    });
+    await db.markSyncDirty(reason);
+
+    snapshot.meta.revision = normalizeIndexedDbRevision(importResult?.revision, revision);
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    scheduleUpload(normalizedChatId, buildBmeSyncRuntimeOptions({
+      trigger: `graph-mutation:${String(reason || "graph-save")}`,
+    }));
+
+    updateGraphPersistenceState({
+      storagePrimary: "indexeddb",
+      storageMode: "indexeddb",
+      dbReady: true,
+      indexedDbRevision: snapshot.meta.revision,
+      metadataIntegrity: getChatMetadataIntegrity(getContext()) || graphPersistenceState.metadataIntegrity,
+      indexedDbLastError: "",
+      lastSyncError: "",
+      dualWriteLastResult: {
+        action: "save",
+        target: "indexeddb",
+        success: true,
+        chatId: normalizedChatId,
+        revision: snapshot.meta.revision,
+        reason: String(reason || "graph-save"),
+        at: Date.now(),
+      },
+    });
+
+    return {
+      saved: true,
+      chatId: normalizedChatId,
+      revision: snapshot.meta.revision,
+      reason: String(reason || "graph-save"),
+    };
+  } catch (error) {
+    console.warn("[ST-BME] IndexedDB 写入失败，保留 metadata 兜底:", error);
+    updateGraphPersistenceState({
+      indexedDbLastError: error?.message || String(error),
+      dualWriteLastResult: {
+        action: "save",
+        target: "indexeddb",
+        success: false,
+        chatId: normalizedChatId,
+        revision: normalizeIndexedDbRevision(revision),
+        reason: String(reason || "graph-save"),
+        error: error?.message || String(error),
+        at: Date.now(),
+      },
+    });
+    return {
+      saved: false,
+      chatId: normalizedChatId,
+      revision: normalizeIndexedDbRevision(revision),
+      reason: "indexeddb-write-failed",
+      error,
+    };
+  }
+}
+
+function queueGraphPersistToIndexedDb(
+  chatId,
+  graph,
+  { revision = 0, reason = "graph-save" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !graph) return;
+  const graphSnapshot = cloneGraphForPersistence(graph, normalizedChatId);
+
+  const normalizedRevision = normalizeIndexedDbRevision(revision);
+  const latestQueuedRevision = normalizeIndexedDbRevision(
+    bmeIndexedDbLatestQueuedRevisionByChatId.get(normalizedChatId),
+  );
+  bmeIndexedDbLatestQueuedRevisionByChatId.set(
+    normalizedChatId,
+    Math.max(latestQueuedRevision, normalizedRevision),
+  );
+
+  const previousWritePromise =
+    bmeIndexedDbWriteInFlightByChatId.get(normalizedChatId) || Promise.resolve();
+  const nextWritePromise = previousWritePromise
+    .catch(() => null)
+    .then(async () => {
+      const currentLatestRevision = normalizeIndexedDbRevision(
+        bmeIndexedDbLatestQueuedRevisionByChatId.get(normalizedChatId),
+      );
+      if (normalizedRevision > 0 && normalizedRevision < currentLatestRevision) {
+        return {
+          saved: false,
+          skipped: true,
+          reason: "indexeddb-write-superseded",
+          revision: normalizedRevision,
+        };
+      }
+      return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
+        revision: normalizedRevision,
+        reason,
+      });
+    })
+    .finally(() => {
+      if (bmeIndexedDbWriteInFlightByChatId.get(normalizedChatId) === nextWritePromise) {
+        bmeIndexedDbWriteInFlightByChatId.delete(normalizedChatId);
+      }
+    });
+
+  bmeIndexedDbWriteInFlightByChatId.set(normalizedChatId, nextWritePromise);
 }
 
 function saveGraphToChat(options = {}) {
@@ -3538,7 +4573,8 @@ function saveGraphToChat(options = {}) {
   const {
     reason = "graph-save",
     markMutation = true,
-    captureShadow = true,
+    persistMetadata = false,
+    captureShadow = Boolean(persistMetadata),
     immediate = markMutation,
   } = options;
 
@@ -3560,6 +4596,17 @@ function saveGraphToChat(options = {}) {
     maybeCaptureGraphShadowSnapshot(reason);
   }
 
+  const shouldQueueIndexedDbPersist =
+    markMutation || !isGraphEffectivelyEmpty(currentGraph);
+  if (shouldQueueIndexedDbPersist) {
+    queueGraphPersistToIndexedDb(chatId, currentGraph, {
+      revision,
+      reason,
+    });
+  }
+
+  const metadataFallbackEnabled = Boolean(persistMetadata) || !ensureBmeChatManager();
+
   if (!markMutation) {
     const hasMeaningfulGraphData = !isGraphEffectivelyEmpty(currentGraph);
     if (
@@ -3577,6 +4624,45 @@ function saveGraphToChat(options = {}) {
     }
   }
 
+  if (!metadataFallbackEnabled) {
+    const saveMode = shouldQueueIndexedDbPersist
+      ? "indexeddb-queued"
+      : "indexeddb-skip";
+    updateGraphPersistenceState({
+      storagePrimary: "indexeddb",
+      storageMode: "indexeddb",
+      dbReady:
+        graphPersistenceState.dbReady ?? isGraphLoadStateDbReady(graphPersistenceState.loadState),
+      lastPersistReason: String(reason || "graph-save"),
+      lastPersistMode: saveMode,
+      pendingPersist: false,
+      queuedPersistChatId: "",
+      queuedPersistMode: "",
+      queuedPersistReason: "",
+      queuedPersistRotateIntegrity: false,
+      dualWriteLastResult: {
+        action: "save",
+        target: "indexeddb",
+        queued: Boolean(shouldQueueIndexedDbPersist),
+        success: true,
+        chatId,
+        revision: normalizeIndexedDbRevision(revision),
+        reason: String(reason || "graph-save"),
+        at: Date.now(),
+      },
+    });
+    return buildGraphPersistResult({
+      saved: Boolean(shouldQueueIndexedDbPersist),
+      queued: false,
+      blocked: false,
+      reason: shouldQueueIndexedDbPersist
+        ? "indexeddb-queued"
+        : "indexeddb-empty-skip",
+      revision,
+      saveMode,
+    });
+  }
+
   if (!isGraphMetadataWriteAllowed()) {
     console.warn(
       `[ST-BME] 图谱写回已被安全保护拦截（chat=${chatId}，state=${graphPersistenceState.loadState}，reason=${reason}）`,
@@ -3584,11 +4670,28 @@ function saveGraphToChat(options = {}) {
     return queueGraphPersist(reason, revision, { immediate });
   }
 
-  return persistGraphToChatMetadata(context, {
+  const metadataPersistResult = persistGraphToChatMetadata(context, {
     reason,
     revision,
     immediate,
   });
+  updateGraphPersistenceState({
+    storagePrimary: "metadata",
+    storageMode: "metadata",
+    dualWriteLastResult: {
+      action: "save",
+      target: "metadata",
+      success: Boolean(metadataPersistResult?.saved),
+      queued: Boolean(metadataPersistResult?.queued),
+      blocked: Boolean(metadataPersistResult?.blocked),
+      chatId,
+      revision: normalizeIndexedDbRevision(revision),
+      reason: String(reason || "graph-save"),
+      at: Date.now(),
+    },
+  });
+
+  return metadataPersistResult;
 }
 
 function handleGraphShadowSnapshotPageHide() {
@@ -5048,7 +6151,7 @@ async function runRecall(options = {}) {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
-  return onChatChangedController({
+  const result = onChatChangedController({
     abortAllRunningStages,
     clearGenerationRecallTransactionsForChat,
     clearInjectionState,
@@ -5077,13 +6180,41 @@ function onChatChanged() {
     },
     syncGraphLoadFromLiveContext,
   });
+
+  scheduleBmeIndexedDbTask(async () => {
+    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-changed");
+    if (syncResult?.chatId) {
+      await runBmeAutoSyncForChat("chat-changed", syncResult.chatId);
+      await loadGraphFromIndexedDb(syncResult.chatId, {
+        source: "chat-changed",
+        allowOverride: true,
+        applyEmptyState: true,
+      });
+    }
+  });
+
+  return result;
 }
 
 function onChatLoaded() {
-  return onChatLoadedController({
+  const result = onChatLoadedController({
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     syncGraphLoadFromLiveContext,
   });
+
+  scheduleBmeIndexedDbTask(async () => {
+    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-loaded");
+    if (syncResult?.chatId) {
+      await runBmeAutoSyncForChat("chat-loaded", syncResult.chatId);
+      await loadGraphFromIndexedDb(syncResult.chatId, {
+        source: "chat-loaded",
+        allowOverride: true,
+        applyEmptyState: true,
+      });
+    }
+  });
+
+  return result;
 }
 
 function onMessageSent(messageId) {
@@ -5453,13 +6584,13 @@ async function onReembedDirect() {
 (async function init() {
   await loadServerSettings();
   syncGraphPersistenceDebugState();
+
+  ensureBmeChatManager();
+  scheduleBmeIndexedDbWarmup("init");
   initializeHostCapabilityBridge();
   installSendIntentHooks();
-  globalThis.addEventListener?.("pagehide", handleGraphShadowSnapshotPageHide);
-  document.addEventListener(
-    "visibilitychange",
-    handleGraphShadowSnapshotVisibilityChange,
-  );
+  autoSyncOnVisibility(buildBmeSyncRuntimeOptions());
+
 
   // 注册事件钩子
   registerCoreEventHooksController({
@@ -5481,12 +6612,19 @@ async function onReembedDirect() {
   });
 
   // 加载当前聊天的图谱
-  clearPendingGraphLoadRetry();
-  syncGraphLoadFromLiveContext({
-    source: "initial-load",
-    force: true,
+  scheduleBmeIndexedDbTask(async () => {
+    const syncResult = await syncBmeChatManagerWithCurrentChat("initial-load");
+    if (!syncResult?.chatId) {
+      syncGraphLoadFromLiveContext({ source: "initial-load:no-chat", force: true });
+      return;
+    }
+    await runBmeAutoSyncForChat("initial-load", syncResult.chatId);
+    await loadGraphFromIndexedDb(syncResult.chatId, {
+      source: "initial-load",
+      allowOverride: true,
+      applyEmptyState: true,
+    });
   });
-  scheduleStartupGraphReconciliation();
 
   // ==================== 操控面板初始化 ====================
 

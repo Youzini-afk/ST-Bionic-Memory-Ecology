@@ -263,8 +263,12 @@ export async function onBeforeCombinePromptsController(runtime) {
 }
 
 export function onMessageReceivedController(runtime) {
-  const loadState = runtime.getGraphPersistenceState?.()?.loadState || "";
+  const persistenceState = runtime.getGraphPersistenceState?.() || {};
+  const loadState = persistenceState.loadState || "";
+  const dbReady =
+    persistenceState.dbReady ?? (loadState === "loaded" || loadState === "empty-confirmed");
   if (
+    !dbReady ||
     loadState === "loading" ||
     loadState === "shadow-restored" ||
     loadState === "blocked"
@@ -281,7 +285,6 @@ export function onMessageReceivedController(runtime) {
     ) {
       runtime.maybeFlushQueuedGraphPersist("message-received-pending-flush");
     }
-    runtime.maybeCaptureGraphShadowSnapshot("message-received-passive-sync");
   }
 
   const pendingRecallSendIntent = runtime.getPendingRecallSendIntent();

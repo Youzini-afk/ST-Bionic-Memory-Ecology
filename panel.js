@@ -4201,6 +4201,13 @@ function _getGraphPersistenceSnapshot() {
     shadowSnapshotUsed: false,
     pendingPersist: false,
     chatId: "",
+    storageMode: "indexeddb",
+    dbReady: false,
+    syncState: "idle",
+    lastSyncUploadedAt: 0,
+    lastSyncDownloadedAt: 0,
+    lastSyncedRevision: 0,
+    lastSyncError: "",
   };
 }
 
@@ -4224,6 +4231,7 @@ function _getGraphLoadLabel(loadState = "") {
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
   return (
+    loadInfo.dbReady === true ||
     loadInfo.loadState === "loaded" ||
     loadInfo.loadState === "empty-confirmed" ||
     loadInfo.shadowSnapshotUsed === true
@@ -4231,6 +4239,9 @@ function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
 }
 
 function _isGraphWriteBlocked(loadInfo = _getGraphPersistenceSnapshot()) {
+  if (typeof loadInfo.dbReady === "boolean" && !loadInfo.dbReady) {
+    return true;
+  }
   return Boolean(loadInfo.writesBlocked);
 }
 
@@ -4271,6 +4282,8 @@ function _refreshGraphAvailabilityState() {
   }
 
   const shouldShowOverlay =
+    blocked ||
+    loadInfo.syncState === "syncing" ||
     loadInfo.loadState === "loading" ||
     loadInfo.loadState === "shadow-restored" ||
     loadInfo.loadState === "blocked";
