@@ -3836,6 +3836,7 @@ function loadGraphFromChat(options = {}) {
     attemptIndex = 0,
     expectedChatId = "",
     source = "direct-load",
+    allowMetadataFallback = true,
   } = options;
   const context = getContext();
   const chatIdentity = resolveCurrentChatIdentity(context);
@@ -3861,28 +3862,7 @@ function loadGraphFromChat(options = {}) {
     };
   }
 
-  if (chatId) {
-    const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
-    if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
-      const cachedResult = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
-        source: `${source}:indexeddb-cache`,
-        attemptIndex,
-      });
-      if (cachedResult?.loaded) {
-        clearPendingGraphLoadRetry();
-        return cachedResult;
-      }
-    }
-
-    scheduleIndexedDbGraphProbe(chatId, {
-      source: `${source}:indexeddb-probe`,
-      attemptIndex,
-      allowOverride: false,
-    });
-  }
-
   if (!chatId) {
-    const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
     if (chatIdentity.hasLikelySelectedChat) {
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), "");
       extractionCount = 0;
@@ -3891,63 +3871,46 @@ function loadGraphFromChat(options = {}) {
       lastInjectionContent = "";
       runtimeStatus = createUiStatus(
         "图谱加载中",
-        "正在等待当前聊天会话 ID 与元数据就绪",
-        shouldRetry ? "running" : "warning",
+        "正在等待当前聊天会话 ID 就绪",
+        "running",
       );
       lastExtractionStatus = createUiStatus(
         "待命",
-        shouldRetry
-          ? "正在等待当前聊天会话 ID 就绪"
-          : "当前聊天会话 ID 长时间未就绪，已暂停修改图谱",
-        shouldRetry ? "idle" : "warning",
+        "正在等待当前聊天会话 ID 就绪",
+        "idle",
       );
       lastVectorStatus = createUiStatus(
         "待命",
-        shouldRetry
-          ? "正在等待当前聊天会话 ID 就绪"
-          : "当前聊天会话 ID 长时间未就绪，已暂停修改图谱",
-        shouldRetry ? "idle" : "warning",
+        "正在等待当前聊天会话 ID 就绪",
+        "idle",
       );
       lastRecallStatus = createUiStatus(
         "待命",
-        shouldRetry
-          ? "正在等待当前聊天会话 ID 就绪"
-          : "当前聊天会话 ID 长时间未就绪，已暂停图谱写回",
-        shouldRetry ? "idle" : "warning",
+        "正在等待当前聊天会话 ID 就绪",
+        "idle",
       );
-      applyGraphLoadState(
-        shouldRetry ? GRAPH_LOAD_STATES.LOADING : GRAPH_LOAD_STATES.BLOCKED,
-        {
-          chatId: "",
-          reason: shouldRetry ? "chat-id-missing" : "chat-id-timeout",
-          attemptIndex,
-          revision: 0,
-          lastPersistedRevision: 0,
-          queuedPersistRevision: 0,
-          queuedPersistChatId: "",
-          pendingPersist: false,
-          shadowSnapshotUsed: false,
-          shadowSnapshotRevision: 0,
-          shadowSnapshotUpdatedAt: "",
-          shadowSnapshotReason: "",
-          writesBlocked: true,
-        },
-      );
-      if (shouldRetry) {
-        scheduleGraphLoadRetry("", "chat-id-missing", attemptIndex, {
-          allowPendingChat: true,
-        });
-      } else {
-        clearPendingGraphLoadRetry();
-      }
+      applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
+        chatId: "",
+        reason: "chat-id-missing",
+        attemptIndex,
+        revision: 0,
+        lastPersistedRevision: 0,
+        queuedPersistRevision: 0,
+        queuedPersistChatId: "",
+        pendingPersist: false,
+        shadowSnapshotUsed: false,
+        shadowSnapshotRevision: 0,
+        shadowSnapshotUpdatedAt: "",
+        shadowSnapshotReason: "",
+        dbReady: false,
+        writesBlocked: true,
+      });
       refreshPanelLiveState();
       return {
         success: false,
         loaded: false,
-        loadState: shouldRetry
-          ? GRAPH_LOAD_STATES.LOADING
-          : GRAPH_LOAD_STATES.BLOCKED,
-        reason: shouldRetry ? "chat-id-missing" : "chat-id-timeout",
+        loadState: GRAPH_LOAD_STATES.LOADING,
+        reason: "chat-id-missing",
         chatId: "",
         attemptIndex,
       };
@@ -3978,6 +3941,7 @@ function loadGraphFromChat(options = {}) {
       shadowSnapshotReason: "",
       writesBlocked: true,
     });
+
     refreshPanelLiveState();
     return {
       success: false,
@@ -3989,351 +3953,51 @@ function loadGraphFromChat(options = {}) {
     };
   }
 
-  const hasChatMetadata =
-    context?.chatMetadata &&
-    typeof context.chatMetadata === "object" &&
-    !Array.isArray(context.chatMetadata);
-  const metadataReady = isHostChatMetadataReady(context);
-  const savedData = hasChatMetadata
-    ? context.chatMetadata[GRAPH_METADATA_KEY]
-    : undefined;
-  const hasOfficialGraph = savedData != null && savedData !== "";
-  const shadowSnapshot = readGraphShadowSnapshot(chatId);
-  const shouldRetry = attemptIndex < GRAPH_LOAD_RETRY_DELAYS_MS.length;
-
-  if (hasOfficialGraph) {
-    const officialGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
-      chatId,
-    );
-    const officialRevision = Math.max(
-      1,
-      getGraphPersistedRevision(officialGraph),
-    );
-    const metadataIntegrity = getChatMetadataIntegrity(context);
-
-    if (shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot)) {
+  const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
+  if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
+    const cachedResult = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
+      source: `${source}:indexeddb-cache`,
+      attemptIndex,
+    });
+    if (cachedResult?.loaded) {
       clearPendingGraphLoadRetry();
-      currentGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(shadowSnapshot.serializedGraph),
-          chatId,
-        ),
+      return cachedResult;
+    }
+  }
+
+  const savedData = allowMetadataFallback
+    ? context?.chatMetadata?.[GRAPH_METADATA_KEY]
+    : undefined;
+  if (savedData != null && savedData !== "") {
+    try {
+      const officialGraph = cloneGraphForPersistence(
+        normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
         chatId,
       );
-      extractionCount = Number.isFinite(
-        currentGraph?.historyState?.extractionCount,
-      )
+      const officialRevision = Math.max(1, getGraphPersistedRevision(officialGraph));
+
+      clearPendingGraphLoadRetry();
+      currentGraph = officialGraph;
+      extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
         ? currentGraph.historyState.extractionCount
         : 0;
       lastExtractedItems = [];
       updateLastRecalledItems(currentGraph.lastRecallResult || []);
       lastInjectionContent = "";
-      runtimeStatus = createUiStatus(
-        "待命",
-        "已恢复本次会话里较新的图谱，正在补写正式聊天元数据",
-        "warning",
-      );
-      lastExtractionStatus = createUiStatus(
-        "待命",
-        "检测到本次会话里有更新的图谱快照，正在补写正式元数据",
-        "warning",
-      );
+      runtimeStatus = createUiStatus("待命", "已从兼容 metadata 加载图谱", "idle");
+      lastExtractionStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次提取", "idle");
       lastVectorStatus = createUiStatus(
         "待命",
-        "检测到本次会话里有更新的图谱快照，正在补写正式元数据",
-        "warning",
+        currentGraph.vectorIndexState?.lastWarning || "已加载聊天图谱，等待下一次向量任务",
+        "idle",
       );
-      lastRecallStatus = createUiStatus(
-        "待命",
-        "检测到本次会话里有更新的图谱快照，正在补写正式元数据",
-        "warning",
-      );
+      lastRecallStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次召回", "idle");
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
         chatId,
-        reason: "shadow-snapshot-newer-than-official",
+        reason: `${source}:metadata-compat`,
         attemptIndex,
-        revision: Math.max(shadowSnapshot.revision || 0, 1),
+        revision: officialRevision,
         lastPersistedRevision: officialRevision,
-        queuedPersistRevision: Math.max(shadowSnapshot.revision || 0, 1),
-        pendingPersist: true,
-        shadowSnapshotUsed: true,
-        shadowSnapshotRevision: Math.max(shadowSnapshot.revision || 0, 1),
-        shadowSnapshotUpdatedAt: shadowSnapshot.updatedAt,
-        shadowSnapshotReason: shadowSnapshot.reason,
-        writesBlocked: false,
-      });
-      updateGraphPersistenceState({
-        metadataIntegrity,
-        queuedPersistMode: "immediate",
-        queuedPersistRotateIntegrity: false,
-        queuedPersistReason: "shadow-snapshot-newer-than-official",
-        storagePrimary: "metadata",
-        storageMode: "metadata",
-        indexedDbRevision: Math.max(graphPersistenceState.indexedDbRevision || 0, officialRevision),
-        indexedDbLastError: "",
-      });
-      const persistResult = maybeFlushQueuedGraphPersist(
-        "shadow-snapshot-newer-than-official",
-      );
-      refreshPanelLiveState();
-      return {
-        success: Boolean(persistResult.saved),
-        loaded: true,
-        loadState: GRAPH_LOAD_STATES.LOADED,
-        reason: "shadow-snapshot-newer-than-official",
-        chatId,
-        attemptIndex,
-        shadowSnapshotUsed: true,
-      };
-    }
-
-    clearPendingGraphLoadRetry();
-    currentGraph = officialGraph;
-    extractionCount = Number.isFinite(
-      currentGraph?.historyState?.extractionCount,
-    )
-      ? currentGraph.historyState.extractionCount
-      : 0;
-    lastExtractedItems = [];
-    updateLastRecalledItems(currentGraph.lastRecallResult || []);
-    lastInjectionContent = "";
-    runtimeStatus = createUiStatus(
-      "待命",
-      "已加载聊天图谱，等待下一次任务",
-      "idle",
-    );
-    lastExtractionStatus = createUiStatus(
-      "待命",
-      "已加载聊天图谱，等待下一次提取",
-      "idle",
-    );
-    lastVectorStatus = createUiStatus(
-      "待命",
-      currentGraph.vectorIndexState?.lastWarning ||
-        "已加载聊天图谱，等待下一次向量任务",
-      "idle",
-    );
-    lastRecallStatus = createUiStatus(
-      "待命",
-      "已加载聊天图谱，等待下一次召回",
-      "idle",
-    );
-    applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
-      chatId,
-      reason: source,
-      attemptIndex,
-      revision: officialRevision,
-      lastPersistedRevision: officialRevision,
-      queuedPersistRevision: 0,
-      queuedPersistChatId: "",
-      pendingPersist: false,
-      shadowSnapshotUsed: false,
-      shadowSnapshotRevision: 0,
-      shadowSnapshotUpdatedAt: "",
-      shadowSnapshotReason: "",
-      writesBlocked: false,
-    });
-    updateGraphPersistenceState({
-      metadataIntegrity,
-      lastPersistMode: "",
-      queuedPersistMode: "",
-      queuedPersistRotateIntegrity: false,
-      queuedPersistReason: "",
-      storagePrimary: "metadata",
-      storageMode: "metadata",
-      indexedDbLastError: "",
-    });
-    removeGraphShadowSnapshot(chatId);
-
-    console.log("[ST-BME] 从聊天数据加载图谱:", {
-      chatId,
-      source,
-      attemptIndex,
-      ...getGraphStats(currentGraph),
-    });
-    refreshPanelLiveState();
-    return {
-      success: true,
-      loaded: true,
-      loadState: GRAPH_LOAD_STATES.LOADED,
-      reason: source,
-      chatId,
-      attemptIndex,
-      shadowSnapshotUsed: false,
-    };
-  }
-
-  if (shadowSnapshot) {
-    currentGraph = normalizeGraphRuntimeState(
-      deserializeGraph(shadowSnapshot.serializedGraph),
-      chatId,
-    );
-    extractionCount = Number.isFinite(
-      currentGraph?.historyState?.extractionCount,
-    )
-      ? currentGraph.historyState.extractionCount
-      : 0;
-    lastExtractedItems = [];
-    updateLastRecalledItems(currentGraph.lastRecallResult || []);
-    lastInjectionContent = "";
-    runtimeStatus = createUiStatus("待命", "已从本次会话临时恢复图谱", "idle");
-    lastExtractionStatus = createUiStatus(
-      "待命",
-      "图谱处于临时恢复状态，等待正式元数据",
-      "warning",
-    );
-    lastVectorStatus = createUiStatus(
-      "待命",
-      "图谱处于临时恢复状态，等待正式元数据",
-      "warning",
-    );
-    lastRecallStatus = createUiStatus(
-      "待命",
-      "图谱处于临时恢复状态，等待正式元数据",
-      "warning",
-    );
-
-    if (metadataReady) {
-      applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
-        chatId,
-        reason: "shadow-snapshot-promoted",
-        attemptIndex,
-        revision: Math.max(shadowSnapshot.revision || 0, 1),
-        lastPersistedRevision: 0,
-        queuedPersistRevision: Math.max(shadowSnapshot.revision || 0, 1),
-        pendingPersist: true,
-        shadowSnapshotUsed: true,
-        shadowSnapshotRevision: Math.max(shadowSnapshot.revision || 0, 1),
-        shadowSnapshotUpdatedAt: shadowSnapshot.updatedAt,
-        shadowSnapshotReason: shadowSnapshot.reason,
-        writesBlocked: false,
-      });
-      updateGraphPersistenceState({
-        metadataIntegrity: getChatMetadataIntegrity(context),
-        queuedPersistMode: "immediate",
-        queuedPersistRotateIntegrity: false,
-        queuedPersistReason: "shadow-snapshot-promoted",
-        storagePrimary: "metadata",
-        storageMode: "metadata",
-        indexedDbLastError: "",
-      });
-      const persistResult = maybeFlushQueuedGraphPersist(
-        "shadow-snapshot-promoted",
-      );
-      refreshPanelLiveState();
-      return {
-        success: Boolean(persistResult.saved),
-        loaded: true,
-        loadState: GRAPH_LOAD_STATES.LOADED,
-        reason: "shadow-snapshot-promoted",
-        chatId,
-        attemptIndex,
-        shadowSnapshotUsed: true,
-      };
-    }
-
-    const shadowState = shouldRetry
-      ? GRAPH_LOAD_STATES.SHADOW_RESTORED
-      : GRAPH_LOAD_STATES.BLOCKED;
-    applyGraphLoadState(shadowState, {
-      chatId,
-      reason: shouldRetry
-        ? "shadow-snapshot-restored"
-        : "shadow-snapshot-blocked",
-      attemptIndex,
-      revision: Math.max(shadowSnapshot.revision || 0, 1),
-      lastPersistedRevision: 0,
-      queuedPersistRevision: Math.max(shadowSnapshot.revision || 0, 1),
-      pendingPersist: true,
-      shadowSnapshotUsed: true,
-      shadowSnapshotRevision: Math.max(shadowSnapshot.revision || 0, 1),
-      shadowSnapshotUpdatedAt: shadowSnapshot.updatedAt,
-      shadowSnapshotReason: shadowSnapshot.reason,
-      writesBlocked: true,
-    });
-    updateGraphPersistenceState({
-      queuedPersistMode: "immediate",
-      queuedPersistRotateIntegrity: false,
-      queuedPersistReason: shouldRetry
-        ? "shadow-snapshot-restored"
-        : "shadow-snapshot-blocked",
-      storagePrimary: "metadata",
-      storageMode: "metadata",
-      indexedDbLastError: "",
-    });
-    if (shouldRetry) {
-      scheduleGraphLoadRetry(
-        chatId,
-        hasChatMetadata
-          ? "official-graph-missing-shadow"
-          : "chat-metadata-missing-shadow",
-        attemptIndex,
-      );
-    } else {
-      clearPendingGraphLoadRetry();
-    }
-    refreshPanelLiveState();
-    return {
-      success: false,
-      loaded: false,
-      loadState: shadowState,
-      reason: graphPersistenceState.reason,
-      chatId,
-      attemptIndex,
-      shadowSnapshotUsed: true,
-    };
-  }
-
-  currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
-  extractionCount = 0;
-  lastExtractedItems = [];
-  lastRecalledItems = [];
-  lastInjectionContent = "";
-
-  if (!metadataReady) {
-    runtimeStatus = createUiStatus(
-      "待命",
-      shouldRetry
-        ? "正在加载当前聊天图谱，暂不写回图谱元数据"
-        : "聊天元数据未就绪，已暂停图谱写回",
-      shouldRetry ? "idle" : "warning",
-    );
-    lastExtractionStatus = createUiStatus(
-      "待命",
-      shouldRetry
-        ? "正在等待聊天图谱元数据加载"
-        : "聊天元数据未就绪，暂不允许修改图谱",
-      shouldRetry ? "idle" : "warning",
-    );
-    lastVectorStatus = createUiStatus(
-      "待命",
-      shouldRetry
-        ? "正在等待聊天图谱元数据加载"
-        : "聊天元数据未就绪，暂不允许修改图谱",
-      shouldRetry ? "idle" : "warning",
-    );
-    lastRecallStatus = createUiStatus(
-      "待命",
-      shouldRetry
-        ? "正在等待聊天图谱元数据加载"
-        : "聊天元数据未就绪，图谱处于保护状态",
-      shouldRetry ? "idle" : "warning",
-    );
-    applyGraphLoadState(
-      shouldRetry ? GRAPH_LOAD_STATES.LOADING : GRAPH_LOAD_STATES.BLOCKED,
-      {
-        chatId,
-        reason: hasChatMetadata
-          ? shouldRetry
-            ? "graph-metadata-missing"
-            : "graph-metadata-timeout"
-          : shouldRetry
-            ? "chat-metadata-missing"
-            : "chat-metadata-timeout",
-        attemptIndex,
-        revision: 0,
-        lastPersistedRevision: 0,
         queuedPersistRevision: 0,
         queuedPersistChatId: "",
         pendingPersist: false,
@@ -4341,72 +4005,66 @@ function loadGraphFromChat(options = {}) {
         shadowSnapshotRevision: 0,
         shadowSnapshotUpdatedAt: "",
         shadowSnapshotReason: "",
-        writesBlocked: true,
-      },
-    );
-    if (shouldRetry) {
-      scheduleGraphLoadRetry(
-        chatId,
-        hasChatMetadata ? "graph-metadata-missing" : "chat-metadata-missing",
+        dbReady: true,
+        writesBlocked: false,
+      });
+      updateGraphPersistenceState({
+        metadataIntegrity: getChatMetadataIntegrity(context),
+        storagePrimary: "metadata",
+        storageMode: "metadata",
+        dbReady: true,
+        indexedDbLastError: "",
+      });
+
+      scheduleIndexedDbGraphProbe(chatId, {
+        source: `${source}:indexeddb-probe`,
         attemptIndex,
-      );
-    } else {
-      clearPendingGraphLoadRetry();
+        allowOverride: true,
+        applyEmptyState: true,
+      });
+
+      refreshPanelLiveState();
+      return {
+        success: true,
+        loaded: true,
+        loadState: GRAPH_LOAD_STATES.LOADED,
+        reason: `${source}:metadata-compat`,
+        chatId,
+        attemptIndex,
+      };
+    } catch (error) {
+      console.warn("[ST-BME] 兼容 metadata 图谱读取失败，将回退 IndexedDB:", error);
     }
-    refreshPanelLiveState();
-    return {
-      success: false,
-      loaded: false,
-      loadState: shouldRetry
-        ? GRAPH_LOAD_STATES.LOADING
-        : GRAPH_LOAD_STATES.BLOCKED,
-      reason: graphPersistenceState.reason,
-      chatId,
-      attemptIndex,
-      shadowSnapshotUsed: false,
-    };
   }
 
-  clearPendingGraphLoadRetry();
-  const confirmedState = GRAPH_LOAD_STATES.EMPTY_CONFIRMED;
-  runtimeStatus = createUiStatus("待命", "当前聊天还没有图谱", "idle");
-  lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
-  lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
-  lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
-  applyGraphLoadState(confirmedState, {
+  applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
     chatId,
-    reason: "metadata-confirmed-empty",
+    reason: `indexeddb-probe-pending:${String(source || "direct-load")}`,
     attemptIndex,
-    revision: 0,
-    lastPersistedRevision: 0,
-    queuedPersistRevision: 0,
-    queuedPersistChatId: "",
-    pendingPersist: false,
-    shadowSnapshotUsed: false,
-    shadowSnapshotRevision: 0,
-    shadowSnapshotUpdatedAt: "",
-    shadowSnapshotReason: "",
-    writesBlocked: false,
+    dbReady: false,
+    writesBlocked: true,
   });
   updateGraphPersistenceState({
-    metadataIntegrity: getChatMetadataIntegrity(context),
-    queuedPersistMode: "",
-    queuedPersistRotateIntegrity: false,
-    queuedPersistReason: "",
-    storagePrimary: "metadata",
-    storageMode: "metadata",
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: false,
     indexedDbLastError: "",
   });
-  removeGraphShadowSnapshot(chatId);
+  scheduleIndexedDbGraphProbe(chatId, {
+    source: `${source}:indexeddb-probe`,
+    attemptIndex,
+    allowOverride: true,
+    applyEmptyState: true,
+  });
   refreshPanelLiveState();
+
   return {
     success: false,
     loaded: false,
-    loadState: confirmedState,
-    reason: graphPersistenceState.reason,
+    loadState: GRAPH_LOAD_STATES.LOADING,
+    reason: "indexeddb-probe-pending",
     chatId,
     attemptIndex,
-    shadowSnapshotUsed: false,
   };
 }
 

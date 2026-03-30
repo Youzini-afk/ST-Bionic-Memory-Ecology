@@ -284,18 +284,21 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 ST-BME/
 ├── index.js           # 主入口：事件绑定、流程调度、历史恢复
+├── bme-db.js          # IndexedDB(Dexie) 持久化层（本地主存储）
+├── bme-sync.js        # 跨设备同步（/user/files/ 镜像 + 合并）
+├── bme-chat-manager.js# chatId -> BmeDatabase 生命周期管理
+├── lib/dexie.min.js   # vendored Dexie（浏览器端动态注入加载）
 ├── graph.js           # 图数据模型、序列化、版本迁移
 ├── extractor.js       # 记忆提取、概要、反思
 ├── retriever.js       # 向量候选、图扩散、混合评分、召回
 ├── injector.js        # 召回结果格式化注入
 ├── runtime-state.js   # 运行时状态：楼层 hash、dirty 标记、恢复日志
-├── recall-persistence.js # 持久召回记录（message.extra.bme_recall）
-├── recall-message-ui.js # 消息级召回卡片 UI（子图渲染 + 侧边栏编辑）
+├── recall-persistence.js # 持久召回记录（message.extra.bme_recall，不变）
+├── recall-message-ui.js # 消息级召回卡片 UI（子图渲染 + 侧边栏编辑，不变）
 ├── vector-index.js    # 向量索引管理（backend / direct 双模式）
 ├── embedding.js       # 直连 Embedding API 封装
 ├── llm.js             # 记忆 LLM 请求封装
 ├── compressor.js      # 层级压缩与遗忘
-├── evolution.js       # 记忆进化（A-MEM 风格）
 ├── diffusion.js       # 图扩散算法
 ├── dynamics.js        # 动态调节（重要度衰减等）
 ├── schema.js          # 节点类型定义
@@ -310,19 +313,40 @@ ST-BME/
 
 ### 数据存储
 
-- **图谱数据** → `chat_metadata.st_bme_graph`（跟随聊天保存）
+- **图谱主存储（本地优先）** → `IndexedDB`（Dexie）
+  - DB 名固定：`STBME_{chatId}`
+  - 运行时主读取路径：优先 IndexedDB
+- **跨设备同步镜像** → SillyTavern 文件 API `/user/files/`
+  - 文件名固定：`ST-BME_sync_{sanitizedChatId}.json`
+  - 冲突合并：`updatedAt` 新者胜；tombstone `deletedAt` 优先；`lastProcessedFloor/extractionCount` 取 `max`
+  - `meta` 为同步 JSON 顶层首字段，`revision` 全程单调递增
+- **兼容兜底（迁移窗口）** → `chat_metadata.st_bme_graph`
+  - 仅用于 legacy 兼容与迁移，不再是主路径
+- **墓碑（tombstones）** → 保留期固定 30 天
 - **插件设置** → SillyTavern 的 `extension_settings.st_bme`
 - **向量索引** → 后端模式走酒馆 API；直连模式存在节点内
-- **召回持久注入** → `chat[x].extra.bme_recall`（消息级）
+- **召回持久注入（不变）** → `chat[x].extra.bme_recall`（消息级）
+
+### 兼容迁移策略（legacy metadata → IndexedDB）
+
+- 触发：聊天加载/切换后，若目标 `STBME_{chatId}` 为空且存在 legacy `chat_metadata` 图谱
+- 行为：自动一次性迁移到 IndexedDB，并立即尝试同步到 `/user/files/`
+- 幂等：
+  - 若 `migrationCompletedAt > 0`，跳过
+  - 若 IndexedDB 已非空，跳过
+- 迁移记录：
+  - `migrationCompletedAt`
+  - `migrationSource`（默认 `chat_metadata`）
+  - `legacyRetentionUntil`（30 天）
 
 ### 事件挂载
 
 | SillyTavern 事件 | 做什么 |
 |---|---|
-| `CHAT_CHANGED` | 加载对应聊天的图谱 |
+| `CHAT_CHANGED` | IndexedDB 优先加载 + 自动同步 |
 | `GENERATION_AFTER_COMMANDS` | AI 回复后提取记忆 |
 | `GENERATE_BEFORE_COMBINE_PROMPTS` | 生成前召回并注入 |
-| `MESSAGE_RECEIVED` | 保存图谱状态 |
+| `MESSAGE_RECEIVED` | 触发图谱持久化（IndexedDB 主写） |
 | 删除 / 编辑 / Swipe | 触发历史变动检测与恢复 |
 
 ### 召回流水线

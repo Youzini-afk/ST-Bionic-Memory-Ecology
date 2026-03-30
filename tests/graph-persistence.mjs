@@ -651,12 +651,12 @@ result = {
   assert.equal(
     result.loadState,
     "loading",
-    "无 integrity 的占位 metadata 不能视作 ready",
+    "无图谱数据时应进入 IndexedDB 探测等待态",
   );
   assert.equal(
     result.reason,
-    "graph-metadata-missing",
-    "应继续等待正式 graph metadata",
+    "indexeddb-probe-pending",
+    "应继续等待 IndexedDB 探测结果",
   );
   assert.equal(live.writesBlocked, true);
 }
@@ -673,11 +673,11 @@ result = {
     source: "metadata-chatid-ready",
   });
 
-  assert.equal(result.loadState, "empty-confirmed");
+  assert.equal(result.loadState, "loading");
   assert.equal(
     harness.api.getGraphPersistenceLiveState().writesBlocked,
-    false,
-    "当 metadata 提供 chatId/sessionId 等强信号时，可进入 ready-empty",
+    true,
+    "无 IndexedDB 命中时应维持 loading 等待探测结果",
   );
 }
 
@@ -862,11 +862,11 @@ result = {
     source: "shadow-test",
   });
 
-  assert.equal(result.loadState, "shadow-restored");
-  assert.equal(reader.api.getCurrentGraph().nodes.length, 1);
+  assert.equal(result.loadState, "loading");
+  assert.equal(reader.api.getCurrentGraph(), null);
   assert.equal(
     reader.api.getGraphPersistenceLiveState().shadowSnapshotUsed,
-    true,
+    false,
   );
   assert.equal(reader.api.getGraphPersistenceLiveState().writesBlocked, true);
 }
@@ -907,9 +907,9 @@ result = {
     "事件-official",
   );
   assert.equal(
-    reader.api.readGraphShadowSnapshot("chat-official"),
-    null,
-    "正式元数据到位后应清理影子快照",
+    reader.api.readGraphShadowSnapshot("chat-official")?.reason,
+    "stale-shadow",
+    "metadata 兼容加载时保留影子快照仅作为兼容数据，不参与主链路",
   );
 }
 
@@ -944,26 +944,21 @@ result = {
   });
 
   assert.equal(result.loadState, "loaded");
-  assert.equal(result.reason, "shadow-snapshot-newer-than-official");
+  assert.equal(result.reason, "official-older-than-shadow:metadata-compat");
   assert.equal(
     reader.api.getCurrentGraph().nodes[0]?.fields?.title,
-    "事件-shadow-newer",
+    "事件-official-older",
   );
-  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 1);
+  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 0);
   assert.equal(
     reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes?.[0]
       ?.fields?.title,
-    "事件-shadow-newer",
+    "事件-official-older",
   );
   assert.equal(
-    reader.runtimeContext.__chatContext.chatMetadata?.integrity,
-    "integrity-official-older",
-    "影子快照补写正式图谱时不能改写宿主 metadata.integrity",
-  );
-  assert.equal(
-    reader.api.readGraphShadowSnapshot("chat-shadow-newer"),
-    null,
-    "影子快照补写成功后应被清理",
+    reader.api.readGraphShadowSnapshot("chat-shadow-newer")?.reason,
+    "pagehide-refresh",
+    "metadata 兼容加载后影子快照可保留，但不作为主链路恢复来源",
   );
 }
 
@@ -980,13 +975,13 @@ result = {
   });
   const live = harness.api.getGraphPersistenceLiveState();
 
-  assert.equal(result.loadState, "empty-confirmed");
-  assert.equal(live.writesBlocked, false);
-  assert.equal(live.canWriteToMetadata, true);
-  assert.equal(harness.api.getCurrentGraph().nodes.length, 0);
+  assert.equal(result.loadState, "loading");
+  assert.equal(result.reason, "indexeddb-probe-pending");
+  assert.equal(live.writesBlocked, true);
+  assert.equal(harness.api.getCurrentGraph(), null);
   assert.equal(
     harness.api.readRuntimeDebugSnapshot().graphPersistence?.loadState,
-    "empty-confirmed",
+    "loading",
   );
 }
 
@@ -1017,7 +1012,7 @@ result = {
   assert.equal(
     harness.runtimeContext.__chatContext.chatMetadata?.st_bme_graph,
     undefined,
-    "empty-confirmed 状态下不能把空图被动写回 metadata",
+    "loading 状态下不能把空图被动写回 metadata",
   );
 }
 
@@ -1088,20 +1083,16 @@ result = {
   });
   const live = reader.api.getGraphPersistenceLiveState();
 
-  assert.equal(result.loadState, "loaded");
+  assert.equal(result.loadState, "loading");
   assert.equal(
     reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes
       ?.length,
-    1,
+    undefined,
   );
-  assert.equal(
-    reader.runtimeContext.__chatContext.chatMetadata?.integrity,
-    "meta-ready-promote",
-    "metadata 就绪后提升影子快照时不能改写宿主 metadata.integrity",
-  );
-  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 1);
+  assert.equal(reader.runtimeContext.__chatContext.chatMetadata?.integrity, "meta-ready-promote");
+  assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 0);
   assert.equal(reader.runtimeContext.__contextSaveCalls, 0);
-  assert.equal(live.lastPersistedRevision, 9);
+  assert.equal(live.lastPersistedRevision, 0);
   assert.equal(live.pendingPersist, false);
 }
 
@@ -1255,8 +1246,8 @@ result = {
   runtimeGraph.nodes[0].fields.title = "runtime-shadow-mutated";
   assert.equal(
     persistedGraph.nodes[0].fields.title,
-    "事件-shadow",
-    "shadow 恢复后的运行时修改不能污染已补写 metadata",
+    "事件-official-older",
+    "metadata 兼容加载后的运行时修改不能污染已保存 metadata",
   );
 }
 
