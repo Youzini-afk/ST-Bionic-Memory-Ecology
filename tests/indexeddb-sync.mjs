@@ -371,6 +371,128 @@ async function testMergeRules() {
   assert.equal(merged.state.extractionCount, 3);
 }
 
+async function testMergeRuntimeMetaPolicies() {
+  const local = {
+    meta: {
+      chatId: "chat-merge-meta",
+      revision: 7,
+      lastModified: 200,
+      deviceId: "local-device",
+      schemaVersion: 1,
+      runtimeHistoryState: {
+        chatId: "chat-merge-meta",
+        lastProcessedAssistantFloor: 6,
+        extractionCount: 6,
+        processedMessageHashes: {
+          1: "h1",
+          2: "h2",
+          3: "h3",
+          4: "local-h4",
+          6: "h6",
+        },
+      },
+      runtimeVectorIndexState: {
+        hashToNodeId: {
+          "hash-local-a": "node-a",
+          "hash-shared-b": "node-b",
+        },
+        nodeToHash: {
+          "node-a": "hash-local-a",
+          "node-b": "hash-shared-b",
+        },
+      },
+      runtimeBatchJournal: [
+        { id: "journal-shared", processedRange: [0, 2], createdAt: 100 },
+        { id: "journal-drop-local", processedRange: [4, 5], createdAt: 110 },
+      ],
+      runtimeLastRecallResult: { nodes: ["local-only"] },
+      runtimeLastProcessedSeq: 2,
+      runtimeGraphVersion: 10,
+    },
+    nodes: [
+      { id: "node-a", updatedAt: 100 },
+      { id: "node-b", updatedAt: 100 },
+    ],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 6,
+      extractionCount: 3,
+    },
+  };
+
+  const remote = {
+    meta: {
+      chatId: "chat-merge-meta",
+      revision: 10,
+      lastModified: 200,
+      deviceId: "remote-device",
+      schemaVersion: 1,
+      runtimeHistoryState: {
+        chatId: "chat-merge-meta",
+        lastProcessedAssistantFloor: 5,
+        extractionCount: 7,
+        processedMessageHashes: {
+          1: "h1",
+          2: "h2",
+          3: "h3",
+          4: "remote-h4",
+          5: "h5",
+        },
+      },
+      runtimeVectorIndexState: {
+        hashToNodeId: {
+          "hash-remote-a": "node-a",
+          "hash-shared-b": "node-b",
+        },
+        nodeToHash: {
+          "node-a": "hash-remote-a",
+          "node-b": "hash-shared-b",
+        },
+      },
+      runtimeBatchJournal: [
+        { id: "journal-shared", processedRange: [0, 3], createdAt: 210 },
+        { id: "journal-drop-remote", processedRange: [3, 4], createdAt: 220 },
+      ],
+      runtimeLastRecallResult: { nodes: ["remote-only"] },
+      runtimeLastProcessedSeq: 9,
+      runtimeGraphVersion: 7,
+    },
+    nodes: [
+      { id: "node-a", updatedAt: 200 },
+      { id: "node-b", updatedAt: 200 },
+    ],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 5,
+      extractionCount: 2,
+    },
+  };
+
+  const merged = mergeSnapshots(local, remote, { chatId: "chat-merge-meta" });
+
+  assert.equal(merged.state.lastProcessedFloor, 3, "冲突哈希楼层应触发保守回退");
+  assert.equal(merged.state.extractionCount, 7);
+  assert.deepEqual(Object.keys(merged.meta.runtimeHistoryState.processedMessageHashes), ["1", "2", "3"]);
+  assert.equal(merged.meta.runtimeHistoryState.historyDirtyFrom, 4);
+  assert.ok(String(merged.meta.runtimeHistoryState.lastMutationReason).includes("processed-hash-conflict@4"));
+  assert.equal(merged.meta.runtimeVectorIndexState.nodeToHash["node-a"], undefined);
+  assert.equal(merged.meta.runtimeVectorIndexState.nodeToHash["node-b"], "hash-shared-b");
+  assert.equal(merged.meta.runtimeVectorIndexState.hashToNodeId["hash-local-a"], undefined);
+  assert.equal(merged.meta.runtimeVectorIndexState.hashToNodeId["hash-remote-a"], undefined);
+  assert.equal(merged.meta.runtimeVectorIndexState.hashToNodeId["hash-shared-b"], "node-b");
+  assert.equal(merged.meta.runtimeVectorIndexState.dirty, true);
+  assert.ok(merged.meta.runtimeVectorIndexState.replayRequiredNodeIds.includes("node-a"));
+  assert.equal(merged.meta.runtimeVectorIndexState.pendingRepairFromFloor, 3);
+  assert.equal(merged.meta.runtimeBatchJournal.length, 1);
+  assert.equal(merged.meta.runtimeBatchJournal[0].id, "journal-shared");
+  assert.deepEqual(merged.meta.runtimeBatchJournal[0].processedRange, [0, 3]);
+  assert.equal(merged.meta.runtimeLastRecallResult, null);
+  assert.equal(merged.meta.runtimeLastProcessedSeq, 9);
+  assert.equal(merged.meta.runtimeGraphVersion, 11);
+}
+
 async function testSyncNowLockAndAutoSync() {
   const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
   const dbByChatId = new Map();
@@ -518,6 +640,81 @@ async function testSyncNowRemoteReadErrorPath() {
   assert.equal(result.reason, "http-error");
 }
 
+async function testSyncAppliedHook() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const hookCalls = [];
+
+  dbByChatId.set(
+    "chat-hook-download",
+    new FakeDb("chat-hook-download", {
+      meta: {
+        schemaVersion: 1,
+        chatId: "chat-hook-download",
+        revision: 1,
+        lastModified: 10,
+        deviceId: "",
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+      },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      state: { lastProcessedFloor: -1, extractionCount: 0 },
+    }),
+  );
+
+  dbByChatId.set(
+    "chat-hook-merge",
+    new FakeDb("chat-hook-merge", {
+      meta: {
+        schemaVersion: 1,
+        chatId: "chat-hook-merge",
+        revision: 4,
+        lastModified: 20,
+        deviceId: "",
+        nodeCount: 1,
+        edgeCount: 0,
+        tombstoneCount: 0,
+      },
+      nodes: [{ id: "local-merge", updatedAt: 20 }],
+      edges: [],
+      tombstones: [],
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+    }),
+  );
+
+  remoteFiles.set("ST-BME_sync_chat-hook-download.json", {
+    meta: { schemaVersion: 1, chatId: "chat-hook-download", revision: 3, lastModified: 30, deviceId: "remote", nodeCount: 1, edgeCount: 0, tombstoneCount: 0 },
+    nodes: [{ id: "remote-download", updatedAt: 30 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  remoteFiles.set("ST-BME_sync_chat-hook-merge.json", {
+    meta: { schemaVersion: 1, chatId: "chat-hook-merge", revision: 4, lastModified: 25, deviceId: "remote", nodeCount: 1, edgeCount: 0, tombstoneCount: 0 },
+    nodes: [{ id: "remote-merge", updatedAt: 25 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 3, extractionCount: 2 },
+  });
+
+  const runtime = {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    onSyncApplied: async (payload) => hookCalls.push({ ...payload }),
+  };
+
+  const downloadResult = await syncNow("chat-hook-download", runtime);
+  assert.equal(downloadResult.action, "download");
+
+  dbByChatId.get("chat-hook-merge").meta.set("syncDirty", true);
+  const mergeResult = await syncNow("chat-hook-merge", runtime);
+  assert.equal(mergeResult.action, "merge");
+
+  assert.deepEqual(hookCalls.map((item) => item.action), ["download", "merge"]);
+}
+
 async function main() {
   console.log(`${PREFIX} debounce=${BME_SYNC_UPLOAD_DEBOUNCE_MS}`);
   await testDeviceId();
@@ -525,10 +722,12 @@ async function main() {
   await testUploadPayloadMetaFirstAndDebounce();
   await testDownloadImport();
   await testMergeRules();
+  await testMergeRuntimeMetaPolicies();
   await testSyncNowLockAndAutoSync();
   await testDeleteRemoteSyncFile();
   await testAutoSyncOnVisibility();
   await testSyncNowRemoteReadErrorPath();
+  await testSyncAppliedHook();
   console.log("indexeddb-sync tests passed");
 }
 

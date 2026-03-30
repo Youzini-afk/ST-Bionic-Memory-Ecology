@@ -455,6 +455,7 @@ result = {
   loadGraphFromChat,
   saveGraphToChat,
   syncGraphLoadFromLiveContext,
+  buildBmeSyncRuntimeOptions,
   onMessageReceived,
   applyGraphLoadState,
   maybeFlushQueuedGraphPersist,
@@ -541,10 +542,16 @@ result = {
     source: "global-chat-id",
   });
 
-  assert.equal(result.loadState, "loaded");
+  assert.equal(result.loadState, "loading");
+  assert.equal(result.reason, "global-chat-id:metadata-compat-provisional");
   assert.equal(
     harness.api.getCurrentGraph().historyState.chatId,
     "chat-global",
+  );
+  assert.equal(harness.api.getGraphPersistenceState().dbReady, false);
+  assert.equal(
+    harness.api.getGraphPersistenceLiveState().writesBlocked,
+    true,
   );
 }
 
@@ -840,6 +847,42 @@ result = {
 }
 
 {
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-sync-refresh",
+    chatMetadata: {
+      integrity: "chat-sync-refresh-ready",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(createMeaningfulGraph("chat-sync-refresh", "stale-runtime"), "chat-sync-refresh"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-sync-refresh",
+    reason: "runtime-stale",
+    revision: 2,
+    lastPersistedRevision: 2,
+    dbReady: true,
+    writesBlocked: false,
+  });
+  harness.api.setIndexedDbSnapshot(
+    buildSnapshotFromGraph(createMeaningfulGraph("chat-sync-refresh", "fresh-indexeddb"), {
+      chatId: "chat-sync-refresh",
+      revision: 7,
+    }),
+  );
+
+  const runtimeOptions = harness.api.buildBmeSyncRuntimeOptions();
+  await runtimeOptions.onSyncApplied({ chatId: "chat-sync-refresh", action: "download" });
+
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-fresh-indexeddb",
+    "download/merge 后应刷新当前运行时图谱",
+  );
+}
+
+{
   const sharedSession = new Map();
   const writer = await createGraphPersistenceHarness({
     chatId: "chat-shadow",
@@ -901,7 +944,7 @@ result = {
     source: "official-load",
   });
 
-  assert.equal(result.loadState, "loaded");
+  assert.equal(result.loadState, "loading");
   assert.equal(
     reader.api.getCurrentGraph().nodes[0]?.fields?.title,
     "事件-official",
@@ -943,8 +986,8 @@ result = {
     source: "official-older-than-shadow",
   });
 
-  assert.equal(result.loadState, "loaded");
-  assert.equal(result.reason, "official-older-than-shadow:metadata-compat");
+  assert.equal(result.loadState, "loading");
+  assert.equal(result.reason, "official-older-than-shadow:metadata-compat-provisional");
   assert.equal(
     reader.api.getCurrentGraph().nodes[0]?.fields?.title,
     "事件-official-older",
@@ -1166,7 +1209,7 @@ result = {
     source: "load-official-decoupled",
   });
 
-  assert.equal(result.loadState, "loaded");
+  assert.equal(result.loadState, "loading");
   const runtimeGraph = harness.api.getCurrentGraph();
   const persistedGraph =
     harness.runtimeContext.__chatContext.chatMetadata.st_bme_graph;
@@ -1233,7 +1276,7 @@ result = {
     source: "load-shadow-decoupled",
   });
 
-  assert.equal(result.loadState, "loaded");
+  assert.equal(result.loadState, "loading");
   const runtimeGraph = reader.api.getCurrentGraph();
   const persistedGraph =
     reader.runtimeContext.__chatContext.chatMetadata.st_bme_graph;

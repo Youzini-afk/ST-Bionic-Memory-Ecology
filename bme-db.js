@@ -28,6 +28,30 @@ export const BME_DB_TABLE_SCHEMAS = Object.freeze({
   tombstones: "&id, kind, targetId, deletedAt, sourceDeviceId, [kind+targetId]",
 });
 
+function createDefaultMetaValues(chatId = "", nowMs = Date.now()) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const normalizedNow = normalizeTimestamp(nowMs);
+  return {
+    chatId: normalizedChatId,
+    revision: 0,
+    lastProcessedFloor: META_DEFAULT_LAST_PROCESSED_FLOOR,
+    extractionCount: META_DEFAULT_EXTRACTION_COUNT,
+    lastModified: normalizedNow,
+    lastSyncUploadedAt: 0,
+    lastSyncDownloadedAt: 0,
+    lastSyncedRevision: 0,
+    deviceId: "",
+    nodeCount: 0,
+    edgeCount: 0,
+    tombstoneCount: 0,
+    schemaVersion: BME_DB_SCHEMA_VERSION,
+    syncDirty: false,
+    migrationCompletedAt: 0,
+    migrationSource: "",
+    legacyRetentionUntil: 0,
+  };
+}
+
 function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
 }
@@ -1010,6 +1034,7 @@ export class BmeDatabase {
       edges: 0,
       tombstones: 0,
     };
+    let revisionFloor = 0;
 
     await db.transaction(
       "rw",
@@ -1018,11 +1043,14 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
+        revisionFloor = normalizeRevision((await db.table("meta").get("revision"))?.value);
+
         if (mode === "replace") {
           await Promise.all([
             db.table("nodes").clear(),
             db.table("edges").clear(),
             db.table("tombstones").clear(),
+            db.table("meta").clear(),
           ]);
         }
 
@@ -1044,6 +1072,7 @@ export class BmeDatabase {
         }
 
         const metaPatch = {
+          ...(mode === "replace" ? createDefaultMetaValues(this.chatId, nowMs) : {}),
           ...normalizedSnapshot.meta,
           ...(normalizedSnapshot.state || {}),
           chatId: this.chatId,
@@ -1059,9 +1088,12 @@ export class BmeDatabase {
 
         counts = await this._updateCountMetaInTx(db, nowMs);
 
-        const currentRevision = normalizeRevision(
+        const persistedRevision = normalizeRevision(
           (await db.table("meta").get("revision"))?.value,
         );
+        const currentRevision =
+          mode === "replace" ? Math.max(revisionFloor, persistedRevision) : persistedRevision;
+
         const incomingRevision = normalizeRevision(normalizedSnapshot.meta?.revision);
         const explicitRevision = normalizeRevision(options.revision);
         const requestedRevision = Number.isFinite(Number(options.revision))
@@ -1199,25 +1231,7 @@ export class BmeDatabase {
   async _ensureMetaDefaults() {
     const db = await this.open();
     const nowMs = Date.now();
-    const defaultMeta = {
-      chatId: this.chatId,
-      revision: 0,
-      lastProcessedFloor: META_DEFAULT_LAST_PROCESSED_FLOOR,
-      extractionCount: META_DEFAULT_EXTRACTION_COUNT,
-      lastModified: nowMs,
-      lastSyncUploadedAt: 0,
-      lastSyncDownloadedAt: 0,
-      lastSyncedRevision: 0,
-      deviceId: "",
-      nodeCount: 0,
-      edgeCount: 0,
-      tombstoneCount: 0,
-      schemaVersion: BME_DB_SCHEMA_VERSION,
-      syncDirty: false,
-      migrationCompletedAt: 0,
-      migrationSource: "",
-      legacyRetentionUntil: 0,
-    };
+    const defaultMeta = createDefaultMetaValues(this.chatId, nowMs);
 
     await db.transaction("rw", db.table("meta"), async () => {
       for (const [key, value] of Object.entries(defaultMeta)) {

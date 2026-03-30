@@ -19,6 +19,7 @@ const chatIdsForCleanup = new Set([
   "chat-b",
   "chat-manager-a",
   "chat-manager-b",
+  "chat-replace-reset",
 ]);
 
 async function setupIndexedDbTestEnv() {
@@ -190,6 +191,81 @@ async function testSnapshotExportImport() {
   assert.equal(importResult.mode, "replace");
   assert.ok(importResult.imported.nodes >= 1);
   assert.ok((await db.listNodes()).some((item) => item.id === "node-snapshot"));
+
+  await db.close();
+}
+
+async function testReplaceImportResetsStaleMeta() {
+  const chatId = "chat-replace-reset";
+  const db = new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
+  await db.open();
+
+  await db.patchMeta({
+    runtimeHistoryState: {
+      chatId,
+      lastProcessedAssistantFloor: 99,
+      processedMessageHashes: {
+        99: "stale-hash",
+      },
+    },
+    runtimeVectorIndexState: {
+      hashToNodeId: {
+        "stale-hash": "node-stale",
+      },
+      nodeToHash: {
+        "node-stale": "stale-hash",
+      },
+      dirty: true,
+      pendingRepairFromFloor: 88,
+    },
+    runtimeBatchJournal: [{ id: "stale-journal", processedRange: [90, 99] }],
+    runtimeLastRecallResult: { updatedAt: 123456, nodes: ["node-stale"] },
+    runtimeLastProcessedSeq: 999,
+    runtimeGraphVersion: 999,
+    migrationCompletedAt: 987654321,
+    legacyRetentionUntil: 987654321,
+    customLeakField: "stale-value",
+  });
+
+  const revisionBefore = await db.getRevision();
+
+  const importResult = await db.importSnapshot(
+    {
+      meta: {
+        chatId,
+        revision: 1,
+        deviceId: "device-replace-new",
+      },
+      state: {
+        lastProcessedFloor: 3,
+        extractionCount: 2,
+      },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+    },
+    {
+      mode: "replace",
+      preserveRevision: true,
+      markSyncDirty: false,
+    },
+  );
+
+  assert.ok(importResult.revision > revisionBefore, "replace 导入后 revision 必须单调递增");
+  assert.equal(await db.getMeta("chatId", ""), chatId);
+  assert.equal(await db.getMeta("lastProcessedFloor", -1), 3);
+  assert.equal(await db.getMeta("extractionCount", 0), 2);
+  assert.equal(await db.getMeta("deviceId", ""), "device-replace-new");
+  assert.equal(await db.getMeta("migrationCompletedAt", -1), 0);
+  assert.equal(await db.getMeta("legacyRetentionUntil", -1), 0);
+  assert.equal(await db.getMeta("runtimeHistoryState", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("runtimeVectorIndexState", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("runtimeBatchJournal", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("runtimeLastRecallResult", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("runtimeLastProcessedSeq", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("runtimeGraphVersion", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("customLeakField", "__missing__"), "__missing__");
+  assert.equal(await db.getMeta("syncDirty", true), false);
 
   await db.close();
 }
@@ -395,6 +471,7 @@ async function main() {
   await testCrudAndMeta();
   await testTransactionRollback();
   await testSnapshotExportImport();
+  await testReplaceImportResetsStaleMeta();
   await testRevisionMonotonicity();
   await testTombstonePrune();
   await testChatIsolationAndManager();

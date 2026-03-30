@@ -219,10 +219,24 @@ export function snapshotProcessedMessageHashes(
 export function detectHistoryMutation(chat, historyState) {
   const lastProcessedAssistantFloor =
     historyState?.lastProcessedAssistantFloor ?? -1;
-  const processedMessageHashes = historyState?.processedMessageHashes || {};
+
+  const processedMessageHashes =
+    historyState?.processedMessageHashes &&
+    typeof historyState.processedMessageHashes === "object" &&
+    !Array.isArray(historyState.processedMessageHashes)
+      ? historyState.processedMessageHashes
+      : {};
 
   if (!Array.isArray(chat) || lastProcessedAssistantFloor < 0) {
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
+
+  if (lastProcessedAssistantFloor >= chat.length) {
+    return {
+      dirty: true,
+      earliestAffectedFloor: chat.length,
+      reason: "已处理楼层超出当前聊天长度，检测到历史截断",
+    };
   }
 
   const trackedFloors = Object.keys(processedMessageHashes)
@@ -230,8 +244,22 @@ export function detectHistoryMutation(chat, historyState) {
     .filter(Number.isFinite)
     .sort((a, b) => a - b);
 
-  if (trackedFloors.length === 0) {
-    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  if (trackedFloors.length === 0 && lastProcessedAssistantFloor >= 0) {
+    return {
+      dirty: true,
+      earliestAffectedFloor: 0,
+      reason: "已处理楼层存在，但 processedMessageHashes 缺失，执行保守重放",
+    };
+  }
+
+  for (let floor = 0; floor <= lastProcessedAssistantFloor; floor++) {
+    if (!Object.prototype.hasOwnProperty.call(processedMessageHashes, String(floor))) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 缺少已处理哈希，执行保守重放`,
+      };
+    }
   }
 
   for (const floor of trackedFloors) {
@@ -251,14 +279,6 @@ export function detectHistoryMutation(chat, historyState) {
         reason: `楼层 ${floor} 内容或 swipe 已变化`,
       };
     }
-  }
-
-  if (lastProcessedAssistantFloor >= chat.length) {
-    return {
-      dirty: true,
-      earliestAffectedFloor: chat.length,
-      reason: "已处理楼层超出当前聊天长度，检测到历史截断",
-    };
   }
 
   return { dirty: false, earliestAffectedFloor: null, reason: "" };

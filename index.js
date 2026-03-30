@@ -1918,8 +1918,58 @@ function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
 }
 
-function buildBmeSyncRuntimeOptions(extra = {}) {
+async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
+  const action = String(syncPayload?.action || "")
+    .trim()
+    .toLowerCase();
+  if (action !== "download" && action !== "merge") {
+    return {
+      refreshed: false,
+      reason: "action-not-supported",
+      action,
+    };
+  }
+
+  const syncedChatId = normalizeChatIdCandidate(syncPayload?.chatId);
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId());
+  const targetChatId = syncedChatId || activeChatId;
+
+  if (!targetChatId) {
+    return {
+      refreshed: false,
+      reason: "missing-chat-id",
+      action,
+    };
+  }
+
+  if (activeChatId && targetChatId !== activeChatId) {
+    return {
+      refreshed: false,
+      reason: "chat-switched",
+      action,
+      chatId: targetChatId,
+      activeChatId,
+    };
+  }
+
+  const loadResult = await loadGraphFromIndexedDb(targetChatId, {
+    source: `sync-post-refresh:${action}`,
+    allowOverride: true,
+    applyEmptyState: true,
+  });
+
   return {
+    refreshed: Boolean(loadResult?.loaded || loadResult?.emptyConfirmed),
+    action,
+    chatId: targetChatId,
+    ...loadResult,
+  };
+}
+
+function buildBmeSyncRuntimeOptions(extra = {}) {
+  const normalizedExtra =
+    extra && typeof extra === "object" && !Array.isArray(extra) ? extra : {};
+  const defaultOptions = {
     getDb: async (chatId) => {
       const manager = ensureBmeChatManager();
       if (!manager) {
@@ -1929,7 +1979,25 @@ function buildBmeSyncRuntimeOptions(extra = {}) {
     },
     getCurrentChatId: () => getCurrentChatId(),
     getRequestHeaders,
-    ...extra,
+    onSyncApplied: async (payload = {}) => {
+      await refreshRuntimeGraphAfterSyncApplied(payload);
+    },
+  };
+
+  if (typeof normalizedExtra.onSyncApplied !== "function") {
+    return {
+      ...defaultOptions,
+      ...normalizedExtra,
+    };
+  }
+
+  return {
+    ...defaultOptions,
+    ...normalizedExtra,
+    onSyncApplied: async (payload = {}) => {
+      await defaultOptions.onSyncApplied(payload);
+      await normalizedExtra.onSyncApplied(payload);
+    },
   };
 }
 
@@ -3984,17 +4052,30 @@ function loadGraphFromChat(options = {}) {
       lastExtractedItems = [];
       updateLastRecalledItems(currentGraph.lastRecallResult || []);
       lastInjectionContent = "";
-      runtimeStatus = createUiStatus("待命", "已从兼容 metadata 加载图谱", "idle");
-      lastExtractionStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次提取", "idle");
-      lastVectorStatus = createUiStatus(
+      runtimeStatus = createUiStatus(
+        "图谱加载中",
+        "已从兼容 metadata 暂载图谱，等待 IndexedDB 权威确认",
+        "running",
+      );
+      lastExtractionStatus = createUiStatus(
         "待命",
-        currentGraph.vectorIndexState?.lastWarning || "已加载聊天图谱，等待下一次向量任务",
+        "兼容图谱暂载中，等待 IndexedDB 确认后再执行提取",
         "idle",
       );
-      lastRecallStatus = createUiStatus("待命", "已加载聊天图谱，等待下一次召回", "idle");
-      applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+      lastVectorStatus = createUiStatus(
+        "待命",
+        currentGraph.vectorIndexState?.lastWarning ||
+          "兼容图谱暂载中，等待 IndexedDB 确认后再执行向量任务",
+        "idle",
+      );
+      lastRecallStatus = createUiStatus(
+        "待命",
+        "兼容图谱暂载中，等待 IndexedDB 确认后再执行召回",
+        "idle",
+      );
+      applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
         chatId,
-        reason: `${source}:metadata-compat`,
+        reason: `${source}:metadata-compat-provisional`,
         attemptIndex,
         revision: officialRevision,
         lastPersistedRevision: officialRevision,
@@ -4005,15 +4086,23 @@ function loadGraphFromChat(options = {}) {
         shadowSnapshotRevision: 0,
         shadowSnapshotUpdatedAt: "",
         shadowSnapshotReason: "",
-        dbReady: true,
-        writesBlocked: false,
+        dbReady: false,
+        writesBlocked: true,
       });
       updateGraphPersistenceState({
         metadataIntegrity: getChatMetadataIntegrity(context),
-        storagePrimary: "metadata",
-        storageMode: "metadata",
-        dbReady: true,
+        storagePrimary: "indexeddb",
+        storageMode: "indexeddb",
+        dbReady: false,
         indexedDbLastError: "",
+        dualWriteLastResult: {
+          action: "load",
+          source: `${source}:metadata-compat`,
+          success: true,
+          provisional: true,
+          revision: officialRevision,
+          at: Date.now(),
+        },
       });
 
       scheduleIndexedDbGraphProbe(chatId, {
@@ -4027,8 +4116,8 @@ function loadGraphFromChat(options = {}) {
       return {
         success: true,
         loaded: true,
-        loadState: GRAPH_LOAD_STATES.LOADED,
-        reason: `${source}:metadata-compat`,
+        loadState: GRAPH_LOAD_STATES.LOADING,
+        reason: `${source}:metadata-compat-provisional`,
         chatId,
         attemptIndex,
       };

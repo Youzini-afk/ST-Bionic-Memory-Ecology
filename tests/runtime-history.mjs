@@ -24,6 +24,24 @@ const cleanDetection = detectHistoryMutation(chat, {
 });
 assert.equal(cleanDetection.dirty, false);
 
+const missingHashesDetection = detectHistoryMutation(chat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: {},
+});
+assert.equal(missingHashesDetection.dirty, true);
+assert.equal(missingHashesDetection.earliestAffectedFloor, 0);
+
+const sparseHashesDetection = detectHistoryMutation(chat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: {
+    0: hashes[0],
+    2: hashes[2],
+    3: hashes[3],
+  },
+});
+assert.equal(sparseHashesDetection.dirty, true);
+assert.equal(sparseHashesDetection.earliestAffectedFloor, 1);
+
 const editedChat = structuredClone(chat);
 editedChat[1].mes = "我改过内容了。";
 const editedDetection = detectHistoryMutation(editedChat, {
