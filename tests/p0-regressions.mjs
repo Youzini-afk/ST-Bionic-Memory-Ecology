@@ -269,8 +269,16 @@ function createGenerationRecallHarness() {
       Map,
       setTimeout,
       clearTimeout,
+      __sendTextareaValue: "",
       document: {
-        getElementById() {
+        getElementById(id) {
+          if (
+            id === "send_textarea" &&
+            typeof context.__sendTextareaValue === "string" &&
+            context.__sendTextareaValue
+          ) {
+            return { value: context.__sendTextareaValue };
+          }
           return null;
         },
       },
@@ -287,6 +295,7 @@ function createGenerationRecallHarness() {
         [...chat].reverse().find((message) => !message?.is_system) || null,
       getSendTextareaValue: () => "",
       getRecallUserMessageSourceLabel: (source = "") => source,
+      getRecallUserMessageSourceLabelController: (source = "") => source,
       buildRecallRecentMessages: (
         chat = [],
         _limit,
@@ -2081,6 +2090,46 @@ async function testGenerationRecallSkipsUntilTargetUserFloorAvailable() {
   );
 }
 
+async function testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBinding() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: false, mes: "assistant-tail" }];
+  harness.__sendTextareaValue = "发送前输入";
+  harness.result.pendingRecallSendIntent = {
+    text: "发送前输入",
+    hash: "hash-send-intent",
+    at: Date.now(),
+  };
+
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATE_BEFORE_COMBINE_PROMPTS",
+  );
+  assert.equal(harness.runRecallCalls[0].overrideUserMessage, "发送前输入");
+  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
+}
+
+async function testGenerationRecallAfterCommandsStillSkipsWithoutStableUserFloor() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: false, mes: "assistant-tail" }];
+  harness.__sendTextareaValue = "发送前输入";
+  harness.result.pendingRecallSendIntent = {
+    text: "发送前输入",
+    hash: "hash-send-intent",
+    at: Date.now(),
+  };
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  assert.equal(
+    harness.runRecallCalls.length,
+    0,
+    "after-commands 在缺失稳定 user floor 时应继续跳过，避免错误楼层绑定",
+  );
+}
+
 async function testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "同 key 连续生成" }];
@@ -2651,6 +2700,8 @@ await testGenerationRecallTransactionDedupesReverseHookOrder();
 await testGenerationRecallHistoryModesUseSameBindingAcrossHooks();
 await testGenerationRecallFrozenBindingSurvivesCrossHookInputDrift();
 await testGenerationRecallSkipsUntilTargetUserFloorAvailable();
+await testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBinding();
+await testGenerationRecallAfterCommandsStillSkipsWithoutStableUserFloor();
 await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
 await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
 await testGenerationRecallBeforeCombineRunsStandalone();

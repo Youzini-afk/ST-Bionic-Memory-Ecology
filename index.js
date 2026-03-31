@@ -4751,6 +4751,22 @@ function freezeGenerationRecallOptionsForTransaction(
   ).trim() || "normal";
   const normalizedGenerationType = optionGenerationType;
 
+  const overrideUserMessage = normalizeRecallInputText(
+    recallOptions?.overrideUserMessage || recallOptions?.userMessage || "",
+  );
+
+  const source =
+    String(recallOptions?.overrideSource || recallOptions?.source || "").trim() ||
+    (normalizeGenerationRecallTransactionType(normalizedGenerationType) === "normal"
+      ? "chat-tail-user"
+      : "chat-last-user");
+  const sourceLabel =
+    String(
+      recallOptions?.overrideSourceLabel ||
+        recallOptions?.sourceLabel ||
+        getRecallUserMessageSourceLabel(source),
+    ).trim() || getRecallUserMessageSourceLabel(source);
+
   let targetUserMessageIndex = Number.isFinite(recallOptions?.targetUserMessageIndex)
     ? Math.floor(Number(recallOptions.targetUserMessageIndex))
     : resolveGenerationTargetUserMessageIndex(chat, {
@@ -4758,6 +4774,21 @@ function freezeGenerationRecallOptionsForTransaction(
       });
 
   if (!Number.isFinite(targetUserMessageIndex)) {
+    if (
+      normalizeGenerationRecallTransactionType(normalizedGenerationType) === "normal" &&
+      overrideUserMessage
+    ) {
+      return {
+        generationType: normalizedGenerationType,
+        targetUserMessageIndex: null,
+        overrideUserMessage,
+        overrideSource: source,
+        overrideSourceLabel: sourceLabel,
+        includeSyntheticUserMessage: Boolean(
+          recallOptions?.includeSyntheticUserMessage,
+        ),
+      };
+    }
     return null;
   }
   targetUserMessageIndex = Math.floor(targetUserMessageIndex);
@@ -4776,18 +4807,6 @@ function freezeGenerationRecallOptionsForTransaction(
   if (!frozenUserMessage) {
     return null;
   }
-
-  const source =
-    String(recallOptions?.overrideSource || recallOptions?.source || "").trim() ||
-    (normalizeGenerationRecallTransactionType(normalizedGenerationType) === "normal"
-      ? "chat-tail-user"
-      : "chat-last-user");
-  const sourceLabel =
-    String(
-      recallOptions?.overrideSourceLabel ||
-        recallOptions?.sourceLabel ||
-        getRecallUserMessageSourceLabel(source),
-    ).trim() || getRecallUserMessageSourceLabel(source);
 
   return {
     generationType: normalizedGenerationType,
