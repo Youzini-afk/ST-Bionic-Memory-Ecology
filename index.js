@@ -1443,7 +1443,12 @@ function refreshPersistedRecallMessageUi() {
     ) || null;
 
     if (currentCard) {
-      updateRecallCardData(currentCard, record);
+      updateRecallCardData(currentCard, record, {
+        userMessageText: message.mes || "",
+        graph: currentGraph,
+        themeName,
+        callbacks,
+      });
     } else {
       const card = createRecallCardElement({
         messageIndex,

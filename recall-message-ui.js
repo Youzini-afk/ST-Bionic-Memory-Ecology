@@ -79,6 +79,94 @@ function formatMetaLine(record) {
   return parts.join(" · ");
 }
 
+function stableSerialize(value) {
+  if (value === null || value === undefined) return "null";
+  const type = typeof value;
+  if (type === "number") {
+    return Number.isFinite(value) ? String(value) : "null";
+  }
+  if (type === "boolean") return value ? "true" : "false";
+  if (type === "string") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  if (type === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
+}
+
+function normalizeSelectedNodeIds(selectedNodeIds = []) {
+  return Array.isArray(selectedNodeIds)
+    ? selectedNodeIds
+        .map((id) => String(id || "").trim())
+        .filter(Boolean)
+        .sort()
+    : [];
+}
+
+function summarizeSubGraphForSignature(subGraph) {
+  const nodes = Array.isArray(subGraph?.nodes)
+    ? subGraph.nodes
+        .map((node) => ({
+          id: String(node?.id || ""),
+          type: String(node?.type || ""),
+          archived: Boolean(node?.archived),
+          seq: Number.isFinite(node?.seq) ? node.seq : 0,
+          seqRange: Array.isArray(node?.seqRange)
+            ? [
+                Number.isFinite(node.seqRange[0]) ? node.seqRange[0] : 0,
+                Number.isFinite(node.seqRange[1]) ? node.seqRange[1] : 0,
+              ]
+            : [],
+          fields: node?.fields && typeof node.fields === "object" ? { ...node.fields } : {},
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id))
+    : [];
+
+  const edges = Array.isArray(subGraph?.edges)
+    ? subGraph.edges
+        .map((edge) => ({
+          fromId: String(edge?.fromId || ""),
+          toId: String(edge?.toId || ""),
+          relation: String(edge?.relation || ""),
+          strength: Number.isFinite(edge?.strength) ? edge.strength : 0,
+        }))
+        .sort((left, right) => {
+          const leftKey = `${left.fromId}->${left.toId}:${left.relation}`;
+          const rightKey = `${right.fromId}->${right.toId}:${right.relation}`;
+          return leftKey.localeCompare(rightKey);
+        })
+    : [];
+
+  return { nodes, edges };
+}
+
+function buildExpandedRenderSignature({
+  record,
+  userMessageText,
+  selectedNodeIds,
+  subGraph,
+} = {}) {
+  return stableSerialize({
+    updatedAt: String(record?.updatedAt || ""),
+    manuallyEdited: Boolean(record?.manuallyEdited),
+    generationCount: Number.isFinite(record?.generationCount)
+      ? record.generationCount
+      : 0,
+    tokenEstimate: Number.isFinite(record?.tokenEstimate) ? record.tokenEstimate : 0,
+    recallSource: String(record?.recallSource || ""),
+    hookName: String(record?.hookName || ""),
+    injectionText: String(record?.injectionText || ""),
+    selectedNodeIds: normalizeSelectedNodeIds(selectedNodeIds),
+    userMessageText: String(userMessageText || ""),
+    subGraph: summarizeSubGraphForSignature(subGraph),
+  });
+}
+
 // ==================== 卡片 DOM 构建 ====================
 
 /**
@@ -103,18 +191,25 @@ export function createRecallCardElement({
   const card = el("div", "bme-recall-card");
   card.dataset.messageIndex = String(messageIndex);
   card.dataset.updatedAt = String(record?.updatedAt || "");
+  card.dataset.expandedRenderSignature = "";
+
+  let activeRecord = record || {};
+  let activeUserMessageText = String(userMessageText || "");
+  let activeGraph = graph || null;
+  let activeCallbacks = callbacks || {};
+  let expandedRenderSignature = "";
 
   // -- 用户消息区 --
   const userLabel = el("div", "bme-recall-user-label");
   userLabel.innerHTML = "💬 <span>本轮用户输入</span>";
   card.appendChild(userLabel);
 
-  const userText = el("div", "bme-recall-user-text", userMessageText || "(empty)");
+  const userText = el("div", "bme-recall-user-text", activeUserMessageText || "(empty)");
   card.appendChild(userText);
 
   // -- 召回条 --
-  const nodeCount = Array.isArray(record?.selectedNodeIds)
-    ? record.selectedNodeIds.length
+  const initialNodeCount = Array.isArray(activeRecord?.selectedNodeIds)
+    ? activeRecord.selectedNodeIds.length
     : 0;
   const bar = el("div", "bme-recall-bar");
 
@@ -127,15 +222,16 @@ export function createRecallCardElement({
   const badge = el(
     "span",
     "bme-recall-count-badge",
-    nodeCount > 0 ? `记忆 ${nodeCount}` : "记忆 ✓",
+    initialNodeCount > 0 ? `记忆 ${initialNodeCount}` : "记忆 ✓",
   );
   bar.appendChild(badge);
 
   const tokenHint = el(
     "span",
     "bme-recall-token-hint",
-    formatTokenHint(record?.tokenEstimate),
+    formatTokenHint(activeRecord?.tokenEstimate),
   );
+
   bar.appendChild(tokenHint);
 
   const arrow = el("span", "bme-recall-expand-arrow", "▶");
@@ -158,18 +254,20 @@ export function createRecallCardElement({
     }
   }
 
-  function buildExpandedContent() {
+  function buildExpandedContent(subGraph = null, nextSignature = "") {
     body.innerHTML = "";
 
-    const subGraph = graph
-      ? buildRecallSubGraph(graph, record?.selectedNodeIds || [])
-      : { nodes: [], edges: [] };
+    const resolvedSubGraph =
+      subGraph ||
+      (activeGraph
+        ? buildRecallSubGraph(activeGraph, activeRecord?.selectedNodeIds || [])
+        : { nodes: [], edges: [] });
 
-    if (subGraph.nodes.length === 0) {
+    if (resolvedSubGraph.nodes.length === 0) {
       const emptyMsg = el(
         "div",
         "bme-recall-empty",
-        graph ? "召回节点已不存在或图谱已重建" : "图谱未就绪",
+        activeGraph ? "召回节点已不存在或图谱已重建" : "图谱未就绪",
       );
       body.appendChild(emptyMsg);
     } else {
@@ -184,22 +282,22 @@ export function createRecallCardElement({
         theme: themeName,
         forceConfig: RECALL_CARD_FORCE_CONFIG,
         onNodeClick: (node) => {
-          if (typeof callbacks.onNodeClick === "function") {
-            callbacks.onNodeClick(messageIndex, node);
+          if (typeof activeCallbacks.onNodeClick === "function") {
+            activeCallbacks.onNodeClick(messageIndex, node);
           }
         },
         onNodeDoubleClick: (node) => {
-          if (typeof callbacks.onNodeClick === "function") {
-            callbacks.onNodeClick(messageIndex, node);
+          if (typeof activeCallbacks.onNodeClick === "function") {
+            activeCallbacks.onNodeClick(messageIndex, node);
           }
         },
       });
-      renderer.loadGraph(subGraph);
+      renderer.loadGraph(resolvedSubGraph);
     }
 
     // 元信息行
-    const meta = el("div", "bme-recall-meta", formatMetaLine(record || {}));
-    if (record?.manuallyEdited) {
+    const meta = el("div", "bme-recall-meta", formatMetaLine(activeRecord || {}));
+    if (activeRecord?.manuallyEdited) {
       const tag = el("span", "bme-recall-meta-tag", "✍ 手动编辑");
       meta.appendChild(tag);
     }
@@ -213,7 +311,7 @@ export function createRecallCardElement({
     editBtn.type = "button";
     editBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      callbacks.onEdit?.(messageIndex);
+      activeCallbacks.onEdit?.(messageIndex);
     });
     actions.appendChild(editBtn);
 
@@ -221,7 +319,7 @@ export function createRecallCardElement({
     deleteBtn.innerHTML = '<span class="bme-recall-btn-icon">🗑</span> 删除';
     deleteBtn.type = "button";
     setupDeleteConfirmation(deleteBtn, () => {
-      callbacks.onDelete?.(messageIndex);
+      activeCallbacks.onDelete?.(messageIndex);
     });
     actions.appendChild(deleteBtn);
 
@@ -232,7 +330,7 @@ export function createRecallCardElement({
       e.stopPropagation();
       setRecallButtonLoading(recallBtn, true);
       try {
-        await callbacks.onRerunRecall?.(messageIndex);
+        await activeCallbacks.onRerunRecall?.(messageIndex);
       } finally {
         setRecallButtonLoading(recallBtn, false);
       }
@@ -240,46 +338,106 @@ export function createRecallCardElement({
     actions.appendChild(recallBtn);
 
     body.appendChild(actions);
+
+    expandedRenderSignature =
+      nextSignature ||
+      buildExpandedRenderSignature({
+        record: activeRecord,
+        userMessageText: activeUserMessageText,
+        selectedNodeIds: activeRecord?.selectedNodeIds || [],
+        subGraph: resolvedSubGraph,
+      });
+    card.dataset.expandedRenderSignature = expandedRenderSignature;
   }
+
+  function applyCardRuntimeData(next = {}, { skipExpandedRerender = false } = {}) {
+    if (next.record && typeof next.record === "object") {
+      activeRecord = next.record;
+    }
+    if (Object.prototype.hasOwnProperty.call(next, "userMessageText")) {
+      activeUserMessageText = String(next.userMessageText || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(next, "graph")) {
+      activeGraph = next.graph || null;
+    }
+    if (next.callbacks && typeof next.callbacks === "object") {
+      activeCallbacks = next.callbacks;
+    }
+
+    card.dataset.updatedAt = String(activeRecord?.updatedAt || "");
+    card.dataset.expandedRenderSignature = expandedRenderSignature;
+    userText.textContent = activeUserMessageText || "(empty)";
+
+    const nodeCount = Array.isArray(activeRecord?.selectedNodeIds)
+      ? activeRecord.selectedNodeIds.length
+      : 0;
+    badge.textContent = nodeCount > 0 ? `记忆 ${nodeCount}` : "记忆 ✓";
+    tokenHint.textContent = formatTokenHint(activeRecord?.tokenEstimate);
+
+    if (skipExpandedRerender || !card.classList.contains("expanded")) return;
+
+    const nextSubGraph = activeGraph
+      ? buildRecallSubGraph(activeGraph, activeRecord?.selectedNodeIds || [])
+      : { nodes: [], edges: [] };
+    const nextSignature = buildExpandedRenderSignature({
+      record: activeRecord,
+      userMessageText: activeUserMessageText,
+      selectedNodeIds: activeRecord?.selectedNodeIds || [],
+      subGraph: nextSubGraph,
+    });
+    if (nextSignature === expandedRenderSignature) return;
+
+    destroyRenderer();
+    buildExpandedContent(nextSubGraph, nextSignature);
+  }
+
+  card._bmeUpdateRecallCard = applyCardRuntimeData;
 
   // 点击召回条 toggle 展开/折叠
   bar.addEventListener("click", (e) => {
     e.stopPropagation();
     const isExpanded = card.classList.toggle("expanded");
     if (isExpanded) {
+      applyCardRuntimeData({}, { skipExpandedRerender: true });
       buildExpandedContent();
     } else {
       destroyRenderer();
       body.innerHTML = "";
+      expandedRenderSignature = "";
+      card.dataset.expandedRenderSignature = "";
     }
   });
 
+  applyCardRuntimeData({}, { skipExpandedRerender: true });
+
   // 暴露清理方法
-  card._bmeDestroyRenderer = destroyRenderer;
+  card._bmeDestroyRenderer = () => {
+    destroyRenderer();
+    expandedRenderSignature = "";
+    card.dataset.expandedRenderSignature = "";
+  };
 
   return card;
 }
 
+
 /**
  * 更新已有卡片的 badge / token hint / meta（不重建整个卡片）
  */
-export function updateRecallCardData(cardElement, record) {
+export function updateRecallCardData(cardElement, record, options = {}) {
   if (!cardElement || !record) return;
 
+  if (typeof cardElement._bmeUpdateRecallCard === "function") {
+    cardElement._bmeUpdateRecallCard({
+      record,
+      userMessageText: options?.userMessageText,
+      graph: options?.graph,
+      callbacks: options?.callbacks,
+    });
+    return;
+  }
+
   cardElement.dataset.updatedAt = String(record.updatedAt || "");
-
-  const badge = cardElement.querySelector(".bme-recall-count-badge");
-  if (badge) {
-    const nodeCount = Array.isArray(record.selectedNodeIds)
-      ? record.selectedNodeIds.length
-      : 0;
-    badge.textContent = nodeCount > 0 ? `记忆 ${nodeCount}` : "记忆 ✓";
-  }
-
-  const tokenHint = cardElement.querySelector(".bme-recall-token-hint");
-  if (tokenHint) {
-    tokenHint.textContent = formatTokenHint(record.tokenEstimate);
-  }
 }
 
 // ==================== 删除二次确认 ====================

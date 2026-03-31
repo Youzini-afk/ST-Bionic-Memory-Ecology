@@ -1076,6 +1076,97 @@ async function testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates() {
   }
 }
 
+async function testRecallCardExpandedContentRerendersAfterRecordUpdate() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          recallSource: "before",
+          tokenEstimate: 8,
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    let summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "rendered");
+
+    let card = harness.chatRoot.querySelector(".bme-recall-card");
+    card.querySelector(".bme-recall-bar")?.click();
+    assert.equal(card.classList.contains("expanded"), true);
+    const signatureBefore = card.dataset.expandedRenderSignature || "";
+    assert.equal(card.querySelector(".bme-recall-meta-tag"), null);
+
+    chat[0].extra.bme_recall = buildPersistedRecallRecord(
+      {
+        injectionText: "recall-1",
+        selectedNodeIds: ["n1", "n2"],
+        recallSource: "after",
+        tokenEstimate: 13,
+        manuallyEdited: true,
+        nowIso: "2026-01-01T00:01:00.000Z",
+      },
+      chat[0].extra.bme_recall,
+    );
+
+    summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "rendered");
+
+    card = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.equal(card.dataset.updatedAt, "2026-01-01T00:01:00.000Z");
+    assert.equal(card.querySelector(".bme-recall-count-badge")?.textContent, "记忆 2");
+    assert.equal(
+      card.querySelector(".bme-recall-token-hint")?.textContent,
+      "~13 tokens",
+    );
+    const metaElements = card.querySelectorAll(".bme-recall-meta");
+    const latestMeta = metaElements[metaElements.length - 1] || null;
+    const latestTag = card.querySelectorAll(".bme-recall-meta-tag").pop() || null;
+    assert.ok(latestMeta?.textContent.includes("来源: after"));
+    assert.equal(latestTag?.textContent, "✍ 手动编辑");
+    assert.notEqual(card.dataset.expandedRenderSignature, signatureBefore);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardUserTextRefreshesWithoutCardRecreate() {
+  const chat = [
+    { is_user: true, mes: "before-user", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const firstCard = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.equal(firstCard.querySelector(".bme-recall-user-text")?.textContent, "before-user");
+
+    chat[0].mes = "after-user";
+    harness.api.refreshPersistedRecallMessageUi();
+
+    const secondCard = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.equal(secondCard, firstCard);
+    assert.equal(secondCard.querySelector(".bme-recall-user-text")?.textContent, "after-user");
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 function makeEvent(seq, title) {
   return createNode({
     type: "event",
@@ -2573,6 +2664,8 @@ await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
 await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
+await testRecallCardExpandedContentRerendersAfterRecordUpdate();
+await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testRerollRejectsMissingRecoveryPoint();
