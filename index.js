@@ -5026,34 +5026,80 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
   )
     ? options.frozenInputSnapshot
     : null;
+  const pendingSendIntent = isFreshRecallInputRecord(pendingRecallSendIntent)
+    ? pendingRecallSendIntent
+    : null;
+  const sendIntentText = normalizeRecallInputText(
+    pendingSendIntent?.text || "",
+  );
   const hostSnapshotText = normalizeRecallInputText(
     frozenInputSnapshot?.text || "",
   );
-  const textareaText = normalizeRecallInputText(
-    pendingRecallSendIntent.text || getSendTextareaValue(),
-  );
-  const userMessage = tailUserText || hostSnapshotText || textareaText;
-  if (!userMessage) return null;
-
-  let overrideSource = "send-intent";
-  let overrideSourceLabel = "发送意图";
-  if (tailUserText) {
-    overrideSource = "chat-tail-user";
-    overrideSourceLabel = "当前用户楼层";
-  } else if (hostSnapshotText) {
-    overrideSource = String(
-      frozenInputSnapshot?.source || "host-generation-lifecycle",
-    );
-    overrideSourceLabel = "宿主发送快照";
-  }
+  const textareaText = normalizeRecallInputText(getSendTextareaValue());
+  const sourceCandidates = [
+    sendIntentText
+      ? {
+          text: sendIntentText,
+          source: "send-intent",
+          sourceLabel: "发送意图",
+          reason: tailUserText
+            ? "send-intent-overrides-chat-tail"
+            : "send-intent-captured",
+          includeSyntheticUserMessage: !tailUserText,
+        }
+      : null,
+    hostSnapshotText
+      ? {
+          text: hostSnapshotText,
+          source: String(
+            frozenInputSnapshot?.source || "host-generation-lifecycle",
+          ),
+          sourceLabel: "宿主发送快照",
+          reason: sendIntentText
+            ? "host-snapshot-suppressed-by-send-intent"
+            : tailUserText
+              ? "host-snapshot-suppressed-by-chat-tail"
+              : "host-snapshot-captured",
+          includeSyntheticUserMessage: !tailUserText,
+        }
+      : null,
+    tailUserText
+      ? {
+          text: tailUserText,
+          source: "chat-tail-user",
+          sourceLabel: "当前用户楼层",
+          reason:
+            sendIntentText || hostSnapshotText
+              ? "chat-tail-deprioritized"
+              : "chat-tail-fallback",
+          includeSyntheticUserMessage: false,
+        }
+      : null,
+    textareaText
+      ? {
+          text: textareaText,
+          source: "textarea-live",
+          sourceLabel: "输入框当前文本",
+          reason:
+            sendIntentText || hostSnapshotText || tailUserText
+              ? "textarea-live-deprioritized"
+              : "textarea-live-fallback",
+          includeSyntheticUserMessage: !tailUserText,
+        }
+      : null,
+  ].filter(Boolean);
+  const selectedCandidate = sourceCandidates[0] || null;
+  if (!selectedCandidate?.text) return null;
 
   return {
-    overrideUserMessage: userMessage,
+    overrideUserMessage: selectedCandidate.text,
     generationType: "normal",
     targetUserMessageIndex,
-    overrideSource,
-    overrideSourceLabel,
-    includeSyntheticUserMessage: !tailUserText,
+    overrideSource: selectedCandidate.source,
+    overrideSourceLabel: selectedCandidate.sourceLabel,
+    overrideReason: selectedCandidate.reason,
+    sourceCandidates,
+    includeSyntheticUserMessage: selectedCandidate.includeSyntheticUserMessage,
   };
 }
 
@@ -5172,6 +5218,23 @@ function freezeGenerationRecallOptionsForTransaction(
         recallOptions?.sourceLabel ||
         getRecallUserMessageSourceLabel(source),
     ).trim() || getRecallUserMessageSourceLabel(source);
+  const sourceReason =
+    String(
+      recallOptions?.overrideReason || recallOptions?.reason || "",
+    ).trim() || "transaction-source-frozen";
+  const sourceCandidates = Array.isArray(recallOptions?.sourceCandidates)
+    ? recallOptions.sourceCandidates
+        .map((candidate) => ({
+          text: normalizeRecallInputText(candidate?.text || ""),
+          source: String(candidate?.source || "").trim(),
+          sourceLabel: String(candidate?.sourceLabel || "").trim(),
+          reason: String(candidate?.reason || "").trim(),
+          includeSyntheticUserMessage: Boolean(
+            candidate?.includeSyntheticUserMessage,
+          ),
+        }))
+        .filter((candidate) => candidate.text && candidate.source)
+    : [];
 
   let targetUserMessageIndex = Number.isFinite(
     recallOptions?.targetUserMessageIndex,
@@ -5193,6 +5256,11 @@ function freezeGenerationRecallOptionsForTransaction(
         overrideUserMessage,
         overrideSource: source,
         overrideSourceLabel: sourceLabel,
+        overrideReason: sourceReason,
+        sourceCandidates,
+        lockedSource: source,
+        lockedSourceLabel: sourceLabel,
+        lockedReason: sourceReason,
         includeSyntheticUserMessage: Boolean(
           recallOptions?.includeSyntheticUserMessage,
         ),
@@ -5223,6 +5291,19 @@ function freezeGenerationRecallOptionsForTransaction(
     overrideUserMessage: frozenUserMessage,
     overrideSource: source,
     overrideSourceLabel: sourceLabel,
+    overrideReason:
+      sourceReason ||
+      (frozenUserMessage === overrideUserMessage
+        ? "transaction-source-frozen"
+        : "transaction-bound-to-chat-user-floor"),
+    sourceCandidates,
+    lockedSource: source,
+    lockedSourceLabel: sourceLabel,
+    lockedReason:
+      sourceReason ||
+      (frozenUserMessage === overrideUserMessage
+        ? "transaction-source-frozen"
+        : "transaction-bound-to-chat-user-floor"),
     includeSyntheticUserMessage: false,
   };
 }
@@ -5532,6 +5613,22 @@ function createGenerationRecallContext({
   ) {
     transaction.frozenRecallOptions = {
       ...frozenRecallOptions,
+      lockedSource:
+        frozenRecallOptions?.lockedSource ||
+        frozenRecallOptions?.overrideSource ||
+        frozenRecallOptions?.source ||
+        "",
+      lockedSourceLabel:
+        frozenRecallOptions?.lockedSourceLabel ||
+        frozenRecallOptions?.overrideSourceLabel ||
+        frozenRecallOptions?.sourceLabel ||
+        "",
+      lockedReason:
+        frozenRecallOptions?.lockedReason ||
+        frozenRecallOptions?.overrideReason ||
+        frozenRecallOptions?.reason ||
+        "",
+      lockedAt: now,
     };
   }
   if (!String(transaction.generationType || "").trim()) {

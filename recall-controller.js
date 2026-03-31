@@ -66,11 +66,26 @@ export function resolveRecallInputController(
         ? override.targetUserMessageIndex
         : null,
       source: String(
-        override?.source || override?.overrideSource || "override",
+        override?.lockedSource ||
+          override?.source ||
+          override?.overrideSource ||
+          "override",
       ),
       sourceLabel: String(
-        override?.sourceLabel || override?.overrideSourceLabel || "发送前拦截",
+        override?.lockedSourceLabel ||
+          override?.sourceLabel ||
+          override?.overrideSourceLabel ||
+          "发送前拦截",
       ),
+      reason: String(
+        override?.lockedReason ||
+          override?.reason ||
+          override?.overrideReason ||
+          "override-bound",
+      ),
+      sourceCandidates: Array.isArray(override?.sourceCandidates)
+        ? override.sourceCandidates.map((candidate) => ({ ...candidate }))
+        : [],
       recentMessages: runtime.buildRecallRecentMessages(
         chat,
         recentContextMessageLimit,
@@ -126,6 +141,8 @@ export function resolveRecallInputController(
     targetUserMessageIndex: null,
     source,
     sourceLabel: runtime.getRecallUserMessageSourceLabel(source),
+    reason: userMessage ? `${source || "unknown"}-selected` : "no-recall-input",
+    sourceCandidates: [],
     recentMessages: runtime.buildRecallRecentMessages(
       chat,
       recentContextMessageLimit,
@@ -174,6 +191,10 @@ export function applyRecallInjectionController(
     taskType: "recall",
     source: recallInput.source,
     sourceLabel: recallInput.sourceLabel,
+    reason: recallInput.reason || "",
+    sourceCandidates: Array.isArray(recallInput.sourceCandidates)
+      ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))
+      : [],
     hookName: recallInput.hookName,
     recentMessages,
     selectedNodeIds: result.selectedNodeIds || [],
