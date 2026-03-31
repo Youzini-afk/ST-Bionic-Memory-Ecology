@@ -591,6 +591,18 @@ result = {
   );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, false);
   assert.equal(harness.api.getGraphPersistenceLiveState().writesBlocked, true);
+  assert.equal(
+    harness.api.getGraphPersistenceState().dualWriteLastResult?.resultCode,
+    "graph.load.metadata-compat.provisional",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().dualWriteLastResult?.provisional,
+    true,
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().dualWriteLastResult?.reason,
+    "global-chat-id:metadata-compat-provisional",
+  );
 }
 
 {
@@ -1158,6 +1170,77 @@ result = {
   const live = reader.api.getGraphPersistenceLiveState();
   assert.equal(live.shadowSnapshotRevision, 9);
   assert.equal(live.shadowSnapshotReason, "shadow-integrity-mismatch");
+  const compareDecision = shouldPreferShadowSnapshotOverOfficial(
+    officialGraph,
+    reader.api.readGraphShadowSnapshot("chat-shadow-newer"),
+  );
+  assert.equal(compareDecision.resultCode, "shadow.reject.integrity-mismatch");
+}
+
+{
+  const decision = shouldPreferShadowSnapshotOverOfficial(
+    stampPersistedGraph(createMeaningfulGraph("chat-self-mismatch"), {
+      revision: 0,
+      chatId: "",
+      integrity: "",
+    }),
+    {
+      chatId: "chat-self-mismatch",
+      persistedChatId: "chat-other",
+      revision: 5,
+      integrity: "",
+    },
+  );
+  assert.equal(decision.prefer, false);
+  assert.equal(decision.reason, "shadow-self-chat-mismatch");
+  assert.equal(decision.resultCode, "shadow.reject.self-chat-mismatch");
+}
+
+{
+  const decision = shouldPreferShadowSnapshotOverOfficial(
+    stampPersistedGraph(createMeaningfulGraph("chat-official-missing"), {
+      revision: 0,
+      chatId: "",
+      integrity: "",
+    }),
+    {
+      chatId: "chat-official-missing",
+      persistedChatId: "chat-official-missing",
+      revision: 4,
+      integrity: "",
+    },
+  );
+  assert.equal(decision.prefer, false);
+  assert.equal(decision.reason, "shadow-persisted-chat-without-official-chat");
+  assert.equal(
+    decision.resultCode,
+    "shadow.reject.persisted-chat-without-official-chat",
+  );
+}
+
+{
+  const decision = shouldPreferShadowSnapshotOverOfficial(
+    stampPersistedGraph(
+      createMeaningfulGraph("chat-official-integrity-missing"),
+      {
+        revision: 0,
+        chatId: "chat-official-integrity-missing",
+        integrity: "",
+      },
+    ),
+    {
+      chatId: "chat-official-integrity-missing",
+      persistedChatId: "chat-official-integrity-missing",
+      revision: 4,
+      integrity: "shadow-only-integrity",
+    },
+  );
+  assert.equal(decision.prefer, false);
+  assert.equal(decision.reason, "shadow-integrity-without-official-integrity");
+  assert.equal(
+    decision.resultCode,
+    "shadow.reject.integrity-without-official-integrity",
+  );
 }
 
 {

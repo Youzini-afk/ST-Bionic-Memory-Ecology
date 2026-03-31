@@ -242,6 +242,7 @@ export function shouldPreferShadowSnapshotOverOfficial(
     return {
       prefer: false,
       reason: "shadow-missing",
+      resultCode: "shadow.missing",
     };
   }
 
@@ -260,6 +261,7 @@ export function shouldPreferShadowSnapshotOverOfficial(
     return {
       prefer: false,
       reason: "shadow-revision-invalid",
+      resultCode: "shadow.reject.revision-invalid",
       shadowRevision,
       officialRevision,
     };
@@ -273,6 +275,7 @@ export function shouldPreferShadowSnapshotOverOfficial(
     return {
       prefer: false,
       reason: "shadow-persisted-chat-mismatch",
+      resultCode: "shadow.reject.persisted-chat-mismatch",
       shadowRevision,
       officialRevision,
       officialChatId: normalizedOfficialChatId,
@@ -288,6 +291,7 @@ export function shouldPreferShadowSnapshotOverOfficial(
     return {
       prefer: false,
       reason: "shadow-chat-mismatch",
+      resultCode: "shadow.reject.chat-mismatch",
       shadowRevision,
       officialRevision,
       officialChatId: normalizedOfficialChatId,
@@ -303,9 +307,48 @@ export function shouldPreferShadowSnapshotOverOfficial(
     return {
       prefer: false,
       reason: "shadow-integrity-mismatch",
+      resultCode: "shadow.reject.integrity-mismatch",
       shadowRevision,
       officialRevision,
       officialIntegrity,
+      shadowIntegrity,
+    };
+  }
+
+  if (
+    normalizedShadowPersistedChatId &&
+    normalizedShadowChatId &&
+    normalizedShadowPersistedChatId !== normalizedShadowChatId
+  ) {
+    return {
+      prefer: false,
+      reason: "shadow-self-chat-mismatch",
+      resultCode: "shadow.reject.self-chat-mismatch",
+      shadowRevision,
+      officialRevision,
+      shadowChatId: normalizedShadowChatId,
+      shadowPersistedChatId: normalizedShadowPersistedChatId,
+    };
+  }
+
+  if (normalizedShadowPersistedChatId && !normalizedOfficialChatId) {
+    return {
+      prefer: false,
+      reason: "shadow-persisted-chat-without-official-chat",
+      resultCode: "shadow.reject.persisted-chat-without-official-chat",
+      shadowRevision,
+      officialRevision,
+      shadowPersistedChatId: normalizedShadowPersistedChatId,
+    };
+  }
+
+  if (shadowIntegrity && !officialIntegrity) {
+    return {
+      prefer: false,
+      reason: "shadow-integrity-without-official-integrity",
+      resultCode: "shadow.reject.integrity-without-official-integrity",
+      shadowRevision,
+      officialRevision,
       shadowIntegrity,
     };
   }
@@ -316,6 +359,10 @@ export function shouldPreferShadowSnapshotOverOfficial(
       shadowRevision > officialRevision
         ? "shadow-newer-than-official"
         : "shadow-not-newer-than-official",
+    resultCode:
+      shadowRevision > officialRevision
+        ? "shadow.accept.newer-than-official"
+        : "shadow.keep.official-not-older",
     shadowRevision,
     officialRevision,
   };

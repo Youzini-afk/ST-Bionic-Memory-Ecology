@@ -368,6 +368,185 @@ function createGenerationRecallHarness() {
   });
 }
 
+function createHistoryRecoveryHarness() {
+  return fs.readFile(indexPath, "utf8").then((source) => {
+    const start = source.indexOf("async function recoverHistoryIfNeeded(");
+    const end = source.indexOf("/**\n * 提取管线：处理未提取的对话楼层");
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error("无法从 index.js 提取 history recovery 定义");
+    }
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const context = {
+      console,
+      Date,
+      result: null,
+      currentGraph: null,
+      extractionCount: 0,
+      isRecoveringHistory: false,
+      chat: [],
+      clearedHistoryDirty: null,
+      prepareVectorStateCalls: [],
+      saveGraphToChatCalls: 0,
+      refreshPanelCalls: 0,
+      notices: [],
+      embeddingConfig: { mode: "backend" },
+      ensureCurrentGraphRuntimeState() {
+        return context.currentGraph;
+      },
+      beginStageAbortController() {
+        return {
+          signal: { aborted: false },
+          abort() {},
+        };
+      },
+      finishStageAbortController() {},
+      updateStageNotice(...args) {
+        context.notices.push(args);
+      },
+      inspectHistoryMutation() {
+        return context.inspectHistoryMutationImpl();
+      },
+      inspectHistoryMutationImpl() {
+        return {
+          dirty: true,
+          earliestAffectedFloor: 0,
+          source: "manual-test",
+          reason: "edited",
+        };
+      },
+      getContext() {
+        return {
+          chat: context.chat,
+          chatId: "chat-main",
+        };
+      },
+      getCurrentChatId() {
+        return "chat-main";
+      },
+      clampRecoveryStartFloor(chat, floor) {
+        return Math.max(0, Number(floor) || 0);
+      },
+      throwIfAborted(signal, message = "aborted") {
+        if (signal?.aborted) {
+          const error = new Error(message);
+          error.name = "AbortError";
+          throw error;
+        }
+      },
+      createAbortError(message = "aborted") {
+        const error = new Error(message);
+        error.name = "AbortError";
+        return error;
+      },
+      isAbortError(error) {
+        return error?.name === "AbortError";
+      },
+      findJournalRecoveryPoint(graph, floor) {
+        return context.findJournalRecoveryPointImpl(graph, floor);
+      },
+      findJournalRecoveryPointImpl() {
+        return null;
+      },
+      buildReverseJournalRecoveryPlan(...args) {
+        return context.buildReverseJournalRecoveryPlanImpl(...args);
+      },
+      buildReverseJournalRecoveryPlanImpl() {
+        return {
+          valid: true,
+          backendDeleteHashes: [],
+          replayRequiredNodeIds: [],
+          pendingRepairFromFloor: 0,
+          legacyGapFallback: false,
+          dirtyReason: "history-recovery-replay",
+        };
+      },
+      rollbackAffectedJournals() {},
+      normalizeGraphRuntimeState(graph) {
+        return graph;
+      },
+      createEmptyGraph() {
+        return {
+          historyState: {
+            extractionCount: 0,
+            lastMutationSource: "",
+            lastMutationReason: "",
+          },
+          vectorIndexState: {
+            collectionId: "col-1",
+            dirty: false,
+            dirtyReason: "",
+            pendingRepairFromFloor: null,
+            replayRequiredNodeIds: [],
+            lastWarning: "",
+            lastIntegrityIssue: null,
+          },
+          batchJournal: [],
+          lastProcessedSeq: -1,
+        };
+      },
+      getEmbeddingConfig() {
+        return context.embeddingConfig;
+      },
+      getSettings() {
+        return {};
+      },
+      isBackendVectorConfig(config) {
+        return config?.mode === "backend";
+      },
+      async deleteBackendVectorHashesForRecovery(...args) {
+        context.deletedHashesCalls ||= [];
+        context.deletedHashesCalls.push(args);
+      },
+      async prepareVectorStateForReplay(...args) {
+        context.prepareVectorStateCalls.push(args);
+        if (typeof context.prepareVectorStateForReplayImpl === "function") {
+          return await context.prepareVectorStateForReplayImpl(...args);
+        }
+      },
+      applyRecoveryPlanToVectorState() {},
+      async replayExtractionFromHistory(...args) {
+        if (typeof context.replayExtractionFromHistoryImpl === "function") {
+          return await context.replayExtractionFromHistoryImpl(...args);
+        }
+        return 0;
+      },
+      clearHistoryDirty(graph, result) {
+        context.clearedHistoryDirty = result;
+        graph.historyState ||= {};
+        graph.historyState.historyDirtyFrom = null;
+        graph.historyState.processedMessageHashes = {};
+        graph.historyState.lastRecoveryResult = result;
+      },
+      buildRecoveryResult(status, extra = {}) {
+        return {
+          status,
+          ...extra,
+        };
+      },
+      saveGraphToChat() {
+        context.saveGraphToChatCalls += 1;
+      },
+      clearInjectionState() {},
+      assertRecoveryChatStillActive() {},
+      refreshPanelLiveState() {
+        context.refreshPanelCalls += 1;
+      },
+      toastr: {
+        success() {},
+        warning() {},
+        error() {},
+      },
+    };
+    vm.createContext(context);
+    vm.runInContext(
+      `${snippet}\nresult = { recoverFromHistoryMutation: recoverHistoryIfNeeded };`,
+      context,
+      { filename: indexPath },
+    );
+    return context;
+  });
+}
+
 function createRerollHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
     const rollbackStart = source.indexOf(
@@ -487,6 +666,7 @@ function createRerollHarness() {
         context.clearedHistoryDirty = result;
         graph.historyState ||= {};
         graph.historyState.historyDirtyFrom = null;
+        graph.historyState.processedMessageHashes = {};
         graph.historyState.lastRecoveryResult = result;
       },
       buildRecoveryResult(status, extra = {}) {
@@ -2869,6 +3049,7 @@ async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   assert.equal(result.rollbackPerformed, true);
   assert.equal(result.recoveryPath, "reverse-journal");
   assert.equal(result.effectiveFromFloor, 2);
+  assert.equal(result.resultCode, "reroll.rollback.applied");
   assert.equal(harness.rollbackAffectedJournalsCalls.length, 1);
   assert.equal(harness.deletedHashesCalls.length, 1);
   assert.equal(harness.prepareVectorStateCalls.length, 1);
@@ -2881,9 +3062,252 @@ async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
     harness.currentGraph.historyState.processedMessageHashes[3],
     undefined,
   );
+  assert.equal(harness.currentGraph.vectorIndexState.lastIntegrityIssue, null);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "reroll.rollback.applied",
+  );
   assert.equal(harness.lastExtractedItems.length, 0);
 }
 
+async function testRerollRejectsInvalidReverseJournalPlanFailClosed() {
+  const harness = await createRerollHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: {
+        1: "hash-1",
+        3: "hash-3",
+      },
+      lastRecoveryResult: null,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+    },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 3,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "journal-1" }],
+  });
+  harness.buildReverseJournalRecoveryPlanImpl = () => ({
+    valid: false,
+    invalidReason: "pending-repair-floor-missing",
+    backendDeleteHashes: [],
+    replayRequiredNodeIds: [],
+  });
+
+  const result = await harness.result.onReroll({ fromFloor: 3 });
+
+  assert.equal(result.success, false);
+  assert.equal(result.recoveryPath, "reverse-journal-rejected");
+  assert.equal(result.resultCode, "reroll.rollback.plan-invalid");
+  assert.equal(harness.rollbackAffectedJournalsCalls.length, 0);
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+  assert.equal(harness.deletedHashesCalls.length, 0);
+  assert.equal(harness.saveGraphToChatCalls, 1);
+  assert.equal(harness.refreshPanelCalls, 1);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.status,
+    "reroll-rollback-rejected",
+  );
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "reroll.rollback.plan-invalid",
+  );
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.debugReason,
+    "reroll-rollback-plan-invalid:pending-repair-floor-missing",
+  );
+}
+
+async function testHistoryRecoveryAbortClearsVectorRepairState() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: { code: "dangling-vector" },
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "full-rebuild",
+    affectedBatchCount: 0,
+  });
+  harness.prepareVectorStateForReplayImpl = async () => {
+    throw harness.createAbortError("manual abort");
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation({
+    trigger: "message-edited",
+    dirtyFrom: 1,
+    detection: { source: "manual-test", reason: "edited" },
+  });
+
+  assert.equal(result, false);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.recovery.aborted",
+  );
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.debugReason,
+    "history-recovery-aborted:full-rebuild",
+  );
+  assert.equal(harness.currentGraph.vectorIndexState.lastIntegrityIssue, null);
+  assert.equal(harness.currentGraph.vectorIndexState.lastWarning, "");
+  assert.equal(
+    harness.currentGraph.vectorIndexState.pendingRepairFromFloor,
+    null,
+  );
+  assert.equal(
+    harness.currentGraph.vectorIndexState.replayRequiredNodeIds.length,
+    0,
+  );
+  assert.equal(harness.currentGraph.vectorIndexState.dirty, false);
+  assert.equal(harness.currentGraph.vectorIndexState.dirtyReason, "");
+}
+
+async function testHistoryRecoveryFallbackFullRebuildCarriesResultCode() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: { code: "dangling-vector" },
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "legacy-snapshot",
+    affectedBatchCount: 2,
+    snapshotBefore: {
+      historyState: { extractionCount: 0 },
+      vectorIndexState: { collectionId: "col-1" },
+      batchJournal: [],
+      lastProcessedSeq: -1,
+    },
+  });
+  let replayCallCount = 0;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    replayCallCount += 1;
+    if (replayCallCount === 1) {
+      throw new Error("replay failed");
+    }
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation({
+    trigger: "message-edited",
+    dirtyFrom: 1,
+    detection: { source: "manual-test", reason: "edited" },
+  });
+
+  assert.equal(result, true);
+  assert.equal(
+    harness.clearedHistoryDirty.resultCode,
+    "history.recovery.fallback-full-rebuild",
+  );
+  assert.equal(
+    harness.clearedHistoryDirty.debugReason,
+    "history-recovery-fallback-full-rebuild:legacy-snapshot",
+  );
+}
+
+async function testHistoryRecoveryFailureCarriesResultCode() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: { code: "dangling-vector" },
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "legacy-snapshot",
+    affectedBatchCount: 1,
+    snapshotBefore: {
+      historyState: { extractionCount: 0 },
+      vectorIndexState: { collectionId: "col-1" },
+      batchJournal: [],
+      lastProcessedSeq: -1,
+    },
+  });
+  harness.replayExtractionFromHistoryImpl = async () => {
+    throw new Error("replay failed twice");
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation({
+    trigger: "message-edited",
+    dirtyFrom: 1,
+    detection: { source: "manual-test", reason: "edited" },
+  });
+
+  assert.equal(result, false);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.recovery.failed",
+  );
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.debugReason,
+    "history-recovery-failed:legacy-snapshot",
+  );
+  assert.equal(harness.currentGraph.vectorIndexState.lastIntegrityIssue, null);
+}
 async function testRerollRejectsMissingRecoveryPoint() {
   const harness = await createRerollHarness();
   harness.chat = [
@@ -2911,6 +3335,7 @@ async function testRerollRejectsMissingRecoveryPoint() {
 
   assert.equal(result.success, false);
   assert.equal(result.recoveryPath, "unavailable");
+  assert.equal(result.resultCode, "reroll.rollback.unavailable");
   assert.equal(harness.onManualExtractCalls, 0);
   assert.equal(harness.saveGraphToChatCalls, 0);
 }
@@ -2943,6 +3368,7 @@ async function testRerollFallsBackToDirectExtractForUnprocessedFloor() {
   assert.equal(result.rollbackPerformed, false);
   assert.equal(result.recoveryPath, "direct-extract");
   assert.equal(result.effectiveFromFloor, 2);
+  assert.equal(result.resultCode, undefined);
   assert.equal(harness.onManualExtractCalls, 1);
   assert.equal(harness.saveGraphToChatCalls, 0);
 }
@@ -3188,6 +3614,9 @@ await testRecallCardExpandedContentRerendersAfterRecordUpdate();
 await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
+await testHistoryRecoveryAbortClearsVectorRepairState();
+await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
+await testHistoryRecoveryFailureCarriesResultCode();
 await testRerollRejectsMissingRecoveryPoint();
 await testRerollFallsBackToDirectExtractForUnprocessedFloor();
 await testLlmDebugSnapshotRedactsSecretsBeforeStorage();

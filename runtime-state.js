@@ -324,6 +324,7 @@ export function clearHistoryDirty(graph, result = null) {
   graph.historyState.historyDirtyFrom = null;
   graph.historyState.lastMutationReason = "";
   graph.historyState.lastMutationSource = "";
+  graph.historyState.processedMessageHashes = {};
   if (result) {
     graph.historyState.lastRecoveryResult = result;
   }
