@@ -8,7 +8,10 @@ export function registerBeforeCombinePromptsController(runtime, listener) {
   }
 
   runtime.console.warn("[ST-BME] eventMakeFirst 不可用，回退到普通事件注册");
-  runtime.eventSource.on(runtime.eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, listener);
+  runtime.eventSource.on(
+    runtime.eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS,
+    listener,
+  );
   return null;
 }
 
@@ -21,7 +24,10 @@ export function registerGenerationAfterCommandsController(runtime, listener) {
   runtime.console.warn(
     "[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册",
   );
-  runtime.eventSource.on(runtime.eventTypes.GENERATION_AFTER_COMMANDS, listener);
+  runtime.eventSource.on(
+    runtime.eventTypes.GENERATION_AFTER_COMMANDS,
+    listener,
+  );
   return null;
 }
 
@@ -48,7 +54,10 @@ export function installSendIntentHooksController(runtime) {
 
   if (sendButton) {
     const captureSendIntent = () => {
-      runtime.recordRecallSendIntent(runtime.getSendTextareaValue(), "send-button");
+      runtime.recordRecallSendIntent(
+        runtime.getSendTextareaValue(),
+        "send-button",
+      );
     };
 
     sendButton.addEventListener("click", captureSendIntent, true);
@@ -182,25 +191,36 @@ export async function onGenerationAfterCommandsController(
 ) {
   if (dryRun) return;
 
+  const generationType = String(type || "normal").trim() || "normal";
+  const frozenInputSnapshot =
+    generationType === "normal"
+      ? runtime.consumeHostGenerationInputSnapshot?.({ preserve: true }) ||
+        runtime.consumeHostGenerationInputSnapshot?.()
+      : null;
+
   const context = runtime.getContext();
   const chat = context?.chat;
   const recallOptions = runtime.buildGenerationAfterCommandsRecallInput(
     type,
-    params,
+    {
+      ...params,
+      frozenInputSnapshot,
+    },
     chat,
   );
   if (!recallOptions) return;
 
   const recallContext = runtime.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
-    generationType: String(type || "normal").trim() || "normal",
+    generationType,
     recallOptions,
   });
   if (!recallContext.shouldRun) {
     return;
   }
 
-  const runtimeRecallOptions = recallContext.recallOptions || recallOptions || {};
+  const runtimeRecallOptions =
+    recallContext.recallOptions || recallOptions || {};
   runtime.markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
@@ -226,10 +246,17 @@ export async function onGenerationAfterCommandsController(
 }
 
 export async function onBeforeCombinePromptsController(runtime) {
+  const frozenInputSnapshot =
+    runtime.consumeHostGenerationInputSnapshot?.() ||
+    runtime.getPendingHostGenerationInputSnapshot?.() ||
+    runtime.createRecallInputRecord?.() ||
+    {};
   const context = runtime.getContext();
   const chat = context?.chat;
   const recallOptions =
-    runtime.buildNormalGenerationRecallInput(chat) ||
+    runtime.buildNormalGenerationRecallInput(chat, {
+      frozenInputSnapshot,
+    }) ||
     runtime.buildHistoryGenerationRecallInput(chat) ||
     {};
   const recallContext = runtime.createGenerationRecallContext({
@@ -241,7 +268,8 @@ export async function onBeforeCombinePromptsController(runtime) {
     return;
   }
 
-  const runtimeRecallOptions = recallContext.recallOptions || recallOptions || {};
+  const runtimeRecallOptions =
+    recallContext.recallOptions || recallOptions || {};
   runtime.markGenerationRecallTransactionHookState(
     recallContext.transaction,
     recallContext.hookName,
@@ -268,7 +296,8 @@ export function onMessageReceivedController(runtime) {
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const loadState = persistenceState.loadState || "";
   const dbReady =
-    persistenceState.dbReady ?? (loadState === "loaded" || loadState === "empty-confirmed");
+    persistenceState.dbReady ??
+    (loadState === "loaded" || loadState === "empty-confirmed");
   if (
     !dbReady ||
     loadState === "loading" ||

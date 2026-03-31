@@ -446,6 +446,7 @@ let graphPersistenceState = createGraphPersistenceState();
 const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
+let pendingHostGenerationInputSnapshot = createRecallInputRecord();
 let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
@@ -1027,6 +1028,45 @@ function updateLastRecalledItems(nodeIds = []) {
 function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
+  pendingHostGenerationInputSnapshot = createRecallInputRecord();
+}
+
+function freezeHostGenerationInputSnapshot(
+  text,
+  source = "host-generation-lifecycle",
+) {
+  const normalized = normalizeRecallInputText(text);
+  if (!normalized) return null;
+
+  pendingHostGenerationInputSnapshot = createRecallInputRecord({
+    text: normalized,
+    hash: hashRecallInput(normalized),
+    source,
+    at: Date.now(),
+  });
+  return pendingHostGenerationInputSnapshot;
+}
+
+function consumeHostGenerationInputSnapshot(options = {}) {
+  const { preserve = false } = options;
+  if (!isFreshRecallInputRecord(pendingHostGenerationInputSnapshot)) {
+    if (!preserve) {
+      pendingHostGenerationInputSnapshot = createRecallInputRecord();
+    }
+    return createRecallInputRecord();
+  }
+
+  const snapshot = createRecallInputRecord({
+    ...pendingHostGenerationInputSnapshot,
+  });
+  if (!preserve) {
+    pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  }
+  return snapshot;
+}
+
+function getPendingHostGenerationInputSnapshot() {
+  return pendingHostGenerationInputSnapshot;
 }
 
 function recordRecallSendIntent(text, source = "dom-intent") {
@@ -1056,6 +1096,12 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
 
   if (pendingRecallSendIntent.hash && pendingRecallSendIntent.hash === hash) {
     pendingRecallSendIntent = createRecallInputRecord();
+  }
+  if (
+    pendingHostGenerationInputSnapshot.hash &&
+    pendingHostGenerationInputSnapshot.hash === hash
+  ) {
+    pendingHostGenerationInputSnapshot = createRecallInputRecord();
   }
 }
 
@@ -4830,10 +4876,12 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     };
   }
 
-  return buildNormalGenerationRecallInput(chat);
+  return buildNormalGenerationRecallInput(chat, {
+    frozenInputSnapshot: params?.frozenInputSnapshot,
+  });
 }
 
-function buildNormalGenerationRecallInput(chat) {
+function buildNormalGenerationRecallInput(chat, options = {}) {
   const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
   const tailUserText = lastNonSystemMessage?.is_user
     ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
@@ -4841,18 +4889,38 @@ function buildNormalGenerationRecallInput(chat) {
   const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
     generationType: "normal",
   });
+  const frozenInputSnapshot = isFreshRecallInputRecord(
+    options?.frozenInputSnapshot,
+  )
+    ? options.frozenInputSnapshot
+    : null;
+  const hostSnapshotText = normalizeRecallInputText(
+    frozenInputSnapshot?.text || "",
+  );
   const textareaText = normalizeRecallInputText(
     pendingRecallSendIntent.text || getSendTextareaValue(),
   );
-  const userMessage = tailUserText || textareaText;
+  const userMessage = tailUserText || hostSnapshotText || textareaText;
   if (!userMessage) return null;
+
+  let overrideSource = "send-intent";
+  let overrideSourceLabel = "发送意图";
+  if (tailUserText) {
+    overrideSource = "chat-tail-user";
+    overrideSourceLabel = "当前用户楼层";
+  } else if (hostSnapshotText) {
+    overrideSource = String(
+      frozenInputSnapshot?.source || "host-generation-lifecycle",
+    );
+    overrideSourceLabel = "宿主发送快照";
+  }
 
   return {
     overrideUserMessage: userMessage,
     generationType: "normal",
     targetUserMessageIndex,
-    overrideSource: tailUserText ? "chat-tail-user" : "send-intent",
-    overrideSourceLabel: tailUserText ? "当前用户楼层" : "发送意图",
+    overrideSource,
+    overrideSourceLabel,
     includeSyntheticUserMessage: !tailUserText,
   };
 }
@@ -6514,6 +6582,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
     {
       applyFinalRecallInjectionForGeneration,
       buildGenerationAfterCommandsRecallInput,
+      consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       getContext,
       getGenerationRecallHookStateFromResult,
@@ -6531,6 +6600,7 @@ async function onBeforeCombinePrompts() {
     applyFinalRecallInjectionForGeneration,
     buildHistoryGenerationRecallInput,
     buildNormalGenerationRecallInput,
+    consumeHostGenerationInputSnapshot,
     createGenerationRecallContext,
     getContext,
     getGenerationRecallHookStateFromResult,
@@ -6546,6 +6616,7 @@ function onMessageReceived() {
     getContext,
     getCurrentGraph: () => currentGraph,
     getGraphPersistenceState: () => graphPersistenceState,
+    getPendingHostGenerationInputSnapshot,
     getPendingRecallSendIntent: () => pendingRecallSendIntent,
     isAssistantChatMessage,
     isFreshRecallInputRecord,
@@ -6557,6 +6628,9 @@ function onMessageReceived() {
     queueMicrotask,
     runExtraction,
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    setPendingHostGenerationInputSnapshot: (record) => {
+      pendingHostGenerationInputSnapshot = record;
+    },
     setPendingRecallSendIntent: (record) => {
       pendingRecallSendIntent = record;
     },

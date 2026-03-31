@@ -270,6 +270,7 @@ function createGenerationRecallHarness() {
       getCurrentChatId: () => "chat-main",
       normalizeRecallInputText: (text = "") => String(text || "").trim(),
       pendingRecallSendIntent: { text: "", hash: "", at: 0 },
+      pendingHostGenerationInputSnapshot: { text: "", hash: "", at: 0 },
       lastRecallSentUserMessage: { text: "", hash: "", at: 0 },
       getLatestUserChatMessage: (chat = []) =>
         [...chat].reverse().find((message) => message?.is_user) || null,
@@ -341,7 +342,7 @@ function createGenerationRecallHarness() {
     };
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationAfterCommands, onBeforeCombinePrompts, generationRecallTransactions };`,
+      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationAfterCommands, onBeforeCombinePrompts, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot };`,
       context,
       { filename: indexPath },
     );
@@ -2264,6 +2265,40 @@ async function testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBindi
   assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
 }
 
+async function testGenerationRecallHostLifecycleSnapshotSurvivesTextareaClearWithoutDomIntent() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: false, mes: "assistant-tail" }];
+  harness.__sendTextareaValue = "宿主冻结输入";
+
+  const frozenSnapshot = harness.result.freezeHostGenerationInputSnapshot(
+    harness.__sendTextareaValue,
+  );
+  harness.__sendTextareaValue = "";
+
+  await harness.result.onGenerationAfterCommands(
+    "normal",
+    { frozenInputSnapshot: frozenSnapshot },
+    false,
+  );
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATE_BEFORE_COMBINE_PROMPTS",
+  );
+  assert.equal(harness.runRecallCalls[0].overrideUserMessage, "宿主冻结输入");
+  assert.equal(harness.runRecallCalls[0].overrideSourceLabel, "宿主发送快照");
+  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
+  assert.deepEqual(harness.result.getPendingHostGenerationInputSnapshot(), {
+    text: "",
+    hash: "",
+    at: 0,
+    source: "",
+    messageId: null,
+  });
+}
+
 async function testGenerationRecallAfterCommandsStillSkipsWithoutStableUserFloor() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: false, mes: "assistant-tail" }];
@@ -3016,6 +3051,7 @@ await testGenerationRecallHistoryModesUseSameBindingAcrossHooks();
 await testGenerationRecallFrozenBindingSurvivesCrossHookInputDrift();
 await testGenerationRecallSkipsUntilTargetUserFloorAvailable();
 await testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBinding();
+await testGenerationRecallHostLifecycleSnapshotSurvivesTextareaClearWithoutDomIntent();
 await testGenerationRecallAfterCommandsStillSkipsWithoutStableUserFloor();
 await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
 await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
