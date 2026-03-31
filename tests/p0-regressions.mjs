@@ -4,10 +4,31 @@ import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
+import {
+  onBeforeCombinePromptsController,
+  onGenerationAfterCommandsController,
+} from "../event-binding.js";
+import { onRerollController } from "../extraction-controller.js";
+import {
+  GRAPH_LOAD_STATES,
+  GRAPH_METADATA_KEY,
+  GRAPH_PERSISTENCE_META_KEY,
+  MODULE_NAME,
+} from "../graph-persistence.js";
+import {
+  buildPersistedRecallRecord,
+  bumpPersistedRecallGenerationCount,
+  markPersistedRecallManualEdit,
+  readPersistedRecallFromUserMessage,
+  removePersistedRecallFromUserMessage,
+  resolveFinalRecallInjectionSource,
+  resolveGenerationTargetUserMessageIndex,
+  writePersistedRecallToUserMessage,
+} from "../recall-persistence.js";
 import {
   BATCH_STAGE_ORDER,
   BATCH_STAGE_SEVERITY,
-  clampFloat,
   clampInt,
   createBatchStageStatus,
   createBatchStatusSkeleton,
@@ -16,7 +37,6 @@ import {
   createRecallRunResult,
   createUiStatus,
   finalizeBatchStatus,
-  formatRecallContextLine,
   getGenerationRecallHookStateFromResult,
   getRecallHookLabel,
   getStageNoticeDuration,
@@ -30,44 +50,6 @@ import {
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
 } from "../ui-status.js";
-import {
-  cloneRuntimeDebugValue,
-  GRAPH_LOAD_STATES,
-  GRAPH_METADATA_KEY,
-  GRAPH_PERSISTENCE_META_KEY,
-  GRAPH_PERSISTENCE_SESSION_ID,
-  MODULE_NAME,
-  readGraphShadowSnapshot,
-  stampGraphPersistenceMeta,
-  writeChatMetadataPatch,
-  writeGraphShadowSnapshot,
-} from "../graph-persistence.js";
-import {
-  buildExtractionMessages,
-  clampRecoveryStartFloor,
-  getAssistantTurns,
-  getChatIndexForAssistantSeq,
-  getChatIndexForPlayableSeq,
-  getMinExtractableAssistantFloor,
-  isAssistantChatMessage,
-  pruneProcessedMessageHashesFromFloor,
-  rollbackAffectedJournals,
-} from "../chat-history.js";
-import {
-  onBeforeCombinePromptsController,
-  onGenerationAfterCommandsController,
-} from "../event-binding.js";
-import { onRerollController } from "../extraction-controller.js";
-import {
-  buildPersistedRecallRecord,
-  readPersistedRecallFromUserMessage,
-  removePersistedRecallFromUserMessage,
-  resolveFinalRecallInjectionSource,
-  resolveGenerationTargetUserMessageIndex,
-  writePersistedRecallToUserMessage,
-  bumpPersistedRecallGenerationCount,
-  markPersistedRecallManualEdit,
-} from "../recall-persistence.js";
 
 const waitForTick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const extensionsShimSource = [
@@ -332,7 +314,9 @@ function createGenerationRecallHarness() {
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
       readPersistedRecallFromUserMessage: () => null,
-      resolveFinalRecallInjectionSource: ({ freshRecallResult = null } = {}) => ({
+      resolveFinalRecallInjectionSource: ({
+        freshRecallResult = null,
+      } = {}) => ({
         source: freshRecallResult?.didRecall ? "fresh" : "none",
         injectionText: String(freshRecallResult?.injectionText || ""),
         record: null,
@@ -342,11 +326,16 @@ function createGenerationRecallHarness() {
       getSettings: () => ({}),
       triggerChatMetadataSave: () => "debounced",
       refreshPanelLiveState: () => {},
-      resolveGenerationTargetUserMessageIndex: (chat = [], { generationType } = {}) => {
+      resolveGenerationTargetUserMessageIndex: (
+        chat = [],
+        { generationType } = {},
+      ) => {
         const normalized = String(generationType || "normal");
         if (!Array.isArray(chat) || chat.length === 0) return null;
-        if (normalized === "normal") return chat[chat.length - 1]?.is_user ? chat.length - 1 : null;
-        for (let index = chat.length - 1; index >= 0; index--) if (chat[index]?.is_user) return index;
+        if (normalized === "normal")
+          return chat[chat.length - 1]?.is_user ? chat.length - 1 : null;
+        for (let index = chat.length - 1; index >= 0; index--)
+          if (chat[index]?.is_user) return index;
         return null;
       },
     };
@@ -373,8 +362,12 @@ function createGenerationRecallHarness() {
 
 function createRerollHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
-    const rollbackStart = source.indexOf("async function rollbackGraphForReroll(");
-    const rollbackEnd = source.indexOf("async function recoverHistoryIfNeeded(");
+    const rollbackStart = source.indexOf(
+      "async function rollbackGraphForReroll(",
+    );
+    const rollbackEnd = source.indexOf(
+      "async function recoverHistoryIfNeeded(",
+    );
     const rerollStart = source.indexOf("async function onReroll(");
     const rerollEnd = source.indexOf("async function onManualSleep()");
     if (
@@ -387,7 +380,10 @@ function createRerollHarness() {
     ) {
       throw new Error("无法从 index.js 提取 reroll 定义");
     }
-    const snippet = [source.slice(rollbackStart, rollbackEnd), source.slice(rerollStart, rerollEnd)]
+    const snippet = [
+      source.slice(rollbackStart, rollbackEnd),
+      source.slice(rerollStart, rerollEnd),
+    ]
       .join("\n")
       .replace(/^export\s+/gm, "");
     const context = {
@@ -559,7 +555,6 @@ function pushTestOverrides(patch = {}) {
   };
 }
 
-
 class FakeClassList {
   constructor(owner) {
     this.owner = owner;
@@ -567,7 +562,11 @@ class FakeClassList {
   }
 
   setFromString(value = "") {
-    this.tokens = new Set(String(value || "").split(/\s+/).filter(Boolean));
+    this.tokens = new Set(
+      String(value || "")
+        .split(/\s+/)
+        .filter(Boolean),
+    );
   }
 
   add(...tokens) {
@@ -686,7 +685,11 @@ class FakeElement {
     child.parentElement = this;
     child.ownerDocument = this.ownerDocument;
     this.children.push(child);
-    this.ownerDocument?._notifyMutation({ type: "childList", target: this, addedNodes: [child] });
+    this.ownerDocument?._notifyMutation({
+      type: "childList",
+      target: this,
+      addedNodes: [child],
+    });
     return child;
   }
 
@@ -695,7 +698,11 @@ class FakeElement {
     if (index >= 0) {
       this.children.splice(index, 1);
       child.parentElement = null;
-      this.ownerDocument?._notifyMutation({ type: "childList", target: this, removedNodes: [child] });
+      this.ownerDocument?._notifyMutation({
+        type: "childList",
+        target: this,
+        removedNodes: [child],
+      });
     }
     return child;
   }
@@ -785,9 +792,12 @@ class FakeDocument {
     }
     const attrMatches = [...selector.matchAll(/\[([^=\]]+)="([^\]]*)"\]/g)];
     const attrless = selector.replace(/\[[^\]]+\]/g, "");
-    const classMatches = [...attrless.matchAll(/\.([A-Za-z0-9_-]+)/g)].map((m) => m[1]);
+    const classMatches = [...attrless.matchAll(/\.([A-Za-z0-9_-]+)/g)].map(
+      (m) => m[1],
+    );
     const tagMatch = attrless.match(/^[A-Za-z][A-Za-z0-9_-]*/);
-    if (tagMatch && node.tagName.toLowerCase() !== tagMatch[0].toLowerCase()) return false;
+    if (tagMatch && node.tagName.toLowerCase() !== tagMatch[0].toLowerCase())
+      return false;
     for (const className of classMatches) {
       if (!node.classList.contains(className)) return false;
     }
@@ -813,9 +823,15 @@ class FakeDocument {
   }
 
   _querySelectorAll(selector, scopeRoot) {
-    const segments = String(selector || "").trim().split(/\s+/).filter(Boolean);
+    const segments = String(selector || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
     const nodes = this._flatten(scopeRoot);
-    return nodes.filter((node) => node !== scopeRoot && this._matchesSelectorChain(node, segments));
+    return nodes.filter(
+      (node) =>
+        node !== scopeRoot && this._matchesSelectorChain(node, segments),
+    );
   }
 
   _registerObserver(observer) {
@@ -871,7 +887,11 @@ function createDomHarness(chat) {
   return { document, chatRoot, MutationObserver: observerClass, chat };
 }
 
-function createMessageElement(document, messageIndex, { stableId = true, withMesBlock = true, isUser = true } = {}) {
+function createMessageElement(
+  document,
+  messageIndex,
+  { stableId = true, withMesBlock = true, isUser = true } = {},
+) {
   const mes = document.createElement("div");
   mes.classList.add("mes");
   if (stableId) mes.setAttribute("mesid", String(messageIndex));
@@ -896,7 +916,10 @@ function appendLegacyBadge(document, messageElement) {
   return badge;
 }
 
-async function createRecallUiHarness({ chat, graph = { nodes: [], edges: [] } } = {}) {
+async function createRecallUiHarness({
+  chat,
+  graph = { nodes: [], edges: [] },
+} = {}) {
   const harness = createDomHarness(chat);
   const previousDocument = globalThis.document;
   globalThis.document = harness.document;
@@ -935,7 +958,11 @@ async function createRecallUiHarness({ chat, graph = { nodes: [], edges: [] } } 
     getContext: () => ({ chat }),
     getSettings: () => ({ panelTheme: "crimson" }),
     triggerChatMetadataSave: () => "debounced",
-    estimateTokens: (text = "") => String(text || "").trim().split(/\s+/).filter(Boolean).length || 1,
+    estimateTokens: (text = "") =>
+      String(text || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length || 1,
     toastr: {
       success() {},
       warning() {},
@@ -975,18 +1002,38 @@ async function createRecallUiHarness({ chat, graph = { nodes: [], edges: [] } } 
 
 async function testRecallCardMountsOnStandardUserMessageDom() {
   const chat = [
-    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
-  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
   harness.chatRoot.appendChild(messageElement);
 
   try {
     const summary = harness.api.refreshPersistedRecallMessageUi();
     assert.equal(summary.status, "rendered");
     assert.equal(summary.renderedCount, 1);
-    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
-    assert.equal(harness.chatRoot.querySelectorAll(".mes_block .bme-recall-card").length, 1);
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+    );
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".mes_block .bme-recall-card").length,
+      1,
+    );
   } finally {
     harness.restoreGlobals();
   }
@@ -994,17 +1041,34 @@ async function testRecallCardMountsOnStandardUserMessageDom() {
 
 async function testRecallCardSkipsMountWithoutStableMessageIndex() {
   const chat = [
-    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
-  const messageElement = createMessageElement(harness.document, 0, { stableId: false, withMesBlock: true, isUser: true });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: false,
+    withMesBlock: true,
+    isUser: true,
+  });
   harness.chatRoot.appendChild(messageElement);
 
   try {
     const summary = harness.api.refreshPersistedRecallMessageUi();
     assert.equal(summary.status, "waiting_dom");
     assert.deepEqual(Array.from(summary.waitingMessageIndices), [0]);
-    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 0);
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      0,
+    );
   } finally {
     harness.restoreGlobals();
   }
@@ -1012,7 +1076,17 @@ async function testRecallCardSkipsMountWithoutStableMessageIndex() {
 
 async function testRecallCardDelayedDomInsertionEventuallyRenders() {
   const chat = [
-    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
   try {
@@ -1025,15 +1099,26 @@ async function testRecallCardDelayedDomInsertionEventuallyRenders() {
 
     harness.api.schedulePersistedRecallMessageUiRefresh();
     await waitForTick();
-    const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+    const messageElement = createMessageElement(harness.document, 0, {
+      stableId: true,
+      withMesBlock: true,
+      isUser: true,
+    });
     harness.chatRoot.appendChild(messageElement);
     await waitForTick();
     await waitForTick();
     await new Promise((resolve) => setTimeout(resolve, 35));
     await waitForTick();
 
-    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
-    assert.equal(updateCalls, 0, "observer 先触发后不应再被旧 timeout 重复刷新");
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+    );
+    assert.equal(
+      updateCalls,
+      0,
+      "observer 先触发后不应再被旧 timeout 重复刷新",
+    );
   } finally {
     harness.restoreGlobals();
   }
@@ -1041,17 +1126,34 @@ async function testRecallCardDelayedDomInsertionEventuallyRenders() {
 
 async function testRecallCardDoesNotMountOnNonUserFloor() {
   const chat = [
-    { is_user: false, mes: "assistant-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: false,
+      mes: "assistant-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
-  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: false });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: false,
+  });
   harness.chatRoot.appendChild(messageElement);
 
   try {
     const summary = harness.api.refreshPersistedRecallMessageUi();
     assert.equal(summary.status, "skipped_non_user");
     assert.deepEqual(Array.from(summary.skippedNonUserIndices), [0]);
-    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 0);
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      0,
+    );
   } finally {
     harness.restoreGlobals();
   }
@@ -1059,10 +1161,24 @@ async function testRecallCardDoesNotMountOnNonUserFloor() {
 
 async function testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates() {
   const chat = [
-    { is_user: true, mes: "user-0", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1", "n2"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1", "n2"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
-  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
   const staleCard = harness.document.createElement("div");
   staleCard.classList.add("bme-recall-card");
   staleCard.dataset.messageIndex = "999";
@@ -1077,8 +1193,14 @@ async function testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates() {
     harness.api.refreshPersistedRecallMessageUi();
     harness.api.refreshPersistedRecallMessageUi();
 
-    assert.equal(harness.chatRoot.querySelectorAll(".st-bme-recall-badge").length, 0);
-    assert.equal(harness.chatRoot.querySelectorAll(".bme-recall-card").length, 1);
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".st-bme-recall-badge").length,
+      0,
+    );
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+    );
     assert.equal(staleCard.dataset.destroyed, "1");
   } finally {
     harness.restoreGlobals();
@@ -1136,14 +1258,18 @@ async function testRecallCardExpandedContentRerendersAfterRecordUpdate() {
 
     card = harness.chatRoot.querySelector(".bme-recall-card");
     assert.equal(card.dataset.updatedAt, "2026-01-01T00:01:00.000Z");
-    assert.equal(card.querySelector(".bme-recall-count-badge")?.textContent, "记忆 2");
+    assert.equal(
+      card.querySelector(".bme-recall-count-badge")?.textContent,
+      "记忆 2",
+    );
     assert.equal(
       card.querySelector(".bme-recall-token-hint")?.textContent,
       "~13 tokens",
     );
     const metaElements = card.querySelectorAll(".bme-recall-meta");
     const latestMeta = metaElements[metaElements.length - 1] || null;
-    const latestTag = card.querySelectorAll(".bme-recall-meta-tag").pop() || null;
+    const latestTag =
+      card.querySelectorAll(".bme-recall-meta-tag").pop() || null;
     assert.ok(latestMeta?.textContent.includes("来源: after"));
     assert.equal(latestTag?.textContent, "✍ 手动编辑");
     assert.notEqual(card.dataset.expandedRenderSignature, signatureBefore);
@@ -1154,23 +1280,43 @@ async function testRecallCardExpandedContentRerendersAfterRecordUpdate() {
 
 async function testRecallCardUserTextRefreshesWithoutCardRecreate() {
   const chat = [
-    { is_user: true, mes: "before-user", extra: { bme_recall: buildPersistedRecallRecord({ injectionText: "recall-0", selectedNodeIds: ["n1"], nowIso: "2026-01-01T00:00:00.000Z" }) } },
+    {
+      is_user: true,
+      mes: "before-user",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
   ];
   const harness = await createRecallUiHarness({ chat });
-  const messageElement = createMessageElement(harness.document, 0, { stableId: true, withMesBlock: true, isUser: true });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
   harness.chatRoot.appendChild(messageElement);
 
   try {
     harness.api.refreshPersistedRecallMessageUi();
     const firstCard = harness.chatRoot.querySelector(".bme-recall-card");
-    assert.equal(firstCard.querySelector(".bme-recall-user-text")?.textContent, "before-user");
+    assert.equal(
+      firstCard.querySelector(".bme-recall-user-text")?.textContent,
+      "before-user",
+    );
 
     chat[0].mes = "after-user";
     harness.api.refreshPersistedRecallMessageUi();
 
     const secondCard = harness.chatRoot.querySelector(".bme-recall-card");
     assert.equal(secondCard, firstCard);
-    assert.equal(secondCard.querySelector(".bme-recall-user-text")?.textContent, "after-user");
+    assert.equal(
+      secondCard.querySelector(".bme-recall-user-text")?.textContent,
+      "after-user",
+    );
   } finally {
     harness.restoreGlobals();
   }
@@ -2055,8 +2201,15 @@ async function testGenerationRecallHistoryModesUseSameBindingAcrossHooks() {
     await harness.result.onGenerationAfterCommands(generationType, {}, false);
     await harness.result.onBeforeCombinePrompts();
 
-    assert.equal(harness.runRecallCalls.length, 1, `${generationType} 应只执行一次召回`);
-    assert.equal(harness.runRecallCalls[0].hookName, "GENERATION_AFTER_COMMANDS");
+    assert.equal(
+      harness.runRecallCalls.length,
+      1,
+      `${generationType} 应只执行一次召回`,
+    );
+    assert.equal(
+      harness.runRecallCalls[0].hookName,
+      "GENERATION_AFTER_COMMANDS",
+    );
     assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
     assert.equal(harness.runRecallCalls[0].overrideUserMessage, userMessage);
   }
@@ -2138,7 +2291,10 @@ async function testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration(
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
   assert.equal(harness.runRecallCalls.length, 2);
-  assert.equal(harness.runRecallCalls[0].recallKey, harness.runRecallCalls[1].recallKey);
+  assert.equal(
+    harness.runRecallCalls[0].recallKey,
+    harness.runRecallCalls[1].recallKey,
+  );
 }
 
 async function testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow() {
@@ -2146,7 +2302,9 @@ async function testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow() {
   harness.chat = [{ is_user: true, mes: "同 key 重复生成" }];
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = [
+    ...harness.result.generationRecallTransactions.values(),
+  ][0];
   transaction.updatedAt = Date.now() - 5000;
   harness.result.generationRecallTransactions.set(transaction.id, transaction);
   await harness.result.onGenerationAfterCommands("normal", {}, false);
@@ -2199,11 +2357,10 @@ async function testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine() {
   await harness.result.onBeforeCombinePrompts();
 
   assert.equal(harness.runRecallCalls.length, 1);
-  assert.equal(
-    harness.result.generationRecallTransactions.size,
-    1,
-  );
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  assert.equal(harness.result.generationRecallTransactions.size, 1);
+  const transaction = [
+    ...harness.result.generationRecallTransactions.values(),
+  ][0];
   assert.equal(transaction.hookStates.GENERATION_AFTER_COMMANDS, "skipped");
 }
 
@@ -2216,6 +2373,108 @@ async function testGenerationRecallAppliesFinalInjectionOncePerTransaction() {
 
   assert.equal(harness.applyFinalCalls.length, 1);
   assert.equal(harness.applyFinalCalls[0].generationType, "normal");
+}
+
+async function testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable() {
+  const { runRecallController } = await import("../recall-controller.js");
+  const statuses = [];
+  const graph = normalizeGraphRuntimeState(createEmptyGraph(), "chat-main");
+  graph.nodes.push(
+    createNode("event", {
+      title: "旧事件",
+      summary: "来自 runtime graph",
+    }),
+  );
+
+  const runtime = {
+    getIsRecalling: () => false,
+    abortRecallStageWithReason() {},
+    waitForActiveRecallToSettle: async () => ({ settled: true }),
+    getCurrentGraph: () => graph,
+    getSettings: () => ({
+      enabled: true,
+      recallEnabled: true,
+      recallLlmContextMessages: 4,
+    }),
+    isGraphReadable: () => false,
+    isGraphReadableForRecall: () => true,
+    getGraphMutationBlockReason: () => "召回已暂停：正在加载 IndexedDB 图谱。",
+    setLastRecallStatus: (...args) => {
+      statuses.push(args);
+    },
+    isGraphMetadataWriteAllowed: () => false,
+    recoverHistoryIfNeeded: async () => {
+      throw new Error("loading 期间不应触发历史恢复");
+    },
+    getContext: () => ({
+      chat: [{ is_user: true, mes: "发送前输入" }],
+    }),
+    nextRecallRunSequence: () => 1,
+    setIsRecalling() {},
+    beginStageAbortController: () => ({
+      signal: { aborted: false, addEventListener() {} },
+      abort() {},
+    }),
+    createAbortError: (message) => new Error(message),
+    ensureVectorReadyIfNeeded: async () => {},
+    clampInt,
+    resolveRecallInput: () => ({
+      userMessage: "发送前输入",
+      recentMessages: ["[user]: 发送前输入"],
+      source: "send-intent",
+      sourceLabel: "发送意图",
+      generationType: "normal",
+      targetUserMessageIndex: null,
+    }),
+    console,
+    getRecallHookLabel: () => "发送前拦截",
+    retrieve: async ({ graph: passedGraph, userMessage }) => {
+      assert.equal(passedGraph, graph);
+      assert.equal(userMessage, "发送前输入");
+      return {
+        stats: { recallCount: 1, coreCount: 1 },
+        selectedNodeIds: [graph.nodes[0].id],
+        meta: {
+          retrieval: {
+            vectorHits: 1,
+            diffusionHits: 0,
+            llm: { status: "disabled", candidatePool: 0 },
+          },
+        },
+      };
+    },
+    getEmbeddingConfig: () => null,
+    getSchema: () => schema,
+    buildRecallRetrieveOptions: () => ({}),
+    applyRecallInjection: (_settings, recallInput) => ({
+      injectionText: `注入:${recallInput.userMessage}`,
+    }),
+    createRecallInputRecord,
+    createRecallRunResult,
+    isAbortError: () => false,
+    toastr: {
+      warning() {},
+      error() {},
+    },
+    finishStageAbortController() {},
+    getActiveRecallPromise: () => null,
+    setActiveRecallPromise() {},
+    setPendingRecallSendIntent() {},
+    refreshPanelLiveState() {},
+  };
+
+  const result = await runRecallController(runtime, {
+    hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+  });
+
+  assert.equal(result.status, "completed");
+  assert.equal(result.didRecall, true);
+  assert.equal(result.injectionText, "注入:发送前输入");
+  assert.equal(
+    statuses.some(([title]) => title === "等待图谱加载"),
+    false,
+    "runtime graph 可读时不应再被 loading 门禁误判为等待图谱加载",
+  );
 }
 
 async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
@@ -2244,7 +2503,10 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
   assert.equal(loaded.manuallyEdited, false);
 
   chat[2].mes = "u2 edited";
-  assert.equal(readPersistedRecallFromUserMessage(chat, 2)?.injectionText, "fresh-memory");
+  assert.equal(
+    readPersistedRecallFromUserMessage(chat, 2)?.injectionText,
+    "fresh-memory",
+  );
 
   const bumped = bumpPersistedRecallGenerationCount(chat, 2);
   assert.equal(bumped?.generationCount, 1);
@@ -2278,7 +2540,10 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
 
   assert.equal(removePersistedRecallFromUserMessage(chat, 2), true);
   assert.equal(readPersistedRecallFromUserMessage(chat, 2), null);
-  assert.equal(readPersistedRecallFromUserMessage([{ is_user: true, mes: "legacy" }], 0), null);
+  assert.equal(
+    readPersistedRecallFromUserMessage([{ is_user: true, mes: "legacy" }], 0),
+    null,
+  );
 }
 
 async function testPersistentRecallSourceResolutionAndTargetRouting() {
@@ -2289,21 +2554,42 @@ async function testPersistentRecallSourceResolutionAndTargetRouting() {
     { is_user: false, mes: "a3" },
   ];
 
-  assert.equal(resolveGenerationTargetUserMessageIndex(chat, { generationType: "normal" }), null);
-  assert.equal(resolveGenerationTargetUserMessageIndex(chat, { generationType: "continue" }), 2);
+  assert.equal(
+    resolveGenerationTargetUserMessageIndex(chat, { generationType: "normal" }),
+    null,
+  );
+  assert.equal(
+    resolveGenerationTargetUserMessageIndex(chat, {
+      generationType: "continue",
+    }),
+    2,
+  );
 
   const withTailUser = [...chat, { is_user: true, mes: "u4" }];
-  assert.equal(resolveGenerationTargetUserMessageIndex(withTailUser, { generationType: "normal" }), 4);
+  assert.equal(
+    resolveGenerationTargetUserMessageIndex(withTailUser, {
+      generationType: "normal",
+    }),
+    4,
+  );
 
   const freshWins = resolveFinalRecallInjectionSource({
-    freshRecallResult: { status: "completed", didRecall: true, injectionText: "fresh" },
+    freshRecallResult: {
+      status: "completed",
+      didRecall: true,
+      injectionText: "fresh",
+    },
     persistedRecord: { injectionText: "persisted" },
   });
   assert.equal(freshWins.source, "fresh");
   assert.equal(freshWins.injectionText, "fresh");
 
   const fallback = resolveFinalRecallInjectionSource({
-    freshRecallResult: { status: "skipped", didRecall: false, injectionText: "" },
+    freshRecallResult: {
+      status: "skipped",
+      didRecall: false,
+      injectionText: "",
+    },
     persistedRecord: { injectionText: "persisted" },
   });
   assert.equal(fallback.source, "persisted");
@@ -2318,7 +2604,13 @@ async function testRecallSubGraphAndDataLayerEntryPoints() {
     nodes: [
       { id: "n1", type: "character", name: "赵管家", importance: 7 },
       { id: "n2", type: "event", name: "喂食", importance: 5 },
-      { id: "n3", type: "location", name: "厨房", importance: 3, archived: true },
+      {
+        id: "n3",
+        type: "location",
+        name: "厨房",
+        importance: 3,
+        archived: true,
+      },
       { id: "n4", type: "thread", name: "主线", importance: 8 },
     ],
     edges: [
@@ -2344,7 +2636,27 @@ async function testRecallSubGraphAndDataLayerEntryPoints() {
   assert.equal(buildRecallSubGraph(graph, []).nodes.length, 0);
 
   // Data layer: edit and delete still work
-  const chat = [{ is_user: true, mes: "u0", extra: { bme_recall: { version: 1, injectionText: "test", selectedNodeIds: ["n1"], generationCount: 0, manuallyEdited: false, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", recallInput: "u0", recallSource: "test", hookName: "TEST", tokenEstimate: 4 } } }];
+  const chat = [
+    {
+      is_user: true,
+      mes: "u0",
+      extra: {
+        bme_recall: {
+          version: 1,
+          injectionText: "test",
+          selectedNodeIds: ["n1"],
+          generationCount: 0,
+          manuallyEdited: false,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          recallInput: "u0",
+          recallSource: "test",
+          hookName: "TEST",
+          tokenEstimate: 4,
+        },
+      },
+    },
+  ];
   assert.ok(readPersistedRecallFromUserMessage(chat, 0));
   assert.equal(removePersistedRecallFromUserMessage(chat, 0), true);
   assert.equal(readPersistedRecallFromUserMessage(chat, 0), null);
@@ -2416,7 +2728,10 @@ async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   assert.equal(harness.refreshPanelCalls, 2);
   assert.equal(harness.clearInjectionCalls, 1);
   assert.equal(harness.onManualExtractCalls, 1);
-  assert.equal(harness.currentGraph.historyState.processedMessageHashes[3], undefined);
+  assert.equal(
+    harness.currentGraph.historyState.processedMessageHashes[3],
+    undefined,
+  );
   assert.equal(harness.lastExtractedItems.length, 0);
 }
 
@@ -2704,6 +3019,7 @@ await testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBinding();
 await testGenerationRecallAfterCommandsStillSkipsWithoutStableUserFloor();
 await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
 await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
+await testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable();
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();

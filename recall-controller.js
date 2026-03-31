@@ -19,9 +19,8 @@ export function buildRecallRecentMessagesController(
     recentMessages.unshift(runtime.formatRecallContextLine(message));
   }
 
-  const normalizedSynthetic = runtime.normalizeRecallInputText(
-    syntheticUserMessage,
-  );
+  const normalizedSynthetic =
+    runtime.normalizeRecallInputText(syntheticUserMessage);
   if (!normalizedSynthetic) return recentMessages;
 
   const syntheticLine = `[user]: ${normalizedSynthetic}`;
@@ -63,8 +62,12 @@ export function resolveRecallInputController(
     return {
       userMessage: overrideText,
       generationType: String(override?.generationType || "normal"),
-      targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex) ? override.targetUserMessageIndex : null,
-      source: String(override?.source || override?.overrideSource || "override"),
+      targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex)
+        ? override.targetUserMessageIndex
+        : null,
+      source: String(
+        override?.source || override?.overrideSource || "override",
+      ),
       sourceLabel: String(
         override?.sourceLabel || override?.overrideSourceLabel || "发送前拦截",
       ),
@@ -155,7 +158,12 @@ export function applyRecallInjectionController(
     runtime.console.log(
       `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
     );
-    runtime.persistRecallInjectionRecord?.({ recallInput, result, injectionText, tokenEstimate: tokens });
+    runtime.persistRecallInjectionRecord?.({
+      recallInput,
+      result,
+      injectionText,
+      tokenEstimate: tokens,
+    });
   }
 
   const injectionTransport = runtime.applyModuleInjectionPrompt(
@@ -196,7 +204,9 @@ export function applyRecallInjectionController(
       recallInput.sourceLabel,
       `ctx ${recentMessages.length}`,
       `vector ${retrievalMeta.vectorHits ?? 0}`,
-      retrievalMeta.vectorMergedHits ? `merged ${retrievalMeta.vectorMergedHits}` : "",
+      retrievalMeta.vectorMergedHits
+        ? `merged ${retrievalMeta.vectorMergedHits}`
+        : "",
       `diffusion ${retrievalMeta.diffusionHits ?? 0}`,
       retrievalMeta.candidatePoolAfterDpp
         ? `dpp ${retrievalMeta.candidatePoolAfterDpp}`
@@ -259,7 +269,11 @@ export async function runRecallController(runtime, options = {}) {
       reason: "召回功能未启用",
     });
   }
-  if (!runtime.isGraphReadable()) {
+  const isReadableForRecall =
+    typeof runtime.isGraphReadableForRecall === "function"
+      ? runtime.isGraphReadableForRecall()
+      : runtime.isGraphReadable();
+  if (!isReadableForRecall) {
     const reason = runtime.getGraphMutationBlockReason("召回");
     runtime.setLastRecallStatus("等待图谱加载", reason, "warning", {
       syncRuntime: true,
@@ -300,7 +314,8 @@ export async function runRecallController(runtime, options = {}) {
           "abort",
           () =>
             recallController.abort(
-              options.signal.reason || runtime.createAbortError("宿主已终止生成"),
+              options.signal.reason ||
+                runtime.createAbortError("宿主已终止生成"),
             ),
           { once: true },
         );
