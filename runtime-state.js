@@ -41,6 +41,7 @@ export function createDefaultVectorIndexState(chatId = "") {
       pending: 0,
     },
     lastWarning: "",
+    lastIntegrityIssue: null,
   };
 }
 
@@ -132,6 +133,13 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   }
   if (!Number.isFinite(vectorIndexState.pendingRepairFromFloor)) {
     vectorIndexState.pendingRepairFromFloor = null;
+  }
+  if (
+    vectorIndexState.lastIntegrityIssue != null &&
+    (typeof vectorIndexState.lastIntegrityIssue !== "object" ||
+      Array.isArray(vectorIndexState.lastIntegrityIssue))
+  ) {
+    vectorIndexState.lastIntegrityIssue = null;
   }
 
   const previousCollectionId = vectorIndexState.collectionId;
@@ -253,7 +261,12 @@ export function detectHistoryMutation(chat, historyState) {
   }
 
   for (let floor = 0; floor <= lastProcessedAssistantFloor; floor++) {
-    if (!Object.prototype.hasOwnProperty.call(processedMessageHashes, String(floor))) {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        processedMessageHashes,
+        String(floor),
+      )
+    ) {
       return {
         dirty: true,
         earliestAffectedFloor: floor,
@@ -679,6 +692,11 @@ export function buildReverseJournalRecoveryPlan(
   let minProcessedFloor = Number.isFinite(dirtyFromFloor)
     ? dirtyFromFloor
     : null;
+  let invalidJournalReason = "";
+
+  if (!Array.isArray(affectedJournals) || affectedJournals.length === 0) {
+    invalidJournalReason = "affected-journals-empty";
+  }
 
   for (const journal of affectedJournals) {
     const vectorDelta = journal?.vectorDelta || {};
@@ -697,6 +715,13 @@ export function buildReverseJournalRecoveryPlan(
     const range = Array.isArray(journal?.processedRange)
       ? journal.processedRange
       : [-1, -1];
+
+    if (
+      !invalidJournalReason &&
+      (!Number.isFinite(range[0]) || !Number.isFinite(range[1]))
+    ) {
+      invalidJournalReason = "processed-range-missing";
+    }
 
     if (Number.isFinite(range[0])) {
       minProcessedFloor = Number.isFinite(minProcessedFloor)
@@ -751,6 +776,17 @@ export function buildReverseJournalRecoveryPlan(
     pendingRepairFromFloor,
     legacyGapFallback: hasLegacyGap,
     dirtyReason: hasLegacyGap ? "legacy-gap" : "history-recovery-replay",
+    valid:
+      !invalidJournalReason &&
+      Number.isFinite(pendingRepairFromFloor) &&
+      pendingRepairFromFloor >= 0,
+    invalidReason:
+      invalidJournalReason ||
+      (!Number.isFinite(pendingRepairFromFloor)
+        ? "pending-repair-floor-missing"
+        : pendingRepairFromFloor < 0
+          ? "pending-repair-floor-negative"
+          : ""),
   };
 }
 
@@ -758,6 +794,12 @@ export function buildRecoveryResult(status, extra = {}) {
   return {
     status,
     at: Date.now(),
+    debugReason:
+      typeof extra?.debugReason === "string" && extra.debugReason.trim()
+        ? extra.debugReason.trim()
+        : typeof extra?.reason === "string"
+          ? extra.reason
+          : "",
     ...extra,
   };
 }

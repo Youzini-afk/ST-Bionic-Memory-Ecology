@@ -8,6 +8,7 @@ import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
 import {
   onBeforeCombinePromptsController,
   onGenerationAfterCommandsController,
+  registerCoreEventHooksController,
 } from "../event-binding.js";
 import { onRerollController } from "../extraction-controller.js";
 import {
@@ -123,8 +124,14 @@ globalThis.__p0ExtensionSettings = {
 globalThis.__stBmeTestOverrides = {};
 globalThis.require = require;
 
-const { createEmptyGraph, createNode, addNode, createEdge, addEdge } =
-  await import("../graph.js");
+const {
+  createEmptyGraph,
+  createNode,
+  addNode,
+  createEdge,
+  addEdge,
+  removeNode,
+} = await import("../graph.js");
 const { compressType } = await import("../compressor.js");
 const { syncGraphVectorIndex } = await import("../vector-index.js");
 const { extractMemories } = await import("../extractor.js");
@@ -1699,6 +1706,8 @@ async function testReverseJournalRecoveryPlanLegacyFallback() {
   assert.equal(recoveryPlan.legacyGapFallback, true);
   assert.equal(recoveryPlan.dirtyReason, "legacy-gap");
   assert.equal(recoveryPlan.pendingRepairFromFloor, 5);
+  assert.equal(recoveryPlan.valid, true);
+  assert.equal(recoveryPlan.invalidReason, "");
   assert.deepEqual(recoveryPlan.backendDeleteHashes, ["hash_1"]);
   assert.deepEqual(recoveryPlan.replayRequiredNodeIds, []);
 }
@@ -1741,6 +1750,8 @@ async function testReverseJournalRecoveryPlanAggregatesDeletesAndReplay() {
   assert.equal(recoveryPlan.legacyGapFallback, false);
   assert.equal(recoveryPlan.dirtyReason, "history-recovery-replay");
   assert.equal(recoveryPlan.pendingRepairFromFloor, 4);
+  assert.equal(recoveryPlan.valid, true);
+  assert.equal(recoveryPlan.invalidReason, "");
   assert.deepEqual(recoveryPlan.backendDeleteHashes.sort(), [
     "hash_backend",
     "hash_new",
@@ -1956,6 +1967,8 @@ async function testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairS
   assert.equal(recoveryPlan.legacyGapFallback, true);
   assert.equal(recoveryPlan.dirtyReason, "legacy-gap");
   assert.equal(recoveryPlan.pendingRepairFromFloor, 7);
+  assert.equal(recoveryPlan.valid, true);
+  assert.equal(recoveryPlan.invalidReason, "");
   assert.deepEqual(recoveryPlan.replayRequiredNodeIds.sort(), [
     "node-current",
     "node-extra",
@@ -2397,6 +2410,107 @@ async function testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine() {
     ...harness.result.generationRecallTransactions.values(),
   ][0];
   assert.equal(transaction.hookStates.GENERATION_AFTER_COMMANDS, "skipped");
+}
+
+async function testGenerationRecallSentMessageClearsStaleTransactionForSameKey() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "同 key 发送后重开" }];
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(harness.result.generationRecallTransactions.size, 1);
+
+  harness.recordRecallSentUserMessage(0, "同 key 发送后重开");
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  assert.equal(harness.runRecallCalls.length, 2);
+}
+
+async function testRegisterCoreEventHooksIsIdempotent() {
+  const eventRegistrations = [];
+  const makeFirstRegistrations = [];
+  const bindingState = { registered: false, cleanups: [], registeredAt: 0 };
+  const eventSource = {
+    on(eventName, listener) {
+      eventRegistrations.push({ eventName, listener });
+    },
+    off() {},
+  };
+  const runtime = {
+    console: { warn() {} },
+    eventSource,
+    eventTypes: {
+      CHAT_CHANGED: "chat-changed",
+      CHAT_LOADED: "chat-loaded",
+      MESSAGE_SENT: "message-sent",
+      MESSAGE_RECEIVED: "message-received",
+      MESSAGE_DELETED: "message-deleted",
+      MESSAGE_EDITED: "message-edited",
+      MESSAGE_SWIPED: "message-swiped",
+      MESSAGE_UPDATED: "message-updated",
+    },
+    handlers: {
+      onChatChanged() {},
+      onChatLoaded() {},
+      onMessageSent() {},
+      onGenerationAfterCommands() {},
+      onBeforeCombinePrompts() {},
+      onMessageReceived() {},
+      onMessageDeleted() {},
+      onMessageEdited() {},
+      onMessageSwiped() {},
+    },
+    registerGenerationAfterCommands(listener) {
+      makeFirstRegistrations.push({ hook: "after", listener });
+      return () => {};
+    },
+    registerBeforeCombinePrompts(listener) {
+      makeFirstRegistrations.push({ hook: "before", listener });
+      return () => {};
+    },
+    getCoreEventBindingState: () => bindingState,
+    setCoreEventBindingState(nextState) {
+      bindingState.registered = Boolean(nextState?.registered);
+      bindingState.cleanups = Array.isArray(nextState?.cleanups)
+        ? nextState.cleanups
+        : [];
+      bindingState.registeredAt = Number(nextState?.registeredAt) || 0;
+      return bindingState;
+    },
+  };
+
+  registerCoreEventHooksController(runtime);
+  registerCoreEventHooksController(runtime);
+
+  assert.equal(eventRegistrations.length, 8);
+  assert.equal(makeFirstRegistrations.length, 2);
+  assert.equal(bindingState.registered, true);
+}
+
+async function testRemoveNodeHandlesCyclicChildGraph() {
+  const graph = createEmptyGraph();
+  const nodeA = addNode(
+    graph,
+    createNode({ type: "event", fields: { title: "A" }, seq: 0 }),
+  );
+  const nodeB = addNode(
+    graph,
+    createNode({ type: "event", fields: { title: "B" }, seq: 1 }),
+  );
+  nodeA.childIds = [nodeB.id];
+  nodeB.parentId = nodeA.id;
+  nodeB.childIds = [nodeA.id];
+  nodeA.parentId = nodeB.id;
+  addEdge(
+    graph,
+    createEdge({ fromId: nodeA.id, toId: nodeB.id, relation: "cycle" }),
+  );
+
+  const removed = removeNode(graph, nodeA.id);
+
+  assert.equal(removed, true);
+  assert.equal(graph.nodes.length, 0);
+  assert.equal(graph.edges.length, 0);
 }
 
 async function testGenerationRecallAppliesFinalInjectionOncePerTransaction() {
@@ -3059,6 +3173,9 @@ await testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable()
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
+await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
+await testRegisterCoreEventHooksIsIdempotent();
+await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();

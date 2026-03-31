@@ -136,8 +136,13 @@ export function updateNode(graph, nodeId, updates) {
  * @param {string} nodeId
  * @returns {boolean}
  */
-export function removeNode(graph, nodeId) {
-  const node = getNode(graph, nodeId);
+export function removeNode(graph, nodeId, visited = new Set()) {
+  const normalizedNodeId = String(nodeId || "");
+  if (!normalizedNodeId) return false;
+  if (visited.has(normalizedNodeId)) return false;
+  visited.add(normalizedNodeId);
+
+  const node = getNode(graph, normalizedNodeId);
   if (!node) return false;
 
   // 修复时间链表
@@ -150,26 +155,39 @@ export function removeNode(graph, nodeId) {
     if (next) next.prevId = node.prevId;
   }
 
-  // 递归删除子节点
+  // 递归删除子节点（带环保护）
   for (const childId of node.childIds) {
-    removeNode(graph, childId);
+    removeNode(graph, childId, visited);
   }
 
   // 从父节点中移除引用
   if (node.parentId) {
     const parent = getNode(graph, node.parentId);
     if (parent) {
-      parent.childIds = parent.childIds.filter((id) => id !== nodeId);
+      parent.childIds = parent.childIds.filter((id) => id !== normalizedNodeId);
     }
+  }
+
+  // 同时清理其它节点上可能残留的脏 child 引用，避免导入脏图残留环
+  for (const candidate of graph.nodes) {
+    if (
+      !Array.isArray(candidate?.childIds) ||
+      candidate.id === normalizedNodeId
+    ) {
+      continue;
+    }
+    candidate.childIds = candidate.childIds.filter(
+      (id) => id !== normalizedNodeId,
+    );
   }
 
   // 删除相关边
   graph.edges = graph.edges.filter(
-    (e) => e.fromId !== nodeId && e.toId !== nodeId,
+    (e) => e.fromId !== normalizedNodeId && e.toId !== normalizedNodeId,
   );
 
   // 删除节点本身
-  graph.nodes = graph.nodes.filter((n) => n.id !== nodeId);
+  graph.nodes = graph.nodes.filter((n) => n.id !== normalizedNodeId);
 
   return true;
 }
@@ -545,7 +563,9 @@ export function deserializeGraph(json) {
           extractionCount: Number.isFinite(data?.historyState?.extractionCount)
             ? data.historyState.extractionCount
             : 0,
-          lastMutationSource: String(data?.historyState?.lastMutationSource || ""),
+          lastMutationSource: String(
+            data?.historyState?.lastMutationSource || "",
+          ),
         };
         data.batchJournal = Array.isArray(data.batchJournal)
           ? data.batchJournal
@@ -623,7 +643,9 @@ export function exportGraph(graph) {
     historyState: {
       ...createDefaultHistoryState(graph?.historyState?.chatId || ""),
       lastProcessedAssistantFloor:
-        graph?.historyState?.lastProcessedAssistantFloor ?? graph?.lastProcessedSeq ?? -1,
+        graph?.historyState?.lastProcessedAssistantFloor ??
+        graph?.lastProcessedSeq ??
+        -1,
     },
     vectorIndexState: {
       ...createDefaultVectorIndexState(graph?.historyState?.chatId || ""),

@@ -1,5 +1,8 @@
 import { createEmptyGraph, deserializeGraph } from "./graph.js";
-import { buildVectorCollectionId, normalizeGraphRuntimeState } from "./runtime-state.js";
+import {
+  buildVectorCollectionId,
+  normalizeGraphRuntimeState,
+} from "./runtime-state.js";
 
 const DEXIE_LOAD_PROMISE_KEY = "__stBmeDexieLoadPromise";
 const DEXIE_SCRIPT_MARKER = "data-st-bme-dexie";
@@ -16,7 +19,8 @@ export const BME_RUNTIME_HISTORY_META_KEY = "runtimeHistoryState";
 export const BME_RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
 export const BME_RUNTIME_BATCH_JOURNAL_META_KEY = "runtimeBatchJournal";
 export const BME_RUNTIME_LAST_RECALL_META_KEY = "runtimeLastRecallResult";
-export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY = "runtimeLastProcessedSeq";
+export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY =
+  "runtimeLastProcessedSeq";
 export const BME_RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
 
 export const BME_DB_TABLE_SCHEMAS = Object.freeze({
@@ -125,11 +129,15 @@ function sanitizeSnapshot(snapshot = {}) {
   }
 
   const safeMeta =
-    snapshot.meta && typeof snapshot.meta === "object" && !Array.isArray(snapshot.meta)
+    snapshot.meta &&
+    typeof snapshot.meta === "object" &&
+    !Array.isArray(snapshot.meta)
       ? { ...snapshot.meta }
       : {};
   const safeState =
-    snapshot.state && typeof snapshot.state === "object" && !Array.isArray(snapshot.state)
+    snapshot.state &&
+    typeof snapshot.state === "object" &&
+    !Array.isArray(snapshot.state)
       ? { ...snapshot.state }
       : {};
 
@@ -138,13 +146,17 @@ function sanitizeSnapshot(snapshot = {}) {
     state: safeState,
     nodes: toArray(snapshot.nodes).map((item) => ({ ...(item || {}) })),
     edges: toArray(snapshot.edges).map((item) => ({ ...(item || {}) })),
-    tombstones: toArray(snapshot.tombstones).map((item) => ({ ...(item || {}) })),
+    tombstones: toArray(snapshot.tombstones).map((item) => ({
+      ...(item || {}),
+    })),
   };
 }
 
 function normalizeStateSnapshot(snapshot = {}) {
   const state =
-    snapshot?.state && typeof snapshot.state === "object" && !Array.isArray(snapshot.state)
+    snapshot?.state &&
+    typeof snapshot.state === "object" &&
+    !Array.isArray(snapshot.state)
       ? { ...snapshot.state }
       : {};
 
@@ -228,7 +240,10 @@ export function buildSnapshotFromGraph(graph, options = {}) {
   if (!graphInput.historyState || typeof graphInput.historyState !== "object") {
     graphInput.historyState = {};
   }
-  if (!graphInput.vectorIndexState || typeof graphInput.vectorIndexState !== "object") {
+  if (
+    !graphInput.vectorIndexState ||
+    typeof graphInput.vectorIndexState !== "object"
+  ) {
     graphInput.vectorIndexState = {};
   }
   if (chatId) {
@@ -269,7 +284,8 @@ export function buildSnapshotFromGraph(graph, options = {}) {
 
   const tombstones = toArray(options.tombstones ?? baseSnapshot.tombstones)
     .map((record) => {
-      if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+      if (!record || typeof record !== "object" || Array.isArray(record))
+        return null;
       const id = normalizeRecordId(record.id);
       if (!id) return null;
       return {
@@ -290,8 +306,12 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       Number(runtimeGraph?.historyState?.lastProcessedAssistantFloor),
     )
       ? Number(runtimeGraph.historyState.lastProcessedAssistantFloor)
-      : Number(runtimeGraph?.lastProcessedSeq ?? META_DEFAULT_LAST_PROCESSED_FLOOR),
-    extractionCount: Number.isFinite(Number(runtimeGraph?.historyState?.extractionCount))
+      : Number(
+          runtimeGraph?.lastProcessedSeq ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
+        ),
+    extractionCount: Number.isFinite(
+      Number(runtimeGraph?.historyState?.extractionCount),
+    )
       ? Number(runtimeGraph.historyState.extractionCount)
       : META_DEFAULT_EXTRACTION_COUNT,
   };
@@ -301,7 +321,9 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     ...(options.meta || {}),
     schemaVersion: BME_DB_SCHEMA_VERSION,
     chatId,
-    revision: normalizeRevision(options.revision ?? baseSnapshot.meta?.revision),
+    revision: normalizeRevision(
+      options.revision ?? baseSnapshot.meta?.revision,
+    ),
     lastModified: normalizeTimestamp(
       options.lastModified ?? baseSnapshot.meta?.lastModified,
       nowMs,
@@ -309,9 +331,18 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     nodeCount: nodes.length,
     edgeCount: edges.length,
     tombstoneCount: tombstones.length,
-    [BME_RUNTIME_HISTORY_META_KEY]: toPlainData(runtimeGraph?.historyState || {}, {}),
-    [BME_RUNTIME_VECTOR_META_KEY]: toPlainData(runtimeGraph?.vectorIndexState || {}, {}),
-    [BME_RUNTIME_BATCH_JOURNAL_META_KEY]: toPlainData(runtimeGraph?.batchJournal || [], []),
+    [BME_RUNTIME_HISTORY_META_KEY]: toPlainData(
+      runtimeGraph?.historyState || {},
+      {},
+    ),
+    [BME_RUNTIME_VECTOR_META_KEY]: toPlainData(
+      runtimeGraph?.vectorIndexState || {},
+      {},
+    ),
+    [BME_RUNTIME_BATCH_JOURNAL_META_KEY]: toPlainData(
+      runtimeGraph?.batchJournal || [],
+      [],
+    ),
     [BME_RUNTIME_LAST_RECALL_META_KEY]: toPlainData(
       runtimeGraph?.lastRecallResult ?? null,
       null,
@@ -321,7 +352,9 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     )
       ? Number(runtimeGraph.lastProcessedSeq)
       : state.lastProcessedFloor,
-    [BME_RUNTIME_GRAPH_VERSION_META_KEY]: Number.isFinite(Number(runtimeGraph?.version))
+    [BME_RUNTIME_GRAPH_VERSION_META_KEY]: Number.isFinite(
+      Number(runtimeGraph?.version),
+    )
       ? Number(runtimeGraph.version)
       : Number(baseSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY] || 0),
   };
@@ -348,8 +381,12 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(normalizedSnapshot.meta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(normalizedSnapshot.nodes).map((node) => ({ ...(node || {}) }));
-  runtimeGraph.edges = toArray(normalizedSnapshot.edges).map((edge) => ({ ...(edge || {}) }));
+  runtimeGraph.nodes = toArray(normalizedSnapshot.nodes).map((node) => ({
+    ...(node || {}),
+  }));
+  runtimeGraph.edges = toArray(normalizedSnapshot.edges).map((edge) => ({
+    ...(edge || {}),
+  }));
   runtimeGraph.batchJournal = toArray(
     normalizedSnapshot.meta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
   );
@@ -361,17 +398,21 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
     ...(normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
-    lastProcessedAssistantFloor: Number.isFinite(Number(normalizedSnapshot.state?.lastProcessedFloor))
+    lastProcessedAssistantFloor: Number.isFinite(
+      Number(normalizedSnapshot.state?.lastProcessedFloor),
+    )
       ? Number(normalizedSnapshot.state.lastProcessedFloor)
       : Number(
           normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
             ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
-    extractionCount: Number.isFinite(Number(normalizedSnapshot.state?.extractionCount))
+    extractionCount: Number.isFinite(
+      Number(normalizedSnapshot.state?.extractionCount),
+    )
       ? Number(normalizedSnapshot.state.extractionCount)
       : Number(
-          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]?.extractionCount ??
-            META_DEFAULT_EXTRACTION_COUNT,
+          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
+            ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
   runtimeGraph.vectorIndexState = {
@@ -391,7 +432,54 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     ? Number(normalizedSnapshot.meta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
 
-  return normalizeGraphRuntimeState(runtimeGraph, chatId);
+  const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
+  const historyState = normalizedGraph.historyState || {};
+  const vectorState = normalizedGraph.vectorIndexState || {};
+  const resolvedLastProcessedFloor = Number.isFinite(
+    Number(historyState.lastProcessedAssistantFloor),
+  )
+    ? Number(historyState.lastProcessedAssistantFloor)
+    : META_DEFAULT_LAST_PROCESSED_FLOOR;
+  const resolvedLastProcessedSeq = Number.isFinite(
+    Number(normalizedGraph.lastProcessedSeq),
+  )
+    ? Number(normalizedGraph.lastProcessedSeq)
+    : resolvedLastProcessedFloor;
+  const collectionId = String(vectorState.collectionId || "");
+  const expectedCollectionId = buildVectorCollectionId(
+    chatId || historyState.chatId || "",
+  );
+  const inconsistentReasons = [];
+
+  if (
+    Number.isFinite(resolvedLastProcessedFloor) &&
+    Number.isFinite(resolvedLastProcessedSeq) &&
+    resolvedLastProcessedFloor !== resolvedLastProcessedSeq
+  ) {
+    inconsistentReasons.push("last-processed-seq-mismatch");
+  }
+  if (
+    chatId &&
+    historyState.chatId &&
+    String(historyState.chatId) !== String(chatId)
+  ) {
+    inconsistentReasons.push("history-chat-id-mismatch");
+  }
+  if (collectionId && collectionId !== expectedCollectionId) {
+    inconsistentReasons.push("vector-collection-mismatch");
+  }
+
+  if (inconsistentReasons.length > 0) {
+    const error = new Error(
+      `图谱快照完整性校验失败: ${inconsistentReasons.join(", ")}`,
+    );
+    error.code = "BME_SNAPSHOT_INTEGRITY_ERROR";
+    error.reasons = inconsistentReasons;
+    error.snapshotChatId = chatId;
+    throw error;
+  }
+
+  return normalizedGraph;
 }
 
 async function loadDexieFromNodeFallback() {
@@ -417,7 +505,9 @@ async function loadDexieByScriptInjection() {
   }
 
   await new Promise((resolve, reject) => {
-    const existingScript = doc.querySelector?.(`script[${DEXIE_SCRIPT_MARKER}="true"]`);
+    const existingScript = doc.querySelector?.(
+      `script[${DEXIE_SCRIPT_MARKER}="true"]`,
+    );
     if (existingScript) {
       existingScript.addEventListener("load", () => resolve(), { once: true });
       existingScript.addEventListener(
@@ -519,7 +609,9 @@ export class BmeDatabase {
     if (!this._openPromise) {
       this._openPromise = (async () => {
         const DexieCtor =
-          this.options.dexieClass || globalThis.Dexie || (await ensureDexieLoaded());
+          this.options.dexieClass ||
+          globalThis.Dexie ||
+          (await ensureDexieLoaded());
         if (typeof DexieCtor !== "function") {
           throw new Error("Dexie 构造函数不可用");
         }
@@ -588,7 +680,9 @@ export class BmeDatabase {
 
     const db = await this.open();
     const nowMs = Date.now();
-    const entries = Object.entries(record).filter(([key]) => normalizeRecordId(key));
+    const entries = Object.entries(record).filter(([key]) =>
+      normalizeRecordId(key),
+    );
 
     if (!entries.length) {
       return {};
@@ -624,7 +718,12 @@ export class BmeDatabase {
     const nowMs = Date.now();
     await db.transaction("rw", db.table("meta"), async () => {
       await this._setMetaInTx(db, "syncDirty", true, nowMs);
-      await this._setMetaInTx(db, "syncDirtyReason", String(reason || "mutation"), nowMs);
+      await this._setMetaInTx(
+        db,
+        "syncDirtyReason",
+        String(reason || "mutation"),
+        nowMs,
+      );
     });
     return true;
   }
@@ -649,11 +748,20 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-      await db.table("nodes").bulkPut(records);
-      await this._updateCountMetaInTx(db, nowMs);
-      nextRevision = await this._bumpRevisionInTx(db, "bulkUpsertNodes", nowMs);
-      await this._setMetaInTx(db, "syncDirty", true, nowMs);
-      await this._setMetaInTx(db, "syncDirtyReason", "bulkUpsertNodes", nowMs);
+        await db.table("nodes").bulkPut(records);
+        await this._updateCountMetaInTx(db, nowMs);
+        nextRevision = await this._bumpRevisionInTx(
+          db,
+          "bulkUpsertNodes",
+          nowMs,
+        );
+        await this._setMetaInTx(db, "syncDirty", true, nowMs);
+        await this._setMetaInTx(
+          db,
+          "syncDirtyReason",
+          "bulkUpsertNodes",
+          nowMs,
+        );
       },
     );
 
@@ -683,11 +791,20 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-      await db.table("edges").bulkPut(records);
-      await this._updateCountMetaInTx(db, nowMs);
-      nextRevision = await this._bumpRevisionInTx(db, "bulkUpsertEdges", nowMs);
-      await this._setMetaInTx(db, "syncDirty", true, nowMs);
-      await this._setMetaInTx(db, "syncDirtyReason", "bulkUpsertEdges", nowMs);
+        await db.table("edges").bulkPut(records);
+        await this._updateCountMetaInTx(db, nowMs);
+        nextRevision = await this._bumpRevisionInTx(
+          db,
+          "bulkUpsertEdges",
+          nowMs,
+        );
+        await this._setMetaInTx(db, "syncDirty", true, nowMs);
+        await this._setMetaInTx(
+          db,
+          "syncDirtyReason",
+          "bulkUpsertEdges",
+          nowMs,
+        );
       },
     );
 
@@ -717,11 +834,20 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-      await db.table("tombstones").bulkPut(records);
-      await this._updateCountMetaInTx(db, nowMs);
-      nextRevision = await this._bumpRevisionInTx(db, "bulkUpsertTombstones", nowMs);
-      await this._setMetaInTx(db, "syncDirty", true, nowMs);
-      await this._setMetaInTx(db, "syncDirtyReason", "bulkUpsertTombstones", nowMs);
+        await db.table("tombstones").bulkPut(records);
+        await this._updateCountMetaInTx(db, nowMs);
+        nextRevision = await this._bumpRevisionInTx(
+          db,
+          "bulkUpsertTombstones",
+          nowMs,
+        );
+        await this._setMetaInTx(db, "syncDirty", true, nowMs);
+        await this._setMetaInTx(
+          db,
+          "syncDirtyReason",
+          "bulkUpsertTombstones",
+          nowMs,
+        );
       },
     );
 
@@ -739,7 +865,9 @@ export class BmeDatabase {
     let records = await db.table("nodes").toArray();
 
     if (!includeDeleted) {
-      records = records.filter((item) => !Number.isFinite(Number(item?.deletedAt)));
+      records = records.filter(
+        (item) => !Number.isFinite(Number(item?.deletedAt)),
+      );
     }
 
     if (!includeArchived) {
@@ -747,7 +875,9 @@ export class BmeDatabase {
     }
 
     if (typeof options.type === "string" && options.type.trim()) {
-      records = records.filter((item) => String(item?.type || "") === options.type);
+      records = records.filter(
+        (item) => String(item?.type || "") === options.type,
+      );
     }
 
     return this._applyListOptions(records, options);
@@ -760,7 +890,9 @@ export class BmeDatabase {
     let records = await db.table("edges").toArray();
 
     if (!includeDeleted) {
-      records = records.filter((item) => !Number.isFinite(Number(item?.deletedAt)));
+      records = records.filter(
+        (item) => !Number.isFinite(Number(item?.deletedAt)),
+      );
     }
 
     if (typeof options.relation === "string" && options.relation.trim()) {
@@ -777,7 +909,9 @@ export class BmeDatabase {
     let records = await db.table("tombstones").toArray();
 
     if (typeof options.kind === "string" && options.kind.trim()) {
-      records = records.filter((item) => String(item?.kind || "") === options.kind);
+      records = records.filter(
+        (item) => String(item?.kind || "") === options.kind,
+      );
     }
 
     if (typeof options.targetId === "string" && options.targetId.trim()) {
@@ -849,16 +983,23 @@ export class BmeDatabase {
     });
 
     const nodeSourceFloorById = new Map();
-    const nodes = this._normalizeNodeRecords(snapshot.nodes, nowMs).map((node) => {
-      const sourceFloor = deriveNodeSourceFloor(node);
-      nodeSourceFloorById.set(node.id, sourceFloor);
-      return sourceFloor == null ? node : { ...node, sourceFloor };
-    });
-    const edges = this._normalizeEdgeRecords(snapshot.edges, nowMs).map((edge) => {
-      const sourceFloor = deriveEdgeSourceFloor(edge, nodeSourceFloorById);
-      return sourceFloor == null ? edge : { ...edge, sourceFloor };
-    });
-    const tombstones = this._normalizeTombstoneRecords(snapshot.tombstones, nowMs);
+    const nodes = this._normalizeNodeRecords(snapshot.nodes, nowMs).map(
+      (node) => {
+        const sourceFloor = deriveNodeSourceFloor(node);
+        nodeSourceFloorById.set(node.id, sourceFloor);
+        return sourceFloor == null ? node : { ...node, sourceFloor };
+      },
+    );
+    const edges = this._normalizeEdgeRecords(snapshot.edges, nowMs).map(
+      (edge) => {
+        const sourceFloor = deriveEdgeSourceFloor(edge, nodeSourceFloorById);
+        return sourceFloor == null ? edge : { ...edge, sourceFloor };
+      },
+    );
+    const tombstones = this._normalizeTombstoneRecords(
+      snapshot.tombstones,
+      nowMs,
+    );
 
     let migrated = false;
     let skipReason = "";
@@ -882,7 +1023,9 @@ export class BmeDatabase {
         );
         if (migrationCompletedAt > 0) {
           skipReason = "migration-already-completed";
-          nextRevision = normalizeRevision((await db.table("meta").get("revision"))?.value);
+          nextRevision = normalizeRevision(
+            (await db.table("meta").get("revision"))?.value,
+          );
           counts = {
             nodes: await db.table("nodes").count(),
             edges: await db.table("edges").count(),
@@ -897,7 +1040,9 @@ export class BmeDatabase {
         ]);
         if (nodeCount > 0 || edgeCount > 0) {
           skipReason = "indexeddb-not-empty";
-          nextRevision = normalizeRevision((await db.table("meta").get("revision"))?.value);
+          nextRevision = normalizeRevision(
+            (await db.table("meta").get("revision"))?.value,
+          );
           counts = {
             nodes: nodeCount,
             edges: edgeCount,
@@ -953,9 +1098,19 @@ export class BmeDatabase {
         nextRevision = Math.max(currentRevision + 1, requestedRevision, 1);
         await this._setMetaInTx(db, "revision", nextRevision, nowMs);
         await this._setMetaInTx(db, "lastModified", nowMs, nowMs);
-        await this._setMetaInTx(db, "lastMutationReason", "importLegacyGraph", nowMs);
+        await this._setMetaInTx(
+          db,
+          "lastMutationReason",
+          "importLegacyGraph",
+          nowMs,
+        );
         await this._setMetaInTx(db, "syncDirty", true, nowMs);
-        await this._setMetaInTx(db, "syncDirtyReason", "legacy-migration", nowMs);
+        await this._setMetaInTx(
+          db,
+          "syncDirtyReason",
+          "legacy-migration",
+          nowMs,
+        );
 
         migrated = true;
       },
@@ -1043,7 +1198,9 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-        revisionFloor = normalizeRevision((await db.table("meta").get("revision"))?.value);
+        revisionFloor = normalizeRevision(
+          (await db.table("meta").get("revision"))?.value,
+        );
 
         if (mode === "replace") {
           await Promise.all([
@@ -1054,8 +1211,14 @@ export class BmeDatabase {
           ]);
         }
 
-        const nodes = this._normalizeNodeRecords(normalizedSnapshot.nodes, nowMs);
-        const edges = this._normalizeEdgeRecords(normalizedSnapshot.edges, nowMs);
+        const nodes = this._normalizeNodeRecords(
+          normalizedSnapshot.nodes,
+          nowMs,
+        );
+        const edges = this._normalizeEdgeRecords(
+          normalizedSnapshot.edges,
+          nowMs,
+        );
         const tombstones = this._normalizeTombstoneRecords(
           normalizedSnapshot.tombstones,
           nowMs,
@@ -1072,7 +1235,9 @@ export class BmeDatabase {
         }
 
         const metaPatch = {
-          ...(mode === "replace" ? createDefaultMetaValues(this.chatId, nowMs) : {}),
+          ...(mode === "replace"
+            ? createDefaultMetaValues(this.chatId, nowMs)
+            : {}),
           ...normalizedSnapshot.meta,
           ...(normalizedSnapshot.state || {}),
           chatId: this.chatId,
@@ -1092,9 +1257,13 @@ export class BmeDatabase {
           (await db.table("meta").get("revision"))?.value,
         );
         const currentRevision =
-          mode === "replace" ? Math.max(revisionFloor, persistedRevision) : persistedRevision;
+          mode === "replace"
+            ? Math.max(revisionFloor, persistedRevision)
+            : persistedRevision;
 
-        const incomingRevision = normalizeRevision(normalizedSnapshot.meta?.revision);
+        const incomingRevision = normalizeRevision(
+          normalizedSnapshot.meta?.revision,
+        );
         const explicitRevision = normalizeRevision(options.revision);
         const requestedRevision = Number.isFinite(Number(options.revision))
           ? explicitRevision
@@ -1105,7 +1274,12 @@ export class BmeDatabase {
         nextRevision = Math.max(currentRevision + 1, requestedRevision);
         await this._setMetaInTx(db, "revision", nextRevision, nowMs);
         await this._setMetaInTx(db, "lastModified", nowMs, nowMs);
-        await this._setMetaInTx(db, "lastMutationReason", "importSnapshot", nowMs);
+        await this._setMetaInTx(
+          db,
+          "lastMutationReason",
+          "importSnapshot",
+          nowMs,
+        );
 
         await this._setMetaInTx(db, "syncDirty", shouldMarkSyncDirty, nowMs);
         await this._setMetaInTx(db, "syncDirtyReason", "importSnapshot", nowMs);
@@ -1148,7 +1322,12 @@ export class BmeDatabase {
 
         await this._setMetaInTx(db, "revision", nextRevision, nowMs);
         await this._setMetaInTx(db, "chatId", this.chatId, nowMs);
-        await this._setMetaInTx(db, "schemaVersion", BME_DB_SCHEMA_VERSION, nowMs);
+        await this._setMetaInTx(
+          db,
+          "schemaVersion",
+          BME_DB_SCHEMA_VERSION,
+          nowMs,
+        );
         await this._setMetaInTx(db, "nodeCount", 0, nowMs);
         await this._setMetaInTx(db, "edgeCount", 0, nowMs);
         await this._setMetaInTx(db, "tombstoneCount", 0, nowMs);
@@ -1192,32 +1371,32 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-      const staleIds = await db
-        .table("tombstones")
-        .where("deletedAt")
-        .below(cutoffMs)
-        .primaryKeys();
+        const staleIds = await db
+          .table("tombstones")
+          .where("deletedAt")
+          .below(cutoffMs)
+          .primaryKeys();
 
-      if (!staleIds.length) {
-        return;
-      }
+        if (!staleIds.length) {
+          return;
+        }
 
-      await db.table("tombstones").bulkDelete(staleIds);
-      removedCount = staleIds.length;
+        await db.table("tombstones").bulkDelete(staleIds);
+        removedCount = staleIds.length;
 
-      await this._updateCountMetaInTx(db, normalizedNow);
-      nextRevision = await this._bumpRevisionInTx(
-        db,
-        "pruneExpiredTombstones",
-        normalizedNow,
-      );
-      await this._setMetaInTx(db, "syncDirty", true, normalizedNow);
-      await this._setMetaInTx(
-        db,
-        "syncDirtyReason",
-        "pruneExpiredTombstones",
-        normalizedNow,
-      );
+        await this._updateCountMetaInTx(db, normalizedNow);
+        nextRevision = await this._bumpRevisionInTx(
+          db,
+          "pruneExpiredTombstones",
+          normalizedNow,
+        );
+        await this._setMetaInTx(db, "syncDirty", true, normalizedNow);
+        await this._setMetaInTx(
+          db,
+          "syncDirtyReason",
+          "pruneExpiredTombstones",
+          normalizedNow,
+        );
       },
     );
 
@@ -1254,12 +1433,24 @@ export class BmeDatabase {
   }
 
   async _bumpRevisionInTx(db, reason = "mutation", nowMs = Date.now()) {
-    const currentRevision = normalizeRevision((await db.table("meta").get("revision"))?.value);
+    const currentRevision = normalizeRevision(
+      (await db.table("meta").get("revision"))?.value,
+    );
     const nextRevision = currentRevision + 1;
 
     await this._setMetaInTx(db, "revision", nextRevision, nowMs);
-    await this._setMetaInTx(db, "lastModified", normalizeTimestamp(nowMs), nowMs);
-    await this._setMetaInTx(db, "lastMutationReason", String(reason || "mutation"), nowMs);
+    await this._setMetaInTx(
+      db,
+      "lastModified",
+      normalizeTimestamp(nowMs),
+      nowMs,
+    );
+    await this._setMetaInTx(
+      db,
+      "lastMutationReason",
+      String(reason || "mutation"),
+      nowMs,
+    );
 
     return nextRevision;
   }
@@ -1309,7 +1500,8 @@ export class BmeDatabase {
     const nowMs = normalizeTimestamp(fallbackNowMs);
     return toArray(nodes)
       .map((node) => {
-        if (!node || typeof node !== "object" || Array.isArray(node)) return null;
+        if (!node || typeof node !== "object" || Array.isArray(node))
+          return null;
         const id = normalizeRecordId(node.id);
         if (!id) return null;
 
@@ -1326,7 +1518,8 @@ export class BmeDatabase {
     const nowMs = normalizeTimestamp(fallbackNowMs);
     return toArray(edges)
       .map((edge) => {
-        if (!edge || typeof edge !== "object" || Array.isArray(edge)) return null;
+        if (!edge || typeof edge !== "object" || Array.isArray(edge))
+          return null;
         const id = normalizeRecordId(edge.id);
         if (!id) return null;
 
@@ -1345,7 +1538,8 @@ export class BmeDatabase {
     const nowMs = normalizeTimestamp(fallbackNowMs);
     return toArray(tombstones)
       .map((record) => {
-        if (!record || typeof record !== "object" || Array.isArray(record)) return null;
+        if (!record || typeof record !== "object" || Array.isArray(record))
+          return null;
 
         const id = normalizeRecordId(record.id);
         if (!id) return null;

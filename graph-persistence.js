@@ -1,10 +1,7 @@
 // ST-BME: 图谱持久化常量与纯工具函数
 // 不依赖 index.js 模块级可变状态（currentGraph / graphPersistenceState 等）
 
-import {
-  deserializeGraph,
-  serializeGraph,
-} from "./graph.js";
+import { deserializeGraph, serializeGraph } from "./graph.js";
 import { normalizeGraphRuntimeState } from "./runtime-state.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -167,6 +164,9 @@ export function readGraphShadowSnapshot(chatId = "") {
       serializedGraph: snapshot.serializedGraph,
       updatedAt: String(snapshot.updatedAt || ""),
       reason: String(snapshot.reason || ""),
+      integrity: String(snapshot.integrity || ""),
+      persistedChatId: String(snapshot.persistedChatId || ""),
+      debugReason: String(snapshot.debugReason || snapshot.reason || ""),
     };
   } catch {
     return null;
@@ -183,13 +183,14 @@ export function readGraphShadowSnapshot(chatId = "") {
 export function writeGraphShadowSnapshot(
   chatId,
   graph,
-  { revision = 0, reason = "" } = {},
+  { revision = 0, reason = "", integrity = "", debugReason = "" } = {},
 ) {
   const storageKey = getGraphShadowSnapshotStorageKey(chatId);
   if (!storageKey || !graph) return false;
 
   try {
     const serializedGraph = serializeGraph(graph);
+    const persistedMeta = getGraphPersistenceMeta(graph) || {};
     globalThis.sessionStorage?.setItem(
       storageKey,
       JSON.stringify({
@@ -198,6 +199,9 @@ export function writeGraphShadowSnapshot(
         serializedGraph,
         updatedAt: new Date().toISOString(),
         reason: String(reason || ""),
+        integrity: String(integrity || persistedMeta.integrity || ""),
+        persistedChatId: String(persistedMeta.chatId || ""),
+        debugReason: String(debugReason || reason || ""),
       }),
     );
     return true;
@@ -230,9 +234,89 @@ export function cloneGraphForPersistence(graph, chatId = "") {
   );
 }
 
-export function shouldPreferShadowSnapshotOverOfficial(officialGraph, shadowSnapshot) {
-  if (!shadowSnapshot) return false;
+export function shouldPreferShadowSnapshotOverOfficial(
+  officialGraph,
+  shadowSnapshot,
+) {
+  if (!shadowSnapshot) {
+    return {
+      prefer: false,
+      reason: "shadow-missing",
+    };
+  }
+
   const shadowRevision = Number(shadowSnapshot.revision || 0);
   const officialRevision = getGraphPersistedRevision(officialGraph);
-  return shadowRevision > 0 && shadowRevision > officialRevision;
+  const officialMeta = getGraphPersistenceMeta(officialGraph) || {};
+  const normalizedOfficialChatId = String(officialMeta.chatId || "").trim();
+  const normalizedShadowChatId = String(shadowSnapshot.chatId || "").trim();
+  const normalizedShadowPersistedChatId = String(
+    shadowSnapshot.persistedChatId || "",
+  ).trim();
+  const officialIntegrity = String(officialMeta.integrity || "").trim();
+  const shadowIntegrity = String(shadowSnapshot.integrity || "").trim();
+
+  if (shadowRevision <= 0) {
+    return {
+      prefer: false,
+      reason: "shadow-revision-invalid",
+      shadowRevision,
+      officialRevision,
+    };
+  }
+
+  if (
+    normalizedOfficialChatId &&
+    normalizedShadowPersistedChatId &&
+    normalizedOfficialChatId !== normalizedShadowPersistedChatId
+  ) {
+    return {
+      prefer: false,
+      reason: "shadow-persisted-chat-mismatch",
+      shadowRevision,
+      officialRevision,
+      officialChatId: normalizedOfficialChatId,
+      shadowPersistedChatId: normalizedShadowPersistedChatId,
+    };
+  }
+
+  if (
+    normalizedOfficialChatId &&
+    normalizedShadowChatId &&
+    normalizedOfficialChatId !== normalizedShadowChatId
+  ) {
+    return {
+      prefer: false,
+      reason: "shadow-chat-mismatch",
+      shadowRevision,
+      officialRevision,
+      officialChatId: normalizedOfficialChatId,
+      shadowChatId: normalizedShadowChatId,
+    };
+  }
+
+  if (
+    officialIntegrity &&
+    shadowIntegrity &&
+    officialIntegrity !== shadowIntegrity
+  ) {
+    return {
+      prefer: false,
+      reason: "shadow-integrity-mismatch",
+      shadowRevision,
+      officialRevision,
+      officialIntegrity,
+      shadowIntegrity,
+    };
+  }
+
+  return {
+    prefer: shadowRevision > 0 && shadowRevision > officialRevision,
+    reason:
+      shadowRevision > officialRevision
+        ? "shadow-newer-than-official"
+        : "shadow-not-newer-than-official",
+    shadowRevision,
+    officialRevision,
+  };
 }

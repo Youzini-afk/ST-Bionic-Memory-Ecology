@@ -4,34 +4,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
-import {
-  createEmptyGraph,
-  deserializeGraph,
-  getGraphStats,
-  getNode,
-  serializeGraph,
-} from "../graph.js";
-import { normalizeGraphRuntimeState } from "../runtime-state.js";
-import {
-  createUiStatus,
-  createGraphPersistenceState,
-  createRecallInputRecord,
-  createRecallRunResult,
-  normalizeStageNoticeLevel,
-  getStageNoticeTitle,
-  getStageNoticeDuration,
-  normalizeRecallInputText,
-  hashRecallInput,
-  isFreshRecallInputRecord,
-  clampInt,
-  clampFloat,
-  formatRecallContextLine,
-} from "../ui-status.js";
+import { buildGraphFromSnapshot, buildSnapshotFromGraph } from "../bme-db.js";
+import { onMessageReceivedController } from "../event-binding.js";
 import {
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
-  getGraphPersistenceMeta,
   getGraphPersistedRevision,
+  getGraphPersistenceMeta,
   getGraphShadowSnapshotStorageKey,
   GRAPH_LOAD_PENDING_CHAT_ID,
   GRAPH_LOAD_STATES,
@@ -48,8 +27,29 @@ import {
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
 } from "../graph-persistence.js";
-import { onMessageReceivedController } from "../event-binding.js";
-import { buildGraphFromSnapshot, buildSnapshotFromGraph } from "../bme-db.js";
+import {
+  createEmptyGraph,
+  deserializeGraph,
+  getGraphStats,
+  getNode,
+  serializeGraph,
+} from "../graph.js";
+import { normalizeGraphRuntimeState } from "../runtime-state.js";
+import {
+  clampFloat,
+  clampInt,
+  createGraphPersistenceState,
+  createRecallInputRecord,
+  createRecallRunResult,
+  createUiStatus,
+  formatRecallContextLine,
+  getStageNoticeDuration,
+  getStageNoticeTitle,
+  hashRecallInput,
+  isFreshRecallInputRecord,
+  normalizeRecallInputText,
+  normalizeStageNoticeLevel,
+} from "../ui-status.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
@@ -258,35 +258,63 @@ async function createGraphPersistenceHarness({
         const raw = storage.getItem(key);
         if (!raw) return null;
         const snap = JSON.parse(raw);
-        if (!snap || String(snap.chatId || "") !== String(chatId || "") ||
-            typeof snap.serializedGraph !== "string" || !snap.serializedGraph) return null;
+        if (
+          !snap ||
+          String(snap.chatId || "") !== String(chatId || "") ||
+          typeof snap.serializedGraph !== "string" ||
+          !snap.serializedGraph
+        )
+          return null;
         return {
           chatId: String(snap.chatId || ""),
           revision: Number.isFinite(snap.revision) ? snap.revision : 0,
           serializedGraph: snap.serializedGraph,
           updatedAt: String(snap.updatedAt || ""),
           reason: String(snap.reason || ""),
+          integrity: String(snap.integrity || ""),
+          persistedChatId: String(snap.persistedChatId || ""),
+          debugReason: String(snap.debugReason || snap.reason || ""),
         };
-      } catch { return null; }
+      } catch {
+        return null;
+      }
     },
-    writeGraphShadowSnapshot(chatId = "", graph = null, { revision = 0, reason = "" } = {}) {
+    writeGraphShadowSnapshot(
+      chatId = "",
+      graph = null,
+      { revision = 0, reason = "", integrity = "", debugReason = "" } = {},
+    ) {
       const key = getGraphShadowSnapshotStorageKey(chatId);
       if (!key || !graph) return false;
+      const persistedMeta = getGraphPersistenceMeta(graph) || {};
       try {
-        storage.setItem(key, JSON.stringify({
-          chatId: String(chatId || ""),
-          revision: Number.isFinite(revision) ? revision : 0,
-          serializedGraph: serializeGraph(graph),
-          updatedAt: new Date().toISOString(),
-          reason: String(reason || ""),
-        }));
+        storage.setItem(
+          key,
+          JSON.stringify({
+            chatId: String(chatId || ""),
+            revision: Number.isFinite(revision) ? revision : 0,
+            serializedGraph: serializeGraph(graph),
+            updatedAt: new Date().toISOString(),
+            reason: String(reason || ""),
+            integrity: String(integrity || persistedMeta.integrity || ""),
+            persistedChatId: String(persistedMeta.chatId || ""),
+            debugReason: String(debugReason || reason || ""),
+          }),
+        );
         return true;
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     },
     removeGraphShadowSnapshot(chatId = "") {
       const key = getGraphShadowSnapshotStorageKey(chatId);
       if (!key) return false;
-      try { storage.removeItem(key); return true; } catch { return false; }
+      try {
+        storage.removeItem(key);
+        return true;
+      } catch {
+        return false;
+      }
     },
     createDefaultTaskProfiles() {
       return {
@@ -398,8 +426,12 @@ async function createGraphPersistenceHarness({
           },
           async isEmpty() {
             const snapshot = runtimeContext.__indexedDbSnapshot || {};
-            const nodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes.length : 0;
-            const edges = Array.isArray(snapshot?.edges) ? snapshot.edges.length : 0;
+            const nodes = Array.isArray(snapshot?.nodes)
+              ? snapshot.nodes.length
+              : 0;
+            const edges = Array.isArray(snapshot?.edges)
+              ? snapshot.edges.length
+              : 0;
             const tombstones = Array.isArray(snapshot?.tombstones)
               ? snapshot.tombstones.length
               : 0;
@@ -420,7 +452,16 @@ async function createGraphPersistenceHarness({
                 migrationSource: "chat_metadata",
               },
             });
-            return { migrated: true, revision, imported: { nodes: runtimeContext.__indexedDbSnapshot.nodes.length, edges: runtimeContext.__indexedDbSnapshot.edges.length, tombstones: runtimeContext.__indexedDbSnapshot.tombstones.length } };
+            return {
+              migrated: true,
+              revision,
+              imported: {
+                nodes: runtimeContext.__indexedDbSnapshot.nodes.length,
+                edges: runtimeContext.__indexedDbSnapshot.edges.length,
+                tombstones:
+                  runtimeContext.__indexedDbSnapshot.tombstones.length,
+              },
+            };
           },
           async markSyncDirty() {},
         };
@@ -549,10 +590,7 @@ result = {
     "chat-global",
   );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, false);
-  assert.equal(
-    harness.api.getGraphPersistenceLiveState().writesBlocked,
-    true,
-  );
+  assert.equal(harness.api.getGraphPersistenceLiveState().writesBlocked, true);
 }
 
 {
@@ -599,7 +637,10 @@ result = {
   assert.equal(result.loadState, "loading");
   assert.equal(harness.api.getCurrentGraph().historyState.chatId, "chat-late");
   assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
-  assert.equal(harness.api.getGraphPersistenceState().storagePrimary, "indexeddb");
+  assert.equal(
+    harness.api.getGraphPersistenceState().storagePrimary,
+    "indexeddb",
+  );
 }
 
 {
@@ -638,7 +679,10 @@ result = {
 
   assert.equal(result.synced, true);
   assert.equal(result.loadState, "loading");
-  assert.equal(harness.api.getGraphPersistenceState().loadState, "empty-confirmed");
+  assert.equal(
+    harness.api.getGraphPersistenceState().loadState,
+    "empty-confirmed",
+  );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
 }
 
@@ -823,14 +867,20 @@ result = {
     chatId: "chat-late-reconcile",
     chatMetadata: {
       integrity: "chat-late-reconcile-ready",
-      st_bme_graph: createMeaningfulGraph("chat-late-reconcile", "late-official"),
+      st_bme_graph: createMeaningfulGraph(
+        "chat-late-reconcile",
+        "late-official",
+      ),
     },
   });
   harness.api.setIndexedDbSnapshot(
-    buildSnapshotFromGraph(createMeaningfulGraph("chat-late-reconcile", "late-indexeddb"), {
-      chatId: "chat-late-reconcile",
-      revision: 7,
-    }),
+    buildSnapshotFromGraph(
+      createMeaningfulGraph("chat-late-reconcile", "late-indexeddb"),
+      {
+        chatId: "chat-late-reconcile",
+        revision: 7,
+      },
+    ),
   );
 
   harness.api.onMessageReceived();
@@ -854,7 +904,10 @@ result = {
     },
   });
   harness.api.setCurrentGraph(
-    normalizeGraphRuntimeState(createMeaningfulGraph("chat-sync-refresh", "stale-runtime"), "chat-sync-refresh"),
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-sync-refresh", "stale-runtime"),
+      "chat-sync-refresh",
+    ),
   );
   harness.api.setGraphPersistenceState({
     loadState: "loaded",
@@ -866,14 +919,20 @@ result = {
     writesBlocked: false,
   });
   harness.api.setIndexedDbSnapshot(
-    buildSnapshotFromGraph(createMeaningfulGraph("chat-sync-refresh", "fresh-indexeddb"), {
-      chatId: "chat-sync-refresh",
-      revision: 7,
-    }),
+    buildSnapshotFromGraph(
+      createMeaningfulGraph("chat-sync-refresh", "fresh-indexeddb"),
+      {
+        chatId: "chat-sync-refresh",
+        revision: 7,
+      },
+    ),
   );
 
   const runtimeOptions = harness.api.buildBmeSyncRuntimeOptions();
-  await runtimeOptions.onSyncApplied({ chatId: "chat-sync-refresh", action: "download" });
+  await runtimeOptions.onSyncApplied({
+    chatId: "chat-sync-refresh",
+    action: "download",
+  });
 
   assert.equal(
     harness.api.getCurrentGraph().nodes[0]?.fields?.title,
@@ -1043,11 +1102,21 @@ result = {
     chatMetadata: undefined,
     sessionStore: sharedSession,
   });
-  writer.api.writeGraphShadowSnapshot(
-    "chat-shadow-newer",
+  const shadowGraph = stampPersistedGraph(
     createMeaningfulGraph("chat-shadow-newer", "shadow-newer"),
-    { revision: 9, reason: "pagehide-refresh" },
+    {
+      revision: 9,
+      integrity: "integrity-shadow-mismatch",
+      chatId: "chat-shadow-newer",
+      reason: "pagehide-refresh",
+    },
   );
+  writer.api.writeGraphShadowSnapshot("chat-shadow-newer", shadowGraph, {
+    revision: 9,
+    reason: "pagehide-refresh",
+    integrity: "integrity-shadow-mismatch",
+    debugReason: "pagehide-refresh",
+  });
 
   const officialGraph = stampPersistedGraph(
     createMeaningfulGraph("chat-shadow-newer", "official-older"),
@@ -1067,7 +1136,10 @@ result = {
   });
 
   assert.equal(result.loadState, "loading");
-  assert.equal(result.reason, "official-older-than-shadow:metadata-compat-provisional");
+  assert.equal(
+    result.reason,
+    "official-older-than-shadow:metadata-compat-provisional",
+  );
   assert.equal(
     reader.api.getCurrentGraph().nodes[0]?.fields?.title,
     "事件-official-older",
@@ -1083,6 +1155,9 @@ result = {
     "pagehide-refresh",
     "metadata 兼容加载后影子快照可保留，但不作为主链路恢复来源",
   );
+  const live = reader.api.getGraphPersistenceLiveState();
+  assert.equal(live.shadowSnapshotRevision, 9);
+  assert.equal(live.shadowSnapshotReason, "shadow-integrity-mismatch");
 }
 
 {
@@ -1212,7 +1287,10 @@ result = {
       ?.length,
     undefined,
   );
-  assert.equal(reader.runtimeContext.__chatContext.chatMetadata?.integrity, "meta-ready-promote");
+  assert.equal(
+    reader.runtimeContext.__chatContext.chatMetadata?.integrity,
+    "meta-ready-promote",
+  );
   assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 0);
   assert.equal(reader.runtimeContext.__contextSaveCalls, 0);
   assert.equal(live.lastPersistedRevision, 0);
@@ -1603,7 +1681,10 @@ result = {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(harness.api.getCurrentGraph().nodes[0].id, "node-indexeddb");
-  assert.equal(harness.api.getGraphPersistenceState().storagePrimary, "indexeddb");
+  assert.equal(
+    harness.api.getGraphPersistenceState().storagePrimary,
+    "indexeddb",
+  );
 }
 
 {
@@ -1644,9 +1725,15 @@ result = {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.ok(harness.runtimeContext.__syncNowCalls.length >= 1);
-  assert.equal(harness.runtimeContext.__syncNowCalls[0].options.reason, "post-migration");
+  assert.equal(
+    harness.runtimeContext.__syncNowCalls[0].options.reason,
+    "post-migration",
+  );
   assert.equal(harness.api.getCurrentGraph().nodes[0].id, "node-legacy");
-  assert.equal(harness.api.getIndexedDbSnapshot().meta.migrationSource, "chat_metadata");
+  assert.equal(
+    harness.api.getIndexedDbSnapshot().meta.migrationSource,
+    "chat_metadata",
+  );
 }
 
 console.log("graph-persistence tests passed");

@@ -447,6 +447,11 @@ const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
 let pendingHostGenerationInputSnapshot = createRecallInputRecord();
+let coreEventBindingState = {
+  registered: false,
+  cleanups: [],
+  registeredAt: 0,
+};
 let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
 let pendingHistoryRecoveryTimer = null;
@@ -1031,6 +1036,41 @@ function clearRecallInputTracking() {
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
 }
 
+function getCoreEventBindingState() {
+  return coreEventBindingState;
+}
+
+function setCoreEventBindingState(nextState = {}) {
+  coreEventBindingState = {
+    registered: Boolean(nextState?.registered),
+    cleanups: Array.isArray(nextState?.cleanups) ? nextState.cleanups : [],
+    registeredAt: Number(nextState?.registeredAt) || 0,
+  };
+  return coreEventBindingState;
+}
+
+function clearCoreEventBindingState() {
+  const cleanups = Array.isArray(coreEventBindingState?.cleanups)
+    ? coreEventBindingState.cleanups.splice(
+        0,
+        coreEventBindingState.cleanups.length,
+      )
+    : [];
+  for (const cleanup of cleanups) {
+    try {
+      cleanup?.();
+    } catch (error) {
+      console.warn("[ST-BME] 清理核心事件绑定失败:", error);
+    }
+  }
+  coreEventBindingState = {
+    registered: false,
+    cleanups: [],
+    registeredAt: 0,
+  };
+  return coreEventBindingState;
+}
+
 function freezeHostGenerationInputSnapshot(
   text,
   source = "host-generation-lifecycle",
@@ -1071,19 +1111,36 @@ function getPendingHostGenerationInputSnapshot() {
 
 function recordRecallSendIntent(text, source = "dom-intent") {
   const normalized = normalizeRecallInputText(text);
-  if (!normalized) return;
+  if (!normalized) return createRecallInputRecord();
+
+  const hash = hashRecallInput(normalized);
+  const previousRecord = isFreshRecallInputRecord(pendingRecallSendIntent)
+    ? pendingRecallSendIntent
+    : null;
+  const previousHash = String(previousRecord?.hash || "");
+  const previousText = String(previousRecord?.text || "");
+
+  if (previousHash && previousHash === hash && previousText === normalized) {
+    pendingRecallSendIntent = createRecallInputRecord({
+      ...previousRecord,
+      at: Date.now(),
+      source: String(source || previousRecord.source || "dom-intent"),
+    });
+    return pendingRecallSendIntent;
+  }
 
   pendingRecallSendIntent = createRecallInputRecord({
     text: normalized,
-    hash: hashRecallInput(normalized),
+    hash,
     source,
     at: Date.now(),
   });
+  return pendingRecallSendIntent;
 }
 
 function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
   const normalized = normalizeRecallInputText(text);
-  if (!normalized) return;
+  if (!normalized) return createRecallInputRecord();
 
   const hash = hashRecallInput(normalized);
   lastRecallSentUserMessage = createRecallInputRecord({
@@ -1103,6 +1160,13 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
   ) {
     pendingHostGenerationInputSnapshot = createRecallInputRecord();
   }
+
+  const activeChatId = getCurrentChatId();
+  if (activeChatId) {
+    clearGenerationRecallTransactionsForChat(activeChatId);
+  }
+
+  return lastRecallSentUserMessage;
 }
 
 function getMessageRecallRecord(messageIndex) {
@@ -2678,9 +2742,50 @@ function applyIndexedDbSnapshotToRuntime(
     1,
     normalizeIndexedDbRevision(snapshot?.meta?.revision),
   );
-  const graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
-    chatId: normalizedChatId,
-  });
+  let graphFromSnapshot = null;
+  try {
+    graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
+      chatId: normalizedChatId,
+    });
+  } catch (error) {
+    const failureReason =
+      error?.code === "BME_SNAPSHOT_INTEGRITY_ERROR"
+        ? "indexeddb-snapshot-integrity-rejected"
+        : "indexeddb-snapshot-load-failed";
+    updateGraphPersistenceState({
+      storagePrimary: "indexeddb",
+      storageMode: "indexeddb",
+      dbReady: true,
+      indexedDbRevision: revision,
+      indexedDbLastError: error?.message || String(error),
+      dualWriteLastResult: {
+        action: "load",
+        source: String(source || "indexeddb"),
+        success: false,
+        rejected: true,
+        reason: failureReason,
+        revision,
+        at: Date.now(),
+      },
+    });
+    console.warn("[ST-BME] IndexedDB 图谱快照已拒绝加载", {
+      chatId: normalizedChatId,
+      source,
+      revision,
+      reason: failureReason,
+      detail: error?.message || String(error),
+      integrityReasons: Array.isArray(error?.reasons) ? error.reasons : [],
+    });
+    return {
+      success: false,
+      loaded: false,
+      reason: failureReason,
+      detail: error?.message || String(error),
+      integrityReasons: Array.isArray(error?.reasons) ? error.reasons : [],
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
   currentGraph = cloneGraphForPersistence(
     normalizeGraphRuntimeState(graphFromSnapshot, normalizedChatId),
     normalizedChatId,
@@ -2740,6 +2845,8 @@ function applyIndexedDbSnapshotToRuntime(
     dualWriteLastResult: {
       action: "load",
       source: String(source || "indexeddb"),
+      success: true,
+      reason: "indexeddb-loaded",
       revision,
       at: Date.now(),
     },
@@ -4249,10 +4356,29 @@ function loadGraphFromChat(options = {}) {
         normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
         chatId,
       );
+      const shadowSnapshot = readGraphShadowSnapshot(chatId);
+      const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
+        officialGraph,
+        shadowSnapshot,
+      );
       const officialRevision = Math.max(
         1,
         getGraphPersistedRevision(officialGraph),
       );
+
+      if (shadowSnapshot && shadowDecision?.reason) {
+        updateGraphPersistenceState({
+          dualWriteLastResult: {
+            action: "shadow-compare",
+            source: `${source}:metadata-shadow-compare`,
+            success: Boolean(shadowDecision.prefer),
+            reason: shadowDecision.reason,
+            shadowRevision: Number(shadowSnapshot.revision || 0),
+            officialRevision,
+            at: Date.now(),
+          },
+        });
+      }
 
       clearPendingGraphLoadRetry();
       currentGraph = officialGraph;
@@ -4295,9 +4421,11 @@ function loadGraphFromChat(options = {}) {
         queuedPersistChatId: "",
         pendingPersist: false,
         shadowSnapshotUsed: false,
-        shadowSnapshotRevision: 0,
-        shadowSnapshotUpdatedAt: "",
-        shadowSnapshotReason: "",
+        shadowSnapshotRevision: Number(shadowSnapshot?.revision || 0),
+        shadowSnapshotUpdatedAt: String(shadowSnapshot?.updatedAt || ""),
+        shadowSnapshotReason: String(
+          shadowDecision?.reason || shadowSnapshot?.reason || "",
+        ),
         dbReady: false,
         writesBlocked: true,
       });
@@ -5313,6 +5441,7 @@ function createGenerationRecallContext({
       transaction: null,
       recallOptions: null,
       shouldRun: false,
+      guardReason: "missing-frozen-recall-options",
     };
   }
 
@@ -5326,6 +5455,18 @@ function createGenerationRecallContext({
       chatId: normalizedChatId,
       userMessage: frozenRecallOptions.overrideUserMessage,
     });
+
+  if (!normalizedChatId || !String(fallbackRecallKey || "").trim()) {
+    return {
+      hookName,
+      generationType: transactionGenerationType,
+      recallKey: "",
+      transaction: null,
+      recallOptions: null,
+      shouldRun: false,
+      guardReason: !normalizedChatId ? "missing-chat-id" : "missing-recall-key",
+    };
+  }
 
   const now = Date.now();
   const recentTransaction = findRecentGenerationRecallTransactionForChat(
@@ -5352,11 +5493,32 @@ function createGenerationRecallContext({
   if (!transaction) {
     return {
       hookName,
-      generationType,
+      generationType: transactionGenerationType,
       recallKey: "",
       transaction: null,
       recallOptions: null,
       shouldRun: false,
+      guardReason: "transaction-unavailable",
+    };
+  }
+
+  const normalizedTransactionChatId = normalizeChatIdCandidate(
+    transaction.chatId,
+  );
+  const transactionRecallKey = String(transaction.recallKey || "").trim();
+  if (
+    normalizedTransactionChatId !== normalizedChatId ||
+    !transactionRecallKey ||
+    transactionRecallKey !== String(fallbackRecallKey)
+  ) {
+    return {
+      hookName,
+      generationType: transactionGenerationType,
+      recallKey: String(fallbackRecallKey || ""),
+      transaction,
+      recallOptions: null,
+      shouldRun: false,
+      guardReason: "transaction-mismatch",
     };
   }
 
@@ -5367,9 +5529,6 @@ function createGenerationRecallContext({
     transaction.frozenRecallOptions = {
       ...frozenRecallOptions,
     };
-  }
-  if (!String(transaction.recallKey || "").trim()) {
-    transaction.recallKey = fallbackRecallKey;
   }
   if (!String(transaction.generationType || "").trim()) {
     transaction.generationType = transactionGenerationType;
@@ -5384,7 +5543,7 @@ function createGenerationRecallContext({
       transaction.frozenRecallOptions?.generationType || generationType,
   };
 
-  const recallKey = String(transaction.recallKey || fallbackRecallKey || "");
+  const recallKey = transactionRecallKey;
   const shouldRun = shouldRunRecallForTransaction(transaction, hookName);
 
   return {
@@ -5394,6 +5553,7 @@ function createGenerationRecallContext({
     transaction,
     recallOptions: boundRecallOptions,
     shouldRun,
+    guardReason: shouldRun ? "" : "transaction-not-runnable",
   };
 }
 
@@ -5944,21 +6104,35 @@ function applyRecoveryPlanToVectorState(
     if (nodeId) replayRequiredNodeIds.add(nodeId);
   }
 
+  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
+    ? dirtyFallbackFloor
+    : currentGraph.historyState?.historyDirtyFrom;
+  const pendingRepairFromFloor = Number.isFinite(
+    recoveryPlan?.pendingRepairFromFloor,
+  )
+    ? recoveryPlan.pendingRepairFromFloor
+    : Number.isFinite(fallbackFloor)
+      ? fallbackFloor
+      : null;
+
   vectorState.replayRequiredNodeIds = [...replayRequiredNodeIds];
   vectorState.dirty = true;
   vectorState.dirtyReason =
     recoveryPlan?.dirtyReason ||
     vectorState.dirtyReason ||
     "history-recovery-replay";
-  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
-    ? dirtyFallbackFloor
-    : currentGraph.historyState?.historyDirtyFrom;
-  vectorState.pendingRepairFromFloor = Number.isFinite(
-    recoveryPlan?.pendingRepairFromFloor,
-  )
-    ? recoveryPlan.pendingRepairFromFloor
-    : Number.isFinite(fallbackFloor)
-      ? fallbackFloor
+  vectorState.pendingRepairFromFloor = pendingRepairFromFloor;
+  vectorState.lastIntegrityIssue =
+    recoveryPlan?.valid === false
+      ? {
+          scope: "history-recovery-plan",
+          reason: String(recoveryPlan.invalidReason || "invalid-recovery-plan"),
+          dirtyFallbackFloor: Number.isFinite(fallbackFloor)
+            ? fallbackFloor
+            : null,
+          pendingRepairFromFloor,
+          at: Date.now(),
+        }
       : null;
   vectorState.lastWarning = recoveryPlan?.legacyGapFallback
     ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
@@ -5996,6 +6170,18 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       recoveryPoint.affectedJournals,
       targetFloor,
     );
+    if (recoveryPlan?.valid === false) {
+      return {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: targetFloor,
+        effectiveFromFloor: null,
+        recoveryPath: "reverse-journal-rejected",
+        affectedBatchCount,
+        error: `回滚计划完整性校验失败: ${recoveryPlan.invalidReason || "unknown"}`,
+      };
+    }
     rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
     currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
     extractionCount = currentGraph.historyState.extractionCount || 0;
@@ -6131,6 +6317,13 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         recoveryPoint.affectedJournals,
         initialDirtyFrom,
       );
+      if (recoveryPlan?.valid === false) {
+        throw new Error(
+          `reverse-journal recovery plan invalid: ${
+            recoveryPlan.invalidReason || "unknown"
+          }`,
+        );
+      }
       rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
       currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
       extractionCount = currentGraph.historyState.extractionCount || 0;
@@ -6466,6 +6659,7 @@ async function runRecall(options = {}) {
 function onChatChanged() {
   const result = onChatChangedController({
     abortAllRunningStages,
+    clearCoreEventBindingState,
     clearGenerationRecallTransactionsForChat,
     clearInjectionState,
     clearPendingGraphLoadRetry,
@@ -6914,8 +7108,10 @@ async function onReembedDirect() {
 
   // 注册事件钩子
   registerCoreEventHooksController({
+    console,
     eventSource,
     eventTypes: event_types,
+    getCoreEventBindingState,
     handlers: {
       onBeforeCombinePrompts,
       onChatChanged,
@@ -6929,6 +7125,7 @@ async function onReembedDirect() {
     },
     registerBeforeCombinePrompts,
     registerGenerationAfterCommands,
+    setCoreEventBindingState,
   });
 
   // 加载当前聊天的图谱

@@ -96,28 +96,65 @@ export function installSendIntentHooksController(runtime) {
 
 export function registerCoreEventHooksController(runtime) {
   const { eventSource, eventTypes, handlers } = runtime;
+  const registrationState = runtime.getCoreEventBindingState?.() || {};
 
-  eventSource.on(eventTypes.CHAT_CHANGED, handlers.onChatChanged);
+  if (registrationState.registered) {
+    runtime.console?.warn?.("[ST-BME] 核心事件已注册，跳过重复绑定");
+    return registrationState;
+  }
+
+  const cleanups = [];
+  const bind = (eventName, listener) => {
+    if (!eventName || typeof listener !== "function") return;
+    eventSource.on(eventName, listener);
+    if (typeof eventSource.off === "function") {
+      cleanups.push(() => eventSource.off(eventName, listener));
+    } else if (typeof eventSource.removeListener === "function") {
+      cleanups.push(() => eventSource.removeListener(eventName, listener));
+    }
+  };
+
+  bind(eventTypes.CHAT_CHANGED, handlers.onChatChanged);
   if (eventTypes.CHAT_LOADED) {
-    eventSource.on(eventTypes.CHAT_LOADED, handlers.onChatLoaded);
+    bind(eventTypes.CHAT_LOADED, handlers.onChatLoaded);
   }
   if (eventTypes.MESSAGE_SENT) {
-    eventSource.on(eventTypes.MESSAGE_SENT, handlers.onMessageSent);
+    bind(eventTypes.MESSAGE_SENT, handlers.onMessageSent);
   }
 
-  runtime.registerGenerationAfterCommands(handlers.onGenerationAfterCommands);
-  runtime.registerBeforeCombinePrompts(handlers.onBeforeCombinePrompts);
+  const beforeCombineCleanup = runtime.registerBeforeCombinePrompts(
+    handlers.onBeforeCombinePrompts,
+  );
+  if (typeof beforeCombineCleanup === "function") {
+    cleanups.push(beforeCombineCleanup);
+  }
 
-  eventSource.on(eventTypes.MESSAGE_RECEIVED, handlers.onMessageReceived);
-  eventSource.on(eventTypes.MESSAGE_DELETED, handlers.onMessageDeleted);
-  eventSource.on(eventTypes.MESSAGE_EDITED, handlers.onMessageEdited);
-  eventSource.on(eventTypes.MESSAGE_SWIPED, handlers.onMessageSwiped);
+  const afterCommandsCleanup = runtime.registerGenerationAfterCommands(
+    handlers.onGenerationAfterCommands,
+  );
+  if (typeof afterCommandsCleanup === "function") {
+    cleanups.push(afterCommandsCleanup);
+  }
+
+  bind(eventTypes.MESSAGE_RECEIVED, handlers.onMessageReceived);
+  bind(eventTypes.MESSAGE_DELETED, handlers.onMessageDeleted);
+  bind(eventTypes.MESSAGE_EDITED, handlers.onMessageEdited);
+  bind(eventTypes.MESSAGE_SWIPED, handlers.onMessageSwiped);
   if (eventTypes.MESSAGE_UPDATED) {
-    eventSource.on(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
+    bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
   }
+
+  const nextState = {
+    registered: true,
+    cleanups,
+    registeredAt: Date.now(),
+  };
+  runtime.setCoreEventBindingState?.(nextState);
+  return nextState;
 }
 
 export function onChatChangedController(runtime) {
+  runtime.clearCoreEventBindingState?.();
   runtime.clearPendingHistoryMutationChecks();
   runtime.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
   runtime.setPendingHistoryRecoveryTimer(null);
