@@ -5251,14 +5251,15 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
   const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
     generationType,
   });
-  if (!Number.isFinite(targetUserMessageIndex)) {
-    return {
-      generationType,
-      targetUserMessageIndex: null,
-    };
-  }
 
+  // 对于 history 类型（continue/regenerate/swipe），必须有 chat 中的用户消息
   if (generationType !== "normal") {
+    if (!Number.isFinite(targetUserMessageIndex)) {
+      return {
+        generationType,
+        targetUserMessageIndex: null,
+      };
+    }
     const historyInput = buildHistoryGenerationRecallInput(chat);
     if (!historyInput) {
       return {
@@ -5273,6 +5274,17 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     };
   }
 
+  // 对于 normal 类型：GENERATION_AFTER_COMMANDS 触发时用户消息可能不在 chat 末尾
+  // （ST 可能已追加空 assistant 消息）。如果 chat 中存在任何用户消息，
+  // 继续走 buildNormalGenerationRecallInput，它会通过 latestUserText 兜底找到。
+  // 如果 chat 中完全没有用户消息，则延迟到 BEFORE_COMBINE_PROMPTS 处理。
+  if (!Number.isFinite(targetUserMessageIndex) && !getLatestUserChatMessage(chat)) {
+    return {
+      generationType,
+      targetUserMessageIndex: null,
+    };
+  }
+
   return buildNormalGenerationRecallInput(chat, {
     frozenInputSnapshot: params?.frozenInputSnapshot,
   });
@@ -5282,6 +5294,13 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
   const lastNonSystemMessage = getLastNonSystemChatMessage(chat);
   const tailUserText = lastNonSystemMessage?.is_user
     ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
+    : "";
+  // 当 GENERATION_AFTER_COMMANDS 触发时，ST 可能已追加了空 assistant 消息，
+  // 导致 lastNonSystemMessage 不是 user。用 getLatestUserChatMessage 反向扫描
+  // 定位真正的用户消息（与 shujuku 参考实现一致）。
+  const latestUserMessage = !tailUserText ? getLatestUserChatMessage(chat) : null;
+  const latestUserText = latestUserMessage
+    ? normalizeRecallInputText(latestUserMessage?.mes || "")
     : "";
   const targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
     generationType: "normal",
@@ -5337,6 +5356,18 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
             sendIntentText || hostSnapshotText
               ? "chat-tail-deprioritized"
               : "chat-tail-fallback",
+          includeSyntheticUserMessage: false,
+        }
+      : null,
+    latestUserText
+      ? {
+          text: latestUserText,
+          source: "chat-latest-user",
+          sourceLabel: "最近用户消息",
+          reason:
+            sendIntentText || hostSnapshotText || tailUserText
+              ? "latest-user-deprioritized"
+              : "latest-user-fallback",
           includeSyntheticUserMessage: false,
         }
       : null,
