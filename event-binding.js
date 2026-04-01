@@ -17,17 +17,22 @@ export function registerBeforeCombinePromptsController(runtime, listener) {
 
 export function registerGenerationAfterCommandsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
+  const eventName = runtime.eventTypes.GENERATION_AFTER_COMMANDS;
+  console.warn("[ST-BME:DIAG] Registering GENERATION_AFTER_COMMANDS:", {
+    eventName,
+    hasMakeFirst: typeof makeFirst === "function",
+    hasListener: typeof listener === "function",
+  });
   if (typeof makeFirst === "function") {
-    return makeFirst(runtime.eventTypes.GENERATION_AFTER_COMMANDS, listener);
+    const cleanup = makeFirst(eventName, listener);
+    console.warn("[ST-BME:DIAG] Registered via makeFirst, cleanup:", typeof cleanup);
+    return cleanup;
   }
 
   runtime.console.warn(
     "[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册",
   );
-  runtime.eventSource.on(
-    runtime.eventTypes.GENERATION_AFTER_COMMANDS,
-    listener,
-  );
+  runtime.eventSource.on(eventName, listener);
   return null;
 }
 
@@ -263,7 +268,11 @@ export async function onGenerationAfterCommandsController(
   params = {},
   dryRun = false,
 ) {
-  if (dryRun) return;
+  console.warn("[ST-BME:DIAG] GENERATION_AFTER_COMMANDS fired", { type, dryRun, paramsKeys: Object.keys(params || {}) });
+  if (dryRun) {
+    console.warn("[ST-BME:DIAG] EXIT: dryRun=true");
+    return;
+  }
 
   const generationType = String(type || "normal").trim() || "normal";
   const frozenInputSnapshot =
@@ -271,9 +280,12 @@ export async function onGenerationAfterCommandsController(
       ? runtime.consumeHostGenerationInputSnapshot?.({ preserve: true }) ||
         runtime.consumeHostGenerationInputSnapshot?.()
       : null;
+  console.warn("[ST-BME:DIAG] frozenInputSnapshot:", frozenInputSnapshot?.text ? `"${frozenInputSnapshot.text.slice(0,50)}"` : "(empty)", "fresh:", !!frozenInputSnapshot?.at);
 
   const context = runtime.getContext();
   const chat = context?.chat;
+  console.warn("[ST-BME:DIAG] chat length:", chat?.length, "last msg:", chat?.length ? { is_user: chat[chat.length-1]?.is_user, mes: (chat[chat.length-1]?.mes||"").slice(0,50) } : "(no chat)");
+
   const recallOptions = runtime.buildGenerationAfterCommandsRecallInput(
     type,
     {
@@ -282,7 +294,11 @@ export async function onGenerationAfterCommandsController(
     },
     chat,
   );
-  if (!recallOptions) return;
+  if (!recallOptions) {
+    console.warn("[ST-BME:DIAG] EXIT: buildGenerationAfterCommandsRecallInput returned null");
+    return;
+  }
+  console.warn("[ST-BME:DIAG] recallOptions:", { generationType: recallOptions.generationType, overrideUserMessage: recallOptions.overrideUserMessage?.slice(0,50), overrideSource: recallOptions.overrideSource, targetIdx: recallOptions.targetUserMessageIndex });
 
   const recallContext = runtime.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
@@ -290,8 +306,10 @@ export async function onGenerationAfterCommandsController(
     recallOptions,
   });
   if (!recallContext.shouldRun && !recallContext.transaction) {
+    console.warn("[ST-BME:DIAG] EXIT: shouldRun=false, no transaction. guardReason:", recallContext.guardReason);
     return;
   }
+  console.warn("[ST-BME:DIAG] recallContext:", { shouldRun: recallContext.shouldRun, guardReason: recallContext.guardReason, transactionId: recallContext.transaction?.id });
 
   const runtimeRecallOptions =
     recallContext.recallOptions || recallOptions || {};
@@ -304,6 +322,7 @@ export async function onGenerationAfterCommandsController(
   let recallResult = runtime.getGenerationRecallTransactionResult?.(
     recallContext.transaction,
   );
+  console.warn("[ST-BME:DIAG] deliveryMode:", deliveryMode, "shouldRun:", recallContext.shouldRun);
 
   if (recallContext.shouldRun) {
     runtime.markGenerationRecallTransactionHookState(
@@ -314,6 +333,7 @@ export async function onGenerationAfterCommandsController(
     if (deliveryMode === "deferred") {
       runtime.clearLiveRecallInjectionPromptForRewrite?.();
     }
+    console.warn("[ST-BME:DIAG] >>> Starting runRecall...");
     recallResult = await runtime.runRecall({
       ...runtimeRecallOptions,
       deliveryMode,
@@ -321,6 +341,7 @@ export async function onGenerationAfterCommandsController(
       hookName: recallContext.hookName,
       signal: params?.signal,
     });
+    console.warn("[ST-BME:DIAG] <<< runRecall finished:", { status: recallResult?.status, ok: recallResult?.ok, reason: recallResult?.reason, injectionText: recallResult?.injectionText?.slice(0,80) });
     runtime.storeGenerationRecallTransactionResult?.(
       recallContext.transaction,
       recallResult,
@@ -342,6 +363,7 @@ export async function onGenerationAfterCommandsController(
   // 后续 GENERATE_BEFORE_COMBINE_PROMPTS 阶段会通过
   // applyFinalRecallInjectionForGeneration 做 deferred rewrite 兜底。
   if (deliveryMode === "immediate") {
+    console.warn("[ST-BME:DIAG] DONE: immediate mode, injection via setExtensionPrompt in runRecall");
     return recallResult;
   }
 
