@@ -287,10 +287,12 @@ export function applyRecallInjectionController(
 }
 
 export async function runRecallController(runtime, options = {}) {
+  console.warn("[ST-BME:DIAG:RECALL] runRecallController entered");
   if (runtime.getIsRecalling()) {
     runtime.abortRecallStageWithReason("旧召回已取消，正在启动新的召回");
     const settle = await runtime.waitForActiveRecallToSettle();
     if (!settle.settled && runtime.getIsRecalling()) {
+      console.warn("[ST-BME:DIAG:RECALL] EXIT: 上一轮召回仍在清理");
       runtime.setLastRecallStatus(
         "召回忙",
         "上一轮召回仍在清理，请稍后重试",
@@ -305,14 +307,19 @@ export async function runRecallController(runtime, options = {}) {
     }
   }
 
-  if (!runtime.getCurrentGraph()) {
+  const hasGraph = !!runtime.getCurrentGraph();
+  console.warn("[ST-BME:DIAG:RECALL] hasGraph:", hasGraph);
+  if (!hasGraph) {
+    console.warn("[ST-BME:DIAG:RECALL] EXIT: 当前无图谱");
     return runtime.createRecallRunResult("skipped", {
       reason: "当前无图谱",
     });
   }
 
   const settings = runtime.getSettings();
+  console.warn("[ST-BME:DIAG:RECALL] settings.enabled:", settings.enabled, "recallEnabled:", settings.recallEnabled);
   if (!settings.enabled || !settings.recallEnabled) {
+    console.warn("[ST-BME:DIAG:RECALL] EXIT: 召回功能未启用");
     return runtime.createRecallRunResult("skipped", {
       reason: "召回功能未启用",
     });
@@ -321,8 +328,12 @@ export async function runRecallController(runtime, options = {}) {
     typeof runtime.isGraphReadableForRecall === "function"
       ? runtime.isGraphReadableForRecall()
       : runtime.isGraphReadable();
+  const chatId = typeof runtime.getCurrentChatId === "function" ? runtime.getCurrentChatId() : "(no fn)";
+  const loadState = runtime.getGraphPersistenceLoadState?.() || "(no fn)";
+  console.warn("[ST-BME:DIAG:RECALL] isReadableForRecall:", isReadableForRecall, "chatId:", chatId, "loadState:", loadState);
   if (!isReadableForRecall) {
     const reason = runtime.getGraphMutationBlockReason("召回");
+    console.warn("[ST-BME:DIAG:RECALL] EXIT: 图谱不可读 -", reason);
     runtime.setLastRecallStatus("等待图谱加载", reason, "warning", {
       syncRuntime: true,
     });
