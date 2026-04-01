@@ -630,11 +630,16 @@ function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   const runtimeChatId = normalizeChatIdCandidate(
     currentGraph.historyState.chatId,
   );
-  if (!activeChatId || !runtimeChatId) {
-    return false;
+
+  // chatId 匹配验证：如果两者都有，必须一致
+  if (activeChatId && runtimeChatId) {
+    return runtimeChatId === activeChatId;
   }
 
-  return runtimeChatId === activeChatId;
+  // 兜底：chatId 不可用（ST 插件环境可能无法获取 chatId），
+  // 但 currentGraph 结构完整且有节点数据 → 允许召回。
+  // 这对应用户能在 UI 看到图谱但 getCurrentChatId() 返回空的场景。
+  return currentGraph.nodes.length > 0 || currentGraph.edges.length > 0;
 }
 
 function isGraphReadableForRecall(
@@ -645,10 +650,10 @@ function isGraphReadableForRecall(
     return true;
   }
 
-  if (loadState !== GRAPH_LOAD_STATES.LOADING) {
-    return false;
-  }
-
+  // 当 loadState 不在正常可读状态时（如 NO_CHAT、LOADING），
+  // 仍检查运行时图谱的实际结构。持久化状态机可能失同步
+  // （如 getCurrentChatId 在某些 ST 环境下返回空导致 loadState 卡在 NO_CHAT），
+  // 但 currentGraph 已经通过其他路径（IndexedDB probe / metadata fallback）加载了数据。
   return hasReadableRuntimeGraphForRecall(chatId);
 }
 
