@@ -337,7 +337,11 @@ export async function onGenerationAfterCommandsController(
     );
   }
 
-  if (deliveryMode === "deferred") {
+  // immediate 模式下，runRecall → applyRecallInjection 内部已通过
+  // setExtensionPrompt 完成了注入，此处直接返回召回结果。
+  // 后续 GENERATE_BEFORE_COMBINE_PROMPTS 阶段会通过
+  // applyFinalRecallInjectionForGeneration 做 deferred rewrite 兜底。
+  if (deliveryMode === "immediate") {
     return recallResult;
   }
 

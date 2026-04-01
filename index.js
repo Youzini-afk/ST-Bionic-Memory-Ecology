@@ -1152,20 +1152,11 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
     at: Date.now(),
   });
 
-  if (pendingRecallSendIntent.hash && pendingRecallSendIntent.hash === hash) {
-    pendingRecallSendIntent = createRecallInputRecord();
-  }
-  if (
-    pendingHostGenerationInputSnapshot.hash &&
-    pendingHostGenerationInputSnapshot.hash === hash
-  ) {
-    pendingHostGenerationInputSnapshot = createRecallInputRecord();
-  }
-
-  const activeChatId = getCurrentChatId();
-  if (activeChatId) {
-    clearGenerationRecallTransactionsForChat(activeChatId);
-  }
+  // 注意：不再在 MESSAGE_SENT 阶段清空 pendingRecallSendIntent /
+  // pendingHostGenerationInputSnapshot / transactions。
+  // 这些数据在 GENERATION_AFTER_COMMANDS 中被消费；MESSAGE_SENT 先于
+  // GENERATION_AFTER_COMMANDS 触发，提前清空会导致召回拿不到用户输入。
+  // 真正的消费发生在 recall 执行后（runRecallController 内部）。
 
   return lastRecallSentUserMessage;
 }
@@ -5477,10 +5468,14 @@ function resolveGenerationRecallDeliveryMode(
     return "immediate";
   }
 
-  return hookName === "GENERATION_AFTER_COMMANDS" ||
-    hookName === "GENERATE_BEFORE_COMBINE_PROMPTS"
-    ? "deferred"
-    : "immediate";
+  // GENERATION_AFTER_COMMANDS: immediate —— await 完召回后直接通过
+  // setExtensionPrompt 注入记忆，与 shujuku 参考实现一致。
+  // GENERATE_BEFORE_COMBINE_PROMPTS: deferred —— 作为兜底，通过 promptData
+  // rewrite 补救注入。
+  if (hookName === "GENERATE_BEFORE_COMBINE_PROMPTS") {
+    return "deferred";
+  }
+  return "immediate";
 }
 
 function freezeGenerationRecallOptionsForTransaction(
