@@ -1,6 +1,7 @@
 // ST-BME: 运行时状态与历史恢复辅助
 
 const BATCH_JOURNAL_LIMIT = 96;
+const MAINTENANCE_JOURNAL_LIMIT = 20;
 export const BATCH_JOURNAL_VERSION = 2;
 
 export function buildVectorCollectionId(chatId) {
@@ -46,6 +47,10 @@ export function createDefaultVectorIndexState(chatId = "") {
 }
 
 export function createDefaultBatchJournal() {
+  return [];
+}
+
+export function createDefaultMaintenanceJournal() {
   return [];
 }
 
@@ -165,6 +170,11 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   graph.batchJournal = Array.isArray(graph.batchJournal)
     ? graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT)
     : createDefaultBatchJournal();
+  graph.maintenanceJournal = Array.isArray(graph.maintenanceJournal)
+    ? graph.maintenanceJournal
+        .filter((entry) => entry && typeof entry === "object")
+        .slice(-MAINTENANCE_JOURNAL_LIMIT)
+    : createDefaultMaintenanceJournal();
   graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
   return graph;
 }
@@ -547,6 +557,212 @@ export function appendBatchJournal(graph, entry) {
   if (graph.batchJournal.length > BATCH_JOURNAL_LIMIT) {
     graph.batchJournal = graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT);
   }
+}
+
+export function createMaintenanceJournalEntry(
+  snapshotBefore,
+  snapshotAfter,
+  meta = {},
+) {
+  const beforeNodes = buildNodeMap(snapshotBefore?.nodes || []);
+  const afterNodes = buildNodeMap(snapshotAfter?.nodes || []);
+  const beforeEdges = buildEdgeMap(snapshotBefore?.edges || []);
+  const afterEdges = buildEdgeMap(snapshotAfter?.edges || []);
+
+  const restoreNodes = [];
+  const restoreEdges = [];
+  const deleteNodeIds = [];
+  const deleteEdgeIds = [];
+  const postNodes = [];
+  const postEdges = [];
+
+  for (const [nodeId, beforeNode] of beforeNodes.entries()) {
+    const afterNode = afterNodes.get(nodeId);
+    if (!afterNode) {
+      restoreNodes.push(cloneGraphSnapshot(beforeNode));
+      continue;
+    }
+    if (!hasMeaningfulNodeChange(beforeNode, afterNode)) continue;
+    restoreNodes.push(cloneGraphSnapshot(beforeNode));
+    postNodes.push(cloneGraphSnapshot(afterNode));
+  }
+
+  for (const [nodeId, afterNode] of afterNodes.entries()) {
+    if (beforeNodes.has(nodeId)) continue;
+    deleteNodeIds.push(nodeId);
+    postNodes.push(cloneGraphSnapshot(afterNode));
+  }
+
+  for (const [edgeId, beforeEdge] of beforeEdges.entries()) {
+    const afterEdge = afterEdges.get(edgeId);
+    if (!afterEdge) {
+      restoreEdges.push(cloneGraphSnapshot(beforeEdge));
+      continue;
+    }
+    if (!hasMeaningfulEdgeChange(beforeEdge, afterEdge)) continue;
+    restoreEdges.push(cloneGraphSnapshot(beforeEdge));
+    postEdges.push(cloneGraphSnapshot(afterEdge));
+  }
+
+  for (const [edgeId, afterEdge] of afterEdges.entries()) {
+    if (beforeEdges.has(edgeId)) continue;
+    deleteEdgeIds.push(edgeId);
+    postEdges.push(cloneGraphSnapshot(afterEdge));
+  }
+
+  if (
+    restoreNodes.length === 0 &&
+    restoreEdges.length === 0 &&
+    deleteNodeIds.length === 0 &&
+    deleteEdgeIds.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    id: `maintenance-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    action: String(meta.action || "unknown"),
+    mode:
+      meta.mode === "auto" || meta.mode === "manual" ? meta.mode : "manual",
+    summary: String(meta.summary || ""),
+    inversePatch: {
+      restoreNodes,
+      restoreEdges,
+      deleteNodeIds,
+      deleteEdgeIds,
+    },
+    postCheck: {
+      nodes: postNodes,
+      edges: postEdges,
+    },
+  };
+}
+
+export function appendMaintenanceJournal(graph, entry) {
+  if (!entry || typeof entry !== "object") return;
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  graph.maintenanceJournal.push(entry);
+  if (graph.maintenanceJournal.length > MAINTENANCE_JOURNAL_LIMIT) {
+    graph.maintenanceJournal = graph.maintenanceJournal.slice(
+      -MAINTENANCE_JOURNAL_LIMIT,
+    );
+  }
+}
+
+export function getLatestMaintenanceJournalEntry(graph) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const journal = Array.isArray(graph?.maintenanceJournal)
+    ? graph.maintenanceJournal
+    : [];
+  return journal.length > 0 ? journal[journal.length - 1] : null;
+}
+
+function validateMaintenanceUndoState(graph, entry) {
+  const currentNodes = buildNodeMap(graph?.nodes || []);
+  const currentEdges = buildEdgeMap(graph?.edges || []);
+  const expectedNodes = entry?.postCheck?.nodes || [];
+  const expectedEdges = entry?.postCheck?.edges || [];
+
+  for (const snapshot of expectedNodes) {
+    const current = currentNodes.get(snapshot?.id);
+    if (!current) {
+      return {
+        ok: false,
+        reason: `节点 ${snapshot?.id || "unknown"} 已被后续操作改写`,
+      };
+    }
+    if (JSON.stringify(current) !== JSON.stringify(snapshot)) {
+      return {
+        ok: false,
+        reason: `节点 ${snapshot?.id || "unknown"} 当前状态已变化，无法安全撤销`,
+      };
+    }
+  }
+
+  for (const snapshot of expectedEdges) {
+    const current = currentEdges.get(snapshot?.id);
+    if (!current) {
+      return {
+        ok: false,
+        reason: `边 ${snapshot?.id || "unknown"} 已被后续操作改写`,
+      };
+    }
+    if (JSON.stringify(current) !== JSON.stringify(snapshot)) {
+      return {
+        ok: false,
+        reason: `边 ${snapshot?.id || "unknown"} 当前状态已变化，无法安全撤销`,
+      };
+    }
+  }
+
+  return { ok: true, reason: "" };
+}
+
+export function applyMaintenanceInversePatch(graph, inversePatch = {}) {
+  if (!graph || !inversePatch || typeof inversePatch !== "object") {
+    return graph;
+  }
+
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+
+  const deleteNodeIds = new Set(inversePatch.deleteNodeIds || []);
+  const deleteEdgeIds = new Set(inversePatch.deleteEdgeIds || []);
+  const restoreNodes = Array.isArray(inversePatch.restoreNodes)
+    ? inversePatch.restoreNodes
+    : [];
+  const restoreEdges = Array.isArray(inversePatch.restoreEdges)
+    ? inversePatch.restoreEdges
+    : [];
+
+  graph.edges = (graph.edges || []).filter(
+    (edge) =>
+      !deleteEdgeIds.has(edge.id) &&
+      !deleteNodeIds.has(edge.fromId) &&
+      !deleteNodeIds.has(edge.toId),
+  );
+  graph.nodes = (graph.nodes || []).filter((node) => !deleteNodeIds.has(node.id));
+
+  for (const nodeSnapshot of restoreNodes) {
+    upsertById(graph.nodes, cloneGraphSnapshot(nodeSnapshot));
+  }
+  for (const edgeSnapshot of restoreEdges) {
+    upsertById(graph.edges, cloneGraphSnapshot(edgeSnapshot));
+  }
+
+  sanitizeGraphReferences(graph);
+  return graph;
+}
+
+export function undoLatestMaintenance(graph) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const entry = getLatestMaintenanceJournalEntry(graph);
+  if (!entry) {
+    return {
+      ok: false,
+      reason: "当前没有可撤销的维护记录",
+      entry: null,
+    };
+  }
+
+  const validation = validateMaintenanceUndoState(graph, entry);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      reason: validation.reason,
+      entry,
+    };
+  }
+
+  applyMaintenanceInversePatch(graph, entry.inversePatch || {});
+  graph.maintenanceJournal = graph.maintenanceJournal.slice(0, -1);
+
+  return {
+    ok: true,
+    reason: "",
+    entry,
+    remaining: graph.maintenanceJournal.length,
+  };
 }
 
 function upsertById(list, item) {

@@ -53,19 +53,31 @@ export function timeDecayFactor(createdTime, now = Date.now()) {
 export function hybridScore({
     graphScore = 0,
     vectorScore = 0,
+    lexicalScore = 0,
     importance = 5,
     createdTime = Date.now(),
 }, weights = {}) {
     const alpha = weights.graphWeight ?? 0.6;
     const beta = weights.vectorWeight ?? 0.3;
     const gamma = weights.importanceWeight ?? 0.1;
+    const delta = weights.lexicalWeight ?? 0;
 
     // 归一化
     const normGraph = Math.max(0, Math.min(1, graphScore / 2.0)); // PEDSA 能量范围 [-2, 2] → [0, 1]
     const normVec = Math.max(0, Math.min(1, vectorScore));
+    const normLexical = Math.max(0, Math.min(1, lexicalScore));
     const normImportance = Math.max(0, Math.min(1, importance / 10.0));
+    const totalWeight = Math.max(
+        1e-6,
+        Math.max(0, alpha) + Math.max(0, beta) + Math.max(0, gamma) + Math.max(0, delta),
+    );
 
-    const baseScore = normGraph * alpha + normVec * beta + normImportance * gamma;
+    const baseScore =
+        (normGraph * alpha +
+            normVec * beta +
+            normLexical * delta +
+            normImportance * gamma) /
+        totalWeight;
     const decay = timeDecayFactor(createdTime);
 
     return baseScore * decay;

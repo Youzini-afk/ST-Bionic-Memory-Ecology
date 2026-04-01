@@ -78,6 +78,7 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-sleep",
   "bme-act-synopsis",
   "bme-act-evolve",
+  "bme-act-undo-maintenance",
   "bme-act-import",
   "bme-act-rebuild",
   "bme-act-vector-rebuild",
@@ -1255,6 +1256,7 @@ function _bindActions() {
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
     "bme-act-evolve": "evolve",
+    "bme-act-undo-maintenance": "undoMaintenance",
     "bme-act-vector-rebuild": "rebuildVectorIndex",
     "bme-act-vector-reembed": "reembedDirect",
   };
@@ -1268,6 +1270,7 @@ function _bindActions() {
     import: "导入图谱",
     rebuild: "重建图谱",
     evolve: "强制进化",
+    undoMaintenance: "撤销最近维护",
     rebuildVectorIndex: "重建向量",
     reembedDirect: "直连重嵌",
   };
@@ -1435,6 +1438,14 @@ function _refreshConfigTab() {
     settings.recallEnableMultiIntent ?? true,
   );
   _setCheckboxValue(
+    "bme-setting-recall-context-query-blend-enabled",
+    settings.recallEnableContextQueryBlend ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-recall-lexical-boost-enabled",
+    settings.recallEnableLexicalBoost ?? true,
+  );
+  _setCheckboxValue(
     "bme-setting-recall-temporal-links-enabled",
     settings.recallEnableTemporalLinks ?? true,
   );
@@ -1507,6 +1518,18 @@ function _refreshConfigTab() {
     settings.recallMultiIntentMaxSegments ?? 4,
   );
   _setInputValue(
+    "bme-setting-recall-context-assistant-weight",
+    settings.recallContextAssistantWeight ?? 0.2,
+  );
+  _setInputValue(
+    "bme-setting-recall-context-previous-user-weight",
+    settings.recallContextPreviousUserWeight ?? 0.1,
+  );
+  _setInputValue(
+    "bme-setting-recall-lexical-weight",
+    settings.recallLexicalWeight ?? 0.18,
+  );
+  _setInputValue(
     "bme-setting-recall-teleport-alpha",
     settings.recallTeleportAlpha ?? 0.15,
   );
@@ -1577,6 +1600,10 @@ function _refreshConfigTab() {
   _setInputValue(
     "bme-setting-forget-threshold",
     settings.forgetThreshold ?? 0.5,
+  );
+  _setInputValue(
+    "bme-setting-maintenance-auto-min-new-nodes",
+    settings.maintenanceAutoMinNewNodes ?? 3,
   );
   _setInputValue("bme-setting-sleep-every", settings.sleepEveryN ?? 10);
   _setInputValue(
@@ -1689,6 +1716,12 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-recall-multi-intent-enabled", (checked) => {
     _patchSettings({ recallEnableMultiIntent: checked });
   });
+  bindCheckbox("bme-setting-recall-context-query-blend-enabled", (checked) => {
+    _patchSettings({ recallEnableContextQueryBlend: checked });
+  });
+  bindCheckbox("bme-setting-recall-lexical-boost-enabled", (checked) => {
+    _patchSettings({ recallEnableLexicalBoost: checked });
+  });
   bindCheckbox("bme-setting-recall-temporal-links-enabled", (checked) => {
     _patchSettings({ recallEnableTemporalLinks: checked });
   });
@@ -1759,6 +1792,23 @@ function _bindConfigControls() {
     1,
     8,
     (value) => _patchSettings({ recallMultiIntentMaxSegments: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-context-assistant-weight",
+    0.2,
+    0,
+    1,
+    (value) => _patchSettings({ recallContextAssistantWeight: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-context-previous-user-weight",
+    0.1,
+    0,
+    1,
+    (value) => _patchSettings({ recallContextPreviousUserWeight: value }),
+  );
+  bindFloat("bme-setting-recall-lexical-weight", 0.18, 0, 1, (value) =>
+    _patchSettings({ recallLexicalWeight: value }),
   );
   bindFloat("bme-setting-recall-teleport-alpha", 0.15, 0, 1, (value) =>
     _patchSettings({ recallTeleportAlpha: value }),
@@ -1842,6 +1892,13 @@ function _bindConfigControls() {
   );
   bindFloat("bme-setting-forget-threshold", 0.5, 0.1, 1, (value) =>
     _patchSettings({ forgetThreshold: value }),
+  );
+  bindNumber(
+    "bme-setting-maintenance-auto-min-new-nodes",
+    3,
+    1,
+    50,
+    (value) => _patchSettings({ maintenanceAutoMinNewNodes: value }),
   );
   bindNumber("bme-setting-sleep-every", 10, 1, 200, (value) =>
     _patchSettings({ sleepEveryN: value }),
@@ -2903,6 +2960,7 @@ function _renderTaskDebugTab(state) {
   const promptBuild = runtimeDebug?.taskPromptBuilds?.[state.taskType] || null;
   const llmRequest = runtimeDebug?.taskLlmRequests?.[state.taskType] || null;
   const recallInjection = runtimeDebug?.injections?.recall || null;
+  const maintenanceDebug = runtimeDebug?.maintenance || null;
   const graphPersistence = runtimeDebug?.graphPersistence || null;
 
   return `
@@ -2924,6 +2982,9 @@ function _renderTaskDebugTab(state) {
           ${_renderTaskDebugGraphPersistenceCard(graphPersistence)}
         </div>
         <div class="bme-config-card">
+          ${_renderTaskDebugMaintenanceCard(maintenanceDebug)}
+        </div>
+        <div class="bme-config-card">
           ${_renderTaskDebugPromptCard(state.taskType, promptBuild)}
         </div>
         <div class="bme-config-card">
@@ -2934,6 +2995,32 @@ function _renderTaskDebugTab(state) {
         </div>
       </div>
     </div>
+  `;
+}
+
+function _renderTaskDebugMaintenanceCard(maintenanceDebug) {
+  const lastAction = maintenanceDebug?.lastAction || null;
+  const lastUndoResult = maintenanceDebug?.lastUndoResult || null;
+
+  if (!lastAction && !lastUndoResult) {
+    return `
+      <div class="bme-config-card-title">维护账本状态</div>
+      <div class="bme-config-help">当前还没有最近维护或撤销快照。</div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">维护账本状态</div>
+        <div class="bme-config-card-subtitle">
+          最近一次维护记录和最近一次撤销结果。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(lastAction?.action || lastUndoResult?.action || "maintenance")}</span>
+    </div>
+    ${_renderDebugDetails("最近维护", lastAction)}
+    ${_renderDebugDetails("最近撤销", lastUndoResult)}
   `;
 }
 

@@ -136,16 +136,19 @@ import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { retrieve } from "./retriever.js";
 import {
   appendBatchJournal,
+  appendMaintenanceJournal,
   buildRecoveryResult,
   buildReverseJournalRecoveryPlan,
   clearHistoryDirty,
   cloneGraphSnapshot,
   createBatchJournalEntry,
+  createMaintenanceJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
   markHistoryDirty,
   normalizeGraphRuntimeState,
   snapshotProcessedMessageHashes,
+  undoLatestMaintenance,
 } from "./runtime-state.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
 import {
@@ -157,6 +160,7 @@ import {
   onManualEvolveController,
   onManualSleepController,
   onManualSynopsisController,
+  onUndoLastMaintenanceController,
   onRebuildController,
   onRebuildVectorIndexController,
   onReembedDirectController,
@@ -249,6 +253,10 @@ function getRuntimeDebugState() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      maintenance: {
+        lastAction: null,
+        lastUndoResult: null,
+      },
       graphPersistence: null,
       updatedAt: "",
     };
@@ -281,6 +289,18 @@ function recordGraphPersistenceSnapshot(snapshot = null) {
   state.graphPersistence = cloneRuntimeDebugValue(snapshot, null);
 }
 
+function recordMaintenanceDebugSnapshot(patch = {}) {
+  const state = touchRuntimeDebugState();
+  const previous = state.maintenance || {
+    lastAction: null,
+    lastUndoResult: null,
+  };
+  state.maintenance = {
+    ...previous,
+    ...cloneRuntimeDebugValue(patch, {}),
+  };
+}
+
 function readRuntimeDebugSnapshot() {
   const state = getRuntimeDebugState();
   return cloneRuntimeDebugValue(
@@ -289,6 +309,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: state.taskPromptBuilds,
       taskLlmRequests: state.taskLlmRequests,
       injections: state.injections,
+      maintenance: state.maintenance,
       graphPersistence: state.graphPersistence,
       updatedAt: state.updatedAt,
     },
@@ -297,6 +318,10 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      maintenance: {
+        lastAction: null,
+        lastUndoResult: null,
+      },
       graphPersistence: null,
       updatedAt: "",
     },
@@ -325,6 +350,11 @@ const defaultSettings = {
   recallLlmContextMessages: 4, // 传给 LLM 精排的最近非系统消息数
   recallEnableMultiIntent: true,
   recallMultiIntentMaxSegments: 4,
+  recallEnableContextQueryBlend: true,
+  recallContextAssistantWeight: 0.2,
+  recallContextPreviousUserWeight: 0.1,
+  recallEnableLexicalBoost: true,
+  recallLexicalWeight: 0.18,
   recallTeleportAlpha: 0.15,
   recallEnableTemporalLinks: true,
   recallTemporalLinkStrength: 0.2,
@@ -412,6 +442,7 @@ const defaultSettings = {
   // ⑩ 反思条目（P2）
   enableReflection: true, // 启用反思
   reflectEveryN: 10, // 每 N 次提取后反思
+  maintenanceAutoMinNewNodes: 3,
 
   // UI 面板
   panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet
@@ -4148,6 +4179,117 @@ async function recordGraphMutation({
   return vectorSync;
 }
 
+function noteMaintenanceGate(status, action, reason) {
+  if (!status || typeof status !== "object") return;
+  const normalizedAction = String(action || "").trim() || "unknown";
+  const normalizedReason = String(reason || "").trim();
+  if (!normalizedReason) return;
+
+  const nextDetail = {
+    action: normalizedAction,
+    reason: normalizedReason,
+  };
+  const previousDetails = Array.isArray(status.maintenanceGateDetails)
+    ? status.maintenanceGateDetails
+    : [];
+  status.maintenanceGateApplied = true;
+  status.maintenanceGateDetails = [...previousDetails, nextDetail];
+  status.maintenanceGateReason = status.maintenanceGateDetails
+    .map((item) => `${item.action}: ${item.reason}`)
+    .join(" | ");
+}
+
+function evaluateAutoMaintenanceGate(action, newNodeCount, settings = {}) {
+  const normalizedAction = String(action || "").trim();
+  if (!["consolidate", "compress"].includes(normalizedAction)) {
+    return { blocked: false, reason: "", minNewNodes: 0 };
+  }
+  if (settings?.maintenanceAutoMinNewNodes == null) {
+    return { blocked: false, reason: "", minNewNodes: 0 };
+  }
+
+  const minNewNodes = clampInt(settings.maintenanceAutoMinNewNodes, 3, 1, 50);
+  const safeNewNodeCount = Math.max(0, Number(newNodeCount) || 0);
+  if (safeNewNodeCount >= minNewNodes) {
+    return { blocked: false, reason: "", minNewNodes };
+  }
+
+  return {
+    blocked: true,
+    minNewNodes,
+    reason: `本批只新增 ${safeNewNodeCount} 个节点，低于门槛 ${minNewNodes}`,
+  };
+}
+
+function buildMaintenanceSummary(action, result, mode = "manual") {
+  const prefix = mode === "auto" ? "自动" : "手动";
+  switch (String(action || "")) {
+    case "compress":
+      return `${prefix}压缩：新建 ${result?.created || 0}，归档 ${result?.archived || 0}`;
+    case "consolidate":
+      return `${prefix}整合：合并 ${result?.merged || 0}，跳过 ${result?.skipped || 0}，保留 ${result?.kept || 0}，进化 ${result?.evolved || 0}，新链接 ${result?.connections || 0}，回溯更新 ${result?.updates || 0}`;
+    case "sleep":
+      return `${prefix}遗忘：归档 ${result?.forgotten || 0} 个节点`;
+    default:
+      return `${prefix}维护已执行`;
+  }
+}
+
+function recordMaintenanceAction({
+  action,
+  beforeSnapshot,
+  mode = "manual",
+  summary = "",
+} = {}) {
+  if (!currentGraph || !beforeSnapshot) return null;
+  ensureCurrentGraphRuntimeState();
+
+  const entry = createMaintenanceJournalEntry(
+    beforeSnapshot,
+    cloneGraphSnapshot(currentGraph),
+    {
+      action,
+      mode,
+      summary,
+    },
+  );
+  if (!entry) return null;
+
+  appendMaintenanceJournal(currentGraph, entry);
+  recordMaintenanceDebugSnapshot({
+    lastAction: {
+      id: entry.id,
+      action: entry.action,
+      mode: entry.mode,
+      summary: entry.summary,
+      createdAt: entry.createdAt,
+      maintenanceJournalSize: currentGraph.maintenanceJournal?.length || 0,
+    },
+  });
+  return entry;
+}
+
+function undoLastMaintenanceAction() {
+  if (!currentGraph) {
+    return { ok: false, reason: "当前没有加载的图谱", entry: null };
+  }
+
+  ensureCurrentGraphRuntimeState();
+  const result = undoLatestMaintenance(currentGraph);
+  recordMaintenanceDebugSnapshot({
+    lastUndoResult: {
+      ok: Boolean(result?.ok),
+      reason: String(result?.reason || ""),
+      action: result?.entry?.action || "",
+      summary: result?.entry?.summary || "",
+      createdAt: result?.entry?.createdAt || 0,
+      maintenanceJournalSize: currentGraph.maintenanceJournal?.length || 0,
+      updatedAt: new Date().toISOString(),
+    },
+  });
+  return result;
+}
+
 function markVectorStateDirty(reason = "向量状态已标记为待重建") {
   if (!currentGraph) return;
   ensureCurrentGraphRuntimeState();
@@ -6027,6 +6169,78 @@ async function handleExtractionSuccess(
   }),
 ) {
   const postProcessArtifacts = [];
+  const newNodeCount = Array.isArray(result?.newNodeIds)
+    ? result.newNodeIds.length
+    : 0;
+  const resolveAutoMaintenanceGate =
+    typeof evaluateAutoMaintenanceGate === "function"
+      ? evaluateAutoMaintenanceGate
+      : (action, count, localSettings = {}) => {
+          const normalizedAction = String(action || "").trim();
+          if (!["consolidate", "compress"].includes(normalizedAction)) {
+            return { blocked: false, reason: "", minNewNodes: 0 };
+          }
+          if (localSettings?.maintenanceAutoMinNewNodes == null) {
+            return { blocked: false, reason: "", minNewNodes: 0 };
+          }
+          const parsedMinNewNodes = Math.floor(
+            Number(localSettings.maintenanceAutoMinNewNodes),
+          );
+          const minNewNodes =
+            Number.isFinite(parsedMinNewNodes) && parsedMinNewNodes >= 1
+              ? Math.min(50, parsedMinNewNodes)
+              : 3;
+          const safeCount = Math.max(0, Number(count) || 0);
+          return safeCount >= minNewNodes
+            ? { blocked: false, reason: "", minNewNodes }
+            : {
+                blocked: true,
+                minNewNodes,
+                reason: `本批只新增 ${safeCount} 个节点，低于门槛 ${minNewNodes}`,
+              };
+        };
+  const applyMaintenanceGateNote =
+    typeof noteMaintenanceGate === "function"
+      ? noteMaintenanceGate
+      : (batchStatus, action, reason) => {
+          if (!batchStatus || !reason) return;
+          batchStatus.maintenanceGateApplied = true;
+          const details = Array.isArray(batchStatus.maintenanceGateDetails)
+            ? batchStatus.maintenanceGateDetails
+            : [];
+          details.push({
+            action: String(action || "").trim() || "unknown",
+            reason: String(reason || ""),
+          });
+          batchStatus.maintenanceGateDetails = details;
+          batchStatus.maintenanceGateReason = details
+            .map((item) => `${item.action}: ${item.reason}`)
+            .join(" | ");
+        };
+  const summarizeMaintenance =
+    typeof buildMaintenanceSummary === "function"
+      ? buildMaintenanceSummary
+      : (action, maintenanceResult, mode = "manual") => {
+          const prefix = mode === "auto" ? "自动" : "手动";
+          switch (String(action || "")) {
+            case "compress":
+              return `${prefix}压缩：新建 ${maintenanceResult?.created || 0}，归档 ${maintenanceResult?.archived || 0}`;
+            case "consolidate":
+              return `${prefix}整合：合并 ${maintenanceResult?.merged || 0}，跳过 ${maintenanceResult?.skipped || 0}，保留 ${maintenanceResult?.kept || 0}，进化 ${maintenanceResult?.evolved || 0}，新链接 ${maintenanceResult?.connections || 0}，回溯更新 ${maintenanceResult?.updates || 0}`;
+            case "sleep":
+              return `${prefix}遗忘：归档 ${maintenanceResult?.forgotten || 0} 个节点`;
+            default:
+              return `${prefix}维护已执行`;
+          }
+        };
+  const cloneMaintenanceSnapshot =
+    typeof cloneGraphSnapshot === "function"
+      ? cloneGraphSnapshot
+      : (value) => JSON.parse(JSON.stringify(value ?? null));
+  const persistMaintenanceAction =
+    typeof recordMaintenanceAction === "function"
+      ? recordMaintenanceAction
+      : () => null;
   throwIfAborted(signal, "提取已终止");
   extractionCount++;
   ensureCurrentGraphRuntimeState();
@@ -6035,30 +6249,51 @@ async function handleExtractionSuccess(
   setBatchStageOutcome(status, "core", "success");
 
   if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
-    try {
-      await consolidateMemories({
-        graph: currentGraph,
-        newNodeIds: result.newNodeIds,
-        embeddingConfig: getEmbeddingConfig(),
-        options: {
-          neighborCount: settings.consolidationNeighborCount,
-          conflictThreshold: settings.consolidationThreshold,
-        },
-        settings,
-        signal,
-      });
-      postProcessArtifacts.push("consolidation");
-      pushBatchStageArtifact(status, "structural", "consolidation");
-    } catch (e) {
-      if (isAbortError(e)) throw e;
-      const message = e?.message || String(e) || "记忆整合阶段失败";
-      setBatchStageOutcome(
-        status,
-        "structural",
-        "partial",
-        `记忆整合失败: ${message}`,
-      );
-      console.error("[ST-BME] 记忆整合失败:", e);
+    const gate = resolveAutoMaintenanceGate(
+      "consolidate",
+      newNodeCount,
+      settings,
+    );
+    if (gate.blocked) {
+      applyMaintenanceGateNote(status, "consolidate", gate.reason);
+      pushBatchStageArtifact(status, "structural", "consolidation-skipped");
+    } else {
+      try {
+        const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
+        const consolidationResult = await consolidateMemories({
+          graph: currentGraph,
+          newNodeIds: result.newNodeIds,
+          embeddingConfig: getEmbeddingConfig(),
+          options: {
+            neighborCount: settings.consolidationNeighborCount,
+            conflictThreshold: settings.consolidationThreshold,
+          },
+          settings,
+          signal,
+        });
+        persistMaintenanceAction({
+          action: "consolidate",
+          beforeSnapshot,
+          mode: "auto",
+          summary: summarizeMaintenance(
+            "consolidate",
+            consolidationResult,
+            "auto",
+          ),
+        });
+        postProcessArtifacts.push("consolidation");
+        pushBatchStageArtifact(status, "structural", "consolidation");
+      } catch (e) {
+        if (isAbortError(e)) throw e;
+        const message = e?.message || String(e) || "记忆整合阶段失败";
+        setBatchStageOutcome(
+          status,
+          "structural",
+          "partial",
+          `记忆整合失败: ${message}`,
+        );
+        console.error("[ST-BME] 记忆整合失败:", e);
+      }
     }
   }
 
@@ -6120,9 +6355,18 @@ async function handleExtractionSuccess(
     extractionCount % settings.sleepEveryN === 0
   ) {
     try {
-      sleepCycle(currentGraph, settings);
-      postProcessArtifacts.push("sleep");
-      pushBatchStageArtifact(status, "semantic", "sleep");
+      const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
+      const sleepResult = sleepCycle(currentGraph, settings);
+      if ((sleepResult?.forgotten || 0) > 0) {
+        persistMaintenanceAction({
+          action: "sleep",
+          beforeSnapshot,
+          mode: "auto",
+          summary: summarizeMaintenance("sleep", sleepResult, "auto"),
+        });
+        postProcessArtifacts.push("sleep");
+        pushBatchStageArtifact(status, "semantic", "sleep");
+      }
     } catch (e) {
       const message = e?.message || String(e) || "主动遗忘阶段失败";
       setBatchStageOutcome(
@@ -6137,18 +6381,39 @@ async function handleExtractionSuccess(
 
   try {
     throwIfAborted(signal, "提取已终止");
-    const compressionResult = await compressAll(
-      currentGraph,
-      getSchema(),
-      getEmbeddingConfig(),
-      false,
-      undefined,
-      signal,
+    const gate = resolveAutoMaintenanceGate(
+      "compress",
+      newNodeCount,
       settings,
     );
-    if (compressionResult.created > 0 || compressionResult.archived > 0) {
-      postProcessArtifacts.push("compression");
-      pushBatchStageArtifact(status, "structural", "compression");
+    if (gate.blocked) {
+      applyMaintenanceGateNote(status, "compress", gate.reason);
+      pushBatchStageArtifact(status, "structural", "compression-skipped");
+    } else {
+      const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
+      const compressionResult = await compressAll(
+        currentGraph,
+        getSchema(),
+        getEmbeddingConfig(),
+        false,
+        undefined,
+        signal,
+        settings,
+      );
+      if (compressionResult.created > 0 || compressionResult.archived > 0) {
+        persistMaintenanceAction({
+          action: "compress",
+          beforeSnapshot,
+          mode: "auto",
+          summary: summarizeMaintenance(
+            "compress",
+            compressionResult,
+            "auto",
+          ),
+        });
+        postProcessArtifacts.push("compression");
+        pushBatchStageArtifact(status, "structural", "compression");
+      }
     }
   } catch (error) {
     if (isAbortError(error)) throw error;
@@ -6196,6 +6461,18 @@ async function handleExtractionSuccess(
     );
   } else {
     setBatchStageOutcome(status, "finalize", "success");
+  }
+
+  status.maintenanceJournalSize =
+    currentGraph?.maintenanceJournal?.length || 0;
+  if (
+    status.maintenanceGateApplied &&
+    !status.maintenanceGateReason &&
+    Array.isArray(status.maintenanceGateDetails)
+  ) {
+    status.maintenanceGateReason = status.maintenanceGateDetails
+      .map((item) => `${item.action}: ${item.reason}`)
+      .join(" | ");
   }
 
   return {
@@ -7107,6 +7384,12 @@ function buildRecallRetrieveOptions(settings, context) {
     probRecallChance: settings.probRecallChance ?? 0.15,
     enableMultiIntent: settings.recallEnableMultiIntent ?? true,
     multiIntentMaxSegments: settings.recallMultiIntentMaxSegments ?? 4,
+    enableContextQueryBlend: settings.recallEnableContextQueryBlend ?? true,
+    contextAssistantWeight: settings.recallContextAssistantWeight ?? 0.2,
+    contextPreviousUserWeight:
+      settings.recallContextPreviousUserWeight ?? 0.1,
+    enableLexicalBoost: settings.recallEnableLexicalBoost ?? true,
+    lexicalWeight: settings.recallLexicalWeight ?? 0.18,
     teleportAlpha: settings.recallTeleportAlpha ?? 0.15,
     enableTemporalLinks: settings.recallEnableTemporalLinks ?? true,
     temporalLinkStrength: settings.recallTemporalLinkStrength ?? 0.2,
@@ -7426,6 +7709,7 @@ async function onRebuild() {
 
 async function onManualCompress() {
   return await onManualCompressController({
+    buildMaintenanceSummary,
     cloneGraphSnapshot,
     compressAll,
     ensureGraphMutationReady,
@@ -7433,6 +7717,7 @@ async function onManualCompress() {
     getEmbeddingConfig,
     getSchema,
     getSettings,
+    recordMaintenanceAction,
     recordGraphMutation,
     toastr,
   });
@@ -7577,10 +7862,12 @@ async function onReroll({ fromFloor } = {}) {
 
 async function onManualSleep() {
   return await onManualSleepController({
+    buildMaintenanceSummary,
     cloneGraphSnapshot,
     ensureGraphMutationReady,
     getCurrentGraph: () => currentGraph,
     getSettings,
+    recordMaintenanceAction,
     recordGraphMutation,
     sleepCycle,
     toastr,
@@ -7603,6 +7890,7 @@ async function onManualSynopsis() {
 
 async function onManualEvolve() {
   return await onManualEvolveController({
+    buildMaintenanceSummary,
     cloneGraphSnapshot,
     consolidateMemories,
     ensureGraphMutationReady,
@@ -7610,8 +7898,21 @@ async function onManualEvolve() {
     getEmbeddingConfig,
     getLastExtractedItems: () => lastExtractedItems,
     getSettings,
+    recordMaintenanceAction,
     recordGraphMutation,
     toastr,
+  });
+}
+
+async function onUndoLastMaintenance() {
+  return await onUndoLastMaintenanceController({
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    markVectorStateDirty,
+    refreshPanelLiveState,
+    saveGraphToChat,
+    toastr,
+    undoLastMaintenance: undoLastMaintenanceAction,
   });
 }
 
@@ -7713,6 +8014,7 @@ async function onReembedDirect() {
       import: onImportGraph,
       rebuild: onRebuild,
       evolve: onManualEvolve,
+      undoMaintenance: onUndoLastMaintenance,
       testEmbedding: onTestEmbedding,
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,

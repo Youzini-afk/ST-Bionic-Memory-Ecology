@@ -269,6 +269,10 @@
                     <i class="fa-solid fa-moon"></i>
                     <span>执行遗忘</span>
                   </button>
+                  <button class="bme-action-btn" id="bme-act-undo-maintenance" type="button">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span>撤销最近维护</span>
+                  </button>
                   <button class="bme-action-btn" id="bme-act-reroll" type="button">
                     <i class="fa-solid fa-rotate"></i>
                     <span>重新提取</span>
@@ -1187,13 +1191,78 @@
                       <div>
                         <div class="bme-config-subgroup-title">更多高级项</div>
                         <div class="bme-config-subgroup-desc">
-                          从 DPP 多样性去重开始，收纳共现补强和弱信号残差召回。
+                          收纳上下文混合查询、文字补分，以及 DPP、共现补强和弱信号残差召回。
                         </div>
                       </div>
                       <span class="bme-collapsible-indicator" aria-hidden="true">
                         <i class="fa-solid fa-chevron-down"></i>
                       </span>
                     </summary>
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-subgroup-title">查询纠偏</div>
+                      <div class="bme-config-subgroup-desc">
+                        让召回在“那后来呢”“他为什么这么做”这类追问里，也能借最近上下文稳一点。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-context-query-blend-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-context-query-blend-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用上下文混合查询</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-context-assistant-weight"
+                          >最近 assistant 权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-context-assistant-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-context-previous-user-weight"
+                          >上一条 user 权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-context-previous-user-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-lexical-boost-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-lexical-boost-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用文字命中补分</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-lexical-weight"
+                          >文字补分权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-lexical-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                    </div>
                     <div class="bme-config-subgroup">
                       <div class="bme-config-subgroup-title">DPP 与共现补强</div>
                       <div class="bme-config-subgroup-desc">
@@ -1611,6 +1680,29 @@
                       type="number"
                       min="1"
                       max="200"
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">自动维护门槛</div>
+                      <div class="bme-config-card-subtitle">
+                        新增节点太少时，自动整合和自动压缩直接跳过，避免小批次也跑重维护。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-maintenance-auto-min-new-nodes"
+                      >最少新增节点数</label
+                    >
+                    <input
+                      id="bme-setting-maintenance-auto-min-new-nodes"
+                      class="bme-config-input"
+                      type="number"
+                      min="1"
+                      max="50"
                     />
                   </div>
                 </div>

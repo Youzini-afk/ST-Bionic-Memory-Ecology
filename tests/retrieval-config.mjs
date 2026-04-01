@@ -145,8 +145,12 @@ const retrieve = await loadRetrieve({
   async runResidualRecall() {
     return { triggered: false, hits: [], skipReason: "residual-disabled-test" };
   },
-  hybridScore: ({ graphScore = 0, vectorScore = 0, importance = 0 }) =>
-    graphScore + vectorScore + importance,
+  hybridScore: ({
+    graphScore = 0,
+    vectorScore = 0,
+    lexicalScore = 0,
+    importance = 0,
+  }) => graphScore + vectorScore + lexicalScore + importance,
   reinforceAccessBatch() {},
   validateVectorConfig() {
     return { valid: true };
@@ -215,6 +219,32 @@ assert.equal(state.llmCalls.length, 0);
 assert.deepEqual(Array.from(noStageResult.selectedNodeIds), ["rule-2", "rule-1"]);
 
 state.vectorCalls.length = 0;
+await retrieve({
+  graph,
+  userMessage: "他后来怎么做？",
+  recentMessages: [
+    "[assistant]: 他提到了规则二的限制",
+    "[user]: 我们先看规则一",
+    "[user]: 他后来怎么做？",
+  ],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: false,
+    enableMultiIntent: false,
+    enableContextQueryBlend: true,
+  },
+});
+assert.deepEqual(
+  state.vectorCalls.map((item) => item.message),
+  ["他后来怎么做？", "他提到了规则二的限制", "我们先看规则一"],
+);
+
+state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
 state.llmCalls.length = 0;
 state.llmOptions.length = 0;
@@ -235,7 +265,10 @@ const llmPoolResult = await retrieve({
     llmCandidatePool: 2,
   },
 });
-assert.deepEqual(state.vectorCalls, [{ topK: 4, message: "请根据规则给出结论" }]);
+assert.deepEqual(state.vectorCalls, [
+  { topK: 4, message: "请根据规则给出结论" },
+  { topK: 4, message: "现在该怎么做？" },
+]);
 assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCandidateCount, 2);
 assert.deepEqual(Array.from(llmPoolResult.selectedNodeIds), ["rule-2", "rule-1"]);
@@ -365,5 +398,50 @@ const cappedResult = await retrieve({
   },
 });
 assert.equal(cappedResult.selectedNodeIds.length, 1);
+
+const lexicalGraph = {
+  nodes: [
+    {
+      id: "char-1",
+      type: "character",
+      importance: 1,
+      createdTime: 1,
+      archived: false,
+      fields: { name: "Alice", summary: "常驻角色" },
+      seqRange: [1, 1],
+    },
+    {
+      id: "char-2",
+      type: "character",
+      importance: 1,
+      createdTime: 1,
+      archived: false,
+      fields: { name: "Bob", summary: "常驻角色" },
+      seqRange: [1, 1],
+    },
+  ],
+  edges: [],
+};
+const lexicalSchema = [{ id: "character", label: "角色", alwaysInject: false }];
+const lexicalResult = await retrieve({
+  graph: lexicalGraph,
+  userMessage: "Alice 现在怎么样了",
+  recentMessages: [],
+  embeddingConfig: {},
+  schema: lexicalSchema,
+  options: {
+    topK: 2,
+    maxRecallNodes: 1,
+    enableVectorPrefilter: false,
+    enableGraphDiffusion: false,
+    enableLLMRecall: false,
+    enableDiversitySampling: false,
+    enableLexicalBoost: true,
+  },
+});
+assert.deepEqual(Array.from(lexicalResult.selectedNodeIds), ["char-1"]);
+assert.equal(lexicalResult.meta.retrieval.queryBlendActive, false);
+assert.equal(lexicalResult.meta.retrieval.lexicalBoostedNodes, 1);
+assert.equal(lexicalResult.meta.retrieval.lexicalTopHits[0]?.nodeId, "char-1");
 
 console.log("retrieval-config tests passed");

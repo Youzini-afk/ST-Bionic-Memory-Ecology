@@ -101,6 +101,12 @@ export async function onManualCompressController(runtime) {
     undefined,
     runtime.getSettings(),
   );
+  runtime.recordMaintenanceAction?.({
+    action: "compress",
+    beforeSnapshot,
+    mode: "manual",
+    summary: runtime.buildMaintenanceSummary?.("compress", result, "manual"),
+  });
   await runtime.recordGraphMutation({
     beforeSnapshot,
     artifactTags: ["compression"],
@@ -386,6 +392,12 @@ export async function onManualSleepController(runtime) {
 
   const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
   const result = runtime.sleepCycle(graph, runtime.getSettings());
+  runtime.recordMaintenanceAction?.({
+    action: "sleep",
+    beforeSnapshot,
+    mode: "manual",
+    summary: runtime.buildMaintenanceSummary?.("sleep", result, "manual"),
+  });
   await runtime.recordGraphMutation({
     beforeSnapshot,
     artifactTags: ["sleep"],
@@ -439,6 +451,12 @@ export async function onManualEvolveController(runtime) {
       conflictThreshold: settings.consolidationThreshold,
     },
   });
+  runtime.recordMaintenanceAction?.({
+    action: "consolidate",
+    beforeSnapshot,
+    mode: "manual",
+    summary: runtime.buildMaintenanceSummary?.("consolidate", result, "manual"),
+  });
   await runtime.recordGraphMutation({
     beforeSnapshot,
     artifactTags: ["consolidation"],
@@ -446,4 +464,27 @@ export async function onManualEvolveController(runtime) {
   runtime.toastr.success(
     `整合完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}`,
   );
+}
+
+export async function onUndoLastMaintenanceController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("撤销最近维护")) return;
+
+  const result = runtime.undoLastMaintenance?.();
+  if (!result?.ok) {
+    runtime.toastr.warning(result?.reason || "撤销最近维护失败");
+    return { handledToast: true };
+  }
+
+  runtime.markVectorStateDirty?.("撤销维护后需要重建向量索引");
+  runtime.saveGraphToChat?.({ reason: "maintenance-undo-complete" });
+  runtime.refreshPanelLiveState?.();
+  runtime.toastr.success(
+    `已撤销最近维护：${result.entry?.summary || result.entry?.action || "未知操作"}`,
+  );
+  return {
+    handledToast: true,
+    result,
+  };
 }
