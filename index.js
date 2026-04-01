@@ -45,6 +45,7 @@ import {
   onChatChangedController,
   onChatLoadedController,
   onGenerationAfterCommandsController,
+  onGenerationStartedController,
   onMessageDeletedController,
   onMessageEditedController,
   onMessageReceivedController,
@@ -1330,17 +1331,179 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
   return edited;
 }
 
+function rewriteRecallPayloadWithInjection(
+  promptData = null,
+  injectionText = "",
+) {
+  const normalizedInjectionText = normalizeRecallInputText(injectionText);
+  if (!normalizedInjectionText) {
+    return {
+      applied: false,
+      path: "",
+      field: "",
+      reason: "empty-injection-text",
+    };
+  }
+
+  const finalMesSend = Array.isArray(promptData?.finalMesSend)
+    ? promptData.finalMesSend
+    : null;
+  if (Array.isArray(finalMesSend) && finalMesSend.length > 0) {
+    for (let index = finalMesSend.length - 1; index >= 0; index--) {
+      const entry = finalMesSend[index];
+      if (!entry || typeof entry !== "object") continue;
+      if (entry.injected === true) continue;
+      const messageText = normalizeRecallInputText(
+        entry.message || entry.mes || entry.content || "",
+      );
+      if (!messageText) continue;
+
+      entry.extensionPrompts = Array.isArray(entry.extensionPrompts)
+        ? entry.extensionPrompts
+        : [];
+      const alreadyPresent = entry.extensionPrompts.some((chunk) =>
+        String(chunk || "").includes(normalizedInjectionText),
+      );
+      if (!alreadyPresent) {
+        entry.extensionPrompts.push(`${normalizedInjectionText}\n`);
+      }
+      return {
+        applied: true,
+        path: "finalMesSend",
+        field: `finalMesSend[${index}].extensionPrompts`,
+        reason: alreadyPresent
+          ? "rewrite-already-present"
+          : "finalMesSend-extensionPrompt-appended",
+        targetIndex: index,
+      };
+    }
+
+    return {
+      applied: false,
+      path: "finalMesSend",
+      field: "",
+      reason: "no-rewritable-finalMesSend-entry",
+    };
+  }
+
+  if (
+    typeof promptData?.combinedPrompt === "string" &&
+    promptData.combinedPrompt.trim()
+  ) {
+    if (!promptData.combinedPrompt.includes(normalizedInjectionText)) {
+      promptData.combinedPrompt = `${normalizedInjectionText}\n\n${promptData.combinedPrompt}`;
+    }
+    return {
+      applied: true,
+      path: "combinedPrompt",
+      field: "combinedPrompt",
+      reason: "combinedPrompt-prefixed",
+    };
+  }
+
+  if (typeof promptData?.prompt === "string" && promptData.prompt.trim()) {
+    if (!promptData.prompt.includes(normalizedInjectionText)) {
+      promptData.prompt = `${normalizedInjectionText}\n\n${promptData.prompt}`;
+    }
+    return {
+      applied: true,
+      path: "prompt",
+      field: "prompt",
+      reason: "prompt-prefixed",
+    };
+  }
+
+  return {
+    applied: false,
+    path: "",
+    field: "",
+    reason: "prompt-payload-unavailable",
+  };
+}
+
+function readGenerationRecallTransactionFinalResolution(transaction) {
+  return transaction?.finalResolution || null;
+}
+
+function storeGenerationRecallTransactionFinalResolution(
+  transaction,
+  finalResolution = null,
+) {
+  if (!transaction?.id) return transaction;
+  transaction.finalResolution = finalResolution ? { ...finalResolution } : null;
+  transaction.updatedAt = Date.now();
+  generationRecallTransactions.set(transaction.id, transaction);
+  return transaction;
+}
+
 function applyFinalRecallInjectionForGeneration({
   generationType = "normal",
   freshRecallResult = null,
+  transaction = null,
+  promptData = null,
+  hookName = "",
 } = {}) {
-  const chat = getContext()?.chat;
-  if (!Array.isArray(chat)) {
-    applyModuleInjectionPrompt("", getSettings());
-    return { source: "none", targetUserMessageIndex: null, usedText: "" };
+  const existingFinalResolution =
+    readGenerationRecallTransactionFinalResolution(transaction);
+  if (existingFinalResolution) {
+    return existingFinalResolution;
   }
 
-  let targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+  const recallResult =
+    freshRecallResult ||
+    getGenerationRecallTransactionResult(transaction) ||
+    null;
+  const deliveryMode =
+    String(
+      recallResult?.deliveryMode ||
+        transaction?.lastDeliveryMode ||
+        resolveGenerationRecallDeliveryMode(
+          hookName,
+          generationType,
+          transaction?.frozenRecallOptions || {},
+        ),
+    ).trim() || "immediate";
+  const chat = getContext()?.chat;
+
+  let transport = {
+    applied: false,
+    source: "none",
+    mode: "none",
+  };
+  let targetUserMessageIndex = null;
+  let resolved = {
+    source: "none",
+    injectionText: "",
+    record: null,
+  };
+  const rewrite = {
+    applied: false,
+    path: "",
+    field: "",
+    reason: "no-recall-source",
+  };
+  let applicationMode = "none";
+
+  if (!Array.isArray(chat)) {
+    transport = applyModuleInjectionPrompt("", getSettings()) || transport;
+    const emptyResolution = {
+      source: "none",
+      isFallback: false,
+      targetUserMessageIndex: null,
+      usedText: "",
+      deliveryMode,
+      applicationMode: "none",
+      rewrite,
+      transport,
+    };
+    storeGenerationRecallTransactionFinalResolution(
+      transaction,
+      emptyResolution,
+    );
+    return emptyResolution;
+  }
+
+  targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
     generationType,
   });
   if (
@@ -1354,15 +1517,71 @@ function applyFinalRecallInjectionForGeneration({
   const persistedRecord = Number.isFinite(targetUserMessageIndex)
     ? readPersistedRecallFromUserMessage(chat, targetUserMessageIndex)
     : null;
-  const resolved = resolveFinalRecallInjectionSource({
-    freshRecallResult,
+  resolved = resolveFinalRecallInjectionSource({
+    freshRecallResult: recallResult,
     persistedRecord,
   });
 
-  if (resolved.source === "persisted") {
-    applyModuleInjectionPrompt(resolved.injectionText || "", getSettings());
-  } else if (resolved.source === "none") {
-    applyModuleInjectionPrompt("", getSettings());
+  if (resolved.source === "fresh" && deliveryMode === "deferred") {
+    const rewriteResult = rewriteRecallPayloadWithInjection(
+      promptData,
+      resolved.injectionText || "",
+    );
+    Object.assign(rewrite, rewriteResult);
+    lastInjectionContent = resolved.injectionText || "";
+    if (rewriteResult.applied) {
+      applicationMode = "rewrite";
+      transport = clearLiveRecallInjectionPromptForRewrite() || {
+        applied: false,
+        source: "rewrite-cleared",
+        mode: "rewrite-cleared",
+      };
+      runtimeStatus = createUiStatus(
+        "召回已改写",
+        `本轮发送载荷已 rewrite · ${rewriteResult.path || rewriteResult.field || "payload"}`,
+        "success",
+      );
+    } else {
+      applicationMode = "fallback-injection";
+      transport =
+        applyModuleInjectionPrompt(
+          resolved.injectionText || "",
+          getSettings(),
+        ) || transport;
+      runtimeStatus = createUiStatus(
+        "召回回退",
+        `rewrite 未命中，已回退注入 · ${rewriteResult.reason}`,
+        "warning",
+      );
+    }
+  } else if (resolved.source === "fresh") {
+    applicationMode = "injection";
+    transport =
+      applyModuleInjectionPrompt(resolved.injectionText || "", getSettings()) ||
+      transport;
+    lastInjectionContent = resolved.injectionText || "";
+    rewrite.reason = "immediate-injection";
+    runtimeStatus = createUiStatus(
+      "召回已注入",
+      "本轮已使用最新召回结果",
+      "success",
+    );
+  } else if (resolved.source === "persisted") {
+    applicationMode = "persisted-injection";
+    transport =
+      applyModuleInjectionPrompt(resolved.injectionText || "", getSettings()) ||
+      transport;
+    lastInjectionContent = resolved.injectionText || "";
+    rewrite.reason = "persisted-record-fallback";
+    runtimeStatus = createUiStatus(
+      "召回回退",
+      "已使用消息楼层持久化注入",
+      "info",
+    );
+  } else {
+    transport = applyModuleInjectionPrompt("", getSettings()) || transport;
+    lastInjectionContent = "";
+    runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
   }
 
   if (
@@ -1373,32 +1592,87 @@ function applyFinalRecallInjectionForGeneration({
     triggerChatMetadataSave(getContext(), { immediate: false });
   }
 
-  if (resolved.source === "fresh") {
-    runtimeStatus = createUiStatus(
-      "召回已注入",
-      "本轮已使用最新召回结果",
-      "success",
-    );
-  } else if (resolved.source === "persisted") {
-    lastInjectionContent = resolved.injectionText || "";
-    runtimeStatus = createUiStatus(
-      "召回回退",
-      "已使用消息楼层持久化注入",
-      "info",
-    );
-  } else {
-    lastInjectionContent = "";
-    runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
-  }
+  recordInjectionSnapshot("recall", {
+    taskType: "recall",
+    source:
+      String(
+        recallResult?.source ||
+          transaction?.frozenRecallOptions?.lockedSource ||
+          transaction?.frozenRecallOptions?.overrideSource ||
+          "",
+      ).trim() || "unknown",
+    sourceLabel:
+      String(
+        recallResult?.sourceLabel ||
+          transaction?.frozenRecallOptions?.lockedSourceLabel ||
+          transaction?.frozenRecallOptions?.overrideSourceLabel ||
+          "",
+      ).trim() || "未知",
+    reason:
+      String(
+        recallResult?.reason ||
+          transaction?.frozenRecallOptions?.lockedReason ||
+          transaction?.frozenRecallOptions?.overrideReason ||
+          "",
+      ).trim() || "final-application",
+    sourceCandidates: Array.isArray(recallResult?.sourceCandidates)
+      ? recallResult.sourceCandidates.map((candidate) => ({ ...candidate }))
+      : Array.isArray(transaction?.frozenRecallOptions?.sourceCandidates)
+        ? transaction.frozenRecallOptions.sourceCandidates.map((candidate) => ({
+            ...candidate,
+          }))
+        : [],
+    hookName: String(hookName || recallResult?.hookName || "").trim(),
+    selectedNodeIds: recallResult?.selectedNodeIds || [],
+    retrievalMeta: recallResult?.retrievalMeta || {},
+    llmMeta: recallResult?.llmMeta || {},
+    stats: recallResult?.stats || {},
+    injectionText: resolved.injectionText || "",
+    deliveryMode,
+    applicationMode,
+    transport,
+    rewrite,
+    targetUserMessageIndex,
+    sourceKind: resolved.source,
+  });
+
   refreshPanelLiveState();
   schedulePersistedRecallMessageUiRefresh();
 
-  return {
+  const finalResolution = {
     source: resolved.source,
-    isFallback: resolved.source === "persisted",
+    isFallback:
+      resolved.source === "persisted" ||
+      applicationMode === "fallback-injection",
     targetUserMessageIndex,
     usedText: resolved.injectionText || "",
+    deliveryMode,
+    applicationMode,
+    rewrite,
+    transport,
   };
+  storeGenerationRecallTransactionFinalResolution(transaction, finalResolution);
+  return finalResolution;
+}
+
+function clearLiveRecallInjectionPromptForRewrite() {
+  try {
+    return (
+      applyModuleInjectionPrompt("", getSettings()) || {
+        applied: false,
+        source: "rewrite-clear",
+        mode: "rewrite-clear",
+      }
+    );
+  } catch (error) {
+    console.warn("[ST-BME] 清理 rewrite 前旧注入失败:", error);
+    return {
+      applied: false,
+      source: "rewrite-clear-error",
+      mode: "rewrite-clear-error",
+      error: error instanceof Error ? error.message : String(error || ""),
+    };
+  }
 }
 
 function clearPersistedRecallMessageUiObserver() {
@@ -5187,6 +5461,28 @@ function normalizeGenerationRecallTransactionType(generationType = "normal") {
   return normalized === "normal" ? "normal" : "history";
 }
 
+function resolveGenerationRecallDeliveryMode(
+  hookName,
+  generationType = "normal",
+  recallOptions = {},
+) {
+  if (recallOptions?.forceImmediateDelivery === true) {
+    return "immediate";
+  }
+
+  const normalizedType = normalizeGenerationRecallTransactionType(
+    recallOptions?.generationType || generationType,
+  );
+  if (normalizedType !== "normal") {
+    return "immediate";
+  }
+
+  return hookName === "GENERATION_AFTER_COMMANDS" ||
+    hookName === "GENERATE_BEFORE_COMBINE_PROMPTS"
+    ? "deferred"
+    : "immediate";
+}
+
 function freezeGenerationRecallOptionsForTransaction(
   chat,
   generationType = "normal",
@@ -5441,6 +5737,29 @@ function markGenerationRecallTransactionHookState(
   if (!transaction?.id || !hookName) return transaction;
   transaction.hookStates ||= {};
   transaction.hookStates[hookName] = state;
+  transaction.updatedAt = Date.now();
+  generationRecallTransactions.set(transaction.id, transaction);
+  return transaction;
+}
+
+function getGenerationRecallTransactionResult(transaction) {
+  return transaction?.lastRecallResult || null;
+}
+
+function storeGenerationRecallTransactionResult(
+  transaction,
+  recallResult = null,
+  meta = {},
+) {
+  if (!transaction?.id) return transaction;
+  transaction.lastRecallResult = recallResult ? { ...recallResult } : null;
+  transaction.lastRecallMeta =
+    meta && typeof meta === "object" ? { ...meta } : {};
+  transaction.lastDeliveryMode =
+    String(meta?.deliveryMode || recallResult?.deliveryMode || "").trim() ||
+    transaction.lastDeliveryMode ||
+    "";
+  transaction.finalResolution = null;
   transaction.updatedAt = Date.now();
   generationRecallTransactions.set(transaction.id, transaction);
   return transaction;
@@ -6944,17 +7263,14 @@ function onMessageSwiped(messageId, meta = null) {
   );
 }
 
-async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
-  return await onGenerationAfterCommandsController(
+function onGenerationStarted(type, params = {}, dryRun = false) {
+  return onGenerationStartedController(
     {
-      applyFinalRecallInjectionForGeneration,
-      buildGenerationAfterCommandsRecallInput,
-      consumeHostGenerationInputSnapshot,
-      createGenerationRecallContext,
-      getContext,
-      getGenerationRecallHookStateFromResult,
-      markGenerationRecallTransactionHookState,
-      runRecall,
+      freezeHostGenerationInputSnapshot,
+      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      getSendTextareaValue,
+      isFreshRecallInputRecord,
+      normalizeRecallInputText,
     },
     type,
     params,
@@ -6962,18 +7278,47 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
   );
 }
 
-async function onBeforeCombinePrompts() {
-  return await onBeforeCombinePromptsController({
-    applyFinalRecallInjectionForGeneration,
-    buildHistoryGenerationRecallInput,
-    buildNormalGenerationRecallInput,
-    consumeHostGenerationInputSnapshot,
-    createGenerationRecallContext,
-    getContext,
-    getGenerationRecallHookStateFromResult,
-    markGenerationRecallTransactionHookState,
-    runRecall,
-  });
+async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
+  return await onGenerationAfterCommandsController(
+    {
+      applyFinalRecallInjectionForGeneration,
+      buildGenerationAfterCommandsRecallInput,
+      clearLiveRecallInjectionPromptForRewrite,
+      consumeHostGenerationInputSnapshot,
+      createGenerationRecallContext,
+      getContext,
+      getGenerationRecallHookStateFromResult,
+      getGenerationRecallTransactionResult,
+      markGenerationRecallTransactionHookState,
+      resolveGenerationRecallDeliveryMode,
+      runRecall,
+      storeGenerationRecallTransactionResult,
+    },
+    type,
+    params,
+    dryRun,
+  );
+}
+
+async function onBeforeCombinePrompts(promptData = null) {
+  return await onBeforeCombinePromptsController(
+    {
+      applyFinalRecallInjectionForGeneration,
+      buildHistoryGenerationRecallInput,
+      buildNormalGenerationRecallInput,
+      clearLiveRecallInjectionPromptForRewrite,
+      consumeHostGenerationInputSnapshot,
+      createGenerationRecallContext,
+      getContext,
+      getGenerationRecallHookStateFromResult,
+      getGenerationRecallTransactionResult,
+      markGenerationRecallTransactionHookState,
+      resolveGenerationRecallDeliveryMode,
+      runRecall,
+      storeGenerationRecallTransactionResult,
+    },
+    promptData,
+  );
 }
 
 function onMessageReceived() {
@@ -7290,6 +7635,7 @@ async function onReembedDirect() {
       onChatChanged,
       onChatLoaded,
       onGenerationAfterCommands,
+      onGenerationStarted,
       onMessageDeleted,
       onMessageEdited,
       onMessageReceived,

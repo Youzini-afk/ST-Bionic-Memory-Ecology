@@ -121,6 +121,9 @@ export function registerCoreEventHooksController(runtime) {
   if (eventTypes.MESSAGE_SENT) {
     bind(eventTypes.MESSAGE_SENT, handlers.onMessageSent);
   }
+  if (eventTypes.GENERATION_STARTED) {
+    bind(eventTypes.GENERATION_STARTED, handlers.onGenerationStarted);
+  }
 
   const beforeCombineCleanup = runtime.registerBeforeCombinePrompts(
     handlers.onBeforeCombinePrompts,
@@ -194,6 +197,40 @@ export function onMessageSentController(runtime, messageId) {
   runtime.refreshPersistedRecallMessageUi?.();
 }
 
+export function onGenerationStartedController(
+  runtime,
+  type,
+  params = {},
+  dryRun = false,
+) {
+  if (dryRun) return null;
+  if (params?.automatic_trigger || params?.quiet_prompt) return null;
+
+  const generationType = String(type || "normal").trim() || "normal";
+  if (generationType !== "normal") return null;
+
+  const pendingSendIntent = runtime.getPendingRecallSendIntent?.();
+  const pendingIntentText = runtime.isFreshRecallInputRecord?.(
+    pendingSendIntent,
+  )
+    ? pendingSendIntent.text
+    : "";
+  const textareaText =
+    typeof runtime.getSendTextareaValue === "function"
+      ? runtime.getSendTextareaValue()
+      : "";
+  const snapshotText =
+    runtime.normalizeRecallInputText?.(pendingIntentText || textareaText) || "";
+
+  if (!snapshotText) return null;
+  return runtime.freezeHostGenerationInputSnapshot(
+    snapshotText,
+    pendingIntentText
+      ? "generation-started-send-intent"
+      : "generation-started-textarea",
+  );
+}
+
 export function onMessageDeletedController(
   runtime,
   chatLengthOrMessageId,
@@ -252,37 +289,70 @@ export async function onGenerationAfterCommandsController(
     generationType,
     recallOptions,
   });
-  if (!recallContext.shouldRun) {
+  if (!recallContext.shouldRun && !recallContext.transaction) {
     return;
   }
 
   const runtimeRecallOptions =
     recallContext.recallOptions || recallOptions || {};
-  runtime.markGenerationRecallTransactionHookState(
+  const deliveryMode =
+    runtime.resolveGenerationRecallDeliveryMode?.(
+      recallContext.hookName,
+      recallContext.generationType,
+      runtimeRecallOptions,
+    ) || "immediate";
+  let recallResult = runtime.getGenerationRecallTransactionResult?.(
     recallContext.transaction,
-    recallContext.hookName,
-    "running",
-  );
-  const recallResult = await runtime.runRecall({
-    ...runtimeRecallOptions,
-    recallKey: recallContext.recallKey,
-    hookName: recallContext.hookName,
-    signal: params?.signal,
-  });
-
-  runtime.markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    runtime.getGenerationRecallHookStateFromResult(recallResult),
   );
 
-  runtime.applyFinalRecallInjectionForGeneration({
+  if (recallContext.shouldRun) {
+    runtime.markGenerationRecallTransactionHookState(
+      recallContext.transaction,
+      recallContext.hookName,
+      "running",
+    );
+    if (deliveryMode === "deferred") {
+      runtime.clearLiveRecallInjectionPromptForRewrite?.();
+    }
+    recallResult = await runtime.runRecall({
+      ...runtimeRecallOptions,
+      deliveryMode,
+      recallKey: recallContext.recallKey,
+      hookName: recallContext.hookName,
+      signal: params?.signal,
+    });
+    runtime.storeGenerationRecallTransactionResult?.(
+      recallContext.transaction,
+      recallResult,
+      {
+        hookName: recallContext.hookName,
+        deliveryMode,
+      },
+    );
+
+    runtime.markGenerationRecallTransactionHookState(
+      recallContext.transaction,
+      recallContext.hookName,
+      runtime.getGenerationRecallHookStateFromResult(recallResult),
+    );
+  }
+
+  if (deliveryMode === "deferred") {
+    return recallResult;
+  }
+
+  return runtime.applyFinalRecallInjectionForGeneration({
     generationType: recallContext.generationType,
     freshRecallResult: recallResult,
+    transaction: recallContext.transaction,
+    hookName: recallContext.hookName,
   });
 }
 
-export async function onBeforeCombinePromptsController(runtime) {
+export async function onBeforeCombinePromptsController(
+  runtime,
+  promptData = null,
+) {
   const frozenInputSnapshot =
     runtime.consumeHostGenerationInputSnapshot?.() ||
     runtime.getPendingHostGenerationInputSnapshot?.() ||
@@ -301,31 +371,58 @@ export async function onBeforeCombinePromptsController(runtime) {
     generationType: "normal",
     recallOptions,
   });
-  if (!recallContext.shouldRun) {
+  if (!recallContext.shouldRun && !recallContext.transaction) {
     return;
   }
 
   const runtimeRecallOptions =
     recallContext.recallOptions || recallOptions || {};
-  runtime.markGenerationRecallTransactionHookState(
+  const deliveryMode =
+    runtime.resolveGenerationRecallDeliveryMode?.(
+      recallContext.hookName,
+      recallContext.generationType,
+      runtimeRecallOptions,
+    ) || "deferred";
+  let recallResult = runtime.getGenerationRecallTransactionResult?.(
     recallContext.transaction,
-    recallContext.hookName,
-    "running",
-  );
-  const recallResult = await runtime.runRecall({
-    ...runtimeRecallOptions,
-    recallKey: recallContext.recallKey,
-    hookName: recallContext.hookName,
-  });
-  runtime.markGenerationRecallTransactionHookState(
-    recallContext.transaction,
-    recallContext.hookName,
-    runtime.getGenerationRecallHookStateFromResult(recallResult),
   );
 
-  runtime.applyFinalRecallInjectionForGeneration({
+  if (recallContext.shouldRun) {
+    runtime.markGenerationRecallTransactionHookState(
+      recallContext.transaction,
+      recallContext.hookName,
+      "running",
+    );
+    if (deliveryMode === "deferred") {
+      runtime.clearLiveRecallInjectionPromptForRewrite?.();
+    }
+    recallResult = await runtime.runRecall({
+      ...runtimeRecallOptions,
+      deliveryMode,
+      recallKey: recallContext.recallKey,
+      hookName: recallContext.hookName,
+    });
+    runtime.storeGenerationRecallTransactionResult?.(
+      recallContext.transaction,
+      recallResult,
+      {
+        hookName: recallContext.hookName,
+        deliveryMode,
+      },
+    );
+    runtime.markGenerationRecallTransactionHookState(
+      recallContext.transaction,
+      recallContext.hookName,
+      runtime.getGenerationRecallHookStateFromResult(recallResult),
+    );
+  }
+
+  return runtime.applyFinalRecallInjectionForGeneration({
     generationType: recallContext.generationType,
     freshRecallResult: recallResult,
+    transaction: recallContext.transaction,
+    promptData,
+    hookName: recallContext.hookName,
   });
 }
 

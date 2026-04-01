@@ -8,6 +8,7 @@ import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
 import {
   onBeforeCombinePromptsController,
   onGenerationAfterCommandsController,
+  onGenerationStartedController,
   registerCoreEventHooksController,
 } from "../event-binding.js";
 import { onRerollController } from "../extraction-controller.js";
@@ -244,7 +245,8 @@ function createBatchStageHarness() {
   });
 }
 
-function createGenerationRecallHarness() {
+function createGenerationRecallHarness(options = {}) {
+  const { realApplyFinal = false } = options;
   return fs.readFile(indexPath, "utf8").then((source) => {
     const start = source.indexOf("const RECALL_INPUT_RECORD_TTL_MS = 60000;");
     const end = source.indexOf("function onMessageReceived() {");
@@ -273,6 +275,33 @@ function createGenerationRecallHarness() {
       },
       result: null,
       currentGraph: {},
+      _panelModule: null,
+      defaultSettings: {},
+      extension_settings: { [MODULE_NAME]: {} },
+      extension_prompt_types: {
+        NONE: 0,
+        BEFORE_PROMPT: 1,
+        IN_PROMPT: 2,
+        IN_CHAT: 3,
+      },
+      extension_prompt_roles: {
+        SYSTEM: 0,
+        USER: 1,
+        ASSISTANT: 2,
+      },
+      clampInt: (value, fallback = 0, min = 0, max = 9999) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return fallback;
+        return Math.min(max, Math.max(min, Math.trunc(numeric)));
+      },
+      getHostAdapter: () => null,
+      migrateLegacyTaskProfiles: (settings = {}) => ({
+        taskProfilesVersion: settings?.taskProfilesVersion || 0,
+        taskProfiles: settings?.taskProfiles || {},
+      }),
+      refreshPanelLiveStateController: () => {
+        context.refreshPanelCalls += 1;
+      },
       isRecalling: false,
       getCurrentChatId: () => "chat-main",
       normalizeRecallInputText: (text = "") => String(text || "").trim(),
@@ -298,6 +327,9 @@ function createGenerationRecallHarness() {
       chat: [],
       runRecallCalls: [],
       applyFinalCalls: [],
+      moduleInjectionCalls: [],
+      recordedInjectionSnapshots: [],
+      refreshPanelCalls: 0,
       createRecallInputRecord,
       createRecallRunResult,
       hashRecallInput,
@@ -318,6 +350,7 @@ function createGenerationRecallHarness() {
       GRAPH_PERSISTENCE_META_KEY,
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
+      onGenerationStartedController,
       readPersistedRecallFromUserMessage: () => null,
       resolveFinalRecallInjectionSource: ({
         freshRecallResult = null,
@@ -327,10 +360,24 @@ function createGenerationRecallHarness() {
         record: null,
       }),
       bumpPersistedRecallGenerationCount: () => null,
-      applyModuleInjectionPrompt: () => ({}),
+      applyModuleInjectionPrompt: (text = "") => {
+        const normalizedText = String(text || "");
+        context.moduleInjectionCalls.push(normalizedText);
+        return {
+          applied: Boolean(normalizedText.trim()),
+          source: normalizedText.trim() ? "module-injection" : "rewrite-clear",
+          mode: normalizedText.trim() ? "module-injection" : "rewrite-clear",
+        };
+      },
       getSettings: () => ({}),
       triggerChatMetadataSave: () => "debounced",
-      refreshPanelLiveState: () => {},
+      refreshPanelLiveState: () => {
+        context.refreshPanelCalls += 1;
+      },
+      recordInjectionSnapshot: (_kind, snapshot = {}) => {
+        context.recordedInjectionSnapshots.push({ ...snapshot });
+      },
+      schedulePersistedRecallMessageUiRefresh: () => {},
       resolveGenerationTargetUserMessageIndex: (
         chat = [],
         { generationType } = {},
@@ -346,7 +393,7 @@ function createGenerationRecallHarness() {
     };
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationAfterCommands, onBeforeCombinePrompts, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, recordRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage };`,
+      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, recordRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage };`,
       context,
       { filename: indexPath },
     );
@@ -377,8 +424,13 @@ function createGenerationRecallHarness() {
         configurable: true,
       },
     });
+    const originalApplyFinalRecallInjectionForGeneration =
+      context.result.applyFinalRecallInjectionForGeneration;
     context.applyFinalRecallInjectionForGeneration = (payload = {}) => {
       context.applyFinalCalls.push({ ...payload });
+      if (realApplyFinal) {
+        return originalApplyFinalRecallInjectionForGeneration(payload);
+      }
       return {
         source: "fresh",
         targetUserMessageIndex: null,
@@ -386,14 +438,37 @@ function createGenerationRecallHarness() {
     };
     context.runRecall = async (options = {}) => {
       context.runRecallCalls.push({ ...options });
+      const overrideUserMessage = String(
+        options.overrideUserMessage || options.userMessage || "",
+      );
       return {
         status: "completed",
         didRecall: true,
         ok: true,
+        injectionText: `注入:${overrideUserMessage}`,
+        deliveryMode: String(options.deliveryMode || "immediate"),
         source: options.overrideSource,
         sourceLabel: options.overrideSourceLabel,
         reason: options.overrideReason,
-        sourceCandidates: options.sourceCandidates,
+        sourceCandidates: Array.isArray(options.sourceCandidates)
+          ? options.sourceCandidates.map((candidate) => ({ ...candidate }))
+          : [],
+        selectedNodeIds: ["node-test-1"],
+        retrievalMeta: {
+          vectorHits: 1,
+          vectorMergedHits: 0,
+          diffusionHits: 0,
+          candidatePoolAfterDpp: 1,
+        },
+        llmMeta: {
+          status: "disabled",
+          reason: "test-disabled",
+          candidatePool: 0,
+        },
+        stats: {
+          coreCount: 1,
+          recallCount: 1,
+        },
       };
     };
     return context;
@@ -2670,6 +2745,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
       CHAT_CHANGED: "chat-changed",
       CHAT_LOADED: "chat-loaded",
       MESSAGE_SENT: "message-sent",
+      GENERATION_STARTED: "generation-started",
       MESSAGE_RECEIVED: "message-received",
       MESSAGE_DELETED: "message-deleted",
       MESSAGE_EDITED: "message-edited",
@@ -2680,6 +2756,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
       onChatChanged() {},
       onChatLoaded() {},
       onMessageSent() {},
+      onGenerationStarted() {},
       onGenerationAfterCommands() {},
       onBeforeCombinePrompts() {},
       onMessageReceived() {},
@@ -2709,7 +2786,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
   registerCoreEventHooksController(runtime);
   registerCoreEventHooksController(runtime);
 
-  assert.equal(eventRegistrations.length, 8);
+  assert.equal(eventRegistrations.length, 9);
   assert.equal(makeFirstRegistrations.length, 2);
   assert.equal(bindingState.registered, true);
 }
@@ -2749,6 +2826,47 @@ async function testGenerationRecallAppliesFinalInjectionOncePerTransaction() {
 
   assert.equal(harness.applyFinalCalls.length, 1);
   assert.equal(harness.applyFinalCalls[0].generationType, "normal");
+}
+
+async function testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload() {
+  const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+  harness.chat = [{ is_user: false, mes: "assistant-tail" }];
+  harness.__sendTextareaValue = "发送前真实输入";
+
+  await harness.result.onGenerationStarted("normal", {}, false);
+  harness.__sendTextareaValue = "";
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  const promptData = {
+    finalMesSend: [
+      {
+        injected: false,
+        message: "发送前真实输入",
+        extensionPrompts: [],
+      },
+    ],
+  };
+
+  const resolution = await harness.result.onBeforeCombinePrompts(promptData);
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(harness.applyFinalCalls.length, 1);
+  assert.equal(resolution.applicationMode, "rewrite");
+  assert.equal(resolution.deliveryMode, "deferred");
+  assert.equal(resolution.rewrite.applied, true);
+  assert.equal(resolution.rewrite.path, "finalMesSend");
+  assert.match(
+    promptData.finalMesSend[0].extensionPrompts.join("\n"),
+    /注入:发送前真实输入/,
+  );
+  assert.equal(
+    harness.moduleInjectionCalls.every((text) => text === ""),
+    true,
+  );
+  assert.equal(
+    harness.recordedInjectionSnapshots.at(-1)?.applicationMode,
+    "rewrite",
+  );
 }
 
 async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
@@ -3772,6 +3890,7 @@ await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
+await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
 await testRecallCardMountsOnStandardUserMessageDom();

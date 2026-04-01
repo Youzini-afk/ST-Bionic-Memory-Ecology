@@ -169,6 +169,8 @@ export function applyRecallInjectionController(
     reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
     candidatePool: 0,
   };
+  const deliveryMode =
+    String(recallInput?.deliveryMode || "immediate").trim() || "immediate";
 
   if (injectionText) {
     const tokens = runtime.estimateTokens(injectionText);
@@ -183,10 +185,16 @@ export function applyRecallInjectionController(
     });
   }
 
-  const injectionTransport = runtime.applyModuleInjectionPrompt(
-    injectionText,
-    settings,
-  );
+  let injectionTransport = {
+    applied: false,
+    source: "deferred",
+    mode: "deferred",
+  };
+  if (deliveryMode === "immediate") {
+    injectionTransport =
+      runtime.applyModuleInjectionPrompt(injectionText, settings) ||
+      injectionTransport;
+  }
   runtime.recordInjectionSnapshot("recall", {
     taskType: "recall",
     source: recallInput.source,
@@ -202,6 +210,18 @@ export function applyRecallInjectionController(
     llmMeta,
     stats: result.stats || {},
     injectionText,
+    deliveryMode,
+    applicationMode:
+      deliveryMode === "immediate" ? "injection" : "pending-rewrite",
+    rewrite: {
+      applied: false,
+      path: "",
+      field: "",
+      reason:
+        deliveryMode === "immediate"
+          ? "immediate-injection"
+          : "awaiting-generation-payload-rewrite",
+    },
     transport: injectionTransport,
   });
 
@@ -223,6 +243,7 @@ export function applyRecallInjectionController(
     [
       hookLabel,
       recallInput.sourceLabel,
+      deliveryMode === "immediate" ? "即时注入" : "等待本轮 rewrite",
       `ctx ${recentMessages.length}`,
       `vector ${retrievalMeta.vectorHits ?? 0}`,
       retrievalMeta.vectorMergedHits
@@ -256,7 +277,13 @@ export function applyRecallInjectionController(
     }
   }
 
-  return { injectionText, retrievalMeta, llmMeta };
+  return {
+    injectionText,
+    retrievalMeta,
+    llmMeta,
+    transport: injectionTransport,
+    deliveryMode,
+  };
 }
 
 export async function runRecallController(runtime, options = {}) {
@@ -366,6 +393,8 @@ export async function runRecallController(runtime, options = {}) {
       }
 
       recallInput.hookName = options.hookName || "";
+      recallInput.deliveryMode =
+        String(options.deliveryMode || "immediate").trim() || "immediate";
 
       runtime.console.log("[ST-BME] 开始召回", {
         source: recallInput.source,
@@ -425,6 +454,24 @@ export async function runRecallController(runtime, options = {}) {
         reason: "召回完成",
         selectedNodeIds: result.selectedNodeIds || [],
         injectionText: applied?.injectionText || "",
+        retrievalMeta: applied?.retrievalMeta || {},
+        llmMeta: applied?.llmMeta || {},
+        transport: applied?.transport || {
+          applied: false,
+          source: "none",
+          mode: "none",
+        },
+        deliveryMode:
+          applied?.deliveryMode ||
+          String(recallInput?.deliveryMode || "immediate").trim() ||
+          "immediate",
+        source: recallInput?.source || "",
+        sourceLabel: recallInput?.sourceLabel || "",
+        hookName: recallInput?.hookName || "",
+        sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
+          ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))
+          : [],
+        stats: result?.stats || {},
       });
     } catch (e) {
       if (runtime.isAbortError(e)) {
