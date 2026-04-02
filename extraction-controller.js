@@ -125,7 +125,10 @@ export async function executeExtractionBatchController(
 }
 
 export async function runExtractionController(runtime) {
-  if (runtime.getIsExtracting()) return;
+  if (runtime.getIsExtracting()) {
+    runtime.deferAutoExtraction?.("extracting");
+    return;
+  }
 
   const settings = runtime.getSettings();
   if (!settings.enabled) return;

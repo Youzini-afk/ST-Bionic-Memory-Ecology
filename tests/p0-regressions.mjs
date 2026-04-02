@@ -2697,6 +2697,16 @@ async function testGenerationRecallBeforeCombineRunsStandalone() {
   );
 }
 
+async function testGenerationRecallDryRunPreviewDoesNotTriggerBeforeCombineRecall() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "Prompt Viewer 预览" }];
+
+  harness.result.onGenerationStarted("normal", {}, true);
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 0);
+}
+
 async function testGenerationRecallDifferentKeyCanRunAgain() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "第一条" }];
@@ -2872,6 +2882,19 @@ async function testAutoExtractionDefersWhenGraphNotReady() {
 
   assert.deepEqual(deferredReasons, ["graph-not-ready"]);
   assert.equal(statuses[0]?.[0], "等待图谱加载");
+}
+
+async function testAutoExtractionDefersWhenAlreadyExtracting() {
+  const deferredReasons = [];
+
+  await runExtractionController({
+    getIsExtracting: () => true,
+    deferAutoExtraction(reason) {
+      deferredReasons.push(reason);
+    },
+  });
+
+  assert.deepEqual(deferredReasons, ["extracting"]);
 }
 
 async function testAutoExtractionDefersWhenHistoryRecoveryBusy() {
@@ -3986,12 +4009,14 @@ await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
 await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
 await testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable();
 await testGenerationRecallBeforeCombineRunsStandalone();
+await testGenerationRecallDryRunPreviewDoesNotTriggerBeforeCombineRecall();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testAutoExtractionDefersWhenGraphNotReady();
+await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
