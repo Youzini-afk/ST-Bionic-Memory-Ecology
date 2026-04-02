@@ -7,11 +7,15 @@ import vm from "node:vm";
 import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
 import {
   onBeforeCombinePromptsController,
+  onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
   registerCoreEventHooksController,
 } from "../event-binding.js";
-import { onRerollController } from "../extraction-controller.js";
+import {
+  onRerollController,
+  runExtractionController,
+} from "../extraction-controller.js";
 import {
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
@@ -249,7 +253,9 @@ function createGenerationRecallHarness(options = {}) {
   const { realApplyFinal = false } = options;
   return fs.readFile(indexPath, "utf8").then((source) => {
     const start = source.indexOf("const RECALL_INPUT_RECORD_TTL_MS = 60000;");
-    const end = source.indexOf("function onMessageReceived() {");
+    const end = source.indexOf(
+      'function onMessageReceived(messageId = null, type = "") {',
+    );
     if (start < 0 || end < 0 || end <= start) {
       throw new Error("无法从 index.js 提取生成召回事务定义");
     }
@@ -2791,6 +2797,86 @@ async function testRegisterCoreEventHooksIsIdempotent() {
   assert.equal(bindingState.registered, true);
 }
 
+async function testChatChangedDoesNotClearCoreEventBindings() {
+  let clearCoreBindingsCalls = 0;
+  let clearPendingAutoExtractionCalls = 0;
+
+  onChatChangedController({
+    clearCoreEventBindingState() {
+      clearCoreBindingsCalls += 1;
+    },
+    clearPendingHistoryMutationChecks() {},
+    clearTimeout() {},
+    getPendingHistoryRecoveryTimer: () => null,
+    setPendingHistoryRecoveryTimer() {},
+    setPendingHistoryRecoveryTrigger() {},
+    clearPendingAutoExtraction() {
+      clearPendingAutoExtractionCalls += 1;
+    },
+    clearPendingGraphLoadRetry() {},
+    setSkipBeforeCombineRecallUntil() {},
+    setLastPreGenerationRecallKey() {},
+    setLastPreGenerationRecallAt() {},
+    clearGenerationRecallTransactionsForChat() {},
+    abortAllRunningStages() {},
+    dismissAllStageNotices() {},
+    syncGraphLoadFromLiveContext() {},
+    clearInjectionState() {},
+    clearRecallInputTracking() {},
+    installSendIntentHooks() {},
+    refreshPersistedRecallMessageUi() {},
+  });
+
+  assert.equal(
+    clearCoreBindingsCalls,
+    0,
+    "聊天切换不应清空核心事件监听，否则后续自动链会失联",
+  );
+  assert.equal(clearPendingAutoExtractionCalls, 1);
+}
+
+async function testAutoExtractionDefersWhenGraphNotReady() {
+  const deferredReasons = [];
+  const statuses = [];
+
+  await runExtractionController({
+    getIsExtracting: () => false,
+    getCurrentGraph: () => null,
+    getSettings: () => ({ enabled: true }),
+    ensureGraphMutationReady: () => false,
+    deferAutoExtraction(reason) {
+      deferredReasons.push(reason);
+    },
+    setLastExtractionStatus(...args) {
+      statuses.push(args);
+    },
+    getGraphMutationBlockReason: () =>
+      "自动提取已暂停：正在加载 IndexedDB 图谱。",
+  });
+
+  assert.deepEqual(deferredReasons, ["graph-not-ready"]);
+  assert.equal(statuses[0]?.[0], "等待图谱加载");
+}
+
+async function testAutoExtractionDefersWhenHistoryRecoveryBusy() {
+  const deferredReasons = [];
+
+  await runExtractionController({
+    getIsExtracting: () => false,
+    getCurrentGraph: () => ({}),
+    getSettings: () => ({ enabled: true }),
+    ensureGraphMutationReady: () => true,
+    ensureCurrentGraphRuntimeState() {},
+    recoverHistoryIfNeeded: async () => false,
+    getIsRecoveringHistory: () => true,
+    deferAutoExtraction(reason) {
+      deferredReasons.push(reason);
+    },
+  });
+
+  assert.deepEqual(deferredReasons, ["history-recovering"]);
+}
+
 async function testRemoveNodeHandlesCyclicChildGraph() {
   const graph = createEmptyGraph();
   const nodeA = addNode(
@@ -3888,6 +3974,9 @@ await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
+await testChatChangedDoesNotClearCoreEventBindings();
+await testAutoExtractionDefersWhenGraphNotReady();
+await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();

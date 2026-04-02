@@ -470,6 +470,7 @@ const RECALL_INPUT_RECORD_TTL_MS = 60000;
 const HISTORY_RECOVERY_SETTLE_MS = 80;
 const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
 const GRAPH_LOAD_RETRY_DELAYS_MS = [120, 450, 1200, 2500];
+const AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS = [120, 320, 800, 1600, 2800];
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -491,6 +492,14 @@ let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
 let pendingGraphLoadRetryTimer = null;
 let pendingGraphLoadRetryChatId = "";
+let pendingAutoExtractionTimer = null;
+let pendingAutoExtraction = {
+  chatId: "",
+  messageId: null,
+  reason: "",
+  requestedAt: 0,
+  attempts: 0,
+};
 let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
@@ -810,6 +819,18 @@ function applyGraphLoadState(
     dbReady,
     storageMode: "indexeddb",
   });
+
+  if (dbReady && isGraphLoadStateDbReady(loadState)) {
+    const enqueueMicrotask =
+      typeof globalThis.queueMicrotask === "function"
+        ? globalThis.queueMicrotask.bind(globalThis)
+        : (task) => Promise.resolve().then(task);
+    enqueueMicrotask(() => {
+      if (typeof maybeResumePendingAutoExtraction === "function") {
+        void maybeResumePendingAutoExtraction(`graph-ready:${loadState}`);
+      }
+    });
+  }
 }
 
 function createAbortError(message = "操作已终止") {
@@ -3485,6 +3506,148 @@ function isGraphLoadRetryPending(chatId = getCurrentChatId()) {
     Boolean(normalizedChatId) &&
     pendingGraphLoadRetryChatId === normalizedChatId
   );
+}
+
+function clearPendingAutoExtraction({ resetState = true } = {}) {
+  if (pendingAutoExtractionTimer) {
+    clearTimeout(pendingAutoExtractionTimer);
+    pendingAutoExtractionTimer = null;
+  }
+
+  if (resetState) {
+    pendingAutoExtraction = {
+      chatId: "",
+      messageId: null,
+      reason: "",
+      requestedAt: 0,
+      attempts: 0,
+    };
+  }
+}
+
+function deferAutoExtraction(
+  reason = "auto-extraction-deferred",
+  { chatId = getCurrentChatId(), messageId = null, delayMs = null } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    clearPendingAutoExtraction();
+    return {
+      scheduled: false,
+      reason: "missing-chat-id",
+      chatId: "",
+    };
+  }
+
+  const sameChat = normalizedChatId === pendingAutoExtraction.chatId;
+  const previousAttempts = sameChat
+    ? Math.max(0, Math.floor(Number(pendingAutoExtraction.attempts) || 0))
+    : 0;
+  const nextAttempts = previousAttempts + 1;
+  const resolvedDelayMs = Number.isFinite(Number(delayMs))
+    ? Math.max(0, Math.floor(Number(delayMs)))
+    : AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS[
+        Math.min(
+          previousAttempts,
+          AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS.length - 1,
+        )
+      ];
+
+  pendingAutoExtraction = {
+    chatId: normalizedChatId,
+    messageId: Number.isFinite(Number(messageId))
+      ? Math.floor(Number(messageId))
+      : sameChat
+        ? pendingAutoExtraction.messageId
+        : null,
+    reason: String(reason || "auto-extraction-deferred"),
+    requestedAt:
+      sameChat && pendingAutoExtraction.requestedAt > 0
+        ? pendingAutoExtraction.requestedAt
+        : Date.now(),
+    attempts: nextAttempts,
+  };
+
+  if (pendingAutoExtractionTimer) {
+    clearTimeout(pendingAutoExtractionTimer);
+  }
+
+  pendingAutoExtractionTimer = setTimeout(() => {
+    pendingAutoExtractionTimer = null;
+    void maybeResumePendingAutoExtraction(
+      `retry:${pendingAutoExtraction.reason || "auto-extraction-deferred"}`,
+    );
+  }, resolvedDelayMs);
+
+  return {
+    scheduled: true,
+    chatId: normalizedChatId,
+    messageId: pendingAutoExtraction.messageId,
+    reason: pendingAutoExtraction.reason,
+    attempts: nextAttempts,
+    delayMs: resolvedDelayMs,
+  };
+}
+
+function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
+  const pendingChatId = normalizeChatIdCandidate(pendingAutoExtraction.chatId);
+  if (!pendingChatId) {
+    return {
+      resumed: false,
+      reason: "no-pending-auto-extraction",
+    };
+  }
+
+  const currentChatId = normalizeChatIdCandidate(getCurrentChatId());
+  if (!currentChatId || currentChatId !== pendingChatId) {
+    clearPendingAutoExtraction();
+    return {
+      resumed: false,
+      reason: "chat-switched",
+      chatId: pendingChatId,
+      currentChatId,
+    };
+  }
+
+  if (isExtracting) {
+    return deferAutoExtraction("extracting", {
+      chatId: pendingChatId,
+      messageId: pendingAutoExtraction.messageId,
+    });
+  }
+
+  if (isRecoveringHistory) {
+    return deferAutoExtraction("history-recovering", {
+      chatId: pendingChatId,
+      messageId: pendingAutoExtraction.messageId,
+    });
+  }
+
+  if (!ensureGraphMutationReady("自动提取", { notify: false })) {
+    return deferAutoExtraction("graph-not-ready", {
+      chatId: pendingChatId,
+      messageId: pendingAutoExtraction.messageId,
+    });
+  }
+
+  const pendingRequest = { ...pendingAutoExtraction };
+  clearPendingAutoExtraction();
+  const enqueueMicrotask =
+    typeof globalThis.queueMicrotask === "function"
+      ? globalThis.queueMicrotask.bind(globalThis)
+      : (task) => Promise.resolve().then(task);
+  enqueueMicrotask(() => {
+    void runExtraction().catch((error) => {
+      console.error("[ST-BME] 延迟自动提取失败:", error);
+      notifyExtractionIssue(error?.message || String(error) || "自动提取失败");
+    });
+  });
+
+  return {
+    resumed: true,
+    source,
+    ...pendingRequest,
+  };
 }
 
 function isGraphEffectivelyEmpty(graph) {
@@ -7296,6 +7459,15 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   } finally {
     finishStageAbortController("history", historyController);
     isRecoveringHistory = false;
+    const enqueueMicrotask =
+      typeof globalThis.queueMicrotask === "function"
+        ? globalThis.queueMicrotask.bind(globalThis)
+        : (task) => Promise.resolve().then(task);
+    enqueueMicrotask(() => {
+      if (typeof maybeResumePendingAutoExtraction === "function") {
+        void maybeResumePendingAutoExtraction("history-recovery-finished");
+      }
+    });
   }
 }
 
@@ -7307,6 +7479,8 @@ async function runExtraction() {
     beginStageAbortController,
     clampInt,
     console,
+    deferAutoExtraction,
+    ensureCurrentGraphRuntimeState,
     ensureGraphMutationReady,
     executeExtractionBatch,
     finishStageAbortController,
@@ -7315,6 +7489,7 @@ async function runExtraction() {
     getCurrentGraph: () => currentGraph,
     getGraphMutationBlockReason,
     getIsExtracting: () => isExtracting,
+    getIsRecoveringHistory: () => isRecoveringHistory,
     getLastProcessedAssistantFloor,
     getSettings,
     getSmartTriggerDecision,
@@ -7468,6 +7643,7 @@ function onChatChanged() {
     clearCoreEventBindingState,
     clearGenerationRecallTransactionsForChat,
     clearInjectionState,
+    clearPendingAutoExtraction,
     clearPendingGraphLoadRetry,
     clearPendingHistoryMutationChecks,
     clearRecallInputTracking,
@@ -7635,7 +7811,7 @@ async function onBeforeCombinePrompts(promptData = null) {
   );
 }
 
-function onMessageReceived() {
+function onMessageReceived(messageId = null, type = "") {
   return onMessageReceivedController({
     console,
     createRecallInputRecord,
@@ -7660,7 +7836,7 @@ function onMessageReceived() {
     setPendingRecallSendIntent: (record) => {
       pendingRecallSendIntent = record;
     },
-  });
+  }, messageId, type);
 }
 
 // ==================== UI 操作 ====================

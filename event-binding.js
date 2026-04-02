@@ -162,11 +162,11 @@ export function registerCoreEventHooksController(runtime) {
 }
 
 export function onChatChangedController(runtime) {
-  runtime.clearCoreEventBindingState?.();
   runtime.clearPendingHistoryMutationChecks();
   runtime.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
   runtime.setPendingHistoryRecoveryTimer(null);
   runtime.setPendingHistoryRecoveryTrigger("");
+  runtime.clearPendingAutoExtraction?.();
   runtime.clearPendingGraphLoadRetry();
   runtime.setSkipBeforeCombineRecallUntil(0);
   runtime.setLastPreGenerationRecallKey("");
@@ -452,7 +452,11 @@ export async function onBeforeCombinePromptsController(
   });
 }
 
-export function onMessageReceivedController(runtime) {
+export function onMessageReceivedController(
+  runtime,
+  messageId = null,
+  _type = "",
+) {
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const loadState = persistenceState.loadState || "";
   const dbReady =
@@ -488,10 +492,17 @@ export function onMessageReceivedController(runtime) {
 
   const context = runtime.getContext();
   const chat = context?.chat;
+  const receivedMessage =
+    Array.isArray(chat) && Number.isFinite(Number(messageId))
+      ? chat[Number(messageId)]
+      : null;
   const lastMessage =
     Array.isArray(chat) && chat.length > 0 ? chat[chat.length - 1] : null;
+  const targetMessage = runtime.isAssistantChatMessage(receivedMessage)
+    ? receivedMessage
+    : lastMessage;
 
-  if (runtime.isAssistantChatMessage(lastMessage)) {
+  if (runtime.isAssistantChatMessage(targetMessage)) {
     runtime.queueMicrotask(() => {
       void runtime.runExtraction().catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);

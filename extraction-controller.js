@@ -125,11 +125,12 @@ export async function executeExtractionBatchController(
 }
 
 export async function runExtractionController(runtime) {
-  if (runtime.getIsExtracting() || !runtime.getCurrentGraph()) return;
+  if (runtime.getIsExtracting()) return;
 
   const settings = runtime.getSettings();
   if (!settings.enabled) return;
   if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
+    runtime.deferAutoExtraction?.("graph-not-ready");
     runtime.setLastExtractionStatus(
       "等待图谱加载",
       runtime.getGraphMutationBlockReason("自动提取"),
@@ -138,7 +139,17 @@ export async function runExtractionController(runtime) {
     );
     return;
   }
-  if (!(await runtime.recoverHistoryIfNeeded("auto-extract"))) return;
+
+  if (!runtime.getCurrentGraph()) {
+    runtime.ensureCurrentGraphRuntimeState?.();
+  }
+
+  if (!(await runtime.recoverHistoryIfNeeded("auto-extract"))) {
+    if (runtime.getIsRecoveringHistory?.()) {
+      runtime.deferAutoExtraction?.("history-recovering");
+    }
+    return;
+  }
 
   const context = runtime.getContext();
   const chat = context.chat;

@@ -73,7 +73,7 @@ const persistenceCore = extractSnippet(
   "function handleGraphShadowSnapshotPageHide() {",
 );
 const messageSnippet = extractSnippet(
-  "function onMessageReceived() {",
+  'function onMessageReceived(messageId = null, type = "") {',
   "// ==================== UI 操作 ====================",
 );
 
