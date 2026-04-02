@@ -3,6 +3,7 @@
 // 可被 index.js 及其他模块安全导入。
 
 import { clampInt } from "./ui-status.js";
+import { sanitizePlannerMessageText } from "./planner-tag-utils.js";
 import { rollbackBatch } from "./runtime-state.js";
 
 export function isAssistantChatMessage(message) {
@@ -40,7 +41,7 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
     messages.push({
       seq: index,
       role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
+      content: sanitizePlannerMessageText(msg),
     });
   }
 

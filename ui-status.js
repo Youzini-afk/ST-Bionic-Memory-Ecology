@@ -1,6 +1,7 @@
 // ST-BME: UI 状态工厂、纯工具函数
 // 此模块中的函数均不依赖 index.js 模块级可变状态，
 // 可被 index.js 及其他模块安全导入。
+import { sanitizePlannerMessageText } from "./planner-tag-utils.js";
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -309,7 +310,7 @@ export function shouldRunRecallForTransaction(transaction, hookName) {
 }
 
 export function formatRecallContextLine(message) {
-  return `[${message.is_user ? "user" : "assistant"}]: ${message.mes || ""}`;
+  return `[${message.is_user ? "user" : "assistant"}]: ${sanitizePlannerMessageText(message)}`;
 }
 
 // ═══════════════════════════════════════════════════════════
