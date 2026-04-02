@@ -13,15 +13,22 @@ const hideState = {
 };
 
 function getTimerApi(runtime = {}) {
+  const rawSetTimeout =
+    typeof runtime.setTimeout === "function"
+      ? runtime.setTimeout
+      : globalThis.setTimeout;
+  const rawClearTimeout =
+    typeof runtime.clearTimeout === "function"
+      ? runtime.clearTimeout
+      : globalThis.clearTimeout;
+
   return {
-    setTimeout:
-      typeof runtime.setTimeout === "function"
-        ? runtime.setTimeout.bind(runtime)
-        : globalThis.setTimeout.bind(globalThis),
-    clearTimeout:
-      typeof runtime.clearTimeout === "function"
-        ? runtime.clearTimeout.bind(runtime)
-        : globalThis.clearTimeout.bind(globalThis),
+    setTimeout(...args) {
+      return Reflect.apply(rawSetTimeout, globalThis, args);
+    },
+    clearTimeout(...args) {
+      return Reflect.apply(rawClearTimeout, globalThis, args);
+    },
   };
 }
 
