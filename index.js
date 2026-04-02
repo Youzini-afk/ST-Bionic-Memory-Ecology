@@ -514,6 +514,7 @@ let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
+const plannerRecallHandoffs = new Map();
 let persistedRecallUiRefreshTimer = null;
 let persistedRecallUiRefreshObserver = null;
 let persistedRecallUiRefreshSession = 0;
@@ -522,6 +523,7 @@ const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
 const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
+const PLANNER_RECALL_HANDOFF_TTL_MS = GENERATION_RECALL_TRANSACTION_TTL_MS;
 const GENERATION_RECALL_HOOK_BRIDGE_MS = 1200;
 const stageNoticeHandles = {
   extraction: null,
@@ -1102,6 +1104,7 @@ function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  clearPlannerRecallHandoffsForChat("", { clearAll: true });
 }
 
 function getCoreEventBindingState() {
@@ -5855,6 +5858,116 @@ function buildHistoryGenerationRecallInput(chat) {
   };
 }
 
+function cleanupPlannerRecallHandoffs(now = Date.now()) {
+  for (const [chatId, handoff] of plannerRecallHandoffs.entries()) {
+    if (
+      !handoff ||
+      String(handoff.chatId || "") !== String(chatId || "") ||
+      now - Number(handoff.updatedAt || handoff.createdAt || 0) >
+        PLANNER_RECALL_HANDOFF_TTL_MS
+    ) {
+      plannerRecallHandoffs.delete(chatId);
+    }
+  }
+}
+
+function peekPlannerRecallHandoff(
+  chatId = getCurrentChatId(),
+  now = Date.now(),
+) {
+  cleanupPlannerRecallHandoffs(now);
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  const handoff = plannerRecallHandoffs.get(normalizedChatId) || null;
+  if (!handoff) return null;
+  if (
+    now - Number(handoff.updatedAt || handoff.createdAt || 0) >
+    PLANNER_RECALL_HANDOFF_TTL_MS
+  ) {
+    plannerRecallHandoffs.delete(normalizedChatId);
+    return null;
+  }
+  return handoff;
+}
+
+function clearPlannerRecallHandoffsForChat(
+  chatId = getCurrentChatId(),
+  { clearAll = false } = {},
+) {
+  cleanupPlannerRecallHandoffs();
+  if (clearAll) {
+    const removed = plannerRecallHandoffs.size;
+    plannerRecallHandoffs.clear();
+    return removed;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return 0;
+  return plannerRecallHandoffs.delete(normalizedChatId) ? 1 : 0;
+}
+
+function consumePlannerRecallHandoff(
+  chatId = getCurrentChatId(),
+  { handoffId = "" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  const handoff = peekPlannerRecallHandoff(normalizedChatId);
+  if (!handoff) return null;
+  if (handoffId && String(handoff.id || "") !== String(handoffId || "")) {
+    return null;
+  }
+
+  plannerRecallHandoffs.delete(normalizedChatId);
+  return handoff;
+}
+
+function preparePlannerRecallHandoff({
+  rawUserInput = "",
+  plannerAugmentedMessage = "",
+  plannerRecall = null,
+  chatId = getCurrentChatId(),
+} = {}) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedRawUserInput = normalizeRecallInputText(rawUserInput);
+  const normalizedPlannerAugmentedMessage = normalizeRecallInputText(
+    plannerAugmentedMessage,
+  );
+  const result = plannerRecall?.result || null;
+  if (!normalizedChatId || !normalizedRawUserInput || !result) {
+    return null;
+  }
+
+  cleanupPlannerRecallHandoffs();
+  const createdAt = Date.now();
+  const injectionText = normalizeRecallInputText(
+    plannerRecall?.memoryBlock || formatInjection(result, getSchema()),
+  );
+  const handoff = {
+    id: [
+      normalizedChatId,
+      hashRecallInput(normalizedRawUserInput),
+      createdAt,
+    ].join(":"),
+    chatId: normalizedChatId,
+    rawUserInput: normalizedRawUserInput,
+    plannerAugmentedMessage: normalizedPlannerAugmentedMessage,
+    result,
+    recentMessages: Array.isArray(plannerRecall?.recentMessages)
+      ? plannerRecall.recentMessages.map((item) => String(item || ""))
+      : [],
+    injectionText,
+    source: "planner-handoff",
+    sourceLabel: "Planner handoff",
+    createdAt,
+    updatedAt: createdAt,
+  };
+  plannerRecallHandoffs.set(normalizedChatId, handoff);
+  return handoff;
+}
+
 function buildPreGenerationRecallKey(type, options = {}) {
   const targetUserMessageIndex = Number.isFinite(options.targetUserMessageIndex)
     ? options.targetUserMessageIndex
@@ -6290,11 +6403,39 @@ function createGenerationRecallContext({
   const normalizedChatId = normalizeChatIdCandidate(
     chatId || context?.chatId || getCurrentChatId(),
   );
+  const effectiveGenerationType = normalizeGenerationRecallTransactionType(
+    recallOptions?.generationType || generationType,
+  );
+  const plannerRecallHandoff =
+    effectiveGenerationType === "normal"
+      ? peekPlannerRecallHandoff(normalizedChatId)
+      : null;
+  const effectiveRecallOptions = plannerRecallHandoff
+    ? {
+        ...(recallOptions || {}),
+        overrideUserMessage: plannerRecallHandoff.rawUserInput,
+        overrideSource: plannerRecallHandoff.source || "planner-handoff",
+        overrideSourceLabel:
+          plannerRecallHandoff.sourceLabel || "Planner handoff",
+        overrideReason: "planner-handoff-reuse",
+        sourceCandidates: [
+          {
+            text: plannerRecallHandoff.rawUserInput,
+            source: plannerRecallHandoff.source || "planner-handoff",
+            sourceLabel:
+              plannerRecallHandoff.sourceLabel || "Planner handoff",
+            reason: "planner-handoff-reuse",
+            includeSyntheticUserMessage: false,
+          },
+        ],
+        includeSyntheticUserMessage: false,
+      }
+    : recallOptions;
 
   const frozenRecallOptions = freezeGenerationRecallOptionsForTransaction(
     chat,
     generationType,
-    recallOptions,
+    effectiveRecallOptions,
   );
   if (!frozenRecallOptions) {
     return {
@@ -6312,7 +6453,7 @@ function createGenerationRecallContext({
     frozenRecallOptions.generationType || generationType,
   );
   const fallbackRecallKey =
-    recallOptions.recallKey ||
+    effectiveRecallOptions?.recallKey ||
     buildPreGenerationRecallKey(transactionGenerationType, {
       ...frozenRecallOptions,
       chatId: normalizedChatId,
@@ -6421,6 +6562,20 @@ function createGenerationRecallContext({
     generationType:
       transaction.frozenRecallOptions?.generationType || generationType,
   };
+  if (plannerRecallHandoff?.result) {
+    boundRecallOptions.cachedRecallPayload = {
+      handoffId: plannerRecallHandoff.id,
+      chatId: plannerRecallHandoff.chatId,
+      result: plannerRecallHandoff.result,
+      recentMessages: Array.isArray(plannerRecallHandoff.recentMessages)
+        ? plannerRecallHandoff.recentMessages.map((item) => String(item || ""))
+        : [],
+      injectionText: String(plannerRecallHandoff.injectionText || ""),
+      source: plannerRecallHandoff.source || "planner-handoff",
+      sourceLabel: plannerRecallHandoff.sourceLabel || "Planner handoff",
+      reason: "planner-handoff-reuse",
+    };
+  }
 
   const recallKey = transactionRecallKey;
   const shouldRun = shouldRunRecallForTransaction(transaction, hookName);
@@ -7709,7 +7864,7 @@ function buildRecallRetrieveOptions(settings, context) {
 async function runPlannerRecallForEna({
   rawUserInput,
   signal = undefined,
-  disableLlmRecall = true,
+  disableLlmRecall = false,
 } = {}) {
   const userMessage = normalizeRecallInputText(rawUserInput || "");
   if (!userMessage) {
@@ -7832,6 +7987,7 @@ async function runRecall(options = {}) {
       buildRecallRetrieveOptions,
       clampInt,
       console,
+      consumePlannerRecallHandoff,
       createAbortError,
       createRecallInputRecord,
       createRecallRunResult,
@@ -8521,6 +8677,7 @@ async function onReembedDirect() {
     await initEnaPlanner({
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      preparePlannerRecallHandoff,
       runPlannerRecallForEna,
     });
     console.log("[ST-BME] Ena Planner module loaded");

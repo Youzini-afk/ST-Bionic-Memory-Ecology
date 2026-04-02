@@ -432,6 +432,57 @@ export async function runRecallController(runtime, options = {}) {
         runtime.setPendingRecallSendIntent(runtime.createRecallInputRecord());
       }
 
+      const cachedRecallPayload =
+        options.cachedRecallPayload &&
+        typeof options.cachedRecallPayload === "object"
+          ? options.cachedRecallPayload
+          : null;
+      if (cachedRecallPayload?.result) {
+        // Cached planner handoff is already the authoritative source for this
+        // generation, so any leftover send-intent snapshot must be cleared to
+        // avoid leaking stale input into a later fallback recall path.
+        runtime.setPendingRecallSendIntent?.(runtime.createRecallInputRecord());
+        const cachedResult = cachedRecallPayload.result;
+        const recentMessages = Array.isArray(cachedRecallPayload.recentMessages)
+          ? cachedRecallPayload.recentMessages.map((item) => String(item || ""))
+          : recallInput.recentMessages;
+        const applied = runtime.applyRecallInjection(
+          settings,
+          recallInput,
+          recentMessages,
+          cachedResult,
+        );
+        runtime.consumePlannerRecallHandoff?.(cachedRecallPayload.chatId, {
+          handoffId: cachedRecallPayload.handoffId,
+        });
+        return runtime.createRecallRunResult("completed", {
+          reason: cachedRecallPayload.reason || "planner-handoff-reused",
+          selectedNodeIds: cachedResult.selectedNodeIds || [],
+          injectionText: applied?.injectionText || "",
+          retrievalMeta: applied?.retrievalMeta || {},
+          llmMeta: applied?.llmMeta || {},
+          transport: applied?.transport || {
+            applied: false,
+            source: "none",
+            mode: "none",
+          },
+          deliveryMode:
+            applied?.deliveryMode ||
+            String(recallInput?.deliveryMode || "immediate").trim() ||
+            "immediate",
+          source: recallInput?.source || cachedRecallPayload.source || "",
+          sourceLabel:
+            recallInput?.sourceLabel || cachedRecallPayload.sourceLabel || "",
+          hookName: recallInput?.hookName || "",
+          sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
+            ? recallInput.sourceCandidates.map((candidate) => ({
+                ...candidate,
+              }))
+            : [],
+          stats: cachedResult?.stats || {},
+        });
+      }
+
       const result = await runtime.retrieve({
         graph: runtime.getCurrentGraph(),
         userMessage,

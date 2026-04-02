@@ -6,7 +6,7 @@ import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';
 const OVERLAY_ID = 'xiaobaix-ena-planner-overlay';
-const VECTOR_RECALL_TIMEOUT_MS = 15000;
+const VECTOR_RECALL_TIMEOUT_MS = 30000;
 const PLANNER_REQUEST_TIMEOUT_MS = 90000;
 const _currentModuleUrl = import.meta.url;
 
@@ -1114,9 +1114,10 @@ async function buildPlannerMessages(rawUserInput) {
 
     const charBlockRaw = formatCharCardBlock(charObj);
 
-    // --- BME memory: planner-safe recall with history/vector guards ---
+    // --- BME memory: full recall with history/vector guards ---
     let memoryBlock = '';
     let memorySource = 'none';
+    let plannerRecall = null;
     if (_bmeRuntime?.runPlannerRecallForEna) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), VECTOR_RECALL_TIMEOUT_MS);
@@ -1124,8 +1125,8 @@ async function buildPlannerMessages(rawUserInput) {
             const recall = await _bmeRuntime.runPlannerRecallForEna({
                 rawUserInput,
                 signal: controller.signal,
-                disableLlmRecall: true,
             });
+            plannerRecall = recall ?? null;
             if (recall?.ok && recall.memoryBlock) {
                 memoryBlock = recall.memoryBlock;
                 memorySource = 'bme';
@@ -1204,7 +1205,17 @@ async function buildPlannerMessages(rawUserInput) {
         messages.push({ role: 'assistant', content });
     }
 
-    return { messages, meta: { charBlockRaw, worldbookRaw, recentChatRaw, memoryBlockLen: memoryBlock.length, plotsRaw } };
+    return {
+        messages,
+        meta: {
+            charBlockRaw,
+            worldbookRaw,
+            recentChatRaw,
+            memoryBlockLen: memoryBlock.length,
+            plannerRecall,
+            plotsRaw,
+        }
+    };
 }
 
 /**
@@ -1221,7 +1232,7 @@ async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
     };
 
     try {
-        const { messages } = await buildPlannerMessages(rawUserInput);
+        const { messages, meta } = await buildPlannerMessages(rawUserInput);
         log.requestMessages = messages;
 
         const rawReply = await callPlanner(messages, options);
@@ -1232,7 +1243,7 @@ async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
         log.ok = true;
 
         state.logs.unshift(log); clampLogs(); persistLogsMaybe();
-        return { rawReply, filtered };
+        return { rawReply, filtered, plannerRecall: meta?.plannerRecall ?? null };
     } catch (e) {
         log.error = String(e?.message ?? e);
         state.logs.unshift(log); clampLogs(); persistLogsMaybe();
@@ -1274,7 +1285,7 @@ async function doInterceptAndPlanThenSend() {
 
     try {
         toastInfo('Ena Planner：正在规划…');
-        const { filtered } = await runPlanningOnce(raw, false, {
+        const { filtered, plannerRecall } = await runPlanningOnce(raw, false, {
             onDelta(_piece, full) {
                 if (!state.isPlanning) return;
                 if (!ensureSettings().api.stream) return;
@@ -1285,6 +1296,16 @@ async function doInterceptAndPlanThenSend() {
         const merged = `${raw}\n\n${filtered}`.trim();
         ta.value = merged;
         state.lastInjectedText = merged;
+
+        // Ordering requirement: register the one-shot planner recall handoff
+        // synchronously before btn.click(), with no await/timer hop in between.
+        if (_bmeRuntime?.preparePlannerRecallHandoff && plannerRecall?.result) {
+            _bmeRuntime.preparePlannerRecallHandoff({
+                rawUserInput: raw,
+                plannerAugmentedMessage: merged,
+                plannerRecall,
+            });
+        }
 
         state.bypassNextSend = true;
         btn.click();
