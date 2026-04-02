@@ -953,7 +953,62 @@
 .bme-config-workspace-header {
   padding: 20px 22px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   flex-shrink: 0;
+}
+
+.bme-config-workspace-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.bme-config-launch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--bme-on-surface);
+  cursor: pointer;
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    color 0.2s ease,
+    transform 0.2s ease;
+}
+
+.bme-config-launch-btn:hover {
+  border-color: var(--bme-primary);
+  color: var(--bme-primary);
+  background: var(--bme-primary-dim);
+  transform: translateY(-1px);
+}
+
+.bme-config-launch-btn:disabled,
+.bme-config-launch-btn.is-runtime-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  color: var(--bme-on-surface-dim);
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+  transform: none;
+}
+
+.bme-config-launch-hint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--bme-on-surface-dim);
+  text-align: right;
+  max-width: 220px;
 }
 
 .bme-config-workspace-title,
@@ -2242,10 +2297,21 @@
   /* ⑦ Config mode 移动端 */
   .bme-config-workspace-header {
     padding: 14px 14px 8px;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .bme-config-workspace-title {
     font-size: 18px;
+  }
+
+  .bme-config-workspace-actions {
+    align-items: stretch;
+  }
+
+  .bme-config-launch-hint {
+    max-width: none;
+    text-align: left;
   }
 
   .bme-config-sections {
