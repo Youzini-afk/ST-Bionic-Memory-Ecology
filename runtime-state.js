@@ -208,10 +208,15 @@ export function stableHashString(text) {
 }
 
 export function buildMessageHash(message) {
+  const managedHideMarker = Boolean(
+    message?.extra &&
+      typeof message.extra === "object" &&
+      message.extra.__st_bme_hide_managed === true,
+  );
   const swipeId = Number.isFinite(message?.swipe_id) ? message.swipe_id : null;
   const payload = JSON.stringify({
     isUser: Boolean(message?.is_user),
-    isSystem: Boolean(message?.is_system),
+    isSystem: managedHideMarker ? false : Boolean(message?.is_system),
     text: String(message?.mes || ""),
     swipeId,
   });

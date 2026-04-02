@@ -51,6 +51,24 @@ const editedDetection = detectHistoryMutation(editedChat, {
 assert.equal(editedDetection.dirty, true);
 assert.equal(editedDetection.earliestAffectedFloor, 1);
 
+const bmeHiddenChat = structuredClone(chat);
+bmeHiddenChat[1].is_system = true;
+bmeHiddenChat[1].extra = { __st_bme_hide_managed: true };
+const bmeHiddenDetection = detectHistoryMutation(bmeHiddenChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: hashes,
+});
+assert.equal(bmeHiddenDetection.dirty, false);
+
+const realSystemFlipChat = structuredClone(chat);
+realSystemFlipChat[1].is_system = true;
+const realSystemFlipDetection = detectHistoryMutation(realSystemFlipChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: hashes,
+});
+assert.equal(realSystemFlipDetection.dirty, true);
+assert.equal(realSystemFlipDetection.earliestAffectedFloor, 1);
+
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {
   lastProcessedAssistantFloor: 3,

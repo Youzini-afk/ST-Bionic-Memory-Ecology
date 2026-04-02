@@ -12,6 +12,8 @@ const hideState = {
   operationVersion: 0,
 };
 
+const BME_HIDE_HASH_MARKER = "__st_bme_hide_managed";
+
 function getTimerApi(runtime = {}) {
   const rawSetTimeout =
     typeof runtime.setTimeout === "function"
@@ -179,6 +181,12 @@ function restoreManagedSystemFlags(chat, runtime = {}) {
     const message = chat[index];
     if (!message || message.is_system !== true) continue;
     message.is_system = false;
+    if (message.extra && typeof message.extra === "object") {
+      delete message.extra[BME_HIDE_HASH_MARKER];
+      if (Object.keys(message.extra).length === 0) {
+        delete message.extra;
+      }
+    }
     restored.push(index);
   }
 
@@ -195,6 +203,10 @@ function markManagedSystemRange(chat, start, end, runtime = {}) {
     const message = chat[index];
     if (!message || message.is_system === true) continue;
     message.is_system = true;
+    const extra =
+      message.extra && typeof message.extra === "object" ? message.extra : {};
+    extra[BME_HIDE_HASH_MARKER] = true;
+    message.extra = extra;
     hideState.managedSystemIndices.add(index);
     marked.push(index);
   }
