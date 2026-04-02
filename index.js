@@ -2287,9 +2287,9 @@ function getHideRuntimeAdapters() {
   };
 }
 
-function applyMessageHideNow(reason = "manual-apply") {
+async function applyMessageHideNow(reason = "manual-apply") {
   try {
-    const result = applyHideSettings(
+    const result = await applyHideSettings(
       getMessageHideSettings(),
       getHideRuntimeAdapters(),
     );
@@ -2316,9 +2316,9 @@ function scheduleMessageHideApply(reason = "scheduled", delayMs = 120) {
   }
 }
 
-function runIncrementalMessageHide(reason = "incremental") {
+async function runIncrementalMessageHide(reason = "incremental") {
   try {
-    const result = runIncrementalHideCheck(
+    const result = await runIncrementalHideCheck(
       getMessageHideSettings(),
       getHideRuntimeAdapters(),
     );
@@ -2344,9 +2344,9 @@ function clearMessageHideState(reason = "reset") {
   }
 }
 
-function clearAllHiddenMessages(reason = "manual-clear") {
+async function clearAllHiddenMessages(reason = "manual-clear") {
   try {
-    const result = unhideAll(getHideRuntimeAdapters());
+    const result = await unhideAll(getHideRuntimeAdapters());
     console.log("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
     return result;
   } catch (error) {
@@ -4899,7 +4899,7 @@ function updateModuleSettings(patch = {}) {
   if (Object.keys(patch).some((key) => messageHideKeys.has(key))) {
     const hideSettings = getMessageHideSettings(settings);
     if (!hideSettings.enabled || hideSettings.hide_last_n <= 0) {
-      clearAllHiddenMessages("settings-updated-disable");
+      void clearAllHiddenMessages("settings-updated-disable");
     } else {
       scheduleMessageHideApply("settings-updated", 30);
     }
@@ -8273,7 +8273,7 @@ function onMessageReceived(messageId = null, type = "") {
     hideSettings?.hide_last_n > 0 &&
     typeof runIncrementalMessageHide === "function"
   ) {
-    runIncrementalMessageHide("message-received");
+    void runIncrementalMessageHide("message-received");
   }
 
   return result;
