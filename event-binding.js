@@ -506,6 +506,12 @@ export function onMessageReceivedController(
   messageId = null,
   _type = "",
 ) {
+  const enqueueMicrotask =
+    typeof runtime.queueMicrotask === "function"
+      ? runtime.queueMicrotask.bind(runtime)
+      : typeof globalThis.queueMicrotask === "function"
+        ? globalThis.queueMicrotask.bind(globalThis)
+        : (task) => Promise.resolve().then(task);
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const loadState = persistenceState.loadState || "";
   const dbReady =
@@ -552,7 +558,7 @@ export function onMessageReceivedController(
     : lastMessage;
 
   if (runtime.isAssistantChatMessage(targetMessage)) {
-    runtime.queueMicrotask(() => {
+    enqueueMicrotask(() => {
       void runtime.runExtraction().catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);
         runtime.notifyExtractionIssue(

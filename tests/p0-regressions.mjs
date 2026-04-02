@@ -10,6 +10,7 @@ import {
   onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
+  onMessageReceivedController,
   onMessageSwipedController,
   registerCoreEventHooksController,
 } from "../event-binding.js";
@@ -2946,6 +2947,48 @@ async function testSwipeRoutesToRerollWithoutHistoryRecoveryFallback() {
   assert.equal(result.recoveryPath, "reverse-journal");
 }
 
+async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask() {
+  let runExtractionCalls = 0;
+  let refreshCalls = 0;
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({
+        chat: [
+          { is_user: true, mes: "u1" },
+          { is_user: false, mes: "a1" },
+        ],
+      }),
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      runExtraction: async () => {
+        runExtractionCalls += 1;
+      },
+      console: {
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+    },
+    1,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls, 1);
+  assert.equal(refreshCalls, 1);
+}
+
 async function testAutoExtractionDefersWhenGraphNotReady() {
   const deferredReasons = [];
   const statuses = [];
@@ -4218,6 +4261,7 @@ await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testSwipeRoutesToRerollWithoutHistoryRecoveryFallback();
+await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
