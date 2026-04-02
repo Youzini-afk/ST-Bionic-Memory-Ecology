@@ -7408,6 +7408,120 @@ function buildRecallRetrieveOptions(settings, context) {
   };
 }
 
+async function runPlannerRecallForEna({
+  rawUserInput,
+  signal = undefined,
+  disableLlmRecall = true,
+} = {}) {
+  const userMessage = normalizeRecallInputText(rawUserInput || "");
+  if (!userMessage) {
+    return {
+      ok: false,
+      reason: "empty-user-input",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  const settings = getSettings();
+  if (!settings.enabled || !settings.recallEnabled) {
+    return {
+      ok: false,
+      reason: "recall-disabled",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError("Ena Planner recall aborted");
+  }
+
+  if (!currentGraph || !isGraphReadableForRecall()) {
+    return {
+      ok: false,
+      reason: "graph-not-readable",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (
+    !Array.isArray(currentGraph.nodes) ||
+    currentGraph.nodes.length === 0
+  ) {
+    return {
+      ok: false,
+      reason: "graph-empty",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (isGraphMetadataWriteAllowed()) {
+    const recovered = await recoverHistoryIfNeeded("pre-ena-planner-recall");
+    if (!recovered) {
+      return {
+        ok: false,
+        reason: "history-recovery-not-ready",
+        memoryBlock: "",
+        recentMessages: [],
+        result: null,
+      };
+    }
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError("Ena Planner recall aborted");
+  }
+
+  await ensureVectorReadyIfNeeded("pre-ena-planner-recall", signal);
+
+  const context = getContext();
+  const chat = context?.chat ?? [];
+  const recentMessages = buildRecallRecentMessages(
+    chat,
+    clampInt(settings.recallLlmContextMessages, 4, 0, 20),
+    userMessage,
+  );
+  const schema = getSchema();
+  const baseOptions = buildRecallRetrieveOptions(settings, context);
+  const options = {
+    ...baseOptions,
+    enableLLMRecall: disableLlmRecall
+      ? false
+      : baseOptions.enableLLMRecall,
+  };
+
+  const result = await retrieve({
+    graph: currentGraph,
+    userMessage,
+    recentMessages,
+    embeddingConfig: getEmbeddingConfig(),
+    schema,
+    settings,
+    signal,
+    options,
+  });
+  const memoryBlock = formatInjection(result, schema).trim();
+
+  return {
+    ok: Boolean(memoryBlock),
+    reason: memoryBlock ? "completed" : "empty-memory-block",
+    memoryBlock,
+    recentMessages,
+    result,
+  };
+}
+
 /**
  * 召回管线：检索并注入记忆
  */
@@ -8054,5 +8168,16 @@ async function onReembedDirect() {
   });
 
   schedulePersistedRecallMessageUiRefresh(120);
+  try {
+    const { initEnaPlanner } = await import("./ena-planner/ena-planner.js");
+    await initEnaPlanner({
+      getContext,
+      getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      runPlannerRecallForEna,
+    });
+    console.log("[ST-BME] Ena Planner module loaded");
+  } catch (error) {
+    console.warn("[ST-BME] Ena Planner module load failed:", error);
+  }
   console.log("[ST-BME] 初始化完成");
 })();
