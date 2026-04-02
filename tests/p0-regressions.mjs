@@ -10,6 +10,7 @@ import {
   onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
+  onMessageSwipedController,
   registerCoreEventHooksController,
 } from "../event-binding.js";
 import {
@@ -204,10 +205,13 @@ function createBatchStageHarness() {
     const marker = "function notifyHistoryDirty(dirtyFrom, reason) {";
     const start = source.indexOf("function shouldAdvanceProcessedHistory(");
     const end = source.indexOf(marker);
-    if (start < 0 || end < 0 || end <= start) {
+    const resolvedEnd = end >= 0 ? end : endFallback;
+    if (start < 0 || resolvedEnd < 0 || resolvedEnd <= start) {
       throw new Error("无法从 index.js 提取批次状态机定义");
     }
-    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const snippet = source
+      .slice(start, resolvedEnd)
+      .replace(/^export\s+/gm, "");
     const context = {
       console,
       result: null,
@@ -256,10 +260,13 @@ function createGenerationRecallHarness(options = {}) {
     const end = source.indexOf(
       'function onMessageReceived(messageId = null, type = "") {',
     );
-    if (start < 0 || end < 0 || end <= start) {
+    const resolvedEnd = end >= 0 ? end : endFallback;
+    if (start < 0 || resolvedEnd < 0 || resolvedEnd <= start) {
       throw new Error("无法从 index.js 提取生成召回事务定义");
     }
-    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const snippet = source
+      .slice(start, resolvedEnd)
+      .replace(/^export\s+/gm, "");
     const context = {
       console,
       Date,
@@ -484,11 +491,15 @@ function createGenerationRecallHarness(options = {}) {
 function createHistoryRecoveryHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
     const start = source.indexOf("async function recoverHistoryIfNeeded(");
+    const endFallback = source.indexOf("async function runExtraction()");
     const end = source.indexOf("/**\n * 提取管线：处理未提取的对话楼层");
-    if (start < 0 || end < 0 || end <= start) {
+    const resolvedEnd = end >= 0 ? end : endFallback;
+    if (start < 0 || resolvedEnd < 0 || resolvedEnd <= start) {
       throw new Error("无法从 index.js 提取 history recovery 定义");
     }
-    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const snippet = source
+      .slice(start, resolvedEnd)
+      .replace(/^export\s+/gm, "");
     const context = {
       console,
       Date,
@@ -622,6 +633,19 @@ function createHistoryRecoveryHarness() {
           return await context.replayExtractionFromHistoryImpl(...args);
         }
         return 0;
+      },
+      updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
+        context.updatedProcessedHistorySnapshot = {
+          chatLength: Array.isArray(chat) ? chat.length : 0,
+          lastProcessedAssistantFloor,
+        };
+        context.currentGraph.historyState ||= {};
+        context.currentGraph.historyState.lastProcessedAssistantFloor =
+          lastProcessedAssistantFloor;
+        context.currentGraph.historyState.processedMessageHashes =
+          lastProcessedAssistantFloor >= 0
+            ? { [lastProcessedAssistantFloor]: `hash-${lastProcessedAssistantFloor}` }
+            : {};
       },
       clearHistoryDirty(graph, result) {
         context.clearedHistoryDirty = result;
@@ -768,6 +792,20 @@ function createRerollHarness() {
       },
       async deleteBackendVectorHashesForRecovery(...args) {
         context.deletedHashesCalls.push(args);
+      },
+      updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
+        context.updatedProcessedHistorySnapshot = {
+          chatLength: Array.isArray(chat) ? chat.length : 0,
+          lastProcessedAssistantFloor,
+        };
+        context.currentGraph.historyState ||= {};
+        context.currentGraph.historyState.lastProcessedAssistantFloor =
+          lastProcessedAssistantFloor;
+        context.currentGraph.historyState.processedMessageHashes =
+          lastProcessedAssistantFloor >= 0
+            ? { [lastProcessedAssistantFloor]: `hash-${lastProcessedAssistantFloor}` }
+            : {};
+        context.currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
       },
       pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
         return pruneProcessedMessageHashesFromFloor(graph, fromFloor);
@@ -2861,6 +2899,53 @@ async function testChatChangedDoesNotClearCoreEventBindings() {
   assert.equal(clearPendingAutoExtractionCalls, 1);
 }
 
+async function testSwipeRoutesToRerollWithoutHistoryRecoveryFallback() {
+  const invalidationReasons = [];
+  const rerollCalls = [];
+  let historyRecheckCalls = 0;
+  let refreshCalls = 0;
+
+  const result = await onMessageSwipedController(
+    {
+      invalidateRecallAfterHistoryMutation(reason) {
+        invalidationReasons.push(reason);
+      },
+      async onReroll(payload) {
+        rerollCalls.push(payload);
+        return {
+          success: true,
+          rollbackPerformed: true,
+          extractionTriggered: true,
+          requestedFloor: payload.fromFloor,
+          effectiveFromFloor: payload.fromFloor,
+          recoveryPath: "reverse-journal",
+          affectedBatchCount: 1,
+          error: "",
+        };
+      },
+      scheduleHistoryMutationRecheck() {
+        historyRecheckCalls += 1;
+      },
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+      console: {
+        warn() {},
+        error() {},
+      },
+    },
+    16,
+    { reason: "host-swipe" },
+  );
+
+  assert.equal(invalidationReasons.length, 1);
+  assert.deepEqual(rerollCalls, [{ fromFloor: 16, meta: { reason: "host-swipe" } }]);
+  assert.equal(historyRecheckCalls, 0);
+  assert.equal(refreshCalls, 1);
+  assert.equal(result.success, true);
+  assert.equal(result.recoveryPath, "reverse-journal");
+}
+
 async function testAutoExtractionDefersWhenGraphNotReady() {
   const deferredReasons = [];
   const statuses = [];
@@ -3661,6 +3746,57 @@ async function testHistoryRecoveryFallbackFullRebuildCarriesResultCode() {
   );
 }
 
+async function testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "old-hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: false,
+      dirtyReason: "",
+      pendingRepairFromFloor: null,
+      replayRequiredNodeIds: [],
+      lastWarning: "",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "full-rebuild",
+    affectedBatchCount: 0,
+  });
+  harness.replayExtractionFromHistoryImpl = async () => {
+    harness.currentGraph.historyState.lastProcessedAssistantFloor = 1;
+    harness.currentGraph.lastProcessedSeq = 1;
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation({
+    trigger: "message-edited",
+    dirtyFrom: 1,
+    detection: { source: "manual-test", reason: "edited" },
+  });
+
+  assert.equal(result, true);
+  assert.deepEqual(harness.updatedProcessedHistorySnapshot, {
+    chatLength: 2,
+    lastProcessedAssistantFloor: 1,
+  });
+  assert.deepEqual(harness.currentGraph.historyState.processedMessageHashes, {
+    1: "hash-1",
+  });
+}
+
 async function testHistoryRecoveryFailureCarriesResultCode() {
   const harness = await createHistoryRecoveryHarness();
   harness.chat = [
@@ -3780,6 +3916,72 @@ async function testRerollFallsBackToDirectExtractForUnprocessedFloor() {
   assert.equal(result.resultCode, undefined);
   assert.equal(harness.onManualExtractCalls, 1);
   assert.equal(harness.saveGraphToChatCalls, 0);
+}
+
+async function testRerollPreservesPrefixHashesWhenReextractDoesNotAdvance() {
+  const harness = await createRerollHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+    { is_user: true, mes: "u3" },
+    { is_user: false, mes: "a3" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 5,
+      processedMessageHashes: {
+        1: "hash-1",
+        3: "hash-3",
+        5: "hash-5",
+      },
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+    },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 5,
+  };
+  harness.postRollbackGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: {
+        1: "old-hash-1",
+        3: "stale-hash",
+      },
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "journal-1" }],
+  });
+  harness.buildReverseJournalRecoveryPlanImpl = () => ({
+    backendDeleteHashes: [],
+    replayRequiredNodeIds: [],
+    pendingRepairFromFloor: 2,
+    legacyGapFallback: false,
+    dirtyReason: "history-recovery-replay",
+  });
+  harness.manualExtractLevel = "error";
+
+  const result = await harness.result.onReroll({ fromFloor: 3 });
+
+  assert.equal(result.success, true);
+  assert.equal(result.extractionStatus, "error");
+  assert.deepEqual(harness.updatedProcessedHistorySnapshot, {
+    chatLength: 6,
+    lastProcessedAssistantFloor: 1,
+  });
+  assert.deepEqual(harness.currentGraph.historyState.processedMessageHashes, {
+    1: "hash-1",
+  });
 }
 
 async function testLlmDebugSnapshotRedactsSecretsBeforeStorage() {
@@ -4015,6 +4217,7 @@ await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
+await testSwipeRoutesToRerollWithoutHistoryRecoveryFallback();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
@@ -4034,9 +4237,11 @@ await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testHistoryRecoveryAbortClearsVectorRepairState();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
+await testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay();
 await testHistoryRecoveryFailureCarriesResultCode();
 await testRerollRejectsMissingRecoveryPoint();
 await testRerollFallsBackToDirectExtractForUnprocessedFloor();
+await testRerollPreservesPrefixHashesWhenReextractDoesNotAdvance();
 await testLlmDebugSnapshotRedactsSecretsBeforeStorage();
 await testEmbeddingUsesConfigTimeoutInsteadOfDefault();
 await testLlmOutputRegexCleansResponseBeforeJsonParse();

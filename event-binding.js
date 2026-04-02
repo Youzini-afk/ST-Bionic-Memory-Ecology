@@ -263,10 +263,45 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
   runtime.refreshPersistedRecallMessageUi?.();
 }
 
-export function onMessageSwipedController(runtime, messageId, meta = null) {
+export async function onMessageSwipedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
-  runtime.scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+  const parsedFloor = Number(messageId);
+  const fromFloor = Number.isFinite(parsedFloor) ? parsedFloor : undefined;
+  let result = {
+    success: false,
+    rollbackPerformed: false,
+    extractionTriggered: false,
+    requestedFloor: fromFloor ?? null,
+    effectiveFromFloor: null,
+    recoveryPath: "reroll-handler-unavailable",
+    affectedBatchCount: 0,
+    error: "swipe reroll handler unavailable",
+  };
+
+  if (typeof runtime.onReroll === "function") {
+    try {
+      result = await runtime.onReroll({ fromFloor, meta });
+    } catch (error) {
+      runtime.console?.error?.("[ST-BME] swipe reroll failed:", error);
+      result = {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: fromFloor ?? null,
+        effectiveFromFloor: null,
+        recoveryPath: "reroll-threw",
+        affectedBatchCount: 0,
+        error: error?.message || String(error) || "swipe reroll failed",
+      };
+    }
+  } else {
+    runtime.console?.warn?.(
+      "[ST-BME] MESSAGE_SWIPED missing onReroll; skip generic history recovery fallback.",
+      { messageId, meta },
+    );
+  }
   runtime.refreshPersistedRecallMessageUi?.();
+  return result;
 }
 
 export async function onGenerationAfterCommandsController(

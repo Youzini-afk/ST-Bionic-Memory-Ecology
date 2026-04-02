@@ -7474,6 +7474,19 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       resultCode: "reroll.rollback.applied",
     }),
   );
+  if (
+    Array.isArray(context?.chat) &&
+    Number.isFinite(currentGraph.historyState?.lastProcessedAssistantFloor) &&
+    currentGraph.historyState.lastProcessedAssistantFloor >= 0
+  ) {
+    // Preserve the rolled-back prefix immediately so a failed follow-up
+    // re-extraction does not look like a generic "missing processed hashes"
+    // corruption on the next history integrity check.
+    updateProcessedHistorySnapshot(
+      context.chat,
+      currentGraph.historyState.lastProcessedAssistantFloor,
+    );
+  }
   pruneProcessedMessageHashesFromFloor(currentGraph, effectiveFromFloor);
   currentGraph.lastProcessedSeq =
     currentGraph.historyState?.lastProcessedAssistantFloor ?? -1;
@@ -7623,6 +7636,16 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           trigger,
       }),
     );
+    const recoveredLastProcessedFloor = Number.isFinite(
+      currentGraph?.historyState?.lastProcessedAssistantFloor,
+    )
+      ? currentGraph.historyState.lastProcessedAssistantFloor
+      : -1;
+    if (recoveredLastProcessedFloor >= 0) {
+      // Recovery replay has rebuilt the graph state; restore processed hashes so
+      // the next hash recheck does not immediately trigger another replay loop.
+      updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+    }
     saveGraphToChat({ reason: "history-recovery-complete" });
     refreshPanelLiveState();
     updateStageNotice(
@@ -8180,10 +8203,11 @@ function onMessageEdited(messageId, meta = null) {
   return result;
 }
 
-function onMessageSwiped(messageId, meta = null) {
-  const result = onMessageSwipedController(
+async function onMessageSwiped(messageId, meta = null) {
+  const result = await onMessageSwipedController(
     {
       invalidateRecallAfterHistoryMutation,
+      onReroll,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
