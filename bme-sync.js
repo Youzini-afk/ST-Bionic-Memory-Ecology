@@ -1,5 +1,6 @@
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
+const BME_SYNC_FILENAME_MAX_LENGTH = 180;
 
 export const BME_SYNC_DEVICE_ID_KEY = "st_bme_sync_device_id_v1";
 export const BME_SYNC_UPLOAD_DEBOUNCE_MS = 2500;
@@ -21,6 +22,54 @@ const RUNTIME_BATCH_JOURNAL_LIMIT = 96;
 
 function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
+}
+
+function createStableFilenameHash(input = "") {
+  let hash = 2166136261;
+  const normalized = String(input ?? "");
+  for (let index = 0; index < normalized.length; index++) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function normalizeRemoteFilenameCandidate(fileName, fallbackValue = "ST-BME_sync_unknown.json") {
+  const raw = String(fileName ?? "");
+  const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+  const sanitized = normalized
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._~-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^\.+/g, "")
+    .slice(0, BME_SYNC_FILENAME_MAX_LENGTH)
+    .trim();
+  return sanitized || fallbackValue;
+}
+
+function buildSyncFilename(chatId) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const legacyName = `${BME_SYNC_FILE_PREFIX}${normalizedChatId}${BME_SYNC_FILE_SUFFIX}`;
+  if (
+    normalizedChatId
+    && /^[A-Za-z0-9._~-]+$/.test(normalizedChatId)
+    && legacyName.length <= BME_SYNC_FILENAME_MAX_LENGTH
+  ) {
+    return legacyName;
+  }
+
+  const hash = createStableFilenameHash(normalizedChatId || "unknown");
+  const rawSlug = normalizeRemoteFilenameCandidate(normalizedChatId, "");
+  const suffixPart = `~${hash}${BME_SYNC_FILE_SUFFIX}`;
+  const maxSlugLength = Math.max(
+    0,
+    BME_SYNC_FILENAME_MAX_LENGTH - BME_SYNC_FILE_PREFIX.length - suffixPart.length,
+  );
+  const safeSlug = rawSlug.slice(0, maxSlugLength).replace(/^[_~.-]+|[_~.-]+$/g, "");
+  const core = safeSlug
+    ? `${BME_SYNC_FILE_PREFIX}${safeSlug}~${hash}`
+    : `${BME_SYNC_FILE_PREFIX}${hash}`;
+  return `${core}${BME_SYNC_FILE_SUFFIX}`;
 }
 
 function normalizeRevision(value) {
@@ -856,13 +905,10 @@ async function invokeSyncAppliedHook(options = {}, payload = {}) {
 }
 
 async function sanitizeFilename(fileName, options = {}) {
-  const fallbackSanitized = String(fileName || "")
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
-    .replace(/\s+/g, "_")
-    .replace(/^\.+/g, "")
-    .slice(0, 180);
-
-  const finalFallback = fallbackSanitized || "ST-BME_sync_unknown.json";
+  const finalFallback = normalizeRemoteFilenameCandidate(
+    fileName,
+    "ST-BME_sync_unknown.json",
+  );
 
   if (options.disableRemoteSanitize) {
     return finalFallback;
@@ -885,7 +931,7 @@ async function sanitizeFilename(fileName, options = {}) {
 
     const payload = await response.json().catch(() => null);
     const sanitized = String(payload?.fileName || "").trim();
-    return sanitized || finalFallback;
+    return normalizeRemoteFilenameCandidate(sanitized, finalFallback);
   } catch {
     return finalFallback;
   }
@@ -901,9 +947,9 @@ async function resolveSyncFilename(chatId, options = {}) {
     return sanitizedFilenameByChatId.get(normalizedChatId);
   }
 
-  const rawFileName = `${BME_SYNC_FILE_PREFIX}${normalizedChatId}${BME_SYNC_FILE_SUFFIX}`;
+  const rawFileName = buildSyncFilename(normalizedChatId);
   const sanitized = await sanitizeFilename(rawFileName, options);
-  const finalName = sanitized || rawFileName;
+  const finalName = normalizeRemoteFilenameCandidate(sanitized, rawFileName);
   sanitizedFilenameByChatId.set(normalizedChatId, finalName);
   return finalName;
 }
