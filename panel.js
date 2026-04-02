@@ -1421,6 +1421,10 @@ function _refreshConfigTab() {
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
+    "bme-setting-hide-old-messages-enabled",
+    settings.hideOldMessagesEnabled ?? false,
+  );
+  _setCheckboxValue(
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,
   );
@@ -1495,6 +1499,10 @@ function _refreshConfigTab() {
   );
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
+  _setInputValue(
+    "bme-setting-hide-old-messages-keep-last-n",
+    settings.hideOldMessagesKeepLastN ?? 12,
+  );
   _setInputValue(
     "bme-setting-extract-context-turns",
     settings.extractContextTurns ?? 2,
@@ -1695,6 +1703,9 @@ function _bindConfigControls() {
     _patchSettings({ enabled: checked });
     _refreshGuardedConfigStates();
   });
+  bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
+    _patchSettings({ hideOldMessagesEnabled: checked });
+  });
   bindCheckbox("bme-setting-recall-enabled", (checked) => {
     _patchSettings({ recallEnabled: checked });
     _refreshGuardedConfigStates();
@@ -1767,6 +1778,13 @@ function _bindConfigControls() {
 
   bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
     _patchSettings({ extractEvery: value }),
+  );
+  bindNumber(
+    "bme-setting-hide-old-messages-keep-last-n",
+    12,
+    0,
+    200,
+    (value) => _patchSettings({ hideOldMessagesKeepLastN: value }),
   );
   bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
     _patchSettings({ extractContextTurns: value }),
@@ -2024,6 +2042,27 @@ function _bindConfigControls() {
     card.dataset.bmeBound = "true";
   });
 
+  document
+    .getElementById("bme-apply-hide-settings")
+    ?.addEventListener("click", () => {
+      const settings = _getSettings?.() || {};
+      _patchSettings({
+        hideOldMessagesEnabled: settings.hideOldMessagesEnabled ?? false,
+        hideOldMessagesKeepLastN: settings.hideOldMessagesKeepLastN ?? 12,
+      });
+      toastr.success("当前聊天的隐藏设置已重新应用", "ST-BME");
+    });
+  document
+    .getElementById("bme-clear-hide-settings")
+    ?.addEventListener("click", () => {
+      _patchSettings({
+        hideOldMessagesEnabled: false,
+        hideOldMessagesKeepLastN: 0,
+      });
+      _setCheckboxValue("bme-setting-hide-old-messages-enabled", false);
+      _setInputValue("bme-setting-hide-old-messages-keep-last-n", 0);
+      toastr.info("已取消当前聊天里由 ST-BME 应用的隐藏", "ST-BME");
+    });
   document
     .getElementById("bme-test-llm")
     ?.addEventListener("click", async () => {

@@ -129,6 +129,9 @@ export function registerCoreEventHooksController(runtime) {
   if (eventTypes.GENERATION_STARTED) {
     bind(eventTypes.GENERATION_STARTED, handlers.onGenerationStarted);
   }
+  if (eventTypes.GENERATION_ENDED) {
+    bind(eventTypes.GENERATION_ENDED, handlers.onGenerationEnded);
+  }
 
   const beforeCombineCleanup = runtime.registerBeforeCombinePrompts(
     handlers.onBeforeCombinePrompts,
