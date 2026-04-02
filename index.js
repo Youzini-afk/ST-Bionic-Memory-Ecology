@@ -3763,6 +3763,33 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
   };
 }
 
+function markDryRunPromptPreview(ttlMs = GENERATION_RECALL_HOOK_BRIDGE_MS) {
+  const resolvedTtlMs = Math.max(
+    100,
+    Math.floor(Number(ttlMs) || GENERATION_RECALL_HOOK_BRIDGE_MS),
+  );
+  skipBeforeCombineRecallUntil = Date.now() + resolvedTtlMs;
+  return skipBeforeCombineRecallUntil;
+}
+
+function clearDryRunPromptPreview() {
+  const hadPendingSkip = skipBeforeCombineRecallUntil > Date.now();
+  skipBeforeCombineRecallUntil = 0;
+  return hadPendingSkip;
+}
+
+function consumeDryRunPromptPreview(now = Date.now()) {
+  if (skipBeforeCombineRecallUntil <= now) {
+    if (skipBeforeCombineRecallUntil !== 0) {
+      skipBeforeCombineRecallUntil = 0;
+    }
+    return false;
+  }
+
+  skipBeforeCombineRecallUntil = 0;
+  return true;
+}
+
 function isGraphEffectivelyEmpty(graph) {
   if (!graph || typeof graph !== "object") {
     return true;
@@ -4584,11 +4611,7 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
 
 function shouldAdvanceProcessedHistory(batchStatus) {
   if (!batchStatus || typeof batchStatus !== "object") return false;
-  return (
-    batchStatus.completed === true &&
-    batchStatus.outcome === "success" &&
-    batchStatus.consistency === "strong"
-  );
+  return batchStatus?.stages?.core?.outcome === "success";
 }
 
 function computePostProcessArtifacts(
@@ -8176,10 +8199,12 @@ function onMessageSwiped(messageId, meta = null) {
 function onGenerationStarted(type, params = {}, dryRun = false) {
   return onGenerationStartedController(
     {
+      clearDryRunPromptPreview,
       freezeHostGenerationInputSnapshot,
       getPendingRecallSendIntent: () => pendingRecallSendIntent,
       getSendTextareaValue,
       isFreshRecallInputRecord,
+      markDryRunPromptPreview,
       normalizeRecallInputText,
     },
     type,
@@ -8223,6 +8248,7 @@ async function onBeforeCombinePrompts(promptData = null) {
       buildHistoryGenerationRecallInput,
       buildNormalGenerationRecallInput,
       clearLiveRecallInjectionPromptForRewrite,
+      consumeDryRunPromptPreview,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       getContext,

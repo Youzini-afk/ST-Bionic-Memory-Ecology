@@ -211,7 +211,11 @@ export function onGenerationStartedController(
   params = {},
   dryRun = false,
 ) {
-  if (dryRun) return null;
+  if (dryRun) {
+    runtime.markDryRunPromptPreview?.();
+    return null;
+  }
+  runtime.clearDryRunPromptPreview?.();
   if (params?.automatic_trigger || params?.quiet_prompt) return null;
 
   const generationType = String(type || "normal").trim() || "normal";
@@ -382,6 +386,13 @@ export async function onBeforeCombinePromptsController(
   runtime,
   promptData = null,
 ) {
+  if (runtime.consumeDryRunPromptPreview?.()) {
+    return {
+      skipped: true,
+      reason: "dry-run-preview",
+    };
+  }
+
   const frozenInputSnapshot =
     runtime.consumeHostGenerationInputSnapshot?.() ||
     runtime.getPendingHostGenerationInputSnapshot?.() ||

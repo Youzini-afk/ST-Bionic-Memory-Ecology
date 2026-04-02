@@ -2416,7 +2416,7 @@ async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
   assert.equal(effects.vectorError, "vector finalize down");
 }
 
-async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
+async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
   const harness = await createBatchStageHarness();
   const {
     createBatchStatusSkeleton,
@@ -2441,7 +2441,7 @@ async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
   assert.equal(structuralPartial.completed, true);
   assert.equal(structuralPartial.outcome, "partial");
   assert.equal(structuralPartial.consistency, "weak");
-  assert.equal(shouldAdvanceProcessedHistory(structuralPartial), false);
+  assert.equal(shouldAdvanceProcessedHistory(structuralPartial), true);
 
   const semanticFailed = createBatchStatusSkeleton({
     processedRange: [5, 5],
@@ -2454,7 +2454,23 @@ async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
   assert.equal(semanticFailed.completed, true);
   assert.equal(semanticFailed.outcome, "failed");
   assert.equal(semanticFailed.consistency, "strong");
-  assert.equal(shouldAdvanceProcessedHistory(semanticFailed), false);
+  assert.equal(shouldAdvanceProcessedHistory(semanticFailed), true);
+
+  const finalizeFailed = createBatchStatusSkeleton({
+    processedRange: [6, 7],
+    extractionCountBefore: 0,
+  });
+  setBatchStageOutcome(finalizeFailed, "core", "success");
+  setBatchStageOutcome(
+    finalizeFailed,
+    "finalize",
+    "failed",
+    "vector finalize down",
+  );
+  finalizeBatchStatus(finalizeFailed);
+  assert.equal(finalizeFailed.completed, false);
+  assert.equal(finalizeFailed.outcome, "failed");
+  assert.equal(shouldAdvanceProcessedHistory(finalizeFailed), true);
 
   const fullSuccess = createBatchStatusSkeleton({
     processedRange: [8, 9],
@@ -2681,6 +2697,16 @@ async function testGenerationRecallBeforeCombineRunsStandalone() {
   );
 }
 
+async function testGenerationRecallDryRunPreviewDoesNotTriggerBeforeCombineRecall() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "Prompt Viewer 预览" }];
+
+  harness.result.onGenerationStarted("normal", {}, true);
+  await harness.result.onBeforeCombinePrompts();
+
+  assert.equal(harness.runRecallCalls.length, 0);
+}
+
 async function testGenerationRecallDifferentKeyCanRunAgain() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "第一条" }];
@@ -2856,6 +2882,19 @@ async function testAutoExtractionDefersWhenGraphNotReady() {
 
   assert.deepEqual(deferredReasons, ["graph-not-ready"]);
   assert.equal(statuses[0]?.[0], "等待图谱加载");
+}
+
+async function testAutoExtractionDefersWhenAlreadyExtracting() {
+  const deferredReasons = [];
+
+  await runExtractionController({
+    getIsExtracting: () => true,
+    deferAutoExtraction(reason) {
+      deferredReasons.push(reason);
+    },
+  });
+
+  assert.deepEqual(deferredReasons, ["extracting"]);
 }
 
 async function testAutoExtractionDefersWhenHistoryRecoveryBusy() {
@@ -3954,7 +3993,7 @@ await testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairSet();
 await testBatchStatusStructuralPartialRemainsRecoverable();
 await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
-await testProcessedHistoryAdvanceRequiresCompleteStrongSuccess();
+await testProcessedHistoryAdvanceTracksCoreExtractionSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
 await testGenerationRecallTransactionDedupesReverseHookOrder();
 await testGenerationRecallHistoryModesUseSameBindingAcrossHooks();
@@ -3970,12 +4009,14 @@ await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
 await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
 await testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable();
 await testGenerationRecallBeforeCombineRunsStandalone();
+await testGenerationRecallDryRunPreviewDoesNotTriggerBeforeCombineRecall();
 await testGenerationRecallDifferentKeyCanRunAgain();
 await testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine();
 await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testAutoExtractionDefersWhenGraphNotReady();
+await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
