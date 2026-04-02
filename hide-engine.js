@@ -246,10 +246,13 @@ function buildResult({
   };
 }
 
-async function unhideCurrentRange(runtime = {}, version = null) {
+async function unhideCurrentRange(runtime = {}, version = null, options = {}) {
   const { chat } = getCurrentChatInfo(runtime);
   const chatLength = Array.isArray(chat) ? chat.length : 0;
-  const previousEnd = Math.min(hideState.hiddenRangeEnd, chatLength - 1);
+  const full = Boolean(options.full);
+  const previousEnd = full
+    ? Math.max(-1, chatLength - 1)
+    : Math.min(hideState.hiddenRangeEnd, chatLength - 1);
   if (previousEnd < 0) {
     return { shownCount: 0, chatLength };
   }
@@ -425,14 +428,16 @@ export async function unhideAll(runtime = {}) {
   const chatInfo = getCurrentChatInfo(runtime);
   const chatLength = Array.isArray(chatInfo.chat) ? chatInfo.chat.length : 0;
 
-  if (chatLength === 0 || hideState.hiddenRangeEnd < 0) {
+  if (chatLength === 0) {
     hideState.lastProcessedLength = chatLength;
     hideState.hiddenRangeEnd = -1;
     hideState.managedChatKey = getCurrentChatKey(runtime);
     return buildResult({ chatLength });
   }
 
-  const { shownCount } = await unhideCurrentRange(runtime, version);
+  const { shownCount } = await unhideCurrentRange(runtime, version, {
+    full: true,
+  });
   if (!isOperationCurrent(version)) {
     return buildResult({ chatLength, shownCount, stale: true });
   }

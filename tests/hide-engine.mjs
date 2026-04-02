@@ -83,8 +83,8 @@ async function testDisableUnhidesManagedRange() {
 
   const result = await unhideAll(runtime);
   assert.equal(result.active, false);
-  assert.equal(result.shownCount, 3);
-  assert.deepEqual(runtime.commands, ["/unhide 0-2"]);
+  assert.equal(result.shownCount, 4);
+  assert.deepEqual(runtime.commands, ["/unhide 0-3"]);
   assert.equal(chat[0].is_system, true);
   assert.equal(chat[1].is_system, false);
   assert.equal(chat[2].is_system, false);
