@@ -4581,11 +4581,7 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
 
 function shouldAdvanceProcessedHistory(batchStatus) {
   if (!batchStatus || typeof batchStatus !== "object") return false;
-  return (
-    batchStatus.completed === true &&
-    batchStatus.outcome === "success" &&
-    batchStatus.consistency === "strong"
-  );
+  return batchStatus?.stages?.core?.outcome === "success";
 }
 
 function computePostProcessArtifacts(

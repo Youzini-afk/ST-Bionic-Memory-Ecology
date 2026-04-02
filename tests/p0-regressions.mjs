@@ -2416,7 +2416,7 @@ async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
   assert.equal(effects.vectorError, "vector finalize down");
 }
 
-async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
+async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
   const harness = await createBatchStageHarness();
   const {
     createBatchStatusSkeleton,
@@ -2441,7 +2441,7 @@ async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
   assert.equal(structuralPartial.completed, true);
   assert.equal(structuralPartial.outcome, "partial");
   assert.equal(structuralPartial.consistency, "weak");
-  assert.equal(shouldAdvanceProcessedHistory(structuralPartial), false);
+  assert.equal(shouldAdvanceProcessedHistory(structuralPartial), true);
 
   const semanticFailed = createBatchStatusSkeleton({
     processedRange: [5, 5],
@@ -2454,7 +2454,23 @@ async function testProcessedHistoryAdvanceRequiresCompleteStrongSuccess() {
   assert.equal(semanticFailed.completed, true);
   assert.equal(semanticFailed.outcome, "failed");
   assert.equal(semanticFailed.consistency, "strong");
-  assert.equal(shouldAdvanceProcessedHistory(semanticFailed), false);
+  assert.equal(shouldAdvanceProcessedHistory(semanticFailed), true);
+
+  const finalizeFailed = createBatchStatusSkeleton({
+    processedRange: [6, 7],
+    extractionCountBefore: 0,
+  });
+  setBatchStageOutcome(finalizeFailed, "core", "success");
+  setBatchStageOutcome(
+    finalizeFailed,
+    "finalize",
+    "failed",
+    "vector finalize down",
+  );
+  finalizeBatchStatus(finalizeFailed);
+  assert.equal(finalizeFailed.completed, false);
+  assert.equal(finalizeFailed.outcome, "failed");
+  assert.equal(shouldAdvanceProcessedHistory(finalizeFailed), true);
 
   const fullSuccess = createBatchStatusSkeleton({
     processedRange: [8, 9],
@@ -3954,7 +3970,7 @@ await testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairSet();
 await testBatchStatusStructuralPartialRemainsRecoverable();
 await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
-await testProcessedHistoryAdvanceRequiresCompleteStrongSuccess();
+await testProcessedHistoryAdvanceTracksCoreExtractionSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
 await testGenerationRecallTransactionDedupesReverseHookOrder();
 await testGenerationRecallHistoryModesUseSameBindingAcrossHooks();
