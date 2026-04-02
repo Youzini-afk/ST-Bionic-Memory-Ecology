@@ -408,6 +408,7 @@ export async function initPanel({
   _bindGraphControls();
   _bindActions();
   _bindConfigControls();
+  _bindPlannerLauncher();
   currentTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
   _applyWorkspaceMode();
@@ -734,6 +735,44 @@ function _switchTab(tabId) {
     default:
       break;
   }
+}
+
+function _getPlannerApi() {
+  return globalThis?.stBmeEnaPlanner || null;
+}
+
+function _refreshPlannerLauncher() {
+  const button = document.getElementById("bme-open-ena-planner");
+  const hint = document.getElementById("bme-open-ena-planner-hint");
+  if (!button || !hint) return;
+
+  const plannerApi = _getPlannerApi();
+  const ready = typeof plannerApi?.openSettings === "function";
+
+  button.disabled = !ready;
+  button.classList.toggle("is-runtime-disabled", !ready);
+  hint.textContent = ready
+    ? "已加载，可打开独立的 Ena Planner 设置页。"
+    : "未检测到 Ena Planner 模块，请重载 ST-BME 后再试。";
+}
+
+function _bindPlannerLauncher() {
+  const button = document.getElementById("bme-open-ena-planner");
+  if (!button || button.dataset.bmeBound === "true") {
+    _refreshPlannerLauncher();
+    return;
+  }
+
+  button.addEventListener("click", () => {
+    const plannerApi = _getPlannerApi();
+    if (typeof plannerApi?.openSettings === "function") {
+      plannerApi.openSettings();
+    }
+    _refreshPlannerLauncher();
+  });
+
+  button.dataset.bmeBound = "true";
+  _refreshPlannerLauncher();
 }
 
 function _applyWorkspaceMode() {
@@ -1418,6 +1457,7 @@ function _bindActions() {
 
 function _refreshConfigTab() {
   const settings = _getSettings?.() || {};
+  _refreshPlannerLauncher();
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
