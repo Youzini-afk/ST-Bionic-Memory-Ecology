@@ -952,6 +952,66 @@
                     </label>
                   </div>
                 </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">隐藏旧楼层</div>
+                      <div class="bme-config-card-subtitle">
+                        不删除聊天内容，只是把较早楼层临时标成系统消息，让主回复和 ST-BME 自己读取聊天时一起跳过它们。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-hide-old-messages-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">启用旧楼层隐藏</span>
+                      <span class="bme-toggle-desc">
+                        适合长聊天控 token。切聊天会自动重新应用，不会删除原楼层。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-hide-old-messages-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-hide-old-messages-keep-last-n">
+                      保留最近 N 条消息
+                    </label>
+                    <input
+                      id="bme-setting-hide-old-messages-keep-last-n"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="200"
+                      placeholder="0 = 不隐藏"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    设置修改后会自动生效。`0` 表示不隐藏；“取消全部隐藏”会立即把当前聊天里由 ST-BME 隐藏的楼层恢复。
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-apply-hide-settings"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-eye-slash"></i>
+                      <span>重新应用当前隐藏</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-clear-hide-settings"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-eye"></i>
+                      <span>取消全部隐藏</span>
+                    </button>
+                  </div>
+                </div>
               </div>
             </section>
 

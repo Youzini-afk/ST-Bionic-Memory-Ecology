@@ -82,6 +82,14 @@ import {
   writeGraphShadowSnapshot,
 } from "./graph-persistence.js";
 import {
+  applyHideSettings,
+  getHideStateSnapshot,
+  resetHideState,
+  runIncrementalHideCheck,
+  scheduleHideSettingsApply,
+  unhideAll,
+} from "./hide-engine.js";
+import {
   createEmptyGraph,
   deserializeGraph,
   exportGraph,
@@ -333,6 +341,8 @@ function readRuntimeDebugSnapshot() {
 const defaultSettings = {
   enabled: true,
   timeoutMs: 300000,
+  hideOldMessagesEnabled: false,
+  hideOldMessagesKeepLastN: 12,
 
   // 提取设置
   extractEvery: 1, // 每 N 条 assistant 回复提取一次
@@ -2246,6 +2256,105 @@ function getSettings() {
   return mergedSettings;
 }
 
+function getMessageHideSettings(settings = null) {
+  let sourceSettings = settings;
+  if (!sourceSettings || typeof sourceSettings !== "object") {
+    try {
+      sourceSettings =
+        typeof getSettings === "function" ? getSettings() : {};
+    } catch {
+      sourceSettings = {};
+    }
+  }
+  return {
+    enabled: Boolean(sourceSettings.hideOldMessagesEnabled),
+    hide_last_n: Math.max(
+      0,
+      Math.trunc(Number(sourceSettings.hideOldMessagesKeepLastN ?? 0) || 0),
+    ),
+  };
+}
+
+function getHideRuntimeAdapters() {
+  return {
+    $,
+    clearTimeout,
+    getContext,
+    setTimeout,
+  };
+}
+
+function applyMessageHideNow(reason = "manual-apply") {
+  try {
+    const result = applyHideSettings(
+      getMessageHideSettings(),
+      getHideRuntimeAdapters(),
+    );
+    console.log("[ST-BME] 已应用旧楼层隐藏:", reason, result);
+    return result;
+  } catch (error) {
+    console.warn("[ST-BME] 应用旧楼层隐藏失败:", reason, error);
+    return {
+      active: false,
+      error: error instanceof Error ? error.message : String(error || "未知错误"),
+    };
+  }
+}
+
+function scheduleMessageHideApply(reason = "scheduled", delayMs = 120) {
+  try {
+    scheduleHideSettingsApply(
+      getMessageHideSettings(),
+      getHideRuntimeAdapters(),
+      delayMs,
+    );
+  } catch (error) {
+    console.warn("[ST-BME] 调度旧楼层隐藏失败:", reason, error);
+  }
+}
+
+function runIncrementalMessageHide(reason = "incremental") {
+  try {
+    const result = runIncrementalHideCheck(
+      getMessageHideSettings(),
+      getHideRuntimeAdapters(),
+    );
+    if (result?.active) {
+      console.log("[ST-BME] 已增量更新旧楼层隐藏:", reason, result);
+    }
+    return result;
+  } catch (error) {
+    console.warn("[ST-BME] 增量更新旧楼层隐藏失败:", reason, error);
+    return {
+      active: false,
+      error: error instanceof Error ? error.message : String(error || "未知错误"),
+    };
+  }
+}
+
+function clearMessageHideState(reason = "reset") {
+  try {
+    resetHideState(getHideRuntimeAdapters());
+    console.log("[ST-BME] 已重置旧楼层隐藏状态:", reason);
+  } catch (error) {
+    console.warn("[ST-BME] 重置旧楼层隐藏状态失败:", reason, error);
+  }
+}
+
+function clearAllHiddenMessages(reason = "manual-clear") {
+  try {
+    const result = unhideAll(getHideRuntimeAdapters());
+    console.log("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
+    return result;
+  } catch (error) {
+    console.warn("[ST-BME] 取消全部旧楼层隐藏失败:", reason, error);
+    return {
+      active: false,
+      error: error instanceof Error ? error.message : String(error || "未知错误"),
+    };
+  }
+}
+
 function initializeHostCapabilityBridge(options = {}) {
   try {
     initializeHostAdapter({
@@ -2324,6 +2433,7 @@ export function getPanelRuntimeDebugSnapshot(options = {}) {
 
   return {
     hostCapabilities,
+    messageHiding: getHideStateSnapshot(),
     runtimeDebug: readRuntimeDebugSnapshot(),
   };
 }
@@ -4732,6 +4842,10 @@ function updateModuleSettings(patch = {}) {
     "embeddingBackendApiUrl",
     "embeddingAutoSuffix",
   ]);
+  const messageHideKeys = new Set([
+    "hideOldMessagesEnabled",
+    "hideOldMessagesKeepLastN",
+  ]);
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
@@ -4777,6 +4891,15 @@ function updateModuleSettings(patch = {}) {
     void resetVectorStateForConfigChange(
       "Embedding 配置已变更，向量索引待重建",
     );
+  }
+
+  if (Object.keys(patch).some((key) => messageHideKeys.has(key))) {
+    const hideSettings = getMessageHideSettings(settings);
+    if (!hideSettings.enabled || hideSettings.hide_last_n <= 0) {
+      clearAllHiddenMessages("settings-updated-disable");
+    } else {
+      scheduleMessageHideApply("settings-updated", 30);
+    }
   }
 
   scheduleServerSettingsSave();
@@ -7752,6 +7875,9 @@ async function runRecall(options = {}) {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
+  if (typeof clearMessageHideState === "function") {
+    clearMessageHideState("chat-changed");
+  }
   const result = onChatChangedController({
     abortAllRunningStages,
     clearCoreEventBindingState,
@@ -7796,6 +7922,10 @@ function onChatChanged() {
     }
   });
 
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("chat-changed", 220);
+  }
+
   return result;
 }
 
@@ -7817,11 +7947,15 @@ function onChatLoaded() {
     }
   });
 
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("chat-loaded", 180);
+  }
+
   return result;
 }
 
 function onMessageSent(messageId) {
-  return onMessageSentController(
+  const result = onMessageSentController(
     {
       getContext,
       recordRecallSentUserMessage,
@@ -7829,10 +7963,14 @@ function onMessageSent(messageId) {
     },
     messageId,
   );
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("message-sent", 40);
+  }
+  return result;
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
-  return onMessageDeletedController(
+  const result = onMessageDeletedController(
     {
       invalidateRecallAfterHistoryMutation,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
@@ -7841,10 +7979,14 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
     chatLengthOrMessageId,
     meta,
   );
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("message-deleted", 80);
+  }
+  return result;
 }
 
 function onMessageEdited(messageId, meta = null) {
-  return onMessageEditedController(
+  const result = onMessageEditedController(
     {
       invalidateRecallAfterHistoryMutation,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
@@ -7853,10 +7995,14 @@ function onMessageEdited(messageId, meta = null) {
     messageId,
     meta,
   );
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("message-edited", 80);
+  }
+  return result;
 }
 
 function onMessageSwiped(messageId, meta = null) {
-  return onMessageSwipedController(
+  const result = onMessageSwipedController(
     {
       invalidateRecallAfterHistoryMutation,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
@@ -7865,6 +8011,10 @@ function onMessageSwiped(messageId, meta = null) {
     messageId,
     meta,
   );
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("message-swiped", 80);
+  }
+  return result;
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
@@ -7880,6 +8030,12 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
     params,
     dryRun,
   );
+}
+
+function onGenerationEnded(_chatLength = null) {
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("generation-ended", 180);
+  }
 }
 
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
@@ -7926,7 +8082,7 @@ async function onBeforeCombinePrompts(promptData = null) {
 }
 
 function onMessageReceived(messageId = null, type = "") {
-  return onMessageReceivedController({
+  const result = onMessageReceivedController({
     console,
     createRecallInputRecord,
     getContext,
@@ -7951,6 +8107,20 @@ function onMessageReceived(messageId = null, type = "") {
       pendingRecallSendIntent = record;
     },
   }, messageId, type);
+
+  const hideSettings =
+    typeof getMessageHideSettings === "function"
+      ? getMessageHideSettings()
+      : null;
+  if (
+    hideSettings?.enabled &&
+    hideSettings?.hide_last_n > 0 &&
+    typeof runIncrementalMessageHide === "function"
+  ) {
+    runIncrementalMessageHide("message-received");
+  }
+
+  return result;
 }
 
 // ==================== UI 操作 ====================
@@ -8245,6 +8415,7 @@ async function onReembedDirect() {
   initializeHostCapabilityBridge();
   installSendIntentHooks();
   autoSyncOnVisibility(buildBmeSyncRuntimeOptions());
+  scheduleMessageHideApply("init", 180);
 
   // 注册事件钩子
   registerCoreEventHooksController({
@@ -8257,6 +8428,7 @@ async function onReembedDirect() {
       onChatChanged,
       onChatLoaded,
       onGenerationAfterCommands,
+      onGenerationEnded,
       onGenerationStarted,
       onMessageDeleted,
       onMessageEdited,
