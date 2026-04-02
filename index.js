@@ -8663,6 +8663,8 @@ async function onReembedDirect() {
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,
       fetchEmbeddingModels: onFetchEmbeddingModels,
+      applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
+      clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,

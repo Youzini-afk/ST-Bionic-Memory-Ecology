@@ -2084,23 +2084,22 @@ function _bindConfigControls() {
 
   document
     .getElementById("bme-apply-hide-settings")
-    ?.addEventListener("click", () => {
-      const settings = _getSettings?.() || {};
-      _patchSettings({
-        hideOldMessagesEnabled: settings.hideOldMessagesEnabled ?? false,
-        hideOldMessagesKeepLastN: settings.hideOldMessagesKeepLastN ?? 12,
-      });
+    ?.addEventListener("click", async () => {
+      const result = await _actionHandlers.applyCurrentHide?.();
+      if (result?.error) {
+        toastr.error(result.error, "ST-BME");
+        return;
+      }
       toastr.success("当前聊天的隐藏设置已重新应用", "ST-BME");
     });
   document
     .getElementById("bme-clear-hide-settings")
-    ?.addEventListener("click", () => {
-      _patchSettings({
-        hideOldMessagesEnabled: false,
-        hideOldMessagesKeepLastN: 0,
-      });
-      _setCheckboxValue("bme-setting-hide-old-messages-enabled", false);
-      _setInputValue("bme-setting-hide-old-messages-keep-last-n", 0);
+    ?.addEventListener("click", async () => {
+      const result = await _actionHandlers.clearCurrentHide?.();
+      if (result?.error) {
+        toastr.error(result.error, "ST-BME");
+        return;
+      }
       toastr.info("已取消当前聊天里由 ST-BME 应用的隐藏", "ST-BME");
     });
   document
