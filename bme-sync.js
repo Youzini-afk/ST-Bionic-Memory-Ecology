@@ -39,7 +39,7 @@ function normalizeRemoteFilenameCandidate(fileName, fallbackValue = "ST-BME_sync
   const normalized = typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
   const sanitized = normalized
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^A-Za-z0-9._~-]+/g, "_")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
     .replace(/_+/g, "_")
     .replace(/^\.+/g, "")
     .slice(0, BME_SYNC_FILENAME_MAX_LENGTH)
@@ -52,7 +52,7 @@ function buildSyncFilename(chatId) {
   const legacyName = `${BME_SYNC_FILE_PREFIX}${normalizedChatId}${BME_SYNC_FILE_SUFFIX}`;
   if (
     normalizedChatId
-    && /^[A-Za-z0-9._~-]+$/.test(normalizedChatId)
+    && /^[A-Za-z0-9._-]+$/.test(normalizedChatId)
     && legacyName.length <= BME_SYNC_FILENAME_MAX_LENGTH
   ) {
     return legacyName;
@@ -60,14 +60,14 @@ function buildSyncFilename(chatId) {
 
   const hash = createStableFilenameHash(normalizedChatId || "unknown");
   const rawSlug = normalizeRemoteFilenameCandidate(normalizedChatId, "");
-  const suffixPart = `~${hash}${BME_SYNC_FILE_SUFFIX}`;
+  const suffixPart = `-${hash}${BME_SYNC_FILE_SUFFIX}`;
   const maxSlugLength = Math.max(
     0,
     BME_SYNC_FILENAME_MAX_LENGTH - BME_SYNC_FILE_PREFIX.length - suffixPart.length,
   );
-  const safeSlug = rawSlug.slice(0, maxSlugLength).replace(/^[_~.-]+|[_~.-]+$/g, "");
+  const safeSlug = rawSlug.slice(0, maxSlugLength).replace(/^[_.-]+|[_.-]+$/g, "");
   const core = safeSlug
-    ? `${BME_SYNC_FILE_PREFIX}${safeSlug}~${hash}`
+    ? `${BME_SYNC_FILE_PREFIX}${safeSlug}-${hash}`
     : `${BME_SYNC_FILE_PREFIX}${hash}`;
   return `${core}${BME_SYNC_FILE_SUFFIX}`;
 }
