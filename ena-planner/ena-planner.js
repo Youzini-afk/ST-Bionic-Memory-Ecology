@@ -47,9 +47,12 @@ function getHtmlPath() {
  * Default settings
  * --------------------------
  */
-function getDefaultSettings() {
+function getDefaultSettings(options = {}) {
+    const {
+        enabled = false,
+    } = options;
     return {
-        enabled: true,
+        enabled,
         skipIfPlotPresent: true,
 
         // Chat history: tags to strip from AI responses (besides <think>)
@@ -121,8 +124,11 @@ let sendKeydownHandler = null;
  * Helpers
  * --------------------------
  */
-function ensureSettings() {
-    const d = getDefaultSettings();
+function ensureSettings(options = {}) {
+    const {
+        defaultEnabled = false,
+    } = options;
+    const d = getDefaultSettings({ enabled: defaultEnabled });
     const s = config || structuredClone(d);
 
     function deepMerge(target, src) {
@@ -168,8 +174,9 @@ function normalizeResponseKeepTags(tags) {
 
 async function loadConfig() {
     const loaded = await EnaPlannerStorage.get('config', null);
-    config = (loaded && typeof loaded === 'object') ? loaded : getDefaultSettings();
-    ensureSettings();
+    const hasSavedConfig = !!(loaded && typeof loaded === 'object');
+    config = hasSavedConfig ? loaded : getDefaultSettings({ enabled: false });
+    ensureSettings({ defaultEnabled: hasSavedConfig ? true : false });
     state.logs = Array.isArray(await EnaPlannerStorage.get('logs', [])) ? await EnaPlannerStorage.get('logs', []) : [];
 
     if (extension_settings?.[EXT_NAME]) {
