@@ -1008,6 +1008,11 @@ class FakeElement {
         .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
       this.dataset[datasetKey] = normalized;
     }
+    this.ownerDocument?._notifyMutation({
+      type: "attributes",
+      target: this,
+      attributeName: key,
+    });
   }
 
   getAttribute(name) {
@@ -1201,10 +1206,12 @@ class FakeMutationObserver {
     this.callback = callback;
     this.documentRef = documentRef;
     this.active = false;
+    this.options = {};
   }
 
-  observe() {
+  observe(_target = null, options = {}) {
     this.active = true;
+    this.options = { ...options };
     this.documentRef._registerObserver(this);
   }
 
@@ -1215,6 +1222,16 @@ class FakeMutationObserver {
 
   _notify(record) {
     if (!this.active) return;
+    if (record?.type === "attributes" && !this.options?.attributes) return;
+    if (record?.type === "childList" && !this.options?.childList) return;
+    if (
+      record?.type === "attributes" &&
+      Array.isArray(this.options?.attributeFilter) &&
+      this.options.attributeFilter.length > 0 &&
+      !this.options.attributeFilter.includes(String(record.attributeName || ""))
+    ) {
+      return;
+    }
     queueMicrotask(() => {
       if (this.active) this.callback([record]);
     });
@@ -1465,6 +1482,46 @@ async function testRecallCardDelayedDomInsertionEventuallyRenders() {
       updateCalls,
       0,
       "observer 先触发后不应再被旧 timeout 重复刷新",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardDelayedStableMessageIndexEventuallyRenders() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: false,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.schedulePersistedRecallMessageUiRefresh();
+    await waitForTick();
+    messageElement.setAttribute("mesid", "0");
+    await waitForTick();
+    await waitForTick();
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await waitForTick();
+
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
     );
   } finally {
     harness.restoreGlobals();
@@ -4520,6 +4577,7 @@ await testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecord();
 await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
+await testRecallCardDelayedStableMessageIndexEventuallyRenders();
 await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();

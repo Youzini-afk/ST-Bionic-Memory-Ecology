@@ -2527,6 +2527,8 @@ function armPersistedRecallMessageUiObserver(sessionId, runAttempt) {
   persistedRecallUiRefreshObserver.observe(chatRoot, {
     childList: true,
     subtree: true,
+    attributes: true,
+    attributeFilter: ["mesid", "data-mesid", "data-message-id"],
   });
   return true;
 }
