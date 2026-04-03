@@ -1203,7 +1203,7 @@ async function buildPlannerMessages(rawUserInput) {
     // Extra user blocks before user message
     for (const b of enaUserBlocks) {
         const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.splice(Math.max(0, messages.length - 1), 0, { role: 'system', content: `【extra-user-block】\n${content}` });
+        messages.splice(Math.max(0, messages.length - 1), 0, { role: 'user', content: `【extra-user-block】\n${content}` });
     }
 
     // 7) Assistant blocks

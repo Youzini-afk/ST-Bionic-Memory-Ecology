@@ -49,6 +49,23 @@ function normalizeRemoteFilenameCandidate(fileName, fallbackValue = "ST-BME_sync
   return sanitized || fallbackValue;
 }
 
+function normalizeLegacyRemoteFilenameCandidate(
+  fileName,
+  fallbackValue = "ST-BME_sync_unknown.json",
+) {
+  const raw = String(fileName ?? "");
+  const normalized =
+    typeof raw.normalize === "function" ? raw.normalize("NFKD") : raw;
+  const sanitized = normalized
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._~-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^\.+/g, "")
+    .slice(0, BME_SYNC_FILENAME_MAX_LENGTH)
+    .trim();
+  return sanitized || fallbackValue;
+}
+
 function buildSyncFilename(chatId) {
   const normalizedChatId = normalizeChatId(chatId);
   const legacyName = `${BME_SYNC_FILE_PREFIX}${normalizedChatId}${BME_SYNC_FILE_SUFFIX}`;
@@ -72,6 +89,18 @@ function buildSyncFilename(chatId) {
     ? `${BME_SYNC_FILE_PREFIX}${safeSlug}-${hash}`
     : `${BME_SYNC_FILE_PREFIX}${hash}`;
   return `${core}${BME_SYNC_FILE_SUFFIX}`;
+}
+
+function buildLegacyRawSyncFilename(chatId) {
+  return `${BME_SYNC_FILE_PREFIX}${normalizeChatId(chatId)}${BME_SYNC_FILE_SUFFIX}`;
+}
+
+function rememberResolvedSyncFilename(chatId, filename) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const normalizedFilename = String(filename || "").trim();
+  if (!normalizedChatId || !normalizedFilename) return "";
+  sanitizedFilenameByChatId.set(normalizedChatId, normalizedFilename);
+  return normalizedFilename;
 }
 
 function normalizeRevision(value) {
@@ -933,25 +962,53 @@ async function sanitizeFilename(fileName, options = {}) {
   }
 
   try {
-    const fetchImpl = getFetch(options);
-    const response = await fetchImpl("/api/files/sanitize-filename", {
-      method: "POST",
-      headers: {
-        ...getRequestHeadersSafe(options),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ fileName }),
-    });
-
-    if (!response.ok) {
-      return finalFallback;
-    }
-
-    const payload = await response.json().catch(() => null);
-    const sanitized = String(payload?.fileName || "").trim();
+    const sanitized = await requestSanitizedFilename(fileName, options);
     return normalizeRemoteFilenameCandidate(sanitized, finalFallback);
   } catch {
     return finalFallback;
+  }
+}
+
+async function requestSanitizedFilename(fileName, options = {}) {
+  if (options.disableRemoteSanitize) {
+    return String(fileName || "");
+  }
+
+  const fetchImpl = getFetch(options);
+  const response = await fetchImpl("/api/files/sanitize-filename", {
+    method: "POST",
+    headers: {
+      ...getRequestHeadersSafe(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fileName }),
+  });
+
+  if (!response.ok) {
+    return "";
+  }
+
+  const payload = await response.json().catch(() => null);
+  return String(payload?.fileName || "").trim();
+}
+
+async function resolveLegacySyncFilename(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const rawFileName = buildLegacyRawSyncFilename(normalizedChatId);
+  const legacyFallback = normalizeLegacyRemoteFilenameCandidate(
+    rawFileName,
+    "ST-BME_sync_unknown.json",
+  );
+
+  if (options.disableRemoteSanitize) {
+    return legacyFallback;
+  }
+
+  try {
+    const sanitized = await requestSanitizedFilename(rawFileName, options);
+    return normalizeLegacyRemoteFilenameCandidate(sanitized, legacyFallback);
+  } catch {
+    return legacyFallback;
   }
 }
 
@@ -968,8 +1025,39 @@ async function resolveSyncFilename(chatId, options = {}) {
   const rawFileName = buildSyncFilename(normalizedChatId);
   const sanitized = await sanitizeFilename(rawFileName, options);
   const finalName = normalizeRemoteFilenameCandidate(sanitized, rawFileName);
-  sanitizedFilenameByChatId.set(normalizedChatId, finalName);
+  rememberResolvedSyncFilename(normalizedChatId, finalName);
   return finalName;
+}
+
+async function resolveSyncFilenameCandidates(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    throw new Error("chatId 不能为空");
+  }
+
+  const candidates = [];
+  const pushCandidate = (value) => {
+    const normalizedValue = String(value || "").trim();
+    if (!normalizedValue || candidates.includes(normalizedValue)) return;
+    candidates.push(normalizedValue);
+  };
+
+  if (sanitizedFilenameByChatId.has(normalizedChatId)) {
+    pushCandidate(sanitizedFilenameByChatId.get(normalizedChatId));
+  }
+
+  const primaryRawFileName = buildSyncFilename(normalizedChatId);
+  const primarySanitized = await sanitizeFilename(primaryRawFileName, options);
+  pushCandidate(
+    normalizeRemoteFilenameCandidate(primarySanitized, primaryRawFileName),
+  );
+
+  const legacyRawFileName = buildLegacyRawSyncFilename(normalizedChatId);
+  if (legacyRawFileName !== primaryRawFileName) {
+    pushCandidate(await resolveLegacySyncFilename(normalizedChatId, options));
+  }
+
+  return candidates;
 }
 
 async function readRemoteSnapshot(chatId, options = {}) {
@@ -983,70 +1071,81 @@ async function readRemoteSnapshot(chatId, options = {}) {
     };
   }
 
-  const filename = await resolveSyncFilename(normalizedChatId, options);
   const fetchImpl = getFetch(options);
-  const cacheBust = `t=${Date.now()}`;
-  const url = `/user/files/${encodeURIComponent(filename)}?${cacheBust}`;
+  const candidateFilenames = await resolveSyncFilenameCandidates(
+    normalizedChatId,
+    options,
+  );
+  let lastNotFoundFilename = candidateFilenames[0] || "";
 
-  let response;
-  try {
-    response = await fetchImpl(url, {
-      method: "GET",
-      cache: "no-store",
-    });
-  } catch (error) {
-    console.warn("[ST-BME] 读取远端同步文件失败:", error);
-    return {
-      exists: false,
-      status: "network-error",
-      filename,
-      snapshot: null,
-      error,
-    };
+  for (const filename of candidateFilenames) {
+    const cacheBust = `t=${Date.now()}`;
+    const url = `/user/files/${encodeURIComponent(filename)}?${cacheBust}`;
+
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "GET",
+        cache: "no-store",
+      });
+    } catch (error) {
+      console.warn("[ST-BME] 读取远端同步文件失败:", error);
+      return {
+        exists: false,
+        status: "network-error",
+        filename,
+        snapshot: null,
+        error,
+      };
+    }
+
+    if (response.status === 404) {
+      lastNotFoundFilename = filename;
+      continue;
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      const error = new Error(errorText || `HTTP ${response.status}`);
+      console.warn("[ST-BME] 读取远端同步文件失败:", error);
+      return {
+        exists: false,
+        status: "http-error",
+        filename,
+        snapshot: null,
+        error,
+        statusCode: response.status,
+      };
+    }
+
+    try {
+      const remotePayload = await response.json();
+      const snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
+      rememberResolvedSyncFilename(normalizedChatId, filename);
+      return {
+        exists: true,
+        status: "ok",
+        filename,
+        snapshot,
+      };
+    } catch (error) {
+      console.warn("[ST-BME] 解析远端同步文件失败:", error);
+      return {
+        exists: false,
+        status: "invalid-json",
+        filename,
+        snapshot: null,
+        error,
+      };
+    }
   }
 
-  if (response.status === 404) {
-    return {
-      exists: false,
-      status: "not-found",
-      filename,
-      snapshot: null,
-    };
-  }
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    const error = new Error(errorText || `HTTP ${response.status}`);
-    console.warn("[ST-BME] 读取远端同步文件失败:", error);
-    return {
-      exists: false,
-      status: "http-error",
-      filename,
-      snapshot: null,
-      error,
-      statusCode: response.status,
-    };
-  }
-
-  try {
-    const remotePayload = await response.json();
-    const snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
-    return {
-      exists: true,
-      status: "ok",
-      filename,
-      snapshot,
-    };
-  } catch (error) {
-    console.warn("[ST-BME] 解析远端同步文件失败:", error);
-    return {
-      exists: false,
-      status: "invalid-json",
-      filename,
-      snapshot: null,
-      error,
-    };
-  }
+  return {
+    exists: false,
+    status: "not-found",
+    filename: lastNotFoundFilename,
+    snapshot: null,
+  };
 }
 
 async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
@@ -1671,37 +1770,48 @@ export async function deleteRemoteSyncFile(chatId, options = {}) {
   }
 
   try {
-    const filename = await resolveSyncFilename(normalizedChatId, options);
     const fetchImpl = getFetch(options);
-    const response = await fetchImpl("/api/files/delete", {
-      method: "POST",
-      headers: {
-        ...getRequestHeadersSafe(options),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        path: `/user/files/${filename}`,
-      }),
-    });
+    const filenames = await resolveSyncFilenameCandidates(
+      normalizedChatId,
+      options,
+    );
+    let lastNotFoundFilename = filenames[0] || "";
 
-    if (response.status === 404) {
+    for (const filename of filenames) {
+      const response = await fetchImpl("/api/files/delete", {
+        method: "POST",
+        headers: {
+          ...getRequestHeadersSafe(options),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          path: `/user/files/${filename}`,
+        }),
+      });
+
+      if (response.status === 404) {
+        lastNotFoundFilename = filename;
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => response.statusText);
+        throw new Error(errorText || `HTTP ${response.status}`);
+      }
+
+      sanitizedFilenameByChatId.delete(normalizedChatId);
       return {
-        deleted: false,
+        deleted: true,
         chatId: normalizedChatId,
         filename,
-        reason: "not-found",
       };
     }
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => response.statusText);
-      throw new Error(errorText || `HTTP ${response.status}`);
-    }
-
     return {
-      deleted: true,
+      deleted: false,
       chatId: normalizedChatId,
-      filename,
+      filename: lastNotFoundFilename,
+      reason: "not-found",
     };
   } catch (error) {
     console.warn("[ST-BME] 删除远端同步文件失败:", error);

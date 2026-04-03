@@ -170,9 +170,69 @@ function clearManagedState() {
   hideState.lastProcessedLength = 0;
 }
 
-function restoreManagedSystemFlags(chat, runtime = {}) {
-  if (!Array.isArray(chat) || hideState.managedSystemIndices.size === 0) {
+function isManagedSystemMessage(message) {
+  return Boolean(
+    message?.is_system === true &&
+      message?.extra &&
+      typeof message.extra === "object" &&
+      message.extra[BME_HIDE_HASH_MARKER] === true,
+  );
+}
+
+function collectManagedSystemIndices(chat) {
+  if (!Array.isArray(chat) || chat.length === 0) return [];
+  const indices = [];
+  for (let index = 0; index < chat.length; index++) {
+    if (isManagedSystemMessage(chat[index])) {
+      indices.push(index);
+    }
+  }
+  return indices;
+}
+
+function hydrateManagedStateFromChat(
+  chat,
+  chatKey = getCurrentChatKey(),
+  { bootstrapLength = false } = {},
+) {
+  if (!Array.isArray(chat)) {
     hideState.managedSystemIndices.clear();
+    hideState.hiddenRangeEnd = -1;
+    return { managedCount: 0, hiddenRangeEnd: -1 };
+  }
+
+  const managedIndices = collectManagedSystemIndices(chat);
+  hideState.managedSystemIndices.clear();
+  for (const index of managedIndices) {
+    hideState.managedSystemIndices.add(index);
+  }
+
+  hideState.managedChatRef = chat;
+  hideState.managedChatKey = chatKey;
+  hideState.hiddenRangeEnd =
+    managedIndices.length > 0 ? managedIndices[managedIndices.length - 1] : -1;
+  if (managedIndices.length > 0 && bootstrapLength) {
+    hideState.lastProcessedLength = chat.length;
+  }
+
+  return {
+    managedCount: managedIndices.length,
+    hiddenRangeEnd: hideState.hiddenRangeEnd,
+  };
+}
+
+function restoreManagedSystemFlags(chat, runtime = {}) {
+  if (!Array.isArray(chat)) {
+    hideState.managedSystemIndices.clear();
+    return 0;
+  }
+
+  if (hideState.managedSystemIndices.size === 0) {
+    hydrateManagedStateFromChat(chat, getCurrentChatKey(runtime), {
+      bootstrapLength: false,
+    });
+  }
+  if (hideState.managedSystemIndices.size === 0) {
     return 0;
   }
 
@@ -279,11 +339,22 @@ async function runHideApply(settings = {}, runtime = {}, options = {}) {
 
   const chatKey = getCurrentChatKey(runtime);
   const previousChatKey = hideState.managedChatKey;
+  const hadTrackedState =
+    hideState.managedSystemIndices.size > 0 ||
+    hideState.hiddenRangeEnd >= 0 ||
+    (Number.isFinite(hideState.lastProcessedLength) &&
+      hideState.lastProcessedLength > 0);
+  adoptManagedChat(chat, chatKey, runtime);
+  hydrateManagedStateFromChat(chat, chatKey, {
+    bootstrapLength: !hadTrackedState,
+  });
   const sameChat =
     previousChatKey !== null && chatKey !== null && previousChatKey === chatKey;
-  const previousHiddenEnd = sameChat ? hideState.hiddenRangeEnd : -1;
-  const previousLength = sameChat ? hideState.lastProcessedLength : 0;
-  adoptManagedChat(chat, chatKey, runtime);
+  const previousHiddenEnd = hideState.hiddenRangeEnd;
+  const previousLength =
+    sameChat && Number.isFinite(hideState.lastProcessedLength)
+      ? hideState.lastProcessedLength
+      : 0;
   hideState.lastProcessedLength = chatLength;
 
   if (!normalized.enabled || normalized.hideLastN <= 0) {
@@ -435,6 +506,9 @@ export async function unhideAll(runtime = {}) {
     return buildResult({ chatLength });
   }
 
+  hydrateManagedStateFromChat(chatInfo.chat, getCurrentChatKey(runtime), {
+    bootstrapLength: false,
+  });
   const { shownCount } = await unhideCurrentRange(runtime, version, {
     full: true,
   });
@@ -454,6 +528,12 @@ export async function unhideAll(runtime = {}) {
 export function resetHideState(runtime = {}) {
   clearScheduledTimer(runtime);
   beginOperation();
+  const chatInfo = getCurrentChatInfo(runtime);
+  if (Array.isArray(chatInfo.chat)) {
+    hydrateManagedStateFromChat(chatInfo.chat, chatInfo.chatId || null, {
+      bootstrapLength: false,
+    });
+  }
   restoreManagedSystemFlags(hideState.managedChatRef, runtime);
   clearManagedState();
 }

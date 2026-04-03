@@ -144,9 +144,40 @@ async function testResetClearsStateWithoutIssuingCommands() {
   });
 }
 
+async function testUnhideAllRecoversPersistedManagedMarkersAfterStateLoss() {
+  resetHideState();
+  const chat = [
+    {
+      mes: "user-1",
+      is_user: true,
+      is_system: true,
+      extra: { __st_bme_hide_managed: true },
+    },
+    {
+      mes: "assistant-1",
+      is_user: false,
+      is_system: true,
+      extra: { __st_bme_hide_managed: true },
+    },
+    { mes: "user-2", is_user: true, is_system: false },
+  ];
+  const runtime = createRuntime(chat);
+
+  const result = await unhideAll(runtime);
+
+  assert.equal(result.active, false);
+  assert.equal(result.shownCount, 3);
+  assert.deepEqual(runtime.commands, ["/unhide 0-2"]);
+  assert.equal(chat[0].is_system, false);
+  assert.equal(chat[1].is_system, false);
+  assert.equal(chat[0].extra, undefined);
+  assert.equal(chat[1].extra, undefined);
+}
+
 await testApplyUsesNativeHide();
 await testDisableUnhidesManagedRange();
 await testIncrementalOnlyHidesOverflowDelta();
 await testResetClearsStateWithoutIssuingCommands();
+await testUnhideAllRecoversPersistedManagedMarkersAfterStateLoss();
 
 console.log("hide-engine tests passed");
