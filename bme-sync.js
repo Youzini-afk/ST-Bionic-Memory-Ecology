@@ -1,3 +1,5 @@
+import { PROCESSED_MESSAGE_HASH_VERSION } from "./runtime-state.js";
+
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
 const BME_SYNC_FILENAME_MAX_LENGTH = 180;
@@ -469,6 +471,14 @@ function normalizeRuntimeHistoryMeta(value = {}, fallbackChatId = "") {
     value && typeof value === "object" && !Array.isArray(value)
       ? toSerializableData(value, {})
       : {};
+  const processedMessageHashVersion = Number.isFinite(
+    Number(input.processedMessageHashVersion),
+  )
+    ? Math.max(1, Math.floor(Number(input.processedMessageHashVersion)))
+    : PROCESSED_MESSAGE_HASH_VERSION;
+  const processedMessageHashesNeedRefresh =
+    input.processedMessageHashesNeedRefresh === true ||
+    processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION;
 
   return {
     ...input,
@@ -476,8 +486,12 @@ function normalizeRuntimeHistoryMeta(value = {}, fallbackChatId = "") {
     lastProcessedAssistantFloor: Number.isFinite(Number(input.lastProcessedAssistantFloor))
       ? Math.floor(Number(input.lastProcessedAssistantFloor))
       : -1,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
     extractionCount: normalizeNonNegativeInteger(input.extractionCount, 0),
-    processedMessageHashes: normalizeProcessedMessageHashes(input.processedMessageHashes),
+    processedMessageHashes: processedMessageHashesNeedRefresh
+      ? {}
+      : normalizeProcessedMessageHashes(input.processedMessageHashes),
+    processedMessageHashesNeedRefresh,
     historyDirtyFrom: normalizeOptionalFloor(input.historyDirtyFrom),
     lastMutationReason:
       typeof input.lastMutationReason === "string" ? input.lastMutationReason : "",
@@ -557,12 +571,16 @@ function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) 
     ...remoteHistory,
     chatId: normalizeChatId(remoteHistory.chatId || localHistory.chatId || options.chatId),
     lastProcessedAssistantFloor: safeLastProcessedFloor,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
     extractionCount: Math.max(
       localHistory.extractionCount,
       remoteHistory.extractionCount,
       fallbackExtractionCount,
     ),
     processedMessageHashes: sortProcessedMessageHashes(mergedHashes),
+    processedMessageHashesNeedRefresh:
+      localHistory.processedMessageHashesNeedRefresh === true ||
+      remoteHistory.processedMessageHashesNeedRefresh === true,
     historyDirtyFrom,
     lastMutationReason: hasIntegrityConflict
       ? `sync-merge:processed-hash-conflict@${firstConflictFloor}`

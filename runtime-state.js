@@ -3,6 +3,7 @@
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
 export const BATCH_JOURNAL_VERSION = 2;
+export const PROCESSED_MESSAGE_HASH_VERSION = 2;
 
 export function buildVectorCollectionId(chatId) {
   return `st-bme::${chatId || "unknown-chat"}`;
@@ -12,7 +13,9 @@ export function createDefaultHistoryState(chatId = "") {
   return {
     chatId,
     lastProcessedAssistantFloor: -1,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
     processedMessageHashes: {},
+    processedMessageHashesNeedRefresh: false,
     historyDirtyFrom: null,
     lastMutationReason: "",
     lastMutationSource: "",
@@ -103,6 +106,22 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
     Array.isArray(historyState.processedMessageHashes)
   ) {
     historyState.processedMessageHashes = {};
+  }
+  if (!Number.isFinite(historyState.processedMessageHashVersion)) {
+    historyState.processedMessageHashVersion = 1;
+  }
+  historyState.processedMessageHashVersion = Math.max(
+    1,
+    Math.floor(historyState.processedMessageHashVersion),
+  );
+  historyState.processedMessageHashesNeedRefresh =
+    historyState.processedMessageHashesNeedRefresh === true;
+  if (
+    historyState.processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION
+  ) {
+    historyState.processedMessageHashes = {};
+    historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+    historyState.processedMessageHashesNeedRefresh = true;
   }
 
   if (
@@ -208,15 +227,9 @@ export function stableHashString(text) {
 }
 
 export function buildMessageHash(message) {
-  const managedHideMarker = Boolean(
-    message?.extra &&
-      typeof message.extra === "object" &&
-      message.extra.__st_bme_hide_managed === true,
-  );
   const swipeId = Number.isFinite(message?.swipe_id) ? message.swipe_id : null;
   const payload = JSON.stringify({
     isUser: Boolean(message?.is_user),
-    isSystem: managedHideMarker ? false : Boolean(message?.is_system),
     text: String(message?.mes || ""),
     swipeId,
   });
@@ -242,6 +255,13 @@ export function snapshotProcessedMessageHashes(
 export function detectHistoryMutation(chat, historyState) {
   const lastProcessedAssistantFloor =
     historyState?.lastProcessedAssistantFloor ?? -1;
+  const processedMessageHashVersion = Number.isFinite(
+    historyState?.processedMessageHashVersion,
+  )
+    ? Math.max(1, Math.floor(historyState.processedMessageHashVersion))
+    : 1;
+  const processedMessageHashesNeedRefresh =
+    historyState?.processedMessageHashesNeedRefresh === true;
 
   const processedMessageHashes =
     historyState?.processedMessageHashes &&
@@ -251,6 +271,12 @@ export function detectHistoryMutation(chat, historyState) {
       : {};
 
   if (!Array.isArray(chat) || lastProcessedAssistantFloor < 0) {
+    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
+  if (
+    processedMessageHashesNeedRefresh ||
+    processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION
+  ) {
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
   }
 
@@ -339,7 +365,10 @@ export function clearHistoryDirty(graph, result = null) {
   graph.historyState.historyDirtyFrom = null;
   graph.historyState.lastMutationReason = "";
   graph.historyState.lastMutationSource = "";
+  graph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
   graph.historyState.processedMessageHashes = {};
+  graph.historyState.processedMessageHashesNeedRefresh = false;
   if (result) {
     graph.historyState.lastRecoveryResult = result;
   }
@@ -478,9 +507,19 @@ function buildJournalStateBefore(snapshotBefore, meta = {}) {
       snapshotBefore?.historyState?.lastProcessedAssistantFloor ??
       snapshotBefore?.lastProcessedSeq ??
       -1,
+    processedMessageHashVersion: Number.isFinite(
+      snapshotBefore?.historyState?.processedMessageHashVersion,
+    )
+      ? Math.max(
+          1,
+          Math.floor(snapshotBefore.historyState.processedMessageHashVersion),
+        )
+      : PROCESSED_MESSAGE_HASH_VERSION,
     processedMessageHashes: clonePlain(
       snapshotBefore?.historyState?.processedMessageHashes || {},
     ),
+    processedMessageHashesNeedRefresh:
+      snapshotBefore?.historyState?.processedMessageHashesNeedRefresh === true,
     historyDirtyFrom: Number.isFinite(
       snapshotBefore?.historyState?.historyDirtyFrom,
     )
@@ -805,9 +844,16 @@ function applyJournalStateBefore(graph, stateBefore = {}) {
   )
     ? stateBefore.lastProcessedAssistantFloor
     : historyState.lastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = Number.isFinite(
+    stateBefore.processedMessageHashVersion,
+  )
+    ? Math.max(1, Math.floor(stateBefore.processedMessageHashVersion))
+    : historyState.processedMessageHashVersion;
   historyState.processedMessageHashes = clonePlain(
     stateBefore.processedMessageHashes || {},
   );
+  historyState.processedMessageHashesNeedRefresh =
+    stateBefore.processedMessageHashesNeedRefresh === true;
   historyState.historyDirtyFrom = Number.isFinite(stateBefore.historyDirtyFrom)
     ? stateBefore.historyDirtyFrom
     : null;

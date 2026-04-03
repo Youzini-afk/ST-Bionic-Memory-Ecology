@@ -5,6 +5,8 @@ import {
   createBatchJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
+  normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
   rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "../runtime-state.js";
@@ -66,8 +68,25 @@ const realSystemFlipDetection = detectHistoryMutation(realSystemFlipChat, {
   lastProcessedAssistantFloor: 3,
   processedMessageHashes: hashes,
 });
-assert.equal(realSystemFlipDetection.dirty, true);
-assert.equal(realSystemFlipDetection.earliestAffectedFloor, 1);
+assert.equal(realSystemFlipDetection.dirty, false);
+
+const migratedGraph = normalizeGraphRuntimeState({
+  historyState: {
+    chatId: "chat-history-test",
+    lastProcessedAssistantFloor: 3,
+    processedMessageHashVersion: 1,
+    processedMessageHashes: hashes,
+  },
+});
+assert.equal(
+  migratedGraph.historyState.processedMessageHashVersion,
+  PROCESSED_MESSAGE_HASH_VERSION,
+);
+assert.deepEqual(migratedGraph.historyState.processedMessageHashes, {});
+assert.equal(migratedGraph.historyState.processedMessageHashesNeedRefresh, true);
+
+const migratedDetection = detectHistoryMutation(chat, migratedGraph.historyState);
+assert.equal(migratedDetection.dirty, false);
 
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {

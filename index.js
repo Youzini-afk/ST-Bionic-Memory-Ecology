@@ -155,6 +155,7 @@ import {
   findJournalRecoveryPoint,
   markHistoryDirty,
   normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
   snapshotProcessedMessageHashes,
   undoLatestMaintenance,
 } from "./runtime-state.js";
@@ -3691,6 +3692,13 @@ function deferAutoExtraction(
       `retry:${pendingAutoExtraction.reason || "auto-extraction-deferred"}`,
     );
   }, resolvedDelayMs);
+  console.debug?.("[ST-BME] auto extraction deferred", {
+    reason: pendingAutoExtraction.reason,
+    chatId: normalizedChatId,
+    messageId: pendingAutoExtraction.messageId,
+    attempts: nextAttempts,
+    delayMs: resolvedDelayMs,
+  });
 
   return {
     scheduled: true,
@@ -3737,6 +3745,15 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
   }
 
   if (!ensureGraphMutationReady("自动提取", { notify: false })) {
+    console.debug?.(
+      "[ST-BME] pending auto extraction resume blocked: graph-not-ready",
+      {
+        source,
+        chatId: pendingChatId,
+        attempts: pendingAutoExtraction.attempts || 0,
+        loadState: graphPersistenceState.loadState || "",
+      },
+    );
     return deferAutoExtraction("graph-not-ready", {
       chatId: pendingChatId,
       messageId: pendingAutoExtraction.messageId,
@@ -3745,6 +3762,12 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
 
   const pendingRequest = { ...pendingAutoExtraction };
   clearPendingAutoExtraction();
+  console.debug?.("[ST-BME] resuming pending auto extraction", {
+    source,
+    chatId: pendingRequest.chatId,
+    messageId: pendingRequest.messageId,
+    attempts: pendingRequest.attempts || 0,
+  });
   const enqueueMicrotask =
     typeof globalThis.queueMicrotask === "function"
       ? globalThis.queueMicrotask.bind(globalThis)
@@ -4604,8 +4627,11 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.lastProcessedAssistantFloor =
     lastProcessedAssistantFloor;
+  currentGraph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
   currentGraph.historyState.processedMessageHashes =
     snapshotProcessedMessageHashes(chat, lastProcessedAssistantFloor);
+  currentGraph.historyState.processedMessageHashesNeedRefresh = false;
   currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
 }
 
@@ -7078,6 +7104,27 @@ function inspectHistoryMutation(
   ensureCurrentGraphRuntimeState();
   const context = getContext();
   const chat = context?.chat;
+  if (
+    Array.isArray(chat) &&
+    currentGraph.historyState?.processedMessageHashesNeedRefresh === true
+  ) {
+    updateProcessedHistorySnapshot(
+      chat,
+      currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+    );
+    console.debug?.(
+      "[ST-BME] refreshed processed message hashes after hash-version migration",
+      {
+        trigger,
+        lastProcessedAssistantFloor:
+          currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+      },
+    );
+    if (isGraphMetadataWriteAllowed()) {
+      saveGraphToChat({ reason: "processed-hash-version-migrated" });
+    }
+    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
   const metaDetection = resolveDirtyFloorFromMutationMeta(
     trigger,
     primaryArg,

@@ -558,6 +558,15 @@ export function onMessageReceivedController(
     : lastMessage;
 
   if (runtime.isAssistantChatMessage(targetMessage)) {
+    runtime.console?.debug?.(
+      "[ST-BME] assistant message received, queueing auto extraction",
+      {
+        messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+        chatLength: Array.isArray(chat) ? chat.length : 0,
+        loadState,
+        dbReady,
+      },
+    );
     enqueueMicrotask(() => {
       void runtime.runExtraction().catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);
