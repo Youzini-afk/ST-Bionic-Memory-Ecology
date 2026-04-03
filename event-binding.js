@@ -427,6 +427,9 @@ export async function onGenerationAfterCommandsController(
   // 后续 GENERATE_BEFORE_COMBINE_PROMPTS 阶段会通过
   // applyFinalRecallInjectionForGeneration 做 deferred rewrite 兜底。
   if (deliveryMode === "immediate") {
+    // immediate 路径下 runRecall 已经完成持久化 recall record，
+    // 这里补一次 UI 刷新，避免需要等到消息编辑/历史恢复后才看到 Recall Card。
+    runtime.refreshPersistedRecallMessageUi?.();
     console.warn("[ST-BME:DIAG] DONE: immediate mode, injection via setExtensionPrompt in runRecall");
     return recallResult;
   }
