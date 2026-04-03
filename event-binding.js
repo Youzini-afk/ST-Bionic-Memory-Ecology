@@ -1,3 +1,23 @@
+function getTimerApi(runtime) {
+  const rawSetTimeout =
+    typeof runtime?.setTimeout === "function"
+      ? runtime.setTimeout
+      : globalThis.setTimeout;
+  const rawClearTimeout =
+    typeof runtime?.clearTimeout === "function"
+      ? runtime.clearTimeout
+      : globalThis.clearTimeout;
+
+  return {
+    setTimeout(...args) {
+      return Reflect.apply(rawSetTimeout, globalThis, args);
+    },
+    clearTimeout(...args) {
+      return Reflect.apply(rawClearTimeout, globalThis, args);
+    },
+  };
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   if (typeof makeFirst === "function") {
@@ -37,8 +57,9 @@ export function registerGenerationAfterCommandsController(runtime, listener) {
 }
 
 export function scheduleSendIntentHookRetryController(runtime, delayMs = 400) {
-  runtime.clearTimeout(runtime.getSendIntentHookRetryTimer());
-  const timer = runtime.setTimeout(() => {
+  const timers = getTimerApi(runtime);
+  timers.clearTimeout(runtime.getSendIntentHookRetryTimer());
+  const timer = timers.setTimeout(() => {
     runtime.setSendIntentHookRetryTimer(null);
     runtime.installSendIntentHooks();
   }, delayMs);
@@ -165,8 +186,9 @@ export function registerCoreEventHooksController(runtime) {
 }
 
 export function onChatChangedController(runtime) {
+  const timers = getTimerApi(runtime);
   runtime.clearPendingHistoryMutationChecks();
-  runtime.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
+  timers.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
   runtime.setPendingHistoryRecoveryTimer(null);
   runtime.setPendingHistoryRecoveryTrigger("");
   runtime.clearPendingAutoExtraction?.();
