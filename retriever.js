@@ -1327,7 +1327,7 @@ async function llmRecall(
   const llmResult = await callLLMForJSON({
     systemPrompt: resolveTaskLlmSystemPrompt(promptPayload, systemPrompt),
     userPrompt: promptPayload.userPrompt,
-    maxRetries: 1,
+    maxRetries: 2,
     signal,
     taskType: "recall",
     debugContext: createTaskLlmDebugContext(
@@ -1337,6 +1337,7 @@ async function llmRecall(
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayload.additionalMessages,
     onStreamProgress,
+    maxCompletionTokens: Math.max(512, maxNodes * 160),
     returnFailureDetails: true,
   });
   const result = llmResult?.ok ? llmResult.data : null;

@@ -3532,6 +3532,70 @@ async function testPersistentRecallSourceResolutionAndTargetRouting() {
   assert.equal(fallback.injectionText, "persisted");
 }
 
+async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor() {
+  {
+    const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+    harness.chat = [
+      { is_user: true, mes: "当前输入" },
+      { is_user: false, mes: "assistant-tail" },
+    ];
+    harness.result.recordRecallSentUserMessage(0, "当前输入", "message-sent");
+
+    const resolution =
+      harness.result.applyFinalRecallInjectionForGeneration({
+        generationType: "normal",
+        hookName: "GENERATION_AFTER_COMMANDS",
+        freshRecallResult: {
+          status: "completed",
+          didRecall: true,
+          injectionText: "fresh-memory",
+        },
+        transaction: {
+          frozenRecallOptions: {
+            generationType: "normal",
+            targetUserMessageIndex: null,
+            overrideUserMessage: "当前输入",
+          },
+        },
+      });
+
+    assert.equal(resolution.targetUserMessageIndex, 0);
+  }
+
+  {
+    const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+    harness.chat = [
+      { is_user: true, mes: "尾部 user 仍可匹配" },
+      { is_user: false, mes: "assistant-tail" },
+    ];
+
+    const resolution =
+      harness.result.applyFinalRecallInjectionForGeneration({
+        generationType: "normal",
+        hookName: "GENERATION_AFTER_COMMANDS",
+        freshRecallResult: {
+          status: "completed",
+          didRecall: true,
+          injectionText: "fresh-memory",
+          sourceCandidates: [
+            {
+              text: "尾部 user 仍可匹配",
+            },
+          ],
+        },
+        transaction: {
+          frozenRecallOptions: {
+            generationType: "normal",
+            targetUserMessageIndex: null,
+            overrideUserMessage: "尾部 user 仍可匹配",
+          },
+        },
+      });
+
+    assert.equal(resolution.targetUserMessageIndex, 0);
+  }
+}
+
 async function testRecallSubGraphAndDataLayerEntryPoints() {
   // Sub-graph build test (pure function, no DOM needed)
   const { buildRecallSubGraph } = await import("../recall-message-ui.js");
@@ -4340,6 +4404,7 @@ await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
+await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
 await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();

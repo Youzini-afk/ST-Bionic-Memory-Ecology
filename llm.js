@@ -1446,6 +1446,7 @@ export async function callLLMForJSON({
   promptMessages = [],
   debugContext = null,
   onStreamProgress = null,
+  maxCompletionTokens = null,
   returnFailureDetails = false,
 } = {}) {
   const override = getLlmTestOverride("callLLMForJSON");
@@ -1461,6 +1462,7 @@ export async function callLLMForJSON({
       promptMessages,
       debugContext,
       onStreamProgress,
+      maxCompletionTokens,
       returnFailureDetails,
     });
   }
@@ -1489,7 +1491,9 @@ export async function callLLMForJSON({
         taskType,
         requestSource: privateRequestSource,
         onStreamProgress,
-        maxCompletionTokens: DEFAULT_JSON_COMPLETION_TOKENS,
+        maxCompletionTokens: Number.isFinite(maxCompletionTokens)
+          ? maxCompletionTokens
+          : DEFAULT_JSON_COMPLETION_TOKENS,
       });
       const responseText = response?.content || "";
       const outputCleanup = applyTaskOutputRegexStages(taskType, responseText);

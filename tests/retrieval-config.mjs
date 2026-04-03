@@ -279,6 +279,8 @@ assert.equal(llmPoolResult.meta.retrieval.diversityApplied, true);
 assert.equal(llmPoolResult.meta.retrieval.candidatePoolBeforeDpp, 3);
 assert.equal(llmPoolResult.meta.retrieval.candidatePoolAfterDpp, 2);
 assert.equal(state.llmOptions[0].returnFailureDetails, true);
+assert.equal(state.llmOptions[0].maxRetries, 2);
+assert.equal(state.llmOptions[0].maxCompletionTokens, 512);
 
 state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;

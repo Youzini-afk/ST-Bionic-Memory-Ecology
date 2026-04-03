@@ -1269,6 +1269,101 @@ function debugPersistedRecallPersistence(
   );
 }
 
+function buildRecallTargetCandidateHashes(candidateTexts = []) {
+  const hashes = new Set();
+  for (const text of candidateTexts) {
+    const normalized = normalizeRecallInputText(text);
+    if (!normalized) continue;
+    const hash = hashRecallInput(normalized);
+    if (hash) hashes.add(hash);
+  }
+  return hashes;
+}
+
+function doesChatUserMessageMatchRecallCandidates(message, candidateHashes) {
+  if (!message?.is_user || !(candidateHashes instanceof Set) || !candidateHashes.size) {
+    return false;
+  }
+  const normalizedMessage = normalizeRecallInputText(message?.mes || "");
+  if (!normalizedMessage) return false;
+  return candidateHashes.has(hashRecallInput(normalizedMessage));
+}
+
+function resolveRecallPersistenceTargetUserMessageIndex(
+  chat,
+  {
+    generationType = "normal",
+    explicitTargetUserMessageIndex = null,
+    candidateTexts = [],
+    preferredRecord = null,
+  } = {},
+) {
+  if (!Array.isArray(chat) || chat.length === 0) return null;
+
+  const explicitIndex = Number.isFinite(explicitTargetUserMessageIndex)
+    ? Math.floor(Number(explicitTargetUserMessageIndex))
+    : null;
+  if (Number.isFinite(explicitIndex) && chat[explicitIndex]?.is_user) {
+    return explicitIndex;
+  }
+
+  const candidateHashes = buildRecallTargetCandidateHashes(candidateTexts);
+  const latestUserIndex = resolveGenerationTargetUserMessageIndex(chat, {
+    generationType: "history",
+  });
+
+  const hasFreshPreferredRecord = isFreshRecallInputRecord(preferredRecord);
+  const preferredMessageId =
+    hasFreshPreferredRecord && Number.isFinite(preferredRecord?.messageId)
+      ? Math.floor(Number(preferredRecord.messageId))
+      : null;
+
+  if (
+    Number.isFinite(preferredMessageId) &&
+    chat[preferredMessageId]?.is_user &&
+    (!candidateHashes.size ||
+      doesChatUserMessageMatchRecallCandidates(
+        chat[preferredMessageId],
+        candidateHashes,
+      ))
+  ) {
+    return preferredMessageId;
+  }
+
+  if (
+    candidateHashes.size &&
+    Number.isFinite(latestUserIndex) &&
+    chat[latestUserIndex]?.is_user &&
+    doesChatUserMessageMatchRecallCandidates(
+      chat[latestUserIndex],
+      candidateHashes,
+    )
+  ) {
+    return latestUserIndex;
+  }
+
+  if (hasFreshPreferredRecord && candidateHashes.size) {
+    for (let index = chat.length - 1; index >= 0; index--) {
+      const message = chat[index];
+      if (
+        doesChatUserMessageMatchRecallCandidates(message, candidateHashes)
+      ) {
+        return index;
+      }
+    }
+  }
+
+  if (
+    String(generationType || "normal").trim() !== "normal" &&
+    Number.isFinite(latestUserIndex) &&
+    chat[latestUserIndex]?.is_user
+  ) {
+    return latestUserIndex;
+  }
+
+  return null;
+}
+
 function persistRecallInjectionRecord({
   recallInput = {},
   result = {},
@@ -1280,23 +1375,26 @@ function persistRecallInjectionRecord({
 
   const generationType =
     String(recallInput?.generationType || "normal").trim() || "normal";
-  let resolvedTargetIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
-    ? recallInput.targetUserMessageIndex
-    : resolveGenerationTargetUserMessageIndex(chat, { generationType });
-
-  if (
-    !Number.isFinite(resolvedTargetIndex) &&
-    Number.isFinite(lastRecallSentUserMessage?.messageId) &&
-    chat[lastRecallSentUserMessage.messageId]?.is_user
-  ) {
-    resolvedTargetIndex = lastRecallSentUserMessage.messageId;
-  }
+  let resolvedTargetIndex = resolveRecallPersistenceTargetUserMessageIndex(
+    chat,
+    {
+      generationType,
+      explicitTargetUserMessageIndex: recallInput?.targetUserMessageIndex,
+      candidateTexts: [
+        recallInput?.userMessage,
+        recallInput?.overrideUserMessage,
+        lastRecallSentUserMessage?.text,
+      ],
+      preferredRecord: lastRecallSentUserMessage,
+    },
+  );
 
   if (!Number.isFinite(resolvedTargetIndex)) {
     debugPersistedRecallPersistence("目标 user 楼层解析失败", {
       generationType,
       explicitTargetUserMessageIndex: recallInput?.targetUserMessageIndex,
       lastSentUserMessageId: lastRecallSentUserMessage?.messageId,
+      recallInputSource: String(recallInput?.source || ""),
     });
     return null;
   }
@@ -1338,6 +1436,7 @@ function persistRecallInjectionRecord({
   }
 
   triggerChatMetadataSave(getContext(), { immediate: false });
+  schedulePersistedRecallMessageUiRefresh();
   debugPersistedRecallPersistence(
     "召回记录已写入 user 楼层",
     {
@@ -1567,16 +1666,19 @@ function applyFinalRecallInjectionForGeneration({
     return emptyResolution;
   }
 
-  targetUserMessageIndex = resolveGenerationTargetUserMessageIndex(chat, {
+  targetUserMessageIndex = resolveRecallPersistenceTargetUserMessageIndex(chat, {
     generationType,
+    explicitTargetUserMessageIndex:
+      transaction?.frozenRecallOptions?.targetUserMessageIndex,
+    candidateTexts: [
+      transaction?.frozenRecallOptions?.overrideUserMessage,
+      recallResult?.recallInput,
+      recallResult?.userMessage,
+      recallResult?.sourceCandidates?.[0]?.text,
+      lastRecallSentUserMessage?.text,
+    ],
+    preferredRecord: lastRecallSentUserMessage,
   });
-  if (
-    !Number.isFinite(targetUserMessageIndex) &&
-    Number.isFinite(lastRecallSentUserMessage?.messageId) &&
-    chat[lastRecallSentUserMessage.messageId]?.is_user
-  ) {
-    targetUserMessageIndex = lastRecallSentUserMessage.messageId;
-  }
 
   const persistedRecord = Number.isFinite(targetUserMessageIndex)
     ? readPersistedRecallFromUserMessage(chat, targetUserMessageIndex)
