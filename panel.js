@@ -1537,6 +1537,10 @@ function _refreshConfigTab() {
     "bme-setting-reflection-enabled",
     settings.enableReflection ?? false,
   );
+  _setInputValue(
+    "bme-setting-recall-card-user-input-display-mode",
+    settings.recallCardUserInputDisplayMode ?? "beautify_only",
+  );
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
   _setInputValue(
@@ -1815,6 +1819,21 @@ function _bindConfigControls() {
     _patchSettings({ enableReflection: checked });
     _refreshGuardedConfigStates();
   });
+  const recallCardUserInputDisplayModeEl = document.getElementById(
+    "bme-setting-recall-card-user-input-display-mode",
+  );
+  if (
+    recallCardUserInputDisplayModeEl &&
+    recallCardUserInputDisplayModeEl.dataset.bmeBound !== "true"
+  ) {
+    recallCardUserInputDisplayModeEl.addEventListener("change", () => {
+      _patchSettings({
+        recallCardUserInputDisplayMode:
+          recallCardUserInputDisplayModeEl.value || "beautify_only",
+      });
+    });
+    recallCardUserInputDisplayModeEl.dataset.bmeBound = "true";
+  }
 
   bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
     _patchSettings({ extractEvery: value }),

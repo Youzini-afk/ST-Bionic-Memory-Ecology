@@ -123,7 +123,7 @@ export function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, cha
   const isDeleteTrigger = String(trigger || "").includes("message-deleted");
   const minExtractableFloor = getMinExtractableAssistantFloor(chat);
 
-  // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近“被删区间起点”，
+  // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近"被删区间起点"，
   // 因此这里额外向前退一层，避免恢复仍停留在被删楼层对应的旧图谱边界。
   if (!isDeleteTrigger && Number.isFinite(meta.messageId)) {
     candidates.push({

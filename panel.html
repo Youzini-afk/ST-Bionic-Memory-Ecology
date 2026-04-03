@@ -1021,6 +1021,35 @@
                     </button>
                   </div>
                 </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">美化用户输入</div>
+                      <div class="bme-config-card-subtitle">
+                        控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-recall-card-user-input-display-mode">
+                      显示模式
+                    </label>
+                    <select
+                      id="bme-setting-recall-card-user-input-display-mode"
+                      class="bme-config-input"
+                    >
+                      <option value="off">关闭美化，仅显示原始输入</option>
+                      <option value="beautify_only">
+                        由 Recall Card 接管显示，并隐藏原始输入
+                      </option>
+                      <option value="mirror">Recall Card 与原始输入同时显示</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-help">
+                    只调整聊天楼层里的显示方式，不改变记忆召回、注入 prompt 或消息实际发送内容。
+                  </div>
+                </div>
               </div>
             </section>
 
