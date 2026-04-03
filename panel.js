@@ -2897,14 +2897,14 @@ function _renderTaskProfileWorkspace(state) {
             )
             .join("")}
           <span style="flex:1"></span>
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
+            <i class="fa-solid fa-arrows-rotate" style="margin-right:4px"></i>恢复全部
+          </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
             <i class="fa-solid fa-file-export" style="margin-right:4px"></i>导出全部
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
             <i class="fa-solid fa-file-import" style="margin-right:4px"></i>导入全部
-          </button>
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
-            <i class="fa-solid fa-arrows-rotate" style="margin-right:4px"></i>恢复全部
           </button>
         </div>
 
