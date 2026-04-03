@@ -2255,9 +2255,9 @@ function buildPersistedRecallUiRetryDelays(initialDelayMs = 0) {
 }
 
 function summarizePersistedRecallRefreshStatus(summary) {
-  if (summary.renderedCount > 0) return "rendered";
   if (summary.waitingMessageIndices.length > 0) return "waiting_dom";
   if (summary.anchorFailureIndices.length > 0) return "missing_message_anchor";
+  if (summary.renderedCount > 0) return "rendered";
   if (summary.skippedNonUserIndices.length > 0) return "skipped_non_user";
   if (summary.persistedRecordCount === 0) return "missing_recall_record";
   return "missing_message_anchor";

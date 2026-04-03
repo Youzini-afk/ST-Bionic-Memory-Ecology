@@ -1528,6 +1528,68 @@ async function testRecallCardDelayedStableMessageIndexEventuallyRenders() {
   }
 }
 
+async function testRecallCardKeepsRetryingWhenOlderCardsAlreadyRendered() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+    {
+      is_user: true,
+      mes: "user-1",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-1",
+          selectedNodeIds: ["n2"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const firstMessageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  const secondMessageElement = createMessageElement(harness.document, 1, {
+    stableId: false,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(firstMessageElement);
+  harness.chatRoot.appendChild(secondMessageElement);
+
+  try {
+    harness.api.schedulePersistedRecallMessageUiRefresh();
+    await waitForTick();
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+    );
+
+    secondMessageElement.setAttribute("mesid", "1");
+    await waitForTick();
+    await waitForTick();
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await waitForTick();
+
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      2,
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 async function testRecallCardDoesNotMountOnNonUserFloor() {
   const chat = [
     {
@@ -4578,6 +4640,7 @@ await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
 await testRecallCardDelayedStableMessageIndexEventuallyRenders();
+await testRecallCardKeepsRetryingWhenOlderCardsAlreadyRendered();
 await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
