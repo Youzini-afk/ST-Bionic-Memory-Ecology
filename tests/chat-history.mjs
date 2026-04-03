@@ -97,7 +97,10 @@ const autoHiddenChat = [
   { is_user: true, is_system: false, mes: "user-3" },
   { is_user: false, is_system: false, mes: "assistant-3" },
 ];
-await applyHideSettings({ enabled: true, hide_last_n: 2 }, createRuntime(autoHiddenChat));
+await applyHideSettings(
+  { enabled: true, hide_last_n: 2 },
+  createRuntime(autoHiddenChat),
+);
 
 assert.equal(
   isInManagedHideRange(2, autoHiddenChat),
@@ -105,12 +108,18 @@ assert.equal(
   "auto-hidden ordinary floors should be queryable from hide-engine managed range",
 );
 assert.equal(
-  isSystemMessageForExtraction(autoHiddenChat[2], { index: 2, chat: autoHiddenChat }),
+  isSystemMessageForExtraction(autoHiddenChat[2], {
+    index: 2,
+    chat: autoHiddenChat,
+  }),
   false,
   "auto-hidden ordinary floors inside managed range should remain extractable",
 );
 assert.equal(
-  isSystemMessageForExtraction(autoHiddenChat[0], { index: 0, chat: autoHiddenChat }),
+  isSystemMessageForExtraction(autoHiddenChat[0], {
+    index: 0,
+    chat: autoHiddenChat,
+  }),
   true,
   "greeting/system floor should still be treated as system even if hide range starts at 0",
 );

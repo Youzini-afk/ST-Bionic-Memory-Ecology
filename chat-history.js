@@ -7,8 +7,15 @@ import { sanitizePlannerMessageText } from "./planner-tag-utils.js";
 import { rollbackBatch } from "./runtime-state.js";
 import { isInManagedHideRange } from "./hide-engine.js";
 
-export function isBmeManagedHiddenMessage(message, { index = null, chat = null } = {}) {
-  if (Number.isFinite(index) && index > 0 && isInManagedHideRange(index, chat)) {
+export function isBmeManagedHiddenMessage(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (
+    Number.isFinite(index) &&
+    index > 0 &&
+    isInManagedHideRange(index, chat)
+  ) {
     return true;
   }
 
@@ -29,7 +36,10 @@ export function isSystemMessageForExtraction(
   return !isBmeManagedHiddenMessage(message, { index, chat });
 }
 
-export function isAssistantChatMessage(message, { index = null, chat = null } = {}) {
+export function isAssistantChatMessage(
+  message,
+  { index = null, chat = null } = {},
+) {
   return (
     Boolean(message) &&
     !message.is_user &&
@@ -113,7 +123,7 @@ export function resolveDirtyFloorFromMutationMeta(trigger, primaryArg, meta, cha
   const isDeleteTrigger = String(trigger || "").includes("message-deleted");
   const minExtractableFloor = getMinExtractableAssistantFloor(chat);
 
-  // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近“被删区间起点”，
+  // 删除后 chat 已是收缩后的状态，删除事件携带的 seq 更接近"被删区间起点"，
   // 因此这里额外向前退一层，避免恢复仍停留在被删楼层对应的旧图谱边界。
   if (!isDeleteTrigger && Number.isFinite(meta.messageId)) {
     candidates.push({
