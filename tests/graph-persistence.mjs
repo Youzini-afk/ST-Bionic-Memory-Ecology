@@ -34,6 +34,11 @@ import {
   getNode,
   serializeGraph,
 } from "../graph.js";
+import {
+  buildPersistedRecallRecord,
+  readPersistedRecallFromUserMessage,
+} from "../recall-persistence.js";
+import { getNodeDisplayName } from "../node-labels.js";
 import { normalizeGraphRuntimeState } from "../runtime-state.js";
 import {
   clampFloat,
@@ -216,6 +221,7 @@ async function createGraphPersistenceHarness({
     deserializeGraph,
     getGraphStats,
     getNode,
+    getNodeDisplayName,
     createUiStatus,
     createGraphPersistenceState,
     createRecallInputRecord,
@@ -229,6 +235,7 @@ async function createGraphPersistenceHarness({
     clampInt,
     clampFloat,
     formatRecallContextLine,
+    readPersistedRecallFromUserMessage,
     cloneGraphForPersistence,
     cloneRuntimeDebugValue,
     onMessageReceivedController,
@@ -511,6 +518,12 @@ result = {
   getCurrentGraph() {
     return currentGraph;
   },
+  getLastInjectionContent() {
+    return lastInjectionContent;
+  },
+  getLastRecalledItems() {
+    return lastRecalledItems;
+  },
   setGraphPersistenceState(patch = {}) {
     graphPersistenceState = {
       ...graphPersistenceState,
@@ -603,6 +616,54 @@ result = {
     harness.api.getGraphPersistenceState().dualWriteLastResult?.reason,
     "global-chat-id:metadata-compat-provisional",
   );
+}
+
+{
+  const graph = createMeaningfulGraph("chat-recall-ui", "recall-ui");
+  graph.nodes[0].id = "restore-node";
+  graph.lastRecallResult = [{ id: "restore-node" }];
+  stampPersistedGraph(graph, {
+    revision: 7,
+    chatId: "chat-recall-ui",
+    reason: "recall-ui-restore",
+  });
+
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-recall-ui",
+    globalChatId: "chat-recall-ui",
+    indexedDbSnapshot: buildSnapshotFromGraph(graph, {
+      chatId: "chat-recall-ui",
+      revision: 7,
+    }),
+    chat: [
+      {
+        is_user: true,
+        mes: "用户楼层",
+        extra: {
+          bme_recall: buildPersistedRecallRecord({
+            injectionText: "已持久化的召回注入",
+            selectedNodeIds: [],
+            nowIso: "2026-01-01T00:00:00.000Z",
+          }),
+        },
+      },
+      {
+        is_user: false,
+        mes: "assistant",
+      },
+    ],
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "indexeddb-recall-ui-restore",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.synced, true);
+  assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
+  assert.equal(harness.api.getLastInjectionContent(), "已持久化的召回注入");
+  assert.equal(harness.api.getLastRecalledItems().length, 1);
+  assert.equal(harness.api.getLastRecalledItems()[0]?.id, "restore-node");
 }
 
 {

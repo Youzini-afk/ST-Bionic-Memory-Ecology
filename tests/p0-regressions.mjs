@@ -3594,6 +3594,44 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
 
     assert.equal(resolution.targetUserMessageIndex, 0);
   }
+
+  {
+    const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+    harness.chat = [
+      { is_user: true, mes: "酒馆最终写入的用户楼层文本" },
+      { is_user: false, mes: "assistant-tail" },
+    ];
+    harness.result.recordRecallSentUserMessage(0, "发送前捕获的原始文本", "message-sent");
+
+    const resolution =
+      harness.result.applyFinalRecallInjectionForGeneration({
+        generationType: "normal",
+        hookName: "GENERATION_AFTER_COMMANDS",
+        freshRecallResult: {
+          status: "completed",
+          didRecall: true,
+          injectionText: "fresh-memory",
+          sourceCandidates: [
+            {
+              text: "发送前捕获的原始文本",
+            },
+          ],
+        },
+        transaction: {
+          frozenRecallOptions: {
+            generationType: "normal",
+            targetUserMessageIndex: null,
+            overrideUserMessage: "发送前捕获的原始文本",
+          },
+        },
+      });
+
+    assert.equal(
+      resolution.targetUserMessageIndex,
+      0,
+      "normal 生成时即便用户文本被宿主改写，也应回绑到最新 user 楼层",
+    );
+  }
 }
 
 async function testRecallSubGraphAndDataLayerEntryPoints() {

@@ -1101,7 +1101,7 @@ function updateLastRecalledItems(nodeIds = []) {
     return;
   }
 
-  lastRecalledItems = nodeIds
+  lastRecalledItems = normalizeRecallNodeIdList(nodeIds)
     .map((id) => getNode(currentGraph, id))
     .filter(Boolean)
     .slice(0, 8)
@@ -1111,6 +1111,61 @@ function updateLastRecalledItems(nodeIds = []) {
         `imp ${node.importance ?? 5} · seq ${node.seqRange?.[1] ?? node.seq ?? 0}`,
       ),
     );
+}
+
+function normalizeRecallNodeIdList(nodeIds = []) {
+  if (!Array.isArray(nodeIds)) return [];
+  return nodeIds
+    .map((entry) => {
+      if (typeof entry === "string" || typeof entry === "number") {
+        return String(entry).trim();
+      }
+      if (entry && typeof entry === "object") {
+        return String(entry.id || entry.nodeId || "").trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function getLatestPersistedRecallDisplayRecord(chat = getContext()?.chat) {
+  if (!Array.isArray(chat) || chat.length === 0) return null;
+  for (let index = chat.length - 1; index >= 0; index--) {
+    if (!chat[index]?.is_user) continue;
+    const record = readPersistedRecallFromUserMessage(chat, index);
+    if (record?.injectionText) {
+      return {
+        messageIndex: index,
+        record,
+      };
+    }
+  }
+  return null;
+}
+
+function restoreRecallUiStateFromPersistence(chat = getContext()?.chat) {
+  const latestPersisted = getLatestPersistedRecallDisplayRecord(chat);
+  const graphRecallNodeIds = normalizeRecallNodeIdList(
+    currentGraph?.lastRecallResult,
+  );
+  const persistedNodeIds = normalizeRecallNodeIdList(
+    latestPersisted?.record?.selectedNodeIds,
+  );
+  const effectiveNodeIds = graphRecallNodeIds.length
+    ? graphRecallNodeIds
+    : persistedNodeIds;
+
+  updateLastRecalledItems(effectiveNodeIds);
+  lastInjectionContent = String(latestPersisted?.record?.injectionText || "").trim();
+
+  return {
+    restored: Boolean(lastInjectionContent || effectiveNodeIds.length),
+    latestPersistedMessageIndex: Number.isFinite(latestPersisted?.messageIndex)
+      ? latestPersisted.messageIndex
+      : null,
+    selectedNodeIds: effectiveNodeIds,
+    injectionTextLength: lastInjectionContent.length,
+  };
 }
 
 function clearRecallInputTracking() {
@@ -1309,6 +1364,8 @@ function resolveRecallPersistenceTargetUserMessageIndex(
   } = {},
 ) {
   if (!Array.isArray(chat) || chat.length === 0) return null;
+  const normalizedGenerationType =
+    String(generationType || "normal").trim() || "normal";
 
   const explicitIndex = Number.isFinite(explicitTargetUserMessageIndex)
     ? Math.floor(Number(explicitTargetUserMessageIndex))
@@ -1363,8 +1420,28 @@ function resolveRecallPersistenceTargetUserMessageIndex(
     }
   }
 
+  // 正常生成阶段里，ST 可能会在真正发送前改写用户文本
+  // （命令展开、包装显示、助手 UI 处理等），导致 hash 已无法精确匹配。
+  // 这时仍应优先回绑到“当前最新 user 楼层”，否则召回记录虽然生成了，
+  // 但 Recall Card 会因为找不到目标楼层而消失。
   if (
-    String(generationType || "normal").trim() !== "normal" &&
+    normalizedGenerationType === "normal" &&
+    Number.isFinite(latestUserIndex) &&
+    chat[latestUserIndex]?.is_user
+  ) {
+    return latestUserIndex;
+  }
+
+  if (
+    normalizedGenerationType === "normal" &&
+    Number.isFinite(preferredMessageId) &&
+    chat[preferredMessageId]?.is_user
+  ) {
+    return preferredMessageId;
+  }
+
+  if (
+    normalizedGenerationType !== "normal" &&
     Number.isFinite(latestUserIndex) &&
     chat[latestUserIndex]?.is_user
   ) {
@@ -3397,8 +3474,9 @@ function applyIndexedDbSnapshotToRuntime(
     ? currentGraph.historyState.extractionCount
     : 0;
   lastExtractedItems = [];
-  updateLastRecalledItems(currentGraph.lastRecallResult || []);
-  lastInjectionContent = "";
+  const restoredRecallUi = restoreRecallUiStateFromPersistence(
+    getContext()?.chat,
+  );
   runtimeStatus = createUiStatus("待命", "已从 IndexedDB 加载聊天图谱", "idle");
   lastExtractionStatus = createUiStatus(
     "待命",
@@ -3413,7 +3491,9 @@ function applyIndexedDbSnapshotToRuntime(
   );
   lastRecallStatus = createUiStatus(
     "待命",
-    "已从 IndexedDB 加载聊天图谱，等待下一次召回",
+    restoredRecallUi.restored
+      ? "已从持久化召回记录恢复显示，等待下一次召回"
+      : "已从 IndexedDB 加载聊天图谱，等待下一次召回",
     "idle",
   );
 
@@ -3456,6 +3536,7 @@ function applyIndexedDbSnapshotToRuntime(
 
   removeGraphShadowSnapshot(normalizedChatId);
   refreshPanelLiveState();
+  schedulePersistedRecallMessageUiRefresh(30);
   console.debug("[ST-BME] 已从 IndexedDB 加载图谱", {
     chatId: normalizedChatId,
     source,
@@ -5310,8 +5391,9 @@ function loadGraphFromChat(options = {}) {
         ? currentGraph.historyState.extractionCount
         : 0;
       lastExtractedItems = [];
-      updateLastRecalledItems(currentGraph.lastRecallResult || []);
-      lastInjectionContent = "";
+      const restoredRecallUi = restoreRecallUiStateFromPersistence(
+        context?.chat,
+      );
       runtimeStatus = createUiStatus(
         "图谱加载中",
         "已从兼容 metadata 暂载图谱，等待 IndexedDB 权威确认",
@@ -5330,7 +5412,9 @@ function loadGraphFromChat(options = {}) {
       );
       lastRecallStatus = createUiStatus(
         "待命",
-        "兼容图谱暂载中，等待 IndexedDB 确认后再执行召回",
+        restoredRecallUi.restored
+          ? "已从持久化召回记录恢复显示，等待 IndexedDB 权威确认"
+          : "兼容图谱暂载中，等待 IndexedDB 确认后再执行召回",
         "idle",
       );
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
@@ -5377,6 +5461,7 @@ function loadGraphFromChat(options = {}) {
       });
 
       refreshPanelLiveState();
+      schedulePersistedRecallMessageUiRefresh(30);
       return {
         success: true,
         loaded: true,
