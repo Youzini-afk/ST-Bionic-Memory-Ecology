@@ -1539,7 +1539,7 @@ function _refreshConfigTab() {
   );
   _setInputValue(
     "bme-setting-recall-card-user-input-display-mode",
-    settings.recallCardUserInputDisplayMode ?? "mirror",
+    settings.recallCardUserInputDisplayMode ?? "beautify_only",
   );
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
@@ -1829,7 +1829,7 @@ function _bindConfigControls() {
     recallCardUserInputDisplayModeEl.addEventListener("change", () => {
       _patchSettings({
         recallCardUserInputDisplayMode:
-          recallCardUserInputDisplayModeEl.value || "mirror",
+          recallCardUserInputDisplayModeEl.value || "beautify_only",
       });
     });
     recallCardUserInputDisplayModeEl.dataset.bmeBound = "true";

@@ -88,7 +88,7 @@ function normalizeUserInputDisplayMode(mode) {
   ) {
     return normalized;
   }
-  return "mirror";
+  return "beautify_only";
 }
 
 function stableSerialize(value) {
@@ -198,7 +198,7 @@ export function createRecallCardElement({
   userMessageText = "",
   graph = null,
   themeName = "crimson",
-  userInputDisplayMode = "mirror",
+  userInputDisplayMode = "beautify_only",
   callbacks = {},
 }) {
   const card = el("div", "bme-recall-card");

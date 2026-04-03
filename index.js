@@ -352,7 +352,7 @@ const defaultSettings = {
 
   // 召回设置
   recallEnabled: true,
-  recallCardUserInputDisplayMode: "mirror",
+  recallCardUserInputDisplayMode: "beautify_only",
   recallTopK: 20, // 向量预筛 Top-K
   recallMaxNodes: 8, // LLM 召回最大节点数
   recallEnableLLM: true, // 是否启用 LLM 精确召回
@@ -1846,7 +1846,7 @@ function normalizeRecallCardUserInputDisplayMode(mode) {
   ) {
     return normalized;
   }
-  return "mirror";
+  return "beautify_only";
 }
 
 function applyRecallCardUserInputDisplayMode(messageElement, mode) {
