@@ -33,6 +33,7 @@ import {
   clampRecoveryStartFloor,
   getAssistantTurns,
   isAssistantChatMessage,
+  isSystemMessageForExtraction,
   pruneProcessedMessageHashesFromFloor,
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
@@ -4359,6 +4360,22 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
   toastr.warning(message, title, { timeOut: 4500 });
 }
 
+function settleExtractionStatusAfterHistoryRecovery(
+  text = "提取完成",
+  meta = "",
+  level = "success",
+) {
+  const currentText = String(lastExtractionStatus?.text || "");
+  const currentLevel = String(lastExtractionStatus?.level || "");
+  if (currentText !== "AI 生成中" && currentLevel !== "running") {
+    return;
+  }
+  setLastExtractionStatus(text, meta, level, {
+    syncRuntime: true,
+    toastKind: "",
+  });
+}
+
 async function fetchLocalWithTimeout(
   url,
   options = {},
@@ -5594,7 +5611,7 @@ const DEFAULT_TRIGGER_KEYWORDS = [
 export function getSmartTriggerDecision(chat, lastProcessed, settings) {
   const pendingMessages = chat
     .slice(Math.max(0, (lastProcessed ?? -1) + 1))
-    .filter((msg) => !msg.is_system)
+    .filter((msg) => !isSystemMessageForExtraction(msg))
     .map((msg) => ({
       role: msg.is_user ? "user" : "assistant",
       content: msg.mes || "",
@@ -7695,6 +7712,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
     }
     saveGraphToChat({ reason: "history-recovery-complete" });
     refreshPanelLiveState();
+    settleExtractionStatusAfterHistoryRecovery(
+      "提取完成",
+      `历史恢复回放 ${replayedBatches} 批`,
+      "success",
+    );
     updateStageNotice(
       "history",
       usedFullRebuild ? "历史恢复完成（全量重建）" : "历史恢复完成",
@@ -7736,6 +7758,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.replayRequiredNodeIds = [];
       currentGraph.vectorIndexState.dirty = false;
       currentGraph.vectorIndexState.dirtyReason = "";
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取已终止",
+        error?.message || "历史恢复已终止",
+        "warning",
+      );
       updateStageNotice(
         "history",
         "历史恢复已终止",
@@ -7782,6 +7809,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
       saveGraphToChat({ reason: "history-recovery-fallback-rebuild" });
       refreshPanelLiveState();
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取完成",
+        `历史恢复已退化为全量重建，回放 ${replayedBatches} 批`,
+        "warning",
+      );
       updateStageNotice(
         "history",
         "历史恢复已退化为全量重建",
@@ -7814,6 +7846,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
       saveGraphToChat({ reason: "history-recovery-failed" });
       refreshPanelLiveState();
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取失败",
+        fallbackError?.message || String(fallbackError),
+        "error",
+      );
       updateStageNotice(
         "history",
         "历史恢复失败",
