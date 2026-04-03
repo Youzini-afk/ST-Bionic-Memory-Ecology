@@ -341,6 +341,49 @@ async function testDownloadImport() {
   assert.equal(db.lastImportPayload.nodes[0].id, "remote-node");
 }
 
+async function testLegacyRemoteFilenameFallbackAndReuse() {
+  const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat~legacy name";
+  const db = new FakeDb(chatId);
+  dbByChatId.set(chatId, db);
+
+  remoteFiles.set("ST-BME_sync_chat~legacy_name.json", {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 4,
+      deviceId: "remote-device",
+      lastModified: 400,
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "legacy-node", updatedAt: 300 }],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 3,
+      extractionCount: 2,
+    },
+  });
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  const status = await getRemoteStatus(chatId, runtime);
+  assert.equal(status.exists, true);
+  assert.equal(status.filename, "ST-BME_sync_chat~legacy_name.json");
+
+  const downloadResult = await download(chatId, runtime);
+  assert.equal(downloadResult.downloaded, true);
+  assert.equal(downloadResult.filename, "ST-BME_sync_chat~legacy_name.json");
+  assert.equal(db.lastImportPayload.nodes[0].id, "legacy-node");
+
+  const uploadResult = await upload(chatId, runtime);
+  assert.equal(uploadResult.uploaded, true);
+  assert.equal(uploadResult.filename, "ST-BME_sync_chat~legacy_name.json");
+  assert.equal(logs.uploadedPayloads.at(-1)?.name, "ST-BME_sync_chat~legacy_name.json");
+}
+
 async function testMergeRules() {
   const local = {
     meta: {
@@ -595,6 +638,38 @@ async function testDeleteRemoteSyncFile() {
   assert.equal(logs.deleteCalls, 2);
 }
 
+async function testDeleteRemoteSyncFileFallsBackToLegacyFilename() {
+  const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat~legacy delete";
+  dbByChatId.set(chatId, new FakeDb(chatId));
+  remoteFiles.set("ST-BME_sync_chat~legacy_delete.json", {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 1,
+      lastModified: 10,
+      deviceId: "remote-device",
+      nodeCount: 0,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    },
+  });
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  const deleteResult = await deleteRemoteSyncFile(chatId, runtime);
+  assert.equal(deleteResult.deleted, true);
+  assert.equal(deleteResult.filename, "ST-BME_sync_chat~legacy_delete.json");
+  assert.equal(logs.deleteCalls, 2, "应先尝试新文件名，再回退删除 legacy 文件名");
+}
+
 async function testAutoSyncOnVisibility() {
   const { fetch, logs } = createMockFetchEnvironment();
   const dbByChatId = new Map();
@@ -748,10 +823,12 @@ async function main() {
   await testUploadPayloadMetaFirstAndDebounce();
   await testUploadSanitizesIllegalChatIdFilename();
   await testDownloadImport();
+  await testLegacyRemoteFilenameFallbackAndReuse();
   await testMergeRules();
   await testMergeRuntimeMetaPolicies();
   await testSyncNowLockAndAutoSync();
   await testDeleteRemoteSyncFile();
+  await testDeleteRemoteSyncFileFallsBackToLegacyFilename();
   await testAutoSyncOnVisibility();
   await testSyncNowRemoteReadErrorPath();
   await testSyncAppliedHook();
