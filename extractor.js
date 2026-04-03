@@ -17,13 +17,17 @@ import {
 import { callLLMForJSON } from "./llm.js";
 import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
 import {
+  normalizeMemoryScope,
+  isObjectiveScope,
+} from "./memory-scope.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
 } from "./prompt-builder.js";
 import { RELATION_TYPES } from "./schema.js";
 import { applyTaskRegex } from "./task-regex.js";
-import { getSTContextForPrompt } from "./st-context.js";
+import { getSTContextForPrompt, getSTContextSnapshot } from "./st-context.js";
 import { buildNodeVectorText, isDirectVectorConfig } from "./vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -112,6 +116,11 @@ export async function extractMemories({
     : ([...messages].reverse().find((m) => Number.isFinite(m.seq))?.seq ??
       effectiveStartSeq);
   const currentSeq = effectiveEndSeq;
+  const stContext = getSTContextSnapshot();
+  const scopeRuntime = {
+    activeCharacterOwner: stContext?.prompt?.charName || "",
+    activeUserOwner: stContext?.prompt?.userName || "",
+  };
 
   console.log(
     `[ST-BME] 提取开始: chat[${effectiveStartSeq}..${effectiveEndSeq}], ${messages.length} 条消息`,
@@ -224,12 +233,13 @@ export async function extractMemories({
             schema,
             refMap,
             stats,
+            scopeRuntime,
           );
           if (createdId) newNodeIds.push(createdId);
           break;
         }
         case "update":
-          handleUpdate(graph, op, currentSeq, stats);
+          handleUpdate(graph, op, currentSeq, stats, scopeRuntime);
           break;
         case "delete":
           handleDelete(graph, op, stats);
@@ -275,6 +285,7 @@ export async function extractMemories({
     graph.lastProcessedSeq ?? -1,
     effectiveEndSeq,
   );
+  updateRuntimeScopeState(graph, newNodeIds, scopeRuntime);
 
   console.log(
     `[ST-BME] 提取完成: 新建 ${stats.newNodes}, 更新 ${stats.updatedNodes}, 新边 ${stats.newEdges}, lastProcessedSeq=${graph.lastProcessedSeq}`,
@@ -292,7 +303,7 @@ export async function extractMemories({
 /**
  * 处理 create 操作
  */
-function handleCreate(graph, op, seq, schema, refMap, stats) {
+function handleCreate(graph, op, seq, schema, refMap, stats, scopeRuntime = {}) {
   const normalizedFields =
     op.type === "event" ? ensureEventTitle(op.fields || {}) : op.fields || {};
   const typeDef = schema.find((s) => s.id === op.type);
@@ -300,13 +311,20 @@ function handleCreate(graph, op, seq, schema, refMap, stats) {
     console.warn(`[ST-BME] 未知节点类型: ${op.type}`);
     return null;
   }
+  const nodeScope = resolveOperationScope(op, scopeRuntime);
 
   // latestOnly 类型：检查是否已存在同名节点
   if (typeDef.latestOnly && op.fields?.name) {
-    const existing = findLatestNode(graph, op.type, op.fields.name);
+    const existing = findLatestNode(
+      graph,
+      op.type,
+      op.fields.name,
+      "name",
+      nodeScope,
+    );
     if (existing) {
       // 转为更新操作
-      updateNode(graph, existing.id, { fields: op.fields, seq });
+      updateNode(graph, existing.id, { fields: op.fields, seq, scope: nodeScope });
       stats.updatedNodes++;
 
       if (op.ref) refMap.set(op.ref, existing.id);
@@ -326,6 +344,7 @@ function handleCreate(graph, op, seq, schema, refMap, stats) {
     seq,
     importance: op.importance ?? 5.0,
     clusters: op.clusters || [],
+    scope: nodeScope,
   });
 
   addNode(graph, node);
@@ -347,7 +366,7 @@ function handleCreate(graph, op, seq, schema, refMap, stats) {
 /**
  * 处理 update 操作
  */
-function handleUpdate(graph, op, currentSeq, stats) {
+function handleUpdate(graph, op, currentSeq, stats, scopeRuntime = {}) {
   if (!op.nodeId) {
     console.warn("[ST-BME] update 操作缺少 nodeId");
     return;
@@ -365,11 +384,15 @@ function handleUpdate(graph, op, currentSeq, stats) {
       ? ensureEventTitle({ ...previousFields, ...(op.fields || {}) })
       : { ...previousFields, ...(op.fields || {}) };
   const changeSummary = buildFieldChangeSummary(previousFields, nextFields);
+  const resolvedScope = op.scope
+    ? normalizeMemoryScope(op.scope, previousNode.scope || {})
+    : normalizeMemoryScope(previousNode.scope);
 
   const updateSeq = Number.isFinite(op.seq) ? op.seq : currentSeq;
   const updated = updateNode(graph, op.nodeId, {
     fields: op.fields || {},
     seq: Math.max(previousNode.seq || 0, updateSeq),
+    scope: resolvedScope,
   });
 
   if (updated) {
@@ -428,6 +451,14 @@ function handleUpdate(graph, op, currentSeq, stats) {
           4,
           Math.min(8, op.importance ?? previousNode.importance ?? 5),
         ),
+        scope: isObjectiveScope(previousNode.scope)
+          ? normalizeMemoryScope(previousNode.scope)
+          : normalizeMemoryScope({
+              layer: "objective",
+              regionPrimary: resolvedScope.regionPrimary,
+              regionPath: resolvedScope.regionPath,
+              regionSecondary: resolvedScope.regionSecondary,
+            }),
       });
       addNode(graph, updateEventNode);
       stats.newNodes++;
@@ -438,6 +469,7 @@ function handleUpdate(graph, op, currentSeq, stats) {
         relation: "updates",
         strength: 0.9,
         edgeType: 0,
+        scope: updateEventNode.scope,
       });
       if (addEdge(graph, updateEdge)) {
         stats.newEdges++;
@@ -481,6 +513,8 @@ function handleDelete(graph, op, stats) {
  * 处理关联边
  */
 function handleLinks(graph, sourceId, links, refMap, stats) {
+  const sourceNode = getNode(graph, sourceId);
+  const sourceScope = normalizeMemoryScope(sourceNode?.scope);
   for (const link of links) {
     let targetId = link.targetNodeId || null;
 
@@ -504,11 +538,60 @@ function handleLinks(graph, sourceId, links, refMap, stats) {
       relation,
       strength: link.strength ?? 0.8,
       edgeType,
+      scope: link.scope || sourceScope,
     });
 
     if (addEdge(graph, edge)) {
       stats.newEdges++;
     }
+  }
+}
+
+function resolveOperationScope(op, scopeRuntime = {}) {
+  if (op?.scope) {
+    return normalizeMemoryScope(op.scope);
+  }
+  if (op?.type === "pov_memory") {
+    if (scopeRuntime.activeCharacterOwner) {
+      return normalizeMemoryScope({
+        layer: "pov",
+        ownerType: "character",
+        ownerId: scopeRuntime.activeCharacterOwner,
+        ownerName: scopeRuntime.activeCharacterOwner,
+      });
+    }
+    return normalizeMemoryScope({ layer: "pov" });
+  }
+  return normalizeMemoryScope({ layer: "objective" });
+}
+
+function updateRuntimeScopeState(graph, newNodeIds = [], scopeRuntime = {}) {
+  if (!graph?.historyState || typeof graph.historyState !== "object") {
+    return;
+  }
+
+  graph.historyState.activeCharacterPovOwner =
+    String(scopeRuntime.activeCharacterOwner || "");
+  graph.historyState.activeUserPovOwner =
+    String(scopeRuntime.activeUserOwner || "");
+
+  const objectiveCandidates = (Array.isArray(newNodeIds) ? newNodeIds : [])
+    .map((nodeId) => getNode(graph, nodeId))
+    .filter((node) => node && !node.archived && isObjectiveScope(node.scope))
+    .sort((a, b) => (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0));
+
+  const regionNode =
+    objectiveCandidates.find((node) => node.scope?.regionPrimary) ||
+    getActiveNodes(graph)
+      .filter((node) => !node.archived && isObjectiveScope(node.scope))
+      .sort((a, b) => (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0))
+      .find((node) => node.scope?.regionPrimary);
+
+  if (regionNode?.scope?.regionPrimary) {
+    graph.historyState.lastExtractedRegion = String(
+      regionNode.scope.regionPrimary || "",
+    );
+    graph.historyState.activeRegion = String(regionNode.scope.regionPrimary || "");
   }
 }
 
@@ -590,14 +673,20 @@ function buildDefaultExtractPrompt(schema) {
     "",
     `支持的节点类型：${typeNames}`,
     "",
+    "这轮必须同时考虑三层信息：",
+    "- 客观事实：继续写入 event / character / location / thread / rule / synopsis / reflection",
+    '- 主观记忆：统一写入 pov_memory，使用 scope.layer = "pov"',
+    "- 地区归属：能判断时写入 scope.regionPrimary / regionPath / regionSecondary，判断不出来就留空",
+    "",
     "输出格式为严格 JSON：",
     "{",
-    '  "thought": "你对本段对话的分析（事件/角色变化/新信息）",',
+    '  "thought": "你对本段对话的分析（事件/角色变化/新信息/谁如何理解）",',
     '  "operations": [',
     "    {",
     '      "action": "create",',
     '      "type": "event",',
     '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
+    '      "scope": {"layer": "objective", "regionPrimary": "主地区", "regionPath": ["上级地区", "主地区"], "regionSecondary": ["次级地区"]},',
     '      "importance": 6,',
     '      "ref": "evt1",',
     '      "links": [',
@@ -606,21 +695,32 @@ function buildDefaultExtractPrompt(schema) {
     "      ]",
     "    },",
     "    {",
-    '      "action": "update",',
-    '      "nodeId": "existing-node-id",',
-    '      "fields": {"state": "新的状态"}',
+    '      "action": "create",',
+    '      "type": "pov_memory",',
+    '      "fields": {"summary": "角色怎么记住这件事", "belief": "她认为发生了什么", "emotion": "情绪", "attitude": "态度", "certainty": "unsure", "about": "evt1"},',
+    '      "scope": {"layer": "pov", "ownerType": "character", "ownerId": "角色名", "ownerName": "角色名", "regionPrimary": "主地区", "regionPath": ["上级地区", "主地区"]}',
+    "    },",
+    "    {",
+    '      "action": "create",',
+    '      "type": "pov_memory",',
+    '      "fields": {"summary": "用户怎么记住这件事", "belief": "用户视角判断", "emotion": "情绪", "attitude": "态度", "certainty": "certain", "about": "evt1"},',
+    '      "scope": {"layer": "pov", "ownerType": "user", "ownerId": "用户名", "ownerName": "用户名"}',
     "    }",
     "  ]",
     "}",
     "",
     "规则：",
     "- 每批对话最多创建 1 个事件节点，多个子事件合并为一条",
-    "- 角色/地点节点：如果图中已有同名节点，用 update 而非 create",
+    "- 同时尽量为当前角色和用户各生成 1 条 pov_memory",
+    "- 角色/地点节点：如果图中已有同名同作用域节点，用 update 而非 create",
     `- 关系类型限定：${RELATION_TYPES.join(", ")}`,
     "- contradicts 关系用于矛盾/冲突信息",
     "- evolves 关系用于新信息揭示旧记忆需修正的情况",
     "- temporal_update 关系用于实体状态的时序变化",
     "- 不要虚构内容，只提取对话中有证据支持的信息",
+    "- 用户 POV 不等于角色已知事实，不要把用户想法伪装成客观事实",
+    "- pov_memory 只能用于主观记忆，不要拿 character/location/event 去伪装第一视角记忆",
+    "- 地区不确定就留空，不要硬编",
     "- importance 范围 1-10，普通事件 5，关键转折 8+",
     "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
     "- summary 应该是摘要抽象，不要复制原文",

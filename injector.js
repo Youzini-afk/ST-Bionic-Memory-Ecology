@@ -11,9 +11,46 @@ import { getSchemaType } from "./schema.js";
  * @returns {string} 注入文本
  */
 export function formatInjection(retrievalResult, schema) {
-  const { coreNodes, recallNodes, groupedRecallNodes } = retrievalResult;
+  const { coreNodes, recallNodes, groupedRecallNodes, scopeBuckets } =
+    retrievalResult;
   const parts = [];
   const appended = new Set();
+
+  if (scopeBuckets && typeof scopeBuckets === "object") {
+    appendScopeSection(
+      parts,
+      "[Memory - Character POV]",
+      scopeBuckets.characterPov,
+      schema,
+      appended,
+    );
+    appendScopeSection(
+      parts,
+      "[Memory - User POV / Not Character Facts]",
+      scopeBuckets.userPov,
+      schema,
+      appended,
+      "这些是用户/玩家侧主观记忆，不等于角色已知事实；只能作为关系、承诺、情绪和长期互动背景参考。",
+    );
+    appendScopeSection(
+      parts,
+      "[Memory - Objective / Current Region]",
+      scopeBuckets.objectiveCurrentRegion,
+      schema,
+      appended,
+    );
+    appendScopeSection(
+      parts,
+      "[Memory - Objective / Global]",
+      scopeBuckets.objectiveGlobal,
+      schema,
+      appended,
+    );
+
+    if (parts.length > 0) {
+      return parts.join("\n");
+    }
+  }
 
   // ========== Core 常驻注入 ==========
   if (coreNodes.length > 0) {
@@ -68,6 +105,25 @@ export function formatInjection(retrievalResult, schema) {
   }
 
   return parts.join("\n");
+}
+
+function appendScopeSection(parts, title, nodes, schema, appended, note = "") {
+  if (!Array.isArray(nodes) || nodes.length === 0) return;
+  if (parts.length > 0) {
+    parts.push("");
+  }
+  parts.push(title);
+  if (note) {
+    parts.push(note);
+  }
+
+  const grouped = groupByType(nodes);
+  for (const [typeId, groupedNodes] of grouped) {
+    const typeDef = getSchemaType(schema, typeId);
+    if (!typeDef) continue;
+    const table = formatTable(groupedNodes, typeDef, appended);
+    if (table) parts.push(table);
+  }
 }
 
 /**

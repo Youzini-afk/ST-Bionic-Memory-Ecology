@@ -6,6 +6,11 @@ import { embedBatch, searchSimilar } from "./embedding.js";
 import { addEdge, createEdge, getActiveNodes, getNode } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import {
+  buildScopeBadgeText,
+  canMergeScopedMemories,
+  describeMemoryScope,
+} from "./memory-scope.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -208,7 +213,11 @@ export async function consolidateMemories({
     for (let i = 0; i < newEntries.length; i++) {
       throwIfAborted(signal);
       const entry = newEntries[i];
-      const candidates = candidatePool.filter((c) => c.nodeId !== entry.id);
+      const candidates = candidatePool.filter((c) => {
+        if (c.nodeId === entry.id) return false;
+        const candidateNode = getNode(graph, c.nodeId);
+        return canMergeScopedMemories(entry.node, candidateNode);
+      });
 
       if (queryVectors?.[i] && candidates.length > 0) {
         // 本地 cosine 搜索（0 API 调用）
@@ -248,7 +257,9 @@ export async function consolidateMemories({
           entry.text,
           embeddingConfig,
           neighborCount,
-          activeNodes.filter((n) => n.id !== entry.id),
+          activeNodes.filter(
+            (n) => n.id !== entry.id && canMergeScopedMemories(entry.node, n),
+          ),
           signal,
         );
         neighborsMap.set(entry.id, neighbors);
@@ -277,6 +288,7 @@ export async function consolidateMemories({
     const newNodeFieldsStr = Object.entries(entry.node.fields)
       .map(([k, v]) => `${k}: ${v}`)
       .join(", ");
+    const newNodeScope = buildScopeBadgeText(entry.node.scope);
 
     // 构建近邻描述
     let neighborText;
@@ -290,7 +302,7 @@ export async function consolidateMemories({
           const fieldsStr = Object.entries(node.fields)
             .map(([k, v]) => `${k}: ${v}`)
             .join(", ");
-          return `  - [${node.id}] 类型=${node.type}, ${fieldsStr} (相似度=${n.score.toFixed(3)})`;
+          return `  - [${node.id}] 类型=${node.type}, 作用域=${describeMemoryScope(node.scope)}, ${fieldsStr} (相似度=${n.score.toFixed(3)})`;
         })
         .filter(Boolean)
         .join("\n");
@@ -306,7 +318,7 @@ export async function consolidateMemories({
     userPromptSections.push(
       [
         `### 新记忆 #${i + 1}`,
-        `[${entry.id}] 类型=${entry.node.type}, ${newNodeFieldsStr}`,
+        `[${entry.id}] 类型=${entry.node.type}, 作用域=${newNodeScope}, ${newNodeFieldsStr}`,
         "近邻记忆:",
         neighborText,
         hint,
@@ -437,7 +449,11 @@ function processOneResult(graph, entry, result, stats) {
       const targetId = result.merge_target_id;
       const targetNode = targetId ? getNode(graph, targetId) : null;
 
-      if (targetNode && !targetNode.archived) {
+      if (
+        targetNode &&
+        !targetNode.archived &&
+        canMergeScopedMemories(newNode, targetNode)
+      ) {
         console.log(`[ST-BME] 记忆整合: merge ${newId} → ${targetId}`);
 
         if (result.merged_fields && typeof result.merged_fields === "object") {
@@ -516,7 +532,13 @@ function processOneResult(graph, entry, result, stats) {
       for (const update of evolution.neighbor_updates) {
         if (!update.nodeId) continue;
         const oldNode = getNode(graph, update.nodeId);
-        if (!oldNode || oldNode.archived) continue;
+        if (
+          !oldNode ||
+          oldNode.archived ||
+          !canMergeScopedMemories(newNode, oldNode)
+        ) {
+          continue;
+        }
 
         let changed = false;
 

@@ -217,8 +217,18 @@
                 id="bme-memory-search"
                 placeholder="搜索记忆节点..."
               />
+              <input
+                type="text"
+                class="bme-search-input"
+                id="bme-memory-region-filter"
+                placeholder="按地区筛选..."
+              />
               <select class="bme-filter-select" id="bme-memory-filter">
                 <option value="all">全部</option>
+                <option value="scope:objective">客观</option>
+                <option value="scope:characterPov">角色 POV</option>
+                <option value="scope:userPov">用户 POV</option>
+                <option value="pov_memory">主观记忆</option>
                 <option value="character">角色</option>
                 <option value="event">事件</option>
                 <option value="location">地点</option>
@@ -1296,6 +1306,127 @@
                         <i class="fa-solid fa-chevron-down"></i>
                       </span>
                     </summary>
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-subgroup-title">作用域记忆</div>
+                      <div class="bme-config-subgroup-desc">
+                        让召回优先理解“谁怎么记得这件事”和“当前地区的客观事实”，避免所有记忆都用上帝视角混在一起。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-scoped-memory-enabled"
+                      >
+                        <input
+                          id="bme-setting-scoped-memory-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用作用域记忆召回</span>
+                      </label>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-pov-memory-enabled"
+                      >
+                        <input
+                          id="bme-setting-pov-memory-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用角色 / 用户 POV 记忆</span>
+                      </label>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-region-scoped-objective-enabled"
+                      >
+                        <input
+                          id="bme-setting-region-scoped-objective-enabled"
+                          type="checkbox"
+                        />
+                        <span>启用地区客观层加权</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-character-pov-weight"
+                          >角色 POV 权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-character-pov-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="3"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-user-pov-weight"
+                          >用户 POV 权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-user-pov-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="3"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-objective-current-region-weight"
+                          >当前地区客观权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-objective-current-region-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="3"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-objective-adjacent-region-weight"
+                          >邻近地区客观权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-objective-adjacent-region-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="3"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-objective-global-weight"
+                          >全局客观权重</label
+                        >
+                        <input
+                          id="bme-setting-recall-objective-global-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="3"
+                          step="0.05"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-inject-user-pov-memory"
+                      >
+                        <input
+                          id="bme-setting-inject-user-pov-memory"
+                          type="checkbox"
+                        />
+                        <span>注入用户 POV 记忆</span>
+                      </label>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-inject-objective-global-memory"
+                      >
+                        <input
+                          id="bme-setting-inject-objective-global-memory"
+                          type="checkbox"
+                        />
+                        <span>注入少量全局客观记忆</span>
+                      </label>
+                    </div>
                     <div class="bme-config-subgroup">
                       <div class="bme-config-subgroup-title">查询纠偏</div>
                       <div class="bme-config-subgroup-desc">

@@ -1,4 +1,8 @@
 // ST-BME: 运行时状态与历史恢复辅助
+import {
+  normalizeEdgeMemoryScope,
+  normalizeNodeMemoryScope,
+} from "./memory-scope.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
@@ -22,6 +26,10 @@ export function createDefaultHistoryState(chatId = "") {
     extractionCount: 0,
     lastRecoveryResult: null,
     lastBatchStatus: null,
+    lastExtractedRegion: "",
+    activeRegion: "",
+    activeCharacterPovOwner: "",
+    activeUserPovOwner: "",
   };
 }
 
@@ -98,6 +106,18 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
       ...historyState.lastBatchStatus,
       historyAdvanced: false,
     };
+  }
+  if (typeof historyState.lastExtractedRegion !== "string") {
+    historyState.lastExtractedRegion = "";
+  }
+  if (typeof historyState.activeRegion !== "string") {
+    historyState.activeRegion = historyState.lastExtractedRegion || "";
+  }
+  if (typeof historyState.activeCharacterPovOwner !== "string") {
+    historyState.activeCharacterPovOwner = "";
+  }
+  if (typeof historyState.activeUserPovOwner !== "string") {
+    historyState.activeUserPovOwner = "";
   }
 
   if (
@@ -186,6 +206,12 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
 
   graph.historyState = historyState;
   graph.vectorIndexState = vectorIndexState;
+  if (Array.isArray(graph.nodes)) {
+    graph.nodes.forEach((node) => normalizeNodeMemoryScope(node));
+  }
+  if (Array.isArray(graph.edges)) {
+    graph.edges.forEach((edge) => normalizeEdgeMemoryScope(edge));
+  }
   graph.batchJournal = Array.isArray(graph.batchJournal)
     ? graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT)
     : createDefaultBatchJournal();

@@ -12,6 +12,11 @@ import {
 } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
 import {
+  getScopeOwnerKey,
+  getScopeRegionKey,
+  normalizeMemoryScope,
+} from "./memory-scope.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -130,6 +135,8 @@ async function compressLevel({
   const levelNodes = getActiveNodes(graph, typeDef.id)
     .filter((n) => n.level === level)
     .sort((a, b) => a.seq - b.seq);
+  let created = 0;
+  let archived = 0;
 
   const threshold = force
     ? fanIn
@@ -142,73 +149,92 @@ async function compressLevel({
       ? Math.max(0, Number(compression.keepRecentLeaves))
       : 0;
 
-  // 不够阈值，无需压缩；强制压缩时只要求满足 fanIn
-  if (force ? levelNodes.length < fanIn : levelNodes.length <= threshold) {
-    return { created: 0, archived: 0 };
-  }
-
-  // 排除最近的节点
-  const compressible = levelNodes.slice(0, levelNodes.length - keepRecent);
-  if (compressible.length < fanIn) {
-    return { created: 0, archived: 0 };
-  }
-
-  let created = 0;
-  let archived = 0;
-
-  // 按 fanIn 分组压缩
-  for (let i = 0; i < compressible.length; i += fanIn) {
-    const batch = compressible.slice(i, i + fanIn);
-    if (batch.length < 2) break; // 至少 2 个才压缩
-
-    // 调用 LLM 总结
-    const summaryResult = await summarizeBatch(
-      batch,
-      typeDef,
-      customPrompt,
-      signal,
-      settings,
-    );
-    if (!summaryResult) continue;
-
-    // 创建压缩节点
-    const compressedNode = createNode({
-      type: typeDef.id,
-      fields: summaryResult.fields,
-      seq: batch[batch.length - 1].seq,
-      seqRange: [
-        batch[0].seqRange?.[0] ?? batch[0].seq,
-        batch[batch.length - 1].seqRange?.[1] ?? batch[batch.length - 1].seq,
-      ],
-      importance: Math.max(...batch.map((n) => n.importance)),
-    });
-
-    compressedNode.level = level + 1;
-    compressedNode.childIds = batch.map((n) => n.id);
-
-    // 生成 embedding
-    if (isDirectVectorConfig(embeddingConfig) && summaryResult.fields.summary) {
-      const vec = await embedText(
-        summaryResult.fields.summary,
-        embeddingConfig,
-        { signal },
-      );
-      if (vec) compressedNode.embedding = Array.from(vec);
+  for (const group of groupCompressionCandidates(levelNodes)) {
+    if (force ? group.length < fanIn : group.length <= threshold) {
+      continue;
     }
 
-    addNode(graph, compressedNode);
-    migrateBatchEdges(graph, batch, compressedNode);
-    created++;
+    const compressible = group.slice(0, Math.max(0, group.length - keepRecent));
+    if (compressible.length < fanIn) {
+      continue;
+    }
 
-    // 归档子节点
-    for (const child of batch) {
-      child.archived = true;
-      child.parentId = compressedNode.id;
-      archived++;
+    for (let i = 0; i < compressible.length; i += fanIn) {
+      const batch = compressible.slice(i, i + fanIn);
+      if (batch.length < 2) break;
+
+      const summaryResult = await summarizeBatch(
+        batch,
+        typeDef,
+        customPrompt,
+        signal,
+        settings,
+      );
+      if (!summaryResult) continue;
+
+      const compressedNode = createNode({
+        type: typeDef.id,
+        fields: summaryResult.fields,
+        seq: batch[batch.length - 1].seq,
+        seqRange: [
+          batch[0].seqRange?.[0] ?? batch[0].seq,
+          batch[batch.length - 1].seqRange?.[1] ?? batch[batch.length - 1].seq,
+        ],
+        importance: Math.max(...batch.map((n) => n.importance)),
+        scope: normalizeMemoryScope(batch[0]?.scope),
+      });
+
+      compressedNode.level = level + 1;
+      compressedNode.childIds = batch.map((n) => n.id);
+
+      if (isDirectVectorConfig(embeddingConfig) && summaryResult.fields.summary) {
+        const vec = await embedText(
+          summaryResult.fields.summary,
+          embeddingConfig,
+          { signal },
+        );
+        if (vec) compressedNode.embedding = Array.from(vec);
+      }
+
+      addNode(graph, compressedNode);
+      migrateBatchEdges(graph, batch, compressedNode);
+      created++;
+
+      for (const child of batch) {
+        child.archived = true;
+        child.parentId = compressedNode.id;
+        archived++;
+      }
     }
   }
 
   return { created, archived };
+}
+
+function groupCompressionCandidates(nodes = []) {
+  const groups = new Map();
+  for (const node of nodes) {
+    const normalizedScope = normalizeMemoryScope(node?.scope);
+    const key =
+      normalizedScope.layer === "pov"
+        ? [
+            "pov",
+            getScopeOwnerKey(normalizedScope) || "owner:none",
+            node.type || "",
+          ].join("::")
+        : [
+            "objective",
+            getScopeRegionKey(normalizedScope) || "region:global",
+            node.type || "",
+          ].join("::");
+    if (!groups.has(key)) {
+      groups.set(key, []);
+    }
+    groups.get(key).push(node);
+  }
+  return [...groups.values()].map((group) =>
+    group.sort((a, b) => a.seq - b.seq),
+  );
 }
 
 function migrateBatchEdges(graph, batch, compressedNode) {
@@ -234,6 +260,7 @@ function migrateBatchEdges(graph, batch, compressedNode) {
       relation: edge.relation,
       strength: edge.strength,
       edgeType: edge.edgeType,
+      scope: edge.scope,
     });
     migratedEdge.validAt = edge.validAt ?? migratedEdge.validAt;
     migratedEdge.invalidAt = edge.invalidAt ?? migratedEdge.invalidAt;

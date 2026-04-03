@@ -7,11 +7,18 @@ import {
   createDefaultVectorIndexState,
   normalizeGraphRuntimeState,
 } from "./runtime-state.js";
+import {
+  hasSameScopeIdentity,
+  normalizeEdgeMemoryScope,
+  normalizeMemoryScope,
+  normalizeNodeMemoryScope,
+  isSameLatestScopeBucket,
+} from "./memory-scope.js";
 
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 5;
+const GRAPH_VERSION = 6;
 
 /**
  * 生成 UUID v4
@@ -55,6 +62,7 @@ export function createNode({
   seqRange = null,
   importance = 5.0,
   clusters = [],
+  scope = undefined,
 }) {
   const now = Date.now();
   return {
@@ -75,6 +83,7 @@ export function createNode({
     prevId: null,
     nextId: null,
     clusters,
+    scope: normalizeMemoryScope(scope),
   };
 }
 
@@ -87,7 +96,13 @@ export function createNode({
 export function addNode(graph, node) {
   // 同类型节点的时间链表：连接到最后一个同类型节点
   const sameTypeNodes = graph.nodes
-    .filter((n) => n.type === node.type && !n.archived && n.level === 0)
+    .filter(
+      (n) =>
+        n.type === node.type &&
+        !n.archived &&
+        n.level === 0 &&
+        hasSameScopeIdentity(n.scope, node.scope),
+    )
     .sort((a, b) => a.seq - b.seq);
 
   if (sameTypeNodes.length > 0) {
@@ -124,6 +139,11 @@ export function updateNode(graph, nodeId, updates) {
   if (updates.fields) {
     node.fields = { ...node.fields, ...updates.fields };
     delete updates.fields;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(updates, "scope")) {
+    node.scope = normalizeMemoryScope(updates.scope, node.scope || {});
+    delete updates.scope;
   }
 
   Object.assign(node, updates);
@@ -219,12 +239,20 @@ export function findLatestNode(
   type,
   primaryKeyValue,
   primaryKeyField = "name",
+  scope = undefined,
 ) {
   const candidates = graph.nodes.filter(
     (n) =>
       n.type === type &&
       !n.archived &&
-      n.fields[primaryKeyField] === primaryKeyValue,
+      n.fields[primaryKeyField] === primaryKeyValue &&
+      (scope == null ||
+        isSameLatestScopeBucket(n, {
+          type,
+          primaryKeyValue,
+          primaryKeyField,
+          scope,
+        })),
   );
   if (candidates.length === 0) return null;
   return candidates.sort((a, b) => b.seq - a.seq)[0];
@@ -243,6 +271,7 @@ export function createEdge({
   relation = "related",
   strength = 0.8,
   edgeType = 0,
+  scope = undefined,
 }) {
   return {
     id: uuid(),
@@ -256,6 +285,7 @@ export function createEdge({
     validAt: Date.now(), // 关系生效时间
     invalidAt: null, // 关系失效时间（null = 当前有效）
     expiredAt: null, // 系统标记过期时间
+    scope: normalizeMemoryScope(scope),
   };
 }
 
@@ -283,6 +313,8 @@ export function addEdge(graph, edge) {
       e.fromId === edge.fromId &&
       e.toId === edge.toId &&
       e.relation === edge.relation &&
+      JSON.stringify(normalizeMemoryScope(e.scope)) ===
+        JSON.stringify(normalizeMemoryScope(edge.scope)) &&
       isCurrentEdgeValid(e),
   );
   if (existing) {
@@ -572,6 +604,15 @@ export function deserializeGraph(json) {
           : createDefaultBatchJournal();
       }
 
+      if (data.version < 6) {
+        for (const node of data.nodes || []) {
+          node.scope = normalizeMemoryScope(node?.scope);
+        }
+        for (const edge of data.edges || []) {
+          edge.scope = normalizeMemoryScope(edge?.scope);
+        }
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -589,15 +630,20 @@ export function deserializeGraph(json) {
         ...node,
         seq,
         seqRange: Array.isArray(node.seqRange) ? node.seqRange : [seq, seq],
+        scope: normalizeNodeMemoryScope(node),
       };
     });
-    data.edges = (data.edges || []).map((edge) => ({
-      createdTime: Date.now(),
-      validAt: edge?.createdTime || Date.now(),
-      invalidAt: null,
-      expiredAt: null,
-      ...edge,
-    }));
+    data.edges = (data.edges || []).map((edge) => {
+      const normalizedEdge = {
+        createdTime: Date.now(),
+        validAt: edge?.createdTime || Date.now(),
+        invalidAt: null,
+        expiredAt: null,
+        ...edge,
+      };
+      normalizedEdge.scope = normalizeEdgeMemoryScope(normalizedEdge);
+      return normalizedEdge;
+    });
     data.lastProcessedSeq = Number.isFinite(data.lastProcessedSeq)
       ? data.lastProcessedSeq
       : -1;

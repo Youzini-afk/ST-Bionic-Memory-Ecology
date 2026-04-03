@@ -192,6 +192,35 @@ export const DEFAULT_NODE_SCHEMA = [
       instruction: "将反思条目合并为高层次的叙事指导原则。",
     },
   },
+  {
+    id: "pov_memory",
+    label: "主观记忆",
+    tableName: "pov_memory_table",
+    columns: [
+      { name: "summary", hint: "这个视角如何记住这件事", required: true },
+      { name: "belief", hint: "她/他认为发生了什么", required: false },
+      { name: "emotion", hint: "主观情绪反应", required: false },
+      { name: "attitude", hint: "对人物或事件的态度", required: false },
+      {
+        name: "certainty",
+        hint: "确定度：certain/unsure/mistaken",
+        required: false,
+      },
+      { name: "about", hint: "关联对象或引用标签", required: false },
+    ],
+    alwaysInject: false,
+    latestOnly: false,
+    forceUpdate: false,
+    compression: {
+      mode: COMPRESSION_MODE.HIERARCHICAL,
+      threshold: 8,
+      fanIn: 3,
+      maxDepth: 4,
+      keepRecentLeaves: 4,
+      instruction:
+        "将同一视角、同一角色归属下的主观记忆压缩成更稳定的第一视角记忆摘要，保留误解、情绪和态度变化。",
+    },
+  },
 ];
 
 /**

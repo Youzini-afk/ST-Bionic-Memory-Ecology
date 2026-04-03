@@ -383,6 +383,16 @@ const defaultSettings = {
   recallNmfNoveltyThreshold: 0.4,
   recallResidualThreshold: 0.3,
   recallResidualTopK: 5,
+  enableScopedMemory: true,
+  enablePovMemory: true,
+  enableRegionScopedObjective: true,
+  recallCharacterPovWeight: 1.25,
+  recallUserPovWeight: 1.05,
+  recallObjectiveCurrentRegionWeight: 1.15,
+  recallObjectiveAdjacentRegionWeight: 0.9,
+  recallObjectiveGlobalWeight: 0.75,
+  injectUserPovMemory: true,
+  injectObjectiveGlobalMemory: true,
 
   // 注入设置
   injectPosition: "atDepth", // 注入位置
@@ -8159,6 +8169,33 @@ function buildRecallRetrieveOptions(settings, context) {
     residualNmfNoveltyThreshold: settings.recallNmfNoveltyThreshold ?? 0.4,
     residualThreshold: settings.recallResidualThreshold ?? 0.3,
     residualTopK: settings.recallResidualTopK ?? 5,
+    enableScopedMemory: settings.enableScopedMemory ?? true,
+    enablePovMemory: settings.enablePovMemory ?? true,
+    enableRegionScopedObjective:
+      settings.enableRegionScopedObjective ?? true,
+    recallCharacterPovWeight: settings.recallCharacterPovWeight ?? 1.25,
+    recallUserPovWeight: settings.recallUserPovWeight ?? 1.05,
+    recallObjectiveCurrentRegionWeight:
+      settings.recallObjectiveCurrentRegionWeight ?? 1.15,
+    recallObjectiveAdjacentRegionWeight:
+      settings.recallObjectiveAdjacentRegionWeight ?? 0.9,
+    recallObjectiveGlobalWeight:
+      settings.recallObjectiveGlobalWeight ?? 0.75,
+    injectUserPovMemory: settings.injectUserPovMemory ?? true,
+    injectObjectiveGlobalMemory:
+      settings.injectObjectiveGlobalMemory ?? true,
+    activeRegion:
+      currentGraph?.historyState?.activeRegion ||
+      currentGraph?.historyState?.lastExtractedRegion ||
+      "",
+    activeCharacterPovOwner:
+      currentGraph?.historyState?.activeCharacterPovOwner ||
+      context.name2 ||
+      "",
+    activeUserPovOwner:
+      currentGraph?.historyState?.activeUserPovOwner ||
+      context.name1 ||
+      "",
   };
 }
 

@@ -26,6 +26,15 @@ import {
   runResidualRecall,
   splitIntentSegments,
 } from "./retrieval-enhancer.js";
+import {
+  MEMORY_SCOPE_BUCKETS,
+  classifyNodeScopeBucket,
+  describeMemoryScope,
+  describeScopeBucket,
+  getScopeRegionKey,
+  normalizeMemoryScope,
+  resolveScopeBucketWeight,
+} from "./memory-scope.js";
 import { applyTaskRegex } from "./task-regex.js";
 import { getSTContextForPrompt } from "./st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "./vector-index.js";
@@ -141,6 +150,12 @@ function createRetrievalMeta(enableLLMRecall) {
     diversityApplied: false,
     residualTriggered: false,
     residualHits: 0,
+    scopeBuckets: {},
+    activeRegion: "",
+    activeCharacterPovOwner: "",
+    activeUserPovOwner: "",
+    bucketWeights: {},
+    selectedByBucket: {},
     skipReasons: [],
     timings: {},
     llm: {
@@ -579,6 +594,76 @@ function scaleVectorResults(results = [], weight = 1) {
   }));
 }
 
+function pickActiveRegion(graph, optionValue = "") {
+  const direct = String(optionValue || "").trim();
+  if (direct) return direct;
+
+  const historyRegion = String(
+    graph?.historyState?.activeRegion || graph?.historyState?.lastExtractedRegion || "",
+  ).trim();
+  if (historyRegion) return historyRegion;
+
+  const fallback = getActiveNodes(graph)
+    .filter((node) => !node.archived)
+    .sort((a, b) => (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0))
+    .find((node) => getScopeRegionKey(node?.scope));
+
+  return String(getScopeRegionKey(fallback?.scope) || "").trim();
+}
+
+function buildScopeBucketWeightMap(options = {}) {
+  return {
+    [MEMORY_SCOPE_BUCKETS.CHARACTER_POV]: Number(
+      options.recallCharacterPovWeight ?? 1.25,
+    ),
+    [MEMORY_SCOPE_BUCKETS.USER_POV]: Number(options.recallUserPovWeight ?? 1.05),
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION]: Number(
+      options.recallObjectiveCurrentRegionWeight ?? 1.15,
+    ),
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION]: Number(
+      options.recallObjectiveAdjacentRegionWeight ?? 0.9,
+    ),
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL]: Number(
+      options.recallObjectiveGlobalWeight ?? 0.75,
+    ),
+    [MEMORY_SCOPE_BUCKETS.OTHER_POV]: 0.6,
+  };
+}
+
+function createEmptyScopeBucketMap() {
+  return {
+    [MEMORY_SCOPE_BUCKETS.CHARACTER_POV]: [],
+    [MEMORY_SCOPE_BUCKETS.USER_POV]: [],
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION]: [],
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION]: [],
+    [MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL]: [],
+  };
+}
+
+function pushScopeBucketDebug(map, bucket, value) {
+  if (!Object.prototype.hasOwnProperty.call(map, bucket)) {
+    map[bucket] = [];
+  }
+  map[bucket].push(value);
+}
+
+function getScopeBucketPriority(bucket) {
+  switch (bucket) {
+    case MEMORY_SCOPE_BUCKETS.CHARACTER_POV:
+      return 5;
+    case MEMORY_SCOPE_BUCKETS.USER_POV:
+      return 4;
+    case MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION:
+      return 3;
+    case MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION:
+      return 2;
+    case MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 /**
  * 三层混合检索管线
  *
@@ -683,6 +768,27 @@ export async function retrieve({
   );
   const enableLexicalBoost = options.enableLexicalBoost ?? true;
   const lexicalWeight = clampRange(options.lexicalWeight, 0.18, 0, 10);
+  const enableScopedMemory = options.enableScopedMemory ?? true;
+  const enablePovMemory = options.enablePovMemory ?? true;
+  const enableRegionScopedObjective =
+    options.enableRegionScopedObjective ?? true;
+  const injectUserPovMemory = options.injectUserPovMemory ?? true;
+  const injectObjectiveGlobalMemory = options.injectObjectiveGlobalMemory ?? true;
+  const stPromptContext = getSTContextForPrompt();
+  const activeCharacterPovOwner = String(
+    options.activeCharacterPovOwner ||
+      graph?.historyState?.activeCharacterPovOwner ||
+      stPromptContext?.charName ||
+      "",
+  ).trim();
+  const activeUserPovOwner = String(
+    options.activeUserPovOwner ||
+      graph?.historyState?.activeUserPovOwner ||
+      stPromptContext?.userName ||
+      "",
+  ).trim();
+  const activeRegion = pickActiveRegion(graph, options.activeRegion);
+  const bucketWeights = buildScopeBucketWeightMap(options);
 
   let activeNodes = getActiveNodes(graph).filter(
     (node) =>
@@ -705,6 +811,10 @@ export async function retrieve({
   );
   const vectorValidation = validateVectorConfig(embeddingConfig);
   const retrievalMeta = createRetrievalMeta(enableLLMRecall);
+  retrievalMeta.activeRegion = activeRegion;
+  retrievalMeta.activeCharacterPovOwner = activeCharacterPovOwner;
+  retrievalMeta.activeUserPovOwner = activeUserPovOwner;
+  retrievalMeta.bucketWeights = { ...bucketWeights };
   const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
     enabled: enableContextQueryBlend,
     assistantWeight: contextAssistantWeight,
@@ -750,6 +860,17 @@ export async function retrieve({
         timings: {
           total: roundMs(nowMs() - startedAt),
         },
+      },
+      scopeContext: {
+        enableScopedMemory,
+        enablePovMemory,
+        enableRegionScopedObjective,
+        injectUserPovMemory,
+        injectObjectiveGlobalMemory,
+        activeRegion,
+        activeCharacterPovOwner,
+        activeUserPovOwner,
+        bucketWeights,
       },
     });
   }
@@ -994,17 +1115,46 @@ export async function retrieve({
         lexicalWeight: enableLexicalBoost ? lexicalWeight : 0,
       },
     );
+    const scopeBucket = enableScopedMemory
+      ? classifyNodeScopeBucket(node, {
+          activeCharacterPovOwner,
+          activeUserPovOwner,
+          activeRegion,
+          enablePovMemory,
+          enableRegionScopedObjective,
+        })
+      : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
+    const scopeWeight = enableScopedMemory
+      ? resolveScopeBucketWeight(scopeBucket, bucketWeights)
+      : 1;
+    const weightedScore = finalScore * scopeWeight;
 
     scoredNodes.push({
       nodeId,
       node,
       finalScore,
+      weightedScore,
       lexicalScore,
+      scopeBucket,
+      scopeWeight,
       ...scores,
     });
+    pushScopeBucketDebug(
+      retrievalMeta.scopeBuckets,
+      scopeBucket,
+      nodeId,
+    );
   }
 
-  scoredNodes.sort((a, b) => b.finalScore - a.finalScore);
+  scoredNodes.sort((a, b) => {
+    const bucketDelta =
+      getScopeBucketPriority(b.scopeBucket) - getScopeBucketPriority(a.scopeBucket);
+    if (bucketDelta !== 0) return bucketDelta;
+    const weightedDelta =
+      (Number(b.weightedScore) || 0) - (Number(a.weightedScore) || 0);
+    if (weightedDelta !== 0) return weightedDelta;
+    return (Number(b.finalScore) || 0) - (Number(a.finalScore) || 0);
+  });
   retrievalMeta.scoredCandidates = scoredNodes.length;
   retrievalMeta.lexicalBoostedNodes = scoredNodes.filter(
     (item) => (Number(item.lexicalScore) || 0) > 0,
@@ -1081,6 +1231,19 @@ export async function retrieve({
   const selectedNodes = selectedNodeIds
     .map((id) => getNode(graph, id))
     .filter(Boolean);
+  retrievalMeta.selectedByBucket = selectedNodes.reduce((acc, node) => {
+    const bucket = enableScopedMemory
+      ? classifyNodeScopeBucket(node, {
+          activeCharacterPovOwner,
+          activeUserPovOwner,
+          activeRegion,
+          enablePovMemory,
+          enableRegionScopedObjective,
+        })
+      : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
+    pushScopeBucketDebug(acc, bucket, node.id);
+    return acc;
+  }, createEmptyScopeBucketMap());
 
   reinforceAccessBatch(selectedNodes);
 
@@ -1118,6 +1281,17 @@ export async function retrieve({
 
   return buildResult(graph, selectedNodeIds, schema, {
     retrieval: retrievalMeta,
+    scopeContext: {
+      enableScopedMemory,
+      enablePovMemory,
+      enableRegionScopedObjective,
+      injectUserPovMemory,
+      injectObjectiveGlobalMemory,
+      activeRegion,
+      activeCharacterPovOwner,
+      activeUserPovOwner,
+      bucketWeights,
+    },
   });
 }
 
@@ -1280,7 +1454,7 @@ async function llmRecall(
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      return `[${node.id}] 类型=${typeLabel}, ${fieldsStr} (评分=${c.finalScore.toFixed(3)})`;
+      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
 
@@ -1414,6 +1588,7 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const coreNodes = [];
   const recallNodes = [];
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
+  const scopeContext = meta.scopeContext || {};
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
@@ -1439,23 +1614,96 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   coreNodes.sort(compareNodeRecallOrder);
   recallNodes.sort(compareNodeRecallOrder);
   const groupedRecallNodes = groupRecallNodes(recallNodes);
+  const selectedNodes = [...selectedSet]
+    .map((nodeId) => getNode(graph, nodeId))
+    .filter((node) => node && !node.archived)
+    .sort(compareNodeRecallOrder);
+  const scopeBuckets = buildScopedInjectionBuckets(
+    coreNodes,
+    selectedNodes,
+    scopeContext,
+  );
 
   return {
     coreNodes,
     recallNodes,
     groupedRecallNodes,
+    scopeBuckets,
     selectedNodeIds: [...selectedSet],
     meta,
     stats: {
       totalActive: activeNodes.length,
       coreCount: coreNodes.length,
       recallCount: recallNodes.length,
+      characterPovCount: scopeBuckets.characterPov.length,
+      userPovCount: scopeBuckets.userPov.length,
+      objectiveCurrentRegionCount: scopeBuckets.objectiveCurrentRegion.length,
+      objectiveGlobalCount: scopeBuckets.objectiveGlobal.length,
       episodicCount: groupedRecallNodes.episodic.length,
       stateCount: groupedRecallNodes.state.length,
       reflectiveCount: groupedRecallNodes.reflective.length,
       ruleCount: groupedRecallNodes.rule.length,
     },
   };
+}
+
+function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}) {
+  const buckets = {
+    characterPov: [],
+    userPov: [],
+    objectiveCurrentRegion: [],
+    objectiveGlobal: [],
+  };
+  const combinedNodes = [
+    ...selectedNodes,
+    ...coreNodes,
+  ];
+  const seen = new Set();
+  const globalCandidates = [];
+
+  for (const node of combinedNodes) {
+    if (!node?.id || seen.has(node.id)) continue;
+    seen.add(node.id);
+    const bucket = classifyNodeScopeBucket(node, {
+      activeCharacterPovOwner: scopeContext.activeCharacterPovOwner,
+      activeUserPovOwner: scopeContext.activeUserPovOwner,
+      activeRegion: scopeContext.activeRegion,
+      enablePovMemory: scopeContext.enablePovMemory !== false,
+      enableRegionScopedObjective:
+        scopeContext.enableRegionScopedObjective !== false,
+    });
+
+    if (bucket === MEMORY_SCOPE_BUCKETS.CHARACTER_POV) {
+      buckets.characterPov.push(node);
+      continue;
+    }
+    if (bucket === MEMORY_SCOPE_BUCKETS.USER_POV) {
+      if (scopeContext.injectUserPovMemory !== false) {
+        buckets.userPov.push(node);
+      }
+      continue;
+    }
+    if (bucket === MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION) {
+      buckets.objectiveCurrentRegion.push(node);
+      continue;
+    }
+    if (
+      bucket === MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION ||
+      bucket === MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL
+    ) {
+      globalCandidates.push(node);
+    }
+  }
+
+  buckets.characterPov.sort(compareNodeRecallOrder);
+  buckets.userPov.sort(compareNodeRecallOrder);
+  buckets.objectiveCurrentRegion.sort(compareNodeRecallOrder);
+  const cappedGlobal = (scopeContext.injectObjectiveGlobalMemory === false
+    ? []
+    : globalCandidates.sort(compareNodeRecallOrder).slice(0, 6));
+  buckets.objectiveGlobal = cappedGlobal;
+
+  return buckets;
 }
 
 function reconstructSceneNodeIds(graph, seedNodeIds, limit = 16) {
@@ -1478,6 +1726,20 @@ function reconstructSceneNodeIds(graph, seedNodeIds, limit = 16) {
 
     if (node.type === "event") {
       expandEventScene(graph, node, push);
+    } else if (node.type === "pov_memory") {
+      const relatedNodes = getNodeEdges(graph, node.id)
+        .filter(isUsableSceneEdge)
+        .map((e) => (e.fromId === node.id ? e.toId : e.fromId))
+        .map((id) => getNode(graph, id))
+        .filter(Boolean)
+        .sort(compareNodeRecallOrder)
+        .slice(0, 2);
+      for (const relatedNode of relatedNodes) {
+        push(relatedNode.id);
+        if (relatedNode.type === "event") {
+          expandEventScene(graph, relatedNode, push);
+        }
+      }
     } else if (node.type === "character" || node.type === "location") {
       const relatedEvents = getNodeEdges(graph, node.id)
         .filter(isUsableSceneEdge)
@@ -1506,7 +1768,8 @@ function expandEventScene(graph, eventNode, push) {
       neighbor.type === "character" ||
       neighbor.type === "location" ||
       neighbor.type === "thread" ||
-      neighbor.type === "reflection"
+      neighbor.type === "reflection" ||
+      neighbor.type === "pov_memory"
     ) {
       push(neighbor.id);
     }

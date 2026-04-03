@@ -3,6 +3,7 @@
 
 import { getNodeColors } from './themes.js';
 import { getGraphNodeLabel, getNodeDisplayName } from './node-labels.js';
+import { normalizeMemoryScope } from './memory-scope.js';
 
 /**
  * @typedef {Object} GraphNode
@@ -29,6 +30,12 @@ const DEFAULT_FORCE_CONFIG = {
     labelFontSize: 10,
     gridSpacing: 40,
     gridColor: 'rgba(255,255,255,0.03)',
+};
+
+const SCOPE_OUTLINE_COLORS = {
+    objective: '#57c7ff',
+    character: '#ffb347',
+    user: '#7dff9b',
 };
 
 export class GraphRenderer {
@@ -236,6 +243,12 @@ export class GraphRenderer {
             const color = this.colors[node.type] || this.colors.event;
             const isSelected = node === this.selectedNode;
             const isHovered = node === this.hoveredNode;
+            const scope = normalizeMemoryScope(node.raw?.scope);
+            const outlineColor = scope.layer === 'pov'
+                ? (scope.ownerType === 'user'
+                    ? SCOPE_OUTLINE_COLORS.user
+                    : SCOPE_OUTLINE_COLORS.character)
+                : SCOPE_OUTLINE_COLORS.objective;
 
             // 发光效果
             if (isSelected || isHovered) {
@@ -255,11 +268,9 @@ export class GraphRenderer {
             ctx.fill();
 
             // 边框
-            if (isSelected) {
-                ctx.strokeStyle = '#fff';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-            }
+            ctx.strokeStyle = isSelected ? '#fff' : outlineColor;
+            ctx.lineWidth = isSelected ? 2.5 : 1.5;
+            ctx.stroke();
 
             // 标签
             ctx.fillStyle = `rgba(255,255,255,${isHovered || isSelected ? 0.95 : 0.65})`;

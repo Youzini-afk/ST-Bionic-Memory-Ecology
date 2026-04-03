@@ -8,6 +8,7 @@ const GRAPH_LABEL_LENGTH_BY_TYPE = {
   rule: 14,
   synopsis: 16,
   reflection: 14,
+  pov_memory: 16,
 };
 
 function normalizeLabelText(value) {

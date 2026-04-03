@@ -4,6 +4,11 @@ import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "./node-labels.js";
 import {
+  buildRegionLine,
+  buildScopeBadgeText,
+  normalizeMemoryScope,
+} from "./memory-scope.js";
+import {
   cloneTaskProfile,
   createBuiltinPromptBlock,
   createCustomPromptBlock,
@@ -951,12 +956,14 @@ function _refreshMemoryBrowser() {
   if (!graph) return;
 
   const searchInput = document.getElementById("bme-memory-search");
+  const regionInput = document.getElementById("bme-memory-region-filter");
   const filterSelect = document.getElementById("bme-memory-filter");
   const listEl = document.getElementById("bme-memory-list");
   if (!listEl) return;
 
   const canRenderGraph = _canRenderGraphData(loadInfo);
   if (searchInput) searchInput.disabled = !canRenderGraph;
+  if (regionInput) regionInput.disabled = !canRenderGraph;
   if (filterSelect) filterSelect.disabled = !canRenderGraph;
 
   if (!canRenderGraph && loadInfo.loadState !== "empty-confirmed") {
@@ -967,17 +974,33 @@ function _refreshMemoryBrowser() {
   const query = String(searchInput?.value || "")
     .trim()
     .toLowerCase();
+  const regionQuery = String(regionInput?.value || "")
+    .trim()
+    .toLowerCase();
   const filter = filterSelect?.value || "all";
 
   let nodes = graph.nodes.filter((node) => !node.archived);
   if (filter !== "all") {
-    nodes = nodes.filter((node) => node.type === filter);
+    nodes = nodes.filter((node) => _matchesMemoryFilter(node, filter));
   }
   if (query) {
     nodes = nodes.filter((node) => {
       const name = getNodeDisplayName(node).toLowerCase();
       const text = JSON.stringify(node.fields || {}).toLowerCase();
       return name.includes(query) || text.includes(query);
+    });
+  }
+  if (regionQuery) {
+    nodes = nodes.filter((node) => {
+      const scope = normalizeMemoryScope(node.scope);
+      const regionText = [
+        scope.regionPrimary,
+        ...(scope.regionPath || []),
+        ...(scope.regionSecondary || []),
+      ]
+        .join(" ")
+        .toLowerCase();
+      return regionText.includes(regionQuery);
     });
   }
 
@@ -1005,6 +1028,11 @@ function _refreshMemoryBrowser() {
     badge.textContent = _typeLabel(node.type);
     li.appendChild(badge);
 
+    const scopeBadge = document.createElement("span");
+    scopeBadge.className = "bme-type-badge";
+    scopeBadge.textContent = buildScopeBadgeText(node.scope);
+    li.appendChild(scopeBadge);
+
     const content = document.createElement("div");
     const title = document.createElement("div");
     title.className = "bme-memory-name";
@@ -1024,6 +1052,12 @@ function _refreshMemoryBrowser() {
             : `seq: ${node.seqRange?.[1] ?? node.seq ?? 0}`;
       meta.appendChild(span);
     });
+    const regionMeta = _buildScopeMetaText(node);
+    if (regionMeta) {
+      const scopeSpan = document.createElement("span");
+      scopeSpan.textContent = regionMeta;
+      meta.appendChild(scopeSpan);
+    }
     content.append(title, body, meta);
     li.appendChild(content);
     fragment.appendChild(li);
@@ -1043,6 +1077,10 @@ function _refreshMemoryBrowser() {
   if (searchInput && !searchInput._bmeBound) {
     let timer = null;
     searchInput.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => _refreshMemoryBrowser(), 200);
+    });
+    regionInput?.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => _refreshMemoryBrowser(), 200);
     });
@@ -1102,6 +1140,16 @@ function _buildLegend() {
 
   const settings = _getSettings?.() || {};
   const colors = getNodeColors(settings.panelTheme || "crimson");
+  const scopeColors = {
+    objective: "#57c7ff",
+    characterPov: "#ffb347",
+    userPov: "#7dff9b",
+  };
+  const layers = [
+    { key: "objective", label: "客观层" },
+    { key: "characterPov", label: "角色 POV" },
+    { key: "userPov", label: "用户 POV" },
+  ];
   const types = [
     { key: "character", label: "角色" },
     { key: "event", label: "事件" },
@@ -1110,9 +1158,20 @@ function _buildLegend() {
     { key: "rule", label: "规则" },
     { key: "synopsis", label: "概要" },
     { key: "reflection", label: "反思" },
+    { key: "pov_memory", label: "主观记忆" },
   ];
 
   const fragment = document.createDocumentFragment();
+  layers.forEach((type) => {
+    const item = document.createElement("span");
+    item.className = "bme-legend-item";
+    const dot = document.createElement("span");
+    dot.className = "bme-legend-dot";
+    dot.style.background = scopeColors[type.key] || "";
+    item.appendChild(dot);
+    item.append(document.createTextNode(type.label));
+    fragment.appendChild(item);
+  });
   types.forEach((type) => {
     const item = document.createElement("span");
     item.className = "bme-legend-item";
@@ -1156,11 +1215,23 @@ function _showNodeDetail(node) {
 
   const items = [
     { label: "类型", value: _typeLabel(raw.type) },
+    { label: "作用域", value: buildScopeBadgeText(raw.scope) },
     { label: "ID", value: raw.id || "—" },
     { label: "重要度", value: raw.importance || 5 },
     { label: "访问次数", value: raw.accessCount || 0 },
     { label: "序列号", value: raw.seqRange?.[1] ?? raw.seq ?? 0 },
   ];
+  const scope = normalizeMemoryScope(raw.scope);
+  if (scope.layer === "pov") {
+    items.push({
+      label: "POV 归属",
+      value: `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
+    });
+  }
+  const regionLine = buildRegionLine(scope);
+  if (regionLine) {
+    items.push({ label: "地区", value: regionLine });
+  }
 
   if (Array.isArray(raw.seqRange)) {
     items.push({
@@ -1506,6 +1577,26 @@ function _refreshConfigTab() {
     settings.recallEnableResidualRecall ?? false,
   );
   _setCheckboxValue(
+    "bme-setting-scoped-memory-enabled",
+    settings.enableScopedMemory ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-pov-memory-enabled",
+    settings.enablePovMemory ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-region-scoped-objective-enabled",
+    settings.enableRegionScopedObjective ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-inject-user-pov-memory",
+    settings.injectUserPovMemory ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-inject-objective-global-memory",
+    settings.injectObjectiveGlobalMemory ?? true,
+  );
+  _setCheckboxValue(
     "bme-setting-consolidation-enabled",
     settings.enableConsolidation ?? true,
   );
@@ -1624,6 +1715,26 @@ function _refreshConfigTab() {
   _setInputValue(
     "bme-setting-recall-residual-top-k",
     settings.recallResidualTopK ?? 5,
+  );
+  _setInputValue(
+    "bme-setting-recall-character-pov-weight",
+    settings.recallCharacterPovWeight ?? 1.25,
+  );
+  _setInputValue(
+    "bme-setting-recall-user-pov-weight",
+    settings.recallUserPovWeight ?? 1.05,
+  );
+  _setInputValue(
+    "bme-setting-recall-objective-current-region-weight",
+    settings.recallObjectiveCurrentRegionWeight ?? 1.15,
+  );
+  _setInputValue(
+    "bme-setting-recall-objective-adjacent-region-weight",
+    settings.recallObjectiveAdjacentRegionWeight ?? 0.9,
+  );
+  _setInputValue(
+    "bme-setting-recall-objective-global-weight",
+    settings.recallObjectiveGlobalWeight ?? 0.75,
   );
   _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
   _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
@@ -1789,6 +1900,24 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-recall-residual-enabled", (checked) => {
     _patchSettings({ recallEnableResidualRecall: checked });
   });
+  bindCheckbox("bme-setting-scoped-memory-enabled", (checked) => {
+    _patchSettings({ enableScopedMemory: checked });
+  });
+  bindCheckbox("bme-setting-pov-memory-enabled", (checked) => {
+    _patchSettings({ enablePovMemory: checked });
+  });
+  bindCheckbox(
+    "bme-setting-region-scoped-objective-enabled",
+    (checked) => {
+      _patchSettings({ enableRegionScopedObjective: checked });
+    },
+  );
+  bindCheckbox("bme-setting-inject-user-pov-memory", (checked) => {
+    _patchSettings({ injectUserPovMemory: checked });
+  });
+  bindCheckbox("bme-setting-inject-objective-global-memory", (checked) => {
+    _patchSettings({ injectObjectiveGlobalMemory: checked });
+  });
   bindCheckbox("bme-setting-consolidation-enabled", (checked) => {
     _patchSettings({ enableConsolidation: checked });
     _refreshGuardedConfigStates();
@@ -1939,6 +2068,33 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-recall-residual-top-k", 5, 1, 20, (value) =>
     _patchSettings({ recallResidualTopK: value }),
+  );
+  bindFloat("bme-setting-recall-character-pov-weight", 1.25, 0, 3, (value) =>
+    _patchSettings({ recallCharacterPovWeight: value }),
+  );
+  bindFloat("bme-setting-recall-user-pov-weight", 1.05, 0, 3, (value) =>
+    _patchSettings({ recallUserPovWeight: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-objective-current-region-weight",
+    1.15,
+    0,
+    3,
+    (value) => _patchSettings({ recallObjectiveCurrentRegionWeight: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-objective-adjacent-region-weight",
+    0.9,
+    0,
+    3,
+    (value) => _patchSettings({ recallObjectiveAdjacentRegionWeight: value }),
+  );
+  bindFloat(
+    "bme-setting-recall-objective-global-weight",
+    0.75,
+    0,
+    3,
+    (value) => _patchSettings({ recallObjectiveGlobalWeight: value }),
   );
   bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
     _patchSettings({ injectDepth: value }),
@@ -4680,6 +4836,36 @@ function _safeCssToken(value, fallback = "unknown") {
   return token || fallback;
 }
 
+function _matchesMemoryFilter(node, filter = "all") {
+  if (!node || filter === "all") return true;
+  const scope = normalizeMemoryScope(node.scope);
+  switch (filter) {
+    case "scope:objective":
+      return scope.layer === "objective";
+    case "scope:characterPov":
+      return scope.layer === "pov" && scope.ownerType === "character";
+    case "scope:userPov":
+      return scope.layer === "pov" && scope.ownerType === "user";
+    default:
+      return node.type === filter;
+  }
+}
+
+function _buildScopeMetaText(node) {
+  const scope = normalizeMemoryScope(node?.scope);
+  const parts = [];
+  if (scope.layer === "pov") {
+    parts.push(
+      `${scope.ownerType === "user" ? "用户 POV" : "角色 POV"}: ${scope.ownerName || scope.ownerId || "未命名"}`,
+    );
+  } else {
+    parts.push("客观层");
+  }
+  const regionLine = buildRegionLine(scope);
+  if (regionLine) parts.push(regionLine);
+  return parts.join(" | ");
+}
+
 function _typeLabel(type) {
   const map = {
     character: "角色",
@@ -4689,6 +4875,7 @@ function _typeLabel(type) {
     rule: "规则",
     synopsis: "概要",
     reflection: "反思",
+    pov_memory: "主观记忆",
   };
   return map[type] || type || "—";
 }

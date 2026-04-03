@@ -3,6 +3,7 @@
 import { getRequestHeaders } from "../../../../script.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "./graph.js";
+import { describeMemoryScope, normalizeMemoryScope } from "./memory-scope.js";
 import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { buildVectorCollectionId, stableHashString } from "./runtime-state.js";
 
@@ -286,6 +287,18 @@ export function buildNodeVectorText(node) {
       continue;
     }
     parts.push(`${key}: ${value}`);
+  }
+
+  const scope = normalizeMemoryScope(node?.scope);
+  const scopeText = describeMemoryScope(scope);
+  if (scopeText) {
+    parts.push(`memory_scope: ${scopeText}`);
+  }
+  if (scope.regionPath.length > 0) {
+    parts.push(`memory_region_path: ${scope.regionPath.join(" / ")}`);
+  }
+  if (scope.regionSecondary.length > 0) {
+    parts.push(`memory_region_secondary: ${scope.regionSecondary.join(", ")}`);
   }
 
   return parts.join(" | ").trim();

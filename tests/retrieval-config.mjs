@@ -92,6 +92,53 @@ const graph = createGraph();
 const helpers = createGraphHelpers(graph);
 const retrieve = await loadRetrieve({
   ...helpers,
+  MEMORY_SCOPE_BUCKETS: {
+    CHARACTER_POV: "characterPov",
+    USER_POV: "userPov",
+    OBJECTIVE_CURRENT_REGION: "objectiveCurrentRegion",
+    OBJECTIVE_ADJACENT_REGION: "objectiveAdjacentRegion",
+    OBJECTIVE_GLOBAL: "objectiveGlobal",
+    OTHER_POV: "otherPov",
+  },
+  normalizeMemoryScope(scope = {}) {
+    return {
+      layer: scope.layer === "pov" ? "pov" : "objective",
+      ownerType: scope.ownerType || "",
+      ownerId: scope.ownerId || "",
+      ownerName: scope.ownerName || "",
+      regionPrimary: scope.regionPrimary || "",
+      regionPath: Array.isArray(scope.regionPath) ? scope.regionPath : [],
+      regionSecondary: Array.isArray(scope.regionSecondary)
+        ? scope.regionSecondary
+        : [],
+    };
+  },
+  getScopeRegionKey(scope = {}) {
+    return String(scope.regionPrimary || "");
+  },
+  classifyNodeScopeBucket(node, { activeRegion = "" } = {}) {
+    if (node?.scope?.layer === "pov") {
+      return node?.scope?.ownerType === "user"
+        ? "userPov"
+        : "characterPov";
+    }
+    if (
+      activeRegion &&
+      String(node?.scope?.regionPrimary || "").trim() === String(activeRegion).trim()
+    ) {
+      return "objectiveCurrentRegion";
+    }
+    return "objectiveGlobal";
+  },
+  resolveScopeBucketWeight(bucket, overrides = {}) {
+    return Number(overrides?.[bucket] ?? 1) || 1;
+  },
+  describeMemoryScope(scope = {}) {
+    return `${scope.layer || "objective"}:${scope.ownerType || ""}:${scope.regionPrimary || ""}`;
+  },
+  describeScopeBucket(bucket = "") {
+    return String(bucket || "");
+  },
   buildTaskPrompt() {
     return { systemPrompt: "" };
   },
@@ -445,5 +492,68 @@ assert.deepEqual(Array.from(lexicalResult.selectedNodeIds), ["char-1"]);
 assert.equal(lexicalResult.meta.retrieval.queryBlendActive, false);
 assert.equal(lexicalResult.meta.retrieval.lexicalBoostedNodes, 1);
 assert.equal(lexicalResult.meta.retrieval.lexicalTopHits[0]?.nodeId, "char-1");
+
+const scopedGraph = {
+  nodes: [
+    {
+      id: "obj-global",
+      type: "event",
+      importance: 8,
+      createdTime: 1,
+      archived: false,
+      fields: { title: "旧王都事件" },
+      seqRange: [1, 1],
+      scope: { layer: "objective", regionPrimary: "旧城区" },
+    },
+    {
+      id: "char-pov",
+      type: "pov_memory",
+      importance: 4,
+      createdTime: 2,
+      archived: false,
+      fields: { summary: "艾琳觉得钟楼入口非常可疑" },
+      seqRange: [2, 2],
+      scope: {
+        layer: "pov",
+        ownerType: "character",
+        ownerId: "艾琳",
+        ownerName: "艾琳",
+        regionPrimary: "钟楼",
+      },
+    },
+  ],
+  edges: [],
+  historyState: {
+    activeRegion: "钟楼",
+    activeCharacterPovOwner: "艾琳",
+    activeUserPovOwner: "玩家",
+  },
+};
+const scopedSchema = [
+  { id: "event", label: "事件", alwaysInject: true },
+  { id: "pov_memory", label: "主观记忆", alwaysInject: false },
+];
+const scopedResult = await retrieve({
+  graph: scopedGraph,
+  userMessage: "钟楼里到底有什么",
+  recentMessages: [],
+  embeddingConfig: {},
+  schema: scopedSchema,
+  options: {
+    topK: 2,
+    maxRecallNodes: 1,
+    enableVectorPrefilter: false,
+    enableGraphDiffusion: false,
+    enableLLMRecall: false,
+    enableDiversitySampling: false,
+    enableScopedMemory: true,
+    activeRegion: "钟楼",
+    activeCharacterPovOwner: "艾琳",
+  },
+});
+assert.deepEqual(Array.from(scopedResult.selectedNodeIds), ["char-pov"]);
+assert.equal(scopedResult.meta.retrieval.activeRegion, "钟楼");
+assert.ok(Array.isArray(scopedResult.scopeBuckets.characterPov));
+assert.equal(scopedResult.scopeBuckets.characterPov[0]?.id, "char-pov");
 
 console.log("retrieval-config tests passed");
