@@ -1662,6 +1662,76 @@ async function testRecallCardUserTextRefreshesWithoutCardRecreate() {
   }
 }
 
+async function testRecallCardDisplayModeToggleRestoresOriginalUserText() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "line-1\nline-2",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  const userTextElement = messageElement.querySelector(".mes_text");
+  userTextElement.textContent = chat[0].mes;
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.context.getSettings = () => ({
+      panelTheme: "crimson",
+      recallCardUserInputDisplayMode: "beautify_only",
+    });
+    harness.api.refreshPersistedRecallMessageUi();
+
+    let card = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.equal(card?.dataset.userInputDisplayMode, "beautify_only");
+    assert.equal(
+      userTextElement.classList.contains("bme-hide-original-user-text"),
+      true,
+    );
+    assert.equal(
+      card?.querySelector(".bme-recall-user-text")?.textContent,
+      "line-1\nline-2",
+    );
+
+    harness.context.getSettings = () => ({
+      panelTheme: "crimson",
+      recallCardUserInputDisplayMode: "mirror",
+    });
+    harness.api.refreshPersistedRecallMessageUi();
+
+    card = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.equal(card?.dataset.userInputDisplayMode, "mirror");
+    assert.equal(
+      userTextElement.classList.contains("bme-hide-original-user-text"),
+      false,
+    );
+
+    delete chat[0].extra.bme_recall;
+    harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(
+      userTextElement.classList.contains("bme-hide-original-user-text"),
+      false,
+    );
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      0,
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 function makeEvent(seq, title) {
   return createNode({
     type: "event",
@@ -4277,6 +4347,7 @@ await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
 await testRecallCardUserTextRefreshesWithoutCardRecreate();
+await testRecallCardDisplayModeToggleRestoresOriginalUserText();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testHistoryRecoveryAbortClearsVectorRepairState();
