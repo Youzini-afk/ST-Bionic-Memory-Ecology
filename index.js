@@ -4360,22 +4360,6 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
   toastr.warning(message, title, { timeOut: 4500 });
 }
 
-function settleExtractionStatusAfterHistoryRecovery(
-  text = "提取完成",
-  meta = "",
-  level = "success",
-) {
-  const currentText = String(lastExtractionStatus?.text || "");
-  const currentLevel = String(lastExtractionStatus?.level || "");
-  if (currentText !== "AI 生成中" && currentLevel !== "running") {
-    return;
-  }
-  setLastExtractionStatus(text, meta, level, {
-    syncRuntime: true,
-    toastKind: "",
-  });
-}
-
 async function fetchLocalWithTimeout(
   url,
   options = {},
@@ -5611,8 +5595,12 @@ const DEFAULT_TRIGGER_KEYWORDS = [
 export function getSmartTriggerDecision(chat, lastProcessed, settings) {
   const pendingMessages = chat
     .slice(Math.max(0, (lastProcessed ?? -1) + 1))
-    .filter((msg) => !isSystemMessageForExtraction(msg))
-    .map((msg) => ({
+    .map((msg, offset) => ({
+      msg,
+      index: Math.max(0, (lastProcessed ?? -1) + 1) + offset,
+    }))
+    .filter(({ msg, index }) => !isSystemMessageForExtraction(msg, { index, chat }))
+    .map(({ msg }) => ({
       role: msg.is_user ? "user" : "assistant",
       content: msg.mes || "",
     }))
@@ -7877,6 +7865,30 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       }
     });
   }
+}
+
+function settleExtractionStatusAfterHistoryRecovery(
+  text = "提取完成",
+  meta = "",
+  level = "success",
+) {
+  const statusSnapshot =
+    typeof lastExtractionStatus === "object" && lastExtractionStatus
+      ? lastExtractionStatus
+      : null;
+  if (!statusSnapshot || typeof setLastExtractionStatus !== "function") {
+    return;
+  }
+
+  const currentText = String(statusSnapshot.text || "");
+  const currentLevel = String(statusSnapshot.level || "");
+  if (currentText !== "AI 生成中" && currentLevel !== "running") {
+    return;
+  }
+  setLastExtractionStatus(text, meta, level, {
+    syncRuntime: true,
+    toastKind: "",
+  });
 }
 
 /**

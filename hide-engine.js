@@ -546,3 +546,11 @@ export function getHideStateSnapshot() {
     scheduled: Boolean(hideState.scheduledTimer),
   };
 }
+
+export function isInManagedHideRange(index, chat = null) {
+  if (!Number.isFinite(index) || index < 0) return false;
+  if (!hideState.managedChatRef) return false;
+  if (Array.isArray(chat) && chat !== hideState.managedChatRef) return false;
+
+  return hideState.managedSystemIndices.has(index);
+}
