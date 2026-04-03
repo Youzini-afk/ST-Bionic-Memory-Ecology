@@ -33,6 +33,7 @@ import {
   clampRecoveryStartFloor,
   getAssistantTurns,
   isAssistantChatMessage,
+  isSystemMessageForExtraction,
   pruneProcessedMessageHashesFromFloor,
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
@@ -155,6 +156,7 @@ import {
   findJournalRecoveryPoint,
   markHistoryDirty,
   normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
   snapshotProcessedMessageHashes,
   undoLatestMaintenance,
 } from "./runtime-state.js";
@@ -514,6 +516,7 @@ let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
+const plannerRecallHandoffs = new Map();
 let persistedRecallUiRefreshTimer = null;
 let persistedRecallUiRefreshObserver = null;
 let persistedRecallUiRefreshSession = 0;
@@ -522,6 +525,7 @@ const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
 const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
+const PLANNER_RECALL_HANDOFF_TTL_MS = GENERATION_RECALL_TRANSACTION_TTL_MS;
 const GENERATION_RECALL_HOOK_BRIDGE_MS = 1200;
 const stageNoticeHandles = {
   extraction: null,
@@ -1102,6 +1106,7 @@ function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  clearPlannerRecallHandoffsForChat("", { clearAll: true });
 }
 
 function getCoreEventBindingState() {
@@ -2284,9 +2289,9 @@ function getHideRuntimeAdapters() {
   };
 }
 
-function applyMessageHideNow(reason = "manual-apply") {
+async function applyMessageHideNow(reason = "manual-apply") {
   try {
-    const result = applyHideSettings(
+    const result = await applyHideSettings(
       getMessageHideSettings(),
       getHideRuntimeAdapters(),
     );
@@ -2313,9 +2318,9 @@ function scheduleMessageHideApply(reason = "scheduled", delayMs = 120) {
   }
 }
 
-function runIncrementalMessageHide(reason = "incremental") {
+async function runIncrementalMessageHide(reason = "incremental") {
   try {
-    const result = runIncrementalHideCheck(
+    const result = await runIncrementalHideCheck(
       getMessageHideSettings(),
       getHideRuntimeAdapters(),
     );
@@ -2341,9 +2346,9 @@ function clearMessageHideState(reason = "reset") {
   }
 }
 
-function clearAllHiddenMessages(reason = "manual-clear") {
+async function clearAllHiddenMessages(reason = "manual-clear") {
   try {
-    const result = unhideAll(getHideRuntimeAdapters());
+    const result = await unhideAll(getHideRuntimeAdapters());
     console.log("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
     return result;
   } catch (error) {
@@ -3688,6 +3693,13 @@ function deferAutoExtraction(
       `retry:${pendingAutoExtraction.reason || "auto-extraction-deferred"}`,
     );
   }, resolvedDelayMs);
+  console.debug?.("[ST-BME] auto extraction deferred", {
+    reason: pendingAutoExtraction.reason,
+    chatId: normalizedChatId,
+    messageId: pendingAutoExtraction.messageId,
+    attempts: nextAttempts,
+    delayMs: resolvedDelayMs,
+  });
 
   return {
     scheduled: true,
@@ -3734,6 +3746,15 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
   }
 
   if (!ensureGraphMutationReady("自动提取", { notify: false })) {
+    console.debug?.(
+      "[ST-BME] pending auto extraction resume blocked: graph-not-ready",
+      {
+        source,
+        chatId: pendingChatId,
+        attempts: pendingAutoExtraction.attempts || 0,
+        loadState: graphPersistenceState.loadState || "",
+      },
+    );
     return deferAutoExtraction("graph-not-ready", {
       chatId: pendingChatId,
       messageId: pendingAutoExtraction.messageId,
@@ -3742,6 +3763,12 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
 
   const pendingRequest = { ...pendingAutoExtraction };
   clearPendingAutoExtraction();
+  console.debug?.("[ST-BME] resuming pending auto extraction", {
+    source,
+    chatId: pendingRequest.chatId,
+    messageId: pendingRequest.messageId,
+    attempts: pendingRequest.attempts || 0,
+  });
   const enqueueMicrotask =
     typeof globalThis.queueMicrotask === "function"
       ? globalThis.queueMicrotask.bind(globalThis)
@@ -4333,6 +4360,22 @@ function notifyExtractionIssue(message, title = "ST-BME 提取提示") {
   toastr.warning(message, title, { timeOut: 4500 });
 }
 
+function settleExtractionStatusAfterHistoryRecovery(
+  text = "提取完成",
+  meta = "",
+  level = "success",
+) {
+  const currentText = String(lastExtractionStatus?.text || "");
+  const currentLevel = String(lastExtractionStatus?.level || "");
+  if (currentText !== "AI 生成中" && currentLevel !== "running") {
+    return;
+  }
+  setLastExtractionStatus(text, meta, level, {
+    syncRuntime: true,
+    toastKind: "",
+  });
+}
+
 async function fetchLocalWithTimeout(
   url,
   options = {},
@@ -4601,8 +4644,11 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.lastProcessedAssistantFloor =
     lastProcessedAssistantFloor;
+  currentGraph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
   currentGraph.historyState.processedMessageHashes =
     snapshotProcessedMessageHashes(chat, lastProcessedAssistantFloor);
+  currentGraph.historyState.processedMessageHashesNeedRefresh = false;
   currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
 }
 
@@ -4919,7 +4965,7 @@ function updateModuleSettings(patch = {}) {
   if (Object.keys(patch).some((key) => messageHideKeys.has(key))) {
     const hideSettings = getMessageHideSettings(settings);
     if (!hideSettings.enabled || hideSettings.hide_last_n <= 0) {
-      clearAllHiddenMessages("settings-updated-disable");
+      void clearAllHiddenMessages("settings-updated-disable");
     } else {
       scheduleMessageHideApply("settings-updated", 30);
     }
@@ -5565,7 +5611,7 @@ const DEFAULT_TRIGGER_KEYWORDS = [
 export function getSmartTriggerDecision(chat, lastProcessed, settings) {
   const pendingMessages = chat
     .slice(Math.max(0, (lastProcessed ?? -1) + 1))
-    .filter((msg) => !msg.is_system)
+    .filter((msg) => !isSystemMessageForExtraction(msg))
     .map((msg) => ({
       role: msg.is_user ? "user" : "assistant",
       content: msg.mes || "",
@@ -5876,6 +5922,116 @@ function buildHistoryGenerationRecallInput(chat) {
       : "历史用户楼层缺失",
     includeSyntheticUserMessage: false,
   };
+}
+
+function cleanupPlannerRecallHandoffs(now = Date.now()) {
+  for (const [chatId, handoff] of plannerRecallHandoffs.entries()) {
+    if (
+      !handoff ||
+      String(handoff.chatId || "") !== String(chatId || "") ||
+      now - Number(handoff.updatedAt || handoff.createdAt || 0) >
+        PLANNER_RECALL_HANDOFF_TTL_MS
+    ) {
+      plannerRecallHandoffs.delete(chatId);
+    }
+  }
+}
+
+function peekPlannerRecallHandoff(
+  chatId = getCurrentChatId(),
+  now = Date.now(),
+) {
+  cleanupPlannerRecallHandoffs(now);
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  const handoff = plannerRecallHandoffs.get(normalizedChatId) || null;
+  if (!handoff) return null;
+  if (
+    now - Number(handoff.updatedAt || handoff.createdAt || 0) >
+    PLANNER_RECALL_HANDOFF_TTL_MS
+  ) {
+    plannerRecallHandoffs.delete(normalizedChatId);
+    return null;
+  }
+  return handoff;
+}
+
+function clearPlannerRecallHandoffsForChat(
+  chatId = getCurrentChatId(),
+  { clearAll = false } = {},
+) {
+  cleanupPlannerRecallHandoffs();
+  if (clearAll) {
+    const removed = plannerRecallHandoffs.size;
+    plannerRecallHandoffs.clear();
+    return removed;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return 0;
+  return plannerRecallHandoffs.delete(normalizedChatId) ? 1 : 0;
+}
+
+function consumePlannerRecallHandoff(
+  chatId = getCurrentChatId(),
+  { handoffId = "" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+
+  const handoff = peekPlannerRecallHandoff(normalizedChatId);
+  if (!handoff) return null;
+  if (handoffId && String(handoff.id || "") !== String(handoffId || "")) {
+    return null;
+  }
+
+  plannerRecallHandoffs.delete(normalizedChatId);
+  return handoff;
+}
+
+function preparePlannerRecallHandoff({
+  rawUserInput = "",
+  plannerAugmentedMessage = "",
+  plannerRecall = null,
+  chatId = getCurrentChatId(),
+} = {}) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedRawUserInput = normalizeRecallInputText(rawUserInput);
+  const normalizedPlannerAugmentedMessage = normalizeRecallInputText(
+    plannerAugmentedMessage,
+  );
+  const result = plannerRecall?.result || null;
+  if (!normalizedChatId || !normalizedRawUserInput || !result) {
+    return null;
+  }
+
+  cleanupPlannerRecallHandoffs();
+  const createdAt = Date.now();
+  const injectionText = normalizeRecallInputText(
+    plannerRecall?.memoryBlock || formatInjection(result, getSchema()),
+  );
+  const handoff = {
+    id: [
+      normalizedChatId,
+      hashRecallInput(normalizedRawUserInput),
+      createdAt,
+    ].join(":"),
+    chatId: normalizedChatId,
+    rawUserInput: normalizedRawUserInput,
+    plannerAugmentedMessage: normalizedPlannerAugmentedMessage,
+    result,
+    recentMessages: Array.isArray(plannerRecall?.recentMessages)
+      ? plannerRecall.recentMessages.map((item) => String(item || ""))
+      : [],
+    injectionText,
+    source: "planner-handoff",
+    sourceLabel: "Planner handoff",
+    createdAt,
+    updatedAt: createdAt,
+  };
+  plannerRecallHandoffs.set(normalizedChatId, handoff);
+  return handoff;
 }
 
 function buildPreGenerationRecallKey(type, options = {}) {
@@ -6313,11 +6469,39 @@ function createGenerationRecallContext({
   const normalizedChatId = normalizeChatIdCandidate(
     chatId || context?.chatId || getCurrentChatId(),
   );
+  const effectiveGenerationType = normalizeGenerationRecallTransactionType(
+    recallOptions?.generationType || generationType,
+  );
+  const plannerRecallHandoff =
+    effectiveGenerationType === "normal"
+      ? peekPlannerRecallHandoff(normalizedChatId)
+      : null;
+  const effectiveRecallOptions = plannerRecallHandoff
+    ? {
+        ...(recallOptions || {}),
+        overrideUserMessage: plannerRecallHandoff.rawUserInput,
+        overrideSource: plannerRecallHandoff.source || "planner-handoff",
+        overrideSourceLabel:
+          plannerRecallHandoff.sourceLabel || "Planner handoff",
+        overrideReason: "planner-handoff-reuse",
+        sourceCandidates: [
+          {
+            text: plannerRecallHandoff.rawUserInput,
+            source: plannerRecallHandoff.source || "planner-handoff",
+            sourceLabel:
+              plannerRecallHandoff.sourceLabel || "Planner handoff",
+            reason: "planner-handoff-reuse",
+            includeSyntheticUserMessage: false,
+          },
+        ],
+        includeSyntheticUserMessage: false,
+      }
+    : recallOptions;
 
   const frozenRecallOptions = freezeGenerationRecallOptionsForTransaction(
     chat,
     generationType,
-    recallOptions,
+    effectiveRecallOptions,
   );
   if (!frozenRecallOptions) {
     return {
@@ -6335,7 +6519,7 @@ function createGenerationRecallContext({
     frozenRecallOptions.generationType || generationType,
   );
   const fallbackRecallKey =
-    recallOptions.recallKey ||
+    effectiveRecallOptions?.recallKey ||
     buildPreGenerationRecallKey(transactionGenerationType, {
       ...frozenRecallOptions,
       chatId: normalizedChatId,
@@ -6444,6 +6628,20 @@ function createGenerationRecallContext({
     generationType:
       transaction.frozenRecallOptions?.generationType || generationType,
   };
+  if (plannerRecallHandoff?.result) {
+    boundRecallOptions.cachedRecallPayload = {
+      handoffId: plannerRecallHandoff.id,
+      chatId: plannerRecallHandoff.chatId,
+      result: plannerRecallHandoff.result,
+      recentMessages: Array.isArray(plannerRecallHandoff.recentMessages)
+        ? plannerRecallHandoff.recentMessages.map((item) => String(item || ""))
+        : [],
+      injectionText: String(plannerRecallHandoff.injectionText || ""),
+      source: plannerRecallHandoff.source || "planner-handoff",
+      sourceLabel: plannerRecallHandoff.sourceLabel || "Planner handoff",
+      reason: "planner-handoff-reuse",
+    };
+  }
 
   const recallKey = transactionRecallKey;
   const shouldRun = shouldRunRecallForTransaction(transaction, hookName);
@@ -6923,6 +7121,27 @@ function inspectHistoryMutation(
   ensureCurrentGraphRuntimeState();
   const context = getContext();
   const chat = context?.chat;
+  if (
+    Array.isArray(chat) &&
+    currentGraph.historyState?.processedMessageHashesNeedRefresh === true
+  ) {
+    updateProcessedHistorySnapshot(
+      chat,
+      currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+    );
+    console.debug?.(
+      "[ST-BME] refreshed processed message hashes after hash-version migration",
+      {
+        trigger,
+        lastProcessedAssistantFloor:
+          currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+      },
+    );
+    if (isGraphMetadataWriteAllowed()) {
+      saveGraphToChat({ reason: "processed-hash-version-migrated" });
+    }
+    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
   const metaDetection = resolveDirtyFloorFromMutationMeta(
     trigger,
     primaryArg,
@@ -7319,6 +7538,19 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       resultCode: "reroll.rollback.applied",
     }),
   );
+  if (
+    Array.isArray(context?.chat) &&
+    Number.isFinite(currentGraph.historyState?.lastProcessedAssistantFloor) &&
+    currentGraph.historyState.lastProcessedAssistantFloor >= 0
+  ) {
+    // Preserve the rolled-back prefix immediately so a failed follow-up
+    // re-extraction does not look like a generic "missing processed hashes"
+    // corruption on the next history integrity check.
+    updateProcessedHistorySnapshot(
+      context.chat,
+      currentGraph.historyState.lastProcessedAssistantFloor,
+    );
+  }
   pruneProcessedMessageHashesFromFloor(currentGraph, effectiveFromFloor);
   currentGraph.lastProcessedSeq =
     currentGraph.historyState?.lastProcessedAssistantFloor ?? -1;
@@ -7468,8 +7700,23 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           trigger,
       }),
     );
+    const recoveredLastProcessedFloor = Number.isFinite(
+      currentGraph?.historyState?.lastProcessedAssistantFloor,
+    )
+      ? currentGraph.historyState.lastProcessedAssistantFloor
+      : -1;
+    if (recoveredLastProcessedFloor >= 0) {
+      // Recovery replay has rebuilt the graph state; restore processed hashes so
+      // the next hash recheck does not immediately trigger another replay loop.
+      updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+    }
     saveGraphToChat({ reason: "history-recovery-complete" });
     refreshPanelLiveState();
+    settleExtractionStatusAfterHistoryRecovery(
+      "提取完成",
+      `历史恢复回放 ${replayedBatches} 批`,
+      "success",
+    );
     updateStageNotice(
       "history",
       usedFullRebuild ? "历史恢复完成（全量重建）" : "历史恢复完成",
@@ -7511,6 +7758,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.replayRequiredNodeIds = [];
       currentGraph.vectorIndexState.dirty = false;
       currentGraph.vectorIndexState.dirtyReason = "";
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取已终止",
+        error?.message || "历史恢复已终止",
+        "warning",
+      );
       updateStageNotice(
         "history",
         "历史恢复已终止",
@@ -7557,6 +7809,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
       saveGraphToChat({ reason: "history-recovery-fallback-rebuild" });
       refreshPanelLiveState();
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取完成",
+        `历史恢复已退化为全量重建，回放 ${replayedBatches} 批`,
+        "warning",
+      );
       updateStageNotice(
         "history",
         "历史恢复已退化为全量重建",
@@ -7589,6 +7846,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
       saveGraphToChat({ reason: "history-recovery-failed" });
       refreshPanelLiveState();
+      settleExtractionStatusAfterHistoryRecovery(
+        "提取失败",
+        fallbackError?.message || String(fallbackError),
+        "error",
+      );
       updateStageNotice(
         "history",
         "历史恢复失败",
@@ -7729,6 +7991,120 @@ function buildRecallRetrieveOptions(settings, context) {
   };
 }
 
+async function runPlannerRecallForEna({
+  rawUserInput,
+  signal = undefined,
+  disableLlmRecall = false,
+} = {}) {
+  const userMessage = normalizeRecallInputText(rawUserInput || "");
+  if (!userMessage) {
+    return {
+      ok: false,
+      reason: "empty-user-input",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  const settings = getSettings();
+  if (!settings.enabled || !settings.recallEnabled) {
+    return {
+      ok: false,
+      reason: "recall-disabled",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError("Ena Planner recall aborted");
+  }
+
+  if (!currentGraph || !isGraphReadableForRecall()) {
+    return {
+      ok: false,
+      reason: "graph-not-readable",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (
+    !Array.isArray(currentGraph.nodes) ||
+    currentGraph.nodes.length === 0
+  ) {
+    return {
+      ok: false,
+      reason: "graph-empty",
+      memoryBlock: "",
+      recentMessages: [],
+      result: null,
+    };
+  }
+
+  if (isGraphMetadataWriteAllowed()) {
+    const recovered = await recoverHistoryIfNeeded("pre-ena-planner-recall");
+    if (!recovered) {
+      return {
+        ok: false,
+        reason: "history-recovery-not-ready",
+        memoryBlock: "",
+        recentMessages: [],
+        result: null,
+      };
+    }
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : createAbortError("Ena Planner recall aborted");
+  }
+
+  await ensureVectorReadyIfNeeded("pre-ena-planner-recall", signal);
+
+  const context = getContext();
+  const chat = context?.chat ?? [];
+  const recentMessages = buildRecallRecentMessages(
+    chat,
+    clampInt(settings.recallLlmContextMessages, 4, 0, 20),
+    userMessage,
+  );
+  const schema = getSchema();
+  const baseOptions = buildRecallRetrieveOptions(settings, context);
+  const options = {
+    ...baseOptions,
+    enableLLMRecall: disableLlmRecall
+      ? false
+      : baseOptions.enableLLMRecall,
+  };
+
+  const result = await retrieve({
+    graph: currentGraph,
+    userMessage,
+    recentMessages,
+    embeddingConfig: getEmbeddingConfig(),
+    schema,
+    settings,
+    signal,
+    options,
+  });
+  const memoryBlock = formatInjection(result, schema).trim();
+
+  return {
+    ok: Boolean(memoryBlock),
+    reason: memoryBlock ? "completed" : "empty-memory-block",
+    memoryBlock,
+    recentMessages,
+    result,
+  };
+}
+
 /**
  * 召回管线：检索并注入记忆
  */
@@ -7741,6 +8117,7 @@ async function runRecall(options = {}) {
       buildRecallRetrieveOptions,
       clampInt,
       console,
+      consumePlannerRecallHandoff,
       createAbortError,
       createRecallInputRecord,
       createRecallRunResult,
@@ -7910,10 +8287,11 @@ function onMessageEdited(messageId, meta = null) {
   return result;
 }
 
-function onMessageSwiped(messageId, meta = null) {
-  const result = onMessageSwipedController(
+async function onMessageSwiped(messageId, meta = null) {
+  const result = await onMessageSwipedController(
     {
       invalidateRecallAfterHistoryMutation,
+      onReroll,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
@@ -8029,7 +8407,7 @@ function onMessageReceived(messageId = null, type = "") {
     hideSettings?.hide_last_n > 0 &&
     typeof runIncrementalMessageHide === "function"
   ) {
-    runIncrementalMessageHide("message-received");
+    void runIncrementalMessageHide("message-received");
   }
 
   return result;
@@ -8393,6 +8771,8 @@ async function onReembedDirect() {
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,
       fetchEmbeddingModels: onFetchEmbeddingModels,
+      applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
+      clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,
@@ -8428,5 +8808,17 @@ async function onReembedDirect() {
   });
 
   schedulePersistedRecallMessageUiRefresh(120);
+  try {
+    const { initEnaPlanner } = await import("./ena-planner/ena-planner.js");
+    await initEnaPlanner({
+      getContext,
+      getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      preparePlannerRecallHandoff,
+      runPlannerRecallForEna,
+    });
+    console.log("[ST-BME] Ena Planner module loaded");
+  } catch (error) {
+    console.warn("[ST-BME] Ena Planner module load failed:", error);
+  }
   console.log("[ST-BME] 初始化完成");
 })();

@@ -126,6 +126,7 @@ export async function executeExtractionBatchController(
 
 export async function runExtractionController(runtime) {
   if (runtime.getIsExtracting()) {
+    runtime.console?.debug?.("[ST-BME] auto extraction deferred: extraction already in progress");
     runtime.deferAutoExtraction?.("extracting");
     return;
   }
@@ -133,6 +134,9 @@ export async function runExtractionController(runtime) {
   const settings = runtime.getSettings();
   if (!settings.enabled) return;
   if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
+    runtime.console?.debug?.("[ST-BME] auto extraction blocked: graph-not-ready", {
+      loadState: runtime.getGraphPersistenceState?.()?.loadState || "",
+    });
     runtime.deferAutoExtraction?.("graph-not-ready");
     runtime.setLastExtractionStatus(
       "等待图谱加载",
@@ -148,6 +152,9 @@ export async function runExtractionController(runtime) {
   }
 
   if (!(await runtime.recoverHistoryIfNeeded("auto-extract"))) {
+    runtime.console?.debug?.("[ST-BME] auto extraction paused during history recovery", {
+      recovering: runtime.getIsRecoveringHistory?.() === true,
+    });
     if (runtime.getIsRecoveringHistory?.()) {
       runtime.deferAutoExtraction?.("history-recovering");
     }

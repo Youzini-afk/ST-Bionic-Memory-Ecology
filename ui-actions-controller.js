@@ -1,3 +1,23 @@
+function getTimerApi(runtime = {}) {
+  const rawSetTimeout =
+    typeof runtime.setTimeout === "function"
+      ? runtime.setTimeout
+      : globalThis.setTimeout;
+  const rawClearTimeout =
+    typeof runtime.clearTimeout === "function"
+      ? runtime.clearTimeout
+      : globalThis.clearTimeout;
+
+  return {
+    setTimeout(...args) {
+      return Reflect.apply(rawSetTimeout, globalThis, args);
+    },
+    clearTimeout(...args) {
+      return Reflect.apply(rawClearTimeout, globalThis, args);
+    },
+  };
+}
+
 export async function onViewGraphController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) {
@@ -262,12 +282,13 @@ export async function onImportGraphController(runtime) {
   input.accept = ".json";
 
   return await new Promise((resolve, reject) => {
+    const timers = getTimerApi(runtime);
     let settled = false;
     let focusTimer = null;
 
     const cleanup = () => {
       if (focusTimer) {
-        runtime.clearTimeout(focusTimer);
+        timers.clearTimeout(focusTimer);
         focusTimer = null;
       }
       input.onchange = null;
@@ -286,7 +307,7 @@ export async function onImportGraphController(runtime) {
     };
 
     const onWindowFocus = () => {
-      focusTimer = setTimeout(() => {
+      focusTimer = timers.setTimeout(() => {
         if (!settled) {
           finish({ cancelled: true });
         }

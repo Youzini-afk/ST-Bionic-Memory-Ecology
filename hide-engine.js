@@ -1,40 +1,92 @@
-// ST-BME: 隐藏旧楼层引擎
-// 通过临时把旧楼层标记为 is_system=true，让宿主主回复与 ST-BME 自己的聊天读取一起跳过这些楼层。
+// ST-BME: old-message hide engine
+// Uses the host's native /hide and /unhide slash commands instead of
+// mutating chat messages into is_system=true.
 
 const hideState = {
   managedChatRef: null,
-  hiddenIndices: new Set(),
+  managedChatKey: null,
+  managedSystemIndices: new Set(),
+  hiddenRangeEnd: -1,
   lastProcessedLength: 0,
   scheduledTimer: null,
+  operationVersion: 0,
 };
 
+const BME_HIDE_HASH_MARKER = "__st_bme_hide_managed";
+
 function getTimerApi(runtime = {}) {
+  const rawSetTimeout =
+    typeof runtime.setTimeout === "function"
+      ? runtime.setTimeout
+      : globalThis.setTimeout;
+  const rawClearTimeout =
+    typeof runtime.clearTimeout === "function"
+      ? runtime.clearTimeout
+      : globalThis.clearTimeout;
+
   return {
-    setTimeout:
-      typeof runtime.setTimeout === "function"
-        ? runtime.setTimeout.bind(runtime)
-        : globalThis.setTimeout.bind(globalThis),
-    clearTimeout:
-      typeof runtime.clearTimeout === "function"
-        ? runtime.clearTimeout.bind(runtime)
-        : globalThis.clearTimeout.bind(globalThis),
+    setTimeout(...args) {
+      return Reflect.apply(rawSetTimeout, globalThis, args);
+    },
+    clearTimeout(...args) {
+      return Reflect.apply(rawClearTimeout, globalThis, args);
+    },
   };
 }
 
-function getJquery(runtime = {}) {
-  if (typeof runtime.$ === "function") return runtime.$;
-  if (typeof globalThis.$ === "function") return globalThis.$;
-  return null;
-}
-
-function getCurrentChat(runtime = {}) {
+function getCurrentContext(runtime = {}) {
   try {
-    const context =
-      typeof runtime.getContext === "function" ? runtime.getContext() : null;
-    return Array.isArray(context?.chat) ? context.chat : null;
+    return typeof runtime.getContext === "function" ? runtime.getContext() : null;
   } catch {
     return null;
   }
+}
+
+function getCurrentChatInfo(runtime = {}) {
+  const context = getCurrentContext(runtime);
+  return {
+    chat: Array.isArray(context?.chat) ? context.chat : null,
+    chatId:
+      context?.chatId != null && context.chatId !== ""
+        ? String(context.chatId)
+        : null,
+  };
+}
+
+function getCurrentChatKey(runtime = {}) {
+  const { chat, chatId } = getCurrentChatInfo(runtime);
+  if (chatId) return chatId;
+  return Array.isArray(chat) ? chat : null;
+}
+
+function getSlashExecutor(runtime = {}) {
+  if (typeof runtime.executeSlashCommands === "function") {
+    return runtime.executeSlashCommands.bind(runtime);
+  }
+
+  const context = getCurrentContext(runtime);
+  if (typeof context?.executeSlashCommands === "function") {
+    return context.executeSlashCommands.bind(context);
+  }
+
+  if (typeof globalThis.executeSlashCommands === "function") {
+    return globalThis.executeSlashCommands.bind(globalThis);
+  }
+
+  if (typeof globalThis.executeSlashCommandsOnChatInput === "function") {
+    return globalThis.executeSlashCommandsOnChatInput.bind(globalThis);
+  }
+
+  return null;
+}
+
+async function executeSlashCommand(command, runtime = {}) {
+  const executor = getSlashExecutor(runtime);
+  if (!executor) {
+    throw new Error("executeSlashCommands is not available");
+  }
+
+  return await executor(command, true);
 }
 
 function normalizeHideSettings(settings = {}) {
@@ -55,9 +107,19 @@ function normalizeHideSettings(settings = {}) {
   };
 }
 
+function getJquery(runtime = {}) {
+  if (typeof runtime.$ === "function") return runtime.$;
+  if (typeof globalThis.$ === "function") return globalThis.$;
+  return null;
+}
+
 function syncSystemAttribute(chat, indices = [], value = "true", runtime = {}) {
-  if (!Array.isArray(indices) || indices.length === 0) return;
-  if (getCurrentChat(runtime) !== chat) return;
+  if (!Array.isArray(chat) || !Array.isArray(indices) || indices.length === 0) {
+    return;
+  }
+
+  const currentChat = getCurrentChatInfo(runtime).chat;
+  if (currentChat !== chat) return;
 
   const jq = getJquery(runtime);
   if (!jq) return;
@@ -67,177 +129,280 @@ function syncSystemAttribute(chat, indices = [], value = "true", runtime = {}) {
   jq(selector).attr("is_system", value);
 }
 
-function unhideTrackedChat(chat, runtime = {}) {
-  if (!Array.isArray(chat) || hideState.hiddenIndices.size === 0) {
-    return { shownCount: 0 };
-  }
-
-  const toShow = [];
-  for (const index of hideState.hiddenIndices) {
-    const message = chat[index];
-    if (!message || message.is_system !== true) continue;
-    message.is_system = false;
-    toShow.push(index);
-  }
-
-  syncSystemAttribute(chat, toShow, "false", runtime);
-  return { shownCount: toShow.length };
-}
-
-function swapManagedChat(nextChat, runtime = {}) {
-  const previousChat = hideState.managedChatRef;
-  if (previousChat && previousChat !== nextChat) {
-    unhideTrackedChat(previousChat, runtime);
-    hideState.hiddenIndices.clear();
-    hideState.lastProcessedLength = 0;
-  }
-  hideState.managedChatRef = nextChat;
-}
-
-export function runFullHideCheck(settings = {}, runtime = {}) {
-  const normalized = normalizeHideSettings(settings);
-  const chat = getCurrentChat(runtime);
-  if (!chat || chat.length === 0) {
-    resetHideState(runtime);
-    return {
-      active: false,
-      hiddenCount: 0,
-      shownCount: 0,
-      managedCount: 0,
-      chatLength: 0,
-    };
-  }
-
-  swapManagedChat(chat, runtime);
-
-  if (!normalized.enabled || normalized.hideLastN <= 0) {
-    const { shownCount } = unhideTrackedChat(chat, runtime);
-    hideState.hiddenIndices.clear();
-    hideState.lastProcessedLength = chat.length;
-    return {
-      active: false,
-      hiddenCount: 0,
-      shownCount,
-      managedCount: 0,
-      chatLength: chat.length,
-    };
+function calcHideRange(chatLength, hideLastN) {
+  if (!Number.isFinite(chatLength) || chatLength <= 0 || hideLastN <= 0) {
+    return null;
   }
 
   const visibleStart =
-    normalized.hideLastN >= chat.length
-      ? 0
-      : Math.max(0, chat.length - normalized.hideLastN);
-  const desiredHiddenIndices = new Set();
-  const managedHiddenIndices = new Set();
-  const toHide = [];
-  const toShow = [];
-
-  for (let index = 0; index < chat.length; index++) {
-    const message = chat[index];
-    if (!message) continue;
-
-    const shouldHide = index < visibleStart;
-    const isHidden = message.is_system === true;
-    const wasHiddenByBme = hideState.hiddenIndices.has(index);
-
-    if (shouldHide) {
-      desiredHiddenIndices.add(index);
-      if (wasHiddenByBme || !isHidden) {
-        managedHiddenIndices.add(index);
-      }
-      if (!isHidden) {
-        message.is_system = true;
-        toHide.push(index);
-      }
-      continue;
-    }
-
-    if (isHidden && wasHiddenByBme) {
-      message.is_system = false;
-      toShow.push(index);
-    }
-  }
-
-  syncSystemAttribute(chat, [...desiredHiddenIndices], "true", runtime);
-  syncSystemAttribute(chat, toShow, "false", runtime);
-
-  hideState.hiddenIndices = managedHiddenIndices;
-  hideState.lastProcessedLength = chat.length;
+    hideLastN >= chatLength ? 0 : Math.max(0, chatLength - hideLastN);
+  const hideEnd = visibleStart - 1;
+  if (hideEnd < 0) return null;
 
   return {
-    active: true,
-    hiddenCount: toHide.length,
-    shownCount: toShow.length,
-    managedCount: managedHiddenIndices.size,
-    chatLength: chat.length,
+    start: 0,
+    end: hideEnd,
   };
 }
 
-export function runIncrementalHideCheck(settings = {}, runtime = {}) {
+function beginOperation() {
+  hideState.operationVersion += 1;
+  return hideState.operationVersion;
+}
+
+function isOperationCurrent(version) {
+  return version === hideState.operationVersion;
+}
+
+function clearScheduledTimer(runtime = {}) {
+  const timers = getTimerApi(runtime);
+  if (hideState.scheduledTimer) {
+    timers.clearTimeout(hideState.scheduledTimer);
+    hideState.scheduledTimer = null;
+  }
+}
+
+function clearManagedState() {
+  hideState.managedChatRef = null;
+  hideState.managedChatKey = null;
+  hideState.managedSystemIndices.clear();
+  hideState.hiddenRangeEnd = -1;
+  hideState.lastProcessedLength = 0;
+}
+
+function restoreManagedSystemFlags(chat, runtime = {}) {
+  if (!Array.isArray(chat) || hideState.managedSystemIndices.size === 0) {
+    hideState.managedSystemIndices.clear();
+    return 0;
+  }
+
+  const restored = [];
+  for (const index of hideState.managedSystemIndices) {
+    const message = chat[index];
+    if (!message || message.is_system !== true) continue;
+    message.is_system = false;
+    if (message.extra && typeof message.extra === "object") {
+      delete message.extra[BME_HIDE_HASH_MARKER];
+      if (Object.keys(message.extra).length === 0) {
+        delete message.extra;
+      }
+    }
+    restored.push(index);
+  }
+
+  syncSystemAttribute(chat, restored, "false", runtime);
+  hideState.managedSystemIndices.clear();
+  return restored.length;
+}
+
+function markManagedSystemRange(chat, start, end, runtime = {}) {
+  if (!Array.isArray(chat) || start > end) return 0;
+
+  const marked = [];
+  for (let index = start; index <= end && index < chat.length; index++) {
+    const message = chat[index];
+    if (!message || message.is_system === true) continue;
+    message.is_system = true;
+    const extra =
+      message.extra && typeof message.extra === "object" ? message.extra : {};
+    extra[BME_HIDE_HASH_MARKER] = true;
+    message.extra = extra;
+    hideState.managedSystemIndices.add(index);
+    marked.push(index);
+  }
+
+  syncSystemAttribute(chat, marked, "true", runtime);
+  return marked.length;
+}
+
+function adoptManagedChat(chat, chatKey, runtime = {}) {
+  const previousChat = hideState.managedChatRef;
+  if (previousChat && previousChat !== chat) {
+    restoreManagedSystemFlags(previousChat, runtime);
+    hideState.hiddenRangeEnd = -1;
+    hideState.lastProcessedLength = 0;
+  }
+
+  hideState.managedChatRef = chat;
+  hideState.managedChatKey = chatKey;
+}
+
+function buildResult({
+  active = false,
+  hiddenCount = 0,
+  shownCount = 0,
+  chatLength = 0,
+  incremental = false,
+  stale = false,
+} = {}) {
+  return {
+    active,
+    hiddenCount,
+    shownCount,
+    managedCount: active ? hiddenCount : 0,
+    chatLength,
+    incremental,
+    stale,
+  };
+}
+
+async function unhideCurrentRange(runtime = {}, version = null, options = {}) {
+  const { chat } = getCurrentChatInfo(runtime);
+  const chatLength = Array.isArray(chat) ? chat.length : 0;
+  const full = Boolean(options.full);
+  const previousEnd = full
+    ? Math.max(-1, chatLength - 1)
+    : Math.min(hideState.hiddenRangeEnd, chatLength - 1);
+  if (previousEnd < 0) {
+    return { shownCount: 0, chatLength };
+  }
+
+  await executeSlashCommand(`/unhide 0-${previousEnd}`, runtime);
+  if (!isOperationCurrent(version ?? hideState.operationVersion)) {
+    return { shownCount: 0, chatLength, stale: true };
+  }
+
+  return { shownCount: previousEnd + 1, chatLength };
+}
+
+async function runHideApply(settings = {}, runtime = {}, options = {}) {
   const normalized = normalizeHideSettings(settings);
-  const chat = getCurrentChat(runtime);
-  if (!chat || chat.length === 0) {
-    resetHideState(runtime);
-    return {
-      active: false,
+  const { incrementalPreferred = false, version = beginOperation() } = options;
+  const chatInfo = getCurrentChatInfo(runtime);
+  const chat = chatInfo.chat;
+  const chatLength = Array.isArray(chat) ? chat.length : 0;
+
+  if (!chat || chatLength === 0) {
+    clearManagedState();
+    return buildResult();
+  }
+
+  const chatKey = getCurrentChatKey(runtime);
+  const previousChatKey = hideState.managedChatKey;
+  const sameChat =
+    previousChatKey !== null && chatKey !== null && previousChatKey === chatKey;
+  const previousHiddenEnd = sameChat ? hideState.hiddenRangeEnd : -1;
+  const previousLength = sameChat ? hideState.lastProcessedLength : 0;
+  adoptManagedChat(chat, chatKey, runtime);
+  hideState.lastProcessedLength = chatLength;
+
+  if (!normalized.enabled || normalized.hideLastN <= 0) {
+    if (previousHiddenEnd >= 0) {
+      const { shownCount } = await unhideCurrentRange(runtime, version);
+      if (!isOperationCurrent(version)) {
+        return buildResult({ chatLength, shownCount, stale: true });
+      }
+      restoreManagedSystemFlags(chat, runtime);
+      hideState.hiddenRangeEnd = -1;
+      return buildResult({ chatLength, shownCount });
+    }
+
+    restoreManagedSystemFlags(chat, runtime);
+    hideState.hiddenRangeEnd = -1;
+    return buildResult({ chatLength });
+  }
+
+  const nextRange = calcHideRange(chatLength, normalized.hideLastN);
+  if (!nextRange) {
+    if (previousHiddenEnd >= 0) {
+      const { shownCount } = await unhideCurrentRange(runtime, version);
+      if (!isOperationCurrent(version)) {
+        return buildResult({ chatLength, shownCount, stale: true });
+      }
+      restoreManagedSystemFlags(chat, runtime);
+      hideState.hiddenRangeEnd = -1;
+      return buildResult({ chatLength, shownCount });
+    }
+
+    restoreManagedSystemFlags(chat, runtime);
+    hideState.hiddenRangeEnd = -1;
+    return buildResult({
+      active: true,
       hiddenCount: 0,
-      shownCount: 0,
-      managedCount: 0,
-      chatLength: 0,
-      incremental: false,
-    };
+      chatLength,
+    });
   }
 
   if (
-    hideState.managedChatRef !== chat ||
-    !normalized.enabled ||
-    normalized.hideLastN <= 0
+    incrementalPreferred &&
+    sameChat &&
+    previousHiddenEnd >= 0 &&
+    chatLength > previousLength &&
+    previousLength > 0
   ) {
-    return {
-      ...runFullHideCheck(normalized, runtime),
-      incremental: false,
-    };
-  }
+    const previousRange = calcHideRange(previousLength, normalized.hideLastN);
+    const canExtendOnly =
+      previousRange &&
+      previousRange.end === previousHiddenEnd &&
+      nextRange.end >= previousHiddenEnd;
+    if (canExtendOnly && nextRange.end > previousHiddenEnd) {
+      const start = previousHiddenEnd + 1;
+      const end = nextRange.end;
+      await executeSlashCommand(`/hide ${start}-${end}`, runtime);
+      if (!isOperationCurrent(version)) {
+        return buildResult({ chatLength, stale: true });
+      }
 
-  const chatLength = chat.length;
-  const previousLength = hideState.lastProcessedLength;
-  if (chatLength <= previousLength) {
-    return {
-      ...runFullHideCheck(normalized, runtime),
-      incremental: false,
-    };
-  }
-
-  const previousVisibleStart =
-    previousLength > 0 ? Math.max(0, previousLength - normalized.hideLastN) : 0;
-  const nextVisibleStart = Math.max(0, chatLength - normalized.hideLastN);
-  const toHide = [];
-
-  if (nextVisibleStart > previousVisibleStart) {
-    for (let index = previousVisibleStart; index < nextVisibleStart; index++) {
-      const message = chat[index];
-      if (!message || message.is_system === true) continue;
-      message.is_system = true;
-      hideState.hiddenIndices.add(index);
-      toHide.push(index);
+      markManagedSystemRange(chat, start, end, runtime);
+      hideState.hiddenRangeEnd = end;
+      return buildResult({
+        active: true,
+        hiddenCount: end + 1,
+        shownCount: 0,
+        chatLength,
+        incremental: true,
+      });
     }
   }
 
-  syncSystemAttribute(chat, toHide, "true", runtime);
+  let shownCount = 0;
+  if (previousHiddenEnd >= 0) {
+    const unhideResult = await unhideCurrentRange(runtime, version);
+    if (!isOperationCurrent(version)) {
+      return buildResult({
+        chatLength,
+        shownCount: unhideResult.shownCount ?? 0,
+        stale: true,
+      });
+    }
+    shownCount = unhideResult.shownCount ?? 0;
+  }
+  restoreManagedSystemFlags(chat, runtime);
+
+  await executeSlashCommand(`/hide ${nextRange.start}-${nextRange.end}`, runtime);
+  if (!isOperationCurrent(version)) {
+    return buildResult({ chatLength, shownCount, stale: true });
+  }
+
+  markManagedSystemRange(chat, nextRange.start, nextRange.end, runtime);
+  hideState.hiddenRangeEnd = nextRange.end;
   hideState.lastProcessedLength = chatLength;
 
-  return {
+  return buildResult({
     active: true,
-    hiddenCount: toHide.length,
-    shownCount: 0,
-    managedCount: hideState.hiddenIndices.size,
+    hiddenCount: nextRange.end + 1,
+    shownCount,
     chatLength,
-    incremental: true,
-  };
+    incremental: false,
+  });
 }
 
-export function applyHideSettings(settings = {}, runtime = {}) {
-  return runFullHideCheck(settings, runtime);
+export async function runFullHideCheck(settings = {}, runtime = {}) {
+  return await runHideApply(settings, runtime, {
+    incrementalPreferred: false,
+    version: beginOperation(),
+  });
+}
+
+export async function runIncrementalHideCheck(settings = {}, runtime = {}) {
+  return await runHideApply(settings, runtime, {
+    incrementalPreferred: true,
+    version: beginOperation(),
+  });
+}
+
+export async function applyHideSettings(settings = {}, runtime = {}) {
+  return await runFullHideCheck(settings, runtime);
 }
 
 export function scheduleHideSettingsApply(
@@ -245,58 +410,58 @@ export function scheduleHideSettingsApply(
   runtime = {},
   delayMs = 120,
 ) {
-  const timers = getTimerApi(runtime);
-  if (hideState.scheduledTimer) {
-    timers.clearTimeout(hideState.scheduledTimer);
-    hideState.scheduledTimer = null;
-  }
+  clearScheduledTimer(runtime);
 
+  const timers = getTimerApi(runtime);
   const snapshot = normalizeHideSettings(settings);
   hideState.scheduledTimer = timers.setTimeout(() => {
     hideState.scheduledTimer = null;
-    applyHideSettings(snapshot, runtime);
+    void applyHideSettings(snapshot, runtime).catch((error) => {
+      console.warn?.("[ST-BME] scheduled hide apply failed", error);
+    });
   }, Math.max(0, Math.trunc(Number(delayMs) || 0)));
 }
 
-export function unhideAll(runtime = {}) {
-  const timers = getTimerApi(runtime);
-  if (hideState.scheduledTimer) {
-    timers.clearTimeout(hideState.scheduledTimer);
-    hideState.scheduledTimer = null;
+export async function unhideAll(runtime = {}) {
+  clearScheduledTimer(runtime);
+  const version = beginOperation();
+  const chatInfo = getCurrentChatInfo(runtime);
+  const chatLength = Array.isArray(chatInfo.chat) ? chatInfo.chat.length : 0;
+
+  if (chatLength === 0) {
+    hideState.lastProcessedLength = chatLength;
+    hideState.hiddenRangeEnd = -1;
+    hideState.managedChatKey = getCurrentChatKey(runtime);
+    return buildResult({ chatLength });
   }
 
-  const managedChat = hideState.managedChatRef;
-  const { shownCount } = unhideTrackedChat(managedChat, runtime);
-  hideState.hiddenIndices.clear();
-  hideState.lastProcessedLength = Array.isArray(managedChat)
-    ? managedChat.length
-    : 0;
+  const { shownCount } = await unhideCurrentRange(runtime, version, {
+    full: true,
+  });
+  if (!isOperationCurrent(version)) {
+    return buildResult({ chatLength, shownCount, stale: true });
+  }
 
-  return {
-    active: false,
-    shownCount,
-    managedCount: 0,
-  };
+  restoreManagedSystemFlags(chatInfo.chat, runtime);
+  hideState.hiddenRangeEnd = -1;
+  hideState.lastProcessedLength = chatLength;
+  hideState.managedChatRef = chatInfo.chat;
+  hideState.managedChatKey = getCurrentChatKey(runtime);
+
+  return buildResult({ chatLength, shownCount });
 }
 
 export function resetHideState(runtime = {}) {
-  const timers = getTimerApi(runtime);
-  if (hideState.scheduledTimer) {
-    timers.clearTimeout(hideState.scheduledTimer);
-    hideState.scheduledTimer = null;
-  }
-
-  const managedChat = hideState.managedChatRef;
-  unhideTrackedChat(managedChat, runtime);
-  hideState.managedChatRef = null;
-  hideState.hiddenIndices.clear();
-  hideState.lastProcessedLength = 0;
+  clearScheduledTimer(runtime);
+  beginOperation();
+  restoreManagedSystemFlags(hideState.managedChatRef, runtime);
+  clearManagedState();
 }
 
 export function getHideStateSnapshot() {
   return {
-    hasManagedChat: Boolean(hideState.managedChatRef),
-    managedHiddenCount: hideState.hiddenIndices.size,
+    hasManagedChat: hideState.managedChatRef !== null,
+    managedHiddenCount: hideState.hiddenRangeEnd >= 0 ? hideState.hiddenRangeEnd + 1 : 0,
     lastProcessedLength: hideState.lastProcessedLength,
     scheduled: Boolean(hideState.scheduledTimer),
   };

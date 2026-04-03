@@ -141,6 +141,12 @@ function createMockFetchEnvironment() {
     if (url === "/api/files/upload" && method === "POST") {
       logs.uploadCalls += 1;
       const body = JSON.parse(String(options.body || "{}"));
+      if (!/^[A-Za-z0-9._~-]+$/.test(String(body.name || ""))) {
+        return createJsonResponse(
+          400,
+          "Illegal character in filename; only alphanumeric, '-', '_', '.', '~' are accepted.",
+        );
+      }
       const decoded = __testOnlyDecodeBase64Utf8(body.data);
       const payload = JSON.parse(decoded);
       remoteFiles.set(body.name, payload);
@@ -284,6 +290,21 @@ async function testUploadPayloadMetaFirstAndDebounce() {
   });
   await sleep(50);
   assert.equal(logs.uploadCalls, 2);
+}
+
+async function testUploadSanitizesIllegalChatIdFilename() {
+  const { fetch, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "世界书 测试(chat)#1";
+  dbByChatId.set(chatId, new FakeDb(chatId));
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  const uploadResult = await upload(chatId, runtime);
+
+  assert.equal(uploadResult.uploaded, true);
+  assert.equal(logs.uploadCalls, 1);
+  assert.match(uploadResult.filename, /^ST-BME_sync_[A-Za-z0-9._~-]+\.json$/);
+  assert.match(logs.uploadedPayloads[0].name, /^[A-Za-z0-9._~-]+$/);
 }
 
 async function testDownloadImport() {
@@ -725,6 +746,7 @@ async function main() {
   await testDeviceId();
   await testRemoteStatusMissing();
   await testUploadPayloadMetaFirstAndDebounce();
+  await testUploadSanitizesIllegalChatIdFilename();
   await testDownloadImport();
   await testMergeRules();
   await testMergeRuntimeMetaPolicies();

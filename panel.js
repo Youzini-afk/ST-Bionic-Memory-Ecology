@@ -408,6 +408,7 @@ export async function initPanel({
   _bindGraphControls();
   _bindActions();
   _bindConfigControls();
+  _bindPlannerLauncher();
   currentTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
   _applyWorkspaceMode();
@@ -734,6 +735,44 @@ function _switchTab(tabId) {
     default:
       break;
   }
+}
+
+function _getPlannerApi() {
+  return globalThis?.stBmeEnaPlanner || null;
+}
+
+function _refreshPlannerLauncher() {
+  const button = document.getElementById("bme-open-ena-planner");
+  const hint = document.getElementById("bme-open-ena-planner-hint");
+  if (!button || !hint) return;
+
+  const plannerApi = _getPlannerApi();
+  const ready = typeof plannerApi?.openSettings === "function";
+
+  button.disabled = !ready;
+  button.classList.toggle("is-runtime-disabled", !ready);
+  hint.textContent = ready
+    ? "已加载，可打开独立的 Ena Planner 设置页。"
+    : "未检测到 Ena Planner 模块，请重载 ST-BME 后再试。";
+}
+
+function _bindPlannerLauncher() {
+  const button = document.getElementById("bme-open-ena-planner");
+  if (!button || button.dataset.bmeBound === "true") {
+    _refreshPlannerLauncher();
+    return;
+  }
+
+  button.addEventListener("click", () => {
+    const plannerApi = _getPlannerApi();
+    if (typeof plannerApi?.openSettings === "function") {
+      plannerApi.openSettings();
+    }
+    _refreshPlannerLauncher();
+  });
+
+  button.dataset.bmeBound = "true";
+  _refreshPlannerLauncher();
 }
 
 function _applyWorkspaceMode() {
@@ -1418,6 +1457,7 @@ function _bindActions() {
 
 function _refreshConfigTab() {
   const settings = _getSettings?.() || {};
+  _refreshPlannerLauncher();
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
@@ -2044,23 +2084,22 @@ function _bindConfigControls() {
 
   document
     .getElementById("bme-apply-hide-settings")
-    ?.addEventListener("click", () => {
-      const settings = _getSettings?.() || {};
-      _patchSettings({
-        hideOldMessagesEnabled: settings.hideOldMessagesEnabled ?? false,
-        hideOldMessagesKeepLastN: settings.hideOldMessagesKeepLastN ?? 12,
-      });
+    ?.addEventListener("click", async () => {
+      const result = await _actionHandlers.applyCurrentHide?.();
+      if (result?.error) {
+        toastr.error(result.error, "ST-BME");
+        return;
+      }
       toastr.success("当前聊天的隐藏设置已重新应用", "ST-BME");
     });
   document
     .getElementById("bme-clear-hide-settings")
-    ?.addEventListener("click", () => {
-      _patchSettings({
-        hideOldMessagesEnabled: false,
-        hideOldMessagesKeepLastN: 0,
-      });
-      _setCheckboxValue("bme-setting-hide-old-messages-enabled", false);
-      _setInputValue("bme-setting-hide-old-messages-keep-last-n", 0);
+    ?.addEventListener("click", async () => {
+      const result = await _actionHandlers.clearCurrentHide?.();
+      if (result?.error) {
+        toastr.error(result.error, "ST-BME");
+        return;
+      }
       toastr.info("已取消当前聊天里由 ST-BME 应用的隐藏", "ST-BME");
     });
   document

@@ -1,3 +1,23 @@
+function getTimerApi(runtime) {
+  const rawSetTimeout =
+    typeof runtime?.setTimeout === "function"
+      ? runtime.setTimeout
+      : globalThis.setTimeout;
+  const rawClearTimeout =
+    typeof runtime?.clearTimeout === "function"
+      ? runtime.clearTimeout
+      : globalThis.clearTimeout;
+
+  return {
+    setTimeout(...args) {
+      return Reflect.apply(rawSetTimeout, globalThis, args);
+    },
+    clearTimeout(...args) {
+      return Reflect.apply(rawClearTimeout, globalThis, args);
+    },
+  };
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   if (typeof makeFirst === "function") {
@@ -37,8 +57,9 @@ export function registerGenerationAfterCommandsController(runtime, listener) {
 }
 
 export function scheduleSendIntentHookRetryController(runtime, delayMs = 400) {
-  runtime.clearTimeout(runtime.getSendIntentHookRetryTimer());
-  const timer = runtime.setTimeout(() => {
+  const timers = getTimerApi(runtime);
+  timers.clearTimeout(runtime.getSendIntentHookRetryTimer());
+  const timer = timers.setTimeout(() => {
     runtime.setSendIntentHookRetryTimer(null);
     runtime.installSendIntentHooks();
   }, delayMs);
@@ -165,8 +186,9 @@ export function registerCoreEventHooksController(runtime) {
 }
 
 export function onChatChangedController(runtime) {
+  const timers = getTimerApi(runtime);
   runtime.clearPendingHistoryMutationChecks();
-  runtime.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
+  timers.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
   runtime.setPendingHistoryRecoveryTimer(null);
   runtime.setPendingHistoryRecoveryTrigger("");
   runtime.clearPendingAutoExtraction?.();
@@ -263,10 +285,45 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
   runtime.refreshPersistedRecallMessageUi?.();
 }
 
-export function onMessageSwipedController(runtime, messageId, meta = null) {
+export async function onMessageSwipedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("已切换楼层 swipe");
-  runtime.scheduleHistoryMutationRecheck("message-swiped", messageId, meta);
+  const parsedFloor = Number(messageId);
+  const fromFloor = Number.isFinite(parsedFloor) ? parsedFloor : undefined;
+  let result = {
+    success: false,
+    rollbackPerformed: false,
+    extractionTriggered: false,
+    requestedFloor: fromFloor ?? null,
+    effectiveFromFloor: null,
+    recoveryPath: "reroll-handler-unavailable",
+    affectedBatchCount: 0,
+    error: "swipe reroll handler unavailable",
+  };
+
+  if (typeof runtime.onReroll === "function") {
+    try {
+      result = await runtime.onReroll({ fromFloor, meta });
+    } catch (error) {
+      runtime.console?.error?.("[ST-BME] swipe reroll failed:", error);
+      result = {
+        success: false,
+        rollbackPerformed: false,
+        extractionTriggered: false,
+        requestedFloor: fromFloor ?? null,
+        effectiveFromFloor: null,
+        recoveryPath: "reroll-threw",
+        affectedBatchCount: 0,
+        error: error?.message || String(error) || "swipe reroll failed",
+      };
+    }
+  } else {
+    runtime.console?.warn?.(
+      "[ST-BME] MESSAGE_SWIPED missing onReroll; skip generic history recovery fallback.",
+      { messageId, meta },
+    );
+  }
   runtime.refreshPersistedRecallMessageUi?.();
+  return result;
 }
 
 export async function onGenerationAfterCommandsController(
@@ -471,6 +528,12 @@ export function onMessageReceivedController(
   messageId = null,
   _type = "",
 ) {
+  const enqueueMicrotask =
+    typeof globalThis.queueMicrotask === "function"
+        ? globalThis.queueMicrotask.bind(globalThis)
+      : typeof runtime.queueMicrotask === "function"
+        ? (task) => Reflect.apply(runtime.queueMicrotask, globalThis, [task])
+        : (task) => Promise.resolve().then(task);
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const loadState = persistenceState.loadState || "";
   const dbReady =
@@ -517,7 +580,16 @@ export function onMessageReceivedController(
     : lastMessage;
 
   if (runtime.isAssistantChatMessage(targetMessage)) {
-    runtime.queueMicrotask(() => {
+    runtime.console?.debug?.(
+      "[ST-BME] assistant message received, queueing auto extraction",
+      {
+        messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+        chatLength: Array.isArray(chat) ? chat.length : 0,
+        loadState,
+        dbReady,
+      },
+    );
+    enqueueMicrotask(() => {
       void runtime.runExtraction().catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);
         runtime.notifyExtractionIssue(

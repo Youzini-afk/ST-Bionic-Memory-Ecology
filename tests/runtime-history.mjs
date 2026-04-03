@@ -5,6 +5,8 @@ import {
   createBatchJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
+  normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
   rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "../runtime-state.js";
@@ -50,6 +52,41 @@ const editedDetection = detectHistoryMutation(editedChat, {
 });
 assert.equal(editedDetection.dirty, true);
 assert.equal(editedDetection.earliestAffectedFloor, 1);
+
+const bmeHiddenChat = structuredClone(chat);
+bmeHiddenChat[1].is_system = true;
+bmeHiddenChat[1].extra = { __st_bme_hide_managed: true };
+const bmeHiddenDetection = detectHistoryMutation(bmeHiddenChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: hashes,
+});
+assert.equal(bmeHiddenDetection.dirty, false);
+
+const realSystemFlipChat = structuredClone(chat);
+realSystemFlipChat[1].is_system = true;
+const realSystemFlipDetection = detectHistoryMutation(realSystemFlipChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashes: hashes,
+});
+assert.equal(realSystemFlipDetection.dirty, false);
+
+const migratedGraph = normalizeGraphRuntimeState({
+  historyState: {
+    chatId: "chat-history-test",
+    lastProcessedAssistantFloor: 3,
+    processedMessageHashVersion: 1,
+    processedMessageHashes: hashes,
+  },
+});
+assert.equal(
+  migratedGraph.historyState.processedMessageHashVersion,
+  PROCESSED_MESSAGE_HASH_VERSION,
+);
+assert.deepEqual(migratedGraph.historyState.processedMessageHashes, {});
+assert.equal(migratedGraph.historyState.processedMessageHashesNeedRefresh, true);
+
+const migratedDetection = detectHistoryMutation(chat, migratedGraph.historyState);
+assert.equal(migratedDetection.dirty, false);
 
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {

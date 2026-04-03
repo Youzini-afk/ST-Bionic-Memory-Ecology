@@ -3,10 +3,27 @@
 // 可被 index.js 及其他模块安全导入。
 
 import { clampInt } from "./ui-status.js";
+import { sanitizePlannerMessageText } from "./planner-tag-utils.js";
 import { rollbackBatch } from "./runtime-state.js";
 
+export function isBmeManagedHiddenMessage(message) {
+  return Boolean(
+    message?.extra &&
+      typeof message.extra === "object" &&
+      message.extra.__st_bme_hide_managed === true,
+  );
+}
+
+export function isSystemMessageForExtraction(message) {
+  return Boolean(message?.is_system) && !isBmeManagedHiddenMessage(message);
+}
+
 export function isAssistantChatMessage(message) {
-  return Boolean(message) && !message.is_user && !message.is_system;
+  return (
+    Boolean(message) &&
+    !message.is_user &&
+    !isSystemMessageForExtraction(message)
+  );
 }
 
 export function getAssistantTurns(chat) {
@@ -36,11 +53,11 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
     index++
   ) {
     const msg = chat[index];
-    if (msg.is_system) continue;
+    if (isSystemMessageForExtraction(msg)) continue;
     messages.push({
       seq: index,
       role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
+      content: sanitizePlannerMessageText(msg),
     });
   }
 
@@ -53,7 +70,7 @@ export function getChatIndexForPlayableSeq(chat, playableSeq) {
   let currentSeq = -1;
   for (let index = 0; index < chat.length; index++) {
     const message = chat[index];
-    if (message?.is_system) continue;
+    if (isSystemMessageForExtraction(message)) continue;
     currentSeq++;
     if (currentSeq >= playableSeq) {
       return index;
