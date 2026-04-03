@@ -5,8 +5,13 @@
 import { clampInt } from "./ui-status.js";
 import { sanitizePlannerMessageText } from "./planner-tag-utils.js";
 import { rollbackBatch } from "./runtime-state.js";
+import { isInManagedHideRange } from "./hide-engine.js";
 
-export function isBmeManagedHiddenMessage(message) {
+export function isBmeManagedHiddenMessage(message, { index = null, chat = null } = {}) {
+  if (Number.isFinite(index) && index > 0 && isInManagedHideRange(index, chat)) {
+    return true;
+  }
+
   return Boolean(
     message?.extra &&
       typeof message.extra === "object" &&
@@ -14,15 +19,21 @@ export function isBmeManagedHiddenMessage(message) {
   );
 }
 
-export function isSystemMessageForExtraction(message) {
-  return Boolean(message?.is_system) && !isBmeManagedHiddenMessage(message);
+export function isSystemMessageForExtraction(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (!message?.is_system) return false;
+  if (Number.isFinite(index) && index === 0) return true;
+
+  return !isBmeManagedHiddenMessage(message, { index, chat });
 }
 
-export function isAssistantChatMessage(message) {
+export function isAssistantChatMessage(message, { index = null, chat = null } = {}) {
   return (
     Boolean(message) &&
     !message.is_user &&
-    !isSystemMessageForExtraction(message)
+    !isSystemMessageForExtraction(message, { index, chat })
   );
 }
 
@@ -30,7 +41,7 @@ export function getAssistantTurns(chat) {
   const assistantTurns = [];
   // 从 index 1 开始：index 0 是角色卡首条消息（greeting），不参与提取
   for (let index = 1; index < chat.length; index++) {
-    if (isAssistantChatMessage(chat[index])) {
+    if (isAssistantChatMessage(chat[index], { index, chat })) {
       assistantTurns.push(index);
     }
   }
@@ -53,7 +64,7 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
     index++
   ) {
     const msg = chat[index];
-    if (isSystemMessageForExtraction(msg)) continue;
+    if (isSystemMessageForExtraction(msg, { index, chat })) continue;
     messages.push({
       seq: index,
       role: msg.is_user ? "user" : "assistant",
@@ -70,7 +81,7 @@ export function getChatIndexForPlayableSeq(chat, playableSeq) {
   let currentSeq = -1;
   for (let index = 0; index < chat.length; index++) {
     const message = chat[index];
-    if (isSystemMessageForExtraction(message)) continue;
+    if (isSystemMessageForExtraction(message, { index, chat })) continue;
     currentSeq++;
     if (currentSeq >= playableSeq) {
       return index;
@@ -85,7 +96,7 @@ export function getChatIndexForAssistantSeq(chat, assistantSeq) {
 
   let currentSeq = -1;
   for (let index = 0; index < chat.length; index++) {
-    if (!isAssistantChatMessage(chat[index])) continue;
+    if (!isAssistantChatMessage(chat[index], { index, chat })) continue;
     currentSeq++;
     if (currentSeq >= assistantSeq) {
       return index;
