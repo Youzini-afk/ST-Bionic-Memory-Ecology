@@ -507,10 +507,10 @@ export function onMessageReceivedController(
   _type = "",
 ) {
   const enqueueMicrotask =
-    typeof runtime.queueMicrotask === "function"
-      ? runtime.queueMicrotask.bind(runtime)
-      : typeof globalThis.queueMicrotask === "function"
+    typeof globalThis.queueMicrotask === "function"
         ? globalThis.queueMicrotask.bind(globalThis)
+      : typeof runtime.queueMicrotask === "function"
+        ? (task) => Reflect.apply(runtime.queueMicrotask, globalThis, [task])
         : (task) => Promise.resolve().then(task);
   const persistenceState = runtime.getGraphPersistenceState?.() || {};
   const loadState = persistenceState.loadState || "";
