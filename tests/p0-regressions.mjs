@@ -365,15 +365,11 @@ function createGenerationRecallHarness(options = {}) {
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
       onGenerationStartedController,
-      readPersistedRecallFromUserMessage: () => null,
-      resolveFinalRecallInjectionSource: ({
-        freshRecallResult = null,
-      } = {}) => ({
-        source: freshRecallResult?.didRecall ? "fresh" : "none",
-        injectionText: String(freshRecallResult?.injectionText || ""),
-        record: null,
-      }),
-      bumpPersistedRecallGenerationCount: () => null,
+      readPersistedRecallFromUserMessage,
+      writePersistedRecallToUserMessage,
+      buildPersistedRecallRecord,
+      resolveFinalRecallInjectionSource,
+      bumpPersistedRecallGenerationCount,
       applyModuleInjectionPrompt: (text = "") => {
         const normalizedText = String(text || "");
         context.moduleInjectionCalls.push(normalizedText);
@@ -384,14 +380,23 @@ function createGenerationRecallHarness(options = {}) {
         };
       },
       getSettings: () => ({}),
-      triggerChatMetadataSave: () => "debounced",
+      triggerChatMetadataSave: () => {
+        context.metadataSaveCalls += 1;
+        return "debounced";
+      },
       refreshPanelLiveState: () => {
         context.refreshPanelCalls += 1;
       },
       recordInjectionSnapshot: (_kind, snapshot = {}) => {
         context.recordedInjectionSnapshots.push({ ...snapshot });
       },
-      schedulePersistedRecallMessageUiRefresh: () => {},
+      schedulePersistedRecallMessageUiRefresh: () => {
+        context.recallUiRefreshCalls += 1;
+      },
+      estimateTokens: (text = "") =>
+        normalizeRecallInputText(text)
+          .split(/\s+/)
+          .filter(Boolean).length || (normalizeRecallInputText(text) ? 1 : 0),
       resolveGenerationTargetUserMessageIndex: (
         chat = [],
         { generationType } = {},
@@ -404,6 +409,8 @@ function createGenerationRecallHarness(options = {}) {
           if (chat[index]?.is_user) return index;
         return null;
       },
+      metadataSaveCalls: 0,
+      recallUiRefreshCalls: 0,
     };
     vm.createContext(context);
     vm.runInContext(
@@ -3634,6 +3641,71 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
   }
 }
 
+async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
+  const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+  harness.chat = [
+    { is_user: true, mes: "最终阶段补写目标" },
+    { is_user: false, mes: "assistant-tail" },
+  ];
+  harness.result.recordRecallSentUserMessage(0, "最终阶段补写目标", "message-sent");
+
+  const resolution =
+    harness.result.applyFinalRecallInjectionForGeneration({
+      generationType: "normal",
+      hookName: "GENERATION_AFTER_COMMANDS",
+      freshRecallResult: {
+        status: "completed",
+        didRecall: true,
+        injectionText: "fresh-memory",
+        selectedNodeIds: ["node-a", "node-b"],
+      },
+      transaction: {
+        frozenRecallOptions: {
+          generationType: "normal",
+          targetUserMessageIndex: null,
+          overrideUserMessage: "最终阶段补写目标",
+          lockedSource: "send-intent",
+          hookName: "GENERATION_AFTER_COMMANDS",
+        },
+      },
+    });
+
+  assert.equal(resolution.source, "fresh");
+  assert.equal(resolution.targetUserMessageIndex, 0);
+  assert.equal(
+    harness.chat[0]?.extra?.bme_recall?.injectionText,
+    "fresh-memory",
+  );
+  assert.deepEqual(
+    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
+    ["node-a", "node-b"],
+  );
+  assert.equal(harness.metadataSaveCalls > 0, true);
+}
+
+async function testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecord() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "即时模式补写目标" }];
+  harness.result.recordRecallSentUserMessage(0, "即时模式补写目标", "message-sent");
+
+  const result = await harness.result.onGenerationAfterCommands(
+    "normal",
+    {},
+    false,
+  );
+
+  assert.equal(result?.status, "completed");
+  assert.equal(
+    harness.chat[0]?.extra?.bme_recall?.injectionText,
+    "注入:即时模式补写目标",
+  );
+  assert.deepEqual(
+    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
+    ["node-test-1"],
+  );
+  assert.equal(harness.metadataSaveCalls > 0, true);
+}
+
 async function testRecallSubGraphAndDataLayerEntryPoints() {
   // Sub-graph build test (pure function, no DOM needed)
   const { buildRecallSubGraph } = await import("../recall-message-ui.js");
@@ -4443,6 +4515,8 @@ await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
 await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
+await testGenerationRecallFinalInjectionBackfillsPersistedRecord();
+await testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecord();
 await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
