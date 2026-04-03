@@ -219,11 +219,32 @@ export function onChatLoadedController(runtime) {
 export function onMessageSentController(runtime, messageId) {
   const context = runtime.getContext();
   const chat = context?.chat;
-  const message =
-    Array.isArray(chat) && Number.isFinite(messageId) ? chat[messageId] : null;
+  const normalizedMessageId =
+    messageId === null || messageId === undefined || messageId === ""
+      ? null
+      : Number(messageId);
+  let resolvedMessageId = Number.isFinite(normalizedMessageId)
+    ? normalizedMessageId
+    : null;
+  let message =
+    Array.isArray(chat) && Number.isFinite(resolvedMessageId)
+      ? chat[resolvedMessageId]
+      : null;
+
+  if (!message?.is_user && Array.isArray(chat)) {
+    for (let index = chat.length - 1; index >= 0; index--) {
+      if (!chat[index]?.is_user) continue;
+      resolvedMessageId = index;
+      message = chat[index];
+      break;
+    }
+  }
 
   if (!message?.is_user) return;
-  runtime.recordRecallSentUserMessage(messageId, message.mes || "");
+  runtime.recordRecallSentUserMessage(
+    resolvedMessageId,
+    message.mes || "",
+  );
   runtime.refreshPersistedRecallMessageUi?.();
 }
 

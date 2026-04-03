@@ -8802,6 +8802,20 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
 }
 
 function onGenerationEnded(_chatLength = null) {
+  const recentTransaction = findRecentGenerationRecallTransactionForChat();
+  const recentRecallResult =
+    getGenerationRecallTransactionResult(recentTransaction);
+  ensurePersistedRecallRecordForGeneration({
+    generationType: recentTransaction?.generationType || "normal",
+    recallResult: recentRecallResult,
+    transaction: recentTransaction,
+    recallOptions: recentTransaction?.frozenRecallOptions || null,
+    hookName:
+      recentRecallResult?.hookName ||
+      recentTransaction?.lastRecallMeta?.hookName ||
+      "",
+  });
+  schedulePersistedRecallMessageUiRefresh(320);
   if (typeof scheduleMessageHideApply === "function") {
     scheduleMessageHideApply("generation-ended", 180);
   }

@@ -10,6 +10,7 @@ import {
   onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
+  onMessageSentController,
   onMessageReceivedController,
   onMessageSwipedController,
   registerCoreEventHooksController,
@@ -344,6 +345,7 @@ function createGenerationRecallHarness(options = {}) {
       moduleInjectionCalls: [],
       recordedInjectionSnapshots: [],
       refreshPanelCalls: 0,
+      hideScheduleCalls: [],
       createRecallInputRecord,
       createRecallRunResult,
       hashRecallInput,
@@ -380,6 +382,7 @@ function createGenerationRecallHarness(options = {}) {
         };
       },
       getSettings: () => ({}),
+      $: () => ({}),
       triggerChatMetadataSave: () => {
         context.metadataSaveCalls += 1;
         return "debounced";
@@ -392,6 +395,11 @@ function createGenerationRecallHarness(options = {}) {
       },
       schedulePersistedRecallMessageUiRefresh: () => {
         context.recallUiRefreshCalls += 1;
+      },
+      getMessageHideSettings: () => ({}),
+      getHideRuntimeAdapters: () => ({}),
+      scheduleHideSettingsApply: (...args) => {
+        context.hideScheduleCalls.push(args);
       },
       estimateTokens: (text = "") =>
         normalizeRecallInputText(text)
@@ -414,7 +422,7 @@ function createGenerationRecallHarness(options = {}) {
     };
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, recordRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage };`,
+      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationEnded, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, ensurePersistedRecallRecordForGeneration, findRecentGenerationRecallTransactionForChat, getGenerationRecallTransactionResult, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, recordRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage };`,
       context,
       { filename: indexPath },
     );
@@ -3143,6 +3151,39 @@ async function testSwipeRoutesToRerollWithoutHistoryRecoveryFallback() {
   assert.equal(result.recoveryPath, "reverse-journal");
 }
 
+async function testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid() {
+  const recorded = [];
+  let refreshCalls = 0;
+
+  onMessageSentController(
+    {
+      getContext: () => ({
+        chat: [
+          { is_user: true, mes: "较早用户楼层" },
+          { is_user: false, mes: "assistant-tail" },
+          { is_user: true, mes: "最新用户楼层" },
+        ],
+      }),
+      recordRecallSentUserMessage(messageId, text, source = "message-sent") {
+        recorded.push({ messageId, text, source });
+      },
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+    },
+    null,
+  );
+
+  assert.deepEqual(recorded, [
+    {
+      messageId: 2,
+      text: "最新用户楼层",
+      source: "message-sent",
+    },
+  ]);
+  assert.equal(refreshCalls, 1);
+}
+
 async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask() {
   let runExtractionCalls = 0;
   let refreshCalls = 0;
@@ -3823,6 +3864,50 @@ async function testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecor
     ["node-test-1"],
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
+}
+
+async function testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh() {
+  const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+  harness.chat = [{ is_user: true, mes: "生成结束后补写目标" }];
+  const transaction = harness.result.beginGenerationRecallTransaction({
+    chatId: "chat-main",
+    generationType: "normal",
+    recallKey: "chat-main:normal:test-generation-ended",
+    forceNew: true,
+  });
+  transaction.frozenRecallOptions = {
+    generationType: "normal",
+    targetUserMessageIndex: null,
+    overrideUserMessage: "生成结束后补写目标",
+    lockedSource: "send-intent",
+    hookName: "GENERATION_AFTER_COMMANDS",
+  };
+  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+  harness.result.markGenerationRecallTransactionHookState(
+    transaction,
+    "GENERATION_AFTER_COMMANDS",
+    "completed",
+  );
+  harness.result.getGenerationRecallTransactionResult(transaction);
+  transaction.lastRecallResult = {
+    status: "completed",
+    didRecall: true,
+    injectionText: "generation-ended-memory",
+    selectedNodeIds: ["node-z"],
+    sourceCandidates: [{ text: "生成结束后补写目标" }],
+    hookName: "GENERATION_AFTER_COMMANDS",
+  };
+  transaction.updatedAt = Date.now();
+  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+
+  harness.result.onGenerationEnded();
+
+  assert.equal(
+    harness.chat[0]?.extra?.bme_recall?.injectionText,
+    "generation-ended-memory",
+  );
+  assert.equal(harness.hideScheduleCalls.length, 1);
+  assert.equal(harness.hideScheduleCalls[0]?.[2], 180);
 }
 
 async function testRecallSubGraphAndDataLayerEntryPoints() {
@@ -4624,6 +4709,7 @@ await testGenerationRecallSentMessageClearsStaleTransactionForSameKey();
 await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testSwipeRoutesToRerollWithoutHistoryRecoveryFallback();
+await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
@@ -4636,6 +4722,7 @@ await testPersistentRecallSourceResolutionAndTargetRouting();
 await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
 await testGenerationRecallFinalInjectionBackfillsPersistedRecord();
 await testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecord();
+await testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh();
 await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
