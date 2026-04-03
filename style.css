@@ -2802,6 +2802,19 @@
   word-break: break-word;
 }
 
+.bme-recall-card.bme-recall-hide-user-input .bme-recall-user-label,
+.bme-recall-card.bme-recall-hide-user-input .bme-recall-user-text {
+  display: none;
+}
+
+.bme-recall-card.bme-recall-hide-user-input .bme-recall-bar {
+  border-top: none;
+}
+
+.bme-hide-original-user-text {
+  display: none !important;
+}
+
 /* --- Recall Bar (collapse/expand trigger) --- */
 
 .bme-recall-bar {

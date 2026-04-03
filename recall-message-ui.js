@@ -79,6 +79,18 @@ function formatMetaLine(record) {
   return parts.join(" · ");
 }
 
+function normalizeUserInputDisplayMode(mode) {
+  const normalized = String(mode || "").trim();
+  if (
+    normalized === "off" ||
+    normalized === "beautify_only" ||
+    normalized === "mirror"
+  ) {
+    return normalized;
+  }
+  return "mirror";
+}
+
 function stableSerialize(value) {
   if (value === null || value === undefined) return "null";
   const type = typeof value;
@@ -186,6 +198,7 @@ export function createRecallCardElement({
   userMessageText = "",
   graph = null,
   themeName = "crimson",
+  userInputDisplayMode = "mirror",
   callbacks = {},
 }) {
   const card = el("div", "bme-recall-card");
@@ -197,6 +210,9 @@ export function createRecallCardElement({
   let activeUserMessageText = String(userMessageText || "");
   let activeGraph = graph || null;
   let activeCallbacks = callbacks || {};
+  let activeUserInputDisplayMode = normalizeUserInputDisplayMode(
+    userInputDisplayMode,
+  );
   let expandedRenderSignature = "";
 
   // -- 用户消息区 --
@@ -357,6 +373,11 @@ export function createRecallCardElement({
     if (Object.prototype.hasOwnProperty.call(next, "userMessageText")) {
       activeUserMessageText = String(next.userMessageText || "");
     }
+    if (Object.prototype.hasOwnProperty.call(next, "userInputDisplayMode")) {
+      activeUserInputDisplayMode = normalizeUserInputDisplayMode(
+        next.userInputDisplayMode,
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(next, "graph")) {
       activeGraph = next.graph || null;
     }
@@ -366,6 +387,11 @@ export function createRecallCardElement({
 
     card.dataset.updatedAt = String(activeRecord?.updatedAt || "");
     card.dataset.expandedRenderSignature = expandedRenderSignature;
+    card.dataset.userInputDisplayMode = activeUserInputDisplayMode;
+    card.classList.toggle(
+      "bme-recall-hide-user-input",
+      activeUserInputDisplayMode === "off",
+    );
     userText.textContent = activeUserMessageText || "(empty)";
 
     const nodeCount = Array.isArray(activeRecord?.selectedNodeIds)
@@ -431,6 +457,7 @@ export function updateRecallCardData(cardElement, record, options = {}) {
     cardElement._bmeUpdateRecallCard({
       record,
       userMessageText: options?.userMessageText,
+      userInputDisplayMode: options?.userInputDisplayMode,
       graph: options?.graph,
       callbacks: options?.callbacks,
     });

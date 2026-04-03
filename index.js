@@ -352,6 +352,7 @@ const defaultSettings = {
 
   // 召回设置
   recallEnabled: true,
+  recallCardUserInputDisplayMode: "mirror",
   recallTopK: 20, // 向量预筛 Top-K
   recallMaxNodes: 8, // LLM 召回最大节点数
   recallEnableLLM: true, // 是否启用 LLM 精确召回
@@ -1757,6 +1758,10 @@ function isDomNodeAttached(node) {
 
 function cleanupRecallCardElement(cardElement) {
   if (!cardElement) return;
+  const messageElement = cardElement.closest?.(".mes") || null;
+  if (messageElement) {
+    restoreRecallCardUserInputDisplay(messageElement);
+  }
   try {
     cardElement._bmeDestroyRenderer?.();
   } catch (error) {
@@ -1777,6 +1782,7 @@ function cleanupRecallArtifacts(messageElement, keepMessageIndex = null) {
   if (!messageElement?.querySelectorAll) return;
 
   cleanupLegacyRecallBadges(messageElement);
+  restoreRecallCardUserInputDisplay(messageElement);
 
   const existingCards = Array.from(
     messageElement.querySelectorAll(".bme-recall-card") || [],
@@ -1831,6 +1837,34 @@ function resolveRecallCardAnchor(messageElement) {
   return isDomNodeAttached(messageElement) ? messageElement : null;
 }
 
+function normalizeRecallCardUserInputDisplayMode(mode) {
+  const normalized = String(mode || "").trim();
+  if (
+    normalized === "off" ||
+    normalized === "beautify_only" ||
+    normalized === "mirror"
+  ) {
+    return normalized;
+  }
+  return "mirror";
+}
+
+function applyRecallCardUserInputDisplayMode(messageElement, mode) {
+  if (!messageElement?.querySelector) return;
+  const userTextElement = messageElement.querySelector(".mes_text");
+  if (!userTextElement) return;
+  userTextElement.classList.toggle(
+    "bme-hide-original-user-text",
+    normalizeRecallCardUserInputDisplayMode(mode) === "beautify_only",
+  );
+}
+
+function restoreRecallCardUserInputDisplay(messageElement) {
+  if (!messageElement?.querySelector) return;
+  const userTextElement = messageElement.querySelector(".mes_text");
+  userTextElement?.classList?.remove("bme-hide-original-user-text");
+}
+
 function buildPersistedRecallUiRetryDelays(initialDelayMs = 0) {
   const normalizedInitial = Math.max(
     0,
@@ -1882,7 +1916,12 @@ function refreshPersistedRecallMessageUi() {
     };
   }
 
-  const themeName = getSettings()?.panelTheme || "crimson";
+  const settings = getSettings();
+  const themeName = settings?.panelTheme || "crimson";
+  const recallCardUserInputDisplayMode =
+    normalizeRecallCardUserInputDisplayMode(
+      settings?.recallCardUserInputDisplayMode,
+    );
   const callbacks = getRecallCardCallbacks();
   const messageElementMap = new Map();
   const messageElements = Array.from(chatRoot.querySelectorAll(".mes"));
@@ -1931,6 +1970,9 @@ function refreshPersistedRecallMessageUi() {
       ) || null;
 
     if (!message?.is_user) {
+      if (messageElement) {
+        restoreRecallCardUserInputDisplay(messageElement);
+      }
       if (existingCard) cleanupRecallCardElement(existingCard);
       const unexpectedRecord = readPersistedRecallFromUserMessage(
         chat,
@@ -1951,6 +1993,9 @@ function refreshPersistedRecallMessageUi() {
 
     const record = readPersistedRecallFromUserMessage(chat, messageIndex);
     if (!record?.injectionText) {
+      if (messageElement) {
+        restoreRecallCardUserInputDisplay(messageElement);
+      }
       if (existingCard) cleanupRecallCardElement(existingCard);
       continue;
     }
@@ -1970,6 +2015,7 @@ function refreshPersistedRecallMessageUi() {
 
     const anchor = resolveRecallCardAnchor(messageElement);
     if (!anchor) {
+      restoreRecallCardUserInputDisplay(messageElement);
       cleanupRecallCardElement(existingCard);
       summary.anchorFailureIndices.push(messageIndex);
       debugPersistedRecallUi(
@@ -1991,6 +2037,7 @@ function refreshPersistedRecallMessageUi() {
     if (currentCard) {
       updateRecallCardData(currentCard, record, {
         userMessageText: message.mes || "",
+        userInputDisplayMode: recallCardUserInputDisplayMode,
         graph: currentGraph,
         themeName,
         callbacks,
@@ -2000,12 +2047,17 @@ function refreshPersistedRecallMessageUi() {
         messageIndex,
         record,
         userMessageText: message.mes || "",
+        userInputDisplayMode: recallCardUserInputDisplayMode,
         graph: currentGraph,
         themeName,
         callbacks,
       });
       anchor.appendChild(card);
     }
+    applyRecallCardUserInputDisplayMode(
+      messageElement,
+      recallCardUserInputDisplayMode,
+    );
     summary.renderedCount += 1;
   }
 
@@ -4915,6 +4967,7 @@ function updateModuleSettings(patch = {}) {
     "hideOldMessagesEnabled",
     "hideOldMessagesKeepLastN",
   ]);
+  const recallUiKeys = new Set(["recallCardUserInputDisplayMode"]);
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
@@ -4969,6 +5022,10 @@ function updateModuleSettings(patch = {}) {
     } else {
       scheduleMessageHideApply("settings-updated", 30);
     }
+  }
+
+  if (Object.keys(patch).some((key) => recallUiKeys.has(key))) {
+    schedulePersistedRecallMessageUiRefresh(30);
   }
 
   scheduleServerSettingsSave();
