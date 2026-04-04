@@ -270,6 +270,9 @@ function getRuntimeDebugState() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      messageTrace: {
+        lastSentUserMessage: null,
+      },
       maintenance: {
         lastAction: null,
         lastUndoResult: null,
@@ -301,6 +304,17 @@ function recordInjectionSnapshot(kind, snapshot = {}) {
   };
 }
 
+function recordMessageTraceSnapshot(patch = {}) {
+  const state = touchRuntimeDebugState();
+  const previous = state.messageTrace || {
+    lastSentUserMessage: null,
+  };
+  state.messageTrace = {
+    ...previous,
+    ...cloneRuntimeDebugValue(patch, {}),
+  };
+}
+
 function recordGraphPersistenceSnapshot(snapshot = null) {
   const state = touchRuntimeDebugState();
   state.graphPersistence = cloneRuntimeDebugValue(snapshot, null);
@@ -326,6 +340,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: state.taskPromptBuilds,
       taskLlmRequests: state.taskLlmRequests,
       injections: state.injections,
+      messageTrace: state.messageTrace,
       maintenance: state.maintenance,
       graphPersistence: state.graphPersistence,
       updatedAt: state.updatedAt,
@@ -1307,6 +1322,15 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
     messageId: Number.isFinite(messageId) ? messageId : null,
     source,
     at: Date.now(),
+  });
+  recordMessageTraceSnapshot({
+    lastSentUserMessage: {
+      text: normalized,
+      hash,
+      messageId: Number.isFinite(messageId) ? messageId : null,
+      source,
+      updatedAt: new Date().toISOString(),
+    },
   });
 
   // 注意：不再在 MESSAGE_SENT 阶段清空 pendingRecallSendIntent /

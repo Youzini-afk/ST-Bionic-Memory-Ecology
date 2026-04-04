@@ -2689,6 +2689,7 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     panelDebug,
     runtimeDebug,
     recallInjection: runtimeDebug?.injections?.recall || null,
+    messageTrace: runtimeDebug?.messageTrace || null,
     recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
     recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
     extractLlmRequest: runtimeDebug?.taskLlmRequests?.extract || null,
@@ -2741,7 +2742,11 @@ function _renderMessageTraceRecallCard(state) {
   const recentMessages = Array.isArray(injectionSnapshot?.recentMessages)
     ? injectionSnapshot.recentMessages.map((item) => String(item || ""))
     : [];
+  const lastSentUserMessage = String(
+    state.messageTrace?.lastSentUserMessage?.text || "",
+  ).trim();
   const triggeredUserMessage =
+    lastSentUserMessage ||
     _extractTriggeredUserMessageFromRecentMessages(recentMessages) ||
     _getLastDebugMessageContent(recallLlmRequest?.messages, "user");
   const hostPayloadText = _buildMainAiTraceText(
