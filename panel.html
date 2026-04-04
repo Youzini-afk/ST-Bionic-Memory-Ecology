@@ -941,6 +941,21 @@
                     </label>
                     <label
                       class="bme-toggle-item"
+                      for="bme-setting-auto-compression-enabled"
+                    >
+                      <span class="bme-toggle-copy">
+                        <span class="bme-toggle-title">启用自动压缩</span>
+                        <span class="bme-toggle-desc"
+                          >按提取周期做层级压缩，减少同类记忆越积越散。</span
+                        >
+                      </span>
+                      <input
+                        id="bme-setting-auto-compression-enabled"
+                        type="checkbox"
+                      />
+                    </label>
+                    <label
+                      class="bme-toggle-item"
                       for="bme-setting-prob-recall-enabled"
                     >
                       <span class="bme-toggle-copy">
@@ -1936,13 +1951,19 @@
                   </div>
                 </div>
 
-                <div class="bme-config-card">
+                <div
+                  class="bme-config-card bme-guarded-card"
+                  data-guard-settings="enableAutoCompression"
+                >
                   <div class="bme-config-card-head">
                     <div>
                       <div class="bme-config-card-title">自动压缩周期</div>
                       <div class="bme-config-card-subtitle">
-                        按提取次数计数；到周期点时才尝试自动压缩。填 0 表示关闭。
+                        按提取次数计数；只有到周期点时才会尝试自动压缩。
                       </div>
+                    </div>
+                    <div class="bme-config-guard-note">
+                      在“功能开关”中启用后生效。
                     </div>
                   </div>
                   <div class="bme-config-row">
@@ -1953,7 +1974,7 @@
                       id="bme-setting-compression-every"
                       class="bme-config-input"
                       type="number"
-                      min="0"
+                      min="1"
                       max="500"
                     />
                   </div>

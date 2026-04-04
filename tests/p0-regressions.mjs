@@ -2679,7 +2679,8 @@ async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
       enableConsolidation: true,
       consolidationAutoMinNewNodes: 2,
       consolidationThreshold: 0.85,
-      compressionEveryN: 0,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
       enableSynopsis: false,
       enableReflection: false,
       enableSleepCycle: false,
@@ -2706,7 +2707,7 @@ async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
   assert.equal(effects.batchStatus.autoCompressionScheduled, false);
   assert.match(
     effects.batchStatus.autoCompressionSkippedReason,
-    /自动压缩已关闭/,
+    /自动压缩.*已关闭/,
   );
 }
 
@@ -2756,7 +2757,8 @@ async function testAutoConsolidationSkipsLowRiskSingleNode() {
       enableConsolidation: true,
       consolidationAutoMinNewNodes: 2,
       consolidationThreshold: 0.85,
-      compressionEveryN: 0,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
       enableSynopsis: false,
       enableReflection: false,
       enableSleepCycle: false,
@@ -2822,6 +2824,7 @@ async function testAutoCompressionRunsOnlyOnConfiguredInterval() {
     8,
     {
       enableConsolidation: false,
+      enableAutoCompression: true,
       compressionEveryN: 10,
       enableSynopsis: false,
       enableReflection: false,
@@ -2873,6 +2876,7 @@ async function testAutoCompressionSkipsWhenNotScheduledOrNoCandidates() {
     9,
     {
       enableConsolidation: false,
+      enableAutoCompression: true,
       compressionEveryN: 10,
       enableSynopsis: false,
       enableReflection: false,
@@ -2930,6 +2934,7 @@ async function testAutoCompressionSkipsWhenNotScheduledOrNoCandidates() {
     10,
     {
       enableConsolidation: false,
+      enableAutoCompression: true,
       compressionEveryN: 10,
       enableSynopsis: false,
       enableReflection: false,

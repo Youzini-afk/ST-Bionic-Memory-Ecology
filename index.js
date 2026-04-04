@@ -473,6 +473,7 @@ const defaultSettings = {
   enableReflection: true, // 启用反思
   reflectEveryN: 10, // 每 N 次提取后反思
   consolidationAutoMinNewNodes: 2,
+  enableAutoCompression: true,
   compressionEveryN: 10,
 
   // UI 面板
@@ -2704,6 +2705,18 @@ function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
       1,
       50,
     );
+  }
+  if (!Object.prototype.hasOwnProperty.call(migrated, "enableAutoCompression")) {
+    const parsedEveryN = Math.floor(Number(migrated.compressionEveryN));
+    migrated.enableAutoCompression = !(
+      Number.isFinite(parsedEveryN) && parsedEveryN <= 0
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(migrated, "compressionEveryN") &&
+    Math.floor(Number(migrated.compressionEveryN)) <= 0
+  ) {
+    migrated.compressionEveryN = defaultSettings.compressionEveryN;
   }
   delete migrated.maintenanceAutoMinNewNodes;
   return migrated;
@@ -5046,15 +5059,21 @@ function evaluateAutoCompressionSchedule(
   currentExtractionCount,
   settings = {},
 ) {
-  const everyN = clampInt(settings.compressionEveryN, 10, 0, 500);
+  const enabled = settings.enableAutoCompression !== false;
+  const everyN = clampInt(
+    settings.compressionEveryN,
+    defaultSettings.compressionEveryN,
+    1,
+    500,
+  );
   const safeExtractionCount = Math.max(0, Number(currentExtractionCount) || 0);
 
-  if (everyN <= 0) {
+  if (!enabled) {
     return {
       scheduled: false,
       everyN,
       nextExtractionCount: null,
-      reason: "自动压缩已关闭",
+      reason: "自动压缩开关已关闭",
     };
   }
 
@@ -7266,20 +7285,19 @@ async function handleExtractionSuccess(
     typeof evaluateAutoCompressionSchedule === "function"
       ? evaluateAutoCompressionSchedule
       : (currentCount, localSettings = {}) => {
-          const parsedEveryN = Math.floor(
-            Number(localSettings?.compressionEveryN),
-          );
+          const enabled = localSettings?.enableAutoCompression !== false;
+          const parsedEveryN = Math.floor(Number(localSettings?.compressionEveryN));
           const everyN =
-            Number.isFinite(parsedEveryN) && parsedEveryN >= 0
+            Number.isFinite(parsedEveryN) && parsedEveryN >= 1
               ? Math.min(500, parsedEveryN)
               : 10;
           const safeCount = Math.max(0, Number(currentCount) || 0);
-          if (everyN <= 0) {
+          if (!enabled) {
             return {
               scheduled: false,
               everyN,
               nextExtractionCount: null,
-              reason: "自动压缩已关闭",
+              reason: "自动压缩开关已关闭",
             };
           }
           const remainder = safeCount % everyN;

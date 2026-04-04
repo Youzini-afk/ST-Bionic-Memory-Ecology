@@ -126,6 +126,7 @@ assert.equal(defaultSettings.injectDepth, 9999);
 assert.equal(defaultSettings.enabled, true);
 assert.equal(defaultSettings.enableReflection, true);
 assert.equal(defaultSettings.consolidationAutoMinNewNodes, 2);
+assert.equal(defaultSettings.enableAutoCompression, true);
 assert.equal(defaultSettings.compressionEveryN, 10);
 assert.equal("maintenanceAutoMinNewNodes" in defaultSettings, false);
 assert.equal(defaultSettings.embeddingTransportMode, "direct");
@@ -138,7 +139,17 @@ const migratedSettings = mergePersistedSettings({
   maintenanceAutoMinNewNodes: 7,
 });
 assert.equal(migratedSettings.consolidationAutoMinNewNodes, 7);
+assert.equal(migratedSettings.enableAutoCompression, true);
 assert.equal(migratedSettings.compressionEveryN, 10);
 assert.equal("maintenanceAutoMinNewNodes" in migratedSettings, false);
+
+const migratedLegacyCompressionDisabled = mergePersistedSettings({
+  compressionEveryN: 0,
+});
+assert.equal(migratedLegacyCompressionDisabled.enableAutoCompression, false);
+assert.equal(
+  migratedLegacyCompressionDisabled.compressionEveryN,
+  defaultSettings.compressionEveryN,
+);
 
 console.log("default-settings tests passed");

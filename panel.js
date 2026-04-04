@@ -1621,6 +1621,10 @@ function _refreshConfigTab() {
     settings.enableSleepCycle ?? false,
   );
   _setCheckboxValue(
+    "bme-setting-auto-compression-enabled",
+    settings.enableAutoCompression ?? true,
+  );
+  _setCheckboxValue(
     "bme-setting-prob-recall-enabled",
     settings.enableProbRecall ?? false,
   );
@@ -1942,6 +1946,10 @@ function _bindConfigControls() {
   });
   bindCheckbox("bme-setting-sleep-cycle-enabled", (checked) => {
     _patchSettings({ enableSleepCycle: checked });
+    _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-auto-compression-enabled", (checked) => {
+    _patchSettings({ enableAutoCompression: checked });
     _refreshGuardedConfigStates();
   });
   bindCheckbox("bme-setting-prob-recall-enabled", (checked) => {
