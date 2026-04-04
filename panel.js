@@ -20,6 +20,8 @@ import {
   getLegacyPromptFieldForTask,
   getTaskTypeOptions,
   importTaskProfile as parseImportedTaskProfile,
+  isTaskRegexStageEnabled,
+  normalizeTaskRegexStages,
   restoreDefaultTaskProfile,
   setActiveTaskProfileId,
   upsertTaskProfile,
@@ -143,8 +145,46 @@ const TASK_PROFILE_GENERATION_GROUPS = [
 ];
 
 const TASK_PROFILE_REGEX_STAGES = [
-  { key: "input", label: "输入阶段", desc: "对发送给 LLM 的 prompt 执行正则替换。" },
-  { key: "output", label: "输出阶段", desc: "对 LLM 返回的结果执行正则替换。" },
+  {
+    key: "input",
+    label: "输入总开关",
+    desc: "控制全部输入阶段；未单独覆写的细分阶段会跟随它。",
+  },
+  {
+    key: "input.userMessage",
+    label: "输入: 用户消息",
+    desc: "处理当前 userMessage。",
+  },
+  {
+    key: "input.recentMessages",
+    label: "输入: 最近上下文",
+    desc: "处理 recentMessages、chatMessages、dialogueText。",
+  },
+  {
+    key: "input.candidateText",
+    label: "输入: 候选与摘要",
+    desc: "处理 candidateText、candidateNodes、nodeContent 和各类摘要。",
+  },
+  {
+    key: "input.finalPrompt",
+    label: "输入: 发送前最终消息",
+    desc: "在最终 messages 全部组装完成、真正发送给 LLM 前统一清洗。",
+  },
+  {
+    key: "output",
+    label: "输出总开关",
+    desc: "控制全部输出阶段；未单独覆写的细分阶段会跟随它。",
+  },
+  {
+    key: "output.rawResponse",
+    label: "输出: 原始响应",
+    desc: "LLM 原始文本到手后先清洗一次。",
+  },
+  {
+    key: "output.beforeParse",
+    label: "输出: 解析前",
+    desc: "在 JSON 提取/解析前再清洗一次。",
+  },
 ];
 
 let panelEl = null;
@@ -3342,6 +3382,7 @@ function _renderTaskGenerationTab(state) {
 
 function _renderTaskRegexTab(state) {
   const regex = state.profile.regex || {};
+  const normalizedStages = normalizeTaskRegexStages(regex.stages || {});
   return `
     <div class="bme-task-tab-body">
       <div class="bme-task-regex-top">
@@ -3415,14 +3456,14 @@ function _renderTaskRegexTab(state) {
                   <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
                   <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
                 </span>
-                <input
-                  type="checkbox"
-                  data-regex-stage="${_escAttr(stage.key)}"
-                  ${(regex.stages?.[stage.key] ?? true) ? "checked" : ""}
-                />
-              </label>
-            `,
-          ).join("")}
+                  <input
+                    type="checkbox"
+                    data-regex-stage="${_escAttr(stage.key)}"
+                    ${isTaskRegexStageEnabled(normalizedStages, stage.key) ? "checked" : ""}
+                  />
+                </label>
+              `,
+            ).join("")}
         </div>
       </div>
 
@@ -3754,8 +3795,13 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
         <span class="bme-debug-kv-key">输出清洗</span>
         <span class="bme-debug-kv-value">${_escHtml(llmRequest.responseCleaning?.applied ? "已生效" : "未生效")}</span>
       </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">发送前输入清洗</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.requestCleaning?.applied ? "已生效" : "未生效")}</span>
+      </div>
     </div>
     ${_renderDebugDetails("提示词执行摘要", llmRequest.promptExecution || null)}
+    ${_renderDebugDetails("发送前输入清洗", llmRequest.requestCleaning || null)}
     ${_renderDebugDetails("实际请求路径", llmRequest.effectiveRoute || null)}
     ${_renderDebugDetails("输出清洗", llmRequest.responseCleaning || null)}
     ${_renderDebugDetails("实际保留参数", llmRequest.filteredGeneration || {})}
@@ -4623,7 +4669,7 @@ function _normalizeTaskProfileDraft(profile = {}) {
     stages: {
       input: true,
       output: true,
-      ...(draft.regex?.stages || {}),
+      ...normalizeTaskRegexStages(draft.regex?.stages || {}),
     },
     localRules: Array.isArray(draft.regex?.localRules)
       ? draft.regex.localRules.map((rule) => ({

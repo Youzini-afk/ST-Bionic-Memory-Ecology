@@ -365,6 +365,79 @@ try {
   assert.equal(exactStageResult, "JSON");
   assert.deepEqual(exactStageDebug.entries[0].appliedRules, []);
 
+  const legacyStageCompatibilitySettings = {
+    taskProfilesVersion: 1,
+    taskProfiles: {
+      extract: {
+        activeProfileId: "legacy-stage-compat",
+        profiles: [
+          {
+            id: "legacy-stage-compat",
+            taskType: "extract",
+            regex: {
+              enabled: true,
+              inheritStRegex: false,
+              sources: {
+                global: false,
+                preset: false,
+                character: false,
+              },
+              stages: {
+                input: true,
+                output: true,
+                "input.userMessage": false,
+                "input.recentMessages": false,
+                "input.candidateText": false,
+                "input.finalPrompt": false,
+                "output.rawResponse": false,
+                "output.beforeParse": false,
+              },
+              localRules: [
+                createRule("legacy-input-user", "/Alpha/g", "A1"),
+                createRule("legacy-output-raw", "/Omega/g", "O1", {
+                  source: {
+                    user_input: false,
+                    ai_output: true,
+                  },
+                }),
+              ],
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  const legacyStageInputDebug = { entries: [] };
+  const legacyStageInputResult = applyTaskRegex(
+    legacyStageCompatibilitySettings,
+    "extract",
+    "input.userMessage",
+    "Alpha",
+    legacyStageInputDebug,
+    "user",
+  );
+  assert.equal(legacyStageInputResult, "A1");
+  assert.deepEqual(
+    legacyStageInputDebug.entries[0].appliedRules.map((item) => item.id),
+    ["legacy-input-user"],
+  );
+
+  const legacyStageOutputDebug = { entries: [] };
+  const legacyStageOutputResult = applyTaskRegex(
+    legacyStageCompatibilitySettings,
+    "extract",
+    "output.rawResponse",
+    "Omega",
+    legacyStageOutputDebug,
+    "assistant",
+  );
+  assert.equal(legacyStageOutputResult, "O1");
+  assert.deepEqual(
+    legacyStageOutputDebug.entries[0].appliedRules.map((item) => item.id),
+    ["legacy-output-raw"],
+  );
+
   console.log("task-regex tests passed");
 } finally {
   if (originalSillyTavern === undefined) {

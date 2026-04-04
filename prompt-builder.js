@@ -526,7 +526,7 @@ function sanitizePromptMessages(
   messages = [],
   {
     blockedContents = [],
-    regexStage = "input.finalPrompt",
+    regexStage = "",
     debugState = null,
     regexCollector = null,
   } = {},
@@ -646,7 +646,7 @@ function sanitizeWorldInfoEntries(
         {
           mode: "aggressive",
           blockedContents,
-          regexStage: "input.finalPrompt",
+          regexStage: "",
           role: entry?.role || "system",
           regexCollector,
         },
@@ -728,7 +728,7 @@ function sanitizeWorldInfoContext(
         {
           mode: "aggressive",
           blockedContents: runtimeBlockedContents,
-          regexStage: "input.finalPrompt",
+          regexStage: "",
           role: message?.role || "system",
           regexCollector,
         },
@@ -1107,7 +1107,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       {
         mode: "final-safe",
         blockedContents: worldInfoRuntimeBlockedContents,
-        regexStage: "input.finalPrompt",
+        regexStage: "",
         role,
         regexCollector: promptRegexInput,
       },

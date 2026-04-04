@@ -215,6 +215,104 @@ function applyTaskOutputRegexStages(taskType, text) {
   };
 }
 
+function applyTaskFinalInputRegex(taskType, messages = []) {
+  const normalizedMessages = (Array.isArray(messages) ? messages : [])
+    .map((message) => {
+      if (!message || typeof message !== "object") {
+        return null;
+      }
+      const role = String(message.role || "").trim().toLowerCase();
+      if (!["system", "user", "assistant"].includes(role)) {
+        return null;
+      }
+      return {
+        ...message,
+        role,
+        content: String(message.content || ""),
+      };
+    })
+    .filter(Boolean);
+  const normalizedTaskType = String(taskType || "").trim();
+
+  if (!normalizedTaskType || normalizedMessages.length === 0) {
+    const cleanedMessages = normalizedMessages.filter((message) =>
+      String(message.content || "").trim(),
+    );
+    return {
+      messages: cleanedMessages,
+      debug: {
+        stage: "input.finalPrompt",
+        changed: cleanedMessages.length !== normalizedMessages.length,
+        applied: false,
+        rawMessageCount: normalizedMessages.length,
+        cleanedMessageCount: cleanedMessages.length,
+        droppedMessageCount: normalizedMessages.length - cleanedMessages.length,
+        stages: [],
+      },
+    };
+  }
+
+  const settings = extension_settings[MODULE_NAME] || {};
+  const regexDebug = { entries: [] };
+  let changed = false;
+  let droppedMessageCount = 0;
+  const cleanedMessages = normalizedMessages
+    .map((message) => {
+      const originalContent = String(message.content || "");
+      const cleanedContent = applyTaskRegex(
+        settings,
+        normalizedTaskType,
+        "input.finalPrompt",
+        originalContent,
+        regexDebug,
+        message.role,
+      );
+      if (cleanedContent !== originalContent) {
+        changed = true;
+      }
+      if (!String(cleanedContent || "").trim()) {
+        droppedMessageCount += 1;
+        return null;
+      }
+      return {
+        ...message,
+        content: cleanedContent,
+      };
+    })
+    .filter(Boolean);
+  const normalizedEntries = normalizeRegexDebugEntries(regexDebug);
+  const applied = normalizedEntries.some(
+    (entry) => entry.appliedRules.length > 0,
+  );
+
+  return {
+    messages: cleanedMessages,
+    debug: {
+      stage: "input.finalPrompt",
+      changed: changed || droppedMessageCount > 0,
+      applied,
+      rawMessageCount: normalizedMessages.length,
+      cleanedMessageCount: cleanedMessages.length,
+      droppedMessageCount,
+      stages: normalizedEntries,
+    },
+  };
+}
+
+function attachRequestCleaningToPromptExecution(
+  promptExecutionSummary,
+  requestCleaning,
+) {
+  const base =
+    promptExecutionSummary && typeof promptExecutionSummary === "object"
+      ? cloneRuntimeDebugValue(promptExecutionSummary, {})
+      : {};
+  if (requestCleaning && typeof requestCleaning === "object") {
+    base.requestCleaning = cloneRuntimeDebugValue(requestCleaning, null);
+  }
+  return base;
+}
+
 function buildEffectiveLlmRoute(
   hasDedicatedConfig,
   privateRequestSource,
@@ -1477,7 +1575,7 @@ export async function callLLMForJSON({
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const messages = buildJsonAttemptMessages(
+      const assembledMessages = buildJsonAttemptMessages(
         systemPrompt,
         userPrompt,
         attempt,
@@ -1485,7 +1583,25 @@ export async function callLLMForJSON({
         additionalMessages,
         promptMessages,
       );
-      const response = await callDedicatedOpenAICompatible(messages, {
+      const requestCleaning = applyTaskFinalInputRegex(
+        taskType,
+        assembledMessages,
+      );
+      const promptExecutionSnapshot = attachRequestCleaningToPromptExecution(
+        promptExecutionSummary,
+        requestCleaning.debug,
+      );
+      recordTaskLlmRequest(
+        taskType || privateRequestSource,
+        {
+          requestCleaning: requestCleaning.debug,
+          promptExecution: promptExecutionSnapshot,
+        },
+        {
+          merge: true,
+        },
+      );
+      const response = await callDedicatedOpenAICompatible(requestCleaning.messages, {
         signal,
         jsonMode: true,
         taskType,
@@ -1500,8 +1616,9 @@ export async function callLLMForJSON({
       recordTaskLlmRequest(
         taskType || privateRequestSource,
         {
+          requestCleaning: requestCleaning.debug,
           responseCleaning: outputCleanup.debug,
-          promptExecution: promptExecutionSummary,
+          promptExecution: promptExecutionSnapshot,
         },
         {
           merge: true,
@@ -1592,19 +1709,48 @@ export async function callLLM(systemPrompt, userPrompt, options = {}) {
     return await override(systemPrompt, userPrompt, options);
   }
 
-  const messages = [
+  const taskType = String(options.taskType || "").trim();
+  const privateRequestSource = resolvePrivateRequestSource(
+    taskType,
+    options.requestSource || options.source || "diagnostic:call-llm",
+    { allowAnonymous: true },
+  );
+  const promptExecutionSummary = buildPromptExecutionSummary(
+    options.debugContext || null,
+  );
+  const assembledMessages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
+  const requestCleaning = applyTaskFinalInputRegex(taskType, assembledMessages);
+  const promptExecutionSnapshot = attachRequestCleaningToPromptExecution(
+    promptExecutionSummary,
+    requestCleaning.debug,
+  );
 
   try {
-    const response = await callDedicatedOpenAICompatible(messages, {
-      signal: options.signal,
-      taskType: options.taskType || "",
-      requestSource:
-        options.requestSource || options.source || "diagnostic:call-llm",
+    recordTaskLlmRequest(taskType || privateRequestSource, {
+      requestCleaning: requestCleaning.debug,
+      promptExecution: promptExecutionSnapshot,
+    }, {
+      merge: true,
     });
-    return response?.content || null;
+    const response = await callDedicatedOpenAICompatible(requestCleaning.messages, {
+      signal: options.signal,
+      taskType,
+      requestSource: privateRequestSource,
+    });
+    const responseText =
+      typeof response?.content === "string" ? response.content : "";
+    const outputCleanup = applyTaskOutputRegexStages(taskType, responseText);
+    recordTaskLlmRequest(taskType || privateRequestSource, {
+      requestCleaning: requestCleaning.debug,
+      responseCleaning: outputCleanup.debug,
+      promptExecution: promptExecutionSnapshot,
+    }, {
+      merge: true,
+    });
+    return outputCleanup.cleanedText || null;
   } catch (e) {
     console.error("[ST-BME] LLM 调用失败:", e);
     return null;

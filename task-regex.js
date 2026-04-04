@@ -4,7 +4,11 @@
 
 import { extension_settings, getContext } from "../../../extensions.js";
 import { getHostAdapter } from "./host-adapter/index.js";
-import { getActiveTaskProfile } from "./prompt-profiles.js";
+import {
+  getActiveTaskProfile,
+  isTaskRegexStageEnabled,
+  normalizeTaskRegexStages,
+} from "./prompt-profiles.js";
 
 const HTML_TAG_PATTERN =
   /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
@@ -320,26 +324,19 @@ function collectLocalRules(regexConfig = {}) {
 
 function shouldApplyRuleForStage(rule, stage = "", stagesConfig = {}) {
   const normalizedStage = String(stage || "").trim();
-  if (
-    normalizedStage &&
-    Object.prototype.hasOwnProperty.call(stagesConfig, normalizedStage)
-  ) {
-    return (
-      stagesConfig[normalizedStage] !== false &&
-      rule.destinationFlags.prompt !== false
-    );
+  if (rule.destinationFlags.prompt === false) {
+    return false;
   }
-  if (PROMPT_STAGES.has(normalizedStage)) {
-    return (
-      stagesConfig.input !== false && rule.destinationFlags.prompt !== false
-    );
+
+  if (!normalizedStage) {
+    return isTaskRegexStageEnabled(stagesConfig, "input");
   }
-  if (OUTPUT_STAGES.has(normalizedStage)) {
-    return (
-      stagesConfig.output !== false && rule.destinationFlags.prompt !== false
-    );
+
+  if (PROMPT_STAGES.has(normalizedStage) || OUTPUT_STAGES.has(normalizedStage)) {
+    return isTaskRegexStageEnabled(stagesConfig, normalizedStage);
   }
-  return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
+
+  return isTaskRegexStageEnabled(stagesConfig, normalizedStage);
 }
 
 function shouldApplyRuleForRole(rule, role = "system") {
@@ -398,7 +395,7 @@ export function applyTaskRegex(
   }
 
   // 阶段检查已移到 shouldApplyRuleForStage 中，无需单独 gate
-  const stagesConfig = regexConfig?.stages || {};
+  const stagesConfig = normalizeTaskRegexStages(regexConfig?.stages || {});
 
   const tavernRules = collectTavernRules(regexConfig);
   const localRules = collectLocalRules(regexConfig);
