@@ -691,6 +691,9 @@ export function refreshLiveState() {
   ) {
     _refreshTaskProfileWorkspace();
   }
+  if (currentTabId === "config" && currentConfigSectionId === "trace") {
+    _refreshMessageTraceWorkspace();
+  }
 
   _refreshGraph();
 }
@@ -1847,6 +1850,7 @@ function _refreshConfigTab() {
   _refreshStageCardStates(settings);
   _refreshPromptCardStates(settings);
   _refreshTaskProfileWorkspace(settings);
+  _refreshMessageTraceWorkspace(settings);
   _highlightThemeChoice(settings.panelTheme || "crimson");
   _syncConfigSectionState();
 }
@@ -2671,6 +2675,312 @@ function _refreshTaskProfileWorkspace(settings = _getSettings?.() || {}) {
 
   const state = _getTaskProfileWorkspaceState(settings);
   workspace.innerHTML = _renderTaskProfileWorkspace(state);
+}
+
+function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
+  const panelDebug = _getRuntimeDebugSnapshot?.() || {
+    hostCapabilities: null,
+    runtimeDebug: null,
+  };
+  const runtimeDebug = panelDebug.runtimeDebug || {};
+
+  return {
+    settings,
+    panelDebug,
+    runtimeDebug,
+    recallInjection: runtimeDebug?.injections?.recall || null,
+    recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
+    recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
+    extractLlmRequest: runtimeDebug?.taskLlmRequests?.extract || null,
+    extractPromptBuild: runtimeDebug?.taskPromptBuilds?.extract || null,
+  };
+}
+
+function _refreshMessageTraceWorkspace(settings = _getSettings?.() || {}) {
+  const workspace = document.getElementById("bme-message-trace-workspace");
+  if (!workspace) return;
+
+  const state = _getMessageTraceWorkspaceState(settings);
+  workspace.innerHTML = _renderMessageTraceWorkspace(state);
+}
+
+function _renderMessageTraceWorkspace(state) {
+  const updatedCandidates = [
+    state.recallInjection?.updatedAt,
+    state.recallLlmRequest?.updatedAt,
+    state.extractLlmRequest?.updatedAt,
+    state.extractPromptBuild?.updatedAt,
+  ]
+    .map((value) => Date.parse(String(value || "")))
+    .filter((value) => Number.isFinite(value));
+  const updatedAt = updatedCandidates.length
+    ? new Date(Math.max(...updatedCandidates)).toISOString()
+    : "";
+
+  return `
+    <div class="bme-task-tab-body">
+      <div class="bme-task-toolbar-row">
+        <div class="bme-task-note">
+          这里看的是最近一轮真实运行留下的痕迹，不是静态配置推演。你关心的两个问题会直接拆开：
+          “最后注入给主 AI 的记忆文本” 和 “最后送去提取模型的实际请求”。
+        </div>
+        <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(updatedAt))}</span>
+      </div>
+
+      <div class="bme-task-debug-grid">
+        <div class="bme-config-card">
+          ${_renderMessageTraceRecallCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderMessageTraceExtractCard(state)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _renderMessageTraceRecallCard(state) {
+  const injectionSnapshot = state.recallInjection || null;
+  const recallLlmRequest = state.recallLlmRequest || null;
+  const recentMessages = Array.isArray(injectionSnapshot?.recentMessages)
+    ? injectionSnapshot.recentMessages.map((item) => String(item || ""))
+    : [];
+  const triggeredUserMessage =
+    _extractTriggeredUserMessageFromRecentMessages(recentMessages) ||
+    _findMarkdownSectionContent(
+      _getLastDebugMessageContent(recallLlmRequest?.messages, "user"),
+      ["用户最新输入"],
+    );
+
+  if (!injectionSnapshot) {
+    return `
+      <div class="bme-config-card-title">最后注入给主 AI 的内容</div>
+      <div class="bme-config-help">
+        还没有可用的召回注入快照。先正常发一条消息，让插件跑完一轮召回即可。
+      </div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最后注入给主 AI 的内容</div>
+        <div class="bme-config-card-subtitle">
+          这里展示的不是候选记忆，而是这一轮真正拼进主模型上下文的记忆文本。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">触发来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(injectionSnapshot.sourceLabel || injectionSnapshot.source || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">触发钩子</span>
+        <span class="bme-debug-kv-value">${_escHtml(injectionSnapshot.hookName || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">触发用户输入</span>
+        <span class="bme-debug-kv-value">${_escHtml(triggeredUserMessage || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">选中记忆数</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(injectionSnapshot.selectedNodeIds?.length ?? 0))}</span>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "最终注入文本",
+      injectionSnapshot.injectionText || "",
+      "这次没有生成可注入的记忆文本。",
+    )}
+    ${_renderDebugDetails(
+      "召回参考上下文",
+      recentMessages.length ? recentMessages.join("\n") : "",
+    )}
+    ${_renderDebugDetails(
+      "召回精排实际消息序列",
+      _stringifyTraceMessages(recallLlmRequest?.messages),
+    )}
+    ${_renderDebugDetails("原始注入快照", injectionSnapshot)}
+  `;
+}
+
+function _renderMessageTraceExtractCard(state) {
+  const extractLlmRequest = state.extractLlmRequest || null;
+  const extractPromptBuild = state.extractPromptBuild || null;
+
+  if (!extractLlmRequest && !extractPromptBuild) {
+    return `
+      <div class="bme-config-card-title">最后送去提取模型的内容</div>
+      <div class="bme-config-help">
+        还没有可用的提取请求快照。等 assistant 正常回完一轮，自动提取跑过后这里就会出现。
+      </div>
+    `;
+  }
+
+  const systemPrompt =
+    _getLastDebugMessageContent(extractLlmRequest?.messages, "system") ||
+    extractPromptBuild?.systemPrompt ||
+    "";
+  const userPrompt = _getLastDebugMessageContent(extractLlmRequest?.messages, "user");
+  const dialogueText =
+    _findMarkdownSectionContent(userPrompt, ["当前对话内容"]) || userPrompt;
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最后送去提取模型的内容</div>
+        <div class="bme-config-card-subtitle">
+          这里看的是自动提取真正下发给记忆模型的请求，不只是任务预设模板。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(
+        _formatTaskProfileTime(extractLlmRequest?.updatedAt || extractPromptBuild?.updatedAt),
+      )}</span>
+    </div>
+    <div class="bme-debug-kv-list">
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">预设</span>
+        <span class="bme-debug-kv-value">${_escHtml(extractPromptBuild?.profileName || extractPromptBuild?.profileId || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">模型路由</span>
+        <span class="bme-debug-kv-value">${_escHtml(extractLlmRequest?.effectiveRoute?.llm || extractLlmRequest?.route || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">模型</span>
+        <span class="bme-debug-kv-value">${_escHtml(extractLlmRequest?.model || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">消息条数</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(_normalizeDebugMessages(extractLlmRequest?.messages).length))}</span>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "送去提取的对话正文",
+      dialogueText,
+      "这次没有捕获到提取用户提示词。",
+    )}
+    ${_renderDebugDetails("提取系统提示词（兼容视图）", systemPrompt)}
+    ${_renderDebugDetails("提取用户提示词（完整）", userPrompt)}
+    ${_renderDebugDetails(
+      "提取实际消息序列",
+      _stringifyTraceMessages(extractLlmRequest?.messages),
+    )}
+    ${_renderDebugDetails("提取 Prompt 组装快照", extractPromptBuild)}
+  `;
+}
+
+function _renderMessageTraceTextBlock(title, text, emptyText = "暂无内容") {
+  const normalized = String(text || "").trim();
+  return `
+    <div class="bme-task-section-label">${_escHtml(title)}</div>
+    ${
+      normalized
+        ? `<pre class="bme-debug-pre">${_escHtml(normalized)}</pre>`
+        : `<div class="bme-debug-empty">${_escHtml(emptyText)}</div>`
+    }
+  `;
+}
+
+function _normalizeDebugMessages(messages = []) {
+  if (!Array.isArray(messages)) return [];
+
+  return messages
+    .map((message) => {
+      if (!message || typeof message !== "object") return null;
+      const role = String(message.role || "").trim().toLowerCase();
+      const content = String(message.content || "").trim();
+      if (!role || !content) return null;
+      return { role, content };
+    })
+    .filter(Boolean);
+}
+
+function _getLastDebugMessageContent(messages = [], role = "") {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const normalizedMessages = _normalizeDebugMessages(messages);
+  for (let index = normalizedMessages.length - 1; index >= 0; index--) {
+    const message = normalizedMessages[index];
+    if (!normalizedRole || message.role === normalizedRole) {
+      return message.content;
+    }
+  }
+  return "";
+}
+
+function _stringifyTraceMessages(messages = []) {
+  const normalizedMessages = _normalizeDebugMessages(messages);
+  if (!normalizedMessages.length) return "";
+
+  return normalizedMessages
+    .map(
+      (message, index) => `[${index + 1}] ${message.role}\n${message.content}`,
+    )
+    .join("\n\n---\n\n");
+}
+
+function _extractTriggeredUserMessageFromRecentMessages(recentMessages = []) {
+  if (!Array.isArray(recentMessages)) return "";
+
+  for (let index = recentMessages.length - 1; index >= 0; index--) {
+    const line = String(recentMessages[index] || "").trim();
+    if (!line) continue;
+    if (line.startsWith("[user]:")) {
+      return line.replace(/^\[user\]:\s*/i, "").trim();
+    }
+  }
+  return "";
+}
+
+function _extractMarkdownSections(text = "") {
+  const normalized = String(text || "");
+  if (!normalized.trim()) return [];
+
+  const headingRegex = /^#{1,6}\s*(.+?)\s*$/gm;
+  const sections = [];
+  let currentTitle = "";
+  let bodyStart = 0;
+  let match = headingRegex.exec(normalized);
+
+  while (match) {
+    if (currentTitle) {
+      sections.push({
+        title: currentTitle,
+        content: normalized.slice(bodyStart, match.index).trim(),
+      });
+    }
+    currentTitle = String(match[1] || "").trim();
+    bodyStart = headingRegex.lastIndex;
+    match = headingRegex.exec(normalized);
+  }
+
+  if (currentTitle) {
+    sections.push({
+      title: currentTitle,
+      content: normalized.slice(bodyStart).trim(),
+    });
+  }
+
+  return sections;
+}
+
+function _findMarkdownSectionContent(text = "", titleHints = []) {
+  const hints = Array.isArray(titleHints)
+    ? titleHints.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!hints.length) return "";
+
+  const sections = _extractMarkdownSections(text);
+  for (const section of sections) {
+    const title = String(section?.title || "");
+    if (hints.some((hint) => title.includes(hint))) {
+      return String(section?.content || "").trim();
+    }
+  }
+
+  return "";
 }
 
 function _patchTaskProfiles(taskProfiles, extraPatch = {}, options = {}) {

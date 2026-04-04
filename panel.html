@@ -122,6 +122,14 @@
             </button>
             <button
               class="bme-config-nav-btn"
+              data-config-section="trace"
+              type="button"
+            >
+              <i class="fa-solid fa-route"></i>
+              <span>&#28040;&#24687;&#36861;&#36394;</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
               data-config-section="appearance"
               type="button"
             >
@@ -2060,6 +2068,20 @@
                 accept=".json,application/json"
                 hidden
               />
+            </section>
+
+            <section class="bme-config-section" data-config-section="trace">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker">&#28040;&#24687;&#36861;&#36394;</div>
+                <h3 class="bme-config-section-title">&#36825;&#19968;&#36718;&#21040;&#24213;&#21457;&#20102;&#20160;&#20040;&#65311;</h3>
+                <p class="bme-config-section-desc">
+                  &#29992;&#26356;&#30333;&#35805;&#30340;&#26041;&#24335;&#23637;&#31034;&#26368;&#36817;&#19968;&#27425;&#27880;&#20837;&#20027; AI &#30340;&#20869;&#23481;&#65292;&#20197;&#21450;&#36865;&#21435;&#25552;&#21462;&#27169;&#22411;&#30340;&#23454;&#38469;&#35831;&#27714;&#12290;
+                </p>
+              </div>
+              <div
+                id="bme-message-trace-workspace"
+                class="bme-message-trace-workspace"
+              ></div>
             </section>
 
             <section
