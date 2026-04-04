@@ -103,6 +103,25 @@ const inlineSummaryEntry = createWorldbookEntry({
   order: 20,
 });
 
+const inlineDataSummaryEntry = createWorldbookEntry({
+  uid: 12,
+  name: "数据 EJS 汇总",
+  comment: "数据 EJS 汇总",
+  content:
+    '数据摘要：<%= await getwi("数据模板", { clue: "蓝钥匙", mood: "紧张" }) %>',
+  order: 21,
+});
+
+const inlineDataTemplateEntry = createWorldbookEntry({
+  uid: 13,
+  name: "数据模板",
+  comment: "数据模板",
+  content:
+    "线索=<%= clue %>；情绪=<%= mood %>；角色=<%= char %>；用户=<%= user %>；上下文=<%= recentMessages %>",
+  enabled: false,
+  order: 22,
+});
+
 const extensionLiteralEntry = createWorldbookEntry({
   uid: 4,
   name: "扩展语义正文",
@@ -193,6 +212,8 @@ const worldbooksByName = {
     constantEntry,
     dynEntry,
     inlineSummaryEntry,
+    inlineDataSummaryEntry,
+    inlineDataTemplateEntry,
     extensionLiteralEntry,
     externalInlineEntry,
     mvuLazyProbeEntry,
@@ -242,6 +263,16 @@ try {
     true,
     "constant world info should still resolve without trigger text",
   );
+  assert.equal(
+    emptyTriggerWorldInfo.beforeEntries.some((entry) => entry.name === "数据 EJS 汇总"),
+    true,
+    "constant EJS entry should still render with empty template context defaults",
+  );
+  assert.match(emptyTriggerWorldInfo.beforeText, /数据摘要：线索=蓝钥匙；情绪=紧张；角色=Alice；用户=User；上下文=/);
+  assert.equal(
+    emptyTriggerWorldInfo.debug.warnings.some((warning) => warning.includes("渲染失败")),
+    false,
+  );
 
   const worldInfo = await resolveTaskWorldInfo({
     templateContext: {
@@ -253,19 +284,30 @@ try {
 
   assert.deepEqual(
     worldInfo.beforeEntries.map((entry) => entry.name),
-    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总", "MVU 懒加载探测"],
+    [
+      "常驻设定",
+      "EJS 汇总",
+      "数据 EJS 汇总",
+      "扩展语义正文",
+      "外部书汇总",
+      "MVU 懒加载探测",
+    ],
   );
   assert.deepEqual(worldInfo.afterEntries.map((entry) => entry.name), ["强制后置"]);
   assert.equal(worldInfo.additionalMessages.length, 1);
   assert.equal(worldInfo.additionalMessages[0].content, "这是一条 atDepth 消息。");
   assert.match(worldInfo.beforeText, /控制摘要：隐藏线索：Alice 正在调查。/);
+  assert.match(
+    worldInfo.beforeText,
+    /数据摘要：线索=蓝钥匙；情绪=紧张；角色=Alice；用户=User；上下文=我们继续调查那条线索/,
+  );
   assert.match(worldInfo.beforeText, /外部补充：来自 bonus-book 的补充内容。/);
   assert.match(worldInfo.beforeText, /MVU lazy:/);
   assert.match(worldInfo.beforeText, /@@generate/);
   assert.match(worldInfo.beforeText, /\[GENERATE:Test\]/);
   assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
   assert.doesNotMatch(worldInfo.beforeText, /status_current_variable|变量更新规则|updatevariable/i);
-  assert.equal(worldInfo.debug.ejsInlinePullCount, 2);
+  assert.equal(worldInfo.debug.ejsInlinePullCount, 3);
   assert.equal(worldInfo.debug.ejsForcedActivationCount, 1);
   assert.equal(worldInfo.debug.resolvePassCount >= 2, true);
   assert.deepEqual(worldInfo.debug.forcedActivatedEntries.map((entry) => entry.name), [
@@ -273,7 +315,7 @@ try {
   ]);
   assert.deepEqual(
     worldInfo.debug.inlinePulledEntries.map((entry) => entry.name).sort(),
-    ["Bonus 条目", "线索条目"].sort(),
+    ["Bonus 条目", "数据模板", "线索条目"].sort(),
   );
   assert.deepEqual(worldInfo.debug.lazyLoadedWorldbooks, ["bonus-book"]);
   assert.equal(worldInfo.debug.mvu.filteredEntryCount, 2);
@@ -348,6 +390,10 @@ try {
 
   assert.match(promptBuild.systemPrompt, /这里是常驻世界设定/);
   assert.match(promptBuild.systemPrompt, /控制摘要：隐藏线索：Alice 正在调查/);
+  assert.match(
+    promptBuild.systemPrompt,
+    /数据摘要：线索=蓝钥匙；情绪=紧张；角色=Alice；用户=User；上下文=我们继续调查那条线索/,
+  );
   assert.match(promptBuild.systemPrompt, /扩展语义只是普通文本/);
   assert.match(promptBuild.systemPrompt, /来自 bonus-book 的补充内容/);
   assert.match(promptBuild.systemPrompt, /MVU lazy:/);
@@ -364,7 +410,14 @@ try {
   );
   assert.deepEqual(
     promptBuild.hostInjections.before.map((entry) => entry.name),
-    ["常驻设定", "EJS 汇总", "扩展语义正文", "外部书汇总", "MVU 懒加载探测"],
+    [
+      "常驻设定",
+      "EJS 汇总",
+      "数据 EJS 汇总",
+      "扩展语义正文",
+      "外部书汇总",
+      "MVU 懒加载探测",
+    ],
   );
   assert.deepEqual(
     promptBuild.hostInjections.after.map((entry) => entry.name),
@@ -378,6 +431,7 @@ try {
   assert.deepEqual(promptBuild.hostInjectionPlan.before[0].entryNames, [
     "常驻设定",
     "EJS 汇总",
+    "数据 EJS 汇总",
     "扩展语义正文",
     "外部书汇总",
     "MVU 懒加载探测",
