@@ -792,6 +792,11 @@ function _applyWorkspaceMode() {
 function _switchConfigSection(sectionId) {
   currentConfigSectionId = sectionId || "api";
   _syncConfigSectionState();
+  if (currentConfigSectionId === "prompts") {
+    _refreshTaskProfileWorkspace();
+  } else if (currentConfigSectionId === "trace") {
+    _refreshMessageTraceWorkspace();
+  }
 }
 
 function _syncConfigSectionState() {
@@ -2737,17 +2742,23 @@ function _renderMessageTraceWorkspace(state) {
 
 function _renderMessageTraceRecallCard(state) {
   const injectionSnapshot = state.recallInjection || null;
-  const recallLlmRequest = state.recallLlmRequest || null;
   const recentMessages = Array.isArray(injectionSnapshot?.recentMessages)
     ? injectionSnapshot.recentMessages.map((item) => String(item || ""))
     : [];
   const triggeredUserMessage =
-    _extractTriggeredUserMessageFromRecentMessages(recentMessages) ||
-    _getLastDebugMessageContent(recallLlmRequest?.messages, "user");
+    _extractTriggeredUserMessageFromRecentMessages(recentMessages);
   const hostPayloadText = _buildMainAiTraceText(
     triggeredUserMessage,
     injectionSnapshot?.injectionText || "",
   );
+  const missingUserMessageNotice =
+    injectionSnapshot && !triggeredUserMessage
+      ? `
+        <div class="bme-config-help">
+          这次没有可靠捕获到主 AI 那边的用户消息，因此这里只展示真实记录到的记忆注入文本，不再用 recall 模型请求去反推，避免误导排查。
+        </div>
+      `
+      : "";
 
   if (!injectionSnapshot) {
     return `
@@ -2765,6 +2776,7 @@ function _renderMessageTraceRecallCard(state) {
       </div>
       <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
     </div>
+    ${missingUserMessageNotice}
     ${_renderMessageTraceTextBlock(
       "发送给主 AI 的内容",
       hostPayloadText,
@@ -2831,18 +2843,6 @@ function _normalizeDebugMessages(messages = []) {
       return { role, content };
     })
     .filter(Boolean);
-}
-
-function _getLastDebugMessageContent(messages = [], role = "") {
-  const normalizedRole = String(role || "").trim().toLowerCase();
-  const normalizedMessages = _normalizeDebugMessages(messages);
-  for (let index = normalizedMessages.length - 1; index >= 0; index--) {
-    const message = normalizedMessages[index];
-    if (!normalizedRole || message.role === normalizedRole) {
-      return message.content;
-    }
-  }
-  return "";
 }
 
 function _stringifyTraceMessages(messages = []) {
