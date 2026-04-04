@@ -1210,9 +1210,11 @@ function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
-  recordMessageTraceSnapshot({
-    lastSentUserMessage: null,
-  });
+  if (typeof recordMessageTraceSnapshot === "function") {
+    recordMessageTraceSnapshot({
+      lastSentUserMessage: null,
+    });
+  }
   clearPlannerRecallHandoffsForChat("", { clearAll: true });
 }
 
@@ -1330,15 +1332,17 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
     source,
     at: Date.now(),
   });
-  recordMessageTraceSnapshot({
-    lastSentUserMessage: {
-      text: normalized,
-      hash,
-      messageId: Number.isFinite(messageId) ? messageId : null,
-      source,
-      updatedAt: new Date().toISOString(),
-    },
-  });
+  if (typeof recordMessageTraceSnapshot === "function") {
+    recordMessageTraceSnapshot({
+      lastSentUserMessage: {
+        text: normalized,
+        hash,
+        messageId: Number.isFinite(messageId) ? messageId : null,
+        source,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
 
   // 注意：不再在 MESSAGE_SENT 阶段清空 pendingRecallSendIntent /
   // pendingHostGenerationInputSnapshot / transactions。
