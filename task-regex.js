@@ -4,11 +4,29 @@
 
 import { extension_settings, getContext } from "../../../extensions.js";
 import { getHostAdapter } from "./host-adapter/index.js";
-import { getActiveTaskProfile } from "./prompt-profiles.js";
+import {
+  getActiveTaskProfile,
+  isTaskRegexStageEnabled,
+  normalizeTaskRegexStages,
+} from "./prompt-profiles.js";
 
 const HTML_TAG_PATTERN =
   /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
 const HTML_ATTR_PATTERN = /\b(?:style|class|id|href|src|data-)\s*=/i;
+const TAVERN_REGEX_PLACEMENT = Object.freeze({
+  USER_INPUT: 1,
+  AI_OUTPUT: 2,
+  SLASH_COMMAND: 3,
+  WORLD_INFO: 5,
+  REASONING: 6,
+});
+const TAVERN_REGEX_PLACEMENT_LABELS = Object.freeze({
+  [TAVERN_REGEX_PLACEMENT.USER_INPUT]: "用户输入",
+  [TAVERN_REGEX_PLACEMENT.AI_OUTPUT]: "AI 输出",
+  [TAVERN_REGEX_PLACEMENT.SLASH_COMMAND]: "斜杠命令",
+  [TAVERN_REGEX_PLACEMENT.WORLD_INFO]: "世界书",
+  [TAVERN_REGEX_PLACEMENT.REASONING]: "推理/思维",
+});
 
 const PROMPT_STAGES = new Set([
   "finalPrompt",
@@ -65,6 +83,53 @@ function normalizeTrimStrings(rawTrim) {
   return [];
 }
 
+function normalizeRulePlacement(rawPlacement) {
+  const placement = Array.isArray(rawPlacement) ? rawPlacement : [];
+  return placement
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item));
+}
+
+function isTavernRuleShape(raw = {}) {
+  return (
+    Array.isArray(raw?.placement) ||
+    Object.prototype.hasOwnProperty.call(raw || {}, "promptOnly") ||
+    Object.prototype.hasOwnProperty.call(raw || {}, "markdownOnly") ||
+    Object.prototype.hasOwnProperty.call(raw || {}, "scriptName") ||
+    Object.prototype.hasOwnProperty.call(raw || {}, "findRegex") ||
+    Object.prototype.hasOwnProperty.call(raw || {}, "replaceString")
+  );
+}
+
+function buildRuleSourceFlags(source, placement, isTavernRule) {
+  if (source && typeof source === "object") {
+    return {
+      user: Boolean(source.user_input),
+      assistant: Boolean(source.ai_output),
+      system: Boolean(source.ai_output),
+    };
+  }
+
+  if (isTavernRule && placement.length > 0) {
+    return {
+      user: placement.includes(TAVERN_REGEX_PLACEMENT.USER_INPUT),
+      assistant: placement.includes(TAVERN_REGEX_PLACEMENT.AI_OUTPUT),
+      system: placement.some((item) =>
+        [
+          TAVERN_REGEX_PLACEMENT.WORLD_INFO,
+          TAVERN_REGEX_PLACEMENT.REASONING,
+        ].includes(item),
+      ),
+    };
+  }
+
+  return {
+    user: true,
+    assistant: true,
+    system: true,
+  };
+}
+
 function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
   const destination =
     raw?.destination && typeof raw.destination === "object"
@@ -72,6 +137,8 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
       : null;
   const source =
     raw?.source && typeof raw.source === "object" ? raw.source : null;
+  const placement = normalizeRulePlacement(raw?.placement);
+  const isTavernRule = isTavernRuleShape(raw);
 
   return {
     id: String(raw.id || `${fallbackSource}-${index + 1}`),
@@ -82,19 +149,25 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
       raw.replace_string ?? raw.replaceString ?? raw.replace ?? "",
     ),
     trimStrings: normalizeTrimStrings(raw.trim_strings ?? raw.trimStrings),
-    sourceFlags: {
-      user: source ? Boolean(source.user_input) : true,
-      assistant: source ? Boolean(source.ai_output) : true,
-      system: source ? Boolean(source.ai_output) : true,
-    },
+    sourceFlags: buildRuleSourceFlags(source, placement, isTavernRule),
     destinationFlags: {
       prompt: destination
         ? Boolean(destination.prompt)
-        : raw.promptOnly !== true,
+        : raw.markdownOnly !== true,
       display: destination
         ? Boolean(destination.display)
         : Boolean(raw.markdownOnly),
     },
+    promptOnly: Boolean(raw.promptOnly),
+    markdownOnly: Boolean(raw.markdownOnly),
+    placement,
+    minDepth: Number.isFinite(Number(raw.min_depth ?? raw.minDepth))
+      ? Number(raw.min_depth ?? raw.minDepth)
+      : null,
+    maxDepth: Number.isFinite(Number(raw.max_depth ?? raw.maxDepth))
+      ? Number(raw.max_depth ?? raw.maxDepth)
+      : null,
+    isTavernRule,
     sourceType: fallbackSource,
     raw,
   };
@@ -190,6 +263,136 @@ function getRegexHost() {
   };
 }
 
+function getPresetManagerFromContext(context = {}) {
+  if (typeof context?.getPresetManager !== "function") {
+    return null;
+  }
+
+  try {
+    const manager = context.getPresetManager();
+    return manager && typeof manager === "object" ? manager : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentPresetInfo(context = {}) {
+  const presetManager = getPresetManagerFromContext(context);
+  const apiId = String(presetManager?.apiId || "").trim();
+  const presetName =
+    typeof presetManager?.getSelectedPresetName === "function"
+      ? String(presetManager.getSelectedPresetName() || "").trim()
+      : "";
+
+  return {
+    presetManager,
+    apiId,
+    presetName,
+  };
+}
+
+function isPresetRegexAllowed(extSettings = {}, apiId = "", presetName = "") {
+  if (!apiId || !presetName) {
+    return false;
+  }
+  return Boolean(extSettings?.preset_allowed_regex?.[apiId]?.includes?.(presetName));
+}
+
+function getCurrentCharacterInfo(context = {}) {
+  const rawCharacterId = context?.characterId;
+  const characterId = Number(rawCharacterId);
+  if (!Number.isFinite(characterId) || characterId < 0) {
+    return {
+      characterId: null,
+      character: null,
+      avatar: "",
+    };
+  }
+
+  const characters = Array.isArray(context?.characters) ? context.characters : [];
+  const character = characters[characterId] || null;
+
+  return {
+    characterId,
+    character,
+    avatar: String(character?.avatar || ""),
+  };
+}
+
+function isCharacterRegexAllowed(extSettings = {}, avatar = "") {
+  if (!avatar) {
+    return false;
+  }
+  return Boolean(extSettings?.character_allowed_regex?.includes?.(avatar));
+}
+
+function readGlobalFallbackRules(extSettings = {}) {
+  return readArrayPath(extSettings, [
+    ["regex"],
+    ["regex_scripts"],
+    ["regex", "regex_scripts"],
+  ]);
+}
+
+function readPresetFallbackRules(context = {}, oaiSettings = {}) {
+  const { presetManager } = getCurrentPresetInfo(context);
+  if (typeof presetManager?.readPresetExtensionField === "function") {
+    try {
+      const scripts = presetManager.readPresetExtensionField({
+        path: "regex_scripts",
+      });
+      if (Array.isArray(scripts)) {
+        return scripts;
+      }
+    } catch {
+      // ignore and continue to legacy paths
+    }
+  }
+
+  return readArrayPath(oaiSettings, [
+    ["regex_scripts"],
+    ["extensions", "regex_scripts"],
+  ]);
+}
+
+function readCharacterFallbackRules(context = {}) {
+  const { character } = getCurrentCharacterInfo(context);
+  if (!character) {
+    return [];
+  }
+
+  return readArrayPath(character, [
+    ["data", "extensions", "regex_scripts"],
+    ["extensions", "regex_scripts"],
+  ]);
+}
+
+function getPlacementLabels(placement = []) {
+  return (Array.isArray(placement) ? placement : []).map(
+    (item) => TAVERN_REGEX_PLACEMENT_LABELS[item] || `#${item}`,
+  );
+}
+
+function summarizeRule(rule, reason = "") {
+  const normalized = rule && typeof rule === "object" ? rule : {};
+  return {
+    id: String(normalized.id || ""),
+    name: String(normalized.scriptName || normalized.id || ""),
+    findRegex: String(normalized.findRegex || ""),
+    replaceString: String(normalized.replaceString || ""),
+    sourceType: String(normalized.sourceType || ""),
+    promptOnly: Boolean(normalized.promptOnly),
+    markdownOnly: Boolean(normalized.markdownOnly),
+    placement: Array.isArray(normalized.placement) ? [...normalized.placement] : [],
+    placementLabels: getPlacementLabels(normalized.placement),
+    minDepth:
+      normalized.minDepth == null ? null : Number(normalized.minDepth),
+    maxDepth:
+      normalized.maxDepth == null ? null : Number(normalized.maxDepth),
+    reason: String(reason || ""),
+  };
+}
+
 function collectViaApi(sourceType, regexHost = null) {
   const getter = regexHost?.getTavernRegexes;
   if (typeof getter !== "function") {
@@ -229,15 +432,13 @@ function collectViaApi(sourceType, regexHost = null) {
   return unsupported();
 }
 
-function collectTavernRules(regexConfig = {}) {
+function collectTavernRulesDetailed(regexConfig = {}) {
   const shouldReuse = regexConfig.inheritStRegex !== false;
-  if (!shouldReuse) return [];
-
   const sourceConfig = regexConfig.sources || {};
   const enabledSources = {
-    global: sourceConfig.global !== false,
-    preset: sourceConfig.preset !== false,
-    character: sourceConfig.character !== false,
+    global: shouldReuse && sourceConfig.global !== false,
+    preset: shouldReuse && sourceConfig.preset !== false,
+    character: shouldReuse && sourceConfig.character !== false,
   };
 
   const context = getContext?.() || {};
@@ -247,66 +448,170 @@ function collectTavernRules(regexConfig = {}) {
   const regexHost = getRegexHost();
   const collected = [];
   const seen = new Set();
+  const sources = [];
 
-  const pushRules = (items, sourceType) => {
-    for (let index = 0; index < items.length; index++) {
-      const normalized = normalizeRule(items[index], sourceType, index);
-      if (!normalized.enabled || !normalized.findRegex) continue;
-      const key = `${sourceType}:${normalized.id}:${normalized.findRegex}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      collected.push(normalized);
+  const appendSourceSnapshot = ({
+    type,
+    label,
+    enabled,
+    supported,
+    resolvedVia,
+    allowed = true,
+    reason = "",
+    rawItems = [],
+  }) => {
+    const effectiveItems =
+      enabled && allowed ? (Array.isArray(rawItems) ? rawItems : []) : [];
+    const activeRules = [];
+    const ignoredRules = [];
+
+    if (!enabled) {
+      sources.push({
+        type,
+        label,
+        enabled,
+        supported,
+        resolvedVia,
+        allowed,
+        reason:
+          reason || (shouldReuse ? "当前任务已关闭该来源" : "当前任务未启用复用酒馆正则"),
+        rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
+        activeRuleCount: 0,
+        rules: [],
+        ignoredRules: [],
+      });
+      return;
     }
-  };
 
-  if (enabledSources.global) {
-    const viaApi = collectViaApi("global", regexHost);
-    if (viaApi.supported) {
-      pushRules(viaApi.items, "global");
-    } else {
-      pushRules(
-        readArrayPath(extSettings, [["regex"], ["regex", "regex_scripts"]]),
-        "global",
-      );
-    }
-  }
-
-  if (enabledSources.preset) {
-    const viaApi = collectViaApi("preset", regexHost);
-    if (viaApi.supported) {
-      pushRules(viaApi.items, "preset");
-    } else {
-      pushRules(
-        readArrayPath(oaiSettings, [
-          ["regex_scripts"],
-          ["extensions", "regex_scripts"],
-        ]),
-        "preset",
-      );
-    }
-  }
-
-  if (enabledSources.character) {
-    const viaApi = collectViaApi("character", regexHost);
-    if (viaApi.supported) {
-      pushRules(viaApi.items, "character");
-    } else {
-      const charId = context?.characterId;
-      const characters = context?.characters;
-      if (charId !== undefined && characters) {
-        const character = characters[Number(charId)];
-        pushRules(
-          readArrayPath(character, [
-            ["extensions", "regex_scripts"],
-            ["data", "extensions", "regex_scripts"],
-          ]),
-          "character",
+    if (!allowed && Array.isArray(rawItems)) {
+      for (let index = 0; index < rawItems.length; index++) {
+        ignoredRules.push(
+          summarizeRule(normalizeRule(rawItems[index], type, index), "not-allowed"),
         );
       }
     }
+
+    for (let index = 0; index < effectiveItems.length; index++) {
+      const normalized = normalizeRule(effectiveItems[index], type, index);
+      if (!normalized.enabled) {
+        ignoredRules.push(summarizeRule(normalized, "disabled"));
+        continue;
+      }
+      if (!normalized.findRegex) {
+        ignoredRules.push(summarizeRule(normalized, "missing-find-regex"));
+        continue;
+      }
+      const key = `${type}:${normalized.id}:${normalized.findRegex}`;
+      if (seen.has(key)) {
+        ignoredRules.push(summarizeRule(normalized, "duplicate"));
+        continue;
+      }
+      seen.add(key);
+      collected.push(normalized);
+      activeRules.push(summarizeRule(normalized));
+    }
+
+    sources.push({
+      type,
+      label,
+      enabled,
+      supported,
+      resolvedVia,
+      allowed,
+      reason,
+      rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
+      activeRuleCount: activeRules.length,
+      rules: activeRules,
+      ignoredRules,
+    });
+  };
+
+  const globalViaApi = collectViaApi("global", regexHost);
+  appendSourceSnapshot({
+    type: "global",
+    label: "全局",
+    enabled: enabledSources.global,
+    supported: true,
+    resolvedVia: globalViaApi.supported ? "bridge" : "fallback",
+    rawItems: globalViaApi.supported
+      ? globalViaApi.items
+      : readGlobalFallbackRules(extSettings),
+  });
+
+  const presetViaApi = collectViaApi("preset", regexHost);
+  if (presetViaApi.supported) {
+    appendSourceSnapshot({
+      type: "preset",
+      label: "当前预设",
+      enabled: enabledSources.preset,
+      supported: true,
+      resolvedVia: "bridge",
+      rawItems: presetViaApi.items,
+    });
+  } else {
+    const { apiId, presetName } = getCurrentPresetInfo(context);
+    const rawItems = readPresetFallbackRules(context, oaiSettings);
+    const allowed = isPresetRegexAllowed(extSettings, apiId, presetName);
+    appendSourceSnapshot({
+      type: "preset",
+      label: "当前预设",
+      enabled: enabledSources.preset,
+      supported: true,
+      resolvedVia: "fallback",
+      allowed,
+      reason: allowed
+        ? ""
+        : apiId && presetName
+          ? `酒馆当前未允许预设 "${presetName}" 的正则参与运行`
+          : "未识别到酒馆当前生效的预设",
+      rawItems,
+    });
   }
 
-  return collected;
+  const characterViaApi = collectViaApi("character", regexHost);
+  if (characterViaApi.supported) {
+    appendSourceSnapshot({
+      type: "character",
+      label: "角色卡",
+      enabled: enabledSources.character,
+      supported: true,
+      resolvedVia: "bridge",
+      rawItems: characterViaApi.items,
+    });
+  } else {
+    const { avatar } = getCurrentCharacterInfo(context);
+    const rawItems = readCharacterFallbackRules(context);
+    const allowed = isCharacterRegexAllowed(extSettings, avatar);
+    appendSourceSnapshot({
+      type: "character",
+      label: "角色卡",
+      enabled: enabledSources.character,
+      supported: true,
+      resolvedVia: "fallback",
+      allowed,
+      reason: allowed
+        ? ""
+        : avatar
+          ? "酒馆当前未允许该角色卡的 scoped regex 参与运行"
+          : "当前没有可用的角色卡上下文",
+      rawItems,
+    });
+  }
+
+  return {
+    shouldReuse,
+    host: {
+      sourceLabel: regexHost.sourceLabel,
+      fallback: Boolean(regexHost.fallback),
+      capabilityStatus: regexHost.capabilityStatus || null,
+    },
+    sources,
+    rules: collected,
+  };
+}
+
+function collectTavernRules(regexConfig = {}) {
+  return collectTavernRulesDetailed(regexConfig).rules;
 }
 
 function collectLocalRules(regexConfig = {}) {
@@ -318,31 +623,55 @@ function collectLocalRules(regexConfig = {}) {
     .filter((rule) => rule.enabled && rule.findRegex);
 }
 
+function shouldApplyRuleForTaskContext(rule, stage = "") {
+  if (!rule?.isTavernRule) {
+    return true;
+  }
+
+  if (rule.markdownOnly) {
+    return false;
+  }
+
+  const normalizedStage = String(stage || "").trim();
+  const isFinalPromptStage =
+    normalizedStage === "finalPrompt" || normalizedStage === "input.finalPrompt";
+  const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
+
+  if (isFinalPromptStage) {
+    return rule.promptOnly === true;
+  }
+
+  if (isOutputStage) {
+    return rule.promptOnly !== true;
+  }
+
+  return rule.promptOnly !== true;
+}
+
 function shouldApplyRuleForStage(rule, stage = "", stagesConfig = {}) {
   const normalizedStage = String(stage || "").trim();
-  if (
-    normalizedStage &&
-    Object.prototype.hasOwnProperty.call(stagesConfig, normalizedStage)
-  ) {
-    return (
-      stagesConfig[normalizedStage] !== false &&
-      rule.destinationFlags.prompt !== false
-    );
+  if (rule.destinationFlags.prompt === false) {
+    return false;
   }
-  if (PROMPT_STAGES.has(normalizedStage)) {
-    return (
-      stagesConfig.input !== false && rule.destinationFlags.prompt !== false
-    );
+  if (!shouldApplyRuleForTaskContext(rule, normalizedStage)) {
+    return false;
   }
-  if (OUTPUT_STAGES.has(normalizedStage)) {
-    return (
-      stagesConfig.output !== false && rule.destinationFlags.prompt !== false
-    );
+
+  if (!normalizedStage) {
+    return isTaskRegexStageEnabled(stagesConfig, "input");
   }
-  return stagesConfig.input !== false && rule.destinationFlags.prompt !== false;
+
+  if (PROMPT_STAGES.has(normalizedStage) || OUTPUT_STAGES.has(normalizedStage)) {
+    return isTaskRegexStageEnabled(stagesConfig, normalizedStage);
+  }
+
+  return isTaskRegexStageEnabled(stagesConfig, normalizedStage);
 }
 
 function shouldApplyRuleForRole(rule, role = "system") {
+  if (role === "mixed") {
+    return rule.sourceFlags.user !== false || rule.sourceFlags.assistant !== false;
+  }
   if (role === "user") return rule.sourceFlags.user !== false;
   if (role === "assistant") return rule.sourceFlags.assistant !== false;
   return rule.sourceFlags.system !== false;
@@ -398,7 +727,7 @@ export function applyTaskRegex(
   }
 
   // 阶段检查已移到 shouldApplyRuleForStage 中，无需单独 gate
-  const stagesConfig = regexConfig?.stages || {};
+  const stagesConfig = normalizeTaskRegexStages(regexConfig?.stages || {});
 
   const tavernRules = collectTavernRules(regexConfig);
   const localRules = collectLocalRules(regexConfig);
@@ -440,4 +769,31 @@ export function applyTaskRegex(
   });
 
   return output;
+}
+
+export function inspectTaskRegexReuse(settings = {}, taskType = "") {
+  const profile = getActiveTaskProfile(settings, taskType);
+  const regexConfig = profile?.regex || {};
+  const detailed = collectTavernRulesDetailed(regexConfig);
+
+  return {
+    taskType: String(taskType || ""),
+    profileId: String(profile?.id || ""),
+    profileName: String(profile?.name || ""),
+    regexEnabled: regexConfig.enabled !== false,
+    inheritStRegex: regexConfig.inheritStRegex !== false,
+    stageConfig: normalizeTaskRegexStages(regexConfig.stages || {}),
+    sourceConfig: {
+      global: regexConfig.sources?.global !== false,
+      preset: regexConfig.sources?.preset !== false,
+      character: regexConfig.sources?.character !== false,
+    },
+    localRuleCount: Array.isArray(regexConfig.localRules)
+      ? regexConfig.localRules.length
+      : 0,
+    sources: detailed.sources,
+    host: detailed.host,
+    activeRuleCount: detailed.rules.length,
+    activeRules: detailed.rules.map((rule) => summarizeRule(rule)),
+  };
 }

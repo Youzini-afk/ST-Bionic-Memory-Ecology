@@ -126,6 +126,7 @@ import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
+import { inspectTaskRegexReuse } from "./task-regex.js";
 import {
   applyRecallInjectionController,
   buildRecallRecentMessagesController,
@@ -350,6 +351,9 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      messageTrace: {
+        lastSentUserMessage: null,
+      },
       maintenance: {
         lastAction: null,
         lastUndoResult: null,
@@ -1206,6 +1210,9 @@ function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  recordMessageTraceSnapshot({
+    lastSentUserMessage: null,
+  });
   clearPlannerRecallHandoffsForChat("", { clearAll: true });
 }
 
@@ -9521,6 +9528,8 @@ async function onReembedDirect() {
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,
       fetchEmbeddingModels: onFetchEmbeddingModels,
+      inspectTaskRegexReuse: (taskType) =>
+        inspectTaskRegexReuse(getSettings(), taskType),
       applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       rebuildVectorIndex: () => onRebuildVectorIndex(),

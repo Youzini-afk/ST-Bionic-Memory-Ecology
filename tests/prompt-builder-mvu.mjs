@@ -254,7 +254,8 @@ try {
 
   assert.match(promptBuild.systemPrompt, /GOOD_RECENT/);
   assert.match(JSON.stringify(promptBuild.executionMessages), /GOOD_CANDIDATE/);
-  assert.match(promptBuild.systemPrompt, /FINAL_GOOD/);
+  assert.match(promptBuild.systemPrompt, /FINAL_BAD/);
+  assert.doesNotMatch(promptBuild.systemPrompt, /FINAL_GOOD/);
   assert.equal(
     promptBuild.debug.mvu.sanitizedFields.some((entry) => entry.name === "userMessage"),
     true,
@@ -454,6 +455,8 @@ try {
 
   const payload = buildTaskLlmPayload(promptBuild, "unused fallback");
   assert.equal(payload.systemPrompt, "");
+  assert.match(JSON.stringify(payload.promptMessages), /FINAL_BAD/);
+  assert.doesNotMatch(JSON.stringify(payload.promptMessages), /FINAL_GOOD/);
   const result = await llm.callLLMForJSON({
     systemPrompt: payload.systemPrompt,
     userPrompt: payload.userPrompt,
@@ -466,6 +469,8 @@ try {
 
   assert.deepEqual(result, { ok: true });
   assert.equal(capturedBodies.length, 1);
+  assert.match(JSON.stringify(capturedBodies[0].messages), /FINAL_GOOD/);
+  assert.doesNotMatch(JSON.stringify(capturedBodies[0].messages), /FINAL_BAD/);
   assert.doesNotMatch(
     JSON.stringify(capturedBodies[0].messages),
     /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
@@ -478,6 +483,18 @@ try {
 
   assert.ok(runtimePromptBuild);
   assert.ok(runtimeLlmRequest);
+  assert.match(JSON.stringify(runtimeLlmRequest.messages), /FINAL_GOOD/);
+  assert.equal(runtimeLlmRequest.requestCleaning?.applied, true);
+  assert.equal(
+    runtimeLlmRequest.requestCleaning?.stages?.length > 0,
+    true,
+  );
+  assert.equal(
+    runtimeLlmRequest.requestCleaning?.stages?.every(
+      (entry) => entry.stage === "input.finalPrompt",
+    ),
+    true,
+  );
   assert.doesNotMatch(
     JSON.stringify(runtimePromptBuild.executionMessages),
     /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
