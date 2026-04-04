@@ -46,6 +46,13 @@ const INPUT_REGEX_STAGE_BY_FIELD = {
   contradictionSummary: "input.candidateText",
 };
 
+const INPUT_REGEX_ROLE_BY_FIELD = {
+  userMessage: "user",
+  recentMessages: "mixed",
+  chatMessages: "mixed",
+  dialogueText: "mixed",
+};
+
 function cloneRuntimeDebugValue(value, fallback = null) {
   if (value == null) {
     return fallback;
@@ -601,6 +608,7 @@ function sanitizePromptContextInputs(
     }
     const value = sanitizedContext[fieldName];
     const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
+    const regexRole = INPUT_REGEX_ROLE_BY_FIELD[fieldName] || "system";
     const sanitized = sanitizeStructuredPromptValue(
       settings,
       taskType,
@@ -610,7 +618,7 @@ function sanitizePromptContextInputs(
         path: fieldName,
         mode: "aggressive",
         regexStage,
-        role: "system",
+        role: regexRole,
         debugState,
         regexCollector,
         applyMvu,

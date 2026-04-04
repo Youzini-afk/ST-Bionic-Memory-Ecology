@@ -126,6 +126,7 @@ import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
+import { inspectTaskRegexReuse } from "./task-regex.js";
 import {
   applyRecallInjectionController,
   buildRecallRecentMessagesController,
@@ -9497,6 +9498,8 @@ async function onReembedDirect() {
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,
       fetchEmbeddingModels: onFetchEmbeddingModels,
+      inspectTaskRegexReuse: (taskType) =>
+        inspectTaskRegexReuse(getSettings(), taskType),
       applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       rebuildVectorIndex: () => onRebuildVectorIndex(),
