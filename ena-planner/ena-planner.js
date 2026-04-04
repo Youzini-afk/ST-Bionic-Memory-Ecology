@@ -686,7 +686,11 @@ async function buildWorldbookBlock(scanText) {
 
         // Try EJS rendering if the entry contains EJS tags
         if (body.includes('<%')) {
-            body = renderEjsTemplate(body, ejsCtx);
+            body = renderEjsTemplate(
+                body,
+                ejsCtx,
+                `${e._worldName || 'unknown-worldbook'}${comment ? ` / ${comment}` : ''}`,
+            );
         }
 
         parts.push(`${head}\n${body}`);
@@ -787,18 +791,21 @@ function buildEjsContext() {
     };
 }
 
-function renderEjsTemplate(template, ctx) {
+function renderEjsTemplate(template, ctx, templateLabel = '') {
+    const labelSuffix = templateLabel ? ` (${templateLabel})` : '';
+
     // Try window.ejs first (ST loads this library)
     if (window.ejs?.render) {
         try {
             return window.ejs.render(template, ctx, { async: false });
         } catch (e) {
-            console.warn('[EnaPlanner] EJS render failed, trying fallback:', e?.message);
+            console.warn(`[EnaPlanner] EJS render failed${labelSuffix}, template returned as-is:`, e?.message);
+            return template;
         }
     }
 
     // Safe degradation when ejs is not available.
-    console.warn('[EnaPlanner] window.ejs not available, skipping EJS rendering. Template returned as-is.');
+    console.warn(`[EnaPlanner] window.ejs not available${labelSuffix}, template returned as-is.`);
     return template;
 }
 

@@ -691,6 +691,9 @@ export function refreshLiveState() {
   ) {
     _refreshTaskProfileWorkspace();
   }
+  if (currentTabId === "config" && currentConfigSectionId === "trace") {
+    _refreshMessageTraceWorkspace();
+  }
 
   _refreshGraph();
 }
@@ -1847,6 +1850,7 @@ function _refreshConfigTab() {
   _refreshStageCardStates(settings);
   _refreshPromptCardStates(settings);
   _refreshTaskProfileWorkspace(settings);
+  _refreshMessageTraceWorkspace(settings);
   _highlightThemeChoice(settings.panelTheme || "crimson");
   _syncConfigSectionState();
 }
@@ -2671,6 +2675,236 @@ function _refreshTaskProfileWorkspace(settings = _getSettings?.() || {}) {
 
   const state = _getTaskProfileWorkspaceState(settings);
   workspace.innerHTML = _renderTaskProfileWorkspace(state);
+}
+
+function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
+  const panelDebug = _getRuntimeDebugSnapshot?.() || {
+    hostCapabilities: null,
+    runtimeDebug: null,
+  };
+  const runtimeDebug = panelDebug.runtimeDebug || {};
+
+  return {
+    settings,
+    panelDebug,
+    runtimeDebug,
+    recallInjection: runtimeDebug?.injections?.recall || null,
+    recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
+    recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
+    extractLlmRequest: runtimeDebug?.taskLlmRequests?.extract || null,
+    extractPromptBuild: runtimeDebug?.taskPromptBuilds?.extract || null,
+  };
+}
+
+function _refreshMessageTraceWorkspace(settings = _getSettings?.() || {}) {
+  const workspace = document.getElementById("bme-message-trace-workspace");
+  if (!workspace) return;
+
+  const state = _getMessageTraceWorkspaceState(settings);
+  workspace.innerHTML = _renderMessageTraceWorkspace(state);
+}
+
+function _renderMessageTraceWorkspace(state) {
+  const updatedCandidates = [
+    state.recallInjection?.updatedAt,
+    state.recallLlmRequest?.updatedAt,
+    state.extractLlmRequest?.updatedAt,
+    state.extractPromptBuild?.updatedAt,
+  ]
+    .map((value) => Date.parse(String(value || "")))
+    .filter((value) => Number.isFinite(value));
+  const updatedAt = updatedCandidates.length
+    ? new Date(Math.max(...updatedCandidates)).toISOString()
+    : "";
+
+  return `
+    <div class="bme-task-tab-body">
+      <div class="bme-task-toolbar-row">
+        <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(updatedAt))}</span>
+      </div>
+
+      <div class="bme-task-debug-grid">
+        <div class="bme-config-card">
+          ${_renderMessageTraceRecallCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderMessageTraceExtractCard(state)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function _renderMessageTraceRecallCard(state) {
+  const injectionSnapshot = state.recallInjection || null;
+  const recallLlmRequest = state.recallLlmRequest || null;
+  const recentMessages = Array.isArray(injectionSnapshot?.recentMessages)
+    ? injectionSnapshot.recentMessages.map((item) => String(item || ""))
+    : [];
+  const triggeredUserMessage =
+    _extractTriggeredUserMessageFromRecentMessages(recentMessages) ||
+    _getLastDebugMessageContent(recallLlmRequest?.messages, "user");
+  const hostPayloadText = _buildMainAiTraceText(
+    triggeredUserMessage,
+    injectionSnapshot?.injectionText || "",
+  );
+
+  if (!injectionSnapshot) {
+    return `
+      <div class="bme-config-card-title">最后注入给主 AI 的内容</div>
+      <div class="bme-config-help">
+        还没有可用的召回注入快照。先正常发一条消息，让插件跑完一轮召回即可。
+      </div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最后注入给主 AI 的内容</div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "发送给主 AI 的内容",
+      hostPayloadText,
+      "这次没有捕获到主 AI 侧的注入内容。",
+    )}
+  `;
+}
+
+function _renderMessageTraceExtractCard(state) {
+  const extractLlmRequest = state.extractLlmRequest || null;
+  const extractPromptBuild = state.extractPromptBuild || null;
+  const extractPayloadText = _buildTraceMessagePayloadText(
+    extractLlmRequest?.messages,
+    extractPromptBuild,
+  );
+
+  if (!extractLlmRequest && !extractPromptBuild) {
+    return `
+      <div class="bme-config-card-title">最后送去提取模型的内容</div>
+      <div class="bme-config-help">
+        还没有可用的提取请求快照。等 assistant 正常回完一轮，自动提取跑过后这里就会出现。
+      </div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">最后送去提取模型的内容</div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(
+        _formatTaskProfileTime(extractLlmRequest?.updatedAt || extractPromptBuild?.updatedAt),
+      )}</span>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "发送去提取模型的内容",
+      extractPayloadText,
+      "这次没有捕获到提取请求内容。",
+    )}
+  `;
+}
+
+function _renderMessageTraceTextBlock(title, text, emptyText = "暂无内容") {
+  const normalized = String(text || "").trim();
+  return `
+    <div class="bme-task-section-label">${_escHtml(title)}</div>
+    ${
+      normalized
+        ? `<pre class="bme-debug-pre">${_escHtml(normalized)}</pre>`
+        : `<div class="bme-debug-empty">${_escHtml(emptyText)}</div>`
+    }
+  `;
+}
+
+function _normalizeDebugMessages(messages = []) {
+  if (!Array.isArray(messages)) return [];
+
+  return messages
+    .map((message) => {
+      if (!message || typeof message !== "object") return null;
+      const role = String(message.role || "").trim().toLowerCase();
+      const content = String(message.content || "").trim();
+      if (!role || !content) return null;
+      return { role, content };
+    })
+    .filter(Boolean);
+}
+
+function _getLastDebugMessageContent(messages = [], role = "") {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  const normalizedMessages = _normalizeDebugMessages(messages);
+  for (let index = normalizedMessages.length - 1; index >= 0; index--) {
+    const message = normalizedMessages[index];
+    if (!normalizedRole || message.role === normalizedRole) {
+      return message.content;
+    }
+  }
+  return "";
+}
+
+function _stringifyTraceMessages(messages = []) {
+  const normalizedMessages = _normalizeDebugMessages(messages);
+  if (!normalizedMessages.length) return "";
+
+  return normalizedMessages
+    .map(
+      (message) => `【${message.role}】\n${message.content}`,
+    )
+    .join("\n\n---\n\n");
+}
+
+function _buildMainAiTraceText(triggeredUserMessage = "", injectionText = "") {
+  const sections = [];
+  const normalizedUserMessage = String(triggeredUserMessage || "").trim();
+  const normalizedInjectionText = String(injectionText || "").trim();
+
+  if (normalizedUserMessage) {
+    sections.push(`【user】\n${normalizedUserMessage}`);
+  }
+  if (normalizedInjectionText) {
+    sections.push(`【memory injection】\n${normalizedInjectionText}`);
+  }
+
+  return sections.join("\n\n---\n\n").trim();
+}
+
+function _buildTraceMessagePayloadText(messages = [], promptBuild = null) {
+  const normalizedMessages = _normalizeDebugMessages(messages);
+  if (normalizedMessages.length) {
+    return _stringifyTraceMessages(normalizedMessages);
+  }
+
+  const fallbackMessages = [];
+  const fallbackSystemPrompt = String(promptBuild?.systemPrompt || "").trim();
+  if (fallbackSystemPrompt) {
+    fallbackMessages.push({ role: "system", content: fallbackSystemPrompt });
+  }
+
+  for (const message of promptBuild?.privateTaskMessages || []) {
+    if (!message || typeof message !== "object") continue;
+    const role = String(message.role || "").trim().toLowerCase();
+    const content = String(message.content || "").trim();
+    if (!role || !content) continue;
+    fallbackMessages.push({ role, content });
+  }
+
+  return _stringifyTraceMessages(fallbackMessages);
+}
+
+function _extractTriggeredUserMessageFromRecentMessages(recentMessages = []) {
+  if (!Array.isArray(recentMessages)) return "";
+
+  for (let index = recentMessages.length - 1; index >= 0; index--) {
+    const line = String(recentMessages[index] || "").trim();
+    if (!line) continue;
+    if (line.startsWith("[user]:")) {
+      return line.replace(/^\[user\]:\s*/i, "").trim();
+    }
+  }
+  return "";
 }
 
 function _patchTaskProfiles(taskProfiles, extraPatch = {}, options = {}) {
