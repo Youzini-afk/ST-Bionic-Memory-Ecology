@@ -38,8 +38,15 @@ import {
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
 } from "./chat-history.js";
-import { compressAll, sleepCycle } from "./compressor.js";
-import { consolidateMemories } from "./consolidator.js";
+import {
+  compressAll,
+  inspectAutoCompressionCandidates,
+  sleepCycle,
+} from "./compressor.js";
+import {
+  analyzeAutoConsolidationGate,
+  consolidateMemories,
+} from "./consolidator.js";
 import {
   installSendIntentHooksController,
   onBeforeCombinePromptsController,
@@ -465,7 +472,8 @@ const defaultSettings = {
   // ⑩ 反思条目（P2）
   enableReflection: true, // 启用反思
   reflectEveryN: 10, // 每 N 次提取后反思
-  maintenanceAutoMinNewNodes: 3,
+  consolidationAutoMinNewNodes: 2,
+  compressionEveryN: 10,
 
   // UI 面板
   panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet
@@ -2677,10 +2685,37 @@ function installSendIntentHooks() {
 
 // ==================== 设置管理 ====================
 
+function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
+  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
+    return {};
+  }
+
+  const migrated = { ...loaded };
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      migrated,
+      "consolidationAutoMinNewNodes",
+    ) &&
+    Object.prototype.hasOwnProperty.call(migrated, "maintenanceAutoMinNewNodes")
+  ) {
+    migrated.consolidationAutoMinNewNodes = clampInt(
+      migrated.maintenanceAutoMinNewNodes,
+      defaultSettings.consolidationAutoMinNewNodes,
+      1,
+      50,
+    );
+  }
+  delete migrated.maintenanceAutoMinNewNodes;
+  return migrated;
+}
+
 function getSettings() {
+  const loadedSettings = migrateLegacyAutoMaintenanceSettings(
+    extension_settings[MODULE_NAME] || {},
+  );
   const mergedSettings = {
     ...defaultSettings,
-    ...(extension_settings[MODULE_NAME] || {}),
+    ...loadedSettings,
   };
   const migrated = migrateLegacyTaskProfiles(mergedSettings);
   mergedSettings.taskProfilesVersion = migrated.taskProfilesVersion;
@@ -4958,25 +4993,86 @@ function noteMaintenanceGate(status, action, reason) {
     .join(" | ");
 }
 
-function evaluateAutoMaintenanceGate(action, newNodeCount, settings = {}) {
-  const normalizedAction = String(action || "").trim();
-  if (!["consolidate", "compress"].includes(normalizedAction)) {
-    return { blocked: false, reason: "", minNewNodes: 0 };
-  }
-  if (settings?.maintenanceAutoMinNewNodes == null) {
-    return { blocked: false, reason: "", minNewNodes: 0 };
-  }
-
-  const minNewNodes = clampInt(settings.maintenanceAutoMinNewNodes, 3, 1, 50);
+function evaluateAutoConsolidationGate(
+  newNodeCount,
+  analysis = null,
+  settings = {},
+) {
+  const minNewNodes = clampInt(
+    settings.consolidationAutoMinNewNodes,
+    2,
+    1,
+    50,
+  );
   const safeNewNodeCount = Math.max(0, Number(newNodeCount) || 0);
   if (safeNewNodeCount >= minNewNodes) {
-    return { blocked: false, reason: "", minNewNodes };
+    return {
+      shouldRun: true,
+      minNewNodes,
+      reason: `本批新增 ${safeNewNodeCount} 个节点，达到自动整合门槛 ${minNewNodes}`,
+      matchedScore: null,
+      matchedNodeId: "",
+    };
+  }
+
+  if (analysis?.triggered) {
+    return {
+      shouldRun: true,
+      minNewNodes,
+      reason:
+        String(analysis.reason || "").trim() ||
+        "检测到高重复风险，已触发自动整合",
+      matchedScore: Number.isFinite(Number(analysis?.matchedScore))
+        ? Number(analysis.matchedScore)
+        : null,
+      matchedNodeId: String(analysis?.matchedNodeId || ""),
+    };
   }
 
   return {
-    blocked: true,
+    shouldRun: false,
     minNewNodes,
-    reason: `本批只新增 ${safeNewNodeCount} 个节点，低于门槛 ${minNewNodes}`,
+    reason:
+      String(analysis?.reason || "").trim() ||
+      `本批只新增 ${safeNewNodeCount} 个节点，低于自动整合门槛 ${minNewNodes}`,
+    matchedScore: Number.isFinite(Number(analysis?.matchedScore))
+      ? Number(analysis.matchedScore)
+      : null,
+    matchedNodeId: String(analysis?.matchedNodeId || ""),
+  };
+}
+
+function evaluateAutoCompressionSchedule(
+  currentExtractionCount,
+  settings = {},
+) {
+  const everyN = clampInt(settings.compressionEveryN, 10, 0, 500);
+  const safeExtractionCount = Math.max(0, Number(currentExtractionCount) || 0);
+
+  if (everyN <= 0) {
+    return {
+      scheduled: false,
+      everyN,
+      nextExtractionCount: null,
+      reason: "自动压缩已关闭",
+    };
+  }
+
+  const remainder = safeExtractionCount % everyN;
+  if (remainder !== 0) {
+    return {
+      scheduled: false,
+      everyN,
+      nextExtractionCount: safeExtractionCount + (everyN - remainder),
+      reason: `当前为第 ${safeExtractionCount} 次提取，未到每 ${everyN} 次自动压缩周期`,
+    };
+  }
+
+  return {
+    scheduled: true,
+    everyN,
+    nextExtractionCount: safeExtractionCount + everyN,
+    reason: "",
   };
 }
 
@@ -5238,10 +5334,11 @@ function getPersistedSettingsSnapshot(settings = getSettings()) {
 }
 
 function mergePersistedSettings(loaded = {}) {
+  const compatibleLoaded = migrateLegacyAutoMaintenanceSettings(loaded);
   const merged = { ...defaultSettings };
   for (const key of Object.keys(defaultSettings)) {
-    if (Object.prototype.hasOwnProperty.call(loaded, key)) {
-      merged[key] = loaded[key];
+    if (Object.prototype.hasOwnProperty.call(compatibleLoaded, key)) {
+      merged[key] = compatibleLoaded[key];
     }
   }
   return merged;
@@ -7108,33 +7205,106 @@ async function handleExtractionSuccess(
   const newNodeCount = Array.isArray(result?.newNodeIds)
     ? result.newNodeIds.length
     : 0;
-  const resolveAutoMaintenanceGate =
-    typeof evaluateAutoMaintenanceGate === "function"
-      ? evaluateAutoMaintenanceGate
-      : (action, count, localSettings = {}) => {
-          const normalizedAction = String(action || "").trim();
-          if (!["consolidate", "compress"].includes(normalizedAction)) {
-            return { blocked: false, reason: "", minNewNodes: 0 };
-          }
-          if (localSettings?.maintenanceAutoMinNewNodes == null) {
-            return { blocked: false, reason: "", minNewNodes: 0 };
-          }
-          const parsedMinNewNodes = Math.floor(
-            Number(localSettings.maintenanceAutoMinNewNodes),
+  const resolveAutoConsolidationGate =
+    typeof evaluateAutoConsolidationGate === "function"
+      ? evaluateAutoConsolidationGate
+      : (count, analysis = null, localSettings = {}) => {
+          const minNewNodes = Math.max(
+            1,
+            Math.min(
+              50,
+              Math.floor(
+                Number(localSettings?.consolidationAutoMinNewNodes ?? 2),
+              ) || 2,
+            ),
           );
-          const minNewNodes =
-            Number.isFinite(parsedMinNewNodes) && parsedMinNewNodes >= 1
-              ? Math.min(50, parsedMinNewNodes)
-              : 3;
           const safeCount = Math.max(0, Number(count) || 0);
-          return safeCount >= minNewNodes
-            ? { blocked: false, reason: "", minNewNodes }
-            : {
-                blocked: true,
-                minNewNodes,
-                reason: `本批只新增 ${safeCount} 个节点，低于门槛 ${minNewNodes}`,
-              };
+          if (safeCount >= minNewNodes) {
+            return {
+              shouldRun: true,
+              minNewNodes,
+              reason: `本批新增 ${safeCount} 个节点，达到自动整合门槛 ${minNewNodes}`,
+              matchedScore: null,
+              matchedNodeId: "",
+            };
+          }
+          if (analysis?.triggered) {
+            return {
+              shouldRun: true,
+              minNewNodes,
+              reason:
+                String(analysis.reason || "").trim() ||
+                "检测到高重复风险，已触发自动整合",
+              matchedScore: Number.isFinite(Number(analysis?.matchedScore))
+                ? Number(analysis.matchedScore)
+                : null,
+              matchedNodeId: String(analysis?.matchedNodeId || ""),
+            };
+          }
+          return {
+            shouldRun: false,
+            minNewNodes,
+            reason:
+              String(analysis?.reason || "").trim() ||
+              `本批新增少且无明显重复风险，跳过自动整合`,
+            matchedScore: Number.isFinite(Number(analysis?.matchedScore))
+              ? Number(analysis.matchedScore)
+              : null,
+            matchedNodeId: String(analysis?.matchedNodeId || ""),
+          };
         };
+  const analyzeConsolidationGate =
+    typeof analyzeAutoConsolidationGate === "function"
+      ? analyzeAutoConsolidationGate
+      : async () => ({
+          triggered: false,
+          reason: "本批新增少且无明显重复风险，跳过自动整合",
+          matchedScore: null,
+          matchedNodeId: "",
+        });
+  const resolveAutoCompressionSchedule =
+    typeof evaluateAutoCompressionSchedule === "function"
+      ? evaluateAutoCompressionSchedule
+      : (currentCount, localSettings = {}) => {
+          const parsedEveryN = Math.floor(
+            Number(localSettings?.compressionEveryN),
+          );
+          const everyN =
+            Number.isFinite(parsedEveryN) && parsedEveryN >= 0
+              ? Math.min(500, parsedEveryN)
+              : 10;
+          const safeCount = Math.max(0, Number(currentCount) || 0);
+          if (everyN <= 0) {
+            return {
+              scheduled: false,
+              everyN,
+              nextExtractionCount: null,
+              reason: "自动压缩已关闭",
+            };
+          }
+          const remainder = safeCount % everyN;
+          if (remainder !== 0) {
+            return {
+              scheduled: false,
+              everyN,
+              nextExtractionCount: safeCount + (everyN - remainder),
+              reason: `当前为第 ${safeCount} 次提取，未到每 ${everyN} 次自动压缩周期`,
+            };
+          }
+          return {
+            scheduled: true,
+            everyN,
+            nextExtractionCount: safeCount + everyN,
+            reason: "",
+          };
+        };
+  const inspectCompressionCandidates =
+    typeof inspectAutoCompressionCandidates === "function"
+      ? inspectAutoCompressionCandidates
+      : () => ({
+          hasCandidates: false,
+          reason: "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组",
+        });
   const applyMaintenanceGateNote =
     typeof noteMaintenanceGate === "function"
       ? noteMaintenanceGate
@@ -7185,12 +7355,38 @@ async function handleExtractionSuccess(
   setBatchStageOutcome(status, "core", "success");
 
   if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
-    const gate = resolveAutoMaintenanceGate(
-      "consolidate",
+    let consolidationAnalysis = null;
+    const minNewNodes = Math.max(
+      1,
+      Math.min(
+        50,
+        Math.floor(Number(settings?.consolidationAutoMinNewNodes ?? 2)) || 2,
+      ),
+    );
+    if (newNodeCount < minNewNodes) {
+      consolidationAnalysis = await analyzeConsolidationGate({
+        graph: currentGraph,
+        newNodeIds: result.newNodeIds,
+        embeddingConfig: getEmbeddingConfig(),
+        schema: getSchema(),
+        conflictThreshold: settings.consolidationThreshold,
+        signal,
+      });
+    }
+    const gate = resolveAutoConsolidationGate(
       newNodeCount,
+      consolidationAnalysis,
       settings,
     );
-    if (gate.blocked) {
+    status.consolidationGateTriggered = Boolean(gate.shouldRun);
+    status.consolidationGateReason = String(gate.reason || "");
+    status.consolidationGateSimilarity = Number.isFinite(
+      Number(gate.matchedScore),
+    )
+      ? Number(gate.matchedScore)
+      : null;
+    status.consolidationGateMatchedNodeId = String(gate.matchedNodeId || "");
+    if (!gate.shouldRun) {
       applyMaintenanceGateNote(status, "consolidate", gate.reason);
       pushBatchStageArtifact(status, "structural", "consolidation-skipped");
     } else {
@@ -7315,40 +7511,57 @@ async function handleExtractionSuccess(
     }
   }
 
+  const compressionSchedule = resolveAutoCompressionSchedule(
+    extractionCount,
+    settings,
+  );
+  status.autoCompressionScheduled = Boolean(compressionSchedule.scheduled);
+  status.nextCompressionAtExtractionCount =
+    compressionSchedule.nextExtractionCount;
+  status.autoCompressionSkippedReason = compressionSchedule.reason || "";
+
   try {
     throwIfAborted(signal, "提取已终止");
-    const gate = resolveAutoMaintenanceGate(
-      "compress",
-      newNodeCount,
-      settings,
-    );
-    if (gate.blocked) {
-      applyMaintenanceGateNote(status, "compress", gate.reason);
-      pushBatchStageArtifact(status, "structural", "compression-skipped");
-    } else {
-      const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
-      const compressionResult = await compressAll(
+    if (compressionSchedule.scheduled) {
+      const compressionInspection = inspectCompressionCandidates(
         currentGraph,
         getSchema(),
-        getEmbeddingConfig(),
         false,
-        undefined,
-        signal,
-        settings,
       );
-      if (compressionResult.created > 0 || compressionResult.archived > 0) {
-        persistMaintenanceAction({
-          action: "compress",
-          beforeSnapshot,
-          mode: "auto",
-          summary: summarizeMaintenance(
-            "compress",
-            compressionResult,
-            "auto",
-          ),
-        });
-        postProcessArtifacts.push("compression");
-        pushBatchStageArtifact(status, "structural", "compression");
+      if (!compressionInspection?.hasCandidates) {
+        status.autoCompressionSkippedReason =
+          String(compressionInspection?.reason || "").trim() ||
+          "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组";
+        pushBatchStageArtifact(status, "structural", "compression-skipped");
+      } else {
+        status.autoCompressionSkippedReason = "";
+        const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
+        const compressionResult = await compressAll(
+          currentGraph,
+          getSchema(),
+          getEmbeddingConfig(),
+          false,
+          undefined,
+          signal,
+          settings,
+        );
+        if (compressionResult.created > 0 || compressionResult.archived > 0) {
+          persistMaintenanceAction({
+            action: "compress",
+            beforeSnapshot,
+            mode: "auto",
+            summary: summarizeMaintenance(
+              "compress",
+              compressionResult,
+              "auto",
+            ),
+          });
+          postProcessArtifacts.push("compression");
+          pushBatchStageArtifact(status, "structural", "compression");
+        } else {
+          status.autoCompressionSkippedReason =
+            "已尝试自动压缩，但本轮未产生可持久化变化";
+        }
       }
     }
   } catch (error) {

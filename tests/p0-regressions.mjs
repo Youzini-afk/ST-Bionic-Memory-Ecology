@@ -231,6 +231,16 @@ function createBatchStageHarness() {
       getSchema: () => schema,
       getEmbeddingConfig: () => null,
       getVectorIndexStats: () => ({ pending: 0 }),
+      analyzeAutoConsolidationGate: async () => ({
+        triggered: false,
+        reason: "本批新增少且无明显重复风险，跳过自动整合",
+        matchedScore: null,
+        matchedNodeId: "",
+      }),
+      inspectAutoCompressionCandidates: () => ({
+        hasCandidates: false,
+        reason: "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组",
+      }),
       updateLastExtractedItems: () => {},
       ensureCurrentGraphRuntimeState: () => {},
       throwIfAborted: () => {},
@@ -2530,6 +2540,10 @@ async function testBatchStatusStructuralPartialRemainsRecoverable() {
     harness.currentGraph.historyState ||= {};
     harness.currentGraph.vectorIndexState ||= {};
   };
+  harness.inspectAutoCompressionCandidates = () => ({
+    hasCandidates: true,
+    reason: "",
+  });
   harness.compressAll = async () => {
     throw new Error("compression down");
   };
@@ -2550,6 +2564,7 @@ async function testBatchStatusStructuralPartialRemainsRecoverable() {
       enableSynopsis: false,
       enableReflection: false,
       enableSleepCycle: false,
+      compressionEveryN: 1,
       synopsisEveryN: 1,
       reflectEveryN: 1,
       sleepEveryN: 1,
@@ -2612,6 +2627,333 @@ async function testBatchStatusSemanticFailureDoesNotHideCoreSuccess() {
   assert.equal(effects.batchStatus.outcome, "failed");
   assert.equal(effects.batchStatus.completed, true);
   assert.match(effects.batchStatus.errors[0], /概要生成失败/);
+}
+
+async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let gateCalls = 0;
+  let consolidateCalls = 0;
+  harness.analyzeAutoConsolidationGate = async () => {
+    gateCalls += 1;
+    return {
+      triggered: true,
+      reason:
+        "本批仅新增 1 个节点，但与旧记忆高度相似（0.930 >= 0.85），已触发自动整合",
+      matchedScore: 0.93,
+      matchedNodeId: "old-1",
+    };
+  };
+  harness.consolidateMemories = async () => {
+    consolidateCalls += 1;
+    return {
+      merged: 1,
+      skipped: 0,
+      kept: 0,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [6, 6],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-dup"] },
+    6,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      compressionEveryN: 0,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  assert.equal(gateCalls, 1);
+  assert.equal(consolidateCalls, 1);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, true);
+  assert.equal(
+    effects.batchStatus.consolidationGateMatchedNodeId,
+    "old-1",
+  );
+  assert.equal(effects.batchStatus.consolidationGateSimilarity, 0.93);
+  assert.match(
+    effects.batchStatus.consolidationGateReason,
+    /高度相似/,
+  );
+  assert.equal(effects.batchStatus.autoCompressionScheduled, false);
+  assert.match(
+    effects.batchStatus.autoCompressionSkippedReason,
+    /自动压缩已关闭/,
+  );
+}
+
+async function testAutoConsolidationSkipsLowRiskSingleNode() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let consolidateCalls = 0;
+  harness.analyzeAutoConsolidationGate = async () => ({
+    triggered: false,
+    reason:
+      "本批新增少且最高相似度 0.420 未达到阈值 0.85，跳过自动整合",
+    matchedScore: 0.42,
+    matchedNodeId: "old-2",
+  });
+  harness.consolidateMemories = async () => {
+    consolidateCalls += 1;
+    return {
+      merged: 0,
+      skipped: 0,
+      kept: 1,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [7, 7],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-low-risk"] },
+    7,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      compressionEveryN: 0,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  assert.equal(consolidateCalls, 0);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, false);
+  assert.equal(
+    effects.batchStatus.consolidationGateMatchedNodeId,
+    "old-2",
+  );
+  assert.equal(effects.batchStatus.consolidationGateSimilarity, 0.42);
+  assert.match(
+    effects.batchStatus.consolidationGateReason,
+    /跳过自动整合/,
+  );
+  assert.equal(
+    effects.batchStatus.stages.structural.artifacts.includes(
+      "consolidation-skipped",
+    ),
+    true,
+  );
+}
+
+async function testAutoCompressionRunsOnlyOnConfiguredInterval() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 9 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  harness.extractionCount = 9;
+  let compressionCalls = 0;
+  harness.inspectAutoCompressionCandidates = () => ({
+    hasCandidates: true,
+    reason: "",
+  });
+  harness.compressAll = async () => {
+    compressionCalls += 1;
+    return { created: 1, archived: 2 };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [8, 8],
+    extractionCountBefore: 9,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-for-compress"] },
+    8,
+    {
+      enableConsolidation: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  assert.equal(compressionCalls, 1);
+  assert.equal(effects.batchStatus.autoCompressionScheduled, true);
+  assert.equal(effects.batchStatus.nextCompressionAtExtractionCount, 20);
+  assert.equal(effects.batchStatus.autoCompressionSkippedReason, "");
+}
+
+async function testAutoCompressionSkipsWhenNotScheduledOrNoCandidates() {
+  const offCycleHarness = await createBatchStageHarness();
+  const {
+    createBatchStatusSkeleton: createOffCycleBatchStatus,
+    handleExtractionSuccess: handleOffCycleExtractionSuccess,
+  } = offCycleHarness.result;
+  offCycleHarness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  offCycleHarness.ensureCurrentGraphRuntimeState = () => {
+    offCycleHarness.currentGraph.historyState ||= {};
+    offCycleHarness.currentGraph.vectorIndexState ||= {};
+  };
+  let offCycleCompressionCalls = 0;
+  offCycleHarness.compressAll = async () => {
+    offCycleCompressionCalls += 1;
+    return { created: 1, archived: 1 };
+  };
+  offCycleHarness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const offCycleStatus = createOffCycleBatchStatus({
+    processedRange: [9, 9],
+    extractionCountBefore: 0,
+  });
+  const offCycleEffects = await handleOffCycleExtractionSuccess(
+    { newNodeIds: ["node-off-cycle"] },
+    9,
+    {
+      enableConsolidation: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    offCycleStatus,
+  );
+
+  assert.equal(offCycleCompressionCalls, 0);
+  assert.equal(offCycleEffects.batchStatus.autoCompressionScheduled, false);
+  assert.match(
+    offCycleEffects.batchStatus.autoCompressionSkippedReason,
+    /未到每 10 次自动压缩周期/,
+  );
+  assert.equal(offCycleEffects.batchStatus.nextCompressionAtExtractionCount, 10);
+
+  const scheduledHarness = await createBatchStageHarness();
+  const {
+    createBatchStatusSkeleton: createScheduledBatchStatus,
+    handleExtractionSuccess: handleScheduledExtractionSuccess,
+  } = scheduledHarness.result;
+  scheduledHarness.currentGraph = {
+    historyState: { extractionCount: 9 },
+    vectorIndexState: {},
+  };
+  scheduledHarness.ensureCurrentGraphRuntimeState = () => {
+    scheduledHarness.currentGraph.historyState ||= {};
+    scheduledHarness.currentGraph.vectorIndexState ||= {};
+  };
+  scheduledHarness.extractionCount = 9;
+  let scheduledCompressionCalls = 0;
+  scheduledHarness.inspectAutoCompressionCandidates = () => ({
+    hasCandidates: false,
+    reason: "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组",
+  });
+  scheduledHarness.compressAll = async () => {
+    scheduledCompressionCalls += 1;
+    return { created: 1, archived: 1 };
+  };
+  scheduledHarness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const scheduledStatus = createScheduledBatchStatus({
+    processedRange: [10, 10],
+    extractionCountBefore: 9,
+  });
+  const scheduledEffects = await handleScheduledExtractionSuccess(
+    { newNodeIds: ["node-scheduled"] },
+    10,
+    {
+      enableConsolidation: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    scheduledStatus,
+  );
+
+  assert.equal(scheduledCompressionCalls, 0);
+  assert.equal(scheduledEffects.batchStatus.autoCompressionScheduled, true);
+  assert.match(
+    scheduledEffects.batchStatus.autoCompressionSkippedReason,
+    /没有达到内部压缩阈值的候选组/,
+  );
+  assert.equal(
+    scheduledEffects.batchStatus.stages.structural.artifacts.includes(
+      "compression-skipped",
+    ),
+    true,
+  );
 }
 
 async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
@@ -4685,6 +5027,10 @@ await testReverseJournalRollbackStateFormsReplayClosure();
 await testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairSet();
 await testBatchStatusStructuralPartialRemainsRecoverable();
 await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
+await testAutoConsolidationRunsOnHighDuplicateRiskSingleNode();
+await testAutoConsolidationSkipsLowRiskSingleNode();
+await testAutoCompressionRunsOnlyOnConfiguredInterval();
+await testAutoCompressionSkipsWhenNotScheduledOrNoCandidates();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
 await testProcessedHistoryAdvanceTracksCoreExtractionSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();

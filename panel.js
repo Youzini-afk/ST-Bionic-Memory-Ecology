@@ -1765,8 +1765,12 @@ function _refreshConfigTab() {
     settings.forgetThreshold ?? 0.5,
   );
   _setInputValue(
-    "bme-setting-maintenance-auto-min-new-nodes",
-    settings.maintenanceAutoMinNewNodes ?? 3,
+    "bme-setting-consolidation-auto-min-new-nodes",
+    settings.consolidationAutoMinNewNodes ?? 2,
+  );
+  _setInputValue(
+    "bme-setting-compression-every",
+    settings.compressionEveryN ?? 10,
   );
   _setInputValue("bme-setting-sleep-every", settings.sleepEveryN ?? 10);
   _setInputValue(
@@ -2127,11 +2131,18 @@ function _bindConfigControls() {
     _patchSettings({ forgetThreshold: value }),
   );
   bindNumber(
-    "bme-setting-maintenance-auto-min-new-nodes",
-    3,
+    "bme-setting-consolidation-auto-min-new-nodes",
+    2,
     1,
     50,
-    (value) => _patchSettings({ maintenanceAutoMinNewNodes: value }),
+    (value) => _patchSettings({ consolidationAutoMinNewNodes: value }),
+  );
+  bindNumber(
+    "bme-setting-compression-every",
+    10,
+    0,
+    500,
+    (value) => _patchSettings({ compressionEveryN: value }),
   );
   bindNumber("bme-setting-sleep-every", 10, 1, 200, (value) =>
     _patchSettings({ sleepEveryN: value }),

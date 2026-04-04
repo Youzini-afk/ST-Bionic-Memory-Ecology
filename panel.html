@@ -1916,22 +1916,45 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
-                      <div class="bme-config-card-title">自动维护门槛</div>
+                      <div class="bme-config-card-title">自动整合触发</div>
                       <div class="bme-config-card-subtitle">
-                        新增节点太少时，自动整合和自动压缩直接跳过，避免小批次也跑重维护。
+                        本批新增节点不足时，仍会检查是否与旧记忆高度重复；命中后照样自动整合。
                       </div>
                     </div>
                   </div>
                   <div class="bme-config-row">
-                    <label for="bme-setting-maintenance-auto-min-new-nodes"
+                    <label for="bme-setting-consolidation-auto-min-new-nodes"
                       >最少新增节点数</label
                     >
                     <input
-                      id="bme-setting-maintenance-auto-min-new-nodes"
+                      id="bme-setting-consolidation-auto-min-new-nodes"
                       class="bme-config-input"
                       type="number"
                       min="1"
                       max="50"
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">自动压缩周期</div>
+                      <div class="bme-config-card-subtitle">
+                        按提取次数计数；到周期点时才尝试自动压缩。填 0 表示关闭。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-compression-every"
+                      >每 N 次提取尝试一次</label
+                    >
+                    <input
+                      id="bme-setting-compression-every"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="500"
                     />
                   </div>
                 </div>

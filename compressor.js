@@ -58,6 +58,28 @@ function throwIfAborted(signal) {
   }
 }
 
+function resolveCompressionWindow(compression = {}, force = false) {
+  const fanIn = Number.isFinite(Number(compression?.fanIn))
+    ? Math.max(2, Number(compression.fanIn))
+    : 2;
+  const threshold = force
+    ? fanIn
+    : Number.isFinite(Number(compression?.threshold))
+      ? Math.max(2, Number(compression.threshold))
+      : fanIn;
+  const keepRecent = force
+    ? 0
+    : Number.isFinite(Number(compression?.keepRecentLeaves))
+      ? Math.max(0, Number(compression.keepRecentLeaves))
+      : 0;
+
+  return {
+    fanIn,
+    threshold,
+    keepRecent,
+  };
+}
+
 /**
  * 对指定类型执行层级压缩
  *
@@ -126,9 +148,10 @@ async function compressLevel({
   settings = {},
 }) {
   const compression = typeDef.compression;
-  const fanIn = Number.isFinite(Number(compression.fanIn))
-    ? Math.max(2, Number(compression.fanIn))
-    : 2;
+  const { fanIn, threshold, keepRecent } = resolveCompressionWindow(
+    compression,
+    force,
+  );
   throwIfAborted(signal);
 
   // 获取该层级的活跃叶子节点
@@ -137,17 +160,6 @@ async function compressLevel({
     .sort((a, b) => a.seq - b.seq);
   let created = 0;
   let archived = 0;
-
-  const threshold = force
-    ? fanIn
-    : Number.isFinite(Number(compression.threshold))
-      ? Math.max(2, Number(compression.threshold))
-      : fanIn;
-  const keepRecent = force
-    ? 0
-    : Number.isFinite(Number(compression.keepRecentLeaves))
-      ? Math.max(0, Number(compression.keepRecentLeaves))
-      : 0;
 
   for (const group of groupCompressionCandidates(levelNodes)) {
     if (force ? group.length < fanIn : group.length <= threshold) {
@@ -235,6 +247,78 @@ function groupCompressionCandidates(nodes = []) {
   return [...groups.values()].map((group) =>
     group.sort((a, b) => a.seq - b.seq),
   );
+}
+
+function inspectCompressibleGroup(group = [], compression = {}, force = false) {
+  const { fanIn, threshold, keepRecent } = resolveCompressionWindow(
+    compression,
+    force,
+  );
+  if (force ? group.length < fanIn : group.length <= threshold) {
+    return null;
+  }
+
+  const compressible = group.slice(0, Math.max(0, group.length - keepRecent));
+  if (compressible.length < fanIn) {
+    return null;
+  }
+
+  return {
+    candidateCount: compressible.length,
+    fanIn,
+    threshold,
+    keepRecent,
+  };
+}
+
+export function inspectAutoCompressionCandidates(
+  graph,
+  schema = [],
+  force = false,
+) {
+  const safeSchema = Array.isArray(schema) ? schema : [];
+  for (const typeDef of safeSchema) {
+    if (typeDef?.compression?.mode !== "hierarchical") continue;
+    const maxDepth = Number.isFinite(Number(typeDef?.compression?.maxDepth))
+      ? Math.max(1, Number(typeDef.compression.maxDepth))
+      : 1;
+
+    for (let level = 0; level < maxDepth; level++) {
+      const levelNodes = getActiveNodes(graph, typeDef.id)
+        .filter((node) => Number(node?.level || 0) === level)
+        .sort((a, b) => a.seq - b.seq);
+
+      for (const group of groupCompressionCandidates(levelNodes)) {
+        const summary = inspectCompressibleGroup(
+          group,
+          typeDef.compression,
+          force,
+        );
+        if (!summary) continue;
+        return {
+          hasCandidates: true,
+          typeId: String(typeDef.id || ""),
+          level,
+          candidateCount: summary.candidateCount,
+          threshold: summary.threshold,
+          fanIn: summary.fanIn,
+          keepRecent: summary.keepRecent,
+          reason: "",
+        };
+      }
+    }
+  }
+
+  return {
+    hasCandidates: false,
+    typeId: "",
+    level: null,
+    candidateCount: 0,
+    threshold: 0,
+    fanIn: 0,
+    keepRecent: 0,
+    reason: "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组",
+  };
 }
 
 function migrateBatchEdges(graph, batch, compressedNode) {
