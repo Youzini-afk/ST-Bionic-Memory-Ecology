@@ -139,10 +139,32 @@ function buildTemplateContext(templateContext = {}, hostSnapshot) {
       : snapshot.chat.lastUserMessage || "";
 
   return {
+    userMessage: "",
+    recentMessages: "",
+    chatMessages: [],
+    dialogueText: "",
+    candidateText: "",
+    candidateNodes: [],
+    nodeContent: "",
+    eventSummary: "",
+    characterSummary: "",
+    threadSummary: "",
+    contradictionSummary: "",
+    graphStats: "",
+    schema: "",
+    currentRange: "",
+    worldInfoBefore: "",
+    worldInfoAfter: "",
+    worldInfoBeforeEntries: [],
+    worldInfoAfterEntries: [],
+    worldInfoAtDepthEntries: [],
+    activatedWorldInfoNames: [],
+    taskAdditionalMessages: [],
     user: snapshot.user.name,
     char: snapshot.character.name,
     userName: promptAliases.userName || snapshot.user.name,
     charName: promptAliases.charName || snapshot.character.name,
+    assistantName: promptAliases.charName || snapshot.character.name,
     persona: promptAliases.userPersona || snapshot.persona.text,
     userPersona: promptAliases.userPersona || snapshot.persona.text,
     charDescription:
@@ -181,6 +203,17 @@ function cloneDeep(value) {
   }
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function getByPath(target, path, defaultValue = undefined) {
   const result = String(path || "")
     .split(".")
@@ -195,6 +228,60 @@ function escapeRegExp(value) {
 
 function normalizeEntryKey(value) {
   return String(value ?? "").trim();
+}
+
+function isEntryIdentifier(value) {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    value instanceof RegExp
+  );
+}
+
+function cloneRegExp(pattern) {
+  return new RegExp(pattern.source, pattern.flags);
+}
+
+function matchesWorldbookIdentifier(worldbook, identifier) {
+  if (!isEntryIdentifier(identifier)) {
+    return false;
+  }
+
+  if (identifier instanceof RegExp) {
+    return cloneRegExp(identifier).test(String(worldbook || ""));
+  }
+
+  return normalizeEntryKey(worldbook) === normalizeEntryKey(identifier);
+}
+
+function matchesEntryIdentifier(entry = {}, identifier) {
+  if (!isEntryIdentifier(identifier)) {
+    return false;
+  }
+
+  const entryName = normalizeEntryKey(entry.name);
+  const entryComment = normalizeEntryKey(entry.comment);
+  const entryUid = Number(entry.uid) || 0;
+
+  if (identifier instanceof RegExp) {
+    const pattern = cloneRegExp(identifier);
+    return pattern.test(entryComment) || pattern.test(entryName);
+  }
+
+  if (typeof identifier === "number") {
+    return entryUid === identifier;
+  }
+
+  const normalizedIdentifier = normalizeEntryKey(identifier);
+  if (!normalizedIdentifier) {
+    return false;
+  }
+
+  return (
+    entryComment === normalizedIdentifier ||
+    entryName === normalizedIdentifier ||
+    String(entryUid) === normalizedIdentifier
+  );
 }
 
 function normalizeIdentifier(value) {
@@ -310,6 +397,7 @@ function registerEntries(renderCtx, entries = []) {
     renderCtx.entries.push(entry);
     registerEntryLookup(renderCtx.allEntries, entry.name, entry);
     registerEntryLookup(renderCtx.allEntries, entry.comment, entry);
+    registerEntryLookup(renderCtx.allEntries, entry.uid, entry);
 
     if (!renderCtx.entriesByWorldbook.has(entry.worldbook)) {
       renderCtx.entriesByWorldbook.set(entry.worldbook, new Map());
@@ -317,6 +405,7 @@ function registerEntries(renderCtx, entries = []) {
     const worldbookLookup = renderCtx.entriesByWorldbook.get(entry.worldbook);
     registerEntryLookup(worldbookLookup, entry.name, entry);
     registerEntryLookup(worldbookLookup, entry.comment, entry);
+    registerEntryLookup(worldbookLookup, entry.uid, entry);
   }
 }
 
@@ -372,53 +461,151 @@ async function ensureWorldbookEntriesLoaded(renderCtx, worldbookName) {
   return renderCtx.entriesByWorldbook.has(normalizedWorldbook);
 }
 
-async function resolveEntry(renderCtx, currentWorldbook, worldbookOrEntry, entryNameOrData) {
-  const explicitWorldbook =
-    typeof entryNameOrData === "string"
-      ? normalizeEntryKey(worldbookOrEntry)
-      : "";
-  const fallbackWorldbook = normalizeEntryKey(currentWorldbook);
-  const identifier = normalizeEntryKey(
-    typeof entryNameOrData === "string" ? entryNameOrData : worldbookOrEntry,
-  );
-
-  if (!identifier) return undefined;
-
-  const lookupInWorldbook = (worldbook) => {
-    if (!worldbook) return undefined;
-    return renderCtx.entriesByWorldbook.get(worldbook)?.get(identifier);
-  };
-
-  let resolved =
-    lookupInWorldbook(explicitWorldbook) ||
-    lookupInWorldbook(fallbackWorldbook) ||
-    renderCtx.allEntries.get(identifier);
-
-  if (!resolved && explicitWorldbook) {
-    await ensureWorldbookEntriesLoaded(renderCtx, explicitWorldbook);
-    resolved =
-      lookupInWorldbook(explicitWorldbook) ||
-      lookupInWorldbook(fallbackWorldbook) ||
-      renderCtx.allEntries.get(identifier);
+function lookupEntryInMap(lookup, identifier) {
+  if (!(lookup instanceof Map) || !isEntryIdentifier(identifier)) {
+    return undefined;
   }
 
-  if (
-    !resolved &&
-    typeof renderCtx.resolveIgnoredEntry === "function"
-  ) {
-    const ignoredEntry =
-      renderCtx.resolveIgnoredEntry(explicitWorldbook || fallbackWorldbook, identifier) ||
-      renderCtx.resolveIgnoredEntry("", identifier);
-    if (ignoredEntry) {
-      const descriptor = ignoredEntry.sourceName || ignoredEntry.name || identifier;
-      recordRenderWarning(
-        renderCtx,
-        `mvu filtered world info blocked: ${ignoredEntry.worldbook ? `${ignoredEntry.worldbook}/` : ""}${descriptor}`,
-      );
+  if (!(identifier instanceof RegExp)) {
+    const direct = lookup.get(normalizeEntryKey(identifier));
+    if (direct) {
+      return direct;
     }
   }
 
-  return resolved;
+  for (const entry of lookup.values()) {
+    if (matchesEntryIdentifier(entry, identifier)) {
+      return entry;
+    }
+  }
+
+  return undefined;
+}
+
+function buildCandidateLookups(renderCtx, currentWorldbook, explicitWorldbook = null) {
+  const candidates = [];
+  const seen = new Set();
+  const pushLookup = (lookup) => {
+    if (!(lookup instanceof Map) || seen.has(lookup)) {
+      return;
+    }
+    seen.add(lookup);
+    candidates.push(lookup);
+  };
+
+  if (typeof explicitWorldbook === "string") {
+    pushLookup(renderCtx.entriesByWorldbook.get(normalizeEntryKey(explicitWorldbook)));
+  } else if (explicitWorldbook instanceof RegExp) {
+    for (const [worldbookName, lookup] of renderCtx.entriesByWorldbook.entries()) {
+      if (matchesWorldbookIdentifier(worldbookName, explicitWorldbook)) {
+        pushLookup(lookup);
+      }
+    }
+  }
+
+  const fallbackWorldbook = normalizeEntryKey(currentWorldbook);
+  if (fallbackWorldbook) {
+    pushLookup(renderCtx.entriesByWorldbook.get(fallbackWorldbook));
+  }
+
+  pushLookup(renderCtx.allEntries);
+  return candidates;
+}
+
+async function resolveEntry(renderCtx, currentWorldbook, worldbookOrEntry, entryNameOrData) {
+  const hasExplicitWorldbook = isEntryIdentifier(entryNameOrData);
+  const explicitWorldbook = hasExplicitWorldbook ? worldbookOrEntry : null;
+  const fallbackWorldbook = normalizeEntryKey(currentWorldbook);
+  const identifier = hasExplicitWorldbook ? entryNameOrData : worldbookOrEntry;
+
+  if (!isEntryIdentifier(identifier)) {
+    return undefined;
+  }
+
+  const directLookups = buildCandidateLookups(
+    renderCtx,
+    fallbackWorldbook,
+    explicitWorldbook,
+  );
+  for (const lookup of directLookups) {
+    const matched = lookupEntryInMap(lookup, identifier);
+    if (matched) {
+      return matched;
+    }
+  }
+
+  if (typeof explicitWorldbook === "string" && normalizeEntryKey(explicitWorldbook)) {
+    await ensureWorldbookEntriesLoaded(renderCtx, explicitWorldbook);
+    const loadedLookups = buildCandidateLookups(
+      renderCtx,
+      fallbackWorldbook,
+      explicitWorldbook,
+    );
+    for (const lookup of loadedLookups) {
+      const matched = lookupEntryInMap(lookup, identifier);
+      if (matched) {
+        return matched;
+      }
+    }
+  }
+
+  if (!renderCtx.resolveIgnoredEntry || identifier instanceof RegExp) {
+    return undefined;
+  }
+
+  const normalizedIdentifier = normalizeEntryKey(identifier);
+  const explicitWorldbookName =
+    typeof explicitWorldbook === "string" ? normalizeEntryKey(explicitWorldbook) : "";
+  const ignoredEntry =
+    renderCtx.resolveIgnoredEntry(
+      explicitWorldbookName || fallbackWorldbook,
+      normalizedIdentifier,
+    ) || renderCtx.resolveIgnoredEntry("", normalizedIdentifier);
+  if (ignoredEntry) {
+    const descriptor = ignoredEntry.sourceName || ignoredEntry.name || normalizedIdentifier;
+    recordRenderWarning(
+      renderCtx,
+      `mvu filtered world info blocked: ${ignoredEntry.worldbook ? `${ignoredEntry.worldbook}/` : ""}${descriptor}`,
+    );
+  }
+
+  return undefined;
+}
+
+function parseActivateWorldInfoArgs(world, entryOrForce, maybeForce) {
+  const hasExplicitWorldbook = isEntryIdentifier(entryOrForce);
+  return {
+    explicitWorldbook: hasExplicitWorldbook ? world : null,
+    identifier: hasExplicitWorldbook ? entryOrForce : world,
+    force:
+      typeof maybeForce === "boolean"
+        ? maybeForce
+        : typeof entryOrForce === "boolean",
+  };
+}
+
+function parseGetwiArgs(worldbookOrEntry, entryNameOrData, dataOrUndefined) {
+  const hasExplicitWorldbook = isEntryIdentifier(entryNameOrData);
+  return {
+    explicitWorldbook: hasExplicitWorldbook ? worldbookOrEntry : null,
+    identifier: hasExplicitWorldbook ? entryNameOrData : worldbookOrEntry,
+    data: isPlainObject(hasExplicitWorldbook ? dataOrUndefined : entryNameOrData)
+      ? cloneDeep(hasExplicitWorldbook ? dataOrUndefined : entryNameOrData)
+      : {},
+  };
+}
+
+function mergeEjsExtraEnv(...values) {
+  const utilityLib = getUtilityLib();
+  const merge = typeof utilityLib?.merge === "function" ? utilityLib.merge : null;
+  const plainValues = values.filter((value) => isPlainObject(value));
+  if (plainValues.length === 0) {
+    return {};
+  }
+  if (merge) {
+    return merge({}, ...plainValues.map((value) => cloneDeep(value)));
+  }
+  return Object.assign({}, ...plainValues.map((value) => ({ ...value })));
 }
 
 async function activateWorldInfoInContext(
@@ -428,20 +615,28 @@ async function activateWorldInfoInContext(
   entryOrForce,
   maybeForce,
 ) {
-  const hasExplicitWorldbook = typeof entryOrForce === "string";
-  const identifier = normalizeEntryKey(hasExplicitWorldbook ? entryOrForce : world);
-  const explicitWorldbook = hasExplicitWorldbook ? normalizeEntryKey(world) : "";
+  const parsed = parseActivateWorldInfoArgs(world, entryOrForce, maybeForce);
+  const identifierLabel =
+    parsed.identifier instanceof RegExp
+      ? parsed.identifier.toString()
+      : normalizeEntryKey(parsed.identifier);
+  const explicitWorldbookLabel =
+    typeof parsed.explicitWorldbook === "string"
+      ? normalizeEntryKey(parsed.explicitWorldbook)
+      : parsed.explicitWorldbook instanceof RegExp
+        ? parsed.explicitWorldbook.toString()
+        : "";
   const entry = await resolveEntry(
     renderCtx,
     currentWorldbook,
-    explicitWorldbook || identifier,
-    hasExplicitWorldbook ? identifier : undefined,
+    parsed.explicitWorldbook,
+    parsed.identifier,
   );
 
   if (!entry) {
     recordRenderWarning(
       renderCtx,
-      `activewi target not found: ${explicitWorldbook ? `${explicitWorldbook}/` : ""}${identifier}`,
+      `activewi target not found: ${explicitWorldbookLabel ? `${explicitWorldbookLabel}/` : ""}${identifierLabel}`,
     );
     return null;
   }
@@ -456,7 +651,7 @@ async function activateWorldInfoInContext(
     world: normalizedEntry.worldbook,
     comment: normalizedEntry.comment || normalizedEntry.name,
     content: normalizedEntry.content,
-    forced: typeof maybeForce === "boolean" ? maybeForce : typeof entryOrForce === "boolean",
+    forced: parsed.force,
   };
 }
 
@@ -465,12 +660,18 @@ async function getwi(
   currentWorldbook,
   worldbookOrEntry,
   entryNameOrData,
+  dataOrUndefined,
 ) {
+  const parsed = parseGetwiArgs(
+    worldbookOrEntry,
+    entryNameOrData,
+    dataOrUndefined,
+  );
   const entry = await resolveEntry(
     renderCtx,
     currentWorldbook,
-    worldbookOrEntry,
-    entryNameOrData,
+    parsed.explicitWorldbook,
+    parsed.identifier,
   );
   if (!entry) {
     return "";
@@ -508,6 +709,7 @@ async function getwi(
     renderCtx.renderStack.add(entryKey);
     try {
       finalContent = await evalTaskEjsTemplate(processed, renderCtx, {
+        ...mergeEjsExtraEnv(parsed.data),
         world_info: {
           comment: entry.comment || entry.name,
           name: entry.name,
@@ -677,6 +879,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
 
   const hostSnapshot = resolveHostSnapshot(renderCtx?.hostSnapshot);
   const snapshot = hostSnapshot.snapshot;
+  const templateAliases = buildTemplateContext(renderCtx?.templateContext || {}, hostSnapshot);
   const processed = substituteTaskEjsParams(content, renderCtx?.templateContext, {
     hostSnapshot,
   });
@@ -695,6 +898,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
   const stCtx = snapshot.raw || {};
   const chat = snapshot.chat.messages || [];
   const utilityLib = getUtilityLib();
+  const templateRuntimeEnv = mergeEjsExtraEnv(templateAliases);
   const workflowUserInput =
     typeof renderCtx?.templateContext?.user_input === "string"
       ? renderCtx.templateContext.user_input
@@ -735,12 +939,21 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
   const context = {
     _: utilityLib,
     console,
-    userName: snapshot.user.name,
-    charName: snapshot.character.name,
-    assistantName: snapshot.character.name,
-    charDescription: snapshot.character.description || "",
-    userPersona: snapshot.persona.text || "",
-    currentTime: snapshot.time.current || "",
+    ...templateRuntimeEnv,
+    user: templateAliases.user,
+    char: templateAliases.char,
+    persona:
+      templateAliases.persona || templateAliases.userPersona || snapshot.persona.text || "",
+    userName: templateAliases.userName || snapshot.user.name,
+    charName: templateAliases.charName || snapshot.character.name,
+    assistantName:
+      templateAliases.assistantName ||
+      templateAliases.charName ||
+      snapshot.character.name,
+    charDescription:
+      templateAliases.charDescription || snapshot.character.description || "",
+    userPersona: templateAliases.userPersona || snapshot.persona.text || "",
+    currentTime: templateAliases.currentTime || snapshot.time.current || "",
     characterId: snapshot.character.id,
     hostSnapshot: snapshot,
     stSnapshot: snapshot,
@@ -818,19 +1031,21 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
     get SillyTavern() {
       return stCtx;
     },
-    getwi: (worldbookOrEntry, entryNameOrData) =>
+    getwi: (worldbookOrEntry, entryNameOrData, dataOrUndefined) =>
       getwi(
         renderCtx,
         String(context.world_info?.world || ""),
         worldbookOrEntry,
         entryNameOrData,
+        dataOrUndefined,
       ),
-    getWorldInfo: (worldbookOrEntry, entryNameOrData) =>
+    getWorldInfo: (worldbookOrEntry, entryNameOrData, dataOrUndefined) =>
       getwi(
         renderCtx,
         String(context.world_info?.world || ""),
         worldbookOrEntry,
         entryNameOrData,
+        dataOrUndefined,
       ),
     getvar: (path, options) => getVariable(renderCtx.variableState, path, options),
     getLocalVar: (path, options = {}) =>

@@ -144,6 +144,8 @@ try {
           locals.variables.score,
           locals.variables.location,
           locals.lastUserMessage,
+          locals.recentMessages,
+          locals.persona,
           locals.hostSnapshot.character.worldbook,
           locals.stSnapshot.chat.lastUserMessage,
           typeof locals.execute,
@@ -154,7 +156,14 @@ try {
 
   const renderCtx = createTaskEjsRenderContext([], {
     hostSnapshot,
-    templateContext: {},
+    templateContext: {
+      user: "AliasUser",
+      char: "AliasAlice",
+      userName: "AliasUser",
+      charName: "AliasAlice",
+      recentMessages: "最近上下文",
+      persona: "AliasPersona",
+    },
   });
   const primaryBackend = await inspectTaskEjsRuntimeBackend({
     ensureRuntime: false,
@@ -169,7 +178,7 @@ try {
   const rendered = await evalTaskEjsTemplate("<%= 1 %>", renderCtx);
   assert.equal(
     rendered,
-    "Alice|User|persona-book|chat-book|7|library|最后一句|char-book|最后一句|function",
+    "AliasAlice|AliasUser|persona-book|chat-book|7|library|最后一句|最近上下文|AliasPersona|char-book|最后一句|function",
   );
   assert.deepEqual(compileCalls, ["<%= 1 %>", "<%= 1 %>"]);
 
@@ -192,7 +201,7 @@ try {
   assert.equal(failedBackend.isFallback, false);
 
   const passthrough = await evalTaskEjsTemplate("{{charName}}", renderCtx);
-  assert.equal(passthrough, "Alice");
+  assert.equal(passthrough, "AliasAlice");
 } finally {
   globalThis.SillyTavern = originalSillyTavern;
   globalThis.getCurrentChatId = originalGetCurrentChatId;
