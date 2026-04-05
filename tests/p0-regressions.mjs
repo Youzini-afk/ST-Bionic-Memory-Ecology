@@ -200,6 +200,11 @@ const schema = [
     columns: [{ name: "name" }, { name: "state" }],
     latestOnly: true,
   },
+  {
+    id: "synopsis",
+    label: "概要",
+    columns: [{ name: "summary" }, { name: "scope" }],
+  },
 ];
 
 function createBatchStageHarness() {
@@ -2100,6 +2105,95 @@ async function testExtractorFailsOnUnknownOperation() {
     assert.equal(result.success, false);
     assert.match(result.error, /未知操作类型/);
     assert.equal(graph.lastProcessedSeq, -1);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorNormalizesFlatCreateOperation() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "午夜越界",
+              summary: "两人在午夜越界相见，留下了新的冲突线索。",
+              participants: "悟悟, 晗",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 6, role: "assistant", content: "测试扁平 create" }],
+      startSeq: 6,
+      endSeq: 6,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 1);
+    assert.equal(graph.lastProcessedSeq, 6);
+    const created = graph.nodes.find((node) => !node.archived && node.type === "event");
+    assert.ok(created);
+    assert.equal(created.fields.title, "午夜越界");
+    assert.equal(
+      created.fields.summary,
+      "两人在午夜越界相见，留下了新的冲突线索。",
+    );
+    assert.equal(created.fields.participants, "悟悟, 晗");
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorNormalizesArrayPayloadAndPreservesScopeField() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return [
+          {
+            type: "synopsis",
+            id: "syn1",
+            summary: "最近的整体剧情进入高压对峙阶段。",
+            scope: "20-2-2",
+          },
+        ];
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 8, role: "assistant", content: "测试数组 payload" }],
+      startSeq: 8,
+      endSeq: 8,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 1);
+    const created = graph.nodes.find(
+      (node) => !node.archived && node.type === "synopsis",
+    );
+    assert.ok(created);
+    assert.equal(created.fields.summary, "最近的整体剧情进入高压对峙阶段。");
+    assert.equal(created.fields.scope, "20-2-2");
+    assert.equal(created.scope?.layer, "objective");
   } finally {
     restoreOverrides();
   }
@@ -5023,6 +5117,8 @@ async function testLlmOutputRegexCleansResponseBeforeJsonParse() {
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
 await testExtractorFailsOnUnknownOperation();
+await testExtractorNormalizesFlatCreateOperation();
+await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
 await testConsolidatorMergeUpdatesSeqRange();
 await testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing();
 await testBatchJournalVectorDeltaCapturesRecoveryFields();

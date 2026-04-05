@@ -67,6 +67,219 @@ function throwIfAborted(signal) {
   }
 }
 
+const EXTRACTION_RESULT_CONTAINER_KEYS = [
+  "operations",
+  "nodes",
+  "items",
+  "entries",
+  "memories",
+];
+
+const EXTRACTION_OPERATION_META_KEYS = new Set([
+  "action",
+  "op",
+  "operation",
+  "type",
+  "fields",
+  "nodeId",
+  "node_id",
+  "targetNodeId",
+  "target_node_id",
+  "sourceNodeId",
+  "source_node_id",
+  "ref",
+  "reference",
+  "id",
+  "links",
+  "relations",
+  "edges",
+  "importance",
+  "clusters",
+  "scope",
+  "seq",
+  "temporalStrength",
+  "temporal_strength",
+]);
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function extractOperationsPayload(result) {
+  if (Array.isArray(result)) {
+    return result;
+  }
+  if (!isPlainObject(result)) {
+    return null;
+  }
+
+  for (const key of EXTRACTION_RESULT_CONTAINER_KEYS) {
+    if (Array.isArray(result[key])) {
+      return result[key];
+    }
+  }
+
+  return null;
+}
+
+function resolveExtractionAction(rawOp) {
+  const explicitAction = rawOp?.action ?? rawOp?.op ?? rawOp?.operation;
+  if (typeof explicitAction === "string" && explicitAction.trim()) {
+    return explicitAction.trim().toLowerCase();
+  }
+
+  if (rawOp?.type) {
+    if (rawOp?.nodeId || rawOp?.node_id) {
+      return "update";
+    }
+    return "create";
+  }
+
+  return "";
+}
+
+function resolveExtractionTypeDef(schema, type) {
+  if (!Array.isArray(schema) || !type) {
+    return null;
+  }
+  return schema.find((entry) => entry?.id === type) || null;
+}
+
+function resolveExtractionFieldNames(typeDef) {
+  return new Set(
+    Array.isArray(typeDef?.columns)
+      ? typeDef.columns
+          .map((column) => String(column?.name || "").trim())
+          .filter(Boolean)
+      : [],
+  );
+}
+
+function resolveExtractionNodeId(rawOp) {
+  const nodeId =
+    rawOp?.nodeId ??
+    rawOp?.node_id ??
+    rawOp?.targetNodeId ??
+    rawOp?.target_node_id ??
+    rawOp?.id;
+  return nodeId == null || nodeId === "" ? "" : String(nodeId);
+}
+
+function resolveExtractionRef(rawOp) {
+  const ref = rawOp?.ref ?? rawOp?.reference ?? rawOp?.id;
+  return ref == null || ref === "" ? "" : String(ref);
+}
+
+function collectNormalizedOperationFields(rawOp, typeDef) {
+  const fieldNames = resolveExtractionFieldNames(typeDef);
+  const fields = isPlainObject(rawOp?.fields) ? { ...rawOp.fields } : {};
+
+  for (const [key, value] of Object.entries(rawOp || {})) {
+    if (key === "fields") {
+      continue;
+    }
+
+    if (key === "scope") {
+      if (!isPlainObject(value) && (fieldNames.has("scope") || !typeDef)) {
+        fields.scope = value;
+      }
+      continue;
+    }
+
+    if (EXTRACTION_OPERATION_META_KEYS.has(key)) {
+      continue;
+    }
+
+    if (!typeDef || fieldNames.has(key)) {
+      fields[key] = value;
+    }
+  }
+
+  return fields;
+}
+
+function normalizeExtractionOperation(rawOp, schema) {
+  if (!isPlainObject(rawOp)) {
+    return rawOp;
+  }
+
+  const action = resolveExtractionAction(rawOp);
+  const type = rawOp?.type == null ? "" : String(rawOp.type).trim();
+  const typeDef = resolveExtractionTypeDef(schema, type);
+  const normalized = {
+    ...rawOp,
+    ...(action ? { action } : {}),
+    ...(type ? { type } : {}),
+  };
+
+  const nodeId = resolveExtractionNodeId(rawOp);
+  const ref = resolveExtractionRef(rawOp);
+
+  if (action === "create") {
+    if (ref) {
+      normalized.ref = ref;
+    }
+    delete normalized.nodeId;
+  } else if ((action === "update" || action === "delete") && nodeId) {
+    normalized.nodeId = nodeId;
+  }
+
+  if (Array.isArray(rawOp?.relations) && !Array.isArray(rawOp?.links)) {
+    normalized.links = rawOp.relations;
+  } else if (Array.isArray(rawOp?.edges) && !Array.isArray(rawOp?.links)) {
+    normalized.links = rawOp.edges;
+  }
+
+  if (!Array.isArray(normalized.clusters) && normalized.clusters != null) {
+    normalized.clusters = [normalized.clusters].filter(Boolean);
+  }
+
+  if (isPlainObject(rawOp?.scope)) {
+    normalized.scope = rawOp.scope;
+  } else if (action === "create" || action === "update") {
+    delete normalized.scope;
+  }
+
+  if (action === "create" || action === "update") {
+    const fields = collectNormalizedOperationFields(rawOp, typeDef);
+    if (Object.keys(fields).length > 0) {
+      normalized.fields = fields;
+    }
+  }
+
+  delete normalized.op;
+  delete normalized.operation;
+  delete normalized.node_id;
+  delete normalized.target_node_id;
+  delete normalized.source_node_id;
+  delete normalized.reference;
+  delete normalized.relations;
+  delete normalized.edges;
+  delete normalized.temporal_strength;
+
+  return normalized;
+}
+
+function normalizeExtractionResultPayload(result, schema) {
+  const operations = extractOperationsPayload(result);
+  if (!Array.isArray(operations)) {
+    return result;
+  }
+
+  const normalizedOperations = operations.map((op) =>
+    normalizeExtractionOperation(op, schema),
+  );
+
+  if (Array.isArray(result) || !isPlainObject(result)) {
+    return { operations: normalizedOperations };
+  }
+
+  return {
+    ...result,
+    operations: normalizedOperations,
+  };
+}
+
 /**
  * 对未处理的对话楼层执行记忆提取
  *
@@ -202,8 +415,9 @@ export async function extractMemories({
     onStreamProgress,
   });
   throwIfAborted(signal);
+  const normalizedResult = normalizeExtractionResultPayload(result, schema);
 
-  if (!result || !Array.isArray(result.operations)) {
+  if (!normalizedResult || !Array.isArray(normalizedResult.operations)) {
     console.warn("[ST-BME] 提取 LLM 未返回有效操作");
     return {
       success: false,
@@ -222,7 +436,7 @@ export async function extractMemories({
   const refMap = new Map();
   const operationErrors = [];
 
-  for (const op of result.operations) {
+  for (const op of normalizedResult.operations) {
     try {
       switch (op.action) {
         case "create": {
