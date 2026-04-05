@@ -22,12 +22,14 @@ const chat = [
 const hashes = snapshotProcessedMessageHashes(chat, 3);
 const cleanDetection = detectHistoryMutation(chat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
 assert.equal(cleanDetection.dirty, false);
 
 const missingHashesDetection = detectHistoryMutation(chat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: {},
 });
 assert.equal(missingHashesDetection.dirty, true);
@@ -35,6 +37,7 @@ assert.equal(missingHashesDetection.earliestAffectedFloor, 0);
 
 const sparseHashesDetection = detectHistoryMutation(chat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: {
     0: hashes[0],
     2: hashes[2],
@@ -48,6 +51,7 @@ const editedChat = structuredClone(chat);
 editedChat[1].mes = "我改过内容了。";
 const editedDetection = detectHistoryMutation(editedChat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
 assert.equal(editedDetection.dirty, true);
@@ -58,6 +62,7 @@ bmeHiddenChat[1].is_system = true;
 bmeHiddenChat[1].extra = { __st_bme_hide_managed: true };
 const bmeHiddenDetection = detectHistoryMutation(bmeHiddenChat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
 assert.equal(bmeHiddenDetection.dirty, false);
@@ -66,6 +71,7 @@ const realSystemFlipChat = structuredClone(chat);
 realSystemFlipChat[1].is_system = true;
 const realSystemFlipDetection = detectHistoryMutation(realSystemFlipChat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
 assert.equal(realSystemFlipDetection.dirty, false);
@@ -91,6 +97,7 @@ assert.equal(migratedDetection.dirty, false);
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {
   lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
 assert.equal(truncatedDetection.dirty, true);

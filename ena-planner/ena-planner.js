@@ -1274,6 +1274,10 @@ async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
 function getSendTextarea() { return document.getElementById('send_textarea'); }
 function getSendButton() { return document.getElementById('send_but') || document.getElementById('send_button'); }
 
+function isTrivialPlannerInput(text) {
+    return _bmeRuntime?.isTrivialUserInput?.(text)?.trivial === true;
+}
+
 function shouldInterceptNow() {
     const s = ensureSettings();
     if (!s.enabled || state.isPlanning) return false;
@@ -1281,6 +1285,7 @@ function shouldInterceptNow() {
     if (!ta) return false;
     const txt = String(ta.value ?? '').trim();
     if (!txt) return false;
+    if (isTrivialPlannerInput(txt)) return false;
     if (state.bypassNextSend) return false;
     if (s.skipIfPlotPresent && /<plot\b/i.test(txt)) return false;
     return true;
@@ -1293,6 +1298,7 @@ async function doInterceptAndPlanThenSend() {
 
     const raw = String(ta.value ?? '').trim();
     if (!raw) return;
+    if (isTrivialPlannerInput(raw)) return;
 
     state.isPlanning = true;
     setSendUIBusy(true);

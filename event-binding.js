@@ -212,6 +212,7 @@ export function onChatChangedController(runtime) {
     source: "chat-changed",
     force: true,
   });
+  runtime.clearCurrentGenerationTrivialSkip?.("chat-changed");
   runtime.clearInjectionState();
   runtime.clearRecallInputTracking();
   runtime.installSendIntentHooks();
@@ -250,6 +251,10 @@ export function onMessageSentController(runtime, messageId) {
   }
 
   if (!message?.is_user) return;
+  if (runtime.isTrivialUserInput?.(message.mes || "")?.trivial) {
+    runtime.refreshPersistedRecallMessageUi?.();
+    return;
+  }
   runtime.recordRecallSentUserMessage(
     resolvedMessageId,
     message.mes || "",
@@ -310,8 +315,22 @@ export function onGenerationStartedController(
       : "";
   const snapshotText =
     runtime.normalizeRecallInputText?.(pendingIntentText || textareaText) || "";
-
-  if (!snapshotText) return null;
+  const trivialInputResult = runtime.isTrivialUserInput?.(snapshotText);
+  if (trivialInputResult?.trivial) {
+    const context = runtime.getContext?.() || {};
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: trivialInputResult.reason,
+      chatId: context?.chatId || "",
+      chatLength: Array.isArray(context?.chat) ? context.chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.info?.(
+      `[ST-BME] trivial-input skip: reason=${trivialInputResult.reason} len=${trivialInputResult.normalizedText.length} hook=GENERATION_STARTED`,
+    );
+    return null;
+  }
+  runtime.clearCurrentGenerationTrivialSkip?.("new-non-trivial-generation");
   return runtime.freezeHostGenerationInputSnapshot(
     snapshotText,
     pendingIntentText
@@ -415,6 +434,10 @@ export async function onGenerationAfterCommandsController(
   );
   if (!recallOptions) {
     console.warn("[ST-BME:DIAG] EXIT: buildGenerationAfterCommandsRecallInput returned null");
+    return;
+  }
+  if (recallOptions?.__trivialSkip) {
+    console.warn("[ST-BME:DIAG] EXIT: trivial-input-skip");
     return;
   }
   console.warn("[ST-BME:DIAG] recallOptions:", { generationType: recallOptions.generationType, overrideUserMessage: recallOptions.overrideUserMessage?.slice(0,50), overrideSource: recallOptions.overrideSource, targetIdx: recallOptions.targetUserMessageIndex });
@@ -523,10 +546,18 @@ export async function onBeforeCombinePromptsController(
     {};
   const context = runtime.getContext();
   const chat = context?.chat;
+  const normalInput = runtime.buildNormalGenerationRecallInput(chat, {
+    frozenInputSnapshot,
+  });
+  if (normalInput?.__trivialSkip) {
+    console.warn("[ST-BME:DIAG] EXIT: trivial-input-skip");
+    return {
+      skipped: true,
+      reason: `trivial:${normalInput.trivialReason || ""}`,
+    };
+  }
   const recallOptions =
-    runtime.buildNormalGenerationRecallInput(chat, {
-      frozenInputSnapshot,
-    }) ||
+    normalInput ||
     runtime.buildHistoryGenerationRecallInput(chat) ||
     {};
   const recallContext = runtime.createGenerationRecallContext({
@@ -644,12 +675,27 @@ export function onMessageReceivedController(
   const targetMessage = runtime.isAssistantChatMessage(receivedMessage)
     ? receivedMessage
     : lastMessage;
+  const targetMessageIndex = runtime.isAssistantChatMessage(receivedMessage)
+    ? Number(messageId)
+    : runtime.isAssistantChatMessage(lastMessage)
+      ? chat.length - 1
+      : null;
 
   if (runtime.isAssistantChatMessage(targetMessage)) {
+    if (runtime.consumeCurrentGenerationTrivialSkip?.(targetMessageIndex)) {
+      runtime.console?.info?.(
+        "[ST-BME] trivial-input skip: extraction bypassed",
+        { messageId: targetMessageIndex },
+      );
+      runtime.refreshPersistedRecallMessageUi?.();
+      return;
+    }
     runtime.console?.debug?.(
       "[ST-BME] assistant message received, queueing auto extraction",
       {
-        messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+        messageId: Number.isFinite(Number(targetMessageIndex))
+          ? Number(targetMessageIndex)
+          : null,
         chatLength: Array.isArray(chat) ? chat.length : 0,
         loadState,
         dbReady,
