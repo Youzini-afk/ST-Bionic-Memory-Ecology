@@ -1,5 +1,6 @@
 // ST-BME: 操控面板交互逻辑
 
+import { callGenericPopup, POPUP_TYPE } from "../../../popup.js";
 import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "./node-labels.js";
@@ -20,6 +21,8 @@ import {
   getLegacyPromptFieldForTask,
   getTaskTypeOptions,
   importTaskProfile as parseImportedTaskProfile,
+  isTaskRegexStageEnabled,
+  normalizeTaskRegexStages,
   restoreDefaultTaskProfile,
   setActiveTaskProfileId,
   upsertTaskProfile,
@@ -143,8 +146,46 @@ const TASK_PROFILE_GENERATION_GROUPS = [
 ];
 
 const TASK_PROFILE_REGEX_STAGES = [
-  { key: "input", label: "输入阶段", desc: "对发送给 LLM 的 prompt 执行正则替换。" },
-  { key: "output", label: "输出阶段", desc: "对 LLM 返回的结果执行正则替换。" },
+  {
+    key: "input",
+    label: "输入总开关",
+    desc: "控制全部输入阶段；未单独覆写的细分阶段会跟随它。",
+  },
+  {
+    key: "input.userMessage",
+    label: "输入: 用户消息",
+    desc: "处理当前 userMessage。",
+  },
+  {
+    key: "input.recentMessages",
+    label: "输入: 最近上下文",
+    desc: "处理 recentMessages、chatMessages、dialogueText。",
+  },
+  {
+    key: "input.candidateText",
+    label: "输入: 候选与摘要",
+    desc: "处理 candidateText、candidateNodes、nodeContent 和各类摘要。",
+  },
+  {
+    key: "input.finalPrompt",
+    label: "输入: 发送前最终消息",
+    desc: "在最终 messages 全部组装完成、真正发送给 LLM 前统一清洗。",
+  },
+  {
+    key: "output",
+    label: "输出总开关",
+    desc: "控制全部输出阶段；未单独覆写的细分阶段会跟随它。",
+  },
+  {
+    key: "output.rawResponse",
+    label: "输出: 原始响应",
+    desc: "LLM 原始文本到手后先清洗一次。",
+  },
+  {
+    key: "output.beforeParse",
+    label: "输出: 解析前",
+    desc: "在 JSON 提取/解析前再清洗一次。",
+  },
 ];
 
 let panelEl = null;
@@ -792,6 +833,11 @@ function _applyWorkspaceMode() {
 function _switchConfigSection(sectionId) {
   currentConfigSectionId = sectionId || "api";
   _syncConfigSectionState();
+  if (currentConfigSectionId === "prompts") {
+    _refreshTaskProfileWorkspace();
+  } else if (currentConfigSectionId === "trace") {
+    _refreshMessageTraceWorkspace();
+  }
 }
 
 function _ensureMobileTraceConfigNavButton() {
@@ -2766,7 +2812,6 @@ function _renderMessageTraceWorkspace(state) {
 
 function _renderMessageTraceRecallCard(state) {
   const injectionSnapshot = state.recallInjection || null;
-  const recallLlmRequest = state.recallLlmRequest || null;
   const recentMessages = Array.isArray(injectionSnapshot?.recentMessages)
     ? injectionSnapshot.recentMessages.map((item) => String(item || ""))
     : [];
@@ -2775,12 +2820,19 @@ function _renderMessageTraceRecallCard(state) {
   ).trim();
   const triggeredUserMessage =
     lastSentUserMessage ||
-    _extractTriggeredUserMessageFromRecentMessages(recentMessages) ||
-    _getLastDebugMessageContent(recallLlmRequest?.messages, "user");
+    _extractTriggeredUserMessageFromRecentMessages(recentMessages);
   const hostPayloadText = _buildMainAiTraceText(
     triggeredUserMessage,
     injectionSnapshot?.injectionText || "",
   );
+  const missingUserMessageNotice =
+    injectionSnapshot && !triggeredUserMessage
+      ? `
+        <div class="bme-config-help">
+          这次没有可靠捕获到主 AI 那边的用户消息，因此这里只展示真实记录到的记忆注入文本，不再用 recall 模型请求去反推，避免误导排查。
+        </div>
+      `
+      : "";
 
   if (!injectionSnapshot) {
     return `
@@ -2798,6 +2850,7 @@ function _renderMessageTraceRecallCard(state) {
       </div>
       <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
     </div>
+    ${missingUserMessageNotice}
     ${_renderMessageTraceTextBlock(
       "发送给主 AI 的内容",
       hostPayloadText,
@@ -2864,18 +2917,6 @@ function _normalizeDebugMessages(messages = []) {
       return { role, content };
     })
     .filter(Boolean);
-}
-
-function _getLastDebugMessageContent(messages = [], role = "") {
-  const normalizedRole = String(role || "").trim().toLowerCase();
-  const normalizedMessages = _normalizeDebugMessages(messages);
-  for (let index = normalizedMessages.length - 1; index >= 0; index--) {
-    const message = normalizedMessages[index];
-    if (!normalizedRole || message.role === normalizedRole) {
-      return message.content;
-    }
-  }
-  return "";
 }
 
 function _stringifyTraceMessages(messages = []) {
@@ -2980,6 +3021,9 @@ async function _handleTaskProfileWorkspaceClick(event) {
         _getRuntimeDebugSnapshot({ refreshHost: true });
       }
       _refreshTaskProfileWorkspace();
+      return;
+    case "inspect-tavern-regex":
+      await _openRegexReuseInspector(state.taskType);
       return;
     case "select-block":
       currentTaskProfileBlockId = actionEl.dataset.blockId || "";
@@ -3375,6 +3419,7 @@ function _renderTaskGenerationTab(state) {
 
 function _renderTaskRegexTab(state) {
   const regex = state.profile.regex || {};
+  const normalizedStages = normalizeTaskRegexStages(regex.stages || {});
   return `
     <div class="bme-task-tab-body">
       <div class="bme-task-regex-top">
@@ -3386,6 +3431,9 @@ function _renderTaskRegexTab(state) {
               任务预设可复用酒馆正则，并叠加当前任务自己的附加规则。
             </div>
           </div>
+          <button class="bme-config-secondary-btn" data-task-action="inspect-tavern-regex" type="button">
+            查看当前复用规则
+          </button>
         </div>
 
         <div class="bme-task-toggle-list">
@@ -3448,14 +3496,14 @@ function _renderTaskRegexTab(state) {
                   <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
                   <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
                 </span>
-                <input
-                  type="checkbox"
-                  data-regex-stage="${_escAttr(stage.key)}"
-                  ${(regex.stages?.[stage.key] ?? true) ? "checked" : ""}
-                />
-              </label>
-            `,
-          ).join("")}
+                  <input
+                    type="checkbox"
+                    data-regex-stage="${_escAttr(stage.key)}"
+                    ${isTaskRegexStageEnabled(normalizedStages, stage.key) ? "checked" : ""}
+                  />
+                </label>
+              `,
+            ).join("")}
         </div>
       </div>
 
@@ -3491,6 +3539,164 @@ function _renderTaskRegexTab(state) {
       </div>
     </div>
   `;
+}
+
+function _formatRegexReuseSourceState(source = {}) {
+  const states = [];
+  states.push(source.enabled ? "已启用" : "已关闭");
+  states.push(source.allowed === false ? "未获酒馆允许" : "允许参与");
+  states.push(
+    source.resolvedVia === "bridge"
+      ? "通过桥接读取"
+      : source.resolvedVia === "fallback"
+        ? "通过 fallback 读取"
+        : "来源未知",
+  );
+  return states.join(" · ");
+}
+
+function _renderRegexReuseRuleList(rules = [], emptyText = "无") {
+  if (!Array.isArray(rules) || rules.length === 0) {
+    return `<div class="bme-task-empty">${_escHtml(emptyText)}</div>`;
+  }
+
+  return rules
+    .map((rule) => {
+      const placementText = Array.isArray(rule.placementLabels) && rule.placementLabels.length
+        ? rule.placementLabels.join(" / ")
+        : "未声明 placement";
+      const flags = [
+        rule.promptOnly ? "promptOnly" : "",
+        rule.markdownOnly ? "markdownOnly" : "",
+        rule.reason ? `原因: ${rule.reason}` : "",
+      ].filter(Boolean);
+      return `
+        <div class="bme-debug-row">
+          <span class="bme-debug-key">${_escHtml(rule.name || rule.id || "未命名规则")}</span>
+          <span class="bme-debug-value">${_escHtml(placementText)}</span>
+        </div>
+        <div class="bme-task-note">
+          <code>${_escHtml(rule.findRegex || "(空 findRegex)")}</code>
+          ${rule.replaceString ? ` -> <code>${_escHtml(rule.replaceString)}</code>` : ""}
+          ${flags.length ? `<br>${_escHtml(flags.join(" · "))}` : ""}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function _buildRegexReusePopupContent(snapshot = {}) {
+  const container = document.createElement("div");
+  const sources = Array.isArray(snapshot.sources) ? snapshot.sources : [];
+  const activeRules = Array.isArray(snapshot.activeRules) ? snapshot.activeRules : [];
+  const stageConfig = snapshot.stageConfig && typeof snapshot.stageConfig === "object"
+    ? snapshot.stageConfig
+    : {};
+  const sourceConfig = snapshot.sourceConfig && typeof snapshot.sourceConfig === "object"
+    ? snapshot.sourceConfig
+    : {};
+
+  container.innerHTML = `
+    <div class="bme-task-tab-body">
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">酒馆正则复用快照</div>
+        <div class="bme-config-card-subtitle">
+          这里展示的是当前任务预设下，ST-BME 实际会尝试复用的 Tavern 正则来源和规则，不是静态说明文案。
+        </div>
+        <div class="bme-debug-list">
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">任务</span>
+            <span class="bme-debug-value">${_escHtml(snapshot.taskType || "—")}</span>
+          </div>
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">预设</span>
+            <span class="bme-debug-value">${_escHtml(snapshot.profileName || snapshot.profileId || "—")}</span>
+          </div>
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">任务正则</span>
+            <span class="bme-debug-value">${snapshot.regexEnabled ? "已启用" : "已关闭"}</span>
+          </div>
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">复用酒馆正则</span>
+            <span class="bme-debug-value">${snapshot.inheritStRegex ? "已启用" : "已关闭"}</span>
+          </div>
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">本地规则数</span>
+            <span class="bme-debug-value">${Number(snapshot.localRuleCount || 0)}</span>
+          </div>
+          <div class="bme-debug-row">
+            <span class="bme-debug-key">桥接模式</span>
+            <span class="bme-debug-value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.fallback ? " · fallback" : ""}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">当前启用开关</div>
+        <div class="bme-task-note">
+          来源：global=${sourceConfig.global === false ? "关" : "开"} / preset=${sourceConfig.preset === false ? "关" : "开"} / character=${sourceConfig.character === false ? "关" : "开"}
+        </div>
+        <div class="bme-task-note">
+          阶段：${_escHtml(Object.entries(stageConfig).map(([key, value]) => `${key}=${value ? "on" : "off"}`).join(" | ") || "无")}
+        </div>
+      </div>
+
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">来源明细</div>
+        ${
+          sources.length
+            ? sources.map((source) => `
+                <details class="bme-debug-details" open>
+                  <summary>
+                    ${_escHtml(source.label || source.type || "未知来源")}
+                    <span class="bme-debug-value"> · ${_escHtml(_formatRegexReuseSourceState(source))}</span>
+                  </summary>
+                  <div class="bme-task-note">
+                    raw=${Number(source.rawRuleCount || 0)} / active=${Number(source.activeRuleCount || 0)}
+                    ${source.reason ? `<br>${_escHtml(source.reason)}` : ""}
+                  </div>
+                  <div class="bme-task-section-label">本来源当前生效规则</div>
+                  ${_renderRegexReuseRuleList(source.rules, "该来源当前没有进入任务链的复用规则")}
+                  <div class="bme-task-section-label">被跳过的规则</div>
+                  ${_renderRegexReuseRuleList(source.ignoredRules, "没有被额外跳过的规则")}
+                </details>
+              `).join("")
+            : `<div class="bme-task-empty">当前没有可展示的酒馆正则来源。</div>`
+        }
+      </div>
+
+      <div class="bme-config-card">
+        <div class="bme-config-card-title">汇总后的复用规则</div>
+        <div class="bme-config-card-subtitle">
+          这是经过来源开关、allowlist 和去重后，准备进入当前任务链的 Tavern 规则集合。
+        </div>
+        ${_renderRegexReuseRuleList(activeRules, "当前没有复用到任何酒馆正则")}
+      </div>
+    </div>
+  `;
+
+  return container;
+}
+
+async function _openRegexReuseInspector(taskType) {
+  if (typeof _actionHandlers.inspectTaskRegexReuse !== "function") {
+    toastr.info("当前运行时没有接入正则复用诊断入口", "ST-BME");
+    return;
+  }
+
+  try {
+    const snapshot = await _actionHandlers.inspectTaskRegexReuse(taskType);
+    const content = _buildRegexReusePopupContent(snapshot || {});
+    await callGenericPopup(content, POPUP_TYPE.TEXT, "", {
+      okButton: "关闭",
+      wide: true,
+      large: true,
+      allowVerticalScrolling: true,
+    });
+  } catch (error) {
+    console.error("[ST-BME] 打开正则复用检查弹窗失败:", error);
+    toastr.error("打开正则复用检查弹窗失败", "ST-BME");
+  }
 }
 
 function _renderTaskDebugTab(state) {
@@ -3787,8 +3993,13 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
         <span class="bme-debug-kv-key">输出清洗</span>
         <span class="bme-debug-kv-value">${_escHtml(llmRequest.responseCleaning?.applied ? "已生效" : "未生效")}</span>
       </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">发送前输入清洗</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.requestCleaning?.applied ? "已生效" : "未生效")}</span>
+      </div>
     </div>
     ${_renderDebugDetails("提示词执行摘要", llmRequest.promptExecution || null)}
+    ${_renderDebugDetails("发送前输入清洗", llmRequest.requestCleaning || null)}
     ${_renderDebugDetails("实际请求路径", llmRequest.effectiveRoute || null)}
     ${_renderDebugDetails("输出清洗", llmRequest.responseCleaning || null)}
     ${_renderDebugDetails("实际保留参数", llmRequest.filteredGeneration || {})}
@@ -4656,7 +4867,7 @@ function _normalizeTaskProfileDraft(profile = {}) {
     stages: {
       input: true,
       output: true,
-      ...(draft.regex?.stages || {}),
+      ...normalizeTaskRegexStages(draft.regex?.stages || {}),
     },
     localRules: Array.isArray(draft.regex?.localRules)
       ? draft.regex.localRules.map((rule) => ({

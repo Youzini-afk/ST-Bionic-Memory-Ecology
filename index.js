@@ -126,6 +126,7 @@ import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompt-profiles.js";
+import { inspectTaskRegexReuse } from "./task-regex.js";
 import {
   applyRecallInjectionController,
   buildRecallRecentMessagesController,
@@ -350,6 +351,9 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      messageTrace: {
+        lastSentUserMessage: null,
+      },
       maintenance: {
         lastAction: null,
         lastUndoResult: null,
@@ -1206,6 +1210,11 @@ function clearRecallInputTracking() {
   pendingRecallSendIntent = createRecallInputRecord();
   lastRecallSentUserMessage = createRecallInputRecord();
   pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  if (typeof recordMessageTraceSnapshot === "function") {
+    recordMessageTraceSnapshot({
+      lastSentUserMessage: null,
+    });
+  }
   clearPlannerRecallHandoffsForChat("", { clearAll: true });
 }
 
@@ -1323,15 +1332,17 @@ function recordRecallSentUserMessage(messageId, text, source = "message-sent") {
     source,
     at: Date.now(),
   });
-  recordMessageTraceSnapshot({
-    lastSentUserMessage: {
-      text: normalized,
-      hash,
-      messageId: Number.isFinite(messageId) ? messageId : null,
-      source,
-      updatedAt: new Date().toISOString(),
-    },
-  });
+  if (typeof recordMessageTraceSnapshot === "function") {
+    recordMessageTraceSnapshot({
+      lastSentUserMessage: {
+        text: normalized,
+        hash,
+        messageId: Number.isFinite(messageId) ? messageId : null,
+        source,
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
 
   // 注意：不再在 MESSAGE_SENT 阶段清空 pendingRecallSendIntent /
   // pendingHostGenerationInputSnapshot / transactions。
@@ -9521,6 +9532,8 @@ async function onReembedDirect() {
       testMemoryLLM: onTestMemoryLLM,
       fetchMemoryLLMModels: onFetchMemoryLLMModels,
       fetchEmbeddingModels: onFetchEmbeddingModels,
+      inspectTaskRegexReuse: (taskType) =>
+        inspectTaskRegexReuse(getSettings(), taskType),
       applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       rebuildVectorIndex: () => onRebuildVectorIndex(),

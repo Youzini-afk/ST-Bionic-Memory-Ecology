@@ -569,6 +569,88 @@ function normalizeRegexLocalRule(rule = {}, taskType = "task", index = 0) {
   };
 }
 
+const TASK_REGEX_STAGE_ALIAS_MAP = Object.freeze({
+  finalPrompt: "input.finalPrompt",
+  rawResponse: "output.rawResponse",
+  beforeParse: "output.beforeParse",
+});
+
+const TASK_REGEX_STAGE_GROUPS = Object.freeze({
+  input: Object.freeze([
+    "input.userMessage",
+    "input.recentMessages",
+    "input.candidateText",
+    "input.finalPrompt",
+  ]),
+  output: Object.freeze([
+    "output.rawResponse",
+    "output.beforeParse",
+  ]),
+});
+
+function normalizeRegexStageKey(stageKey = "") {
+  const normalized = String(stageKey || "").trim();
+  return TASK_REGEX_STAGE_ALIAS_MAP[normalized] || normalized;
+}
+
+export function normalizeTaskRegexStages(stages = {}) {
+  const source =
+    stages && typeof stages === "object" && !Array.isArray(stages) ? stages : {};
+  const normalized = { ...source };
+
+  for (const [legacyKey, canonicalKey] of Object.entries(
+    TASK_REGEX_STAGE_ALIAS_MAP,
+  )) {
+    if (
+      !Object.prototype.hasOwnProperty.call(normalized, canonicalKey) &&
+      Object.prototype.hasOwnProperty.call(normalized, legacyKey)
+    ) {
+      normalized[canonicalKey] = Boolean(normalized[legacyKey]);
+    }
+    delete normalized[legacyKey];
+  }
+
+  for (const [groupKey, stageKeys] of Object.entries(TASK_REGEX_STAGE_GROUPS)) {
+    if (normalized[groupKey] === false) {
+      continue;
+    }
+    const allSpecificStagesFalse =
+      stageKeys.length > 0 &&
+      stageKeys.every((stageKey) => normalized[stageKey] === false);
+    if (!allSpecificStagesFalse) {
+      continue;
+    }
+    for (const stageKey of stageKeys) {
+      delete normalized[stageKey];
+    }
+  }
+
+  return normalized;
+}
+
+export function isTaskRegexStageEnabled(stages = {}, stageKey = "") {
+  const normalizedStages = normalizeTaskRegexStages(stages);
+  const normalizedStageKey = normalizeRegexStageKey(stageKey);
+
+  if (!normalizedStageKey) {
+    return normalizedStages.input !== false;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalizedStages, normalizedStageKey)) {
+    return normalizedStages[normalizedStageKey] !== false;
+  }
+
+  if (normalizedStageKey.startsWith("input.")) {
+    return normalizedStages.input !== false;
+  }
+
+  if (normalizedStageKey.startsWith("output.")) {
+    return normalizedStages.output !== false;
+  }
+
+  return normalizedStages[normalizedStageKey] !== false;
+}
+
 function normalizeTaskProfilesState(taskProfiles = {}) {
   return ensureTaskProfiles({ taskProfiles });
 }
@@ -741,7 +823,7 @@ function createFallbackDefaultTaskProfile(taskType) {
         preset: true,
         character: true,
       },
-      stages: {
+      stages: normalizeTaskRegexStages({
         finalPrompt: true,
         "input.userMessage": false,
         "input.recentMessages": false,
@@ -751,7 +833,7 @@ function createFallbackDefaultTaskProfile(taskType) {
         beforeParse: false,
         "output.rawResponse": false,
         "output.beforeParse": false,
-      },
+      }),
       localRules: [],
     },
     metadata: {
@@ -799,10 +881,10 @@ export function createDefaultTaskProfile(taskType) {
         ...fallback.regex.sources,
         ...(template?.regex?.sources || {}),
       },
-      stages: {
+      stages: normalizeTaskRegexStages({
         ...fallback.regex.stages,
         ...(template?.regex?.stages || {}),
-      },
+      }),
       localRules: Array.isArray(template?.regex?.localRules)
         ? template.regex.localRules.map((rule, index) =>
             normalizeRegexLocalRule(rule, taskType, index),
@@ -978,10 +1060,10 @@ export function normalizeTaskProfile(taskType, profile = {}, settings = {}) {
         ...base.regex.sources,
         ...(profile?.regex?.sources || {}),
       },
-      stages: {
+      stages: normalizeTaskRegexStages({
         ...base.regex.stages,
         ...(profile?.regex?.stages || {}),
-      },
+      }),
       localRules: Array.isArray(profile?.regex?.localRules)
         ? profile.regex.localRules.map((rule, index) =>
             normalizeRegexLocalRule(rule, taskType, index),
