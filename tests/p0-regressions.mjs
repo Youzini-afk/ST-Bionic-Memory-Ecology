@@ -149,7 +149,11 @@ const {
 } = await import("../graph.js");
 const { compressType } = await import("../compressor.js");
 const { syncGraphVectorIndex } = await import("../vector-index.js");
-const { extractMemories } = await import("../extractor.js");
+const {
+  extractMemories,
+  generateReflection,
+  generateSynopsis,
+} = await import("../extractor.js");
 const { consolidateMemories } = await import("../consolidator.js");
 const {
   createBatchJournalEntry,
@@ -5281,6 +5285,180 @@ async function testLlmOutputRegexCleansResponseBeforeJsonParse() {
   }
 }
 
+async function testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt() {
+  const graph = createEmptyGraph();
+  addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 1,
+      fields: {
+        title: "起点",
+        summary: "剧情开始，角色进入新的冲突环境。",
+        participants: "Alice",
+        status: "active",
+      },
+    }),
+  );
+  addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 2,
+      fields: {
+        title: "升级",
+        summary: "角色发现关键线索，冲突升级。",
+        participants: "Alice, Bob",
+        status: "active",
+      },
+    }),
+  );
+  addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 3,
+      fields: {
+        title: "转折",
+        summary: "双方对峙，局势进入新的阶段。",
+        participants: "Alice, Bob",
+        status: "active",
+      },
+    }),
+  );
+
+  const captured = [];
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
+        return {
+          summary: "这是新的概要",
+        };
+      },
+    },
+  });
+
+  try {
+    await generateSynopsis({
+      graph,
+      currentSeq: 3,
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
+    });
+
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].taskType, "synopsis");
+    assert.equal(Array.isArray(captured[0].promptMessages), true);
+    assert.ok(captured[0].promptMessages.length > 0);
+    assert.equal(captured[0].systemPrompt, "");
+    assert.equal(
+      graph.nodes.some(
+        (node) =>
+          node.type === "synopsis" &&
+          !node.archived &&
+          node.fields.summary === "这是新的概要",
+      ),
+      true,
+    );
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
+  const graph = createEmptyGraph();
+  addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 4,
+      fields: {
+        title: "事件一",
+        summary: "角色开始怀疑盟友的动机。",
+        participants: "Alice, Bob",
+        status: "active",
+      },
+    }),
+  );
+  addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 5,
+      fields: {
+        title: "事件二",
+        summary: "隐藏矛盾被进一步放大。",
+        participants: "Alice, Bob",
+        status: "active",
+      },
+    }),
+  );
+  addNode(
+    graph,
+    createNode({
+      type: "character",
+      seq: 5,
+      fields: {
+        name: "Alice",
+        state: "戒备",
+      },
+    }),
+  );
+  addNode(
+    graph,
+    createNode({
+      type: "thread",
+      seq: 5,
+      fields: {
+        title: "信任危机",
+        status: "active",
+      },
+    }),
+  );
+
+  const captured = [];
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
+        return {
+          insight: "最近的关系裂痕正在固定化。",
+          trigger: "连续两次试探与怀疑",
+          suggestion: "后续检索时优先关注信任破裂相关节点",
+          importance: 7,
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await generateReflection({
+      graph,
+      currentSeq: 5,
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
+    });
+
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].taskType, "reflection");
+    assert.equal(Array.isArray(captured[0].promptMessages), true);
+    assert.ok(captured[0].promptMessages.length > 0);
+    assert.equal(captured[0].systemPrompt, "");
+    const reflectionNode = graph.nodes.find((node) => node.id === result);
+    assert.equal(
+      reflectionNode?.fields?.insight,
+      "最近的关系裂痕正在固定化。",
+    );
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan() {
   const calls = {
     compressAll: 0,
@@ -5612,6 +5790,8 @@ await testRerollPreservesPrefixHashesWhenReextractDoesNotAdvance();
 await testLlmDebugSnapshotRedactsSecretsBeforeStorage();
 await testEmbeddingUsesConfigTimeoutInsteadOfDefault();
 await testLlmOutputRegexCleansResponseBeforeJsonParse();
+await testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt();
+await testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt();
 await testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan();
 await testManualCompressUsesForcedCompressionAndPersistsRealMutation();
 await testManualEvolveFallsBackToLatestExtractionBatchAfterRefresh();
