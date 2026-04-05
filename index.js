@@ -6662,22 +6662,17 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
         }
       : null,
   ].filter(Boolean);
+  const activeTrivialSkip = getCurrentGenerationTrivialSkip();
+  if (activeTrivialSkip) {
+    clearPendingRecallSendIntent();
+    clearPendingHostGenerationInputSnapshot();
+    return createTrivialRecallSkipSentinel(activeTrivialSkip.reason);
+  }
+
   const selectedCandidate = sourceCandidates[0] || null;
   if (!selectedCandidate?.text) return null;
 
   const trivialInputResult = isTrivialUserInput(selectedCandidate.text);
-  const activeTrivialSkip = getCurrentGenerationTrivialSkip();
-  if (activeTrivialSkip) {
-    if (!trivialInputResult.trivial) {
-      clearCurrentGenerationTrivialSkip("stale-trivial-skip-replaced");
-    } else {
-      clearPendingRecallSendIntent();
-      clearPendingHostGenerationInputSnapshot();
-      return createTrivialRecallSkipSentinel(
-        activeTrivialSkip.reason || trivialInputResult.reason,
-      );
-    }
-  }
 
   if (trivialInputResult.trivial) {
     clearPendingRecallSendIntent();
@@ -9837,6 +9832,7 @@ async function onReembedDirect() {
     await initEnaPlanner({
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      isTrivialUserInput,
       preparePlannerRecallHandoff,
       runPlannerRecallForEna,
     });

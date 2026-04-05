@@ -315,8 +315,6 @@ export function onGenerationStartedController(
       : "";
   const snapshotText =
     runtime.normalizeRecallInputText?.(pendingIntentText || textareaText) || "";
-
-  if (!snapshotText) return null;
   const trivialInputResult = runtime.isTrivialUserInput?.(snapshotText);
   if (trivialInputResult?.trivial) {
     const context = runtime.getContext?.() || {};

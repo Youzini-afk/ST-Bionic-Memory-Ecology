@@ -89,6 +89,28 @@ async function testUnderMinTokensSkipsRecallAndExtraction() {
   assert.equal(harness.result.getCurrentGenerationTrivialSkip(), null);
 }
 
+async function testEmptyInputSkipsPriorHistoryFallback() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "older real user message" }];
+  harness.__sendTextareaValue = "   ";
+
+  const startResult = harness.result.onGenerationStarted("normal", {}, false);
+  assert.equal(startResult, null);
+  assert.equal(
+    harness.result.getCurrentGenerationTrivialSkip()?.reason,
+    "empty",
+  );
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+  assert.equal(harness.runRecallCalls.length, 0);
+
+  const beforeCombine = await harness.result.onBeforeCombinePrompts();
+  assert.deepEqual(beforeCombine, {
+    skipped: true,
+    reason: "trivial:empty",
+  });
+}
+
 async function testNormalInputStillRecalls() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [];
@@ -263,6 +285,7 @@ await Promise.resolve();
 testIsTrivialUserInputTable();
 await testSlashCommandSkipsRecallAndExtraction();
 await testUnderMinTokensSkipsRecallAndExtraction();
+await testEmptyInputSkipsPriorHistoryFallback();
 await testNormalInputStillRecalls();
 await testSentinelBlocksHistoryFallback();
 await testAfterCommandsTrivialSentinelMarksExtractionBypass();
