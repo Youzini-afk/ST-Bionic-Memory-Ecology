@@ -7,12 +7,14 @@ import vm from "node:vm";
 import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
 import {
   onBeforeCombinePromptsController,
+  onCharacterMessageRenderedController,
   onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
   onMessageSentController,
   onMessageReceivedController,
   onMessageSwipedController,
+  onUserMessageRenderedController,
   registerCoreEventHooksController,
 } from "../event-binding.js";
 import {
@@ -3580,23 +3582,29 @@ async function testRegisterCoreEventHooksIsIdempotent() {
       CHAT_LOADED: "chat-loaded",
       MESSAGE_SENT: "message-sent",
       GENERATION_STARTED: "generation-started",
+      GENERATION_ENDED: "generation-ended",
       MESSAGE_RECEIVED: "message-received",
       MESSAGE_DELETED: "message-deleted",
       MESSAGE_EDITED: "message-edited",
       MESSAGE_SWIPED: "message-swiped",
       MESSAGE_UPDATED: "message-updated",
+      USER_MESSAGE_RENDERED: "user-message-rendered",
+      CHARACTER_MESSAGE_RENDERED: "character-message-rendered",
     },
     handlers: {
       onChatChanged() {},
       onChatLoaded() {},
       onMessageSent() {},
       onGenerationStarted() {},
+      onGenerationEnded() {},
       onGenerationAfterCommands() {},
       onBeforeCombinePrompts() {},
       onMessageReceived() {},
       onMessageDeleted() {},
       onMessageEdited() {},
       onMessageSwiped() {},
+      onUserMessageRendered() {},
+      onCharacterMessageRendered() {},
     },
     registerGenerationAfterCommands(listener) {
       makeFirstRegistrations.push({ hook: "after", listener });
@@ -3620,7 +3628,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
   registerCoreEventHooksController(runtime);
   registerCoreEventHooksController(runtime);
 
-  assert.equal(eventRegistrations.length, 9);
+  assert.equal(eventRegistrations.length, 12);
   assert.equal(makeFirstRegistrations.length, 2);
   assert.equal(bindingState.registered, true);
 }
@@ -3741,6 +3749,42 @@ async function testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid() {
     },
   ]);
   assert.equal(refreshCalls, 1);
+}
+
+async function testUserMessageRenderedRefreshesRecallUiAfterRealDomRender() {
+  const refreshCalls = [];
+
+  const result = onUserMessageRenderedController(
+    {
+      refreshPersistedRecallMessageUi(delayMs = 0) {
+        refreshCalls.push(delayMs);
+      },
+    },
+    7,
+  );
+
+  assert.deepEqual(refreshCalls, [40]);
+  assert.equal(result.messageId, 7);
+  assert.equal(result.source, "user-message-rendered");
+}
+
+async function testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender() {
+  const refreshCalls = [];
+
+  const result = onCharacterMessageRenderedController(
+    {
+      refreshPersistedRecallMessageUi(delayMs = 0) {
+        refreshCalls.push(delayMs);
+      },
+    },
+    8,
+    "normal",
+  );
+
+  assert.deepEqual(refreshCalls, [80]);
+  assert.equal(result.messageId, 8);
+  assert.equal(result.type, "normal");
+  assert.equal(result.source, "character-message-rendered");
 }
 
 async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask() {
@@ -5275,6 +5319,8 @@ await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testSwipeRoutesToRerollWithoutHistoryRecoveryFallback();
 await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
+await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
+await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();

@@ -50,6 +50,7 @@ import {
 import {
   installSendIntentHooksController,
   onBeforeCombinePromptsController,
+  onCharacterMessageRenderedController,
   onChatChangedController,
   onChatLoadedController,
   onGenerationAfterCommandsController,
@@ -59,6 +60,7 @@ import {
   onMessageReceivedController,
   onMessageSentController,
   onMessageSwipedController,
+  onUserMessageRenderedController,
   registerBeforeCombinePromptsController,
   registerCoreEventHooksController,
   registerGenerationAfterCommandsController,
@@ -9099,6 +9101,25 @@ function onMessageSent(messageId) {
   return result;
 }
 
+function onUserMessageRendered(messageId = null) {
+  return onUserMessageRenderedController(
+    {
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    },
+    messageId,
+  );
+}
+
+function onCharacterMessageRendered(messageId = null, type = "") {
+  return onCharacterMessageRenderedController(
+    {
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    },
+    messageId,
+    type,
+  );
+}
+
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   const result = onMessageDeletedController(
     {
@@ -9574,6 +9595,7 @@ async function onReembedDirect() {
     getCoreEventBindingState,
     handlers: {
       onBeforeCombinePrompts,
+      onCharacterMessageRendered,
       onChatChanged,
       onChatLoaded,
       onGenerationAfterCommands,
@@ -9584,6 +9606,7 @@ async function onReembedDirect() {
       onMessageReceived,
       onMessageSent,
       onMessageSwiped,
+      onUserMessageRendered,
     },
     registerBeforeCombinePrompts,
     registerGenerationAfterCommands,

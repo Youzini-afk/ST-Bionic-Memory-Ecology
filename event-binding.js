@@ -175,6 +175,15 @@ export function registerCoreEventHooksController(runtime) {
   if (eventTypes.MESSAGE_UPDATED) {
     bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
   }
+  if (eventTypes.USER_MESSAGE_RENDERED) {
+    bind(eventTypes.USER_MESSAGE_RENDERED, handlers.onUserMessageRendered);
+  }
+  if (eventTypes.CHARACTER_MESSAGE_RENDERED) {
+    bind(
+      eventTypes.CHARACTER_MESSAGE_RENDERED,
+      handlers.onCharacterMessageRendered,
+    );
+  }
 
   const nextState = {
     registered: true,
@@ -246,6 +255,31 @@ export function onMessageSentController(runtime, messageId) {
     message.mes || "",
   );
   runtime.refreshPersistedRecallMessageUi?.();
+}
+
+export function onUserMessageRenderedController(runtime, messageId = null) {
+  // MESSAGE_SENT 早于实际 DOM 挂载；这里等宿主确认 user 楼层渲染完成后，
+  // 再补一次 Recall Card 刷新，避免“当前楼层没卡片，下一楼才补出来”。
+  runtime.refreshPersistedRecallMessageUi?.(40);
+  return {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    refreshed: true,
+    source: "user-message-rendered",
+  };
+}
+
+export function onCharacterMessageRenderedController(
+  runtime,
+  messageId = null,
+  type = "",
+) {
+  runtime.refreshPersistedRecallMessageUi?.(80);
+  return {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    type: String(type || ""),
+    refreshed: true,
+    source: "character-message-rendered",
+  };
 }
 
 export function onGenerationStartedController(
