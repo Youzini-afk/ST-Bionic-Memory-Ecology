@@ -141,7 +141,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\n  \"thought\": \"简要分析这批对话里真正值得入图的变化\",\n  \"operations\": [\n    {\n      \"action\": \"create\",\n      \"type\": \"event\",\n      \"fields\": {\"title\": \"简短事件名\", \"summary\": \"...\", \"participants\": \"...\", \"status\": \"ongoing\"},\n      \"scope\": {\"layer\": \"objective\", \"regionPrimary\": \"主地区\", \"regionPath\": [\"上级地区\", \"主地区\"], \"regionSecondary\": [\"次级地区\"]},\n      \"importance\": 6,\n      \"ref\": \"evt1\"\n    },\n    {\n      \"action\": \"create\",\n      \"type\": \"pov_memory\",\n      \"fields\": {\"summary\": \"角色怎么记住这件事\", \"belief\": \"她认为发生了什么\", \"emotion\": \"情绪\", \"attitude\": \"态度\", \"certainty\": \"unsure\", \"about\": \"evt1\"},\n      \"scope\": {\"layer\": \"pov\", \"ownerType\": \"character\", \"ownerId\": \"角色名\", \"ownerName\": \"角色名\", \"regionPrimary\": \"主地区\", \"regionPath\": [\"上级地区\", \"主地区\"]}\n    },\n    {\n      \"action\": \"create\",\n      \"type\": \"pov_memory\",\n      \"fields\": {\"summary\": \"用户怎么记住这件事\", \"belief\": \"用户认知\", \"emotion\": \"情绪\", \"attitude\": \"态度\", \"certainty\": \"certain\", \"about\": \"evt1\"},\n      \"scope\": {\"layer\": \"pov\", \"ownerType\": \"user\", \"ownerId\": \"用户名\", \"ownerName\": \"用户名\"}\n    }\n  ]\n}\n如果需要更新已有节点，可使用 {\"action\":\"update\",\"nodeId\":\"existing-node-id\",\"fields\":{...},\"scope\":{...}}。\n如果这批对话没有值得入图的新信息，返回 {\"thought\":\"...\", \"operations\": []}。",
+        "content": "我需要你只给我一个合法 JSON 对象，按这个结构来：\n{\n  \"thought\": \"简要分析这批对话里真正值得入图的变化\",\n  \"operations\": [\n    {\n      \"action\": \"create\",\n      \"type\": \"event\",\n      \"fields\": {\"title\": \"简短事件名\", \"summary\": \"...\", \"participants\": \"...\", \"status\": \"ongoing\"},\n      \"scope\": {\"layer\": \"objective\", \"regionPrimary\": \"主地区\", \"regionPath\": [\"上级地区\", \"主地区\"], \"regionSecondary\": [\"次级地区\"]},\n      \"importance\": 6,\n      \"ref\": \"evt1\"\n    },\n    {\n      \"action\": \"create\",\n      \"type\": \"pov_memory\",\n      \"fields\": {\"summary\": \"角色怎么记住这件事\", \"belief\": \"她认为发生了什么\", \"emotion\": \"情绪\", \"attitude\": \"态度\", \"certainty\": \"unsure\", \"about\": \"evt1\"},\n      \"scope\": {\"layer\": \"pov\", \"ownerType\": \"character\", \"ownerId\": \"角色名\", \"ownerName\": \"角色名\", \"regionPrimary\": \"主地区\", \"regionPath\": [\"上级地区\", \"主地区\"]}\n    },\n    {\n      \"action\": \"create\",\n      \"type\": \"pov_memory\",\n      \"fields\": {\"summary\": \"用户怎么记住这件事\", \"belief\": \"用户认知\", \"emotion\": \"情绪\", \"attitude\": \"态度\", \"certainty\": \"certain\", \"about\": \"evt1\"},\n      \"scope\": {\"layer\": \"pov\", \"ownerType\": \"user\", \"ownerId\": \"用户名\", \"ownerName\": \"用户名\"}\n    }\n  ]\n}\n如果要更新已有节点，用 {\"action\":\"update\",\"nodeId\":\"existing-node-id\",\"fields\":{...},\"scope\":{...}}。\n如果这批对话没有值得入图的新信息，给我返回 {\"thought\":\"...\", \"operations\": []}。",
         "injectionMode": "relative",
         "order": 10
       },
@@ -153,7 +153,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "执行标准——\n- 先做轻重判断：A级转折、不可逆改变、关系质变优先记录；B级推进按信息量决定；C级日常重复通常不单独建节点。\n- 每批尽量收敛成少量高价值操作；通常 1 个 event，加上必要的 update 和必要的 POV 记忆就够了。\n- 客观事实优先使用 event / character / location / thread / rule / synopsis / reflection。\n- 主观记忆统一使用 type = pov_memory，不要拿 character / location / event 去伪装第一视角记忆。\n- 客观节点 scope.layer 必须是 objective；POV 节点 scope.layer 必须是 pov，并且必须写 ownerType / ownerId / ownerName。\n- 用户 POV 不等于角色已知事实；它是用户或玩家侧的感受、承诺、偏见和长期互动背景。\n- 地区能判断才写 scope.regionPrimary / regionPath / regionSecondary；判断不出来就留空。\n- 角色、地点等 latestOnly 节点如果图里已有同名同作用域节点，优先 update，不要重复 create。\n- importance 用 1-10 拉开：日常 3-5，关键推进 6-7，重大转折 8-10。\n\n字段要求——\n- event.title 只写简短事件名，6-18 字。\n- event.summary 用自己的话概括，150 字以内。\n- participants 用逗号分隔参与者。\n- pov_memory.summary 写“这个视角会怎么记住这件事”。\n- certainty 只能是 certain / unsure / mistaken。\n- about 优先引用同批 ref，没有 ref 再用简短标签。\n\n禁止事项——\n- 编造对话里没有的事件、地区、想法或关系。\n- 把角色 POV、用户 POV、客观事实混成同一个节点。\n- 让 POV 记忆拥有该视角不可能知道的信息。\n- 地区不确定却硬写一个像地区的词。\n- 为了显得全面而生成很多低价值碎节点。\n- 直接复制原文，或写成文学化修辞。",
+        "content": "我对你的执行标准是这样的——\n- 先帮我做轻重判断：A级转折、不可逆改变、关系质变优先记录；B级推进按信息量决定；C级日常重复通常不单独建节点。\n- 每批帮我收敛成少量高价值操作就好；通常 1 个 event，加上必要的 update 和必要的 POV 记忆就够了。\n- 客观事实帮我优先用 event / character / location / thread / rule / synopsis / reflection。\n- 主观记忆统一使用 type = pov_memory，不要拿 character / location / event 去伪装第一视角记忆。\n- 客观节点 scope.layer 必须是 objective；POV 节点 scope.layer 必须是 pov，并且必须写 ownerType / ownerId / ownerName。\n- 用户 POV 不等于角色已知事实；它是我作为用户/玩家侧的感受、承诺、偏见和长期互动背景。\n- 地区能判断才写 scope.regionPrimary / regionPath / regionSecondary；判断不出来就帮我留空。\n- 角色、地点等 latestOnly 节点如果图里已有同名同作用域节点，优先帮我 update，不要重复 create。\n- importance 用 1-10 拉开：日常 3-5，关键推进 6-7，重大转折 8-10。\n\n字段方面我的要求是——\n- event.title 只写简短事件名，6-18 字。\n- event.summary 用自己的话概括，150 字以内。\n- participants 用逗号分隔参与者。\n- pov_memory.summary 写“这个视角会怎么记住这件事”。\n- certainty 只能是 certain / unsure / mistaken。\n- about 优先引用同批 ref，没有 ref 再用简短标签。\n\n以下是我特别不想看到的——\n- 编造对话里没有的事件、地区、想法或关系。\n- 把角色 POV、用户 POV、客观事实混成同一个节点。\n- 让 POV 记忆拥有该视角不可能知道的信息。\n- 地区不确定却硬写一个像地区的词。\n- 为了显得全面而生成很多低价值碎节点。\n- 直接复制原文，或写成文学化修辞。",
         "injectionMode": "relative",
         "order": 11
       }
@@ -348,7 +348,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\"selected_ids\": [\"id1\", \"id2\"], \"reason\": \"id1: 为什么必须选；id2: 为什么必须选\"}\nreason 必须点名说明每个入选节点的作用；如果全部不相关，可以返回空数组。",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\"selected_ids\": [\"id1\", \"id2\"], \"reason\": \"id1: 为什么必须选；id2: 为什么必须选\"}\n在 reason 里帮我点名说清楚每个入选节点的作用；如果全部不相关，给我返回空数组就行。",
         "injectionMode": "relative",
         "order": 10
       },
@@ -360,7 +360,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "选择优先级——\n1. 当前场景直接需要的记忆：正在发生的事件、在场人物、当前地点、当前目标。\n2. 解释“为什么会这样”的最近因果前史。\n3. 与当前人物关系或情绪判断直接相关的 POV 记忆。\n4. 会影响这轮回应取向的规则、承诺、未解线索或长期背景。\n5. 只有在确实必要时，才补少量全局客观背景。\n\n选择原则——\n- 宁少勿滥；只选真正会改变这轮理解和回答的节点。\n- 多个候选表达的是同一件事时，只保留最直接、最新或最能解释当前局面的那个。\n- 用户 POV 可以作为关系、承诺和互动背景参考，但不要把它当成角色已经知道的客观事实。\n- archived、失效、明显过期或与当前话题断开的节点不要选。\n- 如果候选里没有足够相关的内容，可以返回空数组，但 reason 要说明为什么。\n\n禁止事项——\n- 把所有候选节点全选。\n- 只因为 importance 高就选。\n- reason 写成一句空话，例如“这些节点相关”。\n- 用百科全书式背景信息挤掉真正和当前场景直接相关的记忆。",
+        "content": "我希望你按这个优先级帮我挑——\n1. 当前场景直接需要的记忆：正在发生的事件、在场人物、当前地点、当前目标。\n2. 解释“为什么会这样”的最近因果前史。\n3. 与当前人物关系或情绪判断直接相关的 POV 记忆。\n4. 会影响这轮回应取向的规则、承诺、未解线索或长期背景。\n5. 只有在确实必要时，才帮我补少量全局客观背景。\n\n我的选择原则是——\n- 宁少勿滥；只选真正会改变这轮理解和回答的节点。\n- 多个候选表达的是同一件事时，只帮我保留最直接、最新或最能解释当前局面的那个。\n- 用户 POV 可以作为关系、承诺和互动背景参考，但不要把它当成角色已经知道的客观事实。\n- archived、失效、明显过期或与当前话题断开的节点不要帮我选。\n- 如果候选里没有足够相关的内容，可以给我返回空数组，但 reason 要说明为什么。\n\n以下是我不想看到的——\n- 把所有候选节点全选。\n- 只因为 importance 高就选。\n- reason 写成一句空话，例如“这些节点相关”。\n- 用百科全书式背景信息挤掉真正和当前场景直接相关的记忆。",
         "injectionMode": "relative",
         "order": 11
       }
@@ -531,7 +531,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\n  \"results\": [\n    {\n      \"node_id\": \"新记忆节点ID\",\n      \"action\": \"keep\" | \"merge\" | \"skip\",\n      \"merge_target_id\": \"旧节点ID（仅 merge 时必填）\",\n      \"merged_fields\": {\"需要写回旧节点的字段更新\": \"...\"},\n      \"reason\": \"你的判断理由\",\n      \"evolution\": {\n        \"should_evolve\": true,\n        \"connections\": [\"旧记忆ID\"],\n        \"neighbor_updates\": [{\"nodeId\": \"旧节点ID\", \"newContext\": \"...\", \"newTags\": [\"...\"]}]\n      }\n    }\n  ]\n}\nskip 或 merge 时，evolution 可以省略或写 should_evolve=false。",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\n  \"results\": [\n    {\n      \"node_id\": \"新记忆节点ID\",\n      \"action\": \"keep\" | \"merge\" | \"skip\",\n      \"merge_target_id\": \"旧节点ID（仅 merge 时必填）\",\n      \"merged_fields\": {\"需要写回旧节点的字段更新\": \"...\"},\n      \"reason\": \"你的判断理由\",\n      \"evolution\": {\n        \"should_evolve\": true,\n        \"connections\": [\"旧记忆ID\"],\n        \"neighbor_updates\": [{\"nodeId\": \"旧节点ID\", \"newContext\": \"...\", \"newTags\": [\"...\"]}]\n      }\n    }\n  ]\n}\nskip 或 merge 时，evolution 可以省略或写 should_evolve=false。",
         "injectionMode": "relative",
         "order": 8
       },
@@ -543,7 +543,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "判定标准——\n- skip：核心事实相同，没有实质新增信息。\n- merge：新信息是在修正旧结论、补充旧节点细节、或给旧节点带来更准确的新状态。\n- keep：它带来了新的事实、新的主观记忆、或新的长期价值，不能安全折叠进旧节点。\n\n作用域约束——\n- objective 不和 pov 合并。\n- 不同 owner 的 POV 不合并。\n- 地区明显不同的 objective 节点默认不合并，除非它们本来就是同一实体的状态更新。\n- 用户 POV 和角色 POV 绝不能互相吞并。\n\nevolution 规则——\n- 只有 keep 的新节点真的改变了我们理解旧节点的方式时，才写 should_evolve=true。\n- connections 只连真正存在因果、时序、身份揭示、关系推进的旧节点。\n- neighbor_updates 只写有明确修正意义的更新，不要为了凑完整度乱写。\n\n禁止事项——\n- 对所有节点一律 keep。\n- merge 时不填 merge_target_id。\n- 只是措辞不同就 keep，或只是沾边就 merge。\n- 明明是主观记忆却合并进客观事实节点。",
+        "content": "我的判定标准是——\n- skip：核心事实相同，没有实质新增信息。\n- merge：新信息是在修正旧结论、补充旧节点细节、或给旧节点带来更准确的新状态。\n- keep：它带来了新的事实、新的主观记忆、或新的长期价值，不能安全折叠进旧节点。\n\n作用域方面我要求你遵守——\n- objective 不和 pov 合并。\n- 不同 owner 的 POV 不合并。\n- 地区明显不同的 objective 节点默认不合并，除非它们本来就是同一实体的状态更新。\n- 用户 POV 和角色 POV 绝不能互相吞并。\n\nevolution 方面我的规则是——\n- 只有 keep 的新节点真的改变了我们理解旧节点的方式时，才写 should_evolve=true。\n- connections 只帮我连真正存在因果、时序、身份揭示、关系推进的旧节点。\n- neighbor_updates 只写有明确修正意义的更新，不要为了凑完整度乱写。\n\n以下是我不想看到的——\n- 对所有节点一律 keep。\n- merge 时不填 merge_target_id。\n- 只是措辞不同就 keep，或只是沾边就 merge。\n- 明明是主观记忆却合并进客观事实节点。",
         "injectionMode": "relative",
         "order": 9
       }
@@ -726,7 +726,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\"fields\": {\"summary\": \"压缩后的核心摘要\", \"status\": \"如适用\", \"insight\": \"如适用\", \"trigger\": \"如适用\", \"suggestion\": \"如适用\", \"belief\": \"如适用\", \"emotion\": \"如适用\", \"attitude\": \"如适用\", \"certainty\": \"如适用\"}}\n只保留这批节点共有且仍有长期价值的字段；不适用的键可以省略。",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\"fields\": {\"summary\": \"压缩后的核心摘要\", \"status\": \"如适用\", \"insight\": \"如适用\", \"trigger\": \"如适用\", \"suggestion\": \"如适用\", \"belief\": \"如适用\", \"emotion\": \"如适用\", \"attitude\": \"如适用\", \"certainty\": \"如适用\"}}\n只帮我保留这批节点共有且仍有长期价值的字段；不适用的键可以省略。",
         "injectionMode": "relative",
         "order": 9
       },
@@ -738,7 +738,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "保留优先级——\n1. 不可逆结果、重大选择、关系质变。\n2. 因果关系链和现在仍在生效的状态变化。\n3. 未解决的伏笔、悬念和长期风险。\n4. 反复出现后已经形成稳定模式的信息。\n5. 可以删掉的：重复表述、低信息日常、没有后续影响的细枝末节。\n\n写作要求——\n- 目标是更高层、更稳定，而不是把原节点逐条缩写一遍。\n- 客观层不要写成文学化复述；POV 层不要洗成上帝视角。\n- 反思类节点优先保留 insight / trigger / suggestion；POV 节点优先保留 summary / belief / emotion / attitude / certainty。\n- 保持时间顺序和因果顺序，不要把前因后果写反。\n- summary 以 120-220 字为宜，最多不超过 300 字。\n\n禁止事项——\n- 丢掉关键因果关系或不可逆结果。\n- 把不同角色、不同视角、不同阶段的内容混成一个模糊结论。\n- 加入原始节点里没有的推测。\n- 为了看起来完整而把所有字段都硬写一遍。",
+        "content": "我希望你按这个优先级帮我保留信息——\n1. 不可逆结果、重大选择、关系质变。\n2. 因果关系链和现在仍在生效的状态变化。\n3. 未解决的伏笔、悬念和长期风险。\n4. 反复出现后已经形成稳定模式的信息。\n5. 可以帮我删掉的：重复表述、低信息日常、没有后续影响的细枝末节。\n\n我的写作要求是——\n- 目标是更高层、更稳定，而不是把原节点逐条缩写一遍。\n- 客观层不要写成文学化复述；POV 层不要洗成上帝视角。\n- 反思类节点优先帮我保留 insight / trigger / suggestion；POV 节点优先保留 summary / belief / emotion / attitude / certainty。\n- 保持时间顺序和因果顺序，不要把前因后果写反。\n- summary 以 120-220 字为宜，最多不超过 300 字。\n\n以下是我不想看到的——\n- 丢掉关键因果关系或不可逆结果。\n- 把不同角色、不同视角、不同阶段的内容混成一个模糊结论。\n- 加入原始节点里没有的推测。\n- 为了看起来完整而把所有字段都硬写一遍。",
         "injectionMode": "relative",
         "order": 10
       }
@@ -933,7 +933,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\"summary\": \"前情提要文本（200字以内）\"}",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\"summary\": \"前情提要文本（200字以内）\"}",
         "injectionMode": "relative",
         "order": 10
       },
@@ -945,7 +945,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "必须覆盖——\n1. 当前局面：故事现在卡在什么状态。\n2. 核心冲突：当前主要矛盾、目标或压力。\n3. 最近转折：真正改变态势的关键事件。\n4. 主要角色状态：他们现在的处境、关系或立场。\n\n写作要求——\n- 200 字以内。\n- 优先写现在仍然有效的局面，需要时再回带造成这个局面的关键前因。\n- 写成一段连贯叙述，不列清单，不写事件流水账。\n- 可以合并重复日常为一句趋势描述，不要把每件小事都点名。\n\n禁止事项——\n- 超过 200 字。\n- 只罗列事件，不提当前局面。\n- 漏掉主要角色的现在状态。\n- 加入评价、抒情或未来预测。",
+        "content": "我需要你的提要必须覆盖——\n1. 当前局面：故事现在卡在什么状态。\n2. 核心冲突：当前主要矛盾、目标或压力。\n3. 最近转折：真正改变态势的关键事件。\n4. 主要角色状态：他们现在的处境、关系或立场。\n\n我的写作要求是——\n- 200 字以内。\n- 优先帮我写现在仍然有效的局面，需要时再回带造成这个局面的关键前因。\n- 写成一段连贯叙述，不列清单，不写事件流水账。\n- 可以帮我合并重复日常为一句趋势描述，不要把每件小事都点名。\n\n以下是我不想看到的——\n- 超过 200 字。\n- 只罗列事件，不提当前局面。\n- 漏掉主要角色的现在状态。\n- 加入评价、抒情或未来预测。",
         "injectionMode": "relative",
         "order": 11
       }
@@ -1152,7 +1152,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "请只输出一个合法 JSON 对象：\n{\"insight\":\"...\", \"trigger\":\"...\", \"suggestion\":\"...\", \"importance\": 1}",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\"insight\":\"...\", \"trigger\":\"...\", \"suggestion\":\"...\", \"importance\": 1}",
         "injectionMode": "relative",
         "order": 11
       },
@@ -1164,7 +1164,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "关注重点——\n1. 关系是否正在变好、变坏、失衡或逼近临界点。\n2. 哪条未解线索、风险或误解正在积累。\n3. 哪种行为模式、规则压力或人物心态正在反复出现。\n\n写作要求——\n- insight 必须是高层结论，不是事件复述。\n- trigger 要点名真正触发这条反思的关键事件、矛盾或转折。\n- suggestion 要写成后续叙事或检索中值得重点留意的方向，不要写空泛口号。\n- importance 按影响范围和持续时间打分：局部短期 3-5，明确趋势 6-7，全局或长期关键风险 8-10。\n\n禁止事项——\n- 把全部事件再讲一遍。\n- 把 insight 写成一句普通前情提要。\n- importance 习惯性全部给高分。\n- 把尚未发生的剧情当成既定事实。",
+        "content": "我希望你关注这些重点——\n1. 关系是否正在变好、变坏、失衡或逼近临界点。\n2. 哪条未解线索、风险或误解正在积累。\n3. 哪种行为模式、规则压力或人物心态正在反复出现。\n\n我的写作要求是——\n- insight 必须是高层结论，不是事件复述。\n- trigger 帮我点名真正触发这条反思的关键事件、矛盾或转折。\n- suggestion 写成后续叙事或检索中值得我重点留意的方向，不要写空泛口号。\n- importance 按影响范围和持续时间打分：局部短期 3-5，明确趋势 6-7，全局或长期关键风险 8-10。\n\n以下是我不想看到的——\n- 把全部事件再讲一遍。\n- 把 insight 写成一句普通前情提要。\n- importance 习惯性全部给高分。\n- 把尚未发生的剧情当成既定事实。",
         "injectionMode": "relative",
         "order": 12
       }
