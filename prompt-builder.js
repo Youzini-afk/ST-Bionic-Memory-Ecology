@@ -361,6 +361,30 @@ function joinStructuredPath(basePath = "", segment = "") {
     : `${basePath}.${normalizedSegment}`;
 }
 
+function mergeSanitizeReasons(...reasonLists) {
+  const merged = new Set();
+  for (const list of reasonLists) {
+    for (const reason of Array.isArray(list) ? list : []) {
+      if (reason) {
+        merged.add(String(reason));
+      }
+    }
+  }
+  return [...merged];
+}
+
+function summarizeSanitizePreview(value, maxLength = 200) {
+  const rendered = stringifyInterpolatedValue(value)
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!rendered) {
+    return "";
+  }
+  return rendered.length > maxLength
+    ? `${rendered.slice(0, maxLength)}...`
+    : rendered;
+}
+
 function looksLikeMvuStateContainer(value, seen = new WeakSet()) {
   if (!value || typeof value !== "object") {
     return false;
@@ -446,12 +470,22 @@ function sanitizeStructuredPromptValue(
       omit:
         !String(sanitized.text || "").trim() &&
         String(value || "").trim().length > 0,
+      dropped: Boolean(sanitized.dropped),
+      reasons: Array.isArray(sanitized.reasons) ? [...sanitized.reasons] : [],
+      blockedHitCount: Number(sanitized.blockedHitCount || 0),
+      artifactRemovedCount: Number(sanitized.artifactRemovedCount || 0),
+      rawPreview: summarizeSanitizePreview(value),
+      sanitizedPreview: summarizeSanitizePreview(sanitized.text),
     };
   }
 
   if (Array.isArray(value)) {
     const sanitizedArray = [];
     let changed = false;
+    let dropped = false;
+    let blockedHitCount = 0;
+    let artifactRemovedCount = 0;
+    let reasons = [];
     for (let index = 0; index < value.length; index += 1) {
       const childResult = sanitizeStructuredPromptValue(
         settings,
@@ -473,17 +507,31 @@ function sanitizeStructuredPromptValue(
       );
       if (childResult.omit) {
         changed = true;
+        dropped = dropped || Boolean(childResult.dropped);
+        blockedHitCount += Number(childResult.blockedHitCount || 0);
+        artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
+        reasons = mergeSanitizeReasons(reasons, childResult.reasons);
         continue;
       }
       sanitizedArray.push(childResult.value);
       if (childResult.changed) {
         changed = true;
       }
+      dropped = dropped || Boolean(childResult.dropped);
+      blockedHitCount += Number(childResult.blockedHitCount || 0);
+      artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
+      reasons = mergeSanitizeReasons(reasons, childResult.reasons);
     }
     return {
       value: sanitizedArray,
       changed: changed || sanitizedArray.length !== value.length,
       omit: value.length > 0 && sanitizedArray.length === 0,
+      dropped,
+      reasons,
+      blockedHitCount,
+      artifactRemovedCount,
+      rawPreview: summarizeSanitizePreview(value),
+      sanitizedPreview: summarizeSanitizePreview(sanitizedArray),
     };
   }
 
@@ -493,6 +541,12 @@ function sanitizeStructuredPromptValue(
         value,
         changed: false,
         omit: false,
+        dropped: false,
+        reasons: [],
+        blockedHitCount: 0,
+        artifactRemovedCount: 0,
+        rawPreview: summarizeSanitizePreview(value),
+        sanitizedPreview: summarizeSanitizePreview(value),
       };
     }
     seen.add(value);
@@ -501,6 +555,10 @@ function sanitizeStructuredPromptValue(
     const sanitizedObject = {};
     let changed = false;
     let keptEntries = 0;
+    let dropped = false;
+    let blockedHitCount = 0;
+    let artifactRemovedCount = 0;
+    let reasons = [];
 
     for (const [key, entryValue] of Object.entries(value)) {
       const stripReason = stripMvuContainers
@@ -516,6 +574,8 @@ function sanitizeStructuredPromptValue(
           reasons: [stripReason],
           blockedHitCount: 0,
         });
+        dropped = true;
+        reasons = mergeSanitizeReasons(reasons, [stripReason]);
         continue;
       }
 
@@ -539,6 +599,10 @@ function sanitizeStructuredPromptValue(
       );
       if (childResult.omit) {
         changed = true;
+        dropped = dropped || Boolean(childResult.dropped);
+        blockedHitCount += Number(childResult.blockedHitCount || 0);
+        artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
+        reasons = mergeSanitizeReasons(reasons, childResult.reasons);
         continue;
       }
       sanitizedObject[key] = childResult.value;
@@ -546,12 +610,22 @@ function sanitizeStructuredPromptValue(
       if (childResult.changed) {
         changed = true;
       }
+      dropped = dropped || Boolean(childResult.dropped);
+      blockedHitCount += Number(childResult.blockedHitCount || 0);
+      artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
+      reasons = mergeSanitizeReasons(reasons, childResult.reasons);
     }
 
     return {
       value: sanitizedObject,
       changed,
       omit: originalLooksMvuContainer && keptEntries === 0,
+      dropped,
+      reasons,
+      blockedHitCount,
+      artifactRemovedCount,
+      rawPreview: summarizeSanitizePreview(value),
+      sanitizedPreview: summarizeSanitizePreview(sanitizedObject),
     };
   }
 
@@ -559,6 +633,12 @@ function sanitizeStructuredPromptValue(
     value,
     changed: false,
     omit: false,
+    dropped: false,
+    reasons: [],
+    blockedHitCount: 0,
+    artifactRemovedCount: 0,
+    rawPreview: summarizeSanitizePreview(value),
+    sanitizedPreview: summarizeSanitizePreview(value),
   };
 }
 
@@ -665,7 +745,18 @@ function sanitizePromptContextInputs(
       const rawLength = typeof value === "string" ? value.length : -1;
       console.warn(
         "[ST-BME] 关键任务输入字段被 MVU 策略清空",
-        { taskType, fieldName, mode: fieldMode, rawLength },
+        {
+          taskType,
+          fieldName,
+          mode: fieldMode,
+          rawLength,
+          dropped: Boolean(sanitized.dropped),
+          reasons: Array.isArray(sanitized.reasons) ? sanitized.reasons : [],
+          artifactRemovedCount: Number(sanitized.artifactRemovedCount || 0),
+          blockedHitCount: Number(sanitized.blockedHitCount || 0),
+          rawPreview: String(sanitized.rawPreview || ""),
+          sanitizedPreview: String(sanitized.sanitizedPreview || ""),
+        },
       );
     }
     sanitizedContext[fieldName] = sanitized.omit

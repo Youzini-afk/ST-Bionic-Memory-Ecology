@@ -804,6 +804,53 @@ try {
     }
   }
 
+  // 测试 6c：warn 诊断字段包含 reasons 和 before/after preview
+  {
+    delete globalThis.__stBmeRuntimeDebugState;
+    const warnCalls = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnCalls.push(args);
+    try {
+      const s = buildMinimalExtractSettings();
+      await buildTaskPrompt(s, "extract", {
+        recentMessages:
+          "{{get_message_variable::stat_data.hp}}\n{{get_message_variable::display_data.hp}}",
+        charDescription: "",
+        userPersona: "",
+        candidateText: "",
+      });
+      const criticalDropWarn = warnCalls.find(
+        (args) => String(args[0] || "").includes("关键任务输入字段被 MVU 策略清空"),
+      );
+      assert.ok(criticalDropWarn, "T6c: 清洗后为空时应触发关键字段 warn");
+      assert.equal(criticalDropWarn[1]?.fieldName, "recentMessages",
+        "T6c: warn 应指向 recentMessages");
+      assert.equal(criticalDropWarn[1]?.mode, "passive",
+        "T6c: recentMessages 应以 passive mode 清洗");
+      assert.ok(
+        Array.isArray(criticalDropWarn[1]?.reasons) &&
+          criticalDropWarn[1].reasons.includes("artifact_stripped"),
+        "T6c: warn 应携带 artifact_stripped reason",
+      );
+      assert.match(
+        String(criticalDropWarn[1]?.rawPreview || ""),
+        /get_message_variable/,
+        "T6c: warn 应携带原始内容 preview",
+      );
+      assert.equal(
+        String(criticalDropWarn[1]?.sanitizedPreview || ""),
+        "",
+        "T6c: 清洗为空时 sanitizedPreview 应为空串",
+      );
+      assert.ok(
+        Number(criticalDropWarn[1]?.artifactRemovedCount || 0) >= 2,
+        "T6c: warn 应记录 artifactRemovedCount",
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+  }
+
   console.log("prompt-builder-mvu tests passed");
 } finally {
   if (originalRequire === undefined) {
