@@ -323,23 +323,6 @@ export function normalizeRecallInputText(value) {
     .trim();
 }
 
-const TRIVIAL_INPUT_MIN_TOKENS = 2;
-const TRIVIAL_INPUT_CJK_TOKEN_REGEX =
-  /\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/gu;
-
-function estimateTrivialInputTokens(text = "") {
-  const normalized = normalizeRecallInputText(text);
-  if (!normalized) return 0;
-
-  const cjkMatches = normalized.match(TRIVIAL_INPUT_CJK_TOKEN_REGEX) || [];
-  const nonCjkText = normalized.replace(TRIVIAL_INPUT_CJK_TOKEN_REGEX, " ");
-  const wordTokens = nonCjkText
-    .split(/\s+/)
-    .filter(Boolean);
-
-  return cjkMatches.length + wordTokens.length;
-}
-
 export function isTrivialUserInput(text) {
   const normalizedText = normalizeRecallInputText(text);
   if (!normalizedText) {
@@ -354,14 +337,6 @@ export function isTrivialUserInput(text) {
     return {
       trivial: true,
       reason: "slash-command",
-      normalizedText,
-    };
-  }
-
-  if (estimateTrivialInputTokens(normalizedText) < TRIVIAL_INPUT_MIN_TOKENS) {
-    return {
-      trivial: true,
-      reason: "under-min-tokens",
       normalizedText,
     };
   }
