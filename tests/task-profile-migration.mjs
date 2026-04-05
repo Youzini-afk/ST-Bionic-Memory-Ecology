@@ -297,6 +297,10 @@ assert.equal(
   refreshedDefaultExtract.metadata.defaultTemplateUpdatedAt,
   currentDefaultExtract.metadata.defaultTemplateUpdatedAt,
 );
+assert.equal(
+  refreshedDefaultExtract.metadata.defaultTemplateFingerprint,
+  currentDefaultExtract.metadata.defaultTemplateFingerprint,
+);
 assert.ok(preservedCustomExtract);
 assert.equal(
   preservedCustomExtract.blocks[0].content,
@@ -332,6 +336,41 @@ assert.equal(
     ?.content,
   "同版本下保留我的默认预设修改",
 );
+
+const sameTimestampButChangedTemplateDefaults = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    extract: {
+      activeProfileId: "default",
+      profiles: [
+        {
+          ...currentDefaultExtract,
+          blocks: currentDefaultExtract.blocks.map((block) =>
+            block.id === "default-role"
+              ? { ...block, content: "老模板内容但时间戳没变" }
+              : block,
+          ),
+          metadata: {
+            ...(currentDefaultExtract.metadata || {}),
+            defaultTemplateFingerprint: "fnv1a-deadbeef",
+          },
+        },
+      ],
+    },
+  },
+});
+const fingerprintRefreshedDefault =
+  sameTimestampButChangedTemplateDefaults.extract.profiles.find(
+    (profile) => profile.id === "default",
+  );
+assert.equal(
+  fingerprintRefreshedDefault.blocks.find(
+    (block) => block.id === "default-role",
+  )?.content,
+  currentDefaultExtract.blocks.find((block) => block.id === "default-role")
+    ?.content,
+);
+
 assert.deepEqual(
   upgradedLegacyDefault.blocks
     .slice(6, 10)

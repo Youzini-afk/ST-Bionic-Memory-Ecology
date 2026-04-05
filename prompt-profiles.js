@@ -443,6 +443,21 @@ function getDefaultTaskProfileTemplate(taskType) {
   return cloneJson(template);
 }
 
+function hashTemplateFingerprint(value = "") {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+function getDefaultTaskProfileTemplateFingerprint(taskType) {
+  const template = getDefaultTaskProfileTemplate(taskType);
+  return hashTemplateFingerprint(JSON.stringify(template || null));
+}
+
 function getDefaultTaskProfileTemplateStamp(taskType) {
   const template = getDefaultTaskProfileTemplate(taskType);
   return {
@@ -453,6 +468,7 @@ function getDefaultTaskProfileTemplateStamp(taskType) {
       typeof template?.updatedAt === "string" && template.updatedAt
         ? template.updatedAt
         : "",
+    fingerprint: getDefaultTaskProfileTemplateFingerprint(taskType),
   };
 }
 
@@ -804,8 +820,16 @@ function shouldRefreshBuiltinDefaultProfile(taskType, profile = {}) {
     typeof metadata?.defaultTemplateUpdatedAt === "string"
       ? metadata.defaultTemplateUpdatedAt
       : "";
+  const currentFingerprint =
+    typeof metadata?.defaultTemplateFingerprint === "string"
+      ? metadata.defaultTemplateFingerprint
+      : "";
 
   if (currentVersion < expectedStamp.version) {
+    return true;
+  }
+
+  if (expectedStamp.fingerprint && currentFingerprint !== expectedStamp.fingerprint) {
     return true;
   }
 
@@ -886,6 +910,7 @@ function createFallbackDefaultTaskProfile(taskType) {
       legacyPromptField,
       defaultTemplateVersion: templateStamp.version,
       defaultTemplateUpdatedAt: templateStamp.updatedAt,
+      defaultTemplateFingerprint: templateStamp.fingerprint,
     },
   };
 }
@@ -946,6 +971,7 @@ export function createDefaultTaskProfile(taskType) {
       legacyPromptField,
       defaultTemplateVersion: templateStamp.version,
       defaultTemplateUpdatedAt: templateStamp.updatedAt,
+      defaultTemplateFingerprint: templateStamp.fingerprint,
     },
   };
 }
