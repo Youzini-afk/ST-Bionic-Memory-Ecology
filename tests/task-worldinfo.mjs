@@ -456,6 +456,56 @@ try {
   assert.equal(promptBuild.additionalMessages[0].content, "这是一条 atDepth 消息。");
   assert.equal(promptBuild.debug.mvu.sanitizedFieldCount >= 0, true);
 
+  const noWorldInfoBlockSettings = {
+    taskProfiles: {
+      recall: {
+        activeProfileId: "custom",
+        profiles: [
+          {
+            id: "custom",
+            name: "无世界书显式块",
+            taskType: "recall",
+            builtin: false,
+            blocks: [
+              {
+                id: "u1",
+                type: "custom",
+                content: "角色: {{charName}}",
+                role: "user",
+                enabled: true,
+                order: 0,
+                injectionMode: "append",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  const atDepthOnlyPromptBuild = await buildTaskPrompt(
+    noWorldInfoBlockSettings,
+    "recall",
+    {
+      taskName: "recall",
+      userMessage: "继续调查",
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+  );
+
+  assert.equal(atDepthOnlyPromptBuild.debug.worldInfoRequested, true);
+  assert.equal(atDepthOnlyPromptBuild.debug.worldInfoAtDepthCount, 1);
+  assert.equal(atDepthOnlyPromptBuild.additionalMessages.length, 1);
+  assert.equal(
+    atDepthOnlyPromptBuild.additionalMessages[0].content,
+    "这是一条 atDepth 消息。",
+  );
+  assert.deepEqual(
+    atDepthOnlyPromptBuild.executionMessages.map((message) => message.role),
+    ["user", "system"],
+  );
+
   const { initializeHostAdapter } = await import("../host-adapter/index.js");
   const partialBridgeCalls = [];
   const partialBridgeEntriesByWorldbook = {

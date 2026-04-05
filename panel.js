@@ -3926,7 +3926,7 @@ function _renderTaskDebugPromptCard(taskType, promptBuild) {
     ${_renderDebugDetails("实际投递路径", promptBuild.debug?.effectivePath || null)}
     ${_renderDebugDetails("渲染后的块（按配置顺序）", promptBuild.renderedBlocks)}
     ${_renderDebugDetails("实际执行消息序列", promptBuild.executionMessages || promptBuild.privateTaskMessages || null)}
-    ${_renderDebugDetails("系统提示词（兼容视图）", promptBuild.systemPrompt || "")}
+    ${_renderDebugDetails("系统提示词（兼容视图，不含 atDepth 消息）", promptBuild.systemPrompt || "")}
     ${_renderDebugDetails("世界书桶内容（诊断）", promptBuild.hostInjections)}
     ${_renderDebugDetails("世界书块命中计划（诊断）", promptBuild.hostInjectionPlan || null)}
     ${_renderDebugDetails("世界书调试", promptBuild.worldInfo?.debug || promptBuild.worldInfoResolution?.debug || null)}

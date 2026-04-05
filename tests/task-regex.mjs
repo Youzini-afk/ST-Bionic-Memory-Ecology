@@ -153,6 +153,65 @@ try {
   const { applyTaskRegex, inspectTaskRegexReuse } = await import(
     "../task-regex.js"
   );
+  const {
+    createDefaultTaskProfiles,
+    isTaskRegexStageEnabled,
+    normalizeTaskRegexStages,
+  } = await import("../prompt-profiles.js");
+
+  const normalizedLegacyStages = normalizeTaskRegexStages({
+    finalPrompt: true,
+    "input.userMessage": false,
+    "input.recentMessages": false,
+    "input.candidateText": false,
+    "input.finalPrompt": false,
+    rawResponse: false,
+    beforeParse: false,
+    "output.rawResponse": false,
+    "output.beforeParse": false,
+  });
+  assert.equal(normalizedLegacyStages["input.finalPrompt"], true);
+  assert.equal(normalizedLegacyStages["input.userMessage"], false);
+  assert.equal(normalizedLegacyStages["input.recentMessages"], false);
+  assert.equal(normalizedLegacyStages["input.candidateText"], false);
+  assert.equal(normalizedLegacyStages["output.rawResponse"], false);
+  assert.equal(normalizedLegacyStages["output.beforeParse"], false);
+  assert.equal(
+    isTaskRegexStageEnabled(normalizedLegacyStages, "input.finalPrompt"),
+    true,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(normalizedLegacyStages, "input.userMessage"),
+    false,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(normalizedLegacyStages, "input.recentMessages"),
+    false,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(normalizedLegacyStages, "input.candidateText"),
+    false,
+  );
+
+  const defaultProfiles = createDefaultTaskProfiles();
+  const defaultExtractStages =
+    defaultProfiles.extract?.profiles?.[0]?.regex?.stages || {};
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "input.finalPrompt"),
+    true,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "input.userMessage"),
+    false,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "input.recentMessages"),
+    false,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "input.candidateText"),
+    false,
+  );
 
   globalThis.getTavernRegexes = () => {
     throw new Error("legacy global getter should not be used in regex tests");

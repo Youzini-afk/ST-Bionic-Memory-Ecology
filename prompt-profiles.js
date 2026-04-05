@@ -596,32 +596,27 @@ function normalizeRegexStageKey(stageKey = "") {
 export function normalizeTaskRegexStages(stages = {}) {
   const source =
     stages && typeof stages === "object" && !Array.isArray(stages) ? stages : {};
-  const normalized = { ...source };
+  const normalized = {};
+
+  for (const [key, value] of Object.entries(source)) {
+    if (Object.prototype.hasOwnProperty.call(TASK_REGEX_STAGE_ALIAS_MAP, key)) {
+      continue;
+    }
+    normalized[key] = Boolean(value);
+  }
 
   for (const [legacyKey, canonicalKey] of Object.entries(
     TASK_REGEX_STAGE_ALIAS_MAP,
   )) {
-    if (
-      !Object.prototype.hasOwnProperty.call(normalized, canonicalKey) &&
-      Object.prototype.hasOwnProperty.call(normalized, legacyKey)
-    ) {
-      normalized[canonicalKey] = Boolean(normalized[legacyKey]);
-    }
-    delete normalized[legacyKey];
-  }
-
-  for (const [groupKey, stageKeys] of Object.entries(TASK_REGEX_STAGE_GROUPS)) {
-    if (normalized[groupKey] === false) {
+    if (Object.prototype.hasOwnProperty.call(source, legacyKey)) {
+      // Older exports may carry both legacy and canonical keys at the same
+      // time. When that happens, keep the legacy intent instead of letting a
+      // newer placeholder default silently flip stage timing.
+      normalized[canonicalKey] = Boolean(source[legacyKey]);
       continue;
     }
-    const allSpecificStagesFalse =
-      stageKeys.length > 0 &&
-      stageKeys.every((stageKey) => normalized[stageKey] === false);
-    if (!allSpecificStagesFalse) {
-      continue;
-    }
-    for (const stageKey of stageKeys) {
-      delete normalized[stageKey];
+    if (Object.prototype.hasOwnProperty.call(source, canonicalKey)) {
+      normalized[canonicalKey] = Boolean(source[canonicalKey]);
     }
   }
 

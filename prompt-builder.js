@@ -969,6 +969,13 @@ function getBlockDiagnosticInjectionPosition(block = {}) {
 }
 
 function profileRequiresWorldInfo(profile) {
+  if (
+    profile?.worldInfo === false ||
+    profile?.metadata?.disableWorldInfo === true
+  ) {
+    return false;
+  }
+
   const blocks = Array.isArray(profile?.blocks) ? profile.blocks : [];
   for (const block of blocks) {
     if (!block || block.enabled === false) continue;
@@ -990,7 +997,10 @@ function profileRequiresWorldInfo(profile) {
       return true;
     }
   }
-  return false;
+
+  // atDepth world info is implicit in the final message chain, so profiles
+  // without explicit before/after placeholders should still resolve lore.
+  return blocks.some((block) => block && block.enabled !== false);
 }
 
 function extractWorldInfoChatMessages(context = {}) {
