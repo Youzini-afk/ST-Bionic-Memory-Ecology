@@ -794,6 +794,32 @@ function _switchConfigSection(sectionId) {
   _syncConfigSectionState();
 }
 
+function _ensureMobileTraceConfigNavButton() {
+  if (!panelEl) return;
+
+  const mobileNav = panelEl.querySelector(".bme-config-nav-mobile");
+  if (!mobileNav) return;
+  if (mobileNav.querySelector('[data-config-section="trace"]')) return;
+
+  const appearanceButton = mobileNav.querySelector(
+    '[data-config-section="appearance"]',
+  );
+  const traceButton = document.createElement("button");
+  traceButton.className = "bme-config-nav-btn";
+  traceButton.dataset.configSection = "trace";
+  traceButton.type = "button";
+  traceButton.innerHTML = `
+    <i class="fa-solid fa-route"></i>
+    <span>消息追踪</span>
+  `;
+
+  if (appearanceButton?.parentNode === mobileNav) {
+    mobileNav.insertBefore(traceButton, appearanceButton);
+  } else {
+    mobileNav.appendChild(traceButton);
+  }
+}
+
 function _syncConfigSectionState() {
   if (!panelEl) return;
   panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
@@ -1857,6 +1883,8 @@ function _refreshConfigTab() {
 
 function _bindConfigControls() {
   if (!panelEl || panelEl.dataset.bmeConfigBound === "true") return;
+
+  _ensureMobileTraceConfigNavButton();
 
   panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
     if (btn.dataset.bmeBound === "true") return;
