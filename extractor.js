@@ -57,6 +57,16 @@ function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
   };
 }
 
+function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
+  const hasPromptMessages =
+    Array.isArray(promptPayload?.promptMessages) &&
+    promptPayload.promptMessages.length > 0;
+  if (hasPromptMessages) {
+    return String(promptPayload?.systemPrompt || "");
+  }
+  return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
+}
+
 function isAbortError(error) {
   return error?.name === "AbortError";
 }
@@ -396,11 +406,10 @@ export async function extractMemories({
     "请分析对话，按 JSON 格式输出操作列表。",
   ].join("\n");
   const promptPayload = resolveTaskPromptPayload(promptBuild, userPrompt);
-  const llmSystemPrompt =
-    Array.isArray(promptPayload.promptMessages) &&
-    promptPayload.promptMessages.length > 0
-      ? String(promptPayload.systemPrompt || "")
-      : String(promptPayload.systemPrompt || systemPrompt || "");
+  const llmSystemPrompt = resolveTaskLlmSystemPrompt(
+    promptPayload,
+    systemPrompt,
+  );
 
   // 调用 LLM
   const result = await callLLMForJSON({
@@ -1021,7 +1030,10 @@ export async function generateSynopsis({
   );
 
   const result = await callLLMForJSON({
-    systemPrompt: synopsisPromptPayload.systemPrompt || synopsisSystemPrompt,
+    systemPrompt: resolveTaskLlmSystemPrompt(
+      synopsisPromptPayload,
+      synopsisSystemPrompt,
+    ),
     userPrompt: synopsisPromptPayload.userPrompt,
     maxRetries: 1,
     signal,
@@ -1155,8 +1167,10 @@ export async function generateReflection({
   );
 
   const result = await callLLMForJSON({
-    systemPrompt:
-      reflectionPromptPayload.systemPrompt || reflectionSystemPrompt,
+    systemPrompt: resolveTaskLlmSystemPrompt(
+      reflectionPromptPayload,
+      reflectionSystemPrompt,
+    ),
     userPrompt: reflectionPromptPayload.userPrompt,
     maxRetries: 1,
     signal,
