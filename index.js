@@ -560,7 +560,18 @@ const plannerRecallHandoffs = new Map();
 let persistedRecallUiRefreshTimer = null;
 let persistedRecallUiRefreshObserver = null;
 let persistedRecallUiRefreshSession = 0;
-const PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [0, 80, 180, 320, 500];
+const PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [
+  0,
+  80,
+  180,
+  320,
+  500,
+  850,
+  1300,
+  2000,
+  3000,
+  4200,
+];
 const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
 const persistedRecallPersistDiagnosticTimestamps = new Map();
@@ -2281,6 +2292,27 @@ function resolveRecallCardAnchor(messageElement) {
   return isDomNodeAttached(messageElement) ? messageElement : null;
 }
 
+function getRecallMessageElementPriority(messageElement) {
+  if (!messageElement || !isDomNodeAttached(messageElement)) return -1;
+
+  let priority = 0;
+  const anchor = resolveRecallCardAnchor(messageElement);
+  if (anchor === messageElement) priority += 1;
+  else if (anchor) priority += 3;
+
+  if (messageElement.querySelector?.(".mes_text")) priority += 1;
+  if (messageElement.classList?.contains("last_mes")) priority += 2;
+  if (
+    messageElement.getAttribute?.("is_user") === "true" ||
+    messageElement.dataset?.isUser === "true" ||
+    messageElement.classList?.contains("user_mes")
+  ) {
+    priority += 1;
+  }
+
+  return priority;
+}
+
 function normalizeRecallCardUserInputDisplayMode(mode) {
   const normalized = String(mode || "").trim();
   if (
@@ -2383,14 +2415,26 @@ function refreshPersistedRecallMessageUi() {
       continue;
     }
     if (messageElementMap.has(messageIndex)) {
+      const previousElement = messageElementMap.get(messageIndex) || null;
+      const previousPriority = getRecallMessageElementPriority(previousElement);
+      const nextPriority = getRecallMessageElementPriority(messageElement);
+      const shouldReplace = nextPriority >= previousPriority;
       debugPersistedRecallUi(
-        "检测到重复消息 DOM 索引，保留首个锚点",
+        "检测到重复消息 DOM 索引，已挑选更可靠的锚点",
         {
           messageIndex,
+          previousPriority,
+          nextPriority,
+          replaced: shouldReplace,
         },
         `duplicate-message-index:${messageIndex}`,
       );
-      cleanupRecallArtifacts(messageElement);
+      if (shouldReplace) {
+        cleanupRecallArtifacts(previousElement);
+        messageElementMap.set(messageIndex, messageElement);
+      } else {
+        cleanupRecallArtifacts(messageElement);
+      }
       continue;
     }
     messageElementMap.set(messageIndex, messageElement);
@@ -2598,7 +2642,13 @@ function armPersistedRecallMessageUiObserver(sessionId, runAttempt) {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["mesid", "data-mesid", "data-message-id"],
+    attributeFilter: [
+      "mesid",
+      "data-mesid",
+      "data-message-id",
+      "class",
+      "is_user",
+    ],
   });
   return true;
 }
@@ -2620,23 +2670,40 @@ function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
 
     const summary = refreshPersistedRecallMessageUi();
 
-    const shouldRetry =
+    const shouldRetryForPending =
       (summary.status === "missing_chat_root" ||
         summary.status === "waiting_dom" ||
         summary.status === "missing_message_anchor") &&
       attemptIndex < retryDelays.length - 1;
 
-    if (!shouldRetry) {
+    const shouldWatchForRepaint =
+      summary.status === "rendered" && summary.renderedCount > 0;
+
+    if (!shouldRetryForPending && !shouldWatchForRepaint) {
       clearPersistedRecallMessageUiObserver();
       return;
     }
 
     armPersistedRecallMessageUiObserver(sessionId, runAttempt);
-    attemptIndex += 1;
-    persistedRecallUiRefreshTimer = setTimeout(
-      runAttempt,
-      retryDelays[attemptIndex],
-    );
+    if (shouldRetryForPending) {
+      attemptIndex += 1;
+      persistedRecallUiRefreshTimer = setTimeout(
+        runAttempt,
+        retryDelays[attemptIndex],
+      );
+      return;
+    }
+
+    const lingerMs = retryDelays[retryDelays.length - 1] || 0;
+    if (lingerMs <= 0) {
+      clearPersistedRecallMessageUiObserver();
+      return;
+    }
+    persistedRecallUiRefreshTimer = setTimeout(() => {
+      if (sessionId !== persistedRecallUiRefreshSession) return;
+      clearPersistedRecallMessageUiObserver();
+      persistedRecallUiRefreshTimer = null;
+    }, lingerMs);
   };
 
   persistedRecallUiRefreshTimer = setTimeout(

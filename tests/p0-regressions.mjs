@@ -1551,6 +1551,73 @@ async function testRecallCardDelayedStableMessageIndexEventuallyRenders() {
   }
 }
 
+async function testRecallCardSurvivesLateMessageDomReplacement() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  harness.context.PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [
+    0,
+    20,
+    40,
+    120,
+    260,
+  ];
+  const originalElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(originalElement);
+
+  try {
+    harness.api.schedulePersistedRecallMessageUiRefresh();
+    await waitForTick();
+    await waitForTick();
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+    );
+
+    originalElement.remove();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+
+    const replacementElement = createMessageElement(harness.document, 0, {
+      stableId: true,
+      withMesBlock: true,
+      isUser: true,
+    });
+    harness.chatRoot.appendChild(replacementElement);
+
+    await waitForTick();
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await waitForTick();
+
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".bme-recall-card").length,
+      1,
+      "延迟重渲染后的当前 user 楼层应自动补挂 Recall Card",
+    );
+    assert.equal(
+      replacementElement.querySelectorAll(".bme-recall-card").length,
+      1,
+      "卡片应重新挂到替换后的消息 DOM 上",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 async function testRecallCardKeepsRetryingWhenOlderCardsAlreadyRendered() {
   const chat = [
     {
@@ -1607,6 +1674,57 @@ async function testRecallCardKeepsRetryingWhenOlderCardsAlreadyRendered() {
     assert.equal(
       harness.chatRoot.querySelectorAll(".bme-recall-card").length,
       2,
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardPrefersBetterDuplicateMessageAnchor() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "user-0",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const staleElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: false,
+    isUser: true,
+  });
+  const liveElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  liveElement.classList.add("last_mes");
+  harness.chatRoot.appendChild(staleElement);
+  harness.chatRoot.appendChild(liveElement);
+
+  try {
+    const summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "rendered");
+    assert.equal(
+      staleElement.querySelectorAll(".bme-recall-card").length,
+      0,
+      "低质量的重复 DOM 不应抢走当前楼层卡片",
+    );
+    assert.equal(
+      liveElement.querySelectorAll(".bme-recall-card").length,
+      1,
+      "应优先挂到结构更完整的那条消息 DOM 上",
+    );
+    assert.equal(
+      harness.chatRoot.querySelectorAll(".mes_block .bme-recall-card").length,
+      1,
     );
   } finally {
     harness.restoreGlobals();
@@ -5174,7 +5292,9 @@ await testRecallCardMountsOnStandardUserMessageDom();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
 await testRecallCardDelayedStableMessageIndexEventuallyRenders();
+await testRecallCardSurvivesLateMessageDomReplacement();
 await testRecallCardKeepsRetryingWhenOlderCardsAlreadyRendered();
+await testRecallCardPrefersBetterDuplicateMessageAnchor();
 await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
