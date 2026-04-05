@@ -204,6 +204,7 @@ import {
   getStageNoticeTitle,
   hashRecallInput,
   isFreshRecallInputRecord,
+  isTrivialUserInput,
   normalizeRecallInputText,
   normalizeStageNoticeLevel,
   pushBatchStageArtifact,
@@ -521,6 +522,7 @@ let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 300000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
+const TRIVIAL_GENERATION_SKIP_TTL_MS = 60000;
 const HISTORY_RECOVERY_SETTLE_MS = 80;
 const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
 const GRAPH_LOAD_RETRY_DELAYS_MS = [120, 450, 1200, 2500];
@@ -534,6 +536,7 @@ const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
 let pendingHostGenerationInputSnapshot = createRecallInputRecord();
+let currentGenerationTrivialSkip = null;
 let coreEventBindingState = {
   registered: false,
   cleanups: [],
@@ -1246,9 +1249,9 @@ function restoreRecallUiStateFromPersistence(chat = getContext()?.chat) {
 }
 
 function clearRecallInputTracking() {
-  pendingRecallSendIntent = createRecallInputRecord();
+  clearPendingRecallSendIntent();
   lastRecallSentUserMessage = createRecallInputRecord();
-  pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  clearPendingHostGenerationInputSnapshot();
   if (typeof recordMessageTraceSnapshot === "function") {
     recordMessageTraceSnapshot({
       lastSentUserMessage: null,
@@ -1328,6 +1331,91 @@ function consumeHostGenerationInputSnapshot(options = {}) {
 
 function getPendingHostGenerationInputSnapshot() {
   return pendingHostGenerationInputSnapshot;
+}
+
+function clearPendingRecallSendIntent() {
+  pendingRecallSendIntent = createRecallInputRecord();
+  return pendingRecallSendIntent;
+}
+
+function clearPendingHostGenerationInputSnapshot() {
+  pendingHostGenerationInputSnapshot = createRecallInputRecord();
+  return pendingHostGenerationInputSnapshot;
+}
+
+function getCurrentGenerationTrivialSkip(
+  chatId = getCurrentChatId(),
+  now = Date.now(),
+) {
+  if (!currentGenerationTrivialSkip) return null;
+
+  const setAtMs = Number(currentGenerationTrivialSkip.setAtMs) || 0;
+  if (
+    !setAtMs ||
+    now - setAtMs > TRIVIAL_GENERATION_SKIP_TTL_MS
+  ) {
+    currentGenerationTrivialSkip = null;
+    return null;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const activeChatId = normalizeChatIdCandidate(
+    currentGenerationTrivialSkip.chatId,
+  );
+  if (normalizedChatId && activeChatId && normalizedChatId !== activeChatId) {
+    return null;
+  }
+
+  return currentGenerationTrivialSkip;
+}
+
+function markCurrentGenerationTrivialSkip({
+  reason = "",
+  chatId = getCurrentChatId(),
+  chatLength = 0,
+} = {}) {
+  currentGenerationTrivialSkip = {
+    chatId: normalizeChatIdCandidate(chatId),
+    setAtMs: Date.now(),
+    reason: String(reason || ""),
+    generationStartMinChatIndex: Math.max(
+      0,
+      Math.floor(Number(chatLength) || 0),
+    ),
+  };
+  return currentGenerationTrivialSkip;
+}
+
+function clearCurrentGenerationTrivialSkip(_reason = "") {
+  const previous = currentGenerationTrivialSkip;
+  currentGenerationTrivialSkip = null;
+  return previous;
+}
+
+function consumeCurrentGenerationTrivialSkip(
+  targetMessageIndex,
+  chatId = getCurrentChatId(),
+  now = Date.now(),
+) {
+  const activeSkip = getCurrentGenerationTrivialSkip(chatId, now);
+  if (!activeSkip) return false;
+
+  const normalizedTargetIndex = Number.isFinite(Number(targetMessageIndex))
+    ? Math.floor(Number(targetMessageIndex))
+    : null;
+  if (!Number.isFinite(normalizedTargetIndex)) {
+    return false;
+  }
+
+  if (
+    normalizedTargetIndex <
+    Math.max(0, Math.floor(Number(activeSkip.generationStartMinChatIndex) || 0))
+  ) {
+    return false;
+  }
+
+  currentGenerationTrivialSkip = null;
+  return true;
 }
 
 function recordRecallSendIntent(text, source = "dom-intent") {
@@ -6467,9 +6555,17 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     };
   }
 
-  return buildNormalGenerationRecallInput(chat, {
+  const normalInput = buildNormalGenerationRecallInput(chat, {
     frozenInputSnapshot: params?.frozenInputSnapshot,
   });
+  return normalInput;
+}
+
+function createTrivialRecallSkipSentinel(reason = "") {
+  return {
+    __trivialSkip: true,
+    trivialReason: String(reason || ""),
+  };
 }
 
 function buildNormalGenerationRecallInput(chat, options = {}) {
@@ -6568,6 +6664,34 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
   ].filter(Boolean);
   const selectedCandidate = sourceCandidates[0] || null;
   if (!selectedCandidate?.text) return null;
+
+  const trivialInputResult = isTrivialUserInput(selectedCandidate.text);
+  const activeTrivialSkip = getCurrentGenerationTrivialSkip();
+  if (activeTrivialSkip) {
+    if (!trivialInputResult.trivial) {
+      clearCurrentGenerationTrivialSkip("stale-trivial-skip-replaced");
+    } else {
+      clearPendingRecallSendIntent();
+      clearPendingHostGenerationInputSnapshot();
+      return createTrivialRecallSkipSentinel(
+        activeTrivialSkip.reason || trivialInputResult.reason,
+      );
+    }
+  }
+
+  if (trivialInputResult.trivial) {
+    clearPendingRecallSendIntent();
+    clearPendingHostGenerationInputSnapshot();
+    markCurrentGenerationTrivialSkip({
+      reason: trivialInputResult.reason,
+      chatId: getCurrentChatId(),
+      chatLength: Array.isArray(chat) ? chat.length : 0,
+    });
+    console.info?.(
+      `[ST-BME] trivial-input skip: reason=${trivialInputResult.reason} len=${trivialInputResult.normalizedText.length} hook=build-normal-input`,
+    );
+    return createTrivialRecallSkipSentinel(trivialInputResult.reason);
+  }
 
   return {
     overrideUserMessage: selectedCandidate.text,
@@ -7119,6 +7243,7 @@ function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") 
 
   clearGenerationRecallTransactionsForChat();
   clearRecallInputTracking();
+  clearCurrentGenerationTrivialSkip("history-mutation");
   clearInjectionState({
     preserveRecallStatus: hadActiveRecall,
     preserveRuntimeStatus: hadActiveRecall,
@@ -8843,10 +8968,14 @@ async function runPlannerRecallForEna({
   disableLlmRecall = false,
 } = {}) {
   const userMessage = normalizeRecallInputText(rawUserInput || "");
-  if (!userMessage) {
+  const trivialInputResult = isTrivialUserInput(userMessage);
+  if (trivialInputResult.trivial) {
+    console.info?.(
+      `[ST-BME] trivial-input skip: reason=${trivialInputResult.reason} len=${trivialInputResult.normalizedText.length} hook=ena-planner`,
+    );
     return {
       ok: false,
-      reason: "empty-user-input",
+      reason: `trivial-user-input:${trivialInputResult.reason}`,
       memoryBlock: "",
       recentMessages: [],
       result: null,
@@ -9018,6 +9147,7 @@ function onChatChanged() {
     clearPendingAutoExtraction,
     clearPendingGraphLoadRetry,
     clearPendingHistoryMutationChecks,
+    clearCurrentGenerationTrivialSkip,
     clearRecallInputTracking,
     clearTimeout,
     dismissAllStageNotices,
@@ -9090,6 +9220,7 @@ function onMessageSent(messageId) {
   const result = onMessageSentController(
     {
       getContext,
+      isTrivialUserInput,
       recordRecallSentUserMessage,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     },
@@ -9173,11 +9304,17 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
   return onGenerationStartedController(
     {
       clearDryRunPromptPreview,
+      clearCurrentGenerationTrivialSkip,
+      clearPendingHostGenerationInputSnapshot,
+      clearPendingRecallSendIntent,
       freezeHostGenerationInputSnapshot,
+      getContext,
       getPendingRecallSendIntent: () => pendingRecallSendIntent,
       getSendTextareaValue,
       isFreshRecallInputRecord,
+      isTrivialUserInput,
       markDryRunPromptPreview,
+      markCurrentGenerationTrivialSkip,
       normalizeRecallInputText,
     },
     type,
@@ -9254,6 +9391,7 @@ async function onBeforeCombinePrompts(promptData = null) {
 function onMessageReceived(messageId = null, type = "") {
   const result = onMessageReceivedController({
     console,
+    consumeCurrentGenerationTrivialSkip,
     createRecallInputRecord,
     getContext,
     getCurrentGraph: () => currentGraph,
