@@ -333,6 +333,54 @@ state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
 state.llmCalls.length = 0;
 state.llmOptions.length = 0;
+state.llmCandidateCount = 0;
+state.llmResponse = { selectedIds: ["rule-1"] };
+const llmCamelCaseResult = await retrieve({
+  graph,
+  userMessage: "换个 JSON 键名也应该兼容",
+  recentMessages: [],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.deepEqual(Array.from(llmCamelCaseResult.selectedNodeIds), ["rule-1"]);
+assert.equal(llmCamelCaseResult.meta.retrieval.llm.status, "llm");
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
+state.llmCandidateCount = 0;
+state.llmResponse = { data: { selected_ids: ["rule-2"] } };
+const llmNestedResult = await retrieve({
+  graph,
+  userMessage: "嵌套 JSON 结构也应该兼容",
+  recentMessages: [],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.deepEqual(Array.from(llmNestedResult.selectedNodeIds), ["rule-2"]);
+assert.equal(llmNestedResult.meta.retrieval.llm.status, "llm");
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
 await retrieve({
   graph,
   userMessage: "规则一和规则二有什么关联",

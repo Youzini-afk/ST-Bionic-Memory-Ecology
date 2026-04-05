@@ -107,7 +107,7 @@ function isPlainObject(value) {
 
 function extractOperationsPayload(result) {
   if (Array.isArray(result)) {
-    return result;
+    return { source: "root", operations: result };
   }
   if (!isPlainObject(result)) {
     return null;
@@ -115,27 +115,14 @@ function extractOperationsPayload(result) {
 
   for (const key of EXTRACTION_RESULT_CONTAINER_KEYS) {
     if (Array.isArray(result[key])) {
-      return result[key];
+      return {
+        source: key,
+        operations: result[key],
+      };
     }
   }
 
   return null;
-}
-
-function resolveExtractionAction(rawOp) {
-  const explicitAction = rawOp?.action ?? rawOp?.op ?? rawOp?.operation;
-  if (typeof explicitAction === "string" && explicitAction.trim()) {
-    return explicitAction.trim().toLowerCase();
-  }
-
-  if (rawOp?.type) {
-    if (rawOp?.nodeId || rawOp?.node_id) {
-      return "update";
-    }
-    return "create";
-  }
-
-  return "";
 }
 
 function resolveExtractionTypeDef(schema, type) {
@@ -153,6 +140,32 @@ function resolveExtractionFieldNames(typeDef) {
           .filter(Boolean)
       : [],
   );
+}
+
+function hasExplicitExtractionAction(rawOp) {
+  const explicitAction = rawOp?.action ?? rawOp?.op ?? rawOp?.operation;
+  return typeof explicitAction === "string" && explicitAction.trim().length > 0;
+}
+
+function resolveExtractionAction(rawOp) {
+  const explicitAction = rawOp?.action ?? rawOp?.op ?? rawOp?.operation;
+  if (typeof explicitAction === "string" && explicitAction.trim()) {
+    return explicitAction.trim().toLowerCase();
+  }
+
+  if (rawOp?.type) {
+    if (
+      rawOp?.nodeId ||
+      rawOp?.node_id ||
+      rawOp?.targetNodeId ||
+      rawOp?.target_node_id
+    ) {
+      return "update";
+    }
+    return "create";
+  }
+
+  return "";
 }
 
 function resolveExtractionNodeId(rawOp) {
@@ -203,6 +216,7 @@ function normalizeExtractionOperation(rawOp, schema) {
     return rawOp;
   }
 
+  const explicitAction = hasExplicitExtractionAction(rawOp);
   const action = resolveExtractionAction(rawOp);
   const type = rawOp?.type == null ? "" : String(rawOp.type).trim();
   const typeDef = resolveExtractionTypeDef(schema, type);
@@ -222,6 +236,10 @@ function normalizeExtractionOperation(rawOp, schema) {
     delete normalized.nodeId;
   } else if ((action === "update" || action === "delete") && nodeId) {
     normalized.nodeId = nodeId;
+  }
+
+  if (!explicitAction && action && type) {
+    normalized.__legacyCompat = true;
   }
 
   if (Array.isArray(rawOp?.relations) && !Array.isArray(rawOp?.links)) {
@@ -261,23 +279,42 @@ function normalizeExtractionOperation(rawOp, schema) {
 }
 
 function normalizeExtractionResultPayload(result, schema) {
-  const operations = extractOperationsPayload(result);
-  if (!Array.isArray(operations)) {
-    return result;
+  const extracted = extractOperationsPayload(result);
+  if (!extracted || !Array.isArray(extracted.operations)) {
+    return null;
   }
 
-  const normalizedOperations = operations.map((op) =>
-    normalizeExtractionOperation(op, schema),
-  );
+  let legacyCount = 0;
+  const normalizedOperations = extracted.operations.map((op) => {
+    const normalized = normalizeExtractionOperation(op, schema);
+    if (normalized?.__legacyCompat) {
+      legacyCount += 1;
+      delete normalized.__legacyCompat;
+    }
+    return normalized;
+  });
 
-  if (Array.isArray(result) || !isPlainObject(result)) {
-    return { operations: normalizedOperations };
+  const normalizedPayload =
+    Array.isArray(result) || !isPlainObject(result)
+      ? { operations: normalizedOperations }
+      : {
+          ...result,
+          operations: normalizedOperations,
+        };
+
+  if (legacyCount > 0) {
+    console.info("[ST-BME] 兼容旧版扁平提取输出", {
+      source: extracted.source,
+      normalizedCount: legacyCount,
+      totalCount: normalizedOperations.length,
+    });
   }
 
-  return {
-    ...result,
-    operations: normalizedOperations,
+  normalizedPayload.compat = {
+    legacyCount,
+    source: extracted.source,
   };
+  return normalizedPayload;
 }
 
 /**
