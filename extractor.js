@@ -67,6 +67,136 @@ function throwIfAborted(signal) {
   }
 }
 
+function resolveExtractionOperations(result, schema = []) {
+  const candidates = [
+    { source: "operations", value: result?.operations },
+    { source: "nodes", value: result?.nodes },
+    { source: "memories", value: result?.memories },
+    { source: "root", value: result },
+  ];
+
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate.value)) {
+      continue;
+    }
+
+    const normalized = normalizeExtractionOperations(candidate.value, schema);
+    if (normalized?.legacyCount > 0) {
+      console.info("[ST-BME] 兼容旧版扁平提取输出", {
+        source: candidate.source,
+        normalizedCount: normalized.legacyCount,
+        totalCount: normalized.operations.length,
+      });
+    }
+    return normalized.operations;
+  }
+
+  return null;
+}
+
+function normalizeExtractionOperations(operations, schema = []) {
+  if (!Array.isArray(operations)) {
+    return null;
+  }
+
+  let legacyCount = 0;
+  const normalizedOperations = operations.map((operation) => {
+    const normalized = normalizeExtractionOperation(operation, schema);
+    if (normalized?.__legacyCompat) {
+      legacyCount += 1;
+      delete normalized.__legacyCompat;
+    }
+    return normalized;
+  });
+
+  return {
+    operations: normalizedOperations,
+    legacyCount,
+  };
+}
+
+function normalizeExtractionOperation(operation, schema = []) {
+  if (!operation || typeof operation !== "object") {
+    return operation;
+  }
+
+  const normalized = { ...operation };
+  const normalizedAction = normalizeOperationAction(normalized);
+  if (normalizedAction) {
+    normalized.action = normalizedAction;
+  }
+
+  const typeDef = schema.find((entry) => entry?.id === normalized.type);
+  const normalizedFields = extractOperationFields(normalized, typeDef);
+  if (
+    normalized.action === "create" ||
+    normalized.action === "update" ||
+    (!normalized.action && Object.keys(normalizedFields).length > 0)
+  ) {
+    normalized.fields = normalizedFields;
+  }
+
+  if (
+    !normalized.action &&
+    typeDef &&
+    !normalized.nodeId &&
+    Object.keys(normalizedFields).length > 0
+  ) {
+    normalized.action = "create";
+    normalized.__legacyCompat = true;
+  }
+
+  if (
+    (normalized.action === "update" || normalized.action === "delete") &&
+    !normalized.nodeId &&
+    typeof normalized.id === "string" &&
+    normalized.id.trim()
+  ) {
+    normalized.nodeId = normalized.id.trim();
+  }
+
+  if (
+    normalized.action === "create" &&
+    !normalized.ref &&
+    typeof normalized.id === "string" &&
+    normalized.id.trim()
+  ) {
+    normalized.ref = normalized.id.trim();
+  }
+
+  return normalized;
+}
+
+function normalizeOperationAction(operation = {}) {
+  const candidate = operation.action ?? operation.op ?? operation.operation;
+  return typeof candidate === "string" && candidate.trim()
+    ? candidate.trim()
+    : "";
+}
+
+function extractOperationFields(operation = {}, typeDef = null) {
+  const fields = {
+    ...(operation.fields && typeof operation.fields === "object"
+      ? operation.fields
+      : {}),
+  };
+
+  const columnNames = Array.isArray(typeDef?.columns)
+    ? typeDef.columns
+        .map((column) => String(column?.name || "").trim())
+        .filter(Boolean)
+    : [];
+
+  for (const fieldName of columnNames) {
+    if (fields[fieldName] !== undefined || operation[fieldName] === undefined) {
+      continue;
+    }
+    fields[fieldName] = operation[fieldName];
+  }
+
+  return fields;
+}
+
 /**
  * 对未处理的对话楼层执行记忆提取
  *
@@ -203,7 +333,8 @@ export async function extractMemories({
   });
   throwIfAborted(signal);
 
-  if (!result || !Array.isArray(result.operations)) {
+  const operations = resolveExtractionOperations(result, schema);
+  if (!result || !Array.isArray(operations)) {
     console.warn("[ST-BME] 提取 LLM 未返回有效操作");
     return {
       success: false,
@@ -222,7 +353,7 @@ export async function extractMemories({
   const refMap = new Map();
   const operationErrors = [];
 
-  for (const op of result.operations) {
+  for (const op of operations) {
     try {
       switch (op.action) {
         case "create": {
