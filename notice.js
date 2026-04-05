@@ -60,16 +60,6 @@ function ensureStyle(doc) {
       -webkit-backdrop-filter: blur(10px) saturate(125%);
     }
 
-    .st-bme-notice[data-layout="compact"] {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      width: fit-content;
-      max-width: 100%;
-      align-self: flex-end;
-      padding: 10px;
-    }
-
     .st-bme-notice::after {
       content: "";
       position: absolute;
@@ -97,7 +87,6 @@ function ensureStyle(doc) {
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.14);
       box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.16);
-      flex-shrink: 0;
     }
 
     .st-bme-notice[data-busy="true"] .st-bme-notice__icon {
@@ -108,12 +97,6 @@ function ensureStyle(doc) {
       min-width: 0;
     }
 
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
-      display: flex;
-      align-items: center;
-      min-width: 0;
-    }
-
     .st-bme-notice__title {
       margin: 0;
       font-size: 17px;
@@ -121,14 +104,6 @@ function ensureStyle(doc) {
       font-weight: 800;
       letter-spacing: 0.01em;
       color: #f0f6ff;
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__title {
-      font-size: 16px;
-      line-height: 1.2;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     .st-bme-notice__message {
@@ -149,12 +124,6 @@ function ensureStyle(doc) {
       color: rgba(240, 246, 255, 0.72);
       mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
       -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__message,
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__actions,
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__progress {
-      display: none !important;
     }
 
     .st-bme-notice__actions {
@@ -201,7 +170,6 @@ function ensureStyle(doc) {
       line-height: 1;
       cursor: pointer;
       transition: background 140ms ease;
-      flex-shrink: 0;
     }
 
     .st-bme-notice__close:hover,
@@ -312,11 +280,8 @@ function getIcon(level) {
 
 function applyNoticeState(item, input, progress) {
   const level = input.level || "info";
-  const displayMode = input.displayMode === "compact" ? "compact" : "normal";
-  const isCompact = displayMode === "compact";
   item.dataset.level = level;
   item.dataset.busy = input.busy ? "true" : "false";
-  item.dataset.layout = displayMode;
 
   const icon = item.querySelector(".st-bme-notice__icon");
   if (icon) {
@@ -331,7 +296,6 @@ function applyNoticeState(item, input, progress) {
   const message = item.querySelector(".st-bme-notice__message");
   if (message) {
     message.textContent = input.message || "";
-    message.hidden = isCompact || !String(input.message || "").trim();
     if (input.marquee) {
       message.classList.add("st-bme-notice__message--marquee");
     } else {
@@ -342,7 +306,7 @@ function applyNoticeState(item, input, progress) {
   const actionWrap = item.querySelector(".st-bme-notice__actions");
   const actionButton = item.querySelector(".st-bme-notice__action");
   if (actionWrap && actionButton) {
-    if (!isCompact && input.action?.label) {
+    if (input.action?.label) {
       actionWrap.style.display = "";
       actionButton.style.display = "";
       actionButton.textContent = input.action.label;
@@ -355,7 +319,7 @@ function applyNoticeState(item, input, progress) {
     }
   }
 
-  if (input.persist || isCompact) {
+  if (input.persist) {
     progress.style.display = "none";
     progress.style.animationDuration = "";
   } else {

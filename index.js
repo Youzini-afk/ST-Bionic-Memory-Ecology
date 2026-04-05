@@ -496,7 +496,6 @@ const defaultSettings = {
   compressionEveryN: 10,
 
   // UI 面板
-  noticeDisplayMode: "normal", // normal|compact
   panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet
 };
 
@@ -1055,30 +1054,6 @@ function syncStageNoticeAbortAction(stage) {
   });
 }
 
-function getStageNoticeDisplayMode(level = "info") {
-  const configuredMode = getSettings()?.noticeDisplayMode;
-  if (
-    configuredMode === "compact" &&
-    level !== "warning" &&
-    level !== "error"
-  ) {
-    return "compact";
-  }
-  return "normal";
-}
-
-function refreshVisibleStageNotices() {
-  for (const stage of Object.keys(stageNoticeHandles)) {
-    const handle = stageNoticeHandles[stage];
-    if (!handle || handle.isClosed?.()) continue;
-    const status = getStageUiStatus(stage);
-    if (!status) continue;
-    updateStageNotice(stage, status.text, status.meta, status.level, {
-      title: getStageNoticeTitle(stage),
-    });
-  }
-}
-
 function updateStageNotice(
   stage,
   text,
@@ -1094,7 +1069,6 @@ function updateStageNotice(
   const input = {
     title,
     message,
-    displayMode: options.displayMode || getStageNoticeDisplayMode(noticeLevel),
     level: noticeLevel,
     busy,
     persist,
@@ -5509,7 +5483,6 @@ function updateModuleSettings(patch = {}) {
     "hideOldMessagesKeepLastN",
   ]);
   const recallUiKeys = new Set(["recallCardUserInputDisplayMode"]);
-  const noticeUiKeys = new Set(["noticeDisplayMode"]);
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
@@ -5568,10 +5541,6 @@ function updateModuleSettings(patch = {}) {
 
   if (Object.keys(patch).some((key) => recallUiKeys.has(key))) {
     schedulePersistedRecallMessageUiRefresh(30);
-  }
-
-  if (Object.keys(patch).some((key) => noticeUiKeys.has(key))) {
-    refreshVisibleStageNotices();
   }
 
   scheduleServerSettingsSave();

@@ -840,32 +840,6 @@ function _switchConfigSection(sectionId) {
   }
 }
 
-function _ensureMobileTraceConfigNavButton() {
-  if (!panelEl) return;
-
-  const mobileNav = panelEl.querySelector(".bme-config-nav-mobile");
-  if (!mobileNav) return;
-  if (mobileNav.querySelector('[data-config-section="trace"]')) return;
-
-  const appearanceButton = mobileNav.querySelector(
-    '[data-config-section="appearance"]',
-  );
-  const traceButton = document.createElement("button");
-  traceButton.className = "bme-config-nav-btn";
-  traceButton.dataset.configSection = "trace";
-  traceButton.type = "button";
-  traceButton.innerHTML = `
-    <i class="fa-solid fa-route"></i>
-    <span>消息追踪</span>
-  `;
-
-  if (appearanceButton?.parentNode === mobileNav) {
-    mobileNav.insertBefore(traceButton, appearanceButton);
-  } else {
-    mobileNav.appendChild(traceButton);
-  }
-}
-
 function _syncConfigSectionState() {
   if (!panelEl) return;
   panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
@@ -1711,10 +1685,6 @@ function _refreshConfigTab() {
     "bme-setting-recall-card-user-input-display-mode",
     settings.recallCardUserInputDisplayMode ?? "beautify_only",
   );
-  _setInputValue(
-    "bme-setting-notice-display-mode",
-    settings.noticeDisplayMode ?? "normal",
-  );
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
   _setInputValue(
@@ -1934,8 +1904,6 @@ function _refreshConfigTab() {
 function _bindConfigControls() {
   if (!panelEl || panelEl.dataset.bmeConfigBound === "true") return;
 
-  _ensureMobileTraceConfigNavButton();
-
   panelEl.querySelectorAll(".bme-config-nav-btn").forEach((btn) => {
     if (btn.dataset.bmeBound === "true") return;
     btn.addEventListener("click", () => {
@@ -2056,17 +2024,6 @@ function _bindConfigControls() {
       });
     });
     recallCardUserInputDisplayModeEl.dataset.bmeBound = "true";
-  }
-  const noticeDisplayModeEl = document.getElementById(
-    "bme-setting-notice-display-mode",
-  );
-  if (noticeDisplayModeEl && noticeDisplayModeEl.dataset.bmeBound !== "true") {
-    noticeDisplayModeEl.addEventListener("change", () => {
-      _patchSettings({
-        noticeDisplayMode: noticeDisplayModeEl.value || "normal",
-      });
-    });
-    noticeDisplayModeEl.dataset.bmeBound = "true";
   }
 
   bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>

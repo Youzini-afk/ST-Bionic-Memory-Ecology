@@ -97,44 +97,6 @@ function buildRecallFallbackReason(llmResult) {
   }
 }
 
-function resolveRecallSelectedIds(result) {
-  if (Array.isArray(result)) {
-    return result;
-  }
-
-  const visited = new Set();
-  const queue = [{ value: result, depth: 0 }];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const value = current?.value;
-    const depth = Number(current?.depth) || 0;
-    if (!value || typeof value !== "object" || visited.has(value) || depth > 1) {
-      continue;
-    }
-    visited.add(value);
-
-    const directCandidates = [
-      value.selected_ids,
-      value.selectedIds,
-      value.node_ids,
-      value.nodeIds,
-      value.ids,
-    ];
-    for (const candidate of directCandidates) {
-      if (Array.isArray(candidate)) {
-        return candidate;
-      }
-    }
-
-    queue.push({ value: value.data, depth: depth + 1 });
-    queue.push({ value: value.result, depth: depth + 1 });
-    queue.push({ value: value.payload, depth: depth + 1 });
-    queue.push({ value: value.output, depth: depth + 1 });
-  }
-
-  return null;
-}
-
 function isAbortError(error) {
   return error?.name === "AbortError";
 }
@@ -1553,22 +1515,21 @@ async function llmRecall(
     returnFailureDetails: true,
   });
   const result = llmResult?.ok ? llmResult.data : null;
-  const selectedIds = resolveRecallSelectedIds(result);
 
-  if (Array.isArray(selectedIds)) {
+  if (result?.selected_ids && Array.isArray(result.selected_ids)) {
     // 校验 ID 有效性
     const validIds = uniqueNodeIds(
-      selectedIds.filter((id) =>
+      result.selected_ids.filter((id) =>
         candidates.some((c) => c.nodeId === id),
       ),
     ).slice(0, maxNodes);
 
-    if (validIds.length > 0 || selectedIds.length === 0) {
+    if (validIds.length > 0 || result.selected_ids.length === 0) {
       return {
         selectedNodeIds: validIds,
         status: "llm",
         reason:
-          validIds.length < selectedIds.length
+          validIds.length < result.selected_ids.length
             ? "LLM 返回了部分无效或超限 ID，已自动裁剪"
             : "LLM 精排完成",
       };
@@ -1577,7 +1538,7 @@ async function llmRecall(
 
   // LLM 失败时回退到纯评分排序
   const fallbackReason = llmResult?.ok
-    ? Array.isArray(selectedIds)
+    ? Array.isArray(result?.selected_ids)
       ? "LLM 返回的候选 ID 无效，已回退到评分排序"
       : "LLM 返回了无法识别的 JSON 结构，已回退到评分排序"
     : buildRecallFallbackReason(llmResult);
@@ -1585,11 +1546,7 @@ async function llmRecall(
     selectedNodeIds: candidates.slice(0, maxNodes).map((c) => c.nodeId),
     status: "fallback",
     reason: fallbackReason,
-    fallbackType: llmResult?.ok
-      ? Array.isArray(selectedIds)
-        ? "invalid-candidate"
-        : "invalid-structure"
-      : llmResult?.errorType || "unknown",
+    fallbackType: llmResult?.ok ? "invalid-candidate" : llmResult?.errorType || "unknown",
   };
 }
 

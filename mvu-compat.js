@@ -2,13 +2,6 @@
 // These rules are intentionally narrow so we strip MVU artifacts without
 // disturbing normal prompt or world info content.
 
-export const MVU_SANITIZE_MODES = Object.freeze({
-  /** 整段 drop likely MVU 内容（用于世界书条目）。 */
-  AGGRESSIVE: "aggressive",
-  /** 只剥离 MVU 容器/宏，不整段 drop（用于用户原文、角色描述等任务输入字段）。 */
-  PASSIVE: "passive",
-});
-
 export const MVU_ENTRY_COMMENT_REGEX = /\[(mvu_update|mvu_plot|initvar)\]/i;
 
 const MVU_UPDATE_BLOCK_REGEX =
@@ -222,8 +215,7 @@ export function sanitizeMvuContent(
 
   let text = blockedResult.text;
   let dropped = false;
-  if (sanitizedMode === MVU_SANITIZE_MODES.AGGRESSIVE) {
-    // 整段 drop：用于世界书条目，不用于用户原文字段
+  if (sanitizedMode === "aggressive") {
     if (
       isLikelyMvuWorldInfoContent(originalCollapsed) ||
       isLikelyMvuWorldInfoContent(text)
@@ -233,7 +225,6 @@ export function sanitizeMvuContent(
       reasons.push("likely_mvu_content");
     }
   }
-  // MVU_SANITIZE_MODES.PASSIVE：只做 artifact 剥离 + blocked 过滤，不整段 drop。
 
   return {
     text: collapseWhitespace(text),

@@ -2157,62 +2157,6 @@ async function testExtractorNormalizesFlatCreateOperation() {
   }
 }
 
-async function testExtractorSupportsLegacyFlatNodeOperations() {
-  const graph = createEmptyGraph();
-  const restoreOverrides = pushTestOverrides({
-    llm: {
-      async callLLMForJSON() {
-        return {
-          operations: [
-            {
-              type: "event",
-              id: "evt-legacy",
-              title: "夜间喂食",
-              summary: "角色完成了一次深夜喂食。",
-              participants: "悟岳, 访客",
-              status: "resolved",
-              importance: 6,
-            },
-            {
-              type: "character",
-              id: "char-legacy",
-              name: "悟岳",
-              state: "放松下来",
-            },
-          ],
-        };
-      },
-    },
-  });
-
-  try {
-    const result = await extractMemories({
-      graph,
-      messages: [{ seq: 7, role: "assistant", content: "测试旧版扁平提取输出" }],
-      startSeq: 7,
-      endSeq: 7,
-      schema,
-      embeddingConfig: null,
-      settings: {},
-    });
-
-    assert.equal(result.success, true);
-    assert.equal(result.newNodes, 2);
-    assert.equal(graph.lastProcessedSeq, 7);
-
-    const eventNode = graph.nodes.find((node) => node.type === "event");
-    const characterNode = graph.nodes.find((node) => node.type === "character");
-    assert.ok(eventNode);
-    assert.ok(characterNode);
-    assert.equal(eventNode.fields?.title, "夜间喂食");
-    assert.equal(eventNode.fields?.summary, "角色完成了一次深夜喂食。");
-    assert.equal(characterNode.fields?.name, "悟岳");
-    assert.equal(characterNode.fields?.state, "放松下来");
-  } finally {
-    restoreOverrides();
-  }
-}
-
 async function testExtractorNormalizesArrayPayloadAndPreservesScopeField() {
   const graph = createEmptyGraph();
   const restoreOverrides = pushTestOverrides({
@@ -5174,8 +5118,6 @@ await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
-await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
-await testExtractorSupportsLegacyFlatNodeOperations();
 await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
 await testConsolidatorMergeUpdatesSeqRange();
 await testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing();

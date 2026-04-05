@@ -2,7 +2,7 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
-import { sanitizeMvuContent, MVU_SANITIZE_MODES } from "./mvu-compat.js";
+import { sanitizeMvuContent } from "./mvu-compat.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
 import { applyTaskRegex } from "./task-regex.js";
 
@@ -31,41 +31,6 @@ const INPUT_CONTEXT_MVU_FIELDS = [
   "charDescription",
   "userPersona",
 ];
-
-/**
- * 字段族 → sanitize mode 映射表。
- *
- * PASSIVE：用户原文字段（对话、角色描述、摘要、候选节点等）——只剥离 MVU 容器/宏，
- *          不整段 drop。这些字段不可能"整段就是一条 MVU 世界书条目"。
- * AGGRESSIVE（默认）：保留现有行为，用于世界书条目路径（sanitizeWorldInfoEntries）。
- *
- * 未列入此表的字段走 AGGRESSIVE，与改动前行为一致。
- */
-const INPUT_CONTEXT_FIELD_MODE = {
-  userMessage:           MVU_SANITIZE_MODES.PASSIVE,
-  recentMessages:        MVU_SANITIZE_MODES.PASSIVE,
-  chatMessages:          MVU_SANITIZE_MODES.PASSIVE,
-  dialogueText:          MVU_SANITIZE_MODES.PASSIVE,
-  charDescription:       MVU_SANITIZE_MODES.PASSIVE,
-  userPersona:           MVU_SANITIZE_MODES.PASSIVE,
-  candidateText:         MVU_SANITIZE_MODES.PASSIVE,
-  candidateNodes:        MVU_SANITIZE_MODES.PASSIVE,
-  nodeContent:           MVU_SANITIZE_MODES.PASSIVE,
-  eventSummary:          MVU_SANITIZE_MODES.PASSIVE,
-  characterSummary:      MVU_SANITIZE_MODES.PASSIVE,
-  threadSummary:         MVU_SANITIZE_MODES.PASSIVE,
-  contradictionSummary:  MVU_SANITIZE_MODES.PASSIVE,
-};
-
-/** 这些字段被清空时必须 warn（兜底告警）。 */
-const CRITICAL_INPUT_FIELDS = new Set([
-  "recentMessages",
-  "dialogueText",
-  "chatMessages",
-  "charDescription",
-  "userPersona",
-  "candidateNodes",
-]);
 
 const INPUT_REGEX_STAGE_BY_FIELD = {
   userMessage: "input.userMessage",
@@ -361,30 +326,6 @@ function joinStructuredPath(basePath = "", segment = "") {
     : `${basePath}.${normalizedSegment}`;
 }
 
-function mergeSanitizeReasons(...reasonLists) {
-  const merged = new Set();
-  for (const list of reasonLists) {
-    for (const reason of Array.isArray(list) ? list : []) {
-      if (reason) {
-        merged.add(String(reason));
-      }
-    }
-  }
-  return [...merged];
-}
-
-function summarizeSanitizePreview(value, maxLength = 200) {
-  const rendered = stringifyInterpolatedValue(value)
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!rendered) {
-    return "";
-  }
-  return rendered.length > maxLength
-    ? `${rendered.slice(0, maxLength)}...`
-    : rendered;
-}
-
 function looksLikeMvuStateContainer(value, seen = new WeakSet()) {
   if (!value || typeof value !== "object") {
     return false;
@@ -470,22 +411,12 @@ function sanitizeStructuredPromptValue(
       omit:
         !String(sanitized.text || "").trim() &&
         String(value || "").trim().length > 0,
-      dropped: Boolean(sanitized.dropped),
-      reasons: Array.isArray(sanitized.reasons) ? [...sanitized.reasons] : [],
-      blockedHitCount: Number(sanitized.blockedHitCount || 0),
-      artifactRemovedCount: Number(sanitized.artifactRemovedCount || 0),
-      rawPreview: summarizeSanitizePreview(value),
-      sanitizedPreview: summarizeSanitizePreview(sanitized.text),
     };
   }
 
   if (Array.isArray(value)) {
     const sanitizedArray = [];
     let changed = false;
-    let dropped = false;
-    let blockedHitCount = 0;
-    let artifactRemovedCount = 0;
-    let reasons = [];
     for (let index = 0; index < value.length; index += 1) {
       const childResult = sanitizeStructuredPromptValue(
         settings,
@@ -507,31 +438,17 @@ function sanitizeStructuredPromptValue(
       );
       if (childResult.omit) {
         changed = true;
-        dropped = dropped || Boolean(childResult.dropped);
-        blockedHitCount += Number(childResult.blockedHitCount || 0);
-        artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
-        reasons = mergeSanitizeReasons(reasons, childResult.reasons);
         continue;
       }
       sanitizedArray.push(childResult.value);
       if (childResult.changed) {
         changed = true;
       }
-      dropped = dropped || Boolean(childResult.dropped);
-      blockedHitCount += Number(childResult.blockedHitCount || 0);
-      artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
-      reasons = mergeSanitizeReasons(reasons, childResult.reasons);
     }
     return {
       value: sanitizedArray,
       changed: changed || sanitizedArray.length !== value.length,
       omit: value.length > 0 && sanitizedArray.length === 0,
-      dropped,
-      reasons,
-      blockedHitCount,
-      artifactRemovedCount,
-      rawPreview: summarizeSanitizePreview(value),
-      sanitizedPreview: summarizeSanitizePreview(sanitizedArray),
     };
   }
 
@@ -541,12 +458,6 @@ function sanitizeStructuredPromptValue(
         value,
         changed: false,
         omit: false,
-        dropped: false,
-        reasons: [],
-        blockedHitCount: 0,
-        artifactRemovedCount: 0,
-        rawPreview: summarizeSanitizePreview(value),
-        sanitizedPreview: summarizeSanitizePreview(value),
       };
     }
     seen.add(value);
@@ -555,10 +466,6 @@ function sanitizeStructuredPromptValue(
     const sanitizedObject = {};
     let changed = false;
     let keptEntries = 0;
-    let dropped = false;
-    let blockedHitCount = 0;
-    let artifactRemovedCount = 0;
-    let reasons = [];
 
     for (const [key, entryValue] of Object.entries(value)) {
       const stripReason = stripMvuContainers
@@ -574,8 +481,6 @@ function sanitizeStructuredPromptValue(
           reasons: [stripReason],
           blockedHitCount: 0,
         });
-        dropped = true;
-        reasons = mergeSanitizeReasons(reasons, [stripReason]);
         continue;
       }
 
@@ -599,10 +504,6 @@ function sanitizeStructuredPromptValue(
       );
       if (childResult.omit) {
         changed = true;
-        dropped = dropped || Boolean(childResult.dropped);
-        blockedHitCount += Number(childResult.blockedHitCount || 0);
-        artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
-        reasons = mergeSanitizeReasons(reasons, childResult.reasons);
         continue;
       }
       sanitizedObject[key] = childResult.value;
@@ -610,22 +511,12 @@ function sanitizeStructuredPromptValue(
       if (childResult.changed) {
         changed = true;
       }
-      dropped = dropped || Boolean(childResult.dropped);
-      blockedHitCount += Number(childResult.blockedHitCount || 0);
-      artifactRemovedCount += Number(childResult.artifactRemovedCount || 0);
-      reasons = mergeSanitizeReasons(reasons, childResult.reasons);
     }
 
     return {
       value: sanitizedObject,
       changed,
       omit: originalLooksMvuContainer && keptEntries === 0,
-      dropped,
-      reasons,
-      blockedHitCount,
-      artifactRemovedCount,
-      rawPreview: summarizeSanitizePreview(value),
-      sanitizedPreview: summarizeSanitizePreview(sanitizedObject),
     };
   }
 
@@ -633,12 +524,6 @@ function sanitizeStructuredPromptValue(
     value,
     changed: false,
     omit: false,
-    dropped: false,
-    reasons: [],
-    blockedHitCount: 0,
-    artifactRemovedCount: 0,
-    rawPreview: summarizeSanitizePreview(value),
-    sanitizedPreview: summarizeSanitizePreview(value),
   };
 }
 
@@ -724,7 +609,6 @@ function sanitizePromptContextInputs(
     const value = sanitizedContext[fieldName];
     const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
     const regexRole = INPUT_REGEX_ROLE_BY_FIELD[fieldName] || "system";
-    const fieldMode = INPUT_CONTEXT_FIELD_MODE[fieldName] || MVU_SANITIZE_MODES.AGGRESSIVE;
     const sanitized = sanitizeStructuredPromptValue(
       settings,
       taskType,
@@ -732,7 +616,7 @@ function sanitizePromptContextInputs(
       {
         fieldName,
         path: fieldName,
-        mode: fieldMode,
+        mode: "aggressive",
         regexStage,
         role: regexRole,
         debugState,
@@ -741,24 +625,6 @@ function sanitizePromptContextInputs(
         stripMvuContainers,
       },
     );
-    if (sanitized.omit && CRITICAL_INPUT_FIELDS.has(fieldName)) {
-      const rawLength = typeof value === "string" ? value.length : -1;
-      console.warn(
-        "[ST-BME] 关键任务输入字段被 MVU 策略清空",
-        {
-          taskType,
-          fieldName,
-          mode: fieldMode,
-          rawLength,
-          dropped: Boolean(sanitized.dropped),
-          reasons: Array.isArray(sanitized.reasons) ? sanitized.reasons : [],
-          artifactRemovedCount: Number(sanitized.artifactRemovedCount || 0),
-          blockedHitCount: Number(sanitized.blockedHitCount || 0),
-          rawPreview: String(sanitized.rawPreview || ""),
-          sanitizedPreview: String(sanitized.sanitizedPreview || ""),
-        },
-      );
-    }
     sanitizedContext[fieldName] = sanitized.omit
       ? Array.isArray(value)
         ? []
