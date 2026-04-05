@@ -2,7 +2,7 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
-import { sanitizeMvuContent } from "./mvu-compat.js";
+import { sanitizeMvuContent, MVU_SANITIZE_MODES } from "./mvu-compat.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
 import { applyTaskRegex } from "./task-regex.js";
 
@@ -31,6 +31,41 @@ const INPUT_CONTEXT_MVU_FIELDS = [
   "charDescription",
   "userPersona",
 ];
+
+/**
+ * 字段族 → sanitize mode 映射表。
+ *
+ * PASSIVE：用户原文字段（对话、角色描述、摘要、候选节点等）——只剥离 MVU 容器/宏，
+ *          不整段 drop。这些字段不可能"整段就是一条 MVU 世界书条目"。
+ * AGGRESSIVE（默认）：保留现有行为，用于世界书条目路径（sanitizeWorldInfoEntries）。
+ *
+ * 未列入此表的字段走 AGGRESSIVE，与改动前行为一致。
+ */
+const INPUT_CONTEXT_FIELD_MODE = {
+  userMessage:           MVU_SANITIZE_MODES.PASSIVE,
+  recentMessages:        MVU_SANITIZE_MODES.PASSIVE,
+  chatMessages:          MVU_SANITIZE_MODES.PASSIVE,
+  dialogueText:          MVU_SANITIZE_MODES.PASSIVE,
+  charDescription:       MVU_SANITIZE_MODES.PASSIVE,
+  userPersona:           MVU_SANITIZE_MODES.PASSIVE,
+  candidateText:         MVU_SANITIZE_MODES.PASSIVE,
+  candidateNodes:        MVU_SANITIZE_MODES.PASSIVE,
+  nodeContent:           MVU_SANITIZE_MODES.PASSIVE,
+  eventSummary:          MVU_SANITIZE_MODES.PASSIVE,
+  characterSummary:      MVU_SANITIZE_MODES.PASSIVE,
+  threadSummary:         MVU_SANITIZE_MODES.PASSIVE,
+  contradictionSummary:  MVU_SANITIZE_MODES.PASSIVE,
+};
+
+/** 这些字段被清空时必须 warn（兜底告警）。 */
+const CRITICAL_INPUT_FIELDS = new Set([
+  "recentMessages",
+  "dialogueText",
+  "chatMessages",
+  "charDescription",
+  "userPersona",
+  "candidateNodes",
+]);
 
 const INPUT_REGEX_STAGE_BY_FIELD = {
   userMessage: "input.userMessage",
@@ -609,6 +644,7 @@ function sanitizePromptContextInputs(
     const value = sanitizedContext[fieldName];
     const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
     const regexRole = INPUT_REGEX_ROLE_BY_FIELD[fieldName] || "system";
+    const fieldMode = INPUT_CONTEXT_FIELD_MODE[fieldName] || MVU_SANITIZE_MODES.AGGRESSIVE;
     const sanitized = sanitizeStructuredPromptValue(
       settings,
       taskType,
@@ -616,7 +652,7 @@ function sanitizePromptContextInputs(
       {
         fieldName,
         path: fieldName,
-        mode: "aggressive",
+        mode: fieldMode,
         regexStage,
         role: regexRole,
         debugState,
@@ -625,6 +661,13 @@ function sanitizePromptContextInputs(
         stripMvuContainers,
       },
     );
+    if (sanitized.omit && CRITICAL_INPUT_FIELDS.has(fieldName)) {
+      const rawLength = typeof value === "string" ? value.length : -1;
+      console.warn(
+        "[ST-BME] 关键任务输入字段被 MVU 策略清空",
+        { taskType, fieldName, mode: fieldMode, rawLength },
+      );
+    }
     sanitizedContext[fieldName] = sanitized.omit
       ? Array.isArray(value)
         ? []
