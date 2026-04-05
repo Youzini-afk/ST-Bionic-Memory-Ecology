@@ -1711,6 +1711,10 @@ function _refreshConfigTab() {
     "bme-setting-recall-card-user-input-display-mode",
     settings.recallCardUserInputDisplayMode ?? "beautify_only",
   );
+  _setInputValue(
+    "bme-setting-notice-display-mode",
+    settings.noticeDisplayMode ?? "normal",
+  );
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
   _setInputValue(
@@ -2052,6 +2056,17 @@ function _bindConfigControls() {
       });
     });
     recallCardUserInputDisplayModeEl.dataset.bmeBound = "true";
+  }
+  const noticeDisplayModeEl = document.getElementById(
+    "bme-setting-notice-display-mode",
+  );
+  if (noticeDisplayModeEl && noticeDisplayModeEl.dataset.bmeBound !== "true") {
+    noticeDisplayModeEl.addEventListener("change", () => {
+      _patchSettings({
+        noticeDisplayMode: noticeDisplayModeEl.value || "normal",
+      });
+    });
+    noticeDisplayModeEl.dataset.bmeBound = "true";
   }
 
   bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
