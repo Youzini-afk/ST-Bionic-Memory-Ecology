@@ -443,6 +443,19 @@ function getDefaultTaskProfileTemplate(taskType) {
   return cloneJson(template);
 }
 
+function getDefaultTaskProfileTemplateStamp(taskType) {
+  const template = getDefaultTaskProfileTemplate(taskType);
+  return {
+    version: Number.isFinite(Number(template?.version))
+      ? Number(template.version)
+      : DEFAULT_TASK_PROFILE_VERSION,
+    updatedAt:
+      typeof template?.updatedAt === "string" && template.updatedAt
+        ? template.updatedAt
+        : "",
+  };
+}
+
 function buildDefaultTaskBlockTripletsFromTemplate(taskType) {
   const template = getDefaultTaskProfileTemplate(taskType);
   const blocks = Array.isArray(template?.blocks) ? template.blocks : [];
@@ -775,8 +788,45 @@ function mergeDefaultTaskProfileBlocks(taskType, existingBlocks = []) {
   return [...merged, ...extraBlocks];
 }
 
+function shouldRefreshBuiltinDefaultProfile(taskType, profile = {}) {
+  if (String(profile?.id || "") !== DEFAULT_PROFILE_ID || profile?.builtin === false) {
+    return false;
+  }
+
+  const expectedStamp = getDefaultTaskProfileTemplateStamp(taskType);
+  const metadata = profile?.metadata || {};
+  const currentVersion = Number.isFinite(Number(metadata?.defaultTemplateVersion))
+    ? Number(metadata.defaultTemplateVersion)
+    : Number.isFinite(Number(profile?.version))
+      ? Number(profile.version)
+      : 0;
+  const currentUpdatedAt =
+    typeof metadata?.defaultTemplateUpdatedAt === "string"
+      ? metadata.defaultTemplateUpdatedAt
+      : "";
+
+  if (currentVersion < expectedStamp.version) {
+    return true;
+  }
+
+  if (
+    expectedStamp.updatedAt &&
+    currentUpdatedAt &&
+    currentUpdatedAt !== expectedStamp.updatedAt
+  ) {
+    return true;
+  }
+
+  if (expectedStamp.updatedAt && !currentUpdatedAt) {
+    return true;
+  }
+
+  return false;
+}
+
 function createFallbackDefaultTaskProfile(taskType) {
   const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
+  const templateStamp = getDefaultTaskProfileTemplateStamp(taskType);
   return {
     id: DEFAULT_PROFILE_ID,
     name: "默认预设",
@@ -834,6 +884,8 @@ function createFallbackDefaultTaskProfile(taskType) {
     metadata: {
       migratedFromLegacy: false,
       legacyPromptField,
+      defaultTemplateVersion: templateStamp.version,
+      defaultTemplateUpdatedAt: templateStamp.updatedAt,
     },
   };
 }
@@ -846,6 +898,7 @@ export function createDefaultTaskProfile(taskType) {
 
   const legacyPromptField = LEGACY_PROMPT_FIELD_MAP[taskType];
   const fallback = createFallbackDefaultTaskProfile(taskType);
+  const templateStamp = getDefaultTaskProfileTemplateStamp(taskType);
   return {
     ...fallback,
     ...template,
@@ -891,6 +944,8 @@ export function createDefaultTaskProfile(taskType) {
       ...(template?.metadata || {}),
       migratedFromLegacy: false,
       legacyPromptField,
+      defaultTemplateVersion: templateStamp.version,
+      defaultTemplateUpdatedAt: templateStamp.updatedAt,
     },
   };
 }
@@ -985,12 +1040,24 @@ export function ensureTaskProfiles(settings = {}) {
   for (const taskType of TASK_TYPES) {
     const current = existing[taskType] || {};
     const defaultBucket = defaults[taskType];
-    const profiles =
+    let profiles =
       Array.isArray(current.profiles) && current.profiles.length > 0
         ? current.profiles.map((profile) =>
             normalizeTaskProfile(taskType, profile, settings),
           )
         : defaultBucket.profiles;
+
+    const defaultIndex = profiles.findIndex(
+      (profile) => String(profile?.id || "") === DEFAULT_PROFILE_ID,
+    );
+    if (defaultIndex >= 0 && shouldRefreshBuiltinDefaultProfile(taskType, profiles[defaultIndex])) {
+      const refreshedDefault = createDefaultTaskProfile(taskType);
+      profiles = [
+        ...profiles.slice(0, defaultIndex),
+        refreshedDefault,
+        ...profiles.slice(defaultIndex + 1),
+      ];
+    }
 
     const activeProfileId =
       typeof current.activeProfileId === "string" &&

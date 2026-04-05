@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   createDefaultTaskProfiles,
+  ensureTaskProfiles,
   getActiveTaskProfile,
   migrateLegacyTaskProfiles,
 } from "../prompt-profiles.js";
@@ -218,6 +219,119 @@ assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的输出
 assert.equal(upgradedLegacyDefault.blocks[11].content, "保留我自己的行为规则");
 assert.equal(upgradedLegacyDefault.blocks[10].role, "user");
 assert.equal(upgradedLegacyDefault.blocks[11].role, "user");
+
+const currentDefaults = createDefaultTaskProfiles();
+const currentDefaultExtract = currentDefaults.extract.profiles[0];
+
+const staleBuiltinDefaults = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    extract: {
+      activeProfileId: "default",
+      profiles: [
+        {
+          ...currentDefaultExtract,
+          updatedAt: "2000-01-01T00:00:00.000Z",
+          blocks: currentDefaultExtract.blocks.map((block) =>
+            block.id === "default-role"
+              ? { ...block, content: "这是过期的默认角色定义" }
+              : block,
+          ),
+          metadata: {
+            ...(currentDefaultExtract.metadata || {}),
+            defaultTemplateVersion:
+              Number(currentDefaultExtract.metadata?.defaultTemplateVersion || 3),
+            defaultTemplateUpdatedAt: "2000-01-01T00:00:00.000Z",
+          },
+        },
+        {
+          id: "extract-custom-1",
+          taskType: "extract",
+          builtin: false,
+          name: "我的自定义预设",
+          promptMode: "block-based",
+          enabled: true,
+          updatedAt: "2026-04-05T00:00:00.000Z",
+          blocks: [
+            {
+              id: "custom-block-1",
+              name: "自定义块",
+              type: "custom",
+              enabled: true,
+              role: "system",
+              sourceKey: "",
+              sourceField: "",
+              content: "保留我的自定义内容",
+              injectionMode: "append",
+              order: 0,
+            },
+          ],
+          generation: { ...(currentDefaultExtract.generation || {}) },
+          regex: {
+            ...(currentDefaultExtract.regex || {}),
+            localRules: [],
+          },
+          metadata: {
+            note: "custom-profile-should-stay",
+          },
+        },
+      ],
+    },
+  },
+});
+const refreshedDefaultExtract = staleBuiltinDefaults.extract.profiles.find(
+  (profile) => profile.id === "default",
+);
+const preservedCustomExtract = staleBuiltinDefaults.extract.profiles.find(
+  (profile) => profile.id === "extract-custom-1",
+);
+
+assert.ok(refreshedDefaultExtract);
+assert.equal(
+  refreshedDefaultExtract.blocks.find((block) => block.id === "default-role")
+    ?.content,
+  currentDefaultExtract.blocks.find((block) => block.id === "default-role")
+    ?.content,
+);
+assert.equal(
+  refreshedDefaultExtract.metadata.defaultTemplateUpdatedAt,
+  currentDefaultExtract.metadata.defaultTemplateUpdatedAt,
+);
+assert.ok(preservedCustomExtract);
+assert.equal(
+  preservedCustomExtract.blocks[0].content,
+  "保留我的自定义内容",
+);
+
+const sameStampBuiltinDefault = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    extract: {
+      activeProfileId: "default",
+      profiles: [
+        {
+          ...currentDefaultExtract,
+          blocks: currentDefaultExtract.blocks.map((block) =>
+            block.id === "default-role"
+              ? { ...block, content: "同版本下保留我的默认预设修改" }
+              : block,
+          ),
+          metadata: {
+            ...(currentDefaultExtract.metadata || {}),
+          },
+        },
+      ],
+    },
+  },
+});
+const sameStampDefaultExtract = sameStampBuiltinDefault.extract.profiles.find(
+  (profile) => profile.id === "default",
+);
+assert.equal(
+  sameStampDefaultExtract.blocks.find((block) => block.id === "default-role")
+    ?.content,
+  "同版本下保留我的默认预设修改",
+);
 assert.deepEqual(
   upgradedLegacyDefault.blocks
     .slice(6, 10)
