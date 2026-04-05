@@ -61,6 +61,11 @@ import {
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
 } from "../ui-status.js";
+import {
+  onManualCompressController,
+  onManualEvolveController,
+  onManualSleepController,
+} from "../ui-actions-controller.js";
 
 const waitForTick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const extensionsShimSource = [
@@ -5276,6 +5281,255 @@ async function testLlmOutputRegexCleansResponseBeforeJsonParse() {
   }
 }
 
+async function testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan() {
+  const calls = {
+    compressAll: 0,
+    recordGraphMutation: 0,
+    recordMaintenanceAction: 0,
+  };
+  const toastMessages = [];
+  const graph = { nodes: [], historyState: {} };
+
+  const result = await onManualCompressController({
+    getCurrentGraph: () => graph,
+    ensureGraphMutationReady: () => true,
+    getSchema: () => [],
+    inspectCompressionCandidates: () => ({
+      hasCandidates: false,
+      reason: "当前没有可压缩候选组，本次未发起 LLM 压缩",
+    }),
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value ?? null)),
+    compressAll: async () => {
+      calls.compressAll += 1;
+      return { created: 1, archived: 1 };
+    },
+    getEmbeddingConfig: () => ({}),
+    getSettings: () => ({}),
+    recordMaintenanceAction() {
+      calls.recordMaintenanceAction += 1;
+    },
+    recordGraphMutation: async () => {
+      calls.recordGraphMutation += 1;
+    },
+    toastr: {
+      info(message) {
+        toastMessages.push(["info", message]);
+      },
+      success(message) {
+        toastMessages.push(["success", message]);
+      },
+    },
+  });
+
+  assert.equal(calls.compressAll, 0);
+  assert.equal(calls.recordMaintenanceAction, 0);
+  assert.equal(calls.recordGraphMutation, 0);
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.requestDispatched, false);
+  assert.match(String(toastMessages[0]?.[1] || ""), /未发起 LLM 压缩/);
+}
+
+async function testManualCompressUsesForcedCompressionAndPersistsRealMutation() {
+  const calls = {
+    forceFlag: null,
+    recordGraphMutation: 0,
+    recordMaintenanceAction: 0,
+  };
+  const graph = { nodes: [], historyState: {} };
+
+  const result = await onManualCompressController({
+    getCurrentGraph: () => graph,
+    ensureGraphMutationReady: () => true,
+    getSchema: () => [{ id: "event", compression: { mode: "hierarchical" } }],
+    inspectCompressionCandidates: () => ({
+      hasCandidates: true,
+      reason: "",
+    }),
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value ?? null)),
+    compressAll: async (_graph, _schema, _embeddingConfig, force) => {
+      calls.forceFlag = force;
+      return { created: 1, archived: 2 };
+    },
+    getEmbeddingConfig: () => ({}),
+    getSettings: () => ({}),
+    recordMaintenanceAction() {
+      calls.recordMaintenanceAction += 1;
+    },
+    recordGraphMutation: async () => {
+      calls.recordGraphMutation += 1;
+    },
+    buildMaintenanceSummary: () => "手动压缩",
+    toastr: {
+      info() {},
+      success() {},
+    },
+  });
+
+  assert.equal(calls.forceFlag, true);
+  assert.equal(calls.recordMaintenanceAction, 1);
+  assert.equal(calls.recordGraphMutation, 1);
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.requestDispatched, true);
+  assert.equal(result?.mutated, true);
+}
+
+async function testManualEvolveFallsBackToLatestExtractionBatchAfterRefresh() {
+  const graph = {
+    nodes: [
+      {
+        id: "evt-1",
+        type: "event",
+        archived: false,
+        level: 0,
+      },
+    ],
+    historyState: {
+      extractionCount: 3,
+    },
+    batchJournal: [
+      {
+        stateBefore: {
+          extractionCount: 3,
+        },
+        createdNodeIds: ["compression-1"],
+      },
+      {
+        stateBefore: {
+          extractionCount: 2,
+        },
+        createdNodeIds: ["evt-1"],
+      },
+    ],
+  };
+  let receivedCandidateIds = null;
+  let recordGraphMutationCalls = 0;
+  const toastMessages = [];
+
+  const result = await onManualEvolveController({
+    getCurrentGraph: () => graph,
+    ensureGraphMutationReady: () => true,
+    getEmbeddingConfig: () => ({ mode: "direct" }),
+    validateVectorConfig: () => ({ valid: true }),
+    getLastExtractedItems: () => [],
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value ?? null)),
+    getSettings: () => ({
+      consolidationNeighborCount: 5,
+      consolidationThreshold: 0.85,
+    }),
+    consolidateMemories: async ({ newNodeIds }) => {
+      receivedCandidateIds = [...newNodeIds];
+      return {
+        merged: 0,
+        skipped: 0,
+        kept: 1,
+        evolved: 0,
+        connections: 0,
+        updates: 0,
+      };
+    },
+    recordMaintenanceAction() {
+      throw new Error("keep-only 结果不应写入维护账本");
+    },
+    recordGraphMutation: async () => {
+      recordGraphMutationCalls += 1;
+    },
+    toastr: {
+      info(message) {
+        toastMessages.push(["info", message]);
+      },
+      success(message) {
+        toastMessages.push(["success", message]);
+      },
+      warning(message) {
+        toastMessages.push(["warning", message]);
+      },
+    },
+  });
+
+  assert.deepEqual(receivedCandidateIds, ["evt-1"]);
+  assert.equal(recordGraphMutationCalls, 0);
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.requestDispatched, true);
+  assert.equal(result?.mutated, false);
+  assert.match(String(toastMessages[0]?.[1] || ""), /最近一批提取落盘/);
+}
+
+async function testManualEvolveWarnsOnInvalidVectorConfigInsteadOfPretendingComplete() {
+  let consolidateCalls = 0;
+  const toastMessages = [];
+
+  const result = await onManualEvolveController({
+    getCurrentGraph: () => ({
+      nodes: [{ id: "evt-2", type: "event", archived: false, level: 0 }],
+      historyState: { extractionCount: 1 },
+      batchJournal: [],
+    }),
+    ensureGraphMutationReady: () => true,
+    getEmbeddingConfig: () => ({ mode: "direct" }),
+    validateVectorConfig: () => ({
+      valid: false,
+      error: "Embedding 配置无效",
+    }),
+    getLastExtractedItems: () => [{ id: "evt-2" }],
+    consolidateMemories: async () => {
+      consolidateCalls += 1;
+      return {
+        merged: 1,
+        skipped: 0,
+        kept: 0,
+        evolved: 0,
+        connections: 0,
+        updates: 0,
+      };
+    },
+    toastr: {
+      warning(message) {
+        toastMessages.push(["warning", message]);
+      },
+      info(message) {
+        toastMessages.push(["info", message]);
+      },
+    },
+  });
+
+  assert.equal(consolidateCalls, 0);
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.requestDispatched, false);
+  assert.match(String(toastMessages[0]?.[1] || ""), /配置无效/);
+}
+
+async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
+  let recordGraphMutationCalls = 0;
+  const toastMessages = [];
+
+  const result = await onManualSleepController({
+    getCurrentGraph: () => ({ nodes: [] }),
+    ensureGraphMutationReady: () => true,
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value ?? null)),
+    sleepCycle: () => ({ forgotten: 0 }),
+    getSettings: () => ({ forgetThreshold: 0.5 }),
+    recordMaintenanceAction() {
+      throw new Error("无归档时不应写入维护账本");
+    },
+    recordGraphMutation: async () => {
+      recordGraphMutationCalls += 1;
+    },
+    toastr: {
+      info(message) {
+        toastMessages.push(["info", message]);
+      },
+      success(message) {
+        toastMessages.push(["success", message]);
+      },
+    },
+  });
+
+  assert.equal(recordGraphMutationCalls, 0);
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.requestDispatched, false);
+  assert.match(String(toastMessages[0]?.[1] || ""), /不会发送 LLM 请求/);
+}
+
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
 await testExtractorFailsOnUnknownOperation();
@@ -5358,5 +5612,10 @@ await testRerollPreservesPrefixHashesWhenReextractDoesNotAdvance();
 await testLlmDebugSnapshotRedactsSecretsBeforeStorage();
 await testEmbeddingUsesConfigTimeoutInsteadOfDefault();
 await testLlmOutputRegexCleansResponseBeforeJsonParse();
+await testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan();
+await testManualCompressUsesForcedCompressionAndPersistsRealMutation();
+await testManualEvolveFallsBackToLatestExtractionBatchAfterRefresh();
+await testManualEvolveWarnsOnInvalidVectorConfigInsteadOfPretendingComplete();
+await testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges();
 
 console.log("p0-regressions tests passed");

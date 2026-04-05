@@ -18,6 +18,107 @@ function getTimerApi(runtime = {}) {
   };
 }
 
+function hasCompressionMutation(result = {}) {
+  return (
+    Math.max(0, Number(result?.created) || 0) > 0 ||
+    Math.max(0, Number(result?.archived) || 0) > 0
+  );
+}
+
+function hasSleepMutation(result = {}) {
+  return Math.max(0, Number(result?.forgotten) || 0) > 0;
+}
+
+function hasConsolidationMutation(result = {}) {
+  return (
+    Math.max(0, Number(result?.merged) || 0) > 0 ||
+    Math.max(0, Number(result?.skipped) || 0) > 0 ||
+    Math.max(0, Number(result?.evolved) || 0) > 0 ||
+    Math.max(0, Number(result?.connections) || 0) > 0 ||
+    Math.max(0, Number(result?.updates) || 0) > 0
+  );
+}
+
+function findGraphNode(graph, nodeId) {
+  if (!graph || !Array.isArray(graph.nodes)) return null;
+  return graph.nodes.find((node) => node?.id === nodeId) || null;
+}
+
+function isManualEvolutionCandidateNode(node) {
+  if (!node || node.archived) return false;
+  if (Number(node.level || 0) > 0) return false;
+  return !["synopsis", "reflection"].includes(String(node.type || ""));
+}
+
+function normalizeManualEvolutionCandidateIds(graph, nodeIds = []) {
+  const unique = new Set();
+  for (const rawId of Array.isArray(nodeIds) ? nodeIds : []) {
+    const nodeId = String(rawId || "").trim();
+    if (!nodeId || unique.has(nodeId)) continue;
+    const node = findGraphNode(graph, nodeId);
+    if (!isManualEvolutionCandidateNode(node)) continue;
+    unique.add(nodeId);
+  }
+  return [...unique];
+}
+
+function resolveManualEvolutionCandidates(runtime, graph) {
+  const liveRecentIds = normalizeManualEvolutionCandidateIds(
+    graph,
+    runtime.getLastExtractedItems?.()
+      ?.map((item) => item?.id)
+      .filter(Boolean) || [],
+  );
+  if (liveRecentIds.length > 0) {
+    return {
+      ids: liveRecentIds,
+      source: "recent-extract",
+    };
+  }
+
+  const currentExtractionCount = Math.max(
+    0,
+    Number(graph?.historyState?.extractionCount) || 0,
+  );
+  const batchJournal = Array.isArray(graph?.batchJournal) ? graph.batchJournal : [];
+  for (let index = batchJournal.length - 1; index >= 0; index -= 1) {
+    const entry = batchJournal[index];
+    const beforeExtractionCount = Math.max(
+      0,
+      Number(entry?.stateBefore?.extractionCount) || 0,
+    );
+    if (beforeExtractionCount >= currentExtractionCount) {
+      continue;
+    }
+    const fallbackIds = normalizeManualEvolutionCandidateIds(
+      graph,
+      entry?.createdNodeIds || [],
+    );
+    if (fallbackIds.length > 0) {
+      return {
+        ids: fallbackIds,
+        source: "latest-extraction-batch",
+      };
+    }
+  }
+
+  return {
+    ids: [],
+    source: "none",
+  };
+}
+
+function describeManualEvolutionSource(source, count) {
+  switch (String(source || "")) {
+    case "recent-extract":
+      return `使用最近提取的 ${count} 个节点`;
+    case "latest-extraction-batch":
+      return `使用最近一批提取落盘的 ${count} 个节点`;
+    default:
+      return `候选节点 ${count} 个`;
+  }
+}
+
 export async function onViewGraphController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) {
@@ -111,28 +212,55 @@ export async function onManualCompressController(runtime) {
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("手动压缩")) return;
 
+  const schema = runtime.getSchema();
+  const inspection = runtime.inspectCompressionCandidates?.(graph, schema, true);
+  if (inspection && !inspection.hasCandidates) {
+    runtime.toastr.info(
+      String(inspection.reason || "当前没有可压缩候选组，本次未发起 LLM 压缩"),
+    );
+    return {
+      handledToast: true,
+      requestDispatched: false,
+      mutated: false,
+      reason: String(inspection.reason || ""),
+    };
+  }
+
   const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
   const result = await runtime.compressAll(
     graph,
-    runtime.getSchema(),
+    schema,
     runtime.getEmbeddingConfig(),
-    false,
+    true,
     undefined,
     undefined,
     runtime.getSettings(),
   );
-  runtime.recordMaintenanceAction?.({
-    action: "compress",
-    beforeSnapshot,
-    mode: "manual",
-    summary: runtime.buildMaintenanceSummary?.("compress", result, "manual"),
-  });
-  await runtime.recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["compression"],
-  });
+  const mutated = hasCompressionMutation(result);
+  if (mutated) {
+    runtime.recordMaintenanceAction?.({
+      action: "compress",
+      beforeSnapshot,
+      mode: "manual",
+      summary: runtime.buildMaintenanceSummary?.("compress", result, "manual"),
+    });
+    await runtime.recordGraphMutation({
+      beforeSnapshot,
+      artifactTags: ["compression"],
+    });
+    runtime.toastr.success(
+      `手动压缩完成：新建 ${result.created}，归档 ${result.archived}`,
+    );
+  } else {
+    runtime.toastr.info("已尝试手动压缩，但本轮没有产生可持久化变化");
+  }
 
-  runtime.toastr.info(`压缩完成: 新建 ${result.created}, 归档 ${result.archived}`);
+  return {
+    handledToast: true,
+    requestDispatched: true,
+    mutated,
+    result,
+  };
 }
 
 export async function onExportGraphController(runtime) {
@@ -413,17 +541,30 @@ export async function onManualSleepController(runtime) {
 
   const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
   const result = runtime.sleepCycle(graph, runtime.getSettings());
-  runtime.recordMaintenanceAction?.({
-    action: "sleep",
-    beforeSnapshot,
-    mode: "manual",
-    summary: runtime.buildMaintenanceSummary?.("sleep", result, "manual"),
-  });
-  await runtime.recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["sleep"],
-  });
-  runtime.toastr.info(`执行完成：归档 ${result.forgotten} 个节点`);
+  const mutated = hasSleepMutation(result);
+  if (mutated) {
+    runtime.recordMaintenanceAction?.({
+      action: "sleep",
+      beforeSnapshot,
+      mode: "manual",
+      summary: runtime.buildMaintenanceSummary?.("sleep", result, "manual"),
+    });
+    await runtime.recordGraphMutation({
+      beforeSnapshot,
+      artifactTags: ["sleep"],
+    });
+    runtime.toastr.success(`执行遗忘完成：归档 ${result.forgotten} 个节点`);
+  } else {
+    runtime.toastr.info(
+      "当前没有符合遗忘条件的节点。本操作只做本地图清理，不会发送 LLM 请求。",
+    );
+  }
+  return {
+    handledToast: true,
+    requestDispatched: false,
+    mutated,
+    result,
+  };
 }
 
 export async function onManualSynopsisController(runtime) {
@@ -451,12 +592,28 @@ export async function onManualEvolveController(runtime) {
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("强制进化")) return;
 
-  const candidateIds = runtime.getLastExtractedItems()
-    .map((item) => item.id)
-    .filter(Boolean);
+  const embeddingConfig = runtime.getEmbeddingConfig();
+  const vectorValidation = runtime.validateVectorConfig?.(embeddingConfig);
+  if (vectorValidation && !vectorValidation.valid) {
+    runtime.toastr.warning(vectorValidation.error);
+    return {
+      handledToast: true,
+      requestDispatched: false,
+      mutated: false,
+      reason: vectorValidation.error,
+    };
+  }
+
+  const candidateResolution = resolveManualEvolutionCandidates(runtime, graph);
+  const candidateIds = candidateResolution.ids;
   if (candidateIds.length === 0) {
-    runtime.toastr.info("暂无最近提取节点可用于进化");
-    return;
+    runtime.toastr.info("当前没有可用于进化的最近提取节点，本次未发起整合请求");
+    return {
+      handledToast: true,
+      requestDispatched: false,
+      mutated: false,
+      reason: "no-candidates",
+    };
   }
 
   const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
@@ -464,7 +621,7 @@ export async function onManualEvolveController(runtime) {
   const result = await runtime.consolidateMemories({
     graph,
     newNodeIds: candidateIds,
-    embeddingConfig: runtime.getEmbeddingConfig(),
+    embeddingConfig,
     customPrompt: undefined,
     settings,
     options: {
@@ -472,19 +629,38 @@ export async function onManualEvolveController(runtime) {
       conflictThreshold: settings.consolidationThreshold,
     },
   });
-  runtime.recordMaintenanceAction?.({
-    action: "consolidate",
-    beforeSnapshot,
-    mode: "manual",
-    summary: runtime.buildMaintenanceSummary?.("consolidate", result, "manual"),
-  });
-  await runtime.recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["consolidation"],
-  });
-  runtime.toastr.success(
-    `整合完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}`,
+  const mutated = hasConsolidationMutation(result);
+  const sourceLabel = describeManualEvolutionSource(
+    candidateResolution.source,
+    candidateIds.length,
   );
+  if (mutated) {
+    runtime.recordMaintenanceAction?.({
+      action: "consolidate",
+      beforeSnapshot,
+      mode: "manual",
+      summary: runtime.buildMaintenanceSummary?.("consolidate", result, "manual"),
+    });
+    await runtime.recordGraphMutation({
+      beforeSnapshot,
+      artifactTags: ["consolidation"],
+    });
+    runtime.toastr.success(
+      `强制进化完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}。${sourceLabel}。`,
+    );
+  } else {
+    runtime.toastr.info(
+      `已完成整合判定，但本轮没有产生图谱变更。${sourceLabel}。`,
+    );
+  }
+
+  return {
+    handledToast: true,
+    requestDispatched: true,
+    mutated,
+    result,
+    candidateSource: candidateResolution.source,
+  };
 }
 
 export async function onUndoLastMaintenanceController(runtime) {

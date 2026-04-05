@@ -9347,6 +9347,7 @@ async function onManualCompress() {
     getEmbeddingConfig,
     getSchema,
     getSettings,
+    inspectCompressionCandidates: inspectAutoCompressionCandidates,
     recordMaintenanceAction,
     recordGraphMutation,
     toastr,
@@ -9531,6 +9532,7 @@ async function onManualEvolve() {
     recordMaintenanceAction,
     recordGraphMutation,
     toastr,
+    validateVectorConfig,
   });
 }
 
