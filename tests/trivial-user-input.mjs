@@ -21,9 +21,9 @@ function testIsTrivialUserInputTable() {
     ["/echo hello", true, "slash-command"],
     ["/", true, "slash-command"],
     [" /echo", true, "slash-command"],
-    ["a", true, "under-min-tokens"],
-    ["好", true, "under-min-tokens"],
-    ["ok", true, "under-min-tokens"],
+    ["a", false, ""],
+    ["好", false, ""],
+    ["ok", false, ""],
     ["ok a", false, ""],
     ["好的", false, ""],
     ["好的呀", false, ""],
@@ -60,27 +60,6 @@ async function testSlashCommandSkipsRecallAndExtraction() {
     skipped: true,
     reason: "trivial:slash-command",
   });
-  assert.equal(harness.runRecallCalls.length, 0);
-
-  harness.chat.push({ is_user: false, mes: "assistant reply" });
-  harness.invokeOnMessageReceived(0, "");
-  assert.equal(harness.runExtractionCalls.length, 0);
-  assert.equal(harness.result.getCurrentGenerationTrivialSkip(), null);
-}
-
-async function testUnderMinTokensSkipsRecallAndExtraction() {
-  const harness = await createGenerationRecallHarness();
-  harness.chat = [];
-  harness.__sendTextareaValue = "a";
-
-  const startResult = harness.result.onGenerationStarted("normal", {}, false);
-  assert.equal(startResult, null);
-  assert.equal(
-    harness.result.getCurrentGenerationTrivialSkip()?.reason,
-    "under-min-tokens",
-  );
-
-  await harness.result.onGenerationAfterCommands("normal", {}, false);
   assert.equal(harness.runRecallCalls.length, 0);
 
   harness.chat.push({ is_user: false, mes: "assistant reply" });
@@ -284,7 +263,6 @@ async function testSkipFlagTtlExpires() {
 await Promise.resolve();
 testIsTrivialUserInputTable();
 await testSlashCommandSkipsRecallAndExtraction();
-await testUnderMinTokensSkipsRecallAndExtraction();
 await testEmptyInputSkipsPriorHistoryFallback();
 await testNormalInputStillRecalls();
 await testSentinelBlocksHistoryFallback();
