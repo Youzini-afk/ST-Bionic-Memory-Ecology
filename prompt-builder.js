@@ -1098,6 +1098,12 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   let assistantRoleBlockCount = 0;
   let systemRoleBlockCount = 0;
 
+  console.log(
+    `[ST-BME][prompt-diag] buildTaskPrompt: taskType=${taskType}, ` +
+      `total blocks=${blocks.length}, ` +
+      `block roles=[${blocks.map((b) => `${b.name}(${b.role},${b.enabled !== false ? "on" : "off"})`).join(", ")}]`,
+  );
+
   for (const block of blocks) {
     if (!block || block.enabled === false) continue;
 
@@ -1116,6 +1122,15 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       }
     } else if (block.type === "custom") {
       content = interpolateVariables(block.content || "", resolvedContext);
+    }
+
+    if (role === "user") {
+      console.log(
+        `[ST-BME][prompt-diag] user block "${block.name || block.id}": ` +
+          `type=${block.type}, contentLen=${String(content || "").length}, ` +
+          `rawContentLen=${String(block.content || "").length}, ` +
+          `blockedContentsCount=${worldInfoRuntimeBlockedContents.length}`,
+      );
     }
 
     const sanitizedBlockContent = sanitizeTaskPromptText(
@@ -1204,6 +1219,13 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       customMessages.push({ role, content });
     }
   }
+
+  console.log(
+    `[ST-BME][prompt-diag] buildTaskPrompt done: ` +
+      `executionMessages=${executionMessages.length}, ` +
+      `userBlocks=${userRoleBlockCount}, systemBlocks=${systemRoleBlockCount}, ` +
+      `customMessages=${customMessages.length}`,
+  );
 
   for (const message of worldInfoResolution.additionalMessages || []) {
     const executionMessage = createExecutionMessage(
