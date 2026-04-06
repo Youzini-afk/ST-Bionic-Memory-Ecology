@@ -443,7 +443,7 @@ try {
           placement: [PLACEMENT.USER_INPUT],
           promptOnly: true,
         }),
-        createTavernRule("markdown-only", "/Alpha/g", "M", {
+        createTavernRule("markdown-only", "/Alpha/g", "<b>M</b>", {
           placement: [PLACEMENT.USER_INPUT],
           markdownOnly: true,
         }),
@@ -475,7 +475,7 @@ try {
       { entries: [] },
       "user",
     ),
-    "Alpha",
+    "",
   );
   assert.equal(
     applyTaskRegex(
@@ -499,6 +499,77 @@ try {
     ),
     "AI Lore",
   );
+  const markdownInspect = inspectTaskRegexReuse(tavernSemanticsSettings, "extract");
+  const markdownRule = markdownInspect.activeRules.find(
+    (rule) => rule.id === "markdown-only",
+  );
+  assert.equal(markdownRule?.promptReplaceAsEmpty, true);
+  assert.equal(markdownRule?.effectivePromptReplaceString, "");
+  const markdownOnlyFinalPromptSettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("markdown-final-strip", "/Decor/g", "<span>Decor</span>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: true,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const markdownFinalDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      markdownOnlyFinalPromptSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      markdownFinalDebug,
+      "user",
+    ),
+    "",
+  );
+  assert.deepEqual(
+    markdownFinalDebug.entries[0].appliedRules.map((item) => item.id),
+    ["markdown-final-strip"],
+  );
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("user-prompt-only", "/Alpha/g", "A", {
+          placement: [PLACEMENT.USER_INPUT],
+          promptOnly: true,
+        }),
+        createTavernRule("markdown-only", "/Alpha/g", "<b>M</b>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: true,
+        }),
+        createTavernRule("output-only", "/Answer/g", "AI", {
+          placement: [PLACEMENT.AI_OUTPUT],
+        }),
+        createTavernRule("world-info-only", "/Lore/g", "SYS", {
+          placement: [PLACEMENT.WORLD_INFO],
+        }),
+        createTavernRule("recent-user", "/User/g", "U", {
+          placement: [PLACEMENT.USER_INPUT],
+        }),
+        createTavernRule("recent-ai", "/Reply/g", "R", {
+          placement: [PLACEMENT.AI_OUTPUT],
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
   assert.equal(
     applyTaskRegex(
       tavernSemanticsSettings,

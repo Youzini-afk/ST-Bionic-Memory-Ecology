@@ -3890,8 +3890,14 @@ function _renderRegexReuseRuleList(rules = [], emptyText = "无") {
       const flags = [
         rule.promptOnly ? "promptOnly" : "",
         rule.markdownOnly ? "markdownOnly" : "",
+        rule.promptReplaceAsEmpty ? "请求阶段按空字符串替换" : "",
         rule.reason ? `原因: ${rule.reason}` : "",
       ].filter(Boolean);
+      const replaceText = rule.promptReplaceAsEmpty
+        ? `${rule.replaceString ? `<code>${_escHtml(rule.replaceString)}</code> -> ` : ""}<code>(prompt 时为空)</code>`
+        : rule.replaceString
+          ? `<code>${_escHtml(rule.replaceString)}</code>`
+          : "";
       return `
         <div class="bme-debug-row">
           <span class="bme-debug-key">${_escHtml(rule.name || rule.id || "未命名规则")}</span>
@@ -3899,7 +3905,7 @@ function _renderRegexReuseRuleList(rules = [], emptyText = "无") {
         </div>
         <div class="bme-task-note">
           <code>${_escHtml(rule.findRegex || "(空 findRegex)")}</code>
-          ${rule.replaceString ? ` -> <code>${_escHtml(rule.replaceString)}</code>` : ""}
+          ${replaceText ? ` -> ${replaceText}` : ""}
           ${flags.length ? `<br>${_escHtml(flags.join(" · "))}` : ""}
         </div>
       `;

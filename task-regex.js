@@ -154,7 +154,9 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
     destinationFlags: {
       prompt: destination
         ? Boolean(destination.prompt)
-        : raw.markdownOnly !== true,
+        : isTavernRule && raw.markdownOnly === true
+          ? true
+          : raw.markdownOnly !== true,
       display: destination
         ? Boolean(destination.display)
         : Boolean(raw.markdownOnly),
@@ -376,11 +378,18 @@ function getPlacementLabels(placement = []) {
 
 function summarizeRule(rule, reason = "") {
   const normalized = rule && typeof rule === "object" ? rule : {};
+  const promptReplaceAsEmpty =
+    Boolean(normalized.markdownOnly) ||
+    isBeautificationReplace(normalized.replaceString);
   return {
     id: String(normalized.id || ""),
     name: String(normalized.scriptName || normalized.id || ""),
     findRegex: String(normalized.findRegex || ""),
     replaceString: String(normalized.replaceString || ""),
+    effectivePromptReplaceString: promptReplaceAsEmpty
+      ? ""
+      : String(normalized.replaceString || ""),
+    promptReplaceAsEmpty,
     sourceType: String(normalized.sourceType || ""),
     promptOnly: Boolean(normalized.promptOnly),
     markdownOnly: Boolean(normalized.markdownOnly),
@@ -629,14 +638,15 @@ function shouldApplyRuleForTaskContext(rule, stage = "") {
     return true;
   }
 
-  if (rule.markdownOnly) {
-    return false;
-  }
-
   const normalizedStage = String(stage || "").trim();
+  const isPromptStage = PROMPT_STAGES.has(normalizedStage);
   const isFinalPromptStage =
     normalizedStage === "finalPrompt" || normalizedStage === "input.finalPrompt";
   const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
+
+  if (rule.markdownOnly) {
+    return isPromptStage;
+  }
 
   if (isFinalPromptStage) {
     return rule.promptOnly === true;
@@ -683,7 +693,10 @@ function applyOneRule(input, rule, stage = "") {
   if (!regex) return { output: input, changed: false, error: "invalid_regex" };
 
   let replacement = rule.replaceString || "";
-  if (PROMPT_STAGES.has(stage) && isBeautificationReplace(replacement)) {
+  if (
+    PROMPT_STAGES.has(stage) &&
+    (rule.markdownOnly || isBeautificationReplace(replacement))
+  ) {
     replacement = "";
   }
 
