@@ -1309,7 +1309,9 @@
 /* 宿主样式 / WebKit 默认易把 select、自动填充 input 画成黑底 — 在面板内强制用主题色 */
 #st-bme-panel input.bme-config-input,
 #st-bme-panel textarea.bme-config-textarea,
-#st-bme-panel input.bme-search-input {
+#st-bme-panel input.bme-search-input,
+#st-bme-panel .bme-node-detail-input,
+#st-bme-panel .bme-node-detail-textarea {
   background-color: var(--bme-surface-high) !important;
   color: var(--bme-on-surface) !important;
 }
@@ -1356,7 +1358,13 @@
 #st-bme-panel input.bme-config-input:-webkit-autofill:focus,
 #st-bme-panel input.bme-search-input:-webkit-autofill,
 #st-bme-panel input.bme-search-input:-webkit-autofill:hover,
-#st-bme-panel input.bme-search-input:-webkit-autofill:focus {
+#st-bme-panel input.bme-search-input:-webkit-autofill:focus,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill:hover,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill:focus,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill:hover,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--bme-on-surface) !important;
   caret-color: var(--bme-on-surface);
   border: 1px solid var(--bme-border) !important;
@@ -2310,12 +2318,14 @@
 .bme-node-detail-textarea {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bme-surface-lowest, #0e0e11);
+  background-color: var(--bme-surface-high);
   border: 1px solid var(--bme-border);
   border-radius: 6px;
   color: var(--bme-on-surface);
   font-size: 11px;
   padding: 6px 8px;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .bme-node-detail-textarea {
