@@ -1,5 +1,5 @@
 // ST-BME: Canvas 图谱渲染器 — 分区「神经视图」布局
-// 零依赖：按客观层 / 角色 POV / 用户 POV 分区排布，稳定无持续力导向抖动
+// 零依赖：客观层 / 角色 POV / 用户 POV 分区内 Vogel 初值 + 一次性力导向稳定，无帧循环抖动
 
 import { getNodeColors } from './themes.js';
 import { getGraphNodeLabel, getNodeDisplayName } from './node-labels.js';
@@ -26,7 +26,14 @@ const DEFAULT_LAYOUT_CONFIG = {
     gridColor: 'rgba(255,255,255,0.028)',
     /** 主画布左侧客观区占比（余下为右侧 POV 列） */
     objectiveWidthRatio: 0.62,
-    localRelaxIterations: 22,
+    /** 分区内类神经布局：力导向迭代次数（无持续动画，仅一次性稳定） */
+    neuralIterations: 120,
+    neuralRepulsion: 2800,
+    neuralSpringK: 0.048,
+    neuralDamping: 0.88,
+    neuralCenterGravity: 0.014,
+    /** 节点最小间距（除半径外） */
+    neuralMinGap: 12,
 };
 
 /** 兼容旧版 forceConfig（召回卡片等） */
@@ -39,7 +46,10 @@ function layoutKeysFromForceConfig(fc) {
     if (fc.gridSpacing != null) o.gridSpacing = fc.gridSpacing;
     if (fc.gridColor != null) o.gridColor = fc.gridColor;
     if (fc.maxIterations != null) {
-        o.localRelaxIterations = Math.min(60, Math.max(6, Math.round(fc.maxIterations * 0.25)));
+        o.neuralIterations = Math.min(
+            160,
+            Math.max(32, Math.round(fc.maxIterations * 0.85)),
+        );
     }
     return o;
 }
@@ -72,14 +82,6 @@ function hashId(id) {
 /** 与 memory-scope 中 normalizeKey 一致，用于分区键（模块内未导出故本地复制） */
 function normalizeKeyForPartition(value) {
     return String(value ?? '').trim().toLowerCase();
-}
-
-/** 由 id 导出的微小偏移，避免网格完全对齐，且无帧间随机抖动 */
-function deterministicJitter(id, mag) {
-    const h = hashId(id);
-    const nx = ((h & 0xff) / 255 - 0.5) * 2;
-    const ny = (((h >> 8) & 0xff) / 255 - 0.5) * 2;
-    return { x: nx * mag * 0.45, y: ny * mag * 0.45 };
 }
 
 function characterPovLabelFromNodes(arr) {
@@ -229,7 +231,7 @@ export class GraphRenderer {
         const parts = partitionNodesByScope(this.nodes);
         this._regionPanels = this._computeRegionPanels(W, H, parts);
         this._layoutAllPartitions(parts);
-        this._relaxWithinRegions(this.config.localRelaxIterations);
+        this._simulateNeuralWithinRegions(this.config.neuralIterations);
 
         if (prevSelectedId) {
             this.selectedNode = this.nodeMap.get(prevSelectedId) || null;
@@ -378,62 +380,145 @@ export class GraphRenderer {
     }
 
     _layoutAllPartitions({ objective, userPov, charMap }) {
-        this._layoutGridInRect(objective, objective[0]?.regionRect);
-        for (const list of userPov.length ? [userPov] : []) {
-            this._layoutGridInRect(list, list[0]?.regionRect);
+        this._seedNeuralCloudInRect(objective, objective[0]?.regionRect);
+        if (userPov.length) {
+            this._seedNeuralCloudInRect(userPov, userPov[0]?.regionRect);
         }
         for (const [, arr] of charMap) {
-            this._layoutGridInRect(arr, arr[0]?.regionRect);
+            this._seedNeuralCloudInRect(arr, arr[0]?.regionRect);
         }
     }
 
-    _layoutGridInRect(nodes, rect) {
-        if (!rect || nodes.length === 0) return;
-        const n = nodes.length;
-        const pad = 8;
-        const innerW = Math.max(24, rect.w - 2 * pad);
-        const innerH = Math.max(24, rect.h - 2 * pad);
-        const aspect = innerW / innerH;
-        const cols = Math.max(1, Math.round(Math.sqrt(n * aspect)));
-        const rows = Math.ceil(n / cols);
-        const cellW = innerW / cols;
-        const cellH = innerH / rows;
+    /**
+     * 椭圆 Vogel 螺旋初值：有机疏密，Deterministic，无网格感
+     */
+    _seedNeuralCloudInRect(nodes, rect) {
+        if (!rect || !nodes.length) return;
+        const pad = Math.max(10, this.config.neuralMinGap);
+        const cx = rect.x + rect.w / 2;
+        const cy = rect.y + rect.h / 2;
+        const rx = Math.max(14, rect.w / 2 - pad);
+        const ry = Math.max(14, rect.h / 2 - pad);
         const sorted = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
-        const jitterMag = Math.min(cellW, cellH) * 0.09;
-
+        const n = sorted.length;
+        const golden = Math.PI * (3 - Math.sqrt(5));
         sorted.forEach((node, i) => {
-            const r = Math.floor(i / cols);
-            const c = i % cols;
-            const cx = rect.x + pad + cellW * (c + 0.5);
-            const cy = rect.y + pad + cellH * (r + 0.5);
-            const j = deterministicJitter(node.id, jitterMag);
-            node.x = cx + j.x;
-            node.y = cy + j.y;
+            const t = (i + 0.5) / Math.max(n, 1);
+            const radScale = Math.sqrt(t) * 0.9;
+            const phase = ((hashId(node.id) & 0x3ff) / 1024) * 0.62;
+            const theta = i * golden + phase;
+            node.x = cx + Math.cos(theta) * radScale * rx;
+            node.y = cy + Math.sin(theta) * radScale * ry;
+            node.vx = 0;
+            node.vy = 0;
         });
     }
 
-    _relaxWithinRegions(iterations) {
-        const minDist = 26;
-        for (let it = 0; it < iterations; it++) {
-            for (let i = 0; i < this.nodes.length; i++) {
-                for (let j = i + 1; j < this.nodes.length; j++) {
-                    const a = this.nodes[i];
-                    const b = this.nodes[j];
+    _idealSpringLengthsByRegion() {
+        const countBy = new Map();
+        for (const n of this.nodes) {
+            const k = n.regionKey;
+            countBy.set(k, (countBy.get(k) || 0) + 1);
+        }
+        const ideal = new Map();
+        for (const n of this.nodes) {
+            if (ideal.has(n.regionKey)) continue;
+            const rect = n.regionRect;
+            const c = Math.max(1, countBy.get(n.regionKey) || 1);
+            const area = (rect?.w || 1) * (rect?.h || 1);
+            const len = Math.max(
+                36,
+                Math.min(92, 0.78 * Math.sqrt(area / c)),
+            );
+            ideal.set(n.regionKey, len);
+        }
+        return ideal;
+    }
+
+    /**
+     * 分区内一次性力导向：斥力 + 同区边弹簧 + 弱向心，稳定后停止（无帧循环）
+     */
+    _simulateNeuralWithinRegions(iterations) {
+        const iters = Math.max(8, Math.min(220, iterations || 80));
+        const repulsion = this.config.neuralRepulsion ?? 2800;
+        const springK = this.config.neuralSpringK ?? 0.048;
+        const damping = this.config.neuralDamping ?? 0.88;
+        const cg = this.config.neuralCenterGravity ?? 0.014;
+        const extraGap = this.config.neuralMinGap ?? 12;
+        const springIdeal = this._idealSpringLengthsByRegion();
+        const nodes = this.nodes;
+
+        for (let it = 0; it < iters; it++) {
+            for (const n of nodes) {
+                n._fx = 0;
+                n._fy = 0;
+            }
+
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const a = nodes[i];
+                    const b = nodes[j];
                     if (a.regionKey !== b.regionKey) continue;
                     let dx = b.x - a.x;
                     let dy = b.y - a.y;
-                    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
-                    if (dist >= minDist) continue;
-                    const push = (minDist - dist) * 0.42;
-                    const fx = (dx / dist) * push;
-                    const fy = (dy / dist) * push;
-                    a.x -= fx;
-                    a.y -= fy;
-                    b.x += fx;
-                    b.y += fy;
+                    let distSq = dx * dx + dy * dy;
+                    if (distSq < 0.25) distSq = 0.25;
+                    const dist = Math.sqrt(distSq);
+                    const minSep =
+                        this._nodeRadius(a) + this._nodeRadius(b) + extraGap;
+                    let f = repulsion / distSq;
+                    if (dist < minSep) {
+                        f += (minSep - dist) * 0.22;
+                    }
+                    const fx = (dx / dist) * f;
+                    const fy = (dy / dist) * f;
+                    a._fx -= fx;
+                    a._fy -= fy;
+                    b._fx += fx;
+                    b._fy += fy;
                 }
             }
-            for (const node of this.nodes) {
+
+            for (const edge of this.edges) {
+                const { from, to, strength } = edge;
+                if (from.regionKey !== to.regionKey) continue;
+                const ideal =
+                    springIdeal.get(from.regionKey) ?? 68;
+                let dx = to.x - from.x;
+                let dy = to.y - from.y;
+                const dist = Math.sqrt(dx * dx + dy * dy) || 0.001;
+                const displacement = dist - ideal * (0.82 + 0.18 * strength);
+                const f = springK * displacement * (0.45 + 0.55 * strength);
+                const fx = (dx / dist) * f;
+                const fy = (dy / dist) * f;
+                from._fx += fx;
+                from._fy += fy;
+                to._fx -= fx;
+                to._fy -= fy;
+            }
+
+            for (const node of nodes) {
+                const rect = node.regionRect;
+                if (!rect) continue;
+                const ccx = rect.x + rect.w / 2;
+                const ccy = rect.y + rect.h / 2;
+                node._fx += (ccx - node.x) * cg;
+                node._fy += (ccy - node.y) * cg;
+            }
+
+            for (const node of nodes) {
+                node.vx = (node.vx + node._fx) * damping;
+                node.vy = (node.vy + node._fy) * damping;
+                const sp = Math.hypot(node.vx, node.vy);
+                const cap = 3.8;
+                if (sp > cap) {
+                    node.vx = (node.vx / sp) * cap;
+                    node.vy = (node.vy / sp) * cap;
+                }
+                node.x += node.vx;
+                node.y += node.vy;
+                delete node._fx;
+                delete node._fy;
                 this._clampNodeToRegion(node);
             }
         }
@@ -546,7 +631,21 @@ export class GraphRenderer {
             ctx.fillStyle = `rgba(255,255,255,${isHovered || isSelected ? 0.94 : 0.66})`;
             ctx.font = `${this.config.labelFontSize}px Inter, sans-serif`;
             ctx.textAlign = 'center';
-            ctx.fillText(node.label || node.name, node.x, node.y + r + 14);
+            const rect = node.regionRect;
+            let maxLabelW = 118;
+            if (rect) {
+                const frac =
+                    node.regionKey === 'user' ? 0.4
+                    : node.regionKey.startsWith('char:') ? 0.46
+                    : 0.52;
+                maxLabelW = Math.max(36, Math.min(220, rect.w * frac));
+            }
+            const labelDraw = this._ellipsisLabel(
+                ctx,
+                node.label || node.name,
+                maxLabelW,
+            );
+            ctx.fillText(labelDraw, node.x, node.y + r + 14);
         }
 
         ctx.restore();
@@ -582,6 +681,22 @@ export class GraphRenderer {
         const min = this.config.minNodeRadius;
         const max = this.config.maxNodeRadius;
         return min + ((node.importance || 5) / 10) * (max - min);
+    }
+
+    _ellipsisLabel(ctx, text, maxW) {
+        const s = String(text ?? "").trim() || "—";
+        if (!maxW || maxW < 12) return s;
+        if (ctx.measureText(s).width <= maxW) return s;
+        const ell = "…";
+        let lo = 0;
+        let hi = s.length;
+        while (lo < hi) {
+            const mid = Math.ceil((lo + hi) / 2);
+            const trial = s.slice(0, mid) + ell;
+            if (ctx.measureText(trial).width <= maxW) lo = mid;
+            else hi = mid - 1;
+        }
+        return lo <= 0 ? ell : s.slice(0, lo) + ell;
     }
 
     _cancelAnim() {
