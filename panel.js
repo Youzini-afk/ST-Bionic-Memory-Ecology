@@ -1069,7 +1069,7 @@ function _refreshMemoryBrowser() {
   const fragment = document.createDocumentFragment();
   nodes.slice(0, 100).forEach((node) => {
     const name = getNodeDisplayName(node);
-    const snippet = _getNodeSnippet(node);
+    const snippetText = _getNodeSnippet(node);
     const li = document.createElement("li");
     li.className = "bme-memory-item";
     li.dataset.nodeId = String(node.id || "");
@@ -1077,40 +1077,59 @@ function _refreshMemoryBrowser() {
     const badge = document.createElement("span");
     badge.className = `bme-type-badge ${_safeCssToken(node.type)}`;
     badge.textContent = _typeLabel(node.type);
-    li.appendChild(badge);
 
     const scopeBadge = document.createElement("span");
     scopeBadge.className = "bme-type-badge";
     scopeBadge.textContent = buildScopeBadgeText(node.scope);
-    li.appendChild(scopeBadge);
 
-    const content = document.createElement("div");
-    const title = document.createElement("div");
-    title.className = "bme-memory-name";
-    title.textContent = name;
+    const badgesWrap = document.createElement("div");
+    badgesWrap.className = "bme-memory-badges";
+    badgesWrap.append(badge, scopeBadge);
+
     const body = document.createElement("div");
-    body.className = "bme-memory-content";
-    body.textContent = snippet;
+    body.className = "bme-memory-body";
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "bme-memory-name";
+    titleEl.textContent = name;
+
+    const snippetEl = document.createElement("div");
+    snippetEl.className = "bme-memory-content";
+    snippetEl.textContent = snippetText;
+
     const meta = document.createElement("div");
     meta.className = "bme-memory-meta";
-    ["imp", "acc", "seq"].forEach((key, index) => {
-      const span = document.createElement("span");
-      span.textContent =
-        index === 0
-          ? `imp: ${node.importance || 5}`
-          : index === 1
-            ? `acc: ${node.accessCount || 0}`
-            : `seq: ${node.seqRange?.[1] ?? node.seq ?? 0}`;
-      meta.appendChild(span);
-    });
+
+    const impSpan = document.createElement("span");
+    impSpan.className = "bme-memory-metric";
+    impSpan.textContent = `重要度 ${_formatMemoryMetricNumber(node.importance, {
+      fallback: 5,
+      maxFrac: 2,
+    })}`;
+
+    const accSpan = document.createElement("span");
+    accSpan.className = "bme-memory-metric";
+    accSpan.textContent = `访问 ${_formatMemoryInt(node.accessCount, 0)}`;
+
+    const seqSpan = document.createElement("span");
+    seqSpan.className = "bme-memory-metric";
+    seqSpan.textContent = `序列 ${_formatMemoryInt(
+      node.seqRange?.[1] ?? node.seq,
+      0,
+    )}`;
+
+    meta.append(impSpan, accSpan, seqSpan);
+
     const regionMeta = _buildScopeMetaText(node);
     if (regionMeta) {
       const scopeSpan = document.createElement("span");
+      scopeSpan.className = "bme-memory-regionline";
       scopeSpan.textContent = regionMeta;
       meta.appendChild(scopeSpan);
     }
-    content.append(title, body, meta);
-    li.appendChild(content);
+
+    body.append(titleEl, snippetEl, meta);
+    li.append(badgesWrap, body);
     fragment.appendChild(li);
   });
   listEl.replaceChildren(fragment);
@@ -5548,12 +5567,31 @@ function _buildScopeMetaText(node) {
     parts.push(
       `${scope.ownerType === "user" ? "用户 POV" : "角色 POV"}: ${scope.ownerName || scope.ownerId || "未命名"}`,
     );
-  } else {
-    parts.push("客观层");
   }
   const regionLine = buildRegionLine(scope);
   if (regionLine) parts.push(regionLine);
-  return parts.join(" | ");
+  return parts.join(" · ");
+}
+
+/** 记忆列表等指标：避免浮点误差打出 9.499999999999998 */
+function _formatMemoryMetricNumber(value, { fallback = 0, maxFrac = 2 } = {}) {
+  const x =
+    value === undefined || value === null || value === ""
+      ? Number(fallback)
+      : Number(value);
+  if (!Number.isFinite(x)) return "—";
+  const rounded = Number.parseFloat(x.toFixed(maxFrac));
+  if (Object.is(rounded, -0)) return "0";
+  return String(rounded);
+}
+
+function _formatMemoryInt(value, fallback = 0) {
+  const x =
+    value === undefined || value === null || value === ""
+      ? Number(fallback)
+      : Number(value);
+  if (!Number.isFinite(x)) return "—";
+  return String(Math.trunc(x));
 }
 
 function _typeLabel(type) {
