@@ -586,6 +586,29 @@ const PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [
 ];
 /** Ingest / NDJSON：搜索此固定串可只看 Recall Card UI 调试行 */
 const BME_DEBUG_RECALL_CARD_UI = "ST-BME|DBG|recall-card-ui";
+const BME_DEBUG_RECALL_CARD_UI_INGEST =
+  "http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85";
+function bmePostRecallCardUiDebug(partial) {
+  const payload = {
+    bmeDbgTag: BME_DEBUG_RECALL_CARD_UI,
+    sessionId: "b6ba57",
+    ...partial,
+    timestamp: Date.now(),
+  };
+  try {
+    if (typeof console?.info === "function") {
+      console.info(BME_DEBUG_RECALL_CARD_UI, payload.message, payload);
+    }
+  } catch (_) {}
+  fetch(BME_DEBUG_RECALL_CARD_UI_INGEST, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Debug-Session-Id": "b6ba57",
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
 const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
 const persistedRecallPersistDiagnosticTimestamps = new Map();
@@ -1794,7 +1817,7 @@ function ensurePersistedRecallRecordForGeneration({
   );
 
   // #region agent log
-  {fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:ensurePersistedRecallRecordForGeneration',message:`${BME_DEBUG_RECALL_CARD_UI} target resolved`,data:{targetUserMessageIndex,chatLen:chat.length,isUser:chat[targetUserMessageIndex]?.is_user,generationType,hookName:String(hookName||''),injectionTextLen:injectionText?.length||0},timestamp:Date.now()})}).catch(()=>{});}
+  {bmePostRecallCardUiDebug({location:'index.js:ensurePersistedRecallRecordForGeneration',message:`${BME_DEBUG_RECALL_CARD_UI} target resolved`,data:{targetUserMessageIndex,chatLen:chat.length,isUser:chat[targetUserMessageIndex]?.is_user,generationType,hookName:String(hookName||''),injectionTextLen:injectionText?.length||0}});}
   // #endregion
   if (
     !Number.isFinite(targetUserMessageIndex) ||
@@ -2553,7 +2576,7 @@ function refreshPersistedRecallMessageUi() {
   };
 
   // #region agent log
-  {const _latestUserIdx=chat.reduce((a,m,i)=>m?.is_user?i:a,-1);const _domKeys=[...messageElementMap.keys()];const _hasRecord=_latestUserIdx>=0&&!!readPersistedRecallFromUserMessage(chat,_latestUserIdx);const _hasDom=_latestUserIdx>=0&&messageElementMap.has(_latestUserIdx);fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:loop-start',message:`${BME_DEBUG_RECALL_CARD_UI} refresh loop entry`,data:{chatLen:chat.length,domElementCount:_domKeys.length,domKeys:_domKeys.slice(-6),latestUserIdx:_latestUserIdx,hasRecordForLatest:_hasRecord,hasDomForLatest:_hasDom},timestamp:Date.now()})}).catch(()=>{});}
+  {const _latestUserIdx=chat.reduce((a,m,i)=>m?.is_user?i:a,-1);const _domKeys=[...messageElementMap.keys()];const _hasRecord=_latestUserIdx>=0&&!!readPersistedRecallFromUserMessage(chat,_latestUserIdx);const _hasDom=_latestUserIdx>=0&&messageElementMap.has(_latestUserIdx);bmePostRecallCardUiDebug({location:'index.js:refreshPersistedRecallMessageUi:loop-start',message:`${BME_DEBUG_RECALL_CARD_UI} refresh loop entry`,data:{chatLen:chat.length,domElementCount:_domKeys.length,domKeys:_domKeys.slice(-6),latestUserIdx:_latestUserIdx,hasRecordForLatest:_hasRecord,hasDomForLatest:_hasDom}});}
   // #endregion
   for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
     const message = chat[messageIndex];
@@ -2587,7 +2610,7 @@ function refreshPersistedRecallMessageUi() {
 
     const record = readPersistedRecallFromUserMessage(chat, messageIndex);
     // #region agent log
-    if(message?.is_user){const _isLatestUser=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser){fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:latest-user-check',message:`${BME_DEBUG_RECALL_CARD_UI} latest user msg detail`,data:{messageIndex,hasRecord:!!record?.injectionText,hasDom:!!messageElement,hasExistingCard:!!existingCard,domMesid:messageElement?.getAttribute?.('mesid'),domDataMesid:messageElement?.getAttribute?.('data-mesid'),domClasses:messageElement?.className?.slice(0,80)||''},timestamp:Date.now()})}).catch(()=>{});}}
+    if(message?.is_user){const _isLatestUser=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser){bmePostRecallCardUiDebug({location:'index.js:refreshPersistedRecallMessageUi:latest-user-check',message:`${BME_DEBUG_RECALL_CARD_UI} latest user msg detail`,data:{messageIndex,hasRecord:!!record?.injectionText,hasDom:!!messageElement,hasExistingCard:!!existingCard,domMesid:messageElement?.getAttribute?.('mesid'),domDataMesid:messageElement?.getAttribute?.('data-mesid'),domClasses:messageElement?.className?.slice(0,80)||''}});}}
     // #endregion
     if (!record?.injectionText) {
       if (messageElement) {
@@ -2657,7 +2680,7 @@ function refreshPersistedRecallMessageUi() {
     );
     summary.renderedCount += 1;
     // #region agent log
-    {const _isLatestUser2=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser2){fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:card-mounted',message:`${BME_DEBUG_RECALL_CARD_UI} card mounted for latest user`,data:{messageIndex,hadExistingCard:!!currentCard,cardInDom:!!messageElement.querySelector('.bme-recall-card')},timestamp:Date.now()})}).catch(()=>{});}}
+    {const _isLatestUser2=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser2){bmePostRecallCardUiDebug({location:'index.js:refreshPersistedRecallMessageUi:card-mounted',message:`${BME_DEBUG_RECALL_CARD_UI} card mounted for latest user`,data:{messageIndex,hadExistingCard:!!currentCard,cardInDom:!!messageElement.querySelector('.bme-recall-card')}});}}
     // #endregion
   }
 
@@ -2676,7 +2699,7 @@ function refreshPersistedRecallMessageUi() {
     );
   }
   // #region agent log
-  fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:summary',message:`${BME_DEBUG_RECALL_CARD_UI} refresh complete`,data:{status:summary.status,renderedCount:summary.renderedCount,persistedRecordCount:summary.persistedRecordCount,waitingDom:summary.waitingMessageIndices,anchorFail:summary.anchorFailureIndices},timestamp:Date.now()})}).catch(()=>{});
+  bmePostRecallCardUiDebug({location:'index.js:refreshPersistedRecallMessageUi:summary',message:`${BME_DEBUG_RECALL_CARD_UI} refresh complete`,data:{status:summary.status,renderedCount:summary.renderedCount,persistedRecordCount:summary.persistedRecordCount,waitingDom:summary.waitingMessageIndices,anchorFail:summary.anchorFailureIndices}});
   // #endregion
   return summary;
 }
@@ -2770,7 +2793,7 @@ function armPersistedRecallMessageUiObserver(sessionId, runAttempt) {
 
 function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
   // #region agent log
-  {const _prevSession=persistedRecallUiRefreshSession;const _caller=new Error().stack?.split('\n')?.[2]?.trim()?.slice(0,120)||'';fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({bmeDbgTag:BME_DEBUG_RECALL_CARD_UI,sessionId:'b6ba57',location:'index.js:schedulePersistedRecallMessageUiRefresh',message:`${BME_DEBUG_RECALL_CARD_UI} schedule refresh called`,data:{delayMs,prevSession:_prevSession,nextSession:_prevSession+1,caller:_caller},timestamp:Date.now()})}).catch(()=>{});}
+  {const _prevSession=persistedRecallUiRefreshSession;const _caller=new Error().stack?.split('\n')?.[2]?.trim()?.slice(0,120)||'';bmePostRecallCardUiDebug({location:'index.js:schedulePersistedRecallMessageUiRefresh',message:`${BME_DEBUG_RECALL_CARD_UI} schedule refresh called`,data:{delayMs,prevSession:_prevSession,nextSession:_prevSession+1,caller:_caller}});}
   // #endregion
   clearTimeout(persistedRecallUiRefreshTimer);
   clearPersistedRecallMessageUiObserver();
