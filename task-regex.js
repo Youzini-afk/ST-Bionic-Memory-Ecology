@@ -169,7 +169,7 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
     sourceFlags,
     destinationFlags: {
       prompt: destination
-        ? isTavernRule && beautificationReplace
+        ? isTavernRule && (raw.markdownOnly === true || beautificationReplace)
           ? true
           : Boolean(destination.prompt)
         : isTavernRule && raw.markdownOnly === true
@@ -397,7 +397,8 @@ function getPlacementLabels(placement = []) {
 
 function summarizeRule(rule, reason = "") {
   const normalized = rule && typeof rule === "object" ? rule : {};
-  const promptReplaceAsEmpty = Boolean(normalized.beautificationReplace);
+  const promptReplaceAsEmpty =
+    Boolean(normalized.markdownOnly) || Boolean(normalized.beautificationReplace);
   const sourceFlags =
     normalized.sourceFlags && typeof normalized.sourceFlags === "object"
       ? normalized.sourceFlags
@@ -431,6 +432,24 @@ function summarizeRule(rule, reason = "") {
     maxDepth:
       normalized.maxDepth == null ? null : Number(normalized.maxDepth),
     reason: String(reason || ""),
+  };
+}
+
+function summarizeRuleForPromptPreview(rule, stageConfig = {}, reason = "") {
+  const summary = summarizeRule(rule, reason);
+  const promptStageApplies = shouldApplyRuleForStage(
+    rule,
+    "input.finalPrompt",
+    stageConfig,
+  );
+  return {
+    ...summary,
+    promptStageApplies,
+    promptStageMode: promptStageApplies
+      ? summary.promptReplaceAsEmpty
+        ? "clear"
+        : "replace"
+      : "skip",
   };
 }
 
@@ -505,6 +524,8 @@ function collectTavernRulesDetailed(regexConfig = {}) {
       enabled && allowed ? (Array.isArray(rawItems) ? rawItems : []) : [];
     const activeRules = [];
     const ignoredRules = [];
+    const ignoredPreviewRules = [];
+    const previewRules = [];
 
     if (!enabled) {
       sources.push({
@@ -518,6 +539,10 @@ function collectTavernRulesDetailed(regexConfig = {}) {
           reason || (shouldReuse ? "当前任务已关闭该来源" : "当前任务未启用复用酒馆正则"),
         rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
         activeRuleCount: 0,
+        previewRules: Array.isArray(rawItems)
+          ? rawItems.map((item, index) => normalizeRule(item, type, index))
+          : [],
+        ignoredPreviewRules: [],
         rules: [],
         ignoredRules: [],
       });
@@ -526,24 +551,31 @@ function collectTavernRulesDetailed(regexConfig = {}) {
 
     if (!allowed && Array.isArray(rawItems)) {
       for (let index = 0; index < rawItems.length; index++) {
+        const normalized = normalizeRule(rawItems[index], type, index);
+        previewRules.push(normalized);
+        ignoredPreviewRules.push({ ...normalized, reason: "not-allowed" });
         ignoredRules.push(
-          summarizeRule(normalizeRule(rawItems[index], type, index), "not-allowed"),
+          summarizeRule(normalized, "not-allowed"),
         );
       }
     }
 
     for (let index = 0; index < effectiveItems.length; index++) {
       const normalized = normalizeRule(effectiveItems[index], type, index);
+      previewRules.push(normalized);
       if (!normalized.enabled) {
+        ignoredPreviewRules.push({ ...normalized, reason: "disabled" });
         ignoredRules.push(summarizeRule(normalized, "disabled"));
         continue;
       }
       if (!normalized.findRegex) {
+        ignoredPreviewRules.push({ ...normalized, reason: "missing-find-regex" });
         ignoredRules.push(summarizeRule(normalized, "missing-find-regex"));
         continue;
       }
       const key = `${type}:${normalized.id}:${normalized.findRegex}`;
       if (seen.has(key)) {
+        ignoredPreviewRules.push({ ...normalized, reason: "duplicate" });
         ignoredRules.push(summarizeRule(normalized, "duplicate"));
         continue;
       }
@@ -562,6 +594,8 @@ function collectTavernRulesDetailed(regexConfig = {}) {
       reason,
       rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
       activeRuleCount: activeRules.length,
+      previewRules,
+      ignoredPreviewRules,
       rules: activeRules,
       ignoredRules,
     });
@@ -676,7 +710,7 @@ function shouldApplyRuleForTaskContext(rule, stage = "") {
   const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
 
   if (rule.markdownOnly) {
-    return isPromptStage && rule.beautificationReplace === true;
+    return isPromptStage;
   }
 
   if (isFinalPromptStage) {
@@ -726,7 +760,7 @@ function applyOneRule(input, rule, stage = "") {
   let replacement = rule.replaceString || "";
   if (
     PROMPT_STAGES.has(stage) &&
-    rule.beautificationReplace
+    (rule.markdownOnly || rule.beautificationReplace)
   ) {
     replacement = "";
   }
@@ -820,6 +854,12 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
   const profile = getActiveTaskProfile(settings, taskType);
   const regexConfig = profile?.regex || {};
   const detailed = collectTavernRulesDetailed(regexConfig);
+  const stageConfig = normalizeTaskRegexStages(regexConfig.stages || {});
+
+  const mapPreviewRules = (rules = []) =>
+    (Array.isArray(rules) ? rules : []).map((rule) =>
+      summarizeRuleForPromptPreview(rule, stageConfig, rule?.reason || ""),
+    );
 
   return {
     taskType: String(taskType || ""),
@@ -836,9 +876,16 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
     localRuleCount: Array.isArray(regexConfig.localRules)
       ? regexConfig.localRules.length
       : 0,
-    sources: detailed.sources,
+    sources: detailed.sources.map((source) => ({
+      ...source,
+      previewRules: mapPreviewRules(source.previewRules),
+      rules: mapPreviewRules(source.previewRules),
+      ignoredRules: mapPreviewRules(source.ignoredPreviewRules),
+    })),
     host: detailed.host,
     activeRuleCount: detailed.rules.length,
-    activeRules: detailed.rules.map((rule) => summarizeRule(rule)),
+    activeRules: detailed.rules.map((rule) =>
+      summarizeRuleForPromptPreview(rule, stageConfig),
+    ),
   };
 }

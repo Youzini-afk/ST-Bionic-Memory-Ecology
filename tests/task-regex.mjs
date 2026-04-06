@@ -506,6 +506,7 @@ try {
   assert.equal(markdownRule?.promptReplaceAsEmpty, true);
   assert.equal(markdownRule?.effectivePromptReplaceString, "");
   assert.deepEqual(markdownRule?.placementLabels, ["用户输入"]);
+  assert.equal(markdownRule?.promptStageMode, "clear");
   const markdownOnlyFinalPromptSettings = buildSettings({
     sources: {
       global: true,
@@ -588,15 +589,15 @@ try {
       destinationBeautifySettings,
       "extract",
       "input.finalPrompt",
-      "Decor Plain",
+      "DecorPlain",
       destinationDebug,
       "user",
     ),
-    " Plain",
+    "",
   );
   assert.deepEqual(
     destinationDebug.entries[0].appliedRules.map((item) => item.id),
-    ["destination-display-only-beautify"],
+    ["destination-display-only-beautify", "destination-display-only-text"],
   );
   const destinationInspect = inspectTaskRegexReuse(
     destinationBeautifySettings,
@@ -610,7 +611,9 @@ try {
   );
   assert.deepEqual(destinationBeautifyRule?.placementLabels, ["用户输入"]);
   assert.equal(destinationBeautifyRule?.promptReplaceAsEmpty, true);
-  assert.equal(destinationTextRule?.promptReplaceAsEmpty, false);
+  assert.equal(destinationBeautifyRule?.promptStageMode, "clear");
+  assert.equal(destinationTextRule?.promptReplaceAsEmpty, true);
+  assert.equal(destinationTextRule?.promptStageMode, "clear");
   setTestContext({
     extensionSettings: {
       regex: [

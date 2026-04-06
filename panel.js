@@ -3890,7 +3890,11 @@ function _renderRegexReuseRuleList(rules = [], emptyText = "无") {
       const flags = [
         rule.promptOnly ? "promptOnly" : "",
         rule.markdownOnly ? "markdownOnly" : "",
-        rule.promptReplaceAsEmpty ? "请求阶段按空字符串替换" : "",
+        rule.promptStageMode === "clear"
+          ? "请求阶段: 美化/展示 -> 清空"
+          : rule.promptStageMode === "replace"
+            ? "请求阶段: 正常替换"
+            : "请求阶段: 不参与",
         rule.reason ? `原因: ${rule.reason}` : "",
       ].filter(Boolean);
       const replaceText = rule.promptReplaceAsEmpty
@@ -3983,10 +3987,10 @@ function _buildRegexReusePopupContent(snapshot = {}) {
                     raw=${Number(source.rawRuleCount || 0)} / active=${Number(source.activeRuleCount || 0)}
                     ${source.reason ? `<br>${_escHtml(source.reason)}` : ""}
                   </div>
-                  <div class="bme-task-section-label">本来源当前生效规则</div>
-                  ${_renderRegexReuseRuleList(source.rules, "该来源当前没有进入任务链的复用规则")}
-                  <div class="bme-task-section-label">被跳过的规则</div>
-                  ${_renderRegexReuseRuleList(source.ignoredRules, "没有被额外跳过的规则")}
+                  <div class="bme-task-section-label">本来源规则总览</div>
+                  ${_renderRegexReuseRuleList(source.previewRules || source.rules, "该来源当前没有可展示的规则")}
+                  <div class="bme-task-section-label">未纳入最终任务链</div>
+                  ${_renderRegexReuseRuleList(source.ignoredRules, "没有额外被排除的规则")}
                 </details>
               `).join("")
             : `<div class="bme-task-empty">当前没有可展示的酒馆正则来源。</div>`
@@ -3996,7 +4000,7 @@ function _buildRegexReusePopupContent(snapshot = {}) {
       <div class="bme-config-card">
         <div class="bme-config-card-title">汇总后的复用规则</div>
         <div class="bme-config-card-subtitle">
-          这是经过来源开关、allowlist 和去重后，准备进入当前任务链的 Tavern 规则集合。
+          这是经过来源开关、allowlist 和去重后，进入 ST-BME 任务链的 Tavern 规则集合。展示/美化类规则在请求阶段会按空字符串替换。
         </div>
         ${_renderRegexReuseRuleList(activeRules, "当前没有复用到任何酒馆正则")}
       </div>
