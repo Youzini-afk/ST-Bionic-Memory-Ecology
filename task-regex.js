@@ -11,8 +11,7 @@ import {
   normalizeTaskRegexStages,
 } from "./prompt-profiles.js";
 
-const HTML_TAG_PATTERN =
-  /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
+const HTML_TAG_PATTERN = /<\/?[a-z][\w:-]*\b/i;
 const HTML_ATTR_PATTERN = /\b(?:style|class|id|href|src|data-)\s*=/i;
 const TAVERN_REGEX_PLACEMENT = Object.freeze({
   USER_INPUT: 1,
@@ -91,6 +90,20 @@ function normalizeRulePlacement(rawPlacement) {
     .filter((item) => Number.isFinite(item));
 }
 
+function derivePlacementLabelsFromSourceFlags(sourceFlags = {}) {
+  const labels = [];
+  if (sourceFlags.user) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.USER_INPUT]);
+  }
+  if (sourceFlags.assistant) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.AI_OUTPUT]);
+  }
+  if (sourceFlags.system && !sourceFlags.assistant) {
+    labels.push("系统/世界书");
+  }
+  return labels;
+}
+
 function isTavernRuleShape(raw = {}) {
   return (
     Array.isArray(raw?.placement) ||
@@ -140,20 +153,25 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
     raw?.source && typeof raw.source === "object" ? raw.source : null;
   const placement = normalizeRulePlacement(raw?.placement);
   const isTavernRule = isTavernRuleShape(raw);
+  const replaceString = String(
+    raw.replace_string ?? raw.replaceString ?? raw.replace ?? "",
+  );
+  const beautificationReplace = isBeautificationReplace(replaceString);
+  const sourceFlags = buildRuleSourceFlags(source, placement, isTavernRule);
 
   return {
     id: String(raw.id || `${fallbackSource}-${index + 1}`),
     scriptName: String(raw.script_name || raw.scriptName || ""),
     enabled: raw.enabled !== false && raw.disabled !== true,
     findRegex: String(raw.find_regex || raw.findRegex || raw.find || "").trim(),
-    replaceString: String(
-      raw.replace_string ?? raw.replaceString ?? raw.replace ?? "",
-    ),
+    replaceString,
     trimStrings: normalizeTrimStrings(raw.trim_strings ?? raw.trimStrings),
-    sourceFlags: buildRuleSourceFlags(source, placement, isTavernRule),
+    sourceFlags,
     destinationFlags: {
       prompt: destination
-        ? Boolean(destination.prompt)
+        ? isTavernRule && beautificationReplace
+          ? true
+          : Boolean(destination.prompt)
         : isTavernRule && raw.markdownOnly === true
           ? true
           : raw.markdownOnly !== true,
@@ -161,6 +179,7 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
         ? Boolean(destination.display)
         : Boolean(raw.markdownOnly),
     },
+    beautificationReplace,
     promptOnly: Boolean(raw.promptOnly),
     markdownOnly: Boolean(raw.markdownOnly),
     placement,
@@ -378,9 +397,16 @@ function getPlacementLabels(placement = []) {
 
 function summarizeRule(rule, reason = "") {
   const normalized = rule && typeof rule === "object" ? rule : {};
-  const promptReplaceAsEmpty =
-    Boolean(normalized.markdownOnly) ||
-    isBeautificationReplace(normalized.replaceString);
+  const promptReplaceAsEmpty = Boolean(normalized.beautificationReplace);
+  const sourceFlags =
+    normalized.sourceFlags && typeof normalized.sourceFlags === "object"
+      ? normalized.sourceFlags
+      : {};
+  const placementLabels = getPlacementLabels(normalized.placement);
+  const effectivePlacementLabels =
+    placementLabels.length > 0
+      ? placementLabels
+      : derivePlacementLabelsFromSourceFlags(sourceFlags);
   return {
     id: String(normalized.id || ""),
     name: String(normalized.scriptName || normalized.id || ""),
@@ -393,8 +419,13 @@ function summarizeRule(rule, reason = "") {
     sourceType: String(normalized.sourceType || ""),
     promptOnly: Boolean(normalized.promptOnly),
     markdownOnly: Boolean(normalized.markdownOnly),
+    sourceFlags: {
+      user: sourceFlags.user !== false,
+      assistant: sourceFlags.assistant !== false,
+      system: sourceFlags.system !== false,
+    },
     placement: Array.isArray(normalized.placement) ? [...normalized.placement] : [],
-    placementLabels: getPlacementLabels(normalized.placement),
+    placementLabels: effectivePlacementLabels,
     minDepth:
       normalized.minDepth == null ? null : Number(normalized.minDepth),
     maxDepth:
@@ -645,7 +676,7 @@ function shouldApplyRuleForTaskContext(rule, stage = "") {
   const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
 
   if (rule.markdownOnly) {
-    return isPromptStage;
+    return isPromptStage && rule.beautificationReplace === true;
   }
 
   if (isFinalPromptStage) {
@@ -695,7 +726,7 @@ function applyOneRule(input, rule, stage = "") {
   let replacement = rule.replaceString || "";
   if (
     PROMPT_STAGES.has(stage) &&
-    (rule.markdownOnly || isBeautificationReplace(replacement))
+    rule.beautificationReplace
   ) {
     replacement = "";
   }

@@ -505,6 +505,7 @@ try {
   );
   assert.equal(markdownRule?.promptReplaceAsEmpty, true);
   assert.equal(markdownRule?.effectivePromptReplaceString, "");
+  assert.deepEqual(markdownRule?.placementLabels, ["用户输入"]);
   const markdownOnlyFinalPromptSettings = buildSettings({
     sources: {
       global: true,
@@ -541,6 +542,75 @@ try {
     markdownFinalDebug.entries[0].appliedRules.map((item) => item.id),
     ["markdown-final-strip"],
   );
+  const destinationBeautifySettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("destination-display-only-beautify", "/Decor/g", "<span>Decor</span>", {
+          placement: [],
+          source: {
+            user_input: true,
+            ai_output: false,
+          },
+          destination: {
+            prompt: false,
+            display: true,
+          },
+          markdownOnly: true,
+        }),
+        createTavernRule("destination-display-only-text", "/Plain/g", "TEXT", {
+          placement: [],
+          source: {
+            user_input: true,
+            ai_output: false,
+          },
+          destination: {
+            prompt: false,
+            display: true,
+          },
+          markdownOnly: true,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const destinationDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      destinationBeautifySettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor Plain",
+      destinationDebug,
+      "user",
+    ),
+    " Plain",
+  );
+  assert.deepEqual(
+    destinationDebug.entries[0].appliedRules.map((item) => item.id),
+    ["destination-display-only-beautify"],
+  );
+  const destinationInspect = inspectTaskRegexReuse(
+    destinationBeautifySettings,
+    "extract",
+  );
+  const destinationBeautifyRule = destinationInspect.activeRules.find(
+    (rule) => rule.id === "destination-display-only-beautify",
+  );
+  const destinationTextRule = destinationInspect.activeRules.find(
+    (rule) => rule.id === "destination-display-only-text",
+  );
+  assert.deepEqual(destinationBeautifyRule?.placementLabels, ["用户输入"]);
+  assert.equal(destinationBeautifyRule?.promptReplaceAsEmpty, true);
+  assert.equal(destinationTextRule?.promptReplaceAsEmpty, false);
   setTestContext({
     extensionSettings: {
       regex: [
