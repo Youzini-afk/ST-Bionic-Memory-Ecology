@@ -95,6 +95,46 @@ function normalizeKeyForPartition(value) {
     return String(value ?? '').trim().toLowerCase();
 }
 
+/**
+ * 将宿主侧「用户显示名」候选归一为分区用 Set，用于把误标为 character 的用户 POV 拉回用户区。
+ * @param {string|string[]|{name1?:string,userName?:string,personaName?:string,aliases?:string[]}|null|undefined} hints
+ * @returns {Set<string>}
+ */
+export function buildUserPovAliasNormalizedSet(hints) {
+    const set = new Set();
+    const add = (v) => {
+        const k = normalizeKeyForPartition(v);
+        if (k) set.add(k);
+    };
+    if (hints == null) return set;
+    if (typeof hints === 'string') {
+        add(hints);
+        return set;
+    }
+    if (Array.isArray(hints)) {
+        for (const item of hints) add(item);
+        return set;
+    }
+    if (typeof hints === 'object') {
+        add(hints.name1);
+        add(hints.userName);
+        add(hints.personaName);
+        if (Array.isArray(hints.aliases)) {
+            for (const a of hints.aliases) add(a);
+        }
+    }
+    return set;
+}
+
+function scopeMatchesHostUserAliases(scope, aliasSet) {
+    if (!(aliasSet instanceof Set) || aliasSet.size === 0) return false;
+    const nameKey = normalizeKeyForPartition(scope.ownerName);
+    const idKey = normalizeKeyForPartition(scope.ownerId);
+    if (nameKey && aliasSet.has(nameKey)) return true;
+    if (idKey && aliasSet.has(idKey)) return true;
+    return false;
+}
+
 function characterPovLabelFromNodes(arr) {
     if (!arr?.length) return '·';
     for (const n of arr) {
@@ -108,16 +148,24 @@ function characterPovLabelFromNodes(arr) {
     return '·';
 }
 
-function partitionNodesByScope(nodes) {
+function partitionNodesByScope(nodes, userPovAliasSet = null) {
     const objective = [];
     const userPov = [];
     const charMap = new Map();
+    const aliasSet =
+        userPovAliasSet instanceof Set ? userPovAliasSet : new Set();
 
     for (const node of nodes) {
         const scope = normalizeMemoryScope(node.raw?.scope);
         if (scope.layer !== 'pov') {
             objective.push(node);
             node.regionKey = 'objective';
+            continue;
+        }
+        // 优先：宿主用户显示名与 ownerName/ownerId 一致时一律归用户 POV（修正提取阶段误标 character）
+        if (scopeMatchesHostUserAliases(scope, aliasSet)) {
+            userPov.push(node);
+            node.regionKey = 'user';
             continue;
         }
         if (scope.ownerType === 'user') {
@@ -166,6 +214,9 @@ export class GraphRenderer {
         this.colors = getNodeColors(themeName);
         this.themeName = themeName;
         this.config = { ...DEFAULT_LAYOUT_CONFIG, ...fromForce, ...layoutOverride };
+        this._userPovAliasSet = buildUserPovAliasNormalizedSet(
+            isLegacy ? null : options?.userPovAliases,
+        );
 
         this._regionPanels = [];
         this._lastGraph = null;
@@ -200,10 +251,19 @@ export class GraphRenderer {
      * 加载图谱数据
      * @param {object} graph - 完整的 graph state
      */
-    loadGraph(graph) {
+    /**
+     * @param {object} graph
+     * @param {{ userPovAliases?: string|string[]|object }} [layoutHints]
+     */
+    loadGraph(graph, layoutHints = {}) {
         const prevSelectedId = this.selectedNode?.id || null;
         this.nodeMap.clear();
         this._lastGraph = graph;
+        if (layoutHints && Object.prototype.hasOwnProperty.call(layoutHints, 'userPovAliases')) {
+            this._userPovAliasSet = buildUserPovAliasNormalizedSet(
+                layoutHints.userPovAliases,
+            );
+        }
 
         const dpr = window.devicePixelRatio || 1;
         const W = this.canvas.width / dpr;
@@ -239,7 +299,7 @@ export class GraphRenderer {
                 relation: e.relation || 'related',
             }));
 
-        const parts = partitionNodesByScope(this.nodes);
+        const parts = partitionNodesByScope(this.nodes, this._userPovAliasSet);
         this._regionPanels = this._computeRegionPanels(W, H, parts);
         this._layoutAllPartitions(parts);
         this._simulateNeuralWithinRegions(this.config.neuralIterations);

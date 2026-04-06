@@ -1,6 +1,7 @@
 // ST-BME: 操控面板交互逻辑
 
 import { callGenericPopup, POPUP_TYPE } from "../../../popup.js";
+import { getContext } from "../../../extensions.js";
 import { renderTemplateAsync } from "../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "./node-labels.js";
@@ -672,15 +673,19 @@ export function openPanel() {
   const settings = _getSettings?.() || {};
   const themeName = settings.panelTheme || "crimson";
 
+  const graphOpts = {
+    theme: themeName,
+    userPovAliases: _hostUserPovAliasHintsForGraph(),
+  };
   const canvas = document.getElementById("bme-graph-canvas");
   if (canvas && !graphRenderer && !isMobile) {
-    graphRenderer = new GraphRenderer(canvas, themeName);
+    graphRenderer = new GraphRenderer(canvas, graphOpts);
     graphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
 
   const mobileCanvas = document.getElementById("bme-mobile-graph-canvas");
   if (mobileCanvas && !mobileGraphRenderer && isMobile) {
-    mobileGraphRenderer = new GraphRenderer(mobileCanvas, themeName);
+    mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
     mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
 
@@ -1203,11 +1208,26 @@ async function _refreshInjectionPreview() {
 
 // ==================== 图谱 ====================
 
+/** SillyTavern 用户显示名（name1），用于图谱分区：误标为角色的用户 POV 强制归用户区 */
+function _hostUserPovAliasHintsForGraph() {
+  try {
+    const ctx = typeof getContext === "function" ? getContext() : null;
+    const out = [];
+    if (ctx?.name1 && String(ctx.name1).trim()) {
+      out.push(String(ctx.name1).trim());
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function _refreshGraph() {
   const graph = _getGraph?.();
   if (!graph) return;
-  graphRenderer?.loadGraph(graph);
-  mobileGraphRenderer?.loadGraph(graph);
+  const hints = { userPovAliases: _hostUserPovAliasHintsForGraph() };
+  graphRenderer?.loadGraph(graph, hints);
+  mobileGraphRenderer?.loadGraph(graph, hints);
 }
 
 function _buildLegend() {
