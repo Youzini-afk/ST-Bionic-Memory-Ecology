@@ -1338,12 +1338,15 @@
   color: var(--bme-on-surface) !important;
   cursor: pointer;
   padding-right: 36px;
+  /* 影响原生下拉列表用亮色还是暗色绘制（否则在浅色面板下 option 可能出现黑底） */
+  color-scheme: dark;
 }
 
 :root[data-bme-color-scheme="light"]
   #st-bme-panel
   :is(select.bme-config-input, select.bme-filter-select, select.bme-task-builtin-select) {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") !important;
+  color-scheme: light;
 }
 
 #st-bme-panel select.bme-config-input option,
@@ -1351,6 +1354,31 @@
 #st-bme-panel select.bme-task-builtin-select option {
   background-color: var(--bme-surface-container);
   color: var(--bme-on-surface);
+}
+
+/* 原生 option 在部分浏览器/系统上不用 CSS 变量；亮色主题用实色保证每项都是浅底深字 */
+:root[data-bme-color-scheme="light"] #st-bme-panel select option {
+  background-color: #ffffff !important;
+  color: #1c1917 !important;
+}
+
+:root[data-bme-color-scheme="light"] #st-bme-panel select option:checked,
+:root[data-bme-color-scheme="light"] #st-bme-panel select option:hover,
+:root[data-bme-color-scheme="light"] #st-bme-panel select option:focus {
+  background-color: #e7e5e4 !important;
+  color: #1c1917 !important;
+}
+
+:root[data-bme-color-scheme="dark"] #st-bme-panel select option {
+  background-color: #2a2a2d !important;
+  color: #e4e1e6 !important;
+}
+
+:root[data-bme-color-scheme="dark"] #st-bme-panel select option:checked,
+:root[data-bme-color-scheme="dark"] #st-bme-panel select option:hover,
+:root[data-bme-color-scheme="dark"] #st-bme-panel select option:focus {
+  background-color: #3d3d42 !important;
+  color: #f4f4f5 !important;
 }
 
 #st-bme-panel input.bme-config-input:-webkit-autofill,
