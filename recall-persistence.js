@@ -134,11 +134,13 @@ export function resolveGenerationTargetUserMessageIndex(
 
   const normalizedType = String(generationType || "normal").trim() || "normal";
 
+  // normal：取「最后一条非系统用户楼层」。若直接 return 末条非 user（常见为刚追加的助手回合），
+  // 会得到 null，导致持久化无法回绑到本轮 user，`hasRecordForLatest` 长期为 false。
   if (normalizedType === "normal") {
     for (let index = chat.length - 1; index >= 0; index--) {
       const message = chat[index];
       if (message?.is_system) continue;
-      return message?.is_user ? index : null;
+      if (message?.is_user) return index;
     }
     return null;
   }

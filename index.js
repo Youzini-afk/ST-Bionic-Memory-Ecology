@@ -2848,8 +2848,9 @@ function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
         summary.status === "missing_message_anchor") &&
       attemptIndex < retryDelays.length - 1;
 
-    const shouldWatchForRepaint =
-      summary.status === "rendered" && summary.renderedCount > 0;
+    // 勿在「已成功渲染」时长期挂 MutationObserver：#chat 上 class/流式更新会疯狂触发
+    // runAttempt，造成满屏刷新与日志；显式事件（USER_MESSAGE_RENDERED 等）仍会 schedule 刷新。
+    const shouldWatchForRepaint = false;
 
     if (!shouldRetryForPending && !shouldWatchForRepaint) {
       clearPersistedRecallMessageUiObserver();
