@@ -517,7 +517,7 @@ const defaultSettings = {
 
   // UI 面板
   noticeDisplayMode: "normal", // normal|compact
-  panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet
+  panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet|paperDawn|glacierSky
 };
 
 // ==================== 状态 ====================

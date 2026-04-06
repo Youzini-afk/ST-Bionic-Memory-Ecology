@@ -1,5 +1,5 @@
 // ST-BME: 主题配色系统
-// 4 套 CSS 变量主题，通过 data-bme-theme 属性切换
+// 多套 CSS 变量主题，通过 data-bme-theme 属性切换
 
 export const THEMES = {
     crimson: {
@@ -111,11 +111,70 @@ export const THEMES = {
         nodeSynopsis: '#ce93d8',
         nodeReflection: '#80deea',
     },
+    /** 亮色 · 晨光纸感（暖纸面 + 青绿主色 + 琥珀强调） */
+    paperDawn: {
+        name: '晨光纸感',
+        primary: '#0d9488',
+        primaryDim: 'rgba(13, 148, 136, 0.14)',
+        primaryGlow: 'rgba(13, 148, 136, 0.32)',
+        primaryText: '#0f766e',
+        secondary: '#d97706',
+        accent2: '#0284c7',
+        accent3: '#ea580c',
+        surface: '#f7f4ef',
+        surfaceContainer: '#fffcf7',
+        surfaceHigh: '#efeae2',
+        surfaceHighest: '#e2ddd4',
+        surfaceLow: '#faf8f5',
+        surfaceLowest: '#f0ebe4',
+        onSurface: '#1c1917',
+        onSurfaceDim: 'rgba(28, 25, 23, 0.62)',
+        border: 'rgba(28, 25, 23, 0.09)',
+        borderActive: 'rgba(13, 148, 136, 0.42)',
+        nodeCharacter: '#ea580c',
+        nodeEvent: '#0284c7',
+        nodeLocation: '#16a34a',
+        nodeThread: '#d97706',
+        nodeRule: '#7c3aed',
+        nodeSynopsis: '#0d9488',
+        nodeReflection: '#64748b',
+    },
+    /** 亮色 · 冰川晴空（冷灰底 + 蓝主色 + 青/紫辅色） */
+    glacierSky: {
+        name: '冰川晴空',
+        primary: '#2563eb',
+        primaryDim: 'rgba(37, 99, 235, 0.12)',
+        primaryGlow: 'rgba(37, 99, 235, 0.28)',
+        primaryText: '#1d4ed8',
+        secondary: '#0891b2',
+        accent2: '#7c3aed',
+        accent3: '#f59e0b',
+        surface: '#f8fafc',
+        surfaceContainer: '#ffffff',
+        surfaceHigh: '#e2e8f0',
+        surfaceHighest: '#cbd5e1',
+        surfaceLow: '#f1f5f9',
+        surfaceLowest: '#e2e8f0',
+        onSurface: '#0f172a',
+        onSurfaceDim: 'rgba(15, 23, 42, 0.62)',
+        border: 'rgba(15, 23, 42, 0.08)',
+        borderActive: 'rgba(37, 99, 235, 0.42)',
+        nodeCharacter: '#c026d3',
+        nodeEvent: '#0369a1',
+        nodeLocation: '#059669',
+        nodeThread: '#f59e0b',
+        nodeRule: '#7c3aed',
+        nodeSynopsis: '#2563eb',
+        nodeReflection: '#0891b2',
+    },
 };
+
+/** 使用亮色 color-scheme 的面板主题（原生 number/select 等控件配色） */
+export const LIGHT_PANEL_THEMES = new Set(['paperDawn', 'glacierSky']);
 
 /**
  * 将主题配色应用为 CSS 变量
- * @param {string} themeName - crimson | cyan | amber | violet
+ * @param {string} themeName - crimson | cyan | amber | violet | paperDawn | glacierSky
  * @param {HTMLElement} [root] - 目标元素，默认 document.documentElement
  */
 export function applyTheme(themeName, root = null) {
@@ -153,6 +212,10 @@ export function applyTheme(themeName, root = null) {
         el.style.setProperty(key, value);
     }
     el.setAttribute('data-bme-theme', themeName);
+    el.setAttribute(
+        'data-bme-color-scheme',
+        LIGHT_PANEL_THEMES.has(themeName) ? 'light' : 'dark',
+    );
 }
 
 /**
