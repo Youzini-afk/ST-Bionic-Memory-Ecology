@@ -96,31 +96,71 @@ function normalizeKeyForPartition(value) {
 }
 
 /**
+ * 宿主别名与 POV owner 比对：忽略大小写、多空格、常见中英文标点/符号差（NFKC）。
+ * 不用于 charMap 主键，仅用于「是否同一用户」的宽松匹配。
+ */
+function normalizeAliasMatchKey(value) {
+    let s = String(value ?? '');
+    if (typeof s.normalize === 'function') {
+        try {
+            s = s.normalize('NFKC');
+        } catch {
+            /* ignore */
+        }
+    }
+    s = s.trim().toLowerCase();
+    // 标点、间隔号、各类空白等统一成空格，再压成单空格
+    s = s.replace(
+        /[\s!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~\u00b7\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\u2000-\u206f\u2e00-\u2e7f]+/g,
+        ' ',
+    );
+    s = s.replace(/\s+/g, ' ').trim();
+    return s;
+}
+
+/** 同一名称的多种可比形式（兼容老数据只做了 trim+lower） */
+function collectAliasMatchVariants(raw) {
+    const variants = [];
+    const leg = normalizeKeyForPartition(raw);
+    if (leg) variants.push(leg);
+    const soft = normalizeAliasMatchKey(raw);
+    if (soft) {
+        variants.push(soft);
+        const compact = soft.replace(/\s/g, '');
+        if (compact && compact !== soft) variants.push(compact);
+    }
+    return variants;
+}
+
+function addAliasMatchVariantsToSet(set, raw) {
+    for (const k of collectAliasMatchVariants(raw)) {
+        if (k) set.add(k);
+    }
+}
+
+/**
  * 将宿主侧「用户显示名」候选归一为分区用 Set，用于把误标为 character 的用户 POV 拉回用户区。
  * @param {string|string[]|{name1?:string,userName?:string,personaName?:string,aliases?:string[]}|null|undefined} hints
  * @returns {Set<string>}
  */
 export function buildUserPovAliasNormalizedSet(hints) {
     const set = new Set();
-    const add = (v) => {
-        const k = normalizeKeyForPartition(v);
-        if (k) set.add(k);
-    };
     if (hints == null) return set;
+    const ingest = (v) => addAliasMatchVariantsToSet(set, v);
     if (typeof hints === 'string') {
-        add(hints);
+        ingest(hints);
         return set;
     }
     if (Array.isArray(hints)) {
-        for (const item of hints) add(item);
+        for (const item of hints) ingest(item);
         return set;
     }
     if (typeof hints === 'object') {
-        add(hints.name1);
-        add(hints.userName);
-        add(hints.personaName);
+        ingest(hints.name1);
+        ingest(hints.userName);
+        ingest(hints.personaName);
         if (Array.isArray(hints.aliases)) {
-            for (const a of hints.aliases) add(a);
+            for (const a of hints.aliases) ingest(a);
         }
     }
     return set;
@@ -128,10 +168,11 @@ export function buildUserPovAliasNormalizedSet(hints) {
 
 function scopeMatchesHostUserAliases(scope, aliasSet) {
     if (!(aliasSet instanceof Set) || aliasSet.size === 0) return false;
-    const nameKey = normalizeKeyForPartition(scope.ownerName);
-    const idKey = normalizeKeyForPartition(scope.ownerId);
-    if (nameKey && aliasSet.has(nameKey)) return true;
-    if (idKey && aliasSet.has(idKey)) return true;
+    for (const field of [scope.ownerName, scope.ownerId]) {
+        for (const k of collectAliasMatchVariants(field)) {
+            if (k && aliasSet.has(k)) return true;
+        }
+    }
     return false;
 }
 
