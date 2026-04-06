@@ -236,6 +236,7 @@ function createBatchStageHarness() {
       result: null,
       extractionCount: 0,
       currentGraph: null,
+      extractionStatuses: [],
       consolidateMemories: async () => {},
       generateSynopsis: async () => {},
       generateReflection: async () => {},
@@ -271,6 +272,9 @@ function createBatchStageHarness() {
       pushBatchStageArtifact,
       finalizeBatchStatus,
       createUiStatus,
+      setLastExtractionStatus(...args) {
+        context.extractionStatuses.push(args);
+      },
     };
     vm.createContext(context);
     vm.runInContext(
@@ -2602,6 +2606,73 @@ async function testBatchStatusSemanticFailureDoesNotHideCoreSuccess() {
   assert.equal(effects.batchStatus.outcome, "failed");
   assert.equal(effects.batchStatus.completed, true);
   assert.match(effects.batchStatus.errors[0], /概要生成失败/);
+}
+
+async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  harness.consolidateMemories = async () => ({
+    merged: 1,
+    skipped: 0,
+    kept: 0,
+    evolved: 1,
+    connections: 0,
+    updates: 0,
+  });
+  harness.generateSynopsis = async () => ({ ok: true });
+  harness.generateReflection = async () => ({ ok: true });
+  harness.sleepCycle = () => ({ forgotten: 0 });
+  harness.inspectAutoCompressionCandidates = () => ({
+    hasCandidates: true,
+    reason: "",
+  });
+  harness.compressAll = async () => ({ created: 1, archived: 2 });
+  harness.syncVectorState = async () => ({
+    insertedHashes: ["hash-stage"],
+    stats: { pending: 0, indexed: 3 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [8, 8],
+    extractionCountBefore: 0,
+  });
+  await handleExtractionSuccess(
+    {
+      newNodeIds: ["node-stage"],
+    },
+    8,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 1,
+      enableSynopsis: true,
+      synopsisEveryN: 1,
+      enableReflection: true,
+      reflectEveryN: 1,
+      enableSleepCycle: true,
+      sleepEveryN: 1,
+      enableAutoCompression: true,
+      compressionEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  const statusTexts = harness.extractionStatuses.map((entry) => entry[0]);
+  assert.ok(statusTexts.includes("提取收尾中"));
+  assert.ok(statusTexts.includes("整合/进化中"));
+  assert.ok(statusTexts.includes("概要更新中"));
+  assert.ok(statusTexts.includes("反思生成中"));
+  assert.ok(statusTexts.includes("主动遗忘中"));
+  assert.ok(statusTexts.includes("自动压缩中"));
+  assert.ok(statusTexts.includes("向量同步中"));
 }
 
 async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
@@ -5474,6 +5545,7 @@ await testReverseJournalRollbackStateFormsReplayClosure();
 await testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairSet();
 await testBatchStatusStructuralPartialRemainsRecoverable();
 await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
+await testExtractionPostProcessStatusesExposeMaintenancePhases();
 await testAutoConsolidationRunsOnHighDuplicateRiskSingleNode();
 await testAutoConsolidationSkipsLowRiskSingleNode();
 await testAutoCompressionRunsOnlyOnConfiguredInterval();

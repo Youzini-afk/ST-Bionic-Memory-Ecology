@@ -1,7 +1,21 @@
 // ST-BME: 消息级召回卡片 UI
 // 纯 DOM 构建模块，不含模块级 mutable state
 
+import { getContext } from "../../../extensions.js";
 import { GraphRenderer } from "./graph-renderer.js";
+
+function _hostUserPovAliasHintsForRecallCanvas() {
+  try {
+    const ctx = typeof getContext === "function" ? getContext() : null;
+    const out = [];
+    if (ctx?.name1 && String(ctx.name1).trim()) {
+      out.push(String(ctx.name1).trim());
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 // ==================== 常量 ====================
 
@@ -297,6 +311,7 @@ export function createRecallCardElement({
       renderer = new GraphRenderer(canvas, {
         theme: themeName,
         forceConfig: RECALL_CARD_FORCE_CONFIG,
+        userPovAliases: _hostUserPovAliasHintsForRecallCanvas(),
         onNodeClick: (node) => {
           if (typeof activeCallbacks.onNodeClick === "function") {
             activeCallbacks.onNodeClick(messageIndex, node);
@@ -308,7 +323,9 @@ export function createRecallCardElement({
           }
         },
       });
-      renderer.loadGraph(resolvedSubGraph);
+      renderer.loadGraph(resolvedSubGraph, {
+        userPovAliases: _hostUserPovAliasHintsForRecallCanvas(),
+      });
     }
 
     // 元信息行
