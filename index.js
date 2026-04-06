@@ -1543,6 +1543,53 @@ function doesChatUserMessageMatchRecallCandidates(message, candidateHashes) {
   return candidateHashes.has(hashRecallInput(normalizedMessage));
 }
 
+function rebindRecallRecordToNewUserMessage(newUserMessageIndex) {
+  const chat = getContext()?.chat;
+  if (
+    !Array.isArray(chat) ||
+    !Number.isFinite(newUserMessageIndex) ||
+    !chat[newUserMessageIndex]?.is_user
+  ) {
+    return;
+  }
+  if (readPersistedRecallFromUserMessage(chat, newUserMessageIndex)) {
+    return;
+  }
+  const recentTransaction = findRecentGenerationRecallTransactionForChat();
+  const recallResult = getGenerationRecallTransactionResult(recentTransaction);
+  if (
+    !recallResult ||
+    recallResult.status !== "completed" ||
+    !recallResult.didRecall ||
+    !String(recallResult.injectionText || "").trim()
+  ) {
+    return;
+  }
+  const record = buildPersistedRecallRecord(
+    {
+      injectionText: String(recallResult.injectionText || "").trim(),
+      selectedNodeIds: recallResult.selectedNodeIds || [],
+      recallInput: String(
+        recallResult.recallInput || recallResult.userMessage || "",
+      ),
+      recallSource: String(recallResult.source || ""),
+      hookName: String(
+        recallResult.hookName ||
+          recentTransaction?.lastRecallMeta?.hookName ||
+          "",
+      ),
+      tokenEstimate: estimateTokens(
+        String(recallResult.injectionText || "").trim(),
+      ),
+      manuallyEdited: false,
+    },
+    null,
+  );
+  if (writePersistedRecallToUserMessage(chat, newUserMessageIndex, record)) {
+    triggerChatMetadataSave(getContext(), { immediate: false });
+  }
+}
+
 function resolveRecallPersistenceTargetUserMessageIndex(
   chat,
   {
@@ -9235,6 +9282,7 @@ function onMessageSent(messageId) {
       getContext,
       isTrivialUserInput,
       recordRecallSentUserMessage,
+      rebindRecallRecordToNewUserMessage,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     },
     messageId,
