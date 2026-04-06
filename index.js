@@ -7685,12 +7685,27 @@ async function handleExtractionSuccess(
     typeof recordMaintenanceAction === "function"
       ? recordMaintenanceAction
       : () => null;
+  const updateExtractionPostProcessStatus = (
+    text,
+    meta,
+    { noticeMarquee = false } = {},
+  ) => {
+    if (typeof setLastExtractionStatus !== "function") return;
+    setLastExtractionStatus(text, meta, "running", {
+      syncRuntime: true,
+      noticeMarquee,
+    });
+  };
   throwIfAborted(signal, "提取已终止");
   extractionCount++;
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
   updateLastExtractedItems(result.newNodeIds || []);
   setBatchStageOutcome(status, "core", "success");
+  updateExtractionPostProcessStatus(
+    "提取收尾中",
+    `已抽取 ${newNodeCount} 个新节点，正在处理后续阶段`,
+  );
 
   if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
     let consolidationAnalysis = null;
@@ -7702,6 +7717,10 @@ async function handleExtractionSuccess(
       ),
     );
     if (newNodeCount < minNewNodes) {
+      updateExtractionPostProcessStatus(
+        "整合判定中",
+        `本批新增 ${newNodeCount} 个节点，正在检查是否需要自动整合/进化`,
+      );
       consolidationAnalysis = await analyzeConsolidationGate({
         graph: currentGraph,
         newNodeIds: result.newNodeIds,
@@ -7729,6 +7748,10 @@ async function handleExtractionSuccess(
       pushBatchStageArtifact(status, "structural", "consolidation-skipped");
     } else {
       try {
+        updateExtractionPostProcessStatus(
+          "整合/进化中",
+          String(gate.reason || "").trim() || "正在自动整合新旧记忆",
+        );
         const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
         const consolidationResult = await consolidateMemories({
           graph: currentGraph,
@@ -7772,6 +7795,10 @@ async function handleExtractionSuccess(
     extractionCount % settings.synopsisEveryN === 0
   ) {
     try {
+      updateExtractionPostProcessStatus(
+        "概要更新中",
+        `第 ${extractionCount} 次提取，正在生成全局概要`,
+      );
       await generateSynopsis({
         graph: currentGraph,
         schema: getSchema(),
@@ -7799,6 +7826,10 @@ async function handleExtractionSuccess(
     extractionCount % settings.reflectEveryN === 0
   ) {
     try {
+      updateExtractionPostProcessStatus(
+        "反思生成中",
+        `第 ${extractionCount} 次提取，正在生成长期反思`,
+      );
       await generateReflection({
         graph: currentGraph,
         currentSeq: endIdx,
@@ -7825,6 +7856,10 @@ async function handleExtractionSuccess(
     extractionCount % settings.sleepEveryN === 0
   ) {
     try {
+      updateExtractionPostProcessStatus(
+        "主动遗忘中",
+        `第 ${extractionCount} 次提取，正在归档低价值记忆`,
+      );
       const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
       const sleepResult = sleepCycle(currentGraph, settings);
       if ((sleepResult?.forgotten || 0) > 0) {
@@ -7872,6 +7907,10 @@ async function handleExtractionSuccess(
           "已到自动压缩周期，但当前没有达到内部压缩阈值的候选组";
         pushBatchStageArtifact(status, "structural", "compression-skipped");
       } else {
+        updateExtractionPostProcessStatus(
+          "自动压缩中",
+          `已到第 ${extractionCount} 次提取周期，正在压缩层级记忆`,
+        );
         status.autoCompressionSkippedReason = "";
         const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
         const compressionResult = await compressAll(
@@ -7916,6 +7955,10 @@ async function handleExtractionSuccess(
 
   let vectorSync = null;
   try {
+    updateExtractionPostProcessStatus(
+      "向量同步中",
+      "正在同步本批提取后的向量索引",
+    );
     vectorSync = await syncVectorState({ signal });
   } catch (error) {
     if (isAbortError(error)) throw error;
