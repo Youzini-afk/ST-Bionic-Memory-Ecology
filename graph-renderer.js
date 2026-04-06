@@ -55,12 +55,23 @@ function layoutKeysFromForceConfig(fc) {
 }
 
 function roundRectPath(ctx, x, y, w, h, r) {
-    const radius = Math.min(r, w / 2, h / 2);
+    const W = Math.max(0, Number(w) || 0);
+    const H = Math.max(0, Number(h) || 0);
+    const rr = Math.max(0, Number(r) || 0);
+    const radius = Math.min(rr, W / 2, H / 2);
+    if (W < 1 || H < 1) {
+        ctx.rect(x, y, Math.max(1, W), Math.max(1, H));
+        return;
+    }
+    if (radius < 1e-6) {
+        ctx.rect(x, y, W, H);
+        return;
+    }
     ctx.moveTo(x + radius, y);
-    ctx.arcTo(x + w, y, x + w, y + h, radius);
-    ctx.arcTo(x + w, y + h, x, y + h, radius);
-    ctx.arcTo(x, y + h, x, y, radius);
-    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.arcTo(x + W, y, x + W, y + H, radius);
+    ctx.arcTo(x + W, y + H, x, y + H, radius);
+    ctx.arcTo(x, y + H, x, y, radius);
+    ctx.arcTo(x, y, x + W, y, radius);
     ctx.closePath();
 }
 
@@ -272,8 +283,11 @@ export class GraphRenderer {
         const objectivePanel = {
             x: pad,
             y: pad + 6,
-            w: (hasRight ? splitX : W) - pad * 2 - (hasRight ? gutter / 2 : 0),
-            h: H - pad * 2 - 6,
+            w: Math.max(
+                0,
+                (hasRight ? splitX : W) - pad * 2 - (hasRight ? gutter / 2 : 0),
+            ),
+            h: Math.max(0, H - pad * 2 - 6),
             label: '客观层',
             tint: 'rgba(26, 35, 50, 0.42)',
             key: 'objective',
@@ -283,15 +297,15 @@ export class GraphRenderer {
         const innerObjective = {
             x: objectivePanel.x + 10,
             y: objectivePanel.y + topPad,
-            w: objectivePanel.w - 20,
-            h: objectivePanel.h - topPad - 10,
+            w: Math.max(1, objectivePanel.w - 20),
+            h: Math.max(1, objectivePanel.h - topPad - 10),
         };
         for (const n of objective) n.regionRect = innerObjective;
 
         if (!hasRight) return panels;
 
         const rightX = splitX + gutter / 2;
-        const rightW = W - pad - rightX;
+        const rightW = Math.max(0, W - pad - rightX);
         const yBottom = H - pad;
         let yTop = pad + 6;
 
@@ -315,8 +329,8 @@ export class GraphRenderer {
             const innerU = {
                 x: rightX + 10,
                 y: yTop + topPad,
-                w: rightW - 20,
-                h: fullH - topPad - 8,
+                w: Math.max(1, rightW - 20),
+                h: Math.max(1, fullH - topPad - 8),
             };
             for (const n of userPov) n.regionRect = innerU;
             return panels;
@@ -349,8 +363,8 @@ export class GraphRenderer {
             const inner = {
                 x: rightX + 10,
                 y: yc + topPad,
-                w: rightW - 20,
-                h: ph - topPad - 8,
+                w: Math.max(1, rightW - 20),
+                h: Math.max(1, ph - topPad - 8),
             };
             for (const n of arr) n.regionRect = inner;
             yc += ph + gap;
@@ -370,8 +384,8 @@ export class GraphRenderer {
             const innerU = {
                 x: rightX + 10,
                 y: uy + topPad,
-                w: rightW - 20,
-                h: userStripH - topPad - 8,
+                w: Math.max(1, rightW - 20),
+                h: Math.max(1, userStripH - topPad - 8),
             };
             for (const n of userPov) n.regionRect = innerU;
         }
@@ -536,8 +550,11 @@ export class GraphRenderer {
 
     _drawRegionPanels(ctx) {
         for (const p of this._regionPanels) {
+            const pw = Number(p.w) || 0;
+            const ph = Number(p.h) || 0;
+            if (pw < 2 || ph < 2) continue;
             ctx.beginPath();
-            roundRectPath(ctx, p.x, p.y, p.w, p.h, 12);
+            roundRectPath(ctx, p.x, p.y, pw, ph, 12);
             ctx.fillStyle = p.tint;
             ctx.fill();
             ctx.strokeStyle = 'rgba(87, 199, 255, 0.12)';

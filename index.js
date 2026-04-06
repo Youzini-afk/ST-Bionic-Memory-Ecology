@@ -1791,6 +1791,9 @@ function ensurePersistedRecallRecordForGeneration({
     },
   );
 
+  // #region agent log
+  {fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:ensurePersistedRecallRecordForGeneration',message:'target resolved',data:{targetUserMessageIndex,chatLen:chat.length,isUser:chat[targetUserMessageIndex]?.is_user,generationType,hookName:String(hookName||''),injectionTextLen:injectionText?.length||0},timestamp:Date.now()})}).catch(()=>{});}
+  // #endregion
   if (
     !Number.isFinite(targetUserMessageIndex) ||
     !chat[targetUserMessageIndex]?.is_user
@@ -2547,6 +2550,9 @@ function refreshPersistedRecallMessageUi() {
     skippedNonUserIndices: [],
   };
 
+  // #region agent log
+  {const _latestUserIdx=chat.reduce((a,m,i)=>m?.is_user?i:a,-1);const _domKeys=[...messageElementMap.keys()];const _hasRecord=_latestUserIdx>=0&&!!readPersistedRecallFromUserMessage(chat,_latestUserIdx);const _hasDom=_latestUserIdx>=0&&messageElementMap.has(_latestUserIdx);fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:loop-start',message:'refresh loop entry',data:{chatLen:chat.length,domElementCount:_domKeys.length,domKeys:_domKeys.slice(-6),latestUserIdx:_latestUserIdx,hasRecordForLatest:_hasRecord,hasDomForLatest:_hasDom},timestamp:Date.now()})}).catch(()=>{});}
+  // #endregion
   for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
     const message = chat[messageIndex];
     const messageElement = messageElementMap.get(messageIndex) || null;
@@ -2578,6 +2584,9 @@ function refreshPersistedRecallMessageUi() {
     }
 
     const record = readPersistedRecallFromUserMessage(chat, messageIndex);
+    // #region agent log
+    if(message?.is_user){const _isLatestUser=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser){fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:latest-user-check',message:'latest user msg detail',data:{messageIndex,hasRecord:!!record?.injectionText,hasDom:!!messageElement,hasExistingCard:!!existingCard,domMesid:messageElement?.getAttribute?.('mesid'),domDataMesid:messageElement?.getAttribute?.('data-mesid'),domClasses:messageElement?.className?.slice(0,80)||''},timestamp:Date.now()})}).catch(()=>{});}}
+    // #endregion
     if (!record?.injectionText) {
       if (messageElement) {
         restoreRecallCardUserInputDisplay(messageElement);
@@ -2645,6 +2654,9 @@ function refreshPersistedRecallMessageUi() {
       recallCardUserInputDisplayMode,
     );
     summary.renderedCount += 1;
+    // #region agent log
+    {const _isLatestUser2=messageIndex===chat.reduce((a,m,i)=>m?.is_user?i:a,-1);if(_isLatestUser2){fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:card-mounted',message:'card mounted for latest user',data:{messageIndex,hadExistingCard:!!currentCard,cardInDom:!!messageElement.querySelector('.bme-recall-card')},timestamp:Date.now()})}).catch(()=>{});}}
+    // #endregion
   }
 
   summary.status = summarizePersistedRecallRefreshStatus(summary);
@@ -2661,6 +2673,9 @@ function refreshPersistedRecallMessageUi() {
       `rendered:${summary.renderedCount}`,
     );
   }
+  // #region agent log
+  fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:refreshPersistedRecallMessageUi:summary',message:'refresh complete',data:{status:summary.status,renderedCount:summary.renderedCount,persistedRecordCount:summary.persistedRecordCount,waitingDom:summary.waitingMessageIndices,anchorFail:summary.anchorFailureIndices},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   return summary;
 }
 
@@ -2752,6 +2767,9 @@ function armPersistedRecallMessageUiObserver(sessionId, runAttempt) {
 }
 
 function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
+  // #region agent log
+  {const _prevSession=persistedRecallUiRefreshSession;const _caller=new Error().stack?.split('\n')?.[2]?.trim()?.slice(0,120)||'';fetch('http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'b6ba57'},body:JSON.stringify({sessionId:'b6ba57',location:'index.js:schedulePersistedRecallMessageUiRefresh',message:'schedule called',data:{delayMs,prevSession:_prevSession,nextSession:_prevSession+1,caller:_caller},timestamp:Date.now()})}).catch(()=>{});}
+  // #endregion
   clearTimeout(persistedRecallUiRefreshTimer);
   clearPersistedRecallMessageUiObserver();
 
