@@ -1,5 +1,3 @@
-import { debugWarn } from "./debug-logging.js";
-
 function getTimerApi(runtime) {
   const rawSetTimeout =
     typeof runtime?.setTimeout === "function"
@@ -40,14 +38,8 @@ export function registerBeforeCombinePromptsController(runtime, listener) {
 export function registerGenerationAfterCommandsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   const eventName = runtime.eventTypes.GENERATION_AFTER_COMMANDS;
-  debugWarn("[ST-BME:DIAG] Registering GENERATION_AFTER_COMMANDS:", {
-    eventName,
-    hasMakeFirst: typeof makeFirst === "function",
-    hasListener: typeof listener === "function",
-  });
   if (typeof makeFirst === "function") {
     const cleanup = makeFirst(eventName, listener);
-    debugWarn("[ST-BME:DIAG] Registered via makeFirst, cleanup:", typeof cleanup);
     return cleanup;
   }
 
@@ -412,9 +404,7 @@ export async function onGenerationAfterCommandsController(
   params = {},
   dryRun = false,
 ) {
-  debugWarn("[ST-BME:DIAG] GENERATION_AFTER_COMMANDS fired", { type, dryRun, paramsKeys: Object.keys(params || {}) });
   if (dryRun) {
-    debugWarn("[ST-BME:DIAG] EXIT: dryRun=true");
     return;
   }
 
@@ -424,11 +414,9 @@ export async function onGenerationAfterCommandsController(
       ? runtime.consumeHostGenerationInputSnapshot?.({ preserve: true }) ||
         runtime.consumeHostGenerationInputSnapshot?.()
       : null;
-  debugWarn("[ST-BME:DIAG] frozenInputSnapshot:", frozenInputSnapshot?.text ? `"${frozenInputSnapshot.text.slice(0,50)}"` : "(empty)", "fresh:", !!frozenInputSnapshot?.at);
 
   const context = runtime.getContext();
   const chat = context?.chat;
-  debugWarn("[ST-BME:DIAG] chat length:", chat?.length, "last msg:", chat?.length ? { is_user: chat[chat.length-1]?.is_user, mes: (chat[chat.length-1]?.mes||"").slice(0,50) } : "(no chat)");
 
   const recallOptions = runtime.buildGenerationAfterCommandsRecallInput(
     type,
@@ -439,14 +427,11 @@ export async function onGenerationAfterCommandsController(
     chat,
   );
   if (!recallOptions) {
-    debugWarn("[ST-BME:DIAG] EXIT: buildGenerationAfterCommandsRecallInput returned null");
     return;
   }
   if (recallOptions?.__trivialSkip) {
-    debugWarn("[ST-BME:DIAG] EXIT: trivial-input-skip");
     return;
   }
-  debugWarn("[ST-BME:DIAG] recallOptions:", { generationType: recallOptions.generationType, overrideUserMessage: recallOptions.overrideUserMessage?.slice(0,50), overrideSource: recallOptions.overrideSource, targetIdx: recallOptions.targetUserMessageIndex });
 
   const recallContext = runtime.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
@@ -454,10 +439,8 @@ export async function onGenerationAfterCommandsController(
     recallOptions,
   });
   if (!recallContext.shouldRun && !recallContext.transaction) {
-    debugWarn("[ST-BME:DIAG] EXIT: shouldRun=false, no transaction. guardReason:", recallContext.guardReason);
     return;
   }
-  debugWarn("[ST-BME:DIAG] recallContext:", { shouldRun: recallContext.shouldRun, guardReason: recallContext.guardReason, transactionId: recallContext.transaction?.id });
 
   const runtimeRecallOptions =
     recallContext.recallOptions || recallOptions || {};
@@ -470,7 +453,6 @@ export async function onGenerationAfterCommandsController(
   let recallResult = runtime.getGenerationRecallTransactionResult?.(
     recallContext.transaction,
   );
-  debugWarn("[ST-BME:DIAG] deliveryMode:", deliveryMode, "shouldRun:", recallContext.shouldRun);
 
   if (recallContext.shouldRun) {
     runtime.markGenerationRecallTransactionHookState(
@@ -481,7 +463,6 @@ export async function onGenerationAfterCommandsController(
     if (deliveryMode === "deferred") {
       runtime.clearLiveRecallInjectionPromptForRewrite?.();
     }
-    debugWarn("[ST-BME:DIAG] >>> Starting runRecall...");
     recallResult = await runtime.runRecall({
       ...runtimeRecallOptions,
       deliveryMode,
@@ -489,7 +470,6 @@ export async function onGenerationAfterCommandsController(
       hookName: recallContext.hookName,
       signal: params?.signal,
     });
-    debugWarn("[ST-BME:DIAG] <<< runRecall finished:", { status: recallResult?.status, ok: recallResult?.ok, reason: recallResult?.reason, injectionText: recallResult?.injectionText?.slice(0,80) });
     runtime.storeGenerationRecallTransactionResult?.(
       recallContext.transaction,
       recallResult,
@@ -522,7 +502,6 @@ export async function onGenerationAfterCommandsController(
     // 上面的兜底补写会把 fresh recall 绑定回最终 user 楼层。
     // 这里再补一次 UI 刷新，避免需要等到消息编辑/历史恢复后才看到 Recall Card。
     runtime.refreshPersistedRecallMessageUi?.();
-    debugWarn("[ST-BME:DIAG] DONE: immediate mode, injection via setExtensionPrompt in runRecall");
     return recallResult;
   }
 
@@ -556,7 +535,6 @@ export async function onBeforeCombinePromptsController(
     frozenInputSnapshot,
   });
   if (normalInput?.__trivialSkip) {
-    debugWarn("[ST-BME:DIAG] EXIT: trivial-input-skip");
     return {
       skipped: true,
       reason: `trivial:${normalInput.trivialReason || ""}`,
