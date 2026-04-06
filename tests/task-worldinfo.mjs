@@ -670,6 +670,18 @@ try {
     customInterpolatedPromptBuild.systemPrompt,
     /<status_current_variable>secret=true<\/status_current_variable>/,
   );
+  const customInterpolatedPayload = buildTaskLlmPayload(
+    customInterpolatedPromptBuild,
+    "unused fallback",
+  );
+  assert.equal(
+    customInterpolatedPayload.promptMessages.some((message) =>
+      /<status_current_variable>secret=true<\/status_current_variable>/.test(
+        message.content,
+      ),
+    ),
+    true,
+  );
 
   const noWorldInfoBlockSettings = {
     taskProfiles: {

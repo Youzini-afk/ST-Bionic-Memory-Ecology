@@ -238,6 +238,9 @@ function blockUsesWorldInfoContent(block = {}) {
 }
 
 function messageUsesWorldInfoContent(message = {}) {
+  if (message?.derivedFromWorldInfo === true) {
+    return true;
+  }
   if (usesWorldInfoSourceKey(message?.sourceKey)) {
     return true;
   }
@@ -618,6 +621,9 @@ function sanitizePromptMessages(
           injectionMode: String(
             sanitized.value?.injectionMode || message?.injectionMode || "",
           ),
+          derivedFromWorldInfo:
+            sanitized.value?.derivedFromWorldInfo === true ||
+            message?.derivedFromWorldInfo === true,
         },
       );
       return executionMessage;
@@ -1157,6 +1163,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     if (!block || block.enabled === false) continue;
 
     const role = normalizeRole(block.role);
+    const blockDerivedFromWorldInfo = blockUsesWorldInfoContent(block);
     let content = "";
 
     if (block.type === "legacyPrompt") {
@@ -1182,7 +1189,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       );
     }
 
-    const blockApplyMvu = !(isCustomFilter && blockUsesWorldInfoContent(block));
+    const blockApplyMvu = !(isCustomFilter && blockDerivedFromWorldInfo);
     const sanitizedBlockContent = sanitizeTaskPromptText(
       settings,
       taskType,
@@ -1229,6 +1236,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       order: Number.isFinite(Number(block.order))
         ? Number(block.order)
         : block._orderIndex,
+      derivedFromWorldInfo: blockDerivedFromWorldInfo,
       injectionMode: mode,
       delivery: resolveBlockDelivery(block),
       effectiveDelivery: resolveBlockDelivery(block),
@@ -1242,6 +1250,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       blockType: String(block.type || "custom"),
       sourceKey: String(block.sourceKey || ""),
       injectionMode: mode,
+      derivedFromWorldInfo: blockDerivedFromWorldInfo,
     });
     if (executionMessage) {
       executionMessages.push(executionMessage);
@@ -1265,9 +1274,29 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       assistantRoleBlockCount += 1;
     }
     if (mode === "prepend") {
-      customMessages.unshift({ role, content });
+      customMessages.unshift({
+        role,
+        content,
+        source: "profile-block",
+        blockId: String(block.id || ""),
+        blockName: String(block.name || ""),
+        blockType: String(block.type || "custom"),
+        sourceKey: String(block.sourceKey || ""),
+        injectionMode: mode,
+        derivedFromWorldInfo: blockDerivedFromWorldInfo,
+      });
     } else {
-      customMessages.push({ role, content });
+      customMessages.push({
+        role,
+        content,
+        source: "profile-block",
+        blockId: String(block.id || ""),
+        blockName: String(block.name || ""),
+        blockType: String(block.type || "custom"),
+        sourceKey: String(block.sourceKey || ""),
+        injectionMode: mode,
+        derivedFromWorldInfo: blockDerivedFromWorldInfo,
+      });
     }
   }
 
@@ -1436,6 +1465,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
             blockType: String(message.blockType || ""),
             sourceKey: String(message.sourceKey || ""),
             injectionMode: String(message.injectionMode || ""),
+            derivedFromWorldInfo: message.derivedFromWorldInfo === true,
           }),
         )
         .filter(Boolean)
