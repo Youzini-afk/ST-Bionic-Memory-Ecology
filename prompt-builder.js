@@ -1137,7 +1137,19 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
     content = sanitizedBlockContent.text;
 
-    if (!String(content || "").trim()) continue;
+    if (!String(content || "").trim()) {
+      if (role === "user" && String(block.content || "").trim()) {
+        console.warn(
+          `[ST-BME] buildTaskPrompt: user block "${block.name || block.id}" ` +
+            `content emptied during sanitization! ` +
+            `original length=${String(block.content || "").length}, ` +
+            `dropped=${sanitizedBlockContent.dropped}, ` +
+            `reasons=[${(sanitizedBlockContent.reasons || []).join(", ")}], ` +
+            `blockedHitCount=${sanitizedBlockContent.blockedHitCount}`,
+        );
+      }
+      continue;
+    }
 
     const mode = normalizeInjectionMode(block.injectionMode);
     renderedBlocks.push({
@@ -1361,6 +1373,39 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
   const hasUserMessage = executionMessages.some(
     (message) => message.role === "user",
   );
+  if (!hasUserMessage && rawExecutionMessages.length > 0) {
+    const userBlocksBefore = (promptBuild?.executionMessages || []).filter(
+      (m) => m?.role === "user",
+    );
+    const userBlocksAfterRaw = rawExecutionMessages.filter(
+      (m) => m?.role === "user",
+    );
+    const userBlocksAfterSanitize = executionMessages.filter(
+      (m) => m?.role === "user",
+    );
+    console.warn(
+      `[ST-BME] buildTaskLlmPayload fallback triggered: ` +
+        `user blocks in promptBuild=${userBlocksBefore.length}, ` +
+        `after recreate=${userBlocksAfterRaw.length}, ` +
+        `after sanitize=${userBlocksAfterSanitize.length}, ` +
+        `blockedContents count=${blockedContents.length}, ` +
+        `total executionMessages=${executionMessages.length}`,
+    );
+    if (userBlocksBefore.length > 0) {
+      for (const block of userBlocksBefore) {
+        console.warn(
+          `[ST-BME]   user block "${block.blockName || block.blockId}": ` +
+            `content length=${String(block.content || "").length}, ` +
+            `content preview="${String(block.content || "").slice(0, 80)}..."`,
+        );
+      }
+    }
+    if (blockedContents.length > 0) {
+      console.warn(
+        `[ST-BME]   blockedContents lengths: [${blockedContents.map((c) => String(c || "").length).join(", ")}]`,
+      );
+    }
+  }
   const sanitizedFallbackUserPrompt = sanitizeTaskPromptText(
     {},
     promptBuild?.debug?.taskType || "",
