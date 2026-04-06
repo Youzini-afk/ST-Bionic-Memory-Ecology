@@ -1074,20 +1074,21 @@ function _refreshMemoryBrowser() {
     li.className = "bme-memory-item";
     li.dataset.nodeId = String(node.id || "");
 
+    const card = document.createElement("div");
+    card.className = "bme-memory-card";
+
+    const head = document.createElement("div");
+    head.className = "bme-memory-card-head";
+
     const badge = document.createElement("span");
     badge.className = `bme-type-badge ${_safeCssToken(node.type)}`;
     badge.textContent = _typeLabel(node.type);
 
-    const scopeBadge = document.createElement("span");
-    scopeBadge.className = "bme-type-badge";
-    scopeBadge.textContent = buildScopeBadgeText(node.scope);
+    const scopeChip = document.createElement("span");
+    scopeChip.className = "bme-memory-scope-chip";
+    scopeChip.textContent = buildScopeBadgeText(node.scope);
 
-    const badgesWrap = document.createElement("div");
-    badgesWrap.className = "bme-memory-badges";
-    badgesWrap.append(badge, scopeBadge);
-
-    const body = document.createElement("div");
-    body.className = "bme-memory-body";
+    head.append(badge, scopeChip);
 
     const titleEl = document.createElement("div");
     titleEl.className = "bme-memory-name";
@@ -1097,39 +1098,43 @@ function _refreshMemoryBrowser() {
     snippetEl.className = "bme-memory-content";
     snippetEl.textContent = snippetText;
 
-    const meta = document.createElement("div");
-    meta.className = "bme-memory-meta";
+    const foot = document.createElement("div");
+    foot.className = "bme-memory-foot";
+
+    const stats = document.createElement("div");
+    stats.className = "bme-memory-stats";
 
     const impSpan = document.createElement("span");
-    impSpan.className = "bme-memory-metric";
+    impSpan.className = "bme-memory-stat-pill";
     impSpan.textContent = `重要度 ${_formatMemoryMetricNumber(node.importance, {
       fallback: 5,
       maxFrac: 2,
     })}`;
 
     const accSpan = document.createElement("span");
-    accSpan.className = "bme-memory-metric";
+    accSpan.className = "bme-memory-stat-pill";
     accSpan.textContent = `访问 ${_formatMemoryInt(node.accessCount, 0)}`;
 
     const seqSpan = document.createElement("span");
-    seqSpan.className = "bme-memory-metric";
+    seqSpan.className = "bme-memory-stat-pill";
     seqSpan.textContent = `序列 ${_formatMemoryInt(
       node.seqRange?.[1] ?? node.seq,
       0,
     )}`;
 
-    meta.append(impSpan, accSpan, seqSpan);
+    stats.append(impSpan, accSpan, seqSpan);
+    foot.appendChild(stats);
 
     const regionMeta = _buildScopeMetaText(node);
     if (regionMeta) {
-      const scopeSpan = document.createElement("span");
-      scopeSpan.className = "bme-memory-regionline";
-      scopeSpan.textContent = regionMeta;
-      meta.appendChild(scopeSpan);
+      const regionEl = document.createElement("div");
+      regionEl.className = "bme-memory-region";
+      regionEl.textContent = regionMeta;
+      foot.appendChild(regionEl);
     }
 
-    body.append(titleEl, snippetEl, meta);
-    li.append(badgesWrap, body);
+    card.append(head, titleEl, snippetEl, foot);
+    li.appendChild(card);
     fragment.appendChild(li);
   });
   listEl.replaceChildren(fragment);
