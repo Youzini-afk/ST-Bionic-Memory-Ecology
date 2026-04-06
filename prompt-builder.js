@@ -211,6 +211,39 @@ function createExecutionMessage(
   };
 }
 
+function isCustomWorldInfoFilterEnabled(settings = {}) {
+  return String(settings?.worldInfoFilterMode || "default").trim() === "custom";
+}
+
+function usesWorldInfoSourceKey(sourceKey = "") {
+  return [
+    "worldInfoBefore",
+    "worldInfoAfter",
+    "worldInfoBeforeEntries",
+    "worldInfoAfterEntries",
+    "worldInfoAtDepthEntries",
+    "activatedWorldInfoNames",
+    "taskAdditionalMessages",
+  ].includes(String(sourceKey || ""));
+}
+
+function blockUsesWorldInfoContent(block = {}) {
+  if (usesWorldInfoSourceKey(block?.sourceKey)) {
+    return true;
+  }
+  const content = String(block?.content || "");
+  return /\{\{\s*(worldInfoBefore|worldInfoAfter|worldInfoBeforeEntries|worldInfoAfterEntries|worldInfoAtDepthEntries|activatedWorldInfoNames|taskAdditionalMessages)\s*\}\}/.test(
+    content,
+  );
+}
+
+function messageUsesWorldInfoContent(message = {}) {
+  if (usesWorldInfoSourceKey(message?.sourceKey)) {
+    return true;
+  }
+  return String(message?.source || "") === "worldInfo-atDepth";
+}
+
 function stringifyInterpolatedValue(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -537,10 +570,13 @@ function sanitizePromptMessages(
     regexStage = "",
     debugState = null,
     regexCollector = null,
+    applyMvu = true,
   } = {},
 ) {
   return (Array.isArray(messages) ? messages : [])
     .map((message, index) => {
+      const messageApplyMvu =
+        typeof applyMvu === "function" ? applyMvu(message, index) : applyMvu;
       const sanitized = sanitizeStructuredPromptValue(
         settings,
         taskType,
@@ -554,6 +590,8 @@ function sanitizePromptMessages(
           role: message?.role || "system",
           debugState,
           regexCollector,
+          applyMvu: messageApplyMvu,
+          stripMvuContainers: messageApplyMvu,
         },
       );
       if (debugState && (sanitized.changed || sanitized.omit)) {
@@ -645,6 +683,7 @@ function sanitizeWorldInfoEntries(
   blockedContents = [],
   debugState = null,
   regexCollector = null,
+  { applyMvu = true } = {},
 ) {
   return (Array.isArray(entries) ? entries : [])
     .map((entry, index) => {
@@ -658,6 +697,7 @@ function sanitizeWorldInfoEntries(
           regexStage: "",
           role: entry?.role || "system",
           regexCollector,
+          applyMvu,
         },
       );
       debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
@@ -686,6 +726,7 @@ function sanitizeWorldInfoContext(
   debugState = null,
   regexCollector = null,
 ) {
+  const isCustomFilter = isCustomWorldInfoFilterEnabled(settings);
   const rawDebug =
     worldInfo?.debug && typeof worldInfo.debug === "object"
       ? worldInfo.debug
@@ -708,6 +749,7 @@ function sanitizeWorldInfoContext(
     runtimeBlockedContents,
     debugState,
     regexCollector,
+    { applyMvu: !isCustomFilter },
   );
   const afterEntries = sanitizeWorldInfoEntries(
     settings,
@@ -716,6 +758,7 @@ function sanitizeWorldInfoContext(
     runtimeBlockedContents,
     debugState,
     regexCollector,
+    { applyMvu: !isCustomFilter },
   );
   const atDepthEntries = sanitizeWorldInfoEntries(
     settings,
@@ -724,6 +767,7 @@ function sanitizeWorldInfoContext(
     runtimeBlockedContents,
     debugState,
     regexCollector,
+    { applyMvu: !isCustomFilter },
   );
   const additionalMessages = (Array.isArray(worldInfo?.additionalMessages)
     ? worldInfo.additionalMessages
@@ -740,6 +784,7 @@ function sanitizeWorldInfoContext(
           regexStage: "",
           role: message?.role || "system",
           regexCollector,
+          applyMvu: !isCustomFilter,
         },
       );
       debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
@@ -752,6 +797,8 @@ function sanitizeWorldInfoContext(
       return {
         ...message,
         content: sanitized.text,
+        source: String(message?.source || "worldInfo-atDepth"),
+        sourceKey: String(message?.sourceKey || "taskAdditionalMessages"),
       };
     })
     .filter(Boolean);
@@ -1012,6 +1059,7 @@ function extractWorldInfoChatMessages(context = {}) {
 }
 
 export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
+  const isCustomFilter = isCustomWorldInfoFilterEnabled(settings);
   const profile = getActiveTaskProfile(settings, taskType);
   const legacyPrompt = getLegacyPromptForTask(settings, taskType);
   const promptRegexInput = { entries: [] };
@@ -1134,6 +1182,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       );
     }
 
+    const blockApplyMvu = !(isCustomFilter && blockUsesWorldInfoContent(block));
     const sanitizedBlockContent = sanitizeTaskPromptText(
       settings,
       taskType,
@@ -1144,6 +1193,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         regexStage: "",
         role,
         regexCollector: promptRegexInput,
+        applyMvu: blockApplyMvu,
       },
     );
     mvuPromptDebug.worldInfoBlockedContentHits +=
@@ -1234,6 +1284,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       message.content,
       {
         source: "worldInfo-atDepth",
+        sourceKey: "taskAdditionalMessages",
       },
     );
     if (executionMessage) {
@@ -1366,6 +1417,12 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
   const runtimeMvu = promptBuild?.__mvuRuntime || {};
   const taskType = String(promptBuild?.debug?.taskType || "");
+  const isCustomFilter =
+    String(
+      promptBuild?.worldInfo?.debug?.customFilter?.mode ||
+        promptBuild?.worldInfoResolution?.debug?.customFilter?.mode ||
+        "default",
+    ).trim() === "custom";
   const blockedContents = Array.isArray(runtimeMvu?.blockedContents)
     ? runtimeMvu.blockedContents
     : [];
@@ -1390,6 +1447,8 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     {
       blockedContents,
       regexStage: "",
+      applyMvu: (message) =>
+        !(isCustomFilter && messageUsesWorldInfoContent(message)),
     },
   );
 
@@ -1451,6 +1510,8 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
           {
             blockedContents,
             regexStage: "",
+            applyMvu: (message) =>
+              !(isCustomFilter && messageUsesWorldInfoContent(message)),
           },
         );
 

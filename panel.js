@@ -1983,6 +1983,21 @@ function _refreshConfigTab() {
     "bme-setting-notice-display-mode",
     settings.noticeDisplayMode ?? "normal",
   );
+  _setInputValue(
+    "bme-setting-wi-filter-mode",
+    settings.worldInfoFilterMode || "default",
+  );
+  _setInputValue(
+    "bme-setting-wi-filter-keywords",
+    settings.worldInfoFilterCustomKeywords || "",
+  );
+  const wiFilterCustomSection = panelEl?.querySelector(
+    "#bme-wi-filter-custom-section",
+  );
+  if (wiFilterCustomSection) {
+    wiFilterCustomSection.style.display =
+      (settings.worldInfoFilterMode || "default") === "custom" ? "" : "none";
+  }
 
   _setInputValue("bme-setting-extract-every", settings.extractEvery ?? 1);
   _setInputValue(
@@ -2336,6 +2351,29 @@ function _bindConfigControls() {
       });
     });
     noticeDisplayModeEl.dataset.bmeBound = "true";
+  }
+  const wiFilterModeEl = document.getElementById("bme-setting-wi-filter-mode");
+  if (wiFilterModeEl && wiFilterModeEl.dataset.bmeBound !== "true") {
+    wiFilterModeEl.addEventListener("change", () => {
+      const nextValue = wiFilterModeEl.value || "default";
+      _patchSettings({ worldInfoFilterMode: nextValue });
+      const section = panelEl?.querySelector("#bme-wi-filter-custom-section");
+      if (section) {
+        section.style.display = nextValue === "custom" ? "" : "none";
+      }
+    });
+    wiFilterModeEl.dataset.bmeBound = "true";
+  }
+  const wiFilterKeywordsEl = document.getElementById(
+    "bme-setting-wi-filter-keywords",
+  );
+  if (wiFilterKeywordsEl && wiFilterKeywordsEl.dataset.bmeBound !== "true") {
+    wiFilterKeywordsEl.addEventListener("change", () => {
+      _patchSettings({
+        worldInfoFilterCustomKeywords: wiFilterKeywordsEl.value || "",
+      });
+    });
+    wiFilterKeywordsEl.dataset.bmeBound = "true";
   }
 
   bindNumber("bme-setting-extract-every", 1, 1, 50, (value) =>
