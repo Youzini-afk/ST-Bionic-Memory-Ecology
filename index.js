@@ -3237,6 +3237,10 @@ function getConfiguredTimeoutMs(settings = getSettings()) {
       })();
 }
 
+function getPlannerRecallTimeoutMs() {
+  return getConfiguredTimeoutMs(getSettings());
+}
+
 function getEmbeddingConfig(mode = null) {
   const settings = getSettings();
   return getVectorConfigFromSettings(
@@ -10570,9 +10574,10 @@ async function onReembedDirect() {
     await initEnaPlanner({
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      getPlannerRecallTimeoutMs,
       isTrivialUserInput,
       preparePlannerRecallHandoff,
-    runPlannerRecallForEna,
+      runPlannerRecallForEna,
     });
     debugLog("[ST-BME] Ena Planner module loaded");
   } catch (error) {

@@ -13,6 +13,13 @@ const _currentModuleUrl = import.meta.url;
 
 let _bmeRuntime = null;
 
+function getPlannerRecallTimeoutMs() {
+    const timeoutMs = Number(_bmeRuntime?.getPlannerRecallTimeoutMs?.());
+    return Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : VECTOR_RECALL_TIMEOUT_MS;
+}
+
 function getTrustedOrigin() { return window.location.origin; }
 
 function postToIframe(iframe, payload) {
@@ -1135,7 +1142,9 @@ async function buildPlannerMessages(rawUserInput) {
     let plannerRecall = null;
     if (_bmeRuntime?.runPlannerRecallForEna) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), VECTOR_RECALL_TIMEOUT_MS);
+        const recallTimeoutMs = getPlannerRecallTimeoutMs();
+        const recallStartedAt = Date.now();
+        const timeoutId = setTimeout(() => controller.abort(), recallTimeoutMs);
         try {
             const recall = await _bmeRuntime.runPlannerRecallForEna({
                 rawUserInput,
@@ -1148,12 +1157,15 @@ async function buildPlannerMessages(rawUserInput) {
             }
         } catch (e) {
             if (e?.name === 'AbortError') {
-                console.warn(`[Ena] BME recall timed out (> ${Math.floor(VECTOR_RECALL_TIMEOUT_MS / 1000)}s)`);
+                console.warn(`[Ena] BME recall timed out (> ${Math.floor(recallTimeoutMs / 1000)}s)`);
             } else {
                 console.warn('[Ena] BME planner recall failed:', e);
             }
         } finally {
             clearTimeout(timeoutId);
+            debugLog(
+                `[Ena] Planner recall finished in ${Date.now() - recallStartedAt}ms (source=${memorySource}, timeout=${recallTimeoutMs}ms)`,
+            );
         }
     }
     debugLog(`[Ena] Memory source: ${memorySource}`);
