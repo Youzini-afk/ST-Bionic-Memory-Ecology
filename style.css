@@ -346,6 +346,12 @@
   margin-bottom: 6px;
 }
 
+:root[data-bme-color-scheme="light"] .bme-config-sidebar-kicker,
+:root[data-bme-color-scheme="light"] .bme-config-workspace-kicker,
+:root[data-bme-color-scheme="light"] .bme-config-section-kicker {
+  color: var(--bme-primary-text);
+}
+
 .bme-config-sidebar-title {
   font-size: 18px;
   font-weight: 700;
@@ -1040,7 +1046,7 @@
 /* --- Config Workspace --- */
 .bme-config-workspace-header {
   padding: 20px 22px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--bme-border);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1063,8 +1069,8 @@
   min-height: 38px;
   padding: 0 14px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--bme-border);
+  background: var(--bme-surface-high);
   color: var(--bme-on-surface);
   cursor: pointer;
   transition:
@@ -1086,8 +1092,8 @@
   opacity: 0.5;
   cursor: not-allowed;
   color: var(--bme-on-surface-dim);
-  border-color: rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  border-color: var(--bme-border);
+  background: var(--bme-surface-low);
   transform: none;
 }
 
@@ -1147,11 +1153,10 @@
 
 .bme-config-card,
 .bme-prompt-card {
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--bme-surface-container);
+  border: 1px solid var(--bme-border);
   border-radius: 14px;
   padding: 16px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .bme-config-card-head,
@@ -1184,8 +1189,8 @@
   height: 28px;
   flex-shrink: 0;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--bme-border);
+  background: var(--bme-surface-high);
   color: var(--bme-on-surface-dim);
   transition:
     transform 0.2s ease,
@@ -1196,8 +1201,8 @@
 
 .bme-collapsible-card[open] .bme-collapsible-indicator {
   transform: rotate(180deg);
-  color: var(--bme-accent);
-  background: rgba(255, 255, 255, 0.08);
+  color: var(--bme-primary);
+  background: var(--bme-primary-dim);
 }
 
 .bme-config-card-title {
@@ -1217,7 +1222,7 @@
 .bme-config-subgroup + .bme-config-subgroup {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--bme-border);
 }
 
 .bme-config-subgroup-title {
@@ -1237,7 +1242,7 @@
 .bme-config-subdetails {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--bme-border);
 }
 
 .bme-config-subdetails-summary {
@@ -1301,6 +1306,53 @@
   cursor: not-allowed;
 }
 
+/* 宿主样式 / WebKit 默认易把 select、自动填充 input 画成黑底 — 在面板内强制用主题色 */
+#st-bme-panel input.bme-config-input,
+#st-bme-panel textarea.bme-config-textarea {
+  background-color: var(--bme-surface-high) !important;
+  color: var(--bme-on-surface) !important;
+}
+
+#st-bme-panel select.bme-config-input,
+#st-bme-panel select.bme-filter-select,
+#st-bme-panel select.bme-task-builtin-select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  background-color: var(--bme-surface-high) !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px 14px;
+  color: var(--bme-on-surface) !important;
+  cursor: pointer;
+  padding-right: 36px;
+}
+
+:root[data-bme-color-scheme="light"]
+  #st-bme-panel
+  :is(select.bme-config-input, select.bme-filter-select, select.bme-task-builtin-select) {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23334155' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") !important;
+}
+
+#st-bme-panel select.bme-config-input option,
+#st-bme-panel select.bme-filter-select option,
+#st-bme-panel select.bme-task-builtin-select option {
+  background-color: var(--bme-surface-container);
+  color: var(--bme-on-surface);
+}
+
+#st-bme-panel input.bme-config-input:-webkit-autofill,
+#st-bme-panel input.bme-config-input:-webkit-autofill:hover,
+#st-bme-panel input.bme-config-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--bme-on-surface) !important;
+  caret-color: var(--bme-on-surface);
+  border: 1px solid var(--bme-border) !important;
+  box-shadow: 0 0 0 1000px var(--bme-surface-high) inset !important;
+  transition: background-color 99999s ease-out;
+}
+
 .bme-config-textarea {
   min-height: 180px;
   resize: vertical;
@@ -1333,8 +1385,8 @@
   min-height: 38px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--bme-border);
+  background: var(--bme-surface-high);
   color: var(--bme-on-surface);
   cursor: pointer;
   font-size: 12px;
@@ -1347,7 +1399,7 @@
 
 .bme-config-secondary-btn:hover {
   border-color: var(--bme-primary);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bme-primary-dim);
   color: var(--bme-primary);
 }
 
@@ -1369,14 +1421,8 @@
   min-height: 42px;
   padding: 0 16px;
   border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background:
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.05),
-      rgba(255, 255, 255, 0.02)
-    ),
-    rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--bme-border);
+  background: var(--bme-surface-high);
   color: var(--bme-on-surface);
   cursor: pointer;
   font-size: 13px;
@@ -1385,7 +1431,6 @@
   white-space: nowrap !important;
   writing-mode: horizontal-tb !important;
   text-orientation: mixed !important;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   transition:
     border-color 0.15s,
     background 0.15s,
@@ -1396,14 +1441,10 @@
 
 .bme-config-test-btn:hover {
   border-color: var(--bme-primary);
-  background:
-    linear-gradient(180deg, rgba(233, 69, 96, 0.16), rgba(233, 69, 96, 0.08)),
-    rgba(0, 0, 0, 0.3);
+  background: var(--bme-primary-dim);
   color: var(--bme-primary-text, var(--bme-on-surface));
   transform: translateY(-1px);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 8px 20px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
 }
 
 .bme-config-test-btn:active {
