@@ -122,6 +122,16 @@ const inlineDataTemplateEntry = createWorldbookEntry({
   order: 22,
 });
 
+const commentKeywordProbeEntry = createWorldbookEntry({
+  uid: 14,
+  name: "备注命中测试",
+  comment: "常驻备注",
+  content: "这条只用于验证 comment 不参与自定义过滤。",
+  strategyType: "selective",
+  keys: ["绝不会匹配到这里"],
+  order: 23,
+});
+
 const extensionLiteralEntry = createWorldbookEntry({
   uid: 4,
   name: "扩展语义正文",
@@ -214,6 +224,7 @@ const worldbooksByName = {
     inlineSummaryEntry,
     inlineDataSummaryEntry,
     inlineDataTemplateEntry,
+    commentKeywordProbeEntry,
     extensionLiteralEntry,
     externalInlineEntry,
     mvuLazyProbeEntry,
@@ -251,7 +262,9 @@ try {
     }));
 
   const { resolveTaskWorldInfo } = await import("../task-worldinfo.js");
-  const { buildTaskPrompt } = await import("../prompt-builder.js");
+  const { buildTaskPrompt, buildTaskLlmPayload } = await import(
+    "../prompt-builder.js"
+  );
 
   const emptyTriggerWorldInfo = await resolveTaskWorldInfo({
     chatMessages: [],
@@ -335,6 +348,132 @@ try {
     ),
     true,
   );
+  assert.equal(worldInfo.debug.customFilter.mode, "default");
+  assert.equal(worldInfo.debug.customFilter.filteredEntryCount, 0);
+
+  const customWorldInfo = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "",
+    },
+    templateContext: {
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+    userMessage: "继续调查",
+  });
+
+  assert.equal(
+    customWorldInfo.beforeEntries.some(
+      (entry) => entry.sourceName === "[mvu_update] 状态同步",
+    ),
+    true,
+  );
+  assert.equal(
+    customWorldInfo.beforeEntries.some(
+      (entry) => entry.sourceName === "MVU 启发式条目",
+    ),
+    true,
+  );
+  assert.match(
+    customWorldInfo.beforeText,
+    /<status_current_variable>secret=true<\/status_current_variable>/,
+  );
+  assert.doesNotMatch(
+    customWorldInfo.beforeText,
+    /控制摘要：隐藏线索：Alice 正在调查/,
+  );
+  assert.equal(
+    customWorldInfo.allEntries.some((entry) => entry.name === "EW/Dyn/线索"),
+    false,
+  );
+  assert.equal(customWorldInfo.debug.mvu.filteredEntryCount, 0);
+  assert.equal(customWorldInfo.debug.customFilter.mode, "custom");
+  assert.equal(customWorldInfo.debug.customFilter.filteredEntryCount, 0);
+
+  const keywordWorldInfo = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "常驻",
+    },
+    templateContext: {
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+    userMessage: "继续调查",
+  });
+
+  assert.equal(
+    keywordWorldInfo.beforeEntries.some(
+      (entry) => entry.sourceName === "常驻设定",
+    ),
+    false,
+  );
+  assert.equal(
+    keywordWorldInfo.allEntries.some((entry) => entry.name === "备注命中测试"),
+    true,
+  );
+  assert.equal(keywordWorldInfo.debug.customFilter.filteredEntryCount, 1);
+  assert.equal(
+    keywordWorldInfo.debug.customFilter.filteredEntries[0].name,
+    "常驻设定",
+  );
+  assert.equal(
+    keywordWorldInfo.debug.customFilter.filteredEntries[0].matchedKeyword,
+    "常驻",
+  );
+
+  const keywordCachePrime = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "常驻,缓存探针",
+    },
+    templateContext: {
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+    userMessage: "继续调查",
+  });
+  assert.equal(keywordCachePrime.debug.cache.hit, false);
+  assert.equal(keywordCachePrime.debug.customFilter.filteredEntryCount, 1);
+
+  const keywordCacheHit = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "常驻,缓存探针",
+    },
+    templateContext: {
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+    userMessage: "继续调查",
+  });
+  assert.equal(keywordCacheHit.debug.cache.hit, true);
+  assert.equal(keywordCacheHit.debug.customFilter.filteredEntryCount, 1);
+  assert.equal(
+    keywordCacheHit.debug.customFilter.filteredEntries[0].name,
+    "常驻设定",
+  );
+
+  const defaultModeWithKeywords = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "default",
+      worldInfoFilterCustomKeywords: "常驻",
+    },
+    templateContext: {
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+    userMessage: "继续调查",
+  });
+  assert.equal(
+    defaultModeWithKeywords.beforeEntries.some(
+      (entry) => entry.sourceName === "常驻设定",
+    ),
+    true,
+  );
+  assert.equal(defaultModeWithKeywords.debug.mvu.filteredEntryCount > 0, true);
+  assert.equal(defaultModeWithKeywords.debug.customFilter.filteredEntryCount, 0);
 
   const settings = {
     taskProfiles: {
@@ -455,6 +594,82 @@ try {
   assert.equal(promptBuild.additionalMessages.length, 1);
   assert.equal(promptBuild.additionalMessages[0].content, "这是一条 atDepth 消息。");
   assert.equal(promptBuild.debug.mvu.sanitizedFieldCount >= 0, true);
+
+  const customPromptBuild = await buildTaskPrompt(
+    {
+      ...settings,
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "",
+    },
+    "recall",
+    {
+      taskName: "recall",
+      userMessage: "继续调查",
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+  );
+  assert.match(
+    customPromptBuild.systemPrompt,
+    /<status_current_variable>secret=true<\/status_current_variable>/,
+  );
+  assert.match(customPromptBuild.systemPrompt, /这一条不应该进入结果/);
+  assert.doesNotMatch(
+    customPromptBuild.systemPrompt,
+    /控制摘要：隐藏线索：Alice 正在调查/,
+  );
+  const customPayload = buildTaskLlmPayload(customPromptBuild, "unused fallback");
+  assert.equal(
+    customPayload.promptMessages.some((message) =>
+      /<status_current_variable>secret=true<\/status_current_variable>/.test(
+        message.content,
+      ),
+    ),
+    true,
+  );
+
+  const interpolatedSettings = {
+    taskProfiles: {
+      recall: {
+        activeProfileId: "interpolated",
+        profiles: [
+          {
+            id: "interpolated",
+            name: "插值预设",
+            taskType: "recall",
+            builtin: false,
+            blocks: [
+              {
+                id: "interp-system",
+                type: "custom",
+                content: "世界书插值:\\n{{worldInfoBefore}}",
+                role: "system",
+                enabled: true,
+                order: 0,
+                injectionMode: "append",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    worldInfoFilterMode: "custom",
+    worldInfoFilterCustomKeywords: "",
+  };
+  const customInterpolatedPromptBuild = await buildTaskPrompt(
+    interpolatedSettings,
+    "recall",
+    {
+      taskName: "recall",
+      userMessage: "继续调查",
+      recentMessages: "我们继续调查那条线索",
+      charName: "Alice",
+    },
+  );
+  assert.match(
+    customInterpolatedPromptBuild.systemPrompt,
+    /<status_current_variable>secret=true<\/status_current_variable>/,
+  );
 
   const noWorldInfoBlockSettings = {
     taskProfiles: {
