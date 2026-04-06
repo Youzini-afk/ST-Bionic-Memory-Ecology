@@ -110,6 +110,7 @@ import {
   getGraphStats,
   getNode,
   importGraph,
+  updateNode,
 } from "./graph.js";
 import {
   HOST_ADAPTER_STATE_SEMANTICS,
@@ -9502,6 +9503,27 @@ async function onManualCompress() {
   });
 }
 
+function onSavePanelGraphNode(payload = {}) {
+  const nodeId = String(payload.nodeId || "");
+  const updates = payload.updates;
+  if (!nodeId || !updates || typeof updates !== "object" || !currentGraph) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!getNode(currentGraph, nodeId)) {
+    return { ok: false, error: "node-not-found" };
+  }
+  const updated = updateNode(currentGraph, nodeId, updates);
+  if (!updated) {
+    return { ok: false, error: "update-failed" };
+  }
+  const persist = saveGraphToChat({ reason: "panel-node-edit" });
+  return {
+    ok: true,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 async function onExportGraph() {
   return await onExportGraphController({
     document,
@@ -9807,6 +9829,7 @@ async function onReembedDirect() {
         inspectTaskRegexReuse(getSettings(), taskType),
       applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
+      saveGraphNode: onSavePanelGraphNode,
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,

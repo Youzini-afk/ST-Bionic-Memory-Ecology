@@ -93,6 +93,7 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-vector-range",
   "bme-act-vector-reembed",
   "bme-act-reroll",
+  "bme-detail-save",
 ];
 
 const TASK_PROFILE_GENERATION_GROUPS = [
@@ -449,6 +450,7 @@ export async function initPanel({
 
   _bindTabs();
   _bindClose();
+  _bindNodeDetailPanel();
   _bindResizeHandle();
   _bindPanelResize();
   _bindGraphControls();
@@ -1252,6 +1254,79 @@ function _bindGraphControls() {
 
 // ==================== 节点详情 ====================
 
+function _appendNodeDetailReadOnly(container, labelText, valueText) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const value = document.createElement("div");
+  value.className = "value";
+  value.textContent = String(valueText ?? "—");
+  row.append(label, value);
+  container.appendChild(row);
+}
+
+function _appendNodeDetailNumberInput(
+  container,
+  labelText,
+  inputId,
+  value,
+  { min, max, step } = {},
+) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.setAttribute("for", inputId);
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "number";
+  input.id = inputId;
+  input.className = "bme-node-detail-input";
+  if (min != null) input.min = String(min);
+  if (max != null) input.max = String(max);
+  if (step != null) input.step = String(step);
+  input.value =
+    value === undefined || value === null ? "" : String(Number(value));
+  row.append(label, input);
+  container.appendChild(row);
+}
+
+function _appendNodeDetailTextInput(container, labelText, inputId, value) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.setAttribute("for", inputId);
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = inputId;
+  input.className = "bme-node-detail-input";
+  input.value = String(value ?? "");
+  row.append(label, input);
+  container.appendChild(row);
+}
+
+function _appendNodeDetailTextareaField(
+  container,
+  labelText,
+  fieldKey,
+  fieldType,
+  text,
+) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  const ta = document.createElement("textarea");
+  ta.className = "bme-node-detail-textarea";
+  ta.dataset.bmeFieldKey = fieldKey;
+  ta.dataset.bmeFieldType = fieldType;
+  ta.rows = String(text || "").length > 160 ? 6 : 3;
+  ta.value = text;
+  row.append(label, ta);
+  container.appendChild(row);
+}
+
 function _showNodeDetail(node) {
   const detailEl = document.getElementById("bme-node-detail");
   const titleEl = document.getElementById("bme-detail-title");
@@ -1261,59 +1336,183 @@ function _showNodeDetail(node) {
   const raw = node.raw || node;
   const fields = raw.fields || {};
   titleEl.textContent = getNodeDisplayName(raw);
+  detailEl.dataset.editNodeId = raw.id || "";
 
-  const items = [
-    { label: "类型", value: _typeLabel(raw.type) },
-    { label: "作用域", value: buildScopeBadgeText(raw.scope) },
-    { label: "ID", value: raw.id || "—" },
-    { label: "重要度", value: raw.importance || 5 },
-    { label: "访问次数", value: raw.accessCount || 0 },
-    { label: "序列号", value: raw.seqRange?.[1] ?? raw.seq ?? 0 },
-  ];
+  const fragment = document.createDocumentFragment();
+
+  _appendNodeDetailReadOnly(fragment, "类型", _typeLabel(raw.type));
+  _appendNodeDetailReadOnly(
+    fragment,
+    "作用域",
+    buildScopeBadgeText(raw.scope),
+  );
+  _appendNodeDetailReadOnly(fragment, "ID", raw.id || "—");
+  _appendNodeDetailReadOnly(
+    fragment,
+    "序列号",
+    raw.seqRange?.[1] ?? raw.seq ?? 0,
+  );
+
   const scope = normalizeMemoryScope(raw.scope);
   if (scope.layer === "pov") {
-    items.push({
-      label: "POV 归属",
-      value: `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
-    });
+    _appendNodeDetailReadOnly(
+      fragment,
+      "POV 归属",
+      `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
+    );
   }
   const regionLine = buildRegionLine(scope);
   if (regionLine) {
-    items.push({ label: "地区", value: regionLine });
+    _appendNodeDetailReadOnly(fragment, "地区", regionLine);
+  }
+  if (Array.isArray(raw.seqRange)) {
+    _appendNodeDetailReadOnly(
+      fragment,
+      "序列范围",
+      `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
+    );
   }
 
-  if (Array.isArray(raw.seqRange)) {
-    items.push({
-      label: "序列范围",
-      value: `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
-    });
-  }
-  if (Array.isArray(raw.clusters) && raw.clusters.length > 0) {
-    items.push({ label: "聚类标签", value: raw.clusters.join(", ") });
-  }
+  _appendNodeDetailNumberInput(
+    fragment,
+    "重要度 (0–10)",
+    "bme-detail-importance",
+    raw.importance ?? 5,
+    { min: 0, max: 10, step: 0.1 },
+  );
+  _appendNodeDetailNumberInput(
+    fragment,
+    "访问次数",
+    "bme-detail-accesscount",
+    raw.accessCount ?? 0,
+    { min: 0, step: 1 },
+  );
+
+  const clustersStr = Array.isArray(raw.clusters)
+    ? raw.clusters.join(", ")
+    : "";
+  _appendNodeDetailTextInput(
+    fragment,
+    "聚类标签 (逗号分隔)",
+    "bme-detail-clusters",
+    clustersStr,
+  );
+
+  const section = document.createElement("div");
+  section.className = "bme-node-detail-section";
+  section.textContent = "记忆字段";
+  fragment.appendChild(section);
 
   for (const [key, value] of Object.entries(fields)) {
-    items.push({
-      label: key,
-      value: typeof value === "object" ? JSON.stringify(value, null, 2) : value,
-    });
+    const isJson = typeof value === "object" && value !== null;
+    const displayVal = isJson
+      ? JSON.stringify(value, null, 2)
+      : String(value ?? "");
+    _appendNodeDetailTextareaField(
+      fragment,
+      key,
+      key,
+      isJson ? "json" : "string",
+      displayVal,
+    );
   }
-
-  const fragment = document.createDocumentFragment();
-  items.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "bme-node-detail-field";
-    const label = document.createElement("label");
-    label.textContent = item.label;
-    const value = document.createElement("div");
-    value.className = "value";
-    value.textContent = String(item.value ?? "—");
-    row.append(label, value);
-    fragment.appendChild(row);
-  });
   bodyEl.replaceChildren(fragment);
 
   detailEl.classList.add("open");
+}
+
+function _saveNodeDetail() {
+  const detailEl = document.getElementById("bme-node-detail");
+  const bodyEl = document.getElementById("bme-detail-body");
+  const nodeId = detailEl?.dataset?.editNodeId;
+  if (!nodeId || !bodyEl) return;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return;
+  }
+
+  const updates = { fields: {} };
+  const impEl = document.getElementById("bme-detail-importance");
+  if (impEl && impEl.value !== "") {
+    const imp = Number.parseFloat(impEl.value);
+    if (Number.isFinite(imp)) {
+      updates.importance = Math.max(0, Math.min(10, imp));
+    }
+  }
+  const accessEl = document.getElementById("bme-detail-accesscount");
+  if (accessEl && accessEl.value !== "") {
+    const ac = Number.parseInt(accessEl.value, 10);
+    if (Number.isFinite(ac)) {
+      updates.accessCount = Math.max(0, ac);
+    }
+  }
+  const clustersEl = document.getElementById("bme-detail-clusters");
+  if (clustersEl) {
+    updates.clusters = clustersEl.value
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
+  for (const el of fieldEls) {
+    const key = el.dataset.bmeFieldKey;
+    const type = el.dataset.bmeFieldType || "string";
+    const rawVal = el.value;
+    if (type === "json") {
+      try {
+        updates.fields[key] = JSON.parse(rawVal || "null");
+      } catch {
+        toastr.error(`字段「${key}」须为合法 JSON`, "ST-BME");
+        return;
+      }
+    } else {
+      updates.fields[key] = rawVal;
+    }
+  }
+
+  const result = _actionHandlers.saveGraphNode?.({
+    nodeId,
+    updates,
+  });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found"
+        ? "节点已不存在，请关闭后重试"
+        : "保存失败",
+      "ST-BME",
+    );
+    return;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "内容已更新，但写回聊天元数据可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已保存", "ST-BME");
+  }
+
+  const r = _getActiveGraphRenderer();
+  const sel = r?.selectedNode;
+  if (sel?.id === nodeId && sel.raw) {
+    _showNodeDetail(sel);
+  } else {
+    const g = _getGraph?.();
+    const rawN = g?.nodes?.find((n) => n.id === nodeId);
+    if (rawN) {
+      _showNodeDetail({ raw: rawN, id: rawN.id });
+    }
+  }
+  refreshLiveState();
+}
+
+function _bindNodeDetailPanel() {
+  const saveBtn = document.getElementById("bme-detail-save");
+  if (saveBtn && saveBtn.dataset.bmeBound !== "true") {
+    saveBtn.addEventListener("click", () => _saveNodeDetail());
+    saveBtn.dataset.bmeBound = "true";
+  }
 }
 
 function _bindClose() {
