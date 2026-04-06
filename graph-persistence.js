@@ -21,6 +21,7 @@ export const GRAPH_LOAD_STATES = Object.freeze({
 });
 export const GRAPH_LOAD_PENDING_CHAT_ID = "__pending_chat__";
 export const GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX = `${MODULE_NAME}:graph-shadow:`;
+export const GRAPH_IDENTITY_ALIAS_STORAGE_KEY = `${MODULE_NAME}:chat-identity-aliases`;
 export const GRAPH_STARTUP_RECONCILE_DELAYS_MS = [150, 600, 1800, 4000];
 
 // ═══════════════════════════════════════════════════════════
@@ -50,6 +51,247 @@ export function createLocalIntegritySlug() {
 }
 
 export const GRAPH_PERSISTENCE_SESSION_ID = createLocalIntegritySlug();
+
+function normalizeIdentityValue(value) {
+  return String(value ?? "").trim();
+}
+
+function getLocalStorageSafe() {
+  const storage = globalThis.localStorage;
+  if (
+    !storage ||
+    typeof storage.getItem !== "function" ||
+    typeof storage.setItem !== "function"
+  ) {
+    return null;
+  }
+  return storage;
+}
+
+function getSessionStorageSafe() {
+  const storage = globalThis.sessionStorage;
+  if (!storage || typeof storage.getItem !== "function") {
+    return null;
+  }
+  return storage;
+}
+
+function listStorageKeys(storage) {
+  if (!storage) return [];
+
+  if (typeof storage.length === "number" && typeof storage.key === "function") {
+    const keys = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (typeof key === "string" && key) {
+        keys.push(key);
+      }
+    }
+    return keys;
+  }
+
+  if (storage.__store instanceof Map) {
+    return Array.from(storage.__store.keys()).map((key) => String(key));
+  }
+
+  return [];
+}
+
+function readGraphIdentityAliasRegistryRaw() {
+  const storage = getLocalStorageSafe();
+  if (!storage) {
+    return {
+      byIntegrity: {},
+    };
+  }
+
+  try {
+    const raw = storage.getItem(GRAPH_IDENTITY_ALIAS_STORAGE_KEY);
+    if (!raw) {
+      return {
+        byIntegrity: {},
+      };
+    }
+
+    const parsed = JSON.parse(raw);
+    const byIntegrity =
+      parsed?.byIntegrity &&
+      typeof parsed.byIntegrity === "object" &&
+      !Array.isArray(parsed.byIntegrity)
+        ? parsed.byIntegrity
+        : {};
+
+    return {
+      byIntegrity,
+    };
+  } catch {
+    return {
+      byIntegrity: {},
+    };
+  }
+}
+
+function writeGraphIdentityAliasRegistryRaw(registry = null) {
+  const storage = getLocalStorageSafe();
+  if (!storage) return false;
+
+  try {
+    storage.setItem(
+      GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
+      JSON.stringify({
+        byIntegrity:
+          registry?.byIntegrity &&
+          typeof registry.byIntegrity === "object" &&
+          !Array.isArray(registry.byIntegrity)
+            ? registry.byIntegrity
+            : {},
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeGraphIdentityAliasEntry(entry = {}, integrity = "") {
+  const normalizedIntegrity = normalizeIdentityValue(integrity || entry.integrity);
+  const normalizedPersistenceChatId = normalizeIdentityValue(
+    entry.persistenceChatId || normalizedIntegrity,
+  );
+  const normalizedHostChatIds = Array.from(
+    new Set(
+      (Array.isArray(entry.hostChatIds) ? entry.hostChatIds : [])
+        .map((value) => normalizeIdentityValue(value))
+        .filter(Boolean),
+    ),
+  ).slice(-16);
+
+  return {
+    integrity: normalizedIntegrity,
+    persistenceChatId: normalizedPersistenceChatId || normalizedIntegrity,
+    hostChatIds: normalizedHostChatIds,
+    updatedAt: String(entry.updatedAt || ""),
+  };
+}
+
+export function rememberGraphIdentityAlias({
+  integrity = "",
+  hostChatId = "",
+  persistenceChatId = "",
+} = {}) {
+  const normalizedIntegrity = normalizeIdentityValue(integrity);
+  if (!normalizedIntegrity) return null;
+
+  const normalizedHostChatId = normalizeIdentityValue(hostChatId);
+  const normalizedPersistenceChatId = normalizeIdentityValue(
+    persistenceChatId || normalizedIntegrity,
+  );
+  const registry = readGraphIdentityAliasRegistryRaw();
+  const existingEntry = normalizeGraphIdentityAliasEntry(
+    registry.byIntegrity?.[normalizedIntegrity] || {},
+    normalizedIntegrity,
+  );
+  const hostChatIds = Array.from(
+    new Set(
+      [normalizedHostChatId, ...existingEntry.hostChatIds].filter(Boolean),
+    ),
+  ).slice(-16);
+  const nextEntry = {
+    integrity: normalizedIntegrity,
+    persistenceChatId: normalizedPersistenceChatId || normalizedIntegrity,
+    hostChatIds,
+    updatedAt: new Date().toISOString(),
+  };
+
+  registry.byIntegrity[normalizedIntegrity] = nextEntry;
+  writeGraphIdentityAliasRegistryRaw(registry);
+  return nextEntry;
+}
+
+export function resolveGraphIdentityAliasByHostChatId(hostChatId = "") {
+  const normalizedHostChatId = normalizeIdentityValue(hostChatId);
+  if (!normalizedHostChatId) return "";
+
+  const registry = readGraphIdentityAliasRegistryRaw();
+  let bestEntry = null;
+
+  for (const [integrity, value] of Object.entries(registry.byIntegrity || {})) {
+    const entry = normalizeGraphIdentityAliasEntry(value, integrity);
+    if (!entry.hostChatIds.includes(normalizedHostChatId)) {
+      continue;
+    }
+
+    if (!bestEntry) {
+      bestEntry = entry;
+      continue;
+    }
+
+    if (String(entry.updatedAt || "") > String(bestEntry.updatedAt || "")) {
+      bestEntry = entry;
+    }
+  }
+
+  return normalizeIdentityValue(bestEntry?.persistenceChatId || "");
+}
+
+export function getGraphIdentityAliasCandidates({
+  integrity = "",
+  hostChatId = "",
+  persistenceChatId = "",
+} = {}) {
+  const normalizedIntegrity = normalizeIdentityValue(integrity);
+  const normalizedHostChatId = normalizeIdentityValue(hostChatId);
+  const normalizedPersistenceChatId = normalizeIdentityValue(persistenceChatId);
+  const registry = readGraphIdentityAliasRegistryRaw();
+  const candidates = [];
+  const seen = new Set();
+  const pushCandidate = (value) => {
+    const normalized = normalizeIdentityValue(value);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  if (normalizedIntegrity) {
+    const entry = normalizeGraphIdentityAliasEntry(
+      registry.byIntegrity?.[normalizedIntegrity] || {},
+      normalizedIntegrity,
+    );
+    pushCandidate(entry.persistenceChatId);
+    for (const value of entry.hostChatIds) {
+      pushCandidate(value);
+    }
+  } else if (normalizedHostChatId) {
+    pushCandidate(resolveGraphIdentityAliasByHostChatId(normalizedHostChatId));
+  }
+
+  pushCandidate(normalizedHostChatId);
+  pushCandidate(normalizedPersistenceChatId);
+  return candidates;
+}
+
+function normalizeShadowSnapshotPayload(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return null;
+  }
+
+  const serializedGraph = String(snapshot.serializedGraph || "");
+  const chatId = normalizeIdentityValue(snapshot.chatId);
+  if (!chatId || !serializedGraph) {
+    return null;
+  }
+
+  return {
+    chatId,
+    revision: Number.isFinite(snapshot.revision) ? snapshot.revision : 0,
+    serializedGraph,
+    updatedAt: String(snapshot.updatedAt || ""),
+    reason: String(snapshot.reason || ""),
+    integrity: normalizeIdentityValue(snapshot.integrity),
+    persistedChatId: normalizeIdentityValue(snapshot.persistedChatId),
+    debugReason: String(snapshot.debugReason || snapshot.reason || ""),
+  };
+}
 
 // ═══════════════════════════════════════════════════════════
 // 图谱持久化元数据
@@ -146,31 +388,70 @@ export function readGraphShadowSnapshot(chatId = "") {
   if (!storageKey) return null;
 
   try {
-    const raw = globalThis.sessionStorage?.getItem(storageKey);
+    const raw = getSessionStorageSafe()?.getItem(storageKey);
     if (!raw) return null;
-    const snapshot = JSON.parse(raw);
-    if (
-      !snapshot ||
-      typeof snapshot !== "object" ||
-      String(snapshot.chatId || "") !== String(chatId || "") ||
-      typeof snapshot.serializedGraph !== "string" ||
-      !snapshot.serializedGraph
-    ) {
+    const snapshot = normalizeShadowSnapshotPayload(JSON.parse(raw));
+    if (!snapshot || snapshot.chatId !== String(chatId || "")) {
       return null;
     }
-    return {
-      chatId: String(snapshot.chatId || ""),
-      revision: Number.isFinite(snapshot.revision) ? snapshot.revision : 0,
-      serializedGraph: snapshot.serializedGraph,
-      updatedAt: String(snapshot.updatedAt || ""),
-      reason: String(snapshot.reason || ""),
-      integrity: String(snapshot.integrity || ""),
-      persistedChatId: String(snapshot.persistedChatId || ""),
-      debugReason: String(snapshot.debugReason || snapshot.reason || ""),
-    };
+    return snapshot;
   } catch {
     return null;
   }
+}
+
+export function findGraphShadowSnapshotByIntegrity(
+  integrity = "",
+  { excludeChatIds = [] } = {},
+) {
+  const normalizedIntegrity = normalizeIdentityValue(integrity);
+  if (!normalizedIntegrity) return null;
+
+  const storage = getSessionStorageSafe();
+  if (!storage) return null;
+
+  const excludedChatIds = new Set(
+    (Array.isArray(excludeChatIds) ? excludeChatIds : [])
+      .map((value) => normalizeIdentityValue(value))
+      .filter(Boolean),
+  );
+
+  let bestSnapshot = null;
+  for (const key of listStorageKeys(storage)) {
+    if (!String(key || "").startsWith(GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX)) {
+      continue;
+    }
+
+    try {
+      const snapshot = normalizeShadowSnapshotPayload(
+        JSON.parse(storage.getItem(key)),
+      );
+      if (!snapshot || snapshot.integrity !== normalizedIntegrity) {
+        continue;
+      }
+      if (excludedChatIds.has(snapshot.chatId)) {
+        continue;
+      }
+
+      const bestRevision = Number(bestSnapshot?.revision || 0);
+      const nextRevision = Number(snapshot.revision || 0);
+      if (!bestSnapshot || nextRevision > bestRevision) {
+        bestSnapshot = snapshot;
+        continue;
+      }
+
+      if (
+        nextRevision === bestRevision &&
+        String(snapshot.updatedAt || "") > String(bestSnapshot.updatedAt || "")
+      ) {
+        bestSnapshot = snapshot;
+      }
+    } catch {
+      // ignore broken shadow snapshot payloads
+    }
+  }
+
+  return bestSnapshot;
 }
 
 /**
@@ -191,7 +472,7 @@ export function writeGraphShadowSnapshot(
   try {
     const serializedGraph = serializeGraph(graph);
     const persistedMeta = getGraphPersistenceMeta(graph) || {};
-    globalThis.sessionStorage?.setItem(
+    getSessionStorageSafe()?.setItem(
       storageKey,
       JSON.stringify({
         chatId: String(chatId || ""),
@@ -216,7 +497,7 @@ export function removeGraphShadowSnapshot(chatId = "") {
   if (!storageKey) return false;
 
   try {
-    globalThis.sessionStorage?.removeItem(storageKey);
+    getSessionStorageSafe()?.removeItem(storageKey);
     return true;
   } catch {
     return false;
