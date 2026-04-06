@@ -543,6 +543,51 @@ try {
     markdownFinalDebug.entries[0].appliedRules.map((item) => item.id),
     ["markdown-final-strip"],
   );
+  const beautifyFinalPromptSettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("beautify-final-strip", "/Decor/g", "<div class=\"pretty\">Decor</div>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: false,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const beautifyFinalInspect = inspectTaskRegexReuse(
+    beautifyFinalPromptSettings,
+    "extract",
+  );
+  const beautifyFinalRule = beautifyFinalInspect.activeRules.find(
+    (rule) => rule.id === "beautify-final-strip",
+  );
+  assert.equal(beautifyFinalRule?.promptReplaceAsEmpty, true);
+  assert.equal(beautifyFinalRule?.promptStageMode, "clear");
+  const beautifyFinalDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      beautifyFinalPromptSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      beautifyFinalDebug,
+      "user",
+    ),
+    "",
+  );
+  assert.deepEqual(
+    beautifyFinalDebug.entries[0].appliedRules.map((item) => item.id),
+    ["beautify-final-strip"],
+  );
   const destinationBeautifySettings = buildSettings({
     sources: {
       global: true,
@@ -563,7 +608,7 @@ try {
             prompt: false,
             display: true,
           },
-          markdownOnly: true,
+          markdownOnly: false,
         }),
         createTavernRule("destination-display-only-text", "/Plain/g", "TEXT", {
           placement: [],

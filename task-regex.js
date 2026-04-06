@@ -709,7 +709,7 @@ function shouldApplyRuleForTaskContext(rule, stage = "") {
     normalizedStage === "finalPrompt" || normalizedStage === "input.finalPrompt";
   const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
 
-  if (rule.markdownOnly) {
+  if (rule.markdownOnly || rule.beautificationReplace) {
     return isPromptStage;
   }
 
