@@ -69,12 +69,30 @@ function hashId(id) {
     return h;
 }
 
+/** 与 memory-scope 中 normalizeKey 一致，用于分区键（模块内未导出故本地复制） */
+function normalizeKeyForPartition(value) {
+    return String(value ?? '').trim().toLowerCase();
+}
+
 /** 由 id 导出的微小偏移，避免网格完全对齐，且无帧间随机抖动 */
 function deterministicJitter(id, mag) {
     const h = hashId(id);
     const nx = ((h & 0xff) / 255 - 0.5) * 2;
     const ny = (((h >> 8) & 0xff) / 255 - 0.5) * 2;
     return { x: nx * mag * 0.45, y: ny * mag * 0.45 };
+}
+
+function characterPovLabelFromNodes(arr) {
+    if (!arr?.length) return '·';
+    for (const n of arr) {
+        const s = normalizeMemoryScope(n.raw?.scope);
+        if (s.ownerName) return s.ownerName;
+    }
+    for (const n of arr) {
+        const s = normalizeMemoryScope(n.raw?.scope);
+        if (s.ownerId) return s.ownerId;
+    }
+    return '·';
 }
 
 function partitionNodesByScope(nodes) {
@@ -95,7 +113,10 @@ function partitionNodesByScope(nodes) {
             continue;
         }
         if (scope.ownerType === 'character') {
-            const key = scope.ownerId || scope.ownerName || '·';
+            // 与 UUID+姓名、仅姓名 等存法兼容：优先用展示名归并，避免同一角色拆成多个 POV 区
+            const nameKey = normalizeKeyForPartition(scope.ownerName);
+            const idKey = normalizeKeyForPartition(scope.ownerId);
+            const key = nameKey || idKey || '·';
             if (!charMap.has(key)) charMap.set(key, []);
             charMap.get(key).push(node);
             node.regionKey = `char:${key}`;
@@ -313,8 +334,7 @@ export class GraphRenderer {
         for (let i = 0; i < charCount; i++) {
             const [key, arr] = charEntries[i];
             const ph = Math.max(52, slice);
-            const scope0 = normalizeMemoryScope(arr[0]?.raw?.scope);
-            const displayName = scope0.ownerName || key;
+            const displayName = characterPovLabelFromNodes(arr);
             panels.push({
                 x: rightX,
                 y: yc,
