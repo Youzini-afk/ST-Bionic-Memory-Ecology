@@ -73,6 +73,10 @@ import {
   runExtractionController,
 } from "./extraction-controller.js";
 import {
+  debugDebug,
+  debugLog,
+} from "./debug-logging.js";
+import {
   extractMemories,
   generateReflection,
   generateSynopsis,
@@ -371,6 +375,7 @@ function readRuntimeDebugSnapshot() {
 
 const defaultSettings = {
   enabled: true,
+  debugLoggingEnabled: false,
   timeoutMs: 300000,
   hideOldMessagesEnabled: false,
   hideOldMessagesKeepLastN: 12,
@@ -1486,6 +1491,7 @@ function getMessageRecallRecord(messageIndex) {
 }
 
 function debugWithThrottle(cache, key, ...args) {
+  if (!globalThis.__stBmeDebugLoggingEnabled) return;
   const now = Date.now();
   const lastAt = cache.get(key) || 0;
   if (now - lastAt < PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS) return;
@@ -2952,6 +2958,9 @@ function getSettings() {
   mergedSettings.taskProfilesVersion = migrated.taskProfilesVersion;
   mergedSettings.taskProfiles = migrated.taskProfiles;
   extension_settings[MODULE_NAME] = mergedSettings;
+  globalThis.__stBmeDebugLoggingEnabled = Boolean(
+    mergedSettings.debugLoggingEnabled,
+  );
   return mergedSettings;
 }
 
@@ -2989,7 +2998,7 @@ async function applyMessageHideNow(reason = "manual-apply") {
       getMessageHideSettings(),
       getHideRuntimeAdapters(),
     );
-    console.log("[ST-BME] 已应用旧楼层隐藏:", reason, result);
+    debugLog("[ST-BME] 已应用旧楼层隐藏:", reason, result);
     return result;
   } catch (error) {
     console.warn("[ST-BME] 应用旧楼层隐藏失败:", reason, error);
@@ -3019,7 +3028,7 @@ async function runIncrementalMessageHide(reason = "incremental") {
       getHideRuntimeAdapters(),
     );
     if (result?.active) {
-      console.log("[ST-BME] 已增量更新旧楼层隐藏:", reason, result);
+      debugLog("[ST-BME] 已增量更新旧楼层隐藏:", reason, result);
     }
     return result;
   } catch (error) {
@@ -3034,7 +3043,7 @@ async function runIncrementalMessageHide(reason = "incremental") {
 function clearMessageHideState(reason = "reset") {
   try {
     resetHideState(getHideRuntimeAdapters());
-    console.log("[ST-BME] 已重置旧楼层隐藏状态:", reason);
+    debugLog("[ST-BME] 已重置旧楼层隐藏状态:", reason);
   } catch (error) {
     console.warn("[ST-BME] 重置旧楼层隐藏状态失败:", reason, error);
   }
@@ -3043,7 +3052,7 @@ function clearMessageHideState(reason = "reset") {
 async function clearAllHiddenMessages(reason = "manual-clear") {
   try {
     const result = await unhideAll(getHideRuntimeAdapters());
-    console.log("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
+    debugLog("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
     return result;
   } catch (error) {
     console.warn("[ST-BME] 取消全部旧楼层隐藏失败:", reason, error);
@@ -3485,7 +3494,7 @@ async function syncBmeChatManagerWithCurrentChat(
 
   if (!chatId) {
     await manager.closeCurrent();
-    console.debug("[ST-BME] IndexedDB 会话已关闭（无活动聊天）", {
+    debugDebug("[ST-BME] IndexedDB 会话已关闭（无活动聊天）", {
       source,
     });
     return {
@@ -3496,7 +3505,7 @@ async function syncBmeChatManagerWithCurrentChat(
   }
 
   const db = await manager.switchChat(chatId);
-  console.debug("[ST-BME] IndexedDB 会话已同步", {
+  debugDebug("[ST-BME] IndexedDB 会话已同步", {
     source,
     chatId,
   });
@@ -3715,7 +3724,7 @@ async function maybeMigrateLegacyGraphToIndexedDb(
 
       const postMigrationSnapshot = await targetDb.exportSnapshot();
       cacheIndexedDbSnapshot(normalizedChatId, postMigrationSnapshot);
-      console.debug("[ST-BME] legacy chat_metadata 图谱迁移完成", {
+      debugDebug("[ST-BME] legacy chat_metadata 图谱迁移完成", {
         source,
         chatId: normalizedChatId,
         revision:
@@ -3990,7 +3999,7 @@ function applyIndexedDbSnapshotToRuntime(
   removeGraphShadowSnapshot(normalizedChatId);
   refreshPanelLiveState();
   schedulePersistedRecallMessageUiRefresh(30);
-  console.debug("[ST-BME] 已从 IndexedDB 加载图谱", {
+  debugDebug("[ST-BME] 已从 IndexedDB 加载图谱", {
     chatId: normalizedChatId,
     source,
     revision,
@@ -4766,7 +4775,7 @@ function scheduleGraphLoadRetry(
   clearPendingGraphLoadRetry({ resetChatId: false });
   pendingGraphLoadRetryChatId =
     normalizedChatId || (allowPendingChat ? GRAPH_LOAD_PENDING_CHAT_ID : "");
-  console.debug(
+  debugDebug(
     `[ST-BME] 图谱元数据尚未就绪，${delayMs}ms 后重试加载（chat=${normalizedChatId || "pending"}，attempt=${attemptIndex + 1}，reason=${reason}）`,
   );
 
@@ -5543,7 +5552,7 @@ async function ensureVectorReadyIfNeeded(
 
   currentGraph.vectorIndexState.lastWarning = "";
   saveGraphToChat({ reason: "vector-auto-repair-succeeded" });
-  console.log("[ST-BME] 向量状态已自动修复:", reason, result.stats);
+  debugLog("[ST-BME] 向量状态已自动修复:", reason, result.stats);
   return result;
 }
 
@@ -5610,6 +5619,9 @@ async function loadServerSettings() {
     const loaded = await response.json();
     if (loaded && typeof loaded === "object" && !Array.isArray(loaded)) {
       extension_settings[MODULE_NAME] = mergePersistedSettings(loaded);
+      globalThis.__stBmeDebugLoggingEnabled = Boolean(
+        extension_settings[MODULE_NAME]?.debugLoggingEnabled,
+      );
       saveSettingsDebounced();
     }
   } catch (error) {
@@ -5670,6 +5682,9 @@ function updateModuleSettings(patch = {}) {
   const settings = getSettings();
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
+  globalThis.__stBmeDebugLoggingEnabled = Boolean(
+    settings.debugLoggingEnabled,
+  );
   saveSettingsDebounced();
 
   if (
@@ -9834,11 +9849,11 @@ async function onReembedDirect() {
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
       isTrivialUserInput,
       preparePlannerRecallHandoff,
-      runPlannerRecallForEna,
+    runPlannerRecallForEna,
     });
-    console.log("[ST-BME] Ena Planner module loaded");
+    debugLog("[ST-BME] Ena Planner module loaded");
   } catch (error) {
     console.warn("[ST-BME] Ena Planner module load failed:", error);
   }
-  console.log("[ST-BME] 初始化完成");
+  debugLog("[ST-BME] 初始化完成");
 })();

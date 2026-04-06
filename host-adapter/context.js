@@ -1,6 +1,7 @@
 import { getContext as extensionGetContext } from "../../../../extensions.js";
 
 import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
+import { debugDebug } from "../debug-logging.js";
 
 function resolveContextGetter(providedGetter = null) {
   if (typeof providedGetter === "function") {
@@ -55,7 +56,7 @@ export function createContextHostFacade(options = {}) {
       try {
         return getContext(...args);
       } catch (error) {
-        console.debug(
+        debugDebug(
           "[ST-BME] host-adapter/context getContext 调用失败",
           error,
         );
@@ -71,7 +72,7 @@ export function createContextHostFacade(options = {}) {
         const context = getContext(...args);
         return context && typeof context === "object" ? context : null;
       } catch (error) {
-        console.debug("[ST-BME] host-adapter/context 读取上下文失败", error);
+        debugDebug("[ST-BME] host-adapter/context 读取上下文失败", error);
         return null;
       }
     },

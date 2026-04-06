@@ -14,6 +14,7 @@ import {
   normalizeNodeMemoryScope,
   isSameLatestScopeBucket,
 } from "./memory-scope.js";
+import { debugLog } from "./debug-logging.js";
 
 /**
  * 图状态版本号
@@ -546,7 +547,7 @@ export function deserializeGraph(json) {
     }
 
     if (data.version < GRAPH_VERSION) {
-      console.log(`[ST-BME] 图版本迁移 v${data.version} → v${GRAPH_VERSION}`);
+      debugLog(`[ST-BME] 图版本迁移 v${data.version} → v${GRAPH_VERSION}`);
 
       if (data.version < 2 && data.edges) {
         for (const edge of data.edges) {

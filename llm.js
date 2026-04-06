@@ -4,6 +4,7 @@
 import { getRequestHeaders } from "../../../../script.js";
 import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
+import { debugLog, debugWarn } from "./debug-logging.js";
 import { resolveTaskGenerationOptions } from "./generation-options.js";
 import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { applyTaskRegex } from "./task-regex.js";
@@ -1585,13 +1586,13 @@ export async function callLLMForJSON({
       );
       {
         const asmUser = assembledMessages.filter((m) => m?.role === "user");
-        console.log(
+        debugLog(
           `[ST-BME][prompt-diag] buildJsonAttemptMessages: ` +
             `total=${assembledMessages.length}, user=${asmUser.length}, ` +
             `roles=[${assembledMessages.map((m) => m?.role).join(",")}]`,
         );
         for (const m of asmUser) {
-          console.log(
+          debugLog(
             `[ST-BME][prompt-diag]   assembled user: len=${String(m.content || "").length}, ` +
               `preview="${String(m.content || "").slice(0, 80)}..."`,
           );
@@ -1605,18 +1606,18 @@ export async function callLLMForJSON({
         const rcMsgs = Array.isArray(requestCleaning.messages) ? requestCleaning.messages : [];
         const rcUser = rcMsgs.filter((m) => m?.role === "user");
         const dbg = requestCleaning.debug || {};
-        console.log(
+        debugLog(
           `[ST-BME][prompt-diag] applyTaskFinalInputRegex: ` +
             `total=${rcMsgs.length}, user=${rcUser.length}, ` +
             `changed=${dbg.changed}, applied=${dbg.applied}, ` +
             `roles=[${rcMsgs.map((m) => m?.role).join(",")}]`,
         );
         if (rcUser.length === 0 && assembledMessages.filter((m) => m?.role === "user").length > 0) {
-          console.warn(
+          debugWarn(
             `[ST-BME][prompt-diag] *** USER MESSAGES LOST during applyTaskFinalInputRegex! ***`,
           );
           for (const rule of dbg.appliedRules || []) {
-            console.warn(`[ST-BME][prompt-diag]   applied rule: ${JSON.stringify(rule)}`);
+            debugWarn(`[ST-BME][prompt-diag]   applied rule: ${JSON.stringify(rule)}`);
           }
         }
       }

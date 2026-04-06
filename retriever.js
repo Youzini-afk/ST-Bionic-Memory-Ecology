@@ -2,6 +2,7 @@
 // 融合向量预筛（PeroCore）+ 图扩散（PeroCore PEDSA）+ 可选 LLM 精确召回
 // v2: + 认知边界过滤(RoleRAG) + 双记忆交叉检索(AriGraph) + 概率触发
 
+import { debugLog } from "./debug-logging.js";
 import { diffuseAndRank } from "./diffusion.js";
 import { hybridScore, reinforceAccessBatch } from "./dynamics.js";
 import {
@@ -838,7 +839,7 @@ export async function retrieve({
       maxSegments: multiIntentMaxSegments,
     },
   );
-  console.log(
+  debugLog(
     `[ST-BME] 检索开始: ${nodeCount} 个活跃节点${enableVisibility ? " (认知边界已启用)" : ""}`,
   );
 
@@ -877,7 +878,7 @@ export async function retrieve({
 
   const vectorStartedAt = nowMs();
   if (enableVectorPrefilter && vectorValidation.valid) {
-    console.log("[ST-BME] 第1层: 向量预筛");
+    debugLog("[ST-BME] 第1层: 向量预筛");
     const queryPlan = buildVectorQueryPlan(contextQueryBlend, {
       enableMultiIntent,
       maxSegments: multiIntentMaxSegments,
@@ -958,7 +959,7 @@ export async function retrieve({
 
   const diffusionStartedAt = nowMs();
   if (enableGraphDiffusion) {
-    console.log("[ST-BME] 第2层: PEDSA 图扩散");
+    debugLog("[ST-BME] 第2层: PEDSA 图扩散");
     const seeds = [
       ...vectorResults.map((v) => ({ id: v.nodeId, energy: v.score })),
       ...exactEntityAnchors.map((item) => ({ id: item.nodeId, energy: 2.0 })),
@@ -1016,7 +1017,7 @@ export async function retrieve({
   retrievalMeta.diffusionHits = diffusionResults.length;
   retrievalMeta.timings.diffusion = roundMs(nowMs() - diffusionStartedAt);
 
-  console.log("[ST-BME] 第3层: 混合评分");
+  debugLog("[ST-BME] 第3层: 混合评分");
 
   const scoreMap = new Map();
 
@@ -1168,7 +1169,7 @@ export async function retrieve({
   let llmDurationMs = 0;
 
   if (enableLLMRecall && nodeCount > 0) {
-    console.log("[ST-BME] LLM 精确召回");
+    debugLog("[ST-BME] LLM 精确召回");
     llmCandidates = resolveCandidatePool(
       scoredNodes,
       normalizedLlmCandidatePool,
@@ -1247,7 +1248,7 @@ export async function retrieve({
 
   reinforceAccessBatch(selectedNodes);
 
-  console.log(`[ST-BME] 检索完成: 选中 ${selectedNodeIds.length} 个节点`);
+  debugLog(`[ST-BME] 检索完成: 选中 ${selectedNodeIds.length} 个节点`);
 
   if (enableProbRecall && probRecallChance > 0) {
     const selectedSet = new Set(selectedNodeIds);
@@ -1265,7 +1266,7 @@ export async function retrieve({
     for (const c of candidates) {
       if (Math.random() < probability) {
         selectedNodeIds.push(c.id);
-        console.log(
+        debugLog(
           `[ST-BME] 概率触发: ${c.fields?.name || c.fields?.summary || c.id}`,
         );
       }

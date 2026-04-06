@@ -2,6 +2,7 @@
 // 合并 Mem0 精确对照 + A-MEM 记忆进化为单一阶段
 // 批量 embed + 批量查近邻 + 单次 LLM 调用
 
+import { debugLog } from "./debug-logging.js";
 import { embedBatch, searchSimilar } from "./embedding.js";
 import { addEdge, createEdge, getActiveNodes, getNode } from "./graph.js";
 import { callLLMForJSON } from "./llm.js";
@@ -301,7 +302,7 @@ export async function consolidateMemories({
 
   if (!newNodeIds || newNodeIds.length === 0) return stats;
   if (!validateVectorConfig(embeddingConfig).valid) {
-    console.log("[ST-BME] 记忆整合跳过：向量配置不可用");
+    debugLog("[ST-BME] 记忆整合跳过：向量配置不可用");
     return stats;
   }
 
@@ -331,7 +332,7 @@ export async function consolidateMemories({
   }
 
   throwIfAborted(signal);
-  console.log(`[ST-BME] 记忆整合开始: ${newEntries.length} 个新节点`);
+  debugLog(`[ST-BME] 记忆整合开始: ${newEntries.length} 个新节点`);
 
   // ══════════════════════════════════════════════
   // Phase 1 + 2: 批量 Embed + 查近邻
@@ -571,7 +572,7 @@ export async function consolidateMemories({
   if (stats.updates > 0) actionSummary.push(`回溯更新 ${stats.updates}`);
 
   if (actionSummary.length > 0) {
-    console.log(`[ST-BME] 记忆整合完成: ${actionSummary.join(", ")}`);
+    debugLog(`[ST-BME] 记忆整合完成: ${actionSummary.join(", ")}`);
   }
 
   return stats;
@@ -586,7 +587,7 @@ function processOneResult(graph, entry, result, stats) {
   // ── 处理 action ──
   switch (result.action) {
     case "skip": {
-      console.log(`[ST-BME] 记忆整合: skip (重复) — ${newId}`);
+      debugLog(`[ST-BME] 记忆整合: skip (重复) — ${newId}`);
       newNode.archived = true;
       stats.skipped++;
       break;
@@ -601,7 +602,7 @@ function processOneResult(graph, entry, result, stats) {
         !targetNode.archived &&
         canMergeScopedMemories(newNode, targetNode)
       ) {
-        console.log(`[ST-BME] 记忆整合: merge ${newId} → ${targetId}`);
+        debugLog(`[ST-BME] 记忆整合: merge ${newId} → ${targetId}`);
 
         if (result.merged_fields && typeof result.merged_fields === "object") {
           for (const [key, value] of Object.entries(result.merged_fields)) {
@@ -658,7 +659,7 @@ function processOneResult(graph, entry, result, stats) {
   const evolution = result.evolution;
   if (evolution?.should_evolve && !newNode.archived) {
     stats.evolved++;
-    console.log(`[ST-BME] 记忆整合/进化触发: ${result.reason || "(无理由)"}`);
+    debugLog(`[ST-BME] 记忆整合/进化触发: ${result.reason || "(无理由)"}`);
 
     if (Array.isArray(evolution.connections)) {
       for (const targetId of evolution.connections) {

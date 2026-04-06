@@ -1,6 +1,7 @@
 // ST-BME: Prompt Builder
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
+import { debugLog, debugWarn } from "./debug-logging.js";
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
 import { sanitizeMvuContent } from "./mvu-compat.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
@@ -1098,7 +1099,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   let assistantRoleBlockCount = 0;
   let systemRoleBlockCount = 0;
 
-  console.log(
+  debugLog(
     `[ST-BME][prompt-diag] buildTaskPrompt: taskType=${taskType}, ` +
       `total blocks=${blocks.length}, ` +
       `block roles=[${blocks.map((b) => `${b.name}(${b.role},${b.enabled !== false ? "on" : "off"})`).join(", ")}]`,
@@ -1125,7 +1126,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
 
     if (role === "user") {
-      console.log(
+      debugLog(
         `[ST-BME][prompt-diag] user block "${block.name || block.id}": ` +
           `type=${block.type}, contentLen=${String(content || "").length}, ` +
           `rawContentLen=${String(block.content || "").length}, ` +
@@ -1154,7 +1155,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 
     if (!String(content || "").trim()) {
       if (role === "user" && String(block.content || "").trim()) {
-        console.warn(
+        debugWarn(
           `[ST-BME] buildTaskPrompt: user block "${block.name || block.id}" ` +
             `content emptied during sanitization! ` +
             `original length=${String(block.content || "").length}, ` +
@@ -1220,7 +1221,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
   }
 
-  console.log(
+  debugLog(
     `[ST-BME][prompt-diag] buildTaskPrompt done: ` +
       `executionMessages=${executionMessages.length}, ` +
       `userBlocks=${userRoleBlockCount}, systemBlocks=${systemRoleBlockCount}, ` +
@@ -1405,7 +1406,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     const userBlocksAfterSanitize = executionMessages.filter(
       (m) => m?.role === "user",
     );
-    console.warn(
+    debugWarn(
       `[ST-BME] buildTaskLlmPayload fallback triggered: ` +
         `user blocks in promptBuild=${userBlocksBefore.length}, ` +
         `after recreate=${userBlocksAfterRaw.length}, ` +
@@ -1415,7 +1416,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     );
     if (userBlocksBefore.length > 0) {
       for (const block of userBlocksBefore) {
-        console.warn(
+        debugWarn(
           `[ST-BME]   user block "${block.blockName || block.blockId}": ` +
             `content length=${String(block.content || "").length}, ` +
             `content preview="${String(block.content || "").slice(0, 80)}..."`,
@@ -1423,7 +1424,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
       }
     }
     if (blockedContents.length > 0) {
-      console.warn(
+      debugWarn(
         `[ST-BME]   blockedContents lengths: [${blockedContents.map((c) => String(c || "").length).join(", ")}]`,
       );
     }

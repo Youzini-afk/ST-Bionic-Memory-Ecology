@@ -1082,6 +1082,32 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
+                      <div class="bme-config-card-title">调试日志</div>
+                      <div class="bme-config-card-subtitle">
+                        默认关闭，需要排查问题时再临时打开浏览器控制台日志。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-debug-logging-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">启用调试日志</span>
+                      <span class="bme-toggle-desc">
+                        只在开启后输出内部诊断日志与流程跟踪，可能包含脱敏后的 prompt 组装摘要。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-debug-logging-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
                       <div class="bme-config-card-title">美化用户输入</div>
                       <div class="bme-config-card-subtitle">
                         控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。

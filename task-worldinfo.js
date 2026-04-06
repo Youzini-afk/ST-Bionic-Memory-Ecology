@@ -13,6 +13,7 @@ import {
   isMvuTaggedWorldInfoNameOrComment,
   sanitizeMvuContent,
 } from "./mvu-compat.js";
+import { debugDebug } from "./debug-logging.js";
 
 const WI_POSITION = {
   before: 0,
@@ -249,7 +250,7 @@ async function getWorldbookHost() {
       };
     }
   } catch (error) {
-    console.debug(
+    debugDebug(
       "[ST-BME] task-worldinfo 读取 worldbook bridge 失败，回退到 legacy 宿主接口",
       error,
     );
@@ -759,7 +760,7 @@ async function loadNormalizedWorldbookEntries(
         ]),
       );
     } catch (error) {
-      console.debug(
+      debugDebug(
         `[ST-BME] task-worldinfo 读取 lorebook comment 失败: ${normalizedName}`,
         error,
       );
@@ -827,7 +828,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
     capabilityStatus?.supplementedCapabilities || [];
   const missingCapabilities = capabilityStatus?.missingCapabilities || [];
   if (supplementedCapabilities.length > 0) {
-    console.debug(
+    debugDebug(
       `[ST-BME] task-worldinfo worldbook bridge 已通过 legacy 补齐关键能力: ${supplementedCapabilities.join(", ")} [${sourceTag}]`,
     );
   }
@@ -849,7 +850,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
         ? resolved.additional.map((name) => normalizeKey(name)).filter(Boolean)
         : [];
     } catch (error) {
-      console.debug(
+      debugDebug(
         `[ST-BME] task-worldinfo 读取角色世界书失败 [${sourceTag}]`,
         error,
       );
@@ -928,7 +929,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
       );
       allEntries.push(...entries);
     } catch (error) {
-      console.debug(
+      debugDebug(
         `[ST-BME] task-worldinfo 读取世界书失败: ${normalizedName} [${sourceTag}]`,
         error,
       );

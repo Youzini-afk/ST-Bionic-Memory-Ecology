@@ -1,6 +1,8 @@
 // ST-BME: 提取编排控制器（纯函数）
 // 通过 runtime 依赖注入，避免直接访问 index.js 模块级状态。
 
+import { debugLog } from "./debug-logging.js";
+
 export async function executeExtractionBatchController(
   runtime,
   {
@@ -25,7 +27,7 @@ export async function executeExtractionBatchController(
     extractionCountBefore,
   });
 
-  runtime.console.log(
+  debugLog(
     `[ST-BME] 开始提取: 楼层 ${startIdx}-${endIdx}` +
       (smartTriggerDecision?.triggered
         ? ` [智能触发 score=${smartTriggerDecision.score}; ${smartTriggerDecision.reasons.join(" / ")}]`
@@ -504,7 +506,7 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     };
   }
 
-  runtime.console.log(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
+  debugLog(`[ST-BME] 重 Roll 开始，目标楼层: ${targetFloor}`);
   let rollbackResult;
   try {
     rollbackResult = await runtime.rollbackGraphForReroll(targetFloor, context);

@@ -40,10 +40,10 @@ async function loadSettingsCompatHelpers() {
   const source = await fs.readFile(indexPath, "utf8");
   const settingsMatch = source.match(/const defaultSettings = \{[\s\S]*?^\};/m);
   const compatMatch = source.match(
-    /function migrateLegacyAutoMaintenanceSettings\(loaded = \{\}\) \{[\s\S]*?^}\n/m,
+    /function migrateLegacyAutoMaintenanceSettings\(loaded = \{\}\) \{[\s\S]*?^}\r?\n/m,
   );
   const mergeMatch = source.match(
-    /function mergePersistedSettings\(loaded = \{\}\) \{[\s\S]*?^}\n/m,
+    /function mergePersistedSettings\(loaded = \{\}\) \{[\s\S]*?^}\r?\n/m,
   );
 
   if (!settingsMatch || !compatMatch || !mergeMatch) {
@@ -124,6 +124,7 @@ assert.equal(defaultSettings.injectUserPovMemory, true);
 assert.equal(defaultSettings.injectObjectiveGlobalMemory, true);
 assert.equal(defaultSettings.injectDepth, 9999);
 assert.equal(defaultSettings.enabled, true);
+assert.equal(defaultSettings.debugLoggingEnabled, false);
 assert.equal(defaultSettings.enableReflection, true);
 assert.equal(defaultSettings.consolidationAutoMinNewNodes, 2);
 assert.equal(defaultSettings.enableAutoCompression, true);

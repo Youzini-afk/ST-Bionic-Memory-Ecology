@@ -1,6 +1,7 @@
 // ST-BME: 层级压缩引擎
 // 超过阈值的节点被 LLM 总结为更高层级的压缩节点
 
+import { debugLog } from "./debug-logging.js";
 import { embedText } from "./embedding.js";
 import {
   addEdge,
@@ -517,7 +518,7 @@ export function sleepCycle(graph, settings) {
   }
 
   if (forgotten > 0) {
-    console.log(`[ST-BME] 主动遗忘: ${forgotten} 个低价值节点已归档`);
+    debugLog(`[ST-BME] 主动遗忘: ${forgotten} 个低价值节点已归档`);
   }
 
   return { forgotten };

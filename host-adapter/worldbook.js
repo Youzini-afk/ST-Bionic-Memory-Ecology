@@ -1,5 +1,6 @@
 import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
 import { createContextHostFacade } from "./context.js";
+import { debugDebug } from "../debug-logging.js";
 
 const WORLDBOOK_API_NAMES = [
   "getWorldbook",
@@ -40,7 +41,7 @@ function resolveProviderCandidate(candidate, options = {}) {
       const resolved = candidate(options);
       return isObjectLike(resolved) ? resolved : null;
     } catch (error) {
-      console.debug("[ST-BME] host-adapter/worldbook provider 解析失败", error);
+      debugDebug("[ST-BME] host-adapter/worldbook provider 解析失败", error);
       return null;
     }
   }

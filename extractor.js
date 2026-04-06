@@ -3,6 +3,7 @@
 // v2: 融合 Mem0 精确对照 + Graphiti 时序边 + MemoRAG 全局概要
 
 import { embedBatch } from "./embedding.js";
+import { debugLog, debugWarn } from "./debug-logging.js";
 import {
   addEdge,
   addNode,
@@ -345,7 +346,7 @@ export async function extractMemories({
     activeUserOwner: stContext?.prompt?.userName || "",
   };
 
-  console.log(
+  debugLog(
     `[ST-BME] 提取开始: chat[${effectiveStartSeq}..${effectiveEndSeq}], ${messages.length} 条消息`,
   );
 
@@ -416,7 +417,7 @@ export async function extractMemories({
     const pm = Array.isArray(promptPayload.promptMessages) ? promptPayload.promptMessages : [];
     const pmUser = pm.filter((m) => m?.role === "user");
     const am = Array.isArray(promptPayload.additionalMessages) ? promptPayload.additionalMessages : [];
-    console.log(
+    debugLog(
       `[ST-BME][prompt-diag] resolveTaskPromptPayload: ` +
         `promptMessages=${pm.length} (user=${pmUser.length}), ` +
         `additionalMessages=${am.length}, ` +
@@ -426,13 +427,13 @@ export async function extractMemories({
     );
     if (pmUser.length > 0) {
       for (const m of pmUser) {
-        console.log(
+        debugLog(
           `[ST-BME][prompt-diag]   user msg: contentLen=${String(m.content || "").length}, ` +
             `blockName="${m.blockName || ""}", preview="${String(m.content || "").slice(0, 60)}..."`,
         );
       }
     } else {
-      console.warn(
+      debugWarn(
         `[ST-BME][prompt-diag]   NO user messages in promptMessages! Fallback userPrompt will be used.`,
       );
     }
@@ -537,7 +538,7 @@ export async function extractMemories({
   );
   updateRuntimeScopeState(graph, newNodeIds, scopeRuntime);
 
-  console.log(
+  debugLog(
     `[ST-BME] 提取完成: 新建 ${stats.newNodes}, 更新 ${stats.updatedNodes}, 新边 ${stats.newEdges}, lastProcessedSeq=${graph.lastProcessedSeq}`,
   );
 
@@ -863,7 +864,7 @@ async function generateNodeEmbeddings(graph, embeddingConfig, signal) {
     (node) => buildNodeVectorText(node) || node.type,
   );
 
-  console.log(`[ST-BME] 为 ${texts.length} 个节点生成 embedding`);
+  debugLog(`[ST-BME] 为 ${texts.length} 个节点生成 embedding`);
 
   const embeddings = await embedBatch(texts, embeddingConfig, { signal });
 
@@ -1089,7 +1090,7 @@ export async function generateSynopsis({
       Math.max(existingSynopsis.seqRange?.[1] ?? currentSeq, currentSeq),
     ];
     existingSynopsis.embedding = null;
-    console.log("[ST-BME] 全局概要已更新");
+    debugLog("[ST-BME] 全局概要已更新");
   } else {
     const node = createNode({
       type: "synopsis",
@@ -1098,7 +1099,7 @@ export async function generateSynopsis({
       importance: 9.0,
     });
     addNode(graph, node);
-    console.log("[ST-BME] 全局概要已创建");
+    debugLog("[ST-BME] 全局概要已创建");
   }
 }
 
@@ -1238,6 +1239,6 @@ export async function generateReflection({
     addEdge(graph, edge);
   }
 
-  console.log("[ST-BME] 反思条目已生成");
+  debugLog("[ST-BME] 反思条目已生成");
   return reflectionNode.id;
 }

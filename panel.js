@@ -1581,6 +1581,10 @@ function _refreshConfigTab() {
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
   _setCheckboxValue(
+    "bme-setting-debug-logging-enabled",
+    settings.debugLoggingEnabled ?? false,
+  );
+  _setCheckboxValue(
     "bme-setting-hide-old-messages-enabled",
     settings.hideOldMessagesEnabled ?? false,
   );
@@ -1919,6 +1923,9 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
     _refreshGuardedConfigStates();
+  });
+  bindCheckbox("bme-setting-debug-logging-enabled", (checked) => {
+    _patchSettings({ debugLoggingEnabled: checked });
   });
   bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
     _patchSettings({ hideOldMessagesEnabled: checked });

@@ -1,5 +1,6 @@
 import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
 import { createContextHostFacade } from "./context.js";
+import { debugDebug } from "../debug-logging.js";
 
 function resolvePromptSetter(providedSetter = null, contextHost = null) {
   if (typeof providedSetter === "function") {
@@ -75,7 +76,7 @@ export function createInjectionHostFacade(options = {}) {
         liveSetterRecord.setter(...args);
         return true;
       } catch (error) {
-        console.debug(
+        debugDebug(
           "[ST-BME] host-adapter/injection setExtensionPrompt 调用失败",
           error,
         );

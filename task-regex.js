@@ -3,6 +3,7 @@
 // 同时叠加任务本地规则，并按任务阶段执行。
 
 import { extension_settings, getContext } from "../../../extensions.js";
+import { debugDebug } from "./debug-logging.js";
 import { getHostAdapter } from "./host-adapter/index.js";
 import {
   getActiveTaskProfile,
@@ -236,7 +237,7 @@ function getRegexHost() {
       };
     }
   } catch (error) {
-    console.debug(
+    debugDebug(
       "[ST-BME] task-regex 读取 regex bridge 失败，回退到 legacy 宿主接口",
       error,
     );

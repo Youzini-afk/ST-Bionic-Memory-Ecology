@@ -2,6 +2,7 @@ import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced, substituteParamsExtended } from '../../../../../script.js';
 import { EnaPlannerStorage, migrateFromLWBIfNeeded } from './ena-planner-storage.js';
 import { DEFAULT_PROMPT_BLOCKS, BUILTIN_TEMPLATES } from './ena-planner-presets.js';
+import { debugLog } from '../debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';
@@ -199,7 +200,7 @@ async function saveConfigNow() {
 
 function toastInfo(msg) {
     if (window.toastr?.info) return window.toastr.info(msg);
-    console.log('[EnaPlanner]', msg);
+    debugLog('[EnaPlanner]', msg);
 }
 function toastErr(msg) {
     if (window.toastr?.error) return window.toastr.error(msg);
@@ -505,7 +506,7 @@ async function getCharacterWorldbooks() {
         }
     } catch { }
 
-    console.log('[EnaPlanner] Character worldbook names found:', worldNames);
+    debugLog('[EnaPlanner] Character worldbook names found:', worldNames);
     return worldNames.filter(Boolean);
 }
 
@@ -618,11 +619,11 @@ async function buildWorldbookBlock(scanText) {
     const allWorldNames = [...new Set([...charWorldNames, ...globalWorldNames])];
 
     if (!allWorldNames.length) {
-        console.log('[EnaPlanner] No worldbooks to load');
+        debugLog('[EnaPlanner] No worldbooks to load');
         return '';
     }
 
-    console.log('[EnaPlanner] Loading worldbooks:', allWorldNames);
+    debugLog('[EnaPlanner] Loading worldbooks:', allWorldNames);
 
     // Fetch all worldbook data
     const worldbookResults = await Promise.all(allWorldNames.map(name => getWorldbookData(name)));
@@ -1155,7 +1156,7 @@ async function buildPlannerMessages(rawUserInput) {
             clearTimeout(timeoutId);
         }
     }
-    console.log(`[Ena] Memory source: ${memorySource}`);
+    debugLog(`[Ena] Memory source: ${memorySource}`);
 
     // --- Chat history: last 2 AI messages (floors N-1 & N-3) ---
     // Two messages instead of one to avoid cross-device cache miss:

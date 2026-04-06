@@ -1,3 +1,5 @@
+import { debugLog } from "./debug-logging.js";
+
 function resolvePanelTheme(settings) {
   return settings?.panelTheme || "crimson";
 }
@@ -83,7 +85,7 @@ export async function initializePanelBridgeController(runtime) {
     });
 
     injectOptionsMenuEntry(runtime);
-    runtime.console.log("[ST-BME] 操控面板初始化完成");
+    debugLog("[ST-BME] 操控面板初始化完成");
   } catch (panelError) {
     runtime.console.error(
       "[ST-BME] 操控面板加载失败（核心功能不受影响）:",
