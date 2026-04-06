@@ -129,6 +129,8 @@ assert.equal(defaultSettings.enableReflection, true);
 assert.equal(defaultSettings.consolidationAutoMinNewNodes, 2);
 assert.equal(defaultSettings.enableAutoCompression, true);
 assert.equal(defaultSettings.compressionEveryN, 10);
+assert.equal(defaultSettings.worldInfoFilterMode, "default");
+assert.equal(defaultSettings.worldInfoFilterCustomKeywords, "");
 assert.equal("maintenanceAutoMinNewNodes" in defaultSettings, false);
 assert.equal(defaultSettings.embeddingTransportMode, "direct");
 assert.equal(defaultSettings.taskProfilesVersion, 3);

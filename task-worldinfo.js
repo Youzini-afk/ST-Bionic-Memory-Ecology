@@ -71,6 +71,14 @@ function createMvuCollector() {
   };
 }
 
+function createCustomFilterCollector() {
+  return {
+    filteredEntries: [],
+    lazyFilteredEntries: [],
+    seenEntries: new Set(),
+  };
+}
+
 function registerIgnoredEntryLookup(collector, worldbookName, identifier, meta) {
   const normalizedIdentifier = normalizeKey(identifier);
   if (!collector || !normalizedIdentifier) return;
@@ -78,6 +86,36 @@ function registerIgnoredEntryLookup(collector, worldbookName, identifier, meta) 
     buildIgnoredEntryLookupKey(worldbookName, normalizedIdentifier),
     meta,
   );
+}
+
+function registerCustomFilteredEntry(
+  collector,
+  entry = {},
+  matchedKeyword = "",
+  { lazy = false } = {},
+) {
+  if (!collector || !entry) return;
+
+  const worldbook = normalizeKey(entry.worldbook);
+  const name = normalizeKey(entry.name);
+  const identity = `${worldbook}:${entry.uid || 0}:${name}:${String(matchedKeyword || "")}`;
+  if (collector.seenEntries.has(identity)) {
+    return;
+  }
+  collector.seenEntries.add(identity);
+
+  const meta = {
+    worldbook,
+    name,
+    matchedKeyword: String(matchedKeyword || ""),
+    reason: "custom_keyword",
+  };
+
+  if (lazy) {
+    collector.lazyFilteredEntries.push(meta);
+  } else {
+    collector.filteredEntries.push(meta);
+  }
 }
 
 function registerIgnoredWorldInfoEntry(
@@ -171,6 +209,26 @@ function buildMvuDebugSummary(collector) {
     filteredEntryCount: filteredEntries.length,
     filteredEntries: [...filteredEntries, ...lazyFilteredEntries],
     blockedContentsCount: uniq(blockedContents.map((item) => String(item || "").trim()).filter(Boolean)).length,
+    lazyFilteredEntryCount: lazyFilteredEntries.length,
+  };
+}
+
+function buildCustomFilterDebugSummary(
+  collector,
+  { filterMode = "default", customFilterKeywords = [] } = {},
+) {
+  const filteredEntries = Array.isArray(collector?.filteredEntries)
+    ? collector.filteredEntries
+    : [];
+  const lazyFilteredEntries = Array.isArray(collector?.lazyFilteredEntries)
+    ? collector.lazyFilteredEntries
+    : [];
+
+  return {
+    mode: String(filterMode || "default"),
+    keywords: [...(Array.isArray(customFilterKeywords) ? customFilterKeywords : [])],
+    filteredEntryCount: filteredEntries.length + lazyFilteredEntries.length,
+    filteredEntries: [...filteredEntries, ...lazyFilteredEntries],
     lazyFilteredEntryCount: lazyFilteredEntries.length,
   };
 }
@@ -741,7 +799,13 @@ function selectActivatedEntries(
 async function loadNormalizedWorldbookEntries(
   worldbookHost,
   worldbookName,
-  { mvuCollector = null, lazy = false } = {},
+  {
+    mvuCollector = null,
+    lazy = false,
+    filterMode = "default",
+    customFilterKeywords = [],
+    customFilterCollector = null,
+  } = {},
 ) {
   const normalizedName = normalizeKey(worldbookName);
   if (!normalizedName || typeof worldbookHost?.getWorldbook !== "function") {
@@ -776,12 +840,33 @@ async function loadNormalizedWorldbookEntries(
       },
       normalizedName,
     );
-    const ignoreReason = getMvuIgnoreReason(normalizedEntry);
-    if (ignoreReason) {
-      registerIgnoredWorldInfoEntry(mvuCollector, normalizedEntry, ignoreReason, {
-        lazy,
-      });
-      continue;
+    if (String(filterMode || "default") === "custom") {
+      if (!normalizedEntry.enabled) {
+        continue;
+      }
+      if (Array.isArray(customFilterKeywords) && customFilterKeywords.length > 0) {
+        const nameLower = normalizedEntry.name.toLowerCase();
+        const matchedKeyword = customFilterKeywords.find((keyword) =>
+          nameLower.includes(String(keyword || "")),
+        );
+        if (matchedKeyword) {
+          registerCustomFilteredEntry(
+            customFilterCollector,
+            normalizedEntry,
+            matchedKeyword,
+            { lazy },
+          );
+          continue;
+        }
+      }
+    } else {
+      const ignoreReason = getMvuIgnoreReason(normalizedEntry);
+      if (ignoreReason) {
+        registerIgnoredWorldInfoEntry(mvuCollector, normalizedEntry, ignoreReason, {
+          lazy,
+        });
+        continue;
+      }
     }
     normalizedEntries.push(normalizedEntry);
   }
@@ -789,7 +874,10 @@ async function loadNormalizedWorldbookEntries(
   return normalizedEntries;
 }
 
-async function collectAllWorldbookEntries(worldbookHost = null) {
+async function collectAllWorldbookEntries(
+  worldbookHost = null,
+  { filterMode = "default", customFilterKeywords = [] } = {},
+) {
   const resolvedWorldbookHost = worldbookHost || (await getWorldbookHost());
   const {
     getWorldbook,
@@ -883,6 +971,10 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
     sourceLabel,
     fallback,
     snapshotRevision: Number(snapshotRevision || 0),
+    filterMode: String(filterMode || "default"),
+    customFilterKeywords: Array.isArray(customFilterKeywords)
+      ? customFilterKeywords
+      : [],
   });
   debug.cache.key = cacheKey;
 
@@ -902,6 +994,12 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
         worldbookCount: worldbookEntriesCache.entries.length,
         loadMs: worldbookEntriesCache.debug?.loadMs || 0,
         mvu: worldbookEntriesCache.debug?.mvu || buildMvuDebugSummary(null),
+        customFilter:
+          worldbookEntriesCache.debug?.customFilter ||
+          buildCustomFilterDebugSummary(null, {
+            filterMode,
+            customFilterKeywords,
+          }),
         cache: {
           ...debug.cache,
           hit: true,
@@ -915,6 +1013,7 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
   const loadedNames = new Set();
   const startedAt = Date.now();
   const mvuCollector = createMvuCollector();
+  const customFilterCollector = createCustomFilterCollector();
 
   async function loadWorldbookOnce(worldbookName) {
     const normalizedName = normalizeKey(worldbookName);
@@ -925,7 +1024,12 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
       const entries = await loadNormalizedWorldbookEntries(
         resolvedWorldbookHost,
         normalizedName,
-        { mvuCollector },
+        {
+          mvuCollector,
+          filterMode,
+          customFilterKeywords,
+          customFilterCollector,
+        },
       );
       allEntries.push(...entries);
     } catch (error) {
@@ -944,6 +1048,10 @@ async function collectAllWorldbookEntries(worldbookHost = null) {
   debug.worldbookCount = allEntries.length;
   debug.loadMs = Date.now() - startedAt;
   debug.mvu = buildMvuDebugSummary(mvuCollector);
+  debug.customFilter = buildCustomFilterDebugSummary(customFilterCollector, {
+    filterMode,
+    customFilterKeywords,
+  });
   worldbookEntriesCache = {
     key: cacheKey,
     createdAt: Date.now(),
@@ -1024,6 +1132,8 @@ function buildAdditionalMessages(entries = []) {
     .map((entry) => ({
       role: entry.role,
       content: String(entry.content || "").trim(),
+      source: "worldInfo-atDepth",
+      sourceKey: "taskAdditionalMessages",
     }))
     .filter((entry) => entry.content);
 }
@@ -1131,6 +1241,14 @@ export async function resolveTaskWorldInfo({
   userMessage = "",
   templateContext = {},
 } = {}) {
+  const filterMode = String(settings.worldInfoFilterMode || "default").trim();
+  const isCustomFilter = filterMode === "custom";
+  const customFilterKeywords = isCustomFilter
+    ? String(settings.worldInfoFilterCustomKeywords || "")
+        .split(",")
+        .map((keyword) => keyword.trim().toLowerCase())
+        .filter(Boolean)
+    : [];
   const result = {
     beforeEntries: [],
     afterEntries: [],
@@ -1172,12 +1290,19 @@ export async function resolveTaskWorldInfo({
       warnings: [],
       resolvedEntries: [],
       mvu: buildMvuDebugSummary(null),
+      customFilter: buildCustomFilterDebugSummary(null, {
+        filterMode,
+        customFilterKeywords,
+      }),
     },
   };
 
   try {
     const worldbookHost = await getWorldbookHost();
-    const collected = await collectAllWorldbookEntries(worldbookHost);
+    const collected = await collectAllWorldbookEntries(worldbookHost, {
+      filterMode,
+      customFilterKeywords,
+    });
     const allEntries = Array.isArray(collected?.entries) ? collected.entries : [];
     const blockedContents = Array.isArray(collected?.blockedContents)
       ? collected.blockedContents
@@ -1210,6 +1335,14 @@ export async function resolveTaskWorldInfo({
         collected?.debug?.mvu && typeof collected.debug.mvu === "object"
           ? { ...collected.debug.mvu }
           : buildMvuDebugSummary(null),
+      customFilter:
+        collected?.debug?.customFilter &&
+        typeof collected.debug.customFilter === "object"
+          ? { ...collected.debug.customFilter }
+          : buildCustomFilterDebugSummary(null, {
+              filterMode,
+              customFilterKeywords,
+            }),
     };
     if (allEntries.length === 0) {
       return result;
@@ -1258,6 +1391,7 @@ export async function resolveTaskWorldInfo({
       ignoredLookup,
       seenEntries: new Set(),
     };
+    const lazyCustomFilterCollector = createCustomFilterCollector();
     const knownWorldbooks = new Set(
       allEntries.map((entry) => entry.worldbook).filter(Boolean),
     );
@@ -1272,6 +1406,9 @@ export async function resolveTaskWorldInfo({
         {
           mvuCollector: lazyMvuCollector,
           lazy: true,
+          filterMode,
+          customFilterKeywords,
+          customFilterCollector: lazyCustomFilterCollector,
         },
       );
       knownWorldbooks.add(normalizedWorldbook);
@@ -1292,6 +1429,29 @@ export async function resolveTaskWorldInfo({
           newLazyIgnoredEntries.length,
       };
       lazyMvuCollector.lazyFilteredEntries = [];
+      if (isCustomFilter) {
+        const newLazyCustomEntries = [
+          ...lazyCustomFilterCollector.lazyFilteredEntries,
+        ];
+        if (newLazyCustomEntries.length > 0) {
+          result.debug.customFilter = {
+            ...result.debug.customFilter,
+            filteredEntries: [
+              ...(Array.isArray(result.debug.customFilter?.filteredEntries)
+                ? result.debug.customFilter.filteredEntries
+                : []),
+              ...newLazyCustomEntries,
+            ],
+            filteredEntryCount:
+              Number(result.debug.customFilter?.filteredEntryCount || 0) +
+              newLazyCustomEntries.length,
+            lazyFilteredEntryCount:
+              Number(result.debug.customFilter?.lazyFilteredEntryCount || 0) +
+              newLazyCustomEntries.length,
+          };
+        }
+        lazyCustomFilterCollector.lazyFilteredEntries = [];
+      }
       return lazyEntries;
     };
 
@@ -1312,12 +1472,14 @@ export async function resolveTaskWorldInfo({
         templateContext: normalizedTemplateContext,
         currentActivatedEntries: [...allActivated.values()],
         loadWorldbookEntries: lazyLoadWorldbookEntries,
-        resolveIgnoredEntry: (worldbookName, identifier) =>
-          findIgnoredWorldInfoEntry(
-            { ignoredLookup },
-            worldbookName,
-            identifier,
-          ),
+        resolveIgnoredEntry: isCustomFilter
+          ? () => null
+          : (worldbookName, identifier) =>
+              findIgnoredWorldInfoEntry(
+                { ignoredLookup },
+                worldbookName,
+                identifier,
+              ),
       },
     );
 
@@ -1384,10 +1546,19 @@ export async function resolveTaskWorldInfo({
           recursionWarnings.add(String(warning || ""));
         }
 
-        const mvuSanitized = sanitizeMvuContent(renderedContent, {
-          mode: "aggressive",
-          blockedContents,
-        });
+        const mvuSanitized = isCustomFilter
+          ? {
+              text: renderedContent,
+              changed: false,
+              dropped: false,
+              reasons: [],
+              blockedHitCount: 0,
+              artifactRemovedCount: 0,
+            }
+          : sanitizeMvuContent(renderedContent, {
+              mode: "aggressive",
+              blockedContents,
+            });
         if (mvuSanitized.dropped) {
           const warning = `世界书条目 ${entry.name} 渲染结果命中 MVU 规则，已跳过`;
           if (!result.debug.warnings.includes(warning)) {
