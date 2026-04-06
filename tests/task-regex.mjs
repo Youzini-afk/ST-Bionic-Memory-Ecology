@@ -588,6 +588,38 @@ try {
     beautifyFinalDebug.entries[0].appliedRules.map((item) => item.id),
     ["beautify-final-strip"],
   );
+  const beautifyFinalPromptStageOffSettings = buildSettings({
+    stages: {
+      input: true,
+      output: true,
+      "input.userMessage": true,
+      "input.recentMessages": true,
+      "input.candidateText": true,
+      "input.finalPrompt": false,
+      "output.rawResponse": true,
+      "output.beforeParse": true,
+    },
+  });
+  const beautifyStageOffInspect = inspectTaskRegexReuse(
+    beautifyFinalPromptStageOffSettings,
+    "extract",
+  );
+  const beautifyStageOffRule = beautifyStageOffInspect.activeRules.find(
+    (rule) => rule.id === "beautify-final-strip",
+  );
+  assert.equal(beautifyStageOffRule?.promptStageMode, "clear");
+  assert.equal(beautifyStageOffRule?.promptStageApplies, false);
+  assert.equal(
+    applyTaskRegex(
+      beautifyFinalPromptStageOffSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      { entries: [] },
+      "user",
+    ),
+    "Decor",
+  );
   const destinationBeautifySettings = buildSettings({
     sources: {
       global: true,

@@ -437,6 +437,12 @@ function summarizeRule(rule, reason = "") {
 
 function summarizeRuleForPromptPreview(rule, stageConfig = {}, reason = "") {
   const summary = summarizeRule(rule, reason);
+  const promptSemanticApplies =
+    summary.sourceType === "local"
+      ? summary.sourceFlags.system !== false &&
+        rule?.destinationFlags?.prompt !== false
+      : summary.promptReplaceAsEmpty ||
+        (summary.promptOnly === true && rule?.destinationFlags?.prompt !== false);
   const promptStageApplies = shouldApplyRuleForStage(
     rule,
     "input.finalPrompt",
@@ -444,8 +450,10 @@ function summarizeRuleForPromptPreview(rule, stageConfig = {}, reason = "") {
   );
   return {
     ...summary,
+    promptSemanticApplies,
     promptStageApplies,
-    promptStageMode: promptStageApplies
+    promptStageEnabled: isTaskRegexStageEnabled(stageConfig, "input.finalPrompt"),
+    promptStageMode: promptSemanticApplies
       ? summary.promptReplaceAsEmpty
         ? "clear"
         : "replace"

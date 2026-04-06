@@ -3928,6 +3928,12 @@ function _renderRegexReuseBadges(rule = {}) {
       text: "仅 Prompt",
     });
   }
+  if (rule.promptStageMode !== "skip" && rule.promptStageApplies === false) {
+    badges.push({
+      className: "is-skip",
+      text: "当前任务未启用",
+    });
+  }
   return badges
     .map(
       (badge) => `<span class="bme-regex-preview-item__badge ${badge.className}">${_escHtml(badge.text)}</span>`,
