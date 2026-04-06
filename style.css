@@ -2214,6 +2214,15 @@
   cursor: not-allowed;
 }
 
+.bme-detail-action-danger {
+  color: var(--bme-accent3, #ffc107);
+}
+
+.bme-detail-action-danger:hover:not(:disabled) {
+  background: rgba(255, 193, 7, 0.12);
+  color: var(--bme-accent3, #ffc107);
+}
+
 .bme-node-detail h3 {
   font-size: 14px;
   color: var(--bme-on-surface);

@@ -93,6 +93,7 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-vector-range",
   "bme-act-vector-reembed",
   "bme-act-reroll",
+  "bme-detail-delete",
   "bme-detail-save",
 ];
 
@@ -1537,6 +1538,52 @@ function _bindNodeDetailPanel() {
     saveBtn.addEventListener("click", () => _saveNodeDetail());
     saveBtn.dataset.bmeBound = "true";
   }
+  const deleteBtn = document.getElementById("bme-detail-delete");
+  if (deleteBtn && deleteBtn.dataset.bmeBound !== "true") {
+    deleteBtn.addEventListener("click", () => _deleteNodeDetail());
+    deleteBtn.dataset.bmeBound = "true";
+  }
+}
+
+function _deleteNodeDetail() {
+  const detailEl = document.getElementById("bme-node-detail");
+  const nodeId = detailEl?.dataset?.editNodeId;
+  if (!nodeId) return;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return;
+  }
+  const g = _getGraph?.();
+  const node = g?.nodes?.find((n) => n.id === nodeId);
+  const label = node ? getNodeDisplayName(node) : nodeId;
+  if (
+    !confirm(
+      `确定删除节点「${label}」？\n\n若该节点有层级子节点，将一并删除。此操作不可在本面板内撤销。`,
+    )
+  ) {
+    return;
+  }
+  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
+      "ST-BME",
+    );
+    return;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "节点已从图中移除，但写回可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已删除", "ST-BME");
+  }
+  detailEl?.classList.remove("open");
+  if (detailEl) delete detailEl.dataset.editNodeId;
+  graphRenderer?.highlightNode?.("__cleared__");
+  mobileGraphRenderer?.highlightNode?.("__cleared__");
+  refreshLiveState();
 }
 
 function _bindClose() {

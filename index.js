@@ -110,6 +110,7 @@ import {
   getGraphStats,
   getNode,
   importGraph,
+  removeNode,
   updateNode,
 } from "./graph.js";
 import {
@@ -9524,6 +9525,26 @@ function onSavePanelGraphNode(payload = {}) {
   };
 }
 
+function onDeletePanelGraphNode(payload = {}) {
+  const nodeId = String(payload.nodeId || "");
+  if (!nodeId || !currentGraph) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!getNode(currentGraph, nodeId)) {
+    return { ok: false, error: "node-not-found" };
+  }
+  const removed = removeNode(currentGraph, nodeId);
+  if (!removed) {
+    return { ok: false, error: "delete-failed" };
+  }
+  const persist = saveGraphToChat({ reason: "panel-node-delete" });
+  return {
+    ok: true,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 async function onExportGraph() {
   return await onExportGraphController({
     document,
@@ -9830,6 +9851,7 @@ async function onReembedDirect() {
       applyCurrentHide: () => applyMessageHideNow("panel-manual-apply"),
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       saveGraphNode: onSavePanelGraphNode,
+      deleteGraphNode: onDeletePanelGraphNode,
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,
