@@ -41,6 +41,12 @@
   transform: translateY(12px) scale(0.98);
   transition: transform 0.25s ease;
   resize: both;
+  /* 默认暗色表单范式；亮色主题见 :root[data-bme-color-scheme="light"] */
+  color-scheme: dark;
+}
+
+:root[data-bme-color-scheme="light"] #st-bme-panel {
+  color-scheme: light;
 }
 
 #st-bme-panel-overlay.active #st-bme-panel {
@@ -1266,8 +1272,9 @@
 .bme-config-input,
 .bme-config-textarea {
   width: 100%;
-  background: rgba(0, 0, 0, 0.22);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-sizing: border-box;
+  background-color: var(--bme-surface-high);
+  border: 1px solid var(--bme-border);
   border-radius: 10px;
   padding: 10px 12px;
   color: var(--bme-on-surface);
@@ -1276,7 +1283,7 @@
   transition:
     border-color 0.15s,
     box-shadow 0.15s,
-    background 0.15s;
+    background-color 0.15s;
 }
 
 .bme-config-input:focus,
@@ -1287,8 +1294,10 @@
 
 .bme-config-input:disabled,
 .bme-config-textarea:disabled {
-  background: rgba(255, 255, 255, 0.035);
-  color: rgba(255, 255, 255, 0.45);
+  background-color: var(--bme-surface-low);
+  color: var(--bme-on-surface-dim);
+  border-color: var(--bme-border);
+  opacity: 0.85;
   cursor: not-allowed;
 }
 
@@ -1874,7 +1883,7 @@
   -webkit-appearance: none;
   appearance: none;
   height: 4px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--bme-border);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
@@ -1893,7 +1902,7 @@
 }
 
 .bme-range-input::-webkit-slider-thumb:hover {
-  box-shadow: 0 0 0 4px rgba(233, 69, 96, 0.15);
+  box-shadow: 0 0 0 4px var(--bme-primary-dim);
 }
 
 .bme-range-input::-moz-range-thumb {
@@ -1907,7 +1916,7 @@
 
 .bme-range-input::-moz-range-track {
   height: 4px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--bme-border);
   border-radius: 2px;
 }
 

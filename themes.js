@@ -169,6 +169,9 @@ export const THEMES = {
     },
 };
 
+/** 使用亮色 color-scheme 的面板主题（原生 number/select 等控件配色） */
+export const LIGHT_PANEL_THEMES = new Set(['paperDawn', 'glacierSky']);
+
 /**
  * 将主题配色应用为 CSS 变量
  * @param {string} themeName - crimson | cyan | amber | violet | paperDawn | glacierSky
@@ -209,6 +212,10 @@ export function applyTheme(themeName, root = null) {
         el.style.setProperty(key, value);
     }
     el.setAttribute('data-bme-theme', themeName);
+    el.setAttribute(
+        'data-bme-color-scheme',
+        LIGHT_PANEL_THEMES.has(themeName) ? 'light' : 'dark',
+    );
 }
 
 /**
