@@ -196,7 +196,7 @@ let overlayEl = null;
 let graphRenderer = null;
 let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
-let currentConfigSectionId = "api";
+let currentConfigSectionId = "toggles";
 let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
@@ -839,7 +839,7 @@ function _applyWorkspaceMode() {
 }
 
 function _switchConfigSection(sectionId) {
-  currentConfigSectionId = sectionId || "api";
+  currentConfigSectionId = sectionId || "toggles";
   _syncConfigSectionState();
   if (currentConfigSectionId === "prompts") {
     _refreshTaskProfileWorkspace();
