@@ -411,6 +411,33 @@ export async function extractMemories({
     systemPrompt,
   );
 
+  // 诊断：追踪 promptPayload
+  {
+    const pm = Array.isArray(promptPayload.promptMessages) ? promptPayload.promptMessages : [];
+    const pmUser = pm.filter((m) => m?.role === "user");
+    const am = Array.isArray(promptPayload.additionalMessages) ? promptPayload.additionalMessages : [];
+    console.log(
+      `[ST-BME][prompt-diag] resolveTaskPromptPayload: ` +
+        `promptMessages=${pm.length} (user=${pmUser.length}), ` +
+        `additionalMessages=${am.length}, ` +
+        `userPrompt length=${String(promptPayload.userPrompt || "").length}, ` +
+        `systemPrompt length=${String(promptPayload.systemPrompt || "").length}, ` +
+        `llmSystemPrompt length=${String(llmSystemPrompt || "").length}`,
+    );
+    if (pmUser.length > 0) {
+      for (const m of pmUser) {
+        console.log(
+          `[ST-BME][prompt-diag]   user msg: contentLen=${String(m.content || "").length}, ` +
+            `blockName="${m.blockName || ""}", preview="${String(m.content || "").slice(0, 60)}..."`,
+        );
+      }
+    } else {
+      console.warn(
+        `[ST-BME][prompt-diag]   NO user messages in promptMessages! Fallback userPrompt will be used.`,
+      );
+    }
+  }
+
   // 调用 LLM
   const result = await callLLMForJSON({
     systemPrompt: llmSystemPrompt,

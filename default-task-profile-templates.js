@@ -189,13 +189,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,
@@ -396,13 +393,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,
@@ -579,13 +573,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,
@@ -774,13 +765,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,
@@ -981,13 +969,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,
@@ -1200,13 +1185,10 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "character": true
       },
       "stages": {
-        "finalPrompt": true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        "rawResponse": false,
-        "beforeParse": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
         "input": true,

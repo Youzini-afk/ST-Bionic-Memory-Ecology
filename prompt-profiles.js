@@ -637,15 +637,13 @@ export function normalizeTaskRegexStages(stages = {}) {
   for (const [legacyKey, canonicalKey] of Object.entries(
     TASK_REGEX_STAGE_ALIAS_MAP,
   )) {
-    if (Object.prototype.hasOwnProperty.call(source, legacyKey)) {
-      // Older exports may carry both legacy and canonical keys at the same
-      // time. When that happens, keep the legacy intent instead of letting a
-      // newer placeholder default silently flip stage timing.
-      normalized[canonicalKey] = Boolean(source[legacyKey]);
+    if (Object.prototype.hasOwnProperty.call(source, canonicalKey)) {
+      // Respect an explicitly stored canonical key when both forms are
+      // present. Legacy aliases should only backfill older exports.
       continue;
     }
-    if (Object.prototype.hasOwnProperty.call(source, canonicalKey)) {
-      normalized[canonicalKey] = Boolean(source[canonicalKey]);
+    if (Object.prototype.hasOwnProperty.call(source, legacyKey)) {
+      normalized[canonicalKey] = Boolean(source[legacyKey]);
     }
   }
 
@@ -893,13 +891,10 @@ function createFallbackDefaultTaskProfile(taskType) {
         character: true,
       },
       stages: normalizeTaskRegexStages({
-        finalPrompt: true,
         "input.userMessage": false,
         "input.recentMessages": false,
         "input.candidateText": false,
         "input.finalPrompt": false,
-        rawResponse: false,
-        beforeParse: false,
         "output.rawResponse": false,
         "output.beforeParse": false,
       }),
@@ -954,10 +949,10 @@ export function createDefaultTaskProfile(taskType) {
         ...fallback.regex.sources,
         ...(template?.regex?.sources || {}),
       },
-      stages: normalizeTaskRegexStages({
-        ...fallback.regex.stages,
-        ...(template?.regex?.stages || {}),
-      }),
+      stages: {
+        ...normalizeTaskRegexStages(fallback.regex.stages || {}),
+        ...normalizeTaskRegexStages(template?.regex?.stages || {}),
+      },
       localRules: Array.isArray(template?.regex?.localRules)
         ? template.regex.localRules.map((rule, index) =>
             normalizeRegexLocalRule(rule, taskType, index),
@@ -1148,10 +1143,10 @@ export function normalizeTaskProfile(taskType, profile = {}, settings = {}) {
         ...base.regex.sources,
         ...(profile?.regex?.sources || {}),
       },
-      stages: normalizeTaskRegexStages({
-        ...base.regex.stages,
-        ...(profile?.regex?.stages || {}),
-      }),
+      stages: {
+        ...normalizeTaskRegexStages(base.regex.stages || {}),
+        ...normalizeTaskRegexStages(profile?.regex?.stages || {}),
+      },
       localRules: Array.isArray(profile?.regex?.localRules)
         ? profile.regex.localRules.map((rule, index) =>
             normalizeRegexLocalRule(rule, taskType, index),

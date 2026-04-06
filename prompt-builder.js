@@ -1098,6 +1098,12 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   let assistantRoleBlockCount = 0;
   let systemRoleBlockCount = 0;
 
+  console.log(
+    `[ST-BME][prompt-diag] buildTaskPrompt: taskType=${taskType}, ` +
+      `total blocks=${blocks.length}, ` +
+      `block roles=[${blocks.map((b) => `${b.name}(${b.role},${b.enabled !== false ? "on" : "off"})`).join(", ")}]`,
+  );
+
   for (const block of blocks) {
     if (!block || block.enabled === false) continue;
 
@@ -1116,6 +1122,15 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       }
     } else if (block.type === "custom") {
       content = interpolateVariables(block.content || "", resolvedContext);
+    }
+
+    if (role === "user") {
+      console.log(
+        `[ST-BME][prompt-diag] user block "${block.name || block.id}": ` +
+          `type=${block.type}, contentLen=${String(content || "").length}, ` +
+          `rawContentLen=${String(block.content || "").length}, ` +
+          `blockedContentsCount=${worldInfoRuntimeBlockedContents.length}`,
+      );
     }
 
     const sanitizedBlockContent = sanitizeTaskPromptText(
@@ -1137,7 +1152,19 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
     content = sanitizedBlockContent.text;
 
-    if (!String(content || "").trim()) continue;
+    if (!String(content || "").trim()) {
+      if (role === "user" && String(block.content || "").trim()) {
+        console.warn(
+          `[ST-BME] buildTaskPrompt: user block "${block.name || block.id}" ` +
+            `content emptied during sanitization! ` +
+            `original length=${String(block.content || "").length}, ` +
+            `dropped=${sanitizedBlockContent.dropped}, ` +
+            `reasons=[${(sanitizedBlockContent.reasons || []).join(", ")}], ` +
+            `blockedHitCount=${sanitizedBlockContent.blockedHitCount}`,
+        );
+      }
+      continue;
+    }
 
     const mode = normalizeInjectionMode(block.injectionMode);
     renderedBlocks.push({
@@ -1192,6 +1219,13 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       customMessages.push({ role, content });
     }
   }
+
+  console.log(
+    `[ST-BME][prompt-diag] buildTaskPrompt done: ` +
+      `executionMessages=${executionMessages.length}, ` +
+      `userBlocks=${userRoleBlockCount}, systemBlocks=${systemRoleBlockCount}, ` +
+      `customMessages=${customMessages.length}`,
+  );
 
   for (const message of worldInfoResolution.additionalMessages || []) {
     const executionMessage = createExecutionMessage(
@@ -1361,6 +1395,39 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
   const hasUserMessage = executionMessages.some(
     (message) => message.role === "user",
   );
+  if (!hasUserMessage && rawExecutionMessages.length > 0) {
+    const userBlocksBefore = (promptBuild?.executionMessages || []).filter(
+      (m) => m?.role === "user",
+    );
+    const userBlocksAfterRaw = rawExecutionMessages.filter(
+      (m) => m?.role === "user",
+    );
+    const userBlocksAfterSanitize = executionMessages.filter(
+      (m) => m?.role === "user",
+    );
+    console.warn(
+      `[ST-BME] buildTaskLlmPayload fallback triggered: ` +
+        `user blocks in promptBuild=${userBlocksBefore.length}, ` +
+        `after recreate=${userBlocksAfterRaw.length}, ` +
+        `after sanitize=${userBlocksAfterSanitize.length}, ` +
+        `blockedContents count=${blockedContents.length}, ` +
+        `total executionMessages=${executionMessages.length}`,
+    );
+    if (userBlocksBefore.length > 0) {
+      for (const block of userBlocksBefore) {
+        console.warn(
+          `[ST-BME]   user block "${block.blockName || block.blockId}": ` +
+            `content length=${String(block.content || "").length}, ` +
+            `content preview="${String(block.content || "").slice(0, 80)}..."`,
+        );
+      }
+    }
+    if (blockedContents.length > 0) {
+      console.warn(
+        `[ST-BME]   blockedContents lengths: [${blockedContents.map((c) => String(c || "").length).join(", ")}]`,
+      );
+    }
+  }
   const sanitizedFallbackUserPrompt = sanitizeTaskPromptText(
     {},
     promptBuild?.debug?.taskType || "",

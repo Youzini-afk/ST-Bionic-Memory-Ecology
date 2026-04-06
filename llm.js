@@ -1583,10 +1583,43 @@ export async function callLLMForJSON({
         additionalMessages,
         promptMessages,
       );
+      {
+        const asmUser = assembledMessages.filter((m) => m?.role === "user");
+        console.log(
+          `[ST-BME][prompt-diag] buildJsonAttemptMessages: ` +
+            `total=${assembledMessages.length}, user=${asmUser.length}, ` +
+            `roles=[${assembledMessages.map((m) => m?.role).join(",")}]`,
+        );
+        for (const m of asmUser) {
+          console.log(
+            `[ST-BME][prompt-diag]   assembled user: len=${String(m.content || "").length}, ` +
+              `preview="${String(m.content || "").slice(0, 80)}..."`,
+          );
+        }
+      }
       const requestCleaning = applyTaskFinalInputRegex(
         taskType,
         assembledMessages,
       );
+      {
+        const rcMsgs = Array.isArray(requestCleaning.messages) ? requestCleaning.messages : [];
+        const rcUser = rcMsgs.filter((m) => m?.role === "user");
+        const dbg = requestCleaning.debug || {};
+        console.log(
+          `[ST-BME][prompt-diag] applyTaskFinalInputRegex: ` +
+            `total=${rcMsgs.length}, user=${rcUser.length}, ` +
+            `changed=${dbg.changed}, applied=${dbg.applied}, ` +
+            `roles=[${rcMsgs.map((m) => m?.role).join(",")}]`,
+        );
+        if (rcUser.length === 0 && assembledMessages.filter((m) => m?.role === "user").length > 0) {
+          console.warn(
+            `[ST-BME][prompt-diag] *** USER MESSAGES LOST during applyTaskFinalInputRegex! ***`,
+          );
+          for (const rule of dbg.appliedRules || []) {
+            console.warn(`[ST-BME][prompt-diag]   applied rule: ${JSON.stringify(rule)}`);
+          }
+        }
+      }
       const promptExecutionSnapshot = attachRequestCleaningToPromptExecution(
         promptExecutionSummary,
         requestCleaning.debug,

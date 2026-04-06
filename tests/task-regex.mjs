@@ -156,6 +156,7 @@ try {
   const {
     createDefaultTaskProfiles,
     isTaskRegexStageEnabled,
+    normalizeTaskProfile,
     normalizeTaskRegexStages,
   } = await import("../prompt-profiles.js");
 
@@ -170,7 +171,7 @@ try {
     "output.rawResponse": false,
     "output.beforeParse": false,
   });
-  assert.equal(normalizedLegacyStages["input.finalPrompt"], true);
+  assert.equal(normalizedLegacyStages["input.finalPrompt"], false);
   assert.equal(normalizedLegacyStages["input.userMessage"], false);
   assert.equal(normalizedLegacyStages["input.recentMessages"], false);
   assert.equal(normalizedLegacyStages["input.candidateText"], false);
@@ -178,7 +179,7 @@ try {
   assert.equal(normalizedLegacyStages["output.beforeParse"], false);
   assert.equal(
     isTaskRegexStageEnabled(normalizedLegacyStages, "input.finalPrompt"),
-    true,
+    false,
   );
   assert.equal(
     isTaskRegexStageEnabled(normalizedLegacyStages, "input.userMessage"),
@@ -198,7 +199,7 @@ try {
     defaultProfiles.extract?.profiles?.[0]?.regex?.stages || {};
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.finalPrompt"),
-    true,
+    false,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.userMessage"),
@@ -211,6 +212,27 @@ try {
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.candidateText"),
     false,
+  );
+
+  const normalizedLegacyOnlyProfile = normalizeTaskProfile(
+    "extract",
+    {
+      id: "legacy-only-profile",
+      name: "legacy only",
+      regex: {
+        stages: {
+          finalPrompt: true,
+        },
+      },
+    },
+    {},
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(
+      normalizedLegacyOnlyProfile.regex?.stages || {},
+      "input.finalPrompt",
+    ),
+    true,
   );
 
   globalThis.getTavernRegexes = () => {
