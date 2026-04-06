@@ -794,14 +794,14 @@
 
 .bme-memory-item:hover .bme-memory-card {
   background: var(--bme-surface-container, #1f1f22);
-  border-color: rgba(255, 255, 255, 0.1);
-  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+  border-color: var(--bme-border-active);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .bme-memory-item.selected .bme-memory-card {
   background: var(--bme-primary-dim);
   border-color: var(--bme-primary);
-  box-shadow: 0 0 0 1px rgba(233, 69, 96, 0.12);
+  box-shadow: 0 0 0 1px var(--bme-border-active);
 }
 
 .bme-memory-card-head {
@@ -843,7 +843,7 @@
 
 .bme-memory-content {
   font-size: 11.5px;
-  color: rgba(228, 225, 230, 0.72);
+  color: var(--bme-on-surface-dim);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 4;
@@ -860,7 +860,7 @@
   gap: 8px;
   margin-top: 2px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--bme-border);
 }
 
 .bme-memory-stats {
@@ -1308,9 +1308,19 @@
 
 /* 宿主样式 / WebKit 默认易把 select、自动填充 input 画成黑底 — 在面板内强制用主题色 */
 #st-bme-panel input.bme-config-input,
-#st-bme-panel textarea.bme-config-textarea {
+#st-bme-panel textarea.bme-config-textarea,
+#st-bme-panel input.bme-search-input,
+#st-bme-panel .bme-node-detail-input,
+#st-bme-panel .bme-node-detail-textarea {
   background-color: var(--bme-surface-high) !important;
   color: var(--bme-on-surface) !important;
+}
+
+#st-bme-panel input.bme-search-input {
+  box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
+  border: 1px solid var(--bme-border);
 }
 
 #st-bme-panel select.bme-config-input,
@@ -1345,7 +1355,16 @@
 
 #st-bme-panel input.bme-config-input:-webkit-autofill,
 #st-bme-panel input.bme-config-input:-webkit-autofill:hover,
-#st-bme-panel input.bme-config-input:-webkit-autofill:focus {
+#st-bme-panel input.bme-config-input:-webkit-autofill:focus,
+#st-bme-panel input.bme-search-input:-webkit-autofill,
+#st-bme-panel input.bme-search-input:-webkit-autofill:hover,
+#st-bme-panel input.bme-search-input:-webkit-autofill:focus,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill:hover,
+#st-bme-panel .bme-node-detail-input:-webkit-autofill:focus,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill:hover,
+#st-bme-panel .bme-node-detail-textarea:-webkit-autofill:focus {
   -webkit-text-fill-color: var(--bme-on-surface) !important;
   caret-color: var(--bme-on-surface);
   border: 1px solid var(--bme-border) !important;
@@ -2299,12 +2318,14 @@
 .bme-node-detail-textarea {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bme-surface-lowest, #0e0e11);
+  background-color: var(--bme-surface-high);
   border: 1px solid var(--bme-border);
   border-radius: 6px;
   color: var(--bme-on-surface);
   font-size: 11px;
   padding: 6px 8px;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .bme-node-detail-textarea {
