@@ -75,6 +75,7 @@ import {
 import {
   debugDebug,
   debugLog,
+  isDebugLoggingEnabled,
 } from "./debug-logging.js";
 import {
   extractMemories,
@@ -588,18 +589,19 @@ const PERSISTED_RECALL_UI_REFRESH_RETRY_DELAYS_MS = [
 const BME_DEBUG_RECALL_CARD_UI = "ST-BME|DBG|recall-card-ui";
 const BME_DEBUG_RECALL_CARD_UI_INGEST =
   "http://127.0.0.1:7433/ingest/799bfe5d-077f-41ac-bcda-da9f93fe5a85";
+const BME_DEBUG_RECALL_CARD_UI_CONSOLE_THROTTLE_MS = 2500;
+let bmeRecallCardUiConsolePending = 0;
+let bmeRecallCardUiConsoleLastFlush = 0;
 function bmePostRecallCardUiDebug(partial) {
+  if (!isDebugLoggingEnabled(getSettings())) {
+    return;
+  }
   const payload = {
     bmeDbgTag: BME_DEBUG_RECALL_CARD_UI,
     sessionId: "b6ba57",
     ...partial,
     timestamp: Date.now(),
   };
-  try {
-    if (typeof console?.info === "function") {
-      console.info(BME_DEBUG_RECALL_CARD_UI, payload.message, payload);
-    }
-  } catch (_) {}
   fetch(BME_DEBUG_RECALL_CARD_UI_INGEST, {
     method: "POST",
     headers: {
@@ -608,6 +610,35 @@ function bmePostRecallCardUiDebug(partial) {
     },
     body: JSON.stringify(payload),
   }).catch(() => {});
+
+  try {
+    if (typeof console?.info !== "function") return;
+    const verbose =
+      typeof globalThis !== "undefined" &&
+      globalThis.__ST_BME_RECALL_CARD_UI_VERBOSE_CONSOLE === true;
+    if (verbose) {
+      console.info(BME_DEBUG_RECALL_CARD_UI, payload.message, payload);
+      return;
+    }
+    bmeRecallCardUiConsolePending += 1;
+    const now = Date.now();
+    if (
+      now - bmeRecallCardUiConsoleLastFlush <
+      BME_DEBUG_RECALL_CARD_UI_CONSOLE_THROTTLE_MS
+    ) {
+      return;
+    }
+    const batched = bmeRecallCardUiConsolePending;
+    bmeRecallCardUiConsolePending = 0;
+    bmeRecallCardUiConsoleLastFlush = now;
+    console.info(
+      BME_DEBUG_RECALL_CARD_UI,
+      partial.message,
+      partial.location,
+      partial.data,
+      batched > 1 ? `(×${batched})` : "",
+    );
+  } catch (_) {}
 }
 const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const persistedRecallUiDiagnosticTimestamps = new Map();
