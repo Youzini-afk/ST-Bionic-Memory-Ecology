@@ -18,6 +18,8 @@ import {
 
 import { BmeChatManager } from "./bme-chat-manager.js";
 import {
+  BmeDatabase,
+  buildBmeDbName,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
   ensureDexieLoaded,
@@ -82,6 +84,7 @@ import {
   generateSynopsis,
 } from "./extractor.js";
 import {
+  findGraphShadowSnapshotByIntegrity,
   GRAPH_LOAD_PENDING_CHAT_ID,
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
@@ -90,7 +93,12 @@ import {
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
   getGraphPersistedRevision,
+  getGraphPersistenceMeta,
+  getGraphIdentityAliasCandidates,
+  readGraphShadowSnapshot,
   removeGraphShadowSnapshot,
+  rememberGraphIdentityAlias,
+  resolveGraphIdentityAliasByHostChatId,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
@@ -930,10 +938,19 @@ function throwIfAborted(signal, message = "操作已终止") {
 
 function assertRecoveryChatStillActive(expectedChatId, label = "") {
   if (!expectedChatId) return;
-  const currentId = getCurrentChatId();
-  if (currentId && currentId !== expectedChatId) {
+  const currentIdentity = resolveCurrentChatIdentity(getContext());
+  const currentId = normalizeChatIdCandidate(currentIdentity.chatId);
+  const normalizedExpectedChatId = normalizeChatIdCandidate(expectedChatId);
+  if (
+    currentId &&
+    normalizedExpectedChatId &&
+    !doesChatIdMatchResolvedGraphIdentity(
+      normalizedExpectedChatId,
+      currentIdentity,
+    )
+  ) {
     throw createAbortError(
-      `历史恢复已终止：聊天已从 ${expectedChatId} 切换到 ${currentId}${label ? ` (${label})` : ""}`,
+      `历史恢复已终止：聊天已从 ${normalizedExpectedChatId} 切换到 ${currentId}${label ? ` (${label})` : ""}`,
     );
   }
 }
@@ -3309,7 +3326,7 @@ function isHostChatMetadataReady(context = getContext()) {
   return false;
 }
 
-function resolveCurrentChatIdentity(context = getContext()) {
+function resolveCurrentHostChatId(context = getContext()) {
   const candidates = [
     context?.chatId,
     context?.getCurrentChatId?.(),
@@ -3320,19 +3337,293 @@ function resolveCurrentChatIdentity(context = getContext()) {
     context?.chatMetadata?.sessionId,
   ];
 
-  const chatId =
+  return (
     candidates
       .map((candidate) => normalizeChatIdCandidate(candidate))
-      .find(Boolean) || "";
+      .find(Boolean) || ""
+  );
+}
+
+function resolveCurrentChatIdentity(context = getContext()) {
+  const hostChatId = resolveCurrentHostChatId(context);
+  const integrity =
+    typeof getChatMetadataIntegrity === "function"
+      ? getChatMetadataIntegrity(context)
+      : normalizeChatIdCandidate(
+          context?.chatMetadata?.integrity ||
+            context?.chatMetadata?.chat_id ||
+            context?.chatMetadata?.chatId ||
+            "",
+        );
+  const aliasedChatId =
+    !integrity &&
+    hostChatId &&
+    typeof resolveGraphIdentityAliasByHostChatId === "function"
+      ? resolveGraphIdentityAliasByHostChatId(hostChatId)
+      : "";
+  const chatId = integrity || aliasedChatId || hostChatId;
 
   return {
     chatId,
+    hostChatId,
+    integrity,
+    identitySource: integrity
+      ? "integrity"
+      : aliasedChatId
+        ? "alias"
+        : hostChatId
+          ? "host-chat-id"
+          : "",
     hasLikelySelectedChat: hasLikelySelectedChatContext(context),
   };
 }
 
 function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
+}
+
+function rememberResolvedGraphIdentityAlias(
+  context = getContext(),
+  persistenceChatId = getCurrentChatId(context),
+) {
+  const identity = resolveCurrentChatIdentity(context);
+  if (!identity.integrity || !persistenceChatId) {
+    return null;
+  }
+
+  return rememberGraphIdentityAlias({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId,
+  });
+}
+
+function buildLegacyGraphIdentityCandidates(
+  targetChatId,
+  context = getContext(),
+  { shadowSnapshot = null } = {},
+) {
+  const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
+  const identity = resolveCurrentChatIdentity(context);
+  const candidates = new Set();
+  const addCandidate = (value) => {
+    const normalized = normalizeChatIdCandidate(value);
+    if (!normalized || normalized === normalizedTargetChatId) return;
+    candidates.add(normalized);
+  };
+
+  addCandidate(identity.hostChatId);
+  for (const aliasCandidate of getGraphIdentityAliasCandidates({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId: normalizedTargetChatId,
+  })) {
+    addCandidate(aliasCandidate);
+  }
+
+  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
+  const runtimeGraphIntegrity = normalizeChatIdCandidate(
+    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
+  );
+  if (
+    identity.integrity &&
+    runtimeGraphIntegrity &&
+    runtimeGraphIntegrity === identity.integrity
+  ) {
+    addCandidate(graphPersistenceState.chatId);
+    addCandidate(currentGraph?.historyState?.chatId);
+    addCandidate(currentGraphMeta.chatId);
+  }
+
+  addCandidate(shadowSnapshot?.chatId);
+  addCandidate(shadowSnapshot?.persistedChatId);
+  return Array.from(candidates);
+}
+
+async function doesIndexedDbChatStoreExist(chatId = "") {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return false;
+
+  const DexieCtor = globalThis.Dexie || (await ensureDexieLoaded());
+  if (typeof DexieCtor?.exists === "function") {
+    return await DexieCtor.exists(buildBmeDbName(normalizedChatId));
+  }
+
+  if (typeof DexieCtor?.getDatabaseNames === "function") {
+    const names = await DexieCtor.getDatabaseNames();
+    return Array.isArray(names)
+      ? names.includes(buildBmeDbName(normalizedChatId))
+      : false;
+  }
+
+  return false;
+}
+
+async function exportIndexedDbSnapshotForChat(chatId = "") {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return null;
+  }
+
+  if (!(await doesIndexedDbChatStoreExist(normalizedChatId))) {
+    return null;
+  }
+
+  const DexieCtor = globalThis.Dexie || (await ensureDexieLoaded());
+  const db = new BmeDatabase(normalizedChatId, {
+    dexieClass: DexieCtor,
+  });
+
+  try {
+    await db.open();
+    return await db.exportSnapshot();
+  } finally {
+    await db.close();
+  }
+}
+
+function buildRecoveredSnapshotForChatIdentity(
+  graph,
+  targetChatId,
+  {
+    revision = 0,
+    integrity = "",
+    source = "identity-recovery",
+    legacyChatId = "",
+  } = {},
+) {
+  const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
+  const normalizedIntegrity = normalizeChatIdCandidate(integrity);
+  const normalizedLegacyChatId = normalizeChatIdCandidate(legacyChatId);
+  const normalizedGraph = cloneGraphForPersistence(graph, normalizedTargetChatId);
+  const effectiveRevision = Math.max(
+    1,
+    normalizeIndexedDbRevision(
+      revision || graphPersistenceState.revision || getGraphPersistedRevision(graph),
+    ),
+  );
+
+  stampGraphPersistenceMeta(normalizedGraph, {
+    revision: effectiveRevision,
+    reason: source,
+    chatId: normalizedTargetChatId,
+    integrity: normalizedIntegrity,
+  });
+
+  return buildSnapshotFromGraph(normalizedGraph, {
+    chatId: normalizedTargetChatId,
+    revision: effectiveRevision,
+    lastModified: Date.now(),
+    meta: {
+      storagePrimary: "indexeddb",
+      lastMutationReason: String(source || "identity-recovery"),
+      integrity: normalizedIntegrity,
+      migratedFromChatId: normalizedLegacyChatId,
+      identityMigrationSource: String(source || "identity-recovery"),
+    },
+  });
+}
+
+async function importRecoveredSnapshotToIndexedDb(
+  targetDb,
+  targetChatId,
+  graph,
+  { revision = 0, integrity = "", source = "identity-recovery", legacyChatId = "" } = {},
+) {
+  const snapshot = buildRecoveredSnapshotForChatIdentity(graph, targetChatId, {
+    revision,
+    integrity,
+    source,
+    legacyChatId,
+  });
+  const importResult = await targetDb.importSnapshot(snapshot, {
+    mode: "replace",
+    preserveRevision: true,
+    revision: snapshot.meta.revision,
+    markSyncDirty: true,
+  });
+  snapshot.meta.revision = normalizeIndexedDbRevision(
+    importResult?.revision,
+    snapshot.meta.revision,
+  );
+  return snapshot;
+}
+
+function doesChatIdMatchResolvedGraphIdentity(
+  candidateChatId,
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
+  if (!normalizedCandidate || !identity || typeof identity !== "object") {
+    return false;
+  }
+
+  const knownChatIds = new Set();
+  const addKnownChatId = (value) => {
+    const normalized = normalizeChatIdCandidate(value);
+    if (normalized) {
+      knownChatIds.add(normalized);
+    }
+  };
+
+  addKnownChatId(identity.chatId);
+  addKnownChatId(identity.hostChatId);
+  addKnownChatId(identity.integrity);
+
+  for (const aliasCandidate of getGraphIdentityAliasCandidates({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId: identity.chatId,
+  })) {
+    addKnownChatId(aliasCandidate);
+  }
+
+  return knownChatIds.has(normalizedCandidate);
+}
+
+function resolveCompatibleGraphShadowSnapshot(
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  if (!identity || typeof identity !== "object") {
+    return null;
+  }
+
+  const directSnapshot = readGraphShadowSnapshot(identity.chatId);
+  if (directSnapshot) {
+    return directSnapshot;
+  }
+
+  const seenChatIds = new Set(
+    [identity.chatId].map((value) => normalizeChatIdCandidate(value)).filter(Boolean),
+  );
+  const readByChatId = (value) => {
+    const normalized = normalizeChatIdCandidate(value);
+    if (!normalized || seenChatIds.has(normalized)) {
+      return null;
+    }
+    seenChatIds.add(normalized);
+    return readGraphShadowSnapshot(normalized);
+  };
+
+  const hostSnapshot = readByChatId(identity.hostChatId);
+  if (hostSnapshot) {
+    return hostSnapshot;
+  }
+
+  for (const aliasCandidate of getGraphIdentityAliasCandidates({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId: identity.chatId,
+  })) {
+    const aliasSnapshot = readByChatId(aliasCandidate);
+    if (aliasSnapshot) {
+      return aliasSnapshot;
+    }
+  }
+
+  return findGraphShadowSnapshotByIntegrity(identity.integrity, {
+    excludeChatIds: Array.from(seenChatIds),
+  });
 }
 
 async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
@@ -3348,8 +3639,14 @@ async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
   }
 
   const syncedChatId = normalizeChatIdCandidate(syncPayload?.chatId);
-  const activeChatId = normalizeChatIdCandidate(getCurrentChatId());
-  const targetChatId = syncedChatId || activeChatId;
+  const activeIdentity = resolveCurrentChatIdentity(getContext());
+  const activeChatId = normalizeChatIdCandidate(activeIdentity.chatId);
+  const targetChatId =
+    activeChatId &&
+    syncedChatId &&
+    doesChatIdMatchResolvedGraphIdentity(syncedChatId, activeIdentity)
+      ? activeChatId
+      : syncedChatId || activeChatId;
 
   if (!targetChatId) {
     return {
@@ -3671,6 +3968,223 @@ function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
   }
 }
 
+async function maybeRecoverIndexedDbGraphFromStableIdentity(
+  chatId,
+  context = getContext(),
+  { source = "unknown", db = null } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return {
+      migrated: false,
+      reason: "identity-recovery-missing-chat-id",
+      chatId: "",
+    };
+  }
+
+  const identity = resolveCurrentChatIdentity(context);
+  if (!identity.integrity) {
+    return {
+      migrated: false,
+      reason: "identity-recovery-integrity-missing",
+      chatId: normalizedChatId,
+    };
+  }
+
+  const manager = ensureBmeChatManager();
+  if (!manager) {
+    return {
+      migrated: false,
+      reason: "identity-recovery-manager-unavailable",
+      chatId: normalizedChatId,
+    };
+  }
+
+  const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+  if (!targetDb) {
+    return {
+      migrated: false,
+      reason: "identity-recovery-db-unavailable",
+      chatId: normalizedChatId,
+    };
+  }
+
+  const emptyStatus = await targetDb.isEmpty();
+  if (!emptyStatus?.empty) {
+    return {
+      migrated: false,
+      reason: "identity-recovery-target-not-empty",
+      chatId: normalizedChatId,
+      emptyStatus,
+    };
+  }
+
+  const finalizeMigration = async (
+    graph,
+    {
+      revision = 0,
+      legacyChatId = "",
+      migrationSource = "identity-recovery",
+      shadowChatId = "",
+    } = {},
+  ) => {
+    const snapshot = await importRecoveredSnapshotToIndexedDb(
+      targetDb,
+      normalizedChatId,
+      graph,
+      {
+        revision,
+        integrity: identity.integrity,
+        source: migrationSource,
+        legacyChatId,
+      },
+    );
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    rememberResolvedGraphIdentityAlias(context, normalizedChatId);
+
+    if (shadowChatId && shadowChatId !== normalizedChatId) {
+      removeGraphShadowSnapshot(shadowChatId);
+    }
+
+    let syncResult = {
+      synced: false,
+      reason: "identity-recovery-sync-skipped",
+      chatId: normalizedChatId,
+    };
+    try {
+      syncResult = await syncNow(
+        normalizedChatId,
+        buildBmeSyncRuntimeOptions({
+          reason: "identity-recovery",
+          trigger: `${String(source || "identity-recovery")}:identity-recovery`,
+        }),
+      );
+    } catch (syncError) {
+      console.warn("[ST-BME] 身份恢复后的同步失败:", syncError);
+      syncResult = {
+        synced: false,
+        reason: "identity-recovery-sync-failed",
+        chatId: normalizedChatId,
+        error: syncError?.message || String(syncError),
+      };
+    }
+
+    return {
+      migrated: true,
+      reason: "identity-recovery-completed",
+      chatId: normalizedChatId,
+      legacyChatId: normalizeChatIdCandidate(legacyChatId),
+      source: migrationSource,
+      snapshot,
+      syncResult,
+    };
+  };
+
+  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
+  const runtimeGraphIntegrity = normalizeChatIdCandidate(
+    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
+  );
+  const runtimeGraphChatId = normalizeChatIdCandidate(
+    currentGraph?.historyState?.chatId ||
+      currentGraphMeta.chatId ||
+      graphPersistenceState.chatId,
+  );
+
+  if (
+    currentGraph &&
+    !isGraphEffectivelyEmpty(currentGraph) &&
+    runtimeGraphIntegrity &&
+    runtimeGraphIntegrity === identity.integrity &&
+    runtimeGraphChatId &&
+    runtimeGraphChatId !== normalizedChatId
+  ) {
+    return await finalizeMigration(currentGraph, {
+      revision: Math.max(
+        graphPersistenceState.revision || 0,
+        getGraphPersistedRevision(currentGraph),
+        1,
+      ),
+      legacyChatId: runtimeGraphChatId,
+      migrationSource: "runtime-identity-promotion",
+    });
+  }
+
+  const aliasShadowSnapshot = findGraphShadowSnapshotByIntegrity(
+    identity.integrity,
+    {
+      excludeChatIds: [normalizedChatId],
+    },
+  );
+  if (aliasShadowSnapshot?.serializedGraph) {
+    try {
+      const shadowGraph = normalizeGraphRuntimeState(
+        deserializeGraph(aliasShadowSnapshot.serializedGraph),
+        normalizedChatId,
+      );
+      if (!isGraphEffectivelyEmpty(shadowGraph)) {
+        return await finalizeMigration(shadowGraph, {
+          revision: Math.max(
+            Number(aliasShadowSnapshot.revision || 0),
+            getGraphPersistedRevision(shadowGraph),
+            1,
+          ),
+          legacyChatId:
+            aliasShadowSnapshot.persistedChatId || aliasShadowSnapshot.chatId,
+          migrationSource: "shadow-identity-recovery",
+          shadowChatId: aliasShadowSnapshot.chatId,
+        });
+      }
+    } catch (error) {
+      console.warn("[ST-BME] 通过影子快照恢复聊天身份失败:", error);
+    }
+  }
+
+  const legacyCandidates = buildLegacyGraphIdentityCandidates(
+    normalizedChatId,
+    context,
+    {
+      shadowSnapshot: aliasShadowSnapshot,
+    },
+  );
+
+  for (const legacyChatId of legacyCandidates) {
+    try {
+      const legacySnapshot = await exportIndexedDbSnapshotForChat(legacyChatId);
+      if (!isIndexedDbSnapshotMeaningful(legacySnapshot)) {
+        continue;
+      }
+
+      const legacyGraph = buildGraphFromSnapshot(legacySnapshot, {
+        chatId: legacyChatId,
+      });
+      if (isGraphEffectivelyEmpty(legacyGraph)) {
+        continue;
+      }
+
+      return await finalizeMigration(legacyGraph, {
+        revision: Math.max(
+          normalizeIndexedDbRevision(legacySnapshot?.meta?.revision),
+          getGraphPersistedRevision(legacyGraph),
+          1,
+        ),
+        legacyChatId,
+        migrationSource: "indexeddb-identity-alias",
+      });
+    } catch (error) {
+      console.warn("[ST-BME] 读取旧身份 IndexedDB 图谱失败:", {
+        legacyChatId,
+        error,
+      });
+    }
+  }
+
+  return {
+    migrated: false,
+    reason: "identity-recovery-no-match",
+    chatId: normalizedChatId,
+  };
+}
+
 async function maybeMigrateLegacyGraphToIndexedDb(
   chatId,
   context = getContext(),
@@ -3980,6 +4494,14 @@ function applyIndexedDbSnapshotToRuntime(
     normalizeGraphRuntimeState(graphFromSnapshot, normalizedChatId),
     normalizedChatId,
   );
+  stampGraphPersistenceMeta(currentGraph, {
+    revision,
+    reason: `indexeddb:${String(source || "indexeddb")}`,
+    chatId: normalizedChatId,
+    integrity:
+      normalizeChatIdCandidate(snapshot?.meta?.integrity) ||
+      getChatMetadataIntegrity(getContext()),
+  });
   currentGraph.vectorIndexState.lastIntegrityIssue = null;
 
   extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
@@ -4045,6 +4567,7 @@ function applyIndexedDbSnapshotToRuntime(
       at: Date.now(),
     },
   });
+  rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
   removeGraphShadowSnapshot(normalizedChatId);
   refreshPanelLiveState();
@@ -4101,14 +4624,59 @@ async function loadGraphFromIndexedDb(
     }
     const db = await manager.getCurrentDb(normalizedChatId);
 
-    const migrationResult = await maybeMigrateLegacyGraphToIndexedDb(
-      normalizedChatId,
-      getContext(),
-      {
-        source,
-        db,
-      },
-    );
+    const identityRecoveryResult =
+      await maybeRecoverIndexedDbGraphFromStableIdentity(
+        normalizedChatId,
+        getContext(),
+        {
+          source,
+          db,
+        },
+      );
+
+    if (identityRecoveryResult?.migrated) {
+      const recoveredRevision = normalizeIndexedDbRevision(
+        identityRecoveryResult?.snapshot?.meta?.revision,
+      );
+      updateGraphPersistenceState({
+        storagePrimary: "indexeddb",
+        storageMode: "indexeddb",
+        indexedDbRevision: recoveredRevision,
+        indexedDbLastError: "",
+        lastSyncError: "",
+        dualWriteLastResult: {
+          action: "identity-recovery",
+          source: String(identityRecoveryResult?.source || "indexeddb"),
+          success: true,
+          chatId: normalizedChatId,
+          legacyChatId: String(identityRecoveryResult?.legacyChatId || ""),
+          revision: recoveredRevision,
+          reason: String(
+            identityRecoveryResult?.reason || "identity-recovery",
+          ),
+          at: Date.now(),
+          syncResult: cloneRuntimeDebugValue(
+            identityRecoveryResult?.syncResult,
+            null,
+          ),
+        },
+      });
+    }
+
+    const migrationResult = identityRecoveryResult?.migrated
+      ? {
+          migrated: false,
+          reason: "identity-recovery-already-applied",
+          chatId: normalizedChatId,
+        }
+      : await maybeMigrateLegacyGraphToIndexedDb(
+          normalizedChatId,
+          getContext(),
+          {
+            source,
+            db,
+          },
+        );
 
     if (migrationResult?.migrated) {
       const migratedRevision = normalizeIndexedDbRevision(
@@ -4146,8 +4714,11 @@ async function loadGraphFromIndexedDb(
         },
       });
     }
+    const snapshot =
+      identityRecoveryResult?.snapshot ||
+      migrationResult?.snapshot ||
+      (await db.exportSnapshot());
 
-    const snapshot = migrationResult?.snapshot || (await db.exportSnapshot());
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
     if (!isIndexedDbSnapshotMeaningful(snapshot)) {
@@ -4713,6 +5284,7 @@ function persistGraphToChatMetadata(
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: "",
   });
+  rememberResolvedGraphIdentityAlias(context, chatId);
 
   return buildGraphPersistResult({
     saved: true,
@@ -5949,7 +6521,7 @@ function loadGraphFromChat(options = {}) {
         normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
         chatId,
       );
-      const shadowSnapshot = readGraphShadowSnapshot(chatId);
+      const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(chatIdentity);
       const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
         officialGraph,
         shadowSnapshot,
@@ -5976,6 +6548,12 @@ function loadGraphFromChat(options = {}) {
 
       clearPendingGraphLoadRetry();
       currentGraph = officialGraph;
+      stampGraphPersistenceMeta(currentGraph, {
+        revision: officialRevision,
+        reason: `${source}:metadata-compat-provisional`,
+        chatId,
+        integrity: getChatMetadataIntegrity(context),
+      });
       extractionCount = Number.isFinite(
         currentGraph?.historyState?.extractionCount,
       )
@@ -6043,6 +6621,7 @@ function loadGraphFromChat(options = {}) {
           at: Date.now(),
         },
       });
+      rememberResolvedGraphIdentityAlias(context, chatId);
 
       scheduleIndexedDbGraphProbe(chatId, {
         source: `${source}:indexeddb-probe`,
@@ -6126,6 +6705,7 @@ async function saveGraphToIndexedDb(
       };
     }
     const db = await manager.getCurrentDb(normalizedChatId);
+    const currentIdentity = resolveCurrentChatIdentity(getContext());
     const baseSnapshot =
       readCachedIndexedDbSnapshot(normalizedChatId) ||
       (await db.exportSnapshot());
@@ -6137,6 +6717,9 @@ async function saveGraphToIndexedDb(
       meta: {
         storagePrimary: "indexeddb",
         lastMutationReason: String(reason || "graph-save"),
+        integrity:
+          currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+        hostChatId: currentIdentity.hostChatId || "",
       },
     });
     const importResult = await db.importSnapshot(snapshot, {
@@ -6179,6 +6762,7 @@ async function saveGraphToIndexedDb(
         at: Date.now(),
       },
     });
+    rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
     return {
       saved: true,

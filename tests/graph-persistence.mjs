@@ -4,15 +4,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
-import { buildGraphFromSnapshot, buildSnapshotFromGraph } from "../bme-db.js";
+import {
+  buildBmeDbName,
+  buildGraphFromSnapshot,
+  buildSnapshotFromGraph,
+} from "../bme-db.js";
 import { onMessageReceivedController } from "../event-binding.js";
 import {
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
+  findGraphShadowSnapshotByIntegrity,
   getGraphPersistedRevision,
+  getGraphIdentityAliasCandidates,
   getGraphPersistenceMeta,
   getGraphShadowSnapshotStorageKey,
   GRAPH_LOAD_PENDING_CHAT_ID,
+  GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
   GRAPH_PERSISTENCE_META_KEY,
@@ -21,7 +28,9 @@ import {
   GRAPH_STARTUP_RECONCILE_DELAYS_MS,
   MODULE_NAME,
   readGraphShadowSnapshot,
+  rememberGraphIdentityAlias,
   removeGraphShadowSnapshot,
+  resolveGraphIdentityAliasByHostChatId,
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
@@ -83,6 +92,28 @@ const messageSnippet = extractSnippet(
 );
 
 function createSessionStorage(seed = null) {
+  const store = seed instanceof Map ? seed : new Map();
+  return {
+    __store: store,
+    get length() {
+      return store.size;
+    },
+    key(index) {
+      return Array.from(store.keys())[Number(index)] ?? null;
+    },
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(String(key), String(value));
+    },
+    removeItem(key) {
+      store.delete(String(key));
+    },
+  };
+}
+
+function createLocalStorage(seed = null) {
   const store = seed instanceof Map ? seed : new Map();
   return {
     __store: store,
@@ -154,15 +185,75 @@ async function createGraphPersistenceHarness({
   chatId = "chat-test",
   chatMetadata = undefined,
   sessionStore = null,
+  localStore = null,
   globalChatId = "",
   characterId = "",
   groupId = null,
   indexedDbSnapshot = null,
+  indexedDbSnapshots = null,
   chat = [],
 } = {}) {
   const timers = new Map();
   let nextTimerId = 1;
   const storage = createSessionStorage(sessionStore);
+  const localStorage = createLocalStorage(localStore);
+  const indexedDbSnapshotMap =
+    indexedDbSnapshots instanceof Map
+      ? new Map(indexedDbSnapshots)
+      : new Map(
+          Object.entries(
+            indexedDbSnapshots &&
+              typeof indexedDbSnapshots === "object" &&
+              !Array.isArray(indexedDbSnapshots)
+              ? indexedDbSnapshots
+              : {},
+          ),
+        );
+
+  if (indexedDbSnapshot) {
+    const primaryChatId = String(chatId || globalChatId || "");
+    if (primaryChatId) {
+      indexedDbSnapshotMap.set(primaryChatId, structuredClone(indexedDbSnapshot));
+    }
+  }
+
+  function buildEmptyIndexedDbSnapshot(targetChatId = "") {
+    return {
+      meta: { revision: 0, chatId: String(targetChatId || "") },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      state: { lastProcessedFloor: -1, extractionCount: 0 },
+    };
+  }
+
+  function getIndexedDbSnapshotForChat(targetChatId = "") {
+    const normalizedChatId = String(targetChatId || "");
+    if (normalizedChatId && indexedDbSnapshotMap.has(normalizedChatId)) {
+      return structuredClone(indexedDbSnapshotMap.get(normalizedChatId));
+    }
+
+    if (
+      normalizedChatId &&
+      indexedDbSnapshot &&
+      !indexedDbSnapshotMap.size &&
+      normalizedChatId === String(chatId || globalChatId || "")
+    ) {
+      return structuredClone(indexedDbSnapshot);
+    }
+
+    return buildEmptyIndexedDbSnapshot(normalizedChatId);
+  }
+
+  function setIndexedDbSnapshotForChat(targetChatId = "", snapshot = null) {
+    const normalizedChatId = String(targetChatId || "");
+    if (!normalizedChatId) return;
+    if (!snapshot) {
+      indexedDbSnapshotMap.delete(normalizedChatId);
+      return;
+    }
+    indexedDbSnapshotMap.set(normalizedChatId, structuredClone(snapshot));
+  }
 
   const runtimeContext = {
     console,
@@ -176,8 +267,12 @@ async function createGraphPersistenceHarness({
     Boolean,
     structuredClone,
     result: null,
-    __indexedDbSnapshot: indexedDbSnapshot,
+    __indexedDbSnapshot: getIndexedDbSnapshotForChat(
+      String(chatId || globalChatId || ""),
+    ),
+    __indexedDbSnapshots: indexedDbSnapshotMap,
     sessionStorage: storage,
+    localStorage,
     setTimeout(fn, delay) {
       const id = nextTimerId++;
       timers.set(id, { fn, delay });
@@ -211,6 +306,21 @@ async function createGraphPersistenceHarness({
       },
     },
     __globalChatId: String(globalChatId || ""),
+    Dexie: {
+      async exists(dbName = "") {
+        return Array.from(indexedDbSnapshotMap.keys()).some(
+          (candidateChatId) => buildBmeDbName(candidateChatId) === String(dbName),
+        );
+      },
+      async getDatabaseNames() {
+        return Array.from(indexedDbSnapshotMap.keys()).map((candidateChatId) =>
+          buildBmeDbName(candidateChatId),
+        );
+      },
+    },
+    async ensureDexieLoaded() {
+      return runtimeContext.Dexie;
+    },
     refreshPanelLiveState() {
       runtimeContext.__panelRefreshCount += 1;
     },
@@ -241,7 +351,9 @@ async function createGraphPersistenceHarness({
     onMessageReceivedController,
     getGraphPersistenceMeta,
     getGraphPersistedRevision,
+    getGraphIdentityAliasCandidates,
     getGraphShadowSnapshotStorageKey,
+    GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
     GRAPH_LOAD_PENDING_CHAT_ID,
     GRAPH_LOAD_STATES,
     GRAPH_METADATA_KEY,
@@ -250,14 +362,141 @@ async function createGraphPersistenceHarness({
     GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX,
     GRAPH_STARTUP_RECONCILE_DELAYS_MS,
     MODULE_NAME,
+    findGraphShadowSnapshotByIntegrity,
     readGraphShadowSnapshot,
+    rememberGraphIdentityAlias,
     removeGraphShadowSnapshot,
+    resolveGraphIdentityAliasByHostChatId,
     shouldPreferShadowSnapshotOverOfficial,
     stampGraphPersistenceMeta,
     writeChatMetadataPatch,
     writeGraphShadowSnapshot,
     // Shadow snapshot functions need VM-local sessionStorage overrides
     // because imported versions use the outer globalThis (no sessionStorage)
+    rememberGraphIdentityAlias({
+      integrity = "",
+      hostChatId = "",
+      persistenceChatId = "",
+    } = {}) {
+      const normalizedIntegrity = String(integrity || "").trim();
+      if (!normalizedIntegrity) return null;
+
+      const normalizedHostChatId = String(hostChatId || "").trim();
+      const normalizedPersistenceChatId = String(
+        persistenceChatId || normalizedIntegrity,
+      ).trim();
+      let registry = { byIntegrity: {} };
+      try {
+        const raw = localStorage.getItem(GRAPH_IDENTITY_ALIAS_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (
+            parsed?.byIntegrity &&
+            typeof parsed.byIntegrity === "object" &&
+            !Array.isArray(parsed.byIntegrity)
+          ) {
+            registry = { byIntegrity: parsed.byIntegrity };
+          }
+        }
+      } catch {
+        registry = { byIntegrity: {} };
+      }
+
+      const current = registry.byIntegrity[normalizedIntegrity] || {};
+      const hostChatIds = Array.from(
+        new Set(
+          [
+            normalizedHostChatId,
+            ...(Array.isArray(current.hostChatIds) ? current.hostChatIds : []),
+          ].filter(Boolean),
+        ),
+      );
+      const next = {
+        integrity: normalizedIntegrity,
+        persistenceChatId: normalizedPersistenceChatId,
+        hostChatIds,
+        updatedAt: new Date().toISOString(),
+      };
+      registry.byIntegrity[normalizedIntegrity] = next;
+      localStorage.setItem(
+        GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
+        JSON.stringify(registry),
+      );
+      return next;
+    },
+    resolveGraphIdentityAliasByHostChatId(hostChatId = "") {
+      const normalizedHostChatId = String(hostChatId || "").trim();
+      if (!normalizedHostChatId) return "";
+      try {
+        const raw = localStorage.getItem(GRAPH_IDENTITY_ALIAS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : { byIntegrity: {} };
+        let best = "";
+        let bestUpdatedAt = "";
+        for (const value of Object.values(parsed.byIntegrity || {})) {
+          const hostChatIds = Array.isArray(value?.hostChatIds)
+            ? value.hostChatIds.map((item) => String(item || "").trim())
+            : [];
+          if (!hostChatIds.includes(normalizedHostChatId)) continue;
+          const persistenceChatId = String(
+            value?.persistenceChatId || value?.integrity || "",
+          ).trim();
+          if (!persistenceChatId) continue;
+          const updatedAt = String(value?.updatedAt || "");
+          if (!best || updatedAt > bestUpdatedAt) {
+            best = persistenceChatId;
+            bestUpdatedAt = updatedAt;
+          }
+        }
+        return best;
+      } catch {
+        return "";
+      }
+    },
+    getGraphIdentityAliasCandidates({
+      integrity = "",
+      hostChatId = "",
+      persistenceChatId = "",
+    } = {}) {
+      const normalizedIntegrity = String(integrity || "").trim();
+      const normalizedHostChatId = String(hostChatId || "").trim();
+      const normalizedPersistenceChatId = String(
+        persistenceChatId || "",
+      ).trim();
+      const candidates = [];
+      const seen = new Set();
+      const addCandidate = (value) => {
+        const normalized = String(value || "").trim();
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        candidates.push(normalized);
+      };
+
+      try {
+        const raw = localStorage.getItem(GRAPH_IDENTITY_ALIAS_STORAGE_KEY);
+        const parsed = raw ? JSON.parse(raw) : { byIntegrity: {} };
+        if (normalizedIntegrity) {
+          const value = parsed.byIntegrity?.[normalizedIntegrity] || {};
+          addCandidate(value?.persistenceChatId || value?.integrity || "");
+          for (const candidate of Array.isArray(value?.hostChatIds)
+            ? value.hostChatIds
+            : []) {
+            addCandidate(candidate);
+          }
+        } else if (normalizedHostChatId) {
+          addCandidate(
+            runtimeContext.resolveGraphIdentityAliasByHostChatId(
+              normalizedHostChatId,
+            ),
+          );
+        }
+      } catch {
+        // ignore
+      }
+
+      addCandidate(normalizedHostChatId);
+      addCandidate(normalizedPersistenceChatId);
+      return candidates;
+    },
     readGraphShadowSnapshot(chatId = "") {
       const key = getGraphShadowSnapshotStorageKey(chatId);
       if (!key) return null;
@@ -285,6 +524,56 @@ async function createGraphPersistenceHarness({
       } catch {
         return null;
       }
+    },
+    findGraphShadowSnapshotByIntegrity(integrity = "", { excludeChatIds = [] } = {}) {
+      const normalizedIntegrity = String(integrity || "").trim();
+      if (!normalizedIntegrity) return null;
+      const excluded = new Set(
+        (Array.isArray(excludeChatIds) ? excludeChatIds : [])
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      );
+      let best = null;
+      for (const key of storage.__store.keys()) {
+        if (!String(key || "").startsWith(GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX)) {
+          continue;
+        }
+        try {
+          const snap = JSON.parse(storage.getItem(key));
+          if (
+            !snap ||
+            String(snap.integrity || "") !== normalizedIntegrity ||
+            typeof snap.serializedGraph !== "string" ||
+            !snap.serializedGraph
+          ) {
+            continue;
+          }
+          const normalizedChatId = String(snap.chatId || "").trim();
+          if (!normalizedChatId || excluded.has(normalizedChatId)) {
+            continue;
+          }
+          if (
+            !best ||
+            Number(snap.revision || 0) > Number(best.revision || 0) ||
+            (Number(snap.revision || 0) === Number(best.revision || 0) &&
+              String(snap.updatedAt || "") > String(best.updatedAt || ""))
+          ) {
+            best = {
+              chatId: normalizedChatId,
+              revision: Number.isFinite(snap.revision) ? snap.revision : 0,
+              serializedGraph: snap.serializedGraph,
+              updatedAt: String(snap.updatedAt || ""),
+              reason: String(snap.reason || ""),
+              integrity: String(snap.integrity || ""),
+              persistedChatId: String(snap.persistedChatId || ""),
+              debugReason: String(snap.debugReason || snap.reason || ""),
+            };
+          }
+        } catch {
+          // ignore
+        }
+      }
+      return best;
     },
     writeGraphShadowSnapshot(
       chatId = "",
@@ -350,6 +639,8 @@ async function createGraphPersistenceHarness({
       return true;
     },
     notifyExtractionIssue() {},
+    debugDebug() {},
+    debugLog() {},
     async runExtraction() {},
     getRequestHeaders() {
       return {};
@@ -394,24 +685,37 @@ async function createGraphPersistenceHarness({
     __contextImmediateSaveCalls: 0,
     buildGraphFromSnapshot,
     buildSnapshotFromGraph,
+    buildBmeDbName,
     scheduleUpload() {},
+    BmeDatabase: class {
+      constructor(dbChatId = "") {
+        this.chatId = String(dbChatId || "");
+      }
+      async open() {}
+      async close() {}
+      async exportSnapshot() {
+        return getIndexedDbSnapshotForChat(this.chatId);
+      }
+      async importSnapshot(snapshot) {
+        setIndexedDbSnapshotForChat(this.chatId, snapshot);
+        return {
+          revision: Number(snapshot?.meta?.revision) || 0,
+        };
+      }
+    },
     BmeChatManager: class {
       constructor() {
-        this._db = {
+        this._currentChatId = "";
+      }
+      _createDb(dbChatId = "") {
+        return {
           async exportSnapshot() {
-            if (runtimeContext.__indexedDbSnapshot) {
-              return structuredClone(runtimeContext.__indexedDbSnapshot);
-            }
-            return {
-              meta: { revision: 0, chatId: "" },
-              nodes: [],
-              edges: [],
-              tombstones: [],
-              state: { lastProcessedFloor: -1, extractionCount: 0 },
-            };
+            return getIndexedDbSnapshotForChat(dbChatId);
           },
           async importSnapshot(snapshot) {
-            runtimeContext.__indexedDbSnapshot = structuredClone(snapshot);
+            setIndexedDbSnapshotForChat(dbChatId, snapshot);
+            runtimeContext.__indexedDbSnapshot =
+              getIndexedDbSnapshotForChat(dbChatId);
             return {
               revision:
                 Number(snapshot?.meta?.revision) ||
@@ -420,19 +724,18 @@ async function createGraphPersistenceHarness({
             };
           },
           async getMeta(key, fallbackValue = 0) {
-            const snapshot = runtimeContext.__indexedDbSnapshot || {};
+            const snapshot = getIndexedDbSnapshotForChat(dbChatId) || {};
             if (!snapshot?.meta || !(key in snapshot.meta)) {
               return fallbackValue;
             }
             return snapshot.meta[key];
           },
           async getRevision() {
-            return (
-              Number(runtimeContext.__indexedDbSnapshot?.meta?.revision) || 0
-            );
+            const snapshot = getIndexedDbSnapshotForChat(dbChatId) || {};
+            return Number(snapshot?.meta?.revision) || 0;
           },
           async isEmpty() {
-            const snapshot = runtimeContext.__indexedDbSnapshot || {};
+            const snapshot = getIndexedDbSnapshotForChat(dbChatId) || {};
             const nodes = Array.isArray(snapshot?.nodes)
               ? snapshot.nodes.length
               : 0;
@@ -451,33 +754,44 @@ async function createGraphPersistenceHarness({
           },
           async importLegacyGraph(graph, options = {}) {
             const revision = Number(options?.revision) || 1;
-            runtimeContext.__indexedDbSnapshot = buildSnapshotFromGraph(graph, {
-              chatId: runtimeContext.__chatContext?.chatId || "",
+            const migratedSnapshot = buildSnapshotFromGraph(graph, {
+              chatId: dbChatId || runtimeContext.__chatContext?.chatId || "",
               revision,
               meta: {
                 migrationCompletedAt: Date.now(),
                 migrationSource: "chat_metadata",
               },
             });
+            setIndexedDbSnapshotForChat(dbChatId, migratedSnapshot);
+            runtimeContext.__indexedDbSnapshot =
+              getIndexedDbSnapshotForChat(dbChatId);
             return {
               migrated: true,
               revision,
               imported: {
-                nodes: runtimeContext.__indexedDbSnapshot.nodes.length,
-                edges: runtimeContext.__indexedDbSnapshot.edges.length,
+                nodes: runtimeContext.__indexedDbSnapshot?.nodes?.length || 0,
+                edges: runtimeContext.__indexedDbSnapshot?.edges?.length || 0,
                 tombstones:
-                  runtimeContext.__indexedDbSnapshot.tombstones.length,
+                  runtimeContext.__indexedDbSnapshot?.tombstones?.length || 0,
               },
             };
           },
           async markSyncDirty() {},
         };
       }
-      async getCurrentDb() {
-        return this._db;
+      async getCurrentDb(dbChatId = this._currentChatId) {
+        this._currentChatId = String(dbChatId || this._currentChatId || "");
+        runtimeContext.__indexedDbSnapshot = getIndexedDbSnapshotForChat(
+          this._currentChatId,
+        );
+        return this._createDb(this._currentChatId);
       }
-      async switchChat() {
-        return this._db;
+      async switchChat(dbChatId = "") {
+        this._currentChatId = String(dbChatId || "");
+        runtimeContext.__indexedDbSnapshot = getIndexedDbSnapshotForChat(
+          this._currentChatId,
+        );
+        return this._createDb(this._currentChatId);
       }
       async closeCurrent() {}
     },
@@ -544,10 +858,32 @@ result = {
     return globalThis.__chatContext;
   },
   setIndexedDbSnapshot(snapshot) {
-    globalThis.__indexedDbSnapshot = snapshot;
+    const activeChatId =
+      String(globalThis.__chatContext?.chatId || globalThis.__globalChatId || "");
+    if (activeChatId) {
+      globalThis.__indexedDbSnapshots.set(
+        activeChatId,
+        structuredClone(snapshot),
+      );
+    }
+    globalThis.__indexedDbSnapshot = structuredClone(snapshot);
   },
   getIndexedDbSnapshot() {
     return globalThis.__indexedDbSnapshot;
+  },
+  setIndexedDbSnapshotForChat(chatId, snapshot) {
+    const normalizedChatId = String(chatId || "");
+    if (!normalizedChatId) return;
+    globalThis.__indexedDbSnapshots.set(
+      normalizedChatId,
+      structuredClone(snapshot),
+    );
+  },
+  getIndexedDbSnapshotForChat(chatId) {
+    const normalizedChatId = String(chatId || "");
+    if (!normalizedChatId) return null;
+    const snapshot = globalThis.__indexedDbSnapshots.get(normalizedChatId);
+    return snapshot ? structuredClone(snapshot) : null;
   },
 };
       `,
@@ -708,7 +1044,10 @@ result = {
 
   assert.equal(result.synced, true);
   assert.equal(result.loadState, "loading");
-  assert.equal(harness.api.getCurrentGraph().historyState.chatId, "chat-late");
+  assert.equal(
+    harness.api.getCurrentGraph().historyState.chatId,
+    "chat-late-ready",
+  );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
   assert.equal(
     harness.api.getGraphPersistenceState().storagePrimary,
