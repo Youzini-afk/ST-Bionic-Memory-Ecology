@@ -140,6 +140,10 @@ export function createGenerationRecallHarness(options = {}) {
       recordedInjectionSnapshots: [],
       refreshPanelCalls: 0,
       hideScheduleCalls: [],
+      isExtracting: false,
+      isRecoveringHistory: false,
+      isAssistantChatMessage: (message) =>
+        Boolean(message) && !message.is_user && !message.is_system,
       createRecallInputRecord,
       createRecallRunResult,
       hashRecallInput,
@@ -215,7 +219,7 @@ export function createGenerationRecallHarness(options = {}) {
     };
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, buildNormalGenerationRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationEnded, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, ensurePersistedRecallRecordForGeneration, findRecentGenerationRecallTransactionForChat, getGenerationRecallTransactionResult, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, clearPendingHostGenerationInputSnapshot, recordRecallSendIntent, clearPendingRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage, getCurrentGenerationTrivialSkip, markCurrentGenerationTrivialSkip, clearCurrentGenerationTrivialSkip, consumeCurrentGenerationTrivialSkip, runPlannerRecallForEna, getGraphPersistenceState: () => graphPersistenceState, setGraphPersistenceState: (value = {}) => { graphPersistenceState = { ...graphPersistenceState, ...(value || {}) }; return graphPersistenceState; } };`,
+      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, buildNormalGenerationRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationEnded, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, ensurePersistedRecallRecordForGeneration, findRecentGenerationRecallTransactionForChat, getGenerationRecallTransactionResult, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, clearPendingHostGenerationInputSnapshot, recordRecallSendIntent, clearPendingRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage, getCurrentGenerationTrivialSkip, markCurrentGenerationTrivialSkip, clearCurrentGenerationTrivialSkip, consumeCurrentGenerationTrivialSkip, deferAutoExtraction, maybeResumePendingAutoExtraction, clearPendingAutoExtraction, getPendingAutoExtraction: () => ({ ...pendingAutoExtraction }), getIsHostGenerationRunning: () => isHostGenerationRunning, runPlannerRecallForEna, getGraphPersistenceState: () => graphPersistenceState, setGraphPersistenceState: (value = {}) => { graphPersistenceState = { ...graphPersistenceState, ...(value || {}) }; return graphPersistenceState; } };`,
       context,
       { filename: indexPath },
     );
@@ -322,9 +326,12 @@ export function createGenerationRecallHarness(options = {}) {
           consumeCurrentGenerationTrivialSkip:
             context.result.consumeCurrentGenerationTrivialSkip,
           createRecallInputRecord,
+          deferAutoExtraction: context.result.deferAutoExtraction,
           getContext: context.getContext,
           getCurrentGraph: () => context.currentGraph,
           getGraphPersistenceState: () => context.result.getGraphPersistenceState(),
+          getIsHostGenerationRunning: () =>
+            context.result.getIsHostGenerationRunning(),
           getPendingHostGenerationInputSnapshot:
             context.result.getPendingHostGenerationInputSnapshot,
           getPendingRecallSendIntent: () => context.result.getPendingRecallSendIntent(),

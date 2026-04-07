@@ -181,6 +181,7 @@ import {
   markHistoryDirty,
   normalizeGraphRuntimeState,
   PROCESSED_MESSAGE_HASH_VERSION,
+  rebindProcessedHistoryStateToChat,
   snapshotProcessedMessageHashes,
   undoLatestMaintenance,
 } from "./runtime-state.js";
@@ -546,6 +547,7 @@ const HISTORY_RECOVERY_SETTLE_MS = 80;
 const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
 const GRAPH_LOAD_RETRY_DELAYS_MS = [120, 450, 1200, 2500];
 const AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS = [120, 320, 800, 1600, 2800];
+const AUTO_EXTRACTION_HOST_SETTLE_MS = 120;
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -576,6 +578,8 @@ let pendingAutoExtraction = {
   requestedAt: 0,
   attempts: 0,
 };
+let isHostGenerationRunning = false;
+let lastHostGenerationEndedAt = 0;
 let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
@@ -3788,6 +3792,178 @@ function resolveCompatibleGraphShadowSnapshot(
   });
 }
 
+function createShadowComparisonGraph({
+  chatId = "",
+  revision = 0,
+  integrity = "",
+} = {}) {
+  const graph = createEmptyGraph();
+  stampGraphPersistenceMeta(graph, {
+    revision: Math.max(0, normalizeIndexedDbRevision(revision)),
+    chatId: String(chatId || ""),
+    integrity: String(integrity || ""),
+    reason: "shadow-compare-reference",
+  });
+  return graph;
+}
+
+function applyShadowSnapshotToRuntime(
+  chatId,
+  shadowSnapshot,
+  {
+    source = "shadow-restore",
+    attemptIndex = 0,
+    promoteToIndexedDb = true,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(
+    chatId || shadowSnapshot?.chatId,
+  );
+  if (!normalizedChatId || !shadowSnapshot?.serializedGraph) {
+    return {
+      success: false,
+      loaded: false,
+      loadState: graphPersistenceState.loadState,
+      reason: "shadow-invalid",
+      chatId: normalizedChatId || "",
+      attemptIndex,
+    };
+  }
+
+  let shadowGraph = null;
+  try {
+    shadowGraph = cloneGraphForPersistence(
+      normalizeGraphRuntimeState(
+        deserializeGraph(shadowSnapshot.serializedGraph),
+        normalizedChatId,
+      ),
+      normalizedChatId,
+    );
+  } catch (error) {
+    console.warn("[ST-BME] shadow snapshot 恢复失败:", error);
+    return {
+      success: false,
+      loaded: false,
+      loadState: graphPersistenceState.loadState,
+      reason: "shadow-deserialize-failed",
+      detail: error?.message || String(error),
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
+
+  const shadowRevision = Math.max(
+    1,
+    normalizeIndexedDbRevision(shadowSnapshot.revision),
+  );
+  stampGraphPersistenceMeta(shadowGraph, {
+    revision: shadowRevision,
+    reason: `shadow:${String(source || "shadow-restore")}`,
+    chatId: normalizedChatId,
+    integrity:
+      String(shadowSnapshot.integrity || "").trim() ||
+      getChatMetadataIntegrity(getContext()) ||
+      graphPersistenceState.metadataIntegrity,
+  });
+
+  currentGraph = shadowGraph;
+  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
+    ? currentGraph.historyState.extractionCount
+    : 0;
+  lastExtractedItems = [];
+  const restoredRecallUi = restoreRecallUiStateFromPersistence(
+    getContext()?.chat,
+  );
+  runtimeStatus = createUiStatus(
+    "图谱临时恢复",
+    "已从本次会话临时快照恢复最近图谱，正在补写 IndexedDB",
+    "warning",
+  );
+  lastExtractionStatus = createUiStatus(
+    "待命",
+    "已从会话快照恢复最近图谱，等待下一次提取",
+    "idle",
+  );
+  lastVectorStatus = createUiStatus(
+    "待命",
+    currentGraph.vectorIndexState?.lastWarning ||
+      "已从会话快照恢复最近图谱，等待下一次向量任务",
+    "idle",
+  );
+  lastRecallStatus = createUiStatus(
+    "待命",
+    restoredRecallUi.restored
+      ? "已从持久化召回记录恢复显示，并已恢复最近图谱"
+      : "已从会话快照恢复最近图谱，等待下一次召回",
+    "idle",
+  );
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.SHADOW_RESTORED, {
+    chatId: normalizedChatId,
+    reason: `shadow:${String(source || "shadow-restore")}`,
+    attemptIndex,
+    revision: shadowRevision,
+    lastPersistedRevision: Math.max(
+      normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
+      shadowRevision,
+    ),
+    queuedPersistRevision: Math.max(
+      normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+      shadowRevision,
+    ),
+    queuedPersistChatId: normalizedChatId,
+    pendingPersist: Boolean(promoteToIndexedDb),
+    shadowSnapshotUsed: true,
+    shadowSnapshotRevision: shadowRevision,
+    shadowSnapshotUpdatedAt: String(shadowSnapshot.updatedAt || ""),
+    shadowSnapshotReason: String(
+      shadowSnapshot.debugReason || shadowSnapshot.reason || source || "",
+    ),
+    dbReady: true,
+    writesBlocked: false,
+  });
+  updateGraphPersistenceState({
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    dbReady: true,
+    indexedDbLastError: "",
+    metadataIntegrity:
+      getChatMetadataIntegrity(getContext()) ||
+      graphPersistenceState.metadataIntegrity,
+    dualWriteLastResult: {
+      action: "load",
+      source: `${String(source || "shadow-restore")}:shadow`,
+      success: true,
+      provisional: true,
+      revision: shadowRevision,
+      resultCode: "graph.load.shadow-restored",
+      reason: `shadow:${String(source || "shadow-restore")}`,
+      at: Date.now(),
+    },
+  });
+  rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
+
+  if (promoteToIndexedDb) {
+    queueGraphPersistToIndexedDb(normalizedChatId, currentGraph, {
+      revision: shadowRevision,
+      reason: `shadow-restore-promote:${String(source || "shadow-restore")}`,
+    });
+  }
+
+  refreshPanelLiveState();
+  schedulePersistedRecallMessageUiRefresh(30);
+  return {
+    success: true,
+    loaded: true,
+    loadState: GRAPH_LOAD_STATES.SHADOW_RESTORED,
+    reason: `shadow:${String(source || "shadow-restore")}`,
+    chatId: normalizedChatId,
+    attemptIndex,
+    revision: shadowRevision,
+    shadowRestored: true,
+  };
+}
+
 async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
   const action = String(syncPayload?.action || "")
     .trim()
@@ -4924,10 +5100,26 @@ async function loadGraphFromIndexedDb(
       identityRecoveryResult?.snapshot ||
       migrationResult?.snapshot ||
       (await db.exportSnapshot());
+    const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
+      resolveCurrentChatIdentity(getContext()),
+    );
 
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
     if (!isIndexedDbSnapshotMeaningful(snapshot)) {
+      if (shadowSnapshot) {
+        const shadowRestoreResult = applyShadowSnapshotToRuntime(
+          normalizedChatId,
+          shadowSnapshot,
+          {
+            source: `${source}:shadow-indexeddb-empty`,
+            attemptIndex,
+          },
+        );
+        if (shadowRestoreResult?.loaded) {
+          return shadowRestoreResult;
+        }
+      }
       if (applyEmptyState && getCurrentChatId() === normalizedChatId) {
         return applyIndexedDbEmptyToRuntime(normalizedChatId, {
           source,
@@ -4946,6 +5138,39 @@ async function loadGraphFromIndexedDb(
     const snapshotRevision = normalizeIndexedDbRevision(
       snapshot?.meta?.revision,
     );
+    const snapshotIntegrity = String(snapshot?.meta?.integrity || "").trim();
+    const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
+      createShadowComparisonGraph({
+        chatId: normalizedChatId,
+        revision: snapshotRevision,
+        integrity: snapshotIntegrity,
+      }),
+      shadowSnapshot,
+    );
+    if (shadowSnapshot && shadowDecision?.reason) {
+      updateGraphPersistenceState({
+        dualWriteLastResult: {
+          action: "shadow-compare",
+          source: `${source}:indexeddb-shadow-compare`,
+          success: Boolean(shadowDecision.prefer),
+          reason: shadowDecision.reason,
+          resultCode: String(shadowDecision.resultCode || ""),
+          shadowRevision: Number(shadowSnapshot.revision || 0),
+          officialRevision: snapshotRevision,
+          at: Date.now(),
+        },
+      });
+    }
+    if (shadowSnapshot && shadowDecision?.prefer) {
+      return applyShadowSnapshotToRuntime(
+        normalizedChatId,
+        shadowSnapshot,
+        {
+          source: `${source}:shadow-newer-than-indexeddb`,
+          attemptIndex,
+        },
+      );
+    }
     const shouldAllowOverride =
       allowOverride ||
       BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(
@@ -5193,7 +5418,10 @@ function deferAutoExtraction(
     ? Math.max(0, Math.floor(Number(pendingAutoExtraction.attempts) || 0))
     : 0;
   const nextAttempts = previousAttempts + 1;
-  const resolvedDelayMs = Number.isFinite(Number(delayMs))
+  const resolvedDelayMs =
+    delayMs !== null &&
+    delayMs !== undefined &&
+    Number.isFinite(Number(delayMs))
     ? Math.max(0, Math.floor(Number(delayMs)))
     : AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS[
         Math.min(
@@ -5272,6 +5500,26 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
     });
   }
 
+  if (isHostGenerationRunning) {
+    return deferAutoExtraction("generation-running", {
+      chatId: pendingChatId,
+      messageId: pendingAutoExtraction.messageId,
+    });
+  }
+
+  const hostGenerationSettleRemainingMs =
+    lastHostGenerationEndedAt > 0
+      ? AUTO_EXTRACTION_HOST_SETTLE_MS -
+        (Date.now() - lastHostGenerationEndedAt)
+      : 0;
+  if (hostGenerationSettleRemainingMs > 0) {
+    return deferAutoExtraction("generation-settling", {
+      chatId: pendingChatId,
+      messageId: pendingAutoExtraction.messageId,
+      delayMs: hostGenerationSettleRemainingMs,
+    });
+  }
+
   if (isRecoveringHistory) {
     return deferAutoExtraction("history-recovering", {
       chatId: pendingChatId,
@@ -5293,6 +5541,31 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
       chatId: pendingChatId,
       messageId: pendingAutoExtraction.messageId,
     });
+  }
+
+  const resumeContext = getContext();
+  const resumeChat = resumeContext?.chat;
+  if (
+    Array.isArray(resumeChat) &&
+    Number.isFinite(Number(pendingAutoExtraction.messageId))
+  ) {
+    const pendingMessageIndex = Math.floor(
+      Number(pendingAutoExtraction.messageId),
+    );
+    const pendingMessage = resumeChat[pendingMessageIndex];
+    if (
+      isAssistantChatMessage(pendingMessage, {
+        index: pendingMessageIndex,
+        chat: resumeChat,
+      }) &&
+      !String(pendingMessage?.mes ?? "").trim()
+    ) {
+      return deferAutoExtraction("assistant-message-empty", {
+        chatId: pendingChatId,
+        messageId: pendingMessageIndex,
+        delayMs: AUTO_EXTRACTION_HOST_SETTLE_MS,
+      });
+    }
   }
 
   const pendingRequest = { ...pendingAutoExtraction };
@@ -6607,6 +6880,7 @@ function loadGraphFromChat(options = {}) {
   const context = getContext();
   const chatIdentity = resolveCurrentChatIdentity(context);
   const chatId = chatIdentity.chatId;
+  const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(chatIdentity);
   const normalizedExpectedChatId = String(expectedChatId || "");
   if (attemptIndex === 0) {
     clearPendingGraphLoadRetry();
@@ -6757,7 +7031,6 @@ function loadGraphFromChat(options = {}) {
         normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
         chatId,
       );
-      const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(chatIdentity);
       const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
         officialGraph,
         shadowSnapshot,
@@ -6824,6 +7097,14 @@ function loadGraphFromChat(options = {}) {
             officialRevision,
             at: Date.now(),
           },
+        });
+      }
+
+      if (shadowSnapshot && shadowDecision?.prefer) {
+        clearPendingGraphLoadRetry();
+        return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
+          source: `${source}:metadata-shadow`,
+          attemptIndex,
         });
       }
 
@@ -6927,6 +7208,14 @@ function loadGraphFromChat(options = {}) {
         error,
       );
     }
+  }
+
+  if (shadowSnapshot) {
+    clearPendingGraphLoadRetry();
+    return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
+      source: `${source}:shadow-no-official`,
+      attemptIndex,
+    });
   }
 
   applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
@@ -7043,6 +7332,37 @@ async function saveGraphToIndexedDb(
         at: Date.now(),
       },
     });
+    if (
+      graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
+      areChatIdsEquivalentForResolvedIdentity(
+        normalizedChatId,
+        graphPersistenceState.chatId || getCurrentChatId(),
+      )
+    ) {
+      applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+        chatId: normalizedChatId,
+        reason: `shadow-promoted:${String(reason || "graph-save")}`,
+        revision: snapshot.meta.revision,
+        lastPersistedRevision: snapshot.meta.revision,
+        queuedPersistRevision: 0,
+        queuedPersistChatId: "",
+        pendingPersist: false,
+        shadowSnapshotUsed: true,
+        shadowSnapshotRevision: Math.max(
+          Number(graphPersistenceState.shadowSnapshotRevision || 0),
+          snapshot.meta.revision,
+        ),
+        shadowSnapshotUpdatedAt: String(
+          graphPersistenceState.shadowSnapshotUpdatedAt || "",
+        ),
+        shadowSnapshotReason: String(
+          graphPersistenceState.shadowSnapshotReason ||
+            "shadow-restore-promoted",
+        ),
+        dbReady: true,
+        writesBlocked: false,
+      });
+    }
     rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
     return {
@@ -7268,11 +7588,23 @@ function saveGraphToChat(options = {}) {
 }
 
 function handleGraphShadowSnapshotPageHide() {
+  saveGraphToChat({
+    reason: "pagehide-passive-persist",
+    markMutation: false,
+    captureShadow: true,
+    immediate: false,
+  });
   maybeCaptureGraphShadowSnapshot("pagehide");
 }
 
 function handleGraphShadowSnapshotVisibilityChange() {
   if (document.visibilityState === "hidden") {
+    saveGraphToChat({
+      reason: "visibility-hidden-passive-persist",
+      markMutation: false,
+      captureShadow: true,
+      immediate: false,
+    });
     maybeCaptureGraphShadowSnapshot("visibility-hidden");
   }
 }
@@ -9013,9 +9345,10 @@ function inspectHistoryMutation(
     Array.isArray(chat) &&
     currentGraph.historyState?.processedMessageHashesNeedRefresh === true
   ) {
-    updateProcessedHistorySnapshot(
+    rebindProcessedHistoryStateToChat(
+      currentGraph,
       chat,
-      currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+      getAssistantTurns(chat),
     );
     console.debug?.(
       "[ST-BME] refreshed processed message hashes after hash-version migration",
@@ -10104,6 +10437,8 @@ async function runRecall(options = {}) {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
+  isHostGenerationRunning = false;
+  lastHostGenerationEndedAt = 0;
   if (typeof clearMessageHideState === "function") {
     clearMessageHideState("chat-changed");
   }
@@ -10211,13 +10546,15 @@ function onUserMessageRendered(messageId = null) {
 }
 
 function onCharacterMessageRendered(messageId = null, type = "") {
-  return onCharacterMessageRenderedController(
+  const result = onCharacterMessageRenderedController(
     {
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     },
     messageId,
     type,
   );
+  void maybeResumePendingAutoExtraction("character-message-rendered");
+  return result;
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
@@ -10270,6 +10607,16 @@ async function onMessageSwiped(messageId, meta = null) {
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
+  const generationType = String(type || "normal").trim() || "normal";
+  if (
+    !dryRun &&
+    !params?.automatic_trigger &&
+    !params?.quiet_prompt &&
+    generationType === "normal"
+  ) {
+    isHostGenerationRunning = true;
+    lastHostGenerationEndedAt = 0;
+  }
   return onGenerationStartedController(
     {
       clearDryRunPromptPreview,
@@ -10293,6 +10640,8 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
 }
 
 function onGenerationEnded(_chatLength = null) {
+  isHostGenerationRunning = false;
+  lastHostGenerationEndedAt = Date.now();
   const recentTransaction = findRecentGenerationRecallTransactionForChat();
   const recentRecallResult =
     getGenerationRecallTransactionResult(recentTransaction);
@@ -10307,6 +10656,7 @@ function onGenerationEnded(_chatLength = null) {
       "",
   });
   schedulePersistedRecallMessageUiRefresh(320);
+  void maybeResumePendingAutoExtraction("generation-ended");
   if (typeof scheduleMessageHideApply === "function") {
     scheduleMessageHideApply("generation-ended", 180);
   }
@@ -10362,9 +10712,11 @@ function onMessageReceived(messageId = null, type = "") {
     console,
     consumeCurrentGenerationTrivialSkip,
     createRecallInputRecord,
+    deferAutoExtraction,
     getContext,
     getCurrentGraph: () => currentGraph,
     getGraphPersistenceState: () => graphPersistenceState,
+    getIsHostGenerationRunning: () => isHostGenerationRunning,
     getPendingHostGenerationInputSnapshot,
     getPendingRecallSendIntent: () => pendingRecallSendIntent,
     isAssistantChatMessage,
@@ -10519,10 +10871,13 @@ async function onImportGraph() {
     clearTimeout,
     document,
     ensureGraphMutationReady,
+    getAssistantTurns,
+    getContext,
     getCurrentChatId,
     importGraph,
     markVectorStateDirty,
     normalizeGraphRuntimeState,
+    rebindProcessedHistoryStateToChat,
     saveGraphToChat,
     setCurrentGraph: (graph) => {
       currentGraph = graph;

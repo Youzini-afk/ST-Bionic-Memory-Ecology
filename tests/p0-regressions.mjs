@@ -3716,6 +3716,89 @@ async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask()
   assert.equal(refreshCalls, 1);
 }
 
+async function testMessageReceivedDefersExtractionDuringHostGeneration() {
+  let runExtractionCalls = 0;
+  const deferred = [];
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      getIsHostGenerationRunning: () => true,
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      deferAutoExtraction(reason, meta = {}) {
+        deferred.push({
+          reason,
+          messageId: Number.isFinite(Number(meta?.messageId))
+            ? Number(meta.messageId)
+            : null,
+        });
+      },
+      setPendingRecallSendIntent() {},
+      getContext: () => ({
+        chat: [
+          { is_user: true, mes: "u1" },
+          { is_user: false, mes: "a1" },
+        ],
+      }),
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      runExtraction: async () => {
+        runExtractionCalls += 1;
+      },
+      console: {
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {},
+    },
+    1,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls, 0);
+  assert.deepEqual(deferred, [
+    {
+      reason: "generation-running",
+      messageId: 1,
+    },
+  ]);
+}
+
+async function testGenerationEndedResumesPendingAutoExtractionAfterSettle() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "streaming response" },
+  ];
+  harness.result.setGraphPersistenceState({
+    loadState: "loaded",
+    dbReady: true,
+    chatId: "chat-main",
+  });
+
+  harness.result.onGenerationStarted("normal", {}, false);
+  harness.invokeOnMessageReceived(1, "assistant");
+  await waitForTick();
+
+  assert.equal(harness.runExtractionCalls.length, 0);
+  assert.equal(
+    harness.result.getPendingAutoExtraction().reason,
+    "generation-running",
+  );
+
+  harness.result.onGenerationEnded();
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(harness.runExtractionCalls.length, 1);
+  harness.result.clearPendingAutoExtraction();
+}
+
 async function testAutoExtractionDefersWhenGraphNotReady() {
   const deferredReasons = [];
   const statuses = [];
@@ -5671,6 +5754,8 @@ await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
 await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
+await testMessageReceivedDefersExtractionDuringHostGeneration();
+await testGenerationEndedResumesPendingAutoExtractionAfterSettle();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();

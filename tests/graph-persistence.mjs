@@ -1641,13 +1641,16 @@ result = {
     source: "shadow-test",
   });
 
-  assert.equal(result.loadState, "loading");
-  assert.equal(reader.api.getCurrentGraph(), null);
+  assert.equal(result.loadState, "shadow-restored");
+  assert.equal(
+    reader.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-shadow",
+  );
   assert.equal(
     reader.api.getGraphPersistenceLiveState().shadowSnapshotUsed,
-    false,
+    true,
   );
-  assert.equal(reader.api.getGraphPersistenceLiveState().writesBlocked, true);
+  assert.equal(reader.api.getGraphPersistenceLiveState().writesBlocked, false);
 }
 
 {
@@ -1949,7 +1952,7 @@ result = {
   });
   const live = reader.api.getGraphPersistenceLiveState();
 
-  assert.equal(result.loadState, "loading");
+  assert.equal(result.loadState, "shadow-restored");
   assert.equal(
     reader.runtimeContext.__chatContext.chatMetadata?.st_bme_graph?.nodes
       ?.length,
@@ -1961,8 +1964,8 @@ result = {
   );
   assert.equal(reader.runtimeContext.__contextImmediateSaveCalls, 0);
   assert.equal(reader.runtimeContext.__contextSaveCalls, 0);
-  assert.equal(live.lastPersistedRevision, 0);
-  assert.equal(live.pendingPersist, false);
+  assert.equal(live.lastPersistedRevision, 9);
+  assert.equal(live.pendingPersist, true);
 }
 
 {
@@ -2102,7 +2105,7 @@ result = {
     source: "load-shadow-decoupled",
   });
 
-  assert.equal(result.loadState, "loading");
+  assert.equal(result.loadState, "shadow-restored");
   const runtimeGraph = reader.api.getCurrentGraph();
   const persistedGraph =
     reader.runtimeContext.__chatContext.chatMetadata.st_bme_graph;
@@ -2113,6 +2116,10 @@ result = {
   );
 
   runtimeGraph.nodes[0].fields.title = "runtime-shadow-mutated";
+  assert.equal(
+    runtimeGraph.nodes[0].fields.title,
+    "runtime-shadow-mutated",
+  );
   assert.equal(
     persistedGraph.nodes[0].fields.title,
     "事件-official-older",
@@ -2352,6 +2359,65 @@ result = {
   assert.equal(
     harness.api.getGraphPersistenceState().storagePrimary,
     "indexeddb",
+  );
+}
+
+{
+  const sharedSession = new Map();
+  const writer = await createGraphPersistenceHarness({
+    chatId: "chat-indexeddb-shadow-restore",
+    globalChatId: "chat-indexeddb-shadow-restore",
+    sessionStore: sharedSession,
+  });
+  writer.api.writeGraphShadowSnapshot(
+    "chat-indexeddb-shadow-restore",
+    createMeaningfulGraph("chat-indexeddb-shadow-restore", "shadow-newer"),
+    {
+      revision: 9,
+      reason: "pagehide-refresh",
+    },
+  );
+
+  const indexedDbGraph = stampPersistedGraph(
+    createMeaningfulGraph("chat-indexeddb-shadow-restore", "indexeddb-older"),
+    {
+      revision: 4,
+      integrity: "meta-indexeddb-shadow-restore",
+      chatId: "chat-indexeddb-shadow-restore",
+      reason: "indexeddb-older",
+    },
+  );
+  const indexedDbSnapshot = buildSnapshotFromGraph(indexedDbGraph, {
+    chatId: "chat-indexeddb-shadow-restore",
+    revision: 4,
+  });
+
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-indexeddb-shadow-restore",
+    globalChatId: "chat-indexeddb-shadow-restore",
+    indexedDbSnapshot,
+    sessionStore: sharedSession,
+  });
+
+  const result = await harness.api.loadGraphFromIndexedDb(
+    "chat-indexeddb-shadow-restore",
+    {
+      source: "indexeddb-shadow-restore",
+      allowOverride: true,
+      applyEmptyState: true,
+    },
+  );
+
+  assert.equal(result.loadState, "shadow-restored");
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-shadow-newer",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    harness.api.getIndexedDbSnapshot().meta.revision,
+    9,
+    "shadow 恢复后应回补 IndexedDB 修正旧快照",
   );
 }
 

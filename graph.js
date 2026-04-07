@@ -6,6 +6,7 @@ import {
   createDefaultHistoryState,
   createDefaultVectorIndexState,
   normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
 } from "./runtime-state.js";
 import {
   hasSameScopeIdentity,
@@ -717,7 +718,10 @@ export function importGraph(json) {
     node.embedding = null;
   }
   graph.batchJournal = createDefaultBatchJournal();
+  graph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
   graph.historyState.processedMessageHashes = {};
+  graph.historyState.processedMessageHashesNeedRefresh = true;
   graph.historyState.historyDirtyFrom = null;
   graph.vectorIndexState.hashToNodeId = {};
   graph.vectorIndexState.nodeToHash = {};

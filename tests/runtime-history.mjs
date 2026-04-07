@@ -7,6 +7,7 @@ import {
   findJournalRecoveryPoint,
   normalizeGraphRuntimeState,
   PROCESSED_MESSAGE_HASH_VERSION,
+  rebindProcessedHistoryStateToChat,
   rollbackBatch,
   snapshotProcessedMessageHashes,
 } from "../runtime-state.js";
@@ -93,6 +94,28 @@ assert.equal(migratedGraph.historyState.processedMessageHashesNeedRefresh, true)
 
 const migratedDetection = detectHistoryMutation(chat, migratedGraph.historyState);
 assert.equal(migratedDetection.dirty, false);
+
+const importedGraph = normalizeGraphRuntimeState({
+  historyState: {
+    chatId: "chat-history-test",
+    lastProcessedAssistantFloor: 99,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+    processedMessageHashes: {},
+    processedMessageHashesNeedRefresh: true,
+  },
+});
+const reboundResult = rebindProcessedHistoryStateToChat(importedGraph, chat, [
+  1,
+  3,
+]);
+assert.equal(reboundResult.rebound, true);
+assert.equal(reboundResult.lastProcessedAssistantFloor, 3);
+assert.equal(reboundResult.clamped, true);
+assert.equal(importedGraph.historyState.processedMessageHashesNeedRefresh, false);
+assert.deepEqual(
+  importedGraph.historyState.processedMessageHashes,
+  snapshotProcessedMessageHashes(chat, 3),
+);
 
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {

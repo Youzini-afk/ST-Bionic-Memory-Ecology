@@ -278,6 +278,72 @@ export function snapshotProcessedMessageHashes(
   return result;
 }
 
+export function rebindProcessedHistoryStateToChat(
+  graph,
+  chat,
+  assistantTurns = [],
+) {
+  if (!graph || typeof graph !== "object") {
+    return {
+      rebound: false,
+      reason: "missing-graph",
+      lastProcessedAssistantFloor: -1,
+      maxAssistantFloor: -1,
+      clamped: false,
+    };
+  }
+
+  const historyState =
+    graph.historyState && typeof graph.historyState === "object"
+      ? graph.historyState
+      : createDefaultHistoryState();
+  graph.historyState = historyState;
+
+  const normalizedAssistantTurns = Array.isArray(assistantTurns)
+    ? assistantTurns
+        .map((value) => Number.parseInt(value, 10))
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b)
+    : [];
+  const maxAssistantFloor =
+    normalizedAssistantTurns.length > 0
+      ? normalizedAssistantTurns[normalizedAssistantTurns.length - 1]
+      : -1;
+  const rawLastProcessedAssistantFloor = Number.isFinite(
+    historyState.lastProcessedAssistantFloor,
+  )
+    ? Math.floor(historyState.lastProcessedAssistantFloor)
+    : -1;
+
+  let safeLastProcessedAssistantFloor = rawLastProcessedAssistantFloor;
+  if (!Array.isArray(chat) || chat.length === 0 || maxAssistantFloor < 0) {
+    safeLastProcessedAssistantFloor = -1;
+  } else if (safeLastProcessedAssistantFloor > maxAssistantFloor) {
+    safeLastProcessedAssistantFloor = maxAssistantFloor;
+  }
+
+  historyState.lastProcessedAssistantFloor = safeLastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+  historyState.processedMessageHashes =
+    safeLastProcessedAssistantFloor >= 0
+      ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
+      : {};
+  historyState.processedMessageHashesNeedRefresh = false;
+  graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
+
+  return {
+    rebound: true,
+    reason:
+      safeLastProcessedAssistantFloor < 0
+        ? "no-processed-assistant-floor"
+        : "ok",
+    lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+    maxAssistantFloor,
+    clamped:
+      safeLastProcessedAssistantFloor !== rawLastProcessedAssistantFloor,
+  };
+}
+
 export function detectHistoryMutation(chat, historyState) {
   const lastProcessedAssistantFloor =
     historyState?.lastProcessedAssistantFloor ?? -1;

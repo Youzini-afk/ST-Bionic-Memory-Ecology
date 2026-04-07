@@ -126,6 +126,35 @@ function updateManualActionUiState(runtime, text, meta = "", level = "idle") {
   runtime?.refreshPanelLiveState?.();
 }
 
+function rebindImportedGraphToCurrentChat(runtime, importedGraph) {
+  if (!importedGraph || typeof importedGraph !== "object") {
+    return {
+      rebound: false,
+      reason: "missing-graph",
+    };
+  }
+
+  const chat = runtime.getContext?.()?.chat;
+  const assistantTurns =
+    typeof runtime.getAssistantTurns === "function" && Array.isArray(chat)
+      ? runtime.getAssistantTurns(chat)
+      : [];
+
+  if (typeof runtime.rebindProcessedHistoryStateToChat === "function") {
+    return runtime.rebindProcessedHistoryStateToChat(
+      importedGraph,
+      chat,
+      assistantTurns,
+    );
+  }
+
+  importedGraph.historyState.processedMessageHashesNeedRefresh = true;
+  return {
+    rebound: false,
+    reason: "missing-history-rebind-helper",
+  };
+}
+
 export async function onViewGraphController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) {
@@ -497,14 +526,24 @@ export async function onImportGraphController(runtime) {
           runtime.importGraph(text),
           runtime.getCurrentChatId(),
         );
+        const historyRebind = rebindImportedGraphToCurrentChat(
+          runtime,
+          importedGraph,
+        );
         runtime.setCurrentGraph(importedGraph);
         runtime.markVectorStateDirty("导入图谱后需要重建向量索引");
-        runtime.setExtractionCount(0);
+        runtime.setExtractionCount(
+          Math.max(0, Number(importedGraph?.historyState?.extractionCount) || 0),
+        );
         runtime.setLastExtractedItems([]);
         runtime.updateLastRecalledItems(importedGraph.lastRecallResult || []);
         runtime.clearInjectionState();
         runtime.saveGraphToChat({ reason: "graph-import-complete" });
-        runtime.toastr.success("图谱已导入");
+        runtime.toastr.success(
+          historyRebind?.rebound === true
+            ? "图谱已导入，并已重新绑定当前聊天历史"
+            : "图谱已导入",
+        );
         finish({ imported: true, handledToast: true });
       } catch (err) {
         const error =

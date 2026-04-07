@@ -685,6 +685,24 @@ export function onMessageReceivedController(
         dbReady,
       },
     );
+    if (
+      runtime.getIsHostGenerationRunning?.() === true &&
+      typeof runtime.deferAutoExtraction === "function"
+    ) {
+      runtime.console?.debug?.(
+        "[ST-BME] assistant message received during host generation, deferring auto extraction",
+        {
+          messageId: Number.isFinite(Number(targetMessageIndex))
+            ? Number(targetMessageIndex)
+            : null,
+        },
+      );
+      runtime.deferAutoExtraction("generation-running", {
+        messageId: targetMessageIndex,
+      });
+      runtime.refreshPersistedRecallMessageUi?.();
+      return;
+    }
     enqueueMicrotask(() => {
       void runtime.runExtraction().catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);

@@ -87,6 +87,34 @@ assert.deepEqual(
   "extraction should keep BME-managed hidden context but still skip real system messages",
 );
 
+const blankAssistantChat = [
+  { is_user: false, is_system: true, mes: "greeting/system" },
+  { is_user: true, is_system: false, mes: "user-1" },
+  { is_user: false, is_system: false, mes: "   " },
+  { is_user: true, is_system: false, mes: "<plot>secret</plot>" },
+  { is_user: false, is_system: false, mes: "assistant-2" },
+];
+
+assert.deepEqual(
+  getAssistantTurns(blankAssistantChat),
+  [4],
+  "blank assistant floors should not be treated as extractable turns",
+);
+assert.deepEqual(
+  buildExtractionMessages(blankAssistantChat, 4, 4, {
+    extractContextTurns: 3,
+  }).map((message) => ({
+    seq: message.seq,
+    role: message.role,
+    content: message.content,
+  })),
+  [
+    { seq: 1, role: "user", content: "user-1" },
+    { seq: 4, role: "assistant", content: "assistant-2" },
+  ],
+  "blank assistant text and planner-tag-only user text should be skipped",
+);
+
 resetHideState();
 const autoHiddenChat = [
   { is_user: false, is_system: true, mes: "greeting/system" },

@@ -51,9 +51,9 @@ export function getAssistantTurns(chat) {
   const assistantTurns = [];
   // 从 index 1 开始：index 0 是角色卡首条消息（greeting），不参与提取
   for (let index = 1; index < chat.length; index++) {
-    if (isAssistantChatMessage(chat[index], { index, chat })) {
-      assistantTurns.push(index);
-    }
+    if (!isAssistantChatMessage(chat[index], { index, chat })) continue;
+    if (!String(chat[index]?.mes ?? "").trim()) continue;
+    assistantTurns.push(index);
   }
   return assistantTurns;
 }
@@ -75,10 +75,12 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
   ) {
     const msg = chat[index];
     if (isSystemMessageForExtraction(msg, { index, chat })) continue;
+    const content = sanitizePlannerMessageText(msg);
+    if (!String(content || "").trim()) continue;
     messages.push({
       seq: index,
       role: msg.is_user ? "user" : "assistant",
-      content: sanitizePlannerMessageText(msg),
+      content,
     });
   }
 
