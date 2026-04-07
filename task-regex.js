@@ -98,7 +98,19 @@ function derivePlacementLabelsFromSourceFlags(sourceFlags = {}) {
   if (sourceFlags.assistant) {
     labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.AI_OUTPUT]);
   }
-  if (sourceFlags.system && !sourceFlags.assistant) {
+  if (sourceFlags.worldInfo) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.WORLD_INFO]);
+  }
+  if (sourceFlags.reasoning) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.REASONING]);
+  }
+  if (
+    labels.length === 0 &&
+    sourceFlags.system &&
+    !sourceFlags.assistant &&
+    !sourceFlags.worldInfo &&
+    !sourceFlags.reasoning
+  ) {
     labels.push("系统/世界书");
   }
   return labels;
@@ -117,29 +129,38 @@ function isTavernRuleShape(raw = {}) {
 
 function buildRuleSourceFlags(source, placement, isTavernRule) {
   if (source && typeof source === "object") {
+    const user = Boolean(source.user_input);
+    const assistant = Boolean(source.ai_output);
+    const worldInfo = Boolean(source.world_info);
+    const reasoning = Boolean(source.reasoning);
     return {
-      user: Boolean(source.user_input),
-      assistant: Boolean(source.ai_output),
-      system: Boolean(source.ai_output),
+      user,
+      assistant,
+      worldInfo,
+      reasoning,
+      system: assistant || worldInfo || reasoning,
     };
   }
 
   if (isTavernRule && placement.length > 0) {
+    const user = placement.includes(TAVERN_REGEX_PLACEMENT.USER_INPUT);
+    const assistant = placement.includes(TAVERN_REGEX_PLACEMENT.AI_OUTPUT);
+    const worldInfo = placement.includes(TAVERN_REGEX_PLACEMENT.WORLD_INFO);
+    const reasoning = placement.includes(TAVERN_REGEX_PLACEMENT.REASONING);
     return {
-      user: placement.includes(TAVERN_REGEX_PLACEMENT.USER_INPUT),
-      assistant: placement.includes(TAVERN_REGEX_PLACEMENT.AI_OUTPUT),
-      system: placement.some((item) =>
-        [
-          TAVERN_REGEX_PLACEMENT.WORLD_INFO,
-          TAVERN_REGEX_PLACEMENT.REASONING,
-        ].includes(item),
-      ),
+      user,
+      assistant,
+      worldInfo,
+      reasoning,
+      system: assistant || worldInfo || reasoning,
     };
   }
 
   return {
     user: true,
     assistant: true,
+    worldInfo: true,
+    reasoning: true,
     system: true,
   };
 }
@@ -169,12 +190,10 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
     sourceFlags,
     destinationFlags: {
       prompt: destination
-        ? isTavernRule && (raw.markdownOnly === true || beautificationReplace)
-          ? true
-          : Boolean(destination.prompt)
-        : isTavernRule && raw.markdownOnly === true
-          ? true
-          : raw.markdownOnly !== true,
+        ? Boolean(destination.prompt)
+        : raw.markdownOnly === true
+          ? false
+          : true,
       display: destination
         ? Boolean(destination.display)
         : Boolean(raw.markdownOnly),
@@ -223,10 +242,16 @@ function getRegexHost() {
   const legacyIsCharacterTavernRegexesEnabled = getLegacyRegexApi(
     "isCharacterTavernRegexesEnabled",
   );
+  const legacyFormatAsTavernRegexedString = getLegacyRegexApi(
+    "formatAsTavernRegexedString",
+  );
 
   try {
     const regexHost = getHostAdapter?.()?.regex || null;
-    if (typeof regexHost?.getTavernRegexes === "function") {
+    if (
+      typeof regexHost?.getTavernRegexes === "function" ||
+      typeof regexHost?.formatAsTavernRegexedString === "function"
+    ) {
       const capabilitySupport = regexHost.readCapabilitySupport?.() || {};
       const supplementedCapabilities = [];
       const missingCapabilities = [];
@@ -234,6 +259,10 @@ function getRegexHost() {
         typeof regexHost.isCharacterTavernRegexesEnabled === "function"
           ? regexHost.isCharacterTavernRegexesEnabled
           : legacyIsCharacterTavernRegexesEnabled;
+      const resolvedFormatter =
+        typeof regexHost.formatAsTavernRegexedString === "function"
+          ? regexHost.formatAsTavernRegexedString
+          : legacyFormatAsTavernRegexedString;
 
       if (typeof regexHost.isCharacterTavernRegexesEnabled !== "function") {
         if (resolvedCharacterToggle) {
@@ -243,13 +272,23 @@ function getRegexHost() {
         }
       }
 
+      if (typeof regexHost.formatAsTavernRegexedString !== "function") {
+        if (resolvedFormatter) {
+          supplementedCapabilities.push("formatAsTavernRegexedString");
+        } else {
+          missingCapabilities.push("formatAsTavernRegexedString");
+        }
+      }
+
       return {
         getTavernRegexes: regexHost.getTavernRegexes,
         isCharacterTavernRegexesEnabled: resolvedCharacterToggle,
+        formatAsTavernRegexedString: resolvedFormatter,
         sourceLabel: capabilitySupport.sourceLabel || "host-adapter.regex",
         fallback:
           Boolean(capabilitySupport.fallback) ||
           supplementedCapabilities.length > 0,
+        fallbackReason: String(capabilitySupport.fallbackReason || "").trim(),
         capabilityStatus: Object.freeze({
           mode: capabilitySupport.mode || "unknown",
           supplementedCapabilities: Object.freeze(supplementedCapabilities),
@@ -271,12 +310,20 @@ function getRegexHost() {
   if (typeof legacyIsCharacterTavernRegexesEnabled !== "function") {
     missingCapabilities.push("isCharacterTavernRegexesEnabled");
   }
+  if (typeof legacyFormatAsTavernRegexedString !== "function") {
+    missingCapabilities.push("formatAsTavernRegexedString");
+  }
 
   return {
     getTavernRegexes: legacyGetTavernRegexes,
     isCharacterTavernRegexesEnabled: legacyIsCharacterTavernRegexesEnabled,
+    formatAsTavernRegexedString: legacyFormatAsTavernRegexedString,
     sourceLabel: "legacy.globalThis",
     fallback: true,
+    fallbackReason:
+      typeof legacyGetTavernRegexes === "function"
+        ? "当前通过 legacy globalThis 回退提供 Tavern Regex 能力"
+        : "未检测到 Tavern Regex 宿主接口",
     capabilityStatus: Object.freeze({
       mode: "legacy",
       supplementedCapabilities: Object.freeze([]),
@@ -397,8 +444,6 @@ function getPlacementLabels(placement = []) {
 
 function summarizeRule(rule, reason = "") {
   const normalized = rule && typeof rule === "object" ? rule : {};
-  const promptReplaceAsEmpty =
-    Boolean(normalized.markdownOnly) || Boolean(normalized.beautificationReplace);
   const sourceFlags =
     normalized.sourceFlags && typeof normalized.sourceFlags === "object"
       ? normalized.sourceFlags
@@ -413,16 +458,17 @@ function summarizeRule(rule, reason = "") {
     name: String(normalized.scriptName || normalized.id || ""),
     findRegex: String(normalized.findRegex || ""),
     replaceString: String(normalized.replaceString || ""),
-    effectivePromptReplaceString: promptReplaceAsEmpty
-      ? ""
-      : String(normalized.replaceString || ""),
-    promptReplaceAsEmpty,
+    effectivePromptReplaceString: String(normalized.replaceString || ""),
+    promptReplaceAsEmpty: false,
     sourceType: String(normalized.sourceType || ""),
     promptOnly: Boolean(normalized.promptOnly),
     markdownOnly: Boolean(normalized.markdownOnly),
+    beautificationReplace: Boolean(normalized.beautificationReplace),
     sourceFlags: {
       user: sourceFlags.user !== false,
       assistant: sourceFlags.assistant !== false,
+      worldInfo: sourceFlags.worldInfo !== false,
+      reasoning: sourceFlags.reasoning !== false,
       system: sourceFlags.system !== false,
     },
     placement: Array.isArray(normalized.placement) ? [...normalized.placement] : [],
@@ -437,27 +483,38 @@ function summarizeRule(rule, reason = "") {
 
 function summarizeRuleForPromptPreview(rule, stageConfig = {}, reason = "") {
   const summary = summarizeRule(rule, reason);
+  const regexHost = getRegexHost();
+  const executionState = buildHostRegexExecutionState(regexHost);
+  const promptStageApplies =
+    summary.sourceType === "local"
+      ? shouldApplyRuleForStage(rule, "input.finalPrompt", stageConfig)
+      : shouldReuseTavernRuleForPrompt(rule, executionState.mode);
   const promptSemanticApplies =
     summary.sourceType === "local"
       ? summary.sourceFlags.system !== false &&
         rule?.destinationFlags?.prompt !== false
-      : summary.promptReplaceAsEmpty ||
-        (summary.promptOnly === true && rule?.destinationFlags?.prompt !== false);
-  const promptStageApplies = shouldApplyRuleForStage(
-    rule,
-    "input.finalPrompt",
-    stageConfig,
-  );
+      : shouldReuseTavernRuleForPrompt(rule, executionState.mode);
+  let promptStageMode = "skip";
+  if (summary.sourceType === "local") {
+    promptStageMode = promptSemanticApplies ? "replace" : "skip";
+  } else if (rule?.destinationFlags?.prompt === false || summary.markdownOnly) {
+    promptStageMode = "display-only";
+  } else if (summary.beautificationReplace && executionState.mode !== "host-real") {
+    promptStageMode = "fallback-skip-beautify";
+  } else if (executionState.mode === "host-real") {
+    promptStageMode = "host-real";
+  } else if (executionState.mode === "host-fallback") {
+    promptStageMode = "host-fallback";
+  }
   return {
     ...summary,
     promptSemanticApplies,
     promptStageApplies,
     promptStageEnabled: isTaskRegexStageEnabled(stageConfig, "input.finalPrompt"),
-    promptStageMode: promptSemanticApplies
-      ? summary.promptReplaceAsEmpty
-        ? "clear"
-        : "replace"
-      : "skip",
+    promptStageMode,
+    executionMode:
+      summary.sourceType === "local" ? "local-final" : executionState.mode,
+    formatterAvailable: executionState.formatterAvailable,
   };
 }
 
@@ -686,6 +743,10 @@ function collectTavernRulesDetailed(regexConfig = {}) {
     host: {
       sourceLabel: regexHost.sourceLabel,
       fallback: Boolean(regexHost.fallback),
+      fallbackReason: String(regexHost.fallbackReason || ""),
+      formatterAvailable:
+        typeof regexHost.formatAsTavernRegexedString === "function",
+      executionMode: buildHostRegexExecutionState(regexHost).mode,
       capabilityStatus: regexHost.capabilityStatus || null,
     },
     sources,
@@ -704,6 +765,91 @@ function collectLocalRules(regexConfig = {}) {
   return localRules
     .map((rule, index) => normalizeRule(rule, "local", index))
     .filter((rule) => rule.enabled && rule.findRegex);
+}
+
+function normalizeHostRegexSourceType(sourceType = "") {
+  const normalized = String(sourceType || "").trim().toLowerCase();
+  if (
+    ["user_input", "ai_output", "world_info", "reasoning"].includes(normalized)
+  ) {
+    return normalized;
+  }
+  return "";
+}
+
+function buildHostRegexExecutionState(regexHost = null) {
+  const formatterAvailable =
+    typeof regexHost?.formatAsTavernRegexedString === "function";
+  const rulesAvailable = typeof regexHost?.getTavernRegexes === "function";
+
+  if (formatterAvailable) {
+    return {
+      mode: "host-real",
+      formatterAvailable: true,
+      fallbackReason: "",
+    };
+  }
+
+  if (rulesAvailable) {
+    return {
+      mode: "host-fallback",
+      formatterAvailable: false,
+      fallbackReason:
+        String(regexHost?.fallbackReason || "").trim() ||
+        "宿主 formatter 不可用，已回退插件侧兼容执行",
+    };
+  }
+
+  return {
+    mode: "host-unavailable",
+    formatterAvailable: false,
+    fallbackReason:
+      String(regexHost?.fallbackReason || "").trim() ||
+      "未检测到可用的 Tavern Regex 宿主接口",
+  };
+}
+
+function shouldReuseTavernRuleForPrompt(rule, executionMode = "host-fallback") {
+  if (!rule?.isTavernRule) {
+    return false;
+  }
+  if (rule?.destinationFlags?.prompt === false) {
+    return false;
+  }
+  if (rule?.markdownOnly) {
+    return false;
+  }
+  if (
+    executionMode !== "host-real" &&
+    Boolean(rule?.beautificationReplace)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function shouldReuseTavernRuleForSourceType(rule, sourceType = "", role = "system") {
+  const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
+  if (!normalizedSourceType || !rule?.sourceFlags) {
+    return false;
+  }
+
+  if (normalizedSourceType === "user_input") {
+    return rule.sourceFlags.user !== false;
+  }
+  if (normalizedSourceType === "ai_output") {
+    if (role === "user") {
+      return rule.sourceFlags.user !== false;
+    }
+    return rule.sourceFlags.assistant !== false;
+  }
+  if (normalizedSourceType === "world_info") {
+    return rule.sourceFlags.worldInfo !== false;
+  }
+  if (normalizedSourceType === "reasoning") {
+    return rule.sourceFlags.reasoning !== false;
+  }
+  return false;
 }
 
 function shouldApplyRuleForTaskContext(rule, stage = "") {
@@ -765,15 +911,7 @@ function applyOneRule(input, rule, stage = "") {
   const regex = parseRegexFromString(rule.findRegex);
   if (!regex) return { output: input, changed: false, error: "invalid_regex" };
 
-  let replacement = rule.replaceString || "";
-  if (
-    PROMPT_STAGES.has(stage) &&
-    (rule.markdownOnly || rule.beautificationReplace)
-  ) {
-    replacement = "";
-  }
-
-  let output = input.replace(regex, replacement);
+  let output = input.replace(regex, rule.replaceString || "");
   if (rule.trimStrings.length > 0) {
     for (const trimText of rule.trimStrings) {
       if (!trimText) continue;
@@ -788,6 +926,209 @@ function pushDebug(collector, entry) {
   if (collector && Array.isArray(collector.entries)) {
     collector.entries.push(entry);
   }
+}
+
+function applyHostRegexReuseFallback(
+  input,
+  tavernRules = [],
+  {
+    sourceType = "",
+    role = "system",
+  } = {},
+) {
+  let output = String(input || "");
+  const appliedRules = [];
+  const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
+
+  for (const rule of Array.isArray(tavernRules) ? tavernRules : []) {
+    if (!shouldReuseTavernRuleForPrompt(rule, "host-fallback")) {
+      continue;
+    }
+    if (!shouldReuseTavernRuleForSourceType(rule, normalizedSourceType, role)) {
+      continue;
+    }
+
+    const result = applyOneRule(output, rule, "");
+    if (result.error) {
+      appliedRules.push({
+        id: rule.id,
+        source: rule.sourceType,
+        error: result.error,
+      });
+      continue;
+    }
+    if (result.changed) {
+      appliedRules.push({
+        id: rule.id,
+        source: rule.sourceType,
+      });
+      output = result.output;
+    }
+  }
+
+  return {
+    output,
+    appliedRules,
+  };
+}
+
+export function applyHostRegexReuse(
+  settings = {},
+  taskType,
+  text,
+  {
+    sourceType = "",
+    role = "system",
+    debugCollector = null,
+    formatterOptions = null,
+  } = {},
+) {
+  const input = typeof text === "string" ? text : "";
+  const normalizedTaskType = String(taskType || "").trim();
+  const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
+  const profile = getActiveTaskProfile(settings, normalizedTaskType);
+  const regexConfig = profile?.regex || {};
+  const regexHost = getRegexHost();
+  const executionState = buildHostRegexExecutionState(regexHost);
+
+  if (!regexConfig.enabled || regexConfig.inheritStRegex === false) {
+    pushDebug(debugCollector, {
+      kind: "host-reuse",
+      taskType: normalizedTaskType,
+      stage: `host:${normalizedSourceType || "unknown"}`,
+      enabled: false,
+      executionMode: executionState.mode,
+      formatterAvailable: executionState.formatterAvailable,
+      appliedRules: [],
+      sourceCount: { tavern: 0, local: 0 },
+      fallbackReason: executionState.fallbackReason,
+      hostFormatterSource: String(regexHost?.sourceLabel || ""),
+      skippedDisplayOnlyRuleCount: 0,
+    });
+    return {
+      text: input,
+      changed: false,
+      executionMode: executionState.mode,
+      formatterAvailable: executionState.formatterAvailable,
+      formatterSource: String(regexHost?.sourceLabel || ""),
+      fallbackReason: executionState.fallbackReason,
+      skippedDisplayOnlyRuleCount: 0,
+    };
+  }
+
+  const detailed = collectTavernRulesDetailed(regexConfig);
+  const tavernRules = Array.isArray(detailed.rules) ? detailed.rules : [];
+  const skippedDisplayOnlyRuleCount = tavernRules.filter(
+    (rule) =>
+      rule?.isTavernRule &&
+      (!shouldReuseTavernRuleForPrompt(rule, executionState.mode) ||
+        rule?.destinationFlags?.prompt === false ||
+        rule?.markdownOnly === true),
+  ).length;
+
+  if (
+    !normalizedSourceType ||
+    (tavernRules.length === 0 && executionState.mode !== "host-real")
+  ) {
+    pushDebug(debugCollector, {
+      kind: "host-reuse",
+      taskType: normalizedTaskType,
+      stage: `host:${normalizedSourceType || "unknown"}`,
+      enabled: true,
+      executionMode: executionState.mode,
+      formatterAvailable: executionState.formatterAvailable,
+      appliedRules: [],
+      sourceCount: { tavern: tavernRules.length, local: 0 },
+      fallbackReason: executionState.fallbackReason,
+      hostFormatterSource: String(regexHost?.sourceLabel || ""),
+      skippedDisplayOnlyRuleCount,
+    });
+    return {
+      text: input,
+      changed: false,
+      executionMode: executionState.mode,
+      formatterAvailable: executionState.formatterAvailable,
+      formatterSource: String(regexHost?.sourceLabel || ""),
+      fallbackReason: executionState.fallbackReason,
+      skippedDisplayOnlyRuleCount,
+    };
+  }
+
+  if (
+    executionState.mode === "host-real" &&
+    typeof regexHost?.formatAsTavernRegexedString === "function"
+  ) {
+    try {
+      const output = String(
+        regexHost.formatAsTavernRegexedString(
+          input,
+          normalizedSourceType,
+          "prompt",
+          formatterOptions && typeof formatterOptions === "object"
+            ? formatterOptions
+            : undefined,
+        ) ?? input,
+      );
+      pushDebug(debugCollector, {
+        kind: "host-reuse",
+        taskType: normalizedTaskType,
+        stage: `host:${normalizedSourceType}`,
+        enabled: true,
+        executionMode: "host-real",
+        formatterAvailable: true,
+        appliedRules: output !== input
+          ? [{ id: "__host_formatter__", source: "host-real" }]
+          : [],
+        sourceCount: { tavern: tavernRules.length, local: 0 },
+        fallbackReason: "",
+        hostFormatterSource: String(regexHost?.sourceLabel || ""),
+        skippedDisplayOnlyRuleCount,
+      });
+      return {
+        text: output,
+        changed: output !== input,
+        executionMode: "host-real",
+        formatterAvailable: true,
+        formatterSource: String(regexHost?.sourceLabel || ""),
+        fallbackReason: "",
+        skippedDisplayOnlyRuleCount,
+      };
+    } catch (error) {
+      debugDebug("[ST-BME] 宿主 formatter 执行失败，回退插件兼容执行", error);
+    }
+  }
+
+  const fallback = applyHostRegexReuseFallback(input, tavernRules, {
+    sourceType: normalizedSourceType,
+    role,
+  });
+  const fallbackReason =
+    executionState.mode === "host-unavailable"
+      ? executionState.fallbackReason
+      : executionState.fallbackReason ||
+        "宿主 formatter 不可用，已回退插件侧兼容执行";
+  pushDebug(debugCollector, {
+    kind: "host-reuse",
+    taskType: normalizedTaskType,
+    stage: `host:${normalizedSourceType}`,
+    enabled: true,
+    executionMode: "host-fallback",
+    formatterAvailable: false,
+    appliedRules: fallback.appliedRules,
+    sourceCount: { tavern: tavernRules.length, local: 0 },
+    fallbackReason,
+    hostFormatterSource: String(regexHost?.sourceLabel || ""),
+    skippedDisplayOnlyRuleCount,
+  });
+  return {
+    text: fallback.output,
+    changed: fallback.output !== input,
+    executionMode: "host-fallback",
+    formatterAvailable: false,
+    formatterSource: String(regexHost?.sourceLabel || ""),
+    fallbackReason,
+    skippedDisplayOnlyRuleCount,
+  };
 }
 
 export function applyTaskRegex(
@@ -816,13 +1157,11 @@ export function applyTaskRegex(
   // 阶段检查已移到 shouldApplyRuleForStage 中，无需单独 gate
   const stagesConfig = normalizeTaskRegexStages(regexConfig?.stages || {});
 
-  const tavernRules = collectTavernRules(regexConfig);
   const localRules = collectLocalRules(regexConfig);
-  const orderedRules = [...tavernRules, ...localRules];
   const appliedRules = [];
   let output = input;
 
-  for (const rule of orderedRules) {
+  for (const rule of localRules) {
     if (!shouldApplyRuleForStage(rule, stage, stagesConfig)) continue;
     if (!shouldApplyRuleForRole(rule, role)) continue;
 
@@ -850,7 +1189,7 @@ export function applyTaskRegex(
     enabled: true,
     appliedRules,
     sourceCount: {
-      tavern: tavernRules.length,
+      tavern: 0,
       local: localRules.length,
     },
   });
@@ -863,6 +1202,7 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
   const regexConfig = profile?.regex || {};
   const detailed = collectTavernRulesDetailed(regexConfig);
   const stageConfig = normalizeTaskRegexStages(regexConfig.stages || {});
+  const localRules = collectLocalRules(regexConfig);
 
   const mapPreviewRules = (rules = []) =>
     (Array.isArray(rules) ? rules : []).map((rule) =>
@@ -884,6 +1224,7 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
     localRuleCount: Array.isArray(regexConfig.localRules)
       ? regexConfig.localRules.length
       : 0,
+    localRules: mapPreviewRules(localRules),
     sources: detailed.sources.map((source) => ({
       ...source,
       previewRules: mapPreviewRules(source.previewRules),

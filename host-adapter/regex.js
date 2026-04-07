@@ -2,7 +2,11 @@ import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
 import { createContextHostFacade } from "./context.js";
 import { debugDebug } from "../debug-logging.js";
 
-const REGEX_API_NAMES = ["getTavernRegexes", "isCharacterTavernRegexesEnabled"];
+const REGEX_API_NAMES = [
+  "getTavernRegexes",
+  "isCharacterTavernRegexesEnabled",
+  "formatAsTavernRegexedString",
+];
 
 function isObjectLike(value) {
   return (
@@ -182,7 +186,9 @@ function resolveRegexSource(options = {}, contextHost = null) {
 
   return (
     records.find(
-      (record) => typeof record.apiMap.getTavernRegexes === "function",
+      (record) =>
+        typeof record.apiMap.getTavernRegexes === "function" ||
+        typeof record.apiMap.formatAsTavernRegexedString === "function",
     ) ||
     buildSourceRecord({
       label: "none",
@@ -193,13 +199,21 @@ function resolveRegexSource(options = {}, contextHost = null) {
 }
 
 function detectRegexMode(apiMap = {}) {
-  if (typeof apiMap.getTavernRegexes !== "function") {
+  const hasGetter = typeof apiMap.getTavernRegexes === "function";
+  const hasFormatter =
+    typeof apiMap.formatAsTavernRegexedString === "function";
+
+  if (!hasGetter && !hasFormatter) {
     return "unavailable";
   }
 
-  return typeof apiMap.isCharacterTavernRegexesEnabled === "function"
-    ? "full"
-    : "partial";
+  if (hasGetter && hasFormatter) {
+    return typeof apiMap.isCharacterTavernRegexesEnabled === "function"
+      ? "full"
+      : "partial";
+  }
+
+  return hasFormatter ? "formatter-only" : "getter-only";
 }
 
 function buildFallbackReason(sourceRecord, available, mode) {
@@ -217,6 +231,14 @@ function buildFallbackReason(sourceRecord, available, mode) {
 
   if (mode === "partial") {
     return `Tavern Regex 桥接仅发现部分接口，来源: ${sourceRecord?.label || "unknown"}`;
+  }
+
+  if (mode === "formatter-only") {
+    return `Tavern Regex 桥接仅发现 formatter 接口，来源: ${sourceRecord?.label || "unknown"}`;
+  }
+
+  if (mode === "getter-only") {
+    return `Tavern Regex 桥接仅发现规则读取接口，来源: ${sourceRecord?.label || "unknown"}`;
   }
 
   return "";
@@ -253,6 +275,8 @@ export function createRegexHostFacade(options = {}) {
     getTavernRegexes: sourceRecord.apiMap.getTavernRegexes,
     isCharacterTavernRegexesEnabled:
       sourceRecord.apiMap.isCharacterTavernRegexesEnabled,
+    formatAsTavernRegexedString:
+      sourceRecord.apiMap.formatAsTavernRegexedString,
     getApi(name) {
       return sourceRecord.apiMap[String(name || "")] || null;
     },
@@ -271,6 +295,8 @@ export function createRegexHostFacade(options = {}) {
         source: sourceRecord.sourceKind,
         sourceLabel: sourceRecord.label,
         fallback: sourceRecord.fallback,
+        formatterAvailable:
+          typeof sourceRecord.apiMap.formatAsTavernRegexedString === "function",
       });
     },
   });

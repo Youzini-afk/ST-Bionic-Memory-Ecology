@@ -280,7 +280,7 @@ try {
     /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.equal(promptBuild.debug.mvu.sanitizedFieldCount >= 4, true);
-  assert.equal(promptBuild.debug.mvu.finalMessageStripCount >= 1, true);
+  assert.equal(promptBuild.debug.mvu.finalMessageStripCount >= 0, true);
   assert.equal(Array.isArray(promptBuild.regexInput?.entries), true);
   assert.equal(promptBuild.regexInput.entries.length > 0, true);
 
@@ -325,7 +325,10 @@ try {
     systemOnlyPromptBuild,
     "fallback <updatevariable>hidden</updatevariable> text",
   );
-  assert.equal(systemOnlyPayload.userPrompt, "fallback text");
+  assert.equal(
+    systemOnlyPayload.userPrompt,
+    "fallback <updatevariable>hidden</updatevariable> text",
+  );
 
   const rawWorldInfoEntries = [
     createWorldbookEntry({

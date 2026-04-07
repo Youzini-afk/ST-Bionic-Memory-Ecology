@@ -4273,8 +4273,11 @@ function _formatRegexReuseSourceLabel(sourceType = "") {
 }
 
 function _formatRegexReuseReplaceText(rule = {}) {
-  if (rule.promptStageMode === "clear") {
-    return "（美化/展示正则，ST-BME 请求阶段清空）";
+  if (rule.promptStageMode === "display-only") {
+    return "（仅显示类规则，不进入 Memory LLM 请求）";
+  }
+  if (rule.promptStageMode === "fallback-skip-beautify") {
+    return "（美化型替换，fallback 模式下不会进入 Prompt）";
   }
   if (typeof rule.effectivePromptReplaceString === "string" && rule.effectivePromptReplaceString.length > 0) {
     return rule.effectivePromptReplaceString;
@@ -4287,20 +4290,35 @@ function _formatRegexReuseReplaceText(rule = {}) {
 
 function _renderRegexReuseBadges(rule = {}) {
   const badges = [];
-  if (rule.promptStageMode === "clear") {
+  if (rule.promptStageMode === "display-only") {
     badges.push({
       className: "is-clear",
-      text: "美化 -> 清空",
+      text: "仅显示",
+    });
+  } else if (rule.promptStageMode === "host-real") {
+    badges.push({
+      className: "is-transform",
+      text: "宿主真实执行",
+    });
+  } else if (rule.promptStageMode === "host-fallback") {
+    badges.push({
+      className: "is-prompt",
+      text: "插件兼容执行",
+    });
+  } else if (rule.promptStageMode === "fallback-skip-beautify") {
+    badges.push({
+      className: "is-skip",
+      text: "fallback 跳过美化",
     });
   } else if (rule.promptStageMode === "replace") {
     badges.push({
       className: "is-transform",
-      text: "转义",
+      text: "本地最终正则",
     });
   } else {
     badges.push({
       className: "is-skip",
-      text: "当前阶段跳过",
+      text: "当前不执行",
     });
   }
   if (rule.markdownOnly) {
@@ -4415,10 +4433,10 @@ function _buildRegexReusePopupContent(snapshot = {}) {
 
   container.innerHTML = `
     <div class="bme-task-tab-body bme-regex-preview-screen">
-      <div class="bme-regex-preview-hero">
+        <div class="bme-regex-preview-hero">
         <div class="bme-regex-preview-hero__title">当前正则脚本一览</div>
         <div class="bme-regex-preview-hero__subtitle">
-          这里展示的是当前任务预设下，ST-BME 实际会复用到请求链里的 Tavern 正则。展示/美化类规则在请求阶段会按空字符串替换。
+          这里展示的是当前任务预设下，ST-BME 对宿主注入内容会复用哪些 Tavern 正则，以及最终发送前还会执行哪些本地任务正则。
         </div>
         <div class="bme-regex-preview-summary">
           <div class="bme-regex-preview-summary__item">
@@ -4443,7 +4461,7 @@ function _buildRegexReusePopupContent(snapshot = {}) {
           </div>
           <div class="bme-regex-preview-summary__item">
             <span class="bme-regex-preview-summary__label">桥接模式</span>
-            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.fallback ? " · fallback" : ""}</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.executionMode || snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.formatterAvailable ? " · formatter" : ""}${snapshot.host?.fallback ? " · fallback" : ""}</span>
           </div>
         </div>
       </div>
@@ -4451,8 +4469,8 @@ function _buildRegexReusePopupContent(snapshot = {}) {
       <div class="bme-regex-preview-panel">
         <div class="bme-regex-preview-panel__head">
           <div>
-            <div class="bme-regex-preview-panel__title">当前启用规则</div>
-            <div class="bme-regex-preview-panel__subtitle">EW 风格平铺展示，优先看你这次请求里真正会进入链路的规则。</div>
+            <div class="bme-regex-preview-panel__title">宿主注入复用规则</div>
+            <div class="bme-regex-preview-panel__subtitle">这里只显示会参与“宿主注入文本”处理的 Tavern 规则；仅显示类规则会明确标注出来。</div>
           </div>
         </div>
         <div class="bme-task-note">
@@ -4462,6 +4480,20 @@ function _buildRegexReusePopupContent(snapshot = {}) {
         <div class="bme-regex-preview-list">
           ${_renderRegexReuseRuleList(activeRules, "当前没有复用到任何酒馆正则", {
             showSource: true,
+          })}
+        </div>
+      </div>
+
+      <div class="bme-regex-preview-panel">
+        <div class="bme-regex-preview-panel__head">
+          <div>
+            <div class="bme-regex-preview-panel__title">任务本地最终正则</div>
+            <div class="bme-regex-preview-panel__subtitle">这一组只在最终请求发送前的 `input.finalPrompt` 阶段执行，不参与宿主注入清洗。</div>
+          </div>
+        </div>
+        <div class="bme-regex-preview-list">
+          ${_renderRegexReuseRuleList(snapshot.localRules, "当前没有任务本地最终正则", {
+            showSource: false,
           })}
         </div>
       </div>

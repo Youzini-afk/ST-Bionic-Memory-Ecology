@@ -3,7 +3,13 @@
 
 import { debugLog, debugWarn } from "./debug-logging.js";
 import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
-import { sanitizeMvuContent } from "./mvu-compat.js";
+import {
+  createEmptyInjectionSanitizerDebug,
+  PROMPT_CONTENT_ORIGIN,
+  sanitizeInjectionText,
+  sanitizeInjectionMessages,
+  sanitizeInjectionStructuredValue,
+} from "./injection-sanitizer.js";
 import { resolveTaskWorldInfo } from "./task-worldinfo.js";
 import { applyTaskRegex } from "./task-regex.js";
 
@@ -52,6 +58,22 @@ const INPUT_REGEX_ROLE_BY_FIELD = {
   recentMessages: "mixed",
   chatMessages: "mixed",
   dialogueText: "mixed",
+};
+
+const INPUT_HOST_REGEX_SOURCE_BY_FIELD = {
+  userMessage: "user_input",
+  recentMessages: "ai_output",
+  chatMessages: "ai_output",
+  dialogueText: "ai_output",
+  candidateText: "ai_output",
+  candidateNodes: "ai_output",
+  nodeContent: "ai_output",
+  eventSummary: "ai_output",
+  characterSummary: "ai_output",
+  threadSummary: "ai_output",
+  contradictionSummary: "ai_output",
+  charDescription: "ai_output",
+  userPersona: "user_input",
 };
 
 function cloneRuntimeDebugValue(value, fallback = null) {
@@ -275,12 +297,7 @@ function buildEmptyWorldInfoContext() {
 }
 
 function createEmptyMvuPromptDebug() {
-  return {
-    sanitizedFieldCount: 0,
-    sanitizedFields: [],
-    finalMessageStripCount: 0,
-    worldInfoBlockedContentHits: 0,
-  };
+  return createEmptyInjectionSanitizerDebug();
 }
 
 function pushMvuPromptDebugEntry(debugState, entry = {}) {
@@ -304,47 +321,46 @@ function sanitizeTaskPromptText(
   taskType,
   text,
   {
-    mode = "aggressive",
+    mode = "injection-safe",
     blockedContents = [],
     regexStage = "",
     role = "system",
     regexCollector = null,
     applyMvu = true,
+    contentOrigin = PROMPT_CONTENT_ORIGIN.HOST_INJECTED,
+    sanitizationEligible = true,
+    regexSourceType = "",
   } = {},
 ) {
-  const originalText = typeof text === "string" ? text : "";
-  const mvuResult = applyMvu
-    ? sanitizeMvuContent(originalText, {
-        mode,
-        blockedContents,
-      })
-    : {
-        text: originalText,
-        changed: false,
-        dropped: false,
-        reasons: [],
-        blockedHitCount: 0,
-        artifactRemovedCount: 0,
-      };
-  const afterMvu = String(mvuResult.text || "");
+  const sanitized = sanitizeInjectionText(settings, taskType, text, {
+    mode:
+      String(mode || "").trim() === "final-safe"
+        ? "final-injection-safe"
+        : "injection-safe",
+    blockedContents,
+    contentOrigin,
+    sanitizationEligible,
+    regexSourceType,
+    role,
+    regexCollector,
+    applySanitizer: applyMvu,
+    applyHostRegex: Boolean(regexSourceType),
+  });
   const finalText = regexStage
     ? applyTaskRegex(
         settings,
         taskType,
         regexStage,
-        afterMvu,
+        sanitized.text,
         regexCollector,
         role,
       )
-    : afterMvu;
+    : sanitized.text;
 
   return {
+    ...sanitized,
     text: finalText,
-    changed: finalText !== originalText,
-    dropped: Boolean(mvuResult.dropped),
-    reasons: Array.isArray(mvuResult.reasons) ? mvuResult.reasons : [],
-    blockedHitCount: Number(mvuResult.blockedHitCount || 0),
-    artifactRemovedCount: Number(mvuResult.artifactRemovedCount || 0),
+    changed: finalText !== String(text || ""),
   };
 }
 
@@ -570,64 +586,49 @@ function sanitizePromptMessages(
   messages = [],
   {
     blockedContents = [],
-    regexStage = "",
     debugState = null,
     regexCollector = null,
-    applyMvu = true,
+    applySanitizer = null,
   } = {},
 ) {
-  return (Array.isArray(messages) ? messages : [])
-    .map((message, index) => {
-      const messageApplyMvu =
-        typeof applyMvu === "function" ? applyMvu(message, index) : applyMvu;
-      const sanitized = sanitizeStructuredPromptValue(
-        settings,
-        taskType,
-        message,
-        {
-          fieldName: "message",
-          path: `message[${index}]`,
-          mode: "final-safe",
-          blockedContents,
-          regexStage,
-          role: message?.role || "system",
-          debugState,
-          regexCollector,
-          applyMvu: messageApplyMvu,
-          stripMvuContainers: messageApplyMvu,
-        },
-      );
-      if (debugState && (sanitized.changed || sanitized.omit)) {
-        debugState.finalMessageStripCount += 1;
+  const preparedMessages = (Array.isArray(messages) ? messages : []).map(
+    (message, index) => {
+      if (!message || typeof message !== "object") {
+        return message;
       }
-      if (sanitized.omit) {
-        return null;
+      const shouldSanitize =
+        typeof applySanitizer === "function"
+          ? applySanitizer(message, index)
+          : applySanitizer;
+      if (shouldSanitize === false) {
+        return {
+          ...message,
+          sanitizationEligible: false,
+        };
       }
-      const executionMessage = createExecutionMessage(
-        sanitized.value?.role || message?.role,
-        sanitized.value?.content,
-        {
-          source: String(sanitized.value?.source || message?.source || ""),
-          blockId: String(sanitized.value?.blockId || message?.blockId || ""),
-          blockName: String(
-            sanitized.value?.blockName || message?.blockName || "",
-          ),
-          blockType: String(
-            sanitized.value?.blockType || message?.blockType || "",
-          ),
-          sourceKey: String(
-            sanitized.value?.sourceKey || message?.sourceKey || "",
-          ),
-          injectionMode: String(
-            sanitized.value?.injectionMode || message?.injectionMode || "",
-          ),
-          derivedFromWorldInfo:
-            sanitized.value?.derivedFromWorldInfo === true ||
-            message?.derivedFromWorldInfo === true,
-        },
-      );
-      return executionMessage;
-    })
+      return message;
+    },
+  );
+
+  return sanitizeInjectionMessages(settings, taskType, preparedMessages, {
+    blockedContents,
+    debugState,
+    regexCollector,
+  })
+    .map((message) =>
+      createExecutionMessage(message.role, message.content, {
+        source: String(message?.source || ""),
+        blockId: String(message?.blockId || ""),
+        blockName: String(message?.blockName || ""),
+        blockType: String(message?.blockType || ""),
+        sourceKey: String(message?.sourceKey || ""),
+        injectionMode: String(message?.injectionMode || ""),
+        derivedFromWorldInfo: message?.derivedFromWorldInfo === true,
+        contentOrigin: String(message?.contentOrigin || ""),
+        sanitizationEligible: message?.sanitizationEligible === true,
+        regexSourceType: String(message?.regexSourceType || ""),
+      }),
+    )
     .filter(Boolean);
 }
 
@@ -647,6 +648,50 @@ function sanitizePromptContextInputs(
     stripMvuContainers = applyMvu,
   } = options || {};
 
+  const applyLocalRegexToStructuredValue = (
+    value,
+    regexStage,
+    regexRole,
+    seen = new WeakSet(),
+  ) => {
+    if (!regexStage) {
+      return value;
+    }
+    if (typeof value === "string") {
+      return applyTaskRegex(
+        settings,
+        taskType,
+        regexStage,
+        value,
+        regexCollector,
+        regexRole,
+      );
+    }
+    if (Array.isArray(value)) {
+      return value.map((item) =>
+        applyLocalRegexToStructuredValue(item, regexStage, regexRole, seen),
+      );
+    }
+    if (value && typeof value === "object") {
+      if (seen.has(value)) {
+        return value;
+      }
+      seen.add(value);
+      return Object.fromEntries(
+        Object.entries(value).map(([key, entryValue]) => [
+          key,
+          applyLocalRegexToStructuredValue(
+            entryValue,
+            regexStage,
+            regexRole,
+            seen,
+          ),
+        ]),
+      );
+    }
+    return value;
+  };
+
   for (const fieldName of INPUT_CONTEXT_MVU_FIELDS) {
     if (!(fieldName in sanitizedContext)) {
       continue;
@@ -654,29 +699,39 @@ function sanitizePromptContextInputs(
     const value = sanitizedContext[fieldName];
     const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
     const regexRole = INPUT_REGEX_ROLE_BY_FIELD[fieldName] || "system";
-    const sanitized = sanitizeStructuredPromptValue(
+    const regexSourceType = INPUT_HOST_REGEX_SOURCE_BY_FIELD[fieldName] || "";
+    const sanitized = sanitizeInjectionStructuredValue(
       settings,
       taskType,
       value,
       {
         fieldName,
         path: fieldName,
-        mode: "aggressive",
-        regexStage,
+        mode: "injection-safe",
+        contentOrigin: PROMPT_CONTENT_ORIGIN.HOST_INJECTED,
+        sanitizationEligible: true,
+        regexSourceType,
         role: regexRole,
         debugState,
         regexCollector,
-        applyMvu,
+        applySanitizer: applyMvu,
+        applyHostRegex: Boolean(regexSourceType),
         stripMvuContainers,
       },
     );
-    sanitizedContext[fieldName] = sanitized.omit
+    let sanitizedValue = sanitized.omit
       ? Array.isArray(value)
         ? []
         : typeof value === "string"
           ? ""
           : null
       : sanitized.value;
+    sanitizedValue = applyLocalRegexToStructuredValue(
+      sanitizedValue,
+      regexStage,
+      regexRole,
+    );
+    sanitizedContext[fieldName] = sanitizedValue;
   }
 
   return sanitizedContext;
@@ -693,17 +748,22 @@ function sanitizeWorldInfoEntries(
 ) {
   return (Array.isArray(entries) ? entries : [])
     .map((entry, index) => {
-      const sanitized = sanitizeTaskPromptText(
+      const sanitized = sanitizeInjectionText(
         settings,
         taskType,
         String(entry?.content || ""),
         {
-          mode: "aggressive",
+          mode: "injection-safe",
           blockedContents,
-          regexStage: "",
+          contentOrigin: PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+          sanitizationEligible: true,
+          regexSourceType: "world_info",
           role: entry?.role || "system",
           regexCollector,
-          applyMvu,
+          applySanitizer: applyMvu,
+          applyHostRegex: true,
+          path: `worldInfo[${index}]`,
+          stage: "world-info-rendered",
         },
       );
       debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
@@ -780,17 +840,22 @@ function sanitizeWorldInfoContext(
     : []
   )
     .map((message) => {
-      const sanitized = sanitizeTaskPromptText(
+      const sanitized = sanitizeInjectionText(
         settings,
         taskType,
         String(message?.content || ""),
         {
-          mode: "aggressive",
+          mode: "injection-safe",
           blockedContents: runtimeBlockedContents,
-          regexStage: "",
+          contentOrigin: PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+          sanitizationEligible: true,
+          regexSourceType: "world_info",
           role: message?.role || "system",
           regexCollector,
-          applyMvu: !isCustomFilter,
+          applySanitizer: !isCustomFilter,
+          applyHostRegex: true,
+          path: "taskAdditionalMessages",
+          stage: "world-info-rendered",
         },
       );
       debugState.worldInfoBlockedContentHits += sanitized.blockedHitCount;
@@ -805,6 +870,9 @@ function sanitizeWorldInfoContext(
         content: sanitized.text,
         source: String(message?.source || "worldInfo-atDepth"),
         sourceKey: String(message?.sourceKey || "taskAdditionalMessages"),
+        contentOrigin: PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+        sanitizationEligible: true,
+        regexSourceType: "world_info",
       };
     })
     .filter(Boolean);
@@ -1000,6 +1068,54 @@ function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
   };
 }
 
+function getPromptFieldContentOrigin(sourceKey = "") {
+  const normalizedSourceKey = String(sourceKey || "").trim();
+  if (!normalizedSourceKey) {
+    return PROMPT_CONTENT_ORIGIN.TEMPLATE_OWNED;
+  }
+  if (WORLD_INFO_VARIABLE_KEYS.includes(normalizedSourceKey)) {
+    return PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED;
+  }
+  if (INPUT_CONTEXT_MVU_FIELDS.includes(normalizedSourceKey)) {
+    return PROMPT_CONTENT_ORIGIN.HOST_INJECTED;
+  }
+  return PROMPT_CONTENT_ORIGIN.TEMPLATE_OWNED;
+}
+
+function getPromptFieldRegexSourceType(sourceKey = "") {
+  const normalizedSourceKey = String(sourceKey || "").trim();
+  if (!normalizedSourceKey) {
+    return "";
+  }
+  if (WORLD_INFO_VARIABLE_KEYS.includes(normalizedSourceKey)) {
+    return "world_info";
+  }
+  return INPUT_HOST_REGEX_SOURCE_BY_FIELD[normalizedSourceKey] || "";
+}
+
+function blockIsPureInjectedContent(block = {}) {
+  return (
+    block?.type === "builtin" &&
+    !String(block?.content || "").trim() &&
+    String(block?.sourceKey || "").trim().length > 0
+  );
+}
+
+function describeBlockContentOwnership(block = {}) {
+  const contentOrigin = blockIsPureInjectedContent(block)
+    ? getPromptFieldContentOrigin(block.sourceKey)
+    : PROMPT_CONTENT_ORIGIN.TEMPLATE_OWNED;
+  return {
+    contentOrigin,
+    sanitizationEligible:
+      contentOrigin !== PROMPT_CONTENT_ORIGIN.TEMPLATE_OWNED,
+    regexSourceType:
+      contentOrigin === PROMPT_CONTENT_ORIGIN.TEMPLATE_OWNED
+        ? ""
+        : getPromptFieldRegexSourceType(block.sourceKey),
+  };
+}
+
 function resolveBlockDelivery(block = {}) {
   return normalizeRole(block.role) === "system"
     ? "private.system"
@@ -1069,19 +1185,10 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const profile = getActiveTaskProfile(settings, taskType);
   const legacyPrompt = getLegacyPromptForTask(settings, taskType);
   const promptRegexInput = { entries: [] };
-  const worldInfoRegexInput = { entries: [] };
   const mvuPromptDebug = createEmptyMvuPromptDebug();
-  const worldInfoInputContext = sanitizePromptContextInputs(
-    settings,
-    taskType,
-    context,
-    null,
-    worldInfoRegexInput,
-    {
-      applyMvu: false,
-      stripMvuContainers: false,
-    },
-  );
+  const worldInfoInputContext = {
+    ...context,
+  };
   const sanitizedInputContext = sanitizePromptContextInputs(
     settings,
     taskType,
@@ -1164,6 +1271,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 
     const role = normalizeRole(block.role);
     const blockDerivedFromWorldInfo = blockUsesWorldInfoContent(block);
+    const blockOwnership = describeBlockContentOwnership(block);
     let content = "";
 
     if (block.type === "legacyPrompt") {
@@ -1189,38 +1297,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       );
     }
 
-    const blockApplyMvu = !(isCustomFilter && blockDerivedFromWorldInfo);
-    const sanitizedBlockContent = sanitizeTaskPromptText(
-      settings,
-      taskType,
-      content,
-      {
-        mode: "final-safe",
-        blockedContents: worldInfoRuntimeBlockedContents,
-        regexStage: "",
-        role,
-        regexCollector: promptRegexInput,
-        applyMvu: blockApplyMvu,
-      },
-    );
-    mvuPromptDebug.worldInfoBlockedContentHits +=
-      sanitizedBlockContent.blockedHitCount;
-    if (sanitizedBlockContent.changed || sanitizedBlockContent.dropped) {
-      mvuPromptDebug.finalMessageStripCount += 1;
-    }
-    content = sanitizedBlockContent.text;
-
     if (!String(content || "").trim()) {
-      if (role === "user" && String(block.content || "").trim()) {
-        debugWarn(
-          `[ST-BME] buildTaskPrompt: user block "${block.name || block.id}" ` +
-            `content emptied during sanitization! ` +
-            `original length=${String(block.content || "").length}, ` +
-            `dropped=${sanitizedBlockContent.dropped}, ` +
-            `reasons=[${(sanitizedBlockContent.reasons || []).join(", ")}], ` +
-            `blockedHitCount=${sanitizedBlockContent.blockedHitCount}`,
-        );
-      }
       continue;
     }
 
@@ -1241,6 +1318,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       delivery: resolveBlockDelivery(block),
       effectiveDelivery: resolveBlockDelivery(block),
       diagnosticInjectionPosition: getBlockDiagnosticInjectionPosition(block),
+      contentOrigin: blockOwnership.contentOrigin,
+      sanitizationEligible: blockOwnership.sanitizationEligible,
+      regexSourceType: blockOwnership.regexSourceType,
     });
 
     const executionMessage = createExecutionMessage(role, content, {
@@ -1251,6 +1331,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       sourceKey: String(block.sourceKey || ""),
       injectionMode: mode,
       derivedFromWorldInfo: blockDerivedFromWorldInfo,
+      contentOrigin: blockOwnership.contentOrigin,
+      sanitizationEligible: blockOwnership.sanitizationEligible,
+      regexSourceType: blockOwnership.regexSourceType,
     });
     if (executionMessage) {
       executionMessages.push(executionMessage);
@@ -1284,6 +1367,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         sourceKey: String(block.sourceKey || ""),
         injectionMode: mode,
         derivedFromWorldInfo: blockDerivedFromWorldInfo,
+        contentOrigin: blockOwnership.contentOrigin,
+        sanitizationEligible: blockOwnership.sanitizationEligible,
+        regexSourceType: blockOwnership.regexSourceType,
       });
     } else {
       customMessages.push({
@@ -1296,6 +1382,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         sourceKey: String(block.sourceKey || ""),
         injectionMode: mode,
         derivedFromWorldInfo: blockDerivedFromWorldInfo,
+        contentOrigin: blockOwnership.contentOrigin,
+        sanitizationEligible: blockOwnership.sanitizationEligible,
+        regexSourceType: blockOwnership.regexSourceType,
       });
     }
   }
@@ -1314,6 +1403,11 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       {
         source: "worldInfo-atDepth",
         sourceKey: "taskAdditionalMessages",
+        contentOrigin:
+          String(message.contentOrigin || "") ||
+          PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+        sanitizationEligible: message.sanitizationEligible === true,
+        regexSourceType: String(message.regexSourceType || "world_info"),
       },
     );
     if (executionMessage) {
@@ -1341,7 +1435,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     executionMessages,
     privateTaskMessages,
     renderedBlocks,
-    regexInput: mergeRegexCollectors(promptRegexInput, worldInfoRegexInput),
+    regexInput: mergeRegexCollectors(promptRegexInput),
     worldInfoResolution,
     systemPrompt,
     customMessages,
@@ -1397,6 +1491,31 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         ),
         finalMessageStripCount: mvuPromptDebug.finalMessageStripCount,
         worldInfoBlockedContentHits: mvuPromptDebug.worldInfoBlockedContentHits,
+        sanitizerAppliedFields: cloneRuntimeDebugValue(
+          mvuPromptDebug.sanitizerAppliedFields,
+          [],
+        ),
+        sanitizerHitKinds: cloneRuntimeDebugValue(
+          mvuPromptDebug.sanitizerHitKinds,
+          [],
+        ),
+        hostReuseAppliedFields: cloneRuntimeDebugValue(
+          mvuPromptDebug.hostReuseAppliedFields,
+          [],
+        ),
+        hostReuseSkippedDisplayOnlyRules: Number(
+          mvuPromptDebug.hostReuseSkippedDisplayOnlyRules || 0,
+        ),
+        regexExecutionMode: String(
+          mvuPromptDebug.regexExecutionMode || "host-unavailable",
+        ),
+        hostFormatterAvailable: Boolean(
+          mvuPromptDebug.hostFormatterAvailable,
+        ),
+        hostFormatterSource: String(
+          mvuPromptDebug.hostFormatterSource || "",
+        ),
+        fallbackReason: String(mvuPromptDebug.fallbackReason || ""),
       },
       effectivePath: {
         promptAssembly: "ordered-private-messages",
@@ -1446,6 +1565,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
 export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
   const runtimeMvu = promptBuild?.__mvuRuntime || {};
   const taskType = String(promptBuild?.debug?.taskType || "");
+  const settings = {};
   const isCustomFilter =
     String(
       promptBuild?.worldInfo?.debug?.customFilter?.mode ||
@@ -1466,18 +1586,20 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
             sourceKey: String(message.sourceKey || ""),
             injectionMode: String(message.injectionMode || ""),
             derivedFromWorldInfo: message.derivedFromWorldInfo === true,
+            contentOrigin: String(message.contentOrigin || ""),
+            sanitizationEligible: message.sanitizationEligible === true,
+            regexSourceType: String(message.regexSourceType || ""),
           }),
         )
         .filter(Boolean)
     : [];
   const executionMessages = sanitizePromptMessages(
-    {},
+    settings,
     taskType,
     rawExecutionMessages,
     {
       blockedContents,
-      regexStage: "",
-      applyMvu: (message) =>
+      applySanitizer: (message) =>
         !(isCustomFilter && messageUsesWorldInfoContent(message)),
     },
   );
@@ -1518,29 +1640,18 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
       );
     }
   }
-  const sanitizedFallbackUserPrompt = sanitizeTaskPromptText(
-    {},
-    promptBuild?.debug?.taskType || "",
-    String(fallbackUserPrompt || ""),
-    {
-      mode: "final-safe",
-      blockedContents,
-      regexStage: "",
-    },
-  ).text;
   const additionalMessages =
     executionMessages.length > 0
       ? []
       : sanitizePromptMessages(
-          {},
+          settings,
           taskType,
           Array.isArray(promptBuild?.privateTaskMessages)
             ? promptBuild.privateTaskMessages
             : [],
           {
             blockedContents,
-            regexStage: "",
-            applyMvu: (message) =>
+            applySanitizer: (message) =>
               !(isCustomFilter && messageUsesWorldInfoContent(message)),
           },
         );
@@ -1548,7 +1659,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
   return {
     systemPrompt:
       executionMessages.length > 0 ? "" : String(promptBuild?.systemPrompt || ""),
-    userPrompt: hasUserMessage ? "" : sanitizedFallbackUserPrompt,
+    userPrompt: hasUserMessage ? "" : String(fallbackUserPrompt || ""),
     promptMessages: executionMessages,
     additionalMessages,
   };

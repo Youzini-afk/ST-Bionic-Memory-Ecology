@@ -4531,7 +4531,7 @@ async function testPersistentRecallSourceResolutionAndTargetRouting() {
 
   assert.equal(
     resolveGenerationTargetUserMessageIndex(chat, { generationType: "normal" }),
-    null,
+    2,
   );
   assert.equal(
     resolveGenerationTargetUserMessageIndex(chat, {

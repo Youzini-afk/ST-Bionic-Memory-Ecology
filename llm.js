@@ -178,9 +178,17 @@ function normalizeRegexDebugEntries(debugCollector = null) {
     return [];
   }
   return debugCollector.entries.map((entry) => ({
+    kind: String(entry?.kind || "local-regex"),
     taskType: String(entry?.taskType || ""),
     stage: String(entry?.stage || ""),
     enabled: entry?.enabled !== false,
+    executionMode: String(entry?.executionMode || ""),
+    formatterAvailable: Boolean(entry?.formatterAvailable),
+    hostFormatterSource: String(entry?.hostFormatterSource || ""),
+    fallbackReason: String(entry?.fallbackReason || ""),
+    skippedDisplayOnlyRuleCount: Number(
+      entry?.skippedDisplayOnlyRuleCount || 0,
+    ),
     appliedRules: Array.isArray(entry?.appliedRules)
       ? entry.appliedRules.map((rule) => ({
           id: String(rule?.id || ""),
@@ -278,6 +286,7 @@ function applyTaskFinalInputRegex(taskType, messages = []) {
         rawMessageCount: normalizedMessages.length,
         cleanedMessageCount: cleanedMessages.length,
         droppedMessageCount: normalizedMessages.length - cleanedMessages.length,
+        finalPromptLocalRuleCount: 0,
         stages: [],
       },
     };
@@ -325,6 +334,10 @@ function applyTaskFinalInputRegex(taskType, messages = []) {
       rawMessageCount: normalizedMessages.length,
       cleanedMessageCount: cleanedMessages.length,
       droppedMessageCount,
+      finalPromptLocalRuleCount: normalizedEntries.reduce(
+        (sum, entry) => sum + Number(entry?.sourceCount?.local || 0),
+        0,
+      ),
       stages: normalizedEntries,
     },
   };

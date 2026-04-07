@@ -1,11 +1,11 @@
 {
-    "display_name": "ST-BME Memory Graph",
-    "loading_order": 150,
-    "requires": [],
-    "optional": [],
-    "js": "index.js",
-    "css": "style.css",
-    "author": "Youzini",
-    "version": "1.0.0",
-    "homePage": "https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology"
+  "display_name": "ST-BME Memory Graph",
+  "loading_order": 150,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Youzini",
+  "version": "3.6.4",
+  "homePage": "https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology"
 }

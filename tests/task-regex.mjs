@@ -150,7 +150,7 @@ function setTestContext({
 
 try {
   const { initializeHostAdapter } = await import("../host-adapter/index.js");
-  const { applyTaskRegex, inspectTaskRegexReuse } = await import(
+  const { applyHostRegexReuse, applyTaskRegex, inspectTaskRegexReuse } = await import(
     "../task-regex.js"
   );
   const {
@@ -268,6 +268,7 @@ try {
     localRules: [createLocalRule("local-tail", "/Beta/g", "B")],
   });
   const bridgeCalls = [];
+  const formatterCalls = [];
   initializeHostAdapter({
     regexProvider: {
       getTavernRegexes(request) {
@@ -298,28 +299,53 @@ try {
       isCharacterTavernRegexesEnabled() {
         return true;
       },
+      formatAsTavernRegexedString(text, source, destination) {
+        formatterCalls.push({ text, source, destination });
+        return String(text || "").replace(/Alpha/g, "HOST");
+      },
     },
   });
 
   const fullBridgeDebug = { entries: [] };
-  const fullBridgeOutput = applyTaskRegex(
+  const fullBridgeOutput = applyHostRegexReuse(
     fullBridgeSettings,
     "extract",
-    "finalPrompt",
     "Alpha Beta",
-    fullBridgeDebug,
-    "system",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: fullBridgeDebug,
+    },
   );
 
-  assert.equal(fullBridgeOutput, "C B");
+  assert.equal(fullBridgeOutput.text, "HOST Beta");
   assert.deepEqual(bridgeCalls, [
     { type: "global" },
     { type: "preset", name: "in_use" },
     { type: "character", name: "current" },
   ]);
+  assert.deepEqual(formatterCalls, [
+    {
+      text: "Alpha Beta",
+      source: "user_input",
+      destination: "prompt",
+    },
+  ]);
+  assert.equal(fullBridgeDebug.entries[0].executionMode, "host-real");
   assert.deepEqual(
     fullBridgeDebug.entries[0].appliedRules.map((item) => item.id),
-    ["bridge-global", "bridge-preset", "bridge-character", "local-tail"],
+    ["__host_formatter__"],
+  );
+  assert.equal(
+    applyTaskRegex(
+      fullBridgeSettings,
+      "extract",
+      "input.finalPrompt",
+      "Beta",
+      { entries: [] },
+      "system",
+    ),
+    "B",
   );
 
   const fallbackExtensionSettings = {
@@ -358,15 +384,18 @@ try {
   initializeHostAdapter({});
 
   const fallbackDebug = { entries: [] };
-  const fallbackOutput = applyTaskRegex(
+  const fallbackOutput = applyHostRegexReuse(
     buildSettings(),
     "extract",
-    "input.finalPrompt",
     "Gamma",
-    fallbackDebug,
-    "system",
+    {
+      sourceType: "world_info",
+      role: "system",
+      debugCollector: fallbackDebug,
+    },
   );
-  assert.equal(fallbackOutput, "C1");
+  assert.equal(fallbackOutput.text, "C1");
+  assert.equal(fallbackDebug.entries[0].executionMode, "host-fallback");
 
   const fallbackInspect = inspectTaskRegexReuse(buildSettings(), "extract");
   assert.equal(fallbackInspect.activeRuleCount, 3);
@@ -418,15 +447,17 @@ try {
   });
   initializeHostAdapter({});
 
-  const disallowedOutput = applyTaskRegex(
+  const disallowedOutput = applyHostRegexReuse(
     buildSettings(),
     "extract",
-    "input.finalPrompt",
     "Gamma",
-    { entries: [] },
-    "system",
+    {
+      sourceType: "world_info",
+      role: "system",
+      debugCollector: { entries: [] },
+    },
   );
-  assert.equal(disallowedOutput, "G2");
+  assert.equal(disallowedOutput.text, "G2");
 
   const disallowedInspect = inspectTaskRegexReuse(buildSettings(), "extract");
   assert.equal(disallowedInspect.activeRuleCount, 1);
@@ -478,47 +509,39 @@ try {
   });
   initializeHostAdapter({});
 
-  assert.equal(
-    applyTaskRegex(
-      tavernSemanticsSettings,
-      "extract",
-      "input.userMessage",
-      "Alpha",
-      { entries: [] },
-      "user",
-    ),
-    "",
+  const userReuseResult = applyHostRegexReuse(
+    tavernSemanticsSettings,
+    "extract",
+    "Alpha",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: { entries: [] },
+    },
   );
-  assert.equal(
-    applyTaskRegex(
-      tavernSemanticsSettings,
-      "extract",
-      "input.finalPrompt",
-      "Alpha",
-      { entries: [] },
-      "user",
-    ),
-    "A",
+  assert.equal(userReuseResult.text, "A");
+  assert.equal(userReuseResult.executionMode, "host-fallback");
+  assert.equal(userReuseResult.skippedDisplayOnlyRuleCount >= 1, true);
+  const aiReuseResult = applyHostRegexReuse(
+    tavernSemanticsSettings,
+    "extract",
+    "Answer Lore",
+    {
+      sourceType: "ai_output",
+      role: "assistant",
+      debugCollector: { entries: [] },
+    },
   );
-  assert.equal(
-    applyTaskRegex(
-      tavernSemanticsSettings,
-      "extract",
-      "output.rawResponse",
-      "Answer Lore",
-      { entries: [] },
-      "assistant",
-    ),
-    "AI Lore",
-  );
+  assert.equal(aiReuseResult.text, "AI Lore");
+  assert.equal(aiReuseResult.executionMode, "host-fallback");
   const markdownInspect = inspectTaskRegexReuse(tavernSemanticsSettings, "extract");
   const markdownRule = markdownInspect.activeRules.find(
     (rule) => rule.id === "markdown-only",
   );
-  assert.equal(markdownRule?.promptReplaceAsEmpty, true);
-  assert.equal(markdownRule?.effectivePromptReplaceString, "");
+  assert.equal(markdownRule?.promptReplaceAsEmpty, false);
+  assert.equal(markdownRule?.effectivePromptReplaceString, "<b>M</b>");
   assert.deepEqual(markdownRule?.placementLabels, ["用户输入"]);
-  assert.equal(markdownRule?.promptStageMode, "clear");
+  assert.equal(markdownRule?.promptStageMode, "display-only");
   const markdownOnlyFinalPromptSettings = buildSettings({
     sources: {
       global: true,
@@ -540,21 +563,19 @@ try {
   });
   initializeHostAdapter({});
   const markdownFinalDebug = { entries: [] };
-  assert.equal(
-    applyTaskRegex(
-      markdownOnlyFinalPromptSettings,
-      "extract",
-      "input.finalPrompt",
-      "Decor",
-      markdownFinalDebug,
-      "user",
-    ),
-    "",
+  const markdownFallbackResult = applyHostRegexReuse(
+    markdownOnlyFinalPromptSettings,
+    "extract",
+    "Decor",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: markdownFinalDebug,
+    },
   );
-  assert.deepEqual(
-    markdownFinalDebug.entries[0].appliedRules.map((item) => item.id),
-    ["markdown-final-strip"],
-  );
+  assert.equal(markdownFallbackResult.text, "Decor");
+  assert.equal(markdownFallbackResult.skippedDisplayOnlyRuleCount, 1);
+  assert.deepEqual(markdownFinalDebug.entries[0].appliedRules, []);
   const beautifyFinalPromptSettings = buildSettings({
     sources: {
       global: true,
@@ -582,24 +603,22 @@ try {
   const beautifyFinalRule = beautifyFinalInspect.activeRules.find(
     (rule) => rule.id === "beautify-final-strip",
   );
-  assert.equal(beautifyFinalRule?.promptReplaceAsEmpty, true);
-  assert.equal(beautifyFinalRule?.promptStageMode, "clear");
+  assert.equal(beautifyFinalRule?.promptReplaceAsEmpty, false);
+  assert.equal(beautifyFinalRule?.promptStageMode, "fallback-skip-beautify");
   const beautifyFinalDebug = { entries: [] };
-  assert.equal(
-    applyTaskRegex(
-      beautifyFinalPromptSettings,
-      "extract",
-      "input.finalPrompt",
-      "Decor",
-      beautifyFinalDebug,
-      "user",
-    ),
-    "",
+  const beautifyFallbackResult = applyHostRegexReuse(
+    beautifyFinalPromptSettings,
+    "extract",
+    "Decor",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: beautifyFinalDebug,
+    },
   );
-  assert.deepEqual(
-    beautifyFinalDebug.entries[0].appliedRules.map((item) => item.id),
-    ["beautify-final-strip"],
-  );
+  assert.equal(beautifyFallbackResult.text, "Decor");
+  assert.equal(beautifyFallbackResult.skippedDisplayOnlyRuleCount, 1);
+  assert.deepEqual(beautifyFinalDebug.entries[0].appliedRules, []);
   const beautifyFinalPromptStageOffSettings = buildSettings({
     stages: {
       input: true,
@@ -619,19 +638,8 @@ try {
   const beautifyStageOffRule = beautifyStageOffInspect.activeRules.find(
     (rule) => rule.id === "beautify-final-strip",
   );
-  assert.equal(beautifyStageOffRule?.promptStageMode, "clear");
+  assert.equal(beautifyStageOffRule?.promptStageMode, "fallback-skip-beautify");
   assert.equal(beautifyStageOffRule?.promptStageApplies, false);
-  assert.equal(
-    applyTaskRegex(
-      beautifyFinalPromptStageOffSettings,
-      "extract",
-      "input.finalPrompt",
-      "Decor",
-      { entries: [] },
-      "user",
-    ),
-    "Decor",
-  );
   const destinationBeautifySettings = buildSettings({
     sources: {
       global: true,
@@ -673,21 +681,19 @@ try {
   });
   initializeHostAdapter({});
   const destinationDebug = { entries: [] };
-  assert.equal(
-    applyTaskRegex(
-      destinationBeautifySettings,
-      "extract",
-      "input.finalPrompt",
-      "DecorPlain",
-      destinationDebug,
-      "user",
-    ),
-    "",
+  const destinationReuseResult = applyHostRegexReuse(
+    destinationBeautifySettings,
+    "extract",
+    "DecorPlain",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: destinationDebug,
+    },
   );
-  assert.deepEqual(
-    destinationDebug.entries[0].appliedRules.map((item) => item.id),
-    ["destination-display-only-beautify", "destination-display-only-text"],
-  );
+  assert.equal(destinationReuseResult.text, "DecorPlain");
+  assert.equal(destinationReuseResult.skippedDisplayOnlyRuleCount, 2);
+  assert.deepEqual(destinationDebug.entries[0].appliedRules, []);
   const destinationInspect = inspectTaskRegexReuse(
     destinationBeautifySettings,
     "extract",
@@ -699,10 +705,10 @@ try {
     (rule) => rule.id === "destination-display-only-text",
   );
   assert.deepEqual(destinationBeautifyRule?.placementLabels, ["用户输入"]);
-  assert.equal(destinationBeautifyRule?.promptReplaceAsEmpty, true);
-  assert.equal(destinationBeautifyRule?.promptStageMode, "clear");
-  assert.equal(destinationTextRule?.promptReplaceAsEmpty, true);
-  assert.equal(destinationTextRule?.promptStageMode, "clear");
+  assert.equal(destinationBeautifyRule?.promptReplaceAsEmpty, false);
+  assert.equal(destinationBeautifyRule?.promptStageMode, "display-only");
+  assert.equal(destinationTextRule?.promptReplaceAsEmpty, false);
+  assert.equal(destinationTextRule?.promptStageMode, "display-only");
   setTestContext({
     extensionSettings: {
       regex: [
@@ -732,17 +738,17 @@ try {
     },
   });
   initializeHostAdapter({});
-  assert.equal(
-    applyTaskRegex(
-      tavernSemanticsSettings,
-      "extract",
-      "input.recentMessages",
-      "User Reply Lore",
-      { entries: [] },
-      "mixed",
-    ),
-    "U R Lore",
+  const mixedReuseResult = applyHostRegexReuse(
+    tavernSemanticsSettings,
+    "extract",
+    "User Reply Lore",
+    {
+      sourceType: "ai_output",
+      role: "assistant",
+      debugCollector: { entries: [] },
+    },
   );
+  assert.equal(mixedReuseResult.text, "User R Lore");
 
   const outputGuardSettings = buildSettings({
     inheritStRegex: false,

@@ -18,6 +18,12 @@ const extensionsShimSource = [
   "}",
 ].join("\n");
 
+const scriptShimSource = [
+  "export function substituteParamsExtended(value) {",
+  "  return String(value ?? '');",
+  "}",
+].join("\n");
+
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
@@ -27,6 +33,12 @@ registerHooks({
       return {
         shortCircuit: true,
         url: `data:text/javascript,${encodeURIComponent(extensionsShimSource)}`,
+      };
+    }
+    if (specifier === "../../../../script.js") {
+      return {
+        shortCircuit: true,
+        url: `data:text/javascript,${encodeURIComponent(scriptShimSource)}`,
       };
     }
     return nextResolve(specifier, context);
