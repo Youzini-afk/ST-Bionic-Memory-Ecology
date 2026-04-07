@@ -70,6 +70,9 @@ assert.match(text, /\[Memory - User POV \/ Not Character Facts\]/);
 assert.match(text, /不等于角色已知事实/);
 assert.match(text, /\[Memory - Objective \/ Current Region\]/);
 assert.match(text, /pov_memory_table:/);
+assert.match(text, /\| owner \| summary \| belief \| emotion \| attitude \|/);
+assert.match(text, /角色: 艾琳/);
+assert.match(text, /用户: 玩家/);
 assert.match(text, /event_table:/);
 
 console.log("injector-format tests passed");

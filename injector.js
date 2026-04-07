@@ -2,6 +2,7 @@
 // 将检索结果格式化为表格注入到 LLM 上下文中
 
 import { getSchemaType } from "./schema.js";
+import { normalizeMemoryScope } from "./memory-scope.js";
 
 /**
  * 将检索结果转换为注入文本
@@ -172,17 +173,22 @@ function formatTable(nodes, typeDef, appended = new Set()) {
       (n) => n.fields?.[col.name] != null && n.fields[col.name] !== "",
     ),
   );
+  const derivedCols = buildDerivedColumns(uniqueNodes, typeDef);
+  const allCols = [...derivedCols, ...activeCols];
 
-  if (activeCols.length === 0) return "";
+  if (allCols.length === 0) return "";
 
   // 表头
-  const header = `| ${activeCols.map((c) => c.name).join(" | ")} |`;
-  const separator = `| ${activeCols.map(() => "---").join(" | ")} |`;
+  const header = `| ${allCols.map((c) => c.name).join(" | ")} |`;
+  const separator = `| ${allCols.map(() => "---").join(" | ")} |`;
 
   // 数据行
   const rows = uniqueNodes.map((node) => {
-    const cells = activeCols.map((col) => {
-      const val = node.fields?.[col.name] ?? "";
+    const cells = allCols.map((col) => {
+      const val =
+        typeof col.getValue === "function"
+          ? col.getValue(node)
+          : node.fields?.[col.name] ?? "";
       // 转义管道符，限制单元格长度
       return String(val)
         .replace(/\|/g, "\\|")
@@ -193,6 +199,29 @@ function formatTable(nodes, typeDef, appended = new Set()) {
   });
 
   return `${typeDef.tableName}:\n${header}\n${separator}\n${rows.join("\n")}`;
+}
+
+function buildDerivedColumns(nodes, typeDef) {
+  if (typeDef?.id !== "pov_memory") {
+    return [];
+  }
+
+  return [
+    {
+      name: "owner",
+      getValue(node) {
+        const scope = normalizeMemoryScope(node?.scope);
+        const ownerLabel = scope.ownerName || scope.ownerId || "未命名";
+        if (scope.ownerType === "user") {
+          return `用户: ${ownerLabel}`;
+        }
+        if (scope.ownerType === "character") {
+          return `角色: ${ownerLabel}`;
+        }
+        return `POV: ${ownerLabel}`;
+      },
+    },
+  ];
 }
 
 /**
