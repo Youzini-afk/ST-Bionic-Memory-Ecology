@@ -940,6 +940,7 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
     _: utilityLib,
     console,
     ...templateRuntimeEnv,
+    stat_data: renderCtx.variableState?.cacheVars?.stat_data,
     user: templateAliases.user,
     char: templateAliases.char,
     persona:
@@ -962,6 +963,9 @@ export async function evalTaskEjsTemplate(content, renderCtx, extraEnv = {}) {
     },
     get variables() {
       return renderCtx.variableState.cacheVars;
+    },
+    get stat_data() {
+      return renderCtx.variableState?.cacheVars?.stat_data;
     },
     get lastUserMessageId() {
       if (typeof chat.findLastIndex === "function") {

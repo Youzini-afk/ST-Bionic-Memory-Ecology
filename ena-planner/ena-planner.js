@@ -799,8 +799,25 @@ function buildEjsContext() {
     };
 }
 
+function shouldSkipSyncEjsPreRender(template) {
+    const src = String(template ?? '');
+    if (!src.includes('<%')) return false;
+
+    // Planner worldbook entries are rendered again later with ST's async EJS env.
+    // Skip the lightweight sync pre-pass for async templates/helpers so we don't
+    // emit misleading warnings for entries that will render correctly downstream.
+    if (/\bawait\b/.test(src)) return true;
+    if (/\b(getwi|getWorldInfo|evalTemplate)\s*\(/.test(src)) return true;
+
+    return false;
+}
+
 function renderEjsTemplate(template, ctx, templateLabel = '') {
     const labelSuffix = templateLabel ? ` (${templateLabel})` : '';
+
+    if (shouldSkipSyncEjsPreRender(template)) {
+        return template;
+    }
 
     // Try window.ejs first (ST loads this library)
     if (window.ejs?.render) {

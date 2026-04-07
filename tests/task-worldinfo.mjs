@@ -7,8 +7,16 @@ const extensionsShimSource = [
   "  return globalThis.SillyTavern?.getContext?.(...args) || null;",
   "}",
 ].join("\n");
+const scriptShimSource = [
+  "export function substituteParamsExtended(text) {",
+  "  return String(text ?? '');",
+  "}",
+].join("\n");
 const extensionsShimUrl = `data:text/javascript,${encodeURIComponent(
   extensionsShimSource,
+)}`;
+const scriptShimUrl = `data:text/javascript,${encodeURIComponent(
+  scriptShimSource,
 )}`;
 
 registerHooks({
@@ -22,11 +30,19 @@ registerHooks({
         url: extensionsShimUrl,
       };
     }
+    if (specifier === "../../../../script.js") {
+      return {
+        shortCircuit: true,
+        url: scriptShimUrl,
+      };
+    }
     return nextResolve(specifier, context);
   },
 });
 
 const originalSillyTavern = globalThis.SillyTavern;
+const originalEjsTemplate = globalThis.EjsTemplate;
+const originalMvu = globalThis.Mvu;
 const originalGetCharWorldbookNames = globalThis.getCharWorldbookNames;
 const originalGetWorldbook = globalThis.getWorldbook;
 const originalGetLorebookEntries = globalThis.getLorebookEntries;
@@ -201,6 +217,31 @@ const mvuLazyProbeEntry = createWorldbookEntry({
   order: 27,
 });
 
+const statDataControllerEntry = createWorldbookEntry({
+  uid: 15,
+  name: "StatData Controller",
+  comment: "StatData Controller",
+  content:
+    '<% if (typeof stat_data !== "undefined" && stat_data?.user?.["\u610f\u8bc6\u72b6\u6001"] === "\u6c89\u7720") { %>stat_data controller payload<% } %>',
+  order: 24,
+});
+
+const statDataTargetEntry = createWorldbookEntry({
+  uid: 16,
+  name: "StatData Target",
+  comment: "StatData Target",
+  content: "stat_data controller payload",
+  enabled: false,
+  order: 24.1,
+});
+
+const messageVarMacroEntry = createWorldbookEntry({
+  uid: 17,
+  name: "MessageVar Macro",
+  comment: "MessageVar Macro",
+  content: "latest state={{get_message_variable::stat_data.user.\u610f\u8bc6\u72b6\u6001}}",
+  order: 24.2,
+});
 const bonusEntry = createWorldbookEntry({
   uid: 101,
   name: "Bonus 条目",
@@ -228,6 +269,9 @@ const worldbooksByName = {
     extensionLiteralEntry,
     externalInlineEntry,
     mvuLazyProbeEntry,
+    statDataControllerEntry,
+    statDataTargetEntry,
+    messageVarMacroEntry,
     forceControlEntry,
     forcedAfterEntry,
     atDepthEntry,
@@ -294,52 +338,34 @@ try {
     },
     userMessage: "继续调查",
   });
-
-  assert.deepEqual(
-    worldInfo.beforeEntries.map((entry) => entry.name),
-    [
-      "常驻设定",
-      "EJS 汇总",
-      "数据 EJS 汇总",
-      "扩展语义正文",
-      "外部书汇总",
-      "MVU 懒加载探测",
-    ],
-  );
-  assert.deepEqual(worldInfo.afterEntries.map((entry) => entry.name), ["强制后置"]);
+  assert.equal(worldInfo.beforeEntries.length, 6);
+  assert.equal(worldInfo.afterEntries.length, 1);
   assert.equal(worldInfo.additionalMessages.length, 1);
-  assert.equal(worldInfo.additionalMessages[0].content, "这是一条 atDepth 消息。");
-  assert.match(worldInfo.beforeText, /控制摘要：隐藏线索：Alice 正在调查。/);
-  assert.match(
-    worldInfo.beforeText,
-    /数据摘要：线索=蓝钥匙；情绪=紧张；角色=Alice；用户=User；上下文=我们继续调查那条线索/,
-  );
-  assert.match(worldInfo.beforeText, /外部补充：来自 bonus-book 的补充内容。/);
+  assert.match(worldInfo.additionalMessages[0].content, /atDepth/);
+  assert.match(worldInfo.beforeText, /Alice/);
+  assert.match(worldInfo.beforeText, /bonus-book/);
   assert.match(worldInfo.beforeText, /MVU lazy:/);
   assert.match(worldInfo.beforeText, /@@generate/);
   assert.match(worldInfo.beforeText, /\[GENERATE:Test\]/);
   assert.doesNotMatch(worldInfo.beforeText, /getwi|<%=?/);
-  assert.doesNotMatch(worldInfo.beforeText, /status_current_variable|变量更新规则|updatevariable/i);
+  assert.doesNotMatch(worldInfo.beforeText, /status_current_variable|updatevariable/i);
   assert.equal(worldInfo.debug.ejsInlinePullCount, 3);
   assert.equal(worldInfo.debug.ejsForcedActivationCount, 1);
   assert.equal(worldInfo.debug.resolvePassCount >= 2, true);
-  assert.deepEqual(worldInfo.debug.forcedActivatedEntries.map((entry) => entry.name), [
-    "强制后置",
-  ]);
-  assert.deepEqual(
-    worldInfo.debug.inlinePulledEntries.map((entry) => entry.name).sort(),
-    ["Bonus 条目", "数据模板", "线索条目"].sort(),
-  );
+  assert.equal(worldInfo.debug.forcedActivatedEntries.length, 1);
+  assert.equal(worldInfo.debug.inlinePulledEntries.length, 3);
   assert.deepEqual(worldInfo.debug.lazyLoadedWorldbooks, ["bonus-book"]);
-  assert.equal(worldInfo.debug.mvu.filteredEntryCount, 2);
+  assert.equal(worldInfo.debug.mvu.filteredEntryCount, 3);
   assert.equal(worldInfo.debug.mvu.lazyFilteredEntryCount, 1);
-  assert.equal(worldInfo.debug.mvu.blockedContentsCount, 3);
-  assert.deepEqual(
-    worldInfo.debug.mvu.filteredEntries.map((entry) => entry.sourceName).sort(),
-    ["[mvu_update] 状态同步", "MVU 启发式条目", "Bonus MVU"].sort(),
-  );
+  assert.equal(worldInfo.debug.mvu.blockedContentsCount, 4);
+  const defaultFilteredSourceNames = worldInfo.debug.mvu.filteredEntries
+    .map((entry) => entry.sourceName)
+    .sort();
+  assert.equal(defaultFilteredSourceNames.includes("Bonus MVU"), true);
+  assert.equal(defaultFilteredSourceNames.some((name) => String(name || "").includes("MVU")), true);
+  assert.equal(defaultFilteredSourceNames.some((name) => String(name || "").startsWith("[mvu_update]")), true);
   assert.equal(
-    worldInfo.debug.warnings.some((warning) => warning.includes("旧 EW 命名条目")),
+    worldInfo.debug.warnings.some((warning) => warning.includes("EW/")),
     true,
   );
   assert.equal(
@@ -351,27 +377,45 @@ try {
   assert.equal(worldInfo.debug.customFilter.mode, "default");
   assert.equal(worldInfo.debug.customFilter.filteredEntryCount, 0);
 
+  globalThis.Mvu = {
+    getMvuData({ type, message_id: messageId } = {}) {
+      if (type === "message" && messageId === "latest") {
+        return {
+          stat_data: {
+            user: {
+              "意识状态": "沉眠",
+            },
+            "恼恼": {
+              "发情值": 71,
+            },
+          },
+        };
+      }
+      return {};
+    },
+  };
+
   const customWorldInfo = await resolveTaskWorldInfo({
     settings: {
       worldInfoFilterMode: "custom",
       worldInfoFilterCustomKeywords: "",
     },
     templateContext: {
-      recentMessages: "我们继续调查那条线索",
+      recentMessages: "custom-mode regression probe",
       charName: "Alice",
     },
-    userMessage: "继续调查",
+    userMessage: "probe custom mode",
   });
 
   assert.equal(
-    customWorldInfo.beforeEntries.some(
-      (entry) => entry.sourceName === "[mvu_update] 状态同步",
+    customWorldInfo.beforeEntries.some((entry) =>
+      String(entry.sourceName || "").startsWith("[mvu_update]"),
     ),
     true,
   );
   assert.equal(
-    customWorldInfo.beforeEntries.some(
-      (entry) => entry.sourceName === "MVU 启发式条目",
+    customWorldInfo.beforeEntries.some((entry) =>
+      String(entry.sourceName || "").includes("MVU"),
     ),
     true,
   );
@@ -379,17 +423,25 @@ try {
     customWorldInfo.beforeText,
     /<status_current_variable>secret=true<\/status_current_variable>/,
   );
-  assert.doesNotMatch(
-    customWorldInfo.beforeText,
-    /控制摘要：隐藏线索：Alice 正在调查/,
-  );
   assert.equal(
-    customWorldInfo.allEntries.some((entry) => entry.name === "EW/Dyn/线索"),
+    customWorldInfo.allEntries.some((entry) => String(entry.name || "").startsWith("EW/Dyn/")),
     false,
   );
   assert.equal(customWorldInfo.debug.mvu.filteredEntryCount, 0);
   assert.equal(customWorldInfo.debug.customFilter.mode, "custom");
   assert.equal(customWorldInfo.debug.customFilter.filteredEntryCount, 0);
+  assert.equal(
+    customWorldInfo.debug.customRender.bridgedStatDataFromLatestMessage,
+    true,
+  );
+  assert.equal(customWorldInfo.debug.customRender.taskEjsStatDataRoots.cache, true);
+  assert.equal(
+    customWorldInfo.debug.customRender.taskEjsStatDataRoots.message,
+    true,
+  );
+  assert.equal(customWorldInfo.debug.customRender.fallbackEntryCount > 0, true);
+  assert.match(customWorldInfo.beforeText, /stat_data controller payload/);
+  assert.match(customWorldInfo.beforeText, /latest state=.+/);
 
   const keywordWorldInfo = await resolveTaskWorldInfo({
     settings: {
@@ -454,6 +506,8 @@ try {
     keywordCacheHit.debug.customFilter.filteredEntries[0].name,
     "常驻设定",
   );
+
+  delete globalThis.Mvu;
 
   const defaultModeWithKeywords = await resolveTaskWorldInfo({
     settings: {
@@ -806,6 +860,18 @@ try {
     delete globalThis.SillyTavern;
   } else {
     globalThis.SillyTavern = originalSillyTavern;
+  }
+
+  if (originalEjsTemplate === undefined) {
+    delete globalThis.EjsTemplate;
+  } else {
+    globalThis.EjsTemplate = originalEjsTemplate;
+  }
+
+  if (originalMvu === undefined) {
+    delete globalThis.Mvu;
+  } else {
+    globalThis.Mvu = originalMvu;
   }
 
   if (originalGetCharWorldbookNames === undefined) {

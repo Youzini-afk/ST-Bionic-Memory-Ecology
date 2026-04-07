@@ -21,6 +21,9 @@ const scriptShimSource = [
   "export function getRequestHeaders() {",
   "  return { 'Content-Type': 'application/json' };",
   "}",
+  "export function substituteParamsExtended(text) {",
+  "  return String(text ?? '');",
+  "}",
 ].join("\n");
 const openAiShimSource = [
   "export const chat_completion_sources = { CUSTOM: 'custom', OPENAI: 'openai' };",

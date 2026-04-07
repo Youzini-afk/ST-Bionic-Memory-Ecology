@@ -9,6 +9,11 @@ import {
   substituteTaskEjsParams,
 } from "./task-ejs.js";
 import {
+  getLatestMessageVarTable,
+  prepareStNativeEjsEnv,
+  renderTemplateWithStSupport,
+} from "./st-native-render.js";
+import {
   isLikelyMvuWorldInfoContent,
   isMvuTaggedWorldInfoNameOrComment,
   sanitizeMvuContent,
@@ -77,6 +82,67 @@ function createCustomFilterCollector() {
     lazyFilteredEntries: [],
     seenEntries: new Set(),
   };
+}
+
+function safeCloneValue(value, fallback = {}) {
+  if (value == null) {
+    return fallback;
+  }
+
+  try {
+    if (typeof structuredClone === "function") {
+      return structuredClone(value);
+    }
+  } catch {
+    // ignore and fall back to JSON clone
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function bridgeCustomTaskEjsStatData(renderCtx, latestMessageVars) {
+  if (!renderCtx || !latestMessageVars || typeof latestMessageVars !== "object") {
+    return false;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(latestMessageVars, "stat_data")) {
+    return false;
+  }
+
+  const statData = safeCloneValue(latestMessageVars.stat_data, {});
+  const messageVars = safeCloneValue(latestMessageVars, {});
+  const previousState = renderCtx.variableState || {};
+
+  renderCtx.variableState = {
+    globalVars: {
+      ...(previousState.globalVars || {}),
+      stat_data: statData,
+    },
+    localVars: {
+      ...(previousState.localVars || {}),
+      stat_data: statData,
+    },
+    messageVars: {
+      ...(previousState.messageVars || {}),
+      ...messageVars,
+    },
+    cacheVars: {
+      ...(previousState.cacheVars || {}),
+      ...messageVars,
+      stat_data: statData,
+    },
+  };
+
+  renderCtx.templateContext = {
+    ...(renderCtx.templateContext || {}),
+    stat_data: statData,
+  };
+
+  return true;
 }
 
 function registerIgnoredEntryLookup(collector, worldbookName, identifier, meta) {
@@ -1289,6 +1355,20 @@ export async function resolveTaskWorldInfo({
       ejsLastError: "",
       warnings: [],
       resolvedEntries: [],
+      customRender: {
+        stNativeRuntimeAvailable: false,
+        envPrepared: false,
+        usedEntryCount: 0,
+        fallbackEntryCount: 0,
+        ejsErrorCount: 0,
+        bridgedStatDataFromLatestMessage: false,
+        taskEjsStatDataRoots: {
+          global: false,
+          local: false,
+          message: false,
+          cache: false,
+        },
+      },
       mvu: buildMvuDebugSummary(null),
       customFilter: buildCustomFilterDebugSummary(null, {
         filterMode,
@@ -1483,6 +1563,46 @@ export async function resolveTaskWorldInfo({
       },
     );
 
+    const customRenderEnv = isCustomFilter
+      ? await prepareStNativeEjsEnv()
+      : null;
+    const customRenderMessageVars = isCustomFilter
+      ? getLatestMessageVarTable()
+      : null;
+    if (isCustomFilter) {
+      result.debug.customRender.bridgedStatDataFromLatestMessage =
+        bridgeCustomTaskEjsStatData(renderCtx, customRenderMessageVars);
+    }
+
+    result.debug.customRender = {
+      ...result.debug.customRender,
+      taskEjsStatDataRoots: {
+        global: Object.prototype.hasOwnProperty.call(
+          renderCtx.variableState?.globalVars || {},
+          "stat_data",
+        ),
+        local: Object.prototype.hasOwnProperty.call(
+          renderCtx.variableState?.localVars || {},
+          "stat_data",
+        ),
+        message: Object.prototype.hasOwnProperty.call(
+          renderCtx.variableState?.messageVars || {},
+          "stat_data",
+        ),
+        cache: Object.prototype.hasOwnProperty.call(
+          renderCtx.variableState?.cacheVars || {},
+          "stat_data",
+        ),
+      },
+    };
+    result.debug.customRender = {
+      ...result.debug.customRender,
+      stNativeRuntimeAvailable:
+        result.debug.customRender.stNativeRuntimeAvailable ||
+        Boolean(globalThis.window?.EjsTemplate || globalThis.EjsTemplate),
+      envPrepared: Boolean(customRenderEnv),
+    };
+
     const maxResolvePasses =
       Number.isFinite(Number(settings.worldInfoMaxResolvePasses)) &&
       Number(settings.worldInfoMaxResolvePasses) > 0
@@ -1510,8 +1630,9 @@ export async function resolveTaskWorldInfo({
       for (const entry of activatedEntries) {
         const sourceContent = entry.cleanContent || entry.content;
         let renderedContent = sourceContent;
+        let taskEjsRenderedContent = sourceContent;
         try {
-          renderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
+          taskEjsRenderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
             world_info: {
               comment: entry.comment || entry.name,
               name: entry.name,
@@ -1539,7 +1660,33 @@ export async function resolveTaskWorldInfo({
             result.debug.ejsLastError =
               error instanceof Error ? error.message : String(error);
           }
-          renderedContent = "";
+          taskEjsRenderedContent = "";
+        }
+        renderedContent = taskEjsRenderedContent;
+
+        if (isCustomFilter) {
+          const stNativeRender = await renderTemplateWithStSupport(sourceContent, {
+            env: customRenderEnv,
+            messageVars: customRenderMessageVars,
+          });
+          if (stNativeRender.ejsError) {
+            result.debug.customRender.ejsErrorCount += 1;
+          }
+
+          const sourceIncludesEjs = String(sourceContent || "").includes("<%");
+          const shouldUseStNativeResult =
+            (!sourceIncludesEjs &&
+              (stNativeRender.macroApplied ||
+                stNativeRender.messageVariableMacrosApplied ||
+                stNativeRender.text !== sourceContent)) ||
+            (sourceIncludesEjs && stNativeRender.ejsEvaluated);
+
+          if (shouldUseStNativeResult) {
+            renderedContent = stNativeRender.text;
+            result.debug.customRender.usedEntryCount += 1;
+          } else {
+            result.debug.customRender.fallbackEntryCount += 1;
+          }
         }
 
         for (const warning of renderCtx.warnings || []) {
