@@ -595,7 +595,7 @@
   background:
     radial-gradient(
       circle at top right,
-      rgba(233, 69, 96, 0.1),
+      var(--bme-primary-dim, rgba(233, 69, 96, 0.15)),
       transparent 32%
     ),
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 20%),
@@ -4048,6 +4048,42 @@
     gap: 10px;
   }
 
+  /* P1: 能力卡片 toggle 移动端放大 */
+  .bme-capability-card input[type="checkbox"] {
+    width: 44px;
+    height: 24px;
+    border-radius: 12px;
+  }
+
+  .bme-capability-card input[type="checkbox"]::after {
+    width: 18px;
+    height: 18px;
+  }
+
+  .bme-capability-card input[type="checkbox"]:checked::after {
+    transform: translateX(20px);
+  }
+
+  /* P2: 能力卡片文字 / icon 移动端微调 */
+  .bme-cap-icon {
+    width: 38px;
+    height: 38px;
+    font-size: 17px;
+    border-radius: 10px;
+  }
+
+  .bme-cap-title {
+    font-size: 14px;
+  }
+
+  .bme-cap-desc {
+    font-size: 12px;
+  }
+
+  .bme-capability-card {
+    padding: 14px;
+  }
+
   .bme-stripe-row {
     flex-direction: column;
     gap: 12px;
@@ -4095,6 +4131,11 @@
 
 @media (max-width: 520px) {
   .bme-capability-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* P3: Action 网格窄屏 1 列 fallback */
+  .bme-action-grid {
     grid-template-columns: 1fr;
   }
 }
