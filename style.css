@@ -1738,6 +1738,7 @@
 
 .bme-capability-card input[type="checkbox"] {
   -webkit-appearance: none;
+  -moz-appearance: none;
   appearance: none;
   width: 40px;
   height: 22px;
@@ -1748,6 +1749,15 @@
   transition: background 0.2s;
   flex-shrink: 0;
   border: 1px solid var(--bme-border);
+  color: transparent;
+  overflow: hidden;
+}
+
+.bme-capability-card input[type="checkbox"]::before {
+  content: "";
+  display: block;
+  position: absolute;
+  inset: 0;
 }
 
 .bme-capability-card input[type="checkbox"]::after {
