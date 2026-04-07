@@ -4501,7 +4501,7 @@ function _buildRegexReusePopupContent(snapshot = {}) {
         <div class="bme-regex-preview-panel__head">
           <div>
             <div class="bme-regex-preview-panel__title">任务本地最终正则</div>
-            <div class="bme-regex-preview-panel__subtitle">这一组只在最终请求发送前的 `input.finalPrompt` 阶段执行，不参与宿主注入清洗。</div>
+            <div class="bme-regex-preview-panel__subtitle">这一组只在最终请求发送前的 <code>input.finalPrompt</code> 阶段执行，不参与宿主注入清洗。</div>
           </div>
         </div>
         <div class="bme-regex-preview-list">
