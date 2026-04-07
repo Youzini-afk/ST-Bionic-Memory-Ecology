@@ -1,8 +1,6 @@
 // ST-BME: 操控面板交互逻辑
 
-import { callGenericPopup, POPUP_TYPE } from "../../../../popup.js";
 import { getContext } from "../../../../extensions.js";
-import { renderTemplateAsync } from "../../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
@@ -221,6 +219,7 @@ let fetchedMemoryLLMModels = [];
 let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
 let viewportSyncBound = false;
+let popupRuntimePromise = null;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -238,13 +237,27 @@ let _updateSettings = null;
 let _actionHandlers = {};
 
 async function loadLocalTemplate(templateName) {
-  const templatePath = new URL(`./${templateName}.html`, import.meta.url)
-    .pathname;
-  const html = await renderTemplateAsync(templatePath, {}, true, true, true);
+  const templateUrl = new URL(`./${templateName}.html`, import.meta.url);
+  const response = await fetch(templateUrl.href, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Template request failed: ${templateUrl.pathname} (${response.status} ${response.statusText})`,
+    );
+  }
+  const html = await response.text();
   if (typeof html !== "string" || html.trim().length === 0) {
-    throw new Error(`Template render returned empty content: ${templatePath}`);
+    throw new Error(`Template returned empty content: ${templateUrl.pathname}`);
   }
   return html;
+}
+
+async function getPopupRuntime() {
+  if (!popupRuntimePromise) {
+    popupRuntimePromise = import("../../../../popup.js");
+  }
+  return await popupRuntimePromise;
 }
 
 function mountPanelHtml(html) {
@@ -4545,6 +4558,7 @@ async function _openRegexReuseInspector(taskType) {
   try {
     const snapshot = await _actionHandlers.inspectTaskRegexReuse(taskType);
     const content = _buildRegexReusePopupContent(snapshot || {});
+    const { callGenericPopup, POPUP_TYPE } = await getPopupRuntime();
     await callGenericPopup(content, POPUP_TYPE.TEXT, "", {
       okButton: "关闭",
       wide: true,

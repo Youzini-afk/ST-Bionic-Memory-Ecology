@@ -37,9 +37,14 @@ function injectOptionsMenuEntry(runtime) {
       <span>记忆图谱</span>
     </a>
   `).on("click", async () => {
-    await ensurePanelBridgeReady(runtime);
-    openPanelController(runtime);
-    runtime.$("#options").hide();
+    try {
+      await ensurePanelBridgeReady(runtime);
+      openPanelController(runtime);
+      runtime.$("#options").hide();
+    } catch (error) {
+      runtime.console.error("[ST-BME] 点击菜单打开面板失败:", error);
+      globalThis.toastr?.error?.("记忆图谱面板加载失败，请查看控制台报错", "ST-BME");
+    }
   });
 
   const $optionsContent = runtime.$("#options .options-content");
@@ -129,5 +134,6 @@ export async function initializePanelBridgeController(runtime) {
       "[ST-BME] 操控面板加载失败（核心功能不受影响）:",
       panelError,
     );
+    globalThis.toastr?.error?.("记忆图谱面板预加载失败，可稍后重试点击菜单", "ST-BME");
   }
 }
