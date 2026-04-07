@@ -815,6 +815,7 @@ result = {
   removeGraphShadowSnapshot,
   maybeCaptureGraphShadowSnapshot,
   loadGraphFromChat,
+  loadGraphFromIndexedDb,
   saveGraphToChat,
   syncGraphLoadFromLiveContext,
   buildBmeSyncRuntimeOptions,
@@ -1430,6 +1431,190 @@ result = {
     harness.api.getCurrentGraph().nodes[0]?.fields?.title,
     "事件-active-runtime",
     "active chat 与 sync payload chat 不一致时不应覆盖当前运行时图谱",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-panel-host",
+    globalChatId: "chat-panel-host",
+    chatMetadata: {
+      integrity: "chat-panel-integrity",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-panel-host", "runtime-host"),
+      "chat-panel-host",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-panel-host",
+    reason: "runtime-host-loaded",
+    revision: 6,
+    lastPersistedRevision: 6,
+    dbReady: true,
+    writesBlocked: false,
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "panel-open-sync",
+  });
+
+  assert.equal(
+    result.synced,
+    false,
+    "hostChatId 与 integrity 只是同一聊天的不同身份时，不应误判为需要重新加载",
+  );
+  assert.equal(result.reason, "no-sync-needed");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-stale-cache",
+    globalChatId: "chat-stale-cache",
+    chatMetadata: {
+      integrity: "chat-stale-cache-integrity",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-stale-cache", "runtime-newer"),
+      "chat-stale-cache",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-stale-cache",
+    reason: "runtime-newer",
+    revision: 9,
+    lastPersistedRevision: 9,
+    queuedPersistRevision: 9,
+    dbReady: true,
+    writesBlocked: false,
+  });
+  harness.api.setIndexedDbSnapshotForChat(
+    "chat-stale-cache-integrity",
+    buildSnapshotFromGraph(
+      createMeaningfulGraph("chat-stale-cache", "indexeddb-older"),
+      {
+        chatId: "chat-stale-cache-integrity",
+        revision: 4,
+      },
+    ),
+  );
+
+  const result = await harness.api.loadGraphFromIndexedDb(
+    "chat-stale-cache-integrity",
+    {
+      source: "sync-post-refresh:download",
+      allowOverride: true,
+      applyEmptyState: true,
+    },
+  );
+
+  assert.equal(result.success, false);
+  assert.equal(result.loaded, false);
+  assert.equal(result.reason, "indexeddb-stale-runtime");
+  assert.equal(
+    result.staleDetail?.reason,
+    "runtime-revision-newer",
+    "同聊天较旧的 IndexedDB 快照应被识别为过期",
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-runtime-newer",
+    "较旧的 IndexedDB 快照不得覆盖当前更近的运行时图谱",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceLiveState().loadState,
+    "loaded",
+    "拒绝旧快照后不应把当前图谱重新打回 loading",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-stale-cache-panel",
+    globalChatId: "chat-stale-cache-panel",
+    chatMetadata: {
+      integrity: "chat-stale-cache-panel-integrity",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-stale-cache-panel", "runtime-newer"),
+      "chat-stale-cache-panel",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-stale-cache-panel",
+    reason: "runtime-newer",
+    revision: 9,
+    lastPersistedRevision: 9,
+    queuedPersistRevision: 9,
+    dbReady: true,
+    writesBlocked: false,
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "panel-open-sync",
+  });
+
+  assert.equal(
+    result.synced,
+    false,
+    "hostChatId 与 integrity 只是同一聊天的不同身份时，面板打开不应误判成要重新同步",
+  );
+  assert.equal(result.reason, "no-sync-needed");
+}
+
+{
+  const metadataGraph = stampPersistedGraph(
+    createMeaningfulGraph("chat-stale-metadata", "metadata-older"),
+    {
+      revision: 3,
+      integrity: "chat-stale-metadata-integrity",
+      chatId: "chat-stale-metadata",
+      reason: "metadata-older",
+    },
+  );
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-stale-metadata",
+    globalChatId: "chat-stale-metadata",
+    chatMetadata: {
+      integrity: "chat-stale-metadata-integrity",
+      st_bme_graph: metadataGraph,
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-stale-metadata", "runtime-newer"),
+      "chat-stale-metadata",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-stale-metadata",
+    reason: "runtime-newer",
+    revision: 8,
+    lastPersistedRevision: 8,
+    dbReady: true,
+    writesBlocked: false,
+  });
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "stale-metadata-runtime-guard",
+  });
+
+  assert.equal(result.reason, "metadata-compat-stale-runtime");
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-runtime-newer",
+    "较旧的 metadata 兼容图不得把当前运行时图谱盖回去",
   );
 }
 

@@ -3589,6 +3589,160 @@ function doesChatIdMatchResolvedGraphIdentity(
   return knownChatIds.has(normalizedCandidate);
 }
 
+function areChatIdsEquivalentForResolvedIdentity(
+  candidateChatId,
+  referenceChatId,
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
+  const normalizedReference = normalizeChatIdCandidate(referenceChatId);
+  if (!normalizedCandidate || !normalizedReference) {
+    return normalizedCandidate === normalizedReference;
+  }
+  if (normalizedCandidate === normalizedReference) {
+    return true;
+  }
+  return (
+    doesChatIdMatchResolvedGraphIdentity(normalizedCandidate, identity) &&
+    doesChatIdMatchResolvedGraphIdentity(normalizedReference, identity)
+  );
+}
+
+function getIndexedDbSnapshotHistoryState(snapshot = null) {
+  const snapshotState =
+    snapshot?.meta?.runtimeHistoryState &&
+    typeof snapshot.meta.runtimeHistoryState === "object" &&
+    !Array.isArray(snapshot.meta.runtimeHistoryState)
+      ? snapshot.meta.runtimeHistoryState
+      : null;
+
+  return {
+    lastProcessedAssistantFloor: Number.isFinite(
+      Number(snapshot?.state?.lastProcessedFloor),
+    )
+      ? Number(snapshot.state.lastProcessedFloor)
+      : Number.isFinite(Number(snapshotState?.lastProcessedAssistantFloor))
+        ? Number(snapshotState.lastProcessedAssistantFloor)
+        : -1,
+    extractionCount: Number.isFinite(Number(snapshot?.state?.extractionCount))
+      ? Number(snapshot.state.extractionCount)
+      : Number.isFinite(Number(snapshotState?.extractionCount))
+        ? Number(snapshotState.extractionCount)
+        : 0,
+  };
+}
+
+function detectStaleIndexedDbSnapshotAgainstRuntime(
+  chatId,
+  snapshot,
+  { identity = resolveCurrentChatIdentity(getContext()) } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot) || !currentGraph) {
+    return {
+      stale: false,
+      reason: "",
+    };
+  }
+
+  const runtimeChatId = normalizeChatIdCandidate(
+    currentGraph?.historyState?.chatId ||
+      getGraphPersistenceMeta(currentGraph)?.chatId ||
+      graphPersistenceState.chatId,
+  );
+  if (
+    !runtimeChatId ||
+    !areChatIdsEquivalentForResolvedIdentity(
+      normalizedChatId,
+      runtimeChatId,
+      identity,
+    )
+  ) {
+    return {
+      stale: false,
+      reason: "",
+    };
+  }
+
+  const runtimeRevision = Math.max(
+    normalizeIndexedDbRevision(graphPersistenceState.revision),
+    normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
+    normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+    getGraphPersistedRevision(currentGraph),
+  );
+  const snapshotRevision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
+  if (runtimeRevision > snapshotRevision) {
+    return {
+      stale: true,
+      reason: "runtime-revision-newer",
+      runtimeRevision,
+      snapshotRevision,
+    };
+  }
+
+  if (runtimeRevision < snapshotRevision) {
+    return {
+      stale: false,
+      reason: "",
+      runtimeRevision,
+      snapshotRevision,
+    };
+  }
+
+  const runtimeLastProcessedFloor = Number.isFinite(
+    Number(currentGraph?.historyState?.lastProcessedAssistantFloor),
+  )
+    ? Number(currentGraph.historyState.lastProcessedAssistantFloor)
+    : Number.isFinite(Number(currentGraph?.lastProcessedSeq))
+      ? Number(currentGraph.lastProcessedSeq)
+      : -1;
+  const runtimeExtractionCount = Number.isFinite(
+    Number(currentGraph?.historyState?.extractionCount),
+  )
+    ? Number(currentGraph.historyState.extractionCount)
+    : Number.isFinite(Number(extractionCount))
+      ? Number(extractionCount)
+      : 0;
+  const snapshotHistoryState = getIndexedDbSnapshotHistoryState(snapshot);
+
+  if (runtimeLastProcessedFloor > snapshotHistoryState.lastProcessedAssistantFloor) {
+    return {
+      stale: true,
+      reason: "runtime-last-processed-newer",
+      runtimeRevision,
+      snapshotRevision,
+      runtimeLastProcessedFloor,
+      snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
+      runtimeExtractionCount,
+      snapshotExtractionCount: snapshotHistoryState.extractionCount,
+    };
+  }
+
+  if (runtimeExtractionCount > snapshotHistoryState.extractionCount) {
+    return {
+      stale: true,
+      reason: "runtime-extraction-count-newer",
+      runtimeRevision,
+      snapshotRevision,
+      runtimeLastProcessedFloor,
+      snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
+      runtimeExtractionCount,
+      snapshotExtractionCount: snapshotHistoryState.extractionCount,
+    };
+  }
+
+  return {
+    stale: false,
+    reason: "",
+    runtimeRevision,
+    snapshotRevision,
+    runtimeLastProcessedFloor,
+    snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
+    runtimeExtractionCount,
+    snapshotExtractionCount: snapshotHistoryState.extractionCount,
+  };
+}
+
 function resolveCompatibleGraphShadowSnapshot(
   identity = resolveCurrentChatIdentity(getContext()),
 ) {
@@ -4454,6 +4608,50 @@ function applyIndexedDbSnapshotToRuntime(
     1,
     normalizeIndexedDbRevision(snapshot?.meta?.revision),
   );
+  const staleDecision = detectStaleIndexedDbSnapshotAgainstRuntime(
+    normalizedChatId,
+    snapshot,
+  );
+  if (staleDecision.stale) {
+    updateGraphPersistenceState({
+      storagePrimary:
+        graphPersistenceState.storagePrimary || "indexeddb",
+      storageMode: graphPersistenceState.storageMode || "indexeddb",
+      indexedDbRevision: Math.max(
+        graphPersistenceState.indexedDbRevision || 0,
+        revision,
+      ),
+      metadataIntegrity:
+        getChatMetadataIntegrity(getContext()) ||
+        graphPersistenceState.metadataIntegrity,
+      indexedDbLastError: "",
+      dualWriteLastResult: {
+        action: "load",
+        source: String(source || "indexeddb"),
+        success: false,
+        rejected: true,
+        reason: "indexeddb-stale-runtime",
+        revision,
+        staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+        at: Date.now(),
+      },
+    });
+    debugDebug("[ST-BME] 已拒绝用较旧 IndexedDB 快照覆盖当前运行时图谱", {
+      chatId: normalizedChatId,
+      source,
+      revision,
+      staleDetail: staleDecision,
+    });
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-stale-runtime",
+      chatId: normalizedChatId,
+      attemptIndex,
+      revision,
+      staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+    };
+  }
   let graphFromSnapshot = null;
   try {
     graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
@@ -5449,7 +5647,15 @@ function shouldSyncGraphLoadFromLiveContext(
   const liveChatId = chatIdentity.chatId;
   const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
 
-  if (liveChatId !== stateChatId) return true;
+  if (
+    !areChatIdsEquivalentForResolvedIdentity(
+      liveChatId,
+      stateChatId,
+      chatIdentity,
+    )
+  ) {
+    return true;
+  }
 
   if (
     !liveChatId &&
@@ -5493,6 +5699,15 @@ function syncGraphLoadFromLiveContext(options = {}) {
       source: `${source}:indexeddb-cache`,
       attemptIndex: 0,
     });
+    if (result?.reason === "indexeddb-stale-runtime") {
+      return {
+        synced: false,
+        reason: "cached-indexeddb-stale-runtime",
+        loadState: graphPersistenceState.loadState,
+        chatId: graphPersistenceState.chatId,
+        staleDetail: cloneRuntimeDebugValue(result?.staleDetail, null),
+      };
+    }
     return {
       synced: true,
       ...result,
@@ -6514,6 +6729,19 @@ function loadGraphFromChat(options = {}) {
         attemptIndex,
       },
     );
+    if (cachedResult?.reason === "indexeddb-stale-runtime") {
+      clearPendingGraphLoadRetry();
+      refreshPanelLiveState();
+      return {
+        success: false,
+        loaded: false,
+        loadState: graphPersistenceState.loadState,
+        reason: "indexeddb-cache-stale-runtime",
+        chatId,
+        attemptIndex,
+        staleDetail: cloneRuntimeDebugValue(cachedResult?.staleDetail, null),
+      };
+    }
     if (cachedResult?.loaded) {
       clearPendingGraphLoadRetry();
       return cachedResult;
@@ -6538,6 +6766,51 @@ function loadGraphFromChat(options = {}) {
         1,
         getGraphPersistedRevision(officialGraph),
       );
+      const officialRuntimeStaleDecision =
+        detectStaleIndexedDbSnapshotAgainstRuntime(
+          chatId,
+          buildSnapshotFromGraph(officialGraph, {
+            chatId,
+            revision: officialRevision,
+          }),
+          {
+            identity: chatIdentity,
+          },
+        );
+
+      if (officialRuntimeStaleDecision.stale) {
+        clearPendingGraphLoadRetry();
+        updateGraphPersistenceState({
+          metadataIntegrity: getChatMetadataIntegrity(context),
+          dualWriteLastResult: {
+            action: "load",
+            source: `${source}:metadata-compat`,
+            success: false,
+            provisional: true,
+            rejected: true,
+            reason: "metadata-compat-stale-runtime",
+            revision: officialRevision,
+            staleDetail: cloneRuntimeDebugValue(
+              officialRuntimeStaleDecision,
+              null,
+            ),
+            at: Date.now(),
+          },
+        });
+        refreshPanelLiveState();
+        return {
+          success: false,
+          loaded: false,
+          loadState: graphPersistenceState.loadState,
+          reason: "metadata-compat-stale-runtime",
+          chatId,
+          attemptIndex,
+          staleDetail: cloneRuntimeDebugValue(
+            officialRuntimeStaleDecision,
+            null,
+          ),
+        };
+      }
 
       if (shadowSnapshot && shadowDecision?.reason) {
         updateGraphPersistenceState({
