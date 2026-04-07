@@ -11,6 +11,10 @@ import {
   normalizeMemoryScope,
 } from "./memory-scope.js";
 import {
+  resolveActiveLlmPresetName,
+  sanitizeLlmPresetSettings,
+} from "./llm-preset-utils.js";
+import {
   cloneTaskProfile,
   createBuiltinPromptBlock,
   createCustomPromptBlock,
@@ -1866,11 +1870,8 @@ function _bindActions() {
 }
 
 function _refreshConfigTab() {
-  let settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
-  const resolvedActiveLlmPreset = _resolveActiveLlmPresetName(settings);
-  if (resolvedActiveLlmPreset !== String(settings.llmActivePreset || "")) {
-    settings = _patchSettings({ llmActivePreset: resolvedActiveLlmPreset });
-  }
+  const settings = _resolveAndPersistActiveLlmPreset(_getSettings?.() || {});
+  const resolvedActiveLlmPreset = String(settings.llmActivePreset || "");
   _refreshPlannerLauncher();
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
@@ -5736,81 +5737,28 @@ function _patchSettings(patch = {}, options = {}) {
 }
 
 function _normalizeLlmPresetSettings(settings = _getSettings?.() || {}) {
-  const rawPresets = settings?.llmPresets;
-  const normalizedPresets = {};
-  let changed =
-    !rawPresets ||
-    typeof rawPresets !== "object" ||
-    Array.isArray(rawPresets);
+  const normalized = sanitizeLlmPresetSettings(settings);
 
-  if (!changed) {
-    for (const [name, preset] of Object.entries(rawPresets)) {
-      if (!String(name || "").trim()) {
-        changed = true;
-        continue;
-      }
-      if (
-        !preset ||
-        typeof preset !== "object" ||
-        Array.isArray(preset) ||
-        typeof preset.llmApiUrl !== "string" ||
-        typeof preset.llmApiKey !== "string" ||
-        typeof preset.llmModel !== "string"
-      ) {
-        changed = true;
-        continue;
-      }
-      normalizedPresets[name] = {
-        llmApiUrl: preset.llmApiUrl,
-        llmApiKey: preset.llmApiKey,
-        llmModel: preset.llmModel,
-      };
-    }
-  }
-
-  let activePreset =
-    typeof settings?.llmActivePreset === "string" ? settings.llmActivePreset : "";
-  if (activePreset && !Object.prototype.hasOwnProperty.call(normalizedPresets, activePreset)) {
-    activePreset = "";
-    changed = true;
-  }
-  if (typeof settings?.llmActivePreset !== "string") {
-    changed = true;
-  }
-
-  if (!changed) {
+  if (!normalized.changed) {
     return settings;
   }
 
   return _patchSettings({
-    llmPresets: normalizedPresets,
-    llmActivePreset: activePreset,
+    llmPresets: normalized.presets,
+    llmActivePreset: normalized.activePreset,
   });
 }
 
-function _resolveActiveLlmPresetName(settings = _getSettings?.() || {}) {
-  const activePreset = String(settings?.llmActivePreset || "");
-  if (!activePreset) return "";
-  const preset = settings?.llmPresets?.[activePreset];
-  if (!preset) return "";
-  return _isSameLlmConfigSnapshot(
-    {
-      llmApiUrl: String(settings?.llmApiUrl || ""),
-      llmApiKey: String(settings?.llmApiKey || ""),
-      llmModel: String(settings?.llmModel || ""),
-    },
-    preset,
-  )
-    ? activePreset
-    : "";
-}
-
-function _isSameLlmConfigSnapshot(left = {}, right = {}) {
-  return (
-    String(left?.llmApiUrl || "") === String(right?.llmApiUrl || "") &&
-    String(left?.llmApiKey || "") === String(right?.llmApiKey || "") &&
-    String(left?.llmModel || "") === String(right?.llmModel || "")
-  );
+function _resolveAndPersistActiveLlmPreset(settings = _getSettings?.() || {}) {
+  const normalizedSettings = _normalizeLlmPresetSettings(settings);
+  const resolvedActivePreset = resolveActiveLlmPresetName(normalizedSettings);
+  if (
+    resolvedActivePreset !==
+    String(normalizedSettings?.llmActivePreset || "")
+  ) {
+    return _patchSettings({ llmActivePreset: resolvedActivePreset });
+  }
+  return normalizedSettings;
 }
 
 function _getLlmConfigInputSnapshot() {
@@ -5877,11 +5825,8 @@ function _markLlmPresetDirty(options = {}) {
     _clearFetchedLlmModels();
   }
 
-  const activePreset = String((_getSettings?.() || {}).llmActivePreset || "");
-  if (activePreset) {
-    _patchSettings({ llmActivePreset: "" });
-  }
-  _syncLlmPresetControls("");
+  const settings = _resolveAndPersistActiveLlmPreset(_getSettings?.() || {});
+  _syncLlmPresetControls(String(settings?.llmActivePreset || ""));
 }
 
 function _highlightThemeChoice(themeName) {
