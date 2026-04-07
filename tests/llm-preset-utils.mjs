@@ -1,11 +1,39 @@
 import assert from "node:assert/strict";
 
 import {
+  createLlmConfigSnapshot,
   isSameLlmConfigSnapshot,
+  isUsableLlmConfigSnapshot,
   normalizeLlmPresetMap,
+  resolveLlmConfigSelection,
   resolveActiveLlmPresetName,
   sanitizeLlmPresetSettings,
 } from "../llm-preset-utils.js";
+
+assert.deepEqual(createLlmConfigSnapshot({
+  llmApiUrl: " https://example.com/v1 ",
+  llmApiKey: " sk-test ",
+  llmModel: " model-a ",
+}), {
+  llmApiUrl: "https://example.com/v1",
+  llmApiKey: "sk-test",
+  llmModel: "model-a",
+});
+
+assert.equal(
+  isUsableLlmConfigSnapshot({
+    llmApiUrl: "https://example.com/v1",
+    llmModel: "model-a",
+  }),
+  true,
+);
+assert.equal(
+  isUsableLlmConfigSnapshot({
+    llmApiUrl: "",
+    llmModel: "model-a",
+  }),
+  false,
+);
 
 assert.equal(
   isSameLlmConfigSnapshot(
@@ -130,5 +158,72 @@ const noMatchSettings = {
   llmActivePreset: "",
 };
 assert.equal(resolveActiveLlmPresetName(noMatchSettings), "");
+
+const taskPresetSelection = resolveLlmConfigSelection(
+  uniqueMatchSettings,
+  "Alpha",
+);
+assert.equal(taskPresetSelection.source, "task-preset");
+assert.equal(taskPresetSelection.presetName, "Alpha");
+assert.deepEqual(taskPresetSelection.config, {
+  llmApiUrl: "https://example.com/v1",
+  llmApiKey: "sk-alpha",
+  llmModel: "model-a",
+});
+
+const globalSelection = resolveLlmConfigSelection(
+  uniqueMatchSettings,
+  "",
+);
+assert.equal(globalSelection.source, "global");
+assert.equal(globalSelection.presetName, "");
+
+const missingTaskPresetSelection = resolveLlmConfigSelection(
+  uniqueMatchSettings,
+  "Missing",
+);
+assert.equal(
+  missingTaskPresetSelection.source,
+  "global-fallback-missing-task-preset",
+);
+assert.equal(missingTaskPresetSelection.requestedPresetName, "Missing");
+assert.equal(
+  missingTaskPresetSelection.fallbackReason,
+  "selected_task_preset_missing",
+);
+assert.deepEqual(missingTaskPresetSelection.config, {
+  llmApiUrl: "https://example.com/v1",
+  llmApiKey: "sk-alpha",
+  llmModel: "model-a",
+});
+
+const invalidTaskPresetSelection = resolveLlmConfigSelection(
+  {
+    llmApiUrl: "https://global.example/v1",
+    llmApiKey: "sk-global",
+    llmModel: "model-global",
+    llmPresets: {
+      Broken: {
+        llmApiUrl: "",
+        llmApiKey: "sk-broken",
+        llmModel: "",
+      },
+    },
+  },
+  "Broken",
+);
+assert.equal(
+  invalidTaskPresetSelection.source,
+  "global-fallback-invalid-task-preset",
+);
+assert.equal(
+  invalidTaskPresetSelection.fallbackReason,
+  "selected_task_preset_incomplete",
+);
+assert.deepEqual(invalidTaskPresetSelection.config, {
+  llmApiUrl: "https://global.example/v1",
+  llmApiKey: "sk-global",
+  llmModel: "model-global",
+});
 
 console.log("llm-preset-utils tests passed");

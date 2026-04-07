@@ -15,11 +15,13 @@ import {
 
 const taskProfiles = createDefaultTaskProfiles();
 const baseProfile = taskProfiles.extract.profiles[0];
+assert.equal(baseProfile.generation.llm_preset, "");
 
 const clonedProfile = cloneTaskProfile(baseProfile, {
   taskType: "extract",
   name: "激进提取",
 });
+clonedProfile.generation.llm_preset = "Recall-API";
 clonedProfile.blocks = [
   ...clonedProfile.blocks,
   createBuiltinPromptBlock("extract", "userMessage", {
@@ -65,6 +67,7 @@ assert.ok(customBlock);
 assert.equal(customBlock.role, "user");
 assert.equal(activeProfile.regex.localRules.length, 1);
 assert.equal(activeProfile.regex.localRules[0].script_name, "裁边");
+assert.equal(activeProfile.generation.llm_preset, "Recall-API");
 
 const exported = exportTaskProfile(
   updatedProfiles,
@@ -74,10 +77,12 @@ const exported = exportTaskProfile(
 assert.equal(exported.format, "st-bme-task-profile");
 assert.equal(exported.taskType, "extract");
 assert.equal(exported.profile.name, "激进提取");
+assert.equal(exported.profile.generation.llm_preset, "Recall-API");
 
 const imported = importTaskProfile(updatedProfiles, JSON.stringify(exported));
 assert.equal(imported.taskType, "extract");
 assert.notEqual(imported.profile.id, clonedProfile.id);
+assert.equal(imported.profile.generation.llm_preset, "Recall-API");
 assert.ok(
   imported.profile.blocks.some(
     (block) => block.type === "builtin" && block.sourceKey === "userMessage",

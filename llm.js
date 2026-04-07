@@ -6,6 +6,8 @@ import { extension_settings } from "../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../openai.js";
 import { debugLog, debugWarn } from "./debug-logging.js";
 import { resolveTaskGenerationOptions } from "./generation-options.js";
+import { resolveLlmConfigSelection } from "./llm-preset-utils.js";
+import { getActiveTaskProfile } from "./prompt-profiles.js";
 import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
 import { applyTaskRegex } from "./task-regex.js";
 
@@ -122,13 +124,41 @@ function getLlmTestOverride(name) {
   return typeof override === "function" ? override : null;
 }
 
-function getMemoryLLMConfig() {
+function formatLlmConfigSourceLabel(source = "") {
+  switch (String(source || "").trim()) {
+    case "task-preset":
+      return "任务专用模板";
+    case "global-fallback-missing-task-preset":
+      return "任务模板缺失，已回退当前 API";
+    case "global-fallback-invalid-task-preset":
+      return "任务模板不完整，已回退当前 API";
+    case "global":
+    default:
+      return "跟随当前 API";
+  }
+}
+
+function getMemoryLLMConfig(taskType = "") {
   const settings = extension_settings[MODULE_NAME] || {};
+  const normalizedTaskType = String(taskType || "").trim();
+  const activeProfile = normalizedTaskType
+    ? getActiveTaskProfile(settings, normalizedTaskType)
+    : null;
+  const selectedPresetName =
+    typeof activeProfile?.generation?.llm_preset === "string"
+      ? activeProfile.generation.llm_preset
+      : "";
+  const selection = resolveLlmConfigSelection(settings, selectedPresetName);
   return {
-    apiUrl: normalizeOpenAICompatibleBaseUrl(settings.llmApiUrl),
-    apiKey: String(settings.llmApiKey || "").trim(),
-    model: String(settings.llmModel || "").trim(),
+    apiUrl: normalizeOpenAICompatibleBaseUrl(selection.config?.llmApiUrl),
+    apiKey: String(selection.config?.llmApiKey || "").trim(),
+    model: String(selection.config?.llmModel || "").trim(),
     timeoutMs: getConfiguredTimeoutMs(settings),
+    llmConfigSource: selection.source || "global",
+    llmConfigSourceLabel: formatLlmConfigSourceLabel(selection.source),
+    llmPresetName: selection.presetName || "",
+    requestedLlmPresetName: selection.requestedPresetName || "",
+    llmPresetFallbackReason: selection.fallbackReason || "",
   };
 }
 
@@ -1296,9 +1326,15 @@ async function callDedicatedOpenAICompatible(
     taskType,
     requestSource,
   );
-  const config = getMemoryLLMConfig();
+  const config = getMemoryLLMConfig(taskType);
   const settings = extension_settings[MODULE_NAME] || {};
   const hasDedicatedConfig = hasDedicatedLLMConfig(config);
+  if (taskType && config.llmPresetFallbackReason) {
+    debugWarn(
+      `[ST-BME] 任务 ${taskType} 指定的 API 模板不可用，已回退当前 API: ` +
+        `${config.requestedLlmPresetName || "(empty)"} / ${config.llmPresetFallbackReason}`,
+    );
+  }
   const generationResolved = taskType
     ? resolveTaskGenerationOptions(settings, taskType, {
         max_completion_tokens: Number.isFinite(maxCompletionTokens)
@@ -1332,6 +1368,11 @@ async function callDedicatedOpenAICompatible(
       : "sillytavern-current-model",
     model: hasDedicatedConfig ? config.model : "sillytavern-current-model",
     apiUrl: hasDedicatedConfig ? config.apiUrl : "",
+    llmConfigSource: config.llmConfigSource || "global",
+    llmConfigSourceLabel: config.llmConfigSourceLabel || "",
+    llmPresetName: config.llmPresetName || "",
+    requestedLlmPresetName: config.requestedLlmPresetName || "",
+    llmPresetFallbackReason: config.llmPresetFallbackReason || "",
     messages,
     generation: generationResolved.generation || {},
     filteredGeneration: generationResolved.filtered || {},
@@ -1435,6 +1476,11 @@ async function callDedicatedOpenAICompatible(
     route: "dedicated-openai-compatible",
     model: config.model,
     apiUrl: config.apiUrl,
+    llmConfigSource: config.llmConfigSource || "global",
+    llmConfigSourceLabel: config.llmConfigSourceLabel || "",
+    llmPresetName: config.llmPresetName || "",
+    requestedLlmPresetName: config.requestedLlmPresetName || "",
+    llmPresetFallbackReason: config.llmPresetFallbackReason || "",
     messages,
     generation: generationResolved.generation || {},
     filteredGeneration,

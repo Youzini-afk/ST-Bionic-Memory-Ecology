@@ -2,14 +2,26 @@ function normalizeLlmConfigValue(value) {
   return String(value || "").trim();
 }
 
+export function createLlmConfigSnapshot(source = {}) {
+  return {
+    llmApiUrl: normalizeLlmConfigValue(source?.llmApiUrl),
+    llmApiKey: normalizeLlmConfigValue(source?.llmApiKey),
+    llmModel: normalizeLlmConfigValue(source?.llmModel),
+  };
+}
+
+export function isUsableLlmConfigSnapshot(snapshot = {}) {
+  const normalized = createLlmConfigSnapshot(snapshot);
+  return Boolean(normalized.llmApiUrl && normalized.llmModel);
+}
+
 export function isSameLlmConfigSnapshot(left = {}, right = {}) {
+  const normalizedLeft = createLlmConfigSnapshot(left);
+  const normalizedRight = createLlmConfigSnapshot(right);
   return (
-    normalizeLlmConfigValue(left?.llmApiUrl) ===
-      normalizeLlmConfigValue(right?.llmApiUrl) &&
-    normalizeLlmConfigValue(left?.llmApiKey) ===
-      normalizeLlmConfigValue(right?.llmApiKey) &&
-    normalizeLlmConfigValue(left?.llmModel) ===
-      normalizeLlmConfigValue(right?.llmModel)
+    normalizedLeft.llmApiUrl === normalizedRight.llmApiUrl &&
+    normalizedLeft.llmApiKey === normalizedRight.llmApiKey &&
+    normalizedLeft.llmModel === normalizedRight.llmModel
   );
 }
 
@@ -84,11 +96,7 @@ export function sanitizeLlmPresetSettings(settings = {}) {
 export function resolveActiveLlmPresetName(settings = {}) {
   const normalized = settings && typeof settings === "object" ? settings : {};
   const { presets, activePreset } = sanitizeLlmPresetSettings(normalized);
-  const snapshot = {
-    llmApiUrl: normalizeLlmConfigValue(normalized.llmApiUrl),
-    llmApiKey: normalizeLlmConfigValue(normalized.llmApiKey),
-    llmModel: normalizeLlmConfigValue(normalized.llmModel),
-  };
+  const snapshot = createLlmConfigSnapshot(normalized);
 
   if (
     activePreset &&
@@ -107,4 +115,51 @@ export function resolveActiveLlmPresetName(settings = {}) {
   }
 
   return "";
+}
+
+export function resolveLlmConfigSelection(settings = {}, selectedPresetName = "") {
+  const normalized = settings && typeof settings === "object" ? settings : {};
+  const { presets } = sanitizeLlmPresetSettings(normalized);
+  const globalConfig = createLlmConfigSnapshot(normalized);
+  const requestedPresetName = normalizeLlmConfigValue(selectedPresetName);
+
+  if (!requestedPresetName) {
+    return {
+      source: "global",
+      config: globalConfig,
+      requestedPresetName: "",
+      presetName: "",
+      fallbackReason: "",
+    };
+  }
+
+  const presetConfig = presets[requestedPresetName];
+  if (!presetConfig) {
+    return {
+      source: "global-fallback-missing-task-preset",
+      config: globalConfig,
+      requestedPresetName,
+      presetName: "",
+      fallbackReason: "selected_task_preset_missing",
+    };
+  }
+
+  const normalizedPresetConfig = createLlmConfigSnapshot(presetConfig);
+  if (!isUsableLlmConfigSnapshot(normalizedPresetConfig)) {
+    return {
+      source: "global-fallback-invalid-task-preset",
+      config: globalConfig,
+      requestedPresetName,
+      presetName: "",
+      fallbackReason: "selected_task_preset_incomplete",
+    };
+  }
+
+  return {
+    source: "task-preset",
+    config: normalizedPresetConfig,
+    requestedPresetName,
+    presetName: requestedPresetName,
+    fallbackReason: "",
+  };
 }

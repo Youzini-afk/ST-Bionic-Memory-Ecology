@@ -104,6 +104,18 @@ const GRAPH_WRITE_ACTION_IDS = [
 
 const TASK_PROFILE_GENERATION_GROUPS = [
   {
+    title: "API 配置",
+    fields: [
+      {
+        key: "llm_preset",
+        label: "API 配置模板",
+        type: "llm_preset",
+        defaultValue: "",
+        help: "留空表示跟随当前 API；选中已保存模板后，这个任务会独立使用那套 URL / Key / Model。",
+      },
+    ],
+  },
+  {
     title: "基础生成参数",
     fields: [
       { key: "max_context_tokens", label: "最大上下文 Tokens", type: "number", defaultValue: "" },
@@ -2587,7 +2599,7 @@ function _bindConfigControls() {
       const settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
       const preset = settings.llmPresets?.[selectedName];
       if (!preset) {
-        _patchSettings({ llmActivePreset: "" });
+        _patchSettings({ llmActivePreset: "" }, { refreshTaskWorkspace: true });
         _populateLlmPresetSelect(settings.llmPresets || {}, "");
         _syncLlmPresetControls("");
         toastr.warning("选中的模板不存在，已切回手动模式", "ST-BME");
@@ -2623,7 +2635,7 @@ function _bindConfigControls() {
         ...(settings.llmPresets || {}),
         [activePreset]: _getLlmConfigInputSnapshot(),
       };
-      _patchSettings({ llmPresets: nextPresets });
+      _patchSettings({ llmPresets: nextPresets }, { refreshTaskWorkspace: true });
       _populateLlmPresetSelect(nextPresets, activePreset);
       _syncLlmPresetControls(activePreset);
       toastr.success("当前模板已保存", "ST-BME");
@@ -2659,7 +2671,7 @@ function _bindConfigControls() {
       _patchSettings({
         llmPresets: nextPresets,
         llmActivePreset: trimmedName,
-      });
+      }, { refreshTaskWorkspace: true });
       _populateLlmPresetSelect(nextPresets, trimmedName);
       _syncLlmPresetControls(trimmedName);
       toastr.success("已另存为新模板", "ST-BME");
@@ -2687,7 +2699,7 @@ function _bindConfigControls() {
       _patchSettings({
         llmPresets: nextPresets,
         llmActivePreset: "",
-      });
+      }, { refreshTaskWorkspace: true });
       _populateLlmPresetSelect(nextPresets, "");
       _syncLlmPresetControls("");
       toastr.success("模板已删除", "ST-BME");
@@ -3861,7 +3873,11 @@ function _renderTaskGenerationTab(state) {
             <div class="bme-task-field-grid">
               ${group.fields
                 .map((field) =>
-                  _renderGenerationField(field, state.profile.generation?.[field.key]),
+                  _renderGenerationField(
+                    field,
+                    state.profile.generation?.[field.key],
+                    state,
+                  ),
                 )
                 .join("")}
             </div>
@@ -4553,6 +4569,14 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
         <span class="bme-debug-kv-value">${_escHtml(llmRequest.model || "—")}</span>
       </div>
       <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">API 配置来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.llmConfigSourceLabel || llmRequest.llmConfigSource || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">任务 API 模板</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.llmPresetName || (llmRequest.requestedLlmPresetName ? `缺失: ${llmRequest.requestedLlmPresetName}` : "跟随当前 API"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">能力过滤模式</span>
         <span class="bme-debug-kv-value">${_escHtml(llmRequest.capabilityMode || "—")}</span>
       </div>
@@ -4577,6 +4601,13 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
     ${_renderDebugDetails("发送前输入清洗", llmRequest.requestCleaning || null)}
     ${_renderDebugDetails("实际请求路径", llmRequest.effectiveRoute || null)}
     ${_renderDebugDetails("输出清洗", llmRequest.responseCleaning || null)}
+    ${_renderDebugDetails("API 配置解析", {
+      llmConfigSource: llmRequest.llmConfigSource || "",
+      llmConfigSourceLabel: llmRequest.llmConfigSourceLabel || "",
+      requestedLlmPresetName: llmRequest.requestedLlmPresetName || "",
+      llmPresetName: llmRequest.llmPresetName || "",
+      llmPresetFallbackReason: llmRequest.llmPresetFallbackReason || "",
+    })}
     ${_renderDebugDetails("实际保留参数", llmRequest.filteredGeneration || {})}
     ${_renderDebugDetails("被过滤掉的参数", llmRequest.removedGeneration || [])}
     ${_renderDebugDetails("最终消息列表", llmRequest.messages || [])}
@@ -4884,8 +4915,61 @@ function _renderTaskBlockEditor(state) {
   `;
 }
 
-function _renderGenerationField(field, value) {
+function _renderGenerationField(field, value, state = {}) {
   const effectiveValue = (value != null && value !== "") ? value : field.defaultValue;
+
+  if (field.type === "llm_preset") {
+    const presetMap =
+      state?.settings && typeof state.settings === "object"
+        ? state.settings.llmPresets || {}
+        : {};
+    const presetNames = Object.keys(presetMap).sort((left, right) =>
+      left.localeCompare(right, "zh-Hans-CN"),
+    );
+    const currentValue = String(effectiveValue || "");
+    const hasCurrentPreset =
+      !currentValue || presetNames.includes(currentValue);
+    const currentLabel = !currentValue
+      ? "跟随当前 API"
+      : hasCurrentPreset
+        ? currentValue
+        : `${currentValue}（已丢失，将回退当前 API）`;
+    const options = [
+      {
+        value: "",
+        label: "跟随当前 API",
+      },
+      ...(!currentValue || hasCurrentPreset
+        ? []
+        : [{ value: currentValue, label: currentLabel }]),
+      ...presetNames.map((name) => ({
+        value: name,
+        label: name,
+      })),
+    ];
+
+    return `
+      <div class="bme-config-row">
+        <label>${_escHtml(field.label)}</label>
+        <select
+          class="bme-config-input"
+          data-generation-key="${_escAttr(field.key)}"
+          data-value-type="text"
+        >
+          ${options
+            .map(
+              (item) => `
+                <option value="${_escAttr(item.value)}" ${item.value === currentValue ? "selected" : ""}>
+                  ${_escHtml(item.label)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+        ${field.help ? `<div class="bme-config-help">${_escHtml(field.help)}</div>` : ""}
+      </div>
+    `;
+  }
 
   if (field.type === "tri_bool") {
     const currentValue =
@@ -5746,6 +5830,8 @@ function _normalizeLlmPresetSettings(settings = _getSettings?.() || {}) {
   return _patchSettings({
     llmPresets: normalized.presets,
     llmActivePreset: normalized.activePreset,
+  }, {
+    refreshTaskWorkspace: true,
   });
 }
 

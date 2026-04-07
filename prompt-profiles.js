@@ -871,6 +871,7 @@ function createFallbackDefaultTaskProfile(taskType) {
     updatedAt: nowIso(),
     blocks: buildDefaultTaskProfileBlocks(taskType),
     generation: {
+      llm_preset: "",
       max_context_tokens: null,
       max_completion_tokens: null,
       reply_count: null,
