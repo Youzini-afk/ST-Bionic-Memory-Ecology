@@ -1,7 +1,7 @@
 // ST-BME: LLM 调用封装
 // 包装 ST 的 sendOpenAIRequest，提供结构化 JSON 输出和重试机制
 
-import { getRequestHeaders } from "../../../../script.js";
+import { getRequestHeaders } from "../../../../../script.js";
 import { extension_settings } from "../../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../../openai.js";
 import { debugLog, debugWarn } from "../runtime/debug-logging.js";

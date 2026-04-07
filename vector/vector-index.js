@@ -1,6 +1,6 @@
 // ST-BME: 向量模式、后端索引与直连兜底
 
-import { getRequestHeaders } from "../../../../script.js";
+import { getRequestHeaders } from "../../../../../script.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "../graph/graph.js";
 import { describeMemoryScope, normalizeMemoryScope } from "../graph/memory-scope.js";
