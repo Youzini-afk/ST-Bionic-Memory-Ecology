@@ -3489,21 +3489,6 @@ async function _handleTaskProfileWorkspaceClick(event) {
         actionEl.dataset.taskTab || currentTaskProfileTabId;
       _refreshTaskProfileWorkspace();
       return;
-    case "select-profile": {
-      const profileId = actionEl.dataset.profileId;
-      if (profileId) {
-        const settings = _getSettings?.() || {};
-        const nextTaskProfiles = setActiveTaskProfileId(
-          settings.taskProfiles || {},
-          currentTaskProfileTaskType,
-          profileId,
-        );
-        currentTaskProfileBlockId = "";
-        currentTaskProfileRuleId = "";
-        _patchTaskProfiles(nextTaskProfiles);
-      }
-      return;
-    }
     case "refresh-task-debug":
       if (typeof _getRuntimeDebugSnapshot === "function") {
         _getRuntimeDebugSnapshot({ refreshHost: true });
@@ -3727,11 +3712,10 @@ function _renderTaskProfileWorkspace(state) {
       </div>
 
       <div class="bme-task-master-detail">
-        <div class="bme-task-profile-list">
-          <div class="bme-task-profile-list-header">
-            <span>${_escHtml(taskMeta?.label || state.taskType)}</span>
-          </div>
-          <select id="bme-task-profile-select" class="bme-config-input" style="display:none">
+        <div class="bme-task-profile-nav" aria-label="任务预设切换">
+          <div class="bme-task-profile-nav-kicker">${_escHtml(taskMeta?.label || state.taskType)}</div>
+          <label class="bme-task-profile-nav-label" for="bme-task-profile-select">当前预设</label>
+          <select id="bme-task-profile-select" class="bme-config-input bme-task-profile-nav-select">
             ${state.bucket.profiles
               .map(
                 (profile) => `
@@ -3739,28 +3723,12 @@ function _renderTaskProfileWorkspace(state) {
                     value="${_escAttr(profile.id)}"
                     ${profile.id === state.profile.id ? "selected" : ""}
                   >
-                    ${_escHtml(profile.name)}${profile.builtin ? " · 内置" : ""}
+                    ${_escHtml(profile.name)}${profile.builtin ? "（内置）" : ""}
                   </option>
                 `,
               )
               .join("")}
           </select>
-          <div class="bme-task-profile-items">
-            ${state.bucket.profiles
-              .map(
-                (profile) => `
-                  <div
-                    class="bme-task-profile-list-item ${profile.id === state.profile.id ? "active" : ""}"
-                    data-task-action="select-profile"
-                    data-profile-id="${_escAttr(profile.id)}"
-                  >
-                    <div class="bme-task-profile-list-item-name">${_escHtml(profile.name)}</div>
-                    ${profile.builtin ? '<span class="bme-task-pill is-builtin">内置</span>' : ""}
-                  </div>
-                `,
-              )
-              .join("")}
-          </div>
         </div>
 
         <div class="bme-task-profile-editor">
