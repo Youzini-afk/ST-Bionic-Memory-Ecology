@@ -6,7 +6,7 @@
  * 调用外部 API 获取文本向量，并提供暴力搜索 cosine 相似度
  */
 
-import { extension_settings } from "../../../extensions.js";
+import { extension_settings } from "../../../../extensions.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 
 const MODULE_NAME = "st_bme";

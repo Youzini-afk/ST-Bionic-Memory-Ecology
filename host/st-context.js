@@ -1,7 +1,7 @@
 // ST-BME: SillyTavern 上下文数据读取辅助
 // 为 prompt 变量扩展（Phase 2）提供统一的 ST 上下文数据接口
 
-import { getContext } from "../../../extensions.js";
+import { getContext } from "../../../../extensions.js";
 
 function safeClone(value, fallback) {
   if (value == null) {

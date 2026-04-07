@@ -1,8 +1,8 @@
 // ST-BME: 操控面板交互逻辑
 
-import { callGenericPopup, POPUP_TYPE } from "../../../popup.js";
-import { getContext } from "../../../extensions.js";
-import { renderTemplateAsync } from "../../../templates.js";
+import { callGenericPopup, POPUP_TYPE } from "../../../../popup.js";
+import { getContext } from "../../../../extensions.js";
+import { renderTemplateAsync } from "../../../../templates.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {

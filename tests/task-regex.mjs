@@ -15,7 +15,8 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
       specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js"
+      specifier === "../../../../extensions.js" ||
+      specifier === "../../../../../extensions.js"
     ) {
       return {
         shortCircuit: true,

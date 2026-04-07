@@ -26,20 +26,27 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
       specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js"
+      specifier === "../../../../extensions.js" ||
+      specifier === "../../../../../extensions.js"
     ) {
       return {
         shortCircuit: true,
         url: `data:text/javascript,${encodeURIComponent(extensionsShimSource)}`,
       };
     }
-    if (specifier === "../../../../script.js") {
+    if (
+      specifier === "../../../../script.js" ||
+      specifier === "../../../../../script.js"
+    ) {
       return {
         shortCircuit: true,
         url: `data:text/javascript,${encodeURIComponent(scriptShimSource)}`,
       };
     }
-    if (specifier === "../../../openai.js") {
+    if (
+      specifier === "../../../openai.js" ||
+      specifier === "../../../../openai.js"
+    ) {
       return {
         shortCircuit: true,
         url: `data:text/javascript,${encodeURIComponent(openAiShimSource)}`,

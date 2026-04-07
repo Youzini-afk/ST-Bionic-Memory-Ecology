@@ -110,20 +110,27 @@ registerHooks({
   resolve(specifier, context, nextResolve) {
     if (
       specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js"
+      specifier === "../../../../extensions.js" ||
+      specifier === "../../../../../extensions.js"
     ) {
       return {
         shortCircuit: true,
         url: extensionsShimUrl,
       };
     }
-    if (specifier === "../../../../script.js") {
+    if (
+      specifier === "../../../../script.js" ||
+      specifier === "../../../../../script.js"
+    ) {
       return {
         shortCircuit: true,
         url: scriptShimUrl,
       };
     }
-    if (specifier === "../../../openai.js") {
+    if (
+      specifier === "../../../openai.js" ||
+      specifier === "../../../../openai.js"
+    ) {
       return {
         shortCircuit: true,
         url: openAiShimUrl,

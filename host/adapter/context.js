@@ -1,4 +1,4 @@
-import { getContext as extensionGetContext } from "../../../../extensions.js";
+import { getContext as extensionGetContext } from "../../../../../extensions.js";
 
 import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
 import { debugDebug } from "../../runtime/debug-logging.js";

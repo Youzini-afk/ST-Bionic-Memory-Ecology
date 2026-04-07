@@ -2,7 +2,7 @@
 // 目标：在任务预设中复用 Tavern 正则来源（global/preset/character），
 // 同时叠加任务本地规则，并按任务阶段执行。
 
-import { extension_settings, getContext } from "../../../extensions.js";
+import { extension_settings, getContext } from "../../../../extensions.js";
 import { debugDebug } from "../runtime/debug-logging.js";
 import { getHostAdapter } from "../host/adapter/index.js";
 import {
