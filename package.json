@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "version:bump-manifest": "node scripts/bump-manifest-version.mjs",
     "test:p0": "node tests/p0-regressions.mjs",
     "test:runtime-history": "node tests/runtime-history.mjs",
     "test:graph-persistence": "node tests/graph-persistence.mjs",
