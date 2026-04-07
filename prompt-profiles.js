@@ -617,6 +617,15 @@ const TASK_REGEX_STAGE_GROUPS = Object.freeze({
   ]),
 });
 
+const DEFAULT_TASK_REGEX_STAGES = Object.freeze({
+  "input.userMessage": true,
+  "input.recentMessages": true,
+  "input.candidateText": true,
+  "input.finalPrompt": true,
+  "output.rawResponse": true,
+  "output.beforeParse": true,
+});
+
 function normalizeRegexStageKey(stageKey = "") {
   const normalized = String(stageKey || "").trim();
   return TASK_REGEX_STAGE_ALIAS_MAP[normalized] || normalized;
@@ -890,14 +899,7 @@ function createFallbackDefaultTaskProfile(taskType) {
         preset: true,
         character: true,
       },
-      stages: normalizeTaskRegexStages({
-        "input.userMessage": false,
-        "input.recentMessages": false,
-        "input.candidateText": false,
-        "input.finalPrompt": false,
-        "output.rawResponse": false,
-        "output.beforeParse": false,
-      }),
+      stages: normalizeTaskRegexStages(DEFAULT_TASK_REGEX_STAGES),
       localRules: [],
     },
     metadata: {

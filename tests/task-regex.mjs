@@ -199,19 +199,27 @@ try {
     defaultProfiles.extract?.profiles?.[0]?.regex?.stages || {};
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.finalPrompt"),
-    false,
+    true,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.userMessage"),
-    false,
+    true,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.recentMessages"),
-    false,
+    true,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.candidateText"),
-    false,
+    true,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "output.rawResponse"),
+    true,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "output.beforeParse"),
+    true,
   );
 
   const normalizedLegacyOnlyProfile = normalizeTaskProfile(
@@ -443,7 +451,7 @@ try {
           placement: [PLACEMENT.USER_INPUT],
           promptOnly: true,
         }),
-        createTavernRule("markdown-only", "/Alpha/g", "M", {
+        createTavernRule("markdown-only", "/Alpha/g", "<b>M</b>", {
           placement: [PLACEMENT.USER_INPUT],
           markdownOnly: true,
         }),
@@ -475,7 +483,7 @@ try {
       { entries: [] },
       "user",
     ),
-    "Alpha",
+    "",
   );
   assert.equal(
     applyTaskRegex(
@@ -499,6 +507,227 @@ try {
     ),
     "AI Lore",
   );
+  const markdownInspect = inspectTaskRegexReuse(tavernSemanticsSettings, "extract");
+  const markdownRule = markdownInspect.activeRules.find(
+    (rule) => rule.id === "markdown-only",
+  );
+  assert.equal(markdownRule?.promptReplaceAsEmpty, true);
+  assert.equal(markdownRule?.effectivePromptReplaceString, "");
+  assert.deepEqual(markdownRule?.placementLabels, ["用户输入"]);
+  assert.equal(markdownRule?.promptStageMode, "clear");
+  const markdownOnlyFinalPromptSettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("markdown-final-strip", "/Decor/g", "<span>Decor</span>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: true,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const markdownFinalDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      markdownOnlyFinalPromptSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      markdownFinalDebug,
+      "user",
+    ),
+    "",
+  );
+  assert.deepEqual(
+    markdownFinalDebug.entries[0].appliedRules.map((item) => item.id),
+    ["markdown-final-strip"],
+  );
+  const beautifyFinalPromptSettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("beautify-final-strip", "/Decor/g", "<div class=\"pretty\">Decor</div>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: false,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const beautifyFinalInspect = inspectTaskRegexReuse(
+    beautifyFinalPromptSettings,
+    "extract",
+  );
+  const beautifyFinalRule = beautifyFinalInspect.activeRules.find(
+    (rule) => rule.id === "beautify-final-strip",
+  );
+  assert.equal(beautifyFinalRule?.promptReplaceAsEmpty, true);
+  assert.equal(beautifyFinalRule?.promptStageMode, "clear");
+  const beautifyFinalDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      beautifyFinalPromptSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      beautifyFinalDebug,
+      "user",
+    ),
+    "",
+  );
+  assert.deepEqual(
+    beautifyFinalDebug.entries[0].appliedRules.map((item) => item.id),
+    ["beautify-final-strip"],
+  );
+  const beautifyFinalPromptStageOffSettings = buildSettings({
+    stages: {
+      input: true,
+      output: true,
+      "input.userMessage": true,
+      "input.recentMessages": true,
+      "input.candidateText": true,
+      "input.finalPrompt": false,
+      "output.rawResponse": true,
+      "output.beforeParse": true,
+    },
+  });
+  const beautifyStageOffInspect = inspectTaskRegexReuse(
+    beautifyFinalPromptStageOffSettings,
+    "extract",
+  );
+  const beautifyStageOffRule = beautifyStageOffInspect.activeRules.find(
+    (rule) => rule.id === "beautify-final-strip",
+  );
+  assert.equal(beautifyStageOffRule?.promptStageMode, "clear");
+  assert.equal(beautifyStageOffRule?.promptStageApplies, false);
+  assert.equal(
+    applyTaskRegex(
+      beautifyFinalPromptStageOffSettings,
+      "extract",
+      "input.finalPrompt",
+      "Decor",
+      { entries: [] },
+      "user",
+    ),
+    "Decor",
+  );
+  const destinationBeautifySettings = buildSettings({
+    sources: {
+      global: true,
+      preset: false,
+      character: false,
+    },
+  });
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("destination-display-only-beautify", "/Decor/g", "<span>Decor</span>", {
+          placement: [],
+          source: {
+            user_input: true,
+            ai_output: false,
+          },
+          destination: {
+            prompt: false,
+            display: true,
+          },
+          markdownOnly: false,
+        }),
+        createTavernRule("destination-display-only-text", "/Plain/g", "TEXT", {
+          placement: [],
+          source: {
+            user_input: true,
+            ai_output: false,
+          },
+          destination: {
+            prompt: false,
+            display: true,
+          },
+          markdownOnly: true,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const destinationDebug = { entries: [] };
+  assert.equal(
+    applyTaskRegex(
+      destinationBeautifySettings,
+      "extract",
+      "input.finalPrompt",
+      "DecorPlain",
+      destinationDebug,
+      "user",
+    ),
+    "",
+  );
+  assert.deepEqual(
+    destinationDebug.entries[0].appliedRules.map((item) => item.id),
+    ["destination-display-only-beautify", "destination-display-only-text"],
+  );
+  const destinationInspect = inspectTaskRegexReuse(
+    destinationBeautifySettings,
+    "extract",
+  );
+  const destinationBeautifyRule = destinationInspect.activeRules.find(
+    (rule) => rule.id === "destination-display-only-beautify",
+  );
+  const destinationTextRule = destinationInspect.activeRules.find(
+    (rule) => rule.id === "destination-display-only-text",
+  );
+  assert.deepEqual(destinationBeautifyRule?.placementLabels, ["用户输入"]);
+  assert.equal(destinationBeautifyRule?.promptReplaceAsEmpty, true);
+  assert.equal(destinationBeautifyRule?.promptStageMode, "clear");
+  assert.equal(destinationTextRule?.promptReplaceAsEmpty, true);
+  assert.equal(destinationTextRule?.promptStageMode, "clear");
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("user-prompt-only", "/Alpha/g", "A", {
+          placement: [PLACEMENT.USER_INPUT],
+          promptOnly: true,
+        }),
+        createTavernRule("markdown-only", "/Alpha/g", "<b>M</b>", {
+          placement: [PLACEMENT.USER_INPUT],
+          markdownOnly: true,
+        }),
+        createTavernRule("output-only", "/Answer/g", "AI", {
+          placement: [PLACEMENT.AI_OUTPUT],
+        }),
+        createTavernRule("world-info-only", "/Lore/g", "SYS", {
+          placement: [PLACEMENT.WORLD_INFO],
+        }),
+        createTavernRule("recent-user", "/User/g", "U", {
+          placement: [PLACEMENT.USER_INPUT],
+        }),
+        createTavernRule("recent-ai", "/Reply/g", "R", {
+          placement: [PLACEMENT.AI_OUTPUT],
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
   assert.equal(
     applyTaskRegex(
       tavernSemanticsSettings,

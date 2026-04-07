@@ -1954,6 +1954,211 @@
   line-height: 1.55;
 }
 
+.bme-regex-preview-screen {
+  gap: 14px;
+}
+
+.bme-regex-preview-hero,
+.bme-regex-preview-panel,
+.bme-regex-preview-source {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.bme-regex-preview-hero__title,
+.bme-regex-preview-panel__title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+}
+
+.bme-regex-preview-hero__subtitle,
+.bme-regex-preview-panel__subtitle,
+.bme-regex-preview-source__meta,
+.bme-regex-preview-item__meta {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-regex-preview-summary {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bme-regex-preview-summary__item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bme-regex-preview-summary__label {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-regex-preview-summary__value {
+  display: block;
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--bme-on-surface);
+  word-break: break-word;
+}
+
+.bme-regex-preview-panel__head,
+.bme-regex-preview-source__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.bme-regex-preview-source__title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+}
+
+.bme-regex-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bme-regex-preview-list .bme-task-empty {
+  margin: 0;
+}
+
+.bme-regex-preview-item {
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bme-regex-preview-item.is-muted {
+  opacity: 0.82;
+}
+
+.bme-regex-preview-item__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.bme-regex-preview-item__title-group,
+.bme-regex-preview-item__badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bme-regex-preview-item__index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--bme-on-surface-dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bme-regex-preview-item__name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+  line-height: 1.4;
+}
+
+.bme-regex-preview-item__badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.bme-regex-preview-item__badge.is-transform {
+  background: rgba(76, 175, 80, 0.12);
+  color: #9fe6a1;
+  border-color: rgba(76, 175, 80, 0.25);
+}
+
+.bme-regex-preview-item__badge.is-clear {
+  background: rgba(255, 193, 7, 0.13);
+  color: #ffd777;
+  border-color: rgba(255, 193, 7, 0.26);
+}
+
+.bme-regex-preview-item__badge.is-skip {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--bme-on-surface-dim);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.bme-regex-preview-item__badge.is-prompt {
+  background: rgba(33, 150, 243, 0.13);
+  color: #88d0ff;
+  border-color: rgba(33, 150, 243, 0.26);
+}
+
+.bme-regex-preview-item__details {
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.bme-regex-preview-item__row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--bme-on-surface);
+}
+
+.bme-regex-preview-item__label {
+  color: var(--bme-on-surface-dim);
+  font-weight: 700;
+}
+
+.bme-regex-preview-item__row code {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bme-regex-preview-details > summary {
+  padding: 12px 14px;
+}
+
+.bme-regex-preview-details__body {
+  padding: 0 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .bme-task-editor-toggle {
   margin-bottom: 12px;
 }
@@ -2489,6 +2694,28 @@
 
   .bme-panel-main {
     display: none;
+  }
+
+  .bme-regex-preview-hero,
+  .bme-regex-preview-panel,
+  .bme-regex-preview-source {
+    padding: 14px;
+    border-radius: 14px;
+  }
+
+  .bme-regex-preview-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .bme-regex-preview-item__head,
+  .bme-regex-preview-source__head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bme-regex-preview-item__row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 
   /* ⑥ 图谱 tab 移动端全屏覆盖 */

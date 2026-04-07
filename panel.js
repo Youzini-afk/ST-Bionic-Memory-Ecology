@@ -3877,30 +3877,129 @@ function _formatRegexReuseSourceState(source = {}) {
   return states.join(" · ");
 }
 
-function _renderRegexReuseRuleList(rules = [], emptyText = "无") {
+function _formatRegexReuseSourceLabel(sourceType = "") {
+  if (sourceType === "global") return "全局";
+  if (sourceType === "preset") return "预设";
+  if (sourceType === "character") return "角色卡";
+  if (sourceType === "local") return "任务本地";
+  return sourceType ? String(sourceType) : "未知";
+}
+
+function _formatRegexReuseReplaceText(rule = {}) {
+  if (rule.promptStageMode === "clear") {
+    return "（美化/展示正则，ST-BME 请求阶段清空）";
+  }
+  if (typeof rule.effectivePromptReplaceString === "string" && rule.effectivePromptReplaceString.length > 0) {
+    return rule.effectivePromptReplaceString;
+  }
+  if (typeof rule.replaceString === "string" && rule.replaceString.length > 0) {
+    return rule.replaceString;
+  }
+  return "（空 - 删除匹配内容）";
+}
+
+function _renderRegexReuseBadges(rule = {}) {
+  const badges = [];
+  if (rule.promptStageMode === "clear") {
+    badges.push({
+      className: "is-clear",
+      text: "美化 -> 清空",
+    });
+  } else if (rule.promptStageMode === "replace") {
+    badges.push({
+      className: "is-transform",
+      text: "转义",
+    });
+  } else {
+    badges.push({
+      className: "is-skip",
+      text: "当前阶段跳过",
+    });
+  }
+  if (rule.markdownOnly) {
+    badges.push({
+      className: "is-skip",
+      text: "跳过(MD)",
+    });
+  }
+  if (rule.promptOnly) {
+    badges.push({
+      className: "is-prompt",
+      text: "仅 Prompt",
+    });
+  }
+  if (rule.promptStageMode !== "skip" && rule.promptStageApplies === false) {
+    badges.push({
+      className: "is-skip",
+      text: "当前任务未启用",
+    });
+  }
+  return badges
+    .map(
+      (badge) => `<span class="bme-regex-preview-item__badge ${badge.className}">${_escHtml(badge.text)}</span>`,
+    )
+    .join("");
+}
+
+function _renderRegexReuseRuleList(rules = [], emptyText = "无", options = {}) {
   if (!Array.isArray(rules) || rules.length === 0) {
     return `<div class="bme-task-empty">${_escHtml(emptyText)}</div>`;
   }
 
+  const {
+    showSource = false,
+    showReason = false,
+    startIndex = 0,
+    muted = false,
+  } = options || {};
+
   return rules
-    .map((rule) => {
+    .map((rule, index) => {
       const placementText = Array.isArray(rule.placementLabels) && rule.placementLabels.length
-        ? rule.placementLabels.join(" / ")
-        : "未声明 placement";
-      const flags = [
-        rule.promptOnly ? "promptOnly" : "",
-        rule.markdownOnly ? "markdownOnly" : "",
-        rule.reason ? `原因: ${rule.reason}` : "",
-      ].filter(Boolean);
+        ? rule.placementLabels.join("，")
+        : "未声明作用域";
+      const sourceLabel = _formatRegexReuseSourceLabel(rule.sourceType || "");
+      const metaBits = [];
+      if (showSource) {
+        metaBits.push(`来源：${sourceLabel}`);
+      }
+      if (showReason && rule.reason) {
+        metaBits.push(rule.reason);
+      }
       return `
-        <div class="bme-debug-row">
-          <span class="bme-debug-key">${_escHtml(rule.name || rule.id || "未命名规则")}</span>
-          <span class="bme-debug-value">${_escHtml(placementText)}</span>
-        </div>
-        <div class="bme-task-note">
-          <code>${_escHtml(rule.findRegex || "(空 findRegex)")}</code>
-          ${rule.replaceString ? ` -> <code>${_escHtml(rule.replaceString)}</code>` : ""}
-          ${flags.length ? `<br>${_escHtml(flags.join(" · "))}` : ""}
+        <div class="bme-regex-preview-item ${muted ? "is-muted" : ""}">
+          <div class="bme-regex-preview-item__head">
+            <div class="bme-regex-preview-item__title-group">
+              <span class="bme-regex-preview-item__index">#${startIndex + index + 1}</span>
+              <span class="bme-regex-preview-item__name">${_escHtml(rule.name || rule.id || "未命名规则")}</span>
+            </div>
+            <div class="bme-regex-preview-item__badges">
+              ${_renderRegexReuseBadges(rule)}
+            </div>
+          </div>
+          <div class="bme-regex-preview-item__details">
+            <div class="bme-regex-preview-item__row">
+              <span class="bme-regex-preview-item__label">查找</span>
+              <code>${_escHtml(rule.findRegex || "(空 findRegex)")}</code>
+            </div>
+            <div class="bme-regex-preview-item__row">
+              <span class="bme-regex-preview-item__label">替换</span>
+              <code>${_escHtml(_formatRegexReuseReplaceText(rule))}</code>
+            </div>
+            <div class="bme-regex-preview-item__row">
+              <span class="bme-regex-preview-item__label">作用域</span>
+              <span>${_escHtml(placementText)}</span>
+            </div>
+            ${showSource ? `
+              <div class="bme-regex-preview-item__row">
+                <span class="bme-regex-preview-item__label">来源</span>
+                <span>${_escHtml(sourceLabel)}</span>
+              </div>
+            ` : ""}
+          </div>
+          ${metaBits.length ? `
+            <div class="bme-regex-preview-item__meta">${_escHtml(metaBits.join(" · "))}</div>
+          ` : ""}
         </div>
       `;
     })
@@ -3917,83 +4016,101 @@ function _buildRegexReusePopupContent(snapshot = {}) {
   const sourceConfig = snapshot.sourceConfig && typeof snapshot.sourceConfig === "object"
     ? snapshot.sourceConfig
     : {};
+  const sourceSummaryText = [
+    `global=${sourceConfig.global === false ? "关" : "开"}`,
+    `preset=${sourceConfig.preset === false ? "关" : "开"}`,
+    `character=${sourceConfig.character === false ? "关" : "开"}`,
+  ].join(" / ");
+  const stageSummaryText =
+    Object.entries(stageConfig)
+      .map(([key, value]) => `${key}=${value ? "on" : "off"}`)
+      .join(" | ") || "无";
 
   container.innerHTML = `
-    <div class="bme-task-tab-body">
-      <div class="bme-config-card">
-        <div class="bme-config-card-title">酒馆正则复用快照</div>
-        <div class="bme-config-card-subtitle">
-          这里展示的是当前任务预设下，ST-BME 实际会尝试复用的 Tavern 正则来源和规则，不是静态说明文案。
+    <div class="bme-task-tab-body bme-regex-preview-screen">
+      <div class="bme-regex-preview-hero">
+        <div class="bme-regex-preview-hero__title">当前正则脚本一览</div>
+        <div class="bme-regex-preview-hero__subtitle">
+          这里展示的是当前任务预设下，ST-BME 实际会复用到请求链里的 Tavern 正则。展示/美化类规则在请求阶段会按空字符串替换。
         </div>
-        <div class="bme-debug-list">
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">任务</span>
-            <span class="bme-debug-value">${_escHtml(snapshot.taskType || "—")}</span>
+        <div class="bme-regex-preview-summary">
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">任务</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.taskType || "—")}</span>
           </div>
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">预设</span>
-            <span class="bme-debug-value">${_escHtml(snapshot.profileName || snapshot.profileId || "—")}</span>
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">预设</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.profileName || snapshot.profileId || "—")}</span>
           </div>
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">任务正则</span>
-            <span class="bme-debug-value">${snapshot.regexEnabled ? "已启用" : "已关闭"}</span>
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">任务正则</span>
+            <span class="bme-regex-preview-summary__value">${snapshot.regexEnabled ? "已启用" : "已关闭"}</span>
           </div>
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">复用酒馆正则</span>
-            <span class="bme-debug-value">${snapshot.inheritStRegex ? "已启用" : "已关闭"}</span>
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">复用 Tavern</span>
+            <span class="bme-regex-preview-summary__value">${snapshot.inheritStRegex ? "已启用" : "已关闭"}</span>
           </div>
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">本地规则数</span>
-            <span class="bme-debug-value">${Number(snapshot.localRuleCount || 0)}</span>
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">已收集规则</span>
+            <span class="bme-regex-preview-summary__value">${Number(snapshot.activeRuleCount || activeRules.length || 0)}</span>
           </div>
-          <div class="bme-debug-row">
-            <span class="bme-debug-key">桥接模式</span>
-            <span class="bme-debug-value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.fallback ? " · fallback" : ""}</span>
+          <div class="bme-regex-preview-summary__item">
+            <span class="bme-regex-preview-summary__label">桥接模式</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.fallback ? " · fallback" : ""}</span>
           </div>
-        </div>
-      </div>
-
-      <div class="bme-config-card">
-        <div class="bme-config-card-title">当前启用开关</div>
-        <div class="bme-task-note">
-          来源：global=${sourceConfig.global === false ? "关" : "开"} / preset=${sourceConfig.preset === false ? "关" : "开"} / character=${sourceConfig.character === false ? "关" : "开"}
-        </div>
-        <div class="bme-task-note">
-          阶段：${_escHtml(Object.entries(stageConfig).map(([key, value]) => `${key}=${value ? "on" : "off"}`).join(" | ") || "无")}
         </div>
       </div>
 
-      <div class="bme-config-card">
-        <div class="bme-config-card-title">来源明细</div>
+      <div class="bme-regex-preview-panel">
+        <div class="bme-regex-preview-panel__head">
+          <div>
+            <div class="bme-regex-preview-panel__title">当前启用规则</div>
+            <div class="bme-regex-preview-panel__subtitle">EW 风格平铺展示，优先看你这次请求里真正会进入链路的规则。</div>
+          </div>
+        </div>
+        <div class="bme-task-note">
+          来源开关：${_escHtml(sourceSummaryText)}<br>
+          阶段开关：${_escHtml(stageSummaryText)}
+        </div>
+        <div class="bme-regex-preview-list">
+          ${_renderRegexReuseRuleList(activeRules, "当前没有复用到任何酒馆正则", {
+            showSource: true,
+          })}
+        </div>
+      </div>
+
+      <details class="bme-debug-details bme-regex-preview-details">
+        <summary>来源与排除明细</summary>
+        <div class="bme-regex-preview-details__body">
         ${
           sources.length
             ? sources.map((source) => `
-                <details class="bme-debug-details" open>
-                  <summary>
-                    ${_escHtml(source.label || source.type || "未知来源")}
-                    <span class="bme-debug-value"> · ${_escHtml(_formatRegexReuseSourceState(source))}</span>
-                  </summary>
+                <div class="bme-regex-preview-source">
+                  <div class="bme-regex-preview-source__head">
+                    <div class="bme-regex-preview-source__title">${_escHtml(source.label || source.type || "未知来源")}</div>
+                    <div class="bme-regex-preview-source__meta">${_escHtml(_formatRegexReuseSourceState(source))}</div>
+                  </div>
                   <div class="bme-task-note">
                     raw=${Number(source.rawRuleCount || 0)} / active=${Number(source.activeRuleCount || 0)}
                     ${source.reason ? `<br>${_escHtml(source.reason)}` : ""}
                   </div>
-                  <div class="bme-task-section-label">本来源当前生效规则</div>
-                  ${_renderRegexReuseRuleList(source.rules, "该来源当前没有进入任务链的复用规则")}
-                  <div class="bme-task-section-label">被跳过的规则</div>
-                  ${_renderRegexReuseRuleList(source.ignoredRules, "没有被额外跳过的规则")}
-                </details>
+                  <div class="bme-task-section-label">本来源规则总览</div>
+                  <div class="bme-regex-preview-list">
+                    ${_renderRegexReuseRuleList(source.previewRules || source.rules, "该来源当前没有可展示的规则")}
+                  </div>
+                  <div class="bme-task-section-label">未纳入最终任务链</div>
+                  <div class="bme-regex-preview-list">
+                    ${_renderRegexReuseRuleList(source.ignoredRules, "没有额外被排除的规则", {
+                      showReason: true,
+                      muted: true,
+                    })}
+                  </div>
+                </div>
               `).join("")
             : `<div class="bme-task-empty">当前没有可展示的酒馆正则来源。</div>`
         }
-      </div>
-
-      <div class="bme-config-card">
-        <div class="bme-config-card-title">汇总后的复用规则</div>
-        <div class="bme-config-card-subtitle">
-          这是经过来源开关、allowlist 和去重后，准备进入当前任务链的 Tavern 规则集合。
         </div>
-        ${_renderRegexReuseRuleList(activeRules, "当前没有复用到任何酒馆正则")}
-      </div>
+      </details>
     </div>
   `;
 

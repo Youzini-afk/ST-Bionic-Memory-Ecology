@@ -11,8 +11,7 @@ import {
   normalizeTaskRegexStages,
 } from "./prompt-profiles.js";
 
-const HTML_TAG_PATTERN =
-  /<\/?(?:div|span|p|br|hr|img|details|summary|section|article|aside|header|footer|nav|ul|ol|li|table|tr|td|th|h[1-6]|a|em|strong|blockquote|pre|code|svg|path)\b/i;
+const HTML_TAG_PATTERN = /<\/?[a-z][\w:-]*\b/i;
 const HTML_ATTR_PATTERN = /\b(?:style|class|id|href|src|data-)\s*=/i;
 const TAVERN_REGEX_PLACEMENT = Object.freeze({
   USER_INPUT: 1,
@@ -91,6 +90,20 @@ function normalizeRulePlacement(rawPlacement) {
     .filter((item) => Number.isFinite(item));
 }
 
+function derivePlacementLabelsFromSourceFlags(sourceFlags = {}) {
+  const labels = [];
+  if (sourceFlags.user) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.USER_INPUT]);
+  }
+  if (sourceFlags.assistant) {
+    labels.push(TAVERN_REGEX_PLACEMENT_LABELS[TAVERN_REGEX_PLACEMENT.AI_OUTPUT]);
+  }
+  if (sourceFlags.system && !sourceFlags.assistant) {
+    labels.push("系统/世界书");
+  }
+  return labels;
+}
+
 function isTavernRuleShape(raw = {}) {
   return (
     Array.isArray(raw?.placement) ||
@@ -140,25 +153,33 @@ function normalizeRule(raw = {}, fallbackSource = "local", index = 0) {
     raw?.source && typeof raw.source === "object" ? raw.source : null;
   const placement = normalizeRulePlacement(raw?.placement);
   const isTavernRule = isTavernRuleShape(raw);
+  const replaceString = String(
+    raw.replace_string ?? raw.replaceString ?? raw.replace ?? "",
+  );
+  const beautificationReplace = isBeautificationReplace(replaceString);
+  const sourceFlags = buildRuleSourceFlags(source, placement, isTavernRule);
 
   return {
     id: String(raw.id || `${fallbackSource}-${index + 1}`),
     scriptName: String(raw.script_name || raw.scriptName || ""),
     enabled: raw.enabled !== false && raw.disabled !== true,
     findRegex: String(raw.find_regex || raw.findRegex || raw.find || "").trim(),
-    replaceString: String(
-      raw.replace_string ?? raw.replaceString ?? raw.replace ?? "",
-    ),
+    replaceString,
     trimStrings: normalizeTrimStrings(raw.trim_strings ?? raw.trimStrings),
-    sourceFlags: buildRuleSourceFlags(source, placement, isTavernRule),
+    sourceFlags,
     destinationFlags: {
       prompt: destination
-        ? Boolean(destination.prompt)
-        : raw.markdownOnly !== true,
+        ? isTavernRule && (raw.markdownOnly === true || beautificationReplace)
+          ? true
+          : Boolean(destination.prompt)
+        : isTavernRule && raw.markdownOnly === true
+          ? true
+          : raw.markdownOnly !== true,
       display: destination
         ? Boolean(destination.display)
         : Boolean(raw.markdownOnly),
     },
+    beautificationReplace,
     promptOnly: Boolean(raw.promptOnly),
     markdownOnly: Boolean(raw.markdownOnly),
     placement,
@@ -376,21 +397,67 @@ function getPlacementLabels(placement = []) {
 
 function summarizeRule(rule, reason = "") {
   const normalized = rule && typeof rule === "object" ? rule : {};
+  const promptReplaceAsEmpty =
+    Boolean(normalized.markdownOnly) || Boolean(normalized.beautificationReplace);
+  const sourceFlags =
+    normalized.sourceFlags && typeof normalized.sourceFlags === "object"
+      ? normalized.sourceFlags
+      : {};
+  const placementLabels = getPlacementLabels(normalized.placement);
+  const effectivePlacementLabels =
+    placementLabels.length > 0
+      ? placementLabels
+      : derivePlacementLabelsFromSourceFlags(sourceFlags);
   return {
     id: String(normalized.id || ""),
     name: String(normalized.scriptName || normalized.id || ""),
     findRegex: String(normalized.findRegex || ""),
     replaceString: String(normalized.replaceString || ""),
+    effectivePromptReplaceString: promptReplaceAsEmpty
+      ? ""
+      : String(normalized.replaceString || ""),
+    promptReplaceAsEmpty,
     sourceType: String(normalized.sourceType || ""),
     promptOnly: Boolean(normalized.promptOnly),
     markdownOnly: Boolean(normalized.markdownOnly),
+    sourceFlags: {
+      user: sourceFlags.user !== false,
+      assistant: sourceFlags.assistant !== false,
+      system: sourceFlags.system !== false,
+    },
     placement: Array.isArray(normalized.placement) ? [...normalized.placement] : [],
-    placementLabels: getPlacementLabels(normalized.placement),
+    placementLabels: effectivePlacementLabels,
     minDepth:
       normalized.minDepth == null ? null : Number(normalized.minDepth),
     maxDepth:
       normalized.maxDepth == null ? null : Number(normalized.maxDepth),
     reason: String(reason || ""),
+  };
+}
+
+function summarizeRuleForPromptPreview(rule, stageConfig = {}, reason = "") {
+  const summary = summarizeRule(rule, reason);
+  const promptSemanticApplies =
+    summary.sourceType === "local"
+      ? summary.sourceFlags.system !== false &&
+        rule?.destinationFlags?.prompt !== false
+      : summary.promptReplaceAsEmpty ||
+        (summary.promptOnly === true && rule?.destinationFlags?.prompt !== false);
+  const promptStageApplies = shouldApplyRuleForStage(
+    rule,
+    "input.finalPrompt",
+    stageConfig,
+  );
+  return {
+    ...summary,
+    promptSemanticApplies,
+    promptStageApplies,
+    promptStageEnabled: isTaskRegexStageEnabled(stageConfig, "input.finalPrompt"),
+    promptStageMode: promptSemanticApplies
+      ? summary.promptReplaceAsEmpty
+        ? "clear"
+        : "replace"
+      : "skip",
   };
 }
 
@@ -465,6 +532,8 @@ function collectTavernRulesDetailed(regexConfig = {}) {
       enabled && allowed ? (Array.isArray(rawItems) ? rawItems : []) : [];
     const activeRules = [];
     const ignoredRules = [];
+    const ignoredPreviewRules = [];
+    const previewRules = [];
 
     if (!enabled) {
       sources.push({
@@ -478,6 +547,10 @@ function collectTavernRulesDetailed(regexConfig = {}) {
           reason || (shouldReuse ? "当前任务已关闭该来源" : "当前任务未启用复用酒馆正则"),
         rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
         activeRuleCount: 0,
+        previewRules: Array.isArray(rawItems)
+          ? rawItems.map((item, index) => normalizeRule(item, type, index))
+          : [],
+        ignoredPreviewRules: [],
         rules: [],
         ignoredRules: [],
       });
@@ -486,24 +559,31 @@ function collectTavernRulesDetailed(regexConfig = {}) {
 
     if (!allowed && Array.isArray(rawItems)) {
       for (let index = 0; index < rawItems.length; index++) {
+        const normalized = normalizeRule(rawItems[index], type, index);
+        previewRules.push(normalized);
+        ignoredPreviewRules.push({ ...normalized, reason: "not-allowed" });
         ignoredRules.push(
-          summarizeRule(normalizeRule(rawItems[index], type, index), "not-allowed"),
+          summarizeRule(normalized, "not-allowed"),
         );
       }
     }
 
     for (let index = 0; index < effectiveItems.length; index++) {
       const normalized = normalizeRule(effectiveItems[index], type, index);
+      previewRules.push(normalized);
       if (!normalized.enabled) {
+        ignoredPreviewRules.push({ ...normalized, reason: "disabled" });
         ignoredRules.push(summarizeRule(normalized, "disabled"));
         continue;
       }
       if (!normalized.findRegex) {
+        ignoredPreviewRules.push({ ...normalized, reason: "missing-find-regex" });
         ignoredRules.push(summarizeRule(normalized, "missing-find-regex"));
         continue;
       }
       const key = `${type}:${normalized.id}:${normalized.findRegex}`;
       if (seen.has(key)) {
+        ignoredPreviewRules.push({ ...normalized, reason: "duplicate" });
         ignoredRules.push(summarizeRule(normalized, "duplicate"));
         continue;
       }
@@ -522,6 +602,8 @@ function collectTavernRulesDetailed(regexConfig = {}) {
       reason,
       rawRuleCount: Array.isArray(rawItems) ? rawItems.length : 0,
       activeRuleCount: activeRules.length,
+      previewRules,
+      ignoredPreviewRules,
       rules: activeRules,
       ignoredRules,
     });
@@ -629,14 +711,15 @@ function shouldApplyRuleForTaskContext(rule, stage = "") {
     return true;
   }
 
-  if (rule.markdownOnly) {
-    return false;
-  }
-
   const normalizedStage = String(stage || "").trim();
+  const isPromptStage = PROMPT_STAGES.has(normalizedStage);
   const isFinalPromptStage =
     normalizedStage === "finalPrompt" || normalizedStage === "input.finalPrompt";
   const isOutputStage = OUTPUT_STAGES.has(normalizedStage);
+
+  if (rule.markdownOnly || rule.beautificationReplace) {
+    return isPromptStage;
+  }
 
   if (isFinalPromptStage) {
     return rule.promptOnly === true;
@@ -683,7 +766,10 @@ function applyOneRule(input, rule, stage = "") {
   if (!regex) return { output: input, changed: false, error: "invalid_regex" };
 
   let replacement = rule.replaceString || "";
-  if (PROMPT_STAGES.has(stage) && isBeautificationReplace(replacement)) {
+  if (
+    PROMPT_STAGES.has(stage) &&
+    (rule.markdownOnly || rule.beautificationReplace)
+  ) {
     replacement = "";
   }
 
@@ -776,6 +862,12 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
   const profile = getActiveTaskProfile(settings, taskType);
   const regexConfig = profile?.regex || {};
   const detailed = collectTavernRulesDetailed(regexConfig);
+  const stageConfig = normalizeTaskRegexStages(regexConfig.stages || {});
+
+  const mapPreviewRules = (rules = []) =>
+    (Array.isArray(rules) ? rules : []).map((rule) =>
+      summarizeRuleForPromptPreview(rule, stageConfig, rule?.reason || ""),
+    );
 
   return {
     taskType: String(taskType || ""),
@@ -792,9 +884,16 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
     localRuleCount: Array.isArray(regexConfig.localRules)
       ? regexConfig.localRules.length
       : 0,
-    sources: detailed.sources,
+    sources: detailed.sources.map((source) => ({
+      ...source,
+      previewRules: mapPreviewRules(source.previewRules),
+      rules: mapPreviewRules(source.previewRules),
+      ignoredRules: mapPreviewRules(source.ignoredPreviewRules),
+    })),
     host: detailed.host,
     activeRuleCount: detailed.rules.length,
-    activeRules: detailed.rules.map((rule) => summarizeRule(rule)),
+    activeRules: detailed.rules.map((rule) =>
+      summarizeRuleForPromptPreview(rule, stageConfig),
+    ),
   };
 }
