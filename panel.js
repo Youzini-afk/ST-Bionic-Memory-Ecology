@@ -1207,9 +1207,7 @@ async function _refreshInjectionPreview() {
   try {
     const { estimateTokens } = await import("./injector.js");
     const totalTokens = estimateTokens(injection);
-    const preview = document.createElement("div");
-    preview.className = "bme-injection-preview";
-    preview.textContent = injection;
+    const preview = _buildInjectionPreviewNode(injection);
     container.replaceChildren(preview);
     if (tokenEl) tokenEl.textContent = `≈ ${totalTokens} tokens`;
   } catch (error) {
@@ -1220,6 +1218,261 @@ async function _refreshInjectionPreview() {
     container.replaceChildren(failure);
     if (tokenEl) tokenEl.textContent = "";
   }
+}
+
+function _buildInjectionPreviewNode(injectionText = "") {
+  const parsed = _parseInjectionPreview(String(injectionText || ""));
+  if (!parsed.sections.length) {
+    const preview = document.createElement("div");
+    preview.className = "bme-injection-preview";
+    preview.textContent = injectionText;
+    return preview;
+  }
+
+  const root = document.createElement("div");
+  root.className = "bme-injection-rich";
+
+  const hint = document.createElement("div");
+  hint.className = "bme-injection-rich__hint";
+  hint.textContent = "这里是结构化预览，便于阅读；实际发给模型的仍是原始注入文本。";
+  root.appendChild(hint);
+
+  for (const section of parsed.sections) {
+    const card = document.createElement("section");
+    card.className = `bme-injection-card ${_getInjectionSectionFlavor(section.title)}`;
+
+    const title = document.createElement("div");
+    title.className = "bme-injection-card__title";
+    title.textContent = section.title;
+    card.appendChild(title);
+
+    if (section.note) {
+      const note = document.createElement("div");
+      note.className = "bme-injection-card__note";
+      note.textContent = section.note;
+      card.appendChild(note);
+    }
+
+    for (const block of section.blocks) {
+      if (block.type === "table") {
+        card.appendChild(_buildInjectionTableNode(block));
+      } else if (block.type === "text" && block.text) {
+        const text = document.createElement("div");
+        text.className = "bme-injection-card__text";
+        text.textContent = block.text;
+        card.appendChild(text);
+      }
+    }
+
+    root.appendChild(card);
+  }
+
+  return root;
+}
+
+function _parseInjectionPreview(injectionText = "") {
+  const lines = String(injectionText || "").replace(/\r/g, "").split("\n");
+  const sections = [];
+  let index = 0;
+  let currentSection = null;
+
+  function ensureSection(title = "Memory") {
+    if (!currentSection) {
+      currentSection = {
+        title,
+        note: "",
+        blocks: [],
+      };
+      sections.push(currentSection);
+    }
+    return currentSection;
+  }
+
+  while (index < lines.length) {
+    const rawLine = lines[index] ?? "";
+    const line = rawLine.trim();
+
+    if (!line) {
+      index += 1;
+      continue;
+    }
+
+    const sectionMatch = line.match(/^\[(Memory\s*-\s*.+)]$/i);
+    if (sectionMatch) {
+      currentSection = {
+        title: sectionMatch[1],
+        note: "",
+        blocks: [],
+      };
+      sections.push(currentSection);
+      index += 1;
+
+      const noteCandidate = (lines[index] ?? "").trim();
+      if (
+        noteCandidate &&
+        !noteCandidate.startsWith("[") &&
+        !noteCandidate.endsWith(":") &&
+        !noteCandidate.startsWith("|") &&
+        !noteCandidate.startsWith("## ")
+      ) {
+        currentSection.note = noteCandidate;
+        index += 1;
+      }
+      continue;
+    }
+
+    const section = ensureSection();
+
+    if (line.endsWith(":") && String(lines[index + 1] || "").trim().startsWith("|")) {
+      const tableName = line.slice(0, -1).trim();
+      const tableLines = [];
+      index += 1;
+      while (index < lines.length) {
+        const tableLine = String(lines[index] || "");
+        if (!tableLine.trim().startsWith("|")) {
+          break;
+        }
+        tableLines.push(tableLine.trim());
+        index += 1;
+      }
+      const parsedTable = _parseInjectionTable(tableName, tableLines);
+      if (parsedTable) {
+        section.blocks.push(parsedTable);
+      }
+      continue;
+    }
+
+    const textLines = [];
+    while (index < lines.length) {
+      const candidate = String(lines[index] || "").trim();
+      if (!candidate) {
+        index += 1;
+        if (textLines.length > 0) {
+          break;
+        }
+        continue;
+      }
+      if (
+        /^\[(Memory\s*-\s*.+)]$/i.test(candidate) ||
+        (candidate.endsWith(":") && String(lines[index + 1] || "").trim().startsWith("|"))
+      ) {
+        break;
+      }
+      textLines.push(candidate);
+      index += 1;
+    }
+    if (textLines.length > 0) {
+      section.blocks.push({
+        type: "text",
+        text: textLines.join("\n"),
+      });
+    }
+  }
+
+  return { sections };
+}
+
+function _parseInjectionTable(tableName, tableLines = []) {
+  if (!Array.isArray(tableLines) || tableLines.length < 2) {
+    return null;
+  }
+
+  const headerCells = _splitInjectionTableRow(tableLines[0]);
+  if (!headerCells.length) {
+    return null;
+  }
+
+  const rows = tableLines
+    .slice(2)
+    .map((row) => _splitInjectionTableRow(row))
+    .filter((cells) => cells.length > 0);
+
+  return {
+    type: "table",
+    name: tableName,
+    headers: headerCells,
+    rows,
+  };
+}
+
+function _splitInjectionTableRow(row = "") {
+  const text = String(row || "").trim();
+  if (!text.startsWith("|")) {
+    return [];
+  }
+
+  const inner = text.replace(/^\|/, "").replace(/\|$/, "");
+  const cells = [];
+  let current = "";
+  let escaped = false;
+
+  for (const ch of inner) {
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+
+  cells.push(current.trim());
+  return cells.map((cell) => cell.replace(/\\\|/g, "|").trim());
+}
+
+function _buildInjectionTableNode(table) {
+  const wrap = document.createElement("div");
+  wrap.className = "bme-injection-table-wrap";
+
+  const name = document.createElement("div");
+  name.className = "bme-injection-table-name";
+  name.textContent = table.name;
+  wrap.appendChild(name);
+
+  const tableEl = document.createElement("table");
+  tableEl.className = "bme-injection-table";
+
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const header of table.headers) {
+    const th = document.createElement("th");
+    th.textContent = header;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  tableEl.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of table.rows) {
+    const tr = document.createElement("tr");
+    const normalizedCells = table.headers.map((_, idx) => row[idx] ?? "");
+    for (const cell of normalizedCells) {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  tableEl.appendChild(tbody);
+  wrap.appendChild(tableEl);
+  return wrap;
+}
+
+function _getInjectionSectionFlavor(title = "") {
+  const normalized = String(title || "").toLowerCase();
+  if (normalized.includes("character pov")) return "character-pov";
+  if (normalized.includes("user pov")) return "user-pov";
+  if (normalized.includes("current region")) return "objective-current";
+  if (normalized.includes("global")) return "objective-global";
+  return "generic";
 }
 
 // ==================== 图谱 ====================

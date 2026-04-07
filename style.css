@@ -909,6 +909,137 @@
   overflow-y: auto;
 }
 
+.bme-injection-rich {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.bme-injection-rich__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--bme-on-surface-dim);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.bme-injection-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.bme-injection-card.character-pov {
+  border-color: rgba(255, 113, 145, 0.26);
+  background: linear-gradient(180deg, rgba(255, 113, 145, 0.08), rgba(255, 255, 255, 0.02));
+}
+
+.bme-injection-card.user-pov {
+  border-color: rgba(104, 183, 255, 0.24);
+  background: linear-gradient(180deg, rgba(104, 183, 255, 0.08), rgba(255, 255, 255, 0.02));
+}
+
+.bme-injection-card.objective-current {
+  border-color: rgba(111, 230, 179, 0.22);
+  background: linear-gradient(180deg, rgba(111, 230, 179, 0.07), rgba(255, 255, 255, 0.02));
+}
+
+.bme-injection-card.objective-global {
+  border-color: rgba(255, 211, 102, 0.18);
+  background: linear-gradient(180deg, rgba(255, 211, 102, 0.06), rgba(255, 255, 255, 0.02));
+}
+
+.bme-injection-card__title {
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 800;
+  color: var(--bme-on-surface);
+}
+
+.bme-injection-card__note {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--bme-on-surface-dim);
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.bme-injection-card__text {
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--bme-on-surface);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bme-injection-table-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-x: auto;
+}
+
+.bme-injection-table-name {
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-injection-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.bme-injection-table th,
+.bme-injection-table td {
+  padding: 8px 9px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--bme-on-surface);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.bme-injection-table th:last-child,
+.bme-injection-table td:last-child {
+  border-right: none;
+}
+
+.bme-injection-table tr:last-child td {
+  border-bottom: none;
+}
+
+.bme-injection-table th {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bme-on-surface-dim);
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .bme-injection-section-label {
   font-size: 10px;
   font-weight: 700;
