@@ -1311,7 +1311,8 @@
 #st-bme-panel textarea.bme-config-textarea,
 #st-bme-panel input.bme-search-input,
 #st-bme-panel .bme-node-detail-input,
-#st-bme-panel .bme-node-detail-textarea {
+#st-bme-panel .bme-node-detail-textarea,
+#st-bme-panel .bme-task-editor-preset-select {
   background-color: var(--bme-surface-high) !important;
   color: var(--bme-on-surface) !important;
 }
@@ -1379,6 +1380,20 @@
 :root[data-bme-color-scheme="dark"] #st-bme-panel select option:focus {
   background-color: #3d3d42 !important;
   color: #f4f4f5 !important;
+}
+
+/* --- 压制宿主注入的原生对号 (SillyTavern 全局 checkbox::before) --- */
+#st-bme-panel input[type="checkbox"]::before,
+#st-bme-panel-overlay input[type="checkbox"]::before {
+  content: "" !important;
+  display: none !important;
+  background: none !important;
+  background-image: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  visibility: hidden !important;
 }
 
 #st-bme-panel input.bme-config-input:-webkit-autofill,
@@ -1640,6 +1655,7 @@
 
 .bme-toggle-item input[type="checkbox"] {
   -webkit-appearance: none;
+  -moz-appearance: none;
   appearance: none;
   width: 40px;
   height: 22px;
@@ -1652,6 +1668,8 @@
   position: relative;
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease;
+  color: transparent;
+  overflow: hidden;
 }
 
 .bme-toggle-item input[type="checkbox"]::after {
@@ -1667,13 +1685,158 @@
 }
 
 .bme-toggle-item input[type="checkbox"]:checked {
-  background: var(--bme-primary, #a078ff);
-  border-color: var(--bme-primary, #a078ff);
+  background: color-mix(in srgb, var(--bme-primary) 45%, var(--bme-surface-high, #2a2a2d));
+  border-color: color-mix(in srgb, var(--bme-primary) 55%, transparent);
 }
 
 .bme-toggle-item input[type="checkbox"]:checked::after {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--bme-primary-text, #ffb2b7);
+}
+
+/* --- CAPABILITY CARD GRID (Feature Toggles) --- */
+
+.bme-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.bme-capability-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bme-surface-container);
+  border: 1px solid var(--bme-border);
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  position: relative;
+}
+
+.bme-capability-card:hover {
+  border-color: var(--bme-primary);
+  box-shadow: 0 0 0 1px var(--bme-primary), 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.bme-cap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.bme-cap-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bme-primary);
+  color: #fff;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.bme-cap-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bme-on-surface);
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.bme-cap-desc {
+  font-size: 11.5px;
+  color: var(--bme-on-surface-dim);
+  line-height: 1.45;
+}
+
+.bme-capability-card input[type="checkbox"] {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: 40px;
+  height: 22px;
+  background: var(--bme-surface-high);
+  border-radius: 11px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  border: 1px solid var(--bme-border);
+  color: transparent;
+  overflow: hidden;
+}
+
+.bme-capability-card input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bme-on-surface-dim);
+  top: 2px;
+  left: 3px;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.bme-capability-card input[type="checkbox"]:checked {
+  background: color-mix(in srgb, var(--bme-primary) 45%, var(--bme-surface-high));
+  border-color: color-mix(in srgb, var(--bme-primary) 55%, transparent);
+}
+
+.bme-capability-card input[type="checkbox"]:checked::after {
+  transform: translateX(18px);
+  background: var(--bme-primary-text, #ffb2b7);
+}
+
+/* --- STRIPE ROW LAYOUT (Advanced Settings) --- */
+
+.bme-stripe-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.bme-stripe-row {
+  display: flex;
+  gap: 32px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--bme-border);
+}
+
+.bme-stripe-row:last-child {
+  border-bottom: none;
+}
+
+.bme-stripe-label {
+  flex: 0 0 28%;
+  max-width: 28%;
+  padding-top: 4px;
+}
+
+.bme-stripe-label-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bme-on-surface);
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.bme-stripe-label-desc {
+  font-size: 12px;
+  color: var(--bme-on-surface-dim);
+  line-height: 1.55;
+}
+
+.bme-stripe-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.bme-stripe-content > .bme-config-card {
+  margin-bottom: 0;
 }
 
 .bme-prompt-card-actions {
@@ -1715,7 +1878,149 @@
 .bme-task-shell {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+}
+
+.bme-task-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bme-task-action-bar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bme-task-segmented-control {
+  display: inline-flex;
+  background: var(--bme-surface-container);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--bme-border);
+}
+
+.bme-task-segmented-control .bme-task-type-btn {
+  border: none;
+  border-radius: 8px;
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  background: transparent;
+  color: var(--bme-on-surface-dim);
+  transition: background 0.15s, color 0.15s;
+}
+
+.bme-task-segmented-control .bme-task-type-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--bme-on-surface);
+}
+
+.bme-task-segmented-control .bme-task-type-btn.active {
+  background: var(--bme-primary);
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+.bme-task-master-detail {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--bme-border);
+  border-radius: 12px;
+  overflow: hidden;
+  min-height: 480px;
+  background: var(--bme-surface-container);
+}
+
+.bme-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.bme-task-editor-kicker {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--bme-on-surface-dim);
+  line-height: 1.2;
+}
+
+.bme-task-editor-preset-select {
+  flex: 1;
+  min-width: 200px;
+  min-height: 40px;
+  font-size: 16px;
+  font-weight: 600;
+  padding: 6px 32px 6px 12px;
+  line-height: 1.35;
+  border-radius: 8px;
+  border: 1px solid var(--bme-border);
+  cursor: pointer;
+}
+
+.bme-task-profile-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.bme-task-editor-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--bme-border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bme-task-editor-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bme-task-editor-preset-select:hover,
+.bme-task-editor-preset-select:focus {
+  border-color: var(--bme-primary);
+  outline: none;
+}
+
+.bme-task-editor-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bme-task-editor-actions .bme-config-secondary-btn {
+  font-size: 12px;
+  min-height: 28px;
+  padding: 0 10px;
+  gap: 4px;
+}
+
+.bme-task-profile-editor > .bme-task-subtabs {
+  padding: 0 20px;
+  border-bottom: 1px solid var(--bme-border);
+}
+
+.bme-task-profile-editor > .bme-task-tab-body {
+  flex: 1;
+  padding: 16px 20px;
+  overflow-y: auto;
 }
 
 .bme-task-header {
@@ -3732,5 +4037,64 @@
   .bme-recall-action-btn {
     padding: 4px 8px;
     font-size: 10px;
+  }
+}
+
+/* --- RESPONSIVE: New Layout Components --- */
+
+@media (max-width: 768px) {
+  .bme-capability-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .bme-stripe-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .bme-stripe-label {
+    flex: none;
+    max-width: 100%;
+  }
+
+  .bme-task-master-detail {
+    flex-direction: column;
+    min-height: auto;
+  }
+
+  .bme-task-editor-preset-select {
+    min-width: 0;
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .bme-task-editor-title-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bme-task-profile-badges {
+    justify-content: flex-start;
+  }
+
+  .bme-task-segmented-control {
+    flex-wrap: wrap;
+  }
+
+  .bme-task-action-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bme-task-action-bar-right {
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 520px) {
+  .bme-capability-grid {
+    grid-template-columns: 1fr;
   }
 }
