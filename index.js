@@ -11228,59 +11228,6 @@ async function onReembedDirect() {
   await loadServerSettings();
   syncGraphPersistenceDebugState();
 
-  ensureBmeChatManager();
-  scheduleBmeIndexedDbWarmup("init");
-  initializeHostCapabilityBridge();
-  installSendIntentHooks();
-  autoSyncOnVisibility(buildBmeSyncRuntimeOptions());
-  scheduleMessageHideApply("init", 180);
-
-  // 注册事件钩子
-  registerCoreEventHooksController({
-    console,
-    eventSource,
-    eventTypes: event_types,
-    getCoreEventBindingState,
-    handlers: {
-      onBeforeCombinePrompts,
-      onCharacterMessageRendered,
-      onChatChanged,
-      onChatLoaded,
-      onGenerationAfterCommands,
-      onGenerationEnded,
-      onGenerationStarted,
-      onMessageDeleted,
-      onMessageEdited,
-      onMessageReceived,
-      onMessageSent,
-      onMessageSwiped,
-      onUserMessageRendered,
-    },
-    registerBeforeCombinePrompts,
-    registerGenerationAfterCommands,
-    setCoreEventBindingState,
-  });
-
-  // 加载当前聊天的图谱
-  scheduleBmeIndexedDbTask(async () => {
-    const syncResult = await syncBmeChatManagerWithCurrentChat("initial-load");
-    if (!syncResult?.chatId) {
-      syncGraphLoadFromLiveContext({
-        source: "initial-load:no-chat",
-        force: true,
-      });
-      return;
-    }
-    await runBmeAutoSyncForChat("initial-load", syncResult.chatId);
-    await loadGraphFromIndexedDb(syncResult.chatId, {
-      source: "initial-load",
-      allowOverride: true,
-      applyEmptyState: true,
-    });
-  });
-
-  // ==================== 操控面板初始化 ====================
-
   await initializePanelBridgeController({
     $,
     actions: {
@@ -11340,6 +11287,61 @@ async function onReembedDirect() {
     },
     updateSettings: updateModuleSettings,
   });
+
+  try {
+    ensureBmeChatManager();
+    scheduleBmeIndexedDbWarmup("init");
+    initializeHostCapabilityBridge();
+    installSendIntentHooks();
+    autoSyncOnVisibility(buildBmeSyncRuntimeOptions());
+    scheduleMessageHideApply("init", 180);
+
+    // 注册事件钩子
+    registerCoreEventHooksController({
+      console,
+      eventSource,
+      eventTypes: event_types,
+      getCoreEventBindingState,
+      handlers: {
+        onBeforeCombinePrompts,
+        onCharacterMessageRendered,
+        onChatChanged,
+        onChatLoaded,
+        onGenerationAfterCommands,
+        onGenerationEnded,
+        onGenerationStarted,
+        onMessageDeleted,
+        onMessageEdited,
+        onMessageReceived,
+        onMessageSent,
+        onMessageSwiped,
+        onUserMessageRendered,
+      },
+      registerBeforeCombinePrompts,
+      registerGenerationAfterCommands,
+      setCoreEventBindingState,
+    });
+
+    // 加载当前聊天的图谱
+    scheduleBmeIndexedDbTask(async () => {
+      const syncResult = await syncBmeChatManagerWithCurrentChat("initial-load");
+      if (!syncResult?.chatId) {
+        syncGraphLoadFromLiveContext({
+          source: "initial-load:no-chat",
+          force: true,
+        });
+        return;
+      }
+      await runBmeAutoSyncForChat("initial-load", syncResult.chatId);
+      await loadGraphFromIndexedDb(syncResult.chatId, {
+        source: "initial-load",
+        allowOverride: true,
+        applyEmptyState: true,
+      });
+    });
+  } catch (bootError) {
+    console.error("[ST-BME] 核心初始化阶段失败（面板入口已保留）:", bootError);
+  }
 
   schedulePersistedRecallMessageUiRefresh(120);
   try {

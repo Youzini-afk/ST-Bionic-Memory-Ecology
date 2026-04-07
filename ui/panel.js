@@ -254,7 +254,7 @@ function mountPanelHtml(html) {
   }
 
   if (document.body?.insertAdjacentHTML) {
-    document.body.insertAdjacentHTML("beforebegin", markup);
+    document.body.insertAdjacentHTML("beforeend", markup);
     return;
   }
 
