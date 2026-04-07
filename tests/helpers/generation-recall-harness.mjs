@@ -16,6 +16,7 @@ import {
   GRAPH_PERSISTENCE_META_KEY,
   MODULE_NAME,
 } from "../../graph/graph-persistence.js";
+import { getSmartTriggerDecision } from "../../maintenance/smart-trigger.js";
 import {
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
@@ -40,6 +41,10 @@ import {
   normalizeStageNoticeLevel,
   shouldRunRecallForTransaction,
 } from "../../ui/ui-status.js";
+import {
+  defaultSettings,
+  mergePersistedSettings,
+} from "../../runtime/settings-defaults.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../../index.js");
@@ -81,7 +86,8 @@ export function createGenerationRecallHarness(options = {}) {
       result: null,
       currentGraph: {},
       _panelModule: null,
-      defaultSettings: {},
+      defaultSettings,
+      mergePersistedSettings,
       settings: {},
       graphPersistenceState: createGraphPersistenceState(),
       extension_settings: { [MODULE_NAME]: {} },
@@ -121,6 +127,7 @@ export function createGenerationRecallHarness(options = {}) {
         [...chat].reverse().find((message) => message?.is_user) || null,
       getLastNonSystemChatMessage: (chat = []) =>
         [...chat].reverse().find((message) => !message?.is_system) || null,
+      getSmartTriggerDecision,
       getSendTextareaValue: () => context.__sendTextareaValue,
       getRecallUserMessageSourceLabel: (source = "") => source,
       getRecallUserMessageSourceLabelController: (source = "") => source,

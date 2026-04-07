@@ -12,8 +12,9 @@
     "test:trivial-input": "node tests/trivial-user-input.mjs",
     "test:indexeddb": "npm run test:indexeddb-persistence && npm run test:indexeddb-sync && npm run test:indexeddb-migration",
     "test:persistence-matrix": "npm run test:p0 && npm run test:runtime-history && npm run test:graph-persistence && npm run test:indexeddb",
-    "test:all": "npm run test:persistence-matrix && npm run test:maintenance-journal && npm run test:trivial-input",
-    "check": "node --check index.js && node --check sync/bme-db.js && node --check ui/hide-engine.js && node --check ui/panel.js && node --check ui/ui-status.js && node --check host/event-binding.js"
+    "test:stable": "node scripts/run-test-suite.mjs",
+    "test:all": "npm run test:stable",
+    "check": "node scripts/check-syntax.mjs"
   },
   "dependencies": {
     "triviumdb": "^0.4.41"

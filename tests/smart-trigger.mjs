@@ -1,35 +1,6 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import vm from "node:vm";
 
-async function loadSmartTriggerDecision() {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const indexPath = path.resolve(__dirname, "../index.js");
-  const source = await fs.readFile(indexPath, "utf8");
-  const keywordMatch = source.match(
-    /const DEFAULT_TRIGGER_KEYWORDS = \[[\s\S]*?\];/m,
-  );
-  const fnMatch = source.match(
-    /export function getSmartTriggerDecision\(chat, lastProcessed, settings\) \{[\s\S]*?^\}/m,
-  );
-
-  if (!keywordMatch || !fnMatch) {
-    throw new Error("无法从 index.js 提取 smart trigger 实现");
-  }
-
-  const context = vm.createContext({});
-  const script = new vm.Script(`
-${keywordMatch[0]}
-${fnMatch[0].replace("export function", "function")}
-this.getSmartTriggerDecision = getSmartTriggerDecision;
-`);
-  script.runInContext(context);
-  return context.getSmartTriggerDecision;
-}
-
-const getSmartTriggerDecision = await loadSmartTriggerDecision();
+import { getSmartTriggerDecision } from "../maintenance/smart-trigger.js";
 
 const noTrigger = getSmartTriggerDecision(
   [
@@ -61,7 +32,7 @@ const customTrigger = getSmartTriggerDecision(
   { triggerPatterns: "真相|背叛", smartTriggerThreshold: 2 },
 );
 assert.equal(customTrigger.triggered, true);
-assert.ok(customTrigger.reasons.some((r) => r.includes("自定义触发")));
+assert.ok(customTrigger.reasons.some((reason) => reason.includes("自定义触发")));
 
 const ignoresProcessedMessages = getSmartTriggerDecision(
   [

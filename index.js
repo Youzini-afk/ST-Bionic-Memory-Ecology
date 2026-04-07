@@ -76,6 +76,10 @@ import {
   runExtractionController,
 } from "./maintenance/extraction-controller.js";
 import {
+  DEFAULT_TRIGGER_KEYWORDS,
+  getSmartTriggerDecision,
+} from "./maintenance/smart-trigger.js";
+import {
   debugDebug,
   debugLog,
 } from "./runtime/debug-logging.js";
@@ -140,7 +144,6 @@ import {
   refreshPanelLiveStateController,
 } from "./ui/panel-bridge.js";
 import {
-  createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
 } from "./prompting/prompt-profiles.js";
 import { inspectTaskRegexReuse } from "./prompting/task-regex.js";
@@ -167,6 +170,11 @@ import {
   writePersistedRecallToUserMessage,
 } from "./retrieval/recall-persistence.js";
 import { resolveConfiguredTimeoutMs } from "./runtime/request-timeout.js";
+import {
+  defaultSettings,
+  getPersistedSettingsSnapshot,
+  mergePersistedSettings,
+} from "./runtime/settings-defaults.js";
 import { retrieve } from "./retrieval/retriever.js";
 import {
   appendBatchJournal,
@@ -238,6 +246,8 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector/vector-index.js";
+
+export { DEFAULT_TRIGGER_KEYWORDS, getSmartTriggerDecision };
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -382,148 +392,6 @@ function readRuntimeDebugSnapshot() {
     },
   );
 }
-
-// ==================== 默认设置 ====================
-
-const defaultSettings = {
-  enabled: true,
-  debugLoggingEnabled: false,
-  timeoutMs: 300000,
-  hideOldMessagesEnabled: false,
-  hideOldMessagesKeepLastN: 12,
-
-  // 提取设置
-  extractEvery: 1, // 每 N 条 assistant 回复提取一次
-  extractContextTurns: 2, // 提取时包含的上下文楼层数
-  extractAutoDelayLatestAssistant: false, // 自动提取时晚一条 AI 楼再处理
-
-  // 召回设置
-  recallEnabled: true,
-  recallCardUserInputDisplayMode: "beautify_only",
-  worldInfoFilterMode: "default",
-  worldInfoFilterCustomKeywords: "",
-  recallTopK: 20, // 向量预筛 Top-K
-  recallMaxNodes: 8, // LLM 召回最大节点数
-  recallEnableLLM: true, // 是否启用 LLM 精确召回
-  recallEnableVectorPrefilter: true, // 是否启用向量预筛
-  recallEnableGraphDiffusion: true, // 是否启用图扩散
-  recallDiffusionTopK: 100, // 图扩散阶段保留的候选上限
-  recallLlmCandidatePool: 30, // 传给 LLM 精排的候选池大小
-  recallLlmContextMessages: 4, // 传给 LLM 精排的最近非系统消息数
-  recallEnableMultiIntent: true,
-  recallMultiIntentMaxSegments: 4,
-  recallEnableContextQueryBlend: true,
-  recallContextAssistantWeight: 0.2,
-  recallContextPreviousUserWeight: 0.1,
-  recallEnableLexicalBoost: true,
-  recallLexicalWeight: 0.18,
-  recallTeleportAlpha: 0.15,
-  recallEnableTemporalLinks: true,
-  recallTemporalLinkStrength: 0.2,
-  recallEnableDiversitySampling: true,
-  recallDppCandidateMultiplier: 3,
-  recallDppQualityWeight: 1.0,
-  recallEnableCooccurrenceBoost: false,
-  recallCooccurrenceScale: 0.1,
-  recallCooccurrenceMaxNeighbors: 10,
-  recallEnableResidualRecall: false,
-  recallResidualBasisMaxNodes: 24,
-  recallNmfTopics: 15,
-  recallNmfNoveltyThreshold: 0.4,
-  recallResidualThreshold: 0.3,
-  recallResidualTopK: 5,
-  enableScopedMemory: true,
-  enablePovMemory: true,
-  enableRegionScopedObjective: true,
-  recallCharacterPovWeight: 1.25,
-  recallUserPovWeight: 1.05,
-  recallObjectiveCurrentRegionWeight: 1.15,
-  recallObjectiveAdjacentRegionWeight: 0.9,
-  recallObjectiveGlobalWeight: 0.75,
-  injectUserPovMemory: true,
-  injectObjectiveGlobalMemory: true,
-
-  // 注入设置
-  injectPosition: "atDepth", // 注入位置
-  injectDepth: 9999, // IN_CHAT@Depth 注入深度，数值越大越靠前
-  injectRole: 0, // 0=system, 1=user, 2=assistant
-
-  // 混合评分权重
-  graphWeight: 0.6,
-  vectorWeight: 0.3,
-  importanceWeight: 0.1,
-
-  // 记忆 LLM（留空时复用当前酒馆模型）
-  llmApiUrl: "",
-  llmApiKey: "",
-  llmModel: "",
-  llmPresets: {},
-  llmActivePreset: "",
-
-  // Embedding API 配置
-  embeddingApiUrl: "",
-  embeddingApiKey: "",
-  embeddingModel: "text-embedding-3-small",
-  embeddingTransportMode: "direct",
-  embeddingBackendSource: "openai",
-  embeddingBackendModel: "text-embedding-3-small",
-  embeddingBackendApiUrl: "",
-  embeddingAutoSuffix: true,
-
-  // Schema
-  nodeTypeSchema: null, // null 表示使用默认
-
-  // 自定义提示词
-  extractPrompt: "",
-  recallPrompt: "",
-  consolidationPrompt: "",
-  compressPrompt: "",
-  synopsisPrompt: "",
-  reflectionPrompt: "",
-  taskProfilesVersion: 3,
-  taskProfiles: createDefaultTaskProfiles(),
-
-  // ====== v2 增强设置 ======
-
-  // ③ 记忆整合（合并精确对照 + 记忆进化）
-  enableConsolidation: true, // 启用记忆整合
-  consolidationNeighborCount: 5, // 近邻搜索数量
-  consolidationThreshold: 0.85, // 冲突判定相似度阈值
-
-  // ⑨ 全局故事概要
-  enableSynopsis: true, // 启用全局概要
-  synopsisEveryN: 5, // 每 N 次提取后更新概要
-
-  // ⑥ 认知边界过滤（P1）
-  enableVisibility: true, // 启用认知边界
-  // ⑦ 双记忆交叉检索（P1）
-  enableCrossRecall: true, // 启用交叉检索
-
-  // ① 惊奇度分割（P2）
-  enableSmartTrigger: false, // 启用惊奇度分割
-  triggerPatterns: "", // 自定义触发正则
-  smartTriggerThreshold: 2, // 轻量触发阈值
-
-  // ⑤ 主动遗忘（P2）
-  enableSleepCycle: false, // 启用主动遗忘
-  forgetThreshold: 0.5, // 保留价值阈值
-  sleepEveryN: 10, // 每 N 次提取后执行
-
-  // ⑧ 概率触发回忆（P2）
-  enableProbRecall: false, // 启用概率触发
-  probRecallChance: 0.15, // 触发概率
-
-  // ⑩ 反思条目（P2）
-  enableReflection: true, // 启用反思
-  reflectEveryN: 10, // 每 N 次提取后反思
-  consolidationAutoMinNewNodes: 2,
-  enableAutoCompression: true,
-  compressionEveryN: 10,
-
-  // UI 面板
-  noticeDisplayMode: "normal", // normal|compact
-  panelTheme: "crimson", // 面板主题 crimson|cyan|amber|violet|paperDawn|glacierSky
-};
 
 // ==================== 状态 ====================
 
@@ -2989,50 +2857,10 @@ function installSendIntentHooks() {
 
 // ==================== 设置管理 ====================
 
-function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
-  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
-    return {};
-  }
-
-  const migrated = { ...loaded };
-  if (
-    !Object.prototype.hasOwnProperty.call(
-      migrated,
-      "consolidationAutoMinNewNodes",
-    ) &&
-    Object.prototype.hasOwnProperty.call(migrated, "maintenanceAutoMinNewNodes")
-  ) {
-    migrated.consolidationAutoMinNewNodes = clampInt(
-      migrated.maintenanceAutoMinNewNodes,
-      defaultSettings.consolidationAutoMinNewNodes,
-      1,
-      50,
-    );
-  }
-  if (!Object.prototype.hasOwnProperty.call(migrated, "enableAutoCompression")) {
-    const parsedEveryN = Math.floor(Number(migrated.compressionEveryN));
-    migrated.enableAutoCompression = !(
-      Number.isFinite(parsedEveryN) && parsedEveryN <= 0
-    );
-  }
-  if (
-    Object.prototype.hasOwnProperty.call(migrated, "compressionEveryN") &&
-    Math.floor(Number(migrated.compressionEveryN)) <= 0
-  ) {
-    migrated.compressionEveryN = defaultSettings.compressionEveryN;
-  }
-  delete migrated.maintenanceAutoMinNewNodes;
-  return migrated;
-}
-
 function getSettings() {
-  const loadedSettings = migrateLegacyAutoMaintenanceSettings(
+  const mergedSettings = mergePersistedSettings(
     extension_settings[MODULE_NAME] || {},
   );
-  const mergedSettings = {
-    ...defaultSettings,
-    ...loadedSettings,
-  };
   const migrated = migrateLegacyTaskProfiles(mergedSettings);
   mergedSettings.taskProfilesVersion = migrated.taskProfilesVersion;
   mergedSettings.taskProfiles = migrated.taskProfiles;
@@ -6800,25 +6628,6 @@ async function resetVectorStateForConfigChange(reason = "向量配置已变更")
   saveGraphToChat({ reason: "vector-config-reset" });
 }
 
-function getPersistedSettingsSnapshot(settings = getSettings()) {
-  const persisted = {};
-  for (const key of Object.keys(defaultSettings)) {
-    persisted[key] = settings[key];
-  }
-  return persisted;
-}
-
-function mergePersistedSettings(loaded = {}) {
-  const compatibleLoaded = migrateLegacyAutoMaintenanceSettings(loaded);
-  const merged = { ...defaultSettings };
-  for (const key of Object.keys(defaultSettings)) {
-    if (Object.prototype.hasOwnProperty.call(compatibleLoaded, key)) {
-      merged[key] = compatibleLoaded[key];
-    }
-  }
-  return merged;
-}
-
 function encodeBase64Utf8(text) {
   const bytes = new TextEncoder().encode(String(text ?? ""));
   const chunkSize = 0x8000;
@@ -7721,120 +7530,6 @@ function handleGraphShadowSnapshotVisibilityChange() {
 }
 
 // ==================== 核心流程 ====================
-
-const DEFAULT_TRIGGER_KEYWORDS = [
-  "突然",
-  "没想到",
-  "原来",
-  "其实",
-  "发现",
-  "背叛",
-  "死亡",
-  "复活",
-  "恢复记忆",
-  "失忆",
-  "告白",
-  "暴露",
-  "秘密",
-  "计划",
-  "规则",
-  "契约",
-  "位置",
-  "地点",
-  "离开",
-  "来到",
-];
-
-export function getSmartTriggerDecision(
-  chat,
-  lastProcessed,
-  settings,
-  endFloor = null,
-) {
-  const startFloor = Math.max(0, (lastProcessed ?? -1) + 1);
-  const normalizedEndFloor = Number.isFinite(Number(endFloor))
-    ? Math.max(startFloor - 1, Math.floor(Number(endFloor)))
-    : null;
-  const pendingMessages = chat
-    .slice(
-      startFloor,
-      normalizedEndFloor == null ? undefined : normalizedEndFloor + 1,
-    )
-    .map((msg, offset) => ({
-      msg,
-      index: startFloor + offset,
-    }))
-    .filter(({ msg, index }) => !isSystemMessageForExtraction(msg, { index, chat }))
-    .map(({ msg }) => ({
-      role: msg.is_user ? "user" : "assistant",
-      content: msg.mes || "",
-    }))
-    .filter((msg) => msg.content.trim().length > 0);
-
-  if (pendingMessages.length === 0) {
-    return { triggered: false, score: 0, reasons: [] };
-  }
-
-  const reasons = [];
-  let score = 0;
-  const combinedText = pendingMessages.map((m) => m.content).join("\n");
-
-  const keywordHits = DEFAULT_TRIGGER_KEYWORDS.filter((keyword) =>
-    combinedText.includes(keyword),
-  );
-  if (keywordHits.length > 0) {
-    score += Math.min(2, keywordHits.length);
-    reasons.push(`关键词: ${keywordHits.slice(0, 3).join(", ")}`);
-  }
-
-  const customPatterns = String(settings.triggerPatterns || "")
-    .split(/\r?\n|,/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const pattern of customPatterns) {
-    try {
-      const regex = new RegExp(pattern, "i");
-      if (regex.test(combinedText)) {
-        score += 2;
-        reasons.push(`自定义触发: ${pattern}`);
-        break;
-      }
-    } catch {
-      // 忽略无效正则，避免影响主流程
-    }
-  }
-
-  const roleSwitchCount = pendingMessages.reduce((count, message, index) => {
-    if (index === 0) return count;
-    return count + (message.role !== pendingMessages[index - 1].role ? 1 : 0);
-  }, 0);
-  if (roleSwitchCount >= 2) {
-    score += 1;
-    reasons.push("多轮往返互动");
-  }
-
-  const punctuationHits = (combinedText.match(/[!?！？]/g) || []).length;
-  if (punctuationHits >= 2) {
-    score += 1;
-    reasons.push("情绪/冲突波动");
-  }
-
-  const entityLikeHits =
-    combinedText.match(
-      /[A-Z][a-z]{2,}|[\u4e00-\u9fff]{2,6}(先生|小姐|王国|城|镇|村|学院|组织|公司|小队|军团)/g,
-    ) || [];
-  if (entityLikeHits.length > 0) {
-    score += 1;
-    reasons.push("疑似新实体/新地点");
-  }
-
-  const threshold = Math.max(1, settings.smartTriggerThreshold || 2);
-  return {
-    triggered: score >= threshold,
-    score,
-    reasons,
-  };
-}
 
 function getLatestUserChatMessage(chat) {
   if (!Array.isArray(chat)) return null;

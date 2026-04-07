@@ -1,86 +1,9 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import vm from "node:vm";
 
-async function loadDefaultSettings() {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const indexPath = path.resolve(__dirname, "../index.js");
-  const source = await fs.readFile(indexPath, "utf8");
-  const settingsMatch = source.match(/const defaultSettings = \{[\s\S]*?^\};/m);
-
-  if (!settingsMatch) {
-    throw new Error("无法从 index.js 提取 defaultSettings");
-  }
-
-  const context = vm.createContext({
-    createDefaultTaskProfiles() {
-      return {
-        extract: { activeProfileId: "default", profiles: [] },
-        recall: { activeProfileId: "default", profiles: [] },
-        compress: { activeProfileId: "default", profiles: [] },
-        synopsis: { activeProfileId: "default", profiles: [] },
-        reflection: { activeProfileId: "default", profiles: [] },
-        consolidation: { activeProfileId: "default", profiles: [] },
-      };
-    },
-  });
-  const script = new vm.Script(`
-${settingsMatch[0]}
-this.defaultSettings = defaultSettings;
-`);
-  script.runInContext(context);
-  return context.defaultSettings;
-}
-
-async function loadSettingsCompatHelpers() {
-  const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const indexPath = path.resolve(__dirname, "../index.js");
-  const source = await fs.readFile(indexPath, "utf8");
-  const settingsMatch = source.match(/const defaultSettings = \{[\s\S]*?^\};/m);
-  const compatMatch = source.match(
-    /function migrateLegacyAutoMaintenanceSettings\(loaded = \{\}\) \{[\s\S]*?^}\r?\n/m,
-  );
-  const mergeMatch = source.match(
-    /function mergePersistedSettings\(loaded = \{\}\) \{[\s\S]*?^}\r?\n/m,
-  );
-
-  if (!settingsMatch || !compatMatch || !mergeMatch) {
-    throw new Error("无法从 index.js 提取设置兼容辅助函数");
-  }
-
-  const context = vm.createContext({
-    clampInt: (value, fallback = 0, min = 0, max = 9999) => {
-      const numeric = Number(value);
-      if (!Number.isFinite(numeric)) return fallback;
-      return Math.min(max, Math.max(min, Math.trunc(numeric)));
-    },
-    createDefaultTaskProfiles() {
-      return {
-        extract: { activeProfileId: "default", profiles: [] },
-        recall: { activeProfileId: "default", profiles: [] },
-        compress: { activeProfileId: "default", profiles: [] },
-        synopsis: { activeProfileId: "default", profiles: [] },
-        reflection: { activeProfileId: "default", profiles: [] },
-        consolidation: { activeProfileId: "default", profiles: [] },
-      };
-    },
-  });
-  const script = new vm.Script(`
-${settingsMatch[0]}
-${compatMatch[0]}
-${mergeMatch[0]}
-this.mergePersistedSettings = mergePersistedSettings;
-`);
-  script.runInContext(context);
-  return {
-    mergePersistedSettings: context.mergePersistedSettings,
-  };
-}
-
-const defaultSettings = await loadDefaultSettings();
-const { mergePersistedSettings } = await loadSettingsCompatHelpers();
+import {
+  defaultSettings,
+  mergePersistedSettings,
+} from "../runtime/settings-defaults.js";
 
 assert.equal(defaultSettings.extractContextTurns, 2);
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);

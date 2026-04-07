@@ -50,6 +50,11 @@ import {
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
 import {
+  defaultSettings,
+  getPersistedSettingsSnapshot,
+  mergePersistedSettings,
+} from "../runtime/settings-defaults.js";
+import {
   clampFloat,
   clampInt,
   createGraphPersistenceState,
@@ -276,6 +281,9 @@ async function createGraphPersistenceHarness({
     extension_settings: {
       [MODULE_NAME]: {},
     },
+    defaultSettings,
+    getPersistedSettingsSnapshot,
+    mergePersistedSettings,
     migrateLegacyTaskProfiles(settings = {}) {
       return {
         taskProfilesVersion: Number(settings?.taskProfilesVersion || 0),
