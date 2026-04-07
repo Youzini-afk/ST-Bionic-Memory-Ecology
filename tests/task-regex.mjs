@@ -199,7 +199,7 @@ try {
     defaultProfiles.extract?.profiles?.[0]?.regex?.stages || {};
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.finalPrompt"),
-    true,
+    false,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.userMessage"),
@@ -211,15 +211,19 @@ try {
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.candidateText"),
-    true,
+    false,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "output.rawResponse"),
-    true,
+    false,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "output.beforeParse"),
-    true,
+    false,
+  );
+  assert.equal(
+    isTaskRegexStageEnabled(defaultExtractStages, "output"),
+    false,
   );
 
   const normalizedLegacyOnlyProfile = normalizeTaskProfile(

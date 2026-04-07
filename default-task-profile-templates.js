@@ -191,12 +191,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },
@@ -395,12 +395,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },
@@ -575,12 +575,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },
@@ -767,12 +767,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },
@@ -971,12 +971,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },
@@ -1187,12 +1187,12 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": true,
-        "input.finalPrompt": true,
-        "output.rawResponse": true,
-        "output.beforeParse": true,
+        "input.candidateText": false,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
         "input": true,
-        "output": true
+        "output": false
       },
       "localRules": []
     },

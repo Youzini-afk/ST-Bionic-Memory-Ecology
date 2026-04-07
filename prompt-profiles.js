@@ -620,10 +620,11 @@ const TASK_REGEX_STAGE_GROUPS = Object.freeze({
 const DEFAULT_TASK_REGEX_STAGES = Object.freeze({
   "input.userMessage": true,
   "input.recentMessages": true,
-  "input.candidateText": true,
-  "input.finalPrompt": true,
-  "output.rawResponse": true,
-  "output.beforeParse": true,
+  "input.candidateText": false,
+  "input.finalPrompt": false,
+  "output.rawResponse": false,
+  "output.beforeParse": false,
+  output: false,
 });
 
 function normalizeRegexStageKey(stageKey = "") {
