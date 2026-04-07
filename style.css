@@ -1763,13 +1763,13 @@
 }
 
 .bme-capability-card input[type="checkbox"]:checked {
-  background: var(--bme-primary);
-  border-color: var(--bme-primary);
+  background: color-mix(in srgb, var(--bme-primary) 45%, var(--bme-surface-high));
+  border-color: color-mix(in srgb, var(--bme-primary) 55%, transparent);
 }
 
 .bme-capability-card input[type="checkbox"]:checked::after {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--bme-primary-text, #ffb2b7);
 }
 
 /* --- STRIPE ROW LAYOUT (Advanced Settings) --- */
