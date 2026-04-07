@@ -1866,7 +1866,11 @@ function _bindActions() {
 }
 
 function _refreshConfigTab() {
-  const settings = _getSettings?.() || {};
+  let settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
+  const resolvedActiveLlmPreset = _resolveActiveLlmPresetName(settings);
+  if (resolvedActiveLlmPreset !== String(settings.llmActivePreset || "")) {
+    settings = _patchSettings({ llmActivePreset: resolvedActiveLlmPreset });
+  }
   _refreshPlannerLauncher();
 
   _setCheckboxValue("bme-setting-enabled", settings.enabled ?? true);
@@ -2148,6 +2152,8 @@ function _refreshConfigTab() {
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
   _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
   _setInputValue("bme-setting-llm-model", settings.llmModel || "");
+  _populateLlmPresetSelect(settings.llmPresets || {}, resolvedActiveLlmPreset);
+  _syncLlmPresetControls(resolvedActiveLlmPreset);
   _setInputValue("bme-setting-timeout-ms", settings.timeoutMs ?? 300000);
 
   _setInputValue("bme-setting-embed-url", settings.embeddingApiUrl || "");
@@ -2562,15 +2568,144 @@ function _bindConfigControls() {
     _patchSettings({ reflectEveryN: value }),
   );
 
-  bindText("bme-setting-llm-url", (value) =>
-    _patchSettings({ llmApiUrl: value.trim() }),
-  );
-  bindText("bme-setting-llm-key", (value) =>
-    _patchSettings({ llmApiKey: value.trim() }),
-  );
-  bindText("bme-setting-llm-model", (value) =>
-    _patchSettings({ llmModel: value.trim() }),
-  );
+  const llmPresetSelect = document.getElementById("bme-llm-preset-select");
+  if (llmPresetSelect && llmPresetSelect.dataset.bmeBound !== "true") {
+    llmPresetSelect.addEventListener("change", () => {
+      const selectedName = String(llmPresetSelect.value || "");
+      if (!selectedName) {
+        const currentActivePreset = String(
+          (_getSettings?.() || {}).llmActivePreset || "",
+        );
+        if (currentActivePreset) {
+          _patchSettings({ llmActivePreset: "" });
+        }
+        _syncLlmPresetControls("");
+        return;
+      }
+
+      const settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
+      const preset = settings.llmPresets?.[selectedName];
+      if (!preset) {
+        _patchSettings({ llmActivePreset: "" });
+        _populateLlmPresetSelect(settings.llmPresets || {}, "");
+        _syncLlmPresetControls("");
+        toastr.warning("选中的模板不存在，已切回手动模式", "ST-BME");
+        return;
+      }
+
+      _patchSettings({
+        llmApiUrl: preset.llmApiUrl,
+        llmApiKey: preset.llmApiKey,
+        llmModel: preset.llmModel,
+        llmActivePreset: selectedName,
+      });
+      _setInputValue("bme-setting-llm-url", preset.llmApiUrl);
+      _setInputValue("bme-setting-llm-key", preset.llmApiKey);
+      _setInputValue("bme-setting-llm-model", preset.llmModel);
+      _clearFetchedLlmModels();
+      _syncLlmPresetControls(selectedName);
+    });
+    llmPresetSelect.dataset.bmeBound = "true";
+  }
+
+  const llmPresetSaveBtn = document.getElementById("bme-llm-preset-save");
+  if (llmPresetSaveBtn && llmPresetSaveBtn.dataset.bmeBound !== "true") {
+    llmPresetSaveBtn.addEventListener("click", () => {
+      const settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
+      const activePreset = String(settings.llmActivePreset || "");
+      if (!activePreset) {
+        document.getElementById("bme-llm-preset-save-as")?.click();
+        return;
+      }
+
+      const nextPresets = {
+        ...(settings.llmPresets || {}),
+        [activePreset]: _getLlmConfigInputSnapshot(),
+      };
+      _patchSettings({ llmPresets: nextPresets });
+      _populateLlmPresetSelect(nextPresets, activePreset);
+      _syncLlmPresetControls(activePreset);
+      toastr.success("当前模板已保存", "ST-BME");
+    });
+    llmPresetSaveBtn.dataset.bmeBound = "true";
+  }
+
+  const llmPresetSaveAsBtn = document.getElementById("bme-llm-preset-save-as");
+  if (llmPresetSaveAsBtn && llmPresetSaveAsBtn.dataset.bmeBound !== "true") {
+    llmPresetSaveAsBtn.addEventListener("click", () => {
+      const settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
+      const activePreset = String(settings.llmActivePreset || "");
+      const suggestedName = activePreset
+        ? `${activePreset} 副本`
+        : "新模板";
+      const nextName = window.prompt("请输入新模板名称", suggestedName);
+      if (nextName == null) return;
+
+      const trimmedName = String(nextName).trim();
+      if (!trimmedName) {
+        toastr.info("模板名称不能为空", "ST-BME");
+        return;
+      }
+      if (trimmedName in (settings.llmPresets || {})) {
+        toastr.info("模板名称已存在，请换一个", "ST-BME");
+        return;
+      }
+
+      const nextPresets = {
+        ...(settings.llmPresets || {}),
+        [trimmedName]: _getLlmConfigInputSnapshot(),
+      };
+      _patchSettings({
+        llmPresets: nextPresets,
+        llmActivePreset: trimmedName,
+      });
+      _populateLlmPresetSelect(nextPresets, trimmedName);
+      _syncLlmPresetControls(trimmedName);
+      toastr.success("已另存为新模板", "ST-BME");
+    });
+    llmPresetSaveAsBtn.dataset.bmeBound = "true";
+  }
+
+  const llmPresetDeleteBtn = document.getElementById("bme-llm-preset-delete");
+  if (llmPresetDeleteBtn && llmPresetDeleteBtn.dataset.bmeBound !== "true") {
+    llmPresetDeleteBtn.addEventListener("click", () => {
+      const settings = _normalizeLlmPresetSettings(_getSettings?.() || {});
+      const activePreset = String(settings.llmActivePreset || "");
+      if (!activePreset) {
+        toastr.info("当前处于手动模式，没有可删除的模板", "ST-BME");
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `确定要删除模板“${activePreset}”吗？当前输入框里的值会保留。`,
+      );
+      if (!confirmed) return;
+
+      const nextPresets = { ...(settings.llmPresets || {}) };
+      delete nextPresets[activePreset];
+      _patchSettings({
+        llmPresets: nextPresets,
+        llmActivePreset: "",
+      });
+      _populateLlmPresetSelect(nextPresets, "");
+      _syncLlmPresetControls("");
+      toastr.success("模板已删除", "ST-BME");
+    });
+    llmPresetDeleteBtn.dataset.bmeBound = "true";
+  }
+
+  bindText("bme-setting-llm-url", (value) => {
+    _patchSettings({ llmApiUrl: value.trim() });
+    _markLlmPresetDirty({ clearFetchedModels: true });
+  });
+  bindText("bme-setting-llm-key", (value) => {
+    _patchSettings({ llmApiKey: value.trim() });
+    _markLlmPresetDirty({ clearFetchedModels: true });
+  });
+  bindText("bme-setting-llm-model", (value) => {
+    _patchSettings({ llmModel: value.trim() });
+    _markLlmPresetDirty();
+  });
   bindNumber("bme-setting-timeout-ms", 300000, 1000, 3600000, (value) =>
     _patchSettings({ timeoutMs: value }),
   );
@@ -5598,6 +5733,155 @@ function _patchSettings(patch = {}, options = {}) {
   if (options.refreshTheme)
     _highlightThemeChoice(settings.panelTheme || "crimson");
   return settings;
+}
+
+function _normalizeLlmPresetSettings(settings = _getSettings?.() || {}) {
+  const rawPresets = settings?.llmPresets;
+  const normalizedPresets = {};
+  let changed =
+    !rawPresets ||
+    typeof rawPresets !== "object" ||
+    Array.isArray(rawPresets);
+
+  if (!changed) {
+    for (const [name, preset] of Object.entries(rawPresets)) {
+      if (!String(name || "").trim()) {
+        changed = true;
+        continue;
+      }
+      if (
+        !preset ||
+        typeof preset !== "object" ||
+        Array.isArray(preset) ||
+        typeof preset.llmApiUrl !== "string" ||
+        typeof preset.llmApiKey !== "string" ||
+        typeof preset.llmModel !== "string"
+      ) {
+        changed = true;
+        continue;
+      }
+      normalizedPresets[name] = {
+        llmApiUrl: preset.llmApiUrl,
+        llmApiKey: preset.llmApiKey,
+        llmModel: preset.llmModel,
+      };
+    }
+  }
+
+  let activePreset =
+    typeof settings?.llmActivePreset === "string" ? settings.llmActivePreset : "";
+  if (activePreset && !Object.prototype.hasOwnProperty.call(normalizedPresets, activePreset)) {
+    activePreset = "";
+    changed = true;
+  }
+  if (typeof settings?.llmActivePreset !== "string") {
+    changed = true;
+  }
+
+  if (!changed) {
+    return settings;
+  }
+
+  return _patchSettings({
+    llmPresets: normalizedPresets,
+    llmActivePreset: activePreset,
+  });
+}
+
+function _resolveActiveLlmPresetName(settings = _getSettings?.() || {}) {
+  const activePreset = String(settings?.llmActivePreset || "");
+  if (!activePreset) return "";
+  const preset = settings?.llmPresets?.[activePreset];
+  if (!preset) return "";
+  return _isSameLlmConfigSnapshot(
+    {
+      llmApiUrl: String(settings?.llmApiUrl || ""),
+      llmApiKey: String(settings?.llmApiKey || ""),
+      llmModel: String(settings?.llmModel || ""),
+    },
+    preset,
+  )
+    ? activePreset
+    : "";
+}
+
+function _isSameLlmConfigSnapshot(left = {}, right = {}) {
+  return (
+    String(left?.llmApiUrl || "") === String(right?.llmApiUrl || "") &&
+    String(left?.llmApiKey || "") === String(right?.llmApiKey || "") &&
+    String(left?.llmModel || "") === String(right?.llmModel || "")
+  );
+}
+
+function _getLlmConfigInputSnapshot() {
+  const settings = _getSettings?.() || {};
+  return {
+    llmApiUrl: String(
+      document.getElementById("bme-setting-llm-url")?.value ?? settings.llmApiUrl ?? "",
+    ).trim(),
+    llmApiKey: String(
+      document.getElementById("bme-setting-llm-key")?.value ?? settings.llmApiKey ?? "",
+    ).trim(),
+    llmModel: String(
+      document.getElementById("bme-setting-llm-model")?.value ?? settings.llmModel ?? "",
+    ).trim(),
+  };
+}
+
+function _populateLlmPresetSelect(presets = {}, activePreset = "") {
+  const select = document.getElementById("bme-llm-preset-select");
+  if (!select) return;
+
+  while (select.options.length > 1) {
+    select.remove(1);
+  }
+
+  Object.keys(presets)
+    .sort((left, right) => left.localeCompare(right, "zh-Hans-CN"))
+    .forEach((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    });
+
+  select.value = activePreset || "";
+}
+
+function _syncLlmPresetControls(activePreset = "") {
+  const select = document.getElementById("bme-llm-preset-select");
+  if (select) {
+    select.value = activePreset || "";
+  }
+
+  const deleteBtn = document.getElementById("bme-llm-preset-delete");
+  if (deleteBtn) {
+    deleteBtn.disabled = !activePreset;
+    deleteBtn.title = activePreset ? "删除当前模板" : "手动模式下没有可删除的模板";
+  }
+}
+
+function _clearFetchedLlmModels() {
+  fetchedMemoryLLMModels.length = 0;
+  const modelSelect = document.getElementById("bme-select-llm-model");
+  if (!modelSelect) return;
+  while (modelSelect.options.length > 1) {
+    modelSelect.remove(1);
+  }
+  modelSelect.value = "";
+  modelSelect.style.display = "none";
+}
+
+function _markLlmPresetDirty(options = {}) {
+  if (options.clearFetchedModels) {
+    _clearFetchedLlmModels();
+  }
+
+  const activePreset = String((_getSettings?.() || {}).llmActivePreset || "");
+  if (activePreset) {
+    _patchSettings({ llmActivePreset: "" });
+  }
+  _syncLlmPresetControls("");
 }
 
 function _highlightThemeChoice(themeName) {

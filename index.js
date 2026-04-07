@@ -454,6 +454,8 @@ const defaultSettings = {
   llmApiUrl: "",
   llmApiKey: "",
   llmModel: "",
+  llmPresets: {},
+  llmActivePreset: "",
 
   // Embedding API 配置
   embeddingApiUrl: "",
@@ -3235,6 +3237,10 @@ function getConfiguredTimeoutMs(settings = getSettings()) {
           ? timeoutMs
           : LOCAL_VECTOR_TIMEOUT_MS;
       })();
+}
+
+function getPlannerRecallTimeoutMs() {
+  return getConfiguredTimeoutMs(getSettings());
 }
 
 function getEmbeddingConfig(mode = null) {
@@ -10570,9 +10576,10 @@ async function onReembedDirect() {
     await initEnaPlanner({
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
+      getPlannerRecallTimeoutMs,
       isTrivialUserInput,
       preparePlannerRecallHandoff,
-    runPlannerRecallForEna,
+      runPlannerRecallForEna,
     });
     debugLog("[ST-BME] Ena Planner module loaded");
   } catch (error) {
