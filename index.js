@@ -454,6 +454,8 @@ const defaultSettings = {
   llmApiUrl: "",
   llmApiKey: "",
   llmModel: "",
+  llmPresets: {},
+  llmActivePreset: "",
 
   // Embedding API 配置
   embeddingApiUrl: "",

@@ -1423,6 +1423,22 @@
   margin-bottom: 12px;
 }
 
+.bme-llm-preset-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bme-llm-preset-controls select {
+  flex: 1;
+  min-width: 0;
+}
+
+.bme-llm-preset-controls .bme-config-secondary-btn {
+  flex-shrink: 0;
+}
+
 .bme-config-secondary-btn {
   display: inline-flex;
   align-items: center;
@@ -2877,6 +2893,15 @@
   }
 
   .bme-config-actions {
+    width: 100%;
+  }
+
+  .bme-llm-preset-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .bme-llm-preset-controls .bme-config-secondary-btn {
     width: 100%;
   }
 
