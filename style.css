@@ -1702,20 +1702,82 @@
 
 .bme-inline-checkbox {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   margin-bottom: 12px;
   font-size: 12px;
   font-weight: 700;
   color: var(--bme-on-surface);
   cursor: pointer;
+  user-select: none;
 }
 
 .bme-inline-checkbox input {
-  width: 16px;
-  height: 16px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
   margin: 0;
-  accent-color: var(--bme-primary);
+  margin-top: 1px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, var(--bme-border, rgba(255, 255, 255, 0.14)) 82%, white 18%);
+  background: color-mix(in srgb, var(--bme-surface-high, #2a2a2d) 90%, black 10%);
+  cursor: pointer;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.12s ease;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.bme-inline-checkbox input::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border-right: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+  transform: rotate(45deg) scale(0.65);
+  opacity: 0;
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.bme-inline-checkbox input:hover {
+  border-color: color-mix(in srgb, var(--bme-primary, #e94560) 50%, white 50%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.bme-inline-checkbox input:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--bme-primary, #e94560) 60%, white 40%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bme-primary-dim, rgba(233, 69, 96, 0.18)) 75%, transparent);
+}
+
+.bme-inline-checkbox input:checked {
+  background: color-mix(in srgb, var(--bme-primary, #e94560) 38%, var(--bme-surface-high, #2a2a2d));
+  border-color: color-mix(in srgb, var(--bme-primary, #e94560) 70%, transparent);
+}
+
+.bme-inline-checkbox input:checked::after {
+  opacity: 1;
+  transform: rotate(45deg) scale(1);
+  border-right-color: var(--bme-primary-text, #ffd9dd);
+  border-bottom-color: var(--bme-primary-text, #ffd9dd);
+}
+
+.bme-inline-checkbox span {
+  line-height: 1.5;
+  min-width: 0;
 }
 
 .bme-stage-card.stage-disabled .bme-stage-param {
@@ -3358,6 +3420,13 @@
   .bme-inline-checkbox input {
     width: 20px;
     height: 20px;
+    min-width: 20px;
+    margin-top: 0;
+  }
+
+  .bme-inline-checkbox input::after {
+    left: 6px;
+    top: 1px;
   }
 
   .bme-toggle-item {
