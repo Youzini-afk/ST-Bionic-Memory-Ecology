@@ -1,4 +1,4 @@
-import { substituteParamsExtended } from "../../../../../script.js";
+import { substituteParamsExtended } from "../../../../script.js";
 import jsyaml from "../vendor/js-yaml.mjs";
 
 function getTemplateRuntime() {
