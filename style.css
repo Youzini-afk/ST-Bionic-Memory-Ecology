@@ -1425,17 +1425,24 @@
 
 .bme-llm-preset-controls {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.bme-llm-preset-controls select {
+  min-width: 0;
+  width: 100%;
+}
+
+.bme-llm-preset-actions {
+  display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
 
-.bme-llm-preset-controls select {
-  flex: 1;
-  min-width: 0;
-}
-
-.bme-llm-preset-controls .bme-config-secondary-btn {
+.bme-llm-preset-actions .bme-config-secondary-btn {
   flex-shrink: 0;
 }
 
@@ -2896,12 +2903,12 @@
     width: 100%;
   }
 
-  .bme-llm-preset-controls {
+  .bme-llm-preset-actions {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .bme-llm-preset-controls .bme-config-secondary-btn {
+  .bme-llm-preset-actions .bme-config-secondary-btn {
     width: 100%;
   }
 
