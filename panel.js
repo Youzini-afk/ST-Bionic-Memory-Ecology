@@ -3489,6 +3489,21 @@ async function _handleTaskProfileWorkspaceClick(event) {
         actionEl.dataset.taskTab || currentTaskProfileTabId;
       _refreshTaskProfileWorkspace();
       return;
+    case "select-profile": {
+      const profileId = actionEl.dataset.profileId;
+      if (profileId) {
+        const settings = _getSettings?.() || {};
+        const nextTaskProfiles = setActiveTaskProfileId(
+          settings.taskProfiles || {},
+          currentTaskProfileTaskType,
+          profileId,
+        );
+        currentTaskProfileBlockId = "";
+        currentTaskProfileRuleId = "";
+        _patchTaskProfiles(nextTaskProfiles);
+      }
+      return;
+    }
     case "refresh-task-debug":
       if (typeof _getRuntimeDebugSnapshot === "function") {
         _getRuntimeDebugSnapshot({ refreshHost: true });
@@ -3683,8 +3698,8 @@ function _renderTaskProfileWorkspace(state) {
 
   return `
     <div class="bme-task-shell">
-      <div class="bme-task-header">
-        <div class="bme-task-type-tabs">
+      <div class="bme-task-action-bar">
+        <div class="bme-task-segmented-control">
           ${state.taskTypeOptions
             .map(
               (item) => `
@@ -3693,110 +3708,115 @@ function _renderTaskProfileWorkspace(state) {
                   data-task-action="switch-task-type"
                   data-task-type="${_escAttr(item.id)}"
                   type="button"
-                >
-                  <span>${_escHtml(item.label)}</span>
-                </button>
+                >${_escHtml(item.label)}</button>
               `,
             )
             .join("")}
-          <span style="flex:1"></span>
+        </div>
+        <div class="bme-task-action-bar-right">
           <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
-            <i class="fa-solid fa-arrows-rotate" style="margin-right:4px"></i>恢复全部
+            <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
-            <i class="fa-solid fa-file-export" style="margin-right:4px"></i>导出全部
+            <i class="fa-solid fa-file-export"></i><span>导出全部</span>
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
-            <i class="fa-solid fa-file-import" style="margin-right:4px"></i>导入全部
+            <i class="fa-solid fa-file-import"></i><span>导入全部</span>
           </button>
         </div>
+      </div>
 
-        <div class="bme-config-card bme-task-header-card">
-          <div class="bme-config-card-head">
-            <div>
-              <div class="bme-config-card-title">
-                ${_escHtml(taskMeta?.label || state.taskType)} 任务预设
-              </div>
-              <div class="bme-config-card-subtitle">
-                ${_escHtml(taskMeta?.description || "")}
-              </div>
-            </div>
-            <div class="bme-task-profile-badges">
-              <span class="bme-task-pill ${state.profile.builtin ? "is-builtin" : ""}">
-                ${state.profile.builtin ? "内置" : "自定义"}
-              </span>
-              <span class="bme-task-pill">更新于 ${_escHtml(profileUpdatedAt)}</span>
-            </div>
+      <div class="bme-task-master-detail">
+        <div class="bme-task-profile-list">
+          <div class="bme-task-profile-list-header">
+            <span>${_escHtml(taskMeta?.label || state.taskType)}</span>
           </div>
+          <select id="bme-task-profile-select" class="bme-config-input" style="display:none">
+            ${state.bucket.profiles
+              .map(
+                (profile) => `
+                  <option
+                    value="${_escAttr(profile.id)}"
+                    ${profile.id === state.profile.id ? "selected" : ""}
+                  >
+                    ${_escHtml(profile.name)}${profile.builtin ? " · 内置" : ""}
+                  </option>
+                `,
+              )
+              .join("")}
+          </select>
+          <div class="bme-task-profile-items">
+            ${state.bucket.profiles
+              .map(
+                (profile) => `
+                  <div
+                    class="bme-task-profile-list-item ${profile.id === state.profile.id ? "active" : ""}"
+                    data-task-action="select-profile"
+                    data-profile-id="${_escAttr(profile.id)}"
+                  >
+                    <div class="bme-task-profile-list-item-name">${_escHtml(profile.name)}</div>
+                    ${profile.builtin ? '<span class="bme-task-pill is-builtin">内置</span>' : ""}
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </div>
 
-          <div class="bme-task-header-fields">
-            <div class="bme-config-row">
-              <label for="bme-task-profile-select">当前预设</label>
-              <select id="bme-task-profile-select" class="bme-config-input">
-                ${state.bucket.profiles
-                  .map(
-                    (profile) => `
-                      <option
-                        value="${_escAttr(profile.id)}"
-                        ${profile.id === state.profile.id ? "selected" : ""}
-                      >
-                        ${_escHtml(profile.name)}${profile.builtin ? " · 内置" : ""}
-                      </option>
-                    `,
-                  )
-                  .join("")}
-              </select>
-            </div>
-            <div class="bme-config-row">
-              <label for="bme-task-profile-name">预设名称</label>
+        <div class="bme-task-profile-editor">
+          <div class="bme-task-editor-header">
+            <div class="bme-task-editor-title-row">
               <input
                 id="bme-task-profile-name"
-                class="bme-config-input"
+                class="bme-task-editor-name-input"
                 type="text"
                 value="${_escAttr(state.profile.name || "")}"
                 placeholder="输入预设名称"
               />
+              <div class="bme-task-profile-badges">
+                <span class="bme-task-pill ${state.profile.builtin ? "is-builtin" : ""}">
+                  ${state.profile.builtin ? "内置" : "自定义"}
+                </span>
+                <span class="bme-task-pill">更新于 ${_escHtml(profileUpdatedAt)}</span>
+              </div>
+            </div>
+            <div class="bme-task-editor-actions">
+              <button class="bme-config-secondary-btn" data-task-action="save-profile" type="button"><i class="fa-solid fa-floppy-disk"></i><span>保存</span></button>
+              <button class="bme-config-secondary-btn" data-task-action="rename-profile" type="button"><i class="fa-solid fa-pen"></i><span>重命名</span></button>
+              <button class="bme-config-secondary-btn" data-task-action="save-as-profile" type="button"><i class="fa-solid fa-copy"></i><span>另存为</span></button>
+              <button class="bme-config-secondary-btn" data-task-action="import-profile" type="button"><i class="fa-solid fa-file-import"></i><span>导入</span></button>
+              <button class="bme-config-secondary-btn" data-task-action="export-profile" type="button"><i class="fa-solid fa-file-export"></i><span>导出</span></button>
+              <button class="bme-config-secondary-btn bme-task-btn-danger" data-task-action="restore-default-profile" type="button"><i class="fa-solid fa-arrows-rotate"></i><span>恢复默认</span></button>
             </div>
           </div>
 
-          <div class="bme-task-header-actions">
-            <button class="bme-config-secondary-btn" data-task-action="save-profile" type="button">保存</button>
-            <button class="bme-config-secondary-btn" data-task-action="rename-profile" type="button">重命名</button>
-            <button class="bme-config-secondary-btn" data-task-action="save-as-profile" type="button">另存为</button>
-            <span class="bme-task-action-sep"></span>
-            <button class="bme-config-secondary-btn" data-task-action="import-profile" type="button">导入</button>
-            <button class="bme-config-secondary-btn" data-task-action="export-profile" type="button">导出</button>
-            <span class="bme-task-action-sep"></span>
-            <button class="bme-config-secondary-btn bme-task-btn-danger" data-task-action="restore-default-profile" type="button">恢复默认</button>
+          <div class="bme-task-subtabs">
+            ${TASK_PROFILE_TABS.map(
+              (tab) => `
+                <button
+                  class="bme-task-subtab-btn ${tab.id === state.taskTabId ? "active" : ""}"
+                  data-task-action="switch-task-tab"
+                  data-task-tab="${_escAttr(tab.id)}"
+                  type="button"
+                >
+                  ${_escHtml(tab.label)}
+                </button>
+              `,
+            ).join("")}
+          </div>
+
+          <div class="bme-task-tab-body">
+            ${
+              state.taskTabId === "generation"
+                ? _renderTaskGenerationTab(state)
+                : state.taskTabId === "regex"
+                  ? _renderTaskRegexTab(state)
+                  : state.taskTabId === "debug"
+                    ? _renderTaskDebugTab(state)
+                    : _renderTaskPromptTab(state)
+            }
           </div>
         </div>
-      </div>
-
-      <div class="bme-task-subtabs">
-        ${TASK_PROFILE_TABS.map(
-          (tab) => `
-            <button
-              class="bme-task-subtab-btn ${tab.id === state.taskTabId ? "active" : ""}"
-              data-task-action="switch-task-tab"
-              data-task-tab="${_escAttr(tab.id)}"
-              type="button"
-            >
-              ${_escHtml(tab.label)}
-            </button>
-          `,
-        ).join("")}
-      </div>
-
-      <div class="bme-task-tab-body">
-        ${
-          state.taskTabId === "generation"
-            ? _renderTaskGenerationTab(state)
-            : state.taskTabId === "regex"
-              ? _renderTaskRegexTab(state)
-              : state.taskTabId === "debug"
-                ? _renderTaskDebugTab(state)
-                : _renderTaskPromptTab(state)
-        }
       </div>
     </div>
   `;
