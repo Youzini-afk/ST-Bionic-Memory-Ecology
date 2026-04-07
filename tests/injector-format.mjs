@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { formatInjection } from "../injector.js";
-import { DEFAULT_NODE_SCHEMA } from "../schema.js";
+import { formatInjection } from "../retrieval/injector.js";
+import { DEFAULT_NODE_SCHEMA } from "../graph/schema.js";
 
 const coreEvent = {
   id: "event-1",

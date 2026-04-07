@@ -149,16 +149,16 @@ function setTestContext({
 }
 
 try {
-  const { initializeHostAdapter } = await import("../host-adapter/index.js");
+  const { initializeHostAdapter } = await import("../host/adapter/index.js");
   const { applyHostRegexReuse, applyTaskRegex, inspectTaskRegexReuse } = await import(
-    "../task-regex.js"
+    "../prompting/task-regex.js"
   );
   const {
     createDefaultTaskProfiles,
     isTaskRegexStageEnabled,
     normalizeTaskProfile,
     normalizeTaskRegexStages,
-  } = await import("../prompt-profiles.js");
+  } = await import("../prompting/prompt-profiles.js");
 
   const normalizedLegacyStages = normalizeTaskRegexStages({
     finalPrompt: true,
@@ -810,7 +810,7 @@ try {
   }
 
   try {
-    const { initializeHostAdapter } = await import("../host-adapter/index.js");
+    const { initializeHostAdapter } = await import("../host/adapter/index.js");
     initializeHostAdapter({});
   } catch {
     // ignore reset failures in test cleanup

@@ -3,14 +3,14 @@ import {
   applyHideSettings,
   isInManagedHideRange,
   resetHideState,
-} from "../hide-engine.js";
+} from "../ui/hide-engine.js";
 import {
   buildExtractionMessages,
   getAssistantTurns,
   isAssistantChatMessage,
   isBmeManagedHiddenMessage,
   isSystemMessageForExtraction,
-} from "../chat-history.js";
+} from "../maintenance/chat-history.js";
 
 const visibleAssistant = {
   is_user: false,

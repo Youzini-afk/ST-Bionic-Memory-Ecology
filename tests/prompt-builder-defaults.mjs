@@ -45,8 +45,8 @@ registerHooks({
   },
 });
 
-const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompt-builder.js");
-const { createDefaultTaskProfiles } = await import("../prompt-profiles.js");
+const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompting/prompt-builder.js");
+const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
 
 const settings = {
   taskProfilesVersion: 3,

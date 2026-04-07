@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 async function loadVectorHelpers() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const sourcePath = path.resolve(__dirname, "../vector-index.js");
+  const sourcePath = path.resolve(__dirname, "../vector/vector-index.js");
   const source = await fs.readFile(sourcePath, "utf8");
 
   const pieces = [

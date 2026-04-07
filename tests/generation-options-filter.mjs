@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { resolveTaskGenerationOptions } from "../generation-options.js";
-import { createDefaultTaskProfiles } from "../prompt-profiles.js";
+import { resolveTaskGenerationOptions } from "../runtime/generation-options.js";
+import { createDefaultTaskProfiles } from "../prompting/prompt-profiles.js";
 
 function buildSettingsWithExtractGeneration(generation) {
   const taskProfiles = createDefaultTaskProfiles();

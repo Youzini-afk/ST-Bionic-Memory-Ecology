@@ -84,14 +84,14 @@ try {
   };
 
   const { getSTContextForPrompt, getSTContextSnapshot } =
-    await import("../st-context.js");
+    await import("../host/st-context.js");
   const {
     substituteTaskEjsParams,
     createTaskEjsRenderContext,
     evalTaskEjsTemplate,
     checkTaskEjsSyntax,
     inspectTaskEjsRuntimeBackend,
-  } = await import("../task-ejs.js");
+  } = await import("../prompting/task-ejs.js");
 
   const promptContext = getSTContextForPrompt();
   assert.deepEqual(promptContext, {

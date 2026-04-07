@@ -59,8 +59,8 @@ globalThis.__llmStreamingExtensionSettings = {
 };
 globalThis.require = require;
 
-const { createDefaultTaskProfiles } = await import("../prompt-profiles.js");
-const llm = await import("../llm.js");
+const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
+const llm = await import("../llm/llm.js");
 const extensionsApi = await import("../../../../extensions.js");
 
 if (originalRequire === undefined) {

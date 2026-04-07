@@ -14,7 +14,7 @@ import {
   scheduleUpload,
   syncNow,
   upload,
-} from "../bme-sync.js";
+} from "../sync/bme-sync.js";
 
 const PREFIX = "[ST-BME][indexeddb-sync]";
 

@@ -6,7 +6,7 @@ import {
   resetHideState,
   runIncrementalHideCheck,
   unhideAll,
-} from "../hide-engine.js";
+} from "../ui/hide-engine.js";
 
 function createRuntime(chat, chatId = "chat-a") {
   const commands = [];

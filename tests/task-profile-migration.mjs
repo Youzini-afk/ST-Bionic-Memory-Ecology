@@ -4,7 +4,7 @@ import {
   ensureTaskProfiles,
   getActiveTaskProfile,
   migrateLegacyTaskProfiles,
-} from "../prompt-profiles.js";
+} from "../prompting/prompt-profiles.js";
 
 const legacySettings = {
   extractPrompt: "旧提取提示",

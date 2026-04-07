@@ -122,13 +122,13 @@ function createWorldbookEntry({
 
 try {
   const extensionsApi = await import("../../../../extensions.js");
-  const { createDefaultTaskProfiles } = await import("../prompt-profiles.js");
+  const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
   const {
     buildTaskExecutionDebugContext,
     buildTaskLlmPayload,
     buildTaskPrompt,
-  } = await import("../prompt-builder.js");
-  const llm = await import("../llm.js");
+  } = await import("../prompting/prompt-builder.js");
+  const llm = await import("../llm/llm.js");
 
   function createRule(id, findRegex, replaceString) {
     return {

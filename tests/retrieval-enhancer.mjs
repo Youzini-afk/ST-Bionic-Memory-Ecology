@@ -3,11 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { addNode, createEmptyGraph, createNode } from "../graph.js";
+import { addNode, createEmptyGraph, createNode } from "../graph/graph.js";
 
 async function loadEnhancer() {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const enhancerPath = path.resolve(__dirname, "../retrieval-enhancer.js");
+  const enhancerPath = path.resolve(__dirname, "../retrieval/retrieval-enhancer.js");
   const source = await fs.readFile(enhancerPath, "utf8");
   const transformed = `${source
     .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\r?\n/gm, "")

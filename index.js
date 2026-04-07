@@ -16,20 +16,20 @@ import {
   saveMetadataDebounced,
 } from "../../../extensions.js";
 
-import { BmeChatManager } from "./bme-chat-manager.js";
+import { BmeChatManager } from "./sync/bme-chat-manager.js";
 import {
   BmeDatabase,
   buildBmeDbName,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
   ensureDexieLoaded,
-} from "./bme-db.js";
+} from "./sync/bme-db.js";
 import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
   scheduleUpload,
   syncNow,
-} from "./bme-sync.js";
+} from "./sync/bme-sync.js";
 import {
   buildExtractionMessages,
   clampRecoveryStartFloor,
@@ -39,16 +39,16 @@ import {
   pruneProcessedMessageHashesFromFloor,
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
-} from "./chat-history.js";
+} from "./maintenance/chat-history.js";
 import {
   compressAll,
   inspectAutoCompressionCandidates,
   sleepCycle,
-} from "./compressor.js";
+} from "./maintenance/compressor.js";
 import {
   analyzeAutoConsolidationGate,
   consolidateMemories,
-} from "./consolidator.js";
+} from "./maintenance/consolidator.js";
 import {
   installSendIntentHooksController,
   onBeforeCombinePromptsController,
@@ -67,23 +67,23 @@ import {
   registerCoreEventHooksController,
   registerGenerationAfterCommandsController,
   scheduleSendIntentHookRetryController,
-} from "./event-binding.js";
+} from "./host/event-binding.js";
 import {
   executeExtractionBatchController,
   onManualExtractController,
   onRerollController,
   resolveAutoExtractionPlanController,
   runExtractionController,
-} from "./extraction-controller.js";
+} from "./maintenance/extraction-controller.js";
 import {
   debugDebug,
   debugLog,
-} from "./debug-logging.js";
+} from "./runtime/debug-logging.js";
 import {
   extractMemories,
   generateReflection,
   generateSynopsis,
-} from "./extractor.js";
+} from "./maintenance/extractor.js";
 import {
   findGraphShadowSnapshotByIntegrity,
   GRAPH_LOAD_PENDING_CHAT_ID,
@@ -103,7 +103,7 @@ import {
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
-} from "./graph-persistence.js";
+} from "./graph/graph-persistence.js";
 import {
   applyHideSettings,
   getHideStateSnapshot,
@@ -111,7 +111,7 @@ import {
   runIncrementalHideCheck,
   scheduleHideSettingsApply,
   unhideAll,
-} from "./hide-engine.js";
+} from "./ui/hide-engine.js";
 import {
   createEmptyGraph,
   deserializeGraph,
@@ -121,7 +121,7 @@ import {
   importGraph,
   removeNode,
   updateNode,
-} from "./graph.js";
+} from "./graph/graph.js";
 import {
   HOST_ADAPTER_STATE_SEMANTICS,
   getHostAdapter,
@@ -129,33 +129,33 @@ import {
   initializeHostAdapter,
   readHostCapability,
   refreshHostCapabilitySnapshot,
-} from "./host-adapter/index.js";
-import { estimateTokens, formatInjection } from "./injector.js";
-import { fetchMemoryLLMModels, testLLMConnection } from "./llm.js";
-import { getNodeDisplayName } from "./node-labels.js";
-import { showManagedBmeNotice } from "./notice.js";
+} from "./host/adapter/index.js";
+import { estimateTokens, formatInjection } from "./retrieval/injector.js";
+import { fetchMemoryLLMModels, testLLMConnection } from "./llm/llm.js";
+import { getNodeDisplayName } from "./graph/node-labels.js";
+import { showManagedBmeNotice } from "./ui/notice.js";
 import {
   createNoticePanelActionController,
   initializePanelBridgeController,
   refreshPanelLiveStateController,
-} from "./panel-bridge.js";
+} from "./ui/panel-bridge.js";
 import {
   createDefaultTaskProfiles,
   migrateLegacyTaskProfiles,
-} from "./prompt-profiles.js";
-import { inspectTaskRegexReuse } from "./task-regex.js";
+} from "./prompting/prompt-profiles.js";
+import { inspectTaskRegexReuse } from "./prompting/task-regex.js";
 import {
   applyRecallInjectionController,
   buildRecallRecentMessagesController,
   getRecallUserMessageSourceLabelController,
   resolveRecallInputController,
   runRecallController,
-} from "./recall-controller.js";
+} from "./retrieval/recall-controller.js";
 import {
   createRecallCardElement,
   openRecallSidebar,
   updateRecallCardData,
-} from "./recall-message-ui.js";
+} from "./ui/recall-message-ui.js";
 import {
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
@@ -165,9 +165,9 @@ import {
   resolveFinalRecallInjectionSource,
   resolveGenerationTargetUserMessageIndex,
   writePersistedRecallToUserMessage,
-} from "./recall-persistence.js";
-import { resolveConfiguredTimeoutMs } from "./request-timeout.js";
-import { retrieve } from "./retriever.js";
+} from "./retrieval/recall-persistence.js";
+import { resolveConfiguredTimeoutMs } from "./runtime/request-timeout.js";
+import { retrieve } from "./retrieval/retriever.js";
 import {
   appendBatchJournal,
   appendMaintenanceJournal,
@@ -185,8 +185,8 @@ import {
   rebindProcessedHistoryStateToChat,
   snapshotProcessedMessageHashes,
   undoLatestMaintenance,
-} from "./runtime-state.js";
-import { DEFAULT_NODE_SCHEMA, validateSchema } from "./schema.js";
+} from "./runtime/runtime-state.js";
+import { DEFAULT_NODE_SCHEMA, validateSchema } from "./graph/schema.js";
 import {
   onExportGraphController,
   onFetchEmbeddingModelsController,
@@ -204,7 +204,7 @@ import {
   onTestMemoryLLMController,
   onViewGraphController,
   onViewLastInjectionController,
-} from "./ui-actions-controller.js";
+} from "./ui/ui-actions-controller.js";
 import {
   clampInt,
   createBatchStatusSkeleton,
@@ -226,7 +226,7 @@ import {
   pushBatchStageArtifact,
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
-} from "./ui-status.js";
+} from "./ui/ui-status.js";
 import {
   deleteBackendVectorHashesForRecovery,
   fetchAvailableEmbeddingModels,
@@ -237,7 +237,7 @@ import {
   syncGraphVectorIndex,
   testVectorConnection,
   validateVectorConfig,
-} from "./vector-index.js";
+} from "./vector/vector-index.js";
 
 // 操控面板模块（动态加载，防止加载失败崩溃整个扩展）
 let _panelModule = null;
@@ -11330,8 +11330,8 @@ async function onReembedDirect() {
     getRuntimeStatus: () => getPanelRuntimeStatus(),
     getSettings,
     getThemesModule: () => _themesModule,
-    importPanelModule: async () => await import("./panel.js"),
-    importThemesModule: async () => await import("./themes.js"),
+    importPanelModule: async () => await import("./ui/panel.js"),
+    importThemesModule: async () => await import("./ui/themes.js"),
     setPanelModule: (module) => {
       _panelModule = module;
     },

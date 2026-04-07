@@ -8,9 +8,9 @@ import {
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
   ensureDexieLoaded,
-} from "../bme-db.js";
-import { BmeChatManager } from "../bme-chat-manager.js";
-import { createEmptyGraph } from "../graph.js";
+} from "../sync/bme-db.js";
+import { BmeChatManager } from "../sync/bme-chat-manager.js";
+import { createEmptyGraph } from "../graph/graph.js";
 
 const PREFIX = "[ST-BME][indexeddb-persistence]";
 

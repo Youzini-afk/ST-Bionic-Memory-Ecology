@@ -7,7 +7,7 @@ import {
   deserializeGraph,
   findLatestNode,
   serializeGraph,
-} from "../graph.js";
+} from "../graph/graph.js";
 
 const graph = createEmptyGraph();
 const objectiveNode = createNode({

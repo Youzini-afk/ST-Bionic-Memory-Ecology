@@ -10,8 +10,8 @@ import {
   rebindProcessedHistoryStateToChat,
   rollbackBatch,
   snapshotProcessedMessageHashes,
-} from "../runtime-state.js";
-import { createEmptyGraph } from "../graph.js";
+} from "../runtime/runtime-state.js";
+import { createEmptyGraph } from "../graph/graph.js";
 
 const chat = [
   { is_user: true, mes: "你好" },

@@ -5,7 +5,7 @@ import {
   createMaintenanceJournalEntry,
   normalizeGraphRuntimeState,
   undoLatestMaintenance,
-} from "../runtime-state.js";
+} from "../runtime/runtime-state.js";
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));

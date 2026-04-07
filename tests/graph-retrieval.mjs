@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { diffuseAndRank } from "../diffusion.js";
+import { diffuseAndRank } from "../retrieval/diffusion.js";
 import {
   addEdge,
   addNode,
@@ -8,7 +8,7 @@ import {
   createEmptyGraph,
   createNode,
   invalidateEdge,
-} from "../graph.js";
+} from "../graph/graph.js";
 
 const graph = createEmptyGraph();
 

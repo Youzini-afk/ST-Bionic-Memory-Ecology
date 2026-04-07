@@ -2,7 +2,7 @@ import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced, substituteParamsExtended } from '../../../../../script.js';
 import { EnaPlannerStorage, migrateFromLWBIfNeeded } from './ena-planner-storage.js';
 import { DEFAULT_PROMPT_BLOCKS, BUILTIN_TEMPLATES } from './ena-planner-presets.js';
-import { debugLog } from '../debug-logging.js';
+import { debugLog } from '../runtime/debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';

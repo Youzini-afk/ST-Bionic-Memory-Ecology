@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { onManualExtractController } from "../extraction-controller.js";
-import { onRebuildController } from "../ui-actions-controller.js";
+import { onManualExtractController } from "../maintenance/extraction-controller.js";
+import { onRebuildController } from "../ui/ui-actions-controller.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(__dirname, "../index.js");

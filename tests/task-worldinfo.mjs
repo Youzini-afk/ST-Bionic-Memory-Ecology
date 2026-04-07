@@ -317,9 +317,9 @@ try {
       comment: entry.comment,
     }));
 
-  const { resolveTaskWorldInfo } = await import("../task-worldinfo.js");
+  const { resolveTaskWorldInfo } = await import("../prompting/task-worldinfo.js");
   const { buildTaskPrompt, buildTaskLlmPayload } = await import(
-    "../prompt-builder.js"
+    "../prompting/prompt-builder.js"
   );
 
   const emptyTriggerWorldInfo = await resolveTaskWorldInfo({
@@ -844,7 +844,7 @@ try {
     ["user", "system"],
   );
 
-  const { initializeHostAdapter } = await import("../host-adapter/index.js");
+  const { initializeHostAdapter } = await import("../host/adapter/index.js");
   const partialBridgeCalls = [];
   const partialBridgeEntriesByWorldbook = {
     "main-book": [createConstantWorldbookEntry(11, "主书原名", "主书内容。", "主书注释")],
@@ -950,7 +950,7 @@ try {
   }
 
   try {
-    const { initializeHostAdapter } = await import("../host-adapter/index.js");
+    const { initializeHostAdapter } = await import("../host/adapter/index.js");
     initializeHostAdapter({});
   } catch {
     // ignore reset failures in test cleanup

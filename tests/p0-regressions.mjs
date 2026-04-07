@@ -4,7 +4,7 @@ import { createRequire, registerHooks } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { pruneProcessedMessageHashesFromFloor } from "../chat-history.js";
+import { pruneProcessedMessageHashesFromFloor } from "../maintenance/chat-history.js";
 import {
   onBeforeCombinePromptsController,
   onCharacterMessageRenderedController,
@@ -16,18 +16,18 @@ import {
   onMessageSwipedController,
   onUserMessageRenderedController,
   registerCoreEventHooksController,
-} from "../event-binding.js";
+} from "../host/event-binding.js";
 import {
   onRerollController,
   resolveAutoExtractionPlanController,
   runExtractionController,
-} from "../extraction-controller.js";
+} from "../maintenance/extraction-controller.js";
 import {
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
   GRAPH_PERSISTENCE_META_KEY,
   MODULE_NAME,
-} from "../graph-persistence.js";
+} from "../graph/graph-persistence.js";
 import {
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
@@ -37,7 +37,7 @@ import {
   resolveFinalRecallInjectionSource,
   resolveGenerationTargetUserMessageIndex,
   writePersistedRecallToUserMessage,
-} from "../recall-persistence.js";
+} from "../retrieval/recall-persistence.js";
 import {
   BATCH_STAGE_ORDER,
   BATCH_STAGE_SEVERITY,
@@ -61,12 +61,12 @@ import {
   pushBatchStageArtifact,
   setBatchStageOutcome,
   shouldRunRecallForTransaction,
-} from "../ui-status.js";
+} from "../ui/ui-status.js";
 import {
   onManualCompressController,
   onManualEvolveController,
   onManualSleepController,
-} from "../ui-actions-controller.js";
+} from "../ui/ui-actions-controller.js";
 import { createGenerationRecallHarness } from "./helpers/generation-recall-harness.mjs";
 
 const waitForTick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -151,25 +151,25 @@ const {
   createEdge,
   addEdge,
   removeNode,
-} = await import("../graph.js");
-const { compressType } = await import("../compressor.js");
-const { syncGraphVectorIndex } = await import("../vector-index.js");
+} = await import("../graph/graph.js");
+const { compressType } = await import("../maintenance/compressor.js");
+const { syncGraphVectorIndex } = await import("../vector/vector-index.js");
 const {
   extractMemories,
   generateReflection,
   generateSynopsis,
-} = await import("../extractor.js");
-const { consolidateMemories } = await import("../consolidator.js");
+} = await import("../maintenance/extractor.js");
+const { consolidateMemories } = await import("../maintenance/consolidator.js");
 const {
   createBatchJournalEntry,
   buildReverseJournalRecoveryPlan,
   normalizeGraphRuntimeState,
   rollbackBatch,
-} = await import("../runtime-state.js");
-const { createDefaultTaskProfiles } = await import("../prompt-profiles.js");
+} = await import("../runtime/runtime-state.js");
+const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
 const extensionsApi = await import("../../../../extensions.js");
-const llm = await import("../llm.js");
-const embedding = await import("../embedding.js");
+const llm = await import("../llm/llm.js");
+const embedding = await import("../vector/embedding.js");
 
 if (originalRequire === undefined) {
   delete globalThis.require;
@@ -1170,7 +1170,7 @@ async function createRecallUiHarness({
     result: null,
   };
   context.globalThis = context;
-  const recallUiModule = await import("../recall-message-ui.js");
+  const recallUiModule = await import("../ui/recall-message-ui.js");
   context.createRecallCardElement = recallUiModule.createRecallCardElement;
   context.updateRecallCardData = recallUiModule.updateRecallCardData;
   context.MutationObserver = harness.MutationObserver;
@@ -1401,6 +1401,7 @@ async function testRecallCardSurvivesLateMessageDomReplacement() {
       isUser: true,
     });
     harness.chatRoot.appendChild(replacementElement);
+    harness.api.schedulePersistedRecallMessageUiRefresh();
 
     await waitForTick();
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -4351,7 +4352,7 @@ async function testGenerationRecallLockedSourceDoesNotDriftWithinTransaction() {
 }
 
 async function testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable() {
-  const { runRecallController } = await import("../recall-controller.js");
+  const { runRecallController } = await import("../retrieval/recall-controller.js");
   const statuses = [];
   const graph = normalizeGraphRuntimeState(createEmptyGraph(), "chat-main");
   graph.nodes.push(
@@ -4784,7 +4785,7 @@ async function testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh()
 
 async function testRecallSubGraphAndDataLayerEntryPoints() {
   // Sub-graph build test (pure function, no DOM needed)
-  const { buildRecallSubGraph } = await import("../recall-message-ui.js");
+  const { buildRecallSubGraph } = await import("../ui/recall-message-ui.js");
 
   const graph = {
     nodes: [

@@ -1,7 +1,7 @@
 // wired into npm run test:all
 import assert from "node:assert/strict";
-import { MODULE_NAME } from "../graph-persistence.js";
-import { isTrivialUserInput } from "../ui-status.js";
+import { MODULE_NAME } from "../graph/graph-persistence.js";
+import { isTrivialUserInput } from "../ui/ui-status.js";
 import { createGenerationRecallHarness } from "./helpers/generation-recall-harness.mjs";
 
 function assertEmptyRecallInputRecord(record) {
@@ -183,6 +183,15 @@ async function testOnMessageSentSkipsTrivialText() {
 async function testNonTrivialGenerationClearsResidualTrivialSkip() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [];
+  harness.result.setGraphPersistenceState({
+    loadState: "loaded",
+    dbReady: true,
+  });
+  harness.currentGraph = {
+    nodes: [],
+    edges: [],
+    historyState: {},
+  };
   harness.__sendTextareaValue = "/echo";
   harness.result.onGenerationStarted("normal", {}, false);
   assert.ok(harness.result.getCurrentGenerationTrivialSkip());
@@ -194,8 +203,11 @@ async function testNonTrivialGenerationClearsResidualTrivialSkip() {
 
   harness.chat.push({ is_user: false, mes: "assistant after non-trivial" });
   harness.invokeOnMessageReceived(0, "");
-  await Promise.resolve();
-  assert.equal(harness.runExtractionCalls.length, 1);
+  const pending = harness.result.getPendingAutoExtraction();
+  assert.equal(pending?.messageId, 0);
+  assert.equal(pending?.reason, "generation-running");
+  assert.equal(harness.result.getCurrentGenerationTrivialSkip(), null);
+  harness.result.clearPendingAutoExtraction();
 }
 
 async function testNonTargetMessageIdDoesNotConsumeFlag() {
@@ -207,6 +219,15 @@ async function testNonTargetMessageIdDoesNotConsumeFlag() {
     { is_user: false, mes: "old assistant" },
     { is_user: true, mes: "u4" },
   ];
+  harness.result.setGraphPersistenceState({
+    loadState: "loaded",
+    dbReady: true,
+  });
+  harness.currentGraph = {
+    nodes: [],
+    edges: [],
+    historyState: {},
+  };
   harness.__sendTextareaValue = "/echo";
   harness.result.onGenerationStarted("normal", {}, false);
   assert.equal(
@@ -215,14 +236,17 @@ async function testNonTargetMessageIdDoesNotConsumeFlag() {
   );
 
   harness.invokeOnMessageReceived(3, "");
-  await Promise.resolve();
-  assert.equal(harness.runExtractionCalls.length, 1);
+  const pendingBeforeTarget = harness.result.getPendingAutoExtraction();
+  assert.equal(pendingBeforeTarget?.messageId, 3);
+  assert.equal(pendingBeforeTarget?.reason, "generation-running");
+  assert.equal(harness.runExtractionCalls.length, 0);
   assert.ok(harness.result.getCurrentGenerationTrivialSkip());
 
   harness.chat.push({ is_user: false, mes: "target assistant" });
   harness.invokeOnMessageReceived(5, "");
-  assert.equal(harness.runExtractionCalls.length, 1);
+  assert.equal(harness.runExtractionCalls.length, 0);
   assert.equal(harness.result.getCurrentGenerationTrivialSkip(), null);
+  harness.result.clearPendingAutoExtraction();
 }
 
 async function testNullMessageIdFallsBackToLastAssistantIndex() {

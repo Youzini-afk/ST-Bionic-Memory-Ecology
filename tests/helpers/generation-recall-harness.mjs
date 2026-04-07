@@ -8,21 +8,21 @@ import {
   onGenerationStartedController,
   onMessageReceivedController,
   onMessageSentController,
-} from "../../event-binding.js";
-import { resolveAutoExtractionPlanController } from "../../extraction-controller.js";
+} from "../../host/event-binding.js";
+import { resolveAutoExtractionPlanController } from "../../maintenance/extraction-controller.js";
 import {
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
   GRAPH_PERSISTENCE_META_KEY,
   MODULE_NAME,
-} from "../../graph-persistence.js";
+} from "../../graph/graph-persistence.js";
 import {
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
   readPersistedRecallFromUserMessage,
   resolveFinalRecallInjectionSource,
   writePersistedRecallToUserMessage,
-} from "../../recall-persistence.js";
+} from "../../retrieval/recall-persistence.js";
 import {
   createGraphPersistenceState,
   createRecallInputRecord,
@@ -39,7 +39,7 @@ import {
   normalizeRecallInputText,
   normalizeStageNoticeLevel,
   shouldRunRecallForTransaction,
-} from "../../ui-status.js";
+} from "../../ui/ui-status.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../../index.js");

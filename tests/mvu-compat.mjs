@@ -4,7 +4,7 @@ const {
   isLikelyMvuWorldInfoContent,
   isMvuTaggedWorldInfoNameOrComment,
   sanitizeMvuContent,
-} = await import("../mvu-compat.js");
+} = await import("../prompting/mvu-compat.js");
 
 assert.equal(
   isMvuTaggedWorldInfoNameOrComment("[mvu_update] 状态", ""),

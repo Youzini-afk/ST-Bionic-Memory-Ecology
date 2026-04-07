@@ -8,8 +8,8 @@ import {
   buildBmeDbName,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
-} from "../bme-db.js";
-import { onMessageReceivedController } from "../event-binding.js";
+} from "../sync/bme-db.js";
+import { onMessageReceivedController } from "../host/event-binding.js";
 import {
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
@@ -35,20 +35,20 @@ import {
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
   writeGraphShadowSnapshot,
-} from "../graph-persistence.js";
+} from "../graph/graph-persistence.js";
 import {
   createEmptyGraph,
   deserializeGraph,
   getGraphStats,
   getNode,
   serializeGraph,
-} from "../graph.js";
+} from "../graph/graph.js";
 import {
   buildPersistedRecallRecord,
   readPersistedRecallFromUserMessage,
-} from "../recall-persistence.js";
-import { getNodeDisplayName } from "../node-labels.js";
-import { normalizeGraphRuntimeState } from "../runtime-state.js";
+} from "../retrieval/recall-persistence.js";
+import { getNodeDisplayName } from "../graph/node-labels.js";
+import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
 import {
   clampFloat,
   clampInt,
@@ -63,7 +63,7 @@ import {
   isFreshRecallInputRecord,
   normalizeRecallInputText,
   normalizeStageNoticeLevel,
-} from "../ui-status.js";
+} from "../ui/ui-status.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
@@ -273,6 +273,18 @@ async function createGraphPersistenceHarness({
     __indexedDbSnapshots: indexedDbSnapshotMap,
     sessionStorage: storage,
     localStorage,
+    extension_settings: {
+      [MODULE_NAME]: {},
+    },
+    migrateLegacyTaskProfiles(settings = {}) {
+      return {
+        taskProfilesVersion: Number(settings?.taskProfilesVersion || 0),
+        taskProfiles:
+          settings?.taskProfiles && typeof settings.taskProfiles === "object"
+            ? settings.taskProfiles
+            : {},
+      };
+    },
     setTimeout(fn, delay) {
       const id = nextTimerId++;
       timers.set(id, { fn, delay });
@@ -325,6 +337,17 @@ async function createGraphPersistenceHarness({
       runtimeContext.__panelRefreshCount += 1;
     },
     __panelRefreshCount: 0,
+    getLastProcessedAssistantFloor() {
+      const historyFloor = Number(
+        runtimeContext.currentGraph?.historyState?.lastProcessedAssistantFloor,
+      );
+      if (Number.isFinite(historyFloor)) {
+        return historyFloor;
+      }
+      const legacySeq = Number(runtimeContext.currentGraph?.lastProcessedSeq);
+      if (Number.isFinite(legacySeq)) return legacySeq;
+      return -1;
+    },
     createEmptyGraph,
     normalizeGraphRuntimeState,
     serializeGraph,

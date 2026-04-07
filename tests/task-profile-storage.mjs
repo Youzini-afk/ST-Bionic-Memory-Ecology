@@ -11,7 +11,7 @@ import {
   importTaskProfile,
   restoreDefaultTaskProfile,
   upsertTaskProfile,
-} from "../prompt-profiles.js";
+} from "../prompting/prompt-profiles.js";
 
 const taskProfiles = createDefaultTaskProfiles();
 const baseProfile = taskProfiles.extract.profiles[0];

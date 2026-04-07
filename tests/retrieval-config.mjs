@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 async function loadRetrieve(stubs) {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  const retrieverPath = path.resolve(__dirname, "../retriever.js");
+  const retrieverPath = path.resolve(__dirname, "../retrieval/retriever.js");
   const source = await fs.readFile(retrieverPath, "utf8");
   const transformed = `${source
     .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\r?\n/gm, "")
@@ -16,6 +16,7 @@ this.retrieve = retrieve;
 
   const context = vm.createContext({
     console: { log() {}, error() {}, warn() {} },
+    debugLog() {},
     ...stubs,
   });
   new vm.Script(transformed).runInContext(context);

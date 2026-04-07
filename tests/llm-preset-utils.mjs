@@ -8,7 +8,7 @@ import {
   resolveLlmConfigSelection,
   resolveActiveLlmPresetName,
   sanitizeLlmPresetSettings,
-} from "../llm-preset-utils.js";
+} from "../llm/llm-preset-utils.js";
 
 assert.deepEqual(createLlmConfigSnapshot({
   llmApiUrl: " https://example.com/v1 ",
