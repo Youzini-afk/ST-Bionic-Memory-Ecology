@@ -9,6 +9,7 @@ import {
   onMessageReceivedController,
   onMessageSentController,
 } from "../../event-binding.js";
+import { resolveAutoExtractionPlanController } from "../../extraction-controller.js";
 import {
   GRAPH_LOAD_STATES,
   GRAPH_METADATA_KEY,
@@ -26,11 +27,11 @@ import {
   createGraphPersistenceState,
   createRecallInputRecord,
   createRecallRunResult,
-  createUiStatus,
-  getGenerationRecallHookStateFromResult,
-  getRecallHookLabel,
-  getStageNoticeDuration,
-  getStageNoticeTitle,
+      createUiStatus,
+      getGenerationRecallHookStateFromResult,
+      getRecallHookLabel,
+      getStageNoticeDuration,
+      getStageNoticeTitle,
   hashRecallInput,
   isFreshRecallInputRecord,
   isTerminalGenerationRecallHookState,
@@ -112,6 +113,10 @@ export function createGenerationRecallHarness(options = {}) {
       getCurrentChatId: () => "chat-main",
       normalizeRecallInputText: (text = "") => String(text || "").trim(),
       isTrivialUserInput,
+      getAssistantTurns: (chat = []) =>
+        chat.flatMap((message, index) =>
+          !message?.is_user && !message?.is_system ? [index] : [],
+        ),
       getLatestUserChatMessage: (chat = []) =>
         [...chat].reverse().find((message) => message?.is_user) || null,
       getLastNonSystemChatMessage: (chat = []) =>
@@ -161,6 +166,7 @@ export function createGenerationRecallHarness(options = {}) {
       GRAPH_LOAD_STATES,
       GRAPH_METADATA_KEY,
       GRAPH_PERSISTENCE_META_KEY,
+      resolveAutoExtractionPlanController,
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
       onGenerationStartedController,
@@ -334,7 +340,10 @@ export function createGenerationRecallHarness(options = {}) {
             context.result.getIsHostGenerationRunning(),
           getPendingHostGenerationInputSnapshot:
             context.result.getPendingHostGenerationInputSnapshot,
-          getPendingRecallSendIntent: () => context.result.getPendingRecallSendIntent(),
+          getPendingRecallSendIntent: () =>
+            context.result.getPendingRecallSendIntent(),
+          getLastProcessedAssistantFloor: () => -1,
+          getSettings: () => context.settings,
           isAssistantChatMessage: (message) =>
             Boolean(message) && !message.is_user && !message.is_system,
           isFreshRecallInputRecord,
@@ -346,6 +355,24 @@ export function createGenerationRecallHarness(options = {}) {
             context.extractionIssues.push(String(message || ""));
           },
           queueMicrotask: (task) => task(),
+          resolveAutoExtractionPlan: (options = {}) =>
+            resolveAutoExtractionPlanController(
+              {
+                getAssistantTurns(chat = []) {
+                  return chat.flatMap((message, index) =>
+                    !message?.is_user && !message?.is_system ? [index] : [],
+                  );
+                },
+                getLastProcessedAssistantFloor: () => -1,
+                getSettings: () => context.settings,
+                getSmartTriggerDecision: () => ({
+                  triggered: false,
+                  score: 0,
+                  reasons: [],
+                }),
+              },
+              options,
+            ),
           runExtraction: context.runExtraction,
           refreshPersistedRecallMessageUi: () => {
             context.recallUiRefreshCalls += 1;

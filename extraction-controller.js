@@ -3,6 +3,177 @@
 
 import { debugLog } from "./debug-logging.js";
 
+function toSafeFloor(value, fallback = null) {
+  if (value == null || value === "") return fallback;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
+}
+
+function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(numeric)));
+}
+
+function isAssistantFloor(runtime, chat, index) {
+  if (!Array.isArray(chat)) return false;
+  const message = chat[index];
+  if (!message) return false;
+  if (typeof runtime?.isAssistantChatMessage === "function") {
+    return Boolean(
+      runtime.isAssistantChatMessage(message, {
+        index,
+        chat,
+      }),
+    );
+  }
+  return Boolean(message) && !message.is_user && !message.is_system;
+}
+
+function getAssistantTurnsFallback(runtime, chat = []) {
+  if (!Array.isArray(chat)) return [];
+  const assistantTurns = [];
+  for (let index = 0; index < chat.length; index++) {
+    if (!isAssistantFloor(runtime, chat, index)) continue;
+    if (!String(chat[index]?.mes ?? "").trim()) continue;
+    assistantTurns.push(index);
+  }
+  return assistantTurns;
+}
+
+function normalizeSmartTriggerDecision(decision = null) {
+  if (!decision || typeof decision !== "object") {
+    return { triggered: false, score: 0, reasons: [] };
+  }
+  return {
+    triggered: decision.triggered === true,
+    score: Number.isFinite(Number(decision.score)) ? Number(decision.score) : 0,
+    reasons: Array.isArray(decision.reasons)
+      ? decision.reasons.map((item) => String(item || "")).filter(Boolean)
+      : [],
+  };
+}
+
+export function resolveAutoExtractionPlanController(
+  runtime,
+  {
+    chat = null,
+    settings = null,
+    lastProcessedAssistantFloor = null,
+    lockedEndFloor = null,
+  } = {},
+) {
+  const resolvedChat = Array.isArray(chat)
+    ? chat
+    : runtime?.getContext?.()?.chat || [];
+  const resolvedSettings =
+    settings && typeof settings === "object"
+      ? settings
+      : runtime?.getSettings?.() || {};
+  const safeLastProcessedAssistantFloor = toSafeFloor(
+    lastProcessedAssistantFloor,
+    toSafeFloor(runtime?.getLastProcessedAssistantFloor?.(), -1),
+  );
+  const safeLockedEndFloor = toSafeFloor(lockedEndFloor, null);
+  const strategy =
+    resolvedSettings.extractAutoDelayLatestAssistant === true
+      ? "lag-one-assistant"
+      : "normal";
+  const extractEvery = clampIntValue(
+    resolvedSettings.extractEvery,
+    1,
+    1,
+    50,
+  );
+  const assistantTurns =
+    typeof runtime?.getAssistantTurns === "function"
+      ? runtime.getAssistantTurns(resolvedChat)
+      : getAssistantTurnsFallback(runtime, resolvedChat);
+  const pendingAssistantTurns = assistantTurns.filter(
+    (floor) => floor > safeLastProcessedAssistantFloor,
+  );
+  const candidateAssistantTurns =
+    safeLockedEndFloor == null
+      ? pendingAssistantTurns
+      : pendingAssistantTurns.filter((floor) => floor <= safeLockedEndFloor);
+
+  let eligibleAssistantTurns = candidateAssistantTurns;
+  let waitingForNextAssistant = false;
+  if (safeLockedEndFloor == null && strategy === "lag-one-assistant") {
+    if (candidateAssistantTurns.length <= 1) {
+      eligibleAssistantTurns = [];
+      waitingForNextAssistant = candidateAssistantTurns.length === 1;
+    } else {
+      eligibleAssistantTurns = candidateAssistantTurns.slice(0, -1);
+    }
+  }
+
+  const eligibleEndFloor =
+    eligibleAssistantTurns.length > 0
+      ? eligibleAssistantTurns[eligibleAssistantTurns.length - 1]
+      : null;
+  const smartTriggerDecision =
+    resolvedSettings.enableSmartTrigger && eligibleEndFloor != null
+      ? normalizeSmartTriggerDecision(
+          runtime?.getSmartTriggerDecision?.(
+            resolvedChat,
+            safeLastProcessedAssistantFloor,
+            resolvedSettings,
+            eligibleEndFloor,
+          ),
+        )
+      : { triggered: false, score: 0, reasons: [] };
+  const meetsExtractEvery = eligibleAssistantTurns.length >= extractEvery;
+  const canRun =
+    eligibleAssistantTurns.length > 0 &&
+    (meetsExtractEvery || smartTriggerDecision.triggered);
+  const batchAssistantTurns = canRun
+    ? smartTriggerDecision.triggered
+      ? eligibleAssistantTurns
+      : eligibleAssistantTurns.slice(0, extractEvery)
+    : [];
+  const plannedBatchEndFloor =
+    batchAssistantTurns.length > 0
+      ? batchAssistantTurns[batchAssistantTurns.length - 1]
+      : null;
+
+  let reason = "";
+  if (pendingAssistantTurns.length === 0) {
+    reason = "no-unprocessed-assistant-turns";
+  } else if (candidateAssistantTurns.length === 0) {
+    reason =
+      safeLockedEndFloor == null
+        ? "no-candidate-assistant-turns"
+        : "locked-target-missing";
+  } else if (waitingForNextAssistant) {
+    reason = "waiting-next-assistant";
+  } else if (!canRun && !smartTriggerDecision.triggered) {
+    reason = "below-extract-every";
+  }
+
+  return {
+    strategy,
+    chat: resolvedChat,
+    settings: resolvedSettings,
+    lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+    lockedEndFloor: safeLockedEndFloor,
+    extractEvery,
+    pendingAssistantTurns,
+    candidateAssistantTurns,
+    eligibleAssistantTurns,
+    eligibleEndFloor,
+    waitingForNextAssistant,
+    smartTriggerDecision,
+    meetsExtractEvery,
+    canRun,
+    batchAssistantTurns,
+    plannedBatchEndFloor,
+    startIdx: batchAssistantTurns[0] ?? null,
+    endIdx: plannedBatchEndFloor,
+    reason,
+  };
+}
+
 export async function executeExtractionBatchController(
   runtime,
   {
@@ -126,20 +297,38 @@ export async function executeExtractionBatchController(
   };
 }
 
-export async function runExtractionController(runtime) {
+export async function runExtractionController(runtime, options = {}) {
+  const lockedEndFloor = toSafeFloor(options?.lockedEndFloor, null);
+  const triggerSource = String(options?.triggerSource || "auto").trim() || "auto";
+  const settings = runtime.getSettings?.() || {};
+  const context = runtime.getContext?.() || {};
+  const chat = Array.isArray(context?.chat) ? context.chat : [];
+  const plan = resolveAutoExtractionPlanController(runtime, {
+    chat,
+    settings,
+    lockedEndFloor,
+  });
+  const deferredTargetEndFloor =
+    plan.plannedBatchEndFloor ?? lockedEndFloor;
+
   if (runtime.getIsExtracting()) {
     runtime.console?.debug?.("[ST-BME] auto extraction deferred: extraction already in progress");
-    runtime.deferAutoExtraction?.("extracting");
+    runtime.deferAutoExtraction?.("extracting", {
+      targetEndFloor: deferredTargetEndFloor,
+      strategy: plan.strategy,
+    });
     return;
   }
 
-  const settings = runtime.getSettings();
   if (!settings.enabled) return;
   if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
     runtime.console?.debug?.("[ST-BME] auto extraction blocked: graph-not-ready", {
       loadState: runtime.getGraphPersistenceState?.()?.loadState || "",
     });
-    runtime.deferAutoExtraction?.("graph-not-ready");
+    runtime.deferAutoExtraction?.("graph-not-ready", {
+      targetEndFloor: deferredTargetEndFloor,
+      strategy: plan.strategy,
+    });
     runtime.setLastExtractionStatus(
       "等待图谱加载",
       runtime.getGraphMutationBlockReason("自动提取"),
@@ -158,44 +347,28 @@ export async function runExtractionController(runtime) {
       recovering: runtime.getIsRecoveringHistory?.() === true,
     });
     if (runtime.getIsRecoveringHistory?.()) {
-      runtime.deferAutoExtraction?.("history-recovering");
+      runtime.deferAutoExtraction?.("history-recovering", {
+        targetEndFloor: deferredTargetEndFloor,
+        strategy: plan.strategy,
+      });
     }
     return;
   }
 
-  const context = runtime.getContext();
-  const chat = context.chat;
   if (!chat || chat.length === 0) return;
-
-  const assistantTurns = runtime.getAssistantTurns(chat);
-  const lastProcessed = runtime.getLastProcessedAssistantFloor();
-  const unprocessedAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
-
-  if (unprocessedAssistantTurns.length === 0) return;
-
-  const extractEvery = runtime.clampInt(settings.extractEvery, 1, 1, 50);
-  const smartTriggerDecision = settings.enableSmartTrigger
-    ? runtime.getSmartTriggerDecision(chat, lastProcessed, settings)
-    : { triggered: false, score: 0, reasons: [] };
-
-  if (
-    unprocessedAssistantTurns.length < extractEvery &&
-    !smartTriggerDecision.triggered
-  ) {
+  if (!plan.canRun || plan.startIdx == null || plan.endIdx == null) {
     return;
   }
 
-  const batchAssistantTurns = smartTriggerDecision.triggered
-    ? unprocessedAssistantTurns
-    : unprocessedAssistantTurns.slice(0, extractEvery);
-  const startIdx = batchAssistantTurns[0];
-  const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+  const startIdx = plan.startIdx;
+  const endIdx = plan.endIdx;
+  const smartTriggerDecision = plan.smartTriggerDecision;
   runtime.setIsExtracting(true);
   const extractionController = runtime.beginStageAbortController("extraction");
   const extractionSignal = extractionController.signal;
   runtime.setLastExtractionStatus(
     "提取中",
-    `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}`,
+    `楼层 ${startIdx}-${endIdx}${smartTriggerDecision.triggered ? " · 智能触发" : ""}${triggerSource !== "auto" ? ` · ${triggerSource}` : ""}`,
     "running",
     { syncRuntime: true },
   );

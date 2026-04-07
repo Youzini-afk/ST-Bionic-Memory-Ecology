@@ -83,6 +83,7 @@ const defaultSettings = await loadDefaultSettings();
 const { mergePersistedSettings } = await loadSettingsCompatHelpers();
 
 assert.equal(defaultSettings.extractContextTurns, 2);
+assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
 assert.equal(defaultSettings.recallTopK, 20);
 assert.equal(defaultSettings.recallMaxNodes, 8);
 assert.equal(defaultSettings.recallEnableVectorPrefilter, true);
@@ -140,8 +141,10 @@ assert.ok(defaultSettings.taskProfiles.recall);
 
 const migratedSettings = mergePersistedSettings({
   maintenanceAutoMinNewNodes: 7,
+  extractAutoDelayLatestAssistant: true,
 });
 assert.equal(migratedSettings.consolidationAutoMinNewNodes, 7);
+assert.equal(migratedSettings.extractAutoDelayLatestAssistant, true);
 assert.equal(migratedSettings.enableAutoCompression, true);
 assert.equal(migratedSettings.compressionEveryN, 10);
 assert.equal("maintenanceAutoMinNewNodes" in migratedSettings, false);

@@ -18,6 +18,12 @@ function getTimerApi(runtime) {
   };
 }
 
+function toSafeFloor(value, fallback = null) {
+  if (value == null || value === "") return fallback;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   if (typeof makeFirst === "function") {
@@ -650,6 +656,12 @@ export function onMessageReceivedController(
 
   const context = runtime.getContext();
   const chat = context?.chat;
+  const settings =
+    typeof runtime.getSettings === "function" ? runtime.getSettings() : {};
+  const lastProcessedAssistantFloor =
+    typeof runtime.getLastProcessedAssistantFloor === "function"
+      ? runtime.getLastProcessedAssistantFloor()
+      : -1;
   const receivedMessage =
     Array.isArray(chat) && Number.isFinite(Number(messageId))
       ? chat[Number(messageId)]
@@ -670,6 +682,28 @@ export function onMessageReceivedController(
       runtime.console?.info?.(
         "[ST-BME] trivial-input skip: extraction bypassed",
         { messageId: targetMessageIndex },
+      );
+      runtime.refreshPersistedRecallMessageUi?.();
+      return;
+    }
+    const autoExtractionPlan =
+      typeof runtime.resolveAutoExtractionPlan === "function"
+        ? runtime.resolveAutoExtractionPlan({
+            chat,
+            settings,
+            lastProcessedAssistantFloor,
+          })
+        : null;
+    if (!autoExtractionPlan?.canRun) {
+      runtime.console?.debug?.(
+        "[ST-BME] assistant message received, auto extraction not runnable yet",
+        {
+          messageId: Number.isFinite(Number(targetMessageIndex))
+            ? Number(targetMessageIndex)
+            : null,
+          reason: String(autoExtractionPlan?.reason || "not-runnable"),
+          strategy: String(autoExtractionPlan?.strategy || "normal"),
+        },
       );
       runtime.refreshPersistedRecallMessageUi?.();
       return;
@@ -695,21 +729,29 @@ export function onMessageReceivedController(
           messageId: Number.isFinite(Number(targetMessageIndex))
             ? Number(targetMessageIndex)
             : null,
+          targetEndFloor: toSafeFloor(autoExtractionPlan.plannedBatchEndFloor, null),
         },
       );
       runtime.deferAutoExtraction("generation-running", {
         messageId: targetMessageIndex,
+        targetEndFloor: autoExtractionPlan.plannedBatchEndFloor,
+        strategy: autoExtractionPlan.strategy,
       });
       runtime.refreshPersistedRecallMessageUi?.();
       return;
     }
     enqueueMicrotask(() => {
-      void runtime.runExtraction().catch((error) => {
+      void runtime
+        .runExtraction({
+          lockedEndFloor: autoExtractionPlan.plannedBatchEndFloor,
+          triggerSource: "message-received",
+        })
+        .catch((error) => {
         runtime.console.error("[ST-BME] 异步自动提取失败:", error);
         runtime.notifyExtractionIssue(
           error?.message || String(error) || "自动提取失败",
         );
-      });
+        });
     });
   }
   runtime.refreshPersistedRecallMessageUi?.();

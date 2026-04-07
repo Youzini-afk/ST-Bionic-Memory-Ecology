@@ -2281,6 +2281,10 @@ function _refreshConfigTab() {
     "bme-setting-extract-context-turns",
     settings.extractContextTurns ?? 2,
   );
+  _setCheckboxValue(
+    "bme-setting-extract-auto-delay-latest-assistant",
+    settings.extractAutoDelayLatestAssistant === true,
+  );
   _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
   _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
   _setInputValue(
@@ -2663,6 +2667,11 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
     _patchSettings({ extractContextTurns: value }),
+  );
+  bindCheckbox(
+    "bme-setting-extract-auto-delay-latest-assistant",
+    (checked) =>
+      _patchSettings({ extractAutoDelayLatestAssistant: checked }),
   );
   bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
     _patchSettings({ recallTopK: value }),

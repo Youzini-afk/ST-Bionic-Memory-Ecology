@@ -19,6 +19,7 @@ import {
 } from "../event-binding.js";
 import {
   onRerollController,
+  resolveAutoExtractionPlanController,
   runExtractionController,
 } from "../extraction-controller.js";
 import {
@@ -78,6 +79,9 @@ const extensionsShimSource = [
 const scriptShimSource = [
   "export function getRequestHeaders() {",
   "  return { 'Content-Type': 'application/json' };",
+  "}",
+  "export function substituteParamsExtended(text = '') {",
+  "  return String(text ?? '');",
   "}",
 ].join("\n");
 const openAiShimSource = [
@@ -218,6 +222,38 @@ const schema = [
     columns: [{ name: "summary" }, { name: "scope" }],
   },
 ];
+
+function buildAutoExtractionPlan({
+  chat = [],
+  settings = {},
+  lastProcessedAssistantFloor = -1,
+  lockedEndFloor = null,
+  smartTriggerDecision = null,
+} = {}) {
+  return resolveAutoExtractionPlanController(
+    {
+      getAssistantTurns(sourceChat = []) {
+        return sourceChat.flatMap((message, index) =>
+          !message?.is_user && !message?.is_system ? [index] : [],
+        );
+      },
+      getLastProcessedAssistantFloor: () => lastProcessedAssistantFloor,
+      getSettings: () => settings,
+      getSmartTriggerDecision: () =>
+        smartTriggerDecision || {
+          triggered: false,
+          score: 0,
+          reasons: [],
+        },
+    },
+    {
+      chat,
+      settings,
+      lastProcessedAssistantFloor,
+      lockedEndFloor,
+    },
+  );
+}
 
 function createBatchStageHarness() {
   return fs.readFile(indexPath, "utf8").then((source) => {
@@ -3677,6 +3713,15 @@ async function testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender
 async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask() {
   let runExtractionCalls = 0;
   let refreshCalls = 0;
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const settings = {
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: false,
+    enableSmartTrigger: false,
+  };
 
   onMessageReceivedController(
     {
@@ -3687,14 +3732,20 @@ async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask()
       createRecallInputRecord: () => ({ text: "", at: 0 }),
       setPendingRecallSendIntent() {},
       getContext: () => ({
-        chat: [
-          { is_user: true, mes: "u1" },
-          { is_user: false, mes: "a1" },
-        ],
+        chat,
       }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
       isAssistantChatMessage(message) {
         return Boolean(message) && !message.is_user && !message.is_system;
       },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
       runExtraction: async () => {
         runExtractionCalls += 1;
       },
@@ -3719,6 +3770,15 @@ async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask()
 async function testMessageReceivedDefersExtractionDuringHostGeneration() {
   let runExtractionCalls = 0;
   const deferred = [];
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const settings = {
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: false,
+    enableSmartTrigger: false,
+  };
 
   onMessageReceivedController(
     {
@@ -3734,18 +3794,27 @@ async function testMessageReceivedDefersExtractionDuringHostGeneration() {
           messageId: Number.isFinite(Number(meta?.messageId))
             ? Number(meta.messageId)
             : null,
+          targetEndFloor: Number.isFinite(Number(meta?.targetEndFloor))
+            ? Number(meta.targetEndFloor)
+            : null,
         });
       },
       setPendingRecallSendIntent() {},
       getContext: () => ({
-        chat: [
-          { is_user: true, mes: "u1" },
-          { is_user: false, mes: "a1" },
-        ],
+        chat,
       }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
       isAssistantChatMessage(message) {
         return Boolean(message) && !message.is_user && !message.is_system;
       },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
       runExtraction: async () => {
         runExtractionCalls += 1;
       },
@@ -3766,8 +3835,196 @@ async function testMessageReceivedDefersExtractionDuringHostGeneration() {
     {
       reason: "generation-running",
       messageId: 1,
+      targetEndFloor: 1,
     },
   ]);
+}
+
+async function testMessageReceivedLagModeWaitsSilentlyForNextAssistant() {
+  let runExtractionCalls = 0;
+  const deferred = [];
+  let refreshCalls = 0;
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const settings = {
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: true,
+    enableSmartTrigger: false,
+  };
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({ chat }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
+      runExtraction: async () => {
+        runExtractionCalls += 1;
+      },
+      deferAutoExtraction(reason) {
+        deferred.push(reason);
+      },
+      console: {
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+    },
+    1,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls, 0);
+  assert.deepEqual(deferred, []);
+  assert.equal(refreshCalls, 1);
+}
+
+async function testMessageReceivedLagModeQueuesPreviousAssistantOnly() {
+  const runExtractionCalls = [];
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  const settings = {
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: true,
+    enableSmartTrigger: false,
+  };
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({ chat }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
+      runExtraction: async (options = {}) => {
+        runExtractionCalls.push({ ...options });
+      },
+      console: {
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {},
+    },
+    3,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls.length, 1);
+  assert.equal(runExtractionCalls[0]?.lockedEndFloor, 1);
+  assert.equal(runExtractionCalls[0]?.triggerSource, "message-received");
+}
+
+async function testLagModeSmartTriggerOnlyScoresEligibleWindow() {
+  const endFloors = [];
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+
+  const plan = resolveAutoExtractionPlanController(
+    {
+      getAssistantTurns(sourceChat = []) {
+        return sourceChat.flatMap((message, index) =>
+          !message?.is_user && !message?.is_system ? [index] : [],
+        );
+      },
+      getLastProcessedAssistantFloor: () => -1,
+      getSettings: () => ({
+        extractEvery: 10,
+        extractAutoDelayLatestAssistant: true,
+        enableSmartTrigger: true,
+      }),
+      getSmartTriggerDecision(_chat, _lastProcessed, _settings, endFloor) {
+        endFloors.push(endFloor);
+        return {
+          triggered: true,
+          score: 3,
+          reasons: ["test"],
+        };
+      },
+    },
+    {
+      chat,
+      settings: {
+        extractEvery: 10,
+        extractAutoDelayLatestAssistant: true,
+        enableSmartTrigger: true,
+      },
+      lastProcessedAssistantFloor: -1,
+    },
+  );
+
+  assert.equal(plan.canRun, true);
+  assert.deepEqual(endFloors, [1]);
+  assert.deepEqual(plan.batchAssistantTurns, [1]);
+}
+
+async function testLagModeRespectsExtractEveryAgainstEligibleWindow() {
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+    { is_user: true, mes: "u3" },
+    { is_user: false, mes: "a3" },
+  ];
+  const plan = buildAutoExtractionPlan({
+    chat,
+    settings: {
+      extractEvery: 2,
+      extractAutoDelayLatestAssistant: true,
+      enableSmartTrigger: false,
+    },
+    lastProcessedAssistantFloor: -1,
+  });
+
+  assert.equal(plan.canRun, true);
+  assert.deepEqual(plan.eligibleAssistantTurns, [1, 3]);
+  assert.deepEqual(plan.batchAssistantTurns, [1, 3]);
+  assert.equal(plan.plannedBatchEndFloor, 3);
 }
 
 async function testGenerationEndedResumesPendingAutoExtractionAfterSettle() {
@@ -3796,6 +4053,48 @@ async function testGenerationEndedResumesPendingAutoExtractionAfterSettle() {
   await new Promise((resolve) => setTimeout(resolve, 180));
 
   assert.equal(harness.runExtractionCalls.length, 1);
+  harness.result.clearPendingAutoExtraction();
+}
+
+async function testLagModePendingResumeKeepsLockedPreviousAssistantAfterLatestDisappears() {
+  const harness = await createGenerationRecallHarness();
+  harness.settings = {
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: true,
+    enableSmartTrigger: false,
+  };
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  harness.result.setGraphPersistenceState({
+    loadState: "loaded",
+    dbReady: true,
+    chatId: "chat-main",
+  });
+
+  harness.result.onGenerationStarted("normal", {}, false);
+  harness.invokeOnMessageReceived(3, "assistant");
+  await waitForTick();
+
+  assert.equal(harness.runExtractionCalls.length, 0);
+  assert.equal(
+    harness.result.getPendingAutoExtraction().targetEndFloor,
+    1,
+  );
+
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+  ];
+  harness.result.onGenerationEnded();
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(harness.runExtractionCalls.length, 1);
+  assert.equal(harness.runExtractionCalls[0]?.[0]?.lockedEndFloor, 1);
   harness.result.clearPendingAutoExtraction();
 }
 
@@ -5755,7 +6054,12 @@ await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
+await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
+await testMessageReceivedLagModeQueuesPreviousAssistantOnly();
+await testLagModeSmartTriggerOnlyScoresEligibleWindow();
+await testLagModeRespectsExtractEveryAgainstEligibleWindow();
 await testGenerationEndedResumesPendingAutoExtractionAfterSettle();
+await testLagModePendingResumeKeepsLockedPreviousAssistantAfterLatestDisappears();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
