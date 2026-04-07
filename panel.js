@@ -1755,6 +1755,7 @@ function _bindActions() {
       btn.disabled = true;
       btn.style.opacity = "0.5";
 
+      _showActionProgressUi(label);
       toastr.info(`${label} 进行中…`, "ST-BME", { timeOut: 2000 });
 
       try {
@@ -1804,6 +1805,7 @@ function _bindActions() {
         btn.style.opacity = "0.5";
       }
 
+      _showActionProgressUi("范围重建");
       toastr.info("范围重建 进行中…", "ST-BME", { timeOut: 2000 });
 
       try {
@@ -1855,6 +1857,7 @@ function _bindActions() {
         btn.style.opacity = "0.5";
       }
 
+      _showActionProgressUi("重新提取");
       try {
         await _actionHandlers.reroll?.({
           fromFloor: Number.isFinite(fromFloor) ? fromFloor : undefined,
@@ -5808,6 +5811,13 @@ function _refreshRuntimeStatus() {
   _setText("bme-status-meta", meta);
   _setText("bme-panel-status", text);
   _refreshGraphAvailabilityState();
+}
+
+function _showActionProgressUi(label, meta = "请稍候…") {
+  _setText("bme-status-text", `${label}中`);
+  _setText("bme-status-meta", meta);
+  _setText("bme-panel-status", `${label}中`);
+  updateFloatingBallStatus("running", `${label}中`);
 }
 
 function _patchSettings(patch = {}, options = {}) {

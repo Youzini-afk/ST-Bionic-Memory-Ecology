@@ -1891,6 +1891,61 @@ async function testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure() {
   }
 }
 
+async function testCompressTypeAcceptsTopLevelFieldsResult() {
+  const graph = createEmptyGraph();
+  const typeDef = {
+    id: "event",
+    label: "事件",
+    columns: [
+      { name: "title" },
+      { name: "summary" },
+      { name: "participants" },
+      { name: "status" },
+    ],
+    compression: {
+      mode: "hierarchical",
+      fanIn: 2,
+      threshold: 2,
+      keepRecentLeaves: 0,
+    },
+  };
+  const first = makeEvent(1, "事件甲");
+  const second = makeEvent(2, "事件乙");
+  addNode(graph, first);
+  addNode(graph, second);
+
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          title: "压缩事件",
+          summary: "顶层返回的合并摘要",
+          participants: "Alice",
+          status: "done",
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await compressType({
+      graph,
+      typeDef,
+      embeddingConfig: null,
+      force: true,
+      settings: {},
+    });
+    assert.equal(result.created, 1);
+    const compressed = graph.nodes.find(
+      (node) => node.level === 1 && !node.archived,
+    );
+    assert.equal(compressed?.fields?.summary, "顶层返回的合并摘要");
+    assert.equal(compressed?.fields?.title, "压缩事件");
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
   const graph = createEmptyGraph();
   const target = createNode({
@@ -5374,6 +5429,43 @@ async function testManualCompressUsesForcedCompressionAndPersistsRealMutation() 
   assert.equal(result?.mutated, true);
 }
 
+async function testManualCompressUpdatesRuntimeStatusForPanelUi() {
+  const statusUpdates = [];
+  const graph = { nodes: [], historyState: {} };
+
+  const result = await onManualCompressController({
+    getCurrentGraph: () => graph,
+    ensureGraphMutationReady: () => true,
+    getSchema: () => [{ id: "event", compression: { mode: "hierarchical" } }],
+    inspectCompressionCandidates: () => ({
+      hasCandidates: true,
+      reason: "",
+    }),
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value ?? null)),
+    compressAll: async () => ({ created: 1, archived: 2 }),
+    getEmbeddingConfig: () => ({}),
+    getSettings: () => ({}),
+    recordMaintenanceAction() {},
+    recordGraphMutation: async () => {},
+    buildMaintenanceSummary: () => "手动压缩",
+    setRuntimeStatus(text, meta = "", level = "idle") {
+      statusUpdates.push({ text, meta, level });
+    },
+    refreshPanelLiveState() {},
+    toastr: {
+      info() {},
+      success() {},
+    },
+  });
+
+  assert.equal(result?.handledToast, true);
+  assert.equal(result?.mutated, true);
+  assert.equal(statusUpdates[0]?.text, "手动压缩中");
+  assert.equal(statusUpdates[0]?.level, "running");
+  assert.equal(statusUpdates.at(-1)?.text, "手动压缩完成");
+  assert.equal(statusUpdates.at(-1)?.level, "success");
+}
+
 async function testManualEvolveFallsBackToLatestExtractionBatchAfterRefresh() {
   const graph = {
     nodes: [
@@ -5533,6 +5625,7 @@ async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
 
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
+await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
 await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
@@ -5618,6 +5711,7 @@ await testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt();
 await testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt();
 await testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan();
 await testManualCompressUsesForcedCompressionAndPersistsRealMutation();
+await testManualCompressUpdatesRuntimeStatusForPanelUi();
 await testManualEvolveFallsBackToLatestExtractionBatchAfterRefresh();
 await testManualEvolveWarnsOnInvalidVectorConfigInsteadOfPretendingComplete();
 await testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges();
