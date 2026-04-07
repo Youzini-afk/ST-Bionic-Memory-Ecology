@@ -1382,6 +1382,20 @@
   color: #f4f4f5 !important;
 }
 
+/* --- 压制宿主注入的原生对号 (SillyTavern 全局 checkbox::before) --- */
+#st-bme-panel input[type="checkbox"]::before,
+#st-bme-panel-overlay input[type="checkbox"]::before {
+  content: "" !important;
+  display: none !important;
+  background: none !important;
+  background-image: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  visibility: hidden !important;
+}
+
 #st-bme-panel input.bme-config-input:-webkit-autofill,
 #st-bme-panel input.bme-config-input:-webkit-autofill:hover,
 #st-bme-panel input.bme-config-input:-webkit-autofill:focus,
@@ -1641,6 +1655,7 @@
 
 .bme-toggle-item input[type="checkbox"] {
   -webkit-appearance: none;
+  -moz-appearance: none;
   appearance: none;
   width: 40px;
   height: 22px;
@@ -1653,6 +1668,8 @@
   position: relative;
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease;
+  color: transparent;
+  overflow: hidden;
 }
 
 .bme-toggle-item input[type="checkbox"]::after {
@@ -1668,13 +1685,13 @@
 }
 
 .bme-toggle-item input[type="checkbox"]:checked {
-  background: var(--bme-primary, #a078ff);
-  border-color: var(--bme-primary, #a078ff);
+  background: color-mix(in srgb, var(--bme-primary) 45%, var(--bme-surface-high, #2a2a2d));
+  border-color: color-mix(in srgb, var(--bme-primary) 55%, transparent);
 }
 
 .bme-toggle-item input[type="checkbox"]:checked::after {
   transform: translateX(18px);
-  background: #fff;
+  background: var(--bme-primary-text, #ffb2b7);
 }
 
 /* --- CAPABILITY CARD GRID (Feature Toggles) --- */
@@ -1751,13 +1768,6 @@
   border: 1px solid var(--bme-border);
   color: transparent;
   overflow: hidden;
-}
-
-.bme-capability-card input[type="checkbox"]::before {
-  content: "";
-  display: block;
-  position: absolute;
-  inset: 0;
 }
 
 .bme-capability-card input[type="checkbox"]::after {
