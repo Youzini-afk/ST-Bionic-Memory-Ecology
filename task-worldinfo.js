@@ -907,9 +907,6 @@ async function loadNormalizedWorldbookEntries(
       normalizedName,
     );
     if (String(filterMode || "default") === "custom") {
-      if (!normalizedEntry.enabled) {
-        continue;
-      }
       if (Array.isArray(customFilterKeywords) && customFilterKeywords.length > 0) {
         const nameLower = normalizedEntry.name.toLowerCase();
         const matchedKeyword = customFilterKeywords.find((keyword) =>
@@ -1631,6 +1628,7 @@ export async function resolveTaskWorldInfo({
         const sourceContent = entry.cleanContent || entry.content;
         let renderedContent = sourceContent;
         let taskEjsRenderedContent = sourceContent;
+        let taskEjsError = null;
         try {
           taskEjsRenderedContent = await evalTaskEjsTemplate(sourceContent, renderCtx, {
             world_info: {
@@ -1660,26 +1658,34 @@ export async function resolveTaskWorldInfo({
             result.debug.ejsLastError =
               error instanceof Error ? error.message : String(error);
           }
+          taskEjsError = error;
           taskEjsRenderedContent = "";
         }
         renderedContent = taskEjsRenderedContent;
 
         if (isCustomFilter) {
-          const stNativeRender = await renderTemplateWithStSupport(sourceContent, {
-            env: customRenderEnv,
-            messageVars: customRenderMessageVars,
-          });
+          const sourceIncludesEjs = String(sourceContent || "").includes("<%");
+          const shouldAttemptNativeEjsFallback =
+            taskEjsError?.code === "st_bme_task_ejs_runtime_unavailable" &&
+            sourceIncludesEjs;
+          const stNativeRender = await renderTemplateWithStSupport(
+            shouldAttemptNativeEjsFallback ? sourceContent : renderedContent,
+            {
+              env: customRenderEnv,
+              messageVars: customRenderMessageVars,
+              evaluateEjs: shouldAttemptNativeEjsFallback,
+            },
+          );
           if (stNativeRender.ejsError) {
             result.debug.customRender.ejsErrorCount += 1;
           }
 
-          const sourceIncludesEjs = String(sourceContent || "").includes("<%");
           const shouldUseStNativeResult =
-            (!sourceIncludesEjs &&
+            (shouldAttemptNativeEjsFallback && stNativeRender.ejsEvaluated) ||
+            (!shouldAttemptNativeEjsFallback &&
               (stNativeRender.macroApplied ||
                 stNativeRender.messageVariableMacrosApplied ||
-                stNativeRender.text !== sourceContent)) ||
-            (sourceIncludesEjs && stNativeRender.ejsEvaluated);
+                stNativeRender.text !== renderedContent));
 
           if (shouldUseStNativeResult) {
             renderedContent = stNativeRender.text;

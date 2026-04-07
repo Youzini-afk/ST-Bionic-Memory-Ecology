@@ -177,6 +177,7 @@ const forcedAfterEntry = createWorldbookEntry({
   name: "强制 after",
   comment: "强制后置",
   content: "这是被 EJS 强制激活的后置条目。",
+  enabled: false,
   positionType: "after_character_definition",
   strategyType: "selective",
   keys: ["永远不会命中"],
@@ -242,6 +243,16 @@ const messageVarMacroEntry = createWorldbookEntry({
   content: "latest state={{get_message_variable::stat_data.user.\u610f\u8bc6\u72b6\u6001}}",
   order: 24.2,
 });
+
+const customContextProbeEntry = createWorldbookEntry({
+  uid: 18,
+  name: "Custom Context Probe",
+  comment: "Custom Context Probe",
+  content: "上下文探针：user=<%= user_input %>;char=<%= charName %>",
+  strategyType: "selective",
+  keys: ["probe custom mode"],
+  order: 24.3,
+});
 const bonusEntry = createWorldbookEntry({
   uid: 101,
   name: "Bonus 条目",
@@ -272,6 +283,7 @@ const worldbooksByName = {
     statDataControllerEntry,
     statDataTargetEntry,
     messageVarMacroEntry,
+    customContextProbeEntry,
     forceControlEntry,
     forcedAfterEntry,
     atDepthEntry,
@@ -423,9 +435,21 @@ try {
     customWorldInfo.beforeText,
     /<status_current_variable>secret=true<\/status_current_variable>/,
   );
+  assert.match(
+    customWorldInfo.beforeText,
+    /控制摘要：隐藏线索：Alice 正在调查。/,
+  );
+  assert.match(
+    customWorldInfo.beforeText,
+    /上下文探针：user=probe custom mode;char=Alice/,
+  );
   assert.equal(
     customWorldInfo.allEntries.some((entry) => String(entry.name || "").startsWith("EW/Dyn/")),
-    false,
+    true,
+  );
+  assert.equal(
+    customWorldInfo.afterEntries.some((entry) => entry.sourceName === "强制 after"),
+    true,
   );
   assert.equal(customWorldInfo.debug.mvu.filteredEntryCount, 0);
   assert.equal(customWorldInfo.debug.customFilter.mode, "custom");
@@ -442,6 +466,42 @@ try {
   assert.equal(customWorldInfo.debug.customRender.fallbackEntryCount > 0, true);
   assert.match(customWorldInfo.beforeText, /stat_data controller payload/);
   assert.match(customWorldInfo.beforeText, /latest state=.+/);
+
+  globalThis.EjsTemplate = {
+    async prepareContext() {
+      return {
+        user_input: "OLD_FROM_NATIVE",
+        charName: "OLD_CHAR",
+      };
+    },
+    async evalTemplate(text, env) {
+      return String(text)
+        .replace(/<%=\s*user_input\s*%>/g, String(env.user_input ?? ""))
+        .replace(/<%=\s*charName\s*%>/g, String(env.charName ?? ""));
+    },
+  };
+
+  const customWorldInfoWithNativeRuntime = await resolveTaskWorldInfo({
+    settings: {
+      worldInfoFilterMode: "custom",
+      worldInfoFilterCustomKeywords: "",
+    },
+    templateContext: {
+      recentMessages: "custom-mode regression probe",
+      charName: "Alice",
+    },
+    userMessage: "probe custom mode",
+  });
+
+  assert.match(
+    customWorldInfoWithNativeRuntime.beforeText,
+    /上下文探针：user=probe custom mode;char=Alice/,
+  );
+  assert.doesNotMatch(
+    customWorldInfoWithNativeRuntime.beforeText,
+    /OLD_FROM_NATIVE|OLD_CHAR/,
+  );
+  delete globalThis.EjsTemplate;
 
   const keywordWorldInfo = await resolveTaskWorldInfo({
     settings: {
@@ -668,10 +728,7 @@ try {
     /<status_current_variable>secret=true<\/status_current_variable>/,
   );
   assert.match(customPromptBuild.systemPrompt, /这一条不应该进入结果/);
-  assert.doesNotMatch(
-    customPromptBuild.systemPrompt,
-    /控制摘要：隐藏线索：Alice 正在调查/,
-  );
+  assert.match(customPromptBuild.systemPrompt, /控制摘要：隐藏线索：Alice 正在调查/);
   const customPayload = buildTaskLlmPayload(customPromptBuild, "unused fallback");
   assert.equal(
     customPayload.promptMessages.some((message) =>

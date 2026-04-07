@@ -117,7 +117,7 @@ function resolveFormatMessageVariableMacros(text, messageVars) {
 
 export async function renderTemplateWithStSupport(
   text,
-  { env = null, messageVars = null } = {},
+  { env = null, messageVars = null, evaluateEjs = true } = {},
 ) {
   const originalText = String(text ?? "");
   const runtime = getTemplateRuntime();
@@ -131,7 +131,7 @@ export async function renderTemplateWithStSupport(
   let ejsEvaluated = false;
   let ejsError = null;
 
-  if (originalText.includes("<%")) {
+  if (evaluateEjs && originalText.includes("<%")) {
     try {
       const evalTemplate =
         runtime?.evalTemplate || runtime?.evaltemplate || null;
