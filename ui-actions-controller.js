@@ -119,6 +119,13 @@ function describeManualEvolutionSource(source, count) {
   }
 }
 
+function updateManualActionUiState(runtime, text, meta = "", level = "idle") {
+  if (typeof runtime?.setRuntimeStatus === "function") {
+    runtime.setRuntimeStatus(text, meta, level);
+  }
+  runtime?.refreshPanelLiveState?.();
+}
+
 export async function onViewGraphController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) {
@@ -211,56 +218,82 @@ export async function onManualCompressController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("手动压缩")) return;
+  updateManualActionUiState(runtime, "手动压缩中", "正在检查可压缩候选组", "running");
 
-  const schema = runtime.getSchema();
-  const inspection = runtime.inspectCompressionCandidates?.(graph, schema, true);
-  if (inspection && !inspection.hasCandidates) {
-    runtime.toastr.info(
-      String(inspection.reason || "当前没有可压缩候选组，本次未发起 LLM 压缩"),
+  try {
+    const schema = runtime.getSchema();
+    const inspection = runtime.inspectCompressionCandidates?.(graph, schema, true);
+    if (inspection && !inspection.hasCandidates) {
+      const reason = String(
+        inspection.reason || "当前没有可压缩候选组，本次未发起 LLM 压缩",
+      );
+      updateManualActionUiState(runtime, "手动压缩未执行", reason, "idle");
+      runtime.toastr.info(reason);
+      return {
+        handledToast: true,
+        requestDispatched: false,
+        mutated: false,
+        reason,
+      };
+    }
+
+    updateManualActionUiState(runtime, "手动压缩中", "正在请求 LLM 压缩候选组", "running");
+    const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+    const result = await runtime.compressAll(
+      graph,
+      schema,
+      runtime.getEmbeddingConfig(),
+      true,
+      undefined,
+      undefined,
+      runtime.getSettings(),
     );
+    const mutated = hasCompressionMutation(result);
+    if (mutated) {
+      runtime.recordMaintenanceAction?.({
+        action: "compress",
+        beforeSnapshot,
+        mode: "manual",
+        summary: runtime.buildMaintenanceSummary?.("compress", result, "manual"),
+      });
+      await runtime.recordGraphMutation({
+        beforeSnapshot,
+        artifactTags: ["compression"],
+      });
+      updateManualActionUiState(
+        runtime,
+        "手动压缩完成",
+        `新建 ${result.created}，归档 ${result.archived}`,
+        "success",
+      );
+      runtime.toastr.success(
+        `手动压缩完成：新建 ${result.created}，归档 ${result.archived}`,
+      );
+    } else {
+      updateManualActionUiState(
+        runtime,
+        "手动压缩无变更",
+        "已尝试压缩，但本轮没有产生可持久化变化",
+        "idle",
+      );
+      runtime.toastr.info("已尝试手动压缩，但本轮没有产生可持久化变化");
+    }
+
     return {
       handledToast: true,
-      requestDispatched: false,
-      mutated: false,
-      reason: String(inspection.reason || ""),
+      requestDispatched: true,
+      mutated,
+      result,
     };
-  }
-
-  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
-  const result = await runtime.compressAll(
-    graph,
-    schema,
-    runtime.getEmbeddingConfig(),
-    true,
-    undefined,
-    undefined,
-    runtime.getSettings(),
-  );
-  const mutated = hasCompressionMutation(result);
-  if (mutated) {
-    runtime.recordMaintenanceAction?.({
-      action: "compress",
-      beforeSnapshot,
-      mode: "manual",
-      summary: runtime.buildMaintenanceSummary?.("compress", result, "manual"),
-    });
-    await runtime.recordGraphMutation({
-      beforeSnapshot,
-      artifactTags: ["compression"],
-    });
-    runtime.toastr.success(
-      `手动压缩完成：新建 ${result.created}，归档 ${result.archived}`,
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "手动压缩失败",
+      error?.message || String(error),
+      "error",
     );
-  } else {
-    runtime.toastr.info("已尝试手动压缩，但本轮没有产生可持久化变化");
+    throw error;
   }
-
-  return {
-    handledToast: true,
-    requestDispatched: true,
-    mutated,
-    result,
-  };
 }
 
 export async function onExportGraphController(runtime) {
@@ -538,150 +571,253 @@ export async function onManualSleepController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("执行遗忘")) return;
+  updateManualActionUiState(runtime, "执行遗忘中", "正在评估可归档节点", "running");
 
-  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
-  const result = runtime.sleepCycle(graph, runtime.getSettings());
-  const mutated = hasSleepMutation(result);
-  if (mutated) {
-    runtime.recordMaintenanceAction?.({
-      action: "sleep",
-      beforeSnapshot,
-      mode: "manual",
-      summary: runtime.buildMaintenanceSummary?.("sleep", result, "manual"),
-    });
-    await runtime.recordGraphMutation({
-      beforeSnapshot,
-      artifactTags: ["sleep"],
-    });
-    runtime.toastr.success(`执行遗忘完成：归档 ${result.forgotten} 个节点`);
-  } else {
-    runtime.toastr.info(
-      "当前没有符合遗忘条件的节点。本操作只做本地图清理，不会发送 LLM 请求。",
+  try {
+    const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+    const result = runtime.sleepCycle(graph, runtime.getSettings());
+    const mutated = hasSleepMutation(result);
+    if (mutated) {
+      runtime.recordMaintenanceAction?.({
+        action: "sleep",
+        beforeSnapshot,
+        mode: "manual",
+        summary: runtime.buildMaintenanceSummary?.("sleep", result, "manual"),
+      });
+      await runtime.recordGraphMutation({
+        beforeSnapshot,
+        artifactTags: ["sleep"],
+      });
+      updateManualActionUiState(
+        runtime,
+        "执行遗忘完成",
+        `归档 ${result.forgotten} 个节点`,
+        "success",
+      );
+      runtime.toastr.success(`执行遗忘完成：归档 ${result.forgotten} 个节点`);
+    } else {
+      updateManualActionUiState(
+        runtime,
+        "执行遗忘无变更",
+        "当前没有符合遗忘条件的节点",
+        "idle",
+      );
+      runtime.toastr.info(
+        "当前没有符合遗忘条件的节点。本操作只做本地图清理，不会发送 LLM 请求。",
+      );
+    }
+    return {
+      handledToast: true,
+      requestDispatched: false,
+      mutated,
+      result,
+    };
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "执行遗忘失败",
+      error?.message || String(error),
+      "error",
     );
+    throw error;
   }
-  return {
-    handledToast: true,
-    requestDispatched: false,
-    mutated,
-    result,
-  };
 }
 
 export async function onManualSynopsisController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("更新概要")) return;
+  updateManualActionUiState(runtime, "更新概要中", "正在生成新的概要节点", "running");
 
-  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
-  await runtime.generateSynopsis({
-    graph,
-    schema: runtime.getSchema(),
-    currentSeq: runtime.getCurrentChatSeq(),
-    customPrompt: undefined,
-    settings: runtime.getSettings(),
-  });
-  await runtime.recordGraphMutation({
-    beforeSnapshot,
-    artifactTags: ["synopsis"],
-  });
-  runtime.toastr.success("概要生成完成");
+  try {
+    const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+    await runtime.generateSynopsis({
+      graph,
+      schema: runtime.getSchema(),
+      currentSeq: runtime.getCurrentChatSeq(),
+      customPrompt: undefined,
+      settings: runtime.getSettings(),
+    });
+    await runtime.recordGraphMutation({
+      beforeSnapshot,
+      artifactTags: ["synopsis"],
+    });
+    updateManualActionUiState(runtime, "概要生成完成", "概要节点已更新", "success");
+    runtime.toastr.success("概要生成完成");
+    return {
+      handledToast: true,
+      requestDispatched: true,
+      mutated: true,
+    };
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "概要生成失败",
+      error?.message || String(error),
+      "error",
+    );
+    throw error;
+  }
 }
 
 export async function onManualEvolveController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("强制进化")) return;
+  updateManualActionUiState(runtime, "强制进化中", "正在整理候选节点", "running");
 
-  const embeddingConfig = runtime.getEmbeddingConfig();
-  const vectorValidation = runtime.validateVectorConfig?.(embeddingConfig);
-  if (vectorValidation && !vectorValidation.valid) {
-    runtime.toastr.warning(vectorValidation.error);
+  try {
+    const embeddingConfig = runtime.getEmbeddingConfig();
+    const vectorValidation = runtime.validateVectorConfig?.(embeddingConfig);
+    if (vectorValidation && !vectorValidation.valid) {
+      updateManualActionUiState(
+        runtime,
+        "强制进化未执行",
+        vectorValidation.error,
+        "warning",
+      );
+      runtime.toastr.warning(vectorValidation.error);
+      return {
+        handledToast: true,
+        requestDispatched: false,
+        mutated: false,
+        reason: vectorValidation.error,
+      };
+    }
+
+    const candidateResolution = resolveManualEvolutionCandidates(runtime, graph);
+    const candidateIds = candidateResolution.ids;
+    if (candidateIds.length === 0) {
+      updateManualActionUiState(
+        runtime,
+        "强制进化未执行",
+        "当前没有可用于进化的最近提取节点",
+        "idle",
+      );
+      runtime.toastr.info("当前没有可用于进化的最近提取节点，本次未发起整合请求");
+      return {
+        handledToast: true,
+        requestDispatched: false,
+        mutated: false,
+        reason: "no-candidates",
+      };
+    }
+
+    const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
+    const settings = runtime.getSettings();
+    updateManualActionUiState(
+      runtime,
+      "强制进化中",
+      `正在处理 ${candidateIds.length} 个候选节点`,
+      "running",
+    );
+    const result = await runtime.consolidateMemories({
+      graph,
+      newNodeIds: candidateIds,
+      embeddingConfig,
+      customPrompt: undefined,
+      settings,
+      options: {
+        neighborCount: settings.consolidationNeighborCount,
+        conflictThreshold: settings.consolidationThreshold,
+      },
+    });
+    const mutated = hasConsolidationMutation(result);
+    const sourceLabel = describeManualEvolutionSource(
+      candidateResolution.source,
+      candidateIds.length,
+    );
+    if (mutated) {
+      runtime.recordMaintenanceAction?.({
+        action: "consolidate",
+        beforeSnapshot,
+        mode: "manual",
+        summary: runtime.buildMaintenanceSummary?.("consolidate", result, "manual"),
+      });
+      await runtime.recordGraphMutation({
+        beforeSnapshot,
+        artifactTags: ["consolidation"],
+      });
+      updateManualActionUiState(
+        runtime,
+        "强制进化完成",
+        `合并 ${result.merged}，进化 ${result.evolved}，更新 ${result.updates}`,
+        "success",
+      );
+      runtime.toastr.success(
+        `强制进化完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}。${sourceLabel}。`,
+      );
+    } else {
+      updateManualActionUiState(
+        runtime,
+        "强制进化无变更",
+        `已完成整合判定，但本轮没有图谱变化。${sourceLabel}。`,
+        "idle",
+      );
+      runtime.toastr.info(
+        `已完成整合判定，但本轮没有产生图谱变更。${sourceLabel}。`,
+      );
+    }
+
     return {
       handledToast: true,
-      requestDispatched: false,
-      mutated: false,
-      reason: vectorValidation.error,
+      requestDispatched: true,
+      mutated,
+      result,
+      candidateSource: candidateResolution.source,
     };
-  }
-
-  const candidateResolution = resolveManualEvolutionCandidates(runtime, graph);
-  const candidateIds = candidateResolution.ids;
-  if (candidateIds.length === 0) {
-    runtime.toastr.info("当前没有可用于进化的最近提取节点，本次未发起整合请求");
-    return {
-      handledToast: true,
-      requestDispatched: false,
-      mutated: false,
-      reason: "no-candidates",
-    };
-  }
-
-  const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
-  const settings = runtime.getSettings();
-  const result = await runtime.consolidateMemories({
-    graph,
-    newNodeIds: candidateIds,
-    embeddingConfig,
-    customPrompt: undefined,
-    settings,
-    options: {
-      neighborCount: settings.consolidationNeighborCount,
-      conflictThreshold: settings.consolidationThreshold,
-    },
-  });
-  const mutated = hasConsolidationMutation(result);
-  const sourceLabel = describeManualEvolutionSource(
-    candidateResolution.source,
-    candidateIds.length,
-  );
-  if (mutated) {
-    runtime.recordMaintenanceAction?.({
-      action: "consolidate",
-      beforeSnapshot,
-      mode: "manual",
-      summary: runtime.buildMaintenanceSummary?.("consolidate", result, "manual"),
-    });
-    await runtime.recordGraphMutation({
-      beforeSnapshot,
-      artifactTags: ["consolidation"],
-    });
-    runtime.toastr.success(
-      `强制进化完成：合并 ${result.merged}，跳过 ${result.skipped}，保留 ${result.kept}，进化 ${result.evolved}，新链接 ${result.connections}，回溯更新 ${result.updates}。${sourceLabel}。`,
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "强制进化失败",
+      error?.message || String(error),
+      "error",
     );
-  } else {
-    runtime.toastr.info(
-      `已完成整合判定，但本轮没有产生图谱变更。${sourceLabel}。`,
-    );
+    throw error;
   }
-
-  return {
-    handledToast: true,
-    requestDispatched: true,
-    mutated,
-    result,
-    candidateSource: candidateResolution.source,
-  };
 }
 
 export async function onUndoLastMaintenanceController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("撤销最近维护")) return;
+  updateManualActionUiState(runtime, "撤销最近维护中", "正在恢复上一条维护变更", "running");
 
-  const result = runtime.undoLastMaintenance?.();
-  if (!result?.ok) {
-    runtime.toastr.warning(result?.reason || "撤销最近维护失败");
-    return { handledToast: true };
+  try {
+    const result = runtime.undoLastMaintenance?.();
+    if (!result?.ok) {
+      updateManualActionUiState(
+        runtime,
+        "撤销最近维护失败",
+        result?.reason || "当前没有可撤销的维护记录",
+        "warning",
+      );
+      runtime.toastr.warning(result?.reason || "撤销最近维护失败");
+      return { handledToast: true };
+    }
+
+    runtime.markVectorStateDirty?.("撤销维护后需要重建向量索引");
+    runtime.saveGraphToChat?.({ reason: "maintenance-undo-complete" });
+    updateManualActionUiState(
+      runtime,
+      "撤销最近维护完成",
+      result.entry?.summary || result.entry?.action || "已恢复最近维护",
+      "success",
+    );
+    runtime.toastr.success(
+      `已撤销最近维护：${result.entry?.summary || result.entry?.action || "未知操作"}`,
+    );
+    return {
+      handledToast: true,
+      result,
+    };
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "撤销最近维护失败",
+      error?.message || String(error),
+      "error",
+    );
+    throw error;
   }
-
-  runtime.markVectorStateDirty?.("撤销维护后需要重建向量索引");
-  runtime.saveGraphToChat?.({ reason: "maintenance-undo-complete" });
-  runtime.refreshPanelLiveState?.();
-  runtime.toastr.success(
-    `已撤销最近维护：${result.entry?.summary || result.entry?.action || "未知操作"}`,
-  );
-  return {
-    handledToast: true,
-    result,
-  };
 }

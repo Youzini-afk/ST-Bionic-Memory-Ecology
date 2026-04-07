@@ -10455,8 +10455,10 @@ async function onManualCompress() {
     getSchema,
     getSettings,
     inspectCompressionCandidates: inspectAutoCompressionCandidates,
+    refreshPanelLiveState,
     recordMaintenanceAction,
     recordGraphMutation,
+    setRuntimeStatus,
     toastr,
   });
 }
@@ -10646,8 +10648,10 @@ async function onManualSleep() {
     ensureGraphMutationReady,
     getCurrentGraph: () => currentGraph,
     getSettings,
+    refreshPanelLiveState,
     recordMaintenanceAction,
     recordGraphMutation,
+    setRuntimeStatus,
     sleepCycle,
     toastr,
   });
@@ -10662,7 +10666,9 @@ async function onManualSynopsis() {
     getCurrentGraph: () => currentGraph,
     getSchema,
     getSettings,
+    refreshPanelLiveState,
     recordGraphMutation,
+    setRuntimeStatus,
     toastr,
   });
 }
@@ -10677,8 +10683,10 @@ async function onManualEvolve() {
     getEmbeddingConfig,
     getLastExtractedItems: () => lastExtractedItems,
     getSettings,
+    refreshPanelLiveState,
     recordMaintenanceAction,
     recordGraphMutation,
+    setRuntimeStatus,
     toastr,
     validateVectorConfig,
   });
@@ -10691,6 +10699,7 @@ async function onUndoLastMaintenance() {
     markVectorStateDirty,
     refreshPanelLiveState,
     saveGraphToChat,
+    setRuntimeStatus,
     toastr,
     undoLastMaintenance: undoLastMaintenanceAction,
   });

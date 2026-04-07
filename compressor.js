@@ -17,6 +17,7 @@ import {
   getScopeRegionKey,
   normalizeMemoryScope,
 } from "./memory-scope.js";
+import { ensureEventTitle, getNodeDisplayName } from "./node-labels.js";
 import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
@@ -79,6 +80,92 @@ function resolveCompressionWindow(compression = {}, force = false) {
     threshold,
     keepRecent,
   };
+}
+
+function normalizeCompressionFieldValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => normalizeCompressionFieldValue(item))
+      .filter(Boolean)
+      .join("；");
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "";
+    }
+  }
+  return String(value).trim();
+}
+
+function buildCompressionFallbackSummary(batch = []) {
+  return batch
+    .map((node) =>
+      normalizeCompressionFieldValue(
+        node?.fields?.summary ||
+          node?.fields?.title ||
+          node?.fields?.name ||
+          node?.fields?.insight ||
+          getNodeDisplayName(node),
+      ),
+    )
+    .filter(Boolean)
+    .slice(0, 6)
+    .join("；");
+}
+
+function normalizeCompressedFields(summaryResult, typeDef, batch = []) {
+  const rawFields =
+    summaryResult?.fields &&
+    typeof summaryResult.fields === "object" &&
+    !Array.isArray(summaryResult.fields)
+      ? summaryResult.fields
+      : summaryResult && typeof summaryResult === "object" && !Array.isArray(summaryResult)
+        ? summaryResult
+        : {};
+  const columns = Array.isArray(typeDef?.columns) ? typeDef.columns : [];
+  const normalized = {};
+
+  for (const column of columns) {
+    const key = String(column?.name || "").trim();
+    if (!key) continue;
+    const normalizedValue = normalizeCompressionFieldValue(rawFields[key]);
+    if (normalizedValue) {
+      normalized[key] = normalizedValue;
+    }
+  }
+
+  const fallbackSummary = buildCompressionFallbackSummary(batch);
+  if (!normalized.summary && columns.some((column) => column?.name === "summary")) {
+    normalized.summary = fallbackSummary || "压缩批次摘要缺失";
+  }
+  if (!normalized.insight && columns.some((column) => column?.name === "insight")) {
+    normalized.insight = fallbackSummary || "压缩批次洞察缺失";
+  }
+  if (!normalized.title && columns.some((column) => column?.name === "title")) {
+    const titled = ensureEventTitle({ title: rawFields?.title, summary: normalized.summary });
+    normalized.title =
+      normalizeCompressionFieldValue(titled?.title) ||
+      normalizeCompressionFieldValue(rawFields?.name) ||
+      normalizeCompressionFieldValue(batch[batch.length - 1]?.fields?.title) ||
+      normalizeCompressionFieldValue(batch[batch.length - 1]?.fields?.name) ||
+      "压缩节点";
+  }
+  if (!normalized.name && columns.some((column) => column?.name === "name")) {
+    normalized.name =
+      normalizeCompressionFieldValue(rawFields?.title) ||
+      normalizeCompressionFieldValue(rawFields?.name) ||
+      normalizeCompressionFieldValue(batch[batch.length - 1]?.fields?.name) ||
+      "压缩节点";
+  }
+
+  return normalized;
 }
 
 /**
@@ -184,10 +271,20 @@ async function compressLevel({
         settings,
       );
       if (!summaryResult) continue;
+      const normalizedFields = normalizeCompressedFields(
+        summaryResult,
+        typeDef,
+        batch,
+      );
+      if (Object.keys(normalizedFields).length === 0) {
+        throw new Error(
+          `压缩结果缺少可用 fields，无法创建 ${typeDef?.label || typeDef?.id || "压缩"} 节点`,
+        );
+      }
 
       const compressedNode = createNode({
         type: typeDef.id,
-        fields: summaryResult.fields,
+        fields: normalizedFields,
         seq: batch[batch.length - 1].seq,
         seqRange: [
           batch[0].seqRange?.[0] ?? batch[0].seq,
@@ -200,9 +297,16 @@ async function compressLevel({
       compressedNode.level = level + 1;
       compressedNode.childIds = batch.map((n) => n.id);
 
-      if (isDirectVectorConfig(embeddingConfig) && summaryResult.fields.summary) {
+      const embeddingText =
+        normalizeCompressionFieldValue(
+          normalizedFields.summary ||
+            normalizedFields.insight ||
+            normalizedFields.title ||
+            normalizedFields.name,
+        ) || "";
+      if (isDirectVectorConfig(embeddingConfig) && embeddingText) {
         const vec = await embedText(
-          summaryResult.fields.summary,
+          embeddingText,
           embeddingConfig,
           { signal },
         );
