@@ -3068,16 +3068,6 @@ function _handleTaskProfileWorkspaceInput(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
 
-  if (target.id === "bme-task-profile-name") {
-    _updateCurrentTaskProfile(
-      (draft) => {
-        draft.name = String(target.value || "").trim() || draft.name;
-      },
-      { refresh: false },
-    );
-    return;
-  }
-
   if (target.matches("[data-block-field]")) {
     _persistSelectedBlockField(target, false);
     return;
@@ -3556,14 +3546,16 @@ async function _handleTaskProfileWorkspaceClick(event) {
       toastr.success("当前预设已保存", "ST-BME");
       return;
     case "rename-profile": {
-      const nameInput = document.getElementById("bme-task-profile-name");
-      const nextName = String(nameInput?.value || "").trim();
-      if (!nextName) {
+      const current = String(selectedProfile?.name || "").trim();
+      const nextName = window.prompt("请输入预设名称", current);
+      if (nextName == null) return;
+      const trimmed = String(nextName).trim();
+      if (!trimmed) {
         toastr.info("预设名称不能为空", "ST-BME");
         return;
       }
       _updateCurrentTaskProfile((draft) => {
-        draft.name = nextName;
+        draft.name = trimmed;
       });
       toastr.success("预设名称已更新", "ST-BME");
       return;
@@ -3712,13 +3704,15 @@ function _renderTaskProfileWorkspace(state) {
       </div>
 
       <div class="bme-task-master-detail">
-        <div class="bme-task-profile-nav" aria-label="任务预设切换">
-          <div class="bme-task-profile-nav-kicker">${_escHtml(taskMeta?.label || state.taskType)}</div>
-          <label class="bme-task-profile-nav-label" for="bme-task-profile-select">当前预设</label>
-          <select id="bme-task-profile-select" class="bme-config-input bme-task-profile-nav-select">
-            ${state.bucket.profiles
-              .map(
-                (profile) => `
+        <div class="bme-task-profile-editor">
+          <div class="bme-task-editor-header">
+            <div class="bme-task-editor-kicker">${_escHtml(taskMeta?.label || state.taskType)}</div>
+            <div class="bme-task-editor-title-row">
+              <label class="bme-visually-hidden" for="bme-task-profile-select">当前预设</label>
+              <select id="bme-task-profile-select" class="bme-config-input bme-task-editor-preset-select" title="切换预设">
+                ${state.bucket.profiles
+                  .map(
+                    (profile) => `
                   <option
                     value="${_escAttr(profile.id)}"
                     ${profile.id === state.profile.id ? "selected" : ""}
@@ -3726,21 +3720,9 @@ function _renderTaskProfileWorkspace(state) {
                     ${_escHtml(profile.name)}${profile.builtin ? "（内置）" : ""}
                   </option>
                 `,
-              )
-              .join("")}
-          </select>
-        </div>
-
-        <div class="bme-task-profile-editor">
-          <div class="bme-task-editor-header">
-            <div class="bme-task-editor-title-row">
-              <input
-                id="bme-task-profile-name"
-                class="bme-task-editor-name-input"
-                type="text"
-                value="${_escAttr(state.profile.name || "")}"
-                placeholder="输入预设名称"
-              />
+                  )
+                  .join("")}
+              </select>
               <div class="bme-task-profile-badges">
                 <span class="bme-task-pill ${state.profile.builtin ? "is-builtin" : ""}">
                   ${state.profile.builtin ? "内置" : "自定义"}
