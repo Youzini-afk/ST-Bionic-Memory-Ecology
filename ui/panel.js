@@ -220,6 +220,7 @@ let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
 let currentTaskProfileRuleId = "";
 let currentCognitionOwnerKey = "";
+let currentGraphView = "graph";
 let fetchedMemoryLLMModels = [];
 let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
@@ -873,6 +874,476 @@ function _applyWorkspaceMode() {
   panelEl.classList.toggle("config-mode", isConfig);
 }
 
+// ==================== 图谱视图切换 ====================
+
+function _switchGraphView(view) {
+  currentGraphView = view || "graph";
+  panelEl?.querySelectorAll(".bme-graph-view-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.graphView === currentGraphView);
+  });
+
+  const canvas = document.getElementById("bme-graph-canvas");
+  const legend = document.getElementById("bme-graph-legend");
+  const statusbar = panelEl?.querySelector(".bme-graph-statusbar");
+  const nodeDetail = document.getElementById("bme-node-detail");
+  const cogWorkspace = document.getElementById("bme-cognition-workspace");
+  const graphControls = panelEl?.querySelector(".bme-graph-controls");
+
+  const isGraph = currentGraphView === "graph";
+  if (canvas) canvas.style.display = isGraph ? "" : "none";
+  if (legend) legend.style.display = isGraph ? "" : "none";
+  if (statusbar) statusbar.style.display = isGraph ? "" : "none";
+  if (nodeDetail) nodeDetail.style.display = isGraph ? "" : "none";
+  if (graphControls) graphControls.style.display = isGraph ? "" : "none";
+  if (cogWorkspace) cogWorkspace.hidden = isGraph;
+
+  if (!isGraph) _refreshCognitionWorkspace();
+}
+
+function _ownerAvatarHsl(name) {
+  let hash = 0;
+  const str = String(name || "");
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 55%, 42%)`;
+}
+
+// ==================== 认知视图工作区 ====================
+
+function _refreshCognitionWorkspace() {
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph) return;
+
+  const canRender =
+    Boolean(graph) &&
+    (_canRenderGraphData(loadInfo) || loadInfo.loadState === "empty-confirmed");
+
+  _renderCogStatusStrip(graph, loadInfo, canRender);
+  _renderCogOwnerList(graph, canRender);
+  _renderCogOwnerDetail(graph, loadInfo, canRender);
+  _renderCogSpaceTools(graph, loadInfo, canRender);
+  _renderCogMonitorMini();
+}
+
+function _renderCogStatusStrip(graph, loadInfo, canRender) {
+  const el = document.getElementById("bme-cog-status-strip");
+  if (!el) return;
+
+  if (!canRender) {
+    el.innerHTML = `<div class="bme-cog-status-card" style="grid-column:1/-1"><div class="bme-cog-status-card__value">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div></div>`;
+    return;
+  }
+
+  const historyState = graph?.historyState || {};
+  const regionState = graph?.regionState || {};
+  const { owners, activeOwnerKey, activeOwner } = _getCurrentCognitionOwnerSummary(graph);
+  const activeRegion = String(
+    historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "",
+  ).trim();
+  const activeRegionLabel = activeRegion
+    ? `${activeRegion}${historyState.activeRegionSource ? ` · ${historyState.activeRegionSource}` : ""}`
+    : "—";
+  const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
+    ? regionState.adjacencyMap[activeRegion].adjacent
+    : [];
+
+  el.innerHTML = `
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 当前召回角色</div>
+      <div class="bme-cog-status-card__value">${_escHtml(activeOwner?.ownerName || activeOwnerKey || "—")}</div>
+    </div>
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
+      <div class="bme-cog-status-card__value">${_escHtml(activeRegionLabel)}</div>
+    </div>
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-diagram-project"></i> 邻接地区</div>
+      <div class="bme-cog-status-card__value">${_escHtml(adjacentRegions.length > 0 ? adjacentRegions.join(" / ") : "—")}</div>
+    </div>
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
+      <div class="bme-cog-status-card__value">${owners.length}</div>
+    </div>
+  `;
+}
+
+function _renderCogOwnerList(graph, canRender) {
+  const el = document.getElementById("bme-cog-owner-list");
+  if (!el) return;
+
+  if (!canRender) {
+    el.innerHTML = "";
+    return;
+  }
+
+  const { owners, activeOwnerKey } = _getCurrentCognitionOwnerSummary(graph);
+
+  if (!owners.length) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">暂无认知角色</div>`;
+    return;
+  }
+
+  el.innerHTML = owners
+    .map((owner) => {
+      const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
+      const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
+      const selected = owner.ownerKey === currentCognitionOwnerKey ? "is-selected" : "";
+      const anchor = owner.ownerKey === activeOwnerKey ? "is-active-anchor" : "";
+      return `
+        <div class="bme-cog-owner-card ${selected} ${anchor}"
+             data-owner-key="${_escHtml(String(owner.ownerKey || ""))}"
+             role="button" tabindex="0">
+          <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(firstName)}</div>
+          <div class="bme-cog-owner-card__info">
+            <div class="bme-cog-owner-card__name">${_escHtml(String(owner.ownerName || owner.ownerKey || "未命名"))}</div>
+            <div class="bme-cog-owner-card__stats">已知 ${Number(owner.knownCount || 0)} · 误解 ${Number(owner.mistakenCount || 0)} · 隐藏 ${Number(owner.manualHiddenCount || 0)}</div>
+          </div>
+        </div>`;
+    })
+    .join("");
+}
+
+function _renderCogOwnerDetail(graph, loadInfo, canRender) {
+  const el = document.getElementById("bme-cog-owner-detail");
+  if (!el) return;
+
+  if (!canRender) {
+    el.innerHTML = "";
+    return;
+  }
+
+  const { selectedOwner, activeOwnerKey } = _getCurrentCognitionOwnerSummary(graph);
+
+  if (!selectedOwner) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">选择上方角色查看详情，或等待提取产生认知数据。</div>`;
+    return;
+  }
+
+  const ownerState = graph?.knowledgeState?.owners?.[selectedOwner.ownerKey] || {
+    aliases: selectedOwner.aliases || [],
+    visibilityScores: {},
+    manualKnownNodeIds: [],
+    manualHiddenNodeIds: [],
+    mistakenNodeIds: [],
+    knownNodeIds: [],
+    updatedAt: 0,
+  };
+  const visibilityEntries = Object.entries(ownerState.visibilityScores || {})
+    .map(([nodeId, score]) => ({ nodeId: String(nodeId || ""), score: Number(score || 0) }))
+    .filter((e) => e.nodeId)
+    .sort((a, b) => b.score - a.score);
+  const strongVisibleNames = _collectNodeNames(
+    graph,
+    visibilityEntries.filter((e) => e.score >= 0.68).map((e) => e.nodeId),
+    { limit: 6 },
+  );
+  const suppressedNames = _collectNodeNames(
+    graph,
+    [...(ownerState.manualHiddenNodeIds || []), ...(ownerState.mistakenNodeIds || [])],
+    { limit: 6 },
+  );
+  const selectedNode = _getSelectedGraphNode(graph);
+  const selectedNodeLabel = selectedNode ? getNodeDisplayName(selectedNode) : "";
+  const selectedNodeState = selectedNode
+    ? ownerState.manualKnownNodeIds?.includes(selectedNode.id)
+      ? "known"
+      : ownerState.manualHiddenNodeIds?.includes(selectedNode.id)
+        ? "hidden"
+        : ownerState.mistakenNodeIds?.includes(selectedNode.id)
+          ? "mistaken"
+          : "none"
+    : "";
+  const stateLabels = { known: "强制已知", hidden: "强制隐藏", mistaken: "误解", none: "未覆盖" };
+  const selectedNodeStateLabel = stateLabels[selectedNodeState] || "未选中节点";
+  const writeBlocked = _isGraphWriteBlocked(loadInfo);
+  const suppressedCount = new Set([...(ownerState.manualHiddenNodeIds || []), ...(ownerState.mistakenNodeIds || [])]).size;
+  const disabledAttr = !selectedNode || writeBlocked ? "disabled" : "";
+
+  const visChips = strongVisibleNames.length
+    ? strongVisibleNames.map((n) => `<span class="bme-cog-chip is-visible">${_escHtml(n)}</span>`).join("")
+    : '<span class="bme-cog-chip is-empty">暂无</span>';
+  const supChips = suppressedNames.length
+    ? suppressedNames.map((n) => `<span class="bme-cog-chip is-suppressed">${_escHtml(n)}</span>`).join("")
+    : '<span class="bme-cog-chip is-empty">暂无</span>';
+
+  el.innerHTML = `
+    <div class="bme-cog-detail-header">
+      <div class="bme-cog-detail-name">${_escHtml(String(selectedOwner.ownerName || selectedOwner.ownerKey || "未命名"))}</div>
+      ${selectedOwner.ownerKey === activeOwnerKey ? '<span class="bme-cog-detail-badge">当前召回锚点</span>' : ""}
+    </div>
+
+    <div class="bme-cog-metrics">
+      <div class="bme-cog-metric">
+        <div class="bme-cog-metric__label"><span class="bme-cog-metric-dot dot-known"></span> 已知锚点</div>
+        <div class="bme-cog-metric__value">${Number(selectedOwner.knownCount || 0)}</div>
+      </div>
+      <div class="bme-cog-metric">
+        <div class="bme-cog-metric__label"><span class="bme-cog-metric-dot dot-mistaken"></span> 误解节点</div>
+        <div class="bme-cog-metric__value">${Number(selectedOwner.mistakenCount || 0)}</div>
+      </div>
+      <div class="bme-cog-metric">
+        <div class="bme-cog-metric__label"><span class="bme-cog-metric-dot dot-visible"></span> 强可见</div>
+        <div class="bme-cog-metric__value">${strongVisibleNames.length}</div>
+      </div>
+      <div class="bme-cog-metric">
+        <div class="bme-cog-metric__label"><span class="bme-cog-metric-dot dot-suppressed"></span> 被压制</div>
+        <div class="bme-cog-metric__value">${suppressedCount}</div>
+      </div>
+    </div>
+
+    <div class="bme-cog-chip-section">
+      <div class="bme-cog-chip-label">强可见节点 · ACTIVE VISIBILITY</div>
+      <div class="bme-cog-chip-wrap">${visChips}</div>
+    </div>
+    <div class="bme-cog-chip-section">
+      <div class="bme-cog-chip-label">被压制节点 · SUPPRESSED</div>
+      <div class="bme-cog-chip-wrap">${supChips}</div>
+    </div>
+
+    <div class="bme-cog-override-section">
+      <div class="bme-cog-override-title">对当前选中节点做手动覆盖</div>
+      <div class="bme-cog-override-status">${
+        selectedNode
+          ? `当前节点：${_escHtml(selectedNodeLabel)} · <span class="bme-cog-status-pill is-${selectedNodeState}">${_escHtml(selectedNodeStateLabel)}</span>`
+          : "先在实时图谱或记忆列表中选中一个节点。"
+      }</div>
+      <div class="bme-cog-override-actions">
+        <button class="bme-cog-btn bme-cog-btn--known" type="button" data-bme-cognition-node-action="known" ${disabledAttr}>强制已知</button>
+        <button class="bme-cog-btn bme-cog-btn--hidden" type="button" data-bme-cognition-node-action="hidden" ${disabledAttr}>强制隐藏</button>
+        <button class="bme-cog-btn bme-cog-btn--mistaken" type="button" data-bme-cognition-node-action="mistaken" ${disabledAttr}>标记误解</button>
+        <button class="bme-cog-btn bme-cog-btn--clear" type="button" data-bme-cognition-node-action="clear" ${disabledAttr}>清除覆盖</button>
+      </div>
+    </div>
+  `;
+}
+
+function _renderCogSpaceTools(graph, loadInfo, canRender) {
+  const el = document.getElementById("bme-cog-space-tools");
+  if (!el) return;
+
+  if (!canRender) { el.innerHTML = ""; return; }
+
+  const regionState = graph?.regionState || {};
+  const historyState = graph?.historyState || {};
+  const activeRegion = String(
+    historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "",
+  ).trim();
+  const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
+    ? regionState.adjacencyMap[activeRegion].adjacent : [];
+  const writeBlocked = _isGraphWriteBlocked(loadInfo);
+  const disabledAttr = writeBlocked ? "disabled" : "";
+
+  el.innerHTML = `
+    <div class="bme-cog-space-row">
+      <label>手动当前地区</label>
+      <input class="bme-config-input" type="text" id="bme-cog-manual-region"
+             placeholder="输入地区名称..." value="${_escHtml(regionState.manualActiveRegion || activeRegion || "")}" ${disabledAttr} />
+      <div class="bme-cog-space-btn-row">
+        <button class="bme-cog-btn bme-cog-btn--known" type="button" id="bme-cog-region-apply" ${disabledAttr}>
+          <i class="fa-solid fa-location-dot"></i> 设为当前地区
+        </button>
+        <button class="bme-cog-btn bme-cog-btn--clear" type="button" id="bme-cog-region-clear" ${disabledAttr}>
+          <i class="fa-solid fa-rotate-left"></i> 恢复自动
+        </button>
+      </div>
+    </div>
+    <div class="bme-cog-space-row">
+      <label>当前地区邻接</label>
+      <input class="bme-config-input" type="text" id="bme-cog-adjacency-input"
+             placeholder="例如：内廷, 港口, 花园" value="${_escHtml(adjacentRegions.join(", "))}" ${disabledAttr} />
+      <div class="bme-config-help" style="font-size:10px;margin-top:2px">使用 "," 分隔多个地区。保存后更新该地区的邻接关系。</div>
+      <button class="bme-cog-btn bme-cog-btn--known" type="button" id="bme-cog-adjacency-save" ${disabledAttr}>
+        <i class="fa-solid fa-diagram-project"></i> 保存当前地区邻接
+      </button>
+    </div>
+  `;
+}
+
+function _renderCogMonitorMini() {
+  const el = document.getElementById("bme-cog-monitor-mini");
+  if (!el) return;
+
+  const settings = _getSettings?.() || {};
+  if (settings.enableAiMonitor !== true) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">AI Monitor 已关闭</div>`;
+    return;
+  }
+
+  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
+  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
+    ? runtimeDebug.runtimeDebug.taskTimeline : [];
+
+  if (!timeline.length) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">暂无任务流水</div>`;
+    return;
+  }
+
+  const taskTypeLabels = { extract: "提取", recall: "召回", compress: "压缩", sleep: "遗忘", evolve: "进化", embed: "向量" };
+
+  el.innerHTML = timeline
+    .slice(-8)
+    .reverse()
+    .map((entry) => {
+      const status = String(entry?.status || "").toLowerCase();
+      const statusClass = status.includes("error") || status.includes("fail") ? "is-error"
+        : status.includes("run") ? "is-running" : "is-success";
+      const taskType = String(entry?.taskType || "unknown");
+      const route = String(entry?.route || entry?.llmConfigSourceLabel || entry?.model || "").trim();
+      const durationMs = Number(entry?.durationMs);
+      const durationText = Number.isFinite(durationMs) && durationMs > 0
+        ? durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${Math.round(durationMs)}ms`
+        : "—";
+      return `
+        <div class="bme-cog-monitor-entry ${statusClass}">
+          <span class="bme-cog-monitor-badge">${_escHtml(taskTypeLabels[taskType] || taskType)}</span>
+          <span class="bme-cog-monitor-info">${_escHtml(route || "—")}</span>
+          <span class="bme-cog-monitor-duration">${_escHtml(durationText)}</span>
+        </div>`;
+    })
+    .join("");
+}
+
+// ==================== 移动端图谱视图 ====================
+
+function _switchMobileGraphView(view) {
+  const section = document.getElementById("bme-mobile-graph-section");
+  if (!section) return;
+
+  section.querySelectorAll(".bme-mobile-graph-tab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.mobileView === view);
+  });
+  section.querySelectorAll(".bme-mobile-view-pane").forEach((pane) => {
+    pane.classList.toggle("active", pane.dataset.mobileView === view);
+  });
+
+  if (view === "summary") _refreshMobileSummary();
+  if (view === "cognition") _refreshMobileCognition();
+}
+
+function _refreshMobileSummary() {
+  const el = document.getElementById("bme-mobile-summary-pane");
+  if (!el) return;
+
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph || !_canRenderGraphData(loadInfo)) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo?.loadState))}</div>`;
+    return;
+  }
+
+  const activeNodes = graph.nodes.filter((n) => !n.archived);
+  const archivedCount = graph.nodes.filter((n) => n.archived).length;
+  const typeMap = {};
+  for (const node of activeNodes) {
+    const t = String(node.type || "unknown");
+    typeMap[t] = (typeMap[t] || 0) + 1;
+  }
+  const typePills = Object.entries(typeMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([type, count]) => `<span class="bme-cog-chip">${_escHtml(type)} ${count}</span>`)
+    .join("");
+
+  const recentNodes = [...activeNodes]
+    .sort((a, b) => (Number(b.seqRange?.[1] || b.seqRange?.[0] || 0)) - (Number(a.seqRange?.[1] || a.seqRange?.[0] || 0)))
+    .slice(0, 5);
+  const recentHtml = recentNodes.map((n) => {
+    const name = getNodeDisplayName(n);
+    const type = String(n.type || "");
+    return `<div class="bme-cog-monitor-entry is-success" style="border-left-color:var(--bme-primary)">
+      <span class="bme-cog-monitor-badge">${_escHtml(type)}</span>
+      <span class="bme-cog-monitor-info">${_escHtml(name)}</span>
+    </div>`;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="bme-cog-status-strip" style="grid-template-columns:repeat(3,1fr);margin-bottom:10px">
+      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">活跃</div><div class="bme-cog-status-card__value">${activeNodes.length}</div></div>
+      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">边</div><div class="bme-cog-status-card__value">${graph.edges.length}</div></div>
+      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">归档</div><div class="bme-cog-status-card__value">${archivedCount}</div></div>
+    </div>
+    <div class="bme-cog-chip-section" style="margin-bottom:10px">
+      <div class="bme-cog-chip-label">类型分布</div>
+      <div class="bme-cog-chip-wrap">${typePills || '<span class="bme-cog-chip is-empty">暂无</span>'}</div>
+    </div>
+    <div class="bme-cog-chip-label" style="margin-bottom:6px">最近节点</div>
+    <div class="bme-cog-monitor-mini">${recentHtml || '<div class="bme-cog-monitor-empty">暂无</div>'}</div>
+  `;
+}
+
+function _refreshMobileCognition() {
+  const el = document.getElementById("bme-mobile-cognition-pane");
+  if (!el) return;
+
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph) { el.innerHTML = ""; return; }
+
+  const canRender =
+    Boolean(graph) &&
+    (_canRenderGraphData(loadInfo) || loadInfo.loadState === "empty-confirmed");
+
+  if (!canRender) {
+    el.innerHTML = `<div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div>`;
+    return;
+  }
+
+  const { owners, activeOwnerKey, activeOwner } = _getCurrentCognitionOwnerSummary(graph);
+  const historyState = graph?.historyState || {};
+  const regionState = graph?.regionState || {};
+  const activeRegion = String(historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "").trim();
+  const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
+    ? regionState.adjacencyMap[activeRegion].adjacent : [];
+
+  const ownerCards = owners.map((owner) => {
+    const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
+    const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
+    const anchor = owner.ownerKey === activeOwnerKey ? "is-active-anchor" : "";
+    return `
+      <div class="bme-cog-owner-card ${anchor}" style="min-width:unset;max-width:unset">
+        <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(firstName)}</div>
+        <div class="bme-cog-owner-card__info">
+          <div class="bme-cog-owner-card__name">${_escHtml(String(owner.ownerName || owner.ownerKey || "未命名"))}</div>
+          <div class="bme-cog-owner-card__stats">已知 ${Number(owner.knownCount || 0)} · 误解 ${Number(owner.mistakenCount || 0)}</div>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="bme-cog-status-strip" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px">
+      <div class="bme-cog-status-card">
+        <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 召回角色</div>
+        <div class="bme-cog-status-card__value">${_escHtml(activeOwner?.ownerName || "—")}</div>
+      </div>
+      <div class="bme-cog-status-card">
+        <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
+        <div class="bme-cog-status-card__value">${_escHtml(activeRegion || "—")}</div>
+      </div>
+    </div>
+    <div class="bme-cog-chip-label" style="margin-bottom:6px">认知角色 (${owners.length})</div>
+    <div style="display:flex;flex-direction:column;gap:6px">${ownerCards || '<div class="bme-cog-monitor-empty">暂无</div>'}</div>
+  `;
+}
+
+function _openFullscreenGraph() {
+  const overlay = document.getElementById("bme-fullscreen-graph");
+  if (!overlay) return;
+  overlay.hidden = false;
+  document.body.style.overflow = "hidden";
+}
+
+function _closeFullscreenGraph() {
+  const overlay = document.getElementById("bme-fullscreen-graph");
+  if (!overlay) return;
+  overlay.hidden = true;
+  document.body.style.overflow = "";
+}
+
+
+
 function _switchConfigSection(sectionId) {
   currentConfigSectionId = sectionId || "toggles";
   _syncConfigSectionState();
@@ -998,6 +1469,7 @@ function _refreshDashboard() {
 
   _refreshCognitionDashboard(graph);
   _refreshAiMonitorDashboard();
+  _refreshMobileSummary();
   _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
   _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
 }
@@ -1405,25 +1877,10 @@ function _refreshCognitionDashboard(
     adjacentRegions.length > 0 ? adjacentRegions.join(" / ") : "—",
   );
   _setText("bme-cognition-owner-count", owners.length);
-  _renderCognitionOwnerList(graph, { owners, activeOwnerKey });
-  _renderCognitionDetail(
-    graph,
-    {
-      selectedOwner,
-      activeOwnerKey,
-      activeRegion,
-      adjacentRegions,
-    },
-    loadInfo,
-  );
-  _setInputValueIfIdle(
-    "bme-cognition-manual-region",
-    regionState.manualActiveRegion || activeRegion || "",
-  );
-  _setInputValueIfIdle(
-    "bme-cognition-adjacency-input",
-    adjacentRegions.join(", "),
-  );
+  // Cognition view workspace refresh (if visible)
+  if (currentGraphView === "cognition") {
+    _refreshCognitionWorkspace();
+  }
 }
 
 function _refreshAiMonitorDashboard() {
@@ -2856,6 +3313,89 @@ function _bindActions() {
         _refreshGraphAvailabilityState();
       }
     });
+
+  // ==================== 认知视图绑定 ====================
+
+  // 图谱/认知视图 tab 切换
+  panelEl?.querySelectorAll(".bme-graph-view-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      _switchGraphView(tab.dataset.graphView);
+    });
+  });
+
+  // 移动端图谱/认知 tab 切换
+  document.querySelectorAll(".bme-mobile-graph-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      _switchMobileGraphView(tab.dataset.mobileView);
+    });
+  });
+
+  // 全屏图谱
+  document.getElementById("bme-mobile-open-fullscreen")?.addEventListener("click", _openFullscreenGraph);
+  document.getElementById("bme-fs-close")?.addEventListener("click", _closeFullscreenGraph);
+
+  // 认知视图角色列表点击
+  document.getElementById("bme-cog-owner-list")?.addEventListener("click", (e) => {
+    const card = e.target.closest("[data-owner-key]");
+    if (!card) return;
+    currentCognitionOwnerKey = card.dataset.ownerKey;
+    _refreshCognitionWorkspace();
+  });
+
+  // Dashboard 跳转认知视图
+  document.getElementById("bme-cognition-jump-to-view")?.addEventListener("click", () => {
+    _switchTab("dashboard");
+    _switchGraphView("cognition");
+  });
+
+  // 认知视图空间工具 (delegate)
+  document.getElementById("bme-cognition-workspace")?.addEventListener("click", (e) => {
+    const regionApply = e.target.closest("#bme-cog-region-apply");
+    const regionClear = e.target.closest("#bme-cog-region-clear");
+    const adjSave = e.target.closest("#bme-cog-adjacency-save");
+
+    if (regionApply) {
+      const manualRegion = document.getElementById("bme-cog-manual-region")?.value?.trim();
+      if (manualRegion) _callAction("setActiveRegion", { region: manualRegion });
+    }
+    if (regionClear) {
+      _callAction("setActiveRegion", { region: "" });
+    }
+    if (adjSave) {
+      const adjInput = document.getElementById("bme-cog-adjacency-input")?.value?.trim() || "";
+      const adjList = adjInput.split(/[,，\/\\]/).map((s) => s.trim()).filter(Boolean);
+      const graph = _getGraph?.();
+      const activeRegion = String(
+        graph?.historyState?.activeRegion || graph?.historyState?.lastExtractedRegion || graph?.regionState?.manualActiveRegion || "",
+      ).trim();
+      if (activeRegion) _callAction("updateRegionAdjacency", { region: activeRegion, adjacent: adjList });
+    }
+
+    // 手动覆盖按钮
+    const actionBtn = e.target.closest("[data-bme-cognition-node-action]");
+    if (actionBtn) {
+      const mode = actionBtn.dataset.bmeCognitionNodeAction;
+      if (!mode) return;
+      const graph = _getGraph?.();
+      const selectedNode = _getSelectedGraphNode(graph);
+      if (!selectedNode) return;
+      const { selectedOwner } = _getCurrentCognitionOwnerSummary(graph);
+      if (!selectedOwner) return;
+
+      if (mode === "clear") {
+        _callAction("clearKnowledgeOverride", { nodeId: selectedNode.id, ownerKey: selectedOwner.ownerKey });
+      } else {
+        _callAction("applyKnowledgeOverride", {
+          nodeId: selectedNode.id,
+          ownerKey: selectedOwner.ownerKey,
+          ownerType: selectedOwner.ownerType || "",
+          ownerName: selectedOwner.ownerName || "",
+          mode,
+        });
+      }
+      _refreshCognitionWorkspace();
+    }
+  });
 }
 
 function _refreshConfigTab() {
