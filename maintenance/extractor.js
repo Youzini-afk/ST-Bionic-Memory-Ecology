@@ -154,12 +154,12 @@ function extractOperationsPayload(result) {
     }
   }
 
-  // 2. 智能探测：扫描对象中第一个值为非空数组且元素为对象的键
+  // 2. 智能探测：扫描对象中第一个值为非空数组且元素看起来像操作的键
   for (const [key, value] of Object.entries(result)) {
     if (
       Array.isArray(value) &&
       value.length > 0 &&
-      isPlainObject(value[0])
+      value.some((item) => looksLikeSingleOperation(item))
     ) {
       debugLog(
         `[ST-BME] 自动探测到非标准容器键: "${key}" (${value.length} 项)`,
