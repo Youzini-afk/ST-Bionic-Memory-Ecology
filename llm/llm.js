@@ -1976,5 +1976,51 @@ function extractJSON(text) {
     }
   }
 
+  // 4. trailing comma 容错 (常见 LLM 错误: {"a": 1,} 或 [1, 2,])
+  if (startIdx >= 0) {
+    const lastEnd = trimmed.lastIndexOf(endChar);
+    if (lastEnd > startIdx) {
+      const candidate = trimmed
+        .slice(startIdx, lastEnd + 1)
+        .replace(/,\s*([}\]])/g, "$1");
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        /* continue */
+      }
+    }
+  }
+
+  // 5. 截断 JSON 修复: 尝试补全不匹配的括号
+  if (startIdx >= 0) {
+    let candidate = trimmed.slice(startIdx);
+    // 先清理 trailing comma
+    candidate = candidate.replace(/,\s*$/g, "");
+
+    const opens = { "{": 0, "[": 0 };
+    const closes = { "}": "{", "]": "[" };
+    for (const ch of candidate) {
+      if (ch in opens) opens[ch]++;
+      if (ch in closes && opens[closes[ch]] > 0) opens[closes[ch]]--;
+    }
+
+    if (opens["["] > 0 || opens["{"] > 0) {
+      // 去除末尾不完整的 key-value 残片（如 "key": "未完...）
+      candidate = candidate.replace(
+        /,?\s*"[^"]*"?\s*:\s*"?[^"}\]]*$/,
+        "",
+      );
+      candidate = candidate.replace(/,\s*$/g, "");
+      for (let i = 0; i < opens["["]; i++) candidate += "]";
+      for (let i = 0; i < opens["{"]; i++) candidate += "}";
+      candidate = candidate.replace(/,\s*([}\]])/g, "$1");
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        /* continue */
+      }
+    }
+  }
+
   return null;
 }

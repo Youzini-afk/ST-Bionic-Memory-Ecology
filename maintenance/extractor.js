@@ -84,6 +84,14 @@ const EXTRACTION_RESULT_CONTAINER_KEYS = [
   "items",
   "entries",
   "memories",
+  "results",
+  "data",
+  "memory_operations",
+  "actions",
+  "output",
+  "extracted",
+  "extractions",
+  "memory_nodes",
 ];
 
 const EXTRACTION_OPERATION_META_KEYS = new Set([
@@ -116,7 +124,22 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * 判断一个对象是否像一个 extraction 操作
+ * (包含 action/op/operation/type 中的至少一个)
+ */
+function looksLikeSingleOperation(obj) {
+  if (!isPlainObject(obj)) return false;
+  return (
+    typeof obj.action === "string" ||
+    typeof obj.op === "string" ||
+    typeof obj.operation === "string" ||
+    typeof obj.type === "string"
+  );
+}
+
 function extractOperationsPayload(result) {
+  // 直接是数组 → 直接返回
   if (Array.isArray(result)) {
     return result;
   }
@@ -124,10 +147,33 @@ function extractOperationsPayload(result) {
     return null;
   }
 
+  // 1. 优先匹配已知容器键
   for (const key of EXTRACTION_RESULT_CONTAINER_KEYS) {
     if (Array.isArray(result[key])) {
       return result[key];
     }
+  }
+
+  // 2. 智能探测：扫描对象中第一个值为非空数组且元素为对象的键
+  for (const [key, value] of Object.entries(result)) {
+    if (
+      Array.isArray(value) &&
+      value.length > 0 &&
+      isPlainObject(value[0])
+    ) {
+      debugLog(
+        `[ST-BME] 自动探测到非标准容器键: "${key}" (${value.length} 项)`,
+      );
+      return value;
+    }
+  }
+
+  // 3. 单个操作对象兜底：如果整个结果看起来像一条操作，包装成数组
+  if (looksLikeSingleOperation(result)) {
+    debugLog(
+      "[ST-BME] LLM 返回了单个操作对象，自动包装为数组",
+    );
+    return [result];
   }
 
   return null;
@@ -455,7 +501,23 @@ export async function extractMemories({
   const normalizedResult = normalizeExtractionResultPayload(result, schema);
 
   if (!normalizedResult || !Array.isArray(normalizedResult.operations)) {
-    console.warn("[ST-BME] 提取 LLM 未返回有效操作");
+    const diagType = result === null
+      ? "null"
+      : Array.isArray(result)
+        ? `array(len=${result.length})`
+        : typeof result;
+    const diagKeys = isPlainObject(result)
+      ? Object.keys(result).slice(0, 10).join(", ")
+      : "";
+    const diagPreview = typeof result === "string"
+      ? result.slice(0, 120)
+      : "";
+    console.warn(
+      `[ST-BME] 提取 LLM 未返回有效操作 ` +
+        `[type=${diagType}]` +
+        (diagKeys ? ` [keys=${diagKeys}]` : "") +
+        (diagPreview ? ` [preview=${diagPreview}]` : ""),
+    );
     return {
       success: false,
       error: "提取 LLM 未返回有效操作",
