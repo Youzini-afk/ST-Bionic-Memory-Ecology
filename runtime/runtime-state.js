@@ -8,6 +8,10 @@ import {
   createDefaultRegionState,
   normalizeGraphCognitiveState,
 } from "../graph/knowledge-state.js";
+import {
+  createDefaultTimelineState,
+  normalizeGraphStoryTimeline,
+} from "../graph/story-timeline.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
@@ -34,6 +38,10 @@ export function createDefaultHistoryState(chatId = "") {
     lastExtractedRegion: "",
     activeRegion: "",
     activeRegionSource: "",
+    activeStorySegmentId: "",
+    activeStoryTimeLabel: "",
+    activeStoryTimeSource: "",
+    lastExtractedStorySegmentId: "",
     activeCharacterPovOwner: "",
     activeUserPovOwner: "",
     activeRecallOwnerKey: "",
@@ -123,6 +131,21 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   }
   if (typeof historyState.activeRegionSource !== "string") {
     historyState.activeRegionSource = historyState.activeRegion ? "history" : "";
+  }
+  if (typeof historyState.activeStorySegmentId !== "string") {
+    historyState.activeStorySegmentId = "";
+  }
+  if (typeof historyState.activeStoryTimeLabel !== "string") {
+    historyState.activeStoryTimeLabel = "";
+  }
+  if (typeof historyState.activeStoryTimeSource !== "string") {
+    historyState.activeStoryTimeSource =
+      historyState.activeStorySegmentId || historyState.activeStoryTimeLabel
+        ? "history"
+        : "";
+  }
+  if (typeof historyState.lastExtractedStorySegmentId !== "string") {
+    historyState.lastExtractedStorySegmentId = "";
   }
   if (typeof historyState.activeCharacterPovOwner !== "string") {
     historyState.activeCharacterPovOwner = "";
@@ -247,7 +270,9 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
     : createDefaultMaintenanceJournal();
   graph.knowledgeState = createDefaultKnowledgeState(graph.knowledgeState);
   graph.regionState = createDefaultRegionState(graph.regionState);
+  graph.timelineState = createDefaultTimelineState(graph.timelineState);
   normalizeGraphCognitiveState(graph);
+  normalizeGraphStoryTimeline(graph);
   graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
   return graph;
 }

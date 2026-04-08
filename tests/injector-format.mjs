@@ -14,6 +14,15 @@ const coreEvent = {
     participants: "艾琳",
     status: "resolved",
   },
+  storyTime: {
+    segmentId: "tl-1",
+    label: "第二天清晨",
+    tense: "ongoing",
+    relation: "same",
+    anchorLabel: "",
+    confidence: "high",
+    source: "extract",
+  },
 };
 
 const recalledCharacter = {
@@ -31,6 +40,15 @@ const recalledCharacter = {
     belief: "这里藏着失踪案线索",
     emotion: "警觉",
     attitude: "必须立刻下去查看",
+  },
+  storyTime: {
+    segmentId: "tl-1",
+    label: "第二天清晨",
+    tense: "ongoing",
+    relation: "same",
+    anchorLabel: "",
+    confidence: "high",
+    source: "extract",
   },
 };
 
@@ -51,6 +69,25 @@ const recalledReflection = {
   },
 };
 
+const recalledSynopsis = {
+  id: "synopsis-1",
+  type: "synopsis",
+  scope: {
+    layer: "objective",
+  },
+  fields: {
+    summary: "昨夜冲突后，艾琳在第二天清晨重新回到钟楼，并发现地下入口与失踪案有直接联系。",
+  },
+  storyTimeSpan: {
+    startSegmentId: "tl-0",
+    endSegmentId: "tl-1",
+    startLabel: "昨夜冲突之后",
+    endLabel: "第二天清晨",
+    mixed: true,
+    source: "derived",
+  },
+};
+
 const text = formatInjection(
   {
     coreNodes: [coreEvent],
@@ -63,7 +100,7 @@ const text = formatInjection(
       characterPovOwnerOrder: ["character:艾琳"],
       userPov: [recalledReflection],
       objectiveCurrentRegion: [coreEvent],
-      objectiveGlobal: [],
+      objectiveGlobal: [recalledSynopsis],
     },
     meta: {
       retrieval: {
@@ -81,9 +118,13 @@ assert.match(text, /\[Memory - User POV \/ Not Character Facts\]/);
 assert.match(text, /不等于角色已知事实/);
 assert.match(text, /\[Memory - Objective \/ Current Region\]/);
 assert.match(text, /pov_memory_table:/);
-assert.match(text, /\| owner \| summary \| belief \| emotion \| attitude \|/);
+assert.match(text, /\| owner \| story_time \| summary \| belief \| emotion \| attitude \|/);
 assert.match(text, /角色: 艾琳/);
 assert.match(text, /用户: 玩家/);
 assert.match(text, /event_table:/);
+assert.match(text, /\| story_time \| summary \| participants \| status \|/);
+assert.match(text, /第二天清晨 · ongoing/);
+assert.match(text, /story_time_span/);
+assert.match(text, /昨夜冲突之后 -> 第二天清晨/);
 
 console.log("injector-format tests passed");

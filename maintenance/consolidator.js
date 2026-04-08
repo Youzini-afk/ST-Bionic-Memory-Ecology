@@ -12,6 +12,10 @@ import {
   describeMemoryScope,
 } from "../graph/memory-scope.js";
 import {
+  describeNodeStoryTime,
+  isStoryTimeCompatible,
+} from "../graph/story-timeline.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -110,13 +114,22 @@ const CONSOLIDATION_SYSTEM_PROMPT = `你是一个记忆整合分析器。当新�
 - 例如：揭露卧底身份 → 修正该角色之前事件中的动机描述
 - 例如：发现地点的隐藏特性 → 更新地点节点的描述
 - 不要对无关记忆强行建立联系
-- neighbor_updates 中每条必须有实际意义的修改`;
+- neighbor_updates 中每条必须有实际意义的修改
+- 必须保持剧情时间一致；不同时间段的事件默认不要 merge
+- 同名事件若剧情时间不同，除非明确是同一事件的补充，否则应 keep`;
 
 function normalizeLatestOnlyIdentityValue(value) {
   return String(value ?? "")
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase();
+}
+
+function canMergeTemporalScopedMemories(leftNode, rightNode) {
+  if (!canMergeScopedMemories(leftNode, rightNode)) {
+    return false;
+  }
+  return isStoryTimeCompatible(leftNode, rightNode).compatible;
 }
 
 export async function analyzeAutoConsolidationGate({
@@ -159,7 +172,7 @@ export async function analyzeAutoConsolidationGate({
     const typeDef = schemaByType.get(String(node.type || ""));
     const scopedCandidates = activeNodes.filter(
       (candidate) =>
-        candidate?.id !== node.id && canMergeScopedMemories(node, candidate),
+        candidate?.id !== node.id && canMergeTemporalScopedMemories(node, candidate),
     );
 
     if (typeDef?.latestOnly) {
@@ -364,7 +377,7 @@ export async function consolidateMemories({
       const candidates = candidatePool.filter((c) => {
         if (c.nodeId === entry.id) return false;
         const candidateNode = getNode(graph, c.nodeId);
-        return canMergeScopedMemories(entry.node, candidateNode);
+        return canMergeTemporalScopedMemories(entry.node, candidateNode);
       });
 
       if (queryVectors?.[i] && candidates.length > 0) {
@@ -406,7 +419,7 @@ export async function consolidateMemories({
           embeddingConfig,
           neighborCount,
           activeNodes.filter(
-            (n) => n.id !== entry.id && canMergeScopedMemories(entry.node, n),
+            (n) => n.id !== entry.id && canMergeTemporalScopedMemories(entry.node, n),
           ),
           signal,
         );
@@ -437,6 +450,7 @@ export async function consolidateMemories({
       .map(([k, v]) => `${k}: ${v}`)
       .join(", ");
     const newNodeScope = buildScopeBadgeText(entry.node.scope);
+    const newNodeStoryTime = describeNodeStoryTime(entry.node);
 
     // 构建近邻描述
     let neighborText;
@@ -450,7 +464,7 @@ export async function consolidateMemories({
           const fieldsStr = Object.entries(node.fields)
             .map(([k, v]) => `${k}: ${v}`)
             .join(", ");
-          return `  - [${node.id}] 类型=${node.type}, 作用域=${describeMemoryScope(node.scope)}, ${fieldsStr} (相似度=${n.score.toFixed(3)})`;
+          return `  - [${node.id}] 类型=${node.type}, 作用域=${describeMemoryScope(node.scope)}${describeNodeStoryTime(node) ? `, 剧情时间=${describeNodeStoryTime(node)}` : ""}, ${fieldsStr} (相似度=${n.score.toFixed(3)})`;
         })
         .filter(Boolean)
         .join("\n");
@@ -466,7 +480,7 @@ export async function consolidateMemories({
     userPromptSections.push(
       [
         `### 新记忆 #${i + 1}`,
-        `[${entry.id}] 类型=${entry.node.type}, 作用域=${newNodeScope}, ${newNodeFieldsStr}`,
+        `[${entry.id}] 类型=${entry.node.type}, 作用域=${newNodeScope}${newNodeStoryTime ? `, 剧情时间=${newNodeStoryTime}` : ""}, ${newNodeFieldsStr}`,
         "近邻记忆:",
         neighborText,
         hint,
@@ -600,7 +614,7 @@ function processOneResult(graph, entry, result, stats) {
       if (
         targetNode &&
         !targetNode.archived &&
-        canMergeScopedMemories(newNode, targetNode)
+        canMergeTemporalScopedMemories(newNode, targetNode)
       ) {
         debugLog(`[ST-BME] 记忆整合: merge ${newId} → ${targetId}`);
 
@@ -635,6 +649,14 @@ function processOneResult(graph, entry, result, stats) {
           Math.min(targetRange[0], newRange[0]),
           Math.max(targetRange[1], newRange[1]),
         ];
+        if (!String(targetNode?.storyTime?.segmentId || targetNode?.storyTime?.label || "").trim()) {
+          targetNode.storyTime = { ...(newNode.storyTime || targetNode.storyTime || {}) };
+        }
+        if (!String(targetNode?.storyTimeSpan?.startSegmentId || targetNode?.storyTimeSpan?.startLabel || "").trim()) {
+          targetNode.storyTimeSpan = {
+            ...(newNode.storyTimeSpan || targetNode.storyTimeSpan || {}),
+          };
+        }
 
         targetNode.embedding = null;
         newNode.archived = true;
@@ -683,7 +705,7 @@ function processOneResult(graph, entry, result, stats) {
         if (
           !oldNode ||
           oldNode.archived ||
-          !canMergeScopedMemories(newNode, oldNode)
+          !canMergeTemporalScopedMemories(newNode, oldNode)
         ) {
           continue;
         }

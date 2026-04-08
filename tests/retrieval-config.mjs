@@ -93,6 +93,14 @@ const graph = createGraph();
 const helpers = createGraphHelpers(graph);
 const retrieve = await loadRetrieve({
   ...helpers,
+  STORY_TEMPORAL_BUCKETS: {
+    CURRENT: "current",
+    ADJACENT_PAST: "adjacentPast",
+    DISTANT_PAST: "distantPast",
+    FLASHBACK: "flashback",
+    FUTURE: "future",
+    UNDATED: "undated",
+  },
   MEMORY_SCOPE_BUCKETS: {
     CHARACTER_POV: "characterPov",
     USER_POV: "userPov",
@@ -187,6 +195,89 @@ const retrieve = await loadRetrieve({
     return {
       canonicalRegion: "",
       adjacentRegions: [],
+    };
+  },
+  resolveActiveStoryContext(targetGraph, preferred = {}) {
+    const preferredLabel = String(preferred?.label || "").trim();
+    const preferredSegmentId = String(preferred?.segmentId || "").trim();
+    const segments = Array.isArray(targetGraph?.timelineState?.segments)
+      ? targetGraph.timelineState.segments
+      : [];
+    const segment =
+      segments.find((item) => item.id === preferredSegmentId) ||
+      segments.find((item) => item.label === preferredLabel) ||
+      segments.find(
+        (item) =>
+          item.id === String(targetGraph?.historyState?.activeStorySegmentId || "").trim(),
+      ) ||
+      null;
+    return {
+      activeSegmentId: String(
+        segment?.id || targetGraph?.historyState?.activeStorySegmentId || "",
+      ).trim(),
+      activeStoryTimeLabel: String(
+        segment?.label || targetGraph?.historyState?.activeStoryTimeLabel || "",
+      ).trim(),
+      source: segment ? "history" : "",
+      segment,
+      resolved: Boolean(segment),
+    };
+  },
+  resolveStoryCueMode(userMessage = "", recentMessages = []) {
+    const text = [userMessage, ...(Array.isArray(recentMessages) ? recentMessages : [])]
+      .map((value) => String(value || ""))
+      .join("\n");
+    if (/回忆|以前|过去/.test(text)) return "flashback";
+    if (/以后|未来|计划|打算/.test(text)) return "future";
+    return "";
+  },
+  describeNodeStoryTime(node = {}) {
+    return String(node?.storyTime?.label || node?.storyTimeSpan?.startLabel || "").trim();
+  },
+  classifyStoryTemporalBucket(_graph, node, { activeSegmentId = "", cueMode = "" } = {}) {
+    const label = String(node?.storyTime?.label || node?.storyTimeSpan?.startLabel || "").trim();
+    if (!label) {
+      return {
+        bucket: "undated",
+        weight: 0.88,
+        suppressed: false,
+        rescued: false,
+        reason: "undated",
+      };
+    }
+    if (label === activeSegmentId || label === "当前") {
+      return {
+        bucket: "current",
+        weight: 1.15,
+        suppressed: false,
+        rescued: false,
+        reason: "current",
+      };
+    }
+    if (label === "未来计划") {
+      return {
+        bucket: "future",
+        weight: cueMode === "future" ? 0.74 : 0.22,
+        suppressed: cueMode !== "future",
+        rescued: false,
+        reason: cueMode === "future" ? "future-cue" : "future-suppressed",
+      };
+    }
+    if (label === "往事") {
+      return {
+        bucket: cueMode === "flashback" ? "flashback" : "distantPast",
+        weight: cueMode === "flashback" ? 1.02 : 0.64,
+        suppressed: false,
+        rescued: cueMode === "flashback",
+        reason: cueMode === "flashback" ? "flashback-rescued" : "distant-past",
+      };
+    }
+    return {
+      bucket: "adjacentPast",
+      weight: 1.0,
+      suppressed: false,
+      rescued: false,
+      reason: "adjacent-past",
     };
   },
   pushRecentRecallOwner(historyState, ownerKey = "") {
@@ -721,6 +812,88 @@ assert.equal(
 assert.equal(
   multiOwnerResult.meta.retrieval.selectedByOwner["character:艾琳"]?.[0],
   "pov-a",
+);
+
+const temporalGraph = {
+  nodes: [
+    {
+      id: "evt-current",
+      type: "event",
+      importance: 5,
+      createdTime: 1,
+      archived: false,
+      fields: { title: "当前调查" },
+      seqRange: [10, 10],
+      storyTime: { label: "当前" },
+    },
+    {
+      id: "evt-past",
+      type: "event",
+      importance: 6,
+      createdTime: 2,
+      archived: false,
+      fields: { title: "旧冲突" },
+      seqRange: [8, 8],
+      storyTime: { label: "往事" },
+    },
+    {
+      id: "evt-future",
+      type: "event",
+      importance: 10,
+      createdTime: 3,
+      archived: false,
+      fields: { title: "未来计划" },
+      seqRange: [12, 12],
+      storyTime: { label: "未来计划", tense: "future" },
+    },
+  ],
+  edges: [],
+  historyState: {
+    activeStorySegmentId: "当前",
+    activeStoryTimeLabel: "当前",
+    activeStoryTimeSource: "test",
+  },
+  timelineState: {
+    segments: [
+      { id: "当前", label: "当前", order: 2 },
+      { id: "往事", label: "往事", order: 1 },
+      { id: "未来计划", label: "未来计划", order: 3 },
+    ],
+  },
+};
+const temporalSchema = [{ id: "event", label: "事件", alwaysInject: false }];
+const temporalResult = await retrieve({
+  graph: temporalGraph,
+  userMessage: "现在现场怎么样",
+  recentMessages: [],
+  embeddingConfig: {},
+  schema: temporalSchema,
+  options: {
+    topK: 3,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: false,
+    enableGraphDiffusion: false,
+    enableLLMRecall: false,
+    enableDiversitySampling: false,
+    enableStoryTimeline: true,
+    storyTimeSoftDirecting: true,
+    activeStorySegmentId: "当前",
+    activeStoryTimeLabel: "当前",
+  },
+});
+assert.equal(temporalResult.meta.retrieval.activeStorySegmentId, "当前");
+assert.equal(temporalResult.meta.retrieval.activeStoryTimeLabel, "当前");
+assert.ok(Array.isArray(temporalResult.meta.retrieval.temporalSuppressedNodes));
+assert.ok(
+  Array.isArray(temporalResult.meta.retrieval.temporalBuckets?.future) ||
+    Array.isArray(temporalResult.meta.retrieval.temporalBuckets?.["future"]),
+);
+assert.ok(
+  !Array.from(temporalResult.selectedNodeIds).includes("evt-future"),
+);
+assert.equal(
+  temporalResult.meta.retrieval.temporalTopHits[0]?.nodeId,
+  "evt-current",
 );
 
 console.log("retrieval-config tests passed");

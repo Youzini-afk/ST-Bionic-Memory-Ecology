@@ -87,7 +87,10 @@ const extractRulesBlock = extractPayload.promptMessages.find(
 );
 assert.match(String(extractFormatBlock?.content || ""), /cognitionUpdates/);
 assert.match(String(extractFormatBlock?.content || ""), /regionUpdates/);
+assert.match(String(extractFormatBlock?.content || ""), /batchStoryTime/);
+assert.match(String(extractFormatBlock?.content || ""), /storyTime/);
 assert.match(String(extractRulesBlock?.content || ""), /涉及到的角色都尽量尝试补 cognitionUpdates/);
+assert.match(String(extractRulesBlock?.content || ""), /batchStoryTime/);
 assert.deepEqual(
   extractPayload.promptMessages
     .map((message) => message.sourceKey)
@@ -136,7 +139,11 @@ assert.deepEqual(
 const recallFormatBlock = recallPayload.promptMessages.find(
   (message) => message.blockName === "输出格式",
 );
+const recallRulesBlock = recallPayload.promptMessages.find(
+  (message) => message.blockName === "行为规则",
+);
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_keys/);
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
+assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
 
 console.log("prompt-builder-defaults tests passed");

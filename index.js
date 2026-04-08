@@ -203,6 +203,10 @@ import {
   updateRegionAdjacencyManual,
 } from "./graph/knowledge-state.js";
 import {
+  clearManualActiveStorySegment,
+  setManualActiveStorySegment,
+} from "./graph/story-timeline.js";
+import {
   onExportGraphController,
   onFetchEmbeddingModelsController,
   onFetchMemoryLLMModelsController,
@@ -10082,6 +10086,9 @@ function buildRecallRetrieveOptions(settings, context) {
       settings.enableRegionScopedObjective ?? true,
     enableCognitiveMemory: settings.enableCognitiveMemory ?? true,
     enableSpatialAdjacency: settings.enableSpatialAdjacency ?? true,
+    enableStoryTimeline: settings.enableStoryTimeline ?? true,
+    injectStoryTimeLabel: settings.injectStoryTimeLabel ?? true,
+    storyTimeSoftDirecting: settings.storyTimeSoftDirecting ?? true,
     recallCharacterPovWeight: settings.recallCharacterPovWeight ?? 1.25,
     recallUserPovWeight: settings.recallUserPovWeight ?? 1.05,
     recallObjectiveCurrentRegionWeight:
@@ -10099,6 +10106,10 @@ function buildRecallRetrieveOptions(settings, context) {
       currentGraph?.historyState?.activeRegion ||
       currentGraph?.historyState?.lastExtractedRegion ||
       "",
+    activeStorySegmentId:
+      currentGraph?.historyState?.activeStorySegmentId || "",
+    activeStoryTimeLabel:
+      currentGraph?.historyState?.activeStoryTimeLabel || "",
     activeCharacterPovOwner:
       currentGraph?.historyState?.activeCharacterPovOwner || "",
     activeUserPovOwner:
@@ -10807,6 +10818,53 @@ function onSetPanelActiveRegion(payload = {}) {
   };
 }
 
+function onSetPanelActiveStoryTime(payload = {}) {
+  const label = String(payload.label || "").trim();
+  if (!currentGraph) {
+    return { ok: false, error: "missing-graph" };
+  }
+  if (!ensureGraphMutationReady("剧情时间覆盖", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  const result = setManualActiveStorySegment(currentGraph, { label });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "set-story-time-failed" };
+  }
+  const persist = saveGraphToChat({
+    reason: label ? "panel-story-time-set" : "panel-story-time-clear",
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    activeStorySegmentId: result.activeStorySegmentId || "",
+    activeStoryTimeLabel: result.activeStoryTimeLabel || "",
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onClearPanelActiveStoryTime() {
+  if (!currentGraph) {
+    return { ok: false, error: "missing-graph" };
+  }
+  if (!ensureGraphMutationReady("剧情时间覆盖清理", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  const result = clearManualActiveStorySegment(currentGraph);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "clear-story-time-failed" };
+  }
+  const persist = saveGraphToChat({ reason: "panel-story-time-clear" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    activeStorySegmentId: result.activeStorySegmentId || "",
+    activeStoryTimeLabel: result.activeStoryTimeLabel || "",
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 function onUpdatePanelRegionAdjacency(payload = {}) {
   const fallbackRegion =
     currentGraph?.historyState?.activeRegion ||
@@ -11173,6 +11231,8 @@ async function onDeleteServerSyncFile() {
       applyKnowledgeOverride: onApplyPanelKnowledgeOverride,
       clearKnowledgeOverride: onClearPanelKnowledgeOverride,
       setActiveRegion: onSetPanelActiveRegion,
+      setActiveStoryTime: onSetPanelActiveStoryTime,
+      clearActiveStoryTime: onClearPanelActiveStoryTime,
       updateRegionAdjacency: onUpdatePanelRegionAdjacency,
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),

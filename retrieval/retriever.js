@@ -45,6 +45,13 @@ import {
   resolveKnowledgeOwner,
   resolveKnowledgeOwnerKeyFromScope,
 } from "../graph/knowledge-state.js";
+import {
+  classifyStoryTemporalBucket,
+  describeNodeStoryTime,
+  resolveActiveStoryContext,
+  resolveStoryCueMode,
+  STORY_TEMPORAL_BUCKETS,
+} from "../graph/story-timeline.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-index.js";
@@ -161,8 +168,12 @@ function createRetrievalMeta(enableLLMRecall) {
     residualTriggered: false,
     residualHits: 0,
     scopeBuckets: {},
+    temporalBuckets: {},
     activeRegion: "",
     activeRegionSource: "",
+    activeStorySegmentId: "",
+    activeStoryTimeLabel: "",
+    activeStoryTimeSource: "",
     activeCharacterPovOwner: "",
     activeUserPovOwner: "",
     activeRecallOwnerKey: "",
@@ -181,6 +192,11 @@ function createRetrievalMeta(enableLLMRecall) {
     visibilityTopHits: [],
     visibilitySuppressedReasons: {},
     adjacentRegionMatches: [],
+    temporalSuppressedNodes: [],
+    temporalRescuedNodes: [],
+    temporalTopHits: [],
+    selectedByStoryTime: {},
+    timelineAdvanceApplied: false,
     selectedByKnowledgeState: {},
     selectedByOwner: {},
     skipReasons: [],
@@ -692,6 +708,17 @@ function createEmptyScopeBucketMap() {
   };
 }
 
+function createEmptyTemporalBucketMap() {
+  return {
+    [STORY_TEMPORAL_BUCKETS.CURRENT]: [],
+    [STORY_TEMPORAL_BUCKETS.ADJACENT_PAST]: [],
+    [STORY_TEMPORAL_BUCKETS.DISTANT_PAST]: [],
+    [STORY_TEMPORAL_BUCKETS.FLASHBACK]: [],
+    [STORY_TEMPORAL_BUCKETS.FUTURE]: [],
+    [STORY_TEMPORAL_BUCKETS.UNDATED]: [],
+  };
+}
+
 function pushScopeBucketDebug(map, bucket, value) {
   if (!Object.prototype.hasOwnProperty.call(map, bucket)) {
     map[bucket] = [];
@@ -711,6 +738,25 @@ function getScopeBucketPriority(bucket) {
       return 2;
     case MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL:
       return 1;
+    default:
+      return 0;
+  }
+}
+
+function getTemporalBucketPriority(bucket) {
+  switch (bucket) {
+    case STORY_TEMPORAL_BUCKETS.CURRENT:
+      return 5;
+    case STORY_TEMPORAL_BUCKETS.ADJACENT_PAST:
+      return 4;
+    case STORY_TEMPORAL_BUCKETS.UNDATED:
+      return 3;
+    case STORY_TEMPORAL_BUCKETS.FLASHBACK:
+      return 2;
+    case STORY_TEMPORAL_BUCKETS.DISTANT_PAST:
+      return 1;
+    case STORY_TEMPORAL_BUCKETS.FUTURE:
+      return 0;
     default:
       return 0;
   }
@@ -1250,6 +1296,9 @@ export async function retrieve({
     options.injectLowConfidenceObjectiveMemory ?? false;
   const injectUserPovMemory = options.injectUserPovMemory ?? true;
   const injectObjectiveGlobalMemory = options.injectObjectiveGlobalMemory ?? true;
+  const enableStoryTimeline = options.enableStoryTimeline ?? true;
+  const injectStoryTimeLabel = options.injectStoryTimeLabel ?? true;
+  const storyTimeSoftDirecting = options.storyTimeSoftDirecting ?? true;
   const stPromptContext = getSTContextForPrompt();
   const ownerCatalog = buildCharacterOwnerCatalog(graph);
   const legacyOwnerCandidate =
@@ -1309,6 +1358,21 @@ export async function retrieve({
   const adjacentRegionContext = enableSpatialAdjacency
     ? resolveAdjacentRegions(graph, activeRegion)
     : { adjacentRegions: [] };
+  const storyCueMode = enableStoryTimeline
+    ? resolveStoryCueMode(userMessage, recentMessages)
+    : "";
+  const activeStoryContext = enableStoryTimeline
+    ? resolveActiveStoryContext(graph, {
+        segmentId: options.activeStorySegmentId || "",
+        label: options.activeStoryTimeLabel || "",
+      })
+    : {
+        activeSegmentId: "",
+        activeStoryTimeLabel: "",
+        source: "",
+        segment: null,
+        resolved: false,
+      };
   const bucketWeights = buildScopeBucketWeightMap(options);
 
   let activeNodes = getActiveNodes(graph).filter(
@@ -1334,6 +1398,9 @@ export async function retrieve({
   const retrievalMeta = createRetrievalMeta(enableLLMRecall);
   retrievalMeta.activeRegion = activeRegion;
   retrievalMeta.activeRegionSource = activeRegionContext.source || "";
+  retrievalMeta.activeStorySegmentId = activeStoryContext.activeSegmentId || "";
+  retrievalMeta.activeStoryTimeLabel = activeStoryContext.activeStoryTimeLabel || "";
+  retrievalMeta.activeStoryTimeSource = activeStoryContext.source || "";
   retrievalMeta.activeCharacterPovOwner =
     activeCharacterPovOwner ||
     preliminarySceneOwnerCandidates[0]?.ownerName ||
@@ -1351,6 +1418,7 @@ export async function retrieve({
     reasons: [...(candidate.reasons || [])],
   }));
   retrievalMeta.bucketWeights = { ...bucketWeights };
+  retrievalMeta.temporalBuckets = createEmptyTemporalBucketMap();
   retrievalMeta.knowledgeGateMode = enableCognitiveMemory
     ? "anchored-soft-visibility"
     : "disabled";
@@ -1405,10 +1473,15 @@ export async function retrieve({
         enablePovMemory,
         enableRegionScopedObjective,
         enableCognitiveMemory,
+        enableStoryTimeline,
         injectUserPovMemory,
         injectObjectiveGlobalMemory,
         activeRegion,
         activeRegionSource: activeRegionContext.source || "",
+        activeStorySegmentId: activeStoryContext.activeSegmentId || "",
+        activeStoryTimeLabel: activeStoryContext.activeStoryTimeLabel || "",
+        activeStoryTimeSource: activeStoryContext.source || "",
+        injectStoryTimeLabel,
         activeCharacterPovOwner,
         activeUserPovOwner,
         activeCharacterPovOwners: preliminarySceneOwnerCandidates.map(
@@ -1683,6 +1756,18 @@ export async function retrieve({
           allowImplicitCharacterPovFallback: false,
         })
       : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
+    const temporalDirector = enableStoryTimeline
+      ? classifyStoryTemporalBucket(graph, node, {
+          activeSegmentId: activeStoryContext.activeSegmentId,
+          cueMode: storyCueMode,
+        })
+      : {
+          bucket: STORY_TEMPORAL_BUCKETS.UNDATED,
+          weight: 1,
+          suppressed: false,
+          rescued: false,
+          reason: "disabled",
+        };
     const knowledgeGate = enableCognitiveMemory
       ? computeKnowledgeGateForNode(
           graph,
@@ -1728,6 +1813,18 @@ export async function retrieve({
     if (knowledgeGate.rescued) {
       retrievalMeta.knowledgeRescuedNodes.push(nodeId);
     }
+    pushScopeBucketDebug(
+      retrievalMeta.temporalBuckets,
+      temporalDirector.bucket,
+      nodeId,
+    );
+    if (storyTimeSoftDirecting && temporalDirector.suppressed) {
+      retrievalMeta.temporalSuppressedNodes.push(nodeId);
+      continue;
+    }
+    if (temporalDirector.rescued) {
+      retrievalMeta.temporalRescuedNodes.push(nodeId);
+    }
     const scopeWeight = enableScopedMemory
       ? resolveScopeBucketWeight(scopeBucket, bucketWeights)
       : 1;
@@ -1741,7 +1838,16 @@ export async function retrieve({
     const ownerCoverageWeight = enableCognitiveMemory
       ? 1 + Math.max(0, Number(knowledgeGate.ownerCoverage || 0) - 1 / Math.max(1, activeRecallOwnerKeys.length || 1)) * 0.08
       : 1;
-    const weightedScore = finalScore * scopeWeight * knowledgeWeight * ownerCoverageWeight;
+    const temporalWeight =
+      enableStoryTimeline && storyTimeSoftDirecting
+        ? Number(temporalDirector.weight || 1)
+        : 1;
+    const weightedScore =
+      finalScore *
+      scopeWeight *
+      knowledgeWeight *
+      ownerCoverageWeight *
+      temporalWeight;
 
     scoredNodes.push({
       nodeId,
@@ -1760,6 +1866,12 @@ export async function retrieve({
       knowledgeVisibleOwnerKeys: [...(knowledgeGate.visibleOwnerKeys || [])],
       knowledgeSuppressedOwnerKeys: [...(knowledgeGate.suppressedOwnerKeys || [])],
       ownerCoverageWeight,
+      storyTimeLabel: describeNodeStoryTime(node),
+      temporalBucket: temporalDirector.bucket,
+      temporalWeight,
+      temporalSuppressed: Boolean(temporalDirector.suppressed),
+      temporalRescued: Boolean(temporalDirector.rescued),
+      temporalReason: String(temporalDirector.reason || ""),
       ...scores,
     });
     pushScopeBucketDebug(
@@ -1773,6 +1885,10 @@ export async function retrieve({
     const bucketDelta =
       getScopeBucketPriority(b.scopeBucket) - getScopeBucketPriority(a.scopeBucket);
     if (bucketDelta !== 0) return bucketDelta;
+    const temporalDelta =
+      getTemporalBucketPriority(b.temporalBucket) -
+      getTemporalBucketPriority(a.temporalBucket);
+    if (temporalDelta !== 0) return temporalDelta;
     const weightedDelta =
       (Number(b.weightedScore) || 0) - (Number(a.weightedScore) || 0);
     if (weightedDelta !== 0) return weightedDelta;
@@ -1784,6 +1900,13 @@ export async function retrieve({
   ).length;
   retrievalMeta.lexicalTopHits = buildLexicalTopHits(scoredNodes);
   retrievalMeta.visibilityTopHits = buildVisibilityTopHits(scoredNodes);
+  retrievalMeta.temporalTopHits = scoredNodes.slice(0, 8).map((item) => ({
+    nodeId: item.nodeId,
+    bucket: item.temporalBucket,
+    weight: Math.round((Number(item.temporalWeight) || 0) * 1000) / 1000,
+    label: item.storyTimeLabel || "",
+    reason: item.temporalReason || "",
+  }));
   const sceneOwnerCandidates = mergeSceneOwnerCandidateLists(
     preliminarySceneOwnerCandidates,
     collectOwnerCandidatesFromNodes(
@@ -1826,6 +1949,7 @@ export async function retrieve({
       normalizedMaxRecallNodes,
       options.recallPrompt,
       sceneOwnerCandidates,
+      activeStoryContext.activeStoryTimeLabel || "",
       settings,
       signal,
       onStreamProgress,
@@ -1967,6 +2091,22 @@ export async function retrieve({
       ];
     }),
   );
+  retrievalMeta.selectedByStoryTime = Object.fromEntries(
+    selectedNodes.map((node) => {
+      const scored = scoredNodes.find((item) => item.nodeId === node.id);
+      return [
+        node.id,
+        {
+          bucket: String(scored?.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED),
+          weight:
+            Math.round((Number(scored?.temporalWeight) || 0) * 1000) / 1000,
+          label: String(scored?.storyTimeLabel || ""),
+          rescued: Boolean(scored?.temporalRescued),
+          reason: String(scored?.temporalReason || ""),
+        },
+      ];
+    }),
+  );
   retrievalMeta.selectedByOwner = buildSelectedByOwner(
     graph,
     selectedNodes,
@@ -2025,6 +2165,12 @@ export async function retrieve({
   retrievalMeta.adjacentRegionMatches = uniqueNodeIds(
     retrievalMeta.adjacentRegionMatches,
   );
+  retrievalMeta.temporalSuppressedNodes = uniqueNodeIds(
+    retrievalMeta.temporalSuppressedNodes,
+  );
+  retrievalMeta.temporalRescuedNodes = uniqueNodeIds(
+    retrievalMeta.temporalRescuedNodes,
+  );
   retrievalMeta.llm = llmMeta;
   retrievalMeta.timings.total = roundMs(nowMs() - startedAt);
 
@@ -2035,10 +2181,15 @@ export async function retrieve({
       enablePovMemory,
       enableRegionScopedObjective,
       enableCognitiveMemory,
+      enableStoryTimeline,
       injectUserPovMemory,
       injectObjectiveGlobalMemory,
       activeRegion,
       activeRegionSource: activeRegionContext.source || "",
+      activeStorySegmentId: activeStoryContext.activeSegmentId || "",
+      activeStoryTimeLabel: activeStoryContext.activeStoryTimeLabel || "",
+      activeStoryTimeSource: activeStoryContext.source || "",
+      injectStoryTimeLabel,
       activeCharacterPovOwner:
         getSceneOwnerNamesByKeys(sceneOwnerCandidates, activeRecallOwnerKeys)[0] ||
         activeCharacterPovOwner,
@@ -2206,6 +2357,7 @@ async function llmRecall(
   maxNodes,
   customPrompt,
   sceneOwnerCandidates = [],
+  activeStoryTimeLabel = "",
   settings = {},
   signal,
   onStreamProgress = null,
@@ -2218,10 +2370,11 @@ async function llmRecall(
       const node = c.node;
       const typeDef = schema.find((s) => s.id === node.type);
       const typeLabel = typeDef?.label || node.type;
+      const storyTimeLabel = describeNodeStoryTime(node);
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
+      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 时间=${storyTimeLabel || "未标注"}, 时间桶=${String(c.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
 
@@ -2232,6 +2385,7 @@ async function llmRecall(
     candidateNodes: candidateDescriptions,
     candidateText: candidateDescriptions,
     sceneOwnerCandidates: sceneOwnerCandidateText,
+    activeStoryTimeLabel,
     graphStats: `candidate_count=${candidates.length}`,
     ...getSTContextForPrompt(),
   });
@@ -2244,6 +2398,7 @@ async function llmRecall(
       "你是一个记忆召回分析器。",
       "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
       "你还需要判断这轮真正参与当前回应的具体人物，并返回他们的 ownerKey。",
+      "优先维持剧情时间一致，不要把未来信息当成当前已经发生的客观事实带入。",
       "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
       `最多选择 ${maxNodes} 个节点。`,
       "输出严格的 JSON 格式：",
@@ -2254,6 +2409,9 @@ async function llmRecall(
   );
 
   const userPrompt = [
+    "## 当前剧情时间",
+    activeStoryTimeLabel || "(未确定)",
+    "",
     "## 最近对话上下文",
     contextStr || "(无)",
     "",
@@ -2392,6 +2550,7 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const recallNodes = [];
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
   const scopeContext = meta.scopeContext || {};
+  const compareForResult = compareNodeRecallOrderWithContext(graph, scopeContext);
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
@@ -2414,13 +2573,13 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
     }
   }
 
-  coreNodes.sort(compareNodeRecallOrder);
-  recallNodes.sort(compareNodeRecallOrder);
+  coreNodes.sort(compareForResult);
+  recallNodes.sort(compareForResult);
   const groupedRecallNodes = groupRecallNodes(recallNodes);
   const selectedNodes = [...selectedSet]
     .map((nodeId) => getNode(graph, nodeId))
     .filter((node) => node && !node.archived)
-    .sort(compareNodeRecallOrder);
+    .sort(compareForResult);
   const scopeBuckets = buildScopedInjectionBuckets(
     coreNodes,
     selectedNodes,
@@ -2466,6 +2625,10 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
     ...selectedNodes,
     ...coreNodes,
   ];
+  const compareForBucket = compareNodeRecallOrderWithContext(
+    scopeContext.graph,
+    scopeContext,
+  );
   const seen = new Set();
   const globalCandidates = [];
 
@@ -2538,9 +2701,9 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
     }
   }
 
-  buckets.characterPov.sort(compareNodeRecallOrder);
+  buckets.characterPov.sort(compareForBucket);
   for (const ownerKey of Object.keys(buckets.characterPovByOwner)) {
-    buckets.characterPovByOwner[ownerKey].sort(compareNodeRecallOrder);
+    buckets.characterPovByOwner[ownerKey].sort(compareForBucket);
   }
   buckets.characterPovOwnerOrder = [
     ...activeRecallOwnerKeys.filter((ownerKey) =>
@@ -2552,11 +2715,11 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
         buckets.characterPovByOwner[ownerKey]?.length > 0,
     ),
   ];
-  buckets.userPov.sort(compareNodeRecallOrder);
-  buckets.objectiveCurrentRegion.sort(compareNodeRecallOrder);
+  buckets.userPov.sort(compareForBucket);
+  buckets.objectiveCurrentRegion.sort(compareForBucket);
   const cappedGlobal = (scopeContext.injectObjectiveGlobalMemory === false
     ? []
-    : globalCandidates.sort(compareNodeRecallOrder).slice(0, 6));
+    : globalCandidates.sort(compareForBucket).slice(0, 6));
   buckets.objectiveGlobal = cappedGlobal;
 
   return buckets;
@@ -2662,6 +2825,29 @@ function compareNodeRecallOrder(a, b) {
   const bSeq = b?.seqRange?.[1] ?? b?.seq ?? 0;
   if (bSeq !== aSeq) return bSeq - aSeq;
   return (b.importance || 0) - (a.importance || 0);
+}
+
+function compareNodeRecallOrderWithContext(graph, scopeContext = {}) {
+  const activeStorySegmentId = String(scopeContext?.activeStorySegmentId || "").trim();
+  const enableStoryTimeline = scopeContext?.enableStoryTimeline !== false;
+  if (!enableStoryTimeline || !activeStorySegmentId) {
+    return compareNodeRecallOrder;
+  }
+  return (a, b) => {
+    const temporalDelta =
+      getTemporalBucketPriority(
+        classifyStoryTemporalBucket(graph, b, {
+          activeSegmentId: activeStorySegmentId,
+        }).bucket,
+      ) -
+      getTemporalBucketPriority(
+        classifyStoryTemporalBucket(graph, a, {
+          activeSegmentId: activeStorySegmentId,
+        }).bucket,
+      );
+    if (temporalDelta !== 0) return temporalDelta;
+    return compareNodeRecallOrder(a, b);
+  };
 }
 
 function groupRecallNodes(nodes) {

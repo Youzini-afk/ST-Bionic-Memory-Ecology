@@ -27,6 +27,14 @@ import {
   resolveKnowledgeOwner,
 } from "../graph/knowledge-state.js";
 import {
+  applyBatchStoryTime,
+  createSpanFromStoryTime,
+  deriveStoryTimeSpanFromNodes,
+  describeNodeStoryTime,
+  normalizeStoryTime,
+  upsertTimelineSegment,
+} from "../graph/story-timeline.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -120,6 +128,7 @@ const EXTRACTION_OPERATION_META_KEYS = new Set([
   "importance",
   "clusters",
   "scope",
+  "storyTime",
   "seq",
   "temporalStrength",
   "temporal_strength",
@@ -302,6 +311,14 @@ function normalizeExtractionOperation(rawOp, schema) {
     delete normalized.scope;
   }
 
+  if (isPlainObject(rawOp?.storyTime)) {
+    normalized.storyTime = normalizeStoryTime(rawOp.storyTime, {
+      source: "extract",
+    });
+  } else if (action === "create" || action === "update") {
+    delete normalized.storyTime;
+  }
+
   if (action === "create" || action === "update") {
     const fields = collectNormalizedOperationFields(rawOp, typeDef);
     if (Object.keys(fields).length > 0) {
@@ -370,12 +387,19 @@ function normalizeExtractionResultPayload(result, schema) {
           : [],
       }
     : null;
+  const normalizedBatchStoryTime = isPlainObject(result?.batchStoryTime)
+    ? {
+        ...normalizeStoryTime(result.batchStoryTime, { source: "extract" }),
+        advancesActiveTimeline: result.batchStoryTime?.advancesActiveTimeline === true,
+      }
+    : null;
 
   if (Array.isArray(result) || !isPlainObject(result)) {
     return {
       operations: normalizedOperations,
       cognitionUpdates: normalizedCognitionUpdates,
       regionUpdates: normalizedRegionUpdates,
+      batchStoryTime: normalizedBatchStoryTime,
     };
   }
 
@@ -384,6 +408,7 @@ function normalizeExtractionResultPayload(result, schema) {
     operations: normalizedOperations,
     cognitionUpdates: normalizedCognitionUpdates,
     regionUpdates: normalizedRegionUpdates,
+    batchStoryTime: normalizedBatchStoryTime,
   };
 }
 
@@ -544,6 +569,75 @@ function normalizeCognitionUpdatesWithOwnerContext(
   }
 
   return normalized;
+}
+
+function supportsPointStoryTime(type = "") {
+  return ["event", "pov_memory"].includes(String(type || ""));
+}
+
+function supportsSpanStoryTime(type = "") {
+  return ["thread", "synopsis", "reflection"].includes(String(type || ""));
+}
+
+function resolveOperationStoryTime(
+  graph,
+  op = {},
+  batchStoryTime = null,
+  { source = "extract" } = {},
+) {
+  const explicitStoryTime = normalizeStoryTime(op?.storyTime, { source });
+  const fallbackStoryTime = normalizeStoryTime(batchStoryTime, { source });
+  const candidate =
+    explicitStoryTime.segmentId || explicitStoryTime.label
+      ? explicitStoryTime
+      : fallbackStoryTime.segmentId || fallbackStoryTime.label
+        ? fallbackStoryTime
+        : null;
+  if (!candidate) {
+    return {
+      storyTime: normalizeStoryTime(),
+      storyTimeSpan: createSpanFromStoryTime(null, source),
+      timelineAdvanceApplied: false,
+    };
+  }
+
+  const activeReferenceSegmentId = String(
+    graph?.historyState?.activeStorySegmentId ||
+      graph?.historyState?.lastExtractedStorySegmentId ||
+      "",
+  ).trim();
+  const upserted = upsertTimelineSegment(graph, candidate, {
+    referenceSegmentId: activeReferenceSegmentId,
+    source,
+  });
+  return {
+    storyTime: upserted.storyTime,
+    storyTimeSpan: createSpanFromStoryTime(upserted.storyTime, source),
+    timelineAdvanceApplied: false,
+  };
+}
+
+function applyOperationStoryTimeToNode(
+  graph,
+  node,
+  op = {},
+  batchStoryTime = null,
+  { source = "extract" } = {},
+) {
+  if (!node || typeof node !== "object") return;
+  const resolved = resolveOperationStoryTime(graph, op, batchStoryTime, { source });
+  if (supportsPointStoryTime(node.type)) {
+    node.storyTime = resolved.storyTime;
+    node.storyTimeSpan = createSpanFromStoryTime(null, source);
+    return;
+  }
+  if (supportsSpanStoryTime(node.type)) {
+    node.storyTime = normalizeStoryTime();
+    node.storyTimeSpan = resolved.storyTimeSpan;
+    return;
+  }
+  node.storyTime = normalizeStoryTime();
+  node.storyTimeSpan = createSpanFromStoryTime(null, source);
 }
 
 /**
@@ -774,6 +868,7 @@ export async function extractMemories({
   const updatedNodeIds = [];
   const refMap = new Map();
   const operationErrors = [];
+  const normalizedBatchStoryTime = normalizedResult?.batchStoryTime || null;
 
   for (const op of normalizedResult.operations) {
     try {
@@ -789,6 +884,7 @@ export async function extractMemories({
             scopeRuntime,
             extractionOwnerContext,
             ownershipWarnings,
+            normalizedBatchStoryTime,
           );
           if (createdId) newNodeIds.push(createdId);
           break;
@@ -803,6 +899,7 @@ export async function extractMemories({
               scopeRuntime,
               extractionOwnerContext,
               ownershipWarnings,
+              normalizedBatchStoryTime,
             );
             if (updatedNodeId) updatedNodeIds.push(updatedNodeId);
           }
@@ -867,6 +964,11 @@ export async function extractMemories({
     changedNodeIds,
     source: "extract",
   });
+  const batchStoryTimeResult = applyBatchStoryTime(
+    graph,
+    normalizedBatchStoryTime,
+    "extract",
+  );
   updateRuntimeScopeState(graph, newNodeIds, scopeRuntime, extractionOwnerContext);
 
   debugLog(
@@ -879,6 +981,8 @@ export async function extractMemories({
     ...stats,
     newNodeIds,
     ownerWarnings: ownershipWarnings,
+    batchStoryTime: normalizedBatchStoryTime,
+    batchStoryTimeResult,
     processedRange: [effectiveStartSeq, effectiveEndSeq],
   };
 }
@@ -896,6 +1000,7 @@ function handleCreate(
   scopeRuntime = {},
   ownerContext = {},
   ownershipWarnings = [],
+  batchStoryTime = null,
 ) {
   const normalizedFields =
     op.type === "event" ? ensureEventTitle(op.fields || {}) : op.fields || {};
@@ -933,6 +1038,7 @@ function handleCreate(
     if (existing) {
       // 转为更新操作
       updateNode(graph, existing.id, { fields: op.fields, seq, scope: nodeScope });
+      applyOperationStoryTimeToNode(graph, existing, op, batchStoryTime);
       stats.updatedNodes++;
 
       if (op.ref) refMap.set(op.ref, existing.id);
@@ -954,6 +1060,7 @@ function handleCreate(
     clusters: op.clusters || [],
     scope: nodeScope,
   });
+  applyOperationStoryTimeToNode(graph, node, op, batchStoryTime);
 
   addNode(graph, node);
   stats.newNodes++;
@@ -982,6 +1089,7 @@ function handleUpdate(
   scopeRuntime = {},
   ownerContext = {},
   ownershipWarnings = [],
+  batchStoryTime = null,
 ) {
   if (!op.nodeId) {
     console.warn("[ST-BME] update 操作缺少 nodeId");
@@ -1029,6 +1137,7 @@ function handleUpdate(
     stats.updatedNodes++;
     const node = getNode(graph, op.nodeId);
     if (node) {
+      applyOperationStoryTimeToNode(graph, node, op, batchStoryTime);
       node.embedding = null;
       node.seq = Math.max(node.seq || 0, updateSeq);
       node.seqRange = [
@@ -1381,14 +1490,16 @@ function buildDefaultExtractPrompt(schema) {
     "输出格式为严格 JSON：",
     "{",
     '  "thought": "你对本段对话的分析（事件/角色变化/新信息/谁如何理解）",',
+    '  "batchStoryTime": {"label": "第二天清晨", "tense": "ongoing", "relation": "after", "anchorLabel": "昨夜冲突之后", "confidence": "high", "advancesActiveTimeline": true},',
     '  "operations": [',
     "    {",
-    '      "action": "create",',
-    '      "type": "event",',
-    '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
-    '      "scope": {"layer": "objective", "regionPrimary": "主地区", "regionPath": ["上级地区", "主地区"], "regionSecondary": ["次级地区"]},',
-    '      "importance": 6,',
-    '      "ref": "evt1",',
+      '      "action": "create",',
+      '      "type": "event",',
+      '      "fields": {"title": "简短事件名", "summary": "...", "participants": "...", "status": "ongoing"},',
+      '      "scope": {"layer": "objective", "regionPrimary": "主地区", "regionPath": ["上级地区", "主地区"], "regionSecondary": ["次级地区"]},',
+      '      "storyTime": {"label": "第二天清晨", "tense": "ongoing", "relation": "same", "confidence": "high"},',
+      '      "importance": 6,',
+      '      "ref": "evt1",',
     '      "links": [',
     '        {"targetNodeId": "existing-id", "relation": "involved_in", "strength": 0.9},',
     '        {"targetRef": "char1", "relation": "occurred_at", "strength": 0.8}',
@@ -1430,6 +1541,10 @@ function buildDefaultExtractPrompt(schema) {
     "",
     "规则：",
     "- 每批对话最多创建 1 个事件节点，多个子事件合并为一条",
+    "- batchStoryTime 表示这批对话主叙事所处的剧情时间；普通当前场景尽量填写，推不出来就留空",
+    "- operations[].storyTime 用于节点自己的剧情时间；不写时系统会继承 batchStoryTime",
+    "- 必须区分聊天顺序和剧情顺序，不要把“后说到”误当成“后发生”",
+    "- flashback / hypothetical / future 可以写 storyTime，但通常不要把 advancesActiveTimeline 设为 true",
     "- 涉及到的角色都尽量尝试生成对应 POV 记忆和 cognitionUpdates；不必强行覆盖全图所有角色",
     "- cognitionUpdates 用来表达谁确定知道、谁误解了什么、谁只是模糊可见",
     "- 多角色场景里，pov_memory 和 cognitionUpdates 必须写清具体人物；不要把角色卡名当作 POV owner",
@@ -1462,6 +1577,8 @@ function buildCognitiveExtractAugmentPrompt() {
     "- visibility.score 取 0..1，1 表示亲历或明确得知，0.5 左右表示间接听闻。",
     "- regionUpdates.activeRegionHint 只在这批对话明确落到某个地区时填写。",
     "- regionUpdates.adjacency 只在文本里明确出现邻接关系时填写，不要猜。",
+    "- batchStoryTime.label 尽量写成可复用的剧情时间标签，例如“第二天清晨”“昨夜之后”“回忆里的童年时期”。",
+    "- advancesActiveTimeline 只有在这批确实推动当前主叙事时间线时才写 true。",
     "- 若没有认知或空间变化，可返回空数组或空对象，但不要返回无效结构。",
   ].join("\n");
 }
@@ -1493,7 +1610,10 @@ export async function generateSynopsis({
   if (eventNodes.length < 3) return;
 
   const eventSummaries = eventNodes
-    .map((n) => `[楼${n.seq}] ${n.fields.summary || "(无)"}`)
+    .map((n) => {
+      const storyLabel = describeNodeStoryTime(n);
+      return `[楼${n.seq}]${storyLabel ? ` [${storyLabel}]` : ""} ${n.fields.summary || "(无)"}`;
+    })
     .join("\n");
 
   const characterNodes = getActiveNodes(graph, "character");
@@ -1503,8 +1623,16 @@ export async function generateSynopsis({
 
   const threadNodes = getActiveNodes(graph, "thread");
   const threadSummary = threadNodes
-    .map((n) => `${n.fields.title}: ${n.fields.status || "active"}`)
+    .map((n) => {
+      const storyLabel = describeNodeStoryTime(n);
+      return `${n.fields.title}: ${n.fields.status || "active"}${storyLabel ? `（${storyLabel}）` : ""}`;
+    })
     .join("; ");
+  const synopsisStoryTimeSpan = deriveStoryTimeSpanFromNodes(
+    graph,
+    [...eventNodes, ...threadNodes],
+    "derived",
+  );
 
   const synopsisPromptBuild = await buildTaskPrompt(settings, "synopsis", {
     taskName: "synopsis",
@@ -1572,6 +1700,7 @@ export async function generateSynopsis({
     updateNode(graph, existingSynopsis.id, {
       fields: { summary: result.summary, scope: `楼 1 ~ ${currentSeq}` },
       seq: Math.max(existingSynopsis.seq || 0, currentSeq),
+      storyTimeSpan: synopsisStoryTimeSpan,
     });
     existingSynopsis.seqRange = [
       Math.min(existingSynopsis.seqRange?.[0] ?? currentSeq, currentSeq),
@@ -1586,6 +1715,7 @@ export async function generateSynopsis({
       seq: currentSeq,
       importance: 9.0,
     });
+    node.storyTimeSpan = synopsisStoryTimeSpan;
     addNode(graph, node);
     debugLog("[ST-BME] 全局概要已创建");
   }
@@ -1618,7 +1748,10 @@ export async function generateReflection({
     .slice(-5);
 
   const eventSummary = recentEvents
-    .map((n) => `[楼${n.seq}] ${n.fields.summary || "(无)"}`)
+    .map((n) => {
+      const storyLabel = describeNodeStoryTime(n);
+      return `[楼${n.seq}]${storyLabel ? ` [${storyLabel}]` : ""} ${n.fields.summary || "(无)"}`;
+    })
     .join("\n");
   const characterSummary = recentCharacters
     .map(
@@ -1629,9 +1762,14 @@ export async function generateReflection({
   const threadSummary = recentThreads
     .map(
       (n) =>
-        `${n.fields.title || n.fields.name || n.id}: ${n.fields.status || n.fields.summary || "active"}`,
+        `${n.fields.title || n.fields.name || n.id}: ${n.fields.status || n.fields.summary || "active"}${describeNodeStoryTime(n) ? `（${describeNodeStoryTime(n)}）` : ""}`,
     )
     .join("\n");
+  const reflectionStoryTimeSpan = deriveStoryTimeSpanFromNodes(
+    graph,
+    [...recentEvents, ...recentThreads],
+    "derived",
+  );
   const contradictionSummary = contradictEdges
     .map((e) => `${e.fromId} -> ${e.toId} (${e.relation})`)
     .join("\n");
@@ -1714,6 +1852,7 @@ export async function generateReflection({
     seq: currentSeq,
     importance: Math.max(5, Math.min(10, result.importance ?? 7)),
   });
+  reflectionNode.storyTimeSpan = reflectionStoryTimeSpan;
   addNode(graph, reflectionNode);
 
   for (const eventNode of recentEvents.slice(-3)) {

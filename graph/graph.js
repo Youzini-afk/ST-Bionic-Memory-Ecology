@@ -20,12 +20,21 @@ import {
   createDefaultKnowledgeState,
   createDefaultRegionState,
 } from "./knowledge-state.js";
+import {
+  createDefaultStoryTime,
+  createDefaultStoryTimeSpan,
+  createDefaultTimelineState,
+  normalizeGraphStoryTimeline,
+  normalizeNodeStoryTimeline,
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
+} from "./story-timeline.js";
 import { debugLog } from "../runtime/debug-logging.js";
 
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 7;
+const GRAPH_VERSION = 8;
 
 /**
  * 生成 UUID v4
@@ -55,6 +64,7 @@ export function createEmptyGraph() {
     maintenanceJournal: createDefaultMaintenanceJournal(),
     knowledgeState: createDefaultKnowledgeState(),
     regionState: createDefaultRegionState(),
+    timelineState: createDefaultTimelineState(),
   });
 }
 
@@ -94,6 +104,8 @@ export function createNode({
     nextId: null,
     clusters,
     scope: normalizeMemoryScope(scope),
+    storyTime: createDefaultStoryTime(),
+    storyTimeSpan: createDefaultStoryTimeSpan(),
   };
 }
 
@@ -154,6 +166,17 @@ export function updateNode(graph, nodeId, updates) {
   if (Object.prototype.hasOwnProperty.call(updates, "scope")) {
     node.scope = normalizeMemoryScope(updates.scope, node.scope || {});
     delete updates.scope;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, "storyTime")) {
+    node.storyTime = normalizeStoryTime(updates.storyTime, node.storyTime || {});
+    delete updates.storyTime;
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, "storyTimeSpan")) {
+    node.storyTimeSpan = normalizeStoryTimeSpan(
+      updates.storyTimeSpan,
+      node.storyTimeSpan || {},
+    );
+    delete updates.storyTimeSpan;
   }
 
   Object.assign(node, updates);
@@ -647,6 +670,33 @@ export function deserializeGraph(json) {
         data.regionState = createDefaultRegionState(data.regionState);
       }
 
+      if (data.version < 8) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          activeStorySegmentId: String(
+            data?.historyState?.activeStorySegmentId || "",
+          ),
+          activeStoryTimeLabel: String(
+            data?.historyState?.activeStoryTimeLabel || "",
+          ),
+          activeStoryTimeSource: String(
+            data?.historyState?.activeStoryTimeSource ||
+              (data?.historyState?.activeStorySegmentId ||
+              data?.historyState?.activeStoryTimeLabel
+                ? "history"
+                : ""),
+          ),
+          lastExtractedStorySegmentId: String(
+            data?.historyState?.lastExtractedStorySegmentId || "",
+          ),
+        };
+        data.timelineState = createDefaultTimelineState(data.timelineState);
+        for (const node of data.nodes || []) {
+          normalizeNodeStoryTimeline(node);
+        }
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -665,6 +715,8 @@ export function deserializeGraph(json) {
         seq,
         seqRange: Array.isArray(node.seqRange) ? node.seqRange : [seq, seq],
         scope: normalizeNodeMemoryScope(node),
+        storyTime: createDefaultStoryTime(node?.storyTime || {}),
+        storyTimeSpan: createDefaultStoryTimeSpan(node?.storyTimeSpan || {}),
       };
     });
     data.edges = (data.edges || []).map((edge) => {
@@ -709,6 +761,8 @@ export function deserializeGraph(json) {
       : createDefaultMaintenanceJournal();
     data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
     data.regionState = createDefaultRegionState(data.regionState);
+    data.timelineState = createDefaultTimelineState(data.timelineState);
+    normalizeGraphStoryTimeline(data);
 
     return normalizeGraphRuntimeState(data, data?.historyState?.chatId || "");
   } catch (e) {
@@ -742,6 +796,7 @@ export function exportGraph(graph) {
     maintenanceJournal: createDefaultMaintenanceJournal(),
     knowledgeState: createDefaultKnowledgeState(graph?.knowledgeState || {}),
     regionState: createDefaultRegionState(graph?.regionState || {}),
+    timelineState: createDefaultTimelineState(graph?.timelineState || {}),
     nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
   };
   return JSON.stringify(exportData, null, 2);

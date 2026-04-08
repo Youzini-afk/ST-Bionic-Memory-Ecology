@@ -3,6 +3,10 @@
 
 import { getSchemaType } from "../graph/schema.js";
 import { normalizeMemoryScope } from "../graph/memory-scope.js";
+import {
+  describeStoryTime,
+  describeStoryTimeSpan,
+} from "../graph/story-timeline.js";
 
 /**
  * 将检索结果转换为注入文本
@@ -14,6 +18,8 @@ import { normalizeMemoryScope } from "../graph/memory-scope.js";
 export function formatInjection(retrievalResult, schema) {
   const { coreNodes, recallNodes, groupedRecallNodes, scopeBuckets } =
     retrievalResult;
+  const showStoryTime =
+    retrievalResult?.meta?.scopeContext?.injectStoryTimeLabel !== false;
   const parts = [];
   const appended = new Set();
 
@@ -24,6 +30,7 @@ export function formatInjection(retrievalResult, schema) {
       retrievalResult?.meta?.retrieval?.sceneOwnerCandidates || [],
       schema,
       appended,
+      showStoryTime,
     );
     appendScopeSection(
       parts,
@@ -31,6 +38,7 @@ export function formatInjection(retrievalResult, schema) {
       scopeBuckets.userPov,
       schema,
       appended,
+      showStoryTime,
       "这些是用户/玩家侧主观记忆，不等于角色已知事实；只能作为关系、承诺、情绪和长期互动背景参考。",
     );
     appendScopeSection(
@@ -39,6 +47,7 @@ export function formatInjection(retrievalResult, schema) {
       scopeBuckets.objectiveCurrentRegion,
       schema,
       appended,
+      showStoryTime,
     );
     appendScopeSection(
       parts,
@@ -46,6 +55,7 @@ export function formatInjection(retrievalResult, schema) {
       scopeBuckets.objectiveGlobal,
       schema,
       appended,
+      showStoryTime,
     );
 
     if (parts.length > 0) {
@@ -63,7 +73,7 @@ export function formatInjection(retrievalResult, schema) {
       const typeDef = getSchemaType(schema, typeId);
       if (!typeDef) continue;
 
-      const table = formatTable(nodes, typeDef, appended);
+      const table = formatTable(nodes, typeDef, appended, showStoryTime);
       if (table) parts.push(table);
     }
   }
@@ -98,11 +108,11 @@ export function formatInjection(retrievalResult, schema) {
       ),
     };
 
-    appendBucket(parts, "当前状态记忆", buckets.state, schema, appended);
-    appendBucket(parts, "情景事件记忆", buckets.episodic, schema, appended);
-    appendBucket(parts, "反思与长期锚点", buckets.reflective, schema, appended);
-    appendBucket(parts, "规则与约束", buckets.rule, schema, appended);
-    appendBucket(parts, "其他关联记忆", buckets.other, schema, appended);
+    appendBucket(parts, "当前状态记忆", buckets.state, schema, appended, showStoryTime);
+    appendBucket(parts, "情景事件记忆", buckets.episodic, schema, appended, showStoryTime);
+    appendBucket(parts, "反思与长期锚点", buckets.reflective, schema, appended, showStoryTime);
+    appendBucket(parts, "规则与约束", buckets.rule, schema, appended, showStoryTime);
+    appendBucket(parts, "其他关联记忆", buckets.other, schema, appended, showStoryTime);
   }
 
   return parts.join("\n");
@@ -114,6 +124,7 @@ function appendCharacterPovSections(
   sceneOwnerCandidates,
   schema,
   appended,
+  showStoryTime,
 ) {
   const byOwner =
     scopeBuckets?.characterPovByOwner &&
@@ -134,6 +145,7 @@ function appendCharacterPovSections(
         nodes,
         schema,
         appended,
+        showStoryTime,
       );
     }
     return;
@@ -145,6 +157,7 @@ function appendCharacterPovSections(
     scopeBuckets?.characterPov,
     schema,
     appended,
+    showStoryTime,
   );
 }
 
@@ -161,7 +174,7 @@ function resolveSceneOwnerLabel(ownerKey, nodes = [], sceneOwnerCandidates = [])
   return String(nodeMatch?.ownerName || nodeMatch?.ownerId || normalizedOwnerKey || "未命名角色");
 }
 
-function appendScopeSection(parts, title, nodes, schema, appended, note = "") {
+function appendScopeSection(parts, title, nodes, schema, appended, showStoryTime, note = "") {
   if (!Array.isArray(nodes) || nodes.length === 0) return;
   if (parts.length > 0) {
     parts.push("");
@@ -175,7 +188,7 @@ function appendScopeSection(parts, title, nodes, schema, appended, note = "") {
   for (const [typeId, groupedNodes] of grouped) {
     const typeDef = getSchemaType(schema, typeId);
     if (!typeDef) continue;
-    const table = formatTable(groupedNodes, typeDef, appended);
+    const table = formatTable(groupedNodes, typeDef, appended, showStoryTime);
     if (table) parts.push(table);
   }
 }
@@ -192,7 +205,7 @@ function groupByType(nodes) {
   return map;
 }
 
-function appendBucket(parts, title, nodes, schema, appended) {
+function appendBucket(parts, title, nodes, schema, appended, showStoryTime) {
   if (!nodes || nodes.length === 0) return;
   parts.push(`## ${title}`);
 
@@ -201,7 +214,7 @@ function appendBucket(parts, title, nodes, schema, appended) {
     const typeDef = getSchemaType(schema, typeId);
     if (!typeDef) continue;
 
-    const table = formatTable(groupedNodes, typeDef, appended);
+    const table = formatTable(groupedNodes, typeDef, appended, showStoryTime);
     if (table) parts.push(table);
   }
 }
@@ -209,7 +222,7 @@ function appendBucket(parts, title, nodes, schema, appended) {
 /**
  * 将同类型节点格式化为 Markdown 表格
  */
-function formatTable(nodes, typeDef, appended = new Set()) {
+function formatTable(nodes, typeDef, appended = new Set(), showStoryTime = true) {
   if (!Array.isArray(nodes) || nodes.length === 0) return "";
 
   const uniqueNodes = nodes.filter((node) => {
@@ -226,7 +239,7 @@ function formatTable(nodes, typeDef, appended = new Set()) {
       (n) => n.fields?.[col.name] != null && n.fields[col.name] !== "",
     ),
   );
-  const derivedCols = buildDerivedColumns(uniqueNodes, typeDef);
+  const derivedCols = buildDerivedColumns(uniqueNodes, typeDef, showStoryTime);
   const allCols = [...derivedCols, ...activeCols];
 
   if (allCols.length === 0) return "";
@@ -254,13 +267,11 @@ function formatTable(nodes, typeDef, appended = new Set()) {
   return `${typeDef.tableName}:\n${header}\n${separator}\n${rows.join("\n")}`;
 }
 
-function buildDerivedColumns(nodes, typeDef) {
-  if (typeDef?.id !== "pov_memory") {
-    return [];
-  }
+function buildDerivedColumns(nodes, typeDef, showStoryTime = true) {
+  const derived = [];
 
-  return [
-    {
+  if (typeDef?.id === "pov_memory") {
+    derived.push({
       name: "owner",
       getValue(node) {
         const scope = normalizeMemoryScope(node?.scope);
@@ -273,8 +284,36 @@ function buildDerivedColumns(nodes, typeDef) {
         }
         return `POV: ${ownerLabel}`;
       },
-    },
-  ];
+    });
+  }
+
+  if (showStoryTime) {
+    const pointTypes = new Set(["event", "pov_memory"]);
+    const spanTypes = new Set(["thread", "synopsis", "reflection"]);
+    if (
+      pointTypes.has(typeDef?.id) &&
+      nodes.some((node) => describeStoryTime(node?.storyTime))
+    ) {
+      derived.push({
+        name: "story_time",
+        getValue(node) {
+          return describeStoryTime(node?.storyTime) || "";
+        },
+      });
+    } else if (
+      spanTypes.has(typeDef?.id) &&
+      nodes.some((node) => describeStoryTimeSpan(node?.storyTimeSpan))
+    ) {
+      derived.push({
+        name: "story_time_span",
+        getValue(node) {
+          return describeStoryTimeSpan(node?.storyTimeSpan) || "";
+        },
+      });
+    }
+  }
+
+  return derived;
 }
 
 /**

@@ -10,6 +10,11 @@ import {
 } from "../graph/memory-scope.js";
 import { listKnowledgeOwners } from "../graph/knowledge-state.js";
 import {
+  describeNodeStoryTime,
+  describeStoryTime,
+  describeStoryTimeSpan,
+} from "../graph/story-timeline.js";
+import {
   resolveActiveLlmPresetName,
   sanitizeLlmPresetSettings,
 } from "../llm/llm-preset-utils.js";
@@ -99,9 +104,11 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-reroll",
   "bme-detail-delete",
   "bme-detail-save",
-  "bme-cognition-region-apply",
-  "bme-cognition-region-clear",
-  "bme-cognition-adjacency-save",
+  "bme-cog-region-apply",
+  "bme-cog-region-clear",
+  "bme-cog-adjacency-save",
+  "bme-cog-story-time-apply",
+  "bme-cog-story-time-clear",
 ];
 
 const TASK_PROFILE_GENERATION_GROUPS = [
@@ -939,6 +946,7 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
 
   const historyState = graph?.historyState || {};
   const regionState = graph?.regionState || {};
+  const timelineState = graph?.timelineState || {};
   const { owners, activeOwnerKey, activeOwner, activeOwnerLabels } =
     _getCurrentCognitionOwnerSummary(graph);
   const activeRegion = String(
@@ -949,6 +957,20 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
     : "—";
   const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
     ? regionState.adjacencyMap[activeRegion].adjacent
+    : [];
+  const activeStoryTimeLabel = String(
+    historyState.activeStoryTimeLabel || "",
+  ).trim();
+  const activeStoryTimeMeta = activeStoryTimeLabel
+    ? `${activeStoryTimeLabel}${historyState.activeStoryTimeSource ? ` · ${historyState.activeStoryTimeSource}` : ""}`
+    : "—";
+  const recentStorySegments = Array.isArray(timelineState?.recentSegmentIds)
+    ? timelineState.recentSegmentIds
+        .map((segmentId) =>
+          timelineState.segments?.find((segment) => segment.id === segmentId)?.label || "",
+        )
+        .filter(Boolean)
+        .slice(0, 3)
     : [];
 
   el.innerHTML = `
@@ -971,6 +993,14 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
       <div class="bme-cog-status-card__value">${owners.length}</div>
+    </div>
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-clock"></i> 当前剧情时间</div>
+      <div class="bme-cog-status-card__value">${_escHtml(activeStoryTimeMeta)}</div>
+    </div>
+    <div class="bme-cog-status-card">
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-timeline"></i> 最近时间段</div>
+      <div class="bme-cog-status-card__value">${_escHtml(recentStorySegments.length ? recentStorySegments.join(" / ") : "—")}</div>
     </div>
   `;
 }
@@ -1144,13 +1174,18 @@ function _renderCogSpaceTools(graph, loadInfo, canRender) {
 
   const regionState = graph?.regionState || {};
   const historyState = graph?.historyState || {};
+  const timelineState = graph?.timelineState || {};
   const activeRegion = String(
     historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "",
+  ).trim();
+  const activeStoryTimeLabel = String(
+    historyState.activeStoryTimeLabel || "",
   ).trim();
   const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
     ? regionState.adjacencyMap[activeRegion].adjacent : [];
   const writeBlocked = _isGraphWriteBlocked(loadInfo);
   const disabledAttr = writeBlocked ? "disabled" : "";
+  const manualStorySegmentId = String(timelineState.manualActiveSegmentId || "").trim();
 
   el.innerHTML = `
     <div class="bme-cog-space-row">
@@ -1174,6 +1209,20 @@ function _renderCogSpaceTools(graph, loadInfo, canRender) {
       <button class="bme-cog-btn bme-cog-btn--known" type="button" id="bme-cog-adjacency-save" ${disabledAttr}>
         <i class="fa-solid fa-diagram-project"></i> 保存当前地区邻接
       </button>
+    </div>
+    <div class="bme-cog-space-row">
+      <label>手动当前剧情时间</label>
+      <input class="bme-config-input" type="text" id="bme-cog-manual-story-time"
+             placeholder="例如：第二天清晨 / 昨夜之后 / 回忆里的童年" value="${_escHtml(manualStorySegmentId ? activeStoryTimeLabel : activeStoryTimeLabel || "")}" ${disabledAttr} />
+      <div class="bme-config-help" style="font-size:10px;margin-top:2px">留空表示恢复自动维护；这里只维护当前剧情时间，不会改写所有节点。</div>
+      <div class="bme-cog-space-btn-row">
+        <button class="bme-cog-btn bme-cog-btn--known" type="button" id="bme-cog-story-time-apply" ${disabledAttr}>
+          <i class="fa-solid fa-clock"></i> 设为当前剧情时间
+        </button>
+        <button class="bme-cog-btn bme-cog-btn--clear" type="button" id="bme-cog-story-time-clear" ${disabledAttr}>
+          <i class="fa-solid fa-rotate-left"></i> 恢复自动
+        </button>
+      </div>
     </div>
   `;
 }
@@ -2699,6 +2748,20 @@ function _showNodeDetail(node) {
       `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
     );
   }
+  _appendNodeDetailTextareaField(
+    fragment,
+    "剧情时间",
+    "__storyTime",
+    "json",
+    JSON.stringify(raw.storyTime || {}, null, 2),
+  );
+  _appendNodeDetailTextareaField(
+    fragment,
+    "剧情时间范围",
+    "__storyTimeSpan",
+    "json",
+    JSON.stringify(raw.storyTimeSpan || {}, null, 2),
+  );
 
   _appendNodeDetailNumberInput(
     fragment,
@@ -2786,6 +2849,17 @@ function _saveNodeDetail() {
     const key = el.dataset.bmeFieldKey;
     const type = el.dataset.bmeFieldType || "string";
     const rawVal = el.value;
+    if (key === "__storyTime" || key === "__storyTimeSpan") {
+      try {
+        updates[key === "__storyTime" ? "storyTime" : "storyTimeSpan"] = JSON.parse(
+          rawVal || "{}",
+        );
+      } catch {
+        toastr.error(`字段「${key === "__storyTime" ? "剧情时间" : "剧情时间范围"}」须为合法 JSON`, "ST-BME");
+        return;
+      }
+      continue;
+    }
     if (type === "json") {
       try {
         updates.fields[key] = JSON.parse(rawVal || "null");
@@ -3431,6 +3505,8 @@ function _bindActions() {
     const regionApply = e.target.closest("#bme-cog-region-apply");
     const regionClear = e.target.closest("#bme-cog-region-clear");
     const adjSave = e.target.closest("#bme-cog-adjacency-save");
+    const storyApply = e.target.closest("#bme-cog-story-time-apply");
+    const storyClear = e.target.closest("#bme-cog-story-time-clear");
 
     if (regionApply) {
       const manualRegion = document.getElementById("bme-cog-manual-region")?.value?.trim();
@@ -3447,6 +3523,13 @@ function _bindActions() {
         graph?.historyState?.activeRegion || graph?.historyState?.lastExtractedRegion || graph?.regionState?.manualActiveRegion || "",
       ).trim();
       if (activeRegion) _callAction("updateRegionAdjacency", { region: activeRegion, adjacent: adjList });
+    }
+    if (storyApply) {
+      const storyLabel = document.getElementById("bme-cog-manual-story-time")?.value?.trim();
+      if (storyLabel) _callAction("setActiveStoryTime", { label: storyLabel });
+    }
+    if (storyClear) {
+      _callAction("clearActiveStoryTime", {});
     }
 
     // 手动覆盖按钮
@@ -3554,6 +3637,18 @@ function _refreshConfigTab() {
   _setCheckboxValue(
     "bme-setting-spatial-adjacency-enabled",
     settings.enableSpatialAdjacency ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-enable-story-timeline",
+    settings.enableStoryTimeline ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-story-time-soft-directing",
+    settings.storyTimeSoftDirecting ?? true,
+  );
+  _setCheckboxValue(
+    "bme-setting-inject-story-time-label",
+    settings.injectStoryTimeLabel ?? true,
   );
   _setCheckboxValue(
     "bme-setting-inject-user-pov-memory",
@@ -3929,6 +4024,15 @@ function _bindConfigControls() {
   });
   bindCheckbox("bme-setting-spatial-adjacency-enabled", (checked) => {
     _patchSettings({ enableSpatialAdjacency: checked });
+  });
+  bindCheckbox("bme-setting-enable-story-timeline", (checked) => {
+    _patchSettings({ enableStoryTimeline: checked });
+  });
+  bindCheckbox("bme-setting-story-time-soft-directing", (checked) => {
+    _patchSettings({ storyTimeSoftDirecting: checked });
+  });
+  bindCheckbox("bme-setting-inject-story-time-label", (checked) => {
+    _patchSettings({ injectStoryTimeLabel: checked });
   });
   bindCheckbox("bme-setting-inject-user-pov-memory", (checked) => {
     _patchSettings({ injectUserPovMemory: checked });
@@ -8026,6 +8130,8 @@ function _buildScopeMetaText(node) {
   }
   const regionLine = buildRegionLine(scope);
   if (regionLine) parts.push(regionLine);
+  const storyTime = describeNodeStoryTime(node);
+  if (storyTime) parts.push(`剧情时间: ${storyTime}`);
   return parts.join(" · ");
 }
 
@@ -8066,11 +8172,13 @@ function _typeLabel(type) {
 
 function _getNodeSnippet(node) {
   const fields = node.fields || {};
+  const storyTime = describeNodeStoryTime(node);
   if (fields.summary) return fields.summary;
   if (fields.state) return fields.state;
   if (fields.constraint) return fields.constraint;
   if (fields.insight) return fields.insight;
   if (fields.traits) return fields.traits;
+  if (storyTime) return `剧情时间: ${storyTime}`;
 
   const entries = Object.entries(fields).filter(
     ([key]) => !["name", "title", "summary", "embedding"].includes(key),
