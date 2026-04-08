@@ -1350,6 +1350,21 @@
   margin-bottom: 10px;
 }
 
+.bme-cleanup-warning-text {
+  color: #ffc54f;
+  border-left: 3px solid #ffc54f;
+  padding-left: 10px;
+  margin-top: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.bme-cleanup-warning-text i {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .bme-config-subgroup + .bme-config-subgroup {
   margin-top: 16px;
   padding-top: 16px;

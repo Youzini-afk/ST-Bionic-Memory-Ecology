@@ -860,3 +860,221 @@ export async function onUndoLastMaintenanceController(runtime) {
     throw error;
   }
 }
+
+// ==================== 数据清理 ====================
+
+export async function onClearGraphController(runtime) {
+  if (!runtime.confirm("确定要清空当前图谱？\n\n所有节点和边将被删除，操作不可撤销。")) {
+    return { cancelled: true };
+  }
+  if (!runtime.ensureGraphMutationReady("清空图谱")) return;
+
+  const nextGraph = runtime.normalizeGraphRuntimeState(
+    runtime.createEmptyGraph(),
+    runtime.getCurrentChatId(),
+  );
+  runtime.setCurrentGraph(nextGraph);
+  runtime.clearInjectionState();
+  runtime.markVectorStateDirty?.("清空图谱后需要重建向量索引");
+  runtime.setExtractionCount(0);
+  runtime.setLastExtractedItems([]);
+  runtime.saveGraphToChat({ reason: "manual-clear-graph" });
+  runtime.refreshPanelLiveState();
+  runtime.toastr.success("当前图谱已清空");
+  return { handledToast: true };
+}
+
+export async function onClearGraphRangeController(runtime, startSeq, endSeq) {
+  if (!Number.isFinite(startSeq) || !Number.isFinite(endSeq) || startSeq > endSeq) {
+    runtime.toastr.warning("请填写有效的起始和结束楼层");
+    return { handledToast: true };
+  }
+  if (
+    !runtime.confirm(
+      `确定要删除楼层 ${startSeq} ~ ${endSeq} 范围内的所有节点？\n\n操作不可撤销。`,
+    )
+  ) {
+    return { cancelled: true };
+  }
+  if (!runtime.ensureGraphMutationReady("按楼层范围清理")) return;
+
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+
+  const nodesToRemove = graph.nodes.filter((node) => {
+    const range = Array.isArray(node.seqRange) ? node.seqRange : [node.seq, node.seq];
+    const nodeStart = Number(range[0]) || 0;
+    const nodeEnd = Number(range[1]) || 0;
+    return nodeEnd >= startSeq && nodeStart <= endSeq;
+  });
+
+  let removedCount = 0;
+  for (const node of nodesToRemove) {
+    if (runtime.removeNode(graph, node.id)) {
+      removedCount += 1;
+    }
+  }
+
+  if (removedCount > 0) {
+    runtime.markVectorStateDirty?.("按楼层范围清理后需要重建向量索引");
+    runtime.saveGraphToChat({ reason: "manual-clear-graph-range" });
+  }
+  runtime.refreshPanelLiveState();
+  runtime.toastr.success(`已删除楼层 ${startSeq}~${endSeq} 范围内 ${removedCount} 个节点`);
+  return { handledToast: true };
+}
+
+export async function onClearVectorCacheController(runtime) {
+  if (!runtime.confirm("确定要清空向量缓存？\n\n清空后需要重新构建向量索引。")) {
+    return { cancelled: true };
+  }
+
+  const graph = runtime.getCurrentGraph();
+  if (!graph) {
+    runtime.toastr.warning("当前没有加载的图谱");
+    return { handledToast: true };
+  }
+
+  if (graph.vectorIndexState) {
+    graph.vectorIndexState.hashToNodeId = {};
+    graph.vectorIndexState.nodeToHash = {};
+    graph.vectorIndexState.dirty = true;
+    graph.vectorIndexState.dirtyReason = "manual-clear-vector-cache";
+    graph.vectorIndexState.lastWarning = "向量缓存已手动清空，需要重建索引";
+  }
+
+  runtime.saveGraphToChat({ reason: "manual-clear-vector-cache" });
+  runtime.refreshPanelLiveState();
+  runtime.toastr.success("向量缓存已清空，请重建向量索引");
+  return { handledToast: true };
+}
+
+export async function onClearBatchJournalController(runtime) {
+  if (!runtime.confirm("确定要清空提取历史？\n\n提取批次记录和计数将被重置。")) {
+    return { cancelled: true };
+  }
+
+  const graph = runtime.getCurrentGraph();
+  if (!graph) {
+    runtime.toastr.warning("当前没有加载的图谱");
+    return { handledToast: true };
+  }
+
+  graph.batchJournal = [];
+  if (graph.historyState) {
+    graph.historyState.extractionCount = 0;
+  }
+  runtime.setExtractionCount(0);
+  runtime.saveGraphToChat({ reason: "manual-clear-batch-journal" });
+  runtime.refreshPanelLiveState();
+  runtime.toastr.success("提取历史已清空");
+  return { handledToast: true };
+}
+
+export async function onDeleteCurrentIdbController(runtime) {
+  const chatId = runtime.getCurrentChatId();
+  if (!chatId) {
+    runtime.toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+
+  const dbName = runtime.buildBmeDbName(chatId);
+  if (
+    !runtime.confirm(
+      `确定要删除当前聊天的本地缓存数据库？\n\n目标: ${dbName}\n操作不可撤销。`,
+    )
+  ) {
+    return { cancelled: true };
+  }
+
+  try {
+    await runtime.closeBmeDb?.(chatId);
+    await new Promise((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(dbName);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => resolve();
+    });
+    runtime.toastr.success(`已删除数据库 ${dbName}`);
+  } catch (error) {
+    runtime.toastr.error(`删除失败: ${error?.message || error}`);
+  }
+  return { handledToast: true };
+}
+
+export async function onDeleteAllIdbController(runtime) {
+  const userInput = runtime.prompt(
+    "此操作会删除所有聊天的 BME 本地缓存数据库，不可恢复。\n\n请输入 DELETE 确认：",
+  );
+  if (userInput !== "DELETE") {
+    if (userInput != null) {
+      runtime.toastr.warning("输入不匹配，操作已取消");
+    }
+    return { cancelled: true };
+  }
+
+  try {
+    const databases = await indexedDB.databases();
+    const bmeDbs = databases.filter((db) =>
+      String(db.name || "").startsWith("STBME_"),
+    );
+    if (bmeDbs.length === 0) {
+      runtime.toastr.info("没有找到 BME 本地缓存数据库");
+      return { handledToast: true };
+    }
+
+    let deletedCount = 0;
+    for (const db of bmeDbs) {
+      try {
+        await new Promise((resolve, reject) => {
+          const req = indexedDB.deleteDatabase(db.name);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+          req.onblocked = () => resolve();
+        });
+        deletedCount += 1;
+      } catch {
+        // continue deleting others
+      }
+    }
+
+    runtime.toastr.success(`已删除 ${deletedCount}/${bmeDbs.length} 个 BME 数据库`);
+  } catch (error) {
+    runtime.toastr.error(`删除失败: ${error?.message || error}`);
+  }
+  return { handledToast: true };
+}
+
+export async function onDeleteServerSyncFileController(runtime) {
+  const chatId = runtime.getCurrentChatId();
+  if (!chatId) {
+    runtime.toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+
+  const userInput = runtime.prompt(
+    "此操作会删除当前聊天在服务端的同步文件，不可恢复。\n\n请输入 DELETE 确认：",
+  );
+  if (userInput !== "DELETE") {
+    if (userInput != null) {
+      runtime.toastr.warning("输入不匹配，操作已取消");
+    }
+    return { cancelled: true };
+  }
+
+  try {
+    const result = await runtime.deleteRemoteSyncFile(chatId);
+    if (result?.deleted) {
+      runtime.toastr.success(`已删除服务端同步文件: ${result.filename}`);
+    } else {
+      runtime.toastr.info(
+        result?.reason === "not-found"
+          ? "服务端没有找到同步文件"
+          : `删除未成功: ${result?.reason || "未知原因"}`,
+      );
+    }
+  } catch (error) {
+    runtime.toastr.error(`删除失败: ${error?.message || error}`);
+  }
+  return { handledToast: true };
+}
