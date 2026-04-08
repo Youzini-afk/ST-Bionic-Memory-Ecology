@@ -4333,9 +4333,4 @@
   .bme-capability-grid {
     grid-template-columns: 1fr;
   }
-
-  /* P3: Action 网格窄屏 1 列 fallback */
-  .bme-action-grid {
-    grid-template-columns: 1fr;
-  }
 }
