@@ -1990,6 +1990,12 @@ function _bindActions() {
     "bme-act-undo-maintenance": "undoMaintenance",
     "bme-act-vector-rebuild": "rebuildVectorIndex",
     "bme-act-vector-reembed": "reembedDirect",
+    "bme-act-clear-graph": "clearGraph",
+    "bme-act-clear-vector-cache": "clearVectorCache",
+    "bme-act-clear-batch-journal": "clearBatchJournal",
+    "bme-act-delete-current-idb": "deleteCurrentIdb",
+    "bme-act-delete-all-idb": "deleteAllIdb",
+    "bme-act-delete-server-sync": "deleteServerSyncFile",
   };
 
   const actionLabels = {
@@ -2004,6 +2010,12 @@ function _bindActions() {
     undoMaintenance: "撤销最近维护",
     rebuildVectorIndex: "重建向量",
     reembedDirect: "直连重嵌",
+    clearGraph: "清空图谱",
+    clearVectorCache: "清空向量缓存",
+    clearBatchJournal: "清空提取历史",
+    deleteCurrentIdb: "清空当前 IDB",
+    deleteAllIdb: "清空全部 IDB",
+    deleteServerSyncFile: "清空服务端同步文件",
   };
 
   for (const [elementId, actionKey] of Object.entries(bindings)) {
@@ -2140,6 +2152,50 @@ function _bindActions() {
       } catch (error) {
         console.error("[ST-BME] Action reroll failed:", error);
         toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        if (btn) {
+          btn.style.opacity = "";
+        }
+        _refreshRuntimeStatus();
+        _refreshGraphAvailabilityState();
+      }
+    });
+
+  // 按楼层范围清理 (cleanup)
+  document
+    .getElementById("bme-act-clear-graph-range")
+    ?.addEventListener("click", async () => {
+      const btn = document.getElementById("bme-act-clear-graph-range");
+      if (btn?.disabled) return;
+
+      const startStr = document.getElementById("bme-cleanup-range-start")?.value;
+      const endStr = document.getElementById("bme-cleanup-range-end")?.value;
+      const startSeq = _parseOptionalInt(startStr);
+      const endSeq = _parseOptionalInt(endStr);
+
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = "0.5";
+      }
+
+      _showActionProgressUi("按楼层范围清理");
+      try {
+        await _actionHandlers.clearGraphRange?.(
+          Number.isFinite(startSeq) ? startSeq : null,
+          Number.isFinite(endSeq) ? endSeq : null,
+        );
+        _refreshDashboard();
+        _refreshGraph();
+        if (
+          document
+            .getElementById("bme-pane-memory")
+            ?.classList.contains("active")
+        ) {
+          _refreshMemoryBrowser();
+        }
+      } catch (error) {
+        console.error("[ST-BME] Action clearGraphRange failed:", error);
+        toastr.error(`按楼层范围清理失败: ${error?.message || error}`, "ST-BME");
       } finally {
         if (btn) {
           btn.style.opacity = "";

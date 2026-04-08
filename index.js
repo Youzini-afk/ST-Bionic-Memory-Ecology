@@ -27,6 +27,7 @@ import {
 import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
+  deleteRemoteSyncFile,
   scheduleUpload,
   syncNow,
 } from "./sync/bme-sync.js";
@@ -212,6 +213,13 @@ import {
   onTestMemoryLLMController,
   onViewGraphController,
   onViewLastInjectionController,
+  onClearGraphController,
+  onClearGraphRangeController,
+  onClearVectorCacheController,
+  onClearBatchJournalController,
+  onDeleteCurrentIdbController,
+  onDeleteAllIdbController,
+  onDeleteServerSyncFileController,
 } from "./ui/ui-actions-controller.js";
 import {
   clampInt,
@@ -10917,6 +10925,70 @@ async function onReembedDirect() {
   });
 }
 
+// ==================== 数据清理 ====================
+
+const _cleanupRuntime = () => ({
+  confirm: (msg) => (typeof globalThis.confirm === "function" ? globalThis.confirm(msg) : false),
+  prompt: (msg) => (typeof globalThis.prompt === "function" ? globalThis.prompt(msg) : null),
+  createEmptyGraph,
+  clearInjectionState,
+  ensureGraphMutationReady,
+  getCurrentChatId,
+  getCurrentGraph: () => currentGraph,
+  markVectorStateDirty: (reason) => {
+    if (currentGraph?.vectorIndexState) {
+      currentGraph.vectorIndexState.dirty = true;
+      currentGraph.vectorIndexState.dirtyReason = reason;
+    }
+  },
+  normalizeGraphRuntimeState,
+  refreshPanelLiveState,
+  removeNode: (graph, nodeId) => removeNode(graph, nodeId),
+  saveGraphToChat,
+  setCurrentGraph: (graph) => { currentGraph = graph; },
+  setExtractionCount: (count) => {
+    if (currentGraph?.historyState) {
+      currentGraph.historyState.extractionCount = count;
+    }
+  },
+  setLastExtractedItems: () => { lastExtractedItems = []; },
+  buildBmeDbName,
+  closeBmeDb: null,
+  deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
+    fetch: globalThis.fetch?.bind(globalThis),
+    getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
+  }),
+  toastr,
+});
+
+async function onClearGraph() {
+  return await onClearGraphController(_cleanupRuntime());
+}
+
+async function onClearGraphRange(startSeq, endSeq) {
+  return await onClearGraphRangeController(_cleanupRuntime(), startSeq, endSeq);
+}
+
+async function onClearVectorCache() {
+  return await onClearVectorCacheController(_cleanupRuntime());
+}
+
+async function onClearBatchJournal() {
+  return await onClearBatchJournalController(_cleanupRuntime());
+}
+
+async function onDeleteCurrentIdb() {
+  return await onDeleteCurrentIdbController(_cleanupRuntime());
+}
+
+async function onDeleteAllIdb() {
+  return await onDeleteAllIdbController(_cleanupRuntime());
+}
+
+async function onDeleteServerSyncFile() {
+  return await onDeleteServerSyncFileController(_cleanupRuntime());
+}
+
 // ==================== 初始化 ====================
 
 (async function init() {
@@ -10953,6 +11025,13 @@ async function onReembedDirect() {
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,
       reroll: onReroll,
+      clearGraph: onClearGraph,
+      clearGraphRange: (startSeq, endSeq) => onClearGraphRange(startSeq, endSeq),
+      clearVectorCache: onClearVectorCache,
+      clearBatchJournal: onClearBatchJournal,
+      deleteCurrentIdb: onDeleteCurrentIdb,
+      deleteAllIdb: onDeleteAllIdb,
+      deleteServerSyncFile: onDeleteServerSyncFile,
     },
     console,
     document,

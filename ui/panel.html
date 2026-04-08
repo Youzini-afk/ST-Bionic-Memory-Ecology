@@ -144,6 +144,14 @@
               <i class="fa-solid fa-palette"></i>
               <span>面板外观</span>
             </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="cleanup"
+              type="button"
+            >
+              <i class="fa-solid fa-broom"></i>
+              <span>数据清理</span>
+            </button>
           </div>
         </div>
 
@@ -541,6 +549,14 @@
             >
               <i class="fa-solid fa-palette"></i>
               <span>面板外观</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="cleanup"
+              type="button"
+            >
+              <i class="fa-solid fa-broom"></i>
+              <span>数据清理</span>
             </button>
           </div>
 
@@ -2324,6 +2340,148 @@
                       ><i class="fa-solid fa-check"></i
                     ></span>
                   </button>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="bme-config-section"
+              data-config-section="cleanup"
+            >
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker">数据清理</div>
+                <h3 class="bme-config-section-title">图谱、缓存与存储清理</h3>
+                <p class="bme-config-section-desc">
+                  在这里执行高危清理操作。所有操作均需二次确认，部分操作不可撤销。
+                </p>
+              </div>
+
+              <!-- 图谱清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">图谱清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空整个图谱或删除指定楼层范围内的记忆节点。操作不可撤销。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-clear-graph"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span>清空当前图谱</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-clear-graph-range"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-scissors"></i>
+                    <span>按楼层范围清理</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    按楼层范围清理：删除指定楼层范围内的所有节点和相关边。留空则不执行。
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-cleanup-range-start">起始楼层</label>
+                      <input
+                        id="bme-cleanup-range-start"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-cleanup-range-end">结束楼层</label>
+                      <input
+                        id="bme-cleanup-range-end"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 缓存清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">缓存清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空运行时向量缓存或提取历史。不影响已持久化的图谱节点。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn"
+                    id="bme-act-clear-vector-cache"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-database"></i>
+                    <span>清空向量缓存</span>
+                  </button>
+                  <button
+                    class="bme-action-btn"
+                    id="bme-act-clear-batch-journal"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    <span>清空提取历史</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 数据存储清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">数据存储清理</div>
+                    <div class="bme-config-card-subtitle">
+                      删除本地 IndexedDB 缓存或服务端同步文件。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-current-idb"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-hard-drive"></i>
+                    <span>清空当前聊天 IDB</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-all-idb"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-explosion"></i>
+                    <span>清空全部 BME IDB</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-server-sync"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-down"></i>
+                    <span>清空服务端同步文件</span>
+                  </button>
+                </div>
+                <div class="bme-config-help bme-cleanup-warning-text">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  「清空全部 BME IDB」和「清空服务端同步文件」需要输入 DELETE 确认。
                 </div>
               </div>
             </section>
