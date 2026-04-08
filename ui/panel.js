@@ -3314,6 +3314,15 @@ function _bindActions() {
       }
     });
 
+  // ==================== AI Monitor Trace 折叠 ====================
+
+  document.addEventListener("click", (e) => {
+    const toggle = e.target.closest(".bme-ai-monitor-entry__toggle");
+    if (!toggle) return;
+    const entry = toggle.closest(".bme-ai-monitor-entry");
+    if (entry) entry.classList.toggle("is-collapsed");
+  });
+
   // ==================== 认知视图绑定 ====================
 
   // 图谱/认知视图 tab 切换
@@ -4996,78 +5005,117 @@ function _renderAiMonitorTraceCard(state) {
     `;
   }
 
+  const taskTypeLabels = {
+    extract: "提取", recall: "召回", compress: "压缩",
+    sleep: "遗忘", evolve: "进化", embed: "向量",
+    synopsis: "概要", rebuild: "重建",
+  };
+
+  const cards = timeline
+    .slice(-8)
+    .reverse()
+    .map((entry, idx) => {
+      const summaryLines = _summarizeMonitorGovernance(entry);
+      const previewText = _buildMonitorMessagesPreview(entry?.messages || []);
+      const modelLabel =
+        String(entry?.llmPresetName || "").trim() ||
+        String(entry?.llmConfigSourceLabel || "").trim() ||
+        String(entry?.model || "").trim() ||
+        "未知模型";
+      const taskType = String(entry?.taskType || "unknown");
+      const taskLabel = taskTypeLabels[taskType] || taskType;
+      const status = String(entry?.status || "").toLowerCase();
+      const dotClass = status.includes("error") || status.includes("fail")
+        ? "dot-error"
+        : status.includes("run")
+          ? "dot-running"
+          : "dot-success";
+      const routeInfo = [
+        String(entry?.route || "").trim(),
+        String(entry?.llmConfigSourceLabel || "").trim(),
+      ].filter(Boolean).join(" · ") || "未记录路由信息";
+
+      // Governance tags
+      const govTags = [];
+      const pe = entry?.promptExecution || {};
+      if (pe.worldInfo?.hit) govTags.push({ cls: "tag-worldinfo", label: `世界书 ${Number(pe.worldInfo.beforeCount || 0) + Number(pe.worldInfo.afterCount || 0) + Number(pe.worldInfo.atDepthCount || 0)}条` });
+      if (pe.ejsRuntimeStatus) govTags.push({ cls: "tag-ejs", label: "EJS" });
+      if (Array.isArray(pe.regexInput) && pe.regexInput.length) {
+        const ruleCount = pe.regexInput.reduce((s, i) => s + Number(i?.appliedRules?.length || 0), 0);
+        govTags.push({ cls: "tag-regex", label: `正则 ${ruleCount}条` });
+      }
+      if (entry?.requestCleaning?.changed) govTags.push({ cls: "tag-cleaning", label: "发送清洗" });
+      if (entry?.responseCleaning?.changed) govTags.push({ cls: "tag-cleaning", label: "响应清洗" });
+      if (entry?.jsonFailure?.failureReason) govTags.push({ cls: "tag-error", label: "JSON失败" });
+
+      const govTagsHtml = govTags.length
+        ? `<div class="bme-ai-monitor-governance-tags">${govTags.map(t => `<span class="bme-ai-monitor-gov-tag ${t.cls}">${_escHtml(t.label)}</span>`).join("")}</div>`
+        : "";
+
+      const connector = idx < 7 ? `<div class="bme-ai-monitor-timeline-connector"></div>` : "";
+
+      return `
+        <div class="bme-ai-monitor-entry is-collapsed" data-bme-trace-idx="${idx}">
+          <div class="bme-ai-monitor-entry__head">
+            <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+              <div class="bme-ai-monitor-status-dot ${dotClass}"></div>
+              <div style="min-width:0;flex:1">
+                <div class="bme-ai-monitor-entry__title">${_escHtml(taskLabel)}
+                  <span style="font-weight:400;opacity:0.5;font-size:11px;margin-left:4px">${_escHtml(_formatDurationMs(entry?.durationMs))}</span>
+                </div>
+                <div class="bme-ai-monitor-entry__meta">
+                  ${_escHtml(
+                    [
+                      String(entry?.status || "unknown"),
+                      _formatTaskProfileTime(entry?.updatedAt),
+                    ].filter(Boolean).join(" · "),
+                  )}
+                </div>
+              </div>
+            </div>
+            <span class="bme-task-pill">${_escHtml(modelLabel)}</span>
+            <button class="bme-ai-monitor-entry__toggle" type="button" title="展开/折叠">
+              <i class="fa-solid fa-chevron-down"></i>
+            </button>
+          </div>
+          ${govTagsHtml}
+          <div class="bme-ai-monitor-entry__detail">
+            <div class="bme-config-help">${_escHtml(routeInfo)}</div>
+            ${
+              summaryLines.length
+                ? `<div class="bme-ai-monitor-entry__summary">${summaryLines
+                    .map((line) => `<div>${_escHtml(line)}</div>`)
+                    .join("")}</div>`
+                : ""
+            }
+            ${_renderMessageTraceTextBlock(
+              "最终发送 messages 预览",
+              previewText,
+              "这条任务没有捕获到完整的 messages 预览。",
+            )}
+          </div>
+        </div>
+        ${connector}
+      `;
+    })
+    .join("");
+
   return `
     <div class="bme-config-card-head">
       <div>
         <div class="bme-config-card-title">AI Monitor 任务流水</div>
         <div class="bme-config-card-subtitle">
-          最近 ${Math.min(timeline.length, 6)} 条完成或失败的记忆任务。
+          最近 ${Math.min(timeline.length, 8)} 条任务快照 · 点击展开查看详情
         </div>
       </div>
       <span class="bme-task-pill">${_escHtml(String(timeline.length))} 条</span>
     </div>
     <div class="bme-ai-monitor-stack">
-      ${timeline
-        .slice(-6)
-        .reverse()
-        .map((entry) => {
-          const summaryLines = _summarizeMonitorGovernance(entry);
-          const previewText = _buildMonitorMessagesPreview(entry?.messages || []);
-          const modelLabel =
-            String(entry?.llmPresetName || "").trim() ||
-            String(entry?.llmConfigSourceLabel || "").trim() ||
-            String(entry?.model || "").trim() ||
-            "未知模型";
-          return `
-            <div class="bme-ai-monitor-entry">
-              <div class="bme-ai-monitor-entry__head">
-                <div>
-                  <div class="bme-ai-monitor-entry__title">${_escHtml(
-                    String(entry?.taskType || "unknown"),
-                  )}</div>
-                  <div class="bme-ai-monitor-entry__meta">
-                    ${_escHtml(
-                      [
-                        String(entry?.status || "unknown"),
-                        _formatDurationMs(entry?.durationMs),
-                        _formatTaskProfileTime(entry?.updatedAt),
-                      ]
-                        .filter(Boolean)
-                        .join(" · "),
-                    )}
-                  </div>
-                </div>
-                <span class="bme-task-pill">${_escHtml(modelLabel)}</span>
-              </div>
-              <div class="bme-config-help">
-                ${_escHtml(
-                  [
-                    String(entry?.route || "").trim(),
-                    String(entry?.llmConfigSourceLabel || "").trim(),
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "未记录路由信息",
-                )}
-              </div>
-              ${
-                summaryLines.length
-                  ? `<div class="bme-ai-monitor-entry__summary">${summaryLines
-                      .map((line) => `<div>${_escHtml(line)}</div>`)
-                      .join("")}</div>`
-                  : ""
-              }
-              ${_renderMessageTraceTextBlock(
-                "最终发送 messages 预览",
-                previewText,
-                "这条任务没有捕获到完整的 messages 预览。",
-              )}
-            </div>
-          `;
-        })
-        .join("")}
+      ${cards}
     </div>
   `;
 }
+
 
 function _renderAiMonitorCognitionCard(state) {
   const graph = state.graph || null;
