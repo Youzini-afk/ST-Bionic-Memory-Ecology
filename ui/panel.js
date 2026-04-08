@@ -2686,6 +2686,18 @@ function _appendNodeDetailTextInput(container, labelText, inputId, value) {
   container.appendChild(row);
 }
 
+function _parseNodeDetailScopeList(rawValue, { allowSlash = true } = {}) {
+  const normalized = String(rawValue ?? "")
+    .replace(/[＞>→]+/g, "/")
+    .replace(/\r/g, "\n");
+  const separatorPattern = allowSlash ? /[,\n，/\\]+/ : /[,\n，]+/;
+  const values = normalized
+    .split(separatorPattern)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
+}
+
 function _appendNodeDetailTextareaField(
   container,
   labelText,
@@ -2745,6 +2757,26 @@ function _showNodeDetail(node) {
   if (regionLine) {
     _appendNodeDetailReadOnly(fragment, "地区", regionLine);
   }
+  _appendNodeDetailTextInput(
+    fragment,
+    "主地区",
+    "bme-detail-scope-region-primary",
+    scope.regionPrimary || "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "地区路径 (用 / 分隔)",
+    "bme-detail-scope-region-path",
+    Array.isArray(scope.regionPath) ? scope.regionPath.join(" / ") : "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "次级地区 (用逗号或 / 分隔)",
+    "bme-detail-scope-region-secondary",
+    Array.isArray(scope.regionSecondary)
+      ? scope.regionSecondary.join(", ")
+      : "",
+  );
   if (Array.isArray(raw.seqRange)) {
     _appendNodeDetailReadOnly(
       fragment,
@@ -2846,6 +2878,20 @@ function _saveNodeDetail() {
       .split(/[,，]/)
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+  const regionPrimaryEl = document.getElementById("bme-detail-scope-region-primary");
+  const regionPathEl = document.getElementById("bme-detail-scope-region-path");
+  const regionSecondaryEl = document.getElementById("bme-detail-scope-region-secondary");
+  if (regionPrimaryEl || regionPathEl || regionSecondaryEl) {
+    updates.scope = {
+      regionPrimary: String(regionPrimaryEl?.value || "").trim(),
+      regionPath: _parseNodeDetailScopeList(regionPathEl?.value, {
+        allowSlash: true,
+      }),
+      regionSecondary: _parseNodeDetailScopeList(regionSecondaryEl?.value, {
+        allowSlash: true,
+      }),
+    };
   }
 
   const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
