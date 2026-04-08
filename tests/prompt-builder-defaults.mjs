@@ -79,6 +79,15 @@ assert.deepEqual(
     .map((message) => message.blockName),
   ["输出格式", "行为规则"],
 );
+const extractFormatBlock = extractPayload.promptMessages.find(
+  (message) => message.blockName === "输出格式",
+);
+const extractRulesBlock = extractPayload.promptMessages.find(
+  (message) => message.blockName === "行为规则",
+);
+assert.match(String(extractFormatBlock?.content || ""), /cognitionUpdates/);
+assert.match(String(extractFormatBlock?.content || ""), /regionUpdates/);
+assert.match(String(extractRulesBlock?.content || ""), /涉及到的角色都尽量尝试补 cognitionUpdates/);
 assert.deepEqual(
   extractPayload.promptMessages
     .map((message) => message.sourceKey)

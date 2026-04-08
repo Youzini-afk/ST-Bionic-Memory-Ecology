@@ -54,7 +54,7 @@ assert.equal(latestObjective?.id, objectiveNode.id);
 assert.equal(latestPov?.id, povNode.id);
 
 const legacyGraph = deserializeGraph({
-  version: 5,
+  version: 6,
   lastProcessedSeq: 0,
   nodes: [
     {
@@ -79,10 +79,46 @@ const legacyGraph = deserializeGraph({
   edges: [],
 });
 assert.equal(legacyGraph.nodes[0]?.scope?.layer, "objective");
-assert.equal(legacyGraph.version, 6);
+assert.equal(legacyGraph.version, 7);
+assert.equal(legacyGraph.knowledgeState?.version, 1);
+assert.equal(legacyGraph.regionState?.version, 1);
+assert.equal(legacyGraph.historyState?.activeRegionSource, "");
+assert.deepEqual(legacyGraph.historyState?.recentRecallOwnerKeys, []);
 
 const restored = deserializeGraph(serializeGraph(graph));
 assert.equal(restored.nodes.find((node) => node.id === povNode.id)?.scope?.ownerType, "character");
 assert.equal(restored.nodes.find((node) => node.id === povNode.id)?.scope?.regionPrimary, "钟楼");
+assert.equal(restored.knowledgeState?.version, 1);
+assert.equal(restored.regionState?.version, 1);
+
+restored.knowledgeState.owners["character:艾琳"] = {
+  ownerType: "character",
+  ownerKey: "character:艾琳",
+  ownerName: "艾琳",
+  nodeId: "",
+  aliases: ["艾琳"],
+  knownNodeIds: [objectiveNode.id],
+  mistakenNodeIds: [],
+  visibilityScores: { [objectiveNode.id]: 1 },
+  manualKnownNodeIds: [],
+  manualHiddenNodeIds: [],
+  updatedAt: Date.now(),
+  lastSource: "test",
+};
+restored.regionState.adjacencyMap["钟楼"] = {
+  adjacent: ["旧城区"],
+  aliases: [],
+  source: "test",
+  updatedAt: Date.now(),
+};
+const roundTrip = deserializeGraph(serializeGraph(restored));
+assert.equal(
+  roundTrip.knowledgeState?.owners?.["character:艾琳"]?.knownNodeIds?.[0],
+  objectiveNode.id,
+);
+assert.equal(
+  roundTrip.regionState?.adjacencyMap?.["钟楼"]?.adjacent?.[0],
+  "旧城区",
+);
 
 console.log("scoped-memory tests passed");

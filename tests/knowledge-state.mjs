@@ -1,0 +1,123 @@
+import assert from "node:assert/strict";
+
+import { createEmptyGraph, createNode, addNode } from "../graph/graph.js";
+import {
+  applyCognitionUpdates,
+  applyManualKnowledgeOverride,
+  clearManualKnowledgeOverride,
+  applyRegionUpdates,
+  computeKnowledgeGateForNode,
+  listKnowledgeOwners,
+  resolveActiveRegionContext,
+  resolveAdjacentRegions,
+  resolveKnowledgeOwner,
+  setManualActiveRegion,
+} from "../graph/knowledge-state.js";
+
+const graph = createEmptyGraph();
+const erinA = createNode({
+  type: "character",
+  fields: { name: "艾琳", state: "守塔人" },
+  seq: 1,
+});
+const erinB = createNode({
+  type: "character",
+  fields: { name: "艾琳", state: "伪装者" },
+  seq: 2,
+});
+const lucia = createNode({
+  type: "character",
+  fields: { name: "露西亚", state: "旁观者" },
+  seq: 2,
+});
+const bellEvent = createNode({
+  type: "event",
+  fields: { title: "钟楼异响", summary: "钟楼深夜传出异响" },
+  seq: 3,
+  scope: { layer: "objective", regionPrimary: "钟楼" },
+});
+addNode(graph, erinA);
+addNode(graph, erinB);
+addNode(graph, lucia);
+addNode(graph, bellEvent);
+
+const ownerA = resolveKnowledgeOwner(graph, {
+  ownerType: "character",
+  ownerName: "艾琳",
+  nodeId: erinA.id,
+});
+const ownerB = resolveKnowledgeOwner(graph, {
+  ownerType: "character",
+  ownerName: "艾琳",
+  nodeId: erinB.id,
+});
+assert.notEqual(ownerA.ownerKey, ownerB.ownerKey);
+
+applyCognitionUpdates(
+  graph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "艾琳",
+      ownerNodeId: erinA.id,
+      knownRefs: [bellEvent.id],
+      visibility: [{ ref: bellEvent.id, score: 1 }],
+    },
+  ],
+  {
+    changedNodeIds: [bellEvent.id],
+    scopeRuntime: {
+      activeCharacterOwner: "艾琳",
+      activeUserOwner: "玩家",
+    },
+  },
+);
+
+const gateVisible = computeKnowledgeGateForNode(graph, bellEvent, ownerA.ownerKey, {
+  scopeBucket: "objectiveCurrentRegion",
+});
+assert.equal(gateVisible.visible, true);
+assert.equal(gateVisible.anchored, true);
+
+applyManualKnowledgeOverride(graph, {
+  ownerKey: ownerA.ownerKey,
+  nodeId: bellEvent.id,
+  mode: "mistaken",
+});
+const gateSuppressed = computeKnowledgeGateForNode(graph, bellEvent, ownerA.ownerKey, {
+  scopeBucket: "objectiveCurrentRegion",
+});
+assert.equal(gateSuppressed.visible, false);
+assert.equal(gateSuppressed.suppressedReason, "mistaken-objective");
+
+const clearedOverride = clearManualKnowledgeOverride(graph, {
+  ownerKey: ownerA.ownerKey,
+  nodeId: bellEvent.id,
+});
+assert.equal(clearedOverride.ok, true);
+const gateRestored = computeKnowledgeGateForNode(graph, bellEvent, ownerA.ownerKey, {
+  scopeBucket: "objectiveCurrentRegion",
+});
+assert.equal(gateRestored.visible, true);
+assert.notEqual(gateRestored.suppressedReason, "mistaken-objective");
+
+applyRegionUpdates(graph, {
+  activeRegionHint: "钟楼",
+  adjacency: [{ region: "钟楼", adjacent: ["旧城区", "内廷"] }],
+});
+assert.equal(resolveActiveRegionContext(graph).activeRegion, "钟楼");
+assert.deepEqual(resolveAdjacentRegions(graph, "钟楼").adjacentRegions, ["旧城区", "内廷"]);
+
+setManualActiveRegion(graph, "旧城区");
+assert.equal(resolveActiveRegionContext(graph).source, "manual");
+assert.equal(resolveActiveRegionContext(graph).activeRegion, "旧城区");
+
+const ownerList = listKnowledgeOwners(graph);
+assert.ok(ownerList.some((entry) => entry.ownerKey === ownerA.ownerKey));
+assert.ok(
+  ownerList.some(
+    (entry) => entry.ownerName === "露西亚" && entry.knownCount === 0,
+  ),
+);
+
+console.log("knowledge-state tests passed");

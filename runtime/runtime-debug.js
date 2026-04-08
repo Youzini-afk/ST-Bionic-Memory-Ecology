@@ -27,6 +27,7 @@ const runtimeDebugState = {
   taskPromptBuilds: {},
   taskLlmRequests: {},
   injections: {},
+  taskTimeline: [],
   updatedAt: "",
 };
 
@@ -39,6 +40,7 @@ export function resetRuntimeDebugSnapshot() {
   runtimeDebugState.taskPromptBuilds = {};
   runtimeDebugState.taskLlmRequests = {};
   runtimeDebugState.injections = {};
+  runtimeDebugState.taskTimeline = [];
   runtimeDebugState.updatedAt = nowIso();
 }
 
@@ -81,6 +83,7 @@ export function getRuntimeDebugSnapshot() {
       taskPromptBuilds: runtimeDebugState.taskPromptBuilds,
       taskLlmRequests: runtimeDebugState.taskLlmRequests,
       injections: runtimeDebugState.injections,
+      taskTimeline: runtimeDebugState.taskTimeline,
       updatedAt: runtimeDebugState.updatedAt,
     },
     {
@@ -88,6 +91,7 @@ export function getRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      taskTimeline: [],
       updatedAt: "",
     },
   );

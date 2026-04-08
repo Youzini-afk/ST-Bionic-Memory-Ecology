@@ -36,6 +36,13 @@ import {
   normalizeMemoryScope,
   resolveScopeBucketWeight,
 } from "../graph/memory-scope.js";
+import {
+  computeKnowledgeGateForNode,
+  pushRecentRecallOwner,
+  resolveActiveRegionContext,
+  resolveAdjacentRegions,
+  resolveKnowledgeOwner,
+} from "../graph/knowledge-state.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-index.js";
@@ -153,10 +160,20 @@ function createRetrievalMeta(enableLLMRecall) {
     residualHits: 0,
     scopeBuckets: {},
     activeRegion: "",
+    activeRegionSource: "",
     activeCharacterPovOwner: "",
     activeUserPovOwner: "",
+    activeRecallOwnerKey: "",
     bucketWeights: {},
     selectedByBucket: {},
+    knowledgeGateMode: "disabled",
+    knowledgeAnchoredNodes: [],
+    knowledgeSuppressedNodes: [],
+    knowledgeRescuedNodes: [],
+    visibilityTopHits: [],
+    visibilitySuppressedReasons: {},
+    adjacentRegionMatches: [],
+    selectedByKnowledgeState: {},
     skipReasons: [],
     timings: {},
     llm: {
@@ -588,6 +605,31 @@ function buildLexicalTopHits(scoredNodes = [], maxCount = 5) {
     }));
 }
 
+function buildVisibilityTopHits(scoredNodes = [], maxCount = 6) {
+  return scoredNodes
+    .filter((item) => Number(item?.knowledgeVisibilityScore) > 0)
+    .sort((a, b) => {
+      const visibilityDelta =
+        (Number(b?.knowledgeVisibilityScore) || 0) -
+        (Number(a?.knowledgeVisibilityScore) || 0);
+      if (visibilityDelta !== 0) return visibilityDelta;
+      return (Number(b?.weightedScore) || 0) - (Number(a?.weightedScore) || 0);
+    })
+    .slice(0, Math.max(1, maxCount))
+    .map((item) => ({
+      nodeId: item.nodeId,
+      type: item.node?.type || "",
+      label:
+        item.node?.fields?.name ||
+        item.node?.fields?.title ||
+        item.node?.fields?.summary ||
+        item.nodeId,
+      visibilityScore:
+        Math.round((Number(item.knowledgeVisibilityScore) || 0) * 1000) / 1000,
+      knowledgeMode: String(item.knowledgeMode || ""),
+    }));
+}
+
 function scaleVectorResults(results = [], weight = 1) {
   return (Array.isArray(results) ? results : []).map((item) => ({
     ...item,
@@ -773,6 +815,10 @@ export async function retrieve({
   const enablePovMemory = options.enablePovMemory ?? true;
   const enableRegionScopedObjective =
     options.enableRegionScopedObjective ?? true;
+  const enableCognitiveMemory = options.enableCognitiveMemory ?? true;
+  const enableSpatialAdjacency = options.enableSpatialAdjacency ?? true;
+  const injectLowConfidenceObjectiveMemory =
+    options.injectLowConfidenceObjectiveMemory ?? false;
   const injectUserPovMemory = options.injectUserPovMemory ?? true;
   const injectObjectiveGlobalMemory = options.injectObjectiveGlobalMemory ?? true;
   const stPromptContext = getSTContextForPrompt();
@@ -788,7 +834,22 @@ export async function retrieve({
       stPromptContext?.userName ||
       "",
   ).trim();
-  const activeRegion = pickActiveRegion(graph, options.activeRegion);
+  const activeRecallOwner = resolveKnowledgeOwner(graph, {
+    ownerType: "character",
+    ownerName:
+      options.activeCharacterPovOwner ||
+      graph?.historyState?.activeCharacterPovOwner ||
+      stPromptContext?.charName ||
+      "",
+  });
+  const activeRegionContext = resolveActiveRegionContext(
+    graph,
+    options.activeRegion || "",
+  );
+  const activeRegion = activeRegionContext.activeRegion || pickActiveRegion(graph, options.activeRegion);
+  const adjacentRegionContext = enableSpatialAdjacency
+    ? resolveAdjacentRegions(graph, activeRegion)
+    : { adjacentRegions: [] };
   const bucketWeights = buildScopeBucketWeightMap(options);
 
   let activeNodes = getActiveNodes(graph).filter(
@@ -813,9 +874,14 @@ export async function retrieve({
   const vectorValidation = validateVectorConfig(embeddingConfig);
   const retrievalMeta = createRetrievalMeta(enableLLMRecall);
   retrievalMeta.activeRegion = activeRegion;
+  retrievalMeta.activeRegionSource = activeRegionContext.source || "";
   retrievalMeta.activeCharacterPovOwner = activeCharacterPovOwner;
   retrievalMeta.activeUserPovOwner = activeUserPovOwner;
+  retrievalMeta.activeRecallOwnerKey = activeRecallOwner.ownerKey || "";
   retrievalMeta.bucketWeights = { ...bucketWeights };
+  retrievalMeta.knowledgeGateMode = enableCognitiveMemory
+    ? "anchored-soft-visibility"
+    : "disabled";
   const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
     enabled: enableContextQueryBlend,
     assistantWeight: contextAssistantWeight,
@@ -866,11 +932,17 @@ export async function retrieve({
         enableScopedMemory,
         enablePovMemory,
         enableRegionScopedObjective,
+        enableCognitiveMemory,
         injectUserPovMemory,
         injectObjectiveGlobalMemory,
         activeRegion,
+        activeRegionSource: activeRegionContext.source || "",
         activeCharacterPovOwner,
         activeUserPovOwner,
+        activeRecallOwnerKey: activeRecallOwner.ownerKey || "",
+        adjacentRegions: adjacentRegionContext.adjacentRegions,
+        injectLowConfidenceObjectiveMemory,
+        graph,
         bucketWeights,
       },
     });
@@ -1121,14 +1193,61 @@ export async function retrieve({
           activeCharacterPovOwner,
           activeUserPovOwner,
           activeRegion,
+          adjacentRegions: adjacentRegionContext.adjacentRegions,
           enablePovMemory,
           enableRegionScopedObjective,
         })
       : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
+    const knowledgeGate = enableCognitiveMemory
+      ? computeKnowledgeGateForNode(
+          graph,
+          node,
+          activeRecallOwner.ownerKey,
+          {
+            vectorScore: scores.vectorScore,
+            graphScore: scores.graphScore,
+            lexicalScore,
+            scopeBucket,
+            injectLowConfidenceObjectiveMemory,
+          },
+        )
+      : {
+          visible: true,
+          anchored: false,
+          rescued: false,
+          suppressed: false,
+          suppressedReason: "",
+          visibilityScore: 0,
+          mode: "disabled",
+        };
+    if (scopeBucket === MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION) {
+      retrievalMeta.adjacentRegionMatches.push(nodeId);
+    }
+    if (!knowledgeGate.visible) {
+      retrievalMeta.knowledgeSuppressedNodes.push(nodeId);
+      if (knowledgeGate.suppressedReason) {
+        retrievalMeta.visibilitySuppressedReasons[nodeId] =
+          knowledgeGate.suppressedReason;
+      }
+      continue;
+    }
+    if (knowledgeGate.anchored) {
+      retrievalMeta.knowledgeAnchoredNodes.push(nodeId);
+    }
+    if (knowledgeGate.rescued) {
+      retrievalMeta.knowledgeRescuedNodes.push(nodeId);
+    }
     const scopeWeight = enableScopedMemory
       ? resolveScopeBucketWeight(scopeBucket, bucketWeights)
       : 1;
-    const weightedScore = finalScore * scopeWeight;
+    const knowledgeWeight = enableCognitiveMemory
+      ? knowledgeGate.anchored
+        ? 1.18
+        : knowledgeGate.rescued
+          ? 0.92
+          : Math.max(0.35, 0.55 + Number(knowledgeGate.visibilityScore || 0) * 0.6)
+      : 1;
+    const weightedScore = finalScore * scopeWeight * knowledgeWeight;
 
     scoredNodes.push({
       nodeId,
@@ -1138,6 +1257,11 @@ export async function retrieve({
       lexicalScore,
       scopeBucket,
       scopeWeight,
+      knowledgeMode: knowledgeGate.mode,
+      knowledgeVisibilityScore: Number(knowledgeGate.visibilityScore || 0),
+      knowledgeWeight,
+      knowledgeAnchored: Boolean(knowledgeGate.anchored),
+      knowledgeRescued: Boolean(knowledgeGate.rescued),
       ...scores,
     });
     pushScopeBucketDebug(
@@ -1161,6 +1285,7 @@ export async function retrieve({
     (item) => (Number(item.lexicalScore) || 0) > 0,
   ).length;
   retrievalMeta.lexicalTopHits = buildLexicalTopHits(scoredNodes);
+  retrievalMeta.visibilityTopHits = buildVisibilityTopHits(scoredNodes);
   retrievalMeta.timings.scoring = roundMs(nowMs() - scoringStartedAt);
 
   let selectedNodeIds;
@@ -1238,6 +1363,7 @@ export async function retrieve({
           activeCharacterPovOwner,
           activeUserPovOwner,
           activeRegion,
+          adjacentRegions: adjacentRegionContext.adjacentRegions,
           enablePovMemory,
           enableRegionScopedObjective,
         })
@@ -1245,6 +1371,25 @@ export async function retrieve({
     pushScopeBucketDebug(acc, bucket, node.id);
     return acc;
   }, createEmptyScopeBucketMap());
+  retrievalMeta.selectedByKnowledgeState = Object.fromEntries(
+    selectedNodes.map((node) => {
+      const scored = scoredNodes.find((item) => item.nodeId === node.id);
+      return [
+        node.id,
+        {
+          mode: String(scored?.knowledgeMode || "selected"),
+          anchored: Boolean(scored?.knowledgeAnchored),
+          rescued: Boolean(scored?.knowledgeRescued),
+          visibilityScore:
+            Math.round((Number(scored?.knowledgeVisibilityScore) || 0) * 1000) /
+            1000,
+        },
+      ];
+    }),
+  );
+  if (graph?.historyState && activeRecallOwner.ownerKey) {
+    pushRecentRecallOwner(graph.historyState, activeRecallOwner.ownerKey);
+  }
 
   reinforceAccessBatch(selectedNodes);
 
@@ -1277,6 +1422,18 @@ export async function retrieve({
     0,
     normalizedMaxRecallNodes,
   );
+  retrievalMeta.knowledgeAnchoredNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeAnchoredNodes,
+  );
+  retrievalMeta.knowledgeSuppressedNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeSuppressedNodes,
+  );
+  retrievalMeta.knowledgeRescuedNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeRescuedNodes,
+  );
+  retrievalMeta.adjacentRegionMatches = uniqueNodeIds(
+    retrievalMeta.adjacentRegionMatches,
+  );
   retrievalMeta.llm = llmMeta;
   retrievalMeta.timings.total = roundMs(nowMs() - startedAt);
 
@@ -1286,11 +1443,17 @@ export async function retrieve({
       enableScopedMemory,
       enablePovMemory,
       enableRegionScopedObjective,
+      enableCognitiveMemory,
       injectUserPovMemory,
       injectObjectiveGlobalMemory,
       activeRegion,
+      activeRegionSource: activeRegionContext.source || "",
       activeCharacterPovOwner,
       activeUserPovOwner,
+      activeRecallOwnerKey: activeRecallOwner.ownerKey || "",
+      adjacentRegions: adjacentRegionContext.adjacentRegions,
+      injectLowConfidenceObjectiveMemory,
+      graph,
       bucketWeights,
     },
   });
@@ -1455,7 +1618,7 @@ async function llmRecall(
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
+      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
 
@@ -1669,10 +1832,27 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
       activeCharacterPovOwner: scopeContext.activeCharacterPovOwner,
       activeUserPovOwner: scopeContext.activeUserPovOwner,
       activeRegion: scopeContext.activeRegion,
+      adjacentRegions: scopeContext.adjacentRegions,
       enablePovMemory: scopeContext.enablePovMemory !== false,
       enableRegionScopedObjective:
         scopeContext.enableRegionScopedObjective !== false,
     });
+    const knowledgeGate =
+      scopeContext.enableCognitiveMemory !== false
+        ? computeKnowledgeGateForNode(
+            scopeContext.graph,
+            node,
+            scopeContext.activeRecallOwnerKey,
+            {
+              scopeBucket: bucket,
+              injectLowConfidenceObjectiveMemory:
+                scopeContext.injectLowConfidenceObjectiveMemory === true,
+            },
+          )
+        : { visible: true };
+    if (!knowledgeGate.visible && String(node?.scope?.layer || "objective") === "objective") {
+      continue;
+    }
 
     if (bucket === MEMORY_SCOPE_BUCKETS.CHARACTER_POV) {
       buckets.characterPov.push(node);

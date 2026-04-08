@@ -87,6 +87,52 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function summarizeTaskTimelineEntry(taskType, snapshot = {}) {
+  const taskKey = String(taskType || "unknown").trim() || "unknown";
+  const status = snapshot?.jsonFailure
+    ? "failed"
+    : snapshot?.responseCleaning
+      ? "completed"
+      : snapshot?.streamCompleted
+        ? "stream-completed"
+      : "";
+  if (!status) return null;
+
+  const startedAt = String(snapshot?.startedAt || snapshot?.streamStartedAt || "").trim();
+  const finishedAt = String(
+    snapshot?.finishedAt ||
+      snapshot?.streamFinishedAt ||
+      snapshot?.updatedAt ||
+      nowIso(),
+  ).trim();
+  const startedAtMs = Date.parse(startedAt);
+  const finishedAtMs = Date.parse(finishedAt);
+  const durationMs =
+    Number.isFinite(startedAtMs) && Number.isFinite(finishedAtMs) && finishedAtMs >= startedAtMs
+      ? finishedAtMs - startedAtMs
+      : 0;
+
+  return {
+    id: `${taskKey}:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`,
+    taskType: taskKey,
+    status,
+    updatedAt: nowIso(),
+    startedAt,
+    finishedAt,
+    durationMs,
+    model: String(snapshot?.model || ""),
+    route: String(snapshot?.route || snapshot?.effectiveRoute || ""),
+    llmConfigSourceLabel: String(snapshot?.llmConfigSourceLabel || ""),
+    llmPresetName: String(snapshot?.llmPresetName || ""),
+    promptExecution: cloneRuntimeDebugValue(snapshot?.promptExecution, null),
+    requestCleaning: cloneRuntimeDebugValue(snapshot?.requestCleaning, null),
+    responseCleaning: cloneRuntimeDebugValue(snapshot?.responseCleaning, null),
+    jsonFailure: cloneRuntimeDebugValue(snapshot?.jsonFailure, null),
+    messages: cloneRuntimeDebugValue(snapshot?.messages, []),
+    requestBody: cloneRuntimeDebugValue(snapshot?.requestBody, null),
+  };
+}
+
 function getRuntimeDebugState() {
   const stateKey = "__stBmeRuntimeDebugState";
   if (
@@ -98,6 +144,7 @@ function getRuntimeDebugState() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      taskTimeline: [],
       updatedAt: "",
     };
   }
@@ -116,6 +163,15 @@ function recordTaskLlmRequest(taskType, snapshot = {}, options = {}) {
     updatedAt: new Date().toISOString(),
     ...sanitizeLlmDebugSnapshot(snapshot),
   };
+  const timelineEntry = summarizeTaskTimelineEntry(
+    normalizedTaskType,
+    state.taskLlmRequests[normalizedTaskType],
+  );
+  if (timelineEntry) {
+    state.taskTimeline = Array.isArray(state.taskTimeline)
+      ? [...state.taskTimeline, timelineEntry].slice(-40)
+      : [timelineEntry];
+  }
   state.updatedAt = new Date().toISOString();
 }
 
@@ -1372,6 +1428,7 @@ async function callDedicatedOpenAICompatible(
     requested: streamRequested,
   });
   recordTaskLlmRequest(taskType || privateRequestSource, {
+    startedAt: nowIso(),
     requestSource: privateRequestSource,
     taskType: String(taskType || "").trim(),
     jsonMode,

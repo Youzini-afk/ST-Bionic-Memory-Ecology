@@ -226,12 +226,16 @@ export function classifyNodeScopeBucket(
     activeCharacterPovOwner = "",
     activeUserPovOwner = "",
     activeRegion = "",
+    adjacentRegions = [],
     enablePovMemory = true,
     enableRegionScopedObjective = true,
   } = {},
 ) {
   const scope = normalizeMemoryScope(node?.scope);
   const normalizedActiveRegion = normalizeKey(activeRegion);
+  const normalizedAdjacentRegions = new Set(
+    normalizeStringArray(adjacentRegions).map((value) => normalizeKey(value)),
+  );
 
   if (scope.layer === MEMORY_SCOPE_LAYER.POV) {
     if (!enablePovMemory) {
@@ -272,9 +276,15 @@ export function classifyNodeScopeBucket(
   if (regionPrimary && regionPrimary === normalizedActiveRegion) {
     return MEMORY_SCOPE_BUCKETS.OBJECTIVE_CURRENT_REGION;
   }
+  if (regionPrimary && normalizedAdjacentRegions.has(regionPrimary)) {
+    return MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION;
+  }
 
   const tokens = getScopeRegionTokens(scope).map((value) => normalizeKey(value));
-  if (tokens.includes(normalizedActiveRegion)) {
+  if (
+    tokens.includes(normalizedActiveRegion) ||
+    tokens.some((token) => normalizedAdjacentRegions.has(token))
+  ) {
     return MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION;
   }
 

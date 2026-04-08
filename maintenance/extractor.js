@@ -22,6 +22,10 @@ import {
   isObjectiveScope,
 } from "../graph/memory-scope.js";
 import {
+  applyCognitionUpdates,
+  applyRegionUpdates,
+} from "../graph/knowledge-state.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -326,14 +330,59 @@ function normalizeExtractionResultPayload(result, schema) {
   const normalizedOperations = operations.map((op) =>
     normalizeExtractionOperation(op, schema),
   );
+  const normalizedCognitionUpdates = Array.isArray(result?.cognitionUpdates)
+    ? result.cognitionUpdates
+        .filter(isPlainObject)
+        .map((entry) => ({
+          ownerType: String(entry?.ownerType || "").trim(),
+          ownerName: String(entry?.ownerName || "").trim(),
+          ownerId: String(entry?.ownerId || "").trim(),
+          ownerNodeId: String(entry?.ownerNodeId || "").trim(),
+          knownRefs: Array.isArray(entry?.knownRefs)
+            ? entry.knownRefs
+            : entry?.knownRefs != null
+              ? [entry.knownRefs]
+              : [],
+          mistakenRefs: Array.isArray(entry?.mistakenRefs)
+            ? entry.mistakenRefs
+            : entry?.mistakenRefs != null
+              ? [entry.mistakenRefs]
+              : [],
+          visibility: Array.isArray(entry?.visibility) ? entry.visibility : [],
+        }))
+    : [];
+  const normalizedRegionUpdates = isPlainObject(result?.regionUpdates)
+    ? {
+        activeRegionHint: String(result.regionUpdates?.activeRegionHint || "").trim(),
+        adjacency: Array.isArray(result.regionUpdates?.adjacency)
+          ? result.regionUpdates.adjacency
+              .filter(isPlainObject)
+              .map((entry) => ({
+                region: String(entry?.region || "").trim(),
+                adjacent: Array.isArray(entry?.adjacent)
+                  ? entry.adjacent
+                  : entry?.adjacent != null
+                    ? [entry.adjacent]
+                    : [],
+                source: String(entry?.source || "").trim(),
+              }))
+          : [],
+      }
+    : null;
 
   if (Array.isArray(result) || !isPlainObject(result)) {
-    return { operations: normalizedOperations };
+    return {
+      operations: normalizedOperations,
+      cognitionUpdates: normalizedCognitionUpdates,
+      regionUpdates: normalizedRegionUpdates,
+    };
   }
 
   return {
     ...result,
     operations: normalizedOperations,
+    cognitionUpdates: normalizedCognitionUpdates,
+    regionUpdates: normalizedRegionUpdates,
   };
 }
 
@@ -453,6 +502,23 @@ export async function extractMemories({
     "请分析对话，按 JSON 格式输出操作列表。",
   ].join("\n");
   const promptPayload = resolveTaskPromptPayload(promptBuild, userPrompt);
+  const extractionAugmentPrompt = buildCognitiveExtractAugmentPrompt();
+  const promptPayloadAdditionalMessages = Array.isArray(
+    promptPayload.additionalMessages,
+  )
+    ? [
+        ...promptPayload.additionalMessages,
+        {
+          role: "system",
+          content: extractionAugmentPrompt,
+        },
+      ]
+    : [
+        {
+          role: "system",
+          content: extractionAugmentPrompt,
+        },
+      ];
   const llmSystemPrompt = resolveTaskLlmSystemPrompt(
     promptPayload,
     systemPrompt,
@@ -494,7 +560,7 @@ export async function extractMemories({
     taskType: "extract",
     debugContext: createTaskLlmDebugContext(promptBuild, extractRegexInput),
     promptMessages: promptPayload.promptMessages,
-    additionalMessages: promptPayload.additionalMessages,
+    additionalMessages: promptPayloadAdditionalMessages,
     onStreamProgress,
   });
   throwIfAborted(signal);
@@ -532,6 +598,7 @@ export async function extractMemories({
   // 执行操作
   const stats = { newNodes: 0, updatedNodes: 0, newEdges: 0 };
   const newNodeIds = []; // v2: 收集新建节点 ID（用于进化引擎）
+  const updatedNodeIds = [];
   const refMap = new Map();
   const operationErrors = [];
 
@@ -552,7 +619,16 @@ export async function extractMemories({
           break;
         }
         case "update":
-          handleUpdate(graph, op, currentSeq, stats, scopeRuntime);
+          {
+            const updatedNodeId = handleUpdate(
+              graph,
+              op,
+              currentSeq,
+              stats,
+              scopeRuntime,
+            );
+            if (updatedNodeId) updatedNodeIds.push(updatedNodeId);
+          }
           break;
         case "delete":
           handleDelete(graph, op, stats);
@@ -598,6 +674,17 @@ export async function extractMemories({
     graph.lastProcessedSeq ?? -1,
     effectiveEndSeq,
   );
+  const changedNodeIds = [...new Set([...newNodeIds, ...updatedNodeIds])];
+  applyCognitionUpdates(graph, normalizedResult.cognitionUpdates, {
+    refMap,
+    changedNodeIds,
+    scopeRuntime,
+    source: "extract",
+  });
+  applyRegionUpdates(graph, normalizedResult.regionUpdates, {
+    changedNodeIds,
+    source: "extract",
+  });
   updateRuntimeScopeState(graph, newNodeIds, scopeRuntime);
 
   debugLog(
@@ -682,13 +769,13 @@ function handleCreate(graph, op, seq, schema, refMap, stats, scopeRuntime = {}) 
 function handleUpdate(graph, op, currentSeq, stats, scopeRuntime = {}) {
   if (!op.nodeId) {
     console.warn("[ST-BME] update 操作缺少 nodeId");
-    return;
+    return "";
   }
 
   const previousNode = getNode(graph, op.nodeId);
   if (!previousNode) {
     console.warn(`[ST-BME] update 目标节点不存在: ${op.nodeId}`);
-    return;
+    return "";
   }
 
   const previousFields = { ...(previousNode.fields || {}) };
@@ -789,6 +876,7 @@ function handleUpdate(graph, op, currentSeq, stats, scopeRuntime = {}) {
       }
     }
   }
+  return updated ? op.nodeId : "";
 }
 
 function buildFieldChangeSummary(previousFields = {}, nextFields = {}) {
@@ -904,7 +992,10 @@ function updateRuntimeScopeState(graph, newNodeIds = [], scopeRuntime = {}) {
     graph.historyState.lastExtractedRegion = String(
       regionNode.scope.regionPrimary || "",
     );
-    graph.historyState.activeRegion = String(regionNode.scope.regionPrimary || "");
+    if (!String(graph?.regionState?.manualActiveRegion || "").trim()) {
+      graph.historyState.activeRegion = String(regionNode.scope.regionPrimary || "");
+      graph.historyState.activeRegionSource = "extract";
+    }
   }
 }
 
@@ -1019,12 +1110,34 @@ function buildDefaultExtractPrompt(schema) {
     '      "fields": {"summary": "用户怎么记住这件事", "belief": "用户视角判断", "emotion": "情绪", "attitude": "态度", "certainty": "certain", "about": "evt1"},',
     '      "scope": {"layer": "pov", "ownerType": "user", "ownerId": "用户名", "ownerName": "用户名"}',
     "    }",
-    "  ]",
+    "  ],",
+    '  "cognitionUpdates": [',
+    "    {",
+    '      "ownerType": "character",',
+    '      "ownerName": "艾琳",',
+    '      "ownerNodeId": "char-1",',
+    '      "knownRefs": ["evt1", "char2"],',
+    '      "mistakenRefs": ["evt2"],',
+    '      "visibility": [',
+    '        {"ref": "evt1", "score": 1.0, "reason": "direct witness"},',
+    '        {"ref": "thread-1", "score": 0.55, "reason": "heard nearby"}',
+    "      ]",
+    "    }",
+    "  ],",
+    '  "regionUpdates": {',
+    '    "activeRegionHint": "钟楼",',
+    '    "adjacency": [',
+    '      {"region": "钟楼", "adjacent": ["旧城区", "内廷"]}',
+    "    ]",
+    "  }",
     "}",
     "",
     "规则：",
     "- 每批对话最多创建 1 个事件节点，多个子事件合并为一条",
-    "- 同时尽量为当前角色和用户各生成 1 条 pov_memory",
+    "- 涉及到的角色都尽量尝试生成对应 POV 记忆和 cognitionUpdates；不必强行覆盖全图所有角色",
+    "- cognitionUpdates 用来表达谁确定知道、谁误解了什么、谁只是模糊可见",
+    "- knownRefs / mistakenRefs 优先引用同批 ref；没有 ref 再引用现有 nodeId",
+    "- regionUpdates 只有在对话里明确出现地区线索时才写；不确定就留空",
     "- 角色/地点节点：如果图中已有同名同作用域节点，用 update 而非 create",
     `- 关系类型限定：${RELATION_TYPES.join(", ")}`,
     "- contradicts 关系用于矛盾/冲突信息",
@@ -1037,6 +1150,20 @@ function buildDefaultExtractPrompt(schema) {
     "- importance 范围 1-10，普通事件 5，关键转折 8+",
     "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
     "- summary 应该是摘要抽象，不要复制原文",
+  ].join("\n");
+}
+
+function buildCognitiveExtractAugmentPrompt() {
+  return [
+    "增强要求：这一轮提取除了 operations，还要尽量补 cognitionUpdates 与 regionUpdates。",
+    "- cognitionUpdates 表达谁明确知道哪些客观节点、谁产生了误解、谁只是低置信可见。",
+    "- 本批涉及到的角色都尽量尝试生成 POV 和记忆认知更新，不必覆盖全图全部角色。",
+    "- ownerType 只能是 character 或 user；ownerName 必须写清楚角色名或用户名。",
+    "- knownRefs / mistakenRefs 优先引用同批 ref，没有 ref 再用现有 nodeId。",
+    "- visibility.score 取 0..1，1 表示亲历或明确得知，0.5 左右表示间接听闻。",
+    "- regionUpdates.activeRegionHint 只在这批对话明确落到某个地区时填写。",
+    "- regionUpdates.adjacency 只在文本里明确出现邻接关系时填写，不要猜。",
+    "- 若没有认知或空间变化，可返回空数组或空对象，但不要返回无效结构。",
   ].join("\n");
 }
 

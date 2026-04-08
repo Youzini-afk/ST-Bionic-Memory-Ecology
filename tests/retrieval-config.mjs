@@ -134,6 +134,47 @@ const retrieve = await loadRetrieve({
   resolveScopeBucketWeight(bucket, overrides = {}) {
     return Number(overrides?.[bucket] ?? 1) || 1;
   },
+  computeKnowledgeGateForNode(_graph, _node, _ownerKey, options = {}) {
+    return {
+      visible: true,
+      anchored: false,
+      rescued: false,
+      suppressed: false,
+      suppressedReason: "",
+      visibilityScore:
+        options.scopeBucket === "objectiveCurrentRegion" ? 0.8 : 0.45,
+      mode: "soft-visible",
+      threshold: 0.4,
+    };
+  },
+  resolveKnowledgeOwner(_graph, input = {}) {
+    const ownerType = String(input.ownerType || "").trim();
+    const ownerName = String(input.ownerName || input.ownerId || "").trim();
+    return {
+      ownerType,
+      ownerName,
+      nodeId: String(input.nodeId || "").trim(),
+      aliases: ownerName ? [ownerName] : [],
+      ownerKey: ownerType && ownerName ? `${ownerType}:${ownerName}` : "",
+    };
+  },
+  resolveActiveRegionContext(graph, preferredRegion = "") {
+    return {
+      activeRegion:
+        String(preferredRegion || graph?.historyState?.activeRegion || "").trim(),
+      source: preferredRegion ? "runtime" : "history",
+    };
+  },
+  resolveAdjacentRegions() {
+    return {
+      canonicalRegion: "",
+      adjacentRegions: [],
+    };
+  },
+  pushRecentRecallOwner(historyState, ownerKey = "") {
+    historyState.activeRecallOwnerKey = ownerKey;
+    historyState.recentRecallOwnerKeys = ownerKey ? [ownerKey] : [];
+  },
   describeMemoryScope(scope = {}) {
     return `${scope.layer || "objective"}:${scope.ownerType || ""}:${scope.regionPrimary || ""}`;
   },

@@ -4,6 +4,7 @@
 import {
   createDefaultBatchJournal,
   createDefaultHistoryState,
+  createDefaultMaintenanceJournal,
   createDefaultVectorIndexState,
   normalizeGraphRuntimeState,
   PROCESSED_MESSAGE_HASH_VERSION,
@@ -15,12 +16,16 @@ import {
   normalizeNodeMemoryScope,
   isSameLatestScopeBucket,
 } from "./memory-scope.js";
+import {
+  createDefaultKnowledgeState,
+  createDefaultRegionState,
+} from "./knowledge-state.js";
 import { debugLog } from "../runtime/debug-logging.js";
 
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 6;
+const GRAPH_VERSION = 7;
 
 /**
  * 生成 UUID v4
@@ -47,6 +52,9 @@ export function createEmptyGraph() {
     historyState: createDefaultHistoryState(),
     vectorIndexState: createDefaultVectorIndexState(),
     batchJournal: createDefaultBatchJournal(),
+    maintenanceJournal: createDefaultMaintenanceJournal(),
+    knowledgeState: createDefaultKnowledgeState(),
+    regionState: createDefaultRegionState(),
   });
 }
 
@@ -615,6 +623,30 @@ export function deserializeGraph(json) {
         }
       }
 
+      if (data.version < 7) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          activeRegionSource: String(
+            data?.historyState?.activeRegionSource ||
+              (data?.historyState?.activeRegion ? "history" : ""),
+          ),
+          activeRecallOwnerKey: String(
+            data?.historyState?.activeRecallOwnerKey || "",
+          ),
+          recentRecallOwnerKeys: Array.isArray(
+            data?.historyState?.recentRecallOwnerKeys,
+          )
+            ? data.historyState.recentRecallOwnerKeys
+            : [],
+        };
+        data.maintenanceJournal = Array.isArray(data.maintenanceJournal)
+          ? data.maintenanceJournal
+          : createDefaultMaintenanceJournal();
+        data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
+        data.regionState = createDefaultRegionState(data.regionState);
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -672,6 +704,11 @@ export function deserializeGraph(json) {
     data.batchJournal = Array.isArray(data.batchJournal)
       ? data.batchJournal
       : createDefaultBatchJournal();
+    data.maintenanceJournal = Array.isArray(data.maintenanceJournal)
+      ? data.maintenanceJournal
+      : createDefaultMaintenanceJournal();
+    data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
+    data.regionState = createDefaultRegionState(data.regionState);
 
     return normalizeGraphRuntimeState(data, data?.historyState?.chatId || "");
   } catch (e) {
@@ -690,6 +727,7 @@ export function exportGraph(graph) {
     ...graph,
     historyState: {
       ...createDefaultHistoryState(graph?.historyState?.chatId || ""),
+      ...(graph?.historyState || {}),
       lastProcessedAssistantFloor:
         graph?.historyState?.lastProcessedAssistantFloor ??
         graph?.lastProcessedSeq ??
@@ -701,6 +739,9 @@ export function exportGraph(graph) {
       lastWarning: "导出图谱不包含运行时向量索引",
     },
     batchJournal: createDefaultBatchJournal(),
+    maintenanceJournal: createDefaultMaintenanceJournal(),
+    knowledgeState: createDefaultKnowledgeState(graph?.knowledgeState || {}),
+    regionState: createDefaultRegionState(graph?.regionState || {}),
     nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
   };
   return JSON.stringify(exportData, null, 2);

@@ -210,6 +210,85 @@
               </div>
             </div>
 
+            <div class="bme-config-card">
+              <div class="bme-section-header">认知 / 空间</div>
+              <div class="bme-config-row">
+                <label>当前召回角色</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-owner">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>当前地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-region">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>邻接地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-adjacent-regions">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>认知角色数</label>
+                <div class="bme-recent-meta" id="bme-cognition-owner-count">0</div>
+              </div>
+              <ul class="bme-recent-list" id="bme-cognition-owner-list"></ul>
+              <div id="bme-cognition-detail" class="bme-cognition-detail"></div>
+              <div class="bme-cognition-tools">
+                <div class="bme-config-row">
+                  <label for="bme-cognition-manual-region">手动当前地区</label>
+                  <input
+                    id="bme-cognition-manual-region"
+                    class="bme-config-input"
+                    type="text"
+                    placeholder="留空则恢复自动判断"
+                  />
+                </div>
+                <div class="bme-cognition-tool-actions">
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-cognition-region-apply"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-location-dot"></i>
+                    <span>设为当前地区</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-cognition-region-clear"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span>恢复自动</span>
+                  </button>
+                </div>
+                <div class="bme-config-row">
+                  <label for="bme-cognition-adjacency-input">当前地区邻接</label>
+                  <input
+                    id="bme-cognition-adjacency-input"
+                    class="bme-config-input"
+                    type="text"
+                    placeholder="旧城区, 内廷"
+                  />
+                </div>
+                <div class="bme-config-help">
+                  这里的手动覆盖只影响当前聊天图谱。选中一个节点后，可以在上面的角色详情里对该角色标记“强制已知 / 强制隐藏 / 误解”。
+                </div>
+                <button
+                  class="bme-config-secondary-btn"
+                  id="bme-cognition-adjacency-save"
+                  type="button"
+                >
+                  <i class="fa-solid fa-diagram-project"></i>
+                  <span>保存当前地区邻接</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header">AI Monitor</div>
+              <div class="bme-config-help">
+                默认跟随调试总开关；开启后展示最近的记忆任务流水。
+              </div>
+              <ul class="bme-recent-list" id="bme-ai-monitor-list"></ul>
+            </div>
+
             <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
               <canvas id="bme-mobile-graph-canvas"></canvas>
               <div class="bme-graph-overlay" id="bme-mobile-graph-overlay" hidden>
@@ -1135,6 +1214,29 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
+                      <div class="bme-config-card-title">AI Monitor</div>
+                      <div class="bme-config-card-subtitle">
+                        记录最近的提取、召回、压缩等任务流水；默认关闭，建议配合调试开关一起使用。
+                      </div>
+                    </div>
+                  </div>
+                  <label class="bme-toggle-item" for="bme-setting-ai-monitor-enabled">
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">启用 AI Monitor</span>
+                      <span class="bme-toggle-desc">
+                        开启后面板会显示最近任务的模型路由、清洗摘要和最终消息预览。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-ai-monitor-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
                       <div class="bme-config-card-title">美化用户输入</div>
                       <div class="bme-config-card-subtitle">
                         控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。
@@ -1462,6 +1564,26 @@
                             />
                             <span>启用地区客观层加权</span>
                           </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-cognitive-memory-enabled"
+                          >
+                            <input
+                              id="bme-setting-cognitive-memory-enabled"
+                              type="checkbox"
+                            />
+                            <span>启用多角色认知层</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-spatial-adjacency-enabled"
+                          >
+                            <input
+                              id="bme-setting-spatial-adjacency-enabled"
+                              type="checkbox"
+                            />
+                            <span>启用地区邻接图</span>
+                          </label>
                           <div class="bme-config-row">
                             <label for="bme-setting-recall-character-pov-weight"
                               >角色 POV 权重</label
@@ -1546,6 +1668,16 @@
                               type="checkbox"
                             />
                             <span>注入少量全局客观记忆</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-low-confidence-objective-memory"
+                          >
+                            <input
+                              id="bme-setting-inject-low-confidence-objective-memory"
+                              type="checkbox"
+                            />
+                            <span>允许低置信客观记忆直接注入</span>
                           </label>
                         </div>
                         <div class="bme-config-subgroup">
