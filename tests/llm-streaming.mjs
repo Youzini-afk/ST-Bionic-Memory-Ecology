@@ -410,7 +410,8 @@ async function testJsonRetryKeepsProfileCompletionTokens() {
 
         const snapshot = getSnapshot("extract");
         assert.ok(snapshot);
-        assert.equal(snapshot.requestBody?.max_completion_tokens, 7777);
+        assert.equal(snapshot.requestBody?.max_tokens, 7777);
+        assert.equal(snapshot.requestBody?.max_completion_tokens, undefined);
         assert.equal(snapshot.filteredGeneration?.max_completion_tokens, 7777);
       },
     );
