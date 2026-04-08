@@ -110,6 +110,7 @@ assert.deepEqual(
     "recentMessages",
     "userMessage",
     "candidateNodes",
+    "sceneOwnerCandidates",
     "graphStats",
     "default-format",
     "default-rules",
@@ -300,6 +301,11 @@ assert.equal(
 assert.equal(
   refreshedDefaultExtract.metadata.defaultTemplateFingerprint,
   currentDefaultExtract.metadata.defaultTemplateFingerprint,
+);
+assert.match(
+  refreshedDefaultExtract.blocks.find((block) => block.id === "default-format")
+    ?.content || "",
+  /cognitionUpdates/,
 );
 assert.ok(preservedCustomExtract);
 assert.equal(

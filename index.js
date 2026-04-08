@@ -197,6 +197,16 @@ import {
 } from "./runtime/runtime-state.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./graph/schema.js";
 import {
+  applyManualKnowledgeOverride,
+  clearManualKnowledgeOverride,
+  setManualActiveRegion,
+  updateRegionAdjacencyManual,
+} from "./graph/knowledge-state.js";
+import {
+  clearManualActiveStorySegment,
+  setManualActiveStorySegment,
+} from "./graph/story-timeline.js";
+import {
   onExportGraphController,
   onFetchEmbeddingModelsController,
   onFetchMemoryLLMModelsController,
@@ -308,6 +318,7 @@ function getRuntimeDebugState() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      taskTimeline: [],
       messageTrace: {
         lastSentUserMessage: null,
       },
@@ -378,6 +389,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: state.taskPromptBuilds,
       taskLlmRequests: state.taskLlmRequests,
       injections: state.injections,
+      taskTimeline: state.taskTimeline,
       messageTrace: state.messageTrace,
       maintenance: state.maintenance,
       graphPersistence: state.graphPersistence,
@@ -388,6 +400,7 @@ function readRuntimeDebugSnapshot() {
       taskPromptBuilds: {},
       taskLlmRequests: {},
       injections: {},
+      taskTimeline: [],
       messageTrace: {
         lastSentUserMessage: null,
       },
@@ -10071,6 +10084,11 @@ function buildRecallRetrieveOptions(settings, context) {
     enablePovMemory: settings.enablePovMemory ?? true,
     enableRegionScopedObjective:
       settings.enableRegionScopedObjective ?? true,
+    enableCognitiveMemory: settings.enableCognitiveMemory ?? true,
+    enableSpatialAdjacency: settings.enableSpatialAdjacency ?? true,
+    enableStoryTimeline: settings.enableStoryTimeline ?? true,
+    injectStoryTimeLabel: settings.injectStoryTimeLabel ?? true,
+    storyTimeSoftDirecting: settings.storyTimeSoftDirecting ?? true,
     recallCharacterPovWeight: settings.recallCharacterPovWeight ?? 1.25,
     recallUserPovWeight: settings.recallUserPovWeight ?? 1.05,
     recallObjectiveCurrentRegionWeight:
@@ -10082,14 +10100,18 @@ function buildRecallRetrieveOptions(settings, context) {
     injectUserPovMemory: settings.injectUserPovMemory ?? true,
     injectObjectiveGlobalMemory:
       settings.injectObjectiveGlobalMemory ?? true,
+    injectLowConfidenceObjectiveMemory:
+      settings.injectLowConfidenceObjectiveMemory ?? false,
     activeRegion:
       currentGraph?.historyState?.activeRegion ||
       currentGraph?.historyState?.lastExtractedRegion ||
       "",
+    activeStorySegmentId:
+      currentGraph?.historyState?.activeStorySegmentId || "",
+    activeStoryTimeLabel:
+      currentGraph?.historyState?.activeStoryTimeLabel || "",
     activeCharacterPovOwner:
-      currentGraph?.historyState?.activeCharacterPovOwner ||
-      context.name2 ||
-      "",
+      currentGraph?.historyState?.activeCharacterPovOwner || "",
     activeUserPovOwner:
       currentGraph?.historyState?.activeUserPovOwner ||
       context.name1 ||
@@ -10693,6 +10715,191 @@ function onDeletePanelGraphNode(payload = {}) {
   };
 }
 
+function onApplyPanelKnowledgeOverride(payload = {}) {
+  const nodeId = String(payload.nodeId || "");
+  const ownerKey = String(payload.ownerKey || "");
+  const ownerType = String(payload.ownerType || "");
+  const ownerName = String(payload.ownerName || "");
+  const mode = String(payload.mode || "").trim();
+
+  if (!currentGraph || !nodeId || !ownerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("认知覆盖", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  if (!["known", "hidden", "mistaken"].includes(mode)) {
+    return { ok: false, error: "invalid-mode" };
+  }
+  if (!getNode(currentGraph, nodeId)) {
+    return { ok: false, error: "node-not-found" };
+  }
+
+  const result = applyManualKnowledgeOverride(currentGraph, {
+    ownerKey,
+    ownerType,
+    ownerName,
+    nodeId,
+    mode,
+  });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "override-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: `panel-knowledge-${mode}` });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onClearPanelKnowledgeOverride(payload = {}) {
+  const nodeId = String(payload.nodeId || "");
+  const ownerKey = String(payload.ownerKey || "");
+  const ownerType = String(payload.ownerType || "");
+  const ownerName = String(payload.ownerName || "");
+
+  if (!currentGraph || !nodeId || !ownerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("认知覆盖清理", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  if (!getNode(currentGraph, nodeId)) {
+    return { ok: false, error: "node-not-found" };
+  }
+
+  const result = clearManualKnowledgeOverride(currentGraph, {
+    ownerKey,
+    ownerType,
+    ownerName,
+    nodeId,
+  });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "clear-override-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-knowledge-clear" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onSetPanelActiveRegion(payload = {}) {
+  const region = String(payload.region || "").trim();
+  if (!currentGraph) {
+    return { ok: false, error: "missing-graph" };
+  }
+  if (!ensureGraphMutationReady("地区覆盖", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = setManualActiveRegion(currentGraph, region);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "set-region-failed" };
+  }
+
+  const persist = saveGraphToChat({
+    reason: region ? "panel-region-set" : "panel-region-clear",
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    activeRegion: result.activeRegion || "",
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onSetPanelActiveStoryTime(payload = {}) {
+  const label = String(payload.label || "").trim();
+  if (!currentGraph) {
+    return { ok: false, error: "missing-graph" };
+  }
+  if (!ensureGraphMutationReady("剧情时间覆盖", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  const result = setManualActiveStorySegment(currentGraph, { label });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "set-story-time-failed" };
+  }
+  const persist = saveGraphToChat({
+    reason: label ? "panel-story-time-set" : "panel-story-time-clear",
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    activeStorySegmentId: result.activeStorySegmentId || "",
+    activeStoryTimeLabel: result.activeStoryTimeLabel || "",
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onClearPanelActiveStoryTime() {
+  if (!currentGraph) {
+    return { ok: false, error: "missing-graph" };
+  }
+  if (!ensureGraphMutationReady("剧情时间覆盖清理", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+  const result = clearManualActiveStorySegment(currentGraph);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "clear-story-time-failed" };
+  }
+  const persist = saveGraphToChat({ reason: "panel-story-time-clear" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    activeStorySegmentId: result.activeStorySegmentId || "",
+    activeStoryTimeLabel: result.activeStoryTimeLabel || "",
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onUpdatePanelRegionAdjacency(payload = {}) {
+  const fallbackRegion =
+    currentGraph?.historyState?.activeRegion ||
+    currentGraph?.regionState?.manualActiveRegion ||
+    "";
+  const region = String(payload.region || fallbackRegion).trim();
+  const adjacent = Array.isArray(payload.adjacent)
+    ? payload.adjacent
+    : String(payload.adjacent || "")
+        .split(/[,\n，]/)
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+
+  if (!currentGraph || !region) {
+    return { ok: false, error: "missing-region" };
+  }
+  if (!ensureGraphMutationReady("地区邻接编辑", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = updateRegionAdjacencyManual(currentGraph, region, adjacent);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "update-adjacency-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-region-adjacency" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    region,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 async function onExportGraph() {
   return await onExportGraphController({
     document,
@@ -11021,6 +11228,12 @@ async function onDeleteServerSyncFile() {
       clearCurrentHide: () => clearAllHiddenMessages("panel-manual-clear"),
       saveGraphNode: onSavePanelGraphNode,
       deleteGraphNode: onDeletePanelGraphNode,
+      applyKnowledgeOverride: onApplyPanelKnowledgeOverride,
+      clearKnowledgeOverride: onClearPanelKnowledgeOverride,
+      setActiveRegion: onSetPanelActiveRegion,
+      setActiveStoryTime: onSetPanelActiveStoryTime,
+      clearActiveStoryTime: onClearPanelActiveStoryTime,
+      updateRegionAdjacency: onUpdatePanelRegionAdjacency,
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       reembedDirect: onReembedDirect,

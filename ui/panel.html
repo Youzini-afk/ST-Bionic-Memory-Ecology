@@ -210,20 +210,56 @@
               </div>
             </div>
 
-            <div class="bme-mobile-graph-preview" id="bme-mobile-graph-area">
-              <canvas id="bme-mobile-graph-canvas"></canvas>
-              <div class="bme-graph-overlay" id="bme-mobile-graph-overlay" hidden>
-                <div class="bme-graph-overlay__text" id="bme-mobile-graph-overlay-text">
-                  正在加载当前聊天图谱
-                </div>
+            <div class="bme-config-card">
+              <div class="bme-section-header">认知 / 空间</div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-user" style="margin-right:4px;opacity:0.5"></i>当前场景锚点</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-owner">—</div>
               </div>
-              <span class="bme-mobile-graph-label">REALTIME</span>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-location-dot" style="margin-right:4px;opacity:0.5"></i>当前地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-region">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-diagram-project" style="margin-right:4px;opacity:0.5"></i>邻接地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-adjacent-regions">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-users" style="margin-right:4px;opacity:0.5"></i>认知角色数</label>
+                <div class="bme-recent-meta" id="bme-cognition-owner-count">0</div>
+              </div>
+              <button
+                class="bme-config-secondary-btn bme-cognition-jump-btn"
+                id="bme-cognition-jump-to-view"
+                type="button"
+              >
+                <i class="fa-solid fa-brain"></i>
+                <span>在认知视图中查看完整认知 →</span>
+              </button>
             </div>
-            <div
-              class="bme-graph-statusbar bme-mobile-graph-status"
-              id="bme-mobile-graph-status"
-            >
-              <span><span class="bme-status-dot"></span>NODE_SYNC_ACTIVE</span>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header">任务监视器</div>
+              <div class="bme-config-help">
+                默认跟随调试总开关；开启后展示最近的记忆任务流水。
+              </div>
+              <ul class="bme-recent-list" id="bme-ai-monitor-list"></ul>
+            </div>
+
+            <div class="bme-mobile-graph-section" id="bme-mobile-graph-section">
+              <div class="bme-mobile-graph-tabs">
+                <button class="bme-mobile-graph-tab active" data-mobile-view="summary" type="button">
+                  <i class="fa-solid fa-chart-pie"></i> 图谱摘要
+                </button>
+                <button class="bme-mobile-graph-tab" data-mobile-view="cognition" type="button">
+                  <i class="fa-solid fa-brain"></i> 认知视图
+                </button>
+              </div>
+              <div class="bme-mobile-view-pane active" id="bme-mobile-summary-pane" data-mobile-view="summary"></div>
+              <div class="bme-mobile-view-pane" id="bme-mobile-cognition-pane" data-mobile-view="cognition"></div>
+              <button class="bme-mobile-fullscreen-btn" id="bme-mobile-open-fullscreen" type="button">
+                <i class="fa-solid fa-expand"></i> 打开全屏图谱
+              </button>
             </div>
 
             <div class="bme-section-header">最近提取</div>
@@ -421,9 +457,15 @@
       <div class="bme-panel-main">
         <div class="bme-graph-workspace" id="bme-graph-workspace">
           <div class="bme-graph-toolbar">
-            <div class="bme-graph-toolbar-title">
-              <i class="fa-solid fa-diagram-project"></i>
-              <span>实时图谱</span>
+            <div class="bme-graph-view-tabs">
+              <button class="bme-graph-view-tab active" data-graph-view="graph" type="button">
+                <i class="fa-solid fa-diagram-project"></i>
+                <span>实时图谱</span>
+              </button>
+              <button class="bme-graph-view-tab" data-graph-view="cognition" type="button">
+                <i class="fa-solid fa-brain"></i>
+                <span>认知视图</span>
+              </button>
             </div>
             <div class="bme-graph-controls">
               <button id="bme-graph-zoom-in" title="放大" type="button">
@@ -453,6 +495,30 @@
               ><span id="bme-status-text">READY</span></span
             >
             <span id="bme-status-meta">NODES: 0 | EDGES: 0</span>
+          </div>
+
+
+          <div class="bme-cognition-workspace" id="bme-cognition-workspace" hidden>
+            <div class="bme-cog-status-strip" id="bme-cog-status-strip"></div>
+            <div class="bme-cog-body">
+              <div class="bme-cog-column bme-cog-column--owners">
+                <div class="bme-cog-section-title">
+                  <i class="fa-solid fa-users"></i> 角色认知清单
+                </div>
+                <div class="bme-cog-owner-scroll" id="bme-cog-owner-list"></div>
+                <div class="bme-cog-owner-detail" id="bme-cog-owner-detail"></div>
+              </div>
+              <div class="bme-cog-column bme-cog-column--space">
+                <div class="bme-cog-section-title">
+                  <i class="fa-solid fa-map-location-dot"></i> 空间控制台
+                </div>
+                <div class="bme-cog-space-tools" id="bme-cog-space-tools"></div>
+                <div class="bme-cog-section-title" style="margin-top:16px">
+                  <i class="fa-solid fa-wave-square"></i> 任务监视器
+                </div>
+                <div class="bme-cog-monitor-mini" id="bme-cog-monitor-mini"></div>
+              </div>
+            </div>
           </div>
 
           <div class="bme-node-detail" id="bme-node-detail">
@@ -1135,6 +1201,29 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
+                      <div class="bme-config-card-title">任务监视器</div>
+                      <div class="bme-config-card-subtitle">
+                        记录最近的提取、召回、压缩等任务流水；默认关闭，建议配合调试开关一起使用。
+                      </div>
+                    </div>
+                  </div>
+                  <label class="bme-toggle-item" for="bme-setting-ai-monitor-enabled">
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">启用任务监视器</span>
+                      <span class="bme-toggle-desc">
+                        开启后面板会显示最近任务的模型路由、清洗摘要和最终消息预览。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-ai-monitor-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
                       <div class="bme-config-card-title">美化用户输入</div>
                       <div class="bme-config-card-subtitle">
                         控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。
@@ -1462,6 +1551,56 @@
                             />
                             <span>启用地区客观层加权</span>
                           </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-cognitive-memory-enabled"
+                          >
+                            <input
+                              id="bme-setting-cognitive-memory-enabled"
+                              type="checkbox"
+                            />
+                            <span>启用多角色认知层</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-spatial-adjacency-enabled"
+                          >
+                            <input
+                              id="bme-setting-spatial-adjacency-enabled"
+                              type="checkbox"
+                            />
+                            <span>启用地区邻接图</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-enable-story-timeline"
+                          >
+                            <input
+                              id="bme-setting-enable-story-timeline"
+                              type="checkbox"
+                            />
+                            <span>启用剧情时间层</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-story-time-soft-directing"
+                          >
+                            <input
+                              id="bme-setting-story-time-soft-directing"
+                              type="checkbox"
+                            />
+                            <span>启用剧情时间软导演</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-story-time-label"
+                          >
+                            <input
+                              id="bme-setting-inject-story-time-label"
+                              type="checkbox"
+                            />
+                            <span>注入时间标签</span>
+                          </label>
                           <div class="bme-config-row">
                             <label for="bme-setting-recall-character-pov-weight"
                               >角色 POV 权重</label
@@ -1546,6 +1685,16 @@
                               type="checkbox"
                             />
                             <span>注入少量全局客观记忆</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-low-confidence-objective-memory"
+                          >
+                            <input
+                              id="bme-setting-inject-low-confidence-objective-memory"
+                              type="checkbox"
+                            />
+                            <span>允许低置信客观记忆直接注入</span>
                           </label>
                         </div>
                         <div class="bme-config-subgroup">
@@ -2519,4 +2668,26 @@
       </button>
     </div>
   </div>
+
+      <div class="bme-fullscreen-graph-overlay" id="bme-fullscreen-graph" hidden>
+        <div class="bme-fullscreen-graph-toolbar">
+          <div class="bme-graph-toolbar-title">
+            <i class="fa-solid fa-diagram-project"></i>
+            <span>实时图谱（全屏）</span>
+          </div>
+          <div class="bme-fullscreen-graph-controls">
+            <button id="bme-fs-zoom-in" title="放大" type="button">
+              <i class="fa-solid fa-plus"></i>
+            </button>
+            <button id="bme-fs-zoom-out" title="缩小" type="button">
+              <i class="fa-solid fa-minus"></i>
+            </button>
+            <button id="bme-fs-close" title="关闭" type="button">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+        <canvas id="bme-fullscreen-graph-canvas"></canvas>
+      </div>
+
 </div>

@@ -215,7 +215,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "根据上下文筛选最相关的记忆节点。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-03T13:12:21.155Z",
+    "updatedAt": "2026-04-08T12:00:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -326,6 +326,18 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "order": 8
       },
       {
+        "id": "default-scene-owner-candidates",
+        "name": "场景角色候选",
+        "type": "builtin",
+        "enabled": true,
+        "role": "system",
+        "sourceKey": "sceneOwnerCandidates",
+        "sourceField": "",
+        "content": "",
+        "injectionMode": "relative",
+        "order": 9
+      },
+      {
         "id": "default-graph-stats",
         "name": "图统计",
         "type": "builtin",
@@ -335,7 +347,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "sourceField": "",
         "content": "",
         "injectionMode": "relative",
-        "order": 9
+        "order": 10
       },
       {
         "id": "default-format",
@@ -345,9 +357,9 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "我需要你只给我一个合法 JSON 对象：\n{\"selected_ids\": [\"id1\", \"id2\"], \"reason\": \"id1: 为什么必须选；id2: 为什么必须选\"}\n在 reason 里帮我点名说清楚每个入选节点的作用；如果全部不相关，给我返回空数组就行。",
+        "content": "我需要你只给我一个合法 JSON 对象：\n{\n  \"selected_ids\": [\"id1\", \"id2\"],\n  \"reason\": \"id1: 为什么必须选；id2: 为什么必须选\",\n  \"active_owner_keys\": [\"character:alice\", \"character:bob\"],\n  \"active_owner_scores\": [\n    {\"ownerKey\": \"character:alice\", \"score\": 0.92, \"reason\": \"她在场且 POV 最相关\"},\n    {\"ownerKey\": \"character:bob\", \"score\": 0.74, \"reason\": \"他直接参与了当前因果链\"}\n  ]\n}\nactive_owner_keys 必须从提供的 ownerKey 候选中选择；如果这轮无法可靠判断具体人物，可以返回空数组。",
         "injectionMode": "relative",
-        "order": 10
+        "order": 11
       },
       {
         "id": "default-rules",
@@ -357,9 +369,9 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "role": "user",
         "sourceKey": "",
         "sourceField": "",
-        "content": "我希望你按这个优先级帮我挑——\n1. 当前场景直接需要的记忆：正在发生的事件、在场人物、当前地点、当前目标。\n2. 解释“为什么会这样”的最近因果前史。\n3. 与当前人物关系或情绪判断直接相关的 POV 记忆。\n4. 会影响这轮回应取向的规则、承诺、未解线索或长期背景。\n5. 只有在确实必要时，才帮我补少量全局客观背景。\n\n我的选择原则是——\n- 宁少勿滥；只选真正会改变这轮理解和回答的节点。\n- 多个候选表达的是同一件事时，只帮我保留最直接、最新或最能解释当前局面的那个。\n- 用户 POV 可以作为关系、承诺和互动背景参考，但不要把它当成角色已经知道的客观事实。\n- archived、失效、明显过期或与当前话题断开的节点不要帮我选。\n- 如果候选里没有足够相关的内容，可以给我返回空数组，但 reason 要说明为什么。\n\n以下是我不想看到的——\n- 把所有候选节点全选。\n- 只因为 importance 高就选。\n- reason 写成一句空话，例如“这些节点相关”。\n- 用百科全书式背景信息挤掉真正和当前场景直接相关的记忆。",
+        "content": "我希望你按这个优先级帮我挑——\n1. 当前场景直接需要的记忆：正在发生的事件、在场人物、当前地点、当前目标。\n2. 解释“为什么会这样”的最近因果前史。\n3. 与当前人物关系或情绪判断直接相关的 POV 记忆。\n4. 会影响这轮回应取向的规则、承诺、未解线索或长期背景。\n5. 只有在确实必要时，才帮我补少量全局客观背景。\n\n场景角色判断——\n- 你还要判断这轮真正参与当前回应的具体人物，并返回 active_owner_keys。\n- 只能从给出的 ownerKey 候选里选，不要把角色卡名、群像统称或“当前角色”这类模糊说法当成具体人物。\n- 多角色同场时按对等多锚处理，可以返回多个 ownerKey。\n- 如果无法可靠判断，就返回空数组，不要强行猜一个。\n\n我的选择原则是——\n- 宁少勿滥；只选真正会改变这轮理解和回答的节点。\n- 多个候选表达的是同一件事时，只帮我保留最直接、最新或最能解释当前局面的那个。\n- 用户 POV 可以作为关系、承诺和互动背景参考，但不要把它当成角色已经知道的客观事实。\n- archived、失效、明显过期或与当前话题断开的节点不要帮我选。\n- 如果候选里没有足够相关的内容，可以给我返回空数组，但 reason 要说明为什么。\n\n以下是我不想看到的——\n- 把所有候选节点全选。\n- 只因为 importance 高就选。\n- reason 写成一句空话，例如“这些节点相关”。\n- 用百科全书式背景信息挤掉真正和当前场景直接相关的记忆。",
         "injectionMode": "relative",
-        "order": 11
+        "order": 12
       }
     ],
     "generation": {

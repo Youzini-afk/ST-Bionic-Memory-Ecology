@@ -3,6 +3,15 @@ import {
   normalizeEdgeMemoryScope,
   normalizeNodeMemoryScope,
 } from "../graph/memory-scope.js";
+import {
+  createDefaultKnowledgeState,
+  createDefaultRegionState,
+  normalizeGraphCognitiveState,
+} from "../graph/knowledge-state.js";
+import {
+  createDefaultTimelineState,
+  normalizeGraphStoryTimeline,
+} from "../graph/story-timeline.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
@@ -28,8 +37,15 @@ export function createDefaultHistoryState(chatId = "") {
     lastBatchStatus: null,
     lastExtractedRegion: "",
     activeRegion: "",
+    activeRegionSource: "",
+    activeStorySegmentId: "",
+    activeStoryTimeLabel: "",
+    activeStoryTimeSource: "",
+    lastExtractedStorySegmentId: "",
     activeCharacterPovOwner: "",
     activeUserPovOwner: "",
+    activeRecallOwnerKey: "",
+    recentRecallOwnerKeys: [],
   };
 }
 
@@ -113,11 +129,43 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   if (typeof historyState.activeRegion !== "string") {
     historyState.activeRegion = historyState.lastExtractedRegion || "";
   }
+  if (typeof historyState.activeRegionSource !== "string") {
+    historyState.activeRegionSource = historyState.activeRegion ? "history" : "";
+  }
+  if (typeof historyState.activeStorySegmentId !== "string") {
+    historyState.activeStorySegmentId = "";
+  }
+  if (typeof historyState.activeStoryTimeLabel !== "string") {
+    historyState.activeStoryTimeLabel = "";
+  }
+  if (typeof historyState.activeStoryTimeSource !== "string") {
+    historyState.activeStoryTimeSource =
+      historyState.activeStorySegmentId || historyState.activeStoryTimeLabel
+        ? "history"
+        : "";
+  }
+  if (typeof historyState.lastExtractedStorySegmentId !== "string") {
+    historyState.lastExtractedStorySegmentId = "";
+  }
   if (typeof historyState.activeCharacterPovOwner !== "string") {
     historyState.activeCharacterPovOwner = "";
   }
   if (typeof historyState.activeUserPovOwner !== "string") {
     historyState.activeUserPovOwner = "";
+  }
+  if (typeof historyState.activeRecallOwnerKey !== "string") {
+    historyState.activeRecallOwnerKey = "";
+  }
+  if (!Array.isArray(historyState.recentRecallOwnerKeys)) {
+    historyState.recentRecallOwnerKeys = [];
+  } else {
+    historyState.recentRecallOwnerKeys = [
+      ...new Set(
+        historyState.recentRecallOwnerKeys
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    ].slice(0, 8);
   }
 
   if (
@@ -220,6 +268,11 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
         .filter((entry) => entry && typeof entry === "object")
         .slice(-MAINTENANCE_JOURNAL_LIMIT)
     : createDefaultMaintenanceJournal();
+  graph.knowledgeState = createDefaultKnowledgeState(graph.knowledgeState);
+  graph.regionState = createDefaultRegionState(graph.regionState);
+  graph.timelineState = createDefaultTimelineState(graph.timelineState);
+  normalizeGraphCognitiveState(graph);
+  normalizeGraphStoryTimeline(graph);
   graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
   return graph;
 }

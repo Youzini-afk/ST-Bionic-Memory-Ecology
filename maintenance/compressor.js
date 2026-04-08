@@ -19,6 +19,11 @@ import {
 } from "../graph/memory-scope.js";
 import { ensureEventTitle, getNodeDisplayName } from "../graph/node-labels.js";
 import {
+  deriveStoryTimeSpanFromNodes,
+  describeNodeStoryTime,
+  normalizeStoryTime,
+} from "../graph/story-timeline.js";
+import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
@@ -296,6 +301,12 @@ async function compressLevel({
 
       compressedNode.level = level + 1;
       compressedNode.childIds = batch.map((n) => n.id);
+      compressedNode.storyTime = normalizeStoryTime();
+      compressedNode.storyTimeSpan = deriveStoryTimeSpanFromNodes(
+        graph,
+        batch,
+        "derived",
+      );
 
       const embeddingText =
         normalizeCompressionFieldValue(
@@ -471,11 +482,12 @@ async function summarizeBatch(
 ) {
   const nodeDescriptions = nodes
     .map((n, i) => {
+      const storyTimeLabel = describeNodeStoryTime(n);
       const fieldsStr = Object.entries(n.fields)
         .filter(([_, v]) => v)
         .map(([k, v]) => `${k}: ${v}`)
         .join("\n    ");
-      return `节点 ${i + 1} [楼层 ${n.seq}]:\n    ${fieldsStr}`;
+      return `节点 ${i + 1} [楼层 ${n.seq}]${storyTimeLabel ? ` [剧情时间 ${storyTimeLabel}]` : ""}:\n    ${fieldsStr}`;
     })
     .join("\n\n");
 
@@ -508,6 +520,8 @@ async function summarizeBatch(
         "- 保留关键信息：因果关系、不可逆结果、未解决伏笔",
         "- 去除重复和低信息密度内容",
         "- 压缩后文本应精炼，目标 150 字左右",
+        "- 必须保持剧情时间顺序，不要把不同阶段的内容写反",
+        "- 不要把未来计划写成已经发生的客观事实",
       ].join("\n"),
     compressRegexInput,
     "system",

@@ -79,6 +79,18 @@ assert.deepEqual(
     .map((message) => message.blockName),
   ["输出格式", "行为规则"],
 );
+const extractFormatBlock = extractPayload.promptMessages.find(
+  (message) => message.blockName === "输出格式",
+);
+const extractRulesBlock = extractPayload.promptMessages.find(
+  (message) => message.blockName === "行为规则",
+);
+assert.match(String(extractFormatBlock?.content || ""), /cognitionUpdates/);
+assert.match(String(extractFormatBlock?.content || ""), /regionUpdates/);
+assert.match(String(extractFormatBlock?.content || ""), /batchStoryTime/);
+assert.match(String(extractFormatBlock?.content || ""), /storyTime/);
+assert.match(String(extractRulesBlock?.content || ""), /涉及到的角色都尽量尝试补 cognitionUpdates/);
+assert.match(String(extractRulesBlock?.content || ""), /batchStoryTime/);
 assert.deepEqual(
   extractPayload.promptMessages
     .map((message) => message.sourceKey)
@@ -100,6 +112,7 @@ const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
   recentMessages: "上下文",
   userMessage: "用户最新发言",
   candidateNodes: "候选 1\n候选 2",
+  sceneOwnerCandidates: "character:alice\ncharacter:bob",
   graphStats: "candidate_count=2",
 });
 const recallPayload = buildTaskLlmPayload(recallPromptBuild, "fallback-user");
@@ -119,8 +132,18 @@ assert.deepEqual(
     "recentMessages",
     "userMessage",
     "candidateNodes",
+    "sceneOwnerCandidates",
     "graphStats",
   ],
 );
+const recallFormatBlock = recallPayload.promptMessages.find(
+  (message) => message.blockName === "输出格式",
+);
+const recallRulesBlock = recallPayload.promptMessages.find(
+  (message) => message.blockName === "行为规则",
+);
+assert.match(String(recallFormatBlock?.content || ""), /active_owner_keys/);
+assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
+assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
 
 console.log("prompt-builder-defaults tests passed");

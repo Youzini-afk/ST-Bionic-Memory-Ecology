@@ -36,6 +36,22 @@ import {
   normalizeMemoryScope,
   resolveScopeBucketWeight,
 } from "../graph/memory-scope.js";
+import {
+  computeKnowledgeGateForNode,
+  listKnowledgeOwners,
+  pushRecentRecallOwner,
+  resolveActiveRegionContext,
+  resolveAdjacentRegions,
+  resolveKnowledgeOwner,
+  resolveKnowledgeOwnerKeyFromScope,
+} from "../graph/knowledge-state.js";
+import {
+  classifyStoryTemporalBucket,
+  describeNodeStoryTime,
+  resolveActiveStoryContext,
+  resolveStoryCueMode,
+  STORY_TEMPORAL_BUCKETS,
+} from "../graph/story-timeline.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-index.js";
@@ -152,11 +168,37 @@ function createRetrievalMeta(enableLLMRecall) {
     residualTriggered: false,
     residualHits: 0,
     scopeBuckets: {},
+    temporalBuckets: {},
     activeRegion: "",
+    activeRegionSource: "",
+    activeStorySegmentId: "",
+    activeStoryTimeLabel: "",
+    activeStoryTimeSource: "",
     activeCharacterPovOwner: "",
     activeUserPovOwner: "",
+    activeRecallOwnerKey: "",
+    activeRecallOwnerKeys: [],
+    activeRecallOwnerScores: {},
+    sceneOwnerResolutionMode: "unresolved",
+    sceneOwnerCandidates: [],
     bucketWeights: {},
     selectedByBucket: {},
+    knowledgeGateMode: "disabled",
+    knowledgeAnchoredNodes: [],
+    knowledgeSuppressedNodes: [],
+    knowledgeRescuedNodes: [],
+    knowledgeVisibleOwnersByNode: {},
+    knowledgeSuppressedOwnersByNode: {},
+    visibilityTopHits: [],
+    visibilitySuppressedReasons: {},
+    adjacentRegionMatches: [],
+    temporalSuppressedNodes: [],
+    temporalRescuedNodes: [],
+    temporalTopHits: [],
+    selectedByStoryTime: {},
+    timelineAdvanceApplied: false,
+    selectedByKnowledgeState: {},
+    selectedByOwner: {},
     skipReasons: [],
     timings: {},
     llm: {
@@ -588,6 +630,31 @@ function buildLexicalTopHits(scoredNodes = [], maxCount = 5) {
     }));
 }
 
+function buildVisibilityTopHits(scoredNodes = [], maxCount = 6) {
+  return scoredNodes
+    .filter((item) => Number(item?.knowledgeVisibilityScore) > 0)
+    .sort((a, b) => {
+      const visibilityDelta =
+        (Number(b?.knowledgeVisibilityScore) || 0) -
+        (Number(a?.knowledgeVisibilityScore) || 0);
+      if (visibilityDelta !== 0) return visibilityDelta;
+      return (Number(b?.weightedScore) || 0) - (Number(a?.weightedScore) || 0);
+    })
+    .slice(0, Math.max(1, maxCount))
+    .map((item) => ({
+      nodeId: item.nodeId,
+      type: item.node?.type || "",
+      label:
+        item.node?.fields?.name ||
+        item.node?.fields?.title ||
+        item.node?.fields?.summary ||
+        item.nodeId,
+      visibilityScore:
+        Math.round((Number(item.knowledgeVisibilityScore) || 0) * 1000) / 1000,
+      knowledgeMode: String(item.knowledgeMode || ""),
+    }));
+}
+
 function scaleVectorResults(results = [], weight = 1) {
   return (Array.isArray(results) ? results : []).map((item) => ({
     ...item,
@@ -641,6 +708,17 @@ function createEmptyScopeBucketMap() {
   };
 }
 
+function createEmptyTemporalBucketMap() {
+  return {
+    [STORY_TEMPORAL_BUCKETS.CURRENT]: [],
+    [STORY_TEMPORAL_BUCKETS.ADJACENT_PAST]: [],
+    [STORY_TEMPORAL_BUCKETS.DISTANT_PAST]: [],
+    [STORY_TEMPORAL_BUCKETS.FLASHBACK]: [],
+    [STORY_TEMPORAL_BUCKETS.FUTURE]: [],
+    [STORY_TEMPORAL_BUCKETS.UNDATED]: [],
+  };
+}
+
 function pushScopeBucketDebug(map, bucket, value) {
   if (!Object.prototype.hasOwnProperty.call(map, bucket)) {
     map[bucket] = [];
@@ -663,6 +741,445 @@ function getScopeBucketPriority(bucket) {
     default:
       return 0;
   }
+}
+
+function getTemporalBucketPriority(bucket) {
+  switch (bucket) {
+    case STORY_TEMPORAL_BUCKETS.CURRENT:
+      return 5;
+    case STORY_TEMPORAL_BUCKETS.ADJACENT_PAST:
+      return 4;
+    case STORY_TEMPORAL_BUCKETS.UNDATED:
+      return 3;
+    case STORY_TEMPORAL_BUCKETS.FLASHBACK:
+      return 2;
+    case STORY_TEMPORAL_BUCKETS.DISTANT_PAST:
+      return 1;
+    case STORY_TEMPORAL_BUCKETS.FUTURE:
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+function normalizeTrimmedString(value) {
+  return String(value ?? "").trim();
+}
+
+function normalizeOwnerKeyList(ownerKeys = []) {
+  return [
+    ...new Set(
+      (Array.isArray(ownerKeys) ? ownerKeys : [ownerKeys])
+        .map((value) => normalizeTrimmedString(value))
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function roundOwnerScore(value) {
+  return Math.round((Number(value) || 0) * 1000) / 1000;
+}
+
+function buildCharacterOwnerCatalog(graph) {
+  return (listKnowledgeOwners(graph) || [])
+    .filter((entry) => String(entry?.ownerType || "") === "character")
+    .map((entry) => ({
+      ownerKey: normalizeTrimmedString(entry.ownerKey),
+      ownerName: normalizeTrimmedString(entry.ownerName),
+      nodeId: normalizeTrimmedString(entry.nodeId),
+      aliases: [
+        ...new Set(
+          [entry.ownerName, ...(entry.aliases || [])]
+            .map((value) => normalizeTrimmedString(value))
+            .filter(Boolean),
+        ),
+      ],
+      updatedAt: Number(entry?.updatedAt || 0),
+    }))
+    .filter((entry) => entry.ownerKey && entry.ownerName);
+}
+
+function createSceneOwnerCandidateMap() {
+  return new Map();
+}
+
+function addSceneOwnerCandidate(
+  candidateMap,
+  owner,
+  { score = 0, source = "", reason = "" } = {},
+) {
+  if (!(candidateMap instanceof Map)) return;
+  const ownerKey = normalizeTrimmedString(owner?.ownerKey);
+  const ownerName = normalizeTrimmedString(owner?.ownerName);
+  if (!ownerKey || !ownerName) return;
+
+  const existing = candidateMap.get(ownerKey) || {
+    ownerKey,
+    ownerName,
+    ownerType: "character",
+    nodeId: normalizeTrimmedString(owner?.nodeId),
+    aliases: [
+      ...new Set(
+        [ownerName, ...(owner?.aliases || [])]
+          .map((value) => normalizeTrimmedString(value))
+          .filter(Boolean),
+      ),
+    ],
+    score: 0,
+    sources: [],
+    reasons: [],
+  };
+
+  existing.score += Math.max(0, Number(score) || 0);
+  if (source && !existing.sources.includes(source)) {
+    existing.sources.push(source);
+  }
+  if (reason && !existing.reasons.includes(reason)) {
+    existing.reasons.push(reason);
+  }
+  candidateMap.set(ownerKey, existing);
+}
+
+function finalizeSceneOwnerCandidates(candidateMap, maxCount = 8) {
+  if (!(candidateMap instanceof Map)) return [];
+  return [...candidateMap.values()]
+    .map((entry) => ({
+      ...entry,
+      score: roundOwnerScore(entry.score),
+      aliases: [...new Set((entry.aliases || []).filter(Boolean))],
+      sources: [...new Set((entry.sources || []).filter(Boolean))],
+      reasons: [...new Set((entry.reasons || []).filter(Boolean))],
+    }))
+    .sort((left, right) => {
+      const scoreDelta = Number(right.score || 0) - Number(left.score || 0);
+      if (scoreDelta !== 0) return scoreDelta;
+      return String(left.ownerName || "").localeCompare(
+        String(right.ownerName || ""),
+        "zh-Hans-CN",
+      );
+    })
+    .slice(0, Math.max(1, maxCount));
+}
+
+function resolveLegacySceneOwner(graph, rawOwnerName = "") {
+  const ownerName = normalizeTrimmedString(rawOwnerName);
+  if (!ownerName) return null;
+  const ownerCatalog = buildCharacterOwnerCatalog(graph);
+  const matchedOwners = ownerCatalog.filter(
+    (owner) =>
+      String(owner.ownerName || "").trim() === ownerName &&
+      String(owner.nodeId || "").trim(),
+  );
+  if (matchedOwners.length !== 1) {
+    return null;
+  }
+  const resolved = resolveKnowledgeOwner(graph, {
+    ownerType: "character",
+    ownerName,
+  });
+  return resolved?.ownerKey ? resolved : null;
+}
+
+function collectOwnerCandidatesFromText(
+  ownerCatalog,
+  texts = [],
+  { score = 0.8, source = "recent-message" } = {},
+) {
+  const candidateMap = createSceneOwnerCandidateMap();
+  const normalizedTexts = (Array.isArray(texts) ? texts : [texts])
+    .map((value) => normalizeQueryText(value, 800).toLowerCase())
+    .filter(Boolean);
+  if (normalizedTexts.length === 0) {
+    return [];
+  }
+
+  for (const owner of ownerCatalog || []) {
+    const alias = [...(owner.aliases || [])]
+      .map((value) => normalizeTrimmedString(value))
+      .filter((value) => value.length >= 2)
+      .sort((left, right) => right.length - left.length)
+      .find((value) =>
+        normalizedTexts.some((text) => text.includes(value.toLowerCase())),
+      );
+    if (!alias) continue;
+    addSceneOwnerCandidate(candidateMap, owner, {
+      score,
+      source,
+      reason: `文本直接点名 ${alias}`,
+    });
+  }
+
+  return finalizeSceneOwnerCandidates(candidateMap, 8);
+}
+
+function collectOwnerCandidatesFromNodes(
+  graph,
+  ownerCatalog,
+  nodeEntries = [],
+) {
+  const candidateMap = createSceneOwnerCandidateMap();
+
+  for (const entry of Array.isArray(nodeEntries) ? nodeEntries : []) {
+    const node = entry?.node || entry;
+    const baseScore = Math.max(0, Number(entry?.weightedScore ?? entry?.finalScore ?? 0) || 0);
+    if (!node || node.archived) continue;
+
+    if (node.type === "pov_memory" && String(node?.scope?.ownerType || "") === "character") {
+      const resolvedOwner = resolveKnowledgeOwner(graph, {
+        ownerType: "character",
+        ownerName: node?.scope?.ownerName || node?.scope?.ownerId,
+      });
+      if (resolvedOwner.ownerKey) {
+        addSceneOwnerCandidate(candidateMap, resolvedOwner, {
+          score: 1.0 + Math.min(0.8, baseScore / 8),
+          source: "candidate-pov-owner",
+          reason: `候选 POV 命中 ${resolvedOwner.ownerName || resolvedOwner.ownerKey}`,
+        });
+      }
+      continue;
+    }
+
+    const text = [
+      node?.fields?.participants,
+      node?.fields?.summary,
+      node?.fields?.state,
+      node?.fields?.title,
+      node?.fields?.name,
+      node?.fields?.status,
+    ]
+      .filter((value) => value != null)
+      .join(" ");
+    if (!text) continue;
+
+    const matched = collectOwnerCandidatesFromText(ownerCatalog, [text], {
+      score: 0.9 + Math.min(0.6, baseScore / 10),
+      source: "objective-participant",
+    });
+    for (const owner of matched) {
+      addSceneOwnerCandidate(candidateMap, owner, {
+        score: owner.score,
+        source: "objective-participant",
+        reason: owner.reasons?.[0] || "高分客观节点提到该角色",
+      });
+    }
+  }
+
+  return finalizeSceneOwnerCandidates(candidateMap, 8);
+}
+
+function collectRecentActiveOwnerCandidates(
+  graph,
+  ownerCatalog,
+  limit = 4,
+) {
+  const sorted = [...(ownerCatalog || [])].sort((left, right) => {
+    const updatedDelta = Number(right.updatedAt || 0) - Number(left.updatedAt || 0);
+    if (updatedDelta !== 0) return updatedDelta;
+    const leftNode = left.nodeId ? getNode(graph, left.nodeId) : null;
+    const rightNode = right.nodeId ? getNode(graph, right.nodeId) : null;
+    return (Number(rightNode?.seqRange?.[1] ?? rightNode?.seq ?? 0) || 0)
+      - (Number(leftNode?.seqRange?.[1] ?? leftNode?.seq ?? 0) || 0);
+  });
+  return sorted.slice(0, Math.max(1, limit)).map((owner) => ({
+    ...owner,
+    score: 0.35,
+    sources: ["recent-active"],
+    reasons: ["近期活跃角色"],
+  }));
+}
+
+function mergeSceneOwnerCandidateLists(...lists) {
+  const candidateMap = createSceneOwnerCandidateMap();
+  for (const list of lists) {
+    for (const owner of Array.isArray(list) ? list : []) {
+      addSceneOwnerCandidate(candidateMap, owner, {
+        score: owner.score,
+        source: Array.isArray(owner.sources) ? owner.sources[0] || "" : "",
+        reason: Array.isArray(owner.reasons) ? owner.reasons[0] || "" : "",
+      });
+      for (const source of Array.isArray(owner.sources) ? owner.sources : []) {
+        addSceneOwnerCandidate(candidateMap, owner, {
+          score: 0,
+          source,
+          reason: "",
+        });
+      }
+      for (const reason of Array.isArray(owner.reasons) ? owner.reasons : []) {
+        addSceneOwnerCandidate(candidateMap, owner, {
+          score: 0,
+          source: "",
+          reason,
+        });
+      }
+    }
+  }
+  return finalizeSceneOwnerCandidates(candidateMap, 8);
+}
+
+function resolveSceneOwnersHeuristically(
+  sceneOwnerCandidates = [],
+  { mode = "heuristic", maxOwners = 4, minScore = 0.55 } = {},
+) {
+  const filtered = (Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [])
+    .filter(
+      (candidate) =>
+        candidate?.ownerKey && Number(candidate?.score || 0) >= Number(minScore || 0),
+    )
+    .slice(0, Math.max(1, maxOwners));
+  return {
+    ownerKeys: filtered.map((candidate) => candidate.ownerKey),
+    ownerScores: Object.fromEntries(
+      filtered.map((candidate) => [
+        candidate.ownerKey,
+        roundOwnerScore(Math.min(1, Number(candidate.score || 0))),
+      ]),
+    ),
+    mode: filtered.length > 0 ? mode : "unresolved",
+  };
+}
+
+function getSceneOwnerNamesByKeys(sceneOwnerCandidates = [], ownerKeys = []) {
+  const keySet = new Set(normalizeOwnerKeyList(ownerKeys));
+  if (keySet.size === 0) return [];
+  return (Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [])
+    .filter((candidate) => keySet.has(candidate.ownerKey))
+    .map((candidate) => candidate.ownerName)
+    .filter(Boolean);
+}
+
+function buildSceneOwnerCandidateText(sceneOwnerCandidates = []) {
+  const candidates = Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [];
+  if (candidates.length === 0) {
+    return "(当前没有足够可靠的具体角色候选；如果无法判断，请返回空数组)";
+  }
+  return candidates
+    .map((candidate) => {
+      const reasonText = Array.isArray(candidate.reasons) && candidate.reasons.length
+        ? candidate.reasons.join("；")
+        : "无";
+      return `- ownerKey=${candidate.ownerKey}; ownerName=${candidate.ownerName}; score=${roundOwnerScore(candidate.score).toFixed(3)}; reasons=${reasonText}`;
+    })
+    .join("\n");
+}
+
+function resolveSceneOwnerKeyFromValue(sceneOwnerCandidates = [], value = "") {
+  const normalizedValue = normalizeTrimmedString(value);
+  if (!normalizedValue) return "";
+  const directMatch = (Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [])
+    .find((candidate) => candidate.ownerKey === normalizedValue);
+  if (directMatch?.ownerKey) {
+    return directMatch.ownerKey;
+  }
+  const lowered = normalizedValue.toLowerCase();
+  const aliasMatch = (Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [])
+    .find((candidate) =>
+      [candidate.ownerName, ...(candidate.aliases || [])]
+        .map((item) => normalizeTrimmedString(item).toLowerCase())
+        .includes(lowered),
+    );
+  return aliasMatch?.ownerKey || "";
+}
+
+function normalizeLlmSceneOwnerScores(
+  sceneOwnerCandidates = [],
+  rawScores = [],
+) {
+  const normalizedEntries = Array.isArray(rawScores)
+    ? rawScores
+    : rawScores && typeof rawScores === "object"
+      ? Object.entries(rawScores).map(([ownerKey, score]) => ({
+          ownerKey,
+          score,
+          reason: "",
+        }))
+      : [];
+  const result = [];
+  for (const entry of normalizedEntries) {
+    const ownerKey = resolveSceneOwnerKeyFromValue(
+      sceneOwnerCandidates,
+      entry?.ownerKey || entry?.owner || entry?.owner_name || "",
+    );
+    if (!ownerKey) continue;
+    result.push({
+      ownerKey,
+      score: clampRange(entry?.score, 0, 0, 1),
+      reason: normalizeTrimmedString(entry?.reason),
+    });
+  }
+  return result;
+}
+
+function buildSelectedByOwner(
+  graph,
+  selectedNodes = [],
+  scoredNodes = [],
+  sceneOwnerCandidates = [],
+) {
+  const scoredMap = new Map(
+    (Array.isArray(scoredNodes) ? scoredNodes : []).map((item) => [item.nodeId, item]),
+  );
+  const result = {};
+  for (const node of Array.isArray(selectedNodes) ? selectedNodes : []) {
+    if (!node?.id) continue;
+    const scored = scoredMap.get(node.id);
+    const ownerKeys = normalizeOwnerKeyList([
+      resolveKnowledgeOwnerKeyFromScope(graph, node?.scope),
+      ...(scored?.knowledgeVisibleOwnerKeys || []),
+    ])
+      .map((ownerKey) => resolveSceneOwnerKeyFromValue(sceneOwnerCandidates, ownerKey) || ownerKey)
+      .filter(Boolean);
+    for (const ownerKey of ownerKeys) {
+      result[ownerKey] ||= [];
+      result[ownerKey].push(node.id);
+    }
+  }
+  return result;
+}
+
+function augmentSelectedNodeIdsWithActiveOwnerPov(
+  graph,
+  selectedNodeIds = [],
+  scoredNodes = [],
+  activeOwnerKeys = [],
+  limit = 8,
+) {
+  const ownerKeys = normalizeOwnerKeyList(activeOwnerKeys);
+  if (ownerKeys.length === 0) {
+    return uniqueNodeIds(selectedNodeIds).slice(0, Math.max(1, limit));
+  }
+
+  const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
+  const ownerPovNodeIds = [];
+  for (const ownerKey of ownerKeys) {
+    const bestPov = (Array.isArray(scoredNodes) ? scoredNodes : []).find((item) => {
+      if (!item?.node || item.node.archived || item.node.type !== "pov_memory") {
+        return false;
+      }
+      const scopeOwnerKey = resolveKnowledgeOwnerKeyFromScope(graph, item.node.scope);
+      return scopeOwnerKey === ownerKey;
+    });
+    if (!bestPov?.nodeId || selectedSet.has(bestPov.nodeId)) continue;
+    selectedSet.add(bestPov.nodeId);
+    ownerPovNodeIds.push(bestPov.nodeId);
+  }
+
+  return uniqueNodeIds([
+    ...ownerPovNodeIds,
+    ...selectedNodeIds,
+  ]).slice(0, Math.max(1, limit));
+}
+
+function buildRecallSceneOwnerAugmentPrompt(maxNodes, sceneOwnerCandidateText = "") {
+  return [
+    "除了 selected_ids，你还需要同时判断这轮场景里真正参与当前回应的具体人物。",
+    `最多返回 ${Math.max(1, Math.min(4, Number(maxNodes) || 4))} 个 active_owner_keys；如果无法可靠判断，可以返回空数组。`,
+    "active_owner_keys 必须从给出的 ownerKey 候选里选择，不要用角色卡名替代具体人物。",
+    "active_owner_scores 必须是数组，每项格式为 {\"ownerKey\":\"...\",\"score\":0.0,\"reason\":\"...\"}，score 范围 0..1。",
+    "如果某个客观事实只被部分人物知道，也要保留这些具体人物的判断，不要把所有人混成一个总角色。",
+    "",
+    "## 场景角色候选",
+    sceneOwnerCandidateText || "(无)",
+  ].join("\n");
 }
 
 /**
@@ -773,14 +1290,23 @@ export async function retrieve({
   const enablePovMemory = options.enablePovMemory ?? true;
   const enableRegionScopedObjective =
     options.enableRegionScopedObjective ?? true;
+  const enableCognitiveMemory = options.enableCognitiveMemory ?? true;
+  const enableSpatialAdjacency = options.enableSpatialAdjacency ?? true;
+  const injectLowConfidenceObjectiveMemory =
+    options.injectLowConfidenceObjectiveMemory ?? false;
   const injectUserPovMemory = options.injectUserPovMemory ?? true;
   const injectObjectiveGlobalMemory = options.injectObjectiveGlobalMemory ?? true;
+  const enableStoryTimeline = options.enableStoryTimeline ?? true;
+  const injectStoryTimeLabel = options.injectStoryTimeLabel ?? true;
+  const storyTimeSoftDirecting = options.storyTimeSoftDirecting ?? true;
   const stPromptContext = getSTContextForPrompt();
+  const ownerCatalog = buildCharacterOwnerCatalog(graph);
+  const legacyOwnerCandidate =
+    resolveLegacySceneOwner(graph, options.activeCharacterPovOwner) ||
+    resolveLegacySceneOwner(graph, graph?.historyState?.activeCharacterPovOwner) ||
+    resolveLegacySceneOwner(graph, stPromptContext?.charName);
   const activeCharacterPovOwner = String(
-    options.activeCharacterPovOwner ||
-      graph?.historyState?.activeCharacterPovOwner ||
-      stPromptContext?.charName ||
-      "",
+    legacyOwnerCandidate?.ownerName || "",
   ).trim();
   const activeUserPovOwner = String(
     options.activeUserPovOwner ||
@@ -788,7 +1314,65 @@ export async function retrieve({
       stPromptContext?.userName ||
       "",
   ).trim();
-  const activeRegion = pickActiveRegion(graph, options.activeRegion);
+  const preliminarySceneOwnerCandidates = mergeSceneOwnerCandidateLists(
+    legacyOwnerCandidate
+      ? [
+          {
+            ...legacyOwnerCandidate,
+            score: 0.6,
+            sources: ["legacy-unique-match"],
+            reasons: ["唯一映射到图内具体角色"],
+          },
+        ]
+      : [],
+    collectOwnerCandidatesFromText(ownerCatalog, [
+      userMessage,
+      ...recentMessages,
+    ]),
+    collectRecentActiveOwnerCandidates(graph, ownerCatalog),
+  );
+  const preliminarySceneOwnerResolution = resolveSceneOwnersHeuristically(
+    preliminarySceneOwnerCandidates,
+    {
+      mode: "heuristic",
+      maxOwners: 4,
+      minScore: 0.55,
+    },
+  );
+  let activeRecallOwnerKeys = normalizeOwnerKeyList(
+    options.activeRecallOwnerKeys ||
+      preliminarySceneOwnerResolution.ownerKeys ||
+      [],
+  );
+  let activeRecallOwnerScores = {
+    ...(preliminarySceneOwnerResolution.ownerScores || {}),
+  };
+  let sceneOwnerResolutionMode = activeRecallOwnerKeys.length
+    ? preliminarySceneOwnerResolution.mode || "heuristic"
+    : "unresolved";
+  const activeRegionContext = resolveActiveRegionContext(
+    graph,
+    options.activeRegion || "",
+  );
+  const activeRegion = activeRegionContext.activeRegion || pickActiveRegion(graph, options.activeRegion);
+  const adjacentRegionContext = enableSpatialAdjacency
+    ? resolveAdjacentRegions(graph, activeRegion)
+    : { adjacentRegions: [] };
+  const storyCueMode = enableStoryTimeline
+    ? resolveStoryCueMode(userMessage, recentMessages)
+    : "";
+  const activeStoryContext = enableStoryTimeline
+    ? resolveActiveStoryContext(graph, {
+        segmentId: options.activeStorySegmentId || "",
+        label: options.activeStoryTimeLabel || "",
+      })
+    : {
+        activeSegmentId: "",
+        activeStoryTimeLabel: "",
+        source: "",
+        segment: null,
+        resolved: false,
+      };
   const bucketWeights = buildScopeBucketWeightMap(options);
 
   let activeNodes = getActiveNodes(graph).filter(
@@ -813,9 +1397,31 @@ export async function retrieve({
   const vectorValidation = validateVectorConfig(embeddingConfig);
   const retrievalMeta = createRetrievalMeta(enableLLMRecall);
   retrievalMeta.activeRegion = activeRegion;
-  retrievalMeta.activeCharacterPovOwner = activeCharacterPovOwner;
+  retrievalMeta.activeRegionSource = activeRegionContext.source || "";
+  retrievalMeta.activeStorySegmentId = activeStoryContext.activeSegmentId || "";
+  retrievalMeta.activeStoryTimeLabel = activeStoryContext.activeStoryTimeLabel || "";
+  retrievalMeta.activeStoryTimeSource = activeStoryContext.source || "";
+  retrievalMeta.activeCharacterPovOwner =
+    activeCharacterPovOwner ||
+    preliminarySceneOwnerCandidates[0]?.ownerName ||
+    "";
   retrievalMeta.activeUserPovOwner = activeUserPovOwner;
+  retrievalMeta.activeRecallOwnerKey = activeRecallOwnerKeys[0] || "";
+  retrievalMeta.activeRecallOwnerKeys = [...activeRecallOwnerKeys];
+  retrievalMeta.activeRecallOwnerScores = { ...activeRecallOwnerScores };
+  retrievalMeta.sceneOwnerResolutionMode = sceneOwnerResolutionMode;
+  retrievalMeta.sceneOwnerCandidates = preliminarySceneOwnerCandidates.map((candidate) => ({
+    ownerKey: candidate.ownerKey,
+    ownerName: candidate.ownerName,
+    score: roundOwnerScore(candidate.score),
+    sources: [...(candidate.sources || [])],
+    reasons: [...(candidate.reasons || [])],
+  }));
   retrievalMeta.bucketWeights = { ...bucketWeights };
+  retrievalMeta.temporalBuckets = createEmptyTemporalBucketMap();
+  retrievalMeta.knowledgeGateMode = enableCognitiveMemory
+    ? "anchored-soft-visibility"
+    : "disabled";
   const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
     enabled: enableContextQueryBlend,
     assistantWeight: contextAssistantWeight,
@@ -866,11 +1472,29 @@ export async function retrieve({
         enableScopedMemory,
         enablePovMemory,
         enableRegionScopedObjective,
+        enableCognitiveMemory,
+        enableStoryTimeline,
         injectUserPovMemory,
         injectObjectiveGlobalMemory,
         activeRegion,
+        activeRegionSource: activeRegionContext.source || "",
+        activeStorySegmentId: activeStoryContext.activeSegmentId || "",
+        activeStoryTimeLabel: activeStoryContext.activeStoryTimeLabel || "",
+        activeStoryTimeSource: activeStoryContext.source || "",
+        injectStoryTimeLabel,
         activeCharacterPovOwner,
         activeUserPovOwner,
+        activeCharacterPovOwners: preliminarySceneOwnerCandidates.map(
+          (candidate) => candidate.ownerName,
+        ),
+        activeRecallOwnerKey: activeRecallOwnerKeys[0] || "",
+        activeRecallOwnerKeys: [...activeRecallOwnerKeys],
+        activeRecallOwnerScores: { ...activeRecallOwnerScores },
+        sceneOwnerResolutionMode,
+        sceneOwnerCandidates: retrievalMeta.sceneOwnerCandidates,
+        adjacentRegions: adjacentRegionContext.adjacentRegions,
+        injectLowConfidenceObjectiveMemory,
+        graph,
         bucketWeights,
       },
     });
@@ -1119,16 +1743,111 @@ export async function retrieve({
     const scopeBucket = enableScopedMemory
       ? classifyNodeScopeBucket(node, {
           activeCharacterPovOwner,
+          activeCharacterPovOwners: activeRecallOwnerKeys.map((ownerKey) =>
+            preliminarySceneOwnerCandidates.find(
+              (candidate) => candidate.ownerKey === ownerKey,
+            )?.ownerName || "",
+          ),
           activeUserPovOwner,
           activeRegion,
+          adjacentRegions: adjacentRegionContext.adjacentRegions,
           enablePovMemory,
           enableRegionScopedObjective,
+          allowImplicitCharacterPovFallback: false,
         })
       : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
+    const temporalDirector = enableStoryTimeline
+      ? classifyStoryTemporalBucket(graph, node, {
+          activeSegmentId: activeStoryContext.activeSegmentId,
+          cueMode: storyCueMode,
+        })
+      : {
+          bucket: STORY_TEMPORAL_BUCKETS.UNDATED,
+          weight: 1,
+          suppressed: false,
+          rescued: false,
+          reason: "disabled",
+        };
+    const knowledgeGate = enableCognitiveMemory
+      ? computeKnowledgeGateForNode(
+          graph,
+          node,
+          activeRecallOwnerKeys,
+          {
+            vectorScore: scores.vectorScore,
+            graphScore: scores.graphScore,
+            lexicalScore,
+            scopeBucket,
+            injectLowConfidenceObjectiveMemory,
+          },
+        )
+      : {
+          visible: true,
+          anchored: false,
+          rescued: false,
+          suppressed: false,
+          suppressedReason: "",
+          visibilityScore: 0,
+          mode: "disabled",
+        };
+    if (scopeBucket === MEMORY_SCOPE_BUCKETS.OBJECTIVE_ADJACENT_REGION) {
+      retrievalMeta.adjacentRegionMatches.push(nodeId);
+    }
+    retrievalMeta.knowledgeVisibleOwnersByNode[nodeId] = [
+      ...(knowledgeGate.visibleOwnerKeys || []),
+    ];
+    retrievalMeta.knowledgeSuppressedOwnersByNode[nodeId] = [
+      ...(knowledgeGate.suppressedOwnerKeys || []),
+    ];
+    if (!knowledgeGate.visible) {
+      retrievalMeta.knowledgeSuppressedNodes.push(nodeId);
+      if (knowledgeGate.suppressedReason) {
+        retrievalMeta.visibilitySuppressedReasons[nodeId] =
+          knowledgeGate.suppressedReason;
+      }
+      continue;
+    }
+    if (knowledgeGate.anchored) {
+      retrievalMeta.knowledgeAnchoredNodes.push(nodeId);
+    }
+    if (knowledgeGate.rescued) {
+      retrievalMeta.knowledgeRescuedNodes.push(nodeId);
+    }
+    pushScopeBucketDebug(
+      retrievalMeta.temporalBuckets,
+      temporalDirector.bucket,
+      nodeId,
+    );
+    if (storyTimeSoftDirecting && temporalDirector.suppressed) {
+      retrievalMeta.temporalSuppressedNodes.push(nodeId);
+      continue;
+    }
+    if (temporalDirector.rescued) {
+      retrievalMeta.temporalRescuedNodes.push(nodeId);
+    }
     const scopeWeight = enableScopedMemory
       ? resolveScopeBucketWeight(scopeBucket, bucketWeights)
       : 1;
-    const weightedScore = finalScore * scopeWeight;
+    const knowledgeWeight = enableCognitiveMemory
+      ? knowledgeGate.anchored
+        ? 1.18
+        : knowledgeGate.rescued
+          ? 0.92
+          : Math.max(0.35, 0.55 + Number(knowledgeGate.visibilityScore || 0) * 0.6)
+      : 1;
+    const ownerCoverageWeight = enableCognitiveMemory
+      ? 1 + Math.max(0, Number(knowledgeGate.ownerCoverage || 0) - 1 / Math.max(1, activeRecallOwnerKeys.length || 1)) * 0.08
+      : 1;
+    const temporalWeight =
+      enableStoryTimeline && storyTimeSoftDirecting
+        ? Number(temporalDirector.weight || 1)
+        : 1;
+    const weightedScore =
+      finalScore *
+      scopeWeight *
+      knowledgeWeight *
+      ownerCoverageWeight *
+      temporalWeight;
 
     scoredNodes.push({
       nodeId,
@@ -1138,6 +1857,21 @@ export async function retrieve({
       lexicalScore,
       scopeBucket,
       scopeWeight,
+      knowledgeMode: knowledgeGate.mode,
+      knowledgeVisibilityScore: Number(knowledgeGate.visibilityScore || 0),
+      knowledgeWeight,
+      knowledgeAnchored: Boolean(knowledgeGate.anchored),
+      knowledgeRescued: Boolean(knowledgeGate.rescued),
+      knowledgeOwnerCoverage: Number(knowledgeGate.ownerCoverage || 0),
+      knowledgeVisibleOwnerKeys: [...(knowledgeGate.visibleOwnerKeys || [])],
+      knowledgeSuppressedOwnerKeys: [...(knowledgeGate.suppressedOwnerKeys || [])],
+      ownerCoverageWeight,
+      storyTimeLabel: describeNodeStoryTime(node),
+      temporalBucket: temporalDirector.bucket,
+      temporalWeight,
+      temporalSuppressed: Boolean(temporalDirector.suppressed),
+      temporalRescued: Boolean(temporalDirector.rescued),
+      temporalReason: String(temporalDirector.reason || ""),
       ...scores,
     });
     pushScopeBucketDebug(
@@ -1151,6 +1885,10 @@ export async function retrieve({
     const bucketDelta =
       getScopeBucketPriority(b.scopeBucket) - getScopeBucketPriority(a.scopeBucket);
     if (bucketDelta !== 0) return bucketDelta;
+    const temporalDelta =
+      getTemporalBucketPriority(b.temporalBucket) -
+      getTemporalBucketPriority(a.temporalBucket);
+    if (temporalDelta !== 0) return temporalDelta;
     const weightedDelta =
       (Number(b.weightedScore) || 0) - (Number(a.weightedScore) || 0);
     if (weightedDelta !== 0) return weightedDelta;
@@ -1161,6 +1899,29 @@ export async function retrieve({
     (item) => (Number(item.lexicalScore) || 0) > 0,
   ).length;
   retrievalMeta.lexicalTopHits = buildLexicalTopHits(scoredNodes);
+  retrievalMeta.visibilityTopHits = buildVisibilityTopHits(scoredNodes);
+  retrievalMeta.temporalTopHits = scoredNodes.slice(0, 8).map((item) => ({
+    nodeId: item.nodeId,
+    bucket: item.temporalBucket,
+    weight: Math.round((Number(item.temporalWeight) || 0) * 1000) / 1000,
+    label: item.storyTimeLabel || "",
+    reason: item.temporalReason || "",
+  }));
+  const sceneOwnerCandidates = mergeSceneOwnerCandidateLists(
+    preliminarySceneOwnerCandidates,
+    collectOwnerCandidatesFromNodes(
+      graph,
+      ownerCatalog,
+      scoredNodes.slice(0, Math.max(normalizedLlmCandidatePool, 12)),
+    ),
+  );
+  retrievalMeta.sceneOwnerCandidates = sceneOwnerCandidates.map((candidate) => ({
+    ownerKey: candidate.ownerKey,
+    ownerName: candidate.ownerName,
+    score: roundOwnerScore(candidate.score),
+    sources: [...(candidate.sources || [])],
+    reasons: [...(candidate.reasons || [])],
+  }));
   retrievalMeta.timings.scoring = roundMs(nowMs() - scoringStartedAt);
 
   let selectedNodeIds;
@@ -1187,12 +1948,46 @@ export async function retrieve({
       schema,
       normalizedMaxRecallNodes,
       options.recallPrompt,
+      sceneOwnerCandidates,
+      activeStoryContext.activeStoryTimeLabel || "",
       settings,
       signal,
       onStreamProgress,
     );
     llmDurationMs = nowMs() - llmStartedAt;
     selectedNodeIds = llmResult.selectedNodeIds;
+    const llmOwnerResolution =
+      llmResult.activeOwnerKeys?.length > 0
+        ? {
+            ownerKeys: normalizeOwnerKeyList(llmResult.activeOwnerKeys).slice(0, 4),
+            ownerScores: Object.fromEntries(
+              normalizeOwnerKeyList(llmResult.activeOwnerKeys)
+                .slice(0, 4)
+                .map((ownerKey) => [
+                  ownerKey,
+                  roundOwnerScore(
+                    Math.min(
+                      1,
+                      Number(llmResult.activeOwnerScores?.[ownerKey]) ||
+                        Number(
+                          sceneOwnerCandidates.find(
+                            (candidate) => candidate.ownerKey === ownerKey,
+                          )?.score || 0,
+                        ),
+                    ),
+                  ),
+                ]),
+            ),
+            mode: llmResult.sceneOwnerResolutionMode || "llm",
+          }
+        : resolveSceneOwnersHeuristically(sceneOwnerCandidates, {
+            mode: "fallback",
+            maxOwners: 4,
+            minScore: 0.55,
+          });
+    activeRecallOwnerKeys = [...llmOwnerResolution.ownerKeys];
+    activeRecallOwnerScores = { ...(llmOwnerResolution.ownerScores || {}) };
+    sceneOwnerResolutionMode = llmOwnerResolution.mode || "unresolved";
     llmMeta = {
       enabled: true,
       status: llmResult.status,
@@ -1211,6 +2006,17 @@ export async function retrieve({
       retrievalMeta,
     );
     selectedNodeIds = selectedCandidates.map((item) => item.nodeId);
+    const heuristicResolution = resolveSceneOwnersHeuristically(
+      sceneOwnerCandidates,
+      {
+        mode: "heuristic",
+        maxOwners: 4,
+        minScore: 0.55,
+      },
+    );
+    activeRecallOwnerKeys = [...heuristicResolution.ownerKeys];
+    activeRecallOwnerScores = { ...(heuristicResolution.ownerScores || {}) };
+    sceneOwnerResolutionMode = heuristicResolution.mode || "unresolved";
     llmMeta = {
       enabled: false,
       status: "disabled",
@@ -1221,7 +2027,20 @@ export async function retrieve({
   }
   retrievalMeta.timings.diversity = roundMs(nowMs() - diversityStartedAt);
   retrievalMeta.timings.llm = roundMs(llmDurationMs);
+  retrievalMeta.activeRecallOwnerKey = activeRecallOwnerKeys[0] || "";
+  retrievalMeta.activeRecallOwnerKeys = [...activeRecallOwnerKeys];
+  retrievalMeta.activeRecallOwnerScores = { ...activeRecallOwnerScores };
+  retrievalMeta.sceneOwnerResolutionMode = sceneOwnerResolutionMode;
+  retrievalMeta.activeCharacterPovOwner =
+    getSceneOwnerNamesByKeys(sceneOwnerCandidates, activeRecallOwnerKeys)[0] || "";
 
+  selectedNodeIds = augmentSelectedNodeIdsWithActiveOwnerPov(
+    graph,
+    selectedNodeIds,
+    scoredNodes,
+    activeRecallOwnerKeys,
+    normalizedMaxRecallNodes,
+  );
   selectedNodeIds = reconstructSceneNodeIds(
     graph,
     selectedNodeIds,
@@ -1236,15 +2055,72 @@ export async function retrieve({
     const bucket = enableScopedMemory
       ? classifyNodeScopeBucket(node, {
           activeCharacterPovOwner,
+          activeCharacterPovOwners: getSceneOwnerNamesByKeys(
+            sceneOwnerCandidates,
+            activeRecallOwnerKeys,
+          ),
           activeUserPovOwner,
           activeRegion,
+          adjacentRegions: adjacentRegionContext.adjacentRegions,
           enablePovMemory,
           enableRegionScopedObjective,
+          allowImplicitCharacterPovFallback: false,
         })
       : MEMORY_SCOPE_BUCKETS.OBJECTIVE_GLOBAL;
     pushScopeBucketDebug(acc, bucket, node.id);
     return acc;
   }, createEmptyScopeBucketMap());
+  retrievalMeta.selectedByKnowledgeState = Object.fromEntries(
+    selectedNodes.map((node) => {
+      const scored = scoredNodes.find((item) => item.nodeId === node.id);
+      return [
+        node.id,
+        {
+          mode: String(scored?.knowledgeMode || "selected"),
+          anchored: Boolean(scored?.knowledgeAnchored),
+          rescued: Boolean(scored?.knowledgeRescued),
+          ownerCoverage:
+            Math.round((Number(scored?.knowledgeOwnerCoverage) || 0) * 1000) /
+            1000,
+          visibilityScore:
+            Math.round((Number(scored?.knowledgeVisibilityScore) || 0) * 1000) /
+            1000,
+          visibleOwners: [...(scored?.knowledgeVisibleOwnerKeys || [])],
+          suppressedOwners: [...(scored?.knowledgeSuppressedOwnerKeys || [])],
+        },
+      ];
+    }),
+  );
+  retrievalMeta.selectedByStoryTime = Object.fromEntries(
+    selectedNodes.map((node) => {
+      const scored = scoredNodes.find((item) => item.nodeId === node.id);
+      return [
+        node.id,
+        {
+          bucket: String(scored?.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED),
+          weight:
+            Math.round((Number(scored?.temporalWeight) || 0) * 1000) / 1000,
+          label: String(scored?.storyTimeLabel || ""),
+          rescued: Boolean(scored?.temporalRescued),
+          reason: String(scored?.temporalReason || ""),
+        },
+      ];
+    }),
+  );
+  retrievalMeta.selectedByOwner = buildSelectedByOwner(
+    graph,
+    selectedNodes,
+    scoredNodes,
+    sceneOwnerCandidates,
+  );
+  if (graph?.historyState) {
+    graph.historyState.activeRecallOwnerKey = activeRecallOwnerKeys[0] || "";
+    if (activeRecallOwnerKeys.length > 0) {
+      for (const ownerKey of [...activeRecallOwnerKeys].reverse()) {
+        pushRecentRecallOwner(graph.historyState, ownerKey);
+      }
+    }
+  }
 
   reinforceAccessBatch(selectedNodes);
 
@@ -1277,6 +2153,24 @@ export async function retrieve({
     0,
     normalizedMaxRecallNodes,
   );
+  retrievalMeta.knowledgeAnchoredNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeAnchoredNodes,
+  );
+  retrievalMeta.knowledgeSuppressedNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeSuppressedNodes,
+  );
+  retrievalMeta.knowledgeRescuedNodes = uniqueNodeIds(
+    retrievalMeta.knowledgeRescuedNodes,
+  );
+  retrievalMeta.adjacentRegionMatches = uniqueNodeIds(
+    retrievalMeta.adjacentRegionMatches,
+  );
+  retrievalMeta.temporalSuppressedNodes = uniqueNodeIds(
+    retrievalMeta.temporalSuppressedNodes,
+  );
+  retrievalMeta.temporalRescuedNodes = uniqueNodeIds(
+    retrievalMeta.temporalRescuedNodes,
+  );
   retrievalMeta.llm = llmMeta;
   retrievalMeta.timings.total = roundMs(nowMs() - startedAt);
 
@@ -1286,11 +2180,32 @@ export async function retrieve({
       enableScopedMemory,
       enablePovMemory,
       enableRegionScopedObjective,
+      enableCognitiveMemory,
+      enableStoryTimeline,
       injectUserPovMemory,
       injectObjectiveGlobalMemory,
       activeRegion,
-      activeCharacterPovOwner,
+      activeRegionSource: activeRegionContext.source || "",
+      activeStorySegmentId: activeStoryContext.activeSegmentId || "",
+      activeStoryTimeLabel: activeStoryContext.activeStoryTimeLabel || "",
+      activeStoryTimeSource: activeStoryContext.source || "",
+      injectStoryTimeLabel,
+      activeCharacterPovOwner:
+        getSceneOwnerNamesByKeys(sceneOwnerCandidates, activeRecallOwnerKeys)[0] ||
+        activeCharacterPovOwner,
       activeUserPovOwner,
+      activeCharacterPovOwners: getSceneOwnerNamesByKeys(
+        sceneOwnerCandidates,
+        activeRecallOwnerKeys,
+      ),
+      activeRecallOwnerKey: activeRecallOwnerKeys[0] || "",
+      activeRecallOwnerKeys: [...activeRecallOwnerKeys],
+      activeRecallOwnerScores: { ...activeRecallOwnerScores },
+      sceneOwnerResolutionMode,
+      sceneOwnerCandidates: retrievalMeta.sceneOwnerCandidates,
+      adjacentRegions: adjacentRegionContext.adjacentRegions,
+      injectLowConfidenceObjectiveMemory,
+      graph,
       bucketWeights,
     },
   });
@@ -1441,21 +2356,25 @@ async function llmRecall(
   schema,
   maxNodes,
   customPrompt,
+  sceneOwnerCandidates = [],
+  activeStoryTimeLabel = "",
   settings = {},
   signal,
   onStreamProgress = null,
 ) {
   throwIfAborted(signal);
   const contextStr = recentMessages.join("\n---\n");
+  const sceneOwnerCandidateText = buildSceneOwnerCandidateText(sceneOwnerCandidates);
   const candidateDescriptions = candidates
     .map((c) => {
       const node = c.node;
       const typeDef = schema.find((s) => s.id === node.type);
       const typeLabel = typeDef?.label || node.type;
+      const storyTimeLabel = describeNodeStoryTime(node);
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
+      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 时间=${storyTimeLabel || "未标注"}, 时间桶=${String(c.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
 
@@ -1465,6 +2384,8 @@ async function llmRecall(
     userMessage,
     candidateNodes: candidateDescriptions,
     candidateText: candidateDescriptions,
+    sceneOwnerCandidates: sceneOwnerCandidateText,
+    activeStoryTimeLabel,
     graphStats: `candidate_count=${candidates.length}`,
     ...getSTContextForPrompt(),
   });
@@ -1476,16 +2397,21 @@ async function llmRecall(
     recallPromptBuild.systemPrompt || customPrompt || [
       "你是一个记忆召回分析器。",
       "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
+      "你还需要判断这轮真正参与当前回应的具体人物，并返回他们的 ownerKey。",
+      "优先维持剧情时间一致，不要把未来信息当成当前已经发生的客观事实带入。",
       "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
       `最多选择 ${maxNodes} 个节点。`,
       "输出严格的 JSON 格式：",
-      '{"selected_ids": ["id1", "id2", ...], "reason": "简要说明选择理由"}',
+      '{"selected_ids": ["id1", "id2"], "reason": "简要说明选择理由", "active_owner_keys": ["character:alice"], "active_owner_scores": [{"ownerKey": "character:alice", "score": 0.92, "reason": "她在场并且 POV 最相关"}]}',
     ].join("\n"),
     recallRegexInput,
     "system",
   );
 
   const userPrompt = [
+    "## 当前剧情时间",
+    activeStoryTimeLabel || "(未确定)",
+    "",
     "## 最近对话上下文",
     contextStr || "(无)",
     "",
@@ -1495,9 +2421,22 @@ async function llmRecall(
     "## 候选记忆节点",
     candidateDescriptions,
     "",
-    "请选择最相关的节点并输出 JSON。",
+    "## 场景角色候选",
+    sceneOwnerCandidateText,
+    "",
+    "请选择最相关的节点，并同时返回这轮真正参与当前回应的具体人物 ownerKey。",
   ].join("\n");
   const promptPayload = resolveTaskPromptPayload(recallPromptBuild, userPrompt);
+  const additionalMessages = Array.isArray(promptPayload.additionalMessages)
+    ? [...promptPayload.additionalMessages]
+    : [];
+  additionalMessages.push({
+    role: "system",
+    content: buildRecallSceneOwnerAugmentPrompt(
+      maxNodes,
+      sceneOwnerCandidateText,
+    ),
+  });
 
   const llmResult = await callLLMForJSON({
     systemPrompt: resolveTaskLlmSystemPrompt(promptPayload, systemPrompt),
@@ -1510,12 +2449,27 @@ async function llmRecall(
       recallRegexInput,
     ),
     promptMessages: promptPayload.promptMessages,
-    additionalMessages: promptPayload.additionalMessages,
+    additionalMessages,
     onStreamProgress,
     maxCompletionTokens: Math.max(512, maxNodes * 160),
     returnFailureDetails: true,
   });
   const result = llmResult?.ok ? llmResult.data : null;
+  const activeOwnerKeys = normalizeOwnerKeyList(
+    (Array.isArray(result?.active_owner_keys) ? result.active_owner_keys : []).map(
+      (value) => resolveSceneOwnerKeyFromValue(sceneOwnerCandidates, value),
+    ),
+  ).slice(0, 4);
+  const activeOwnerScoreEntries = normalizeLlmSceneOwnerScores(
+    sceneOwnerCandidates,
+    result?.active_owner_scores,
+  );
+  const activeOwnerScores = Object.fromEntries(
+    activeOwnerScoreEntries.map((entry) => [
+      entry.ownerKey,
+      roundOwnerScore(entry.score),
+    ]),
+  );
 
   if (result?.selected_ids && Array.isArray(result.selected_ids)) {
     // 校验 ID 有效性
@@ -1529,6 +2483,9 @@ async function llmRecall(
       return {
         selectedNodeIds: validIds,
         status: "llm",
+        activeOwnerKeys,
+        activeOwnerScores,
+        sceneOwnerResolutionMode: activeOwnerKeys.length > 0 ? "llm" : "fallback",
         reason:
           validIds.length < result.selected_ids.length
             ? "LLM 返回了部分无效或超限 ID，已自动裁剪"
@@ -1546,6 +2503,9 @@ async function llmRecall(
   return {
     selectedNodeIds: candidates.slice(0, maxNodes).map((c) => c.nodeId),
     status: "fallback",
+    activeOwnerKeys: [],
+    activeOwnerScores: {},
+    sceneOwnerResolutionMode: "fallback",
     reason: fallbackReason,
     fallbackType: llmResult?.ok ? "invalid-candidate" : llmResult?.errorType || "unknown",
   };
@@ -1590,6 +2550,7 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const recallNodes = [];
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
   const scopeContext = meta.scopeContext || {};
+  const compareForResult = compareNodeRecallOrderWithContext(graph, scopeContext);
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
@@ -1612,13 +2573,13 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
     }
   }
 
-  coreNodes.sort(compareNodeRecallOrder);
-  recallNodes.sort(compareNodeRecallOrder);
+  coreNodes.sort(compareForResult);
+  recallNodes.sort(compareForResult);
   const groupedRecallNodes = groupRecallNodes(recallNodes);
   const selectedNodes = [...selectedSet]
     .map((nodeId) => getNode(graph, nodeId))
     .filter((node) => node && !node.archived)
-    .sort(compareNodeRecallOrder);
+    .sort(compareForResult);
   const scopeBuckets = buildScopedInjectionBuckets(
     coreNodes,
     selectedNodes,
@@ -1651,14 +2612,23 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
 function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}) {
   const buckets = {
     characterPov: [],
+    characterPovByOwner: {},
+    characterPovOwnerOrder: [],
     userPov: [],
     objectiveCurrentRegion: [],
     objectiveGlobal: [],
   };
+  const activeRecallOwnerKeys = normalizeOwnerKeyList(
+    scopeContext.activeRecallOwnerKeys || scopeContext.activeRecallOwnerKey || [],
+  );
   const combinedNodes = [
     ...selectedNodes,
     ...coreNodes,
   ];
+  const compareForBucket = compareNodeRecallOrderWithContext(
+    scopeContext.graph,
+    scopeContext,
+  );
   const seen = new Set();
   const globalCandidates = [];
 
@@ -1667,15 +2637,50 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
     seen.add(node.id);
     const bucket = classifyNodeScopeBucket(node, {
       activeCharacterPovOwner: scopeContext.activeCharacterPovOwner,
+      activeCharacterPovOwners: scopeContext.activeCharacterPovOwners || [],
       activeUserPovOwner: scopeContext.activeUserPovOwner,
       activeRegion: scopeContext.activeRegion,
+      adjacentRegions: scopeContext.adjacentRegions,
       enablePovMemory: scopeContext.enablePovMemory !== false,
       enableRegionScopedObjective:
         scopeContext.enableRegionScopedObjective !== false,
+      allowImplicitCharacterPovFallback: false,
     });
+    const knowledgeGate =
+      scopeContext.enableCognitiveMemory !== false
+        ? computeKnowledgeGateForNode(
+            scopeContext.graph,
+            node,
+            activeRecallOwnerKeys,
+            {
+              scopeBucket: bucket,
+              injectLowConfidenceObjectiveMemory:
+                scopeContext.injectLowConfidenceObjectiveMemory === true,
+            },
+          )
+        : { visible: true };
+    if (!knowledgeGate.visible && String(node?.scope?.layer || "objective") === "objective") {
+      continue;
+    }
 
     if (bucket === MEMORY_SCOPE_BUCKETS.CHARACTER_POV) {
+      if (scopeContext.sceneOwnerResolutionMode === "unresolved") {
+        continue;
+      }
+      const ownerKey =
+        resolveKnowledgeOwnerKeyFromScope(scopeContext.graph, node?.scope) ||
+        "";
+      if (activeRecallOwnerKeys.length > 0 && !activeRecallOwnerKeys.includes(ownerKey)) {
+        continue;
+      }
       buckets.characterPov.push(node);
+      if (ownerKey) {
+        buckets.characterPovByOwner[ownerKey] ||= [];
+        buckets.characterPovByOwner[ownerKey].push(node);
+        if (!buckets.characterPovOwnerOrder.includes(ownerKey)) {
+          buckets.characterPovOwnerOrder.push(ownerKey);
+        }
+      }
       continue;
     }
     if (bucket === MEMORY_SCOPE_BUCKETS.USER_POV) {
@@ -1696,12 +2701,25 @@ function buildScopedInjectionBuckets(coreNodes, selectedNodes, scopeContext = {}
     }
   }
 
-  buckets.characterPov.sort(compareNodeRecallOrder);
-  buckets.userPov.sort(compareNodeRecallOrder);
-  buckets.objectiveCurrentRegion.sort(compareNodeRecallOrder);
+  buckets.characterPov.sort(compareForBucket);
+  for (const ownerKey of Object.keys(buckets.characterPovByOwner)) {
+    buckets.characterPovByOwner[ownerKey].sort(compareForBucket);
+  }
+  buckets.characterPovOwnerOrder = [
+    ...activeRecallOwnerKeys.filter((ownerKey) =>
+      buckets.characterPovByOwner[ownerKey]?.length > 0,
+    ),
+    ...buckets.characterPovOwnerOrder.filter(
+      (ownerKey) =>
+        !activeRecallOwnerKeys.includes(ownerKey) &&
+        buckets.characterPovByOwner[ownerKey]?.length > 0,
+    ),
+  ];
+  buckets.userPov.sort(compareForBucket);
+  buckets.objectiveCurrentRegion.sort(compareForBucket);
   const cappedGlobal = (scopeContext.injectObjectiveGlobalMemory === false
     ? []
-    : globalCandidates.sort(compareNodeRecallOrder).slice(0, 6));
+    : globalCandidates.sort(compareForBucket).slice(0, 6));
   buckets.objectiveGlobal = cappedGlobal;
 
   return buckets;
@@ -1807,6 +2825,29 @@ function compareNodeRecallOrder(a, b) {
   const bSeq = b?.seqRange?.[1] ?? b?.seq ?? 0;
   if (bSeq !== aSeq) return bSeq - aSeq;
   return (b.importance || 0) - (a.importance || 0);
+}
+
+function compareNodeRecallOrderWithContext(graph, scopeContext = {}) {
+  const activeStorySegmentId = String(scopeContext?.activeStorySegmentId || "").trim();
+  const enableStoryTimeline = scopeContext?.enableStoryTimeline !== false;
+  if (!enableStoryTimeline || !activeStorySegmentId) {
+    return compareNodeRecallOrder;
+  }
+  return (a, b) => {
+    const temporalDelta =
+      getTemporalBucketPriority(
+        classifyStoryTemporalBucket(graph, b, {
+          activeSegmentId: activeStorySegmentId,
+        }).bucket,
+      ) -
+      getTemporalBucketPriority(
+        classifyStoryTemporalBucket(graph, a, {
+          activeSegmentId: activeStorySegmentId,
+        }).bucket,
+      );
+    if (temporalDelta !== 0) return temporalDelta;
+    return compareNodeRecallOrder(a, b);
+  };
 }
 
 function groupRecallNodes(nodes) {
