@@ -101,6 +101,36 @@ const gateRestored = computeKnowledgeGateForNode(graph, bellEvent, ownerA.ownerK
 assert.equal(gateRestored.visible, true);
 assert.notEqual(gateRestored.suppressedReason, "mistaken-objective");
 
+applyCognitionUpdates(
+  graph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "露西亚",
+      ownerNodeId: lucia.id,
+      knownRefs: [bellEvent.id],
+      visibility: [{ ref: bellEvent.id, score: 1 }],
+    },
+  ],
+  { changedNodeIds: [bellEvent.id] },
+);
+applyManualKnowledgeOverride(graph, {
+  ownerKey: ownerA.ownerKey,
+  nodeId: bellEvent.id,
+  mode: "mistaken",
+});
+const gateUnion = computeKnowledgeGateForNode(
+  graph,
+  bellEvent,
+  [ownerA.ownerKey, `character:露西亚`],
+  {
+    scopeBucket: "objectiveCurrentRegion",
+  },
+);
+assert.equal(gateUnion.visible, true);
+assert.deepEqual(gateUnion.visibleOwnerKeys, ["character:露西亚"]);
+assert.deepEqual(gateUnion.suppressedOwnerKeys, [ownerA.ownerKey]);
+
 applyRegionUpdates(graph, {
   activeRegionHint: "钟楼",
   adjacency: [{ region: "钟楼", adjacent: ["旧城区", "内廷"] }],
@@ -116,7 +146,7 @@ const ownerList = listKnowledgeOwners(graph);
 assert.ok(ownerList.some((entry) => entry.ownerKey === ownerA.ownerKey));
 assert.ok(
   ownerList.some(
-    (entry) => entry.ownerName === "露西亚" && entry.knownCount === 0,
+    (entry) => entry.ownerName === "露西亚" && entry.knownCount >= 1,
   ),
 );
 

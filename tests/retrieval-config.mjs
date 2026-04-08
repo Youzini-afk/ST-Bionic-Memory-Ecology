@@ -158,6 +158,24 @@ const retrieve = await loadRetrieve({
       ownerKey: ownerType && ownerName ? `${ownerType}:${ownerName}` : "",
     };
   },
+  resolveKnowledgeOwnerKeyFromScope(_graph, scope = {}) {
+    const ownerType = String(scope.ownerType || "").trim();
+    const ownerName = String(scope.ownerName || scope.ownerId || "").trim();
+    return ownerType && ownerName ? `${ownerType}:${ownerName}` : "";
+  },
+  listKnowledgeOwners(targetGraph) {
+    return (targetGraph?.nodes || [])
+      .filter((node) => node?.type === "character" && !node?.archived)
+      .map((node) => ({
+        ownerKey: `character:${String(node?.fields?.name || "").trim()}`,
+        ownerType: "character",
+        ownerName: String(node?.fields?.name || "").trim(),
+        nodeId: String(node?.id || "").trim(),
+        aliases: [String(node?.fields?.name || "").trim()].filter(Boolean),
+        updatedAt: 0,
+      }))
+      .filter((entry) => entry.ownerKey && entry.ownerName);
+  },
   resolveActiveRegionContext(graph, preferredRegion = "") {
     return {
       activeRegion:
@@ -597,5 +615,112 @@ assert.deepEqual(Array.from(scopedResult.selectedNodeIds), ["char-pov"]);
 assert.equal(scopedResult.meta.retrieval.activeRegion, "钟楼");
 assert.ok(Array.isArray(scopedResult.scopeBuckets.characterPov));
 assert.equal(scopedResult.scopeBuckets.characterPov[0]?.id, "char-pov");
+
+const multiOwnerGraph = {
+  nodes: [
+    {
+      id: "char-node-a",
+      type: "character",
+      importance: 6,
+      createdTime: 1,
+      archived: false,
+      fields: { name: "艾琳" },
+      seqRange: [1, 1],
+    },
+    {
+      id: "char-node-b",
+      type: "character",
+      importance: 6,
+      createdTime: 1,
+      archived: false,
+      fields: { name: "露西亚" },
+      seqRange: [1, 1],
+    },
+    {
+      id: "pov-a",
+      type: "pov_memory",
+      importance: 8,
+      createdTime: 2,
+      archived: false,
+      fields: { summary: "艾琳觉得钟楼里还有第二条暗道" },
+      seqRange: [2, 2],
+      scope: {
+        layer: "pov",
+        ownerType: "character",
+        ownerId: "艾琳",
+        ownerName: "艾琳",
+      },
+    },
+    {
+      id: "pov-b",
+      type: "pov_memory",
+      importance: 7,
+      createdTime: 3,
+      archived: false,
+      fields: { summary: "露西亚认为钟楼守卫在故意拖时间" },
+      seqRange: [3, 3],
+      scope: {
+        layer: "pov",
+        ownerType: "character",
+        ownerId: "露西亚",
+        ownerName: "露西亚",
+      },
+    },
+  ],
+  edges: [],
+  historyState: {
+    activeRegion: "",
+    activeCharacterPovOwner: "",
+    activeUserPovOwner: "玩家",
+  },
+};
+const multiOwnerSchema = [
+  { id: "character", label: "角色", alwaysInject: false },
+  { id: "pov_memory", label: "主观记忆", alwaysInject: false },
+];
+state.llmResponse = {
+  selected_ids: ["pov-a", "pov-b"],
+  active_owner_keys: ["character:艾琳", "character:露西亚"],
+  active_owner_scores: [
+    { ownerKey: "character:艾琳", score: 0.91, reason: "她的 POV 直接命中当前追问" },
+    { ownerKey: "character:露西亚", score: 0.83, reason: "她也在同一场景并提供互补判断" },
+  ],
+};
+const multiOwnerResult = await retrieve({
+  graph: multiOwnerGraph,
+  userMessage: "艾琳和露西亚现在各自怎么看钟楼这件事",
+  recentMessages: ["[assistant]: 她们刚刚一起进入钟楼大厅"],
+  embeddingConfig: {},
+  schema: multiOwnerSchema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: false,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 4,
+  },
+});
+assert.deepEqual(
+  Array.from(multiOwnerResult.meta.retrieval.activeRecallOwnerKeys),
+  ["character:艾琳", "character:露西亚"],
+);
+assert.equal(multiOwnerResult.meta.retrieval.sceneOwnerResolutionMode, "llm");
+assert.deepEqual(
+  Array.from(multiOwnerResult.scopeBuckets.characterPovOwnerOrder),
+  ["character:艾琳", "character:露西亚"],
+);
+assert.equal(
+  multiOwnerResult.scopeBuckets.characterPovByOwner["character:艾琳"]?.[0]?.id,
+  "pov-a",
+);
+assert.equal(
+  multiOwnerResult.scopeBuckets.characterPovByOwner["character:露西亚"]?.[0]?.id,
+  "pov-b",
+);
+assert.equal(
+  multiOwnerResult.meta.retrieval.selectedByOwner["character:艾琳"]?.[0],
+  "pov-a",
+);
 
 console.log("retrieval-config tests passed");

@@ -58,6 +58,12 @@ function normalizeStringArray(values = []) {
   return result;
 }
 
+function normalizeOwnerValueSet(values = []) {
+  return new Set(
+    normalizeStringArray(values).map((value) => normalizeKey(value)),
+  );
+}
+
 function normalizeOwnerType(layer, ownerType) {
   if (layer !== MEMORY_SCOPE_LAYER.POV) {
     return MEMORY_SCOPE_OWNER_TYPE.NONE;
@@ -224,11 +230,14 @@ export function classifyNodeScopeBucket(
   node,
   {
     activeCharacterPovOwner = "",
+    activeCharacterPovOwners = [],
     activeUserPovOwner = "",
+    activeUserPovOwners = [],
     activeRegion = "",
     adjacentRegions = [],
     enablePovMemory = true,
     enableRegionScopedObjective = true,
+    allowImplicitCharacterPovFallback = true,
   } = {},
 ) {
   const scope = normalizeMemoryScope(node?.scope);
@@ -236,6 +245,18 @@ export function classifyNodeScopeBucket(
   const normalizedAdjacentRegions = new Set(
     normalizeStringArray(adjacentRegions).map((value) => normalizeKey(value)),
   );
+  const normalizedActiveCharacterOwners = normalizeOwnerValueSet([
+    ...normalizeStringArray(activeCharacterPovOwners),
+    activeCharacterPovOwner,
+  ]);
+  const normalizedActiveUserOwners = normalizeOwnerValueSet([
+    ...normalizeStringArray(activeUserPovOwners),
+    activeUserPovOwner,
+  ]);
+  const scopeOwnerValues = normalizeOwnerValueSet([
+    scope.ownerId,
+    scope.ownerName,
+  ]);
 
   if (scope.layer === MEMORY_SCOPE_LAYER.POV) {
     if (!enablePovMemory) {
@@ -243,24 +264,29 @@ export function classifyNodeScopeBucket(
     }
     if (
       scope.ownerType === MEMORY_SCOPE_OWNER_TYPE.CHARACTER &&
-      matchesScopeOwner(scope, MEMORY_SCOPE_OWNER_TYPE.CHARACTER, activeCharacterPovOwner)
+      scopeOwnerValues.size > 0 &&
+      [...scopeOwnerValues].some((value) =>
+        normalizedActiveCharacterOwners.has(value),
+      )
     ) {
       return MEMORY_SCOPE_BUCKETS.CHARACTER_POV;
     }
     if (
       scope.ownerType === MEMORY_SCOPE_OWNER_TYPE.USER &&
-      matchesScopeOwner(scope, MEMORY_SCOPE_OWNER_TYPE.USER, activeUserPovOwner)
+      scopeOwnerValues.size > 0 &&
+      [...scopeOwnerValues].some((value) => normalizedActiveUserOwners.has(value))
     ) {
       return MEMORY_SCOPE_BUCKETS.USER_POV;
     }
     if (
-      !normalizeString(activeCharacterPovOwner) &&
+      allowImplicitCharacterPovFallback &&
+      normalizedActiveCharacterOwners.size === 0 &&
       scope.ownerType === MEMORY_SCOPE_OWNER_TYPE.CHARACTER
     ) {
       return MEMORY_SCOPE_BUCKETS.CHARACTER_POV;
     }
     if (
-      !normalizeString(activeUserPovOwner) &&
+      normalizedActiveUserOwners.size === 0 &&
       scope.ownerType === MEMORY_SCOPE_OWNER_TYPE.USER
     ) {
       return MEMORY_SCOPE_BUCKETS.USER_POV;

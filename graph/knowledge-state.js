@@ -847,7 +847,11 @@ function listToSet(values = []) {
   return new Set(uniqueIds(values));
 }
 
-export function computeKnowledgeGateForNode(
+function normalizeOwnerKeyList(ownerKeys = []) {
+  return uniqueIds(Array.isArray(ownerKeys) ? ownerKeys : [ownerKeys]);
+}
+
+function computeKnowledgeGateForSingleOwner(
   graph,
   node,
   ownerKey = "",
@@ -968,6 +972,115 @@ export function computeKnowledgeGateForNode(
           ? "soft-visible"
           : "suppressed",
     threshold,
+  };
+}
+
+export function computeKnowledgeGateForNode(
+  graph,
+  node,
+  ownerKey = "",
+  {
+    vectorScore = 0,
+    graphScore = 0,
+    lexicalScore = 0,
+    scopeBucket = "",
+    injectLowConfidenceObjectiveMemory = false,
+  } = {},
+) {
+  const normalizedOwnerKeys = normalizeOwnerKeyList(ownerKey);
+  if (normalizedOwnerKeys.length <= 1) {
+    const singleGate = computeKnowledgeGateForSingleOwner(
+      graph,
+      node,
+      normalizedOwnerKeys[0] || "",
+      {
+        vectorScore,
+        graphScore,
+        lexicalScore,
+        scopeBucket,
+        injectLowConfidenceObjectiveMemory,
+      },
+    );
+    return {
+      ...singleGate,
+      ownerCoverage: singleGate.visible ? 1 : 0,
+      visibleOwnerKeys: singleGate.visible && normalizedOwnerKeys[0]
+        ? [normalizedOwnerKeys[0]]
+        : [],
+      suppressedOwnerKeys:
+        singleGate.visible || !normalizedOwnerKeys[0]
+          ? []
+          : [normalizedOwnerKeys[0]],
+      ownerResults: normalizedOwnerKeys[0]
+        ? { [normalizedOwnerKeys[0]]: singleGate }
+        : {},
+    };
+  }
+
+  const ownerResults = {};
+  const visibleOwnerKeys = [];
+  const suppressedOwnerKeys = [];
+  let bestVisibilityScore = 0;
+  let bestThreshold = 0;
+  let anchored = false;
+  let rescued = false;
+  let bestMode = "suppressed";
+  let bestSuppressedReason = "";
+
+  for (const candidateOwnerKey of normalizedOwnerKeys) {
+    const result = computeKnowledgeGateForSingleOwner(
+      graph,
+      node,
+      candidateOwnerKey,
+      {
+        vectorScore,
+        graphScore,
+        lexicalScore,
+        scopeBucket,
+        injectLowConfidenceObjectiveMemory,
+      },
+    );
+    ownerResults[candidateOwnerKey] = result;
+    bestVisibilityScore = Math.max(
+      bestVisibilityScore,
+      Number(result.visibilityScore || 0),
+    );
+    bestThreshold = Math.max(bestThreshold, Number(result.threshold || 0));
+    if (result.visible) {
+      visibleOwnerKeys.push(candidateOwnerKey);
+      anchored ||= Boolean(result.anchored);
+      rescued ||= Boolean(result.rescued);
+      if (
+        bestMode === "suppressed" ||
+        (result.anchored && bestMode !== "manual-known") ||
+        (result.mode === "manual-known")
+      ) {
+        bestMode = String(result.mode || bestMode);
+      }
+    } else {
+      suppressedOwnerKeys.push(candidateOwnerKey);
+      if (!bestSuppressedReason && result.suppressedReason) {
+        bestSuppressedReason = String(result.suppressedReason || "");
+      }
+    }
+  }
+
+  const visible = visibleOwnerKeys.length > 0;
+  return {
+    visible,
+    anchored,
+    rescued,
+    suppressed: !visible,
+    suppressedReason: visible ? "" : bestSuppressedReason || "low-visibility",
+    visibilityScore: bestVisibilityScore,
+    mode: visible ? bestMode : "suppressed",
+    threshold: bestThreshold,
+    ownerCoverage: normalizedOwnerKeys.length
+      ? visibleOwnerKeys.length / normalizedOwnerKeys.length
+      : 0,
+    visibleOwnerKeys,
+    suppressedOwnerKeys,
+    ownerResults,
   };
 }
 

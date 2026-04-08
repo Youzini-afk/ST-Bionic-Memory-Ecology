@@ -10100,9 +10100,7 @@ function buildRecallRetrieveOptions(settings, context) {
       currentGraph?.historyState?.lastExtractedRegion ||
       "",
     activeCharacterPovOwner:
-      currentGraph?.historyState?.activeCharacterPovOwner ||
-      context.name2 ||
-      "",
+      currentGraph?.historyState?.activeCharacterPovOwner || "",
     activeUserPovOwner:
       currentGraph?.historyState?.activeUserPovOwner ||
       context.name1 ||

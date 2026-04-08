@@ -57,15 +57,26 @@ const text = formatInjection(
     recallNodes: [recalledCharacter, recalledReflection],
     scopeBuckets: {
       characterPov: [recalledCharacter],
+      characterPovByOwner: {
+        "character:艾琳": [recalledCharacter],
+      },
+      characterPovOwnerOrder: ["character:艾琳"],
       userPov: [recalledReflection],
       objectiveCurrentRegion: [coreEvent],
       objectiveGlobal: [],
+    },
+    meta: {
+      retrieval: {
+        sceneOwnerCandidates: [
+          { ownerKey: "character:艾琳", ownerName: "艾琳" },
+        ],
+      },
     },
   },
   DEFAULT_NODE_SCHEMA,
 );
 
-assert.match(text, /\[Memory - Character POV\]/);
+assert.match(text, /\[Memory - Character POV: 艾琳\]/);
 assert.match(text, /\[Memory - User POV \/ Not Character Facts\]/);
 assert.match(text, /不等于角色已知事实/);
 assert.match(text, /\[Memory - Objective \/ Current Region\]/);

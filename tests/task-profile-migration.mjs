@@ -110,6 +110,7 @@ assert.deepEqual(
     "recentMessages",
     "userMessage",
     "candidateNodes",
+    "sceneOwnerCandidates",
     "graphStats",
     "default-format",
     "default-rules",

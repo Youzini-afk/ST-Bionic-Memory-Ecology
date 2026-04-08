@@ -18,10 +18,10 @@ export function formatInjection(retrievalResult, schema) {
   const appended = new Set();
 
   if (scopeBuckets && typeof scopeBuckets === "object") {
-    appendScopeSection(
+    appendCharacterPovSections(
       parts,
-      "[Memory - Character POV]",
-      scopeBuckets.characterPov,
+      scopeBuckets,
+      retrievalResult?.meta?.retrieval?.sceneOwnerCandidates || [],
       schema,
       appended,
     );
@@ -106,6 +106,59 @@ export function formatInjection(retrievalResult, schema) {
   }
 
   return parts.join("\n");
+}
+
+function appendCharacterPovSections(
+  parts,
+  scopeBuckets,
+  sceneOwnerCandidates,
+  schema,
+  appended,
+) {
+  const byOwner =
+    scopeBuckets?.characterPovByOwner &&
+    typeof scopeBuckets.characterPovByOwner === "object"
+      ? scopeBuckets.characterPovByOwner
+      : {};
+  const ownerOrder = Array.isArray(scopeBuckets?.characterPovOwnerOrder)
+    ? scopeBuckets.characterPovOwnerOrder
+    : [];
+
+  if (ownerOrder.length > 0) {
+    for (const ownerKey of ownerOrder) {
+      const nodes = Array.isArray(byOwner[ownerKey]) ? byOwner[ownerKey] : [];
+      if (nodes.length === 0) continue;
+      appendScopeSection(
+        parts,
+        `[Memory - Character POV: ${resolveSceneOwnerLabel(ownerKey, nodes, sceneOwnerCandidates)}]`,
+        nodes,
+        schema,
+        appended,
+      );
+    }
+    return;
+  }
+
+  appendScopeSection(
+    parts,
+    "[Memory - Character POV]",
+    scopeBuckets?.characterPov,
+    schema,
+    appended,
+  );
+}
+
+function resolveSceneOwnerLabel(ownerKey, nodes = [], sceneOwnerCandidates = []) {
+  const normalizedOwnerKey = String(ownerKey || "").trim();
+  const candidateMatch = (Array.isArray(sceneOwnerCandidates) ? sceneOwnerCandidates : [])
+    .find((candidate) => String(candidate?.ownerKey || "").trim() === normalizedOwnerKey);
+  if (candidateMatch?.ownerName) {
+    return String(candidateMatch.ownerName);
+  }
+  const nodeMatch = (Array.isArray(nodes) ? nodes : [])
+    .map((node) => normalizeMemoryScope(node?.scope))
+    .find((scope) => scope.ownerName || scope.ownerId);
+  return String(nodeMatch?.ownerName || nodeMatch?.ownerId || normalizedOwnerKey || "未命名角色");
 }
 
 function appendScopeSection(parts, title, nodes, schema, appended, note = "") {

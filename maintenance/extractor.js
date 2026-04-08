@@ -24,6 +24,7 @@ import {
 import {
   applyCognitionUpdates,
   applyRegionUpdates,
+  resolveKnowledgeOwner,
 } from "../graph/knowledge-state.js";
 import {
   buildTaskExecutionDebugContext,
@@ -386,6 +387,165 @@ function normalizeExtractionResultPayload(result, schema) {
   };
 }
 
+function normalizeExtractionOwnerText(value) {
+  return String(value || "").trim();
+}
+
+function resolveCharacterOwnerCandidate(graph, ownerName = "", ownerNodeId = "") {
+  const resolved = resolveKnowledgeOwner(graph, {
+    ownerType: "character",
+    ownerName,
+    nodeId: ownerNodeId,
+  });
+  return resolved?.ownerKey ? resolved : null;
+}
+
+function deriveExtractionOwnerContext(
+  graph,
+  normalizedResult = {},
+  scopeRuntime = {},
+) {
+  const ownerMap = new Map();
+  const registerCharacterOwner = (ownerName = "", ownerNodeId = "", source = "") => {
+    const resolved = resolveCharacterOwnerCandidate(graph, ownerName, ownerNodeId);
+    if (!resolved?.ownerKey) return;
+    const existing = ownerMap.get(resolved.ownerKey) || {
+      ...resolved,
+      sources: [],
+    };
+    if (source && !existing.sources.includes(source)) {
+      existing.sources.push(source);
+    }
+    ownerMap.set(resolved.ownerKey, existing);
+  };
+
+  for (const op of Array.isArray(normalizedResult?.operations)
+    ? normalizedResult.operations
+    : []) {
+    if (String(op?.type || "") === "pov_memory") {
+      registerCharacterOwner(
+        op?.scope?.ownerName || op?.scope?.ownerId,
+        "",
+        "pov-memory-scope",
+      );
+    }
+    if (
+      String(op?.type || "") === "character" &&
+      ["create", "update"].includes(String(op?.action || ""))
+    ) {
+      registerCharacterOwner(
+        op?.fields?.name || "",
+        String(op?.nodeId || ""),
+        "character-operation",
+      );
+    }
+  }
+
+  for (const entry of Array.isArray(normalizedResult?.cognitionUpdates)
+    ? normalizedResult.cognitionUpdates
+    : []) {
+    if (String(entry?.ownerType || "") !== "character") continue;
+    registerCharacterOwner(
+      entry?.ownerName || entry?.ownerId,
+      entry?.ownerNodeId,
+      "cognition-update",
+    );
+  }
+
+  const runtimeOwner = resolveCharacterOwnerCandidate(
+    graph,
+    scopeRuntime.activeCharacterOwner,
+    "",
+  );
+  if (runtimeOwner?.ownerKey && runtimeOwner?.nodeId && ownerMap.size <= 1) {
+    registerCharacterOwner(runtimeOwner.ownerName, runtimeOwner.nodeId, "runtime-unique");
+  }
+
+  const ownerCandidates = [...ownerMap.values()];
+  return {
+    ownerCandidates,
+    soleCharacterOwner: ownerCandidates.length === 1 ? ownerCandidates[0] : null,
+  };
+}
+
+function normalizeCognitionUpdatesWithOwnerContext(
+  graph,
+  cognitionUpdates = [],
+  scopeRuntime = {},
+  ownerContext = {},
+  ownershipWarnings = [],
+) {
+  const normalized = [];
+
+  for (const entry of Array.isArray(cognitionUpdates) ? cognitionUpdates : []) {
+    const ownerType = normalizeExtractionOwnerText(entry?.ownerType);
+    if (ownerType === "character") {
+      const resolved =
+        resolveCharacterOwnerCandidate(
+          graph,
+          entry?.ownerName || entry?.ownerId,
+          entry?.ownerNodeId,
+        ) || ownerContext?.soleCharacterOwner || null;
+      if (!resolved?.ownerKey) {
+        ownershipWarnings.push({
+          kind: "invalid-owner-scope",
+          source: "cognitionUpdate",
+          ownerType,
+        });
+        continue;
+      }
+      normalized.push({
+        ...entry,
+        ownerType: "character",
+        ownerName: resolved.ownerName,
+        ownerId: resolved.ownerName,
+        ownerNodeId: resolved.nodeId || normalizeExtractionOwnerText(entry?.ownerNodeId),
+      });
+      continue;
+    }
+
+    if (ownerType === "user") {
+      const resolvedUserName =
+        normalizeExtractionOwnerText(entry?.ownerName || entry?.ownerId) ||
+        normalizeExtractionOwnerText(scopeRuntime.activeUserOwner);
+      if (!resolvedUserName) {
+        ownershipWarnings.push({
+          kind: "invalid-owner-scope",
+          source: "cognitionUpdate",
+          ownerType,
+        });
+        continue;
+      }
+      normalized.push({
+        ...entry,
+        ownerType: "user",
+        ownerName: resolvedUserName,
+        ownerId: resolvedUserName,
+      });
+      continue;
+    }
+
+    if (ownerContext?.soleCharacterOwner) {
+      normalized.push({
+        ...entry,
+        ownerType: "character",
+        ownerName: ownerContext.soleCharacterOwner.ownerName,
+        ownerId: ownerContext.soleCharacterOwner.ownerName,
+        ownerNodeId: ownerContext.soleCharacterOwner.nodeId || "",
+      });
+      continue;
+    }
+
+    ownershipWarnings.push({
+      kind: "invalid-owner-scope",
+      source: "cognitionUpdate",
+      ownerType,
+    });
+  }
+
+  return normalized;
+}
+
 /**
  * 对未处理的对话楼层执行记忆提取
  *
@@ -565,6 +725,19 @@ export async function extractMemories({
   });
   throwIfAborted(signal);
   const normalizedResult = normalizeExtractionResultPayload(result, schema);
+  const ownershipWarnings = [];
+  const extractionOwnerContext = deriveExtractionOwnerContext(
+    graph,
+    normalizedResult,
+    scopeRuntime,
+  );
+  const normalizedCognitionUpdates = normalizeCognitionUpdatesWithOwnerContext(
+    graph,
+    normalizedResult?.cognitionUpdates,
+    scopeRuntime,
+    extractionOwnerContext,
+    ownershipWarnings,
+  );
 
   if (!normalizedResult || !Array.isArray(normalizedResult.operations)) {
     const diagType = result === null
@@ -614,6 +787,8 @@ export async function extractMemories({
             refMap,
             stats,
             scopeRuntime,
+            extractionOwnerContext,
+            ownershipWarnings,
           );
           if (createdId) newNodeIds.push(createdId);
           break;
@@ -626,6 +801,8 @@ export async function extractMemories({
               currentSeq,
               stats,
               scopeRuntime,
+              extractionOwnerContext,
+              ownershipWarnings,
             );
             if (updatedNodeId) updatedNodeIds.push(updatedNodeId);
           }
@@ -675,7 +852,12 @@ export async function extractMemories({
     effectiveEndSeq,
   );
   const changedNodeIds = [...new Set([...newNodeIds, ...updatedNodeIds])];
-  applyCognitionUpdates(graph, normalizedResult.cognitionUpdates, {
+  if (ownershipWarnings.length > 0) {
+    debugWarn(
+      `[ST-BME] 已跳过 ${ownershipWarnings.length} 条缺少具体人物 owner 的主观记忆或认知更新`,
+    );
+  }
+  applyCognitionUpdates(graph, normalizedCognitionUpdates, {
     refMap,
     changedNodeIds,
     scopeRuntime,
@@ -685,7 +867,7 @@ export async function extractMemories({
     changedNodeIds,
     source: "extract",
   });
-  updateRuntimeScopeState(graph, newNodeIds, scopeRuntime);
+  updateRuntimeScopeState(graph, newNodeIds, scopeRuntime, extractionOwnerContext);
 
   debugLog(
     `[ST-BME] 提取完成: 新建 ${stats.newNodes}, 更新 ${stats.updatedNodes}, 新边 ${stats.newEdges}, lastProcessedSeq=${graph.lastProcessedSeq}`,
@@ -696,6 +878,7 @@ export async function extractMemories({
     error: "",
     ...stats,
     newNodeIds,
+    ownerWarnings: ownershipWarnings,
     processedRange: [effectiveStartSeq, effectiveEndSeq],
   };
 }
@@ -703,7 +886,17 @@ export async function extractMemories({
 /**
  * 处理 create 操作
  */
-function handleCreate(graph, op, seq, schema, refMap, stats, scopeRuntime = {}) {
+function handleCreate(
+  graph,
+  op,
+  seq,
+  schema,
+  refMap,
+  stats,
+  scopeRuntime = {},
+  ownerContext = {},
+  ownershipWarnings = [],
+) {
   const normalizedFields =
     op.type === "event" ? ensureEventTitle(op.fields || {}) : op.fields || {};
   const typeDef = schema.find((s) => s.id === op.type);
@@ -711,7 +904,22 @@ function handleCreate(graph, op, seq, schema, refMap, stats, scopeRuntime = {}) 
     console.warn(`[ST-BME] 未知节点类型: ${op.type}`);
     return null;
   }
-  const nodeScope = resolveOperationScope(op, scopeRuntime);
+  const scopeDecision = resolveOperationScope(
+    graph,
+    op,
+    scopeRuntime,
+    ownerContext,
+  );
+  if (scopeDecision.invalidReason) {
+    ownershipWarnings.push({
+      kind: scopeDecision.invalidReason,
+      source: "operation",
+      action: String(op?.action || ""),
+      type: String(op?.type || ""),
+    });
+    return null;
+  }
+  const nodeScope = scopeDecision.scope;
 
   // latestOnly 类型：检查是否已存在同名节点
   if (typeDef.latestOnly && op.fields?.name) {
@@ -766,7 +974,15 @@ function handleCreate(graph, op, seq, schema, refMap, stats, scopeRuntime = {}) 
 /**
  * 处理 update 操作
  */
-function handleUpdate(graph, op, currentSeq, stats, scopeRuntime = {}) {
+function handleUpdate(
+  graph,
+  op,
+  currentSeq,
+  stats,
+  scopeRuntime = {},
+  ownerContext = {},
+  ownershipWarnings = [],
+) {
   if (!op.nodeId) {
     console.warn("[ST-BME] update 操作缺少 nodeId");
     return "";
@@ -784,9 +1000,23 @@ function handleUpdate(graph, op, currentSeq, stats, scopeRuntime = {}) {
       ? ensureEventTitle({ ...previousFields, ...(op.fields || {}) })
       : { ...previousFields, ...(op.fields || {}) };
   const changeSummary = buildFieldChangeSummary(previousFields, nextFields);
-  const resolvedScope = op.scope
-    ? normalizeMemoryScope(op.scope, previousNode.scope || {})
-    : normalizeMemoryScope(previousNode.scope);
+  const scopeDecision = resolveOperationScope(
+    graph,
+    op,
+    scopeRuntime,
+    ownerContext,
+    { existingScope: previousNode.scope },
+  );
+  if (scopeDecision.invalidReason && previousNode.type === "pov_memory") {
+    ownershipWarnings.push({
+      kind: scopeDecision.invalidReason,
+      source: "operation",
+      action: String(op?.action || ""),
+      type: String(op?.type || ""),
+      nodeId: previousNode.id,
+    });
+  }
+  const resolvedScope = scopeDecision.scope;
 
   const updateSeq = Number.isFinite(op.seq) ? op.seq : currentSeq;
   const updated = updateNode(graph, op.nodeId, {
@@ -948,31 +1178,97 @@ function handleLinks(graph, sourceId, links, refMap, stats) {
   }
 }
 
-function resolveOperationScope(op, scopeRuntime = {}) {
-  if (op?.scope) {
-    return normalizeMemoryScope(op.scope);
+function resolveOperationScope(
+  graph,
+  op,
+  scopeRuntime = {},
+  ownerContext = {},
+  { existingScope = null } = {},
+) {
+  const fallbackScope = normalizeMemoryScope(
+    existingScope || { layer: op?.type === "pov_memory" ? "pov" : "objective" },
+  );
+
+  if (op?.type !== "pov_memory") {
+    return {
+      scope: op?.scope
+        ? normalizeMemoryScope(op.scope, existingScope || {})
+        : fallbackScope.layer === "objective"
+          ? fallbackScope
+          : normalizeMemoryScope({ layer: "objective" }),
+      invalidReason: "",
+    };
   }
-  if (op?.type === "pov_memory") {
-    if (scopeRuntime.activeCharacterOwner) {
-      return normalizeMemoryScope({
-        layer: "pov",
-        ownerType: "character",
-        ownerId: scopeRuntime.activeCharacterOwner,
-        ownerName: scopeRuntime.activeCharacterOwner,
-      });
+
+  if (!op?.scope && existingScope) {
+    return {
+      scope: normalizeMemoryScope(existingScope),
+      invalidReason: "",
+    };
+  }
+
+  const rawScope = op?.scope ? normalizeMemoryScope(op.scope) : null;
+  const ownerType = String(rawScope?.ownerType || "").trim();
+  const explicitOwnerName = normalizeExtractionOwnerText(
+    rawScope?.ownerName || rawScope?.ownerId,
+  );
+
+  if (ownerType === "user") {
+    const userName =
+      explicitOwnerName || normalizeExtractionOwnerText(scopeRuntime.activeUserOwner);
+    if (!userName) {
+      return {
+        scope: fallbackScope,
+        invalidReason: "invalid-owner-scope",
+      };
     }
-    return normalizeMemoryScope({ layer: "pov" });
+    return {
+      scope: normalizeMemoryScope({
+        ...(rawScope || {}),
+        layer: "pov",
+        ownerType: "user",
+        ownerId: userName,
+        ownerName: userName,
+      }),
+      invalidReason: "",
+    };
   }
-  return normalizeMemoryScope({ layer: "objective" });
+
+  const resolvedCharacterOwner =
+    resolveCharacterOwnerCandidate(graph, explicitOwnerName, "") ||
+    ownerContext?.soleCharacterOwner ||
+    null;
+  if (!resolvedCharacterOwner?.ownerKey) {
+    return {
+      scope: fallbackScope,
+      invalidReason: "invalid-owner-scope",
+    };
+  }
+
+  return {
+    scope: normalizeMemoryScope({
+      ...(rawScope || {}),
+      layer: "pov",
+      ownerType: "character",
+      ownerId: resolvedCharacterOwner.ownerName,
+      ownerName: resolvedCharacterOwner.ownerName,
+    }),
+    invalidReason: "",
+  };
 }
 
-function updateRuntimeScopeState(graph, newNodeIds = [], scopeRuntime = {}) {
+function updateRuntimeScopeState(
+  graph,
+  newNodeIds = [],
+  scopeRuntime = {},
+  ownerContext = {},
+) {
   if (!graph?.historyState || typeof graph.historyState !== "object") {
     return;
   }
 
   graph.historyState.activeCharacterPovOwner =
-    String(scopeRuntime.activeCharacterOwner || "");
+    String(ownerContext?.soleCharacterOwner?.ownerName || "");
   graph.historyState.activeUserPovOwner =
     String(scopeRuntime.activeUserOwner || "");
 
@@ -1136,6 +1432,8 @@ function buildDefaultExtractPrompt(schema) {
     "- 每批对话最多创建 1 个事件节点，多个子事件合并为一条",
     "- 涉及到的角色都尽量尝试生成对应 POV 记忆和 cognitionUpdates；不必强行覆盖全图所有角色",
     "- cognitionUpdates 用来表达谁确定知道、谁误解了什么、谁只是模糊可见",
+    "- 多角色场景里，pov_memory 和 cognitionUpdates 必须写清具体人物；不要把角色卡名当作 POV owner",
+    "- 只有在这一批明显只涉及一个具体角色实体时，才允许省略 character POV 的 owner 并让系统安全归属",
     "- knownRefs / mistakenRefs 优先引用同批 ref；没有 ref 再引用现有 nodeId",
     "- regionUpdates 只有在对话里明确出现地区线索时才写；不确定就留空",
     "- 角色/地点节点：如果图中已有同名同作用域节点，用 update 而非 create",
@@ -1159,6 +1457,7 @@ function buildCognitiveExtractAugmentPrompt() {
     "- cognitionUpdates 表达谁明确知道哪些客观节点、谁产生了误解、谁只是低置信可见。",
     "- 本批涉及到的角色都尽量尝试生成 POV 和记忆认知更新，不必覆盖全图全部角色。",
     "- ownerType 只能是 character 或 user；ownerName 必须写清楚角色名或用户名。",
+    "- 不要把角色卡名、旁白身份或群像统称当成 POV owner；多角色时一定写具体人物。",
     "- knownRefs / mistakenRefs 优先引用同批 ref，没有 ref 再用现有 nodeId。",
     "- visibility.score 取 0..1，1 表示亲历或明确得知，0.5 左右表示间接听闻。",
     "- regionUpdates.activeRegionHint 只在这批对话明确落到某个地区时填写。",

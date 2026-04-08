@@ -939,7 +939,8 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
 
   const historyState = graph?.historyState || {};
   const regionState = graph?.regionState || {};
-  const { owners, activeOwnerKey, activeOwner } = _getCurrentCognitionOwnerSummary(graph);
+  const { owners, activeOwnerKey, activeOwner, activeOwnerLabels } =
+    _getCurrentCognitionOwnerSummary(graph);
   const activeRegion = String(
     historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "",
   ).trim();
@@ -952,8 +953,12 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
 
   el.innerHTML = `
     <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 当前召回角色</div>
-      <div class="bme-cog-status-card__value">${_escHtml(activeOwner?.ownerName || activeOwnerKey || "—")}</div>
+      <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 当前场景锚点</div>
+      <div class="bme-cog-status-card__value">${_escHtml(
+        activeOwnerLabels.length > 0
+          ? activeOwnerLabels.join(" / ")
+          : activeOwner?.ownerName || activeOwnerKey || "—",
+      )}</div>
     </div>
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
@@ -979,7 +984,8 @@ function _renderCogOwnerList(graph, canRender) {
     return;
   }
 
-  const { owners, activeOwnerKey } = _getCurrentCognitionOwnerSummary(graph);
+  const { owners, activeOwnerKey, activeOwnerKeys } =
+    _getCurrentCognitionOwnerSummary(graph);
 
   if (!owners.length) {
     el.innerHTML = `<div class="bme-cog-monitor-empty">暂无认知角色</div>`;
@@ -991,7 +997,11 @@ function _renderCogOwnerList(graph, canRender) {
       const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
       const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
       const selected = owner.ownerKey === currentCognitionOwnerKey ? "is-selected" : "";
-      const anchor = owner.ownerKey === activeOwnerKey ? "is-active-anchor" : "";
+      const anchor =
+        owner.ownerKey === activeOwnerKey ||
+        activeOwnerKeys.includes(owner.ownerKey)
+          ? "is-active-anchor"
+          : "";
       return `
         <div class="bme-cog-owner-card ${selected} ${anchor}"
              data-owner-key="${_escHtml(String(owner.ownerKey || ""))}"
@@ -1015,7 +1025,8 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
     return;
   }
 
-  const { selectedOwner, activeOwnerKey } = _getCurrentCognitionOwnerSummary(graph);
+  const { selectedOwner, activeOwnerKey, activeOwnerKeys } =
+    _getCurrentCognitionOwnerSummary(graph);
 
   if (!selectedOwner) {
     el.innerHTML = `<div class="bme-cog-monitor-empty">选择上方角色查看详情，或等待提取产生认知数据。</div>`;
@@ -1072,7 +1083,12 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
   el.innerHTML = `
     <div class="bme-cog-detail-header">
       <div class="bme-cog-detail-name">${_escHtml(String(selectedOwner.ownerName || selectedOwner.ownerKey || "未命名"))}</div>
-      ${selectedOwner.ownerKey === activeOwnerKey ? '<span class="bme-cog-detail-badge">当前召回锚点</span>' : ""}
+      ${
+        selectedOwner.ownerKey === activeOwnerKey ||
+        activeOwnerKeys.includes(selectedOwner.ownerKey)
+          ? '<span class="bme-cog-detail-badge">当前场景锚点</span>'
+          : ""
+      }
     </div>
 
     <div class="bme-cog-metrics">
@@ -1291,7 +1307,8 @@ function _refreshMobileCognition() {
     return;
   }
 
-  const { owners, activeOwnerKey, activeOwner } = _getCurrentCognitionOwnerSummary(graph);
+  const { owners, activeOwnerKey, activeOwner, activeOwnerKeys, activeOwnerLabels } =
+    _getCurrentCognitionOwnerSummary(graph);
   const historyState = graph?.historyState || {};
   const regionState = graph?.regionState || {};
   const activeRegion = String(historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "").trim();
@@ -1301,7 +1318,10 @@ function _refreshMobileCognition() {
   const ownerCards = owners.map((owner) => {
     const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
     const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
-    const anchor = owner.ownerKey === activeOwnerKey ? "is-active-anchor" : "";
+    const anchor =
+      owner.ownerKey === activeOwnerKey || activeOwnerKeys.includes(owner.ownerKey)
+        ? "is-active-anchor"
+        : "";
     return `
       <div class="bme-cog-owner-card ${anchor}" style="min-width:unset;max-width:unset">
         <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(firstName)}</div>
@@ -1315,8 +1335,12 @@ function _refreshMobileCognition() {
   el.innerHTML = `
     <div class="bme-cog-status-strip" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px">
       <div class="bme-cog-status-card">
-        <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 召回角色</div>
-        <div class="bme-cog-status-card__value">${_escHtml(activeOwner?.ownerName || "—")}</div>
+        <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 场景锚点</div>
+        <div class="bme-cog-status-card__value">${_escHtml(
+          activeOwnerLabels.length > 0
+            ? activeOwnerLabels.join(" / ")
+            : activeOwner?.ownerName || "—",
+        )}</div>
       </div>
       <div class="bme-cog-status-card">
         <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
@@ -1518,10 +1542,44 @@ function _getCognitionOwnerCollection(graph) {
   return typeof listKnowledgeOwners === "function" ? listKnowledgeOwners(graph) : [];
 }
 
+function _getLatestRecallOwnerInfo(graph) {
+  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
+  const recallInjection =
+    runtimeDebug?.runtimeDebug?.injections?.recall || {};
+  const retrievalMeta = recallInjection?.retrievalMeta || {};
+  const owners = _getCognitionOwnerCollection(graph);
+  const ownerCandidates = Array.isArray(retrievalMeta.sceneOwnerCandidates)
+    ? retrievalMeta.sceneOwnerCandidates
+    : [];
+  const ownerKeys = Array.isArray(retrievalMeta.activeRecallOwnerKeys)
+    ? retrievalMeta.activeRecallOwnerKeys.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const fallbackOwnerKey = String(graph?.historyState?.activeRecallOwnerKey || "").trim();
+  const normalizedOwnerKeys = ownerKeys.length > 0
+    ? [...new Set(ownerKeys)]
+    : fallbackOwnerKey
+      ? [fallbackOwnerKey]
+      : [];
+  const ownerLabels = normalizedOwnerKeys.map((ownerKey) => {
+    const candidateMatch = ownerCandidates.find(
+      (candidate) => String(candidate?.ownerKey || "").trim() === ownerKey,
+    );
+    if (candidateMatch?.ownerName) return String(candidateMatch.ownerName);
+    const ownerEntry = owners.find((entry) => entry.ownerKey === ownerKey);
+    return String(ownerEntry?.ownerName || ownerKey || "—");
+  });
+
+  return {
+    ownerKeys: normalizedOwnerKeys,
+    ownerLabels,
+    resolutionMode: String(retrievalMeta.sceneOwnerResolutionMode || "").trim() || "fallback",
+  };
+}
+
 function _getCurrentCognitionOwnerSummary(graph) {
   const owners = _getCognitionOwnerCollection(graph);
-  const historyState = graph?.historyState || {};
-  const activeOwnerKey = String(historyState.activeRecallOwnerKey || "").trim();
+  const recallOwnerInfo = _getLatestRecallOwnerInfo(graph);
+  const activeOwnerKey = String(recallOwnerInfo.ownerKeys[0] || "").trim();
   if (!owners.some((entry) => entry.ownerKey === currentCognitionOwnerKey)) {
     currentCognitionOwnerKey =
       activeOwnerKey && owners.some((entry) => entry.ownerKey === activeOwnerKey)
@@ -1534,6 +1592,9 @@ function _getCurrentCognitionOwnerSummary(graph) {
     owners.find((entry) => entry.ownerKey === activeOwnerKey) || null;
   return {
     owners,
+    activeOwnerKeys: recallOwnerInfo.ownerKeys,
+    activeOwnerLabels: recallOwnerInfo.ownerLabels,
+    sceneOwnerResolutionMode: recallOwnerInfo.resolutionMode,
     activeOwnerKey,
     selectedOwner,
     activeOwner,
@@ -1557,7 +1618,10 @@ function _collectNodeNames(graph, nodeIds = [], { limit = 4 } = {}) {
   return result;
 }
 
-function _renderCognitionOwnerList(graph, { owners = [], activeOwnerKey = "" } = {}) {
+function _renderCognitionOwnerList(
+  graph,
+  { owners = [], activeOwnerKey = "", activeOwnerKeys = [] } = {},
+) {
   const listEl = document.getElementById("bme-cognition-owner-list");
   if (!listEl) return;
   listEl.innerHTML = "";
@@ -1581,7 +1645,7 @@ function _renderCognitionOwnerList(graph, { owners = [], activeOwnerKey = "" } =
     if (owner.ownerKey === currentCognitionOwnerKey) {
       button.classList.add("is-selected");
     }
-    if (owner.ownerKey === activeOwnerKey) {
+    if (owner.ownerKey === activeOwnerKey || activeOwnerKeys.includes(owner.ownerKey)) {
       button.classList.add("is-active-anchor");
     }
     button.dataset.ownerKey = String(owner.ownerKey || "");
@@ -1610,6 +1674,7 @@ function _renderCognitionDetail(
   {
     selectedOwner = null,
     activeOwnerKey = "",
+    activeOwnerKeys = [],
     activeRegion = "",
     adjacentRegions = [],
   } = {},
@@ -1684,8 +1749,9 @@ function _renderCognitionDetail(
           </div>
         </div>
         ${
-          selectedOwner.ownerKey === activeOwnerKey
-            ? '<span class="bme-task-pill">当前召回锚点</span>'
+          selectedOwner.ownerKey === activeOwnerKey ||
+          activeOwnerKeys.includes(selectedOwner.ownerKey)
+            ? '<span class="bme-task-pill">当前场景锚点</span>'
             : ""
         }
       </div>
@@ -1849,6 +1915,7 @@ function _refreshCognitionDashboard(
   const {
     owners,
     activeOwnerKey,
+    activeOwnerLabels,
     selectedOwner,
     activeOwner,
   } = _getCurrentCognitionOwnerSummary(graph);
@@ -1869,7 +1936,9 @@ function _refreshCognitionDashboard(
 
   _setText(
     "bme-cognition-active-owner",
-    activeOwner?.ownerName || activeOwnerKey || "—",
+    activeOwnerLabels.length > 0
+      ? activeOwnerLabels.join(" / ")
+      : activeOwner?.ownerName || activeOwnerKey || "—",
   );
   _setText("bme-cognition-active-region", activeRegionLabel || "—");
   _setText(
@@ -5122,6 +5191,7 @@ function _renderAiMonitorCognitionCard(state) {
   const historyState = graph?.historyState || {};
   const regionState = graph?.regionState || {};
   const owners = _getCognitionOwnerCollection(graph);
+  const latestRecallOwnerInfo = _getLatestRecallOwnerInfo(graph);
   const activeRegion = String(
     historyState.activeRegion ||
       historyState.lastExtractedRegion ||
@@ -5143,11 +5213,15 @@ function _renderAiMonitorCognitionCard(state) {
     </div>
     <div class="bme-ai-monitor-kv">
       <div class="bme-ai-monitor-kv__row">
-        <span>当前召回角色</span>
-        <strong>${_escHtml(String(historyState.activeRecallOwnerKey || "—"))}</strong>
+        <span>当前场景锚点</span>
+        <strong>${_escHtml(
+          latestRecallOwnerInfo.ownerLabels.length > 0
+            ? latestRecallOwnerInfo.ownerLabels.join(" / ")
+            : "—",
+        )}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
-        <span>近期召回角色</span>
+        <span>兼容旧锚点</span>
         <strong>${_escHtml(
           Array.isArray(historyState.recentRecallOwnerKeys) &&
             historyState.recentRecallOwnerKeys.length

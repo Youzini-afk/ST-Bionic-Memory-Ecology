@@ -109,6 +109,7 @@ const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
   recentMessages: "上下文",
   userMessage: "用户最新发言",
   candidateNodes: "候选 1\n候选 2",
+  sceneOwnerCandidates: "character:alice\ncharacter:bob",
   graphStats: "candidate_count=2",
 });
 const recallPayload = buildTaskLlmPayload(recallPromptBuild, "fallback-user");
@@ -128,8 +129,14 @@ assert.deepEqual(
     "recentMessages",
     "userMessage",
     "candidateNodes",
+    "sceneOwnerCandidates",
     "graphStats",
   ],
 );
+const recallFormatBlock = recallPayload.promptMessages.find(
+  (message) => message.blockName === "输出格式",
+);
+assert.match(String(recallFormatBlock?.content || ""), /active_owner_keys/);
+assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
 
 console.log("prompt-builder-defaults tests passed");
