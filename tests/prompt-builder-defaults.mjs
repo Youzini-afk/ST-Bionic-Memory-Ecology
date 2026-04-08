@@ -51,6 +51,7 @@ registerHooks({
 
 const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompting/prompt-builder.js");
 const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
+const { initializeHostAdapter } = await import("../host/adapter/index.js");
 
 const settings = {
   taskProfilesVersion: 3,
@@ -145,5 +146,81 @@ const recallRulesBlock = recallPayload.promptMessages.find(
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_keys/);
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
 assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
+
+const formatterCalls = [];
+initializeHostAdapter({
+  regexProvider: {
+    getTavernRegexes() {
+      return [];
+    },
+    isCharacterTavernRegexesEnabled() {
+      return true;
+    },
+    formatAsTavernRegexedString(text, source, destination, options) {
+      formatterCalls.push({ text, source, destination, options });
+      if (source === "ai_output") {
+        return String(text || "").replace(/<action>.*?<\/action>/g, "");
+      }
+      if (source === "user_input") {
+        return String(text || "").replace(/<u>|<\/u>/g, "");
+      }
+      return String(text || "");
+    },
+  },
+});
+
+const regexAwarePromptBuild = await buildTaskPrompt(settings, "extract", {
+  taskName: "extract",
+  charDescription: "",
+  userPersona: "",
+  recentMessages: "这里会被 chatMessages 回填",
+  chatMessages: [
+    {
+      seq: 36,
+      role: "assistant",
+      content: "<action>挥手</action>继续说明",
+    },
+    {
+      seq: 37,
+      role: "user",
+      content: "用户<u>输入</u>",
+    },
+  ],
+  graphStats: "node_count=1",
+  schema: "event(title, summary)",
+  currentRange: "36 ~ 37",
+});
+const regexAwarePayload = buildTaskLlmPayload(
+  regexAwarePromptBuild,
+  "fallback-user",
+);
+const regexAwareRecentBlock = regexAwarePayload.promptMessages.find(
+  (message) => message.sourceKey === "recentMessages",
+);
+assert.match(String(regexAwareRecentBlock?.content || ""), /#36 \[assistant\]: 继续说明/);
+assert.match(String(regexAwareRecentBlock?.content || ""), /#37 \[user\]: 用户输入/);
+assert.doesNotMatch(String(regexAwareRecentBlock?.content || ""), /action|<u>|<\/u>/i);
+assert.equal(
+  formatterCalls.some(
+    (call) =>
+      call.source === "ai_output" &&
+      call.destination === "prompt" &&
+      call.options?.depth === 1 &&
+      call.options?.isPrompt === true,
+  ),
+  true,
+);
+assert.equal(
+  formatterCalls.some(
+    (call) =>
+      call.source === "user_input" &&
+      call.destination === "prompt" &&
+      call.options?.depth === 0 &&
+      call.options?.isPrompt === true,
+  ),
+  true,
+);
+
+initializeHostAdapter({});
 
 console.log("prompt-builder-defaults tests passed");

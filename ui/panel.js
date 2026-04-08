@@ -6233,7 +6233,11 @@ function _renderRegexReuseBadges(rule = {}) {
       text: "仅 Prompt",
     });
   }
-  if (rule.promptStageMode !== "skip" && rule.promptStageApplies === false) {
+  if (
+    rule.sourceType === "local" &&
+    rule.promptStageMode !== "skip" &&
+    rule.promptStageApplies === false
+  ) {
     badges.push({
       className: "is-skip",
       text: "当前任务未启用",

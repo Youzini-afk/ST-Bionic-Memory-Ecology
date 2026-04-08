@@ -300,8 +300,8 @@ try {
       isCharacterTavernRegexesEnabled() {
         return true;
       },
-      formatAsTavernRegexedString(text, source, destination) {
-        formatterCalls.push({ text, source, destination });
+      formatAsTavernRegexedString(text, source, destination, options) {
+        formatterCalls.push({ text, source, destination, options });
         return String(text || "").replace(/Alpha/g, "HOST");
       },
     },
@@ -330,6 +330,10 @@ try {
       text: "Alpha Beta",
       source: "user_input",
       destination: "prompt",
+      options: {
+        isPrompt: true,
+        isMarkdown: false,
+      },
     },
   ]);
   assert.equal(fullBridgeDebug.entries[0].executionMode, "host-real");
@@ -398,6 +402,84 @@ try {
   assert.equal(fallbackOutput.text, "C1");
   assert.equal(fallbackDebug.entries[0].executionMode, "host-fallback");
 
+  setTestContext({
+    extensionSettings: {
+      regex: [
+        createTavernRule("depth-aware", "/Gamma/g", "DEPTH", {
+          placement: [PLACEMENT.WORLD_INFO],
+          minDepth: 1,
+          maxDepth: 1,
+        }),
+      ],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  initializeHostAdapter({});
+  const depthMissResult = applyHostRegexReuse(
+    buildSettings({
+      sources: {
+        global: true,
+        preset: false,
+        character: false,
+      },
+    }),
+    "extract",
+    "Gamma",
+    {
+      sourceType: "world_info",
+      role: "system",
+      formatterOptions: {
+        depth: 0,
+      },
+      debugCollector: { entries: [] },
+    },
+  );
+  const depthHitResult = applyHostRegexReuse(
+    buildSettings({
+      sources: {
+        global: true,
+        preset: false,
+        character: false,
+      },
+    }),
+    "extract",
+    "Gamma",
+    {
+      sourceType: "world_info",
+      role: "system",
+      formatterOptions: {
+        depth: 1,
+      },
+      debugCollector: { entries: [] },
+    },
+  );
+  assert.equal(depthMissResult.text, "Gamma");
+  assert.equal(depthHitResult.text, "DEPTH");
+
+  setTestContext({
+    extensionSettings: fallbackExtensionSettings,
+    presetScripts: [
+      createTavernRule("preset-fallback", "/G1/g", "P1", {
+        promptOnly: true,
+      }),
+    ],
+    characters: [
+      {
+        avatar: "hero.png",
+        data: {
+          extensions: {
+            regex_scripts: [
+              createTavernRule("character-fallback", "/P1/g", "C1", {
+                promptOnly: true,
+              }),
+            ],
+          },
+        },
+      },
+    ],
+  });
+  initializeHostAdapter({});
   const fallbackInspect = inspectTaskRegexReuse(buildSettings(), "extract");
   assert.equal(fallbackInspect.activeRuleCount, 3);
   assert.deepEqual(

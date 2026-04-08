@@ -26,6 +26,90 @@ function normalizeReasons(reasons = []) {
     : [];
 }
 
+function normalizeMessageLikeRole(value = "", isUser = false) {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "user") {
+      return "user";
+    }
+    if (normalized === "assistant") {
+      return "assistant";
+    }
+  }
+  return isUser ? "user" : "assistant";
+}
+
+function getStructuredMessageDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  if (typeof value.content === "string") {
+    const role = normalizeMessageLikeRole(value.role, false);
+    return {
+      contentKey: "content",
+      role,
+      sourceType: role === "user" ? "user_input" : "ai_output",
+      depth: Number.isFinite(Number(value.depth)) ? Number(value.depth) : null,
+    };
+  }
+
+  if (typeof value.mes === "string") {
+    const role = normalizeMessageLikeRole("", Boolean(value.is_user));
+    return {
+      contentKey: "mes",
+      role,
+      sourceType: role === "user" ? "user_input" : "ai_output",
+      depth: Number.isFinite(Number(value.depth)) ? Number(value.depth) : null,
+    };
+  }
+
+  return null;
+}
+
+function mergeFormatterOptions(baseOptions = null, overrides = {}) {
+  const base =
+    baseOptions && typeof baseOptions === "object" ? baseOptions : {};
+  const merged = {
+    ...base,
+    ...overrides,
+  };
+
+  if (merged.isPrompt == null) {
+    merged.isPrompt = true;
+  }
+  if (merged.isMarkdown == null) {
+    merged.isMarkdown = false;
+  }
+
+  if (!Number.isFinite(Number(merged.depth))) {
+    delete merged.depth;
+  } else {
+    merged.depth = Number(merged.depth);
+  }
+
+  return merged;
+}
+
+function buildMessageFormatterOptions(
+  baseOptions = null,
+  descriptor = null,
+  index = -1,
+  total = 0,
+) {
+  let depth =
+    descriptor?.depth != null && Number.isFinite(Number(descriptor.depth))
+    ? Number(descriptor.depth)
+    : null;
+  if (!Number.isFinite(depth) && Number.isFinite(index) && total > 0) {
+    depth = Math.max(total - index - 1, 0);
+  }
+
+  return Number.isFinite(depth)
+    ? mergeFormatterOptions(baseOptions, { depth })
+    : mergeFormatterOptions(baseOptions);
+}
+
 function pushUnique(target = [], value = "") {
   const normalized = String(value || "").trim();
   if (!normalized || target.includes(normalized)) {
@@ -134,12 +218,17 @@ export function sanitizeInjectionText(
   recordSanitizerDebug(debugState, path, sanitizerResult, stage);
 
   const afterSanitizer = String(sanitizerResult.text || "");
-  const hostReuseResult = eligible && applyHostRegex && regexSourceType
+  const normalizedFormatterOptions = mergeFormatterOptions(formatterOptions);
+  const hostReuseResult =
+    eligible &&
+    applyHostRegex &&
+    regexSourceType &&
+    afterSanitizer.length > 0
     ? applyHostRegexReuse(settings, taskType, afterSanitizer, {
         sourceType: regexSourceType,
         role,
         debugCollector: regexCollector,
-        formatterOptions,
+        formatterOptions: normalizedFormatterOptions,
       })
     : {
         text: afterSanitizer,
@@ -284,6 +373,7 @@ export function sanitizeInjectionStructuredValue(
     const sanitizedArray = [];
     let changed = false;
     for (let index = 0; index < value.length; index += 1) {
+      const messageDescriptor = getStructuredMessageDescriptor(value[index]);
       const childResult = sanitizeInjectionStructuredValue(
         settings,
         taskType,
@@ -297,7 +387,14 @@ export function sanitizeInjectionStructuredValue(
           sanitizationEligible,
           regexSourceType,
           role,
-          formatterOptions,
+          formatterOptions: messageDescriptor
+            ? buildMessageFormatterOptions(
+                formatterOptions,
+                messageDescriptor,
+                index,
+                value.length,
+              )
+            : formatterOptions,
           debugState,
           regexCollector,
           applySanitizer,
@@ -335,6 +432,7 @@ export function sanitizeInjectionStructuredValue(
     seen.add(value);
 
     const originalLooksMvuContainer = looksLikeMvuStateContainer(value);
+    const messageDescriptor = getStructuredMessageDescriptor(value);
     const sanitizedObject = {};
     let changed = false;
     let keptEntries = 0;
@@ -359,6 +457,8 @@ export function sanitizeInjectionStructuredValue(
         continue;
       }
 
+      const isMessageContentField =
+        messageDescriptor && key === messageDescriptor.contentKey;
       const childResult = sanitizeInjectionStructuredValue(
         settings,
         taskType,
@@ -370,13 +470,21 @@ export function sanitizeInjectionStructuredValue(
           blockedContents,
           contentOrigin,
           sanitizationEligible,
-          regexSourceType,
-          role,
-          formatterOptions,
+          regexSourceType: isMessageContentField
+            ? messageDescriptor.sourceType
+            : regexSourceType,
+          role: isMessageContentField ? messageDescriptor.role : role,
+          formatterOptions: isMessageContentField
+            ? buildMessageFormatterOptions(formatterOptions, messageDescriptor)
+            : formatterOptions,
           debugState,
           regexCollector,
           applySanitizer,
-          applyHostRegex,
+          applyHostRegex: messageDescriptor
+            ? isMessageContentField
+              ? applyHostRegex && Boolean(messageDescriptor.sourceType)
+              : false
+            : applyHostRegex,
           stripMvuContainers,
           seen,
         },

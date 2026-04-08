@@ -722,6 +722,7 @@ export async function extractMemories({
     schema: schemaDescription,
     schemaDescription,
     recentMessages: dialogueText,
+    chatMessages: messages,
     dialogueText,
     graphStats: graphOverview,
     graphOverview,

@@ -777,6 +777,49 @@ function normalizeHostRegexSourceType(sourceType = "") {
   return "";
 }
 
+function normalizeHostFormatterOptions(formatterOptions = null) {
+  const normalized =
+    formatterOptions && typeof formatterOptions === "object"
+      ? { ...formatterOptions }
+      : {};
+  if (normalized.isPrompt == null) {
+    normalized.isPrompt = true;
+  }
+  if (normalized.isMarkdown == null) {
+    normalized.isMarkdown = false;
+  }
+  if (!Number.isFinite(Number(normalized.depth))) {
+    delete normalized.depth;
+  } else {
+    normalized.depth = Number(normalized.depth);
+  }
+  return normalized;
+}
+
+function ruleMatchesFormatterDepth(rule, formatterOptions = null) {
+  const depth = Number(formatterOptions?.depth);
+  if (!Number.isFinite(depth)) {
+    return true;
+  }
+  if (
+    rule?.minDepth != null &&
+    Number.isFinite(Number(rule.minDepth)) &&
+    Number(rule.minDepth) >= -1 &&
+    depth < Number(rule.minDepth)
+  ) {
+    return false;
+  }
+  if (
+    rule?.maxDepth != null &&
+    Number.isFinite(Number(rule.maxDepth)) &&
+    Number(rule.maxDepth) >= 0 &&
+    depth > Number(rule.maxDepth)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function buildHostRegexExecutionState(regexHost = null) {
   const formatterAvailable =
     typeof regexHost?.formatAsTavernRegexedString === "function";
@@ -835,9 +878,15 @@ function shouldReuseTavernRuleForSourceType(rule, sourceType = "", role = "syste
   }
 
   if (normalizedSourceType === "user_input") {
+    if (role === "mixed") {
+      return rule.sourceFlags.user !== false || rule.sourceFlags.assistant !== false;
+    }
     return rule.sourceFlags.user !== false;
   }
   if (normalizedSourceType === "ai_output") {
+    if (role === "mixed") {
+      return rule.sourceFlags.user !== false || rule.sourceFlags.assistant !== false;
+    }
     if (role === "user") {
       return rule.sourceFlags.user !== false;
     }
@@ -934,17 +983,22 @@ function applyHostRegexReuseFallback(
   {
     sourceType = "",
     role = "system",
+    formatterOptions = null,
   } = {},
 ) {
   let output = String(input || "");
   const appliedRules = [];
   const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
+  const normalizedFormatterOptions = normalizeHostFormatterOptions(formatterOptions);
 
   for (const rule of Array.isArray(tavernRules) ? tavernRules : []) {
     if (!shouldReuseTavernRuleForPrompt(rule, "host-fallback")) {
       continue;
     }
     if (!shouldReuseTavernRuleForSourceType(rule, normalizedSourceType, role)) {
+      continue;
+    }
+    if (!ruleMatchesFormatterDepth(rule, normalizedFormatterOptions)) {
       continue;
     }
 
@@ -986,6 +1040,7 @@ export function applyHostRegexReuse(
   const input = typeof text === "string" ? text : "";
   const normalizedTaskType = String(taskType || "").trim();
   const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
+  const normalizedFormatterOptions = normalizeHostFormatterOptions(formatterOptions);
   const profile = getActiveTaskProfile(settings, normalizedTaskType);
   const regexConfig = profile?.regex || {};
   const regexHost = getRegexHost();
@@ -1064,9 +1119,7 @@ export function applyHostRegexReuse(
           input,
           normalizedSourceType,
           "prompt",
-          formatterOptions && typeof formatterOptions === "object"
-            ? formatterOptions
-            : undefined,
+          normalizedFormatterOptions,
         ) ?? input,
       );
       pushDebug(debugCollector, {
@@ -1101,6 +1154,7 @@ export function applyHostRegexReuse(
   const fallback = applyHostRegexReuseFallback(input, tavernRules, {
     sourceType: normalizedSourceType,
     role,
+    formatterOptions: normalizedFormatterOptions,
   });
   const fallbackReason =
     executionState.mode === "host-unavailable"

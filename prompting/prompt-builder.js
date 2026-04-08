@@ -269,11 +269,66 @@ function messageUsesWorldInfoContent(message = {}) {
   return String(message?.source || "") === "worldInfo-atDepth";
 }
 
+function getPromptMessageLikeDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  if (typeof value.content === "string") {
+    const role = String(value.role || "assistant").trim().toLowerCase();
+    return {
+      content: String(value.content || ""),
+      role: role === "user" ? "user" : "assistant",
+      seq: Number.isFinite(Number(value.seq)) ? Number(value.seq) : null,
+    };
+  }
+
+  if (typeof value.mes === "string") {
+    return {
+      content: String(value.mes || ""),
+      role: value.is_user === true ? "user" : "assistant",
+      seq: Number.isFinite(Number(value.seq)) ? Number(value.seq) : null,
+    };
+  }
+
+  return null;
+}
+
+function isPromptMessageArray(value) {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((entry) => getPromptMessageLikeDescriptor(entry))
+  );
+}
+
+function formatPromptMessageTranscript(value) {
+  const entries = Array.isArray(value) ? value : [value];
+  return entries
+    .map((entry, index) => {
+      const descriptor = getPromptMessageLikeDescriptor(entry);
+      if (!descriptor) {
+        return "";
+      }
+      const seqLabel =
+        descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
+      return `${seqLabel} [${descriptor.role}]: ${descriptor.content}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function stringifyInterpolatedValue(value) {
   if (value == null) return "";
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
+  }
+  if (getPromptMessageLikeDescriptor(value)) {
+    return formatPromptMessageTranscript(value);
+  }
+  if (isPromptMessageArray(value)) {
+    return formatPromptMessageTranscript(value);
   }
 
   try {
@@ -632,6 +687,32 @@ function sanitizePromptMessages(
     .filter(Boolean);
 }
 
+function resolveStructuredMessageSanitizerInput(fieldName = "", context = {}, value) {
+  const normalizedFieldName = String(fieldName || "").trim();
+  if (!["recentMessages", "dialogueText"].includes(normalizedFieldName)) {
+    return {
+      value,
+      renderAsTranscript: false,
+    };
+  }
+
+  if (
+    typeof value === "string" &&
+    Array.isArray(context?.chatMessages) &&
+    isPromptMessageArray(context.chatMessages)
+  ) {
+    return {
+      value: context.chatMessages,
+      renderAsTranscript: true,
+    };
+  }
+
+  return {
+    value,
+    renderAsTranscript: false,
+  };
+}
+
 function sanitizePromptContextInputs(
   settings = {},
   taskType,
@@ -697,13 +778,19 @@ function sanitizePromptContextInputs(
       continue;
     }
     const value = sanitizedContext[fieldName];
+    const structuredSanitizerInput = resolveStructuredMessageSanitizerInput(
+      fieldName,
+      context,
+      value,
+    );
+    const valueForSanitizer = structuredSanitizerInput.value;
     const regexStage = INPUT_REGEX_STAGE_BY_FIELD[fieldName] || "";
     const regexRole = INPUT_REGEX_ROLE_BY_FIELD[fieldName] || "system";
     const regexSourceType = INPUT_HOST_REGEX_SOURCE_BY_FIELD[fieldName] || "";
     const sanitized = sanitizeInjectionStructuredValue(
       settings,
       taskType,
-      value,
+      valueForSanitizer,
       {
         fieldName,
         path: fieldName,
@@ -720,12 +807,15 @@ function sanitizePromptContextInputs(
       },
     );
     let sanitizedValue = sanitized.omit
-      ? Array.isArray(value)
+      ? Array.isArray(valueForSanitizer)
         ? []
-        : typeof value === "string"
+        : typeof valueForSanitizer === "string"
           ? ""
           : null
       : sanitized.value;
+    if (structuredSanitizerInput.renderAsTranscript) {
+      sanitizedValue = stringifyInterpolatedValue(sanitizedValue);
+    }
     sanitizedValue = applyLocalRegexToStructuredValue(
       sanitizedValue,
       regexStage,
