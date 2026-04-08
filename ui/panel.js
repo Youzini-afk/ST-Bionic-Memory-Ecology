@@ -3410,7 +3410,7 @@ function _refreshConfigTab() {
   );
   _setCheckboxValue(
     "bme-setting-ai-monitor-enabled",
-    settings.enableAiMonitor ?? false,
+    settings.enableAiMonitor ?? true,
   );
   _setCheckboxValue(
     "bme-setting-hide-old-messages-enabled",
