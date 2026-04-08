@@ -1233,7 +1233,7 @@ function _renderCogMonitorMini() {
 
   const settings = _getSettings?.() || {};
   if (settings.enableAiMonitor !== true) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">AI Monitor 已关闭</div>`;
+    el.innerHTML = `<div class="bme-cog-monitor-empty">任务监视器已关闭</div>`;
     return;
   }
 
@@ -1246,8 +1246,6 @@ function _renderCogMonitorMini() {
     return;
   }
 
-  const taskTypeLabels = { extract: "提取", recall: "召回", compress: "压缩", sleep: "遗忘", evolve: "进化", embed: "向量" };
-
   el.innerHTML = timeline
     .slice(-8)
     .reverse()
@@ -1256,15 +1254,18 @@ function _renderCogMonitorMini() {
       const statusClass = status.includes("error") || status.includes("fail") ? "is-error"
         : status.includes("run") ? "is-running" : "is-success";
       const taskType = String(entry?.taskType || "unknown");
-      const route = String(entry?.route || entry?.llmConfigSourceLabel || entry?.model || "").trim();
+      const route =
+        _getMonitorRouteLabel(entry?.route) ||
+        _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
+        String(entry?.model || "").trim();
       const durationMs = Number(entry?.durationMs);
       const durationText = Number.isFinite(durationMs) && durationMs > 0
         ? durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${Math.round(durationMs)}ms`
         : "—";
       return `
         <div class="bme-cog-monitor-entry ${statusClass}">
-          <span class="bme-cog-monitor-badge">${_escHtml(taskTypeLabels[taskType] || taskType)}</span>
-          <span class="bme-cog-monitor-info">${_escHtml(route || "—")}</span>
+          <span class="bme-cog-monitor-badge">${_escHtml(_getMonitorTaskTypeLabel(taskType))}</span>
+          <span class="bme-cog-monitor-info">${_escHtml(route || _getMonitorStatusLabel(entry?.status) || "—")}</span>
           <span class="bme-cog-monitor-duration">${_escHtml(durationText)}</span>
         </div>`;
     })
@@ -2007,7 +2008,7 @@ function _refreshAiMonitorDashboard() {
     _renderMiniRecentList(
       "bme-ai-monitor-list",
       [],
-      "AI Monitor 已关闭",
+      "任务监视器已关闭",
     );
     return;
   }
@@ -2022,15 +2023,18 @@ function _refreshAiMonitorDashboard() {
       .slice(-6)
       .reverse()
       .map((entry) => {
-        const route = String(entry?.route || entry?.llmConfigSourceLabel || "").trim();
+        const route =
+          _getMonitorRouteLabel(entry?.route) ||
+          _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
+          "";
         const model = String(entry?.model || "").trim();
         const durationText =
           Number.isFinite(Number(entry?.durationMs)) && Number(entry.durationMs) > 0
             ? `${Math.round(Number(entry.durationMs))}ms`
             : "";
         return [
-          String(entry?.taskType || "unknown"),
-          String(entry?.status || ""),
+          _getMonitorTaskTypeLabel(entry?.taskType),
+          _getMonitorStatusLabel(entry?.status),
           route || model ? `${route || model}` : "",
           durationText,
         ]
@@ -5110,6 +5114,122 @@ function _formatDurationMs(durationMs) {
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
 }
 
+function _getMonitorTaskTypeLabel(taskType = "") {
+  const normalized = String(taskType || "").trim().toLowerCase();
+  const labels = {
+    extract: "提取",
+    recall: "召回",
+    consolidation: "整合",
+    compress: "压缩",
+    synopsis: "概要",
+    reflection: "反思",
+    sleep: "遗忘",
+    evolve: "进化",
+    embed: "向量",
+    rebuild: "重建",
+  };
+  return labels[normalized] || String(taskType || "未知任务");
+}
+
+function _getMonitorStatusLabel(status = "") {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) return "未知状态";
+  if (normalized.includes("error") || normalized.includes("fail")) return "失败";
+  if (normalized.includes("run")) return "运行中";
+  if (normalized.includes("queue")) return "排队中";
+  if (normalized.includes("pending")) return "等待中";
+  if (normalized.includes("skip")) return "已跳过";
+  if (normalized.includes("fallback")) return "已回退";
+  if (normalized.includes("disable")) return "已关闭";
+  if (
+    normalized.includes("success") ||
+    normalized.includes("complete") ||
+    normalized.includes("done") ||
+    normalized === "ok"
+  ) {
+    return "成功";
+  }
+  return String(status || "未知状态");
+}
+
+function _getMonitorRoleLabel(role = "") {
+  const normalized = String(role || "").trim().toLowerCase();
+  const labels = {
+    system: "系统",
+    user: "用户",
+    assistant: "助手",
+    tool: "工具",
+  };
+  return labels[normalized] || String(role || "未知");
+}
+
+function _getMonitorRouteLabel(value = "") {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "";
+  const labels = {
+    "dedicated-openai-compatible": "专用 OpenAI 兼容接口",
+    "sillytavern-current-model": "酒馆当前模型",
+    "dedicated-memory-llm": "专用记忆模型",
+    global: "跟随当前 API",
+    "task-preset": "任务专用模板",
+    "global-fallback-missing-task-preset": "任务模板缺失，已回退当前 API",
+    "global-fallback-invalid-task-preset": "任务模板不完整，已回退当前 API",
+  };
+  return labels[normalized] || normalized;
+}
+
+function _getMonitorStageLabel(stage = "") {
+  const normalized = String(stage || "").trim();
+  if (!normalized) return "—";
+  const labels = {
+    "input.userMessage": "输入阶段: 当前用户消息",
+    "input.recentMessages": "输入阶段: 最近消息",
+    "input.candidateText": "输入阶段: 候选文本",
+    "input.finalPrompt": "输入阶段: 最终提示词",
+    "output.rawResponse": "输出阶段: 原始响应",
+    "output.beforeParse": "输出阶段: 解析前",
+    "world-info-rendered": "世界书渲染后",
+    "final-injection-safe": "注入内容最终清洗",
+    "host:user_input": "宿主注入: 用户输入",
+    "host:ai_output": "宿主注入: AI 输出",
+    "host:world_info": "宿主注入: 世界书",
+    "host:reasoning": "宿主注入: 思维链/推理",
+  };
+  return labels[normalized] || normalized;
+}
+
+function _formatMonitorStageList(stages = []) {
+  if (!Array.isArray(stages) || !stages.length) return "—";
+  return stages
+    .map((entry) => _getMonitorStageLabel(entry?.stage || entry))
+    .filter(Boolean)
+    .join("、") || "—";
+}
+
+function _getMonitorEjsStatusLabel(status = "") {
+  const normalized = String(status || "").trim().toLowerCase();
+  if (!normalized) return "";
+  const labels = {
+    primary: "主运行时",
+    fallback: "回退运行时",
+    failed: "不可用",
+  };
+  return labels[normalized] || String(status || "");
+}
+
+function _formatMonitorRouteInfo(entry = {}) {
+  const parts = [
+    _getMonitorRouteLabel(entry?.route),
+    _getMonitorRouteLabel(entry?.llmConfigSourceLabel),
+    String(entry?.model || "").trim() ? `模型：${String(entry.model).trim()}` : "",
+  ].filter(Boolean);
+  const uniqueParts = [];
+  for (const part of parts) {
+    if (!uniqueParts.includes(part)) uniqueParts.push(part);
+  }
+  return uniqueParts.join(" · ") || "未记录路由信息";
+}
+
 function _summarizeMonitorGovernance(entry = {}) {
   const promptExecution = entry?.promptExecution || {};
   const worldInfo = promptExecution?.worldInfo || null;
@@ -5122,11 +5242,11 @@ function _summarizeMonitorGovernance(entry = {}) {
 
   if (worldInfo) {
     lines.push(
-      `世界书: ${worldInfo.hit ? "命中" : "未命中"} · before ${Number(worldInfo.beforeCount || 0)} · after ${Number(worldInfo.afterCount || 0)} · atDepth ${Number(worldInfo.atDepthCount || 0)}`,
+      `世界书: ${worldInfo.hit ? "命中" : "未命中"} · 前置 ${Number(worldInfo.beforeCount || 0)} · 后置 ${Number(worldInfo.afterCount || 0)} · 深度 ${Number(worldInfo.atDepthCount || 0)}`,
     );
   }
   if (promptExecution?.ejsRuntimeStatus) {
-    lines.push(`EJS: ${String(promptExecution.ejsRuntimeStatus || "")}`);
+    lines.push(`EJS: ${_getMonitorEjsStatusLabel(promptExecution.ejsRuntimeStatus)}`);
   }
   if (regexInput.length > 0) {
     const appliedRuleCount = regexInput.reduce(
@@ -5137,12 +5257,12 @@ function _summarizeMonitorGovernance(entry = {}) {
   }
   if (requestCleaning) {
     lines.push(
-      `发送前清洗: ${requestCleaning.changed ? "有改动" : "无改动"} · stage ${Array.isArray(requestCleaning.stages) ? requestCleaning.stages.join(", ") : "—"}`,
+      `发送前清洗: ${requestCleaning.changed ? "有改动" : "无改动"} · 阶段 ${_formatMonitorStageList(requestCleaning.stages)}`,
     );
   }
   if (responseCleaning) {
     lines.push(
-      `响应清洗: ${responseCleaning.changed ? "有改动" : "无改动"} · stage ${Array.isArray(responseCleaning.stages) ? responseCleaning.stages.join(", ") : "—"}`,
+      `响应清洗: ${responseCleaning.changed ? "有改动" : "无改动"} · 阶段 ${_formatMonitorStageList(responseCleaning.stages)}`,
     );
   }
   if (entry?.jsonFailure?.failureReason) {
@@ -5162,27 +5282,21 @@ function _renderAiMonitorTraceCard(state) {
   const timeline = Array.isArray(state.taskTimeline) ? state.taskTimeline : [];
   if (state.settings?.enableAiMonitor !== true) {
     return `
-      <div class="bme-config-card-title">AI Monitor 任务流水</div>
+      <div class="bme-config-card-title">任务监视器流水</div>
       <div class="bme-config-help">
-        AI Monitor 当前是关闭的。打开后，这里会保留最近的提取 / 召回 / 维护任务快照，便于排查到底发了什么、用了哪套模型、做了哪些清洗。
+        任务监视器当前已关闭。打开后，这里会保留最近的提取 / 召回 / 维护任务快照，便于排查到底发了什么、用了哪套模型、做了哪些清洗。
       </div>
     `;
   }
 
   if (!timeline.length) {
     return `
-      <div class="bme-config-card-title">AI Monitor 任务流水</div>
+      <div class="bme-config-card-title">任务监视器流水</div>
       <div class="bme-config-help">
         还没有任务流水。等提取、召回或维护任务跑过一轮后，这里就会出现最近记录。
       </div>
     `;
   }
-
-  const taskTypeLabels = {
-    extract: "提取", recall: "召回", compress: "压缩",
-    sleep: "遗忘", evolve: "进化", embed: "向量",
-    synopsis: "概要", rebuild: "重建",
-  };
 
   const cards = timeline
     .slice(-8)
@@ -5196,17 +5310,14 @@ function _renderAiMonitorTraceCard(state) {
         String(entry?.model || "").trim() ||
         "未知模型";
       const taskType = String(entry?.taskType || "unknown");
-      const taskLabel = taskTypeLabels[taskType] || taskType;
+      const taskLabel = _getMonitorTaskTypeLabel(taskType);
       const status = String(entry?.status || "").toLowerCase();
       const dotClass = status.includes("error") || status.includes("fail")
         ? "dot-error"
         : status.includes("run")
           ? "dot-running"
           : "dot-success";
-      const routeInfo = [
-        String(entry?.route || "").trim(),
-        String(entry?.llmConfigSourceLabel || "").trim(),
-      ].filter(Boolean).join(" · ") || "未记录路由信息";
+      const routeInfo = _formatMonitorRouteInfo(entry);
 
       // Governance tags
       const govTags = [];
@@ -5239,7 +5350,7 @@ function _renderAiMonitorTraceCard(state) {
                 <div class="bme-ai-monitor-entry__meta">
                   ${_escHtml(
                     [
-                      String(entry?.status || "unknown"),
+                      _getMonitorStatusLabel(entry?.status),
                       _formatTaskProfileTime(entry?.updatedAt),
                     ].filter(Boolean).join(" · "),
                   )}
@@ -5262,9 +5373,9 @@ function _renderAiMonitorTraceCard(state) {
                 : ""
             }
             ${_renderMessageTraceTextBlock(
-              "最终发送 messages 预览",
+              "最终发送消息预览",
               previewText,
-              "这条任务没有捕获到完整的 messages 预览。",
+              "这条任务没有捕获到完整的消息预览。",
             )}
           </div>
         </div>
@@ -5276,7 +5387,7 @@ function _renderAiMonitorTraceCard(state) {
   return `
     <div class="bme-config-card-head">
       <div>
-        <div class="bme-config-card-title">AI Monitor 任务流水</div>
+        <div class="bme-config-card-title">任务监视器流水</div>
         <div class="bme-config-card-subtitle">
           最近 ${Math.min(timeline.length, 8)} 条任务快照 · 点击展开查看详情
         </div>
@@ -5393,7 +5504,7 @@ function _stringifyTraceMessages(messages = []) {
 
   return normalizedMessages
     .map(
-      (message) => `【${message.role}】\n${message.content}`,
+      (message) => `【${_getMonitorRoleLabel(message.role)}】\n${message.content}`,
     )
     .join("\n\n---\n\n");
 }
@@ -5404,10 +5515,10 @@ function _buildMainAiTraceText(triggeredUserMessage = "", injectionText = "") {
   const normalizedInjectionText = String(injectionText || "").trim();
 
   if (normalizedUserMessage) {
-    sections.push(`【user】\n${normalizedUserMessage}`);
+    sections.push(`【用户】\n${normalizedUserMessage}`);
   }
   if (normalizedInjectionText) {
-    sections.push(`【memory injection】\n${normalizedInjectionText}`);
+    sections.push(`【记忆注入】\n${normalizedInjectionText}`);
   }
 
   return sections.join("\n\n---\n\n").trim();
