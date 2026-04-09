@@ -282,6 +282,8 @@ let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
 let currentTaskProfileDragBlockId = "";
 let currentTaskProfileRuleId = "";
+let currentTaskProfileDragRuleId = "";
+let currentTaskProfileDragRuleIsGlobal = false;
 let showGlobalRegexPanel = false;
 let currentGlobalRegexRuleId = "";
 let currentCognitionOwnerKey = "";
@@ -5060,6 +5062,74 @@ function _bindTaskProfileWorkspace() {
       currentTaskProfileDragBlockId = "";
       _clearTaskBlockDragIndicators(workspace);
     });
+    workspace.addEventListener("dragstart", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const handle = target.closest(".bme-regex-drag-handle");
+      const row = target.closest(".bme-regex-rule-row");
+      if (!handle || !(row instanceof HTMLElement)) return;
+      const ruleId = String(row.dataset.ruleId || "").trim();
+      if (!ruleId) return;
+      currentTaskProfileDragRuleId = ruleId;
+      currentTaskProfileDragRuleIsGlobal = _isGlobalRegexPanelTarget(row);
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.dropEffect = "move";
+        event.dataTransfer.setData("text/plain", ruleId);
+      }
+      window.requestAnimationFrame(() => {
+        row.classList.add("dragging");
+      });
+    });
+    workspace.addEventListener("dragover", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !currentTaskProfileDragRuleId) return;
+      const row = target.closest(".bme-regex-rule-row");
+      if (!(row instanceof HTMLElement)) return;
+      const isGlobalRow = _isGlobalRegexPanelTarget(row);
+      if (isGlobalRow !== currentTaskProfileDragRuleIsGlobal) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "move";
+      }
+      const position = _getRegexRuleDropPosition(row, event.clientY);
+      _setRegexRuleDragIndicator(workspace, row, position);
+    });
+    workspace.addEventListener("dragleave", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".bme-regex-rule-row");
+      if (!(row instanceof HTMLElement)) return;
+      const relatedTarget = event.relatedTarget;
+      if (relatedTarget instanceof Node && row.contains(relatedTarget)) {
+        return;
+      }
+      row.classList.remove("drag-over-top", "drag-over-bottom");
+    });
+    workspace.addEventListener("drop", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".bme-regex-rule-row");
+      if (!(row instanceof HTMLElement)) return;
+      const isGlobalRow = _isGlobalRegexPanelTarget(row);
+      if (isGlobalRow !== currentTaskProfileDragRuleIsGlobal) return;
+      event.preventDefault();
+      const sourceId =
+        currentTaskProfileDragRuleId ||
+        String(event.dataTransfer?.getData("text/plain") || "").trim();
+      const targetId = String(row.dataset.ruleId || "").trim();
+      const position = _getRegexRuleDropPosition(row, event.clientY);
+      _clearRegexRuleDragIndicators(workspace);
+      currentTaskProfileDragRuleId = "";
+      currentTaskProfileDragRuleIsGlobal = false;
+      if (!sourceId || !targetId || sourceId === targetId) return;
+      _reorderRegexRules(sourceId, targetId, position, isGlobalRow);
+    });
+    workspace.addEventListener("dragend", () => {
+      currentTaskProfileDragRuleId = "";
+      currentTaskProfileDragRuleIsGlobal = false;
+      _clearRegexRuleDragIndicators(workspace);
+    });
     workspace.dataset.bmeBound = "true";
   }
 
@@ -5280,6 +5350,13 @@ function _handleTaskProfileWorkspaceInput(event) {
     } else {
       _persistSelectedRegexRuleField(target, false);
     }
+    return;
+  }
+
+  if (target.matches("[data-regex-rule-row-enabled]")) {
+    const ruleId = String(target.dataset.ruleId || "").trim();
+    if (!ruleId) return;
+    _persistRegexRuleEnabledById(ruleId, Boolean(target.checked), isGlobalRegexPanel, false);
   }
 }
 
@@ -5353,6 +5430,13 @@ function _handleTaskProfileWorkspaceChange(event) {
     } else {
       _persistSelectedRegexRuleField(target, true);
     }
+    return;
+  }
+
+  if (target.matches("[data-regex-rule-row-enabled]")) {
+    const ruleId = String(target.dataset.ruleId || "").trim();
+    if (!ruleId) return;
+    _persistRegexRuleEnabledById(ruleId, Boolean(target.checked), isGlobalRegexPanel, true);
   }
 }
 
@@ -5392,10 +5476,10 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   if (currentTaskProfileBlockId && !blocks.some((block) => block.id === currentTaskProfileBlockId)) {
     currentTaskProfileBlockId = blocks[0]?.id || "";
   }
-  if (!regexRules.some((rule) => rule.id === currentTaskProfileRuleId)) {
+  if (currentTaskProfileRuleId && !regexRules.some((rule) => rule.id === currentTaskProfileRuleId)) {
     currentTaskProfileRuleId = regexRules[0]?.id || "";
   }
-  if (!globalRegexRules.some((rule) => rule.id === currentGlobalRegexRuleId)) {
+  if (currentGlobalRegexRuleId && !globalRegexRules.some((rule) => rule.id === currentGlobalRegexRuleId)) {
     currentGlobalRegexRuleId = globalRegexRules[0]?.id || "";
   }
 
@@ -6112,6 +6196,26 @@ async function _handleTaskProfileWorkspaceClick(event) {
       _refreshTaskProfileWorkspace();
       return;
     }
+    case "toggle-regex-rule-expand": {
+      const originEl = event.target;
+      if (
+        originEl.closest(".bme-task-row-toggle") ||
+        originEl.closest(".bme-task-row-btn-danger") ||
+        originEl.closest(".bme-regex-drag-handle")
+      ) {
+        return;
+      }
+      const ruleId = actionEl.dataset.ruleId || "";
+      if (_isGlobalRegexPanelTarget(actionEl)) {
+        currentGlobalRegexRuleId =
+          currentGlobalRegexRuleId === ruleId ? "" : ruleId;
+      } else {
+        currentTaskProfileRuleId =
+          currentTaskProfileRuleId === ruleId ? "" : ruleId;
+      }
+      _refreshTaskProfileWorkspace();
+      return;
+    }
     case "select-regex-rule":
       if (_isGlobalRegexPanelTarget(actionEl)) {
         currentGlobalRegexRuleId = actionEl.dataset.ruleId || "";
@@ -6560,7 +6664,6 @@ function _renderTaskRegexTab(state, options = {}) {
   const selectedRule =
     options.selectedRule === undefined ? state.selectedRule : options.selectedRule;
   const normalizedStages = normalizeTaskRegexStages(regex.stages || {});
-  const selectAction = options.selectAction || "select-regex-rule";
   const deleteAction = options.deleteAction || "delete-regex-rule";
   const addAction = options.addAction || "add-regex-rule";
   const addButtonLabel = options.addButtonLabel || "+ 新增规则";
@@ -6578,6 +6681,9 @@ function _renderTaskRegexTab(state, options = {}) {
   const emptyText = options.emptyText || "当前预设还没有本地正则规则。";
   const defaultNamePrefix = options.defaultNamePrefix || "本地规则";
   const headerExtraActions = options.extraHeaderActions || "";
+  const enableToggleTitle = options.enableToggleTitle || "启用任务正则";
+  const enableToggleDesc =
+    options.enableToggleDesc || "关闭后当前配置不执行任何任务级正则。";
   const editorState = {
     ...state,
     selectedRule,
@@ -6585,8 +6691,8 @@ function _renderTaskRegexTab(state, options = {}) {
 
   return `
     <div class="bme-task-tab-body${wrapperClassName}">
-      <div class="bme-task-regex-top">
-        <div class="bme-config-card">
+      <div class="bme-regex-settings-stack">
+        <div class="bme-config-card bme-regex-settings-card">
           <div class="bme-config-card-head">
             <div>
               <div class="bme-config-card-title">${_escHtml(sectionTitle)}</div>
@@ -6605,8 +6711,8 @@ function _renderTaskRegexTab(state, options = {}) {
           <div class="bme-task-toggle-list">
             <label class="bme-toggle-item">
               <span class="bme-toggle-copy">
-                <span class="bme-toggle-title">启用任务正则</span>
-                <span class="bme-toggle-desc">关闭后当前配置不执行任何任务级正则。</span>
+                <span class="bme-toggle-title">${_escHtml(enableToggleTitle)}</span>
+                <span class="bme-toggle-desc">${_escHtml(enableToggleDesc)}</span>
               </span>
               <input
                 type="checkbox"
@@ -6627,7 +6733,9 @@ function _renderTaskRegexTab(state, options = {}) {
               />
             </label>
           </div>
+        </div>
 
+        <div class="bme-config-card bme-regex-settings-card">
           <div class="bme-task-section-label">复用来源</div>
           <div class="bme-task-toggle-list">
             ${[
@@ -6652,7 +6760,9 @@ function _renderTaskRegexTab(state, options = {}) {
               )
               .join("")}
           </div>
+        </div>
 
+        <div class="bme-config-card bme-regex-settings-card">
           <div class="bme-task-section-label">执行阶段</div>
           <div class="bme-task-toggle-list">
             ${TASK_PROFILE_REGEX_STAGES.map(
@@ -6672,42 +6782,37 @@ function _renderTaskRegexTab(state, options = {}) {
             ).join("")}
           </div>
         </div>
-
-        <div class="bme-config-card">
-          <div class="bme-config-card-head">
-            <div>
-              <div class="bme-config-card-title">${_escHtml(rulesTitle)}</div>
-              <div class="bme-config-card-subtitle">
-                ${_escHtml(rulesSubtitle)}
-              </div>
-            </div>
-            <button class="bme-config-secondary-btn" data-task-action="${_escAttr(addAction)}" type="button">
-              ${_escHtml(addButtonLabel)}
-            </button>
-          </div>
-
-          <div class="bme-task-list">
-            ${regexRules.length
-              ? regexRules
-                  .map((rule, index) =>
-                    _renderRegexRuleListItem(rule, index, editorState, {
-                      selectAction,
-                      deleteAction,
-                      defaultNamePrefix,
-                    })
-                  )
-                  .join("")
-              : `
-                  <div class="bme-task-empty">
-                    ${_escHtml(emptyText)}
-                  </div>
-                `}
-          </div>
-        </div>
       </div>
 
-      <div class="bme-config-card">
-        ${_renderRegexRuleEditor(editorState)}
+      <div class="bme-config-card bme-regex-rule-card">
+        <div class="bme-config-card-head">
+          <div>
+            <div class="bme-config-card-title">${_escHtml(rulesTitle)}</div>
+            <div class="bme-config-card-subtitle">
+              ${_escHtml(rulesSubtitle)}
+            </div>
+          </div>
+          <button class="bme-config-secondary-btn" data-task-action="${_escAttr(addAction)}" type="button">
+            ${_escHtml(addButtonLabel)}
+          </button>
+        </div>
+
+        <div class="bme-regex-rule-rows">
+          ${regexRules.length
+            ? regexRules
+                .map((rule, index) =>
+                  _renderRegexRuleRow(rule, index, editorState, {
+                    deleteAction,
+                    defaultNamePrefix,
+                  })
+                )
+                .join("")
+            : `
+                <div class="bme-task-empty">
+                  ${_escHtml(emptyText)}
+                </div>
+              `}
+        </div>
       </div>
     </div>
   `;
@@ -6730,6 +6835,8 @@ function _renderGlobalRegexPanel(state) {
       wrapperClassName: "bme-global-regex-panel",
       sectionTitle: "通用正则设置",
       sectionSubtitle: "所有任务共享同一套任务正则开关、复用来源、执行阶段与附加规则。",
+      enableToggleTitle: "启用通用正则",
+      enableToggleDesc: "关闭后所有任务都不执行任何共享正则配置。",
       rulesTitle: "通用附加规则",
       rulesSubtitle: "这里维护所有任务共享的附加规则。",
       emptyText: "当前还没有通用正则规则。",
@@ -7825,63 +7932,94 @@ function _renderGenerationField(field, value, state = {}) {
   `;
 }
 
-function _renderRegexRuleListItem(rule, index, state, options = {}) {
-  const isSelected = rule.id === state.selectedRule?.id;
-  const selectAction = options.selectAction || "select-regex-rule";
+function _formatRegexRulePreview(findRegex = "") {
+  const collapsed = String(findRegex || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return collapsed || "(未填写 find_regex)";
+}
+
+function _renderRegexRuleRow(rule, index, state, options = {}) {
+  const isExpanded = rule.id === state.selectedRule?.id;
   const deleteAction = options.deleteAction || "delete-regex-rule";
   const defaultNamePrefix = options.defaultNamePrefix || "本地规则";
+  const statusLabel = rule.enabled ? "启用" : "停用";
+  const previewText = _formatRegexRulePreview(rule.find_regex);
 
   return `
-    <div class="bme-task-list-entry">
-      <button
-        class="bme-task-list-item ${isSelected ? "active" : ""}"
-        data-task-action="${_escAttr(selectAction)}"
+    <div
+      class="bme-regex-rule-row ${isExpanded ? "is-expanded" : ""} ${rule.enabled ? "" : "is-disabled"}"
+      data-rule-id="${_escAttr(rule.id)}"
+    >
+      <div
+        class="bme-regex-rule-row-header"
+        data-task-action="toggle-regex-rule-expand"
         data-rule-id="${_escAttr(rule.id)}"
-        type="button"
       >
-        <span class="bme-task-list-index">#${index + 1}</span>
-        <span class="bme-task-list-copy">
-          <span class="bme-task-list-title">${_escHtml(rule.script_name || `${defaultNamePrefix} ${index + 1}`)}</span>
-          <span class="bme-task-list-meta">
-            ${rule.enabled ? "启用" : "停用"} · ${_escHtml(rule.find_regex || "(未填写 find_regex)")}
-          </span>
+        <span
+          class="bme-task-drag-handle bme-regex-drag-handle"
+          title="拖拽排序"
+          aria-label="拖拽排序"
+          draggable="true"
+        >
+          <i class="fa-solid fa-grip-vertical"></i>
         </span>
-      </button>
-      <div class="bme-task-inline-actions">
+        <span class="bme-regex-rule-name">
+          ${_escHtml(rule.script_name || `${defaultNamePrefix} ${index + 1}`)}
+        </span>
+        <span class="bme-regex-rule-status ${rule.enabled ? "is-enabled" : "is-disabled"}">
+          ${_escHtml(statusLabel)}
+        </span>
+        <span class="bme-regex-rule-preview" title="${_escAttr(previewText)}">
+          ${_escHtml(previewText)}
+        </span>
         <button
-          class="bme-config-secondary-btn bme-task-mini-btn"
+          class="bme-task-row-btn"
+          data-task-action="toggle-regex-rule-expand"
+          data-rule-id="${_escAttr(rule.id)}"
+          type="button"
+          title="编辑"
+        >
+          <i class="fa-solid fa-pen"></i>
+        </button>
+        <button
+          class="bme-task-row-btn bme-task-row-btn-danger"
           data-task-action="${_escAttr(deleteAction)}"
           data-rule-id="${_escAttr(rule.id)}"
           type="button"
+          title="删除"
         >
-          删除
+          <i class="fa-solid fa-xmark"></i>
         </button>
+        <label class="bme-task-row-toggle" title="${rule.enabled ? "已启用" : "已停用"}">
+          <input
+            type="checkbox"
+            data-regex-rule-row-enabled="true"
+            data-rule-id="${_escAttr(rule.id)}"
+            ${rule.enabled ? "checked" : ""}
+          />
+          <span class="bme-task-row-toggle-slider"></span>
+        </label>
       </div>
+      ${isExpanded
+        ? `
+            <div class="bme-regex-rule-expand">
+              ${_renderRegexRuleInlineEditor(rule)}
+            </div>
+          `
+        : ""}
     </div>
   `;
 }
-function _renderRegexRuleEditor(state) {
-  const rule = state.selectedRule;
-  if (!rule) {
-    return `
-      <div class="bme-config-card-title">规则详情</div>
-      <div class="bme-config-help">从左侧规则列表选择一条规则进行编辑。</div>
-    `;
-  }
 
+function _renderRegexRuleInlineEditor(rule) {
   const trimStrings = Array.isArray(rule.trim_strings)
     ? rule.trim_strings.join("\n")
     : String(rule.trim_strings || "");
 
   return `
-    <div class="bme-config-card-head">
-      <div>
-        <div class="bme-config-card-title">规则详情</div>
-        <div class="bme-config-card-subtitle">
-          字段尽量与 Tavern 正则结构保持对齐，方便后续导入导出与对照。
-        </div>
-      </div>
-      <span class="bme-task-pill">${rule.enabled ? "启用中" : "已停用"}</span>
+    <div class="bme-task-note">
+      字段尽量与 Tavern 正则结构保持对齐，方便后续导入导出与对照。
     </div>
 
     <div class="bme-config-row">
@@ -8005,6 +8143,17 @@ function _renderRegexRuleEditor(state) {
         />
       </label>
     </div>
+
+    <div class="bme-task-expand-footer">
+      <button
+        class="bme-config-secondary-btn"
+        data-task-action="toggle-regex-rule-expand"
+        data-rule-id="${_escAttr(rule.id)}"
+        type="button"
+      >
+        <i class="fa-solid fa-chevron-up"></i> 收起
+      </button>
+    </div>
   `;
 }
 
@@ -8109,6 +8258,110 @@ function _deleteRegexRule(ruleId) {
         localRules[Math.max(0, index - 1)]?.id || localRules[0]?.id || "",
     };
   });
+}
+
+function _getRegexRuleDropPosition(row, clientY) {
+  const rect = row.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function _clearRegexRuleDragIndicators(workspace = document) {
+  workspace
+    .querySelectorAll(".bme-regex-rule-row.dragging, .bme-regex-rule-row.drag-over-top, .bme-regex-rule-row.drag-over-bottom")
+    .forEach((row) => {
+      row.classList.remove("dragging", "drag-over-top", "drag-over-bottom");
+    });
+}
+
+function _setRegexRuleDragIndicator(workspace, activeRow, position) {
+  workspace.querySelectorAll(".bme-regex-rule-row").forEach((row) => {
+    if (row !== activeRow) {
+      row.classList.remove("drag-over-top", "drag-over-bottom");
+      return;
+    }
+    row.classList.toggle("drag-over-top", position === "before");
+    row.classList.toggle("drag-over-bottom", position === "after");
+  });
+}
+
+function _reorderRegexRules(sourceRuleId, targetRuleId, position = "before", isGlobal = false) {
+  if (!sourceRuleId || !targetRuleId || sourceRuleId === targetRuleId) return;
+  const applyReorder = (rules = []) => {
+    const nextRules = Array.isArray(rules) ? [...rules] : [];
+    const sourceIndex = nextRules.findIndex((item) => item.id === sourceRuleId);
+    const targetIndex = nextRules.findIndex((item) => item.id === targetRuleId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return null;
+    }
+
+    const [sourceRule] = nextRules.splice(sourceIndex, 1);
+    let insertIndex = targetIndex;
+    if (sourceIndex < targetIndex) {
+      insertIndex -= 1;
+    }
+    if (position === "after") {
+      insertIndex += 1;
+    }
+    insertIndex = Math.max(0, Math.min(nextRules.length, insertIndex));
+    nextRules.splice(insertIndex, 0, sourceRule);
+    return nextRules;
+  };
+
+  if (isGlobal) {
+    _updateGlobalTaskRegex((draft) => {
+      const localRules = applyReorder(draft.localRules);
+      if (!localRules) return null;
+      draft.localRules = localRules;
+      return { selectRuleId: sourceRuleId };
+    });
+    return;
+  }
+
+  _updateCurrentTaskProfile((draft) => {
+    const localRules = applyReorder(draft.regex?.localRules);
+    if (!localRules) return null;
+    draft.regex = {
+      ...(draft.regex || {}),
+      localRules,
+    };
+    return { selectRuleId: sourceRuleId };
+  });
+}
+
+function _persistRegexRuleEnabledById(ruleId, enabled, isGlobal = false, refresh = true) {
+  if (!ruleId) return;
+
+  if (isGlobal) {
+    _updateGlobalTaskRegex(
+      (draft) => {
+        const localRules = Array.isArray(draft.localRules) ? [...draft.localRules] : [];
+        const rule = localRules.find((item) => item.id === ruleId);
+        if (!rule) return null;
+        rule.enabled = Boolean(enabled);
+        draft.localRules = localRules;
+        return { selectRuleId: currentGlobalRegexRuleId };
+      },
+      { refresh },
+    );
+    return;
+  }
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      const localRules = Array.isArray(draft.regex?.localRules)
+        ? [...draft.regex.localRules]
+        : [];
+      const rule = localRules.find((item) => item.id === ruleId);
+      if (!rule) return null;
+      rule.enabled = Boolean(enabled);
+      draft.regex = {
+        ...(draft.regex || {}),
+        localRules,
+      };
+      return { selectRuleId: currentTaskProfileRuleId };
+    },
+    { refresh },
+  );
 }
 
 function _persistSelectedBlockField(target, refresh) {

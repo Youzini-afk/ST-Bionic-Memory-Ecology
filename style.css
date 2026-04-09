@@ -2694,12 +2694,6 @@
   top: auto;
 }
 
-.bme-task-regex-top {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
 .bme-task-block-count {
   font-size: 11px;
   color: var(--bme-on-surface-dim);
@@ -3061,6 +3055,126 @@
   display: flex;
   justify-content: flex-end;
   margin-top: 8px;
+}
+
+/* ═══════ Single-column Regex Editor ═══════ */
+
+.bme-regex-settings-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bme-regex-settings-card .bme-task-section-label {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.bme-regex-rule-card .bme-task-empty,
+.bme-regex-rule-card .bme-task-note {
+  margin: 0;
+}
+
+.bme-regex-rule-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bme-regex-rule-row {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.bme-regex-rule-row:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.bme-regex-rule-row.is-expanded {
+  border-color: var(--bme-primary);
+  box-shadow: 0 0 0 1px var(--bme-primary);
+}
+
+.bme-regex-rule-row.is-disabled {
+  opacity: 0.56;
+}
+
+.bme-regex-rule-row.dragging {
+  opacity: 0.35;
+}
+
+.bme-regex-rule-row.drag-over-top {
+  border-top: 2px solid var(--bme-primary);
+  margin-top: -1px;
+}
+
+.bme-regex-rule-row.drag-over-bottom {
+  border-bottom: 2px solid var(--bme-primary);
+  margin-bottom: -1px;
+}
+
+.bme-regex-rule-row-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  min-height: 44px;
+  cursor: pointer;
+  user-select: none;
+  flex-wrap: wrap;
+}
+
+.bme-regex-rule-name {
+  flex: 0 1 220px;
+  min-width: 120px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bme-on-surface);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bme-regex-rule-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.bme-regex-rule-status.is-enabled {
+  background: rgba(80, 180, 120, 0.18);
+  color: #80d0a0;
+}
+
+.bme-regex-rule-status.is-disabled {
+  background: rgba(160, 160, 180, 0.14);
+  color: var(--bme-on-surface-dim);
+}
+
+.bme-regex-rule-preview {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--bme-on-surface-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bme-regex-rule-expand {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 12px;
+  animation: bme-block-expand-in 0.2s ease;
 }
 
 @keyframes bme-block-expand-in {
@@ -3934,7 +4048,6 @@
   .bme-theme-card-grid,
   .bme-task-field-grid,
   .bme-task-expand-row2,
-  .bme-task-regex-top,
   .bme-task-debug-grid {
     grid-template-columns: 1fr;
   }
@@ -4129,6 +4242,12 @@
 
   .bme-task-builtin-select {
     max-width: 100%;
+  }
+
+  .bme-regex-rule-preview {
+    flex: 1 1 100%;
+    order: 10;
+    margin-left: 28px;
   }
 
   /* Dashboard 统计卡片横向滚动 */
