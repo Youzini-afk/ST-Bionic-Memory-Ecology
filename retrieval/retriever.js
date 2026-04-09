@@ -2552,7 +2552,10 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
   const scopeContext = meta.scopeContext || {};
   const compareForResult = compareNodeRecallOrderWithContext(graph, scopeContext);
-  const summaryEntries = getActiveSummaryEntries(graph);
+  const summaryEntries =
+    typeof getActiveSummaryEntries === "function"
+      ? getActiveSummaryEntries(graph)
+      : [];
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
