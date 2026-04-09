@@ -2656,7 +2656,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .bme-task-action-sep {
@@ -2704,10 +2704,14 @@
   font-size: 11px;
   color: var(--bme-on-surface-dim);
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .bme-task-builtin-select {
+  width: auto;
+  min-width: 0;
   max-width: 200px;
+  flex: 0 1 200px;
 }
 
 .bme-task-toolbar-row {
@@ -2716,7 +2720,12 @@
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 14px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+}
+
+.bme-task-toolbar-inline {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .bme-task-list {
@@ -4055,6 +4064,11 @@
   .bme-task-inline-actions,
   .bme-task-toolbar-inline {
     width: 100%;
+  }
+
+  .bme-task-toolbar-row,
+  .bme-task-toolbar-inline {
+    flex-wrap: wrap;
   }
 
   .bme-task-type-tabs,
