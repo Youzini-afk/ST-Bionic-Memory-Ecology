@@ -8,6 +8,7 @@ import { getHostAdapter } from "../host/adapter/index.js";
 import {
   getActiveTaskProfile,
   isTaskRegexStageEnabled,
+  normalizeGlobalTaskRegex,
   normalizeTaskRegexStages,
 } from "./prompt-profiles.js";
 
@@ -1026,6 +1027,29 @@ function applyHostRegexReuseFallback(
   };
 }
 
+function resolveTaskRegexConfig(settings = {}, taskType = "") {
+  const hasGlobalRegex =
+    settings?.globalTaskRegex &&
+    typeof settings.globalTaskRegex === "object" &&
+    !Array.isArray(settings.globalTaskRegex);
+
+  if (hasGlobalRegex) {
+    return {
+      profile: null,
+      regexConfig: normalizeGlobalTaskRegex(
+        settings.globalTaskRegex || {},
+        "global",
+      ),
+    };
+  }
+
+  const profile = getActiveTaskProfile(settings, taskType);
+  return {
+    profile,
+    regexConfig: normalizeGlobalTaskRegex(profile?.regex || {}, taskType || "task"),
+  };
+}
+
 export function applyHostRegexReuse(
   settings = {},
   taskType,
@@ -1041,8 +1065,7 @@ export function applyHostRegexReuse(
   const normalizedTaskType = String(taskType || "").trim();
   const normalizedSourceType = normalizeHostRegexSourceType(sourceType);
   const normalizedFormatterOptions = normalizeHostFormatterOptions(formatterOptions);
-  const profile = getActiveTaskProfile(settings, normalizedTaskType);
-  const regexConfig = profile?.regex || {};
+  const { regexConfig } = resolveTaskRegexConfig(settings, taskType);
   const regexHost = getRegexHost();
   const executionState = buildHostRegexExecutionState(regexHost);
 
@@ -1193,8 +1216,7 @@ export function applyTaskRegex(
   debugCollector = null,
   role = "system",
 ) {
-  const profile = getActiveTaskProfile(settings, taskType);
-  const regexConfig = profile?.regex || {};
+  const { regexConfig } = resolveTaskRegexConfig(settings, taskType);
   const input = typeof text === "string" ? text : "";
 
   if (!regexConfig.enabled) {
@@ -1252,8 +1274,7 @@ export function applyTaskRegex(
 }
 
 export function inspectTaskRegexReuse(settings = {}, taskType = "") {
-  const profile = getActiveTaskProfile(settings, taskType);
-  const regexConfig = profile?.regex || {};
+  const { profile, regexConfig } = resolveTaskRegexConfig(settings, taskType);
   const detailed = collectTavernRulesDetailed(regexConfig);
   const stageConfig = normalizeTaskRegexStages(regexConfig.stages || {});
   const localRules = collectLocalRules(regexConfig);
@@ -1292,3 +1313,6 @@ export function inspectTaskRegexReuse(settings = {}, taskType = "") {
     ),
   };
 }
+
+
+

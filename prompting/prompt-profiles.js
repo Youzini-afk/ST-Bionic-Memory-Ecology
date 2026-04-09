@@ -806,6 +806,71 @@ export function normalizeTaskRegexStages(stages = {}) {
   return normalized;
 }
 
+export function createDefaultGlobalTaskRegex() {
+  return {
+    enabled: true,
+    inheritStRegex: true,
+    sources: {
+      global: true,
+      preset: true,
+      character: true,
+    },
+    stages: normalizeTaskRegexStages(DEFAULT_TASK_REGEX_STAGES),
+    localRules: [],
+  };
+}
+
+export function dedupeRegexRules(rules = [], taskType = "task") {
+  const sourceRules = Array.isArray(rules) ? rules : [];
+  const deduped = [];
+  const seen = new Set();
+
+  for (let index = 0; index < sourceRules.length; index++) {
+    const normalized = normalizeRegexLocalRule(sourceRules[index], taskType, index);
+    const key = JSON.stringify({
+      enabled: normalized.enabled !== false,
+      find_regex: normalized.find_regex,
+      replace_string: normalized.replace_string,
+      trim_strings: normalized.trim_strings,
+      source: {
+        user_input: normalized.source?.user_input !== false,
+        ai_output: normalized.source?.ai_output !== false,
+      },
+      destination: {
+        prompt: normalized.destination?.prompt !== false,
+        display: Boolean(normalized.destination?.display),
+      },
+      min_depth: normalized.min_depth,
+      max_depth: normalized.max_depth,
+    });
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(normalized);
+  }
+
+  return deduped;
+}
+
+export function normalizeGlobalTaskRegex(config = {}, taskType = "global") {
+  const defaults = createDefaultGlobalTaskRegex();
+  const source =
+    config && typeof config === "object" && !Array.isArray(config) ? config : {};
+
+  return {
+    enabled: source.enabled !== false,
+    inheritStRegex: source.inheritStRegex !== false,
+    sources: {
+      ...defaults.sources,
+      ...(source.sources && typeof source.sources === "object" ? source.sources : {}),
+    },
+    stages: {
+      ...normalizeTaskRegexStages(defaults.stages),
+      ...normalizeTaskRegexStages(source.stages || {}),
+    },
+    localRules: dedupeRegexRules(source.localRules, taskType),
+  };
+}
+
 export function isTaskRegexStageEnabled(stages = {}, stageKey = "") {
   const normalizedStages = normalizeTaskRegexStages(stages);
   const normalizedStageKey = normalizeRegexStageKey(stageKey);
@@ -827,6 +892,20 @@ export function isTaskRegexStageEnabled(stages = {}, stageKey = "") {
   }
 
   return normalizedStages[normalizedStageKey] !== false;
+}
+
+function buildRegexConfigSignature(config = {}, taskType = "global") {
+  const normalized = normalizeGlobalTaskRegex(config, taskType);
+  return JSON.stringify({
+    enabled: normalized.enabled !== false,
+    inheritStRegex: normalized.inheritStRegex !== false,
+    sources: {
+      global: normalized.sources?.global !== false,
+      preset: normalized.sources?.preset !== false,
+      character: normalized.sources?.character !== false,
+    },
+    stages: normalizeTaskRegexStages(normalized.stages || {}),
+  });
 }
 
 function normalizeTaskProfilesState(taskProfiles = {}) {
@@ -1355,6 +1434,141 @@ export function migrateLegacyTaskProfiles(settings = {}) {
     changed,
     taskProfilesVersion: DEFAULT_TASK_PROFILE_VERSION,
     taskProfiles: nextTaskProfiles,
+  };
+}
+
+export function migratePerTaskRegexToGlobal(settings = {}) {
+  const taskProfiles = ensureTaskProfiles(settings);
+  const defaultGlobalRegex = normalizeGlobalTaskRegex(
+    createDefaultGlobalTaskRegex(),
+    "global",
+  );
+  const existingGlobalRegex = normalizeGlobalTaskRegex(
+    settings.globalTaskRegex || {},
+    "global",
+  );
+  const existingGlobalConfigSignature = buildRegexConfigSignature(
+    existingGlobalRegex,
+    "global",
+  );
+  const defaultGlobalConfigSignature = buildRegexConfigSignature(
+    defaultGlobalRegex,
+    "global",
+  );
+  const profilesWithLegacyRegex = [];
+
+  for (const taskType of TASK_TYPES) {
+    const bucket = taskProfiles[taskType];
+    const defaultProfileRegex = normalizeGlobalTaskRegex(
+      createDefaultTaskProfile(taskType).regex || {},
+      taskType,
+    );
+    const defaultProfileConfigSignature = buildRegexConfigSignature(
+      defaultProfileRegex,
+      taskType,
+    );
+
+    for (const profile of Array.isArray(bucket?.profiles) ? bucket.profiles : []) {
+      const normalizedProfileRegex = normalizeGlobalTaskRegex(
+        profile?.regex || {},
+        taskType,
+      );
+      const profileConfigSignature = buildRegexConfigSignature(
+        normalizedProfileRegex,
+        taskType,
+      );
+      const hasRules = normalizedProfileRegex.localRules.length > 0;
+      const hasConfigDiff = profileConfigSignature !== defaultProfileConfigSignature;
+      if (!hasRules && !hasConfigDiff) continue;
+      profilesWithLegacyRegex.push({
+        taskType,
+        profileId: String(profile?.id || ""),
+        regex: normalizedProfileRegex,
+        configSignature: profileConfigSignature,
+        hasConfigDiff,
+      });
+    }
+  }
+
+  if (profilesWithLegacyRegex.length === 0) {
+    return {
+      changed: false,
+      settings: {
+        ...settings,
+        taskProfiles,
+      },
+    };
+  }
+
+  const configCandidates = profilesWithLegacyRegex.filter(
+    (item) => item.hasConfigDiff,
+  );
+  const uniqueCandidateSignatures = [
+    ...new Set(configCandidates.map((item) => item.configSignature)),
+  ];
+  if (uniqueCandidateSignatures.length > 1) {
+    console.warn(
+      "[ST-BME] 检测到多个任务预设存在冲突的旧正则配置，已按顺序采用第一份并统一迁移。",
+      configCandidates.map((item) => ({
+        taskType: item.taskType,
+        profileId: item.profileId,
+      })),
+    );
+  }
+
+  const selectedConfig =
+    existingGlobalConfigSignature !== defaultGlobalConfigSignature
+      ? existingGlobalRegex
+      : configCandidates[0]?.regex || defaultGlobalRegex;
+
+  const mergedLocalRules = dedupeRegexRules(
+    [
+      ...(Array.isArray(existingGlobalRegex.localRules)
+        ? existingGlobalRegex.localRules
+        : []),
+      ...profilesWithLegacyRegex.flatMap((item) =>
+        Array.isArray(item.regex?.localRules) ? item.regex.localRules : [],
+      ),
+    ],
+    "global",
+  );
+
+  const nextGlobalRegex = {
+    ...normalizeGlobalTaskRegex(selectedConfig, "global"),
+    localRules: mergedLocalRules,
+  };
+
+  const nextTaskProfiles = {};
+  for (const taskType of TASK_TYPES) {
+    const bucket = taskProfiles[taskType] || {
+      activeProfileId: DEFAULT_PROFILE_ID,
+      profiles: [createDefaultTaskProfile(taskType)],
+    };
+    const legacyProfileIds = new Set(
+      profilesWithLegacyRegex
+        .filter((item) => item.taskType === taskType)
+        .map((item) => item.profileId),
+    );
+    nextTaskProfiles[taskType] = {
+      ...bucket,
+      profiles: (Array.isArray(bucket.profiles) ? bucket.profiles : []).map((profile) =>
+        legacyProfileIds.has(String(profile?.id || ""))
+          ? normalizeTaskProfile(taskType, {
+              ...profile,
+              regex: {},
+            })
+          : normalizeTaskProfile(taskType, profile),
+      ),
+    };
+  }
+
+  return {
+    changed: true,
+    settings: {
+      ...settings,
+      globalTaskRegex: nextGlobalRegex,
+      taskProfiles: nextTaskProfiles,
+    },
   };
 }
 

@@ -1,4 +1,7 @@
-import { createDefaultTaskProfiles } from "../prompting/prompt-profiles.js";
+import {
+  createDefaultGlobalTaskRegex,
+  createDefaultTaskProfiles,
+} from "../prompting/prompt-profiles.js";
 
 function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   const numeric = Number(value);
@@ -110,6 +113,7 @@ export const defaultSettings = {
   reflectionPrompt: "",
   taskProfilesVersion: 3,
   taskProfiles: createDefaultTaskProfiles(),
+  globalTaskRegex: createDefaultGlobalTaskRegex(),
 
   // ====== v2 增强设置 ======
   enableConsolidation: true,

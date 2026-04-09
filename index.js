@@ -146,6 +146,7 @@ import {
 } from "./ui/panel-bridge.js";
 import {
   migrateLegacyTaskProfiles,
+  migratePerTaskRegexToGlobal,
 } from "./prompting/prompt-profiles.js";
 import { inspectTaskRegexReuse } from "./prompting/task-regex.js";
 import {
@@ -2885,6 +2886,11 @@ function getSettings() {
   const migrated = migrateLegacyTaskProfiles(mergedSettings);
   mergedSettings.taskProfilesVersion = migrated.taskProfilesVersion;
   mergedSettings.taskProfiles = migrated.taskProfiles;
+  const regexMigration = migratePerTaskRegexToGlobal(mergedSettings);
+  if (regexMigration.changed) {
+    mergedSettings.globalTaskRegex = regexMigration.settings.globalTaskRegex;
+    mergedSettings.taskProfiles = regexMigration.settings.taskProfiles;
+  }
   extension_settings[MODULE_NAME] = mergedSettings;
   globalThis.__stBmeDebugLoggingEnabled = Boolean(
     mergedSettings.debugLoggingEnabled,

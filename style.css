@@ -2414,6 +2414,13 @@
   gap: 6px;
 }
 
+.bme-task-nav-groups {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .bme-task-segmented-control {
   display: inline-flex;
   background: var(--bme-surface-container);
@@ -2443,6 +2450,10 @@
   background: var(--bme-primary);
   color: #fff;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+
+.bme-task-segmented-control--solo {
+  box-shadow: 0 0 0 1px rgba(255, 183, 0, 0.16);
 }
 
 .bme-task-master-detail {
@@ -4690,6 +4701,10 @@
 
   .bme-task-segmented-control {
     flex-wrap: wrap;
+  }
+
+  .bme-task-nav-groups {
+    width: 100%;
   }
 
   .bme-task-action-bar {
