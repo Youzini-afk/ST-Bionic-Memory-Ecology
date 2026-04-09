@@ -5749,18 +5749,23 @@ async function _handleTaskProfileWorkspaceClick(event) {
   const action = actionEl.dataset.taskAction || "";
   const state = _getTaskProfileWorkspaceState();
   const selectedProfile = state.profile;
-  if (!selectedProfile && action !== "switch-task-type") return;
+  if (
+    !selectedProfile &&
+    action !== "switch-task-type" &&
+    action !== "switch-global-regex"
+  ) return;
 
   switch (action) {
     case "switch-task-type":
       currentTaskProfileTaskType =
         actionEl.dataset.taskType || currentTaskProfileTaskType;
+      showGlobalRegexPanel = false;
       currentTaskProfileBlockId = "";
       currentTaskProfileRuleId = "";
       _refreshTaskProfileWorkspace();
       return;
-    case "toggle-global-regex":
-      showGlobalRegexPanel = !showGlobalRegexPanel;
+    case "switch-global-regex":
+      showGlobalRegexPanel = true;
       _refreshTaskProfileWorkspace();
       return;
     case "switch-task-tab":
@@ -6006,7 +6011,7 @@ function _renderTaskProfileWorkspace(state) {
             .map(
               (item) => `
                 <button
-                  class="bme-task-type-btn ${item.id === state.taskType ? "active" : ""}"
+                  class="bme-task-type-btn ${item.id === state.taskType && !state.showGlobalRegex ? "active" : ""}"
                   data-task-action="switch-task-type"
                   data-task-type="${_escAttr(item.id)}"
                   type="button"
@@ -6014,16 +6019,15 @@ function _renderTaskProfileWorkspace(state) {
               `,
             )
             .join("")}
+          <button
+            class="bme-task-type-btn ${state.showGlobalRegex ? "active" : ""}"
+            data-task-action="switch-global-regex"
+            type="button"
+          >
+            通用正则
+          </button>
         </div>
         <div class="bme-task-action-bar-right">
-          <button
-            class="bme-config-secondary-btn bme-bulk-profile-btn ${state.showGlobalRegex ? "active" : ""}"
-            data-task-action="toggle-global-regex"
-            type="button"
-            title="打开或收起通用正则规则面板"
-          >
-            <i class="fa-solid fa-filter"></i><span>通用正则</span>
-          </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
             <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
@@ -6036,8 +6040,9 @@ function _renderTaskProfileWorkspace(state) {
         </div>
       </div>
 
-      ${state.showGlobalRegex ? _renderGlobalRegexPanel(state) : ""}
-
+      ${state.showGlobalRegex
+        ? _renderGlobalRegexPanel(state)
+        : `
       <div class="bme-task-master-detail">
         <div class="bme-task-profile-editor">
           <div class="bme-task-editor-header">
@@ -6101,6 +6106,7 @@ function _renderTaskProfileWorkspace(state) {
           </div>
         </div>
       </div>
+      `}
     </div>
   `;
 }
