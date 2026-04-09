@@ -87,8 +87,14 @@ import {
 import {
   extractMemories,
   generateReflection,
-  generateSynopsis,
 } from "./maintenance/extractor.js";
+import {
+  generateSmallSummary,
+  rebuildHierarchicalSummaryState,
+  resetHierarchicalSummaryState,
+  rollupSummaryFrontier,
+  runHierarchicalSummaryPostProcess,
+} from "./maintenance/hierarchical-summary.js";
 import {
   findGraphShadowSnapshotByIntegrity,
   GRAPH_LOAD_PENDING_CHAT_ID,
@@ -214,8 +220,11 @@ import {
   onImportGraphController,
   onManualCompressController,
   onManualEvolveController,
+  onManualSummaryRollupController,
   onManualSleepController,
   onManualSynopsisController,
+  onRebuildSummaryStateController,
+  onClearSummaryStateController,
   onUndoLastMaintenanceController,
   onRebuildController,
   onRebuildVectorIndexController,
@@ -8719,6 +8728,38 @@ async function handleExtractionSuccess(
               return `${prefix}维护已执行`;
           }
         };
+  const runSummaryPostProcess =
+    typeof runHierarchicalSummaryPostProcess === "function"
+      ? runHierarchicalSummaryPostProcess
+      : typeof generateSynopsis === "function"
+        ? async (params = {}) => {
+            await generateSynopsis({
+              graph: params.graph,
+              schema: typeof getSchema === "function" ? getSchema() : [],
+              currentSeq: params.currentAssistantFloor,
+              settings: params.settings,
+              signal: params.signal,
+            });
+            return {
+              created: true,
+              smallSummary: { created: true, reason: "" },
+              rollup: null,
+            };
+          }
+      : async () => ({
+          created: false,
+          smallSummary: {
+            created: false,
+            reason: "层级总结运行器不可用，已跳过",
+          },
+          rollup: null,
+        });
+  const summaryStageLabel =
+    typeof runHierarchicalSummaryPostProcess === "function"
+      ? "层级总结"
+      : typeof generateSynopsis === "function"
+        ? "概要生成"
+        : "层级总结";
   const cloneMaintenanceSnapshot =
     typeof cloneGraphSnapshot === "function"
       ? cloneGraphSnapshot
@@ -8832,34 +8873,48 @@ async function handleExtractionSuccess(
     }
   }
 
-  if (
-    settings.enableSynopsis &&
-    extractionCount % settings.synopsisEveryN === 0
-  ) {
+  if (settings.enableHierarchicalSummary !== false) {
     try {
+      const currentChatMessages =
+        typeof getContext === "function" && Array.isArray(getContext()?.chat)
+          ? getContext().chat
+          : [];
       updateExtractionPostProcessStatus(
-        "概要更新中",
-        `第 ${extractionCount} 次提取，正在生成全局概要`,
+        summaryStageLabel === "概要生成" ? "概要更新中" : "层级总结处理中",
+        summaryStageLabel === "概要生成"
+          ? `第 ${extractionCount} 次提取，正在生成全局概要`
+          : `第 ${extractionCount} 次提取，正在检查小总结与折叠总结`,
       );
-      await generateSynopsis({
+      const summaryResult = await runSummaryPostProcess({
         graph: currentGraph,
-        schema: getSchema(),
-        currentSeq: endIdx,
+        chat: currentChatMessages,
         settings,
         signal,
+        currentExtractionCount: extractionCount,
+        currentAssistantFloor: endIdx,
+        currentRange: result?.processedRange || [endIdx, endIdx],
+        currentNodeIds: result?.changedNodeIds || result?.newNodeIds || [],
       });
-      postProcessArtifacts.push("synopsis");
-      pushBatchStageArtifact(status, "semantic", "synopsis");
+      if (summaryResult?.smallSummary?.created) {
+        postProcessArtifacts.push("summary");
+        pushBatchStageArtifact(status, "semantic", "summary");
+      } else if (summaryResult?.smallSummary?.reason) {
+        applyMaintenanceGateNote(status, "summary", summaryResult.smallSummary.reason);
+      }
+      if (Number(summaryResult?.rollup?.createdCount || 0) > 0) {
+        postProcessArtifacts.push("summary-rollup");
+        pushBatchStageArtifact(status, "semantic", "summary-rollup");
+      }
     } catch (e) {
       if (isAbortError(e)) throw e;
-      const message = e?.message || String(e) || "概要生成阶段失败";
+      const message = e?.message || String(e) || `${summaryStageLabel}阶段失败`;
       setBatchStageOutcome(
         status,
         "semantic",
         "failed",
-        `概要生成失败: ${message}`,
+        `${summaryStageLabel}失败: ${message}`,
       );
-      console.error("[ST-BME] 概要生成失败:", e);
+      console.error(`[ST-BME] ${summaryStageLabel}失败:`, e);
     }
   }
 
@@ -11064,15 +11119,53 @@ async function onManualSleep() {
 
 async function onManualSynopsis() {
   return await onManualSynopsisController({
-    cloneGraphSnapshot,
     ensureGraphMutationReady,
-    generateSynopsis,
+    generateSmallSummary,
     getCurrentChatSeq,
     getCurrentGraph: () => currentGraph,
-    getSchema,
+    getContext,
     getSettings,
     refreshPanelLiveState,
-    recordGraphMutation,
+    saveGraphToChat,
+    setRuntimeStatus,
+    toastr,
+  });
+}
+
+async function onManualSummaryRollup() {
+  return await onManualSummaryRollupController({
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    getSettings,
+    refreshPanelLiveState,
+    rollupSummaryFrontier,
+    saveGraphToChat,
+    setRuntimeStatus,
+    toastr,
+  });
+}
+
+async function onRebuildSummaryState() {
+  return await onRebuildSummaryStateController({
+    ensureGraphMutationReady,
+    getContext,
+    getCurrentGraph: () => currentGraph,
+    getSettings,
+    rebuildHierarchicalSummaryState,
+    refreshPanelLiveState,
+    saveGraphToChat,
+    setRuntimeStatus,
+    toastr,
+  });
+}
+
+async function onClearSummaryState() {
+  return await onClearSummaryStateController({
+    ensureGraphMutationReady,
+    getCurrentGraph: () => currentGraph,
+    refreshPanelLiveState,
+    resetHierarchicalSummaryState,
+    saveGraphToChat,
     setRuntimeStatus,
     toastr,
   });
@@ -11219,6 +11312,9 @@ async function onDeleteServerSyncFile() {
       compress: onManualCompress,
       sleep: onManualSleep,
       synopsis: onManualSynopsis,
+      summaryRollup: onManualSummaryRollup,
+      rebuildSummaryState: onRebuildSummaryState,
+      clearSummaryState: onClearSummaryState,
       export: onExportGraph,
       import: onImportGraph,
       rebuild: onRebuild,

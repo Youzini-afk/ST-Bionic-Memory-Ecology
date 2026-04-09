@@ -110,6 +110,7 @@ export const defaultSettings = {
   consolidationPrompt: "",
   compressPrompt: "",
   synopsisPrompt: "",
+  summaryRollupPrompt: "",
   reflectionPrompt: "",
   taskProfilesVersion: 3,
   taskProfiles: createDefaultTaskProfiles(),
@@ -121,6 +122,9 @@ export const defaultSettings = {
   consolidationThreshold: 0.85,
   enableSynopsis: true,
   synopsisEveryN: 5,
+  enableHierarchicalSummary: true,
+  smallSummaryEveryNExtractions: 3,
+  summaryRollupFanIn: 3,
   enableVisibility: true,
   enableCrossRecall: true,
   enableSmartTrigger: false,
@@ -175,6 +179,31 @@ export function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
     Math.floor(Number(migrated.compressionEveryN)) <= 0
   ) {
     migrated.compressionEveryN = defaultSettings.compressionEveryN;
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(migrated, "enableHierarchicalSummary") &&
+    Object.prototype.hasOwnProperty.call(migrated, "enableSynopsis")
+  ) {
+    migrated.enableHierarchicalSummary = Boolean(migrated.enableSynopsis);
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      migrated,
+      "smallSummaryEveryNExtractions",
+    ) &&
+    Object.prototype.hasOwnProperty.call(migrated, "synopsisEveryN")
+  ) {
+    migrated.smallSummaryEveryNExtractions = clampIntValue(
+      migrated.synopsisEveryN,
+      defaultSettings.smallSummaryEveryNExtractions,
+      1,
+      100,
+    );
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(migrated, "summaryRollupFanIn")
+  ) {
+    migrated.summaryRollupFanIn = defaultSettings.summaryRollupFanIn;
   }
   delete migrated.maintenanceAutoMinNewNodes;
   return migrated;

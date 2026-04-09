@@ -52,6 +52,7 @@ import {
   resolveStoryCueMode,
   STORY_TEMPORAL_BUCKETS,
 } from "../graph/story-timeline.js";
+import { getActiveSummaryEntries } from "../graph/summary-state.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-index.js";
@@ -2551,11 +2552,18 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   const selectedSet = new Set(uniqueNodeIds(selectedNodeIds));
   const scopeContext = meta.scopeContext || {};
   const compareForResult = compareNodeRecallOrderWithContext(graph, scopeContext);
+  const summaryEntries =
+    typeof getActiveSummaryEntries === "function"
+      ? getActiveSummaryEntries(graph)
+      : [];
 
   // 常驻注入节点（alwaysInject=true 的类型）
   const alwaysInjectTypes = new Set(
     schema.filter((s) => s.alwaysInject).map((s) => s.id),
   );
+  if (summaryEntries.length > 0) {
+    alwaysInjectTypes.delete("synopsis");
+  }
 
   const activeNodes = getActiveNodes(graph).filter((node) => !node.archived);
 
@@ -2587,6 +2595,7 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
   );
 
   return {
+    summaryEntries,
     coreNodes,
     recallNodes,
     groupedRecallNodes,
@@ -2595,6 +2604,7 @@ function buildResult(graph, selectedNodeIds, schema, meta = {}) {
     meta,
     stats: {
       totalActive: activeNodes.length,
+      summaryCount: summaryEntries.length,
       coreCount: coreNodes.length,
       recallCount: recallNodes.length,
       characterPovCount: scopeBuckets.characterPov.length,

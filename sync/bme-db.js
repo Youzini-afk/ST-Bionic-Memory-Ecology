@@ -19,6 +19,7 @@ export const BME_RUNTIME_HISTORY_META_KEY = "runtimeHistoryState";
 export const BME_RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
 export const BME_RUNTIME_BATCH_JOURNAL_META_KEY = "runtimeBatchJournal";
 export const BME_RUNTIME_LAST_RECALL_META_KEY = "runtimeLastRecallResult";
+export const BME_RUNTIME_SUMMARY_STATE_META_KEY = "runtimeSummaryState";
 export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY =
   "runtimeLastProcessedSeq";
 export const BME_RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
@@ -347,6 +348,10 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       runtimeGraph?.lastRecallResult ?? null,
       null,
     ),
+    [BME_RUNTIME_SUMMARY_STATE_META_KEY]: toPlainData(
+      runtimeGraph?.summaryState || {},
+      {},
+    ),
     [BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]: Number.isFinite(
       Number(runtimeGraph?.lastProcessedSeq),
     )
@@ -393,6 +398,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   runtimeGraph.lastRecallResult = toPlainData(
     normalizedSnapshot.meta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
+  );
+  runtimeGraph.summaryState = toPlainData(
+    normalizedSnapshot.meta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
+    runtimeGraph.summaryState || {},
   );
 
   runtimeGraph.historyState = {

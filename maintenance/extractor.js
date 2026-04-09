@@ -981,6 +981,7 @@ export async function extractMemories({
     error: "",
     ...stats,
     newNodeIds,
+    changedNodeIds,
     ownerWarnings: ownershipWarnings,
     batchStoryTime: normalizedBatchStoryTime,
     batchStoryTimeResult,

@@ -665,38 +665,182 @@ export async function onManualSleepController(runtime) {
 export async function onManualSynopsisController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
-  if (!runtime.ensureGraphMutationReady("更新概要")) return;
-  updateManualActionUiState(runtime, "更新概要中", "正在生成新的概要节点", "running");
+  if (!runtime.ensureGraphMutationReady("生成小总结")) return;
+  updateManualActionUiState(runtime, "生成小总结中", "正在基于原文窗口生成新的小总结", "running");
 
   try {
-    const beforeSnapshot = runtime.cloneGraphSnapshot(graph);
-    await runtime.generateSynopsis({
+    const chat = runtime.getContext?.()?.chat;
+    const result = await runtime.generateSmallSummary({
       graph,
-      schema: runtime.getSchema(),
-      currentSeq: runtime.getCurrentChatSeq(),
-      customPrompt: undefined,
+      chat: Array.isArray(chat) ? chat : [],
       settings: runtime.getSettings(),
+      currentExtractionCount: Number(graph?.historyState?.extractionCount) || 0,
+      currentAssistantFloor: runtime.getCurrentChatSeq(),
+      currentRange: null,
+      currentNodeIds: [],
+      force: true,
     });
-    await runtime.recordGraphMutation({
-      beforeSnapshot,
-      artifactTags: ["synopsis"],
-    });
-    updateManualActionUiState(runtime, "概要生成完成", "概要节点已更新", "success");
-    runtime.toastr.success("概要生成完成");
+    if (!result?.created) {
+      updateManualActionUiState(
+        runtime,
+        "小总结未生成",
+        result?.reason || "当前没有可用于生成小总结的新范围",
+        "idle",
+      );
+      runtime.toastr.info(result?.reason || "当前没有可用于生成小总结的新范围");
+      return {
+        handledToast: true,
+        requestDispatched: false,
+        mutated: false,
+        reason: result?.reason || "",
+      };
+    }
+    runtime.saveGraphToChat?.({ reason: "manual-small-summary" });
+    runtime.refreshPanelLiveState?.();
+    updateManualActionUiState(runtime, "小总结生成完成", "新的小总结已加入总结前沿", "success");
+    runtime.toastr.success("小总结生成完成");
     return {
       handledToast: true,
       requestDispatched: true,
       mutated: true,
+      result,
     };
   } catch (error) {
     updateManualActionUiState(
       runtime,
-      "概要生成失败",
+      "小总结生成失败",
       error?.message || String(error),
       "error",
     );
     throw error;
   }
+}
+
+export async function onManualSummaryRollupController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("执行总结折叠")) return;
+  updateManualActionUiState(runtime, "总结折叠中", "正在折叠当前活跃总结前沿", "running");
+
+  try {
+    const result = await runtime.rollupSummaryFrontier({
+      graph,
+      settings: runtime.getSettings(),
+      force: true,
+    });
+    if (!Number(result?.createdCount || 0)) {
+      updateManualActionUiState(
+        runtime,
+        "总结折叠未执行",
+        result?.reason || "当前没有达到折叠门槛的活跃总结",
+        "idle",
+      );
+      runtime.toastr.info(result?.reason || "当前没有达到折叠门槛的活跃总结");
+      return {
+        handledToast: true,
+        requestDispatched: false,
+        mutated: false,
+        reason: result?.reason || "",
+      };
+    }
+    runtime.saveGraphToChat?.({ reason: "manual-summary-rollup" });
+    runtime.refreshPanelLiveState?.();
+    updateManualActionUiState(
+      runtime,
+      "总结折叠完成",
+      `已折叠 ${result.foldedCount || 0} 条，总结产出 ${result.createdCount || 0} 条`,
+      "success",
+    );
+    runtime.toastr.success(
+      `总结折叠完成：折叠 ${result.foldedCount || 0} 条，产出 ${result.createdCount || 0} 条`,
+    );
+    return {
+      handledToast: true,
+      requestDispatched: true,
+      mutated: true,
+      result,
+    };
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "总结折叠失败",
+      error?.message || String(error),
+      "error",
+    );
+    throw error;
+  }
+}
+
+export async function onRebuildSummaryStateController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("重建总结状态")) return;
+  updateManualActionUiState(runtime, "重建总结中", "正在按现有提取批次重建总结链", "running");
+
+  try {
+    const chat = runtime.getContext?.()?.chat;
+    const result = await runtime.rebuildHierarchicalSummaryState({
+      graph,
+      chat: Array.isArray(chat) ? chat : [],
+      settings: runtime.getSettings(),
+    });
+    runtime.saveGraphToChat?.({ reason: "rebuild-summary-state" });
+    runtime.refreshPanelLiveState?.();
+    if (!result?.rebuilt) {
+      updateManualActionUiState(
+        runtime,
+        "重建总结未产生变化",
+        result?.reason || "当前没有可重建的总结链",
+        "idle",
+      );
+      runtime.toastr.info(result?.reason || "当前没有可重建的总结链");
+      return {
+        handledToast: true,
+        requestDispatched: true,
+        mutated: false,
+        result,
+      };
+    }
+    updateManualActionUiState(
+      runtime,
+      "重建总结完成",
+      `小总结 ${result.smallSummaryCount || 0} 条，折叠总结 ${result.rollupCount || 0} 条`,
+      "success",
+    );
+    runtime.toastr.success(
+      `重建总结完成：小总结 ${result.smallSummaryCount || 0} 条，折叠总结 ${result.rollupCount || 0} 条`,
+    );
+    return {
+      handledToast: true,
+      requestDispatched: true,
+      mutated: true,
+      result,
+    };
+  } catch (error) {
+    updateManualActionUiState(
+      runtime,
+      "重建总结失败",
+      error?.message || String(error),
+      "error",
+    );
+    throw error;
+  }
+}
+
+export async function onClearSummaryStateController(runtime) {
+  const graph = runtime.getCurrentGraph();
+  if (!graph) return;
+  if (!runtime.ensureGraphMutationReady("清空总结状态")) return;
+  runtime.resetHierarchicalSummaryState?.(graph);
+  runtime.saveGraphToChat?.({ reason: "clear-summary-state" });
+  runtime.refreshPanelLiveState?.();
+  updateManualActionUiState(runtime, "总结状态已清空", "当前聊天的层级总结已重置", "success");
+  runtime.toastr.success("总结状态已清空");
+  return {
+    handledToast: true,
+    requestDispatched: false,
+    mutated: true,
+  };
 }
 
 export async function onManualEvolveController(runtime) {
