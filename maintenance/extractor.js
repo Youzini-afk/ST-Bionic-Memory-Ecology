@@ -42,6 +42,11 @@ import {
 import { RELATION_TYPES } from "../graph/schema.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt, getSTContextSnapshot } from "../host/st-context.js";
+import {
+  aliasSetMatchesValue,
+  buildUserPovAliasNormalizedSet,
+  getHostUserAliasHints,
+} from "../runtime/user-alias-utils.js";
 import { buildNodeVectorText, isDirectVectorConfig } from "../vector/vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -416,13 +421,70 @@ function normalizeExtractionOwnerText(value) {
   return String(value || "").trim();
 }
 
+function collectExtractorUserAliasHints(scopeRuntime = {}, extraHints = []) {
+  const hints = [];
+  const pushHint = (value) => {
+    const normalized = normalizeExtractionOwnerText(value);
+    if (!normalized || hints.includes(normalized)) return;
+    hints.push(normalized);
+  };
+  const ingest = (value) => {
+    if (value == null) return;
+    if (typeof value === "string") {
+      pushHint(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) ingest(item);
+      return;
+    }
+    if (typeof value === "object") {
+      pushHint(value.name1);
+      pushHint(value.userName);
+      pushHint(value.personaName);
+      pushHint(value.name);
+      ingest(value.aliases);
+    }
+  };
+
+  pushHint(scopeRuntime.activeUserOwner);
+  ingest(getHostUserAliasHints(extraHints));
+  return hints;
+}
+
+function buildExtractorUserAliasContext(scopeRuntime = {}, extraHints = []) {
+  const aliasHints = collectExtractorUserAliasHints(scopeRuntime, extraHints);
+  return {
+    aliasHints,
+    aliasSet: buildUserPovAliasNormalizedSet(aliasHints),
+    preferredName: aliasHints[0] || "",
+  };
+}
+
+function matchesExtractorUserAlias(ownerName = "", scopeRuntime = {}, extraHints = []) {
+  const aliasContext = buildExtractorUserAliasContext(scopeRuntime, extraHints);
+  return aliasSetMatchesValue(aliasContext.aliasSet, ownerName);
+}
+
+function resolveExtractorUserOwnerName(
+  scopeRuntime = {},
+  rawOwnerName = "",
+  extraHints = [],
+) {
+  const aliasContext = buildExtractorUserAliasContext(scopeRuntime, [
+    rawOwnerName,
+    ...(Array.isArray(extraHints) ? extraHints : [extraHints]),
+  ]);
+  return aliasContext.preferredName || normalizeExtractionOwnerText(rawOwnerName);
+}
+
 function resolveCharacterOwnerCandidate(graph, ownerName = "", ownerNodeId = "") {
   const resolved = resolveKnowledgeOwner(graph, {
     ownerType: "character",
     ownerName,
     nodeId: ownerNodeId,
   });
-  return resolved?.ownerKey ? resolved : null;
+  return resolved?.ownerType === "character" && resolved?.ownerKey ? resolved : null;
 }
 
 function deriveExtractionOwnerContext(
@@ -432,6 +494,13 @@ function deriveExtractionOwnerContext(
 ) {
   const ownerMap = new Map();
   const registerCharacterOwner = (ownerName = "", ownerNodeId = "", source = "") => {
+    if (
+      normalizeExtractionOwnerText(ownerName) &&
+      !normalizeExtractionOwnerText(ownerNodeId) &&
+      matchesExtractorUserAlias(ownerName, scopeRuntime)
+    ) {
+      return;
+    }
     const resolved = resolveCharacterOwnerCandidate(graph, ownerName, ownerNodeId);
     if (!resolved?.ownerKey) return;
     const existing = ownerMap.get(resolved.ownerKey) || {
@@ -504,12 +573,42 @@ function normalizeCognitionUpdatesWithOwnerContext(
 
   for (const entry of Array.isArray(cognitionUpdates) ? cognitionUpdates : []) {
     const ownerType = normalizeExtractionOwnerText(entry?.ownerType);
+    const rawOwnerName = normalizeExtractionOwnerText(
+      entry?.ownerName || entry?.ownerId,
+    );
+    const rawOwnerNodeId = normalizeExtractionOwnerText(entry?.ownerNodeId);
     if (ownerType === "character") {
+      if (
+        rawOwnerName &&
+        !rawOwnerNodeId &&
+        matchesExtractorUserAlias(rawOwnerName, scopeRuntime)
+      ) {
+        const resolvedUserName = resolveExtractorUserOwnerName(
+          scopeRuntime,
+          rawOwnerName,
+        );
+        if (!resolvedUserName) {
+          ownershipWarnings.push({
+            kind: "invalid-owner-scope",
+            source: "cognitionUpdate",
+            ownerType: "user",
+          });
+          continue;
+        }
+        normalized.push({
+          ...entry,
+          ownerType: "user",
+          ownerName: resolvedUserName,
+          ownerId: resolvedUserName,
+          ownerNodeId: "",
+        });
+        continue;
+      }
       const resolved =
         resolveCharacterOwnerCandidate(
           graph,
-          entry?.ownerName || entry?.ownerId,
-          entry?.ownerNodeId,
+          rawOwnerName,
+          rawOwnerNodeId,
         ) || ownerContext?.soleCharacterOwner || null;
       if (!resolved?.ownerKey) {
         ownershipWarnings.push({
@@ -530,9 +629,10 @@ function normalizeCognitionUpdatesWithOwnerContext(
     }
 
     if (ownerType === "user") {
-      const resolvedUserName =
-        normalizeExtractionOwnerText(entry?.ownerName || entry?.ownerId) ||
-        normalizeExtractionOwnerText(scopeRuntime.activeUserOwner);
+      const resolvedUserName = resolveExtractorUserOwnerName(
+        scopeRuntime,
+        rawOwnerName,
+      );
       if (!resolvedUserName) {
         ownershipWarnings.push({
           kind: "invalid-owner-scope",
@@ -1323,10 +1423,43 @@ function resolveOperationScope(
   const explicitOwnerName = normalizeExtractionOwnerText(
     rawScope?.ownerName || rawScope?.ownerId,
   );
+  const explicitOwnerNodeId = normalizeExtractionOwnerText(
+    op?.scope?.ownerNodeId || op?.scope?.owner_node_id,
+  );
 
   if (ownerType === "user") {
-    const userName =
-      explicitOwnerName || normalizeExtractionOwnerText(scopeRuntime.activeUserOwner);
+    const userName = resolveExtractorUserOwnerName(
+      scopeRuntime,
+      explicitOwnerName,
+    );
+    if (!userName) {
+      return {
+        scope: fallbackScope,
+        invalidReason: "invalid-owner-scope",
+      };
+    }
+    return {
+      scope: normalizeMemoryScope({
+        ...(rawScope || {}),
+        layer: "pov",
+        ownerType: "user",
+        ownerId: userName,
+        ownerName: userName,
+      }),
+      invalidReason: "",
+    };
+  }
+
+  if (
+    ownerType === "character" &&
+    explicitOwnerName &&
+    !explicitOwnerNodeId &&
+    matchesExtractorUserAlias(explicitOwnerName, scopeRuntime)
+  ) {
+    const userName = resolveExtractorUserOwnerName(
+      scopeRuntime,
+      explicitOwnerName,
+    );
     if (!userName) {
       return {
         scope: fallbackScope,
@@ -1346,7 +1479,7 @@ function resolveOperationScope(
   }
 
   const resolvedCharacterOwner =
-    resolveCharacterOwnerCandidate(graph, explicitOwnerName, "") ||
+    resolveCharacterOwnerCandidate(graph, explicitOwnerName, explicitOwnerNodeId) ||
     ownerContext?.soleCharacterOwner ||
     null;
   if (!resolvedCharacterOwner?.ownerKey) {

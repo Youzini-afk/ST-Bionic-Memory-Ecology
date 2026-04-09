@@ -3,6 +3,11 @@ import {
   getScopeRegionKey,
   normalizeMemoryScope,
 } from "./memory-scope.js";
+import {
+  aliasSetMatchesValue,
+  buildUserPovAliasNormalizedSet,
+  getHostUserAliasHints,
+} from "../runtime/user-alias-utils.js";
 
 export const KNOWLEDGE_STATE_VERSION = 1;
 export const REGION_STATE_VERSION = 1;
@@ -63,6 +68,61 @@ function normalizeOwnerType(ownerType = "") {
   if (normalized === OWNER_TYPE_CHARACTER) return OWNER_TYPE_CHARACTER;
   if (normalized === OWNER_TYPE_USER) return OWNER_TYPE_USER;
   return "";
+}
+
+function appendAliasHintStrings(target, value) {
+  if (value == null) return;
+  if (typeof value === "string") {
+    const normalized = normalizeString(value);
+    if (normalized) target.push(normalized);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) appendAliasHintStrings(target, item);
+    return;
+  }
+  if (typeof value === "object") {
+    appendAliasHintStrings(target, value.name1);
+    appendAliasHintStrings(target, value.userName);
+    appendAliasHintStrings(target, value.personaName);
+    appendAliasHintStrings(target, value.name);
+    appendAliasHintStrings(target, value.aliases);
+  }
+}
+
+function buildUserAliasContext(graph = null, extraHints = []) {
+  const aliasHints = [];
+  appendAliasHintStrings(aliasHints, graph?.historyState?.activeUserPovOwner);
+  appendAliasHintStrings(aliasHints, getHostUserAliasHints());
+  appendAliasHintStrings(aliasHints, extraHints);
+  const uniqueAliasHints = uniqueStrings(aliasHints);
+  return {
+    aliasHints: uniqueAliasHints,
+    aliasSet: buildUserPovAliasNormalizedSet(uniqueAliasHints),
+    preferredName: uniqueAliasHints[0] || "",
+  };
+}
+
+function shouldResolveCharacterOwnerAsUser(
+  graph,
+  ownerName = "",
+  nodeId = "",
+  userAliasContext = null,
+) {
+  const normalizedOwnerName = normalizeString(ownerName);
+  if (!normalizedOwnerName) return false;
+  const aliasContext = userAliasContext || buildUserAliasContext(graph);
+  if (!aliasSetMatchesValue(aliasContext.aliasSet, normalizedOwnerName)) {
+    return false;
+  }
+  const normalizedNodeId = normalizeString(nodeId);
+  if (normalizedNodeId) {
+    const explicitNode = findCharacterNodeById(graph, normalizedNodeId);
+    if (explicitNode) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function getCharacterNodes(graph) {
@@ -241,7 +301,12 @@ function mergeKnowledgeOwnerEntries(baseEntry, incomingEntry) {
   return merged;
 }
 
-function resolveCanonicalKnowledgeEntry(graph, ownerKey, entry) {
+function resolveCanonicalKnowledgeEntry(
+  graph,
+  ownerKey,
+  entry,
+  userAliasContext = null,
+) {
   const normalizedEntry = createDefaultKnowledgeOwnerState({
     ...entry,
     ownerKey,
@@ -252,6 +317,7 @@ function resolveCanonicalKnowledgeEntry(graph, ownerKey, entry) {
     ownerId: normalizedEntry.ownerName,
     nodeId: normalizedEntry.nodeId,
     aliases: normalizedEntry.aliases,
+    userAliasContext,
   });
   return createDefaultKnowledgeOwnerState({
     ...normalizedEntry,
@@ -270,8 +336,14 @@ function resolveCanonicalKnowledgeEntry(graph, ownerKey, entry) {
 export function normalizeKnowledgeState(state = {}, graph = null) {
   const normalized = createDefaultKnowledgeState(state);
   const owners = {};
+  const userAliasContext = buildUserAliasContext(graph);
   for (const [ownerKey, rawEntry] of Object.entries(normalized.owners || {})) {
-    const canonicalEntry = resolveCanonicalKnowledgeEntry(graph, ownerKey, rawEntry);
+    const canonicalEntry = resolveCanonicalKnowledgeEntry(
+      graph,
+      ownerKey,
+      rawEntry,
+      userAliasContext,
+    );
     if (!canonicalEntry.ownerKey) continue;
     owners[canonicalEntry.ownerKey] = owners[canonicalEntry.ownerKey]
       ? mergeKnowledgeOwnerEntries(owners[canonicalEntry.ownerKey], canonicalEntry)
@@ -321,16 +393,27 @@ export function resolveKnowledgeOwner(graph, input = {}) {
     };
   }
 
+  const userAliasContext =
+    input?.userAliasContext &&
+    input.userAliasContext.aliasSet instanceof Set
+      ? input.userAliasContext
+      : buildUserAliasContext(graph);
+
   if (ownerType === OWNER_TYPE_USER) {
-    const ownerName = normalizeString(
+    const fallbackOwnerName = normalizeString(
       input.ownerName || input.ownerId || input.ownerKey,
     );
+    const ownerName = userAliasContext.preferredName || fallbackOwnerName;
     return {
       ownerType,
       ownerKey: buildOwnerKey(ownerType, ownerName),
       ownerName,
       nodeId: "",
-      aliases: uniqueStrings(input.aliases || [ownerName]),
+      aliases: uniqueStrings([
+        ...(Array.isArray(input.aliases) ? input.aliases : [input.aliases]),
+        ...userAliasContext.aliasHints,
+        ownerName,
+      ]),
     };
   }
 
@@ -340,6 +423,31 @@ export function resolveKnowledgeOwner(graph, input = {}) {
   if (explicitNode) {
     nodeId = explicitNode.id;
     ownerName = ownerName || normalizeString(explicitNode?.fields?.name);
+  }
+
+  if (
+    shouldResolveCharacterOwnerAsUser(
+      graph,
+      ownerName || input.ownerId,
+      nodeId,
+      userAliasContext,
+    )
+  ) {
+    const userOwnerName =
+      userAliasContext.preferredName ||
+      normalizeString(ownerName || input.ownerId || input.ownerKey);
+    return {
+      ownerType: OWNER_TYPE_USER,
+      ownerKey: buildOwnerKey(OWNER_TYPE_USER, userOwnerName),
+      ownerName: userOwnerName,
+      nodeId: "",
+      aliases: uniqueStrings([
+        ...(Array.isArray(input.aliases) ? input.aliases : [input.aliases]),
+        ...userAliasContext.aliasHints,
+        ownerName,
+        userOwnerName,
+      ]),
+    };
   }
 
   if (!nodeId && ownerName) {
@@ -1224,6 +1332,7 @@ export function getKnowledgeOwnerEntry(graph, ownerKey = "") {
 export function listKnowledgeOwners(graph) {
   normalizeGraphCognitiveState(graph);
   const owners = new Map();
+  const userAliasContext = buildUserAliasContext(graph);
 
   for (const entry of Object.values(graph.knowledgeState.owners || {})) {
     const normalizedEntry = createDefaultKnowledgeOwnerState(entry);
@@ -1244,10 +1353,21 @@ export function listKnowledgeOwners(graph) {
   }
 
   for (const characterNode of getCharacterNodes(graph)) {
+    if (
+      shouldResolveCharacterOwnerAsUser(
+        graph,
+        characterNode?.fields?.name,
+        "",
+        userAliasContext,
+      )
+    ) {
+      continue;
+    }
     const resolvedOwner = resolveKnowledgeOwner(graph, {
       ownerType: OWNER_TYPE_CHARACTER,
       ownerName: characterNode?.fields?.name,
       nodeId: characterNode?.id,
+      userAliasContext,
     });
     if (!resolvedOwner.ownerKey || owners.has(resolvedOwner.ownerKey)) continue;
     owners.set(resolvedOwner.ownerKey, {

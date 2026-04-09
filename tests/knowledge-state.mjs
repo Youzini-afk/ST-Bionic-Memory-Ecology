@@ -14,6 +14,14 @@ import {
   setManualActiveRegion,
 } from "../graph/knowledge-state.js";
 
+globalThis.SillyTavern = {
+  getContext() {
+    return {
+      name1: "露西亚",
+    };
+  },
+};
+
 const graph = createEmptyGraph();
 const erinA = createNode({
   type: "character",
@@ -167,5 +175,25 @@ assert.deepEqual(
   sameNameOwners.map((entry) => entry.ownerType).sort(),
   ["character", "user"],
 );
+
+const aliasMatchedUserOwner = resolveKnowledgeOwner(graph, {
+  ownerType: "character",
+  ownerName: "露 西 亚",
+});
+assert.equal(aliasMatchedUserOwner.ownerType, "user");
+assert.equal(aliasMatchedUserOwner.ownerName, "露西亚");
+
+const syntheticGraph = createEmptyGraph();
+syntheticGraph.historyState.activeUserPovOwner = "玩家";
+addNode(
+  syntheticGraph,
+  createNode({
+    type: "character",
+    fields: { name: "玩 家" },
+    seq: 1,
+  }),
+);
+const syntheticOwners = listKnowledgeOwners(syntheticGraph);
+assert.equal(syntheticOwners.some((entry) => entry.ownerType === "character"), false);
 
 console.log("knowledge-state tests passed");

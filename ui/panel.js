@@ -1,6 +1,5 @@
 // ST-BME: 操控面板交互逻辑
 
-import { getContext } from "../../../../extensions.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
@@ -9,6 +8,7 @@ import {
   normalizeMemoryScope,
 } from "../graph/memory-scope.js";
 import { listKnowledgeOwners } from "../graph/knowledge-state.js";
+import { getHostUserAliasHints } from "../runtime/user-alias-utils.js";
 import {
   describeNodeStoryTime,
   describeStoryTime,
@@ -2862,16 +2862,7 @@ function _getInjectionSectionFlavor(title = "") {
 
 /** SillyTavern 用户显示名（name1），用于图谱分区：误标为角色的用户 POV 强制归用户区 */
 function _hostUserPovAliasHintsForGraph() {
-  try {
-    const ctx = typeof getContext === "function" ? getContext() : null;
-    const out = [];
-    if (ctx?.name1 && String(ctx.name1).trim()) {
-      out.push(String(ctx.name1).trim());
-    }
-    return out;
-  } catch {
-    return [];
-  }
+  return getHostUserAliasHints();
 }
 
 function _refreshGraph() {
