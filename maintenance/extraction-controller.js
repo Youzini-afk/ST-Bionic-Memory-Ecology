@@ -105,6 +105,24 @@ function getPendingPersistenceGateInfo(runtime) {
   };
 }
 
+async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-retry") {
+  const gate = getPendingPersistenceGateInfo(runtime);
+  if (!gate || typeof runtime?.retryPendingGraphPersist !== "function") {
+    return gate;
+  }
+
+  try {
+    const retryResult = await runtime.retryPendingGraphPersist({ reason });
+    if (retryResult?.accepted === true) {
+      return null;
+    }
+  } catch (error) {
+    runtime?.console?.warn?.("[ST-BME] pending persistence retry failed", error);
+  }
+
+  return getPendingPersistenceGateInfo(runtime);
+}
+
 function formatPendingPersistenceGateMessage(runtime, operationLabel = "当前提取") {
   const gate = getPendingPersistenceGateInfo(runtime);
   if (!gate) return "";
@@ -430,10 +448,13 @@ export async function runExtractionController(runtime, options = {}) {
     return;
   }
 
-  const pendingPersistMessage = formatPendingPersistenceGateMessage(
+  const pendingPersistGate = await maybeRetryPendingPersistence(
     runtime,
-    "自动提取",
+    "auto-extraction-persist-retry",
   );
+  const pendingPersistMessage = pendingPersistGate
+    ? formatPendingPersistenceGateMessage(runtime, "自动提取")
+    : "";
   if (pendingPersistMessage) {
     runtime.console?.debug?.("[ST-BME] auto extraction paused: pending persistence", {
       persistence: runtime.getCurrentGraph?.()?.historyState?.lastBatchStatus?.persistence || null,
@@ -548,10 +569,13 @@ export async function onManualExtractController(runtime, options = {}) {
     return;
   }
   if (!runtime.ensureGraphMutationReady("手动提取")) return;
-  const pendingPersistMessage = formatPendingPersistenceGateMessage(
+  const pendingPersistGate = await maybeRetryPendingPersistence(
     runtime,
-    "手动提取",
+    "manual-extraction-persist-retry",
   );
+  const pendingPersistMessage = pendingPersistGate
+    ? formatPendingPersistenceGateMessage(runtime, "手动提取")
+    : "";
   if (pendingPersistMessage) {
     runtime.setLastExtractionStatus(
       "等待持久化确认",

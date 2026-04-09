@@ -136,8 +136,14 @@ async function testManualExtractNoBatchesDoesNotStayRunning() {
     ...createBaseStatusContext(),
     isExtracting: false,
     currentGraph: {},
+    graphPersistenceState: {
+      pendingPersist: false,
+    },
     getCurrentChatId() {
       return "chat-mobile";
+    },
+    getGraphPersistenceState() {
+      return { pendingPersist: false };
     },
     ensureGraphMutationReady() {
       return true;
@@ -172,6 +178,12 @@ async function testManualExtractNoBatchesDoesNotStayRunning() {
     },
     async executeExtractionBatch() {
       throw new Error("不应进入批次执行");
+    },
+    async retryPendingGraphPersist() {
+      return {
+        accepted: false,
+        reason: "no-pending-persist",
+      };
     },
     isAbortError() {
       return false;

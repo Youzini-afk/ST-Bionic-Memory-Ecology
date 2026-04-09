@@ -627,6 +627,9 @@ let pendingHistoryRecoveryTrigger = "";
 let pendingHistoryMutationCheckTimers = [];
 let pendingGraphLoadRetryTimer = null;
 let pendingGraphLoadRetryChatId = "";
+let pendingGraphPersistRetryTimer = null;
+let pendingGraphPersistRetryChatId = "";
+let pendingGraphPersistRetryAttempt = 0;
 let pendingAutoExtractionTimer = null;
 let pendingAutoExtraction = {
   chatId: "",
@@ -684,6 +687,8 @@ const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
+const PENDING_GRAPH_PERSIST_RETRY_DELAYS_MS = [500, 1500, 5000];
+const PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS = 5;
 const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = new Set([
   GRAPH_LOAD_STATES.LOADING,
   GRAPH_LOAD_STATES.BLOCKED,
@@ -5905,6 +5910,223 @@ function maybeCaptureGraphShadowSnapshot(reason = "runtime-shadow") {
   });
 }
 
+function clearPendingGraphPersistRetry({ resetChatId = true } = {}) {
+  if (pendingGraphPersistRetryTimer) {
+    clearTimeout(pendingGraphPersistRetryTimer);
+    pendingGraphPersistRetryTimer = null;
+  }
+  pendingGraphPersistRetryAttempt = 0;
+  if (resetChatId) {
+    pendingGraphPersistRetryChatId = "";
+  }
+}
+
+function canPersistGraphToMetadataFallback(
+  context = getContext(),
+  graph = currentGraph,
+) {
+  if (isGraphMetadataWriteAllowed()) {
+    return true;
+  }
+
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+  if (!context || !graph || !activeChatId) {
+    return false;
+  }
+
+  const identity = resolveCurrentChatIdentity(context);
+  const runtimeGraphChatId = normalizeChatIdCandidate(
+    graph?.historyState?.chatId,
+  );
+  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const sameRuntimeChat =
+    !runtimeGraphChatId ||
+    areChatIdsEquivalentForResolvedIdentity(
+      runtimeGraphChatId,
+      activeChatId,
+      identity,
+    ) ||
+    areChatIdsEquivalentForResolvedIdentity(
+      activeChatId,
+      runtimeGraphChatId,
+      identity,
+    );
+  const sameStateChat =
+    !stateChatId ||
+    areChatIdsEquivalentForResolvedIdentity(
+      stateChatId,
+      activeChatId,
+      identity,
+    ) ||
+    areChatIdsEquivalentForResolvedIdentity(
+      activeChatId,
+      stateChatId,
+      identity,
+    );
+
+  return (
+    graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT &&
+    sameRuntimeChat &&
+    sameStateChat &&
+    typeof graph === "object" &&
+    graph !== null
+  );
+}
+
+function buildBatchPersistenceRecordFromPersistResult(persistResult = null) {
+  const accepted = persistResult?.accepted === true;
+  const queued = persistResult?.queued === true;
+  const blocked = persistResult?.blocked === true;
+  let outcome = "failed";
+
+  if (accepted && String(persistResult?.storageTier || "") === "indexeddb") {
+    outcome = "saved";
+  } else if (accepted) {
+    outcome = "fallback";
+  } else if (queued) {
+    outcome = "queued";
+  } else if (blocked) {
+    outcome = "blocked";
+  }
+
+  return {
+    outcome,
+    accepted,
+    storageTier: String(persistResult?.storageTier || "none"),
+    reason: String(persistResult?.reason || ""),
+    revision: Number.isFinite(Number(persistResult?.revision))
+      ? Number(persistResult.revision)
+      : 0,
+    saveMode: String(persistResult?.saveMode || ""),
+    saved: persistResult?.saved === true,
+    queued,
+    blocked,
+  };
+}
+
+function resolvePendingPersistLastProcessedAssistantFloor() {
+  const processedRange = Array.isArray(
+    currentGraph?.historyState?.lastBatchStatus?.processedRange,
+  )
+    ? currentGraph.historyState.lastBatchStatus.processedRange
+    : [];
+  const rangeEnd = Number(processedRange[1]);
+  if (Number.isFinite(rangeEnd) && rangeEnd >= 0) {
+    return Math.floor(rangeEnd);
+  }
+
+  const rangeStart = Number(processedRange[0]);
+  if (Number.isFinite(rangeStart) && rangeStart >= 0) {
+    return Math.floor(rangeStart);
+  }
+
+  return null;
+}
+
+function applyAcceptedPendingPersistState(
+  persistResult,
+  {
+    lastProcessedAssistantFloor = resolvePendingPersistLastProcessedAssistantFloor(),
+  } = {},
+) {
+  ensureCurrentGraphRuntimeState();
+
+  const persistenceRecord = buildBatchPersistenceRecordFromPersistResult(
+    persistResult,
+  );
+  const batchStatus = currentGraph?.historyState?.lastBatchStatus;
+  if (batchStatus && typeof batchStatus === "object") {
+    batchStatus.persistence = persistenceRecord;
+    batchStatus.historyAdvanceAllowed = persistenceRecord.accepted === true;
+    batchStatus.historyAdvanced = persistenceRecord.accepted === true;
+    currentGraph.historyState.lastBatchStatus = batchStatus;
+  }
+
+  if (
+    persistenceRecord.accepted === true &&
+    Number.isFinite(Number(lastProcessedAssistantFloor)) &&
+    Number(lastProcessedAssistantFloor) >= 0
+  ) {
+    const chat = Array.isArray(getContext()?.chat) ? getContext().chat : [];
+    const safeFloor = Math.floor(Number(lastProcessedAssistantFloor));
+    if (typeof updateProcessedHistorySnapshot === "function") {
+      updateProcessedHistorySnapshot(chat, safeFloor);
+    } else {
+      currentGraph.historyState.lastProcessedAssistantFloor = safeFloor;
+      currentGraph.lastProcessedSeq = safeFloor;
+    }
+  }
+
+  if (persistenceRecord.accepted === true) {
+    const safeFloor = Number.isFinite(Number(lastProcessedAssistantFloor))
+      ? Math.floor(Number(lastProcessedAssistantFloor))
+      : null;
+    if (typeof setLastExtractionStatus === "function") {
+      setLastExtractionStatus(
+        "持久化已确认",
+        [
+          safeFloor != null ? `楼层 ${safeFloor}` : "",
+          `rev ${Number(persistenceRecord.revision || 0)}`,
+          String(persistenceRecord.storageTier || "none"),
+          persistenceRecord.reason || "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        "success",
+        { syncRuntime: true, toastKind: "" },
+      );
+    }
+  }
+
+  refreshPanelLiveState();
+}
+
+function schedulePendingGraphPersistRetry(
+  reason = "pending-graph-persist-retry",
+  attempt = 0,
+) {
+  if (!graphPersistenceState.pendingPersist) {
+    clearPendingGraphPersistRetry();
+    return false;
+  }
+
+  const targetChatId = normalizeChatIdCandidate(
+    graphPersistenceState.queuedPersistChatId ||
+      graphPersistenceState.chatId ||
+      getCurrentChatId(),
+  );
+  if (!targetChatId) {
+    return false;
+  }
+
+  const normalizedAttempt = Math.max(0, Math.floor(Number(attempt) || 0));
+  if (normalizedAttempt >= PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS) {
+    return false;
+  }
+
+  const delayIndex = Math.min(
+    normalizedAttempt,
+    PENDING_GRAPH_PERSIST_RETRY_DELAYS_MS.length - 1,
+  );
+  const delayMs = PENDING_GRAPH_PERSIST_RETRY_DELAYS_MS[delayIndex];
+  clearPendingGraphPersistRetry({ resetChatId: false });
+  pendingGraphPersistRetryChatId = targetChatId;
+  pendingGraphPersistRetryAttempt = normalizedAttempt;
+
+  pendingGraphPersistRetryTimer = setTimeout(() => {
+    pendingGraphPersistRetryTimer = null;
+    void retryPendingGraphPersist({
+      reason: `${reason}:attempt-${normalizedAttempt + 1}`,
+      retryAttempt: normalizedAttempt,
+      scheduleRetryOnFailure: true,
+    }).catch((error) => {
+      console.warn("[ST-BME] 待确认持久化自动重试失败:", error);
+    });
+  }, delayMs);
+
+  return true;
+}
+
 function persistGraphToChatMetadata(
   context = getContext(),
   {
@@ -5966,6 +6188,7 @@ function persistGraphToChatMetadata(
     pendingPersist: false,
     writesBlocked: false,
   });
+  clearPendingGraphPersistRetry();
   removeGraphShadowSnapshot(chatId);
   updateGraphPersistenceState({
     lastPersistReason: String(reason || ""),
@@ -6013,6 +6236,7 @@ function queueGraphPersist(
     writesBlocked: true,
     lastPersistReason: String(reason || ""),
   });
+  schedulePendingGraphPersistRetry(String(reason || "graph-persist-blocked"), 0);
 
   return buildGraphPersistResult({
     queued: true,
@@ -6027,11 +6251,12 @@ function queueGraphPersist(
 }
 
 function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
-  if (!currentGraph || !isGraphMetadataWriteAllowed()) {
+  const context = getContext();
+  if (!currentGraph || !canPersistGraphToMetadataFallback(context)) {
     return buildGraphPersistResult({
       queued: graphPersistenceState.pendingPersist,
-      blocked: !isGraphMetadataWriteAllowed(),
-      reason: isGraphMetadataWriteAllowed()
+      blocked: !canPersistGraphToMetadataFallback(context),
+      reason: canPersistGraphToMetadataFallback(context)
         ? "missing-current-graph"
         : "write-protected",
     });
@@ -6071,10 +6296,205 @@ function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
     });
   }
 
-  return persistGraphToChatMetadata(getContext(), {
+  return persistGraphToChatMetadata(context, {
     reason,
     revision: targetRevision,
     immediate: graphPersistenceState.queuedPersistMode !== "debounced",
+  });
+}
+
+async function retryPendingGraphPersist({
+  reason = "pending-graph-persist-retry",
+  retryAttempt = 0,
+  scheduleRetryOnFailure = false,
+} = {}) {
+  ensureCurrentGraphRuntimeState();
+
+  if (!graphPersistenceState.pendingPersist) {
+    clearPendingGraphPersistRetry();
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: false,
+      accepted: false,
+      reason: "no-pending-persist",
+      revision: graphPersistenceState.revision,
+      saveMode: graphPersistenceState.lastPersistMode,
+      storageTier: "none",
+    });
+  }
+
+  const context = getContext();
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+  const queuedChatId = normalizeChatIdCandidate(
+    graphPersistenceState.queuedPersistChatId ||
+      graphPersistenceState.chatId ||
+      activeChatId,
+  );
+  const currentIdentity = resolveCurrentChatIdentity(context);
+  if (!currentGraph || !context || !activeChatId || !queuedChatId) {
+    if (scheduleRetryOnFailure) {
+      schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
+    }
+    return buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "pending-persist-context-unavailable",
+      revision: Math.max(
+        Number(graphPersistenceState.queuedPersistRevision || 0),
+        Number(graphPersistenceState.revision || 0),
+      ),
+      saveMode: graphPersistenceState.queuedPersistMode,
+      storageTier: "none",
+    });
+  }
+
+  if (
+    !areChatIdsEquivalentForResolvedIdentity(
+      queuedChatId,
+      activeChatId,
+      currentIdentity,
+    ) &&
+    !areChatIdsEquivalentForResolvedIdentity(
+      activeChatId,
+      queuedChatId,
+      currentIdentity,
+    )
+  ) {
+    if (scheduleRetryOnFailure) {
+      schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
+    }
+    return buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "queued-chat-mismatch",
+      revision: Math.max(
+        Number(graphPersistenceState.queuedPersistRevision || 0),
+        Number(graphPersistenceState.revision || 0),
+      ),
+      saveMode: graphPersistenceState.queuedPersistMode,
+      storageTier: "none",
+    });
+  }
+
+  const targetRevision = Math.max(
+    Number(graphPersistenceState.queuedPersistRevision || 0),
+    Number(graphPersistenceState.revision || 0),
+    Number(graphPersistenceState.lastPersistedRevision || 0),
+    Number(getGraphPersistedRevision(currentGraph) || 0),
+  );
+  const lastProcessedAssistantFloor =
+    resolvePendingPersistLastProcessedAssistantFloor();
+
+  const indexedDbResult = await saveGraphToIndexedDb(activeChatId, currentGraph, {
+    revision: targetRevision,
+    reason,
+  });
+  if (indexedDbResult?.saved) {
+    clearPendingGraphPersistRetry();
+    persistGraphCommitMarker(context, {
+      reason,
+      revision: targetRevision,
+      storageTier: "indexeddb",
+      accepted: true,
+      lastProcessedAssistantFloor,
+      extractionCount,
+      immediate: true,
+    });
+    updateGraphPersistenceState({
+      pendingPersist: false,
+      persistMismatchReason: "",
+      lastAcceptedRevision: Math.max(
+        Number(graphPersistenceState.lastAcceptedRevision || 0),
+        targetRevision,
+      ),
+      lastPersistReason: String(reason || ""),
+      lastPersistMode: "indexeddb",
+      queuedPersistRevision: 0,
+      queuedPersistChatId: "",
+      queuedPersistMode: "",
+      queuedPersistRotateIntegrity: false,
+      queuedPersistReason: "",
+    });
+    const persistResult = buildGraphPersistResult({
+      saved: true,
+      accepted: true,
+      reason,
+      revision: targetRevision,
+      saveMode: "indexeddb",
+      storageTier: "indexeddb",
+    });
+    applyAcceptedPendingPersistState(persistResult, {
+      lastProcessedAssistantFloor,
+    });
+    void maybeResumePendingAutoExtraction("pending-persist-resolved:indexeddb");
+    return persistResult;
+  }
+
+  if (canPersistGraphToMetadataFallback(context, currentGraph)) {
+    const metadataReason = `${reason}:metadata-full-fallback`;
+    const metadataResult = persistGraphToChatMetadata(context, {
+      reason: metadataReason,
+      revision: targetRevision,
+      immediate: true,
+    });
+    if (metadataResult?.saved) {
+      clearPendingGraphPersistRetry();
+      persistGraphCommitMarker(context, {
+        reason: metadataReason,
+        revision: targetRevision,
+        storageTier: "metadata-full",
+        accepted: true,
+        lastProcessedAssistantFloor,
+        extractionCount,
+        immediate: true,
+      });
+      updateGraphPersistenceState({
+        pendingPersist: false,
+        persistMismatchReason: "",
+        lastAcceptedRevision: Math.max(
+          Number(graphPersistenceState.lastAcceptedRevision || 0),
+          targetRevision,
+        ),
+        lastPersistReason: metadataReason,
+        lastPersistMode: String(metadataResult.saveMode || "metadata"),
+        queuedPersistRevision: 0,
+        queuedPersistChatId: "",
+        queuedPersistMode: "",
+        queuedPersistRotateIntegrity: false,
+        queuedPersistReason: "",
+      });
+      const persistResult = buildGraphPersistResult({
+        saved: true,
+        accepted: true,
+        reason: metadataReason,
+        revision: targetRevision,
+        saveMode: metadataResult.saveMode,
+        storageTier: "metadata-full",
+      });
+      applyAcceptedPendingPersistState(persistResult, {
+        lastProcessedAssistantFloor,
+      });
+      void maybeResumePendingAutoExtraction("pending-persist-resolved:metadata");
+      return persistResult;
+    }
+  }
+
+  if (scheduleRetryOnFailure) {
+    schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
+  }
+  return buildGraphPersistResult({
+    saved: false,
+    queued: true,
+    blocked: true,
+    accepted: false,
+    reason: `${reason}:still-pending`,
+    revision: targetRevision,
+    saveMode: graphPersistenceState.queuedPersistMode || "immediate",
+    storageTier: "none",
   });
 }
 
@@ -6129,7 +6549,13 @@ async function persistExtractionBatchResult({
       ),
       lastPersistReason: String(reason || ""),
       lastPersistMode: "indexeddb",
+      queuedPersistRevision: 0,
+      queuedPersistChatId: "",
+      queuedPersistMode: "",
+      queuedPersistRotateIntegrity: false,
+      queuedPersistReason: "",
     });
+    clearPendingGraphPersistRetry();
     return buildGraphPersistResult({
       saved: true,
       accepted: true,
@@ -6163,7 +6589,13 @@ async function persistExtractionBatchResult({
       ),
       lastPersistReason: shadowReason,
       lastPersistMode: "shadow",
+      queuedPersistRevision: 0,
+      queuedPersistChatId: "",
+      queuedPersistMode: "",
+      queuedPersistRotateIntegrity: false,
+      queuedPersistReason: "",
     });
+    clearPendingGraphPersistRetry();
     return buildGraphPersistResult({
       saved: false,
       accepted: true,
@@ -6174,7 +6606,7 @@ async function persistExtractionBatchResult({
     });
   }
 
-  if (isGraphMetadataWriteAllowed()) {
+  if (canPersistGraphToMetadataFallback(context, currentGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
@@ -6198,7 +6630,13 @@ async function persistExtractionBatchResult({
           Number(graphPersistenceState.lastAcceptedRevision || 0),
           revision,
         ),
+        queuedPersistRevision: 0,
+        queuedPersistChatId: "",
+        queuedPersistMode: "",
+        queuedPersistRotateIntegrity: false,
+        queuedPersistReason: "",
       });
+      clearPendingGraphPersistRetry();
       return buildGraphPersistResult({
         saved: true,
         accepted: true,
@@ -6213,6 +6651,7 @@ async function persistExtractionBatchResult({
   const queuedResult = queueGraphPersist(`${reason}:pending`, revision, {
     immediate: true,
   });
+  schedulePendingGraphPersistRetry(`${reason}:pending`, 0);
   updateGraphPersistenceState({
     pendingPersist: true,
     lastPersistReason: String(queuedResult.reason || `${reason}:pending`),
@@ -7714,19 +8153,33 @@ async function saveGraphToIndexedDb(
       revision,
       markSyncDirty: true,
     });
-    await db.markSyncDirty(reason);
+    let syncDirtyWarning = "";
+    let scheduleUploadWarning = "";
+    try {
+      await db.markSyncDirty(reason);
+    } catch (error) {
+      syncDirtyWarning =
+        error?.message || String(error) || "mark-sync-dirty-failed";
+      console.warn("[ST-BME] IndexedDB 已写入，但补记 syncDirty 失败:", error);
+    }
 
     snapshot.meta.revision = normalizeIndexedDbRevision(
       importResult?.revision,
       revision,
     );
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
-    scheduleUpload(
-      normalizedChatId,
-      buildBmeSyncRuntimeOptions({
-        trigger: `graph-mutation:${String(reason || "graph-save")}`,
-      }),
-    );
+    try {
+      scheduleUpload(
+        normalizedChatId,
+        buildBmeSyncRuntimeOptions({
+          trigger: `graph-mutation:${String(reason || "graph-save")}`,
+        }),
+      );
+    } catch (error) {
+      scheduleUploadWarning =
+        error?.message || String(error) || "schedule-upload-failed";
+      console.warn("[ST-BME] IndexedDB 已写入，但同步上传调度失败:", error);
+    }
 
     updateGraphPersistenceState({
       storagePrimary: "indexeddb",
@@ -7734,12 +8187,17 @@ async function saveGraphToIndexedDb(
       dbReady: true,
       lastPersistedRevision: snapshot.meta.revision,
       pendingPersist: false,
+      queuedPersistRevision: 0,
+      queuedPersistChatId: "",
+      queuedPersistMode: "",
+      queuedPersistRotateIntegrity: false,
+      queuedPersistReason: "",
       indexedDbRevision: snapshot.meta.revision,
       metadataIntegrity:
         getChatMetadataIntegrity(getContext()) ||
           graphPersistenceState.metadataIntegrity,
       indexedDbLastError: "",
-      lastSyncError: "",
+      lastSyncError: scheduleUploadWarning,
       dualWriteLastResult: {
         action: "save",
         target: "indexeddb",
@@ -7747,9 +8205,13 @@ async function saveGraphToIndexedDb(
         chatId: normalizedChatId,
         revision: snapshot.meta.revision,
         reason: String(reason || "graph-save"),
+        warning:
+          [syncDirtyWarning, scheduleUploadWarning].filter(Boolean).join(" | ") ||
+          "",
         at: Date.now(),
       },
     });
+    clearPendingGraphPersistRetry();
     if (
       graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
       areChatIdsEquivalentForResolvedIdentity(
@@ -7788,6 +8250,8 @@ async function saveGraphToIndexedDb(
       chatId: normalizedChatId,
       revision: snapshot.meta.revision,
       reason: String(reason || "graph-save"),
+      warning:
+        [syncDirtyWarning, scheduleUploadWarning].filter(Boolean).join(" | ") || "",
     };
   } catch (error) {
     console.warn("[ST-BME] IndexedDB 写入失败，保留 metadata 兜底:", error);
@@ -10511,6 +10975,7 @@ async function runExtraction() {
     getAssistantTurns,
     getContext,
     getCurrentGraph: () => currentGraph,
+    getGraphPersistenceState: () => graphPersistenceState,
     getGraphMutationBlockReason,
     getIsExtracting: () => isExtracting,
     getIsRecoveringHistory: () => isRecoveringHistory,
@@ -10521,6 +10986,7 @@ async function runExtraction() {
     notifyExtractionIssue,
     recoverHistoryIfNeeded,
     resolveAutoExtractionPlan,
+    retryPendingGraphPersist,
     setIsExtracting: (value) => {
       isExtracting = value;
     },
@@ -11521,6 +11987,7 @@ async function onManualExtract(options = {}) {
       getContext,
       getCurrentChatId,
       getCurrentGraph: () => currentGraph,
+      getGraphPersistenceState: () => graphPersistenceState,
       getIsExtracting: () => isExtracting,
       getLastProcessedAssistantFloor,
       getSettings,
@@ -11528,6 +11995,7 @@ async function onManualExtract(options = {}) {
       normalizeGraphRuntimeState,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
+      retryPendingGraphPersist,
       setCurrentGraph: (graph) => {
         currentGraph = graph;
       },

@@ -735,7 +735,11 @@ async function createGraphPersistenceHarness({
     buildGraphFromSnapshot,
     buildSnapshotFromGraph,
     buildBmeDbName,
-    scheduleUpload() {},
+    scheduleUpload() {
+      if (runtimeContext.__scheduleUploadShouldThrow) {
+        throw new Error("schedule-upload-failed");
+      }
+    },
     BmeDatabase: class {
       constructor(dbChatId = "") {
         this.chatId = String(dbChatId || "");
@@ -825,7 +829,11 @@ async function createGraphPersistenceHarness({
               },
             };
           },
-          async markSyncDirty() {},
+          async markSyncDirty() {
+            if (runtimeContext.__markSyncDirtyShouldThrow) {
+              throw new Error("mark-sync-dirty-failed");
+            }
+          },
         };
       }
       async getCurrentDb(dbChatId = this._currentChatId) {
@@ -871,6 +879,8 @@ result = {
   onMessageReceived,
   applyGraphLoadState,
   maybeFlushQueuedGraphPersist,
+  retryPendingGraphPersist,
+  saveGraphToIndexedDb,
   cloneGraphForPersistence,
   assertRecoveryChatStillActive,
   createAbortError,
@@ -2240,6 +2250,124 @@ result = {
     secondPersistedGraph.nodes[0].fields.title,
     "runtime-between-saves",
     "第二次已保存 metadata 也不能被后续运行时修改污染",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-idb-ancillary-warning",
+    globalChatId: "chat-idb-ancillary-warning",
+    chatMetadata: {
+      integrity: "meta-idb-ancillary-warning",
+    },
+  });
+  harness.api.setCurrentGraph(
+    createMeaningfulGraph("chat-idb-ancillary-warning", "ancillary-warning"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-idb-ancillary-warning",
+    revision: 7,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+  harness.runtimeContext.__markSyncDirtyShouldThrow = true;
+  harness.runtimeContext.__scheduleUploadShouldThrow = true;
+
+  const result = await harness.api.saveGraphToIndexedDb(
+    "chat-idb-ancillary-warning",
+    harness.api.getCurrentGraph(),
+    {
+      revision: 7,
+      reason: "ancillary-warning-save",
+    },
+  );
+
+  assert.equal(result.saved, true);
+  assert.match(String(result.warning || ""), /mark-sync-dirty-failed/);
+  assert.match(String(result.warning || ""), /schedule-upload-failed/);
+  assert.equal(
+    harness.api.getIndexedDbSnapshot().meta.revision,
+    7,
+    "附属步骤失败时，IndexedDB 主写仍应视为成功",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-pending-persist-retry",
+    globalChatId: "chat-pending-persist-retry",
+    chatMetadata: {
+      integrity: "meta-pending-persist-retry",
+    },
+    chat: [
+      { is_user: true, mes: "用户发言" },
+      { is_user: false, mes: "助手回复" },
+    ],
+  });
+  const graph = createMeaningfulGraph(
+    "chat-pending-persist-retry",
+    "pending-persist-retry",
+  );
+  graph.historyState.lastProcessedAssistantFloor = -1;
+  graph.lastProcessedSeq = -1;
+  graph.historyState.lastBatchStatus = {
+    processedRange: [1, 1],
+    completed: true,
+    stages: {
+      core: { outcome: "success" },
+      finalize: { outcome: "success" },
+    },
+    persistence: {
+      outcome: "queued",
+      accepted: false,
+      storageTier: "none",
+      reason: "extraction-batch-complete:pending",
+      revision: 7,
+      saveMode: "immediate",
+      saved: false,
+      queued: true,
+      blocked: true,
+    },
+    historyAdvanceAllowed: false,
+    historyAdvanced: false,
+  };
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-pending-persist-retry",
+    revision: 7,
+    lastPersistedRevision: 0,
+    queuedPersistRevision: 7,
+    queuedPersistChatId: "chat-pending-persist-retry",
+    queuedPersistMode: "immediate",
+    pendingPersist: true,
+    writesBlocked: false,
+  });
+  harness.runtimeContext.__markSyncDirtyShouldThrow = true;
+
+  const result = await harness.api.retryPendingGraphPersist({
+    reason: "queued-persist-retry-test",
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(
+    harness.api.getGraphPersistenceState().pendingPersist,
+    false,
+    "pendingPersist 在补存成功后应被清除",
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().historyState.lastProcessedAssistantFloor,
+    1,
+    "补存成功后应推进 lastProcessedAssistantFloor",
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().historyState.lastBatchStatus.historyAdvanceAllowed,
+    true,
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().historyState.lastBatchStatus.persistence.outcome,
+    "saved",
   );
 }
 
