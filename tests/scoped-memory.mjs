@@ -79,10 +79,11 @@ const legacyGraph = deserializeGraph({
   edges: [],
 });
 assert.equal(legacyGraph.nodes[0]?.scope?.layer, "objective");
-assert.equal(legacyGraph.version, 8);
+assert.equal(legacyGraph.version, 9);
 assert.equal(legacyGraph.knowledgeState?.version, 1);
 assert.equal(legacyGraph.regionState?.version, 1);
 assert.equal(legacyGraph.timelineState?.version, 1);
+assert.equal(legacyGraph.summaryState?.version, 1);
 assert.equal(legacyGraph.historyState?.activeRegionSource, "");
 assert.equal(legacyGraph.historyState?.activeStorySegmentId, "");
 assert.equal(legacyGraph.historyState?.activeStoryTimeLabel, "");
