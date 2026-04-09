@@ -112,6 +112,10 @@ export function createGenerationRecallHarness(options = {}) {
         taskProfilesVersion: settings?.taskProfilesVersion || 0,
         taskProfiles: settings?.taskProfiles || {},
       }),
+      migratePerTaskRegexToGlobal: (settings = {}) => ({
+        changed: false,
+        settings,
+      }),
       refreshPanelLiveStateController: () => {
         context.refreshPanelCalls += 1;
       },

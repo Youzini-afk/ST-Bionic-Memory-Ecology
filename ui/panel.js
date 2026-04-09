@@ -20,10 +20,12 @@ import {
 } from "../llm/llm-preset-utils.js";
 import {
   cloneTaskProfile,
+  createDefaultGlobalTaskRegex,
   createBuiltinPromptBlock,
   createCustomPromptBlock,
   createLocalRegexRule,
   DEFAULT_TASK_BLOCKS,
+  dedupeRegexRules,
   ensureTaskProfiles,
   exportTaskProfile as serializeTaskProfile,
   getBuiltinBlockDefinitions,
@@ -31,6 +33,7 @@ import {
   getTaskTypeOptions,
   importTaskProfile as parseImportedTaskProfile,
   isTaskRegexStageEnabled,
+  normalizeGlobalTaskRegex,
   normalizeTaskRegexStages,
   restoreDefaultTaskProfile,
   setActiveTaskProfileId,
@@ -67,7 +70,6 @@ function getDefaultPromptText(taskType = "") {
 const TASK_PROFILE_TABS = [
   { id: "generation", label: "生成参数" },
   { id: "prompt", label: "Prompt 编排" },
-  { id: "regex", label: "正则" },
   { id: "debug", label: "调试预览" },
 ];
 
@@ -226,6 +228,8 @@ let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
 let currentTaskProfileRuleId = "";
+let showGlobalRegexPanel = false;
+let currentGlobalRegexRuleId = "";
 let currentCognitionOwnerKey = "";
 let currentGraphView = "graph";
 let fetchedMemoryLLMModels = [];
@@ -4784,16 +4788,58 @@ function _bindTaskProfileWorkspace() {
       try {
         const text = await file.text();
         const settings = _getSettings?.() || {};
-        const imported = parseImportedTaskProfile(
-          settings.taskProfiles || {},
-          text,
+        const parsed = JSON.parse(text);
+        let nextGlobalTaskRegex = _normalizeGlobalRegexDraft(
+          settings.globalTaskRegex || {},
         );
+        const importedGlobalMerge = _mergeImportedGlobalRegex(
+          nextGlobalTaskRegex,
+          parsed?.globalTaskRegex,
+        );
+        nextGlobalTaskRegex = importedGlobalMerge.globalTaskRegex;
+        let imported = parseImportedTaskProfile(
+          settings.taskProfiles || {},
+          parsed,
+        );
+        const legacyRuleMerge = _mergeProfileRegexRulesIntoGlobal(
+          nextGlobalTaskRegex,
+          imported.profile,
+        );
+        nextGlobalTaskRegex = legacyRuleMerge.globalTaskRegex;
+        if (legacyRuleMerge.clearedLegacyRules) {
+          imported = {
+            ...imported,
+            profile: legacyRuleMerge.profile,
+            taskProfiles: upsertTaskProfile(
+              imported.taskProfiles,
+              imported.taskType,
+              legacyRuleMerge.profile,
+              { setActive: true },
+            ),
+          };
+        }
         currentTaskProfileTaskType = imported.taskType || currentTaskProfileTaskType;
         currentTaskProfileBlockId = imported.profile?.blocks?.[0]?.id || "";
         currentTaskProfileRuleId =
           imported.profile?.regex?.localRules?.[0]?.id || "";
-        _patchTaskProfiles(imported.taskProfiles);
-        toastr.success("预设导入成功", "ST-BME");
+        _patchSettings(
+          {
+            taskProfilesVersion: 3,
+            taskProfiles: imported.taskProfiles,
+            globalTaskRegex: nextGlobalTaskRegex,
+          },
+          {
+            refreshTaskWorkspace: true,
+          },
+        );
+        const mergedRuleCount =
+          importedGlobalMerge.mergedRuleCount + legacyRuleMerge.mergedRuleCount;
+        toastr.success(
+          mergedRuleCount > 0
+            ? `预设导入成功，${mergedRuleCount} 条正则规则已合并到通用正则规则`
+            : "预设导入成功",
+          "ST-BME",
+        );
       } catch (error) {
         console.error("[ST-BME] 导入任务预设失败:", error);
         toastr.error(`预设导入失败: ${error?.message || error}`, "ST-BME");
@@ -4817,14 +4863,41 @@ function _bindTaskProfileWorkspace() {
         }
         const settings = _getSettings?.() || {};
         let mergedProfiles = settings.taskProfiles || {};
+        let nextGlobalTaskRegex = _normalizeGlobalRegexDraft(
+          settings.globalTaskRegex || {},
+        );
+        const importedGlobalMerge = _mergeImportedGlobalRegex(
+          nextGlobalTaskRegex,
+          parsed?.globalTaskRegex,
+        );
+        nextGlobalTaskRegex = importedGlobalMerge.globalTaskRegex;
         let importedCount = 0;
+        let mergedLegacyRuleCount = 0;
         for (const [taskType, entry] of Object.entries(parsed.profiles)) {
           try {
-            const imported = parseImportedTaskProfile(
+            let imported = parseImportedTaskProfile(
               mergedProfiles,
               entry,
               taskType,
             );
+            const legacyRuleMerge = _mergeProfileRegexRulesIntoGlobal(
+              nextGlobalTaskRegex,
+              imported.profile,
+            );
+            nextGlobalTaskRegex = legacyRuleMerge.globalTaskRegex;
+            mergedLegacyRuleCount += legacyRuleMerge.mergedRuleCount;
+            if (legacyRuleMerge.clearedLegacyRules) {
+              imported = {
+                ...imported,
+                profile: legacyRuleMerge.profile,
+                taskProfiles: upsertTaskProfile(
+                  imported.taskProfiles,
+                  imported.taskType,
+                  legacyRuleMerge.profile,
+                  { setActive: true },
+                ),
+              };
+            }
             mergedProfiles = imported.taskProfiles;
             importedCount++;
           } catch (innerError) {
@@ -4835,8 +4908,24 @@ function _bindTaskProfileWorkspace() {
           toastr.warning("没有成功导入任何预设", "ST-BME");
           return;
         }
-        _patchTaskProfiles(mergedProfiles);
-        toastr.success(`已导入 ${importedCount} 个任务预设`, "ST-BME");
+        _patchSettings(
+          {
+            taskProfilesVersion: 3,
+            taskProfiles: mergedProfiles,
+            globalTaskRegex: nextGlobalTaskRegex,
+          },
+          {
+            refreshTaskWorkspace: true,
+          },
+        );
+        const mergedRuleCount =
+          importedGlobalMerge.mergedRuleCount + mergedLegacyRuleCount;
+        toastr.success(
+          mergedRuleCount > 0
+            ? `已导入 ${importedCount} 个任务预设，并合并 ${mergedRuleCount} 条通用正则规则`
+            : `已导入 ${importedCount} 个任务预设`,
+          "ST-BME",
+        );
       } catch (error) {
         console.error("[ST-BME] 导入全部预设失败:", error);
         toastr.error(`导入全部预设失败: ${error?.message || error}`, "ST-BME");
@@ -4851,6 +4940,7 @@ function _bindTaskProfileWorkspace() {
 function _handleTaskProfileWorkspaceInput(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  const isGlobalRegexPanel = _isGlobalRegexPanelTarget(target);
 
   if (target.matches("[data-block-field]")) {
     _persistSelectedBlockField(target, false);
@@ -4880,13 +4970,18 @@ function _handleTaskProfileWorkspaceInput(event) {
     target.matches("[data-regex-rule-source]") ||
     target.matches("[data-regex-rule-destination]")
   ) {
-    _persistSelectedRegexRuleField(target, false);
+    if (isGlobalRegexPanel) {
+      _persistSelectedGlobalRegexRuleField(target, false);
+    } else {
+      _persistSelectedRegexRuleField(target, false);
+    }
   }
 }
 
 function _handleTaskProfileWorkspaceChange(event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
+  const isGlobalRegexPanel = _isGlobalRegexPanelTarget(target);
 
   if (target.id === "bme-task-profile-select") {
     const settings = _getSettings?.() || {};
@@ -4912,17 +5007,29 @@ function _handleTaskProfileWorkspaceChange(event) {
   }
 
   if (target.matches("[data-regex-field]")) {
-    _persistRegexConfigField(target, false);
+    if (isGlobalRegexPanel) {
+      _persistGlobalRegexField(target, false);
+    } else {
+      _persistRegexConfigField(target, false);
+    }
     return;
   }
 
   if (target.matches("[data-regex-source]")) {
-    _persistRegexSourceField(target, false);
+    if (isGlobalRegexPanel) {
+      _persistGlobalRegexSourceField(target, false);
+    } else {
+      _persistRegexSourceField(target, false);
+    }
     return;
   }
 
   if (target.matches("[data-regex-stage]")) {
-    _persistRegexStageField(target, false);
+    if (isGlobalRegexPanel) {
+      _persistGlobalRegexStageField(target, false);
+    } else {
+      _persistRegexStageField(target, false);
+    }
     return;
   }
 
@@ -4931,12 +5038,20 @@ function _handleTaskProfileWorkspaceChange(event) {
     target.matches("[data-regex-rule-source]") ||
     target.matches("[data-regex-rule-destination]")
   ) {
-    _persistSelectedRegexRuleField(target, true);
+    if (isGlobalRegexPanel) {
+      _persistSelectedGlobalRegexRuleField(target, true);
+    } else {
+      _persistSelectedRegexRuleField(target, true);
+    }
   }
 }
 
 function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   const taskProfiles = ensureTaskProfiles(settings);
+  const globalTaskRegex = _normalizeGlobalRegexDraft(settings.globalTaskRegex || {});
+  const globalRegexRules = Array.isArray(globalTaskRegex.localRules)
+    ? globalTaskRegex.localRules
+    : [];
   const taskTypeOptions = getTaskTypeOptions();
   const runtimeDebug = _getRuntimeDebugSnapshot?.() || {
     hostCapabilities: null,
@@ -4970,10 +5085,16 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
   if (!regexRules.some((rule) => rule.id === currentTaskProfileRuleId)) {
     currentTaskProfileRuleId = regexRules[0]?.id || "";
   }
+  if (!globalRegexRules.some((rule) => rule.id === currentGlobalRegexRuleId)) {
+    currentGlobalRegexRuleId = globalRegexRules[0]?.id || "";
+  }
 
   return {
     settings,
     taskProfiles,
+    globalTaskRegex,
+    globalRegexRules,
+    showGlobalRegex: showGlobalRegexPanel,
     taskTypeOptions,
     taskType: currentTaskProfileTaskType,
     taskTabId: currentTaskProfileTabId,
@@ -4985,6 +5106,8 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     regexRules,
     selectedRule:
       regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
+    selectedGlobalRegexRule:
+      globalRegexRules.find((rule) => rule.id === currentGlobalRegexRuleId) || null,
     builtinBlockDefinitions: getBuiltinBlockDefinitions(),
     runtimeDebug,
   };
@@ -5636,6 +5759,10 @@ async function _handleTaskProfileWorkspaceClick(event) {
       currentTaskProfileRuleId = "";
       _refreshTaskProfileWorkspace();
       return;
+    case "toggle-global-regex":
+      showGlobalRegexPanel = !showGlobalRegexPanel;
+      _refreshTaskProfileWorkspace();
+      return;
     case "switch-task-tab":
       currentTaskProfileTabId =
         actionEl.dataset.taskTab || currentTaskProfileTabId;
@@ -5655,7 +5782,11 @@ async function _handleTaskProfileWorkspaceClick(event) {
       _refreshTaskProfileWorkspace();
       return;
     case "select-regex-rule":
-      currentTaskProfileRuleId = actionEl.dataset.ruleId || "";
+      if (_isGlobalRegexPanelTarget(actionEl)) {
+        currentGlobalRegexRuleId = actionEl.dataset.ruleId || "";
+      } else {
+        currentTaskProfileRuleId = actionEl.dataset.ruleId || "";
+      }
       _refreshTaskProfileWorkspace();
       return;
     case "add-custom-block":
@@ -5748,20 +5879,25 @@ async function _handleTaskProfileWorkspaceClick(event) {
       return;
     }
     case "export-profile":
-      _downloadTaskProfile(state.taskProfiles, currentTaskProfileTaskType, selectedProfile);
+      _downloadTaskProfile(
+        state.taskProfiles,
+        currentTaskProfileTaskType,
+        selectedProfile,
+        state.globalTaskRegex,
+      );
       return;
     case "import-profile":
       document.getElementById("bme-task-profile-import")?.click();
       return;
     case "export-all-profiles":
-      _downloadAllTaskProfiles(state.taskProfiles);
+      _downloadAllTaskProfiles(state.taskProfiles, state.globalTaskRegex);
       return;
     case "import-all-profiles":
       document.getElementById("bme-task-profile-import-all")?.click();
       return;
     case "restore-all-profiles": {
       const confirmed = window.confirm(
-        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响。是否继续？",
+        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？",
       );
       if (!confirmed) return;
       const taskTypes = getTaskTypeOptions().map((t) => t.id);
@@ -5815,6 +5951,33 @@ async function _handleTaskProfileWorkspaceClick(event) {
     case "delete-regex-rule":
       _deleteRegexRule(actionEl.dataset.ruleId);
       return;
+    case "add-global-regex-rule":
+      _updateGlobalTaskRegex((draft) => {
+        const localRules = Array.isArray(draft.localRules) ? draft.localRules : [];
+        const nextRule = createLocalRegexRule("global", {
+          script_name: `通用规则 ${localRules.length + 1}`,
+        });
+        draft.localRules = [...localRules, nextRule];
+        return { selectRuleId: nextRule.id };
+      });
+      return;
+    case "delete-global-regex-rule":
+      _deleteGlobalRegexRule(actionEl.dataset.ruleId);
+      return;
+    case "select-global-regex-rule":
+      currentGlobalRegexRuleId = actionEl.dataset.ruleId || "";
+      _refreshTaskProfileWorkspace();
+      return;
+    case "restore-global-regex-defaults": {
+      const confirmed = window.confirm(
+        "这会将通用正则规则恢复为默认配置。是否继续？",
+      );
+      if (!confirmed) return;
+      currentGlobalRegexRuleId = "";
+      _patchGlobalTaskRegex(createDefaultGlobalTaskRegex(), { refresh: true });
+      toastr.success("通用正则规则已恢复默认", "ST-BME");
+      return;
+    }
     default:
       return;
   }
@@ -5853,6 +6016,14 @@ function _renderTaskProfileWorkspace(state) {
             .join("")}
         </div>
         <div class="bme-task-action-bar-right">
+          <button
+            class="bme-config-secondary-btn bme-bulk-profile-btn ${state.showGlobalRegex ? "active" : ""}"
+            data-task-action="toggle-global-regex"
+            type="button"
+            title="打开或收起通用正则规则面板"
+          >
+            <i class="fa-solid fa-filter"></i><span>通用正则</span>
+          </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
             <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
@@ -5864,6 +6035,8 @@ function _renderTaskProfileWorkspace(state) {
           </button>
         </div>
       </div>
+
+      ${state.showGlobalRegex ? _renderGlobalRegexPanel(state) : ""}
 
       <div class="bme-task-master-detail">
         <div class="bme-task-profile-editor">
@@ -5921,11 +6094,9 @@ function _renderTaskProfileWorkspace(state) {
             ${
               state.taskTabId === "generation"
                 ? _renderTaskGenerationTab(state)
-                : state.taskTabId === "regex"
-                  ? _renderTaskRegexTab(state)
-                  : state.taskTabId === "debug"
-                    ? _renderTaskDebugTab(state)
-                    : _renderTaskPromptTab(state)
+                : state.taskTabId === "debug"
+                  ? _renderTaskDebugTab(state)
+                  : _renderTaskPromptTab(state)
             }
           </div>
         </div>
@@ -5933,7 +6104,6 @@ function _renderTaskProfileWorkspace(state) {
     </div>
   `;
 }
-
 function _renderTaskPromptTab(state) {
   return `
     <div class="bme-task-editor-grid">
@@ -6026,85 +6196,116 @@ function _renderTaskGenerationTab(state) {
   `;
 }
 
-function _renderTaskRegexTab(state) {
-  const regex = state.profile.regex || {};
+function _renderTaskRegexTab(state, options = {}) {
+  const regex = options.regex || state.profile?.regex || {};
+  const regexRules = Array.isArray(options.regexRules)
+    ? options.regexRules
+    : state.regexRules;
+  const selectedRule =
+    options.selectedRule === undefined ? state.selectedRule : options.selectedRule;
   const normalizedStages = normalizeTaskRegexStages(regex.stages || {});
+  const selectAction = options.selectAction || "select-regex-rule";
+  const deleteAction = options.deleteAction || "delete-regex-rule";
+  const addAction = options.addAction || "add-regex-rule";
+  const addButtonLabel = options.addButtonLabel || "+ 新增规则";
+  const wrapperClassName = options.wrapperClassName
+    ? ` ${options.wrapperClassName}`
+    : "";
+  const sectionTitle = options.sectionTitle || "复用与阶段";
+  const sectionSubtitle =
+    options.sectionSubtitle ||
+    "任务预设可复用酒馆正则，并叠加当前任务自己的附加规则。";
+  const rulesTitle = options.rulesTitle || "本地附加规则";
+  const rulesSubtitle =
+    options.rulesSubtitle ||
+    "本地规则只作用于当前任务预设，不会污染宿主酒馆配置。";
+  const emptyText = options.emptyText || "当前预设还没有本地正则规则。";
+  const defaultNamePrefix = options.defaultNamePrefix || "本地规则";
+  const headerExtraActions = options.extraHeaderActions || "";
+  const editorState = {
+    ...state,
+    selectedRule,
+  };
+
   return `
-    <div class="bme-task-tab-body">
+    <div class="bme-task-tab-body${wrapperClassName}">
       <div class="bme-task-regex-top">
-      <div class="bme-config-card">
-        <div class="bme-config-card-head">
-          <div>
-            <div class="bme-config-card-title">复用与阶段</div>
-            <div class="bme-config-card-subtitle">
-              任务预设可复用酒馆正则，并叠加当前任务自己的附加规则。
+        <div class="bme-config-card">
+          <div class="bme-config-card-head">
+            <div>
+              <div class="bme-config-card-title">${_escHtml(sectionTitle)}</div>
+              <div class="bme-config-card-subtitle">
+                ${_escHtml(sectionSubtitle)}
+              </div>
+            </div>
+            <div class="bme-task-inline-actions">
+              <button class="bme-config-secondary-btn" data-task-action="inspect-tavern-regex" type="button">
+                查看当前复用规则
+              </button>
+              ${headerExtraActions}
             </div>
           </div>
-          <button class="bme-config-secondary-btn" data-task-action="inspect-tavern-regex" type="button">
-            查看当前复用规则
-          </button>
-        </div>
 
-        <div class="bme-task-toggle-list">
-          <label class="bme-toggle-item">
-            <span class="bme-toggle-copy">
-              <span class="bme-toggle-title">启用任务正则</span>
-              <span class="bme-toggle-desc">关闭后当前预设不执行任何任务级正则。</span>
-            </span>
-            <input
-              type="checkbox"
-              data-regex-field="enabled"
-              ${regex.enabled ? "checked" : ""}
-            />
-          </label>
+          <div class="bme-task-toggle-list">
+            <label class="bme-toggle-item">
+              <span class="bme-toggle-copy">
+                <span class="bme-toggle-title">启用任务正则</span>
+                <span class="bme-toggle-desc">关闭后当前配置不执行任何任务级正则。</span>
+              </span>
+              <input
+                type="checkbox"
+                data-regex-field="enabled"
+                ${regex.enabled ? "checked" : ""}
+              />
+            </label>
 
-          <label class="bme-toggle-item">
-            <span class="bme-toggle-copy">
-              <span class="bme-toggle-title">复用酒馆正则</span>
-              <span class="bme-toggle-desc">读取 global / preset / character 正则来源。</span>
-            </span>
-            <input
-              type="checkbox"
-              data-regex-field="inheritStRegex"
-              ${regex.inheritStRegex !== false ? "checked" : ""}
-            />
-          </label>
-        </div>
+            <label class="bme-toggle-item">
+              <span class="bme-toggle-copy">
+                <span class="bme-toggle-title">复用酒馆正则</span>
+                <span class="bme-toggle-desc">读取 global / preset / character 正则来源。</span>
+              </span>
+              <input
+                type="checkbox"
+                data-regex-field="inheritStRegex"
+                ${regex.inheritStRegex !== false ? "checked" : ""}
+              />
+            </label>
+          </div>
 
-        <div class="bme-task-section-label">复用来源</div>
-        <div class="bme-task-toggle-list">
-          ${[
-            ["global", "全局"],
-            ["preset", "当前预设"],
-            ["character", "角色卡"],
-          ]
-            .map(
-              ([key, label]) => `
+          <div class="bme-task-section-label">复用来源</div>
+          <div class="bme-task-toggle-list">
+            ${[
+              ["global", "全局"],
+              ["preset", "当前预设"],
+              ["character", "角色卡"],
+            ]
+              .map(
+                ([key, label]) => `
+                  <label class="bme-toggle-item">
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">${label}</span>
+                      <span class="bme-toggle-desc">启用 ${label} 来源的 Tavern 正则。</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      data-regex-source="${key}"
+                      ${(regex.sources?.[key] ?? true) ? "checked" : ""}
+                    />
+                  </label>
+                `,
+              )
+              .join("")}
+          </div>
+
+          <div class="bme-task-section-label">执行阶段</div>
+          <div class="bme-task-toggle-list">
+            ${TASK_PROFILE_REGEX_STAGES.map(
+              (stage) => `
                 <label class="bme-toggle-item">
                   <span class="bme-toggle-copy">
-                    <span class="bme-toggle-title">${label}</span>
-                    <span class="bme-toggle-desc">启用 ${label} 来源的 Tavern 正则。</span>
+                    <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
+                    <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
                   </span>
-                  <input
-                    type="checkbox"
-                    data-regex-source="${key}"
-                    ${(regex.sources?.[key] ?? true) ? "checked" : ""}
-                  />
-                </label>
-              `,
-            )
-            .join("")}
-        </div>
-
-        <div class="bme-task-section-label">执行阶段</div>
-        <div class="bme-task-toggle-list">
-          ${TASK_PROFILE_REGEX_STAGES.map(
-            (stage) => `
-              <label class="bme-toggle-item">
-                <span class="bme-toggle-copy">
-                  <span class="bme-toggle-title">${_escHtml(stage.label)}</span>
-                  <span class="bme-toggle-desc">${_escHtml(stage.desc)}</span>
-                </span>
                   <input
                     type="checkbox"
                     data-regex-stage="${_escAttr(stage.key)}"
@@ -6113,43 +6314,78 @@ function _renderTaskRegexTab(state) {
                 </label>
               `,
             ).join("")}
-        </div>
-      </div>
-
-      <div class="bme-config-card">
-        <div class="bme-config-card-head">
-          <div>
-            <div class="bme-config-card-title">本地附加规则</div>
-            <div class="bme-config-card-subtitle">
-              本地规则只作用于当前任务预设，不会污染宿主酒馆配置。
-            </div>
           </div>
-          <button class="bme-config-secondary-btn" data-task-action="add-regex-rule" type="button">
-            + 新增规则
-          </button>
         </div>
 
-        <div class="bme-task-list">
-          ${state.regexRules.length
-            ? state.regexRules
-                .map((rule, index) => _renderRegexRuleListItem(rule, index, state))
-                .join("")
-            : `
-                <div class="bme-task-empty">
-                  当前预设还没有本地正则规则。
-                </div>
-              `}
+        <div class="bme-config-card">
+          <div class="bme-config-card-head">
+            <div>
+              <div class="bme-config-card-title">${_escHtml(rulesTitle)}</div>
+              <div class="bme-config-card-subtitle">
+                ${_escHtml(rulesSubtitle)}
+              </div>
+            </div>
+            <button class="bme-config-secondary-btn" data-task-action="${_escAttr(addAction)}" type="button">
+              ${_escHtml(addButtonLabel)}
+            </button>
+          </div>
+
+          <div class="bme-task-list">
+            ${regexRules.length
+              ? regexRules
+                  .map((rule, index) =>
+                    _renderRegexRuleListItem(rule, index, editorState, {
+                      selectAction,
+                      deleteAction,
+                      defaultNamePrefix,
+                    })
+                  )
+                  .join("")
+              : `
+                  <div class="bme-task-empty">
+                    ${_escHtml(emptyText)}
+                  </div>
+                `}
+          </div>
         </div>
-      </div>
       </div>
 
       <div class="bme-config-card">
-        ${_renderRegexRuleEditor(state)}
+        ${_renderRegexRuleEditor(editorState)}
       </div>
     </div>
   `;
 }
 
+function _renderGlobalRegexPanel(state) {
+  return _renderTaskRegexTab(
+    {
+      ...state,
+      selectedRule: state.selectedGlobalRegexRule,
+    },
+    {
+      regex: state.globalTaskRegex,
+      regexRules: state.globalRegexRules,
+      selectedRule: state.selectedGlobalRegexRule,
+      addAction: "add-global-regex-rule",
+      selectAction: "select-global-regex-rule",
+      deleteAction: "delete-global-regex-rule",
+      addButtonLabel: "+ 新增通用规则",
+      wrapperClassName: "bme-global-regex-panel",
+      sectionTitle: "通用正则设置",
+      sectionSubtitle: "所有任务共享同一套任务正则开关、复用来源、执行阶段与附加规则。",
+      rulesTitle: "通用附加规则",
+      rulesSubtitle: "这里维护所有任务共享的附加规则。",
+      emptyText: "当前还没有通用正则规则。",
+      defaultNamePrefix: "通用规则",
+      extraHeaderActions: `
+        <button class="bme-config-secondary-btn bme-task-btn-danger" data-task-action="restore-global-regex-defaults" type="button">
+          恢复默认
+        </button>
+      `,
+    },
+  );
+}
 function _formatRegexReuseSourceState(source = {}) {
   const states = [];
   states.push(source.enabled ? "已启用" : "已关闭");
@@ -7238,19 +7474,23 @@ function _renderGenerationField(field, value, state = {}) {
   `;
 }
 
-function _renderRegexRuleListItem(rule, index, state) {
+function _renderRegexRuleListItem(rule, index, state, options = {}) {
   const isSelected = rule.id === state.selectedRule?.id;
+  const selectAction = options.selectAction || "select-regex-rule";
+  const deleteAction = options.deleteAction || "delete-regex-rule";
+  const defaultNamePrefix = options.defaultNamePrefix || "本地规则";
+
   return `
     <div class="bme-task-list-entry">
       <button
         class="bme-task-list-item ${isSelected ? "active" : ""}"
-        data-task-action="select-regex-rule"
+        data-task-action="${_escAttr(selectAction)}"
         data-rule-id="${_escAttr(rule.id)}"
         type="button"
       >
         <span class="bme-task-list-index">#${index + 1}</span>
         <span class="bme-task-list-copy">
-          <span class="bme-task-list-title">${_escHtml(rule.script_name || `本地规则 ${index + 1}`)}</span>
+          <span class="bme-task-list-title">${_escHtml(rule.script_name || `${defaultNamePrefix} ${index + 1}`)}</span>
           <span class="bme-task-list-meta">
             ${rule.enabled ? "启用" : "停用"} · ${_escHtml(rule.find_regex || "(未填写 find_regex)")}
           </span>
@@ -7259,7 +7499,7 @@ function _renderRegexRuleListItem(rule, index, state) {
       <div class="bme-task-inline-actions">
         <button
           class="bme-config-secondary-btn bme-task-mini-btn"
-          data-task-action="delete-regex-rule"
+          data-task-action="${_escAttr(deleteAction)}"
           data-rule-id="${_escAttr(rule.id)}"
           type="button"
         >
@@ -7269,7 +7509,6 @@ function _renderRegexRuleListItem(rule, index, state) {
     </div>
   `;
 }
-
 function _renderRegexRuleEditor(state) {
   const rule = state.selectedRule;
   if (!rule) {
@@ -7627,6 +7866,110 @@ function _persistSelectedRegexRuleField(target, refresh) {
   );
 }
 
+function _deleteGlobalRegexRule(ruleId) {
+  if (!ruleId) return;
+  _updateGlobalTaskRegex((draft) => {
+    const localRules = Array.isArray(draft.localRules) ? [...draft.localRules] : [];
+    const index = localRules.findIndex((item) => item.id === ruleId);
+    if (index < 0) return null;
+    localRules.splice(index, 1);
+    draft.localRules = localRules;
+    return {
+      selectRuleId:
+        localRules[Math.max(0, index - 1)]?.id || localRules[0]?.id || "",
+    };
+  });
+}
+
+function _persistGlobalRegexField(target, refresh) {
+  const key = target.dataset.regexField;
+  if (!key) return;
+
+  _updateGlobalTaskRegex(
+    (draft) => {
+      draft[key] =
+        target instanceof HTMLInputElement && target.type === "checkbox"
+          ? Boolean(target.checked)
+          : target.value;
+    },
+    { refresh },
+  );
+}
+
+function _persistGlobalRegexSourceField(target, refresh) {
+  const sourceKey = target.dataset.regexSource;
+  if (!sourceKey) return;
+
+  _updateGlobalTaskRegex(
+    (draft) => {
+      draft.sources = {
+        ...(draft.sources || {}),
+        [sourceKey]: Boolean(target.checked),
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistGlobalRegexStageField(target, refresh) {
+  const stageKey = target.dataset.regexStage;
+  if (!stageKey) return;
+
+  _updateGlobalTaskRegex(
+    (draft) => {
+      draft.stages = {
+        ...(draft.stages || {}),
+        [stageKey]: Boolean(target.checked),
+      };
+    },
+    { refresh },
+  );
+}
+
+function _persistSelectedGlobalRegexRuleField(target, refresh) {
+  _updateGlobalTaskRegex(
+    (draft) => {
+      const localRules = Array.isArray(draft.localRules) ? [...draft.localRules] : [];
+      const rule = localRules.find((item) => item.id === currentGlobalRegexRuleId);
+      if (!rule) return null;
+
+      if (target.dataset.regexRuleField) {
+        const field = target.dataset.regexRuleField;
+        if (target instanceof HTMLInputElement && target.type === "checkbox") {
+          rule[field] = Boolean(target.checked);
+        } else if (["min_depth", "max_depth"].includes(field)) {
+          const parsed = Number.parseInt(String(target.value || "").trim(), 10);
+          rule[field] = Number.isFinite(parsed) ? parsed : 0;
+        } else if (field === "trim_strings") {
+          rule[field] = String(target.value || "");
+        } else {
+          rule[field] = String(target.value || "");
+        }
+      }
+
+      if (target.dataset.regexRuleSource) {
+        const sourceKey = target.dataset.regexRuleSource;
+        rule.source = {
+          ...(rule.source || {}),
+          [sourceKey]: Boolean(target.checked),
+        };
+      }
+
+      if (target.dataset.regexRuleDestination) {
+        const destinationKey = target.dataset.regexRuleDestination;
+        rule.destination = {
+          ...(rule.destination || {}),
+          [destinationKey]: Boolean(target.checked),
+        };
+      }
+
+      draft.localRules = localRules;
+      return { selectRuleId: rule.id };
+    },
+    { refresh },
+  );
+}
+
 function _updateCurrentTaskProfile(mutator, options = {}) {
   const settings = _getSettings?.() || {};
   const taskProfiles = ensureTaskProfiles(settings);
@@ -7751,9 +8094,139 @@ function _parseTaskWorkspaceValue(target, valueType = "text") {
   return String(target.value || "").trim();
 }
 
-function _downloadTaskProfile(taskProfiles, taskType, profile) {
+function _isGlobalRegexPanelTarget(target) {
+  return target instanceof HTMLElement && Boolean(target.closest(".bme-global-regex-panel"));
+}
+
+function _normalizeGlobalRegexDraft(regex = {}) {
+  const normalized = normalizeGlobalTaskRegex(regex || {}, "global");
+  return {
+    ...normalized,
+    sources: {
+      ...(normalized.sources || {}),
+    },
+    stages: {
+      ...normalizeTaskRegexStages(normalized.stages || {}),
+    },
+    localRules: Array.isArray(normalized.localRules)
+      ? normalized.localRules.map((rule, index) =>
+          createLocalRegexRule("global", {
+            ...rule,
+            id: String(rule?.id || `global-rule-${index + 1}`),
+          }),
+        )
+      : [],
+  };
+}
+
+function _mergeImportedGlobalRegex(currentGlobalRegex = {}, importedGlobalRegex = null) {
+  const current = _normalizeGlobalRegexDraft(currentGlobalRegex);
+  if (
+    !importedGlobalRegex ||
+    typeof importedGlobalRegex !== "object" ||
+    Array.isArray(importedGlobalRegex)
+  ) {
+    return {
+      globalTaskRegex: current,
+      mergedRuleCount: 0,
+      replacedConfig: false,
+    };
+  }
+
+  const imported = _normalizeGlobalRegexDraft(importedGlobalRegex);
+  const mergedRules = dedupeRegexRules(
+    [
+      ...(Array.isArray(current.localRules) ? current.localRules : []),
+      ...(Array.isArray(imported.localRules) ? imported.localRules : []),
+    ],
+    "global",
+  );
+
+  return {
+    globalTaskRegex: {
+      ...imported,
+      localRules: mergedRules,
+    },
+    mergedRuleCount: Math.max(
+      0,
+      mergedRules.length -
+        (Array.isArray(current.localRules) ? current.localRules.length : 0),
+    ),
+    replacedConfig: true,
+  };
+}
+
+function _mergeProfileRegexRulesIntoGlobal(currentGlobalRegex = {}, profile = null) {
+  const current = _normalizeGlobalRegexDraft(currentGlobalRegex);
+  const legacyRules = Array.isArray(profile?.regex?.localRules)
+    ? profile.regex.localRules
+    : [];
+  if (legacyRules.length === 0) {
+    return {
+      globalTaskRegex: current,
+      mergedRuleCount: 0,
+      profile,
+      clearedLegacyRules: false,
+    };
+  }
+
+  const mergedRules = dedupeRegexRules(
+    [...(current.localRules || []), ...legacyRules],
+    "global",
+  );
+  return {
+    globalTaskRegex: {
+      ...current,
+      localRules: mergedRules,
+    },
+    mergedRuleCount: Math.max(0, mergedRules.length - current.localRules.length),
+    profile: {
+      ...(profile || {}),
+      regex: {},
+    },
+    clearedLegacyRules: true,
+  };
+}
+
+function _patchGlobalTaskRegex(globalTaskRegex, options = {}) {
+  return _patchSettings(
+    {
+      globalTaskRegex: _normalizeGlobalRegexDraft(globalTaskRegex),
+    },
+    {
+      refreshTaskWorkspace: options.refresh !== false,
+    },
+  );
+}
+
+function _updateGlobalTaskRegex(mutator, options = {}) {
+  const settings = _getSettings?.() || {};
+  const draft = _normalizeGlobalRegexDraft(_cloneJson(settings.globalTaskRegex || {}));
+  const mutationResult = mutator?.(draft, { settings });
+  if (mutationResult === null) return null;
+
+  const result = mutationResult || {};
+  const nextRegex = _normalizeGlobalRegexDraft(result.globalTaskRegex || draft);
+  if (Object.prototype.hasOwnProperty.call(result, "selectRuleId")) {
+    currentGlobalRegexRuleId = result.selectRuleId || "";
+  }
+
+  return _patchSettings(
+    {
+      globalTaskRegex: nextRegex,
+      ...(result.extraSettingsPatch || {}),
+    },
+    {
+      refreshTaskWorkspace:
+        result.refresh === undefined ? options.refresh !== false : result.refresh,
+    },
+  );
+}
+
+function _downloadTaskProfile(taskProfiles, taskType, profile, globalTaskRegex = {}) {
   try {
     const payload = serializeTaskProfile(taskProfiles, taskType, profile?.id || "");
+    payload.globalTaskRegex = _normalizeGlobalRegexDraft(globalTaskRegex || {});
     const fileName = _sanitizeFileName(
       `st-bme-${taskType}-${profile?.name || "profile"}.json`,
     );
@@ -7774,12 +8247,11 @@ function _downloadTaskProfile(taskProfiles, taskType, profile) {
     toastr.error(`预设导出失败: ${error?.message || error}`, "ST-BME");
   }
 }
-
 function _sanitizeFileName(fileName = "profile.json") {
   return String(fileName || "profile.json").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
 }
 
-function _downloadAllTaskProfiles(taskProfiles) {
+function _downloadAllTaskProfiles(taskProfiles, globalTaskRegex = {}) {
   try {
     const taskTypes = getTaskTypeOptions().map((t) => t.id);
     const profiles = {};
@@ -7799,6 +8271,7 @@ function _downloadAllTaskProfiles(taskProfiles) {
       format: "st-bme-all-task-profiles",
       version: 1,
       exportedAt: new Date().toISOString(),
+      globalTaskRegex: _normalizeGlobalRegexDraft(globalTaskRegex || {}),
       profiles,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -7818,7 +8291,6 @@ function _downloadAllTaskProfiles(taskProfiles) {
     toastr.error(`导出全部预设失败: ${error?.message || error}`, "ST-BME");
   }
 }
-
 function _cloneJson(value) {
   return JSON.parse(JSON.stringify(value ?? null));
 }
@@ -8356,3 +8828,5 @@ function _getNodeSnippet(node) {
 function _isMobile() {
   return window.innerWidth <= 768;
 }
+
+
