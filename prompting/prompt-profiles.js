@@ -908,6 +908,118 @@ function buildRegexConfigSignature(config = {}, taskType = "global") {
   });
 }
 
+function getDefaultRegexConfigForTaskType(taskType = "global") {
+  if (TASK_TYPES.includes(String(taskType || "").trim())) {
+    return normalizeGlobalTaskRegex(
+      createDefaultTaskProfile(taskType).regex || {},
+      taskType,
+    );
+  }
+  return normalizeGlobalTaskRegex(createDefaultGlobalTaskRegex(), "global");
+}
+
+export function describeLegacyTaskRegexConfig(taskType = "", regexConfig = {}) {
+  const normalizedTaskType = String(taskType || "").trim();
+  const effectiveTaskType = TASK_TYPES.includes(normalizedTaskType)
+    ? normalizedTaskType
+    : "global";
+  const normalizedRegex = normalizeGlobalTaskRegex(
+    regexConfig || {},
+    effectiveTaskType,
+  );
+  const defaultRegex = getDefaultRegexConfigForTaskType(effectiveTaskType);
+  const configSignature = buildRegexConfigSignature(
+    normalizedRegex,
+    effectiveTaskType,
+  );
+  const defaultConfigSignature = buildRegexConfigSignature(
+    defaultRegex,
+    effectiveTaskType,
+  );
+  const hasRules = normalizedRegex.localRules.length > 0;
+  const hasConfigDiff = configSignature !== defaultConfigSignature;
+
+  return {
+    taskType: effectiveTaskType,
+    regex: normalizedRegex,
+    defaultRegex,
+    configSignature,
+    defaultConfigSignature,
+    hasRules,
+    hasConfigDiff,
+    hasLegacyRegex: hasRules || hasConfigDiff,
+  };
+}
+
+export function migrateLegacyProfileRegexToGlobal(
+  globalTaskRegex = {},
+  profile = null,
+  { applyLegacyConfig = true } = {},
+) {
+  const currentGlobalRegex = normalizeGlobalTaskRegex(globalTaskRegex, "global");
+  const profileTaskType = String(profile?.taskType || "").trim();
+  const legacy = describeLegacyTaskRegexConfig(profileTaskType, profile?.regex || {});
+
+  if (!legacy.hasLegacyRegex) {
+    return {
+      globalTaskRegex: currentGlobalRegex,
+      mergedRuleCount: 0,
+      profile,
+      clearedLegacyRules: false,
+      hasConfigDiff: false,
+      appliedLegacyConfig: false,
+      hasLegacyRegex: false,
+    };
+  }
+
+  const mergedRules = dedupeRegexRules(
+    [
+      ...(Array.isArray(currentGlobalRegex.localRules)
+        ? currentGlobalRegex.localRules
+        : []),
+      ...(Array.isArray(legacy.regex?.localRules) ? legacy.regex.localRules : []),
+    ],
+    "global",
+  );
+
+  const nextGlobalRegexBase =
+    applyLegacyConfig && legacy.hasConfigDiff
+      ? {
+          ...currentGlobalRegex,
+          enabled: legacy.regex.enabled !== false,
+          inheritStRegex: legacy.regex.inheritStRegex !== false,
+          sources: {
+            ...(legacy.regex.sources || {}),
+          },
+          stages: {
+            ...normalizeTaskRegexStages(legacy.regex.stages || {}),
+          },
+        }
+      : currentGlobalRegex;
+
+  return {
+    globalTaskRegex: {
+      ...nextGlobalRegexBase,
+      localRules: mergedRules,
+    },
+    mergedRuleCount: Math.max(
+      0,
+      mergedRules.length -
+        (Array.isArray(currentGlobalRegex.localRules)
+          ? currentGlobalRegex.localRules.length
+          : 0),
+    ),
+    profile: {
+      ...(profile || {}),
+      regex: {},
+    },
+    clearedLegacyRules: true,
+    hasConfigDiff: legacy.hasConfigDiff,
+    appliedLegacyConfig: Boolean(applyLegacyConfig && legacy.hasConfigDiff),
+    hasLegacyRegex: true,
+  };
+}
+
 function normalizeTaskProfilesState(taskProfiles = {}) {
   return ensureTaskProfiles({ taskProfiles });
 }
@@ -1451,6 +1563,7 @@ export function migratePerTaskRegexToGlobal(settings = {}) {
     existingGlobalRegex,
     "global",
   );
+  const hasExistingGlobalRules = existingGlobalRegex.localRules.length > 0;
   const defaultGlobalConfigSignature = buildRegexConfigSignature(
     defaultGlobalRegex,
     "global",
@@ -1459,33 +1572,16 @@ export function migratePerTaskRegexToGlobal(settings = {}) {
 
   for (const taskType of TASK_TYPES) {
     const bucket = taskProfiles[taskType];
-    const defaultProfileRegex = normalizeGlobalTaskRegex(
-      createDefaultTaskProfile(taskType).regex || {},
-      taskType,
-    );
-    const defaultProfileConfigSignature = buildRegexConfigSignature(
-      defaultProfileRegex,
-      taskType,
-    );
 
     for (const profile of Array.isArray(bucket?.profiles) ? bucket.profiles : []) {
-      const normalizedProfileRegex = normalizeGlobalTaskRegex(
-        profile?.regex || {},
-        taskType,
-      );
-      const profileConfigSignature = buildRegexConfigSignature(
-        normalizedProfileRegex,
-        taskType,
-      );
-      const hasRules = normalizedProfileRegex.localRules.length > 0;
-      const hasConfigDiff = profileConfigSignature !== defaultProfileConfigSignature;
-      if (!hasRules && !hasConfigDiff) continue;
+      const legacy = describeLegacyTaskRegexConfig(taskType, profile?.regex || {});
+      if (!legacy.hasLegacyRegex) continue;
       profilesWithLegacyRegex.push({
         taskType,
         profileId: String(profile?.id || ""),
-        regex: normalizedProfileRegex,
-        configSignature: profileConfigSignature,
-        hasConfigDiff,
+        regex: legacy.regex,
+        configSignature: legacy.configSignature,
+        hasConfigDiff: legacy.hasConfigDiff,
       });
     }
   }
@@ -1533,8 +1629,14 @@ export function migratePerTaskRegexToGlobal(settings = {}) {
     "global",
   );
 
+  const normalizedSelectedConfig = normalizeGlobalTaskRegex(selectedConfig, "global");
   const nextGlobalRegex = {
-    ...normalizeGlobalTaskRegex(selectedConfig, "global"),
+    ...normalizedSelectedConfig,
+    enabled:
+      existingGlobalConfigSignature !== defaultGlobalConfigSignature ||
+      hasExistingGlobalRules
+        ? normalizedSelectedConfig.enabled !== false
+        : false,
     localRules: mergedLocalRules,
   };
 

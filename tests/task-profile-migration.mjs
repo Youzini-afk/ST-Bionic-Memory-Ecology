@@ -3,7 +3,10 @@ import {
   createDefaultTaskProfiles,
   ensureTaskProfiles,
   getActiveTaskProfile,
+  migrateLegacyProfileRegexToGlobal,
   migrateLegacyTaskProfiles,
+  migratePerTaskRegexToGlobal,
+  normalizeTaskProfile,
 } from "../prompting/prompt-profiles.js";
 
 const legacySettings = {
@@ -387,6 +390,170 @@ assert.ok(
   upgradedLegacyDefault.blocks
     .slice(0, 10)
     .every((block) => block.role === "system"),
+);
+
+const legacyRegexSettings = {
+  taskProfilesVersion: 3,
+  taskProfiles: createDefaultTaskProfiles(),
+};
+legacyRegexSettings.taskProfiles.extract.activeProfileId = "default";
+legacyRegexSettings.taskProfiles.extract.profiles.push(
+  normalizeTaskProfile("extract", {
+    id: "extract-legacy-regex",
+    taskType: "extract",
+    name: "旧正则副本",
+    builtin: false,
+    regex: {
+      enabled: true,
+      inheritStRegex: true,
+      localRules: [
+        {
+          id: "legacy-rule-1",
+          script_name: "隐藏规则",
+          enabled: true,
+          find_regex: "/SECRET/g",
+          replace_string: "MASK",
+        },
+      ],
+    },
+  }),
+);
+const migratedLegacyRegex = migratePerTaskRegexToGlobal(legacyRegexSettings);
+assert.equal(migratedLegacyRegex.changed, true);
+assert.equal(migratedLegacyRegex.settings.globalTaskRegex.enabled, false);
+assert.deepEqual(
+  migratedLegacyRegex.settings.globalTaskRegex.localRules.map((rule) => rule.script_name),
+  ["隐藏规则"],
+);
+assert.deepEqual(
+  migratedLegacyRegex.settings.taskProfiles.extract.profiles.find(
+    (profile) => profile.id === "extract-legacy-regex",
+  )?.regex?.localRules || [],
+  [],
+);
+
+const existingGlobalRegexSettings = {
+  taskProfilesVersion: 3,
+  globalTaskRegex: {
+    enabled: true,
+    inheritStRegex: true,
+    sources: {
+      global: true,
+      preset: true,
+      character: true,
+    },
+    stages: {
+      "input.userMessage": true,
+      "input.recentMessages": true,
+    },
+    localRules: [
+      {
+        id: "existing-global-rule",
+        script_name: "现有通用规则",
+        enabled: true,
+        find_regex: "/GLOBAL/g",
+        replace_string: "KEEP",
+      },
+    ],
+  },
+  taskProfiles: createDefaultTaskProfiles(),
+};
+existingGlobalRegexSettings.taskProfiles.extract.profiles.push(
+  normalizeTaskProfile("extract", {
+    id: "extract-legacy-extra",
+    taskType: "extract",
+    name: "旧规则补充",
+    builtin: false,
+    regex: {
+      localRules: [
+        {
+          id: "legacy-extra-rule",
+          script_name: "额外旧规则",
+          enabled: true,
+          find_regex: "/EXTRA/g",
+          replace_string: "ADD",
+        },
+      ],
+    },
+  }),
+);
+const migratedWithExistingGlobal = migratePerTaskRegexToGlobal(
+  existingGlobalRegexSettings,
+);
+assert.equal(migratedWithExistingGlobal.settings.globalTaskRegex.enabled, true);
+assert.deepEqual(
+  migratedWithExistingGlobal.settings.globalTaskRegex.localRules.map(
+    (rule) => rule.script_name,
+  ),
+  ["现有通用规则", "额外旧规则"],
+);
+
+const importedLegacyProfileMigration = migrateLegacyProfileRegexToGlobal(
+  {
+    enabled: true,
+    inheritStRegex: true,
+    sources: {
+      global: true,
+      preset: true,
+      character: true,
+    },
+    stages: {
+      "input.userMessage": true,
+      "input.recentMessages": true,
+    },
+    localRules: [],
+  },
+  {
+    taskType: "extract",
+    regex: {
+      enabled: false,
+      inheritStRegex: false,
+      sources: {
+        global: false,
+        preset: false,
+        character: false,
+      },
+      stages: {
+        "input.userMessage": false,
+      },
+      localRules: [
+        {
+          id: "legacy-import-rule",
+          script_name: "旧导入规则",
+          enabled: true,
+          find_regex: "/A/g",
+          replace_string: "B",
+        },
+      ],
+    },
+  },
+  {
+    applyLegacyConfig: true,
+  },
+);
+assert.equal(importedLegacyProfileMigration.appliedLegacyConfig, true);
+assert.equal(importedLegacyProfileMigration.globalTaskRegex.enabled, false);
+assert.equal(
+  importedLegacyProfileMigration.globalTaskRegex.inheritStRegex,
+  false,
+);
+assert.equal(
+  importedLegacyProfileMigration.globalTaskRegex.sources.global,
+  false,
+);
+assert.equal(
+  importedLegacyProfileMigration.globalTaskRegex.stages["input.userMessage"],
+  false,
+);
+assert.deepEqual(
+  importedLegacyProfileMigration.globalTaskRegex.localRules.map(
+    (rule) => rule.script_name,
+  ),
+  ["旧导入规则"],
+);
+assert.deepEqual(
+  importedLegacyProfileMigration.profile?.regex || {},
+  {},
 );
 
 console.log("task-profile-migration tests passed");

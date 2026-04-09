@@ -33,6 +33,7 @@ import {
   getTaskTypeOptions,
   importTaskProfile as parseImportedTaskProfile,
   isTaskRegexStageEnabled,
+  migrateLegacyProfileRegexToGlobal,
   normalizeGlobalTaskRegex,
   normalizeTaskRegexStages,
   restoreDefaultTaskProfile,
@@ -4804,6 +4805,9 @@ function _bindTaskProfileWorkspace() {
         const legacyRuleMerge = _mergeProfileRegexRulesIntoGlobal(
           nextGlobalTaskRegex,
           imported.profile,
+          {
+            applyLegacyConfig: !importedGlobalMerge.replacedConfig,
+          },
         );
         nextGlobalTaskRegex = legacyRuleMerge.globalTaskRegex;
         if (legacyRuleMerge.clearedLegacyRules) {
@@ -4873,6 +4877,8 @@ function _bindTaskProfileWorkspace() {
         nextGlobalTaskRegex = importedGlobalMerge.globalTaskRegex;
         let importedCount = 0;
         let mergedLegacyRuleCount = 0;
+        let legacyConfigImported = Boolean(importedGlobalMerge.replacedConfig);
+        let skippedLegacyConfigCount = 0;
         for (const [taskType, entry] of Object.entries(parsed.profiles)) {
           try {
             let imported = parseImportedTaskProfile(
@@ -4883,9 +4889,17 @@ function _bindTaskProfileWorkspace() {
             const legacyRuleMerge = _mergeProfileRegexRulesIntoGlobal(
               nextGlobalTaskRegex,
               imported.profile,
+              {
+                applyLegacyConfig: !legacyConfigImported,
+              },
             );
             nextGlobalTaskRegex = legacyRuleMerge.globalTaskRegex;
             mergedLegacyRuleCount += legacyRuleMerge.mergedRuleCount;
+            if (legacyRuleMerge.appliedLegacyConfig) {
+              legacyConfigImported = true;
+            } else if (legacyRuleMerge.hasConfigDiff && legacyConfigImported) {
+              skippedLegacyConfigCount += 1;
+            }
             if (legacyRuleMerge.clearedLegacyRules) {
               imported = {
                 ...imported,
@@ -4920,6 +4934,11 @@ function _bindTaskProfileWorkspace() {
         );
         const mergedRuleCount =
           importedGlobalMerge.mergedRuleCount + mergedLegacyRuleCount;
+        if (skippedLegacyConfigCount > 0) {
+          console.warn(
+            `[ST-BME] 导入全部旧版预设时检测到 ${skippedLegacyConfigCount} 份额外任务级正则配置冲突，已保留第一份迁移到通用正则的配置，其余仅合并规则。`,
+          );
+        }
         toastr.success(
           mergedRuleCount > 0
             ? `已导入 ${importedCount} 个任务预设，并合并 ${mergedRuleCount} 条通用正则规则`
@@ -8166,35 +8185,19 @@ function _mergeImportedGlobalRegex(currentGlobalRegex = {}, importedGlobalRegex 
   };
 }
 
-function _mergeProfileRegexRulesIntoGlobal(currentGlobalRegex = {}, profile = null) {
-  const current = _normalizeGlobalRegexDraft(currentGlobalRegex);
-  const legacyRules = Array.isArray(profile?.regex?.localRules)
-    ? profile.regex.localRules
-    : [];
-  if (legacyRules.length === 0) {
-    return {
-      globalTaskRegex: current,
-      mergedRuleCount: 0,
-      profile,
-      clearedLegacyRules: false,
-    };
-  }
-
-  const mergedRules = dedupeRegexRules(
-    [...(current.localRules || []), ...legacyRules],
-    "global",
+function _mergeProfileRegexRulesIntoGlobal(
+  currentGlobalRegex = {},
+  profile = null,
+  options = {},
+) {
+  const merged = migrateLegacyProfileRegexToGlobal(
+    _normalizeGlobalRegexDraft(currentGlobalRegex),
+    profile,
+    options,
   );
   return {
-    globalTaskRegex: {
-      ...current,
-      localRules: mergedRules,
-    },
-    mergedRuleCount: Math.max(0, mergedRules.length - current.localRules.length),
-    profile: {
-      ...(profile || {}),
-      regex: {},
-    },
-    clearedLegacyRules: true,
+    ...merged,
+    globalTaskRegex: _normalizeGlobalRegexDraft(merged.globalTaskRegex || {}),
   };
 }
 
