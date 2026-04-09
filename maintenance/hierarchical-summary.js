@@ -483,7 +483,8 @@ function buildRollupCandidateText(entries = []) {
     .join("\n");
 }
 
-function getFoldableSummaryGroup(graph, fanIn = 3) {
+function getFoldableSummaryGroup(graph, fanIn = 3, options = {}) {
+  const requireExcess = options?.requireExcess === true;
   const activeEntries = getActiveSummaryEntries(graph);
   const byLevel = new Map();
   for (const entry of activeEntries) {
@@ -495,7 +496,7 @@ function getFoldableSummaryGroup(graph, fanIn = 3) {
   const sortedLevels = [...byLevel.keys()].sort((left, right) => left - right);
   for (const level of sortedLevels) {
     const entries = byLevel.get(level) || [];
-    if (entries.length >= fanIn) {
+    if (requireExcess ? entries.length > fanIn : entries.length >= fanIn) {
       return entries.slice(0, fanIn);
     }
   }
@@ -510,12 +511,15 @@ export async function rollupSummaryFrontier({
 } = {}) {
   normalizeGraphSummaryState(graph);
   const fanIn = clampInt(settings.summaryRollupFanIn, 3, 2, 10);
+  const requireExcess = force !== true;
   const createdEntries = [];
   let foldedCount = 0;
 
   while (true) {
     throwIfAborted(signal);
-    const candidates = getFoldableSummaryGroup(graph, fanIn);
+    const candidates = getFoldableSummaryGroup(graph, fanIn, {
+      requireExcess,
+    });
     if (candidates.length < fanIn) {
       break;
     }
@@ -616,7 +620,9 @@ export async function rollupSummaryFrontier({
     skipped: createdEntries.length === 0,
     reason:
       createdEntries.length === 0
-        ? `当前没有达到 ${fanIn} 条同层活跃总结的折叠候选`
+        ? requireExcess
+          ? `当前没有超过 ${fanIn} 条同层活跃总结的折叠候选`
+          : `当前没有达到 ${fanIn} 条同层活跃总结的折叠候选`
         : "",
   };
 }
