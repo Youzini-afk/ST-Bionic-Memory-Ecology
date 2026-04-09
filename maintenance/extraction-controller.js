@@ -254,17 +254,61 @@ export async function executeExtractionBatchController(
     signal,
     batchStatus,
   );
-  const finalizedBatchStatus =
-    effects?.batchStatus ||
-    runtime.finalizeBatchStatus(batchStatus, runtime.getExtractionCount());
+  const batchStatusRef = effects?.batchStatus || batchStatus;
+  const persistResult = runtime.saveGraphToChat({
+    reason: "extraction-batch-complete",
+    persistMetadata: true,
+    captureShadow: true,
+    immediate: true,
+  });
+  const persistAccepted = Boolean(
+    persistResult?.saved || persistResult?.queued,
+  );
+
+  if (!persistAccepted) {
+    runtime.setBatchStageOutcome(
+      batchStatusRef,
+      "finalize",
+      "failed",
+      `图谱持久化失败: ${persistResult?.reason || "unknown-persist-failure"}`,
+    );
+  }
+  const finalizedBatchStatus = runtime.finalizeBatchStatus(
+    batchStatusRef,
+    runtime.getExtractionCount(),
+  );
 
   runtime.getCurrentGraph().historyState.lastBatchStatus = {
     ...finalizedBatchStatus,
     historyAdvanced: runtime.shouldAdvanceProcessedHistory(finalizedBatchStatus),
+    persist: persistResult
+      ? {
+          saved: Boolean(persistResult.saved),
+          queued: Boolean(persistResult.queued),
+          blocked: Boolean(persistResult.blocked),
+          reason: String(persistResult.reason || ""),
+          saveMode: String(persistResult.saveMode || ""),
+          revision: Number.isFinite(Number(persistResult.revision))
+            ? Number(persistResult.revision)
+            : 0,
+        }
+      : null,
   };
 
   if (runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanced) {
     runtime.updateProcessedHistorySnapshot(chat, endIdx);
+  } else if (!persistAccepted) {
+    runtime.setLastExtractionStatus(
+      "提取待恢复",
+      `楼层 ${startIdx}-${endIdx} 已抽取但未确认写盘成功，请稍后重试或检查持久化状态`,
+      "warning",
+      { syncRuntime: true },
+    );
+    runtime.console?.warn?.("[ST-BME] extraction persist not accepted", {
+      chatId: runtime.getGraphPersistenceState?.()?.chatId || "",
+      persist: persistResult,
+      processedRange: [startIdx, endIdx],
+    });
   }
 
   const afterSnapshot = runtime.cloneGraphSnapshot(runtime.getCurrentGraph());
@@ -282,7 +326,6 @@ export async function executeExtractionBatchController(
       extractionCountBefore,
     }),
   );
-  runtime.saveGraphToChat({ reason: "extraction-batch-complete" });
 
   return {
     success: finalizedBatchStatus.completed,
