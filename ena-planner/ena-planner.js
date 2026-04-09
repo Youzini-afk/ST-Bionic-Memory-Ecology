@@ -20,6 +20,13 @@ function getPlannerRecallTimeoutMs() {
         : VECTOR_RECALL_TIMEOUT_MS;
 }
 
+function getPlannerRequestTimeoutMs() {
+    const timeoutMs = Number(_bmeRuntime?.getPlannerRecallTimeoutMs?.());
+    return Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : PLANNER_REQUEST_TIMEOUT_MS;
+}
+
 function getTrustedOrigin() { return window.location.origin; }
 
 function postToIframe(iframe, payload) {
@@ -988,7 +995,8 @@ async function callPlanner(messages, options = {}) {
     if (mt != null && !Number.isNaN(mt) && mt > 0) body.max_tokens = mt;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), PLANNER_REQUEST_TIMEOUT_MS);
+    const plannerRequestTimeoutMs = getPlannerRequestTimeoutMs();
+    const timeoutId = setTimeout(() => controller.abort(), plannerRequestTimeoutMs);
     try {
         const res = await fetch(url, {
             method: 'POST',
@@ -1047,7 +1055,7 @@ async function callPlanner(messages, options = {}) {
         return full;
     } catch (err) {
         if (controller.signal.aborted || err?.name === 'AbortError') {
-            throw new Error(`规划请求超时（>${Math.floor(PLANNER_REQUEST_TIMEOUT_MS / 1000)}s）`);
+            throw new Error(`规划请求超时（>${Math.floor(plannerRequestTimeoutMs / 1000)}s）`);
         }
         throw err;
     } finally {
