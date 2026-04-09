@@ -298,6 +298,7 @@ let popupRuntimePromise = null;
 let _getGraph = null;
 let _getSettings = null;
 let _getLastExtract = null;
+let _getLastBatchStatus = null;
 let _getLastRecall = null;
 let _getRuntimeStatus = null;
 let _getLastExtractionStatus = null;
@@ -508,6 +509,7 @@ export async function initPanel({
   getGraph,
   getSettings,
   getLastExtract,
+  getLastBatchStatus,
   getLastRecall,
   getRuntimeStatus,
   getLastExtractionStatus,
@@ -522,6 +524,7 @@ export async function initPanel({
   _getGraph = getGraph;
   _getSettings = getSettings;
   _getLastExtract = getLastExtract;
+  _getLastBatchStatus = getLastBatchStatus;
   _getLastRecall = getLastRecall;
   _getRuntimeStatus = getRuntimeStatus;
   _getLastExtractionStatus = getLastExtractionStatus;
@@ -1752,6 +1755,7 @@ function _refreshDashboard() {
     _setText("bme-status-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-recovery", "等待聊天图谱元数据加载");
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
+    _setText("bme-status-last-persist", "等待聊天图谱元数据加载");
     _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
     _renderStatefulListPlaceholder(
@@ -1786,6 +1790,7 @@ function _refreshDashboard() {
   const vectorSource = graph?.vectorIndexState?.source || "—";
   const recovery = graph?.historyState?.lastRecoveryResult;
   const extractionStatus = _getLastExtractionStatus?.() || {};
+  const lastBatchStatus = _getLatestBatchStatusSnapshot();
   const vectorStatus = _getLastVectorStatus?.() || {};
   const recallStatus = _getLastRecallStatus?.() || {};
   const historyPrefix =
@@ -1798,11 +1803,7 @@ function _refreshDashboard() {
   _setText("bme-status-chat-id", chatId);
   _setText(
     "bme-status-history",
-    `${historyPrefix}${
-      Number.isFinite(dirtyFrom)
-        ? `脏区从楼层 ${dirtyFrom} 开始，已处理到 ${lastProcessed}`
-        : `干净，已处理到楼层 ${lastProcessed}`
-    }`,
+    `${historyPrefix}${_formatDashboardHistoryMeta(graph, loadInfo, lastBatchStatus)}`,
   );
   _setText(
     "bme-status-vector",
@@ -1829,6 +1830,10 @@ function _refreshDashboard() {
       : "暂无恢复记录",
   );
   _setText("bme-status-last-extract", extractionStatus.meta || "尚未执行提取");
+  _setText(
+    "bme-status-last-persist",
+    _formatDashboardPersistMeta(loadInfo, lastBatchStatus),
+  );
   _setText("bme-status-last-vector", vectorStatus.meta || "尚未执行向量任务");
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
@@ -5934,6 +5939,7 @@ function _summarizeMonitorGovernance(entry = {}) {
     : [];
   const requestCleaning = entry?.requestCleaning || null;
   const responseCleaning = entry?.responseCleaning || null;
+  const persistence = entry?.batchStatus?.persistence || entry?.persistence || null;
   const lines = [];
 
   if (worldInfo) {
@@ -5963,6 +5969,11 @@ function _summarizeMonitorGovernance(entry = {}) {
   }
   if (entry?.jsonFailure?.failureReason) {
     lines.push(`失败原因: ${String(entry.jsonFailure.failureReason || "")}`);
+  }
+  if (persistence) {
+    lines.push(
+      `持久化: ${_formatPersistenceOutcomeLabel(persistence.outcome)} · ${String(persistence.storageTier || "none")}${persistence.reason ? ` · ${String(persistence.reason)}` : ""}`,
+    );
   }
   return lines;
 }
@@ -7403,8 +7414,16 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
         <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.lastPersistedRevision ?? 0))}</span>
       </div>
       <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">最近已接受 revision</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.lastAcceptedRevision ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">排队中的 revision</span>
         <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.queuedPersistRevision ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">待确认写入</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.pendingPersist ? "是" : "否")}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">影子快照</span>
@@ -7413,6 +7432,24 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">写保护</span>
         <span class="bme-debug-kv-value">${_escHtml(graphPersistence.writesBlocked ? "已启用" : "未启用")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">一致性异常</span>
+        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.persistMismatchReason || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Commit Marker</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          graphPersistence.commitMarker
+            ? [
+                `rev ${Number(graphPersistence.commitMarker.revision || 0)}`,
+                graphPersistence.commitMarker.accepted === true ? "accepted" : "pending",
+                graphPersistence.commitMarker.storageTier || "",
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : "—",
+        )}</span>
       </div>
     </div>
     ${_renderDebugDetails("图谱持久化详情", graphPersistence)}
@@ -9170,6 +9207,9 @@ function _getGraphPersistenceSnapshot() {
     writesBlocked: true,
     shadowSnapshotUsed: false,
     pendingPersist: false,
+    lastAcceptedRevision: 0,
+    persistMismatchReason: "",
+    commitMarker: null,
     chatId: "",
     storageMode: "indexeddb",
     dbReady: false,
@@ -9179,6 +9219,86 @@ function _getGraphPersistenceSnapshot() {
     lastSyncedRevision: 0,
     lastSyncError: "",
   };
+}
+
+function _getLatestBatchStatusSnapshot() {
+  return _getLastBatchStatus?.() || null;
+}
+
+function _formatPersistenceOutcomeLabel(outcome = "") {
+  switch (String(outcome || "")) {
+    case "saved":
+      return "已保存";
+    case "fallback":
+      return "兜底已保存";
+    case "queued":
+      return "已排队";
+    case "blocked":
+      return "已阻塞";
+    case "failed":
+      return "失败";
+    default:
+      return "未知";
+  }
+}
+
+function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
+  const persistence = batchStatus?.persistence || null;
+  if (persistence) {
+    const parts = [
+      _formatPersistenceOutcomeLabel(persistence.outcome),
+      persistence.storageTier ? `tier ${persistence.storageTier}` : "",
+      Number.isFinite(Number(persistence.revision)) && Number(persistence.revision) > 0
+        ? `rev ${Number(persistence.revision)}`
+        : "",
+      persistence.reason || "",
+    ].filter(Boolean);
+    return parts.join(" · ") || "尚无持久化记录";
+  }
+
+  const dualWrite = loadInfo?.dualWriteLastResult || null;
+  if (dualWrite) {
+    return [
+      dualWrite.success === true ? "最近写入成功" : "最近写入失败",
+      dualWrite.target || dualWrite.source || "",
+      Number.isFinite(Number(dualWrite.revision)) && Number(dualWrite.revision) > 0
+        ? `rev ${Number(dualWrite.revision)}`
+        : "",
+      dualWrite.reason || dualWrite.error || "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+
+  return "尚未执行持久化";
+}
+
+function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = null) {
+  const lastConfirmedFloor =
+    graph?.historyState?.lastProcessedAssistantFloor ?? -1;
+  const persistence = batchStatus?.persistence || null;
+  const processedRange = Array.isArray(batchStatus?.processedRange)
+    ? batchStatus.processedRange
+    : [];
+  const pendingFloor =
+    processedRange.length > 1 && Number.isFinite(Number(processedRange[1]))
+      ? Number(processedRange[1])
+      : null;
+
+  if (persistence && persistence.accepted !== true && pendingFloor != null) {
+    return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
+  }
+
+  if (loadInfo?.persistMismatchReason) {
+    return `持久化一致性异常：${String(loadInfo.persistMismatchReason || "")} · 已确认楼层 ${lastConfirmedFloor}`;
+  }
+
+  const dirtyFrom = graph?.historyState?.historyDirtyFrom;
+  if (Number.isFinite(dirtyFrom)) {
+    return `脏区从楼层 ${dirtyFrom} 开始，已确认处理到楼层 ${lastConfirmedFloor}`;
+  }
+
+  return `干净，已确认处理到楼层 ${lastConfirmedFloor}`;
 }
 
 function _getGraphLoadLabel(loadState = "") {

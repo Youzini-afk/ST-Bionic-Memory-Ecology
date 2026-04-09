@@ -1,7 +1,7 @@
 // ST-BME: 图谱持久化常量与纯工具函数
 // 不依赖 index.js 模块级可变状态（currentGraph / graphPersistenceState 等）
 
-import { deserializeGraph, serializeGraph } from "./graph.js";
+import { deserializeGraph, getGraphStats, serializeGraph } from "./graph.js";
 import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
 
 // ═══════════════════════════════════════════════════════════
@@ -10,6 +10,7 @@ import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
 
 export const MODULE_NAME = "st_bme";
 export const GRAPH_METADATA_KEY = "st_bme_graph";
+export const GRAPH_COMMIT_MARKER_KEY = "st_bme_commit_marker";
 export const GRAPH_PERSISTENCE_META_KEY = "__stBmePersistence";
 export const GRAPH_LOAD_STATES = Object.freeze({
   NO_CHAT: "no-chat",
@@ -371,6 +372,155 @@ export function writeChatMetadataPatch(context, patch = {}) {
   }
   Object.assign(context.chatMetadata, patch || {});
   return true;
+}
+
+export function normalizeGraphCommitMarker(marker = null) {
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) {
+    return null;
+  }
+
+  const revision = Number(marker.revision);
+  const lastProcessedAssistantFloor = Number(marker.lastProcessedAssistantFloor);
+  const extractionCount = Number(marker.extractionCount);
+  const nodeCount = Number(marker.nodeCount);
+  const edgeCount = Number(marker.edgeCount);
+  const archivedCount = Number(marker.archivedCount);
+
+  return {
+    revision: Number.isFinite(revision) && revision > 0 ? revision : 0,
+    lastProcessedAssistantFloor:
+      Number.isFinite(lastProcessedAssistantFloor)
+        ? Math.floor(lastProcessedAssistantFloor)
+        : -1,
+    extractionCount:
+      Number.isFinite(extractionCount) && extractionCount >= 0
+        ? Math.floor(extractionCount)
+        : 0,
+    nodeCount:
+      Number.isFinite(nodeCount) && nodeCount >= 0 ? Math.floor(nodeCount) : 0,
+    edgeCount:
+      Number.isFinite(edgeCount) && edgeCount >= 0 ? Math.floor(edgeCount) : 0,
+    archivedCount:
+      Number.isFinite(archivedCount) && archivedCount >= 0
+        ? Math.floor(archivedCount)
+        : 0,
+    persistedAt: String(marker.persistedAt || ""),
+    storageTier: String(marker.storageTier || "none"),
+    accepted: marker.accepted === true,
+    reason: String(marker.reason || ""),
+    chatId: normalizeIdentityValue(marker.chatId),
+    integrity: normalizeIdentityValue(marker.integrity),
+  };
+}
+
+export function buildGraphCommitMarker(
+  graph,
+  {
+    revision = 0,
+    storageTier = "none",
+    accepted = false,
+    reason = "",
+    persistedAt = "",
+    chatId = "",
+    integrity = "",
+    lastProcessedAssistantFloor = null,
+    extractionCount = null,
+  } = {},
+) {
+  const stats = graph ? getGraphStats(graph) : null;
+  const historyState = graph?.historyState || {};
+  const hasExplicitLastProcessedFloor =
+    lastProcessedAssistantFloor !== null &&
+    lastProcessedAssistantFloor !== undefined &&
+    lastProcessedAssistantFloor !== "";
+  const hasExplicitExtractionCount =
+    extractionCount !== null &&
+    extractionCount !== undefined &&
+    extractionCount !== "";
+  return normalizeGraphCommitMarker({
+    revision,
+    lastProcessedAssistantFloor:
+      hasExplicitLastProcessedFloor &&
+      Number.isFinite(Number(lastProcessedAssistantFloor))
+        ? Number(lastProcessedAssistantFloor)
+        : Number.isFinite(Number(historyState.lastProcessedAssistantFloor))
+          ? Number(historyState.lastProcessedAssistantFloor)
+          : Number.isFinite(Number(stats?.lastProcessedSeq))
+            ? Number(stats.lastProcessedSeq)
+            : -1,
+    extractionCount:
+      hasExplicitExtractionCount &&
+      Number.isFinite(Number(extractionCount))
+        ? Number(extractionCount)
+        : Number.isFinite(Number(historyState.extractionCount))
+          ? Number(historyState.extractionCount)
+          : 0,
+    nodeCount: Number(stats?.activeNodes || 0),
+    edgeCount: Number(stats?.totalEdges || 0),
+    archivedCount: Number(stats?.archivedNodes || 0),
+    persistedAt: String(persistedAt || new Date().toISOString()),
+    storageTier: String(storageTier || "none"),
+    accepted: accepted === true,
+    reason: String(reason || ""),
+    chatId,
+    integrity,
+  });
+}
+
+export function readGraphCommitMarker(context = null) {
+  const rawMarker =
+    context?.chatMetadata &&
+    typeof context.chatMetadata === "object" &&
+    !Array.isArray(context.chatMetadata)
+      ? context.chatMetadata[GRAPH_COMMIT_MARKER_KEY]
+      : null;
+  const marker = normalizeGraphCommitMarker(rawMarker);
+  return marker?.revision ? marker : null;
+}
+
+export function getAcceptedCommitMarkerRevision(marker = null) {
+  const normalizedMarker = normalizeGraphCommitMarker(marker);
+  return normalizedMarker?.accepted === true
+    ? Number(normalizedMarker.revision || 0)
+    : 0;
+}
+
+export function detectIndexedDbSnapshotCommitMarkerMismatch(
+  snapshot = null,
+  marker = null,
+) {
+  const normalizedMarker = normalizeGraphCommitMarker(marker);
+  if (!normalizedMarker || normalizedMarker.accepted !== true) {
+    return {
+      mismatched: false,
+      reason: "",
+      markerRevision: 0,
+      snapshotRevision: Number.isFinite(Number(snapshot?.meta?.revision))
+        ? Number(snapshot.meta.revision)
+        : 0,
+    };
+  }
+
+  const snapshotRevision = Number.isFinite(Number(snapshot?.meta?.revision))
+    ? Number(snapshot.meta.revision)
+    : 0;
+  const markerRevision = Number(normalizedMarker.revision || 0);
+  if (markerRevision <= 0 || snapshotRevision >= markerRevision) {
+    return {
+      mismatched: false,
+      reason: "",
+      markerRevision,
+      snapshotRevision,
+    };
+  }
+
+  return {
+    mismatched: true,
+    reason: "persist-mismatch:indexeddb-behind-commit-marker",
+    markerRevision,
+    snapshotRevision,
+    marker: normalizedMarker,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════

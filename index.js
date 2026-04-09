@@ -96,9 +96,13 @@ import {
   runHierarchicalSummaryPostProcess,
 } from "./maintenance/hierarchical-summary.js";
 import {
+  buildGraphCommitMarker,
+  detectIndexedDbSnapshotCommitMarkerMismatch,
   findGraphShadowSnapshotByIntegrity,
+  getAcceptedCommitMarkerRevision,
   GRAPH_LOAD_PENDING_CHAT_ID,
   GRAPH_LOAD_STATES,
+  GRAPH_COMMIT_MARKER_KEY,
   GRAPH_METADATA_KEY,
   GRAPH_STARTUP_RECONCILE_DELAYS_MS,
   MODULE_NAME,
@@ -110,6 +114,7 @@ import {
   readGraphShadowSnapshot,
   removeGraphShadowSnapshot,
   rememberGraphIdentityAlias,
+  readGraphCommitMarker,
   resolveGraphIdentityAliasByHostChatId,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
@@ -286,6 +291,157 @@ const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
 function getChatMetadataIntegrity(context = getContext()) {
   return normalizeChatIdCandidate(context?.chatMetadata?.integrity);
+}
+
+function getChatCommitMarker(context = getContext()) {
+  return readGraphCommitMarker(context);
+}
+
+function syncCommitMarkerToPersistenceState(context = getContext()) {
+  const marker = getChatCommitMarker(context);
+  updateGraphPersistenceState({
+    commitMarker: cloneRuntimeDebugValue(marker, null),
+    lastAcceptedRevision: Math.max(
+      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      getAcceptedCommitMarkerRevision(marker),
+    ),
+  });
+  return marker;
+}
+
+function persistGraphCommitMarker(
+  context = getContext(),
+  {
+    reason = "graph-commit-marker",
+    revision = graphPersistenceState.revision,
+    storageTier = "none",
+    accepted = false,
+    lastProcessedAssistantFloor = null,
+    extractionCount: nextExtractionCount = null,
+    immediate = true,
+  } = {},
+) {
+  if (!context) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-context",
+      revision,
+      storageTier,
+    });
+  }
+
+  const chatId = getCurrentChatId(context);
+  if (!chatId) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-chat-id",
+      revision,
+      storageTier,
+    });
+  }
+
+  const marker = buildGraphCommitMarker(currentGraph, {
+    revision,
+    storageTier,
+    accepted,
+    reason,
+    chatId,
+    integrity: getChatMetadataIntegrity(context),
+    lastProcessedAssistantFloor,
+    extractionCount: nextExtractionCount,
+  });
+  if (!marker) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "marker-build-failed",
+      revision,
+      storageTier,
+    });
+  }
+
+  writeChatMetadataPatch(context, {
+    [GRAPH_COMMIT_MARKER_KEY]: marker,
+  });
+  const saveMode = triggerChatMetadataSave(context, { immediate });
+  updateGraphPersistenceState({
+    commitMarker: cloneRuntimeDebugValue(marker, null),
+    lastAcceptedRevision: accepted
+      ? Math.max(
+          Number(graphPersistenceState.lastAcceptedRevision || 0),
+          Number(marker.revision || 0),
+        )
+      : Number(graphPersistenceState.lastAcceptedRevision || 0),
+    lastPersistReason: String(reason || ""),
+    lastPersistMode: `commit-marker:${saveMode}`,
+  });
+  return buildGraphPersistResult({
+    saved: true,
+    blocked: false,
+    accepted,
+    reason,
+    revision: Number(marker.revision || revision || 0),
+    saveMode,
+    storageTier,
+  });
+}
+
+function applyPersistMismatchBlockedState(
+  chatId,
+  mismatch = null,
+  { source = "persist-mismatch", attemptIndex = 0 } = {},
+) {
+  const marker = cloneRuntimeDebugValue(mismatch?.marker, null) || getChatCommitMarker();
+  const markerRevision = Number(mismatch?.markerRevision || 0);
+  const snapshotRevision = Number(mismatch?.snapshotRevision || 0);
+  const reason = String(mismatch?.reason || "persist-mismatch:indexeddb-behind-commit-marker");
+  applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+    chatId,
+    reason: `${source}:${reason}`,
+    attemptIndex,
+    revision: Math.max(Number(graphPersistenceState.revision || 0), markerRevision),
+    lastPersistedRevision: Math.max(
+      Number(graphPersistenceState.lastPersistedRevision || 0),
+      snapshotRevision,
+    ),
+    pendingPersist: false,
+    dbReady: true,
+    writesBlocked: true,
+  });
+  updateGraphPersistenceState({
+    persistMismatchReason: reason,
+    commitMarker: cloneRuntimeDebugValue(marker, null),
+    lastAcceptedRevision: Math.max(
+      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      markerRevision,
+    ),
+    dualWriteLastResult: {
+      action: "load",
+      source: String(source || "persist-mismatch"),
+      success: false,
+      rejected: true,
+      reason,
+      markerRevision,
+      snapshotRevision,
+      at: Date.now(),
+    },
+  });
+  refreshPanelLiveState();
+  return {
+    success: false,
+    loaded: false,
+    loadState: GRAPH_LOAD_STATES.BLOCKED,
+    reason,
+    chatId,
+    attemptIndex,
+    markerRevision,
+    snapshotRevision,
+  };
 }
 
 function triggerChatMetadataSave(
@@ -552,6 +708,13 @@ function normalizeGraphSyncState(value = "idle") {
 }
 
 function getGraphPersistenceLiveState() {
+  const liveCommitMarker =
+    cloneRuntimeDebugValue(graphPersistenceState.commitMarker, null) ||
+    readGraphCommitMarker(getContext());
+  const lastAcceptedRevision = Math.max(
+    Number(graphPersistenceState.lastAcceptedRevision || 0),
+    getAcceptedCommitMarkerRevision(liveCommitMarker),
+  );
   const snapshot = {
     loadState: graphPersistenceState.loadState,
     chatId: graphPersistenceState.chatId,
@@ -570,6 +733,9 @@ function getGraphPersistenceLiveState() {
     metadataIntegrity: graphPersistenceState.metadataIntegrity,
     writesBlocked: graphPersistenceState.writesBlocked,
     pendingPersist: graphPersistenceState.pendingPersist,
+    lastAcceptedRevision,
+    persistMismatchReason: String(graphPersistenceState.persistMismatchReason || ""),
+    commitMarker: cloneRuntimeDebugValue(liveCommitMarker, null),
     queuedPersistMode: graphPersistenceState.queuedPersistMode,
     queuedPersistRotateIntegrity:
       graphPersistenceState.queuedPersistRotateIntegrity,
@@ -3795,6 +3961,11 @@ function applyShadowSnapshotToRuntime(
     storageMode: "indexeddb",
     dbReady: true,
     indexedDbLastError: "",
+    persistMismatchReason: "",
+    lastAcceptedRevision: Math.max(
+      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      shadowRevision,
+    ),
     metadataIntegrity:
       getChatMetadataIntegrity(getContext()) ||
       graphPersistenceState.metadataIntegrity,
@@ -4609,6 +4780,7 @@ function applyIndexedDbEmptyToRuntime(
     storagePrimary: "indexeddb",
     storageMode: "indexeddb",
     dbReady: true,
+    persistMismatchReason: "",
     indexedDbRevision: 0,
     indexedDbLastError: "",
     dualWriteLastResult: {
@@ -4638,6 +4810,7 @@ function applyIndexedDbSnapshotToRuntime(
   { source = "indexeddb", attemptIndex = 0 } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  syncCommitMarkerToPersistenceState(getContext());
   if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot)) {
     return {
       success: false,
@@ -4802,11 +4975,16 @@ function applyIndexedDbSnapshotToRuntime(
     storagePrimary: "indexeddb",
     storageMode: "indexeddb",
     dbReady: true,
+    persistMismatchReason: "",
     indexedDbRevision: revision,
     metadataIntegrity:
       getChatMetadataIntegrity(getContext()) ||
-      graphPersistenceState.metadataIntegrity,
+        graphPersistenceState.metadataIntegrity,
     indexedDbLastError: "",
+    lastAcceptedRevision: Math.max(
+      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      revision,
+    ),
     lastSyncError: "",
     dualWriteLastResult: {
       action: "load",
@@ -4851,6 +5029,7 @@ async function loadGraphFromIndexedDb(
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const commitMarker = syncCommitMarkerToPersistenceState(getContext());
   if (!normalizedChatId) {
     return {
       success: false,
@@ -4974,7 +5153,38 @@ async function loadGraphFromIndexedDb(
 
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
+    const commitMarkerMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
+      snapshot,
+      commitMarker,
+    );
     if (!isIndexedDbSnapshotMeaningful(snapshot)) {
+      if (commitMarkerMismatch.mismatched) {
+        if (
+          shadowSnapshot &&
+          Number(shadowSnapshot.revision || 0) >=
+            Number(commitMarkerMismatch.markerRevision || 0)
+        ) {
+          const shadowRestoreResult = applyShadowSnapshotToRuntime(
+            normalizedChatId,
+            shadowSnapshot,
+            {
+              source: `${source}:shadow-indexeddb-empty`,
+              attemptIndex,
+            },
+          );
+          if (shadowRestoreResult?.loaded) {
+            return shadowRestoreResult;
+          }
+        }
+        return applyPersistMismatchBlockedState(
+          normalizedChatId,
+          commitMarkerMismatch,
+          {
+            source: `${source}:indexeddb-empty`,
+            attemptIndex,
+          },
+        );
+      }
       if (shadowSnapshot) {
         const shadowRestoreResult = applyShadowSnapshotToRuntime(
           normalizedChatId,
@@ -5035,6 +5245,33 @@ async function loadGraphFromIndexedDb(
         shadowSnapshot,
         {
           source: `${source}:shadow-newer-than-indexeddb`,
+          attemptIndex,
+        },
+      );
+    }
+    if (commitMarkerMismatch.mismatched) {
+      if (
+        shadowSnapshot &&
+        Number(shadowSnapshot.revision || 0) >=
+          Number(commitMarkerMismatch.markerRevision || 0)
+      ) {
+        return applyShadowSnapshotToRuntime(
+          normalizedChatId,
+          shadowSnapshot,
+          {
+            source: `${source}:shadow-beats-commit-marker`,
+            attemptIndex,
+          },
+        );
+      }
+      return applyPersistMismatchBlockedState(
+        normalizedChatId,
+        {
+          ...commitMarkerMismatch,
+          marker: commitMarkerMismatch.marker || commitMarker,
+        },
+        {
+          source: `${source}:indexeddb-commit-marker`,
           attemptIndex,
         },
       );
@@ -5634,6 +5871,8 @@ function buildGraphPersistResult({
   saved = false,
   queued = false,
   blocked = false,
+  accepted = false,
+  storageTier = "none",
   reason = "",
   loadState = graphPersistenceState.loadState,
   revision = graphPersistenceState.revision,
@@ -5643,6 +5882,8 @@ function buildGraphPersistResult({
     saved,
     queued,
     blocked,
+    accepted,
+    storageTier: String(storageTier || "none"),
     reason: String(reason || ""),
     loadState,
     revision: Number.isFinite(revision) ? revision : 0,
@@ -5730,6 +5971,7 @@ function persistGraphToChatMetadata(
     lastPersistReason: String(reason || ""),
     lastPersistMode: saveMode,
     metadataIntegrity: String(nextIntegrity || ""),
+    persistMismatchReason: "",
     storagePrimary: "metadata",
     storageMode: "metadata",
     indexedDbLastError: "",
@@ -5742,10 +5984,12 @@ function persistGraphToChatMetadata(
 
   return buildGraphPersistResult({
     saved: true,
+    accepted: true,
     reason,
     loadState: graphPersistenceState.loadState,
     revision,
     saveMode,
+    storageTier: "metadata-full",
   });
 }
 
@@ -5755,7 +5999,7 @@ function queueGraphPersist(
   { immediate = true } = {},
 ) {
   const queuedChatId = graphPersistenceState.chatId || getCurrentChatId();
-  maybeCaptureGraphShadowSnapshot(reason);
+  const shadowCaptured = maybeCaptureGraphShadowSnapshot(reason);
   updateGraphPersistenceState({
     queuedPersistRevision: Math.max(
       graphPersistenceState.queuedPersistRevision || 0,
@@ -5773,10 +6017,12 @@ function queueGraphPersist(
   return buildGraphPersistResult({
     queued: true,
     blocked: true,
+    accepted: shadowCaptured,
     reason,
     loadState: graphPersistenceState.loadState,
     revision,
     saveMode: immediate ? "immediate" : "debounced",
+    storageTier: shadowCaptured ? "shadow" : "none",
   });
 }
 
@@ -5829,6 +6075,158 @@ function maybeFlushQueuedGraphPersist(reason = "queued-graph-persist") {
     reason,
     revision: targetRevision,
     immediate: graphPersistenceState.queuedPersistMode !== "debounced",
+  });
+}
+
+async function persistExtractionBatchResult({
+  reason = "extraction-batch-complete",
+  lastProcessedAssistantFloor = null,
+} = {}) {
+  ensureCurrentGraphRuntimeState();
+  const context = getContext();
+  if (!context || !currentGraph) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-context-or-graph",
+      storageTier: "none",
+    });
+  }
+
+  const chatId = getCurrentChatId(context);
+  if (!chatId) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-chat-id",
+      storageTier: "none",
+    });
+  }
+
+  const revision = bumpGraphRevision(reason);
+  const indexedDbResult = await saveGraphToIndexedDb(chatId, currentGraph, {
+    revision,
+    reason,
+  });
+  if (indexedDbResult?.saved) {
+    persistGraphCommitMarker(context, {
+      reason,
+      revision,
+      storageTier: "indexeddb",
+      accepted: true,
+      lastProcessedAssistantFloor,
+      extractionCount,
+      immediate: true,
+    });
+    updateGraphPersistenceState({
+      pendingPersist: false,
+      persistMismatchReason: "",
+      lastAcceptedRevision: Math.max(
+        Number(graphPersistenceState.lastAcceptedRevision || 0),
+        revision,
+      ),
+      lastPersistReason: String(reason || ""),
+      lastPersistMode: "indexeddb",
+    });
+    return buildGraphPersistResult({
+      saved: true,
+      accepted: true,
+      reason,
+      revision,
+      saveMode: "indexeddb",
+      storageTier: "indexeddb",
+    });
+  }
+
+  const shadowReason = `${reason}:shadow-fallback`;
+  const shadowCaptured = maybeCaptureGraphShadowSnapshot(shadowReason);
+  if (shadowCaptured) {
+    if (isGraphMetadataWriteAllowed()) {
+      persistGraphCommitMarker(context, {
+        reason: shadowReason,
+        revision,
+        storageTier: "shadow",
+        accepted: true,
+        lastProcessedAssistantFloor,
+        extractionCount,
+        immediate: true,
+      });
+    }
+    updateGraphPersistenceState({
+      pendingPersist: false,
+      persistMismatchReason: "",
+      lastAcceptedRevision: Math.max(
+        Number(graphPersistenceState.lastAcceptedRevision || 0),
+        revision,
+      ),
+      lastPersistReason: shadowReason,
+      lastPersistMode: "shadow",
+    });
+    return buildGraphPersistResult({
+      saved: false,
+      accepted: true,
+      reason: shadowReason,
+      revision,
+      saveMode: "shadow",
+      storageTier: "shadow",
+    });
+  }
+
+  if (isGraphMetadataWriteAllowed()) {
+    const metadataReason = `${reason}:metadata-full-fallback`;
+    const metadataResult = persistGraphToChatMetadata(context, {
+      reason: metadataReason,
+      revision,
+      immediate: true,
+    });
+    if (metadataResult?.saved) {
+      persistGraphCommitMarker(context, {
+        reason: metadataReason,
+        revision,
+        storageTier: "metadata-full",
+        accepted: true,
+        lastProcessedAssistantFloor,
+        extractionCount,
+        immediate: true,
+      });
+      updateGraphPersistenceState({
+        pendingPersist: false,
+        persistMismatchReason: "",
+        lastAcceptedRevision: Math.max(
+          Number(graphPersistenceState.lastAcceptedRevision || 0),
+          revision,
+        ),
+      });
+      return buildGraphPersistResult({
+        saved: true,
+        accepted: true,
+        reason: metadataReason,
+        revision,
+        saveMode: metadataResult.saveMode,
+        storageTier: "metadata-full",
+      });
+    }
+  }
+
+  const queuedResult = queueGraphPersist(`${reason}:pending`, revision, {
+    immediate: true,
+  });
+  updateGraphPersistenceState({
+    pendingPersist: true,
+    lastPersistReason: String(queuedResult.reason || `${reason}:pending`),
+    lastPersistMode: String(queuedResult.saveMode || ""),
+  });
+  return buildGraphPersistResult({
+    saved: false,
+    queued: Boolean(queuedResult?.queued),
+    blocked: Boolean(queuedResult?.blocked),
+    accepted: false,
+    reason: String(queuedResult?.reason || `${reason}:pending`),
+    revision,
+    saveMode: String(queuedResult?.saveMode || ""),
+    storageTier: String(queuedResult?.storageTier || "none"),
   });
 }
 
@@ -5920,6 +6318,7 @@ function shouldSyncGraphLoadFromLiveContext(
 function syncGraphLoadFromLiveContext(options = {}) {
   const { source = "live-context-sync", force = false } = options;
   const context = getContext();
+  syncCommitMarkerToPersistenceState(context);
   if (!shouldSyncGraphLoadFromLiveContext(context, { force })) {
     return {
       synced: false,
@@ -6505,6 +6904,12 @@ function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
 
 function shouldAdvanceProcessedHistory(batchStatus) {
   if (!batchStatus || typeof batchStatus !== "object") return false;
+  if (batchStatus.historyAdvanceAllowed === true) {
+    return true;
+  }
+  if (batchStatus.historyAdvanceAllowed === false) {
+    return false;
+  }
   return (
     batchStatus?.stages?.core?.outcome === "success" &&
     batchStatus?.stages?.finalize?.outcome === "success" &&
@@ -6840,6 +7245,7 @@ function loadGraphFromChat(options = {}) {
   const context = getContext();
   const chatIdentity = resolveCurrentChatIdentity(context);
   const chatId = chatIdentity.chatId;
+  const commitMarker = syncCommitMarkerToPersistenceState(context);
   const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(chatIdentity);
   const normalizedExpectedChatId = String(expectedChatId || "");
   if (attemptIndex === 0) {
@@ -6999,6 +7405,13 @@ function loadGraphFromChat(options = {}) {
         1,
         getGraphPersistedRevision(officialGraph),
       );
+      const metadataCommitMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
+        buildSnapshotFromGraph(officialGraph, {
+          chatId,
+          revision: officialRevision,
+        }),
+        commitMarker,
+      );
       const officialRuntimeStaleDecision =
         detectStaleIndexedDbSnapshotAgainstRuntime(
           chatId,
@@ -7043,6 +7456,28 @@ function loadGraphFromChat(options = {}) {
             null,
           ),
         };
+      }
+
+      if (metadataCommitMismatch.mismatched) {
+        clearPendingGraphLoadRetry();
+        if (
+          shadowSnapshot &&
+          Number(shadowSnapshot.revision || 0) >=
+            Number(metadataCommitMismatch.markerRevision || 0)
+        ) {
+          return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
+            source: `${source}:metadata-shadow`,
+            attemptIndex,
+          });
+        }
+        return applyPersistMismatchBlockedState(
+          chatId,
+          metadataCommitMismatch,
+          {
+            source: `${source}:metadata-compat`,
+            attemptIndex,
+          },
+        );
       }
 
       if (shadowSnapshot && shadowDecision?.reason) {
@@ -7171,6 +7606,27 @@ function loadGraphFromChat(options = {}) {
   }
 
   if (shadowSnapshot) {
+    const acceptedCommitRevision = getAcceptedCommitMarkerRevision(commitMarker);
+    if (
+      acceptedCommitRevision > 0 &&
+      Number(shadowSnapshot.revision || 0) < acceptedCommitRevision
+    ) {
+      clearPendingGraphLoadRetry();
+      return applyPersistMismatchBlockedState(
+        chatId,
+        {
+          mismatched: true,
+          reason: "persist-mismatch:indexeddb-behind-commit-marker",
+          markerRevision: acceptedCommitRevision,
+          snapshotRevision: Number(shadowSnapshot.revision || 0),
+          marker: commitMarker,
+        },
+        {
+          source: `${source}:shadow-no-official`,
+          attemptIndex,
+        },
+      );
+    }
     clearPendingGraphLoadRetry();
     return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
       source: `${source}:shadow-no-official`,
@@ -7276,10 +7732,12 @@ async function saveGraphToIndexedDb(
       storagePrimary: "indexeddb",
       storageMode: "indexeddb",
       dbReady: true,
+      lastPersistedRevision: snapshot.meta.revision,
+      pendingPersist: false,
       indexedDbRevision: snapshot.meta.revision,
       metadataIntegrity:
         getChatMetadataIntegrity(getContext()) ||
-        graphPersistenceState.metadataIntegrity,
+          graphPersistenceState.metadataIntegrity,
       indexedDbLastError: "",
       lastSyncError: "",
       dualWriteLastResult: {
@@ -7505,14 +7963,16 @@ function saveGraphToChat(options = {}) {
       },
     });
     return buildGraphPersistResult({
-      saved: Boolean(shouldQueueIndexedDbPersist),
-      queued: false,
+      saved: false,
+      queued: Boolean(shouldQueueIndexedDbPersist),
       blocked: false,
+      accepted: false,
       reason: shouldQueueIndexedDbPersist
         ? "indexeddb-queued"
         : "indexeddb-empty-skip",
       revision,
       saveMode,
+      storageTier: shouldQueueIndexedDbPersist ? "indexeddb" : "none",
     });
   }
 
@@ -9415,7 +9875,7 @@ async function executeExtractionBatch({
       getLastProcessedAssistantFloor,
       getSchema,
       handleExtractionSuccess,
-      saveGraphToChat,
+      persistExtractionBatchResult,
       setBatchStageOutcome,
       setLastExtractionStatus,
       shouldAdvanceProcessedHistory,

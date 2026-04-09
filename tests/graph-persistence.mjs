@@ -11,12 +11,16 @@ import {
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
 import {
+  buildGraphCommitMarker,
+  detectIndexedDbSnapshotCommitMarkerMismatch,
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
   findGraphShadowSnapshotByIntegrity,
+  getAcceptedCommitMarkerRevision,
   getGraphPersistedRevision,
   getGraphIdentityAliasCandidates,
   getGraphPersistenceMeta,
+  GRAPH_COMMIT_MARKER_KEY,
   getGraphShadowSnapshotStorageKey,
   GRAPH_LOAD_PENDING_CHAT_ID,
   GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
@@ -27,6 +31,8 @@ import {
   GRAPH_SHADOW_SNAPSHOT_STORAGE_PREFIX,
   GRAPH_STARTUP_RECONCILE_DELAYS_MS,
   MODULE_NAME,
+  normalizeGraphCommitMarker,
+  readGraphCommitMarker,
   readGraphShadowSnapshot,
   rememberGraphIdentityAlias,
   removeGraphShadowSnapshot,
@@ -384,11 +390,15 @@ async function createGraphPersistenceHarness({
     formatRecallContextLine,
     readPersistedRecallFromUserMessage,
     cloneGraphForPersistence,
+    buildGraphCommitMarker,
     cloneRuntimeDebugValue,
+    detectIndexedDbSnapshotCommitMarkerMismatch,
     onMessageReceivedController,
+    getAcceptedCommitMarkerRevision,
     getGraphPersistenceMeta,
     getGraphPersistedRevision,
     getGraphIdentityAliasCandidates,
+    GRAPH_COMMIT_MARKER_KEY,
     getGraphShadowSnapshotStorageKey,
     GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
     GRAPH_LOAD_PENDING_CHAT_ID,
@@ -400,6 +410,8 @@ async function createGraphPersistenceHarness({
     GRAPH_STARTUP_RECONCILE_DELAYS_MS,
     MODULE_NAME,
     findGraphShadowSnapshotByIntegrity,
+    normalizeGraphCommitMarker,
+    readGraphCommitMarker,
     readGraphShadowSnapshot,
     rememberGraphIdentityAlias,
     removeGraphShadowSnapshot,
@@ -1221,8 +1233,8 @@ result = {
     reason: "blocked-save",
     markMutation: false,
   });
-  assert.equal(result.saved, true);
-  assert.equal(result.queued, false);
+  assert.equal(result.saved, false);
+  assert.equal(result.queued, true);
   assert.equal(result.blocked, false);
   assert.equal(result.saveMode, "indexeddb-queued");
   assert.equal(harness.runtimeContext.__chatContext.chatMetadata, undefined);
@@ -1941,7 +1953,8 @@ result = {
     reason: "first-meaningful-graph",
   });
 
-  assert.equal(result.saved, true);
+  assert.equal(result.saved, false);
+  assert.equal(result.queued, true);
   assert.equal(result.saveMode, "indexeddb-queued");
   assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 0);
   assert.equal(harness.runtimeContext.__contextSaveCalls, 0);
