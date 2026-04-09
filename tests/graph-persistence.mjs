@@ -293,6 +293,12 @@ async function createGraphPersistenceHarness({
             : {},
       };
     },
+    migratePerTaskRegexToGlobal(settings = {}) {
+      return {
+        changed: false,
+        settings,
+      };
+    },
     setTimeout(fn, delay) {
       const id = nextTimerId++;
       timers.set(id, { fn, delay });

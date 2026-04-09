@@ -29,12 +29,17 @@ import {
   normalizeStoryTime,
   normalizeStoryTimeSpan,
 } from "./story-timeline.js";
+import {
+  createDefaultSummaryState,
+  importLegacySynopsisToSummaryState,
+  normalizeGraphSummaryState,
+} from "./summary-state.js";
 import { debugLog } from "../runtime/debug-logging.js";
 
 /**
  * 图状态版本号
  */
-const GRAPH_VERSION = 8;
+const GRAPH_VERSION = 9;
 
 /**
  * 生成 UUID v4
@@ -65,6 +70,7 @@ export function createEmptyGraph() {
     knowledgeState: createDefaultKnowledgeState(),
     regionState: createDefaultRegionState(),
     timelineState: createDefaultTimelineState(),
+    summaryState: createDefaultSummaryState(),
   });
 }
 
@@ -573,6 +579,10 @@ export function serializeGraph(graph) {
 export function deserializeGraph(json) {
   try {
     const data = typeof json === "string" ? JSON.parse(json) : json;
+    const shouldImportLegacySynopsis =
+      !data?.summaryState ||
+      typeof data.summaryState !== "object" ||
+      Array.isArray(data.summaryState);
 
     if (!data || data.version === undefined) {
       return createEmptyGraph();
@@ -697,6 +707,10 @@ export function deserializeGraph(json) {
         }
       }
 
+      if (data.version < 9) {
+        data.summaryState = createDefaultSummaryState(data.summaryState);
+      }
+
       data.version = GRAPH_VERSION;
     }
 
@@ -762,9 +776,18 @@ export function deserializeGraph(json) {
     data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
     data.regionState = createDefaultRegionState(data.regionState);
     data.timelineState = createDefaultTimelineState(data.timelineState);
+    data.summaryState = createDefaultSummaryState(data.summaryState);
     normalizeGraphStoryTimeline(data);
 
-    return normalizeGraphRuntimeState(data, data?.historyState?.chatId || "");
+    const normalizedGraph = normalizeGraphRuntimeState(
+      data,
+      data?.historyState?.chatId || "",
+    );
+    normalizeGraphSummaryState(normalizedGraph);
+    if (shouldImportLegacySynopsis) {
+      importLegacySynopsisToSummaryState(normalizedGraph);
+    }
+    return normalizedGraph;
   } catch (e) {
     console.error("[ST-BME] 图反序列化失败:", e);
     return createEmptyGraph();
@@ -797,6 +820,7 @@ export function exportGraph(graph) {
     knowledgeState: createDefaultKnowledgeState(graph?.knowledgeState || {}),
     regionState: createDefaultRegionState(graph?.regionState || {}),
     timelineState: createDefaultTimelineState(graph?.timelineState || {}),
+    summaryState: createDefaultSummaryState(graph?.summaryState || {}),
     nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
   };
   return JSON.stringify(exportData, null, 2);

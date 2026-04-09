@@ -36,6 +36,15 @@ export function isSystemMessageForExtraction(
   return !isBmeManagedHiddenMessage(message, { index, chat });
 }
 
+export function isSystemMessageForSummary(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (!message?.is_system) return false;
+  if (Number.isFinite(index) && index === 0) return true;
+  return !isBmeManagedHiddenMessage(message, { index, chat });
+}
+
 export function isAssistantChatMessage(
   message,
   { index = null, chat = null } = {},
@@ -81,6 +90,41 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
       seq: index,
       role: msg.is_user ? "user" : "assistant",
       content,
+    });
+  }
+
+  return messages;
+}
+
+export function buildSummarySourceMessages(
+  chat,
+  startIdx,
+  endIdx,
+  options = {},
+) {
+  const extraContextFloors = clampInt(
+    options.rawChatContextFloors,
+    0,
+    0,
+    200,
+  );
+  const contextStart = Math.max(0, Number(startIdx || 0) - extraContextFloors);
+  const messages = [];
+
+  for (
+    let index = contextStart;
+    index <= endIdx && index < chat.length;
+    index += 1
+  ) {
+    const msg = chat[index];
+    if (isSystemMessageForSummary(msg, { index, chat })) continue;
+    const content = sanitizePlannerMessageText(msg);
+    if (!String(content || "").trim()) continue;
+    messages.push({
+      seq: index,
+      role: msg.is_user ? "user" : "assistant",
+      content,
+      hiddenManaged: isBmeManagedHiddenMessage(msg, { index, chat }),
     });
   }
 

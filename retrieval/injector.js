@@ -7,6 +7,7 @@ import {
   describeStoryTime,
   describeStoryTimeSpan,
 } from "../graph/story-timeline.js";
+import { compareSummaryEntriesForDisplay } from "../graph/summary-state.js";
 
 /**
  * 将检索结果转换为注入文本
@@ -16,12 +17,20 @@ import {
  * @returns {string} 注入文本
  */
 export function formatInjection(retrievalResult, schema) {
-  const { coreNodes, recallNodes, groupedRecallNodes, scopeBuckets } =
+  const {
+    summaryEntries,
+    coreNodes,
+    recallNodes,
+    groupedRecallNodes,
+    scopeBuckets,
+  } =
     retrievalResult;
   const showStoryTime =
     retrievalResult?.meta?.scopeContext?.injectStoryTimeLabel !== false;
   const parts = [];
   const appended = new Set();
+
+  appendSummarySections(parts, summaryEntries || []);
 
   if (scopeBuckets && typeof scopeBuckets === "object") {
     appendCharacterPovSections(
@@ -116,6 +125,42 @@ export function formatInjection(retrievalResult, schema) {
   }
 
   return parts.join("\n");
+}
+
+export function formatSummaryInjection(summaryEntries = []) {
+  const parts = [];
+  appendSummarySections(parts, summaryEntries);
+  return parts.join("\n").trim();
+}
+
+function appendSummarySections(parts, summaryEntries = []) {
+  const entries = (Array.isArray(summaryEntries) ? summaryEntries : [])
+    .filter((entry) => String(entry?.status || "active") === "active" && String(entry?.text || "").trim())
+    .sort(compareSummaryEntriesForDisplay);
+  if (entries.length === 0) return;
+
+  if (parts.length > 0) {
+    parts.push("");
+  }
+  parts.push("[Summary - Active Frontier]");
+  for (const entry of entries) {
+    const level = Math.max(0, Number(entry?.level || 0));
+    const range = Array.isArray(entry?.messageRange) ? entry.messageRange : ["?", "?"];
+    const span = describeStoryTimeSpan(entry?.storyTimeSpan);
+    const header =
+      String(entry?.kind || "") === "rollup"
+        ? `[Summary L${level} / Rolled Up / 楼 ${range[0]} ~ ${range[1]}]`
+        : `[Summary L${level} / 楼 ${range[0]} ~ ${range[1]}]`;
+    parts.push(header);
+    if (span) {
+      parts.push(`story_time_span: ${span}`);
+    }
+    parts.push(String(entry?.text || "").trim());
+    parts.push("");
+  }
+  while (parts[parts.length - 1] === "") {
+    parts.pop();
+  }
 }
 
 function appendCharacterPovSections(

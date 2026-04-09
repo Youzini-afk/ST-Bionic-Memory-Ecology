@@ -329,7 +329,19 @@
                   </button>
                   <button class="bme-action-btn" id="bme-act-synopsis" type="button">
                     <i class="fa-solid fa-scroll"></i>
-                    <span>更新概要</span>
+                    <span>生成小总结</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-summary-rollup" type="button">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <span>执行总结折叠</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-summary-rebuild" type="button">
+                    <i class="fa-solid fa-sitemap"></i>
+                    <span>重建总结状态</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-summary-clear" type="button">
+                    <i class="fa-solid fa-eraser"></i>
+                    <span>清空总结状态</span>
                   </button>
                   <button class="bme-action-btn" id="bme-act-evolve" type="button">
                     <i class="fa-solid fa-dna"></i>
@@ -466,6 +478,10 @@
                 <i class="fa-solid fa-brain"></i>
                 <span>认知视图</span>
               </button>
+              <button class="bme-graph-view-tab" data-graph-view="summary" type="button">
+                <i class="fa-solid fa-layer-group"></i>
+                <span>总结视图</span>
+              </button>
             </div>
             <div class="bme-graph-controls">
               <button id="bme-graph-zoom-in" title="放大" type="button">
@@ -520,6 +536,8 @@
               </div>
             </div>
           </div>
+
+          <div class="bme-cognition-workspace" id="bme-summary-workspace" hidden></div>
 
           <div class="bme-node-detail" id="bme-node-detail">
             <div class="bme-node-detail-header">
@@ -989,8 +1007,8 @@
                     <span class="bme-cap-icon"><i class="fa-solid fa-scroll"></i></span>
                     <input id="bme-setting-synopsis-enabled" type="checkbox" />
                   </div>
-                  <div class="bme-cap-title">全局概要</div>
-                  <div class="bme-cap-desc">按周期生成故事级的全局总结节点。</div>
+                  <div class="bme-cap-title">层级总结</div>
+                  <div class="bme-cap-desc">按提取节奏生成原文锚定小总结，并自动折叠成更高层总结。</div>
                 </label>
                 <label class="bme-capability-card" for="bme-setting-visibility-enabled">
                   <div class="bme-cap-header">
@@ -2086,22 +2104,22 @@
 
                 <div class="bme-stripe-row">
                   <div class="bme-stripe-label">
-                    <div class="bme-stripe-label-title">概要</div>
+                    <div class="bme-stripe-label-title">层级总结</div>
                     <div class="bme-stripe-label-desc">
-                      控制全局概要节点的生成周期。
+                      控制小总结触发周期；大总结会按 3 条同层小总结自动折叠。
                     </div>
                   </div>
                   <div class="bme-stripe-content">
                     <div
                       class="bme-config-card bme-guarded-card"
-                      data-guard-settings="enableSynopsis"
+                      data-guard-settings="enableHierarchicalSummary"
                     >
                       <div class="bme-config-guard-note">
                         在“功能开关”中启用后生效。
                       </div>
                       <div class="bme-config-row">
                         <label for="bme-setting-synopsis-every"
-                          >每 N 次提取更新</label
+                          >每 N 次提取生成小总结</label
                         >
                         <input
                           id="bme-setting-synopsis-every"

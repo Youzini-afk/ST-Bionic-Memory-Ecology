@@ -128,14 +128,15 @@ assert.deepEqual(
     "userPersona",
     "worldInfoBefore",
     "worldInfoAfter",
-    "eventSummary",
-    "characterSummary",
-    "threadSummary",
+    "recentMessages",
+    "candidateText",
+    "currentRange",
     "graphStats",
     "default-format",
     "default-rules",
   ],
 );
+assert.ok(defaults.summary_rollup.profiles.length > 0);
 
 const upgradedLegacyDefault = getActiveTaskProfile(
   {

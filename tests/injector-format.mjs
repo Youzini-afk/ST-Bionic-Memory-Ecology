@@ -88,8 +88,33 @@ const recalledSynopsis = {
   },
 };
 
+const activeSummaryEntry = {
+  id: "summary-l0-1",
+  level: 0,
+  kind: "small",
+  status: "active",
+  text: "艾琳刚在钟楼重新站稳脚跟，并确认地下入口和失踪案直接相关，局面从调查转向即将下探。",
+  sourceTask: "synopsis",
+  extractionRange: [1, 3],
+  messageRange: [2, 7],
+  sourceBatchIds: ["batch-1", "batch-2", "batch-3"],
+  sourceSummaryIds: [],
+  sourceNodeIds: ["event-1"],
+  storyTimeSpan: {
+    startSegmentId: "tl-0",
+    endSegmentId: "tl-1",
+    startLabel: "昨夜冲突之后",
+    endLabel: "第二天清晨",
+    mixed: true,
+    source: "derived",
+  },
+  regionHints: ["钟楼"],
+  ownerHints: ["艾琳"],
+};
+
 const text = formatInjection(
   {
+    summaryEntries: [activeSummaryEntry],
     coreNodes: [coreEvent],
     recallNodes: [recalledCharacter, recalledReflection],
     scopeBuckets: {
@@ -114,6 +139,8 @@ const text = formatInjection(
 );
 
 assert.match(text, /\[Memory - Character POV: 艾琳\]/);
+assert.match(text, /\[Summary - Active Frontier\]/);
+assert.match(text, /\[Summary L0 \/ 楼 2 ~ 7\]/);
 assert.match(text, /\[Memory - User POV \/ Not Character Facts\]/);
 assert.match(text, /不等于角色已知事实/);
 assert.match(text, /\[Memory - Objective \/ Current Region\]/);

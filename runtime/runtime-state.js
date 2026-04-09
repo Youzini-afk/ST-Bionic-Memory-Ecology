@@ -12,6 +12,11 @@ import {
   createDefaultTimelineState,
   normalizeGraphStoryTimeline,
 } from "../graph/story-timeline.js";
+import {
+  createDefaultSummaryState,
+  importLegacySynopsisToSummaryState,
+  normalizeGraphSummaryState,
+} from "../graph/summary-state.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
@@ -85,6 +90,10 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   if (!graph || typeof graph !== "object") {
     return graph;
   }
+  const hadSummaryState =
+    graph.summaryState &&
+    typeof graph.summaryState === "object" &&
+    !Array.isArray(graph.summaryState);
 
   const historyState = {
     ...createDefaultHistoryState(chatId),
@@ -271,8 +280,13 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   graph.knowledgeState = createDefaultKnowledgeState(graph.knowledgeState);
   graph.regionState = createDefaultRegionState(graph.regionState);
   graph.timelineState = createDefaultTimelineState(graph.timelineState);
+  graph.summaryState = createDefaultSummaryState(graph.summaryState);
   normalizeGraphCognitiveState(graph);
   normalizeGraphStoryTimeline(graph);
+  normalizeGraphSummaryState(graph);
+  if (!hadSummaryState) {
+    importLegacySynopsisToSummaryState(graph);
+  }
   graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
   return graph;
 }

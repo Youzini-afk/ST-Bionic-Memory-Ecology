@@ -15,6 +15,11 @@ import {
   describeStoryTimeSpan,
 } from "../graph/story-timeline.js";
 import {
+  compareSummaryEntriesForDisplay,
+  getActiveSummaryEntries,
+  getSummaryEntriesByStatus,
+} from "../graph/summary-state.js";
+import {
   resolveActiveLlmPresetName,
   sanitizeLlmPresetSettings,
 } from "../llm/llm-preset-utils.js";
@@ -97,6 +102,9 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-compress",
   "bme-act-sleep",
   "bme-act-synopsis",
+  "bme-act-summary-rollup",
+  "bme-act-summary-rebuild",
+  "bme-act-summary-clear",
   "bme-act-evolve",
   "bme-act-undo-maintenance",
   "bme-act-import",
@@ -175,6 +183,50 @@ const TASK_PROFILE_GENERATION_GROUPS = [
     ],
   },
 ];
+
+const TASK_PROFILE_INPUT_GROUPS = {
+  synopsis: [
+    {
+      title: "总结输入",
+      fields: [
+        {
+          key: "rawChatContextFloors",
+          label: "额外原文上下文楼层",
+          type: "number",
+          defaultValue: 0,
+          help: "在主消息范围之外额外补多少楼原文上下文，只影响小总结任务。",
+        },
+        {
+          key: "rawChatSourceMode",
+          label: "原文来源模式",
+          type: "enum",
+          options: [
+            { value: "ignore_bme_hide", label: "忽略 BME 隐藏助手" },
+          ],
+          defaultValue: "ignore_bme_hide",
+          help: "固定绕过 BME 自己的隐藏助手裁剪，只用于小总结原文读取。",
+        },
+      ],
+    },
+  ],
+  summary_rollup: [
+    {
+      title: "折叠输入",
+      fields: [
+        {
+          key: "rawChatSourceMode",
+          label: "原文来源模式",
+          type: "enum",
+          options: [
+            { value: "ignore_bme_hide", label: "忽略 BME 隐藏助手（仅保留兼容位）" },
+          ],
+          defaultValue: "ignore_bme_hide",
+          help: "折叠总结默认不直接读取原文聊天；这里保留输入配置兼容位。",
+        },
+      ],
+    },
+  ],
+};
 
 const TASK_PROFILE_REGEX_STAGES = [
   {
@@ -899,17 +951,21 @@ function _switchGraphView(view) {
   const statusbar = panelEl?.querySelector(".bme-graph-statusbar");
   const nodeDetail = document.getElementById("bme-node-detail");
   const cogWorkspace = document.getElementById("bme-cognition-workspace");
+  const summaryWorkspace = document.getElementById("bme-summary-workspace");
   const graphControls = panelEl?.querySelector(".bme-graph-controls");
 
   const isGraph = currentGraphView === "graph";
+  const isCognition = currentGraphView === "cognition";
   if (canvas) canvas.style.display = isGraph ? "" : "none";
   if (legend) legend.style.display = isGraph ? "" : "none";
   if (statusbar) statusbar.style.display = isGraph ? "" : "none";
   if (nodeDetail) nodeDetail.style.display = isGraph ? "" : "none";
   if (graphControls) graphControls.style.display = isGraph ? "" : "none";
-  if (cogWorkspace) cogWorkspace.hidden = isGraph;
+  if (cogWorkspace) cogWorkspace.hidden = !isCognition;
+  if (summaryWorkspace) summaryWorkspace.hidden = currentGraphView !== "summary";
 
-  if (!isGraph) _refreshCognitionWorkspace();
+  if (isCognition) _refreshCognitionWorkspace();
+  if (currentGraphView === "summary") _refreshSummaryWorkspace();
 }
 
 function _ownerAvatarHsl(name) {
@@ -1404,6 +1460,115 @@ function _refreshMobileCognition() {
     </div>
     <div class="bme-cog-chip-label" style="margin-bottom:6px">认知角色 (${owners.length})</div>
     <div style="display:flex;flex-direction:column;gap:6px">${ownerCards || '<div class="bme-cog-monitor-empty">暂无</div>'}</div>
+  `;
+}
+
+function _formatSummaryEntryCard(entry = {}) {
+  const messageRange = Array.isArray(entry?.messageRange) ? entry.messageRange : ["?", "?"];
+  const extractionRange = Array.isArray(entry?.extractionRange)
+    ? entry.extractionRange
+    : ["?", "?"];
+  const spanLabel = describeStoryTimeSpan(entry?.storyTimeSpan);
+  const meta = [
+    `L${Math.max(0, Number(entry?.level || 0))}`,
+    String(entry?.kind || "small"),
+    `提取 ${extractionRange[0]} ~ ${extractionRange[1]}`,
+    `楼 ${messageRange[0]} ~ ${messageRange[1]}`,
+  ].join(" · ");
+  const hintLine = [
+    Array.isArray(entry?.regionHints) && entry.regionHints.length
+      ? `地区: ${entry.regionHints.join(" / ")}`
+      : "",
+    Array.isArray(entry?.ownerHints) && entry.ownerHints.length
+      ? `角色: ${entry.ownerHints.join(" / ")}`
+      : "",
+    spanLabel ? `时间: ${spanLabel}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `
+    <div class="bme-cog-monitor-entry is-success" style="border-left-color:var(--bme-primary)">
+      <span class="bme-cog-monitor-badge">${_escHtml(`L${Math.max(0, Number(entry?.level || 0))}`)}</span>
+      <span class="bme-cog-monitor-info">${_escHtml(meta)}</span>
+      <span class="bme-cog-monitor-duration">${_escHtml(String(entry?.kind || ""))}</span>
+      <div class="bme-ai-monitor-entry__summary" style="grid-column:1/-1;margin-top:6px">
+        ${_escHtml(String(entry?.text || ""))}
+      </div>
+      ${
+        hintLine
+          ? `<div class="bme-config-help" style="grid-column:1/-1;margin-top:4px">${_escHtml(hintLine)}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function _refreshSummaryWorkspace() {
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  const workspace = document.getElementById("bme-summary-workspace");
+  if (!workspace) return;
+
+  if (!graph || !_canRenderGraphData(loadInfo)) {
+    workspace.innerHTML = `
+      <div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo?.loadState))}</div>
+    `;
+    return;
+  }
+
+  const activeEntries = getActiveSummaryEntries(graph);
+  const foldedEntries = getSummaryEntriesByStatus(graph, "folded")
+    .sort(compareSummaryEntriesForDisplay)
+    .slice(-12)
+    .reverse();
+  const summaryState = graph?.summaryState || {};
+  const historyState = graph?.historyState || {};
+  const debugText = [
+    `最近已总结提取计数: ${Number(summaryState.lastSummarizedExtractionCount || 0)}`,
+    `最近已总结 assistant 楼层: ${Number(summaryState.lastSummarizedAssistantFloor || -1)}`,
+    `当前 extractionCount: ${Number(historyState.extractionCount || 0)}`,
+  ].join(" · ");
+
+  workspace.innerHTML = `
+    <div class="bme-cog-status-strip" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px">
+      <div class="bme-cog-status-card">
+        <div class="bme-cog-status-card__label">活跃前沿</div>
+        <div class="bme-cog-status-card__value">${activeEntries.length}</div>
+      </div>
+      <div class="bme-cog-status-card">
+        <div class="bme-cog-status-card__label">折叠历史</div>
+        <div class="bme-cog-status-card__value">${getSummaryEntriesByStatus(graph, "folded").length}</div>
+      </div>
+      <div class="bme-cog-status-card">
+        <div class="bme-cog-status-card__label">summaryState</div>
+        <div class="bme-cog-status-card__value">${summaryState.enabled === false ? "off" : "on"}</div>
+      </div>
+    </div>
+
+    <div class="bme-task-toolbar-row" style="margin-bottom:12px">
+      <div class="bme-task-toolbar-inline">
+        <button class="bme-config-secondary-btn" id="bme-summary-generate" type="button">立即生成小总结</button>
+        <button class="bme-config-secondary-btn" id="bme-summary-rollup" type="button">立即执行折叠</button>
+        <button class="bme-config-secondary-btn" id="bme-summary-rebuild" type="button">重建总结状态</button>
+        <button class="bme-config-secondary-btn bme-task-btn-danger" id="bme-summary-clear" type="button">清空总结状态</button>
+      </div>
+    </div>
+
+    <div class="bme-config-help" style="margin-bottom:12px">${_escHtml(debugText)}</div>
+
+    <div class="bme-cog-section-title"><i class="fa-solid fa-layer-group"></i> 活跃总结前沿</div>
+    <div class="bme-cog-monitor-mini" style="margin-bottom:14px">
+      ${activeEntries.length > 0
+        ? activeEntries.map((entry) => _formatSummaryEntryCard(entry)).join("")
+        : '<div class="bme-cog-monitor-empty">当前还没有活跃总结前沿。</div>'}
+    </div>
+
+    <div class="bme-cog-section-title"><i class="fa-solid fa-box-archive"></i> 折叠历史</div>
+    <div class="bme-cog-monitor-mini">
+      ${foldedEntries.length > 0
+        ? foldedEntries.map((entry) => _formatSummaryEntryCard(entry)).join("")
+        : '<div class="bme-cog-monitor-empty">当前还没有折叠历史。</div>'}
+    </div>
   `;
 }
 
@@ -2568,6 +2733,11 @@ function _refreshGraph() {
   const hints = { userPovAliases: _hostUserPovAliasHintsForGraph() };
   graphRenderer?.loadGraph(graph, hints);
   mobileGraphRenderer?.loadGraph(graph, hints);
+  if (currentGraphView === "cognition") {
+    _refreshCognitionWorkspace();
+  } else if (currentGraphView === "summary") {
+    _refreshSummaryWorkspace();
+  }
 }
 
 function _buildLegend() {
@@ -3290,6 +3460,9 @@ function _bindActions() {
     "bme-act-compress": "compress",
     "bme-act-sleep": "sleep",
     "bme-act-synopsis": "synopsis",
+    "bme-act-summary-rollup": "summaryRollup",
+    "bme-act-summary-rebuild": "rebuildSummaryState",
+    "bme-act-summary-clear": "clearSummaryState",
     "bme-act-export": "export",
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
@@ -3309,7 +3482,10 @@ function _bindActions() {
     extract: "手动提取",
     compress: "手动压缩",
     sleep: "执行遗忘",
-    synopsis: "更新概要",
+    synopsis: "生成小总结",
+    summaryRollup: "执行总结折叠",
+    rebuildSummaryState: "重建总结状态",
+    clearSummaryState: "清空总结状态",
     export: "导出图谱",
     import: "导入图谱",
     rebuild: "重建图谱",
@@ -3612,6 +3788,37 @@ function _bindActions() {
       _refreshCognitionWorkspace();
     }
   });
+
+  document.getElementById("bme-summary-workspace")?.addEventListener("click", async (e) => {
+    const generateBtn = e.target.closest("#bme-summary-generate");
+    const rollupBtn = e.target.closest("#bme-summary-rollup");
+    const rebuildBtn = e.target.closest("#bme-summary-rebuild");
+    const clearBtn = e.target.closest("#bme-summary-clear");
+    const actionMap = new Map([
+      [generateBtn, "synopsis"],
+      [rollupBtn, "summaryRollup"],
+      [rebuildBtn, "rebuildSummaryState"],
+      [clearBtn, "clearSummaryState"],
+    ]);
+    const matched = [...actionMap.entries()].find(([element]) => Boolean(element));
+    if (!matched) return;
+
+    const [, actionKey] = matched;
+    const handler = _actionHandlers[actionKey];
+    if (!handler) return;
+
+    try {
+      await handler();
+      _refreshDashboard();
+      _refreshGraph();
+      _refreshSummaryWorkspace();
+      _refreshMemoryBrowser();
+      void _refreshInjectionPreview();
+    } catch (error) {
+      console.error(`[ST-BME] summary workspace action failed: ${actionKey}`, error);
+      toastr.error(String(error?.message || error || "操作失败"), "ST-BME");
+    }
+  });
 }
 
 function _refreshConfigTab() {
@@ -3723,7 +3930,7 @@ function _refreshConfigTab() {
   );
   _setCheckboxValue(
     "bme-setting-synopsis-enabled",
-    settings.enableSynopsis ?? true,
+    settings.enableHierarchicalSummary ?? settings.enableSynopsis ?? true,
   );
   _setCheckboxValue(
     "bme-setting-visibility-enabled",
@@ -3899,7 +4106,10 @@ function _refreshConfigTab() {
     "bme-setting-consolidation-threshold",
     settings.consolidationThreshold ?? 0.85,
   );
-  _setInputValue("bme-setting-synopsis-every", settings.synopsisEveryN ?? 5);
+  _setInputValue(
+    "bme-setting-synopsis-every",
+    settings.smallSummaryEveryNExtractions ?? settings.synopsisEveryN ?? 3,
+  );
   _setInputValue(
     "bme-setting-trigger-patterns",
     settings.triggerPatterns || "",
@@ -4103,7 +4313,10 @@ function _bindConfigControls() {
     _refreshGuardedConfigStates();
   });
   bindCheckbox("bme-setting-synopsis-enabled", (checked) => {
-    _patchSettings({ enableSynopsis: checked });
+    _patchSettings({
+      enableHierarchicalSummary: checked,
+      enableSynopsis: checked,
+    });
     _refreshGuardedConfigStates();
   });
   bindCheckbox("bme-setting-visibility-enabled", (checked) =>
@@ -4337,8 +4550,11 @@ function _bindConfigControls() {
   bindFloat("bme-setting-consolidation-threshold", 0.85, 0.5, 0.99, (value) =>
     _patchSettings({ consolidationThreshold: value }),
   );
-  bindNumber("bme-setting-synopsis-every", 5, 1, 100, (value) =>
-    _patchSettings({ synopsisEveryN: value }),
+  bindNumber("bme-setting-synopsis-every", 3, 1, 100, (value) =>
+    _patchSettings({
+      smallSummaryEveryNExtractions: value,
+      synopsisEveryN: value,
+    }),
   );
   bindText("bme-setting-trigger-patterns", (value) =>
     _patchSettings({ triggerPatterns: value }),
@@ -4984,6 +5200,11 @@ function _handleTaskProfileWorkspaceInput(event) {
     return;
   }
 
+  if (target.matches("[data-input-key]")) {
+    _persistTaskInputField(target, false);
+    return;
+  }
+
   if (
     target.matches("[data-regex-rule-field]") ||
     target.matches("[data-regex-rule-source]") ||
@@ -5022,6 +5243,11 @@ function _handleTaskProfileWorkspaceChange(event) {
 
   if (target.matches("[data-generation-key]")) {
     _persistGenerationField(target, true);
+    return;
+  }
+
+  if (target.matches("[data-input-key]")) {
+    _persistTaskInputField(target, true);
     return;
   }
 
@@ -5309,7 +5535,8 @@ function _getMonitorTaskTypeLabel(taskType = "") {
     recall: "召回",
     consolidation: "整合",
     compress: "压缩",
-    synopsis: "概要",
+    synopsis: "小总结",
+    summary_rollup: "总结折叠",
     reflection: "反思",
     sleep: "遗忘",
     evolve: "进化",
@@ -6191,6 +6418,7 @@ function _renderTaskPromptTab(state) {
 }
 
 function _renderTaskGenerationTab(state) {
+  const inputGroups = TASK_PROFILE_INPUT_GROUPS[state.taskType] || [];
   return `
     <div class="bme-task-tab-body">
       ${TASK_PROFILE_GENERATION_GROUPS.map(
@@ -6218,6 +6446,32 @@ function _renderTaskGenerationTab(state) {
           </div>
         `,
       ).join("")}
+      ${inputGroups
+        .map(
+          (group) => `
+            <div class="bme-config-card">
+              <div class="bme-config-card-head">
+                <div>
+                  <div class="bme-config-card-title">${_escHtml(group.title)}</div>
+                  <div class="bme-config-card-subtitle">
+                    这里配置任务自带的输入收集规则，不跟随全局提取上下文。
+                  </div>
+                </div>
+              </div>
+              <div class="bme-task-field-grid">
+                ${group.fields
+                  .map((field) =>
+                    _renderTaskInputField(
+                      field,
+                      state.profile.input?.[field.key],
+                    ),
+                  )
+                  .join("")}
+              </div>
+            </div>
+          `,
+        )
+        .join("")}
       <div class="bme-task-note">
         <strong>运行时说明</strong> — 这里配置的是完整版 generation options。实际请求发送前，仍会根据模型能力做过滤，避免把不支持的字段直接下发给 provider。
       </div>
@@ -7792,6 +8046,22 @@ function _persistGenerationField(target, refresh) {
   );
 }
 
+function _persistTaskInputField(target, refresh) {
+  const key = target.dataset.inputKey;
+  const valueType = target.dataset.valueType || "text";
+  if (!key) return;
+
+  _updateCurrentTaskProfile(
+    (draft) => {
+      draft.input = {
+        ...(draft.input || {}),
+        [key]: _parseTaskWorkspaceValue(target, valueType),
+      };
+    },
+    { refresh },
+  );
+}
+
 function _persistRegexConfigField(target, refresh) {
   const key = target.dataset.regexField;
   if (!key) return;
@@ -8199,6 +8469,49 @@ function _mergeProfileRegexRulesIntoGlobal(
     ...merged,
     globalTaskRegex: _normalizeGlobalRegexDraft(merged.globalTaskRegex || {}),
   };
+}
+
+function _renderTaskInputField(field, value) {
+  const effectiveValue = value != null && value !== "" ? value : field.defaultValue;
+
+  if (field.type === "enum") {
+    return `
+      <div class="bme-config-row">
+        <label>${_escHtml(field.label)}</label>
+        <select
+          class="bme-config-input"
+          data-input-key="${_escAttr(field.key)}"
+          data-value-type="text"
+        >
+          ${(field.options || [])
+            .map(
+              (item) => `
+                <option value="${_escAttr(item.value)}" ${item.value === String(effectiveValue ?? "") ? "selected" : ""}>
+                  ${_escHtml(item.label)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+        ${field.help ? `<div class="bme-config-help">${_escHtml(field.help)}</div>` : ""}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="bme-config-row">
+      <label>${_escHtml(field.label)}</label>
+      <input
+        class="bme-config-input"
+        type="number"
+        min="0"
+        value="${_escAttr(effectiveValue ?? "")}"
+        data-input-key="${_escAttr(field.key)}"
+        data-value-type="number"
+      />
+      ${field.help ? `<div class="bme-config-help">${_escHtml(field.help)}</div>` : ""}
+    </div>
+  `;
 }
 
 function _patchGlobalTaskRegex(globalTaskRegex, options = {}) {
