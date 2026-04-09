@@ -280,6 +280,7 @@ let currentConfigSectionId = "toggles";
 let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
+let currentTaskProfileDragBlockId = "";
 let currentTaskProfileRuleId = "";
 let showGlobalRegexPanel = false;
 let currentGlobalRegexRuleId = "";
@@ -4998,6 +4999,67 @@ function _bindTaskProfileWorkspace() {
     workspace.addEventListener("change", (event) => {
       _handleTaskProfileWorkspaceChange(event);
     });
+    workspace.addEventListener("dragstart", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const handle = target.closest(".bme-task-drag-handle");
+      const row = target.closest(".bme-task-block-row");
+      if (!handle || !(row instanceof HTMLElement)) return;
+      const blockId = String(row.dataset.blockId || "").trim();
+      if (!blockId) return;
+      currentTaskProfileDragBlockId = blockId;
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.dropEffect = "move";
+        event.dataTransfer.setData("text/plain", blockId);
+      }
+      window.requestAnimationFrame(() => {
+        row.classList.add("dragging");
+      });
+    });
+    workspace.addEventListener("dragover", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !currentTaskProfileDragBlockId) return;
+      const row = target.closest(".bme-task-block-row");
+      if (!(row instanceof HTMLElement)) return;
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "move";
+      }
+      const position = _getTaskBlockDropPosition(row, event.clientY);
+      _setTaskBlockDragIndicator(workspace, row, position);
+    });
+    workspace.addEventListener("dragleave", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".bme-task-block-row");
+      if (!(row instanceof HTMLElement)) return;
+      const relatedTarget = event.relatedTarget;
+      if (relatedTarget instanceof Node && row.contains(relatedTarget)) {
+        return;
+      }
+      row.classList.remove("drag-over-top", "drag-over-bottom");
+    });
+    workspace.addEventListener("drop", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const row = target.closest(".bme-task-block-row");
+      if (!(row instanceof HTMLElement)) return;
+      event.preventDefault();
+      const sourceId =
+        currentTaskProfileDragBlockId ||
+        String(event.dataTransfer?.getData("text/plain") || "").trim();
+      const targetId = String(row.dataset.blockId || "").trim();
+      const position = _getTaskBlockDropPosition(row, event.clientY);
+      _clearTaskBlockDragIndicators(workspace);
+      currentTaskProfileDragBlockId = "";
+      if (!sourceId || !targetId || sourceId === targetId) return;
+      _reorderTaskBlocks(sourceId, targetId, position);
+    });
+    workspace.addEventListener("dragend", () => {
+      currentTaskProfileDragBlockId = "";
+      _clearTaskBlockDragIndicators(workspace);
+    });
     workspace.dataset.bmeBound = "true";
   }
 
@@ -5327,7 +5389,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     ? profile.regex.localRules
     : [];
 
-  if (!blocks.some((block) => block.id === currentTaskProfileBlockId)) {
+  if (currentTaskProfileBlockId && !blocks.some((block) => block.id === currentTaskProfileBlockId)) {
     currentTaskProfileBlockId = blocks[0]?.id || "";
   }
   if (!regexRules.some((rule) => rule.id === currentTaskProfileRuleId)) {
@@ -6035,6 +6097,21 @@ async function _handleTaskProfileWorkspaceClick(event) {
       currentTaskProfileBlockId = actionEl.dataset.blockId || "";
       _refreshTaskProfileWorkspace();
       return;
+    case "toggle-block-expand": {
+      // Ignore if the click originated from a toggle switch, delete button, or drag handle
+      const originEl = event.target;
+      if (originEl.closest(".bme-task-row-toggle") || originEl.closest(".bme-task-row-btn-danger") || originEl.closest(".bme-task-drag-handle")) {
+        return;
+      }
+      const blockId = actionEl.dataset.blockId || "";
+      if (currentTaskProfileBlockId === blockId) {
+        currentTaskProfileBlockId = "";
+      } else {
+        currentTaskProfileBlockId = blockId;
+      }
+      _refreshTaskProfileWorkspace();
+      return;
+    }
     case "select-regex-rule":
       if (_isGlobalRegexPanelTarget(actionEl)) {
         currentGlobalRegexRuleId = actionEl.dataset.ruleId || "";
@@ -6083,6 +6160,16 @@ async function _handleTaskProfileWorkspaceClick(event) {
         block.enabled = block.enabled === false;
         draft.blocks = _normalizeTaskBlocks(blocks);
         return { selectBlockId: block.id };
+      });
+      return;
+    case "toggle-block-enabled-cb":
+      _updateCurrentTaskProfile((draft) => {
+        const blocks = _sortTaskBlocks(draft.blocks);
+        const block = blocks.find((item) => item.id === actionEl.dataset.blockId);
+        if (!block) return null;
+        block.enabled = actionEl.checked;
+        draft.blocks = _normalizeTaskBlocks(blocks);
+        return { selectBlockId: currentTaskProfileBlockId };
       });
       return;
     case "delete-block":
@@ -6365,57 +6452,40 @@ function _renderTaskProfileWorkspace(state) {
 }
 function _renderTaskPromptTab(state) {
   return `
-    <div class="bme-task-editor-grid">
-      <div class="bme-config-card">
-        <div class="bme-config-card-head">
-          <div>
-            <div class="bme-config-card-title">Prompt 块列表</div>
-            <div class="bme-config-card-subtitle">
-              通过顺序、启停与角色控制最终请求的编排方式。
+    <div class="bme-task-toolbar-row">
+      <div class="bme-task-toolbar-inline">
+        <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
+          + 自定义块
+        </button>
+        <span class="bme-task-action-sep"></span>
+        <select id="bme-task-builtin-select" class="bme-config-input bme-task-builtin-select">
+          ${state.builtinBlockDefinitions
+            .map(
+              (item) => `
+                <option value="${_escAttr(item.sourceKey)}">
+                  ${_escHtml(item.name)}
+                </option>
+              `,
+            )
+            .join("")}
+        </select>
+        <button class="bme-config-secondary-btn" data-task-action="add-builtin-block" type="button">
+          + 内置块
+        </button>
+      </div>
+      <span class="bme-task-block-count">${state.blocks.length} 个块</span>
+    </div>
+
+    <div class="bme-task-block-rows">
+      ${state.blocks.length
+        ? state.blocks
+            .map((block, index) => _renderTaskBlockRow(block, index, state))
+            .join("")
+        : `
+            <div class="bme-task-empty">
+              当前预设还没有块。可以先新增一个自定义块或内置块。
             </div>
-          </div>
-        </div>
-
-        <div class="bme-task-toolbar-row">
-          <div class="bme-task-toolbar-inline">
-            <button class="bme-config-secondary-btn" data-task-action="add-custom-block" type="button">
-              + 自定义块
-            </button>
-            <span class="bme-task-action-sep"></span>
-            <select id="bme-task-builtin-select" class="bme-config-input bme-task-builtin-select">
-              ${state.builtinBlockDefinitions
-                .map(
-                  (item) => `
-                    <option value="${_escAttr(item.sourceKey)}">
-                      ${_escHtml(item.name)}
-                    </option>
-                  `,
-                )
-                .join("")}
-            </select>
-            <button class="bme-config-secondary-btn" data-task-action="add-builtin-block" type="button">
-              + 内置块
-            </button>
-          </div>
-          <span class="bme-task-block-count">${state.blocks.length} 个块</span>
-        </div>
-
-        <div class="bme-task-list">
-          ${state.blocks.length
-            ? state.blocks
-                .map((block, index) => _renderTaskBlockListItem(block, index, state))
-                .join("")
-            : `
-                <div class="bme-task-empty">
-                  当前预设还没有块。可以先新增一个自定义块或内置块。
-                </div>
-              `}
-        </div>
-      </div>
-
-      <div class="bme-config-card">
-        ${_renderTaskBlockEditor(state)}
-      </div>
+          `}
     </div>
   `;
 }
@@ -7388,73 +7458,93 @@ function _stringifyDebugValue(value) {
   }
 }
 
-function _renderTaskBlockListItem(block, index, state) {
-  const isSelected = block.id === state.selectedBlock?.id;
+function _getBlockTypeIcon(type) {
+  switch (type) {
+    case "builtin": return `<i class="fa-solid fa-thumbtack"></i>`;
+    case "legacyPrompt": return `<i class="fa-solid fa-scroll"></i>`;
+    default: return `<i class="fa-regular fa-file-lines"></i>`;
+  }
+}
+
+function _getInjectModeLabel(mode) {
+  switch (mode) {
+    case "append": return "追加";
+    case "relative":
+    default: return "相对";
+  }
+}
+
+function _renderTaskBlockRow(block, index, state) {
+  const isExpanded = block.id === state.selectedBlock?.id;
+  const roleClass = `bme-badge-role-${block.role || "system"}`;
+  const disabledClass = block.enabled ? "" : "is-disabled";
+  const expandedClass = isExpanded ? "is-expanded" : "";
+
   return `
-    <div class="bme-task-list-entry">
-      <button
-        class="bme-task-list-item ${isSelected ? "active" : ""}"
-        data-task-action="select-block"
-        data-block-id="${_escAttr(block.id)}"
-        type="button"
-      >
-        <span class="bme-task-list-index">#${index + 1}</span>
-        <span class="bme-task-list-copy">
-          <span class="bme-task-list-title">
-            ${_escHtml(block.name || _getTaskBlockTypeLabel(block.type))}
-          </span>
-          <span class="bme-task-list-meta">
-            ${_escHtml(_getTaskBlockTypeLabel(block.type))} · ${_escHtml(block.role || "system")} · ${block.enabled ? "启用" : "停用"}
-          </span>
+    <div
+      class="bme-task-block-row ${disabledClass} ${expandedClass}"
+      data-block-id="${_escAttr(block.id)}"
+    >
+      <div class="bme-task-block-row-header" data-task-action="toggle-block-expand" data-block-id="${_escAttr(block.id)}">
+        <span
+          class="bme-task-drag-handle"
+          title="拖拽排序"
+          aria-label="拖拽排序"
+          draggable="true"
+        >
+          <i class="fa-solid fa-grip-vertical"></i>
         </span>
-      </button>
-      <div class="bme-task-inline-actions">
+        <span class="bme-task-block-icon">
+          ${_getBlockTypeIcon(block.type)}
+        </span>
+        <span class="bme-task-block-name">
+          ${_escHtml(block.name || _getTaskBlockTypeLabel(block.type))}
+        </span>
+        <span class="bme-task-block-badge ${roleClass}">
+          ${_escHtml(block.role || "system")}
+        </span>
+        <span class="bme-task-block-badge">
+          ${_escHtml(_getInjectModeLabel(block.injectionMode))}
+        </span>
+        <span class="bme-task-block-row-spacer"></span>
         <button
-          class="bme-config-secondary-btn bme-task-mini-btn"
-          data-task-action="move-block-up"
+          class="bme-task-row-btn"
+          data-task-action="toggle-block-expand"
           data-block-id="${_escAttr(block.id)}"
           type="button"
+          title="编辑"
         >
-          上移
+          <i class="fa-solid fa-pen"></i>
         </button>
         <button
-          class="bme-config-secondary-btn bme-task-mini-btn"
-          data-task-action="move-block-down"
-          data-block-id="${_escAttr(block.id)}"
-          type="button"
-        >
-          下移
-        </button>
-        <button
-          class="bme-config-secondary-btn bme-task-mini-btn"
-          data-task-action="toggle-block-enabled"
-          data-block-id="${_escAttr(block.id)}"
-          type="button"
-        >
-          ${block.enabled ? "停用" : "启用"}
-        </button>
-        <button
-          class="bme-config-secondary-btn bme-task-mini-btn"
+          class="bme-task-row-btn bme-task-row-btn-danger"
           data-task-action="delete-block"
           data-block-id="${_escAttr(block.id)}"
           type="button"
+          title="删除"
         >
-          删除
+          <i class="fa-solid fa-xmark"></i>
         </button>
+        <label class="bme-task-row-toggle" title="${block.enabled ? "已启用" : "已停用"}">
+          <input
+            type="checkbox"
+            data-task-action="toggle-block-enabled-cb"
+            data-block-id="${_escAttr(block.id)}"
+            ${block.enabled ? "checked" : ""}
+          />
+          <span class="bme-task-row-toggle-slider"></span>
+        </label>
       </div>
+      ${isExpanded ? `
+        <div class="bme-task-block-expand">
+          ${_renderTaskBlockInlineEditor(block, state)}
+        </div>
+      ` : ""}
     </div>
   `;
 }
 
-function _renderTaskBlockEditor(state) {
-  const block = state.selectedBlock;
-  if (!block) {
-    return `
-      <div class="bme-config-card-title">块详情</div>
-      <div class="bme-config-help">从左侧列表选择一个块进行编辑。</div>
-    `;
-  }
-
+function _renderTaskBlockInlineEditor(block, state) {
   const builtinOptions = state.builtinBlockDefinitions
     .map(
       (item) => `
@@ -7474,31 +7564,18 @@ function _renderTaskBlockEditor(state) {
       : block.content || "";
 
   return `
-    <div class="bme-config-card-head">
-      <div>
-        <div class="bme-config-card-title">块详情</div>
-        <div class="bme-config-card-subtitle">
-          当前块会直接写回到任务预设中。
-        </div>
-      </div>
-      <span class="bme-task-pill">${_escHtml(_getTaskBlockTypeLabel(block.type))}</span>
-      ${block.type === "builtin" ? _helpTip(
-        (state.builtinBlockDefinitions.find((d) => d.sourceKey === block.sourceKey) || {}).description || ""
-      ) : ""}
-    </div>
-
     <div class="bme-config-row">
       <label>块名称</label>
-        <input
-          class="bme-config-input"
-          type="text"
-          data-block-field="name"
-          value="${_escAttr(block.name || "")}"
-          placeholder="用于工作区显示"
-        />
+      <input
+        class="bme-config-input"
+        type="text"
+        data-block-field="name"
+        value="${_escAttr(block.name || "")}"
+        placeholder="用于工作区显示"
+      />
     </div>
 
-    <div class="bme-task-field-grid">
+    <div class="bme-task-expand-row2">
       <div class="bme-config-row">
         <label>角色</label>
         <select class="bme-config-input" data-block-field="role">
@@ -7528,18 +7605,6 @@ function _renderTaskBlockEditor(state) {
       </div>
     </div>
 
-    <label class="bme-toggle-item bme-task-editor-toggle">
-      <span class="bme-toggle-copy">
-        <span class="bme-toggle-title">启用此块</span>
-        <span class="bme-toggle-desc">停用后会从最终 prompt 编排中跳过。</span>
-      </span>
-      <input
-        type="checkbox"
-        data-block-field="enabled"
-        ${block.enabled ? "checked" : ""}
-      />
-    </label>
-
     ${
       block.type === "builtin"
         ? (() => {
@@ -7552,18 +7617,17 @@ function _renderTaskBlockEditor(state) {
             const externalLabel = externalSourceMap[block.sourceKey];
             return `
             <div class="bme-config-row">
-              <label>内置来源${_helpTip("运行时自动从任务上下文注入的数据。不同任务类型使用不同来源。")}</label>
+              <label>内置来源${_helpTip("运行时自动从任务上下文注入的数据。")}</label>
               <select class="bme-config-input" data-block-field="sourceKey">
                 ${builtinOptions}
               </select>
             </div>
             ${externalLabel
-              ? `<div class="bme-task-note" style="text-align:center;padding:1rem;opacity:0.7;">
-                   此提示词的内容是从其他地方提取的，无法在此处进行编辑。<br/>
-                   来源：<strong>${externalLabel}</strong>
+              ? `<div class="bme-task-note" style="text-align:center;padding:0.75rem;opacity:0.7;">
+                   内容来源：<strong>${externalLabel}</strong>，无法在此编辑。
                  </div>`
               : `<div class="bme-config-row">
-                   <label>覆盖内容（可选）${_helpTip("留空时自动从 sourceKey 对应的上下文数据读取。填写后将覆盖自动注入的内容。")}</label>
+                   <label>覆盖内容（可选）${_helpTip("留空时自动从 sourceKey 对应的上下文数据读取。")}</label>
                    <textarea
                      class="bme-config-textarea"
                      data-block-field="content"
@@ -7579,12 +7643,7 @@ function _renderTaskBlockEditor(state) {
               </div>
               <div class="bme-config-row">
                 <label>兼容字段</label>
-                <input
-                  class="bme-config-input"
-                  type="text"
-                  value="${_escAttr(legacyField || block.sourceField || "")}"
-                  readonly
-                />
+                <input class="bme-config-input" type="text" value="${_escAttr(legacyField || block.sourceField || "")}" readonly />
               </div>
               <div class="bme-config-row">
                 <label>兼容 prompt 内容</label>
@@ -7606,6 +7665,12 @@ function _renderTaskBlockEditor(state) {
               </div>
             `
     }
+
+    <div class="bme-task-expand-footer">
+      <button class="bme-config-secondary-btn" data-task-action="toggle-block-expand" data-block-id="${_escAttr(block.id)}" type="button">
+        <i class="fa-solid fa-chevron-up"></i> 收起
+      </button>
+    </div>
   `;
 }
 
@@ -7956,6 +8021,57 @@ function _moveTaskBlock(blockId, direction) {
     // 直接重新编号，不要再 sort（否则会按旧 order 排回去）
     draft.blocks = blocks.map((block, i) => ({ ...block, order: i }));
     return { selectBlockId: blockId };
+  });
+}
+
+function _getTaskBlockDropPosition(row, clientY) {
+  const rect = row.getBoundingClientRect();
+  return clientY < rect.top + rect.height / 2 ? "before" : "after";
+}
+
+function _clearTaskBlockDragIndicators(workspace = document) {
+  workspace
+    .querySelectorAll(".bme-task-block-row.dragging, .bme-task-block-row.drag-over-top, .bme-task-block-row.drag-over-bottom")
+    .forEach((row) => {
+      row.classList.remove("dragging", "drag-over-top", "drag-over-bottom");
+    });
+}
+
+function _setTaskBlockDragIndicator(workspace, activeRow, position) {
+  workspace.querySelectorAll(".bme-task-block-row").forEach((row) => {
+    if (row !== activeRow) {
+      row.classList.remove("drag-over-top", "drag-over-bottom");
+      return;
+    }
+    row.classList.toggle("drag-over-top", position === "before");
+    row.classList.toggle("drag-over-bottom", position === "after");
+  });
+}
+
+function _reorderTaskBlocks(sourceBlockId, targetBlockId, position = "before") {
+  if (!sourceBlockId || !targetBlockId || sourceBlockId === targetBlockId) return;
+  _updateCurrentTaskProfile((draft) => {
+    const blocks = _sortTaskBlocks(draft.blocks);
+    const sourceIndex = blocks.findIndex((item) => item.id === sourceBlockId);
+    const targetIndex = blocks.findIndex((item) => item.id === targetBlockId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      return null;
+    }
+
+    const [sourceBlock] = blocks.splice(sourceIndex, 1);
+    let insertIndex = targetIndex;
+
+    if (sourceIndex < targetIndex) {
+      insertIndex -= 1;
+    }
+    if (position === "after") {
+      insertIndex += 1;
+    }
+
+    insertIndex = Math.max(0, Math.min(blocks.length, insertIndex));
+    blocks.splice(insertIndex, 0, sourceBlock);
+    draft.blocks = blocks.map((block, index) => ({ ...block, order: index }));
+    return { selectBlockId: sourceBlockId };
   });
 }
 
