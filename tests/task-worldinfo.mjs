@@ -265,7 +265,7 @@ const bonusEntry = createWorldbookEntry({
   order: 10,
 });
 
-const bonusMvuEntry = createWorldbookEntry({
+  const bonusMvuEntry = createWorldbookEntry({
   uid: 102,
   name: "Bonus MVU",
   comment: "Bonus MVU",
@@ -273,8 +273,8 @@ const bonusMvuEntry = createWorldbookEntry({
   order: 20,
 });
 
-const worldbooksByName = {
-  "main-book": [
+  const worldbooksByName = {
+    "main-book": [
     constantEntry,
     dynEntry,
     inlineSummaryEntry,
@@ -293,9 +293,9 @@ const worldbooksByName = {
     atDepthEntry,
     mvuTaggedEntry,
     mvuHeuristicEntry,
-  ],
-  "bonus-book": [bonusEntry, bonusMvuEntry],
-};
+    ],
+    "bonus-book": [bonusEntry, bonusMvuEntry],
+  };
 
 try {
   globalThis.SillyTavern = {
@@ -663,7 +663,11 @@ try {
   );
   assert.deepEqual(
     promptBuild.privateTaskMessages.map((message) => message.role),
-    ["user", "system"],
+    ["system", "user"],
+  );
+  assert.equal(
+    promptBuild.privateTaskMessages[0].content,
+    "这是一条 atDepth 消息。",
   );
   assert.deepEqual(
     promptBuild.hostInjections.before.map((entry) => entry.name),
@@ -703,7 +707,11 @@ try {
   assert.equal(promptBuild.executionMessages.length, 4);
   assert.deepEqual(
     promptBuild.executionMessages.map((message) => message.role),
-    ["system", "system", "user", "system"],
+    ["system", "system", "system", "user"],
+  );
+  assert.equal(
+    promptBuild.executionMessages[0].content,
+    "这是一条 atDepth 消息。",
   );
   assert.deepEqual(
     promptBuild.renderedBlocks.map((block) => block.delivery),
@@ -845,8 +853,106 @@ try {
   );
   assert.deepEqual(
     atDepthOnlyPromptBuild.executionMessages.map((message) => message.role),
-    ["user", "system"],
+    ["system", "user"],
   );
+  assert.equal(
+    atDepthOnlyPromptBuild.executionMessages[0].content,
+    "这是一条 atDepth 消息。",
+  );
+
+  const depthD4Entry = createWorldbookEntry({
+    uid: 201,
+    name: "深度注入 D4",
+    comment: "深度注入 D4",
+    content: "这是 d4 atDepth 消息。",
+    positionType: "at_depth_as_system",
+    depth: 4,
+    order: 8,
+  });
+  const depthD1Entry = createWorldbookEntry({
+    uid: 202,
+    name: "深度注入 D1",
+    comment: "深度注入 D1",
+    content: "这是 d1 atDepth 消息。",
+    positionType: "at_depth_as_system",
+    depth: 1,
+    order: 3,
+  });
+  worldbooksByName["main-book"].push(depthD4Entry, depthD1Entry);
+  const previousGetContext = globalThis.SillyTavern.getContext;
+  globalThis.SillyTavern.getContext = () => ({
+    ...previousGetContext(),
+    chatId: "depth-aware-chat",
+  });
+
+  const depthAwareSettings = {
+    taskProfiles: {
+      recall: {
+        activeProfileId: "depth-aware",
+        profiles: [
+          {
+            id: "depth-aware",
+            name: "深度顺序预设",
+            taskType: "recall",
+            builtin: false,
+            blocks: [
+              {
+                id: "depth-recent",
+                type: "builtin",
+                sourceKey: "recentMessages",
+                role: "system",
+                enabled: true,
+                order: 0,
+                injectionMode: "append",
+              },
+              {
+                id: "depth-user",
+                type: "custom",
+                content: "用户问题：{{userMessage}}",
+                role: "user",
+                enabled: true,
+                order: 1,
+                injectionMode: "append",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+
+  const depthAwarePromptBuild = await buildTaskPrompt(depthAwareSettings, "recall", {
+    taskName: "recall",
+    userMessage: "继续调查 depth 排序",
+    recentMessages: "这里会被 chatMessages 替换",
+    chatMessages: [
+      { seq: 11, role: "user", content: "第一句" },
+      { seq: 12, role: "assistant", content: "第二句" },
+    ],
+    charName: "Alice",
+  });
+
+  assert.deepEqual(
+    depthAwarePromptBuild.executionMessages.map((message) => message.content),
+    [
+      "#1 [assistant]: 这是 d4 atDepth 消息。\n\n#2 [assistant]: 这是一条 atDepth 消息。\n\n#11 [user]: 第一句\n\n#4 [assistant]: 这是 d1 atDepth 消息。\n\n#12 [assistant]: 第二句",
+      "用户问题：继续调查 depth 排序",
+    ],
+  );
+  assert.deepEqual(
+    depthAwarePromptBuild.hostInjections.atDepth.map((entry) => entry.name),
+    ["深度注入 D4", "深度注入", "深度注入 D1"],
+  );
+  assert.deepEqual(
+    depthAwarePromptBuild.hostInjectionPlan.atDepth.map((entry) => entry.entryName),
+    ["深度注入 D4", "深度注入", "深度注入 D1"],
+  );
+  assert.equal(
+    depthAwarePromptBuild.executionMessages.at(-1)?.content.includes("atDepth"),
+    false,
+  );
+  worldbooksByName["main-book"].splice(-2, 2);
+  globalThis.SillyTavern.getContext = previousGetContext;
 
   const { initializeHostAdapter } = await import("../host/adapter/index.js");
   const partialBridgeCalls = [];
