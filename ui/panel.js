@@ -6006,26 +6006,30 @@ function _renderTaskProfileWorkspace(state) {
   return `
     <div class="bme-task-shell">
       <div class="bme-task-action-bar">
-        <div class="bme-task-segmented-control">
-          ${state.taskTypeOptions
-            .map(
-              (item) => `
-                <button
-                  class="bme-task-type-btn ${item.id === state.taskType && !state.showGlobalRegex ? "active" : ""}"
-                  data-task-action="switch-task-type"
-                  data-task-type="${_escAttr(item.id)}"
-                  type="button"
-                >${_escHtml(item.label)}</button>
-              `,
-            )
-            .join("")}
-          <button
-            class="bme-task-type-btn ${state.showGlobalRegex ? "active" : ""}"
-            data-task-action="switch-global-regex"
-            type="button"
-          >
-            通用正则
-          </button>
+        <div class="bme-task-nav-groups">
+          <div class="bme-task-segmented-control">
+            ${state.taskTypeOptions
+              .map(
+                (item) => `
+                  <button
+                    class="bme-task-type-btn ${item.id === state.taskType && !state.showGlobalRegex ? "active" : ""}"
+                    data-task-action="switch-task-type"
+                    data-task-type="${_escAttr(item.id)}"
+                    type="button"
+                  >${_escHtml(item.label)}</button>
+                `,
+              )
+              .join("")}
+          </div>
+          <div class="bme-task-segmented-control bme-task-segmented-control--solo">
+            <button
+              class="bme-task-type-btn ${state.showGlobalRegex ? "active" : ""}"
+              data-task-action="switch-global-regex"
+              type="button"
+            >
+              通用正则
+            </button>
+          </div>
         </div>
         <div class="bme-task-action-bar-right">
           <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
