@@ -984,6 +984,98 @@ function _ownerAvatarHsl(name) {
   return `hsl(${hue}, 55%, 42%)`;
 }
 
+function _normalizeOwnerUiType(ownerType = "") {
+  const normalized = String(ownerType || "").trim();
+  if (normalized === "user") return "user";
+  if (normalized === "character") return "character";
+  return "";
+}
+
+function _inferOwnerTypeFromKey(ownerKey = "") {
+  const normalizedOwnerKey = String(ownerKey || "").trim().toLowerCase();
+  if (normalizedOwnerKey.startsWith("user:")) return "user";
+  if (normalizedOwnerKey.startsWith("character:")) return "character";
+  return "";
+}
+
+function _getOwnerTypeDisplayLabel(ownerType = "") {
+  const normalizedType = _normalizeOwnerUiType(ownerType);
+  if (normalizedType === "user") return "用户";
+  if (normalizedType === "character") return "角色";
+  return "Owner";
+}
+
+function _buildOwnerCollisionIndex(owners = []) {
+  const collisionIndex = new Map();
+  for (const owner of Array.isArray(owners) ? owners : []) {
+    const baseName =
+      String(owner?.ownerName || owner?.ownerKey || "未命名角色").trim() ||
+      "未命名角色";
+    const nameKey = baseName.toLocaleLowerCase("zh-Hans-CN");
+    const ownerType = _normalizeOwnerUiType(owner?.ownerType) || "unknown";
+    const entry = collisionIndex.get(nameKey) || {
+      count: 0,
+      typeCounts: new Map(),
+    };
+    entry.count += 1;
+    entry.typeCounts.set(ownerType, (entry.typeCounts.get(ownerType) || 0) + 1);
+    collisionIndex.set(nameKey, entry);
+  }
+  return collisionIndex;
+}
+
+function _shortOwnerNodeId(owner = {}) {
+  const nodeId = String(owner?.nodeId || "").trim();
+  if (!nodeId) return "";
+  return nodeId.length > 6 ? nodeId.slice(0, 6) : nodeId;
+}
+
+function _getOwnerDisplayInfo(owner = {}, collisionIndex = null) {
+  const baseName =
+    String(owner?.ownerName || owner?.ownerKey || "未命名角色").trim() ||
+    "未命名角色";
+  const ownerKey = String(owner?.ownerKey || "").trim();
+  const ownerType =
+    _normalizeOwnerUiType(owner?.ownerType) || _inferOwnerTypeFromKey(ownerKey);
+  const typeLabel = _getOwnerTypeDisplayLabel(ownerType);
+  const collisionInfo =
+    collisionIndex instanceof Map
+      ? collisionIndex.get(baseName.toLocaleLowerCase("zh-Hans-CN")) || null
+      : null;
+  const typeCounts =
+    collisionInfo?.typeCounts instanceof Map ? collisionInfo.typeCounts : new Map();
+  const totalCount = Number(collisionInfo?.count || 0);
+  const sameTypeCount = Number(typeCounts.get(ownerType || "unknown") || 0);
+  const hasCrossTypeCollision = totalCount > 1 && typeCounts.size > 1;
+  const shortNodeId = ownerType === "character" ? _shortOwnerNodeId(owner) : "";
+
+  let title = baseName;
+  if (hasCrossTypeCollision) {
+    title = `${baseName}（${typeLabel}）`;
+  } else if (sameTypeCount > 1) {
+    title =
+      ownerType === "character" && shortNodeId
+        ? `${baseName}（${typeLabel} ${shortNodeId}）`
+        : `${baseName}（${typeLabel}）`;
+  }
+
+  const subtitleParts = [typeLabel];
+  if (ownerType === "character" && shortNodeId) {
+    subtitleParts.push(`#${shortNodeId}`);
+  }
+
+  return {
+    title,
+    typeLabel,
+    subtitle: subtitleParts.join(" · "),
+    avatarText: baseName.charAt(0) || "?",
+    avatarSeed: ownerKey || `${ownerType}:${baseName}`,
+    tooltip: [title, ownerKey && ownerKey !== title ? ownerKey : ""]
+      .filter(Boolean)
+      .join(" · "),
+  };
+}
+
 // ==================== 认知视图工作区 ====================
 
 function _refreshCognitionWorkspace() {
@@ -1016,6 +1108,7 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
   const timelineState = graph?.timelineState || {};
   const { owners, activeOwnerKey, activeOwner, activeOwnerLabels } =
     _getCurrentCognitionOwnerSummary(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
   const activeRegion = String(
     historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "",
   ).trim();
@@ -1046,7 +1139,9 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
       <div class="bme-cog-status-card__value">${_escHtml(
         activeOwnerLabels.length > 0
           ? activeOwnerLabels.join(" / ")
-          : activeOwner?.ownerName || activeOwnerKey || "—",
+          : activeOwner
+            ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
+            : activeOwnerKey || "—",
       )}</div>
     </div>
     <div class="bme-cog-status-card">
@@ -1083,6 +1178,7 @@ function _renderCogOwnerList(graph, canRender) {
 
   const { owners, activeOwnerKey, activeOwnerKeys } =
     _getCurrentCognitionOwnerSummary(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
 
   if (!owners.length) {
     el.innerHTML = `<div class="bme-cog-monitor-empty">暂无认知角色</div>`;
@@ -1091,8 +1187,8 @@ function _renderCogOwnerList(graph, canRender) {
 
   el.innerHTML = owners
     .map((owner) => {
-      const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
-      const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
+      const displayInfo = _getOwnerDisplayInfo(owner, collisionIndex);
+      const bgColor = _ownerAvatarHsl(displayInfo.avatarSeed);
       const selected = owner.ownerKey === currentCognitionOwnerKey ? "is-selected" : "";
       const anchor =
         owner.ownerKey === activeOwnerKey ||
@@ -1102,10 +1198,14 @@ function _renderCogOwnerList(graph, canRender) {
       return `
         <div class="bme-cog-owner-card ${selected} ${anchor}"
              data-owner-key="${_escHtml(String(owner.ownerKey || ""))}"
-             role="button" tabindex="0">
-          <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(firstName)}</div>
+             role="button" tabindex="0"
+             title="${_escHtml(displayInfo.tooltip)}">
+          <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(displayInfo.avatarText)}</div>
           <div class="bme-cog-owner-card__info">
-            <div class="bme-cog-owner-card__name">${_escHtml(String(owner.ownerName || owner.ownerKey || "未命名"))}</div>
+            <div class="bme-cog-owner-card__name-row">
+              <div class="bme-cog-owner-card__name">${_escHtml(displayInfo.title)}</div>
+              <span class="bme-cog-owner-card__badge">${_escHtml(displayInfo.typeLabel)}</span>
+            </div>
             <div class="bme-cog-owner-card__stats">已知 ${Number(owner.knownCount || 0)} · 误解 ${Number(owner.mistakenCount || 0)} · 隐藏 ${Number(owner.manualHiddenCount || 0)}</div>
           </div>
         </div>`;
@@ -1124,6 +1224,9 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
 
   const { selectedOwner, activeOwnerKey, activeOwnerKeys } =
     _getCurrentCognitionOwnerSummary(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(
+    _getCognitionOwnerCollection(graph),
+  );
 
   if (!selectedOwner) {
     el.innerHTML = `<div class="bme-cog-monitor-empty">选择上方角色查看详情，或等待提取产生认知数据。</div>`;
@@ -1169,6 +1272,7 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
   const writeBlocked = _isGraphWriteBlocked(loadInfo);
   const suppressedCount = new Set([...(ownerState.manualHiddenNodeIds || []), ...(ownerState.mistakenNodeIds || [])]).size;
   const disabledAttr = !selectedNode || writeBlocked ? "disabled" : "";
+  const displayInfo = _getOwnerDisplayInfo(selectedOwner, collisionIndex);
 
   const visChips = strongVisibleNames.length
     ? strongVisibleNames.map((n) => `<span class="bme-cog-chip is-visible">${_escHtml(n)}</span>`).join("")
@@ -1179,7 +1283,12 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
 
   el.innerHTML = `
     <div class="bme-cog-detail-header">
-      <div class="bme-cog-detail-name">${_escHtml(String(selectedOwner.ownerName || selectedOwner.ownerKey || "未命名"))}</div>
+      <div class="bme-cog-detail-title-wrap">
+        <div class="bme-cog-detail-name" title="${_escHtml(displayInfo.tooltip)}">${_escHtml(displayInfo.title)}</div>
+        <div class="bme-cog-detail-meta">${_escHtml(
+          [displayInfo.subtitle, selectedOwner.ownerKey || ""].filter(Boolean).join(" · "),
+        )}</div>
+      </div>
       ${
         selectedOwner.ownerKey === activeOwnerKey ||
         activeOwnerKeys.includes(selectedOwner.ownerKey)
@@ -1426,6 +1535,7 @@ function _refreshMobileCognition() {
 
   const { owners, activeOwnerKey, activeOwner, activeOwnerKeys, activeOwnerLabels } =
     _getCurrentCognitionOwnerSummary(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
   const historyState = graph?.historyState || {};
   const regionState = graph?.regionState || {};
   const activeRegion = String(historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "").trim();
@@ -1433,17 +1543,20 @@ function _refreshMobileCognition() {
     ? regionState.adjacencyMap[activeRegion].adjacent : [];
 
   const ownerCards = owners.map((owner) => {
-    const firstName = String(owner.ownerName || owner.ownerKey || "?").charAt(0);
-    const bgColor = _ownerAvatarHsl(owner.ownerName || owner.ownerKey);
+    const displayInfo = _getOwnerDisplayInfo(owner, collisionIndex);
+    const bgColor = _ownerAvatarHsl(displayInfo.avatarSeed);
     const anchor =
       owner.ownerKey === activeOwnerKey || activeOwnerKeys.includes(owner.ownerKey)
         ? "is-active-anchor"
         : "";
     return `
-      <div class="bme-cog-owner-card ${anchor}" style="min-width:unset;max-width:unset">
-        <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(firstName)}</div>
+      <div class="bme-cog-owner-card ${anchor}" style="min-width:unset;max-width:unset" title="${_escHtml(displayInfo.tooltip)}">
+        <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(displayInfo.avatarText)}</div>
         <div class="bme-cog-owner-card__info">
-          <div class="bme-cog-owner-card__name">${_escHtml(String(owner.ownerName || owner.ownerKey || "未命名"))}</div>
+          <div class="bme-cog-owner-card__name-row">
+            <div class="bme-cog-owner-card__name">${_escHtml(displayInfo.title)}</div>
+            <span class="bme-cog-owner-card__badge">${_escHtml(displayInfo.typeLabel)}</span>
+          </div>
           <div class="bme-cog-owner-card__stats">已知 ${Number(owner.knownCount || 0)} · 误解 ${Number(owner.mistakenCount || 0)}</div>
         </div>
       </div>`;
@@ -1456,7 +1569,9 @@ function _refreshMobileCognition() {
         <div class="bme-cog-status-card__value">${_escHtml(
           activeOwnerLabels.length > 0
             ? activeOwnerLabels.join(" / ")
-            : activeOwner?.ownerName || "—",
+            : activeOwner
+              ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
+              : "—",
         )}</div>
       </div>
       <div class="bme-cog-status-card">
@@ -1774,6 +1889,7 @@ function _getLatestRecallOwnerInfo(graph) {
     runtimeDebug?.runtimeDebug?.injections?.recall || {};
   const retrievalMeta = recallInjection?.retrievalMeta || {};
   const owners = _getCognitionOwnerCollection(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
   const ownerCandidates = Array.isArray(retrievalMeta.sceneOwnerCandidates)
     ? retrievalMeta.sceneOwnerCandidates
     : [];
@@ -1787,12 +1903,24 @@ function _getLatestRecallOwnerInfo(graph) {
       ? [fallbackOwnerKey]
       : [];
   const ownerLabels = normalizedOwnerKeys.map((ownerKey) => {
+    const ownerEntry = owners.find((entry) => entry.ownerKey === ownerKey);
+    if (ownerEntry) {
+      return _getOwnerDisplayInfo(ownerEntry, collisionIndex).title;
+    }
     const candidateMatch = ownerCandidates.find(
       (candidate) => String(candidate?.ownerKey || "").trim() === ownerKey,
     );
-    if (candidateMatch?.ownerName) return String(candidateMatch.ownerName);
-    const ownerEntry = owners.find((entry) => entry.ownerKey === ownerKey);
-    return String(ownerEntry?.ownerName || ownerKey || "—");
+    if (candidateMatch?.ownerName) {
+      return _getOwnerDisplayInfo(
+        {
+          ownerKey,
+          ownerName: candidateMatch.ownerName,
+          ownerType: _inferOwnerTypeFromKey(ownerKey),
+        },
+        collisionIndex,
+      ).title;
+    }
+    return _getOwnerDisplayInfo({ ownerKey }, collisionIndex).title;
   });
 
   return {
@@ -1851,6 +1979,7 @@ function _renderCognitionOwnerList(
   const listEl = document.getElementById("bme-cognition-owner-list");
   if (!listEl) return;
   listEl.innerHTML = "";
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
 
   if (!owners.length) {
     const li = document.createElement("li");
@@ -1862,6 +1991,7 @@ function _renderCognitionOwnerList(
 
   const fragment = document.createDocumentFragment();
   for (const owner of owners) {
+    const displayInfo = _getOwnerDisplayInfo(owner, collisionIndex);
     const li = document.createElement("li");
     li.className = "bme-cognition-owner-row";
 
@@ -1875,14 +2005,16 @@ function _renderCognitionOwnerList(
       button.classList.add("is-active-anchor");
     }
     button.dataset.ownerKey = String(owner.ownerKey || "");
+    button.title = displayInfo.tooltip;
 
     const title = document.createElement("div");
     title.className = "bme-cognition-owner-btn__title";
-    title.textContent = String(owner.ownerName || owner.ownerKey || "未命名角色");
+    title.textContent = displayInfo.title;
 
     const meta = document.createElement("div");
     meta.className = "bme-cognition-owner-btn__meta";
     meta.textContent = [
+      displayInfo.subtitle,
       `已知 ${Number(owner.knownCount || 0)}`,
       `误解 ${Number(owner.mistakenCount || 0)}`,
       `隐藏 ${Number(owner.manualHiddenCount || 0)}`,
@@ -1962,16 +2094,22 @@ function _renderCognitionDetail(
     : "未选中节点";
   const writeBlocked = _isGraphWriteBlocked(loadInfo);
   const aliases = Array.isArray(ownerState.aliases) ? ownerState.aliases : [];
+  const collisionIndex = _buildOwnerCollisionIndex(_getCognitionOwnerCollection(graph));
+  const displayInfo = _getOwnerDisplayInfo(selectedOwner, collisionIndex);
 
   detailEl.innerHTML = `
     <div class="bme-cognition-detail-card">
       <div class="bme-config-card-head">
         <div>
           <div class="bme-config-card-title">${_escHtml(
-            String(selectedOwner.ownerName || selectedOwner.ownerKey || "未命名角色"),
+            displayInfo.title,
           )}</div>
           <div class="bme-config-card-subtitle">
-            ${_escHtml(String(selectedOwner.ownerKey || ""))}
+            ${_escHtml(
+              [displayInfo.subtitle, String(selectedOwner.ownerKey || "")]
+                .filter(Boolean)
+                .join(" · "),
+            )}
           </div>
         </div>
         ${
@@ -2145,6 +2283,7 @@ function _refreshCognitionDashboard(
     selectedOwner,
     activeOwner,
   } = _getCurrentCognitionOwnerSummary(graph);
+  const collisionIndex = _buildOwnerCollisionIndex(owners);
   const activeRegion = String(
     historyState.activeRegion ||
       historyState.lastExtractedRegion ||
@@ -2164,7 +2303,9 @@ function _refreshCognitionDashboard(
     "bme-cognition-active-owner",
     activeOwnerLabels.length > 0
       ? activeOwnerLabels.join(" / ")
-      : activeOwner?.ownerName || activeOwnerKey || "—",
+      : activeOwner
+        ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
+        : activeOwnerKey || "—",
   );
   _setText("bme-cognition-active-region", activeRegionLabel || "—");
   _setText(

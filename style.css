@@ -5275,6 +5275,13 @@
   flex: 1;
 }
 
+.bme-cog-owner-card__name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .bme-cog-owner-card__name {
   font-size: 12px;
   font-weight: 700;
@@ -5282,6 +5289,22 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.bme-cog-owner-card__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--bme-on-surface-dim);
+  flex-shrink: 0;
 }
 
 .bme-cog-owner-card__stats {
@@ -5309,10 +5332,25 @@
   gap: 12px;
 }
 
+.bme-cog-detail-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
 .bme-cog-detail-name {
   font-size: 15px;
   font-weight: 700;
   color: var(--bme-on-surface);
+  word-break: break-word;
+}
+
+.bme-cog-detail-meta {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--bme-on-surface-dim);
+  word-break: break-word;
 }
 
 .bme-cog-detail-badge {
@@ -5803,5 +5841,22 @@
   }
   .bme-ai-monitor-snapshot-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 520px) {
+  .bme-cognition-line {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .bme-cognition-line strong {
+    text-align: left;
+  }
+
+  .bme-cog-detail-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

@@ -114,6 +114,18 @@ applyCognitionUpdates(
   ],
   { changedNodeIds: [bellEvent.id] },
 );
+applyCognitionUpdates(
+  graph,
+  [
+    {
+      ownerType: "user",
+      ownerName: "露西亚",
+      knownRefs: [bellEvent.id],
+      visibility: [{ ref: bellEvent.id, score: 0.8 }],
+    },
+  ],
+  { changedNodeIds: [bellEvent.id] },
+);
 applyManualKnowledgeOverride(graph, {
   ownerKey: ownerA.ownerKey,
   nodeId: bellEvent.id,
@@ -148,6 +160,12 @@ assert.ok(
   ownerList.some(
     (entry) => entry.ownerName === "露西亚" && entry.knownCount >= 1,
   ),
+);
+const sameNameOwners = ownerList.filter((entry) => entry.ownerName === "露西亚");
+assert.equal(sameNameOwners.length, 2);
+assert.deepEqual(
+  sameNameOwners.map((entry) => entry.ownerType).sort(),
+  ["character", "user"],
 );
 
 console.log("knowledge-state tests passed");
