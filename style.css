@@ -4740,6 +4740,10 @@
   gap: 16px;
 }
 
+.bme-cognition-workspace[hidden] {
+  display: none !important;
+}
+
 .bme-cog-status-strip {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

@@ -956,16 +956,19 @@ function _switchGraphView(view) {
 
   const isGraph = currentGraphView === "graph";
   const isCognition = currentGraphView === "cognition";
+  const isSummary = currentGraphView === "summary";
   if (canvas) canvas.style.display = isGraph ? "" : "none";
   if (legend) legend.style.display = isGraph ? "" : "none";
   if (statusbar) statusbar.style.display = isGraph ? "" : "none";
   if (nodeDetail) nodeDetail.style.display = isGraph ? "" : "none";
   if (graphControls) graphControls.style.display = isGraph ? "" : "none";
   if (cogWorkspace) cogWorkspace.hidden = !isCognition;
-  if (summaryWorkspace) summaryWorkspace.hidden = currentGraphView !== "summary";
+  if (summaryWorkspace) summaryWorkspace.hidden = !isSummary;
+  if (cogWorkspace) cogWorkspace.style.display = isCognition ? "" : "none";
+  if (summaryWorkspace) summaryWorkspace.style.display = isSummary ? "" : "none";
 
   if (isCognition) _refreshCognitionWorkspace();
-  if (currentGraphView === "summary") _refreshSummaryWorkspace();
+  if (isSummary) _refreshSummaryWorkspace();
 }
 
 function _ownerAvatarHsl(name) {
