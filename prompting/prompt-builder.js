@@ -269,6 +269,14 @@ function messageUsesWorldInfoContent(message = {}) {
   return String(message?.source || "") === "worldInfo-atDepth";
 }
 
+function getOptionalFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
 function getPromptMessageLikeDescriptor(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -279,7 +287,7 @@ function getPromptMessageLikeDescriptor(value) {
     return {
       content: String(value.content || ""),
       role: role === "user" ? "user" : "assistant",
-      seq: Number.isFinite(Number(value.seq)) ? Number(value.seq) : null,
+      seq: getOptionalFiniteNumber(value.seq),
     };
   }
 
@@ -287,7 +295,7 @@ function getPromptMessageLikeDescriptor(value) {
     return {
       content: String(value.mes || ""),
       role: value.is_user === true ? "user" : "assistant",
-      seq: Number.isFinite(Number(value.seq)) ? Number(value.seq) : null,
+      seq: getOptionalFiniteNumber(value.seq),
     };
   }
 
@@ -1072,6 +1080,41 @@ function sortInjectionEntries(entries = []) {
   });
 }
 
+function sortAtDepthInjectionEntries(entries = []) {
+  return [...entries].sort((left, right) => {
+    const depthLeft = Number.isFinite(Number(left?.depth))
+      ? Number(left.depth)
+      : 0;
+    const depthRight = Number.isFinite(Number(right?.depth))
+      ? Number(right.depth)
+      : 0;
+    const orderLeft = Number.isFinite(Number(left?.order))
+      ? Number(left.order)
+      : 0;
+    const orderRight = Number.isFinite(Number(right?.order))
+      ? Number(right.order)
+      : 0;
+    const uidLeft = Number.isFinite(Number(left?.uid))
+      ? Number(left.uid)
+      : Number.NEGATIVE_INFINITY;
+    const uidRight = Number.isFinite(Number(right?.uid))
+      ? Number(right.uid)
+      : Number.NEGATIVE_INFINITY;
+    const indexLeft = Number.isFinite(Number(left?.index))
+      ? Number(left.index)
+      : 0;
+    const indexRight = Number.isFinite(Number(right?.index))
+      ? Number(right.index)
+      : 0;
+    return (
+      depthRight - depthLeft ||
+      orderLeft - orderRight ||
+      uidRight - uidLeft ||
+      indexLeft - indexRight
+    );
+  });
+}
+
 function createHostInjectionPlanEntry(block = {}, position, extra = {}) {
   return {
     source: "block",
@@ -1154,8 +1197,96 @@ function buildHostInjectionPlan(renderedBlocks = [], worldInfoResolution = {}) {
   return {
     before: sortInjectionEntries(plan.before),
     after: sortInjectionEntries(plan.after),
-    atDepth: sortInjectionEntries(plan.atDepth),
+    atDepth: sortAtDepthInjectionEntries(plan.atDepth),
   };
+}
+
+function createInjectedAtDepthChatMessage(message = {}) {
+  const descriptor = getPromptMessageLikeDescriptor(message);
+  if (!descriptor) {
+    return null;
+  }
+  return {
+    ...(message && typeof message === "object" ? message : {}),
+    role: descriptor.role,
+    content: descriptor.content,
+    seq: descriptor.seq,
+    uid: Number.isFinite(Number(message?.uid))
+      ? Number(message.uid)
+      : null,
+    index: Number.isFinite(Number(message?.index))
+      ? Number(message.index)
+      : null,
+    name: String(message?.name || ""),
+    sourceName: String(message?.sourceName || ""),
+    worldbook: String(message?.worldbook || ""),
+    source: String(message?.source || "worldInfo-atDepth"),
+    sourceKey: String(message?.sourceKey || "taskAdditionalMessages"),
+    derivedFromWorldInfo: true,
+    contentOrigin:
+      String(message?.contentOrigin || "") ||
+      PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+    sanitizationEligible: message?.sanitizationEligible === true,
+    regexSourceType: String(message?.regexSourceType || "world_info"),
+    depth: Number.isFinite(Number(message?.depth))
+      ? Number(message.depth)
+      : 0,
+    order: Number.isFinite(Number(message?.order))
+      ? Number(message.order)
+      : 0,
+  };
+}
+
+function injectAtDepthMessagesIntoChatMessages(
+  chatMessages = [],
+  atDepthMessages = [],
+) {
+  const normalizedChatMessages = (Array.isArray(chatMessages) ? chatMessages : [])
+    .map((message) => {
+      const descriptor = getPromptMessageLikeDescriptor(message);
+      if (!descriptor) return null;
+      return {
+        ...(message && typeof message === "object" ? message : {}),
+        role: descriptor.role,
+        content: descriptor.content,
+        seq: descriptor.seq,
+      };
+    })
+    .filter(Boolean);
+  if (normalizedChatMessages.length === 0) {
+    return null;
+  }
+
+  const groupedByDepth = new Map();
+  for (const message of sortAtDepthInjectionEntries(atDepthMessages)) {
+    const injectedMessage = createInjectedAtDepthChatMessage(message);
+    if (!injectedMessage) continue;
+    const depth = Math.max(0, Number(injectedMessage.depth || 0));
+    if (!groupedByDepth.has(depth)) {
+      groupedByDepth.set(depth, []);
+    }
+    groupedByDepth.get(depth).push(injectedMessage);
+  }
+  if (groupedByDepth.size === 0) {
+    return normalizedChatMessages;
+  }
+
+  const reversedMessages = [...normalizedChatMessages].reverse();
+  const sortedDepths = [...groupedByDepth.keys()].sort((left, right) => left - right);
+  let totalInsertedMessages = 0;
+
+  for (const depth of sortedDepths) {
+    const depthMessages = groupedByDepth.get(depth) || [];
+    if (depthMessages.length === 0) continue;
+    const injectIndex = Math.min(
+      Math.max(0, depth + totalInsertedMessages),
+      reversedMessages.length,
+    );
+    reversedMessages.splice(injectIndex, 0, ...depthMessages);
+    totalInsertedMessages += depthMessages.length;
+  }
+
+  return reversedMessages.reverse();
 }
 
 function getPromptFieldContentOrigin(sourceKey = "") {
@@ -1303,6 +1434,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const emptyWorldInfo = buildEmptyWorldInfoContext();
   let resolvedWorldInfo = emptyWorldInfo;
   let worldInfoRuntimeBlockedContents = [];
+  let deliveredAtDepthViaChatMessages = false;
 
   if (worldInfoRequested) {
     const worldInfo = await resolveTaskWorldInfo({
@@ -1333,6 +1465,28 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       taskAdditionalMessages: sanitizedWorldInfo.additionalMessages || [],
       worldInfoDebug: sanitizedWorldInfo.debug || null,
     };
+
+    if (
+      Array.isArray(sanitizedInputContext.chatMessages) &&
+      isPromptMessageArray(sanitizedInputContext.chatMessages)
+    ) {
+      const injectedChatMessages = injectAtDepthMessagesIntoChatMessages(
+        sanitizedInputContext.chatMessages,
+        sanitizedWorldInfo.additionalMessages,
+      );
+      if (Array.isArray(injectedChatMessages) && injectedChatMessages.length > 0) {
+        sanitizedInputContext.chatMessages = injectedChatMessages;
+        if (typeof context.recentMessages === "string") {
+          sanitizedInputContext.recentMessages =
+            stringifyInterpolatedValue(injectedChatMessages);
+        }
+        if (typeof context.dialogueText === "string") {
+          sanitizedInputContext.dialogueText =
+            stringifyInterpolatedValue(injectedChatMessages);
+        }
+        deliveredAtDepthViaChatMessages = true;
+      }
+    }
   }
 
   const resolvedContext = {
@@ -1479,36 +1633,44 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
   }
 
+  const atDepthExecutionMessages = (worldInfoResolution.additionalMessages || [])
+    .map((message) =>
+      createExecutionMessage(
+        message.role,
+        message.content,
+        {
+          source: "worldInfo-atDepth",
+          sourceKey: "taskAdditionalMessages",
+          contentOrigin:
+            String(message.contentOrigin || "") ||
+            PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
+          sanitizationEligible: message.sanitizationEligible === true,
+          regexSourceType: String(message.regexSourceType || "world_info"),
+          depth: Number.isFinite(Number(message?.depth))
+            ? Number(message.depth)
+            : null,
+          order: Number.isFinite(Number(message?.order))
+            ? Number(message.order)
+            : 0,
+        },
+      ),
+    )
+    .filter(Boolean);
+  const finalExecutionMessages = deliveredAtDepthViaChatMessages
+    ? executionMessages
+    : [...atDepthExecutionMessages, ...executionMessages];
+
+  const privateTaskMessages = deliveredAtDepthViaChatMessages
+    ? [...customMessages]
+    : [...worldInfoResolution.additionalMessages, ...customMessages];
   debugLog(
     `[ST-BME][prompt-diag] buildTaskPrompt done: ` +
-      `executionMessages=${executionMessages.length}, ` +
+      `executionMessages=${finalExecutionMessages.length}, ` +
       `userBlocks=${userRoleBlockCount}, systemBlocks=${systemRoleBlockCount}, ` +
-      `customMessages=${customMessages.length}`,
+      `customMessages=${customMessages.length}, ` +
+      `atDepthMessages=${atDepthExecutionMessages.length}, ` +
+      `atDepthViaChatMessages=${deliveredAtDepthViaChatMessages}`,
   );
-
-  for (const message of worldInfoResolution.additionalMessages || []) {
-    const executionMessage = createExecutionMessage(
-      message.role,
-      message.content,
-      {
-        source: "worldInfo-atDepth",
-        sourceKey: "taskAdditionalMessages",
-        contentOrigin:
-          String(message.contentOrigin || "") ||
-          PROMPT_CONTENT_ORIGIN.WORLD_INFO_RENDERED,
-        sanitizationEligible: message.sanitizationEligible === true,
-        regexSourceType: String(message.regexSourceType || "world_info"),
-      },
-    );
-    if (executionMessage) {
-      executionMessages.push(executionMessage);
-    }
-  }
-
-  const privateTaskMessages = [
-    ...customMessages,
-    ...worldInfoResolution.additionalMessages,
-  ];
   const hostInjectionPlan = buildHostInjectionPlan(
     renderedBlocks,
     worldInfoResolution,
@@ -1522,7 +1684,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       systemPrompt,
       messages: privateTaskMessages,
     },
-    executionMessages,
+    executionMessages: finalExecutionMessages,
     privateTaskMessages,
     renderedBlocks,
     regexInput: mergeRegexCollectors(promptRegexInput),
@@ -1562,14 +1724,16 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       customMessageCount: customMessages.length,
       additionalMessageCount: worldInfoResolution.additionalMessages.length,
       privateTaskMessageCount: privateTaskMessages.length,
-      executionMessageCount: executionMessages.length,
+      executionMessageCount: finalExecutionMessages.length,
       userRoleBlockCount,
       assistantRoleBlockCount,
       systemRoleBlockCount,
       effectiveDelivery: {
         profileBlocks: "ordered-private-messages",
         worldInfoBeforeAfter: "inline-in-ordered-messages",
-        worldInfoAtDepth: "appended-private-messages",
+        worldInfoAtDepth: deliveredAtDepthViaChatMessages
+          ? "inserted-into-chat-messages-by-depth"
+          : "appended-private-messages-fallback",
       },
       worldInfoCacheHit: Boolean(worldInfoResolution.debug?.cache?.hit),
       ejsRuntimeStatus: worldInfoResolution.debug?.ejsRuntimeStatus || "",
@@ -1639,7 +1803,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     profileName: profile?.name || "",
     systemPrompt,
     privateTaskMessages,
-    executionMessages,
+    executionMessages: finalExecutionMessages,
     renderedBlocks,
     hostInjections: worldInfoResolution.injections,
     hostInjectionPlan,

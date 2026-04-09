@@ -1158,6 +1158,7 @@ function normalizeResolvedEntry(entry = {}, fallbackIndex = 0) {
     ? entry.role
     : "system";
   return {
+    uid: Number(entry.uid ?? 0),
     name: normalizeKey(entry.name),
     sourceName: normalizeKey(
       entry.sourceName || entry.source_name || entry.name,
@@ -1185,6 +1186,7 @@ function sortAtDepthEntries(entries = []) {
     return (
       depthB - depthA ||
       (a.order ?? 100) - (b.order ?? 100) ||
+      (b.uid ?? 0) - (a.uid ?? 0) ||
       a.index - b.index
     );
   });
@@ -1195,6 +1197,13 @@ function buildAdditionalMessages(entries = []) {
     .map((entry) => ({
       role: entry.role,
       content: String(entry.content || "").trim(),
+      depth: Number(entry.depth ?? 0),
+      order: Number(entry.order ?? 100),
+      uid: Number(entry.uid ?? 0),
+      index: Number(entry.index ?? 0),
+      name: String(entry.name || ""),
+      sourceName: String(entry.sourceName || entry.name || ""),
+      worldbook: String(entry.worldbook || ""),
       source: "worldInfo-atDepth",
       sourceKey: "taskAdditionalMessages",
     }))
