@@ -20,6 +20,10 @@ export const BME_RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
 export const BME_RUNTIME_BATCH_JOURNAL_META_KEY = "runtimeBatchJournal";
 export const BME_RUNTIME_LAST_RECALL_META_KEY = "runtimeLastRecallResult";
 export const BME_RUNTIME_SUMMARY_STATE_META_KEY = "runtimeSummaryState";
+export const BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY = "maintenanceJournal";
+export const BME_RUNTIME_KNOWLEDGE_STATE_META_KEY = "knowledgeState";
+export const BME_RUNTIME_REGION_STATE_META_KEY = "regionState";
+export const BME_RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY =
   "runtimeLastProcessedSeq";
 export const BME_RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
@@ -45,6 +49,11 @@ function createDefaultMetaValues(chatId = "", nowMs = Date.now()) {
     lastSyncUploadedAt: 0,
     lastSyncDownloadedAt: 0,
     lastSyncedRevision: 0,
+    lastBackupUploadedAt: 0,
+    lastBackupRestoredAt: 0,
+    lastBackupRollbackAt: 0,
+    lastBackupFilename: "",
+    syncDirtyReason: "",
     deviceId: "",
     nodeCount: 0,
     edgeCount: 0,
@@ -250,6 +259,15 @@ export function buildSnapshotFromGraph(graph, options = {}) {
   if (chatId) {
     graphInput.historyState.chatId = chatId;
   }
+  const legacyActiveOwnerKey = String(
+    graphInput?.knowledgeState?.activeOwnerKey || "",
+  ).trim();
+  const legacyActiveRegion = String(
+    graphInput?.regionState?.activeRegion || "",
+  ).trim();
+  const legacyActiveSegmentId = String(
+    graphInput?.timelineState?.activeSegmentId || "",
+  ).trim();
   graphInput.vectorIndexState.collectionId = buildVectorCollectionId(
     chatId || graphInput.historyState.chatId || "",
   );
@@ -352,6 +370,45 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       runtimeGraph?.summaryState || {},
       {},
     ),
+    [BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY]: toPlainData(
+      runtimeGraph?.maintenanceJournal || [],
+      [],
+    ),
+    [BME_RUNTIME_KNOWLEDGE_STATE_META_KEY]: toPlainData(
+      {
+        ...(runtimeGraph?.knowledgeState || {}),
+        activeOwnerKey: String(
+          legacyActiveOwnerKey ||
+            runtimeGraph?.historyState?.activeRecallOwnerKey ||
+            "",
+        ).trim(),
+      },
+      {},
+    ),
+    [BME_RUNTIME_REGION_STATE_META_KEY]: toPlainData(
+      {
+        ...(runtimeGraph?.regionState || {}),
+        activeRegion: String(
+          legacyActiveRegion ||
+            runtimeGraph?.historyState?.activeRegion ||
+            runtimeGraph?.regionState?.manualActiveRegion ||
+            "",
+        ).trim(),
+      },
+      {},
+    ),
+    [BME_RUNTIME_TIMELINE_STATE_META_KEY]: toPlainData(
+      {
+        ...(runtimeGraph?.timelineState || {}),
+        activeSegmentId: String(
+          legacyActiveSegmentId ||
+            runtimeGraph?.historyState?.activeStorySegmentId ||
+            runtimeGraph?.timelineState?.manualActiveSegmentId ||
+            "",
+        ).trim(),
+      },
+      {},
+    ),
     [BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]: Number.isFinite(
       Number(runtimeGraph?.lastProcessedSeq),
     )
@@ -399,10 +456,43 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     normalizedSnapshot.meta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
+  runtimeGraph.maintenanceJournal = toArray(
+    normalizedSnapshot.meta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+  );
+  runtimeGraph.knowledgeState = toPlainData(
+    normalizedSnapshot.meta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
+    runtimeGraph.knowledgeState || {},
+  );
+  runtimeGraph.regionState = toPlainData(
+    normalizedSnapshot.meta?.[BME_RUNTIME_REGION_STATE_META_KEY],
+    runtimeGraph.regionState || {},
+  );
+  runtimeGraph.timelineState = toPlainData(
+    normalizedSnapshot.meta?.[BME_RUNTIME_TIMELINE_STATE_META_KEY],
+    runtimeGraph.timelineState || {},
+  );
   runtimeGraph.summaryState = toPlainData(
     normalizedSnapshot.meta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
     runtimeGraph.summaryState || {},
   );
+  const rawKnowledgeState =
+    runtimeGraph.knowledgeState &&
+    typeof runtimeGraph.knowledgeState === "object" &&
+    !Array.isArray(runtimeGraph.knowledgeState)
+      ? runtimeGraph.knowledgeState
+      : {};
+  const rawRegionState =
+    runtimeGraph.regionState &&
+    typeof runtimeGraph.regionState === "object" &&
+    !Array.isArray(runtimeGraph.regionState)
+      ? runtimeGraph.regionState
+      : {};
+  const rawTimelineState =
+    runtimeGraph.timelineState &&
+    typeof runtimeGraph.timelineState === "object" &&
+    !Array.isArray(runtimeGraph.timelineState)
+      ? runtimeGraph.timelineState
+      : {};
 
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
@@ -424,6 +514,59 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
             ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
+  if (
+    typeof runtimeGraph.historyState.activeRecallOwnerKey !== "string" ||
+    !runtimeGraph.historyState.activeRecallOwnerKey
+  ) {
+    const legacyActiveOwnerKey = String(rawKnowledgeState.activeOwnerKey || "").trim();
+    if (legacyActiveOwnerKey) {
+      runtimeGraph.historyState.activeRecallOwnerKey = legacyActiveOwnerKey;
+    }
+  }
+  if (
+    typeof runtimeGraph.historyState.activeRegion !== "string" ||
+    !runtimeGraph.historyState.activeRegion
+  ) {
+    const legacyActiveRegion = String(rawRegionState.activeRegion || "").trim();
+    if (legacyActiveRegion) {
+      runtimeGraph.historyState.activeRegion = legacyActiveRegion;
+      if (
+        typeof runtimeGraph.historyState.activeRegionSource !== "string" ||
+        !runtimeGraph.historyState.activeRegionSource
+      ) {
+        runtimeGraph.historyState.activeRegionSource = "snapshot";
+      }
+    }
+  }
+  if (
+    typeof runtimeGraph.historyState.activeStorySegmentId !== "string" ||
+    !runtimeGraph.historyState.activeStorySegmentId
+  ) {
+    const legacyActiveSegmentId = String(rawTimelineState.activeSegmentId || "").trim();
+    if (legacyActiveSegmentId) {
+      runtimeGraph.historyState.activeStorySegmentId = legacyActiveSegmentId;
+      const activeSegment = Array.isArray(rawTimelineState.segments)
+        ? rawTimelineState.segments.find(
+            (segment) => String(segment?.id || "").trim() === legacyActiveSegmentId,
+          )
+        : null;
+      if (
+        (typeof runtimeGraph.historyState.activeStoryTimeLabel !== "string" ||
+          !runtimeGraph.historyState.activeStoryTimeLabel) &&
+        activeSegment
+      ) {
+        runtimeGraph.historyState.activeStoryTimeLabel = String(
+          activeSegment.label || "",
+        ).trim();
+      }
+      if (
+        typeof runtimeGraph.historyState.activeStoryTimeSource !== "string" ||
+        !runtimeGraph.historyState.activeStoryTimeSource
+      ) {
+        runtimeGraph.historyState.activeStoryTimeSource = "snapshot";
+      }
+    }
+  }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
     ...(normalizedSnapshot.meta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
@@ -442,6 +585,41 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
 
   const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
+  if (
+    normalizedGraph.knowledgeState &&
+    typeof normalizedGraph.knowledgeState === "object" &&
+    !Array.isArray(normalizedGraph.knowledgeState)
+  ) {
+    normalizedGraph.knowledgeState.activeOwnerKey = String(
+      normalizedGraph.historyState?.activeRecallOwnerKey ||
+        rawKnowledgeState.activeOwnerKey ||
+        "",
+    ).trim();
+  }
+  if (
+    normalizedGraph.regionState &&
+    typeof normalizedGraph.regionState === "object" &&
+    !Array.isArray(normalizedGraph.regionState)
+  ) {
+    normalizedGraph.regionState.activeRegion = String(
+      normalizedGraph.historyState?.activeRegion ||
+        normalizedGraph.regionState.manualActiveRegion ||
+        rawRegionState.activeRegion ||
+        "",
+    ).trim();
+  }
+  if (
+    normalizedGraph.timelineState &&
+    typeof normalizedGraph.timelineState === "object" &&
+    !Array.isArray(normalizedGraph.timelineState)
+  ) {
+    normalizedGraph.timelineState.activeSegmentId = String(
+      normalizedGraph.historyState?.activeStorySegmentId ||
+        normalizedGraph.timelineState.manualActiveSegmentId ||
+        rawTimelineState.activeSegmentId ||
+        "",
+    ).trim();
+  }
   const historyState = normalizedGraph.historyState || {};
   const vectorState = normalizedGraph.vectorIndexState || {};
   const resolvedLastProcessedFloor = Number.isFinite(

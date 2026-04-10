@@ -436,6 +436,49 @@ async function testGraphSnapshotConverters() {
       processedRange: [8, 9],
     },
   ];
+  graph.maintenanceJournal = [
+    {
+      id: "maintenance-1",
+      action: "compress",
+      updatedAt: 123,
+    },
+  ];
+  graph.knowledgeState = {
+    activeOwnerKey: "owner:hero",
+    owners: {
+      "owner:hero": {
+        ownerKey: "owner:hero",
+        displayName: "Hero",
+      },
+    },
+  };
+  graph.regionState = {
+    activeRegion: "camp",
+    knownRegions: {
+      camp: {
+        regionId: "camp",
+        displayName: "Camp",
+      },
+    },
+  };
+  graph.timelineState = {
+    activeSegmentId: "segment-1",
+    segments: [
+      {
+        id: "segment-1",
+        label: "Night 1",
+      },
+    ],
+  };
+  graph.summaryState = {
+    updatedAt: 456,
+    entries: [
+      {
+        id: "summary-1",
+        text: "Summary text",
+      },
+    ],
+  };
   graph.nodes.push({
     id: "node-converter",
     type: "event",
@@ -461,6 +504,11 @@ async function testGraphSnapshotConverters() {
   assert.equal(rebuilt.nodes.length, 1);
   assert.equal(rebuilt.nodes[0].id, "node-converter");
   assert.equal(rebuilt.vectorIndexState.hashToNodeId["vec-hash"], "node-converter");
+  assert.equal(rebuilt.maintenanceJournal[0].id, "maintenance-1");
+  assert.equal(rebuilt.knowledgeState.activeOwnerKey, "owner:hero");
+  assert.equal(rebuilt.regionState.activeRegion, "camp");
+  assert.equal(rebuilt.timelineState.activeSegmentId, "segment-1");
+  assert.equal(rebuilt.summaryState.entries[0].id, "summary-1");
 }
 
 async function main() {

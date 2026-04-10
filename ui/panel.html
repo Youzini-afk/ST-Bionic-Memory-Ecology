@@ -1072,6 +1072,74 @@
                 </label>
               </div>
 
+              <div class="bme-config-card" style="margin-top: 20px;">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">云端存储模式</div>
+                    <div class="bme-config-card-subtitle">
+                      自动模式沿用当前镜像同步；手动模式停止自动云端写入，改为按当前聊天手动备份与恢复。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-config-row">
+                  <label for="bme-setting-cloud-storage-mode">存储模式</label>
+                  <select
+                    id="bme-setting-cloud-storage-mode"
+                    class="bme-config-input"
+                  >
+                    <option value="automatic">自动储存</option>
+                    <option value="manual">手动储存</option>
+                  </select>
+                </div>
+                <div class="bme-config-help" id="bme-cloud-storage-mode-help">
+                  自动储存会继续按当前镜像逻辑同步；手动储存只保留本地写入，需要你主动备份和恢复。
+                </div>
+                <div
+                  class="bme-config-help"
+                  id="bme-cloud-storage-mode-status"
+                  style="display: none; margin-top: 8px;"
+                ></div>
+                <div
+                  id="bme-cloud-backup-manual-actions"
+                  class="bme-config-actions"
+                  style="display: none; margin-top: 12px; flex-wrap: wrap;"
+                >
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-backup-to-cloud"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <span>备份到云端</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-restore-from-cloud"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-down"></i>
+                    <span>从云端获取备份</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-manage-server-backups"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-box-archive"></i>
+                    <span>管理服务器备份</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-rollback-last-restore"
+                    type="button"
+                    disabled
+                  >
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span>回滚上次恢复</span>
+                  </button>
+                </div>
+              </div>
+
               <div class="bme-config-grid bme-config-grid-2" style="margin-top: 20px;">
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
