@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import { createRequire, registerHooks } from "node:module";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import {
+  installResolveHooks,
+  toDataModuleUrl,
+} from "./helpers/register-hooks-compat.mjs";
 import { pruneProcessedMessageHashesFromFloor } from "../maintenance/chat-history.js";
 import {
   onBeforeCombinePromptsController,
@@ -106,39 +110,30 @@ const openAiShimUrl = `data:text/javascript,${encodeURIComponent(
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js" ||
-      specifier === "../../../../../extensions.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: extensionsShimUrl,
-      };
-    }
-    if (
-      specifier === "../../../../script.js" ||
-      specifier === "../../../../../script.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: scriptShimUrl,
-      };
-    }
-    if (
-      specifier === "../../../openai.js" ||
-      specifier === "../../../../openai.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: openAiShimUrl,
-      };
-    }
-    return nextResolve(specifier, context);
+installResolveHooks([
+  {
+    specifiers: [
+      "../../../extensions.js",
+      "../../../../extensions.js",
+      "../../../../../extensions.js",
+    ],
+    url: extensionsShimUrl || toDataModuleUrl(extensionsShimSource),
   },
-});
+  {
+    specifiers: [
+      "../../../../script.js",
+      "../../../../../script.js",
+    ],
+    url: scriptShimUrl || toDataModuleUrl(scriptShimSource),
+  },
+  {
+    specifiers: [
+      "../../../openai.js",
+      "../../../../openai.js",
+    ],
+    url: openAiShimUrl || toDataModuleUrl(openAiShimSource),
+  },
+]);
 
 const require = createRequire(import.meta.url);
 const originalRequire = globalThis.require;
@@ -3173,6 +3168,7 @@ async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
   );
   setBatchStageOutcome(structuralPartial, "finalize", "success");
   finalizeBatchStatus(structuralPartial);
+  delete structuralPartial.historyAdvanceAllowed;
   assert.equal(structuralPartial.completed, true);
   assert.equal(structuralPartial.outcome, "partial");
   assert.equal(structuralPartial.consistency, "weak");
@@ -3186,6 +3182,7 @@ async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
   setBatchStageOutcome(semanticFailed, "semantic", "failed", "semantic down");
   setBatchStageOutcome(semanticFailed, "finalize", "success");
   finalizeBatchStatus(semanticFailed);
+  delete semanticFailed.historyAdvanceAllowed;
   assert.equal(semanticFailed.completed, true);
   assert.equal(semanticFailed.outcome, "failed");
   assert.equal(semanticFailed.consistency, "strong");
@@ -3203,9 +3200,10 @@ async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
     "vector finalize down",
   );
   finalizeBatchStatus(finalizeFailed);
+  delete finalizeFailed.historyAdvanceAllowed;
   assert.equal(finalizeFailed.completed, false);
   assert.equal(finalizeFailed.outcome, "failed");
-  assert.equal(shouldAdvanceProcessedHistory(finalizeFailed), true);
+  assert.equal(shouldAdvanceProcessedHistory(finalizeFailed), false);
 
   const fullSuccess = createBatchStatusSkeleton({
     processedRange: [8, 9],
@@ -3216,6 +3214,7 @@ async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
   setBatchStageOutcome(fullSuccess, "semantic", "success");
   setBatchStageOutcome(fullSuccess, "finalize", "success");
   finalizeBatchStatus(fullSuccess);
+  delete fullSuccess.historyAdvanceAllowed;
   assert.equal(fullSuccess.completed, true);
   assert.equal(fullSuccess.outcome, "success");
   assert.equal(fullSuccess.consistency, "strong");

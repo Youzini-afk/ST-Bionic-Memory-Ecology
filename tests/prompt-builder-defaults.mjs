@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import {
+  installResolveHooks,
+  toDataModuleUrl,
+} from "./helpers/register-hooks-compat.mjs";
 
 const extensionsShimSource = [
   "export const extension_settings = {};",
@@ -24,30 +27,23 @@ const scriptShimSource = [
   "}",
 ].join("\n");
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js" ||
-      specifier === "../../../../../extensions.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: `data:text/javascript,${encodeURIComponent(extensionsShimSource)}`,
-      };
-    }
-    if (
-      specifier === "../../../../script.js" ||
-      specifier === "../../../../../script.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: `data:text/javascript,${encodeURIComponent(scriptShimSource)}`,
-      };
-    }
-    return nextResolve(specifier, context);
+installResolveHooks([
+  {
+    specifiers: [
+      "../../../extensions.js",
+      "../../../../extensions.js",
+      "../../../../../extensions.js",
+    ],
+    url: toDataModuleUrl(extensionsShimSource),
   },
-});
+  {
+    specifiers: [
+      "../../../../script.js",
+      "../../../../../script.js",
+    ],
+    url: toDataModuleUrl(scriptShimSource),
+  },
+]);
 
 const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompting/prompt-builder.js");
 const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");

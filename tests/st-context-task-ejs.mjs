@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import {
+  installResolveHooks,
+  toDataModuleUrl,
+} from "./helpers/register-hooks-compat.mjs";
 
 const extensionsShimSource = [
   "export function getContext(...args) {",
@@ -10,20 +13,15 @@ const extensionsShimUrl = `data:text/javascript,${encodeURIComponent(
   extensionsShimSource,
 )}`;
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: extensionsShimUrl,
-      };
-    }
-    return nextResolve(specifier, context);
+installResolveHooks([
+  {
+    specifiers: [
+      "../../../extensions.js",
+      "../../../../extensions.js",
+    ],
+    url: extensionsShimUrl || toDataModuleUrl(extensionsShimSource),
   },
-});
+]);
 
 const originalSillyTavern = globalThis.SillyTavern;
 const originalGetCurrentChatId = globalThis.getCurrentChatId;

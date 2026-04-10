@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { registerHooks } from "node:module";
+import {
+  installResolveHooks,
+} from "./helpers/register-hooks-compat.mjs";
 
 const extensionsShimSource = [
   "export const extension_settings = {};",
@@ -19,30 +21,23 @@ const scriptShimUrl = `data:text/javascript,${encodeURIComponent(
   scriptShimSource,
 )}`;
 
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (
-      specifier === "../../../extensions.js" ||
-      specifier === "../../../../extensions.js" ||
-      specifier === "../../../../../extensions.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: extensionsShimUrl,
-      };
-    }
-    if (
-      specifier === "../../../../script.js" ||
-      specifier === "../../../../../script.js"
-    ) {
-      return {
-        shortCircuit: true,
-        url: scriptShimUrl,
-      };
-    }
-    return nextResolve(specifier, context);
+installResolveHooks([
+  {
+    specifiers: [
+      "../../../extensions.js",
+      "../../../../extensions.js",
+      "../../../../../extensions.js",
+    ],
+    url: extensionsShimUrl,
   },
-});
+  {
+    specifiers: [
+      "../../../../script.js",
+      "../../../../../script.js",
+    ],
+    url: scriptShimUrl,
+  },
+]);
 
 const originalSillyTavern = globalThis.SillyTavern;
 const originalEjsTemplate = globalThis.EjsTemplate;
