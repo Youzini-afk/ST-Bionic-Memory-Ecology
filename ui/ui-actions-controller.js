@@ -844,11 +844,26 @@ export async function onClearSummaryStateController(runtime) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("清空总结状态")) return;
+  if (
+    typeof runtime.confirm === "function" &&
+    !runtime.confirm(
+      "确定要清空当前聊天的总结状态？\n\n这会删除当前聊天的所有层级总结前沿与折叠历史，但不会删除图谱节点或聊天原文。",
+    )
+  ) {
+    return {
+      cancelled: true,
+    };
+  }
   runtime.resetHierarchicalSummaryState?.(graph);
   runtime.saveGraphToChat?.({ reason: "clear-summary-state" });
   runtime.refreshPanelLiveState?.();
-  updateManualActionUiState(runtime, "总结状态已清空", "当前聊天的层级总结已重置", "success");
-  runtime.toastr.success("总结状态已清空");
+  updateManualActionUiState(
+    runtime,
+    "总结状态已清空",
+    "当前聊天的层级总结已重置",
+    "success",
+  );
+  runtime.toastr.success("当前聊天总结状态已清空");
   return {
     handledToast: true,
     requestDispatched: false,

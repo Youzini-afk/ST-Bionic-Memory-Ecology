@@ -343,10 +343,6 @@
                     <i class="fa-solid fa-sitemap"></i>
                     <span>重建总结状态</span>
                   </button>
-                  <button class="bme-action-btn" id="bme-act-summary-clear" type="button">
-                    <i class="fa-solid fa-eraser"></i>
-                    <span>清空总结状态</span>
-                  </button>
                   <button class="bme-action-btn" id="bme-act-evolve" type="button">
                     <i class="fa-solid fa-dna"></i>
                     <span>强制进化</span>
@@ -364,14 +360,14 @@
                   <div class="bme-config-help">
                     重新提取：按总楼层计数（用户+AI，首条 greeting 为 0）。真正 system 不计入，且不受隐藏助手影响。
                   </div>
+                  <div class="bme-config-row" style="margin-top:8px">
+                    <label for="bme-extract-mode">提取模式</label>
+                    <select id="bme-extract-mode" class="bme-config-select">
+                      <option value="pending">提取未处理</option>
+                      <option value="rerun">重新提取范围</option>
+                    </select>
+                  </div>
                   <div class="bme-action-range-row">
-                    <div class="bme-config-row">
-                      <label for="bme-extract-mode">提取模式</label>
-                      <select id="bme-extract-mode" class="bme-config-select">
-                        <option value="pending">提取未处理</option>
-                        <option value="rerun">重新提取范围</option>
-                      </select>
-                    </div>
                     <div class="bme-config-row">
                       <label for="bme-extract-start-floor">起始楼层</label>
                       <input
@@ -399,31 +395,7 @@
                     重新提取范围：起始/终止都留空 = 当前重提；只填起始 = 从起始到最新。
                   </div>
                   <div class="bme-config-help" style="margin-top:12px">
-                    重建总结状态：默认按当前总结相关范围重建；填写楼层后按范围重建。
-                  </div>
-                  <div class="bme-action-range-row">
-                    <div class="bme-config-row">
-                      <label for="bme-summary-rebuild-start-floor">总结起始楼层</label>
-                      <input
-                        id="bme-summary-rebuild-start-floor"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="999999"
-                        placeholder="留空 = 当前重建"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-summary-rebuild-end-floor">总结终止楼层</label>
-                      <input
-                        id="bme-summary-rebuild-end-floor"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="999999"
-                        placeholder="留空 = 到最新"
-                      />
-                    </div>
+                    重建总结状态：和上面的起始/终止楼层共用同一组范围；留空时按当前总结相关范围重建。
                   </div>
                 </div>
               </div>
@@ -2695,6 +2667,27 @@
                       />
                     </div>
                   </div>
+                </div>
+              </div>
+
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">总结状态清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空当前聊天的层级总结状态，不影响图谱节点与聊天原文。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-summary-clear"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-eraser"></i>
+                    <span>清空当前聊天总结状态</span>
+                  </button>
                 </div>
               </div>
 
