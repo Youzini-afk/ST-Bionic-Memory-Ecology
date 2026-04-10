@@ -9442,11 +9442,30 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
   }
 }
 
+function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
+  if (!persistence || persistence.accepted === true) return true;
+  if (loadInfo?.pendingPersist === true) return false;
+  const persistenceRevision = Number(persistence?.revision || 0);
+  if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
+    return false;
+  }
+  const commitMarkerRevision =
+    loadInfo?.commitMarker?.accepted === true
+      ? Number(loadInfo.commitMarker.revision || 0)
+      : 0;
+  const lastAcceptedRevision = Math.max(
+    Number(loadInfo?.lastAcceptedRevision || 0),
+    commitMarkerRevision,
+  );
+  return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
+}
+
 function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   const persistence = batchStatus?.persistence || null;
   if (persistence) {
+    const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
-      _formatPersistenceOutcomeLabel(persistence.outcome),
+      accepted ? "已确认" : _formatPersistenceOutcomeLabel(persistence.outcome),
       persistence.storageTier ? `tier ${persistence.storageTier}` : "",
       Number.isFinite(Number(persistence.revision)) && Number(persistence.revision) > 0
         ? `rev ${Number(persistence.revision)}`
@@ -9477,6 +9496,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   const lastConfirmedFloor =
     graph?.historyState?.lastProcessedAssistantFloor ?? -1;
   const persistence = batchStatus?.persistence || null;
+  const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
   const processedRange = Array.isArray(batchStatus?.processedRange)
     ? batchStatus.processedRange
     : [];
@@ -9485,7 +9505,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
       ? Number(processedRange[1])
       : null;
 
-  if (persistence && persistence.accepted !== true && pendingFloor != null) {
+  if (persistence && !accepted && pendingFloor != null) {
     return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
   }
 
