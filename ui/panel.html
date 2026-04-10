@@ -399,31 +399,7 @@
                     重新提取范围：起始/终止都留空 = 当前重提；只填起始 = 从起始到最新。
                   </div>
                   <div class="bme-config-help" style="margin-top:12px">
-                    重建总结状态：默认按当前总结相关范围重建；填写楼层后按范围重建。
-                  </div>
-                  <div class="bme-action-range-row">
-                    <div class="bme-config-row">
-                      <label for="bme-summary-rebuild-start-floor">总结起始楼层</label>
-                      <input
-                        id="bme-summary-rebuild-start-floor"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="999999"
-                        placeholder="留空 = 当前重建"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-summary-rebuild-end-floor">总结终止楼层</label>
-                      <input
-                        id="bme-summary-rebuild-end-floor"
-                        class="bme-config-input"
-                        type="number"
-                        min="0"
-                        max="999999"
-                        placeholder="留空 = 到最新"
-                      />
-                    </div>
+                    重建总结状态：和上面的起始/终止楼层共用同一组范围；留空时按当前总结相关范围重建。
                   </div>
                 </div>
               </div>

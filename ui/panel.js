@@ -3806,10 +3806,10 @@ function _bindActions() {
       const btn = document.getElementById("bme-act-summary-rebuild");
       if (btn?.disabled) return;
       const startFloor = _parseOptionalInt(
-        document.getElementById("bme-summary-rebuild-start-floor")?.value,
+        document.getElementById("bme-extract-start-floor")?.value,
       );
       const endFloor = _parseOptionalInt(
-        document.getElementById("bme-summary-rebuild-end-floor")?.value,
+        document.getElementById("bme-extract-end-floor")?.value,
       );
       const desc = Number.isFinite(startFloor) || Number.isFinite(endFloor)
         ? `按范围 ${Number.isFinite(startFloor) ? startFloor : "当前"} ~ ${Number.isFinite(endFloor) ? endFloor : "最新"} 重建总结状态`
