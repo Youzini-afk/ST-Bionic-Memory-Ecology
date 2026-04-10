@@ -9889,12 +9889,13 @@ function _buildCloudBackupManagerHtml(state = {}) {
           </div>
           <div class="bme-cloud-backup-card__filename">${_escHtml(filename)}</div>
           <div class="bme-cloud-backup-card__actions">
-            <button
+          <button
               type="button"
               class="bme-cloud-backup-modal__btn bme-cloud-backup-card__danger"
               data-bme-backup-action="delete"
               data-chat-id="${_escHtml(chatId)}"
               data-filename="${_escHtml(filename)}"
+              data-server-path="${_escHtml(String(entry?.serverPath || ""))}"
               ${state.busy ? "disabled" : ""}
             >
               <i class="fa-solid fa-trash-can"></i>
@@ -9970,7 +9971,7 @@ async function _openServerBackupManagerModal() {
     }
   };
 
-  const deleteEntry = async (chatId, filename) => {
+  const deleteEntry = async (chatId, filename, serverPath = "") => {
     if (typeof _actionHandlers.deleteServerBackupEntry !== "function") {
       toastr.error("\u5f53\u524d\u8fd0\u884c\u65f6\u6ca1\u6709\u63a5\u5165\u5220\u9664\u670d\u52a1\u5668\u5907\u4efd\u5165\u53e3", "ST-BME");
       return;
@@ -9986,6 +9987,7 @@ async function _openServerBackupManagerModal() {
       const result = await _actionHandlers.deleteServerBackupEntry({
         chatId,
         filename,
+        serverPath,
       });
       if (!result?.deleted) {
         const message =
@@ -10005,6 +10007,7 @@ async function _openServerBackupManagerModal() {
     } finally {
       state.busy = false;
       render();
+      _refreshRuntimeStatus();
       void _refreshCloudBackupManualUi();
     }
   };
@@ -10021,6 +10024,7 @@ async function _openServerBackupManagerModal() {
       await deleteEntry(
         String(button.dataset.chatId || "").trim(),
         String(button.dataset.filename || "").trim(),
+        String(button.dataset.serverPath || "").trim(),
       );
     }
   });

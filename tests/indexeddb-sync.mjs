@@ -714,12 +714,15 @@ async function testManualBackupAndRestoreFlow() {
 
   const deleteResult = await deleteServerBackup("chat-backup-flow", runtime);
   assert.equal(deleteResult.deleted, true);
+  assert.equal(deleteResult.localMetaUpdated, true);
   const manifestAfterDelete = await listServerBackups(runtime);
   assert.equal(manifestAfterDelete.entries.length, 0);
   assert.equal(
     Array.from(remoteFiles.keys()).some((key) => key.startsWith("ST-BME_backup_")),
     false,
   );
+  assert.equal(db.meta.get("lastBackupUploadedAt"), 0);
+  assert.equal(db.meta.get("lastBackupFilename"), "");
 }
 
 async function testBackupManifestReadFailureDoesNotOverwriteManifest() {
@@ -804,6 +807,130 @@ async function testRestoreValidationDoesNotCreateSafetySnapshot() {
     runtime,
   );
   assert.equal(safetyStatus.exists, false);
+}
+
+async function testRestoreUsesManifestFilenameWhenCurrentFilenameDrifts() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const db = new FakeDb("chat-filename-drift");
+  const safetyDb = new FakeDb(buildRestoreSafetyChatId("chat-filename-drift"));
+  dbByChatId.set("chat-filename-drift", db);
+
+  const legacyFilename = "ST-BME_backup_chat-filename-drift-legacy.json";
+  remoteFiles.set(legacyFilename, {
+    kind: "st-bme-backup",
+    version: 1,
+    chatId: "chat-filename-drift",
+    createdAt: 123,
+    sourceDeviceId: "remote-device",
+    snapshot: {
+      meta: {
+        schemaVersion: 1,
+        chatId: "chat-filename-drift",
+        revision: 7,
+        lastModified: 70,
+        deviceId: "remote-device",
+        nodeCount: 1,
+        edgeCount: 0,
+        tombstoneCount: 0,
+      },
+      nodes: [{ id: "restored-from-drift", updatedAt: 70 }],
+      edges: [],
+      tombstones: [],
+      state: {
+        lastProcessedFloor: 5,
+        extractionCount: 2,
+      },
+    },
+  });
+  remoteFiles.set("ST-BME_BackupManifest.json", [
+    {
+      filename: legacyFilename,
+      serverPath: `user/files/${legacyFilename}`,
+      chatId: "chat-filename-drift",
+      revision: 7,
+      lastModified: 70,
+      backupTime: 123,
+      size: 256,
+      schemaVersion: 1,
+    },
+  ]);
+
+  const runtime = {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    getSafetyDb: async () => safetyDb,
+  };
+
+  const restoreResult = await restoreFromServer("chat-filename-drift", runtime);
+  assert.equal(restoreResult.restored, true);
+  assert.equal(restoreResult.filename, legacyFilename);
+  assert.equal(db.snapshot.nodes[0].id, "restored-from-drift");
+}
+
+async function testDeleteUsesExplicitManifestFilenameAndClearsLocalBackupMeta() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const db = new FakeDb("chat-delete-drift");
+  db.meta.set("lastBackupUploadedAt", 999);
+  db.meta.set("lastBackupFilename", "ST-BME_backup_chat-delete-drift-stale.json");
+  dbByChatId.set("chat-delete-drift", db);
+
+  const driftFilename = "ST-BME_backup_chat-delete-drift-legacy.json";
+  remoteFiles.set(driftFilename, {
+    kind: "st-bme-backup",
+    version: 1,
+    chatId: "chat-delete-drift",
+    createdAt: 321,
+    sourceDeviceId: "remote-device",
+    snapshot: {
+      meta: {
+        schemaVersion: 1,
+        chatId: "chat-delete-drift",
+        revision: 3,
+        lastModified: 30,
+        deviceId: "remote-device",
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+      },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      state: {
+        lastProcessedFloor: -1,
+        extractionCount: 0,
+      },
+    },
+  });
+  remoteFiles.set("ST-BME_BackupManifest.json", [
+    {
+      filename: driftFilename,
+      serverPath: `user/files/${driftFilename}`,
+      chatId: "chat-delete-drift",
+      revision: 3,
+      lastModified: 30,
+      backupTime: 321,
+      size: 128,
+      schemaVersion: 1,
+    },
+  ]);
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  const deleteResult = await deleteServerBackup("chat-delete-drift", {
+    ...runtime,
+    filename: driftFilename,
+    serverPath: `user/files/${driftFilename}`,
+  });
+
+  assert.equal(deleteResult.deleted, true);
+  assert.equal(deleteResult.filename, driftFilename);
+  assert.equal(deleteResult.localMetaUpdated, true);
+  assert.equal(remoteFiles.has(driftFilename), false);
+  assert.equal(db.meta.get("lastBackupUploadedAt"), 0);
+  assert.equal(db.meta.get("lastBackupFilename"), "");
+
+  const manifestResult = await listServerBackups(runtime);
+  assert.equal(manifestResult.entries.length, 0);
 }
 
 async function testSyncNowLockAndAutoSync() {
@@ -1079,6 +1206,8 @@ async function main() {
   await testManualBackupAndRestoreFlow();
   await testBackupManifestReadFailureDoesNotOverwriteManifest();
   await testRestoreValidationDoesNotCreateSafetySnapshot();
+  await testRestoreUsesManifestFilenameWhenCurrentFilenameDrifts();
+  await testDeleteUsesExplicitManifestFilenameAndClearsLocalBackupMeta();
   await testSyncNowLockAndAutoSync();
   await testDeleteRemoteSyncFile();
   await testDeleteRemoteSyncFileFallsBackToLegacyFilename();

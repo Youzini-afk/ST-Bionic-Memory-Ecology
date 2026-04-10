@@ -13123,6 +13123,7 @@ async function onManageServerBackups() {
 async function onDeleteServerBackupEntry(payload = {}) {
   const chatId = String(payload?.chatId || "").trim();
   const filename = String(payload?.filename || "").trim();
+  const serverPath = String(payload?.serverPath || "").trim();
   if (!chatId) {
     return {
       deleted: false,
@@ -13138,12 +13139,27 @@ async function onDeleteServerBackupEntry(payload = {}) {
     buildBmeSyncRuntimeOptions({
       reason: "delete-backup",
       trigger: "panel:delete-backup",
+      filename,
+      serverPath,
     }),
   );
 
+  const currentChatId = getCurrentChatId();
+  if (
+    deleteResult?.deleted &&
+    currentChatId &&
+    normalizeChatIdCandidate(currentChatId) ===
+      normalizeChatIdCandidate(chatId)
+  ) {
+    await syncIndexedDbMetaToPersistenceState(chatId, {
+      syncState: "idle",
+      lastSyncError: "",
+    });
+  }
+
   return {
     ...deleteResult,
-    filename,
+    filename: deleteResult?.filename || filename,
     handledToast: true,
     skipDashboardRefresh: true,
   };

@@ -368,56 +368,207 @@ async function upsertBackupManifestEntry(entry, options = {}) {
   await writeBackupManifest(filteredEntries, options);
 }
 
+function normalizeSelectedBackupFilename(filename) {
+  const normalized = String(filename ?? "")
+    .trim()
+    .replace(/^\/+/, "");
+  if (
+    !normalized
+    || normalized === BME_BACKUP_MANIFEST_FILENAME
+    || /[\\/]/.test(normalized)
+  ) {
+    return "";
+  }
+  return normalized;
+}
+
+function normalizeSelectedBackupServerPath(serverPath, fallbackFilename = "") {
+  const normalizedPath = String(serverPath ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+  if (normalizedPath && !normalizedPath.includes("..")) {
+    return `/${normalizedPath}`;
+  }
+
+  const normalizedFilename = normalizeSelectedBackupFilename(fallbackFilename);
+  return normalizedFilename ? `/user/files/${normalizedFilename}` : "";
+}
+
+function sortBackupManifestEntries(entries = []) {
+  return [...entries].sort((left, right) => {
+    const timeDelta =
+      normalizeTimestamp(right.backupTime, 0) -
+      normalizeTimestamp(left.backupTime, 0);
+    if (timeDelta !== 0) return timeDelta;
+
+    const modifiedDelta =
+      normalizeTimestamp(right.lastModified, 0) -
+      normalizeTimestamp(left.lastModified, 0);
+    if (modifiedDelta !== 0) return modifiedDelta;
+
+    return String(left.filename || "").localeCompare(
+      String(right.filename || ""),
+    );
+  });
+}
+
+async function resolveBackupLookupContext(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const explicitFilename = normalizeSelectedBackupFilename(
+    options.filename || options.backupFilename,
+  );
+  const explicitServerPath = normalizeSelectedBackupServerPath(
+    options.serverPath,
+    explicitFilename,
+  );
+
+  let manifestEntries = [];
+  let manifestError = null;
+  try {
+    manifestEntries = sortBackupManifestEntries(await fetchBackupManifest(options));
+  } catch (error) {
+    manifestError = error;
+  }
+
+  const candidates = [];
+  const candidateIndexByFilename = new Map();
+  const pushCandidate = (filename, serverPath = "") => {
+    const normalizedFilename = normalizeSelectedBackupFilename(filename);
+    if (!normalizedFilename) return;
+
+    const normalizedServerPath = normalizeSelectedBackupServerPath(
+      serverPath,
+      normalizedFilename,
+    );
+    const existingIndex = candidateIndexByFilename.get(normalizedFilename);
+    if (existingIndex != null) {
+      if (
+        normalizedServerPath &&
+        !candidates[existingIndex].serverPath
+      ) {
+        candidates[existingIndex].serverPath = normalizedServerPath;
+      }
+      return;
+    }
+
+    candidateIndexByFilename.set(normalizedFilename, candidates.length);
+    candidates.push({
+      filename: normalizedFilename,
+      serverPath: normalizedServerPath,
+    });
+  };
+
+  pushCandidate(explicitFilename, explicitServerPath);
+
+  if (explicitFilename) {
+    for (const entry of manifestEntries) {
+      if (entry.filename === explicitFilename) {
+        pushCandidate(entry.filename, entry.serverPath);
+      }
+    }
+  }
+
+  for (const entry of manifestEntries) {
+    if (normalizeChatId(entry.chatId) === normalizedChatId) {
+      pushCandidate(entry.filename, entry.serverPath);
+    }
+  }
+
+  pushCandidate(buildBackupFilename(normalizedChatId));
+
+  return {
+    explicitFilename,
+    manifestEntries,
+    manifestError,
+    candidates,
+  };
+}
+
 async function readBackupEnvelope(chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
-  const backupFilename = buildBackupFilename(normalizedChatId);
+  const lookup = await resolveBackupLookupContext(normalizedChatId, options);
   const fetchImpl = getFetch(options);
+  const fallbackFilename = buildBackupFilename(normalizedChatId);
+  let lastMissingFilename = lookup.candidates[0]?.filename || fallbackFilename;
 
+  for (const candidate of lookup.candidates) {
+    try {
+      const response = await fetchImpl(
+        `${candidate.serverPath || `/user/files/${encodeURIComponent(candidate.filename)}`}?t=${Date.now()}`,
+        {
+          method: "GET",
+          cache: "no-store",
+        },
+      );
+      if (response.status === 404) {
+        lastMissingFilename = candidate.filename;
+        continue;
+      }
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => response.statusText);
+        return {
+          exists: false,
+          filename: candidate.filename,
+          envelope: null,
+          reason: "backup-read-error",
+          error: new Error(errorText || `HTTP ${response.status}`),
+        };
+      }
+
+      const payload = await response.json();
+      const envelope = normalizeBackupEnvelope(payload, normalizedChatId);
+      if (!envelope) {
+        return {
+          exists: false,
+          filename: candidate.filename,
+          envelope: null,
+          reason: "invalid-backup",
+        };
+      }
+      return {
+        exists: true,
+        filename: candidate.filename,
+        envelope,
+        reason: "ok",
+      };
+    } catch (error) {
+      return {
+        exists: false,
+        filename: candidate.filename,
+        envelope: null,
+        reason: "backup-read-error",
+        error,
+      };
+    }
+  }
+
+  return {
+    exists: false,
+    filename: lastMissingFilename,
+    envelope: null,
+    reason: "not-found",
+    manifestError: lookup.manifestError,
+  };
+}
+
+async function syncDeletedBackupMeta(chatId, remainingEntry, options = {}) {
   try {
-    const response = await fetchImpl(
-      `/user/files/${encodeURIComponent(backupFilename)}?t=${Date.now()}`,
-      {
-        method: "GET",
-        cache: "no-store",
-      },
-    );
-    if (response.status === 404) {
-      return {
-        exists: false,
-        filename: backupFilename,
-        envelope: null,
-        reason: "not-found",
-      };
-    }
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => response.statusText);
-      throw new Error(errorText || `HTTP ${response.status}`);
-    }
-
-    const payload = await response.json();
-    const envelope = normalizeBackupEnvelope(payload, normalizedChatId);
-    if (!envelope) {
-      return {
-        exists: false,
-        filename: backupFilename,
-        envelope: null,
-        reason: "invalid-backup",
-      };
-    }
-    return {
-      exists: true,
-      filename: backupFilename,
-      envelope,
-      reason: "ok",
-    };
-  } catch (error) {
-    return {
-      exists: false,
-      filename: backupFilename,
-      envelope: null,
-      reason: "backup-read-error",
-      error,
-    };
+    const db = await getDb(chatId, options);
+    await patchDbMeta(db, {
+      lastBackupUploadedAt: remainingEntry
+        ? normalizeTimestamp(
+            remainingEntry.backupTime || remainingEntry.lastModified,
+            0,
+          )
+        : 0,
+      lastBackupFilename: remainingEntry
+        ? String(remainingEntry.filename || "")
+        : "",
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1891,7 +2042,18 @@ export async function deleteServerBackup(chatId, options = {}) {
     };
   }
 
-  const filename = buildBackupFilename(normalizedChatId);
+  const lookup = await resolveBackupLookupContext(normalizedChatId, options);
+  const targetCandidate = lookup.candidates[0] || {
+    filename: buildBackupFilename(normalizedChatId),
+    serverPath: normalizeSelectedBackupServerPath(
+      "",
+      buildBackupFilename(normalizedChatId),
+    ),
+  };
+  const filename = targetCandidate.filename;
+  const serverPath =
+    targetCandidate.serverPath ||
+    normalizeSelectedBackupServerPath("", filename);
   const fetchImpl = getFetch(options);
 
   try {
@@ -1902,7 +2064,7 @@ export async function deleteServerBackup(chatId, options = {}) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        path: `/user/files/${filename}`,
+        path: serverPath,
       }),
     });
 
@@ -1912,11 +2074,33 @@ export async function deleteServerBackup(chatId, options = {}) {
     }
 
     try {
-      const existingEntries = await fetchBackupManifest(options);
+      const existingEntries =
+        lookup.manifestError == null
+          ? lookup.manifestEntries
+          : await fetchBackupManifest(options);
       const filteredEntries = existingEntries.filter(
         (entry) => entry.filename !== filename,
       );
       await writeBackupManifest(filteredEntries, options);
+
+      const remainingEntry =
+        sortBackupManifestEntries(
+          filteredEntries.filter(
+            (entry) => normalizeChatId(entry.chatId) === normalizedChatId,
+          ),
+        )[0] || null;
+      const localMetaUpdated = await syncDeletedBackupMeta(
+        normalizedChatId,
+        remainingEntry,
+        options,
+      );
+
+      return {
+        deleted: true,
+        chatId: normalizedChatId,
+        filename,
+        localMetaUpdated,
+      };
     } catch (manifestError) {
       return {
         deleted: false,
@@ -1927,12 +2111,6 @@ export async function deleteServerBackup(chatId, options = {}) {
         error: manifestError,
       };
     }
-
-    return {
-      deleted: true,
-      chatId: normalizedChatId,
-      filename,
-    };
   } catch (error) {
     console.warn("[ST-BME] 删除服务端备份失败:", error);
     return {
