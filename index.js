@@ -12808,6 +12808,7 @@ async function onRebuildSummaryState(options = {}) {
 
 async function onClearSummaryState() {
   return await onClearSummaryStateController({
+    confirm: (msg) => (typeof globalThis.confirm === "function" ? globalThis.confirm(msg) : false),
     ensureGraphMutationReady,
     getCurrentGraph: () => currentGraph,
     refreshPanelLiveState,

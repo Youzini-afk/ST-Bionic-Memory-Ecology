@@ -104,7 +104,6 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-synopsis",
   "bme-act-summary-rollup",
   "bme-act-summary-rebuild",
-  "bme-act-summary-clear",
   "bme-act-evolve",
   "bme-act-undo-maintenance",
   "bme-act-import",
@@ -1677,7 +1676,6 @@ function _refreshSummaryWorkspace() {
         <button class="bme-config-secondary-btn" id="bme-summary-generate" type="button">立即生成小总结</button>
         <button class="bme-config-secondary-btn" id="bme-summary-rollup" type="button">立即执行折叠</button>
         <button class="bme-config-secondary-btn" id="bme-summary-rebuild" type="button">重建总结状态</button>
-        <button class="bme-config-secondary-btn bme-task-btn-danger" id="bme-summary-clear" type="button">清空总结状态</button>
       </div>
     </div>
 
@@ -3606,7 +3604,6 @@ function _bindActions() {
     "bme-act-sleep": "sleep",
     "bme-act-synopsis": "synopsis",
     "bme-act-summary-rollup": "summaryRollup",
-    "bme-act-summary-clear": "clearSummaryState",
     "bme-act-export": "export",
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
@@ -3628,7 +3625,6 @@ function _bindActions() {
     synopsis: "生成小总结",
     summaryRollup: "执行总结折叠",
     rebuildSummaryState: "重建总结状态",
-    clearSummaryState: "清空总结状态",
     export: "导出图谱",
     import: "导入图谱",
     rebuild: "重建图谱",
@@ -3996,12 +3992,10 @@ function _bindActions() {
     const generateBtn = e.target.closest("#bme-summary-generate");
     const rollupBtn = e.target.closest("#bme-summary-rollup");
     const rebuildBtn = e.target.closest("#bme-summary-rebuild");
-    const clearBtn = e.target.closest("#bme-summary-clear");
     const actionMap = new Map([
       [generateBtn, "synopsis"],
       [rollupBtn, "summaryRollup"],
       [rebuildBtn, "rebuildSummaryState"],
-      [clearBtn, "clearSummaryState"],
     ]);
     const matched = [...actionMap.entries()].find(([element]) => Boolean(element));
     if (!matched) return;
