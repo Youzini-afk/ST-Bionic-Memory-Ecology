@@ -26,6 +26,157 @@ export function isBmeManagedHiddenMessage(
   );
 }
 
+export function isDialogueGreetingMessage(
+  message,
+  { index = null } = {},
+) {
+  if (!Number.isFinite(index) || index !== 0) return false;
+  if (!message || typeof message !== "object") return false;
+  return String(message?.mes ?? "").trim().length > 0;
+}
+
+export function isTrueSystemMessage(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (!message?.is_system) return false;
+  if (isDialogueGreetingMessage(message, { index, chat })) return false;
+  return !isBmeManagedHiddenMessage(message, { index, chat });
+}
+
+export function isDialogueCountedMessage(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (!message || typeof message !== "object") return false;
+  if (!String(message?.mes ?? "").trim()) return false;
+  return !isTrueSystemMessage(message, { index, chat });
+}
+
+export function isDialogueAssistantMessage(
+  message,
+  { index = null, chat = null } = {},
+) {
+  if (!isDialogueCountedMessage(message, { index, chat })) return false;
+  if (isDialogueGreetingMessage(message, { index, chat })) return false;
+  return Boolean(message) && !message.is_user;
+}
+
+export function buildDialogueFloorMap(chat = []) {
+  const floorToChatIndex = [];
+  const chatIndexToFloor = {};
+  const floorToRole = {};
+  const assistantDialogueFloors = [];
+  const assistantChatIndices = [];
+
+  if (!Array.isArray(chat)) {
+    return {
+      latestDialogueFloor: -1,
+      floorToChatIndex,
+      chatIndexToFloor,
+      floorToRole,
+      assistantDialogueFloors,
+      assistantChatIndices,
+    };
+  }
+
+  let currentFloor = -1;
+  for (let index = 0; index < chat.length; index += 1) {
+    const message = chat[index];
+    if (!isDialogueCountedMessage(message, { index, chat })) continue;
+    currentFloor += 1;
+    floorToChatIndex[currentFloor] = index;
+    chatIndexToFloor[index] = currentFloor;
+
+    if (isDialogueGreetingMessage(message, { index, chat })) {
+      floorToRole[currentFloor] = "greeting";
+      continue;
+    }
+
+    const role = message?.is_user ? "user" : "assistant";
+    floorToRole[currentFloor] = role;
+    if (role === "assistant") {
+      assistantDialogueFloors.push(currentFloor);
+      assistantChatIndices.push(index);
+    }
+  }
+
+  return {
+    latestDialogueFloor: currentFloor,
+    floorToChatIndex,
+    chatIndexToFloor,
+    floorToRole,
+    assistantDialogueFloors,
+    assistantChatIndices,
+  };
+}
+
+export function normalizeDialogueFloorRange(
+  chat = [],
+  startFloor = null,
+  endFloor = null,
+) {
+  const map = buildDialogueFloorMap(chat);
+  const latestDialogueFloor = Number(map.latestDialogueFloor);
+  const hasStart =
+    startFloor !== null &&
+    startFloor !== undefined &&
+    startFloor !== "" &&
+    Number.isFinite(Number(startFloor));
+  const hasEnd =
+    endFloor !== null &&
+    endFloor !== undefined &&
+    endFloor !== "" &&
+    Number.isFinite(Number(endFloor));
+  if (latestDialogueFloor < 0) {
+    return {
+      map,
+      latestDialogueFloor,
+      valid: false,
+      reason: "empty-dialogue",
+      startFloor: null,
+      endFloor: null,
+    };
+  }
+  if (!hasStart && hasEnd) {
+    return {
+      map,
+      latestDialogueFloor,
+      valid: false,
+      reason: "end-without-start",
+      startFloor: null,
+      endFloor: null,
+    };
+  }
+  const normalizedStart = hasStart
+    ? Math.max(0, Math.min(latestDialogueFloor, Math.floor(Number(startFloor))))
+    : null;
+  const normalizedEnd = hasEnd
+    ? Math.max(
+        normalizedStart ?? 0,
+        Math.min(latestDialogueFloor, Math.floor(Number(endFloor))),
+      )
+    : hasStart
+      ? latestDialogueFloor
+      : null;
+
+  return {
+    map,
+    latestDialogueFloor,
+    valid: true,
+    reason: "",
+    startFloor: normalizedStart,
+    endFloor: normalizedEnd,
+  };
+}
+
+export function getDialogueFloorForChatIndex(chat = [], chatIndex = null) {
+  if (!Number.isFinite(Number(chatIndex))) return null;
+  const map = buildDialogueFloorMap(chat);
+  const floor = map.chatIndexToFloor[Math.floor(Number(chatIndex))];
+  return Number.isFinite(Number(floor)) ? Number(floor) : null;
+}
+
 function cloneChatMessageForPluginView(message) {
   if (!message || typeof message !== "object") {
     return message;

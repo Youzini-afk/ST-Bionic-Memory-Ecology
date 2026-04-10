@@ -112,7 +112,6 @@ const GRAPH_WRITE_ACTION_IDS = [
   "bme-act-vector-rebuild",
   "bme-act-vector-range",
   "bme-act-vector-reembed",
-  "bme-act-reroll",
   "bme-detail-delete",
   "bme-detail-save",
   "bme-cog-region-apply",
@@ -720,11 +719,11 @@ function _onFabSingleClick() {
 }
 
 async function _onFabDoubleClick() {
-  if (!_actionHandlers.reroll) return;
+  if (!_actionHandlers.extractTask) return;
 
   try {
     _fabEl?.setAttribute("data-status", "running");
-    await _actionHandlers.reroll({});
+    await _actionHandlers.extractTask({ mode: "rerun" });
     _fabEl?.setAttribute("data-status", "success");
     _refreshDashboard();
     _refreshGraph();
@@ -733,7 +732,7 @@ async function _onFabDoubleClick() {
       _fabEl?.setAttribute("data-status", status.status || "idle");
     }, 3000);
   } catch (err) {
-    console.error("[ST-BME] FAB reroll failed:", err);
+    console.error("[ST-BME] FAB extract task failed:", err);
     _fabEl?.setAttribute("data-status", "error");
   }
 }
@@ -1588,7 +1587,11 @@ function _refreshMobileCognition() {
 }
 
 function _formatSummaryEntryCard(entry = {}) {
-  const messageRange = Array.isArray(entry?.messageRange) ? entry.messageRange : ["?", "?"];
+  const messageRange = Array.isArray(entry?.dialogueRange)
+    ? entry.dialogueRange
+    : Array.isArray(entry?.messageRange)
+      ? entry.messageRange
+      : ["?", "?"];
   const extractionRange = Array.isArray(entry?.extractionRange)
     ? entry.extractionRange
     : ["?", "?"];
@@ -3599,12 +3602,10 @@ function _bindDashboardControls() {
 
 function _bindActions() {
   const bindings = {
-    "bme-act-extract": "extract",
     "bme-act-compress": "compress",
     "bme-act-sleep": "sleep",
     "bme-act-synopsis": "synopsis",
     "bme-act-summary-rollup": "summaryRollup",
-    "bme-act-summary-rebuild": "rebuildSummaryState",
     "bme-act-summary-clear": "clearSummaryState",
     "bme-act-export": "export",
     "bme-act-import": "import",
@@ -3622,7 +3623,6 @@ function _bindActions() {
   };
 
   const actionLabels = {
-    extract: "手动提取",
     compress: "手动压缩",
     sleep: "执行遗忘",
     synopsis: "生成小总结",
@@ -3700,6 +3700,67 @@ function _bindActions() {
   }
 
   document
+    .getElementById("bme-act-extract")
+    ?.addEventListener("click", async () => {
+      const btn = document.getElementById("bme-act-extract");
+      if (btn?.disabled) return;
+      const mode =
+        String(document.getElementById("bme-extract-mode")?.value || "pending")
+          .trim()
+          .toLowerCase() === "rerun"
+          ? "rerun"
+          : "pending";
+      const startFloor = _parseOptionalInt(
+        document.getElementById("bme-extract-start-floor")?.value,
+      );
+      const endFloor = _parseOptionalInt(
+        document.getElementById("bme-extract-end-floor")?.value,
+      );
+      const desc =
+        mode === "pending"
+          ? "提取当前尚未处理的内容"
+          : Number.isFinite(startFloor) || Number.isFinite(endFloor)
+            ? `重提范围 ${Number.isFinite(startFloor) ? startFloor : "当前"} ~ ${Number.isFinite(endFloor) ? endFloor : "最新"}`
+            : "当前重提";
+
+      if (!confirm(`确认要执行吗？\n\n${desc}`)) {
+        return;
+      }
+
+      if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = "0.5";
+      }
+
+      _showActionProgressUi("重新提取");
+      try {
+        await _actionHandlers.extractTask?.({
+          mode,
+          startFloor: Number.isFinite(startFloor) ? startFloor : undefined,
+          endFloor: Number.isFinite(endFloor) ? endFloor : undefined,
+        });
+        _refreshDashboard();
+        _refreshGraph();
+        if (
+          document
+            .getElementById("bme-pane-memory")
+            ?.classList.contains("active")
+        ) {
+          _refreshMemoryBrowser();
+        }
+      } catch (error) {
+        console.error("[ST-BME] Action extractTask failed:", error);
+        toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        if (btn) {
+          btn.style.opacity = "";
+        }
+        _refreshRuntimeStatus();
+        _refreshGraphAvailabilityState();
+      }
+    });
+
+  document
     .getElementById("bme-act-vector-range")
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-vector-range");
@@ -3739,32 +3800,31 @@ function _bindActions() {
       }
     });
 
-  // 重新提取 (reroll) 绑定
   document
-    .getElementById("bme-act-reroll")
+    .getElementById("bme-act-summary-rebuild")
     ?.addEventListener("click", async () => {
-      const btn = document.getElementById("bme-act-reroll");
+      const btn = document.getElementById("bme-act-summary-rebuild");
       if (btn?.disabled) return;
-
-      const floorStr = document.getElementById("bme-reroll-floor")?.value;
-      const fromFloor = _parseOptionalInt(floorStr);
-      const desc = Number.isFinite(fromFloor)
-        ? `从楼层 ${fromFloor} 开始回滚并重新提取`
-        : "回滚最新 AI 楼并重新提取";
-
-      if (!confirm(`确认要重新提取吗？\n\n${desc}\n\n已提取的记忆节点将被回滚。`)) {
-        return;
-      }
+      const startFloor = _parseOptionalInt(
+        document.getElementById("bme-summary-rebuild-start-floor")?.value,
+      );
+      const endFloor = _parseOptionalInt(
+        document.getElementById("bme-summary-rebuild-end-floor")?.value,
+      );
+      const desc = Number.isFinite(startFloor) || Number.isFinite(endFloor)
+        ? `按范围 ${Number.isFinite(startFloor) ? startFloor : "当前"} ~ ${Number.isFinite(endFloor) ? endFloor : "最新"} 重建总结状态`
+        : "按当前总结相关范围重建总结状态";
 
       if (btn) {
         btn.disabled = true;
         btn.style.opacity = "0.5";
       }
 
-      _showActionProgressUi("重新提取");
+      _showActionProgressUi("重建总结状态");
       try {
-        await _actionHandlers.reroll?.({
-          fromFloor: Number.isFinite(fromFloor) ? fromFloor : undefined,
+        await _actionHandlers.rebuildSummaryState?.({
+          startFloor: Number.isFinite(startFloor) ? startFloor : undefined,
+          endFloor: Number.isFinite(endFloor) ? endFloor : undefined,
         });
         _refreshDashboard();
         _refreshGraph();
@@ -3776,8 +3836,8 @@ function _bindActions() {
           _refreshMemoryBrowser();
         }
       } catch (error) {
-        console.error("[ST-BME] Action reroll failed:", error);
-        toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
+        console.error("[ST-BME] Action rebuildSummaryState failed:", error);
+        toastr.error(`重建总结状态失败: ${error?.message || error}`, "ST-BME");
       } finally {
         if (btn) {
           btn.style.opacity = "";
