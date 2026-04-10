@@ -12,10 +12,13 @@ import {
 import { onMessageReceivedController } from "../host/event-binding.js";
 import {
   buildGraphCommitMarker,
+  buildGraphChatStateSnapshot,
+  canUseGraphChatState,
   detectIndexedDbSnapshotCommitMarkerMismatch,
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
   findGraphShadowSnapshotByIntegrity,
+  GRAPH_CHAT_STATE_NAMESPACE,
   getAcceptedCommitMarkerRevision,
   getGraphPersistedRevision,
   getGraphIdentityAliasCandidates,
@@ -33,6 +36,7 @@ import {
   MODULE_NAME,
   normalizeGraphCommitMarker,
   readGraphCommitMarker,
+  readGraphChatStateSnapshot,
   readGraphShadowSnapshot,
   rememberGraphIdentityAlias,
   removeGraphShadowSnapshot,
@@ -40,6 +44,7 @@ import {
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
+  writeGraphChatStateSnapshot,
   writeGraphShadowSnapshot,
 } from "../graph/graph-persistence.js";
 import {
@@ -391,9 +396,12 @@ async function createGraphPersistenceHarness({
     readPersistedRecallFromUserMessage,
     cloneGraphForPersistence,
     buildGraphCommitMarker,
+    buildGraphChatStateSnapshot,
+    canUseGraphChatState,
     cloneRuntimeDebugValue,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     onMessageReceivedController,
+    GRAPH_CHAT_STATE_NAMESPACE,
     getAcceptedCommitMarkerRevision,
     getGraphPersistenceMeta,
     getGraphPersistedRevision,
@@ -412,6 +420,7 @@ async function createGraphPersistenceHarness({
     findGraphShadowSnapshotByIntegrity,
     normalizeGraphCommitMarker,
     readGraphCommitMarker,
+    readGraphChatStateSnapshot,
     readGraphShadowSnapshot,
     rememberGraphIdentityAlias,
     removeGraphShadowSnapshot,
@@ -419,6 +428,7 @@ async function createGraphPersistenceHarness({
     shouldPreferShadowSnapshotOverOfficial,
     stampGraphPersistenceMeta,
     writeChatMetadataPatch,
+    writeGraphChatStateSnapshot,
     writeGraphShadowSnapshot,
     // Shadow snapshot functions need VM-local sessionStorage overrides
     // because imported versions use the outer globalThis (no sessionStorage)
@@ -711,6 +721,7 @@ async function createGraphPersistenceHarness({
       characterId,
       groupId,
       chat,
+      __chatStateStore: new Map(),
       updateChatMetadata(patch) {
         const base =
           this.chatMetadata &&
@@ -728,6 +739,36 @@ async function createGraphPersistenceHarness({
       },
       async saveMetadata() {
         runtimeContext.__contextImmediateSaveCalls += 1;
+      },
+      async getChatState(namespace) {
+        const key = String(namespace || "").trim().toLowerCase();
+        const value = this.__chatStateStore.get(key);
+        return value == null ? null : structuredClone(value);
+      },
+      async updateChatState(namespace, updater) {
+        const key = String(namespace || "").trim().toLowerCase();
+        if (!key || typeof updater !== "function") {
+          return { ok: false, state: null, updated: false };
+        }
+        const current = this.__chatStateStore.has(key)
+          ? structuredClone(this.__chatStateStore.get(key))
+          : {};
+        const next = await updater(structuredClone(current), {
+          attempt: 0,
+          target: null,
+          namespace: key,
+        });
+        if (next == null) {
+          return { ok: true, state: current, updated: false };
+        }
+        const currentJson = JSON.stringify(current);
+        const nextJson = JSON.stringify(next);
+        this.__chatStateStore.set(key, structuredClone(next));
+        return {
+          ok: true,
+          state: structuredClone(next),
+          updated: currentJson !== nextJson,
+        };
       },
     },
     __contextSaveCalls: 0,
@@ -2673,6 +2714,113 @@ result = {
     harness.api.getIndexedDbSnapshot().meta.migrationSource,
     "chat_metadata",
   );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-state-save",
+    globalChatId: "chat-state-save",
+    chatMetadata: {
+      integrity: "meta-chat-state-save",
+    },
+    indexedDbSnapshot: {
+      meta: {
+        chatId: "chat-state-save",
+        revision: 0,
+      },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      state: {
+        lastProcessedFloor: -1,
+        extractionCount: 0,
+      },
+    },
+  });
+
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-state-save", "sidecar"),
+    {
+      revision: 7,
+      integrity: "meta-chat-state-save",
+      chatId: "chat-state-save",
+      reason: "chat-state-seed",
+    },
+  );
+
+  const result = await harness.runtimeContext.persistGraphToHostChatState(
+    harness.runtimeContext.__chatContext,
+    {
+      graph,
+      revision: 7,
+      reason: "chat-state-direct-save",
+      storageTier: "chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+      mode: "primary",
+    },
+  );
+
+  assert.equal(result.saved, true);
+  const stored = await harness.runtimeContext.__chatContext.getChatState(
+    GRAPH_CHAT_STATE_NAMESPACE,
+  );
+  assert.equal(stored?.revision, 7);
+  assert.equal(stored?.commitMarker?.storageTier, "chat-state");
+  assert.equal(
+    harness.api.getGraphPersistenceState().dualWriteLastResult?.target,
+    "chat-state",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-state-read",
+    globalChatId: "chat-state-read",
+    chatMetadata: {
+      integrity: "meta-chat-state-read",
+    },
+  });
+
+  const sidecarGraph = stampPersistedGraph(
+    createMeaningfulGraph("chat-state-read", "sidecar-read"),
+    {
+      revision: 9,
+      integrity: "meta-chat-state-read",
+      chatId: "chat-state-read",
+      reason: "chat-state-read-seed",
+    },
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    GRAPH_CHAT_STATE_NAMESPACE,
+    buildGraphChatStateSnapshot(sidecarGraph, {
+      revision: 9,
+      storageTier: "chat-state",
+      accepted: true,
+      reason: "chat-state-read-seed",
+      chatId: "chat-state-read",
+      integrity: "meta-chat-state-read",
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+    }),
+  );
+
+  const result = await harness.runtimeContext.readGraphChatStateSnapshot(
+    harness.runtimeContext.__chatContext,
+    {
+      namespace: GRAPH_CHAT_STATE_NAMESPACE,
+    },
+  );
+
+  assert.equal(
+    harness.runtimeContext.canUseGraphChatState(
+      harness.runtimeContext.__chatContext,
+    ),
+    true,
+  );
+  assert.equal(result?.revision, 9);
+  assert.equal(result?.commitMarker?.storageTier, "chat-state");
 }
 
 console.log("graph-persistence tests passed");
