@@ -182,4 +182,34 @@ function createRuntime(persistResult) {
   );
 }
 
+{
+  const runtime = createRuntime({
+    saved: false,
+    queued: false,
+    blocked: false,
+    accepted: false,
+    reason: "should-not-run",
+    revision: 0,
+    saveMode: "",
+    storageTier: "none",
+  });
+  runtime.extractMemories = async () => ({
+    success: false,
+    error: "提取 LLM 未返回有效操作",
+    processedRange: [4, 4],
+  });
+  const result = await executeExtractionBatchController(runtime, {
+    chat: [{ is_user: false, mes: "测试" }],
+    startIdx: 5,
+    endIdx: 5,
+    settings: {},
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.batchStatus.completed, false);
+  assert.equal(result.batchStatus.stages.core.outcome, "failed");
+  assert.equal(result.batchStatus.stages.finalize.outcome, "failed");
+  assert.equal(runtime.graph.historyState.lastBatchStatus.persistence, null);
+}
+
 console.log("extraction-persistence-gating tests passed");

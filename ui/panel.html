@@ -204,6 +204,20 @@
                 <label>最近持久化</label>
                 <div class="bme-recent-meta" id="bme-status-last-persist">—</div>
               </div>
+              <div class="bme-config-row" id="bme-persist-repair-row" hidden>
+                <label>持久化修复</label>
+                <div class="bme-task-inline-actions">
+                  <button class="bme-config-secondary-btn" id="bme-act-retry-persist" type="button">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                    <span>重试持久化</span>
+                  </button>
+                  <button class="bme-config-secondary-btn" id="bme-act-probe-graph-load" type="button">
+                    <i class="fa-solid fa-satellite-dish"></i>
+                    <span>重新探测图谱</span>
+                  </button>
+                </div>
+              </div>
+              <div class="bme-config-help" id="bme-persist-repair-help" hidden></div>
               <div class="bme-config-row">
                 <label>最近向量</label>
                 <div class="bme-recent-meta" id="bme-status-last-vector">—</div>

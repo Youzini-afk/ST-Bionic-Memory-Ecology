@@ -137,7 +137,7 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
         !Array.isArray(historyState.lastBatchStatus.persistence)
           ? {
               outcome: String(
-                historyState.lastBatchStatus.persistence.outcome || "queued",
+                historyState.lastBatchStatus.persistence.outcome || "failed",
               ),
               accepted:
                 historyState.lastBatchStatus.persistence.accepted === true,
@@ -161,18 +161,32 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
                 historyState.lastBatchStatus.persistence.queued === true,
               blocked:
                 historyState.lastBatchStatus.persistence.blocked === true,
+              attempted:
+                historyState.lastBatchStatus.persistence.attempted === true ||
+                Number(historyState.lastBatchStatus.persistence.revision) > 0 ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.storageTier || "",
+                  ).trim() &&
+                    String(
+                      historyState.lastBatchStatus.persistence.storageTier || "",
+                    ) !== "none",
+                ) ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.saveMode || "",
+                  ).trim(),
+                ) ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.reason || "",
+                  ).trim(),
+                ) ||
+                historyState.lastBatchStatus.persistence.saved === true ||
+                historyState.lastBatchStatus.persistence.queued === true ||
+                historyState.lastBatchStatus.persistence.blocked === true,
             }
-          : {
-              outcome: "queued",
-              accepted: false,
-              storageTier: "none",
-              reason: "",
-              revision: 0,
-              saveMode: "",
-              saved: false,
-              queued: false,
-              blocked: false,
-            },
+          : null,
     };
   }
   if (typeof historyState.lastExtractedRegion !== "string") {

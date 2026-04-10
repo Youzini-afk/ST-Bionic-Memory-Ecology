@@ -13229,6 +13229,53 @@ async function onRollbackLastRestore() {
   });
   return { handledToast: true, result };
 }
+
+async function onRetryPendingPersist() {
+  const hadPending = graphPersistenceState.pendingPersist === true;
+  const result = await retryPendingGraphPersist({
+    reason: "panel-manual-persist-retry",
+    scheduleRetryOnFailure: false,
+  });
+  refreshPanelLiveState();
+
+  if (result?.accepted === true) {
+    toastr.success("最近一批持久化已确认");
+    return { handledToast: true, result };
+  }
+
+  if (!hadPending && String(result?.reason || "") === "no-pending-persist") {
+    toastr.info("当前没有待确认的持久化批次");
+    return { handledToast: true, result };
+  }
+
+  toastr.warning(
+    `持久化仍未确认: ${result?.reason || result?.loadState || "未知原因"}`,
+  );
+  return { handledToast: true, result };
+}
+
+async function onProbeGraphLoad() {
+  const result = syncGraphLoadFromLiveContext({
+    source: "panel-manual-graph-probe",
+    force: true,
+  });
+  refreshPanelLiveState();
+
+  if (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING) {
+    toastr.info("已重新探测当前聊天图谱，正在等待本地持久化加载");
+    return { handledToast: true, result };
+  }
+
+  if (graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED) {
+    toastr.warning(
+      `当前图谱仍处于保护模式: ${graphPersistenceState.reason || "metadata not ready"}`,
+    );
+    return { handledToast: true, result };
+  }
+
+  toastr.success("已重新探测当前聊天图谱");
+  return { handledToast: true, result };
+}
 (async function init() {
   await loadServerSettings();
   syncGraphPersistenceDebugState();
@@ -13248,6 +13295,8 @@ async function onRollbackLastRestore() {
       summaryRollup: onManualSummaryRollup,
       rebuildSummaryState: onRebuildSummaryState,
       clearSummaryState: onClearSummaryState,
+      retryPendingPersist: onRetryPendingPersist,
+      probeGraphLoad: onProbeGraphLoad,
       export: onExportGraph,
       import: onImportGraph,
       rebuild: onRebuild,

@@ -1832,6 +1832,7 @@ function _refreshDashboard() {
     _setText("bme-status-last-persist", "等待聊天图谱元数据加载");
     _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
+    _refreshPersistenceRepairUi(loadInfo, null);
     _renderStatefulListPlaceholder(
       document.getElementById("bme-recent-extract"),
       _getGraphLoadLabel(loadInfo.loadState),
@@ -1908,6 +1909,7 @@ function _refreshDashboard() {
     "bme-status-last-persist",
     _formatDashboardPersistMeta(loadInfo, lastBatchStatus),
   );
+  _refreshPersistenceRepairUi(loadInfo, lastBatchStatus);
   _setText("bme-status-last-vector", vectorStatus.meta || "尚未执行向量任务");
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
@@ -3739,6 +3741,8 @@ function _bindActions() {
     "bme-act-sleep": "sleep",
     "bme-act-synopsis": "synopsis",
     "bme-act-summary-rollup": "summaryRollup",
+    "bme-act-retry-persist": "retryPendingPersist",
+    "bme-act-probe-graph-load": "probeGraphLoad",
     "bme-act-export": "export",
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
@@ -3763,6 +3767,8 @@ function _bindActions() {
     sleep: "执行遗忘",
     synopsis: "生成小总结",
     summaryRollup: "执行总结折叠",
+    retryPendingPersist: "重试持久化",
+    probeGraphLoad: "重新探测图谱",
     rebuildSummaryState: "重建总结状态",
     export: "导出图谱",
     import: "导入图谱",
@@ -9504,6 +9510,8 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
       return "已保存";
     case "fallback":
       return "兜底已保存";
+    case "not-attempted":
+      return "未尝试";
     case "queued":
       return "已排队";
     case "blocked":
@@ -9515,8 +9523,26 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
   }
 }
 
+function _hasMeaningfulPersistenceRecord(persistence = null) {
+  if (!persistence || typeof persistence !== "object") return false;
+  if (persistence.attempted === true) return true;
+  const revision = Number(persistence?.revision || 0);
+  if (Number.isFinite(revision) && revision > 0) return true;
+  if (String(persistence?.storageTier || "").trim() && persistence.storageTier !== "none") {
+    return true;
+  }
+  if (String(persistence?.saveMode || "").trim()) return true;
+  if (String(persistence?.reason || "").trim()) return true;
+  return (
+    persistence.saved === true ||
+    persistence.queued === true ||
+    persistence.blocked === true
+  );
+}
+
 function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
   if (!persistence || persistence.accepted === true) return true;
+  if (!_hasMeaningfulPersistenceRecord(persistence)) return true;
   if (loadInfo?.pendingPersist === true) return false;
   const persistenceRevision = Number(persistence?.revision || 0);
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
@@ -9535,7 +9561,7 @@ function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
 
 function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   const persistence = batchStatus?.persistence || null;
-  if (persistence) {
+  if (_hasMeaningfulPersistenceRecord(persistence)) {
     const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
       accepted ? "已确认" : _formatPersistenceOutcomeLabel(persistence.outcome),
@@ -9562,6 +9588,14 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
       .join(" · ");
   }
 
+  if (loadInfo?.persistMismatchReason) {
+    return `一致性异常 · ${String(loadInfo.persistMismatchReason || "")}`;
+  }
+
+  if (String(batchStatus?.outcome || "") === "failed") {
+    return "本批未进入持久化";
+  }
+
   return "尚未执行持久化";
 }
 
@@ -9578,12 +9612,16 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
       ? Number(processedRange[1])
       : null;
 
-  if (persistence && !accepted && pendingFloor != null) {
+  if (_hasMeaningfulPersistenceRecord(persistence) && !accepted && pendingFloor != null) {
     return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
   }
 
   if (loadInfo?.persistMismatchReason) {
     return `持久化一致性异常：${String(loadInfo.persistMismatchReason || "")} · 已确认楼层 ${lastConfirmedFloor}`;
+  }
+
+  if (String(batchStatus?.outcome || "") === "failed") {
+    return `最近一批提取失败，已确认处理到楼层 ${lastConfirmedFloor}`;
   }
 
   const dirtyFrom = graph?.historyState?.historyDirtyFrom;
@@ -9610,6 +9648,44 @@ function _getGraphLoadLabel(loadState = "") {
     default:
       return "当前尚未进入聊天";
   }
+}
+
+function _refreshPersistenceRepairUi(
+  loadInfo = _getGraphPersistenceSnapshot(),
+  batchStatus = _getLatestBatchStatusSnapshot(),
+) {
+  const row = document.getElementById("bme-persist-repair-row");
+  const help = document.getElementById("bme-persist-repair-help");
+  if (!row || !help) return;
+
+  const persistence = batchStatus?.persistence || null;
+  const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
+  const shouldShow =
+    loadInfo?.pendingPersist === true ||
+    Boolean(loadInfo?.persistMismatchReason) ||
+    (_hasMeaningfulPersistenceRecord(persistence) && !accepted);
+
+  row.hidden = !shouldShow;
+  help.hidden = !shouldShow;
+  if (!shouldShow) {
+    help.textContent = "";
+    return;
+  }
+
+  if (loadInfo?.pendingPersist === true) {
+    help.textContent =
+      "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
+    return;
+  }
+
+  if (loadInfo?.persistMismatchReason) {
+    help.textContent =
+      `检测到持久化一致性异常：${String(loadInfo.persistMismatchReason || "")}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
+    return;
+  }
+
+  help.textContent =
+    "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
