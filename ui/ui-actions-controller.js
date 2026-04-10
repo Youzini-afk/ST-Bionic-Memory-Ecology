@@ -1151,6 +1151,7 @@ export async function onDeleteCurrentIdbController(runtime) {
   }
 
   const dbName = runtime.buildBmeDbName(chatId);
+  const restoreSafetyDbName = runtime.buildRestoreSafetyDbName?.(chatId) || "";
   if (
     !runtime.confirm(
       `确定要删除当前聊天的本地缓存数据库？\n\n目标: ${dbName}\n操作不可撤销。`,
@@ -1167,6 +1168,14 @@ export async function onDeleteCurrentIdbController(runtime) {
       req.onerror = () => reject(req.error);
       req.onblocked = () => resolve();
     });
+    if (restoreSafetyDbName) {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(restoreSafetyDbName);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => resolve();
+      });
+    }
     runtime.toastr.success(`已删除数据库 ${dbName}`);
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);

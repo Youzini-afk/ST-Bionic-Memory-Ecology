@@ -1,8 +1,12 @@
+import { BmeDatabase } from "./bme-db.js";
 import { PROCESSED_MESSAGE_HASH_VERSION } from "../runtime/runtime-state.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
 const BME_SYNC_FILENAME_MAX_LENGTH = 180;
+const BME_BACKUP_FILE_PREFIX = "ST-BME_backup_";
+const BME_BACKUP_MANIFEST_FILENAME = "ST-BME_BackupManifest.json";
+const BME_BACKUP_SCHEMA_VERSION = 1;
 
 export const BME_SYNC_DEVICE_ID_KEY = "st_bme_sync_device_id_v1";
 export const BME_SYNC_UPLOAD_DEBOUNCE_MS = 2500;
@@ -18,12 +22,35 @@ const RUNTIME_HISTORY_META_KEY = "runtimeHistoryState";
 const RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
 const RUNTIME_BATCH_JOURNAL_META_KEY = "runtimeBatchJournal";
 const RUNTIME_LAST_RECALL_META_KEY = "runtimeLastRecallResult";
+const RUNTIME_SUMMARY_STATE_META_KEY = "runtimeSummaryState";
+const RUNTIME_MAINTENANCE_JOURNAL_META_KEY = "maintenanceJournal";
+const RUNTIME_KNOWLEDGE_STATE_META_KEY = "knowledgeState";
+const RUNTIME_REGION_STATE_META_KEY = "regionState";
+const RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 const RUNTIME_LAST_PROCESSED_SEQ_META_KEY = "runtimeLastProcessedSeq";
 const RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
 const RUNTIME_BATCH_JOURNAL_LIMIT = 96;
 
 function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
+}
+
+export function buildRestoreSafetyChatId(chatId) {
+  return `__restore_safety__${normalizeChatId(chatId)}`;
+}
+
+function resolveCloudStorageMode(options = {}) {
+  const mode =
+    typeof options.getCloudStorageMode === "function"
+      ? options.getCloudStorageMode()
+      : options.cloudStorageMode;
+  return String(mode || "automatic").trim().toLowerCase() === "manual"
+    ? "manual"
+    : "automatic";
+}
+
+function isAutomaticCloudMode(options = {}) {
+  return resolveCloudStorageMode(options) === "automatic";
 }
 
 function createStableFilenameHash(input = "") {
@@ -47,6 +74,26 @@ function normalizeRemoteFilenameCandidate(fileName, fallbackValue = "ST-BME_sync
     .slice(0, BME_SYNC_FILENAME_MAX_LENGTH)
     .trim();
   return sanitized || fallbackValue;
+}
+
+function buildBackupFilename(chatId) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const hash = createStableFilenameHash(normalizedChatId || "unknown");
+  const rawSlug = normalizeRemoteFilenameCandidate(normalizedChatId, "");
+  const suffixPart = `-${hash}${BME_SYNC_FILE_SUFFIX}`;
+  const maxSlugLength = Math.max(
+    0,
+    BME_SYNC_FILENAME_MAX_LENGTH -
+      BME_BACKUP_FILE_PREFIX.length -
+      suffixPart.length,
+  );
+  const safeSlug = rawSlug
+    .slice(0, maxSlugLength)
+    .replace(/^[_.-]+|[_.-]+$/g, "");
+  const core = safeSlug
+    ? `${BME_BACKUP_FILE_PREFIX}${safeSlug}-${hash}`
+    : `${BME_BACKUP_FILE_PREFIX}${hash}`;
+  return `${core}${BME_SYNC_FILE_SUFFIX}`;
 }
 
 function normalizeLegacyRemoteFilenameCandidate(
@@ -141,6 +188,48 @@ function toSerializableData(value, fallback = null) {
   }
 }
 
+function normalizeBackupManifestEntry(rawEntry = {}) {
+  if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+    return null;
+  }
+
+  const filename = String(rawEntry.filename || "").trim();
+  if (
+    !filename
+    || !filename.startsWith(BME_BACKUP_FILE_PREFIX)
+    || !filename.endsWith(BME_SYNC_FILE_SUFFIX)
+  ) {
+    return null;
+  }
+
+  return {
+    filename,
+    serverPath: String(rawEntry.serverPath || "").trim(),
+    chatId: normalizeChatId(rawEntry.chatId),
+    revision: normalizeRevision(rawEntry.revision),
+    lastModified: normalizeTimestamp(rawEntry.lastModified, 0),
+    backupTime: normalizeTimestamp(rawEntry.backupTime, 0),
+    size: normalizeNonNegativeInteger(rawEntry.size, 0),
+    schemaVersion: normalizeNonNegativeInteger(rawEntry.schemaVersion, 0),
+  };
+}
+
+function normalizeBackupEnvelope(payload = {}, chatId = "") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const normalizedSnapshot = normalizeSyncSnapshot(payload.snapshot, chatId);
+  return {
+    kind: String(payload.kind || "st-bme-backup").trim().toLowerCase(),
+    version: normalizeNonNegativeInteger(payload.version, 0),
+    chatId: normalizeChatId(payload.chatId || normalizedSnapshot.meta?.chatId),
+    createdAt: normalizeTimestamp(payload.createdAt, 0),
+    sourceDeviceId: String(payload.sourceDeviceId || "").trim(),
+    snapshot: normalizedSnapshot,
+  };
+}
+
 function getStorage() {
   const storage = globalThis.localStorage;
   if (!storage || typeof storage.getItem !== "function" || typeof storage.setItem !== "function") {
@@ -213,6 +302,283 @@ function getFetch(options = {}) {
     throw new Error("fetch 不可用，无法执行 ST-BME 同步请求");
   }
   return fetchImpl;
+}
+
+async function getSafetyDb(chatId, options = {}) {
+  if (typeof options.getSafetyDb === "function") {
+    return await options.getSafetyDb(chatId);
+  }
+
+  const db = new BmeDatabase(buildRestoreSafetyChatId(chatId));
+  await db.open();
+  return db;
+}
+
+async function fetchBackupManifest(options = {}) {
+  const fetchImpl = getFetch(options);
+  const response = await fetchImpl(
+    `/user/files/${BME_BACKUP_MANIFEST_FILENAME}?t=${Date.now()}`,
+    {
+      method: "GET",
+      cache: "no-store",
+    },
+  );
+  if (response.status === 404) {
+    return [];
+  }
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `manifest read failed: HTTP ${response.status}`);
+  }
+  const rawPayload = await response.json();
+  if (!Array.isArray(rawPayload)) {
+    throw new Error("backup manifest payload is not an array");
+  }
+  return rawPayload.map(normalizeBackupManifestEntry).filter(Boolean);
+}
+
+async function writeBackupManifest(entries = [], options = {}) {
+  const fetchImpl = getFetch(options);
+  const payload = JSON.stringify(entries, null, 2);
+  const response = await fetchImpl("/api/files/upload", {
+    method: "POST",
+    headers: {
+      ...getRequestHeadersSafe(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: BME_BACKUP_MANIFEST_FILENAME,
+      data: encodeBase64Utf8(payload),
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+}
+
+async function upsertBackupManifestEntry(entry, options = {}) {
+  const existingEntries = await fetchBackupManifest(options);
+  const filteredEntries = existingEntries.filter(
+    (candidate) => candidate.filename !== entry.filename,
+  );
+  filteredEntries.push(normalizeBackupManifestEntry(entry));
+  filteredEntries.sort((left, right) => right.backupTime - left.backupTime);
+  await writeBackupManifest(filteredEntries, options);
+}
+
+async function readBackupEnvelope(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const backupFilename = buildBackupFilename(normalizedChatId);
+  const fetchImpl = getFetch(options);
+
+  try {
+    const response = await fetchImpl(
+      `/user/files/${encodeURIComponent(backupFilename)}?t=${Date.now()}`,
+      {
+        method: "GET",
+        cache: "no-store",
+      },
+    );
+    if (response.status === 404) {
+      return {
+        exists: false,
+        filename: backupFilename,
+        envelope: null,
+        reason: "not-found",
+      };
+    }
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(errorText || `HTTP ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const envelope = normalizeBackupEnvelope(payload, normalizedChatId);
+    if (!envelope) {
+      return {
+        exists: false,
+        filename: backupFilename,
+        envelope: null,
+        reason: "invalid-backup",
+      };
+    }
+    return {
+      exists: true,
+      filename: backupFilename,
+      envelope,
+      reason: "ok",
+    };
+  } catch (error) {
+    return {
+      exists: false,
+      filename: backupFilename,
+      envelope: null,
+      reason: "backup-read-error",
+      error,
+    };
+  }
+}
+
+async function writeBackupEnvelope(envelope, chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const filename = buildBackupFilename(normalizedChatId);
+  const fetchImpl = getFetch(options);
+  const payload = JSON.stringify(envelope, null, 2);
+  const response = await fetchImpl("/api/files/upload", {
+    method: "POST",
+    headers: {
+      ...getRequestHeadersSafe(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: filename,
+      data: encodeBase64Utf8(payload),
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+
+  const uploadResult = await response.json().catch(() => ({}));
+  return {
+    filename,
+    path: String(uploadResult?.path || `/user/files/${filename}`),
+  };
+}
+
+async function createRestoreSafetySnapshot(chatId, snapshot, options = {}) {
+  const safetyDb = await getSafetyDb(chatId, options);
+  const revision = normalizeRevision(snapshot?.meta?.revision);
+  try {
+    await safetyDb.importSnapshot(snapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      revision,
+      markSyncDirty: false,
+    });
+    await patchDbMeta(safetyDb, {
+      restoreSafetySnapshotExists: true,
+      restoreSafetySnapshotCreatedAt: Date.now(),
+      restoreSafetySnapshotChatId: normalizeChatId(chatId),
+    });
+  } finally {
+    if (typeof options.getSafetyDb !== "function") {
+      await safetyDb.close().catch(() => {});
+    }
+  }
+}
+
+export async function getRestoreSafetySnapshotStatus(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      exists: false,
+      chatId: "",
+      createdAt: 0,
+      reason: "missing-chat-id",
+    };
+  }
+
+  try {
+    const safetyDb = await getSafetyDb(normalizedChatId, options);
+    try {
+      const exists = Boolean(
+        await readDbMeta(safetyDb, "restoreSafetySnapshotExists", false),
+      );
+      const createdAt = normalizeTimestamp(
+        await readDbMeta(safetyDb, "restoreSafetySnapshotCreatedAt", 0),
+        0,
+      );
+      return {
+        exists,
+        chatId: normalizedChatId,
+        createdAt: exists ? createdAt : 0,
+        reason: exists ? "ok" : "not-found",
+      };
+    } finally {
+      if (typeof options.getSafetyDb !== "function") {
+        await safetyDb.close().catch(() => {});
+      }
+    }
+  } catch (error) {
+    return {
+      exists: false,
+      chatId: normalizedChatId,
+      createdAt: 0,
+      reason: "safety-status-error",
+      error,
+    };
+  }
+}
+
+export async function rollbackFromRestoreSafetySnapshot(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      restored: false,
+      chatId: "",
+      reason: "missing-chat-id",
+    };
+  }
+
+  try {
+    const status = await getRestoreSafetySnapshotStatus(normalizedChatId, options);
+    if (!status.exists) {
+      return {
+        restored: false,
+        chatId: normalizedChatId,
+        reason: status.reason || "safety-not-found",
+      };
+    }
+
+    const safetyDb = await getSafetyDb(normalizedChatId, options);
+    try {
+      const snapshot = normalizeSyncSnapshot(
+        await safetyDb.exportSnapshot(),
+        normalizedChatId,
+      );
+      const db = await getDb(normalizedChatId, options);
+      await db.importSnapshot(snapshot, {
+        mode: "replace",
+        preserveRevision: true,
+        revision: normalizeRevision(snapshot.meta?.revision),
+        markSyncDirty: false,
+      });
+      await patchDbMeta(db, {
+        deviceId: getOrCreateDeviceId(),
+        syncDirty: true,
+        syncDirtyReason: "restore-safety-rollback",
+        lastBackupRollbackAt: Date.now(),
+      });
+      await invokeSyncAppliedHook(options, {
+        chatId: normalizedChatId,
+        action: "restore-backup",
+        revision: normalizeRevision(snapshot.meta?.revision),
+      });
+      return {
+        restored: true,
+        chatId: normalizedChatId,
+        revision: normalizeRevision(snapshot.meta?.revision),
+        createdAt: normalizeTimestamp(status.createdAt, 0),
+      };
+    } finally {
+      if (typeof options.getSafetyDb !== "function") {
+        await safetyDb.close().catch(() => {});
+      }
+    }
+  } catch (error) {
+    console.warn("[ST-BME] 回滚本地安全快照失败:", error);
+    return {
+      restored: false,
+      chatId: normalizedChatId,
+      reason: "restore-safety-rollback-error",
+      error,
+    };
+  }
 }
 
 function getRequestHeadersSafe(options = {}) {
@@ -919,6 +1285,22 @@ async function getDb(chatId, options = {}) {
   return db;
 }
 
+async function readDbMeta(db, key, fallbackValue = null) {
+  if (!db || typeof key !== "string" || !key) return fallbackValue;
+  if (typeof db.getMeta === "function") {
+    return db.getMeta(key, fallbackValue);
+  }
+  if (db.meta instanceof Map) {
+    return db.meta.has(key) ? db.meta.get(key) : fallbackValue;
+  }
+  if (db.meta && typeof db.meta === "object" && !Array.isArray(db.meta)) {
+    return Object.prototype.hasOwnProperty.call(db.meta, key)
+      ? db.meta[key]
+      : fallbackValue;
+  }
+  return fallbackValue;
+}
+
 async function patchDbMeta(db, patch = {}) {
   if (!db || !patch || typeof patch !== "object") return;
   if (typeof db.patchMeta === "function") {
@@ -1289,6 +1671,280 @@ export async function getRemoteStatus(chatId, options = {}) {
   };
 }
 
+export async function listServerBackups(options = {}) {
+  const entries = await fetchBackupManifest(options);
+  return {
+    entries,
+    filename: BME_BACKUP_MANIFEST_FILENAME,
+  };
+}
+
+export async function backupToServer(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      backedUp: false,
+      chatId: "",
+      reason: "missing-chat-id",
+    };
+  }
+
+  try {
+    const db = await getDb(normalizedChatId, options);
+    const snapshot = normalizeSyncSnapshot(
+      await db.exportSnapshot(),
+      normalizedChatId,
+    );
+    const nowMs = Date.now();
+    const deviceId = getOrCreateDeviceId();
+
+    snapshot.meta.chatId = normalizedChatId;
+    snapshot.meta.deviceId = snapshot.meta.deviceId || deviceId;
+    snapshot.meta.lastModified = normalizeTimestamp(
+      snapshot.meta.lastModified,
+      nowMs,
+    );
+
+    const envelope = {
+      kind: "st-bme-backup",
+      version: BME_BACKUP_SCHEMA_VERSION,
+      chatId: normalizedChatId,
+      createdAt: nowMs,
+      sourceDeviceId: deviceId,
+      snapshot: {
+        meta: toSerializableData(snapshot.meta, {}),
+        nodes: toSerializableData(snapshot.nodes, []),
+        edges: toSerializableData(snapshot.edges, []),
+        tombstones: toSerializableData(snapshot.tombstones, []),
+        state: toSerializableData(snapshot.state, {}),
+      },
+    };
+
+    const uploadResult = await writeBackupEnvelope(
+      envelope,
+      normalizedChatId,
+      options,
+    );
+    const serializedEnvelope = JSON.stringify(envelope);
+
+    try {
+      await upsertBackupManifestEntry(
+        {
+          filename: uploadResult.filename,
+          serverPath: String(uploadResult.path || "").replace(/^\/+/, ""),
+          chatId: normalizedChatId,
+          revision: normalizeRevision(snapshot.meta.revision),
+          lastModified: normalizeTimestamp(snapshot.meta.lastModified, nowMs),
+          backupTime: nowMs,
+          size: serializedEnvelope.length,
+          schemaVersion: BME_BACKUP_SCHEMA_VERSION,
+        },
+        options,
+      );
+    } catch (manifestError) {
+      return {
+        backedUp: false,
+        chatId: normalizedChatId,
+        filename: uploadResult.filename,
+        remotePath: uploadResult.path,
+        reason: "backup-manifest-error",
+        backupUploaded: true,
+        error: manifestError,
+      };
+    }
+
+    await patchDbMeta(db, {
+      deviceId,
+      syncDirty: false,
+      syncDirtyReason: "",
+      lastBackupUploadedAt: nowMs,
+      lastBackupFilename: uploadResult.filename,
+    });
+
+    return {
+      backedUp: true,
+      chatId: normalizedChatId,
+      filename: uploadResult.filename,
+      remotePath: uploadResult.path,
+      revision: normalizeRevision(snapshot.meta.revision),
+      backupTime: nowMs,
+    };
+  } catch (error) {
+    console.warn("[ST-BME] 手动备份到云端失败:", error);
+    return {
+      backedUp: false,
+      chatId: normalizedChatId,
+      reason: "backup-error",
+      error,
+    };
+  }
+}
+
+export async function restoreFromServer(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      restored: false,
+      chatId: "",
+      reason: "missing-chat-id",
+    };
+  }
+
+  try {
+    const db = await getDb(normalizedChatId, options);
+    const remoteResult = await readBackupEnvelope(normalizedChatId, options);
+    if (!remoteResult.exists || !remoteResult.envelope) {
+      return {
+        restored: false,
+        chatId: normalizedChatId,
+        filename: remoteResult.filename || "",
+        reason: remoteResult.reason || "backup-missing",
+      };
+    }
+
+    const envelope = remoteResult.envelope;
+    if (envelope.version !== BME_BACKUP_SCHEMA_VERSION) {
+      return {
+        restored: false,
+        chatId: normalizedChatId,
+        filename: remoteResult.filename,
+        reason: "backup-version-mismatch",
+      };
+    }
+
+    if (envelope.chatId !== normalizedChatId) {
+      return {
+        restored: false,
+        chatId: normalizedChatId,
+        filename: remoteResult.filename,
+        reason: "backup-chat-id-mismatch",
+      };
+    }
+
+    const snapshot = normalizeSyncSnapshot(envelope.snapshot, normalizedChatId);
+    if (normalizeChatId(snapshot.meta?.chatId) !== normalizedChatId) {
+      return {
+        restored: false,
+        chatId: normalizedChatId,
+        filename: remoteResult.filename,
+        reason: "snapshot-chat-id-mismatch",
+      };
+    }
+
+    const localSnapshot = normalizeSyncSnapshot(
+      await db.exportSnapshot(),
+      normalizedChatId,
+    );
+    await createRestoreSafetySnapshot(
+      normalizedChatId,
+      localSnapshot,
+      options,
+    );
+
+    await db.importSnapshot(snapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      revision: normalizeRevision(snapshot.meta.revision),
+      markSyncDirty: false,
+    });
+
+    await patchDbMeta(db, {
+      deviceId: getOrCreateDeviceId(),
+      syncDirty: false,
+      syncDirtyReason: "",
+      lastBackupRestoredAt: Date.now(),
+      lastBackupFilename:
+        remoteResult.filename || buildBackupFilename(normalizedChatId),
+    });
+
+    await invokeSyncAppliedHook(options, {
+      chatId: normalizedChatId,
+      action: "restore-backup",
+      revision: normalizeRevision(snapshot.meta.revision),
+    });
+
+    return {
+      restored: true,
+      chatId: normalizedChatId,
+      filename: remoteResult.filename,
+      revision: normalizeRevision(snapshot.meta.revision),
+      backupTime: normalizeTimestamp(envelope.createdAt, 0),
+    };
+  } catch (error) {
+    console.warn("[ST-BME] 从云端恢复备份失败:", error);
+    return {
+      restored: false,
+      chatId: normalizedChatId,
+      reason: "restore-error",
+      error,
+    };
+  }
+}
+
+export async function deleteServerBackup(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      deleted: false,
+      chatId: "",
+      reason: "missing-chat-id",
+    };
+  }
+
+  const filename = buildBackupFilename(normalizedChatId);
+  const fetchImpl = getFetch(options);
+
+  try {
+    const response = await fetchImpl("/api/files/delete", {
+      method: "POST",
+      headers: {
+        ...getRequestHeadersSafe(options),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        path: `/user/files/${filename}`,
+      }),
+    });
+
+    if (!response.ok && response.status !== 404) {
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(errorText || `HTTP ${response.status}`);
+    }
+
+    try {
+      const existingEntries = await fetchBackupManifest(options);
+      const filteredEntries = existingEntries.filter(
+        (entry) => entry.filename !== filename,
+      );
+      await writeBackupManifest(filteredEntries, options);
+    } catch (manifestError) {
+      return {
+        deleted: false,
+        chatId: normalizedChatId,
+        filename,
+        reason: "delete-backup-manifest-error",
+        backupDeleted: true,
+        error: manifestError,
+      };
+    }
+
+    return {
+      deleted: true,
+      chatId: normalizedChatId,
+      filename,
+    };
+  } catch (error) {
+    console.warn("[ST-BME] 删除服务端备份失败:", error);
+    return {
+      deleted: false,
+      chatId: normalizedChatId,
+      filename,
+      reason: "delete-backup-error",
+      error,
+    };
+  }
+}
+
 export async function upload(chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   if (!normalizedChatId) {
@@ -1503,6 +2159,61 @@ export function mergeSnapshots(localSnapshot, remoteSnapshot, options = {}) {
   );
 
   const mergedLastRecallResult = mergeRuntimeLastRecallResult(local, remote);
+  const mergedSummaryState =
+    chooseNewerRuntimePayload(
+      local.meta?.[RUNTIME_SUMMARY_STATE_META_KEY],
+      remote.meta?.[RUNTIME_SUMMARY_STATE_META_KEY],
+    ) ??
+    toSerializableData(
+      remote.meta?.[RUNTIME_SUMMARY_STATE_META_KEY] ??
+        local.meta?.[RUNTIME_SUMMARY_STATE_META_KEY] ??
+        {},
+      {},
+    );
+  const mergedMaintenanceJournal =
+    chooseNewerRuntimePayload(
+      local.meta?.[RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+      remote.meta?.[RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    ) ??
+    toSerializableData(
+      remote.meta?.[RUNTIME_MAINTENANCE_JOURNAL_META_KEY] ??
+        local.meta?.[RUNTIME_MAINTENANCE_JOURNAL_META_KEY] ??
+        [],
+      [],
+    );
+  const mergedKnowledgeState =
+    chooseNewerRuntimePayload(
+      local.meta?.[RUNTIME_KNOWLEDGE_STATE_META_KEY],
+      remote.meta?.[RUNTIME_KNOWLEDGE_STATE_META_KEY],
+    ) ??
+    toSerializableData(
+      remote.meta?.[RUNTIME_KNOWLEDGE_STATE_META_KEY] ??
+        local.meta?.[RUNTIME_KNOWLEDGE_STATE_META_KEY] ??
+        {},
+      {},
+    );
+  const mergedRegionState =
+    chooseNewerRuntimePayload(
+      local.meta?.[RUNTIME_REGION_STATE_META_KEY],
+      remote.meta?.[RUNTIME_REGION_STATE_META_KEY],
+    ) ??
+    toSerializableData(
+      remote.meta?.[RUNTIME_REGION_STATE_META_KEY] ??
+        local.meta?.[RUNTIME_REGION_STATE_META_KEY] ??
+        {},
+      {},
+    );
+  const mergedTimelineState =
+    chooseNewerRuntimePayload(
+      local.meta?.[RUNTIME_TIMELINE_STATE_META_KEY],
+      remote.meta?.[RUNTIME_TIMELINE_STATE_META_KEY],
+    ) ??
+    toSerializableData(
+      remote.meta?.[RUNTIME_TIMELINE_STATE_META_KEY] ??
+        local.meta?.[RUNTIME_TIMELINE_STATE_META_KEY] ??
+        {},
+      {},
+    );
 
   const mergedLastProcessedSeq = Math.max(
     normalizeNonNegativeInteger(local.meta?.[RUNTIME_LAST_PROCESSED_SEQ_META_KEY], 0),
@@ -1523,6 +2234,11 @@ export function mergeSnapshots(localSnapshot, remoteSnapshot, options = {}) {
     [RUNTIME_VECTOR_META_KEY]: mergedVectorState,
     [RUNTIME_BATCH_JOURNAL_META_KEY]: mergedBatchJournal,
     [RUNTIME_LAST_RECALL_META_KEY]: mergedLastRecallResult,
+    [RUNTIME_SUMMARY_STATE_META_KEY]: mergedSummaryState,
+    [RUNTIME_MAINTENANCE_JOURNAL_META_KEY]: mergedMaintenanceJournal,
+    [RUNTIME_KNOWLEDGE_STATE_META_KEY]: mergedKnowledgeState,
+    [RUNTIME_REGION_STATE_META_KEY]: mergedRegionState,
+    [RUNTIME_TIMELINE_STATE_META_KEY]: mergedTimelineState,
     [RUNTIME_LAST_PROCESSED_SEQ_META_KEY]: mergedLastProcessedSeq,
     [RUNTIME_GRAPH_VERSION_META_KEY]: mergedRuntimeGraphVersion,
     schemaVersion: Math.max(
@@ -1562,6 +2278,16 @@ export async function syncNow(chatId, options = {}) {
       synced: false,
       chatId: "",
       reason: "missing-chat-id",
+    };
+  }
+
+  if (!isAutomaticCloudMode(options)) {
+    return {
+      synced: false,
+      chatId: normalizedChatId,
+      action: "manual-probe",
+      reason: "manual-cloud-mode",
+      remoteStatus: null,
     };
   }
 
@@ -1680,6 +2406,14 @@ export function scheduleUpload(chatId, options = {}) {
     };
   }
 
+  if (!isAutomaticCloudMode(options)) {
+    return {
+      scheduled: false,
+      chatId: normalizedChatId,
+      reason: "manual-cloud-mode",
+    };
+  }
+
   const debounceMs = Number.isFinite(Number(options.debounceMs))
     ? Math.max(0, Math.floor(Number(options.debounceMs)))
     : BME_SYNC_UPLOAD_DEBOUNCE_MS;
@@ -1710,6 +2444,16 @@ export function autoSyncOnChatChange(chatId, options = {}) {
       synced: false,
       chatId: "",
       reason: "missing-chat-id",
+    });
+  }
+
+  if (!isAutomaticCloudMode(options)) {
+    return Promise.resolve({
+      synced: false,
+      chatId: normalizedChatId,
+      action: "manual-probe",
+      reason: "manual-cloud-mode",
+      remoteStatus: null,
     });
   }
 
@@ -1745,6 +2489,7 @@ export function autoSyncOnVisibility(options = {}) {
 
     const chatId = normalizeChatId(chatIdResolver());
     if (!chatId) return;
+    if (!isAutomaticCloudMode(options)) return;
 
     autoSyncOnChatChange(chatId, {
       ...options,

@@ -321,12 +321,31 @@ function buildCommittedBatchPersistSnapshot(
   };
 }
 
+function isPersistenceRevisionAccepted(runtime, persistence = null) {
+  if (!persistence || persistence.accepted === true) return true;
+  const graphPersistenceState = runtime?.getGraphPersistenceState?.() || {};
+  if (graphPersistenceState.pendingPersist === true) {
+    return false;
+  }
+  const persistenceRevision = Number(persistence?.revision || 0);
+  if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
+    return false;
+  }
+  const lastAcceptedRevision = Math.max(
+    Number(graphPersistenceState?.lastAcceptedRevision || 0),
+    Number(graphPersistenceState?.commitMarker?.accepted === true
+      ? graphPersistenceState?.commitMarker?.revision
+      : 0),
+  );
+  return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
+}
+
 function getPendingPersistenceGateInfo(runtime) {
   const graph = runtime?.getCurrentGraph?.();
   const batchStatus = graph?.historyState?.lastBatchStatus || null;
   const persistence = batchStatus?.persistence || null;
   const pendingPersist = runtime?.getGraphPersistenceState?.()?.pendingPersist === true;
-  const accepted = persistence?.accepted === true;
+  const accepted = isPersistenceRevisionAccepted(runtime, persistence);
   if (!pendingPersist && (!persistence || accepted)) {
     return null;
   }

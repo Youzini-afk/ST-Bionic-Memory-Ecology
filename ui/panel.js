@@ -332,6 +332,143 @@ async function getPopupRuntime() {
   return await popupRuntimePromise;
 }
 
+function _ensureCloudBackupManagerStyles() {
+  if (document.getElementById("bme-cloud-backup-manager-styles")) return;
+  const style = document.createElement("style");
+  style.id = "bme-cloud-backup-manager-styles";
+  style.textContent = `
+    .bme-cloud-backup-modal {
+      width: min(920px, 88vw);
+      max-width: 100%;
+      color: var(--SmartThemeBodyColor, #f2efe8);
+    }
+    .bme-cloud-backup-modal__header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .bme-cloud-backup-modal__title {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0;
+    }
+    .bme-cloud-backup-modal__subtitle {
+      opacity: 0.78;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+    .bme-cloud-backup-modal__tools {
+      display: inline-flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .bme-cloud-backup-modal__btn {
+      border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+      background: var(--SmartThemeBlurTintColor, rgba(255,255,255,0.06));
+      color: inherit;
+      border-radius: 10px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    .bme-cloud-backup-modal__btn:hover:not(:disabled) {
+      border-color: rgba(255, 181, 71, 0.65);
+    }
+    .bme-cloud-backup-modal__btn:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+    .bme-cloud-backup-modal__list {
+      display: grid;
+      gap: 12px;
+      max-height: 62vh;
+      overflow: auto;
+      padding-right: 4px;
+    }
+    .bme-cloud-backup-modal__empty,
+    .bme-cloud-backup-modal__loading {
+      border: 1px dashed var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+      border-radius: 14px;
+      padding: 18px;
+      opacity: 0.85;
+      text-align: center;
+    }
+    .bme-cloud-backup-card {
+      border: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.18));
+      border-radius: 14px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+    }
+    .bme-cloud-backup-card.is-current-chat {
+      border-color: rgba(255, 181, 71, 0.78);
+      box-shadow: 0 0 0 1px rgba(255, 181, 71, 0.22) inset;
+    }
+    .bme-cloud-backup-card__top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+    .bme-cloud-backup-card__title {
+      font-size: 16px;
+      font-weight: 700;
+      word-break: break-all;
+    }
+    .bme-cloud-backup-card__badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: rgba(255, 181, 71, 0.18);
+      color: #ffcd73;
+      flex-shrink: 0;
+    }
+    .bme-cloud-backup-card__meta {
+      display: grid;
+      gap: 4px;
+      font-size: 13px;
+      opacity: 0.86;
+      margin-bottom: 10px;
+    }
+    .bme-cloud-backup-card__filename {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      opacity: 0.75;
+      word-break: break-all;
+      margin-bottom: 12px;
+    }
+    .bme-cloud-backup-card__actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .bme-cloud-backup-card__danger {
+      border-color: rgba(255, 99, 99, 0.45);
+    }
+    .bme-cloud-backup-card__danger:hover:not(:disabled) {
+      border-color: rgba(255, 99, 99, 0.72);
+    }
+    @media (max-width: 720px) {
+      .bme-cloud-backup-modal__header {
+        flex-direction: column;
+      }
+      .bme-cloud-backup-modal__tools {
+        justify-content: flex-start;
+      }
+      .bme-cloud-backup-card__top {
+        flex-direction: column;
+      }
+    }
+  `;
+  document.head?.appendChild(style);
+}
+
 function mountPanelHtml(html) {
   const markup = String(html || "").trim();
   if (!markup) {
@@ -3617,6 +3754,10 @@ function _bindActions() {
     "bme-act-delete-current-idb": "deleteCurrentIdb",
     "bme-act-delete-all-idb": "deleteAllIdb",
     "bme-act-delete-server-sync": "deleteServerSyncFile",
+    "bme-act-backup-to-cloud": "backupToCloud",
+    "bme-act-restore-from-cloud": "restoreFromCloud",
+    "bme-act-manage-server-backups": "manageServerBackups",
+    "bme-act-rollback-last-restore": "rollbackLastRestore",
   };
 
   const actionLabels = {
@@ -3638,6 +3779,10 @@ function _bindActions() {
     deleteCurrentIdb: "清空当前 IDB",
     deleteAllIdb: "清空全部 IDB",
     deleteServerSyncFile: "清空服务端同步文件",
+    backupToCloud: "\u5907\u4efd\u5230\u4e91\u7aef",
+    restoreFromCloud: "\u4ece\u4e91\u7aef\u83b7\u53d6\u5907\u4efd",
+    manageServerBackups: "\u7ba1\u7406\u670d\u52a1\u5668\u5907\u4efd",
+    rollbackLastRestore: "\u56de\u6eda\u4e0a\u6b21\u6062\u590d",
   };
 
   for (const [elementId, actionKey] of Object.entries(bindings)) {
@@ -3645,7 +3790,10 @@ function _bindActions() {
     if (!btn) continue;
 
     btn.addEventListener("click", async () => {
-      const handler = _actionHandlers[actionKey];
+      const handler =
+        actionKey === "manageServerBackups"
+          ? _openServerBackupManagerModal
+          : _actionHandlers[actionKey];
       if (!handler) return;
 
       const label = actionLabels[actionKey] || actionKey;
@@ -3663,34 +3811,39 @@ function _bindActions() {
         if (result?.cancelled) {
           return;
         }
-        _refreshDashboard();
-        _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
-        if (
-          document
-            .getElementById("bme-pane-injection")
-            ?.classList.contains("active")
-        ) {
-          await _refreshInjectionPreview();
+        if (!result?.skipDashboardRefresh) {
+          _refreshDashboard();
+          _refreshGraph();
+          if (
+            document
+              .getElementById("bme-pane-memory")
+              ?.classList.contains("active")
+          ) {
+            _refreshMemoryBrowser();
+          }
+          if (
+            document
+              .getElementById("bme-pane-injection")
+              ?.classList.contains("active")
+          ) {
+            await _refreshInjectionPreview();
+          }
         }
         if (!result?.handledToast) {
           toastr.success(`${label} 完成`, "ST-BME");
         }
+        void _refreshCloudBackupManualUi();
       } catch (error) {
         console.error(`[ST-BME] Action ${actionKey} failed:`, error);
         if (!error?._stBmeToastHandled) {
           toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
         }
       } finally {
+        btn.disabled = false;
         btn.style.opacity = "";
         _refreshRuntimeStatus();
         _refreshGraphAvailabilityState();
+        void _refreshCloudBackupManualUi();
       }
     });
   }
@@ -4166,6 +4319,11 @@ function _refreshConfigTab() {
     settings.noticeDisplayMode ?? "normal",
   );
   _setInputValue(
+    "bme-setting-cloud-storage-mode",
+    settings.cloudStorageMode || "automatic",
+  );
+  _refreshCloudStorageModeUi(settings);
+  _setInputValue(
     "bme-setting-wi-filter-mode",
     settings.worldInfoFilterMode || "default",
   );
@@ -4567,6 +4725,18 @@ function _bindConfigControls() {
       });
     });
     noticeDisplayModeEl.dataset.bmeBound = "true";
+  }
+  const cloudStorageModeEl = document.getElementById(
+    "bme-setting-cloud-storage-mode",
+  );
+  if (cloudStorageModeEl && cloudStorageModeEl.dataset.bmeBound !== "true") {
+    cloudStorageModeEl.addEventListener("change", () => {
+      const settings = _patchSettings({
+        cloudStorageMode: cloudStorageModeEl.value || "automatic",
+      });
+      _refreshCloudStorageModeUi(settings);
+    });
+    cloudStorageModeEl.dataset.bmeBound = "true";
   }
   const wiFilterModeEl = document.getElementById("bme-setting-wi-filter-mode");
   if (wiFilterModeEl && wiFilterModeEl.dataset.bmeBound !== "true") {
@@ -9292,9 +9462,15 @@ function _getGraphPersistenceSnapshot() {
     storageMode: "indexeddb",
     dbReady: false,
     syncState: "idle",
+    syncDirty: false,
+    syncDirtyReason: "",
     lastSyncUploadedAt: 0,
     lastSyncDownloadedAt: 0,
     lastSyncedRevision: 0,
+    lastBackupUploadedAt: 0,
+    lastBackupRestoredAt: 0,
+    lastBackupRollbackAt: 0,
+    lastBackupFilename: "",
     lastSyncError: "",
   };
 }
@@ -9320,11 +9496,30 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
   }
 }
 
+function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
+  if (!persistence || persistence.accepted === true) return true;
+  if (loadInfo?.pendingPersist === true) return false;
+  const persistenceRevision = Number(persistence?.revision || 0);
+  if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
+    return false;
+  }
+  const commitMarkerRevision =
+    loadInfo?.commitMarker?.accepted === true
+      ? Number(loadInfo.commitMarker.revision || 0)
+      : 0;
+  const lastAcceptedRevision = Math.max(
+    Number(loadInfo?.lastAcceptedRevision || 0),
+    commitMarkerRevision,
+  );
+  return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
+}
+
 function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   const persistence = batchStatus?.persistence || null;
   if (persistence) {
+    const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
-      _formatPersistenceOutcomeLabel(persistence.outcome),
+      accepted ? "已确认" : _formatPersistenceOutcomeLabel(persistence.outcome),
       persistence.storageTier ? `tier ${persistence.storageTier}` : "",
       Number.isFinite(Number(persistence.revision)) && Number(persistence.revision) > 0
         ? `rev ${Number(persistence.revision)}`
@@ -9355,6 +9550,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   const lastConfirmedFloor =
     graph?.historyState?.lastProcessedAssistantFloor ?? -1;
   const persistence = batchStatus?.persistence || null;
+  const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
   const processedRange = Array.isArray(batchStatus?.processedRange)
     ? batchStatus.processedRange
     : [];
@@ -9363,7 +9559,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
       ? Number(processedRange[1])
       : null;
 
-  if (persistence && persistence.accepted !== true && pendingFloor != null) {
+  if (persistence && !accepted && pendingFloor != null) {
     return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
   }
 
@@ -9472,6 +9668,141 @@ function _refreshGraphAvailabilityState() {
   }
 }
 
+function _formatCloudTimeLabel(timestamp) {
+  const normalized = Number(timestamp);
+  if (!Number.isFinite(normalized) || normalized <= 0) return "";
+  try {
+    return new Date(normalized).toLocaleString();
+  } catch {
+    return "";
+  }
+}
+
+function _renderCloudStorageModeStatus(
+  settings = _getSettings?.() || {},
+  loadInfo = _getGraphPersistenceSnapshot(),
+) {
+  const statusEl = document.getElementById("bme-cloud-storage-mode-status");
+  if (!statusEl) return;
+
+  const mode = String(settings?.cloudStorageMode || "automatic");
+  if (mode !== "manual") {
+    statusEl.style.display = "none";
+    statusEl.textContent = "";
+    return;
+  }
+
+  const lines = [];
+  const syncDirty = Boolean(loadInfo?.syncDirty);
+  const dirtyReason = String(loadInfo?.syncDirtyReason || "").trim();
+  const backupUploadedAt = Number(loadInfo?.lastBackupUploadedAt) || 0;
+  const backupRestoredAt = Number(loadInfo?.lastBackupRestoredAt) || 0;
+  const backupRollbackAt = Number(loadInfo?.lastBackupRollbackAt) || 0;
+  const backupFilename = String(loadInfo?.lastBackupFilename || "").trim();
+  const dualWrite = loadInfo?.dualWriteLastResult || null;
+  const dualWriteAt = Number(dualWrite?.at) || 0;
+  const needsPostRecoveryBackup =
+    Boolean(dualWrite?.success) &&
+    ["migration", "identity-recovery"].includes(String(dualWrite?.action || "")) &&
+    dualWriteAt > backupUploadedAt;
+
+  if (syncDirty) {
+    lines.push(
+      dirtyReason
+        ? `\u672c\u5730\u6709\u672a\u5907\u4efd\u7684\u6539\u52a8\uff0c\u7b49\u5f85\u4f60\u624b\u52a8\u4e0a\u4f20\u3002\u539f\u56e0\uff1a${dirtyReason}`
+        : "\u672c\u5730\u6709\u672a\u5907\u4efd\u7684\u6539\u52a8\uff0c\u7b49\u5f85\u4f60\u624b\u52a8\u4e0a\u4f20\u3002",
+    );
+  } else if (backupUploadedAt > 0) {
+    const uploadedAtText = _formatCloudTimeLabel(backupUploadedAt);
+    lines.push(
+      uploadedAtText
+        ? `\u4e0a\u6b21\u5907\u4efd\u4e8e ${uploadedAtText}${backupFilename ? `\uff0c\u6587\u4ef6\uff1a${backupFilename}` : ""}`
+        : "\u5f53\u524d\u804a\u5929\u5df2\u6709\u4e91\u7aef\u5907\u4efd\u8bb0\u5f55\u3002",
+    );
+  } else {
+    lines.push("\u8fd8\u6ca1\u6709\u4e3a\u5f53\u524d\u804a\u5929\u4e0a\u4f20\u8fc7\u624b\u52a8\u5907\u4efd\u3002");
+  }
+
+  if (backupRestoredAt > 0) {
+    const restoredAtText = _formatCloudTimeLabel(backupRestoredAt);
+    if (restoredAtText) {
+      lines.push(`\u4e0a\u6b21\u4ece\u4e91\u7aef\u6062\u590d\u4e8e ${restoredAtText}${backupFilename ? `\uff0c\u6587\u4ef6\uff1a${backupFilename}` : ""}`);
+    }
+  }
+
+  if (backupRollbackAt > 0) {
+    const rollbackAtText = _formatCloudTimeLabel(backupRollbackAt);
+    if (rollbackAtText) {
+      lines.push(`\u6700\u8fd1\u4e00\u6b21\u5df2\u56de\u6eda\u5230\u6062\u590d\u524d\u7684\u672c\u5730\u5feb\u7167\uff0c\u65f6\u95f4\uff1a${rollbackAtText}`);
+    }
+  }
+
+  if (needsPostRecoveryBackup) {
+    const actionLabel =
+      String(dualWrite?.action || "") === "identity-recovery"
+        ? "\u8eab\u4efd\u6062\u590d"
+        : "\u8fc1\u79fb";
+    lines.push(`\u5df2\u5b8c\u6210${actionLabel}\uff0c\u4f46\u4e91\u7aef\u5907\u4efd\u8fd8\u6ca1\u8ddf\u4e0a\u8fd9\u6b21\u53d8\u66f4\u3002\u5982\u679c\u4f60\u8981\u5728 A/B \u8bbe\u5907\u95f4\u63a5\u529b\uff0c\u8bf7\u518d\u70b9\u4e00\u6b21\u201c\u5907\u4efd\u5230\u4e91\u7aef\u201d\u3002`);
+  }
+
+  statusEl.style.display = lines.length ? "" : "none";
+  statusEl.innerHTML = lines.map((line) => `<div>${_escHtml(line)}</div>`).join("");
+}
+
+async function _refreshCloudBackupManualUi(settings = _getSettings?.() || {}) {
+  const mode = String(settings?.cloudStorageMode || "automatic");
+  const rollbackButton = document.getElementById("bme-act-rollback-last-restore");
+  if (!rollbackButton) return;
+
+  if (mode !== "manual") {
+    rollbackButton.disabled = true;
+    rollbackButton.title = "";
+    return;
+  }
+
+  if (typeof _actionHandlers.getRestoreSafetyStatus !== "function") {
+    rollbackButton.disabled = true;
+    rollbackButton.title = "";
+    return;
+  }
+
+  rollbackButton.disabled = true;
+  rollbackButton.title = "\u6b63\u5728\u68c0\u67e5\u662f\u5426\u5b58\u5728\u53ef\u7528\u7684\u56de\u6eda\u5feb\u7167...";
+  try {
+    const status = await _actionHandlers.getRestoreSafetyStatus();
+    const hasSafety = Boolean(status?.exists);
+    rollbackButton.disabled = !hasSafety;
+    rollbackButton.title = hasSafety
+      ? status?.createdAt
+        ? `\u5df2\u68c0\u6d4b\u5230\u4e0a\u6b21\u6062\u590d\u524d\u7684\u672c\u5730\u5b89\u5168\u5feb\u7167\uff0c\u521b\u5efa\u65f6\u95f4\uff1a${new Date(status.createdAt).toLocaleString()}`
+        : "\u5df2\u68c0\u6d4b\u5230\u4e0a\u6b21\u6062\u590d\u524d\u7684\u672c\u5730\u5b89\u5168\u5feb\u7167\uff0c\u53ef\u4ee5\u56de\u6eda\u3002"
+      : "\u5f53\u524d\u804a\u5929\u8fd8\u6ca1\u6709\u53ef\u7528\u7684\u56de\u6eda\u5feb\u7167\u3002";
+  } catch (error) {
+    console.error("[ST-BME] failed to read restore safety snapshot status:", error);
+    rollbackButton.disabled = true;
+    rollbackButton.title = "\u8bfb\u53d6\u56de\u6eda\u5feb\u7167\u72b6\u6001\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002";
+  }
+}
+
+function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
+  const mode = String(settings?.cloudStorageMode || "automatic");
+  const manualActions = document.getElementById(
+    "bme-cloud-backup-manual-actions",
+  );
+  const helpText = document.getElementById("bme-cloud-storage-mode-help");
+  if (manualActions) {
+    manualActions.style.display = mode === "manual" ? "" : "none";
+  }
+  if (helpText) {
+    helpText.textContent =
+      mode === "manual"
+        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
+        : "\u81ea\u52a8\u50a8\u5b58\u4f1a\u7ee7\u7eed\u6cbf\u7528\u5f53\u524d\u955c\u50cf\u540c\u6b65\u903b\u8f91\u4e0e\u95f4\u9694\uff1b\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730\u5199\u5165\uff0c\u9700\u8981\u4f60\u4e3b\u52a8\u5907\u4efd\u548c\u6062\u590d\u3002";
+  }
+  _renderCloudStorageModeStatus(settings, _getGraphPersistenceSnapshot());
+  void _refreshCloudBackupManualUi(settings);
+}
+
 function _refreshRuntimeStatus() {
   const runtimeStatus = _getRuntimeStatus?.() || {};
   const text = runtimeStatus.text || "待命";
@@ -9479,6 +9810,7 @@ function _refreshRuntimeStatus() {
   _setText("bme-status-text", text);
   _setText("bme-status-meta", meta);
   _setText("bme-panel-status", text);
+  _renderCloudStorageModeStatus(_getSettings?.() || {}, _getGraphPersistenceSnapshot());
   _refreshGraphAvailabilityState();
 }
 
@@ -9496,7 +9828,211 @@ function _patchSettings(patch = {}, options = {}) {
   if (options.refreshTaskWorkspace) _refreshTaskProfileWorkspace(settings);
   if (options.refreshTheme)
     _highlightThemeChoice(settings.panelTheme || "crimson");
+  _refreshCloudStorageModeUi(settings);
   return settings;
+}
+
+function _formatBackupManagerTime(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "\u672a\u8bb0\u5f55";
+  }
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return "\u672a\u8bb0\u5f55";
+  }
+}
+
+function _buildCloudBackupManagerHtml(state = {}) {
+  const entries = Array.isArray(state.entries) ? state.entries : [];
+  const currentChatId = String(state.currentChatId || "").trim();
+  if (state.loading) {
+    return `
+      <div class="bme-cloud-backup-modal__loading">
+        <i class="fa-solid fa-spinner fa-spin"></i> \u6b63\u5728\u8bfb\u53d6\u670d\u52a1\u5668\u5907\u4efd\u5217\u8868...
+      </div>
+    `;
+  }
+
+  if (!entries.length) {
+    return `
+      <div class="bme-cloud-backup-modal__empty">
+        \u670d\u52a1\u5668\u4e0a\u8fd8\u6ca1\u6709 ST-BME \u5907\u4efd\u3002<br />
+        \u5148\u5728\u5f53\u524d\u804a\u5929\u70b9\u4e00\u6b21\u201c\u5907\u4efd\u5230\u4e91\u7aef\u201d\u5c31\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002
+      </div>
+    `;
+  }
+
+  return entries
+    .map((entry) => {
+      const chatId = String(entry?.chatId || "").trim();
+      const filename = String(entry?.filename || "").trim();
+      const isCurrentChat = currentChatId && chatId === currentChatId;
+      const backupTime = _formatBackupManagerTime(entry?.backupTime);
+      const lastModified = _formatBackupManagerTime(entry?.lastModified);
+      const sizeLabel =
+        Number.isFinite(Number(entry?.size)) && Number(entry.size) > 0
+          ? `${Number(entry.size)} B`
+          : "\u672a\u77e5\u5927\u5c0f";
+      return `
+        <div class="bme-cloud-backup-card ${isCurrentChat ? "is-current-chat" : ""}">
+          <div class="bme-cloud-backup-card__top">
+            <div class="bme-cloud-backup-card__title">${_escHtml(chatId || "(unknown chat)")}</div>
+            ${isCurrentChat ? '<div class="bme-cloud-backup-card__badge"><i class="fa-solid fa-location-dot"></i><span>\u5f53\u524d\u804a\u5929</span></div>' : ""}
+          </div>
+          <div class="bme-cloud-backup-card__meta">
+            <div>Revision: ${_escHtml(String(entry?.revision ?? 0))}</div>
+            <div>\u5907\u4efd\u65f6\u95f4: ${_escHtml(backupTime)}</div>
+            <div>\u6700\u540e\u4fee\u6539: ${_escHtml(lastModified)}</div>
+            <div>\u6587\u4ef6\u5927\u5c0f: ${_escHtml(sizeLabel)}</div>
+          </div>
+          <div class="bme-cloud-backup-card__filename">${_escHtml(filename)}</div>
+          <div class="bme-cloud-backup-card__actions">
+            <button
+              type="button"
+              class="bme-cloud-backup-modal__btn bme-cloud-backup-card__danger"
+              data-bme-backup-action="delete"
+              data-chat-id="${_escHtml(chatId)}"
+              data-filename="${_escHtml(filename)}"
+              ${state.busy ? "disabled" : ""}
+            >
+              <i class="fa-solid fa-trash-can"></i>
+              <span>\u5220\u9664\u5907\u4efd</span>
+            </button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function _openServerBackupManagerModal() {
+  if (typeof _actionHandlers.manageServerBackups !== "function") {
+    toastr.info("\u5f53\u524d\u8fd0\u884c\u65f6\u6ca1\u6709\u63a5\u5165\u670d\u52a1\u5668\u5907\u4efd\u7ba1\u7406\u5165\u53e3", "ST-BME");
+    return { handledToast: true, skipDashboardRefresh: true };
+  }
+
+  _ensureCloudBackupManagerStyles();
+  const { callGenericPopup, POPUP_TYPE } = await getPopupRuntime();
+  const state = {
+    loading: true,
+    busy: false,
+    entries: [],
+    currentChatId: "",
+  };
+
+  const container = document.createElement("div");
+  container.className = "bme-cloud-backup-modal";
+  container.innerHTML = `
+    <div class="bme-cloud-backup-modal__header">
+      <div>
+        <div class="bme-cloud-backup-modal__title">\u7ba1\u7406\u670d\u52a1\u5668\u5907\u4efd</div>
+        <div class="bme-cloud-backup-modal__subtitle">
+          \u8fd9\u91cc\u5c55\u793a\u7684\u662f\u624b\u52a8\u5907\u4efd\u6587\u4ef6\uff0c\u4e0d\u4f1a\u628a\u81ea\u52a8\u540c\u6b65\u955c\u50cf\u6df7\u8fdb\u6765\u3002<br />
+          \u5220\u9664\u64cd\u4f5c\u53ea\u5f71\u54cd\u4e91\u7aef\u5907\u4efd\uff0c\u4e0d\u4f1a\u6539\u52a8\u5f53\u524d\u8bbe\u5907\u7684\u672c\u5730 IndexedDB\u3002
+        </div>
+      </div>
+      <div class="bme-cloud-backup-modal__tools">
+        <button type="button" class="bme-cloud-backup-modal__btn" data-bme-backup-action="refresh">
+          <i class="fa-solid fa-rotate"></i>
+          <span>\u5237\u65b0\u5217\u8868</span>
+        </button>
+      </div>
+    </div>
+    <div class="bme-cloud-backup-modal__list"></div>
+  `;
+
+  const listEl = container.querySelector(".bme-cloud-backup-modal__list");
+  const render = () => {
+    if (!listEl) return;
+    listEl.innerHTML = _buildCloudBackupManagerHtml(state);
+    const refreshBtn = container.querySelector('[data-bme-backup-action="refresh"]');
+    if (refreshBtn) refreshBtn.disabled = Boolean(state.busy || state.loading);
+  };
+
+  const refreshEntries = async ({ showToast = false } = {}) => {
+    state.loading = true;
+    render();
+    try {
+      const result = await _actionHandlers.manageServerBackups();
+      state.entries = Array.isArray(result?.entries) ? result.entries : [];
+      state.currentChatId = String(result?.currentChatId || "").trim();
+      if (showToast) {
+        toastr.success("\u670d\u52a1\u5668\u5907\u4efd\u5217\u8868\u5df2\u5237\u65b0", "ST-BME");
+      }
+    } catch (error) {
+      console.error("[ST-BME] failed to load server backups:", error);
+      toastr.error(`\u8bfb\u53d6\u670d\u52a1\u5668\u5907\u4efd\u5931\u8d25: ${error?.message || error}`, "ST-BME");
+    } finally {
+      state.loading = false;
+      render();
+    }
+  };
+
+  const deleteEntry = async (chatId, filename) => {
+    if (typeof _actionHandlers.deleteServerBackupEntry !== "function") {
+      toastr.error("\u5f53\u524d\u8fd0\u884c\u65f6\u6ca1\u6709\u63a5\u5165\u5220\u9664\u670d\u52a1\u5668\u5907\u4efd\u5165\u53e3", "ST-BME");
+      return;
+    }
+
+    if (!globalThis.confirm?.(`\u786e\u5b9a\u8981\u5220\u9664\u670d\u52a1\u5668\u5907\u4efd ${filename} \u5417\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u64a4\u9500\u3002`)) {
+      return;
+    }
+
+    state.busy = true;
+    render();
+    try {
+      const result = await _actionHandlers.deleteServerBackupEntry({
+        chatId,
+        filename,
+      });
+      if (!result?.deleted) {
+        const message =
+          result?.reason === "delete-backup-manifest-error"
+            ? result?.backupDeleted
+              ? "\u5907\u4efd\u6587\u4ef6\u5df2\u5220\u9664\uff0c\u4f46\u670d\u52a1\u5668\u5907\u4efd\u6e05\u5355\u66f4\u65b0\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+              : "\u670d\u52a1\u5668\u5907\u4efd\u6e05\u5355\u66f4\u65b0\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5"
+            : `\u5220\u9664\u5931\u8d25: ${result?.error?.message || result?.reason || "\u672a\u77e5\u539f\u56e0"}`;
+        toastr.error(message, "ST-BME");
+        return;
+      }
+      toastr.success(`\u5df2\u5220\u9664\u670d\u52a1\u5668\u5907\u4efd\uff1a${filename}`, "ST-BME");
+      await refreshEntries();
+    } catch (error) {
+      console.error("[ST-BME] failed to delete server backup:", error);
+      toastr.error(`\u5220\u9664\u5931\u8d25: ${error?.message || error}`, "ST-BME");
+    } finally {
+      state.busy = false;
+      render();
+      void _refreshCloudBackupManualUi();
+    }
+  };
+
+  container.addEventListener("click", async (event) => {
+    const button = event.target.closest?.("[data-bme-backup-action]");
+    if (!button || button.disabled) return;
+    const action = String(button.dataset.bmeBackupAction || "");
+    if (action === "refresh") {
+      await refreshEntries({ showToast: true });
+      return;
+    }
+    if (action === "delete") {
+      await deleteEntry(
+        String(button.dataset.chatId || "").trim(),
+        String(button.dataset.filename || "").trim(),
+      );
+    }
+  });
+
+  await refreshEntries();
+  await callGenericPopup(container, POPUP_TYPE.TEXT, "", {
+    okButton: "\u5173\u95ed",
+    wide: true,
+    large: true,
+    allowVerticalScrolling: true,
+  });
+  return { handledToast: true, skipDashboardRefresh: true };
 }
 
 function _normalizeLlmPresetSettings(settings = _getSettings?.() || {}) {

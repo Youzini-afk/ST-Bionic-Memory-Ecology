@@ -60,6 +60,7 @@ assert.equal(defaultSettings.enableReflection, true);
 assert.equal(defaultSettings.consolidationAutoMinNewNodes, 2);
 assert.equal(defaultSettings.enableAutoCompression, true);
 assert.equal(defaultSettings.compressionEveryN, 10);
+assert.equal(defaultSettings.cloudStorageMode, "automatic");
 assert.equal(defaultSettings.worldInfoFilterMode, "default");
 assert.equal(defaultSettings.worldInfoFilterCustomKeywords, "");
 assert.equal("maintenanceAutoMinNewNodes" in defaultSettings, false);
@@ -77,6 +78,7 @@ assert.equal(migratedSettings.consolidationAutoMinNewNodes, 7);
 assert.equal(migratedSettings.extractAutoDelayLatestAssistant, true);
 assert.equal(migratedSettings.enableAutoCompression, true);
 assert.equal(migratedSettings.compressionEveryN, 10);
+assert.equal(migratedSettings.cloudStorageMode, "automatic");
 assert.equal("maintenanceAutoMinNewNodes" in migratedSettings, false);
 
 const migratedLegacyCompressionDisabled = mergePersistedSettings({

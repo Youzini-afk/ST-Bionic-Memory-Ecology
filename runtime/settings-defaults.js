@@ -144,6 +144,7 @@ export const defaultSettings = {
   // UI 面板
   noticeDisplayMode: "normal",
   panelTheme: "crimson",
+  cloudStorageMode: "automatic",
 };
 
 const DEFAULT_SETTING_KEYS = Object.freeze(Object.keys(defaultSettings));

@@ -6,11 +6,18 @@ import {
   __testOnlyDecodeBase64Utf8,
   autoSyncOnChatChange,
   autoSyncOnVisibility,
+  backupToServer,
+  buildRestoreSafetyChatId,
   deleteRemoteSyncFile,
+  deleteServerBackup,
+  getRestoreSafetySnapshotStatus,
   getOrCreateDeviceId,
   getRemoteStatus,
   download,
+  listServerBackups,
   mergeSnapshots,
+  rollbackFromRestoreSafetySnapshot,
+  restoreFromServer,
   scheduleUpload,
   syncNow,
   upload,
@@ -470,6 +477,11 @@ async function testMergeRuntimeMetaPolicies() {
         { id: "journal-drop-local", processedRange: [4, 5], createdAt: 110 },
       ],
       runtimeLastRecallResult: { nodes: ["local-only"] },
+      runtimeSummaryState: { updatedAt: 500, frontier: ["local-summary"] },
+      maintenanceJournal: [{ id: "maintenance-local", updatedAt: 600 }],
+      knowledgeState: { updatedAt: 700, activeOwnerKey: "local-owner" },
+      regionState: { updatedAt: 800, activeRegion: "local-region" },
+      timelineState: { updatedAt: 900, activeSegmentId: "local-segment" },
       runtimeLastProcessedSeq: 2,
       runtimeGraphVersion: 10,
     },
@@ -519,6 +531,11 @@ async function testMergeRuntimeMetaPolicies() {
         { id: "journal-drop-remote", processedRange: [3, 4], createdAt: 220 },
       ],
       runtimeLastRecallResult: { nodes: ["remote-only"] },
+      runtimeSummaryState: { updatedAt: 1500, frontier: ["remote-summary"] },
+      maintenanceJournal: [{ id: "maintenance-remote", updatedAt: 1600 }],
+      knowledgeState: { updatedAt: 1700, activeOwnerKey: "remote-owner" },
+      regionState: { updatedAt: 1800, activeRegion: "remote-region" },
+      timelineState: { updatedAt: 1900, activeSegmentId: "remote-segment" },
       runtimeLastProcessedSeq: 9,
       runtimeGraphVersion: 7,
     },
@@ -553,8 +570,240 @@ async function testMergeRuntimeMetaPolicies() {
   assert.equal(merged.meta.runtimeBatchJournal[0].id, "journal-shared");
   assert.deepEqual(merged.meta.runtimeBatchJournal[0].processedRange, [0, 3]);
   assert.equal(merged.meta.runtimeLastRecallResult, null);
+  assert.equal(merged.meta.runtimeSummaryState.frontier[0], "remote-summary");
+  assert.equal(merged.meta.maintenanceJournal[0].id, "maintenance-remote");
+  assert.equal(merged.meta.knowledgeState.activeOwnerKey, "remote-owner");
+  assert.equal(merged.meta.regionState.activeRegion, "remote-region");
+  assert.equal(merged.meta.timelineState.activeSegmentId, "remote-segment");
   assert.equal(merged.meta.runtimeLastProcessedSeq, 9);
   assert.equal(merged.meta.runtimeGraphVersion, 11);
+}
+
+async function testManualCloudModeGuards() {
+  const { fetch, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  dbByChatId.set("chat-manual", new FakeDb("chat-manual"));
+
+  const runtime = {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    cloudStorageMode: "manual",
+  };
+
+  const scheduleResult = scheduleUpload("chat-manual", runtime);
+  assert.equal(scheduleResult.scheduled, false);
+  assert.equal(scheduleResult.reason, "manual-cloud-mode");
+
+  const syncResult = await syncNow("chat-manual", runtime);
+  assert.equal(syncResult.action, "manual-probe");
+  assert.equal(logs.uploadCalls, 0);
+
+  const chatChangeResult = await autoSyncOnChatChange("chat-manual", runtime);
+  assert.equal(chatChangeResult.action, "manual-probe");
+  assert.equal(chatChangeResult.remoteStatus, null);
+  assert.equal(logs.getCalls, 0);
+  assert.equal(logs.uploadCalls, 0);
+}
+
+async function testManualBackupAndRestoreFlow() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const db = new FakeDb("chat-backup-flow", {
+    meta: {
+      schemaVersion: 1,
+      chatId: "chat-backup-flow",
+      revision: 8,
+      lastModified: 80,
+      deviceId: "",
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "local-node", updatedAt: 80 }],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 4,
+      extractionCount: 2,
+    },
+  });
+  db.meta.set("syncDirty", true);
+  dbByChatId.set("chat-backup-flow", db);
+
+  const safetyDb = new FakeDb("__restore_safety__chat-backup-flow");
+  const hookCalls = [];
+  const runtime = {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    getSafetyDb: async () => safetyDb,
+    onSyncApplied: async (payload) => hookCalls.push({ ...payload }),
+  };
+
+  const backupResult = await backupToServer("chat-backup-flow", runtime);
+  assert.equal(backupResult.backedUp, true);
+  assert.equal(db.meta.get("syncDirty"), false);
+  assert.ok(Number(db.meta.get("lastBackupUploadedAt")) > 0);
+  assert.ok(String(db.meta.get("lastBackupFilename") || "").startsWith("ST-BME_backup_"));
+
+  const manifestResult = await listServerBackups(runtime);
+  assert.equal(manifestResult.entries.length, 1);
+  assert.equal(manifestResult.entries[0].chatId, "chat-backup-flow");
+
+  db.snapshot = {
+    meta: {
+      schemaVersion: 1,
+      chatId: "chat-backup-flow",
+      revision: 1,
+      lastModified: 10,
+      deviceId: "",
+      nodeCount: 0,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    },
+  };
+
+  const restoreResult = await restoreFromServer("chat-backup-flow", runtime);
+  assert.equal(restoreResult.restored, true);
+  assert.equal(db.snapshot.nodes[0].id, "local-node");
+  assert.ok(Number(db.meta.get("lastBackupRestoredAt")) > 0);
+  const safetyStatus = await getRestoreSafetySnapshotStatus(
+    "chat-backup-flow",
+    runtime,
+  );
+  assert.equal(safetyStatus.exists, true);
+  assert.equal(safetyDb.lastImportPayload.meta.revision, 1);
+  assert.deepEqual(
+    hookCalls.map((item) => item.action),
+    ["restore-backup"],
+  );
+
+  db.snapshot = {
+    meta: {
+      schemaVersion: 1,
+      chatId: "chat-backup-flow",
+      revision: 99,
+      lastModified: 999,
+      deviceId: "",
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "broken-node", updatedAt: 999 }],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 88,
+      extractionCount: 9,
+    },
+  };
+
+  const rollbackResult = await rollbackFromRestoreSafetySnapshot(
+    "chat-backup-flow",
+    runtime,
+  );
+  assert.equal(rollbackResult.restored, true);
+  assert.equal(db.snapshot.meta.revision, 1);
+  assert.equal(db.snapshot.nodes.length, 0);
+  assert.equal(db.meta.get("syncDirty"), true);
+  assert.ok(Number(db.meta.get("lastBackupRollbackAt")) > 0);
+
+  const deleteResult = await deleteServerBackup("chat-backup-flow", runtime);
+  assert.equal(deleteResult.deleted, true);
+  const manifestAfterDelete = await listServerBackups(runtime);
+  assert.equal(manifestAfterDelete.entries.length, 0);
+  assert.equal(
+    Array.from(remoteFiles.keys()).some((key) => key.startsWith("ST-BME_backup_")),
+    false,
+  );
+}
+
+async function testBackupManifestReadFailureDoesNotOverwriteManifest() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const db = new FakeDb("chat-manifest-guard", {
+    meta: {
+      schemaVersion: 1,
+      chatId: "chat-manifest-guard",
+      revision: 3,
+      lastModified: 30,
+      deviceId: "",
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "node-manifest", updatedAt: 30 }],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: 2,
+      extractionCount: 1,
+    },
+  });
+  dbByChatId.set("chat-manifest-guard", db);
+
+  remoteFiles.set("ST-BME_BackupManifest.json", [
+    {
+      filename: "ST-BME_backup_existing-a.json",
+      serverPath: "user/files/ST-BME_backup_existing-a.json",
+      chatId: "chat-a",
+      revision: 1,
+      lastModified: 10,
+      backupTime: 10,
+      size: 100,
+      schemaVersion: 1,
+    },
+  ]);
+
+  let failManifestRead = true;
+  const guardedFetch = async (url, options = {}) => {
+    if (
+      failManifestRead
+      && String(options?.method || "GET").toUpperCase() === "GET"
+      && String(url).startsWith("/user/files/ST-BME_BackupManifest.json")
+    ) {
+      return createJsonResponse(500, "manifest read failed");
+    }
+    return await fetch(url, options);
+  };
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch: guardedFetch });
+  const backupResult = await backupToServer("chat-manifest-guard", runtime);
+  assert.equal(backupResult.backedUp, false);
+  assert.equal(backupResult.reason, "backup-manifest-error");
+  assert.equal(backupResult.backupUploaded, true);
+
+  failManifestRead = false;
+  const manifestResult = await listServerBackups(runtime);
+  assert.equal(manifestResult.entries.length, 1);
+  assert.equal(manifestResult.entries[0].chatId, "chat-a");
+}
+
+async function testRestoreValidationDoesNotCreateSafetySnapshot() {
+  const { fetch } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const db = new FakeDb("chat-no-backup");
+  const safetyDb = new FakeDb(buildRestoreSafetyChatId("chat-no-backup"));
+  dbByChatId.set("chat-no-backup", db);
+
+  const runtime = {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    getSafetyDb: async () => safetyDb,
+  };
+
+  const restoreResult = await restoreFromServer("chat-no-backup", runtime);
+  assert.equal(restoreResult.restored, false);
+  assert.equal(restoreResult.reason, "not-found");
+
+  const safetyStatus = await getRestoreSafetySnapshotStatus(
+    "chat-no-backup",
+    runtime,
+  );
+  assert.equal(safetyStatus.exists, false);
 }
 
 async function testSyncNowLockAndAutoSync() {
@@ -826,6 +1075,10 @@ async function main() {
   await testLegacyRemoteFilenameFallbackAndReuse();
   await testMergeRules();
   await testMergeRuntimeMetaPolicies();
+  await testManualCloudModeGuards();
+  await testManualBackupAndRestoreFlow();
+  await testBackupManifestReadFailureDoesNotOverwriteManifest();
+  await testRestoreValidationDoesNotCreateSafetySnapshot();
   await testSyncNowLockAndAutoSync();
   await testDeleteRemoteSyncFile();
   await testDeleteRemoteSyncFileFallsBackToLegacyFilename();

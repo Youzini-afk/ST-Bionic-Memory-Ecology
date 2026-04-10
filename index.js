@@ -27,7 +27,14 @@ import {
 import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
+  backupToServer,
+  buildRestoreSafetyChatId,
   deleteRemoteSyncFile,
+  deleteServerBackup,
+  getRestoreSafetySnapshotStatus,
+  listServerBackups,
+  rollbackFromRestoreSafetySnapshot,
+  restoreFromServer,
   scheduleUpload,
   syncNow,
 } from "./sync/bme-sync.js";
@@ -120,6 +127,7 @@ import {
   readGraphCommitMarker,
   readGraphChatStateSnapshot,
   resolveGraphIdentityAliasByHostChatId,
+  shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
   writeGraphChatStateSnapshot,
@@ -765,10 +773,19 @@ function getGraphPersistenceLiveState() {
     indexedDbRevision: graphPersistenceState.indexedDbRevision || 0,
     indexedDbLastError: graphPersistenceState.indexedDbLastError || "",
     syncState: normalizeGraphSyncState(graphPersistenceState.syncState),
+    syncDirty: Boolean(graphPersistenceState.syncDirty),
+    syncDirtyReason: String(graphPersistenceState.syncDirtyReason || ""),
     lastSyncUploadedAt: Number(graphPersistenceState.lastSyncUploadedAt) || 0,
     lastSyncDownloadedAt:
       Number(graphPersistenceState.lastSyncDownloadedAt) || 0,
     lastSyncedRevision: Number(graphPersistenceState.lastSyncedRevision) || 0,
+    lastBackupUploadedAt:
+      Number(graphPersistenceState.lastBackupUploadedAt) || 0,
+    lastBackupRestoredAt:
+      Number(graphPersistenceState.lastBackupRestoredAt) || 0,
+    lastBackupRollbackAt:
+      Number(graphPersistenceState.lastBackupRollbackAt) || 0,
+    lastBackupFilename: String(graphPersistenceState.lastBackupFilename || ""),
     lastSyncError: String(graphPersistenceState.lastSyncError || ""),
     dualWriteLastResult: cloneRuntimeDebugValue(
       graphPersistenceState.dualWriteLastResult,
@@ -4020,7 +4037,11 @@ async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
   const action = String(syncPayload?.action || "")
     .trim()
     .toLowerCase();
-  if (action !== "download" && action !== "merge") {
+  if (
+    action !== "download"
+    && action !== "merge"
+    && action !== "restore-backup"
+  ) {
     return {
       refreshed: false,
       reason: "action-not-supported",
@@ -4082,6 +4103,7 @@ function buildBmeSyncRuntimeOptions(extra = {}) {
       return await manager.getCurrentDb(chatId);
     },
     getCurrentChatId: () => getCurrentChatId(),
+    getCloudStorageMode: () => getSettings().cloudStorageMode || "automatic",
     getRequestHeaders,
     onSyncApplied: async (payload = {}) => {
       await refreshRuntimeGraphAfterSyncApplied(payload);
@@ -4118,14 +4140,26 @@ async function syncIndexedDbMetaToPersistenceState(
     const db = await manager.getCurrentDb(normalizedChatId);
     const [
       revision,
+      syncDirty,
+      syncDirtyReason,
       lastSyncUploadedAt,
       lastSyncDownloadedAt,
       lastSyncedRevision,
+      lastBackupUploadedAt,
+      lastBackupRestoredAt,
+      lastBackupRollbackAt,
+      lastBackupFilename,
     ] = await Promise.all([
       db.getRevision(),
+      db.getMeta("syncDirty", false),
+      db.getMeta("syncDirtyReason", ""),
       db.getMeta("lastSyncUploadedAt", 0),
       db.getMeta("lastSyncDownloadedAt", 0),
       db.getMeta("lastSyncedRevision", 0),
+      db.getMeta("lastBackupUploadedAt", 0),
+      db.getMeta("lastBackupRestoredAt", 0),
+      db.getMeta("lastBackupRollbackAt", 0),
+      db.getMeta("lastBackupFilename", ""),
     ]);
 
     const patch = {
@@ -4133,9 +4167,15 @@ async function syncIndexedDbMetaToPersistenceState(
       storageMode: "indexeddb",
       indexedDbRevision: normalizeIndexedDbRevision(revision),
       syncState: normalizeGraphSyncState(syncState),
+      syncDirty: Boolean(syncDirty),
+      syncDirtyReason: String(syncDirtyReason || ""),
       lastSyncUploadedAt: Number(lastSyncUploadedAt) || 0,
       lastSyncDownloadedAt: Number(lastSyncDownloadedAt) || 0,
       lastSyncedRevision: Number(lastSyncedRevision) || 0,
+      lastBackupUploadedAt: Number(lastBackupUploadedAt) || 0,
+      lastBackupRestoredAt: Number(lastBackupRestoredAt) || 0,
+      lastBackupRollbackAt: Number(lastBackupRollbackAt) || 0,
+      lastBackupFilename: String(lastBackupFilename || ""),
       lastSyncError: String(lastSyncError || ""),
     };
 
@@ -4170,7 +4210,12 @@ async function runBmeAutoSyncForChat(source = "unknown", chatId = "") {
     );
 
     await syncIndexedDbMetaToPersistenceState(normalizedChatId, {
-      syncState: syncResult?.synced ? "idle" : "warning",
+      syncState:
+        syncResult?.action === "manual-probe"
+          ? "idle"
+          : syncResult?.synced
+            ? "idle"
+            : "warning",
       lastSyncError: syncResult?.error || "",
     });
 
@@ -8265,6 +8310,9 @@ function updateModuleSettings(patch = {}) {
   const recallUiKeys = new Set(["recallCardUserInputDisplayMode"]);
   const noticeUiKeys = new Set(["noticeDisplayMode"]);
   const settings = getSettings();
+  const previousCloudStorageMode = String(
+    settings.cloudStorageMode || "automatic",
+  );
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
   globalThis.__stBmeDebugLoggingEnabled = Boolean(
@@ -8329,6 +8377,38 @@ function updateModuleSettings(patch = {}) {
 
   if (Object.keys(patch).some((key) => noticeUiKeys.has(key))) {
     refreshVisibleStageNotices();
+  }
+
+  const currentCloudStorageMode = String(
+    settings.cloudStorageMode || "automatic",
+  );
+  if (
+    previousCloudStorageMode !== "automatic"
+    && currentCloudStorageMode === "automatic"
+  ) {
+    const chatId = getCurrentChatId();
+    if (chatId) {
+      scheduleBmeIndexedDbTask(async () => {
+        try {
+          await syncNow(
+            chatId,
+            buildBmeSyncRuntimeOptions({
+              reason: "mode-switch-bootstrap",
+              trigger: "settings:cloud-storage-mode-bootstrap",
+            }),
+          );
+          await syncIndexedDbMetaToPersistenceState(chatId, {
+            syncState: "idle",
+            lastSyncError: "",
+          });
+        } catch (error) {
+          await syncIndexedDbMetaToPersistenceState(chatId, {
+            syncState: "error",
+            lastSyncError: error?.message || String(error),
+          });
+        }
+      });
+    }
   }
 
   scheduleServerSettingsSave();
@@ -12907,6 +12987,8 @@ const _cleanupRuntime = () => ({
   },
   setLastExtractedItems: () => { lastExtractedItems = []; },
   buildBmeDbName,
+  buildRestoreSafetyDbName: (chatId) =>
+    buildBmeDbName(buildRestoreSafetyChatId(chatId)),
   closeBmeDb: null,
   deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
     fetch: globalThis.fetch?.bind(globalThis),
@@ -12943,8 +13025,194 @@ async function onDeleteServerSyncFile() {
   return await onDeleteServerSyncFileController(_cleanupRuntime());
 }
 
+async function onBackupCurrentChatToCloud() {
+  const chatId = getCurrentChatId();
+  if (!chatId) {
+    toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+
+  const result = await backupToServer(
+    chatId,
+    buildBmeSyncRuntimeOptions({
+      reason: "manual-backup",
+      trigger: "panel:manual-backup",
+    }),
+  );
+
+  if (!result?.backedUp) {
+    const backupFailureMessage =
+      result?.reason === "backup-manifest-error"
+        ? result?.backupUploaded
+          ? "备份文件已上传，但服务器备份清单更新失败，请稍后重试"
+          : "服务器备份清单更新失败，请稍后重试"
+        : `备份失败: ${result?.error?.message || result?.reason || "未知原因"}`;
+    toastr.error(backupFailureMessage);
+    return { handledToast: true, result };
+  }
+
+  toastr.success("当前聊天已备份到云端");
+  await syncIndexedDbMetaToPersistenceState(chatId, {
+    syncState: "idle",
+    lastSyncError: "",
+  });
+  return { handledToast: true, result };
+}
+
+async function onRestoreCurrentChatFromCloud() {
+  const chatId = getCurrentChatId();
+  if (!chatId) {
+    toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+
+  const confirmed = globalThis.confirm?.(
+    "这会用云端备份完整覆盖当前聊天的本地记忆，并先保留一份本地安全快照。确定继续吗？",
+  );
+  if (!confirmed) {
+    return { cancelled: true };
+  }
+
+  const result = await restoreFromServer(
+    chatId,
+    buildBmeSyncRuntimeOptions({
+      reason: "manual-restore",
+      trigger: "panel:manual-restore",
+    }),
+  );
+
+  if (!result?.restored) {
+    const reasonMap = {
+      "not-found": "服务器上没有找到当前聊天的备份",
+      "backup-missing": "服务器上没有找到当前聊天的备份",
+      "backup-version-mismatch": "备份版本与当前运行时不兼容",
+      "backup-chat-id-mismatch": "备份聊天 ID 与当前聊天不匹配",
+      "snapshot-chat-id-mismatch": "备份内部快照与当前聊天不匹配",
+    };
+    toastr.error(
+      reasonMap[result?.reason] ||
+        `恢复失败: ${result?.error?.message || result?.reason || "未知原因"}`,
+    );
+    return { handledToast: true, result };
+  }
+
+  toastr.success("已从云端恢复当前聊天备份");
+  await syncIndexedDbMetaToPersistenceState(chatId, {
+    syncState: "idle",
+    lastSyncError: "",
+  });
+  return { handledToast: true, result };
+}
+
+async function onManageServerBackups() {
+  const chatId = getCurrentChatId();
+  const { entries } = await listServerBackups(
+    buildBmeSyncRuntimeOptions({
+      reason: "manage-backups",
+      trigger: "panel:manage-backups",
+    }),
+  );
+  return {
+    entries: Array.isArray(entries) ? entries : [],
+    currentChatId: chatId,
+    handledToast: true,
+    skipDashboardRefresh: true,
+  };
+}
+
+async function onDeleteServerBackupEntry(payload = {}) {
+  const chatId = String(payload?.chatId || "").trim();
+  const filename = String(payload?.filename || "").trim();
+  if (!chatId) {
+    return {
+      deleted: false,
+      reason: "missing-chat-id",
+      filename,
+      handledToast: true,
+      skipDashboardRefresh: true,
+    };
+  }
+
+  const deleteResult = await deleteServerBackup(
+    chatId,
+    buildBmeSyncRuntimeOptions({
+      reason: "delete-backup",
+      trigger: "panel:delete-backup",
+    }),
+  );
+
+  return {
+    ...deleteResult,
+    filename,
+    handledToast: true,
+    skipDashboardRefresh: true,
+  };
+}
+
 // ==================== 初始化 ====================
 
+async function onGetRestoreSafetySnapshotStatus() {
+  const chatId = getCurrentChatId();
+  if (!chatId) {
+    return {
+      exists: false,
+      chatId: "",
+      createdAt: 0,
+      reason: "missing-chat-id",
+    };
+  }
+
+  return await getRestoreSafetySnapshotStatus(
+    chatId,
+    buildBmeSyncRuntimeOptions({
+      reason: "manual-restore-safety-status",
+      trigger: "panel:restore-safety-status",
+    }),
+  );
+}
+
+async function onRollbackLastRestore() {
+  const chatId = getCurrentChatId();
+  if (!chatId) {
+    toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+
+  const safetyStatus = await onGetRestoreSafetySnapshotStatus();
+  if (!safetyStatus?.exists) {
+    toastr.info("当前聊天还没有可用的上次恢复回滚点");
+    return { handledToast: true, result: safetyStatus };
+  }
+
+  const confirmed = globalThis.confirm?.(
+    "这会回滚到上次从云端恢复之前的本地状态。确定继续吗？",
+  );
+  if (!confirmed) {
+    return { cancelled: true };
+  }
+
+  const result = await rollbackFromRestoreSafetySnapshot(
+    chatId,
+    buildBmeSyncRuntimeOptions({
+      reason: "manual-restore-safety-rollback",
+      trigger: "panel:rollback-last-restore",
+    }),
+  );
+
+  if (!result?.restored) {
+    toastr.error(
+      `回滚失败: ${result?.error?.message || result?.reason || "未知原因"}`,
+    );
+    return { handledToast: true, result };
+  }
+
+  toastr.success("已回滚到上次恢复前的本地状态");
+  await syncIndexedDbMetaToPersistenceState(chatId, {
+    syncState: "idle",
+    lastSyncError: "",
+  });
+  return { handledToast: true, result };
+}
 (async function init() {
   await loadServerSettings();
   syncGraphPersistenceDebugState();
@@ -12996,6 +13264,12 @@ async function onDeleteServerSyncFile() {
       deleteCurrentIdb: onDeleteCurrentIdb,
       deleteAllIdb: onDeleteAllIdb,
       deleteServerSyncFile: onDeleteServerSyncFile,
+      backupToCloud: onBackupCurrentChatToCloud,
+      restoreFromCloud: onRestoreCurrentChatFromCloud,
+      rollbackLastRestore: onRollbackLastRestore,
+      manageServerBackups: onManageServerBackups,
+      deleteServerBackupEntry: onDeleteServerBackupEntry,
+      getRestoreSafetyStatus: onGetRestoreSafetySnapshotStatus,
     },
     console,
     document,
@@ -13098,3 +13372,5 @@ async function onDeleteServerSyncFile() {
   }
   debugLog("[ST-BME] 初始化完成");
 })();
+
+
