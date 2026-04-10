@@ -85,7 +85,7 @@ const state = {
   diffusionCalls: [],
   llmCalls: [],
   llmCandidateCount: 0,
-  llmResponse: { selected_ids: ["rule-2", "rule-1"] },
+  llmResponse: { selected_keys: ["R1", "R2"] },
   llmOptions: [],
 };
 
@@ -447,7 +447,7 @@ state.diffusionCalls.length = 0;
 state.llmCalls.length = 0;
 state.llmOptions.length = 0;
 state.llmCandidateCount = 0;
-state.llmResponse = { selected_ids: ["rule-2", "rule-1"] };
+state.llmResponse = { selected_keys: ["R1", "R2"] };
 const llmPoolResult = await retrieve({
   graph,
   userMessage: "请根据规则给出结论",
@@ -471,6 +471,23 @@ assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCandidateCount, 2);
 assert.deepEqual(Array.from(llmPoolResult.selectedNodeIds), ["rule-2", "rule-1"]);
 assert.equal(llmPoolResult.meta.retrieval.llm.status, "llm");
+assert.equal(
+  llmPoolResult.meta.retrieval.llm.selectionProtocol,
+  "candidate-keys-v1",
+);
+assert.deepEqual(
+  Array.from(llmPoolResult.meta.retrieval.llm.rawSelectedKeys),
+  ["R1", "R2"],
+);
+assert.deepEqual(
+  Array.from(llmPoolResult.meta.retrieval.llm.resolvedSelectedNodeIds),
+  ["rule-2", "rule-1"],
+);
+assert.equal(
+  llmPoolResult.meta.retrieval.llm.candidateKeyMapPreview?.R1?.nodeId,
+  "rule-2",
+);
+assert.equal(llmPoolResult.meta.retrieval.llm.legacySelectionUsed, false);
 assert.equal(llmPoolResult.meta.retrieval.llm.candidatePool, 2);
 assert.equal(llmPoolResult.meta.retrieval.vectorMergedHits, 3);
 assert.equal(llmPoolResult.meta.retrieval.diversityApplied, true);
@@ -479,6 +496,135 @@ assert.equal(llmPoolResult.meta.retrieval.candidatePoolAfterDpp, 2);
 assert.equal(state.llmOptions[0].returnFailureDetails, true);
 assert.equal(state.llmOptions[0].maxRetries, 2);
 assert.equal(state.llmOptions[0].maxCompletionTokens, 512);
+assert.match(String(state.llmCalls[0] || ""), /\[R1\]/);
+assert.doesNotMatch(String(state.llmCalls[0] || ""), /\[rule-1\]|\[rule-2\]/);
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
+state.llmResponse = {
+  selected_keys: ["R2"],
+  selected_ids: ["rule-2"],
+};
+const selectedKeysPriorityResult = await retrieve({
+  graph,
+  userMessage: "优先吃新协议",
+  recentMessages: ["用户：测试 selected_keys 优先级"],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.deepEqual(Array.from(selectedKeysPriorityResult.selectedNodeIds), ["rule-1"]);
+assert.equal(
+  selectedKeysPriorityResult.meta.retrieval.llm.selectionProtocol,
+  "candidate-keys-v1",
+);
+assert.equal(
+  selectedKeysPriorityResult.meta.retrieval.llm.legacySelectionUsed,
+  false,
+);
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
+state.llmResponse = { selected_ids: ["rule-1"] };
+const legacySelectionResult = await retrieve({
+  graph,
+  userMessage: "兼容旧 selected_ids",
+  recentMessages: ["用户：测试 legacy 路径"],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.deepEqual(Array.from(legacySelectionResult.selectedNodeIds), ["rule-1"]);
+assert.equal(
+  legacySelectionResult.meta.retrieval.llm.selectionProtocol,
+  "legacy-selected-ids",
+);
+assert.equal(
+  legacySelectionResult.meta.retrieval.llm.legacySelectionUsed,
+  true,
+);
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
+state.llmResponse = { selected_keys: [] };
+const emptySelectionFallbackResult = await retrieve({
+  graph,
+  userMessage: "这次故意空选",
+  recentMessages: ["用户：测试空选回退"],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.equal(emptySelectionFallbackResult.meta.retrieval.llm.status, "fallback");
+assert.equal(
+  emptySelectionFallbackResult.meta.retrieval.llm.fallbackType,
+  "empty-selection",
+);
+assert.equal(
+  emptySelectionFallbackResult.meta.retrieval.llm.emptySelectionAccepted,
+  false,
+);
+assert.deepEqual(
+  Array.from(emptySelectionFallbackResult.selectedNodeIds),
+  ["rule-2", "rule-1"],
+);
+
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+state.llmCalls.length = 0;
+state.llmOptions.length = 0;
+state.llmResponse = { selected_keys: ["R99"] };
+const invalidKeyFallbackResult = await retrieve({
+  graph,
+  userMessage: "这次给无效 key",
+  recentMessages: ["用户：测试无效候选回退"],
+  embeddingConfig: {},
+  schema,
+  options: {
+    topK: 4,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: true,
+    llmCandidatePool: 2,
+  },
+});
+assert.equal(invalidKeyFallbackResult.meta.retrieval.llm.status, "fallback");
+assert.equal(
+  invalidKeyFallbackResult.meta.retrieval.llm.fallbackType,
+  "invalid-candidate",
+);
+assert.deepEqual(
+  Array.from(invalidKeyFallbackResult.selectedNodeIds),
+  ["rule-2", "rule-1"],
+);
 
 state.vectorCalls.length = 0;
 state.diffusionCalls.length = 0;
@@ -792,6 +938,14 @@ const multiOwnerResult = await retrieve({
     llmCandidatePool: 4,
   },
 });
+assert.equal(
+  multiOwnerResult.meta.retrieval.llm.selectionProtocol,
+  "legacy-selected-ids",
+);
+assert.equal(
+  multiOwnerResult.meta.retrieval.llm.legacySelectionUsed,
+  true,
+);
 assert.deepEqual(
   Array.from(multiOwnerResult.meta.retrieval.activeRecallOwnerKeys),
   ["character:艾琳", "character:露西亚"],

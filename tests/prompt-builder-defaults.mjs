@@ -141,7 +141,9 @@ const recallRulesBlock = recallPayload.promptMessages.find(
 );
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_keys/);
 assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
+assert.match(String(recallFormatBlock?.content || ""), /selected_keys/);
 assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
+assert.match(String(recallRulesBlock?.content || ""), /评分召回/);
 
 const formatterCalls = [];
 initializeHostAdapter({

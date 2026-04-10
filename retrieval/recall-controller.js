@@ -170,6 +170,15 @@ export function applyRecallInjectionController(
   const llmMeta = retrievalMeta.llm || {
     status: settings.recallEnableLLM ? "unknown" : "disabled",
     reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
+    selectionProtocol: "",
+    rawSelectedKeys: [],
+    resolvedSelectedKeys: [],
+    resolvedSelectedNodeIds: [],
+    fallbackReason: "",
+    fallbackType: "",
+    emptySelectionAccepted: false,
+    candidateKeyMapPreview: {},
+    legacySelectionUsed: false,
     candidatePool: 0,
   };
   const deliveryMode =

@@ -206,6 +206,15 @@ function createRetrievalMeta(enableLLMRecall) {
       enabled: enableLLMRecall,
       status: enableLLMRecall ? "pending" : "disabled",
       reason: enableLLMRecall ? "" : "LLM 精排已关闭",
+      selectionProtocol: "",
+      rawSelectedKeys: [],
+      resolvedSelectedKeys: [],
+      resolvedSelectedNodeIds: [],
+      fallbackReason: "",
+      fallbackType: "",
+      emptySelectionAccepted: false,
+      candidateKeyMapPreview: {},
+      legacySelectionUsed: false,
       candidatePool: 0,
       selectedSeedCount: 0,
     },
@@ -238,6 +247,63 @@ function createTextPreview(text, maxLength = 120) {
   return normalized.length > maxLength
     ? `${normalized.slice(0, maxLength)}...`
     : normalized;
+}
+
+function normalizeRecallSelectionList(values = [], maxLength = 64) {
+  const normalized = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    normalized.push(text);
+    if (normalized.length >= maxLength) break;
+  }
+  return normalized;
+}
+
+function getRecallCandidateLabel(node = {}) {
+  return String(
+    node?.fields?.title ||
+      node?.fields?.name ||
+      node?.fields?.summary ||
+      node?.fields?.insight ||
+      node?.fields?.belief ||
+      node?.id ||
+      "",
+  ).trim();
+}
+
+function createRecallCandidateKeyMaps(candidates = []) {
+  const candidateKeyToNodeId = {};
+  const candidateKeyToCandidateMeta = {};
+  const nodeIdToCandidateKey = {};
+
+  for (const [index, candidate] of (Array.isArray(candidates) ? candidates : []).entries()) {
+    const node = candidate?.node || {};
+    const nodeId = String(candidate?.nodeId || node?.id || "").trim();
+    if (!nodeId) continue;
+    const candidateKey = `R${index + 1}`;
+    candidateKeyToNodeId[candidateKey] = nodeId;
+    nodeIdToCandidateKey[nodeId] = candidateKey;
+    candidateKeyToCandidateMeta[candidateKey] = {
+      nodeId,
+      type: String(node?.type || ""),
+      label: getRecallCandidateLabel(node),
+      scopeBucket: String(candidate?.scopeBucket || ""),
+      temporalBucket: String(candidate?.temporalBucket || ""),
+      score:
+        Math.round(
+          (Number(candidate?.weightedScore ?? candidate?.finalScore) || 0) * 1000,
+        ) / 1000,
+    };
+  }
+
+  return {
+    candidateKeyToNodeId,
+    candidateKeyToCandidateMeta,
+    nodeIdToCandidateKey,
+  };
 }
 
 function roundBlendWeight(value) {
@@ -1172,10 +1238,11 @@ function augmentSelectedNodeIdsWithActiveOwnerPov(
 
 function buildRecallSceneOwnerAugmentPrompt(maxNodes, sceneOwnerCandidateText = "") {
   return [
-    "除了 selected_ids，你还需要同时判断这轮场景里真正参与当前回应的具体人物。",
+    "除了 selected_keys，你还需要同时判断这轮场景里真正参与当前回应的具体人物。",
     `最多返回 ${Math.max(1, Math.min(4, Number(maxNodes) || 4))} 个 active_owner_keys；如果无法可靠判断，可以返回空数组。`,
     "active_owner_keys 必须从给出的 ownerKey 候选里选择，不要用角色卡名替代具体人物。",
     "active_owner_scores 必须是数组，每项格式为 {\"ownerKey\":\"...\",\"score\":0.0,\"reason\":\"...\"}，score 范围 0..1。",
+    "selected_keys 只能从当前候选短键里选；如果一个都不选，系统会回退到评分召回。",
     "如果某个客观事实只被部分人物知道，也要保留这些具体人物的判断，不要把所有人混成一个总角色。",
     "",
     "## 场景角色候选",
@@ -1990,10 +2057,25 @@ export async function retrieve({
     activeRecallOwnerScores = { ...(llmOwnerResolution.ownerScores || {}) };
     sceneOwnerResolutionMode = llmOwnerResolution.mode || "unresolved";
     llmMeta = {
+      ...retrievalMeta.llm,
       enabled: true,
       status: llmResult.status,
       reason: llmResult.reason,
+      selectionProtocol: llmResult.selectionProtocol || "",
+      rawSelectedKeys: Array.isArray(llmResult.rawSelectedKeys)
+        ? [...llmResult.rawSelectedKeys]
+        : [],
+      resolvedSelectedKeys: Array.isArray(llmResult.resolvedSelectedKeys)
+        ? [...llmResult.resolvedSelectedKeys]
+        : [],
+      resolvedSelectedNodeIds: Array.isArray(llmResult.resolvedSelectedNodeIds)
+        ? [...llmResult.resolvedSelectedNodeIds]
+        : [],
+      fallbackReason: llmResult.fallbackReason || "",
       fallbackType: llmResult.fallbackType || "",
+      emptySelectionAccepted: llmResult.emptySelectionAccepted === true,
+      candidateKeyMapPreview: { ...(llmResult.candidateKeyMapPreview || {}) },
+      legacySelectionUsed: llmResult.legacySelectionUsed === true,
       candidatePool: llmCandidates.length,
       selectedSeedCount: llmResult.selectedNodeIds.length,
     };
@@ -2019,6 +2101,7 @@ export async function retrieve({
     activeRecallOwnerScores = { ...(heuristicResolution.ownerScores || {}) };
     sceneOwnerResolutionMode = heuristicResolution.mode || "unresolved";
     llmMeta = {
+      ...retrievalMeta.llm,
       enabled: false,
       status: "disabled",
       reason: "LLM 精排已关闭，直接采用评分排序",
@@ -2366,8 +2449,13 @@ async function llmRecall(
   throwIfAborted(signal);
   const contextStr = recentMessages.join("\n---\n");
   const sceneOwnerCandidateText = buildSceneOwnerCandidateText(sceneOwnerCandidates);
+  const {
+    candidateKeyToNodeId,
+    candidateKeyToCandidateMeta,
+    nodeIdToCandidateKey,
+  } = createRecallCandidateKeyMaps(candidates);
   const candidateDescriptions = candidates
-    .map((c) => {
+    .map((c, index) => {
       const node = c.node;
       const typeDef = schema.find((s) => s.id === node.type);
       const typeLabel = typeDef?.label || node.type;
@@ -2375,7 +2463,8 @@ async function llmRecall(
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      return `[${node.id}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 时间=${storyTimeLabel || "未标注"}, 时间桶=${String(c.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
+      const candidateKey = `R${index + 1}`;
+      return `[${candidateKey}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 时间=${storyTimeLabel || "未标注"}, 时间桶=${String(c.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
 
@@ -2402,8 +2491,10 @@ async function llmRecall(
       "优先维持剧情时间一致，不要把未来信息当成当前已经发生的客观事实带入。",
       "优先选择：(1) 直接相关的当前场景节点, (2) 因果关系连续性节点, (3) 有潜在影响的背景节点。",
       `最多选择 ${maxNodes} 个节点。`,
+      "候选节点使用短键标识（R1 / R2 / R3 ...），只能从给出的短键里选择。",
+      "如果你一个都不选，系统会自动回退到评分召回。",
       "输出严格的 JSON 格式：",
-      '{"selected_ids": ["id1", "id2"], "reason": "简要说明选择理由", "active_owner_keys": ["character:alice"], "active_owner_scores": [{"ownerKey": "character:alice", "score": 0.92, "reason": "她在场并且 POV 最相关"}]}',
+      '{"selected_keys": ["R1", "R2"], "reason": "R1: 简要说明选择理由；R2: 简要说明选择理由", "active_owner_keys": ["character:alice"], "active_owner_scores": [{"ownerKey": "character:alice", "score": 0.92, "reason": "她在场并且 POV 最相关"}]}',
     ].join("\n"),
     recallRegexInput,
     "system",
@@ -2472,35 +2563,102 @@ async function llmRecall(
     ]),
   );
 
-  if (result?.selected_ids && Array.isArray(result.selected_ids)) {
-    // 校验 ID 有效性
-    const validIds = uniqueNodeIds(
-      result.selected_ids.filter((id) =>
-        candidates.some((c) => c.nodeId === id),
-      ),
-    ).slice(0, maxNodes);
+  const hasSelectedKeysField =
+    result && Object.prototype.hasOwnProperty.call(result, "selected_keys");
+  const hasSelectedIdsField =
+    result && Object.prototype.hasOwnProperty.call(result, "selected_ids");
+  const rawSelectedKeys = Array.isArray(result?.selected_keys)
+    ? normalizeRecallSelectionList(result.selected_keys, maxNodes * 4)
+    : [];
+  const rawSelectedIds = Array.isArray(result?.selected_ids)
+    ? normalizeRecallSelectionList(result.selected_ids, maxNodes * 4)
+    : [];
+  const selectionProtocol = hasSelectedKeysField
+    ? "candidate-keys-v1"
+    : hasSelectedIdsField
+      ? "legacy-selected-ids"
+      : "candidate-keys-v1";
+  const legacySelectionUsed =
+    !hasSelectedKeysField && hasSelectedIdsField && Array.isArray(result?.selected_ids);
 
-    if (validIds.length > 0 || result.selected_ids.length === 0) {
-      return {
-        selectedNodeIds: validIds,
-        status: "llm",
-        activeOwnerKeys,
-        activeOwnerScores,
-        sceneOwnerResolutionMode: activeOwnerKeys.length > 0 ? "llm" : "fallback",
-        reason:
-          validIds.length < result.selected_ids.length
-            ? "LLM 返回了部分无效或超限 ID，已自动裁剪"
-            : "LLM 精排完成",
-      };
+  let resolvedSelectedKeys = [];
+  let resolvedSelectedNodeIds = [];
+  let fallbackReason = "";
+  let fallbackType = "";
+
+  if (hasSelectedKeysField) {
+    if (!Array.isArray(result?.selected_keys)) {
+      fallbackType = "invalid-candidate";
+      fallbackReason = "LLM 返回的 selected_keys 结构无效，已回退到评分排序";
+    } else if (rawSelectedKeys.length === 0) {
+      fallbackType = "empty-selection";
+      fallbackReason = "LLM 返回了空的 selected_keys，已回退到评分排序";
+    } else {
+      resolvedSelectedKeys = rawSelectedKeys
+        .filter((key) => candidateKeyToNodeId[key])
+        .slice(0, maxNodes);
+      resolvedSelectedNodeIds = uniqueNodeIds(
+        resolvedSelectedKeys
+          .map((key) => candidateKeyToNodeId[key])
+          .filter(Boolean),
+      ).slice(0, maxNodes);
     }
+  } else if (hasSelectedIdsField) {
+    if (!Array.isArray(result?.selected_ids)) {
+      fallbackType = "invalid-candidate";
+      fallbackReason = "LLM 返回的 selected_ids 结构无效，已回退到评分排序";
+    } else if (rawSelectedIds.length === 0) {
+      fallbackType = "empty-selection";
+      fallbackReason = "LLM 返回了空的 selected_ids，已回退到评分排序";
+    } else {
+      resolvedSelectedNodeIds = uniqueNodeIds(
+        rawSelectedIds.filter((id) => candidates.some((c) => c.nodeId === id)),
+      ).slice(0, maxNodes);
+      resolvedSelectedKeys = resolvedSelectedNodeIds
+        .map((nodeId) => nodeIdToCandidateKey[nodeId])
+        .filter(Boolean)
+        .slice(0, maxNodes);
+    }
+  } else if (llmResult?.ok) {
+    fallbackType = "invalid-candidate";
+    fallbackReason = "LLM 返回了无法识别的 JSON 结构，已回退到评分排序";
+  }
+
+  if (resolvedSelectedNodeIds.length > 0) {
+    return {
+      selectedNodeIds: resolvedSelectedNodeIds,
+      status: "llm",
+      activeOwnerKeys,
+      activeOwnerScores,
+      sceneOwnerResolutionMode: activeOwnerKeys.length > 0 ? "llm" : "fallback",
+      reason:
+        selectionProtocol === "legacy-selected-ids"
+          ? resolvedSelectedNodeIds.length < rawSelectedIds.length
+            ? "LLM 返回了部分无效或超限 selected_ids，已保留可解析结果"
+            : "LLM 主导演选择完成（legacy selected_ids）"
+          : resolvedSelectedNodeIds.length < rawSelectedKeys.length
+            ? "LLM 返回了部分无效或超限 selected_keys，已保留可解析结果"
+            : "LLM 主导演选择完成",
+      selectionProtocol,
+      rawSelectedKeys,
+      resolvedSelectedKeys,
+      resolvedSelectedNodeIds,
+      legacySelectionUsed,
+      emptySelectionAccepted: false,
+      candidateKeyMapPreview: candidateKeyToCandidateMeta,
+      fallbackReason: "",
+    };
   }
 
   // LLM 失败时回退到纯评分排序
-  const fallbackReason = llmResult?.ok
-    ? Array.isArray(result?.selected_ids)
-      ? "LLM 返回的候选 ID 无效，已回退到评分排序"
+  fallbackReason ||= llmResult?.ok
+    ? hasSelectedKeysField || hasSelectedIdsField
+      ? "LLM 返回的候选短键或候选 ID 无法映射到当前候选，已回退到评分排序"
       : "LLM 返回了无法识别的 JSON 结构，已回退到评分排序"
     : buildRecallFallbackReason(llmResult);
+  fallbackType ||= llmResult?.ok
+    ? "invalid-candidate"
+    : llmResult?.errorType || "unknown";
   return {
     selectedNodeIds: candidates.slice(0, maxNodes).map((c) => c.nodeId),
     status: "fallback",
@@ -2508,7 +2666,15 @@ async function llmRecall(
     activeOwnerScores: {},
     sceneOwnerResolutionMode: "fallback",
     reason: fallbackReason,
-    fallbackType: llmResult?.ok ? "invalid-candidate" : llmResult?.errorType || "unknown",
+    fallbackType,
+    selectionProtocol,
+    rawSelectedKeys,
+    resolvedSelectedKeys,
+    resolvedSelectedNodeIds,
+    legacySelectionUsed,
+    emptySelectionAccepted: false,
+    candidateKeyMapPreview: candidateKeyToCandidateMeta,
+    fallbackReason,
   };
 }
 

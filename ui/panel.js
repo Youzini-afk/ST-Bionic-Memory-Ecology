@@ -7663,6 +7663,14 @@ function _renderTaskDebugInjectionCard(injectionSnapshot) {
     `;
   }
 
+  const llmMeta = injectionSnapshot.llmMeta || {};
+  const rawSelectedKeys = Array.isArray(llmMeta.rawSelectedKeys)
+    ? llmMeta.rawSelectedKeys.join(", ")
+    : "";
+  const resolvedSelectedNodeIds = Array.isArray(llmMeta.resolvedSelectedNodeIds)
+    ? llmMeta.resolvedSelectedNodeIds.join(", ")
+    : "";
+
   return `
     <div class="bme-config-card-head">
       <div>
@@ -7685,6 +7693,22 @@ function _renderTaskDebugInjectionCard(injectionSnapshot) {
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">选中节点数</span>
         <span class="bme-debug-kv-value">${_escHtml(String(injectionSnapshot.selectedNodeIds?.length ?? 0))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">LLM 选择协议</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmMeta.selectionProtocol || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">原始短键</span>
+        <span class="bme-debug-kv-value">${_escHtml(rawSelectedKeys || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">解析节点</span>
+        <span class="bme-debug-kv-value">${_escHtml(resolvedSelectedNodeIds || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">回退类型</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmMeta.fallbackType || "—")}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">宿主投递</span>
