@@ -11,6 +11,9 @@ import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
 export const MODULE_NAME = "st_bme";
 export const GRAPH_METADATA_KEY = "st_bme_graph";
 export const GRAPH_COMMIT_MARKER_KEY = "st_bme_commit_marker";
+export const GRAPH_CHAT_STATE_NAMESPACE = `${MODULE_NAME}_graph_state`;
+export const GRAPH_CHAT_STATE_VERSION = 1;
+export const GRAPH_CHAT_STATE_MAX_OPERATIONS = 4000;
 export const GRAPH_PERSISTENCE_META_KEY = "__stBmePersistence";
 export const GRAPH_LOAD_STATES = Object.freeze({
   NO_CHAT: "no-chat",
@@ -372,6 +375,184 @@ export function writeChatMetadataPatch(context, patch = {}) {
   }
   Object.assign(context.chatMetadata, patch || {});
   return true;
+}
+
+export function canUseGraphChatState(context = null) {
+  return (
+    !!context &&
+    typeof context.getChatState === "function" &&
+    typeof context.updateChatState === "function"
+  );
+}
+
+export function normalizeGraphChatStateSnapshot(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+
+  const version = Number(snapshot.version);
+  const revision = Number(snapshot.revision);
+  const serializedGraph = String(snapshot.serializedGraph || "");
+  const storageTier = String(snapshot.storageTier || "chat-state");
+  const chatId = normalizeIdentityValue(snapshot.chatId);
+  const integrity = normalizeIdentityValue(snapshot.integrity);
+  const commitMarker = normalizeGraphCommitMarker(snapshot.commitMarker);
+
+  if (!serializedGraph) {
+    return null;
+  }
+
+  return {
+    version: Number.isFinite(version) && version > 0 ? version : GRAPH_CHAT_STATE_VERSION,
+    revision: Number.isFinite(revision) && revision > 0 ? revision : 0,
+    serializedGraph,
+    persistedAt: String(snapshot.persistedAt || ""),
+    updatedAt: String(snapshot.updatedAt || snapshot.persistedAt || ""),
+    reason: String(snapshot.reason || ""),
+    storageTier,
+    chatId,
+    integrity,
+    commitMarker,
+  };
+}
+
+export function buildGraphChatStateSnapshot(
+  graph,
+  {
+    revision = 0,
+    storageTier = "chat-state",
+    accepted = true,
+    reason = "",
+    persistedAt = "",
+    updatedAt = "",
+    chatId = "",
+    integrity = "",
+    lastProcessedAssistantFloor = null,
+    extractionCount = null,
+  } = {},
+) {
+  if (!graph) {
+    return null;
+  }
+
+  const commitMarker = buildGraphCommitMarker(graph, {
+    revision,
+    storageTier,
+    accepted,
+    reason,
+    persistedAt,
+    chatId,
+    integrity,
+    lastProcessedAssistantFloor,
+    extractionCount,
+  });
+
+  return normalizeGraphChatStateSnapshot({
+    version: GRAPH_CHAT_STATE_VERSION,
+    revision,
+    serializedGraph: serializeGraph(graph),
+    persistedAt: String(persistedAt || new Date().toISOString()),
+    updatedAt: String(updatedAt || persistedAt || new Date().toISOString()),
+    reason: String(reason || ""),
+    storageTier: String(storageTier || "chat-state"),
+    chatId,
+    integrity,
+    commitMarker,
+  });
+}
+
+export async function readGraphChatStateSnapshot(
+  context = null,
+  { namespace = GRAPH_CHAT_STATE_NAMESPACE } = {},
+) {
+  if (!canUseGraphChatState(context)) {
+    return null;
+  }
+
+  try {
+    const payload = await context.getChatState(namespace);
+    return normalizeGraphChatStateSnapshot(payload);
+  } catch (error) {
+    console.warn("[ST-BME] 读取聊天侧车图谱失败:", error);
+    return null;
+  }
+}
+
+export async function writeGraphChatStateSnapshot(
+  context = null,
+  graph = null,
+  {
+    namespace = GRAPH_CHAT_STATE_NAMESPACE,
+    revision = 0,
+    storageTier = "chat-state",
+    accepted = true,
+    reason = "",
+    chatId = "",
+    integrity = "",
+    lastProcessedAssistantFloor = null,
+    extractionCount = null,
+    maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+  } = {},
+) {
+  if (!canUseGraphChatState(context) || !graph) {
+    return {
+      ok: false,
+      updated: false,
+      snapshot: null,
+      reason: "chat-state-unavailable",
+    };
+  }
+
+  const snapshot = buildGraphChatStateSnapshot(graph, {
+    revision,
+    storageTier,
+    accepted,
+    reason,
+    chatId,
+    integrity,
+    lastProcessedAssistantFloor,
+    extractionCount,
+  });
+  if (!snapshot) {
+    return {
+      ok: false,
+      updated: false,
+      snapshot: null,
+      reason: "chat-state-build-failed",
+    };
+  }
+
+  try {
+    const result = await context.updateChatState(
+      namespace,
+      () => snapshot,
+      {
+        maxOperations,
+        asyncDiff: false,
+        maxRetries: 1,
+      },
+    );
+    return {
+      ok: result?.ok === true,
+      updated: result?.updated !== false,
+      snapshot,
+      reason:
+        result?.ok === true
+          ? result?.updated === false
+            ? "chat-state-noop"
+            : "chat-state-saved"
+          : "chat-state-save-failed",
+    };
+  } catch (error) {
+    console.warn("[ST-BME] 写入聊天侧车图谱失败:", error);
+    return {
+      ok: false,
+      updated: false,
+      snapshot,
+      reason: "chat-state-save-failed",
+      error,
+    };
+  }
 }
 
 export function normalizeGraphCommitMarker(marker = null) {

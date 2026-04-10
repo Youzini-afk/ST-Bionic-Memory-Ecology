@@ -2,6 +2,7 @@
 // 为 prompt 变量扩展（Phase 2）提供统一的 ST 上下文数据接口
 
 import { getContext } from "../../../../extensions.js";
+import { buildPluginVisibleChatMessages } from "../maintenance/chat-history.js";
 
 function safeClone(value, fallback) {
   if (value == null) {
@@ -62,7 +63,9 @@ function resolveLastUserMessage(chat = []) {
 
 function buildStructuredSnapshot(ctx = {}) {
   const char = resolveCharacter(ctx);
-  const chat = Array.isArray(ctx.chat) ? safeClone(ctx.chat, []) : [];
+  const chat = Array.isArray(ctx.chat)
+    ? buildPluginVisibleChatMessages(ctx.chat)
+    : [];
   const currentTime = new Date().toLocaleString("zh-CN");
   const globalVars = safeClone(
     ctx.extensionSettings?.variables?.global || {},

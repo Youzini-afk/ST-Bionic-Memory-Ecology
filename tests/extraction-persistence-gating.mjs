@@ -12,12 +12,15 @@ function createRuntime(persistResult) {
     nodes: [],
     edges: [],
     historyState: {},
+    batchJournal: [],
   };
   let processedHistoryUpdates = 0;
+  let persistedGraphSnapshot = null;
 
   return {
     graph,
     processedHistoryUpdates,
+    persistedGraphSnapshot,
     ensureCurrentGraphRuntimeState() {},
     throwIfAborted() {},
     getCurrentGraph() {
@@ -64,6 +67,7 @@ function createRuntime(persistResult) {
       };
     },
     async persistExtractionBatchResult() {
+      persistedGraphSnapshot = arguments[0]?.graphSnapshot || null;
       return persistResult;
     },
     finalizeBatchStatus,
@@ -73,12 +77,19 @@ function createRuntime(persistResult) {
     updateProcessedHistorySnapshot() {
       processedHistoryUpdates += 1;
     },
-    appendBatchJournal() {},
+    appendBatchJournal(targetGraph, entry) {
+      if (!targetGraph.batchJournal) targetGraph.batchJournal = [];
+      targetGraph.batchJournal.push(entry);
+    },
     createBatchJournalEntry() {
-      return { id: "journal-1" };
+      return { id: "journal-1", processedRange: [5, 5] };
     },
     computePostProcessArtifacts() {
       return [];
+    },
+    applyProcessedHistorySnapshotToGraph(targetGraph, _chat, floor) {
+      targetGraph.historyState.lastProcessedAssistantFloor = floor;
+      targetGraph.lastProcessedSeq = floor;
     },
     getGraphPersistenceState() {
       return { chatId: "chat-test" };
@@ -86,6 +97,9 @@ function createRuntime(persistResult) {
     console,
     get processedHistoryUpdates() {
       return processedHistoryUpdates;
+    },
+    get persistedGraphSnapshot() {
+      return persistedGraphSnapshot;
     },
   };
 }
@@ -119,6 +133,14 @@ function createRuntime(persistResult) {
     runtime.graph.historyState.lastBatchStatus.historyAdvanceAllowed,
     false,
   );
+  assert.equal(
+    runtime.persistedGraphSnapshot?.historyState?.lastProcessedAssistantFloor,
+    5,
+  );
+  assert.equal(
+    runtime.persistedGraphSnapshot?.batchJournal?.length,
+    1,
+  );
 }
 
 {
@@ -149,6 +171,14 @@ function createRuntime(persistResult) {
   assert.equal(
     runtime.graph.historyState.lastBatchStatus.historyAdvanceAllowed,
     true,
+  );
+  assert.equal(
+    runtime.persistedGraphSnapshot?.historyState?.lastProcessedAssistantFloor,
+    5,
+  );
+  assert.equal(
+    runtime.persistedGraphSnapshot?.batchJournal?.length,
+    1,
   );
 }
 

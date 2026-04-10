@@ -84,6 +84,98 @@ function normalizePersistenceStateRecord(persistResult = null) {
   };
 }
 
+function cloneSerializable(value, fallback = null) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return fallback;
+  }
+}
+
+function buildCommittedBatchPersistSnapshot(
+  runtime,
+  {
+    graph = null,
+    chat = [],
+    beforeSnapshot = null,
+    processedRange = [null, null],
+    postProcessArtifacts = [],
+    vectorHashesInserted = [],
+    extractionCountBefore = 0,
+  } = {},
+) {
+  if (!graph || typeof runtime?.cloneGraphSnapshot !== "function") {
+    return {
+      persistGraphSnapshot: null,
+      committedBatchJournalEntry: null,
+      afterSnapshot: null,
+      committedAfterSnapshot: null,
+      postProcessArtifacts: Array.isArray(postProcessArtifacts)
+        ? [...postProcessArtifacts]
+        : [],
+    };
+  }
+
+  const range = Array.isArray(processedRange) ? processedRange : [null, null];
+  const rangeStart = Number.isFinite(Number(range[0])) ? Number(range[0]) : null;
+  const rangeEnd = Number.isFinite(Number(range[1])) ? Number(range[1]) : null;
+  const afterSnapshot = runtime.cloneGraphSnapshot(graph);
+  const effectiveArtifacts = Array.isArray(postProcessArtifacts)
+    ? [...postProcessArtifacts]
+    : [];
+  const committedGraphSnapshot = runtime.cloneGraphSnapshot(graph);
+
+  if (typeof runtime.applyProcessedHistorySnapshotToGraph === "function") {
+    runtime.applyProcessedHistorySnapshotToGraph(
+      committedGraphSnapshot,
+      chat,
+      rangeEnd,
+    );
+  } else {
+    if (
+      !committedGraphSnapshot.historyState ||
+      typeof committedGraphSnapshot.historyState !== "object" ||
+      Array.isArray(committedGraphSnapshot.historyState)
+    ) {
+      committedGraphSnapshot.historyState = {};
+    }
+    committedGraphSnapshot.historyState.lastProcessedAssistantFloor =
+      Number.isFinite(rangeEnd) ? Math.floor(rangeEnd) : -1;
+    committedGraphSnapshot.lastProcessedSeq =
+      Number.isFinite(rangeEnd) ? Math.floor(rangeEnd) : -1;
+  }
+
+  const committedBatchJournalEntry =
+    typeof runtime.createBatchJournalEntry === "function"
+      ? runtime.createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
+          processedRange: [rangeStart, rangeEnd],
+          postProcessArtifacts: effectiveArtifacts,
+          vectorHashesInserted: Array.isArray(vectorHashesInserted)
+            ? vectorHashesInserted
+            : [],
+          extractionCountBefore,
+        })
+      : null;
+
+  if (
+    committedBatchJournalEntry &&
+    typeof runtime.appendBatchJournal === "function"
+  ) {
+    runtime.appendBatchJournal(
+      committedGraphSnapshot,
+      cloneSerializable(committedBatchJournalEntry, committedBatchJournalEntry),
+    );
+  }
+
+  return {
+    persistGraphSnapshot: committedGraphSnapshot,
+    committedBatchJournalEntry,
+    afterSnapshot,
+    committedAfterSnapshot: runtime.cloneGraphSnapshot(committedGraphSnapshot),
+    postProcessArtifacts: effectiveArtifacts,
+  };
+}
+
 function getPendingPersistenceGateInfo(runtime) {
   const graph = runtime?.getCurrentGraph?.();
   const batchStatus = graph?.historyState?.lastBatchStatus || null;
@@ -335,9 +427,23 @@ export async function executeExtractionBatchController(
     batchStatus,
   );
   const batchStatusRef = effects?.batchStatus || batchStatus;
+  const committedPersistState = buildCommittedBatchPersistSnapshot(runtime, {
+    graph: runtime.getCurrentGraph(),
+    chat,
+    beforeSnapshot,
+    processedRange: [startIdx, endIdx],
+    postProcessArtifacts: runtime.computePostProcessArtifacts(
+      beforeSnapshot,
+      runtime.cloneGraphSnapshot(runtime.getCurrentGraph()),
+      effects?.postProcessArtifacts || [],
+    ),
+    vectorHashesInserted: effects?.vectorHashesInserted || [],
+    extractionCountBefore,
+  });
   const persistResult = await runtime.persistExtractionBatchResult({
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
+    graphSnapshot: committedPersistState.persistGraphSnapshot,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
@@ -359,6 +465,15 @@ export async function executeExtractionBatchController(
 
   if (runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanced) {
     runtime.updateProcessedHistorySnapshot(chat, endIdx);
+    if (committedPersistState.committedBatchJournalEntry) {
+      runtime.appendBatchJournal(
+        runtime.getCurrentGraph(),
+        cloneSerializable(
+          committedPersistState.committedBatchJournalEntry,
+          committedPersistState.committedBatchJournalEntry,
+        ),
+      );
+    }
   } else if (!persistence.accepted) {
     runtime.setLastExtractionStatus(
       "提取待恢复",
@@ -372,22 +487,6 @@ export async function executeExtractionBatchController(
       processedRange: [startIdx, endIdx],
     });
   }
-
-  const afterSnapshot = runtime.cloneGraphSnapshot(runtime.getCurrentGraph());
-  const postProcessArtifacts = runtime.computePostProcessArtifacts(
-    beforeSnapshot,
-    afterSnapshot,
-    effects?.postProcessArtifacts || [],
-  );
-  runtime.appendBatchJournal(
-    runtime.getCurrentGraph(),
-    runtime.createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
-      processedRange: [startIdx, endIdx],
-      postProcessArtifacts,
-      vectorHashesInserted: effects?.vectorHashesInserted || [],
-      extractionCountBefore,
-    }),
-  );
 
   return {
     success: finalizedBatchStatus.completed,

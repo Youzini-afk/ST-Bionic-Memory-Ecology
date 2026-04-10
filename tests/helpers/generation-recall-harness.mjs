@@ -9,6 +9,7 @@ import {
   onMessageReceivedController,
   onMessageSentController,
 } from "../../host/event-binding.js";
+import { isSystemMessageForExtraction } from "../../maintenance/chat-history.js";
 import { resolveAutoExtractionPlanController } from "../../maintenance/extraction-controller.js";
 import {
   GRAPH_LOAD_STATES,
@@ -125,12 +126,22 @@ export function createGenerationRecallHarness(options = {}) {
       isTrivialUserInput,
       getAssistantTurns: (chat = []) =>
         chat.flatMap((message, index) =>
-          !message?.is_user && !message?.is_system ? [index] : [],
+          !message?.is_user &&
+          !isSystemMessageForExtraction(message, { index, chat })
+            ? [index]
+            : [],
         ),
+      isSystemMessageForExtraction,
       getLatestUserChatMessage: (chat = []) =>
         [...chat].reverse().find((message) => message?.is_user) || null,
       getLastNonSystemChatMessage: (chat = []) =>
-        [...chat].reverse().find((message) => !message?.is_system) || null,
+        [...chat]
+          .map((message, index) => ({ message, index }))
+          .reverse()
+          .find(
+            ({ message, index }) =>
+              !isSystemMessageForExtraction(message, { index, chat }),
+          )?.message || null,
       getSmartTriggerDecision,
       getSendTextareaValue: () => context.__sendTextareaValue,
       getRecallUserMessageSourceLabel: (source = "") => source,
