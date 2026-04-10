@@ -64,6 +64,51 @@ function uniqueIds(values = []) {
   return result.slice(0, KNOWLEDGE_ENTRY_LIMIT);
 }
 
+function buildExistingGraphNodeIdSet(graph) {
+  const nodeIds = new Set();
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    const nodeId = normalizeString(node?.id);
+    if (nodeId) nodeIds.add(nodeId);
+  }
+  return nodeIds;
+}
+
+function pruneKnowledgeOwnerNodeRefs(entry, graph = null) {
+  const normalizedEntry = createDefaultKnowledgeOwnerState(entry);
+  if (!graph || typeof graph !== "object") {
+    return normalizedEntry;
+  }
+
+  const existingNodeIds = buildExistingGraphNodeIdSet(graph);
+  const filterNodeIds = (values = []) =>
+    uniqueIds(values).filter((nodeId) => existingNodeIds.has(nodeId));
+
+  let ownerNodeId = normalizeString(normalizedEntry.nodeId);
+  if (ownerNodeId && !existingNodeIds.has(ownerNodeId)) {
+    const matches = findCharacterNodeByName(graph, normalizedEntry.ownerName);
+    ownerNodeId = matches.length === 1 ? normalizeString(matches[0]?.id) : "";
+  }
+
+  const visibilityScores = {};
+  for (const [nodeId, score] of Object.entries(
+    normalizedEntry.visibilityScores || {},
+  )) {
+    const normalizedNodeId = normalizeString(nodeId);
+    if (!normalizedNodeId || !existingNodeIds.has(normalizedNodeId)) continue;
+    visibilityScores[normalizedNodeId] = clampScore(score);
+  }
+
+  return createDefaultKnowledgeOwnerState({
+    ...normalizedEntry,
+    nodeId: ownerNodeId,
+    knownNodeIds: filterNodeIds(normalizedEntry.knownNodeIds),
+    mistakenNodeIds: filterNodeIds(normalizedEntry.mistakenNodeIds),
+    manualKnownNodeIds: filterNodeIds(normalizedEntry.manualKnownNodeIds),
+    manualHiddenNodeIds: filterNodeIds(normalizedEntry.manualHiddenNodeIds),
+    visibilityScores,
+  });
+}
+
 function buildOwnerAliasVariantSet(values = []) {
   const variants = new Set();
   for (const value of Array.isArray(values) ? values : [values]) {
@@ -122,14 +167,19 @@ function getKnowledgeOwnerEvidenceScore(owner = {}) {
   );
 }
 
-function findEquivalentCharacterOwnerEntry(ownerCollection, candidate = {}) {
-  if (normalizeOwnerType(candidate?.ownerType) !== OWNER_TYPE_CHARACTER) {
+function findEquivalentCharacterOwnerEntry(
+  ownerCollection,
+  candidate = {},
+  graph = null,
+) {
+  const normalizedCandidate = pruneKnowledgeOwnerNodeRefs(candidate, graph);
+  if (normalizeOwnerType(normalizedCandidate?.ownerType) !== OWNER_TYPE_CHARACTER) {
     return null;
   }
 
-  const candidateKey = normalizeString(candidate?.ownerKey);
-  const candidateNodeId = normalizeString(candidate?.nodeId);
-  const candidateAliasSet = getKnowledgeOwnerAliasVariantSet(candidate);
+  const candidateKey = normalizeString(normalizedCandidate?.ownerKey);
+  const candidateNodeId = normalizeString(normalizedCandidate?.nodeId);
+  const candidateAliasSet = getKnowledgeOwnerAliasVariantSet(normalizedCandidate);
   const matches = [];
   const values =
     ownerCollection instanceof Map
@@ -137,7 +187,7 @@ function findEquivalentCharacterOwnerEntry(ownerCollection, candidate = {}) {
       : Object.values(ownerCollection || {});
 
   for (const rawEntry of values) {
-    const entry = createDefaultKnowledgeOwnerState(rawEntry);
+    const entry = pruneKnowledgeOwnerNodeRefs(rawEntry, graph);
     if (!entry.ownerKey || normalizeOwnerType(entry.ownerType) !== OWNER_TYPE_CHARACTER) {
       continue;
     }
@@ -461,10 +511,10 @@ function resolveCanonicalKnowledgeEntry(
   entry,
   userAliasContext = null,
 ) {
-  const normalizedEntry = createDefaultKnowledgeOwnerState({
+  const normalizedEntry = pruneKnowledgeOwnerNodeRefs({
     ...entry,
     ownerKey,
-  });
+  }, graph);
   const resolvedOwner = resolveKnowledgeOwner(graph, {
     ownerType: normalizedEntry.ownerType,
     ownerName: normalizedEntry.ownerName,
@@ -501,7 +551,7 @@ export function normalizeKnowledgeState(state = {}, graph = null) {
     if (!canonicalEntry.ownerKey) continue;
     const equivalentEntry =
       owners[canonicalEntry.ownerKey] ||
-      findEquivalentCharacterOwnerEntry(owners, canonicalEntry);
+      findEquivalentCharacterOwnerEntry(owners, canonicalEntry, graph);
     const targetKey = equivalentEntry?.ownerKey || canonicalEntry.ownerKey;
     owners[targetKey] = owners[targetKey]
       ? mergeKnowledgeOwnerEntries(owners[targetKey], canonicalEntry)
@@ -625,6 +675,7 @@ export function resolveKnowledgeOwner(graph, input = {}) {
       nodeId,
       aliases,
     },
+    graph,
   );
   if (equivalentOwner?.ownerKey) {
     return {
@@ -1503,7 +1554,7 @@ export function listKnowledgeOwners(graph) {
     };
     const equivalentEntry =
       owners.get(normalizedEntry.ownerKey) ||
-      findEquivalentCharacterOwnerEntry(owners, displayEntry);
+      findEquivalentCharacterOwnerEntry(owners, displayEntry, graph);
     const targetKey = equivalentEntry?.ownerKey || normalizedEntry.ownerKey;
     owners.set(
       targetKey,

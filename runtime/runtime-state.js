@@ -790,6 +790,18 @@ function buildJournalStateBefore(snapshotBefore, meta = {}) {
       ? snapshotBefore.historyState.historyDirtyFrom
       : null,
     vectorIndexState: clonePlain(snapshotBefore?.vectorIndexState || {}),
+    knowledgeState: clonePlain(
+      snapshotBefore?.knowledgeState || createDefaultKnowledgeState(),
+    ),
+    regionState: clonePlain(
+      snapshotBefore?.regionState || createDefaultRegionState(),
+    ),
+    timelineState: clonePlain(
+      snapshotBefore?.timelineState || createDefaultTimelineState(),
+    ),
+    summaryState: clonePlain(
+      snapshotBefore?.summaryState || createDefaultSummaryState(),
+    ),
     lastRecallResult: Array.isArray(snapshotBefore?.lastRecallResult)
       ? [...snapshotBefore.lastRecallResult]
       : null,
@@ -1157,6 +1169,21 @@ function applyJournalStateBefore(graph, stateBefore = {}) {
     ...createDefaultVectorIndexState(graph?.historyState?.chatId || ""),
     ...clonePlain(stateBefore.vectorIndexState || {}),
   };
+  graph.knowledgeState = createDefaultKnowledgeState(
+    clonePlain(stateBefore.knowledgeState || {}),
+  );
+  graph.regionState = createDefaultRegionState(
+    clonePlain(stateBefore.regionState || {}),
+  );
+  graph.timelineState = createDefaultTimelineState(
+    clonePlain(stateBefore.timelineState || {}),
+  );
+  graph.summaryState = createDefaultSummaryState(
+    clonePlain(stateBefore.summaryState || {}),
+  );
+  normalizeGraphCognitiveState(graph);
+  normalizeGraphStoryTimeline(graph);
+  normalizeGraphSummaryState(graph);
   graph.lastRecallResult = Array.isArray(stateBefore.lastRecallResult)
     ? [...stateBefore.lastRecallResult]
     : null;

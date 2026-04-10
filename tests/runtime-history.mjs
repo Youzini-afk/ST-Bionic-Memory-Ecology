@@ -13,6 +13,7 @@ import {
   snapshotProcessedMessageHashes,
 } from "../runtime/runtime-state.js";
 import { createEmptyGraph } from "../graph/graph.js";
+import { normalizeKnowledgeState } from "../graph/knowledge-state.js";
 
 const chat = [
   { is_user: true, mes: "你好" },
@@ -129,6 +130,69 @@ assert.deepEqual(
   snapshotProcessedMessageHashes(chat, 3),
 );
 
+const danglingKnowledgeGraph = createEmptyGraph();
+danglingKnowledgeGraph.nodes.push({
+  id: "live-node",
+  type: "event",
+  fields: { title: "仍存在", summary: "仍存在的节点" },
+  seq: 1,
+  seqRange: [1, 1],
+  archived: false,
+  embedding: null,
+  importance: 5,
+  accessCount: 0,
+  lastAccessTime: Date.now(),
+  createdTime: Date.now(),
+  level: 0,
+  parentId: null,
+  childIds: [],
+  prevId: null,
+  nextId: null,
+  clusters: [],
+});
+danglingKnowledgeGraph.knowledgeState.owners["character:艾琳"] = {
+  ownerType: "character",
+  ownerKey: "character:艾琳",
+  ownerName: "艾琳",
+  nodeId: "ghost-owner-node",
+  knownNodeIds: ["ghost-node", "live-node"],
+  mistakenNodeIds: ["ghost-mistaken"],
+  manualKnownNodeIds: ["ghost-manual-known"],
+  manualHiddenNodeIds: ["ghost-manual-hidden"],
+  visibilityScores: {
+    "ghost-node": 1,
+    "live-node": 0.9,
+  },
+};
+const normalizedKnowledgeState = normalizeKnowledgeState(
+  danglingKnowledgeGraph.knowledgeState,
+  danglingKnowledgeGraph,
+);
+assert.deepEqual(
+  normalizedKnowledgeState.owners["character:艾琳"]?.knownNodeIds,
+  ["live-node"],
+);
+assert.deepEqual(
+  normalizedKnowledgeState.owners["character:艾琳"]?.mistakenNodeIds,
+  [],
+);
+assert.deepEqual(
+  normalizedKnowledgeState.owners["character:艾琳"]?.manualKnownNodeIds,
+  [],
+);
+assert.deepEqual(
+  normalizedKnowledgeState.owners["character:艾琳"]?.manualHiddenNodeIds,
+  [],
+);
+assert.deepEqual(
+  normalizedKnowledgeState.owners["character:艾琳"]?.visibilityScores,
+  { "live-node": 0.9 },
+);
+assert.equal(
+  normalizedKnowledgeState.owners["character:艾琳"]?.nodeId || "",
+  "",
+);
+
 const clearedGraph = normalizeGraphRuntimeState({
   historyState: {
     chatId: "chat-history-test",
@@ -177,6 +241,13 @@ graph.lastProcessedSeq = 3;
 graph.historyState.lastProcessedAssistantFloor = 3;
 graph.historyState.processedMessageHashes = hashes;
 graph.historyState.extractionCount = 4;
+graph.knowledgeState.owners["character:艾琳"] = {
+  ownerType: "character",
+  ownerKey: "character:艾琳",
+  ownerName: "艾琳",
+  knownNodeIds: ["node-1"],
+  visibilityScores: { "node-1": 1 },
+};
 const afterSnapshot = cloneGraphSnapshot(graph);
 appendBatchJournal(
   graph,
@@ -197,5 +268,9 @@ rollbackBatch(graph, recoveryPoint.affectedJournals[0]);
 assert.equal(graph.nodes.length, 0);
 assert.equal(graph.historyState.lastProcessedAssistantFloor, -1);
 assert.equal(graph.historyState.extractionCount, 0);
+assert.equal(
+  Object.keys(graph.knowledgeState?.owners || {}).length,
+  0,
+);
 
 console.log("runtime-history tests passed");
