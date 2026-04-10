@@ -11609,6 +11609,14 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
           resultCode: "history.recovery.fallback-full-rebuild",
         }),
       );
+      const recoveredLastProcessedFloor = Number.isFinite(
+        currentGraph?.historyState?.lastProcessedAssistantFloor,
+      )
+        ? currentGraph.historyState.lastProcessedAssistantFloor
+        : -1;
+      if (recoveredLastProcessedFloor >= 0) {
+        updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+      }
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
       saveGraphToChat({ reason: "history-recovery-fallback-rebuild" });
       refreshPanelLiveState();
@@ -12390,6 +12398,7 @@ async function onRebuild() {
     replayExtractionFromHistory,
     restoreRuntimeUiState,
     saveGraphToChat,
+    updateProcessedHistorySnapshot,
     setCurrentGraph: (graph) => {
       currentGraph = graph;
     },

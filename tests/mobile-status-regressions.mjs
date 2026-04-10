@@ -456,10 +456,17 @@ async function testManualExtractIgnoresFailedBatchWithoutPersistenceAttempt() {
 
 async function testManualRebuildSetsTerminalRuntimeStatus() {
   const chat = [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }];
+  let savedHashes = null;
+  let savedNeedRefresh = null;
   const context = {
     ...createBaseStatusContext(),
     __confirmHost: true,
     currentGraph: {
+      historyState: {
+        lastProcessedAssistantFloor: -1,
+        processedMessageHashes: {},
+        processedMessageHashesNeedRefresh: false,
+      },
       vectorIndexState: {
         lastWarning: "",
       },
@@ -489,6 +496,11 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
     },
     createEmptyGraph() {
       return {
+        historyState: {
+          lastProcessedAssistantFloor: -1,
+          processedMessageHashes: {},
+          processedMessageHashesNeedRefresh: false,
+        },
         vectorIndexState: {
           lastWarning: "",
         },
@@ -501,14 +513,31 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
     clearInjectionState() {},
     async prepareVectorStateForReplay() {},
     async replayExtractionFromHistory() {
+      context.currentGraph.historyState.lastProcessedAssistantFloor = 1;
       context.currentGraph.vectorIndexState.lastWarning = "";
       return 2;
     },
-    clearHistoryDirty() {},
+    clearHistoryDirty(graph) {
+      graph.historyState.processedMessageHashes = {};
+      graph.historyState.processedMessageHashesNeedRefresh = true;
+    },
     buildRecoveryResult(status, extra = {}) {
       return { status, ...extra };
     },
-    saveGraphToChat() {},
+    updateProcessedHistorySnapshot(chatInput, floor) {
+      context.currentGraph.historyState.lastProcessedAssistantFloor = floor;
+      context.currentGraph.historyState.processedMessageHashes = {};
+      for (let index = 0; index <= floor; index += 1) {
+        context.currentGraph.historyState.processedMessageHashes[index] =
+          String(chatInput[index]?.mes || "");
+      }
+      context.currentGraph.historyState.processedMessageHashesNeedRefresh = false;
+    },
+    saveGraphToChat() {
+      savedHashes = { ...context.currentGraph.historyState.processedMessageHashes };
+      savedNeedRefresh =
+        context.currentGraph.historyState.processedMessageHashesNeedRefresh;
+    },
     restoreRuntimeUiState() {},
     onRebuildController,
     result: null,
@@ -524,6 +553,11 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
   assert.equal(context.lastExtractionStatus.text, "图谱重建完成");
   assert.equal(context.runtimeStatus.text, "图谱重建完成");
   assert.equal(context.runtimeStatus.level, "success");
+  assert.deepEqual(savedHashes, {
+    0: "u",
+    1: "a",
+  });
+  assert.equal(savedNeedRefresh, false);
 }
 
 testIndexDefinesLastProcessedAssistantFloorHelper();

@@ -415,6 +415,22 @@ export async function onRebuildController(runtime) {
         reason: "用户手动触发全量重建",
       }),
     );
+    const recoveredLastProcessedFloor = Number.isFinite(
+      runtime.getCurrentGraph()?.historyState?.lastProcessedAssistantFloor,
+    )
+      ? runtime.getCurrentGraph().historyState.lastProcessedAssistantFloor
+      : -1;
+    if (recoveredLastProcessedFloor >= 0) {
+      if (typeof runtime.updateProcessedHistorySnapshot === "function") {
+        runtime.updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+      } else if (typeof runtime.applyProcessedHistorySnapshotToGraph === "function") {
+        runtime.applyProcessedHistorySnapshotToGraph(
+          runtime.getCurrentGraph(),
+          chat,
+          recoveredLastProcessedFloor,
+        );
+      }
+    }
     runtime.saveGraphToChat({ reason: "manual-rebuild-complete" });
     runtime.setLastExtractionStatus(
       "图谱重建完成",

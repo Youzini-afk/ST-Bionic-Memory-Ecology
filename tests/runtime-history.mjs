@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   appendBatchJournal,
+  clearHistoryDirty,
   cloneGraphSnapshot,
   createBatchJournalEntry,
   detectHistoryMutation,
@@ -95,6 +96,17 @@ assert.equal(migratedGraph.historyState.processedMessageHashesNeedRefresh, true)
 const migratedDetection = detectHistoryMutation(chat, migratedGraph.historyState);
 assert.equal(migratedDetection.dirty, false);
 
+const emptyHashGraph = normalizeGraphRuntimeState({
+  historyState: {
+    chatId: "chat-history-test",
+    lastProcessedAssistantFloor: 3,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+    processedMessageHashes: {},
+    processedMessageHashesNeedRefresh: false,
+  },
+});
+assert.equal(emptyHashGraph.historyState.processedMessageHashesNeedRefresh, true);
+
 const importedGraph = normalizeGraphRuntimeState({
   historyState: {
     chatId: "chat-history-test",
@@ -116,6 +128,19 @@ assert.deepEqual(
   importedGraph.historyState.processedMessageHashes,
   snapshotProcessedMessageHashes(chat, 3),
 );
+
+const clearedGraph = normalizeGraphRuntimeState({
+  historyState: {
+    chatId: "chat-history-test",
+    lastProcessedAssistantFloor: 3,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+    processedMessageHashes: hashes,
+    processedMessageHashesNeedRefresh: false,
+  },
+});
+clearHistoryDirty(clearedGraph, { status: "replayed" });
+assert.deepEqual(clearedGraph.historyState.processedMessageHashes, {});
+assert.equal(clearedGraph.historyState.processedMessageHashesNeedRefresh, true);
 
 const truncatedChat = chat.slice(0, 2);
 const truncatedDetection = detectHistoryMutation(truncatedChat, {

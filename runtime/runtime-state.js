@@ -257,6 +257,17 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
     historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
     historyState.processedMessageHashesNeedRefresh = true;
   }
+  const lastProcessedAssistantFloor = Number(
+    historyState.lastProcessedAssistantFloor,
+  );
+  if (
+    historyState.processedMessageHashesNeedRefresh !== true &&
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0 &&
+    Object.keys(historyState.processedMessageHashes).length === 0
+  ) {
+    historyState.processedMessageHashesNeedRefresh = true;
+  }
 
   if (
     !vectorIndexState.hashToNodeId ||
@@ -613,10 +624,15 @@ export function clearHistoryDirty(graph, result = null) {
   graph.historyState.historyDirtyFrom = null;
   graph.historyState.lastMutationReason = "";
   graph.historyState.lastMutationSource = "";
+  const lastProcessedAssistantFloor = Number(
+    graph.historyState.lastProcessedAssistantFloor,
+  );
   graph.historyState.processedMessageHashVersion =
     PROCESSED_MESSAGE_HASH_VERSION;
   graph.historyState.processedMessageHashes = {};
-  graph.historyState.processedMessageHashesNeedRefresh = false;
+  graph.historyState.processedMessageHashesNeedRefresh =
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0;
   if (result) {
     graph.historyState.lastRecoveryResult = result;
   }
