@@ -3532,6 +3532,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
       onMessageReceived() {},
       onMessageDeleted() {},
       onMessageEdited() {},
+      onMessageUpdated() {},
       onMessageSwiped() {},
       onUserMessageRendered() {},
       onCharacterMessageRendered() {},

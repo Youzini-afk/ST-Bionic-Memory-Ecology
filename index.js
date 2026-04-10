@@ -68,6 +68,7 @@ import {
   onMessageDeletedController,
   onMessageEditedController,
   onMessageReceivedController,
+  onMessageUpdatedController,
   onMessageSentController,
   onMessageSwipedController,
   onUserMessageRenderedController,
@@ -513,6 +514,28 @@ function getRuntimeDebugState() {
   return globalThis[stateKey];
 }
 
+function createDefaultBackgroundGenerationSkipCounts() {
+  return {
+    recall: 0,
+    extraction: 0,
+    mutation: 0,
+  };
+}
+
+function createDefaultRuntimeMessageTrace() {
+  return {
+    lastSentUserMessage: null,
+    currentGenerationWorkloadKind: "",
+    currentGenerationBackgroundReason: "",
+    currentGenerationSourceEvidence: [],
+    backgroundGenerationActive: false,
+    lastSkippedRecallReason: "",
+    lastIgnoredMutationEvent: "",
+    lastIgnoredMutationReason: "",
+    backgroundGenerationSkipCounts: createDefaultBackgroundGenerationSkipCounts(),
+  };
+}
+
 function touchRuntimeDebugState() {
   const state = getRuntimeDebugState();
   state.updatedAt = new Date().toISOString();
@@ -535,12 +558,24 @@ function recordInjectionSnapshot(kind, snapshot = {}) {
 
 function recordMessageTraceSnapshot(patch = {}) {
   const state = touchRuntimeDebugState();
-  const previous = state.messageTrace || {
-    lastSentUserMessage: null,
+  const previous = {
+    ...createDefaultRuntimeMessageTrace(),
+    ...(state.messageTrace || {}),
   };
+  const incoming = cloneRuntimeDebugValue(patch, {});
+  const nextSkipCounts =
+    incoming.backgroundGenerationSkipCounts &&
+    typeof incoming.backgroundGenerationSkipCounts === "object" &&
+    !Array.isArray(incoming.backgroundGenerationSkipCounts)
+      ? {
+          ...createDefaultBackgroundGenerationSkipCounts(),
+          ...incoming.backgroundGenerationSkipCounts,
+        }
+      : previous.backgroundGenerationSkipCounts;
   state.messageTrace = {
     ...previous,
-    ...cloneRuntimeDebugValue(patch, {}),
+    ...incoming,
+    backgroundGenerationSkipCounts: nextSkipCounts,
   };
 }
 
@@ -570,7 +605,10 @@ function readRuntimeDebugSnapshot() {
       taskLlmRequests: state.taskLlmRequests,
       injections: state.injections,
       taskTimeline: state.taskTimeline,
-      messageTrace: state.messageTrace,
+      messageTrace: {
+        ...createDefaultRuntimeMessageTrace(),
+        ...(state.messageTrace || {}),
+      },
       maintenance: state.maintenance,
       graphPersistence: state.graphPersistence,
       updatedAt: state.updatedAt,
@@ -581,9 +619,7 @@ function readRuntimeDebugSnapshot() {
       taskLlmRequests: {},
       injections: {},
       taskTimeline: [],
-      messageTrace: {
-        lastSentUserMessage: null,
-      },
+      messageTrace: createDefaultRuntimeMessageTrace(),
       maintenance: {
         lastAction: null,
         lastUndoResult: null,
@@ -659,6 +695,10 @@ let lastHostGenerationEndedAt = 0;
 let skipBeforeCombineRecallUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
+let generationWorkloadSequence = 0;
+let generationWorkloadStack = [];
+let recentForegroundGenerationHint = null;
+let recentBackgroundGenerationHint = null;
 const generationRecallTransactions = new Map();
 const plannerRecallHandoffs = new Map();
 let persistedRecallUiRefreshTimer = null;
@@ -682,6 +722,7 @@ const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const PLANNER_RECALL_HANDOFF_TTL_MS = GENERATION_RECALL_TRANSACTION_TTL_MS;
 const GENERATION_RECALL_HOOK_BRIDGE_MS = 1200;
+const GENERATION_WORKLOAD_HINT_TTL_MS = 5000;
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -1385,10 +1426,671 @@ function clearRecallInputTracking() {
   clearPendingHostGenerationInputSnapshot();
   if (typeof recordMessageTraceSnapshot === "function") {
     recordMessageTraceSnapshot({
-      lastSentUserMessage: null,
+      ...createDefaultRuntimeMessageTrace(),
     });
   }
   clearPlannerRecallHandoffsForChat("", { clearAll: true });
+}
+
+function createGenerationWorkloadState(overrides = {}) {
+  const normalizedKind = String(overrides?.kind || "unresolved").trim() || "unresolved";
+  const normalizedChatId = normalizeChatIdCandidate(
+    overrides?.chatId || getCurrentChatId(),
+  );
+  const normalizedEvidence = Array.isArray(overrides?.sourceEvidence)
+    ? [
+        ...new Set(
+          overrides.sourceEvidence
+            .map((value) => String(value || "").trim())
+            .filter(Boolean),
+        ),
+      ]
+    : [];
+  const boundUserMessageIndex = Number.isFinite(
+    Number(overrides?.boundUserMessageIndex),
+  )
+    ? Math.floor(Number(overrides.boundUserMessageIndex))
+    : null;
+
+  return {
+    id:
+      String(overrides?.id || "").trim() ||
+      `gw-${++generationWorkloadSequence}`,
+    kind: normalizedKind,
+    generationType:
+      String(overrides?.generationType || "normal").trim() || "normal",
+    chatId: normalizedChatId,
+    hookName: String(overrides?.hookName || "").trim(),
+    backgroundReason: String(overrides?.backgroundReason || "").trim(),
+    sourceEvidence: normalizedEvidence,
+    boundUserMessageIndex,
+    startedAt: Number(overrides?.startedAt) || Date.now(),
+    updatedAt: Number(overrides?.updatedAt) || Date.now(),
+    active: overrides?.active !== false,
+    dryRun: overrides?.dryRun === true,
+    bootstrapSource: String(overrides?.bootstrapSource || "").trim(),
+  };
+}
+
+function isForegroundUserGenerationWorkload(workload = null) {
+  return String(workload?.kind || "").trim() === "user-primary";
+}
+
+function isRecallEligibleGenerationWorkload(workload = null) {
+  const kind = String(workload?.kind || "").trim();
+  return kind === "user-primary" || kind === "user-history";
+}
+
+function isBackgroundGenerationWorkload(workload = null) {
+  const kind = String(workload?.kind || "").trim();
+  return (
+    Boolean(workload?.active) &&
+    ["background-plugin", "background-quiet", "background-auto", "unresolved"].includes(kind)
+  );
+}
+
+function cleanupGenerationWorkloadHints(now = Date.now()) {
+  const normalizeHint = (hint = null) => {
+    if (!hint || typeof hint !== "object" || Array.isArray(hint)) return null;
+    const startedAt = Number(hint.startedAt || hint.endedAt || 0);
+    if (!startedAt || now - startedAt > GENERATION_WORKLOAD_HINT_TTL_MS) {
+      return null;
+    }
+    return {
+      kind: String(hint.kind || "").trim(),
+      chatId: normalizeChatIdCandidate(hint.chatId || ""),
+      backgroundReason: String(hint.backgroundReason || "").trim(),
+      sourceEvidence: Array.isArray(hint.sourceEvidence)
+        ? hint.sourceEvidence
+        : [],
+      startedAt,
+      endedAt: Number(hint.endedAt || startedAt) || startedAt,
+    };
+  };
+
+  recentForegroundGenerationHint = normalizeHint(recentForegroundGenerationHint);
+  recentBackgroundGenerationHint = normalizeHint(recentBackgroundGenerationHint);
+}
+
+function cleanupGenerationWorkloadStack(now = Date.now()) {
+  cleanupGenerationWorkloadHints(now);
+  generationWorkloadStack = generationWorkloadStack
+    .map((entry) =>
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? createGenerationWorkloadState({
+            ...entry,
+            id: String(entry.id || "").trim() || `gw-${++generationWorkloadSequence}`,
+            startedAt: Number(entry.startedAt || now) || now,
+            updatedAt: Number(entry.updatedAt || entry.startedAt || now) || now,
+          })
+        : null,
+    )
+    .filter(Boolean)
+    .filter(
+      (entry) =>
+        now - Number(entry.updatedAt || entry.startedAt || 0) <=
+        GENERATION_WORKLOAD_HINT_TTL_MS,
+    );
+  return generationWorkloadStack;
+}
+
+function getGenerationWorkloadStack(chatId = getCurrentChatId()) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  return cleanupGenerationWorkloadStack()
+    .filter(
+      (entry) =>
+        !normalizedChatId || normalizeChatIdCandidate(entry.chatId) === normalizedChatId,
+    )
+    .map((entry) => cloneRuntimeDebugValue(entry, null))
+    .filter(Boolean);
+}
+
+function getCurrentGenerationWorkload(chatId = getCurrentChatId()) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const candidates = getGenerationWorkloadStack(normalizedChatId);
+  return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+}
+
+function recordGenerationIsolationDebugSnapshot() {
+  const currentWorkload = getCurrentGenerationWorkload();
+  recordMessageTraceSnapshot({
+    currentGenerationWorkloadKind: String(currentWorkload?.kind || ""),
+    currentGenerationBackgroundReason: String(
+      currentWorkload?.backgroundReason || "",
+    ),
+    currentGenerationSourceEvidence: Array.isArray(
+      currentWorkload?.sourceEvidence,
+    )
+      ? currentWorkload.sourceEvidence
+      : [],
+    backgroundGenerationActive: isBackgroundGenerationWorkload(currentWorkload),
+  });
+}
+
+function incrementBackgroundGenerationSkipCount(kind = "recall") {
+  const snapshot = readRuntimeDebugSnapshot();
+  const previousCounts =
+    snapshot?.messageTrace?.backgroundGenerationSkipCounts &&
+    typeof snapshot.messageTrace.backgroundGenerationSkipCounts === "object"
+      ? snapshot.messageTrace.backgroundGenerationSkipCounts
+      : createDefaultBackgroundGenerationSkipCounts();
+  const normalizedKind = ["recall", "extraction", "mutation"].includes(
+    String(kind || ""),
+  )
+    ? String(kind)
+    : "recall";
+  recordMessageTraceSnapshot({
+    backgroundGenerationSkipCounts: {
+      ...previousCounts,
+      [normalizedKind]: Number(previousCounts?.[normalizedKind] || 0) + 1,
+    },
+  });
+}
+
+function noteSkippedRecall(
+  reason = "",
+  workload = getCurrentGenerationWorkload(),
+  extra = {},
+) {
+  incrementBackgroundGenerationSkipCount("recall");
+  recordMessageTraceSnapshot({
+    lastSkippedRecallReason: String(reason || "").trim(),
+    currentGenerationWorkloadKind: String(workload?.kind || ""),
+    currentGenerationBackgroundReason: String(
+      workload?.backgroundReason || "",
+    ),
+    currentGenerationSourceEvidence: Array.isArray(workload?.sourceEvidence)
+      ? workload.sourceEvidence
+      : [],
+    backgroundGenerationActive: isBackgroundGenerationWorkload(workload),
+    ...cloneRuntimeDebugValue(extra, {}),
+  });
+}
+
+function noteIgnoredMutationEvent(
+  eventName = "",
+  reason = "",
+  workload = getCurrentGenerationWorkload(),
+  extra = {},
+) {
+  incrementBackgroundGenerationSkipCount("mutation");
+  recordMessageTraceSnapshot({
+    lastIgnoredMutationEvent: String(eventName || "").trim(),
+    lastIgnoredMutationReason: String(reason || "").trim(),
+    currentGenerationWorkloadKind: String(workload?.kind || ""),
+    currentGenerationBackgroundReason: String(
+      workload?.backgroundReason || "",
+    ),
+    currentGenerationSourceEvidence: Array.isArray(workload?.sourceEvidence)
+      ? workload.sourceEvidence
+      : [],
+    backgroundGenerationActive: isBackgroundGenerationWorkload(workload),
+    ...cloneRuntimeDebugValue(extra, {}),
+  });
+}
+
+function noteSkippedBackgroundExtraction(
+  reason = "",
+  workload = getCurrentGenerationWorkload(),
+  extra = {},
+) {
+  incrementBackgroundGenerationSkipCount("extraction");
+  recordMessageTraceSnapshot({
+    currentGenerationWorkloadKind: String(workload?.kind || ""),
+    currentGenerationBackgroundReason: String(
+      workload?.backgroundReason || "",
+    ),
+    currentGenerationSourceEvidence: Array.isArray(workload?.sourceEvidence)
+      ? workload.sourceEvidence
+      : [],
+    backgroundGenerationActive: isBackgroundGenerationWorkload(workload),
+    lastSkippedRecallReason: String(reason || "").trim(),
+    ...cloneRuntimeDebugValue(extra, {}),
+  });
+}
+
+function rememberRecentGenerationHint(workload = null) {
+  if (!workload || typeof workload !== "object") return;
+  const hint = {
+    kind: String(workload.kind || "").trim(),
+    chatId: normalizeChatIdCandidate(workload.chatId || ""),
+    backgroundReason: String(workload.backgroundReason || "").trim(),
+    sourceEvidence: Array.isArray(workload.sourceEvidence)
+      ? workload.sourceEvidence
+      : [],
+    startedAt: Number(workload.startedAt || 0) || Date.now(),
+    endedAt: Date.now(),
+  };
+
+  if (hint.kind === "user-primary") {
+    recentForegroundGenerationHint = hint;
+    return;
+  }
+  if (
+    ["background-plugin", "background-quiet", "background-auto", "unresolved"].includes(
+      hint.kind,
+    )
+  ) {
+    recentBackgroundGenerationHint = hint;
+  }
+}
+
+function pushGenerationWorkload(workload = {}) {
+  const normalized = createGenerationWorkloadState({
+    ...workload,
+    active: true,
+    updatedAt: Date.now(),
+  });
+  cleanupGenerationWorkloadStack();
+  generationWorkloadStack.push(normalized);
+  recordGenerationIsolationDebugSnapshot();
+  return cloneRuntimeDebugValue(normalized, null);
+}
+
+function popGenerationWorkload(chatId = getCurrentChatId()) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  cleanupGenerationWorkloadStack();
+  if (!generationWorkloadStack.length) {
+    recordGenerationIsolationDebugSnapshot();
+    return null;
+  }
+
+  let removed = null;
+  if (
+    !normalizedChatId ||
+    normalizeChatIdCandidate(
+      generationWorkloadStack[generationWorkloadStack.length - 1]?.chatId,
+    ) === normalizedChatId
+  ) {
+    removed = generationWorkloadStack.pop() || null;
+  } else {
+    for (let index = generationWorkloadStack.length - 1; index >= 0; index -= 1) {
+      if (
+        normalizeChatIdCandidate(generationWorkloadStack[index]?.chatId) !==
+        normalizedChatId
+      ) {
+        continue;
+      }
+      removed = generationWorkloadStack.splice(index, 1)[0] || null;
+      break;
+    }
+  }
+
+  if (removed) {
+    rememberRecentGenerationHint(removed);
+  }
+  recordGenerationIsolationDebugSnapshot();
+  return cloneRuntimeDebugValue(removed, null);
+}
+
+function clearGenerationWorkloadsForChat(
+  chatId = getCurrentChatId(),
+  { clearAll = false } = {},
+) {
+  if (clearAll) {
+    generationWorkloadStack = [];
+    recentForegroundGenerationHint = null;
+    recentBackgroundGenerationHint = null;
+    syncHostGenerationRunningState();
+    recordGenerationIsolationDebugSnapshot();
+    return;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  generationWorkloadStack = cleanupGenerationWorkloadStack().filter(
+    (entry) => normalizeChatIdCandidate(entry.chatId) !== normalizedChatId,
+  );
+  if (
+    normalizeChatIdCandidate(recentForegroundGenerationHint?.chatId) ===
+    normalizedChatId
+  ) {
+    recentForegroundGenerationHint = null;
+  }
+  if (
+    normalizeChatIdCandidate(recentBackgroundGenerationHint?.chatId) ===
+    normalizedChatId
+  ) {
+    recentBackgroundGenerationHint = null;
+  }
+  syncHostGenerationRunningState();
+  recordGenerationIsolationDebugSnapshot();
+}
+
+function getRecentForegroundGenerationHint(chatId = getCurrentChatId()) {
+  cleanupGenerationWorkloadHints();
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (
+    !recentForegroundGenerationHint ||
+    normalizeChatIdCandidate(recentForegroundGenerationHint.chatId) !==
+      normalizedChatId
+  ) {
+    return null;
+  }
+  return cloneRuntimeDebugValue(recentForegroundGenerationHint, null);
+}
+
+function getRecentBackgroundGenerationHint(chatId = getCurrentChatId()) {
+  cleanupGenerationWorkloadHints();
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (
+    !recentBackgroundGenerationHint ||
+    normalizeChatIdCandidate(recentBackgroundGenerationHint.chatId) !==
+      normalizedChatId
+  ) {
+    return null;
+  }
+  return cloneRuntimeDebugValue(recentBackgroundGenerationHint, null);
+}
+
+function syncHostGenerationRunningState() {
+  cleanupGenerationWorkloadStack();
+  const hadRunningGeneration = isHostGenerationRunning;
+  isHostGenerationRunning = generationWorkloadStack.length > 0;
+  if (isHostGenerationRunning) {
+    lastHostGenerationEndedAt = 0;
+  } else if (hadRunningGeneration) {
+    lastHostGenerationEndedAt = Date.now();
+  }
+  return isHostGenerationRunning;
+}
+
+function coerceMvuBoolean(value) {
+  if (value === true) return true;
+  if (Array.isArray(value) && value[0] === true) return true;
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value.value === true || value.current === true)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function detectMvuExtraAnalysisSignal() {
+  const evidence = [];
+
+  const mvuCandidates = [
+    globalThis.Mvu,
+    globalThis.window?.Mvu,
+    globalThis.window?.parent?.Mvu,
+  ].filter(Boolean);
+
+  for (const candidate of mvuCandidates) {
+    try {
+      if (typeof candidate?.isDuringExtraAnalysis === "function") {
+        const active = candidate.isDuringExtraAnalysis();
+        if (active === true) {
+          evidence.push("mvu-runtime-method");
+          return {
+            active: true,
+            reason: "mvu-extra-analysis",
+            sourceEvidence: evidence,
+          };
+        }
+      }
+    } catch {
+      // ignore host/plugin read failures
+    }
+  }
+
+  const variableReaders = [
+    globalThis.getVariables,
+    globalThis.TavernHelper?.getVariables,
+    globalThis.window?.TavernHelper?.getVariables,
+  ].filter((reader) => typeof reader === "function");
+
+  for (const reader of variableReaders) {
+    try {
+      const variables = reader({ type: "global" });
+      if (coerceMvuBoolean(variables?.extra_analysis)) {
+        evidence.push("mvu-global-extra_analysis");
+        return {
+          active: true,
+          reason: "mvu-extra-analysis",
+          sourceEvidence: evidence,
+        };
+      }
+    } catch {
+      // ignore host/plugin read failures
+    }
+  }
+
+  return {
+    active: false,
+    reason: "",
+    sourceEvidence: evidence,
+  };
+}
+
+function classifyGenerationWorkload(
+  type,
+  params = {},
+  { dryRun = false, hookName = "" } = {},
+) {
+  const context = getContext();
+  const chat = Array.isArray(context?.chat) ? context.chat : [];
+  const chatId = normalizeChatIdCandidate(context?.chatId || getCurrentChatId());
+  const generationType = String(type || "normal").trim() || "normal";
+  const sourceEvidence = [];
+  const mvuSignal = detectMvuExtraAnalysisSignal();
+
+  if (dryRun) {
+    sourceEvidence.push("dry-run");
+    return createGenerationWorkloadState({
+      kind: "unresolved",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: "dry-run",
+      sourceEvidence,
+      dryRun: true,
+    });
+  }
+
+  if (params?.quiet_prompt) {
+    sourceEvidence.push("quiet-prompt");
+    return createGenerationWorkloadState({
+      kind: "background-quiet",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: "quiet-prompt",
+      sourceEvidence,
+    });
+  }
+
+  if (params?.automatic_trigger) {
+    sourceEvidence.push("automatic-trigger");
+    return createGenerationWorkloadState({
+      kind: "background-auto",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: "automatic-trigger",
+      sourceEvidence,
+    });
+  }
+
+  if (generationType !== "normal") {
+    sourceEvidence.push(`generation-type:${generationType}`);
+    return createGenerationWorkloadState({
+      kind: "user-history",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: `non-normal-generation:${generationType}`,
+      sourceEvidence,
+    });
+  }
+
+  const currentWorkload = getCurrentGenerationWorkload(chatId);
+  const recentForegroundHint = getRecentForegroundGenerationHint(chatId);
+  const suppressForegroundAnchor =
+    mvuSignal.active === true ||
+    isForegroundUserGenerationWorkload(currentWorkload) ||
+    (mvuSignal.active === true &&
+      recentForegroundHint &&
+      Date.now() - Number(recentForegroundHint.endedAt || 0) <=
+        GENERATION_WORKLOAD_HINT_TTL_MS);
+
+  if (isForegroundUserGenerationWorkload(currentWorkload)) {
+    sourceEvidence.push("existing-user-primary-active");
+  } else if (recentForegroundHint && mvuSignal.active) {
+    sourceEvidence.push("recent-user-primary-completed");
+  }
+
+  const resolvedTargetUserMessageIndex = resolveGenerationTargetUserMessageIndex(
+    chat,
+    { generationType: "normal" },
+  );
+  let boundUserMessageIndex = Number.isFinite(resolvedTargetUserMessageIndex)
+    ? Math.floor(Number(resolvedTargetUserMessageIndex))
+    : null;
+  if (!Number.isFinite(boundUserMessageIndex)) {
+    for (let index = chat.length - 1; index >= 0; index -= 1) {
+      const message = chat[index];
+      if (isSystemMessageForExtraction(message, { index, chat })) continue;
+      if (message?.is_user) {
+        boundUserMessageIndex = index;
+        break;
+      }
+    }
+  }
+
+  const candidateSendIntent = isFreshRecallInputRecord(pendingRecallSendIntent)
+    ? pendingRecallSendIntent
+    : null;
+  const candidateHostSnapshot = isFreshRecallInputRecord(
+    pendingHostGenerationInputSnapshot,
+  )
+    ? pendingHostGenerationInputSnapshot
+    : null;
+
+  const freshSendIntent =
+    candidateSendIntent &&
+    (!recentForegroundHint ||
+      Number(candidateSendIntent.at || 0) >
+        Number(recentForegroundHint.endedAt || 0));
+  const freshHostSnapshot =
+    candidateHostSnapshot &&
+    (!recentForegroundHint ||
+      Number(candidateHostSnapshot.at || 0) >
+        Number(recentForegroundHint.endedAt || 0));
+  const canUseUserFloorAnchor =
+    Number.isFinite(boundUserMessageIndex) &&
+    !suppressForegroundAnchor &&
+    chat[boundUserMessageIndex]?.is_user === true;
+
+  if (!suppressForegroundAnchor) {
+    if (freshSendIntent) {
+      sourceEvidence.push("send-intent");
+    }
+    if (freshHostSnapshot) {
+      sourceEvidence.push("host-generation-snapshot");
+    }
+    if (canUseUserFloorAnchor) {
+      sourceEvidence.push("chat-user-floor-anchor");
+    }
+  }
+
+  if (
+    sourceEvidence.some((item) =>
+      ["send-intent", "host-generation-snapshot", "chat-user-floor-anchor"].includes(item),
+    )
+  ) {
+    return createGenerationWorkloadState({
+      kind: "user-primary",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: "",
+      sourceEvidence,
+      boundUserMessageIndex,
+    });
+  }
+
+  if (mvuSignal.active) {
+    return createGenerationWorkloadState({
+      kind: "background-plugin",
+      generationType,
+      chatId,
+      hookName,
+      backgroundReason: String(mvuSignal.reason || "mvu-extra-analysis"),
+      sourceEvidence: [...sourceEvidence, ...(mvuSignal.sourceEvidence || [])],
+      boundUserMessageIndex,
+    });
+  }
+
+  return createGenerationWorkloadState({
+    kind: "unresolved",
+    generationType,
+    chatId,
+    hookName,
+    backgroundReason: "no-foreground-evidence",
+    sourceEvidence,
+    boundUserMessageIndex,
+  });
+}
+
+function resolveCurrentGenerationWorkload(
+  type,
+  params = {},
+  {
+    dryRun = false,
+    hookName = "",
+    bootstrap = false,
+  } = {},
+) {
+  const currentWorkload = getCurrentGenerationWorkload();
+  if (currentWorkload?.active) {
+    return currentWorkload;
+  }
+
+  const classified = classifyGenerationWorkload(type, params, {
+    dryRun,
+    hookName,
+  });
+  if (!bootstrap || dryRun) {
+    return classified;
+  }
+  return pushGenerationWorkload({
+    ...classified,
+    bootstrapSource: hookName,
+  });
+}
+
+function shouldTreatMutationAsBackground(
+  eventName = "",
+  meta = null,
+  chatId = getCurrentChatId(),
+) {
+  const currentWorkload = getCurrentGenerationWorkload(chatId);
+  if (isBackgroundGenerationWorkload(currentWorkload)) {
+    return true;
+  }
+
+  const recentBackgroundHint = getRecentBackgroundGenerationHint(chatId);
+  if (!recentBackgroundHint) {
+    return false;
+  }
+
+  const normalizedEventName = String(eventName || "").trim().toUpperCase();
+  if (normalizedEventName === "MESSAGE_UPDATED") {
+    return true;
+  }
+
+  if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+    if (meta.isUser === true || meta.isSystem === true) {
+      return false;
+    }
+    if (meta.isAssistant === true) {
+      return true;
+    }
+  }
+
+  return recentBackgroundHint.kind === "background-plugin";
 }
 
 function getCoreEventBindingState() {
@@ -10066,6 +10768,21 @@ function createGenerationRecallContext({
   const normalizedChatId = normalizeChatIdCandidate(
     chatId || context?.chatId || getCurrentChatId(),
   );
+  const currentWorkload = getCurrentGenerationWorkload(normalizedChatId);
+  if (currentWorkload && !isRecallEligibleGenerationWorkload(currentWorkload)) {
+    return {
+      hookName,
+      generationType: String(currentWorkload.generationType || generationType || "normal"),
+      recallKey: "",
+      transaction: null,
+      recallOptions: null,
+      shouldRun: false,
+      workload: currentWorkload,
+      guardReason: `background-generation:${String(
+        currentWorkload.backgroundReason || currentWorkload.kind || "background",
+      )}`,
+    };
+  }
   const effectiveGenerationType = normalizeGenerationRecallTransactionType(
     recallOptions?.generationType || generationType,
   );
@@ -10216,15 +10933,29 @@ function createGenerationRecallContext({
   if (!String(transaction.generationType || "").trim()) {
     transaction.generationType = transactionGenerationType;
   }
-  transaction.updatedAt = now;
-  generationRecallTransactions.set(transaction.id, transaction);
-
   const boundRecallOptions = {
     ...(transaction.frozenRecallOptions || frozenRecallOptions),
     recallKey: transaction.recallKey,
     generationType:
       transaction.frozenRecallOptions?.generationType || generationType,
   };
+  transaction.workloadKind =
+    String(currentWorkload?.kind || "user-primary").trim() || "user-primary";
+  transaction.backgroundReason = String(
+    currentWorkload?.backgroundReason || "",
+  ).trim();
+  transaction.sourceEvidence = Array.isArray(currentWorkload?.sourceEvidence)
+    ? currentWorkload.sourceEvidence.map((value) => String(value || ""))
+    : [];
+  transaction.boundUserMessageIndex = Number.isFinite(
+    currentWorkload?.boundUserMessageIndex,
+  )
+    ? Number(currentWorkload.boundUserMessageIndex)
+    : Number.isFinite(boundRecallOptions.targetUserMessageIndex)
+      ? Number(boundRecallOptions.targetUserMessageIndex)
+      : null;
+  transaction.updatedAt = now;
+  generationRecallTransactions.set(transaction.id, transaction);
   if (plannerRecallHandoff?.result) {
     boundRecallOptions.cachedRecallPayload = {
       handoffId: plannerRecallHandoff.id,
@@ -12046,6 +12777,7 @@ function onChatChanged() {
   const result = onChatChangedController({
     abortAllRunningStages,
     clearCoreEventBindingState,
+    clearGenerationWorkloadsForChat,
     clearGenerationRecallTransactionsForChat,
     clearInjectionState,
     clearPendingAutoExtraction,
@@ -12123,8 +12855,10 @@ function onChatLoaded() {
 function onMessageSent(messageId) {
   const result = onMessageSentController(
     {
+      getCurrentGenerationWorkload,
       getContext,
       isTrivialUserInput,
+      noteIgnoredMutationEvent,
       recordRecallSentUserMessage,
       rebindRecallRecordToNewUserMessage,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
@@ -12174,12 +12908,31 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   return result;
 }
 
+function onMessageUpdated(messageId, meta = null) {
+  const result = onMessageUpdatedController(
+    {
+      getCurrentGenerationWorkload,
+      noteIgnoredMutationEvent,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    },
+    messageId,
+    meta,
+  );
+  if (typeof scheduleMessageHideApply === "function") {
+    scheduleMessageHideApply("message-updated", 80);
+  }
+  return result;
+}
+
 function onMessageEdited(messageId, meta = null) {
   const result = onMessageEditedController(
     {
+      getCurrentGenerationWorkload,
       invalidateRecallAfterHistoryMutation,
+      noteIgnoredMutationEvent,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
+      shouldTreatMutationAsBackground,
     },
     messageId,
     meta,
@@ -12208,24 +12961,16 @@ async function onMessageSwiped(messageId, meta = null) {
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
-  const generationType = String(type || "normal").trim() || "normal";
-  if (
-    !dryRun &&
-    !params?.automatic_trigger &&
-    !params?.quiet_prompt &&
-    generationType === "normal"
-  ) {
-    isHostGenerationRunning = true;
-    lastHostGenerationEndedAt = 0;
-  }
-  return onGenerationStartedController(
+  const result = onGenerationStartedController(
     {
+      classifyGenerationWorkload,
       clearDryRunPromptPreview,
       clearCurrentGenerationTrivialSkip,
       clearPendingHostGenerationInputSnapshot,
       clearPendingRecallSendIntent,
       freezeHostGenerationInputSnapshot,
       getContext,
+      getCurrentGenerationWorkload,
       getPendingRecallSendIntent: () => pendingRecallSendIntent,
       getSendTextareaValue,
       isFreshRecallInputRecord,
@@ -12233,31 +12978,44 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
       markDryRunPromptPreview,
       markCurrentGenerationTrivialSkip,
       normalizeRecallInputText,
+      pushGenerationWorkload,
     },
     type,
     params,
     dryRun,
   );
+  syncHostGenerationRunningState();
+  recordGenerationIsolationDebugSnapshot();
+  return result;
 }
 
 function onGenerationEnded(_chatLength = null) {
-  isHostGenerationRunning = false;
-  lastHostGenerationEndedAt = Date.now();
-  const recentTransaction = findRecentGenerationRecallTransactionForChat();
-  const recentRecallResult =
-    getGenerationRecallTransactionResult(recentTransaction);
-  ensurePersistedRecallRecordForGeneration({
-    generationType: recentTransaction?.generationType || "normal",
-    recallResult: recentRecallResult,
-    transaction: recentTransaction,
-    recallOptions: recentTransaction?.frozenRecallOptions || null,
-    hookName:
-      recentRecallResult?.hookName ||
-      recentTransaction?.lastRecallMeta?.hookName ||
-      "",
-  });
+  const completedWorkload = popGenerationWorkload();
+  syncHostGenerationRunningState();
+  if (
+    !completedWorkload ||
+    isRecallEligibleGenerationWorkload(completedWorkload)
+  ) {
+    const recentTransaction = findRecentGenerationRecallTransactionForChat();
+    const recentRecallResult =
+      getGenerationRecallTransactionResult(recentTransaction);
+    ensurePersistedRecallRecordForGeneration({
+      generationType: recentTransaction?.generationType || "normal",
+      recallResult: recentRecallResult,
+      transaction: recentTransaction,
+      recallOptions: recentTransaction?.frozenRecallOptions || null,
+      hookName:
+        recentRecallResult?.hookName ||
+        recentTransaction?.lastRecallMeta?.hookName ||
+        "",
+    });
+  }
   schedulePersistedRecallMessageUiRefresh(320);
-  void maybeResumePendingAutoExtraction("generation-ended");
+  void maybeResumePendingAutoExtraction(
+    completedWorkload?.kind
+      ? `generation-ended:${completedWorkload.kind}`
+      : "generation-ended",
+  );
   if (typeof scheduleMessageHideApply === "function") {
     scheduleMessageHideApply("generation-ended", 180);
   }
@@ -12268,14 +13026,18 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
     {
       applyFinalRecallInjectionForGeneration,
       buildGenerationAfterCommandsRecallInput,
+      classifyGenerationWorkload,
       clearLiveRecallInjectionPromptForRewrite,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       ensurePersistedRecallRecordForGeneration,
       getContext,
+      getCurrentGenerationWorkload,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
       markGenerationRecallTransactionHookState,
+      noteSkippedRecall,
+      pushGenerationWorkload,
       resolveGenerationRecallDeliveryMode,
       runRecall,
       storeGenerationRecallTransactionResult,
@@ -12292,14 +13054,18 @@ async function onBeforeCombinePrompts(promptData = null) {
       applyFinalRecallInjectionForGeneration,
       buildHistoryGenerationRecallInput,
       buildNormalGenerationRecallInput,
+      classifyGenerationWorkload,
       clearLiveRecallInjectionPromptForRewrite,
       consumeDryRunPromptPreview,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       getContext,
+      getCurrentGenerationWorkload,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
       markGenerationRecallTransactionHookState,
+      noteSkippedRecall,
+      pushGenerationWorkload,
       resolveGenerationRecallDeliveryMode,
       runRecall,
       storeGenerationRecallTransactionResult,
@@ -12310,12 +13076,14 @@ async function onBeforeCombinePrompts(promptData = null) {
 
 function onMessageReceived(messageId = null, type = "") {
   const result = onMessageReceivedController({
+    noteSkippedBackgroundExtraction,
     console,
     consumeCurrentGenerationTrivialSkip,
     createRecallInputRecord,
     deferAutoExtraction,
     getContext,
     getCurrentGraph: () => currentGraph,
+    getCurrentGenerationWorkload,
     getGraphPersistenceState: () => graphPersistenceState,
     getIsHostGenerationRunning: () => isHostGenerationRunning,
     getLastProcessedAssistantFloor,
@@ -13326,6 +14094,7 @@ async function onRollbackLastRestore() {
 
     // 注册事件钩子
     registerCoreEventHooksController({
+      clearGenerationWorkloadsForChat,
       console,
       eventSource,
       eventTypes: event_types,
@@ -13340,6 +14109,7 @@ async function onRollbackLastRestore() {
         onGenerationStarted,
         onMessageDeleted,
         onMessageEdited,
+        onMessageUpdated,
         onMessageReceived,
         onMessageSent,
         onMessageSwiped,

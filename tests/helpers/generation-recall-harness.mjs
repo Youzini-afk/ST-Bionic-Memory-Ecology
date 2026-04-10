@@ -7,6 +7,7 @@ import {
   onGenerationAfterCommandsController,
   onGenerationStartedController,
   onMessageReceivedController,
+  onMessageUpdatedController,
   onMessageSentController,
 } from "../../host/event-binding.js";
 import { isSystemMessageForExtraction } from "../../maintenance/chat-history.js";
@@ -16,6 +17,7 @@ import {
   GRAPH_METADATA_KEY,
   GRAPH_PERSISTENCE_META_KEY,
   MODULE_NAME,
+  cloneRuntimeDebugValue,
 } from "../../graph/graph-persistence.js";
 import { getSmartTriggerDecision } from "../../maintenance/smart-trigger.js";
 import {
@@ -169,6 +171,7 @@ export function createGenerationRecallHarness(options = {}) {
       hideScheduleCalls: [],
       isExtracting: false,
       isRecoveringHistory: false,
+      Mvu: null,
       isAssistantChatMessage: (message) =>
         Boolean(message) && !message.is_user && !message.is_system,
       createRecallInputRecord,
@@ -188,6 +191,7 @@ export function createGenerationRecallHarness(options = {}) {
       GRAPH_LOAD_STATES,
       GRAPH_METADATA_KEY,
       GRAPH_PERSISTENCE_META_KEY,
+      cloneRuntimeDebugValue,
       resolveAutoExtractionPlanController,
       onBeforeCombinePromptsController,
       onGenerationAfterCommandsController,
@@ -244,10 +248,45 @@ export function createGenerationRecallHarness(options = {}) {
       },
       metadataSaveCalls: 0,
       recallUiRefreshCalls: 0,
+      __messageTraceState: {
+        lastSentUserMessage: null,
+        currentGenerationWorkloadKind: "",
+        currentGenerationBackgroundReason: "",
+        currentGenerationSourceEvidence: [],
+        backgroundGenerationActive: false,
+        lastSkippedRecallReason: "",
+        lastIgnoredMutationEvent: "",
+        lastIgnoredMutationReason: "",
+        backgroundGenerationSkipCounts: {
+          recall: 0,
+          extraction: 0,
+          mutation: 0,
+        },
+      },
     };
+    context.recordMessageTraceSnapshot = (patch = {}) => {
+      context.__messageTraceState = {
+        ...(context.__messageTraceState || {}),
+        ...(patch || {}),
+        backgroundGenerationSkipCounts: {
+          ...(context.__messageTraceState?.backgroundGenerationSkipCounts || {
+            recall: 0,
+            extraction: 0,
+            mutation: 0,
+          }),
+          ...((patch || {}).backgroundGenerationSkipCounts || {}),
+        },
+      };
+      return context.__messageTraceState;
+    };
+    context.readRuntimeDebugSnapshot = () => ({
+      messageTrace: {
+        ...(context.__messageTraceState || {}),
+      },
+    });
     vm.createContext(context);
     vm.runInContext(
-      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, buildNormalGenerationRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationEnded, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, ensurePersistedRecallRecordForGeneration, findRecentGenerationRecallTransactionForChat, getGenerationRecallTransactionResult, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, clearPendingHostGenerationInputSnapshot, recordRecallSendIntent, clearPendingRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage, getCurrentGenerationTrivialSkip, markCurrentGenerationTrivialSkip, clearCurrentGenerationTrivialSkip, consumeCurrentGenerationTrivialSkip, deferAutoExtraction, maybeResumePendingAutoExtraction, clearPendingAutoExtraction, getPendingAutoExtraction: () => ({ ...pendingAutoExtraction }), getIsHostGenerationRunning: () => isHostGenerationRunning, runPlannerRecallForEna, getGraphPersistenceState: () => graphPersistenceState, setGraphPersistenceState: (value = {}) => { graphPersistenceState = { ...graphPersistenceState, ...(value || {}) }; return graphPersistenceState; } };`,
+      `${snippet}\nresult = { hashRecallInput, buildPreGenerationRecallKey, buildGenerationAfterCommandsRecallInput, buildNormalGenerationRecallInput, cleanupGenerationRecallTransactions, buildGenerationRecallTransactionId, beginGenerationRecallTransaction, markGenerationRecallTransactionHookState, shouldRunRecallForTransaction, createGenerationRecallContext, onGenerationStarted, onGenerationEnded, onGenerationAfterCommands, onBeforeCombinePrompts, applyFinalRecallInjectionForGeneration, ensurePersistedRecallRecordForGeneration, findRecentGenerationRecallTransactionForChat, getGenerationRecallTransactionResult, generationRecallTransactions, freezeHostGenerationInputSnapshot, consumeHostGenerationInputSnapshot, getPendingHostGenerationInputSnapshot, clearPendingHostGenerationInputSnapshot, recordRecallSendIntent, clearPendingRecallSendIntent, recordRecallSentUserMessage, getPendingRecallSendIntent: () => pendingRecallSendIntent, getLastRecallSentUserMessage: () => lastRecallSentUserMessage, getCurrentGenerationTrivialSkip, markCurrentGenerationTrivialSkip, clearCurrentGenerationTrivialSkip, consumeCurrentGenerationTrivialSkip, deferAutoExtraction, maybeResumePendingAutoExtraction, clearPendingAutoExtraction, getPendingAutoExtraction: () => ({ ...pendingAutoExtraction }), getIsHostGenerationRunning: () => isHostGenerationRunning, runPlannerRecallForEna, getGraphPersistenceState: () => graphPersistenceState, setGraphPersistenceState: (value = {}) => { graphPersistenceState = { ...graphPersistenceState, ...(value || {}) }; return graphPersistenceState; }, getCurrentGenerationWorkload, getGenerationWorkloadStack, classifyGenerationWorkload, shouldTreatMutationAsBackground, noteIgnoredMutationEvent, noteSkippedRecall, noteSkippedBackgroundExtraction };`,
       context,
       { filename: indexPath },
     );
@@ -284,6 +323,21 @@ export function createGenerationRecallHarness(options = {}) {
     });
     const originalApplyFinalRecallInjectionForGeneration =
       context.result.applyFinalRecallInjectionForGeneration;
+    const originalOnGenerationStarted = context.result.onGenerationStarted;
+    context.result.onGenerationStarted = (type, params = {}, dryRun = false) => {
+      const pendingIntent = context.result.getPendingRecallSendIntent?.();
+      if (
+        !pendingIntent?.text &&
+        typeof context.__sendTextareaValue === "string" &&
+        context.__sendTextareaValue.trim()
+      ) {
+        context.result.recordRecallSendIntent(
+          context.__sendTextareaValue,
+          "harness-send-intent",
+        );
+      }
+      return originalOnGenerationStarted(type, params, dryRun);
+    };
     context.applyFinalRecallInjectionForGeneration = (payload = {}) => {
       context.applyFinalCalls.push({ ...payload });
       if (realApplyFinal) {
@@ -338,8 +392,10 @@ export function createGenerationRecallHarness(options = {}) {
     context.invokeOnMessageSent = (messageId = null) =>
       onMessageSentController(
         {
+          getCurrentGenerationWorkload: context.result.getCurrentGenerationWorkload,
           getContext: context.getContext,
           isTrivialUserInput,
+          noteIgnoredMutationEvent: context.result.noteIgnoredMutationEvent,
           recordRecallSentUserMessage: context.result.recordRecallSentUserMessage,
           refreshPersistedRecallMessageUi: () => {
             context.recallUiRefreshCalls += 1;
@@ -351,12 +407,16 @@ export function createGenerationRecallHarness(options = {}) {
       onMessageReceivedController(
         {
           console,
+          noteSkippedBackgroundExtraction:
+            context.result.noteSkippedBackgroundExtraction,
           consumeCurrentGenerationTrivialSkip:
             context.result.consumeCurrentGenerationTrivialSkip,
           createRecallInputRecord,
           deferAutoExtraction: context.result.deferAutoExtraction,
           getContext: context.getContext,
           getCurrentGraph: () => context.currentGraph,
+          getCurrentGenerationWorkload:
+            context.result.getCurrentGenerationWorkload,
           getGraphPersistenceState: () => context.result.getGraphPersistenceState(),
           getIsHostGenerationRunning: () =>
             context.result.getIsHostGenerationRunning(),
@@ -413,6 +473,19 @@ export function createGenerationRecallHarness(options = {}) {
         },
         messageId,
         type,
+      );
+    context.invokeOnMessageUpdated = (messageId = null, meta = null) =>
+      onMessageUpdatedController(
+        {
+          getCurrentGenerationWorkload:
+            context.result.getCurrentGenerationWorkload,
+          noteIgnoredMutationEvent: context.result.noteIgnoredMutationEvent,
+          refreshPersistedRecallMessageUi: () => {
+            context.recallUiRefreshCalls += 1;
+          },
+        },
+        messageId,
+        meta,
       );
     return context;
   });

@@ -24,6 +24,92 @@ function toSafeFloor(value, fallback = null) {
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 }
 
+function createDefaultGenerationWorkload(kind = "unresolved", extra = {}) {
+  return {
+    id: String(extra?.id || "").trim(),
+    kind: String(kind || extra?.kind || "unresolved").trim() || "unresolved",
+    generationType:
+      String(extra?.generationType || "normal").trim() || "normal",
+    chatId: String(extra?.chatId || "").trim(),
+    hookName: String(extra?.hookName || "").trim(),
+    backgroundReason: String(extra?.backgroundReason || "").trim(),
+    sourceEvidence: Array.isArray(extra?.sourceEvidence)
+      ? extra.sourceEvidence.map((value) => String(value || "").trim()).filter(Boolean)
+      : [],
+    boundUserMessageIndex: Number.isFinite(Number(extra?.boundUserMessageIndex))
+      ? Math.floor(Number(extra.boundUserMessageIndex))
+      : null,
+    active: extra?.active !== false,
+    dryRun: extra?.dryRun === true,
+  };
+}
+
+function isForegroundUserPrimaryWorkload(workload = null) {
+  return String(workload?.kind || "").trim() === "user-primary";
+}
+
+function isRecallEligibleWorkload(workload = null) {
+  const kind = String(workload?.kind || "").trim();
+  return kind === "user-primary" || kind === "user-history";
+}
+
+function resolveGenerationWorkloadController(
+  runtime,
+  {
+    hookName = "",
+    type = "normal",
+    params = {},
+    dryRun = false,
+    bootstrap = false,
+  } = {},
+) {
+  const currentWorkload =
+    typeof runtime.getCurrentGenerationWorkload === "function"
+      ? runtime.getCurrentGenerationWorkload()
+      : null;
+  if (currentWorkload?.active) {
+    return currentWorkload;
+  }
+
+  const classified =
+    typeof runtime.classifyGenerationWorkload === "function"
+      ? runtime.classifyGenerationWorkload(type, params, {
+          dryRun,
+          hookName,
+        })
+      : createDefaultGenerationWorkload("unresolved", {
+          generationType: type,
+          hookName,
+          backgroundReason: dryRun ? "dry-run" : "workload-classifier-missing",
+          sourceEvidence: [
+            dryRun ? "dry-run" : "workload-classifier-missing",
+          ],
+          dryRun,
+        });
+
+  if (
+    !bootstrap ||
+    dryRun ||
+    String(classified?.kind || "").trim() === "unresolved" ||
+    typeof runtime.pushGenerationWorkload !== "function"
+  ) {
+    return classified;
+  }
+
+  return runtime.pushGenerationWorkload({
+    ...classified,
+    hookName: classified.hookName || hookName,
+    bootstrapSource: hookName,
+  });
+}
+
+function buildBackgroundSkipReason(workload = null) {
+  const reason = String(
+    workload?.backgroundReason || workload?.kind || "background-generation",
+  ).trim();
+  return `background-generation:${reason}`;
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   if (typeof makeFirst === "function") {
@@ -173,7 +259,7 @@ export function registerCoreEventHooksController(runtime) {
   bind(eventTypes.MESSAGE_EDITED, handlers.onMessageEdited);
   bind(eventTypes.MESSAGE_SWIPED, handlers.onMessageSwiped);
   if (eventTypes.MESSAGE_UPDATED) {
-    bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
+    bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageUpdated);
   }
   if (eventTypes.USER_MESSAGE_RENDERED) {
     bind(eventTypes.USER_MESSAGE_RENDERED, handlers.onUserMessageRendered);
@@ -200,6 +286,7 @@ export function onChatChangedController(runtime) {
   timers.clearTimeout(runtime.getPendingHistoryRecoveryTimer());
   runtime.setPendingHistoryRecoveryTimer(null);
   runtime.setPendingHistoryRecoveryTrigger("");
+  runtime.clearGenerationWorkloadsForChat?.("", { clearAll: true });
   runtime.clearPendingAutoExtraction?.();
   runtime.clearPendingGraphLoadRetry();
   runtime.setSkipBeforeCombineRecallUntil(0);
@@ -255,6 +342,22 @@ export function onMessageSentController(runtime, messageId) {
     runtime.refreshPersistedRecallMessageUi?.();
     return;
   }
+  const activeWorkload =
+    typeof runtime.getCurrentGenerationWorkload === "function"
+      ? runtime.getCurrentGenerationWorkload()
+      : null;
+  if (activeWorkload?.active && !isRecallEligibleWorkload(activeWorkload)) {
+    runtime.noteIgnoredMutationEvent?.(
+      "MESSAGE_SENT",
+      "background-generation-user-message-rebind-skipped",
+      activeWorkload,
+      {
+        messageId: resolvedMessageId,
+      },
+    );
+    runtime.refreshPersistedRecallMessageUi?.();
+    return;
+  }
   runtime.recordRecallSentUserMessage(
     resolvedMessageId,
     message.mes || "",
@@ -297,15 +400,21 @@ export function onGenerationStartedController(
   params = {},
   dryRun = false,
 ) {
+  const workload = resolveGenerationWorkloadController(runtime, {
+    hookName: "GENERATION_STARTED",
+    type,
+    params,
+    dryRun,
+    bootstrap: !dryRun,
+  });
   if (dryRun) {
     runtime.markDryRunPromptPreview?.();
     return null;
   }
   runtime.clearDryRunPromptPreview?.();
-  if (params?.automatic_trigger || params?.quiet_prompt) return null;
-
-  const generationType = String(type || "normal").trim() || "normal";
-  if (generationType !== "normal") return null;
+  if (!isForegroundUserPrimaryWorkload(workload)) {
+    return null;
+  }
 
   const pendingSendIntent = runtime.getPendingRecallSendIntent?.();
   const pendingIntentText = runtime.isFreshRecallInputRecord?.(
@@ -358,9 +467,66 @@ export function onMessageDeletedController(
 }
 
 export function onMessageEditedController(runtime, messageId, meta = null) {
+  if (
+    typeof runtime.shouldTreatMutationAsBackground === "function" &&
+    runtime.shouldTreatMutationAsBackground("MESSAGE_EDITED", meta)
+  ) {
+    const workload =
+      typeof runtime.getCurrentGenerationWorkload === "function"
+        ? runtime.getCurrentGenerationWorkload()
+        : null;
+    runtime.noteIgnoredMutationEvent?.(
+      "MESSAGE_EDITED",
+      "background-mutation-downgraded",
+      workload,
+      {
+        messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+        meta,
+      },
+    );
+    runtime.refreshPersistedRecallMessageUi?.();
+    return {
+      messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+      downgraded: true,
+      lightweight: true,
+      reason: "background-mutation-downgraded",
+      source: "message-edited",
+    };
+  }
+
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
+  return {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    downgraded: false,
+    lightweight: false,
+    reason: "",
+    source: "message-edited",
+  };
+}
+
+export function onMessageUpdatedController(runtime, messageId, meta = null) {
+  const workload =
+    typeof runtime.getCurrentGenerationWorkload === "function"
+      ? runtime.getCurrentGenerationWorkload()
+      : null;
+  runtime.noteIgnoredMutationEvent?.(
+    "MESSAGE_UPDATED",
+    "lightweight-refresh-only",
+    workload,
+    {
+      messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+      meta,
+    },
+  );
+  runtime.refreshPersistedRecallMessageUi?.();
+  return {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    lightweight: true,
+    reason: "lightweight-refresh-only",
+    source: "message-updated",
+  };
 }
 
 export async function onMessageSwipedController(runtime, messageId, meta = null) {
@@ -412,6 +578,27 @@ export async function onGenerationAfterCommandsController(
 ) {
   if (dryRun) {
     return;
+  }
+
+  const workload = resolveGenerationWorkloadController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    type,
+    params,
+    dryRun: false,
+    bootstrap: true,
+  });
+  if (!isRecallEligibleWorkload(workload)) {
+    runtime.noteSkippedRecall?.(
+      buildBackgroundSkipReason(workload),
+      workload,
+      {
+        hookName: "GENERATION_AFTER_COMMANDS",
+      },
+    );
+    return {
+      skipped: true,
+      reason: buildBackgroundSkipReason(workload),
+    };
   }
 
   const generationType = String(type || "normal").trim() || "normal";
@@ -527,6 +714,27 @@ export async function onBeforeCombinePromptsController(
     return {
       skipped: true,
       reason: "dry-run-preview",
+    };
+  }
+
+  const workload = resolveGenerationWorkloadController(runtime, {
+    hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+    type: "normal",
+    params: {},
+    dryRun: false,
+    bootstrap: true,
+  });
+  if (!isRecallEligibleWorkload(workload)) {
+    runtime.noteSkippedRecall?.(
+      buildBackgroundSkipReason(workload),
+      workload,
+      {
+        hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+      },
+    );
+    return {
+      skipped: true,
+      reason: buildBackgroundSkipReason(workload),
     };
   }
 
@@ -676,6 +884,38 @@ export function onMessageReceivedController(
     : runtime.isAssistantChatMessage(lastMessage)
       ? chat.length - 1
       : null;
+  const activeWorkload =
+    typeof runtime.getCurrentGenerationWorkload === "function"
+      ? runtime.getCurrentGenerationWorkload()
+      : null;
+
+  if (
+    runtime.isAssistantChatMessage(targetMessage) &&
+    activeWorkload?.active &&
+    !isRecallEligibleWorkload(activeWorkload)
+  ) {
+    runtime.console?.debug?.(
+      "[ST-BME] assistant message received during background generation, skip auto extraction",
+      {
+        messageId: Number.isFinite(Number(targetMessageIndex))
+          ? Number(targetMessageIndex)
+          : null,
+        workloadKind: String(activeWorkload.kind || ""),
+        backgroundReason: String(activeWorkload.backgroundReason || ""),
+      },
+    );
+    runtime.noteSkippedBackgroundExtraction?.(
+      buildBackgroundSkipReason(activeWorkload),
+      activeWorkload,
+      {
+        messageId: Number.isFinite(Number(targetMessageIndex))
+          ? Number(targetMessageIndex)
+          : null,
+      },
+    );
+    runtime.refreshPersistedRecallMessageUi?.();
+    return;
+  }
 
   if (runtime.isAssistantChatMessage(targetMessage)) {
     if (runtime.consumeCurrentGenerationTrivialSkip?.(targetMessageIndex)) {

@@ -5971,6 +5971,61 @@ function _renderMessageTraceRecallCard(state) {
         </div>
       `
       : "";
+  const sourceEvidence = Array.isArray(state.messageTrace?.currentGenerationSourceEvidence)
+    ? state.messageTrace.currentGenerationSourceEvidence
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    : [];
+  const skipCounts = state.messageTrace?.backgroundGenerationSkipCounts || {};
+  const isolationRows = [
+    {
+      label: "当前生成分类",
+      value: String(state.messageTrace?.currentGenerationWorkloadKind || "—").trim() || "—",
+    },
+    {
+      label: "后台原因",
+      value: String(state.messageTrace?.currentGenerationBackgroundReason || "—").trim() || "—",
+    },
+    {
+      label: "识别证据",
+      value: sourceEvidence.length ? sourceEvidence.join(" / ") : "—",
+    },
+    {
+      label: "后台生成中",
+      value: state.messageTrace?.backgroundGenerationActive === true ? "是" : "否",
+    },
+    {
+      label: "最近跳过召回",
+      value: String(state.messageTrace?.lastSkippedRecallReason || "—").trim() || "—",
+    },
+    {
+      label: "最近忽略变更",
+      value: [
+        String(state.messageTrace?.lastIgnoredMutationEvent || "").trim(),
+        String(state.messageTrace?.lastIgnoredMutationReason || "").trim(),
+      ]
+        .filter(Boolean)
+        .join(" · ") || "—",
+    },
+    {
+      label: "后台跳过计数",
+      value: `召回 ${Number(skipCounts?.recall || 0)} / 提取 ${Number(skipCounts?.extraction || 0)} / 变更 ${Number(skipCounts?.mutation || 0)}`,
+    },
+  ];
+  const isolationHtml = `
+    <div class="bme-ai-monitor-kv" style="margin-bottom: 12px;">
+      ${isolationRows
+        .map(
+          (row) => `
+            <div class="bme-ai-monitor-kv__row">
+              <span>${_escHtml(row.label)}</span>
+              <strong>${_escHtml(row.value)}</strong>
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
 
   if (!injectionSnapshot) {
     return `
@@ -5978,6 +6033,7 @@ function _renderMessageTraceRecallCard(state) {
       <div class="bme-config-help">
         还没有可用的召回注入快照。先正常发一条消息，让插件跑完一轮召回即可。
       </div>
+      ${isolationHtml}
     `;
   }
 
@@ -5989,6 +6045,7 @@ function _renderMessageTraceRecallCard(state) {
       <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(injectionSnapshot.updatedAt))}</span>
     </div>
     ${missingUserMessageNotice}
+    ${isolationHtml}
     ${_renderMessageTraceTextBlock(
       "发送给主 AI 的内容",
       hostPayloadText,
