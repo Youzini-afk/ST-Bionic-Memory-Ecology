@@ -364,14 +364,14 @@
                   <div class="bme-config-help">
                     重新提取：按总楼层计数（用户+AI，首条 greeting 为 0）。真正 system 不计入，且不受隐藏助手影响。
                   </div>
+                  <div class="bme-config-row" style="margin-top:8px">
+                    <label for="bme-extract-mode">提取模式</label>
+                    <select id="bme-extract-mode" class="bme-config-select">
+                      <option value="pending">提取未处理</option>
+                      <option value="rerun">重新提取范围</option>
+                    </select>
+                  </div>
                   <div class="bme-action-range-row">
-                    <div class="bme-config-row">
-                      <label for="bme-extract-mode">提取模式</label>
-                      <select id="bme-extract-mode" class="bme-config-select">
-                        <option value="pending">提取未处理</option>
-                        <option value="rerun">重新提取范围</option>
-                      </select>
-                    </div>
                     <div class="bme-config-row">
                       <label for="bme-extract-start-floor">起始楼层</label>
                       <input
