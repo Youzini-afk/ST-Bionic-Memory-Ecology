@@ -85,6 +85,10 @@
             <i class="fa-solid fa-sliders"></i>
             <span>配置</span>
           </button>
+          <button class="bme-tab-btn" data-tab="graph" type="button">
+            <i class="fa-solid fa-diagram-project"></i>
+            <span>图谱</span>
+          </button>
         </div>
 
         <div class="bme-config-sidebar" id="bme-config-sidebar">
@@ -248,22 +252,6 @@
                 默认跟随调试总开关；开启后展示最近的记忆任务流水。
               </div>
               <ul class="bme-recent-list" id="bme-ai-monitor-list"></ul>
-            </div>
-
-            <div class="bme-mobile-graph-section" id="bme-mobile-graph-section">
-              <div class="bme-mobile-graph-tabs">
-                <button class="bme-mobile-graph-tab active" data-mobile-view="summary" type="button">
-                  <i class="fa-solid fa-chart-pie"></i> 图谱摘要
-                </button>
-                <button class="bme-mobile-graph-tab" data-mobile-view="cognition" type="button">
-                  <i class="fa-solid fa-brain"></i> 认知视图
-                </button>
-              </div>
-              <div class="bme-mobile-view-pane active" id="bme-mobile-summary-pane" data-mobile-view="summary"></div>
-              <div class="bme-mobile-view-pane" id="bme-mobile-cognition-pane" data-mobile-view="cognition"></div>
-              <button class="bme-mobile-fullscreen-btn" id="bme-mobile-open-fullscreen" type="button">
-                <i class="fa-solid fa-expand"></i> 打开全屏图谱
-              </button>
             </div>
 
             <div class="bme-section-header">最近提取</div>
@@ -481,6 +469,99 @@
               <div class="bme-config-placeholder-help">
                 左侧子导航负责切页，右侧显示完整的配置表单。
               </div>
+            </div>
+          </div>
+
+          <div class="bme-tab-pane" id="bme-pane-graph">
+            <div class="bme-graph-subtabs">
+              <button class="bme-graph-subtab active" data-mobile-graph-view="graph" type="button">
+                <i class="fa-solid fa-diagram-project"></i>
+                <span>实时图谱</span>
+              </button>
+              <button class="bme-graph-subtab" data-mobile-graph-view="cognition" type="button">
+                <i class="fa-solid fa-brain"></i>
+                <span>认知视图</span>
+              </button>
+              <button class="bme-graph-subtab" data-mobile-graph-view="summary" type="button">
+                <i class="fa-solid fa-layer-group"></i>
+                <span>总结视图</span>
+              </button>
+            </div>
+
+            <div class="bme-graph-view-content">
+              <div class="bme-mobile-graph-pane active" id="bme-mobile-graph-pane" data-mobile-graph-view="graph">
+                <div class="bme-mobile-canvas-wrap">
+                  <canvas id="bme-mobile-graph-canvas"></canvas>
+                  <div class="bme-graph-overlay" id="bme-mobile-graph-overlay" hidden>
+                    <div class="bme-graph-overlay__text" id="bme-mobile-graph-overlay-text">
+                      正在加载当前聊天图谱
+                    </div>
+                  </div>
+                  <div class="bme-mobile-graph-float-controls">
+                    <button id="bme-mobile-zoom-in" title="放大" type="button">
+                      <i class="fa-solid fa-plus"></i>
+                    </button>
+                    <button id="bme-mobile-zoom-out" title="缩小" type="button">
+                      <i class="fa-solid fa-minus"></i>
+                    </button>
+                    <button id="bme-mobile-zoom-reset" title="重置" type="button">
+                      <i class="fa-solid fa-arrows-rotate"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="bme-graph-legend" id="bme-mobile-graph-legend"></div>
+                <div class="bme-graph-statusbar">
+                  <span><span class="bme-status-dot"></span><span id="bme-mobile-status-text">READY</span></span>
+                  <span id="bme-mobile-status-meta">NODES: 0 | EDGES: 0</span>
+                </div>
+              </div>
+
+              <div class="bme-mobile-graph-pane" id="bme-mobile-cognition-pane" data-mobile-graph-view="cognition">
+                <div class="bme-cognition-workspace" id="bme-mobile-cognition-full">
+                  <div class="bme-cog-status-strip" id="bme-mobile-cog-status-strip"></div>
+                  <div class="bme-cog-body">
+                    <div class="bme-cog-column bme-cog-column--owners">
+                      <div class="bme-cog-section-title">
+                        <i class="fa-solid fa-users"></i> 角色认知清单
+                      </div>
+                      <div class="bme-cog-owner-scroll" id="bme-mobile-cog-owner-list"></div>
+                      <div class="bme-cog-owner-detail" id="bme-mobile-cog-owner-detail"></div>
+                    </div>
+                    <div class="bme-cog-column bme-cog-column--space">
+                      <div class="bme-cog-section-title">
+                        <i class="fa-solid fa-map-location-dot"></i> 空间控制台
+                      </div>
+                      <div class="bme-cog-space-tools" id="bme-mobile-cog-space-tools"></div>
+                      <div class="bme-cog-section-title" style="margin-top:16px">
+                        <i class="fa-solid fa-wave-square"></i> 任务监视器
+                      </div>
+                      <div class="bme-cog-monitor-mini" id="bme-mobile-cog-monitor-mini"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bme-mobile-graph-pane" id="bme-mobile-summary-pane-full" data-mobile-graph-view="summary">
+                <div class="bme-cognition-workspace" id="bme-mobile-summary-full"></div>
+              </div>
+            </div>
+
+            <div class="bme-node-detail" id="bme-mobile-node-detail">
+              <div class="bme-node-detail-header">
+                <h3 id="bme-mobile-detail-title">节点详情</h3>
+                <div class="bme-node-detail-actions">
+                  <button class="bme-detail-action-btn bme-detail-action-danger" id="bme-mobile-detail-delete" type="button" title="删除节点">
+                    <i class="fa-solid fa-trash"></i>
+                  </button>
+                  <button class="bme-detail-action-btn" id="bme-mobile-detail-save" type="button" title="保存修改">
+                    <i class="fa-solid fa-floppy-disk"></i>
+                  </button>
+                  <button class="bme-panel-close" id="bme-mobile-detail-close" type="button" title="关闭">
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+              </div>
+              <div id="bme-mobile-detail-body"></div>
             </div>
           </div>
         </div>
@@ -2794,6 +2875,10 @@
       <button class="bme-tab-btn" data-tab="config" type="button">
         <i class="fa-solid fa-sliders"></i>
         <span>配置</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="graph" type="button">
+        <i class="fa-solid fa-diagram-project"></i>
+        <span>图谱</span>
       </button>
     </div>
   </div>

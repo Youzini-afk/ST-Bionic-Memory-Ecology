@@ -286,6 +286,7 @@ let showGlobalRegexPanel = false;
 let currentGlobalRegexRuleId = "";
 let currentCognitionOwnerKey = "";
 let currentGraphView = "graph";
+let currentMobileGraphView = "graph";
 let fetchedMemoryLLMModels = [];
 let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
@@ -1009,12 +1010,6 @@ function _switchTab(tabId) {
     pane.classList.toggle("active", pane.id === `bme-pane-${currentTabId}`);
   });
 
-  // ⑥ 移动端图谱 tab 全屏覆盖
-  const mainEl = panelEl?.querySelector(".bme-panel-main");
-  if (mainEl) {
-    mainEl.classList.toggle("mobile-visible", currentTabId === "graph");
-  }
-
   _applyWorkspaceMode();
 
   switch (currentTabId) {
@@ -1029,6 +1024,9 @@ function _switchTab(tabId) {
       break;
     case "config":
       _refreshConfigTab();
+      break;
+    case "graph":
+      _refreshMobileGraphTab();
       break;
     default:
       break;
@@ -1110,6 +1108,63 @@ function _switchGraphView(view) {
 
   if (isCognition) _refreshCognitionWorkspace();
   if (isSummary) _refreshSummaryWorkspace();
+}
+
+// ==================== 移动端图谱 Tab ====================
+
+function _switchMobileGraphSubView(view) {
+  currentMobileGraphView = view || "graph";
+  const pane = document.getElementById("bme-pane-graph");
+  if (!pane) return;
+
+  pane.querySelectorAll(".bme-graph-subtab").forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.mobileGraphView === currentMobileGraphView);
+  });
+  pane.querySelectorAll(".bme-mobile-graph-pane").forEach((p) => {
+    p.classList.toggle("active", p.dataset.mobileGraphView === currentMobileGraphView);
+  });
+
+  _refreshMobileGraphTab();
+}
+
+function _refreshMobileGraphTab() {
+  if (currentMobileGraphView === "graph") {
+    _refreshGraph();
+    _buildMobileLegend();
+  } else if (currentMobileGraphView === "cognition") {
+    _refreshMobileCognitionFull();
+  } else if (currentMobileGraphView === "summary") {
+    _refreshMobileSummaryFull();
+  }
+}
+
+function _buildMobileLegend() {
+  const legend = document.getElementById("bme-mobile-graph-legend");
+  if (!legend) return;
+  const desktopLegend = document.getElementById("bme-graph-legend");
+  if (desktopLegend) {
+    legend.innerHTML = desktopLegend.innerHTML;
+  }
+}
+
+function _refreshMobileCognitionFull() {
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph) return;
+
+  const canRender =
+    Boolean(graph) &&
+    (_canRenderGraphData(loadInfo) || loadInfo.loadState === "empty-confirmed");
+
+  _renderCogStatusStrip(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-status-strip"));
+  _renderCogOwnerList(graph, canRender, document.getElementById("bme-mobile-cog-owner-list"));
+  _renderCogOwnerDetail(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-owner-detail"));
+  _renderCogSpaceTools(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-space-tools"));
+  _renderCogMonitorMini(document.getElementById("bme-mobile-cog-monitor-mini"));
+}
+
+function _refreshMobileSummaryFull() {
+  _refreshSummaryWorkspace(document.getElementById("bme-mobile-summary-full"));
 }
 
 function _ownerAvatarHsl(name) {
@@ -1232,8 +1287,8 @@ function _refreshCognitionWorkspace() {
   _renderCogMonitorMini();
 }
 
-function _renderCogStatusStrip(graph, loadInfo, canRender) {
-  const el = document.getElementById("bme-cog-status-strip");
+function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
+  const el = targetEl || document.getElementById("bme-cog-status-strip");
   if (!el) return;
 
   if (!canRender) {
@@ -1305,8 +1360,8 @@ function _renderCogStatusStrip(graph, loadInfo, canRender) {
   `;
 }
 
-function _renderCogOwnerList(graph, canRender) {
-  const el = document.getElementById("bme-cog-owner-list");
+function _renderCogOwnerList(graph, canRender, targetEl) {
+  const el = targetEl || document.getElementById("bme-cog-owner-list");
   if (!el) return;
 
   if (!canRender) {
@@ -1351,8 +1406,8 @@ function _renderCogOwnerList(graph, canRender) {
     .join("");
 }
 
-function _renderCogOwnerDetail(graph, loadInfo, canRender) {
-  const el = document.getElementById("bme-cog-owner-detail");
+function _renderCogOwnerDetail(graph, loadInfo, canRender, targetEl) {
+  const el = targetEl || document.getElementById("bme-cog-owner-detail");
   if (!el) return;
 
   if (!canRender) {
@@ -1480,8 +1535,8 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender) {
   `;
 }
 
-function _renderCogSpaceTools(graph, loadInfo, canRender) {
-  const el = document.getElementById("bme-cog-space-tools");
+function _renderCogSpaceTools(graph, loadInfo, canRender, targetEl) {
+  const el = targetEl || document.getElementById("bme-cog-space-tools");
   if (!el) return;
 
   if (!canRender) { el.innerHTML = ""; return; }
@@ -1541,8 +1596,8 @@ function _renderCogSpaceTools(graph, loadInfo, canRender) {
   `;
 }
 
-function _renderCogMonitorMini() {
-  const el = document.getElementById("bme-cog-monitor-mini");
+function _renderCogMonitorMini(targetEl) {
+  const el = targetEl || document.getElementById("bme-cog-monitor-mini");
   if (!el) return;
 
   const settings = _getSettings?.() || {};
@@ -1586,141 +1641,6 @@ function _renderCogMonitorMini() {
     .join("");
 }
 
-// ==================== 移动端图谱视图 ====================
-
-function _switchMobileGraphView(view) {
-  const section = document.getElementById("bme-mobile-graph-section");
-  if (!section) return;
-
-  section.querySelectorAll(".bme-mobile-graph-tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.mobileView === view);
-  });
-  section.querySelectorAll(".bme-mobile-view-pane").forEach((pane) => {
-    pane.classList.toggle("active", pane.dataset.mobileView === view);
-  });
-
-  if (view === "summary") _refreshMobileSummary();
-  if (view === "cognition") _refreshMobileCognition();
-}
-
-function _refreshMobileSummary() {
-  const el = document.getElementById("bme-mobile-summary-pane");
-  if (!el) return;
-
-  const graph = _getGraph?.();
-  const loadInfo = _getGraphPersistenceSnapshot();
-  if (!graph || !_canRenderGraphData(loadInfo)) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo?.loadState))}</div>`;
-    return;
-  }
-
-  const activeNodes = graph.nodes.filter((n) => !n.archived);
-  const archivedCount = graph.nodes.filter((n) => n.archived).length;
-  const typeMap = {};
-  for (const node of activeNodes) {
-    const t = String(node.type || "unknown");
-    typeMap[t] = (typeMap[t] || 0) + 1;
-  }
-  const typePills = Object.entries(typeMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(([type, count]) => `<span class="bme-cog-chip">${_escHtml(type)} ${count}</span>`)
-    .join("");
-
-  const recentNodes = [...activeNodes]
-    .sort((a, b) => (Number(b.seqRange?.[1] || b.seqRange?.[0] || 0)) - (Number(a.seqRange?.[1] || a.seqRange?.[0] || 0)))
-    .slice(0, 5);
-  const recentHtml = recentNodes.map((n) => {
-    const name = getNodeDisplayName(n);
-    const type = String(n.type || "");
-    return `<div class="bme-cog-monitor-entry is-success" style="border-left-color:var(--bme-primary)">
-      <span class="bme-cog-monitor-badge">${_escHtml(type)}</span>
-      <span class="bme-cog-monitor-info">${_escHtml(name)}</span>
-    </div>`;
-  }).join("");
-
-  el.innerHTML = `
-    <div class="bme-cog-status-strip" style="grid-template-columns:repeat(3,1fr);margin-bottom:10px">
-      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">活跃</div><div class="bme-cog-status-card__value">${activeNodes.length}</div></div>
-      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">边</div><div class="bme-cog-status-card__value">${graph.edges.length}</div></div>
-      <div class="bme-cog-status-card"><div class="bme-cog-status-card__label">归档</div><div class="bme-cog-status-card__value">${archivedCount}</div></div>
-    </div>
-    <div class="bme-cog-chip-section" style="margin-bottom:10px">
-      <div class="bme-cog-chip-label">类型分布</div>
-      <div class="bme-cog-chip-wrap">${typePills || '<span class="bme-cog-chip is-empty">暂无</span>'}</div>
-    </div>
-    <div class="bme-cog-chip-label" style="margin-bottom:6px">最近节点</div>
-    <div class="bme-cog-monitor-mini">${recentHtml || '<div class="bme-cog-monitor-empty">暂无</div>'}</div>
-  `;
-}
-
-function _refreshMobileCognition() {
-  const el = document.getElementById("bme-mobile-cognition-pane");
-  if (!el) return;
-
-  const graph = _getGraph?.();
-  const loadInfo = _getGraphPersistenceSnapshot();
-  if (!graph) { el.innerHTML = ""; return; }
-
-  const canRender =
-    Boolean(graph) &&
-    (_canRenderGraphData(loadInfo) || loadInfo.loadState === "empty-confirmed");
-
-  if (!canRender) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div>`;
-    return;
-  }
-
-  const { owners, activeOwnerKey, activeOwner, activeOwnerKeys, activeOwnerLabels } =
-    _getCurrentCognitionOwnerSummary(graph);
-  const collisionIndex = _buildOwnerCollisionIndex(owners);
-  const historyState = graph?.historyState || {};
-  const regionState = graph?.regionState || {};
-  const activeRegion = String(historyState.activeRegion || historyState.lastExtractedRegion || regionState.manualActiveRegion || "").trim();
-  const adjacentRegions = Array.isArray(regionState?.adjacencyMap?.[activeRegion]?.adjacent)
-    ? regionState.adjacencyMap[activeRegion].adjacent : [];
-
-  const ownerCards = owners.map((owner) => {
-    const displayInfo = _getOwnerDisplayInfo(owner, collisionIndex);
-    const bgColor = _ownerAvatarHsl(displayInfo.avatarSeed);
-    const anchor =
-      owner.ownerKey === activeOwnerKey || activeOwnerKeys.includes(owner.ownerKey)
-        ? "is-active-anchor"
-        : "";
-    return `
-      <div class="bme-cog-owner-card ${anchor}" style="min-width:unset;max-width:unset" title="${_escHtml(displayInfo.tooltip)}">
-        <div class="bme-cog-avatar" style="background:${bgColor}">${_escHtml(displayInfo.avatarText)}</div>
-        <div class="bme-cog-owner-card__info">
-          <div class="bme-cog-owner-card__name-row">
-            <div class="bme-cog-owner-card__name">${_escHtml(displayInfo.title)}</div>
-            <span class="bme-cog-owner-card__badge">${_escHtml(displayInfo.typeLabel)}</span>
-          </div>
-          <div class="bme-cog-owner-card__stats">已知 ${Number(owner.knownCount || 0)} · 误解 ${Number(owner.mistakenCount || 0)}</div>
-        </div>
-      </div>`;
-  }).join("");
-
-  el.innerHTML = `
-    <div class="bme-cog-status-strip" style="grid-template-columns:repeat(2,1fr);margin-bottom:10px">
-      <div class="bme-cog-status-card">
-        <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 场景锚点</div>
-        <div class="bme-cog-status-card__value">${_escHtml(
-          activeOwnerLabels.length > 0
-            ? activeOwnerLabels.join(" / ")
-            : activeOwner
-              ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
-              : "—",
-        )}</div>
-      </div>
-      <div class="bme-cog-status-card">
-        <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
-        <div class="bme-cog-status-card__value">${_escHtml(activeRegion || "—")}</div>
-      </div>
-    </div>
-    <div class="bme-cog-chip-label" style="margin-bottom:6px">认知角色 (${owners.length})</div>
-    <div style="display:flex;flex-direction:column;gap:6px">${ownerCards || '<div class="bme-cog-monitor-empty">暂无</div>'}</div>
-  `;
-}
 
 function _formatSummaryEntryCard(entry = {}) {
   const messageRange = Array.isArray(entry?.dialogueRange)
@@ -1766,10 +1686,10 @@ function _formatSummaryEntryCard(entry = {}) {
   `;
 }
 
-function _refreshSummaryWorkspace() {
+function _refreshSummaryWorkspace(targetEl) {
   const graph = _getGraph?.();
   const loadInfo = _getGraphPersistenceSnapshot();
-  const workspace = document.getElementById("bme-summary-workspace");
+  const workspace = targetEl || document.getElementById("bme-summary-workspace");
   if (!workspace) return;
 
   if (!graph || !_canRenderGraphData(loadInfo)) {
@@ -1977,7 +1897,6 @@ function _refreshDashboard() {
 
   _refreshCognitionDashboard(graph);
   _refreshAiMonitorDashboard();
-  _refreshMobileSummary();
   _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
   _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
 }
@@ -3019,6 +2938,9 @@ function _refreshGraph() {
   } else if (currentGraphView === "summary") {
     _refreshSummaryWorkspace();
   }
+  if (currentTabId === "graph") {
+    _refreshMobileGraphTab();
+  }
 }
 
 function _buildLegend() {
@@ -4058,23 +3980,44 @@ function _bindActions() {
     });
   });
 
-  // 移动端图谱/认知 tab 切换
-  document.querySelectorAll(".bme-mobile-graph-tab").forEach((tab) => {
+  // 移动端图谱子 Tab 切换
+  document.querySelectorAll(".bme-graph-subtab").forEach((tab) => {
     tab.addEventListener("click", () => {
-      _switchMobileGraphView(tab.dataset.mobileView);
+      _switchMobileGraphSubView(tab.dataset.mobileGraphView);
     });
   });
 
+  // 移动端图谱浮动控件
+  document.getElementById("bme-mobile-zoom-in")?.addEventListener("click", () => {
+    const r = _getActiveGraphRenderer?.();
+    r?.zoomIn?.();
+  });
+  document.getElementById("bme-mobile-zoom-out")?.addEventListener("click", () => {
+    const r = _getActiveGraphRenderer?.();
+    r?.zoomOut?.();
+  });
+  document.getElementById("bme-mobile-zoom-reset")?.addEventListener("click", () => {
+    const r = _getActiveGraphRenderer?.();
+    r?.resetView?.();
+  });
+
   // 全屏图谱
-  document.getElementById("bme-mobile-open-fullscreen")?.addEventListener("click", _openFullscreenGraph);
   document.getElementById("bme-fs-close")?.addEventListener("click", _closeFullscreenGraph);
 
-  // 认知视图角色列表点击
+  // 认知视图角色列表点击（桌面端）
   document.getElementById("bme-cog-owner-list")?.addEventListener("click", (e) => {
     const card = e.target.closest("[data-owner-key]");
     if (!card) return;
     currentCognitionOwnerKey = card.dataset.ownerKey;
     _refreshCognitionWorkspace();
+  });
+
+  // 认知视图角色列表点击（移动端）
+  document.getElementById("bme-mobile-cog-owner-list")?.addEventListener("click", (e) => {
+    const card = e.target.closest("[data-owner-key]");
+    if (!card) return;
+    currentCognitionOwnerKey = card.dataset.ownerKey;
+    _refreshMobileCognitionFull();
   });
 
   // Dashboard 跳转认知视图
@@ -9866,6 +9809,8 @@ function _refreshRuntimeStatus() {
   const meta = runtimeStatus.meta || "准备就绪";
   _setText("bme-status-text", text);
   _setText("bme-status-meta", meta);
+  _setText("bme-mobile-status-text", text);
+  _setText("bme-mobile-status-meta", meta);
   _setText("bme-panel-status", text);
   _renderCloudStorageModeStatus(_getSettings?.() || {}, _getGraphPersistenceSnapshot());
   _refreshGraphAvailabilityState();
