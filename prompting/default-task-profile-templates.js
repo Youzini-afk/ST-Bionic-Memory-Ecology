@@ -11,7 +11,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "从当前对话批次中抽取结构化记忆。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -191,7 +191,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": false,
+        "input.candidateText": true,
         "input.finalPrompt": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
@@ -215,7 +215,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "根据上下文筛选最相关的记忆节点。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T16:40:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -407,7 +407,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": false,
+        "input.candidateText": true,
         "input.finalPrompt": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
@@ -431,7 +431,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "分析新旧记忆的冲突、去重与进化。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -587,7 +587,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": false,
+        "input.candidateText": true,
         "input.finalPrompt": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
@@ -611,7 +611,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "合并并压缩高层节点内容。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -779,7 +779,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": false,
+        "input.candidateText": true,
         "input.finalPrompt": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
@@ -803,7 +803,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "基于原文聊天窗口生成原文锚定的小总结。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -1011,7 +1011,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "沉淀长期趋势、触发点与建议。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",
@@ -1203,7 +1203,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
       "stages": {
         "input.userMessage": true,
         "input.recentMessages": true,
-        "input.candidateText": false,
+        "input.candidateText": true,
         "input.finalPrompt": false,
         "output.rawResponse": false,
         "output.beforeParse": false,
@@ -1227,7 +1227,7 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
     "enabled": true,
     "description": "将多条活跃总结折叠成一条更高层总结。",
     "promptMode": "block-based",
-    "updatedAt": "2026-04-10T01:00:00.000Z",
+    "updatedAt": "2026-04-10T23:20:00.000Z",
     "blocks": [
       {
         "id": "default-heading",

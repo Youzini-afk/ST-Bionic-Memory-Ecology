@@ -209,7 +209,7 @@ try {
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "input.candidateText"),
-    false,
+    true,
   );
   assert.equal(
     isTaskRegexStageEnabled(defaultExtractStages, "output.rawResponse"),

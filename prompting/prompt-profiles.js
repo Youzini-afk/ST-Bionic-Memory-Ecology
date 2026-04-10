@@ -674,7 +674,7 @@ function applyRuntimeDefaultTemplateOverrides(taskType, template = null) {
   replaceContent("default-rules", overrideContent.rules);
 
   template.version = Math.max(Number(template.version || 0), 4);
-  template.updatedAt = "2026-04-10T01:00:00.000Z";
+  template.updatedAt = "2026-04-10T23:20:00.000Z";
   return template;
 }
 
@@ -863,7 +863,7 @@ const TASK_REGEX_STAGE_GROUPS = Object.freeze({
 const DEFAULT_TASK_REGEX_STAGES = Object.freeze({
   "input.userMessage": true,
   "input.recentMessages": true,
-  "input.candidateText": false,
+  "input.candidateText": true,
   "input.finalPrompt": false,
   "output.rawResponse": false,
   "output.beforeParse": false,
