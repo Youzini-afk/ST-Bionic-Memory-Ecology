@@ -704,6 +704,12 @@
   color: var(--bme-primary);
 }
 
+#bme-graph-canvas,
+#bme-mobile-graph-canvas,
+#bme-fullscreen-graph-canvas {
+  touch-action: none;
+}
+
 #bme-graph-canvas {
   flex: 1;
   width: 100%;
@@ -3691,24 +3697,82 @@
   margin-bottom: 2px;
 }
 
-/* --- Node Detail Panel (sidebar overlay) --- */
-.bme-node-detail {
+/* --- Node detail：桌面右侧抽屉 / 移动端图谱内居中悬浮 + 遮罩 --- */
+.bme-node-detail-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  cursor: pointer;
+}
+
+.bme-node-detail-scrim[hidden] {
+  display: none !important;
+}
+
+/* 桌面图谱工作区（主画布）：节点详情仍为右侧滑出面板 */
+#bme-node-detail {
   position: absolute;
   top: 0;
   right: 0;
+  left: auto;
   width: 280px;
   height: 100%;
+  max-height: none;
   background: var(--bme-surface-container);
   border-left: 1px solid var(--bme-border);
+  border-radius: 0;
   padding: 12px;
   overflow-y: auto;
+  box-shadow: none;
   transform: translateX(100%);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
   transition: transform 0.2s ease;
   z-index: 10;
 }
 
-.bme-node-detail.open {
+#bme-node-detail.open {
   transform: translateX(0);
+}
+
+/* 移动端「图谱」Tab：节点详情居中悬浮窗 */
+#bme-mobile-node-detail {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  right: auto;
+  width: min(400px, calc(100% - 24px));
+  max-height: min(78vh, 640px);
+  height: auto;
+  background: var(--bme-surface-container);
+  border: 1px solid var(--bme-border);
+  border-radius: 14px;
+  padding: 12px;
+  overflow-y: auto;
+  box-shadow: 0 20px 48px rgba(0, 0, 0, 0.5);
+  transform: translate(-50%, -48%) scale(0.96);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease,
+    visibility 0.22s;
+  z-index: 10;
+}
+
+#bme-mobile-node-detail.open {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .bme-node-detail-header {
@@ -3848,11 +3912,147 @@
   border-radius: 2px;
 }
 
-/* 移动端图谱预览 - 桌面端默认隐藏 */
+/* 移动端图谱预览 - 桌面端默认隐藏（旧组件已移除） */
 .bme-mobile-graph-preview,
-.bme-mobile-graph-status,
-.bme-mobile-graph-section {
+.bme-mobile-graph-status {
   display: none;
+}
+
+/* --- Graph Sub-Tabs (Mobile Graph Pane) --- */
+
+.bme-graph-subtabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 12px 6px;
+  background: var(--bme-surface-container);
+  border-bottom: 1px solid var(--bme-border);
+  flex-shrink: 0;
+}
+
+.bme-graph-subtab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--bme-on-surface-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.bme-graph-subtab i {
+  font-size: 12px;
+}
+
+.bme-graph-subtab:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--bme-on-surface);
+}
+
+.bme-graph-subtab.active {
+  background: var(--bme-primary);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(233, 69, 96, 0.35);
+}
+
+.bme-graph-view-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.bme-mobile-graph-pane {
+  display: none;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.bme-mobile-graph-pane.active {
+  display: flex;
+}
+
+.bme-mobile-canvas-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+
+.bme-mobile-canvas-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bme-mobile-graph-float-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 5;
+}
+
+.bme-mobile-graph-float-controls button {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(10, 10, 15, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--bme-on-surface);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.bme-mobile-graph-float-controls button:hover {
+  background: rgba(233, 69, 96, 0.25);
+  border-color: var(--bme-primary);
+  color: var(--bme-primary);
+}
+
+/* Graph pane layout */
+#bme-pane-graph {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+#bme-pane-graph.active {
+  display: flex;
+}
+
+#bme-pane-graph .bme-graph-legend {
+  flex-shrink: 0;
+  padding: 6px 12px;
+}
+
+#bme-pane-graph .bme-graph-statusbar {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  font-size: 10px;
+}
+
+#bme-pane-graph .bme-cognition-workspace {
+  padding: 12px;
+  overflow-y: auto;
 }
 
 /* ═══════ ⑤ 高级设置折叠 (desktop+mobile) ═══════ */
@@ -3954,29 +4154,21 @@
     gap: 4px;
   }
 
-  /* ⑥ 图谱 tab 移动端全屏覆盖 */
-  .bme-panel-main.mobile-visible {
-    display: flex;
-    position: absolute;
-    inset: 0;
-    z-index: 20;
-    border-radius: 0;
-  }
-
-  .bme-panel-main.mobile-visible ~ .bme-panel-tabbar {
-    z-index: 21;
-  }
-
-  /* ② 底部 Tabbar safe-area + 触控增大 */
+  /* ② 底部 Tabbar safe-area + 6 列 icon-only */
   .bme-panel-tabbar {
     display: flex;
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .bme-panel-tabbar .bme-tab-btn {
-    min-height: 52px;
-    gap: 3px;
-    font-size: 10px;
+    min-height: 44px;
+    gap: 2px;
+    font-size: 0;
+    padding: 6px 2px;
+  }
+
+  .bme-panel-tabbar .bme-tab-btn span {
+    display: none;
   }
 
   .bme-panel-tabbar .bme-tab-btn i {
@@ -4289,9 +4481,10 @@
     font-size: 22px;
   }
 
-  /* 节点详情移动端全宽 */
-  .bme-node-detail {
-    width: 100%;
+  /* 移动端图谱内悬浮窗略收窄（桌面 #bme-node-detail 在窄屏下不可见） */
+  #bme-mobile-node-detail {
+    width: min(400px, calc(100% - 16px));
+    max-height: min(82vh, 680px);
   }
 
   /* 图例 */
@@ -4299,88 +4492,6 @@
     font-size: 9px;
   }
 
-  /* 移动端图谱区重设计 */
-  .bme-mobile-graph-section {
-    display: block;
-    margin: 12px 0 0;
-    border: 1px solid var(--bme-border);
-    border-radius: 12px;
-    background: var(--bme-surface-lowest);
-    overflow: hidden;
-  }
-
-  .bme-mobile-graph-tabs {
-    display: flex;
-    border-bottom: 1px solid var(--bme-border);
-  }
-
-  .bme-mobile-graph-tab {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 10px 8px;
-    border: none;
-    background: transparent;
-    color: var(--bme-on-surface-dim);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    position: relative;
-  }
-
-  .bme-mobile-graph-tab:hover {
-    color: var(--bme-on-surface);
-    background: rgba(255, 255, 255, 0.04);
-  }
-
-  .bme-mobile-graph-tab.active {
-    color: var(--bme-primary);
-  }
-
-  .bme-mobile-graph-tab.active::after {
-    content: "";
-    position: absolute;
-    bottom: 0;
-    left: 20%;
-    right: 20%;
-    height: 2px;
-    background: var(--bme-primary);
-    border-radius: 2px 2px 0 0;
-  }
-
-  .bme-mobile-view-pane {
-    display: none;
-    padding: 12px;
-    min-height: 120px;
-  }
-
-  .bme-mobile-view-pane.active {
-    display: block;
-  }
-
-  .bme-mobile-fullscreen-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    width: 100%;
-    padding: 12px;
-    border: none;
-    border-top: 1px solid var(--bme-border);
-    background: rgba(255, 255, 255, 0.02);
-    color: var(--bme-primary);
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.15s ease;
-  }
-
-  .bme-mobile-fullscreen-btn:hover {
-    background: rgba(255, 255, 255, 0.06);
-  }
 }
 
 /* ═══════ Help Tip (? 图标 + 气泡) ═══════ */

@@ -205,6 +205,8 @@ export class GraphRenderer {
         this.isDragging = false;
         this.isPanning = false;
         this.lastMouse = { x: 0, y: 0 };
+        /** @type {{ startX: number, startY: number, lastX: number, lastY: number, nodeCandidate: object|null, moved: boolean } | null} */
+        this._touchSession = null;
 
         this.animId = null;
 
@@ -771,19 +773,55 @@ export class GraphRenderer {
         c.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
         c.addEventListener('dblclick', (e) => this._onDoubleClick(e));
 
+        // 触摸：单指始终平移画布，松手时在未移动过的情况下视为「点击」选中节点（避免拖动画布时误拖节点）
         c.addEventListener('touchstart', (e) => {
-            if (e.touches.length === 1) {
-                const t = e.touches[0];
-                this._onMouseDown({ clientX: t.clientX, clientY: t.clientY, button: 0 });
+            if (e.touches.length !== 1) {
+                this._touchSession = null;
+                return;
             }
-        }, { passive: true });
+            e.preventDefault();
+            const t = e.touches[0];
+            const { x, y } = this._canvasToWorld(t.clientX, t.clientY);
+            this._touchSession = {
+                startX: t.clientX,
+                startY: t.clientY,
+                lastX: t.clientX,
+                lastY: t.clientY,
+                nodeCandidate: this._findNodeAt(x, y),
+                moved: false,
+            };
+        }, { passive: false });
         c.addEventListener('touchmove', (e) => {
-            if (e.touches.length === 1) {
-                const t = e.touches[0];
-                this._onMouseMove({ clientX: t.clientX, clientY: t.clientY });
+            if (!this._touchSession || e.touches.length !== 1) return;
+            e.preventDefault();
+            const t = e.touches[0];
+            const dx = t.clientX - this._touchSession.lastX;
+            const dy = t.clientY - this._touchSession.lastY;
+            const fromStartX = t.clientX - this._touchSession.startX;
+            const fromStartY = t.clientY - this._touchSession.startY;
+            if (Math.abs(fromStartX) > 5 || Math.abs(fromStartY) > 5) {
+                this._touchSession.moved = true;
             }
-        }, { passive: true });
-        c.addEventListener('touchend', () => this._onMouseUp({}));
+            this.offsetX += dx;
+            this.offsetY += dy;
+            this._touchSession.lastX = t.clientX;
+            this._touchSession.lastY = t.clientY;
+            this._render();
+        }, { passive: false });
+        c.addEventListener('touchend', (e) => {
+            if (!this._touchSession) return;
+            const sess = this._touchSession;
+            this._touchSession = null;
+            if (!sess.moved && sess.nodeCandidate) {
+                this.selectedNode = sess.nodeCandidate;
+                if (this.onNodeSelect) this.onNodeSelect(sess.nodeCandidate);
+                if (this.onNodeClick) this.onNodeClick(sess.nodeCandidate);
+                this._render();
+            }
+        });
+        c.addEventListener('touchcancel', () => {
+            this._touchSession = null;
+        });
     }
 
     _canvasToWorld(clientX, clientY) {
