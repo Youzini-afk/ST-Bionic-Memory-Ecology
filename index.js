@@ -8615,7 +8615,7 @@ function getLatestUserChatMessage(chat) {
 
   for (let index = chat.length - 1; index >= 0; index--) {
     const message = chat[index];
-    if (message?.is_system) continue;
+    if (isSystemMessageForExtraction(message, { index, chat })) continue;
     if (message?.is_user) return message;
   }
 
@@ -8627,7 +8627,9 @@ function getLastNonSystemChatMessage(chat) {
 
   for (let index = chat.length - 1; index >= 0; index--) {
     const message = chat[index];
-    if (!message?.is_system) return message;
+    if (!isSystemMessageForExtraction(message, { index, chat })) {
+      return message;
+    }
   }
 
   return null;

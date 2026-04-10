@@ -26,6 +26,48 @@ export function isBmeManagedHiddenMessage(
   );
 }
 
+function cloneChatMessageForPluginView(message) {
+  if (!message || typeof message !== "object") {
+    return message;
+  }
+
+  try {
+    if (typeof structuredClone === "function") {
+      return structuredClone(message);
+    }
+  } catch {
+    // ignore and fall back to JSON clone
+  }
+
+  try {
+    return JSON.parse(JSON.stringify(message));
+  } catch {
+    return {
+      ...message,
+      extra:
+        message.extra && typeof message.extra === "object"
+          ? { ...message.extra }
+          : message.extra,
+    };
+  }
+}
+
+export function buildPluginVisibleChatMessages(chat = []) {
+  if (!Array.isArray(chat)) return [];
+
+  return chat.map((message, index) => {
+    const cloned = cloneChatMessageForPluginView(message);
+    if (
+      cloned &&
+      typeof cloned === "object" &&
+      isBmeManagedHiddenMessage(message, { index, chat })
+    ) {
+      cloned.is_system = false;
+    }
+    return cloned;
+  });
+}
+
 export function isSystemMessageForExtraction(
   message,
   { index = null, chat = null } = {},

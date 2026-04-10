@@ -1,6 +1,7 @@
 // ST-BME: 召回输入解析与注入控制器（纯函数）
 
 import { debugLog } from "../runtime/debug-logging.js";
+import { isSystemMessageForExtraction } from "../maintenance/chat-history.js";
 
 export function buildRecallRecentMessagesController(
   chat,
@@ -17,7 +18,7 @@ export function buildRecallRecentMessagesController(
     index--
   ) {
     const message = chat[index];
-    if (message?.is_system) continue;
+    if (isSystemMessageForExtraction(message, { index, chat })) continue;
     recentMessages.unshift(runtime.formatRecallContextLine(message));
   }
 

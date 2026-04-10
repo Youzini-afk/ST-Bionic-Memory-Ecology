@@ -71,6 +71,14 @@ try {
           { is_user: true, mes: "第一句" },
           {
             is_user: false,
+            is_system: true,
+            mes: "被 BME 隐藏的助手楼层",
+            extra: {
+              __st_bme_hide_managed: true,
+            },
+          },
+          {
+            is_user: false,
             mes: "回应",
             variables: {
               0: {
@@ -115,6 +123,14 @@ try {
   assert.equal(hostSnapshot.snapshot.variables.local.location, "library");
   assert.equal(hostSnapshot.snapshot.chat.lastUserMessage, "最后一句");
   assert.equal(hostSnapshot.snapshot.chat.id, "chat-from-global");
+  assert.equal(
+    hostSnapshot.snapshot.chat.messages[1]?.is_system,
+    false,
+  );
+  assert.equal(
+    hostSnapshot.snapshot.chat.messages[1]?.mes,
+    "被 BME 隐藏的助手楼层",
+  );
   assert.equal(hostSnapshot.prompt.charName, "Alice");
   assert.equal(hostSnapshot.prompt.userPersona, "桥接 persona");
 

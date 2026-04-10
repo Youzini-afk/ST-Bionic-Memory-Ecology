@@ -5,6 +5,7 @@ import {
   resetHideState,
 } from "../ui/hide-engine.js";
 import {
+  buildPluginVisibleChatMessages,
   buildExtractionMessages,
   getAssistantTurns,
   isAssistantChatMessage,
@@ -36,6 +37,25 @@ const realSystemMessage = {
 };
 assert.equal(isSystemMessageForExtraction(realSystemMessage), true);
 assert.equal(isAssistantChatMessage(realSystemMessage), false);
+const pluginVisibleChat = buildPluginVisibleChatMessages([
+  realSystemMessage,
+  managedHiddenAssistant,
+]);
+assert.equal(
+  pluginVisibleChat[0].is_system,
+  true,
+  "real system message should remain system in plugin-visible chat",
+);
+assert.equal(
+  pluginVisibleChat[1].is_system,
+  false,
+  "BME-managed hidden message should be restored for plugin-internal chat views",
+);
+assert.equal(
+  managedHiddenAssistant.is_system,
+  true,
+  "plugin-visible chat clone must not mutate original managed hidden message",
+);
 
 function createRuntime(chat, chatId = "chat-a") {
   return {
