@@ -2332,6 +2332,16 @@ result = {
     historyAdvanceAllowed: false,
     historyAdvanced: false,
   };
+  const committedGraph = structuredClone(graph);
+  committedGraph.historyState.lastProcessedAssistantFloor = 1;
+  committedGraph.lastProcessedSeq = 1;
+  committedGraph.batchJournal = [
+    {
+      id: "journal-queued-1",
+      processedRange: [1, 1],
+      createdAt: Date.now(),
+    },
+  ];
   harness.api.setCurrentGraph(graph);
   harness.api.setGraphPersistenceState({
     loadState: "loaded",
@@ -2344,6 +2354,14 @@ result = {
     pendingPersist: true,
     writesBlocked: false,
   });
+  harness.api.writeGraphShadowSnapshot(
+    "chat-pending-persist-retry",
+    committedGraph,
+    {
+      revision: 7,
+      reason: "queued-persist-authoritative",
+    },
+  );
   harness.runtimeContext.__markSyncDirtyShouldThrow = true;
 
   const result = await harness.api.retryPendingGraphPersist({
@@ -2368,6 +2386,15 @@ result = {
   assert.equal(
     harness.api.getCurrentGraph().historyState.lastBatchStatus.persistence.outcome,
     "saved",
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().batchJournal?.length,
+    1,
+    "pending persist retry 应把 authoritative batch journal 回填到 runtime graph",
+  );
+  assert.equal(
+    harness.api.getCurrentGraph().batchJournal?.[0]?.id,
+    "journal-queued-1",
   );
 }
 

@@ -388,6 +388,38 @@ export function snapshotProcessedMessageHashes(
   return result;
 }
 
+export function applyProcessedHistorySnapshotToGraph(
+  graph,
+  chat,
+  lastProcessedAssistantFloor,
+) {
+  if (!graph || typeof graph !== "object") {
+    return graph;
+  }
+
+  const historyState =
+    graph.historyState && typeof graph.historyState === "object"
+      ? graph.historyState
+      : createDefaultHistoryState(graph?.historyState?.chatId || "");
+  graph.historyState = historyState;
+
+  const safeLastProcessedAssistantFloor = Number.isFinite(
+    Number(lastProcessedAssistantFloor),
+  )
+    ? Math.floor(Number(lastProcessedAssistantFloor))
+    : -1;
+
+  historyState.lastProcessedAssistantFloor = safeLastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+  historyState.processedMessageHashes =
+    safeLastProcessedAssistantFloor >= 0
+      ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
+      : {};
+  historyState.processedMessageHashesNeedRefresh = false;
+  graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
+  return graph;
+}
+
 export function rebindProcessedHistoryStateToChat(
   graph,
   chat,

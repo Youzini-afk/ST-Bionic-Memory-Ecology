@@ -190,6 +190,7 @@ import {
 } from "./runtime/settings-defaults.js";
 import { retrieve } from "./retrieval/retriever.js";
 import {
+  applyProcessedHistorySnapshotToGraph,
   appendBatchJournal,
   appendMaintenanceJournal,
   buildRecoveryResult,
@@ -5896,16 +5897,22 @@ function buildGraphPersistResult({
   };
 }
 
-function maybeCaptureGraphShadowSnapshot(reason = "runtime-shadow") {
-  const chatId = graphPersistenceState.chatId || getCurrentChatId();
-  if (!chatId || !currentGraph) return false;
+function maybeCaptureGraphShadowSnapshot(
+  reason = "runtime-shadow",
+  {
+    graph = currentGraph,
+    chatId = graphPersistenceState.chatId || getCurrentChatId(),
+    revision = graphPersistenceState.revision,
+  } = {},
+) {
+  if (!chatId || !graph) return false;
   const hasMeaningfulGraphData =
-    !isGraphEffectivelyEmpty(currentGraph) ||
+    !isGraphEffectivelyEmpty(graph) ||
     graphPersistenceState.shadowSnapshotUsed ||
     graphPersistenceState.lastPersistedRevision > 0;
   if (!hasMeaningfulGraphData) return false;
-  return writeGraphShadowSnapshot(chatId, currentGraph, {
-    revision: graphPersistenceState.revision,
+  return writeGraphShadowSnapshot(chatId, graph, {
+    revision,
     reason,
   });
 }
@@ -6023,10 +6030,57 @@ function resolvePendingPersistLastProcessedAssistantFloor() {
   return null;
 }
 
+function resolvePendingPersistGraphSource(chatId = "") {
+  const normalizedChatId = normalizeChatIdCandidate(
+    chatId || graphPersistenceState.queuedPersistChatId || graphPersistenceState.chatId,
+  );
+  const targetRevision = Math.max(
+    Number(graphPersistenceState.queuedPersistRevision || 0),
+    Number(graphPersistenceState.revision || 0),
+  );
+  const shadowSnapshot = normalizedChatId
+    ? readGraphShadowSnapshot(normalizedChatId)
+    : null;
+
+  if (
+    shadowSnapshot &&
+    Number(shadowSnapshot.revision || 0) >= targetRevision &&
+    typeof shadowSnapshot.serializedGraph === "string" &&
+    shadowSnapshot.serializedGraph
+  ) {
+    try {
+      const shadowGraph = cloneGraphForPersistence(
+        normalizeGraphRuntimeState(
+          deserializeGraph(shadowSnapshot.serializedGraph),
+          normalizedChatId,
+        ),
+        normalizedChatId,
+      );
+      return {
+        graph: shadowGraph,
+        source: "shadow",
+        revision: Number(shadowSnapshot.revision || 0),
+      };
+    } catch (error) {
+      console.warn("[ST-BME] pending persist shadow graph 恢复失败:", error);
+    }
+  }
+
+  return {
+    graph: currentGraph,
+    source: "runtime",
+    revision: Math.max(
+      Number(getGraphPersistedRevision(currentGraph) || 0),
+      targetRevision,
+    ),
+  };
+}
+
 function applyAcceptedPendingPersistState(
   persistResult,
   {
     lastProcessedAssistantFloor = resolvePendingPersistLastProcessedAssistantFloor(),
+    persistedGraph = null,
   } = {},
 ) {
   ensureCurrentGraphRuntimeState();
@@ -6040,6 +6094,36 @@ function applyAcceptedPendingPersistState(
     batchStatus.historyAdvanceAllowed = persistenceRecord.accepted === true;
     batchStatus.historyAdvanced = persistenceRecord.accepted === true;
     currentGraph.historyState.lastBatchStatus = batchStatus;
+  }
+
+  if (
+    persistedGraph &&
+    typeof persistedGraph === "object" &&
+    !Array.isArray(persistedGraph)
+  ) {
+    const persistedHistory =
+      persistedGraph.historyState &&
+      typeof persistedGraph.historyState === "object" &&
+      !Array.isArray(persistedGraph.historyState)
+        ? persistedGraph.historyState
+        : null;
+    if (persistedHistory) {
+      currentGraph.historyState.processedMessageHashVersion =
+        persistedHistory.processedMessageHashVersion ??
+        currentGraph.historyState.processedMessageHashVersion;
+      currentGraph.historyState.processedMessageHashes = cloneRuntimeDebugValue(
+        persistedHistory.processedMessageHashes || {},
+        currentGraph.historyState.processedMessageHashes || {},
+      );
+      currentGraph.historyState.processedMessageHashesNeedRefresh =
+        persistedHistory.processedMessageHashesNeedRefresh === true;
+    }
+    if (Array.isArray(persistedGraph.batchJournal)) {
+      currentGraph.batchJournal = cloneRuntimeDebugValue(
+        persistedGraph.batchJournal,
+        currentGraph.batchJournal || [],
+      );
+    }
   }
 
   if (
@@ -6133,9 +6217,10 @@ function persistGraphToChatMetadata(
     reason = "graph-persist",
     revision = graphPersistenceState.revision,
     immediate = false,
+    graph = currentGraph,
   } = {},
 ) {
-  if (!context || !currentGraph) {
+  if (!context || !graph) {
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
@@ -6155,19 +6240,21 @@ function persistGraphToChatMetadata(
   }
 
   const nextIntegrity = getChatMetadataIntegrity(context);
-  const persistedGraph = cloneGraphForPersistence(currentGraph, chatId);
+  const persistedGraph = cloneGraphForPersistence(graph, chatId);
   stampGraphPersistenceMeta(persistedGraph, {
     revision,
     reason,
     chatId,
     integrity: nextIntegrity,
   });
-  stampGraphPersistenceMeta(currentGraph, {
-    revision,
-    reason,
-    chatId,
-    integrity: nextIntegrity,
-  });
+  if (graph === currentGraph) {
+    stampGraphPersistenceMeta(currentGraph, {
+      revision,
+      reason,
+      chatId,
+      integrity: nextIntegrity,
+    });
+  }
   writeChatMetadataPatch(context, {
     [GRAPH_METADATA_KEY]: persistedGraph,
   });
@@ -6219,10 +6306,15 @@ function persistGraphToChatMetadata(
 function queueGraphPersist(
   reason = "graph-persist-blocked",
   revision = graphPersistenceState.revision,
-  { immediate = true } = {},
+  { immediate = true, graph = currentGraph, chatId = undefined } = {},
 ) {
-  const queuedChatId = graphPersistenceState.chatId || getCurrentChatId();
-  const shadowCaptured = maybeCaptureGraphShadowSnapshot(reason);
+  const queuedChatId =
+    String(chatId || graphPersistenceState.chatId || getCurrentChatId()) || "";
+  const shadowCaptured = maybeCaptureGraphShadowSnapshot(reason, {
+    graph,
+    chatId: queuedChatId,
+    revision,
+  });
   updateGraphPersistenceState({
     queuedPersistRevision: Math.max(
       graphPersistenceState.queuedPersistRevision || 0,
@@ -6380,16 +6472,20 @@ async function retryPendingGraphPersist({
     });
   }
 
+  const pendingPersistGraphSource = resolvePendingPersistGraphSource(
+    queuedChatId,
+  );
+  const pendingPersistGraph = pendingPersistGraphSource?.graph || currentGraph;
   const targetRevision = Math.max(
     Number(graphPersistenceState.queuedPersistRevision || 0),
     Number(graphPersistenceState.revision || 0),
     Number(graphPersistenceState.lastPersistedRevision || 0),
-    Number(getGraphPersistedRevision(currentGraph) || 0),
+    Number(pendingPersistGraphSource?.revision || 0),
+    Number(getGraphPersistedRevision(pendingPersistGraph) || 0),
   );
   const lastProcessedAssistantFloor =
     resolvePendingPersistLastProcessedAssistantFloor();
-
-  const indexedDbResult = await saveGraphToIndexedDb(activeChatId, currentGraph, {
+  const indexedDbResult = await saveGraphToIndexedDb(activeChatId, pendingPersistGraph, {
     revision: targetRevision,
     reason,
   });
@@ -6429,17 +6525,19 @@ async function retryPendingGraphPersist({
     });
     applyAcceptedPendingPersistState(persistResult, {
       lastProcessedAssistantFloor,
+      persistedGraph: pendingPersistGraph,
     });
     void maybeResumePendingAutoExtraction("pending-persist-resolved:indexeddb");
     return persistResult;
   }
 
-  if (canPersistGraphToMetadataFallback(context, currentGraph)) {
+  if (canPersistGraphToMetadataFallback(context, pendingPersistGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
       revision: targetRevision,
       immediate: true,
+      graph: pendingPersistGraph,
     });
     if (metadataResult?.saved) {
       clearPendingGraphPersistRetry();
@@ -6477,6 +6575,7 @@ async function retryPendingGraphPersist({
       });
       applyAcceptedPendingPersistState(persistResult, {
         lastProcessedAssistantFloor,
+        persistedGraph: pendingPersistGraph,
       });
       void maybeResumePendingAutoExtraction("pending-persist-resolved:metadata");
       return persistResult;
@@ -6501,10 +6600,15 @@ async function retryPendingGraphPersist({
 async function persistExtractionBatchResult({
   reason = "extraction-batch-complete",
   lastProcessedAssistantFloor = null,
+  graphSnapshot = null,
 } = {}) {
   ensureCurrentGraphRuntimeState();
   const context = getContext();
-  if (!context || !currentGraph) {
+  const persistGraph =
+    graphSnapshot && typeof graphSnapshot === "object"
+      ? cloneGraphSnapshot(graphSnapshot)
+      : currentGraph;
+  if (!context || !persistGraph) {
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
@@ -6526,7 +6630,7 @@ async function persistExtractionBatchResult({
   }
 
   const revision = bumpGraphRevision(reason);
-  const indexedDbResult = await saveGraphToIndexedDb(chatId, currentGraph, {
+  const indexedDbResult = await saveGraphToIndexedDb(chatId, persistGraph, {
     revision,
     reason,
   });
@@ -6567,7 +6671,11 @@ async function persistExtractionBatchResult({
   }
 
   const shadowReason = `${reason}:shadow-fallback`;
-  const shadowCaptured = maybeCaptureGraphShadowSnapshot(shadowReason);
+  const shadowCaptured = maybeCaptureGraphShadowSnapshot(shadowReason, {
+    graph: persistGraph,
+    chatId,
+    revision,
+  });
   if (shadowCaptured) {
     if (isGraphMetadataWriteAllowed()) {
       persistGraphCommitMarker(context, {
@@ -6596,6 +6704,10 @@ async function persistExtractionBatchResult({
       queuedPersistReason: "",
     });
     clearPendingGraphPersistRetry();
+    queueGraphPersistToIndexedDb(chatId, persistGraph, {
+      revision,
+      reason: `${shadowReason}:promote-indexeddb`,
+    });
     return buildGraphPersistResult({
       saved: false,
       accepted: true,
@@ -6606,12 +6718,13 @@ async function persistExtractionBatchResult({
     });
   }
 
-  if (canPersistGraphToMetadataFallback(context, currentGraph)) {
+  if (canPersistGraphToMetadataFallback(context, persistGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
       revision,
       immediate: true,
+      graph: persistGraph,
     });
     if (metadataResult?.saved) {
       persistGraphCommitMarker(context, {
@@ -6637,6 +6750,10 @@ async function persistExtractionBatchResult({
         queuedPersistReason: "",
       });
       clearPendingGraphPersistRetry();
+      queueGraphPersistToIndexedDb(chatId, persistGraph, {
+        revision,
+        reason: `${metadataReason}:promote-indexeddb`,
+      });
       return buildGraphPersistResult({
         saved: true,
         accepted: true,
@@ -6650,8 +6767,9 @@ async function persistExtractionBatchResult({
 
   const queuedResult = queueGraphPersist(`${reason}:pending`, revision, {
     immediate: true,
+    graph: persistGraph,
+    chatId,
   });
-  schedulePendingGraphPersistRetry(`${reason}:pending`, 0);
   updateGraphPersistenceState({
     pendingPersist: true,
     lastPersistReason: String(queuedResult.reason || `${reason}:pending`),
@@ -7331,14 +7449,11 @@ function markVectorStateDirty(reason = "向量状态已标记为待重建") {
 
 function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
   ensureCurrentGraphRuntimeState();
-  currentGraph.historyState.lastProcessedAssistantFloor =
-    lastProcessedAssistantFloor;
-  currentGraph.historyState.processedMessageHashVersion =
-    PROCESSED_MESSAGE_HASH_VERSION;
-  currentGraph.historyState.processedMessageHashes =
-    snapshotProcessedMessageHashes(chat, lastProcessedAssistantFloor);
-  currentGraph.historyState.processedMessageHashesNeedRefresh = false;
-  currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
+  applyProcessedHistorySnapshotToGraph(
+    currentGraph,
+    chat,
+    lastProcessedAssistantFloor,
+  );
 }
 
 function shouldAdvanceProcessedHistory(batchStatus) {
@@ -10324,6 +10439,7 @@ async function executeExtractionBatch({
   return await executeExtractionBatchController(
     {
       appendBatchJournal,
+      applyProcessedHistorySnapshotToGraph,
       buildExtractionMessages,
       cloneGraphSnapshot,
       computePostProcessArtifacts,
