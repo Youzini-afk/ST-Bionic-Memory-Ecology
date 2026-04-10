@@ -207,6 +207,7 @@ export class GraphRenderer {
         this.lastMouse = { x: 0, y: 0 };
         /** @type {{ startX: number, startY: number, lastX: number, lastY: number, nodeCandidate: object|null, moved: boolean } | null} */
         this._touchSession = null;
+        this._suppressMouseUntil = 0;
 
         this.animId = null;
 
@@ -780,6 +781,11 @@ export class GraphRenderer {
                 return;
             }
             e.preventDefault();
+            this._markTouchInteraction();
+            this.dragNode = null;
+            this.isDragging = false;
+            this.isPanning = false;
+            this._dragStartMouse = null;
             const t = e.touches[0];
             const { x, y } = this._canvasToWorld(t.clientX, t.clientY);
             this._touchSession = {
@@ -794,6 +800,7 @@ export class GraphRenderer {
         c.addEventListener('touchmove', (e) => {
             if (!this._touchSession || e.touches.length !== 1) return;
             e.preventDefault();
+            this._markTouchInteraction();
             const t = e.touches[0];
             const dx = t.clientX - this._touchSession.lastX;
             const dy = t.clientY - this._touchSession.lastY;
@@ -810,8 +817,13 @@ export class GraphRenderer {
         }, { passive: false });
         c.addEventListener('touchend', (e) => {
             if (!this._touchSession) return;
+            this._markTouchInteraction();
             const sess = this._touchSession;
             this._touchSession = null;
+            this.dragNode = null;
+            this.isDragging = false;
+            this.isPanning = false;
+            this._dragStartMouse = null;
             if (!sess.moved && sess.nodeCandidate) {
                 this.selectedNode = sess.nodeCandidate;
                 if (this.onNodeSelect) this.onNodeSelect(sess.nodeCandidate);
@@ -820,8 +832,21 @@ export class GraphRenderer {
             }
         });
         c.addEventListener('touchcancel', () => {
+            this._markTouchInteraction();
             this._touchSession = null;
+            this.dragNode = null;
+            this.isDragging = false;
+            this.isPanning = false;
+            this._dragStartMouse = null;
         });
+    }
+
+    _markTouchInteraction() {
+        this._suppressMouseUntil = Date.now() + 650;
+    }
+
+    _shouldIgnoreMouseEvent() {
+        return Date.now() < this._suppressMouseUntil;
     }
 
     _canvasToWorld(clientX, clientY) {
@@ -843,6 +868,7 @@ export class GraphRenderer {
     }
 
     _onMouseDown(e) {
+        if (this._shouldIgnoreMouseEvent()) return;
         const { x, y } = this._canvasToWorld(e.clientX, e.clientY);
         const node = this._findNodeAt(x, y);
         this.lastMouse = { x: e.clientX, y: e.clientY };
@@ -858,6 +884,7 @@ export class GraphRenderer {
     }
 
     _onMouseMove(e) {
+        if (this._shouldIgnoreMouseEvent()) return;
         const { x, y } = this._canvasToWorld(e.clientX, e.clientY);
 
         if (this.isDragging && this.dragNode) {
@@ -881,6 +908,7 @@ export class GraphRenderer {
     }
 
     _onMouseUp() {
+        if (this._shouldIgnoreMouseEvent()) return;
         if (this.dragNode) {
             this._clampNodeToRegion(this.dragNode);
             this.dragNode.pinned = false;
@@ -919,6 +947,7 @@ export class GraphRenderer {
     }
 
     _onDoubleClick(e) {
+        if (this._shouldIgnoreMouseEvent()) return;
         const { x, y } = this._canvasToWorld(e.clientX, e.clientY);
         const node = this._findNodeAt(x, y);
         if (node) {
