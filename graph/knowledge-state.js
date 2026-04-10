@@ -896,10 +896,6 @@ function inferKnowledgeFromChangedNodes(
   const normalizedChangedNodeIds = uniqueIds(changedNodeIds);
   if (normalizedChangedNodeIds.length === 0) return;
 
-  const activeCharacterOwner = resolveKnowledgeOwner(graph, {
-    ownerType: OWNER_TYPE_CHARACTER,
-    ownerName: scopeRuntime.activeCharacterOwner,
-  });
   const activeUserOwner = resolveKnowledgeOwner(graph, {
     ownerType: OWNER_TYPE_USER,
     ownerName: scopeRuntime.activeUserOwner,
@@ -946,22 +942,7 @@ function inferKnowledgeFromChangedNodes(
     }
 
     if (node.type === "character") {
-      const selfOwner = ensureKnowledgeOwnerState(
-        graph,
-        {
-          ownerType: OWNER_TYPE_CHARACTER,
-          ownerName: node?.fields?.name,
-          nodeId: node.id,
-        },
-        {
-          updatedAt: Date.now(),
-          lastSource: source,
-        },
-      );
-      if (selfOwner.ownerState) {
-        applyKnowledgeNodeIds(selfOwner.ownerState, "knownNodeIds", [node.id]);
-        applyVisibilityPatch(selfOwner.ownerState, node.id, 1);
-      }
+      continue;
     }
 
     const mentionedOwners = collectCharacterMentionOwners(graph, node);
@@ -973,16 +954,6 @@ function inferKnowledgeFromChangedNodes(
       if (!ownerResult.ownerState) continue;
       applyKnowledgeNodeIds(ownerResult.ownerState, "knownNodeIds", [node.id]);
       applyVisibilityPatch(ownerResult.ownerState, node.id, 0.92);
-    }
-
-    if (activeCharacterOwner.ownerKey && !mentionedOwners.length) {
-      const ownerResult = ensureKnowledgeOwnerState(graph, activeCharacterOwner, {
-        updatedAt: Date.now(),
-        lastSource: source,
-      });
-      if (ownerResult.ownerState) {
-        applyVisibilityPatch(ownerResult.ownerState, node.id, 0.55);
-      }
     }
 
     if (activeUserOwner.ownerKey) {
@@ -1513,7 +1484,6 @@ export function getKnowledgeOwnerEntry(graph, ownerKey = "") {
 export function listKnowledgeOwners(graph) {
   normalizeGraphCognitiveState(graph);
   const owners = new Map();
-  const userAliasContext = buildUserAliasContext(graph);
 
   for (const entry of Object.values(graph.knowledgeState.owners || {})) {
     const normalizedEntry = createDefaultKnowledgeOwnerState(entry);
@@ -1535,49 +1505,6 @@ export function listKnowledgeOwners(graph) {
       owners.get(normalizedEntry.ownerKey) ||
       findEquivalentCharacterOwnerEntry(owners, displayEntry);
     const targetKey = equivalentEntry?.ownerKey || normalizedEntry.ownerKey;
-    owners.set(
-      targetKey,
-      owners.has(targetKey)
-        ? mergeListedKnowledgeOwnerEntry(owners.get(targetKey), displayEntry)
-        : displayEntry,
-    );
-  }
-
-  for (const characterNode of getCharacterNodes(graph)) {
-    if (
-      shouldResolveCharacterOwnerAsUser(
-        graph,
-        characterNode?.fields?.name,
-        "",
-        userAliasContext,
-      )
-    ) {
-      continue;
-    }
-    const resolvedOwner = resolveKnowledgeOwner(graph, {
-      ownerType: OWNER_TYPE_CHARACTER,
-      ownerName: characterNode?.fields?.name,
-      nodeId: characterNode?.id,
-      userAliasContext,
-    });
-    if (!resolvedOwner.ownerKey) continue;
-    const displayEntry = {
-      ownerKey: resolvedOwner.ownerKey,
-      ownerType: resolvedOwner.ownerType,
-      ownerName: resolvedOwner.ownerName,
-      nodeId: resolvedOwner.nodeId,
-      aliases: [...(resolvedOwner.aliases || [])],
-      knownCount: 0,
-      mistakenCount: 0,
-      manualKnownCount: 0,
-      manualHiddenCount: 0,
-      updatedAt: 0,
-      lastSource: "",
-    };
-    const equivalentEntry =
-      owners.get(resolvedOwner.ownerKey) ||
-      findEquivalentCharacterOwnerEntry(owners, displayEntry);
-    const targetKey = equivalentEntry?.ownerKey || resolvedOwner.ownerKey;
     owners.set(
       targetKey,
       owners.has(targetKey)

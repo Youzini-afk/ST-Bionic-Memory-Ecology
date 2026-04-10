@@ -196,6 +196,60 @@ addNode(
 const syntheticOwners = listKnowledgeOwners(syntheticGraph);
 assert.equal(syntheticOwners.some((entry) => entry.ownerType === "character"), false);
 
+const roleCardGraph = createEmptyGraph();
+const roleCardEvent = createNode({
+  type: "event",
+  fields: { title: "天气变化", summary: "窗外下起了雨" },
+  seq: 1,
+});
+addNode(roleCardGraph, roleCardEvent);
+applyCognitionUpdates(
+  roleCardGraph,
+  [],
+  {
+    changedNodeIds: [roleCardEvent.id],
+    scopeRuntime: {
+      activeCharacterOwner: "旁白卡",
+      activeUserOwner: "玩家",
+    },
+  },
+);
+const roleCardOwners = listKnowledgeOwners(roleCardGraph);
+assert.equal(
+  roleCardOwners.some(
+    (entry) =>
+      entry.ownerType === "character" && entry.ownerName === "旁白卡",
+  ),
+  false,
+);
+
+const characterNodeGraph = createEmptyGraph();
+const plainCharacterNode = createNode({
+  type: "character",
+  fields: { name: "旁白卡", state: "仅角色卡实体" },
+  seq: 1,
+});
+addNode(characterNodeGraph, plainCharacterNode);
+applyCognitionUpdates(
+  characterNodeGraph,
+  [],
+  {
+    changedNodeIds: [plainCharacterNode.id],
+    scopeRuntime: {
+      activeCharacterOwner: "旁白卡",
+      activeUserOwner: "玩家",
+    },
+  },
+);
+const characterNodeOwners = listKnowledgeOwners(characterNodeGraph);
+assert.equal(
+  characterNodeOwners.some(
+    (entry) =>
+      entry.ownerType === "character" && entry.ownerName === "旁白卡",
+  ),
+  false,
+);
+
 const duplicateCharacterGraph = createEmptyGraph();
 const roleCardNameNode = createNode({
   type: "character",
@@ -227,8 +281,8 @@ const dedupedCharacterOwners = listKnowledgeOwners(duplicateCharacterGraph).filt
 assert.equal(dedupedCharacterOwners.length, 1);
 assert.equal(dedupedCharacterOwners[0].knownCount >= 1, true);
 assert.equal(
-  dedupedCharacterOwners[0].aliases.includes("艾 琳"),
-  true,
+  dedupedCharacterOwners[0].ownerName,
+  "艾琳",
 );
 assert.equal(
   dedupedCharacterOwners[0].aliases.includes("艾琳"),
