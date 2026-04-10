@@ -196,4 +196,43 @@ addNode(
 const syntheticOwners = listKnowledgeOwners(syntheticGraph);
 assert.equal(syntheticOwners.some((entry) => entry.ownerType === "character"), false);
 
+const duplicateCharacterGraph = createEmptyGraph();
+const roleCardNameNode = createNode({
+  type: "character",
+  fields: { name: "艾 琳" },
+  seq: 1,
+});
+const watchedEvent = createNode({
+  type: "event",
+  fields: { title: "看见钟楼", summary: "艾琳看见钟楼方向出现火光" },
+  seq: 2,
+});
+addNode(duplicateCharacterGraph, roleCardNameNode);
+addNode(duplicateCharacterGraph, watchedEvent);
+applyCognitionUpdates(
+  duplicateCharacterGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "艾琳",
+      knownRefs: [watchedEvent.id],
+      visibility: [{ ref: watchedEvent.id, score: 0.9 }],
+    },
+  ],
+  { changedNodeIds: [watchedEvent.id] },
+);
+const dedupedCharacterOwners = listKnowledgeOwners(duplicateCharacterGraph).filter(
+  (entry) => entry.ownerType === "character",
+);
+assert.equal(dedupedCharacterOwners.length, 1);
+assert.equal(dedupedCharacterOwners[0].knownCount >= 1, true);
+assert.equal(
+  dedupedCharacterOwners[0].aliases.includes("艾 琳"),
+  true,
+);
+assert.equal(
+  dedupedCharacterOwners[0].aliases.includes("艾琳"),
+  true,
+);
+
 console.log("knowledge-state tests passed");

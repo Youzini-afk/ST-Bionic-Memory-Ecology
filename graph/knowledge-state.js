@@ -6,6 +6,7 @@ import {
 import {
   aliasSetMatchesValue,
   buildUserPovAliasNormalizedSet,
+  collectAliasMatchVariants,
   getHostUserAliasHints,
 } from "../runtime/user-alias-utils.js";
 
@@ -61,6 +62,159 @@ function uniqueIds(values = []) {
     result.push(normalized);
   }
   return result.slice(0, KNOWLEDGE_ENTRY_LIMIT);
+}
+
+function buildOwnerAliasVariantSet(values = []) {
+  const variants = new Set();
+  for (const value of Array.isArray(values) ? values : [values]) {
+    for (const variant of collectAliasMatchVariants(value)) {
+      variants.add(variant);
+    }
+  }
+  return variants;
+}
+
+function getKnowledgeOwnerAliasVariantSet(owner = {}) {
+  return buildOwnerAliasVariantSet([
+    owner?.ownerName,
+    ...(Array.isArray(owner?.aliases) ? owner.aliases : []),
+  ]);
+}
+
+function aliasVariantSetsOverlap(left, right) {
+  if (!(left instanceof Set) || !(right instanceof Set) || !left.size || !right.size) {
+    return false;
+  }
+  for (const value of left) {
+    if (right.has(value)) return true;
+  }
+  return false;
+}
+
+function getKnowledgeOwnerEvidenceScore(owner = {}) {
+  const knownCount = Number(
+    owner?.knownCount ??
+      owner?.knownNodeIds?.length ??
+      0,
+  );
+  const mistakenCount = Number(
+    owner?.mistakenCount ??
+      owner?.mistakenNodeIds?.length ??
+      0,
+  );
+  const manualKnownCount = Number(
+    owner?.manualKnownCount ??
+      owner?.manualKnownNodeIds?.length ??
+      0,
+  );
+  const manualHiddenCount = Number(
+    owner?.manualHiddenCount ??
+      owner?.manualHiddenNodeIds?.length ??
+      0,
+  );
+  return (
+    (normalizeString(owner?.nodeId) ? 8 : 0) +
+    knownCount * 4 +
+    mistakenCount * 3 +
+    manualKnownCount * 2 +
+    manualHiddenCount * 2 +
+    (Number(owner?.updatedAt || 0) > 0 ? 1 : 0)
+  );
+}
+
+function findEquivalentCharacterOwnerEntry(ownerCollection, candidate = {}) {
+  if (normalizeOwnerType(candidate?.ownerType) !== OWNER_TYPE_CHARACTER) {
+    return null;
+  }
+
+  const candidateKey = normalizeString(candidate?.ownerKey);
+  const candidateNodeId = normalizeString(candidate?.nodeId);
+  const candidateAliasSet = getKnowledgeOwnerAliasVariantSet(candidate);
+  const matches = [];
+  const values =
+    ownerCollection instanceof Map
+      ? ownerCollection.values()
+      : Object.values(ownerCollection || {});
+
+  for (const rawEntry of values) {
+    const entry = createDefaultKnowledgeOwnerState(rawEntry);
+    if (!entry.ownerKey || normalizeOwnerType(entry.ownerType) !== OWNER_TYPE_CHARACTER) {
+      continue;
+    }
+    if (candidateKey && entry.ownerKey === candidateKey) continue;
+
+    if (candidateNodeId && entry.nodeId && entry.nodeId === candidateNodeId) {
+      matches.push({ entry, reason: "nodeId" });
+      continue;
+    }
+
+    const entryAliasSet = getKnowledgeOwnerAliasVariantSet(entry);
+    if (aliasVariantSetsOverlap(candidateAliasSet, entryAliasSet)) {
+      matches.push({ entry, reason: "alias" });
+    }
+  }
+
+  const nodeIdMatches = matches.filter((match) => match.reason === "nodeId");
+  if (nodeIdMatches.length === 1) {
+    return nodeIdMatches[0].entry;
+  }
+  if (nodeIdMatches.length > 1) {
+    return [...nodeIdMatches]
+      .sort(
+        (left, right) =>
+          getKnowledgeOwnerEvidenceScore(right.entry) -
+          getKnowledgeOwnerEvidenceScore(left.entry),
+      )[0]?.entry || null;
+  }
+  if (matches.length === 1) {
+    return matches[0].entry;
+  }
+  if (matches.length > 1) {
+    return [...matches]
+      .sort(
+        (left, right) =>
+          getKnowledgeOwnerEvidenceScore(right.entry) -
+          getKnowledgeOwnerEvidenceScore(left.entry),
+      )[0]?.entry || null;
+  }
+  return null;
+}
+
+function mergeListedKnowledgeOwnerEntry(baseEntry, incomingEntry) {
+  return {
+    ...baseEntry,
+    ownerName: normalizeString(baseEntry?.ownerName || incomingEntry?.ownerName),
+    nodeId: normalizeString(baseEntry?.nodeId || incomingEntry?.nodeId),
+    aliases: uniqueStrings([
+      ...(baseEntry?.aliases || []),
+      ...(incomingEntry?.aliases || []),
+      incomingEntry?.ownerName || "",
+      baseEntry?.ownerName || "",
+    ]),
+    knownCount: Math.max(
+      Number(baseEntry?.knownCount || 0),
+      Number(incomingEntry?.knownCount || 0),
+    ),
+    mistakenCount: Math.max(
+      Number(baseEntry?.mistakenCount || 0),
+      Number(incomingEntry?.mistakenCount || 0),
+    ),
+    manualKnownCount: Math.max(
+      Number(baseEntry?.manualKnownCount || 0),
+      Number(incomingEntry?.manualKnownCount || 0),
+    ),
+    manualHiddenCount: Math.max(
+      Number(baseEntry?.manualHiddenCount || 0),
+      Number(incomingEntry?.manualHiddenCount || 0),
+    ),
+    updatedAt: Math.max(
+      Number(baseEntry?.updatedAt || 0),
+      Number(incomingEntry?.updatedAt || 0),
+    ),
+    lastSource: normalizeString(
+      baseEntry?.lastSource || incomingEntry?.lastSource,
+    ),
+  };
 }
 
 function normalizeOwnerType(ownerType = "") {
@@ -345,8 +499,12 @@ export function normalizeKnowledgeState(state = {}, graph = null) {
       userAliasContext,
     );
     if (!canonicalEntry.ownerKey) continue;
-    owners[canonicalEntry.ownerKey] = owners[canonicalEntry.ownerKey]
-      ? mergeKnowledgeOwnerEntries(owners[canonicalEntry.ownerKey], canonicalEntry)
+    const equivalentEntry =
+      owners[canonicalEntry.ownerKey] ||
+      findEquivalentCharacterOwnerEntry(owners, canonicalEntry);
+    const targetKey = equivalentEntry?.ownerKey || canonicalEntry.ownerKey;
+    owners[targetKey] = owners[targetKey]
+      ? mergeKnowledgeOwnerEntries(owners[targetKey], canonicalEntry)
       : canonicalEntry;
   }
   return {
@@ -458,6 +616,29 @@ export function resolveKnowledgeOwner(graph, input = {}) {
   }
 
   const aliases = uniqueStrings(input.aliases || [ownerName]);
+  const equivalentOwner = findEquivalentCharacterOwnerEntry(
+    graph?.knowledgeState?.owners || {},
+    {
+      ownerKey: input.ownerKey,
+      ownerType,
+      ownerName,
+      nodeId,
+      aliases,
+    },
+  );
+  if (equivalentOwner?.ownerKey) {
+    return {
+      ownerType,
+      ownerKey: equivalentOwner.ownerKey,
+      ownerName: equivalentOwner.ownerName || ownerName,
+      nodeId: equivalentOwner.nodeId || nodeId,
+      aliases: uniqueStrings([
+        ...aliases,
+        ...(equivalentOwner.aliases || []),
+        equivalentOwner.ownerName || "",
+      ]),
+    };
+  }
   const ownerKey = buildOwnerKey(ownerType, ownerName || input.ownerId, nodeId, graph);
   return {
     ownerType,
@@ -1337,7 +1518,7 @@ export function listKnowledgeOwners(graph) {
   for (const entry of Object.values(graph.knowledgeState.owners || {})) {
     const normalizedEntry = createDefaultKnowledgeOwnerState(entry);
     if (!normalizedEntry.ownerKey) continue;
-    owners.set(normalizedEntry.ownerKey, {
+    const displayEntry = {
       ownerKey: normalizedEntry.ownerKey,
       ownerType: normalizedEntry.ownerType,
       ownerName: normalizedEntry.ownerName,
@@ -1349,7 +1530,17 @@ export function listKnowledgeOwners(graph) {
       manualHiddenCount: uniqueIds(normalizedEntry.manualHiddenNodeIds).length,
       updatedAt: Number(normalizedEntry.updatedAt || 0),
       lastSource: normalizeString(normalizedEntry.lastSource),
-    });
+    };
+    const equivalentEntry =
+      owners.get(normalizedEntry.ownerKey) ||
+      findEquivalentCharacterOwnerEntry(owners, displayEntry);
+    const targetKey = equivalentEntry?.ownerKey || normalizedEntry.ownerKey;
+    owners.set(
+      targetKey,
+      owners.has(targetKey)
+        ? mergeListedKnowledgeOwnerEntry(owners.get(targetKey), displayEntry)
+        : displayEntry,
+    );
   }
 
   for (const characterNode of getCharacterNodes(graph)) {
@@ -1369,8 +1560,8 @@ export function listKnowledgeOwners(graph) {
       nodeId: characterNode?.id,
       userAliasContext,
     });
-    if (!resolvedOwner.ownerKey || owners.has(resolvedOwner.ownerKey)) continue;
-    owners.set(resolvedOwner.ownerKey, {
+    if (!resolvedOwner.ownerKey) continue;
+    const displayEntry = {
       ownerKey: resolvedOwner.ownerKey,
       ownerType: resolvedOwner.ownerType,
       ownerName: resolvedOwner.ownerName,
@@ -1382,7 +1573,17 @@ export function listKnowledgeOwners(graph) {
       manualHiddenCount: 0,
       updatedAt: 0,
       lastSource: "",
-    });
+    };
+    const equivalentEntry =
+      owners.get(resolvedOwner.ownerKey) ||
+      findEquivalentCharacterOwnerEntry(owners, displayEntry);
+    const targetKey = equivalentEntry?.ownerKey || resolvedOwner.ownerKey;
+    owners.set(
+      targetKey,
+      owners.has(targetKey)
+        ? mergeListedKnowledgeOwnerEntry(owners.get(targetKey), displayEntry)
+        : displayEntry,
+    );
   }
 
   return Array.from(owners.values()).sort((left, right) => {
