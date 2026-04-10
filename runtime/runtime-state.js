@@ -811,10 +811,22 @@ export function createBatchJournalEntry(
     journalVersion: BATCH_JOURNAL_VERSION,
     createdAt: Date.now(),
     processedRange: meta.processedRange || [-1, -1],
+    processedDialogueRange: Array.isArray(meta.processedDialogueRange)
+      ? meta.processedDialogueRange
+      : [-1, -1],
+    sourceChatIndexRange: Array.isArray(meta.sourceChatIndexRange)
+      ? meta.sourceChatIndexRange
+      : [-1, -1],
     createdNodeIds,
     createdEdgeIds,
     previousNodeSnapshots,
     previousEdgeSnapshots,
+    touchedNodeIds: normalizeStringArray(
+      meta.touchedNodeIds || [
+        ...createdNodeIds,
+        ...previousNodeSnapshots.map((node) => node?.id),
+      ],
+    ),
     stateBefore: buildJournalStateBefore(snapshotBefore, meta),
     vectorDelta: buildVectorDelta(snapshotBefore, snapshotAfter, meta),
     postProcessArtifacts: Array.isArray(meta.postProcessArtifacts)

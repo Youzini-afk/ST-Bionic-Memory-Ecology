@@ -9,13 +9,16 @@ import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getActiveTaskProfile } from "../prompting/prompt-profiles.js";
 import {
   appendSummaryEntry,
-  createSummaryEntry,
   createDefaultSummaryState,
   getActiveSummaryEntries,
   markSummaryEntriesFolded,
   normalizeGraphSummaryState,
 } from "../graph/summary-state.js";
-import { buildSummarySourceMessages } from "./chat-history.js";
+import {
+  buildDialogueFloorMap,
+  buildSummarySourceMessages,
+  getDialogueFloorForChatIndex,
+} from "./chat-history.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import {
   deriveStoryTimeSpanFromNodes,
@@ -128,6 +131,63 @@ function collectJournalTouchedNodeIds(journal = {}) {
   ]);
 }
 
+function intersectsRange(leftRange, rightRange) {
+  const [leftStart, leftEnd] = normalizeRange(leftRange);
+  const [rightStart, rightEnd] = normalizeRange(rightRange);
+  if (leftStart < 0 || leftEnd < 0 || rightStart < 0 || rightEnd < 0) {
+    return false;
+  }
+  return leftStart <= rightEnd && rightStart <= leftEnd;
+}
+
+function buildDialogueRangeFromMessageRange(chat = [], messageRange = [-1, -1]) {
+  const [messageStart, messageEnd] = normalizeRange(messageRange);
+  if (messageStart < 0 || messageEnd < 0) {
+    return [-1, -1];
+  }
+  const startFloor = getDialogueFloorForChatIndex(chat, messageStart);
+  const endFloor = getDialogueFloorForChatIndex(chat, messageEnd);
+  return [
+    Number.isFinite(Number(startFloor)) ? Number(startFloor) : -1,
+    Number.isFinite(Number(endFloor)) ? Number(endFloor) : -1,
+  ];
+}
+
+function getSummaryEntryDialogueRange(chat = [], entry = {}) {
+  const directRange = normalizeRange(entry?.dialogueRange);
+  if (directRange[0] >= 0 && directRange[1] >= 0) {
+    return directRange;
+  }
+  return buildDialogueRangeFromMessageRange(chat, entry?.messageRange);
+}
+
+function removeSummaryEntriesByIds(graph, entryIds = []) {
+  normalizeGraphSummaryState(graph);
+  const targetIds = new Set(uniqueIds(entryIds));
+  if (targetIds.size === 0) return 0;
+  const queue = [...targetIds];
+  while (queue.length > 0) {
+    const currentId = queue.shift();
+    for (const entry of graph.summaryState.entries || []) {
+      if (targetIds.has(entry.id)) continue;
+      const sourceSummaryIds = Array.isArray(entry?.sourceSummaryIds)
+        ? entry.sourceSummaryIds
+        : [];
+      if (!sourceSummaryIds.includes(currentId)) continue;
+      targetIds.add(entry.id);
+      queue.push(entry.id);
+    }
+  }
+
+  graph.summaryState.entries = (graph.summaryState.entries || []).filter(
+    (entry) => !targetIds.has(entry.id),
+  );
+  graph.summaryState.activeEntryIds = (graph.summaryState.activeEntryIds || []).filter(
+    (entryId) => !targetIds.has(entryId),
+  );
+  return targetIds.size;
+}
+
 function findJournalForExtractionCount(graph, extractionCountBefore) {
   const target = Number(extractionCountBefore);
   const journals = Array.isArray(graph?.batchJournal) ? graph.batchJournal : [];
@@ -143,12 +203,18 @@ function findJournalForExtractionCount(graph, extractionCountBefore) {
   return null;
 }
 
-function buildPseudoCurrentSlice(currentExtractionCount, currentRange, currentNodeIds = []) {
+function buildPseudoCurrentSlice(
+  currentExtractionCount,
+  currentRange,
+  currentNodeIds = [],
+  currentDialogueRange = null,
+) {
   return {
     id: `summary-pending-${currentExtractionCount}`,
     extractionCountBefore: Math.max(0, currentExtractionCount - 1),
     extractionCountAfter: currentExtractionCount,
     processedRange: normalizeRange(currentRange),
+    processedDialogueRange: normalizeRange(currentDialogueRange),
     touchedNodeIds: uniqueIds(currentNodeIds),
   };
 }
@@ -160,7 +226,11 @@ function buildSliceFromJournal(journal = {}) {
     extractionCountAfter:
       clampInt(journal?.stateBefore?.extractionCount, 0, 0, 999999) + 1,
     processedRange: normalizeRange(journal?.processedRange),
-    touchedNodeIds: collectJournalTouchedNodeIds(journal),
+    processedDialogueRange: normalizeRange(journal?.processedDialogueRange),
+    touchedNodeIds: uniqueIds([
+      ...(Array.isArray(journal?.touchedNodeIds) ? journal.touchedNodeIds : []),
+      ...collectJournalTouchedNodeIds(journal),
+    ]),
   };
 }
 
@@ -170,6 +240,7 @@ function collectSlicesForSummaryWindow(
     lastSummarizedExtractionCount = 0,
     currentExtractionCount = 0,
     currentRange = null,
+    currentDialogueRange = null,
     currentNodeIds = [],
     includeCurrentPending = false,
   } = {},
@@ -194,7 +265,12 @@ function collectSlicesForSummaryWindow(
   }
   if (hasCurrentPendingRange && safeCurrentCount > safeLastCount) {
     slices.push(
-      buildPseudoCurrentSlice(safeCurrentCount, currentRange, currentNodeIds),
+      buildPseudoCurrentSlice(
+        safeCurrentCount,
+        currentRange,
+        currentNodeIds,
+        currentDialogueRange,
+      ),
     );
   }
   return slices.sort(
@@ -348,6 +424,7 @@ export async function generateSmallSummary({
     lastSummarizedExtractionCount: summaryState.lastSummarizedExtractionCount,
     currentExtractionCount,
     currentRange,
+    currentDialogueRange: buildDialogueRangeFromMessageRange(chat, currentRange),
     currentNodeIds,
     includeCurrentPending: true,
   });
@@ -384,6 +461,7 @@ export async function generateSmallSummary({
       ? Number(sourceMessages[sourceMessages.length - 1].seq)
       : messageEnd,
   ];
+  const dialogueRange = buildDialogueRangeFromMessageRange(chat, messageRange);
   const sourceNodeIds = uniqueIds(
     slices.flatMap((slice) => Array.isArray(slice.touchedNodeIds) ? slice.touchedNodeIds : []),
   );
@@ -446,6 +524,7 @@ export async function generateSmallSummary({
     sourceTask: "synopsis",
     extractionRange: [firstSlice.extractionCountAfter, lastSlice.extractionCountAfter],
     messageRange,
+    dialogueRange,
     sourceBatchIds: uniqueIds(slices.map((slice) => slice.id)),
     sourceSummaryIds: [],
     sourceNodeIds,
@@ -466,6 +545,7 @@ export async function generateSmallSummary({
     sourceMessages,
     sourceNodeIds,
     messageRange,
+    dialogueRange,
   };
 }
 
@@ -574,6 +654,20 @@ export async function rollupSummaryFrontier({
       Math.min(...candidates.map((entry) => normalizeRange(entry.messageRange)[0])),
       Math.max(...candidates.map((entry) => normalizeRange(entry.messageRange)[1])),
     ];
+    const dialogueRange = [
+      Math.min(
+        ...candidates.map((entry) => {
+          const range = normalizeRange(entry?.dialogueRange, normalizeRange(entry?.messageRange));
+          return range[0];
+        }),
+      ),
+      Math.max(
+        ...candidates.map((entry) => {
+          const range = normalizeRange(entry?.dialogueRange, normalizeRange(entry?.messageRange));
+          return range[1];
+        }),
+      ),
+    ];
     const storyTimeSpan = deriveStoryTimeSpanFromNodes(
       graph,
       nodeHints.nodes,
@@ -592,6 +686,7 @@ export async function rollupSummaryFrontier({
       sourceTask: "summary_rollup",
       extractionRange,
       messageRange,
+      dialogueRange,
       sourceBatchIds: uniqueIds(
         candidates.flatMap((entry) =>
           Array.isArray(entry.sourceBatchIds) ? entry.sourceBatchIds : [],
@@ -684,14 +779,121 @@ function clearSummaryState(graph) {
   graph.summaryState = createDefaultSummaryState();
 }
 
+function getSliceDialogueRange(chat = [], slice = {}) {
+  const directRange = normalizeRange(slice?.processedDialogueRange);
+  if (directRange[0] >= 0 && directRange[1] >= 0) {
+    return directRange;
+  }
+  return buildDialogueRangeFromMessageRange(chat, slice?.processedRange);
+}
+
+function getSuffixRebuildStartFromDialogueRange(
+  graph,
+  chat = [],
+  targetDialogueRange = [-1, -1],
+) {
+  const slices = collectSlicesForSummaryWindow(graph, {
+    lastSummarizedExtractionCount: 0,
+    currentExtractionCount: clampInt(
+      graph?.historyState?.extractionCount,
+      0,
+      0,
+      999999,
+    ),
+    currentRange: null,
+    currentNodeIds: [],
+    includeCurrentPending: false,
+  });
+  const affectedSlices = slices.filter((slice) =>
+    intersectsRange(getSliceDialogueRange(chat, slice), targetDialogueRange),
+  );
+  if (affectedSlices.length === 0) {
+    return null;
+  }
+  return {
+    rebuildFromExtractionCount: Math.min(
+      ...affectedSlices.map((slice) =>
+        clampInt(slice.extractionCountBefore, 0, 0, 999999),
+      ),
+    ),
+    affectedSlices,
+  };
+}
+
+function resolveCurrentSummaryDialogueRange(graph, chat = []) {
+  const activeEntries = getActiveSummaryEntries(graph);
+  if (activeEntries.length > 0) {
+    return getSummaryEntryDialogueRange(
+      chat,
+      activeEntries[activeEntries.length - 1],
+    );
+  }
+  const slices = collectSlicesForSummaryWindow(graph, {
+    lastSummarizedExtractionCount: 0,
+    currentExtractionCount: clampInt(
+      graph?.historyState?.extractionCount,
+      0,
+      0,
+      999999,
+    ),
+    currentRange: null,
+    currentNodeIds: [],
+    includeCurrentPending: false,
+  });
+  if (slices.length === 0) {
+    return [-1, -1];
+  }
+  return getSliceDialogueRange(chat, slices[slices.length - 1]);
+}
+
+function trimSummaryStateForSuffixRebuild(graph, rebuildFromExtractionCount = 0) {
+  normalizeGraphSummaryState(graph);
+  const entries = Array.isArray(graph.summaryState?.entries)
+    ? graph.summaryState.entries
+    : [];
+  const removeIds = entries
+    .filter((entry) => {
+      const extractionRange = normalizeRange(entry?.extractionRange);
+      return extractionRange[1] >= rebuildFromExtractionCount;
+    })
+    .map((entry) => entry.id);
+  const removedCount = removeSummaryEntriesByIds(graph, removeIds);
+  const remainingEntries = Array.isArray(graph.summaryState?.entries)
+    ? graph.summaryState.entries
+    : [];
+  graph.summaryState.lastSummarizedExtractionCount =
+    remainingEntries.length > 0
+      ? Math.max(
+          0,
+          ...remainingEntries.map((entry) =>
+            normalizeRange(entry?.extractionRange)[1],
+          ),
+        )
+      : Math.max(0, rebuildFromExtractionCount);
+  graph.summaryState.lastSummarizedAssistantFloor =
+    remainingEntries.length > 0
+      ? Math.max(
+          -1,
+          ...remainingEntries.map((entry) =>
+            normalizeRange(entry?.messageRange)[1],
+          ),
+        )
+      : -1;
+  return {
+    removedCount,
+  };
+}
+
 export async function rebuildHierarchicalSummaryState({
   graph,
   chat = [],
   settings = {},
   signal,
+  mode = "current",
+  startFloor = null,
+  endFloor = null,
 } = {}) {
   normalizeGraphSummaryState(graph);
-  clearSummaryState(graph);
   const currentExtractionCount = clampInt(
     graph?.historyState?.extractionCount,
     0,
@@ -707,9 +909,63 @@ export async function rebuildHierarchicalSummaryState({
     };
   }
 
+  let targetDialogueRange = [-1, -1];
+  if (String(mode || "current") === "range") {
+    if (!Number.isFinite(Number(startFloor))) {
+      return {
+        rebuilt: false,
+        smallSummaryCount: 0,
+        rollupCount: 0,
+        reason: "范围重建必须填写起始楼层",
+      };
+    }
+    const latestDialogueFloor = buildDialogueFloorMap(chat).latestDialogueFloor;
+    targetDialogueRange = [
+      clampInt(startFloor, 0, 0, Math.max(0, latestDialogueFloor)),
+      Number.isFinite(Number(endFloor))
+        ? clampInt(endFloor, 0, 0, Math.max(0, latestDialogueFloor))
+        : Math.max(0, latestDialogueFloor),
+    ];
+    targetDialogueRange[1] = Math.max(
+      targetDialogueRange[0],
+      targetDialogueRange[1],
+    );
+  } else {
+    targetDialogueRange = resolveCurrentSummaryDialogueRange(graph, chat);
+  }
+
+  if (targetDialogueRange[0] < 0 || targetDialogueRange[1] < 0) {
+    return {
+      rebuilt: false,
+      smallSummaryCount: 0,
+      rollupCount: 0,
+      reason: "当前没有可重建的总结范围",
+    };
+  }
+
+  const rebuildWindow = getSuffixRebuildStartFromDialogueRange(
+    graph,
+    chat,
+    targetDialogueRange,
+  );
+  if (!rebuildWindow) {
+    return {
+      rebuilt: false,
+      smallSummaryCount: 0,
+      rollupCount: 0,
+      reason: "目标范围内没有命中的总结切片",
+      targetDialogueRange,
+    };
+  }
+
+  const trimmed = trimSummaryStateForSuffixRebuild(
+    graph,
+    rebuildWindow.rebuildFromExtractionCount,
+  );
+
   const threshold = clampInt(settings.smallSummaryEveryNExtractions, 3, 1, 100);
   const slices = collectSlicesForSummaryWindow(graph, {
-    lastSummarizedExtractionCount: 0,
+    lastSummarizedExtractionCount: rebuildWindow.rebuildFromExtractionCount,
     currentExtractionCount,
     currentRange: null,
     currentNodeIds: [],
@@ -770,6 +1026,10 @@ export async function rebuildHierarchicalSummaryState({
       });
       const summaryText = String(result?.summary || "").trim();
       if (summaryText) {
+        const entryMessageRange = [
+          Number(sourceMessages[0]?.seq ?? -1),
+          Number(sourceMessages[sourceMessages.length - 1]?.seq ?? -1),
+        ];
         const entry = appendSummaryEntry(graph, {
           level: 0,
           kind: "small",
@@ -777,10 +1037,8 @@ export async function rebuildHierarchicalSummaryState({
           text: summaryText,
           sourceTask: "synopsis",
           extractionRange: [firstSlice.extractionCountAfter, lastSlice.extractionCountAfter],
-          messageRange: [
-            Number(sourceMessages[0]?.seq ?? -1),
-            Number(sourceMessages[sourceMessages.length - 1]?.seq ?? -1),
-          ],
+          messageRange: entryMessageRange,
+          dialogueRange: buildDialogueRangeFromMessageRange(chat, entryMessageRange),
           sourceBatchIds: pendingSlices.map((item) => item.id),
           sourceSummaryIds: [],
           sourceNodeIds,
@@ -813,6 +1071,9 @@ export async function rebuildHierarchicalSummaryState({
     rebuilt: smallSummaryCount > 0 || rollupCount > 0,
     smallSummaryCount,
     rollupCount,
+    targetDialogueRange,
+    rebuildFromExtractionCount: rebuildWindow.rebuildFromExtractionCount,
+    removedEntryCount: trimmed.removedCount,
     reason:
       smallSummaryCount > 0 || rollupCount > 0
         ? ""

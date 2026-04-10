@@ -2,6 +2,10 @@
 // 通过 runtime 依赖注入，避免直接访问 index.js 模块级状态。
 
 import { debugLog } from "../runtime/debug-logging.js";
+import {
+  buildDialogueFloorMap,
+  normalizeDialogueFloorRange,
+} from "./chat-history.js";
 
 function toSafeFloor(value, fallback = null) {
   if (value == null || value === "") return fallback;
@@ -92,6 +96,122 @@ function cloneSerializable(value, fallback = null) {
   }
 }
 
+function resolveLatestAssistantDialogueFloor(chat = []) {
+  const map = buildDialogueFloorMap(chat);
+  const assistantDialogueFloors = Array.isArray(map.assistantDialogueFloors)
+    ? map.assistantDialogueFloors
+    : [];
+  return assistantDialogueFloors.length > 0
+    ? assistantDialogueFloors[assistantDialogueFloors.length - 1]
+    : null;
+}
+
+function resolveRerunDialogueTask(chat = [], options = {}) {
+  const hasStart = Number.isFinite(Number(options?.startFloor));
+  const hasEnd = Number.isFinite(Number(options?.endFloor));
+  if (!hasStart && !hasEnd) {
+    const latestAssistantDialogueFloor = resolveLatestAssistantDialogueFloor(chat);
+    if (!Number.isFinite(Number(latestAssistantDialogueFloor))) {
+      return {
+        valid: false,
+        reason: "当前没有可重提的 AI 回复",
+      };
+    }
+    const normalizedRange = normalizeDialogueFloorRange(
+      chat,
+      latestAssistantDialogueFloor,
+      latestAssistantDialogueFloor,
+    );
+    return {
+      ...normalizedRange,
+      mode: "current",
+      requestedStartFloor: null,
+      requestedEndFloor: null,
+    };
+  }
+
+  const normalizedRange = normalizeDialogueFloorRange(
+    chat,
+    options?.startFloor,
+    options?.endFloor,
+  );
+  return {
+    ...normalizedRange,
+    mode: "range",
+    requestedStartFloor: hasStart ? Number(options.startFloor) : null,
+    requestedEndFloor: hasEnd ? Number(options.endFloor) : null,
+  };
+}
+
+function resolveAssistantTargetRange(chat = [], dialogueRange = [-1, -1]) {
+  const map = buildDialogueFloorMap(chat);
+  const assistantDialogueFloors = Array.isArray(map.assistantDialogueFloors)
+    ? map.assistantDialogueFloors
+    : [];
+  const assistantChatIndices = Array.isArray(map.assistantChatIndices)
+    ? map.assistantChatIndices
+    : [];
+  const [startFloor, endFloor] = Array.isArray(dialogueRange)
+    ? dialogueRange
+    : [-1, -1];
+  const targeted = [];
+
+  for (let index = 0; index < assistantDialogueFloors.length; index += 1) {
+    const floor = Number(assistantDialogueFloors[index]);
+    const chatIndex = Number(assistantChatIndices[index]);
+    if (!Number.isFinite(floor) || !Number.isFinite(chatIndex)) continue;
+    if (floor < startFloor || floor > endFloor) continue;
+    targeted.push({
+      dialogueFloor: floor,
+      chatIndex,
+    });
+  }
+
+  return {
+    map,
+    targeted,
+    startAssistantChatIndex: targeted.length > 0 ? targeted[0].chatIndex : null,
+    endAssistantChatIndex:
+      targeted.length > 0 ? targeted[targeted.length - 1].chatIndex : null,
+    latestAssistantDialogueFloor:
+      assistantDialogueFloors.length > 0
+        ? assistantDialogueFloors[assistantDialogueFloors.length - 1]
+        : null,
+  };
+}
+
+function buildRerunFallbackInfo(chat = [], targetDialogueRange = [-1, -1]) {
+  const assistantRange = resolveAssistantTargetRange(chat, targetDialogueRange);
+  if (!assistantRange.targeted.length) {
+    return {
+      valid: false,
+      reason: "目标范围内没有可重提的 AI 回复",
+      fallbackToLatest: false,
+      ...assistantRange,
+    };
+  }
+
+  const latestTargetedDialogueFloor = Number(
+    assistantRange.targeted[assistantRange.targeted.length - 1]?.dialogueFloor,
+  );
+  const latestAssistantDialogueFloor = Number(
+    assistantRange.latestAssistantDialogueFloor,
+  );
+  const fallbackToLatest =
+    Number.isFinite(latestTargetedDialogueFloor) &&
+    Number.isFinite(latestAssistantDialogueFloor) &&
+    latestTargetedDialogueFloor < latestAssistantDialogueFloor;
+
+  return {
+    valid: true,
+    reason: fallbackToLatest
+      ? "当前图谱对中段范围重提的后缀保留证据不足，已退化为从起始楼层到最新重提"
+      : "",
+    fallbackToLatest,
+    ...assistantRange,
+  };
+}
+
 function buildCommittedBatchPersistSnapshot(
   runtime,
   {
@@ -119,6 +239,29 @@ function buildCommittedBatchPersistSnapshot(
   const range = Array.isArray(processedRange) ? processedRange : [null, null];
   const rangeStart = Number.isFinite(Number(range[0])) ? Number(range[0]) : null;
   const rangeEnd = Number.isFinite(Number(range[1])) ? Number(range[1]) : null;
+  const dialogueMap = buildDialogueFloorMap(chat);
+  const processedDialogueRange = [
+    Number.isFinite(Number(rangeStart))
+      ? dialogueMap.chatIndexToFloor[rangeStart]
+      : null,
+    Number.isFinite(Number(rangeEnd))
+      ? dialogueMap.chatIndexToFloor[rangeEnd]
+      : null,
+  ];
+  const sourceChatIndexRange = [
+    Number.isFinite(Number(rangeStart))
+      ? Math.max(
+          0,
+          Number(rangeStart) -
+            Math.max(
+              0,
+              Number(runtime?.getSettings?.()?.extractContextTurns) || 0,
+            ) *
+              2,
+        )
+      : null,
+    rangeEnd,
+  ];
   const afterSnapshot = runtime.cloneGraphSnapshot(graph);
   const effectiveArtifacts = Array.isArray(postProcessArtifacts)
     ? [...postProcessArtifacts]
@@ -149,6 +292,8 @@ function buildCommittedBatchPersistSnapshot(
     typeof runtime.createBatchJournalEntry === "function"
       ? runtime.createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
           processedRange: [rangeStart, rangeEnd],
+          processedDialogueRange,
+          sourceChatIndexRange,
           postProcessArtifacts: effectiveArtifacts,
           vectorHashesInserted: Array.isArray(vectorHashesInserted)
             ? vectorHashesInserted
@@ -686,13 +831,17 @@ export async function onManualExtractController(runtime, options = {}) {
     runtime.toastr.info("记忆提取正在进行中，请稍候");
     return;
   }
-  if (!runtime.ensureGraphMutationReady("手动提取")) return;
+  const taskLabel = String(options?.taskLabel || "手动提取").trim() || "手动提取";
+  const toastTitle = String(options?.toastTitle || `ST-BME ${taskLabel}`).trim() ||
+    `ST-BME ${taskLabel}`;
+  const lockedEndFloor = toSafeFloor(options?.lockedEndFloor, null);
+  if (!runtime.ensureGraphMutationReady(taskLabel)) return;
   const pendingPersistGate = await maybeRetryPendingPersistence(
     runtime,
     "manual-extraction-persist-retry",
   );
   const pendingPersistMessage = pendingPersistGate
-    ? formatPendingPersistenceGateMessage(runtime, "手动提取")
+    ? formatPendingPersistenceGateMessage(runtime, taskLabel)
     : "";
   if (pendingPersistMessage) {
     runtime.setLastExtractionStatus(
@@ -745,17 +894,22 @@ export async function onManualExtractController(runtime, options = {}) {
   const extractionController = runtime.beginStageAbortController("extraction");
   const extractionSignal = extractionController.signal;
   runtime.setLastExtractionStatus(
-    "手动提取中",
-    `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
+    `${taskLabel}中`,
+    lockedEndFloor != null
+      ? `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条 · 截止 chatIndex ${lockedEndFloor}`
+      : `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
     "running",
-
-    { syncRuntime: true, toastKind: "info", toastTitle: "ST-BME 手动提取" },
+    { syncRuntime: true, toastKind: "info", toastTitle },
   );
   try {
     while (true) {
       const pendingTurns = runtime
         .getAssistantTurns(chat)
-        .filter((i) => i > runtime.getLastProcessedAssistantFloor());
+        .filter((i) => {
+          if (i <= runtime.getLastProcessedAssistantFloor()) return false;
+          if (lockedEndFloor != null && i > lockedEndFloor) return false;
+          return true;
+        });
       if (pendingTurns.length === 0) break;
 
       const batchAssistantTurns = pendingTurns.slice(0, extractEvery);
@@ -802,7 +956,9 @@ export async function onManualExtractController(runtime, options = {}) {
     if (totals.batches === 0) {
       runtime.setLastExtractionStatus(
         "无待提取内容",
-        "没有新的 assistant 回复需要处理",
+        lockedEndFloor != null
+          ? "指定范围内没有新的 assistant 回复需要处理"
+          : "没有新的 assistant 回复需要处理",
         "info",
         {
           syncRuntime: true,
@@ -818,13 +974,13 @@ export async function onManualExtractController(runtime, options = {}) {
         `提取完成但持久化待确认：${pendingAfterRun.reason || pendingAfterRun.outcome || "unknown"}`,
       );
       runtime.setLastExtractionStatus(
-        "手动提取完成，持久化待确认",
+        `${taskLabel}完成，持久化待确认`,
         `${totals.batches} 批 · 新建 ${totals.newNodes} · 更新 ${totals.updatedNodes} · 新边 ${totals.newEdges}${pendingAfterRun.reason ? ` · ${pendingAfterRun.reason}` : ""}`,
         "warning",
         {
           syncRuntime: true,
           toastKind: "",
-          toastTitle: "ST-BME 手动提取",
+          toastTitle,
         },
       );
     } else {
@@ -832,13 +988,13 @@ export async function onManualExtractController(runtime, options = {}) {
         `提取完成：${totals.batches} 批，新建 ${totals.newNodes}，更新 ${totals.updatedNodes}，新边 ${totals.newEdges}`,
       );
       runtime.setLastExtractionStatus(
-        "手动提取完成",
+        `${taskLabel}完成`,
         `${totals.batches} 批 · 新建 ${totals.newNodes} · 更新 ${totals.updatedNodes} · 新边 ${totals.newEdges}`,
         "success",
         {
           syncRuntime: true,
           toastKind: "success",
-          toastTitle: "ST-BME 手动提取",
+          toastTitle,
         },
       );
     }
@@ -850,7 +1006,7 @@ export async function onManualExtractController(runtime, options = {}) {
   } catch (e) {
     if (runtime.isAbortError(e)) {
       runtime.setLastExtractionStatus(
-        "手动提取已终止",
+        `${taskLabel}已终止`,
         e?.message || "已手动终止当前提取",
         "warning",
         {
@@ -860,17 +1016,127 @@ export async function onManualExtractController(runtime, options = {}) {
       return;
     }
     runtime.console.error("[ST-BME] 手动提取失败:", e);
-    runtime.setLastExtractionStatus("手动提取失败", e?.message || String(e), "error", {
+    runtime.setLastExtractionStatus(`${taskLabel}失败`, e?.message || String(e), "error", {
       syncRuntime: true,
       toastKind: "",
-      toastTitle: "ST-BME 手动提取",
+      toastTitle,
     });
-    runtime.toastr.error(`手动提取失败: ${e.message || e}`);
+    runtime.toastr.error(`${taskLabel}失败: ${e.message || e}`);
   } finally {
     runtime.finishStageAbortController("extraction", extractionController);
     runtime.setIsExtracting(false);
     runtime.refreshPanelLiveState();
   }
+}
+
+export async function onExtractionTaskController(runtime, options = {}) {
+  const requestedMode = String(options?.mode || "pending").trim().toLowerCase();
+  const context = runtime.getContext?.() || {};
+  const chat = Array.isArray(context?.chat) ? context.chat : [];
+  const runManualExtract = async (manualOptions = {}) => {
+    if (typeof runtime?.onManualExtract === "function") {
+      return await runtime.onManualExtract(manualOptions);
+    }
+    return await onManualExtractController(runtime, manualOptions);
+  };
+
+  if (requestedMode === "pending") {
+    return await runManualExtract({
+      ...options,
+      taskLabel: "提取未处理",
+      toastTitle: "ST-BME 重新提取",
+    });
+  }
+
+  const rerunTask = resolveRerunDialogueTask(chat, options);
+  if (!rerunTask.valid) {
+    runtime.toastr?.info?.(rerunTask.reason || "当前没有可重提的范围");
+    return {
+      success: false,
+      rerunPerformed: false,
+      fallbackToLatest: false,
+      requestedRange: [null, null],
+      effectiveDialogueRange: [null, null],
+      reason: rerunTask.reason || "invalid-rerun-range",
+    };
+  }
+
+  const fallbackInfo = buildRerunFallbackInfo(chat, [
+    rerunTask.startFloor,
+    rerunTask.endFloor,
+  ]);
+  if (!fallbackInfo.valid) {
+    runtime.toastr?.info?.(fallbackInfo.reason || "目标范围内没有可重提的 AI 回复");
+    return {
+      success: false,
+      rerunPerformed: false,
+      fallbackToLatest: false,
+      requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
+      effectiveDialogueRange: [rerunTask.startFloor, rerunTask.endFloor],
+      reason: fallbackInfo.reason || "no-assistant-in-range",
+    };
+  }
+
+  const effectiveLockedEndFloor = fallbackInfo.fallbackToLatest
+    ? null
+    : fallbackInfo.endAssistantChatIndex;
+  const effectiveDialogueRange = [
+    rerunTask.startFloor,
+    fallbackInfo.fallbackToLatest
+      ? Number.isFinite(Number(fallbackInfo.latestAssistantDialogueFloor))
+        ? Number(fallbackInfo.latestAssistantDialogueFloor)
+        : rerunTask.endFloor
+      : rerunTask.endFloor,
+  ];
+
+  runtime.setRuntimeStatus(
+    "重新提取中",
+    fallbackInfo.fallbackToLatest
+      ? `范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor} 命中旧批次，但当前将退化为从 ${effectiveDialogueRange[0]} 到最新重提`
+      : `准备重提范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor}`,
+    fallbackInfo.fallbackToLatest ? "warning" : "running",
+  );
+
+  const rollbackResult = await runtime.rollbackGraphForReroll(
+    fallbackInfo.startAssistantChatIndex,
+    context,
+  );
+  if (!rollbackResult?.success) {
+    return {
+      ...rollbackResult,
+      rerunPerformed: false,
+      fallbackToLatest: fallbackInfo.fallbackToLatest,
+      requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
+      effectiveDialogueRange,
+    };
+  }
+
+  if (fallbackInfo.reason) {
+    runtime.toastr?.warning?.(fallbackInfo.reason, "ST-BME 重新提取", {
+      timeOut: 3500,
+    });
+  }
+
+  await runManualExtract({
+    drainAll: true,
+    lockedEndFloor: effectiveLockedEndFloor,
+    taskLabel: "重新提取",
+    toastTitle: "ST-BME 重新提取",
+  });
+
+  return {
+    success: true,
+    rerunPerformed: true,
+    fallbackToLatest: fallbackInfo.fallbackToLatest,
+    requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
+    effectiveDialogueRange,
+    effectiveAssistantChatRange: [
+      fallbackInfo.startAssistantChatIndex,
+      effectiveLockedEndFloor,
+    ],
+    rollbackResult,
+    reason: fallbackInfo.reason || "",
+  };
 }
 
 export async function onRerollController(runtime, { fromFloor } = {}) {

@@ -78,6 +78,7 @@ import {
 } from "./host/event-binding.js";
 import {
   executeExtractionBatchController,
+  onExtractionTaskController,
   onManualExtractController,
   onRerollController,
   resolveAutoExtractionPlanController,
@@ -12762,6 +12763,47 @@ async function onManualExtract(options = {}) {
   );
 }
 
+async function onExtractionTask(options = {}) {
+  return await onExtractionTaskController(
+    {
+      beginStageAbortController,
+      clampInt,
+      console,
+      createEmptyGraph,
+      ensureGraphMutationReady,
+      executeExtractionBatch,
+      finishStageAbortController,
+      getAssistantTurns,
+      getContext,
+      getCurrentChatId,
+      getCurrentGraph: () => currentGraph,
+      getGraphMutationBlockReason,
+      getGraphPersistenceState: () => graphPersistenceState,
+      getIsExtracting: () => isExtracting,
+      getLastExtractionStatusLevel: () => lastExtractionStatus?.level || "idle",
+      getLastProcessedAssistantFloor,
+      getSettings,
+      isAbortError,
+      normalizeGraphRuntimeState,
+      onManualExtract,
+      recoverHistoryIfNeeded,
+      refreshPanelLiveState,
+      retryPendingGraphPersist,
+      rollbackGraphForReroll,
+      setCurrentGraph: (graph) => {
+        currentGraph = graph;
+      },
+      setIsExtracting: (value) => {
+        isExtracting = value;
+      },
+      setLastExtractionStatus,
+      setRuntimeStatus,
+      toastr,
+    },
+    options,
+  );
+}
+
 async function onReroll({ fromFloor } = {}) {
   return await onRerollController(
     {
@@ -12830,7 +12872,7 @@ async function onManualSummaryRollup() {
   });
 }
 
-async function onRebuildSummaryState() {
+async function onRebuildSummaryState(options = {}) {
   return await onRebuildSummaryStateController({
     ensureGraphMutationReady,
     getContext,
@@ -12841,7 +12883,7 @@ async function onRebuildSummaryState() {
     saveGraphToChat,
     setRuntimeStatus,
     toastr,
-  });
+  }, options);
 }
 
 async function onClearSummaryState() {
@@ -13181,6 +13223,7 @@ async function onRollbackLastRestore() {
         syncGraphLoadFromLiveContext({
           source: "panel-open-sync",
         }),
+      extractTask: onExtractionTask,
       extract: onManualExtract,
       compress: onManualCompress,
       sleep: onManualSleep,

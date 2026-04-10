@@ -771,11 +771,21 @@ export async function onManualSummaryRollupController(runtime) {
   }
 }
 
-export async function onRebuildSummaryStateController(runtime) {
+export async function onRebuildSummaryStateController(runtime, options = {}) {
   const graph = runtime.getCurrentGraph();
   if (!graph) return;
   if (!runtime.ensureGraphMutationReady("重建总结状态")) return;
-  updateManualActionUiState(runtime, "重建总结中", "正在按现有提取批次重建总结链", "running");
+  const hasStart = Number.isFinite(Number(options?.startFloor));
+  const hasEnd = Number.isFinite(Number(options?.endFloor));
+  const mode = hasStart || hasEnd ? "range" : "current";
+  updateManualActionUiState(
+    runtime,
+    "重建总结中",
+    mode === "range"
+      ? `正在按范围 ${hasStart ? Number(options.startFloor) : "?"} ~ ${hasEnd ? Number(options.endFloor) : "最新"} 重建总结链`
+      : "正在重建当前总结相关范围",
+    "running",
+  );
 
   try {
     const chat = runtime.getContext?.()?.chat;
@@ -783,6 +793,9 @@ export async function onRebuildSummaryStateController(runtime) {
       graph,
       chat: Array.isArray(chat) ? chat : [],
       settings: runtime.getSettings(),
+      mode,
+      startFloor: hasStart ? Number(options.startFloor) : null,
+      endFloor: hasEnd ? Number(options.endFloor) : null,
     });
     runtime.saveGraphToChat?.({ reason: "rebuild-summary-state" });
     runtime.refreshPanelLiveState?.();

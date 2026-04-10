@@ -324,8 +324,8 @@
                 </div>
                 <div class="bme-action-grid">
                   <button class="bme-action-btn" id="bme-act-extract" type="button">
-                    <i class="fa-solid fa-download"></i>
-                    <span>手动提取</span>
+                    <i class="fa-solid fa-rotate"></i>
+                    <span>重新提取</span>
                   </button>
                   <button class="bme-action-btn" id="bme-act-compress" type="button">
                     <i class="fa-solid fa-compress"></i>
@@ -359,25 +359,71 @@
                     <i class="fa-solid fa-rotate-left"></i>
                     <span>撤销最近维护</span>
                   </button>
-                  <button class="bme-action-btn" id="bme-act-reroll" type="button">
-                    <i class="fa-solid fa-rotate"></i>
-                    <span>重新提取</span>
-                  </button>
                 </div>
                 <div class="bme-action-group-extra">
                   <div class="bme-config-help">
-                    重新提取：回滚指定楼层及之后的提取结果并重做。留空则只重做最新 AI 楼。
+                    重新提取：按总楼层计数（用户+AI，首条 greeting 为 0）。真正 system 不计入，且不受隐藏助手影响。
                   </div>
-                  <div class="bme-config-row">
-                    <label for="bme-reroll-floor">起始楼层</label>
-                    <input
-                      id="bme-reroll-floor"
-                      class="bme-config-input"
-                      type="number"
-                      min="0"
-                      max="999999"
-                      placeholder="留空 = 最新 AI 楼"
-                    />
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-extract-mode">提取模式</label>
+                      <select id="bme-extract-mode" class="bme-config-select">
+                        <option value="pending">提取未处理</option>
+                        <option value="rerun">重新提取范围</option>
+                      </select>
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-extract-start-floor">起始楼层</label>
+                      <input
+                        id="bme-extract-start-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 当前重提"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-extract-end-floor">终止楼层</label>
+                      <input
+                        id="bme-extract-end-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 到最新"
+                      />
+                    </div>
+                  </div>
+                  <div class="bme-config-help" style="margin-top:8px">
+                    重新提取范围：起始/终止都留空 = 当前重提；只填起始 = 从起始到最新。
+                  </div>
+                  <div class="bme-config-help" style="margin-top:12px">
+                    重建总结状态：默认按当前总结相关范围重建；填写楼层后按范围重建。
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-summary-rebuild-start-floor">总结起始楼层</label>
+                      <input
+                        id="bme-summary-rebuild-start-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 当前重建"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-summary-rebuild-end-floor">总结终止楼层</label>
+                      <input
+                        id="bme-summary-rebuild-end-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 到最新"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1397,7 +1443,7 @@
                         <span>自动提取晚一楼</span>
                       </label>
                       <div class="bme-config-help">
-                        开启后，最新 AI 楼先不自动提取，要等下一条 AI 楼出现后，才提取前一批内容。手动提取和重 Roll 不受影响。
+                        开启后，最新 AI 楼先不自动提取，要等下一条 AI 楼出现后，才提取前一批内容。提取未处理和范围重提不受影响。
                       </div>
                     </div>
                   </div>

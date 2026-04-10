@@ -73,6 +73,7 @@ export function normalizeSummaryEntry(entry = {}, options = {}) {
     sourceTask: String(source.sourceTask || "synopsis").trim() || "synopsis",
     extractionRange: normalizeNumberRange(source.extractionRange),
     messageRange: normalizeNumberRange(source.messageRange),
+    dialogueRange: normalizeNumberRange(source.dialogueRange),
     sourceBatchIds: normalizeStringArray(source.sourceBatchIds),
     sourceSummaryIds: normalizeStringArray(source.sourceSummaryIds),
     sourceNodeIds: normalizeStringArray(source.sourceNodeIds),
