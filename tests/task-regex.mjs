@@ -175,6 +175,7 @@ try {
     "../prompting/task-regex.js"
   );
   const {
+    createDefaultGlobalTaskRegex,
     createDefaultTaskProfiles,
     isTaskRegexStageEnabled,
     normalizeTaskProfile,
@@ -932,6 +933,93 @@ try {
     outputGuardDebug.entries[0].appliedRules.map((item) => item.id),
     ["prompt-output"],
   );
+
+  const defaultGlobalRegex = createDefaultGlobalTaskRegex();
+  assert.deepEqual(
+    defaultGlobalRegex.localRules.map((rule) => rule.id),
+    [
+      "default-contamination-thinking-blocks",
+      "default-contamination-choice-blocks",
+      "default-contamination-updatevariable-tags",
+      "default-contamination-status-current-variable-tags",
+      "default-contamination-status-placeholder-tags",
+    ],
+  );
+
+  const globalDefaultDebug = { entries: [] };
+  const globalDefaultResult = applyTaskRegex(
+    {
+      taskProfiles: createDefaultTaskProfiles(),
+      globalTaskRegex: createDefaultGlobalTaskRegex(),
+    },
+    "extract",
+    "input.recentMessages",
+    [
+      "前缀",
+      "<thinking>内部思维</thinking>",
+      "<choice>1. 选项</choice>",
+      "<UpdateVariable>hp=1</UpdateVariable>",
+      "<status_current_variable>hp=1</status_current_variable>",
+      "<StatusPlaceHolderImpl/>",
+      "尾巴",
+    ].join("\n"),
+    globalDefaultDebug,
+    "system",
+  );
+  assert.match(globalDefaultResult, /前缀/);
+  assert.match(globalDefaultResult, /尾巴/);
+  assert.doesNotMatch(
+    globalDefaultResult,
+    /<choice|<thinking|<updatevariable|<status_current_variable|<StatusPlaceHolderImpl/i,
+  );
+  assert.deepEqual(
+    globalDefaultDebug.entries[0].appliedRules.map((item) => item.id),
+    [
+      "default-contamination-thinking-blocks",
+      "default-contamination-choice-blocks",
+      "default-contamination-updatevariable-tags",
+      "default-contamination-status-current-variable-tags",
+      "default-contamination-status-placeholder-tags",
+    ],
+  );
+  assert.equal(globalDefaultDebug.entries[0].sourceCount.local, 5);
+
+  const explicitEmptyGlobalDebug = { entries: [] };
+  const explicitEmptyGlobalResult = applyTaskRegex(
+    {
+      taskProfiles: createDefaultTaskProfiles(),
+      globalTaskRegex: {
+        enabled: true,
+        inheritStRegex: false,
+        sources: {
+          global: false,
+          preset: false,
+          character: false,
+        },
+        stages: {
+          "input.userMessage": true,
+          "input.recentMessages": true,
+          "input.candidateText": true,
+          "input.finalPrompt": false,
+          "output.rawResponse": false,
+          "output.beforeParse": false,
+          output: false,
+        },
+        localRules: [],
+      },
+    },
+    "extract",
+    "input.recentMessages",
+    "<choice>保留</choice><thinking>保留</thinking>",
+    explicitEmptyGlobalDebug,
+    "system",
+  );
+  assert.equal(
+    explicitEmptyGlobalResult,
+    "<choice>保留</choice><thinking>保留</thinking>",
+  );
+  assert.deepEqual(explicitEmptyGlobalDebug.entries[0].appliedRules, []);
+  assert.equal(explicitEmptyGlobalDebug.entries[0].sourceCount.local, 0);
 
   console.log("task-regex tests passed");
 } finally {

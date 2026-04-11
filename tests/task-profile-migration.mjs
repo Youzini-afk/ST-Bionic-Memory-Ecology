@@ -427,10 +427,17 @@ legacyRegexSettings.taskProfiles.extract.profiles.push(
 );
 const migratedLegacyRegex = migratePerTaskRegexToGlobal(legacyRegexSettings);
 assert.equal(migratedLegacyRegex.changed, true);
-assert.equal(migratedLegacyRegex.settings.globalTaskRegex.enabled, false);
+assert.equal(migratedLegacyRegex.settings.globalTaskRegex.enabled, true);
 assert.deepEqual(
   migratedLegacyRegex.settings.globalTaskRegex.localRules.map((rule) => rule.script_name),
-  ["隐藏规则"],
+  [
+    "默认清理：thinking/analysis/reasoning",
+    "默认清理：choice",
+    "默认清理：UpdateVariable",
+    "默认清理：status_current_variable",
+    "默认清理：StatusPlaceHolderImpl",
+    "隐藏规则",
+  ],
 );
 assert.deepEqual(
   migratedLegacyRegex.settings.taskProfiles.extract.profiles.find(
