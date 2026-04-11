@@ -14,6 +14,7 @@ assert.equal(defaultSettings.recallEnableGraphDiffusion, true);
 assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
 assert.equal(defaultSettings.recallLlmContextMessages, 4);
+assert.equal(defaultSettings.recallUseAuthoritativeGenerationInput, false);
 assert.equal(defaultSettings.recallEnableMultiIntent, true);
 assert.equal(defaultSettings.recallMultiIntentMaxSegments, 4);
 assert.equal(defaultSettings.recallEnableContextQueryBlend, true);
@@ -69,6 +70,17 @@ assert.equal(defaultSettings.taskProfilesVersion, 3);
 assert.ok(defaultSettings.taskProfiles);
 assert.ok(defaultSettings.taskProfiles.extract);
 assert.ok(defaultSettings.taskProfiles.recall);
+assert.ok(defaultSettings.globalTaskRegex);
+assert.deepEqual(
+  defaultSettings.globalTaskRegex.localRules.map((rule) => rule.id),
+  [
+    "default-contamination-thinking-blocks",
+    "default-contamination-choice-blocks",
+    "default-contamination-updatevariable-tags",
+    "default-contamination-status-current-variable-tags",
+    "default-contamination-status-placeholder-tags",
+  ],
+);
 
 const migratedSettings = mergePersistedSettings({
   maintenanceAutoMinNewNodes: 7,

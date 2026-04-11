@@ -539,6 +539,9 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
         context.currentGraph.historyState.processedMessageHashesNeedRefresh;
     },
     restoreRuntimeUiState() {},
+    async runWithRestoreLock(_source, _reason, task) {
+      return await task();
+    },
     onRebuildController,
     result: null,
   };

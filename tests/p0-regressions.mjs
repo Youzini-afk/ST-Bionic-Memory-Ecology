@@ -349,7 +349,18 @@ function createHistoryRecoveryHarness() {
       saveGraphToChatCalls: 0,
       refreshPanelCalls: 0,
       notices: [],
+      toastCalls: {
+        success: [],
+        warning: [],
+        error: [],
+      },
       embeddingConfig: { mode: "backend" },
+      isRestoreLockActive() {
+        return false;
+      },
+      enterRestoreLock() {},
+      leaveRestoreLock() {},
+      async maybeResumePendingAutoExtraction() {},
       ensureCurrentGraphRuntimeState() {
         return context.currentGraph;
       },
@@ -505,14 +516,52 @@ function createHistoryRecoveryHarness() {
         context.refreshPanelCalls += 1;
       },
       toastr: {
-        success() {},
-        warning() {},
-        error() {},
+        success(...args) {
+          context.toastCalls.success.push(args);
+        },
+        warning(...args) {
+          context.toastCalls.warning.push(args);
+        },
+        error(...args) {
+          context.toastCalls.error.push(args);
+        },
       },
     };
     vm.createContext(context);
     vm.runInContext(
       `${snippet}\nresult = { recoverFromHistoryMutation: recoverHistoryIfNeeded };`,
+      context,
+      { filename: indexPath },
+    );
+    return context;
+  });
+}
+
+function createHistoryNotificationHarness() {
+  return fs.readFile(indexPath, "utf8").then((source) => {
+    const start = source.indexOf("function notifyHistoryDirty(dirtyFrom, reason) {");
+    const end = source.indexOf("function clearPendingHistoryMutationChecks() {");
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error("无法从 index.js 提取 history notify 定义");
+    }
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const context = {
+      console,
+      result: null,
+      notices: [],
+      warningToasts: [],
+      updateStageNotice(...args) {
+        context.notices.push(args);
+      },
+      toastr: {
+        warning(...args) {
+          context.warningToasts.push(args);
+        },
+      },
+    };
+    vm.createContext(context);
+    vm.runInContext(
+      `${snippet}\nresult = { notifyHistoryDirty };`,
       context,
       { filename: indexPath },
     );
@@ -4238,6 +4287,65 @@ async function testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload() {
   );
 }
 
+async function testGenerationRecallDeferredRewriteMutatesFinalMesSendAuthoritativeUserInput() {
+  const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+  harness.extension_settings[MODULE_NAME] = {
+    recallUseAuthoritativeGenerationInput: true,
+  };
+  harness.chat = [{ is_user: true, mes: "楼层稳定输入" }];
+  harness.pendingRecallSendIntent = {
+    text: "发送前真实输入",
+    hash: "hash-deferred-authoritative-rewrite",
+    at: Date.now(),
+    source: "dom-intent",
+  };
+  harness.result.pendingRecallSendIntent = harness.pendingRecallSendIntent;
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  const promptData = {
+    finalMesSend: [
+      {
+        injected: false,
+        message: "楼层稳定输入",
+        extensionPrompts: [],
+      },
+    ],
+  };
+
+  const resolution = await harness.result.onBeforeCombinePrompts(promptData);
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATION_AFTER_COMMANDS",
+  );
+  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  assert.ok(transaction);
+  assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
+  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "楼层稳定输入");
+  assert.equal(
+    harness.runRecallCalls[0].authoritativeInputUsed,
+    true,
+  );
+  assert.equal(harness.runRecallCalls[0].boundUserFloorText, "楼层稳定输入");
+  assert.equal(promptData.finalMesSend[0].message, "发送前真实输入");
+  assert.equal(resolution.applicationMode, "rewrite");
+  assert.equal(resolution.authoritativeInputUsed, true);
+  assert.equal(resolution.boundUserFloorText, "楼层稳定输入");
+  assert.equal(resolution.inputRewrite.applied, true);
+  assert.equal(resolution.inputRewrite.changed, true);
+  assert.equal(resolution.inputRewrite.field, "finalMesSend[0].message");
+  assert.match(
+    promptData.finalMesSend[0].extensionPrompts.join("\n"),
+    /注入:发送前真实输入/,
+  );
+  assert.equal(
+    harness.recordedInjectionSnapshots.at(-1)?.inputRewrite?.applied,
+    true,
+  );
+}
+
 async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "旧的 chat tail" }];
@@ -4459,6 +4567,278 @@ async function testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphR
   );
 }
 
+async function testHistoryGenerationReusesPersistedRecallForStableUserFloor() {
+  const { runRecallController } = await import("../retrieval/recall-controller.js");
+  const chat = [
+    {
+      is_user: true,
+      mes: "稳定 user 楼层",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "persisted-memory",
+          selectedNodeIds: ["node-persisted-1"],
+          recallInput: "发送前权威输入",
+          recallSource: "send-intent",
+          hookName: "GENERATION_AFTER_COMMANDS",
+          tokenEstimate: 12,
+          manuallyEdited: false,
+          authoritativeInputUsed: true,
+          boundUserFloorText: "稳定 user 楼层",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+    { is_user: false, mes: "assistant-tail" },
+  ];
+  let retrieveCalls = 0;
+  let metadataSaveCalls = 0;
+  let recallUiRefreshCalls = 0;
+  const applyCalls = [];
+
+  const runtime = {
+    getIsRecalling: () => false,
+    abortRecallStageWithReason() {},
+    waitForActiveRecallToSettle: async () => ({ settled: true }),
+    getCurrentGraph: () => ({ nodes: [], edges: [] }),
+    getSettings: () => ({
+      enabled: true,
+      recallEnabled: true,
+      recallLlmContextMessages: 4,
+    }),
+    isGraphReadable: () => true,
+    isGraphReadableForRecall: () => true,
+    getGraphMutationBlockReason: () => "",
+    setLastRecallStatus() {},
+    isGraphMetadataWriteAllowed: () => false,
+    recoverHistoryIfNeeded: async () => true,
+    getContext: () => ({ chat }),
+    nextRecallRunSequence: () => 1,
+    setIsRecalling() {},
+    beginStageAbortController: () => ({
+      signal: { aborted: false, addEventListener() {} },
+      abort() {},
+    }),
+    createAbortError: (message) => new Error(message),
+    ensureVectorReadyIfNeeded: async () => {},
+    clampInt,
+    resolveRecallInput: () => ({
+      userMessage: "稳定 user 楼层",
+      recentMessages: ["[user]: 稳定 user 楼层"],
+      source: "chat-last-user",
+      sourceLabel: "历史最后用户楼层",
+      generationType: "history",
+      targetUserMessageIndex: 0,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "稳定 user 楼层",
+      sourceCandidates: [],
+    }),
+    console,
+    getRecallHookLabel: () => "历史生成",
+    retrieve: async () => {
+      retrieveCalls += 1;
+      return {
+        stats: { recallCount: 1, coreCount: 1 },
+        selectedNodeIds: ["fresh-node"],
+        meta: {
+          retrieval: {
+            vectorHits: 1,
+            diffusionHits: 0,
+            llm: { status: "disabled", candidatePool: 0 },
+          },
+        },
+      };
+    },
+    getEmbeddingConfig: () => null,
+    getSchema: () => schema,
+    buildRecallRetrieveOptions: () => ({}),
+    applyRecallInjection: (_settings, recallInput, _recentMessages, result) => {
+      applyCalls.push({ recallInput: { ...recallInput }, result: { ...result } });
+      return {
+        injectionText: String(result?.injectionText || ""),
+        retrievalMeta: result?.meta?.retrieval || {},
+        llmMeta: result?.meta?.retrieval?.llm || {},
+        transport: {
+          applied: true,
+          source: "module-injection",
+          mode: "module-injection",
+        },
+        deliveryMode: String(recallInput?.deliveryMode || "immediate") || "immediate",
+      };
+    },
+    createRecallInputRecord,
+    createRecallRunResult,
+    isAbortError: () => false,
+    toastr: {
+      warning() {},
+      error() {},
+    },
+    finishStageAbortController() {},
+    getActiveRecallPromise: () => null,
+    setActiveRecallPromise() {},
+    setPendingRecallSendIntent() {},
+    refreshPanelLiveState() {},
+    readPersistedRecallFromUserMessage,
+    bumpPersistedRecallGenerationCount,
+    triggerChatMetadataSave() {
+      metadataSaveCalls += 1;
+    },
+    schedulePersistedRecallMessageUiRefresh() {
+      recallUiRefreshCalls += 1;
+    },
+  };
+
+  const result = await runRecallController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    deliveryMode: "immediate",
+  });
+
+  assert.equal(retrieveCalls, 0);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "persisted-user-floor-reused");
+  assert.equal(result.injectionText, "persisted-memory");
+  assert.equal(applyCalls.length, 1);
+  assert.equal(applyCalls[0].recallInput.source, "persisted-user-floor");
+  assert.equal(applyCalls[0].recallInput.authoritativeInputUsed, true);
+  assert.equal(applyCalls[0].recallInput.boundUserFloorText, "稳定 user 楼层");
+  assert.equal(
+    readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
+    1,
+  );
+  assert.equal(metadataSaveCalls, 1);
+  assert.equal(recallUiRefreshCalls, 1);
+}
+
+async function testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit() {
+  const { runRecallController } = await import("../retrieval/recall-controller.js");
+  const chat = [
+    {
+      is_user: true,
+      mes: "已编辑的新 user 楼层",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "stale-persisted-memory",
+          selectedNodeIds: ["node-stale-1"],
+          recallInput: "旧 user 楼层",
+          recallSource: "chat-last-user",
+          hookName: "GENERATION_AFTER_COMMANDS",
+          tokenEstimate: 12,
+          manuallyEdited: false,
+          authoritativeInputUsed: false,
+          boundUserFloorText: "旧 user 楼层",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+    { is_user: false, mes: "assistant-tail" },
+  ];
+  let retrieveCalls = 0;
+
+  const runtime = {
+    getIsRecalling: () => false,
+    abortRecallStageWithReason() {},
+    waitForActiveRecallToSettle: async () => ({ settled: true }),
+    getCurrentGraph: () => ({ nodes: [], edges: [] }),
+    getSettings: () => ({
+      enabled: true,
+      recallEnabled: true,
+      recallLlmContextMessages: 4,
+    }),
+    isGraphReadable: () => true,
+    isGraphReadableForRecall: () => true,
+    getGraphMutationBlockReason: () => "",
+    setLastRecallStatus() {},
+    isGraphMetadataWriteAllowed: () => false,
+    recoverHistoryIfNeeded: async () => true,
+    getContext: () => ({ chat }),
+    nextRecallRunSequence: () => 1,
+    setIsRecalling() {},
+    beginStageAbortController: () => ({
+      signal: { aborted: false, addEventListener() {} },
+      abort() {},
+    }),
+    createAbortError: (message) => new Error(message),
+    ensureVectorReadyIfNeeded: async () => {},
+    clampInt,
+    resolveRecallInput: () => ({
+      userMessage: "已编辑的新 user 楼层",
+      recentMessages: ["[user]: 已编辑的新 user 楼层"],
+      source: "chat-last-user",
+      sourceLabel: "历史最后用户楼层",
+      generationType: "history",
+      targetUserMessageIndex: 0,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "已编辑的新 user 楼层",
+      sourceCandidates: [],
+    }),
+    console,
+    getRecallHookLabel: () => "历史生成",
+    retrieve: async () => {
+      retrieveCalls += 1;
+      return {
+        stats: { recallCount: 1, coreCount: 1 },
+        selectedNodeIds: ["fresh-node"],
+        meta: {
+          retrieval: {
+            vectorHits: 1,
+            diffusionHits: 0,
+            llm: { status: "disabled", candidatePool: 0 },
+          },
+        },
+      };
+    },
+    getEmbeddingConfig: () => null,
+    getSchema: () => schema,
+    buildRecallRetrieveOptions: () => ({}),
+    applyRecallInjection: (_settings, recallInput) => ({
+      injectionText: `fresh:${recallInput.userMessage}`,
+      retrievalMeta: {
+        vectorHits: 1,
+        diffusionHits: 0,
+        llm: { status: "disabled", candidatePool: 0 },
+      },
+      llmMeta: { status: "disabled", candidatePool: 0 },
+      transport: {
+        applied: true,
+        source: "module-injection",
+        mode: "module-injection",
+      },
+      deliveryMode: String(recallInput?.deliveryMode || "immediate") || "immediate",
+    }),
+    createRecallInputRecord,
+    createRecallRunResult,
+    isAbortError: () => false,
+    toastr: {
+      warning() {},
+      error() {},
+    },
+    finishStageAbortController() {},
+    getActiveRecallPromise: () => null,
+    setActiveRecallPromise() {},
+    setPendingRecallSendIntent() {},
+    refreshPanelLiveState() {},
+    readPersistedRecallFromUserMessage,
+    bumpPersistedRecallGenerationCount,
+    triggerChatMetadataSave() {},
+    schedulePersistedRecallMessageUiRefresh() {},
+  };
+
+  const result = await runRecallController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    deliveryMode: "immediate",
+  });
+
+  assert.equal(retrieveCalls, 1);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "召回完成");
+  assert.equal(result.injectionText, "fresh:已编辑的新 user 楼层");
+  assert.equal(
+    readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
+    0,
+  );
+}
+
 async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
   const chat = [
     { is_user: true, mes: "u0" },
@@ -4474,8 +4854,11 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
     hookName: "GENERATION_AFTER_COMMANDS",
     tokenEstimate: 24,
     manuallyEdited: false,
+    authoritativeInputUsed: true,
+    boundUserFloorText: "稳定楼层输入",
     nowIso: "2026-01-01T00:00:00.000Z",
   });
+
   assert.equal(writePersistedRecallToUserMessage(chat, 2, record), true);
 
   const loaded = readPersistedRecallFromUserMessage(chat, 2);
@@ -4483,6 +4866,8 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
   assert.equal(loaded.injectionText, "fresh-memory");
   assert.equal(loaded.generationCount, 0);
   assert.equal(loaded.manuallyEdited, false);
+  assert.equal(loaded.authoritativeInputUsed, true);
+  assert.equal(loaded.boundUserFloorText, "稳定楼层输入");
 
   chat[2].mes = "u2 edited";
   assert.equal(
@@ -4511,14 +4896,19 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
       hookName: "MESSAGE_RECALL_BADGE_RERUN",
       tokenEstimate: 30,
       manuallyEdited: false,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "",
       nowIso: "2026-01-01T00:00:02.000Z",
     },
     readPersistedRecallFromUserMessage(chat, 2),
   );
+
   assert.equal(writePersistedRecallToUserMessage(chat, 2, overwrite), true);
   const overwritten = readPersistedRecallFromUserMessage(chat, 2);
   assert.equal(overwritten?.manuallyEdited, false);
   assert.equal(overwritten?.injectionText, "system-rerecall");
+  assert.equal(overwritten?.authoritativeInputUsed, false);
+  assert.equal(overwritten?.boundUserFloorText, "");
 
   assert.equal(removePersistedRecallFromUserMessage(chat, 2), true);
   assert.equal(readPersistedRecallFromUserMessage(chat, 2), null);
@@ -4595,17 +4985,39 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
           status: "completed",
           didRecall: true,
           injectionText: "fresh-memory",
+          authoritativeInputUsed: true,
+          boundUserFloorText: "稳定楼层输入",
         },
         transaction: {
           frozenRecallOptions: {
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "当前输入",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
 
+    assert.equal(resolution.source, "fresh");
     assert.equal(resolution.targetUserMessageIndex, 0);
+    assert.equal(resolution.authoritativeInputUsed, true);
+    assert.equal(resolution.boundUserFloorText, "稳定楼层输入");
+    assert.equal(
+      harness.chat[0]?.extra?.bme_recall?.injectionText,
+      "fresh-memory",
+    );
+
+    assert.equal(
+      JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+      JSON.stringify([]),
+    );
+    assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
+    assert.equal(
+      harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
+      "稳定楼层输入",
+    );
+    assert.equal(harness.metadataSaveCalls > 0, true);
   }
 
   {
@@ -4634,6 +5046,8 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "尾部 user 仍可匹配",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
@@ -4668,6 +5082,8 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "发送前捕获的原始文本",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
@@ -4697,6 +5113,8 @@ async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
         didRecall: true,
         injectionText: "fresh-memory",
         selectedNodeIds: ["node-a", "node-b"],
+        authoritativeInputUsed: true,
+        boundUserFloorText: "稳定楼层输入",
       },
       transaction: {
         frozenRecallOptions: {
@@ -4715,9 +5133,15 @@ async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
     harness.chat[0]?.extra?.bme_recall?.injectionText,
     "fresh-memory",
   );
-  assert.deepEqual(
-    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
-    ["node-a", "node-b"],
+
+  assert.equal(
+    JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+    JSON.stringify(["node-a", "node-b"]),
+  );
+  assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
+  assert.equal(
+    harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
+    "稳定楼层输入",
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
 }
@@ -4738,9 +5162,9 @@ async function testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecor
     harness.chat[0]?.extra?.bme_recall?.injectionText,
     "注入:即时模式补写目标",
   );
-  assert.deepEqual(
-    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
-    ["node-test-1"],
+  assert.equal(
+    JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+    JSON.stringify(["node-test-1"]),
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
 }
@@ -5053,6 +5477,120 @@ async function testHistoryRecoveryAbortClearsVectorRepairState() {
   );
   assert.equal(harness.currentGraph.vectorIndexState.dirty, false);
   assert.equal(harness.currentGraph.vectorIndexState.dirtyReason, "");
+}
+
+async function testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast() {
+  const harness = await createHistoryNotificationHarness();
+
+  harness.result.notifyHistoryDirty(
+    12,
+    "已处理楼层超出当前聊天长度，检测到历史截断",
+  );
+
+  assert.equal(harness.notices.length, 1);
+  assert.equal(harness.warningToasts.length, 0);
+  assert.equal(harness.notices[0][0], "history");
+  assert.equal(harness.notices[0][1], "检测到楼层历史变化");
+}
+
+async function testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      lastMutationReason: "tail-truncated",
+      extractionCount: 1,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [
+      {
+        processedRange: [1, 1],
+        vectorDelta: {
+          insertedHashes: [],
+          removedHashes: [],
+          backendDeleteHashes: [],
+          touchedNodeIds: [],
+          replayRequiredNodeIds: [],
+          replacedMappings: [],
+        },
+      },
+    ],
+  });
+  harness.replayExtractionFromHistoryImpl = async () => {
+    harness.currentGraph.historyState.lastProcessedAssistantFloor = 1;
+    harness.currentGraph.lastProcessedSeq = 1;
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation("message-deleted");
+
+  assert.equal(result, true);
+  assert.equal(harness.toastCalls.success.length, 0);
+  assert.equal(harness.toastCalls.warning.length, 0);
+  assert.equal(harness.toastCalls.error.length, 0);
+}
+
+async function testHistoryRecoveryFullRebuildStillWarnsUser() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+      lastMutationReason: "edited",
+      extractionCount: 1,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => null;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    harness.currentGraph.historyState.lastProcessedAssistantFloor = 1;
+    harness.currentGraph.lastProcessedSeq = 1;
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation("message-edited");
+
+  assert.equal(result, true);
+  assert.equal(harness.toastCalls.success.length, 0);
+  assert.equal(harness.toastCalls.warning.length, 1);
+  assert.match(String(harness.toastCalls.warning[0]?.[0] || ""), /全量重建/);
 }
 
 async function testHistoryRecoveryFallbackFullRebuildCarriesResultCode() {
@@ -6072,7 +6610,8 @@ await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
-await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
+await testHistoryGenerationReusesPersistedRecallForStableUserFloor();
+await testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
 await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
@@ -6093,6 +6632,9 @@ await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
+await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();
+await testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast();
+await testHistoryRecoveryFullRebuildStillWarnsUser();
 await testHistoryRecoveryAbortClearsVectorRepairState();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
 await testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay();

@@ -12,6 +12,16 @@ const extensionsShimSource = [
 const extensionsShimUrl = `data:text/javascript,${encodeURIComponent(
   extensionsShimSource,
 )}`;
+const regexEngineShimSource = [
+  "export const regex_placement = { USER_INPUT: 1, AI_OUTPUT: 2, SLASH_COMMAND: 3, WORLD_INFO: 5, REASONING: 6 };",
+  "export function getRegexedString(...args) {",
+  "  const fn = globalThis.__taskRegexTestCoreGetRegexedString;",
+  "  return typeof fn === 'function' ? fn(...args) : String(args?.[0] ?? '');",
+  "}",
+].join("\n");
+const regexEngineShimUrl = `data:text/javascript,${encodeURIComponent(
+  regexEngineShimSource,
+)}`;
 
 installResolveHooks([
   {
@@ -22,6 +32,10 @@ installResolveHooks([
     ],
     url: extensionsShimUrl,
   },
+  {
+    specifiers: ["../../../../regex/engine.js"],
+    url: regexEngineShimUrl,
+  },
 ]);
 
 const originalSillyTavern = globalThis.SillyTavern;
@@ -29,6 +43,7 @@ const originalGetTavernRegexes = globalThis.getTavernRegexes;
 const originalIsCharacterTavernRegexesEnabled =
   globalThis.isCharacterTavernRegexesEnabled;
 const originalExtensionSettings = globalThis.__taskRegexTestExtensionSettings;
+const originalCoreGetRegexedString = globalThis.__taskRegexTestCoreGetRegexedString;
 
 const PLACEMENT = Object.freeze({
   USER_INPUT: 1,
@@ -146,17 +161,28 @@ function setTestContext({
   };
 }
 
+function setCoreRegexedStringHandler(handler = null) {
+  if (typeof handler === "function") {
+    globalThis.__taskRegexTestCoreGetRegexedString = handler;
+    return;
+  }
+  delete globalThis.__taskRegexTestCoreGetRegexedString;
+}
+
 try {
   const { initializeHostAdapter } = await import("../host/adapter/index.js");
   const { applyHostRegexReuse, applyTaskRegex, inspectTaskRegexReuse } = await import(
     "../prompting/task-regex.js"
   );
   const {
+    createDefaultGlobalTaskRegex,
     createDefaultTaskProfiles,
     isTaskRegexStageEnabled,
     normalizeTaskProfile,
     normalizeTaskRegexStages,
   } = await import("../prompting/prompt-profiles.js");
+  const initializeFallbackHostAdapter = () =>
+    initializeHostAdapter({ disableCoreRegexBridge: true });
 
   const normalizedLegacyStages = normalizeTaskRegexStages({
     finalPrompt: true,
@@ -244,6 +270,48 @@ try {
     ),
     true,
   );
+
+  setTestContext({
+    extensionSettings: {
+      regex: [],
+      preset_allowed_regex: {},
+      character_allowed_regex: [],
+    },
+  });
+  const coreFormatterCalls = [];
+  setCoreRegexedStringHandler((text, placement, options) => {
+    coreFormatterCalls.push({ text, placement, options });
+    return String(text || "").replace(/Alpha/g, "CORE");
+  });
+  initializeHostAdapter({});
+  const coreBridgeDebug = { entries: [] };
+  const coreBridgeOutput = applyHostRegexReuse(
+    buildSettings(),
+    "extract",
+    "Alpha Beta",
+    {
+      sourceType: "user_input",
+      role: "user",
+      debugCollector: coreBridgeDebug,
+    },
+  );
+  assert.equal(coreBridgeOutput.text, "CORE Beta");
+  assert.deepEqual(coreFormatterCalls, [
+    {
+      text: "Alpha Beta",
+      placement: 1,
+      options: {
+        isPrompt: true,
+        isMarkdown: false,
+      },
+    },
+  ]);
+  assert.equal(coreBridgeDebug.entries[0].executionMode, "host-real");
+  assert.equal(
+    inspectTaskRegexReuse(buildSettings(), "extract").host.bridgeTier,
+    "core-real",
+  );
+  setCoreRegexedStringHandler(null);
 
   globalThis.getTavernRegexes = () => {
     throw new Error("legacy global getter should not be used in regex tests");
@@ -333,10 +401,14 @@ try {
       },
     },
   ]);
-  assert.equal(fullBridgeDebug.entries[0].executionMode, "host-real");
+  assert.equal(fullBridgeDebug.entries[0].executionMode, "host-helper");
   assert.deepEqual(
     fullBridgeDebug.entries[0].appliedRules.map((item) => item.id),
     ["__host_formatter__"],
+  );
+  assert.equal(
+    inspectTaskRegexReuse(fullBridgeSettings, "extract").host.bridgeTier,
+    "helper-bridge",
   );
   assert.equal(
     applyTaskRegex(
@@ -383,7 +455,7 @@ try {
       },
     ],
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
 
   const fallbackDebug = { entries: [] };
   const fallbackOutput = applyHostRegexReuse(
@@ -412,7 +484,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const depthMissResult = applyHostRegexReuse(
     buildSettings({
       sources: {
@@ -476,7 +548,7 @@ try {
       },
     ],
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const fallbackInspect = inspectTaskRegexReuse(buildSettings(), "extract");
   assert.equal(fallbackInspect.activeRuleCount, 3);
   assert.deepEqual(
@@ -525,7 +597,7 @@ try {
       },
     ],
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
 
   const disallowedOutput = applyHostRegexReuse(
     buildSettings(),
@@ -587,7 +659,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
 
   const userReuseResult = applyHostRegexReuse(
     tavernSemanticsSettings,
@@ -641,7 +713,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const markdownFinalDebug = { entries: [] };
   const markdownFallbackResult = applyHostRegexReuse(
     markdownOnlyFinalPromptSettings,
@@ -675,7 +747,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const beautifyFinalInspect = inspectTaskRegexReuse(
     beautifyFinalPromptSettings,
     "extract",
@@ -759,7 +831,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const destinationDebug = { entries: [] };
   const destinationReuseResult = applyHostRegexReuse(
     destinationBeautifySettings,
@@ -817,7 +889,7 @@ try {
       character_allowed_regex: [],
     },
   });
-  initializeHostAdapter({});
+  initializeFallbackHostAdapter();
   const mixedReuseResult = applyHostRegexReuse(
     tavernSemanticsSettings,
     "extract",
@@ -862,6 +934,93 @@ try {
     ["prompt-output"],
   );
 
+  const defaultGlobalRegex = createDefaultGlobalTaskRegex();
+  assert.deepEqual(
+    defaultGlobalRegex.localRules.map((rule) => rule.id),
+    [
+      "default-contamination-thinking-blocks",
+      "default-contamination-choice-blocks",
+      "default-contamination-updatevariable-tags",
+      "default-contamination-status-current-variable-tags",
+      "default-contamination-status-placeholder-tags",
+    ],
+  );
+
+  const globalDefaultDebug = { entries: [] };
+  const globalDefaultResult = applyTaskRegex(
+    {
+      taskProfiles: createDefaultTaskProfiles(),
+      globalTaskRegex: createDefaultGlobalTaskRegex(),
+    },
+    "extract",
+    "input.recentMessages",
+    [
+      "前缀",
+      "<thinking>内部思维</thinking>",
+      "<choice>1. 选项</choice>",
+      "<UpdateVariable>hp=1</UpdateVariable>",
+      "<status_current_variable>hp=1</status_current_variable>",
+      "<StatusPlaceHolderImpl/>",
+      "尾巴",
+    ].join("\n"),
+    globalDefaultDebug,
+    "system",
+  );
+  assert.match(globalDefaultResult, /前缀/);
+  assert.match(globalDefaultResult, /尾巴/);
+  assert.doesNotMatch(
+    globalDefaultResult,
+    /<choice|<thinking|<updatevariable|<status_current_variable|<StatusPlaceHolderImpl/i,
+  );
+  assert.deepEqual(
+    globalDefaultDebug.entries[0].appliedRules.map((item) => item.id),
+    [
+      "default-contamination-thinking-blocks",
+      "default-contamination-choice-blocks",
+      "default-contamination-updatevariable-tags",
+      "default-contamination-status-current-variable-tags",
+      "default-contamination-status-placeholder-tags",
+    ],
+  );
+  assert.equal(globalDefaultDebug.entries[0].sourceCount.local, 5);
+
+  const explicitEmptyGlobalDebug = { entries: [] };
+  const explicitEmptyGlobalResult = applyTaskRegex(
+    {
+      taskProfiles: createDefaultTaskProfiles(),
+      globalTaskRegex: {
+        enabled: true,
+        inheritStRegex: false,
+        sources: {
+          global: false,
+          preset: false,
+          character: false,
+        },
+        stages: {
+          "input.userMessage": true,
+          "input.recentMessages": true,
+          "input.candidateText": true,
+          "input.finalPrompt": false,
+          "output.rawResponse": false,
+          "output.beforeParse": false,
+          output: false,
+        },
+        localRules: [],
+      },
+    },
+    "extract",
+    "input.recentMessages",
+    "<choice>保留</choice><thinking>保留</thinking>",
+    explicitEmptyGlobalDebug,
+    "system",
+  );
+  assert.equal(
+    explicitEmptyGlobalResult,
+    "<choice>保留</choice><thinking>保留</thinking>",
+  );
+  assert.deepEqual(explicitEmptyGlobalDebug.entries[0].appliedRules, []);
+  assert.equal(explicitEmptyGlobalDebug.entries[0].sourceCount.local, 0);
+
   console.log("task-regex tests passed");
 } finally {
   if (originalSillyTavern === undefined) {
@@ -887,6 +1046,12 @@ try {
     delete globalThis.__taskRegexTestExtensionSettings;
   } else {
     globalThis.__taskRegexTestExtensionSettings = originalExtensionSettings;
+  }
+
+  if (originalCoreGetRegexedString === undefined) {
+    delete globalThis.__taskRegexTestCoreGetRegexedString;
+  } else {
+    globalThis.__taskRegexTestCoreGetRegexedString = originalCoreGetRegexedString;
   }
 
   try {

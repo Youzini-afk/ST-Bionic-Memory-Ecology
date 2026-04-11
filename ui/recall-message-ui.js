@@ -82,6 +82,7 @@ function formatTokenHint(tokenEstimate) {
 function formatMetaLine(record) {
   const parts = [];
   if (record.recallSource) parts.push(`来源: ${record.recallSource}`);
+  if (record.authoritativeInputUsed) parts.push("权威输入");
   if (record.tokenEstimate > 0) parts.push(`~${record.tokenEstimate} tokens`);
   if (Number.isFinite(record.generationCount) && record.generationCount > 0) {
     parts.push(`回退 ${record.generationCount} 次`);
@@ -180,6 +181,8 @@ function buildExpandedRenderSignature({
   return stableSerialize({
     updatedAt: String(record?.updatedAt || ""),
     manuallyEdited: Boolean(record?.manuallyEdited),
+    authoritativeInputUsed: Boolean(record?.authoritativeInputUsed),
+    boundUserFloorText: String(record?.boundUserFloorText || ""),
     generationCount: Number.isFinite(record?.generationCount)
       ? record.generationCount
       : 0,

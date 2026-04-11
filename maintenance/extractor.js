@@ -32,8 +32,10 @@ import {
   deriveStoryTimeSpanFromNodes,
   describeNodeStoryTime,
   normalizeStoryTime,
+  resolveActiveStoryContext,
   upsertTimelineSegment,
 } from "../graph/story-timeline.js";
+import { getActiveSummaryEntries } from "../graph/summary-state.js";
 import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
@@ -42,6 +44,7 @@ import {
 import { RELATION_TYPES } from "../graph/schema.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt, getSTContextSnapshot } from "../host/st-context.js";
+import { buildExtractionInputContext } from "./extraction-context.js";
 import {
   aliasSetMatchesValue,
   buildUserPovAliasNormalizedSet,
@@ -59,6 +62,17 @@ function createTaskLlmDebugContext(promptBuild, regexInput) {
   return typeof buildTaskExecutionDebugContext === "function"
     ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
     : null;
+}
+
+function createExtractTaskLlmDebugContext(promptBuild, regexInput, inputContext = null) {
+  const debugContext = createTaskLlmDebugContext(promptBuild, regexInput);
+  if (!inputContext || typeof inputContext !== "object") {
+    return debugContext;
+  }
+  return {
+    ...debugContext,
+    inputContext,
+  };
 }
 
 function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
@@ -84,6 +98,54 @@ function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
     return String(promptPayload?.systemPrompt || "");
   }
   return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
+}
+
+function buildActiveSummariesText(graph) {
+  const entries = getActiveSummaryEntries(graph);
+  if (!Array.isArray(entries) || entries.length === 0) return "";
+  return entries
+    .map((entry, index) => {
+      const rangeLabel = Array.isArray(entry.messageRange) && entry.messageRange.length >= 2
+          && entry.messageRange[0] >= 0 && entry.messageRange[1] >= 0
+        ? `楼${entry.messageRange[0]}~${entry.messageRange[1]}`
+        : "";
+      const levelLabel = entry.level ? `L${entry.level}` : "";
+      const prefix = [rangeLabel, levelLabel].filter(Boolean).join(" ");
+      return `[${index + 1}]${prefix ? ` (${prefix})` : ""} ${String(entry.text || entry.summary || "").trim()}`;
+    })
+    .filter((line) => line.trim())
+    .join("\n");
+}
+
+function buildStoryTimeContextText(graph) {
+  const storyCtx = resolveActiveStoryContext(graph);
+  if (!storyCtx?.resolved) return "";
+  const parts = [];
+  if (storyCtx.activeStoryTimeLabel) {
+    parts.push(`当前活跃剧情时间：${storyCtx.activeStoryTimeLabel}`);
+  }
+  if (storyCtx.source) {
+    parts.push(`来源：${storyCtx.source}`);
+  }
+  const seg = storyCtx.segment;
+  if (seg?.tense && seg.tense !== "unknown") {
+    parts.push(`时态：${seg.tense}`);
+  }
+  return parts.join(" | ");
+}
+
+function applyRecentMessageCap(messages, cap = 0) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const numericCap = Number(cap);
+  if (!Number.isFinite(numericCap) || numericCap <= 0) return messages;
+  if (messages.length <= numericCap) return messages;
+  return messages.slice(-numericCap);
+}
+
+function resolveExtractPromptStructuredMode(settings) {
+  const mode = String(settings?.extractPromptStructuredMode || "both").trim().toLowerCase();
+  if (["transcript", "structured", "both"].includes(mode)) return mode;
+  return "both";
 }
 
 function isAbortError(error) {
@@ -799,13 +861,42 @@ export async function extractMemories({
     `[ST-BME] 提取开始: chat[${effectiveStartSeq}..${effectiveEndSeq}], ${messages.length} 条消息`,
   );
 
-  // 构建对话文本
-  const dialogueText = messages
-    .map((m) => {
-      const seqLabel = Number.isFinite(m.seq) ? `#${m.seq}` : "#?";
-      return `${seqLabel} [${m.role}]: ${m.content}`;
-    })
-    .join("\n\n");
+  const extractionInput = buildExtractionInputContext(messages, {
+    settings,
+    userName: stContext?.prompt?.userName || "",
+    charName: stContext?.prompt?.charName || "",
+  });
+  const allStructuredMessages = Array.isArray(extractionInput?.filteredMessages)
+    ? extractionInput.filteredMessages.map((message) => ({
+        seq: message?.seq,
+        role: message?.role,
+        content: message?.content,
+        speaker: message?.speaker,
+        name: message?.name,
+      }))
+    : [];
+
+  // Phase 3: apply recent message cap
+  const structuredMessages = applyRecentMessageCap(
+    allStructuredMessages,
+    settings?.extractRecentMessageCap,
+  );
+  const cappedMessageCount = allStructuredMessages.length - structuredMessages.length;
+  if (cappedMessageCount > 0) {
+    debugLog(
+      `[ST-BME][extract-p3] extractRecentMessageCap=${settings?.extractRecentMessageCap}, ` +
+        `capped ${cappedMessageCount} messages (${allStructuredMessages.length} -> ${structuredMessages.length})`,
+    );
+  }
+
+  // Phase 3: structured mode determines what goes into recentMessages/dialogueText
+  const structuredMode = resolveExtractPromptStructuredMode(settings);
+  const dialogueText = structuredMode === "structured"
+    ? ""
+    : String(extractionInput?.filteredTranscript || "");
+  const promptRecentMessages = structuredMode === "transcript"
+    ? dialogueText
+    : structuredMessages;
 
   // 构建当前图概览（让 LLM 知道已有哪些节点，避免重复）
   const graphOverview = buildGraphOverview(graph, schema);
@@ -817,16 +908,36 @@ export async function extractMemories({
       ? `${messages[0]?.seq ?? "?"} ~ ${messages[messages.length - 1]?.seq ?? "?"}`
       : "";
 
+  // Phase 3: layered context — active summaries and story time
+  const activeSummaries = settings?.extractIncludeSummaries !== false
+    ? buildActiveSummariesText(graph)
+    : "";
+  const storyTimeContext = settings?.extractIncludeStoryTime !== false
+    ? buildStoryTimeContextText(graph)
+    : "";
+
+  debugLog(
+    `[ST-BME][extract-p3] structuredMode=${structuredMode}, ` +
+      `activeSummaries=${activeSummaries ? activeSummaries.split("\n").length + " entries" : "none"}, ` +
+      `storyTimeContext=${storyTimeContext ? "present" : "none"}, ` +
+      `worldbookMode=${String(settings?.extractWorldbookMode || "active")}`,
+  );
+
+  const extractWorldbookMode = String(settings?.extractWorldbookMode || "active").trim().toLowerCase();
   const promptBuild = await buildTaskPrompt(settings, "extract", {
     taskName: "extract",
     schema: schemaDescription,
     schemaDescription,
-    recentMessages: dialogueText,
-    chatMessages: messages,
+    recentMessages: promptRecentMessages,
+    chatMessages: structuredMessages,
     dialogueText,
     graphStats: graphOverview,
     graphOverview,
     currentRange,
+    activeSummaries,
+    storyTimeContext,
+    taskInputDebug: extractionInput?.debug || null,
+    __skipWorldInfo: extractWorldbookMode === "none",
     ...getSTContextForPrompt(),
   });
 
@@ -843,19 +954,50 @@ export async function extractMemories({
     "system",
   );
 
-  // 用户提示词
-  const userPrompt = [
-    "## 当前对话内容（需提取记忆）",
-    dialogueText,
-    "",
+  // 用户提示词 — Phase 3 分层信息结构
+  const userPromptSections = [];
+
+  // Layer 1: 当前对话切片
+  if (dialogueText) {
+    userPromptSections.push("## 当前对话内容（需提取记忆）", dialogueText, "");
+  } else if (structuredMode === "structured" && structuredMessages.length > 0) {
+    userPromptSections.push(
+      "## 当前对话内容（结构化消息，需提取记忆）",
+      "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
+      "",
+    );
+  }
+
+  // Layer 2: 当前图谱状态
+  userPromptSections.push(
     "## 当前图谱状态",
     graphOverview || "(空图谱，尚无节点)",
     "",
-    "## 节点类型定义",
-    schemaDescription,
-    "",
-    "请分析对话，按 JSON 格式输出操作列表。",
-  ].join("\n");
+  );
+
+  // Layer 3: 已有总结快照（帮助避免重复提取）
+  if (activeSummaries) {
+    userPromptSections.push(
+      "## 近期局面总结（已有覆盖，避免重复）",
+      activeSummaries,
+      "",
+    );
+  }
+
+  // Layer 4: 故事时间线位置
+  if (storyTimeContext) {
+    userPromptSections.push(
+      "## 当前故事时间",
+      storyTimeContext,
+      "",
+    );
+  }
+
+  // Layer 5: 节点类型定义
+  userPromptSections.push("## 节点类型定义", schemaDescription, "");
+
+  userPromptSections.push("请分析对话，按 JSON 格式输出操作列表。");
+  const userPrompt = userPromptSections.join("\n");
   const promptPayload = resolveTaskPromptPayload(promptBuild, userPrompt);
   const extractionAugmentPrompt = buildCognitiveExtractAugmentPrompt();
   const promptPayloadAdditionalMessages = Array.isArray(
@@ -904,6 +1046,16 @@ export async function extractMemories({
         `[ST-BME][prompt-diag]   NO user messages in promptMessages! Fallback userPrompt will be used.`,
       );
     }
+    if (extractionInput?.debug) {
+      debugLog(
+        `[ST-BME][extract-input] raw=${Number(extractionInput.debug.rawMessageCount || 0)}, ` +
+          `filtered=${Number(extractionInput.debug.filteredMessageCount || 0)}, ` +
+          `assistantChanged=${Number(extractionInput.debug.changedAssistantMessageCount || 0)}, ` +
+          `assistantDropped=${Number(extractionInput.debug.droppedAssistantMessageCount || 0)}, ` +
+          `extractRules=${Number(extractionInput.debug.assistantBoundaryConfig?.extractRuleCount || 0)}, ` +
+          `excludeRules=${Number(extractionInput.debug.assistantBoundaryConfig?.excludeRuleCount || 0)}`,
+      );
+    }
   }
 
   // 调用 LLM
@@ -913,7 +1065,11 @@ export async function extractMemories({
     maxRetries: 2,
     signal,
     taskType: "extract",
-    debugContext: createTaskLlmDebugContext(promptBuild, extractRegexInput),
+    debugContext: createExtractTaskLlmDebugContext(
+      promptBuild,
+      extractRegexInput,
+      extractionInput?.debug || null,
+    ),
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayloadAdditionalMessages,
     onStreamProgress,

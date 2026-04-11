@@ -462,6 +462,23 @@ export async function onGenerationAfterCommandsController(
 
   const runtimeRecallOptions =
     recallContext.recallOptions || recallOptions || {};
+  if (
+    params &&
+    typeof params === "object" &&
+    runtimeRecallOptions?.authoritativeInputUsed === true
+  ) {
+    const authoritativePrompt = String(
+      runtimeRecallOptions?.overrideUserMessage ||
+        runtimeRecallOptions?.userMessage ||
+        "",
+    ).trim();
+    if (authoritativePrompt) {
+      params.prompt = authoritativePrompt;
+      if (Object.prototype.hasOwnProperty.call(params, "user_input")) {
+        params.user_input = authoritativePrompt;
+      }
+    }
+  }
   const deliveryMode =
     runtime.resolveGenerationRecallDeliveryMode?.(
       recallContext.hookName,

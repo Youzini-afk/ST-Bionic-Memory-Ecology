@@ -20,6 +20,7 @@ import { BmeChatManager } from "./sync/bme-chat-manager.js";
 import {
   BmeDatabase,
   buildBmeDbName,
+  buildPersistDelta,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
   ensureDexieLoaded,
@@ -315,12 +316,141 @@ function syncCommitMarkerToPersistenceState(context = getContext()) {
   const marker = getChatCommitMarker(context);
   updateGraphPersistenceState({
     commitMarker: cloneRuntimeDebugValue(marker, null),
-    lastAcceptedRevision: Math.max(
-      Number(graphPersistenceState.lastAcceptedRevision || 0),
-      getAcceptedCommitMarkerRevision(marker),
-    ),
   });
   return marker;
+}
+
+function isAcceptedPersistTier(storageTier = "none") {
+  const normalizedTier = String(storageTier || "none").trim().toLowerCase();
+  return normalizedTier === "indexeddb" || normalizedTier === "chat-state";
+}
+
+function isRecoveryOnlyPersistTier(storageTier = "none") {
+  const normalizedTier = String(storageTier || "none").trim().toLowerCase();
+  return normalizedTier === "shadow" || normalizedTier === "metadata-full";
+}
+
+function resolvePersistRevisionFloor(
+  requestedRevision = 0,
+  graph = currentGraph,
+) {
+  return Math.max(
+    normalizeIndexedDbRevision(requestedRevision),
+    normalizeIndexedDbRevision(graphPersistenceState.revision),
+    normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
+    normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+    normalizeIndexedDbRevision(graph ? getGraphPersistedRevision(graph) : 0),
+  );
+}
+
+function allocateRequestedPersistRevision(
+  requestedRevision = 0,
+  graph = currentGraph,
+) {
+  return Math.max(1, resolvePersistRevisionFloor(requestedRevision, graph) + 1);
+}
+
+function normalizeRestoreLockState(lock = null) {
+  const source = String(lock?.source || "").trim();
+  const reason = String(lock?.reason || "").trim();
+  const startedAt = Number(lock?.startedAt);
+  const depth = Math.max(0, Math.floor(Number(lock?.depth) || 0));
+  const active = lock?.active === true || depth > 0;
+  return {
+    active,
+    depth: active ? Math.max(1, depth || 1) : 0,
+    source,
+    reason,
+    startedAt: Number.isFinite(startedAt) && startedAt > 0 ? startedAt : 0,
+  };
+}
+
+function isRestoreLockActive() {
+  return normalizeRestoreLockState(graphPersistenceState.restoreLock).active;
+}
+
+function getRestoreLockMessage(operationLabel = "当前操作") {
+  const lock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  if (!lock.active) return "";
+  const details = [lock.reason, lock.source].filter(Boolean).join(" / ");
+  return `${operationLabel}已暂停：当前处于恢复锁${details ? `（${details}）` : ""}`;
+}
+
+function enterRestoreLock(source = "runtime", reason = "") {
+  const currentLock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  const nextLock = {
+    active: true,
+    depth: currentLock.depth + 1,
+    source: String(source || currentLock.source || "runtime"),
+    reason: String(reason || currentLock.reason || ""),
+    startedAt: currentLock.startedAt || Date.now(),
+  };
+  updateGraphPersistenceState({
+    restoreLock: nextLock,
+  });
+  return cloneRuntimeDebugValue(nextLock, nextLock);
+}
+
+function leaveRestoreLock(source = "runtime") {
+  const currentLock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  if (!currentLock.active) {
+    return currentLock;
+  }
+  const nextDepth = Math.max(0, currentLock.depth - 1);
+  const nextLock =
+    nextDepth > 0
+      ? {
+          ...currentLock,
+          depth: nextDepth,
+          source: String(source || currentLock.source || ""),
+        }
+      : {
+          active: false,
+          depth: 0,
+          source: "",
+          reason: "",
+          startedAt: 0,
+        };
+  updateGraphPersistenceState({
+    restoreLock: nextLock,
+  });
+  return cloneRuntimeDebugValue(nextLock, nextLock);
+}
+
+async function runWithRestoreLock(source, reason, task) {
+  enterRestoreLock(source, reason);
+  try {
+    return await task();
+  } finally {
+    leaveRestoreLock(source);
+  }
+}
+
+function recordPersistMismatchDiagnostic(
+  mismatch = null,
+  { source = "persist-mismatch", resolvedBy = "" } = {},
+) {
+  const normalizedReason = String(mismatch?.reason || "").trim();
+  const marker = cloneRuntimeDebugValue(mismatch?.marker, null) || getChatCommitMarker();
+  updateGraphPersistenceState({
+    persistMismatchReason: normalizedReason,
+    commitMarker: marker,
+    dualWriteLastResult: {
+      action: "load",
+      source: String(source || "persist-mismatch"),
+      success: false,
+      diagnostic: true,
+      reason: normalizedReason,
+      markerRevision: Number(mismatch?.markerRevision || 0),
+      snapshotRevision: Number(mismatch?.snapshotRevision || 0),
+      resolvedBy: String(resolvedBy || ""),
+      at: Date.now(),
+    },
+  });
+  return {
+    reason: normalizedReason,
+    marker,
+  };
 }
 
 function persistGraphCommitMarker(
@@ -385,12 +515,6 @@ function persistGraphCommitMarker(
   const saveMode = triggerChatMetadataSave(context, { immediate });
   updateGraphPersistenceState({
     commitMarker: cloneRuntimeDebugValue(marker, null),
-    lastAcceptedRevision: accepted
-      ? Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          Number(marker.revision || 0),
-        )
-      : Number(graphPersistenceState.lastAcceptedRevision || 0),
     lastPersistReason: String(reason || ""),
     lastPersistMode: `commit-marker:${saveMode}`,
   });
@@ -408,53 +532,37 @@ function persistGraphCommitMarker(
 function applyPersistMismatchBlockedState(
   chatId,
   mismatch = null,
-  { source = "persist-mismatch", attemptIndex = 0 } = {},
+  { source = "persist-mismatch", attemptIndex = 0, resolvedBy = "" } = {},
 ) {
   const marker = cloneRuntimeDebugValue(mismatch?.marker, null) || getChatCommitMarker();
   const markerRevision = Number(mismatch?.markerRevision || 0);
   const snapshotRevision = Number(mismatch?.snapshotRevision || 0);
-  const reason = String(mismatch?.reason || "persist-mismatch:indexeddb-behind-commit-marker");
-  applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-    chatId,
-    reason: `${source}:${reason}`,
-    attemptIndex,
-    revision: Math.max(Number(graphPersistenceState.revision || 0), markerRevision),
-    lastPersistedRevision: Math.max(
-      Number(graphPersistenceState.lastPersistedRevision || 0),
-      snapshotRevision,
-    ),
-    pendingPersist: false,
-    dbReady: true,
-    writesBlocked: true,
-  });
-  updateGraphPersistenceState({
-    persistMismatchReason: reason,
-    commitMarker: cloneRuntimeDebugValue(marker, null),
-    lastAcceptedRevision: Math.max(
-      Number(graphPersistenceState.lastAcceptedRevision || 0),
-      markerRevision,
-    ),
-    dualWriteLastResult: {
-      action: "load",
-      source: String(source || "persist-mismatch"),
-      success: false,
-      rejected: true,
-      reason,
-      markerRevision,
-      snapshotRevision,
-      at: Date.now(),
+  const diagnostic = recordPersistMismatchDiagnostic(
+    {
+      ...(mismatch || {}),
+      marker,
     },
-  });
+    {
+      source,
+      resolvedBy,
+    },
+  );
   refreshPanelLiveState();
   return {
     success: false,
     loaded: false,
-    loadState: GRAPH_LOAD_STATES.BLOCKED,
-    reason,
+    loadState: graphPersistenceState.loadState,
+    reason:
+      diagnostic.reason ||
+      String(
+        mismatch?.reason ||
+          "persist-mismatch:indexeddb-behind-commit-marker",
+      ),
     chatId,
     attemptIndex,
     markerRevision,
     snapshotRevision,
+    diagnosticOnly: true,
   };
 }
 
@@ -607,7 +715,6 @@ let lastRecalledItems = []; // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
 let isRecoveringHistory = false;
-let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 300000;
@@ -734,10 +841,7 @@ function getGraphPersistenceLiveState() {
   const liveCommitMarker =
     cloneRuntimeDebugValue(graphPersistenceState.commitMarker, null) ||
     readGraphCommitMarker(getContext());
-  const lastAcceptedRevision = Math.max(
-    Number(graphPersistenceState.lastAcceptedRevision || 0),
-    getAcceptedCommitMarkerRevision(liveCommitMarker),
-  );
+  const restoreLock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
   const snapshot = {
     loadState: graphPersistenceState.loadState,
     chatId: graphPersistenceState.chatId,
@@ -756,9 +860,14 @@ function getGraphPersistenceLiveState() {
     metadataIntegrity: graphPersistenceState.metadataIntegrity,
     writesBlocked: graphPersistenceState.writesBlocked,
     pendingPersist: graphPersistenceState.pendingPersist,
-    lastAcceptedRevision,
+    lastAcceptedRevision: Number(graphPersistenceState.lastAcceptedRevision || 0),
+    acceptedStorageTier: String(graphPersistenceState.acceptedStorageTier || "none"),
+    lastRecoverableStorageTier: String(
+      graphPersistenceState.lastRecoverableStorageTier || "none",
+    ),
     persistMismatchReason: String(graphPersistenceState.persistMismatchReason || ""),
     commitMarker: cloneRuntimeDebugValue(liveCommitMarker, null),
+    restoreLock,
     queuedPersistMode: graphPersistenceState.queuedPersistMode,
     queuedPersistRotateIntegrity:
       graphPersistenceState.queuedPersistRotateIntegrity,
@@ -871,8 +980,8 @@ function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   }
 
   // 兜底：chatId 不可用（ST 插件环境可能无法获取 chatId），
-  // 但 currentGraph 结构完整且有节点数据 → 允许召回。
-  // 这对应用户能在 UI 看到图谱但 getCurrentChatId() 返回空的场景。
+  // 只要 currentGraph 结构完整且有节点数据，就允许召回。
+  // 这对应用户能在 UI 看到图谱，但 getCurrentChatId() 返回空的场景。
   return currentGraph.nodes.length > 0 || currentGraph.edges.length > 0;
 }
 
@@ -920,7 +1029,7 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.BLOCKED:
       return createUiStatus(
         "图谱加载受阻",
-        "当前图谱尚未完成 IndexedDB 初始化",
+        "当前图谱尚未完成 IndexedDB 初始加载",
         "warning",
       );
     case GRAPH_LOAD_STATES.LOADED:
@@ -944,6 +1053,9 @@ function getPanelRuntimeStatus() {
 }
 
 function getGraphMutationBlockReason(operationLabel = "当前操作") {
+  if (isRestoreLockActive()) {
+    return getRestoreLockMessage(operationLabel);
+  }
   const loadState = graphPersistenceState.loadState;
   if (!getCurrentChatId()) {
     return `${operationLabel}已暂停：当前尚未进入聊天。`;
@@ -969,8 +1081,14 @@ function getGraphMutationBlockReason(operationLabel = "当前操作") {
 
 function ensureGraphMutationReady(
   operationLabel = "当前操作",
-  { notify = true } = {},
+  { notify = true, ignoreRestoreLock = false } = {},
 ) {
+  if (!ignoreRestoreLock && isRestoreLockActive()) {
+    if (notify) {
+      toastr.info(getRestoreLockMessage(operationLabel), "ST-BME");
+    }
+    return false;
+  }
   if (graphPersistenceState.dbReady || isGraphLoadStateDbReady()) return true;
   if (notify) {
     toastr.info(getGraphMutationBlockReason(operationLabel), "ST-BME");
@@ -1783,9 +1901,9 @@ function resolveRecallPersistenceTargetUserMessageIndex(
   }
 
   // 正常生成阶段里，ST 可能会在真正发送前改写用户文本
-  // （命令展开、包装显示、助手 UI 处理等），导致 hash 已无法精确匹配。
+  // （命令展开、包装显示、辅助 UI 处理等），导致 hash 已无法精确匹配。
   // 这时仍应优先回绑到“当前最新 user 楼层”，否则召回记录虽然生成了，
-  // 但 Recall Card 会因为找不到目标楼层而消失。
+  // Recall Card 会因为找不到目标楼层而消失。
   if (
     normalizedGenerationType === "normal" &&
     Number.isFinite(latestUserIndex) &&
@@ -2026,6 +2144,17 @@ function ensurePersistedRecallRecordForGeneration({
       ),
       tokenEstimate: estimateTokens(injectionText),
       manuallyEdited: false,
+      authoritativeInputUsed: Boolean(
+        recallResult?.authoritativeInputUsed ??
+          frozenRecallOptions?.authoritativeInputUsed ??
+          recallOptions?.authoritativeInputUsed,
+      ),
+      boundUserFloorText: String(
+        recallResult?.boundUserFloorText ||
+          frozenRecallOptions?.boundUserFloorText ||
+          recallOptions?.boundUserFloorText ||
+          "",
+      ),
     },
     existingRecord,
   );
@@ -2197,6 +2326,108 @@ function rewriteRecallPayloadWithInjection(
   };
 }
 
+function rewriteRecallPayloadWithAuthoritativeUserInput(
+  promptData = null,
+  authoritativeText = "",
+  boundUserFloorText = "",
+) {
+  const normalizedAuthoritativeText = normalizeRecallInputText(authoritativeText);
+  const normalizedBoundUserFloorText = normalizeRecallInputText(boundUserFloorText);
+  if (!normalizedAuthoritativeText) {
+    return {
+      applied: false,
+      changed: false,
+      path: "",
+      field: "",
+      reason: "empty-authoritative-text",
+    };
+  }
+
+  const finalMesSend = Array.isArray(promptData?.finalMesSend)
+    ? promptData.finalMesSend
+    : null;
+  if (!Array.isArray(finalMesSend) || finalMesSend.length <= 0) {
+    return {
+      applied: false,
+      changed: false,
+      path: "",
+      field: "",
+      reason: "finalMesSend-unavailable",
+    };
+  }
+
+  let fallbackIndex = -1;
+  let matchedIndex = -1;
+  for (let index = finalMesSend.length - 1; index >= 0; index--) {
+    const entry = finalMesSend[index];
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.injected === true) continue;
+
+    const messageText = normalizeRecallInputText(
+      entry.message || entry.mes || entry.content || "",
+    );
+    if (!messageText) continue;
+
+    if (fallbackIndex < 0) {
+      fallbackIndex = index;
+    }
+
+    if (
+      messageText === normalizedAuthoritativeText ||
+      (normalizedBoundUserFloorText &&
+        messageText === normalizedBoundUserFloorText)
+    ) {
+      matchedIndex = index;
+      break;
+    }
+  }
+
+  const targetIndex =
+    matchedIndex >= 0
+      ? matchedIndex
+      : normalizedBoundUserFloorText
+        ? -1
+        : fallbackIndex;
+  if (targetIndex < 0) {
+    return {
+      applied: false,
+      changed: false,
+      path: "finalMesSend",
+      field: "",
+      reason: normalizedBoundUserFloorText
+        ? "bound-user-floor-text-not-found"
+        : "no-rewritable-finalMesSend-entry",
+    };
+  }
+
+  const entry = finalMesSend[targetIndex];
+  const fieldName = Object.prototype.hasOwnProperty.call(entry, "message")
+    ? "message"
+    : Object.prototype.hasOwnProperty.call(entry, "mes")
+      ? "mes"
+      : Object.prototype.hasOwnProperty.call(entry, "content")
+        ? "content"
+        : "message";
+  const previousText = normalizeRecallInputText(
+    entry?.[fieldName] || entry?.message || entry?.mes || entry?.content || "",
+  );
+  const changed = previousText !== normalizedAuthoritativeText;
+  if (changed) {
+    entry[fieldName] = normalizedAuthoritativeText;
+  }
+
+  return {
+    applied: true,
+    changed,
+    path: "finalMesSend",
+    field: `finalMesSend[${targetIndex}].${fieldName}`,
+    reason: changed
+      ? "finalMesSend-authoritative-user-rewritten"
+      : "authoritative-user-already-matched",
+    targetIndex,
+  };
+}
+
 function readGenerationRecallTransactionFinalResolution(transaction) {
   return transaction?.finalResolution || null;
 }
@@ -2222,6 +2453,98 @@ function applyFinalRecallInjectionForGeneration({
   const existingFinalResolution =
     readGenerationRecallTransactionFinalResolution(transaction);
   if (existingFinalResolution) {
+    if (
+      promptData &&
+      transaction?.frozenRecallOptions?.authoritativeInputUsed === true
+    ) {
+      const recallResult =
+        freshRecallResult ||
+        getGenerationRecallTransactionResult(transaction) ||
+        null;
+      const inputRewrite = rewriteRecallPayloadWithAuthoritativeUserInput(
+        promptData,
+        transaction?.frozenRecallOptions?.overrideUserMessage || "",
+        transaction?.frozenRecallOptions?.boundUserFloorText || "",
+      );
+      const rewrite = rewriteRecallPayloadWithInjection(
+        promptData,
+        existingFinalResolution.usedText || recallResult?.injectionText || "",
+      );
+      const nextFinalResolution = {
+        ...existingFinalResolution,
+        deliveryMode: "deferred",
+        applicationMode:
+          rewrite.applied || inputRewrite.applied
+            ? "rewrite"
+            : existingFinalResolution.applicationMode,
+        rewrite,
+        inputRewrite,
+      };
+      recordInjectionSnapshot("recall", {
+        taskType: "recall",
+        source:
+          String(
+            recallResult?.source ||
+              transaction?.frozenRecallOptions?.lockedSource ||
+              transaction?.frozenRecallOptions?.overrideSource ||
+              "",
+          ).trim() || "unknown",
+        sourceLabel:
+          String(
+            recallResult?.sourceLabel ||
+              transaction?.frozenRecallOptions?.lockedSourceLabel ||
+              transaction?.frozenRecallOptions?.overrideSourceLabel ||
+              "",
+          ).trim() || "未知",
+        reason:
+          String(
+            recallResult?.reason ||
+              transaction?.frozenRecallOptions?.lockedReason ||
+              transaction?.frozenRecallOptions?.overrideReason ||
+              "",
+          ).trim() || "final-application-reused",
+        sourceCandidates: Array.isArray(recallResult?.sourceCandidates)
+          ? recallResult.sourceCandidates.map((candidate) => ({ ...candidate }))
+          : Array.isArray(transaction?.frozenRecallOptions?.sourceCandidates)
+            ? transaction.frozenRecallOptions.sourceCandidates.map((candidate) => ({
+                ...candidate,
+              }))
+            : [],
+        hookName: String(hookName || recallResult?.hookName || "").trim(),
+        selectedNodeIds: recallResult?.selectedNodeIds || [],
+        retrievalMeta: recallResult?.retrievalMeta || {},
+        llmMeta: recallResult?.llmMeta || {},
+        stats: recallResult?.stats || {},
+        injectionText: nextFinalResolution.usedText || "",
+        deliveryMode: nextFinalResolution.deliveryMode || "",
+        applicationMode: nextFinalResolution.applicationMode || "none",
+        transport: nextFinalResolution.transport || {
+          applied: false,
+          source: "none",
+          mode: "none",
+        },
+        rewrite: nextFinalResolution.rewrite || {
+          applied: false,
+          path: "",
+          field: "",
+          reason: "final-resolution-reused",
+        },
+        inputRewrite,
+        targetUserMessageIndex: nextFinalResolution.targetUserMessageIndex,
+        sourceKind: nextFinalResolution.source || "none",
+        authoritativeInputUsed: true,
+        boundUserFloorText: String(
+          transaction?.frozenRecallOptions?.boundUserFloorText || "",
+        ),
+      });
+      storeGenerationRecallTransactionFinalResolution(
+        transaction,
+        nextFinalResolution,
+      );
+      refreshPanelLiveState();
+      schedulePersistedRecallMessageUiRefresh();
+      return nextFinalResolution;
+    }
     return existingFinalResolution;
   }
 
@@ -2229,15 +2552,21 @@ function applyFinalRecallInjectionForGeneration({
     freshRecallResult ||
     getGenerationRecallTransactionResult(transaction) ||
     null;
+  const hookResolvedDeliveryMode =
+    String(
+      resolveGenerationRecallDeliveryMode(
+        hookName,
+        generationType,
+        transaction?.frozenRecallOptions || {},
+      ),
+    ).trim() || "immediate";
   const deliveryMode =
     String(
-      recallResult?.deliveryMode ||
-        transaction?.lastDeliveryMode ||
-        resolveGenerationRecallDeliveryMode(
-          hookName,
-          generationType,
-          transaction?.frozenRecallOptions || {},
-        ),
+      promptData && hookName === "GENERATE_BEFORE_COMBINE_PROMPTS"
+        ? hookResolvedDeliveryMode
+        : recallResult?.deliveryMode ||
+            transaction?.lastDeliveryMode ||
+            hookResolvedDeliveryMode,
     ).trim() || "immediate";
   const chat = getContext()?.chat;
 
@@ -2252,6 +2581,24 @@ function applyFinalRecallInjectionForGeneration({
     injectionText: "",
     record: null,
   };
+  const authoritativeInputRewrite =
+    deliveryMode === "deferred" &&
+    transaction?.frozenRecallOptions?.authoritativeInputUsed === true
+      ? rewriteRecallPayloadWithAuthoritativeUserInput(
+          promptData,
+          transaction?.frozenRecallOptions?.overrideUserMessage || "",
+          transaction?.frozenRecallOptions?.boundUserFloorText || "",
+        )
+      : {
+          applied: false,
+          changed: false,
+          path: "",
+          field: "",
+          reason:
+            deliveryMode === "deferred"
+              ? "authoritative-input-unused"
+              : "non-deferred-delivery",
+        };
   const rewrite = {
     applied: false,
     path: "",
@@ -2422,8 +2769,18 @@ function applyFinalRecallInjectionForGeneration({
     applicationMode,
     transport,
     rewrite,
+    inputRewrite: authoritativeInputRewrite,
     targetUserMessageIndex,
     sourceKind: resolved.source,
+    authoritativeInputUsed: Boolean(
+      recallResult?.authoritativeInputUsed ??
+        transaction?.frozenRecallOptions?.authoritativeInputUsed,
+    ),
+    boundUserFloorText: String(
+      recallResult?.boundUserFloorText ||
+        transaction?.frozenRecallOptions?.boundUserFloorText ||
+        "",
+    ),
   });
 
   refreshPanelLiveState();
@@ -2440,6 +2797,16 @@ function applyFinalRecallInjectionForGeneration({
     applicationMode,
     rewrite,
     transport,
+    inputRewrite: authoritativeInputRewrite,
+    authoritativeInputUsed: Boolean(
+      recallResult?.authoritativeInputUsed ??
+        transaction?.frozenRecallOptions?.authoritativeInputUsed,
+    ),
+    boundUserFloorText: String(
+      recallResult?.boundUserFloorText ||
+        transaction?.frozenRecallOptions?.boundUserFloorText ||
+        "",
+    ),
   };
   storeGenerationRecallTransactionFinalResolution(transaction, finalResolution);
   return finalResolution;
@@ -2947,7 +3314,7 @@ function schedulePersistedRecallMessageUiRefresh(delayMs = 0) {
         summary.status === "missing_message_anchor") &&
       attemptIndex < retryDelays.length - 1;
 
-    // 勿在「已成功渲染」时长期挂 MutationObserver：#chat 上 class/流式更新会疯狂触发
+    // 勿在「已成功渲染」时长期监听 MutationObserver：chat 的 class/流式更新会疯狂触发
     // runAttempt，造成满屏刷新与日志；显式事件（USER_MESSAGE_RENDERED 等）仍会 schedule 刷新。
     const shouldWatchForRepaint = false;
 
@@ -3184,7 +3551,7 @@ async function runIncrementalMessageHide(reason = "incremental") {
 function clearMessageHideState(reason = "reset") {
   try {
     resetHideState(getHideRuntimeAdapters());
-    debugLog("[ST-BME] 已重置旧楼层隐藏状态:", reason);
+    debugLog("[ST-BME] 已重置旧楼层隐藏状态", reason);
   } catch (error) {
     console.warn("[ST-BME] 重置旧楼层隐藏状态失败:", reason, error);
   }
@@ -3398,7 +3765,7 @@ function isHostChatMetadataReady(context = getContext()) {
   }
 
   const metadata = context.chatMetadata;
-  // 仅接受宿主“强信号”，避免把中间态/占位 metadata 误判为 ready。
+  // 仅接受宿主“强信号”，避免把中间态占位 metadata 误判为 ready。
   if (hasHostMetadataReadySignal(metadata)) return true;
 
   return false;
@@ -3993,11 +4360,8 @@ function applyShadowSnapshotToRuntime(
     storageMode: "indexeddb",
     dbReady: true,
     indexedDbLastError: "",
-    persistMismatchReason: "",
-    lastAcceptedRevision: Math.max(
-      Number(graphPersistenceState.lastAcceptedRevision || 0),
-      shadowRevision,
-    ),
+    pendingPersist: Boolean(promoteToIndexedDb),
+    lastRecoverableStorageTier: "shadow",
     metadataIntegrity:
       getChatMetadataIntegrity(getContext()) ||
       graphPersistenceState.metadataIntegrity,
@@ -4670,28 +5034,33 @@ async function loadGraphFromChatState(
     snapshot,
     effectiveCommitMarker,
   );
+  let commitMarkerDiagnostic = null;
   if (commitMarkerMismatch.mismatched) {
-    if (
-      shadowSnapshot &&
-      Number(shadowSnapshot.revision || 0) >=
-        Number(commitMarkerMismatch.markerRevision || 0)
-    ) {
-      return applyShadowSnapshotToRuntime(normalizedChatId, shadowSnapshot, {
-        source: `${source}:shadow-beats-chat-state-marker`,
-        attemptIndex,
-      });
-    }
-    return applyPersistMismatchBlockedState(
-      normalizedChatId,
+    commitMarkerDiagnostic = recordPersistMismatchDiagnostic(
       {
         ...commitMarkerMismatch,
         marker: commitMarkerMismatch.marker || effectiveCommitMarker,
       },
       {
         source: `${source}:chat-state-marker`,
-        attemptIndex,
       },
     );
+    if (
+      shadowSnapshot &&
+      Number(shadowSnapshot.revision || 0) >=
+        Number(commitMarkerMismatch.markerRevision || 0)
+    ) {
+      const shadowResult = applyShadowSnapshotToRuntime(normalizedChatId, shadowSnapshot, {
+        source: `${source}:shadow-beats-chat-state-marker`,
+        attemptIndex,
+      });
+      if (shadowResult?.loaded && commitMarkerDiagnostic?.reason) {
+        updateGraphPersistenceState({
+          persistMismatchReason: commitMarkerDiagnostic.reason,
+        });
+      }
+      return shadowResult;
+    }
   }
 
   const shouldAllowOverride =
@@ -4721,7 +5090,7 @@ async function loadGraphFromChatState(
     };
   }
 
-  return applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
+  const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
     source,
     attemptIndex,
     storagePrimary: "chat-state",
@@ -4729,6 +5098,12 @@ async function loadGraphFromChatState(
     statusLabel: "聊天侧车",
     reasonPrefix: "chat-state",
   });
+  if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
+    updateGraphPersistenceState({
+      persistMismatchReason: commitMarkerDiagnostic.reason,
+    });
+  }
+  return loadResult;
 }
 
 function scheduleGraphChatStateProbe(chatId, options = {}) {
@@ -5612,8 +5987,15 @@ async function loadGraphFromIndexedDb(
       snapshot,
       commitMarker,
     );
+    let commitMarkerDiagnostic = null;
     if (!isIndexedDbSnapshotMeaningful(snapshot)) {
       if (commitMarkerMismatch.mismatched) {
+        commitMarkerDiagnostic = recordPersistMismatchDiagnostic(
+          commitMarkerMismatch,
+          {
+            source: `${source}:indexeddb-empty`,
+          },
+        );
         if (
           shadowSnapshot &&
           Number(shadowSnapshot.revision || 0) >=
@@ -5628,17 +6010,12 @@ async function loadGraphFromIndexedDb(
             },
           );
           if (shadowRestoreResult?.loaded) {
+            updateGraphPersistenceState({
+              persistMismatchReason: commitMarkerDiagnostic.reason,
+            });
             return shadowRestoreResult;
           }
         }
-        return applyPersistMismatchBlockedState(
-          normalizedChatId,
-          commitMarkerMismatch,
-          {
-            source: `${source}:indexeddb-empty`,
-            attemptIndex,
-          },
-        );
       }
       if (shadowSnapshot) {
         const shadowRestoreResult = applyShadowSnapshotToRuntime(
@@ -5653,7 +6030,11 @@ async function loadGraphFromIndexedDb(
           return shadowRestoreResult;
         }
       }
-      if (applyEmptyState && getCurrentChatId() === normalizedChatId) {
+      if (
+        applyEmptyState &&
+        !commitMarkerDiagnostic?.reason &&
+        getCurrentChatId() === normalizedChatId
+      ) {
         return applyIndexedDbEmptyToRuntime(normalizedChatId, {
           source,
           attemptIndex,
@@ -5662,7 +6043,7 @@ async function loadGraphFromIndexedDb(
       return {
         success: false,
         loaded: false,
-        reason: "indexeddb-empty",
+        reason: commitMarkerDiagnostic?.reason || "indexeddb-empty",
         chatId: normalizedChatId,
         attemptIndex,
       };
@@ -5705,12 +6086,21 @@ async function loadGraphFromIndexedDb(
       );
     }
     if (commitMarkerMismatch.mismatched) {
+      commitMarkerDiagnostic = recordPersistMismatchDiagnostic(
+        {
+          ...commitMarkerMismatch,
+          marker: commitMarkerMismatch.marker || commitMarker,
+        },
+        {
+          source: `${source}:indexeddb-commit-marker`,
+        },
+      );
       if (
         shadowSnapshot &&
         Number(shadowSnapshot.revision || 0) >=
           Number(commitMarkerMismatch.markerRevision || 0)
       ) {
-        return applyShadowSnapshotToRuntime(
+        const shadowResult = applyShadowSnapshotToRuntime(
           normalizedChatId,
           shadowSnapshot,
           {
@@ -5718,18 +6108,13 @@ async function loadGraphFromIndexedDb(
             attemptIndex,
           },
         );
+        if (shadowResult?.loaded && commitMarkerDiagnostic?.reason) {
+          updateGraphPersistenceState({
+            persistMismatchReason: commitMarkerDiagnostic.reason,
+          });
+        }
+        return shadowResult;
       }
-      return applyPersistMismatchBlockedState(
-        normalizedChatId,
-        {
-          ...commitMarkerMismatch,
-          marker: commitMarkerMismatch.marker || commitMarker,
-        },
-        {
-          source: `${source}:indexeddb-commit-marker`,
-          attemptIndex,
-        },
-      );
     }
     const shouldAllowOverride =
       allowOverride ||
@@ -5762,10 +6147,16 @@ async function loadGraphFromIndexedDb(
       };
     }
 
-    return applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
+    const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
       source,
       attemptIndex,
     });
+    if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
+      updateGraphPersistenceState({
+        persistMismatchReason: commitMarkerDiagnostic.reason,
+      });
+    }
+    return loadResult;
   } catch (error) {
     console.warn("[ST-BME] IndexedDB 读取失败，回退 metadata:", error);
     updateGraphPersistenceState({
@@ -6093,6 +6484,17 @@ function maybeResumePendingAutoExtraction(source = "auto-extraction-resume") {
     };
   }
 
+  if (isRestoreLockActive()) {
+    return {
+      resumed: false,
+      reason: "restore-lock-active",
+      restoreLock: cloneRuntimeDebugValue(
+        normalizeRestoreLockState(graphPersistenceState.restoreLock),
+        null,
+      ),
+    };
+  }
+
   const currentChatId = normalizeChatIdCandidate(getCurrentChatId());
   if (!currentChatId || currentChatId !== pendingChatId) {
     clearPendingAutoExtraction();
@@ -6375,6 +6777,7 @@ function buildGraphPersistResult({
   queued = false,
   blocked = false,
   accepted = false,
+  recoverable = false,
   storageTier = "none",
   reason = "",
   loadState = graphPersistenceState.loadState,
@@ -6386,6 +6789,7 @@ function buildGraphPersistResult({
     queued,
     blocked,
     accepted,
+    recoverable,
     storageTier: String(storageTier || "none"),
     reason: String(reason || ""),
     loadState,
@@ -6481,6 +6885,7 @@ function buildBatchPersistenceRecordFromPersistResult(persistResult = null) {
   const accepted = persistResult?.accepted === true;
   const queued = persistResult?.queued === true;
   const blocked = persistResult?.blocked === true;
+  const recoverable = persistResult?.recoverable === true;
   let outcome = "failed";
 
   if (accepted && String(persistResult?.storageTier || "") === "indexeddb") {
@@ -6489,6 +6894,8 @@ function buildBatchPersistenceRecordFromPersistResult(persistResult = null) {
     outcome = "fallback";
   } else if (queued) {
     outcome = "queued";
+  } else if (recoverable) {
+    outcome = "recoverable";
   } else if (blocked) {
     outcome = "blocked";
   }
@@ -6496,6 +6903,7 @@ function buildBatchPersistenceRecordFromPersistResult(persistResult = null) {
   return {
     outcome,
     accepted,
+    recoverable,
     storageTier: String(persistResult?.storageTier || "none"),
     reason: String(persistResult?.reason || ""),
     revision: Number.isFinite(Number(persistResult?.revision))
@@ -6639,6 +7047,11 @@ function applyAcceptedPendingPersistState(
   }
 
   if (persistenceRecord.accepted === true) {
+    updateGraphPersistenceState({
+      acceptedStorageTier: String(persistenceRecord.storageTier || "none"),
+      lastRecoverableStorageTier: "none",
+      pendingPersist: false,
+    });
     const safeFloor = Number.isFinite(Number(lastProcessedAssistantFloor))
       ? Math.floor(Number(lastProcessedAssistantFloor))
       : null;
@@ -6666,6 +7079,9 @@ function schedulePendingGraphPersistRetry(
   reason = "pending-graph-persist-retry",
   attempt = 0,
 ) {
+  if (isRestoreLockActive()) {
+    return false;
+  }
   if (!graphPersistenceState.pendingPersist) {
     clearPendingGraphPersistRetry();
     return false;
@@ -6721,6 +7137,8 @@ function persistGraphToChatMetadata(
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
+      accepted: false,
+      recoverable: false,
       reason: "missing-context-or-graph",
       revision,
     });
@@ -6731,6 +7149,8 @@ function persistGraphToChatMetadata(
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
+      accepted: false,
+      recoverable: false,
       reason: "missing-chat-id",
       revision,
     });
@@ -6744,54 +7164,35 @@ function persistGraphToChatMetadata(
     chatId,
     integrity: nextIntegrity,
   });
-  if (graph === currentGraph) {
-    stampGraphPersistenceMeta(currentGraph, {
-      revision,
-      reason,
-      chatId,
-      integrity: nextIntegrity,
-    });
-  }
+
   writeChatMetadataPatch(context, {
     [GRAPH_METADATA_KEY]: persistedGraph,
   });
   const saveMode = triggerChatMetadataSave(context, { immediate });
 
-  applyGraphLoadState(graphPersistenceState.loadState, {
-    chatId,
-    reason: graphPersistenceState.reason,
-    attemptIndex: graphPersistenceState.attemptIndex,
-    shadowSnapshotUsed: false,
-    shadowSnapshotRevision: 0,
-    shadowSnapshotUpdatedAt: "",
-    shadowSnapshotReason: "",
-    revision,
-    lastPersistedRevision: revision,
-    queuedPersistRevision: 0,
-    queuedPersistChatId: "",
-    pendingPersist: false,
-    writesBlocked: false,
-  });
-  clearPendingGraphPersistRetry();
-  removeGraphShadowSnapshot(chatId);
   updateGraphPersistenceState({
     lastPersistReason: String(reason || ""),
-    lastPersistMode: saveMode,
-    metadataIntegrity: String(nextIntegrity || ""),
-    persistMismatchReason: "",
-    storagePrimary: "metadata",
-    storageMode: "metadata",
-    indexedDbLastError: "",
-    queuedPersistChatId: "",
-    queuedPersistMode: "",
-    queuedPersistRotateIntegrity: false,
-    queuedPersistReason: "",
+    lastPersistMode: `metadata-full:${saveMode}`,
+    metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
+    indexedDbLastError: graphPersistenceState.indexedDbLastError || "",
+    lastRecoverableStorageTier: "metadata-full",
+    dualWriteLastResult: {
+      action: "save",
+      target: "metadata",
+      success: true,
+      recoverable: true,
+      chatId,
+      revision: normalizeIndexedDbRevision(revision),
+      reason: String(reason || "graph-persist"),
+      at: Date.now(),
+    },
   });
   rememberResolvedGraphIdentityAlias(context, chatId);
 
   return buildGraphPersistResult({
     saved: true,
-    accepted: true,
+    accepted: false,
+    recoverable: true,
     reason,
     loadState: graphPersistenceState.loadState,
     revision,
@@ -6803,19 +7204,39 @@ function persistGraphToChatMetadata(
 function queueGraphPersist(
   reason = "graph-persist-blocked",
   revision = graphPersistenceState.revision,
-  { immediate = true, graph = currentGraph, chatId = undefined } = {},
+  {
+    immediate = true,
+    graph = currentGraph,
+    chatId = undefined,
+    captureShadow = true,
+    recoverableTier = "none",
+  } = {},
 ) {
   const queuedChatId =
     String(chatId || graphPersistenceState.chatId || getCurrentChatId()) || "";
-  const shadowCaptured = maybeCaptureGraphShadowSnapshot(reason, {
-    graph,
-    chatId: queuedChatId,
-    revision,
-  });
+  const normalizedRevision = Math.max(
+    1,
+    allocateRequestedPersistRevision(revision, graph),
+  );
+  let effectiveRecoverableTier = isRecoveryOnlyPersistTier(recoverableTier)
+    ? String(recoverableTier)
+    : "none";
+
+  if (captureShadow) {
+    const shadowCaptured = maybeCaptureGraphShadowSnapshot(reason, {
+      graph,
+      chatId: queuedChatId,
+      revision: normalizedRevision,
+    });
+    if (shadowCaptured && effectiveRecoverableTier === "none") {
+      effectiveRecoverableTier = "shadow";
+    }
+  }
+
   updateGraphPersistenceState({
     queuedPersistRevision: Math.max(
-      graphPersistenceState.queuedPersistRevision || 0,
-      revision || 0,
+      normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+      normalizedRevision,
     ),
     queuedPersistChatId: String(queuedChatId || ""),
     queuedPersistMode: immediate ? "immediate" : "debounced",
@@ -6824,18 +7245,23 @@ function queueGraphPersist(
     pendingPersist: true,
     writesBlocked: true,
     lastPersistReason: String(reason || ""),
+    lastPersistMode: immediate ? "pending-immediate" : "pending-debounced",
+    lastRecoverableStorageTier: isRecoveryOnlyPersistTier(effectiveRecoverableTier)
+      ? effectiveRecoverableTier
+      : graphPersistenceState.lastRecoverableStorageTier,
   });
   schedulePendingGraphPersistRetry(String(reason || "graph-persist-blocked"), 0);
 
   return buildGraphPersistResult({
     queued: true,
     blocked: true,
-    accepted: shadowCaptured,
+    accepted: false,
+    recoverable: isRecoveryOnlyPersistTier(effectiveRecoverableTier),
     reason,
     loadState: graphPersistenceState.loadState,
-    revision,
+    revision: normalizedRevision,
     saveMode: immediate ? "immediate" : "debounced",
-    storageTier: shadowCaptured ? "shadow" : "none",
+    storageTier: effectiveRecoverableTier !== "none" ? effectiveRecoverableTier : "none",
   });
 }
 
@@ -6896,8 +7322,21 @@ async function retryPendingGraphPersist({
   reason = "pending-graph-persist-retry",
   retryAttempt = 0,
   scheduleRetryOnFailure = false,
+  ignoreRestoreLock = false,
 } = {}) {
   ensureCurrentGraphRuntimeState();
+
+  if (!ignoreRestoreLock && isRestoreLockActive()) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "restore-lock-active",
+      revision: graphPersistenceState.revision,
+      saveMode: graphPersistenceState.lastPersistMode,
+      storageTier: "none",
+    });
+  }
 
   if (!graphPersistenceState.pendingPersist) {
     clearPendingGraphPersistRetry();
@@ -6987,49 +7426,34 @@ async function retryPendingGraphPersist({
     reason,
   });
   if (indexedDbResult?.saved) {
-    const chatStateMirrorResult = canUseHostGraphChatStatePersistence(context)
-      ? await persistGraphToHostChatState(context, {
-          graph: pendingPersistGraph,
-          revision: targetRevision,
-          reason: `${reason}:chat-state-mirror`,
-          storageTier: "chat-state",
-          accepted: true,
-          lastProcessedAssistantFloor,
-          extractionCount,
-          mode: "mirror",
-        })
-      : null;
+    if (canUseHostGraphChatStatePersistence(context)) {
+      await persistGraphToHostChatState(context, {
+        graph: pendingPersistGraph,
+        revision: indexedDbResult.revision || targetRevision,
+        reason: `${reason}:chat-state-mirror`,
+        storageTier: "chat-state",
+        accepted: true,
+        lastProcessedAssistantFloor,
+        extractionCount,
+        mode: "mirror",
+      });
+    }
     clearPendingGraphPersistRetry();
     persistGraphCommitMarker(context, {
       reason,
-      revision: targetRevision,
+      revision: indexedDbResult.revision || targetRevision,
       storageTier: "indexeddb",
       accepted: true,
       lastProcessedAssistantFloor,
       extractionCount,
       immediate: true,
     });
-    updateGraphPersistenceState({
-      pendingPersist: false,
-      persistMismatchReason: "",
-      lastAcceptedRevision: Math.max(
-        Number(graphPersistenceState.lastAcceptedRevision || 0),
-        targetRevision,
-      ),
-      lastPersistReason: String(reason || ""),
-      lastPersistMode: "indexeddb",
-      queuedPersistRevision: 0,
-      queuedPersistChatId: "",
-      queuedPersistMode: "",
-      queuedPersistRotateIntegrity: false,
-      queuedPersistReason: "",
-    });
     const persistResult = buildGraphPersistResult({
       saved: true,
       accepted: true,
       reason,
-      revision: targetRevision,
-      saveMode: "indexeddb",
+      revision: indexedDbResult.revision || targetRevision,
+      saveMode: String(indexedDbResult.saveMode || "indexeddb-delta"),
       storageTier: "indexeddb",
     });
     applyAcceptedPendingPersistState(persistResult, {
@@ -7055,7 +7479,7 @@ async function retryPendingGraphPersist({
       clearPendingGraphPersistRetry();
       persistGraphCommitMarker(context, {
         reason: `${reason}:chat-state-fallback`,
-        revision: targetRevision,
+        revision: chatStateResult.revision || targetRevision,
         storageTier: "chat-state",
         accepted: true,
         lastProcessedAssistantFloor,
@@ -7063,14 +7487,20 @@ async function retryPendingGraphPersist({
         immediate: true,
       });
       updateGraphPersistenceState({
+        revision: Math.max(
+          Number(graphPersistenceState.revision || 0),
+          Number(chatStateResult.revision || targetRevision),
+        ),
         pendingPersist: false,
         persistMismatchReason: "",
         lastAcceptedRevision: Math.max(
           Number(graphPersistenceState.lastAcceptedRevision || 0),
-          targetRevision,
+          Number(chatStateResult.revision || targetRevision),
         ),
+        acceptedStorageTier: "chat-state",
+        lastRecoverableStorageTier: "none",
         lastPersistReason: `${reason}:chat-state-fallback`,
-        lastPersistMode: "chat-state",
+        lastPersistMode: String(chatStateResult.saveMode || "chat-state"),
         queuedPersistRevision: 0,
         queuedPersistChatId: "",
         queuedPersistMode: "",
@@ -7083,8 +7513,8 @@ async function retryPendingGraphPersist({
         saved: true,
         accepted: true,
         reason: `${reason}:chat-state-fallback`,
-        revision: targetRevision,
-        saveMode: "chat-state",
+        revision: Number(chatStateResult.revision || targetRevision),
+        saveMode: String(chatStateResult.saveMode || "chat-state"),
         storageTier: "chat-state",
       });
       applyAcceptedPendingPersistState(persistResult, {
@@ -7092,7 +7522,7 @@ async function retryPendingGraphPersist({
         persistedGraph: pendingPersistGraph,
       });
       queueGraphPersistToIndexedDb(activeChatId, pendingPersistGraph, {
-        revision: targetRevision,
+        revision: Number(chatStateResult.revision || targetRevision),
         reason: `${reason}:chat-state-fallback:promote-indexeddb`,
       });
       void maybeResumePendingAutoExtraction("pending-persist-resolved:chat-state");
@@ -7100,6 +7530,7 @@ async function retryPendingGraphPersist({
     }
   }
 
+  let recoverableTier = "none";
   if (canPersistGraphToMetadataFallback(context, pendingPersistGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
@@ -7109,49 +7540,36 @@ async function retryPendingGraphPersist({
       graph: pendingPersistGraph,
     });
     if (metadataResult?.saved) {
-      clearPendingGraphPersistRetry();
-      persistGraphCommitMarker(context, {
-        reason: metadataReason,
-        revision: targetRevision,
-        storageTier: "metadata-full",
-        accepted: true,
-        lastProcessedAssistantFloor,
-        extractionCount,
-        immediate: true,
-      });
-      updateGraphPersistenceState({
-        pendingPersist: false,
-        persistMismatchReason: "",
-        lastAcceptedRevision: Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          targetRevision,
-        ),
-        lastPersistReason: metadataReason,
-        lastPersistMode: String(metadataResult.saveMode || "metadata"),
-        queuedPersistRevision: 0,
-        queuedPersistChatId: "",
-        queuedPersistMode: "",
-        queuedPersistRotateIntegrity: false,
-        queuedPersistReason: "",
-      });
-      const persistResult = buildGraphPersistResult({
-        saved: true,
-        accepted: true,
-        reason: metadataReason,
-        revision: targetRevision,
-        saveMode: metadataResult.saveMode,
-        storageTier: "metadata-full",
-      });
-      applyAcceptedPendingPersistState(persistResult, {
-        lastProcessedAssistantFloor,
-        persistedGraph: pendingPersistGraph,
-      });
-      void maybeResumePendingAutoExtraction("pending-persist-resolved:metadata");
-      return persistResult;
+      recoverableTier = "metadata-full";
     }
   }
 
-  if (scheduleRetryOnFailure) {
+  if (
+    recoverableTier === "none" &&
+    maybeCaptureGraphShadowSnapshot(`${reason}:shadow-fallback`, {
+      graph: pendingPersistGraph,
+      chatId: activeChatId,
+      revision: targetRevision,
+    })
+  ) {
+    recoverableTier = "shadow";
+  }
+
+  const queuedReason = `${reason}:still-pending`;
+  const queuedResult = queueGraphPersist(queuedReason, targetRevision, {
+    immediate: graphPersistenceState.queuedPersistMode !== "debounced",
+    graph: pendingPersistGraph,
+    chatId: activeChatId,
+    captureShadow: recoverableTier === "none",
+    recoverableTier,
+  });
+  if (recoverableTier !== "none") {
+    updateGraphPersistenceState({
+      lastPersistReason: queuedReason,
+      lastRecoverableStorageTier: recoverableTier,
+    });
+  }
+  if (scheduleRetryOnFailure && recoverableTier === "none") {
     schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
   }
   return buildGraphPersistResult({
@@ -7159,10 +7577,17 @@ async function retryPendingGraphPersist({
     queued: true,
     blocked: true,
     accepted: false,
-    reason: `${reason}:still-pending`,
-    revision: targetRevision,
-    saveMode: graphPersistenceState.queuedPersistMode || "immediate",
-    storageTier: "none",
+    recoverable:
+      recoverableTier !== "none" || queuedResult?.recoverable === true,
+    reason: queuedReason,
+    revision: Number(queuedResult?.revision || targetRevision),
+    saveMode: String(
+      queuedResult?.saveMode || graphPersistenceState.queuedPersistMode || "immediate",
+    ),
+    storageTier:
+      recoverableTier !== "none"
+        ? recoverableTier
+        : String(queuedResult?.storageTier || "none"),
   });
 }
 
@@ -7198,55 +7623,40 @@ async function persistExtractionBatchResult({
     });
   }
 
-  const revision = bumpGraphRevision(reason);
+  const revision = allocateRequestedPersistRevision(0, persistGraph);
   const indexedDbResult = await saveGraphToIndexedDb(chatId, persistGraph, {
     revision,
     reason,
   });
   if (indexedDbResult?.saved) {
-    const chatStateMirrorResult = canUseHostGraphChatStatePersistence(context)
-      ? await persistGraphToHostChatState(context, {
-          graph: persistGraph,
-          revision,
-          reason: `${reason}:chat-state-mirror`,
-          storageTier: "chat-state",
-          accepted: true,
-          lastProcessedAssistantFloor,
-          extractionCount,
-          mode: "mirror",
-        })
-      : null;
+    if (canUseHostGraphChatStatePersistence(context)) {
+      await persistGraphToHostChatState(context, {
+        graph: persistGraph,
+        revision: indexedDbResult.revision || revision,
+        reason: `${reason}:chat-state-mirror`,
+        storageTier: "chat-state",
+        accepted: true,
+        lastProcessedAssistantFloor,
+        extractionCount,
+        mode: "mirror",
+      });
+    }
     persistGraphCommitMarker(context, {
       reason,
-      revision,
+      revision: indexedDbResult.revision || revision,
       storageTier: "indexeddb",
       accepted: true,
       lastProcessedAssistantFloor,
       extractionCount,
       immediate: true,
     });
-    updateGraphPersistenceState({
-      pendingPersist: false,
-      persistMismatchReason: "",
-      lastAcceptedRevision: Math.max(
-        Number(graphPersistenceState.lastAcceptedRevision || 0),
-        revision,
-      ),
-      lastPersistReason: String(reason || ""),
-      lastPersistMode: "indexeddb",
-      queuedPersistRevision: 0,
-      queuedPersistChatId: "",
-      queuedPersistMode: "",
-      queuedPersistRotateIntegrity: false,
-      queuedPersistReason: "",
-    });
     clearPendingGraphPersistRetry();
     return buildGraphPersistResult({
       saved: true,
       accepted: true,
       reason,
-      revision,
-      saveMode: "indexeddb",
+      revision: indexedDbResult.revision || revision,
+      saveMode: String(indexedDbResult.saveMode || "indexeddb-delta"),
       storageTier: "indexeddb",
     });
   }
@@ -7265,7 +7675,7 @@ async function persistExtractionBatchResult({
     if (chatStateResult?.saved) {
       persistGraphCommitMarker(context, {
         reason: `${reason}:chat-state-fallback`,
-        revision,
+        revision: chatStateResult.revision || revision,
         storageTier: "chat-state",
         accepted: true,
         lastProcessedAssistantFloor,
@@ -7273,14 +7683,20 @@ async function persistExtractionBatchResult({
         immediate: true,
       });
       updateGraphPersistenceState({
+        revision: Math.max(
+          Number(graphPersistenceState.revision || 0),
+          Number(chatStateResult.revision || revision),
+        ),
         pendingPersist: false,
         persistMismatchReason: "",
         lastAcceptedRevision: Math.max(
           Number(graphPersistenceState.lastAcceptedRevision || 0),
-          revision,
+          Number(chatStateResult.revision || revision),
         ),
+        acceptedStorageTier: "chat-state",
+        lastRecoverableStorageTier: "none",
         lastPersistReason: `${reason}:chat-state-fallback`,
-        lastPersistMode: "chat-state",
+        lastPersistMode: String(chatStateResult.saveMode || "chat-state"),
         queuedPersistRevision: 0,
         queuedPersistChatId: "",
         queuedPersistMode: "",
@@ -7291,66 +7707,29 @@ async function persistExtractionBatchResult({
       });
       clearPendingGraphPersistRetry();
       queueGraphPersistToIndexedDb(chatId, persistGraph, {
-        revision,
+        revision: Number(chatStateResult.revision || revision),
         reason: `${reason}:chat-state-fallback:promote-indexeddb`,
       });
       return buildGraphPersistResult({
         saved: true,
         accepted: true,
         reason: `${reason}:chat-state-fallback`,
-        revision,
-        saveMode: "chat-state",
+        revision: Number(chatStateResult.revision || revision),
+        saveMode: String(chatStateResult.saveMode || "chat-state"),
         storageTier: "chat-state",
       });
     }
   }
 
-  const shadowReason = `${reason}:shadow-fallback`;
-  const shadowCaptured = maybeCaptureGraphShadowSnapshot(shadowReason, {
-    graph: persistGraph,
-    chatId,
-    revision,
-  });
-  if (shadowCaptured) {
-    if (isGraphMetadataWriteAllowed()) {
-      persistGraphCommitMarker(context, {
-        reason: shadowReason,
-        revision,
-        storageTier: "shadow",
-        accepted: true,
-        lastProcessedAssistantFloor,
-        extractionCount,
-        immediate: true,
-      });
-    }
-    updateGraphPersistenceState({
-      pendingPersist: false,
-      persistMismatchReason: "",
-      lastAcceptedRevision: Math.max(
-        Number(graphPersistenceState.lastAcceptedRevision || 0),
-        revision,
-      ),
-      lastPersistReason: shadowReason,
-      lastPersistMode: "shadow",
-      queuedPersistRevision: 0,
-      queuedPersistChatId: "",
-      queuedPersistMode: "",
-      queuedPersistRotateIntegrity: false,
-      queuedPersistReason: "",
-    });
-    clearPendingGraphPersistRetry();
-    queueGraphPersistToIndexedDb(chatId, persistGraph, {
+  let recoverableTier = "none";
+  if (
+    maybeCaptureGraphShadowSnapshot(`${reason}:shadow-fallback`, {
+      graph: persistGraph,
+      chatId,
       revision,
-      reason: `${shadowReason}:promote-indexeddb`,
-    });
-    return buildGraphPersistResult({
-      saved: false,
-      accepted: true,
-      reason: shadowReason,
-      revision,
-      saveMode: "shadow",
-      storageTier: "shadow",
-    });
+    })
+  ) {
+    recoverableTier = "shadow";
   }
 
   if (canPersistGraphToMetadataFallback(context, persistGraph)) {
@@ -7362,41 +7741,7 @@ async function persistExtractionBatchResult({
       graph: persistGraph,
     });
     if (metadataResult?.saved) {
-      persistGraphCommitMarker(context, {
-        reason: metadataReason,
-        revision,
-        storageTier: "metadata-full",
-        accepted: true,
-        lastProcessedAssistantFloor,
-        extractionCount,
-        immediate: true,
-      });
-      updateGraphPersistenceState({
-        pendingPersist: false,
-        persistMismatchReason: "",
-        lastAcceptedRevision: Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          revision,
-        ),
-        queuedPersistRevision: 0,
-        queuedPersistChatId: "",
-        queuedPersistMode: "",
-        queuedPersistRotateIntegrity: false,
-        queuedPersistReason: "",
-      });
-      clearPendingGraphPersistRetry();
-      queueGraphPersistToIndexedDb(chatId, persistGraph, {
-        revision,
-        reason: `${metadataReason}:promote-indexeddb`,
-      });
-      return buildGraphPersistResult({
-        saved: true,
-        accepted: true,
-        reason: metadataReason,
-        revision,
-        saveMode: metadataResult.saveMode,
-        storageTier: "metadata-full",
-      });
+      recoverableTier = "metadata-full";
     }
   }
 
@@ -7404,21 +7749,32 @@ async function persistExtractionBatchResult({
     immediate: true,
     graph: persistGraph,
     chatId,
+    captureShadow: recoverableTier === "none",
+    recoverableTier,
   });
   updateGraphPersistenceState({
     pendingPersist: true,
     lastPersistReason: String(queuedResult.reason || `${reason}:pending`),
     lastPersistMode: String(queuedResult.saveMode || ""),
+    lastRecoverableStorageTier:
+      recoverableTier !== "none"
+        ? recoverableTier
+        : String(queuedResult.storageTier || graphPersistenceState.lastRecoverableStorageTier || "none"),
   });
   return buildGraphPersistResult({
     saved: false,
     queued: Boolean(queuedResult?.queued),
     blocked: Boolean(queuedResult?.blocked),
     accepted: false,
+    recoverable:
+      recoverableTier !== "none" || queuedResult?.recoverable === true,
     reason: String(queuedResult?.reason || `${reason}:pending`),
-    revision,
+    revision: Number(queuedResult?.revision || revision),
     saveMode: String(queuedResult?.saveMode || ""),
-    storageTier: String(queuedResult?.storageTier || "none"),
+    storageTier:
+      recoverableTier !== "none"
+        ? recoverableTier
+        : String(queuedResult?.storageTier || "none"),
   });
 }
 
@@ -8018,7 +8374,7 @@ function buildMaintenanceSummary(action, result, mode = "manual") {
   const prefix = mode === "auto" ? "自动" : "手动";
   switch (String(action || "")) {
     case "compress":
-      return `${prefix}压缩：新建 ${result?.created || 0}，归档 ${result?.archived || 0}`;
+      return `${prefix}压缩：新增 ${result?.created || 0}，归档 ${result?.archived || 0}`;
     case "consolidate":
       return `${prefix}整合：合并 ${result?.merged || 0}，跳过 ${result?.skipped || 0}，保留 ${result?.kept || 0}，进化 ${result?.evolved || 0}，新链接 ${result?.connections || 0}，回溯更新 ${result?.updates || 0}`;
     case "sleep":
@@ -8698,26 +9054,31 @@ function loadGraphFromChat(options = {}) {
         };
       }
 
+      let metadataMismatchDiagnostic = null;
       if (metadataCommitMismatch.mismatched) {
         clearPendingGraphLoadRetry();
+        metadataMismatchDiagnostic = recordPersistMismatchDiagnostic(
+          metadataCommitMismatch,
+          {
+            source: `${source}:metadata-compat`,
+          },
+        );
         if (
           shadowSnapshot &&
           Number(shadowSnapshot.revision || 0) >=
             Number(metadataCommitMismatch.markerRevision || 0)
         ) {
-          return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
+          const shadowResult = applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
             source: `${source}:metadata-shadow`,
             attemptIndex,
           });
+          if (shadowResult?.loaded && metadataMismatchDiagnostic?.reason) {
+            updateGraphPersistenceState({
+              persistMismatchReason: metadataMismatchDiagnostic.reason,
+            });
+          }
+          return shadowResult;
         }
-        return applyPersistMismatchBlockedState(
-          chatId,
-          metadataCommitMismatch,
-          {
-            source: `${source}:metadata-compat`,
-            attemptIndex,
-          },
-        );
       }
 
       if (shadowSnapshot && shadowDecision?.reason) {
@@ -8807,6 +9168,10 @@ function loadGraphFromChat(options = {}) {
         storageMode: "indexeddb",
         dbReady: false,
         indexedDbLastError: "",
+        persistMismatchReason:
+          metadataMismatchDiagnostic?.reason ||
+          graphPersistenceState.persistMismatchReason ||
+          "",
         dualWriteLastResult: {
           action: "load",
           source: `${source}:metadata-compat`,
@@ -8847,13 +9212,13 @@ function loadGraphFromChat(options = {}) {
 
   if (shadowSnapshot) {
     const acceptedCommitRevision = getAcceptedCommitMarkerRevision(commitMarker);
+    let shadowOnlyMismatch = null;
     if (
       acceptedCommitRevision > 0 &&
       Number(shadowSnapshot.revision || 0) < acceptedCommitRevision
     ) {
       clearPendingGraphLoadRetry();
-      return applyPersistMismatchBlockedState(
-        chatId,
+      shadowOnlyMismatch = recordPersistMismatchDiagnostic(
         {
           mismatched: true,
           reason: "persist-mismatch:indexeddb-behind-commit-marker",
@@ -8863,15 +9228,21 @@ function loadGraphFromChat(options = {}) {
         },
         {
           source: `${source}:shadow-no-official`,
-          attemptIndex,
+          resolvedBy: "shadow",
         },
       );
     }
     clearPendingGraphLoadRetry();
-    return applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
+    const shadowResult = applyShadowSnapshotToRuntime(chatId, shadowSnapshot, {
       source: `${source}:shadow-no-official`,
       attemptIndex,
     });
+    if (shadowOnlyMismatch?.reason && shadowResult?.loaded) {
+      updateGraphPersistenceState({
+        persistMismatchReason: shadowOnlyMismatch.reason,
+      });
+    }
+    return shadowResult;
   }
 
   applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
@@ -8935,9 +9306,10 @@ async function saveGraphToIndexedDb(
     const baseSnapshot =
       readCachedIndexedDbSnapshot(normalizedChatId) ||
       (await db.exportSnapshot());
+    const requestedRevision = resolvePersistRevisionFloor(revision, graph);
     const snapshot = buildSnapshotFromGraph(graph, {
       chatId: normalizedChatId,
-      revision,
+      revision: requestedRevision,
       baseSnapshot,
       lastModified: Date.now(),
       meta: {
@@ -8948,27 +9320,35 @@ async function saveGraphToIndexedDb(
         hostChatId: currentIdentity.hostChatId || "",
       },
     });
-    const importResult = await db.importSnapshot(snapshot, {
-      mode: "replace",
-      preserveRevision: true,
-      revision,
+    const delta = buildPersistDelta(baseSnapshot, snapshot);
+    const commitResult = await db.commitDelta(delta, {
+      reason,
+      requestedRevision,
       markSyncDirty: true,
     });
-    let syncDirtyWarning = "";
+
     let scheduleUploadWarning = "";
-    try {
-      await db.markSyncDirty(reason);
-    } catch (error) {
-      syncDirtyWarning =
-        error?.message || String(error) || "mark-sync-dirty-failed";
-      console.warn("[ST-BME] IndexedDB 已写入，但补记 syncDirty 失败:", error);
+    snapshot.meta.revision = normalizeIndexedDbRevision(
+      commitResult?.revision,
+      requestedRevision,
+    );
+    snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
+    snapshot.meta.lastMutationReason = String(reason || "graph-save");
+    snapshot.meta.storagePrimary = "indexeddb";
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+
+    if (graph === currentGraph) {
+      stampGraphPersistenceMeta(currentGraph, {
+        revision: snapshot.meta.revision,
+        reason: String(reason || "graph-save"),
+        chatId: normalizedChatId,
+        integrity:
+          currentIdentity.integrity ||
+          getChatMetadataIntegrity(getContext()) ||
+          graphPersistenceState.metadataIntegrity,
+      });
     }
 
-    snapshot.meta.revision = normalizeIndexedDbRevision(
-      importResult?.revision,
-      revision,
-    );
-    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
     try {
       scheduleUpload(
         normalizedChatId,
@@ -8983,6 +9363,7 @@ async function saveGraphToIndexedDb(
     }
 
     updateGraphPersistenceState({
+      revision: snapshot.meta.revision,
       storagePrimary: "indexeddb",
       storageMode: "indexeddb",
       dbReady: true,
@@ -8996,9 +9377,20 @@ async function saveGraphToIndexedDb(
       indexedDbRevision: snapshot.meta.revision,
       metadataIntegrity:
         getChatMetadataIntegrity(getContext()) ||
+          currentIdentity.integrity ||
           graphPersistenceState.metadataIntegrity,
       indexedDbLastError: "",
       lastSyncError: scheduleUploadWarning,
+      syncDirty: true,
+      syncDirtyReason: String(reason || "graph-save"),
+      lastPersistReason: String(reason || "graph-save"),
+      lastPersistMode: "indexeddb-delta",
+      lastAcceptedRevision: Math.max(
+        Number(graphPersistenceState.lastAcceptedRevision || 0),
+        snapshot.meta.revision,
+      ),
+      acceptedStorageTier: "indexeddb",
+      lastRecoverableStorageTier: "none",
       dualWriteLastResult: {
         action: "save",
         target: "indexeddb",
@@ -9006,9 +9398,8 @@ async function saveGraphToIndexedDb(
         chatId: normalizedChatId,
         revision: snapshot.meta.revision,
         reason: String(reason || "graph-save"),
-        warning:
-          [syncDirtyWarning, scheduleUploadWarning].filter(Boolean).join(" | ") ||
-          "",
+        warning: scheduleUploadWarning || "",
+        delta: cloneRuntimeDebugValue(commitResult?.delta, null),
         at: Date.now(),
       },
     });
@@ -9051,11 +9442,13 @@ async function saveGraphToIndexedDb(
       chatId: normalizedChatId,
       revision: snapshot.meta.revision,
       reason: String(reason || "graph-save"),
-      warning:
-        [syncDirtyWarning, scheduleUploadWarning].filter(Boolean).join(" | ") || "",
+      saveMode: "indexeddb-delta",
+      warning: scheduleUploadWarning || "",
+      delta: cloneRuntimeDebugValue(commitResult?.delta, null),
+      snapshot,
     };
   } catch (error) {
-    console.warn("[ST-BME] IndexedDB 写入失败，保留 metadata 兜底:", error);
+    console.warn("[ST-BME] IndexedDB 写入失败，保鐣?metadata 兜底:", error);
     updateGraphPersistenceState({
       indexedDbLastError: error?.message || String(error),
       dualWriteLastResult: {
@@ -9163,8 +9556,8 @@ function saveGraphToChat(options = {}) {
   }
 
   const revision = markMutation
-    ? bumpGraphRevision(reason)
-    : graphPersistenceState.revision || 0;
+    ? allocateRequestedPersistRevision(0, currentGraph)
+    : resolvePersistRevisionFloor(0, currentGraph);
 
   if (captureShadow) {
     maybeCaptureGraphShadowSnapshot(reason);
@@ -9254,8 +9647,7 @@ function saveGraphToChat(options = {}) {
     immediate,
   });
   updateGraphPersistenceState({
-    storagePrimary: "metadata",
-    storageMode: "metadata",
+    storageMode: "metadata-full",
     dualWriteLastResult: {
       action: "save",
       target: "metadata",
@@ -9369,7 +9761,7 @@ function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     generationType,
   });
 
-  // 对于 history 类型（continue/regenerate/swipe），必须有 chat 中的用户消息
+  // 对于 history 类型（continue/regenerate/swipe），必须依赖 chat 中的用户消息
   if (generationType !== "normal") {
     if (!Number.isFinite(targetUserMessageIndex)) {
       return {
@@ -9420,7 +9812,7 @@ function buildNormalGenerationRecallInput(chat, options = {}) {
   const tailUserText = lastNonSystemMessage?.is_user
     ? normalizeRecallInputText(lastNonSystemMessage?.mes || "")
     : "";
-  // 当 GENERATION_AFTER_COMMANDS 触发时，ST 可能已追加了空 assistant 消息，
+  // 当 GENERATION_AFTER_COMMANDS 触发时，ST 可能已追加了空 assistant 消息。
   // 导致 lastNonSystemMessage 不是 user。用 getLatestUserChatMessage 反向扫描
   // 定位真正的用户消息（与 shujuku 参考实现一致）。
   const latestUserMessage = !tailUserText ? getLatestUserChatMessage(chat) : null;
@@ -9767,6 +10159,41 @@ function resolveGenerationRecallDeliveryMode(
   return "immediate";
 }
 
+function shouldUseAuthoritativeGenerationRecallInput(recallOptions = {}) {
+  const normalizedGenerationType = normalizeGenerationRecallTransactionType(
+    recallOptions?.generationType || "normal",
+  );
+  if (normalizedGenerationType !== "normal") {
+    return false;
+  }
+  return Boolean(getSettings()?.recallUseAuthoritativeGenerationInput);
+}
+
+function shouldPreserveAuthoritativeGenerationRecallText(
+  source,
+  overrideUserMessage,
+  targetUserMessageText,
+  recallOptions = {},
+) {
+  if (!shouldUseAuthoritativeGenerationRecallInput(recallOptions)) {
+    return false;
+  }
+  const normalizedOverride = normalizeRecallInputText(overrideUserMessage);
+  const normalizedTarget = normalizeRecallInputText(targetUserMessageText);
+  if (!normalizedOverride || !normalizedTarget || normalizedOverride === normalizedTarget) {
+    return false;
+  }
+  const normalizedSource = String(source || "").trim();
+  return [
+    "send-intent",
+    "generation-started-send-intent",
+    "generation-started-textarea",
+    "host-generation-lifecycle",
+    "textarea-live",
+    "planner-handoff",
+  ].includes(normalizedSource);
+}
+
 function freezeGenerationRecallOptionsForTransaction(
   chat,
   generationType = "normal",
@@ -9841,6 +10268,8 @@ function freezeGenerationRecallOptionsForTransaction(
         lockedSource: source,
         lockedSourceLabel: sourceLabel,
         lockedReason: sourceReason,
+        authoritativeInputUsed: false,
+        boundUserFloorText: "",
         includeSyntheticUserMessage: Boolean(
           recallOptions?.includeSyntheticUserMessage,
         ),
@@ -9855,12 +10284,21 @@ function freezeGenerationRecallOptionsForTransaction(
     return null;
   }
 
-  const frozenUserMessage = normalizeRecallInputText(
-    targetUserMessage?.mes ||
-      recallOptions?.overrideUserMessage ||
-      recallOptions?.userMessage ||
-      "",
+  const targetUserMessageText = normalizeRecallInputText(targetUserMessage?.mes || "");
+  const preserveAuthoritativeText = shouldPreserveAuthoritativeGenerationRecallText(
+    source,
+    overrideUserMessage,
+    targetUserMessageText,
+    recallOptions,
   );
+  const frozenUserMessage = preserveAuthoritativeText
+    ? normalizeRecallInputText(overrideUserMessage)
+    : normalizeRecallInputText(
+        targetUserMessage?.mes ||
+          recallOptions?.overrideUserMessage ||
+          recallOptions?.userMessage ||
+          "",
+      );
   if (!frozenUserMessage) {
     return null;
   }
@@ -9884,7 +10322,9 @@ function freezeGenerationRecallOptionsForTransaction(
       (frozenUserMessage === overrideUserMessage
         ? "transaction-source-frozen"
         : "transaction-bound-to-chat-user-floor"),
-    includeSyntheticUserMessage: false,
+    authoritativeInputUsed: preserveAuthoritativeText,
+    boundUserFloorText: targetUserMessageText,
+    includeSyntheticUserMessage: preserveAuthoritativeText,
   };
 }
 
@@ -10074,6 +10514,10 @@ function clearGenerationRecallTransactionsForChat(
 }
 
 function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") {
+  if (isRestoreLockActive()) {
+    return false;
+  }
+
   const hadActiveRecall = Boolean(
     isRecalling ||
     (stageAbortControllers.recall &&
@@ -10450,7 +10894,7 @@ async function handleExtractionSuccess(
           const prefix = mode === "auto" ? "自动" : "手动";
           switch (String(action || "")) {
             case "compress":
-              return `${prefix}压缩：新建 ${maintenanceResult?.created || 0}，归档 ${maintenanceResult?.archived || 0}`;
+              return `${prefix}压缩：新增 ${maintenanceResult?.created || 0}，归档 ${maintenanceResult?.archived || 0}`;
             case "consolidate":
               return `${prefix}整合：合并 ${maintenanceResult?.merged || 0}，跳过 ${maintenanceResult?.skipped || 0}，保留 ${maintenanceResult?.kept || 0}，进化 ${maintenanceResult?.evolved || 0}，新链接 ${maintenanceResult?.connections || 0}，回溯更新 ${maintenanceResult?.updates || 0}`;
             case "sleep":
@@ -10613,8 +11057,8 @@ async function handleExtractionSuccess(
       updateExtractionPostProcessStatus(
         summaryStageLabel === "概要生成" ? "概要更新中" : "层级总结处理中",
         summaryStageLabel === "概要生成"
-          ? `第 ${extractionCount} 次提取，正在生成全局概要`
-          : `第 ${extractionCount} 次提取，正在检查小总结与折叠总结`,
+          ? `${extractionCount} 次提取，正在生成全局概要`
+          : `${extractionCount} 次提取，正在检查小总结与折叠总结`,
       );
       const summaryResult = await runSummaryPostProcess({
         graph: currentGraph,
@@ -10656,7 +11100,7 @@ async function handleExtractionSuccess(
     try {
       updateExtractionPostProcessStatus(
         "反思生成中",
-        `第 ${extractionCount} 次提取，正在生成长期反思`,
+        `${extractionCount} 次提取，正在生成长期反思`,
       );
       await generateReflection({
         graph: currentGraph,
@@ -10686,7 +11130,7 @@ async function handleExtractionSuccess(
     try {
       updateExtractionPostProcessStatus(
         "主动遗忘中",
-        `第 ${extractionCount} 次提取，正在归档低价值记忆`,
+        `${extractionCount} 次提取，正在归档低价值记忆`,
       );
       const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
       const sleepResult = sleepCycle(currentGraph, settings);
@@ -10853,13 +11297,6 @@ function notifyHistoryDirty(dirtyFrom, reason) {
       persist: true,
       busy: true,
     },
-  );
-  const now = Date.now();
-  if (now - lastHistoryWarningAt < 3000) return;
-  lastHistoryWarningAt = now;
-  toastr.warning(
-    `检测到楼层历史变化，将从楼层 ${dirtyFrom} 之后自动恢复图谱`,
-    reason || "ST-BME 历史回退保护",
   );
 }
 
@@ -11439,7 +11876,11 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   if (!detection.dirty && !Number.isFinite(dirtyFrom)) {
     return true;
   }
+  if (isRestoreLockActive()) {
+    return false;
+  }
 
+  enterRestoreLock("history-recovery", trigger);
   isRecoveringHistory = true;
   clearInjectionState();
 
@@ -11580,12 +12021,9 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         persist: false,
       },
     );
-
-    toastr.success(
-      usedFullRebuild
-        ? "历史变化已触发全量重建"
-        : "历史变化已完成受影响后缀恢复",
-    );
+    if (usedFullRebuild) {
+      toastr.warning("历史变化已触发全量重建");
+    }
     return true;
   } catch (error) {
     if (isAbortError(error)) {
@@ -11727,6 +12165,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
     }
   } finally {
     finishStageAbortController("history", historyController);
+    leaveRestoreLock("history-recovery");
     isRecoveringHistory = false;
     const enqueueMicrotask =
       typeof globalThis.queueMicrotask === "function"
@@ -12044,11 +12483,25 @@ async function runPlannerRecallForEna({
  * 召回管线：检索并注入记忆
  */
 async function runRecall(options = {}) {
+  if (!options?.ignoreRestoreLock && isRestoreLockActive()) {
+    const message = getRestoreLockMessage("召回");
+    setLastRecallStatus("召回已暂停", message, "warning", {
+      syncRuntime: true,
+    });
+    return createRecallRunResult("skipped", {
+      reason: "restore-lock-active",
+      restoreLock: cloneRuntimeDebugValue(
+        normalizeRestoreLockState(graphPersistenceState.restoreLock),
+        null,
+      ),
+    });
+  }
   return await runRecallController(
     {
       abortRecallStageWithReason,
       applyRecallInjection,
       beginStageAbortController,
+      bumpPersistedRecallGenerationCount,
       buildRecallRetrieveOptions,
       clampInt,
       console,
@@ -12072,10 +12525,12 @@ async function runRecall(options = {}) {
       isGraphReadable,
       isGraphReadableForRecall,
       nextRecallRunSequence: () => ++recallRunSequence,
+      readPersistedRecallFromUserMessage,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
       resolveRecallInput,
       retrieve,
+      schedulePersistedRecallMessageUiRefresh,
       setActiveRecallPromise: (value) => {
         activeRecallPromise = value;
       },
@@ -12087,6 +12542,7 @@ async function runRecall(options = {}) {
         pendingRecallSendIntent = value;
       },
       toastr,
+      triggerChatMetadataSave,
       waitForActiveRecallToSettle,
     },
     options,
@@ -12428,38 +12884,47 @@ async function onViewGraph() {
 }
 
 async function onRebuild() {
-  return await onRebuildController({
-    buildRecoveryResult,
-    clearHistoryDirty,
-    clearInjectionState,
-    cloneGraphSnapshot,
-    confirm: (message) => {
-      if (typeof globalThis.confirm === "function") {
-        return globalThis.confirm(message);
-      }
-      return false;
-    },
-    createEmptyGraph,
-    ensureGraphMutationReady,
-    getContext,
-    getCurrentChatId,
-    getCurrentGraph: () => currentGraph,
-    getSettings,
-    normalizeGraphRuntimeState,
-    prepareVectorStateForReplay,
-    refreshPanelLiveState,
-    replayExtractionFromHistory,
-    restoreRuntimeUiState,
-    saveGraphToChat,
-    updateProcessedHistorySnapshot,
-    setCurrentGraph: (graph) => {
-      currentGraph = graph;
-    },
-    setLastExtractionStatus,
-    setRuntimeStatus,
-    snapshotRuntimeUiState,
-    toastr,
-  });
+  return await runWithRestoreLock(
+    "manual-rebuild",
+    "manual-rebuild",
+    async () =>
+      await onRebuildController({
+        buildRecoveryResult,
+        clearHistoryDirty,
+        clearInjectionState,
+        cloneGraphSnapshot,
+        confirm: (message) => {
+          if (typeof globalThis.confirm === "function") {
+            return globalThis.confirm(message);
+          }
+          return false;
+        },
+        createEmptyGraph,
+        ensureGraphMutationReady: (operationLabel, options = {}) =>
+          ensureGraphMutationReady(operationLabel, {
+            ...(options || {}),
+            ignoreRestoreLock: true,
+          }),
+        getContext,
+        getCurrentChatId,
+        getCurrentGraph: () => currentGraph,
+        getSettings,
+        normalizeGraphRuntimeState,
+        prepareVectorStateForReplay,
+        refreshPanelLiveState,
+        replayExtractionFromHistory,
+        restoreRuntimeUiState,
+        saveGraphToChat,
+        updateProcessedHistorySnapshot,
+        setCurrentGraph: (graph) => {
+          currentGraph = graph;
+        },
+        setLastExtractionStatus,
+        setRuntimeStatus,
+        snapshotRuntimeUiState,
+        toastr,
+      }),
+  );
 }
 
 async function onManualCompress() {
@@ -12717,32 +13182,41 @@ async function onExportGraph() {
 }
 
 async function onImportGraph() {
-  return await onImportGraphController({
-    clearInjectionState,
-    clearTimeout,
-    document,
-    ensureGraphMutationReady,
-    getAssistantTurns,
-    getContext,
-    getCurrentChatId,
-    importGraph,
-    markVectorStateDirty,
-    normalizeGraphRuntimeState,
-    rebindProcessedHistoryStateToChat,
-    saveGraphToChat,
-    setCurrentGraph: (graph) => {
-      currentGraph = graph;
-    },
-    setExtractionCount: (value) => {
-      extractionCount = value;
-    },
-    setLastExtractedItems: (items) => {
-      lastExtractedItems = items;
-    },
-    toastr,
-    updateLastRecalledItems,
-    window,
-  });
+  return await runWithRestoreLock(
+    "graph-import",
+    "graph-import",
+    async () =>
+      await onImportGraphController({
+        clearInjectionState,
+        clearTimeout,
+        document,
+        ensureGraphMutationReady: (operationLabel, options = {}) =>
+          ensureGraphMutationReady(operationLabel, {
+            ...(options || {}),
+            ignoreRestoreLock: true,
+          }),
+        getAssistantTurns,
+        getContext,
+        getCurrentChatId,
+        importGraph,
+        markVectorStateDirty,
+        normalizeGraphRuntimeState,
+        rebindProcessedHistoryStateToChat,
+        saveGraphToChat,
+        setCurrentGraph: (graph) => {
+          currentGraph = graph;
+        },
+        setExtractionCount: (value) => {
+          extractionCount = value;
+        },
+        setLastExtractedItems: (items) => {
+          lastExtractedItems = items;
+        },
+        toastr,
+        updateLastRecalledItems,
+        window,
+      }),
+  );
 }
 
 async function onViewLastInjection() {
@@ -12935,17 +13409,29 @@ async function onManualSummaryRollup() {
 }
 
 async function onRebuildSummaryState(options = {}) {
-  return await onRebuildSummaryStateController({
-    ensureGraphMutationReady,
-    getContext,
-    getCurrentGraph: () => currentGraph,
-    getSettings,
-    rebuildHierarchicalSummaryState,
-    refreshPanelLiveState,
-    saveGraphToChat,
-    setRuntimeStatus,
-    toastr,
-  }, options);
+  return await runWithRestoreLock(
+    "summary-rebuild",
+    "summary-rebuild",
+    async () =>
+      await onRebuildSummaryStateController(
+        {
+          ensureGraphMutationReady: (operationLabel, nextOptions = {}) =>
+            ensureGraphMutationReady(operationLabel, {
+              ...(nextOptions || {}),
+              ignoreRestoreLock: true,
+            }),
+          getContext,
+          getCurrentGraph: () => currentGraph,
+          getSettings,
+          rebuildHierarchicalSummaryState,
+          refreshPanelLiveState,
+          saveGraphToChat,
+          setRuntimeStatus,
+          toastr,
+        },
+        options,
+      ),
+  );
 }
 
 async function onClearSummaryState() {
@@ -13122,48 +13608,54 @@ async function onBackupCurrentChatToCloud() {
 }
 
 async function onRestoreCurrentChatFromCloud() {
-  const chatId = getCurrentChatId();
-  if (!chatId) {
-    toastr.warning("当前没有聊天上下文");
-    return { handledToast: true };
-  }
+  return await runWithRestoreLock(
+    "cloud-restore",
+    "manual-restore",
+    async () => {
+      const chatId = getCurrentChatId();
+      if (!chatId) {
+        toastr.warning("当前没有聊天上下文");
+        return { handledToast: true };
+      }
 
-  const confirmed = globalThis.confirm?.(
-    "这会用云端备份完整覆盖当前聊天的本地记忆，并先保留一份本地安全快照。确定继续吗？",
+      const confirmed = globalThis.confirm?.(
+        "这会用云端备份完整覆盖当前聊天的本地记忆，并先保留一份本地安全快照。确定继续吗？",
+      );
+      if (!confirmed) {
+        return { cancelled: true };
+      }
+
+      const result = await restoreFromServer(
+        chatId,
+        buildBmeSyncRuntimeOptions({
+          reason: "manual-restore",
+          trigger: "panel:manual-restore",
+        }),
+      );
+
+      if (!result?.restored) {
+        const reasonMap = {
+          "not-found": "服务器上没有找到当前聊天的备份",
+          "backup-missing": "服务器上没有找到当前聊天的备份",
+          "backup-version-mismatch": "备份版本与当前运行时不兼容",
+          "backup-chat-id-mismatch": "备份聊天 ID 与当前聊天不匹配",
+          "snapshot-chat-id-mismatch": "备份内部快照与当前聊天不匹配",
+        };
+        toastr.error(
+          reasonMap[result?.reason] ||
+            `恢复失败: ${result?.error?.message || result?.reason || "未知原因"}`,
+        );
+        return { handledToast: true, result };
+      }
+
+      toastr.success("已从云端恢复当前聊天备份");
+      await syncIndexedDbMetaToPersistenceState(chatId, {
+        syncState: "idle",
+        lastSyncError: "",
+      });
+      return { handledToast: true, result };
+    },
   );
-  if (!confirmed) {
-    return { cancelled: true };
-  }
-
-  const result = await restoreFromServer(
-    chatId,
-    buildBmeSyncRuntimeOptions({
-      reason: "manual-restore",
-      trigger: "panel:manual-restore",
-    }),
-  );
-
-  if (!result?.restored) {
-    const reasonMap = {
-      "not-found": "服务器上没有找到当前聊天的备份",
-      "backup-missing": "服务器上没有找到当前聊天的备份",
-      "backup-version-mismatch": "备份版本与当前运行时不兼容",
-      "backup-chat-id-mismatch": "备份聊天 ID 与当前聊天不匹配",
-      "snapshot-chat-id-mismatch": "备份内部快照与当前聊天不匹配",
-    };
-    toastr.error(
-      reasonMap[result?.reason] ||
-        `恢复失败: ${result?.error?.message || result?.reason || "未知原因"}`,
-    );
-    return { handledToast: true, result };
-  }
-
-  toastr.success("已从云端恢复当前聊天备份");
-  await syncIndexedDbMetaToPersistenceState(chatId, {
-    syncState: "idle",
-    lastSyncError: "",
-  });
-  return { handledToast: true, result };
 }
 
 async function onManageServerBackups() {
@@ -13227,7 +13719,7 @@ async function onDeleteServerBackupEntry(payload = {}) {
   };
 }
 
-// ==================== 初始化 ====================
+// ==================== 恢复快照 ====================
 
 async function onGetRestoreSafetySnapshotStatus() {
   const chatId = getCurrentChatId();
@@ -13250,46 +13742,52 @@ async function onGetRestoreSafetySnapshotStatus() {
 }
 
 async function onRollbackLastRestore() {
-  const chatId = getCurrentChatId();
-  if (!chatId) {
-    toastr.warning("当前没有聊天上下文");
-    return { handledToast: true };
-  }
+  return await runWithRestoreLock(
+    "restore-rollback",
+    "manual-restore-rollback",
+    async () => {
+      const chatId = getCurrentChatId();
+      if (!chatId) {
+        toastr.warning("当前没有聊天上下文");
+        return { handledToast: true };
+      }
 
-  const safetyStatus = await onGetRestoreSafetySnapshotStatus();
-  if (!safetyStatus?.exists) {
-    toastr.info("当前聊天还没有可用的上次恢复回滚点");
-    return { handledToast: true, result: safetyStatus };
-  }
+      const safetyStatus = await onGetRestoreSafetySnapshotStatus();
+      if (!safetyStatus?.exists) {
+        toastr.info("当前聊天还没有可用的上次恢复回滚点");
+        return { handledToast: true, result: safetyStatus };
+      }
 
-  const confirmed = globalThis.confirm?.(
-    "这会回滚到上次从云端恢复之前的本地状态。确定继续吗？",
+      const confirmed = globalThis.confirm?.(
+        "这会回滚到上次从云端恢复之前的本地状态。确定继续吗？",
+      );
+      if (!confirmed) {
+        return { cancelled: true };
+      }
+
+      const result = await rollbackFromRestoreSafetySnapshot(
+        chatId,
+        buildBmeSyncRuntimeOptions({
+          reason: "manual-restore-safety-rollback",
+          trigger: "panel:rollback-last-restore",
+        }),
+      );
+
+      if (!result?.restored) {
+        toastr.error(
+          `回滚失败: ${result?.error?.message || result?.reason || "未知原因"}`,
+        );
+        return { handledToast: true, result };
+      }
+
+      toastr.success("已回滚到上次恢复前的本地状态");
+      await syncIndexedDbMetaToPersistenceState(chatId, {
+        syncState: "idle",
+        lastSyncError: "",
+      });
+      return { handledToast: true, result };
+    },
   );
-  if (!confirmed) {
-    return { cancelled: true };
-  }
-
-  const result = await rollbackFromRestoreSafetySnapshot(
-    chatId,
-    buildBmeSyncRuntimeOptions({
-      reason: "manual-restore-safety-rollback",
-      trigger: "panel:rollback-last-restore",
-    }),
-  );
-
-  if (!result?.restored) {
-    toastr.error(
-      `回滚失败: ${result?.error?.message || result?.reason || "未知原因"}`,
-    );
-    return { handledToast: true, result };
-  }
-
-  toastr.success("已回滚到上次恢复前的本地状态");
-  await syncIndexedDbMetaToPersistenceState(chatId, {
-    syncState: "idle",
-    lastSyncError: "",
-  });
-  return { handledToast: true, result };
 }
 
 async function onRetryPendingPersist() {
@@ -13297,6 +13795,7 @@ async function onRetryPendingPersist() {
   const result = await retryPendingGraphPersist({
     reason: "panel-manual-persist-retry",
     scheduleRetryOnFailure: false,
+    ignoreRestoreLock: true,
   });
   refreshPanelLiveState();
 
@@ -13306,12 +13805,12 @@ async function onRetryPendingPersist() {
   }
 
   if (!hadPending && String(result?.reason || "") === "no-pending-persist") {
-    toastr.info("当前没有待确认的持久化批次");
+    toastr.info("当前没有待重试的持久化批次");
     return { handledToast: true, result };
   }
 
   toastr.warning(
-    `持久化仍未确认: ${result?.reason || result?.loadState || "未知原因"}`,
+    `重试持久化仍未成功: ${result?.reason || result?.loadState || "未知原因"}`,
   );
   return { handledToast: true, result };
 }

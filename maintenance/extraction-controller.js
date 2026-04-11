@@ -82,6 +82,7 @@ function normalizePersistenceStateRecord(persistResult = null) {
       ? Number(persistResult.revision)
       : 0,
     saveMode: String(persistResult?.saveMode || ""),
+    recoverable: persistResult?.recoverable === true,
     saved: persistResult?.saved === true,
     queued,
     blocked,
@@ -349,12 +350,7 @@ function isPersistenceRevisionAccepted(runtime, persistence = null) {
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const lastAcceptedRevision = Math.max(
-    Number(graphPersistenceState?.lastAcceptedRevision || 0),
-    Number(graphPersistenceState?.commitMarker?.accepted === true
-      ? graphPersistenceState?.commitMarker?.revision
-      : 0),
-  );
+  const lastAcceptedRevision = Number(graphPersistenceState?.lastAcceptedRevision || 0);
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
