@@ -12462,6 +12462,7 @@ async function runRecall(options = {}) {
       abortRecallStageWithReason,
       applyRecallInjection,
       beginStageAbortController,
+      bumpPersistedRecallGenerationCount,
       buildRecallRetrieveOptions,
       clampInt,
       console,
@@ -12485,10 +12486,12 @@ async function runRecall(options = {}) {
       isGraphReadable,
       isGraphReadableForRecall,
       nextRecallRunSequence: () => ++recallRunSequence,
+      readPersistedRecallFromUserMessage,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
       resolveRecallInput,
       retrieve,
+      schedulePersistedRecallMessageUiRefresh,
       setActiveRecallPromise: (value) => {
         activeRecallPromise = value;
       },
@@ -12500,6 +12503,7 @@ async function runRecall(options = {}) {
         pendingRecallSendIntent = value;
       },
       toastr,
+      triggerChatMetadataSave,
       waitForActiveRecallToSettle,
     },
     options,

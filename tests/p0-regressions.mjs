@@ -4524,6 +4524,278 @@ async function testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphR
   );
 }
 
+async function testHistoryGenerationReusesPersistedRecallForStableUserFloor() {
+  const { runRecallController } = await import("../retrieval/recall-controller.js");
+  const chat = [
+    {
+      is_user: true,
+      mes: "稳定 user 楼层",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "persisted-memory",
+          selectedNodeIds: ["node-persisted-1"],
+          recallInput: "发送前权威输入",
+          recallSource: "send-intent",
+          hookName: "GENERATION_AFTER_COMMANDS",
+          tokenEstimate: 12,
+          manuallyEdited: false,
+          authoritativeInputUsed: true,
+          boundUserFloorText: "稳定 user 楼层",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+    { is_user: false, mes: "assistant-tail" },
+  ];
+  let retrieveCalls = 0;
+  let metadataSaveCalls = 0;
+  let recallUiRefreshCalls = 0;
+  const applyCalls = [];
+
+  const runtime = {
+    getIsRecalling: () => false,
+    abortRecallStageWithReason() {},
+    waitForActiveRecallToSettle: async () => ({ settled: true }),
+    getCurrentGraph: () => ({ nodes: [], edges: [] }),
+    getSettings: () => ({
+      enabled: true,
+      recallEnabled: true,
+      recallLlmContextMessages: 4,
+    }),
+    isGraphReadable: () => true,
+    isGraphReadableForRecall: () => true,
+    getGraphMutationBlockReason: () => "",
+    setLastRecallStatus() {},
+    isGraphMetadataWriteAllowed: () => false,
+    recoverHistoryIfNeeded: async () => true,
+    getContext: () => ({ chat }),
+    nextRecallRunSequence: () => 1,
+    setIsRecalling() {},
+    beginStageAbortController: () => ({
+      signal: { aborted: false, addEventListener() {} },
+      abort() {},
+    }),
+    createAbortError: (message) => new Error(message),
+    ensureVectorReadyIfNeeded: async () => {},
+    clampInt,
+    resolveRecallInput: () => ({
+      userMessage: "稳定 user 楼层",
+      recentMessages: ["[user]: 稳定 user 楼层"],
+      source: "chat-last-user",
+      sourceLabel: "历史最后用户楼层",
+      generationType: "history",
+      targetUserMessageIndex: 0,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "稳定 user 楼层",
+      sourceCandidates: [],
+    }),
+    console,
+    getRecallHookLabel: () => "历史生成",
+    retrieve: async () => {
+      retrieveCalls += 1;
+      return {
+        stats: { recallCount: 1, coreCount: 1 },
+        selectedNodeIds: ["fresh-node"],
+        meta: {
+          retrieval: {
+            vectorHits: 1,
+            diffusionHits: 0,
+            llm: { status: "disabled", candidatePool: 0 },
+          },
+        },
+      };
+    },
+    getEmbeddingConfig: () => null,
+    getSchema: () => schema,
+    buildRecallRetrieveOptions: () => ({}),
+    applyRecallInjection: (_settings, recallInput, _recentMessages, result) => {
+      applyCalls.push({ recallInput: { ...recallInput }, result: { ...result } });
+      return {
+        injectionText: String(result?.injectionText || ""),
+        retrievalMeta: result?.meta?.retrieval || {},
+        llmMeta: result?.meta?.retrieval?.llm || {},
+        transport: {
+          applied: true,
+          source: "module-injection",
+          mode: "module-injection",
+        },
+        deliveryMode: String(recallInput?.deliveryMode || "immediate") || "immediate",
+      };
+    },
+    createRecallInputRecord,
+    createRecallRunResult,
+    isAbortError: () => false,
+    toastr: {
+      warning() {},
+      error() {},
+    },
+    finishStageAbortController() {},
+    getActiveRecallPromise: () => null,
+    setActiveRecallPromise() {},
+    setPendingRecallSendIntent() {},
+    refreshPanelLiveState() {},
+    readPersistedRecallFromUserMessage,
+    bumpPersistedRecallGenerationCount,
+    triggerChatMetadataSave() {
+      metadataSaveCalls += 1;
+    },
+    schedulePersistedRecallMessageUiRefresh() {
+      recallUiRefreshCalls += 1;
+    },
+  };
+
+  const result = await runRecallController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    deliveryMode: "immediate",
+  });
+
+  assert.equal(retrieveCalls, 0);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "persisted-user-floor-reused");
+  assert.equal(result.injectionText, "persisted-memory");
+  assert.equal(applyCalls.length, 1);
+  assert.equal(applyCalls[0].recallInput.source, "persisted-user-floor");
+  assert.equal(applyCalls[0].recallInput.authoritativeInputUsed, true);
+  assert.equal(applyCalls[0].recallInput.boundUserFloorText, "稳定 user 楼层");
+  assert.equal(
+    readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
+    1,
+  );
+  assert.equal(metadataSaveCalls, 1);
+  assert.equal(recallUiRefreshCalls, 1);
+}
+
+async function testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit() {
+  const { runRecallController } = await import("../retrieval/recall-controller.js");
+  const chat = [
+    {
+      is_user: true,
+      mes: "已编辑的新 user 楼层",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "stale-persisted-memory",
+          selectedNodeIds: ["node-stale-1"],
+          recallInput: "旧 user 楼层",
+          recallSource: "chat-last-user",
+          hookName: "GENERATION_AFTER_COMMANDS",
+          tokenEstimate: 12,
+          manuallyEdited: false,
+          authoritativeInputUsed: false,
+          boundUserFloorText: "旧 user 楼层",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+    { is_user: false, mes: "assistant-tail" },
+  ];
+  let retrieveCalls = 0;
+
+  const runtime = {
+    getIsRecalling: () => false,
+    abortRecallStageWithReason() {},
+    waitForActiveRecallToSettle: async () => ({ settled: true }),
+    getCurrentGraph: () => ({ nodes: [], edges: [] }),
+    getSettings: () => ({
+      enabled: true,
+      recallEnabled: true,
+      recallLlmContextMessages: 4,
+    }),
+    isGraphReadable: () => true,
+    isGraphReadableForRecall: () => true,
+    getGraphMutationBlockReason: () => "",
+    setLastRecallStatus() {},
+    isGraphMetadataWriteAllowed: () => false,
+    recoverHistoryIfNeeded: async () => true,
+    getContext: () => ({ chat }),
+    nextRecallRunSequence: () => 1,
+    setIsRecalling() {},
+    beginStageAbortController: () => ({
+      signal: { aborted: false, addEventListener() {} },
+      abort() {},
+    }),
+    createAbortError: (message) => new Error(message),
+    ensureVectorReadyIfNeeded: async () => {},
+    clampInt,
+    resolveRecallInput: () => ({
+      userMessage: "已编辑的新 user 楼层",
+      recentMessages: ["[user]: 已编辑的新 user 楼层"],
+      source: "chat-last-user",
+      sourceLabel: "历史最后用户楼层",
+      generationType: "history",
+      targetUserMessageIndex: 0,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "已编辑的新 user 楼层",
+      sourceCandidates: [],
+    }),
+    console,
+    getRecallHookLabel: () => "历史生成",
+    retrieve: async () => {
+      retrieveCalls += 1;
+      return {
+        stats: { recallCount: 1, coreCount: 1 },
+        selectedNodeIds: ["fresh-node"],
+        meta: {
+          retrieval: {
+            vectorHits: 1,
+            diffusionHits: 0,
+            llm: { status: "disabled", candidatePool: 0 },
+          },
+        },
+      };
+    },
+    getEmbeddingConfig: () => null,
+    getSchema: () => schema,
+    buildRecallRetrieveOptions: () => ({}),
+    applyRecallInjection: (_settings, recallInput) => ({
+      injectionText: `fresh:${recallInput.userMessage}`,
+      retrievalMeta: {
+        vectorHits: 1,
+        diffusionHits: 0,
+        llm: { status: "disabled", candidatePool: 0 },
+      },
+      llmMeta: { status: "disabled", candidatePool: 0 },
+      transport: {
+        applied: true,
+        source: "module-injection",
+        mode: "module-injection",
+      },
+      deliveryMode: String(recallInput?.deliveryMode || "immediate") || "immediate",
+    }),
+    createRecallInputRecord,
+    createRecallRunResult,
+    isAbortError: () => false,
+    toastr: {
+      warning() {},
+      error() {},
+    },
+    finishStageAbortController() {},
+    getActiveRecallPromise: () => null,
+    setActiveRecallPromise() {},
+    setPendingRecallSendIntent() {},
+    refreshPanelLiveState() {},
+    readPersistedRecallFromUserMessage,
+    bumpPersistedRecallGenerationCount,
+    triggerChatMetadataSave() {},
+    schedulePersistedRecallMessageUiRefresh() {},
+  };
+
+  const result = await runRecallController(runtime, {
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    deliveryMode: "immediate",
+  });
+
+  assert.equal(retrieveCalls, 1);
+  assert.equal(result.status, "completed");
+  assert.equal(result.reason, "召回完成");
+  assert.equal(result.injectionText, "fresh:已编辑的新 user 楼层");
+  assert.equal(
+    readPersistedRecallFromUserMessage(chat, 0)?.generationCount,
+    0,
+  );
+}
+
 async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
   const chat = [
     { is_user: true, mes: "u0" },
@@ -6181,8 +6453,8 @@ await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
-await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
-await testGenerationRecallDeferredRewriteMutatesFinalMesSendAuthoritativeUserInput();
+await testHistoryGenerationReusesPersistedRecallForStableUserFloor();
+await testHistoryGenerationDoesNotReusePersistedRecallAfterUserFloorEdit();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
 await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
