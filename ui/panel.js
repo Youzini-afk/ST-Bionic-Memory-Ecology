@@ -4377,6 +4377,26 @@ function _refreshConfigTab() {
     "bme-setting-extract-auto-delay-latest-assistant",
     settings.extractAutoDelayLatestAssistant === true,
   );
+  _setInputValue(
+    "bme-setting-extract-recent-message-cap",
+    settings.extractRecentMessageCap ?? 0,
+  );
+  _setInputValue(
+    "bme-setting-extract-prompt-structured-mode",
+    settings.extractPromptStructuredMode || "both",
+  );
+  _setInputValue(
+    "bme-setting-extract-worldbook-mode",
+    settings.extractWorldbookMode || "active",
+  );
+  _setCheckboxValue(
+    "bme-setting-extract-include-summaries",
+    settings.extractIncludeSummaries !== false,
+  );
+  _setCheckboxValue(
+    "bme-setting-extract-include-story-time",
+    settings.extractIncludeStoryTime !== false,
+  );
   _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
   _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
   _setInputValue(
@@ -4472,6 +4492,10 @@ function _refreshConfigTab() {
     settings.recallObjectiveGlobalWeight ?? 0.75,
   );
   _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
+  _setCheckboxValue(
+    "bme-setting-recall-use-authoritative-generation-input",
+    settings.recallUseAuthoritativeGenerationInput === true,
+  );
   _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
   _setInputValue("bme-setting-vector-weight", settings.vectorWeight ?? 0.3);
   _setInputValue(
@@ -4805,6 +4829,35 @@ function _bindConfigControls() {
     (checked) =>
       _patchSettings({ extractAutoDelayLatestAssistant: checked }),
   );
+  bindNumber("bme-setting-extract-recent-message-cap", 0, 0, 200, (value) =>
+    _patchSettings({ extractRecentMessageCap: value }),
+  );
+  const extractStructuredModeEl = document.getElementById(
+    "bme-setting-extract-prompt-structured-mode",
+  );
+  if (extractStructuredModeEl && extractStructuredModeEl.dataset.bmeBound !== "true") {
+    extractStructuredModeEl.addEventListener("change", () => {
+      _patchSettings({ extractPromptStructuredMode: extractStructuredModeEl.value || "both" });
+    });
+    extractStructuredModeEl.dataset.bmeBound = "true";
+  }
+  const extractWorldbookModeEl = document.getElementById(
+    "bme-setting-extract-worldbook-mode",
+  );
+  if (extractWorldbookModeEl && extractWorldbookModeEl.dataset.bmeBound !== "true") {
+    extractWorldbookModeEl.addEventListener("change", () => {
+      _patchSettings({ extractWorldbookMode: extractWorldbookModeEl.value || "active" });
+    });
+    extractWorldbookModeEl.dataset.bmeBound = "true";
+  }
+  bindCheckbox(
+    "bme-setting-extract-include-summaries",
+    (checked) => _patchSettings({ extractIncludeSummaries: checked }),
+  );
+  bindCheckbox(
+    "bme-setting-extract-include-story-time",
+    (checked) => _patchSettings({ extractIncludeStoryTime: checked }),
+  );
   bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
     _patchSettings({ recallTopK: value }),
   );
@@ -4926,6 +4979,11 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
     _patchSettings({ injectDepth: value }),
+  );
+  bindCheckbox(
+    "bme-setting-recall-use-authoritative-generation-input",
+    (checked) =>
+      _patchSettings({ recallUseAuthoritativeGenerationInput: checked }),
   );
   bindFloat("bme-setting-graph-weight", 0.6, 0, 1, (value) =>
     _patchSettings({ graphWeight: value }),

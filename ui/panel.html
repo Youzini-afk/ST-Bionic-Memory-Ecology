@@ -1513,6 +1513,63 @@
                       <div class="bme-config-help">
                         开启后，最新 AI 楼先不自动提取，要等下一条 AI 楼出现后，才提取前一批内容。提取未处理和范围重提不受影响。
                       </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-recent-message-cap"
+                          >最近消息上限（0 = 不限）</label
+                        >
+                        <input
+                          id="bme-setting-extract-recent-message-cap"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-prompt-structured-mode"
+                          >提取结构模式</label
+                        >
+                        <select
+                          id="bme-setting-extract-prompt-structured-mode"
+                          class="bme-config-input"
+                        >
+                          <option value="both">混合（transcript + structured）</option>
+                          <option value="transcript">仅 transcript</option>
+                          <option value="structured">仅 structured</option>
+                        </select>
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-worldbook-mode"
+                          >提取时世界书</label
+                        >
+                        <select
+                          id="bme-setting-extract-worldbook-mode"
+                          class="bme-config-input"
+                        >
+                          <option value="active">启用（解析激活条目）</option>
+                          <option value="none">禁用</option>
+                        </select>
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-extract-include-summaries"
+                      >
+                        <input
+                          id="bme-setting-extract-include-summaries"
+                          type="checkbox"
+                        />
+                        <span>提取时包含活跃总结</span>
+                      </label>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-extract-include-story-time"
+                      >
+                        <input
+                          id="bme-setting-extract-include-story-time"
+                          type="checkbox"
+                        />
+                        <span>提取时包含故事时间线</span>
+                      </label>
                     </div>
                   </div>
                 </div>
@@ -1544,6 +1601,19 @@
                           min="0"
                           max="9999"
                         />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-use-authoritative-generation-input"
+                      >
+                        <input
+                          id="bme-setting-recall-use-authoritative-generation-input"
+                          type="checkbox"
+                        />
+                        <span>使用权威 generation 输入（实验性）</span>
+                      </label>
+                      <div class="bme-config-help">
+                        开启后，召回查询将优先使用更接近真实发送入口的文本（如 send-intent、宿主快照、planner handoff），而非回退到 chat tail 或 textarea。
                       </div>
                     </div>
                   </div>

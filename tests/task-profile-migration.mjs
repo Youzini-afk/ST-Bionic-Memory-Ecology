@@ -34,7 +34,7 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 12);
+assert.equal(extractProfile.blocks.length, 14);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
   [
@@ -48,6 +48,8 @@ assert.deepEqual(
     "图统计",
     "Schema",
     "当前范围",
+    "活跃总结",
+    "故事时间",
     "输出格式",
     "行为规则",
   ],
@@ -65,6 +67,8 @@ assert.deepEqual(
     "builtin",
     "builtin",
     "builtin",
+    "builtin",
+    "builtin",
     "custom",
     "custom",
   ],
@@ -72,6 +76,8 @@ assert.deepEqual(
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.role),
   [
+    "system",
+    "system",
     "system",
     "system",
     "system",
@@ -214,16 +220,16 @@ const upgradedLegacyDefault = getActiveTaskProfile(
   },
   "extract",
 );
-assert.equal(upgradedLegacyDefault.blocks.length, 12);
+assert.equal(upgradedLegacyDefault.blocks.length, 14);
 assert.equal(upgradedLegacyDefault.blocks[0].name, "抬头");
 assert.match(upgradedLegacyDefault.blocks[0].content, /虚拟的世界/);
 assert.equal(upgradedLegacyDefault.blocks[0].role, "system");
 assert.equal(upgradedLegacyDefault.blocks[0].injectionMode, "relative");
 assert.equal(upgradedLegacyDefault.blocks[1].content, "保留我自己的角色定义");
-assert.equal(upgradedLegacyDefault.blocks[10].content, "保留我自己的输出格式");
-assert.equal(upgradedLegacyDefault.blocks[11].content, "保留我自己的行为规则");
-assert.equal(upgradedLegacyDefault.blocks[10].role, "user");
-assert.equal(upgradedLegacyDefault.blocks[11].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[12].content, "保留我自己的输出格式");
+assert.equal(upgradedLegacyDefault.blocks[13].content, "保留我自己的行为规则");
+assert.equal(upgradedLegacyDefault.blocks[12].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[13].role, "user");
 
 const currentDefaults = createDefaultTaskProfiles();
 const currentDefaultExtract = currentDefaults.extract.profiles[0];
@@ -389,7 +395,7 @@ assert.deepEqual(
 );
 assert.ok(
   upgradedLegacyDefault.blocks
-    .slice(0, 10)
+    .slice(0, 12)
     .every((block) => block.role === "system"),
 );
 
