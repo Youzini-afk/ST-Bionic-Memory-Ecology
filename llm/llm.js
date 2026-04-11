@@ -129,6 +129,7 @@ function summarizeTaskTimelineEntry(taskType, snapshot = {}) {
     responseCleaning: cloneRuntimeDebugValue(snapshot?.responseCleaning, null),
     jsonFailure: cloneRuntimeDebugValue(snapshot?.jsonFailure, null),
     messages: cloneRuntimeDebugValue(snapshot?.messages, []),
+    transportMessages: cloneRuntimeDebugValue(snapshot?.transportMessages, []),
     requestBody: cloneRuntimeDebugValue(snapshot?.requestBody, null),
   };
 }
@@ -456,6 +457,10 @@ function buildPromptExecutionSummary(debugContext = null) {
     mvu:
       debugContext.mvu && typeof debugContext.mvu === "object"
         ? cloneRuntimeDebugValue(debugContext.mvu, {})
+        : null,
+    inputContext:
+      debugContext.inputContext && typeof debugContext.inputContext === "object"
+        ? cloneRuntimeDebugValue(debugContext.inputContext, {})
         : null,
     regexInput: normalizeRegexDebugEntries(debugContext.regexInput),
   };
@@ -926,6 +931,76 @@ function looksLikeTruncatedJson(text) {
   return false;
 }
 
+function cloneLlmDebugMessageMetadata(message = {}) {
+  const metadata = {};
+
+  for (const key of [
+    "source",
+    "sourceKey",
+    "blockId",
+    "blockName",
+    "blockType",
+    "injectionMode",
+    "contentOrigin",
+    "regexSourceType",
+    "speaker",
+    "name",
+  ]) {
+    const value = String(message?.[key] || "").trim();
+    if (value) {
+      metadata[key] = value;
+    }
+  }
+
+  if (message?.derivedFromWorldInfo === true) {
+    metadata.derivedFromWorldInfo = true;
+  }
+  if (message?.sanitizationEligible === true) {
+    metadata.sanitizationEligible = true;
+  }
+  if (Number.isFinite(Number(message?.depth))) {
+    metadata.depth = Number(message.depth);
+  }
+  if (Number.isFinite(Number(message?.order))) {
+    metadata.order = Number(message.order);
+  }
+
+  return metadata;
+}
+
+function normalizeLlmDebugMessage(message = {}) {
+  if (!message || typeof message !== "object") return null;
+  const role = String(message.role || "").trim().toLowerCase();
+  const content = String(message.content || "").trim();
+  if (!content || !["system", "user", "assistant"].includes(role)) {
+    return null;
+  }
+  return {
+    role,
+    content,
+    ...cloneLlmDebugMessageMetadata(message),
+  };
+}
+
+function buildTransportMessages(messages = []) {
+  return (Array.isArray(messages) ? messages : [])
+    .map((message) => {
+      if (!message || typeof message !== "object") {
+        return null;
+      }
+      const role = String(message.role || "").trim().toLowerCase();
+      const content = String(message.content || "").trim();
+      if (!content || !["system", "user", "assistant"].includes(role)) {
+        return null;
+      }
+      return {
+        role,
+        content,
+      };
+    })
+    .filter(Boolean);
+}
+
 function buildJsonAttemptMessages(
   systemPrompt,
   userPrompt,
@@ -957,15 +1032,7 @@ function buildJsonAttemptMessages(
 
   const normalizedPromptMessages = Array.isArray(promptMessages)
     ? promptMessages
-        .map((message) => {
-          if (!message || typeof message !== "object") return null;
-          const role = String(message.role || "").trim().toLowerCase();
-          const content = String(message.content || "").trim();
-          if (!["system", "user", "assistant"].includes(role) || !content) {
-            return null;
-          }
-          return { role, content };
-        })
+        .map((message) => normalizeLlmDebugMessage(message))
         .filter(Boolean)
     : [];
 
@@ -1033,12 +1100,9 @@ function buildJsonAttemptMessages(
   }
 
   for (const message of additionalMessages || []) {
-    if (!message || typeof message !== "object") continue;
-    const role = String(message.role || "").trim().toLowerCase();
-    const content = String(message.content || "").trim();
-    if (!content) continue;
-    if (!["system", "user", "assistant"].includes(role)) continue;
-    messages.push({ role, content });
+    const normalizedMessage = normalizeLlmDebugMessage(message);
+    if (!normalizedMessage) continue;
+    messages.push(normalizedMessage);
   }
 
   messages.push({ role: "user", content: userParts.join("\n\n") });
@@ -1050,14 +1114,14 @@ function resolvePrivateRequestSource(
   requestSource = "",
   { allowAnonymous = false } = {},
 ) {
-  const normalizedRequestSource = String(requestSource || "").trim();
-  if (normalizedRequestSource) {
-    return normalizedRequestSource;
-  }
-
   const normalizedTaskType = String(taskType || "").trim();
   if (normalizedTaskType) {
     return `task:${normalizedTaskType}`;
+  }
+
+  const normalizedRequestSource = String(requestSource || "").trim();
+  if (normalizedRequestSource) {
+    return normalizedRequestSource;
   }
 
   if (allowAnonymous) {
@@ -1395,6 +1459,7 @@ async function callDedicatedOpenAICompatible(
     taskType,
     requestSource,
   );
+  const transportMessages = buildTransportMessages(messages);
   const config = getMemoryLLMConfig(taskType);
   const settings = extension_settings[MODULE_NAME] || {};
   const hasDedicatedConfig = hasDedicatedLLMConfig(config);
@@ -1444,6 +1509,7 @@ async function callDedicatedOpenAICompatible(
     requestedLlmPresetName: config.requestedLlmPresetName || "",
     llmPresetFallbackReason: config.llmPresetFallbackReason || "",
     messages,
+    transportMessages,
     generation: generationResolved.generation || {},
     filteredGeneration: generationResolved.filtered || {},
     removedGeneration: generationResolved.removed || [],
@@ -1459,7 +1525,7 @@ async function callDedicatedOpenAICompatible(
   if (!hasDedicatedConfig) {
     const payload = await sendOpenAIRequest(
       "quiet",
-      messages,
+      transportMessages,
       signal,
       jsonMode ? { jsonSchema: createGenericJsonSchema() } : {},
     );
@@ -1496,7 +1562,7 @@ async function callDedicatedOpenAICompatible(
         })
       : "",
     model: config.model,
-    messages,
+    messages: transportMessages,
     temperature: filteredGeneration.temperature ?? 1,
     max_tokens: resolvedCompletionTokens,
     stream: filteredGeneration.stream ?? false,
@@ -1552,6 +1618,7 @@ async function callDedicatedOpenAICompatible(
     requestedLlmPresetName: config.requestedLlmPresetName || "",
     llmPresetFallbackReason: config.llmPresetFallbackReason || "",
     messages,
+    transportMessages,
     generation: generationResolved.generation || {},
     filteredGeneration,
     removedGeneration: generationResolved.removed || [],

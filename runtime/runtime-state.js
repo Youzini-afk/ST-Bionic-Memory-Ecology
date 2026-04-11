@@ -155,6 +155,8 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
               saveMode: String(
                 historyState.lastBatchStatus.persistence.saveMode || "",
               ),
+              recoverable:
+                historyState.lastBatchStatus.persistence.recoverable === true,
               saved:
                 historyState.lastBatchStatus.persistence.saved === true,
               queued:

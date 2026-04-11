@@ -20,6 +20,15 @@ export const defaultSettings = {
   extractEvery: 1,
   extractContextTurns: 2,
   extractAutoDelayLatestAssistant: false,
+  extractAssistantExtractTags: "",
+  extractAssistantExcludeTags: "think,analysis,reasoning",
+  extractAssistantExtractRules: [],
+  extractAssistantExcludeRules: [],
+  extractRecentMessageCap: 0,
+  extractPromptStructuredMode: "both",
+  extractWorldbookMode: "active",
+  extractIncludeStoryTime: true,
+  extractIncludeSummaries: true,
 
   // 召回设置
   recallEnabled: true,
@@ -34,6 +43,7 @@ export const defaultSettings = {
   recallDiffusionTopK: 100,
   recallLlmCandidatePool: 30,
   recallLlmContextMessages: 4,
+  recallUseAuthoritativeGenerationInput: false,
   recallEnableMultiIntent: true,
   recallMultiIntentMaxSegments: 4,
   recallEnableContextQueryBlend: true,

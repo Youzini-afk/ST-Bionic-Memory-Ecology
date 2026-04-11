@@ -4377,6 +4377,26 @@ function _refreshConfigTab() {
     "bme-setting-extract-auto-delay-latest-assistant",
     settings.extractAutoDelayLatestAssistant === true,
   );
+  _setInputValue(
+    "bme-setting-extract-recent-message-cap",
+    settings.extractRecentMessageCap ?? 0,
+  );
+  _setInputValue(
+    "bme-setting-extract-prompt-structured-mode",
+    settings.extractPromptStructuredMode || "both",
+  );
+  _setInputValue(
+    "bme-setting-extract-worldbook-mode",
+    settings.extractWorldbookMode || "active",
+  );
+  _setCheckboxValue(
+    "bme-setting-extract-include-summaries",
+    settings.extractIncludeSummaries !== false,
+  );
+  _setCheckboxValue(
+    "bme-setting-extract-include-story-time",
+    settings.extractIncludeStoryTime !== false,
+  );
   _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
   _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
   _setInputValue(
@@ -4472,6 +4492,10 @@ function _refreshConfigTab() {
     settings.recallObjectiveGlobalWeight ?? 0.75,
   );
   _setInputValue("bme-setting-inject-depth", settings.injectDepth ?? 9999);
+  _setCheckboxValue(
+    "bme-setting-recall-use-authoritative-generation-input",
+    settings.recallUseAuthoritativeGenerationInput === true,
+  );
   _setInputValue("bme-setting-graph-weight", settings.graphWeight ?? 0.6);
   _setInputValue("bme-setting-vector-weight", settings.vectorWeight ?? 0.3);
   _setInputValue(
@@ -4805,6 +4829,35 @@ function _bindConfigControls() {
     (checked) =>
       _patchSettings({ extractAutoDelayLatestAssistant: checked }),
   );
+  bindNumber("bme-setting-extract-recent-message-cap", 0, 0, 200, (value) =>
+    _patchSettings({ extractRecentMessageCap: value }),
+  );
+  const extractStructuredModeEl = document.getElementById(
+    "bme-setting-extract-prompt-structured-mode",
+  );
+  if (extractStructuredModeEl && extractStructuredModeEl.dataset.bmeBound !== "true") {
+    extractStructuredModeEl.addEventListener("change", () => {
+      _patchSettings({ extractPromptStructuredMode: extractStructuredModeEl.value || "both" });
+    });
+    extractStructuredModeEl.dataset.bmeBound = "true";
+  }
+  const extractWorldbookModeEl = document.getElementById(
+    "bme-setting-extract-worldbook-mode",
+  );
+  if (extractWorldbookModeEl && extractWorldbookModeEl.dataset.bmeBound !== "true") {
+    extractWorldbookModeEl.addEventListener("change", () => {
+      _patchSettings({ extractWorldbookMode: extractWorldbookModeEl.value || "active" });
+    });
+    extractWorldbookModeEl.dataset.bmeBound = "true";
+  }
+  bindCheckbox(
+    "bme-setting-extract-include-summaries",
+    (checked) => _patchSettings({ extractIncludeSummaries: checked }),
+  );
+  bindCheckbox(
+    "bme-setting-extract-include-story-time",
+    (checked) => _patchSettings({ extractIncludeStoryTime: checked }),
+  );
   bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
     _patchSettings({ recallTopK: value }),
   );
@@ -4926,6 +4979,11 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-inject-depth", 9999, 0, 9999, (value) =>
     _patchSettings({ injectDepth: value }),
+  );
+  bindCheckbox(
+    "bme-setting-recall-use-authoritative-generation-input",
+    (checked) =>
+      _patchSettings({ recallUseAuthoritativeGenerationInput: checked }),
   );
   bindFloat("bme-setting-graph-weight", 0.6, 0, 1, (value) =>
     _patchSettings({ graphWeight: value }),
@@ -7291,6 +7349,11 @@ function _renderRegexReuseBadges(rule = {}) {
       className: "is-transform",
       text: "宿主真实执行",
     });
+  } else if (rule.promptStageMode === "host-helper") {
+    badges.push({
+      className: "is-prompt",
+      text: "Helper 兼容执行",
+    });
   } else if (rule.promptStageMode === "host-fallback") {
     badges.push({
       className: "is-prompt",
@@ -7456,7 +7519,7 @@ function _buildRegexReusePopupContent(snapshot = {}) {
           </div>
           <div class="bme-regex-preview-summary__item">
             <span class="bme-regex-preview-summary__label">桥接模式</span>
-            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.executionMode || snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.formatterAvailable ? " · formatter" : ""}${snapshot.host?.fallback ? " · fallback" : ""}</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.executionMode || snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.bridgeTier ? ` · ${_escHtml(snapshot.host.bridgeTier)}` : ""}${snapshot.host?.formatterAvailable ? " · formatter" : ""}${snapshot.host?.fallback ? " · fallback" : ""}</span>
           </div>
         </div>
       </div>
@@ -9518,6 +9581,8 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
       return "已阻塞";
     case "failed":
       return "失败";
+    case "recoverable":
+      return "已捕获恢复锚点";
     default:
       return "未知";
   }
@@ -9548,14 +9613,7 @@ function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const commitMarkerRevision =
-    loadInfo?.commitMarker?.accepted === true
-      ? Number(loadInfo.commitMarker.revision || 0)
-      : 0;
-  const lastAcceptedRevision = Math.max(
-    Number(loadInfo?.lastAcceptedRevision || 0),
-    commitMarkerRevision,
-  );
+  const lastAcceptedRevision = Number(loadInfo?.lastAcceptedRevision || 0);
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
@@ -9564,7 +9622,11 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   if (_hasMeaningfulPersistenceRecord(persistence)) {
     const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
-      accepted ? "已确认" : _formatPersistenceOutcomeLabel(persistence.outcome),
+      accepted
+        ? "已确认"
+        : persistence.recoverable === true
+          ? "已捕获恢复锚点"
+          : _formatPersistenceOutcomeLabel(persistence.outcome),
       persistence.storageTier ? `tier ${persistence.storageTier}` : "",
       Number.isFinite(Number(persistence.revision)) && Number(persistence.revision) > 0
         ? `rev ${Number(persistence.revision)}`
@@ -9685,7 +9747,9 @@ function _refreshPersistenceRepairUi(
   }
 
   help.textContent =
-    "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
+    persistence?.recoverable === true
+      ? "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
+      : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {

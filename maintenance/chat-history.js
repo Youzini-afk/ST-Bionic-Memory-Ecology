@@ -283,6 +283,9 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
       seq: index,
       role: msg.is_user ? "user" : "assistant",
       content,
+      rawContent: String(msg?.mes ?? ""),
+      name: String(msg?.name ?? "").trim(),
+      speaker: String(msg?.name ?? "").trim(),
     });
   }
 

@@ -52,6 +52,102 @@ export function getRecallUserMessageSourceLabelController(source) {
   }
 }
 
+function buildPersistedRecallReuseResult(record = {}) {
+  const selectedNodeIds = Array.isArray(record?.selectedNodeIds)
+    ? record.selectedNodeIds
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    : [];
+  return {
+    injectionText: String(record?.injectionText || "").trim(),
+    selectedNodeIds,
+    stats: {
+      coreCount: 0,
+      recallCount: selectedNodeIds.length,
+    },
+    meta: {
+      retrieval: {
+        vectorHits: 0,
+        vectorMergedHits: 0,
+        diffusionHits: 0,
+        candidatePoolAfterDpp: 0,
+        persistedReuse: true,
+        llm: {
+          status: "persisted",
+          reason: "复用已持久化召回",
+          selectionProtocol: "persisted-record-reuse",
+          rawSelectedKeys: [],
+          resolvedSelectedKeys: [],
+          resolvedSelectedNodeIds: selectedNodeIds,
+          fallbackReason: "",
+          fallbackType: "",
+          emptySelectionAccepted: false,
+          candidateKeyMapPreview: {},
+          legacySelectionUsed: false,
+          candidatePool: 0,
+        },
+      },
+    },
+  };
+}
+
+function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
+  const generationType = String(recallInput?.generationType || "normal").trim() || "normal";
+  if (generationType === "normal") return null;
+
+  const targetUserMessageIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
+    ? Math.floor(Number(recallInput.targetUserMessageIndex))
+    : null;
+  if (!Number.isFinite(targetUserMessageIndex)) return null;
+
+  const targetMessage = Array.isArray(chat) ? chat[targetUserMessageIndex] : null;
+  if (!targetMessage?.is_user) return null;
+
+  const readPersistedRecallFromUserMessage = runtime.readPersistedRecallFromUserMessage;
+  if (typeof readPersistedRecallFromUserMessage !== "function") return null;
+
+  const record = readPersistedRecallFromUserMessage(chat, targetUserMessageIndex);
+  if (!record?.injectionText) return null;
+
+  const normalizeText = (value = "") =>
+    typeof runtime.normalizeRecallInputText === "function"
+      ? runtime.normalizeRecallInputText(value)
+      : String(value ?? "")
+          .replace(/\r\n/g, "\n")
+          .trim();
+  const currentUserFloorText = normalizeText(targetMessage?.mes || "");
+  const currentRecallInputText = normalizeText(recallInput?.userMessage || "");
+  const recordRecallInput = normalizeText(record?.recallInput || "");
+  const boundUserFloorText = normalizeText(record?.boundUserFloorText || "");
+
+  const matchesBoundUserFloor = Boolean(
+    currentUserFloorText &&
+      boundUserFloorText &&
+      currentUserFloorText === boundUserFloorText,
+  );
+  const matchesRecallInput = Boolean(
+    currentRecallInputText &&
+      recordRecallInput &&
+      currentRecallInputText === recordRecallInput,
+  );
+  const matchesCurrentUserFloor = Boolean(
+    currentUserFloorText &&
+      recordRecallInput &&
+      currentUserFloorText === recordRecallInput,
+  );
+
+  if (record.authoritativeInputUsed) {
+    if (!matchesBoundUserFloor) return null;
+  } else if (!matchesRecallInput && !matchesCurrentUserFloor) {
+    return null;
+  }
+
+  return {
+    record,
+    targetUserMessageIndex,
+  };
+}
+
 export function resolveRecallInputController(
   chat,
   recentContextMessageLimit,
@@ -85,6 +181,10 @@ export function resolveRecallInputController(
           override?.reason ||
           override?.overrideReason ||
           "override-bound",
+      ),
+      authoritativeInputUsed: Boolean(override?.authoritativeInputUsed),
+      boundUserFloorText: runtime.normalizeRecallInputText(
+        override?.boundUserFloorText || "",
       ),
       sourceCandidates: Array.isArray(override?.sourceCandidates)
         ? override.sourceCandidates.map((candidate) => ({ ...candidate }))
@@ -145,6 +245,8 @@ export function resolveRecallInputController(
     source,
     sourceLabel: runtime.getRecallUserMessageSourceLabel(source),
     reason: userMessage ? `${source || "unknown"}-selected` : "no-recall-input",
+    authoritativeInputUsed: false,
+    boundUserFloorText: tailUserText || latestUserText || "",
     sourceCandidates: [],
     recentMessages: runtime.buildRecallRecentMessages(
       chat,
@@ -161,12 +263,15 @@ export function applyRecallInjectionController(
   result,
   runtime,
 ) {
-  const injectionText = runtime
-    .formatInjection(result, runtime.getSchema())
-    .trim();
+  const injectionText = String(
+    typeof result?.injectionText === "string"
+      ? result.injectionText
+      : runtime.formatInjection(result, runtime.getSchema()),
+  ).trim();
   runtime.setLastInjectionContent(injectionText);
 
   const retrievalMeta = result?.meta?.retrieval || {};
+  const isPersistedReuse = Boolean(retrievalMeta.persistedReuse);
   const llmMeta = retrievalMeta.llm || {
     status: settings.recallEnableLLM ? "unknown" : "disabled",
     reason: settings.recallEnableLLM ? "未提供 LLM 状态" : "LLM 精排已关闭",
@@ -184,7 +289,7 @@ export function applyRecallInjectionController(
   const deliveryMode =
     String(recallInput?.deliveryMode || "immediate").trim() || "immediate";
 
-  if (injectionText) {
+  if (injectionText && !isPersistedReuse) {
     const tokens = runtime.estimateTokens(injectionText);
     debugLog(
       `[ST-BME] 注入 ${tokens} 估算 tokens, Core=${result.stats.coreCount}, Recall=${result.stats.recallCount}`,
@@ -212,6 +317,8 @@ export function applyRecallInjectionController(
     source: recallInput.source,
     sourceLabel: recallInput.sourceLabel,
     reason: recallInput.reason || "",
+    authoritativeInputUsed: Boolean(recallInput.authoritativeInputUsed),
+    boundUserFloorText: String(recallInput.boundUserFloorText || ""),
     sourceCandidates: Array.isArray(recallInput.sourceCandidates)
       ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))
       : [],
@@ -242,7 +349,9 @@ export function applyRecallInjectionController(
   runtime.saveGraphToChat({ reason: "recall-result-updated" });
 
   const llmLabel =
-    llmMeta.status === "llm"
+    isPersistedReuse
+      ? "复用召回"
+      : llmMeta.status === "llm"
       ? "LLM 精排完成"
       : llmMeta.status === "fallback"
         ? "LLM 回退评分"
@@ -475,6 +584,8 @@ export async function runRecallController(runtime, options = {}) {
           source: recallInput?.source || cachedRecallPayload.source || "",
           sourceLabel:
             recallInput?.sourceLabel || cachedRecallPayload.sourceLabel || "",
+          authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+          boundUserFloorText: String(recallInput?.boundUserFloorText || ""),
           hookName: recallInput?.hookName || "",
           sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
             ? recallInput.sourceCandidates.map((candidate) => ({
@@ -482,6 +593,90 @@ export async function runRecallController(runtime, options = {}) {
               }))
             : [],
           stats: cachedResult?.stats || {},
+        });
+      }
+
+      const persistedReuse = resolveReusablePersistedRecallRecord(
+        chat,
+        recallInput,
+        runtime,
+      );
+      if (persistedReuse) {
+        const normalizedBoundUserFloorText =
+          typeof runtime.normalizeRecallInputText === "function"
+            ? runtime.normalizeRecallInputText(
+                persistedReuse.record.boundUserFloorText ||
+                  recallInput.boundUserFloorText ||
+                  "",
+              )
+            : String(
+                persistedReuse.record.boundUserFloorText ||
+                  recallInput.boundUserFloorText ||
+                  "",
+              )
+                .replace(/\r\n/g, "\n")
+                .trim();
+        const effectiveRecallInput = {
+          ...recallInput,
+          source: "persisted-user-floor",
+          sourceLabel: "复用用户楼层召回",
+          reason: "persisted-user-floor-reuse",
+          authoritativeInputUsed: Boolean(
+            persistedReuse.record.authoritativeInputUsed ||
+              recallInput.authoritativeInputUsed,
+          ),
+          boundUserFloorText: normalizedBoundUserFloorText,
+        };
+        const reusedResult = buildPersistedRecallReuseResult(persistedReuse.record);
+        const applied = runtime.applyRecallInjection(
+          settings,
+          effectiveRecallInput,
+          recentMessages,
+          reusedResult,
+        );
+        const bumpedRecord =
+          typeof runtime.bumpPersistedRecallGenerationCount === "function"
+            ? runtime.bumpPersistedRecallGenerationCount(
+                chat,
+                persistedReuse.targetUserMessageIndex,
+              )
+            : null;
+        if (bumpedRecord) {
+          runtime.triggerChatMetadataSave?.(context, { immediate: false });
+          runtime.schedulePersistedRecallMessageUiRefresh?.();
+        }
+        return runtime.createRecallRunResult("completed", {
+          reason: "persisted-user-floor-reused",
+          selectedNodeIds: reusedResult.selectedNodeIds || [],
+          injectionText: applied?.injectionText || reusedResult.injectionText || "",
+          retrievalMeta: applied?.retrievalMeta || reusedResult.meta?.retrieval || {},
+          llmMeta:
+            applied?.llmMeta || reusedResult.meta?.retrieval?.llm || {},
+          transport: applied?.transport || {
+            applied: false,
+            source: "none",
+            mode: "none",
+          },
+          deliveryMode:
+            applied?.deliveryMode ||
+            String(effectiveRecallInput?.deliveryMode || "immediate").trim() ||
+            "immediate",
+          source: effectiveRecallInput.source || "",
+          sourceLabel: effectiveRecallInput.sourceLabel || "",
+          authoritativeInputUsed: Boolean(
+            effectiveRecallInput.authoritativeInputUsed,
+          ),
+          boundUserFloorText: String(
+            effectiveRecallInput.boundUserFloorText || "",
+          ),
+          hookName: effectiveRecallInput.hookName || "",
+          sourceCandidates: Array.isArray(effectiveRecallInput.sourceCandidates)
+            ? effectiveRecallInput.sourceCandidates.map((candidate) => ({
+                ...candidate,
+              }))
+            : [],
+          stats: reusedResult?.stats || {},
+          recallInput: String(persistedReuse.record.recallInput || ""),
         });
       }
 
@@ -531,6 +726,8 @@ export async function runRecallController(runtime, options = {}) {
           "immediate",
         source: recallInput?.source || "",
         sourceLabel: recallInput?.sourceLabel || "",
+        authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+        boundUserFloorText: String(recallInput?.boundUserFloorText || ""),
         hookName: recallInput?.hookName || "",
         sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
           ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))

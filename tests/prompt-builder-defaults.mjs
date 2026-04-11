@@ -46,7 +46,10 @@ installResolveHooks([
 ]);
 
 const { buildTaskLlmPayload, buildTaskPrompt } = await import("../prompting/prompt-builder.js");
-const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
+const {
+  createDefaultGlobalTaskRegex,
+  createDefaultTaskProfiles,
+} = await import("../prompting/prompt-profiles.js");
 const { initializeHostAdapter } = await import("../host/adapter/index.js");
 
 const settings = {
@@ -144,6 +147,28 @@ assert.match(String(recallFormatBlock?.content || ""), /active_owner_scores/);
 assert.match(String(recallFormatBlock?.content || ""), /selected_keys/);
 assert.match(String(recallRulesBlock?.content || ""), /剧情时间/);
 assert.match(String(recallRulesBlock?.content || ""), /评分召回/);
+
+const globalRegexPromptBuild = await buildTaskPrompt(
+  {
+    taskProfilesVersion: 3,
+    taskProfiles: createDefaultTaskProfiles(),
+    globalTaskRegex: createDefaultGlobalTaskRegex(),
+  },
+  "recall",
+  {
+    taskName: "recall",
+    recentMessages:
+      "最近消息 <thinking>隐藏思维</thinking> <choice>1. 隐藏选项</choice>",
+    userMessage:
+      "用户输入 <updatevariable>secret</updatevariable> <status_current_variable>hp=3</status_current_variable>",
+    candidateNodes:
+      "候选节点 <StatusPlaceHolderImpl/> <analysis>隐藏分析</analysis>",
+  },
+);
+assert.doesNotMatch(
+  JSON.stringify(globalRegexPromptBuild),
+  /<thinking|<choice|<updatevariable|<status_current_variable|<StatusPlaceHolderImpl|<analysis/i,
+);
 
 const formatterCalls = [];
 initializeHostAdapter({

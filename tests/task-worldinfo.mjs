@@ -930,7 +930,7 @@ try {
   assert.deepEqual(
     depthAwarePromptBuild.executionMessages.map((message) => message.content),
     [
-      "#1 [assistant]: 这是 d4 atDepth 消息。\n\n#2 [assistant]: 这是一条 atDepth 消息。\n\n#11 [user]: 第一句\n\n#4 [assistant]: 这是 d1 atDepth 消息。\n\n#12 [assistant]: 第二句",
+      "#1 [assistant|深度注入 D4]: 这是 d4 atDepth 消息。\n\n#2 [assistant|深度注入]: 这是一条 atDepth 消息。\n\n#11 [user]: 第一句\n\n#4 [assistant|深度注入 D1]: 这是 d1 atDepth 消息。\n\n#12 [assistant]: 第二句",
       "用户问题：继续调查 depth 排序",
     ],
   );

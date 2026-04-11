@@ -1,3 +1,7 @@
+import {
+  getRegexedString as coreGetRegexedString,
+  regex_placement as coreRegexPlacement,
+} from "../../../../regex/engine.js";
 import { buildCapabilityStatus, mergeVersionHints } from "./capabilities.js";
 import { createContextHostFacade } from "./context.js";
 import { debugDebug } from "../../runtime/debug-logging.js";
@@ -7,6 +11,28 @@ const REGEX_API_NAMES = [
   "isCharacterTavernRegexesEnabled",
   "formatAsTavernRegexedString",
 ];
+const CORE_REGEX_SOURCE_TO_PLACEMENT_KEY = Object.freeze({
+  user_input: "USER_INPUT",
+  ai_output: "AI_OUTPUT",
+  slash_command: "SLASH_COMMAND",
+  world_info: "WORLD_INFO",
+  reasoning: "REASONING",
+});
+const REGEX_SOURCE_KIND_PRIORITY = Object.freeze({
+  unknown: 0,
+  unavailable: 0,
+  "global-fallback": 1,
+  context: 2,
+  "core-bridge": 3,
+  "api-map": 4,
+  provider: 5,
+});
+const REGEX_BRIDGE_TIER_PRIORITY = Object.freeze({
+  unavailable: 0,
+  "helper-getter-only": 1,
+  "helper-bridge": 2,
+  "core-real": 3,
+});
 
 function isObjectLike(value) {
   return (
@@ -19,16 +45,112 @@ function bindHostFunction(container, name) {
   return typeof fn === "function" ? fn.bind(container) : null;
 }
 
+function resolveCorePlacement(regexPlacement, source) {
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  const placementKey = CORE_REGEX_SOURCE_TO_PLACEMENT_KEY[normalizedSource];
+  if (!placementKey || !isObjectLike(regexPlacement)) {
+    return null;
+  }
+  const placement = regexPlacement?.[placementKey];
+  return Number.isFinite(Number(placement)) ? Number(placement) : null;
+}
+
+function hasCoreRegexApi(container) {
+  return (
+    typeof container?.getRegexedString === "function" &&
+    resolveCorePlacement(container?.regex_placement, "user_input") != null
+  );
+}
+
+function normalizeCoreFormatterOptions(destination, options = {}) {
+  const normalizedDestination =
+    typeof destination === "string" ? String(destination || "").trim() : "";
+  const normalizedOptions =
+    destination &&
+    typeof destination === "object" &&
+    !Array.isArray(destination)
+      ? { ...destination }
+      : options && typeof options === "object" && !Array.isArray(options)
+        ? { ...options }
+        : {};
+
+  if (normalizedDestination === "display" && normalizedOptions.isMarkdown == null) {
+    normalizedOptions.isMarkdown = true;
+  }
+  if (normalizedDestination === "prompt" && normalizedOptions.isPrompt == null) {
+    normalizedOptions.isPrompt = true;
+  }
+  if (
+    normalizedOptions.character_name != null &&
+    normalizedOptions.characterOverride == null
+  ) {
+    normalizedOptions.characterOverride = normalizedOptions.character_name;
+  }
+  delete normalizedOptions.character_name;
+  return normalizedOptions;
+}
+
+function createCoreFormatterBridge(container) {
+  if (!hasCoreRegexApi(container)) {
+    return null;
+  }
+  const getRegexedString = bindHostFunction(container, "getRegexedString");
+  const regexPlacement = container?.regex_placement;
+  if (typeof getRegexedString !== "function") {
+    return null;
+  }
+
+  return function formatAsTavernRegexedString(
+    text,
+    source,
+    destination,
+    options = {}
+  ) {
+    const placement = resolveCorePlacement(regexPlacement, source);
+    if (placement == null) {
+      return String(text ?? "");
+    }
+    return getRegexedString(
+      String(text ?? ""),
+      placement,
+      normalizeCoreFormatterOptions(destination, options)
+    );
+  };
+}
+
 function buildApiMap(container = null) {
-  return REGEX_API_NAMES.reduce((result, name) => {
+  const apiMap = REGEX_API_NAMES.reduce((result, name) => {
     result[name] = bindHostFunction(container, name);
     return result;
   }, {});
+
+  if (typeof apiMap.formatAsTavernRegexedString !== "function") {
+    apiMap.formatAsTavernRegexedString = createCoreFormatterBridge(container);
+  }
+
+  return apiMap;
 }
 
 function countResolvedApis(apiMap = {}) {
   return Object.values(apiMap).filter((api) => typeof api === "function")
     .length;
+}
+
+function detectBridgeTier({ hasCoreApi = false, apiMap = {} } = {}) {
+  const hasGetter = typeof apiMap.getTavernRegexes === "function";
+  const hasFormatter =
+    typeof apiMap.formatAsTavernRegexedString === "function";
+
+  if (hasCoreApi && hasFormatter) {
+    return "core-real";
+  }
+  if (hasFormatter) {
+    return "helper-bridge";
+  }
+  if (hasGetter) {
+    return "helper-getter-only";
+  }
+  return "unavailable";
 }
 
 function resolveProviderCandidate(candidate, options = {}) {
@@ -56,6 +178,8 @@ function buildSourceRecord({
   fallback = false,
 } = {}) {
   const apiMap = buildApiMap(container);
+  const hasCoreApi = hasCoreRegexApi(container);
+  const bridgeTier = detectBridgeTier({ hasCoreApi, apiMap });
 
   return Object.freeze({
     label,
@@ -63,6 +187,8 @@ function buildSourceRecord({
     fallback,
     apiMap,
     apiCount: countResolvedApis(apiMap),
+    hasCoreApi,
+    bridgeTier,
   });
 }
 
@@ -109,6 +235,27 @@ function collectExplicitRegexSourceRecords(options = {}) {
   }
 
   return records;
+}
+
+function collectCoreBridgeSourceRecords(options = {}) {
+  if (options?.disableCoreRegexBridge === true) {
+    return [];
+  }
+  const coreBridge = {
+    getRegexedString: coreGetRegexedString,
+    regex_placement: coreRegexPlacement,
+  };
+  if (!hasCoreRegexApi(coreBridge)) {
+    return [];
+  }
+
+  return [
+    buildSourceRecord({
+      label: "sillytavern.core.regex",
+      sourceKind: "core-bridge",
+      container: coreBridge,
+    }),
+  ];
 }
 
 function collectContextRegexSourceRecords(contextHost, options = {}) {
@@ -177,19 +324,31 @@ function collectGlobalFallbackRecords() {
   return records;
 }
 
-function resolveRegexSource(options = {}, contextHost = null) {
-  const records = [
-    ...collectExplicitRegexSourceRecords(options),
-    ...collectContextRegexSourceRecords(contextHost, options),
-    ...collectGlobalFallbackRecords(),
-  ];
+function scoreSourceRecord(record = {}) {
+  const sourceScore =
+    REGEX_SOURCE_KIND_PRIORITY[String(record?.sourceKind || "unknown")] || 0;
+  const tierScore =
+    REGEX_BRIDGE_TIER_PRIORITY[String(record?.bridgeTier || "unavailable")] || 0;
+  if (tierScore <= 0) {
+    return 0;
+  }
+  return sourceScore * 100 + tierScore * 10 + Number(record?.apiCount || 0);
+}
+
+function selectBestRegexSource(records = []) {
+  let bestRecord = null;
+  let bestScore = -1;
+
+  for (const record of Array.isArray(records) ? records : []) {
+    const score = scoreSourceRecord(record);
+    if (!bestRecord || score > bestScore) {
+      bestRecord = record;
+      bestScore = score;
+    }
+  }
 
   return (
-    records.find(
-      (record) =>
-        typeof record.apiMap.getTavernRegexes === "function" ||
-        typeof record.apiMap.formatAsTavernRegexedString === "function",
-    ) ||
+    bestRecord ||
     buildSourceRecord({
       label: "none",
       sourceKind: "unavailable",
@@ -198,22 +357,19 @@ function resolveRegexSource(options = {}, contextHost = null) {
   );
 }
 
-function detectRegexMode(apiMap = {}) {
-  const hasGetter = typeof apiMap.getTavernRegexes === "function";
-  const hasFormatter =
-    typeof apiMap.formatAsTavernRegexedString === "function";
+function resolveRegexSource(options = {}, contextHost = null) {
+  const records = [
+    ...collectExplicitRegexSourceRecords(options),
+    ...collectCoreBridgeSourceRecords(options),
+    ...collectContextRegexSourceRecords(contextHost, options),
+    ...collectGlobalFallbackRecords(),
+  ];
 
-  if (!hasGetter && !hasFormatter) {
-    return "unavailable";
-  }
+  return selectBestRegexSource(records);
+}
 
-  if (hasGetter && hasFormatter) {
-    return typeof apiMap.isCharacterTavernRegexesEnabled === "function"
-      ? "full"
-      : "partial";
-  }
-
-  return hasFormatter ? "formatter-only" : "getter-only";
+function detectRegexMode(sourceRecord = {}) {
+  return String(sourceRecord?.bridgeTier || "").trim() || "unavailable";
 }
 
 function buildFallbackReason(sourceRecord, available, mode) {
@@ -221,23 +377,15 @@ function buildFallbackReason(sourceRecord, available, mode) {
     return "未检测到 Tavern Regex 宿主接口";
   }
 
-  if (sourceRecord?.fallback && mode === "partial") {
-    return `当前通过 ${sourceRecord.label} fallback 提供部分 Tavern Regex 能力`;
+  if (mode === "core-real") {
+    return "";
   }
 
-  if (sourceRecord?.fallback) {
-    return `当前通过 ${sourceRecord.label} fallback 提供 Tavern Regex 能力`;
+  if (mode === "helper-bridge") {
+    return `当前通过 ${sourceRecord?.label || "unknown"} helper bridge 提供 Tavern Regex formatter`;
   }
 
-  if (mode === "partial") {
-    return `Tavern Regex 桥接仅发现部分接口，来源: ${sourceRecord?.label || "unknown"}`;
-  }
-
-  if (mode === "formatter-only") {
-    return `Tavern Regex 桥接仅发现 formatter 接口，来源: ${sourceRecord?.label || "unknown"}`;
-  }
-
-  if (mode === "getter-only") {
+  if (mode === "helper-getter-only") {
     return `Tavern Regex 桥接仅发现规则读取接口，来源: ${sourceRecord?.label || "unknown"}`;
   }
 
@@ -247,31 +395,45 @@ function buildFallbackReason(sourceRecord, available, mode) {
 export function createRegexHostFacade(options = {}) {
   const contextHost = options.contextHost || createContextHostFacade(options);
   const sourceRecord = resolveRegexSource(options, contextHost);
-  const mode = detectRegexMode(sourceRecord.apiMap);
+  const mode = detectRegexMode(sourceRecord);
   const available = mode !== "unavailable";
+  const formatterAvailable =
+    typeof sourceRecord.apiMap.formatAsTavernRegexedString === "function";
+  const rulesAvailable =
+    typeof sourceRecord.apiMap.getTavernRegexes === "function";
+  const fallbackReason = buildFallbackReason(sourceRecord, available, mode);
+  const versionHints = mergeVersionHints(
+    {
+      apis: REGEX_API_NAMES.filter(
+        (name) => typeof sourceRecord.apiMap[name] === "function",
+      ),
+      apiCount: String(sourceRecord.apiCount),
+      supportsCharacterToggle:
+        typeof sourceRecord.apiMap.isCharacterTavernRegexesEnabled === "function"
+          ? "yes"
+          : "no",
+      source: sourceRecord.sourceKind,
+      sourceLabel: sourceRecord.label,
+      fallback: sourceRecord.fallback ? "yes" : "no",
+      contextMode: contextHost?.mode || "unknown",
+      bridgeTier: sourceRecord.bridgeTier,
+      hasCoreApi: sourceRecord.hasCoreApi ? "yes" : "no",
+    },
+    options.versionHints,
+  );
+  const capabilityStatus = buildCapabilityStatus({
+    available,
+    mode,
+    fallbackReason,
+    versionHints,
+  });
 
   return Object.freeze({
     available,
     mode,
-    fallbackReason: buildFallbackReason(sourceRecord, available, mode),
-    versionHints: mergeVersionHints(
-      {
-        apis: REGEX_API_NAMES.filter(
-          (name) => typeof sourceRecord.apiMap[name] === "function",
-        ),
-        apiCount: String(sourceRecord.apiCount),
-        supportsCharacterToggle:
-          typeof sourceRecord.apiMap.isCharacterTavernRegexesEnabled ===
-          "function"
-            ? "yes"
-            : "no",
-        source: sourceRecord.sourceKind,
-        sourceLabel: sourceRecord.label,
-        fallback: sourceRecord.fallback ? "yes" : "no",
-        contextMode: contextHost?.mode || "unknown",
-      },
-      options.versionHints,
-    ),
+    fallbackReason,
+    versionHints,
+    capabilityStatus,
     getTavernRegexes: sourceRecord.apiMap.getTavernRegexes,
     isCharacterTavernRegexesEnabled:
       sourceRecord.apiMap.isCharacterTavernRegexesEnabled,
@@ -295,8 +457,10 @@ export function createRegexHostFacade(options = {}) {
         source: sourceRecord.sourceKind,
         sourceLabel: sourceRecord.label,
         fallback: sourceRecord.fallback,
-        formatterAvailable:
-          typeof sourceRecord.apiMap.formatAsTavernRegexedString === "function",
+        formatterAvailable,
+        rulesAvailable,
+        bridgeTier: sourceRecord.bridgeTier,
+        hasCoreApi: sourceRecord.hasCoreApi,
       });
     },
   });

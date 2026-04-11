@@ -158,6 +158,18 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     role: "system",
     description: "注入近期检测到的记忆矛盾或冲突信息。reflection 任务专用，触发基于矛盾的深度反思。",
   },
+  {
+    sourceKey: "activeSummaries",
+    name: "活跃总结",
+    role: "system",
+    description: "注入当前活跃的分层总结快照。extract 任务使用，帮助 LLM 了解近期已总结的局面，避免重复提取已覆盖内容。",
+  },
+  {
+    sourceKey: "storyTimeContext",
+    name: "故事时间",
+    role: "system",
+    description: "注入当前活跃的故事时间线标签与来源。extract 任务使用，帮助 LLM 定位本批对话在剧情时间轴上的位置。",
+  },
 ];
 
 const DEFAULT_TASK_PROFILE_VERSION = 3;
@@ -488,6 +500,20 @@ const TASK_CONTEXT_BLOCK_BLUEPRINTS = {
       type: "builtin",
       role: "system",
       sourceKey: "currentRange",
+    },
+    {
+      id: "default-active-summaries",
+      name: "活跃总结",
+      type: "builtin",
+      role: "system",
+      sourceKey: "activeSummaries",
+    },
+    {
+      id: "default-story-time-context",
+      name: "故事时间",
+      type: "builtin",
+      role: "system",
+      sourceKey: "storyTimeContext",
     },
   ],
   recall: [
@@ -870,6 +896,119 @@ const DEFAULT_TASK_REGEX_STAGES = Object.freeze({
   output: false,
 });
 
+ const DEFAULT_GLOBAL_TASK_REGEX_RULE_SPECS = Object.freeze([
+   {
+     id: "default-contamination-thinking-blocks",
+     script_name: "默认清理：thinking/analysis/reasoning",
+     enabled: true,
+     find_regex: "/<(think|thinking|analysis|reasoning)\\b[^>]*>[\\s\\S]*?<\\/\\1>/gi",
+     replace_string: "",
+     trim_strings: "",
+     source: {
+       user_input: true,
+       ai_output: true,
+     },
+     destination: {
+       prompt: true,
+       display: false,
+     },
+     min_depth: 0,
+     max_depth: 9999,
+   },
+   {
+     id: "default-contamination-choice-blocks",
+     script_name: "默认清理：choice",
+     enabled: true,
+     find_regex: "/(?:<choice\\b[^>]*>[\\s\\S]*?<\\/choice>|<choice\\b[^>]*\\/?>)/gi",
+     replace_string: "",
+     trim_strings: "",
+     source: {
+       user_input: true,
+       ai_output: true,
+     },
+     destination: {
+       prompt: true,
+       display: false,
+     },
+     min_depth: 0,
+     max_depth: 9999,
+   },
+   {
+     id: "default-contamination-updatevariable-tags",
+     script_name: "默认清理：UpdateVariable",
+     enabled: true,
+     find_regex:
+       "/(?:<updatevariable\\b[^>]*>[\\s\\S]*?<\\/updatevariable>|<updatevariable\\b[^>]*\\/?>)/gi",
+     replace_string: "",
+     trim_strings: "",
+     source: {
+       user_input: true,
+       ai_output: true,
+     },
+     destination: {
+       prompt: true,
+       display: false,
+     },
+     min_depth: 0,
+     max_depth: 9999,
+   },
+   {
+     id: "default-contamination-status-current-variable-tags",
+     script_name: "默认清理：status_current_variable",
+     enabled: true,
+     find_regex:
+       "/(?:<status_current_variable\\b[^>]*>[\\s\\S]*?<\\/status_current_variable>|<status_current_variable\\b[^>]*\\/?>)/gi",
+     replace_string: "",
+     trim_strings: "",
+     source: {
+       user_input: true,
+       ai_output: true,
+     },
+     destination: {
+       prompt: true,
+       display: false,
+     },
+     min_depth: 0,
+     max_depth: 9999,
+   },
+   {
+     id: "default-contamination-status-placeholder-tags",
+     script_name: "默认清理：StatusPlaceHolderImpl",
+     enabled: true,
+     find_regex: "/<StatusPlaceHolderImpl\\b[^>]*\\/?>/gi",
+     replace_string: "",
+     trim_strings: "",
+     source: {
+       user_input: true,
+       ai_output: true,
+     },
+     destination: {
+       prompt: true,
+       display: false,
+     },
+     min_depth: 0,
+     max_depth: 9999,
+   },
+ ]);
+
+ function cloneDefaultGlobalTaskRegexRules() {
+   return DEFAULT_GLOBAL_TASK_REGEX_RULE_SPECS.map((rule, index) =>
+     normalizeRegexLocalRule(
+       {
+         ...rule,
+         source: {
+           ...(rule.source || {}),
+         },
+         destination: {
+           ...(rule.destination || {}),
+         },
+       },
+       "global",
+       index,
+     ),
+   );
+ }
+
 function normalizeRegexStageKey(stageKey = "") {
   const normalized = String(stageKey || "").trim();
   return TASK_REGEX_STAGE_ALIAS_MAP[normalized] || normalized;
@@ -913,7 +1052,7 @@ export function createDefaultGlobalTaskRegex() {
       character: true,
     },
     stages: normalizeTaskRegexStages(DEFAULT_TASK_REGEX_STAGES),
-    localRules: [],
+    localRules: cloneDefaultGlobalTaskRegexRules(),
   };
 }
 
@@ -952,6 +1091,11 @@ export function normalizeGlobalTaskRegex(config = {}, taskType = "global") {
   const defaults = createDefaultGlobalTaskRegex();
   const source =
     config && typeof config === "object" && !Array.isArray(config) ? config : {};
+  const normalizedTaskType = String(taskType || "").trim().toLowerCase();
+  const defaultLocalRules = normalizedTaskType === "global" ? defaults.localRules : [];
+  const rawLocalRules = Array.isArray(source.localRules)
+    ? source.localRules
+    : defaultLocalRules;
 
   return {
     enabled: source.enabled !== false,
@@ -964,7 +1108,7 @@ export function normalizeGlobalTaskRegex(config = {}, taskType = "global") {
       ...normalizeTaskRegexStages(defaults.stages),
       ...normalizeTaskRegexStages(source.stages || {}),
     },
-    localRules: dedupeRegexRules(source.localRules, taskType),
+    localRules: dedupeRegexRules(rawLocalRules, taskType),
   };
 }
 

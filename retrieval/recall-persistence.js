@@ -47,6 +47,8 @@ export function readPersistedRecallFromUserMessage(chat, userMessageIndex) {
     updatedAt: toIsoString(record.updatedAt),
     generationCount: Math.max(0, Number.parseInt(record.generationCount, 10) || 0),
     manuallyEdited: Boolean(record.manuallyEdited),
+    authoritativeInputUsed: Boolean(record.authoritativeInputUsed),
+    boundUserFloorText: String(record.boundUserFloorText || ""),
   };
 }
 
@@ -69,6 +71,8 @@ export function buildPersistedRecallRecord(payload = {}, existingRecord = null) 
     updatedAt: nowIso,
     generationCount: 0,
     manuallyEdited: Boolean(payload.manuallyEdited),
+    authoritativeInputUsed: Boolean(payload.authoritativeInputUsed),
+    boundUserFloorText: String(payload.boundUserFloorText || ""),
   };
 }
 

@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
 
 jobs:
   bump-manifest-version:
@@ -15,20 +16,45 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Detect merged pull request push
+        id: pr-check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.sha;
+            const response = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner,
+              repo,
+              commit_sha: sha,
+            });
+            const mergedPr = (response.data || []).find(
+              (pr) => pr?.merged_at && pr?.base?.ref === context.ref.replace('refs/heads/', ''),
+            );
+            const shouldSkip = Boolean(mergedPr);
+            core.setOutput('skip', shouldSkip ? 'true' : 'false');
+            if (mergedPr) {
+              core.notice(`Skip manifest bump for merged PR #${mergedPr.number}: ${mergedPr.title}`);
+            }
+
       - name: Checkout
+        if: ${{ steps.pr-check.outputs.skip != 'true' }}
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
+        if: ${{ steps.pr-check.outputs.skip != 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Bump manifest version
+        if: ${{ steps.pr-check.outputs.skip != 'true' }}
         run: node scripts/bump-manifest-version.mjs
 
       - name: Commit version bump
+        if: ${{ steps.pr-check.outputs.skip != 'true' }}
         run: |
           if git diff --quiet -- manifest.json; then
             echo "manifest.json version did not change."

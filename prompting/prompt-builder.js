@@ -181,6 +181,10 @@ export function buildTaskExecutionDebugContext(
       promptDebug.mvu && typeof promptDebug.mvu === "object"
         ? cloneRuntimeDebugValue(promptDebug.mvu, {})
         : null,
+    inputContext:
+      promptDebug.inputContext && typeof promptDebug.inputContext === "object"
+        ? cloneRuntimeDebugValue(promptDebug.inputContext, {})
+        : null,
     regexInput:
       (() => {
         const merged = mergeRegexCollectors(
@@ -284,18 +288,26 @@ function getPromptMessageLikeDescriptor(value) {
 
   if (typeof value.content === "string") {
     const role = String(value.role || "assistant").trim().toLowerCase();
+    const speaker = String(
+      value.speaker || value.name || value.displayName || "",
+    ).trim();
     return {
       content: String(value.content || ""),
       role: role === "user" ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
+      speaker,
     };
   }
 
   if (typeof value.mes === "string") {
+    const speaker = String(
+      value.speaker || value.name || value.displayName || "",
+    ).trim();
     return {
       content: String(value.mes || ""),
       role: value.is_user === true ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
+      speaker,
     };
   }
 
@@ -320,7 +332,10 @@ function formatPromptMessageTranscript(value) {
       }
       const seqLabel =
         descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
-      return `${seqLabel} [${descriptor.role}]: ${descriptor.content}`;
+      const speakerLabel = descriptor.speaker
+        ? `|${descriptor.speaker}`
+        : "";
+      return `${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`;
     })
     .filter(Boolean)
     .join("\n\n");
@@ -766,6 +781,32 @@ function sanitizePromptContextInputs(
         return value;
       }
       seen.add(value);
+      const messageDescriptor = getPromptMessageLikeDescriptor(value);
+      if (messageDescriptor) {
+        const contentKey = typeof value.content === "string"
+          ? "content"
+          : typeof value.mes === "string"
+            ? "mes"
+            : "";
+        const messageRole = messageDescriptor.role === "user"
+          ? "user"
+          : messageDescriptor.role === "assistant"
+            ? "assistant"
+            : regexRole;
+        return Object.fromEntries(
+          Object.entries(value).map(([key, entryValue]) => [
+            key,
+            key === contentKey
+              ? applyLocalRegexToStructuredValue(
+                  entryValue,
+                  regexStage,
+                  messageRole,
+                  seen,
+                )
+              : entryValue,
+          ]),
+        );
+      }
       return Object.fromEntries(
         Object.entries(value).map(([key, entryValue]) => [
           key,
@@ -821,14 +862,14 @@ function sanitizePromptContextInputs(
           ? ""
           : null
       : sanitized.value;
-    if (structuredSanitizerInput.renderAsTranscript) {
-      sanitizedValue = stringifyInterpolatedValue(sanitizedValue);
-    }
     sanitizedValue = applyLocalRegexToStructuredValue(
       sanitizedValue,
       regexStage,
       regexRole,
     );
+    if (structuredSanitizerInput.renderAsTranscript) {
+      sanitizedValue = stringifyInterpolatedValue(sanitizedValue);
+    }
     sanitizedContext[fieldName] = sanitizedValue;
   }
 
@@ -1407,6 +1448,10 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const legacyPrompt = getLegacyPromptForTask(settings, taskType);
   const promptRegexInput = { entries: [] };
   const mvuPromptDebug = createEmptyMvuPromptDebug();
+  const taskInputDebug =
+    context?.taskInputDebug && typeof context.taskInputDebug === "object"
+      ? cloneRuntimeDebugValue(context.taskInputDebug, {})
+      : null;
   const worldInfoInputContext = {
     ...context,
   };
@@ -1430,7 +1475,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       return orderA - orderB;
     });
 
-  const worldInfoRequested = profileRequiresWorldInfo(profile);
+  const worldInfoRequested = context?.__skipWorldInfo === true
+    ? false
+    : profileRequiresWorldInfo(profile);
   const emptyWorldInfo = buildEmptyWorldInfoContext();
   let resolvedWorldInfo = emptyWorldInfo;
   let worldInfoRuntimeBlockedContents = [];
@@ -1771,6 +1818,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         ),
         fallbackReason: String(mvuPromptDebug.fallbackReason || ""),
       },
+      inputContext: taskInputDebug,
       effectivePath: {
         promptAssembly: "ordered-private-messages",
         hostInjectionPlan: "diagnostic-plan-only",
@@ -1809,11 +1857,92 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     hostInjectionPlan,
     worldInfoResolution,
     mvu: result.debug.mvu,
+    inputContext: taskInputDebug,
     regexInput: result.regexInput,
     debug: result.debug,
   });
 
   return result;
+}
+
+function clonePayloadMessage(message = {}) {
+  return createExecutionMessage(message.role, message.content, {
+    source: String(message.source || ""),
+    blockId: String(message.blockId || ""),
+    blockName: String(message.blockName || ""),
+    blockType: String(message.blockType || ""),
+    sourceKey: String(message.sourceKey || ""),
+    injectionMode: String(message.injectionMode || ""),
+    derivedFromWorldInfo: message.derivedFromWorldInfo === true,
+    contentOrigin: String(message.contentOrigin || ""),
+    sanitizationEligible: message.sanitizationEligible === true,
+    regexSourceType: String(message.regexSourceType || ""),
+  });
+}
+
+function collectPayloadUserMessageTexts(messages = []) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => String(message?.role || "").trim().toLowerCase() === "user")
+    .map((message) => String(message?.content || "").trim())
+    .filter(Boolean);
+}
+
+function buildSafeFallbackUserPrompt(
+  settings = {},
+  taskType,
+  {
+    fallbackUserPrompt = "",
+    blockedContents = [],
+    rawExecutionMessages = [],
+    rawPrivateTaskMessages = [],
+  } = {},
+) {
+  const structuredUserPrompt = [
+    ...collectPayloadUserMessageTexts(rawExecutionMessages),
+    ...collectPayloadUserMessageTexts(rawPrivateTaskMessages),
+  ]
+    .join("\n\n")
+    .trim();
+  const candidates = [
+    {
+      source: "structured-user-blocks",
+      text: structuredUserPrompt,
+    },
+    {
+      source: "fallback-user-prompt",
+      text: String(fallbackUserPrompt || "").trim(),
+    },
+  ].filter((candidate) => candidate.text);
+
+  for (const candidate of candidates) {
+    const sanitized = sanitizeInjectionText(settings, taskType, candidate.text, {
+      mode: "final-injection-safe",
+      blockedContents,
+      contentOrigin: PROMPT_CONTENT_ORIGIN.HOST_INJECTED,
+      sanitizationEligible: true,
+      role: "user",
+      applySanitizer: true,
+      applyHostRegex: false,
+      path: "payload.fallbackUserPrompt",
+      stage: "payload-fallback-user-prompt",
+    });
+    const text = String(sanitized.text || "").trim();
+    if (text) {
+      return {
+        text,
+        source: candidate.source,
+        changed: Boolean(sanitized.changed),
+        dropped: Boolean(sanitized.dropped),
+      };
+    }
+  }
+
+  return {
+    text: "",
+    source: candidates[0]?.source || "",
+    changed: false,
+    dropped: candidates.length > 0,
+  };
 }
 
 export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
@@ -1831,20 +1960,12 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     : [];
   const rawExecutionMessages = Array.isArray(promptBuild?.executionMessages)
     ? promptBuild.executionMessages
-        .map((message) =>
-          createExecutionMessage(message.role, message.content, {
-            source: String(message.source || ""),
-            blockId: String(message.blockId || ""),
-            blockName: String(message.blockName || ""),
-            blockType: String(message.blockType || ""),
-            sourceKey: String(message.sourceKey || ""),
-            injectionMode: String(message.injectionMode || ""),
-            derivedFromWorldInfo: message.derivedFromWorldInfo === true,
-            contentOrigin: String(message.contentOrigin || ""),
-            sanitizationEligible: message.sanitizationEligible === true,
-            regexSourceType: String(message.regexSourceType || ""),
-          }),
-        )
+        .map((message) => clonePayloadMessage(message))
+        .filter(Boolean)
+    : [];
+  const rawPrivateTaskMessages = Array.isArray(promptBuild?.privateTaskMessages)
+    ? promptBuild.privateTaskMessages
+        .map((message) => clonePayloadMessage(message))
         .filter(Boolean)
     : [];
   const executionMessages = sanitizePromptMessages(
@@ -1900,22 +2021,39 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
       : sanitizePromptMessages(
           settings,
           taskType,
-          Array.isArray(promptBuild?.privateTaskMessages)
-            ? promptBuild.privateTaskMessages
-            : [],
+          rawPrivateTaskMessages,
           {
             blockedContents,
             applySanitizer: (message) =>
               !(isCustomFilter && messageUsesWorldInfoContent(message)),
           },
         );
+  const hasAdditionalUserMessage = additionalMessages.some(
+    (message) => message.role === "user",
+  );
+  const fallbackUserPromptResult =
+    hasUserMessage || hasAdditionalUserMessage
+      ? {
+          text: "",
+          source: hasUserMessage ? "execution-messages" : "additional-messages",
+          changed: false,
+          dropped: false,
+        }
+      : buildSafeFallbackUserPrompt(settings, taskType, {
+          fallbackUserPrompt,
+          blockedContents,
+          rawExecutionMessages,
+          rawPrivateTaskMessages,
+        });
 
   return {
     systemPrompt:
       executionMessages.length > 0 ? "" : String(promptBuild?.systemPrompt || ""),
-    userPrompt: hasUserMessage ? "" : String(fallbackUserPrompt || ""),
+    userPrompt: fallbackUserPromptResult.text,
     promptMessages: executionMessages,
     additionalMessages,
+    fallbackUserPromptSource: fallbackUserPromptResult.source,
+    fallbackUserPromptApplied: Boolean(fallbackUserPromptResult.text),
   };
 }
 
