@@ -6738,6 +6738,27 @@ function isMvuExtraAnalysisGuardActive(now = Date.now()) {
   return true;
 }
 
+function isTavernHelperPromptViewerRefreshActive() {
+  try {
+    const doc = globalThis?.document;
+    if (!doc?.querySelectorAll) return false;
+
+    const dialogs = Array.from(doc.querySelectorAll('[role="dialog"]'));
+    for (const dialog of dialogs) {
+      const dialogText = String(dialog?.textContent || "");
+      if (!/(提示词查看器|prompt\s*viewer)/i.test(dialogText)) {
+        continue;
+      }
+
+      if (dialog.querySelector(".fa-rotate-right.animate-spin")) {
+        return true;
+      }
+    }
+  } catch {}
+
+  return false;
+}
+
 function isGraphEffectivelyEmpty(graph) {
   if (!graph || typeof graph !== "object") {
     return true;
@@ -12748,6 +12769,7 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
       getPendingRecallSendIntent: () => pendingRecallSendIntent,
       getSendTextareaValue,
       isFreshRecallInputRecord,
+      isTavernHelperPromptViewerRefreshActive,
       isTrivialUserInput,
       markDryRunPromptPreview,
       markCurrentGenerationTrivialSkip,
@@ -12787,6 +12809,8 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
     {
       applyFinalRecallInjectionForGeneration,
       buildGenerationAfterCommandsRecallInput,
+      clearPendingHostGenerationInputSnapshot,
+      clearPendingRecallSendIntent,
       clearLiveRecallInjectionPromptForRewrite,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
@@ -12794,7 +12818,12 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
+      getCurrentChatId,
+      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      isFreshRecallInputRecord,
       isMvuExtraAnalysisGuardActive,
+      isTavernHelperPromptViewerRefreshActive,
+      markCurrentGenerationTrivialSkip,
       markGenerationRecallTransactionHookState,
       resolveGenerationRecallDeliveryMode,
       runRecall,
@@ -12812,6 +12841,8 @@ async function onBeforeCombinePrompts(promptData = null) {
       applyFinalRecallInjectionForGeneration,
       buildHistoryGenerationRecallInput,
       buildNormalGenerationRecallInput,
+      clearPendingHostGenerationInputSnapshot,
+      clearPendingRecallSendIntent,
       clearLiveRecallInjectionPromptForRewrite,
       consumeDryRunPromptPreview,
       consumeHostGenerationInputSnapshot,
@@ -12819,7 +12850,12 @@ async function onBeforeCombinePrompts(promptData = null) {
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
+      getCurrentChatId,
+      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      isFreshRecallInputRecord,
       isMvuExtraAnalysisGuardActive,
+      isTavernHelperPromptViewerRefreshActive,
+      markCurrentGenerationTrivialSkip,
       markGenerationRecallTransactionHookState,
       resolveGenerationRecallDeliveryMode,
       runRecall,
