@@ -21,6 +21,7 @@ import {
 } from "../graph/summary-state.js";
 import {
   resolveActiveLlmPresetName,
+  resolveDedicatedLlmProviderConfig,
   sanitizeLlmPresetSettings,
 } from "../llm/llm-preset-utils.js";
 import {
@@ -52,6 +53,48 @@ import {
 } from "../vector/vector-index.js";
 
 let defaultPromptCache = null;
+
+function _refreshMemoryLlmProviderHelp(urlValue = null) {
+  const helpEl = document.getElementById("bme-memory-llm-provider-help");
+  if (!helpEl) return;
+
+  const settings = _getSettings?.() || {};
+  const rawUrl = String(
+    urlValue ??
+      document.getElementById("bme-setting-llm-url")?.value ??
+      settings.llmApiUrl ??
+      "",
+  ).trim();
+
+  if (!rawUrl) {
+    helpEl.textContent =
+      "留空时复用当前聊天模型。支持自动识别 OpenAI 兼容渠道、Anthropic Claude、Google AI Studio / Gemini；填写完整 endpoint 时会自动规整为可复用的 base URL。";
+    return;
+  }
+
+  const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
+  const parts = [];
+
+  if (resolved.isKnownProvider) {
+    parts.push(`已识别渠道：${resolved.providerLabel || resolved.providerId || "未知渠道"}`);
+  } else {
+    parts.push("未识别为特定渠道，将按自定义 OpenAI 兼容接口处理");
+  }
+
+  if (resolved.transportLabel) {
+    parts.push(`请求通道：${resolved.transportLabel}`);
+  }
+
+  if (resolved.apiUrl && resolved.apiUrl !== rawUrl) {
+    parts.push(`规范化地址：${resolved.apiUrl}`);
+  }
+
+  if (resolved.supportsModelFetch !== true) {
+    parts.push("该渠道暂不支持自动拉取模型，请手动填写模型名");
+  }
+
+  helpEl.textContent = parts.join("；");
+}
 
 function getDefaultPrompts() {
   if (defaultPromptCache) {
@@ -4544,6 +4587,7 @@ function _refreshConfigTab() {
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
   _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
   _setInputValue("bme-setting-llm-model", settings.llmModel || "");
+  _refreshMemoryLlmProviderHelp(settings.llmApiUrl || "");
   _populateLlmPresetSelect(settings.llmPresets || {}, resolvedActiveLlmPreset);
   _syncLlmPresetControls(resolvedActiveLlmPreset);
   _setInputValue("bme-setting-timeout-ms", settings.timeoutMs ?? 300000);
@@ -5073,6 +5117,7 @@ function _bindConfigControls() {
       _setInputValue("bme-setting-llm-url", preset.llmApiUrl);
       _setInputValue("bme-setting-llm-key", preset.llmApiKey);
       _setInputValue("bme-setting-llm-model", preset.llmModel);
+      _refreshMemoryLlmProviderHelp(preset.llmApiUrl);
       _clearFetchedLlmModels();
       _syncLlmPresetControls(selectedName);
     });
@@ -5167,6 +5212,7 @@ function _bindConfigControls() {
 
   bindText("bme-setting-llm-url", (value) => {
     _patchSettings({ llmApiUrl: value.trim() });
+    _refreshMemoryLlmProviderHelp(value);
     _markLlmPresetDirty({ clearFetchedModels: true });
   });
   bindText("bme-setting-llm-key", (value) => {
@@ -6176,6 +6222,8 @@ function _getMonitorRouteLabel(value = "") {
   if (!normalized) return "";
   const labels = {
     "dedicated-openai-compatible": "专用 OpenAI 兼容接口",
+    "dedicated-anthropic-claude": "Anthropic Claude 接口",
+    "dedicated-google-ai-studio": "Google AI Studio / Gemini 接口",
     "sillytavern-current-model": "酒馆当前模型",
     "dedicated-memory-llm": "专用记忆模型",
     global: "跟随当前 API",
@@ -6227,7 +6275,8 @@ function _getMonitorEjsStatusLabel(status = "") {
 
 function _formatMonitorRouteInfo(entry = {}) {
   const parts = [
-    _getMonitorRouteLabel(entry?.route),
+    _getMonitorRouteLabel(entry?.routeLabel || entry?.route),
+    String(entry?.llmProviderLabel || "").trim(),
     _getMonitorRouteLabel(entry?.llmConfigSourceLabel),
     String(entry?.model || "").trim() ? `模型：${String(entry.model).trim()}` : "",
   ].filter(Boolean);
@@ -7914,7 +7963,11 @@ function _renderTaskDebugLlmCard(taskType, llmRequest) {
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">请求路径</span>
-        <span class="bme-debug-kv-value">${_escHtml(llmRequest.route || "—")}</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.routeLabel || _getMonitorRouteLabel(llmRequest.route || "") || llmRequest.route || "—")}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">识别渠道</span>
+        <span class="bme-debug-kv-value">${_escHtml(llmRequest.llmProviderLabel || llmRequest.llmProvider || "—")}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">模型</span>

@@ -110,6 +110,23 @@ async function withModelFetchSettings(run) {
   }
 }
 
+async function withModelFetchSettingsOverrides(overrides, run) {
+  const previousSettings = JSON.parse(
+    JSON.stringify(extensionsApi.extension_settings.st_bme || {}),
+  );
+  extensionsApi.extension_settings.st_bme = {
+    ...previousSettings,
+    ...buildModelFetchSettings(),
+    ...(overrides || {}),
+  };
+
+  try {
+    await run();
+  } finally {
+    extensionsApi.extension_settings.st_bme = previousSettings;
+  }
+}
+
 async function testFetchMemoryModelsUsesCustomStatusFirst() {
   const originalFetch = globalThis.fetch;
   const seenBodies = [];
@@ -238,8 +255,70 @@ async function testFetchMemoryModelsParsesNestedPayload() {
   }
 }
 
+async function testFetchMemoryModelsUsesGoogleStatusRoute() {
+  const originalFetch = globalThis.fetch;
+  const seenBodies = [];
+
+  globalThis.fetch = async (_url, options = {}) => {
+    seenBodies.push(JSON.parse(String(options.body || "{}")));
+    return new Response(
+      JSON.stringify({
+        data: [{ id: "gemini-2.5-pro" }],
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+  };
+
+  try {
+    await withModelFetchSettingsOverrides(
+      {
+        llmApiUrl:
+          "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        llmApiKey: "gemini-secret",
+      },
+      async () => {
+        const result = await llm.fetchMemoryLLMModels();
+        assert.equal(result.success, true);
+        assert.deepEqual(result.models, [
+          { id: "gemini-2.5-pro", label: "gemini-2.5-pro" },
+        ]);
+        assert.equal(seenBodies.length, 1);
+        assert.equal(seenBodies[0].chat_completion_source, "makersuite");
+        assert.equal(seenBodies[0].reverse_proxy, "https://generativelanguage.googleapis.com");
+        assert.equal(seenBodies[0].proxy_password, "gemini-secret");
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function testFetchMemoryModelsReturnsHelpfulMessageForAnthropic() {
+  await withModelFetchSettingsOverrides(
+    {
+      llmApiUrl: "https://api.anthropic.com/v1/messages",
+      llmApiKey: "anthropic-secret",
+      llmModel: "claude-sonnet-4-5",
+    },
+    async () => {
+      const result = await llm.fetchMemoryLLMModels();
+      assert.equal(result.success, false);
+      assert.equal(result.models.length, 0);
+      assert.match(result.error, /Anthropic Claude/);
+      assert.match(result.error, /手动填写模型名/);
+    },
+  );
+}
+
 await testFetchMemoryModelsUsesCustomStatusFirst();
 await testFetchMemoryModelsFallsBackToLegacyStatus();
 await testFetchMemoryModelsParsesNestedPayload();
+await testFetchMemoryModelsUsesGoogleStatusRoute();
+await testFetchMemoryModelsReturnsHelpfulMessageForAnthropic();
 
 console.log("llm-model-fetch tests passed");

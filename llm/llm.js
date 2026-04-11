@@ -6,7 +6,10 @@ import { extension_settings } from "../../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../../openai.js";
 import { debugLog, debugWarn } from "../runtime/debug-logging.js";
 import { resolveTaskGenerationOptions } from "../runtime/generation-options.js";
-import { resolveLlmConfigSelection } from "./llm-preset-utils.js";
+import {
+  resolveDedicatedLlmProviderConfig,
+  resolveLlmConfigSelection,
+} from "./llm-preset-utils.js";
 import { getActiveTaskProfile } from "../prompting/prompt-profiles.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
@@ -206,11 +209,27 @@ function getMemoryLLMConfig(taskType = "") {
       ? activeProfile.generation.llm_preset
       : "";
   const selection = resolveLlmConfigSelection(settings, selectedPresetName);
+  const resolvedProvider = resolveDedicatedLlmProviderConfig(
+    selection.config?.llmApiUrl,
+  );
   return {
-    apiUrl: normalizeOpenAICompatibleBaseUrl(selection.config?.llmApiUrl),
+    inputApiUrl: resolvedProvider.inputUrl || "",
+    apiUrl: resolvedProvider.apiUrl || "",
     apiKey: String(selection.config?.llmApiKey || "").trim(),
     model: String(selection.config?.llmModel || "").trim(),
     timeoutMs: getConfiguredTimeoutMs(settings),
+    llmProvider: resolvedProvider.providerId || "",
+    llmProviderLabel: resolvedProvider.providerLabel || "",
+    llmTransport: resolvedProvider.transportId || "",
+    llmTransportLabel: resolvedProvider.transportLabel || "",
+    llmRouteMode: resolvedProvider.routeMode || "",
+    llmHostSource: resolvedProvider.hostSource || "",
+    llmHostSourceConst: resolvedProvider.hostSourceConst || "",
+    llmSupportsModelFetch: resolvedProvider.supportsModelFetch === true,
+    llmStatusStrategies: Array.isArray(resolvedProvider.statusStrategies)
+      ? [...resolvedProvider.statusStrategies]
+      : [],
+    llmChannel: resolvedProvider,
     llmConfigSource: selection.source || "global",
     llmConfigSourceLabel: formatLlmConfigSourceLabel(selection.source),
     llmPresetName: selection.presetName || "",
@@ -418,6 +437,7 @@ function buildEffectiveLlmRoute(
   hasDedicatedConfig,
   privateRequestSource,
   taskType = "",
+  config = null,
 ) {
   const dedicated = Boolean(hasDedicatedConfig);
   return {
@@ -425,8 +445,18 @@ function buildEffectiveLlmRoute(
     requestSource: String(privateRequestSource || "").trim(),
     llm: dedicated ? "dedicated-memory-llm" : "sillytavern-current-model",
     transport: dedicated
-      ? "dedicated-openai-compatible"
+      ? String(config?.llmTransport || "dedicated-openai-compatible")
       : "sillytavern-current-model",
+    transportLabel: dedicated
+      ? String(
+          config?.llmTransportLabel || config?.llmProviderLabel || "专用记忆模型",
+        )
+      : "酒馆当前模型",
+    provider: dedicated ? String(config?.llmProvider || "") : "",
+    providerLabel: dedicated ? String(config?.llmProviderLabel || "") : "",
+    routeMode: dedicated ? String(config?.llmRouteMode || "") : "",
+    inputApiUrl: dedicated ? String(config?.inputApiUrl || "") : "",
+    apiUrl: dedicated ? String(config?.apiUrl || "") : "",
   };
 }
 
@@ -665,10 +695,8 @@ function buildResponseErrorMessage(response, responseText = "") {
 }
 
 function normalizeOpenAICompatibleBaseUrl(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\/+(chat\/completions|embeddings)$/i, "")
-    .replace(/\/+$/, "");
+  const resolved = resolveDedicatedLlmProviderConfig(value);
+  return resolved.apiUrl || String(value || "").trim().replace(/\/+$/, "");
 }
 
 function hasDedicatedLLMConfig(config = getMemoryLLMConfig()) {
@@ -739,28 +767,87 @@ function buildDedicatedAuthHeaderString(apiKey = "") {
   return normalized ? `Authorization: Bearer ${normalized}` : "";
 }
 
-function buildDedicatedStatusRequestVariants(config = getMemoryLLMConfig()) {
-  const customVariant = {
+function resolveChatCompletionSourceValue(sourceConst = "", fallback = "") {
+  const normalizedConst = String(sourceConst || "").trim();
+  if (
+    normalizedConst &&
+    chat_completion_sources &&
+    typeof chat_completion_sources === "object" &&
+    chat_completion_sources[normalizedConst]
+  ) {
+    return String(chat_completion_sources[normalizedConst]).trim();
+  }
+  return String(fallback || "").trim();
+}
+
+function buildDedicatedCustomStatusVariant(config = getMemoryLLMConfig()) {
+  return {
     mode: "custom",
     body: {
-      chat_completion_source: chat_completion_sources.CUSTOM,
+      chat_completion_source: resolveChatCompletionSourceValue("CUSTOM", "custom"),
       custom_url: config.apiUrl,
       custom_include_headers: buildDedicatedAuthHeaderString(config.apiKey),
       reverse_proxy: config.apiUrl,
       proxy_password: "",
     },
   };
+}
 
-  const legacyOpenAiVariant = {
-    mode: "openai-reverse-proxy",
+function buildDedicatedReverseProxyStatusVariant(
+  mode,
+  sourceConst,
+  fallbackSource,
+  config = getMemoryLLMConfig(),
+) {
+  return {
+    mode,
     body: {
-      chat_completion_source: chat_completion_sources.OPENAI,
+      chat_completion_source: resolveChatCompletionSourceValue(
+        sourceConst,
+        fallbackSource,
+      ),
       reverse_proxy: config.apiUrl,
       proxy_password: config.apiKey || "",
     },
   };
+}
 
-  return [customVariant, legacyOpenAiVariant];
+function buildDedicatedStatusRequestVariants(config = getMemoryLLMConfig()) {
+  const strategies = Array.isArray(config.llmStatusStrategies)
+    ? config.llmStatusStrategies
+    : ["custom", "openai-reverse-proxy"];
+  const variants = [];
+  const seenModes = new Set();
+
+  for (const strategy of strategies) {
+    let variant = null;
+    if (strategy === "custom") {
+      variant = buildDedicatedCustomStatusVariant(config);
+    } else if (strategy === "openai-reverse-proxy") {
+      variant = buildDedicatedReverseProxyStatusVariant(
+        "openai-reverse-proxy",
+        "OPENAI",
+        "openai",
+        config,
+      );
+    } else if (strategy === "makersuite-reverse-proxy") {
+      variant = buildDedicatedReverseProxyStatusVariant(
+        "makersuite-reverse-proxy",
+        "MAKERSUITE",
+        "makersuite",
+        config,
+      );
+    }
+
+    if (!variant?.mode || seenModes.has(variant.mode)) {
+      continue;
+    }
+
+    seenModes.add(variant.mode);
+    variants.push(variant);
+  }
+
+  return variants;
 }
 
 async function requestDedicatedStatusModels(
@@ -1444,6 +1531,64 @@ async function executeDedicatedRequest(
   }
 }
 
+function shouldForceDedicatedNonStream(config = getMemoryLLMConfig()) {
+  return (
+    String(config.llmRouteMode || "").trim() === "reverse-proxy" &&
+    ["claude", "makersuite"].includes(
+      String(config.llmHostSource || "").trim().toLowerCase(),
+    )
+  );
+}
+
+function buildDedicatedRequestBody(
+  config,
+  transportMessages,
+  filteredGeneration,
+  resolvedCompletionTokens,
+  { jsonMode = false } = {},
+) {
+  const routeMode = String(config?.llmRouteMode || "custom").trim() || "custom";
+  const body = {
+    model: config.model,
+    messages: transportMessages,
+    temperature: filteredGeneration.temperature ?? 1,
+    max_tokens: resolvedCompletionTokens,
+    stream: filteredGeneration.stream ?? false,
+    frequency_penalty: filteredGeneration.frequency_penalty ?? 0,
+    presence_penalty: filteredGeneration.presence_penalty ?? 0,
+    top_p: filteredGeneration.top_p ?? 1,
+  };
+
+  if (routeMode === "reverse-proxy") {
+    body.chat_completion_source = resolveChatCompletionSourceValue(
+      config.llmHostSourceConst,
+      config.llmHostSource || "custom",
+    );
+    body.reverse_proxy = config.apiUrl;
+    body.proxy_password = config.apiKey || "";
+    if (jsonMode) {
+      body.json_schema = createGenericJsonSchema();
+    }
+  } else {
+    body.chat_completion_source = resolveChatCompletionSourceValue("CUSTOM", "custom");
+    body.custom_url = config.apiUrl;
+    body.custom_include_headers = config.apiKey
+      ? buildYamlObject({
+          Authorization: `Bearer ${config.apiKey}`,
+        })
+      : "";
+    if (jsonMode && _jsonModeSupported) {
+      body.custom_include_body = buildYamlObject({
+        response_format: {
+          type: "json_object",
+        },
+      });
+    }
+  }
+
+  return body;
+}
+
 async function callDedicatedOpenAICompatible(
   messages,
   {
@@ -1487,8 +1632,15 @@ async function callDedicatedOpenAICompatible(
       };
   const taskKey = taskType || privateRequestSource;
   const initialFilteredGeneration = generationResolved.filtered || {};
+  const filteredGeneration = {
+    ...initialFilteredGeneration,
+  };
+  const forceNonStream = hasDedicatedConfig && shouldForceDedicatedNonStream(config);
+  if (forceNonStream && filteredGeneration.stream === true) {
+    filteredGeneration.stream = false;
+  }
   const streamRequested =
-    hasDedicatedConfig && initialFilteredGeneration.stream === true;
+    hasDedicatedConfig && filteredGeneration.stream === true;
   const streamState = createStreamDebugState({
     requested: streamRequested,
   });
@@ -1499,10 +1651,17 @@ async function callDedicatedOpenAICompatible(
     jsonMode,
     dedicatedConfig: hasDedicatedConfig,
     route: hasDedicatedConfig
-      ? "dedicated-openai-compatible"
+      ? config.llmTransport || "dedicated-openai-compatible"
       : "sillytavern-current-model",
+    routeLabel: hasDedicatedConfig ? config.llmTransportLabel || "" : "酒馆当前模型",
     model: hasDedicatedConfig ? config.model : "sillytavern-current-model",
+    inputApiUrl: hasDedicatedConfig ? config.inputApiUrl || "" : "",
     apiUrl: hasDedicatedConfig ? config.apiUrl : "",
+    llmProvider: config.llmProvider || "",
+    llmProviderLabel: config.llmProviderLabel || "",
+    llmTransport: config.llmTransport || "",
+    llmTransportLabel: config.llmTransportLabel || "",
+    llmRouteMode: config.llmRouteMode || "",
     llmConfigSource: config.llmConfigSource || "global",
     llmConfigSourceLabel: config.llmConfigSourceLabel || "",
     llmPresetName: config.llmPresetName || "",
@@ -1511,13 +1670,15 @@ async function callDedicatedOpenAICompatible(
     messages,
     transportMessages,
     generation: generationResolved.generation || {},
-    filteredGeneration: generationResolved.filtered || {},
+    filteredGeneration,
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
+    streamForceDisabled: forceNonStream,
     effectiveRoute: buildEffectiveLlmRoute(
       hasDedicatedConfig,
       privateRequestSource,
       taskType,
+      config,
     ),
     maxCompletionTokens,
     ...buildStreamDebugSnapshot(streamState),
@@ -1546,30 +1707,19 @@ async function callDedicatedOpenAICompatible(
     : jsonMode
       ? DEFAULT_JSON_COMPLETION_TOKENS
       : DEFAULT_TEXT_COMPLETION_TOKENS;
-  const filteredGeneration = generationResolved.filtered || {};
   const resolvedCompletionTokens = Number.isFinite(
     filteredGeneration.max_completion_tokens,
   )
     ? filteredGeneration.max_completion_tokens
     : completionTokens;
 
-  const body = {
-    chat_completion_source: chat_completion_sources.CUSTOM,
-    custom_url: config.apiUrl,
-    custom_include_headers: config.apiKey
-      ? buildYamlObject({
-          Authorization: `Bearer ${config.apiKey}`,
-        })
-      : "",
-    model: config.model,
-    messages: transportMessages,
-    temperature: filteredGeneration.temperature ?? 1,
-    max_tokens: resolvedCompletionTokens,
-    stream: filteredGeneration.stream ?? false,
-    frequency_penalty: filteredGeneration.frequency_penalty ?? 0,
-    presence_penalty: filteredGeneration.presence_penalty ?? 0,
-    top_p: filteredGeneration.top_p ?? 1,
-  };
+  const body = buildDedicatedRequestBody(
+    config,
+    transportMessages,
+    filteredGeneration,
+    resolvedCompletionTokens,
+    { jsonMode },
+  );
 
   const optionalGenerationFields = [
     "top_p",
@@ -1596,12 +1746,8 @@ async function callDedicatedOpenAICompatible(
     body[field] = filteredGeneration[field];
   }
 
-  if (jsonMode && _jsonModeSupported) {
-    body.custom_include_body = buildYamlObject({
-      response_format: {
-        type: "json_object",
-      },
-    });
+  if (Object.prototype.hasOwnProperty.call(filteredGeneration, "request_thoughts")) {
+    body.include_reasoning = Boolean(filteredGeneration.request_thoughts);
   }
 
   recordTaskLlmRequest(taskKey, {
@@ -1609,9 +1755,16 @@ async function callDedicatedOpenAICompatible(
     taskType: String(taskType || "").trim(),
     jsonMode,
     dedicatedConfig: true,
-    route: "dedicated-openai-compatible",
+    route: config.llmTransport || "dedicated-openai-compatible",
+    routeLabel: config.llmTransportLabel || "",
     model: config.model,
+    inputApiUrl: config.inputApiUrl || "",
     apiUrl: config.apiUrl,
+    llmProvider: config.llmProvider || "",
+    llmProviderLabel: config.llmProviderLabel || "",
+    llmTransport: config.llmTransport || "",
+    llmTransportLabel: config.llmTransportLabel || "",
+    llmRouteMode: config.llmRouteMode || "",
     llmConfigSource: config.llmConfigSource || "global",
     llmConfigSourceLabel: config.llmConfigSourceLabel || "",
     llmPresetName: config.llmPresetName || "",
@@ -1624,10 +1777,12 @@ async function callDedicatedOpenAICompatible(
     removedGeneration: generationResolved.removed || [],
     capabilityMode: generationResolved.capabilityMode || "",
     resolvedCompletionTokens,
+    streamForceDisabled: forceNonStream,
     effectiveRoute: buildEffectiveLlmRoute(
       true,
       privateRequestSource,
       taskType,
+      config,
     ),
     requestBody: body,
     ...buildStreamDebugSnapshot(streamState),
@@ -1983,7 +2138,7 @@ export async function callLLM(systemPrompt, userPrompt, options = {}) {
 export async function testLLMConnection() {
   const config = getMemoryLLMConfig();
   const mode = hasDedicatedLLMConfig(config)
-    ? `dedicated:${config.model}`
+    ? `dedicated:${config.llmProviderLabel || config.llmTransportLabel || config.model}:${config.model}`
     : "sillytavern-current-model";
 
   try {
@@ -2013,7 +2168,22 @@ export async function fetchMemoryLLMModels() {
     };
   }
 
+  if (config.llmSupportsModelFetch !== true) {
+    return {
+      success: false,
+      models: [],
+      error: `${config.llmProviderLabel || "当前渠道"} 暂不支持自动拉取模型，请手动填写模型名`,
+    };
+  }
+
   const variants = buildDedicatedStatusRequestVariants(config);
+  if (!variants.length) {
+    return {
+      success: false,
+      models: [],
+      error: `${config.llmProviderLabel || "当前渠道"} 暂无可用的模型探测策略，请手动填写模型名`,
+    };
+  }
   const errors = [];
 
   try {

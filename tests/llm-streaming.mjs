@@ -83,7 +83,7 @@ if (originalSendOpenAIRequest === undefined) {
   globalThis.__llmStreamingSendOpenAIRequest = originalSendOpenAIRequest;
 }
 
-function buildStreamingSettings(generation = {}) {
+function buildStreamingSettings(generation = {}, overrides = {}) {
   const taskProfiles = createDefaultTaskProfiles();
   taskProfiles.extract.profiles[0].generation = {
     ...taskProfiles.extract.profiles[0].generation,
@@ -96,6 +96,7 @@ function buildStreamingSettings(generation = {}) {
     timeoutMs: 1234,
     taskProfilesVersion: 3,
     taskProfiles,
+    ...(overrides || {}),
   };
 }
 
@@ -125,13 +126,13 @@ function getSnapshot(taskKey = "extract") {
   return globalThis.__stBmeRuntimeDebugState?.taskLlmRequests?.[taskKey] || null;
 }
 
-async function withStreamingSettings(generation, run) {
+async function withStreamingSettings(generation, run, overrides = {}) {
   const previousSettings = JSON.parse(
     JSON.stringify(extensionsApi.extension_settings.st_bme || {}),
   );
   extensionsApi.extension_settings.st_bme = {
     ...previousSettings,
-    ...buildStreamingSettings(generation),
+    ...buildStreamingSettings(generation, overrides),
   };
   delete globalThis.__stBmeRuntimeDebugState;
 
@@ -415,9 +416,72 @@ async function testJsonRetryKeepsProfileCompletionTokens() {
   }
 }
 
+async function testAnthropicRouteUsesReverseProxyAndDisablesStreaming() {
+  const originalFetch = globalThis.fetch;
+  let requestBody = null;
+
+  globalThis.fetch = async (_url, options = {}) => {
+    requestBody = JSON.parse(String(options.body || "{}"));
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: '{"ok":true}',
+            },
+            finish_reason: "stop",
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+  };
+
+  try {
+    await withStreamingSettings(
+      { stream: true },
+      async () => {
+        const result = await llm.callLLMForJSON({
+          systemPrompt: "system",
+          userPrompt: "user",
+          maxRetries: 0,
+          taskType: "extract",
+          requestSource: "test:anthropic-route",
+        });
+
+        assert.deepEqual(result, { ok: true });
+        assert.equal(requestBody?.chat_completion_source, "claude");
+        assert.equal(requestBody?.reverse_proxy, "https://api.anthropic.com/v1");
+        assert.equal(requestBody?.proxy_password, "sk-stream-secret");
+        assert.equal(requestBody?.stream, false);
+        assert.ok(requestBody?.json_schema);
+
+        const snapshot = getSnapshot("extract");
+        assert.ok(snapshot);
+        assert.equal(snapshot.route, "dedicated-anthropic-claude");
+        assert.equal(snapshot.llmProviderLabel, "Anthropic Claude");
+        assert.equal(snapshot.streamRequested, false);
+        assert.equal(snapshot.streamForceDisabled, true);
+      },
+      {
+        llmApiUrl: "https://api.anthropic.com/v1/messages",
+        llmModel: "claude-sonnet-4-5",
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
 await testDedicatedStreamingSuccess();
 await testDedicatedStreamingFallsBackToNonStream();
 await testDedicatedStreamingAbortDoesNotLeaveActiveState();
 await testJsonRetryKeepsProfileCompletionTokens();
+await testAnthropicRouteUsesReverseProxyAndDisablesStreaming();
 
 console.log("llm-streaming tests passed");
