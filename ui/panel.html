@@ -1513,31 +1513,55 @@
                       <div class="bme-config-help">
                         开启后，最新 AI 楼先不自动提取，要等下一条 AI 楼出现后，才提取前一批内容。提取未处理和范围重提不受影响。
                       </div>
-                      <div class="bme-config-row">
-                        <label for="bme-setting-extract-recent-message-cap"
-                          >最近消息上限（0 = 不限）</label
-                        >
-                        <input
-                          id="bme-setting-extract-recent-message-cap"
-                          class="bme-config-input"
-                          type="number"
-                          min="0"
-                          max="200"
-                        />
-                      </div>
-                      <div class="bme-config-row">
-                        <label for="bme-setting-extract-prompt-structured-mode"
-                          >提取结构模式</label
-                        >
-                        <select
-                          id="bme-setting-extract-prompt-structured-mode"
-                          class="bme-config-input"
-                        >
-                          <option value="both">混合（transcript + structured）</option>
-                          <option value="transcript">仅 transcript</option>
-                          <option value="structured">仅 structured</option>
-                        </select>
-                      </div>
+                      <details
+                        class="bme-config-subdetails bme-collapsible-card"
+                        id="bme-extract-advanced-settings"
+                      >
+                        <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                          <div>
+                            <div class="bme-config-subgroup-title">提取高级项</div>
+                            <div class="bme-config-subgroup-desc">
+                              控制提取 prompt 的表达方式，以及结构化 recentMessages 的裁剪。通常保持默认即可。
+                            </div>
+                          </div>
+                          <span class="bme-collapsible-indicator" aria-hidden="true">
+                            <i class="fa-solid fa-chevron-down"></i>
+                          </span>
+                        </summary>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-row">
+                            <label for="bme-setting-extract-recent-message-cap"
+                              >结构化消息上限（0 = 不限）</label
+                            >
+                            <input
+                              id="bme-setting-extract-recent-message-cap"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="200"
+                            />
+                          </div>
+                          <div class="bme-config-help">
+                            只限制提取 prompt 里的 structured recentMessages 条数，不影响实际提取切片范围。
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-extract-prompt-structured-mode"
+                              >提取输入格式</label
+                            >
+                            <select
+                              id="bme-setting-extract-prompt-structured-mode"
+                              class="bme-config-input"
+                            >
+                              <option value="both">混合（transcript + structured）</option>
+                              <option value="transcript">仅 transcript</option>
+                              <option value="structured">仅 structured</option>
+                            </select>
+                          </div>
+                          <div class="bme-config-help">
+                            控制 LLM 在提取时看到的是纯 transcript、结构化 recentMessages，还是两者同时提供。通常保持“混合”即可。
+                          </div>
+                        </div>
+                      </details>
                       <div class="bme-config-row">
                         <label for="bme-setting-extract-worldbook-mode"
                           >提取时世界书</label
