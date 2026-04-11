@@ -7349,6 +7349,11 @@ function _renderRegexReuseBadges(rule = {}) {
       className: "is-transform",
       text: "宿主真实执行",
     });
+  } else if (rule.promptStageMode === "host-helper") {
+    badges.push({
+      className: "is-prompt",
+      text: "Helper 兼容执行",
+    });
   } else if (rule.promptStageMode === "host-fallback") {
     badges.push({
       className: "is-prompt",
@@ -7514,7 +7519,7 @@ function _buildRegexReusePopupContent(snapshot = {}) {
           </div>
           <div class="bme-regex-preview-summary__item">
             <span class="bme-regex-preview-summary__label">桥接模式</span>
-            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.executionMode || snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.formatterAvailable ? " · formatter" : ""}${snapshot.host?.fallback ? " · fallback" : ""}</span>
+            <span class="bme-regex-preview-summary__value">${_escHtml(snapshot.host?.sourceLabel || "unknown")} · ${_escHtml(snapshot.host?.executionMode || snapshot.host?.capabilityStatus?.mode || snapshot.host?.mode || "unknown")}${snapshot.host?.bridgeTier ? ` · ${_escHtml(snapshot.host.bridgeTier)}` : ""}${snapshot.host?.formatterAvailable ? " · formatter" : ""}${snapshot.host?.fallback ? " · fallback" : ""}</span>
           </div>
         </div>
       </div>

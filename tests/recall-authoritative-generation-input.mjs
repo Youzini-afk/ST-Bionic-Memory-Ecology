@@ -199,6 +199,29 @@ async function testHostSnapshotCanRemainAuthoritativeQueryWhenFlagEnabled() {
   assert.equal(transaction.frozenRecallOptions.includeSyntheticUserMessage, true);
 }
 
+async function testGenerationAfterCommandsWritesBackAuthoritativePromptWhenPreserved() {
+  const harness = await createGenerationRecallHarness();
+  harness.extension_settings[MODULE_NAME] = {
+    recallUseAuthoritativeGenerationInput: true,
+  };
+  harness.chat = [{ is_user: true, mes: "旧的 chat tail" }];
+  harness.pendingRecallSendIntent = {
+    text: "发送前权威输入",
+    hash: "hash-phase4-writeback",
+    at: Date.now(),
+    source: "dom-intent",
+  };
+  const params = {
+    prompt: "旧 prompt",
+    user_input: "旧 user_input",
+  };
+
+  await harness.result.onGenerationAfterCommands("normal", params, false);
+
+  assert.equal(params.prompt, "发送前权威输入");
+  assert.equal(params.user_input, "发送前权威输入");
+}
+
 function testResolveRecallInputControllerAppendsSyntheticAuthoritativeUserMessage() {
   const runtime = {
     normalizeRecallInputText(value = "") {
@@ -240,6 +263,7 @@ await testSendIntentCanRemainAuthoritativeQueryWhenFlagEnabled();
 await testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled();
 await testAuthoritativeSendIntentStaysFrozenAcrossHooksWhenFlagEnabled();
 await testHostSnapshotCanRemainAuthoritativeQueryWhenFlagEnabled();
+await testGenerationAfterCommandsWritesBackAuthoritativePromptWhenPreserved();
 testResolveRecallInputControllerAppendsSyntheticAuthoritativeUserMessage();
 
 console.log("recall-authoritative-generation-input tests passed");

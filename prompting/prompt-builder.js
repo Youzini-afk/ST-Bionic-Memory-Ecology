@@ -1865,6 +1865,86 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   return result;
 }
 
+function clonePayloadMessage(message = {}) {
+  return createExecutionMessage(message.role, message.content, {
+    source: String(message.source || ""),
+    blockId: String(message.blockId || ""),
+    blockName: String(message.blockName || ""),
+    blockType: String(message.blockType || ""),
+    sourceKey: String(message.sourceKey || ""),
+    injectionMode: String(message.injectionMode || ""),
+    derivedFromWorldInfo: message.derivedFromWorldInfo === true,
+    contentOrigin: String(message.contentOrigin || ""),
+    sanitizationEligible: message.sanitizationEligible === true,
+    regexSourceType: String(message.regexSourceType || ""),
+  });
+}
+
+function collectPayloadUserMessageTexts(messages = []) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => String(message?.role || "").trim().toLowerCase() === "user")
+    .map((message) => String(message?.content || "").trim())
+    .filter(Boolean);
+}
+
+function buildSafeFallbackUserPrompt(
+  settings = {},
+  taskType,
+  {
+    fallbackUserPrompt = "",
+    blockedContents = [],
+    rawExecutionMessages = [],
+    rawPrivateTaskMessages = [],
+  } = {},
+) {
+  const structuredUserPrompt = [
+    ...collectPayloadUserMessageTexts(rawExecutionMessages),
+    ...collectPayloadUserMessageTexts(rawPrivateTaskMessages),
+  ]
+    .join("\n\n")
+    .trim();
+  const candidates = [
+    {
+      source: "structured-user-blocks",
+      text: structuredUserPrompt,
+    },
+    {
+      source: "fallback-user-prompt",
+      text: String(fallbackUserPrompt || "").trim(),
+    },
+  ].filter((candidate) => candidate.text);
+
+  for (const candidate of candidates) {
+    const sanitized = sanitizeInjectionText(settings, taskType, candidate.text, {
+      mode: "final-injection-safe",
+      blockedContents,
+      contentOrigin: PROMPT_CONTENT_ORIGIN.HOST_INJECTED,
+      sanitizationEligible: true,
+      role: "user",
+      applySanitizer: true,
+      applyHostRegex: false,
+      path: "payload.fallbackUserPrompt",
+      stage: "payload-fallback-user-prompt",
+    });
+    const text = String(sanitized.text || "").trim();
+    if (text) {
+      return {
+        text,
+        source: candidate.source,
+        changed: Boolean(sanitized.changed),
+        dropped: Boolean(sanitized.dropped),
+      };
+    }
+  }
+
+  return {
+    text: "",
+    source: candidates[0]?.source || "",
+    changed: false,
+    dropped: candidates.length > 0,
+  };
+}
+
 export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "") {
   const runtimeMvu = promptBuild?.__mvuRuntime || {};
   const taskType = String(promptBuild?.debug?.taskType || "");
@@ -1880,20 +1960,12 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     : [];
   const rawExecutionMessages = Array.isArray(promptBuild?.executionMessages)
     ? promptBuild.executionMessages
-        .map((message) =>
-          createExecutionMessage(message.role, message.content, {
-            source: String(message.source || ""),
-            blockId: String(message.blockId || ""),
-            blockName: String(message.blockName || ""),
-            blockType: String(message.blockType || ""),
-            sourceKey: String(message.sourceKey || ""),
-            injectionMode: String(message.injectionMode || ""),
-            derivedFromWorldInfo: message.derivedFromWorldInfo === true,
-            contentOrigin: String(message.contentOrigin || ""),
-            sanitizationEligible: message.sanitizationEligible === true,
-            regexSourceType: String(message.regexSourceType || ""),
-          }),
-        )
+        .map((message) => clonePayloadMessage(message))
+        .filter(Boolean)
+    : [];
+  const rawPrivateTaskMessages = Array.isArray(promptBuild?.privateTaskMessages)
+    ? promptBuild.privateTaskMessages
+        .map((message) => clonePayloadMessage(message))
         .filter(Boolean)
     : [];
   const executionMessages = sanitizePromptMessages(
@@ -1949,22 +2021,39 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
       : sanitizePromptMessages(
           settings,
           taskType,
-          Array.isArray(promptBuild?.privateTaskMessages)
-            ? promptBuild.privateTaskMessages
-            : [],
+          rawPrivateTaskMessages,
           {
             blockedContents,
             applySanitizer: (message) =>
               !(isCustomFilter && messageUsesWorldInfoContent(message)),
           },
         );
+  const hasAdditionalUserMessage = additionalMessages.some(
+    (message) => message.role === "user",
+  );
+  const fallbackUserPromptResult =
+    hasUserMessage || hasAdditionalUserMessage
+      ? {
+          text: "",
+          source: hasUserMessage ? "execution-messages" : "additional-messages",
+          changed: false,
+          dropped: false,
+        }
+      : buildSafeFallbackUserPrompt(settings, taskType, {
+          fallbackUserPrompt,
+          blockedContents,
+          rawExecutionMessages,
+          rawPrivateTaskMessages,
+        });
 
   return {
     systemPrompt:
       executionMessages.length > 0 ? "" : String(promptBuild?.systemPrompt || ""),
-    userPrompt: hasUserMessage ? "" : String(fallbackUserPrompt || ""),
+    userPrompt: fallbackUserPromptResult.text,
     promptMessages: executionMessages,
     additionalMessages,
+    fallbackUserPromptSource: fallbackUserPromptResult.source,
+    fallbackUserPromptApplied: Boolean(fallbackUserPromptResult.text),
   };
 }
 

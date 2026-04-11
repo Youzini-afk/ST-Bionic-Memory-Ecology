@@ -2143,6 +2143,17 @@ function ensurePersistedRecallRecordForGeneration({
       ),
       tokenEstimate: estimateTokens(injectionText),
       manuallyEdited: false,
+      authoritativeInputUsed: Boolean(
+        recallResult?.authoritativeInputUsed ??
+          frozenRecallOptions?.authoritativeInputUsed ??
+          recallOptions?.authoritativeInputUsed,
+      ),
+      boundUserFloorText: String(
+        recallResult?.boundUserFloorText ||
+          frozenRecallOptions?.boundUserFloorText ||
+          recallOptions?.boundUserFloorText ||
+          "",
+      ),
     },
     existingRecord,
   );
@@ -2314,6 +2325,108 @@ function rewriteRecallPayloadWithInjection(
   };
 }
 
+function rewriteRecallPayloadWithAuthoritativeUserInput(
+  promptData = null,
+  authoritativeText = "",
+  boundUserFloorText = "",
+) {
+  const normalizedAuthoritativeText = normalizeRecallInputText(authoritativeText);
+  const normalizedBoundUserFloorText = normalizeRecallInputText(boundUserFloorText);
+  if (!normalizedAuthoritativeText) {
+    return {
+      applied: false,
+      changed: false,
+      path: "",
+      field: "",
+      reason: "empty-authoritative-text",
+    };
+  }
+
+  const finalMesSend = Array.isArray(promptData?.finalMesSend)
+    ? promptData.finalMesSend
+    : null;
+  if (!Array.isArray(finalMesSend) || finalMesSend.length <= 0) {
+    return {
+      applied: false,
+      changed: false,
+      path: "",
+      field: "",
+      reason: "finalMesSend-unavailable",
+    };
+  }
+
+  let fallbackIndex = -1;
+  let matchedIndex = -1;
+  for (let index = finalMesSend.length - 1; index >= 0; index--) {
+    const entry = finalMesSend[index];
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.injected === true) continue;
+
+    const messageText = normalizeRecallInputText(
+      entry.message || entry.mes || entry.content || "",
+    );
+    if (!messageText) continue;
+
+    if (fallbackIndex < 0) {
+      fallbackIndex = index;
+    }
+
+    if (
+      messageText === normalizedAuthoritativeText ||
+      (normalizedBoundUserFloorText &&
+        messageText === normalizedBoundUserFloorText)
+    ) {
+      matchedIndex = index;
+      break;
+    }
+  }
+
+  const targetIndex =
+    matchedIndex >= 0
+      ? matchedIndex
+      : normalizedBoundUserFloorText
+        ? -1
+        : fallbackIndex;
+  if (targetIndex < 0) {
+    return {
+      applied: false,
+      changed: false,
+      path: "finalMesSend",
+      field: "",
+      reason: normalizedBoundUserFloorText
+        ? "bound-user-floor-text-not-found"
+        : "no-rewritable-finalMesSend-entry",
+    };
+  }
+
+  const entry = finalMesSend[targetIndex];
+  const fieldName = Object.prototype.hasOwnProperty.call(entry, "message")
+    ? "message"
+    : Object.prototype.hasOwnProperty.call(entry, "mes")
+      ? "mes"
+      : Object.prototype.hasOwnProperty.call(entry, "content")
+        ? "content"
+        : "message";
+  const previousText = normalizeRecallInputText(
+    entry?.[fieldName] || entry?.message || entry?.mes || entry?.content || "",
+  );
+  const changed = previousText !== normalizedAuthoritativeText;
+  if (changed) {
+    entry[fieldName] = normalizedAuthoritativeText;
+  }
+
+  return {
+    applied: true,
+    changed,
+    path: "finalMesSend",
+    field: `finalMesSend[${targetIndex}].${fieldName}`,
+    reason: changed
+      ? "finalMesSend-authoritative-user-rewritten"
+      : "authoritative-user-already-matched",
+    targetIndex,
+  };
+}
+
 function readGenerationRecallTransactionFinalResolution(transaction) {
   return transaction?.finalResolution || null;
 }
@@ -2339,6 +2452,98 @@ function applyFinalRecallInjectionForGeneration({
   const existingFinalResolution =
     readGenerationRecallTransactionFinalResolution(transaction);
   if (existingFinalResolution) {
+    if (
+      promptData &&
+      transaction?.frozenRecallOptions?.authoritativeInputUsed === true
+    ) {
+      const recallResult =
+        freshRecallResult ||
+        getGenerationRecallTransactionResult(transaction) ||
+        null;
+      const inputRewrite = rewriteRecallPayloadWithAuthoritativeUserInput(
+        promptData,
+        transaction?.frozenRecallOptions?.overrideUserMessage || "",
+        transaction?.frozenRecallOptions?.boundUserFloorText || "",
+      );
+      const rewrite = rewriteRecallPayloadWithInjection(
+        promptData,
+        existingFinalResolution.usedText || recallResult?.injectionText || "",
+      );
+      const nextFinalResolution = {
+        ...existingFinalResolution,
+        deliveryMode: "deferred",
+        applicationMode:
+          rewrite.applied || inputRewrite.applied
+            ? "rewrite"
+            : existingFinalResolution.applicationMode,
+        rewrite,
+        inputRewrite,
+      };
+      recordInjectionSnapshot("recall", {
+        taskType: "recall",
+        source:
+          String(
+            recallResult?.source ||
+              transaction?.frozenRecallOptions?.lockedSource ||
+              transaction?.frozenRecallOptions?.overrideSource ||
+              "",
+          ).trim() || "unknown",
+        sourceLabel:
+          String(
+            recallResult?.sourceLabel ||
+              transaction?.frozenRecallOptions?.lockedSourceLabel ||
+              transaction?.frozenRecallOptions?.overrideSourceLabel ||
+              "",
+          ).trim() || "未知",
+        reason:
+          String(
+            recallResult?.reason ||
+              transaction?.frozenRecallOptions?.lockedReason ||
+              transaction?.frozenRecallOptions?.overrideReason ||
+              "",
+          ).trim() || "final-application-reused",
+        sourceCandidates: Array.isArray(recallResult?.sourceCandidates)
+          ? recallResult.sourceCandidates.map((candidate) => ({ ...candidate }))
+          : Array.isArray(transaction?.frozenRecallOptions?.sourceCandidates)
+            ? transaction.frozenRecallOptions.sourceCandidates.map((candidate) => ({
+                ...candidate,
+              }))
+            : [],
+        hookName: String(hookName || recallResult?.hookName || "").trim(),
+        selectedNodeIds: recallResult?.selectedNodeIds || [],
+        retrievalMeta: recallResult?.retrievalMeta || {},
+        llmMeta: recallResult?.llmMeta || {},
+        stats: recallResult?.stats || {},
+        injectionText: nextFinalResolution.usedText || "",
+        deliveryMode: nextFinalResolution.deliveryMode || "",
+        applicationMode: nextFinalResolution.applicationMode || "none",
+        transport: nextFinalResolution.transport || {
+          applied: false,
+          source: "none",
+          mode: "none",
+        },
+        rewrite: nextFinalResolution.rewrite || {
+          applied: false,
+          path: "",
+          field: "",
+          reason: "final-resolution-reused",
+        },
+        inputRewrite,
+        targetUserMessageIndex: nextFinalResolution.targetUserMessageIndex,
+        sourceKind: nextFinalResolution.source || "none",
+        authoritativeInputUsed: true,
+        boundUserFloorText: String(
+          transaction?.frozenRecallOptions?.boundUserFloorText || "",
+        ),
+      });
+      storeGenerationRecallTransactionFinalResolution(
+        transaction,
+        nextFinalResolution,
+      );
+      refreshPanelLiveState();
+      schedulePersistedRecallMessageUiRefresh();
+      return nextFinalResolution;
+    }
     return existingFinalResolution;
   }
 
@@ -2346,15 +2551,21 @@ function applyFinalRecallInjectionForGeneration({
     freshRecallResult ||
     getGenerationRecallTransactionResult(transaction) ||
     null;
+  const hookResolvedDeliveryMode =
+    String(
+      resolveGenerationRecallDeliveryMode(
+        hookName,
+        generationType,
+        transaction?.frozenRecallOptions || {},
+      ),
+    ).trim() || "immediate";
   const deliveryMode =
     String(
-      recallResult?.deliveryMode ||
-        transaction?.lastDeliveryMode ||
-        resolveGenerationRecallDeliveryMode(
-          hookName,
-          generationType,
-          transaction?.frozenRecallOptions || {},
-        ),
+      promptData && hookName === "GENERATE_BEFORE_COMBINE_PROMPTS"
+        ? hookResolvedDeliveryMode
+        : recallResult?.deliveryMode ||
+            transaction?.lastDeliveryMode ||
+            hookResolvedDeliveryMode,
     ).trim() || "immediate";
   const chat = getContext()?.chat;
 
@@ -2369,6 +2580,24 @@ function applyFinalRecallInjectionForGeneration({
     injectionText: "",
     record: null,
   };
+  const authoritativeInputRewrite =
+    deliveryMode === "deferred" &&
+    transaction?.frozenRecallOptions?.authoritativeInputUsed === true
+      ? rewriteRecallPayloadWithAuthoritativeUserInput(
+          promptData,
+          transaction?.frozenRecallOptions?.overrideUserMessage || "",
+          transaction?.frozenRecallOptions?.boundUserFloorText || "",
+        )
+      : {
+          applied: false,
+          changed: false,
+          path: "",
+          field: "",
+          reason:
+            deliveryMode === "deferred"
+              ? "authoritative-input-unused"
+              : "non-deferred-delivery",
+        };
   const rewrite = {
     applied: false,
     path: "",
@@ -2539,8 +2768,18 @@ function applyFinalRecallInjectionForGeneration({
     applicationMode,
     transport,
     rewrite,
+    inputRewrite: authoritativeInputRewrite,
     targetUserMessageIndex,
     sourceKind: resolved.source,
+    authoritativeInputUsed: Boolean(
+      recallResult?.authoritativeInputUsed ??
+        transaction?.frozenRecallOptions?.authoritativeInputUsed,
+    ),
+    boundUserFloorText: String(
+      recallResult?.boundUserFloorText ||
+        transaction?.frozenRecallOptions?.boundUserFloorText ||
+        "",
+    ),
   });
 
   refreshPanelLiveState();
@@ -2557,6 +2796,16 @@ function applyFinalRecallInjectionForGeneration({
     applicationMode,
     rewrite,
     transport,
+    inputRewrite: authoritativeInputRewrite,
+    authoritativeInputUsed: Boolean(
+      recallResult?.authoritativeInputUsed ??
+        transaction?.frozenRecallOptions?.authoritativeInputUsed,
+    ),
+    boundUserFloorText: String(
+      recallResult?.boundUserFloorText ||
+        transaction?.frozenRecallOptions?.boundUserFloorText ||
+        "",
+    ),
   };
   storeGenerationRecallTransactionFinalResolution(transaction, finalResolution);
   return finalResolution;

@@ -327,9 +327,42 @@ try {
     systemOnlyPromptBuild,
     "fallback <updatevariable>hidden</updatevariable> text",
   );
+  assert.equal(systemOnlyPayload.userPrompt, "fallback text");
+  assert.equal(systemOnlyPayload.fallbackUserPromptSource, "fallback-user-prompt");
+
+  const additionalUserOnlyPayload = buildTaskLlmPayload(
+    {
+      debug: {
+        taskType: "recall",
+      },
+      systemPrompt: "",
+      executionMessages: [],
+      privateTaskMessages: [
+        {
+          role: "user",
+          content: "来自 additionalMessages 的结构化用户块",
+          source: "profile-block",
+        },
+      ],
+    },
+    "unused fallback user prompt",
+  );
+  assert.equal(additionalUserOnlyPayload.userPrompt, "");
   assert.equal(
-    systemOnlyPayload.userPrompt,
-    "fallback <updatevariable>hidden</updatevariable> text",
+    additionalUserOnlyPayload.fallbackUserPromptSource,
+    "additional-messages",
+  );
+  assert.deepEqual(
+    additionalUserOnlyPayload.additionalMessages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+    [
+      {
+        role: "user",
+        content: "来自 additionalMessages 的结构化用户块",
+      },
+    ],
   );
 
   const rawWorldInfoEntries = [
@@ -465,6 +498,10 @@ try {
   assert.equal(payload.systemPrompt, "");
   assert.match(JSON.stringify(payload.promptMessages), /FINAL_BAD/);
   assert.doesNotMatch(JSON.stringify(payload.promptMessages), /FINAL_GOOD/);
+  assert.equal(
+    payload.promptMessages.some((message) => String(message?.regexSourceType || "").trim()),
+    true,
+  );
   const result = await llm.callLLMForJSON({
     systemPrompt: payload.systemPrompt,
     userPrompt: payload.userPrompt,
@@ -492,6 +529,22 @@ try {
   assert.ok(runtimePromptBuild);
   assert.ok(runtimeLlmRequest);
   assert.match(JSON.stringify(runtimeLlmRequest.messages), /FINAL_GOOD/);
+  assert.equal(
+    runtimeLlmRequest.messages.some((message) =>
+      String(message?.regexSourceType || "").trim(),
+    ),
+    true,
+  );
+  assert.equal(
+    runtimeLlmRequest.transportMessages.some((message) =>
+      Object.prototype.hasOwnProperty.call(message || {}, "regexSourceType"),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(capturedBodies[0].messages),
+    /regexSourceType|sourceKey|blockId|contentOrigin|speaker/i,
+  );
   assert.equal(runtimeLlmRequest.requestCleaning?.applied, true);
   assert.equal(
     runtimeLlmRequest.requestCleaning?.stages?.length > 0,
@@ -516,7 +569,7 @@ try {
     /status_current_variable|updatevariable|StatusPlaceHolderImpl|stat_data|display_data|delta_data|get_message_variable/i,
   );
   assert.deepEqual(
-    runtimeLlmRequest.messages,
+    runtimeLlmRequest.transportMessages,
     runtimeLlmRequest.requestBody.messages,
   );
   assert.equal(

@@ -4244,6 +4244,65 @@ async function testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload() {
   );
 }
 
+async function testGenerationRecallDeferredRewriteMutatesFinalMesSendAuthoritativeUserInput() {
+  const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+  harness.extension_settings[MODULE_NAME] = {
+    recallUseAuthoritativeGenerationInput: true,
+  };
+  harness.chat = [{ is_user: true, mes: "楼层稳定输入" }];
+  harness.pendingRecallSendIntent = {
+    text: "发送前真实输入",
+    hash: "hash-deferred-authoritative-rewrite",
+    at: Date.now(),
+    source: "dom-intent",
+  };
+  harness.result.pendingRecallSendIntent = harness.pendingRecallSendIntent;
+
+  await harness.result.onGenerationAfterCommands("normal", {}, false);
+
+  const promptData = {
+    finalMesSend: [
+      {
+        injected: false,
+        message: "楼层稳定输入",
+        extensionPrompts: [],
+      },
+    ],
+  };
+
+  const resolution = await harness.result.onBeforeCombinePrompts(promptData);
+
+  assert.equal(harness.runRecallCalls.length, 1);
+  assert.equal(
+    harness.runRecallCalls[0].hookName,
+    "GENERATION_AFTER_COMMANDS",
+  );
+  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  assert.ok(transaction);
+  assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
+  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "楼层稳定输入");
+  assert.equal(
+    harness.runRecallCalls[0].authoritativeInputUsed,
+    true,
+  );
+  assert.equal(harness.runRecallCalls[0].boundUserFloorText, "楼层稳定输入");
+  assert.equal(promptData.finalMesSend[0].message, "发送前真实输入");
+  assert.equal(resolution.applicationMode, "rewrite");
+  assert.equal(resolution.authoritativeInputUsed, true);
+  assert.equal(resolution.boundUserFloorText, "楼层稳定输入");
+  assert.equal(resolution.inputRewrite.applied, true);
+  assert.equal(resolution.inputRewrite.changed, true);
+  assert.equal(resolution.inputRewrite.field, "finalMesSend[0].message");
+  assert.match(
+    promptData.finalMesSend[0].extensionPrompts.join("\n"),
+    /注入:发送前真实输入/,
+  );
+  assert.equal(
+    harness.recordedInjectionSnapshots.at(-1)?.inputRewrite?.applied,
+    true,
+  );
+}
+
 async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "旧的 chat tail" }];
@@ -4480,8 +4539,11 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
     hookName: "GENERATION_AFTER_COMMANDS",
     tokenEstimate: 24,
     manuallyEdited: false,
+    authoritativeInputUsed: true,
+    boundUserFloorText: "稳定楼层输入",
     nowIso: "2026-01-01T00:00:00.000Z",
   });
+
   assert.equal(writePersistedRecallToUserMessage(chat, 2, record), true);
 
   const loaded = readPersistedRecallFromUserMessage(chat, 2);
@@ -4489,6 +4551,8 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
   assert.equal(loaded.injectionText, "fresh-memory");
   assert.equal(loaded.generationCount, 0);
   assert.equal(loaded.manuallyEdited, false);
+  assert.equal(loaded.authoritativeInputUsed, true);
+  assert.equal(loaded.boundUserFloorText, "稳定楼层输入");
 
   chat[2].mes = "u2 edited";
   assert.equal(
@@ -4517,14 +4581,19 @@ async function testPersistentRecallDataLayerLifecycleAndCompatibility() {
       hookName: "MESSAGE_RECALL_BADGE_RERUN",
       tokenEstimate: 30,
       manuallyEdited: false,
+      authoritativeInputUsed: false,
+      boundUserFloorText: "",
       nowIso: "2026-01-01T00:00:02.000Z",
     },
     readPersistedRecallFromUserMessage(chat, 2),
   );
+
   assert.equal(writePersistedRecallToUserMessage(chat, 2, overwrite), true);
   const overwritten = readPersistedRecallFromUserMessage(chat, 2);
   assert.equal(overwritten?.manuallyEdited, false);
   assert.equal(overwritten?.injectionText, "system-rerecall");
+  assert.equal(overwritten?.authoritativeInputUsed, false);
+  assert.equal(overwritten?.boundUserFloorText, "");
 
   assert.equal(removePersistedRecallFromUserMessage(chat, 2), true);
   assert.equal(readPersistedRecallFromUserMessage(chat, 2), null);
@@ -4601,17 +4670,39 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
           status: "completed",
           didRecall: true,
           injectionText: "fresh-memory",
+          authoritativeInputUsed: true,
+          boundUserFloorText: "稳定楼层输入",
         },
         transaction: {
           frozenRecallOptions: {
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "当前输入",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
 
+    assert.equal(resolution.source, "fresh");
     assert.equal(resolution.targetUserMessageIndex, 0);
+    assert.equal(resolution.authoritativeInputUsed, true);
+    assert.equal(resolution.boundUserFloorText, "稳定楼层输入");
+    assert.equal(
+      harness.chat[0]?.extra?.bme_recall?.injectionText,
+      "fresh-memory",
+    );
+
+    assert.equal(
+      JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+      JSON.stringify([]),
+    );
+    assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
+    assert.equal(
+      harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
+      "稳定楼层输入",
+    );
+    assert.equal(harness.metadataSaveCalls > 0, true);
   }
 
   {
@@ -4640,6 +4731,8 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "尾部 user 仍可匹配",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
@@ -4674,6 +4767,8 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
             generationType: "normal",
             targetUserMessageIndex: null,
             overrideUserMessage: "发送前捕获的原始文本",
+            lockedSource: "send-intent",
+            hookName: "GENERATION_AFTER_COMMANDS",
           },
         },
       });
@@ -4703,6 +4798,8 @@ async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
         didRecall: true,
         injectionText: "fresh-memory",
         selectedNodeIds: ["node-a", "node-b"],
+        authoritativeInputUsed: true,
+        boundUserFloorText: "稳定楼层输入",
       },
       transaction: {
         frozenRecallOptions: {
@@ -4721,9 +4818,15 @@ async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
     harness.chat[0]?.extra?.bme_recall?.injectionText,
     "fresh-memory",
   );
-  assert.deepEqual(
-    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
-    ["node-a", "node-b"],
+
+  assert.equal(
+    JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+    JSON.stringify(["node-a", "node-b"]),
+  );
+  assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
+  assert.equal(
+    harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
+    "稳定楼层输入",
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
 }
@@ -4744,9 +4847,9 @@ async function testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecor
     harness.chat[0]?.extra?.bme_recall?.injectionText,
     "注入:即时模式补写目标",
   );
-  assert.deepEqual(
-    harness.chat[0]?.extra?.bme_recall?.selectedNodeIds,
-    ["node-test-1"],
+  assert.equal(
+    JSON.stringify(harness.chat[0]?.extra?.bme_recall?.selectedNodeIds || []),
+    JSON.stringify(["node-test-1"]),
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
 }
@@ -6079,6 +6182,7 @@ await testAutoExtractionDefersWhenHistoryRecoveryBusy();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testGenerationRecallDeferredRewriteMutatesFinalMesSendPayload();
+await testGenerationRecallDeferredRewriteMutatesFinalMesSendAuthoritativeUserInput();
 await testPersistentRecallDataLayerLifecycleAndCompatibility();
 await testPersistentRecallSourceResolutionAndTargetRouting();
 await testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor();
