@@ -715,7 +715,6 @@ let lastRecalledItems = []; // 最近召回的节点（面板展示用）
 let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
 let isRecoveringHistory = false;
-let lastHistoryWarningAt = 0;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 300000;
@@ -11249,13 +11248,6 @@ function notifyHistoryDirty(dirtyFrom, reason) {
       busy: true,
     },
   );
-  const now = Date.now();
-  if (now - lastHistoryWarningAt < 3000) return;
-  lastHistoryWarningAt = now;
-  toastr.warning(
-    `检测到楼层历史变化，将从楼层 ${dirtyFrom} 之后自动恢复图谱`,
-    reason || "ST-BME 历史回退保护",
-  );
 }
 
 function clearPendingHistoryMutationChecks() {
@@ -11979,12 +11971,9 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         persist: false,
       },
     );
-
-    toastr.success(
-      usedFullRebuild
-        ? "历史变化已触发全量重建"
-        : "历史变化已完成受影响后缀恢复",
-    );
+    if (usedFullRebuild) {
+      toastr.warning("历史变化已触发全量重建");
+    }
     return true;
   } catch (error) {
     if (isAbortError(error)) {

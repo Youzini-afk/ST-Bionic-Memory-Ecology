@@ -349,6 +349,11 @@ function createHistoryRecoveryHarness() {
       saveGraphToChatCalls: 0,
       refreshPanelCalls: 0,
       notices: [],
+      toastCalls: {
+        success: [],
+        warning: [],
+        error: [],
+      },
       embeddingConfig: { mode: "backend" },
       isRestoreLockActive() {
         return false;
@@ -511,14 +516,52 @@ function createHistoryRecoveryHarness() {
         context.refreshPanelCalls += 1;
       },
       toastr: {
-        success() {},
-        warning() {},
-        error() {},
+        success(...args) {
+          context.toastCalls.success.push(args);
+        },
+        warning(...args) {
+          context.toastCalls.warning.push(args);
+        },
+        error(...args) {
+          context.toastCalls.error.push(args);
+        },
       },
     };
     vm.createContext(context);
     vm.runInContext(
       `${snippet}\nresult = { recoverFromHistoryMutation: recoverHistoryIfNeeded };`,
+      context,
+      { filename: indexPath },
+    );
+    return context;
+  });
+}
+
+function createHistoryNotificationHarness() {
+  return fs.readFile(indexPath, "utf8").then((source) => {
+    const start = source.indexOf("function notifyHistoryDirty(dirtyFrom, reason) {");
+    const end = source.indexOf("function clearPendingHistoryMutationChecks() {");
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error("无法从 index.js 提取 history notify 定义");
+    }
+    const snippet = source.slice(start, end).replace(/^export\s+/gm, "");
+    const context = {
+      console,
+      result: null,
+      notices: [],
+      warningToasts: [],
+      updateStageNotice(...args) {
+        context.notices.push(args);
+      },
+      toastr: {
+        warning(...args) {
+          context.warningToasts.push(args);
+        },
+      },
+    };
+    vm.createContext(context);
+    vm.runInContext(
+      `${snippet}\nresult = { notifyHistoryDirty };`,
       context,
       { filename: indexPath },
     );
@@ -5436,6 +5479,120 @@ async function testHistoryRecoveryAbortClearsVectorRepairState() {
   assert.equal(harness.currentGraph.vectorIndexState.dirtyReason, "");
 }
 
+async function testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast() {
+  const harness = await createHistoryNotificationHarness();
+
+  harness.result.notifyHistoryDirty(
+    12,
+    "已处理楼层超出当前聊天长度，检测到历史截断",
+  );
+
+  assert.equal(harness.notices.length, 1);
+  assert.equal(harness.warningToasts.length, 0);
+  assert.equal(harness.notices[0][0], "history");
+  assert.equal(harness.notices[0][1], "检测到楼层历史变化");
+}
+
+async function testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-deleted",
+      lastMutationReason: "tail-truncated",
+      extractionCount: 1,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [
+      {
+        processedRange: [1, 1],
+        vectorDelta: {
+          insertedHashes: [],
+          removedHashes: [],
+          backendDeleteHashes: [],
+          touchedNodeIds: [],
+          replayRequiredNodeIds: [],
+          replacedMappings: [],
+        },
+      },
+    ],
+  });
+  harness.replayExtractionFromHistoryImpl = async () => {
+    harness.currentGraph.historyState.lastProcessedAssistantFloor = 1;
+    harness.currentGraph.lastProcessedSeq = 1;
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation("message-deleted");
+
+  assert.equal(result, true);
+  assert.equal(harness.toastCalls.success.length, 0);
+  assert.equal(harness.toastCalls.warning.length, 0);
+  assert.equal(harness.toastCalls.error.length, 0);
+}
+
+async function testHistoryRecoveryFullRebuildStillWarnsUser() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+      lastMutationReason: "edited",
+      extractionCount: 1,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: true,
+      dirtyReason: "history-recovery-replay",
+      pendingRepairFromFloor: 1,
+      replayRequiredNodeIds: ["node-1"],
+      lastWarning: "repair pending",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => null;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    harness.currentGraph.historyState.lastProcessedAssistantFloor = 1;
+    harness.currentGraph.lastProcessedSeq = 1;
+    return 1;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation("message-edited");
+
+  assert.equal(result, true);
+  assert.equal(harness.toastCalls.success.length, 0);
+  assert.equal(harness.toastCalls.warning.length, 1);
+  assert.match(String(harness.toastCalls.warning[0]?.[0] || ""), /全量重建/);
+}
+
 async function testHistoryRecoveryFallbackFullRebuildCarriesResultCode() {
   const harness = await createHistoryRecoveryHarness();
   harness.chat = [
@@ -6475,6 +6632,9 @@ await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
+await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();
+await testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast();
+await testHistoryRecoveryFullRebuildStillWarnsUser();
 await testHistoryRecoveryAbortClearsVectorRepairState();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
 await testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay();
