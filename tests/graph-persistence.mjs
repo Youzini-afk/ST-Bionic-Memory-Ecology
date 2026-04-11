@@ -7,6 +7,7 @@ import vm from "node:vm";
 import {
   buildBmeDbName,
   buildGraphFromSnapshot,
+  buildPersistDelta,
   buildSnapshotFromGraph,
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
@@ -104,7 +105,7 @@ const persistenceCore = extractSnippet(
 );
 const messageSnippet = extractSnippet(
   'function onMessageReceived(messageId = null, type = "") {',
-  "// ==================== UI 操作 ====================",
+  "async function onViewGraph() {",
 );
 
 function createSessionStorage(seed = null) {
@@ -269,6 +270,109 @@ async function createGraphPersistenceHarness({
       return;
     }
     indexedDbSnapshotMap.set(normalizedChatId, structuredClone(snapshot));
+  }
+
+  function commitIndexedDbDelta(targetChatId = "", delta = {}, options = {}) {
+    const normalizedChatId = String(targetChatId || "");
+    const currentSnapshot = getIndexedDbSnapshotForChat(normalizedChatId);
+    const now = Date.now();
+
+    const nodeMap = new Map(
+      (Array.isArray(currentSnapshot?.nodes) ? currentSnapshot.nodes : [])
+        .filter((record) => record?.id)
+        .map((record) => [String(record.id), structuredClone(record)]),
+    );
+    const edgeMap = new Map(
+      (Array.isArray(currentSnapshot?.edges) ? currentSnapshot.edges : [])
+        .filter((record) => record?.id)
+        .map((record) => [String(record.id), structuredClone(record)]),
+    );
+    const tombstoneMap = new Map(
+      (Array.isArray(currentSnapshot?.tombstones) ? currentSnapshot.tombstones : [])
+        .filter((record) => record?.id)
+        .map((record) => [String(record.id), structuredClone(record)]),
+    );
+
+    for (const edgeId of Array.isArray(delta?.deleteEdgeIds) ? delta.deleteEdgeIds : []) {
+      edgeMap.delete(String(edgeId));
+    }
+    for (const nodeId of Array.isArray(delta?.deleteNodeIds) ? delta.deleteNodeIds : []) {
+      nodeMap.delete(String(nodeId));
+    }
+    for (const record of Array.isArray(delta?.upsertNodes) ? delta.upsertNodes : []) {
+      if (!record?.id) continue;
+      nodeMap.set(String(record.id), structuredClone(record));
+    }
+    for (const record of Array.isArray(delta?.upsertEdges) ? delta.upsertEdges : []) {
+      if (!record?.id) continue;
+      edgeMap.set(String(record.id), structuredClone(record));
+    }
+    for (const record of Array.isArray(delta?.tombstones) ? delta.tombstones : []) {
+      if (!record?.id) continue;
+      tombstoneMap.set(String(record.id), structuredClone(record));
+    }
+
+    const runtimeMetaPatch =
+      delta?.runtimeMetaPatch &&
+      typeof delta.runtimeMetaPatch === "object" &&
+      !Array.isArray(delta.runtimeMetaPatch)
+        ? structuredClone(delta.runtimeMetaPatch)
+        : {};
+    const shouldMarkSyncDirty = options?.markSyncDirty !== false;
+    const nextRevision = Math.max(
+      Number(currentSnapshot?.meta?.revision || 0) + 1,
+      Number(options?.requestedRevision || 0),
+    );
+    const nextState = {
+      lastProcessedFloor: Number.isFinite(Number(runtimeMetaPatch.lastProcessedFloor))
+        ? Number(runtimeMetaPatch.lastProcessedFloor)
+        : Number(currentSnapshot?.state?.lastProcessedFloor ?? -1),
+      extractionCount: Number.isFinite(Number(runtimeMetaPatch.extractionCount))
+        ? Number(runtimeMetaPatch.extractionCount)
+        : Number(currentSnapshot?.state?.extractionCount ?? 0),
+    };
+    const nextSnapshot = {
+      meta: {
+        ...(currentSnapshot?.meta || {}),
+        ...runtimeMetaPatch,
+        chatId: normalizedChatId,
+        revision: nextRevision,
+        lastModified: now,
+        lastMutationReason: String(options?.reason || "commitDelta"),
+        syncDirty: shouldMarkSyncDirty,
+        syncDirtyReason: shouldMarkSyncDirty
+          ? String(options?.reason || "commitDelta")
+          : "",
+        nodeCount: nodeMap.size,
+        edgeCount: edgeMap.size,
+        tombstoneCount: tombstoneMap.size,
+      },
+      nodes: Array.from(nodeMap.values()),
+      edges: Array.from(edgeMap.values()),
+      tombstones: Array.from(tombstoneMap.values()),
+      state: nextState,
+    };
+
+    setIndexedDbSnapshotForChat(normalizedChatId, nextSnapshot);
+    runtimeContext.__indexedDbSnapshot =
+      getIndexedDbSnapshotForChat(normalizedChatId);
+
+    return {
+      revision: nextRevision,
+      lastModified: now,
+      imported: {
+        nodes: nodeMap.size,
+        edges: edgeMap.size,
+        tombstones: tombstoneMap.size,
+      },
+      delta: {
+        upsertNodes: Array.isArray(delta?.upsertNodes) ? delta.upsertNodes.length : 0,
+        upsertEdges: Array.isArray(delta?.upsertEdges) ? delta.upsertEdges.length : 0,
+        deleteNodeIds: Array.isArray(delta?.deleteNodeIds) ? delta.deleteNodeIds.length : 0,
+        deleteEdgeIds: Array.isArray(delta?.deleteEdgeIds) ? delta.deleteEdgeIds.length : 0,
+        tombstones: Array.isArray(delta?.tombstones) ? delta.tombstones.length : 0,
+      },
+    };
   }
 
   const runtimeContext = {
@@ -774,6 +878,7 @@ async function createGraphPersistenceHarness({
     __contextSaveCalls: 0,
     __contextImmediateSaveCalls: 0,
     buildGraphFromSnapshot,
+    buildPersistDelta,
     buildSnapshotFromGraph,
     buildBmeDbName,
     scheduleUpload() {
@@ -790,6 +895,9 @@ async function createGraphPersistenceHarness({
       async exportSnapshot() {
         return getIndexedDbSnapshotForChat(this.chatId);
       }
+      async commitDelta(delta, options = {}) {
+        return commitIndexedDbDelta(this.chatId, delta, options);
+      }
       async importSnapshot(snapshot) {
         setIndexedDbSnapshotForChat(this.chatId, snapshot);
         return {
@@ -805,6 +913,9 @@ async function createGraphPersistenceHarness({
         return {
           async exportSnapshot() {
             return getIndexedDbSnapshotForChat(dbChatId);
+          },
+          async commitDelta(delta, options = {}) {
+            return commitIndexedDbDelta(dbChatId, delta, options);
           },
           async importSnapshot(snapshot) {
             setIndexedDbSnapshotForChat(dbChatId, snapshot);
@@ -2312,7 +2423,6 @@ result = {
     lastPersistedRevision: 0,
     writesBlocked: false,
   });
-  harness.runtimeContext.__markSyncDirtyShouldThrow = true;
   harness.runtimeContext.__scheduleUploadShouldThrow = true;
 
   const result = await harness.api.saveGraphToIndexedDb(
@@ -2325,7 +2435,6 @@ result = {
   );
 
   assert.equal(result.saved, true);
-  assert.match(String(result.warning || ""), /mark-sync-dirty-failed/);
   assert.match(String(result.warning || ""), /schedule-upload-failed/);
   assert.equal(
     harness.api.getIndexedDbSnapshot().meta.revision,

@@ -169,6 +169,7 @@ export function createGenerationRecallHarness(options = {}) {
       hideScheduleCalls: [],
       isExtracting: false,
       isRecoveringHistory: false,
+      isRestoreLockActive: () => false,
       isAssistantChatMessage: (message) =>
         Boolean(message) && !message.is_user && !message.is_system,
       createRecallInputRecord,

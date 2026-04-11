@@ -9518,6 +9518,8 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
       return "已阻塞";
     case "failed":
       return "失败";
+    case "recoverable":
+      return "已捕获恢复锚点";
     default:
       return "未知";
   }
@@ -9548,14 +9550,7 @@ function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const commitMarkerRevision =
-    loadInfo?.commitMarker?.accepted === true
-      ? Number(loadInfo.commitMarker.revision || 0)
-      : 0;
-  const lastAcceptedRevision = Math.max(
-    Number(loadInfo?.lastAcceptedRevision || 0),
-    commitMarkerRevision,
-  );
+  const lastAcceptedRevision = Number(loadInfo?.lastAcceptedRevision || 0);
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
@@ -9564,7 +9559,11 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   if (_hasMeaningfulPersistenceRecord(persistence)) {
     const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
-      accepted ? "已确认" : _formatPersistenceOutcomeLabel(persistence.outcome),
+      accepted
+        ? "已确认"
+        : persistence.recoverable === true
+          ? "已捕获恢复锚点"
+          : _formatPersistenceOutcomeLabel(persistence.outcome),
       persistence.storageTier ? `tier ${persistence.storageTier}` : "",
       Number.isFinite(Number(persistence.revision)) && Number(persistence.revision) > 0
         ? `rev ${Number(persistence.revision)}`
@@ -9685,7 +9684,9 @@ function _refreshPersistenceRepairUi(
   }
 
   help.textContent =
-    "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
+    persistence?.recoverable === true
+      ? "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
+      : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {

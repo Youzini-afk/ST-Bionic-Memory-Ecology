@@ -350,6 +350,12 @@ function createHistoryRecoveryHarness() {
       refreshPanelCalls: 0,
       notices: [],
       embeddingConfig: { mode: "backend" },
+      isRestoreLockActive() {
+        return false;
+      },
+      enterRestoreLock() {},
+      leaveRestoreLock() {},
+      async maybeResumePendingAutoExtraction() {},
       ensureCurrentGraphRuntimeState() {
         return context.currentGraph;
       },
