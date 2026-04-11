@@ -457,6 +457,10 @@ function buildPromptExecutionSummary(debugContext = null) {
       debugContext.mvu && typeof debugContext.mvu === "object"
         ? cloneRuntimeDebugValue(debugContext.mvu, {})
         : null,
+    inputContext:
+      debugContext.inputContext && typeof debugContext.inputContext === "object"
+        ? cloneRuntimeDebugValue(debugContext.inputContext, {})
+        : null,
     regexInput: normalizeRegexDebugEntries(debugContext.regexInput),
   };
 }

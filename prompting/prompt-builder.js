@@ -181,6 +181,10 @@ export function buildTaskExecutionDebugContext(
       promptDebug.mvu && typeof promptDebug.mvu === "object"
         ? cloneRuntimeDebugValue(promptDebug.mvu, {})
         : null,
+    inputContext:
+      promptDebug.inputContext && typeof promptDebug.inputContext === "object"
+        ? cloneRuntimeDebugValue(promptDebug.inputContext, {})
+        : null,
     regexInput:
       (() => {
         const merged = mergeRegexCollectors(
@@ -284,18 +288,26 @@ function getPromptMessageLikeDescriptor(value) {
 
   if (typeof value.content === "string") {
     const role = String(value.role || "assistant").trim().toLowerCase();
+    const speaker = String(
+      value.speaker || value.name || value.displayName || "",
+    ).trim();
     return {
       content: String(value.content || ""),
       role: role === "user" ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
+      speaker,
     };
   }
 
   if (typeof value.mes === "string") {
+    const speaker = String(
+      value.speaker || value.name || value.displayName || "",
+    ).trim();
     return {
       content: String(value.mes || ""),
       role: value.is_user === true ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
+      speaker,
     };
   }
 
@@ -320,7 +332,10 @@ function formatPromptMessageTranscript(value) {
       }
       const seqLabel =
         descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
-      return `${seqLabel} [${descriptor.role}]: ${descriptor.content}`;
+      const speakerLabel = descriptor.speaker
+        ? `|${descriptor.speaker}`
+        : "";
+      return `${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`;
     })
     .filter(Boolean)
     .join("\n\n");
@@ -766,6 +781,32 @@ function sanitizePromptContextInputs(
         return value;
       }
       seen.add(value);
+      const messageDescriptor = getPromptMessageLikeDescriptor(value);
+      if (messageDescriptor) {
+        const contentKey = typeof value.content === "string"
+          ? "content"
+          : typeof value.mes === "string"
+            ? "mes"
+            : "";
+        const messageRole = messageDescriptor.role === "user"
+          ? "user"
+          : messageDescriptor.role === "assistant"
+            ? "assistant"
+            : regexRole;
+        return Object.fromEntries(
+          Object.entries(value).map(([key, entryValue]) => [
+            key,
+            key === contentKey
+              ? applyLocalRegexToStructuredValue(
+                  entryValue,
+                  regexStage,
+                  messageRole,
+                  seen,
+                )
+              : entryValue,
+          ]),
+        );
+      }
       return Object.fromEntries(
         Object.entries(value).map(([key, entryValue]) => [
           key,
@@ -821,14 +862,14 @@ function sanitizePromptContextInputs(
           ? ""
           : null
       : sanitized.value;
-    if (structuredSanitizerInput.renderAsTranscript) {
-      sanitizedValue = stringifyInterpolatedValue(sanitizedValue);
-    }
     sanitizedValue = applyLocalRegexToStructuredValue(
       sanitizedValue,
       regexStage,
       regexRole,
     );
+    if (structuredSanitizerInput.renderAsTranscript) {
+      sanitizedValue = stringifyInterpolatedValue(sanitizedValue);
+    }
     sanitizedContext[fieldName] = sanitizedValue;
   }
 
@@ -1407,6 +1448,10 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   const legacyPrompt = getLegacyPromptForTask(settings, taskType);
   const promptRegexInput = { entries: [] };
   const mvuPromptDebug = createEmptyMvuPromptDebug();
+  const taskInputDebug =
+    context?.taskInputDebug && typeof context.taskInputDebug === "object"
+      ? cloneRuntimeDebugValue(context.taskInputDebug, {})
+      : null;
   const worldInfoInputContext = {
     ...context,
   };
@@ -1430,7 +1475,9 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       return orderA - orderB;
     });
 
-  const worldInfoRequested = profileRequiresWorldInfo(profile);
+  const worldInfoRequested = context?.__skipWorldInfo === true
+    ? false
+    : profileRequiresWorldInfo(profile);
   const emptyWorldInfo = buildEmptyWorldInfoContext();
   let resolvedWorldInfo = emptyWorldInfo;
   let worldInfoRuntimeBlockedContents = [];
@@ -1771,6 +1818,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
         ),
         fallbackReason: String(mvuPromptDebug.fallbackReason || ""),
       },
+      inputContext: taskInputDebug,
       effectivePath: {
         promptAssembly: "ordered-private-messages",
         hostInjectionPlan: "diagnostic-plan-only",
@@ -1809,6 +1857,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     hostInjectionPlan,
     worldInfoResolution,
     mvu: result.debug.mvu,
+    inputContext: taskInputDebug,
     regexInput: result.regexInput,
     debug: result.debug,
   });

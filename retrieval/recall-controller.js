@@ -86,6 +86,10 @@ export function resolveRecallInputController(
           override?.overrideReason ||
           "override-bound",
       ),
+      authoritativeInputUsed: Boolean(override?.authoritativeInputUsed),
+      boundUserFloorText: runtime.normalizeRecallInputText(
+        override?.boundUserFloorText || "",
+      ),
       sourceCandidates: Array.isArray(override?.sourceCandidates)
         ? override.sourceCandidates.map((candidate) => ({ ...candidate }))
         : [],
@@ -145,6 +149,8 @@ export function resolveRecallInputController(
     source,
     sourceLabel: runtime.getRecallUserMessageSourceLabel(source),
     reason: userMessage ? `${source || "unknown"}-selected` : "no-recall-input",
+    authoritativeInputUsed: false,
+    boundUserFloorText: tailUserText || latestUserText || "",
     sourceCandidates: [],
     recentMessages: runtime.buildRecallRecentMessages(
       chat,
@@ -212,6 +218,8 @@ export function applyRecallInjectionController(
     source: recallInput.source,
     sourceLabel: recallInput.sourceLabel,
     reason: recallInput.reason || "",
+    authoritativeInputUsed: Boolean(recallInput.authoritativeInputUsed),
+    boundUserFloorText: String(recallInput.boundUserFloorText || ""),
     sourceCandidates: Array.isArray(recallInput.sourceCandidates)
       ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))
       : [],
@@ -475,6 +483,8 @@ export async function runRecallController(runtime, options = {}) {
           source: recallInput?.source || cachedRecallPayload.source || "",
           sourceLabel:
             recallInput?.sourceLabel || cachedRecallPayload.sourceLabel || "",
+          authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+          boundUserFloorText: String(recallInput?.boundUserFloorText || ""),
           hookName: recallInput?.hookName || "",
           sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
             ? recallInput.sourceCandidates.map((candidate) => ({
@@ -531,6 +541,8 @@ export async function runRecallController(runtime, options = {}) {
           "immediate",
         source: recallInput?.source || "",
         sourceLabel: recallInput?.sourceLabel || "",
+        authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+        boundUserFloorText: String(recallInput?.boundUserFloorText || ""),
         hookName: recallInput?.hookName || "",
         sourceCandidates: Array.isArray(recallInput?.sourceCandidates)
           ? recallInput.sourceCandidates.map((candidate) => ({ ...candidate }))

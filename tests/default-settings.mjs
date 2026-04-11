@@ -14,6 +14,7 @@ assert.equal(defaultSettings.recallEnableGraphDiffusion, true);
 assert.equal(defaultSettings.recallDiffusionTopK, 100);
 assert.equal(defaultSettings.recallLlmCandidatePool, 30);
 assert.equal(defaultSettings.recallLlmContextMessages, 4);
+assert.equal(defaultSettings.recallUseAuthoritativeGenerationInput, false);
 assert.equal(defaultSettings.recallEnableMultiIntent, true);
 assert.equal(defaultSettings.recallMultiIntentMaxSegments, 4);
 assert.equal(defaultSettings.recallEnableContextQueryBlend, true);

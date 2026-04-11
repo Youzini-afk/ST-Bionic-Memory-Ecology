@@ -9861,6 +9861,41 @@ function resolveGenerationRecallDeliveryMode(
   return "immediate";
 }
 
+function shouldUseAuthoritativeGenerationRecallInput(recallOptions = {}) {
+  const normalizedGenerationType = normalizeGenerationRecallTransactionType(
+    recallOptions?.generationType || "normal",
+  );
+  if (normalizedGenerationType !== "normal") {
+    return false;
+  }
+  return Boolean(getSettings()?.recallUseAuthoritativeGenerationInput);
+}
+
+function shouldPreserveAuthoritativeGenerationRecallText(
+  source,
+  overrideUserMessage,
+  targetUserMessageText,
+  recallOptions = {},
+) {
+  if (!shouldUseAuthoritativeGenerationRecallInput(recallOptions)) {
+    return false;
+  }
+  const normalizedOverride = normalizeRecallInputText(overrideUserMessage);
+  const normalizedTarget = normalizeRecallInputText(targetUserMessageText);
+  if (!normalizedOverride || !normalizedTarget || normalizedOverride === normalizedTarget) {
+    return false;
+  }
+  const normalizedSource = String(source || "").trim();
+  return [
+    "send-intent",
+    "generation-started-send-intent",
+    "generation-started-textarea",
+    "host-generation-lifecycle",
+    "textarea-live",
+    "planner-handoff",
+  ].includes(normalizedSource);
+}
+
 function freezeGenerationRecallOptionsForTransaction(
   chat,
   generationType = "normal",
@@ -9935,6 +9970,8 @@ function freezeGenerationRecallOptionsForTransaction(
         lockedSource: source,
         lockedSourceLabel: sourceLabel,
         lockedReason: sourceReason,
+        authoritativeInputUsed: false,
+        boundUserFloorText: "",
         includeSyntheticUserMessage: Boolean(
           recallOptions?.includeSyntheticUserMessage,
         ),
@@ -9949,12 +9986,21 @@ function freezeGenerationRecallOptionsForTransaction(
     return null;
   }
 
-  const frozenUserMessage = normalizeRecallInputText(
-    targetUserMessage?.mes ||
-      recallOptions?.overrideUserMessage ||
-      recallOptions?.userMessage ||
-      "",
+  const targetUserMessageText = normalizeRecallInputText(targetUserMessage?.mes || "");
+  const preserveAuthoritativeText = shouldPreserveAuthoritativeGenerationRecallText(
+    source,
+    overrideUserMessage,
+    targetUserMessageText,
+    recallOptions,
   );
+  const frozenUserMessage = preserveAuthoritativeText
+    ? normalizeRecallInputText(overrideUserMessage)
+    : normalizeRecallInputText(
+        targetUserMessage?.mes ||
+          recallOptions?.overrideUserMessage ||
+          recallOptions?.userMessage ||
+          "",
+      );
   if (!frozenUserMessage) {
     return null;
   }
@@ -9978,7 +10024,9 @@ function freezeGenerationRecallOptionsForTransaction(
       (frozenUserMessage === overrideUserMessage
         ? "transaction-source-frozen"
         : "transaction-bound-to-chat-user-floor"),
-    includeSyntheticUserMessage: false,
+    authoritativeInputUsed: preserveAuthoritativeText,
+    boundUserFloorText: targetUserMessageText,
+    includeSyntheticUserMessage: preserveAuthoritativeText,
   };
 }
 
@@ -13271,12 +13319,12 @@ async function onRestoreCurrentChatFromCloud() {
     async () => {
       const chatId = getCurrentChatId();
       if (!chatId) {
-        toastr.warning("当前没有聊天上下鏂?");
+        toastr.warning("当前没有聊天上下文");
         return { handledToast: true };
       }
 
       const confirmed = globalThis.confirm?.(
-        "这会用云端备份完整覆盖当前聊天的本地记忆，并先保留一份本地安全快照。确定继续吗锛?,
+        "这会用云端备份完整覆盖当前聊天的本地记忆，并先保留一份本地安全快照。确定继续吗？",
       );
       if (!confirmed) {
         return { cancelled: true };

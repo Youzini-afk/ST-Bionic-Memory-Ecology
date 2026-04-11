@@ -158,6 +158,18 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     role: "system",
     description: "注入近期检测到的记忆矛盾或冲突信息。reflection 任务专用，触发基于矛盾的深度反思。",
   },
+  {
+    sourceKey: "activeSummaries",
+    name: "活跃总结",
+    role: "system",
+    description: "注入当前活跃的分层总结快照。extract 任务使用，帮助 LLM 了解近期已总结的局面，避免重复提取已覆盖内容。",
+  },
+  {
+    sourceKey: "storyTimeContext",
+    name: "故事时间",
+    role: "system",
+    description: "注入当前活跃的故事时间线标签与来源。extract 任务使用，帮助 LLM 定位本批对话在剧情时间轴上的位置。",
+  },
 ];
 
 const DEFAULT_TASK_PROFILE_VERSION = 3;
@@ -488,6 +500,20 @@ const TASK_CONTEXT_BLOCK_BLUEPRINTS = {
       type: "builtin",
       role: "system",
       sourceKey: "currentRange",
+    },
+    {
+      id: "default-active-summaries",
+      name: "活跃总结",
+      type: "builtin",
+      role: "system",
+      sourceKey: "activeSummaries",
+    },
+    {
+      id: "default-story-time-context",
+      name: "故事时间",
+      type: "builtin",
+      role: "system",
+      sourceKey: "storyTimeContext",
     },
   ],
   recall: [
