@@ -3977,6 +3977,11 @@
   overflow: auto;
 }
 
+#bme-mobile-graph-pane {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 .bme-mobile-graph-pane.active {
   display: flex;
 }

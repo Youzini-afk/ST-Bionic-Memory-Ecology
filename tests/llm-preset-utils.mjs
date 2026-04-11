@@ -5,6 +5,7 @@ import {
   isSameLlmConfigSnapshot,
   isUsableLlmConfigSnapshot,
   normalizeLlmPresetMap,
+  resolveDedicatedLlmProviderConfig,
   resolveLlmConfigSelection,
   resolveActiveLlmPresetName,
   sanitizeLlmPresetSettings,
@@ -225,5 +226,32 @@ assert.deepEqual(invalidTaskPresetSelection.config, {
   llmApiKey: "sk-global",
   llmModel: "model-global",
 });
+
+const arkProvider = resolveDedicatedLlmProviderConfig(
+  "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+);
+assert.equal(arkProvider.providerId, "volcengine-ark");
+assert.equal(arkProvider.transportId, "dedicated-openai-compatible");
+assert.equal(arkProvider.routeMode, "custom");
+assert.equal(arkProvider.apiUrl, "https://ark.cn-beijing.volces.com/api/coding/v3");
+assert.equal(arkProvider.supportsModelFetch, true);
+
+const anthropicProvider = resolveDedicatedLlmProviderConfig(
+  "https://api.anthropic.com/v1/messages",
+);
+assert.equal(anthropicProvider.providerId, "anthropic-claude");
+assert.equal(anthropicProvider.transportId, "dedicated-anthropic-claude");
+assert.equal(anthropicProvider.routeMode, "reverse-proxy");
+assert.equal(anthropicProvider.apiUrl, "https://api.anthropic.com/v1");
+assert.equal(anthropicProvider.supportsModelFetch, false);
+
+const geminiProvider = resolveDedicatedLlmProviderConfig(
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+);
+assert.equal(geminiProvider.providerId, "google-ai-studio");
+assert.equal(geminiProvider.transportId, "dedicated-google-ai-studio");
+assert.equal(geminiProvider.routeMode, "reverse-proxy");
+assert.equal(geminiProvider.apiUrl, "https://generativelanguage.googleapis.com");
+assert.equal(geminiProvider.supportsModelFetch, true);
 
 console.log("llm-preset-utils tests passed");

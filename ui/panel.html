@@ -782,8 +782,7 @@
                     <div>
                       <div class="bme-config-card-title">记忆 LLM</div>
                       <div class="bme-config-card-subtitle">
-                        留空时复用当前聊天模型；填写后走现有代理转发到 OpenAI
-                        兼容接口。
+                        留空时复用当前聊天模型；填写后会自动识别常见渠道，未识别时按自定义 OpenAI 兼容接口处理。
                       </div>
                     </div>
                   </div>
@@ -835,6 +834,9 @@
                       type="text"
                       placeholder="https://api.openai.com/v1"
                     />
+                  </div>
+                  <div class="bme-config-help" id="bme-memory-llm-provider-help">
+                    留空时复用当前聊天模型。支持自动识别 OpenAI 兼容渠道、Anthropic Claude、Google AI Studio / Gemini；填写完整 endpoint 时会自动规整为可复用的 base URL。
                   </div>
                   <div class="bme-config-row">
                     <label for="bme-setting-llm-key">LLM API Key</label>
