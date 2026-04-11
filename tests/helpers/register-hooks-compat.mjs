@@ -1,4 +1,11 @@
-import { register, registerHooks } from "node:module";
+import * as nodeModule from "node:module";
+
+const register =
+  typeof nodeModule.register === "function" ? nodeModule.register : undefined;
+const registerHooks =
+  typeof nodeModule.registerHooks === "function"
+    ? nodeModule.registerHooks
+    : undefined;
 
 const DEFAULT_REGEX_ENGINE_HOOK_ENTRIES = Object.freeze([
   {
