@@ -657,6 +657,7 @@ let pendingAutoExtraction = {
 let isHostGenerationRunning = false;
 let lastHostGenerationEndedAt = 0;
 let skipBeforeCombineRecallUntil = 0;
+let mvuExtraAnalysisGuardUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
 const generationRecallTransactions = new Map();
@@ -682,6 +683,7 @@ const persistedRecallPersistDiagnosticTimestamps = new Map();
 const GENERATION_RECALL_TRANSACTION_TTL_MS = 15000;
 const PLANNER_RECALL_HANDOFF_TTL_MS = GENERATION_RECALL_TRANSACTION_TTL_MS;
 const GENERATION_RECALL_HOOK_BRIDGE_MS = 1200;
+const MVU_EXTRA_ANALYSIS_GUARD_TTL_MS = 2500;
 const stageNoticeHandles = {
   extraction: null,
   vector: null,
@@ -6283,6 +6285,54 @@ function consumeDryRunPromptPreview(now = Date.now()) {
   }
 
   skipBeforeCombineRecallUntil = 0;
+  return true;
+}
+
+function readMvuExtraAnalysisFlag() {
+  try {
+    const sameFrameMvu = globalThis?.window?.Mvu;
+    if (typeof sameFrameMvu?.isDuringExtraAnalysis === "function") {
+      return Boolean(sameFrameMvu.isDuringExtraAnalysis());
+    }
+  } catch {}
+
+  try {
+    const parentMvu = globalThis?.window?.parent?.Mvu;
+    if (typeof parentMvu?.isDuringExtraAnalysis === "function") {
+      return Boolean(parentMvu.isDuringExtraAnalysis());
+    }
+  } catch {}
+
+  try {
+    const getActivePinia =
+      globalThis?.window?.getActivePinia ??
+      globalThis?.window?.parent?.getActivePinia;
+    if (typeof getActivePinia === "function") {
+      const pinia = getActivePinia();
+      return Boolean(
+        pinia?.state?.value?.["MVU变量框架"]?.runtimes?.is_during_extra_analysis,
+      );
+    }
+  } catch {}
+
+  return false;
+}
+
+function isMvuExtraAnalysisGuardActive(now = Date.now()) {
+  if (readMvuExtraAnalysisFlag()) {
+    mvuExtraAnalysisGuardUntil = Math.max(
+      mvuExtraAnalysisGuardUntil,
+      now + MVU_EXTRA_ANALYSIS_GUARD_TTL_MS,
+    );
+  }
+
+  if (mvuExtraAnalysisGuardUntil <= now) {
+    if (mvuExtraAnalysisGuardUntil !== 0) {
+      mvuExtraAnalysisGuardUntil = 0;
+    }
+    return false;
+  }
+
   return true;
 }
 
@@ -12186,6 +12236,7 @@ function onMessageEdited(messageId, meta = null) {
   const result = onMessageEditedController(
     {
       invalidateRecallAfterHistoryMutation,
+      isMvuExtraAnalysisGuardActive,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },
@@ -12283,6 +12334,7 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
+      isMvuExtraAnalysisGuardActive,
       markGenerationRecallTransactionHookState,
       resolveGenerationRecallDeliveryMode,
       runRecall,
@@ -12307,6 +12359,7 @@ async function onBeforeCombinePrompts(promptData = null) {
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
+      isMvuExtraAnalysisGuardActive,
       markGenerationRecallTransactionHookState,
       resolveGenerationRecallDeliveryMode,
       runRecall,

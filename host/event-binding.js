@@ -358,6 +358,11 @@ export function onMessageDeletedController(
 }
 
 export function onMessageEditedController(runtime, messageId, meta = null) {
+  if (runtime.isMvuExtraAnalysisGuardActive?.()) {
+    console.debug?.("[ST-BME] skip: mvu-extra-analysis hook=MESSAGE_EDITED");
+    runtime.refreshPersistedRecallMessageUi?.();
+    return;
+  }
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
@@ -411,6 +416,13 @@ export async function onGenerationAfterCommandsController(
   dryRun = false,
 ) {
   if (dryRun) {
+    return;
+  }
+
+  if (runtime.isMvuExtraAnalysisGuardActive?.()) {
+    console.debug?.(
+      "[ST-BME] skip: mvu-extra-analysis hook=GENERATION_AFTER_COMMANDS",
+    );
     return;
   }
 
@@ -527,6 +539,16 @@ export async function onBeforeCombinePromptsController(
     return {
       skipped: true,
       reason: "dry-run-preview",
+    };
+  }
+
+  if (runtime.isMvuExtraAnalysisGuardActive?.()) {
+    console.debug?.(
+      "[ST-BME] skip: mvu-extra-analysis hook=GENERATE_BEFORE_COMBINE_PROMPTS",
+    );
+    return {
+      skipped: true,
+      reason: "mvu-extra-analysis",
     };
   }
 
