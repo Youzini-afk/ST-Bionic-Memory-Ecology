@@ -251,7 +251,33 @@ export function onMessageSentController(runtime, messageId) {
   }
 
   if (!message?.is_user) return;
-  if (runtime.isTrivialUserInput?.(message.mes || "")?.trivial) {
+  const trivialInputResult = runtime.isTrivialUserInput?.(message.mes || "") || {
+    trivial: false,
+    reason: "",
+    normalizedText: "",
+  };
+  const tokenEstimate =
+    typeof runtime.estimateTokens === "function"
+      ? Number(runtime.estimateTokens(message.mes || ""))
+      : Number.NaN;
+  const isZeroTokenInput =
+    Number.isFinite(tokenEstimate) && tokenEstimate <= 0;
+
+  if (trivialInputResult.trivial || isZeroTokenInput) {
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: trivialInputResult.trivial
+        ? trivialInputResult.reason
+        : "zero-token",
+      chatId: context?.chatId || "",
+      chatLength: Array.isArray(chat) ? chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.info?.(
+      `[ST-BME] trivial-input skip: reason=${
+        trivialInputResult.trivial ? trivialInputResult.reason : "zero-token"
+      } len=${String(trivialInputResult.normalizedText || message.mes || "").length} hook=MESSAGE_SENT`,
+    );
     runtime.refreshPersistedRecallMessageUi?.();
     return;
   }

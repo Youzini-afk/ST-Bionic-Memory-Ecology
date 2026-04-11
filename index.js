@@ -12637,8 +12637,12 @@ function onChatLoaded() {
 function onMessageSent(messageId) {
   const result = onMessageSentController(
     {
+      clearPendingHostGenerationInputSnapshot,
+      clearPendingRecallSendIntent,
+      estimateTokens,
       getContext,
       isTrivialUserInput,
+      markCurrentGenerationTrivialSkip,
       recordRecallSentUserMessage,
       rebindRecallRecordToNewUserMessage,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
