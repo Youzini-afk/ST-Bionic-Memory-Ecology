@@ -1,6 +1,10 @@
 // ST-BME: 操控面板交互逻辑
 
 import { GraphRenderer } from "./graph-renderer.js";
+import {
+  buildVisibleGraphRefreshToken,
+  resolveVisibleGraphWorkspaceMode,
+} from "./panel-graph-refresh-utils.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
   buildRegionLine,
@@ -335,6 +339,12 @@ let fetchedBackendEmbeddingModels = [];
 let fetchedDirectEmbeddingModels = [];
 let viewportSyncBound = false;
 let popupRuntimePromise = null;
+const GRAPH_LIVE_REFRESH_THROTTLE_MS = 240;
+let pendingVisibleGraphRefreshTimer = null;
+let pendingVisibleGraphRefreshToken = "";
+let pendingVisibleGraphRefreshForce = false;
+let lastVisibleGraphRefreshToken = "";
+let lastVisibleGraphRefreshAt = 0;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -684,6 +694,143 @@ function bindViewportSync() {
   window.visualViewport?.addEventListener("scroll", update);
 }
 
+function _getVisibleGraphWorkspaceMode() {
+  return resolveVisibleGraphWorkspaceMode({
+    overlayActive: overlayEl?.classList.contains("active") === true,
+    isMobile: _isMobile(),
+    currentTabId,
+    currentGraphView,
+    currentMobileGraphView,
+  });
+}
+
+function _getCurrentGraphRefreshToken() {
+  const graph = _getGraph?.();
+  const persistence = _getGraphPersistenceSnapshot();
+  return buildVisibleGraphRefreshToken({
+    visibleMode: _getVisibleGraphWorkspaceMode(),
+    chatId: persistence?.chatId,
+    loadState: persistence?.loadState,
+    revision:
+      persistence?.revision ??
+      persistence?.lastAcceptedRevision ??
+      persistence?.lastSyncedRevision ??
+      0,
+    nodeCount: Array.isArray(graph?.nodes) ? graph.nodes.length : -1,
+    edgeCount: Array.isArray(graph?.edges) ? graph.edges.length : -1,
+    lastProcessedSeq: graph?.historyState?.lastProcessedAssistantFloor ?? -1,
+  });
+}
+
+function _clearScheduledVisibleGraphRefresh() {
+  if (pendingVisibleGraphRefreshTimer) {
+    clearTimeout(pendingVisibleGraphRefreshTimer);
+    pendingVisibleGraphRefreshTimer = null;
+  }
+  pendingVisibleGraphRefreshToken = "";
+  pendingVisibleGraphRefreshForce = false;
+}
+
+function _refreshVisibleGraphWorkspace({ force = false } = {}) {
+  const visibleMode = _getVisibleGraphWorkspaceMode();
+  if (visibleMode === "hidden") {
+    return { refreshed: false, reason: "hidden" };
+  }
+
+  const graph = _getGraph?.();
+  const nextToken = _getCurrentGraphRefreshToken();
+  if (!force && nextToken === lastVisibleGraphRefreshToken) {
+    return { refreshed: false, reason: "unchanged", token: nextToken };
+  }
+
+  const hints = { userPovAliases: _hostUserPovAliasHintsForGraph() };
+  if (visibleMode === "desktop:graph") {
+    if (graph && graphRenderer) {
+      graphRenderer.loadGraph(graph, hints);
+    }
+  } else if (visibleMode === "desktop:cognition") {
+    _refreshCognitionWorkspace();
+  } else if (visibleMode === "desktop:summary") {
+    _refreshSummaryWorkspace();
+  } else if (visibleMode === "mobile:graph") {
+    if (graph && mobileGraphRenderer) {
+      mobileGraphRenderer.loadGraph(graph, hints);
+    }
+    _buildMobileLegend();
+  } else if (visibleMode === "mobile:cognition") {
+    _refreshMobileCognitionFull();
+  } else if (visibleMode === "mobile:summary") {
+    _refreshMobileSummaryFull();
+  }
+
+  lastVisibleGraphRefreshToken = nextToken;
+  lastVisibleGraphRefreshAt = Date.now();
+  return {
+    refreshed: true,
+    reason: force ? "forced" : "changed",
+    token: nextToken,
+    visibleMode,
+  };
+}
+
+function _flushScheduledVisibleGraphRefresh() {
+  const shouldForce = pendingVisibleGraphRefreshForce === true;
+  _clearScheduledVisibleGraphRefresh();
+  return _refreshVisibleGraphWorkspace({ force: shouldForce });
+}
+
+function _scheduleVisibleGraphWorkspaceRefresh({ force = false } = {}) {
+  const nextToken = _getCurrentGraphRefreshToken();
+  if (nextToken === "hidden") {
+    _clearScheduledVisibleGraphRefresh();
+    return { scheduled: false, reason: "hidden" };
+  }
+
+  if (force) {
+    _clearScheduledVisibleGraphRefresh();
+    return _refreshVisibleGraphWorkspace({ force: true });
+  }
+
+  if (nextToken === lastVisibleGraphRefreshToken) {
+    return { scheduled: false, reason: "unchanged", token: nextToken };
+  }
+
+  if (
+    pendingVisibleGraphRefreshTimer &&
+    pendingVisibleGraphRefreshToken === nextToken &&
+    pendingVisibleGraphRefreshForce !== true
+  ) {
+    return { scheduled: true, reason: "pending", token: nextToken };
+  }
+
+  const delay = Math.max(
+    0,
+    GRAPH_LIVE_REFRESH_THROTTLE_MS - (Date.now() - lastVisibleGraphRefreshAt),
+  );
+  pendingVisibleGraphRefreshToken = nextToken;
+  pendingVisibleGraphRefreshForce = false;
+
+  if (pendingVisibleGraphRefreshTimer) {
+    clearTimeout(pendingVisibleGraphRefreshTimer);
+    pendingVisibleGraphRefreshTimer = null;
+  }
+
+  if (delay <= 0) {
+    return _flushScheduledVisibleGraphRefresh();
+  }
+
+  pendingVisibleGraphRefreshTimer = setTimeout(() => {
+    _flushScheduledVisibleGraphRefresh();
+  }, delay);
+
+  return {
+    scheduled: true,
+    reason: "throttled",
+    token: nextToken,
+    delay,
+  };
+}
+
 /**
  * 初始化面板（由 index.js 调用一次）
  */
@@ -981,7 +1128,6 @@ export function openPanel() {
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
   _switchTab(activeTabId);
   _refreshRuntimeStatus();
-  _refreshGraph();
   _buildLegend();
 }
 
@@ -991,6 +1137,8 @@ export function openPanel() {
 export function closePanel() {
   if (!overlayEl) return;
   overlayEl.classList.remove("active");
+  _clearScheduledVisibleGraphRefresh();
+  lastVisibleGraphRefreshToken = "";
 }
 
 /**
@@ -1032,7 +1180,7 @@ export function refreshLiveState() {
     _refreshMessageTraceWorkspace();
   }
 
-  _refreshGraph();
+  _scheduleVisibleGraphWorkspaceRefresh();
 }
 
 // ==================== Tab 切换 ====================
@@ -1047,6 +1195,7 @@ function _bindTabs() {
 }
 
 function _switchTab(tabId) {
+  const previousVisibleGraphMode = _getVisibleGraphWorkspaceMode();
   let next = tabId || "dashboard";
   // 「图谱」仅移动端底部 Tab 可用；桌面端图谱在右侧主工作区，侧栏不设该 Tab
   if (!_isMobile() && next === "graph") {
@@ -1078,10 +1227,16 @@ function _switchTab(tabId) {
       _refreshConfigTab();
       break;
     case "graph":
-      _refreshMobileGraphTab();
       break;
     default:
       break;
+  }
+
+  const nextVisibleGraphMode = _getVisibleGraphWorkspaceMode();
+  if (nextVisibleGraphMode !== previousVisibleGraphMode) {
+    _scheduleVisibleGraphWorkspaceRefresh({ force: true });
+  } else {
+    _scheduleVisibleGraphWorkspaceRefresh();
   }
 }
 
@@ -1161,8 +1316,7 @@ function _switchGraphView(view) {
   if (cogWorkspace) cogWorkspace.style.display = isCognition ? "" : "none";
   if (summaryWorkspace) summaryWorkspace.style.display = isSummary ? "" : "none";
 
-  if (isCognition) _refreshCognitionWorkspace();
-  if (isSummary) _refreshSummaryWorkspace();
+  _refreshGraph({ force: true });
 }
 
 // ==================== 移动端图谱 Tab ====================
@@ -1187,14 +1341,7 @@ function _switchMobileGraphSubView(view) {
 }
 
 function _refreshMobileGraphTab() {
-  if (currentMobileGraphView === "graph") {
-    _refreshGraph();
-    _buildMobileLegend();
-  } else if (currentMobileGraphView === "cognition") {
-    _refreshMobileCognitionFull();
-  } else if (currentMobileGraphView === "summary") {
-    _refreshMobileSummaryFull();
-  }
+  _refreshGraph({ force: true });
 }
 
 function _buildMobileLegend() {
@@ -2990,20 +3137,8 @@ function _hostUserPovAliasHintsForGraph() {
   return getHostUserAliasHints();
 }
 
-function _refreshGraph() {
-  const graph = _getGraph?.();
-  if (!graph) return;
-  const hints = { userPovAliases: _hostUserPovAliasHintsForGraph() };
-  graphRenderer?.loadGraph(graph, hints);
-  mobileGraphRenderer?.loadGraph(graph, hints);
-  if (currentGraphView === "cognition") {
-    _refreshCognitionWorkspace();
-  } else if (currentGraphView === "summary") {
-    _refreshSummaryWorkspace();
-  }
-  if (currentTabId === "graph") {
-    _refreshMobileGraphTab();
-  }
+function _refreshGraph(options = {}) {
+  return _refreshVisibleGraphWorkspace({ force: options.force !== false });
 }
 
 function _buildLegend() {
@@ -9591,6 +9726,7 @@ function _setText(id, text) {
 
 function _getGraphPersistenceSnapshot() {
   return _getGraphPersistenceState?.() || {
+    revision: 0,
     loadState: "no-chat",
     reason: "",
     writesBlocked: true,
