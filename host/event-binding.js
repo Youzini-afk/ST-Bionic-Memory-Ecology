@@ -24,6 +24,15 @@ function toSafeFloor(value, fallback = null) {
   return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
 }
 
+function isTavernHelperPromptViewerSyntheticGeneration(runtime) {
+  if (!runtime.isTavernHelperPromptViewerRefreshActive?.()) {
+    return false;
+  }
+
+  const pendingSendIntent = runtime.getPendingRecallSendIntent?.();
+  return !runtime.isFreshRecallInputRecord?.(pendingSendIntent);
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const makeFirst = runtime.getEventMakeFirst();
   if (typeof makeFirst === "function") {
@@ -251,7 +260,33 @@ export function onMessageSentController(runtime, messageId) {
   }
 
   if (!message?.is_user) return;
-  if (runtime.isTrivialUserInput?.(message.mes || "")?.trivial) {
+  const trivialInputResult = runtime.isTrivialUserInput?.(message.mes || "") || {
+    trivial: false,
+    reason: "",
+    normalizedText: "",
+  };
+  const tokenEstimate =
+    typeof runtime.estimateTokens === "function"
+      ? Number(runtime.estimateTokens(message.mes || ""))
+      : Number.NaN;
+  const isZeroTokenInput =
+    Number.isFinite(tokenEstimate) && tokenEstimate <= 0;
+
+  if (trivialInputResult.trivial || isZeroTokenInput) {
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: trivialInputResult.trivial
+        ? trivialInputResult.reason
+        : "zero-token",
+      chatId: context?.chatId || "",
+      chatLength: Array.isArray(chat) ? chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.info?.(
+      `[ST-BME] trivial-input skip: reason=${
+        trivialInputResult.trivial ? trivialInputResult.reason : "zero-token"
+      } len=${String(trivialInputResult.normalizedText || message.mes || "").length} hook=MESSAGE_SENT`,
+    );
     runtime.refreshPersistedRecallMessageUi?.();
     return;
   }
@@ -306,6 +341,21 @@ export function onGenerationStartedController(
 
   const generationType = String(type || "normal").trim() || "normal";
   if (generationType !== "normal") return null;
+
+  if (isTavernHelperPromptViewerSyntheticGeneration(runtime)) {
+    const context = runtime.getContext?.() || {};
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: "tavern-helper-prompt-viewer",
+      chatId: context?.chatId || "",
+      chatLength: Array.isArray(context?.chat) ? context.chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.debug?.(
+      "[ST-BME] skip: tavern-helper-prompt-viewer hook=GENERATION_STARTED",
+    );
+    return null;
+  }
 
   const pendingSendIntent = runtime.getPendingRecallSendIntent?.();
   const pendingIntentText = runtime.isFreshRecallInputRecord?.(
@@ -419,6 +469,8 @@ export async function onGenerationAfterCommandsController(
     return;
   }
 
+  const generationType = String(type || "normal").trim() || "normal";
+
   if (runtime.isMvuExtraAnalysisGuardActive?.()) {
     console.debug?.(
       "[ST-BME] skip: mvu-extra-analysis hook=GENERATION_AFTER_COMMANDS",
@@ -426,7 +478,24 @@ export async function onGenerationAfterCommandsController(
     return;
   }
 
-  const generationType = String(type || "normal").trim() || "normal";
+  if (
+    generationType === "normal" &&
+    isTavernHelperPromptViewerSyntheticGeneration(runtime)
+  ) {
+    const context = runtime.getContext?.() || {};
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: "tavern-helper-prompt-viewer",
+      chatId: runtime.getCurrentChatId?.() || context?.chatId || "",
+      chatLength: Array.isArray(context?.chat) ? context.chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.debug?.(
+      "[ST-BME] skip: tavern-helper-prompt-viewer hook=GENERATION_AFTER_COMMANDS",
+    );
+    return;
+  }
+
   const frozenInputSnapshot =
     generationType === "normal"
       ? runtime.consumeHostGenerationInputSnapshot?.({ preserve: true }) ||
@@ -566,6 +635,24 @@ export async function onBeforeCombinePromptsController(
     return {
       skipped: true,
       reason: "mvu-extra-analysis",
+    };
+  }
+
+  if (isTavernHelperPromptViewerSyntheticGeneration(runtime)) {
+    const context = runtime.getContext?.() || {};
+    runtime.markCurrentGenerationTrivialSkip?.({
+      reason: "tavern-helper-prompt-viewer",
+      chatId: runtime.getCurrentChatId?.() || context?.chatId || "",
+      chatLength: Array.isArray(context?.chat) ? context.chat.length : 0,
+    });
+    runtime.clearPendingRecallSendIntent?.();
+    runtime.clearPendingHostGenerationInputSnapshot?.();
+    console.debug?.(
+      "[ST-BME] skip: tavern-helper-prompt-viewer hook=GENERATE_BEFORE_COMBINE_PROMPTS",
+    );
+    return {
+      skipped: true,
+      reason: "tavern-helper-prompt-viewer",
     };
   }
 
