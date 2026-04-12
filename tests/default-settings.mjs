@@ -6,6 +6,7 @@ import {
 } from "../runtime/settings-defaults.js";
 
 assert.equal(defaultSettings.extractContextTurns, 2);
+assert.equal(defaultSettings.extractActionMode, "pending");
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
 assert.equal(defaultSettings.recallTopK, 20);
 assert.equal(defaultSettings.recallMaxNodes, 8);

@@ -78,6 +78,485 @@ function createGraphHelpers(graph) {
   };
 }
 
+function getPromptNodeLabel(node = {}, { maxLength = 32 } = {}) {
+  const raw = String(
+    node?.fields?.title ||
+      node?.fields?.name ||
+      node?.fields?.summary ||
+      node?.fields?.insight ||
+      node?.fields?.belief ||
+      node?.id ||
+      "—",
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) return "—";
+  if (!Number.isFinite(maxLength) || maxLength < 2 || raw.length <= maxLength) {
+    return raw;
+  }
+  return `${raw.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
+function createPromptNodeReferenceMap(entries = [], { prefix = "N", buildMeta = null } = {}) {
+  const keyToNodeId = {};
+  const keyToMeta = {};
+  const nodeIdToKey = {};
+  const references = [];
+  for (const [index, entry] of (Array.isArray(entries) ? entries : []).entries()) {
+    const node = entry?.node || entry || {};
+    const nodeId = String(entry?.nodeId || node?.id || "").trim();
+    if (!nodeId || nodeIdToKey[nodeId]) continue;
+    const key = `${String(prefix || "N").trim() || "N"}${references.length + 1}`;
+    keyToNodeId[key] = nodeId;
+    nodeIdToKey[nodeId] = key;
+    keyToMeta[key] = {
+      nodeId,
+      type: String(node?.type || ""),
+      label: getPromptNodeLabel(node),
+      ...((typeof buildMeta === "function"
+        ? buildMeta({ entry, node, nodeId, key, index, label: getPromptNodeLabel(node) })
+        : {}) || {}),
+    };
+    references.push({ key, nodeId, node, meta: keyToMeta[key] });
+  }
+  return {
+    keyToNodeId,
+    keyToMeta,
+    nodeIdToKey,
+    references,
+  };
+}
+
+function normalizeQueryText(value, maxLength = 400) {
+  const normalized = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  return normalized.slice(0, Math.max(1, maxLength));
+}
+
+function splitIntentSegments(text, { maxSegments = 4, minLength = 1 } = {}) {
+  const raw = String(text || "").trim();
+  if (!raw) return [];
+  const segments = raw
+    .split(/[，,。.；;！!？?\n]+|(?:和|顺便|另外|还有|对了|然后|而且|并且|同时)/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= minLength);
+  return uniqueStrings(segments).slice(0, Math.max(1, maxSegments));
+}
+
+function uniqueStrings(values = [], maxLength = 400) {
+  const result = [];
+  const seen = new Set();
+  for (const value of values) {
+    const text = normalizeQueryText(value, maxLength);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    result.push(text);
+  }
+  return result;
+}
+
+function mergeVectorResults(groups, limit) {
+  const merged = new Map();
+  let rawHitCount = 0;
+  for (const group of groups) {
+    for (const item of group) {
+      rawHitCount += 1;
+      const existing = merged.get(item.nodeId);
+      if (!existing || item.score > existing.score) {
+        merged.set(item.nodeId, item);
+      }
+    }
+  }
+  return {
+    rawHitCount,
+    results: [...merged.values()].slice(0, limit),
+  };
+}
+
+function parseContextLine(line = "") {
+  const raw = String(line ?? "").trim();
+  if (!raw) return null;
+  const bracketMatch = raw.match(/^\[(user|assistant)\]\s*:\s*([\s\S]*)$/i);
+  if (bracketMatch) {
+    const role = String(bracketMatch[1] || "").toLowerCase();
+    const text = normalizeQueryText(bracketMatch[2] || "");
+    return text ? { role, text } : null;
+  }
+  const plainMatch = raw.match(/^(user|assistant|用户|助手|ai)\s*[：:]\s*([\s\S]*)$/i);
+  if (!plainMatch) return null;
+  const roleToken = String(plainMatch[1] || "").toLowerCase();
+  const role =
+    roleToken === "assistant" || roleToken === "助手" || roleToken === "ai"
+      ? "assistant"
+      : "user";
+  const text = normalizeQueryText(plainMatch[2] || "");
+  return text ? { role, text } : null;
+}
+
+function buildContextQueryBlend(
+  userMessage,
+  recentMessages = [],
+  {
+    enabled = true,
+    assistantWeight = 0.2,
+    previousUserWeight = 0.1,
+    maxTextLength = 400,
+  } = {},
+) {
+  const currentText = normalizeQueryText(userMessage, maxTextLength);
+  let assistantText = "";
+  let previousUserText = "";
+  const parsedMessages = Array.isArray(recentMessages)
+    ? recentMessages.map((line) => parseContextLine(line)).filter(Boolean)
+    : [];
+
+  for (let index = parsedMessages.length - 1; index >= 0; index -= 1) {
+    const item = parsedMessages[index];
+    if (!assistantText && item.role === "assistant") {
+      assistantText = normalizeQueryText(item.text, maxTextLength);
+    }
+    if (
+      !previousUserText &&
+      item.role === "user" &&
+      normalizeQueryText(item.text, maxTextLength).toLowerCase() !==
+        currentText.toLowerCase()
+    ) {
+      previousUserText = normalizeQueryText(item.text, maxTextLength);
+    }
+    if (assistantText && previousUserText) break;
+  }
+
+  const currentWeight = Math.max(
+    0,
+    1 - Number(assistantWeight || 0) - Number(previousUserWeight || 0),
+  );
+  const rawParts = [
+    {
+      kind: "currentUser",
+      label: "当前用户消息",
+      text: currentText,
+      weight: enabled ? currentWeight : 1,
+    },
+  ];
+  if (enabled && assistantText) {
+    rawParts.push({
+      kind: "assistantContext",
+      label: "最近 assistant 回复",
+      text: assistantText,
+      weight: Number(assistantWeight || 0),
+    });
+  }
+  if (enabled && previousUserText) {
+    rawParts.push({
+      kind: "previousUser",
+      label: "上一条 user 消息",
+      text: previousUserText,
+      weight: Number(previousUserWeight || 0),
+    });
+  }
+
+  const dedupedParts = [];
+  const seen = new Set();
+  for (const part of rawParts) {
+    const text = normalizeQueryText(part.text, maxTextLength);
+    const key = text.toLowerCase();
+    if (!text || seen.has(key)) continue;
+    seen.add(key);
+    dedupedParts.push({ ...part, text });
+  }
+
+  const totalWeight = dedupedParts.reduce(
+    (sum, part) => sum + Math.max(0, Number(part.weight) || 0),
+    0,
+  );
+  const parts = dedupedParts.map((part) => ({
+    ...part,
+    weight:
+      totalWeight > 0
+        ? Math.round((Math.max(0, Number(part.weight) || 0) / totalWeight) * 1000) /
+          1000
+        : Math.round((1 / Math.max(1, dedupedParts.length)) * 1000) / 1000,
+  }));
+
+  return {
+    active: enabled && parts.length > 1,
+    parts,
+    currentText: currentText || parts[0]?.text || "",
+    assistantText,
+    previousUserText,
+    combinedText:
+      parts.length <= 1
+        ? parts[0]?.text || ""
+        : parts.map((part) => `${part.label}:\n${part.text}`).join("\n\n"),
+  };
+}
+
+function buildVectorQueryPlan(
+  blendPlan,
+  { enableMultiIntent = true, maxSegments = 4 } = {},
+) {
+  const plan = [];
+  let currentSegments = [];
+  for (const part of blendPlan?.parts || []) {
+    let queries = [part.text];
+    if (part.kind === "currentUser" && enableMultiIntent) {
+      currentSegments = splitIntentSegments(part.text, { maxSegments });
+      queries = uniqueStrings([
+        part.text,
+        ...currentSegments.filter((item) => item !== part.text),
+      ]);
+    } else {
+      queries = uniqueStrings([part.text]);
+    }
+    plan.push({
+      kind: part.kind,
+      label: part.label,
+      weight: part.weight,
+      queries,
+    });
+  }
+  return {
+    plan,
+    currentSegments,
+  };
+}
+
+function buildLexicalQuerySources(
+  userMessage,
+  { enableMultiIntent = true, maxSegments = 4 } = {},
+) {
+  const currentText = normalizeQueryText(userMessage, 400);
+  const segments = enableMultiIntent
+    ? splitIntentSegments(currentText, { maxSegments })
+    : [];
+  return {
+    sources: uniqueStrings([currentText, ...segments]),
+    segments,
+  };
+}
+
+function computeLexicalScoreForShared(node, querySources = []) {
+  const haystack = String(
+    node?.fields?.name || node?.fields?.title || node?.fields?.summary || "",
+  ).toLowerCase();
+  if (!haystack) return 0;
+  for (const sourceText of querySources) {
+    const normalizedSource = String(sourceText || "").toLowerCase();
+    if (normalizedSource && haystack.includes(normalizedSource.split(/\s+/)[0])) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+function extractEntityAnchors(userMessage, activeNodes = []) {
+  const anchors = [];
+  const seen = new Set();
+  for (const node of activeNodes) {
+    const candidates = [node?.fields?.name, node?.fields?.title]
+      .filter((value) => typeof value === "string")
+      .map((value) => value.trim())
+      .filter((value) => value.length >= 2);
+    for (const candidate of candidates) {
+      if (!String(userMessage || "").includes(candidate)) continue;
+      const key = `${node.id}:${candidate}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      anchors.push({ nodeId: node.id, entity: candidate });
+      break;
+    }
+  }
+  return anchors;
+}
+
+async function rankNodesForTaskContext({
+  graph,
+  userMessage,
+  recentMessages = [],
+  embeddingConfig,
+  options = {},
+} = {}) {
+  const activeNodes = Array.isArray(options.activeNodes)
+    ? options.activeNodes.filter((node) => node && !node.archived)
+    : (graph?.nodes || []).filter((node) => node && !node.archived);
+  const topK = Math.max(1, Math.floor(Number(options.topK) || 20));
+  const diffusionTopK = Math.max(1, Math.floor(Number(options.diffusionTopK) || 100));
+  const enableVectorPrefilter = options.enableVectorPrefilter ?? true;
+  const enableGraphDiffusion = options.enableGraphDiffusion ?? true;
+  const enableContextQueryBlend = options.enableContextQueryBlend ?? true;
+  const enableMultiIntent = options.enableMultiIntent ?? true;
+  const multiIntentMaxSegments = Math.max(
+    1,
+    Math.floor(Number(options.multiIntentMaxSegments) || 4),
+  );
+  const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
+    enabled: enableContextQueryBlend,
+    assistantWeight: Number(options.contextAssistantWeight ?? 0.2),
+    previousUserWeight: Number(options.contextPreviousUserWeight ?? 0.1),
+    maxTextLength: Number(options.maxTextLength || 400),
+  });
+  const queryPlan = buildVectorQueryPlan(contextQueryBlend, {
+    enableMultiIntent,
+    maxSegments: multiIntentMaxSegments,
+  });
+  const lexicalQuery = buildLexicalQuerySources(
+    contextQueryBlend.currentText || userMessage,
+    {
+      enableMultiIntent,
+      maxSegments: multiIntentMaxSegments,
+    },
+  );
+  const diagnostics = {
+    queryBlendActive: contextQueryBlend.active,
+    queryBlendParts: (contextQueryBlend.parts || []).map((part) => ({
+      kind: part.kind,
+      label: part.label,
+      weight: part.weight,
+      text: part.text,
+      length: part.text.length,
+    })),
+    queryBlendWeights: Object.fromEntries(
+      (contextQueryBlend.parts || []).map((part) => [part.kind, part.weight]),
+    ),
+    segmentsUsed: [...(queryPlan.currentSegments || [])],
+    vectorValidation: { valid: true },
+    vectorHits: 0,
+    vectorMergedHits: 0,
+    seedCount: 0,
+    diffusionHits: 0,
+    temporalSyntheticEdgeCount: 0,
+    teleportAlpha: Number(options.teleportAlpha ?? 0.15) || 0.15,
+    lexicalBoostedNodes: 0,
+    lexicalTopHits: [],
+    skipReasons: [],
+    timings: { vector: 0, diffusion: 0 },
+  };
+
+  let vectorResults = [];
+  if (enableVectorPrefilter) {
+    const groups = [];
+    for (const part of queryPlan.plan) {
+      for (const queryText of part.queries) {
+        state.vectorCalls.push({ topK, message: queryText });
+        const results = [
+          { nodeId: "rule-1", score: 0.9 },
+          { nodeId: "rule-2", score: 0.8 },
+          { nodeId: "rule-3", score: 0.7 },
+        ].map((item) => ({
+          ...item,
+          score: item.score * Math.max(0, Number(part.weight) || 0),
+        }));
+        groups.push(results);
+      }
+    }
+    const merged = mergeVectorResults(groups, Math.max(topK * 2, 24));
+    diagnostics.vectorHits = merged.rawHitCount;
+    diagnostics.vectorMergedHits = merged.results.length;
+    vectorResults = merged.results;
+  }
+
+  const exactEntityAnchors = extractEntityAnchors(
+    contextQueryBlend.currentText || userMessage,
+    activeNodes,
+  );
+  let diffusionResults = [];
+  if (enableGraphDiffusion) {
+    const seedMap = new Map();
+    for (const item of vectorResults) {
+      seedMap.set(item.nodeId, Math.max(seedMap.get(item.nodeId) || 0, item.score));
+    }
+    for (const item of exactEntityAnchors) {
+      seedMap.set(item.nodeId, Math.max(seedMap.get(item.nodeId) || 0, 2.0));
+    }
+    const uniqueSeeds = [...seedMap.entries()].map(([id, energy]) => ({ id, energy }));
+    diagnostics.seedCount = uniqueSeeds.length;
+    if (uniqueSeeds.length > 0) {
+      state.diffusionCalls.push({
+        seeds: uniqueSeeds,
+        options: {
+          maxSteps: 2,
+          decayFactor: 0.6,
+          topK: diffusionTopK,
+          teleportAlpha: diagnostics.teleportAlpha,
+        },
+      });
+      diffusionResults = [
+        { nodeId: "rule-2", energy: 1.2 },
+        { nodeId: "rule-3", energy: 0.9 },
+      ];
+    }
+  }
+  diagnostics.diffusionHits = diffusionResults.length;
+
+  const scoreMap = new Map();
+  for (const item of vectorResults) {
+    scoreMap.set(item.nodeId, {
+      graphScore: scoreMap.get(item.nodeId)?.graphScore || 0,
+      vectorScore: item.score,
+    });
+  }
+  for (const item of diffusionResults) {
+    scoreMap.set(item.nodeId, {
+      graphScore: item.energy,
+      vectorScore: scoreMap.get(item.nodeId)?.vectorScore || 0,
+    });
+  }
+  if (scoreMap.size === 0) {
+    for (const node of activeNodes) {
+      scoreMap.set(node.id, { graphScore: 0, vectorScore: 0 });
+    }
+  }
+  const scoredNodes = [...scoreMap.entries()].map(([nodeId, scores]) => {
+    const node = activeNodes.find((item) => item.id === nodeId) || null;
+    const lexicalScore = computeLexicalScoreForShared(node, lexicalQuery.sources);
+    return {
+      nodeId,
+      node,
+      graphScore: scores.graphScore,
+      vectorScore: scores.vectorScore,
+      lexicalScore,
+      finalScore:
+        Number(scores.graphScore || 0) +
+        Number(scores.vectorScore || 0) +
+        Number(lexicalScore || 0) +
+        Number(node?.importance || 0),
+      weightedScore:
+        Number(scores.graphScore || 0) +
+        Number(scores.vectorScore || 0) +
+        Number(lexicalScore || 0) +
+        Number(node?.importance || 0),
+    };
+  });
+  diagnostics.lexicalBoostedNodes = scoredNodes.filter(
+    (item) => (Number(item.lexicalScore) || 0) > 0,
+  ).length;
+  diagnostics.lexicalTopHits = scoredNodes
+    .filter((item) => (Number(item.lexicalScore) || 0) > 0)
+    .slice(0, 5)
+    .map((item) => ({
+      nodeId: item.nodeId,
+      label: item.node?.fields?.name || item.node?.fields?.title || item.nodeId,
+      lexicalScore: item.lexicalScore,
+      finalScore: item.finalScore,
+    }));
+
+  return {
+    activeNodes,
+    contextQueryBlend,
+    queryPlan,
+    lexicalQuery,
+    vectorResults,
+    exactEntityAnchors,
+    diffusionResults,
+    scoredNodes,
+    diagnostics,
+  };
+}
+
 const schema = [{ id: "rule", label: "规则", alwaysInject: false }];
 
 const state = {
@@ -93,6 +572,9 @@ const graph = createGraph();
 const helpers = createGraphHelpers(graph);
 const retrieve = await loadRetrieve({
   ...helpers,
+  createPromptNodeReferenceMap,
+  getPromptNodeLabel,
+  rankNodesForTaskContext,
   STORY_TEMPORAL_BUCKETS: {
     CURRENT: "current",
     ADJACENT_PAST: "adjacentPast",
@@ -290,6 +772,10 @@ const retrieve = await loadRetrieve({
   describeScopeBucket(bucket = "") {
     return String(bucket || "");
   },
+  EXTRACTION_CONTEXT_REVIEW_HEADER:
+    "--- 以下是上下文回顾（已提取过），仅供理解剧情 ---",
+  RECALL_TARGET_CONTENT_HEADER:
+    "--- 以下是本次需要召回记忆的新对话内容 ---",
   buildTaskPrompt() {
     return { systemPrompt: "" };
   },

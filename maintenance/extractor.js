@@ -16,7 +16,7 @@ import {
   updateNode,
 } from "../graph/graph.js";
 import { callLLMForJSON } from "../llm/llm.js";
-import { ensureEventTitle, getNodeDisplayName } from "../graph/node-labels.js";
+import { ensureEventTitle } from "../graph/node-labels.js";
 import {
   normalizeMemoryScope,
   isObjectiveScope,
@@ -45,6 +45,7 @@ import { RELATION_TYPES } from "../graph/schema.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt, getSTContextSnapshot } from "../host/st-context.js";
 import { buildExtractionInputContext } from "./extraction-context.js";
+import { buildTaskGraphStats } from "./task-graph-stats.js";
 import {
   aliasSetMatchesValue,
   buildUserPovAliasNormalizedSet,
@@ -146,6 +147,46 @@ function resolveExtractPromptStructuredMode(settings) {
   const mode = String(settings?.extractPromptStructuredMode || "both").trim().toLowerCase();
   if (["transcript", "structured", "both"].includes(mode)) return mode;
   return "both";
+}
+
+function formatExtractRankingMessage(message = {}) {
+  const role = String(message?.role || "assistant").trim().toLowerCase() === "user"
+    ? "user"
+    : "assistant";
+  const content = String(message?.content || "").trim();
+  if (!content) return "";
+  return `[${role}]: ${content}`;
+}
+
+function buildExtractRankingQueryText(messages = []) {
+  const normalizedMessages = Array.isArray(messages) ? messages : [];
+  const targetLines = normalizedMessages
+    .filter((message) => message?.isContextOnly !== true)
+    .map((message) => formatExtractRankingMessage(message))
+    .filter(Boolean);
+  if (targetLines.length > 0) {
+    return targetLines.join("\n");
+  }
+  return normalizedMessages
+    .map((message) => formatExtractRankingMessage(message))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function buildReflectionRankingQueryText({
+  eventSummary = "",
+  characterSummary = "",
+  threadSummary = "",
+  contradictionSummary = "",
+} = {}) {
+  return [
+    eventSummary ? `最近事件:\n${eventSummary}` : "",
+    characterSummary ? `近期角色状态:\n${characterSummary}` : "",
+    threadSummary ? `当前主线:\n${threadSummary}` : "",
+    contradictionSummary ? `已知矛盾:\n${contradictionSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function isAbortError(error) {
@@ -873,6 +914,8 @@ export async function extractMemories({
         content: message?.content,
         speaker: message?.speaker,
         name: message?.name,
+        hideSpeakerLabel: message?.hideSpeakerLabel === true,
+        isContextOnly: message?.isContextOnly === true,
       }))
     : [];
 
@@ -898,8 +941,26 @@ export async function extractMemories({
     ? dialogueText
     : structuredMessages;
 
-  // 构建当前图概览（让 LLM 知道已有哪些节点，避免重复）
-  const graphOverview = buildGraphOverview(graph, schema);
+  const extractGraphRankingQuery = buildExtractRankingQueryText(structuredMessages);
+  const extractGraphStats = await buildTaskGraphStats({
+    graph,
+    schema,
+    userMessage: extractGraphRankingQuery,
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与当前提取片段最相关的既有节点",
+  });
+  const extractGraphRanking = extractGraphStats.ranking;
+  const extractGraphRelevantNodes = extractGraphStats.relevantReferenceMap;
+  const graphOverview = extractGraphStats.graphStats;
 
   // 构建 Schema 描述
   const schemaDescription = buildSchemaDescription(schema);
@@ -922,6 +983,14 @@ export async function extractMemories({
       `storyTimeContext=${storyTimeContext ? "present" : "none"}, ` +
       `worldbookMode=${String(settings?.extractWorldbookMode || "active")}`,
   );
+  if (extractGraphRanking) {
+    debugLog(
+      `[ST-BME][extract-graph] relevantNodes=${extractGraphRelevantNodes.references.length}, ` +
+        `vectorMergedHits=${Number(extractGraphRanking?.diagnostics?.vectorMergedHits || 0)}, ` +
+        `diffusionHits=${Number(extractGraphRanking?.diagnostics?.diffusionHits || 0)}, ` +
+        `lexicalBoostedNodes=${Number(extractGraphRanking?.diagnostics?.lexicalBoostedNodes || 0)}`,
+    );
+  }
 
   const extractWorldbookMode = String(settings?.extractWorldbookMode || "active").trim().toLowerCase();
   const promptBuild = await buildTaskPrompt(settings, "extract", {
@@ -957,15 +1026,39 @@ export async function extractMemories({
   // 用户提示词 — Phase 3 分层信息结构
   const userPromptSections = [];
 
-  // Layer 1: 当前对话切片
-  if (dialogueText) {
-    userPromptSections.push("## 当前对话内容（需提取记忆）", dialogueText, "");
-  } else if (structuredMode === "structured" && structuredMessages.length > 0) {
-    userPromptSections.push(
-      "## 当前对话内容（结构化消息，需提取记忆）",
-      "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
-      "",
-    );
+  // Layer 1: 当前对话切片（区分上下文回顾 vs 提取目标）
+  {
+    const hasContextMessages = structuredMessages.some((m) => m?.isContextOnly === true);
+    const hasTargetMessages = structuredMessages.some((m) => m?.isContextOnly !== true);
+    if (dialogueText) {
+      if (hasContextMessages && hasTargetMessages) {
+        userPromptSections.push(
+          "## 对话内容",
+          "以下对话包含两部分：已提取过的上下文回顾（仅供理解前情）和本次需要提取记忆的新内容。" +
+            "请**只从新内容中提取记忆**，不要重复提取上下文回顾中已有的信息。",
+          dialogueText,
+          "",
+        );
+      } else {
+        userPromptSections.push("## 当前对话内容（需提取记忆）", dialogueText, "");
+      }
+    } else if (structuredMode === "structured" && structuredMessages.length > 0) {
+      if (hasContextMessages && hasTargetMessages) {
+        userPromptSections.push(
+          "## 对话内容（结构化消息）",
+          "以下结构化消息包含两部分：标记为 isContextOnly 的是已提取过的上下文回顾（仅供理解前情），" +
+            "其余是本次需要提取记忆的新内容。请**只从 isContextOnly 为 false 的消息中提取记忆**。" +
+            "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
+          "",
+        );
+      } else {
+        userPromptSections.push(
+          "## 当前对话内容（结构化消息，需提取记忆）",
+          "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
+          "",
+        );
+      }
+    }
   }
 
   // Layer 2: 当前图谱状态
@@ -1725,30 +1818,6 @@ async function generateNodeEmbeddings(graph, embeddingConfig, signal) {
 }
 
 /**
- * 构建图谱概览文本（给 LLM 看）
- */
-function buildGraphOverview(graph, schema) {
-  const activeNodes = graph.nodes
-    .filter((n) => !n.archived)
-    .sort((a, b) => (a.seq || 0) - (b.seq || 0));
-  if (activeNodes.length === 0) return "";
-
-  const lines = [];
-  for (const typeDef of schema) {
-    const nodesOfType = activeNodes.filter((n) => n.type === typeDef.id);
-    if (nodesOfType.length === 0) continue;
-
-    lines.push(`### ${typeDef.label} (${nodesOfType.length} 个节点)`);
-    for (const node of nodesOfType.slice(-10)) {
-      // 只展示最近 10 个
-      lines.push(`  - [${node.id}] ${getNodeDisplayName(node)}`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-/**
  * 构建 Schema 描述文本
  */
 function buildSchemaDescription(schema) {
@@ -2015,6 +2084,8 @@ export async function generateSynopsis({
 export async function generateReflection({
   graph,
   currentSeq,
+  schema = [],
+  embeddingConfig,
   customPrompt,
   signal,
   settings = {},
@@ -2064,6 +2135,27 @@ export async function generateReflection({
   const contradictionSummary = contradictEdges
     .map((e) => `${e.fromId} -> ${e.toId} (${e.relation})`)
     .join("\n");
+  const reflectionGraphStats = await buildTaskGraphStats({
+    graph,
+    schema,
+    userMessage: buildReflectionRankingQueryText({
+      eventSummary,
+      characterSummary,
+      threadSummary,
+      contradictionSummary,
+    }),
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与当前反思最相关的既有节点",
+  });
 
   const reflectionPromptBuild = await buildTaskPrompt(settings, "reflection", {
     taskName: "reflection",
@@ -2071,7 +2163,7 @@ export async function generateReflection({
     characterSummary: characterSummary || "(无)",
     threadSummary: threadSummary || "(无)",
     contradictionSummary: contradictionSummary || "(无)",
-    graphStats: `event=${recentEvents.length}, character=${recentCharacters.length}, thread=${recentThreads.length}`,
+    graphStats: reflectionGraphStats.graphStats,
     ...getSTContextForPrompt(),
   });
   const reflectionRegexInput = { entries: [] };

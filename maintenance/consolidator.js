@@ -22,6 +22,7 @@ import {
 } from "../prompting/prompt-builder.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
+import { buildTaskGraphStats } from "./task-graph-stats.js";
 import {
   buildNodeVectorText,
   findSimilarNodesByText,
@@ -130,6 +131,27 @@ function canMergeTemporalScopedMemories(leftNode, rightNode) {
     return false;
   }
   return isStoryTimeCompatible(leftNode, rightNode).compatible;
+}
+
+function buildConsolidationRankingQueryText(newEntries = []) {
+  return (Array.isArray(newEntries) ? newEntries : [])
+    .map((entry, index) => {
+      const node = entry?.node;
+      const fieldsText = Object.entries(node?.fields || {})
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(", ");
+      const storyTimeLabel = describeNodeStoryTime(node);
+      return [
+        `新记忆#${index + 1}`,
+        `类型=${String(node?.type || "").trim()}`,
+        storyTimeLabel ? `剧情时间=${storyTimeLabel}` : "",
+        fieldsText,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 export async function analyzeAutoConsolidationGate({
@@ -297,6 +319,7 @@ export async function consolidateMemories({
   graph,
   newNodeIds,
   embeddingConfig,
+  schema = [],
   options = {},
   customPrompt,
   signal,
@@ -491,13 +514,33 @@ export async function consolidateMemories({
   }
 
   const userPrompt = userPromptSections.join("\n\n");
+  const newNodeIdSet = new Set(newEntries.map((entry) => String(entry?.id || "").trim()));
+  const consolidationGraphStats = await buildTaskGraphStats({
+    graph,
+    schema,
+    userMessage: buildConsolidationRankingQueryText(newEntries),
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    activeNodes: activeNodes.filter(
+      (node) => !newNodeIdSet.has(String(node?.id || "").trim()),
+    ),
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与本轮整合最相关的既有节点",
+  });
 
   let decision;
   const consolidationPromptBuild = await buildTaskPrompt(settings, "consolidation", {
     taskName: "consolidation",
     candidateNodes: userPrompt,
     candidateText: userPrompt,
-    graphStats: `new_entries=${newEntries.length}, threshold=${conflictThreshold}`,
+    graphStats: consolidationGraphStats.graphStats,
     ...getSTContextForPrompt(),
   });
   const consolidationRegexInput = { entries: [] };

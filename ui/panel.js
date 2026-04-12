@@ -4077,7 +4077,11 @@ function _bindActions() {
       const btn = document.getElementById("bme-act-extract");
       if (btn?.disabled) return;
       const mode =
-        String(document.getElementById("bme-extract-mode")?.value || "pending")
+        String(
+          document.getElementById("bme-extract-mode")?.value ||
+            (_getSettings?.() || {}).extractActionMode ||
+            "pending",
+        )
           .trim()
           .toLowerCase() === "rerun"
           ? "rerun"
@@ -4575,6 +4579,10 @@ function _refreshConfigTab() {
     "bme-setting-wi-filter-keywords",
     settings.worldInfoFilterCustomKeywords || "",
   );
+  _setInputValue(
+    "bme-extract-mode",
+    settings.extractActionMode || "pending",
+  );
   const wiFilterCustomSection = panelEl?.querySelector(
     "#bme-wi-filter-custom-section",
   );
@@ -4994,6 +5002,19 @@ function _bindConfigControls() {
       });
     });
     noticeDisplayModeEl.dataset.bmeBound = "true";
+  }
+  const extractModeEl = document.getElementById("bme-extract-mode");
+  if (extractModeEl && extractModeEl.dataset.bmeBound !== "true") {
+    extractModeEl.addEventListener("change", () => {
+      _patchSettings({
+        extractActionMode:
+          String(extractModeEl.value || "pending").trim().toLowerCase() ===
+          "rerun"
+            ? "rerun"
+            : "pending",
+      });
+    });
+    extractModeEl.dataset.bmeBound = "true";
   }
   const cloudStorageModeEl = document.getElementById(
     "bme-setting-cloud-storage-mode",

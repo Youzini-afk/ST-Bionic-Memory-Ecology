@@ -162,6 +162,7 @@ const {
   generateSynopsis,
 } = await import("../maintenance/extractor.js");
 const { consolidateMemories } = await import("../maintenance/consolidator.js");
+const { retrieve } = await import("../retrieval/retriever.js");
 const {
   createBatchJournalEntry,
   buildReverseJournalRecoveryPlan,
@@ -169,6 +170,10 @@ const {
   rollbackBatch,
 } = await import("../runtime/runtime-state.js");
 const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
+const {
+  EXTRACTION_CONTEXT_REVIEW_HEADER,
+  RECALL_TARGET_CONTENT_HEADER,
+} = await import("../prompting/prompt-builder.js");
 const extensionsApi = await import("../../../../extensions.js");
 const llm = await import("../llm/llm.js");
 const embedding = await import("../vector/embedding.js");
@@ -1997,14 +2002,34 @@ async function testCompressTypeAcceptsTopLevelFieldsResult() {
       keepRecentLeaves: 0,
     },
   };
+  const compressionSchema = [
+    typeDef,
+    {
+      id: "thread",
+      label: "主线",
+      columns: [{ name: "title" }, { name: "summary" }, { name: "status" }],
+    },
+  ];
   const first = makeEvent(1, "事件甲");
   const second = makeEvent(2, "事件乙");
+  const relatedThread = createNode({
+    type: "thread",
+    seq: 3,
+    fields: {
+      title: "事件甲余波",
+      summary: "Alice 被卷入的后续波动。",
+      status: "active",
+    },
+  });
   addNode(graph, first);
   addNode(graph, second);
+  addNode(graph, relatedThread);
 
+  const captured = [];
   const restoreOverrides = pushTestOverrides({
     llm: {
-      async callLLMForJSON() {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
         return {
           title: "压缩事件",
           summary: "顶层返回的合并摘要",
@@ -2020,8 +2045,12 @@ async function testCompressTypeAcceptsTopLevelFieldsResult() {
       graph,
       typeDef,
       embeddingConfig: null,
+      schema: compressionSchema,
       force: true,
-      settings: {},
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
     });
     assert.equal(result.created, 1);
     const compressed = graph.nodes.find(
@@ -2029,6 +2058,21 @@ async function testCompressTypeAcceptsTopLevelFieldsResult() {
     );
     assert.equal(compressed?.fields?.summary, "顶层返回的合并摘要");
     assert.equal(compressed?.fields?.title, "压缩事件");
+    assert.equal(captured.length, 1);
+    const graphStatsBlock = (Array.isArray(captured[0].promptMessages)
+      ? captured[0].promptMessages
+      : []
+    ).find((message) => message.sourceKey === "graphStats");
+    assert.ok(graphStatsBlock, "compress graphStats block should exist");
+    const graphStatsContent = String(graphStatsBlock.content || "");
+    assert.match(graphStatsContent, /### 图谱节点统计/);
+    assert.match(graphStatsContent, /事件: 2/);
+    assert.match(graphStatsContent, /主线: 1/);
+    assert.match(graphStatsContent, /\[G1\|主线\] 事件甲余波/);
+    assert.doesNotMatch(
+      graphStatsContent,
+      new RegExp(relatedThread.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
   } finally {
     restoreOverrides();
   }
@@ -2060,17 +2104,22 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
   addNode(graph, target);
   addNode(graph, incoming);
 
+  const captured = [];
   const restoreOverrides = pushTestOverrides({
     embedding: {
       async embedBatch() {
         return [[0.2, 0.3]];
+      },
+      async embedText() {
+        return [0.2, 0.3];
       },
       searchSimilar() {
         return [{ nodeId: target.id, score: 0.99 }];
       },
     },
     llm: {
-      async callLLMForJSON() {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
         return {
           results: [
             {
@@ -2095,13 +2144,31 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
         apiUrl: "https://example.com/v1",
         model: "text-embedding-3-small",
       },
-      settings: {},
+      schema,
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
     });
 
     assert.equal(stats.merged, 0);
     assert.equal(stats.kept, 1);
     assert.equal(incoming.archived, false);
     assert.deepEqual(target.embedding, [0.9, 0.1]);
+    assert.equal(captured.length, 1);
+    const graphStatsBlock = (Array.isArray(captured[0].promptMessages)
+      ? captured[0].promptMessages
+      : []
+    ).find((message) => message.sourceKey === "graphStats");
+    assert.ok(graphStatsBlock, "consolidation graphStats block should exist");
+    const graphStatsContent = String(graphStatsBlock.content || "");
+    assert.match(graphStatsContent, /### 图谱节点统计/);
+    assert.match(graphStatsContent, /事件: 2/);
+    assert.match(graphStatsContent, /\[G1\|事件\] 旧记忆/);
+    assert.doesNotMatch(
+      graphStatsContent,
+      new RegExp(target.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
   } finally {
     restoreOverrides();
   }
@@ -2259,6 +2326,9 @@ async function testConsolidatorMergeUpdatesSeqRange() {
     embedding: {
       async embedBatch() {
         return [[0.4, 0.5]];
+      },
+      async embedText() {
+        return [0.4, 0.5];
       },
       searchSimilar() {
         return [{ nodeId: target.id, score: 0.99 }];
@@ -6173,6 +6243,84 @@ async function testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt() {
   }
 }
 
+async function testRecallUsesSectionedPromptMessagesForContextAndTarget() {
+  const graph = createEmptyGraph();
+  addNode(graph, makeEvent(1, "仓库争执"));
+  addNode(graph, makeEvent(2, "走廊追问"));
+
+  const captured = [];
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
+        return {
+          selected_keys: ["R1"],
+          reason: "R1: 与当前追问直接相关",
+          active_owner_keys: [],
+          active_owner_scores: [],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await retrieve({
+      graph,
+      userMessage: "她为什么突然改口？",
+      recentMessages: [
+        "[assistant]: 她先否认自己去过仓库。",
+        "[user]: 我记得她当时很紧张。",
+        "[user]: 她为什么突然改口？",
+      ],
+      embeddingConfig: null,
+      schema,
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
+      options: {
+        topK: 4,
+        maxRecallNodes: 2,
+        enableLLMRecall: true,
+        enableVectorPrefilter: false,
+        enableGraphDiffusion: false,
+        llmCandidatePool: 2,
+        enableScopedMemory: false,
+        enablePovMemory: false,
+        enableRegionScopedObjective: false,
+        enableCognitiveMemory: false,
+        enableSpatialAdjacency: false,
+        enableStoryTimeline: false,
+        injectStoryTimeLabel: false,
+        injectUserPovMemory: false,
+        injectObjectiveGlobalMemory: false,
+        enableContextQueryBlend: true,
+      },
+    });
+
+    assert.ok(Array.isArray(result?.selectedNodeIds));
+    assert.equal(captured.length, 1);
+    const promptMessages = Array.isArray(captured[0].promptMessages)
+      ? captured[0].promptMessages
+      : [];
+    const recentMessageSections = promptMessages.filter(
+      (message) => message.sourceKey === "recentMessages",
+    );
+    assert.equal(recentMessageSections.length, 2);
+    assert.equal(recentMessageSections[0].role, "system");
+    assert.equal(recentMessageSections[1].role, "system");
+    assert.equal(recentMessageSections[0].transcriptSection, "context");
+    assert.equal(recentMessageSections[1].transcriptSection, "target");
+    assert.match(recentMessageSections[0].content, new RegExp(EXTRACTION_CONTEXT_REVIEW_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(recentMessageSections[1].content, new RegExp(RECALL_TARGET_CONTENT_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(recentMessageSections[0].content, /她先否认自己去过仓库/);
+    assert.match(recentMessageSections[0].content, /我记得她当时很紧张/);
+    assert.match(recentMessageSections[1].content, /她为什么突然改口/);
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
   const graph = createEmptyGraph();
   addNode(
@@ -6212,17 +6360,26 @@ async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
       },
     }),
   );
+  const threadNode = createNode({
+    type: "thread",
+    seq: 5,
+    fields: {
+      title: "信任危机",
+      status: "active",
+    },
+  });
   addNode(
     graph,
-    createNode({
-      type: "thread",
-      seq: 5,
-      fields: {
-        title: "信任危机",
-        status: "active",
-      },
-    }),
+    threadNode,
   );
+  const reflectionSchema = [
+    ...schema,
+    {
+      id: "thread",
+      label: "主线",
+      columns: [{ name: "title" }, { name: "status" }],
+    },
+  ];
 
   const captured = [];
   const restoreOverrides = pushTestOverrides({
@@ -6243,6 +6400,7 @@ async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
     const result = await generateReflection({
       graph,
       currentSeq: 5,
+      schema: reflectionSchema,
       settings: {
         taskProfilesVersion: 3,
         taskProfiles: createDefaultTaskProfiles(),
@@ -6254,6 +6412,21 @@ async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
     assert.equal(Array.isArray(captured[0].promptMessages), true);
     assert.ok(captured[0].promptMessages.length > 0);
     assert.equal(captured[0].systemPrompt, "");
+    const graphStatsBlock = (Array.isArray(captured[0].promptMessages)
+      ? captured[0].promptMessages
+      : []
+    ).find((message) => message.sourceKey === "graphStats");
+    assert.ok(graphStatsBlock, "reflection graphStats block should exist");
+    const graphStatsContent = String(graphStatsBlock.content || "");
+    assert.match(graphStatsContent, /### 图谱节点统计/);
+    assert.match(graphStatsContent, /事件: 2/);
+    assert.match(graphStatsContent, /角色: 1/);
+    assert.match(graphStatsContent, /主线: 1/);
+    assert.match(graphStatsContent, /\[G1\|主线\] 信任危机/);
+    assert.doesNotMatch(
+      graphStatsContent,
+      new RegExp(threadNode.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
     const reflectionNode = graph.nodes.find((node) => node.id === result);
     assert.equal(
       reflectionNode?.fields?.insight,
@@ -6646,6 +6819,7 @@ await testLlmDebugSnapshotRedactsSecretsBeforeStorage();
 await testEmbeddingUsesConfigTimeoutInsteadOfDefault();
 await testLlmOutputRegexCleansResponseBeforeJsonParse();
 await testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt();
+await testRecallUsesSectionedPromptMessagesForContextAndTarget();
 await testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt();
 await testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan();
 await testManualCompressUsesForcedCompressionAndPersistsRealMutation();
