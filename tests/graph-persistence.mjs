@@ -912,6 +912,9 @@ async function createGraphPersistenceHarness({
       _createDb(dbChatId = "") {
         return {
           async exportSnapshot() {
+            if (runtimeContext.__indexedDbExportSnapshotShouldThrow) {
+              throw new Error("indexeddb-export-failed");
+            }
             return getIndexedDbSnapshotForChat(dbChatId);
           },
           async commitDelta(delta, options = {}) {
@@ -993,6 +996,9 @@ async function createGraphPersistenceHarness({
         runtimeContext.__indexedDbSnapshot = getIndexedDbSnapshotForChat(
           this._currentChatId,
         );
+        if (runtimeContext.__indexedDbGetCurrentDbShouldThrow) {
+          throw new Error("indexeddb-get-current-db-failed");
+        }
         return this._createDb(this._currentChatId);
       }
       async switchChat(dbChatId = "") {
@@ -1224,7 +1230,6 @@ result = {
   harness.api.setChatContext({
     chatId: "chat-late",
     chatMetadata: {
-      integrity: "chat-late-ready",
       st_bme_graph: lateGraph,
     },
     characterId: "char-late",
@@ -1258,7 +1263,7 @@ result = {
   assert.equal(result.loadState, "loading");
   assert.equal(
     harness.api.getCurrentGraph().historyState.chatId,
-    "chat-late-ready",
+    "chat-late",
   );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
   assert.equal(
@@ -2093,6 +2098,62 @@ result = {
     harness.runtimeContext.__chatContext.chatMetadata?.st_bme_graph,
     undefined,
     "loading 状态下不能把空图被动写回 metadata",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-manager-unavailable-fallback",
+    globalChatId: "chat-manager-unavailable-fallback",
+    chatMetadata: {
+      integrity: "meta-manager-unavailable-fallback",
+    },
+  });
+  harness.runtimeContext.BmeChatManager = null;
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+    source: "manager-unavailable-fallback",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(
+    harness.api.getGraphPersistenceState().loadState,
+    "blocked",
+    "IndexedDB manager 不可用时，重试耗尽后不应永久停留在 loading",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().reason,
+    "indexeddb-manager-unavailable",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-indexeddb-read-failed-fallback",
+    globalChatId: "chat-indexeddb-read-failed-fallback",
+    chatMetadata: {
+      integrity: "meta-indexeddb-read-failed-fallback",
+    },
+  });
+  harness.runtimeContext.__indexedDbExportSnapshotShouldThrow = true;
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+    source: "indexeddb-read-failed-fallback",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(
+    harness.api.getGraphPersistenceState().loadState,
+    "blocked",
+    "IndexedDB 读取失败时，重试耗尽后不应永久停留在 loading",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().reason,
+    "indexeddb-read-failed",
   );
 }
 

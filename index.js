@@ -1029,7 +1029,7 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.BLOCKED:
       return createUiStatus(
         "图谱加载受阻",
-        "当前图谱尚未完成 IndexedDB 初始加载",
+        "当前图谱未能完成 IndexedDB 确认，请稍后重试",
         "warning",
       );
     case GRAPH_LOAD_STATES.LOADED:
@@ -6182,6 +6182,7 @@ async function loadGraphFromIndexedDb(
 
 function scheduleIndexedDbGraphProbe(chatId, options = {}) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const attemptIndex = Math.max(0, Math.floor(Number(options?.attemptIndex) || 0));
   if (
     !normalizedChatId ||
     bmeIndexedDbLoadInFlightByChatId.has(normalizedChatId)
@@ -6191,8 +6192,27 @@ function scheduleIndexedDbGraphProbe(chatId, options = {}) {
 
   scheduleBmeIndexedDbTask(() => {
     const loadPromise = loadGraphFromIndexedDb(normalizedChatId, options)
+      .then((result) =>
+        reconcileIndexedDbProbeFailureState(normalizedChatId, result, {
+          attemptIndex,
+        }),
+      )
       .catch((error) => {
         console.warn("[ST-BME] IndexedDB 后台加载失败:", error);
+        return reconcileIndexedDbProbeFailureState(
+          normalizedChatId,
+          {
+            success: false,
+            loaded: false,
+            reason: "indexeddb-read-failed",
+            chatId: normalizedChatId,
+            attemptIndex,
+            error,
+          },
+          {
+            attemptIndex,
+          },
+        );
       })
       .finally(() => {
         if (
@@ -7850,6 +7870,73 @@ function scheduleGraphLoadRetry(
   }, delayMs);
 
   return true;
+}
+
+function reconcileIndexedDbProbeFailureState(
+  chatId,
+  result = {},
+  { attemptIndex = 0 } = {},
+) {
+  if (result?.loaded || result?.emptyConfirmed) {
+    clearPendingGraphLoadRetry();
+    return result;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId || result?.chatId);
+  const normalizedReason = String(result?.reason || "").trim();
+  if (!normalizedChatId || !normalizedReason) {
+    return result;
+  }
+
+  if (
+    !normalizedReason.startsWith("indexeddb-") ||
+    normalizedReason === "indexeddb-stale" ||
+    normalizedReason === "indexeddb-chat-switched"
+  ) {
+    return result;
+  }
+
+  if (graphPersistenceState.loadState !== GRAPH_LOAD_STATES.LOADING) {
+    return result;
+  }
+
+  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  if (stateChatId && stateChatId !== normalizedChatId) {
+    return result;
+  }
+
+  const currentChatId = getCurrentChatId();
+  if (currentChatId && currentChatId !== normalizedChatId) {
+    return result;
+  }
+
+  if (
+    scheduleGraphLoadRetry(normalizedChatId, normalizedReason, attemptIndex, {
+      expectedChatId: normalizedChatId,
+    })
+  ) {
+    return {
+      ...result,
+      retryScheduled: true,
+    };
+  }
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+    chatId: normalizedChatId,
+    reason: normalizedReason,
+    attemptIndex,
+    dbReady: false,
+    writesBlocked: true,
+  });
+  runtimeStatus = createGraphLoadUiStatus();
+  refreshPanelLiveState();
+
+  return {
+    ...result,
+    loadState: GRAPH_LOAD_STATES.BLOCKED,
+    blocked: true,
+    reason: normalizedReason,
+  };
 }
 
 function shouldSyncGraphLoadFromLiveContext(

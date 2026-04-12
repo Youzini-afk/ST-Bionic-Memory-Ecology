@@ -9913,7 +9913,7 @@ function _getGraphLoadLabel(loadState = "") {
     case "empty-confirmed":
       return "当前聊天还没有图谱";
     case "blocked":
-      return "聊天元数据未就绪，已暂停图谱写回以保护旧数据";
+      return "当前聊天图谱未能完成 IndexedDB 确认，请稍后重试";
     case "loaded":
       return "聊天图谱已加载";
     case "no-chat":
