@@ -1105,6 +1105,35 @@ function buildManualBackupSnapshot(snapshot = {}, chatId = "") {
   };
 }
 
+function markManualBackupHistoryForLocalRebind(snapshot = {}, chatId = "") {
+  const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const meta = toSerializableData(normalizedSnapshot.meta, {});
+  const historyState = normalizeRuntimeHistoryMeta(
+    meta[RUNTIME_HISTORY_META_KEY],
+    chatId,
+  );
+  const lastProcessedAssistantFloor = Number(
+    historyState.lastProcessedAssistantFloor,
+  );
+
+  historyState.processedMessageHashes = {};
+  historyState.processedMessageHashesNeedRefresh =
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0;
+  meta[RUNTIME_HISTORY_META_KEY] = historyState;
+
+  return {
+    meta,
+    nodes: toSerializableData(normalizedSnapshot.nodes, []),
+    edges: toSerializableData(normalizedSnapshot.edges, []),
+    tombstones: toSerializableData(normalizedSnapshot.tombstones, []),
+    state: toSerializableData(normalizedSnapshot.state, {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    }),
+  };
+}
+
 function mergeRuntimeHistoryMeta(localMeta = {}, remoteMeta = {}, options = {}) {
   const localHistory = normalizeRuntimeHistoryMeta(localMeta, options.chatId);
   const remoteHistory = normalizeRuntimeHistoryMeta(remoteMeta, options.chatId);
@@ -2024,7 +2053,10 @@ export async function restoreFromServer(chatId, options = {}) {
       };
     }
 
-    const snapshot = normalizeSyncSnapshot(envelope.snapshot, normalizedChatId);
+    const snapshot = markManualBackupHistoryForLocalRebind(
+      envelope.snapshot,
+      normalizedChatId,
+    );
     if (normalizeChatId(snapshot.meta?.chatId) !== normalizedChatId) {
       return {
         restored: false,

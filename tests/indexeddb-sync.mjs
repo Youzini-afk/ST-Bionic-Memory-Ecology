@@ -623,6 +623,15 @@ async function testManualBackupAndRestoreFlow() {
         chatId: "chat-backup-flow",
         lastProcessedAssistantFloor: 4,
         extractionCount: 2,
+        processedMessageHashVersion: 2,
+        processedMessageHashes: {
+          0: "hash-0",
+          1: "hash-1",
+          2: "hash-2",
+          3: "hash-3",
+          4: "hash-4",
+        },
+        processedMessageHashesNeedRefresh: false,
       },
       runtimeBatchJournal: [
         { id: "journal-1", processedRange: [0, 0], createdAt: 11 },
@@ -677,6 +686,20 @@ async function testManualBackupAndRestoreFlow() {
       retainedCount: 4,
     },
   );
+  assert.deepEqual(
+    backupPayload.snapshot.meta.runtimeHistoryState.processedMessageHashes,
+    {
+      0: "hash-0",
+      1: "hash-1",
+      2: "hash-2",
+      3: "hash-3",
+      4: "hash-4",
+    },
+  );
+  assert.equal(
+    backupPayload.snapshot.meta.runtimeHistoryState.processedMessageHashesNeedRefresh,
+    false,
+  );
   const backupUploadLog = logs.uploadedPayloads.find(
     (entry) => entry.name === backupResult.filename,
   );
@@ -724,6 +747,15 @@ async function testManualBackupAndRestoreFlow() {
       earliestRetainedFloor: 2,
       retainedCount: 4,
     },
+  );
+  assert.deepEqual(db.snapshot.meta.runtimeHistoryState.processedMessageHashes, {});
+  assert.equal(
+    db.snapshot.meta.runtimeHistoryState.processedMessageHashesNeedRefresh,
+    true,
+  );
+  assert.equal(
+    db.snapshot.meta.runtimeHistoryState.lastProcessedAssistantFloor,
+    4,
   );
   assert.ok(Number(db.meta.get("lastBackupRestoredAt")) > 0);
   const safetyStatus = await getRestoreSafetySnapshotStatus(
