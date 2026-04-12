@@ -346,6 +346,7 @@ let pendingVisibleGraphRefreshToken = "";
 let pendingVisibleGraphRefreshForce = false;
 let lastVisibleGraphRefreshToken = "";
 let lastVisibleGraphRefreshAt = 0;
+let graphRenderingEnabled = true;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -730,6 +731,49 @@ function _clearScheduledVisibleGraphRefresh() {
   }
   pendingVisibleGraphRefreshToken = "";
   pendingVisibleGraphRefreshForce = false;
+}
+
+function _isGraphRenderingEnabled() {
+  return graphRenderingEnabled !== false;
+}
+
+function _refreshGraphRenderToggleUi() {
+  const enabled = _isGraphRenderingEnabled();
+  const syncButton = (button) => {
+    if (!button) return;
+    const title = enabled ? "暂停图谱渲染" : "恢复图谱渲染";
+    button.classList.toggle("is-paused", !enabled);
+    button.classList.toggle("is-active", enabled);
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    const icon = button.querySelector("i");
+    if (icon) {
+      icon.className = enabled ? "fa-solid fa-pause" : "fa-solid fa-play";
+    }
+  };
+  syncButton(document.getElementById("bme-graph-render-toggle"));
+  syncButton(document.getElementById("bme-mobile-render-toggle"));
+}
+
+function _applyGraphRenderEnabledState({ forceRefresh = false } = {}) {
+  const enabled = _isGraphRenderingEnabled();
+  graphRenderer?.setEnabled?.(enabled);
+  mobileGraphRenderer?.setEnabled?.(enabled);
+  _refreshGraphRenderToggleUi();
+  if (!enabled) {
+    _clearScheduledVisibleGraphRefresh();
+    return;
+  }
+  if (forceRefresh) {
+    _scheduleVisibleGraphWorkspaceRefresh({ force: true });
+  }
+}
+
+function _toggleGraphRenderingEnabled() {
+  graphRenderingEnabled = !_isGraphRenderingEnabled();
+  _applyGraphRenderEnabledState({ forceRefresh: graphRenderingEnabled });
+  _refreshGraphAvailabilityState();
 }
 
 function _refreshVisibleGraphWorkspace({ force = false } = {}) {
@@ -1126,6 +1170,8 @@ export function openPanel() {
     mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
     mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
+
+  _applyGraphRenderEnabledState();
 
   const activeTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
@@ -1550,6 +1596,36 @@ function _getMemoryNodeTypeClass(type) {
   }
 }
 
+function _parseFloorFilter(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const ranges = [];
+  for (const part of text.split(/[,，\s]+/)) {
+    const rangeParts = part.split(/[-~]/);
+    if (rangeParts.length === 2) {
+      const lo = parseInt(rangeParts[0], 10);
+      const hi = parseInt(rangeParts[1], 10);
+      if (!Number.isNaN(lo) && !Number.isNaN(hi)) {
+        ranges.push([Math.min(lo, hi), Math.max(lo, hi)]);
+      }
+    } else {
+      const n = parseInt(part, 10);
+      if (!Number.isNaN(n)) ranges.push([n, n]);
+    }
+  }
+  return ranges.length ? ranges : null;
+}
+
+function _matchesFloorFilter(node, ranges) {
+  const seq = node.seq ?? -1;
+  const seqLo = node.seqRange?.[0] ?? seq;
+  const seqHi = node.seqRange?.[1] ?? seq;
+  for (const [lo, hi] of ranges) {
+    if (seqHi >= lo && seqLo <= hi) return true;
+  }
+  return false;
+}
+
 function _refreshTaskMemoryBrowser() {
   const el = document.getElementById("bme-task-memory");
   if (!el) return;
@@ -1565,6 +1641,7 @@ function _refreshTaskMemoryBrowser() {
     .trim()
     .toLowerCase();
   const currentFilter = document.getElementById("bme-task-memory-filter")?.value || "all";
+  const currentFloorQuery = String(document.getElementById("bme-task-memory-floor")?.value || "").trim();
 
   let nodes = Array.isArray(graph.nodes)
     ? graph.nodes.filter((node) => !node?.archived)
@@ -1585,6 +1662,13 @@ function _refreshTaskMemoryBrowser() {
         fieldsText.includes(currentQuery)
       );
     });
+  }
+
+  if (currentFloorQuery) {
+    const floorFilter = _parseFloorFilter(currentFloorQuery);
+    if (floorFilter) {
+      nodes = nodes.filter((node) => _matchesFloorFilter(node, floorFilter));
+    }
   }
 
   const sorted = nodes.slice().sort((a, b) => {
@@ -1624,6 +1708,7 @@ function _refreshTaskMemoryBrowser() {
       <div class="bme-memory-list-panel">
         <div class="bme-memory-list-filters">
           <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." value="${_escHtml(currentQuery)}" />
+          <input type="text" class="bme-search-input bme-floor-input" id="bme-task-memory-floor" placeholder="楼层 (如 4, 3-10)" value="${_escHtml(currentFloorQuery)}" />
           <select class="bme-filter-select" id="bme-task-memory-filter">
             <option value="all"${currentFilter === "all" ? " selected" : ""}>全部</option>
             <option value="scope:objective"${currentFilter === "scope:objective" ? " selected" : ""}>客观</option>
@@ -1648,10 +1733,15 @@ function _refreshTaskMemoryBrowser() {
   _bindTaskMemoryListClick();
 
   const searchInput = document.getElementById("bme-task-memory-search");
+  const floorInput = document.getElementById("bme-task-memory-floor");
   const filterSelect = document.getElementById("bme-task-memory-filter");
   if (searchInput) {
     let timer = null;
     searchInput.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
+    });
+    floorInput?.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
     });
@@ -3300,6 +3390,7 @@ function _refreshMemoryBrowser() {
 
   const searchInput = document.getElementById("bme-memory-search");
   const regionInput = document.getElementById("bme-memory-region-filter");
+  const floorInput = document.getElementById("bme-memory-floor-filter");
   const filterSelect = document.getElementById("bme-memory-filter");
   const listEl = document.getElementById("bme-memory-list");
   if (!listEl) return;
@@ -3307,6 +3398,7 @@ function _refreshMemoryBrowser() {
   const canRenderGraph = _canRenderGraphData(loadInfo);
   if (searchInput) searchInput.disabled = !canRenderGraph;
   if (regionInput) regionInput.disabled = !canRenderGraph;
+  if (floorInput) floorInput.disabled = !canRenderGraph;
   if (filterSelect) filterSelect.disabled = !canRenderGraph;
 
   if (!canRenderGraph && loadInfo.loadState !== "empty-confirmed") {
@@ -3345,6 +3437,14 @@ function _refreshMemoryBrowser() {
         .toLowerCase();
       return regionText.includes(regionQuery);
     });
+  }
+
+  const floorQuery = String(floorInput?.value || "").trim();
+  if (floorQuery) {
+    const floorFilter = _parseFloorFilter(floorQuery);
+    if (floorFilter) {
+      nodes = nodes.filter((node) => _matchesFloorFilter(node, floorFilter));
+    }
   }
 
   nodes.sort((a, b) => {
@@ -3448,6 +3548,10 @@ function _refreshMemoryBrowser() {
       timer = setTimeout(() => _refreshMemoryBrowser(), 200);
     });
     regionInput?.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => _refreshMemoryBrowser(), 200);
+    });
+    floorInput?.addEventListener("input", () => {
       clearTimeout(timer);
       timer = setTimeout(() => _refreshMemoryBrowser(), 200);
     });
@@ -3812,6 +3916,9 @@ function _getActiveGraphRenderer() {
 }
 
 function _bindGraphControls() {
+  document
+    .getElementById("bme-graph-render-toggle")
+    ?.addEventListener("click", () => _toggleGraphRenderingEnabled());
   document
     .getElementById("bme-graph-zoom-in")
     ?.addEventListener("click", () => _getActiveGraphRenderer()?.zoomIn());
@@ -5193,6 +5300,9 @@ function _bindActions() {
   });
 
   // 移动端图谱浮动控件
+  document.getElementById("bme-mobile-render-toggle")?.addEventListener("click", () => {
+    _toggleGraphRenderingEnabled();
+  });
   document.getElementById("bme-mobile-zoom-in")?.addEventListener("click", () => {
     const r = _getActiveGraphRenderer?.();
     r?.zoomIn?.();
@@ -10959,6 +11069,8 @@ function _refreshGraphAvailabilityState() {
   const mobileOverlayText = document.getElementById("bme-mobile-graph-overlay-text");
   const blocked = _isGraphWriteBlocked(loadInfo);
   const loadLabel = _getGraphLoadLabel(loadInfo.loadState);
+  const pausedLabel = "图谱渲染已暂停，可点击工具栏按钮恢复。";
+  const renderingPaused = !_isGraphRenderingEnabled();
 
   GRAPH_WRITE_ACTION_IDS.forEach((id) => {
     const button = document.getElementById(id);
@@ -10967,6 +11079,7 @@ function _refreshGraphAvailabilityState() {
     button.classList.toggle("is-runtime-disabled", blocked);
     button.title = blocked ? loadLabel : "";
   });
+  _refreshGraphRenderToggleUi();
 
   if (banner) {
     const shouldShowBanner = blocked;
@@ -10974,26 +11087,33 @@ function _refreshGraphAvailabilityState() {
     banner.textContent = shouldShowBanner ? loadLabel : "";
   }
 
-  const shouldShowOverlay =
+  const shouldShowRuntimeOverlay =
     blocked ||
     loadInfo.syncState === "syncing" ||
     loadInfo.loadState === "loading" ||
     loadInfo.loadState === "shadow-restored" ||
     loadInfo.loadState === "blocked";
 
+  const shouldShowOverlay = shouldShowRuntimeOverlay || renderingPaused;
+  const overlayLabel = shouldShowRuntimeOverlay
+    ? loadLabel
+    : renderingPaused
+      ? pausedLabel
+      : "";
+
   if (graphOverlay) {
     graphOverlay.hidden = !shouldShowOverlay;
     graphOverlay.classList.toggle("active", shouldShowOverlay);
   }
   if (graphOverlayText) {
-    graphOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+    graphOverlayText.textContent = overlayLabel;
   }
   if (mobileOverlay) {
     mobileOverlay.hidden = !shouldShowOverlay;
     mobileOverlay.classList.toggle("active", shouldShowOverlay);
   }
   if (mobileOverlayText) {
-    mobileOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+    mobileOverlayText.textContent = overlayLabel;
   }
 }
 

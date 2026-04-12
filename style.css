@@ -1257,6 +1257,12 @@
   flex: 0 0 auto;
 }
 
+.bme-memory-list-filters .bme-floor-input {
+  max-width: 120px;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
 .bme-memory-list-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1674,6 +1680,16 @@
 .bme-graph-controls button:hover {
   border-color: var(--bme-primary);
   color: var(--bme-primary);
+}
+
+.bme-graph-controls button.is-paused {
+  border-color: rgba(255, 181, 71, 0.55);
+  color: #ffb347;
+}
+
+.bme-graph-controls button.is-active {
+  border-color: rgba(87, 199, 255, 0.55);
+  color: #57c7ff;
 }
 
 #bme-graph-canvas,
@@ -5037,6 +5053,16 @@
   background: rgba(233, 69, 96, 0.25);
   border-color: var(--bme-primary);
   color: var(--bme-primary);
+}
+
+.bme-mobile-graph-float-controls button.is-paused {
+  border-color: rgba(255, 181, 71, 0.62);
+  color: #ffb347;
+}
+
+.bme-mobile-graph-float-controls button.is-active {
+  border-color: rgba(87, 199, 255, 0.62);
+  color: #57c7ff;
 }
 
 /* Graph pane layout */

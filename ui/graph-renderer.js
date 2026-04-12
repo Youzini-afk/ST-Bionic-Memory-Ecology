@@ -220,6 +220,7 @@ export class GraphRenderer {
         this._suppressMouseUntil = 0;
 
         this.animId = null;
+        this.enabled = true;
 
         // Callbacks
         this.onNodeSelect = isLegacy ? null : (options?.onNodeSelect || null);
@@ -242,7 +243,6 @@ export class GraphRenderer {
      */
     loadGraph(graph, layoutHints = {}) {
         const prevSelectedId = this.selectedNode?.id || null;
-        this.nodeMap.clear();
         this._lastGraph = graph;
         this._lastLayoutHints = layoutHints && typeof layoutHints === 'object'
             ? { ...layoutHints }
@@ -252,6 +252,12 @@ export class GraphRenderer {
                 layoutHints.userPovAliases,
             );
         }
+
+        if (!this.enabled) {
+            return;
+        }
+
+        this.nodeMap.clear();
 
         const dpr = window.devicePixelRatio || 1;
         const W = this.canvas.width / dpr;
@@ -306,7 +312,7 @@ export class GraphRenderer {
     setTheme(themeName) {
         this.themeName = themeName;
         this.colors = getNodeColors(themeName);
-        this._render();
+        if (this.enabled) this._render();
     }
 
     /**
@@ -314,7 +320,45 @@ export class GraphRenderer {
      */
     highlightNode(nodeId) {
         this.selectedNode = this.nodeMap.get(nodeId) || null;
-        this._render();
+        if (this.enabled) this._render();
+    }
+
+    _clearCanvas() {
+        const ctx = this.ctx;
+        if (!ctx) return;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.canvas.style.cursor = 'default';
+    }
+
+    setEnabled(enabled = true) {
+        const nextEnabled = enabled !== false;
+        if (this.enabled === nextEnabled) {
+            if (!nextEnabled) this._clearCanvas();
+            return;
+        }
+        this.enabled = nextEnabled;
+        this._cancelAnim();
+        this.dragNode = null;
+        this.isDragging = false;
+        this.isPanning = false;
+        this._touchSession = null;
+        this._dragStartMouse = null;
+        this.hoveredNode = null;
+        if (!nextEnabled) {
+            this.nodeMap.clear();
+            this.nodes = [];
+            this.edges = [];
+            this._regionPanels = [];
+            this._clearCanvas();
+            return;
+        }
+        this.canvas.style.cursor = 'grab';
+        if (this._lastGraph) {
+            this.loadGraph(this._lastGraph, this._lastLayoutHints);
+        } else {
+            this._render();
+        }
     }
 
     // ==================== 分区布局 ====================
@@ -676,6 +720,10 @@ export class GraphRenderer {
     }
 
     _render() {
+        if (!this.enabled) {
+            this._clearCanvas();
+            return;
+        }
         const ctx = this.ctx;
         const dpr = window.devicePixelRatio || 1;
         const W = this.canvas.width / dpr;
@@ -752,7 +800,7 @@ export class GraphRenderer {
     }
 
     _scheduleRender() {
-        if (this.animId) return;
+        if (!this.enabled || this.animId) return;
         this.animId = requestAnimationFrame(() => {
             this.animId = null;
             this._render();
@@ -814,12 +862,9 @@ export class GraphRenderer {
         }
     }
 
-    /** @deprecated 力导向动画已移除；保留空实现以兼容旧调用 */
     stopAnimation() {
         this._cancelAnim();
     }
-
-    // ==================== 交互 ====================
 
     _bindEvents() {
         const c = this.canvas;
@@ -830,8 +875,8 @@ export class GraphRenderer {
         c.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
         c.addEventListener('dblclick', (e) => this._onDoubleClick(e));
 
-        // 触摸：单指始终平移画布，松手时在未移动过的情况下视为「点击」选中节点（避免拖动画布时误拖节点）
         c.addEventListener('touchstart', (e) => {
+            if (!this.enabled) return;
             if (e.touches.length !== 1) {
                 this._touchSession = null;
                 return;
@@ -854,7 +899,7 @@ export class GraphRenderer {
             };
         }, { passive: false });
         c.addEventListener('touchmove', (e) => {
-            if (!this._touchSession || e.touches.length !== 1) return;
+            if (!this.enabled || !this._touchSession || e.touches.length !== 1) return;
             e.preventDefault();
             this._markTouchInteraction();
             const t = e.touches[0];
@@ -871,8 +916,8 @@ export class GraphRenderer {
             this._touchSession.lastY = t.clientY;
             this._scheduleRender();
         }, { passive: false });
-        c.addEventListener('touchend', (e) => {
-            if (!this._touchSession) return;
+        c.addEventListener('touchend', () => {
+            if (!this.enabled || !this._touchSession) return;
             this._markTouchInteraction();
             const sess = this._touchSession;
             this._touchSession = null;
@@ -888,6 +933,7 @@ export class GraphRenderer {
             }
         });
         c.addEventListener('touchcancel', () => {
+            if (!this.enabled) return;
             this._markTouchInteraction();
             this._touchSession = null;
             this.dragNode = null;
@@ -902,7 +948,7 @@ export class GraphRenderer {
     }
 
     _shouldIgnoreMouseEvent() {
-        return Date.now() < this._suppressMouseUntil;
+        return !this.enabled || Date.now() < this._suppressMouseUntil;
     }
 
     _canvasToWorld(clientX, clientY) {
@@ -988,6 +1034,7 @@ export class GraphRenderer {
     }
 
     _onWheel(e) {
+        if (!this.enabled) return;
         e.preventDefault();
         const factor = e.deltaY > 0 ? 0.9 : 1.1;
         const newScale = Math.max(0.2, Math.min(5, this.scale * factor));
@@ -1017,16 +1064,19 @@ export class GraphRenderer {
     // ==================== 工具 ====================
 
     zoomIn() {
+        if (!this.enabled) return;
         this.scale = Math.min(5, this.scale * 1.2);
         this._render();
     }
 
     zoomOut() {
+        if (!this.enabled) return;
         this.scale = Math.max(0.2, this.scale * 0.8);
         this._render();
     }
 
     resetView() {
+        if (!this.enabled) return;
         this.scale = 1;
         this.offsetX = 0;
         this.offsetY = 0;
@@ -1059,6 +1109,11 @@ export class GraphRenderer {
         this.canvas.height = h * dpr;
         this.canvas.style.width = w + 'px';
         this.canvas.style.height = h + 'px';
+
+        if (!this.enabled) {
+            this._clearCanvas();
+            return;
+        }
 
         if (this.nodes.length > 0 && this._regionPanels.length > 0) {
             this._rebuildLayoutForCurrentViewport(w, h);
