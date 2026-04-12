@@ -1827,36 +1827,74 @@ function _refreshTaskPersistence() {
   const ps = _getGraphPersistenceSnapshot();
   const rs = graph.runtimeState || {};
 
+  const LOAD_STATE_LABELS = {
+    "no-chat": "无聊天",
+    loading: "加载中",
+    loaded: "已加载",
+    blocked: "已阻塞",
+    error: "错误",
+  };
+
+  const STORAGE_TIER_LABELS = {
+    none: "无",
+    metadata: "元数据",
+    indexeddb: "IndexedDB",
+    chat: "聊天存档",
+  };
+
+  const loadStateLabel = LOAD_STATE_LABELS[ps.loadState] || ps.loadState || "未知";
+  const storageTierLabel = STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] || ps.acceptedStorageTier || ps.storageTier || "—";
+
   const kvs = [
-    ["Load State", ps.loadState || "unknown"],
-    ["Storage Tier", ps.acceptedStorageTier || ps.storageTier || "—"],
-    ["Revision", ps.revision ?? "—"],
-    ["Commit Marker", ps.commitMarker ? "present" : "none"],
-    ["Blocked Reason", ps.blockedReason || ps.reason || "—"],
-    ["Shadow Snapshot", ps.shadowSnapshotUsed ? "yes" : "no"],
+    ["加载状态", loadStateLabel],
+    ["存储层级", storageTierLabel],
+    ["版本号", ps.revision ?? "—"],
+    ["提交标记", ps.commitMarker ? "存在" : "无"],
+    ["阻塞原因", ps.blockedReason || ps.reason || "—"],
+    ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
   ];
 
   const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
 
   const journalCount = Array.isArray(rs.historyState?.batchJournal) ? rs.historyState.batchJournal.length : 0;
   const secondaryKvs = [
-    ["Graph Nodes", String((graph.nodes || []).length)],
-    ["Graph Edges", String((graph.edges || []).length)],
-    ["Batch Journal", String(journalCount)],
-    ["Runtime Rev", String(rs.graphRevision ?? "—")],
+    ["图谱节点", String((graph.nodes || []).length)],
+    ["图谱边", String((graph.edges || []).length)],
+    ["批次日志", String(journalCount)],
+    ["运行版本", String(rs.graphRevision ?? "—")],
   ];
   const secondaryHtml = secondaryKvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(v)}</strong></div>`).join("");
+
+  const guidePairs = [
+    ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
+    ["存储层级", "当前持久化使用的最高存储介质。IndexedDB 最快，聊天存档最稳。"],
+    ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
+    ["提交标记", "聊天元数据中的标记，指示是否有更高版本存在于本地 IndexedDB。"],
+    ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
+    ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
+    ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
+    ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
+    ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
+  ];
+
+  const guideHtml = guidePairs.map(([term, desc]) =>
+    `<div class="bme-persist-guide__item"><strong>${_escHtml(term)}</strong><span>${_escHtml(desc)}</span></div>`
+  ).join("");
 
   el.innerHTML = `
     <div class="bme-persist-grid">
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>Persistence State</div>
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
         ${kvHtml}
       </div>
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>Runtime Stats</div>
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行统计</div>
         ${secondaryHtml}
       </div>
+    </div>
+    <div class="bme-persist-guide">
+      <div class="bme-persist-guide__title"><i class="fa-solid fa-circle-info" style="margin-right:6px;opacity:.5"></i>字段说明</div>
+      ${guideHtml}
     </div>
   `;
 }

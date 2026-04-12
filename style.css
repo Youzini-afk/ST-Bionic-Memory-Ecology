@@ -1545,6 +1545,45 @@
 .bme-persist-kv__row span { color: var(--bme-on-surface-dim); }
 .bme-persist-kv__row strong { color: var(--bme-on-surface); font-weight: 600; }
 
+.bme-persist-guide {
+  margin-top: 4px;
+  padding: 14px 16px;
+  background: var(--bme-surface, #131316);
+  border: 1px solid var(--bme-border);
+  border-radius: 8px;
+}
+
+.bme-persist-guide__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--bme-on-surface);
+  margin-bottom: 10px;
+}
+
+.bme-persist-guide__item {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.bme-persist-guide__item:last-child {
+  border-bottom: none;
+}
+
+.bme-persist-guide__item strong {
+  color: var(--bme-on-surface);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 90px;
+}
+
+.bme-persist-guide__item span {
+  color: var(--bme-on-surface-dim);
+}
+
 .bme-persist-actions {
   display: flex;
   gap: 8px;
