@@ -1533,6 +1533,24 @@ function _refreshTaskTimeline() {
 
 // ---------- Memory Browser (Master-Detail) ----------
 
+function _getMemoryNodeTypeClass(type) {
+  switch (type) {
+    case "pov_memory":
+    case "character":
+      return "type-character";
+    case "event":
+      return "type-event";
+    case "location":
+      return "type-location";
+    case "rule":
+      return "type-rule";
+    case "thread":
+      return "type-thread";
+    default:
+      return "type-default";
+  }
+}
+
 function _refreshTaskMemoryBrowser() {
   const el = document.getElementById("bme-task-memory");
   if (!el) return;
@@ -1580,17 +1598,6 @@ function _refreshTaskMemoryBrowser() {
     currentSelectedMemoryNodeId = sorted[0]?.id || "";
   }
 
-  const typeClass = (type) => {
-    switch (type) {
-      case "pov_memory": case "character": return "type-character";
-      case "event": return "type-event";
-      case "location": return "type-location";
-      case "rule": return "type-rule";
-      case "thread": return "type-thread";
-      default: return "type-default";
-    }
-  };
-
   const listItems = sorted.map((node) => {
     const sel = node.id === currentSelectedMemoryNodeId ? "selected" : "";
     const preview = _getNodeSnippet(node);
@@ -1600,7 +1607,7 @@ function _refreshTaskMemoryBrowser() {
     return `
       <div class="bme-memory-node-item ${sel}" data-node-id="${_escHtml(node.id)}">
         <div class="bme-memory-node-item__header">
-          <span class="bme-memory-node-item__type ${typeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>
+          <span class="bme-memory-node-item__type ${_getMemoryNodeTypeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>
           <span class="bme-memory-node-item__imp">IMP: ${typeof node.importance === "number" ? node.importance.toFixed(1) : "—"}</span>
         </div>
         <div class="bme-memory-node-item__title">${_escHtml(displayName)}</div>
@@ -1612,8 +1619,6 @@ function _refreshTaskMemoryBrowser() {
         ${metaText ? `<div class="bme-memory-node-item__meta">${_escHtml(metaText)}</div>` : ""}
       </div>`;
   }).join("");
-
-  const detailHtml = _renderMemoryDetailPanel(sorted.find((n) => n.id === currentSelectedMemoryNodeId) || null, graph);
 
   el.innerHTML = `
     <div class="bme-memory-master-detail">
@@ -1636,12 +1641,11 @@ function _refreshTaskMemoryBrowser() {
           ${listItems || '<div style="padding:16px;font-size:12px;color:var(--bme-on-surface-dim)">无节点</div>'}
         </div>
       </div>
-      <div class="bme-memory-detail-panel" id="bme-task-memory-detail">
-        ${detailHtml}
-      </div>
+      <div class="bme-memory-detail-panel" id="bme-task-memory-detail"></div>
     </div>
   `;
 
+  _renderTaskMemoryDetailSelection(graph);
   _bindTaskMemoryListClick();
 
   const searchInput = document.getElementById("bme-task-memory-search");
@@ -1665,14 +1669,25 @@ function _bindTaskMemoryListClick() {
     currentSelectedMemoryNodeId = item.dataset.nodeId || "";
     list.querySelectorAll(".bme-memory-node-item").forEach((n) => n.classList.toggle("selected", n.dataset.nodeId === currentSelectedMemoryNodeId));
     const graph = _getGraph?.();
-    const node = (graph?.nodes || []).find((n) => n.id === currentSelectedMemoryNodeId) || null;
-    const detailEl = document.getElementById("bme-task-memory-detail");
-    if (detailEl) detailEl.innerHTML = _renderMemoryDetailPanel(node, graph);
+    _renderTaskMemoryDetailSelection(graph);
   });
 }
 
-function _renderMemoryDetailPanel(node, graph) {
-  if (!node) return '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
+function _renderTaskMemoryDetailSelection(graph = _getGraph?.()) {
+  const detailEl = document.getElementById("bme-task-memory-detail");
+  if (!detailEl) return;
+
+  const node = (graph?.nodes || []).find((candidate) => candidate.id === currentSelectedMemoryNodeId) || null;
+  if (!node) {
+    detailEl.innerHTML = '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
+    return;
+  }
+
+  _renderTaskMemoryDetailPanel(detailEl, node, graph);
+}
+
+function _renderTaskMemoryDetailPanel(detailEl, node, graph) {
+  if (!detailEl) return;
 
   const edges = (graph?.edges || []).filter(
     (e) =>
@@ -1680,57 +1695,79 @@ function _renderMemoryDetailPanel(node, graph) {
       !e?.expiredAt &&
       (e?.fromId === node.id || e?.toId === node.id),
   );
-  const fields = node?.fields || {};
   const detailSummary = _getNodeSnippet(node);
-  const scopeMeta = _buildScopeMetaText(node);
   const scopeBadge = buildScopeBadgeText(node.scope);
   const displayName = getNodeDisplayName(node);
+  const writeBlocked = _isGraphWriteBlocked();
+  const disabledAttr = writeBlocked ? " disabled" : "";
   const badges = [
-    node.type ? `<span class="bme-memory-node-item__type ${node.type === "pov_memory" || node.type === "character" ? "type-character" : node.type === "event" ? "type-event" : node.type === "location" ? "type-location" : node.type === "rule" ? "type-rule" : node.type === "thread" ? "type-thread" : "type-default"}">${_escHtml(_typeLabel(node.type))}</span>` : "",
+    node.type ? `<span class="bme-memory-node-item__type ${_getMemoryNodeTypeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>` : "",
     scopeBadge ? `<span class="bme-memory-node-item__type type-default">${_escHtml(scopeBadge)}</span>` : "",
     node.archived ? '<span class="bme-memory-node-item__type type-default">ARCHIVED</span>' : "",
   ].filter(Boolean).join("");
 
-  const detailFields = [
-    ["ID", node.id],
-    ["名称", displayName],
-    ["范围", scopeMeta || scopeBadge || "—"],
-    ["重要度", _formatMemoryMetricNumber(node.importance, { fallback: 5, maxFrac: 2 })],
-    ["访问次数", _formatMemoryInt(node.accessCount, 0)],
-    ["最后序列", _formatMemoryInt(node.seqRange?.[1] ?? node.seq, 0)],
-    ["创建时间", node.createdAt || "—"],
-    ["更新时间", node.updatedAt || "—"],
-  ];
-
-  const extraFieldRows = Object.entries(fields)
-    .filter(([key]) => !["embedding", "name", "title", "summary"].includes(key))
-    .slice(0, 6)
-    .map(([key, value]) => {
-      let text = "—";
-      if (typeof value === "string") {
-        text = value;
-      } else if (value !== undefined && value !== null) {
-        try {
-          text = JSON.stringify(value);
-        } catch {
-          text = String(value);
-        }
-      }
-      return [key, text];
-    });
-
-  return `
+  detailEl.innerHTML = `
     <div class="bme-memory-detail__title">${_escHtml(displayName)}</div>
     <div class="bme-memory-detail__badges">${badges}</div>
     <div class="bme-memory-detail__desc">${_escHtml(detailSummary || "无补充字段")}</div>
-    <div class="bme-memory-detail__fields">
-      ${detailFields.concat(extraFieldRows).map(([k, v]) => `<div class="bme-memory-detail__field-row"><span class="bme-memory-detail__field-key">${_escHtml(k)}</span><span class="bme-memory-detail__field-val">${_escHtml(String(v))}</span></div>`).join("")}
-    </div>
     <div class="bme-memory-detail__stats">
       <span><i class="fa-solid fa-link" style="margin-right:4px;opacity:.5"></i>${edges.length} 条连接</span>
       <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>访问 ${_formatMemoryInt(node.accessCount, 0)}</span>
     </div>
+    <div class="bme-memory-detail__actions">
+      <button class="bme-config-secondary-btn" data-task-memory-action="save" type="button"${disabledAttr}>
+        <i class="fa-solid fa-floppy-disk"></i>
+        <span>保存修改</span>
+      </button>
+      <button class="bme-config-secondary-btn" data-task-memory-action="delete" type="button"${disabledAttr}>
+        <i class="fa-solid fa-trash"></i>
+        <span>删除节点</span>
+      </button>
+    </div>
+    <div id="bme-task-memory-editor-body"></div>
   `;
+
+  const editorBody = detailEl.querySelector("#bme-task-memory-editor-body");
+  if (editorBody) {
+    editorBody.replaceChildren(
+      _buildNodeDetailEditorFragment(node, { idPrefix: "bme-task-detail" }),
+    );
+  }
+
+  detailEl
+    .querySelector('[data-task-memory-action="save"]')
+    ?.addEventListener("click", () => _saveTaskMemoryDetail());
+  detailEl
+    .querySelector('[data-task-memory-action="delete"]')
+    ?.addEventListener("click", () => _deleteTaskMemoryDetail());
+}
+
+function _saveTaskMemoryDetail() {
+  const detailEl = document.getElementById("bme-task-memory-detail");
+  const bodyEl = detailEl?.querySelector("#bme-task-memory-editor-body");
+  const nodeId = currentSelectedMemoryNodeId;
+  if (!nodeId || !bodyEl) return;
+
+  const collected = _collectNodeDetailEditorUpdates(bodyEl, {
+    idPrefix: "bme-task-detail",
+  });
+  if (!collected.ok) {
+    toastr.error(collected.errorMessage || "保存失败", "ST-BME");
+    return;
+  }
+
+  _persistNodeDetailEdits(nodeId, collected.updates);
+}
+
+function _deleteTaskMemoryDetail() {
+  const nodeId = currentSelectedMemoryNodeId;
+  if (!nodeId) return;
+
+  _deleteGraphNodeById(nodeId, {
+    afterSuccess: () => {
+      currentSelectedMemoryNodeId = "";
+    },
+  });
 }
 
 // ---------- Injection Preview ----------
@@ -3843,6 +3880,278 @@ function _appendNodeDetailTextareaField(
   container.appendChild(row);
 }
 
+function _buildNodeDetailEditorFragment(raw, { idPrefix = "bme-detail" } = {}) {
+  const fields = raw.fields || {};
+  const scope = normalizeMemoryScope(raw.scope);
+  const fragment = document.createDocumentFragment();
+  const inputId = (suffix) => `${idPrefix}-${suffix}`;
+
+  _appendNodeDetailReadOnly(fragment, "类型", _typeLabel(raw.type));
+  _appendNodeDetailReadOnly(
+    fragment,
+    "作用域",
+    buildScopeBadgeText(raw.scope),
+  );
+  _appendNodeDetailReadOnly(fragment, "ID", raw.id || "—");
+  _appendNodeDetailReadOnly(
+    fragment,
+    "序列号",
+    raw.seqRange?.[1] ?? raw.seq ?? 0,
+  );
+
+  if (scope.layer === "pov") {
+    _appendNodeDetailReadOnly(
+      fragment,
+      "POV 归属",
+      `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
+    );
+  }
+  const regionLine = buildRegionLine(scope);
+  if (regionLine) {
+    _appendNodeDetailReadOnly(fragment, "地区", regionLine);
+  }
+  _appendNodeDetailTextInput(
+    fragment,
+    "主地区",
+    inputId("scope-region-primary"),
+    scope.regionPrimary || "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "地区路径 (用 / 分隔)",
+    inputId("scope-region-path"),
+    Array.isArray(scope.regionPath) ? scope.regionPath.join(" / ") : "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "次级地区 (用逗号或 / 分隔)",
+    inputId("scope-region-secondary"),
+    Array.isArray(scope.regionSecondary)
+      ? scope.regionSecondary.join(", ")
+      : "",
+  );
+  if (Array.isArray(raw.seqRange)) {
+    _appendNodeDetailReadOnly(
+      fragment,
+      "序列范围",
+      `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
+    );
+  }
+  _appendNodeDetailTextareaField(
+    fragment,
+    "剧情时间",
+    "__storyTime",
+    "json",
+    JSON.stringify(raw.storyTime || {}, null, 2),
+  );
+  _appendNodeDetailTextareaField(
+    fragment,
+    "剧情时间范围",
+    "__storyTimeSpan",
+    "json",
+    JSON.stringify(raw.storyTimeSpan || {}, null, 2),
+  );
+
+  _appendNodeDetailNumberInput(
+    fragment,
+    "重要度 (0–10)",
+    inputId("importance"),
+    raw.importance ?? 5,
+    { min: 0, max: 10, step: 0.1 },
+  );
+  _appendNodeDetailNumberInput(
+    fragment,
+    "访问次数",
+    inputId("accesscount"),
+    raw.accessCount ?? 0,
+    { min: 0, step: 1 },
+  );
+
+  const clustersStr = Array.isArray(raw.clusters)
+    ? raw.clusters.join(", ")
+    : "";
+  _appendNodeDetailTextInput(
+    fragment,
+    "聚类标签 (逗号分隔)",
+    inputId("clusters"),
+    clustersStr,
+  );
+
+  const section = document.createElement("div");
+  section.className = "bme-node-detail-section";
+  section.textContent = "记忆字段";
+  fragment.appendChild(section);
+
+  for (const [key, value] of Object.entries(fields)) {
+    const isJson = typeof value === "object" && value !== null;
+    const displayVal = isJson
+      ? JSON.stringify(value, null, 2)
+      : String(value ?? "");
+    _appendNodeDetailTextareaField(
+      fragment,
+      key,
+      key,
+      isJson ? "json" : "string",
+      displayVal,
+    );
+  }
+
+  return fragment;
+}
+
+function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {}) {
+  if (!bodyEl) {
+    return { ok: false, errorMessage: "未找到可编辑表单" };
+  }
+
+  const findInput = (suffix) =>
+    bodyEl.querySelector(`#${idPrefix}-${suffix}`);
+  const updates = { fields: {} };
+  const impEl = findInput("importance");
+  if (impEl && impEl.value !== "") {
+    const imp = Number.parseFloat(impEl.value);
+    if (Number.isFinite(imp)) {
+      updates.importance = Math.max(0, Math.min(10, imp));
+    }
+  }
+  const accessEl = findInput("accesscount");
+  if (accessEl && accessEl.value !== "") {
+    const ac = Number.parseInt(accessEl.value, 10);
+    if (Number.isFinite(ac)) {
+      updates.accessCount = Math.max(0, ac);
+    }
+  }
+  const clustersEl = findInput("clusters");
+  if (clustersEl) {
+    updates.clusters = clustersEl.value
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  const regionPrimaryEl = findInput("scope-region-primary");
+  const regionPathEl = findInput("scope-region-path");
+  const regionSecondaryEl = findInput("scope-region-secondary");
+  if (regionPrimaryEl || regionPathEl || regionSecondaryEl) {
+    updates.scope = {
+      regionPrimary: String(regionPrimaryEl?.value || "").trim(),
+      regionPath: _parseNodeDetailScopeList(regionPathEl?.value, {
+        allowSlash: true,
+      }),
+      regionSecondary: _parseNodeDetailScopeList(regionSecondaryEl?.value, {
+        allowSlash: true,
+      }),
+    };
+  }
+
+  const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
+  for (const el of fieldEls) {
+    const key = el.dataset.bmeFieldKey;
+    const type = el.dataset.bmeFieldType || "string";
+    const rawVal = el.value;
+    if (key === "__storyTime" || key === "__storyTimeSpan") {
+      try {
+        updates[key === "__storyTime" ? "storyTime" : "storyTimeSpan"] = JSON.parse(
+          rawVal || "{}",
+        );
+      } catch {
+        return {
+          ok: false,
+          errorMessage: `字段「${key === "__storyTime" ? "剧情时间" : "剧情时间范围"}」须为合法 JSON`,
+        };
+      }
+      continue;
+    }
+    if (type === "json") {
+      try {
+        updates.fields[key] = JSON.parse(rawVal || "null");
+      } catch {
+        return {
+          ok: false,
+          errorMessage: `字段「${key}」须为合法 JSON`,
+        };
+      }
+    } else {
+      updates.fields[key] = rawVal;
+    }
+  }
+
+  return { ok: true, updates };
+}
+
+function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
+  if (!nodeId) return false;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return false;
+  }
+
+  const result = _actionHandlers.saveGraphNode?.({
+    nodeId,
+    updates,
+  });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found"
+        ? "节点已不存在，请关闭后重试"
+        : "保存失败",
+      "ST-BME",
+    );
+    return false;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "内容已更新，但写回聊天元数据可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已保存", "ST-BME");
+  }
+
+  afterSuccess?.();
+  refreshLiveState();
+  return true;
+}
+
+function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
+  if (!nodeId) return false;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return false;
+  }
+
+  const g = _getGraph?.();
+  const node = g?.nodes?.find((n) => n.id === nodeId);
+  const label = node ? getNodeDisplayName(node) : nodeId;
+  if (
+    !confirm(
+      `确定删除节点「${label}」？\n\n若该节点有层级子节点，将一并删除。此操作不可在本面板内撤销。`,
+    )
+  ) {
+    return false;
+  }
+
+  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
+      "ST-BME",
+    );
+    return false;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "节点已从图中移除，但写回可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已删除", "ST-BME");
+  }
+
+  afterSuccess?.();
+  refreshLiveState();
+  return true;
+}
+
 function _useMobileGraphNodeDetail() {
   return _isMobile() && currentTabId === "graph";
 }
@@ -3884,123 +4193,9 @@ function _showNodeDetail(node) {
   }
 
   const raw = node.raw || node;
-  const fields = raw.fields || {};
   titleEl.textContent = getNodeDisplayName(raw);
   detailEl.dataset.editNodeId = raw.id || "";
-
-  const fragment = document.createDocumentFragment();
-
-  _appendNodeDetailReadOnly(fragment, "类型", _typeLabel(raw.type));
-  _appendNodeDetailReadOnly(
-    fragment,
-    "作用域",
-    buildScopeBadgeText(raw.scope),
-  );
-  _appendNodeDetailReadOnly(fragment, "ID", raw.id || "—");
-  _appendNodeDetailReadOnly(
-    fragment,
-    "序列号",
-    raw.seqRange?.[1] ?? raw.seq ?? 0,
-  );
-
-  const scope = normalizeMemoryScope(raw.scope);
-  if (scope.layer === "pov") {
-    _appendNodeDetailReadOnly(
-      fragment,
-      "POV 归属",
-      `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
-    );
-  }
-  const regionLine = buildRegionLine(scope);
-  if (regionLine) {
-    _appendNodeDetailReadOnly(fragment, "地区", regionLine);
-  }
-  _appendNodeDetailTextInput(
-    fragment,
-    "主地区",
-    "bme-detail-scope-region-primary",
-    scope.regionPrimary || "",
-  );
-  _appendNodeDetailTextInput(
-    fragment,
-    "地区路径 (用 / 分隔)",
-    "bme-detail-scope-region-path",
-    Array.isArray(scope.regionPath) ? scope.regionPath.join(" / ") : "",
-  );
-  _appendNodeDetailTextInput(
-    fragment,
-    "次级地区 (用逗号或 / 分隔)",
-    "bme-detail-scope-region-secondary",
-    Array.isArray(scope.regionSecondary)
-      ? scope.regionSecondary.join(", ")
-      : "",
-  );
-  if (Array.isArray(raw.seqRange)) {
-    _appendNodeDetailReadOnly(
-      fragment,
-      "序列范围",
-      `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
-    );
-  }
-  _appendNodeDetailTextareaField(
-    fragment,
-    "剧情时间",
-    "__storyTime",
-    "json",
-    JSON.stringify(raw.storyTime || {}, null, 2),
-  );
-  _appendNodeDetailTextareaField(
-    fragment,
-    "剧情时间范围",
-    "__storyTimeSpan",
-    "json",
-    JSON.stringify(raw.storyTimeSpan || {}, null, 2),
-  );
-
-  _appendNodeDetailNumberInput(
-    fragment,
-    "重要度 (0–10)",
-    "bme-detail-importance",
-    raw.importance ?? 5,
-    { min: 0, max: 10, step: 0.1 },
-  );
-  _appendNodeDetailNumberInput(
-    fragment,
-    "访问次数",
-    "bme-detail-accesscount",
-    raw.accessCount ?? 0,
-    { min: 0, step: 1 },
-  );
-
-  const clustersStr = Array.isArray(raw.clusters)
-    ? raw.clusters.join(", ")
-    : "";
-  _appendNodeDetailTextInput(
-    fragment,
-    "聚类标签 (逗号分隔)",
-    "bme-detail-clusters",
-    clustersStr,
-  );
-
-  const section = document.createElement("div");
-  section.className = "bme-node-detail-section";
-  section.textContent = "记忆字段";
-  fragment.appendChild(section);
-
-  for (const [key, value] of Object.entries(fields)) {
-    const isJson = typeof value === "object" && value !== null;
-    const displayVal = isJson
-      ? JSON.stringify(value, null, 2)
-      : String(value ?? "");
-    _appendNodeDetailTextareaField(
-      fragment,
-      key,
-      key,
-      isJson ? "json" : "string",
-      displayVal,
-    );
-  }
-  bodyEl.replaceChildren(fragment);
+  bodyEl.replaceChildren(_buildNodeDetailEditorFragment(raw));
 
   if (mobile) {
     scrimEl?.removeAttribute("hidden");
@@ -4014,110 +4209,27 @@ function _saveNodeDetail() {
   const bodyEl = els?.bodyEl;
   const nodeId = detailEl?.dataset?.editNodeId;
   if (!nodeId || !bodyEl) return;
-  if (_isGraphWriteBlocked()) {
-    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+  const collected = _collectNodeDetailEditorUpdates(bodyEl);
+  if (!collected.ok) {
+    toastr.error(collected.errorMessage || "保存失败", "ST-BME");
     return;
   }
 
-  const updates = { fields: {} };
-  const impEl = document.getElementById("bme-detail-importance");
-  if (impEl && impEl.value !== "") {
-    const imp = Number.parseFloat(impEl.value);
-    if (Number.isFinite(imp)) {
-      updates.importance = Math.max(0, Math.min(10, imp));
-    }
-  }
-  const accessEl = document.getElementById("bme-detail-accesscount");
-  if (accessEl && accessEl.value !== "") {
-    const ac = Number.parseInt(accessEl.value, 10);
-    if (Number.isFinite(ac)) {
-      updates.accessCount = Math.max(0, ac);
-    }
-  }
-  const clustersEl = document.getElementById("bme-detail-clusters");
-  if (clustersEl) {
-    updates.clusters = clustersEl.value
-      .split(/[,，]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  const regionPrimaryEl = document.getElementById("bme-detail-scope-region-primary");
-  const regionPathEl = document.getElementById("bme-detail-scope-region-path");
-  const regionSecondaryEl = document.getElementById("bme-detail-scope-region-secondary");
-  if (regionPrimaryEl || regionPathEl || regionSecondaryEl) {
-    updates.scope = {
-      regionPrimary: String(regionPrimaryEl?.value || "").trim(),
-      regionPath: _parseNodeDetailScopeList(regionPathEl?.value, {
-        allowSlash: true,
-      }),
-      regionSecondary: _parseNodeDetailScopeList(regionSecondaryEl?.value, {
-        allowSlash: true,
-      }),
-    };
-  }
-
-  const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
-  for (const el of fieldEls) {
-    const key = el.dataset.bmeFieldKey;
-    const type = el.dataset.bmeFieldType || "string";
-    const rawVal = el.value;
-    if (key === "__storyTime" || key === "__storyTimeSpan") {
-      try {
-        updates[key === "__storyTime" ? "storyTime" : "storyTimeSpan"] = JSON.parse(
-          rawVal || "{}",
-        );
-      } catch {
-        toastr.error(`字段「${key === "__storyTime" ? "剧情时间" : "剧情时间范围"}」须为合法 JSON`, "ST-BME");
-        return;
+  _persistNodeDetailEdits(nodeId, collected.updates, {
+    afterSuccess: () => {
+      const r = _getActiveGraphRenderer();
+      const sel = r?.selectedNode;
+      if (sel?.id === nodeId && sel.raw) {
+        _showNodeDetail(sel);
+      } else {
+        const g = _getGraph?.();
+        const rawN = g?.nodes?.find((n) => n.id === nodeId);
+        if (rawN) {
+          _showNodeDetail({ raw: rawN, id: rawN.id });
+        }
       }
-      continue;
-    }
-    if (type === "json") {
-      try {
-        updates.fields[key] = JSON.parse(rawVal || "null");
-      } catch {
-        toastr.error(`字段「${key}」须为合法 JSON`, "ST-BME");
-        return;
-      }
-    } else {
-      updates.fields[key] = rawVal;
-    }
-  }
-
-  const result = _actionHandlers.saveGraphNode?.({
-    nodeId,
-    updates,
+    },
   });
-  if (!result?.ok) {
-    toastr.error(
-      result?.error === "node-not-found"
-        ? "节点已不存在，请关闭后重试"
-        : "保存失败",
-      "ST-BME",
-    );
-    return;
-  }
-  if (result.persistBlocked) {
-    toastr.warning(
-      "内容已更新，但写回聊天元数据可能被拦截，请查看图谱状态",
-      "ST-BME",
-    );
-  } else {
-    toastr.success("节点已保存", "ST-BME");
-  }
-
-  const r = _getActiveGraphRenderer();
-  const sel = r?.selectedNode;
-  if (sel?.id === nodeId && sel.raw) {
-    _showNodeDetail(sel);
-  } else {
-    const g = _getGraph?.();
-    const rawN = g?.nodes?.find((n) => n.id === nodeId);
-    if (rawN) {
-      _showNodeDetail({ raw: rawN, id: rawN.id });
-    }
-  }
-  refreshLiveState();
 }
 
 function _bindNodeDetailPanel() {
@@ -4148,44 +4260,18 @@ function _deleteNodeDetail() {
   const detailEl = els?.detailEl;
   const nodeId = detailEl?.dataset?.editNodeId;
   if (!nodeId) return;
-  if (_isGraphWriteBlocked()) {
-    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
-    return;
-  }
-  const g = _getGraph?.();
-  const node = g?.nodes?.find((n) => n.id === nodeId);
-  const label = node ? getNodeDisplayName(node) : nodeId;
-  if (
-    !confirm(
-      `确定删除节点「${label}」？\n\n若该节点有层级子节点，将一并删除。此操作不可在本面板内撤销。`,
-    )
-  ) {
-    return;
-  }
-  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
-  if (!result?.ok) {
-    toastr.error(
-      result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
-      "ST-BME",
-    );
-    return;
-  }
-  if (result.persistBlocked) {
-    toastr.warning(
-      "节点已从图中移除，但写回可能被拦截，请查看图谱状态",
-      "ST-BME",
-    );
-  } else {
-    toastr.success("节点已删除", "ST-BME");
-  }
-  _closeNodeDetailUi();
-  const dDesk = document.getElementById("bme-node-detail");
-  const dMob = document.getElementById("bme-mobile-node-detail");
-  if (dDesk) delete dDesk.dataset.editNodeId;
-  if (dMob) delete dMob.dataset.editNodeId;
-  graphRenderer?.highlightNode?.("__cleared__");
-  mobileGraphRenderer?.highlightNode?.("__cleared__");
-  refreshLiveState();
+
+  _deleteGraphNodeById(nodeId, {
+    afterSuccess: () => {
+      _closeNodeDetailUi();
+      const dDesk = document.getElementById("bme-node-detail");
+      const dMob = document.getElementById("bme-mobile-node-detail");
+      if (dDesk) delete dDesk.dataset.editNodeId;
+      if (dMob) delete dMob.dataset.editNodeId;
+      graphRenderer?.highlightNode?.("__cleared__");
+      mobileGraphRenderer?.highlightNode?.("__cleared__");
+    },
+  });
 }
 
 function _bindClose() {
