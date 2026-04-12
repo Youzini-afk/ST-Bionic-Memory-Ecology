@@ -1257,6 +1257,12 @@
   flex: 0 0 auto;
 }
 
+.bme-memory-list-filters .bme-floor-input {
+  max-width: 120px;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
 .bme-memory-list-scroll {
   flex: 1;
   overflow-y: auto;
