@@ -1192,6 +1192,12 @@ export async function onDeleteCurrentIdbController(runtime) {
         req.onblocked = () => resolve();
       });
     }
+    runtime.clearCachedIndexedDbSnapshot?.(chatId);
+    runtime.syncGraphLoadFromLiveContext?.({
+      source: "manual-delete-current-idb",
+      force: true,
+    });
+    runtime.refreshPanelLiveState?.();
     runtime.toastr.success(`已删除数据库 ${dbName}`);
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);
@@ -1211,6 +1217,7 @@ export async function onDeleteAllIdbController(runtime) {
   }
 
   try {
+    await runtime.closeAllBmeDbs?.();
     const databases = await indexedDB.databases();
     const bmeDbs = databases.filter((db) =>
       String(db.name || "").startsWith("STBME_"),
@@ -1235,6 +1242,15 @@ export async function onDeleteAllIdbController(runtime) {
       }
     }
 
+    runtime.clearAllCachedIndexedDbSnapshots?.();
+    const activeChatId = runtime.getCurrentChatId?.();
+    if (activeChatId) {
+      runtime.syncGraphLoadFromLiveContext?.({
+        source: "manual-delete-all-idb",
+        force: true,
+      });
+    }
+    runtime.refreshPanelLiveState?.();
     runtime.toastr.success(`已删除 ${deletedCount}/${bmeDbs.length} 个 BME 数据库`);
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);

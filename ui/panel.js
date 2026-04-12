@@ -7993,7 +7993,7 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">一致性异常</span>
-        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.persistMismatchReason || "—")}</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatPersistMismatchReason(graphPersistence.persistMismatchReason))}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">Commit Marker</span>
@@ -9839,6 +9839,27 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
   }
 }
 
+function _formatPersistMismatchReason(reason = "") {
+  const normalized = String(reason || "").trim();
+  if (!normalized) return "—";
+  switch (normalized) {
+    case "persist-mismatch:indexeddb-behind-commit-marker":
+      return "本地 IndexedDB 缓存版本落后于当前聊天已确认版本";
+    default:
+      return normalized;
+  }
+}
+
+function _formatPersistMismatchHelp(reason = "") {
+  const normalized = String(reason || "").trim();
+  switch (normalized) {
+    case "persist-mismatch:indexeddb-behind-commit-marker":
+      return "当前聊天记录显示图谱已经确认到更高版本，但本地 IndexedDB 里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
+    default:
+      return `检测到持久化一致性异常：${_formatPersistMismatchReason(normalized)}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
+  }
+}
+
 function _hasMeaningfulPersistenceRecord(persistence = null) {
   if (!persistence || typeof persistence !== "object") return false;
   if (persistence.attempted === true) return true;
@@ -9895,14 +9916,14 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
       Number.isFinite(Number(dualWrite.revision)) && Number(dualWrite.revision) > 0
         ? `rev ${Number(dualWrite.revision)}`
         : "",
-      dualWrite.reason || dualWrite.error || "",
+      _formatPersistMismatchReason(dualWrite.reason || dualWrite.error || ""),
     ]
       .filter(Boolean)
       .join(" · ");
   }
 
   if (loadInfo?.persistMismatchReason) {
-    return `一致性异常 · ${String(loadInfo.persistMismatchReason || "")}`;
+    return `一致性异常 · ${_formatPersistMismatchReason(loadInfo.persistMismatchReason)}`;
   }
 
   if (String(batchStatus?.outcome || "") === "failed") {
@@ -9930,7 +9951,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   }
 
   if (loadInfo?.persistMismatchReason) {
-    return `持久化一致性异常：${String(loadInfo.persistMismatchReason || "")} · 已确认楼层 ${lastConfirmedFloor}`;
+    return `持久化一致性异常：${_formatPersistMismatchReason(loadInfo.persistMismatchReason)} · 已确认楼层 ${lastConfirmedFloor}`;
   }
 
   if (String(batchStatus?.outcome || "") === "failed") {
@@ -9992,8 +10013,7 @@ function _refreshPersistenceRepairUi(
   }
 
   if (loadInfo?.persistMismatchReason) {
-    help.textContent =
-      `检测到持久化一致性异常：${String(loadInfo.persistMismatchReason || "")}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
+    help.textContent = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
     return;
   }
 

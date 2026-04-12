@@ -2157,6 +2157,45 @@ result = {
   );
 }
 
+ {
+   const commitMarker = buildGraphCommitMarker(
+     createMeaningfulGraph("chat-indexeddb-empty-mismatch-fallback", "marker"),
+     {
+       revision: 4,
+       storageTier: "indexeddb",
+       accepted: true,
+       reason: "test-empty-mismatch",
+       chatId: "chat-indexeddb-empty-mismatch-fallback",
+       integrity: "meta-indexeddb-empty-mismatch-fallback",
+     },
+   );
+   const harness = await createGraphPersistenceHarness({
+     chatId: "chat-indexeddb-empty-mismatch-fallback",
+     globalChatId: "chat-indexeddb-empty-mismatch-fallback",
+     chatMetadata: {
+       integrity: "meta-indexeddb-empty-mismatch-fallback",
+       [GRAPH_COMMIT_MARKER_KEY]: commitMarker,
+     },
+   });
+
+   const result = harness.api.loadGraphFromChat({
+     attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+     source: "indexeddb-empty-mismatch-fallback",
+   });
+   await new Promise((resolve) => setTimeout(resolve, 0));
+
+   assert.equal(result.loadState, "loading");
+   assert.equal(
+     harness.api.getGraphPersistenceState().loadState,
+     "blocked",
+     "IndexedDB 空快照但 accepted commit marker 更高时，重试耗尽后不应永久停留在 loading",
+   );
+   assert.equal(
+     harness.api.getGraphPersistenceState().reason,
+     "persist-mismatch:indexeddb-behind-commit-marker",
+   );
+ }
+
 {
   const harness = await createGraphPersistenceHarness({
     chatId: "chat-create-first-graph",

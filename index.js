@@ -4747,6 +4747,18 @@ function readCachedIndexedDbSnapshot(chatId) {
   return cacheEntry.snapshot;
 }
 
+function clearCachedIndexedDbSnapshot(chatId) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return false;
+  return bmeIndexedDbSnapshotCacheByChatId.delete(normalizedChatId);
+}
+
+function clearAllCachedIndexedDbSnapshots() {
+  const hadEntries = bmeIndexedDbSnapshotCacheByChatId.size > 0;
+  bmeIndexedDbSnapshotCacheByChatId.clear();
+  return hadEntries;
+}
+
 function cacheChatStateSnapshot(chatId, snapshot = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
@@ -7888,8 +7900,11 @@ function reconcileIndexedDbProbeFailureState(
     return result;
   }
 
+  const isIndexedDbProbeFailureReason =
+    normalizedReason.startsWith("indexeddb-") ||
+    normalizedReason.startsWith("persist-mismatch:indexeddb-");
   if (
-    !normalizedReason.startsWith("indexeddb-") ||
+    !isIndexedDbProbeFailureReason ||
     normalizedReason === "indexeddb-stale" ||
     normalizedReason === "indexeddb-chat-switched"
   ) {
@@ -13656,6 +13671,7 @@ const _cleanupRuntime = () => ({
   refreshPanelLiveState,
   removeNode: (graph, nodeId) => removeNode(graph, nodeId),
   saveGraphToChat,
+  syncGraphLoadFromLiveContext,
   setCurrentGraph: (graph) => { currentGraph = graph; },
   setExtractionCount: (count) => {
     if (currentGraph?.historyState) {
@@ -13666,7 +13682,24 @@ const _cleanupRuntime = () => ({
   buildBmeDbName,
   buildRestoreSafetyDbName: (chatId) =>
     buildBmeDbName(buildRestoreSafetyChatId(chatId)),
-  closeBmeDb: null,
+  closeBmeDb: async (chatId) => {
+    const normalizedChatId = normalizeChatIdCandidate(chatId);
+    if (!normalizedChatId || !bmeChatManager) return;
+    if (
+      typeof bmeChatManager.getCurrentChatId === "function" &&
+      bmeChatManager.getCurrentChatId() === normalizedChatId &&
+      typeof bmeChatManager.closeCurrent === "function"
+    ) {
+      await bmeChatManager.closeCurrent();
+    }
+  },
+  closeAllBmeDbs: async () => {
+    if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
+      await bmeChatManager.closeAll();
+    }
+  },
+  clearCachedIndexedDbSnapshot,
+  clearAllCachedIndexedDbSnapshots,
   deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
     fetch: globalThis.fetch?.bind(globalThis),
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
