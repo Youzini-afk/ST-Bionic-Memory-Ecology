@@ -3967,6 +3967,27 @@ function _bindActions() {
     rollbackLastRestore: "\u56de\u6eda\u4e0a\u6b21\u6062\u590d",
   };
 
+  const manualCloudFabBehaviors = {
+    backupToCloud: {
+      successStatus: "cloud-success",
+      successTooltip: "备份云端完成",
+      errorTooltip: "备份到云端失败",
+    },
+    restoreFromCloud: {
+      successStatus: "cloud-success",
+      successTooltip: "云端备份已提取",
+      errorTooltip: "从云端获取备份失败",
+    },
+    manageServerBackups: {
+      suppressFab: true,
+    },
+    rollbackLastRestore: {
+      successStatus: "cloud-success",
+      successTooltip: "回滚完成",
+      errorTooltip: "回滚上次恢复失败",
+    },
+  };
+
   for (const [elementId, actionKey] of Object.entries(bindings)) {
     const btn = document.getElementById(elementId);
     if (!btn) continue;
@@ -3979,6 +4000,8 @@ function _bindActions() {
       if (!handler) return;
 
       const label = actionLabels[actionKey] || actionKey;
+      const fabBehavior = manualCloudFabBehaviors[actionKey] || null;
+      const suppressFab = fabBehavior?.suppressFab === true;
 
       // 防止重复点击
       if (btn.disabled) return;
@@ -3986,11 +4009,17 @@ function _bindActions() {
       btn.style.opacity = "0.5";
 
       _showActionProgressUi(label);
+      if (suppressFab) {
+        _syncFloatingBallWithRuntimeStatus();
+      }
       toastr.info(`${label} 进行中…`, "ST-BME", { timeOut: 2000 });
 
       try {
         const result = await handler();
         if (result?.cancelled) {
+          if (!suppressFab) {
+            _syncFloatingBallWithRuntimeStatus();
+          }
           return;
         }
         if (!result?.skipDashboardRefresh) {
@@ -4014,9 +4043,21 @@ function _bindActions() {
         if (!result?.handledToast) {
           toastr.success(`${label} 完成`, "ST-BME");
         }
+        if (fabBehavior?.successTooltip) {
+          updateFloatingBallStatus(
+            fabBehavior.successStatus || "success",
+            fabBehavior.successTooltip,
+          );
+        }
         void _refreshCloudBackupManualUi();
       } catch (error) {
         console.error(`[ST-BME] Action ${actionKey} failed:`, error);
+        if (!suppressFab) {
+          updateFloatingBallStatus(
+            fabBehavior?.errorStatus || "error",
+            fabBehavior?.errorTooltip || `${label}失败`,
+          );
+        }
         if (!error?._stBmeToastHandled) {
           toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
         }
@@ -10190,6 +10231,13 @@ function _showActionProgressUi(label, meta = "请稍候…") {
   _setText("bme-status-meta", meta);
   _setText("bme-panel-status", `${label}中`);
   updateFloatingBallStatus("running", `${label}中`);
+}
+
+function _syncFloatingBallWithRuntimeStatus() {
+  const status = _getRuntimeStatus?.() || {};
+  const level = String(status.level || "idle");
+  const fabStatus = level === "info" ? "idle" : level;
+  updateFloatingBallStatus(fabStatus, status.text || "BME 记忆图谱");
 }
 
 function _patchSettings(patch = {}, options = {}) {
