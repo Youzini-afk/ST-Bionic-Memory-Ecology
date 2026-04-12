@@ -328,10 +328,12 @@ function isPromptMessageArray(value) {
   );
 }
 
-const EXTRACTION_CONTEXT_REVIEW_HEADER =
+export const EXTRACTION_CONTEXT_REVIEW_HEADER =
   "--- 以下是上下文回顾（已提取过），仅供理解剧情 ---";
-const EXTRACTION_TARGET_CONTENT_HEADER =
+export const EXTRACTION_TARGET_CONTENT_HEADER =
   "--- 以下是本次需要提取记忆的新对话内容 ---";
+export const RECALL_TARGET_CONTENT_HEADER =
+  "--- 以下是本次需要召回记忆的新对话内容 ---";
 
 function getPromptMessageContextGroup(value) {
   const descriptor = getPromptMessageLikeDescriptor(value);
@@ -1927,11 +1929,16 @@ function splitSectionedTranscriptPayloadMessage(message = {}) {
   const normalizedRole = normalizeRole(message?.role);
   const sourceKey = String(message?.sourceKey || "").trim();
   const content = String(message?.content || "").trim();
+  const targetSectionHeader = content.includes(RECALL_TARGET_CONTENT_HEADER)
+    ? RECALL_TARGET_CONTENT_HEADER
+    : content.includes(EXTRACTION_TARGET_CONTENT_HEADER)
+      ? EXTRACTION_TARGET_CONTENT_HEADER
+      : "";
   if (
     normalizedRole !== "system" ||
     !["recentMessages", "dialogueText"].includes(sourceKey) ||
     !content.includes(EXTRACTION_CONTEXT_REVIEW_HEADER) ||
-    !content.includes(EXTRACTION_TARGET_CONTENT_HEADER)
+    !targetSectionHeader
   ) {
     return [message];
   }
@@ -1943,10 +1950,9 @@ function splitSectionedTranscriptPayloadMessage(message = {}) {
       EXTRACTION_CONTEXT_REVIEW_HEADER,
       searchIndex,
     );
-    const targetIndex = content.indexOf(
-      EXTRACTION_TARGET_CONTENT_HEADER,
-      searchIndex,
-    );
+    const targetIndex = targetSectionHeader
+      ? content.indexOf(targetSectionHeader, searchIndex)
+      : -1;
     let nextIndex = -1;
     let nextHeader = "";
     if (contextIndex >= 0 && (targetIndex < 0 || contextIndex <= targetIndex)) {
@@ -1954,7 +1960,7 @@ function splitSectionedTranscriptPayloadMessage(message = {}) {
       nextHeader = EXTRACTION_CONTEXT_REVIEW_HEADER;
     } else if (targetIndex >= 0) {
       nextIndex = targetIndex;
-      nextHeader = EXTRACTION_TARGET_CONTENT_HEADER;
+      nextHeader = targetSectionHeader;
     }
     if (nextIndex < 0 || !nextHeader) {
       break;

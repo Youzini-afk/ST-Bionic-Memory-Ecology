@@ -16,6 +16,8 @@ import {
   buildTaskExecutionDebugContext,
   buildTaskLlmPayload,
   buildTaskPrompt,
+  EXTRACTION_CONTEXT_REVIEW_HEADER,
+  RECALL_TARGET_CONTENT_HEADER,
 } from "../prompting/prompt-builder.js";
 import {
   applyCooccurrenceBoost,
@@ -91,6 +93,32 @@ function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
     return String(promptPayload?.systemPrompt || "");
   }
   return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
+}
+
+function buildRecallSectionedTranscript(recentMessages = []) {
+  const lines = (Array.isArray(recentMessages) ? recentMessages : [])
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "";
+  }
+
+  const targetLines = [lines[lines.length - 1]].filter(Boolean);
+  const contextLines = lines.slice(0, -1).filter(Boolean);
+  const sections = [];
+
+  if (contextLines.length > 0) {
+    sections.push(
+      `${EXTRACTION_CONTEXT_REVIEW_HEADER}\n\n${contextLines.join("\n---\n")}`,
+    );
+  }
+  if (targetLines.length > 0) {
+    sections.push(
+      `${RECALL_TARGET_CONTENT_HEADER}\n\n${targetLines.join("\n---\n")}`,
+    );
+  }
+
+  return sections.join("\n\n");
 }
 
 function buildRecallFallbackReason(llmResult) {
@@ -2153,6 +2181,8 @@ async function llmRecall(
 ) {
   throwIfAborted(signal);
   const contextStr = recentMessages.join("\n---\n");
+  const sectionedContextStr =
+    buildRecallSectionedTranscript(recentMessages) || contextStr;
   const sceneOwnerCandidateText = buildSceneOwnerCandidateText(sceneOwnerCandidates);
   const {
     candidateKeyToNodeId,
@@ -2177,7 +2207,7 @@ async function llmRecall(
 
   const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
     taskName: "recall",
-    recentMessages: contextStr || "(无)",
+    recentMessages: sectionedContextStr || "(无)",
     userMessage,
     candidateNodes: candidateDescriptions,
     candidateText: candidateDescriptions,
@@ -2212,7 +2242,7 @@ async function llmRecall(
     activeStoryTimeLabel || "(未确定)",
     "",
     "## 最近对话上下文",
-    contextStr || "(无)",
+    sectionedContextStr || contextStr || "(无)",
     "",
     "## 用户最新输入",
     userMessage,

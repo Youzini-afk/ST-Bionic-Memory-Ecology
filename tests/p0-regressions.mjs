@@ -162,6 +162,7 @@ const {
   generateSynopsis,
 } = await import("../maintenance/extractor.js");
 const { consolidateMemories } = await import("../maintenance/consolidator.js");
+const { retrieve } = await import("../retrieval/retriever.js");
 const {
   createBatchJournalEntry,
   buildReverseJournalRecoveryPlan,
@@ -169,6 +170,10 @@ const {
   rollbackBatch,
 } = await import("../runtime/runtime-state.js");
 const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
+const {
+  EXTRACTION_CONTEXT_REVIEW_HEADER,
+  RECALL_TARGET_CONTENT_HEADER,
+} = await import("../prompting/prompt-builder.js");
 const extensionsApi = await import("../../../../extensions.js");
 const llm = await import("../llm/llm.js");
 const embedding = await import("../vector/embedding.js");
@@ -6238,6 +6243,84 @@ async function testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt() {
   }
 }
 
+async function testRecallUsesSectionedPromptMessagesForContextAndTarget() {
+  const graph = createEmptyGraph();
+  addNode(graph, makeEvent(1, "仓库争执"));
+  addNode(graph, makeEvent(2, "走廊追问"));
+
+  const captured = [];
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON(params = {}) {
+        captured.push(params);
+        return {
+          selected_keys: ["R1"],
+          reason: "R1: 与当前追问直接相关",
+          active_owner_keys: [],
+          active_owner_scores: [],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await retrieve({
+      graph,
+      userMessage: "她为什么突然改口？",
+      recentMessages: [
+        "[assistant]: 她先否认自己去过仓库。",
+        "[user]: 我记得她当时很紧张。",
+        "[user]: 她为什么突然改口？",
+      ],
+      embeddingConfig: null,
+      schema,
+      settings: {
+        taskProfilesVersion: 3,
+        taskProfiles: createDefaultTaskProfiles(),
+      },
+      options: {
+        topK: 4,
+        maxRecallNodes: 2,
+        enableLLMRecall: true,
+        enableVectorPrefilter: false,
+        enableGraphDiffusion: false,
+        llmCandidatePool: 2,
+        enableScopedMemory: false,
+        enablePovMemory: false,
+        enableRegionScopedObjective: false,
+        enableCognitiveMemory: false,
+        enableSpatialAdjacency: false,
+        enableStoryTimeline: false,
+        injectStoryTimeLabel: false,
+        injectUserPovMemory: false,
+        injectObjectiveGlobalMemory: false,
+        enableContextQueryBlend: true,
+      },
+    });
+
+    assert.ok(Array.isArray(result?.selectedNodeIds));
+    assert.equal(captured.length, 1);
+    const promptMessages = Array.isArray(captured[0].promptMessages)
+      ? captured[0].promptMessages
+      : [];
+    const recentMessageSections = promptMessages.filter(
+      (message) => message.sourceKey === "recentMessages",
+    );
+    assert.equal(recentMessageSections.length, 2);
+    assert.equal(recentMessageSections[0].role, "system");
+    assert.equal(recentMessageSections[1].role, "system");
+    assert.equal(recentMessageSections[0].transcriptSection, "context");
+    assert.equal(recentMessageSections[1].transcriptSection, "target");
+    assert.match(recentMessageSections[0].content, new RegExp(EXTRACTION_CONTEXT_REVIEW_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(recentMessageSections[1].content, new RegExp(RECALL_TARGET_CONTENT_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(recentMessageSections[0].content, /她先否认自己去过仓库/);
+    assert.match(recentMessageSections[0].content, /我记得她当时很紧张/);
+    assert.match(recentMessageSections[1].content, /她为什么突然改口/);
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt() {
   const graph = createEmptyGraph();
   addNode(
@@ -6736,6 +6819,7 @@ await testLlmDebugSnapshotRedactsSecretsBeforeStorage();
 await testEmbeddingUsesConfigTimeoutInsteadOfDefault();
 await testLlmOutputRegexCleansResponseBeforeJsonParse();
 await testSynopsisUsesPromptMessagesWithoutFallbackSystemPrompt();
+await testRecallUsesSectionedPromptMessagesForContextAndTarget();
 await testReflectionUsesPromptMessagesWithoutFallbackSystemPrompt();
 await testManualCompressSkipsWithoutCandidatesAndDoesNotPretendItRan();
 await testManualCompressUsesForcedCompressionAndPersistsRealMutation();
