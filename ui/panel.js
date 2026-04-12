@@ -14,9 +14,8 @@ import {
 import { listKnowledgeOwners } from "../graph/knowledge-state.js";
 import { getHostUserAliasHints } from "../runtime/user-alias-utils.js";
 import {
-  describeNodeStoryTime,
-  describeStoryTime,
-  describeStoryTimeSpan,
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
 } from "../graph/story-timeline.js";
 import {
   compareSummaryEntriesForDisplay,
@@ -2442,7 +2441,7 @@ function _formatSummaryEntryCard(entry = {}) {
   const extractionRange = Array.isArray(entry?.extractionRange)
     ? entry.extractionRange
     : ["?", "?"];
-  const spanLabel = describeStoryTimeSpan(entry?.storyTimeSpan);
+  const spanLabel = _describeStoryTimeSpanDisplay(entry?.storyTimeSpan);
   const meta = [
     `L${Math.max(0, Number(entry?.level || 0))}`,
     String(entry?.kind || "small"),
@@ -3795,6 +3794,102 @@ function _bindGraphControls() {
 
 // ==================== 节点详情 ====================
 
+const STORY_TIME_TENSE_OPTIONS = Object.freeze([
+  { value: "past", label: "过去" },
+  { value: "ongoing", label: "进行中" },
+  { value: "future", label: "未来" },
+  { value: "flashback", label: "闪回" },
+  { value: "hypothetical", label: "假设" },
+  { value: "unknown", label: "未知" },
+]);
+
+const STORY_TIME_RELATION_OPTIONS = Object.freeze([
+  { value: "same", label: "同一时点" },
+  { value: "after", label: "在锚点之后" },
+  { value: "before", label: "在锚点之前" },
+  { value: "parallel", label: "与锚点并行" },
+  { value: "unknown", label: "未知" },
+]);
+
+const STORY_TIME_CONFIDENCE_OPTIONS = Object.freeze([
+  { value: "high", label: "高" },
+  { value: "medium", label: "中" },
+  { value: "low", label: "低" },
+]);
+
+const STORY_TIME_SOURCE_OPTIONS = Object.freeze([
+  { value: "extract", label: "提取" },
+  { value: "derived", label: "推导" },
+  { value: "manual", label: "手动" },
+]);
+
+const STORY_TIME_MIXED_OPTIONS = Object.freeze([
+  { value: "false", label: "否" },
+  { value: "true", label: "是" },
+]);
+
+function _resolveNodeDetailOptionLabel(options = [], value, fallback = "") {
+  return (
+    options.find((option) => option.value === String(value ?? ""))?.label ||
+    fallback ||
+    String(value ?? "")
+  );
+}
+
+function _describeStoryTimeDisplay(storyTime = {}) {
+  const normalized = normalizeStoryTime(storyTime);
+  if (!normalized.label) return "";
+
+  const parts = [normalized.label];
+  if (normalized.tense && normalized.tense !== "unknown") {
+    parts.push(
+      _resolveNodeDetailOptionLabel(STORY_TIME_TENSE_OPTIONS, normalized.tense),
+    );
+  }
+  if (
+    normalized.relation &&
+    normalized.relation !== "unknown" &&
+    normalized.relation !== "same"
+  ) {
+    const relationLabel = _resolveNodeDetailOptionLabel(
+      STORY_TIME_RELATION_OPTIONS,
+      normalized.relation,
+    );
+    parts.push(
+      normalized.anchorLabel
+        ? `${relationLabel} · ${normalized.anchorLabel}`
+        : relationLabel,
+    );
+  } else if (normalized.anchorLabel) {
+    parts.push(`锚点 · ${normalized.anchorLabel}`);
+  }
+
+  return parts.join(" · ");
+}
+
+function _describeStoryTimeSpanDisplay(storyTimeSpan = {}) {
+  const normalized = normalizeStoryTimeSpan(storyTimeSpan);
+  const label =
+    normalized.startLabel &&
+    normalized.endLabel &&
+    normalized.startLabel !== normalized.endLabel
+      ? `${normalized.startLabel} → ${normalized.endLabel}`
+      : normalized.startLabel || normalized.endLabel || "";
+
+  if (!label) {
+    return normalized.mixed ? "混合时间" : "";
+  }
+  return normalized.mixed ? `${label} · 混合` : label;
+}
+
+function _describeNodeStoryTimeDisplay(node = {}) {
+  return (
+    _describeStoryTimeDisplay(node.storyTime) ||
+    _describeStoryTimeSpanDisplay(node.storyTimeSpan) ||
+    ""
+  );
+}
+
 function _appendNodeDetailReadOnly(container, labelText, valueText) {
   const row = document.createElement("div");
   row.className = "bme-node-detail-field";
@@ -3847,6 +3942,32 @@ function _appendNodeDetailTextInput(container, labelText, inputId, value) {
   container.appendChild(row);
 }
 
+function _appendNodeDetailSelectInput(
+  container,
+  labelText,
+  inputId,
+  value,
+  options = [],
+) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.setAttribute("for", inputId);
+  label.textContent = labelText;
+  const select = document.createElement("select");
+  select.id = inputId;
+  select.className = "bme-node-detail-input";
+  options.forEach((option) => {
+    const optEl = document.createElement("option");
+    optEl.value = option.value;
+    optEl.textContent = option.label;
+    select.appendChild(optEl);
+  });
+  select.value = String(value ?? "");
+  row.append(label, select);
+  container.appendChild(row);
+}
+
 function _parseNodeDetailScopeList(rawValue, { allowSlash = true } = {}) {
   const normalized = String(rawValue ?? "")
     .replace(/[＞>→]+/g, "/")
@@ -3883,6 +4004,8 @@ function _appendNodeDetailTextareaField(
 function _buildNodeDetailEditorFragment(raw, { idPrefix = "bme-detail" } = {}) {
   const fields = raw.fields || {};
   const scope = normalizeMemoryScope(raw.scope);
+  const storyTime = normalizeStoryTime(raw.storyTime);
+  const storyTimeSpan = normalizeStoryTimeSpan(raw.storyTimeSpan);
   const fragment = document.createDocumentFragment();
   const inputId = (suffix) => `${idPrefix}-${suffix}`;
 
@@ -3937,19 +4060,108 @@ function _buildNodeDetailEditorFragment(raw, { idPrefix = "bme-detail" } = {}) {
       `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
     );
   }
-  _appendNodeDetailTextareaField(
+  const storyTimeSection = document.createElement("div");
+  storyTimeSection.className = "bme-node-detail-section";
+  storyTimeSection.textContent = "剧情时间";
+  fragment.appendChild(storyTimeSection);
+  _appendNodeDetailReadOnly(
     fragment,
-    "剧情时间",
-    "__storyTime",
-    "json",
-    JSON.stringify(raw.storyTime || {}, null, 2),
+    "当前摘要",
+    _describeStoryTimeDisplay(storyTime) || "—",
   );
-  _appendNodeDetailTextareaField(
+  _appendNodeDetailTextInput(
     fragment,
-    "剧情时间范围",
-    "__storyTimeSpan",
-    "json",
-    JSON.stringify(raw.storyTimeSpan || {}, null, 2),
+    "时间标签",
+    inputId("story-time-label"),
+    storyTime.label,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "时态",
+    inputId("story-time-tense"),
+    storyTime.tense,
+    STORY_TIME_TENSE_OPTIONS,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "相对关系",
+    inputId("story-time-relation"),
+    storyTime.relation,
+    STORY_TIME_RELATION_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "锚点标签",
+    inputId("story-time-anchor-label"),
+    storyTime.anchorLabel,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "置信度",
+    inputId("story-time-confidence"),
+    storyTime.confidence,
+    STORY_TIME_CONFIDENCE_OPTIONS,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "来源",
+    inputId("story-time-source"),
+    storyTime.source,
+    STORY_TIME_SOURCE_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "段 ID",
+    inputId("story-time-segment-id"),
+    storyTime.segmentId,
+  );
+
+  const storyTimeSpanSection = document.createElement("div");
+  storyTimeSpanSection.className = "bme-node-detail-section";
+  storyTimeSpanSection.textContent = "剧情时间范围";
+  fragment.appendChild(storyTimeSpanSection);
+  _appendNodeDetailReadOnly(
+    fragment,
+    "当前范围",
+    _describeStoryTimeSpanDisplay(storyTimeSpan) || "—",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "起点标签",
+    inputId("story-time-span-start-label"),
+    storyTimeSpan.startLabel,
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "终点标签",
+    inputId("story-time-span-end-label"),
+    storyTimeSpan.endLabel,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "混合时间",
+    inputId("story-time-span-mixed"),
+    storyTimeSpan.mixed ? "true" : "false",
+    STORY_TIME_MIXED_OPTIONS,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "来源",
+    inputId("story-time-span-source"),
+    storyTimeSpan.source,
+    STORY_TIME_SOURCE_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "起点段 ID",
+    inputId("story-time-span-start-segment-id"),
+    storyTimeSpan.startSegmentId,
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "终点段 ID",
+    inputId("story-time-span-end-segment-id"),
+    storyTimeSpan.endSegmentId,
   );
 
   _appendNodeDetailNumberInput(
@@ -4043,24 +4255,66 @@ function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {
     };
   }
 
+  const storyTimeLabelEl = findInput("story-time-label");
+  const storyTimeTenseEl = findInput("story-time-tense");
+  const storyTimeRelationEl = findInput("story-time-relation");
+  const storyTimeAnchorLabelEl = findInput("story-time-anchor-label");
+  const storyTimeConfidenceEl = findInput("story-time-confidence");
+  const storyTimeSourceEl = findInput("story-time-source");
+  const storyTimeSegmentIdEl = findInput("story-time-segment-id");
+  if (
+    storyTimeLabelEl ||
+    storyTimeTenseEl ||
+    storyTimeRelationEl ||
+    storyTimeAnchorLabelEl ||
+    storyTimeConfidenceEl ||
+    storyTimeSourceEl ||
+    storyTimeSegmentIdEl
+  ) {
+    updates.storyTime = normalizeStoryTime({
+      segmentId: String(storyTimeSegmentIdEl?.value || "").trim(),
+      label: String(storyTimeLabelEl?.value || "").trim(),
+      tense: String(storyTimeTenseEl?.value || ""),
+      relation: String(storyTimeRelationEl?.value || ""),
+      anchorLabel: String(storyTimeAnchorLabelEl?.value || "").trim(),
+      confidence: String(storyTimeConfidenceEl?.value || ""),
+      source: String(storyTimeSourceEl?.value || ""),
+    });
+  }
+
+  const storyTimeSpanStartLabelEl = findInput("story-time-span-start-label");
+  const storyTimeSpanEndLabelEl = findInput("story-time-span-end-label");
+  const storyTimeSpanMixedEl = findInput("story-time-span-mixed");
+  const storyTimeSpanSourceEl = findInput("story-time-span-source");
+  const storyTimeSpanStartSegmentIdEl = findInput(
+    "story-time-span-start-segment-id",
+  );
+  const storyTimeSpanEndSegmentIdEl = findInput(
+    "story-time-span-end-segment-id",
+  );
+  if (
+    storyTimeSpanStartLabelEl ||
+    storyTimeSpanEndLabelEl ||
+    storyTimeSpanMixedEl ||
+    storyTimeSpanSourceEl ||
+    storyTimeSpanStartSegmentIdEl ||
+    storyTimeSpanEndSegmentIdEl
+  ) {
+    updates.storyTimeSpan = normalizeStoryTimeSpan({
+      startSegmentId: String(storyTimeSpanStartSegmentIdEl?.value || "").trim(),
+      endSegmentId: String(storyTimeSpanEndSegmentIdEl?.value || "").trim(),
+      startLabel: String(storyTimeSpanStartLabelEl?.value || "").trim(),
+      endLabel: String(storyTimeSpanEndLabelEl?.value || "").trim(),
+      mixed: String(storyTimeSpanMixedEl?.value || "false") === "true",
+      source: String(storyTimeSpanSourceEl?.value || ""),
+    });
+  }
+
   const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
   for (const el of fieldEls) {
     const key = el.dataset.bmeFieldKey;
     const type = el.dataset.bmeFieldType || "string";
     const rawVal = el.value;
-    if (key === "__storyTime" || key === "__storyTimeSpan") {
-      try {
-        updates[key === "__storyTime" ? "storyTime" : "storyTimeSpan"] = JSON.parse(
-          rawVal || "{}",
-        );
-      } catch {
-        return {
-          ok: false,
-          errorMessage: `字段「${key === "__storyTime" ? "剧情时间" : "剧情时间范围"}」须为合法 JSON`,
-        };
-      }
-      continue;
-    }
     if (type === "json") {
       try {
         updates.fields[key] = JSON.parse(rawVal || "null");
@@ -11374,7 +11628,7 @@ function _buildScopeMetaText(node) {
   }
   const regionLine = buildRegionLine(scope);
   if (regionLine) parts.push(regionLine);
-  const storyTime = describeNodeStoryTime(node);
+  const storyTime = _describeNodeStoryTimeDisplay(node);
   if (storyTime) parts.push(`剧情时间: ${storyTime}`);
   return parts.join(" · ");
 }
@@ -11416,7 +11670,7 @@ function _typeLabel(type) {
 
 function _getNodeSnippet(node) {
   const fields = node.fields || {};
-  const storyTime = describeNodeStoryTime(node);
+  const storyTime = _describeNodeStoryTimeDisplay(node);
   if (fields.summary) return fields.summary;
   if (fields.state) return fields.state;
   if (fields.constraint) return fields.constraint;
