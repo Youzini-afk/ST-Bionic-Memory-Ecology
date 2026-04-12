@@ -26,8 +26,8 @@ const TASK_TYPE_META = {
     description: "合并并压缩高层节点内容。",
   },
   synopsis: {
-    label: "概要",
-    description: "生成阶段性的全局剧情提要。",
+    label: "小总结",
+    description: "基于近期原文窗口生成阶段性小总结。",
   },
   summary_rollup: {
     label: "总结折叠",

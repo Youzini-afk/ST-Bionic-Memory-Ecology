@@ -3163,7 +3163,7 @@ function _buildLegend() {
     { key: "location", label: "地点" },
     { key: "thread", label: "主线" },
     { key: "rule", label: "规则" },
-    { key: "synopsis", label: "概要" },
+    { key: "synopsis", label: "全局概要（旧）" },
     { key: "reflection", label: "反思" },
     { key: "pov_memory", label: "主观记忆" },
   ];
@@ -10783,7 +10783,7 @@ function _typeLabel(type) {
     location: "地点",
     thread: "主线",
     rule: "规则",
-    synopsis: "概要",
+    synopsis: "全局概要（旧）",
     reflection: "反思",
     pov_memory: "主观记忆",
   };

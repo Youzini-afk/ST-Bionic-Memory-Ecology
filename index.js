@@ -11041,7 +11041,7 @@ async function handleExtractionSuccess(
     typeof runHierarchicalSummaryPostProcess === "function"
       ? "层级总结"
       : typeof generateSynopsis === "function"
-        ? "概要生成"
+        ? "旧式全局概要生成"
         : "层级总结";
   const cloneMaintenanceSnapshot =
     typeof cloneGraphSnapshot === "function"
@@ -11163,9 +11163,9 @@ async function handleExtractionSuccess(
           ? getContext().chat
           : [];
       updateExtractionPostProcessStatus(
-        summaryStageLabel === "概要生成" ? "概要更新中" : "层级总结处理中",
-        summaryStageLabel === "概要生成"
-          ? `${extractionCount} 次提取，正在生成全局概要`
+        summaryStageLabel === "旧式全局概要生成" ? "旧式全局概要更新中" : "层级总结处理中",
+        summaryStageLabel === "旧式全局概要生成"
+          ? `${extractionCount} 次提取，正在生成旧式全局概要`
           : `${extractionCount} 次提取，正在检查小总结与折叠总结`,
       );
       const summaryResult = await runSummaryPostProcess({

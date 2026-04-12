@@ -149,15 +149,15 @@ export const DEFAULT_NODE_SCHEMA = [
   // ====== v2 新增节点类型 ======
   {
     id: "synopsis",
-    label: "全局概要",
+    label: "全局概要（旧）",
     tableName: "synopsis_table",
     columns: [
       {
         name: "summary",
-        hint: "当前故事的全局概要（前情提要）",
+        hint: "旧式单条全局前情提要（兼容 / 迁移兜底）",
         required: true,
       },
-      { name: "scope", hint: "概要覆盖的楼层范围", required: false },
+      { name: "scope", hint: "该旧式概要覆盖的楼层范围", required: false },
     ],
     alwaysInject: true, // 常驻注入（MemoRAG 启发）
     latestOnly: true, // 只保留最新版本

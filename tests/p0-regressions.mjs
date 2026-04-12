@@ -225,7 +225,7 @@ const schema = [
   },
   {
     id: "synopsis",
-    label: "概要",
+    label: "全局概要（旧）",
     columns: [{ name: "summary" }, { name: "scope" }],
   },
 ];
@@ -2108,10 +2108,10 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
   const restoreOverrides = pushTestOverrides({
     embedding: {
       async embedBatch() {
-        return [[0.2, 0.3]];
+        return [[0.4, 0.5]];
       },
       async embedText() {
-        return [0.2, 0.3];
+        return [0.4, 0.5];
       },
       searchSimilar() {
         return [{ nodeId: target.id, score: 0.99 }];
@@ -2600,7 +2600,7 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
 
   const journal = createBatchJournalEntry(before, after, {
     processedRange: [4, 6],
-    extractionCountBefore: before.historyState.extractionCount,
+    vectorHashesInserted: ["hash_added"],
   });
 
   const runtimeGraph = normalizeGraphRuntimeState(
@@ -2818,7 +2818,7 @@ async function testBatchStatusSemanticFailureDoesNotHideCoreSuccess() {
   assert.equal(effects.batchStatus.stages.finalize.outcome, "success");
   assert.equal(effects.batchStatus.outcome, "failed");
   assert.equal(effects.batchStatus.completed, true);
-  assert.match(effects.batchStatus.errors[0], /概要生成失败/);
+  assert.match(effects.batchStatus.errors[0], /旧式全局概要生成失败/);
 }
 
 async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
@@ -2881,7 +2881,7 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   const statusTexts = harness.extractionStatuses.map((entry) => entry[0]);
   assert.ok(statusTexts.includes("提取收尾中"));
   assert.ok(statusTexts.includes("整合/进化中"));
-  assert.ok(statusTexts.includes("概要更新中"));
+  assert.ok(statusTexts.includes("旧式全局概要更新中"));
   assert.ok(statusTexts.includes("反思生成中"));
   assert.ok(statusTexts.includes("主动遗忘中"));
   assert.ok(statusTexts.includes("自动压缩中"));
