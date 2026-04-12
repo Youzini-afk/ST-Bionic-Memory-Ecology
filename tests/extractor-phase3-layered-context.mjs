@@ -165,6 +165,81 @@ function collectAllPromptContent(captured) {
   }
 }
 
+{
+  const graph = createEmptyGraph();
+  let captured = null;
+  const restore = setTestOverrides({
+    llm: {
+      async callLLMForJSON(payload) {
+        captured = payload;
+        return { operations: [], cognitionUpdates: [], regionUpdates: {} };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [
+        {
+          seq: 10,
+          role: "user",
+          content: "第一轮消息",
+          name: "玩家",
+          speaker: "玩家",
+          isContextOnly: true,
+        },
+        {
+          seq: 11,
+          role: "assistant",
+          content: "第一轮回复",
+          name: "艾琳",
+          speaker: "艾琳",
+          isContextOnly: true,
+        },
+        {
+          seq: 12,
+          role: "user",
+          content: "第二轮消息",
+          name: "玩家",
+          speaker: "玩家",
+          isContextOnly: false,
+        },
+        {
+          seq: 13,
+          role: "assistant",
+          content: "第二轮回复",
+          name: "艾琳",
+          speaker: "艾琳",
+          isContextOnly: false,
+        },
+      ],
+      startSeq: 12,
+      endSeq: 13,
+      schema: DEFAULT_NODE_SCHEMA,
+      embeddingConfig: null,
+      settings: { ...defaultSettings },
+    });
+
+    assert.equal(result.success, true);
+    assert.ok(captured);
+
+    const recentBlock = (Array.isArray(captured.promptMessages) ? captured.promptMessages : []).find(
+      (m) => m.sourceKey === "recentMessages",
+    );
+    assert.ok(recentBlock, "recentMessages block should exist");
+    const recentContent = String(recentBlock?.content || "");
+    assert.match(recentContent, /以下是上下文回顾（已提取过），仅供理解剧情/);
+    assert.match(recentContent, /以下是本次需要提取记忆的新对话内容/);
+    assert.ok(
+      recentContent.indexOf("已提取过") < recentContent.indexOf("本次需要提取"),
+      "context review should appear before extraction target section",
+    );
+  } finally {
+    restore();
+  }
+}
+
 // ── Test 2: extractRecentMessageCap limits messages ──
 {
   const graph = createEmptyGraph();

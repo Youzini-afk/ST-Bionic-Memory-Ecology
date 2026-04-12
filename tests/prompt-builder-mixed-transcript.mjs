@@ -117,6 +117,7 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
       content: "继续说明",
       name: "艾琳",
       speaker: "艾琳",
+      isContextOnly: true,
     },
     {
       seq: 42,
@@ -124,6 +125,7 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
       content: "用户输入",
       name: "玩家",
       speaker: "玩家",
+      isContextOnly: false,
     },
   ],
   graphStats: "node_count=1",
@@ -133,6 +135,14 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
 const payload = buildTaskLlmPayload(promptBuild, "fallback-user");
 const recentBlock = payload.promptMessages.find(
   (message) => message.sourceKey === "recentMessages",
+);
+assert.match(
+  String(recentBlock?.content || ""),
+  /以下是上下文回顾（已提取过），仅供理解剧情/,
+);
+assert.match(
+  String(recentBlock?.content || ""),
+  /以下是本次需要提取记忆的新对话内容/,
 );
 assert.match(String(recentBlock?.content || ""), /#41 \[assistant\|艾琳\]: 助手已净化/);
 assert.match(String(recentBlock?.content || ""), /#42 \[user\|玩家\]: 用户已净化/);

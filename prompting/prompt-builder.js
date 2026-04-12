@@ -296,6 +296,8 @@ function getPromptMessageLikeDescriptor(value) {
       role: role === "user" ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
       speaker,
+      isContextOnly:
+        typeof value.isContextOnly === "boolean" ? value.isContextOnly : null,
     };
   }
 
@@ -308,6 +310,8 @@ function getPromptMessageLikeDescriptor(value) {
       role: value.is_user === true ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
       speaker,
+      isContextOnly:
+        typeof value.isContextOnly === "boolean" ? value.isContextOnly : null,
     };
   }
 
@@ -322,23 +326,49 @@ function isPromptMessageArray(value) {
   );
 }
 
+function getPromptMessageContextGroup(value) {
+  const descriptor = getPromptMessageLikeDescriptor(value);
+  if (!descriptor || typeof descriptor.isContextOnly !== "boolean") {
+    return null;
+  }
+  return descriptor.isContextOnly ? "context" : "target";
+}
+
 function formatPromptMessageTranscript(value) {
   const entries = Array.isArray(value) ? value : [value];
-  return entries
-    .map((entry, index) => {
-      const descriptor = getPromptMessageLikeDescriptor(entry);
-      if (!descriptor) {
-        return "";
-      }
-      const seqLabel =
-        descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
-      const speakerLabel = descriptor.speaker
-        ? `|${descriptor.speaker}`
-        : "";
-      return `${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`;
-    })
-    .filter(Boolean)
-    .join("\n\n");
+  const hasContextMessages = entries.some(
+    (entry) => getPromptMessageContextGroup(entry) === "context",
+  );
+  const hasTargetMessages = entries.some(
+    (entry) => getPromptMessageContextGroup(entry) === "target",
+  );
+  const lines = [];
+  let activeGroup = null;
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const descriptor = getPromptMessageLikeDescriptor(entry);
+    if (!descriptor) {
+      continue;
+    }
+    const group = getPromptMessageContextGroup(entry);
+    if (hasContextMessages && hasTargetMessages && group && group !== activeGroup) {
+      lines.push(
+        group === "context"
+          ? "--- 以下是上下文回顾（已提取过），仅供理解剧情 ---"
+          : "--- 以下是本次需要提取记忆的新对话内容 ---",
+      );
+      activeGroup = group;
+    }
+    const seqLabel =
+      descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
+    const speakerLabel = descriptor.speaker
+      ? `|${descriptor.speaker}`
+      : "";
+    lines.push(`${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`);
+  }
+
+  return lines.filter(Boolean).join("\n\n");
 }
 
 function stringifyInterpolatedValue(value) {
