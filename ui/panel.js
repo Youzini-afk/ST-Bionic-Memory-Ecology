@@ -1788,29 +1788,22 @@ function _refreshTaskInjectionPreview() {
   const budgetTokens = recallSnap.budgetTokens || totalTokens || 1;
   const pct = totalTokens > 0 ? Math.min(100, Math.round((totalTokens / budgetTokens) * 100)) : 0;
 
-  const tokenBarHtml = totalTokens > 0 ? `
-    <div class="bme-injection-token-bar">
+  const wrapper = document.createDocumentFragment();
+
+  if (totalTokens > 0) {
+    const bar = document.createElement("div");
+    bar.className = "bme-injection-token-bar";
+    bar.innerHTML = `
       <span class="bme-injection-token-bar__label">${totalTokens} / ${budgetTokens} tok</span>
       <div class="bme-injection-token-bar__track">
         <div class="bme-injection-token-bar__fill" style="width:${pct}%"></div>
       </div>
-      <span class="bme-injection-token-bar__breakdown">${pct}%</span>
-    </div>` : "";
+      <span class="bme-injection-token-bar__breakdown">${pct}%</span>`;
+    wrapper.appendChild(bar);
+  }
 
-  const previewText = injectionText.length > 3000 ? injectionText.slice(0, 3000) + "…" : injectionText;
-
-  el.innerHTML = `
-    ${tokenBarHtml}
-    <div class="bme-injection-card-grid">
-      <div class="bme-injection-card" style="grid-column:span 2;border-top-color:var(--bme-primary)">
-        <div class="bme-injection-card__header">
-          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">Recall Injection</span>
-          ${totalTokens > 0 ? `<span class="bme-injection-card__tokens">${totalTokens} tok</span>` : ""}
-        </div>
-        <div class="bme-injection-card__body">${_escHtml(previewText)}</div>
-      </div>
-    </div>
-  `;
+  wrapper.appendChild(_buildInjectionPreviewNode(injectionText));
+  el.replaceChildren(wrapper);
 }
 
 // ---------- Message Trace ----------
