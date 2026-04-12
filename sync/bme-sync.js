@@ -1,5 +1,8 @@
 import { BmeDatabase } from "./bme-db.js";
-import { PROCESSED_MESSAGE_HASH_VERSION } from "../runtime/runtime-state.js";
+import {
+  MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
+  PROCESSED_MESSAGE_HASH_VERSION,
+} from "../runtime/runtime-state.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
@@ -30,6 +33,7 @@ const RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 const RUNTIME_LAST_PROCESSED_SEQ_META_KEY = "runtimeLastProcessedSeq";
 const RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
 const RUNTIME_BATCH_JOURNAL_LIMIT = 96;
+const MANUAL_BACKUP_BATCH_JOURNAL_LIMIT = 4;
 
 function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
@@ -339,7 +343,7 @@ async function fetchBackupManifest(options = {}) {
 
 async function writeBackupManifest(entries = [], options = {}) {
   const fetchImpl = getFetch(options);
-  const payload = JSON.stringify(entries, null, 2);
+  const payload = JSON.stringify(entries);
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: {
@@ -576,7 +580,7 @@ async function writeBackupEnvelope(envelope, chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   const filename = buildBackupFilename(normalizedChatId);
   const fetchImpl = getFetch(options);
-  const payload = JSON.stringify(envelope, null, 2);
+  const payload = JSON.stringify(envelope);
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: {
@@ -1045,6 +1049,59 @@ function normalizeRuntimeHistoryMeta(value = {}, fallbackChatId = "") {
       typeof input.lastMutationSource === "string" ? input.lastMutationSource : "",
     lastRecoveryResult: toSerializableData(input.lastRecoveryResult, null),
     lastBatchStatus: toSerializableData(input.lastBatchStatus, null),
+  };
+}
+
+function resolveEarliestRetainedBatchFloor(journals = []) {
+  let earliestFloor = null;
+  for (const journal of Array.isArray(journals) ? journals : []) {
+    const range = Array.isArray(journal?.processedRange)
+      ? journal.processedRange
+      : [];
+    const startFloor = Number(range[0]);
+    if (!Number.isFinite(startFloor)) continue;
+    const normalizedFloor = Math.max(0, Math.floor(startFloor));
+    earliestFloor =
+      earliestFloor == null
+        ? normalizedFloor
+        : Math.min(earliestFloor, normalizedFloor);
+  }
+  return earliestFloor;
+}
+
+function buildManualBackupSnapshot(snapshot = {}, chatId = "") {
+  const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const meta = toSerializableData(normalizedSnapshot.meta, {});
+  const originalBatchJournal = Array.isArray(meta[RUNTIME_BATCH_JOURNAL_META_KEY])
+    ? toSerializableData(meta[RUNTIME_BATCH_JOURNAL_META_KEY], [])
+    : [];
+  const retainedBatchJournal = originalBatchJournal.slice(
+    -MANUAL_BACKUP_BATCH_JOURNAL_LIMIT,
+  );
+  const historyState = normalizeRuntimeHistoryMeta(
+    meta[RUNTIME_HISTORY_META_KEY],
+    chatId,
+  );
+
+  historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {
+    truncated: originalBatchJournal.length > retainedBatchJournal.length,
+    earliestRetainedFloor: resolveEarliestRetainedBatchFloor(retainedBatchJournal),
+    retainedCount: retainedBatchJournal.length,
+  };
+
+  meta[RUNTIME_HISTORY_META_KEY] = historyState;
+  meta[RUNTIME_BATCH_JOURNAL_META_KEY] = retainedBatchJournal;
+  meta[RUNTIME_MAINTENANCE_JOURNAL_META_KEY] = [];
+
+  return {
+    meta,
+    nodes: toSerializableData(normalizedSnapshot.nodes, []),
+    edges: toSerializableData(normalizedSnapshot.edges, []),
+    tombstones: toSerializableData(normalizedSnapshot.tombstones, []),
+    state: toSerializableData(normalizedSnapshot.state, {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    }),
   };
 }
 
@@ -1856,19 +1913,14 @@ export async function backupToServer(chatId, options = {}) {
       nowMs,
     );
 
+    const backupSnapshot = buildManualBackupSnapshot(snapshot, normalizedChatId);
     const envelope = {
       kind: "st-bme-backup",
       version: BME_BACKUP_SCHEMA_VERSION,
       chatId: normalizedChatId,
       createdAt: nowMs,
       sourceDeviceId: deviceId,
-      snapshot: {
-        meta: toSerializableData(snapshot.meta, {}),
-        nodes: toSerializableData(snapshot.nodes, []),
-        edges: toSerializableData(snapshot.edges, []),
-        tombstones: toSerializableData(snapshot.tombstones, []),
-        state: toSerializableData(snapshot.state, {}),
-      },
+      snapshot: backupSnapshot,
     };
 
     const uploadResult = await writeBackupEnvelope(

@@ -22,6 +22,7 @@ import {
   syncNow,
   upload,
 } from "../sync/bme-sync.js";
+import { MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-sync]";
 
@@ -159,6 +160,7 @@ function createMockFetchEnvironment() {
       remoteFiles.set(body.name, payload);
       logs.uploadedPayloads.push({
         name: body.name,
+        decoded,
         payload,
       });
       return createJsonResponse(200, { path: `/user/files/${body.name}` });
@@ -605,7 +607,7 @@ async function testManualCloudModeGuards() {
 }
 
 async function testManualBackupAndRestoreFlow() {
-  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
   const dbByChatId = new Map();
   const db = new FakeDb("chat-backup-flow", {
     meta: {
@@ -617,6 +619,23 @@ async function testManualBackupAndRestoreFlow() {
       nodeCount: 1,
       edgeCount: 0,
       tombstoneCount: 0,
+      runtimeHistoryState: {
+        chatId: "chat-backup-flow",
+        lastProcessedAssistantFloor: 4,
+        extractionCount: 2,
+      },
+      runtimeBatchJournal: [
+        { id: "journal-1", processedRange: [0, 0], createdAt: 11 },
+        { id: "journal-2", processedRange: [1, 1], createdAt: 22 },
+        { id: "journal-3", processedRange: [2, 2], createdAt: 33 },
+        { id: "journal-4", processedRange: [3, 3], createdAt: 44 },
+        { id: "journal-5", processedRange: [4, 4], createdAt: 55 },
+        { id: "journal-6", processedRange: [5, 5], createdAt: 66 },
+      ],
+      maintenanceJournal: [
+        { id: "maintenance-a", updatedAt: 70 },
+        { id: "maintenance-b", updatedAt: 80 },
+      ],
     },
     nodes: [{ id: "local-node", updatedAt: 80 }],
     edges: [],
@@ -642,10 +661,36 @@ async function testManualBackupAndRestoreFlow() {
   assert.equal(db.meta.get("syncDirty"), false);
   assert.ok(Number(db.meta.get("lastBackupUploadedAt")) > 0);
   assert.ok(String(db.meta.get("lastBackupFilename") || "").startsWith("ST-BME_backup_"));
+  const backupPayload = remoteFiles.get(backupResult.filename);
+  assert.ok(backupPayload, "manual backup should be written to remote files");
+  assert.equal(backupPayload.snapshot.meta.runtimeBatchJournal.length, 4);
+  assert.deepEqual(
+    backupPayload.snapshot.meta.runtimeBatchJournal.map((entry) => entry.id),
+    ["journal-3", "journal-4", "journal-5", "journal-6"],
+  );
+  assert.equal(backupPayload.snapshot.meta.maintenanceJournal.length, 0);
+  assert.deepEqual(
+    backupPayload.snapshot.meta.runtimeHistoryState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+    {
+      truncated: true,
+      earliestRetainedFloor: 2,
+      retainedCount: 4,
+    },
+  );
+  const backupUploadLog = logs.uploadedPayloads.find(
+    (entry) => entry.name === backupResult.filename,
+  );
+  assert.ok(backupUploadLog);
+  assert.equal(backupUploadLog.decoded.includes("\n"), false);
 
   const manifestResult = await listServerBackups(runtime);
   assert.equal(manifestResult.entries.length, 1);
   assert.equal(manifestResult.entries[0].chatId, "chat-backup-flow");
+  const manifestUploadLog = logs.uploadedPayloads.find(
+    (entry) => entry.name === "ST-BME_BackupManifest.json",
+  );
+  assert.ok(manifestUploadLog);
+  assert.equal(manifestUploadLog.decoded.includes("\n"), false);
 
   db.snapshot = {
     meta: {
@@ -670,6 +715,16 @@ async function testManualBackupAndRestoreFlow() {
   const restoreResult = await restoreFromServer("chat-backup-flow", runtime);
   assert.equal(restoreResult.restored, true);
   assert.equal(db.snapshot.nodes[0].id, "local-node");
+  assert.equal(db.snapshot.meta.runtimeBatchJournal.length, 4);
+  assert.equal(db.snapshot.meta.maintenanceJournal.length, 0);
+  assert.deepEqual(
+    db.snapshot.meta.runtimeHistoryState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+    {
+      truncated: true,
+      earliestRetainedFloor: 2,
+      retainedCount: 4,
+    },
+  );
   assert.ok(Number(db.meta.get("lastBackupRestoredAt")) > 0);
   const safetyStatus = await getRestoreSafetySnapshotStatus(
     "chat-backup-flow",

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
   appendBatchJournal,
   clearHistoryDirty,
   cloneGraphSnapshot,
@@ -263,6 +264,32 @@ const recoveryPoint = findJournalRecoveryPoint(graph, 2);
 assert.ok(recoveryPoint);
 assert.equal(recoveryPoint.path, "reverse-journal");
 assert.equal(recoveryPoint.affectedJournals[0].processedRange[1], 3);
+
+const truncatedCoverageGraph = createEmptyGraph();
+truncatedCoverageGraph.historyState.chatId = "chat-truncated-history-test";
+truncatedCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {
+  truncated: true,
+  earliestRetainedFloor: 4,
+  retainedCount: 4,
+};
+truncatedCoverageGraph.batchJournal = [
+  { id: "journal-4", journalVersion: 2, processedRange: [4, 4] },
+  { id: "journal-5", journalVersion: 2, processedRange: [5, 5] },
+  { id: "journal-6", journalVersion: 2, processedRange: [6, 6] },
+  { id: "journal-7", journalVersion: 2, processedRange: [7, 7] },
+];
+assert.equal(
+  findJournalRecoveryPoint(truncatedCoverageGraph, 3),
+  null,
+  "dirty floor earlier than retained backup coverage should reject partial rollback",
+);
+const retainedCoverageRecoveryPoint = findJournalRecoveryPoint(
+  truncatedCoverageGraph,
+  5,
+);
+assert.ok(retainedCoverageRecoveryPoint);
+assert.equal(retainedCoverageRecoveryPoint.path, "reverse-journal");
+assert.equal(retainedCoverageRecoveryPoint.affectedJournals.length, 3);
 
 rollbackBatch(graph, recoveryPoint.affectedJournals[0]);
 assert.equal(graph.nodes.length, 0);
