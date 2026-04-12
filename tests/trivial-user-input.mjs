@@ -284,6 +284,36 @@ async function testSkipFlagTtlExpires() {
   }
 }
 
+async function testPromptViewerSyntheticGenerationSkipsRecall() {
+  const harness = await createGenerationRecallHarness();
+  const fakeDialog = {
+    textContent: "Prompt Viewer",
+    querySelector(selector) {
+      if (selector === ".fa-rotate-right.animate-spin") {
+        return {};
+      }
+      return null;
+    },
+  };
+  harness.document.querySelectorAll = (selector) =>
+    selector === '[role="dialog"]' ? [fakeDialog] : [];
+  harness.__sendTextareaValue = "hello world";
+
+  const startResult = harness.result.onGenerationStarted("normal", {}, false);
+  assert.equal(startResult, null);
+  assert.equal(
+    harness.result.getCurrentGenerationTrivialSkip()?.reason,
+    "tavern-helper-prompt-viewer",
+  );
+
+  const beforeCombine = await harness.result.onBeforeCombinePrompts();
+  assert.deepEqual(beforeCombine, {
+    skipped: true,
+    reason: "tavern-helper-prompt-viewer",
+  });
+  assert.equal(harness.runRecallCalls.length, 0);
+}
+
 await Promise.resolve();
 testIsTrivialUserInputTable();
 await testSlashCommandSkipsRecallAndExtraction();
@@ -297,5 +327,6 @@ await testNonTrivialGenerationClearsResidualTrivialSkip();
 await testNonTargetMessageIdDoesNotConsumeFlag();
 await testNullMessageIdFallsBackToLastAssistantIndex();
 await testSkipFlagTtlExpires();
+await testPromptViewerSyntheticGenerationSkipsRecall();
 
 console.log("trivial-user-input tests passed");

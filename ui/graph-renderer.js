@@ -2,6 +2,10 @@
 // 零依赖：客观层 / 角色 POV / 用户 POV 分区内 Vogel 初值 + 一次性力导向稳定，无帧循环抖动
 
 import { getNodeColors } from './themes.js';
+import {
+    isUsableGraphCanvasSize,
+    remapPositionBetweenRects,
+} from './graph-renderer-utils.js';
 import { getGraphNodeLabel, getNodeDisplayName } from '../graph/node-labels.js';
 import { normalizeMemoryScope } from '../graph/memory-scope.js';
 import {
@@ -39,6 +43,8 @@ const DEFAULT_LAYOUT_CONFIG = {
     /** 节点最小间距（除半径外） */
     neuralMinGap: 12,
 };
+
+const MIN_USABLE_CANVAS_DIMENSION = 48;
 
 /** 兼容旧版 forceConfig（召回卡片等） */
 function layoutKeysFromForceConfig(fc) {
@@ -192,6 +198,10 @@ export class GraphRenderer {
 
         this._regionPanels = [];
         this._lastGraph = null;
+        this._lastLayoutHints = {};
+        this._lastCanvasCssWidth = 0;
+        this._lastCanvasCssHeight = 0;
+        this._lastDevicePixelRatio = window.devicePixelRatio || 1;
 
         // View transform
         this.scale = 1;
@@ -234,6 +244,9 @@ export class GraphRenderer {
         const prevSelectedId = this.selectedNode?.id || null;
         this.nodeMap.clear();
         this._lastGraph = graph;
+        this._lastLayoutHints = layoutHints && typeof layoutHints === 'object'
+            ? { ...layoutHints }
+            : {};
         if (layoutHints && Object.prototype.hasOwnProperty.call(layoutHints, 'userPovAliases')) {
             this._userPovAliasSet = buildUserPovAliasNormalizedSet(
                 layoutHints.userPovAliases,
@@ -438,6 +451,40 @@ export class GraphRenderer {
         }
     }
 
+    _rebuildLayoutForCurrentViewport(W, H) {
+        const previousRectsByRegion = new Map();
+        for (const node of this.nodes) {
+            if (!node?.regionKey || previousRectsByRegion.has(node.regionKey) || !node.regionRect) {
+                continue;
+            }
+            previousRectsByRegion.set(node.regionKey, {
+                x: node.regionRect.x,
+                y: node.regionRect.y,
+                w: node.regionRect.w,
+                h: node.regionRect.h,
+            });
+        }
+
+        const parts = partitionNodesByScope(this.nodes, this._userPovAliasSet);
+        this._regionPanels = this._computeRegionPanels(W, H, parts);
+
+        for (const node of this.nodes) {
+            const nextRect = node.regionRect;
+            const previousRect = previousRectsByRegion.get(node.regionKey) || nextRect;
+            const nextPosition = remapPositionBetweenRects(
+                node.x,
+                node.y,
+                previousRect,
+                nextRect,
+            );
+            node.x = nextPosition.x;
+            node.y = nextPosition.y;
+            node.vx = 0;
+            node.vy = 0;
+            this._clampNodeToRegion(node);
+        }
+    }
+
     /**
      * 椭圆 Vogel 螺旋初值：有机疏密，Deterministic，无网格感
      */
@@ -634,9 +681,10 @@ export class GraphRenderer {
         const W = this.canvas.width / dpr;
         const H = this.canvas.height / dpr;
 
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
         ctx.save();
-        ctx.scale(dpr, dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
         ctx.translate(this.offsetX, this.offsetY);
         ctx.scale(this.scale, this.scale);
@@ -701,6 +749,14 @@ export class GraphRenderer {
         }
 
         ctx.restore();
+    }
+
+    _scheduleRender() {
+        if (this.animId) return;
+        this.animId = requestAnimationFrame(() => {
+            this.animId = null;
+            this._render();
+        });
     }
 
     _drawGrid(W, H) {
@@ -813,7 +869,7 @@ export class GraphRenderer {
             this.offsetY += dy;
             this._touchSession.lastX = t.clientX;
             this._touchSession.lastY = t.clientY;
-            this._render();
+            this._scheduleRender();
         }, { passive: false });
         c.addEventListener('touchend', (e) => {
             if (!this._touchSession) return;
@@ -891,17 +947,17 @@ export class GraphRenderer {
             this.dragNode.x = x;
             this.dragNode.y = y;
             this._clampNodeToRegion(this.dragNode);
-            this._render();
+            this._scheduleRender();
         } else if (this.isPanning) {
             this.offsetX += e.clientX - this.lastMouse.x;
             this.offsetY += e.clientY - this.lastMouse.y;
-            this._render();
+            this._scheduleRender();
         } else {
             const node = this._findNodeAt(x, y);
             if (node !== this.hoveredNode) {
                 this.hoveredNode = node;
                 this.canvas.style.cursor = node ? 'pointer' : 'grab';
-                this._render();
+                this._scheduleRender();
             }
         }
         this.lastMouse = { x: e.clientX, y: e.clientY };
@@ -981,15 +1037,34 @@ export class GraphRenderer {
         const dpr = window.devicePixelRatio || 1;
         const parent = this.canvas.parentElement;
         if (!parent) return;
-        const w = parent.clientWidth;
-        const h = parent.clientHeight;
+        const w = Math.round(parent.clientWidth || 0);
+        const h = Math.round(parent.clientHeight || 0);
+        if (!isUsableGraphCanvasSize(w, h, MIN_USABLE_CANVAS_DIMENSION)) {
+            return;
+        }
+
+        if (
+            w === this._lastCanvasCssWidth
+            && h === this._lastCanvasCssHeight
+            && dpr === this._lastDevicePixelRatio
+        ) {
+            return;
+        }
+
+        this._lastCanvasCssWidth = w;
+        this._lastCanvasCssHeight = h;
+        this._lastDevicePixelRatio = dpr;
+
         this.canvas.width = w * dpr;
         this.canvas.height = h * dpr;
         this.canvas.style.width = w + 'px';
         this.canvas.style.height = h + 'px';
 
-        if (this._lastGraph) {
-            this.loadGraph(this._lastGraph);
+        if (this.nodes.length > 0 && this._regionPanels.length > 0) {
+            this._rebuildLayoutForCurrentViewport(w, h);
+            this._render();
+        } else if (this._lastGraph) {
+            this.loadGraph(this._lastGraph, this._lastLayoutHints);
         } else {
             this._render();
         }
