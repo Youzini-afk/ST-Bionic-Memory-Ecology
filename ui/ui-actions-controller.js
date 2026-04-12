@@ -1196,6 +1196,7 @@ export async function onDeleteCurrentIdbController(runtime) {
     runtime.clearCurrentChatCommitMarker?.({
       reason: "manual-delete-current-idb",
       immediate: true,
+      resetAcceptedRevision: true,
     });
     runtime.syncGraphLoadFromLiveContext?.({
       source: "manual-delete-current-idb",
@@ -1252,6 +1253,7 @@ export async function onDeleteAllIdbController(runtime) {
       runtime.clearCurrentChatCommitMarker?.({
         reason: "manual-delete-all-idb",
         immediate: true,
+        resetAcceptedRevision: true,
       });
       runtime.syncGraphLoadFromLiveContext?.({
         source: "manual-delete-all-idb",

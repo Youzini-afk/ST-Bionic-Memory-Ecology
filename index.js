@@ -325,6 +325,7 @@ function clearCurrentChatCommitMarker(
     context = getContext(),
     reason = "manual-clear-commit-marker",
     immediate = true,
+    resetAcceptedRevision = false,
   } = {},
 ) {
   if (!context) {
@@ -337,15 +338,23 @@ function clearCurrentChatCommitMarker(
   }
 
   const marker = getChatCommitMarker(context);
+  const acceptedRevision = getAcceptedCommitMarkerRevision(marker);
   writeChatMetadataPatch(context, {
     [GRAPH_COMMIT_MARKER_KEY]: null,
   });
   const saveMode = triggerChatMetadataSave(context, { immediate });
+  const shouldResetAcceptedRevision = resetAcceptedRevision === true;
   updateGraphPersistenceState({
     commitMarker: null,
     persistMismatchReason: "",
     lastPersistReason: String(reason || "manual-clear-commit-marker"),
     lastPersistMode: `commit-marker-clear:${saveMode}`,
+    acceptedStorageTier: shouldResetAcceptedRevision
+      ? "none"
+      : String(graphPersistenceState.acceptedStorageTier || "none"),
+    lastAcceptedRevision: shouldResetAcceptedRevision
+      ? 0
+      : Number(graphPersistenceState.lastAcceptedRevision || 0),
   });
 
   return {
@@ -353,6 +362,7 @@ function clearCurrentChatCommitMarker(
     reason: String(reason || "manual-clear-commit-marker"),
     saveMode,
     marker: cloneRuntimeDebugValue(marker, null),
+    acceptedRevision,
   };
 }
 
@@ -5663,6 +5673,148 @@ function applyIndexedDbEmptyToRuntime(
   };
 }
 
+async function maybeResolveOrphanAcceptedCommitMarker(
+  chatId,
+  {
+    source = "indexeddb-probe",
+    attemptIndex = 0,
+    commitMarker = null,
+    migrationResult = null,
+    shadowSnapshot = null,
+    applyEmptyState = false,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const context = getContext();
+  const activeIdentity = resolveCurrentChatIdentity(context);
+  const activePersistenceChatId =
+    normalizeChatIdCandidate(activeIdentity?.chatId) || normalizedChatId;
+  const acceptedRevision = getAcceptedCommitMarkerRevision(commitMarker);
+  if (!normalizedChatId || acceptedRevision <= 0) {
+    return {
+      resolved: false,
+      reason: "marker-not-accepted",
+      result: null,
+      chatId: normalizedChatId || "",
+    };
+  }
+
+  if (!doesChatIdMatchResolvedGraphIdentity(normalizedChatId, activeIdentity)) {
+    return {
+      resolved: false,
+      reason: "chat-switched",
+      result: null,
+      chatId: normalizedChatId,
+    };
+  }
+
+  let chatStateResult = null;
+  if (canUseHostGraphChatStatePersistence(context)) {
+    chatStateResult = await loadGraphFromChatState(activePersistenceChatId, {
+      source: `${source}:orphan-chat-state-fallback`,
+      attemptIndex,
+      allowOverride: true,
+    });
+    if (chatStateResult?.loaded) {
+      return {
+        resolved: true,
+        reason: "chat-state-loaded",
+        result: chatStateResult,
+        chatId: normalizedChatId,
+        chatStateResult,
+        orphanCleared: false,
+      };
+    }
+
+    const chatStateReason = String(chatStateResult?.reason || "");
+    if (
+      chatStateReason &&
+      chatStateReason !== "chat-state-empty" &&
+      chatStateReason !== "chat-state-unavailable"
+    ) {
+      return {
+        resolved: false,
+        reason: chatStateReason,
+        result: null,
+        chatId: normalizedChatId,
+        chatStateResult,
+      };
+    }
+  }
+
+  if (shadowSnapshot) {
+    return {
+      resolved: false,
+      reason: "shadow-available",
+      result: null,
+      chatId: normalizedChatId,
+      chatStateResult,
+    };
+  }
+
+  if (String(migrationResult?.reason || "").trim() === "migration-failed") {
+    return {
+      resolved: false,
+      reason: "migration-failed",
+      result: null,
+      chatId: normalizedChatId,
+      chatStateResult,
+    };
+  }
+
+  const clearResult = clearCurrentChatCommitMarker({
+    context,
+    reason: `orphan-accepted-marker:${source}`,
+    immediate: true,
+    resetAcceptedRevision: true,
+  });
+  debugDebug("[ST-BME] 已自动清理孤儿 accepted commit marker", {
+    chatId: normalizedChatId,
+    source,
+    acceptedRevision,
+    migrationReason: String(migrationResult?.reason || ""),
+    chatStateReason: String(chatStateResult?.reason || ""),
+  });
+
+  if (applyEmptyState) {
+    const emptyResult = applyIndexedDbEmptyToRuntime(activePersistenceChatId, {
+      source: `${source}:orphan-accepted-marker`,
+      attemptIndex,
+    });
+    return {
+      resolved: true,
+      reason: "orphan-accepted-marker-cleared",
+      result: {
+        ...emptyResult,
+        orphanCommitMarkerCleared: true,
+        clearedMarkerRevision: acceptedRevision,
+      },
+      chatId: normalizedChatId,
+      chatStateResult,
+      clearResult,
+      orphanCleared: true,
+    };
+  }
+
+  return {
+    resolved: true,
+    reason: "orphan-accepted-marker-cleared",
+    result: {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-empty",
+      chatId: normalizedChatId,
+      attemptIndex,
+      orphanCommitMarkerCleared: true,
+      clearedMarkerRevision: acceptedRevision,
+    },
+    chatId: normalizedChatId,
+    chatStateResult,
+    clearResult,
+    orphanCleared: true,
+  };
+}
+
 function applyIndexedDbSnapshotToRuntime(
   chatId,
   snapshot,
@@ -6076,6 +6228,28 @@ async function loadGraphFromIndexedDb(
         );
         if (shadowRestoreResult?.loaded) {
           return shadowRestoreResult;
+        }
+      }
+      if (commitMarkerDiagnostic?.reason) {
+        const orphanMarkerResolution =
+          await maybeResolveOrphanAcceptedCommitMarker(normalizedChatId, {
+            source,
+            attemptIndex,
+            commitMarker,
+            migrationResult,
+            shadowSnapshot,
+            applyEmptyState,
+          });
+        if (orphanMarkerResolution?.result) {
+          if (
+            !orphanMarkerResolution.orphanCleared &&
+            orphanMarkerResolution.result?.loaded
+          ) {
+            updateGraphPersistenceState({
+              persistMismatchReason: commitMarkerDiagnostic.reason,
+            });
+          }
+          return orphanMarkerResolution.result;
         }
       }
       if (

@@ -2187,11 +2187,89 @@ result = {
    assert.equal(result.loadState, "loading");
    assert.equal(
      harness.api.getGraphPersistenceState().loadState,
-     "blocked",
-     "IndexedDB 空快照但 accepted commit marker 更高时，重试耗尽后不应永久停留在 loading",
+     "empty-confirmed",
+     "当 accepted commit marker 已成孤儿且本地不存在可恢复图谱源时，应自动降级为 empty-confirmed",
+   );
+   assert.match(
+     String(harness.api.getGraphPersistenceState().reason || ""),
+     /orphan-accepted-marker/,
    );
    assert.equal(
-     harness.api.getGraphPersistenceState().reason,
+     harness.runtimeContext.__chatContext.chatMetadata?.[GRAPH_COMMIT_MARKER_KEY],
+     null,
+   );
+   assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 1);
+   assert.equal(harness.api.getGraphPersistenceState().lastAcceptedRevision, 0);
+   assert.equal(harness.api.getGraphPersistenceState().commitMarker, null);
+ }
+
+ {
+   const commitMarker = buildGraphCommitMarker(
+     createMeaningfulGraph("chat-indexeddb-empty-chat-state-rescue", "marker"),
+     {
+       revision: 8,
+       storageTier: "indexeddb",
+       accepted: true,
+       reason: "test-chat-state-rescue",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+     },
+   );
+   const harness = await createGraphPersistenceHarness({
+     chatId: "chat-indexeddb-empty-chat-state-rescue",
+     globalChatId: "chat-indexeddb-empty-chat-state-rescue",
+     chatMetadata: {
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       [GRAPH_COMMIT_MARKER_KEY]: commitMarker,
+     },
+   });
+   const sidecarGraph = stampPersistedGraph(
+     createMeaningfulGraph("chat-indexeddb-empty-chat-state-rescue", "sidecar"),
+     {
+       revision: 8,
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       reason: "sidecar-rescue-seed",
+     },
+   );
+   harness.runtimeContext.__chatContext.__chatStateStore.set(
+     GRAPH_CHAT_STATE_NAMESPACE,
+     buildGraphChatStateSnapshot(sidecarGraph, {
+       revision: 8,
+       storageTier: "chat-state",
+       accepted: true,
+       reason: "sidecar-rescue-seed",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       lastProcessedAssistantFloor: 6,
+       extractionCount: 3,
+     }),
+   );
+
+   const result = await harness.api.loadGraphFromIndexedDb(
+     "chat-indexeddb-empty-chat-state-rescue",
+     {
+       source: "indexeddb-empty-chat-state-rescue",
+       attemptIndex: 0,
+       allowOverride: true,
+       applyEmptyState: true,
+     },
+   );
+
+   assert.equal(result.loaded, true);
+   assert.equal(result.loadState, "loaded");
+   assert.equal(
+     harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+     "事件-sidecar",
+   );
+   assert.equal(
+     harness.runtimeContext.__chatContext.chatMetadata?.[GRAPH_COMMIT_MARKER_KEY]
+       ?.revision,
+     8,
+   );
+   assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 0);
+   assert.equal(
+     harness.api.getGraphPersistenceState().persistMismatchReason,
      "persist-mismatch:indexeddb-behind-commit-marker",
    );
  }
