@@ -14,9 +14,8 @@ import {
 import { listKnowledgeOwners } from "../graph/knowledge-state.js";
 import { getHostUserAliasHints } from "../runtime/user-alias-utils.js";
 import {
-  describeNodeStoryTime,
-  describeStoryTime,
-  describeStoryTimeSpan,
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
 } from "../graph/story-timeline.js";
 import {
   compareSummaryEntriesForDisplay,
@@ -322,6 +321,8 @@ let graphRenderer = null;
 let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "toggles";
+let currentTaskSectionId = "pipeline";
+let currentSelectedMemoryNodeId = "";
 let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
@@ -893,11 +894,13 @@ export async function initPanel({
   _bindActions();
   _bindDashboardControls();
   _bindConfigControls();
+  _bindTaskNavigation();
   _bindPlannerLauncher();
   currentTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
   _applyWorkspaceMode();
   _syncConfigSectionState();
+  _syncTaskSectionState();
   _refreshRuntimeStatus();
   _initFloatingBall();
   _bindFabToggle();
@@ -1159,11 +1162,8 @@ export function refreshLiveState() {
     case "dashboard":
       _refreshDashboard();
       break;
-    case "memory":
-      _refreshMemoryBrowser();
-      break;
-    case "injection":
-      void _refreshInjectionPreview();
+    case "task":
+      _refreshTaskMonitor();
       break;
     default:
       break;
@@ -1175,9 +1175,6 @@ export function refreshLiveState() {
     currentTaskProfileTabId === "debug"
   ) {
     _refreshTaskProfileWorkspace();
-  }
-  if (currentTabId === "config" && currentConfigSectionId === "trace") {
-    _refreshMessageTraceWorkspace();
   }
 
   _scheduleVisibleGraphWorkspaceRefresh();
@@ -1217,11 +1214,8 @@ function _switchTab(tabId) {
     case "dashboard":
       _refreshDashboard();
       break;
-    case "memory":
-      _refreshMemoryBrowser();
-      break;
-    case "injection":
-      void _refreshInjectionPreview();
+    case "task":
+      _refreshTaskMonitor();
       break;
     case "config":
       _refreshConfigTab();
@@ -1281,7 +1275,628 @@ function _bindPlannerLauncher() {
 function _applyWorkspaceMode() {
   if (!panelEl) return;
   const isConfig = currentTabId === "config";
+  const isTask = currentTabId === "task";
   panelEl.classList.toggle("config-mode", isConfig);
+  panelEl.classList.toggle("task-mode", isTask);
+}
+
+// ==================== 任务监控工作区 ====================
+
+const TASK_SECTION_META = {
+  pipeline: { kicker: "管线总览", title: "管线总览", desc: "实时查看所有任务管线的运行状态与当前批次进度。" },
+  timeline: { kicker: "任务流水", title: "任务流水", desc: "按时间轴追踪每次提取、召回、向量索引等任务的执行记录。" },
+  memory: { kicker: "记忆浏览", title: "记忆浏览", desc: "浏览和检索图谱中的所有记忆节点。" },
+  injection: { kicker: "注入预览", title: "注入预览", desc: "查看最近一次注入到主 AI 的内容预览与 token 用量。" },
+  trace: { kicker: "消息追踪", title: "消息追踪", desc: "这一轮到底发了什么？查看召回注入快照和提取请求详情。" },
+  persistence: { kicker: "持久化", title: "持久化状态", desc: "图谱加载状态、存储层级、commit marker 与修复操作。" },
+};
+
+function _bindTaskNavigation() {
+  panelEl?.querySelectorAll(".bme-task-nav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _switchTaskSection(btn.dataset.taskSection);
+    });
+  });
+  panelEl?.querySelectorAll(".bme-task-nav-pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _switchTaskSection(btn.dataset.taskSection);
+    });
+  });
+}
+
+function _switchTaskSection(sectionId) {
+  currentTaskSectionId = sectionId || "pipeline";
+  _syncTaskSectionState();
+  _refreshTaskMonitor();
+}
+
+function _syncTaskSectionState() {
+  panelEl?.querySelectorAll(".bme-task-nav-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.taskSection === currentTaskSectionId);
+  });
+  panelEl?.querySelectorAll(".bme-task-nav-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.taskSection === currentTaskSectionId);
+  });
+  panelEl?.querySelectorAll(".bme-task-section").forEach((section) => {
+    section.classList.toggle("active", section.dataset.taskSection === currentTaskSectionId);
+  });
+  const meta = TASK_SECTION_META[currentTaskSectionId] || TASK_SECTION_META.pipeline;
+  const kicker = document.getElementById("bme-task-ws-kicker");
+  const title = document.getElementById("bme-task-ws-title");
+  const desc = document.getElementById("bme-task-ws-desc");
+  if (kicker) kicker.textContent = meta.kicker;
+  if (title) title.textContent = meta.title;
+  if (desc) desc.textContent = meta.desc;
+}
+
+function _refreshTaskMonitor() {
+  switch (currentTaskSectionId) {
+    case "pipeline":
+      _refreshTaskPipelineOverview();
+      break;
+    case "timeline":
+      _refreshTaskTimeline();
+      break;
+    case "memory":
+      _refreshTaskMemoryBrowser();
+      break;
+    case "injection":
+      _refreshTaskInjectionPreview();
+      break;
+    case "trace":
+      _refreshTaskMessageTrace();
+      break;
+    case "persistence":
+      _refreshTaskPersistence();
+      break;
+  }
+}
+
+// ---------- Pipeline Overview ----------
+
+function _resolvePipelineStatus(statusObj) {
+  if (!statusObj) return { label: "UNKNOWN", color: "amber", detail: "—" };
+  const text = String(statusObj.text || "");
+  const meta = String(statusObj.meta || "");
+  const level = String(statusObj.level || "info");
+  let color = "green";
+  if (level === "warn") color = "amber";
+  else if (level === "error") color = "red";
+  else if (text.toLowerCase().includes("running") || text.toLowerCase().includes("进行中") || text.includes("正在")) color = "cyan";
+  return { label: text || "IDLE", color, detail: meta };
+}
+
+function _refreshTaskPipelineOverview() {
+  const el = document.getElementById("bme-task-pipeline");
+  if (!el) return;
+
+  const graph = _getGraph?.() || {};
+  const historyState = graph.runtimeState?.historyState || graph.historyState || {};
+  const loadInfo = _getGraphPersistenceSnapshot();
+
+  const extraction = _resolvePipelineStatus(_getLastExtractionStatus?.());
+  const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
+  const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
+  const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
+  const persistence = _resolvePipelineStatus({
+    text: loadInfo.loadState || "unknown",
+    meta: `rev ${loadInfo.revision || 0}`,
+    level: persistLevel,
+  });
+
+  const batchStatus = _getLatestBatchStatusSnapshot() || {};
+  const stages = [
+    { key: "core", label: "Core" },
+    { key: "structural", label: "结构" },
+    { key: "semantic", label: "语义" },
+    { key: "finalize", label: "定稿" },
+  ];
+
+  const stageHtml = stages.map((s, i) => {
+    const outcome = batchStatus.stageOutcomes?.[s.key];
+    let dotClass = "";
+    let lineClass = "";
+    let icon = '<i class="fa-solid fa-hourglass"></i>';
+    if (outcome === "success" || outcome === "skipped") {
+      dotClass = "done";
+      icon = '<i class="fa-solid fa-check"></i>';
+      lineClass = "done";
+    } else if (outcome === "running" || outcome === "partial") {
+      dotClass = "running";
+      icon = '<i class="fa-solid fa-spinner fa-spin"></i>';
+      lineClass = "running";
+    }
+    const linePart = i < stages.length - 1 ? `<div class="bme-batch-stage-line ${lineClass}"></div>` : "";
+    return `
+      <div class="bme-batch-stage">
+        <div class="bme-batch-stage-dot ${dotClass}">${icon}</div>
+        <div class="bme-batch-stage-label">${_escHtml(s.label)}</div>
+        <div class="bme-batch-stage-detail">${outcome ? _escHtml(outcome) : "pending"}</div>
+        ${linePart}
+      </div>
+    `;
+  }).join("");
+
+  const batchMeta = batchStatus.persistenceOutcome
+    ? `<span><i class="fa-solid fa-database"></i> ${_escHtml(batchStatus.persistenceOutcome)}</span>`
+    : "";
+  const batchWarnings = (batchStatus.warnings || []).length;
+  const batchErrors = (batchStatus.errors || []).length;
+  const batchMetaExtra = [
+    batchWarnings ? `<span><i class="fa-solid fa-triangle-exclamation"></i> ${batchWarnings} warnings</span>` : "",
+    batchErrors ? `<span><i class="fa-solid fa-circle-exclamation"></i> ${batchErrors} errors</span>` : "",
+  ].filter(Boolean).join("");
+
+  const statusRows = [
+    { label: "提取", color: extraction.color, value: extraction.label + (extraction.detail ? ` — ${extraction.detail}` : "") },
+    { label: "向量", color: vector.color, value: vector.label + (vector.detail ? ` — ${vector.detail}` : "") },
+    { label: "召回", color: recall.color, value: recall.label + (recall.detail ? ` — ${recall.detail}` : "") },
+    { label: "持久化", color: persistence.color, value: persistence.label + (persistence.detail ? ` — ${persistence.detail}` : "") },
+  ];
+
+  const pipelineCard = (name, s, icon) => `
+    <div class="bme-pipeline-card" data-status="${s.color === "green" ? "idle" : s.color === "cyan" ? "running" : s.color === "amber" ? "warning" : "error"}">
+      <div class="bme-pipeline-dot ${s.color}"></div>
+      <div class="bme-pipeline-info">
+        <div class="bme-pipeline-name"><i class="fa-solid fa-${icon}" style="margin-right:4px;opacity:.5"></i>${_escHtml(name)}</div>
+        <div class="bme-pipeline-status ${s.color}">${_escHtml(s.label)}</div>
+        <div class="bme-pipeline-detail">${_escHtml(s.detail)}</div>
+      </div>
+    </div>`;
+
+  el.innerHTML = `
+    <div class="bme-pipeline-grid">
+      ${pipelineCard("提取 Extraction", extraction, "scissors")}
+      ${pipelineCard("向量 Vector", vector, "share-nodes")}
+      ${pipelineCard("召回 Recall", recall, "magnifying-glass")}
+      ${pipelineCard("持久化 Persistence", persistence, "database")}
+    </div>
+    <div class="bme-batch-progress">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:700;color:var(--bme-on-surface)"><i class="fa-solid fa-timeline" style="margin-right:6px;color:var(--bme-primary)"></i>Active Batch Progress</span>
+        <span style="font-size:10px;color:var(--bme-on-surface-dim)">ID: ${_escHtml(String(batchStatus.batchId || "—"))}</span>
+      </div>
+      <div class="bme-batch-stages">${stageHtml}</div>
+      <div class="bme-batch-meta">${batchMeta}${batchMetaExtra}</div>
+    </div>
+    <div class="bme-status-summary">
+      <div class="bme-status-summary-title"><i class="fa-solid fa-list"></i> Recent Status</div>
+      ${statusRows.map((r) => `
+        <div class="bme-status-row">
+          <div class="bme-status-row-label"><span class="bme-sdot" style="background:${r.color === "green" ? "#2ecc71" : r.color === "cyan" ? "#00d4ff" : r.color === "amber" ? "#f39c12" : "#e74c3c"}"></span>${_escHtml(r.label)}</div>
+          <div class="bme-status-row-value">${_escHtml(r.value)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+// ---------- Task Timeline ----------
+
+function _refreshTaskTimeline() {
+  const el = document.getElementById("bme-task-timeline");
+  if (!el) return;
+
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const timeline = Array.isArray(rd.taskTimeline) ? rd.taskTimeline : [];
+
+  if (!timeline.length) {
+    el.innerHTML = '<div class="bme-timeline-bottom-bar">暂无任务记录</div>';
+    return;
+  }
+
+  const entries = timeline.slice().reverse().map((entry, idx) => {
+    const t = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : "";
+    const title = entry.taskType || entry.stage || "task";
+    const statusText = entry.status || "";
+    const durationMs = entry.durationMs;
+    const durationStr = typeof durationMs === "number" ? `${(durationMs / 1000).toFixed(1)}s` : "";
+    const detail = entry.text || entry.meta || "";
+    const level = entry.level || "info";
+    const levelIcon = level === "error" ? "circle-exclamation" : level === "warn" ? "triangle-exclamation" : "circle-check";
+    const levelColor = level === "error" ? "#e74c3c" : level === "warn" ? "#f39c12" : "#2ecc71";
+
+    const substages = Array.isArray(entry.substages) ? entry.substages.map((sub) => `
+      <div class="bme-timeline-substage">
+        <i class="fa-solid fa-angle-right" style="color:${levelColor}"></i>
+        <span>${_escHtml(sub.label || sub.stage || "")}</span>
+        <span style="margin-left:auto;opacity:.5">${_escHtml(sub.outcome || sub.status || "")}</span>
+      </div>
+    `).join("") : "";
+
+    return `
+      <div class="bme-timeline-entry${idx > 5 ? " is-collapsed" : ""}" data-entry-idx="${idx}">
+        <div class="bme-timeline-entry__head" onclick="this.closest('.bme-timeline-entry').classList.toggle('is-collapsed')">
+          <i class="fa-solid fa-${levelIcon}" style="color:${levelColor};font-size:12px"></i>
+          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(statusText)}` : ""}</span>
+          <span class="bme-timeline-entry__meta">${durationStr} ${t}</span>
+          <button class="bme-timeline-entry__toggle" type="button"><i class="fa-solid fa-chevron-down"></i></button>
+        </div>
+        <div class="bme-timeline-entry__detail">
+          ${detail ? `<div style="font-size:11px;color:var(--bme-on-surface-dim);margin-bottom:6px">${_escHtml(detail)}</div>` : ""}
+          ${substages}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="bme-timeline-toolbar">
+      <i class="fa-solid fa-filter" style="color:var(--bme-on-surface-dim);font-size:11px"></i>
+      <span style="font-size:11px;color:var(--bme-on-surface-dim)">${timeline.length} 条记录</span>
+    </div>
+    <div class="bme-timeline-stack">${entries}</div>
+  `;
+}
+
+// ---------- Memory Browser (Master-Detail) ----------
+
+function _getMemoryNodeTypeClass(type) {
+  switch (type) {
+    case "pov_memory":
+    case "character":
+      return "type-character";
+    case "event":
+      return "type-event";
+    case "location":
+      return "type-location";
+    case "rule":
+      return "type-rule";
+    case "thread":
+      return "type-thread";
+    default:
+      return "type-default";
+  }
+}
+
+function _refreshTaskMemoryBrowser() {
+  const el = document.getElementById("bme-task-memory");
+  if (!el) return;
+
+  const graph = _getGraph?.();
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph || !_canRenderGraphData(loadInfo)) {
+    el.innerHTML = '<div class="bme-memory-detail-empty">图谱未加载</div>';
+    return;
+  }
+
+  const currentQuery = String(document.getElementById("bme-task-memory-search")?.value || "")
+    .trim()
+    .toLowerCase();
+  const currentFilter = document.getElementById("bme-task-memory-filter")?.value || "all";
+
+  let nodes = Array.isArray(graph.nodes)
+    ? graph.nodes.filter((node) => !node?.archived)
+    : [];
+
+  if (currentFilter !== "all") {
+    nodes = nodes.filter((node) => _matchesMemoryFilter(node, currentFilter));
+  }
+
+  if (currentQuery) {
+    nodes = nodes.filter((node) => {
+      const name = getNodeDisplayName(node).toLowerCase();
+      const snippet = _getNodeSnippet(node).toLowerCase();
+      const fieldsText = JSON.stringify(node?.fields || {}).toLowerCase();
+      return (
+        name.includes(currentQuery) ||
+        snippet.includes(currentQuery) ||
+        fieldsText.includes(currentQuery)
+      );
+    });
+  }
+
+  const sorted = nodes.slice().sort((a, b) => {
+    const importanceDiff = (b.importance || 5) - (a.importance || 5);
+    if (importanceDiff !== 0) return importanceDiff;
+    return (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0);
+  });
+
+  if (!sorted.some((node) => node.id === currentSelectedMemoryNodeId)) {
+    currentSelectedMemoryNodeId = sorted[0]?.id || "";
+  }
+
+  const listItems = sorted.map((node) => {
+    const sel = node.id === currentSelectedMemoryNodeId ? "selected" : "";
+    const preview = _getNodeSnippet(node);
+    const scopeBadge = buildScopeBadgeText(node.scope);
+    const metaText = _buildScopeMetaText(node);
+    const displayName = getNodeDisplayName(node);
+    return `
+      <div class="bme-memory-node-item ${sel}" data-node-id="${_escHtml(node.id)}">
+        <div class="bme-memory-node-item__header">
+          <span class="bme-memory-node-item__type ${_getMemoryNodeTypeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>
+          <span class="bme-memory-node-item__imp">IMP: ${typeof node.importance === "number" ? node.importance.toFixed(1) : "—"}</span>
+        </div>
+        <div class="bme-memory-node-item__title">${_escHtml(displayName)}</div>
+        <div class="bme-memory-node-item__preview">${_escHtml(preview)}</div>
+        <div class="bme-memory-node-item__meta">
+          <span>${_escHtml(scopeBadge)}</span>
+          <span>SEQ: ${_formatMemoryInt(node.seqRange?.[1] ?? node.seq, 0)}</span>
+        </div>
+        ${metaText ? `<div class="bme-memory-node-item__meta">${_escHtml(metaText)}</div>` : ""}
+      </div>`;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="bme-memory-master-detail">
+      <div class="bme-memory-list-panel">
+        <div class="bme-memory-list-filters">
+          <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." value="${_escHtml(currentQuery)}" />
+          <select class="bme-filter-select" id="bme-task-memory-filter">
+            <option value="all"${currentFilter === "all" ? " selected" : ""}>全部</option>
+            <option value="scope:objective"${currentFilter === "scope:objective" ? " selected" : ""}>客观</option>
+            <option value="scope:characterPov"${currentFilter === "scope:characterPov" ? " selected" : ""}>角色 POV</option>
+            <option value="scope:userPov"${currentFilter === "scope:userPov" ? " selected" : ""}>用户 POV</option>
+            <option value="pov_memory"${currentFilter === "pov_memory" ? " selected" : ""}>主观记忆</option>
+            <option value="event"${currentFilter === "event" ? " selected" : ""}>事件</option>
+            <option value="location"${currentFilter === "location" ? " selected" : ""}>地点</option>
+            <option value="thread"${currentFilter === "thread" ? " selected" : ""}>线索</option>
+            <option value="rule"${currentFilter === "rule" ? " selected" : ""}>规则</option>
+          </select>
+        </div>
+        <div class="bme-memory-list-scroll" id="bme-task-memory-list">
+          ${listItems || '<div style="padding:16px;font-size:12px;color:var(--bme-on-surface-dim)">无节点</div>'}
+        </div>
+      </div>
+      <div class="bme-memory-detail-panel" id="bme-task-memory-detail"></div>
+    </div>
+  `;
+
+  _renderTaskMemoryDetailSelection(graph);
+  _bindTaskMemoryListClick();
+
+  const searchInput = document.getElementById("bme-task-memory-search");
+  const filterSelect = document.getElementById("bme-task-memory-filter");
+  if (searchInput) {
+    let timer = null;
+    searchInput.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
+    });
+  }
+  filterSelect?.addEventListener("change", () => _refreshTaskMemoryBrowser());
+}
+
+function _bindTaskMemoryListClick() {
+  const list = document.getElementById("bme-task-memory-list");
+  if (!list) return;
+  list.addEventListener("click", (e) => {
+    const item = e.target.closest(".bme-memory-node-item");
+    if (!item) return;
+    currentSelectedMemoryNodeId = item.dataset.nodeId || "";
+    list.querySelectorAll(".bme-memory-node-item").forEach((n) => n.classList.toggle("selected", n.dataset.nodeId === currentSelectedMemoryNodeId));
+    const graph = _getGraph?.();
+    _renderTaskMemoryDetailSelection(graph);
+  });
+}
+
+function _renderTaskMemoryDetailSelection(graph = _getGraph?.()) {
+  const detailEl = document.getElementById("bme-task-memory-detail");
+  if (!detailEl) return;
+
+  const node = (graph?.nodes || []).find((candidate) => candidate.id === currentSelectedMemoryNodeId) || null;
+  if (!node) {
+    detailEl.innerHTML = '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
+    return;
+  }
+
+  _renderTaskMemoryDetailPanel(detailEl, node, graph);
+}
+
+function _renderTaskMemoryDetailPanel(detailEl, node, graph) {
+  if (!detailEl) return;
+
+  const edges = (graph?.edges || []).filter(
+    (e) =>
+      !e?.invalidAt &&
+      !e?.expiredAt &&
+      (e?.fromId === node.id || e?.toId === node.id),
+  );
+  const detailSummary = _getNodeSnippet(node);
+  const scopeBadge = buildScopeBadgeText(node.scope);
+  const displayName = getNodeDisplayName(node);
+  const writeBlocked = _isGraphWriteBlocked();
+  const disabledAttr = writeBlocked ? " disabled" : "";
+  const badges = [
+    node.type ? `<span class="bme-memory-node-item__type ${_getMemoryNodeTypeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>` : "",
+    scopeBadge ? `<span class="bme-memory-node-item__type type-default">${_escHtml(scopeBadge)}</span>` : "",
+    node.archived ? '<span class="bme-memory-node-item__type type-default">ARCHIVED</span>' : "",
+  ].filter(Boolean).join("");
+
+  detailEl.innerHTML = `
+    <div class="bme-memory-detail__header">
+      <div class="bme-memory-detail__title">${_escHtml(displayName)}</div>
+      <div class="bme-memory-detail__header-actions">
+        <button class="bme-detail-action-btn" data-task-memory-action="save" type="button" title="保存修改"${disabledAttr}>
+          <i class="fa-solid fa-floppy-disk"></i>
+        </button>
+        <button class="bme-detail-action-btn bme-detail-action-danger" data-task-memory-action="delete" type="button" title="删除节点"${disabledAttr}>
+          <i class="fa-solid fa-trash"></i>
+        </button>
+      </div>
+    </div>
+    <div class="bme-memory-detail__badges">${badges}</div>
+    <div class="bme-memory-detail__desc">${_escHtml(detailSummary || "无补充字段")}</div>
+    <div class="bme-memory-detail__stats">
+      <span><i class="fa-solid fa-link" style="margin-right:4px;opacity:.5"></i>${edges.length} 条连接</span>
+      <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>访问 ${_formatMemoryInt(node.accessCount, 0)}</span>
+    </div>
+    <div id="bme-task-memory-editor-body"></div>
+  `;
+
+  const editorBody = detailEl.querySelector("#bme-task-memory-editor-body");
+  if (editorBody) {
+    editorBody.replaceChildren(
+      _buildNodeDetailEditorFragment(node, { idPrefix: "bme-task-detail" }),
+    );
+  }
+
+  detailEl
+    .querySelector('[data-task-memory-action="save"]')
+    ?.addEventListener("click", () => _saveTaskMemoryDetail());
+  detailEl
+    .querySelector('[data-task-memory-action="delete"]')
+    ?.addEventListener("click", () => _deleteTaskMemoryDetail());
+}
+
+function _saveTaskMemoryDetail() {
+  const detailEl = document.getElementById("bme-task-memory-detail");
+  const bodyEl = detailEl?.querySelector("#bme-task-memory-editor-body");
+  const nodeId = currentSelectedMemoryNodeId;
+  if (!nodeId || !bodyEl) return;
+
+  const collected = _collectNodeDetailEditorUpdates(bodyEl, {
+    idPrefix: "bme-task-detail",
+  });
+  if (!collected.ok) {
+    toastr.error(collected.errorMessage || "保存失败", "ST-BME");
+    return;
+  }
+
+  _persistNodeDetailEdits(nodeId, collected.updates);
+}
+
+function _deleteTaskMemoryDetail() {
+  const nodeId = currentSelectedMemoryNodeId;
+  if (!nodeId) return;
+
+  _deleteGraphNodeById(nodeId, {
+    afterSuccess: () => {
+      currentSelectedMemoryNodeId = "";
+    },
+  });
+}
+
+// ---------- Injection Preview ----------
+
+function _refreshTaskInjectionPreview() {
+  const el = document.getElementById("bme-task-injection");
+  if (!el) return;
+
+  const injectionText = String(_getLastInjection?.() || "").trim();
+  if (!injectionText) {
+    el.innerHTML = '<div class="bme-memory-detail-empty">暂无注入数据——等待第一次召回注入后显示。</div>';
+    return;
+  }
+
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const recallSnap = rd?.injections?.recall || {};
+  const totalTokens = recallSnap.tokenCount || 0;
+  const budgetTokens = recallSnap.budgetTokens || totalTokens || 1;
+  const pct = totalTokens > 0 ? Math.min(100, Math.round((totalTokens / budgetTokens) * 100)) : 0;
+
+  const wrapper = document.createDocumentFragment();
+
+  if (totalTokens > 0) {
+    const bar = document.createElement("div");
+    bar.className = "bme-injection-token-bar";
+    bar.innerHTML = `
+      <span class="bme-injection-token-bar__label">${totalTokens} / ${budgetTokens} tok</span>
+      <div class="bme-injection-token-bar__track">
+        <div class="bme-injection-token-bar__fill" style="width:${pct}%"></div>
+      </div>
+      <span class="bme-injection-token-bar__breakdown">${pct}%</span>`;
+    wrapper.appendChild(bar);
+  }
+
+  wrapper.appendChild(_buildInjectionPreviewNode(injectionText));
+  el.replaceChildren(wrapper);
+}
+
+// ---------- Message Trace ----------
+
+function _refreshTaskMessageTrace() {
+  const el = document.getElementById("bme-task-trace");
+  if (!el) return;
+
+  const settings = _getSettings?.() || {};
+  const state = _getMessageTraceWorkspaceState(settings);
+  el.innerHTML = _renderMessageTraceWorkspace(state);
+}
+
+// ---------- Persistence Status ----------
+
+function _refreshTaskPersistence() {
+  const el = document.getElementById("bme-task-persistence");
+  if (!el) return;
+
+  const graph = _getGraph?.() || {};
+  const ps = _getGraphPersistenceSnapshot();
+  const rs = graph.runtimeState || {};
+
+  const LOAD_STATE_LABELS = {
+    "no-chat": "无聊天",
+    loading: "加载中",
+    loaded: "已加载",
+    blocked: "已阻塞",
+    error: "错误",
+  };
+
+  const STORAGE_TIER_LABELS = {
+    none: "无",
+    metadata: "元数据",
+    indexeddb: "IndexedDB",
+    chat: "聊天存档",
+  };
+
+  const loadStateLabel = LOAD_STATE_LABELS[ps.loadState] || ps.loadState || "未知";
+  const storageTierLabel = STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] || ps.acceptedStorageTier || ps.storageTier || "—";
+
+  const kvs = [
+    ["加载状态", loadStateLabel],
+    ["存储层级", storageTierLabel],
+    ["版本号", ps.revision ?? "—"],
+    ["提交标记", ps.commitMarker ? "存在" : "无"],
+    ["阻塞原因", ps.blockedReason || ps.reason || "—"],
+    ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
+  ];
+
+  const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
+
+  const journalCount = Array.isArray(rs.historyState?.batchJournal) ? rs.historyState.batchJournal.length : 0;
+  const secondaryKvs = [
+    ["图谱节点", String((graph.nodes || []).length)],
+    ["图谱边", String((graph.edges || []).length)],
+    ["批次日志", String(journalCount)],
+    ["运行版本", String(rs.graphRevision ?? "—")],
+  ];
+  const secondaryHtml = secondaryKvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(v)}</strong></div>`).join("");
+
+  const guidePairs = [
+    ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
+    ["存储层级", "当前持久化使用的最高存储介质。IndexedDB 最快，聊天存档最稳。"],
+    ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
+    ["提交标记", "聊天元数据中的标记，指示是否有更高版本存在于本地 IndexedDB。"],
+    ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
+    ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
+    ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
+    ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
+    ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
+  ];
+
+  const guideHtml = guidePairs.map(([term, desc]) =>
+    `<div class="bme-persist-guide__item"><strong>${_escHtml(term)}</strong><span>${_escHtml(desc)}</span></div>`
+  ).join("");
+
+  el.innerHTML = `
+    <div class="bme-persist-grid">
+      <div class="bme-persist-kv">
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
+        ${kvHtml}
+      </div>
+      <div class="bme-persist-kv">
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行统计</div>
+        ${secondaryHtml}
+      </div>
+    </div>
+    <div class="bme-persist-guide">
+      <div class="bme-persist-guide__title"><i class="fa-solid fa-circle-info" style="margin-right:6px;opacity:.5"></i>字段说明</div>
+      ${guideHtml}
+    </div>
+  `;
 }
 
 // ==================== 图谱视图切换 ====================
@@ -1857,7 +2472,7 @@ function _formatSummaryEntryCard(entry = {}) {
   const extractionRange = Array.isArray(entry?.extractionRange)
     ? entry.extractionRange
     : ["?", "?"];
-  const spanLabel = describeStoryTimeSpan(entry?.storyTimeSpan);
+  const spanLabel = _describeStoryTimeSpanDisplay(entry?.storyTimeSpan);
   const meta = [
     `L${Math.max(0, Number(entry?.level || 0))}`,
     String(entry?.kind || "small"),
@@ -3210,6 +3825,102 @@ function _bindGraphControls() {
 
 // ==================== 节点详情 ====================
 
+const STORY_TIME_TENSE_OPTIONS = Object.freeze([
+  { value: "past", label: "过去" },
+  { value: "ongoing", label: "进行中" },
+  { value: "future", label: "未来" },
+  { value: "flashback", label: "闪回" },
+  { value: "hypothetical", label: "假设" },
+  { value: "unknown", label: "未知" },
+]);
+
+const STORY_TIME_RELATION_OPTIONS = Object.freeze([
+  { value: "same", label: "同一时点" },
+  { value: "after", label: "在锚点之后" },
+  { value: "before", label: "在锚点之前" },
+  { value: "parallel", label: "与锚点并行" },
+  { value: "unknown", label: "未知" },
+]);
+
+const STORY_TIME_CONFIDENCE_OPTIONS = Object.freeze([
+  { value: "high", label: "高" },
+  { value: "medium", label: "中" },
+  { value: "low", label: "低" },
+]);
+
+const STORY_TIME_SOURCE_OPTIONS = Object.freeze([
+  { value: "extract", label: "提取" },
+  { value: "derived", label: "推导" },
+  { value: "manual", label: "手动" },
+]);
+
+const STORY_TIME_MIXED_OPTIONS = Object.freeze([
+  { value: "false", label: "否" },
+  { value: "true", label: "是" },
+]);
+
+function _resolveNodeDetailOptionLabel(options = [], value, fallback = "") {
+  return (
+    options.find((option) => option.value === String(value ?? ""))?.label ||
+    fallback ||
+    String(value ?? "")
+  );
+}
+
+function _describeStoryTimeDisplay(storyTime = {}) {
+  const normalized = normalizeStoryTime(storyTime);
+  if (!normalized.label) return "";
+
+  const parts = [normalized.label];
+  if (normalized.tense && normalized.tense !== "unknown") {
+    parts.push(
+      _resolveNodeDetailOptionLabel(STORY_TIME_TENSE_OPTIONS, normalized.tense),
+    );
+  }
+  if (
+    normalized.relation &&
+    normalized.relation !== "unknown" &&
+    normalized.relation !== "same"
+  ) {
+    const relationLabel = _resolveNodeDetailOptionLabel(
+      STORY_TIME_RELATION_OPTIONS,
+      normalized.relation,
+    );
+    parts.push(
+      normalized.anchorLabel
+        ? `${relationLabel} · ${normalized.anchorLabel}`
+        : relationLabel,
+    );
+  } else if (normalized.anchorLabel) {
+    parts.push(`锚点 · ${normalized.anchorLabel}`);
+  }
+
+  return parts.join(" · ");
+}
+
+function _describeStoryTimeSpanDisplay(storyTimeSpan = {}) {
+  const normalized = normalizeStoryTimeSpan(storyTimeSpan);
+  const label =
+    normalized.startLabel &&
+    normalized.endLabel &&
+    normalized.startLabel !== normalized.endLabel
+      ? `${normalized.startLabel} → ${normalized.endLabel}`
+      : normalized.startLabel || normalized.endLabel || "";
+
+  if (!label) {
+    return normalized.mixed ? "混合时间" : "";
+  }
+  return normalized.mixed ? `${label} · 混合` : label;
+}
+
+function _describeNodeStoryTimeDisplay(node = {}) {
+  return (
+    _describeStoryTimeDisplay(node.storyTime) ||
+    _describeStoryTimeSpanDisplay(node.storyTimeSpan) ||
+    ""
+  );
+}
+
 function _appendNodeDetailReadOnly(container, labelText, valueText) {
   const row = document.createElement("div");
   row.className = "bme-node-detail-field";
@@ -3262,6 +3973,32 @@ function _appendNodeDetailTextInput(container, labelText, inputId, value) {
   container.appendChild(row);
 }
 
+function _appendNodeDetailSelectInput(
+  container,
+  labelText,
+  inputId,
+  value,
+  options = [],
+) {
+  const row = document.createElement("div");
+  row.className = "bme-node-detail-field";
+  const label = document.createElement("label");
+  label.setAttribute("for", inputId);
+  label.textContent = labelText;
+  const select = document.createElement("select");
+  select.id = inputId;
+  select.className = "bme-node-detail-input";
+  options.forEach((option) => {
+    const optEl = document.createElement("option");
+    optEl.value = option.value;
+    optEl.textContent = option.label;
+    select.appendChild(optEl);
+  });
+  select.value = String(value ?? "");
+  row.append(label, select);
+  container.appendChild(row);
+}
+
 function _parseNodeDetailScopeList(rawValue, { allowSlash = true } = {}) {
   const normalized = String(rawValue ?? "")
     .replace(/[＞>→]+/g, "/")
@@ -3293,6 +4030,421 @@ function _appendNodeDetailTextareaField(
   ta.value = text;
   row.append(label, ta);
   container.appendChild(row);
+}
+
+function _buildNodeDetailEditorFragment(raw, { idPrefix = "bme-detail" } = {}) {
+  const fields = raw.fields || {};
+  const scope = normalizeMemoryScope(raw.scope);
+  const storyTime = normalizeStoryTime(raw.storyTime);
+  const storyTimeSpan = normalizeStoryTimeSpan(raw.storyTimeSpan);
+  const fragment = document.createDocumentFragment();
+  const inputId = (suffix) => `${idPrefix}-${suffix}`;
+
+  _appendNodeDetailReadOnly(fragment, "类型", _typeLabel(raw.type));
+  _appendNodeDetailReadOnly(
+    fragment,
+    "作用域",
+    buildScopeBadgeText(raw.scope),
+  );
+  _appendNodeDetailReadOnly(fragment, "ID", raw.id || "—");
+  _appendNodeDetailReadOnly(
+    fragment,
+    "序列号",
+    raw.seqRange?.[1] ?? raw.seq ?? 0,
+  );
+
+  if (scope.layer === "pov") {
+    _appendNodeDetailReadOnly(
+      fragment,
+      "POV 归属",
+      `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
+    );
+  }
+  const regionLine = buildRegionLine(scope);
+  if (regionLine) {
+    _appendNodeDetailReadOnly(fragment, "地区", regionLine);
+  }
+  _appendNodeDetailTextInput(
+    fragment,
+    "主地区",
+    inputId("scope-region-primary"),
+    scope.regionPrimary || "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "地区路径 (用 / 分隔)",
+    inputId("scope-region-path"),
+    Array.isArray(scope.regionPath) ? scope.regionPath.join(" / ") : "",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "次级地区 (用逗号或 / 分隔)",
+    inputId("scope-region-secondary"),
+    Array.isArray(scope.regionSecondary)
+      ? scope.regionSecondary.join(", ")
+      : "",
+  );
+  if (Array.isArray(raw.seqRange)) {
+    _appendNodeDetailReadOnly(
+      fragment,
+      "序列范围",
+      `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
+    );
+  }
+  const storyTimeSection = document.createElement("div");
+  storyTimeSection.className = "bme-node-detail-section";
+  storyTimeSection.textContent = "剧情时间";
+  fragment.appendChild(storyTimeSection);
+  _appendNodeDetailReadOnly(
+    fragment,
+    "当前摘要",
+    _describeStoryTimeDisplay(storyTime) || "—",
+  );
+  _appendNodeDetailTextInput(
+    fragment,
+    "时间标签",
+    inputId("story-time-label"),
+    storyTime.label,
+  );
+  _appendNodeDetailSelectInput(
+    fragment,
+    "时态",
+    inputId("story-time-tense"),
+    storyTime.tense,
+    STORY_TIME_TENSE_OPTIONS,
+  );
+
+  const storyTimeAdvanced = document.createElement("details");
+  storyTimeAdvanced.className = "bme-node-detail-collapse";
+  const storyTimeAdvancedSummary = document.createElement("summary");
+  storyTimeAdvancedSummary.textContent = "高级";
+  storyTimeAdvanced.appendChild(storyTimeAdvancedSummary);
+  _appendNodeDetailSelectInput(
+    storyTimeAdvanced,
+    "相对关系",
+    inputId("story-time-relation"),
+    storyTime.relation,
+    STORY_TIME_RELATION_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    storyTimeAdvanced,
+    "锚点标签",
+    inputId("story-time-anchor-label"),
+    storyTime.anchorLabel,
+  );
+  _appendNodeDetailSelectInput(
+    storyTimeAdvanced,
+    "置信度",
+    inputId("story-time-confidence"),
+    storyTime.confidence,
+    STORY_TIME_CONFIDENCE_OPTIONS,
+  );
+  _appendNodeDetailSelectInput(
+    storyTimeAdvanced,
+    "来源",
+    inputId("story-time-source"),
+    storyTime.source,
+    STORY_TIME_SOURCE_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    storyTimeAdvanced,
+    "段 ID",
+    inputId("story-time-segment-id"),
+    storyTime.segmentId,
+  );
+  fragment.appendChild(storyTimeAdvanced);
+
+  const storyTimeSpanCollapse = document.createElement("details");
+  storyTimeSpanCollapse.className = "bme-node-detail-collapse";
+  const storyTimeSpanSummaryEl = document.createElement("summary");
+  storyTimeSpanSummaryEl.className = "bme-node-detail-section";
+  storyTimeSpanSummaryEl.textContent = "剧情时间范围";
+  storyTimeSpanCollapse.appendChild(storyTimeSpanSummaryEl);
+  _appendNodeDetailReadOnly(
+    storyTimeSpanCollapse,
+    "当前范围",
+    _describeStoryTimeSpanDisplay(storyTimeSpan) || "—",
+  );
+  _appendNodeDetailTextInput(
+    storyTimeSpanCollapse,
+    "起点标签",
+    inputId("story-time-span-start-label"),
+    storyTimeSpan.startLabel,
+  );
+  _appendNodeDetailTextInput(
+    storyTimeSpanCollapse,
+    "终点标签",
+    inputId("story-time-span-end-label"),
+    storyTimeSpan.endLabel,
+  );
+  _appendNodeDetailSelectInput(
+    storyTimeSpanCollapse,
+    "混合时间",
+    inputId("story-time-span-mixed"),
+    storyTimeSpan.mixed ? "true" : "false",
+    STORY_TIME_MIXED_OPTIONS,
+  );
+  _appendNodeDetailSelectInput(
+    storyTimeSpanCollapse,
+    "来源",
+    inputId("story-time-span-source"),
+    storyTimeSpan.source,
+    STORY_TIME_SOURCE_OPTIONS,
+  );
+  _appendNodeDetailTextInput(
+    storyTimeSpanCollapse,
+    "起点段 ID",
+    inputId("story-time-span-start-segment-id"),
+    storyTimeSpan.startSegmentId,
+  );
+  _appendNodeDetailTextInput(
+    storyTimeSpanCollapse,
+    "终点段 ID",
+    inputId("story-time-span-end-segment-id"),
+    storyTimeSpan.endSegmentId,
+  );
+  fragment.appendChild(storyTimeSpanCollapse);
+
+  _appendNodeDetailNumberInput(
+    fragment,
+    "重要度 (0–10)",
+    inputId("importance"),
+    raw.importance ?? 5,
+    { min: 0, max: 10, step: 0.1 },
+  );
+  _appendNodeDetailNumberInput(
+    fragment,
+    "访问次数",
+    inputId("accesscount"),
+    raw.accessCount ?? 0,
+    { min: 0, step: 1 },
+  );
+
+  const clustersStr = Array.isArray(raw.clusters)
+    ? raw.clusters.join(", ")
+    : "";
+  _appendNodeDetailTextInput(
+    fragment,
+    "聚类标签 (逗号分隔)",
+    inputId("clusters"),
+    clustersStr,
+  );
+
+  const section = document.createElement("div");
+  section.className = "bme-node-detail-section";
+  section.textContent = "记忆字段";
+  fragment.appendChild(section);
+
+  for (const [key, value] of Object.entries(fields)) {
+    const isJson = typeof value === "object" && value !== null;
+    const displayVal = isJson
+      ? JSON.stringify(value, null, 2)
+      : String(value ?? "");
+    _appendNodeDetailTextareaField(
+      fragment,
+      key,
+      key,
+      isJson ? "json" : "string",
+      displayVal,
+    );
+  }
+
+  return fragment;
+}
+
+function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {}) {
+  if (!bodyEl) {
+    return { ok: false, errorMessage: "未找到可编辑表单" };
+  }
+
+  const findInput = (suffix) =>
+    bodyEl.querySelector(`#${idPrefix}-${suffix}`);
+  const updates = { fields: {} };
+  const impEl = findInput("importance");
+  if (impEl && impEl.value !== "") {
+    const imp = Number.parseFloat(impEl.value);
+    if (Number.isFinite(imp)) {
+      updates.importance = Math.max(0, Math.min(10, imp));
+    }
+  }
+  const accessEl = findInput("accesscount");
+  if (accessEl && accessEl.value !== "") {
+    const ac = Number.parseInt(accessEl.value, 10);
+    if (Number.isFinite(ac)) {
+      updates.accessCount = Math.max(0, ac);
+    }
+  }
+  const clustersEl = findInput("clusters");
+  if (clustersEl) {
+    updates.clusters = clustersEl.value
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  const regionPrimaryEl = findInput("scope-region-primary");
+  const regionPathEl = findInput("scope-region-path");
+  const regionSecondaryEl = findInput("scope-region-secondary");
+  if (regionPrimaryEl || regionPathEl || regionSecondaryEl) {
+    updates.scope = {
+      regionPrimary: String(regionPrimaryEl?.value || "").trim(),
+      regionPath: _parseNodeDetailScopeList(regionPathEl?.value, {
+        allowSlash: true,
+      }),
+      regionSecondary: _parseNodeDetailScopeList(regionSecondaryEl?.value, {
+        allowSlash: true,
+      }),
+    };
+  }
+
+  const storyTimeLabelEl = findInput("story-time-label");
+  const storyTimeTenseEl = findInput("story-time-tense");
+  const storyTimeRelationEl = findInput("story-time-relation");
+  const storyTimeAnchorLabelEl = findInput("story-time-anchor-label");
+  const storyTimeConfidenceEl = findInput("story-time-confidence");
+  const storyTimeSourceEl = findInput("story-time-source");
+  const storyTimeSegmentIdEl = findInput("story-time-segment-id");
+  if (
+    storyTimeLabelEl ||
+    storyTimeTenseEl ||
+    storyTimeRelationEl ||
+    storyTimeAnchorLabelEl ||
+    storyTimeConfidenceEl ||
+    storyTimeSourceEl ||
+    storyTimeSegmentIdEl
+  ) {
+    updates.storyTime = normalizeStoryTime({
+      segmentId: String(storyTimeSegmentIdEl?.value || "").trim(),
+      label: String(storyTimeLabelEl?.value || "").trim(),
+      tense: String(storyTimeTenseEl?.value || ""),
+      relation: String(storyTimeRelationEl?.value || ""),
+      anchorLabel: String(storyTimeAnchorLabelEl?.value || "").trim(),
+      confidence: String(storyTimeConfidenceEl?.value || ""),
+      source: String(storyTimeSourceEl?.value || ""),
+    });
+  }
+
+  const storyTimeSpanStartLabelEl = findInput("story-time-span-start-label");
+  const storyTimeSpanEndLabelEl = findInput("story-time-span-end-label");
+  const storyTimeSpanMixedEl = findInput("story-time-span-mixed");
+  const storyTimeSpanSourceEl = findInput("story-time-span-source");
+  const storyTimeSpanStartSegmentIdEl = findInput(
+    "story-time-span-start-segment-id",
+  );
+  const storyTimeSpanEndSegmentIdEl = findInput(
+    "story-time-span-end-segment-id",
+  );
+  if (
+    storyTimeSpanStartLabelEl ||
+    storyTimeSpanEndLabelEl ||
+    storyTimeSpanMixedEl ||
+    storyTimeSpanSourceEl ||
+    storyTimeSpanStartSegmentIdEl ||
+    storyTimeSpanEndSegmentIdEl
+  ) {
+    updates.storyTimeSpan = normalizeStoryTimeSpan({
+      startSegmentId: String(storyTimeSpanStartSegmentIdEl?.value || "").trim(),
+      endSegmentId: String(storyTimeSpanEndSegmentIdEl?.value || "").trim(),
+      startLabel: String(storyTimeSpanStartLabelEl?.value || "").trim(),
+      endLabel: String(storyTimeSpanEndLabelEl?.value || "").trim(),
+      mixed: String(storyTimeSpanMixedEl?.value || "false") === "true",
+      source: String(storyTimeSpanSourceEl?.value || ""),
+    });
+  }
+
+  const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
+  for (const el of fieldEls) {
+    const key = el.dataset.bmeFieldKey;
+    const type = el.dataset.bmeFieldType || "string";
+    const rawVal = el.value;
+    if (type === "json") {
+      try {
+        updates.fields[key] = JSON.parse(rawVal || "null");
+      } catch {
+        return {
+          ok: false,
+          errorMessage: `字段「${key}」须为合法 JSON`,
+        };
+      }
+    } else {
+      updates.fields[key] = rawVal;
+    }
+  }
+
+  return { ok: true, updates };
+}
+
+function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
+  if (!nodeId) return false;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return false;
+  }
+
+  const result = _actionHandlers.saveGraphNode?.({
+    nodeId,
+    updates,
+  });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found"
+        ? "节点已不存在，请关闭后重试"
+        : "保存失败",
+      "ST-BME",
+    );
+    return false;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "内容已更新，但写回聊天元数据可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已保存", "ST-BME");
+  }
+
+  afterSuccess?.();
+  refreshLiveState();
+  return true;
+}
+
+function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
+  if (!nodeId) return false;
+  if (_isGraphWriteBlocked()) {
+    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+    return false;
+  }
+
+  const g = _getGraph?.();
+  const node = g?.nodes?.find((n) => n.id === nodeId);
+  const label = node ? getNodeDisplayName(node) : nodeId;
+  if (
+    !confirm(
+      `确定删除节点「${label}」？\n\n若该节点有层级子节点，将一并删除。此操作不可在本面板内撤销。`,
+    )
+  ) {
+    return false;
+  }
+
+  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
+  if (!result?.ok) {
+    toastr.error(
+      result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
+      "ST-BME",
+    );
+    return false;
+  }
+  if (result.persistBlocked) {
+    toastr.warning(
+      "节点已从图中移除，但写回可能被拦截，请查看图谱状态",
+      "ST-BME",
+    );
+  } else {
+    toastr.success("节点已删除", "ST-BME");
+  }
+
+  afterSuccess?.();
+  refreshLiveState();
+  return true;
 }
 
 function _useMobileGraphNodeDetail() {
@@ -3336,123 +4488,9 @@ function _showNodeDetail(node) {
   }
 
   const raw = node.raw || node;
-  const fields = raw.fields || {};
   titleEl.textContent = getNodeDisplayName(raw);
   detailEl.dataset.editNodeId = raw.id || "";
-
-  const fragment = document.createDocumentFragment();
-
-  _appendNodeDetailReadOnly(fragment, "类型", _typeLabel(raw.type));
-  _appendNodeDetailReadOnly(
-    fragment,
-    "作用域",
-    buildScopeBadgeText(raw.scope),
-  );
-  _appendNodeDetailReadOnly(fragment, "ID", raw.id || "—");
-  _appendNodeDetailReadOnly(
-    fragment,
-    "序列号",
-    raw.seqRange?.[1] ?? raw.seq ?? 0,
-  );
-
-  const scope = normalizeMemoryScope(raw.scope);
-  if (scope.layer === "pov") {
-    _appendNodeDetailReadOnly(
-      fragment,
-      "POV 归属",
-      `${scope.ownerType || "unknown"} / ${scope.ownerName || scope.ownerId || "—"}`,
-    );
-  }
-  const regionLine = buildRegionLine(scope);
-  if (regionLine) {
-    _appendNodeDetailReadOnly(fragment, "地区", regionLine);
-  }
-  _appendNodeDetailTextInput(
-    fragment,
-    "主地区",
-    "bme-detail-scope-region-primary",
-    scope.regionPrimary || "",
-  );
-  _appendNodeDetailTextInput(
-    fragment,
-    "地区路径 (用 / 分隔)",
-    "bme-detail-scope-region-path",
-    Array.isArray(scope.regionPath) ? scope.regionPath.join(" / ") : "",
-  );
-  _appendNodeDetailTextInput(
-    fragment,
-    "次级地区 (用逗号或 / 分隔)",
-    "bme-detail-scope-region-secondary",
-    Array.isArray(scope.regionSecondary)
-      ? scope.regionSecondary.join(", ")
-      : "",
-  );
-  if (Array.isArray(raw.seqRange)) {
-    _appendNodeDetailReadOnly(
-      fragment,
-      "序列范围",
-      `${raw.seqRange[0]} ~ ${raw.seqRange[1]}`,
-    );
-  }
-  _appendNodeDetailTextareaField(
-    fragment,
-    "剧情时间",
-    "__storyTime",
-    "json",
-    JSON.stringify(raw.storyTime || {}, null, 2),
-  );
-  _appendNodeDetailTextareaField(
-    fragment,
-    "剧情时间范围",
-    "__storyTimeSpan",
-    "json",
-    JSON.stringify(raw.storyTimeSpan || {}, null, 2),
-  );
-
-  _appendNodeDetailNumberInput(
-    fragment,
-    "重要度 (0–10)",
-    "bme-detail-importance",
-    raw.importance ?? 5,
-    { min: 0, max: 10, step: 0.1 },
-  );
-  _appendNodeDetailNumberInput(
-    fragment,
-    "访问次数",
-    "bme-detail-accesscount",
-    raw.accessCount ?? 0,
-    { min: 0, step: 1 },
-  );
-
-  const clustersStr = Array.isArray(raw.clusters)
-    ? raw.clusters.join(", ")
-    : "";
-  _appendNodeDetailTextInput(
-    fragment,
-    "聚类标签 (逗号分隔)",
-    "bme-detail-clusters",
-    clustersStr,
-  );
-
-  const section = document.createElement("div");
-  section.className = "bme-node-detail-section";
-  section.textContent = "记忆字段";
-  fragment.appendChild(section);
-
-  for (const [key, value] of Object.entries(fields)) {
-    const isJson = typeof value === "object" && value !== null;
-    const displayVal = isJson
-      ? JSON.stringify(value, null, 2)
-      : String(value ?? "");
-    _appendNodeDetailTextareaField(
-      fragment,
-      key,
-      key,
-      isJson ? "json" : "string",
-      displayVal,
-    );
-  }
-  bodyEl.replaceChildren(fragment);
+  bodyEl.replaceChildren(_buildNodeDetailEditorFragment(raw));
 
   if (mobile) {
     scrimEl?.removeAttribute("hidden");
@@ -3466,110 +4504,27 @@ function _saveNodeDetail() {
   const bodyEl = els?.bodyEl;
   const nodeId = detailEl?.dataset?.editNodeId;
   if (!nodeId || !bodyEl) return;
-  if (_isGraphWriteBlocked()) {
-    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
+  const collected = _collectNodeDetailEditorUpdates(bodyEl);
+  if (!collected.ok) {
+    toastr.error(collected.errorMessage || "保存失败", "ST-BME");
     return;
   }
 
-  const updates = { fields: {} };
-  const impEl = document.getElementById("bme-detail-importance");
-  if (impEl && impEl.value !== "") {
-    const imp = Number.parseFloat(impEl.value);
-    if (Number.isFinite(imp)) {
-      updates.importance = Math.max(0, Math.min(10, imp));
-    }
-  }
-  const accessEl = document.getElementById("bme-detail-accesscount");
-  if (accessEl && accessEl.value !== "") {
-    const ac = Number.parseInt(accessEl.value, 10);
-    if (Number.isFinite(ac)) {
-      updates.accessCount = Math.max(0, ac);
-    }
-  }
-  const clustersEl = document.getElementById("bme-detail-clusters");
-  if (clustersEl) {
-    updates.clusters = clustersEl.value
-      .split(/[,，]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-  const regionPrimaryEl = document.getElementById("bme-detail-scope-region-primary");
-  const regionPathEl = document.getElementById("bme-detail-scope-region-path");
-  const regionSecondaryEl = document.getElementById("bme-detail-scope-region-secondary");
-  if (regionPrimaryEl || regionPathEl || regionSecondaryEl) {
-    updates.scope = {
-      regionPrimary: String(regionPrimaryEl?.value || "").trim(),
-      regionPath: _parseNodeDetailScopeList(regionPathEl?.value, {
-        allowSlash: true,
-      }),
-      regionSecondary: _parseNodeDetailScopeList(regionSecondaryEl?.value, {
-        allowSlash: true,
-      }),
-    };
-  }
-
-  const fieldEls = bodyEl.querySelectorAll("[data-bme-field-key]");
-  for (const el of fieldEls) {
-    const key = el.dataset.bmeFieldKey;
-    const type = el.dataset.bmeFieldType || "string";
-    const rawVal = el.value;
-    if (key === "__storyTime" || key === "__storyTimeSpan") {
-      try {
-        updates[key === "__storyTime" ? "storyTime" : "storyTimeSpan"] = JSON.parse(
-          rawVal || "{}",
-        );
-      } catch {
-        toastr.error(`字段「${key === "__storyTime" ? "剧情时间" : "剧情时间范围"}」须为合法 JSON`, "ST-BME");
-        return;
+  _persistNodeDetailEdits(nodeId, collected.updates, {
+    afterSuccess: () => {
+      const r = _getActiveGraphRenderer();
+      const sel = r?.selectedNode;
+      if (sel?.id === nodeId && sel.raw) {
+        _showNodeDetail(sel);
+      } else {
+        const g = _getGraph?.();
+        const rawN = g?.nodes?.find((n) => n.id === nodeId);
+        if (rawN) {
+          _showNodeDetail({ raw: rawN, id: rawN.id });
+        }
       }
-      continue;
-    }
-    if (type === "json") {
-      try {
-        updates.fields[key] = JSON.parse(rawVal || "null");
-      } catch {
-        toastr.error(`字段「${key}」须为合法 JSON`, "ST-BME");
-        return;
-      }
-    } else {
-      updates.fields[key] = rawVal;
-    }
-  }
-
-  const result = _actionHandlers.saveGraphNode?.({
-    nodeId,
-    updates,
+    },
   });
-  if (!result?.ok) {
-    toastr.error(
-      result?.error === "node-not-found"
-        ? "节点已不存在，请关闭后重试"
-        : "保存失败",
-      "ST-BME",
-    );
-    return;
-  }
-  if (result.persistBlocked) {
-    toastr.warning(
-      "内容已更新，但写回聊天元数据可能被拦截，请查看图谱状态",
-      "ST-BME",
-    );
-  } else {
-    toastr.success("节点已保存", "ST-BME");
-  }
-
-  const r = _getActiveGraphRenderer();
-  const sel = r?.selectedNode;
-  if (sel?.id === nodeId && sel.raw) {
-    _showNodeDetail(sel);
-  } else {
-    const g = _getGraph?.();
-    const rawN = g?.nodes?.find((n) => n.id === nodeId);
-    if (rawN) {
-      _showNodeDetail({ raw: rawN, id: rawN.id });
-    }
-  }
-  refreshLiveState();
 }
 
 function _bindNodeDetailPanel() {
@@ -3600,44 +4555,18 @@ function _deleteNodeDetail() {
   const detailEl = els?.detailEl;
   const nodeId = detailEl?.dataset?.editNodeId;
   if (!nodeId) return;
-  if (_isGraphWriteBlocked()) {
-    toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
-    return;
-  }
-  const g = _getGraph?.();
-  const node = g?.nodes?.find((n) => n.id === nodeId);
-  const label = node ? getNodeDisplayName(node) : nodeId;
-  if (
-    !confirm(
-      `确定删除节点「${label}」？\n\n若该节点有层级子节点，将一并删除。此操作不可在本面板内撤销。`,
-    )
-  ) {
-    return;
-  }
-  const result = _actionHandlers.deleteGraphNode?.({ nodeId });
-  if (!result?.ok) {
-    toastr.error(
-      result?.error === "node-not-found" ? "节点已不存在" : "删除失败",
-      "ST-BME",
-    );
-    return;
-  }
-  if (result.persistBlocked) {
-    toastr.warning(
-      "节点已从图中移除，但写回可能被拦截，请查看图谱状态",
-      "ST-BME",
-    );
-  } else {
-    toastr.success("节点已删除", "ST-BME");
-  }
-  _closeNodeDetailUi();
-  const dDesk = document.getElementById("bme-node-detail");
-  const dMob = document.getElementById("bme-mobile-node-detail");
-  if (dDesk) delete dDesk.dataset.editNodeId;
-  if (dMob) delete dMob.dataset.editNodeId;
-  graphRenderer?.highlightNode?.("__cleared__");
-  mobileGraphRenderer?.highlightNode?.("__cleared__");
-  refreshLiveState();
+
+  _deleteGraphNodeById(nodeId, {
+    afterSuccess: () => {
+      _closeNodeDetailUi();
+      const dDesk = document.getElementById("bme-node-detail");
+      const dMob = document.getElementById("bme-mobile-node-detail");
+      if (dDesk) delete dDesk.dataset.editNodeId;
+      if (dMob) delete dMob.dataset.editNodeId;
+      graphRenderer?.highlightNode?.("__cleared__");
+      mobileGraphRenderer?.highlightNode?.("__cleared__");
+    },
+  });
 }
 
 function _bindClose() {
@@ -4025,19 +4954,8 @@ function _bindActions() {
         if (!result?.skipDashboardRefresh) {
           _refreshDashboard();
           _refreshGraph();
-          if (
-            document
-              .getElementById("bme-pane-memory")
-              ?.classList.contains("active")
-          ) {
-            _refreshMemoryBrowser();
-          }
-          if (
-            document
-              .getElementById("bme-pane-injection")
-              ?.classList.contains("active")
-          ) {
-            await _refreshInjectionPreview();
+          if (currentTabId === "task") {
+            _refreshTaskMonitor();
           }
         }
         if (!result?.handledToast) {
@@ -4117,13 +5035,7 @@ function _bindActions() {
         });
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action extractTask failed:", error);
         toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
@@ -4204,13 +5116,7 @@ function _bindActions() {
         });
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action rebuildSummaryState failed:", error);
         toastr.error(`重建总结状态失败: ${error?.message || error}`, "ST-BME");
@@ -4248,13 +5154,7 @@ function _bindActions() {
         );
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action clearGraphRange failed:", error);
         toastr.error(`按楼层范围清理失败: ${error?.message || error}`, "ST-BME");
@@ -4410,8 +5310,7 @@ function _bindActions() {
       _refreshDashboard();
       _refreshGraph();
       _refreshSummaryWorkspace();
-      _refreshMemoryBrowser();
-      void _refreshInjectionPreview();
+      if (currentTabId === "task") _refreshTaskMonitor();
     } catch (error) {
       console.error(`[ST-BME] summary workspace action failed: ${actionKey}`, error);
       toastr.error(String(error?.message || error || "操作失败"), "ST-BME");
@@ -10770,7 +11669,7 @@ function _buildScopeMetaText(node) {
   }
   const regionLine = buildRegionLine(scope);
   if (regionLine) parts.push(regionLine);
-  const storyTime = describeNodeStoryTime(node);
+  const storyTime = _describeNodeStoryTimeDisplay(node);
   if (storyTime) parts.push(`剧情时间: ${storyTime}`);
   return parts.join(" · ");
 }
@@ -10812,7 +11711,7 @@ function _typeLabel(type) {
 
 function _getNodeSnippet(node) {
   const fields = node.fields || {};
-  const storyTime = describeNodeStoryTime(node);
+  const storyTime = _describeNodeStoryTimeDisplay(node);
   if (fields.summary) return fields.summary;
   if (fields.state) return fields.state;
   if (fields.constraint) return fields.constraint;
