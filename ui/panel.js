@@ -1371,23 +1371,21 @@ function _refreshTaskPipelineOverview() {
   const el = document.getElementById("bme-task-pipeline");
   if (!el) return;
 
-  const debug = _getRuntimeDebugSnapshot?.() || {};
-  const rd = debug.runtimeDebug || {};
   const graph = _getGraph?.() || {};
-  const historyState = graph.runtimeState?.historyState || {};
-  const graphPersistenceState = graph.graphPersistenceState || {};
+  const historyState = graph.runtimeState?.historyState || graph.historyState || {};
+  const loadInfo = _getGraphPersistenceSnapshot();
 
-  const extraction = _resolvePipelineStatus(rd.lastExtractionStatus);
-  const vector = _resolvePipelineStatus(rd.lastVectorStatus);
-  const recall = _resolvePipelineStatus(rd.lastRecallStatus);
-  const persistLevel = graphPersistenceState.loadState === "loaded" ? "info" : graphPersistenceState.loadState === "loading" ? "info" : "warn";
+  const extraction = _resolvePipelineStatus(_getLastExtractionStatus?.());
+  const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
+  const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
+  const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
   const persistence = _resolvePipelineStatus({
-    text: graphPersistenceState.loadState || "unknown",
-    meta: `rev ${graphPersistenceState.lastAcceptedRevision || 0}`,
+    text: loadInfo.loadState || "unknown",
+    meta: `rev ${loadInfo.revision || 0}`,
     level: persistLevel,
   });
 
-  const batchStatus = historyState.lastBatchStatus || {};
+  const batchStatus = _getLatestBatchStatusSnapshot() || {};
   const stages = [
     { key: "core", label: "Core" },
     { key: "structural", label: "结构" },
@@ -1670,49 +1668,41 @@ function _refreshTaskInjectionPreview() {
   const el = document.getElementById("bme-task-injection");
   if (!el) return;
 
-  const debug = _getRuntimeDebugSnapshot?.() || {};
-  const rd = debug.runtimeDebug || {};
-  const injection = rd?.injections?.recall || null;
-
-  if (!injection) {
-    el.innerHTML = '<div class="bme-memory-detail-empty">暂无注入数据</div>';
+  const injectionText = String(_getLastInjection?.() || "").trim();
+  if (!injectionText) {
+    el.innerHTML = '<div class="bme-memory-detail-empty">暂无注入数据——等待第一次召回注入后显示。</div>';
     return;
   }
 
-  const totalTokens = injection.tokenCount || 0;
-  const budgetTokens = injection.budgetTokens || totalTokens || 1;
-  const pct = Math.min(100, Math.round((totalTokens / budgetTokens) * 100));
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const recallSnap = rd?.injections?.recall || {};
+  const totalTokens = recallSnap.tokenCount || 0;
+  const budgetTokens = recallSnap.budgetTokens || totalTokens || 1;
+  const pct = totalTokens > 0 ? Math.min(100, Math.round((totalTokens / budgetTokens) * 100)) : 0;
 
-  const sections = Array.isArray(injection.sections) ? injection.sections : [];
-  const injectionText = injection.text || injection.injectionText || "";
-
-  const cardsHtml = sections.length
-    ? sections.map((s) => `
-      <div class="bme-injection-card" style="border-top-color:var(--bme-primary)">
-        <div class="bme-injection-card__header">
-          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">${_escHtml(s.title || s.type || "section")}</span>
-          ${typeof s.tokenCount === "number" ? `<span class="bme-injection-card__tokens">${s.tokenCount} tok</span>` : ""}
-        </div>
-        <div class="bme-injection-card__body">${_escHtml(s.text || s.content || "")}</div>
-      </div>
-    `).join("")
-    : `<div class="bme-injection-card" style="grid-column:span 2;border-top-color:var(--bme-primary)">
-        <div class="bme-injection-card__header">
-          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">Full Injection</span>
-          <span class="bme-injection-card__tokens">${totalTokens} tok</span>
-        </div>
-        <div class="bme-injection-card__body">${_escHtml(injectionText.slice(0, 2000))}${injectionText.length > 2000 ? "…" : ""}</div>
-      </div>`;
-
-  el.innerHTML = `
+  const tokenBarHtml = totalTokens > 0 ? `
     <div class="bme-injection-token-bar">
       <span class="bme-injection-token-bar__label">${totalTokens} / ${budgetTokens} tok</span>
       <div class="bme-injection-token-bar__track">
         <div class="bme-injection-token-bar__fill" style="width:${pct}%"></div>
       </div>
       <span class="bme-injection-token-bar__breakdown">${pct}%</span>
+    </div>` : "";
+
+  const previewText = injectionText.length > 3000 ? injectionText.slice(0, 3000) + "…" : injectionText;
+
+  el.innerHTML = `
+    ${tokenBarHtml}
+    <div class="bme-injection-card-grid">
+      <div class="bme-injection-card" style="grid-column:span 2;border-top-color:var(--bme-primary)">
+        <div class="bme-injection-card__header">
+          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">Recall Injection</span>
+          ${totalTokens > 0 ? `<span class="bme-injection-card__tokens">${totalTokens} tok</span>` : ""}
+        </div>
+        <div class="bme-injection-card__body">${_escHtml(previewText)}</div>
+      </div>
     </div>
-    <div class="bme-injection-card-grid">${cardsHtml}</div>
   `;
 }
 
@@ -1734,18 +1724,16 @@ function _refreshTaskPersistence() {
   if (!el) return;
 
   const graph = _getGraph?.() || {};
-  const ps = graph.graphPersistenceState || {};
+  const ps = _getGraphPersistenceSnapshot();
   const rs = graph.runtimeState || {};
 
   const kvs = [
     ["Load State", ps.loadState || "unknown"],
-    ["Storage Tier", ps.acceptedStorageTier || "—"],
-    ["Last Accepted Rev", ps.lastAcceptedRevision ?? "—"],
-    ["Commit Marker", ps.currentCommitMarker ? "present" : "none"],
-    ["Blocked Reason", ps.blockedReason || "—"],
-    ["IDB Snapshot Rev", ps.indexedDbSnapshotRevision ?? "—"],
-    ["Chat State Rev", ps.chatStateSnapshotRevision ?? "—"],
-    ["Shadow Snapshot", ps.hasShadowSnapshot ? "yes" : "no"],
+    ["Storage Tier", ps.acceptedStorageTier || ps.storageTier || "—"],
+    ["Revision", ps.revision ?? "—"],
+    ["Commit Marker", ps.commitMarker ? "present" : "none"],
+    ["Blocked Reason", ps.blockedReason || ps.reason || "—"],
+    ["Shadow Snapshot", ps.shadowSnapshotUsed ? "yes" : "no"],
   ];
 
   const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");

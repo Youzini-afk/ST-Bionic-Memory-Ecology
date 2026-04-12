@@ -1246,6 +1246,10 @@
   flex-shrink: 0;
 }
 
+.bme-memory-list-filters .bme-filter-select {
+  flex: 0 0 auto;
+}
+
 .bme-memory-list-scroll {
   flex: 1;
   overflow-y: auto;
