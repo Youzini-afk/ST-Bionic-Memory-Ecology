@@ -1674,7 +1674,12 @@ function _bindTaskMemoryListClick() {
 function _renderMemoryDetailPanel(node, graph) {
   if (!node) return '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
 
-  const edges = (graph?.edges || []).filter((e) => e.source === node.id || e.target === node.id);
+  const edges = (graph?.edges || []).filter(
+    (e) =>
+      !e?.invalidAt &&
+      !e?.expiredAt &&
+      (e?.fromId === node.id || e?.toId === node.id),
+  );
   const fields = node?.fields || {};
   const detailSummary = _getNodeSnippet(node);
   const scopeMeta = _buildScopeMetaText(node);
