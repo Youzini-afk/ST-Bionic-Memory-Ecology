@@ -5318,6 +5318,15 @@
     flex: 1;
   }
 
+  #st-bme-panel.task-mode .bme-panel-sidebar {
+    display: none;
+  }
+
+  #st-bme-panel.task-mode .bme-panel-main {
+    display: flex;
+    flex: 1;
+  }
+
   .bme-config-workspace {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
