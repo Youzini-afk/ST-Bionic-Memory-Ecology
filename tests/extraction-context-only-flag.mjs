@@ -76,9 +76,23 @@ const chat = [
 {
   const mixed = [
     { seq: 1, role: "user", content: "context user", speaker: "A", isContextOnly: true },
-    { seq: 2, role: "assistant", content: "context ai", speaker: "B", isContextOnly: true },
+    {
+      seq: 2,
+      role: "assistant",
+      content: "context ai",
+      speaker: "B",
+      hideSpeakerLabel: true,
+      isContextOnly: true,
+    },
     { seq: 3, role: "user", content: "target user", speaker: "A", isContextOnly: false },
-    { seq: 4, role: "assistant", content: "target ai", speaker: "B", isContextOnly: false },
+    {
+      seq: 4,
+      role: "assistant",
+      content: "target ai",
+      speaker: "B",
+      hideSpeakerLabel: true,
+      isContextOnly: false,
+    },
   ];
   const transcript = formatExtractionTranscript(mixed);
   assert.match(transcript, /已提取过/, "transcript should contain context review header");
@@ -89,6 +103,8 @@ const chat = [
   );
   assert.match(transcript, /#1.*context user/, "context message should appear");
   assert.match(transcript, /#3.*target user/, "target message should appear");
+  assert.match(transcript, /#2 \[assistant\]: context ai/, "assistant card name should be hidden");
+  assert.doesNotMatch(transcript, /#2 \[assistant\|B\]:/, "assistant card name should not be rendered");
   console.log("  ✓ formatExtractionTranscript: section dividers for mixed context/target");
 }
 
@@ -132,8 +148,20 @@ const chat = [
   const targetFiltered = result.filteredMessages.filter((m) => !m.isContextOnly);
   assert.equal(contextFiltered.length, 2, "context messages propagated through filtering");
   assert.equal(targetFiltered.length, 2, "target messages propagated through filtering");
+  assert.equal(
+    result.filteredMessages.find((m) => m.seq === 2)?.hideSpeakerLabel,
+    true,
+    "active character assistant label should be hidden",
+  );
+  assert.equal(
+    result.filteredMessages.find((m) => m.seq === 1)?.hideSpeakerLabel,
+    false,
+    "user label should remain visible",
+  );
   assert.match(result.filteredTranscript, /已提取过/, "transcript includes context header");
   assert.match(result.filteredTranscript, /本次需要提取/, "transcript includes target header");
+  assert.match(result.filteredTranscript, /#2 \[assistant\]: old answer/, "assistant transcript should hide character name");
+  assert.doesNotMatch(result.filteredTranscript, /#2 \[assistant\|B\]:/, "assistant transcript should not show character name");
   console.log("  ✓ buildExtractionInputContext: isContextOnly propagated to filteredMessages and transcript");
 }
 

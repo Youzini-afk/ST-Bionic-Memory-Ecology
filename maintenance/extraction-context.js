@@ -289,6 +289,32 @@ function resolveSpeakerName(message = {}, role = "assistant", names = {}) {
   return role || "assistant";
 }
 
+function shouldHideSpeakerLabel(message = {}, role = "assistant", names = {}) {
+  if (message?.hideSpeakerLabel === true) {
+    return true;
+  }
+  if (message?.hideSpeakerLabel === false) {
+    return false;
+  }
+  if (role !== "assistant") {
+    return false;
+  }
+  if (String(message?.source || "").trim() === "worldInfo-atDepth") {
+    return false;
+  }
+  const explicitSpeaker = String(
+    message?.speaker ?? message?.name ?? message?.displayName ?? "",
+  ).trim();
+  if (!explicitSpeaker) {
+    return true;
+  }
+  const activeCharName = String(names?.charName || "").trim();
+  if (!activeCharName) {
+    return false;
+  }
+  return explicitSpeaker === activeCharName;
+}
+
 function normalizeExtractionMessage(message = {}, index = 0, names = {}) {
   const role = normalizeRole(
     message?.role ?? (message?.is_user === true ? "user" : "assistant"),
@@ -296,6 +322,7 @@ function normalizeExtractionMessage(message = {}, index = 0, names = {}) {
   const content = String(resolveMessageContent(message) || "").trim();
   const rawContent = String(resolveMessageRawContent(message) || content).trim();
   const speaker = resolveSpeakerName(message, role, names);
+  const hideSpeakerLabel = shouldHideSpeakerLabel(message, role, names);
   const seq = Number.isFinite(Number(message?.seq)) ? Number(message.seq) : null;
 
   return {
@@ -304,6 +331,7 @@ function normalizeExtractionMessage(message = {}, index = 0, names = {}) {
     role,
     speaker,
     name: speaker,
+    hideSpeakerLabel,
     content,
     rawContent,
     sourceType: role === "user" ? "user_input" : "ai_output",
@@ -347,7 +375,8 @@ export function formatExtractionTranscript(messages = []) {
       : `#${index + 1}`;
     const role = normalizeRole(message?.role || "assistant");
     const speaker = String(message?.speaker || message?.name || "").trim();
-    const speakerLabel = speaker ? `|${speaker}` : "";
+    const speakerLabel =
+      message?.hideSpeakerLabel === true || !speaker ? "" : `|${speaker}`;
     const line = `${seqLabel} [${role}${speakerLabel}]: ${String(message?.content || "")}`;
     if (String(line || "").trim()) {
       lines.push(line);

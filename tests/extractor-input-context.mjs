@@ -141,8 +141,9 @@ try {
     (message) => message.sourceKey === "recentMessages",
   );
   assert.ok(recentBlock);
-  assert.match(String(recentBlock?.content || ""), /#10 \[assistant\|艾琳\]: 继续说明/);
+  assert.match(String(recentBlock?.content || ""), /#10 \[assistant\]: 继续说明/);
   assert.match(String(recentBlock?.content || ""), /#11 \[user\|玩家\]: 用户输入/);
+  assert.doesNotMatch(String(recentBlock?.content || ""), /#10 \[assistant\|艾琳\]:/);
   assert.doesNotMatch(String(recentBlock?.content || ""), /隐式思维|<think>/);
 } finally {
   restore();

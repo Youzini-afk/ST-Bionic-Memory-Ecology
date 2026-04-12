@@ -286,7 +286,7 @@ try {
       ).find((message) => message.sourceKey === "recentMessages");
       assert.ok(recentBlock, "recentMessages block should exist");
       const recentContent = String(recentBlock?.content || "");
-      assert.match(recentContent, /#30 \[assistant\|艾琳\]: 艾琳说：去调查蓝钥匙。/);
+      assert.match(recentContent, /#30 \[assistant\]: 艾琳说：去调查蓝钥匙。/);
       assert.match(
         recentContent,
         /#31 \[assistant\|旁白\]: 旁白补充：<status mood='tense'>雨夜<\/status>巷子很安静。/,
@@ -351,7 +351,7 @@ try {
         : []
       ).find((message) => message.sourceKey === "recentMessages");
       assert.ok(recentBlock, "recentMessages block should still exist when worldbook is disabled");
-      assert.match(String(recentBlock?.content || ""), /#30 \[assistant\|艾琳\]: 艾琳说：去调查蓝钥匙。/);
+      assert.match(String(recentBlock?.content || ""), /#30 \[assistant\]: 艾琳说：去调查蓝钥匙。/);
     } finally {
       restore();
     }

@@ -224,16 +224,25 @@ function collectAllPromptContent(captured) {
     assert.equal(result.success, true);
     assert.ok(captured);
 
-    const recentBlock = (Array.isArray(captured.promptMessages) ? captured.promptMessages : []).find(
+    const recentMessages = (Array.isArray(captured.promptMessages)
+      ? captured.promptMessages
+      : []
+    ).filter(
       (m) => m.sourceKey === "recentMessages",
     );
-    assert.ok(recentBlock, "recentMessages block should exist");
-    const recentContent = String(recentBlock?.content || "");
-    assert.match(recentContent, /以下是上下文回顾（已提取过），仅供理解剧情/);
-    assert.match(recentContent, /以下是本次需要提取记忆的新对话内容/);
+    assert.equal(recentMessages.length, 2, "recentMessages should split into 2 section system messages");
+    assert.equal(recentMessages[0]?.role, "system");
+    assert.equal(recentMessages[0]?.transcriptSection, "context");
+    assert.match(String(recentMessages[0]?.content || ""), /^--- 以下是上下文回顾（已提取过），仅供理解剧情 ---/);
+    assert.match(String(recentMessages[0]?.content || ""), /#10 \[user\|玩家\]: 第一轮消息/);
+    assert.equal(recentMessages[1]?.role, "system");
+    assert.equal(recentMessages[1]?.transcriptSection, "target");
+    assert.match(String(recentMessages[1]?.content || ""), /^--- 以下是本次需要提取记忆的新对话内容 ---/);
+    assert.match(String(recentMessages[1]?.content || ""), /#12 \[user\|玩家\]: 第二轮消息/);
     assert.ok(
-      recentContent.indexOf("已提取过") < recentContent.indexOf("本次需要提取"),
-      "context review should appear before extraction target section",
+      recentMessages[0].content.includes("已提取过") &&
+        recentMessages[1].content.includes("本次需要提取"),
+      "context and target sections should each be emitted as a single system message",
     );
   } finally {
     restore();

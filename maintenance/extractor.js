@@ -873,6 +873,7 @@ export async function extractMemories({
         content: message?.content,
         speaker: message?.speaker,
         name: message?.name,
+        hideSpeakerLabel: message?.hideSpeakerLabel === true,
         isContextOnly: message?.isContextOnly === true,
       }))
     : [];
