@@ -29,6 +29,7 @@ export const defaultSettings = {
   extractWorldbookMode: "active",
   extractIncludeStoryTime: true,
   extractIncludeSummaries: true,
+  extractActionMode: "pending",
 
   // 召回设置
   recallEnabled: true,
