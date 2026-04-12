@@ -4819,6 +4819,42 @@
   line-height: 1.4;
 }
 
+.bme-node-detail-collapse {
+  margin: 6px 0 8px;
+}
+
+.bme-node-detail-collapse > summary {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--bme-on-surface-dim);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bme-node-detail-collapse > summary::-webkit-details-marker {
+  display: none;
+}
+
+.bme-node-detail-collapse > summary::before {
+  content: "▶";
+  font-size: 8px;
+  transition: transform 0.15s;
+}
+
+.bme-node-detail-collapse[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.bme-node-detail-collapse > .bme-node-detail-field:first-of-type {
+  margin-top: 6px;
+}
+
 /* --- Scrollbar --- */
 .bme-tab-content::-webkit-scrollbar,
 .bme-config-sidebar::-webkit-scrollbar,

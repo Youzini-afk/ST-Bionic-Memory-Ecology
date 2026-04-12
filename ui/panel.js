@@ -4082,87 +4082,97 @@ function _buildNodeDetailEditorFragment(raw, { idPrefix = "bme-detail" } = {}) {
     storyTime.tense,
     STORY_TIME_TENSE_OPTIONS,
   );
+
+  const storyTimeAdvanced = document.createElement("details");
+  storyTimeAdvanced.className = "bme-node-detail-collapse";
+  const storyTimeAdvancedSummary = document.createElement("summary");
+  storyTimeAdvancedSummary.textContent = "高级";
+  storyTimeAdvanced.appendChild(storyTimeAdvancedSummary);
   _appendNodeDetailSelectInput(
-    fragment,
+    storyTimeAdvanced,
     "相对关系",
     inputId("story-time-relation"),
     storyTime.relation,
     STORY_TIME_RELATION_OPTIONS,
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeAdvanced,
     "锚点标签",
     inputId("story-time-anchor-label"),
     storyTime.anchorLabel,
   );
   _appendNodeDetailSelectInput(
-    fragment,
+    storyTimeAdvanced,
     "置信度",
     inputId("story-time-confidence"),
     storyTime.confidence,
     STORY_TIME_CONFIDENCE_OPTIONS,
   );
   _appendNodeDetailSelectInput(
-    fragment,
+    storyTimeAdvanced,
     "来源",
     inputId("story-time-source"),
     storyTime.source,
     STORY_TIME_SOURCE_OPTIONS,
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeAdvanced,
     "段 ID",
     inputId("story-time-segment-id"),
     storyTime.segmentId,
   );
+  fragment.appendChild(storyTimeAdvanced);
 
-  const storyTimeSpanSection = document.createElement("div");
-  storyTimeSpanSection.className = "bme-node-detail-section";
-  storyTimeSpanSection.textContent = "剧情时间范围";
-  fragment.appendChild(storyTimeSpanSection);
+  const storyTimeSpanCollapse = document.createElement("details");
+  storyTimeSpanCollapse.className = "bme-node-detail-collapse";
+  const storyTimeSpanSummaryEl = document.createElement("summary");
+  storyTimeSpanSummaryEl.className = "bme-node-detail-section";
+  storyTimeSpanSummaryEl.textContent = "剧情时间范围";
+  storyTimeSpanCollapse.appendChild(storyTimeSpanSummaryEl);
   _appendNodeDetailReadOnly(
-    fragment,
+    storyTimeSpanCollapse,
     "当前范围",
     _describeStoryTimeSpanDisplay(storyTimeSpan) || "—",
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeSpanCollapse,
     "起点标签",
     inputId("story-time-span-start-label"),
     storyTimeSpan.startLabel,
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeSpanCollapse,
     "终点标签",
     inputId("story-time-span-end-label"),
     storyTimeSpan.endLabel,
   );
   _appendNodeDetailSelectInput(
-    fragment,
+    storyTimeSpanCollapse,
     "混合时间",
     inputId("story-time-span-mixed"),
     storyTimeSpan.mixed ? "true" : "false",
     STORY_TIME_MIXED_OPTIONS,
   );
   _appendNodeDetailSelectInput(
-    fragment,
+    storyTimeSpanCollapse,
     "来源",
     inputId("story-time-span-source"),
     storyTimeSpan.source,
     STORY_TIME_SOURCE_OPTIONS,
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeSpanCollapse,
     "起点段 ID",
     inputId("story-time-span-start-segment-id"),
     storyTimeSpan.startSegmentId,
   );
   _appendNodeDetailTextInput(
-    fragment,
+    storyTimeSpanCollapse,
     "终点段 ID",
     inputId("story-time-span-end-segment-id"),
     storyTimeSpan.endSegmentId,
   );
+  fragment.appendChild(storyTimeSpanCollapse);
 
   _appendNodeDetailNumberInput(
     fragment,
