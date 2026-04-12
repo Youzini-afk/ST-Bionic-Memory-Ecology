@@ -69,13 +69,9 @@
             <i class="fa-solid fa-chart-simple"></i>
             <span>总览</span>
           </button>
-          <button class="bme-tab-btn" data-tab="memory" type="button">
-            <i class="fa-solid fa-brain"></i>
-            <span>记忆</span>
-          </button>
-          <button class="bme-tab-btn" data-tab="injection" type="button">
-            <i class="fa-solid fa-syringe"></i>
-            <span>注入</span>
+          <button class="bme-tab-btn" data-tab="task" type="button">
+            <i class="fa-solid fa-list-check"></i>
+            <span>任务</span>
           </button>
           <button class="bme-tab-btn" data-tab="actions" type="button">
             <i class="fa-solid fa-gear"></i>
@@ -130,14 +126,6 @@
             </button>
             <button
               class="bme-config-nav-btn"
-              data-config-section="trace"
-              type="button"
-            >
-              <i class="fa-solid fa-route"></i>
-              <span>&#28040;&#24687;&#36861;&#36394;</span>
-            </button>
-            <button
-              class="bme-config-nav-btn"
               data-config-section="appearance"
               type="button"
             >
@@ -151,6 +139,66 @@
             >
               <i class="fa-solid fa-broom"></i>
               <span>数据清理</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="bme-task-sidebar" id="bme-task-sidebar">
+          <div class="bme-task-sidebar-header">
+            <div class="bme-task-sidebar-kicker">任务监控</div>
+            <div class="bme-task-sidebar-title">ST-BME 任务流</div>
+            <div class="bme-task-sidebar-help">
+              左侧切换监控视图，右侧查看实时任务状态。
+            </div>
+          </div>
+          <div class="bme-task-nav bme-task-nav-desktop">
+            <button
+              class="bme-task-nav-btn active"
+              data-task-section="pipeline"
+              type="button"
+            >
+              <i class="fa-solid fa-gauge-high"></i>
+              <span>管线总览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="timeline"
+              type="button"
+            >
+              <i class="fa-solid fa-timeline"></i>
+              <span>任务流水</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="memory"
+              type="button"
+            >
+              <i class="fa-solid fa-brain"></i>
+              <span>记忆浏览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="injection"
+              type="button"
+            >
+              <i class="fa-solid fa-syringe"></i>
+              <span>注入预览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="trace"
+              type="button"
+            >
+              <i class="fa-solid fa-route"></i>
+              <span>消息追踪</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="persistence"
+              type="button"
+            >
+              <i class="fa-solid fa-database"></i>
+              <span>持久化</span>
             </button>
           </div>
         </div>
@@ -269,45 +317,6 @@
 
             <div class="bme-section-header">最近召回</div>
             <ul class="bme-recent-list" id="bme-recent-recall"></ul>
-          </div>
-
-          <div class="bme-tab-pane" id="bme-pane-memory">
-            <div class="bme-search-bar">
-              <input
-                type="text"
-                class="bme-search-input"
-                id="bme-memory-search"
-                placeholder="搜索记忆节点..."
-              />
-              <input
-                type="text"
-                class="bme-search-input"
-                id="bme-memory-region-filter"
-                placeholder="按地区筛选..."
-              />
-              <select class="bme-filter-select" id="bme-memory-filter">
-                <option value="all">全部</option>
-                <option value="scope:objective">客观</option>
-                <option value="scope:characterPov">角色 POV</option>
-                <option value="scope:userPov">用户 POV</option>
-                <option value="pov_memory">主观记忆</option>
-                <option value="event">事件</option>
-                <option value="location">地点</option>
-                <option value="thread">线索</option>
-                <option value="rule">规则</option>
-                <option value="synopsis">全局概要（旧）</option>
-                <option value="reflection">反思</option>
-              </select>
-            </div>
-            <ul class="bme-memory-list" id="bme-memory-list"></ul>
-          </div>
-
-          <div class="bme-tab-pane" id="bme-pane-injection">
-            <div id="bme-injection-content"></div>
-            <div
-              class="bme-injection-token-count"
-              id="bme-injection-tokens"
-            ></div>
           </div>
 
           <div class="bme-tab-pane" id="bme-pane-actions">
@@ -2638,20 +2647,6 @@
               />
             </section>
 
-            <section class="bme-config-section" data-config-section="trace">
-              <div class="bme-config-section-head">
-                <div class="bme-config-section-kicker">&#28040;&#24687;&#36861;&#36394;</div>
-                <h3 class="bme-config-section-title">&#36825;&#19968;&#36718;&#21040;&#24213;&#21457;&#20102;&#20160;&#20040;&#65311;</h3>
-                <p class="bme-config-section-desc">
-                  &#29992;&#26356;&#30333;&#35805;&#30340;&#26041;&#24335;&#23637;&#31034;&#26368;&#36817;&#19968;&#27425;&#27880;&#20837;&#20027; AI &#30340;&#20869;&#23481;&#65292;&#20197;&#21450;&#36865;&#21435;&#25552;&#21462;&#27169;&#22411;&#30340;&#23454;&#38469;&#35831;&#27714;&#12290;
-                </p>
-              </div>
-              <div
-                id="bme-message-trace-workspace"
-                class="bme-message-trace-workspace"
-              ></div>
-            </section>
-
             <section
               class="bme-config-section"
               data-config-section="appearance"
@@ -2956,6 +2951,36 @@
             </section>
           </div>
         </div>
+
+        <div class="bme-task-workspace" id="bme-task-workspace">
+          <div class="bme-task-workspace-header">
+            <div>
+              <div class="bme-task-workspace-kicker" id="bme-task-ws-kicker">任务监控</div>
+              <h2 class="bme-task-workspace-title" id="bme-task-ws-title">ST-BME 任务流工作区</h2>
+              <p class="bme-task-workspace-desc" id="bme-task-ws-desc">
+                实时查看所有任务管线的运行状态与当前批次进度。
+              </p>
+            </div>
+          </div>
+
+          <div class="bme-task-nav-mobile" id="bme-task-nav-mobile">
+            <button class="bme-task-nav-pill active" data-task-section="pipeline" type="button">管线</button>
+            <button class="bme-task-nav-pill" data-task-section="timeline" type="button">流水</button>
+            <button class="bme-task-nav-pill" data-task-section="memory" type="button">记忆</button>
+            <button class="bme-task-nav-pill" data-task-section="injection" type="button">注入</button>
+            <button class="bme-task-nav-pill" data-task-section="trace" type="button">追踪</button>
+            <button class="bme-task-nav-pill" data-task-section="persistence" type="button">持久化</button>
+          </div>
+
+          <div class="bme-task-workspace-body">
+            <div class="bme-task-section active" data-task-section="pipeline" id="bme-task-pipeline"></div>
+            <div class="bme-task-section" data-task-section="timeline" id="bme-task-timeline"></div>
+            <div class="bme-task-section" data-task-section="memory" id="bme-task-memory"></div>
+            <div class="bme-task-section" data-task-section="injection" id="bme-task-injection"></div>
+            <div class="bme-task-section" data-task-section="trace" id="bme-task-trace"></div>
+            <div class="bme-task-section" data-task-section="persistence" id="bme-task-persistence"></div>
+          </div>
+        </div>
       </div>
 
       <div
@@ -2974,13 +2999,9 @@
         <i class="fa-solid fa-chart-simple"></i>
         <span>总览</span>
       </button>
-      <button class="bme-tab-btn" data-tab="memory" type="button">
-        <i class="fa-solid fa-brain"></i>
-        <span>记忆</span>
-      </button>
-      <button class="bme-tab-btn" data-tab="injection" type="button">
-        <i class="fa-solid fa-syringe"></i>
-        <span>注入</span>
+      <button class="bme-tab-btn" data-tab="task" type="button">
+        <i class="fa-solid fa-list-check"></i>
+        <span>任务</span>
       </button>
       <button class="bme-tab-btn" data-tab="actions" type="button">
         <i class="fa-solid fa-gear"></i>
