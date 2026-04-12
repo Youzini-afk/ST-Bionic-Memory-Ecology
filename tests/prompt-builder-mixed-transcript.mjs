@@ -117,6 +117,8 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
       content: "继续说明",
       name: "艾琳",
       speaker: "艾琳",
+      hideSpeakerLabel: true,
+      isContextOnly: true,
     },
     {
       seq: 42,
@@ -124,6 +126,7 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
       content: "用户输入",
       name: "玩家",
       speaker: "玩家",
+      isContextOnly: false,
     },
   ],
   graphStats: "node_count=1",
@@ -131,17 +134,41 @@ const promptBuild = await buildTaskPrompt(settings, "extract", {
   currentRange: "41 ~ 42",
 });
 const payload = buildTaskLlmPayload(promptBuild, "fallback-user");
-const recentBlock = payload.promptMessages.find(
+const recentMessages = payload.promptMessages.filter(
   (message) => message.sourceKey === "recentMessages",
 );
-assert.match(String(recentBlock?.content || ""), /#41 \[assistant\|艾琳\]: 助手已净化/);
-assert.match(String(recentBlock?.content || ""), /#42 \[user\|玩家\]: 用户已净化/);
+assert.deepEqual(
+  recentMessages.map((message) => ({
+    role: message.role,
+    sourceKey: message.sourceKey,
+    transcriptSection: message.transcriptSection,
+    transcriptSectionPart: message.transcriptSectionPart,
+  })),
+  [
+    {
+      role: "system",
+      sourceKey: "recentMessages",
+      transcriptSection: "context",
+      transcriptSectionPart: "section",
+    },
+    {
+      role: "system",
+      sourceKey: "recentMessages",
+      transcriptSection: "target",
+      transcriptSectionPart: "section",
+    },
+  ],
+);
+assert.match(String(recentMessages[0]?.content || ""), /^--- 以下是上下文回顾（已提取过），仅供理解剧情 ---/);
+assert.match(String(recentMessages[0]?.content || ""), /#41 \[assistant\]: 助手已净化/);
+assert.match(String(recentMessages[1]?.content || ""), /^--- 以下是本次需要提取记忆的新对话内容 ---/);
+assert.match(String(recentMessages[1]?.content || ""), /#42 \[user\|玩家\]: 用户已净化/);
 assert.doesNotMatch(
-  String(recentBlock?.content || ""),
-  /#41 \[assistant\|艾琳\]: 用户已净化/,
+  String(recentMessages[0]?.content || ""),
+  /#41 \[assistant\|艾琳\]:/,
 );
 assert.doesNotMatch(
-  String(recentBlock?.content || ""),
+  String(recentMessages[1]?.content || ""),
   /#42 \[user\|玩家\]: 助手已净化/,
 );
 

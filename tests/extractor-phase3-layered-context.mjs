@@ -62,7 +62,7 @@ installResolveHooks([
   },
 ]);
 
-const { createEmptyGraph, addNode, createNode } = await import("../graph/graph.js");
+const { addEdge, addNode, createEdge, createEmptyGraph, createNode } = await import("../graph/graph.js");
 const { DEFAULT_NODE_SCHEMA } = await import("../graph/schema.js");
 const { extractMemories } = await import("../maintenance/extractor.js");
 const { appendSummaryEntry } = await import("../graph/summary-state.js");
@@ -160,6 +160,90 @@ function collectAllPromptContent(captured) {
     );
     assert.ok(recentBlock, "recentMessages block should exist");
     assert.match(String(recentBlock.content || ""), /第一轮/, "recentMessages should contain dialogue content");
+  } finally {
+    restore();
+  }
+}
+
+{
+  const graph = createEmptyGraph();
+  let captured = null;
+  const restore = setTestOverrides({
+    llm: {
+      async callLLMForJSON(payload) {
+        captured = payload;
+        return { operations: [], cognitionUpdates: [], regionUpdates: {} };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [
+        {
+          seq: 10,
+          role: "user",
+          content: "第一轮消息",
+          name: "玩家",
+          speaker: "玩家",
+          isContextOnly: true,
+        },
+        {
+          seq: 11,
+          role: "assistant",
+          content: "第一轮回复",
+          name: "艾琳",
+          speaker: "艾琳",
+          isContextOnly: true,
+        },
+        {
+          seq: 12,
+          role: "user",
+          content: "第二轮消息",
+          name: "玩家",
+          speaker: "玩家",
+          isContextOnly: false,
+        },
+        {
+          seq: 13,
+          role: "assistant",
+          content: "第二轮回复",
+          name: "艾琳",
+          speaker: "艾琳",
+          isContextOnly: false,
+        },
+      ],
+      startSeq: 12,
+      endSeq: 13,
+      schema: DEFAULT_NODE_SCHEMA,
+      embeddingConfig: null,
+      settings: { ...defaultSettings },
+    });
+
+    assert.equal(result.success, true);
+    assert.ok(captured);
+
+    const recentMessages = (Array.isArray(captured.promptMessages)
+      ? captured.promptMessages
+      : []
+    ).filter(
+      (m) => m.sourceKey === "recentMessages",
+    );
+    assert.equal(recentMessages.length, 2, "recentMessages should split into 2 section system messages");
+    assert.equal(recentMessages[0]?.role, "system");
+    assert.equal(recentMessages[0]?.transcriptSection, "context");
+    assert.match(String(recentMessages[0]?.content || ""), /^--- 以下是上下文回顾（已提取过），仅供理解剧情 ---/);
+    assert.match(String(recentMessages[0]?.content || ""), /#10 \[user\|玩家\]: 第一轮消息/);
+    assert.equal(recentMessages[1]?.role, "system");
+    assert.equal(recentMessages[1]?.transcriptSection, "target");
+    assert.match(String(recentMessages[1]?.content || ""), /^--- 以下是本次需要提取记忆的新对话内容 ---/);
+    assert.match(String(recentMessages[1]?.content || ""), /#12 \[user\|玩家\]: 第二轮消息/);
+    assert.ok(
+      recentMessages[0].content.includes("已提取过") &&
+        recentMessages[1].content.includes("本次需要提取"),
+      "context and target sections should each be emitted as a single system message",
+    );
   } finally {
     restore();
   }
@@ -382,6 +466,97 @@ function collectAllPromptContent(captured) {
 }
 
 // ── Test 7: new settings exist in defaults ──
+{
+  const graph = createEmptyGraph();
+  const confessionNode = addNode(
+    graph,
+    createNode({
+      type: "event",
+      seq: 3,
+      importance: 8,
+      fields: {
+        title: "中文告白",
+        summary: "她认真地要求你再说一遍喜欢她。",
+      },
+    }),
+  );
+  const relationshipNode = addNode(
+    graph,
+    createNode({
+      type: "thread",
+      seq: 4,
+      importance: 7,
+      fields: {
+        title: "感情升温",
+        summary: "两人的关系在这次告白后快速拉近。",
+      },
+    }),
+  );
+  addEdge(
+    graph,
+    createEdge({
+      fromId: confessionNode.id,
+      toId: relationshipNode.id,
+      relation: "supports",
+      strength: 0.9,
+    }),
+  );
+
+  let captured = null;
+  const restore = setTestOverrides({
+    llm: {
+      async callLLMForJSON(payload) {
+        captured = payload;
+        return { operations: [], cognitionUpdates: [], regionUpdates: {} };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [
+        {
+          seq: 10,
+          role: "user",
+          content: "中文告白之后，她还是很害羞。",
+          name: "玩家",
+          speaker: "玩家",
+        },
+        {
+          seq: 11,
+          role: "assistant",
+          content: "这次中文告白让你们的感情升温了。",
+          name: "艾琳",
+          speaker: "艾琳",
+        },
+      ],
+      startSeq: 10,
+      endSeq: 11,
+      schema: DEFAULT_NODE_SCHEMA,
+      embeddingConfig: null,
+      settings: { ...defaultSettings },
+    });
+
+    assert.equal(result.success, true);
+    assert.ok(captured);
+
+    const graphStatsBlock = (Array.isArray(captured.promptMessages) ? captured.promptMessages : []).find(
+      (m) => m.sourceKey === "graphStats",
+    );
+    assert.ok(graphStatsBlock, "graphStats block should exist");
+    const graphStatsContent = String(graphStatsBlock.content || "");
+    assert.match(graphStatsContent, /### 图谱节点统计/);
+    assert.match(graphStatsContent, /事件: 1/);
+    assert.match(graphStatsContent, /主线: 1/);
+    assert.match(graphStatsContent, /\[G1\|事件\] 中文告白/);
+    assert.doesNotMatch(graphStatsContent, new RegExp(confessionNode.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    restore();
+  }
+}
+
+// ── Test 8: new settings exist in defaults ──
 {
   assert.equal(defaultSettings.extractRecentMessageCap, 0);
   assert.equal(defaultSettings.extractPromptStructuredMode, "both");

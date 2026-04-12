@@ -296,6 +296,9 @@ function getPromptMessageLikeDescriptor(value) {
       role: role === "user" ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
       speaker,
+      hideSpeakerLabel: value?.hideSpeakerLabel === true,
+      isContextOnly:
+        typeof value.isContextOnly === "boolean" ? value.isContextOnly : null,
     };
   }
 
@@ -308,6 +311,9 @@ function getPromptMessageLikeDescriptor(value) {
       role: value.is_user === true ? "user" : "assistant",
       seq: getOptionalFiniteNumber(value.seq),
       speaker,
+      hideSpeakerLabel: value?.hideSpeakerLabel === true,
+      isContextOnly:
+        typeof value.isContextOnly === "boolean" ? value.isContextOnly : null,
     };
   }
 
@@ -322,23 +328,62 @@ function isPromptMessageArray(value) {
   );
 }
 
+export const EXTRACTION_CONTEXT_REVIEW_HEADER =
+  "--- 以下是上下文回顾（已提取过），仅供理解剧情 ---";
+export const EXTRACTION_TARGET_CONTENT_HEADER =
+  "--- 以下是本次需要提取记忆的新对话内容 ---";
+export const RECALL_TARGET_CONTENT_HEADER =
+  "--- 以下是本次需要召回记忆的新对话内容 ---";
+
+function getPromptMessageContextGroup(value) {
+  const descriptor = getPromptMessageLikeDescriptor(value);
+  if (!descriptor || typeof descriptor.isContextOnly !== "boolean") {
+    return null;
+  }
+  return descriptor.isContextOnly ? "context" : "target";
+}
+
+function getPromptMessageContextHeader(group = "") {
+  if (group === "context") {
+    return EXTRACTION_CONTEXT_REVIEW_HEADER;
+  }
+  if (group === "target") {
+    return EXTRACTION_TARGET_CONTENT_HEADER;
+  }
+  return "";
+}
+
 function formatPromptMessageTranscript(value) {
   const entries = Array.isArray(value) ? value : [value];
-  return entries
-    .map((entry, index) => {
-      const descriptor = getPromptMessageLikeDescriptor(entry);
-      if (!descriptor) {
-        return "";
-      }
-      const seqLabel =
-        descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
-      const speakerLabel = descriptor.speaker
-        ? `|${descriptor.speaker}`
-        : "";
-      return `${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`;
-    })
-    .filter(Boolean)
-    .join("\n\n");
+  const hasContextMessages = entries.some(
+    (entry) => getPromptMessageContextGroup(entry) === "context",
+  );
+  const hasTargetMessages = entries.some(
+    (entry) => getPromptMessageContextGroup(entry) === "target",
+  );
+  const lines = [];
+  let activeGroup = null;
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const descriptor = getPromptMessageLikeDescriptor(entry);
+    if (!descriptor) {
+      continue;
+    }
+    const group = getPromptMessageContextGroup(entry);
+    if (hasContextMessages && hasTargetMessages && group && group !== activeGroup) {
+      lines.push(getPromptMessageContextHeader(group));
+      activeGroup = group;
+    }
+    const seqLabel =
+      descriptor.seq != null ? `#${descriptor.seq}` : `#${index + 1}`;
+    const speakerLabel = !descriptor.hideSpeakerLabel && descriptor.speaker
+      ? `|${descriptor.speaker}`
+      : "";
+    lines.push(`${seqLabel} [${descriptor.role}${speakerLabel}]: ${descriptor.content}`);
+  }
+
+  return lines.filter(Boolean).join("\n\n");
 }
 
 function stringifyInterpolatedValue(value) {
@@ -1880,6 +1925,91 @@ function clonePayloadMessage(message = {}) {
   });
 }
 
+function splitSectionedTranscriptPayloadMessage(message = {}) {
+  const normalizedRole = normalizeRole(message?.role);
+  const sourceKey = String(message?.sourceKey || "").trim();
+  const content = String(message?.content || "").trim();
+  const targetSectionHeader = content.includes(RECALL_TARGET_CONTENT_HEADER)
+    ? RECALL_TARGET_CONTENT_HEADER
+    : content.includes(EXTRACTION_TARGET_CONTENT_HEADER)
+      ? EXTRACTION_TARGET_CONTENT_HEADER
+      : "";
+  if (
+    normalizedRole !== "system" ||
+    !["recentMessages", "dialogueText"].includes(sourceKey) ||
+    !content.includes(EXTRACTION_CONTEXT_REVIEW_HEADER) ||
+    !targetSectionHeader
+  ) {
+    return [message];
+  }
+
+  const headerMatches = [];
+  let searchIndex = 0;
+  while (searchIndex < content.length) {
+    const contextIndex = content.indexOf(
+      EXTRACTION_CONTEXT_REVIEW_HEADER,
+      searchIndex,
+    );
+    const targetIndex = targetSectionHeader
+      ? content.indexOf(targetSectionHeader, searchIndex)
+      : -1;
+    let nextIndex = -1;
+    let nextHeader = "";
+    if (contextIndex >= 0 && (targetIndex < 0 || contextIndex <= targetIndex)) {
+      nextIndex = contextIndex;
+      nextHeader = EXTRACTION_CONTEXT_REVIEW_HEADER;
+    } else if (targetIndex >= 0) {
+      nextIndex = targetIndex;
+      nextHeader = targetSectionHeader;
+    }
+    if (nextIndex < 0 || !nextHeader) {
+      break;
+    }
+    headerMatches.push({
+      index: nextIndex,
+      header: nextHeader,
+    });
+    searchIndex = nextIndex + nextHeader.length;
+  }
+
+  if (headerMatches.length < 2 || headerMatches[0].index !== 0) {
+    return [message];
+  }
+
+  const { role: _role, content: _content, ...sharedMeta } = message;
+  const splitMessages = [];
+
+  for (let index = 0; index < headerMatches.length; index += 1) {
+    const current = headerMatches[index];
+    const next = headerMatches[index + 1];
+    const sectionBody = content
+      .slice(current.index + current.header.length, next ? next.index : content.length)
+      .trim();
+    const transcriptSection =
+      current.header === EXTRACTION_CONTEXT_REVIEW_HEADER ? "context" : "target";
+    splitMessages.push(
+      createExecutionMessage(
+        "system",
+        sectionBody ? `${current.header}\n\n${sectionBody}` : current.header,
+        {
+          ...sharedMeta,
+          sourceKey,
+          transcriptSection,
+          transcriptSectionPart: "section",
+        },
+      ),
+    );
+  }
+
+  return splitMessages.filter(Boolean);
+}
+
+function expandSectionedTranscriptPayloadMessages(messages = []) {
+  return (Array.isArray(messages) ? messages : []).flatMap((message) =>
+    splitSectionedTranscriptPayloadMessage(message),
+  );
+}
+
 function collectPayloadUserMessageTexts(messages = []) {
   return (Array.isArray(messages) ? messages : [])
     .filter((message) => String(message?.role || "").trim().toLowerCase() === "user")
@@ -1978,8 +2108,11 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
         !(isCustomFilter && messageUsesWorldInfoContent(message)),
     },
   );
+  const expandedExecutionMessages = expandSectionedTranscriptPayloadMessages(
+    executionMessages,
+  );
 
-  const hasUserMessage = executionMessages.some(
+  const hasUserMessage = expandedExecutionMessages.some(
     (message) => message.role === "user",
   );
   if (!hasUserMessage && rawExecutionMessages.length > 0) {
@@ -1998,7 +2131,7 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
         `after recreate=${userBlocksAfterRaw.length}, ` +
         `after sanitize=${userBlocksAfterSanitize.length}, ` +
         `blockedContents count=${blockedContents.length}, ` +
-        `total executionMessages=${executionMessages.length}`,
+        `total executionMessages=${expandedExecutionMessages.length}`,
     );
     if (userBlocksBefore.length > 0) {
       for (const block of userBlocksBefore) {
@@ -2016,17 +2149,19 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
     }
   }
   const additionalMessages =
-    executionMessages.length > 0
+    expandedExecutionMessages.length > 0
       ? []
-      : sanitizePromptMessages(
-          settings,
-          taskType,
-          rawPrivateTaskMessages,
-          {
-            blockedContents,
-            applySanitizer: (message) =>
-              !(isCustomFilter && messageUsesWorldInfoContent(message)),
-          },
+      : expandSectionedTranscriptPayloadMessages(
+          sanitizePromptMessages(
+            settings,
+            taskType,
+            rawPrivateTaskMessages,
+            {
+              blockedContents,
+              applySanitizer: (message) =>
+                !(isCustomFilter && messageUsesWorldInfoContent(message)),
+            },
+          ),
         );
   const hasAdditionalUserMessage = additionalMessages.some(
     (message) => message.role === "user",
@@ -2048,9 +2183,11 @@ export function buildTaskLlmPayload(promptBuild = null, fallbackUserPrompt = "")
 
   return {
     systemPrompt:
-      executionMessages.length > 0 ? "" : String(promptBuild?.systemPrompt || ""),
+      expandedExecutionMessages.length > 0
+        ? ""
+        : String(promptBuild?.systemPrompt || ""),
     userPrompt: fallbackUserPromptResult.text,
-    promptMessages: executionMessages,
+    promptMessages: expandedExecutionMessages,
     additionalMessages,
     fallbackUserPromptSource: fallbackUserPromptResult.source,
     fallbackUserPromptApplied: Boolean(fallbackUserPromptResult.text),
