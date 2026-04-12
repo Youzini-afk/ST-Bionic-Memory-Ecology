@@ -332,6 +332,23 @@ async function testDownloadImport() {
       nodeCount: 1,
       edgeCount: 0,
       tombstoneCount: 0,
+      runtimeVectorIndexState: {
+        mode: "backend",
+        collectionId: "st-bme::chat-download",
+        source: "openai",
+        hashToNodeId: {
+          "hash-remote-node": "remote-node",
+        },
+        nodeToHash: {
+          "remote-node": "hash-remote-node",
+        },
+        lastStats: {
+          total: 1,
+          indexed: 1,
+          stale: 0,
+          pending: 0,
+        },
+      },
     },
     nodes: [{ id: "remote-node", updatedAt: 400 }],
     edges: [],
@@ -348,6 +365,17 @@ async function testDownloadImport() {
   assert.equal(result.downloaded, true);
   assert.equal(db.lastImportPayload.meta.revision, 12);
   assert.equal(db.lastImportPayload.nodes[0].id, "remote-node");
+  assert.equal(db.lastImportPayload.meta.runtimeVectorIndexState.dirty, true);
+  assert.equal(
+    db.lastImportPayload.meta.runtimeVectorIndexState.dirtyReason,
+    "backend-sync-download-unverified",
+  );
+  assert.deepEqual(db.lastImportPayload.meta.runtimeVectorIndexState.hashToNodeId, {});
+  assert.deepEqual(db.lastImportPayload.meta.runtimeVectorIndexState.nodeToHash, {});
+  assert.equal(
+    db.lastImportPayload.meta.runtimeVectorIndexState.pendingRepairFromFloor,
+    0,
+  );
 }
 
 async function testLegacyRemoteFilenameFallbackAndReuse() {
@@ -648,6 +676,23 @@ async function testManualBackupAndRestoreFlow() {
         { id: "journal-5", processedRange: [4, 4], createdAt: 55 },
         { id: "journal-6", processedRange: [5, 5], createdAt: 66 },
       ],
+      runtimeVectorIndexState: {
+        mode: "backend",
+        collectionId: "st-bme::chat-backup-flow",
+        source: "openai",
+        hashToNodeId: {
+          "hash-local-node": "local-node",
+        },
+        nodeToHash: {
+          "local-node": "hash-local-node",
+        },
+        lastStats: {
+          total: 1,
+          indexed: 1,
+          stale: 0,
+          pending: 0,
+        },
+      },
       maintenanceJournal: [
         { id: "maintenance-a", updatedAt: 70 },
         { id: "maintenance-b", updatedAt: 80 },
@@ -768,6 +813,13 @@ async function testManualBackupAndRestoreFlow() {
   assert.equal(db.snapshot.meta.runtimeHistoryState.lastMutationReason, "");
   assert.equal(db.snapshot.meta.runtimeHistoryState.lastMutationSource, "");
   assert.equal(db.snapshot.meta.runtimeHistoryState.lastRecoveryResult, null);
+  assert.equal(db.snapshot.meta.runtimeVectorIndexState.dirty, true);
+  assert.equal(
+    db.snapshot.meta.runtimeVectorIndexState.dirtyReason,
+    "backend-backup-restore-unverified",
+  );
+  assert.deepEqual(db.snapshot.meta.runtimeVectorIndexState.hashToNodeId, {});
+  assert.deepEqual(db.snapshot.meta.runtimeVectorIndexState.nodeToHash, {});
   assert.ok(Number(db.meta.get("lastBackupRestoredAt")) > 0);
   const safetyStatus = await getRestoreSafetySnapshotStatus(
     "chat-backup-flow",
@@ -1247,6 +1299,23 @@ async function testSyncAppliedHook() {
         nodeCount: 1,
         edgeCount: 0,
         tombstoneCount: 0,
+        runtimeVectorIndexState: {
+          mode: "backend",
+          collectionId: "st-bme::chat-hook-merge",
+          source: "openai",
+          hashToNodeId: {
+            "hash-local-merge": "local-merge",
+          },
+          nodeToHash: {
+            "local-merge": "hash-local-merge",
+          },
+          lastStats: {
+            total: 1,
+            indexed: 1,
+            stale: 0,
+            pending: 0,
+          },
+        },
       },
       nodes: [{ id: "local-merge", updatedAt: 20 }],
       edges: [],
@@ -1263,7 +1332,33 @@ async function testSyncAppliedHook() {
     state: { lastProcessedFloor: 2, extractionCount: 1 },
   });
   remoteFiles.set("ST-BME_sync_chat-hook-merge.json", {
-    meta: { schemaVersion: 1, chatId: "chat-hook-merge", revision: 4, lastModified: 25, deviceId: "remote", nodeCount: 1, edgeCount: 0, tombstoneCount: 0 },
+    meta: {
+      schemaVersion: 1,
+      chatId: "chat-hook-merge",
+      revision: 4,
+      lastModified: 25,
+      deviceId: "remote",
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+      runtimeVectorIndexState: {
+        mode: "backend",
+        collectionId: "st-bme::chat-hook-merge",
+        source: "openai",
+        hashToNodeId: {
+          "hash-remote-merge": "remote-merge",
+        },
+        nodeToHash: {
+          "remote-merge": "hash-remote-merge",
+        },
+        lastStats: {
+          total: 1,
+          indexed: 1,
+          stale: 0,
+          pending: 0,
+        },
+      },
+    },
     nodes: [{ id: "remote-merge", updatedAt: 25 }],
     edges: [],
     tombstones: [],
@@ -1284,6 +1379,22 @@ async function testSyncAppliedHook() {
 
   assert.equal(downloadResult.revision, 3);
   assert.equal(mergeResult.revision, 5);
+  assert.equal(
+    dbByChatId.get("chat-hook-merge").lastImportPayload.meta.runtimeVectorIndexState.dirty,
+    true,
+  );
+  assert.equal(
+    dbByChatId.get("chat-hook-merge").lastImportPayload.meta.runtimeVectorIndexState.dirtyReason,
+    "backend-sync-merge-unverified",
+  );
+  assert.deepEqual(
+    dbByChatId.get("chat-hook-merge").lastImportPayload.meta.runtimeVectorIndexState.hashToNodeId,
+    {},
+  );
+  assert.deepEqual(
+    dbByChatId.get("chat-hook-merge").lastImportPayload.meta.runtimeVectorIndexState.nodeToHash,
+    {},
+  );
 
   assert.deepEqual(hookCalls.map((item) => item.action), ["download", "merge"]);
   assert.deepEqual(hookCalls.map((item) => item.chatId), ["chat-hook-download", "chat-hook-merge"]);

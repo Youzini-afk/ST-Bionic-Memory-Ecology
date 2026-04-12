@@ -793,6 +793,54 @@ function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
   };
 }
 
+function markBackendVectorSnapshotDirty(
+  snapshot = {},
+  reason = "backend-sync-import-unverified",
+  warning = "后端向量索引需要在当前环境重建",
+) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return snapshot;
+  }
+
+  if (!snapshot.meta || typeof snapshot.meta !== "object" || Array.isArray(snapshot.meta)) {
+    return snapshot;
+  }
+
+  const vectorMeta = normalizeRuntimeVectorMeta(
+    snapshot.meta?.[RUNTIME_VECTOR_META_KEY],
+  );
+  if (vectorMeta.mode !== "backend") {
+    return snapshot;
+  }
+
+  const total = Math.max(
+    normalizeNonNegativeInteger(vectorMeta.lastStats?.total, 0),
+    Object.keys(vectorMeta.nodeToHash || {}).length,
+    Object.keys(vectorMeta.hashToNodeId || {}).length,
+  );
+  const pending = total > 0
+    ? Math.max(1, normalizeNonNegativeInteger(vectorMeta.lastStats?.pending, 0))
+    : normalizeNonNegativeInteger(vectorMeta.lastStats?.pending, 0);
+
+  snapshot.meta[RUNTIME_VECTOR_META_KEY] = {
+    ...vectorMeta,
+    hashToNodeId: {},
+    nodeToHash: {},
+    replayRequiredNodeIds: [],
+    dirty: true,
+    dirtyReason: String(reason || "backend-sync-import-unverified"),
+    pendingRepairFromFloor: 0,
+    lastStats: {
+      total,
+      indexed: 0,
+      stale: total,
+      pending,
+    },
+    lastWarning: String(warning || "后端向量索引需要在当前环境重建"),
+  };
+  return snapshot;
+}
+
 function createRecordWinnerByUpdatedAt(localRecord, remoteRecord) {
   if (!localRecord) return remoteRecord || null;
   if (!remoteRecord) return localRecord || null;
@@ -2057,9 +2105,13 @@ export async function restoreFromServer(chatId, options = {}) {
       };
     }
 
-    const snapshot = markManualBackupHistoryForLocalRebind(
-      envelope.snapshot,
-      normalizedChatId,
+    const snapshot = markBackendVectorSnapshotDirty(
+      markManualBackupHistoryForLocalRebind(
+        envelope.snapshot,
+        normalizedChatId,
+      ),
+      "backend-backup-restore-unverified",
+      "后端向量索引已从云备份恢复，需要在当前环境重建",
     );
     if (normalizeChatId(snapshot.meta?.chatId) !== normalizedChatId) {
       return {
@@ -2285,7 +2337,11 @@ export async function download(chatId, options = {}) {
       };
     }
 
-    const remoteSnapshot = normalizeSyncSnapshot(remoteResult.snapshot, normalizedChatId);
+    const remoteSnapshot = markBackendVectorSnapshotDirty(
+      normalizeSyncSnapshot(remoteResult.snapshot, normalizedChatId),
+      "backend-sync-download-unverified",
+      "后端向量索引已从远端同步恢复，需要在当前环境重建",
+    );
     const remoteRevision = normalizeRevision(remoteSnapshot.meta.revision);
 
     await db.importSnapshot(remoteSnapshot, {
@@ -2615,9 +2671,13 @@ export async function syncNow(chatId, options = {}) {
       };
     }
 
-    const mergedSnapshot = mergeSnapshots(localSnapshot, remoteSnapshot, {
-      chatId: normalizedChatId,
-    });
+    const mergedSnapshot = markBackendVectorSnapshotDirty(
+      mergeSnapshots(localSnapshot, remoteSnapshot, {
+        chatId: normalizedChatId,
+      }),
+      "backend-sync-merge-unverified",
+      "后端向量索引已从远端合并恢复，需要在当前环境重建",
+    );
 
     await db.importSnapshot(mergedSnapshot, {
       mode: "replace",

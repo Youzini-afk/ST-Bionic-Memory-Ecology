@@ -155,7 +155,10 @@ const {
   removeNode,
 } = await import("../graph/graph.js");
 const { compressType } = await import("../maintenance/compressor.js");
-const { syncGraphVectorIndex } = await import("../vector/vector-index.js");
+const {
+  findSimilarNodesByText,
+  syncGraphVectorIndex,
+} = await import("../vector/vector-index.js");
 const {
   extractMemories,
   generateReflection,
@@ -1981,6 +1984,55 @@ async function testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure() {
     assert.equal(second.embedding, null);
   } finally {
     restoreOverrides();
+  }
+}
+
+async function testBackendVectorQueryFailureMarksStateDirty() {
+  const originalFetch = globalThis.fetch;
+  const graph = normalizeGraphRuntimeState(createEmptyGraph(), "chat-backend-query");
+  const node = makeEvent(1, "后端向量节点");
+  addNode(graph, node);
+  graph.vectorIndexState.mode = "backend";
+  graph.vectorIndexState.source = "openai";
+  graph.vectorIndexState.collectionId = "st-bme::chat-backend-query";
+  graph.vectorIndexState.hashToNodeId = {
+    "hash-backend-node": node.id,
+  };
+  graph.vectorIndexState.nodeToHash = {
+    [node.id]: "hash-backend-node",
+  };
+  graph.vectorIndexState.lastStats = {
+    total: 1,
+    indexed: 1,
+    stale: 0,
+    pending: 0,
+  };
+
+  globalThis.fetch = async () => {
+    throw new Error("backend-down");
+  };
+
+  try {
+    await assert.rejects(
+      findSimilarNodesByText(
+        graph,
+        "测试后端向量失败",
+        {
+          mode: "backend",
+          source: "openai",
+          model: "text-embedding-3-small",
+        },
+        5,
+        [node],
+      ),
+      /backend-down/,
+    );
+    assert.equal(graph.vectorIndexState.dirty, true);
+    assert.equal(graph.vectorIndexState.dirtyReason, "backend-query-failed");
+    assert.equal(graph.vectorIndexState.pendingRepairFromFloor, 0);
+    assert.match(graph.vectorIndexState.lastWarning, /后端向量查询失败/);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 }
 
@@ -6725,6 +6777,7 @@ async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
 
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
+await testBackendVectorQueryFailureMarksStateDirty();
 await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
