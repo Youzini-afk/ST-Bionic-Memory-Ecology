@@ -346,6 +346,7 @@ let pendingVisibleGraphRefreshToken = "";
 let pendingVisibleGraphRefreshForce = false;
 let lastVisibleGraphRefreshToken = "";
 let lastVisibleGraphRefreshAt = 0;
+let graphRenderingEnabled = true;
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -730,6 +731,49 @@ function _clearScheduledVisibleGraphRefresh() {
   }
   pendingVisibleGraphRefreshToken = "";
   pendingVisibleGraphRefreshForce = false;
+}
+
+function _isGraphRenderingEnabled() {
+  return graphRenderingEnabled !== false;
+}
+
+function _refreshGraphRenderToggleUi() {
+  const enabled = _isGraphRenderingEnabled();
+  const syncButton = (button) => {
+    if (!button) return;
+    const title = enabled ? "暂停图谱渲染" : "恢复图谱渲染";
+    button.classList.toggle("is-paused", !enabled);
+    button.classList.toggle("is-active", enabled);
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    const icon = button.querySelector("i");
+    if (icon) {
+      icon.className = enabled ? "fa-solid fa-pause" : "fa-solid fa-play";
+    }
+  };
+  syncButton(document.getElementById("bme-graph-render-toggle"));
+  syncButton(document.getElementById("bme-mobile-render-toggle"));
+}
+
+function _applyGraphRenderEnabledState({ forceRefresh = false } = {}) {
+  const enabled = _isGraphRenderingEnabled();
+  graphRenderer?.setEnabled?.(enabled);
+  mobileGraphRenderer?.setEnabled?.(enabled);
+  _refreshGraphRenderToggleUi();
+  if (!enabled) {
+    _clearScheduledVisibleGraphRefresh();
+    return;
+  }
+  if (forceRefresh) {
+    _scheduleVisibleGraphWorkspaceRefresh({ force: true });
+  }
+}
+
+function _toggleGraphRenderingEnabled() {
+  graphRenderingEnabled = !_isGraphRenderingEnabled();
+  _applyGraphRenderEnabledState({ forceRefresh: graphRenderingEnabled });
+  _refreshGraphAvailabilityState();
 }
 
 function _refreshVisibleGraphWorkspace({ force = false } = {}) {
@@ -1126,6 +1170,8 @@ export function openPanel() {
     mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
     mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
+
+  _applyGraphRenderEnabledState();
 
   const activeTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || currentTabId;
@@ -3871,6 +3917,9 @@ function _getActiveGraphRenderer() {
 
 function _bindGraphControls() {
   document
+    .getElementById("bme-graph-render-toggle")
+    ?.addEventListener("click", () => _toggleGraphRenderingEnabled());
+  document
     .getElementById("bme-graph-zoom-in")
     ?.addEventListener("click", () => _getActiveGraphRenderer()?.zoomIn());
   document
@@ -5251,6 +5300,9 @@ function _bindActions() {
   });
 
   // 移动端图谱浮动控件
+  document.getElementById("bme-mobile-render-toggle")?.addEventListener("click", () => {
+    _toggleGraphRenderingEnabled();
+  });
   document.getElementById("bme-mobile-zoom-in")?.addEventListener("click", () => {
     const r = _getActiveGraphRenderer?.();
     r?.zoomIn?.();
@@ -11017,6 +11069,8 @@ function _refreshGraphAvailabilityState() {
   const mobileOverlayText = document.getElementById("bme-mobile-graph-overlay-text");
   const blocked = _isGraphWriteBlocked(loadInfo);
   const loadLabel = _getGraphLoadLabel(loadInfo.loadState);
+  const pausedLabel = "图谱渲染已暂停，可点击工具栏按钮恢复。";
+  const renderingPaused = !_isGraphRenderingEnabled();
 
   GRAPH_WRITE_ACTION_IDS.forEach((id) => {
     const button = document.getElementById(id);
@@ -11025,6 +11079,7 @@ function _refreshGraphAvailabilityState() {
     button.classList.toggle("is-runtime-disabled", blocked);
     button.title = blocked ? loadLabel : "";
   });
+  _refreshGraphRenderToggleUi();
 
   if (banner) {
     const shouldShowBanner = blocked;
@@ -11032,26 +11087,33 @@ function _refreshGraphAvailabilityState() {
     banner.textContent = shouldShowBanner ? loadLabel : "";
   }
 
-  const shouldShowOverlay =
+  const shouldShowRuntimeOverlay =
     blocked ||
     loadInfo.syncState === "syncing" ||
     loadInfo.loadState === "loading" ||
     loadInfo.loadState === "shadow-restored" ||
     loadInfo.loadState === "blocked";
 
+  const shouldShowOverlay = shouldShowRuntimeOverlay || renderingPaused;
+  const overlayLabel = shouldShowRuntimeOverlay
+    ? loadLabel
+    : renderingPaused
+      ? pausedLabel
+      : "";
+
   if (graphOverlay) {
     graphOverlay.hidden = !shouldShowOverlay;
     graphOverlay.classList.toggle("active", shouldShowOverlay);
   }
   if (graphOverlayText) {
-    graphOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+    graphOverlayText.textContent = overlayLabel;
   }
   if (mobileOverlay) {
     mobileOverlay.hidden = !shouldShowOverlay;
     mobileOverlay.classList.toggle("active", shouldShowOverlay);
   }
   if (mobileOverlayText) {
-    mobileOverlayText.textContent = shouldShowOverlay ? loadLabel : "";
+    mobileOverlayText.textContent = overlayLabel;
   }
 }
 
