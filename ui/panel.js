@@ -1707,22 +1707,22 @@ function _renderTaskMemoryDetailPanel(detailEl, node, graph) {
   ].filter(Boolean).join("");
 
   detailEl.innerHTML = `
-    <div class="bme-memory-detail__title">${_escHtml(displayName)}</div>
+    <div class="bme-memory-detail__header">
+      <div class="bme-memory-detail__title">${_escHtml(displayName)}</div>
+      <div class="bme-memory-detail__header-actions">
+        <button class="bme-detail-action-btn" data-task-memory-action="save" type="button" title="保存修改"${disabledAttr}>
+          <i class="fa-solid fa-floppy-disk"></i>
+        </button>
+        <button class="bme-detail-action-btn bme-detail-action-danger" data-task-memory-action="delete" type="button" title="删除节点"${disabledAttr}>
+          <i class="fa-solid fa-trash"></i>
+        </button>
+      </div>
+    </div>
     <div class="bme-memory-detail__badges">${badges}</div>
     <div class="bme-memory-detail__desc">${_escHtml(detailSummary || "无补充字段")}</div>
     <div class="bme-memory-detail__stats">
       <span><i class="fa-solid fa-link" style="margin-right:4px;opacity:.5"></i>${edges.length} 条连接</span>
       <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>访问 ${_formatMemoryInt(node.accessCount, 0)}</span>
-    </div>
-    <div class="bme-memory-detail__actions">
-      <button class="bme-config-secondary-btn" data-task-memory-action="save" type="button"${disabledAttr}>
-        <i class="fa-solid fa-floppy-disk"></i>
-        <span>保存修改</span>
-      </button>
-      <button class="bme-config-secondary-btn" data-task-memory-action="delete" type="button"${disabledAttr}>
-        <i class="fa-solid fa-trash"></i>
-        <span>删除节点</span>
-      </button>
     </div>
     <div id="bme-task-memory-editor-body"></div>
   `;

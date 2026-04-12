@@ -1354,11 +1354,27 @@
   font-size: 12px;
 }
 
+.bme-memory-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.bme-memory-detail__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .bme-memory-detail__title {
   font-size: 18px;
   font-weight: 700;
   color: var(--bme-on-surface);
-  margin-bottom: 8px;
+  min-width: 0;
+  word-break: break-word;
 }
 
 .bme-memory-detail__badges {
