@@ -775,6 +775,12 @@
   display: block;
 }
 
+#bme-task-memory.bme-task-section.active {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
 /* --- Task nav mobile pill selector (visible only on mobile) --- */
 .bme-task-nav-mobile {
   display: none;
@@ -1225,6 +1231,7 @@
   height: 100%;
   min-height: 400px;
   gap: 0;
+  overflow: hidden;
 }
 
 .bme-memory-list-panel {
@@ -1253,6 +1260,7 @@
 .bme-memory-list-scroll {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .bme-memory-node-item {
@@ -1334,6 +1342,7 @@
   overflow-y: auto;
   padding: 20px;
   min-width: 0;
+  min-height: 0;
 }
 
 .bme-memory-detail-empty {
