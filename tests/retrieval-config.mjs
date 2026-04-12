@@ -772,6 +772,10 @@ const retrieve = await loadRetrieve({
   describeScopeBucket(bucket = "") {
     return String(bucket || "");
   },
+  EXTRACTION_CONTEXT_REVIEW_HEADER:
+    "--- 以下是上下文回顾（已提取过），仅供理解剧情 ---",
+  RECALL_TARGET_CONTENT_HEADER:
+    "--- 以下是本次需要召回记忆的新对话内容 ---",
   buildTaskPrompt() {
     return { systemPrompt: "" };
   },
