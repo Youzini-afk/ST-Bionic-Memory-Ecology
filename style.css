@@ -675,29 +675,32 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: none;
-  border-left: 3px solid transparent;
-  background: transparent;
+  border: 1px solid var(--bme-border);
+  background: var(--bme-surface-low);
   color: var(--bme-on-surface-dim);
+  border-radius: 10px;
+  padding: 10px 12px;
+  text-align: left;
   font-size: 12px;
-  font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    color 0.15s,
+    transform 0.15s;
   white-space: nowrap;
 }
 
 .bme-task-nav-btn:hover {
-  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--bme-primary);
   color: var(--bme-on-surface);
+  background: var(--bme-surface-high);
 }
 
 .bme-task-nav-btn.active {
-  border-left-color: var(--bme-primary);
-  background: var(--bme-primary-dim);
+  border-color: var(--bme-primary);
   color: var(--bme-primary);
-  font-weight: 600;
+  background: var(--bme-primary-dim);
 }
 
 .bme-task-nav-btn i {
