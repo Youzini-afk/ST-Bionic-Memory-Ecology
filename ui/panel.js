@@ -1538,13 +1538,47 @@ function _refreshTaskMemoryBrowser() {
   if (!el) return;
 
   const graph = _getGraph?.();
-  if (!graph) {
+  const loadInfo = _getGraphPersistenceSnapshot();
+  if (!graph || !_canRenderGraphData(loadInfo)) {
     el.innerHTML = '<div class="bme-memory-detail-empty">图谱未加载</div>';
     return;
   }
 
-  const nodes = graph.nodes || [];
-  const sorted = nodes.slice().sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  const currentQuery = String(document.getElementById("bme-task-memory-search")?.value || "")
+    .trim()
+    .toLowerCase();
+  const currentFilter = document.getElementById("bme-task-memory-filter")?.value || "all";
+
+  let nodes = Array.isArray(graph.nodes)
+    ? graph.nodes.filter((node) => !node?.archived)
+    : [];
+
+  if (currentFilter !== "all") {
+    nodes = nodes.filter((node) => _matchesMemoryFilter(node, currentFilter));
+  }
+
+  if (currentQuery) {
+    nodes = nodes.filter((node) => {
+      const name = getNodeDisplayName(node).toLowerCase();
+      const snippet = _getNodeSnippet(node).toLowerCase();
+      const fieldsText = JSON.stringify(node?.fields || {}).toLowerCase();
+      return (
+        name.includes(currentQuery) ||
+        snippet.includes(currentQuery) ||
+        fieldsText.includes(currentQuery)
+      );
+    });
+  }
+
+  const sorted = nodes.slice().sort((a, b) => {
+    const importanceDiff = (b.importance || 5) - (a.importance || 5);
+    if (importanceDiff !== 0) return importanceDiff;
+    return (b.seqRange?.[1] ?? b.seq ?? 0) - (a.seqRange?.[1] ?? a.seq ?? 0);
+  });
+
+  if (!sorted.some((node) => node.id === currentSelectedMemoryNodeId)) {
+    currentSelectedMemoryNodeId = sorted[0]?.id || "";
+  }
 
   const typeClass = (type) => {
     switch (type) {
@@ -1557,27 +1591,25 @@ function _refreshTaskMemoryBrowser() {
     }
   };
 
-  const typeLabel = (node) => {
-    if (node.scope === "characterPov") return "角色POV";
-    if (node.scope === "userPov") return "用户POV";
-    return node.type || "memory";
-  };
-
   const listItems = sorted.map((node) => {
     const sel = node.id === currentSelectedMemoryNodeId ? "selected" : "";
-    const preview = (node.description || "").slice(0, 80);
+    const preview = _getNodeSnippet(node);
+    const scopeBadge = buildScopeBadgeText(node.scope);
+    const metaText = _buildScopeMetaText(node);
+    const displayName = getNodeDisplayName(node);
     return `
       <div class="bme-memory-node-item ${sel}" data-node-id="${_escHtml(node.id)}">
         <div class="bme-memory-node-item__header">
-          <span class="bme-memory-node-item__type ${typeClass(node.type)}">${_escHtml(typeLabel(node))}</span>
+          <span class="bme-memory-node-item__type ${typeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>
           <span class="bme-memory-node-item__imp">IMP: ${typeof node.importance === "number" ? node.importance.toFixed(1) : "—"}</span>
         </div>
-        <div class="bme-memory-node-item__title">${_escHtml(node.label || node.id)}</div>
+        <div class="bme-memory-node-item__title">${_escHtml(displayName)}</div>
         <div class="bme-memory-node-item__preview">${_escHtml(preview)}</div>
         <div class="bme-memory-node-item__meta">
-          <span>SEQ: ${node.lastSeq ?? "—"}</span>
-          ${node.region ? `<span>LOC: ${_escHtml(node.region)}</span>` : ""}
+          <span>${_escHtml(scopeBadge)}</span>
+          <span>SEQ: ${_formatMemoryInt(node.seqRange?.[1] ?? node.seq, 0)}</span>
         </div>
+        ${metaText ? `<div class="bme-memory-node-item__meta">${_escHtml(metaText)}</div>` : ""}
       </div>`;
   }).join("");
 
@@ -1587,17 +1619,17 @@ function _refreshTaskMemoryBrowser() {
     <div class="bme-memory-master-detail">
       <div class="bme-memory-list-panel">
         <div class="bme-memory-list-filters">
-          <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." />
+          <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." value="${_escHtml(currentQuery)}" />
           <select class="bme-filter-select" id="bme-task-memory-filter">
-            <option value="all">全部</option>
-            <option value="scope:objective">客观</option>
-            <option value="scope:characterPov">角色 POV</option>
-            <option value="scope:userPov">用户 POV</option>
-            <option value="pov_memory">主观记忆</option>
-            <option value="event">事件</option>
-            <option value="location">地点</option>
-            <option value="thread">线索</option>
-            <option value="rule">规则</option>
+            <option value="all"${currentFilter === "all" ? " selected" : ""}>全部</option>
+            <option value="scope:objective"${currentFilter === "scope:objective" ? " selected" : ""}>客观</option>
+            <option value="scope:characterPov"${currentFilter === "scope:characterPov" ? " selected" : ""}>角色 POV</option>
+            <option value="scope:userPov"${currentFilter === "scope:userPov" ? " selected" : ""}>用户 POV</option>
+            <option value="pov_memory"${currentFilter === "pov_memory" ? " selected" : ""}>主观记忆</option>
+            <option value="event"${currentFilter === "event" ? " selected" : ""}>事件</option>
+            <option value="location"${currentFilter === "location" ? " selected" : ""}>地点</option>
+            <option value="thread"${currentFilter === "thread" ? " selected" : ""}>线索</option>
+            <option value="rule"${currentFilter === "rule" ? " selected" : ""}>规则</option>
           </select>
         </div>
         <div class="bme-memory-list-scroll" id="bme-task-memory-list">
@@ -1611,6 +1643,17 @@ function _refreshTaskMemoryBrowser() {
   `;
 
   _bindTaskMemoryListClick();
+
+  const searchInput = document.getElementById("bme-task-memory-search");
+  const filterSelect = document.getElementById("bme-task-memory-filter");
+  if (searchInput) {
+    let timer = null;
+    searchInput.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
+    });
+  }
+  filterSelect?.addEventListener("change", () => _refreshTaskMemoryBrowser());
 }
 
 function _bindTaskMemoryListClick() {
@@ -1632,32 +1675,55 @@ function _renderMemoryDetailPanel(node, graph) {
   if (!node) return '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
 
   const edges = (graph?.edges || []).filter((e) => e.source === node.id || e.target === node.id);
+  const fields = node?.fields || {};
+  const detailSummary = _getNodeSnippet(node);
+  const scopeMeta = _buildScopeMetaText(node);
+  const scopeBadge = buildScopeBadgeText(node.scope);
+  const displayName = getNodeDisplayName(node);
   const badges = [
-    node.type ? `<span class="bme-memory-node-item__type ${node.type === "pov_memory" || node.type === "character" ? "type-character" : node.type === "event" ? "type-event" : node.type === "location" ? "type-location" : "type-default"}">${_escHtml(node.type)}</span>` : "",
-    node.scope ? `<span class="bme-memory-node-item__type type-default">${_escHtml(node.scope)}</span>` : "",
+    node.type ? `<span class="bme-memory-node-item__type ${node.type === "pov_memory" || node.type === "character" ? "type-character" : node.type === "event" ? "type-event" : node.type === "location" ? "type-location" : node.type === "rule" ? "type-rule" : node.type === "thread" ? "type-thread" : "type-default"}">${_escHtml(_typeLabel(node.type))}</span>` : "",
+    scopeBadge ? `<span class="bme-memory-node-item__type type-default">${_escHtml(scopeBadge)}</span>` : "",
     node.archived ? '<span class="bme-memory-node-item__type type-default">ARCHIVED</span>' : "",
   ].filter(Boolean).join("");
 
-  const fields = [
+  const detailFields = [
     ["ID", node.id],
-    ["Owner", node.owner || "—"],
-    ["Region", node.region || "—"],
-    ["Importance", typeof node.importance === "number" ? node.importance.toFixed(2) : "—"],
-    ["Last Seq", node.lastSeq ?? "—"],
-    ["Created", node.createdAt || "—"],
-    ["Updated", node.updatedAt || "—"],
+    ["名称", displayName],
+    ["范围", scopeMeta || scopeBadge || "—"],
+    ["重要度", _formatMemoryMetricNumber(node.importance, { fallback: 5, maxFrac: 2 })],
+    ["访问次数", _formatMemoryInt(node.accessCount, 0)],
+    ["最后序列", _formatMemoryInt(node.seqRange?.[1] ?? node.seq, 0)],
+    ["创建时间", node.createdAt || "—"],
+    ["更新时间", node.updatedAt || "—"],
   ];
 
+  const extraFieldRows = Object.entries(fields)
+    .filter(([key]) => !["embedding", "name", "title", "summary"].includes(key))
+    .slice(0, 6)
+    .map(([key, value]) => {
+      let text = "—";
+      if (typeof value === "string") {
+        text = value;
+      } else if (value !== undefined && value !== null) {
+        try {
+          text = JSON.stringify(value);
+        } catch {
+          text = String(value);
+        }
+      }
+      return [key, text];
+    });
+
   return `
-    <div class="bme-memory-detail__title">${_escHtml(node.label || node.id)}</div>
+    <div class="bme-memory-detail__title">${_escHtml(displayName)}</div>
     <div class="bme-memory-detail__badges">${badges}</div>
-    <div class="bme-memory-detail__desc">${_escHtml(node.description || "无描述")}</div>
+    <div class="bme-memory-detail__desc">${_escHtml(detailSummary || "无补充字段")}</div>
     <div class="bme-memory-detail__fields">
-      ${fields.map(([k, v]) => `<div class="bme-memory-detail__field-row"><span class="bme-memory-detail__field-key">${_escHtml(k)}</span><span class="bme-memory-detail__field-val">${_escHtml(String(v))}</span></div>`).join("")}
+      ${detailFields.concat(extraFieldRows).map(([k, v]) => `<div class="bme-memory-detail__field-row"><span class="bme-memory-detail__field-key">${_escHtml(k)}</span><span class="bme-memory-detail__field-val">${_escHtml(String(v))}</span></div>`).join("")}
     </div>
     <div class="bme-memory-detail__stats">
       <span><i class="fa-solid fa-link" style="margin-right:4px;opacity:.5"></i>${edges.length} 条连接</span>
-      <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>recall ${node.recallCount ?? 0}</span>
+      <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>访问 ${_formatMemoryInt(node.accessCount, 0)}</span>
     </div>
   `;
 }
