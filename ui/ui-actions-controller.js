@@ -1193,6 +1193,10 @@ export async function onDeleteCurrentIdbController(runtime) {
       });
     }
     runtime.clearCachedIndexedDbSnapshot?.(chatId);
+    runtime.clearCurrentChatCommitMarker?.({
+      reason: "manual-delete-current-idb",
+      immediate: true,
+    });
     runtime.syncGraphLoadFromLiveContext?.({
       source: "manual-delete-current-idb",
       force: true,
@@ -1245,6 +1249,10 @@ export async function onDeleteAllIdbController(runtime) {
     runtime.clearAllCachedIndexedDbSnapshots?.();
     const activeChatId = runtime.getCurrentChatId?.();
     if (activeChatId) {
+      runtime.clearCurrentChatCommitMarker?.({
+        reason: "manual-delete-all-idb",
+        immediate: true,
+      });
       runtime.syncGraphLoadFromLiveContext?.({
         source: "manual-delete-all-idb",
         force: true,

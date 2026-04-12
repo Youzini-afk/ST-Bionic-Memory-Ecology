@@ -67,6 +67,7 @@ import {
   shouldRunRecallForTransaction,
 } from "../ui/ui-status.js";
 import {
+  onDeleteCurrentIdbController,
   onManualCompressController,
   onManualEvolveController,
   onManualSleepController,
@@ -2033,6 +2034,93 @@ async function testBackendVectorQueryFailureMarksStateDirty() {
     assert.match(graph.vectorIndexState.lastWarning, /后端向量查询失败/);
   } finally {
     globalThis.fetch = originalFetch;
+  }
+}
+
+async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
+  const originalIndexedDb = globalThis.indexedDB;
+  const callLog = [];
+  globalThis.indexedDB = {
+    deleteDatabase(name) {
+      callLog.push(["delete-db", String(name || "")]);
+      const request = {
+        onsuccess: null,
+        onerror: null,
+        onblocked: null,
+      };
+      queueMicrotask(() => {
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+
+  try {
+    const runtime = {
+      confirm() {
+        return true;
+      },
+      getCurrentChatId() {
+        return "chat-delete-idb";
+      },
+      buildBmeDbName(chatId) {
+        return `STBME_${chatId}`;
+      },
+      buildRestoreSafetyDbName(chatId) {
+        return `STBME___restore__${chatId}`;
+      },
+      async closeBmeDb(chatId) {
+        callLog.push(["close-db", chatId]);
+      },
+      clearCachedIndexedDbSnapshot(chatId) {
+        callLog.push(["clear-indexeddb-cache", chatId]);
+      },
+      clearCurrentChatCommitMarker(options = {}) {
+        callLog.push([
+          "clear-commit-marker",
+          String(options.reason || ""),
+          options.immediate === true,
+        ]);
+      },
+      syncGraphLoadFromLiveContext(options = {}) {
+        callLog.push([
+          "sync-graph-load",
+          String(options.source || ""),
+          options.force === true,
+        ]);
+      },
+      refreshPanelLiveState() {
+        callLog.push(["refresh-panel"]);
+      },
+      toastr: {
+        success(message) {
+          callLog.push(["toast-success", String(message || "")]);
+        },
+        warning(message) {
+          callLog.push(["toast-warning", String(message || "")]);
+        },
+        error(message) {
+          callLog.push(["toast-error", String(message || "")]);
+        },
+      },
+    };
+
+    const result = await onDeleteCurrentIdbController(runtime);
+    assert.equal(result?.handledToast, true);
+    const clearMarkerIndex = callLog.findIndex(
+      (entry) => entry[0] === "clear-commit-marker",
+    );
+    const syncLoadIndex = callLog.findIndex(
+      (entry) => entry[0] === "sync-graph-load",
+    );
+    assert.ok(clearMarkerIndex >= 0, "删除当前 IDB 后应清理 commit marker");
+    assert.ok(syncLoadIndex >= 0, "删除当前 IDB 后应重新同步图谱加载状态");
+    assert.ok(
+      clearMarkerIndex < syncLoadIndex,
+      "应先清理 commit marker，再触发图谱重探测",
+    );
+  } finally {
+    globalThis.indexedDB = originalIndexedDb;
   }
 }
 
@@ -6778,6 +6866,7 @@ async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
 await testBackendVectorQueryFailureMarksStateDirty();
+await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();

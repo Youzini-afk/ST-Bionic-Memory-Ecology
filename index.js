@@ -320,6 +320,42 @@ function syncCommitMarkerToPersistenceState(context = getContext()) {
   return marker;
 }
 
+function clearCurrentChatCommitMarker(
+  {
+    context = getContext(),
+    reason = "manual-clear-commit-marker",
+    immediate = true,
+  } = {},
+) {
+  if (!context) {
+    return {
+      cleared: false,
+      reason: "missing-context",
+      saveMode: "",
+      marker: null,
+    };
+  }
+
+  const marker = getChatCommitMarker(context);
+  writeChatMetadataPatch(context, {
+    [GRAPH_COMMIT_MARKER_KEY]: null,
+  });
+  const saveMode = triggerChatMetadataSave(context, { immediate });
+  updateGraphPersistenceState({
+    commitMarker: null,
+    persistMismatchReason: "",
+    lastPersistReason: String(reason || "manual-clear-commit-marker"),
+    lastPersistMode: `commit-marker-clear:${saveMode}`,
+  });
+
+  return {
+    cleared: Boolean(marker),
+    reason: String(reason || "manual-clear-commit-marker"),
+    saveMode,
+    marker: cloneRuntimeDebugValue(marker, null),
+  };
+}
+
 function isAcceptedPersistTier(storageTier = "none") {
   const normalizedTier = String(storageTier || "none").trim().toLowerCase();
   return normalizedTier === "indexeddb" || normalizedTier === "chat-state";
@@ -13700,6 +13736,7 @@ const _cleanupRuntime = () => ({
   },
   clearCachedIndexedDbSnapshot,
   clearAllCachedIndexedDbSnapshots,
+  clearCurrentChatCommitMarker,
   deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
     fetch: globalThis.fetch?.bind(globalThis),
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
