@@ -632,6 +632,13 @@ async function testManualBackupAndRestoreFlow() {
           4: "hash-4",
         },
         processedMessageHashesNeedRefresh: false,
+        historyDirtyFrom: 2,
+        lastMutationReason: "hash-recheck",
+        lastMutationSource: "event:message-received",
+        lastRecoveryResult: {
+          status: "pending",
+          fromFloor: 2,
+        },
       },
       runtimeBatchJournal: [
         { id: "journal-1", processedRange: [0, 0], createdAt: 11 },
@@ -757,6 +764,10 @@ async function testManualBackupAndRestoreFlow() {
     db.snapshot.meta.runtimeHistoryState.lastProcessedAssistantFloor,
     4,
   );
+  assert.equal(db.snapshot.meta.runtimeHistoryState.historyDirtyFrom, null);
+  assert.equal(db.snapshot.meta.runtimeHistoryState.lastMutationReason, "");
+  assert.equal(db.snapshot.meta.runtimeHistoryState.lastMutationSource, "");
+  assert.equal(db.snapshot.meta.runtimeHistoryState.lastRecoveryResult, null);
   assert.ok(Number(db.meta.get("lastBackupRestoredAt")) > 0);
   const safetyStatus = await getRestoreSafetySnapshotStatus(
     "chat-backup-flow",

@@ -1120,6 +1120,10 @@ function markManualBackupHistoryForLocalRebind(snapshot = {}, chatId = "") {
   historyState.processedMessageHashesNeedRefresh =
     Number.isFinite(lastProcessedAssistantFloor) &&
     lastProcessedAssistantFloor >= 0;
+  historyState.historyDirtyFrom = null;
+  historyState.lastMutationReason = "";
+  historyState.lastMutationSource = "";
+  historyState.lastRecoveryResult = null;
   meta[RUNTIME_HISTORY_META_KEY] = historyState;
 
   return {
