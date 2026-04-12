@@ -124,10 +124,88 @@ function getEarliestJournalCoverageStartFloor(journals = []) {
   return earliestFloor;
 }
 
+function hasContiguousJournalCoverageThroughFloor(journals = [], targetFloor = null) {
+  const normalizedTargetFloor = Number.isFinite(Number(targetFloor))
+    ? Math.max(0, Math.floor(Number(targetFloor)))
+    : null;
+  if (!Number.isFinite(normalizedTargetFloor)) {
+    return false;
+  }
+
+  const ranges = (Array.isArray(journals) ? journals : [])
+    .map((journal) => {
+      const range = Array.isArray(journal?.processedRange)
+        ? journal.processedRange
+        : [];
+      const startFloor = Number(range[0]);
+      const endFloor = Number(range[1]);
+      if (!Number.isFinite(startFloor) || !Number.isFinite(endFloor)) {
+        return null;
+      }
+      return {
+        start: Math.max(0, Math.floor(startFloor)),
+        end: Math.max(0, Math.floor(endFloor)),
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+
+  if (ranges.length === 0) {
+    return false;
+  }
+
+  let coveredUntil = null;
+  for (const range of ranges) {
+    if (coveredUntil == null) {
+      if (range.start > normalizedTargetFloor) {
+        return false;
+      }
+      coveredUntil = range.end;
+    } else if (range.start > coveredUntil + 1) {
+      return coveredUntil >= normalizedTargetFloor;
+    } else {
+      coveredUntil = Math.max(coveredUntil, range.end);
+    }
+
+    if (coveredUntil >= normalizedTargetFloor) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function reconcileManualBackupBatchJournalCoverage(coverage = null, journals = []) {
+  const normalizedCoverage = normalizeManualBackupBatchJournalCoverage(coverage);
+  if (!normalizedCoverage) {
+    return null;
+  }
+
+  const manualCoverageFloor =
+    normalizedCoverage.truncated === true &&
+    Number.isFinite(normalizedCoverage.earliestRetainedFloor)
+      ? normalizedCoverage.earliestRetainedFloor
+      : null;
+  const actualCoverageFloor = getEarliestJournalCoverageStartFloor(journals);
+
+  if (
+    normalizedCoverage.truncated === true &&
+    Number.isFinite(actualCoverageFloor) &&
+    Number.isFinite(manualCoverageFloor) &&
+    actualCoverageFloor < manualCoverageFloor &&
+    hasContiguousJournalCoverageThroughFloor(journals, manualCoverageFloor)
+  ) {
+    return null;
+  }
+
+  return normalizedCoverage;
+}
+
 function getRequiredJournalCoverageStartFloor(graph, journals = []) {
   const actualCoverageFloor = getEarliestJournalCoverageStartFloor(journals);
-  const manualCoverage = normalizeManualBackupBatchJournalCoverage(
+  const manualCoverage = reconcileManualBackupBatchJournalCoverage(
     graph?.historyState?.[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+    journals,
   );
   const manualCoverageFloor =
     manualCoverage?.truncated === true &&
@@ -406,6 +484,11 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
   graph.batchJournal = Array.isArray(graph.batchJournal)
     ? graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT)
     : createDefaultBatchJournal();
+  historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] =
+    reconcileManualBackupBatchJournalCoverage(
+      historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+      graph.batchJournal,
+    );
   graph.maintenanceJournal = Array.isArray(graph.maintenanceJournal)
     ? graph.maintenanceJournal
         .filter((entry) => entry && typeof entry === "object")
@@ -955,6 +1038,11 @@ export function appendBatchJournal(graph, entry) {
   if (graph.batchJournal.length > BATCH_JOURNAL_LIMIT) {
     graph.batchJournal = graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT);
   }
+  graph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] =
+    reconcileManualBackupBatchJournalCoverage(
+      graph.historyState?.[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+      graph.batchJournal,
+    );
 }
 
 export function createMaintenanceJournalEntry(

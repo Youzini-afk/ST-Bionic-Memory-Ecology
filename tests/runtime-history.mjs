@@ -291,6 +291,69 @@ assert.ok(retainedCoverageRecoveryPoint);
 assert.equal(retainedCoverageRecoveryPoint.path, "reverse-journal");
 assert.equal(retainedCoverageRecoveryPoint.affectedJournals.length, 3);
 
+const bridgedCoverageGraph = createEmptyGraph();
+bridgedCoverageGraph.historyState.chatId = "chat-bridged-history-test";
+bridgedCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {
+  truncated: true,
+  earliestRetainedFloor: 4,
+  retainedCount: 4,
+};
+bridgedCoverageGraph.batchJournal = [
+  { id: "journal-4", journalVersion: 2, processedRange: [4, 4] },
+  { id: "journal-5", journalVersion: 2, processedRange: [5, 5] },
+];
+appendBatchJournal(bridgedCoverageGraph, {
+  id: "journal-2",
+  journalVersion: 2,
+  processedRange: [2, 2],
+});
+assert.deepEqual(
+  bridgedCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+  {
+    truncated: true,
+    earliestRetainedFloor: 4,
+    retainedCount: 4,
+  },
+);
+appendBatchJournal(bridgedCoverageGraph, {
+  id: "journal-3",
+  journalVersion: 2,
+  processedRange: [3, 3],
+});
+assert.equal(
+  bridgedCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+  null,
+);
+
+const recoveredCoverageGraph = createEmptyGraph();
+recoveredCoverageGraph.historyState.chatId = "chat-recovered-history-test";
+recoveredCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {
+  truncated: true,
+  earliestRetainedFloor: 4,
+  retainedCount: 4,
+};
+recoveredCoverageGraph.batchJournal = [
+  { id: "journal-2", journalVersion: 2, processedRange: [2, 2] },
+  { id: "journal-3", journalVersion: 2, processedRange: [3, 3] },
+  { id: "journal-4", journalVersion: 2, processedRange: [4, 4] },
+  { id: "journal-5", journalVersion: 2, processedRange: [5, 5] },
+];
+normalizeGraphRuntimeState(
+  recoveredCoverageGraph,
+  recoveredCoverageGraph.historyState.chatId,
+);
+assert.equal(
+  recoveredCoverageGraph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+  null,
+);
+const recoveredCoverageRecoveryPoint = findJournalRecoveryPoint(
+  recoveredCoverageGraph,
+  2,
+);
+assert.ok(recoveredCoverageRecoveryPoint);
+assert.equal(recoveredCoverageRecoveryPoint.path, "reverse-journal");
+assert.equal(recoveredCoverageRecoveryPoint.affectedJournals.length, 4);
+
 rollbackBatch(graph, recoveryPoint.affectedJournals[0]);
 assert.equal(graph.nodes.length, 0);
 assert.equal(graph.historyState.lastProcessedAssistantFloor, -1);
