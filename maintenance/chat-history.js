@@ -286,6 +286,7 @@ export function buildExtractionMessages(chat, startIdx, endIdx, settings) {
       rawContent: String(msg?.mes ?? ""),
       name: String(msg?.name ?? "").trim(),
       speaker: String(msg?.name ?? "").trim(),
+      isContextOnly: index < startIdx,
     });
   }
 

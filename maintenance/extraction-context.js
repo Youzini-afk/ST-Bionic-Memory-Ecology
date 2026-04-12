@@ -307,6 +307,7 @@ function normalizeExtractionMessage(message = {}, index = 0, names = {}) {
     content,
     rawContent,
     sourceType: role === "user" ? "user_input" : "ai_output",
+    isContextOnly: message?.isContextOnly === true,
   };
 }
 
@@ -322,18 +323,38 @@ function countRoles(messages = []) {
 }
 
 export function formatExtractionTranscript(messages = []) {
-  return (Array.isArray(messages) ? messages : [])
-    .map((message, index) => {
-      const seqLabel = Number.isFinite(Number(message?.seq))
-        ? `#${Number(message.seq)}`
-        : `#${index + 1}`;
-      const role = normalizeRole(message?.role || "assistant");
-      const speaker = String(message?.speaker || message?.name || "").trim();
-      const speakerLabel = speaker ? `|${speaker}` : "";
-      return `${seqLabel} [${role}${speakerLabel}]: ${String(message?.content || "")}`;
-    })
-    .filter((item) => String(item || "").trim())
-    .join("\n\n");
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  const hasContextMessages = safeMessages.some((m) => m?.isContextOnly === true);
+  const hasTargetMessages = safeMessages.some((m) => m?.isContextOnly !== true);
+  const lines = [];
+  let inContext = null;
+
+  for (let index = 0; index < safeMessages.length; index += 1) {
+    const message = safeMessages[index];
+    const isContext = message?.isContextOnly === true;
+
+    if (hasContextMessages && hasTargetMessages && isContext !== inContext) {
+      if (isContext) {
+        lines.push("--- 以下是上下文回顾（已提取过），仅供理解剧情 ---");
+      } else {
+        lines.push("--- 以下是本次需要提取记忆的新对话内容 ---");
+      }
+      inContext = isContext;
+    }
+
+    const seqLabel = Number.isFinite(Number(message?.seq))
+      ? `#${Number(message.seq)}`
+      : `#${index + 1}`;
+    const role = normalizeRole(message?.role || "assistant");
+    const speaker = String(message?.speaker || message?.name || "").trim();
+    const speakerLabel = speaker ? `|${speaker}` : "";
+    const line = `${seqLabel} [${role}${speakerLabel}]: ${String(message?.content || "")}`;
+    if (String(line || "").trim()) {
+      lines.push(line);
+    }
+  }
+
+  return lines.join("\n\n");
 }
 
 export function buildExtractionInputContext(

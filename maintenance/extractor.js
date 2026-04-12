@@ -873,6 +873,7 @@ export async function extractMemories({
         content: message?.content,
         speaker: message?.speaker,
         name: message?.name,
+        isContextOnly: message?.isContextOnly === true,
       }))
     : [];
 
@@ -957,15 +958,39 @@ export async function extractMemories({
   // 用户提示词 — Phase 3 分层信息结构
   const userPromptSections = [];
 
-  // Layer 1: 当前对话切片
-  if (dialogueText) {
-    userPromptSections.push("## 当前对话内容（需提取记忆）", dialogueText, "");
-  } else if (structuredMode === "structured" && structuredMessages.length > 0) {
-    userPromptSections.push(
-      "## 当前对话内容（结构化消息，需提取记忆）",
-      "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
-      "",
-    );
+  // Layer 1: 当前对话切片（区分上下文回顾 vs 提取目标）
+  {
+    const hasContextMessages = structuredMessages.some((m) => m?.isContextOnly === true);
+    const hasTargetMessages = structuredMessages.some((m) => m?.isContextOnly !== true);
+    if (dialogueText) {
+      if (hasContextMessages && hasTargetMessages) {
+        userPromptSections.push(
+          "## 对话内容",
+          "以下对话包含两部分：已提取过的上下文回顾（仅供理解前情）和本次需要提取记忆的新内容。" +
+            "请**只从新内容中提取记忆**，不要重复提取上下文回顾中已有的信息。",
+          dialogueText,
+          "",
+        );
+      } else {
+        userPromptSections.push("## 当前对话内容（需提取记忆）", dialogueText, "");
+      }
+    } else if (structuredMode === "structured" && structuredMessages.length > 0) {
+      if (hasContextMessages && hasTargetMessages) {
+        userPromptSections.push(
+          "## 对话内容（结构化消息）",
+          "以下结构化消息包含两部分：标记为 isContextOnly 的是已提取过的上下文回顾（仅供理解前情），" +
+            "其余是本次需要提取记忆的新内容。请**只从 isContextOnly 为 false 的消息中提取记忆**。" +
+            "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
+          "",
+        );
+      } else {
+        userPromptSections.push(
+          "## 当前对话内容（结构化消息，需提取记忆）",
+          "(结构化消息已通过 profile blocks 注入，请参考上方 recentMessages 块。)",
+          "",
+        );
+      }
+    }
   }
 
   // Layer 2: 当前图谱状态
