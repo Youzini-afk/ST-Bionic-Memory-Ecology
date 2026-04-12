@@ -8,7 +8,7 @@ const DEFAULT_TYPE_LABELS = Object.freeze({
   location: "地点",
   rule: "规则",
   thread: "主线",
-  synopsis: "全局概要",
+  synopsis: "全局概要（旧）",
   reflection: "反思",
   pov_memory: "主观记忆",
 });

@@ -912,6 +912,9 @@ async function createGraphPersistenceHarness({
       _createDb(dbChatId = "") {
         return {
           async exportSnapshot() {
+            if (runtimeContext.__indexedDbExportSnapshotShouldThrow) {
+              throw new Error("indexeddb-export-failed");
+            }
             return getIndexedDbSnapshotForChat(dbChatId);
           },
           async commitDelta(delta, options = {}) {
@@ -993,6 +996,9 @@ async function createGraphPersistenceHarness({
         runtimeContext.__indexedDbSnapshot = getIndexedDbSnapshotForChat(
           this._currentChatId,
         );
+        if (runtimeContext.__indexedDbGetCurrentDbShouldThrow) {
+          throw new Error("indexeddb-get-current-db-failed");
+        }
         return this._createDb(this._currentChatId);
       }
       async switchChat(dbChatId = "") {
@@ -1224,7 +1230,6 @@ result = {
   harness.api.setChatContext({
     chatId: "chat-late",
     chatMetadata: {
-      integrity: "chat-late-ready",
       st_bme_graph: lateGraph,
     },
     characterId: "char-late",
@@ -1258,7 +1263,7 @@ result = {
   assert.equal(result.loadState, "loading");
   assert.equal(
     harness.api.getCurrentGraph().historyState.chatId,
-    "chat-late-ready",
+    "chat-late",
   );
   assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
   assert.equal(
@@ -2095,6 +2100,179 @@ result = {
     "loading 状态下不能把空图被动写回 metadata",
   );
 }
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-manager-unavailable-fallback",
+    globalChatId: "chat-manager-unavailable-fallback",
+    chatMetadata: {
+      integrity: "meta-manager-unavailable-fallback",
+    },
+  });
+  harness.runtimeContext.BmeChatManager = null;
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+    source: "manager-unavailable-fallback",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(
+    harness.api.getGraphPersistenceState().loadState,
+    "blocked",
+    "IndexedDB manager 不可用时，重试耗尽后不应永久停留在 loading",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().reason,
+    "indexeddb-manager-unavailable",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-indexeddb-read-failed-fallback",
+    globalChatId: "chat-indexeddb-read-failed-fallback",
+    chatMetadata: {
+      integrity: "meta-indexeddb-read-failed-fallback",
+    },
+  });
+  harness.runtimeContext.__indexedDbExportSnapshotShouldThrow = true;
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+    source: "indexeddb-read-failed-fallback",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(
+    harness.api.getGraphPersistenceState().loadState,
+    "blocked",
+    "IndexedDB 读取失败时，重试耗尽后不应永久停留在 loading",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().reason,
+    "indexeddb-read-failed",
+  );
+}
+
+ {
+   const commitMarker = buildGraphCommitMarker(
+     createMeaningfulGraph("chat-indexeddb-empty-mismatch-fallback", "marker"),
+     {
+       revision: 4,
+       storageTier: "indexeddb",
+       accepted: true,
+       reason: "test-empty-mismatch",
+       chatId: "chat-indexeddb-empty-mismatch-fallback",
+       integrity: "meta-indexeddb-empty-mismatch-fallback",
+     },
+   );
+   const harness = await createGraphPersistenceHarness({
+     chatId: "chat-indexeddb-empty-mismatch-fallback",
+     globalChatId: "chat-indexeddb-empty-mismatch-fallback",
+     chatMetadata: {
+       integrity: "meta-indexeddb-empty-mismatch-fallback",
+       [GRAPH_COMMIT_MARKER_KEY]: commitMarker,
+     },
+   });
+
+   const result = harness.api.loadGraphFromChat({
+     attemptIndex: harness.api.GRAPH_LOAD_RETRY_DELAYS_MS.length,
+     source: "indexeddb-empty-mismatch-fallback",
+   });
+   await new Promise((resolve) => setTimeout(resolve, 0));
+
+   assert.equal(result.loadState, "loading");
+   assert.equal(
+     harness.api.getGraphPersistenceState().loadState,
+     "empty-confirmed",
+     "当 accepted commit marker 已成孤儿且本地不存在可恢复图谱源时，应自动降级为 empty-confirmed",
+   );
+   assert.match(
+     String(harness.api.getGraphPersistenceState().reason || ""),
+     /orphan-accepted-marker/,
+   );
+   assert.equal(
+     harness.runtimeContext.__chatContext.chatMetadata?.[GRAPH_COMMIT_MARKER_KEY],
+     null,
+   );
+   assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 1);
+   assert.equal(harness.api.getGraphPersistenceState().lastAcceptedRevision, 0);
+   assert.equal(harness.api.getGraphPersistenceState().commitMarker, null);
+ }
+
+ {
+   const commitMarker = buildGraphCommitMarker(
+     createMeaningfulGraph("chat-indexeddb-empty-chat-state-rescue", "marker"),
+     {
+       revision: 8,
+       storageTier: "indexeddb",
+       accepted: true,
+       reason: "test-chat-state-rescue",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+     },
+   );
+   const harness = await createGraphPersistenceHarness({
+     chatId: "chat-indexeddb-empty-chat-state-rescue",
+     globalChatId: "chat-indexeddb-empty-chat-state-rescue",
+     chatMetadata: {
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       [GRAPH_COMMIT_MARKER_KEY]: commitMarker,
+     },
+   });
+   const sidecarGraph = stampPersistedGraph(
+     createMeaningfulGraph("chat-indexeddb-empty-chat-state-rescue", "sidecar"),
+     {
+       revision: 8,
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       reason: "sidecar-rescue-seed",
+     },
+   );
+   harness.runtimeContext.__chatContext.__chatStateStore.set(
+     GRAPH_CHAT_STATE_NAMESPACE,
+     buildGraphChatStateSnapshot(sidecarGraph, {
+       revision: 8,
+       storageTier: "chat-state",
+       accepted: true,
+       reason: "sidecar-rescue-seed",
+       chatId: "chat-indexeddb-empty-chat-state-rescue",
+       integrity: "meta-indexeddb-empty-chat-state-rescue",
+       lastProcessedAssistantFloor: 6,
+       extractionCount: 3,
+     }),
+   );
+
+   const result = await harness.api.loadGraphFromIndexedDb(
+     "chat-indexeddb-empty-chat-state-rescue",
+     {
+       source: "indexeddb-empty-chat-state-rescue",
+       attemptIndex: 0,
+       allowOverride: true,
+       applyEmptyState: true,
+     },
+   );
+
+   assert.equal(result.loaded, true);
+   assert.equal(result.loadState, "loaded");
+   assert.equal(
+     harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+     "事件-sidecar",
+   );
+   assert.equal(
+     harness.runtimeContext.__chatContext.chatMetadata?.[GRAPH_COMMIT_MARKER_KEY]
+       ?.revision,
+     8,
+   );
+   assert.equal(harness.runtimeContext.__contextImmediateSaveCalls, 0);
+   assert.equal(
+     harness.api.getGraphPersistenceState().persistMismatchReason,
+     "persist-mismatch:indexeddb-behind-commit-marker",
+   );
+ }
 
 {
   const harness = await createGraphPersistenceHarness({

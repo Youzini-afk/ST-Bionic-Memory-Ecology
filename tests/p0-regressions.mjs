@@ -67,6 +67,7 @@ import {
   shouldRunRecallForTransaction,
 } from "../ui/ui-status.js";
 import {
+  onDeleteCurrentIdbController,
   onManualCompressController,
   onManualEvolveController,
   onManualSleepController,
@@ -155,7 +156,10 @@ const {
   removeNode,
 } = await import("../graph/graph.js");
 const { compressType } = await import("../maintenance/compressor.js");
-const { syncGraphVectorIndex } = await import("../vector/vector-index.js");
+const {
+  findSimilarNodesByText,
+  syncGraphVectorIndex,
+} = await import("../vector/vector-index.js");
 const {
   extractMemories,
   generateReflection,
@@ -225,7 +229,7 @@ const schema = [
   },
   {
     id: "synopsis",
-    label: "概要",
+    label: "全局概要（旧）",
     columns: [{ name: "summary" }, { name: "scope" }],
   },
 ];
@@ -1984,6 +1988,142 @@ async function testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure() {
   }
 }
 
+async function testBackendVectorQueryFailureMarksStateDirty() {
+  const originalFetch = globalThis.fetch;
+  const graph = normalizeGraphRuntimeState(createEmptyGraph(), "chat-backend-query");
+  const node = makeEvent(1, "后端向量节点");
+  addNode(graph, node);
+  graph.vectorIndexState.mode = "backend";
+  graph.vectorIndexState.source = "openai";
+  graph.vectorIndexState.collectionId = "st-bme::chat-backend-query";
+  graph.vectorIndexState.hashToNodeId = {
+    "hash-backend-node": node.id,
+  };
+  graph.vectorIndexState.nodeToHash = {
+    [node.id]: "hash-backend-node",
+  };
+  graph.vectorIndexState.lastStats = {
+    total: 1,
+    indexed: 1,
+    stale: 0,
+    pending: 0,
+  };
+
+  globalThis.fetch = async () => {
+    throw new Error("backend-down");
+  };
+
+  try {
+    await assert.rejects(
+      findSimilarNodesByText(
+        graph,
+        "测试后端向量失败",
+        {
+          mode: "backend",
+          source: "openai",
+          model: "text-embedding-3-small",
+        },
+        5,
+        [node],
+      ),
+      /backend-down/,
+    );
+    assert.equal(graph.vectorIndexState.dirty, true);
+    assert.equal(graph.vectorIndexState.dirtyReason, "backend-query-failed");
+    assert.equal(graph.vectorIndexState.pendingRepairFromFloor, 0);
+    assert.match(graph.vectorIndexState.lastWarning, /后端向量查询失败/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
+  const originalIndexedDb = globalThis.indexedDB;
+  const callLog = [];
+  globalThis.indexedDB = {
+    deleteDatabase(name) {
+      callLog.push(["delete-db", String(name || "")]);
+      const request = {
+        onsuccess: null,
+        onerror: null,
+        onblocked: null,
+      };
+      queueMicrotask(() => {
+        request.onsuccess?.();
+      });
+      return request;
+    },
+  };
+
+  try {
+    const runtime = {
+      confirm() {
+        return true;
+      },
+      getCurrentChatId() {
+        return "chat-delete-idb";
+      },
+      buildBmeDbName(chatId) {
+        return `STBME_${chatId}`;
+      },
+      buildRestoreSafetyDbName(chatId) {
+        return `STBME___restore__${chatId}`;
+      },
+      async closeBmeDb(chatId) {
+        callLog.push(["close-db", chatId]);
+      },
+      clearCachedIndexedDbSnapshot(chatId) {
+        callLog.push(["clear-indexeddb-cache", chatId]);
+      },
+      clearCurrentChatCommitMarker(options = {}) {
+        callLog.push([
+          "clear-commit-marker",
+          String(options.reason || ""),
+          options.immediate === true,
+        ]);
+      },
+      syncGraphLoadFromLiveContext(options = {}) {
+        callLog.push([
+          "sync-graph-load",
+          String(options.source || ""),
+          options.force === true,
+        ]);
+      },
+      refreshPanelLiveState() {
+        callLog.push(["refresh-panel"]);
+      },
+      toastr: {
+        success(message) {
+          callLog.push(["toast-success", String(message || "")]);
+        },
+        warning(message) {
+          callLog.push(["toast-warning", String(message || "")]);
+        },
+        error(message) {
+          callLog.push(["toast-error", String(message || "")]);
+        },
+      },
+    };
+
+    const result = await onDeleteCurrentIdbController(runtime);
+    assert.equal(result?.handledToast, true);
+    const clearMarkerIndex = callLog.findIndex(
+      (entry) => entry[0] === "clear-commit-marker",
+    );
+    const syncLoadIndex = callLog.findIndex(
+      (entry) => entry[0] === "sync-graph-load",
+    );
+    assert.ok(clearMarkerIndex >= 0, "删除当前 IDB 后应清理 commit marker");
+    assert.ok(syncLoadIndex >= 0, "删除当前 IDB 后应重新同步图谱加载状态");
+    assert.ok(
+      clearMarkerIndex < syncLoadIndex,
+      "应先清理 commit marker，再触发图谱重探测",
+    );
+  } finally {
+    globalThis.indexedDB = originalIndexedDb;
+  }
+}
+
 async function testCompressTypeAcceptsTopLevelFieldsResult() {
   const graph = createEmptyGraph();
   const typeDef = {
@@ -2108,10 +2248,10 @@ async function testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing() {
   const restoreOverrides = pushTestOverrides({
     embedding: {
       async embedBatch() {
-        return [[0.2, 0.3]];
+        return [[0.4, 0.5]];
       },
       async embedText() {
-        return [0.2, 0.3];
+        return [0.4, 0.5];
       },
       searchSimilar() {
         return [{ nodeId: target.id, score: 0.99 }];
@@ -2600,7 +2740,7 @@ async function testReverseJournalRollbackStateFormsReplayClosure() {
 
   const journal = createBatchJournalEntry(before, after, {
     processedRange: [4, 6],
-    extractionCountBefore: before.historyState.extractionCount,
+    vectorHashesInserted: ["hash_added"],
   });
 
   const runtimeGraph = normalizeGraphRuntimeState(
@@ -2818,7 +2958,7 @@ async function testBatchStatusSemanticFailureDoesNotHideCoreSuccess() {
   assert.equal(effects.batchStatus.stages.finalize.outcome, "success");
   assert.equal(effects.batchStatus.outcome, "failed");
   assert.equal(effects.batchStatus.completed, true);
-  assert.match(effects.batchStatus.errors[0], /概要生成失败/);
+  assert.match(effects.batchStatus.errors[0], /旧式全局概要生成失败/);
 }
 
 async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
@@ -2881,7 +3021,7 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   const statusTexts = harness.extractionStatuses.map((entry) => entry[0]);
   assert.ok(statusTexts.includes("提取收尾中"));
   assert.ok(statusTexts.includes("整合/进化中"));
-  assert.ok(statusTexts.includes("概要更新中"));
+  assert.ok(statusTexts.includes("旧式全局概要更新中"));
   assert.ok(statusTexts.includes("反思生成中"));
   assert.ok(statusTexts.includes("主动遗忘中"));
   assert.ok(statusTexts.includes("自动压缩中"));
@@ -6725,6 +6865,8 @@ async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
 
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
+await testBackendVectorQueryFailureMarksStateDirty();
+await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();

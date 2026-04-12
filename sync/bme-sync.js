@@ -1,5 +1,8 @@
 import { BmeDatabase } from "./bme-db.js";
-import { PROCESSED_MESSAGE_HASH_VERSION } from "../runtime/runtime-state.js";
+import {
+  MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
+  PROCESSED_MESSAGE_HASH_VERSION,
+} from "../runtime/runtime-state.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
@@ -30,6 +33,7 @@ const RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 const RUNTIME_LAST_PROCESSED_SEQ_META_KEY = "runtimeLastProcessedSeq";
 const RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
 const RUNTIME_BATCH_JOURNAL_LIMIT = 96;
+const MANUAL_BACKUP_BATCH_JOURNAL_LIMIT = 4;
 
 function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
@@ -339,7 +343,7 @@ async function fetchBackupManifest(options = {}) {
 
 async function writeBackupManifest(entries = [], options = {}) {
   const fetchImpl = getFetch(options);
-  const payload = JSON.stringify(entries, null, 2);
+  const payload = JSON.stringify(entries);
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: {
@@ -576,7 +580,7 @@ async function writeBackupEnvelope(envelope, chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   const filename = buildBackupFilename(normalizedChatId);
   const fetchImpl = getFetch(options);
-  const payload = JSON.stringify(envelope, null, 2);
+  const payload = JSON.stringify(envelope);
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: {
@@ -787,6 +791,54 @@ function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
     tombstones,
     state,
   };
+}
+
+function markBackendVectorSnapshotDirty(
+  snapshot = {},
+  reason = "backend-sync-import-unverified",
+  warning = "后端向量索引需要在当前环境重建",
+) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return snapshot;
+  }
+
+  if (!snapshot.meta || typeof snapshot.meta !== "object" || Array.isArray(snapshot.meta)) {
+    return snapshot;
+  }
+
+  const vectorMeta = normalizeRuntimeVectorMeta(
+    snapshot.meta?.[RUNTIME_VECTOR_META_KEY],
+  );
+  if (vectorMeta.mode !== "backend") {
+    return snapshot;
+  }
+
+  const total = Math.max(
+    normalizeNonNegativeInteger(vectorMeta.lastStats?.total, 0),
+    Object.keys(vectorMeta.nodeToHash || {}).length,
+    Object.keys(vectorMeta.hashToNodeId || {}).length,
+  );
+  const pending = total > 0
+    ? Math.max(1, normalizeNonNegativeInteger(vectorMeta.lastStats?.pending, 0))
+    : normalizeNonNegativeInteger(vectorMeta.lastStats?.pending, 0);
+
+  snapshot.meta[RUNTIME_VECTOR_META_KEY] = {
+    ...vectorMeta,
+    hashToNodeId: {},
+    nodeToHash: {},
+    replayRequiredNodeIds: [],
+    dirty: true,
+    dirtyReason: String(reason || "backend-sync-import-unverified"),
+    pendingRepairFromFloor: 0,
+    lastStats: {
+      total,
+      indexed: 0,
+      stale: total,
+      pending,
+    },
+    lastWarning: String(warning || "后端向量索引需要在当前环境重建"),
+  };
+  return snapshot;
 }
 
 function createRecordWinnerByUpdatedAt(localRecord, remoteRecord) {
@@ -1045,6 +1097,92 @@ function normalizeRuntimeHistoryMeta(value = {}, fallbackChatId = "") {
       typeof input.lastMutationSource === "string" ? input.lastMutationSource : "",
     lastRecoveryResult: toSerializableData(input.lastRecoveryResult, null),
     lastBatchStatus: toSerializableData(input.lastBatchStatus, null),
+  };
+}
+
+function resolveEarliestRetainedBatchFloor(journals = []) {
+  let earliestFloor = null;
+  for (const journal of Array.isArray(journals) ? journals : []) {
+    const range = Array.isArray(journal?.processedRange)
+      ? journal.processedRange
+      : [];
+    const startFloor = Number(range[0]);
+    if (!Number.isFinite(startFloor)) continue;
+    const normalizedFloor = Math.max(0, Math.floor(startFloor));
+    earliestFloor =
+      earliestFloor == null
+        ? normalizedFloor
+        : Math.min(earliestFloor, normalizedFloor);
+  }
+  return earliestFloor;
+}
+
+function buildManualBackupSnapshot(snapshot = {}, chatId = "") {
+  const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const meta = toSerializableData(normalizedSnapshot.meta, {});
+  const originalBatchJournal = Array.isArray(meta[RUNTIME_BATCH_JOURNAL_META_KEY])
+    ? toSerializableData(meta[RUNTIME_BATCH_JOURNAL_META_KEY], [])
+    : [];
+  const retainedBatchJournal = originalBatchJournal.slice(
+    -MANUAL_BACKUP_BATCH_JOURNAL_LIMIT,
+  );
+  const historyState = normalizeRuntimeHistoryMeta(
+    meta[RUNTIME_HISTORY_META_KEY],
+    chatId,
+  );
+
+  historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] = {
+    truncated: originalBatchJournal.length > retainedBatchJournal.length,
+    earliestRetainedFloor: resolveEarliestRetainedBatchFloor(retainedBatchJournal),
+    retainedCount: retainedBatchJournal.length,
+  };
+
+  meta[RUNTIME_HISTORY_META_KEY] = historyState;
+  meta[RUNTIME_BATCH_JOURNAL_META_KEY] = retainedBatchJournal;
+  meta[RUNTIME_MAINTENANCE_JOURNAL_META_KEY] = [];
+
+  return {
+    meta,
+    nodes: toSerializableData(normalizedSnapshot.nodes, []),
+    edges: toSerializableData(normalizedSnapshot.edges, []),
+    tombstones: toSerializableData(normalizedSnapshot.tombstones, []),
+    state: toSerializableData(normalizedSnapshot.state, {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    }),
+  };
+}
+
+function markManualBackupHistoryForLocalRebind(snapshot = {}, chatId = "") {
+  const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const meta = toSerializableData(normalizedSnapshot.meta, {});
+  const historyState = normalizeRuntimeHistoryMeta(
+    meta[RUNTIME_HISTORY_META_KEY],
+    chatId,
+  );
+  const lastProcessedAssistantFloor = Number(
+    historyState.lastProcessedAssistantFloor,
+  );
+
+  historyState.processedMessageHashes = {};
+  historyState.processedMessageHashesNeedRefresh =
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0;
+  historyState.historyDirtyFrom = null;
+  historyState.lastMutationReason = "";
+  historyState.lastMutationSource = "";
+  historyState.lastRecoveryResult = null;
+  meta[RUNTIME_HISTORY_META_KEY] = historyState;
+
+  return {
+    meta,
+    nodes: toSerializableData(normalizedSnapshot.nodes, []),
+    edges: toSerializableData(normalizedSnapshot.edges, []),
+    tombstones: toSerializableData(normalizedSnapshot.tombstones, []),
+    state: toSerializableData(normalizedSnapshot.state, {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    }),
   };
 }
 
@@ -1856,19 +1994,14 @@ export async function backupToServer(chatId, options = {}) {
       nowMs,
     );
 
+    const backupSnapshot = buildManualBackupSnapshot(snapshot, normalizedChatId);
     const envelope = {
       kind: "st-bme-backup",
       version: BME_BACKUP_SCHEMA_VERSION,
       chatId: normalizedChatId,
       createdAt: nowMs,
       sourceDeviceId: deviceId,
-      snapshot: {
-        meta: toSerializableData(snapshot.meta, {}),
-        nodes: toSerializableData(snapshot.nodes, []),
-        edges: toSerializableData(snapshot.edges, []),
-        tombstones: toSerializableData(snapshot.tombstones, []),
-        state: toSerializableData(snapshot.state, {}),
-      },
+      snapshot: backupSnapshot,
     };
 
     const uploadResult = await writeBackupEnvelope(
@@ -1972,7 +2105,14 @@ export async function restoreFromServer(chatId, options = {}) {
       };
     }
 
-    const snapshot = normalizeSyncSnapshot(envelope.snapshot, normalizedChatId);
+    const snapshot = markBackendVectorSnapshotDirty(
+      markManualBackupHistoryForLocalRebind(
+        envelope.snapshot,
+        normalizedChatId,
+      ),
+      "backend-backup-restore-unverified",
+      "后端向量索引已从云备份恢复，需要在当前环境重建",
+    );
     if (normalizeChatId(snapshot.meta?.chatId) !== normalizedChatId) {
       return {
         restored: false,
@@ -2197,7 +2337,11 @@ export async function download(chatId, options = {}) {
       };
     }
 
-    const remoteSnapshot = normalizeSyncSnapshot(remoteResult.snapshot, normalizedChatId);
+    const remoteSnapshot = markBackendVectorSnapshotDirty(
+      normalizeSyncSnapshot(remoteResult.snapshot, normalizedChatId),
+      "backend-sync-download-unverified",
+      "后端向量索引已从远端同步恢复，需要在当前环境重建",
+    );
     const remoteRevision = normalizeRevision(remoteSnapshot.meta.revision);
 
     await db.importSnapshot(remoteSnapshot, {
@@ -2527,9 +2671,13 @@ export async function syncNow(chatId, options = {}) {
       };
     }
 
-    const mergedSnapshot = mergeSnapshots(localSnapshot, remoteSnapshot, {
-      chatId: normalizedChatId,
-    });
+    const mergedSnapshot = markBackendVectorSnapshotDirty(
+      mergeSnapshots(localSnapshot, remoteSnapshot, {
+        chatId: normalizedChatId,
+      }),
+      "backend-sync-merge-unverified",
+      "后端向量索引已从远端合并恢复，需要在当前环境重建",
+    );
 
     await db.importSnapshot(mergedSnapshot, {
       mode: "replace",

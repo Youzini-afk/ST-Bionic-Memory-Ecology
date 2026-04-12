@@ -1921,7 +1921,7 @@ function buildDefaultExtractPrompt(schema) {
     "- pov_memory 只能用于主观记忆，不要拿 character/location/event 去伪装第一视角记忆",
     "- 地区不确定就留空，不要硬编",
     "- importance 范围 1-10，普通事件 5，关键转折 8+",
-    "- event.fields.title 需要是简短事件名，建议 6-18 字，只用于图谱和列表显示",
+    "- event.fields.title 需要是简短事件名，建议 6-10 字，只用于图谱和列表显示",
     "- summary 应该是摘要抽象，不要复制原文",
   ].join("\n");
 }

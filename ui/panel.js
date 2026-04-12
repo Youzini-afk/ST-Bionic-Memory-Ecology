@@ -322,6 +322,8 @@ let graphRenderer = null;
 let mobileGraphRenderer = null;
 let currentTabId = "dashboard";
 let currentConfigSectionId = "toggles";
+let currentTaskSectionId = "pipeline";
+let currentSelectedMemoryNodeId = "";
 let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
@@ -893,11 +895,13 @@ export async function initPanel({
   _bindActions();
   _bindDashboardControls();
   _bindConfigControls();
+  _bindTaskNavigation();
   _bindPlannerLauncher();
   currentTabId =
     panelEl?.querySelector(".bme-tab-btn.active")?.dataset.tab || "dashboard";
   _applyWorkspaceMode();
   _syncConfigSectionState();
+  _syncTaskSectionState();
   _refreshRuntimeStatus();
   _initFloatingBall();
   _bindFabToggle();
@@ -1159,11 +1163,8 @@ export function refreshLiveState() {
     case "dashboard":
       _refreshDashboard();
       break;
-    case "memory":
-      _refreshMemoryBrowser();
-      break;
-    case "injection":
-      void _refreshInjectionPreview();
+    case "task":
+      _refreshTaskMonitor();
       break;
     default:
       break;
@@ -1175,9 +1176,6 @@ export function refreshLiveState() {
     currentTaskProfileTabId === "debug"
   ) {
     _refreshTaskProfileWorkspace();
-  }
-  if (currentTabId === "config" && currentConfigSectionId === "trace") {
-    _refreshMessageTraceWorkspace();
   }
 
   _scheduleVisibleGraphWorkspaceRefresh();
@@ -1217,11 +1215,8 @@ function _switchTab(tabId) {
     case "dashboard":
       _refreshDashboard();
       break;
-    case "memory":
-      _refreshMemoryBrowser();
-      break;
-    case "injection":
-      void _refreshInjectionPreview();
+    case "task":
+      _refreshTaskMonitor();
       break;
     case "config":
       _refreshConfigTab();
@@ -1281,7 +1276,501 @@ function _bindPlannerLauncher() {
 function _applyWorkspaceMode() {
   if (!panelEl) return;
   const isConfig = currentTabId === "config";
+  const isTask = currentTabId === "task";
   panelEl.classList.toggle("config-mode", isConfig);
+  panelEl.classList.toggle("task-mode", isTask);
+}
+
+// ==================== 任务监控工作区 ====================
+
+const TASK_SECTION_META = {
+  pipeline: { kicker: "管线总览", title: "管线总览", desc: "实时查看所有任务管线的运行状态与当前批次进度。" },
+  timeline: { kicker: "任务流水", title: "任务流水", desc: "按时间轴追踪每次提取、召回、向量索引等任务的执行记录。" },
+  memory: { kicker: "记忆浏览", title: "记忆浏览", desc: "浏览和检索图谱中的所有记忆节点。" },
+  injection: { kicker: "注入预览", title: "注入预览", desc: "查看最近一次注入到主 AI 的内容预览与 token 用量。" },
+  trace: { kicker: "消息追踪", title: "消息追踪", desc: "这一轮到底发了什么？查看召回注入快照和提取请求详情。" },
+  persistence: { kicker: "持久化", title: "持久化状态", desc: "图谱加载状态、存储层级、commit marker 与修复操作。" },
+};
+
+function _bindTaskNavigation() {
+  panelEl?.querySelectorAll(".bme-task-nav-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _switchTaskSection(btn.dataset.taskSection);
+    });
+  });
+  panelEl?.querySelectorAll(".bme-task-nav-pill").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _switchTaskSection(btn.dataset.taskSection);
+    });
+  });
+}
+
+function _switchTaskSection(sectionId) {
+  currentTaskSectionId = sectionId || "pipeline";
+  _syncTaskSectionState();
+  _refreshTaskMonitor();
+}
+
+function _syncTaskSectionState() {
+  panelEl?.querySelectorAll(".bme-task-nav-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.taskSection === currentTaskSectionId);
+  });
+  panelEl?.querySelectorAll(".bme-task-nav-pill").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.taskSection === currentTaskSectionId);
+  });
+  panelEl?.querySelectorAll(".bme-task-section").forEach((section) => {
+    section.classList.toggle("active", section.dataset.taskSection === currentTaskSectionId);
+  });
+  const meta = TASK_SECTION_META[currentTaskSectionId] || TASK_SECTION_META.pipeline;
+  const kicker = document.getElementById("bme-task-ws-kicker");
+  const title = document.getElementById("bme-task-ws-title");
+  const desc = document.getElementById("bme-task-ws-desc");
+  if (kicker) kicker.textContent = meta.kicker;
+  if (title) title.textContent = meta.title;
+  if (desc) desc.textContent = meta.desc;
+}
+
+function _refreshTaskMonitor() {
+  switch (currentTaskSectionId) {
+    case "pipeline":
+      _refreshTaskPipelineOverview();
+      break;
+    case "timeline":
+      _refreshTaskTimeline();
+      break;
+    case "memory":
+      _refreshTaskMemoryBrowser();
+      break;
+    case "injection":
+      _refreshTaskInjectionPreview();
+      break;
+    case "trace":
+      _refreshTaskMessageTrace();
+      break;
+    case "persistence":
+      _refreshTaskPersistence();
+      break;
+  }
+}
+
+// ---------- Pipeline Overview ----------
+
+function _resolvePipelineStatus(statusObj) {
+  if (!statusObj) return { label: "UNKNOWN", color: "amber", detail: "—" };
+  const text = String(statusObj.text || "");
+  const meta = String(statusObj.meta || "");
+  const level = String(statusObj.level || "info");
+  let color = "green";
+  if (level === "warn") color = "amber";
+  else if (level === "error") color = "red";
+  else if (text.toLowerCase().includes("running") || text.toLowerCase().includes("进行中") || text.includes("正在")) color = "cyan";
+  return { label: text || "IDLE", color, detail: meta };
+}
+
+function _refreshTaskPipelineOverview() {
+  const el = document.getElementById("bme-task-pipeline");
+  if (!el) return;
+
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const graph = _getGraph?.() || {};
+  const historyState = graph.runtimeState?.historyState || {};
+  const graphPersistenceState = graph.graphPersistenceState || {};
+
+  const extraction = _resolvePipelineStatus(rd.lastExtractionStatus);
+  const vector = _resolvePipelineStatus(rd.lastVectorStatus);
+  const recall = _resolvePipelineStatus(rd.lastRecallStatus);
+  const persistLevel = graphPersistenceState.loadState === "loaded" ? "info" : graphPersistenceState.loadState === "loading" ? "info" : "warn";
+  const persistence = _resolvePipelineStatus({
+    text: graphPersistenceState.loadState || "unknown",
+    meta: `rev ${graphPersistenceState.lastAcceptedRevision || 0}`,
+    level: persistLevel,
+  });
+
+  const batchStatus = historyState.lastBatchStatus || {};
+  const stages = [
+    { key: "core", label: "Core" },
+    { key: "structural", label: "结构" },
+    { key: "semantic", label: "语义" },
+    { key: "finalize", label: "定稿" },
+  ];
+
+  const stageHtml = stages.map((s, i) => {
+    const outcome = batchStatus.stageOutcomes?.[s.key];
+    let dotClass = "";
+    let lineClass = "";
+    let icon = '<i class="fa-solid fa-hourglass"></i>';
+    if (outcome === "success" || outcome === "skipped") {
+      dotClass = "done";
+      icon = '<i class="fa-solid fa-check"></i>';
+      lineClass = "done";
+    } else if (outcome === "running" || outcome === "partial") {
+      dotClass = "running";
+      icon = '<i class="fa-solid fa-spinner fa-spin"></i>';
+      lineClass = "running";
+    }
+    const linePart = i < stages.length - 1 ? `<div class="bme-batch-stage-line ${lineClass}"></div>` : "";
+    return `
+      <div class="bme-batch-stage">
+        <div class="bme-batch-stage-dot ${dotClass}">${icon}</div>
+        <div class="bme-batch-stage-label">${_escHtml(s.label)}</div>
+        <div class="bme-batch-stage-detail">${outcome ? _escHtml(outcome) : "pending"}</div>
+        ${linePart}
+      </div>
+    `;
+  }).join("");
+
+  const batchMeta = batchStatus.persistenceOutcome
+    ? `<span><i class="fa-solid fa-database"></i> ${_escHtml(batchStatus.persistenceOutcome)}</span>`
+    : "";
+  const batchWarnings = (batchStatus.warnings || []).length;
+  const batchErrors = (batchStatus.errors || []).length;
+  const batchMetaExtra = [
+    batchWarnings ? `<span><i class="fa-solid fa-triangle-exclamation"></i> ${batchWarnings} warnings</span>` : "",
+    batchErrors ? `<span><i class="fa-solid fa-circle-exclamation"></i> ${batchErrors} errors</span>` : "",
+  ].filter(Boolean).join("");
+
+  const statusRows = [
+    { label: "提取", color: extraction.color, value: extraction.label + (extraction.detail ? ` — ${extraction.detail}` : "") },
+    { label: "向量", color: vector.color, value: vector.label + (vector.detail ? ` — ${vector.detail}` : "") },
+    { label: "召回", color: recall.color, value: recall.label + (recall.detail ? ` — ${recall.detail}` : "") },
+    { label: "持久化", color: persistence.color, value: persistence.label + (persistence.detail ? ` — ${persistence.detail}` : "") },
+  ];
+
+  const pipelineCard = (name, s, icon) => `
+    <div class="bme-pipeline-card" data-status="${s.color === "green" ? "idle" : s.color === "cyan" ? "running" : s.color === "amber" ? "warning" : "error"}">
+      <div class="bme-pipeline-dot ${s.color}"></div>
+      <div class="bme-pipeline-info">
+        <div class="bme-pipeline-name"><i class="fa-solid fa-${icon}" style="margin-right:4px;opacity:.5"></i>${_escHtml(name)}</div>
+        <div class="bme-pipeline-status ${s.color}">${_escHtml(s.label)}</div>
+        <div class="bme-pipeline-detail">${_escHtml(s.detail)}</div>
+      </div>
+    </div>`;
+
+  el.innerHTML = `
+    <div class="bme-pipeline-grid">
+      ${pipelineCard("提取 Extraction", extraction, "scissors")}
+      ${pipelineCard("向量 Vector", vector, "share-nodes")}
+      ${pipelineCard("召回 Recall", recall, "magnifying-glass")}
+      ${pipelineCard("持久化 Persistence", persistence, "database")}
+    </div>
+    <div class="bme-batch-progress">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:700;color:var(--bme-on-surface)"><i class="fa-solid fa-timeline" style="margin-right:6px;color:var(--bme-primary)"></i>Active Batch Progress</span>
+        <span style="font-size:10px;color:var(--bme-on-surface-dim)">ID: ${_escHtml(String(batchStatus.batchId || "—"))}</span>
+      </div>
+      <div class="bme-batch-stages">${stageHtml}</div>
+      <div class="bme-batch-meta">${batchMeta}${batchMetaExtra}</div>
+    </div>
+    <div class="bme-status-summary">
+      <div class="bme-status-summary-title"><i class="fa-solid fa-list"></i> Recent Status</div>
+      ${statusRows.map((r) => `
+        <div class="bme-status-row">
+          <div class="bme-status-row-label"><span class="bme-sdot" style="background:${r.color === "green" ? "#2ecc71" : r.color === "cyan" ? "#00d4ff" : r.color === "amber" ? "#f39c12" : "#e74c3c"}"></span>${_escHtml(r.label)}</div>
+          <div class="bme-status-row-value">${_escHtml(r.value)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+// ---------- Task Timeline ----------
+
+function _refreshTaskTimeline() {
+  const el = document.getElementById("bme-task-timeline");
+  if (!el) return;
+
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const timeline = Array.isArray(rd.taskTimeline) ? rd.taskTimeline : [];
+
+  if (!timeline.length) {
+    el.innerHTML = '<div class="bme-timeline-bottom-bar">暂无任务记录</div>';
+    return;
+  }
+
+  const entries = timeline.slice().reverse().map((entry, idx) => {
+    const t = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : "";
+    const title = entry.taskType || entry.stage || "task";
+    const statusText = entry.status || "";
+    const durationMs = entry.durationMs;
+    const durationStr = typeof durationMs === "number" ? `${(durationMs / 1000).toFixed(1)}s` : "";
+    const detail = entry.text || entry.meta || "";
+    const level = entry.level || "info";
+    const levelIcon = level === "error" ? "circle-exclamation" : level === "warn" ? "triangle-exclamation" : "circle-check";
+    const levelColor = level === "error" ? "#e74c3c" : level === "warn" ? "#f39c12" : "#2ecc71";
+
+    const substages = Array.isArray(entry.substages) ? entry.substages.map((sub) => `
+      <div class="bme-timeline-substage">
+        <i class="fa-solid fa-angle-right" style="color:${levelColor}"></i>
+        <span>${_escHtml(sub.label || sub.stage || "")}</span>
+        <span style="margin-left:auto;opacity:.5">${_escHtml(sub.outcome || sub.status || "")}</span>
+      </div>
+    `).join("") : "";
+
+    return `
+      <div class="bme-timeline-entry${idx > 5 ? " is-collapsed" : ""}" data-entry-idx="${idx}">
+        <div class="bme-timeline-entry__head" onclick="this.closest('.bme-timeline-entry').classList.toggle('is-collapsed')">
+          <i class="fa-solid fa-${levelIcon}" style="color:${levelColor};font-size:12px"></i>
+          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(statusText)}` : ""}</span>
+          <span class="bme-timeline-entry__meta">${durationStr} ${t}</span>
+          <button class="bme-timeline-entry__toggle" type="button"><i class="fa-solid fa-chevron-down"></i></button>
+        </div>
+        <div class="bme-timeline-entry__detail">
+          ${detail ? `<div style="font-size:11px;color:var(--bme-on-surface-dim);margin-bottom:6px">${_escHtml(detail)}</div>` : ""}
+          ${substages}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="bme-timeline-toolbar">
+      <i class="fa-solid fa-filter" style="color:var(--bme-on-surface-dim);font-size:11px"></i>
+      <span style="font-size:11px;color:var(--bme-on-surface-dim)">${timeline.length} 条记录</span>
+    </div>
+    <div class="bme-timeline-stack">${entries}</div>
+  `;
+}
+
+// ---------- Memory Browser (Master-Detail) ----------
+
+function _refreshTaskMemoryBrowser() {
+  const el = document.getElementById("bme-task-memory");
+  if (!el) return;
+
+  const graph = _getGraph?.();
+  if (!graph) {
+    el.innerHTML = '<div class="bme-memory-detail-empty">图谱未加载</div>';
+    return;
+  }
+
+  const nodes = graph.nodes || [];
+  const sorted = nodes.slice().sort((a, b) => (b.importance || 0) - (a.importance || 0));
+
+  const typeClass = (type) => {
+    switch (type) {
+      case "pov_memory": case "character": return "type-character";
+      case "event": return "type-event";
+      case "location": return "type-location";
+      case "rule": return "type-rule";
+      case "thread": return "type-thread";
+      default: return "type-default";
+    }
+  };
+
+  const typeLabel = (node) => {
+    if (node.scope === "characterPov") return "角色POV";
+    if (node.scope === "userPov") return "用户POV";
+    return node.type || "memory";
+  };
+
+  const listItems = sorted.map((node) => {
+    const sel = node.id === currentSelectedMemoryNodeId ? "selected" : "";
+    const preview = (node.description || "").slice(0, 80);
+    return `
+      <div class="bme-memory-node-item ${sel}" data-node-id="${_escHtml(node.id)}">
+        <div class="bme-memory-node-item__header">
+          <span class="bme-memory-node-item__type ${typeClass(node.type)}">${_escHtml(typeLabel(node))}</span>
+          <span class="bme-memory-node-item__imp">IMP: ${typeof node.importance === "number" ? node.importance.toFixed(1) : "—"}</span>
+        </div>
+        <div class="bme-memory-node-item__title">${_escHtml(node.label || node.id)}</div>
+        <div class="bme-memory-node-item__preview">${_escHtml(preview)}</div>
+        <div class="bme-memory-node-item__meta">
+          <span>SEQ: ${node.lastSeq ?? "—"}</span>
+          ${node.region ? `<span>LOC: ${_escHtml(node.region)}</span>` : ""}
+        </div>
+      </div>`;
+  }).join("");
+
+  const detailHtml = _renderMemoryDetailPanel(sorted.find((n) => n.id === currentSelectedMemoryNodeId) || null, graph);
+
+  el.innerHTML = `
+    <div class="bme-memory-master-detail">
+      <div class="bme-memory-list-panel">
+        <div class="bme-memory-list-filters">
+          <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." />
+          <select class="bme-filter-select" id="bme-task-memory-filter">
+            <option value="all">全部</option>
+            <option value="scope:objective">客观</option>
+            <option value="scope:characterPov">角色 POV</option>
+            <option value="scope:userPov">用户 POV</option>
+            <option value="pov_memory">主观记忆</option>
+            <option value="event">事件</option>
+            <option value="location">地点</option>
+            <option value="thread">线索</option>
+            <option value="rule">规则</option>
+          </select>
+        </div>
+        <div class="bme-memory-list-scroll" id="bme-task-memory-list">
+          ${listItems || '<div style="padding:16px;font-size:12px;color:var(--bme-on-surface-dim)">无节点</div>'}
+        </div>
+      </div>
+      <div class="bme-memory-detail-panel" id="bme-task-memory-detail">
+        ${detailHtml}
+      </div>
+    </div>
+  `;
+
+  _bindTaskMemoryListClick();
+}
+
+function _bindTaskMemoryListClick() {
+  const list = document.getElementById("bme-task-memory-list");
+  if (!list) return;
+  list.addEventListener("click", (e) => {
+    const item = e.target.closest(".bme-memory-node-item");
+    if (!item) return;
+    currentSelectedMemoryNodeId = item.dataset.nodeId || "";
+    list.querySelectorAll(".bme-memory-node-item").forEach((n) => n.classList.toggle("selected", n.dataset.nodeId === currentSelectedMemoryNodeId));
+    const graph = _getGraph?.();
+    const node = (graph?.nodes || []).find((n) => n.id === currentSelectedMemoryNodeId) || null;
+    const detailEl = document.getElementById("bme-task-memory-detail");
+    if (detailEl) detailEl.innerHTML = _renderMemoryDetailPanel(node, graph);
+  });
+}
+
+function _renderMemoryDetailPanel(node, graph) {
+  if (!node) return '<div class="bme-memory-detail-empty"><i class="fa-solid fa-arrow-left" style="margin-right:6px"></i>选择左侧节点查看详情</div>';
+
+  const edges = (graph?.edges || []).filter((e) => e.source === node.id || e.target === node.id);
+  const badges = [
+    node.type ? `<span class="bme-memory-node-item__type ${node.type === "pov_memory" || node.type === "character" ? "type-character" : node.type === "event" ? "type-event" : node.type === "location" ? "type-location" : "type-default"}">${_escHtml(node.type)}</span>` : "",
+    node.scope ? `<span class="bme-memory-node-item__type type-default">${_escHtml(node.scope)}</span>` : "",
+    node.archived ? '<span class="bme-memory-node-item__type type-default">ARCHIVED</span>' : "",
+  ].filter(Boolean).join("");
+
+  const fields = [
+    ["ID", node.id],
+    ["Owner", node.owner || "—"],
+    ["Region", node.region || "—"],
+    ["Importance", typeof node.importance === "number" ? node.importance.toFixed(2) : "—"],
+    ["Last Seq", node.lastSeq ?? "—"],
+    ["Created", node.createdAt || "—"],
+    ["Updated", node.updatedAt || "—"],
+  ];
+
+  return `
+    <div class="bme-memory-detail__title">${_escHtml(node.label || node.id)}</div>
+    <div class="bme-memory-detail__badges">${badges}</div>
+    <div class="bme-memory-detail__desc">${_escHtml(node.description || "无描述")}</div>
+    <div class="bme-memory-detail__fields">
+      ${fields.map(([k, v]) => `<div class="bme-memory-detail__field-row"><span class="bme-memory-detail__field-key">${_escHtml(k)}</span><span class="bme-memory-detail__field-val">${_escHtml(String(v))}</span></div>`).join("")}
+    </div>
+    <div class="bme-memory-detail__stats">
+      <span><i class="fa-solid fa-link" style="margin-right:4px;opacity:.5"></i>${edges.length} 条连接</span>
+      <span><i class="fa-solid fa-eye" style="margin-right:4px;opacity:.5"></i>recall ${node.recallCount ?? 0}</span>
+    </div>
+  `;
+}
+
+// ---------- Injection Preview ----------
+
+function _refreshTaskInjectionPreview() {
+  const el = document.getElementById("bme-task-injection");
+  if (!el) return;
+
+  const debug = _getRuntimeDebugSnapshot?.() || {};
+  const rd = debug.runtimeDebug || {};
+  const injection = rd?.injections?.recall || null;
+
+  if (!injection) {
+    el.innerHTML = '<div class="bme-memory-detail-empty">暂无注入数据</div>';
+    return;
+  }
+
+  const totalTokens = injection.tokenCount || 0;
+  const budgetTokens = injection.budgetTokens || totalTokens || 1;
+  const pct = Math.min(100, Math.round((totalTokens / budgetTokens) * 100));
+
+  const sections = Array.isArray(injection.sections) ? injection.sections : [];
+  const injectionText = injection.text || injection.injectionText || "";
+
+  const cardsHtml = sections.length
+    ? sections.map((s) => `
+      <div class="bme-injection-card" style="border-top-color:var(--bme-primary)">
+        <div class="bme-injection-card__header">
+          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">${_escHtml(s.title || s.type || "section")}</span>
+          ${typeof s.tokenCount === "number" ? `<span class="bme-injection-card__tokens">${s.tokenCount} tok</span>` : ""}
+        </div>
+        <div class="bme-injection-card__body">${_escHtml(s.text || s.content || "")}</div>
+      </div>
+    `).join("")
+    : `<div class="bme-injection-card" style="grid-column:span 2;border-top-color:var(--bme-primary)">
+        <div class="bme-injection-card__header">
+          <span class="bme-injection-card__type" style="background:var(--bme-primary-dim);color:var(--bme-primary)">Full Injection</span>
+          <span class="bme-injection-card__tokens">${totalTokens} tok</span>
+        </div>
+        <div class="bme-injection-card__body">${_escHtml(injectionText.slice(0, 2000))}${injectionText.length > 2000 ? "…" : ""}</div>
+      </div>`;
+
+  el.innerHTML = `
+    <div class="bme-injection-token-bar">
+      <span class="bme-injection-token-bar__label">${totalTokens} / ${budgetTokens} tok</span>
+      <div class="bme-injection-token-bar__track">
+        <div class="bme-injection-token-bar__fill" style="width:${pct}%"></div>
+      </div>
+      <span class="bme-injection-token-bar__breakdown">${pct}%</span>
+    </div>
+    <div class="bme-injection-card-grid">${cardsHtml}</div>
+  `;
+}
+
+// ---------- Message Trace ----------
+
+function _refreshTaskMessageTrace() {
+  const el = document.getElementById("bme-task-trace");
+  if (!el) return;
+
+  const settings = _getSettings?.() || {};
+  const state = _getMessageTraceWorkspaceState(settings);
+  el.innerHTML = _renderMessageTraceWorkspace(state);
+}
+
+// ---------- Persistence Status ----------
+
+function _refreshTaskPersistence() {
+  const el = document.getElementById("bme-task-persistence");
+  if (!el) return;
+
+  const graph = _getGraph?.() || {};
+  const ps = graph.graphPersistenceState || {};
+  const rs = graph.runtimeState || {};
+
+  const kvs = [
+    ["Load State", ps.loadState || "unknown"],
+    ["Storage Tier", ps.acceptedStorageTier || "—"],
+    ["Last Accepted Rev", ps.lastAcceptedRevision ?? "—"],
+    ["Commit Marker", ps.currentCommitMarker ? "present" : "none"],
+    ["Blocked Reason", ps.blockedReason || "—"],
+    ["IDB Snapshot Rev", ps.indexedDbSnapshotRevision ?? "—"],
+    ["Chat State Rev", ps.chatStateSnapshotRevision ?? "—"],
+    ["Shadow Snapshot", ps.hasShadowSnapshot ? "yes" : "no"],
+  ];
+
+  const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
+
+  const journalCount = Array.isArray(rs.historyState?.batchJournal) ? rs.historyState.batchJournal.length : 0;
+  const secondaryKvs = [
+    ["Graph Nodes", String((graph.nodes || []).length)],
+    ["Graph Edges", String((graph.edges || []).length)],
+    ["Batch Journal", String(journalCount)],
+    ["Runtime Rev", String(rs.graphRevision ?? "—")],
+  ];
+  const secondaryHtml = secondaryKvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(v)}</strong></div>`).join("");
+
+  el.innerHTML = `
+    <div class="bme-persist-grid">
+      <div class="bme-persist-kv">
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>Persistence State</div>
+        ${kvHtml}
+      </div>
+      <div class="bme-persist-kv">
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>Runtime Stats</div>
+        ${secondaryHtml}
+      </div>
+    </div>
+  `;
 }
 
 // ==================== 图谱视图切换 ====================
@@ -3163,7 +3652,7 @@ function _buildLegend() {
     { key: "location", label: "地点" },
     { key: "thread", label: "主线" },
     { key: "rule", label: "规则" },
-    { key: "synopsis", label: "概要" },
+    { key: "synopsis", label: "全局概要（旧）" },
     { key: "reflection", label: "反思" },
     { key: "pov_memory", label: "主观记忆" },
   ];
@@ -3967,6 +4456,27 @@ function _bindActions() {
     rollbackLastRestore: "\u56de\u6eda\u4e0a\u6b21\u6062\u590d",
   };
 
+  const manualCloudFabBehaviors = {
+    backupToCloud: {
+      successStatus: "cloud-success",
+      successTooltip: "备份云端完成",
+      errorTooltip: "备份到云端失败",
+    },
+    restoreFromCloud: {
+      successStatus: "cloud-success",
+      successTooltip: "云端备份已提取",
+      errorTooltip: "从云端获取备份失败",
+    },
+    manageServerBackups: {
+      suppressFab: true,
+    },
+    rollbackLastRestore: {
+      successStatus: "cloud-success",
+      successTooltip: "回滚完成",
+      errorTooltip: "回滚上次恢复失败",
+    },
+  };
+
   for (const [elementId, actionKey] of Object.entries(bindings)) {
     const btn = document.getElementById(elementId);
     if (!btn) continue;
@@ -3979,6 +4489,8 @@ function _bindActions() {
       if (!handler) return;
 
       const label = actionLabels[actionKey] || actionKey;
+      const fabBehavior = manualCloudFabBehaviors[actionKey] || null;
+      const suppressFab = fabBehavior?.suppressFab === true;
 
       // 防止重复点击
       if (btn.disabled) return;
@@ -3986,37 +4498,44 @@ function _bindActions() {
       btn.style.opacity = "0.5";
 
       _showActionProgressUi(label);
+      if (suppressFab) {
+        _syncFloatingBallWithRuntimeStatus();
+      }
       toastr.info(`${label} 进行中…`, "ST-BME", { timeOut: 2000 });
 
       try {
         const result = await handler();
         if (result?.cancelled) {
+          if (!suppressFab) {
+            _syncFloatingBallWithRuntimeStatus();
+          }
           return;
         }
         if (!result?.skipDashboardRefresh) {
           _refreshDashboard();
           _refreshGraph();
-          if (
-            document
-              .getElementById("bme-pane-memory")
-              ?.classList.contains("active")
-          ) {
-            _refreshMemoryBrowser();
-          }
-          if (
-            document
-              .getElementById("bme-pane-injection")
-              ?.classList.contains("active")
-          ) {
-            await _refreshInjectionPreview();
+          if (currentTabId === "task") {
+            _refreshTaskMonitor();
           }
         }
         if (!result?.handledToast) {
           toastr.success(`${label} 完成`, "ST-BME");
         }
+        if (fabBehavior?.successTooltip) {
+          updateFloatingBallStatus(
+            fabBehavior.successStatus || "success",
+            fabBehavior.successTooltip,
+          );
+        }
         void _refreshCloudBackupManualUi();
       } catch (error) {
         console.error(`[ST-BME] Action ${actionKey} failed:`, error);
+        if (!suppressFab) {
+          updateFloatingBallStatus(
+            fabBehavior?.errorStatus || "error",
+            fabBehavior?.errorTooltip || `${label}失败`,
+          );
+        }
         if (!error?._stBmeToastHandled) {
           toastr.error(`${label} 失败: ${error?.message || error}`, "ST-BME");
         }
@@ -4076,13 +4595,7 @@ function _bindActions() {
         });
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action extractTask failed:", error);
         toastr.error(`重新提取失败: ${error?.message || error}`, "ST-BME");
@@ -4163,13 +4676,7 @@ function _bindActions() {
         });
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action rebuildSummaryState failed:", error);
         toastr.error(`重建总结状态失败: ${error?.message || error}`, "ST-BME");
@@ -4207,13 +4714,7 @@ function _bindActions() {
         );
         _refreshDashboard();
         _refreshGraph();
-        if (
-          document
-            .getElementById("bme-pane-memory")
-            ?.classList.contains("active")
-        ) {
-          _refreshMemoryBrowser();
-        }
+        if (currentTabId === "task") _refreshTaskMonitor();
       } catch (error) {
         console.error("[ST-BME] Action clearGraphRange failed:", error);
         toastr.error(`按楼层范围清理失败: ${error?.message || error}`, "ST-BME");
@@ -4369,8 +4870,7 @@ function _bindActions() {
       _refreshDashboard();
       _refreshGraph();
       _refreshSummaryWorkspace();
-      _refreshMemoryBrowser();
-      void _refreshInjectionPreview();
+      if (currentTabId === "task") _refreshTaskMonitor();
     } catch (error) {
       console.error(`[ST-BME] summary workspace action failed: ${actionKey}`, error);
       toastr.error(String(error?.message || error || "操作失败"), "ST-BME");
@@ -7952,7 +8452,7 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">一致性异常</span>
-        <span class="bme-debug-kv-value">${_escHtml(graphPersistence.persistMismatchReason || "—")}</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatPersistMismatchReason(graphPersistence.persistMismatchReason))}</span>
       </div>
       <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">Commit Marker</span>
@@ -9798,6 +10298,27 @@ function _formatPersistenceOutcomeLabel(outcome = "") {
   }
 }
 
+function _formatPersistMismatchReason(reason = "") {
+  const normalized = String(reason || "").trim();
+  if (!normalized) return "—";
+  switch (normalized) {
+    case "persist-mismatch:indexeddb-behind-commit-marker":
+      return "本地 IndexedDB 缓存版本落后于当前聊天已确认版本";
+    default:
+      return normalized;
+  }
+}
+
+function _formatPersistMismatchHelp(reason = "") {
+  const normalized = String(reason || "").trim();
+  switch (normalized) {
+    case "persist-mismatch:indexeddb-behind-commit-marker":
+      return "当前聊天记录显示图谱已经确认到更高版本，但本地 IndexedDB 里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
+    default:
+      return `检测到持久化一致性异常：${_formatPersistMismatchReason(normalized)}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
+  }
+}
+
 function _hasMeaningfulPersistenceRecord(persistence = null) {
   if (!persistence || typeof persistence !== "object") return false;
   if (persistence.attempted === true) return true;
@@ -9854,14 +10375,14 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
       Number.isFinite(Number(dualWrite.revision)) && Number(dualWrite.revision) > 0
         ? `rev ${Number(dualWrite.revision)}`
         : "",
-      dualWrite.reason || dualWrite.error || "",
+      _formatPersistMismatchReason(dualWrite.reason || dualWrite.error || ""),
     ]
       .filter(Boolean)
       .join(" · ");
   }
 
   if (loadInfo?.persistMismatchReason) {
-    return `一致性异常 · ${String(loadInfo.persistMismatchReason || "")}`;
+    return `一致性异常 · ${_formatPersistMismatchReason(loadInfo.persistMismatchReason)}`;
   }
 
   if (String(batchStatus?.outcome || "") === "failed") {
@@ -9889,7 +10410,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   }
 
   if (loadInfo?.persistMismatchReason) {
-    return `持久化一致性异常：${String(loadInfo.persistMismatchReason || "")} · 已确认楼层 ${lastConfirmedFloor}`;
+    return `持久化一致性异常：${_formatPersistMismatchReason(loadInfo.persistMismatchReason)} · 已确认楼层 ${lastConfirmedFloor}`;
   }
 
   if (String(batchStatus?.outcome || "") === "failed") {
@@ -9913,7 +10434,7 @@ function _getGraphLoadLabel(loadState = "") {
     case "empty-confirmed":
       return "当前聊天还没有图谱";
     case "blocked":
-      return "聊天元数据未就绪，已暂停图谱写回以保护旧数据";
+      return "当前聊天图谱未能完成 IndexedDB 确认，请稍后重试";
     case "loaded":
       return "聊天图谱已加载";
     case "no-chat":
@@ -9951,8 +10472,7 @@ function _refreshPersistenceRepairUi(
   }
 
   if (loadInfo?.persistMismatchReason) {
-    help.textContent =
-      `检测到持久化一致性异常：${String(loadInfo.persistMismatchReason || "")}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
+    help.textContent = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
     return;
   }
 
@@ -10190,6 +10710,13 @@ function _showActionProgressUi(label, meta = "请稍候…") {
   _setText("bme-status-meta", meta);
   _setText("bme-panel-status", `${label}中`);
   updateFloatingBallStatus("running", `${label}中`);
+}
+
+function _syncFloatingBallWithRuntimeStatus() {
+  const status = _getRuntimeStatus?.() || {};
+  const level = String(status.level || "idle");
+  const fabStatus = level === "info" ? "idle" : level;
+  updateFloatingBallStatus(fabStatus, status.text || "BME 记忆图谱");
 }
 
 function _patchSettings(patch = {}, options = {}) {
@@ -10735,7 +11262,7 @@ function _typeLabel(type) {
     location: "地点",
     thread: "主线",
     rule: "规则",
-    synopsis: "概要",
+    synopsis: "全局概要（旧）",
     reflection: "反思",
     pov_memory: "主观记忆",
   };

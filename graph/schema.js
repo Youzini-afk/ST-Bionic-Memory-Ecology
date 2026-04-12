@@ -27,7 +27,7 @@ export const DEFAULT_NODE_SCHEMA = [
     label: "事件",
     tableName: "event_table",
     columns: [
-      { name: "title", hint: "简短事件名（建议 6-18 字，用于图谱显示）", required: false },
+      { name: "title", hint: "简短事件名（建议 6-10 字，用于图谱显示）", required: false },
       { name: "summary", hint: "事件摘要，包含因果关系和结果", required: true },
       { name: "participants", hint: "参与角色名，逗号分隔", required: false },
       {
@@ -149,15 +149,15 @@ export const DEFAULT_NODE_SCHEMA = [
   // ====== v2 新增节点类型 ======
   {
     id: "synopsis",
-    label: "全局概要",
+    label: "全局概要（旧）",
     tableName: "synopsis_table",
     columns: [
       {
         name: "summary",
-        hint: "当前故事的全局概要（前情提要）",
+        hint: "旧式单条全局前情提要（兼容 / 迁移兜底）",
         required: true,
       },
-      { name: "scope", hint: "概要覆盖的楼层范围", required: false },
+      { name: "scope", hint: "该旧式概要覆盖的楼层范围", required: false },
     ],
     alwaysInject: true, // 常驻注入（MemoRAG 启发）
     latestOnly: true, // 只保留最新版本

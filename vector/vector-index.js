@@ -488,6 +488,50 @@ function resetVectorMappings(graph, config, chatId) {
   graph.vectorIndexState.nodeToHash = {};
 }
 
+function markBackendVectorStateDirty(
+  graph,
+  config,
+  reason = "backend-query-failed",
+  warning = "后端向量查询失败，已标记待重建",
+) {
+  if (!graph?.vectorIndexState || !isBackendVectorConfig(config)) {
+    return;
+  }
+
+  const state = graph.vectorIndexState;
+  const total = Math.max(
+    Number(state.lastStats?.total || 0),
+    Object.keys(state.nodeToHash || {}).length,
+    Object.keys(state.hashToNodeId || {}).length,
+  );
+  const previousIndexed = Number.isFinite(Number(state.lastStats?.indexed))
+    ? Math.max(0, Math.floor(Number(state.lastStats.indexed)))
+    : 0;
+  const previousStale = Number.isFinite(Number(state.lastStats?.stale))
+    ? Math.max(0, Math.floor(Number(state.lastStats.stale)))
+    : 0;
+  const previousPending = Number.isFinite(Number(state.lastStats?.pending))
+    ? Math.max(0, Math.floor(Number(state.lastStats.pending)))
+    : 0;
+
+  state.mode = "backend";
+  state.source = config.source || state.source || "";
+  state.modelScope = getVectorModelScope(config) || state.modelScope || "";
+  state.collectionId = buildVectorCollectionId(graph?.historyState?.chatId);
+  state.dirty = true;
+  state.dirtyReason = String(reason || "backend-query-failed");
+  state.pendingRepairFromFloor = Number.isFinite(Number(state.pendingRepairFromFloor))
+    ? Math.max(0, Math.floor(Number(state.pendingRepairFromFloor)))
+    : 0;
+  state.lastStats = {
+    total,
+    indexed: previousIndexed,
+    stale: Math.max(previousStale, total > 0 ? 1 : 0),
+    pending: total > 0 ? Math.max(1, previousPending) : previousPending,
+  };
+  state.lastWarning = String(warning || "后端向量查询失败，已标记待重建");
+}
+
 export async function syncGraphVectorIndex(
   graph,
   config,
@@ -723,41 +767,62 @@ export async function findSimilarNodesByText(
   const validation = validateVectorConfig(config);
   if (!validation.valid) return [];
 
-  const response = await fetchWithTimeout(
-    "/api/vector/query",
-    {
-      method: "POST",
-      headers: getRequestHeaders(),
-      signal,
-      body: JSON.stringify({
-        collectionId: graph.vectorIndexState.collectionId,
-        searchText: text,
-        topK,
-        threshold: 0,
-        ...buildBackendSourceRequest(config),
-      }),
-    },
-    getConfiguredTimeoutMs(config),
-  );
+  try {
+    const response = await fetchWithTimeout(
+      "/api/vector/query",
+      {
+        method: "POST",
+        headers: getRequestHeaders(),
+        signal,
+        body: JSON.stringify({
+          collectionId: graph.vectorIndexState.collectionId,
+          searchText: text,
+          topK,
+          threshold: 0,
+          ...buildBackendSourceRequest(config),
+        }),
+      },
+      getConfiguredTimeoutMs(config),
+    );
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    console.warn("[ST-BME] 后端向量查询失败:", errorText);
-    return [];
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      const message = errorText || response.statusText || `HTTP ${response.status}`;
+      console.warn("[ST-BME] 后端向量查询失败:", message);
+      markBackendVectorStateDirty(
+        graph,
+        config,
+        "backend-query-failed",
+        `后端向量查询失败（${message}），已标记待重建`,
+      );
+      return [];
+    }
+
+    const data = await response.json().catch(() => ({ hashes: [] }));
+    const hashes = Array.isArray(data?.hashes) ? data.hashes : [];
+    const nodeIdByHash = graph.vectorIndexState?.hashToNodeId || {};
+    const allowedIds = new Set(candidateNodes.map((node) => node.id));
+
+    return hashes
+      .map((hash, index) => ({
+        nodeId: nodeIdByHash[hash],
+        score: Math.max(0.01, 1 - index / Math.max(1, hashes.length)),
+      }))
+      .filter((entry) => entry.nodeId && allowedIds.has(entry.nodeId))
+      .slice(0, topK);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+    const message = error?.message || String(error) || "后端向量查询失败";
+    markBackendVectorStateDirty(
+      graph,
+      config,
+      "backend-query-failed",
+      `后端向量查询失败（${message}），已标记待重建`,
+    );
+    throw error;
   }
-
-  const data = await response.json().catch(() => ({ hashes: [] }));
-  const hashes = Array.isArray(data?.hashes) ? data.hashes : [];
-  const nodeIdByHash = graph.vectorIndexState?.hashToNodeId || {};
-  const allowedIds = new Set(candidateNodes.map((node) => node.id));
-
-  return hashes
-    .map((hash, index) => ({
-      nodeId: nodeIdByHash[hash],
-      score: Math.max(0.01, 1 - index / Math.max(1, hashes.length)),
-    }))
-    .filter((entry) => entry.nodeId && allowedIds.has(entry.nodeId))
-    .slice(0, topK);
 }
 
 export async function testVectorConnection(config, chatId = "connection-test") {

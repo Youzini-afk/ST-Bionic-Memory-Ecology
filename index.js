@@ -320,6 +320,52 @@ function syncCommitMarkerToPersistenceState(context = getContext()) {
   return marker;
 }
 
+function clearCurrentChatCommitMarker(
+  {
+    context = getContext(),
+    reason = "manual-clear-commit-marker",
+    immediate = true,
+    resetAcceptedRevision = false,
+  } = {},
+) {
+  if (!context) {
+    return {
+      cleared: false,
+      reason: "missing-context",
+      saveMode: "",
+      marker: null,
+    };
+  }
+
+  const marker = getChatCommitMarker(context);
+  const acceptedRevision = getAcceptedCommitMarkerRevision(marker);
+  writeChatMetadataPatch(context, {
+    [GRAPH_COMMIT_MARKER_KEY]: null,
+  });
+  const saveMode = triggerChatMetadataSave(context, { immediate });
+  const shouldResetAcceptedRevision = resetAcceptedRevision === true;
+  updateGraphPersistenceState({
+    commitMarker: null,
+    persistMismatchReason: "",
+    lastPersistReason: String(reason || "manual-clear-commit-marker"),
+    lastPersistMode: `commit-marker-clear:${saveMode}`,
+    acceptedStorageTier: shouldResetAcceptedRevision
+      ? "none"
+      : String(graphPersistenceState.acceptedStorageTier || "none"),
+    lastAcceptedRevision: shouldResetAcceptedRevision
+      ? 0
+      : Number(graphPersistenceState.lastAcceptedRevision || 0),
+  });
+
+  return {
+    cleared: Boolean(marker),
+    reason: String(reason || "manual-clear-commit-marker"),
+    saveMode,
+    marker: cloneRuntimeDebugValue(marker, null),
+    acceptedRevision,
+  };
+}
+
 function isAcceptedPersistTier(storageTier = "none") {
   const normalizedTier = String(storageTier || "none").trim().toLowerCase();
   return normalizedTier === "indexeddb" || normalizedTier === "chat-state";
@@ -1029,7 +1075,7 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.BLOCKED:
       return createUiStatus(
         "图谱加载受阻",
-        "当前图谱尚未完成 IndexedDB 初始加载",
+        "当前图谱未能完成 IndexedDB 确认，请稍后重试",
         "warning",
       );
     case GRAPH_LOAD_STATES.LOADED:
@@ -4747,6 +4793,18 @@ function readCachedIndexedDbSnapshot(chatId) {
   return cacheEntry.snapshot;
 }
 
+function clearCachedIndexedDbSnapshot(chatId) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return false;
+  return bmeIndexedDbSnapshotCacheByChatId.delete(normalizedChatId);
+}
+
+function clearAllCachedIndexedDbSnapshots() {
+  const hadEntries = bmeIndexedDbSnapshotCacheByChatId.size > 0;
+  bmeIndexedDbSnapshotCacheByChatId.clear();
+  return hadEntries;
+}
+
 function cacheChatStateSnapshot(chatId, snapshot = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
@@ -5615,6 +5673,148 @@ function applyIndexedDbEmptyToRuntime(
   };
 }
 
+async function maybeResolveOrphanAcceptedCommitMarker(
+  chatId,
+  {
+    source = "indexeddb-probe",
+    attemptIndex = 0,
+    commitMarker = null,
+    migrationResult = null,
+    shadowSnapshot = null,
+    applyEmptyState = false,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const context = getContext();
+  const activeIdentity = resolveCurrentChatIdentity(context);
+  const activePersistenceChatId =
+    normalizeChatIdCandidate(activeIdentity?.chatId) || normalizedChatId;
+  const acceptedRevision = getAcceptedCommitMarkerRevision(commitMarker);
+  if (!normalizedChatId || acceptedRevision <= 0) {
+    return {
+      resolved: false,
+      reason: "marker-not-accepted",
+      result: null,
+      chatId: normalizedChatId || "",
+    };
+  }
+
+  if (!doesChatIdMatchResolvedGraphIdentity(normalizedChatId, activeIdentity)) {
+    return {
+      resolved: false,
+      reason: "chat-switched",
+      result: null,
+      chatId: normalizedChatId,
+    };
+  }
+
+  let chatStateResult = null;
+  if (canUseHostGraphChatStatePersistence(context)) {
+    chatStateResult = await loadGraphFromChatState(activePersistenceChatId, {
+      source: `${source}:orphan-chat-state-fallback`,
+      attemptIndex,
+      allowOverride: true,
+    });
+    if (chatStateResult?.loaded) {
+      return {
+        resolved: true,
+        reason: "chat-state-loaded",
+        result: chatStateResult,
+        chatId: normalizedChatId,
+        chatStateResult,
+        orphanCleared: false,
+      };
+    }
+
+    const chatStateReason = String(chatStateResult?.reason || "");
+    if (
+      chatStateReason &&
+      chatStateReason !== "chat-state-empty" &&
+      chatStateReason !== "chat-state-unavailable"
+    ) {
+      return {
+        resolved: false,
+        reason: chatStateReason,
+        result: null,
+        chatId: normalizedChatId,
+        chatStateResult,
+      };
+    }
+  }
+
+  if (shadowSnapshot) {
+    return {
+      resolved: false,
+      reason: "shadow-available",
+      result: null,
+      chatId: normalizedChatId,
+      chatStateResult,
+    };
+  }
+
+  if (String(migrationResult?.reason || "").trim() === "migration-failed") {
+    return {
+      resolved: false,
+      reason: "migration-failed",
+      result: null,
+      chatId: normalizedChatId,
+      chatStateResult,
+    };
+  }
+
+  const clearResult = clearCurrentChatCommitMarker({
+    context,
+    reason: `orphan-accepted-marker:${source}`,
+    immediate: true,
+    resetAcceptedRevision: true,
+  });
+  debugDebug("[ST-BME] 已自动清理孤儿 accepted commit marker", {
+    chatId: normalizedChatId,
+    source,
+    acceptedRevision,
+    migrationReason: String(migrationResult?.reason || ""),
+    chatStateReason: String(chatStateResult?.reason || ""),
+  });
+
+  if (applyEmptyState) {
+    const emptyResult = applyIndexedDbEmptyToRuntime(activePersistenceChatId, {
+      source: `${source}:orphan-accepted-marker`,
+      attemptIndex,
+    });
+    return {
+      resolved: true,
+      reason: "orphan-accepted-marker-cleared",
+      result: {
+        ...emptyResult,
+        orphanCommitMarkerCleared: true,
+        clearedMarkerRevision: acceptedRevision,
+      },
+      chatId: normalizedChatId,
+      chatStateResult,
+      clearResult,
+      orphanCleared: true,
+    };
+  }
+
+  return {
+    resolved: true,
+    reason: "orphan-accepted-marker-cleared",
+    result: {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-empty",
+      chatId: normalizedChatId,
+      attemptIndex,
+      orphanCommitMarkerCleared: true,
+      clearedMarkerRevision: acceptedRevision,
+    },
+    chatId: normalizedChatId,
+    chatStateResult,
+    clearResult,
+    orphanCleared: true,
+  };
+}
+
 function applyIndexedDbSnapshotToRuntime(
   chatId,
   snapshot,
@@ -6030,6 +6230,28 @@ async function loadGraphFromIndexedDb(
           return shadowRestoreResult;
         }
       }
+      if (commitMarkerDiagnostic?.reason) {
+        const orphanMarkerResolution =
+          await maybeResolveOrphanAcceptedCommitMarker(normalizedChatId, {
+            source,
+            attemptIndex,
+            commitMarker,
+            migrationResult,
+            shadowSnapshot,
+            applyEmptyState,
+          });
+        if (orphanMarkerResolution?.result) {
+          if (
+            !orphanMarkerResolution.orphanCleared &&
+            orphanMarkerResolution.result?.loaded
+          ) {
+            updateGraphPersistenceState({
+              persistMismatchReason: commitMarkerDiagnostic.reason,
+            });
+          }
+          return orphanMarkerResolution.result;
+        }
+      }
       if (
         applyEmptyState &&
         !commitMarkerDiagnostic?.reason &&
@@ -6182,6 +6404,7 @@ async function loadGraphFromIndexedDb(
 
 function scheduleIndexedDbGraphProbe(chatId, options = {}) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const attemptIndex = Math.max(0, Math.floor(Number(options?.attemptIndex) || 0));
   if (
     !normalizedChatId ||
     bmeIndexedDbLoadInFlightByChatId.has(normalizedChatId)
@@ -6191,8 +6414,27 @@ function scheduleIndexedDbGraphProbe(chatId, options = {}) {
 
   scheduleBmeIndexedDbTask(() => {
     const loadPromise = loadGraphFromIndexedDb(normalizedChatId, options)
+      .then((result) =>
+        reconcileIndexedDbProbeFailureState(normalizedChatId, result, {
+          attemptIndex,
+        }),
+      )
       .catch((error) => {
         console.warn("[ST-BME] IndexedDB 后台加载失败:", error);
+        return reconcileIndexedDbProbeFailureState(
+          normalizedChatId,
+          {
+            success: false,
+            loaded: false,
+            reason: "indexeddb-read-failed",
+            chatId: normalizedChatId,
+            attemptIndex,
+            error,
+          },
+          {
+            attemptIndex,
+          },
+        );
       })
       .finally(() => {
         if (
@@ -7850,6 +8092,76 @@ function scheduleGraphLoadRetry(
   }, delayMs);
 
   return true;
+}
+
+function reconcileIndexedDbProbeFailureState(
+  chatId,
+  result = {},
+  { attemptIndex = 0 } = {},
+) {
+  if (result?.loaded || result?.emptyConfirmed) {
+    clearPendingGraphLoadRetry();
+    return result;
+  }
+
+  const normalizedChatId = normalizeChatIdCandidate(chatId || result?.chatId);
+  const normalizedReason = String(result?.reason || "").trim();
+  if (!normalizedChatId || !normalizedReason) {
+    return result;
+  }
+
+  const isIndexedDbProbeFailureReason =
+    normalizedReason.startsWith("indexeddb-") ||
+    normalizedReason.startsWith("persist-mismatch:indexeddb-");
+  if (
+    !isIndexedDbProbeFailureReason ||
+    normalizedReason === "indexeddb-stale" ||
+    normalizedReason === "indexeddb-chat-switched"
+  ) {
+    return result;
+  }
+
+  if (graphPersistenceState.loadState !== GRAPH_LOAD_STATES.LOADING) {
+    return result;
+  }
+
+  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  if (stateChatId && stateChatId !== normalizedChatId) {
+    return result;
+  }
+
+  const currentChatId = getCurrentChatId();
+  if (currentChatId && currentChatId !== normalizedChatId) {
+    return result;
+  }
+
+  if (
+    scheduleGraphLoadRetry(normalizedChatId, normalizedReason, attemptIndex, {
+      expectedChatId: normalizedChatId,
+    })
+  ) {
+    return {
+      ...result,
+      retryScheduled: true,
+    };
+  }
+
+  applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+    chatId: normalizedChatId,
+    reason: normalizedReason,
+    attemptIndex,
+    dbReady: false,
+    writesBlocked: true,
+  });
+  runtimeStatus = createGraphLoadUiStatus();
+  refreshPanelLiveState();
+
+  return {
+    ...result,
+    loadState: GRAPH_LOAD_STATES.BLOCKED,
+    blocked: true,
+    reason: normalizedReason,
+  };
 }
 
 function shouldSyncGraphLoadFromLiveContext(
@@ -10954,7 +11266,7 @@ async function handleExtractionSuccess(
     typeof runHierarchicalSummaryPostProcess === "function"
       ? "层级总结"
       : typeof generateSynopsis === "function"
-        ? "概要生成"
+        ? "旧式全局概要生成"
         : "层级总结";
   const cloneMaintenanceSnapshot =
     typeof cloneGraphSnapshot === "function"
@@ -11076,9 +11388,9 @@ async function handleExtractionSuccess(
           ? getContext().chat
           : [];
       updateExtractionPostProcessStatus(
-        summaryStageLabel === "概要生成" ? "概要更新中" : "层级总结处理中",
-        summaryStageLabel === "概要生成"
-          ? `${extractionCount} 次提取，正在生成全局概要`
+        summaryStageLabel === "旧式全局概要生成" ? "旧式全局概要更新中" : "层级总结处理中",
+        summaryStageLabel === "旧式全局概要生成"
+          ? `${extractionCount} 次提取，正在生成旧式全局概要`
           : `${extractionCount} 次提取，正在检查小总结与折叠总结`,
       );
       const summaryResult = await runSummaryPostProcess({
@@ -13569,6 +13881,7 @@ const _cleanupRuntime = () => ({
   refreshPanelLiveState,
   removeNode: (graph, nodeId) => removeNode(graph, nodeId),
   saveGraphToChat,
+  syncGraphLoadFromLiveContext,
   setCurrentGraph: (graph) => { currentGraph = graph; },
   setExtractionCount: (count) => {
     if (currentGraph?.historyState) {
@@ -13579,7 +13892,25 @@ const _cleanupRuntime = () => ({
   buildBmeDbName,
   buildRestoreSafetyDbName: (chatId) =>
     buildBmeDbName(buildRestoreSafetyChatId(chatId)),
-  closeBmeDb: null,
+  closeBmeDb: async (chatId) => {
+    const normalizedChatId = normalizeChatIdCandidate(chatId);
+    if (!normalizedChatId || !bmeChatManager) return;
+    if (
+      typeof bmeChatManager.getCurrentChatId === "function" &&
+      bmeChatManager.getCurrentChatId() === normalizedChatId &&
+      typeof bmeChatManager.closeCurrent === "function"
+    ) {
+      await bmeChatManager.closeCurrent();
+    }
+  },
+  closeAllBmeDbs: async () => {
+    if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
+      await bmeChatManager.closeAll();
+    }
+  },
+  clearCachedIndexedDbSnapshot,
+  clearAllCachedIndexedDbSnapshots,
+  clearCurrentChatCommitMarker,
   deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
     fetch: globalThis.fetch?.bind(globalThis),
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
