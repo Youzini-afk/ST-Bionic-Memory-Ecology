@@ -23,9 +23,7 @@ import {
   collectSupplementalAnchorNodeIds,
   createCooccurrenceIndex,
   isEligibleAnchorNode,
-  mergeVectorResults,
   runResidualRecall,
-  splitIntentSegments,
 } from "./retrieval-enhancer.js";
 import {
   MEMORY_SCOPE_BUCKETS,
@@ -36,6 +34,7 @@ import {
   normalizeMemoryScope,
   resolveScopeBucketWeight,
 } from "../graph/memory-scope.js";
+import { rankNodesForTaskContext } from "./shared-ranking.js";
 import {
   computeKnowledgeGateForNode,
   listKnowledgeOwners,
@@ -54,8 +53,8 @@ import {
 } from "../graph/story-timeline.js";
 import { getActiveSummaryEntries } from "../graph/summary-state.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
+import { createPromptNodeReferenceMap } from "../prompting/prompt-node-references.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
-import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-index.js";
 
 function createAbortError(message = "操作已终止") {
   const error = new Error(message);
@@ -241,14 +240,6 @@ function normalizeQueryText(value, maxLength = 400) {
   return normalized.slice(0, Math.max(1, maxLength));
 }
 
-function createTextPreview(text, maxLength = 120) {
-  const normalized = normalizeQueryText(text, maxLength + 4);
-  if (!normalized) return "";
-  return normalized.length > maxLength
-    ? `${normalized.slice(0, maxLength)}...`
-    : normalized;
-}
-
 function normalizeRecallSelectionList(values = [], maxLength = 64) {
   const normalized = [];
   const seen = new Set();
@@ -262,262 +253,23 @@ function normalizeRecallSelectionList(values = [], maxLength = 64) {
   return normalized;
 }
 
-function getRecallCandidateLabel(node = {}) {
-  return String(
-    node?.fields?.title ||
-      node?.fields?.name ||
-      node?.fields?.summary ||
-      node?.fields?.insight ||
-      node?.fields?.belief ||
-      node?.id ||
-      "",
-  ).trim();
-}
-
 function createRecallCandidateKeyMaps(candidates = []) {
-  const candidateKeyToNodeId = {};
-  const candidateKeyToCandidateMeta = {};
-  const nodeIdToCandidateKey = {};
-
-  for (const [index, candidate] of (Array.isArray(candidates) ? candidates : []).entries()) {
-    const node = candidate?.node || {};
-    const nodeId = String(candidate?.nodeId || node?.id || "").trim();
-    if (!nodeId) continue;
-    const candidateKey = `R${index + 1}`;
-    candidateKeyToNodeId[candidateKey] = nodeId;
-    nodeIdToCandidateKey[nodeId] = candidateKey;
-    candidateKeyToCandidateMeta[candidateKey] = {
-      nodeId,
-      type: String(node?.type || ""),
-      label: getRecallCandidateLabel(node),
-      scopeBucket: String(candidate?.scopeBucket || ""),
-      temporalBucket: String(candidate?.temporalBucket || ""),
+  const referenceMap = createPromptNodeReferenceMap(candidates, {
+    prefix: "R",
+    maxLength: 80,
+    buildMeta: ({ entry }) => ({
+      scopeBucket: String(entry?.scopeBucket || ""),
+      temporalBucket: String(entry?.temporalBucket || ""),
       score:
         Math.round(
-          (Number(candidate?.weightedScore ?? candidate?.finalScore) || 0) * 1000,
+          (Number(entry?.weightedScore ?? entry?.finalScore) || 0) * 1000,
         ) / 1000,
-    };
-  }
-
+    }),
+  });
   return {
-    candidateKeyToNodeId,
-    candidateKeyToCandidateMeta,
-    nodeIdToCandidateKey,
-  };
-}
-
-function roundBlendWeight(value) {
-  return Math.round((Number(value) || 0) * 1000) / 1000;
-}
-
-function uniqueStrings(values = [], maxLength = 400) {
-  const result = [];
-  const seen = new Set();
-
-  for (const value of values) {
-    const text = normalizeQueryText(value, maxLength);
-    const key = text.toLowerCase();
-    if (!text || seen.has(key)) continue;
-    seen.add(key);
-    result.push(text);
-  }
-
-  return result;
-}
-
-function parseRecallContextLine(line = "") {
-  const raw = String(line ?? "").trim();
-  if (!raw) return null;
-
-  const bracketMatch = raw.match(/^\[(user|assistant)\]\s*:\s*([\s\S]*)$/i);
-  if (bracketMatch) {
-    const role = String(bracketMatch[1] || "").toLowerCase();
-    const text = normalizeQueryText(bracketMatch[2] || "");
-    return text ? { role, text } : null;
-  }
-
-  const plainMatch = raw.match(
-    /^(user|assistant|用户|助手|ai)\s*[：:]\s*([\s\S]*)$/i,
-  );
-  if (!plainMatch) return null;
-
-  const roleToken = String(plainMatch[1] || "").toLowerCase();
-  const role =
-    roleToken === "assistant" || roleToken === "助手" || roleToken === "ai"
-      ? "assistant"
-      : "user";
-  const text = normalizeQueryText(plainMatch[2] || "");
-  return text ? { role, text } : null;
-}
-
-function buildContextQueryBlend(
-  userMessage,
-  recentMessages = [],
-  {
-    enabled = true,
-    assistantWeight = 0.2,
-    previousUserWeight = 0.1,
-    maxTextLength = 400,
-  } = {},
-) {
-  const currentText = normalizeQueryText(userMessage, maxTextLength);
-  const normalizedAssistantWeight = clampRange(assistantWeight, 0.2, 0, 1);
-  const normalizedPreviousUserWeight = clampRange(
-    previousUserWeight,
-    0.1,
-    0,
-    1,
-  );
-  const currentWeight = Math.max(
-    0,
-    1 - normalizedAssistantWeight - normalizedPreviousUserWeight,
-  );
-
-  let assistantText = "";
-  let previousUserText = "";
-  const parsedMessages = Array.isArray(recentMessages)
-    ? recentMessages.map((line) => parseRecallContextLine(line)).filter(Boolean)
-    : [];
-
-  for (let index = parsedMessages.length - 1; index >= 0; index--) {
-    const item = parsedMessages[index];
-    if (!assistantText && item.role === "assistant") {
-      assistantText = normalizeQueryText(item.text, maxTextLength);
-    }
-    if (
-      !previousUserText &&
-      item.role === "user" &&
-      normalizeQueryText(item.text, maxTextLength).toLowerCase() !==
-        currentText.toLowerCase()
-    ) {
-      previousUserText = normalizeQueryText(item.text, maxTextLength);
-    }
-    if (assistantText && previousUserText) break;
-  }
-
-  const rawParts = [
-    {
-      kind: "currentUser",
-      label: "当前用户消息",
-      text: currentText,
-      weight: enabled ? currentWeight : 1,
-    },
-  ];
-
-  if (enabled && assistantText) {
-    rawParts.push({
-      kind: "assistantContext",
-      label: "最近 assistant 回复",
-      text: assistantText,
-      weight: normalizedAssistantWeight,
-    });
-  }
-
-  if (enabled && previousUserText) {
-    rawParts.push({
-      kind: "previousUser",
-      label: "上一条 user 消息",
-      text: previousUserText,
-      weight: normalizedPreviousUserWeight,
-    });
-  }
-
-  const dedupedParts = [];
-  const seen = new Set();
-  for (const part of rawParts) {
-    const text = normalizeQueryText(part.text, maxTextLength);
-    const key = text.toLowerCase();
-    if (!text || seen.has(key)) continue;
-    seen.add(key);
-    dedupedParts.push({
-      ...part,
-      text,
-    });
-  }
-
-  if (dedupedParts.length === 0) {
-    return {
-      active: false,
-      parts: [],
-      currentText: "",
-      assistantText: "",
-      previousUserText: "",
-      combinedText: "",
-    };
-  }
-
-  const totalWeight = dedupedParts.reduce(
-    (sum, part) => sum + Math.max(0, Number(part.weight) || 0),
-    0,
-  );
-  const normalizedParts = dedupedParts.map((part) => ({
-    ...part,
-    weight:
-      totalWeight > 0
-        ? roundBlendWeight((Math.max(0, Number(part.weight) || 0) || 0) / totalWeight)
-        : roundBlendWeight(1 / dedupedParts.length),
-  }));
-  const combinedText =
-    normalizedParts.length <= 1
-      ? normalizedParts[0]?.text || ""
-      : normalizedParts
-          .map((part) => `${part.label}:\n${part.text}`)
-          .join("\n\n");
-
-  return {
-    active: enabled && normalizedParts.length > 1,
-    parts: normalizedParts,
-    currentText: currentText || normalizedParts[0]?.text || "",
-    assistantText,
-    previousUserText,
-    combinedText,
-  };
-}
-
-function buildVectorQueryPlan(
-  blendPlan,
-  { enableMultiIntent = true, maxSegments = 4 } = {},
-) {
-  const plan = [];
-  let currentSegments = [];
-
-  for (const part of blendPlan?.parts || []) {
-    let queries = [part.text];
-    if (part.kind === "currentUser" && enableMultiIntent) {
-      currentSegments = splitIntentSegments(part.text, { maxSegments });
-      queries = uniqueStrings([
-        part.text,
-        ...currentSegments.filter((item) => item !== part.text),
-      ]);
-    } else {
-      queries = uniqueStrings([part.text]);
-    }
-
-    plan.push({
-      kind: part.kind,
-      label: part.label,
-      weight: part.weight,
-      queries,
-    });
-  }
-
-  return {
-    plan,
-    currentSegments,
-  };
-}
-
-function buildLexicalQuerySources(
-  userMessage,
-  { enableMultiIntent = true, maxSegments = 4 } = {},
-) {
-  const currentText = normalizeQueryText(userMessage, 400);
-  const segments = enableMultiIntent
-    ? splitIntentSegments(currentText, { maxSegments })
-    : [];
-  return {
-    sources: uniqueStrings([currentText, ...segments]),
-    segments,
+    candidateKeyToNodeId: referenceMap.keyToNodeId,
+    candidateKeyToCandidateMeta: referenceMap.keyToMeta,
+    nodeIdToCandidateKey: referenceMap.nodeIdToKey,
   };
 }
 
@@ -720,13 +472,6 @@ function buildVisibilityTopHits(scoredNodes = [], maxCount = 6) {
         Math.round((Number(item.knowledgeVisibilityScore) || 0) * 1000) / 1000,
       knowledgeMode: String(item.knowledgeMode || ""),
     }));
-}
-
-function scaleVectorResults(results = [], weight = 1) {
-  return (Array.isArray(results) ? results : []).map((item) => ({
-    ...item,
-    score: (Number(item?.score) || 0) * Math.max(0, Number(weight) || 0),
-  }));
 }
 
 function pickActiveRegion(graph, optionValue = "") {
@@ -1462,7 +1207,6 @@ export async function retrieve({
     normalizedMaxRecallNodes,
     llmCandidatePool,
   );
-  const vectorValidation = validateVectorConfig(embeddingConfig);
   const retrievalMeta = createRetrievalMeta(enableLLMRecall);
   retrievalMeta.activeRegion = activeRegion;
   retrievalMeta.activeRegionSource = activeRegionContext.source || "";
@@ -1490,29 +1234,6 @@ export async function retrieve({
   retrievalMeta.knowledgeGateMode = enableCognitiveMemory
     ? "anchored-soft-visibility"
     : "disabled";
-  const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
-    enabled: enableContextQueryBlend,
-    assistantWeight: contextAssistantWeight,
-    previousUserWeight: contextPreviousUserWeight,
-  });
-  retrievalMeta.queryBlendActive = contextQueryBlend.active;
-  retrievalMeta.queryBlendParts = (contextQueryBlend.parts || []).map((part) => ({
-    kind: part.kind,
-    label: part.label,
-    weight: part.weight,
-    text: createTextPreview(part.text),
-    length: part.text.length,
-  }));
-  retrievalMeta.queryBlendWeights = Object.fromEntries(
-    (contextQueryBlend.parts || []).map((part) => [part.kind, part.weight]),
-  );
-  const lexicalQuery = buildLexicalQuerySources(
-    contextQueryBlend.currentText || userMessage,
-    {
-      enableMultiIntent,
-      maxSegments: multiIntentMaxSegments,
-    },
-  );
   debugLog(
     `[ST-BME] 检索开始: ${nodeCount} 个活跃节点${enableVisibility ? " (认知边界已启用)" : ""}`,
   );
@@ -1567,49 +1288,85 @@ export async function retrieve({
       },
     });
   }
-
-  const vectorStartedAt = nowMs();
-  if (enableVectorPrefilter && vectorValidation.valid) {
-    debugLog("[ST-BME] 第1层: 向量预筛");
-    const queryPlan = buildVectorQueryPlan(contextQueryBlend, {
+  const sharedRanking = await rankNodesForTaskContext({
+    graph,
+    userMessage,
+    recentMessages,
+    embeddingConfig,
+    signal,
+    options: {
+      topK: normalizedTopK,
+      diffusionTopK: normalizedDiffusionTopK,
+      enableVectorPrefilter,
+      enableGraphDiffusion,
+      enableContextQueryBlend,
       enableMultiIntent,
-      maxSegments: multiIntentMaxSegments,
-    });
-    const groups = [];
-
-    retrievalMeta.segmentsUsed = queryPlan.currentSegments;
-    for (const part of queryPlan.plan) {
-      for (const queryText of part.queries) {
-        const results = await vectorPreFilter(
-          graph,
-          queryText,
-          activeNodes,
-          embeddingConfig,
-          normalizedTopK,
-          signal,
-        );
-        groups.push(scaleVectorResults(results, part.weight || 1));
-      }
-    }
-
-    const merged = mergeVectorResults(
-      groups,
-      Math.max(normalizedTopK * 2, 24),
-    );
-    retrievalMeta.vectorHits = merged.rawHitCount;
-    retrievalMeta.vectorMergedHits = merged.results.length;
-    vectorResults = merged.results;
-  } else if (enableVectorPrefilter) {
-    pushSkipReason(retrievalMeta, "vector-config-invalid");
-  }
-  retrievalMeta.timings.vector = roundMs(nowMs() - vectorStartedAt);
-
-  exactEntityAnchors.push(
-    ...extractEntityAnchors(
-      contextQueryBlend.currentText || userMessage,
+      multiIntentMaxSegments,
+      contextAssistantWeight,
+      contextPreviousUserWeight,
+      teleportAlpha,
+      enableTemporalLinks,
+      temporalLinkStrength,
+      enableLexicalBoost,
+      lexicalWeight,
+      weights,
       activeNodes,
-    ),
+    },
+  });
+  const contextQueryBlend = sharedRanking.contextQueryBlend;
+  const lexicalQuery = sharedRanking.lexicalQuery;
+  retrievalMeta.queryBlendActive = Boolean(
+    sharedRanking?.diagnostics?.queryBlendActive,
   );
+  retrievalMeta.queryBlendParts = Array.isArray(
+    sharedRanking?.diagnostics?.queryBlendParts,
+  )
+    ? [...sharedRanking.diagnostics.queryBlendParts]
+    : [];
+  retrievalMeta.queryBlendWeights = {
+    ...(sharedRanking?.diagnostics?.queryBlendWeights || {}),
+  };
+  retrievalMeta.segmentsUsed = Array.isArray(sharedRanking?.diagnostics?.segmentsUsed)
+    ? [...sharedRanking.diagnostics.segmentsUsed]
+    : [];
+  retrievalMeta.vectorHits = Number(sharedRanking?.diagnostics?.vectorHits || 0);
+  retrievalMeta.vectorMergedHits = Number(
+    sharedRanking?.diagnostics?.vectorMergedHits || 0,
+  );
+  retrievalMeta.seedCount = Number(sharedRanking?.diagnostics?.seedCount || 0);
+  retrievalMeta.diffusionHits = Number(
+    sharedRanking?.diagnostics?.diffusionHits || 0,
+  );
+  retrievalMeta.lexicalBoostedNodes = Number(
+    sharedRanking?.diagnostics?.lexicalBoostedNodes || 0,
+  );
+  retrievalMeta.temporalSyntheticEdgeCount = Number(
+    sharedRanking?.diagnostics?.temporalSyntheticEdgeCount || 0,
+  );
+  retrievalMeta.teleportAlpha = Number(
+    sharedRanking?.diagnostics?.teleportAlpha || teleportAlpha,
+  );
+  retrievalMeta.lexicalTopHits = Array.isArray(
+    sharedRanking?.diagnostics?.lexicalTopHits,
+  )
+    ? [...sharedRanking.diagnostics.lexicalTopHits]
+    : [];
+  retrievalMeta.timings.vector = Number(
+    sharedRanking?.diagnostics?.timings?.vector || 0,
+  );
+  retrievalMeta.timings.diffusion = Number(
+    sharedRanking?.diagnostics?.timings?.diffusion || 0,
+  );
+  for (const reason of sharedRanking?.diagnostics?.skipReasons || []) {
+    pushSkipReason(retrievalMeta, reason);
+  }
+  vectorResults = Array.isArray(sharedRanking?.vectorResults)
+    ? [...sharedRanking.vectorResults]
+    : [];
+  diffusionResults = Array.isArray(sharedRanking?.diffusionResults)
+    ? [...sharedRanking.diffusionResults]
+    : [];
+  exactEntityAnchors.push(...(sharedRanking?.exactEntityAnchors || []));
   supplementalAnchorNodeIds = collectSupplementalAnchorNodeIds(
     graph,
     vectorResults,
@@ -1650,7 +1407,7 @@ export async function retrieve({
   retrievalMeta.timings.residual = roundMs(nowMs() - residualStartedAt);
 
   const diffusionStartedAt = nowMs();
-  if (enableGraphDiffusion) {
+  if (enableGraphDiffusion && (enableCrossRecall || residualResult.triggered)) {
     debugLog("[ST-BME] 第2层: PEDSA 图扩散");
     const seeds = [
       ...vectorResults.map((v) => ({ id: v.nodeId, energy: v.score })),
@@ -1705,9 +1462,11 @@ export async function retrieve({
         return node && !node.archived;
       });
     }
+    retrievalMeta.diffusionHits = diffusionResults.length;
   }
-  retrievalMeta.diffusionHits = diffusionResults.length;
-  retrievalMeta.timings.diffusion = roundMs(nowMs() - diffusionStartedAt);
+  if (enableGraphDiffusion && (enableCrossRecall || residualResult.triggered)) {
+    retrievalMeta.timings.diffusion = roundMs(nowMs() - diffusionStartedAt);
+  }
 
   debugLog("[ST-BME] 第3层: 混合评分");
 
@@ -2259,7 +2018,9 @@ export async function retrieve({
   retrievalMeta.timings.total = roundMs(nowMs() - startedAt);
 
   return buildResult(graph, selectedNodeIds, schema, {
-    retrieval: retrievalMeta,
+    retrieval: {
+      ...retrievalMeta,
+    },
     scopeContext: {
       enableScopedMemory,
       enablePovMemory,
@@ -2293,62 +2054,6 @@ export async function retrieve({
       bucketWeights,
     },
   });
-}
-
-/**
- * 向量预筛选
- */
-async function vectorPreFilter(
-  graph,
-  userMessage,
-  activeNodes,
-  embeddingConfig,
-  topK,
-  signal,
-) {
-  try {
-    return await findSimilarNodesByText(
-      graph,
-      userMessage,
-      embeddingConfig,
-      topK,
-      activeNodes,
-      signal,
-    );
-  } catch (e) {
-    if (isAbortError(e)) {
-      throw e;
-    }
-    console.error("[ST-BME] 向量预筛失败:", e);
-    return [];
-  }
-}
-
-/**
- * 实体锚点提取
- * 从用户消息中提取名词/实体，匹配图中的节点名称
- */
-function extractEntityAnchors(userMessage, activeNodes) {
-  const anchors = [];
-  const seen = new Set();
-
-  for (const node of activeNodes) {
-    const candidates = [node.fields?.name, node.fields?.title]
-      .filter((value) => typeof value === "string")
-      .map((value) => value.trim())
-      .filter((value) => value.length >= 2);
-
-    for (const candidate of candidates) {
-      if (!userMessage.includes(candidate)) continue;
-      const key = `${node.id}:${candidate}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      anchors.push({ nodeId: node.id, entity: candidate });
-      break;
-    }
-  }
-
-  return anchors;
 }
 
 function buildResidualBasisNodes(
@@ -2463,7 +2168,9 @@ async function llmRecall(
       const fieldsStr = Object.entries(node.fields)
         .map(([k, v]) => `${k}: ${v}`)
         .join(", ");
-      const candidateKey = `R${index + 1}`;
+      const candidateKey =
+        nodeIdToCandidateKey[String(c?.nodeId || node?.id || "").trim()] ||
+        `R${index + 1}`;
       return `[${candidateKey}] 类型=${typeLabel}, 作用域=${describeMemoryScope(node.scope)}, 时间=${storyTimeLabel || "未标注"}, 时间桶=${String(c.temporalBucket || STORY_TEMPORAL_BUCKETS.UNDATED)}, 召回桶=${describeScopeBucket(c.scopeBucket)}, 认知=${String(c.knowledgeMode || "unknown")}, 可见性=${(Number(c.knowledgeVisibilityScore) || 0).toFixed(3)}, ${fieldsStr} (评分=${(c.weightedScore ?? c.finalScore).toFixed(3)})`;
     })
     .join("\n");
