@@ -671,6 +671,15 @@
   line-height: 1.4;
 }
 
+.bme-task-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.bme-task-nav-desktop {
+  flex-direction: column;
+}
+
 .bme-task-nav-btn {
   display: flex;
   align-items: center;
