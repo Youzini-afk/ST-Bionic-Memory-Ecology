@@ -11126,6 +11126,8 @@ async function handleExtractionSuccess(
       await generateReflection({
         graph: currentGraph,
         currentSeq: endIdx,
+        schema: getSchema(),
+        embeddingConfig: getEmbeddingConfig(),
         settings,
         signal,
       });

@@ -41,12 +41,11 @@ import {
   buildTaskLlmPayload,
   buildTaskPrompt,
 } from "../prompting/prompt-builder.js";
-import { createPromptNodeReferenceMap } from "../prompting/prompt-node-references.js";
 import { RELATION_TYPES } from "../graph/schema.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
-import { rankNodesForTaskContext } from "../retrieval/shared-ranking.js";
 import { getSTContextForPrompt, getSTContextSnapshot } from "../host/st-context.js";
 import { buildExtractionInputContext } from "./extraction-context.js";
+import { buildTaskGraphStats } from "./task-graph-stats.js";
 import {
   aliasSetMatchesValue,
   buildUserPovAliasNormalizedSet,
@@ -174,36 +173,20 @@ function buildExtractRankingQueryText(messages = []) {
     .join("\n");
 }
 
-function buildExtractRelevantNodeReferenceMap(scoredNodes = [], schema = [], maxCount = 6) {
-  const typeLabelById = new Map(
-    (Array.isArray(schema) ? schema : []).map((typeDef) => [
-      String(typeDef?.id || "").trim(),
-      String(typeDef?.label || typeDef?.id || "").trim(),
-    ]),
-  );
-  const relevantNodes = (Array.isArray(scoredNodes) ? scoredNodes : [])
-    .filter((entry) =>
-      entry?.node &&
-        !entry.node.archived &&
-        ((Number(entry?.vectorScore) || 0) > 0 ||
-          (Number(entry?.graphScore) || 0) > 0 ||
-          (Number(entry?.lexicalScore) || 0) > 0),
-    )
-    .slice(0, Math.max(1, maxCount));
-  return createPromptNodeReferenceMap(relevantNodes, {
-    prefix: "G",
-    maxLength: 28,
-    buildMeta: ({ entry, node }) => ({
-      typeLabel:
-        typeLabelById.get(String(node?.type || "").trim()) ||
-        String(node?.type || "节点").trim() ||
-        "节点",
-      score:
-        Math.round(
-          (Number(entry?.weightedScore ?? entry?.finalScore) || 0) * 1000,
-        ) / 1000,
-    }),
-  });
+function buildReflectionRankingQueryText({
+  eventSummary = "",
+  characterSummary = "",
+  threadSummary = "",
+  contradictionSummary = "",
+} = {}) {
+  return [
+    eventSummary ? `最近事件:\n${eventSummary}` : "",
+    characterSummary ? `近期角色状态:\n${characterSummary}` : "",
+    threadSummary ? `当前主线:\n${threadSummary}` : "",
+    contradictionSummary ? `已知矛盾:\n${contradictionSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function isAbortError(error) {
@@ -959,30 +942,25 @@ export async function extractMemories({
     : structuredMessages;
 
   const extractGraphRankingQuery = buildExtractRankingQueryText(structuredMessages);
-  const extractGraphRanking =
-    graph?.nodes?.some((node) => !node?.archived) && extractGraphRankingQuery
-      ? await rankNodesForTaskContext({
-          graph,
-          userMessage: extractGraphRankingQuery,
-          recentMessages: [],
-          embeddingConfig,
-          signal,
-          options: {
-            topK: 12,
-            diffusionTopK: 48,
-            enableContextQueryBlend: false,
-            enableMultiIntent: true,
-            maxTextLength: 1200,
-          },
-        })
-      : null;
-  const extractGraphRelevantNodes = buildExtractRelevantNodeReferenceMap(
-    extractGraphRanking?.scoredNodes,
+  const extractGraphStats = await buildTaskGraphStats({
+    graph,
     schema,
-  );
-
-  // 构建当前图概览（让 LLM 知道已有哪些节点，避免重复）
-  const graphOverview = buildGraphOverview(graph, schema, extractGraphRelevantNodes);
+    userMessage: extractGraphRankingQuery,
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与当前提取片段最相关的既有节点",
+  });
+  const extractGraphRanking = extractGraphStats.ranking;
+  const extractGraphRelevantNodes = extractGraphStats.relevantReferenceMap;
+  const graphOverview = extractGraphStats.graphStats;
 
   // 构建 Schema 描述
   const schemaDescription = buildSchemaDescription(schema);
@@ -1840,40 +1818,6 @@ async function generateNodeEmbeddings(graph, embeddingConfig, signal) {
 }
 
 /**
- * 构建图谱概览文本（给 LLM 看）
- */
-function buildGraphOverview(graph, schema, relevantReferenceMap = null) {
-  const activeNodes = graph.nodes
-    .filter((n) => !n.archived)
-    .sort((a, b) => (a.seq || 0) - (b.seq || 0));
-  if (activeNodes.length === 0) return "";
-
-  const lines = [];
-  lines.push("### 图谱节点统计");
-  for (const typeDef of schema) {
-    const nodesOfType = activeNodes.filter((n) => n.type === typeDef.id);
-    if (nodesOfType.length === 0) continue;
-
-    lines.push(`  - ${typeDef.label}: ${nodesOfType.length}`);
-  }
-
-  const references = Array.isArray(relevantReferenceMap?.references)
-    ? relevantReferenceMap.references
-    : [];
-  if (references.length > 0) {
-    lines.push("", "### 与当前提取片段最相关的既有节点");
-    for (const reference of references) {
-      const typeLabel = String(reference?.meta?.typeLabel || reference?.meta?.type || "节点").trim() || "节点";
-      const label = String(reference?.meta?.label || "—").trim() || "—";
-      const score = Number(reference?.meta?.score || 0).toFixed(3);
-      lines.push(`  - [${reference.key}|${typeLabel}] ${label} (score=${score})`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-/**
  * 构建 Schema 描述文本
  */
 function buildSchemaDescription(schema) {
@@ -2140,6 +2084,8 @@ export async function generateSynopsis({
 export async function generateReflection({
   graph,
   currentSeq,
+  schema = [],
+  embeddingConfig,
   customPrompt,
   signal,
   settings = {},
@@ -2189,6 +2135,27 @@ export async function generateReflection({
   const contradictionSummary = contradictEdges
     .map((e) => `${e.fromId} -> ${e.toId} (${e.relation})`)
     .join("\n");
+  const reflectionGraphStats = await buildTaskGraphStats({
+    graph,
+    schema,
+    userMessage: buildReflectionRankingQueryText({
+      eventSummary,
+      characterSummary,
+      threadSummary,
+      contradictionSummary,
+    }),
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与当前反思最相关的既有节点",
+  });
 
   const reflectionPromptBuild = await buildTaskPrompt(settings, "reflection", {
     taskName: "reflection",
@@ -2196,7 +2163,7 @@ export async function generateReflection({
     characterSummary: characterSummary || "(无)",
     threadSummary: threadSummary || "(无)",
     contradictionSummary: contradictionSummary || "(无)",
-    graphStats: `event=${recentEvents.length}, character=${recentCharacters.length}, thread=${recentThreads.length}`,
+    graphStats: reflectionGraphStats.graphStats,
     ...getSTContextForPrompt(),
   });
   const reflectionRegexInput = { entries: [] };

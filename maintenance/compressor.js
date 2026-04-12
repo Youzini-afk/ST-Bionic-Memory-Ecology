@@ -30,6 +30,7 @@ import {
 } from "../prompting/prompt-builder.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
+import { buildTaskGraphStats } from "./task-graph-stats.js";
 import { isDirectVectorConfig } from "../vector/vector-index.js";
 
 function createAbortError(message = "操作已终止") {
@@ -107,6 +108,30 @@ function normalizeCompressionFieldValue(value) {
     }
   }
   return String(value).trim();
+}
+
+function buildCompressionRankingQueryText(nodes = [], typeDef = {}) {
+  const typeLabel = String(typeDef?.label || typeDef?.id || "节点").trim() || "节点";
+  const lines = (Array.isArray(nodes) ? nodes : [])
+    .map((node, index) => {
+      const fieldsText = Object.entries(node?.fields || {})
+        .map(([key, value]) => {
+          const normalizedValue = normalizeCompressionFieldValue(value);
+          return normalizedValue ? `${key}: ${normalizedValue}` : "";
+        })
+        .filter(Boolean)
+        .join(" | ");
+      const storyTimeLabel = describeNodeStoryTime(node);
+      return [
+        `${typeLabel}#${index + 1}`,
+        storyTimeLabel ? `剧情时间=${storyTimeLabel}` : "",
+        fieldsText,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+    })
+    .filter(Boolean);
+  return lines.length > 0 ? [`压缩批次 ${typeLabel}`, ...lines].join("\n") : "";
 }
 
 function buildCompressionFallbackSummary(batch = []) {
@@ -187,6 +212,7 @@ export async function compressType({
   graph,
   typeDef,
   embeddingConfig,
+  schema = [],
   force = false,
   customPrompt,
   signal,
@@ -211,6 +237,7 @@ export async function compressType({
       typeDef,
       level,
       embeddingConfig,
+      schema,
       force,
       customPrompt,
       signal,
@@ -235,6 +262,7 @@ async function compressLevel({
   typeDef,
   level,
   embeddingConfig,
+  schema = [],
   force,
   customPrompt,
   signal,
@@ -271,6 +299,9 @@ async function compressLevel({
       const summaryResult = await summarizeBatch(
         batch,
         typeDef,
+        graph,
+        embeddingConfig,
+        schema,
         customPrompt,
         signal,
         settings,
@@ -476,6 +507,9 @@ function migrateBatchEdges(graph, batch, compressedNode) {
 async function summarizeBatch(
   nodes,
   typeDef,
+  graph,
+  embeddingConfig,
+  schema = [],
   customPrompt,
   signal,
   settings = {},
@@ -493,13 +527,35 @@ async function summarizeBatch(
 
   const instruction =
     typeDef.compression.instruction || "将以下节点压缩总结为一条精炼记录。";
+  const excludedNodeIds = new Set(
+    (Array.isArray(nodes) ? nodes : []).map((node) => String(node?.id || "").trim()),
+  );
+  const compressionGraphStats = await buildTaskGraphStats({
+    graph,
+    schema: Array.isArray(schema) && schema.length > 0 ? schema : [typeDef],
+    userMessage: buildCompressionRankingQueryText(nodes, typeDef),
+    recentMessages: [],
+    embeddingConfig,
+    signal,
+    activeNodes: getActiveNodes(graph).filter(
+      (node) => !excludedNodeIds.has(String(node?.id || "").trim()),
+    ),
+    rankingOptions: {
+      topK: 12,
+      diffusionTopK: 48,
+      enableContextQueryBlend: false,
+      enableMultiIntent: true,
+      maxTextLength: 1200,
+    },
+    relevantHeading: "与当前压缩批次最相关的既有节点",
+  });
 
   const compressPromptBuild = await buildTaskPrompt(settings, "compress", {
     taskName: "compress",
     nodeContent: nodeDescriptions,
     candidateNodes: nodeDescriptions,
     currentRange: `${nodes[0]?.seq ?? "?"} ~ ${nodes[nodes.length - 1]?.seq ?? "?"}`,
-    graphStats: `node_count=${nodes.length}, node_type=${typeDef.id}`,
+    graphStats: compressionGraphStats.graphStats,
     ...getSTContextForPrompt(),
   });
   const compressRegexInput = { entries: [] };
@@ -581,6 +637,7 @@ export async function compressAll(
         graph,
         typeDef,
         embeddingConfig,
+        schema,
         force,
         customPrompt,
         signal,
