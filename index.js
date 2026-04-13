@@ -313,12 +313,177 @@ let _themesModule = null;
 const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
 const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
+function normalizeChatIdCandidate(value = "") {
+  return String(value ?? "").trim();
+}
+
+function readGlobalCurrentChatId() {
+  try {
+    return normalizeChatIdCandidate(
+      globalThis.SillyTavern?.getCurrentChatId?.() ||
+        globalThis.getCurrentChatId?.() ||
+        "",
+    );
+  } catch {
+    return "";
+  }
+}
+
+function hasLikelySelectedChatContext(context = getContext()) {
+  if (!context || typeof context !== "object") {
+    return false;
+  }
+
+  const hasMeaningfulChatMetadata =
+    context.chatMetadata &&
+    typeof context.chatMetadata === "object" &&
+    !Array.isArray(context.chatMetadata) &&
+    Object.keys(context.chatMetadata).length > 0;
+  const hasChatMessages =
+    Array.isArray(context.chat) && context.chat.length > 0;
+  const hasCharacterId =
+    context.characterId !== undefined &&
+    context.characterId !== null &&
+    String(context.characterId).trim() !== "";
+  const hasGroupId =
+    context.groupId !== undefined &&
+    context.groupId !== null &&
+    String(context.groupId).trim() !== "";
+
+  return (
+    hasMeaningfulChatMetadata || hasChatMessages || hasCharacterId || hasGroupId
+  );
+}
+
 function getChatMetadataIntegrity(context = getContext()) {
   return normalizeChatIdCandidate(context?.chatMetadata?.integrity);
 }
 
 function getChatCommitMarker(context = getContext()) {
   return readGraphCommitMarker(context);
+}
+
+function resolveCurrentHostChatId(context = getContext()) {
+  const candidates = [
+    context?.chatId,
+    context?.getCurrentChatId?.(),
+    readGlobalCurrentChatId(),
+    context?.chatMetadata?.chat_id,
+    context?.chatMetadata?.chatId,
+    context?.chatMetadata?.session_id,
+    context?.chatMetadata?.sessionId,
+  ];
+
+  return (
+    candidates
+      .map((candidate) => normalizeChatIdCandidate(candidate))
+      .find(Boolean) || ""
+  );
+}
+
+function resolveCurrentChatIdentity(context = getContext()) {
+  const hostChatId = resolveCurrentHostChatId(context);
+  const integrity =
+    typeof getChatMetadataIntegrity === "function"
+      ? getChatMetadataIntegrity(context)
+      : normalizeChatIdCandidate(
+          context?.chatMetadata?.integrity ||
+            context?.chatMetadata?.chat_id ||
+            context?.chatMetadata?.chatId ||
+            "",
+        );
+  const aliasedChatId =
+    !integrity &&
+    hostChatId &&
+    typeof resolveGraphIdentityAliasByHostChatId === "function"
+      ? resolveGraphIdentityAliasByHostChatId(hostChatId)
+      : "";
+  const chatId = integrity || aliasedChatId || hostChatId;
+
+  return {
+    chatId,
+    hostChatId,
+    integrity,
+    identitySource: integrity
+      ? "integrity"
+      : aliasedChatId
+        ? "alias"
+        : hostChatId
+          ? "host-chat-id"
+          : "",
+    hasLikelySelectedChat: hasLikelySelectedChatContext(context),
+  };
+}
+
+function getCurrentChatId(context = getContext()) {
+  return resolveCurrentChatIdentity(context).chatId;
+}
+
+function rememberResolvedGraphIdentityAlias(
+  context = getContext(),
+  persistenceChatId = getCurrentChatId(context),
+) {
+  const identity = resolveCurrentChatIdentity(context);
+  if (!identity.integrity || !persistenceChatId) {
+    return null;
+  }
+
+  return rememberGraphIdentityAlias({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId,
+  });
+}
+
+function doesChatIdMatchResolvedGraphIdentity(
+  candidateChatId,
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
+  if (!normalizedCandidate || !identity || typeof identity !== "object") {
+    return false;
+  }
+
+  const knownChatIds = new Set();
+  const addKnownChatId = (value) => {
+    const normalized = normalizeChatIdCandidate(value);
+    if (normalized) {
+      knownChatIds.add(normalized);
+    }
+  };
+
+  addKnownChatId(identity.chatId);
+  addKnownChatId(identity.hostChatId);
+  addKnownChatId(identity.integrity);
+
+  for (const aliasCandidate of getGraphIdentityAliasCandidates({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId: identity.chatId,
+  })) {
+    addKnownChatId(aliasCandidate);
+  }
+
+  return knownChatIds.has(normalizedCandidate);
+}
+
+function areChatIdsEquivalentForResolvedIdentity(
+  candidateChatId,
+  referenceChatId,
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
+  const normalizedReference = normalizeChatIdCandidate(referenceChatId);
+  if (!normalizedCandidate || !normalizedReference) {
+    return normalizedCandidate === normalizedReference;
+  }
+  if (normalizedCandidate === normalizedReference) {
+    return true;
+  }
+  return (
+    doesChatIdMatchResolvedGraphIdentity(normalizedCandidate, identity) &&
+    doesChatIdMatchResolvedGraphIdentity(normalizedReference, identity)
+  );
 }
 
 function syncCommitMarkerToPersistenceState(context = getContext()) {
@@ -4404,6 +4569,48 @@ function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
     console.warn("[ST-BME] 读取 legacy chat_metadata 图谱失败:", error);
     return null;
   }
+}
+
+function buildLegacyGraphIdentityCandidates(
+  targetChatId,
+  context = getContext(),
+  { shadowSnapshot = null } = {},
+) {
+  const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
+  const identity = resolveCurrentChatIdentity(context);
+  const candidates = new Set();
+  const addCandidate = (value) => {
+    const normalized = normalizeChatIdCandidate(value);
+    if (!normalized || normalized === normalizedTargetChatId) return;
+    candidates.add(normalized);
+  };
+
+  addCandidate(identity.hostChatId);
+  for (const aliasCandidate of getGraphIdentityAliasCandidates({
+    integrity: identity.integrity,
+    hostChatId: identity.hostChatId,
+    persistenceChatId: normalizedTargetChatId,
+  })) {
+    addCandidate(aliasCandidate);
+  }
+
+  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
+  const runtimeGraphIntegrity = normalizeChatIdCandidate(
+    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
+  );
+  if (
+    identity.integrity &&
+    runtimeGraphIntegrity &&
+    runtimeGraphIntegrity === identity.integrity
+  ) {
+    addCandidate(graphPersistenceState.chatId);
+    addCandidate(currentGraph?.historyState?.chatId);
+    addCandidate(currentGraphMeta.chatId);
+  }
+
+  addCandidate(shadowSnapshot?.chatId);
+  addCandidate(shadowSnapshot?.persistedChatId);
+  return Array.from(candidates);
 }
 
 async function maybeRecoverIndexedDbGraphFromStableIdentity(
