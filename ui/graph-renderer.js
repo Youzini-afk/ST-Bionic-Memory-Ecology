@@ -12,6 +12,10 @@ import {
     aliasSetMatchesValue,
     buildUserPovAliasNormalizedSet,
 } from '../runtime/user-alias-utils.js';
+import {
+    GraphNativeLayoutBridge,
+    normalizeGraphNativeRuntimeOptions,
+} from './graph-native-bridge.js';
 
 /**
  * @typedef {Object} GraphNode
@@ -56,6 +60,39 @@ const ADAPTIVE_NEURAL_LAYOUT_POLICY = Object.freeze({
 });
 
 const MIN_USABLE_CANVAS_DIMENSION = 48;
+const RUNTIME_DEBUG_STATE_KEY = '__stBmeRuntimeDebugState';
+
+function cloneGraphLayoutDebugValue(value, fallback = null) {
+    if (value == null) return fallback;
+    if (typeof globalThis.structuredClone === 'function') {
+        try {
+            return globalThis.structuredClone(value);
+        } catch {}
+    }
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch {
+        return fallback;
+    }
+}
+
+function recordGraphLayoutDebugSnapshot(snapshot = null) {
+    if (!globalThis || typeof globalThis !== 'object') return;
+    if (!globalThis[RUNTIME_DEBUG_STATE_KEY] || typeof globalThis[RUNTIME_DEBUG_STATE_KEY] !== 'object') {
+        globalThis[RUNTIME_DEBUG_STATE_KEY] = {
+            updatedAt: '',
+            graphLayout: null,
+        };
+    }
+    const state = globalThis[RUNTIME_DEBUG_STATE_KEY];
+    state.graphLayout = snapshot && typeof snapshot === 'object'
+        ? {
+            updatedAt: new Date().toISOString(),
+            ...cloneGraphLayoutDebugValue(snapshot, {}),
+        }
+        : null;
+    state.updatedAt = new Date().toISOString();
+}
 
 /** 兼容旧版 forceConfig（召回卡片等） */
 function layoutKeysFromForceConfig(fc) {
@@ -194,6 +231,7 @@ export class GraphRenderer {
         const themeName = isLegacy ? options : (options?.theme || 'crimson');
         const layoutOverride = isLegacy ? {} : (options?.layoutConfig || {});
         const fromForce = isLegacy ? {} : layoutKeysFromForceConfig(options?.forceConfig);
+        const runtimeConfig = isLegacy ? {} : (options?.runtimeConfig || {});
 
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
@@ -203,9 +241,13 @@ export class GraphRenderer {
         this.colors = getNodeColors(themeName);
         this.themeName = themeName;
         this.config = { ...DEFAULT_LAYOUT_CONFIG, ...fromForce, ...layoutOverride };
+        this.runtimeConfig = normalizeGraphNativeRuntimeOptions(runtimeConfig);
         this._userPovAliasSet = buildUserPovAliasNormalizedSet(
             isLegacy ? null : options?.userPovAliases,
         );
+        this._nativeLayoutBridge = null;
+        this._layoutSolveRevision = 0;
+        this._lastLayoutDiagnostics = null;
 
         this._regionPanels = [];
         this._lastGraph = null;
@@ -253,7 +295,10 @@ export class GraphRenderer {
      * @param {{ userPovAliases?: string|string[]|object }} [layoutHints]
      */
     loadGraph(graph, layoutHints = {}) {
+        const loadStartedAt = performance.now();
         const prevSelectedId = this.selectedNode?.id || null;
+        const solveRevision = this._nextLayoutSolveRevision();
+        this._nativeLayoutBridge?.cancelPending?.('graph-load-replaced');
         this._lastGraph = graph;
         this._lastLayoutHints = layoutHints && typeof layoutHints === 'object'
             ? { ...layoutHints }
@@ -303,13 +348,39 @@ export class GraphRenderer {
                 strength: e.strength || 0.5,
                 relation: e.relation || 'related',
             }));
+        const prepareFinishedAt = performance.now();
 
         const parts = partitionNodesByScope(this.nodes, this._userPovAliasSet);
         this._regionPanels = this._computeRegionPanels(W, H, parts);
         this._layoutAllPartitions(parts);
+        const layoutFinishedAt = performance.now();
         const neuralPlan = this._resolveNeuralSimulationPlan();
+        const shouldTryNativeLayout = this._shouldTryNativeLayout(
+            this.nodes.length,
+            this.edges.length,
+        );
+
+        let solvePath = neuralPlan.skip ? 'skipped' : 'js-main';
+        let solveMs = 0;
+        let nativeSolvePromise = null;
+
         if (!neuralPlan.skip && neuralPlan.iterations > 0) {
-            this._simulateNeuralWithinRegions(neuralPlan.iterations);
+            if (shouldTryNativeLayout) {
+                solvePath = 'native-worker-pending';
+                nativeSolvePromise = this._simulateNeuralWithNativeBridge(
+                    neuralPlan.iterations,
+                    solveRevision,
+                    {
+                        loadStartedAt,
+                        prepareFinishedAt,
+                        layoutFinishedAt,
+                    },
+                );
+            } else {
+                const solveStartedAt = performance.now();
+                this._simulateNeuralWithinRegions(neuralPlan.iterations);
+                solveMs = Math.max(0, performance.now() - solveStartedAt);
+            }
         }
 
         if (prevSelectedId) {
@@ -318,6 +389,35 @@ export class GraphRenderer {
 
         this._cancelAnim();
         this._render();
+
+        if (!nativeSolvePromise) {
+            this._setLastLayoutDiagnostics({
+                mode: solvePath,
+                nodeCount: this.nodes.length,
+                edgeCount: this.edges.length,
+                prepareMs: Math.max(0, prepareFinishedAt - loadStartedAt),
+                layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
+                solveMs,
+                totalMs: Math.max(0, performance.now() - loadStartedAt),
+                at: Date.now(),
+            });
+            return;
+        }
+
+        nativeSolvePromise
+            .then((result) => {
+                if (!result) return;
+                this._setLastLayoutDiagnostics({
+                    ...result.diagnostics,
+                    at: Date.now(),
+                });
+                if (result.applied && this.enabled) {
+                    this._scheduleRender();
+                }
+            })
+            .catch(() => {
+                // fail-open 路径由 bridge 内部控制
+            });
     }
 
     /**
@@ -327,6 +427,33 @@ export class GraphRenderer {
         this.themeName = themeName;
         this.colors = getNodeColors(themeName);
         if (this.enabled) this._render();
+    }
+
+    setRuntimeConfig(runtimeConfig = {}) {
+        this.runtimeConfig = normalizeGraphNativeRuntimeOptions(runtimeConfig);
+        if (this._nativeLayoutBridge) {
+            this._nativeLayoutBridge.updateRuntimeOptions(this.runtimeConfig);
+        }
+    }
+
+    getLastLayoutDiagnostics() {
+        return this._lastLayoutDiagnostics
+            ? { ...this._lastLayoutDiagnostics }
+            : null;
+    }
+
+    _setLastLayoutDiagnostics(diagnostics = null) {
+        this._lastLayoutDiagnostics = diagnostics && typeof diagnostics === 'object'
+            ? { ...diagnostics }
+            : null;
+        recordGraphLayoutDebugSnapshot(
+            this._lastLayoutDiagnostics
+                ? {
+                    ...this._lastLayoutDiagnostics,
+                    enabled: this.enabled !== false,
+                }
+                : null,
+        );
     }
 
     /**
@@ -351,7 +478,12 @@ export class GraphRenderer {
             if (!nextEnabled) this._clearCanvas();
             return;
         }
+        this._nextLayoutSolveRevision();
+        this._nativeLayoutBridge?.cancelPending?.('graph-renderer-state-changed');
         this.enabled = nextEnabled;
+        if (this._lastLayoutDiagnostics) {
+            this._setLastLayoutDiagnostics(this._lastLayoutDiagnostics);
+        }
         this._cancelAnim();
         this.dragNode = null;
         this.isDragging = false;
@@ -627,6 +759,190 @@ export class GraphRenderer {
         return {
             skip,
             iterations,
+        };
+    }
+
+    _nextLayoutSolveRevision() {
+        this._layoutSolveRevision = Math.max(1, Number(this._layoutSolveRevision || 0) + 1);
+        return this._layoutSolveRevision;
+    }
+
+    _ensureNativeLayoutBridge() {
+        if (this._nativeLayoutBridge) {
+            this._nativeLayoutBridge.updateRuntimeOptions(this.runtimeConfig);
+            return this._nativeLayoutBridge;
+        }
+        this._nativeLayoutBridge = new GraphNativeLayoutBridge(this.runtimeConfig);
+        return this._nativeLayoutBridge;
+    }
+
+    _shouldTryNativeLayout(nodeCount = 0, edgeCount = 0) {
+        if (this.runtimeConfig.graphNativeForceDisable) return false;
+        if (!this.runtimeConfig.graphUseNativeLayout) return false;
+        const bridge = this._ensureNativeLayoutBridge();
+        if (!bridge) return false;
+        return bridge.shouldRunForGraph(nodeCount, edgeCount);
+    }
+
+    _buildNativeLayoutPayload(iterations) {
+        const nodeIndexById = new Map();
+        const nodes = this.nodes.map((node, index) => {
+            nodeIndexById.set(node.id, index);
+            return {
+                x: node.x,
+                y: node.y,
+                vx: node.vx,
+                vy: node.vy,
+                pinned: node.pinned === true,
+                radius: this._nodeRadius(node),
+                regionKey: node.regionKey,
+                regionRect: node.regionRect
+                    ? {
+                        x: node.regionRect.x,
+                        y: node.regionRect.y,
+                        w: node.regionRect.w,
+                        h: node.regionRect.h,
+                    }
+                    : null,
+            };
+        });
+
+        const edges = this.edges
+            .map((edge) => {
+                const from = nodeIndexById.get(edge.from?.id);
+                const to = nodeIndexById.get(edge.to?.id);
+                if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+                    return null;
+                }
+                return {
+                    from,
+                    to,
+                    strength: edge.strength || 0.5,
+                };
+            })
+            .filter(Boolean);
+
+        return {
+            nodes,
+            edges,
+            config: {
+                iterations,
+                repulsion: this.config.neuralRepulsion ?? 2800,
+                springK: this.config.neuralSpringK ?? 0.048,
+                damping: this.config.neuralDamping ?? 0.88,
+                centerGravity: this.config.neuralCenterGravity ?? 0.014,
+                minGap: this.config.neuralMinGap ?? 12,
+                speedCap: 3.8,
+            },
+        };
+    }
+
+    _applyLayoutPositions(positions) {
+        if (!(positions instanceof Float32Array)) return false;
+        if (positions.length < this.nodes.length * 2) return false;
+
+        for (let i = 0; i < this.nodes.length; i++) {
+            const node = this.nodes[i];
+            if (!node || node.pinned) continue;
+            node.x = positions[i * 2];
+            node.y = positions[i * 2 + 1];
+            node.vx = 0;
+            node.vy = 0;
+            this._clampNodeToRegion(node);
+        }
+        return true;
+    }
+
+    async _simulateNeuralWithNativeBridge(iterations, solveRevision, timings = {}) {
+        const loadStartedAt = Number(timings.loadStartedAt) || performance.now();
+        const prepareFinishedAt = Number(timings.prepareFinishedAt) || loadStartedAt;
+        const layoutFinishedAt = Number(timings.layoutFinishedAt) || prepareFinishedAt;
+
+        const bridge = this._ensureNativeLayoutBridge();
+        const solveStartedAt = performance.now();
+        let nativeResult = null;
+
+        try {
+            nativeResult = await bridge.solveLayout(this._buildNativeLayoutPayload(iterations), {
+                timeoutMs: this.runtimeConfig.graphNativeLayoutWorkerTimeoutMs,
+            });
+        } catch (error) {
+            nativeResult = {
+                ok: false,
+                skipped: true,
+                reason: 'native-layout-bridge-error',
+                error: error?.message || String(error),
+            };
+        }
+
+        if (solveRevision !== this._layoutSolveRevision) {
+            return {
+                applied: false,
+                diagnostics: {
+                    mode: 'native-stale',
+                    nodeCount: this.nodes.length,
+                    edgeCount: this.edges.length,
+                    prepareMs: Math.max(0, prepareFinishedAt - loadStartedAt),
+                    layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
+                    solveMs: Math.max(0, performance.now() - solveStartedAt),
+                    totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    reason: 'stale-layout-result',
+                },
+            };
+        }
+
+        if (nativeResult?.ok && this._applyLayoutPositions(nativeResult.positions)) {
+            const workerElapsedMs = Number(nativeResult?.diagnostics?.elapsedMs);
+            return {
+                applied: true,
+                diagnostics: {
+                    mode: nativeResult.usedNative ? 'rust-wasm-worker' : 'js-worker',
+                    nodeCount: this.nodes.length,
+                    edgeCount: this.edges.length,
+                    prepareMs: Math.max(0, prepareFinishedAt - loadStartedAt),
+                    layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
+                    solveMs: Math.max(0, performance.now() - solveStartedAt),
+                    workerSolveMs: Number.isFinite(workerElapsedMs)
+                        ? Math.max(0, workerElapsedMs)
+                        : 0,
+                    totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    reason: '',
+                },
+            };
+        }
+
+        if (!this.runtimeConfig.nativeEngineFailOpen) {
+            return {
+                applied: false,
+                diagnostics: {
+                    mode: 'native-failed-hard',
+                    nodeCount: this.nodes.length,
+                    edgeCount: this.edges.length,
+                    prepareMs: Math.max(0, prepareFinishedAt - loadStartedAt),
+                    layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
+                    solveMs: Math.max(0, performance.now() - solveStartedAt),
+                    totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    reason: nativeResult?.reason || 'native-layout-failed',
+                },
+            };
+        }
+
+        const fallbackStartedAt = performance.now();
+        this._simulateNeuralWithinRegions(iterations);
+        const fallbackSolveMs = Math.max(0, performance.now() - fallbackStartedAt);
+        return {
+            applied: true,
+            diagnostics: {
+                mode: 'js-fallback',
+                nodeCount: this.nodes.length,
+                edgeCount: this.edges.length,
+                prepareMs: Math.max(0, prepareFinishedAt - loadStartedAt),
+                layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
+                solveMs: Math.max(0, performance.now() - solveStartedAt) + fallbackSolveMs,
+                fallbackSolveMs,
+                totalMs: Math.max(0, performance.now() - loadStartedAt),
+                reason: nativeResult?.reason || 'native-layout-failed',
+            },
         };
     }
 
@@ -1171,6 +1487,8 @@ export class GraphRenderer {
         }
 
         if (this.nodes.length > 0 && this._regionPanels.length > 0) {
+            this._nextLayoutSolveRevision();
+            this._nativeLayoutBridge?.cancelPending?.('viewport-resize-layout-reset');
             this._rebuildLayoutForCurrentViewport(w, h);
             this._render();
         } else if (this._lastGraph) {
@@ -1181,7 +1499,22 @@ export class GraphRenderer {
     }
 
     destroy() {
+        this._nextLayoutSolveRevision();
         this._cancelAnim();
+        this._nativeLayoutBridge?.dispose?.();
+        this._nativeLayoutBridge = null;
+        recordGraphLayoutDebugSnapshot(
+            this._lastLayoutDiagnostics
+                ? {
+                    ...this._lastLayoutDiagnostics,
+                    enabled: false,
+                    destroyed: true,
+                }
+                : {
+                    enabled: false,
+                    destroyed: true,
+                },
+        );
         this._resizeObserver?.disconnect();
     }
 }

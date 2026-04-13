@@ -78,6 +78,7 @@ export function createGraphPersistenceState() {
     syncDirtyReason: "",
     lastSyncError: "",
     dualWriteLastResult: null,
+    persistDelta: null,
     updatedAt: new Date().toISOString(),
   };
 }

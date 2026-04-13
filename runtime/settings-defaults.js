@@ -112,6 +112,18 @@ export const defaultSettings = {
   embeddingBackendApiUrl: "",
   embeddingAutoSuffix: true,
 
+  // Native 性能加速（灰度）
+  graphUseNativeLayout: false,
+  graphNativeLayoutThresholdNodes: 280,
+  graphNativeLayoutThresholdEdges: 1600,
+  graphNativeLayoutWorkerTimeoutMs: 260,
+  persistUseNativeDelta: false,
+  persistNativeDeltaThresholdRecords: 20000,
+  persistNativeDeltaThresholdStructuralDelta: 600,
+  persistNativeDeltaThresholdSerializedChars: 4000000,
+  nativeEngineFailOpen: true,
+  graphNativeForceDisable: false,
+
   // Schema
   nodeTypeSchema: null,
 

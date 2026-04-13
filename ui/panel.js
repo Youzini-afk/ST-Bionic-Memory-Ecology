@@ -737,6 +737,36 @@ function _isGraphRenderingEnabled() {
   return graphRenderingEnabled !== false;
 }
 
+function _buildGraphRuntimeConfig(settings = _getSettings?.() || {}) {
+  return {
+    graphUseNativeLayout: settings.graphUseNativeLayout === true,
+    graphNativeLayoutThresholdNodes: Number.isFinite(
+      Number(settings.graphNativeLayoutThresholdNodes),
+    )
+      ? Math.max(1, Math.floor(Number(settings.graphNativeLayoutThresholdNodes)))
+      : 280,
+    graphNativeLayoutThresholdEdges: Number.isFinite(
+      Number(settings.graphNativeLayoutThresholdEdges),
+    )
+      ? Math.max(1, Math.floor(Number(settings.graphNativeLayoutThresholdEdges)))
+      : 1600,
+    graphNativeLayoutWorkerTimeoutMs: Number.isFinite(
+      Number(settings.graphNativeLayoutWorkerTimeoutMs),
+    )
+      ? Math.max(40, Math.floor(Number(settings.graphNativeLayoutWorkerTimeoutMs)))
+      : 260,
+    nativeEngineFailOpen: settings.nativeEngineFailOpen !== false,
+    graphNativeForceDisable: settings.graphNativeForceDisable === true,
+  };
+}
+
+function _applyGraphRuntimeConfig(settings = _getSettings?.() || {}) {
+  const runtimeConfig = _buildGraphRuntimeConfig(settings);
+  graphRenderer?.setRuntimeConfig?.(runtimeConfig);
+  mobileGraphRenderer?.setRuntimeConfig?.(runtimeConfig);
+  return runtimeConfig;
+}
+
 function _refreshGraphRenderToggleUi() {
   const enabled = _isGraphRenderingEnabled();
   const syncButton = (button) => {
@@ -779,6 +809,7 @@ function _toggleGraphRenderingEnabled() {
 function _refreshVisibleGraphWorkspace({ force = false } = {}) {
   const visibleMode = _getVisibleGraphWorkspaceMode();
   if (visibleMode === "hidden") {
+    _refreshGraphLayoutDiagnosticsUi();
     return { refreshed: false, reason: "hidden" };
   }
 
@@ -807,6 +838,8 @@ function _refreshVisibleGraphWorkspace({ force = false } = {}) {
   } else if (visibleMode === "mobile:summary") {
     _refreshMobileSummaryFull();
   }
+
+  _refreshGraphLayoutDiagnosticsUi();
 
   lastVisibleGraphRefreshToken = nextToken;
   lastVisibleGraphRefreshAt = Date.now();
@@ -1159,6 +1192,7 @@ export function openPanel() {
   const graphOpts = {
     theme: themeName,
     userPovAliases: _hostUserPovAliasHintsForGraph(),
+    runtimeConfig: _buildGraphRuntimeConfig(settings),
   };
   const canvas = document.getElementById("bme-graph-canvas");
   if (canvas && !graphRenderer && !isMobile) {
@@ -1171,6 +1205,8 @@ export function openPanel() {
     mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
     mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
+
+  _applyGraphRuntimeConfig(settings);
 
   _applyGraphRenderEnabledState();
 
@@ -1204,6 +1240,7 @@ export function updatePanelTheme(themeName) {
 
 export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
+  _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
 
   switch (currentTabId) {
@@ -3980,6 +4017,89 @@ function _buildLegend() {
 
 function _getActiveGraphRenderer() {
   return mobileGraphRenderer || graphRenderer;
+}
+
+function _resolveVisibleGraphRenderer() {
+  const visibleMode = _getVisibleGraphWorkspaceMode();
+  if (visibleMode.startsWith("mobile:")) {
+    return mobileGraphRenderer || graphRenderer;
+  }
+  if (visibleMode.startsWith("desktop:")) {
+    return graphRenderer || mobileGraphRenderer;
+  }
+  return _getActiveGraphRenderer();
+}
+
+function _formatGraphLayoutDiagnosticsText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return "LAYOUT: --";
+  }
+
+  const modeRaw = String(
+    diagnostics.mode || diagnostics.solver || "",
+  ).trim();
+  const modeMap = {
+    "js-main": "JS-main",
+    "js-worker": "JS-worker",
+    "rust-wasm-worker": "Rust-WASM",
+    "js-fallback": "JS-fallback",
+    skipped: "skipped",
+    "native-stale": "stale",
+    "native-failed-hard": "native-failed",
+  };
+  const modeLabel = modeMap[modeRaw] || modeRaw || "unknown";
+
+  const totalMs = Number(
+    diagnostics.totalMs ?? diagnostics.solveMs ?? diagnostics.workerSolveMs,
+  );
+  const nodeCount = Number(diagnostics.nodeCount);
+  const edgeCount = Number(diagnostics.edgeCount);
+
+  const parts = [`LAYOUT: ${modeLabel}`];
+  if (Number.isFinite(totalMs)) {
+    parts.push(`${Math.max(0, Math.round(totalMs))}ms`);
+  }
+  if (Number.isFinite(nodeCount) && Number.isFinite(edgeCount)) {
+    parts.push(
+      `${Math.max(0, Math.floor(nodeCount))}/${Math.max(
+        0,
+        Math.floor(edgeCount),
+      )}`,
+    );
+  }
+
+  return parts.join(" · ");
+}
+
+function _refreshGraphLayoutDiagnosticsUi() {
+  const desktopMeta = document.getElementById("bme-graph-layout-meta");
+  const mobileMeta = document.getElementById("bme-mobile-graph-layout-meta");
+  if (!desktopMeta && !mobileMeta) return;
+
+  const renderer = _resolveVisibleGraphRenderer();
+  const diagnostics = renderer?.getLastLayoutDiagnostics?.() || null;
+  const text = _formatGraphLayoutDiagnosticsText(diagnostics);
+  const title = diagnostics?.reason
+    ? `layout reason: ${String(diagnostics.reason).trim()}`
+    : "";
+
+  if (desktopMeta) {
+    desktopMeta.textContent = text;
+    if (title) {
+      desktopMeta.title = title;
+    } else {
+      desktopMeta.removeAttribute("title");
+    }
+  }
+
+  if (mobileMeta) {
+    mobileMeta.textContent = text;
+    if (title) {
+      mobileMeta.title = title;
+    } else {
+      mobileMeta.removeAttribute("title");
+    }
+  }
 }
 
 function _bindGraphControls() {
@@ -7290,6 +7410,8 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     panelDebug,
     runtimeDebug,
     recallInjection: runtimeDebug?.injections?.recall || null,
+    graphLayout: runtimeDebug?.graphLayout || null,
+    persistDelta: runtimeDebug?.graphPersistence?.persistDelta || null,
     messageTrace: runtimeDebug?.messageTrace || null,
     recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
     recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
@@ -7313,6 +7435,8 @@ function _refreshMessageTraceWorkspace(settings = _getSettings?.() || {}) {
 function _renderMessageTraceWorkspace(state) {
   const updatedCandidates = [
     state.recallInjection?.updatedAt,
+    state.graphLayout?.updatedAt,
+    state.persistDelta?.updatedAt,
     state.recallLlmRequest?.updatedAt,
     state.extractLlmRequest?.updatedAt,
     state.extractPromptBuild?.updatedAt,
@@ -7344,6 +7468,12 @@ function _renderMessageTraceWorkspace(state) {
         </div>
         <div class="bme-config-card">
           ${_renderAiMonitorCognitionCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderGraphLayoutTraceCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderPersistDeltaTraceCard(state)}
         </div>
       </div>
     </div>
@@ -7805,6 +7935,180 @@ function _renderAiMonitorCognitionCard(state) {
         <strong>${_escHtml(String(historyState.lastExtractedRegion || "—"))}</strong>
       </div>
     </div>
+  `;
+}
+
+function _renderGraphLayoutTraceCard(state) {
+  const layout = state.graphLayout || null;
+  if (!layout) {
+    return `
+      <div class="bme-config-card-title">图布局 / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有图布局诊断快照。打开图谱页并触发一次布局后，这里会显示实际执行路径、耗时和 native 模块来源。
+      </div>
+    `;
+  }
+
+  const mode = String(layout.mode || layout.solver || 'unknown').trim() || 'unknown';
+  const moduleSource = String(layout.moduleSource || '').trim() || '—';
+  const reason = String(layout.reason || '').trim() || '—';
+  const nativeLoadError = String(layout.nativeLoadError || '').trim();
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">图布局 / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图布局走了哪条路径，以及 native 模块是 wasm-pack 产物还是 fallback loader。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(layout.updatedAt || layout.at))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>布局路径</span>
+        <strong>${_escHtml(mode)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>节点 / 边</span>
+        <strong>${_escHtml(`${Number(layout.nodeCount || 0)} / ${Number(layout.edgeCount || 0)}`)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>总耗时</span>
+        <strong>${_escHtml(_formatDurationMs(layout.totalMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>求解耗时</span>
+        <strong>${_escHtml(_formatDurationMs(layout.solveMs || layout.workerSolveMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>迭代次数</span>
+        <strong>${_escHtml(String(layout.iterations || '—'))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native 来源</span>
+        <strong>${_escHtml(moduleSource)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>状态原因</span>
+        <strong>${_escHtml(reason)}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      'Native load error',
+      nativeLoadError,
+      '当前没有 native load error。',
+    )}
+  `;
+}
+
+function _formatPersistDeltaGateReasonText(reasons = []) {
+  const labels = {
+    "below-record-threshold": "记录数不足",
+    "below-structural-delta-threshold": "结构变化不足",
+    "below-serialized-chars-threshold": "序列化体积不足",
+  };
+  const normalized = Array.isArray(reasons)
+    ? reasons
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    : [];
+  if (!normalized.length) return "—";
+  return normalized.map((item) => labels[item] || item).join(" · ");
+}
+
+function _formatPersistDeltaGateText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  if (diagnostics.requestedNative !== true) return "未请求 native";
+  if (diagnostics.nativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.gateAllowed === true) return "通过";
+  return `已拦截 · ${_formatPersistDeltaGateReasonText(diagnostics.gateReasons)}`;
+}
+
+function _renderPersistDeltaTraceCard(state) {
+  const diagnostics = state.persistDelta || null;
+  if (!diagnostics) {
+    return `
+      <div class="bme-config-card-title">Persist Delta / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有 persist delta 诊断快照。等图谱完成一次 IndexedDB 写回后，这里会显示 gate、执行路径、耗时和 fallback 原因。
+      </div>
+    `;
+  }
+
+  const moduleSource = String(diagnostics.moduleSource || "").trim() || "—";
+  const fallbackReason = String(diagnostics.fallbackReason || "").trim();
+  const errorText = String(
+    diagnostics.moduleError || diagnostics.preloadError || diagnostics.nativeError || "",
+  ).trim();
+  const payloadCharsText = diagnostics.combinedSerializedChars
+    ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
+    : "—";
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">Persist Delta / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图谱增量写回的 gate 判定、真实执行路径，以及 native preload / fallback 情况。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(diagnostics.updatedAt))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>执行路径</span>
+        <strong>${_escHtml(String(diagnostics.path || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native Gate</span>
+        <strong>${_escHtml(_formatPersistDeltaGateText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>快照记录数</span>
+        <strong>${_escHtml(`${Number(diagnostics.beforeRecordCount || 0)} → ${Number(diagnostics.afterRecordCount || 0)}`)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>结构变化量</span>
+        <strong>${_escHtml(String(diagnostics.structuralDelta ?? "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Payload chars</span>
+        <strong>${_escHtml(payloadCharsText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>总耗时</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.totalMs || diagnostics.buildMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>构建耗时</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Preload</span>
+        <strong>${_escHtml(String(diagnostics.preloadStatus || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native 来源</span>
+        <strong>${_escHtml(moduleSource)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>增量规模</span>
+        <strong>${_escHtml(
+          `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(diagnostics.upsertEdgeCount || 0)}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(diagnostics.deleteEdgeCount || 0)}DE`,
+        )}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "Fallback reason",
+      fallbackReason,
+      "这次没有发生 native fallback。",
+    )}
+    ${_renderMessageTraceTextBlock(
+      "Preload / native error",
+      errorText,
+      "当前没有 preload / native error。",
+    )}
   `;
 }
 
@@ -9016,6 +9320,8 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
     `;
   }
 
+  const persistDelta = graphPersistence.persistDelta || null;
+
   return `
     <div class="bme-config-card-head">
       <div>
@@ -9084,6 +9390,22 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
                 .join(" · ")
             : "—",
         )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Delta 路径</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(persistDelta?.path || "—"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Native Gate</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatPersistDeltaGateText(persistDelta))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Delta 耗时</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatDurationMs(persistDelta?.totalMs || persistDelta?.buildMs))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Native 来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(persistDelta?.moduleSource || "—"))}</span>
       </div>
     </div>
     ${_renderDebugDetails("图谱持久化详情", graphPersistence)}
@@ -10887,6 +11209,7 @@ function _getGraphPersistenceSnapshot() {
     lastBackupRollbackAt: 0,
     lastBackupFilename: "",
     lastSyncError: "",
+    persistDelta: null,
   };
 }
 
@@ -11182,6 +11505,8 @@ function _refreshGraphAvailabilityState() {
   if (mobileOverlayText) {
     mobileOverlayText.textContent = overlayLabel;
   }
+
+  _refreshGraphLayoutDiagnosticsUi();
 }
 
 function _formatCloudTimeLabel(timestamp) {

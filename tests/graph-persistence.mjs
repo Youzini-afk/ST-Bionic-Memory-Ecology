@@ -9,6 +9,7 @@ import {
   buildGraphFromSnapshot,
   buildPersistDelta,
   buildSnapshotFromGraph,
+  evaluatePersistNativeDeltaGate,
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
 import {
@@ -880,6 +881,7 @@ async function createGraphPersistenceHarness({
     buildGraphFromSnapshot,
     buildPersistDelta,
     buildSnapshotFromGraph,
+    evaluatePersistNativeDeltaGate,
     buildBmeDbName,
     scheduleUpload() {
       if (runtimeContext.__scheduleUploadShouldThrow) {
@@ -2619,6 +2621,12 @@ result = {
     7,
     "附属步骤失败时，IndexedDB 主写仍应视为成功",
   );
+  const persistDeltaDiagnostics = harness.api.getGraphPersistenceState().persistDelta;
+  assert.equal(Boolean(persistDeltaDiagnostics), true);
+  assert.equal(persistDeltaDiagnostics.status, "committed");
+  assert.equal(persistDeltaDiagnostics.path, "js");
+  assert.equal(persistDeltaDiagnostics.requestedNative, false);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.buildMs)), true);
 }
 
 {

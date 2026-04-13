@@ -23,6 +23,7 @@ import {
   buildPersistDelta,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
+  evaluatePersistNativeDeltaGate,
   ensureDexieLoaded,
 } from "./sync/bme-db.js";
 import {
@@ -661,6 +662,7 @@ function getRuntimeDebugState() {
         lastUndoResult: null,
       },
       graphPersistence: null,
+      graphLayout: null,
       updatedAt: "",
     };
   }
@@ -727,6 +729,7 @@ function readRuntimeDebugSnapshot() {
       messageTrace: state.messageTrace,
       maintenance: state.maintenance,
       graphPersistence: state.graphPersistence,
+      graphLayout: state.graphLayout,
       updatedAt: state.updatedAt,
     },
     {
@@ -743,6 +746,7 @@ function readRuntimeDebugSnapshot() {
         lastUndoResult: null,
       },
       graphPersistence: null,
+      graphLayout: null,
       updatedAt: "",
     },
   );
@@ -755,6 +759,7 @@ let isExtracting = false;
 let isRecalling = false;
 let activeRecallPromise = null;
 let recallRunSequence = 0;
+let nativePersistDeltaInstallPromise = null;
 let lastInjectionContent = "";
 let lastExtractedItems = []; // 最近提取的节点（面板展示用）
 let lastRecalledItems = []; // 最近召回的节点（面板展示用）
@@ -948,6 +953,7 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.dualWriteLastResult,
       null,
     ),
+    persistDelta: cloneRuntimeDebugValue(graphPersistenceState.persistDelta, null),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -965,6 +971,30 @@ function updateGraphPersistenceState(patch = {}) {
   };
   syncGraphPersistenceDebugState();
   return graphPersistenceState;
+}
+
+function readPersistDeltaDiagnosticsNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function updatePersistDeltaDiagnostics(snapshot = null) {
+  const nextSnapshot =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? {
+          ...(graphPersistenceState.persistDelta &&
+          typeof graphPersistenceState.persistDelta === "object" &&
+          !Array.isArray(graphPersistenceState.persistDelta)
+            ? cloneRuntimeDebugValue(graphPersistenceState.persistDelta, {})
+            : {}),
+          ...cloneRuntimeDebugValue(snapshot, {}),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
+  updateGraphPersistenceState({ persistDelta: nextSnapshot });
+  return nextSnapshot;
 }
 
 function bumpGraphRevision(reason = "graph-mutation") {
@@ -9653,7 +9683,98 @@ async function saveGraphToIndexedDb(
         hostChatId: currentIdentity.hostChatId || "",
       },
     });
-    const delta = buildPersistDelta(baseSnapshot, snapshot);
+    const currentSettings = getSettings();
+    const nativePersistRequested = currentSettings.persistUseNativeDelta === true;
+    const nativePersistForceDisabled = currentSettings.graphNativeForceDisable === true;
+    const nativePersistGate = evaluatePersistNativeDeltaGate(
+      baseSnapshot,
+      snapshot,
+      currentSettings,
+    );
+    const shouldUseNativePersistDelta =
+      nativePersistRequested &&
+      nativePersistForceDisabled !== true &&
+      nativePersistGate.allowed;
+    const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
+    let persistDeltaBuildDiagnostics = null;
+    let nativePersistModuleStatus = null;
+    let nativePersistPreloadStatus = nativePersistRequested
+      ? nativePersistForceDisabled
+        ? "force-disabled"
+        : nativePersistGate.allowed
+          ? "pending"
+          : "gated-out"
+      : "not-requested";
+    let nativePersistPreloadError = "";
+    let nativePersistPreloadMs = 0;
+    updatePersistDeltaDiagnostics({
+      chatId: normalizedChatId,
+      saveReason: String(reason || "graph-save"),
+      requestedRevision,
+      requestedNative: nativePersistRequested,
+      nativeForceDisabled: nativePersistForceDisabled,
+      nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
+      gateAllowed: nativePersistGate.allowed,
+      gateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
+      preloadGateAllowed: nativePersistGate.allowed,
+      preloadGateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
+      minSnapshotRecords: nativePersistGate.minSnapshotRecords,
+      minStructuralDelta: nativePersistGate.minStructuralDelta,
+      minCombinedSerializedChars: nativePersistGate.minCombinedSerializedChars,
+      beforeRecordCount: nativePersistGate.beforeRecordCount,
+      afterRecordCount: nativePersistGate.afterRecordCount,
+      maxSnapshotRecords: nativePersistGate.maxSnapshotRecords,
+      structuralDelta: nativePersistGate.structuralDelta,
+      preloadStatus: nativePersistPreloadStatus,
+      preloadMs: 0,
+      preloadError: "",
+      status: "building",
+    });
+    if (shouldUseNativePersistDelta) {
+      const preloadStartedAt = readPersistDeltaDiagnosticsNow();
+      try {
+        if (!nativePersistDeltaInstallPromise) {
+          nativePersistDeltaInstallPromise = import("./vendor/wasm/stbme_core.js")
+            .then((module) => module?.installNativePersistDeltaHook?.())
+            .catch((error) => {
+              nativePersistDeltaInstallPromise = null;
+              throw error;
+            });
+        }
+        nativePersistModuleStatus = await nativePersistDeltaInstallPromise;
+        nativePersistPreloadStatus = nativePersistModuleStatus?.loaded
+          ? "loaded"
+          : "not-loaded";
+        nativePersistPreloadMs =
+          readPersistDeltaDiagnosticsNow() - preloadStartedAt;
+      } catch (error) {
+        nativePersistPreloadStatus = "failed";
+        nativePersistPreloadMs =
+          readPersistDeltaDiagnosticsNow() - preloadStartedAt;
+        nativePersistPreloadError = error?.message || String(error);
+        if (currentSettings.nativeEngineFailOpen !== false) {
+          console.warn(
+            "[ST-BME] native persist delta preload failed, fallback to JS delta:",
+            error,
+          );
+        } else {
+          throw error;
+        }
+      }
+    }
+    const delta = buildPersistDelta(baseSnapshot, snapshot, {
+      useNativeDelta: shouldUseNativePersistDelta,
+      nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
+      persistNativeDeltaThresholdRecords:
+        currentSettings.persistNativeDeltaThresholdRecords,
+      persistNativeDeltaThresholdStructuralDelta:
+        currentSettings.persistNativeDeltaThresholdStructuralDelta,
+      persistNativeDeltaThresholdSerializedChars:
+        currentSettings.persistNativeDeltaThresholdSerializedChars,
+      onDiagnostics(snapshot) {
+        persistDeltaBuildDiagnostics = snapshot;
+      },
+    });
     const commitResult = await db.commitDelta(delta, {
       reason,
       requestedRevision,
@@ -9695,6 +9816,56 @@ async function saveGraphToIndexedDb(
       console.warn("[ST-BME] IndexedDB 已写入，但同步上传调度失败:", error);
     }
 
+    const persistDeltaDiagnostics = {
+      ...cloneRuntimeDebugValue(persistDeltaBuildDiagnostics, {}),
+      chatId: normalizedChatId,
+      saveReason: String(reason || "graph-save"),
+      requestedRevision,
+      requestedNative: nativePersistRequested,
+      buildRequestedNative: Boolean(persistDeltaBuildDiagnostics?.requestedNative),
+      nativeForceDisabled: nativePersistForceDisabled,
+      nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
+      gateAllowed:
+        persistDeltaBuildDiagnostics?.gateAllowed ?? nativePersistGate.allowed,
+      gateReasons: cloneRuntimeDebugValue(
+        persistDeltaBuildDiagnostics?.gateReasons,
+        nativePersistGate.reasons,
+      ),
+      preloadGateAllowed: nativePersistGate.allowed,
+      preloadGateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
+      minSnapshotRecords: nativePersistGate.minSnapshotRecords,
+      minStructuralDelta: nativePersistGate.minStructuralDelta,
+      minCombinedSerializedChars:
+        persistDeltaBuildDiagnostics?.minCombinedSerializedChars ??
+        nativePersistGate.minCombinedSerializedChars,
+      beforeRecordCount: nativePersistGate.beforeRecordCount,
+      afterRecordCount: nativePersistGate.afterRecordCount,
+      maxSnapshotRecords: nativePersistGate.maxSnapshotRecords,
+      structuralDelta: nativePersistGate.structuralDelta,
+      preloadStatus: nativePersistPreloadStatus,
+      preloadMs: nativePersistPreloadMs,
+      preloadError: nativePersistPreloadError,
+      moduleLoaded: Boolean(nativePersistModuleStatus?.loaded),
+      moduleSource: String(nativePersistModuleStatus?.source || ""),
+      moduleError: String(
+        nativePersistModuleStatus?.error || nativePersistPreloadError || "",
+      ),
+      status: "committed",
+      commitRevision: snapshot.meta.revision,
+      commitDelta: cloneRuntimeDebugValue(commitResult?.delta, null),
+      totalMs: readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt,
+    };
+    persistDeltaDiagnostics.fallbackReason =
+      persistDeltaDiagnostics.requestedNative && !persistDeltaDiagnostics.usedNative
+        ? String(
+            (persistDeltaDiagnostics.preloadStatus !== "loaded" &&
+            persistDeltaDiagnostics.preloadStatus !== "pending"
+              ? persistDeltaDiagnostics.preloadStatus
+              : persistDeltaDiagnostics.nativeAttemptStatus) ||
+              "js",
+          )
+        : "";
+
     updateGraphPersistenceState({
       revision: snapshot.meta.revision,
       storagePrimary: "indexeddb",
@@ -9735,6 +9906,7 @@ async function saveGraphToIndexedDb(
         delta: cloneRuntimeDebugValue(commitResult?.delta, null),
         at: Date.now(),
       },
+      persistDelta: persistDeltaDiagnostics,
     });
     clearPendingGraphPersistRetry();
     if (
@@ -9782,6 +9954,11 @@ async function saveGraphToIndexedDb(
     };
   } catch (error) {
     console.warn("[ST-BME] IndexedDB 写入失败，保鐣?metadata 兜底:", error);
+    updatePersistDeltaDiagnostics({
+      status: "failed",
+      error: error?.message || String(error),
+      failedAt: Date.now(),
+    });
     updateGraphPersistenceState({
       indexedDbLastError: error?.message || String(error),
       dualWriteLastResult: {
