@@ -496,6 +496,31 @@ async function testGraphSnapshotConverters() {
   assert.equal(snapshot.state.extractionCount, 4);
   assert.equal(snapshot.nodes.length, 1);
 
+  const nextGraph = buildGraphFromSnapshot(snapshot, {
+    chatId: "chat-a",
+  });
+  const reusedSnapshot = buildSnapshotFromGraph(nextGraph, {
+    chatId: "chat-a",
+    revision: 18,
+    baseSnapshot: snapshot,
+  });
+  assert.equal(
+    reusedSnapshot.nodes[0],
+    snapshot.nodes[0],
+    "未变化节点应直接复用 baseSnapshot 记录对象",
+  );
+  nextGraph.nodes[0].updatedAt = Number(nextGraph.nodes[0].updatedAt || 0) + 1;
+  const changedSnapshot = buildSnapshotFromGraph(nextGraph, {
+    chatId: "chat-a",
+    revision: 19,
+    baseSnapshot: snapshot,
+  });
+  assert.notEqual(
+    changedSnapshot.nodes[0],
+    snapshot.nodes[0],
+    "节点变化后不应复用 baseSnapshot 记录对象",
+  );
+
   const rebuilt = buildGraphFromSnapshot(snapshot, {
     chatId: "chat-a",
   });

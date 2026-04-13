@@ -2627,6 +2627,15 @@ result = {
   assert.equal(persistDeltaDiagnostics.path, "js");
   assert.equal(persistDeltaDiagnostics.requestedNative, false);
   assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.buildMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.prepareMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.lookupMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.jsDiffMs)), true);
+  assert.equal(
+    Number(persistDeltaDiagnostics.serializationCacheHits || 0) +
+      Number(persistDeltaDiagnostics.serializationCacheMisses || 0) >
+      0,
+    true,
+  );
 }
 
 {

@@ -9845,10 +9845,18 @@ async function saveGraphToIndexedDb(
       minCombinedSerializedChars:
         persistDeltaBuildDiagnostics?.minCombinedSerializedChars ??
         nativePersistGate.minCombinedSerializedChars,
-      beforeRecordCount: nativePersistGate.beforeRecordCount,
-      afterRecordCount: nativePersistGate.afterRecordCount,
-      maxSnapshotRecords: nativePersistGate.maxSnapshotRecords,
-      structuralDelta: nativePersistGate.structuralDelta,
+      beforeRecordCount:
+        persistDeltaBuildDiagnostics?.beforeRecordCount ??
+        nativePersistGate.beforeRecordCount,
+      afterRecordCount:
+        persistDeltaBuildDiagnostics?.afterRecordCount ??
+        nativePersistGate.afterRecordCount,
+      maxSnapshotRecords:
+        persistDeltaBuildDiagnostics?.maxSnapshotRecords ??
+        nativePersistGate.maxSnapshotRecords,
+      structuralDelta:
+        persistDeltaBuildDiagnostics?.structuralDelta ??
+        nativePersistGate.structuralDelta,
       preloadStatus: nativePersistPreloadStatus,
       preloadMs: nativePersistPreloadMs,
       preloadError: nativePersistPreloadError,

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildPersistDelta,
   evaluatePersistNativeDeltaGate,
+  resetPersistRecordSerializationCaches,
   resolvePersistNativeDeltaBridgeMode,
   resolvePersistNativeDeltaGateOptions,
   shouldUseNativePersistDeltaForSnapshots,
@@ -36,6 +37,10 @@ assert.equal(fallbackDiagnostics.path, "js");
 assert.equal(fallbackDiagnostics.requestedNative, false);
 assert.equal(fallbackDiagnostics.usedNative, false);
 assert.equal(Number.isFinite(fallbackDiagnostics.buildMs), true);
+assert.equal(Number.isFinite(fallbackDiagnostics.prepareMs), true);
+assert.equal(Number.isFinite(fallbackDiagnostics.lookupMs), true);
+assert.equal(Number.isFinite(fallbackDiagnostics.jsDiffMs), true);
+assert.equal(fallbackDiagnostics.serializationCacheMisses > 0, true);
 
 const defaultGate = resolvePersistNativeDeltaGateOptions({});
 assert.equal(defaultGate.minSnapshotRecords, 20000);
@@ -112,6 +117,9 @@ assert.equal(nativeDelta.runtimeMetaPatch.jsPatch, true);
 assert.equal(nativeDiagnostics.path, "native-full");
 assert.equal(nativeDiagnostics.requestedNative, true);
 assert.equal(nativeDiagnostics.usedNative, true);
+assert.equal(Number.isFinite(nativeDiagnostics.prepareMs), true);
+assert.equal(Number.isFinite(nativeDiagnostics.nativeAttemptMs), true);
+assert.equal(Number.isFinite(nativeDiagnostics.hydrateMs), true);
 
 let payloadGateDiagnostics = null;
 let payloadGateBuilderCalled = false;
@@ -134,6 +142,8 @@ assert.equal(payloadGateDiagnostics.path, "js");
 assert.equal(payloadGateDiagnostics.nativeAttemptStatus, "gated-out");
 assert.equal(payloadGateDiagnostics.gateAllowed, false);
 assert.deepEqual(payloadGateDiagnostics.gateReasons, ["below-serialized-chars-threshold"]);
+assert.equal(Number.isFinite(payloadGateDiagnostics.lookupMs), true);
+assert.equal(Number.isFinite(payloadGateDiagnostics.jsDiffMs), true);
 
 globalThis.__stBmeNativeBuildPersistDelta = (_before, _after, options = {}) => {
   assert.equal(Boolean(options?.preparedDeltaInput), true);
@@ -168,6 +178,8 @@ assert.equal(compactDiagnostics.path, "native-compact-json");
 assert.equal(compactDiagnostics.preparedBridgeMode, "json");
 assert.equal(compactDiagnostics.requestedBridgeMode, "json");
 assert.equal(compactDiagnostics.usedNative, true);
+assert.equal(Number.isFinite(compactDiagnostics.nativeAttemptMs), true);
+assert.equal(Number.isFinite(compactDiagnostics.hydrateMs), true);
 
 let hashDiagnostics = null;
 const hashNativeDelta = buildPersistDelta(beforeSnapshot, afterSnapshot, {
@@ -189,6 +201,36 @@ assert.equal(hashDiagnostics.path, "native-compact-hash");
 assert.equal(hashDiagnostics.preparedBridgeMode, "hash");
 assert.equal(hashDiagnostics.requestedBridgeMode, "hash");
 assert.equal(hashDiagnostics.usedNative, true);
+assert.equal(Number.isFinite(hashDiagnostics.nativeAttemptMs), true);
+assert.equal(Number.isFinite(hashDiagnostics.hydrateMs), true);
+
+let tokenCacheDiagnostics = null;
+buildPersistDelta(
+  JSON.parse(JSON.stringify(beforeSnapshot)),
+  JSON.parse(JSON.stringify(afterSnapshot)),
+  {
+    onDiagnostics(snapshot) {
+      tokenCacheDiagnostics = snapshot;
+    },
+  },
+);
+assert.equal(tokenCacheDiagnostics.serializationCacheTokenHits > 0, true);
+
+resetPersistRecordSerializationCaches();
+let preparedCacheColdDiagnostics = null;
+buildPersistDelta(beforeSnapshot, afterSnapshot, {
+  onDiagnostics(snapshot) {
+    preparedCacheColdDiagnostics = snapshot;
+  },
+});
+let preparedCacheWarmDiagnostics = null;
+buildPersistDelta(beforeSnapshot, afterSnapshot, {
+  onDiagnostics(snapshot) {
+    preparedCacheWarmDiagnostics = snapshot;
+  },
+});
+assert.equal(preparedCacheColdDiagnostics.preparedRecordSetCacheMisses > 0, true);
+assert.equal(preparedCacheWarmDiagnostics.preparedRecordSetCacheHits > 0, true);
 
 delete globalThis.__stBmeNativeBuildPersistDelta;
 

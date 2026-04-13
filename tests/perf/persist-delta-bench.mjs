@@ -1,6 +1,9 @@
 import { performance } from "node:perf_hooks";
 
-import { buildPersistDelta } from "../../sync/bme-db.js";
+import {
+  buildPersistDelta,
+  resetPersistRecordSerializationCaches,
+} from "../../sync/bme-db.js";
 import {
   getNativeModuleStatus,
   installNativePersistDeltaHook,
@@ -87,6 +90,40 @@ function buildSnapshots(seed = 5, nodeCount = 5000, edgeCount = 12000, churn = 0
   };
 }
 
+function summarizeDiagnostics(samples = []) {
+  const summary = {
+    prepareMs: 0,
+    nativeAttemptMs: 0,
+    lookupMs: 0,
+    jsDiffMs: 0,
+    hydrateMs: 0,
+    serializationCacheHits: 0,
+    serializationCacheMisses: 0,
+    preparedRecordSetCacheHits: 0,
+    preparedRecordSetCacheMisses: 0,
+  };
+  if (!samples.length) return summary;
+  for (const sample of samples) {
+    summary.prepareMs += Number(sample?.prepareMs || 0);
+    summary.nativeAttemptMs += Number(sample?.nativeAttemptMs || 0);
+    summary.lookupMs += Number(sample?.lookupMs || 0);
+    summary.jsDiffMs += Number(sample?.jsDiffMs || 0);
+    summary.hydrateMs += Number(sample?.hydrateMs || 0);
+    summary.serializationCacheHits += Number(sample?.serializationCacheHits || 0);
+    summary.serializationCacheMisses += Number(sample?.serializationCacheMisses || 0);
+    summary.preparedRecordSetCacheHits += Number(
+      sample?.preparedRecordSetCacheHits || 0,
+    );
+    summary.preparedRecordSetCacheMisses += Number(
+      sample?.preparedRecordSetCacheMisses || 0,
+    );
+  }
+  for (const key of Object.keys(summary)) {
+    summary[key] /= samples.length;
+  }
+  return summary;
+}
+
 function summarize(values = []) {
   if (!values.length) return { avg: 0, p95: 0, min: 0, max: 0 };
   const sorted = [...values].sort((a, b) => a - b);
@@ -100,83 +137,158 @@ function summarize(values = []) {
   };
 }
 
-async function main() {
-  await installNativePersistDeltaHook();
-  const nativeStatus = getNativeModuleStatus();
-  const jsSamples = [];
-  const nativeJsonSamples = [];
-  const nativeHashSamples = [];
-  for (let run = 0; run < RUNS; run++) {
-    const snapshots = buildSnapshots(17 + run, 5000, 12000, 0.12);
-    const jsStartedAt = performance.now();
-    const jsDelta = buildPersistDelta(snapshots.before, snapshots.after, {
-      useNativeDelta: false,
-    });
-    const jsElapsedMs = performance.now() - jsStartedAt;
-    jsSamples.push({
-      elapsedMs: jsElapsedMs,
-      upsertNodes: jsDelta.upsertNodes.length,
-      upsertEdges: jsDelta.upsertEdges.length,
-      deleteNodeIds: jsDelta.deleteNodeIds.length,
-      deleteEdgeIds: jsDelta.deleteEdgeIds.length,
-    });
-
-    const nativeJsonStartedAt = performance.now();
-    const nativeJsonDelta = buildPersistDelta(snapshots.before, snapshots.after, {
+function buildModeOptions(mode, onDiagnostics, extraOptions = {}) {
+  if (mode === "native-json") {
+    return {
       useNativeDelta: true,
       minSnapshotRecords: 0,
       minStructuralDelta: 0,
       minCombinedSerializedChars: 0,
       persistNativeDeltaBridgeMode: "json",
       nativeFailOpen: false,
-    });
-    const nativeJsonElapsedMs = performance.now() - nativeJsonStartedAt;
-    nativeJsonSamples.push({
-      elapsedMs: nativeJsonElapsedMs,
-      upsertNodes: nativeJsonDelta.upsertNodes.length,
-      upsertEdges: nativeJsonDelta.upsertEdges.length,
-      deleteNodeIds: nativeJsonDelta.deleteNodeIds.length,
-      deleteEdgeIds: nativeJsonDelta.deleteEdgeIds.length,
-    });
-
-    const nativeHashStartedAt = performance.now();
-    const nativeHashDelta = buildPersistDelta(snapshots.before, snapshots.after, {
+      onDiagnostics,
+      ...extraOptions,
+    };
+  }
+  if (mode === "native-hash") {
+    return {
       useNativeDelta: true,
       minSnapshotRecords: 0,
       minStructuralDelta: 0,
       minCombinedSerializedChars: 0,
       persistNativeDeltaBridgeMode: "hash",
       nativeFailOpen: false,
-    });
-    const nativeHashElapsedMs = performance.now() - nativeHashStartedAt;
-    nativeHashSamples.push({
-      elapsedMs: nativeHashElapsedMs,
-      upsertNodes: nativeHashDelta.upsertNodes.length,
-      upsertEdges: nativeHashDelta.upsertEdges.length,
-      deleteNodeIds: nativeHashDelta.deleteNodeIds.length,
-      deleteEdgeIds: nativeHashDelta.deleteEdgeIds.length,
-    });
+      onDiagnostics,
+      ...extraOptions,
+    };
+  }
+  return {
+    useNativeDelta: false,
+    onDiagnostics,
+    ...extraOptions,
+  };
+}
+
+function runMeasuredPersistDeltaSample(
+  snapshots,
+  mode,
+  { resetCaches = true, usePreparedRecordSetCache = true } = {},
+) {
+  if (resetCaches) {
+    resetPersistRecordSerializationCaches();
+  }
+  let diagnostics = null;
+  const startedAt = performance.now();
+  const delta = buildPersistDelta(
+    snapshots.before,
+    snapshots.after,
+    buildModeOptions(
+      mode,
+      (snapshot) => {
+        diagnostics = snapshot;
+      },
+      { usePreparedRecordSetCache },
+    ),
+  );
+  const elapsedMs = performance.now() - startedAt;
+  return {
+    elapsedMs,
+    upsertNodes: delta.upsertNodes.length,
+    upsertEdges: delta.upsertEdges.length,
+    deleteNodeIds: delta.deleteNodeIds.length,
+    deleteEdgeIds: delta.deleteEdgeIds.length,
+    prepareMs: diagnostics?.prepareMs,
+    nativeAttemptMs: diagnostics?.nativeAttemptMs,
+    lookupMs: diagnostics?.lookupMs,
+    jsDiffMs: diagnostics?.jsDiffMs,
+    hydrateMs: diagnostics?.hydrateMs,
+    serializationCacheHits: diagnostics?.serializationCacheHits,
+    serializationCacheMisses: diagnostics?.serializationCacheMisses,
+    preparedRecordSetCacheHits: diagnostics?.preparedRecordSetCacheHits,
+    preparedRecordSetCacheMisses: diagnostics?.preparedRecordSetCacheMisses,
+  };
+}
+
+function primePersistDeltaCaches(snapshots, mode) {
+  buildPersistDelta(
+    snapshots.before,
+    snapshots.after,
+    buildModeOptions(mode, undefined, {
+      usePreparedRecordSetCache: true,
+      onDiagnostics() {},
+    }),
+  );
+}
+
+function formatTimingSummary(label, samples = []) {
+  const timingSummary = summarize(samples.map((sample) => sample.elapsedMs));
+  return `${label} avg=${timingSummary.avg.toFixed(2)}ms p95=${timingSummary.p95.toFixed(2)}ms min=${timingSummary.min.toFixed(2)}ms max=${timingSummary.max.toFixed(2)}ms`;
+}
+
+function formatStageSummary(label, samples = []) {
+  const diagnosticsSummary = summarizeDiagnostics(samples);
+  return `${label} prepare=${diagnosticsSummary.prepareMs.toFixed(2)}ms native=${diagnosticsSummary.nativeAttemptMs.toFixed(2)}ms lookup=${diagnosticsSummary.lookupMs.toFixed(2)}ms diff=${diagnosticsSummary.jsDiffMs.toFixed(2)}ms hydrate=${diagnosticsSummary.hydrateMs.toFixed(2)}ms ser-cache=${diagnosticsSummary.serializationCacheHits.toFixed(1)}H/${diagnosticsSummary.serializationCacheMisses.toFixed(1)}M set-cache=${diagnosticsSummary.preparedRecordSetCacheHits.toFixed(1)}H/${diagnosticsSummary.preparedRecordSetCacheMisses.toFixed(1)}M`;
+}
+
+async function main() {
+  await installNativePersistDeltaHook();
+  const nativeStatus = getNativeModuleStatus();
+  const coldSamplesByMode = {
+    js: [],
+    "native-json": [],
+    "native-hash": [],
+  };
+  const warmSamplesByMode = {
+    js: [],
+    "native-json": [],
+    "native-hash": [],
+  };
+  const modes = ["js", "native-json", "native-hash"];
+  for (let run = 0; run < RUNS; run++) {
+    const snapshots = buildSnapshots(17 + run, 5000, 12000, 0.12);
+    for (const mode of modes) {
+      coldSamplesByMode[mode].push(
+        runMeasuredPersistDeltaSample(snapshots, mode, {
+          resetCaches: true,
+          usePreparedRecordSetCache: false,
+        }),
+      );
+      resetPersistRecordSerializationCaches();
+      primePersistDeltaCaches(snapshots, mode);
+      warmSamplesByMode[mode].push(
+        runMeasuredPersistDeltaSample(snapshots, mode, {
+          resetCaches: false,
+          usePreparedRecordSetCache: true,
+        }),
+      );
+    }
   }
 
-  const jsTimingSummary = summarize(jsSamples.map((sample) => sample.elapsedMs));
-  const nativeJsonTimingSummary = summarize(
-    nativeJsonSamples.map((sample) => sample.elapsedMs),
-  );
-  const nativeHashTimingSummary = summarize(
-    nativeHashSamples.map((sample) => sample.elapsedMs),
-  );
   const avgUpserts =
-    jsSamples.reduce((acc, sample) => acc + sample.upsertNodes + sample.upsertEdges, 0) /
-    jsSamples.length;
+    coldSamplesByMode.js.reduce(
+      (acc, sample) => acc + sample.upsertNodes + sample.upsertEdges,
+      0,
+    ) / coldSamplesByMode.js.length;
   const avgDeletes =
-    jsSamples.reduce((acc, sample) => acc + sample.deleteNodeIds + sample.deleteEdgeIds, 0) /
-    jsSamples.length;
+    coldSamplesByMode.js.reduce(
+      (acc, sample) => acc + sample.deleteNodeIds + sample.deleteEdgeIds,
+      0,
+    ) / coldSamplesByMode.js.length;
 
   console.log(
     `[ST-BME][bench] persist-delta native-source=${nativeStatus.source || "unknown"}`,
   );
   console.log(
-    `[ST-BME][bench] persist-delta runs=${RUNS} | js avg=${jsTimingSummary.avg.toFixed(2)}ms p95=${jsTimingSummary.p95.toFixed(2)}ms min=${jsTimingSummary.min.toFixed(2)}ms max=${jsTimingSummary.max.toFixed(2)}ms | native-json avg=${nativeJsonTimingSummary.avg.toFixed(2)}ms p95=${nativeJsonTimingSummary.p95.toFixed(2)}ms min=${nativeJsonTimingSummary.min.toFixed(2)}ms max=${nativeJsonTimingSummary.max.toFixed(2)}ms | native-hash avg=${nativeHashTimingSummary.avg.toFixed(2)}ms p95=${nativeHashTimingSummary.p95.toFixed(2)}ms min=${nativeHashTimingSummary.min.toFixed(2)}ms max=${nativeHashTimingSummary.max.toFixed(2)}ms | avgUpserts=${avgUpserts.toFixed(1)} avgDeletes=${avgDeletes.toFixed(1)}`,
+    `[ST-BME][bench] persist-delta cold runs=${RUNS} | ${formatTimingSummary("js", coldSamplesByMode.js)} | ${formatTimingSummary("native-json", coldSamplesByMode["native-json"])} | ${formatTimingSummary("native-hash", coldSamplesByMode["native-hash"])} | avgUpserts=${avgUpserts.toFixed(1)} avgDeletes=${avgDeletes.toFixed(1)}`,
+  );
+  console.log(
+    `[ST-BME][bench] persist-delta cold stages | ${formatStageSummary("js", coldSamplesByMode.js)} | ${formatStageSummary("native-json", coldSamplesByMode["native-json"])} | ${formatStageSummary("native-hash", coldSamplesByMode["native-hash"])} `,
+  );
+  console.log(
+    `[ST-BME][bench] persist-delta warm runs=${RUNS} | ${formatTimingSummary("js", warmSamplesByMode.js)} | ${formatTimingSummary("native-json", warmSamplesByMode["native-json"])} | ${formatTimingSummary("native-hash", warmSamplesByMode["native-hash"])} `,
+  );
+  console.log(
+    `[ST-BME][bench] persist-delta warm stages | ${formatStageSummary("js", warmSamplesByMode.js)} | ${formatStageSummary("native-json", warmSamplesByMode["native-json"])} | ${formatStageSummary("native-hash", warmSamplesByMode["native-hash"])} `,
   );
 }
 

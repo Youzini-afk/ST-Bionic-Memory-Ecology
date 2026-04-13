@@ -8044,6 +8044,12 @@ function _renderPersistDeltaTraceCard(state) {
   const payloadCharsText = diagnostics.combinedSerializedChars
     ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
     : "—";
+  const cacheText = `${Number(diagnostics.serializationCacheHits || 0)}H / ${Number(
+    diagnostics.serializationCacheMisses || 0,
+  )}M`;
+  const preparedSetCacheText = `${Number(
+    diagnostics.preparedRecordSetCacheHits || 0,
+  )}H / ${Number(diagnostics.preparedRecordSetCacheMisses || 0)}M`;
 
   return `
     <div class="bme-config-card-head">
@@ -8089,6 +8095,28 @@ function _renderPersistDeltaTraceCard(state) {
       <div class="bme-ai-monitor-kv__row">
         <span>构建耗时</span>
         <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Prepare / Native</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Lookup / JS Diff</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate / Cache</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.hydrateMs)} / ${cacheText}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>PreparedSet Cache</span>
+        <strong>${_escHtml(preparedSetCacheText)}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
         <span>Preload</span>
