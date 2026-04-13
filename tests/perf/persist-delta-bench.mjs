@@ -104,7 +104,8 @@ async function main() {
   await installNativePersistDeltaHook();
   const nativeStatus = getNativeModuleStatus();
   const jsSamples = [];
-  const nativeSamples = [];
+  const nativeJsonSamples = [];
+  const nativeHashSamples = [];
   for (let run = 0; run < RUNS; run++) {
     const snapshots = buildSnapshots(17 + run, 5000, 12000, 0.12);
     const jsStartedAt = performance.now();
@@ -120,26 +121,50 @@ async function main() {
       deleteEdgeIds: jsDelta.deleteEdgeIds.length,
     });
 
-    const nativeStartedAt = performance.now();
-    const nativeDelta = buildPersistDelta(snapshots.before, snapshots.after, {
+    const nativeJsonStartedAt = performance.now();
+    const nativeJsonDelta = buildPersistDelta(snapshots.before, snapshots.after, {
       useNativeDelta: true,
       minSnapshotRecords: 0,
       minStructuralDelta: 0,
       minCombinedSerializedChars: 0,
+      persistNativeDeltaBridgeMode: "json",
       nativeFailOpen: false,
     });
-    const nativeElapsedMs = performance.now() - nativeStartedAt;
-    nativeSamples.push({
-      elapsedMs: nativeElapsedMs,
-      upsertNodes: nativeDelta.upsertNodes.length,
-      upsertEdges: nativeDelta.upsertEdges.length,
-      deleteNodeIds: nativeDelta.deleteNodeIds.length,
-      deleteEdgeIds: nativeDelta.deleteEdgeIds.length,
+    const nativeJsonElapsedMs = performance.now() - nativeJsonStartedAt;
+    nativeJsonSamples.push({
+      elapsedMs: nativeJsonElapsedMs,
+      upsertNodes: nativeJsonDelta.upsertNodes.length,
+      upsertEdges: nativeJsonDelta.upsertEdges.length,
+      deleteNodeIds: nativeJsonDelta.deleteNodeIds.length,
+      deleteEdgeIds: nativeJsonDelta.deleteEdgeIds.length,
+    });
+
+    const nativeHashStartedAt = performance.now();
+    const nativeHashDelta = buildPersistDelta(snapshots.before, snapshots.after, {
+      useNativeDelta: true,
+      minSnapshotRecords: 0,
+      minStructuralDelta: 0,
+      minCombinedSerializedChars: 0,
+      persistNativeDeltaBridgeMode: "hash",
+      nativeFailOpen: false,
+    });
+    const nativeHashElapsedMs = performance.now() - nativeHashStartedAt;
+    nativeHashSamples.push({
+      elapsedMs: nativeHashElapsedMs,
+      upsertNodes: nativeHashDelta.upsertNodes.length,
+      upsertEdges: nativeHashDelta.upsertEdges.length,
+      deleteNodeIds: nativeHashDelta.deleteNodeIds.length,
+      deleteEdgeIds: nativeHashDelta.deleteEdgeIds.length,
     });
   }
 
   const jsTimingSummary = summarize(jsSamples.map((sample) => sample.elapsedMs));
-  const nativeTimingSummary = summarize(nativeSamples.map((sample) => sample.elapsedMs));
+  const nativeJsonTimingSummary = summarize(
+    nativeJsonSamples.map((sample) => sample.elapsedMs),
+  );
+  const nativeHashTimingSummary = summarize(
+    nativeHashSamples.map((sample) => sample.elapsedMs),
+  );
   const avgUpserts =
     jsSamples.reduce((acc, sample) => acc + sample.upsertNodes + sample.upsertEdges, 0) /
     jsSamples.length;
@@ -151,7 +176,7 @@ async function main() {
     `[ST-BME][bench] persist-delta native-source=${nativeStatus.source || "unknown"}`,
   );
   console.log(
-    `[ST-BME][bench] persist-delta runs=${RUNS} | js avg=${jsTimingSummary.avg.toFixed(2)}ms p95=${jsTimingSummary.p95.toFixed(2)}ms min=${jsTimingSummary.min.toFixed(2)}ms max=${jsTimingSummary.max.toFixed(2)}ms | native avg=${nativeTimingSummary.avg.toFixed(2)}ms p95=${nativeTimingSummary.p95.toFixed(2)}ms min=${nativeTimingSummary.min.toFixed(2)}ms max=${nativeTimingSummary.max.toFixed(2)}ms | avgUpserts=${avgUpserts.toFixed(1)} avgDeletes=${avgDeletes.toFixed(1)}`,
+    `[ST-BME][bench] persist-delta runs=${RUNS} | js avg=${jsTimingSummary.avg.toFixed(2)}ms p95=${jsTimingSummary.p95.toFixed(2)}ms min=${jsTimingSummary.min.toFixed(2)}ms max=${jsTimingSummary.max.toFixed(2)}ms | native-json avg=${nativeJsonTimingSummary.avg.toFixed(2)}ms p95=${nativeJsonTimingSummary.p95.toFixed(2)}ms min=${nativeJsonTimingSummary.min.toFixed(2)}ms max=${nativeJsonTimingSummary.max.toFixed(2)}ms | native-hash avg=${nativeHashTimingSummary.avg.toFixed(2)}ms p95=${nativeHashTimingSummary.p95.toFixed(2)}ms min=${nativeHashTimingSummary.min.toFixed(2)}ms max=${nativeHashTimingSummary.max.toFixed(2)}ms | avgUpserts=${avgUpserts.toFixed(1)} avgDeletes=${avgDeletes.toFixed(1)}`,
   );
 }
 

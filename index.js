@@ -9684,6 +9684,9 @@ async function saveGraphToIndexedDb(
       },
     });
     const currentSettings = getSettings();
+    const nativePersistBridgeMode = String(
+      currentSettings.persistNativeDeltaBridgeMode || "json",
+    );
     const nativePersistRequested = currentSettings.persistUseNativeDelta === true;
     const nativePersistForceDisabled = currentSettings.graphNativeForceDisable === true;
     const nativePersistGate = evaluatePersistNativeDeltaGate(
@@ -9712,6 +9715,7 @@ async function saveGraphToIndexedDb(
       saveReason: String(reason || "graph-save"),
       requestedRevision,
       requestedNative: nativePersistRequested,
+      requestedBridgeMode: nativePersistBridgeMode,
       nativeForceDisabled: nativePersistForceDisabled,
       nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
       gateAllowed: nativePersistGate.allowed,
@@ -9771,6 +9775,7 @@ async function saveGraphToIndexedDb(
         currentSettings.persistNativeDeltaThresholdStructuralDelta,
       persistNativeDeltaThresholdSerializedChars:
         currentSettings.persistNativeDeltaThresholdSerializedChars,
+      persistNativeDeltaBridgeMode: nativePersistBridgeMode,
       onDiagnostics(snapshot) {
         persistDeltaBuildDiagnostics = snapshot;
       },
@@ -9822,6 +9827,8 @@ async function saveGraphToIndexedDb(
       saveReason: String(reason || "graph-save"),
       requestedRevision,
       requestedNative: nativePersistRequested,
+      requestedBridgeMode:
+        persistDeltaBuildDiagnostics?.requestedBridgeMode || nativePersistBridgeMode,
       buildRequestedNative: Boolean(persistDeltaBuildDiagnostics?.requestedNative),
       nativeForceDisabled: nativePersistForceDisabled,
       nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,

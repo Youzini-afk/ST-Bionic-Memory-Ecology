@@ -33,6 +33,17 @@ try {
         upsertTombstoneIds: [],
       };
     },
+    build_persist_delta_compact_hash(payload = {}) {
+      return {
+        upsertNodeIds: Array.isArray(payload?.afterNodes?.ids)
+          ? payload.afterNodes.ids.slice(0, 1)
+          : [],
+        upsertEdgeIds: [],
+        deleteNodeIds: [],
+        deleteEdgeIds: [],
+        upsertTombstoneIds: [],
+      };
+    },
     build_persist_delta(payload = {}) {
       return {
         upsertNodes: [{ id: "persist-native-node", marker: payload?.afterSnapshot?.meta?.chatId || "" }],
@@ -66,11 +77,25 @@ try {
     {
       nowMs: 123,
       preparedDeltaInput: {
+        bridgeMode: "json",
         afterNodes: { ids: ["persist-native-node"], serialized: ["{}"] },
       },
     },
   );
   assert.deepEqual(compactDeltaResult.upsertNodeIds, ["persist-native-node"]);
+
+  const hashCompactDeltaResult = globalThis.__stBmeNativeBuildPersistDelta(
+    { meta: { chatId: "before-chat" }, nodes: [], edges: [], tombstones: [], state: {} },
+    { meta: { chatId: "after-chat" }, nodes: [], edges: [], tombstones: [], state: {} },
+    {
+      nowMs: 123,
+      preparedDeltaInput: {
+        bridgeMode: "hash",
+        afterNodes: { ids: ["persist-native-node"], hashes: [1] },
+      },
+    },
+  );
+  assert.deepEqual(hashCompactDeltaResult.upsertNodeIds, ["persist-native-node"]);
 
   const deltaResult = globalThis.__stBmeNativeBuildPersistDelta(
     { meta: { chatId: "before-chat" }, nodes: [], edges: [], tombstones: [], state: {} },

@@ -75,6 +75,7 @@ assert.equal(defaultSettings.persistUseNativeDelta, false);
 assert.equal(defaultSettings.persistNativeDeltaThresholdRecords, 20000);
 assert.equal(defaultSettings.persistNativeDeltaThresholdStructuralDelta, 600);
 assert.equal(defaultSettings.persistNativeDeltaThresholdSerializedChars, 4000000);
+assert.equal(defaultSettings.persistNativeDeltaBridgeMode, "json");
 assert.equal(defaultSettings.nativeEngineFailOpen, true);
 assert.equal(defaultSettings.graphNativeForceDisable, false);
 assert.equal(defaultSettings.taskProfilesVersion, 3);

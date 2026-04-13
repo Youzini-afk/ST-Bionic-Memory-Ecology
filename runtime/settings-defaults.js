@@ -121,6 +121,7 @@ export const defaultSettings = {
   persistNativeDeltaThresholdRecords: 20000,
   persistNativeDeltaThresholdStructuralDelta: 600,
   persistNativeDeltaThresholdSerializedChars: 4000000,
+  persistNativeDeltaBridgeMode: "json",
   nativeEngineFailOpen: true,
   graphNativeForceDisable: false,
 

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildPersistDelta,
   evaluatePersistNativeDeltaGate,
+  resolvePersistNativeDeltaBridgeMode,
   resolvePersistNativeDeltaGateOptions,
   shouldUseNativePersistDeltaForSnapshots,
 } from "../sync/bme-db.js";
@@ -40,6 +41,9 @@ const defaultGate = resolvePersistNativeDeltaGateOptions({});
 assert.equal(defaultGate.minSnapshotRecords, 20000);
 assert.equal(defaultGate.minStructuralDelta, 600);
 assert.equal(defaultGate.minCombinedSerializedChars, 4000000);
+assert.equal(resolvePersistNativeDeltaBridgeMode({}), "json");
+assert.equal(resolvePersistNativeDeltaBridgeMode({ persistNativeDeltaBridgeMode: "hash" }), "hash");
+assert.equal(resolvePersistNativeDeltaBridgeMode({ persistNativeDeltaBridgeMode: "unknown" }), "json");
 assert.equal(
   shouldUseNativePersistDeltaForSnapshots(beforeSnapshot, afterSnapshot, defaultGate),
   false,
@@ -160,8 +164,31 @@ assert.deepEqual(compactNativeDelta.upsertEdges, []);
 assert.deepEqual(compactNativeDelta.deleteNodeIds, []);
 assert.equal(compactNativeDelta.runtimeMetaPatch.compact, true);
 assert.equal(compactNativeDelta.runtimeMetaPatch.chatId, "chat-native");
-assert.equal(compactDiagnostics.path, "native-compact");
+assert.equal(compactDiagnostics.path, "native-compact-json");
+assert.equal(compactDiagnostics.preparedBridgeMode, "json");
+assert.equal(compactDiagnostics.requestedBridgeMode, "json");
 assert.equal(compactDiagnostics.usedNative, true);
+
+let hashDiagnostics = null;
+const hashNativeDelta = buildPersistDelta(beforeSnapshot, afterSnapshot, {
+  useNativeDelta: true,
+  minSnapshotRecords: 0,
+  minStructuralDelta: 0,
+  minCombinedSerializedChars: 0,
+  persistNativeDeltaBridgeMode: "hash",
+  runtimeMetaPatch: { hashMode: true },
+  onDiagnostics(snapshot) {
+    hashDiagnostics = snapshot;
+  },
+});
+assert.deepEqual(hashNativeDelta.upsertNodes, [
+  { id: "n1", type: "event", fields: { text: "after" }, updatedAt: 2 },
+]);
+assert.equal(hashNativeDelta.runtimeMetaPatch.hashMode, true);
+assert.equal(hashDiagnostics.path, "native-compact-hash");
+assert.equal(hashDiagnostics.preparedBridgeMode, "hash");
+assert.equal(hashDiagnostics.requestedBridgeMode, "hash");
+assert.equal(hashDiagnostics.usedNative, true);
 
 delete globalThis.__stBmeNativeBuildPersistDelta;
 

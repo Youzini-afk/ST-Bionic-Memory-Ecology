@@ -54,6 +54,10 @@ async function loadFromWasmPackArtifacts() {
 
   return {
     solve_layout: module.solve_layout,
+    build_persist_delta_compact_hash:
+      typeof module.build_persist_delta_compact_hash === "function"
+        ? module.build_persist_delta_compact_hash
+        : null,
     build_persist_delta_compact:
       typeof module.build_persist_delta_compact === "function"
         ? module.build_persist_delta_compact
@@ -147,7 +151,8 @@ export async function installNativePersistDeltaHook() {
   const module = await loadNativeModule();
   if (
     !module ||
-    (typeof module.build_persist_delta_compact !== "function" &&
+    (typeof module.build_persist_delta_compact_hash !== "function" &&
+      typeof module.build_persist_delta_compact !== "function" &&
       typeof module.build_persist_delta !== "function")
   ) {
     throw new Error("native persist delta builder unavailable");
@@ -155,12 +160,32 @@ export async function installNativePersistDeltaHook() {
 
   globalThis.__stBmeNativeBuildPersistDelta = (beforeSnapshot, afterSnapshot, options = {}) => {
     let raw = null;
+    const preparedInput =
+      options?.preparedDeltaInput && typeof options.preparedDeltaInput === "object"
+        ? options.preparedDeltaInput
+        : null;
+    const preparedBridgeMode = String(preparedInput?.bridgeMode || "")
+      .trim()
+      .toLowerCase();
     if (
-      typeof module.build_persist_delta_compact === "function" &&
-      options?.preparedDeltaInput &&
-      typeof options.preparedDeltaInput === "object"
+      typeof module.build_persist_delta_compact_hash === "function" &&
+      preparedInput &&
+      preparedBridgeMode === "hash"
     ) {
-      raw = module.build_persist_delta_compact(options.preparedDeltaInput);
+      raw = module.build_persist_delta_compact_hash(preparedInput);
+    } else if (
+      typeof module.build_persist_delta_compact === "function" &&
+      preparedInput &&
+      (preparedBridgeMode === "json" || preparedBridgeMode === "")
+    ) {
+      raw = module.build_persist_delta_compact(preparedInput);
+    } else if (
+      typeof module.build_persist_delta_compact === "function" &&
+      preparedInput &&
+      preparedBridgeMode === "hash" &&
+      Array.isArray(preparedInput?.afterNodes?.serialized)
+    ) {
+      raw = module.build_persist_delta_compact(preparedInput);
     } else if (typeof module.build_persist_delta === "function") {
       raw = module.build_persist_delta({
         beforeSnapshot,

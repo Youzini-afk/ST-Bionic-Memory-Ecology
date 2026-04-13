@@ -8061,6 +8061,12 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(String(diagnostics.path || "—"))}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Bridge 模式</span>
+        <strong>${_escHtml(
+          `${String(diagnostics.requestedBridgeMode || "none")} → ${String(diagnostics.preparedBridgeMode || "none")}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>Native Gate</span>
         <strong>${_escHtml(_formatPersistDeltaGateText(diagnostics))}</strong>
       </div>

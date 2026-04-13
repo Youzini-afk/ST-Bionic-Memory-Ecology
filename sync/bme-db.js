@@ -18,6 +18,8 @@ export const BME_LEGACY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_RECORDS = 20000;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_STRUCTURAL_DELTA = 600;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS = 4000000;
+const DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE = "json";
+const SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES = new Set(["json", "hash"]);
 
 export const BME_RUNTIME_HISTORY_META_KEY = "runtimeHistoryState";
 export const BME_RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
@@ -249,6 +251,20 @@ export function resolvePersistNativeDeltaGateOptions(options = {}) {
       DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS,
     ),
   };
+}
+
+export function resolvePersistNativeDeltaBridgeMode(options = {}) {
+  const rawMode = String(
+    options?.persistNativeDeltaBridgeMode ??
+      options?.nativeDeltaBridgeMode ??
+      DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE,
+  )
+    .trim()
+    .toLowerCase();
+  if (!rawMode) return DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE;
+  return SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES.has(rawMode)
+    ? rawMode
+    : DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE;
 }
 
 export function evaluatePersistNativeDeltaGate(
@@ -610,30 +626,44 @@ function normalizeSnapshotMetaState(snapshot = {}) {
   };
 }
 
+function hashPersistSerializedRecord32(value = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 function buildPreparedRecordSet(
   records = [],
   {
     retainRecords = false,
     includeTargetKeys = false,
     includeSerializedList = false,
+    includeHashList = false,
+    includeSerializedLookup = true,
     includeSerializedCharCount = false,
   } = {},
 ) {
+  const sourceRecords = toArray(records);
   const ids = [];
   const serialized = includeSerializedList ? [] : null;
-  const serializedById = new Map();
+  const hashes = includeHashList ? [] : null;
+  const serializedById = includeSerializedLookup ? new Map() : null;
   const recordById = retainRecords ? new Map() : null;
   const targetKeyById = includeTargetKeys ? new Map() : null;
   let serializedCharCount = 0;
 
-  for (const record of toArray(records)) {
+  for (const record of sourceRecords) {
     if (!record || typeof record !== "object" || Array.isArray(record)) continue;
     const id = normalizeRecordId(record.id);
     if (!id) continue;
     const json = JSON.stringify(record);
     ids.push(id);
     if (serialized) serialized.push(json);
-    serializedById.set(id, json);
+    if (hashes) hashes.push(hashPersistSerializedRecord32(json));
+    if (serializedById) serializedById.set(id, json);
     if (includeSerializedCharCount) {
       serializedCharCount += json.length;
     }
@@ -648,11 +678,32 @@ function buildPreparedRecordSet(
   return {
     ids,
     serialized,
+    hashes,
     serializedById,
+    sourceRecords,
     recordById,
     targetKeyById,
     serializedCharCount,
   };
+}
+
+function ensurePreparedSerializedLookup(recordSet = null) {
+  if (!recordSet || typeof recordSet !== "object") {
+    return new Map();
+  }
+  if (recordSet.serializedById instanceof Map) {
+    return recordSet.serializedById;
+  }
+
+  const map = new Map();
+  for (const record of toArray(recordSet.sourceRecords)) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = normalizeRecordId(record.id);
+    if (!id) continue;
+    map.set(id, JSON.stringify(record));
+  }
+  recordSet.serializedById = map;
+  return map;
 }
 
 function buildPreparedPersistDeltaContext(
@@ -661,34 +712,57 @@ function buildPreparedPersistDeltaContext(
   nowMs,
   options = {},
 ) {
-  const includeCompactPayload = options.includeCompactPayload === true;
+  const compactPayloadModeRaw = String(options.compactPayloadMode || "none")
+    .trim()
+    .toLowerCase();
+  const compactPayloadMode =
+    compactPayloadModeRaw === "hash"
+      ? "hash"
+      : compactPayloadModeRaw === "json"
+        ? "json"
+        : "none";
+  const includeCompactSerializedList = compactPayloadMode === "json";
+  const includeCompactHashList = compactPayloadMode === "hash";
+  const includeSerializedLookup = options.includeSerializedLookup !== false;
   const includeSerializedCharCount = options.includeSerializedCharCount === true;
   const beforeNodes = buildPreparedRecordSet(beforeSnapshot.nodes, {
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const afterNodes = buildPreparedRecordSet(afterSnapshot.nodes, {
     retainRecords: true,
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const beforeEdges = buildPreparedRecordSet(beforeSnapshot.edges, {
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const afterEdges = buildPreparedRecordSet(afterSnapshot.edges, {
     retainRecords: true,
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const beforeTombstones = buildPreparedRecordSet(beforeSnapshot.tombstones, {
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const afterTombstones = buildPreparedRecordSet(afterSnapshot.tombstones, {
     retainRecords: true,
     includeTargetKeys: true,
-    includeSerializedList: includeCompactPayload,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
     includeSerializedCharCount,
   });
   const sourceDeviceId = normalizeRecordId(
@@ -729,38 +803,72 @@ function buildPreparedPersistDeltaContext(
       Math.abs(afterTombstones.ids.length - beforeTombstones.ids.length),
     beforeSerializedChars,
     afterSerializedChars,
-    compactPayload: includeCompactPayload
-      ? {
-          nowMs,
-          beforeNodes: {
-            ids: beforeNodes.ids,
-            serialized: beforeNodes.serialized,
-          },
-          afterNodes: {
-            ids: afterNodes.ids,
-            serialized: afterNodes.serialized,
-          },
-          beforeEdges: {
-            ids: beforeEdges.ids,
-            serialized: beforeEdges.serialized,
-          },
-          afterEdges: {
-            ids: afterEdges.ids,
-            serialized: afterEdges.serialized,
-          },
-          beforeTombstones: {
-            ids: beforeTombstones.ids,
-            serialized: beforeTombstones.serialized,
-          },
-          afterTombstones: {
-            ids: afterTombstones.ids,
-            serialized: afterTombstones.serialized,
-            targetKeys: afterTombstones.ids.map(
-              (id) => afterTombstones.targetKeyById?.get(id) || "",
-            ),
-          },
-        }
-      : null,
+    compactPayload:
+      compactPayloadMode === "json"
+        ? {
+            bridgeMode: "json",
+            nowMs,
+            beforeNodes: {
+              ids: beforeNodes.ids,
+              serialized: beforeNodes.serialized,
+            },
+            afterNodes: {
+              ids: afterNodes.ids,
+              serialized: afterNodes.serialized,
+            },
+            beforeEdges: {
+              ids: beforeEdges.ids,
+              serialized: beforeEdges.serialized,
+            },
+            afterEdges: {
+              ids: afterEdges.ids,
+              serialized: afterEdges.serialized,
+            },
+            beforeTombstones: {
+              ids: beforeTombstones.ids,
+              serialized: beforeTombstones.serialized,
+            },
+            afterTombstones: {
+              ids: afterTombstones.ids,
+              serialized: afterTombstones.serialized,
+              targetKeys: afterTombstones.ids.map(
+                (id) => afterTombstones.targetKeyById?.get(id) || "",
+              ),
+            },
+          }
+        : compactPayloadMode === "hash"
+          ? {
+              bridgeMode: "hash",
+              nowMs,
+              beforeNodes: {
+                ids: beforeNodes.ids,
+                hashes: beforeNodes.hashes,
+              },
+              afterNodes: {
+                ids: afterNodes.ids,
+                hashes: afterNodes.hashes,
+              },
+              beforeEdges: {
+                ids: beforeEdges.ids,
+                hashes: beforeEdges.hashes,
+              },
+              afterEdges: {
+                ids: afterEdges.ids,
+                hashes: afterEdges.hashes,
+              },
+              beforeTombstones: {
+                ids: beforeTombstones.ids,
+                hashes: beforeTombstones.hashes,
+              },
+              afterTombstones: {
+                ids: afterTombstones.ids,
+                hashes: afterTombstones.hashes,
+                targetKeys: afterTombstones.ids.map(
+                  (id) => afterTombstones.targetKeyById?.get(id) || "",
+                ),
+              },
+            }
+          : null,
   };
 }
 
@@ -998,6 +1106,7 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
   const normalizedBefore = normalizePersistSnapshotView(beforeSnapshot);
   const normalizedAfter = normalizePersistSnapshotView(afterSnapshot);
   const nowMs = normalizeTimestamp(options.nowMs, Date.now());
+  const nativeBridgeMode = resolvePersistNativeDeltaBridgeMode(options);
   const nativeGateOptions =
     options?.useNativeDelta === true
       ? resolvePersistNativeDeltaGateOptions(options)
@@ -1011,7 +1120,8 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
     normalizedAfter,
     nowMs,
     {
-      includeCompactPayload: options?.useNativeDelta === true,
+      compactPayloadMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+      includeSerializedLookup: options?.useNativeDelta !== true,
       includeSerializedCharCount: shouldMeasureSerializedChars,
     },
   );
@@ -1074,8 +1184,12 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
     if (shouldCollectDiagnostics) {
       emitPersistDeltaDiagnostics(options, {
         requestedNative: options?.useNativeDelta === true,
+        requestedBridgeMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+        preparedBridgeMode: preparedContext.compactPayload?.bridgeMode || "none",
         usedNative: true,
-        path: nativeIdDelta ? "native-compact" : "native-full",
+        path: nativeIdDelta
+          ? `native-compact-${preparedContext.compactPayload?.bridgeMode || "json"}`
+          : "native-full",
         gateAllowed: preparedNativeGate?.allowed ?? false,
         gateReasons: preparedNativeGate?.reasons || [],
         nativeAttemptStatus: nativeAttempt.status,
@@ -1100,11 +1214,29 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
     return result;
   }
 
+  const beforeNodeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeNodes,
+  );
+  const afterNodeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterNodes,
+  );
+  const beforeEdgeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeEdges,
+  );
+  const afterEdgeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterEdges,
+  );
+  const beforeTombstoneSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeTombstones,
+  );
+  const afterTombstoneSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterTombstones,
+  );
+
   const upsertNodes = [];
   for (const id of preparedContext.afterNodes.ids) {
     if (
-      preparedContext.beforeNodes.serializedById.get(id) !==
-      preparedContext.afterNodes.serializedById.get(id)
+      beforeNodeSerializedById.get(id) !== afterNodeSerializedById.get(id)
     ) {
       const record = preparedContext.afterNodes.recordById?.get(id);
       if (record) upsertNodes.push(record);
@@ -1114,8 +1246,7 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
   const upsertEdges = [];
   for (const id of preparedContext.afterEdges.ids) {
     if (
-      preparedContext.beforeEdges.serializedById.get(id) !==
-      preparedContext.afterEdges.serializedById.get(id)
+      beforeEdgeSerializedById.get(id) !== afterEdgeSerializedById.get(id)
     ) {
       const record = preparedContext.afterEdges.recordById?.get(id);
       if (record) upsertEdges.push(record);
@@ -1124,14 +1255,14 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
 
   const deleteNodeIds = [];
   for (const id of preparedContext.beforeNodes.ids) {
-    if (!preparedContext.afterNodes.serializedById.has(id)) {
+    if (!afterNodeSerializedById.has(id)) {
       deleteNodeIds.push(id);
     }
   }
 
   const deleteEdgeIds = [];
   for (const id of preparedContext.beforeEdges.ids) {
-    if (!preparedContext.afterEdges.serializedById.has(id)) {
+    if (!afterEdgeSerializedById.has(id)) {
       deleteEdgeIds.push(id);
     }
   }
@@ -1139,8 +1270,8 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
   const tombstoneMap = new Map();
   for (const id of preparedContext.afterTombstones.ids) {
     if (
-      preparedContext.beforeTombstones.serializedById.get(id) !==
-      preparedContext.afterTombstones.serializedById.get(id)
+      beforeTombstoneSerializedById.get(id) !==
+      afterTombstoneSerializedById.get(id)
     ) {
       const record = preparedContext.afterTombstones.recordById?.get(id);
       const targetKey = preparedContext.afterTombstones.targetKeyById?.get(id) || "";
@@ -1186,6 +1317,8 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
   if (shouldCollectDiagnostics) {
     emitPersistDeltaDiagnostics(options, {
       requestedNative: options?.useNativeDelta === true,
+      requestedBridgeMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+      preparedBridgeMode: preparedContext.compactPayload?.bridgeMode || "none",
       usedNative: false,
       path: "js",
       gateAllowed: preparedNativeGate?.allowed ?? false,
