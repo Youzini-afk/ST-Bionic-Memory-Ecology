@@ -2297,6 +2297,8 @@ export class BmeDatabase {
     this.options = {
       dexieClass: options.dexieClass || null,
     };
+    this.storeKind = "indexeddb";
+    this.storeMode = "indexeddb";
 
     this.db = null;
     this._openPromise = null;

@@ -27,6 +27,14 @@ import {
   ensureDexieLoaded,
 } from "./sync/bme-db.js";
 import {
+  BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+  BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+  OpfsGraphStore,
+  detectOpfsSupport,
+  isGraphLocalStorageModeOpfs,
+  normalizeGraphLocalStorageMode,
+} from "./sync/bme-opfs-store.js";
+import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
   backupToServer,
@@ -856,6 +864,14 @@ const stageAbortControllers = {
 };
 let bmeChatManager = null;
 let bmeChatManagerUnavailableWarned = false;
+let bmeLocalStoreCapabilityPromise = null;
+let bmeLocalStoreCapabilitySnapshot = {
+  checked: false,
+  checkedAt: 0,
+  opfsAvailable: false,
+  reason: "unprobed",
+};
+let bmeLocalStoreCapabilityWarningShown = false;
 const bmeIndexedDbSnapshotCacheByChatId = new Map();
 const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
@@ -1188,6 +1204,9 @@ function applyGraphLoadState(
     pendingPersist = graphPersistenceState.pendingPersist,
     dbReady = isGraphLoadStateDbReady(loadState),
     writesBlocked = !isGraphMetadataWriteAllowed(loadState),
+    storagePrimary = graphPersistenceState.storagePrimary || "indexeddb",
+    storageMode =
+      graphPersistenceState.storageMode || BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
   } = {},
 ) {
   updateGraphPersistenceState({
@@ -1205,7 +1224,8 @@ function applyGraphLoadState(
     pendingPersist,
     writesBlocked,
     dbReady,
-    storageMode: "indexeddb",
+    storagePrimary,
+    storageMode,
   });
 
   if (dbReady && isGraphLoadStateDbReady(loadState)) {
@@ -3548,6 +3568,150 @@ function getSettings() {
   return mergedSettings;
 }
 
+function buildIndexedDbStorePresentation() {
+  return {
+    storagePrimary: "indexeddb",
+    storageMode: BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+    statusLabel: "IndexedDB",
+    reasonPrefix: "indexeddb",
+  };
+}
+
+function buildOpfsStorePresentation(
+  mode = BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+) {
+  return {
+    storagePrimary: "opfs",
+    storageMode: normalizeGraphLocalStorageMode(
+      mode,
+      BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+    ),
+    statusLabel: "OPFS",
+    reasonPrefix: "opfs",
+  };
+}
+
+function getRequestedGraphLocalStorageMode(settings = getSettings()) {
+  const sourceSettings =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : {};
+  return normalizeGraphLocalStorageMode(
+    sourceSettings.graphLocalStorageMode,
+    BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+  );
+}
+
+function resolveDbGraphStorePresentation(db = null) {
+  if (db?.storeKind === "opfs" || isGraphLocalStorageModeOpfs(db?.storeMode)) {
+    return buildOpfsStorePresentation(db?.storeMode);
+  }
+  return buildIndexedDbStorePresentation();
+}
+
+function resolveSnapshotGraphStorePresentation(
+  snapshot = null,
+  fallbackPresentation = buildIndexedDbStorePresentation(),
+) {
+  const normalizedFallback =
+    fallbackPresentation && typeof fallbackPresentation === "object"
+      ? fallbackPresentation
+      : buildIndexedDbStorePresentation();
+  const snapshotPrimary = String(snapshot?.meta?.storagePrimary || "")
+    .trim()
+    .toLowerCase();
+  const snapshotMode = normalizeGraphLocalStorageMode(
+    snapshot?.meta?.storageMode,
+    normalizedFallback.storageMode,
+  );
+  if (snapshotPrimary === "opfs" || isGraphLocalStorageModeOpfs(snapshotMode)) {
+    return buildOpfsStorePresentation(snapshotMode);
+  }
+  return buildIndexedDbStorePresentation();
+}
+
+async function getGraphLocalStoreCapability(forceRefresh = false) {
+  if (!forceRefresh && bmeLocalStoreCapabilitySnapshot.checked) {
+    return bmeLocalStoreCapabilitySnapshot;
+  }
+  if (!forceRefresh && bmeLocalStoreCapabilityPromise) {
+    return await bmeLocalStoreCapabilityPromise;
+  }
+
+  bmeLocalStoreCapabilityPromise = detectOpfsSupport()
+    .then((result) => {
+      bmeLocalStoreCapabilitySnapshot = {
+        checked: true,
+        checkedAt: Date.now(),
+        opfsAvailable: Boolean(result?.available),
+        reason: String(result?.reason || (result?.available ? "ok" : "unavailable")),
+      };
+      return bmeLocalStoreCapabilitySnapshot;
+    })
+    .catch((error) => {
+      bmeLocalStoreCapabilitySnapshot = {
+        checked: true,
+        checkedAt: Date.now(),
+        opfsAvailable: false,
+        reason: error?.message || String(error),
+      };
+      return bmeLocalStoreCapabilitySnapshot;
+    })
+    .finally(() => {
+      bmeLocalStoreCapabilityPromise = null;
+    });
+
+  return await bmeLocalStoreCapabilityPromise;
+}
+
+function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  if (
+    isGraphLocalStorageModeOpfs(requestedMode) &&
+    bmeLocalStoreCapabilitySnapshot?.opfsAvailable
+  ) {
+    return buildOpfsStorePresentation(requestedMode);
+  }
+  return buildIndexedDbStorePresentation();
+}
+
+ async function resolvePreferredGraphLocalStorePresentation(
+   settings = getSettings(),
+ ) {
+   const requestedMode = getRequestedGraphLocalStorageMode(settings);
+   if (!isGraphLocalStorageModeOpfs(requestedMode)) {
+     return buildIndexedDbStorePresentation();
+  }
+
+  const capability = await getGraphLocalStoreCapability();
+  if (capability.opfsAvailable) {
+    return buildOpfsStorePresentation(requestedMode);
+  }
+
+  if (!bmeLocalStoreCapabilityWarningShown) {
+    console.warn("[ST-BME] OPFS 不可用，已回退到 IndexedDB:", capability.reason);
+    bmeLocalStoreCapabilityWarningShown = true;
+   }
+   return buildIndexedDbStorePresentation();
+ }
+
+async function createPreferredGraphLocalStore(
+  chatId,
+  settings = getSettings(),
+) {
+  const preferredLocalStore =
+    await resolvePreferredGraphLocalStorePresentation(settings);
+  if (
+    preferredLocalStore.storagePrimary === "opfs" &&
+    typeof OpfsGraphStore === "function"
+  ) {
+    return new OpfsGraphStore(chatId, {
+      storeMode: preferredLocalStore.storageMode,
+    });
+  }
+  return new BmeDatabase(chatId);
+}
+
 function getMessageHideSettings(settings = null) {
   let sourceSettings = settings;
   if (!sourceSettings || typeof sourceSettings !== "object") {
@@ -3567,972 +3731,6 @@ function getMessageHideSettings(settings = null) {
   };
 }
 
-function getHideRuntimeAdapters() {
-  return {
-    $,
-    clearTimeout,
-    getContext,
-    setTimeout,
-  };
-}
-
-async function applyMessageHideNow(reason = "manual-apply") {
-  try {
-    const result = await applyHideSettings(
-      getMessageHideSettings(),
-      getHideRuntimeAdapters(),
-    );
-    debugLog("[ST-BME] 已应用旧楼层隐藏:", reason, result);
-    return result;
-  } catch (error) {
-    console.warn("[ST-BME] 应用旧楼层隐藏失败:", reason, error);
-    return {
-      active: false,
-      error: error instanceof Error ? error.message : String(error || "未知错误"),
-    };
-  }
-}
-
-function scheduleMessageHideApply(reason = "scheduled", delayMs = 120) {
-  try {
-    scheduleHideSettingsApply(
-      getMessageHideSettings(),
-      getHideRuntimeAdapters(),
-      delayMs,
-    );
-  } catch (error) {
-    console.warn("[ST-BME] 调度旧楼层隐藏失败:", reason, error);
-  }
-}
-
-async function runIncrementalMessageHide(reason = "incremental") {
-  try {
-    const result = await runIncrementalHideCheck(
-      getMessageHideSettings(),
-      getHideRuntimeAdapters(),
-    );
-    if (result?.active) {
-      debugLog("[ST-BME] 已增量更新旧楼层隐藏:", reason, result);
-    }
-    return result;
-  } catch (error) {
-    console.warn("[ST-BME] 增量更新旧楼层隐藏失败:", reason, error);
-    return {
-      active: false,
-      error: error instanceof Error ? error.message : String(error || "未知错误"),
-    };
-  }
-}
-
-function clearMessageHideState(reason = "reset") {
-  try {
-    resetHideState(getHideRuntimeAdapters());
-    debugLog("[ST-BME] 已重置旧楼层隐藏状态", reason);
-  } catch (error) {
-    console.warn("[ST-BME] 重置旧楼层隐藏状态失败:", reason, error);
-  }
-}
-
-async function clearAllHiddenMessages(reason = "manual-clear") {
-  try {
-    const result = await unhideAll(getHideRuntimeAdapters());
-    debugLog("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
-    return result;
-  } catch (error) {
-    console.warn("[ST-BME] 取消全部旧楼层隐藏失败:", reason, error);
-    return {
-      active: false,
-      error: error instanceof Error ? error.message : String(error || "未知错误"),
-    };
-  }
-}
-
-function initializeHostCapabilityBridge(options = {}) {
-  try {
-    initializeHostAdapter({
-      getContext,
-      ...options,
-    });
-  } catch (error) {
-    console.warn("[ST-BME] 宿主桥接初始化失败:", error);
-  }
-
-  return getHostCapabilityStatus();
-}
-
-function buildHostCapabilityErrorStatus(error) {
-  const snapshot = {
-    available: false,
-    mode: "error",
-    fallbackReason:
-      error instanceof Error ? error.message : String(error || "未知错误"),
-    versionHints: {
-      stateSemantics: HOST_ADAPTER_STATE_SEMANTICS,
-      refreshMode: "manual-rebuild",
-    },
-    stateSemantics: HOST_ADAPTER_STATE_SEMANTICS,
-    refreshMode: "manual-rebuild",
-    snapshotRevision: -1,
-    snapshotCreatedAt: "",
-  };
-  recordHostCapabilitySnapshot(snapshot);
-  return snapshot;
-}
-
-export function getHostCapabilityStatus(options = {}) {
-  const normalizedOptions =
-    options && typeof options === "object" ? { ...options } : {};
-  const shouldRefresh = normalizedOptions.refresh === true;
-
-  delete normalizedOptions.refresh;
-
-  try {
-    const snapshot = shouldRefresh
-      ? refreshHostCapabilitySnapshot(normalizedOptions)
-      : getHostCapabilitySnapshot();
-    recordHostCapabilitySnapshot(snapshot);
-    return snapshot;
-  } catch (error) {
-    console.warn("[ST-BME] 读取宿主桥接状态失败:", error);
-    return buildHostCapabilityErrorStatus(error);
-  }
-}
-
-export function refreshHostCapabilityStatus(options = {}) {
-  return getHostCapabilityStatus({
-    ...options,
-    refresh: true,
-  });
-}
-
-export function getHostCapability(name, options = {}) {
-  const normalizedName = String(name || "").trim();
-  if (!normalizedName) return null;
-
-  try {
-    return readHostCapability(normalizedName, options) || null;
-  } catch (error) {
-    console.warn("[ST-BME] 读取宿主桥接能力失败:", error);
-    return getHostCapabilityStatus(options)?.[normalizedName] || null;
-  }
-}
-
-export function getPanelRuntimeDebugSnapshot(options = {}) {
-  const shouldRefreshHost = options?.refreshHost === true;
-  const hostCapabilities = shouldRefreshHost
-    ? refreshHostCapabilityStatus()
-    : getHostCapabilityStatus();
-
-  return {
-    hostCapabilities,
-    messageHiding: getHideStateSnapshot(),
-    runtimeDebug: readRuntimeDebugSnapshot(),
-  };
-}
-
-function getSchema() {
-  const settings = getSettings();
-  const schema = settings.nodeTypeSchema || DEFAULT_NODE_SCHEMA;
-  const validation = validateSchema(schema);
-  if (!validation.valid) {
-    console.warn("[ST-BME] Schema 非法，回退到默认 Schema:", validation.errors);
-    return DEFAULT_NODE_SCHEMA;
-  }
-  return schema;
-}
-
-function getConfiguredTimeoutMs(settings = getSettings()) {
-  return typeof resolveConfiguredTimeoutMs === "function"
-    ? resolveConfiguredTimeoutMs(settings, LOCAL_VECTOR_TIMEOUT_MS)
-    : (() => {
-        const timeoutMs = Number(settings?.timeoutMs);
-        return Number.isFinite(timeoutMs) && timeoutMs > 0
-          ? timeoutMs
-          : LOCAL_VECTOR_TIMEOUT_MS;
-      })();
-}
-
-function getPlannerRecallTimeoutMs() {
-  return getConfiguredTimeoutMs(getSettings());
-}
-
-function getEmbeddingConfig(mode = null) {
-  const settings = getSettings();
-  return getVectorConfigFromSettings(
-    mode ? { ...settings, embeddingTransportMode: mode } : settings,
-  );
-}
-
-function normalizeChatIdCandidate(value = "") {
-  return String(value ?? "").trim();
-}
-
-function readGlobalCurrentChatId() {
-  try {
-    return normalizeChatIdCandidate(
-      globalThis.SillyTavern?.getCurrentChatId?.() ||
-        globalThis.getCurrentChatId?.() ||
-        "",
-    );
-  } catch {
-    return "";
-  }
-}
-
-function hasLikelySelectedChatContext(context = getContext()) {
-  if (!context || typeof context !== "object") {
-    return false;
-  }
-
-  const hasMeaningfulChatMetadata =
-    context.chatMetadata &&
-    typeof context.chatMetadata === "object" &&
-    !Array.isArray(context.chatMetadata) &&
-    Object.keys(context.chatMetadata).length > 0;
-  const hasChatMessages =
-    Array.isArray(context.chat) && context.chat.length > 0;
-  const hasCharacterId =
-    context.characterId !== undefined &&
-    context.characterId !== null &&
-    String(context.characterId).trim() !== "";
-  const hasGroupId =
-    context.groupId !== undefined &&
-    context.groupId !== null &&
-    String(context.groupId).trim() !== "";
-
-  return (
-    hasMeaningfulChatMetadata || hasChatMessages || hasCharacterId || hasGroupId
-  );
-}
-
-function hasHostMetadataReadySignal(metadata = {}) {
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-    return false;
-  }
-
-  if (normalizeChatIdCandidate(metadata.integrity)) {
-    return true;
-  }
-
-  const chatIdentityCandidates = [
-    metadata.chat_id,
-    metadata.chatId,
-    metadata.session_id,
-    metadata.sessionId,
-  ];
-  if (
-    chatIdentityCandidates.some((candidate) =>
-      Boolean(normalizeChatIdCandidate(candidate)),
-    )
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-function isHostChatMetadataReady(context = getContext()) {
-  if (
-    !context?.chatMetadata ||
-    typeof context.chatMetadata !== "object" ||
-    Array.isArray(context.chatMetadata)
-  ) {
-    return false;
-  }
-
-  const metadata = context.chatMetadata;
-  // 仅接受宿主“强信号”，避免把中间态占位 metadata 误判为 ready。
-  if (hasHostMetadataReadySignal(metadata)) return true;
-
-  return false;
-}
-
-function resolveCurrentHostChatId(context = getContext()) {
-  const candidates = [
-    context?.chatId,
-    context?.getCurrentChatId?.(),
-    readGlobalCurrentChatId(),
-    context?.chatMetadata?.chat_id,
-    context?.chatMetadata?.chatId,
-    context?.chatMetadata?.session_id,
-    context?.chatMetadata?.sessionId,
-  ];
-
-  return (
-    candidates
-      .map((candidate) => normalizeChatIdCandidate(candidate))
-      .find(Boolean) || ""
-  );
-}
-
-function resolveCurrentChatIdentity(context = getContext()) {
-  const hostChatId = resolveCurrentHostChatId(context);
-  const integrity =
-    typeof getChatMetadataIntegrity === "function"
-      ? getChatMetadataIntegrity(context)
-      : normalizeChatIdCandidate(
-          context?.chatMetadata?.integrity ||
-            context?.chatMetadata?.chat_id ||
-            context?.chatMetadata?.chatId ||
-            "",
-        );
-  const aliasedChatId =
-    !integrity &&
-    hostChatId &&
-    typeof resolveGraphIdentityAliasByHostChatId === "function"
-      ? resolveGraphIdentityAliasByHostChatId(hostChatId)
-      : "";
-  const chatId = integrity || aliasedChatId || hostChatId;
-
-  return {
-    chatId,
-    hostChatId,
-    integrity,
-    identitySource: integrity
-      ? "integrity"
-      : aliasedChatId
-        ? "alias"
-        : hostChatId
-          ? "host-chat-id"
-          : "",
-    hasLikelySelectedChat: hasLikelySelectedChatContext(context),
-  };
-}
-
-function getCurrentChatId(context = getContext()) {
-  return resolveCurrentChatIdentity(context).chatId;
-}
-
-function rememberResolvedGraphIdentityAlias(
-  context = getContext(),
-  persistenceChatId = getCurrentChatId(context),
-) {
-  const identity = resolveCurrentChatIdentity(context);
-  if (!identity.integrity || !persistenceChatId) {
-    return null;
-  }
-
-  return rememberGraphIdentityAlias({
-    integrity: identity.integrity,
-    hostChatId: identity.hostChatId,
-    persistenceChatId,
-  });
-}
-
-function buildLegacyGraphIdentityCandidates(
-  targetChatId,
-  context = getContext(),
-  { shadowSnapshot = null } = {},
-) {
-  const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
-  const identity = resolveCurrentChatIdentity(context);
-  const candidates = new Set();
-  const addCandidate = (value) => {
-    const normalized = normalizeChatIdCandidate(value);
-    if (!normalized || normalized === normalizedTargetChatId) return;
-    candidates.add(normalized);
-  };
-
-  addCandidate(identity.hostChatId);
-  for (const aliasCandidate of getGraphIdentityAliasCandidates({
-    integrity: identity.integrity,
-    hostChatId: identity.hostChatId,
-    persistenceChatId: normalizedTargetChatId,
-  })) {
-    addCandidate(aliasCandidate);
-  }
-
-  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
-  const runtimeGraphIntegrity = normalizeChatIdCandidate(
-    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
-  );
-  if (
-    identity.integrity &&
-    runtimeGraphIntegrity &&
-    runtimeGraphIntegrity === identity.integrity
-  ) {
-    addCandidate(graphPersistenceState.chatId);
-    addCandidate(currentGraph?.historyState?.chatId);
-    addCandidate(currentGraphMeta.chatId);
-  }
-
-  addCandidate(shadowSnapshot?.chatId);
-  addCandidate(shadowSnapshot?.persistedChatId);
-  return Array.from(candidates);
-}
-
-async function doesIndexedDbChatStoreExist(chatId = "") {
-  const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId) return false;
-
-  const DexieCtor = globalThis.Dexie || (await ensureDexieLoaded());
-  if (typeof DexieCtor?.exists === "function") {
-    return await DexieCtor.exists(buildBmeDbName(normalizedChatId));
-  }
-
-  if (typeof DexieCtor?.getDatabaseNames === "function") {
-    const names = await DexieCtor.getDatabaseNames();
-    return Array.isArray(names)
-      ? names.includes(buildBmeDbName(normalizedChatId))
-      : false;
-  }
-
-  return false;
-}
-
-async function exportIndexedDbSnapshotForChat(chatId = "") {
-  const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId) {
-    return null;
-  }
-
-  if (!(await doesIndexedDbChatStoreExist(normalizedChatId))) {
-    return null;
-  }
-
-  const DexieCtor = globalThis.Dexie || (await ensureDexieLoaded());
-  const db = new BmeDatabase(normalizedChatId, {
-    dexieClass: DexieCtor,
-  });
-
-  try {
-    await db.open();
-    return await db.exportSnapshot();
-  } finally {
-    await db.close();
-  }
-}
-
-function buildRecoveredSnapshotForChatIdentity(
-  graph,
-  targetChatId,
-  {
-    revision = 0,
-    integrity = "",
-    source = "identity-recovery",
-    legacyChatId = "",
-  } = {},
-) {
-  const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
-  const normalizedIntegrity = normalizeChatIdCandidate(integrity);
-  const normalizedLegacyChatId = normalizeChatIdCandidate(legacyChatId);
-  const normalizedGraph = cloneGraphForPersistence(graph, normalizedTargetChatId);
-  const effectiveRevision = Math.max(
-    1,
-    normalizeIndexedDbRevision(
-      revision || graphPersistenceState.revision || getGraphPersistedRevision(graph),
-    ),
-  );
-
-  stampGraphPersistenceMeta(normalizedGraph, {
-    revision: effectiveRevision,
-    reason: source,
-    chatId: normalizedTargetChatId,
-    integrity: normalizedIntegrity,
-  });
-
-  return buildSnapshotFromGraph(normalizedGraph, {
-    chatId: normalizedTargetChatId,
-    revision: effectiveRevision,
-    lastModified: Date.now(),
-    meta: {
-      storagePrimary: "indexeddb",
-      lastMutationReason: String(source || "identity-recovery"),
-      integrity: normalizedIntegrity,
-      migratedFromChatId: normalizedLegacyChatId,
-      identityMigrationSource: String(source || "identity-recovery"),
-    },
-  });
-}
-
-async function importRecoveredSnapshotToIndexedDb(
-  targetDb,
-  targetChatId,
-  graph,
-  { revision = 0, integrity = "", source = "identity-recovery", legacyChatId = "" } = {},
-) {
-  const snapshot = buildRecoveredSnapshotForChatIdentity(graph, targetChatId, {
-    revision,
-    integrity,
-    source,
-    legacyChatId,
-  });
-  const importResult = await targetDb.importSnapshot(snapshot, {
-    mode: "replace",
-    preserveRevision: true,
-    revision: snapshot.meta.revision,
-    markSyncDirty: true,
-  });
-  snapshot.meta.revision = normalizeIndexedDbRevision(
-    importResult?.revision,
-    snapshot.meta.revision,
-  );
-  return snapshot;
-}
-
-function doesChatIdMatchResolvedGraphIdentity(
-  candidateChatId,
-  identity = resolveCurrentChatIdentity(getContext()),
-) {
-  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
-  if (!normalizedCandidate || !identity || typeof identity !== "object") {
-    return false;
-  }
-
-  const knownChatIds = new Set();
-  const addKnownChatId = (value) => {
-    const normalized = normalizeChatIdCandidate(value);
-    if (normalized) {
-      knownChatIds.add(normalized);
-    }
-  };
-
-  addKnownChatId(identity.chatId);
-  addKnownChatId(identity.hostChatId);
-  addKnownChatId(identity.integrity);
-
-  for (const aliasCandidate of getGraphIdentityAliasCandidates({
-    integrity: identity.integrity,
-    hostChatId: identity.hostChatId,
-    persistenceChatId: identity.chatId,
-  })) {
-    addKnownChatId(aliasCandidate);
-  }
-
-  return knownChatIds.has(normalizedCandidate);
-}
-
-function areChatIdsEquivalentForResolvedIdentity(
-  candidateChatId,
-  referenceChatId,
-  identity = resolveCurrentChatIdentity(getContext()),
-) {
-  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
-  const normalizedReference = normalizeChatIdCandidate(referenceChatId);
-  if (!normalizedCandidate || !normalizedReference) {
-    return normalizedCandidate === normalizedReference;
-  }
-  if (normalizedCandidate === normalizedReference) {
-    return true;
-  }
-  return (
-    doesChatIdMatchResolvedGraphIdentity(normalizedCandidate, identity) &&
-    doesChatIdMatchResolvedGraphIdentity(normalizedReference, identity)
-  );
-}
-
-function getIndexedDbSnapshotHistoryState(snapshot = null) {
-  const snapshotState =
-    snapshot?.meta?.runtimeHistoryState &&
-    typeof snapshot.meta.runtimeHistoryState === "object" &&
-    !Array.isArray(snapshot.meta.runtimeHistoryState)
-      ? snapshot.meta.runtimeHistoryState
-      : null;
-
-  return {
-    lastProcessedAssistantFloor: Number.isFinite(
-      Number(snapshot?.state?.lastProcessedFloor),
-    )
-      ? Number(snapshot.state.lastProcessedFloor)
-      : Number.isFinite(Number(snapshotState?.lastProcessedAssistantFloor))
-        ? Number(snapshotState.lastProcessedAssistantFloor)
-        : -1,
-    extractionCount: Number.isFinite(Number(snapshot?.state?.extractionCount))
-      ? Number(snapshot.state.extractionCount)
-      : Number.isFinite(Number(snapshotState?.extractionCount))
-        ? Number(snapshotState.extractionCount)
-        : 0,
-  };
-}
-
-function detectStaleIndexedDbSnapshotAgainstRuntime(
-  chatId,
-  snapshot,
-  { identity = resolveCurrentChatIdentity(getContext()) } = {},
-) {
-  const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot) || !currentGraph) {
-    return {
-      stale: false,
-      reason: "",
-    };
-  }
-
-  const runtimeChatId = normalizeChatIdCandidate(
-    currentGraph?.historyState?.chatId ||
-      getGraphPersistenceMeta(currentGraph)?.chatId ||
-      graphPersistenceState.chatId,
-  );
-  if (
-    !runtimeChatId ||
-    !areChatIdsEquivalentForResolvedIdentity(
-      normalizedChatId,
-      runtimeChatId,
-      identity,
-    )
-  ) {
-    return {
-      stale: false,
-      reason: "",
-    };
-  }
-
-  const runtimeRevision = Math.max(
-    normalizeIndexedDbRevision(graphPersistenceState.revision),
-    normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
-    normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
-    getGraphPersistedRevision(currentGraph),
-  );
-  const snapshotRevision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
-  if (runtimeRevision > snapshotRevision) {
-    return {
-      stale: true,
-      reason: "runtime-revision-newer",
-      runtimeRevision,
-      snapshotRevision,
-    };
-  }
-
-  if (runtimeRevision < snapshotRevision) {
-    return {
-      stale: false,
-      reason: "",
-      runtimeRevision,
-      snapshotRevision,
-    };
-  }
-
-  const runtimeLastProcessedFloor = Number.isFinite(
-    Number(currentGraph?.historyState?.lastProcessedAssistantFloor),
-  )
-    ? Number(currentGraph.historyState.lastProcessedAssistantFloor)
-    : Number.isFinite(Number(currentGraph?.lastProcessedSeq))
-      ? Number(currentGraph.lastProcessedSeq)
-      : -1;
-  const runtimeExtractionCount = Number.isFinite(
-    Number(currentGraph?.historyState?.extractionCount),
-  )
-    ? Number(currentGraph.historyState.extractionCount)
-    : Number.isFinite(Number(extractionCount))
-      ? Number(extractionCount)
-      : 0;
-  const snapshotHistoryState = getIndexedDbSnapshotHistoryState(snapshot);
-
-  if (runtimeLastProcessedFloor > snapshotHistoryState.lastProcessedAssistantFloor) {
-    return {
-      stale: true,
-      reason: "runtime-last-processed-newer",
-      runtimeRevision,
-      snapshotRevision,
-      runtimeLastProcessedFloor,
-      snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
-      runtimeExtractionCount,
-      snapshotExtractionCount: snapshotHistoryState.extractionCount,
-    };
-  }
-
-  if (runtimeExtractionCount > snapshotHistoryState.extractionCount) {
-    return {
-      stale: true,
-      reason: "runtime-extraction-count-newer",
-      runtimeRevision,
-      snapshotRevision,
-      runtimeLastProcessedFloor,
-      snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
-      runtimeExtractionCount,
-      snapshotExtractionCount: snapshotHistoryState.extractionCount,
-    };
-  }
-
-  return {
-    stale: false,
-    reason: "",
-    runtimeRevision,
-    snapshotRevision,
-    runtimeLastProcessedFloor,
-    snapshotLastProcessedFloor: snapshotHistoryState.lastProcessedAssistantFloor,
-    runtimeExtractionCount,
-    snapshotExtractionCount: snapshotHistoryState.extractionCount,
-  };
-}
-
-function resolveCompatibleGraphShadowSnapshot(
-  identity = resolveCurrentChatIdentity(getContext()),
-) {
-  if (!identity || typeof identity !== "object") {
-    return null;
-  }
-
-  const directSnapshot = readGraphShadowSnapshot(identity.chatId);
-  if (directSnapshot) {
-    return directSnapshot;
-  }
-
-  const seenChatIds = new Set(
-    [identity.chatId].map((value) => normalizeChatIdCandidate(value)).filter(Boolean),
-  );
-  const readByChatId = (value) => {
-    const normalized = normalizeChatIdCandidate(value);
-    if (!normalized || seenChatIds.has(normalized)) {
-      return null;
-    }
-    seenChatIds.add(normalized);
-    return readGraphShadowSnapshot(normalized);
-  };
-
-  const hostSnapshot = readByChatId(identity.hostChatId);
-  if (hostSnapshot) {
-    return hostSnapshot;
-  }
-
-  for (const aliasCandidate of getGraphIdentityAliasCandidates({
-    integrity: identity.integrity,
-    hostChatId: identity.hostChatId,
-    persistenceChatId: identity.chatId,
-  })) {
-    const aliasSnapshot = readByChatId(aliasCandidate);
-    if (aliasSnapshot) {
-      return aliasSnapshot;
-    }
-  }
-
-  return findGraphShadowSnapshotByIntegrity(identity.integrity, {
-    excludeChatIds: Array.from(seenChatIds),
-  });
-}
-
-function createShadowComparisonGraph({
-  chatId = "",
-  revision = 0,
-  integrity = "",
-} = {}) {
-  const graph = createEmptyGraph();
-  stampGraphPersistenceMeta(graph, {
-    revision: Math.max(0, normalizeIndexedDbRevision(revision)),
-    chatId: String(chatId || ""),
-    integrity: String(integrity || ""),
-    reason: "shadow-compare-reference",
-  });
-  return graph;
-}
-
-function applyShadowSnapshotToRuntime(
-  chatId,
-  shadowSnapshot,
-  {
-    source = "shadow-restore",
-    attemptIndex = 0,
-    promoteToIndexedDb = true,
-  } = {},
-) {
-  const normalizedChatId = normalizeChatIdCandidate(
-    chatId || shadowSnapshot?.chatId,
-  );
-  if (!normalizedChatId || !shadowSnapshot?.serializedGraph) {
-    return {
-      success: false,
-      loaded: false,
-      loadState: graphPersistenceState.loadState,
-      reason: "shadow-invalid",
-      chatId: normalizedChatId || "",
-      attemptIndex,
-    };
-  }
-
-  let shadowGraph = null;
-  try {
-    shadowGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(
-        deserializeGraph(shadowSnapshot.serializedGraph),
-        normalizedChatId,
-      ),
-      normalizedChatId,
-    );
-  } catch (error) {
-    console.warn("[ST-BME] shadow snapshot 恢复失败:", error);
-    return {
-      success: false,
-      loaded: false,
-      loadState: graphPersistenceState.loadState,
-      reason: "shadow-deserialize-failed",
-      detail: error?.message || String(error),
-      chatId: normalizedChatId,
-      attemptIndex,
-    };
-  }
-
-  const shadowRevision = Math.max(
-    1,
-    normalizeIndexedDbRevision(shadowSnapshot.revision),
-  );
-  stampGraphPersistenceMeta(shadowGraph, {
-    revision: shadowRevision,
-    reason: `shadow:${String(source || "shadow-restore")}`,
-    chatId: normalizedChatId,
-    integrity:
-      String(shadowSnapshot.integrity || "").trim() ||
-      getChatMetadataIntegrity(getContext()) ||
-      graphPersistenceState.metadataIntegrity,
-  });
-
-  currentGraph = shadowGraph;
-  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
-    ? currentGraph.historyState.extractionCount
-    : 0;
-  lastExtractedItems = [];
-  const restoredRecallUi = restoreRecallUiStateFromPersistence(
-    getContext()?.chat,
-  );
-  runtimeStatus = createUiStatus(
-    "图谱临时恢复",
-    "已从本次会话临时快照恢复最近图谱，正在补写 IndexedDB",
-    "warning",
-  );
-  lastExtractionStatus = createUiStatus(
-    "待命",
-    "已从会话快照恢复最近图谱，等待下一次提取",
-    "idle",
-  );
-  lastVectorStatus = createUiStatus(
-    "待命",
-    currentGraph.vectorIndexState?.lastWarning ||
-      "已从会话快照恢复最近图谱，等待下一次向量任务",
-    "idle",
-  );
-  lastRecallStatus = createUiStatus(
-    "待命",
-    restoredRecallUi.restored
-      ? "已从持久化召回记录恢复显示，并已恢复最近图谱"
-      : "已从会话快照恢复最近图谱，等待下一次召回",
-    "idle",
-  );
-
-  applyGraphLoadState(GRAPH_LOAD_STATES.SHADOW_RESTORED, {
-    chatId: normalizedChatId,
-    reason: `shadow:${String(source || "shadow-restore")}`,
-    attemptIndex,
-    revision: shadowRevision,
-    lastPersistedRevision: Math.max(
-      normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
-      shadowRevision,
-    ),
-    queuedPersistRevision: Math.max(
-      normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
-      shadowRevision,
-    ),
-    queuedPersistChatId: normalizedChatId,
-    pendingPersist: Boolean(promoteToIndexedDb),
-    shadowSnapshotUsed: true,
-    shadowSnapshotRevision: shadowRevision,
-    shadowSnapshotUpdatedAt: String(shadowSnapshot.updatedAt || ""),
-    shadowSnapshotReason: String(
-      shadowSnapshot.debugReason || shadowSnapshot.reason || source || "",
-    ),
-    dbReady: true,
-    writesBlocked: false,
-  });
-  updateGraphPersistenceState({
-    storagePrimary: "indexeddb",
-    storageMode: "indexeddb",
-    dbReady: true,
-    indexedDbLastError: "",
-    pendingPersist: Boolean(promoteToIndexedDb),
-    lastRecoverableStorageTier: "shadow",
-    metadataIntegrity:
-      getChatMetadataIntegrity(getContext()) ||
-      graphPersistenceState.metadataIntegrity,
-    dualWriteLastResult: {
-      action: "load",
-      source: `${String(source || "shadow-restore")}:shadow`,
-      success: true,
-      provisional: true,
-      revision: shadowRevision,
-      resultCode: "graph.load.shadow-restored",
-      reason: `shadow:${String(source || "shadow-restore")}`,
-      at: Date.now(),
-    },
-  });
-  rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
-
-  if (promoteToIndexedDb) {
-    queueGraphPersistToIndexedDb(normalizedChatId, currentGraph, {
-      revision: shadowRevision,
-      reason: `shadow-restore-promote:${String(source || "shadow-restore")}`,
-    });
-  }
-
-  refreshPanelLiveState();
-  schedulePersistedRecallMessageUiRefresh(30);
-  return {
-    success: true,
-    loaded: true,
-    loadState: GRAPH_LOAD_STATES.SHADOW_RESTORED,
-    reason: `shadow:${String(source || "shadow-restore")}`,
-    chatId: normalizedChatId,
-    attemptIndex,
-    revision: shadowRevision,
-    shadowRestored: true,
-  };
-}
-
-async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
-  const action = String(syncPayload?.action || "")
-    .trim()
-    .toLowerCase();
-  if (
-    action !== "download"
-    && action !== "merge"
-    && action !== "restore-backup"
-  ) {
-    return {
-      refreshed: false,
-      reason: "action-not-supported",
-      action,
-    };
-  }
-
-  const syncedChatId = normalizeChatIdCandidate(syncPayload?.chatId);
-  const activeIdentity = resolveCurrentChatIdentity(getContext());
-  const activeChatId = normalizeChatIdCandidate(activeIdentity.chatId);
-  const targetChatId =
-    activeChatId &&
-    syncedChatId &&
-    doesChatIdMatchResolvedGraphIdentity(syncedChatId, activeIdentity)
-      ? activeChatId
-      : syncedChatId || activeChatId;
-
-  if (!targetChatId) {
-    return {
-      refreshed: false,
-      reason: "missing-chat-id",
-      action,
-    };
-  }
-
-  if (activeChatId && targetChatId !== activeChatId) {
-    return {
-      refreshed: false,
-      reason: "chat-switched",
-      action,
-      chatId: targetChatId,
-      activeChatId,
-    };
-  }
-
-  const loadResult = await loadGraphFromIndexedDb(targetChatId, {
-    source: `sync-post-refresh:${action}`,
-    allowOverride: true,
-    applyEmptyState: true,
-  });
-
-  return {
-    refreshed: Boolean(loadResult?.loaded || loadResult?.emptyConfirmed),
-    action,
-    chatId: targetChatId,
-    ...loadResult,
-  };
-}
-
 function buildBmeSyncRuntimeOptions(extra = {}) {
   const normalizedExtra =
     extra && typeof extra === "object" && !Array.isArray(extra) ? extra : {};
@@ -4543,6 +3741,13 @@ function buildBmeSyncRuntimeOptions(extra = {}) {
         throw new Error("BmeChatManager 不可用");
       }
       return await manager.getCurrentDb(chatId);
+    },
+    getSafetyDb: async (chatId) => {
+      const safetyDb = await createPreferredGraphLocalStore(
+        buildRestoreSafetyChatId(chatId),
+      );
+      await safetyDb.open();
+      return safetyDb;
     },
     getCurrentChatId: () => getCurrentChatId(),
     getCloudStorageMode: () => getSettings().cloudStorageMode || "automatic",
@@ -4569,108 +3774,6 @@ function buildBmeSyncRuntimeOptions(extra = {}) {
   };
 }
 
-async function syncIndexedDbMetaToPersistenceState(
-  chatId,
-  { syncState = "idle", lastSyncError = "" } = {},
-) {
-  const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId) return null;
-
-  try {
-    const manager = ensureBmeChatManager();
-    if (!manager) return null;
-    const db = await manager.getCurrentDb(normalizedChatId);
-    const [
-      revision,
-      syncDirty,
-      syncDirtyReason,
-      lastSyncUploadedAt,
-      lastSyncDownloadedAt,
-      lastSyncedRevision,
-      lastBackupUploadedAt,
-      lastBackupRestoredAt,
-      lastBackupRollbackAt,
-      lastBackupFilename,
-    ] = await Promise.all([
-      db.getRevision(),
-      db.getMeta("syncDirty", false),
-      db.getMeta("syncDirtyReason", ""),
-      db.getMeta("lastSyncUploadedAt", 0),
-      db.getMeta("lastSyncDownloadedAt", 0),
-      db.getMeta("lastSyncedRevision", 0),
-      db.getMeta("lastBackupUploadedAt", 0),
-      db.getMeta("lastBackupRestoredAt", 0),
-      db.getMeta("lastBackupRollbackAt", 0),
-      db.getMeta("lastBackupFilename", ""),
-    ]);
-
-    const patch = {
-      storagePrimary: "indexeddb",
-      storageMode: "indexeddb",
-      indexedDbRevision: normalizeIndexedDbRevision(revision),
-      syncState: normalizeGraphSyncState(syncState),
-      syncDirty: Boolean(syncDirty),
-      syncDirtyReason: String(syncDirtyReason || ""),
-      lastSyncUploadedAt: Number(lastSyncUploadedAt) || 0,
-      lastSyncDownloadedAt: Number(lastSyncDownloadedAt) || 0,
-      lastSyncedRevision: Number(lastSyncedRevision) || 0,
-      lastBackupUploadedAt: Number(lastBackupUploadedAt) || 0,
-      lastBackupRestoredAt: Number(lastBackupRestoredAt) || 0,
-      lastBackupRollbackAt: Number(lastBackupRollbackAt) || 0,
-      lastBackupFilename: String(lastBackupFilename || ""),
-      lastSyncError: String(lastSyncError || ""),
-    };
-
-    updateGraphPersistenceState(patch);
-    return patch;
-  } catch (error) {
-    console.warn("[ST-BME] 读取 IndexedDB 同步元数据失败:", error);
-    updateGraphPersistenceState({
-      syncState: "error",
-      lastSyncError: error?.message || String(error),
-    });
-    return null;
-  }
-}
-
-async function runBmeAutoSyncForChat(source = "unknown", chatId = "") {
-  const normalizedChatId = String(chatId || "").trim();
-  if (!normalizedChatId) return { synced: false, reason: "missing-chat-id" };
-
-  updateGraphPersistenceState({
-    syncState: "syncing",
-    lastSyncError: "",
-  });
-
-  try {
-    const syncResult = await autoSyncOnChatChange(
-      normalizedChatId,
-      buildBmeSyncRuntimeOptions({
-        trigger: source,
-        reason: String(source || "chat-change"),
-      }),
-    );
-
-    await syncIndexedDbMetaToPersistenceState(normalizedChatId, {
-      syncState:
-        syncResult?.action === "manual-probe"
-          ? "idle"
-          : syncResult?.synced
-            ? "idle"
-            : "warning",
-      lastSyncError: syncResult?.error || "",
-    });
-
-    return syncResult;
-  } catch (error) {
-    await syncIndexedDbMetaToPersistenceState(normalizedChatId, {
-      syncState: "error",
-      lastSyncError: error?.message || String(error),
-    });
-    throw error;
-  }
-}
-
 function ensureBmeChatManager() {
   if (typeof BmeChatManager !== "function") {
     if (!bmeChatManagerUnavailableWarned) {
@@ -4681,7 +3784,10 @@ function ensureBmeChatManager() {
   }
 
   if (!bmeChatManager) {
-    bmeChatManager = new BmeChatManager();
+    bmeChatManager = new BmeChatManager({
+      databaseFactory: async (chatId) =>
+        await createPreferredGraphLocalStore(chatId),
+    });
   }
   return bmeChatManager;
 }
@@ -4742,7 +3848,10 @@ async function syncBmeChatManagerWithCurrentChat(
 
 function scheduleBmeIndexedDbWarmup(source = "init") {
   scheduleBmeIndexedDbTask(async () => {
-    await ensureDexieLoaded();
+    const preferredLocalStore = await resolvePreferredGraphLocalStorePresentation();
+    if (preferredLocalStore.storagePrimary === "indexeddb") {
+      await ensureDexieLoaded();
+    }
     await syncBmeChatManagerWithCurrentChat(source);
   });
 }
@@ -5657,6 +4766,7 @@ function applyIndexedDbEmptyToRuntime(
   lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
   lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
   lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
+  const activeStore = getPreferredGraphLocalStorePresentationSync();
 
   applyGraphLoadState(GRAPH_LOAD_STATES.EMPTY_CONFIRMED, {
     chatId: normalizedChatId,
@@ -5673,11 +4783,13 @@ function applyIndexedDbEmptyToRuntime(
     shadowSnapshotReason: "",
     dbReady: true,
     writesBlocked: false,
+    storagePrimary: activeStore.storagePrimary,
+    storageMode: activeStore.storageMode,
   });
 
   updateGraphPersistenceState({
-    storagePrimary: "indexeddb",
-    storageMode: "indexeddb",
+    storagePrimary: activeStore.storagePrimary,
+    storageMode: activeStore.storageMode,
     dbReady: true,
     persistMismatchReason: "",
     indexedDbRevision: 0,
@@ -6100,6 +5212,7 @@ async function loadGraphFromIndexedDb(
     };
   }
 
+  let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
@@ -6112,6 +5225,7 @@ async function loadGraphFromIndexedDb(
       };
     }
     const db = await manager.getCurrentDb(normalizedChatId);
+    localStore = resolveDbGraphStorePresentation(db);
 
     const identityRecoveryResult =
       await maybeRecoverIndexedDbGraphFromStableIdentity(
@@ -6124,18 +5238,22 @@ async function loadGraphFromIndexedDb(
       );
 
     if (identityRecoveryResult?.migrated) {
+      const recoveredStore = resolveSnapshotGraphStorePresentation(
+        identityRecoveryResult?.snapshot,
+        localStore,
+      );
       const recoveredRevision = normalizeIndexedDbRevision(
         identityRecoveryResult?.snapshot?.meta?.revision,
       );
       updateGraphPersistenceState({
-        storagePrimary: "indexeddb",
-        storageMode: "indexeddb",
+        storagePrimary: recoveredStore.storagePrimary,
+        storageMode: recoveredStore.storageMode,
         indexedDbRevision: recoveredRevision,
         indexedDbLastError: "",
         lastSyncError: "",
         dualWriteLastResult: {
           action: "identity-recovery",
-          source: String(identityRecoveryResult?.source || "indexeddb"),
+          source: String(identityRecoveryResult?.source || recoveredStore.reasonPrefix),
           success: true,
           chatId: normalizedChatId,
           legacyChatId: String(identityRecoveryResult?.legacyChatId || ""),
@@ -6152,13 +5270,24 @@ async function loadGraphFromIndexedDb(
       });
     }
 
-    const migrationResult = identityRecoveryResult?.migrated
+    const localStoreMigrationResult = identityRecoveryResult?.migrated
       ? {
           migrated: false,
           reason: "identity-recovery-already-applied",
           chatId: normalizedChatId,
         }
-      : await maybeMigrateLegacyGraphToIndexedDb(
+      : await maybeImportLegacyIndexedDbSnapshotToLocalStore(
+          normalizedChatId,
+          db,
+          {
+            source,
+          },
+        );
+
+    const migrationResult =
+      identityRecoveryResult?.migrated || localStoreMigrationResult?.migrated
+        ? localStoreMigrationResult
+        : await maybeMigrateLegacyGraphToIndexedDb(
           normalizedChatId,
           getContext(),
           {
@@ -6168,19 +5297,23 @@ async function loadGraphFromIndexedDb(
         );
 
     if (migrationResult?.migrated) {
+      const migratedStore = resolveSnapshotGraphStorePresentation(
+        migrationResult?.snapshot,
+        localStore,
+      );
       const migratedRevision = normalizeIndexedDbRevision(
         migrationResult?.snapshot?.meta?.revision ||
           migrationResult?.migrationResult?.revision,
       );
       updateGraphPersistenceState({
-        storagePrimary: "indexeddb",
-        storageMode: "indexeddb",
+        storagePrimary: migratedStore.storagePrimary,
+        storageMode: migratedStore.storageMode,
         indexedDbRevision: migratedRevision,
         indexedDbLastError: "",
         lastSyncError: "",
         dualWriteLastResult: {
           action: "migration",
-          source: "chat_metadata",
+          source: String(migrationResult?.source || "chat_metadata"),
           success: true,
           chatId: normalizedChatId,
           revision: migratedRevision,
@@ -6205,6 +5338,7 @@ async function loadGraphFromIndexedDb(
     }
     const snapshot =
       identityRecoveryResult?.snapshot ||
+      localStoreMigrationResult?.snapshot ||
       migrationResult?.snapshot ||
       (await db.exportSnapshot());
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
@@ -6212,6 +5346,7 @@ async function loadGraphFromIndexedDb(
     );
 
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot, localStore);
 
     const commitMarkerMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
       snapshot,
@@ -6295,7 +5430,7 @@ async function loadGraphFromIndexedDb(
       return {
         success: false,
         loaded: false,
-        reason: commitMarkerDiagnostic?.reason || "indexeddb-empty",
+        reason: commitMarkerDiagnostic?.reason || `${snapshotStore.reasonPrefix}-empty`,
         chatId: normalizedChatId,
         attemptIndex,
       };
@@ -6373,7 +5508,7 @@ async function loadGraphFromIndexedDb(
       BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(
         graphPersistenceState.loadState,
       ) ||
-      graphPersistenceState.storagePrimary === "indexeddb" ||
+      graphPersistenceState.storagePrimary === snapshotStore.storagePrimary ||
       snapshotRevision >=
         normalizeIndexedDbRevision(graphPersistenceState.revision);
 
@@ -6381,7 +5516,7 @@ async function loadGraphFromIndexedDb(
       return {
         success: false,
         loaded: false,
-        reason: "indexeddb-stale",
+        reason: `${snapshotStore.reasonPrefix}-stale`,
         chatId: normalizedChatId,
         attemptIndex,
         revision: snapshotRevision,
@@ -6392,7 +5527,7 @@ async function loadGraphFromIndexedDb(
       return {
         success: false,
         loaded: false,
-        reason: "indexeddb-chat-switched",
+        reason: `${snapshotStore.reasonPrefix}-chat-switched`,
         chatId: normalizedChatId,
         attemptIndex,
         revision: snapshotRevision,
@@ -6402,6 +5537,10 @@ async function loadGraphFromIndexedDb(
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
       source,
       attemptIndex,
+      storagePrimary: snapshotStore.storagePrimary,
+      storageMode: snapshotStore.storageMode,
+      statusLabel: snapshotStore.statusLabel,
+      reasonPrefix: snapshotStore.reasonPrefix,
     });
     if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
       updateGraphPersistenceState({
@@ -6410,12 +5549,14 @@ async function loadGraphFromIndexedDb(
     }
     return loadResult;
   } catch (error) {
-    console.warn("[ST-BME] IndexedDB 读取失败，回退 metadata:", error);
+    console.warn(`[ST-BME] ${localStore.statusLabel} 读取失败，回退 metadata:`, error);
     updateGraphPersistenceState({
+      storagePrimary: localStore.storagePrimary,
+      storageMode: localStore.storageMode,
       indexedDbLastError: error?.message || String(error),
       dualWriteLastResult: {
         action: "load",
-        source: String(source || "indexeddb"),
+        source: String(source || localStore.reasonPrefix),
         success: false,
         error: error?.message || String(error),
         at: Date.now(),
@@ -6424,7 +5565,7 @@ async function loadGraphFromIndexedDb(
     return {
       success: false,
       loaded: false,
-      reason: "indexeddb-read-failed",
+      reason: `${localStore.reasonPrefix}-read-failed`,
       chatId: normalizedChatId,
       attemptIndex,
       error,
@@ -8261,11 +7402,19 @@ function syncGraphLoadFromLiveContext(options = {}) {
 
   const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
   if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
+    const cachedStore = resolveSnapshotGraphStorePresentation(
+      cachedSnapshot,
+      getPreferredGraphLocalStorePresentationSync(),
+    );
     const result = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
       source: `${source}:indexeddb-cache`,
       attemptIndex: 0,
+      storagePrimary: cachedStore.storagePrimary,
+      storageMode: cachedStore.storageMode,
+      statusLabel: cachedStore.statusLabel,
+      reasonPrefix: cachedStore.reasonPrefix,
     });
-    if (result?.reason === "indexeddb-stale-runtime") {
+    if (result?.reason === `${cachedStore.reasonPrefix}-stale-runtime`) {
       return {
         synced: false,
         reason: "cached-indexeddb-stale-runtime",
@@ -8280,6 +7429,7 @@ function syncGraphLoadFromLiveContext(options = {}) {
     };
   }
 
+  const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
   applyGraphLoadState(GRAPH_LOAD_STATES.LOADING, {
     chatId,
     reason: `indexeddb-sync:${String(source || "live-context-sync")}`,
@@ -8288,8 +7438,8 @@ function syncGraphLoadFromLiveContext(options = {}) {
     writesBlocked: true,
   });
   updateGraphPersistenceState({
-    storagePrimary: "indexeddb",
-    storageMode: "indexeddb",
+    storagePrimary: preferredLocalStore.storagePrimary,
+    storageMode: preferredLocalStore.storageMode,
     dbReady: false,
     indexedDbLastError: "",
   });
@@ -9527,8 +8677,8 @@ function loadGraphFromChat(options = {}) {
       });
       updateGraphPersistenceState({
         metadataIntegrity: getChatMetadataIntegrity(context),
-        storagePrimary: "indexeddb",
-        storageMode: "indexeddb",
+        storagePrimary: getPreferredGraphLocalStorePresentationSync().storagePrimary,
+        storageMode: getPreferredGraphLocalStorePresentationSync().storageMode,
         dbReady: false,
         indexedDbLastError: "",
         persistMismatchReason:
@@ -9616,8 +8766,8 @@ function loadGraphFromChat(options = {}) {
     writesBlocked: true,
   });
   updateGraphPersistenceState({
-    storagePrimary: "indexeddb",
-    storageMode: "indexeddb",
+    storagePrimary: getPreferredGraphLocalStorePresentationSync().storagePrimary,
+    storageMode: getPreferredGraphLocalStorePresentationSync().storageMode,
     dbReady: false,
     indexedDbLastError: "",
   });
@@ -9665,6 +8815,7 @@ async function saveGraphToIndexedDb(
       };
     }
     const db = await manager.getCurrentDb(normalizedChatId);
+    localStore = resolveDbGraphStorePresentation(db);
     const currentIdentity = resolveCurrentChatIdentity(getContext());
     const baseSnapshot =
       readCachedIndexedDbSnapshot(normalizedChatId) ||
@@ -9676,7 +8827,8 @@ async function saveGraphToIndexedDb(
       baseSnapshot,
       lastModified: Date.now(),
       meta: {
-        storagePrimary: "indexeddb",
+        storagePrimary: localStore.storagePrimary,
+        storageMode: localStore.storageMode,
         lastMutationReason: String(reason || "graph-save"),
         integrity:
           currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
@@ -9793,7 +8945,8 @@ async function saveGraphToIndexedDb(
     );
     snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
     snapshot.meta.lastMutationReason = String(reason || "graph-save");
-    snapshot.meta.storagePrimary = "indexeddb";
+    snapshot.meta.storagePrimary = localStore.storagePrimary;
+    snapshot.meta.storageMode = localStore.storageMode;
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
     if (graph === currentGraph) {
@@ -9818,7 +8971,10 @@ async function saveGraphToIndexedDb(
     } catch (error) {
       scheduleUploadWarning =
         error?.message || String(error) || "schedule-upload-failed";
-      console.warn("[ST-BME] IndexedDB 已写入，但同步上传调度失败:", error);
+      console.warn(
+        `[ST-BME] ${localStore.statusLabel} 已写入，但同步上传调度失败:`,
+        error,
+      );
     }
 
     const persistDeltaDiagnostics = {
@@ -9883,8 +9039,8 @@ async function saveGraphToIndexedDb(
 
     updateGraphPersistenceState({
       revision: snapshot.meta.revision,
-      storagePrimary: "indexeddb",
-      storageMode: "indexeddb",
+      storagePrimary: localStore.storagePrimary,
+      storageMode: localStore.storageMode,
       dbReady: true,
       lastPersistedRevision: snapshot.meta.revision,
       pendingPersist: false,
@@ -9903,16 +9059,16 @@ async function saveGraphToIndexedDb(
       syncDirty: true,
       syncDirtyReason: String(reason || "graph-save"),
       lastPersistReason: String(reason || "graph-save"),
-      lastPersistMode: "indexeddb-delta",
+      lastPersistMode: `${localStore.reasonPrefix}-delta`,
       lastAcceptedRevision: Math.max(
         Number(graphPersistenceState.lastAcceptedRevision || 0),
         snapshot.meta.revision,
       ),
-      acceptedStorageTier: "indexeddb",
+      acceptedStorageTier: localStore.storagePrimary,
       lastRecoverableStorageTier: "none",
       dualWriteLastResult: {
         action: "save",
-        target: "indexeddb",
+        target: localStore.storagePrimary,
         success: true,
         chatId: normalizedChatId,
         revision: snapshot.meta.revision,
@@ -9962,23 +9118,28 @@ async function saveGraphToIndexedDb(
       chatId: normalizedChatId,
       revision: snapshot.meta.revision,
       reason: String(reason || "graph-save"),
-      saveMode: "indexeddb-delta",
+      saveMode: `${localStore.reasonPrefix}-delta`,
       warning: scheduleUploadWarning || "",
       delta: cloneRuntimeDebugValue(commitResult?.delta, null),
       snapshot,
     };
   } catch (error) {
-    console.warn("[ST-BME] IndexedDB 写入失败，保鐣?metadata 兜底:", error);
+    console.warn(
+      `[ST-BME] ${localStore.statusLabel} 写入失败，保留 metadata 兜底:`,
+      error,
+    );
     updatePersistDeltaDiagnostics({
       status: "failed",
       error: error?.message || String(error),
       failedAt: Date.now(),
     });
     updateGraphPersistenceState({
+      storagePrimary: localStore.storagePrimary,
+      storageMode: localStore.storageMode,
       indexedDbLastError: error?.message || String(error),
       dualWriteLastResult: {
         action: "save",
-        target: "indexeddb",
+        target: localStore.storagePrimary,
         success: false,
         chatId: normalizedChatId,
         revision: normalizeIndexedDbRevision(revision),
@@ -10118,12 +9279,13 @@ function saveGraphToChat(options = {}) {
   }
 
   if (!metadataFallbackEnabled) {
+    const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
     const saveMode = shouldQueueIndexedDbPersist
-      ? "indexeddb-queued"
-      : "indexeddb-skip";
+      ? `${preferredLocalStore.reasonPrefix}-queued`
+      : `${preferredLocalStore.reasonPrefix}-skip`;
     updateGraphPersistenceState({
-      storagePrimary: "indexeddb",
-      storageMode: "indexeddb",
+      storagePrimary: preferredLocalStore.storagePrimary,
+      storageMode: preferredLocalStore.storageMode,
       dbReady:
         graphPersistenceState.dbReady ??
         isGraphLoadStateDbReady(graphPersistenceState.loadState),
@@ -10136,7 +9298,7 @@ function saveGraphToChat(options = {}) {
       queuedPersistRotateIntegrity: false,
       dualWriteLastResult: {
         action: "save",
-        target: "indexeddb",
+        target: preferredLocalStore.storagePrimary,
         queued: Boolean(shouldQueueIndexedDbPersist),
         success: true,
         chatId,
@@ -10151,11 +9313,13 @@ function saveGraphToChat(options = {}) {
       blocked: false,
       accepted: false,
       reason: shouldQueueIndexedDbPersist
-        ? "indexeddb-queued"
-        : "indexeddb-empty-skip",
+        ? `${preferredLocalStore.reasonPrefix}-queued`
+        : `${preferredLocalStore.reasonPrefix}-empty-skip`,
       revision,
       saveMode,
-      storageTier: shouldQueueIndexedDbPersist ? "indexeddb" : "none",
+      storageTier: shouldQueueIndexedDbPersist
+        ? preferredLocalStore.storagePrimary
+        : "none",
     });
   }
 
