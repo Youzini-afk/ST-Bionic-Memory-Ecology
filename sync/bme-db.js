@@ -1933,48 +1933,60 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
 }
 
 export function buildGraphFromSnapshot(snapshot, options = {}) {
-  const normalizedSnapshot = sanitizeSnapshot(snapshot);
+  const snapshotView = normalizePersistSnapshotView(snapshot);
+  const snapshotMeta =
+    snapshotView.meta &&
+    typeof snapshotView.meta === "object" &&
+    !Array.isArray(snapshotView.meta)
+      ? snapshotView.meta
+      : {};
+  const snapshotState =
+    snapshotView.state &&
+    typeof snapshotView.state === "object" &&
+    !Array.isArray(snapshotView.state)
+      ? snapshotView.state
+      : {};
   const chatId =
     normalizeChatId(options.chatId) ||
-    normalizeChatId(normalizedSnapshot.meta?.chatId) ||
-    normalizeChatId(normalizedSnapshot.state?.chatId);
+    normalizeChatId(snapshotMeta?.chatId) ||
+    normalizeChatId(snapshotState?.chatId);
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
-    Number(normalizedSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY]),
+    Number(snapshotMeta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY]),
   )
-    ? Number(normalizedSnapshot.meta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
+    ? Number(snapshotMeta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(normalizedSnapshot.nodes).map((node) => ({
+  runtimeGraph.nodes = toArray(snapshotView.nodes).map((node) => ({
     ...(node || {}),
   }));
-  runtimeGraph.edges = toArray(normalizedSnapshot.edges).map((edge) => ({
+  runtimeGraph.edges = toArray(snapshotView.edges).map((edge) => ({
     ...(edge || {}),
   }));
   runtimeGraph.batchJournal = toArray(
-    normalizedSnapshot.meta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
   );
   runtimeGraph.lastRecallResult = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
   runtimeGraph.maintenanceJournal = toArray(
-    normalizedSnapshot.meta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
   );
   runtimeGraph.knowledgeState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
     runtimeGraph.knowledgeState || {},
   );
   runtimeGraph.regionState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_REGION_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_REGION_STATE_META_KEY],
     runtimeGraph.regionState || {},
   );
   runtimeGraph.timelineState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_TIMELINE_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_TIMELINE_STATE_META_KEY],
     runtimeGraph.timelineState || {},
   );
   runtimeGraph.summaryState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
     runtimeGraph.summaryState || {},
   );
   const rawKnowledgeState =
@@ -1998,21 +2010,21 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
 
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
-    ...(normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
+    ...(snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
     lastProcessedAssistantFloor: Number.isFinite(
-      Number(normalizedSnapshot.state?.lastProcessedFloor),
+      Number(snapshotState?.lastProcessedFloor),
     )
-      ? Number(normalizedSnapshot.state.lastProcessedFloor)
+      ? Number(snapshotState.lastProcessedFloor)
       : Number(
-          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
+          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
             ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
     extractionCount: Number.isFinite(
-      Number(normalizedSnapshot.state?.extractionCount),
+      Number(snapshotState?.extractionCount),
     )
-      ? Number(normalizedSnapshot.state.extractionCount)
+      ? Number(snapshotState.extractionCount)
       : Number(
-          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
+          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
             ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
@@ -2071,19 +2083,19 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
-    ...(normalizedSnapshot.meta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
+    ...(snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
     collectionId: buildVectorCollectionId(
       chatId ||
-        normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
+        snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
         runtimeGraph.historyState?.chatId ||
         "",
     ),
   };
 
   runtimeGraph.lastProcessedSeq = Number.isFinite(
-    Number(normalizedSnapshot.meta?.[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]),
+    Number(snapshotMeta?.[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]),
   )
-    ? Number(normalizedSnapshot.meta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
+    ? Number(snapshotMeta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
 
   const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
@@ -2936,11 +2948,12 @@ export class BmeDatabase {
         ]),
     );
 
+    const metaMap = toMetaMap(metaRows);
     const meta = {
-      ...toMetaMap(metaRows),
+      ...metaMap,
       schemaVersion: BME_DB_SCHEMA_VERSION,
       chatId: this.chatId,
-      revision: normalizeRevision(toMetaMap(metaRows)?.revision),
+      revision: normalizeRevision(metaMap?.revision),
       nodeCount: nodes.length,
       edgeCount: edges.length,
       tombstoneCount: tombstones.length,
@@ -2957,9 +2970,9 @@ export class BmeDatabase {
 
     return {
       meta,
-      nodes: toPlainData(nodes, []),
-      edges: toPlainData(edges, []),
-      tombstones: toPlainData(tombstones, []),
+      nodes,
+      edges,
+      tombstones,
       state,
     };
   }
