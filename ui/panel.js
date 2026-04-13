@@ -932,6 +932,7 @@ export async function initPanel({
   _bindTabs();
   _bindClose();
   _bindNodeDetailPanel();
+  _bindMemoryPopup();
   _bindResizeHandle();
   _bindPanelResize();
   _bindGraphControls();
@@ -1186,6 +1187,7 @@ export function openPanel() {
 export function closePanel() {
   if (!overlayEl) return;
   overlayEl.classList.remove("active");
+  _closeMemoryPopup();
   _clearScheduledVisibleGraphRefresh();
   lastVisibleGraphRefreshToken = "";
 }
@@ -1246,6 +1248,7 @@ function _switchTab(tabId) {
   }
   currentTabId = next;
   _closeNodeDetailUi();
+  _closeMemoryPopup();
   panelEl?.querySelectorAll(".bme-tab-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === currentTabId);
   });
@@ -1352,6 +1355,7 @@ function _bindTaskNavigation() {
 
 function _switchTaskSection(sectionId) {
   currentTaskSectionId = sectionId || "pipeline";
+  _closeMemoryPopup();
   _syncTaskSectionState();
   _refreshTaskMonitor();
 }
@@ -1758,7 +1762,12 @@ function _bindTaskMemoryListClick() {
     currentSelectedMemoryNodeId = item.dataset.nodeId || "";
     list.querySelectorAll(".bme-memory-node-item").forEach((n) => n.classList.toggle("selected", n.dataset.nodeId === currentSelectedMemoryNodeId));
     const graph = _getGraph?.();
-    _renderTaskMemoryDetailSelection(graph);
+    if (_isMobile()) {
+      const node = (graph?.nodes || []).find((c) => c.id === currentSelectedMemoryNodeId) || null;
+      if (node) _openMemoryPopup(node, graph);
+    } else {
+      _renderTaskMemoryDetailSelection(graph);
+    }
   });
 }
 
@@ -1832,20 +1841,31 @@ function _renderTaskMemoryDetailPanel(detailEl, node, graph) {
 }
 
 function _saveTaskMemoryDetail() {
-  const detailEl = document.getElementById("bme-task-memory-detail");
-  const bodyEl = detailEl?.querySelector("#bme-task-memory-editor-body");
+  const popupBody = document.getElementById("bme-memory-popup-body");
+  const popupOpen = document.getElementById("bme-memory-popup")?.classList.contains("open");
+  const detailEl = popupOpen ? null : document.getElementById("bme-task-memory-detail");
+  const bodyEl = popupOpen
+    ? popupBody
+    : detailEl?.querySelector("#bme-task-memory-editor-body");
   const nodeId = currentSelectedMemoryNodeId;
   if (!nodeId || !bodyEl) return;
 
-  const collected = _collectNodeDetailEditorUpdates(bodyEl, {
-    idPrefix: "bme-task-detail",
-  });
+  const idPrefix = popupOpen ? "bme-popup-detail" : "bme-task-detail";
+  const collected = _collectNodeDetailEditorUpdates(bodyEl, { idPrefix });
   if (!collected.ok) {
     toastr.error(collected.errorMessage || "保存失败", "ST-BME");
     return;
   }
 
-  _persistNodeDetailEdits(nodeId, collected.updates);
+  _persistNodeDetailEdits(nodeId, collected.updates, {
+    afterSuccess: () => {
+      if (popupOpen) {
+        const graph = _getGraph?.();
+        const refreshedNode = (graph?.nodes || []).find((n) => n.id === nodeId);
+        if (refreshedNode) _openMemoryPopup(refreshedNode, graph);
+      }
+    },
+  });
 }
 
 function _deleteTaskMemoryDetail() {
@@ -1855,8 +1875,55 @@ function _deleteTaskMemoryDetail() {
   _deleteGraphNodeById(nodeId, {
     afterSuccess: () => {
       currentSelectedMemoryNodeId = "";
+      _closeMemoryPopup();
     },
   });
+}
+
+function _openMemoryPopup(node, graph) {
+  const popup = document.getElementById("bme-memory-popup");
+  const scrim = document.getElementById("bme-memory-popup-scrim");
+  const titleEl = document.getElementById("bme-memory-popup-title");
+  const badgesEl = document.getElementById("bme-memory-popup-badges");
+  const bodyEl = document.getElementById("bme-memory-popup-body");
+  if (!popup || !bodyEl) return;
+
+  const displayName = getNodeDisplayName(node);
+  const scopeBadge = buildScopeBadgeText(node.scope);
+  const badges = [
+    node.type ? `<span class="bme-memory-node-item__type ${_getMemoryNodeTypeClass(node.type)}">${_escHtml(_typeLabel(node.type))}</span>` : "",
+    scopeBadge ? `<span class="bme-memory-node-item__type type-default">${_escHtml(scopeBadge)}</span>` : "",
+    node.archived ? '<span class="bme-memory-node-item__type type-default">ARCHIVED</span>' : "",
+  ].filter(Boolean).join("");
+
+  if (titleEl) titleEl.textContent = displayName;
+  if (badgesEl) badgesEl.innerHTML = badges;
+
+  bodyEl.replaceChildren(
+    _buildNodeDetailEditorFragment(node, { idPrefix: "bme-popup-detail" }),
+  );
+
+  scrim?.removeAttribute("hidden");
+  popup.classList.add("open");
+}
+
+function _closeMemoryPopup() {
+  const popup = document.getElementById("bme-memory-popup");
+  const scrim = document.getElementById("bme-memory-popup-scrim");
+  popup?.classList.remove("open");
+  scrim?.setAttribute("hidden", "");
+}
+
+function _bindMemoryPopup() {
+  const closeBtn = document.getElementById("bme-memory-popup-close");
+  const scrim = document.getElementById("bme-memory-popup-scrim");
+  const saveBtn = document.getElementById("bme-memory-popup-save");
+  const deleteBtn = document.getElementById("bme-memory-popup-delete");
+
+  closeBtn?.addEventListener("click", () => _closeMemoryPopup());
+  scrim?.addEventListener("click", () => _closeMemoryPopup());
+  saveBtn?.addEventListener("click", () => _saveTaskMemoryDetail());
+  deleteBtn?.addEventListener("click", () => _deleteTaskMemoryDetail());
 }
 
 // ---------- Injection Preview ----------
