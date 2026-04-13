@@ -44,6 +44,17 @@ const DEFAULT_LAYOUT_CONFIG = {
     neuralMinGap: 12,
 };
 
+const ADAPTIVE_NEURAL_LAYOUT_POLICY = Object.freeze({
+    reduceIterationsNodes: 220,
+    reduceIterationsEdges: 1200,
+    reduceIterationsCap: 56,
+    strongReduceNodes: 360,
+    strongReduceEdges: 2200,
+    strongReduceCap: 24,
+    skipSimulationNodes: 520,
+    skipSimulationEdges: 3600,
+});
+
 const MIN_USABLE_CANVAS_DIMENSION = 48;
 
 /** 兼容旧版 forceConfig（召回卡片等） */
@@ -296,7 +307,10 @@ export class GraphRenderer {
         const parts = partitionNodesByScope(this.nodes, this._userPovAliasSet);
         this._regionPanels = this._computeRegionPanels(W, H, parts);
         this._layoutAllPartitions(parts);
-        this._simulateNeuralWithinRegions(this.config.neuralIterations);
+        const neuralPlan = this._resolveNeuralSimulationPlan();
+        if (!neuralPlan.skip && neuralPlan.iterations > 0) {
+            this._simulateNeuralWithinRegions(neuralPlan.iterations);
+        }
 
         if (prevSelectedId) {
             this.selectedNode = this.nodeMap.get(prevSelectedId) || null;
@@ -573,6 +587,47 @@ export class GraphRenderer {
             ideal.set(n.regionKey, len);
         }
         return ideal;
+    }
+
+    _resolveNeuralSimulationPlan() {
+        const nodeCount = Array.isArray(this.nodes) ? this.nodes.length : 0;
+        const edgeCount = Array.isArray(this.edges) ? this.edges.length : 0;
+        const baseIterations = Math.max(
+            8,
+            Math.min(220, Number(this.config.neuralIterations) || 80),
+        );
+
+        let iterations = baseIterations;
+        let skip = false;
+
+        if (
+            nodeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.skipSimulationNodes ||
+            edgeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.skipSimulationEdges
+        ) {
+            skip = true;
+            iterations = 0;
+        } else if (
+            nodeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.strongReduceNodes ||
+            edgeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.strongReduceEdges
+        ) {
+            iterations = Math.min(
+                iterations,
+                ADAPTIVE_NEURAL_LAYOUT_POLICY.strongReduceCap,
+            );
+        } else if (
+            nodeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.reduceIterationsNodes ||
+            edgeCount >= ADAPTIVE_NEURAL_LAYOUT_POLICY.reduceIterationsEdges
+        ) {
+            iterations = Math.min(
+                iterations,
+                ADAPTIVE_NEURAL_LAYOUT_POLICY.reduceIterationsCap,
+            );
+        }
+
+        return {
+            skip,
+            iterations,
+        };
     }
 
     /**

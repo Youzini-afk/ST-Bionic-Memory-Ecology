@@ -9812,7 +9812,6 @@ function queueGraphPersistToIndexedDb(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !graph) return;
-  const graphSnapshot = cloneGraphForPersistence(graph, normalizedChatId);
 
   const normalizedRevision = normalizeIndexedDbRevision(revision);
   const latestQueuedRevision = normalizeIndexedDbRevision(
@@ -9843,6 +9842,7 @@ function queueGraphPersistToIndexedDb(
           revision: normalizedRevision,
         };
       }
+      const graphSnapshot = cloneGraphForPersistence(graph, normalizedChatId);
       return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
         revision: normalizedRevision,
         reason,
