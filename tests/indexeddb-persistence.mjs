@@ -19,6 +19,7 @@ const chatIdsForCleanup = new Set([
   "chat-b",
   "chat-manager-a",
   "chat-manager-b",
+  "chat-manager-selector",
   "chat-replace-reset",
 ]);
 
@@ -418,6 +419,54 @@ async function testChatIsolationAndManager() {
   assert.equal(manager.getCurrentChatId(), "");
 }
 
+async function testManagerRecreatesDbWhenSelectorKeyChanges() {
+  let selectorKey = "indexeddb:indexeddb";
+  let instanceCounter = 0;
+  const closeLog = [];
+  const manager = new BmeChatManager({
+    selectorKeyResolver: async () => selectorKey,
+    databaseFactory: async (chatId) => {
+      instanceCounter += 1;
+      const instanceId = instanceCounter;
+      return {
+        chatId,
+        instanceId,
+        openCount: 0,
+        closed: false,
+        async open() {
+          this.openCount += 1;
+          return this;
+        },
+        async close() {
+          this.closed = true;
+          closeLog.push(instanceId);
+        },
+      };
+    },
+  });
+
+  const dbA = await manager.getCurrentDb("chat-manager-selector");
+  assert.equal(dbA.instanceId, 1);
+  assert.equal(dbA.openCount, 1);
+
+  const reopenedSameSelector = await manager.getCurrentDb("chat-manager-selector");
+  assert.equal(reopenedSameSelector, dbA);
+  assert.equal(dbA.openCount, 2);
+  assert.deepEqual(closeLog, []);
+
+  selectorKey = "opfs:opfs-shadow";
+  const dbB = await manager.getCurrentDb("chat-manager-selector");
+  assert.notEqual(dbB, dbA);
+  assert.equal(dbB.instanceId, 2);
+  assert.equal(dbB.openCount, 1);
+  assert.equal(dbA.closed, true);
+  assert.deepEqual(closeLog, [1]);
+
+  await manager.closeAll();
+  assert.equal(dbB.closed, true);
+  assert.deepEqual(closeLog, [1, 2]);
+}
+
 async function testGraphSnapshotConverters() {
   const graph = createEmptyGraph();
   graph.historyState.chatId = "chat-a";
@@ -548,6 +597,7 @@ async function main() {
   await testRevisionMonotonicity();
   await testTombstonePrune();
   await testChatIsolationAndManager();
+  await testManagerRecreatesDbWhenSelectorKeyChanges();
   await testGraphSnapshotConverters();
 
   await cleanupDatabases();

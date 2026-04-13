@@ -3630,6 +3630,41 @@ function resolveSnapshotGraphStorePresentation(
   return buildIndexedDbStorePresentation();
 }
 
+function buildGraphLocalStoreSelectorKey(
+  presentation = buildIndexedDbStorePresentation(),
+) {
+  const normalizedPresentation =
+    presentation && typeof presentation === "object"
+      ? presentation
+      : buildIndexedDbStorePresentation();
+  const storagePrimary =
+    normalizedPresentation.storagePrimary === "opfs" ||
+    isGraphLocalStorageModeOpfs(normalizedPresentation.storageMode)
+      ? "opfs"
+      : "indexeddb";
+  const storageMode =
+    storagePrimary === "opfs"
+      ? normalizeGraphLocalStorageMode(
+          normalizedPresentation.storageMode,
+          BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+        )
+      : BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB;
+  return `${storagePrimary}:${storageMode}`;
+}
+
+function isGraphLocalStorePresentationCompatible(left, right) {
+  return (
+    buildGraphLocalStoreSelectorKey(left) ===
+    buildGraphLocalStoreSelectorKey(right)
+  );
+}
+
+function isCachedIndexedDbSnapshotCompatible(snapshot = null, expectedStore = null) {
+  if (!expectedStore || typeof expectedStore !== "object") return true;
+  const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot, expectedStore);
+  return isGraphLocalStorePresentationCompatible(snapshotStore, expectedStore);
+}
+
 async function getGraphLocalStoreCapability(forceRefresh = false) {
   if (!forceRefresh && bmeLocalStoreCapabilitySnapshot.checked) {
     return bmeLocalStoreCapabilitySnapshot;
@@ -3787,6 +3822,10 @@ function ensureBmeChatManager() {
     bmeChatManager = new BmeChatManager({
       databaseFactory: async (chatId) =>
         await createPreferredGraphLocalStore(chatId),
+      selectorKeyResolver: async () =>
+        buildGraphLocalStoreSelectorKey(
+          await resolvePreferredGraphLocalStorePresentation(),
+        ),
     });
   }
   return bmeChatManager;
@@ -3916,19 +3955,33 @@ function isIndexedDbSnapshotMeaningful(snapshot = null) {
 function cacheIndexedDbSnapshot(chatId, snapshot = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
+  const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot);
   bmeIndexedDbSnapshotCacheByChatId.set(normalizedChatId, {
     chatId: normalizedChatId,
     revision: normalizeIndexedDbRevision(snapshot?.meta?.revision),
+    selectorKey: buildGraphLocalStoreSelectorKey(snapshotStore),
     snapshot,
     updatedAt: Date.now(),
   });
 }
 
-function readCachedIndexedDbSnapshot(chatId) {
+function readCachedIndexedDbSnapshot(chatId, expectedStore = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId) return null;
   const cacheEntry = bmeIndexedDbSnapshotCacheByChatId.get(normalizedChatId);
   if (!cacheEntry?.snapshot) return null;
+  if (expectedStore && typeof expectedStore === "object") {
+    const expectedSelectorKey = buildGraphLocalStoreSelectorKey(expectedStore);
+    if (cacheEntry.selectorKey && cacheEntry.selectorKey !== expectedSelectorKey) {
+      return null;
+    }
+    if (
+      !cacheEntry.selectorKey &&
+      !isCachedIndexedDbSnapshotCompatible(cacheEntry.snapshot, expectedStore)
+    ) {
+      return null;
+    }
+  }
   return cacheEntry.snapshot;
 }
 
@@ -7400,11 +7453,15 @@ function syncGraphLoadFromLiveContext(options = {}) {
     });
   }
 
-  const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
+  const cachedPreferredLocalStore = getPreferredGraphLocalStorePresentationSync();
+  const cachedSnapshot = readCachedIndexedDbSnapshot(
+    chatId,
+    cachedPreferredLocalStore,
+  );
   if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
     const cachedStore = resolveSnapshotGraphStorePresentation(
       cachedSnapshot,
-      getPreferredGraphLocalStorePresentationSync(),
+      cachedPreferredLocalStore,
     );
     const result = applyIndexedDbSnapshotToRuntime(chatId, cachedSnapshot, {
       source: `${source}:indexeddb-cache`,
@@ -8232,6 +8289,9 @@ function updateModuleSettings(patch = {}) {
   const previousCloudStorageMode = String(
     settings.cloudStorageMode || "automatic",
   );
+  const previousGraphLocalStorageMode = getRequestedGraphLocalStorageMode(
+    settings,
+  );
   Object.assign(settings, patch);
   extension_settings[MODULE_NAME] = settings;
   globalThis.__stBmeDebugLoggingEnabled = Boolean(
@@ -8296,6 +8356,21 @@ function updateModuleSettings(patch = {}) {
 
   if (Object.keys(patch).some((key) => noticeUiKeys.has(key))) {
     refreshVisibleStageNotices();
+  }
+
+  const currentGraphLocalStorageMode = getRequestedGraphLocalStorageMode(
+    settings,
+  );
+  if (previousGraphLocalStorageMode !== currentGraphLocalStorageMode) {
+    clearAllCachedIndexedDbSnapshots();
+    scheduleBmeIndexedDbTask(async () => {
+      if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
+        await bmeChatManager.closeAll();
+      }
+      await syncBmeChatManagerWithCurrentChat(
+        "settings:graph-local-storage-mode-changed",
+      );
+    });
   }
 
   const currentCloudStorageMode = String(
@@ -8468,17 +8543,29 @@ function loadGraphFromChat(options = {}) {
     });
   }
 
-  const cachedSnapshot = readCachedIndexedDbSnapshot(chatId);
+  const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
+  const cachedSnapshot = readCachedIndexedDbSnapshot(
+    chatId,
+    preferredLocalStore,
+  );
   if (isIndexedDbSnapshotMeaningful(cachedSnapshot)) {
+    const cachedStore = resolveSnapshotGraphStorePresentation(
+      cachedSnapshot,
+      preferredLocalStore,
+    );
     const cachedResult = applyIndexedDbSnapshotToRuntime(
       chatId,
       cachedSnapshot,
       {
         source: `${source}:indexeddb-cache`,
         attemptIndex,
+        storagePrimary: cachedStore.storagePrimary,
+        storageMode: cachedStore.storageMode,
+        statusLabel: cachedStore.statusLabel,
+        reasonPrefix: cachedStore.reasonPrefix,
       },
     );
-    if (cachedResult?.reason === "indexeddb-stale-runtime") {
+    if (cachedResult?.reason === `${cachedStore.reasonPrefix}-stale-runtime`) {
       clearPendingGraphLoadRetry();
       refreshPanelLiveState();
       return {
@@ -8818,7 +8905,7 @@ async function saveGraphToIndexedDb(
     localStore = resolveDbGraphStorePresentation(db);
     const currentIdentity = resolveCurrentChatIdentity(getContext());
     const baseSnapshot =
-      readCachedIndexedDbSnapshot(normalizedChatId) ||
+      readCachedIndexedDbSnapshot(normalizedChatId, localStore) ||
       (await db.exportSnapshot());
     const requestedRevision = resolvePersistRevisionFloor(revision, graph);
     const snapshot = buildSnapshotFromGraph(graph, {
