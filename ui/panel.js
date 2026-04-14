@@ -1566,6 +1566,56 @@ function _refreshTaskPipelineOverview() {
 
 // ---------- Task Timeline ----------
 
+function _getTaskTimelineEntrySeverity(entry = {}) {
+  const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+  if (explicitLevel) return explicitLevel;
+
+  const status = String(entry?.status || "").trim().toLowerCase();
+  if (status.includes("error") || status.includes("fail")) return "error";
+  if (status.includes("warn")) return "warn";
+  return "info";
+}
+
+function _buildTaskTimelineDetailState(entry = {}) {
+  const detailLines = [];
+  const legacyDetail = String(entry?.text || entry?.meta || "").trim();
+  const routeInfo = _formatMonitorRouteInfo(entry);
+  const governanceLines = _summarizeMonitorGovernance(entry);
+  const messageCount = Array.isArray(entry?.messages) ? entry.messages.length : 0;
+  const rawPreviewText = _buildMonitorMessagesPreview(entry?.messages || []);
+  const previewText =
+    rawPreviewText.length > 480
+      ? `${rawPreviewText.slice(0, 480)}\n\n...（详情已截断）`
+      : rawPreviewText;
+
+  if (legacyDetail) {
+    detailLines.push(legacyDetail);
+  }
+  if (routeInfo && routeInfo !== "未记录路由信息") {
+    detailLines.push(`路由: ${routeInfo}`);
+  }
+  for (const line of governanceLines) {
+    const normalized = String(line || "").trim();
+    if (normalized) detailLines.push(normalized);
+  }
+  if (messageCount > 0) {
+    detailLines.push(`消息快照: ${messageCount} 条`);
+  }
+
+  const uniqueLines = [];
+  for (const line of detailLines) {
+    if (!uniqueLines.includes(line)) {
+      uniqueLines.push(line);
+    }
+  }
+
+  return {
+    detailLines: uniqueLines,
+    previewText,
+    hasRenderableDetail: uniqueLines.length > 0 || Boolean(previewText),
+  };
+}
+
 function _refreshTaskTimeline() {
   const el = document.getElementById("bme-task-timeline");
   if (!el) return;
@@ -1581,14 +1631,22 @@ function _refreshTaskTimeline() {
 
   const entries = timeline.slice().reverse().map((entry, idx) => {
     const t = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : "";
-    const title = entry.taskType || entry.stage || "task";
+    const taskType = String(entry?.taskType || entry?.stage || "task");
+    const title = entry?.taskType
+      ? _getMonitorTaskTypeLabel(taskType)
+      : taskType;
     const statusText = entry.status || "";
     const durationMs = entry.durationMs;
-    const durationStr = typeof durationMs === "number" ? `${(durationMs / 1000).toFixed(1)}s` : "";
-    const detail = entry.text || entry.meta || "";
-    const level = entry.level || "info";
+    const durationStr = _formatDurationMs(durationMs);
+    const { detailLines, previewText, hasRenderableDetail } =
+      _buildTaskTimelineDetailState(entry);
+    const level = _getTaskTimelineEntrySeverity(entry);
     const levelIcon = level === "error" ? "circle-exclamation" : level === "warn" ? "triangle-exclamation" : "circle-check";
     const levelColor = level === "error" ? "#e74c3c" : level === "warn" ? "#f39c12" : "#2ecc71";
+    const metaParts = [
+      durationStr && durationStr !== "—" ? durationStr : "",
+      t,
+    ].filter(Boolean);
 
     const substages = Array.isArray(entry.substages) ? entry.substages.map((sub) => `
       <div class="bme-timeline-substage">
@@ -1600,15 +1658,17 @@ function _refreshTaskTimeline() {
 
     return `
       <div class="bme-timeline-entry${idx > 5 ? " is-collapsed" : ""}" data-entry-idx="${idx}">
-        <div class="bme-timeline-entry__head" onclick="this.closest('.bme-timeline-entry').classList.toggle('is-collapsed')">
+        <div class="bme-timeline-entry__head">
           <i class="fa-solid fa-${levelIcon}" style="color:${levelColor};font-size:12px"></i>
-          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(statusText)}` : ""}</span>
-          <span class="bme-timeline-entry__meta">${durationStr} ${t}</span>
+          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(_getMonitorStatusLabel(statusText))}` : ""}</span>
+          <span class="bme-timeline-entry__meta">${_escHtml(metaParts.join(" "))}</span>
           <button class="bme-timeline-entry__toggle" type="button"><i class="fa-solid fa-chevron-down"></i></button>
         </div>
         <div class="bme-timeline-entry__detail">
-          ${detail ? `<div style="font-size:11px;color:var(--bme-on-surface-dim);margin-bottom:6px">${_escHtml(detail)}</div>` : ""}
+          ${detailLines.map((line) => `<div class="bme-timeline-entry__line">${_escHtml(line)}</div>`).join("")}
           ${substages}
+          ${previewText ? `<div class="bme-timeline-entry__preview">${_escHtml(previewText)}</div>` : ""}
+          ${!hasRenderableDetail && !substages ? `<div class="bme-timeline-entry__empty">这条记录没有捕获到更多详情，通常表示当前只保留了任务状态快照。</div>` : ""}
         </div>
       </div>
     `;
@@ -5535,6 +5595,15 @@ function _bindActions() {
     if (entry) entry.classList.toggle("is-collapsed");
   });
 
+  document.addEventListener("click", (e) => {
+    const toggle = e.target.closest(
+      ".bme-timeline-entry__toggle, .bme-timeline-entry__head",
+    );
+    if (!toggle) return;
+    const entry = toggle.closest(".bme-timeline-entry");
+    if (entry) entry.classList.toggle("is-collapsed");
+  });
+
   // ==================== 认知视图绑定 ====================
 
   // 图谱/认知视图 tab 切换
@@ -5886,7 +5955,7 @@ function _refreshConfigTab() {
     settings.extractIncludeStoryTime !== false,
   );
   _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
-  _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
+  _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 12);
   _setInputValue(
     "bme-setting-recall-diffusion-top-k",
     settings.recallDiffusionTopK ?? 100,
@@ -6363,7 +6432,7 @@ function _bindConfigControls() {
   bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
     _patchSettings({ recallTopK: value }),
   );
-  bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
+  bindNumber("bme-setting-recall-max-nodes", 12, 1, 50, (value) =>
     _patchSettings({ recallMaxNodes: value }),
   );
   bindNumber("bme-setting-recall-diffusion-top-k", 100, 1, 300, (value) =>

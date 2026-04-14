@@ -1203,6 +1203,32 @@
   border-top: 1px solid var(--bme-border);
 }
 
+.bme-timeline-entry__line,
+.bme-timeline-entry__empty {
+  font-size: 11px;
+  color: var(--bme-on-surface-dim);
+  line-height: 1.55;
+}
+
+.bme-timeline-entry__line + .bme-timeline-entry__line {
+  margin-top: 6px;
+}
+
+.bme-timeline-entry__preview {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--bme-border);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--bme-on-surface-dim);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow: auto;
+}
+
 .bme-timeline-entry.is-collapsed .bme-timeline-entry__detail {
   display: none;
 }

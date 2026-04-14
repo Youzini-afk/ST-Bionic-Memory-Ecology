@@ -37,7 +37,7 @@ export const defaultSettings = {
   worldInfoFilterMode: "default",
   worldInfoFilterCustomKeywords: "",
   recallTopK: 20,
-  recallMaxNodes: 8,
+  recallMaxNodes: 12,
   recallEnableLLM: true,
   recallEnableVectorPrefilter: true,
   recallEnableGraphDiffusion: true,

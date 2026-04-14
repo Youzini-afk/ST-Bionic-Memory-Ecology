@@ -9,7 +9,7 @@ assert.equal(defaultSettings.extractContextTurns, 2);
 assert.equal(defaultSettings.extractActionMode, "pending");
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
 assert.equal(defaultSettings.recallTopK, 20);
-assert.equal(defaultSettings.recallMaxNodes, 8);
+assert.equal(defaultSettings.recallMaxNodes, 12);
 assert.equal(defaultSettings.recallEnableVectorPrefilter, true);
 assert.equal(defaultSettings.recallEnableGraphDiffusion, true);
 assert.equal(defaultSettings.recallDiffusionTopK, 100);
