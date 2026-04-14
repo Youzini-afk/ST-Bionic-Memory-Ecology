@@ -4373,57 +4373,6 @@ async function importRecoveredSnapshotToIndexedDb(
   return snapshot;
 }
 
-function doesChatIdMatchResolvedGraphIdentity(
-  candidateChatId,
-  identity = resolveCurrentChatIdentity(getContext()),
-) {
-  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
-  if (!normalizedCandidate || !identity || typeof identity !== "object") {
-    return false;
-  }
-
-  const knownChatIds = new Set();
-  const addKnownChatId = (value) => {
-    const normalized = normalizeChatIdCandidate(value);
-    if (normalized) {
-      knownChatIds.add(normalized);
-    }
-  };
-
-  addKnownChatId(identity.chatId);
-  addKnownChatId(identity.hostChatId);
-  addKnownChatId(identity.integrity);
-
-  for (const aliasCandidate of getGraphIdentityAliasCandidates({
-    integrity: identity.integrity,
-    hostChatId: identity.hostChatId,
-    persistenceChatId: identity.chatId,
-  })) {
-    addKnownChatId(aliasCandidate);
-  }
-
-  return knownChatIds.has(normalizedCandidate);
-}
-
-function areChatIdsEquivalentForResolvedIdentity(
-  candidateChatId,
-  referenceChatId,
-  identity = resolveCurrentChatIdentity(getContext()),
-) {
-  const normalizedCandidate = normalizeChatIdCandidate(candidateChatId);
-  const normalizedReference = normalizeChatIdCandidate(referenceChatId);
-  if (!normalizedCandidate || !normalizedReference) {
-    return normalizedCandidate === normalizedReference;
-  }
-  if (normalizedCandidate === normalizedReference) {
-    return true;
-  }
-  return (
-    doesChatIdMatchResolvedGraphIdentity(normalizedCandidate, identity) &&
-    doesChatIdMatchResolvedGraphIdentity(normalizedReference, identity)
-  );
-}
-
 function getIndexedDbSnapshotHistoryState(snapshot = null) {
   const snapshotState =
     snapshot?.meta?.runtimeHistoryState &&
