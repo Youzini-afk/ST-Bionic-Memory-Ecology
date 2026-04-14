@@ -1269,6 +1269,10 @@
   flex: 0 0 auto;
 }
 
+.bme-memory-list-filters .bme-task-memory-search-btn {
+  width: 100%;
+}
+
 .bme-memory-list-filters .bme-floor-input {
   max-width: 120px;
   flex: 0 0 auto;
