@@ -2032,20 +2032,58 @@ function _refreshTaskPersistence() {
   const STORAGE_TIER_LABELS = {
     none: "无",
     metadata: "元数据",
+    "metadata-full": "完整 metadata",
     indexeddb: "IndexedDB",
-    chat: "聊天存档",
+    opfs: "OPFS",
+    "chat-state": "聊天侧车",
+    "luker-chat-state": "Luker 侧车主存储",
+    shadow: "影子快照",
+  };
+  const HOST_PROFILE_LABELS = {
+    "generic-st": "通用 ST",
+    luker: "Luker",
+  };
+  const CACHE_MIRROR_LABELS = {
+    idle: "空闲",
+    none: "无",
+    queued: "排队中",
+    saved: "已更新",
+    error: "失败",
   };
 
   const loadStateLabel = LOAD_STATE_LABELS[ps.loadState] || ps.loadState || "未知";
-  const storageTierLabel = STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] || ps.acceptedStorageTier || ps.storageTier || "—";
+  const acceptedTierLabel =
+    STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] ||
+    ps.acceptedStorageTier ||
+    ps.storageTier ||
+    "—";
+  const primaryTierLabel =
+    STORAGE_TIER_LABELS[ps.primaryStorageTier] || ps.primaryStorageTier || "—";
+  const cacheTierLabel =
+    STORAGE_TIER_LABELS[ps.cacheStorageTier] || ps.cacheStorageTier || "—";
+  const hostProfileLabel =
+    HOST_PROFILE_LABELS[ps.hostProfile] || ps.hostProfile || "未知";
+  const opfsLock = ps.opfsWriteLockState || null;
+  const opfsLockLabel = opfsLock
+    ? opfsLock.active
+      ? `活跃中 · queue ${Number(opfsLock.queueDepth || 0)}`
+      : `空闲 · queue ${Number(opfsLock.queueDepth || 0)}`
+    : "—";
 
   const kvs = [
     ["加载状态", loadStateLabel],
-    ["存储层级", storageTierLabel],
+    ["宿主档案", hostProfileLabel],
+    ["主 durable", primaryTierLabel],
+    ["当前 accepted", acceptedTierLabel],
+    ["accepted by", ps.acceptedBy || "—"],
+    ["本地缓存", cacheTierLabel],
+    ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
     ["版本号", ps.revision ?? "—"],
-    ["提交标记", ps.commitMarker ? "存在" : "无"],
+    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
     ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
+    ["OPFS 写锁", opfsLockLabel],
   ];
 
   const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
@@ -2061,11 +2099,18 @@ function _refreshTaskPersistence() {
 
   const guidePairs = [
     ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
-    ["存储层级", "当前持久化使用的最高存储介质。IndexedDB 最快，聊天存档最稳。"],
+    ["宿主档案", "当前运行环境。Luker 会把聊天侧车当主 durable 存储，其它宿主仍以本地存储为主。"],
+    ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
+    ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
+    ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
+    ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
+    ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
     ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
-    ["提交标记", "聊天元数据中的标记，指示是否有更高版本存在于本地 IndexedDB。"],
+    ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
+    ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
     ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
     ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
+    ["OPFS 写锁", "OPFS 本地存储的串行写状态。活跃表示当前有写任务排队或执行中。"],
     ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
     ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
     ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
@@ -11227,10 +11272,17 @@ function _getGraphPersistenceSnapshot() {
     shadowSnapshotUsed: false,
     pendingPersist: false,
     lastAcceptedRevision: 0,
+    hostProfile: "generic-st",
+    primaryStorageTier: "indexeddb",
+    cacheStorageTier: "none",
+    cacheMirrorState: "idle",
+    acceptedBy: "none",
+    persistDiagnosticTier: "none",
     persistMismatchReason: "",
     commitMarker: null,
     chatId: "",
     storageMode: "indexeddb",
+    opfsWriteLockState: null,
     dbReady: false,
     syncState: "idle",
     syncDirty: false,
@@ -11408,7 +11460,7 @@ function _getGraphLoadLabel(loadState = "") {
     case "empty-confirmed":
       return "当前聊天还没有图谱";
     case "blocked":
-      return "当前聊天图谱未能完成 IndexedDB 确认，请稍后重试";
+      return "当前聊天图谱未能完成正式持久化确认，请稍后重试";
     case "loaded":
       return "聊天图谱已加载";
     case "no-chat":

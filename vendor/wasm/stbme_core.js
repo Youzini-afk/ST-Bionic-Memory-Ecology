@@ -3,6 +3,21 @@ let triedLoad = false;
 let loadError = null;
 let moduleSource = "none";
 
+function shouldRetryNativeLoad() {
+  return (
+    !cachedNativeModule &&
+    triedLoad &&
+    typeof globalThis.__stBmeLoadRustWasmLayout === "function"
+  );
+}
+
+export function resetNativeModuleStatus() {
+  cachedNativeModule = null;
+  triedLoad = false;
+  loadError = null;
+  moduleSource = "none";
+}
+
 async function resolveWasmModuleInput(wasmUrl) {
   if (
     wasmUrl &&
@@ -69,10 +84,16 @@ async function loadFromWasmPackArtifacts() {
   };
 }
 
-async function loadNativeModule() {
+async function loadNativeModule(options = {}) {
   if (cachedNativeModule) return cachedNativeModule;
-  if (triedLoad) {
+  if (triedLoad && !(options?.forceRetry === true || shouldRetryNativeLoad())) {
     throw loadError || new Error("stbme_core native module unavailable");
+  }
+
+  if (triedLoad && (options?.forceRetry === true || shouldRetryNativeLoad())) {
+    triedLoad = false;
+    loadError = null;
+    moduleSource = "none";
   }
 
   triedLoad = true;
@@ -148,7 +169,9 @@ export async function solveLayout(payload) {
 }
 
 export async function installNativePersistDeltaHook() {
-  const module = await loadNativeModule();
+  const module = await loadNativeModule({
+    forceRetry: shouldRetryNativeLoad(),
+  });
   if (
     !module ||
     (typeof module.build_persist_delta_compact_hash !== "function" &&

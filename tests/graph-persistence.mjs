@@ -1098,6 +1098,7 @@ result = {
   applyGraphLoadState,
   maybeFlushQueuedGraphPersist,
   retryPendingGraphPersist,
+  persistExtractionBatchResult,
   saveGraphToIndexedDb,
   cloneGraphForPersistence,
   assertRecoveryChatStillActive,
@@ -3183,6 +3184,91 @@ result = {
   );
   assert.equal(result?.revision, 9);
   assert.equal(result?.commitMarker?.storageTier, "chat-state");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-generic-primary-no-mirror",
+    globalChatId: "chat-generic-primary-no-mirror",
+    characterId: "char-generic",
+    chatMetadata: {
+      integrity: "meta-generic-primary-no-mirror",
+    },
+  });
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-generic-primary-no-mirror", "generic-primary"),
+    {
+      revision: 5,
+      integrity: "meta-generic-primary-no-mirror",
+      chatId: "chat-generic-primary-no-mirror",
+      reason: "generic-primary-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "generic-primary-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "indexeddb");
+  assert.equal(
+    harness.runtimeContext.__chatContext.__chatStateStore.size,
+    0,
+    "generic ST 主写成功后不应再常驻 mirror 到 chat-state",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-luker-primary",
+    globalChatId: "chat-luker-primary",
+    characterId: "char-luker",
+    chatMetadata: {
+      integrity: "meta-luker-primary",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-luker-primary", "luker-primary"),
+    {
+      revision: 8,
+      integrity: "meta-luker-primary",
+      chatId: "chat-luker-primary",
+      reason: "luker-primary-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "luker-primary-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.acceptedBy, "luker-chat-state");
+
+  const stored = await harness.runtimeContext.__chatContext.getChatState(
+    GRAPH_CHAT_STATE_NAMESPACE,
+  );
+  assert.equal(stored?.revision, result.revision);
+  assert.equal(stored?.storageTier, "luker-chat-state");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0) >= result.revision,
+    true,
+    "Luker 主存储成功后应异步补写本地缓存",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().acceptedStorageTier,
+    "luker-chat-state",
+  );
 }
 
 console.log("graph-persistence tests passed");
