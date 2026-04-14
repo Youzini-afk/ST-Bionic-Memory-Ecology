@@ -27,43 +27,85 @@ export function openPanelController(runtime) {
 }
 
 function injectOptionsMenuEntry(runtime) {
-  if (runtime.document.getElementById("option_st_bme_panel")) {
+  const doc = runtime.document;
+  if (!doc || doc.getElementById("option_st_bme_panel")) {
     return true;
   }
-
-  const $menuItem = runtime.$(`
-    <a id="option_st_bme_panel">
-      <i class="fa-lg fa-solid fa-brain"></i>
-      <span>记忆图谱</span>
-    </a>
-  `).on("click", async () => {
+  const menuItem = doc.createElement("a");
+  menuItem.id = "option_st_bme_panel";
+  menuItem.innerHTML =
+    '<i class="fa-lg fa-solid fa-brain"></i><span>记忆图谱</span>';
+  menuItem.addEventListener("click", async () => {
     try {
       await ensurePanelBridgeReady(runtime);
       openPanelController(runtime);
-      runtime.$("#options").hide();
+      runtime.$?.("#options")?.hide?.();
     } catch (error) {
       runtime.console.error("[ST-BME] 点击菜单打开面板失败:", error);
       globalThis.toastr?.error?.("记忆图谱面板加载失败，请查看控制台报错", "ST-BME");
     }
   });
 
-  const $optionsContent = runtime.$("#options .options-content");
-  const $anchor = runtime.$("#option_toggle_logprobs");
+  const anchor = doc.getElementById("option_toggle_logprobs");
+  const optionsContent = doc.querySelector("#options .options-content");
 
-  if ($anchor.length > 0) {
-    $anchor.after($menuItem);
-    return true;
-  } else if ($optionsContent.length > 0) {
-    $optionsContent.append($menuItem);
+  if (anchor?.parentNode) {
+    anchor.parentNode.insertBefore(menuItem, anchor.nextSibling);
     return true;
   }
-
+  if (optionsContent) {
+    optionsContent.appendChild(menuItem);
+    return true;
+  }
   return false;
 }
 
+function injectFloatingBootstrap(runtime) {
+  const doc = runtime.document;
+  if (!doc) return false;
+  let fab = doc.getElementById("bme-floating-ball");
+  if (!fab) {
+    fab = doc.createElement("div");
+    fab.id = "bme-floating-ball";
+    fab.setAttribute("data-status", "idle");
+    fab.setAttribute("data-bme-bootstrap", "true");
+    fab.innerHTML = `
+      <i class="fa-solid fa-brain bme-fab-icon"></i>
+      <span class="bme-fab-tooltip">BME 记忆图谱</span>
+    `;
+    const mountTarget = doc.body || doc.documentElement;
+    if (!mountTarget) return false;
+    mountTarget.appendChild(fab);
+  }
+  if (fab.dataset.bmeBridgeBound === "true") {
+    return true;
+  }
+  fab.dataset.bmeBridgeBound = "true";
+  fab.addEventListener("click", async () => {
+    try {
+      await ensurePanelBridgeReady(runtime);
+      openPanelController(runtime);
+    } catch (error) {
+      runtime.console.error("[ST-BME] 点击悬浮球打开面板失败:", error);
+      globalThis.toastr?.error?.("记忆图谱面板加载失败，请查看控制台报错", "ST-BME");
+    }
+  });
+  return true;
+}
+
 function scheduleOptionsMenuInjection(runtime, attempt = 0) {
-  if (injectOptionsMenuEntry(runtime)) {
-    return;
+  try {
+    injectFloatingBootstrap(runtime);
+  } catch (error) {
+    runtime.console.warn("[ST-BME] 悬浮球入口预注入失败:", error);
+  }
+
+  try {
+    if (injectOptionsMenuEntry(runtime)) {
+      return;
+    }
+  } catch (error) {
+    runtime.console.warn("[ST-BME] 菜单入口注入失败，稍后重试:", error);
   }
 
   if (attempt >= MENU_ENTRY_MAX_ATTEMPTS) {

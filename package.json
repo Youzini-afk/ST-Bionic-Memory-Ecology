@@ -1,6 +1,7 @@
 {
   "scripts": {
     "version:bump-manifest": "node scripts/bump-manifest-version.mjs",
+    "build:native:wasm": "node scripts/build-native-wasm.mjs",
     "test:p0": "node tests/p0-regressions.mjs",
     "test:runtime-history": "node tests/runtime-history.mjs",
     "test:graph-persistence": "node tests/graph-persistence.mjs",
@@ -9,7 +10,11 @@
     "test:indexeddb-persistence": "node tests/indexeddb-persistence.mjs",
     "test:indexeddb-sync": "node tests/indexeddb-sync.mjs",
     "test:indexeddb-migration": "node tests/indexeddb-migration.mjs",
+    "test:native-layout-parity": "node tests/native-layout-parity.mjs",
     "test:trivial-input": "node tests/trivial-user-input.mjs",
+    "bench:graph-layout": "node tests/perf/graph-layout-bench.mjs",
+    "bench:persist-delta": "node tests/perf/persist-delta-bench.mjs",
+    "bench:native": "npm run bench:graph-layout && npm run bench:persist-delta",
     "test:indexeddb": "npm run test:indexeddb-persistence && npm run test:indexeddb-sync && npm run test:indexeddb-migration",
     "test:persistence-matrix": "npm run test:p0 && npm run test:runtime-history && npm run test:graph-persistence && npm run test:indexeddb",
     "test:stable": "node scripts/run-test-suite.mjs",

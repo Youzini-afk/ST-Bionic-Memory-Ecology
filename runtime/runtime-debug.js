@@ -28,6 +28,8 @@ const runtimeDebugState = {
   taskLlmRequests: {},
   injections: {},
   taskTimeline: [],
+  graphPersistence: null,
+  graphLayout: null,
   updatedAt: "",
 };
 
@@ -41,6 +43,8 @@ export function resetRuntimeDebugSnapshot() {
   runtimeDebugState.taskLlmRequests = {};
   runtimeDebugState.injections = {};
   runtimeDebugState.taskTimeline = [];
+  runtimeDebugState.graphPersistence = null;
+  runtimeDebugState.graphLayout = null;
   runtimeDebugState.updatedAt = nowIso();
 }
 
@@ -76,6 +80,26 @@ export function recordInjectionSnapshot(kind, snapshot = {}) {
   touchRuntimeDebugState();
 }
 
+export function recordGraphPersistenceSnapshot(snapshot = null) {
+  runtimeDebugState.graphPersistence = snapshot
+    ? {
+        updatedAt: nowIso(),
+        ...safeClone(snapshot, {}),
+      }
+    : null;
+  touchRuntimeDebugState();
+}
+
+export function recordGraphLayoutSnapshot(snapshot = null) {
+  runtimeDebugState.graphLayout = snapshot
+    ? {
+        updatedAt: nowIso(),
+        ...safeClone(snapshot, {}),
+      }
+    : null;
+  touchRuntimeDebugState();
+}
+
 export function getRuntimeDebugSnapshot() {
   return safeClone(
     {
@@ -84,6 +108,8 @@ export function getRuntimeDebugSnapshot() {
       taskLlmRequests: runtimeDebugState.taskLlmRequests,
       injections: runtimeDebugState.injections,
       taskTimeline: runtimeDebugState.taskTimeline,
+      graphPersistence: runtimeDebugState.graphPersistence,
+      graphLayout: runtimeDebugState.graphLayout,
       updatedAt: runtimeDebugState.updatedAt,
     },
     {
@@ -92,6 +118,8 @@ export function getRuntimeDebugSnapshot() {
       taskLlmRequests: {},
       injections: {},
       taskTimeline: [],
+      graphPersistence: null,
+      graphLayout: null,
       updatedAt: "",
     },
   );

@@ -104,6 +104,7 @@ export function createNode({
     embedding: null,
     importance: Math.max(0, Math.min(10, importance)),
     accessCount: 0,
+    updatedAt: now,
     lastAccessTime: now,
     createdTime: now,
     prevId: null,
@@ -164,6 +165,10 @@ export function updateNode(graph, nodeId, updates) {
   const node = getNode(graph, nodeId);
   if (!node) return false;
 
+  const nextUpdatedAt = Number.isFinite(Number(updates?.updatedAt))
+    ? Number(updates.updatedAt)
+    : Date.now();
+
   if (updates.fields) {
     node.fields = { ...node.fields, ...updates.fields };
     delete updates.fields;
@@ -186,6 +191,7 @@ export function updateNode(graph, nodeId, updates) {
   }
 
   Object.assign(node, updates);
+  node.updatedAt = nextUpdatedAt;
   return true;
 }
 
@@ -312,6 +318,7 @@ export function createEdge({
   edgeType = 0,
   scope = undefined,
 }) {
+  const now = Date.now();
   return {
     id: uuid(),
     fromId,
@@ -319,9 +326,10 @@ export function createEdge({
     relation,
     strength: Math.max(0, Math.min(1, strength)),
     edgeType,
-    createdTime: Date.now(),
+    createdTime: now,
+    updatedAt: now,
     // Graphiti 启发的时序字段
-    validAt: Date.now(), // 关系生效时间
+    validAt: now, // 关系生效时间
     invalidAt: null, // 关系失效时间（null = 当前有效）
     expiredAt: null, // 系统标记过期时间
     scope: normalizeMemoryScope(scope),
@@ -362,13 +370,33 @@ export function addEdge(graph, edge) {
       existing.validAt || 0,
       edge.validAt || Date.now(),
     );
+    existing.updatedAt = Math.max(
+      Number(existing.updatedAt || 0),
+      Number(edge.updatedAt || 0),
+      Number(existing.validAt || 0),
+    );
     if (edge.invalidAt) {
       existing.invalidAt = edge.invalidAt;
+      existing.updatedAt = Math.max(
+        Number(existing.updatedAt || 0),
+        Number(existing.invalidAt || 0),
+      );
     }
     if (edge.expiredAt) {
       existing.expiredAt = edge.expiredAt;
+      existing.updatedAt = Math.max(
+        Number(existing.updatedAt || 0),
+        Number(existing.expiredAt || 0),
+      );
     }
     return existing;
+  }
+
+  if (!Number.isFinite(Number(edge.updatedAt))) {
+    edge.updatedAt = Math.max(
+      Number(edge.validAt || 0),
+      Number(edge.createdTime || Date.now()),
+    );
   }
 
   graph.edges.push(edge);
@@ -532,9 +560,14 @@ function isEdgeActive(edge, now = Date.now()) {
  */
 export function invalidateEdge(edge) {
   if (!edge) return;
+  const now = Date.now();
   if (!edge.invalidAt) {
-    edge.invalidAt = Date.now();
+    edge.invalidAt = now;
   }
+  edge.updatedAt = Math.max(
+    Number(edge.updatedAt || 0),
+    Number(edge.invalidAt || now),
+  );
 }
 
 /**

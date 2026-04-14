@@ -9,6 +9,7 @@ import {
   buildGraphFromSnapshot,
   buildPersistDelta,
   buildSnapshotFromGraph,
+  evaluatePersistNativeDeltaGate,
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
 import {
@@ -880,7 +881,66 @@ async function createGraphPersistenceHarness({
     buildGraphFromSnapshot,
     buildPersistDelta,
     buildSnapshotFromGraph,
+    evaluatePersistNativeDeltaGate,
     buildBmeDbName,
+    BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB: "indexeddb",
+    BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW: "opfs-shadow",
+    detectOpfsSupport: async () => ({
+      available: false,
+      reason: "opfs-unsupported-in-test",
+    }),
+    isGraphLocalStorageModeOpfs: (mode = "") =>
+      /^opfs-/.test(String(mode || "").trim().toLowerCase()),
+    normalizeGraphLocalStorageMode: (mode = "", fallback = "indexeddb") => {
+      const normalized = String(mode || "").trim().toLowerCase();
+      if (
+        normalized === "indexeddb" ||
+        normalized === "opfs-shadow" ||
+        normalized === "opfs-primary"
+      ) {
+        return normalized;
+      }
+      return String(fallback || "indexeddb").trim().toLowerCase() || "indexeddb";
+    },
+    OpfsGraphStore: class {
+      constructor(dbChatId = "") {
+        this.chatId = String(dbChatId || "");
+        this.storeKind = "opfs";
+        this.storeMode = "opfs-shadow";
+      }
+      async open() {}
+      async close() {}
+      async exportSnapshot() {
+        return getIndexedDbSnapshotForChat(this.chatId);
+      }
+      async commitDelta(delta, options = {}) {
+        return commitIndexedDbDelta(this.chatId, delta, options);
+      }
+      async importSnapshot(snapshot) {
+        setIndexedDbSnapshotForChat(this.chatId, snapshot);
+        return {
+          revision: Number(snapshot?.meta?.revision) || 0,
+        };
+      }
+      async isEmpty() {
+        const snapshot = getIndexedDbSnapshotForChat(this.chatId);
+        return {
+          empty:
+            !snapshot ||
+            (!snapshot.nodes?.length && !snapshot.edges?.length && !snapshot.tombstones?.length),
+        };
+      }
+      async getRevision() {
+        return Number(getIndexedDbSnapshotForChat(this.chatId)?.meta?.revision || 0);
+      }
+      async getMeta(key, fallbackValue = 0) {
+        const snapshot = getIndexedDbSnapshotForChat(this.chatId) || {};
+        if (!snapshot?.meta || !(key in snapshot.meta)) {
+          return fallbackValue;
+        }
+        return snapshot.meta[key];
+      }
+    },
     scheduleUpload() {
       if (runtimeContext.__scheduleUploadShouldThrow) {
         throw new Error("schedule-upload-failed");
@@ -1038,6 +1098,7 @@ result = {
   applyGraphLoadState,
   maybeFlushQueuedGraphPersist,
   retryPendingGraphPersist,
+  persistExtractionBatchResult,
   saveGraphToIndexedDb,
   cloneGraphForPersistence,
   assertRecoveryChatStillActive,
@@ -2619,6 +2680,21 @@ result = {
     7,
     "附属步骤失败时，IndexedDB 主写仍应视为成功",
   );
+  const persistDeltaDiagnostics = harness.api.getGraphPersistenceState().persistDelta;
+  assert.equal(Boolean(persistDeltaDiagnostics), true);
+  assert.equal(persistDeltaDiagnostics.status, "committed");
+  assert.equal(persistDeltaDiagnostics.path, "js");
+  assert.equal(persistDeltaDiagnostics.requestedNative, false);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.buildMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.prepareMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.lookupMs)), true);
+  assert.equal(Number.isFinite(Number(persistDeltaDiagnostics.jsDiffMs)), true);
+  assert.equal(
+    Number(persistDeltaDiagnostics.serializationCacheHits || 0) +
+      Number(persistDeltaDiagnostics.serializationCacheMisses || 0) >
+      0,
+    true,
+  );
 }
 
 {
@@ -3108,6 +3184,91 @@ result = {
   );
   assert.equal(result?.revision, 9);
   assert.equal(result?.commitMarker?.storageTier, "chat-state");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-generic-primary-no-mirror",
+    globalChatId: "chat-generic-primary-no-mirror",
+    characterId: "char-generic",
+    chatMetadata: {
+      integrity: "meta-generic-primary-no-mirror",
+    },
+  });
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-generic-primary-no-mirror", "generic-primary"),
+    {
+      revision: 5,
+      integrity: "meta-generic-primary-no-mirror",
+      chatId: "chat-generic-primary-no-mirror",
+      reason: "generic-primary-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "generic-primary-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "indexeddb");
+  assert.equal(
+    harness.runtimeContext.__chatContext.__chatStateStore.size,
+    0,
+    "generic ST 主写成功后不应再常驻 mirror 到 chat-state",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-luker-primary",
+    globalChatId: "chat-luker-primary",
+    characterId: "char-luker",
+    chatMetadata: {
+      integrity: "meta-luker-primary",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-luker-primary", "luker-primary"),
+    {
+      revision: 8,
+      integrity: "meta-luker-primary",
+      chatId: "chat-luker-primary",
+      reason: "luker-primary-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "luker-primary-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.acceptedBy, "luker-chat-state");
+
+  const stored = await harness.runtimeContext.__chatContext.getChatState(
+    GRAPH_CHAT_STATE_NAMESPACE,
+  );
+  assert.equal(stored?.revision, result.revision);
+  assert.equal(stored?.storageTier, "luker-chat-state");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0) >= result.revision,
+    true,
+    "Luker 主存储成功后应异步补写本地缓存",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().acceptedStorageTier,
+    "luker-chat-state",
+  );
 }
 
 console.log("graph-persistence tests passed");

@@ -130,8 +130,10 @@ function createMockFetchEnvironment() {
     sanitizeCalls: 0,
     getCalls: 0,
     uploadCalls: 0,
+    uploadChunkCalls: 0,
     deleteCalls: 0,
     uploadedPayloads: [],
+    uploadedChunkPayloads: [],
   };
 
   const fetch = async (url, options = {}) => {
@@ -147,7 +149,6 @@ function createMockFetchEnvironment() {
     }
 
     if (url === "/api/files/upload" && method === "POST") {
-      logs.uploadCalls += 1;
       const body = JSON.parse(String(options.body || "{}"));
       if (!/^[A-Za-z0-9._~-]+$/.test(String(body.name || ""))) {
         return createJsonResponse(
@@ -158,7 +159,15 @@ function createMockFetchEnvironment() {
       const decoded = __testOnlyDecodeBase64Utf8(body.data);
       const payload = JSON.parse(decoded);
       remoteFiles.set(body.name, payload);
-      logs.uploadedPayloads.push({
+      const targetLog = String(body.name || "").includes(".__")
+        ? "uploadedChunkPayloads"
+        : "uploadedPayloads";
+      if (targetLog === "uploadedChunkPayloads") {
+        logs.uploadChunkCalls += 1;
+      } else {
+        logs.uploadCalls += 1;
+      }
+      logs[targetLog].push({
         name: body.name,
         decoded,
         payload,
@@ -288,10 +297,13 @@ async function testUploadPayloadMetaFirstAndDebounce() {
   const uploadResult = await upload("chat-upload", runtime);
   assert.equal(uploadResult.uploaded, true);
   assert.equal(logs.uploadCalls, 1);
+  assert.equal(logs.uploadChunkCalls > 0, true);
 
   const uploadedPayload = logs.uploadedPayloads[0].payload;
-  assert.equal(Object.keys(uploadedPayload)[0], "meta");
+  assert.equal(uploadedPayload.formatVersion, 2);
   assert.equal(uploadedPayload.meta.revision, 9);
+  assert.equal(Array.isArray(uploadedPayload.chunks), true);
+  assert.equal(uploadedPayload.chunks.length > 0, true);
 
   scheduleUpload("chat-upload", {
     ...runtime,
@@ -1156,12 +1168,13 @@ async function testDeleteRemoteSyncFile() {
   const deleteResult = await deleteRemoteSyncFile("chat-delete", runtime);
   assert.equal(deleteResult.deleted, true);
   assert.equal(deleteResult.chatId, "chat-delete");
-  assert.equal(logs.deleteCalls, 1);
+  assert.equal(logs.deleteCalls >= 1, true);
+  const deleteCallsAfterFirstDelete = logs.deleteCalls;
 
   const deleteMissingResult = await deleteRemoteSyncFile("chat-delete", runtime);
   assert.equal(deleteMissingResult.deleted, false);
   assert.equal(deleteMissingResult.reason, "not-found");
-  assert.equal(logs.deleteCalls, 2);
+  assert.equal(logs.deleteCalls > deleteCallsAfterFirstDelete, true);
 }
 
 async function testDeleteRemoteSyncFileFallsBackToLegacyFilename() {

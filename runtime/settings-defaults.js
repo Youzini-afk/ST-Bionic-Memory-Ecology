@@ -37,7 +37,7 @@ export const defaultSettings = {
   worldInfoFilterMode: "default",
   worldInfoFilterCustomKeywords: "",
   recallTopK: 20,
-  recallMaxNodes: 8,
+  recallMaxNodes: 12,
   recallEnableLLM: true,
   recallEnableVectorPrefilter: true,
   recallEnableGraphDiffusion: true,
@@ -112,6 +112,19 @@ export const defaultSettings = {
   embeddingBackendApiUrl: "",
   embeddingAutoSuffix: true,
 
+  // Native 性能加速（灰度）
+  graphUseNativeLayout: false,
+  graphNativeLayoutThresholdNodes: 280,
+  graphNativeLayoutThresholdEdges: 1600,
+  graphNativeLayoutWorkerTimeoutMs: 260,
+  persistUseNativeDelta: false,
+  persistNativeDeltaThresholdRecords: 20000,
+  persistNativeDeltaThresholdStructuralDelta: 600,
+  persistNativeDeltaThresholdSerializedChars: 4000000,
+  persistNativeDeltaBridgeMode: "json",
+  nativeEngineFailOpen: true,
+  graphNativeForceDisable: false,
+
   // Schema
   nodeTypeSchema: null,
 
@@ -155,6 +168,7 @@ export const defaultSettings = {
   // UI 面板
   noticeDisplayMode: "normal",
   panelTheme: "crimson",
+  graphLocalStorageMode: "auto",
   cloudStorageMode: "automatic",
 };
 

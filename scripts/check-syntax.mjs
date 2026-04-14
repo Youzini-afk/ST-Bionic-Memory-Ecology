@@ -16,6 +16,8 @@ const SOURCE_ROOTS = [
   "sync",
   "ui",
   "vector",
+  "vendor/wasm",
+  "native",
 ];
 
 async function collectFiles(targetPath) {

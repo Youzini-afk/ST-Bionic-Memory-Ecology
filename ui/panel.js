@@ -737,6 +737,36 @@ function _isGraphRenderingEnabled() {
   return graphRenderingEnabled !== false;
 }
 
+function _buildGraphRuntimeConfig(settings = _getSettings?.() || {}) {
+  return {
+    graphUseNativeLayout: settings.graphUseNativeLayout === true,
+    graphNativeLayoutThresholdNodes: Number.isFinite(
+      Number(settings.graphNativeLayoutThresholdNodes),
+    )
+      ? Math.max(1, Math.floor(Number(settings.graphNativeLayoutThresholdNodes)))
+      : 280,
+    graphNativeLayoutThresholdEdges: Number.isFinite(
+      Number(settings.graphNativeLayoutThresholdEdges),
+    )
+      ? Math.max(1, Math.floor(Number(settings.graphNativeLayoutThresholdEdges)))
+      : 1600,
+    graphNativeLayoutWorkerTimeoutMs: Number.isFinite(
+      Number(settings.graphNativeLayoutWorkerTimeoutMs),
+    )
+      ? Math.max(40, Math.floor(Number(settings.graphNativeLayoutWorkerTimeoutMs)))
+      : 260,
+    nativeEngineFailOpen: settings.nativeEngineFailOpen !== false,
+    graphNativeForceDisable: settings.graphNativeForceDisable === true,
+  };
+}
+
+function _applyGraphRuntimeConfig(settings = _getSettings?.() || {}) {
+  const runtimeConfig = _buildGraphRuntimeConfig(settings);
+  graphRenderer?.setRuntimeConfig?.(runtimeConfig);
+  mobileGraphRenderer?.setRuntimeConfig?.(runtimeConfig);
+  return runtimeConfig;
+}
+
 function _refreshGraphRenderToggleUi() {
   const enabled = _isGraphRenderingEnabled();
   const syncButton = (button) => {
@@ -779,6 +809,7 @@ function _toggleGraphRenderingEnabled() {
 function _refreshVisibleGraphWorkspace({ force = false } = {}) {
   const visibleMode = _getVisibleGraphWorkspaceMode();
   if (visibleMode === "hidden") {
+    _refreshGraphLayoutDiagnosticsUi();
     return { refreshed: false, reason: "hidden" };
   }
 
@@ -807,6 +838,8 @@ function _refreshVisibleGraphWorkspace({ force = false } = {}) {
   } else if (visibleMode === "mobile:summary") {
     _refreshMobileSummaryFull();
   }
+
+  _refreshGraphLayoutDiagnosticsUi();
 
   lastVisibleGraphRefreshToken = nextToken;
   lastVisibleGraphRefreshAt = Date.now();
@@ -988,21 +1021,21 @@ function _bindFabToggle() {
 }
 
 function _initFloatingBall() {
-  const existing = document.getElementById("bme-floating-ball");
-  if (existing) {
-    _fabEl = existing;
-    ensureFabMountedAtRoot();
-    syncFabPosition();
-    return;
+  let fab = document.getElementById("bme-floating-ball");
+  if (!fab) {
+    fab = document.createElement("div");
+    fab.id = "bme-floating-ball";
+    fab.setAttribute("data-status", "idle");
+    fab.innerHTML = `
+      <i class="fa-solid fa-brain bme-fab-icon"></i>
+      <span class="bme-fab-tooltip">BME 记忆图谱</span>
+    `;
+  } else if (!fab.querySelector(".bme-fab-icon")) {
+    fab.innerHTML = `
+      <i class="fa-solid fa-brain bme-fab-icon"></i>
+      <span class="bme-fab-tooltip">BME 记忆图谱</span>
+    `;
   }
-
-  const fab = document.createElement("div");
-  fab.id = "bme-floating-ball";
-  fab.setAttribute("data-status", "idle");
-  fab.innerHTML = `
-    <i class="fa-solid fa-brain bme-fab-icon"></i>
-    <span class="bme-fab-tooltip">BME 记忆图谱</span>
-  `;
   _fabEl = fab;
   ensureFabMountedAtRoot();
 
@@ -1014,10 +1047,16 @@ function _initFloatingBall() {
   if (saved) {
     fab.dataset.positionMode = "saved";
     applyFabPosition(saved, fab);
-  } else {
+  } else if (!fab.style.left || !fab.style.top) {
     fab.dataset.positionMode = "default";
     syncFabPosition();
   }
+
+  if (fab.dataset.bmeFabBound === "true") {
+    return;
+  }
+  fab.dataset.bmeFabBound = "true";
+  delete fab.dataset.bmeBootstrap;
 
   // 拖拽 + 点击逻辑
   let isDragging = false;
@@ -1159,6 +1198,7 @@ export function openPanel() {
   const graphOpts = {
     theme: themeName,
     userPovAliases: _hostUserPovAliasHintsForGraph(),
+    runtimeConfig: _buildGraphRuntimeConfig(settings),
   };
   const canvas = document.getElementById("bme-graph-canvas");
   if (canvas && !graphRenderer && !isMobile) {
@@ -1171,6 +1211,8 @@ export function openPanel() {
     mobileGraphRenderer = new GraphRenderer(mobileCanvas, graphOpts);
     mobileGraphRenderer.onNodeSelect = (node) => _showNodeDetail(node);
   }
+
+  _applyGraphRuntimeConfig(settings);
 
   _applyGraphRenderEnabledState();
 
@@ -1204,6 +1246,7 @@ export function updatePanelTheme(themeName) {
 
 export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
+  _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
 
   switch (currentTabId) {
@@ -1523,6 +1566,56 @@ function _refreshTaskPipelineOverview() {
 
 // ---------- Task Timeline ----------
 
+function _getTaskTimelineEntrySeverity(entry = {}) {
+  const explicitLevel = String(entry?.level || "").trim().toLowerCase();
+  if (explicitLevel) return explicitLevel;
+
+  const status = String(entry?.status || "").trim().toLowerCase();
+  if (status.includes("error") || status.includes("fail")) return "error";
+  if (status.includes("warn")) return "warn";
+  return "info";
+}
+
+function _buildTaskTimelineDetailState(entry = {}) {
+  const detailLines = [];
+  const legacyDetail = String(entry?.text || entry?.meta || "").trim();
+  const routeInfo = _formatMonitorRouteInfo(entry);
+  const governanceLines = _summarizeMonitorGovernance(entry);
+  const messageCount = Array.isArray(entry?.messages) ? entry.messages.length : 0;
+  const rawPreviewText = _buildMonitorMessagesPreview(entry?.messages || []);
+  const previewText =
+    rawPreviewText.length > 480
+      ? `${rawPreviewText.slice(0, 480)}\n\n...（详情已截断）`
+      : rawPreviewText;
+
+  if (legacyDetail) {
+    detailLines.push(legacyDetail);
+  }
+  if (routeInfo && routeInfo !== "未记录路由信息") {
+    detailLines.push(`路由: ${routeInfo}`);
+  }
+  for (const line of governanceLines) {
+    const normalized = String(line || "").trim();
+    if (normalized) detailLines.push(normalized);
+  }
+  if (messageCount > 0) {
+    detailLines.push(`消息快照: ${messageCount} 条`);
+  }
+
+  const uniqueLines = [];
+  for (const line of detailLines) {
+    if (!uniqueLines.includes(line)) {
+      uniqueLines.push(line);
+    }
+  }
+
+  return {
+    detailLines: uniqueLines,
+    previewText,
+    hasRenderableDetail: uniqueLines.length > 0 || Boolean(previewText),
+  };
+}
+
 function _refreshTaskTimeline() {
   const el = document.getElementById("bme-task-timeline");
   if (!el) return;
@@ -1538,14 +1631,22 @@ function _refreshTaskTimeline() {
 
   const entries = timeline.slice().reverse().map((entry, idx) => {
     const t = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : "";
-    const title = entry.taskType || entry.stage || "task";
+    const taskType = String(entry?.taskType || entry?.stage || "task");
+    const title = entry?.taskType
+      ? _getMonitorTaskTypeLabel(taskType)
+      : taskType;
     const statusText = entry.status || "";
     const durationMs = entry.durationMs;
-    const durationStr = typeof durationMs === "number" ? `${(durationMs / 1000).toFixed(1)}s` : "";
-    const detail = entry.text || entry.meta || "";
-    const level = entry.level || "info";
+    const durationStr = _formatDurationMs(durationMs);
+    const { detailLines, previewText, hasRenderableDetail } =
+      _buildTaskTimelineDetailState(entry);
+    const level = _getTaskTimelineEntrySeverity(entry);
     const levelIcon = level === "error" ? "circle-exclamation" : level === "warn" ? "triangle-exclamation" : "circle-check";
     const levelColor = level === "error" ? "#e74c3c" : level === "warn" ? "#f39c12" : "#2ecc71";
+    const metaParts = [
+      durationStr && durationStr !== "—" ? durationStr : "",
+      t,
+    ].filter(Boolean);
 
     const substages = Array.isArray(entry.substages) ? entry.substages.map((sub) => `
       <div class="bme-timeline-substage">
@@ -1557,15 +1658,17 @@ function _refreshTaskTimeline() {
 
     return `
       <div class="bme-timeline-entry${idx > 5 ? " is-collapsed" : ""}" data-entry-idx="${idx}">
-        <div class="bme-timeline-entry__head" onclick="this.closest('.bme-timeline-entry').classList.toggle('is-collapsed')">
+        <div class="bme-timeline-entry__head">
           <i class="fa-solid fa-${levelIcon}" style="color:${levelColor};font-size:12px"></i>
-          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(statusText)}` : ""}</span>
-          <span class="bme-timeline-entry__meta">${durationStr} ${t}</span>
+          <span class="bme-timeline-entry__title">${_escHtml(title)}${statusText ? ` — ${_escHtml(_getMonitorStatusLabel(statusText))}` : ""}</span>
+          <span class="bme-timeline-entry__meta">${_escHtml(metaParts.join(" "))}</span>
           <button class="bme-timeline-entry__toggle" type="button"><i class="fa-solid fa-chevron-down"></i></button>
         </div>
         <div class="bme-timeline-entry__detail">
-          ${detail ? `<div style="font-size:11px;color:var(--bme-on-surface-dim);margin-bottom:6px">${_escHtml(detail)}</div>` : ""}
+          ${detailLines.map((line) => `<div class="bme-timeline-entry__line">${_escHtml(line)}</div>`).join("")}
           ${substages}
+          ${previewText ? `<div class="bme-timeline-entry__preview">${_escHtml(previewText)}</div>` : ""}
+          ${!hasRenderableDetail && !substages ? `<div class="bme-timeline-entry__empty">这条记录没有捕获到更多详情，通常表示当前只保留了任务状态快照。</div>` : ""}
         </div>
       </div>
     `;
@@ -1995,20 +2098,66 @@ function _refreshTaskPersistence() {
   const STORAGE_TIER_LABELS = {
     none: "无",
     metadata: "元数据",
+    "metadata-full": "完整 metadata",
     indexeddb: "IndexedDB",
-    chat: "聊天存档",
+    opfs: "OPFS",
+    "chat-state": "聊天侧车",
+    "luker-chat-state": "Luker 侧车主存储",
+    shadow: "影子快照",
+  };
+  const HOST_PROFILE_LABELS = {
+    "generic-st": "通用 ST",
+    luker: "Luker",
+  };
+  const CACHE_MIRROR_LABELS = {
+    idle: "空闲",
+    none: "无",
+    queued: "排队中",
+    saved: "已更新",
+    error: "失败",
   };
 
   const loadStateLabel = LOAD_STATE_LABELS[ps.loadState] || ps.loadState || "未知";
-  const storageTierLabel = STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] || ps.acceptedStorageTier || ps.storageTier || "—";
+  const acceptedTierLabel =
+    STORAGE_TIER_LABELS[ps.acceptedStorageTier || ps.storageTier] ||
+    ps.acceptedStorageTier ||
+    ps.storageTier ||
+    "—";
+  const primaryTierLabel =
+    STORAGE_TIER_LABELS[ps.primaryStorageTier] || ps.primaryStorageTier || "—";
+  const cacheTierLabel =
+    STORAGE_TIER_LABELS[ps.cacheStorageTier] || ps.cacheStorageTier || "—";
+  const hostProfileLabel =
+    HOST_PROFILE_LABELS[ps.hostProfile] || ps.hostProfile || "未知";
+  const opfsLock = ps.opfsWriteLockState || null;
+  const opfsLockLabel = opfsLock
+    ? opfsLock.active
+      ? `活跃中 · queue ${Number(opfsLock.queueDepth || 0)}`
+      : `空闲 · queue ${Number(opfsLock.queueDepth || 0)}`
+    : "—";
+  const opfsCompactionState = String(ps.opfsCompactionState?.state || "").trim();
+  const opfsCompactionLabel = opfsCompactionState || "—";
 
   const kvs = [
     ["加载状态", loadStateLabel],
-    ["存储层级", storageTierLabel],
+    ["宿主档案", hostProfileLabel],
+    ["主 durable", primaryTierLabel],
+    ["当前 accepted", acceptedTierLabel],
+    ["accepted by", ps.acceptedBy || "—"],
+    ["本地缓存", cacheTierLabel],
+    ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
+    ["解析本地引擎", ps.resolvedLocalStore || "—"],
+    ["本地格式", `v${Number(ps.localStoreFormatVersion || 0) || 1}`],
+    ["本地迁移", ps.localStoreMigrationState || "—"],
     ["版本号", ps.revision ?? "—"],
-    ["提交标记", ps.commitMarker ? "存在" : "无"],
+    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
     ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
+    ["OPFS 写锁", opfsLockLabel],
+    ["OPFS WAL", `${Number(ps.opfsWalDepth || 0)} 条 / ${Number(ps.opfsPendingBytes || 0)} B`],
+    ["OPFS 压实", opfsCompactionLabel],
+    ["远端同步格式", `v${Number(ps.remoteSyncFormatVersion || 0) || 1}`],
   ];
 
   const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
@@ -2024,11 +2173,24 @@ function _refreshTaskPersistence() {
 
   const guidePairs = [
     ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
-    ["存储层级", "当前持久化使用的最高存储介质。IndexedDB 最快，聊天存档最稳。"],
+    ["宿主档案", "当前运行环境。Luker 会把聊天侧车当主 durable 存储，其它宿主仍以本地存储为主。"],
+    ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
+    ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
+    ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
+    ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
+    ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
+    ["解析本地引擎", "当前模式最终解析到的本地引擎，例如 auto 解析成 OPFS 或 IndexedDB。"],
+    ["本地格式", "当前本地存储格式版本。OPFS v2 代表分片基线 + WAL。"],
+    ["本地迁移", "当前本地存储迁移状态，例如 idle / promoting。"],
     ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
-    ["提交标记", "聊天元数据中的标记，指示是否有更高版本存在于本地 IndexedDB。"],
+    ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
+    ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
     ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
     ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
+    ["OPFS 写锁", "OPFS 本地存储的串行写状态。活跃表示当前有写任务排队或执行中。"],
+    ["OPFS WAL", "当前尚未被压实进基线分片的日志条目数和累计字节数。"],
+    ["OPFS 压实", "OPFS 基线压实状态。pending 表示达到阈值后等待后台压实。"],
+    ["远端同步格式", "当前自动同步使用的远端存储格式版本。v2 代表 manifest + chunk。"],
     ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
     ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
     ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
@@ -3982,6 +4144,89 @@ function _getActiveGraphRenderer() {
   return mobileGraphRenderer || graphRenderer;
 }
 
+function _resolveVisibleGraphRenderer() {
+  const visibleMode = _getVisibleGraphWorkspaceMode();
+  if (visibleMode.startsWith("mobile:")) {
+    return mobileGraphRenderer || graphRenderer;
+  }
+  if (visibleMode.startsWith("desktop:")) {
+    return graphRenderer || mobileGraphRenderer;
+  }
+  return _getActiveGraphRenderer();
+}
+
+function _formatGraphLayoutDiagnosticsText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return "LAYOUT: --";
+  }
+
+  const modeRaw = String(
+    diagnostics.mode || diagnostics.solver || "",
+  ).trim();
+  const modeMap = {
+    "js-main": "JS-main",
+    "js-worker": "JS-worker",
+    "rust-wasm-worker": "Rust-WASM",
+    "js-fallback": "JS-fallback",
+    skipped: "skipped",
+    "native-stale": "stale",
+    "native-failed-hard": "native-failed",
+  };
+  const modeLabel = modeMap[modeRaw] || modeRaw || "unknown";
+
+  const totalMs = Number(
+    diagnostics.totalMs ?? diagnostics.solveMs ?? diagnostics.workerSolveMs,
+  );
+  const nodeCount = Number(diagnostics.nodeCount);
+  const edgeCount = Number(diagnostics.edgeCount);
+
+  const parts = [`LAYOUT: ${modeLabel}`];
+  if (Number.isFinite(totalMs)) {
+    parts.push(`${Math.max(0, Math.round(totalMs))}ms`);
+  }
+  if (Number.isFinite(nodeCount) && Number.isFinite(edgeCount)) {
+    parts.push(
+      `${Math.max(0, Math.floor(nodeCount))}/${Math.max(
+        0,
+        Math.floor(edgeCount),
+      )}`,
+    );
+  }
+
+  return parts.join(" · ");
+}
+
+function _refreshGraphLayoutDiagnosticsUi() {
+  const desktopMeta = document.getElementById("bme-graph-layout-meta");
+  const mobileMeta = document.getElementById("bme-mobile-graph-layout-meta");
+  if (!desktopMeta && !mobileMeta) return;
+
+  const renderer = _resolveVisibleGraphRenderer();
+  const diagnostics = renderer?.getLastLayoutDiagnostics?.() || null;
+  const text = _formatGraphLayoutDiagnosticsText(diagnostics);
+  const title = diagnostics?.reason
+    ? `layout reason: ${String(diagnostics.reason).trim()}`
+    : "";
+
+  if (desktopMeta) {
+    desktopMeta.textContent = text;
+    if (title) {
+      desktopMeta.title = title;
+    } else {
+      desktopMeta.removeAttribute("title");
+    }
+  }
+
+  if (mobileMeta) {
+    mobileMeta.textContent = text;
+    if (title) {
+      mobileMeta.title = title;
+    } else {
+      mobileMeta.removeAttribute("title");
+    }
+  }
+}
+
 function _bindGraphControls() {
   document
     .getElementById("bme-graph-render-toggle")
@@ -5061,9 +5306,9 @@ function _bindActions() {
     clearGraph: "清空图谱",
     clearVectorCache: "清空向量缓存",
     clearBatchJournal: "清空提取历史",
-    deleteCurrentIdb: "清空当前 IDB",
-    deleteAllIdb: "清空全部 IDB",
-    deleteServerSyncFile: "清空服务端同步文件",
+    deleteCurrentIdb: "清空当前本地存储",
+    deleteAllIdb: "清空全部本地存储",
+    deleteServerSyncFile: "清空服务端同步数据",
     backupToCloud: "\u5907\u4efd\u5230\u4e91\u7aef",
     restoreFromCloud: "\u4ece\u4e91\u7aef\u83b7\u53d6\u5907\u4efd",
     manageServerBackups: "\u7ba1\u7406\u670d\u52a1\u5668\u5907\u4efd",
@@ -5347,6 +5592,15 @@ function _bindActions() {
     const toggle = e.target.closest(".bme-ai-monitor-entry__toggle");
     if (!toggle) return;
     const entry = toggle.closest(".bme-ai-monitor-entry");
+    if (entry) entry.classList.toggle("is-collapsed");
+  });
+
+  document.addEventListener("click", (e) => {
+    const toggle = e.target.closest(
+      ".bme-timeline-entry__toggle, .bme-timeline-entry__head",
+    );
+    if (!toggle) return;
+    const entry = toggle.closest(".bme-timeline-entry");
     if (entry) entry.classList.toggle("is-collapsed");
   });
 
@@ -5701,7 +5955,7 @@ function _refreshConfigTab() {
     settings.extractIncludeStoryTime !== false,
   );
   _setInputValue("bme-setting-recall-top-k", settings.recallTopK ?? 20);
-  _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 8);
+  _setInputValue("bme-setting-recall-max-nodes", settings.recallMaxNodes ?? 12);
   _setInputValue(
     "bme-setting-recall-diffusion-top-k",
     settings.recallDiffusionTopK ?? 100,
@@ -6178,7 +6432,7 @@ function _bindConfigControls() {
   bindNumber("bme-setting-recall-top-k", 20, 1, 100, (value) =>
     _patchSettings({ recallTopK: value }),
   );
-  bindNumber("bme-setting-recall-max-nodes", 8, 1, 50, (value) =>
+  bindNumber("bme-setting-recall-max-nodes", 12, 1, 50, (value) =>
     _patchSettings({ recallMaxNodes: value }),
   );
   bindNumber("bme-setting-recall-diffusion-top-k", 100, 1, 300, (value) =>
@@ -7290,6 +7544,8 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     panelDebug,
     runtimeDebug,
     recallInjection: runtimeDebug?.injections?.recall || null,
+    graphLayout: runtimeDebug?.graphLayout || null,
+    persistDelta: runtimeDebug?.graphPersistence?.persistDelta || null,
     messageTrace: runtimeDebug?.messageTrace || null,
     recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
     recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
@@ -7313,6 +7569,8 @@ function _refreshMessageTraceWorkspace(settings = _getSettings?.() || {}) {
 function _renderMessageTraceWorkspace(state) {
   const updatedCandidates = [
     state.recallInjection?.updatedAt,
+    state.graphLayout?.updatedAt,
+    state.persistDelta?.updatedAt,
     state.recallLlmRequest?.updatedAt,
     state.extractLlmRequest?.updatedAt,
     state.extractPromptBuild?.updatedAt,
@@ -7344,6 +7602,12 @@ function _renderMessageTraceWorkspace(state) {
         </div>
         <div class="bme-config-card">
           ${_renderAiMonitorCognitionCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderGraphLayoutTraceCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderPersistDeltaTraceCard(state)}
         </div>
       </div>
     </div>
@@ -7805,6 +8069,214 @@ function _renderAiMonitorCognitionCard(state) {
         <strong>${_escHtml(String(historyState.lastExtractedRegion || "—"))}</strong>
       </div>
     </div>
+  `;
+}
+
+function _renderGraphLayoutTraceCard(state) {
+  const layout = state.graphLayout || null;
+  if (!layout) {
+    return `
+      <div class="bme-config-card-title">图布局 / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有图布局诊断快照。打开图谱页并触发一次布局后，这里会显示实际执行路径、耗时和 native 模块来源。
+      </div>
+    `;
+  }
+
+  const mode = String(layout.mode || layout.solver || 'unknown').trim() || 'unknown';
+  const moduleSource = String(layout.moduleSource || '').trim() || '—';
+  const reason = String(layout.reason || '').trim() || '—';
+  const nativeLoadError = String(layout.nativeLoadError || '').trim();
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">图布局 / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图布局走了哪条路径，以及 native 模块是 wasm-pack 产物还是 fallback loader。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(layout.updatedAt || layout.at))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>布局路径</span>
+        <strong>${_escHtml(mode)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>节点 / 边</span>
+        <strong>${_escHtml(`${Number(layout.nodeCount || 0)} / ${Number(layout.edgeCount || 0)}`)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>总耗时</span>
+        <strong>${_escHtml(_formatDurationMs(layout.totalMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>求解耗时</span>
+        <strong>${_escHtml(_formatDurationMs(layout.solveMs || layout.workerSolveMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>迭代次数</span>
+        <strong>${_escHtml(String(layout.iterations || '—'))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native 来源</span>
+        <strong>${_escHtml(moduleSource)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>状态原因</span>
+        <strong>${_escHtml(reason)}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      'Native load error',
+      nativeLoadError,
+      '当前没有 native load error。',
+    )}
+  `;
+}
+
+function _formatPersistDeltaGateReasonText(reasons = []) {
+  const labels = {
+    "below-record-threshold": "记录数不足",
+    "below-structural-delta-threshold": "结构变化不足",
+    "below-serialized-chars-threshold": "序列化体积不足",
+  };
+  const normalized = Array.isArray(reasons)
+    ? reasons
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    : [];
+  if (!normalized.length) return "—";
+  return normalized.map((item) => labels[item] || item).join(" · ");
+}
+
+function _formatPersistDeltaGateText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  if (diagnostics.requestedNative !== true) return "未请求 native";
+  if (diagnostics.nativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.gateAllowed === true) return "通过";
+  return `已拦截 · ${_formatPersistDeltaGateReasonText(diagnostics.gateReasons)}`;
+}
+
+function _renderPersistDeltaTraceCard(state) {
+  const diagnostics = state.persistDelta || null;
+  if (!diagnostics) {
+    return `
+      <div class="bme-config-card-title">Persist Delta / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有 persist delta 诊断快照。等图谱完成一次 IndexedDB 写回后，这里会显示 gate、执行路径、耗时和 fallback 原因。
+      </div>
+    `;
+  }
+
+  const moduleSource = String(diagnostics.moduleSource || "").trim() || "—";
+  const fallbackReason = String(diagnostics.fallbackReason || "").trim();
+  const errorText = String(
+    diagnostics.moduleError || diagnostics.preloadError || diagnostics.nativeError || "",
+  ).trim();
+  const payloadCharsText = diagnostics.combinedSerializedChars
+    ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
+    : "—";
+  const cacheText = `${Number(diagnostics.serializationCacheHits || 0)}H / ${Number(
+    diagnostics.serializationCacheMisses || 0,
+  )}M`;
+  const preparedSetCacheText = `${Number(
+    diagnostics.preparedRecordSetCacheHits || 0,
+  )}H / ${Number(diagnostics.preparedRecordSetCacheMisses || 0)}M`;
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">Persist Delta / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图谱增量写回的 gate 判定、真实执行路径，以及 native preload / fallback 情况。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(diagnostics.updatedAt))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>执行路径</span>
+        <strong>${_escHtml(String(diagnostics.path || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Bridge 模式</span>
+        <strong>${_escHtml(
+          `${String(diagnostics.requestedBridgeMode || "none")} → ${String(diagnostics.preparedBridgeMode || "none")}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native Gate</span>
+        <strong>${_escHtml(_formatPersistDeltaGateText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>快照记录数</span>
+        <strong>${_escHtml(`${Number(diagnostics.beforeRecordCount || 0)} → ${Number(diagnostics.afterRecordCount || 0)}`)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>结构变化量</span>
+        <strong>${_escHtml(String(diagnostics.structuralDelta ?? "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Payload chars</span>
+        <strong>${_escHtml(payloadCharsText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>总耗时</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.totalMs || diagnostics.buildMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>构建耗时</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Prepare / Native</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Lookup / JS Diff</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate / Cache</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.hydrateMs)} / ${cacheText}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>PreparedSet Cache</span>
+        <strong>${_escHtml(preparedSetCacheText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Preload</span>
+        <strong>${_escHtml(String(diagnostics.preloadStatus || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native 来源</span>
+        <strong>${_escHtml(moduleSource)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>增量规模</span>
+        <strong>${_escHtml(
+          `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(diagnostics.upsertEdgeCount || 0)}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(diagnostics.deleteEdgeCount || 0)}DE`,
+        )}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "Fallback reason",
+      fallbackReason,
+      "这次没有发生 native fallback。",
+    )}
+    ${_renderMessageTraceTextBlock(
+      "Preload / native error",
+      errorText,
+      "当前没有 preload / native error。",
+    )}
   `;
 }
 
@@ -9016,6 +9488,8 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
     `;
   }
 
+  const persistDelta = graphPersistence.persistDelta || null;
+
   return `
     <div class="bme-config-card-head">
       <div>
@@ -9084,6 +9558,22 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
                 .join(" · ")
             : "—",
         )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Delta 路径</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(persistDelta?.path || "—"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Native Gate</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatPersistDeltaGateText(persistDelta))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Delta 耗时</span>
+        <span class="bme-debug-kv-value">${_escHtml(_formatDurationMs(persistDelta?.totalMs || persistDelta?.buildMs))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Persist Native 来源</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(persistDelta?.moduleSource || "—"))}</span>
       </div>
     </div>
     ${_renderDebugDetails("图谱持久化详情", graphPersistence)}
@@ -10871,10 +11361,24 @@ function _getGraphPersistenceSnapshot() {
     shadowSnapshotUsed: false,
     pendingPersist: false,
     lastAcceptedRevision: 0,
+    hostProfile: "generic-st",
+    primaryStorageTier: "indexeddb",
+    cacheStorageTier: "none",
+    cacheMirrorState: "idle",
+    acceptedBy: "none",
+    persistDiagnosticTier: "none",
     persistMismatchReason: "",
     commitMarker: null,
     chatId: "",
     storageMode: "indexeddb",
+    resolvedLocalStore: "indexeddb:indexeddb",
+    localStoreFormatVersion: 1,
+    localStoreMigrationState: "idle",
+    opfsWriteLockState: null,
+    opfsWalDepth: 0,
+    opfsPendingBytes: 0,
+    opfsCompactionState: null,
+    remoteSyncFormatVersion: 1,
     dbReady: false,
     syncState: "idle",
     syncDirty: false,
@@ -10887,6 +11391,7 @@ function _getGraphPersistenceSnapshot() {
     lastBackupRollbackAt: 0,
     lastBackupFilename: "",
     lastSyncError: "",
+    persistDelta: null,
   };
 }
 
@@ -10920,7 +11425,7 @@ function _formatPersistMismatchReason(reason = "") {
   if (!normalized) return "—";
   switch (normalized) {
     case "persist-mismatch:indexeddb-behind-commit-marker":
-      return "本地 IndexedDB 缓存版本落后于当前聊天已确认版本";
+      return "本地图谱存储版本落后于当前聊天已确认版本";
     default:
       return normalized;
   }
@@ -10930,7 +11435,7 @@ function _formatPersistMismatchHelp(reason = "") {
   const normalized = String(reason || "").trim();
   switch (normalized) {
     case "persist-mismatch:indexeddb-behind-commit-marker":
-      return "当前聊天记录显示图谱已经确认到更高版本，但本地 IndexedDB 里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
+      return "当前聊天记录显示图谱已经确认到更高版本，但本地 OPFS / IndexedDB 存储里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
     default:
       return `检测到持久化一致性异常：${_formatPersistMismatchReason(normalized)}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
   }
@@ -11051,7 +11556,7 @@ function _getGraphLoadLabel(loadState = "") {
     case "empty-confirmed":
       return "当前聊天还没有图谱";
     case "blocked":
-      return "当前聊天图谱未能完成 IndexedDB 确认，请稍后重试";
+      return "当前聊天图谱未能完成正式持久化确认，请稍后重试";
     case "loaded":
       return "聊天图谱已加载";
     case "no-chat":
@@ -11182,6 +11687,8 @@ function _refreshGraphAvailabilityState() {
   if (mobileOverlayText) {
     mobileOverlayText.textContent = overlayLabel;
   }
+
+  _refreshGraphLayoutDiagnosticsUi();
 }
 
 function _formatCloudTimeLabel(timestamp) {
@@ -11312,7 +11819,7 @@ function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
   if (helpText) {
     helpText.textContent =
       mode === "manual"
-        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
+        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 OPFS / IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
         : "\u81ea\u52a8\u50a8\u5b58\u4f1a\u7ee7\u7eed\u6cbf\u7528\u5f53\u524d\u955c\u50cf\u540c\u6b65\u903b\u8f91\u4e0e\u95f4\u9694\uff1b\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730\u5199\u5165\uff0c\u9700\u8981\u4f60\u4e3b\u52a8\u5907\u4efd\u548c\u6062\u590d\u3002";
   }
   _renderCloudStorageModeStatus(settings, _getGraphPersistenceSnapshot());

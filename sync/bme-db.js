@@ -15,6 +15,19 @@ export const BME_DB_SCHEMA_VERSION = 1;
 export const BME_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const BME_LEGACY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_RECORDS = 20000;
+const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_STRUCTURAL_DELTA = 600;
+const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS = 4000000;
+const DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE = "json";
+const SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES = new Set(["json", "hash"]);
+const PERSIST_RECORD_SERIALIZATION_CACHE_LIMIT = 50000;
+
+const persistRecordSerializationCacheByObject = new WeakMap();
+const persistRecordSerializationCacheByToken = new Map();
+let persistRecordSerializationCacheEpoch = 1;
+const persistPreparedRecordSetCacheByArray = new WeakMap();
+let persistPreparedRecordSetCacheEpoch = 1;
+
 export const BME_RUNTIME_HISTORY_META_KEY = "runtimeHistoryState";
 export const BME_RUNTIME_VECTOR_META_KEY = "runtimeVectorIndexState";
 export const BME_RUNTIME_BATCH_JOURNAL_META_KEY = "runtimeBatchJournal";
@@ -173,6 +186,161 @@ function sanitizeSnapshot(snapshot = {}) {
   };
 }
 
+function normalizePersistSnapshotView(snapshot = {}) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return {
+      meta: {},
+      state: {},
+      nodes: [],
+      edges: [],
+      tombstones: [],
+    };
+  }
+
+  return {
+    meta:
+      snapshot.meta &&
+      typeof snapshot.meta === "object" &&
+      !Array.isArray(snapshot.meta)
+        ? snapshot.meta
+        : {},
+    state:
+      snapshot.state &&
+      typeof snapshot.state === "object" &&
+      !Array.isArray(snapshot.state)
+        ? snapshot.state
+        : {},
+    nodes: toArray(snapshot.nodes),
+    edges: toArray(snapshot.edges),
+    tombstones: toArray(snapshot.tombstones),
+  };
+}
+
+function normalizePersistNativeDeltaThreshold(value, fallbackValue) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallbackValue;
+  return Math.max(0, Math.floor(parsed));
+}
+
+function countPersistSnapshotRecords(snapshot = {}) {
+  return (
+    toArray(snapshot?.nodes).length +
+    toArray(snapshot?.edges).length +
+    toArray(snapshot?.tombstones).length
+  );
+}
+
+function countPersistSnapshotStructuralDelta(beforeSnapshot = {}, afterSnapshot = {}) {
+  return (
+    Math.abs(toArray(afterSnapshot?.nodes).length - toArray(beforeSnapshot?.nodes).length) +
+    Math.abs(toArray(afterSnapshot?.edges).length - toArray(beforeSnapshot?.edges).length) +
+    Math.abs(
+      toArray(afterSnapshot?.tombstones).length -
+        toArray(beforeSnapshot?.tombstones).length,
+    )
+  );
+}
+
+export function resolvePersistNativeDeltaGateOptions(options = {}) {
+  return {
+    minSnapshotRecords: normalizePersistNativeDeltaThreshold(
+      options?.persistNativeDeltaThresholdRecords ?? options?.minSnapshotRecords,
+      DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_RECORDS,
+    ),
+    minStructuralDelta: normalizePersistNativeDeltaThreshold(
+      options?.persistNativeDeltaThresholdStructuralDelta ??
+        options?.minStructuralDelta,
+      DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_STRUCTURAL_DELTA,
+    ),
+    minCombinedSerializedChars: normalizePersistNativeDeltaThreshold(
+      options?.persistNativeDeltaThresholdSerializedChars ??
+        options?.minCombinedSerializedChars,
+      DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS,
+    ),
+  };
+}
+
+export function resolvePersistNativeDeltaBridgeMode(options = {}) {
+  const rawMode = String(
+    options?.persistNativeDeltaBridgeMode ??
+      options?.nativeDeltaBridgeMode ??
+      DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE,
+  )
+    .trim()
+    .toLowerCase();
+  if (!rawMode) return DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE;
+  return SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES.has(rawMode)
+    ? rawMode
+    : DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE;
+}
+
+export function evaluatePersistNativeDeltaGate(
+  beforeSnapshot,
+  afterSnapshot,
+  options = {},
+) {
+  const gate = resolvePersistNativeDeltaGateOptions(options);
+  const beforeRecordCount = countPersistSnapshotRecords(beforeSnapshot);
+  const afterRecordCount = countPersistSnapshotRecords(afterSnapshot);
+  const maxSnapshotRecords = Math.max(beforeRecordCount, afterRecordCount);
+  const measuredCombinedSerializedChars = Number.isFinite(
+    Number(options?.measuredCombinedSerializedChars ?? options?.combinedSerializedChars),
+  )
+    ? Math.max(
+        0,
+        Math.floor(
+          Number(
+            options?.measuredCombinedSerializedChars ??
+              options?.combinedSerializedChars,
+          ),
+        ),
+      )
+    : null;
+  const structuralDelta = countPersistSnapshotStructuralDelta(
+    beforeSnapshot,
+    afterSnapshot,
+  );
+  const reasons = [];
+
+  if (
+    gate.minSnapshotRecords > 0 &&
+    maxSnapshotRecords < gate.minSnapshotRecords
+  ) {
+    reasons.push("below-record-threshold");
+  }
+  if (gate.minStructuralDelta > 0 && structuralDelta < gate.minStructuralDelta) {
+    reasons.push("below-structural-delta-threshold");
+  }
+  if (
+    gate.minCombinedSerializedChars > 0 &&
+    measuredCombinedSerializedChars != null &&
+    measuredCombinedSerializedChars < gate.minCombinedSerializedChars
+  ) {
+    reasons.push("below-serialized-chars-threshold");
+  }
+
+  return {
+    allowed: reasons.length === 0,
+    beforeRecordCount,
+    afterRecordCount,
+    maxSnapshotRecords,
+    combinedSerializedChars: measuredCombinedSerializedChars,
+    structuralDelta,
+    minSnapshotRecords: gate.minSnapshotRecords,
+    minStructuralDelta: gate.minStructuralDelta,
+    minCombinedSerializedChars: gate.minCombinedSerializedChars,
+    reasons,
+  };
+}
+
+export function shouldUseNativePersistDeltaForSnapshots(
+  beforeSnapshot,
+  afterSnapshot,
+  options = {},
+) {
+  return evaluatePersistNativeDeltaGate(beforeSnapshot, afterSnapshot, options).allowed;
+}
+
 function normalizeStateSnapshot(snapshot = {}) {
   const state =
     snapshot?.state &&
@@ -200,7 +368,7 @@ function normalizeNodeUpdatedAt(node = {}, fallbackNowMs = Date.now()) {
 
 function normalizeEdgeUpdatedAt(edge = {}, fallbackNowMs = Date.now()) {
   return normalizeTimestamp(
-    edge.updatedAt ?? edge.validAt ?? edge.createdTime,
+    edge.updatedAt ?? edge.invalidAt ?? edge.expiredAt ?? edge.validAt ?? edge.createdTime,
     fallbackNowMs,
   );
 }
@@ -249,27 +417,187 @@ function deriveEdgeSourceFloor(edge = {}, nodeSourceFloorById = new Map()) {
   return null;
 }
 
+function clonePersistGraphInputRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  return {
+    ...record,
+  };
+}
+
+function buildPersistSnapshotGraphInput(graph = null, chatId = "") {
+  const sourceGraph =
+    graph && typeof graph === "object" && !Array.isArray(graph)
+      ? graph
+      : createEmptyGraph();
+  const graphInput = {
+    ...sourceGraph,
+    historyState:
+      sourceGraph.historyState &&
+      typeof sourceGraph.historyState === "object" &&
+      !Array.isArray(sourceGraph.historyState)
+        ? { ...sourceGraph.historyState }
+        : {},
+    vectorIndexState:
+      sourceGraph.vectorIndexState &&
+      typeof sourceGraph.vectorIndexState === "object" &&
+      !Array.isArray(sourceGraph.vectorIndexState)
+        ? { ...sourceGraph.vectorIndexState }
+        : {},
+    nodes: toArray(sourceGraph.nodes)
+      .map((node) => clonePersistGraphInputRecord(node))
+      .filter(Boolean),
+    edges: toArray(sourceGraph.edges)
+      .map((edge) => clonePersistGraphInputRecord(edge))
+      .filter(Boolean),
+    batchJournal: Array.isArray(sourceGraph.batchJournal)
+      ? [...sourceGraph.batchJournal]
+      : sourceGraph.batchJournal,
+    maintenanceJournal: Array.isArray(sourceGraph.maintenanceJournal)
+      ? [...sourceGraph.maintenanceJournal]
+      : sourceGraph.maintenanceJournal,
+  };
+  if (chatId) {
+    graphInput.historyState.chatId = chatId;
+  }
+  return graphInput;
+}
+
+function buildPersistSnapshotRecordByIdMap(records = []) {
+  const map = new Map();
+  for (const record of toArray(records)) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = normalizeRecordId(record.id);
+    if (!id || map.has(id)) continue;
+    map.set(id, record);
+  }
+  return map;
+}
+
+function clonePersistSnapshotRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  try {
+    return JSON.parse(JSON.stringify(record));
+  } catch {
+    if (typeof globalThis.structuredClone === "function") {
+      try {
+        return globalThis.structuredClone(record);
+      } catch {
+        // no-op
+      }
+    }
+    return null;
+  }
+}
+
+function normalizeComparablePersistNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasReusablePersistNodeRecord(baseRecord, runtimeRecord, normalized = {}) {
+  if (!baseRecord || !runtimeRecord) return false;
+  const normalizedType = normalizeRecordId(normalized.type ?? runtimeRecord.type);
+  if (normalizeRecordId(baseRecord.type) !== normalizedType) return false;
+  if (Boolean(baseRecord.archived) !== Boolean(runtimeRecord.archived)) return false;
+  if (
+    normalizeComparablePersistNumber(baseRecord.updatedAt) !==
+    normalizeComparablePersistNumber(normalized.updatedAt)
+  ) {
+    return false;
+  }
+  if (
+    normalizeComparablePersistNumber(baseRecord.seq) !==
+    normalizeComparablePersistNumber(runtimeRecord.seq)
+  ) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.parentId) !== normalizeRecordId(runtimeRecord.parentId)) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.prevId) !== normalizeRecordId(runtimeRecord.prevId)) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.nextId) !== normalizeRecordId(runtimeRecord.nextId)) {
+    return false;
+  }
+  return true;
+}
+
+function hasReusablePersistEdgeRecord(baseRecord, runtimeRecord, normalized = {}) {
+  if (!baseRecord || !runtimeRecord) return false;
+  if (normalizeRecordId(baseRecord.fromId) !== normalizeRecordId(normalized.fromId)) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.toId) !== normalizeRecordId(normalized.toId)) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.relation) !== normalizeRecordId(runtimeRecord.relation)) {
+    return false;
+  }
+  if (
+    normalizeComparablePersistNumber(baseRecord.updatedAt) !==
+    normalizeComparablePersistNumber(normalized.updatedAt)
+  ) {
+    return false;
+  }
+  if (
+    normalizeComparablePersistNumber(baseRecord.invalidAt) !==
+    normalizeComparablePersistNumber(runtimeRecord.invalidAt)
+  ) {
+    return false;
+  }
+  if (
+    normalizeComparablePersistNumber(baseRecord.expiredAt) !==
+    normalizeComparablePersistNumber(runtimeRecord.expiredAt)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function hasReusablePersistTombstoneRecord(baseRecord, normalized = {}) {
+  if (!baseRecord) return false;
+  if (normalizeRecordId(baseRecord.kind) !== normalizeRecordId(normalized.kind)) {
+    return false;
+  }
+  if (normalizeRecordId(baseRecord.targetId) !== normalizeRecordId(normalized.targetId)) {
+    return false;
+  }
+  if (
+    normalizeRecordId(baseRecord.sourceDeviceId) !==
+    normalizeRecordId(normalized.sourceDeviceId)
+  ) {
+    return false;
+  }
+  if (
+    normalizeComparablePersistNumber(baseRecord.deletedAt) !==
+    normalizeComparablePersistNumber(normalized.deletedAt)
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function buildSnapshotFromGraph(graph, options = {}) {
-  const baseSnapshot = sanitizeSnapshot(options.baseSnapshot || {});
+  const baseSnapshotInput =
+    options?.baseSnapshot &&
+    typeof options.baseSnapshot === "object" &&
+    !Array.isArray(options.baseSnapshot)
+      ? options.baseSnapshot
+      : {};
+  const baseSnapshot = sanitizeSnapshot(baseSnapshotInput);
+  const baseSnapshotView = normalizePersistSnapshotView(baseSnapshotInput);
   const nowMs = normalizeTimestamp(options.nowMs, Date.now());
   const chatId =
     normalizeChatId(options.chatId) ||
     normalizeChatId(graph?.historyState?.chatId) ||
     normalizeChatId(baseSnapshot.meta?.chatId);
 
-  const graphInput = toPlainData(graph, createEmptyGraph());
-  if (!graphInput.historyState || typeof graphInput.historyState !== "object") {
-    graphInput.historyState = {};
-  }
-  if (
-    !graphInput.vectorIndexState ||
-    typeof graphInput.vectorIndexState !== "object"
-  ) {
-    graphInput.vectorIndexState = {};
-  }
-  if (chatId) {
-    graphInput.historyState.chatId = chatId;
-  }
+  const graphInput = buildPersistSnapshotGraphInput(graph, chatId);
   const legacyActiveOwnerKey = String(
     graphInput?.knowledgeState?.activeOwnerKey || "",
   ).trim();
@@ -283,49 +611,102 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     chatId || graphInput.historyState.chatId || "",
   );
   const runtimeGraph = normalizeGraphRuntimeState(graphInput, chatId);
+  const baseNodeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.nodes);
+  const baseEdgeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.edges);
+  const baseTombstoneById = buildPersistSnapshotRecordByIdMap(
+    baseSnapshotView.tombstones,
+  );
 
   const nodes = toArray(runtimeGraph?.nodes)
     .map((node) => {
-      if (!node || typeof node !== "object" || Array.isArray(node)) return null;
+      if (!node || typeof node !== "object" || Array.isArray(node)) {
+        return null;
+      }
       const id = normalizeRecordId(node.id);
       if (!id) return null;
-      return {
-        ...node,
-        id,
-        updatedAt: normalizeNodeUpdatedAt(node, nowMs),
-      };
+      const normalizedUpdatedAt = normalizeNodeUpdatedAt(node, nowMs);
+      const baseNode = baseNodeById.get(id);
+      if (
+        hasReusablePersistNodeRecord(baseNode, node, {
+          type: node.type,
+          updatedAt: normalizedUpdatedAt,
+        })
+      ) {
+        return baseNode;
+      }
+      const plainNode = clonePersistSnapshotRecord(node);
+      if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
+        return null;
+      }
+      plainNode.id = id;
+      plainNode.updatedAt = normalizedUpdatedAt;
+      return plainNode;
     })
     .filter(Boolean);
 
   const edges = toArray(runtimeGraph?.edges)
     .map((edge) => {
-      if (!edge || typeof edge !== "object" || Array.isArray(edge)) return null;
+      if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
+        return null;
+      }
       const id = normalizeRecordId(edge.id);
       if (!id) return null;
-      return {
-        ...edge,
-        id,
-        fromId: normalizeRecordId(edge.fromId),
-        toId: normalizeRecordId(edge.toId),
-        updatedAt: normalizeEdgeUpdatedAt(edge, nowMs),
-      };
+      const normalizedFromId = normalizeRecordId(edge.fromId);
+      const normalizedToId = normalizeRecordId(edge.toId);
+      const normalizedUpdatedAt = normalizeEdgeUpdatedAt(edge, nowMs);
+      const baseEdge = baseEdgeById.get(id);
+      if (
+        hasReusablePersistEdgeRecord(baseEdge, edge, {
+          fromId: normalizedFromId,
+          toId: normalizedToId,
+          updatedAt: normalizedUpdatedAt,
+        })
+      ) {
+        return baseEdge;
+      }
+      const plainEdge = clonePersistSnapshotRecord(edge);
+      if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
+        return null;
+      }
+      plainEdge.id = id;
+      plainEdge.fromId = normalizedFromId;
+      plainEdge.toId = normalizedToId;
+      plainEdge.updatedAt = normalizedUpdatedAt;
+      return plainEdge;
     })
     .filter(Boolean);
 
-  const tombstones = toArray(options.tombstones ?? baseSnapshot.tombstones)
+  const tombstones = toArray(options.tombstones ?? baseSnapshotView.tombstones)
     .map((record) => {
       if (!record || typeof record !== "object" || Array.isArray(record))
         return null;
       const id = normalizeRecordId(record.id);
       if (!id) return null;
-      return {
-        ...record,
-        id,
-        kind: normalizeRecordId(record.kind),
-        targetId: normalizeRecordId(record.targetId),
-        sourceDeviceId: normalizeRecordId(record.sourceDeviceId),
-        deletedAt: normalizeTimestamp(record.deletedAt, nowMs),
-      };
+      const normalizedKind = normalizeRecordId(record.kind);
+      const normalizedTargetId = normalizeRecordId(record.targetId);
+      const normalizedSourceDeviceId = normalizeRecordId(record.sourceDeviceId);
+      const normalizedDeletedAt = normalizeTimestamp(record.deletedAt, nowMs);
+      const baseTombstone = baseTombstoneById.get(id);
+      if (
+        hasReusablePersistTombstoneRecord(baseTombstone, {
+          kind: normalizedKind,
+          targetId: normalizedTargetId,
+          sourceDeviceId: normalizedSourceDeviceId,
+          deletedAt: normalizedDeletedAt,
+        })
+      ) {
+        return baseTombstone;
+      }
+      const plainRecord = clonePersistSnapshotRecord(record);
+      if (!plainRecord || typeof plainRecord !== "object" || Array.isArray(plainRecord)) {
+        return null;
+      }
+      plainRecord.id = id;
+      plainRecord.kind = normalizedKind;
+      plainRecord.targetId = normalizedTargetId;
+      plainRecord.sourceDeviceId = normalizedSourceDeviceId;
+      plainRecord.deletedAt = normalizedDeletedAt;
+      return plainRecord;
     })
     .filter(Boolean);
 
@@ -441,28 +822,553 @@ export function buildSnapshotFromGraph(graph, options = {}) {
   };
 }
 
-function buildSnapshotRecordIndex(records = []) {
-  const map = new Map();
-  for (const record of toArray(records)) {
-    const id = normalizeRecordId(record?.id);
-    if (!id) continue;
-    map.set(id, JSON.stringify(record));
+function normalizeSnapshotMetaState(snapshot = {}) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return {
+      meta: {},
+      state: {},
+    };
   }
+
+  return {
+    meta:
+      snapshot.meta &&
+      typeof snapshot.meta === "object" &&
+      !Array.isArray(snapshot.meta)
+        ? snapshot.meta
+        : {},
+    state:
+      snapshot.state &&
+      typeof snapshot.state === "object" &&
+      !Array.isArray(snapshot.state)
+        ? snapshot.state
+        : {},
+  };
+}
+
+function hashPersistSerializedRecord32(value = "") {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function resolvePersistRecordSerializationVersion(record = {}) {
+  const candidates = [
+    record?.updatedAt,
+    record?.deletedAt,
+    record?.invalidAt,
+    record?.expiredAt,
+    record?.validAt,
+    record?.lastModified,
+    record?.createdTime,
+    record?.lastAccessTime,
+  ];
+  for (const value of candidates) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.floor(parsed);
+  }
+  return null;
+}
+
+function resolvePersistRecordSerializationCacheToken(record = {}) {
+  const id = normalizeRecordId(record?.id);
+  const version = resolvePersistRecordSerializationVersion(record);
+  if (!id || version == null) return "";
+  return [
+    id,
+    version,
+    normalizeRecordId(record?.kind),
+    normalizeRecordId(record?.targetId),
+    normalizeRecordId(record?.fromId),
+    normalizeRecordId(record?.toId),
+    normalizeRecordId(record?.type),
+    normalizeRecordId(record?.relation),
+    record?.archived === true ? "1" : "0",
+  ].join("|");
+}
+
+function recordPersistSerializationCacheStat(stats = null, key = "") {
+  if (!stats || typeof stats !== "object" || !key) return;
+  stats[key] = Number(stats[key] || 0) + 1;
+}
+
+function recordPersistPreparedRecordSetCacheStat(stats = null, key = "") {
+  if (!stats || typeof stats !== "object" || !key) return;
+  stats[key] = Number(stats[key] || 0) + 1;
+}
+
+function resolvePreparedRecordSetCacheKey(options = {}) {
+  return [
+    options?.includeSerializedList === true ? "s1" : "s0",
+    options?.includeHashList === true ? "h1" : "h0",
+    options?.includeSerializedLookup !== false ? "l1" : "l0",
+    options?.includeSerializedCharCount === true ? "c1" : "c0",
+    options?.includeTargetKeys === true ? "t1" : "t0",
+  ].join("|");
+}
+
+function touchPersistRecordSerializationTokenCache(token, entry) {
+  if (!token || !entry) return;
+  if (persistRecordSerializationCacheByToken.has(token)) {
+    persistRecordSerializationCacheByToken.delete(token);
+  }
+  persistRecordSerializationCacheByToken.set(token, entry);
+  while (
+    persistRecordSerializationCacheByToken.size >
+    PERSIST_RECORD_SERIALIZATION_CACHE_LIMIT
+  ) {
+    const oldestKey = persistRecordSerializationCacheByToken.keys().next().value;
+    if (!oldestKey) break;
+    persistRecordSerializationCacheByToken.delete(oldestKey);
+  }
+}
+
+function ensurePersistRecordSerializationHash(entry = null) {
+  if (!entry || typeof entry !== "object") return 0;
+  if (!Number.isFinite(Number(entry.hash))) {
+    entry.hash = hashPersistSerializedRecord32(String(entry.json || ""));
+  }
+  return Number(entry.hash) >>> 0;
+}
+
+function getPersistRecordSerialization(
+  record,
+  { includeHash = false, cacheStats = null } = {},
+) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    const emptyEntry = { token: "", json: "null", length: 4, hash: 1996966820 };
+    if (includeHash) emptyEntry.hash = hashPersistSerializedRecord32(emptyEntry.json);
+    return emptyEntry;
+  }
+
+  const token = resolvePersistRecordSerializationCacheToken(record);
+  const cachedByObject = token
+    ? persistRecordSerializationCacheByObject.get(record)
+    : null;
+  if (
+    cachedByObject &&
+    cachedByObject.token === token &&
+    cachedByObject.epoch === persistRecordSerializationCacheEpoch
+  ) {
+    recordPersistSerializationCacheStat(cacheStats, "objectHitCount");
+    if (includeHash) ensurePersistRecordSerializationHash(cachedByObject);
+    return cachedByObject;
+  }
+
+  const cachedByToken = token ? persistRecordSerializationCacheByToken.get(token) : null;
+  if (cachedByToken) {
+    persistRecordSerializationCacheByObject.set(record, cachedByToken);
+    touchPersistRecordSerializationTokenCache(token, cachedByToken);
+    recordPersistSerializationCacheStat(cacheStats, "tokenHitCount");
+    if (includeHash) ensurePersistRecordSerializationHash(cachedByToken);
+    return cachedByToken;
+  }
+
+  const json = JSON.stringify(record);
+  const entry = {
+    epoch: persistRecordSerializationCacheEpoch,
+    token,
+    json,
+    length: json.length,
+    hash: includeHash ? hashPersistSerializedRecord32(json) : null,
+  };
+  if (token) {
+    persistRecordSerializationCacheByObject.set(record, entry);
+    touchPersistRecordSerializationTokenCache(token, entry);
+  }
+  recordPersistSerializationCacheStat(cacheStats, "missCount");
+  return entry;
+}
+
+function sumPersistSerializationCacheHits(stats = null) {
+  if (!stats || typeof stats !== "object") return 0;
+  return Number(stats.objectHitCount || 0) + Number(stats.tokenHitCount || 0);
+}
+
+export function resetPersistRecordSerializationCaches() {
+  persistRecordSerializationCacheEpoch += 1;
+  persistRecordSerializationCacheByToken.clear();
+  persistPreparedRecordSetCacheEpoch += 1;
+}
+
+function buildPreparedRecordSet(
+  records = [],
+  {
+    retainRecords = false,
+    includeTargetKeys = false,
+    includeSerializedList = false,
+    includeHashList = false,
+    includeSerializedLookup = true,
+    includeSerializedCharCount = false,
+    serializationCacheStats = null,
+    preparedRecordSetCacheStats = null,
+    usePreparedRecordSetCache = true,
+  } = {},
+) {
+  const sourceRecords = toArray(records);
+  const cacheKey =
+    usePreparedRecordSetCache !== false &&
+    Array.isArray(records) &&
+    sourceRecords === records
+      ? resolvePreparedRecordSetCacheKey({
+          includeSerializedList,
+          includeHashList,
+          includeSerializedLookup,
+          includeSerializedCharCount,
+          includeTargetKeys,
+        })
+      : "";
+  if (cacheKey) {
+    const cachedEntry = persistPreparedRecordSetCacheByArray.get(records);
+    const cachedRecordSet =
+      cachedEntry &&
+      cachedEntry.epoch === persistPreparedRecordSetCacheEpoch &&
+      cachedEntry.values instanceof Map
+        ? cachedEntry.values.get(cacheKey)
+        : null;
+    if (cachedRecordSet) {
+      recordPersistPreparedRecordSetCacheStat(preparedRecordSetCacheStats, "hitCount");
+      return cachedRecordSet;
+    }
+    recordPersistPreparedRecordSetCacheStat(preparedRecordSetCacheStats, "missCount");
+  }
+  const ids = [];
+  const serialized = includeSerializedList ? [] : null;
+  const hashes = includeHashList ? [] : null;
+  const serializedById = includeSerializedLookup ? new Map() : null;
+  const recordById = null;
+  const targetKeyById = null;
+  const targetKeys = includeTargetKeys ? [] : null;
+  let serializedCharCount = 0;
+
+  for (const record of sourceRecords) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = normalizeRecordId(record.id);
+    if (!id) continue;
+    const serializedEntry = getPersistRecordSerialization(record, {
+      includeHash: includeHashList,
+      cacheStats: serializationCacheStats,
+    });
+    const json = serializedEntry.json;
+    ids.push(id);
+    if (serialized) serialized.push(json);
+    if (hashes) hashes.push(ensurePersistRecordSerializationHash(serializedEntry));
+    if (serializedById) serializedById.set(id, json);
+    if (includeSerializedCharCount) {
+      serializedCharCount += serializedEntry.length;
+    }
+    if (targetKeys) {
+      const kind = normalizeRecordId(record.kind);
+      const targetId = normalizeRecordId(record.targetId);
+      targetKeys.push(kind && targetId ? `${kind}:${targetId}` : "");
+    }
+  }
+
+  const preparedRecordSet = {
+    ids,
+    serialized,
+    hashes,
+    serializedById,
+    sourceRecords,
+    recordById,
+    targetKeyById,
+    targetKeys,
+    serializedCharCount,
+  };
+  if (cacheKey) {
+    const cachedEntry = persistPreparedRecordSetCacheByArray.get(records);
+    const values =
+      cachedEntry &&
+      cachedEntry.epoch === persistPreparedRecordSetCacheEpoch &&
+      cachedEntry.values instanceof Map
+        ? cachedEntry.values
+        : new Map();
+    values.set(cacheKey, preparedRecordSet);
+    persistPreparedRecordSetCacheByArray.set(records, {
+      epoch: persistPreparedRecordSetCacheEpoch,
+      values,
+    });
+  }
+  return preparedRecordSet;
+}
+
+function ensurePreparedSerializedLookup(recordSet = null, cacheStats = null) {
+  if (!recordSet || typeof recordSet !== "object") {
+    return new Map();
+  }
+  if (recordSet.serializedById instanceof Map) {
+    return recordSet.serializedById;
+  }
+
+  const map = new Map();
+  for (const record of toArray(recordSet.sourceRecords)) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = normalizeRecordId(record.id);
+    if (!id) continue;
+    map.set(
+      id,
+      getPersistRecordSerialization(record, {
+        cacheStats,
+      }).json,
+    );
+  }
+  recordSet.serializedById = map;
   return map;
 }
 
-function buildSnapshotRecordArrayIndex(records = []) {
-  const map = new Map();
-  for (const record of toArray(records)) {
-    const id = normalizeRecordId(record?.id);
-    if (!id) continue;
-    map.set(id, toPlainData(record, record));
+function ensurePreparedRecordLookup(recordSet = null) {
+  if (!recordSet || typeof recordSet !== "object") {
+    return new Map();
   }
+  if (recordSet.recordById instanceof Map) {
+    return recordSet.recordById;
+  }
+
+  const map = new Map();
+  for (const record of toArray(recordSet.sourceRecords)) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = normalizeRecordId(record.id);
+    if (!id) continue;
+    map.set(id, record);
+  }
+  recordSet.recordById = map;
   return map;
+}
+
+function ensurePreparedTargetKeyLookup(recordSet = null) {
+  if (!recordSet || typeof recordSet !== "object") {
+    return new Map();
+  }
+  if (recordSet.targetKeyById instanceof Map) {
+    return recordSet.targetKeyById;
+  }
+
+  const map = new Map();
+  if (
+    Array.isArray(recordSet.ids) &&
+    Array.isArray(recordSet.targetKeys) &&
+    recordSet.ids.length === recordSet.targetKeys.length
+  ) {
+    for (let index = 0; index < recordSet.ids.length; index++) {
+      map.set(recordSet.ids[index], String(recordSet.targetKeys[index] || ""));
+    }
+  } else {
+    for (const record of toArray(recordSet.sourceRecords)) {
+      if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+      const id = normalizeRecordId(record.id);
+      if (!id) continue;
+      const kind = normalizeRecordId(record.kind);
+      const targetId = normalizeRecordId(record.targetId);
+      map.set(id, kind && targetId ? `${kind}:${targetId}` : "");
+    }
+  }
+  recordSet.targetKeyById = map;
+  return map;
+}
+
+function buildPreparedPersistDeltaContext(
+  beforeSnapshot,
+  afterSnapshot,
+  nowMs,
+  options = {},
+) {
+  const compactPayloadModeRaw = String(options.compactPayloadMode || "none")
+    .trim()
+    .toLowerCase();
+  const compactPayloadMode =
+    compactPayloadModeRaw === "hash"
+      ? "hash"
+      : compactPayloadModeRaw === "json"
+        ? "json"
+        : "none";
+  const includeCompactSerializedList = compactPayloadMode === "json";
+  const includeCompactHashList = compactPayloadMode === "hash";
+  const includeSerializedLookup = options.includeSerializedLookup !== false;
+  const includeSerializedCharCount = options.includeSerializedCharCount === true;
+  const serializationCacheStats =
+    options?.serializationCacheStats &&
+    typeof options.serializationCacheStats === "object" &&
+    !Array.isArray(options.serializationCacheStats)
+      ? options.serializationCacheStats
+      : null;
+  const preparedRecordSetCacheStats =
+    options?.preparedRecordSetCacheStats &&
+    typeof options.preparedRecordSetCacheStats === "object" &&
+    !Array.isArray(options.preparedRecordSetCacheStats)
+      ? options.preparedRecordSetCacheStats
+      : null;
+  const usePreparedRecordSetCache = options?.usePreparedRecordSetCache !== false;
+  const beforeNodes = buildPreparedRecordSet(beforeSnapshot.nodes, {
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const afterNodes = buildPreparedRecordSet(afterSnapshot.nodes, {
+    retainRecords: true,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const beforeEdges = buildPreparedRecordSet(beforeSnapshot.edges, {
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const afterEdges = buildPreparedRecordSet(afterSnapshot.edges, {
+    retainRecords: true,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const beforeTombstones = buildPreparedRecordSet(beforeSnapshot.tombstones, {
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const afterTombstones = buildPreparedRecordSet(afterSnapshot.tombstones, {
+    retainRecords: true,
+    includeTargetKeys: true,
+    includeSerializedList: includeCompactSerializedList,
+    includeHashList: includeCompactHashList,
+    includeSerializedLookup,
+    includeSerializedCharCount,
+    serializationCacheStats,
+    preparedRecordSetCacheStats,
+    usePreparedRecordSetCache,
+  });
+  const sourceDeviceId = normalizeRecordId(
+    afterSnapshot.meta?.deviceId || beforeSnapshot.meta?.deviceId || "",
+  );
+  const beforeRecordCount =
+    beforeNodes.ids.length + beforeEdges.ids.length + beforeTombstones.ids.length;
+  const afterRecordCount =
+    afterNodes.ids.length + afterEdges.ids.length + afterTombstones.ids.length;
+  const beforeSerializedChars =
+    includeSerializedCharCount
+      ? beforeNodes.serializedCharCount +
+        beforeEdges.serializedCharCount +
+        beforeTombstones.serializedCharCount
+      : 0;
+  const afterSerializedChars =
+    includeSerializedCharCount
+      ? afterNodes.serializedCharCount +
+        afterEdges.serializedCharCount +
+        afterTombstones.serializedCharCount
+      : 0;
+
+  return {
+    beforeNodes,
+    afterNodes,
+    beforeEdges,
+    afterEdges,
+    beforeTombstones,
+    afterTombstones,
+    nowMs,
+    sourceDeviceId,
+    beforeRecordCount,
+    afterRecordCount,
+    maxSnapshotRecords: Math.max(beforeRecordCount, afterRecordCount),
+    structuralDelta:
+      Math.abs(afterNodes.ids.length - beforeNodes.ids.length) +
+      Math.abs(afterEdges.ids.length - beforeEdges.ids.length) +
+      Math.abs(afterTombstones.ids.length - beforeTombstones.ids.length),
+    beforeSerializedChars,
+    afterSerializedChars,
+    serializationCacheStats,
+    compactPayload:
+      compactPayloadMode === "json"
+        ? {
+            bridgeMode: "json",
+            nowMs,
+            beforeNodes: {
+              ids: beforeNodes.ids,
+              serialized: beforeNodes.serialized,
+            },
+            afterNodes: {
+              ids: afterNodes.ids,
+              serialized: afterNodes.serialized,
+            },
+            beforeEdges: {
+              ids: beforeEdges.ids,
+              serialized: beforeEdges.serialized,
+            },
+            afterEdges: {
+              ids: afterEdges.ids,
+              serialized: afterEdges.serialized,
+            },
+            beforeTombstones: {
+              ids: beforeTombstones.ids,
+              serialized: beforeTombstones.serialized,
+            },
+            afterTombstones: {
+              ids: afterTombstones.ids,
+              serialized: afterTombstones.serialized,
+              targetKeys: afterTombstones.ids.map(
+                (id) => afterTombstones.targetKeyById?.get(id) || "",
+              ),
+            },
+          }
+        : compactPayloadMode === "hash"
+          ? {
+              bridgeMode: "hash",
+              nowMs,
+              beforeNodes: {
+                ids: beforeNodes.ids,
+                hashes: beforeNodes.hashes,
+              },
+              afterNodes: {
+                ids: afterNodes.ids,
+                hashes: afterNodes.hashes,
+              },
+              beforeEdges: {
+                ids: beforeEdges.ids,
+                hashes: beforeEdges.hashes,
+              },
+              afterEdges: {
+                ids: afterEdges.ids,
+                hashes: afterEdges.hashes,
+              },
+              beforeTombstones: {
+                ids: beforeTombstones.ids,
+                hashes: beforeTombstones.hashes,
+              },
+              afterTombstones: {
+                ids: afterTombstones.ids,
+                hashes: afterTombstones.hashes,
+                targetKeys: afterTombstones.ids.map(
+                  (id) => afterTombstones.targetKeyById?.get(id) || "",
+                ),
+              },
+            }
+          : null,
+  };
 }
 
 function buildRuntimeMetaPatch(snapshot = {}) {
-  const normalizedSnapshot = sanitizeSnapshot(snapshot);
+  const normalizedSnapshot = normalizeSnapshotMetaState(snapshot);
   const patch = {};
   for (const [rawKey, value] of Object.entries(normalizedSnapshot.meta || {})) {
     const key = normalizeRecordId(rawKey);
@@ -500,55 +1406,473 @@ function ensureDeleteTombstone(
   });
 }
 
-export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
-  const normalizedBefore = sanitizeSnapshot(beforeSnapshot);
-  const normalizedAfter = sanitizeSnapshot(afterSnapshot);
-  const nowMs = normalizeTimestamp(options.nowMs, Date.now());
-  const beforeNodeJsonById = buildSnapshotRecordIndex(normalizedBefore.nodes);
-  const afterNodeJsonById = buildSnapshotRecordIndex(normalizedAfter.nodes);
-  const beforeEdgeJsonById = buildSnapshotRecordIndex(normalizedBefore.edges);
-  const afterEdgeJsonById = buildSnapshotRecordIndex(normalizedAfter.edges);
-  const beforeTombstoneJsonById = buildSnapshotRecordIndex(
-    normalizedBefore.tombstones,
+function normalizePersistDeltaShape(delta = null) {
+  if (!delta || typeof delta !== "object" || Array.isArray(delta)) {
+    return null;
+  }
+
+  const toObjectArray = (value) =>
+    Array.isArray(value)
+      ? value
+          .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+          .map((item) => toPlainData(item, item))
+      : [];
+  const toStringArray = (value) =>
+    Array.isArray(value)
+      ? value
+          .map((item) => normalizeRecordId(item))
+          .filter((item) => item.length > 0)
+      : [];
+  const runtimeMetaPatch =
+    delta.runtimeMetaPatch &&
+    typeof delta.runtimeMetaPatch === "object" &&
+    !Array.isArray(delta.runtimeMetaPatch)
+      ? toPlainData(delta.runtimeMetaPatch, {})
+      : {};
+
+  return {
+    upsertNodes: toObjectArray(delta.upsertNodes),
+    upsertEdges: toObjectArray(delta.upsertEdges),
+    deleteNodeIds: toStringArray(delta.deleteNodeIds),
+    deleteEdgeIds: toStringArray(delta.deleteEdgeIds),
+    tombstones: toObjectArray(delta.tombstones),
+    runtimeMetaPatch,
+  };
+}
+
+function normalizePersistDeltaIdShape(delta = null) {
+  if (!delta || typeof delta !== "object" || Array.isArray(delta)) {
+    return null;
+  }
+
+  const hasFullShapeFields =
+    Object.prototype.hasOwnProperty.call(delta, "upsertNodes") ||
+    Object.prototype.hasOwnProperty.call(delta, "upsertEdges") ||
+    Object.prototype.hasOwnProperty.call(delta, "tombstones");
+  if (hasFullShapeFields) return null;
+
+  const hasIdShape =
+    Object.prototype.hasOwnProperty.call(delta, "upsertNodeIds") ||
+    Object.prototype.hasOwnProperty.call(delta, "upsertEdgeIds") ||
+    Object.prototype.hasOwnProperty.call(delta, "deleteNodeIds") ||
+    Object.prototype.hasOwnProperty.call(delta, "deleteEdgeIds") ||
+    Object.prototype.hasOwnProperty.call(delta, "upsertTombstoneIds");
+  if (!hasIdShape) return null;
+
+  const toStringArray = (value) =>
+    Array.isArray(value)
+      ? value
+          .map((item) => normalizeRecordId(item))
+          .filter((item) => item.length > 0)
+      : [];
+
+  return {
+    upsertNodeIds: toStringArray(delta.upsertNodeIds),
+    upsertEdgeIds: toStringArray(delta.upsertEdgeIds),
+    deleteNodeIds: toStringArray(delta.deleteNodeIds),
+    deleteEdgeIds: toStringArray(delta.deleteEdgeIds),
+    upsertTombstoneIds: toStringArray(delta.upsertTombstoneIds),
+  };
+}
+
+function hydratePreparedRecords(recordById, ids = []) {
+  const output = [];
+  if (!(recordById instanceof Map)) return output;
+  for (const id of ids) {
+    const record = recordById.get(normalizeRecordId(id));
+    if (!record) continue;
+    output.push(record);
+  }
+  return output;
+}
+
+function buildPersistDeltaFromIdShape(preparedContext, delta = null) {
+  const normalized = normalizePersistDeltaIdShape(delta);
+  if (!normalized) return null;
+
+  const afterNodeRecordById = ensurePreparedRecordLookup(preparedContext.afterNodes);
+  const afterEdgeRecordById = ensurePreparedRecordLookup(preparedContext.afterEdges);
+  const afterTombstoneRecordById = ensurePreparedRecordLookup(
+    preparedContext.afterTombstones,
   );
-  const afterNodeById = buildSnapshotRecordArrayIndex(normalizedAfter.nodes);
-  const afterEdgeById = buildSnapshotRecordArrayIndex(normalizedAfter.edges);
-  const afterTombstoneById = buildSnapshotRecordArrayIndex(
-    normalizedAfter.tombstones,
+  const afterTombstoneTargetKeyById = ensurePreparedTargetKeyLookup(
+    preparedContext.afterTombstones,
   );
 
+  const tombstoneMap = new Map();
+  for (const id of normalized.upsertTombstoneIds) {
+    const record = afterTombstoneRecordById.get(id);
+    const targetKey = afterTombstoneTargetKeyById.get(id) || "";
+    if (!record || !targetKey) continue;
+    tombstoneMap.set(targetKey, record);
+  }
+
+  for (const nodeId of normalized.deleteNodeIds) {
+    ensureDeleteTombstone(
+      tombstoneMap,
+      "node",
+      nodeId,
+      preparedContext.nowMs,
+      preparedContext.sourceDeviceId,
+    );
+  }
+  for (const edgeId of normalized.deleteEdgeIds) {
+    ensureDeleteTombstone(
+      tombstoneMap,
+      "edge",
+      edgeId,
+      preparedContext.nowMs,
+      preparedContext.sourceDeviceId,
+    );
+  }
+
+  return {
+    upsertNodes: hydratePreparedRecords(
+      afterNodeRecordById,
+      normalized.upsertNodeIds,
+    ),
+    upsertEdges: hydratePreparedRecords(
+      afterEdgeRecordById,
+      normalized.upsertEdgeIds,
+    ),
+    deleteNodeIds: normalized.deleteNodeIds,
+    deleteEdgeIds: normalized.deleteEdgeIds,
+    tombstones: Array.from(tombstoneMap.values()),
+    runtimeMetaPatch: {},
+  };
+}
+
+function buildPersistCountDelta(beforeSnapshot = {}, afterSnapshot = {}) {
+  const normalizedBefore = normalizePersistSnapshotView(beforeSnapshot);
+  const normalizedAfter = normalizePersistSnapshotView(afterSnapshot);
+  const previous = {
+    nodes: toArray(normalizedBefore.nodes).length,
+    edges: toArray(normalizedBefore.edges).length,
+    tombstones: toArray(normalizedBefore.tombstones).length,
+  };
+  const next = {
+    nodes: toArray(normalizedAfter.nodes).length,
+    edges: toArray(normalizedAfter.edges).length,
+    tombstones: toArray(normalizedAfter.tombstones).length,
+  };
+  return {
+    previous,
+    next,
+    delta: {
+      nodes: next.nodes - previous.nodes,
+      edges: next.edges - previous.edges,
+      tombstones: next.tombstones - previous.tombstones,
+    },
+  };
+}
+
+function readPersistDeltaNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function emitPersistDeltaDiagnostics(options = {}, snapshot = null) {
+  if (typeof options?.onDiagnostics !== "function") return;
+  try {
+    options.onDiagnostics(snapshot ? toPlainData(snapshot, snapshot) : null);
+  } catch {
+    // ignore diagnostics callback failures
+  }
+}
+
+function tryBuildNativePersistDelta(
+  beforeSnapshot,
+  afterSnapshot,
+  preparedContext,
+  options = {},
+) {
+  if (options?.useNativeDelta !== true) {
+    return {
+      rawDelta: null,
+      status: "not-requested",
+      error: "",
+    };
+  }
+  const nativeBuilder = globalThis.__stBmeNativeBuildPersistDelta;
+  if (typeof nativeBuilder !== "function") {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-persist-delta-builder-unavailable");
+    }
+    return {
+      rawDelta: null,
+      status: "builder-unavailable",
+      error: "native-persist-delta-builder-unavailable",
+    };
+  }
+
+  try {
+    return {
+      rawDelta: nativeBuilder(beforeSnapshot, afterSnapshot, {
+        nowMs: options?.nowMs,
+        preparedDeltaInput: preparedContext?.compactPayload || null,
+      }),
+      status: "ok",
+      error: "",
+    };
+  } catch (error) {
+    if (options?.nativeFailOpen === false) {
+      throw error;
+    }
+    return {
+      rawDelta: null,
+      status: "builder-error",
+      error: error?.message || String(error),
+    };
+  }
+}
+
+export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const startedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const timings = shouldCollectDiagnostics
+    ? {
+        prepareMs: 0,
+        nativeAttemptMs: 0,
+        lookupMs: 0,
+        jsDiffMs: 0,
+        hydrateMs: 0,
+      }
+    : null;
+  const serializationCacheStats = {
+    objectHitCount: 0,
+    tokenHitCount: 0,
+    missCount: 0,
+  };
+  const preparedRecordSetCacheStats = shouldCollectDiagnostics
+    ? {
+        hitCount: 0,
+        missCount: 0,
+      }
+    : null;
+  const normalizedBefore = normalizePersistSnapshotView(beforeSnapshot);
+  const normalizedAfter = normalizePersistSnapshotView(afterSnapshot);
+  const nowMs = normalizeTimestamp(options.nowMs, Date.now());
+  const nativeBridgeMode = resolvePersistNativeDeltaBridgeMode(options);
+  const nativeGateOptions =
+    options?.useNativeDelta === true
+      ? resolvePersistNativeDeltaGateOptions(options)
+      : null;
+  const shouldMeasureSerializedChars =
+    shouldCollectDiagnostics ||
+    (options?.useNativeDelta === true &&
+      (nativeGateOptions?.minCombinedSerializedChars || 0) > 0);
+  const prepareStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const preparedContext = buildPreparedPersistDeltaContext(
+    normalizedBefore,
+    normalizedAfter,
+    nowMs,
+    {
+      compactPayloadMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+      includeSerializedLookup: options?.useNativeDelta !== true,
+      includeSerializedCharCount: shouldMeasureSerializedChars,
+      serializationCacheStats,
+      preparedRecordSetCacheStats,
+      usePreparedRecordSetCache: options?.usePreparedRecordSetCache !== false,
+    },
+  );
+  if (timings) {
+    timings.prepareMs = readPersistDeltaNow() - prepareStartedAt;
+  }
+  const combinedSerializedChars =
+    preparedContext.beforeSerializedChars + preparedContext.afterSerializedChars;
+  const preparedNativeGate =
+    options?.useNativeDelta === true
+      ? evaluatePersistNativeDeltaGate(normalizedBefore, normalizedAfter, {
+          minSnapshotRecords: nativeGateOptions?.minSnapshotRecords,
+          minStructuralDelta: nativeGateOptions?.minStructuralDelta,
+          minCombinedSerializedChars: nativeGateOptions?.minCombinedSerializedChars,
+          measuredCombinedSerializedChars: combinedSerializedChars,
+        })
+      : null;
+
+  const nativeAttemptStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const nativeAttempt =
+    options?.useNativeDelta !== true
+      ? {
+          rawDelta: null,
+          status: "not-requested",
+          error: "",
+        }
+      : preparedNativeGate?.allowed === false
+        ? {
+            rawDelta: null,
+            status: "gated-out",
+            error: "",
+          }
+        : tryBuildNativePersistDelta(
+            normalizedBefore,
+            normalizedAfter,
+            preparedContext,
+            options,
+          );
+  if (timings) {
+    timings.nativeAttemptMs = readPersistDeltaNow() - nativeAttemptStartedAt;
+  }
+  const nativeRawDelta = nativeAttempt.rawDelta;
+  const nativeIdDelta = normalizePersistDeltaIdShape(nativeRawDelta);
+  const hydrateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const nativeDelta = nativeIdDelta
+    ? buildPersistDeltaFromIdShape(preparedContext, nativeIdDelta)
+    : normalizePersistDeltaShape(nativeRawDelta);
+  if (timings && nativeRawDelta) {
+    timings.hydrateMs = readPersistDeltaNow() - hydrateStartedAt;
+  }
+  if (nativeRawDelta && !nativeDelta) {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-persist-delta-invalid-result");
+    }
+    nativeAttempt.status = "invalid-result";
+    nativeAttempt.error = "native-persist-delta-invalid-result";
+  }
+  if (nativeDelta) {
+    const result = {
+      ...nativeDelta,
+      countDelta: buildPersistCountDelta(normalizedBefore, normalizedAfter),
+      runtimeMetaPatch: {
+        ...buildRuntimeMetaPatch(normalizedAfter),
+        ...nativeDelta.runtimeMetaPatch,
+        ...(options.runtimeMetaPatch &&
+        typeof options.runtimeMetaPatch === "object" &&
+        !Array.isArray(options.runtimeMetaPatch)
+          ? toPlainData(options.runtimeMetaPatch, {})
+          : {}),
+      },
+    };
+    if (shouldCollectDiagnostics) {
+      emitPersistDeltaDiagnostics(options, {
+        requestedNative: options?.useNativeDelta === true,
+        requestedBridgeMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+        preparedBridgeMode: preparedContext.compactPayload?.bridgeMode || "none",
+        usedNative: true,
+        path: nativeIdDelta
+          ? `native-compact-${preparedContext.compactPayload?.bridgeMode || "json"}`
+          : "native-full",
+        gateAllowed: preparedNativeGate?.allowed ?? false,
+        gateReasons: preparedNativeGate?.reasons || [],
+        nativeAttemptStatus: nativeAttempt.status,
+        nativeError: nativeAttempt.error,
+        beforeRecordCount: preparedContext.beforeRecordCount,
+        afterRecordCount: preparedContext.afterRecordCount,
+        maxSnapshotRecords: preparedContext.maxSnapshotRecords,
+        combinedSerializedChars,
+        structuralDelta: preparedContext.structuralDelta,
+        beforeSerializedChars: preparedContext.beforeSerializedChars,
+        afterSerializedChars: preparedContext.afterSerializedChars,
+        prepareMs: timings?.prepareMs || 0,
+        nativeAttemptMs: timings?.nativeAttemptMs || 0,
+        lookupMs: timings?.lookupMs || 0,
+        jsDiffMs: timings?.jsDiffMs || 0,
+        hydrateMs: timings?.hydrateMs || 0,
+        serializationCacheObjectHits: Number(serializationCacheStats.objectHitCount || 0),
+        serializationCacheTokenHits: Number(serializationCacheStats.tokenHitCount || 0),
+        serializationCacheMisses: Number(serializationCacheStats.missCount || 0),
+        serializationCacheHits: sumPersistSerializationCacheHits(
+          serializationCacheStats,
+        ),
+        preparedRecordSetCacheHits: Number(preparedRecordSetCacheStats?.hitCount || 0),
+        preparedRecordSetCacheMisses: Number(preparedRecordSetCacheStats?.missCount || 0),
+        minCombinedSerializedChars:
+          preparedNativeGate?.minCombinedSerializedChars || 0,
+        buildMs: readPersistDeltaNow() - startedAt,
+        upsertNodeCount: result.upsertNodes.length,
+        upsertEdgeCount: result.upsertEdges.length,
+        deleteNodeCount: result.deleteNodeIds.length,
+        deleteEdgeCount: result.deleteEdgeIds.length,
+        tombstoneCount: result.tombstones.length,
+      });
+    }
+    return result;
+  }
+
+  const lookupStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const beforeNodeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeNodes,
+    serializationCacheStats,
+  );
+  const afterNodeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterNodes,
+    serializationCacheStats,
+  );
+  const beforeEdgeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeEdges,
+    serializationCacheStats,
+  );
+  const afterEdgeSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterEdges,
+    serializationCacheStats,
+  );
+  const beforeTombstoneSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.beforeTombstones,
+    serializationCacheStats,
+  );
+  const afterTombstoneSerializedById = ensurePreparedSerializedLookup(
+    preparedContext.afterTombstones,
+    serializationCacheStats,
+  );
+  const afterNodeRecordById = ensurePreparedRecordLookup(preparedContext.afterNodes);
+  const afterEdgeRecordById = ensurePreparedRecordLookup(preparedContext.afterEdges);
+  const afterTombstoneRecordById = ensurePreparedRecordLookup(
+    preparedContext.afterTombstones,
+  );
+  const afterTombstoneTargetKeyById = ensurePreparedTargetKeyLookup(
+    preparedContext.afterTombstones,
+  );
+  if (timings) {
+    timings.lookupMs = readPersistDeltaNow() - lookupStartedAt;
+  }
+
+  const jsDiffStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const upsertNodes = [];
-  for (const [id, record] of afterNodeById.entries()) {
-    if (beforeNodeJsonById.get(id) !== JSON.stringify(record)) {
-      upsertNodes.push(record);
+  for (const id of preparedContext.afterNodes.ids) {
+    if (
+      beforeNodeSerializedById.get(id) !== afterNodeSerializedById.get(id)
+    ) {
+      const record = afterNodeRecordById.get(id);
+      if (record) upsertNodes.push(record);
     }
   }
 
   const upsertEdges = [];
-  for (const [id, record] of afterEdgeById.entries()) {
-    if (beforeEdgeJsonById.get(id) !== JSON.stringify(record)) {
-      upsertEdges.push(record);
+  for (const id of preparedContext.afterEdges.ids) {
+    if (
+      beforeEdgeSerializedById.get(id) !== afterEdgeSerializedById.get(id)
+    ) {
+      const record = afterEdgeRecordById.get(id);
+      if (record) upsertEdges.push(record);
     }
   }
 
   const deleteNodeIds = [];
-  for (const id of beforeNodeJsonById.keys()) {
-    if (!afterNodeJsonById.has(id)) {
+  for (const id of preparedContext.beforeNodes.ids) {
+    if (!afterNodeSerializedById.has(id)) {
       deleteNodeIds.push(id);
     }
   }
 
   const deleteEdgeIds = [];
-  for (const id of beforeEdgeJsonById.keys()) {
-    if (!afterEdgeJsonById.has(id)) {
+  for (const id of preparedContext.beforeEdges.ids) {
+    if (!afterEdgeSerializedById.has(id)) {
       deleteEdgeIds.push(id);
     }
   }
 
   const tombstoneMap = new Map();
-  for (const [id, record] of afterTombstoneById.entries()) {
-    if (beforeTombstoneJsonById.get(id) !== JSON.stringify(record)) {
-      tombstoneMap.set(`${record.kind}:${record.targetId}`, record);
+  for (const id of preparedContext.afterTombstones.ids) {
+    if (
+      beforeTombstoneSerializedById.get(id) !==
+      afterTombstoneSerializedById.get(id)
+    ) {
+      const record = afterTombstoneRecordById.get(id);
+      const targetKey = afterTombstoneTargetKeyById.get(id) || "";
+      if (!record || !targetKey) continue;
+      tombstoneMap.set(targetKey, record);
     }
   }
 
@@ -557,8 +1881,8 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
       tombstoneMap,
       "node",
       nodeId,
-      nowMs,
-      normalizedAfter.meta?.deviceId || normalizedBefore.meta?.deviceId || "",
+      preparedContext.nowMs,
+      preparedContext.sourceDeviceId,
     );
   }
   for (const edgeId of deleteEdgeIds) {
@@ -566,17 +1890,18 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
       tombstoneMap,
       "edge",
       edgeId,
-      nowMs,
-      normalizedAfter.meta?.deviceId || normalizedBefore.meta?.deviceId || "",
+      preparedContext.nowMs,
+      preparedContext.sourceDeviceId,
     );
   }
 
-  return {
+  const result = {
     upsertNodes,
     upsertEdges,
     deleteNodeIds,
     deleteEdgeIds,
     tombstones: Array.from(tombstoneMap.values()),
+    countDelta: buildPersistCountDelta(normalizedBefore, normalizedAfter),
     runtimeMetaPatch: {
       ...buildRuntimeMetaPatch(normalizedAfter),
       ...(options.runtimeMetaPatch &&
@@ -586,51 +1911,108 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
         : {}),
     },
   };
+  if (timings) {
+    timings.jsDiffMs = readPersistDeltaNow() - jsDiffStartedAt;
+  }
+  if (shouldCollectDiagnostics) {
+    emitPersistDeltaDiagnostics(options, {
+      requestedNative: options?.useNativeDelta === true,
+      requestedBridgeMode: options?.useNativeDelta === true ? nativeBridgeMode : "none",
+      preparedBridgeMode: preparedContext.compactPayload?.bridgeMode || "none",
+      usedNative: false,
+      path: "js",
+      gateAllowed: preparedNativeGate?.allowed ?? false,
+      gateReasons: preparedNativeGate?.reasons || [],
+      nativeAttemptStatus: nativeAttempt.status,
+      nativeError: nativeAttempt.error,
+      beforeRecordCount: preparedContext.beforeRecordCount,
+      afterRecordCount: preparedContext.afterRecordCount,
+      maxSnapshotRecords: preparedContext.maxSnapshotRecords,
+      combinedSerializedChars,
+      structuralDelta: preparedContext.structuralDelta,
+      beforeSerializedChars: preparedContext.beforeSerializedChars,
+      afterSerializedChars: preparedContext.afterSerializedChars,
+      prepareMs: timings?.prepareMs || 0,
+      nativeAttemptMs: timings?.nativeAttemptMs || 0,
+      lookupMs: timings?.lookupMs || 0,
+      jsDiffMs: timings?.jsDiffMs || 0,
+      hydrateMs: timings?.hydrateMs || 0,
+      serializationCacheObjectHits: Number(serializationCacheStats.objectHitCount || 0),
+      serializationCacheTokenHits: Number(serializationCacheStats.tokenHitCount || 0),
+      serializationCacheMisses: Number(serializationCacheStats.missCount || 0),
+      serializationCacheHits: sumPersistSerializationCacheHits(
+        serializationCacheStats,
+      ),
+      preparedRecordSetCacheHits: Number(preparedRecordSetCacheStats?.hitCount || 0),
+      preparedRecordSetCacheMisses: Number(preparedRecordSetCacheStats?.missCount || 0),
+      minCombinedSerializedChars:
+        preparedNativeGate?.minCombinedSerializedChars || 0,
+      buildMs: readPersistDeltaNow() - startedAt,
+      upsertNodeCount: result.upsertNodes.length,
+      upsertEdgeCount: result.upsertEdges.length,
+      deleteNodeCount: result.deleteNodeIds.length,
+      deleteEdgeCount: result.deleteEdgeIds.length,
+      tombstoneCount: result.tombstones.length,
+    });
+  }
+  return result;
 }
 
 export function buildGraphFromSnapshot(snapshot, options = {}) {
-  const normalizedSnapshot = sanitizeSnapshot(snapshot);
+  const snapshotView = normalizePersistSnapshotView(snapshot);
+  const snapshotMeta =
+    snapshotView.meta &&
+    typeof snapshotView.meta === "object" &&
+    !Array.isArray(snapshotView.meta)
+      ? snapshotView.meta
+      : {};
+  const snapshotState =
+    snapshotView.state &&
+    typeof snapshotView.state === "object" &&
+    !Array.isArray(snapshotView.state)
+      ? snapshotView.state
+      : {};
   const chatId =
     normalizeChatId(options.chatId) ||
-    normalizeChatId(normalizedSnapshot.meta?.chatId) ||
-    normalizeChatId(normalizedSnapshot.state?.chatId);
+    normalizeChatId(snapshotMeta?.chatId) ||
+    normalizeChatId(snapshotState?.chatId);
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
-    Number(normalizedSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY]),
+    Number(snapshotMeta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY]),
   )
-    ? Number(normalizedSnapshot.meta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
+    ? Number(snapshotMeta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(normalizedSnapshot.nodes).map((node) => ({
+  runtimeGraph.nodes = toArray(snapshotView.nodes).map((node) => ({
     ...(node || {}),
   }));
-  runtimeGraph.edges = toArray(normalizedSnapshot.edges).map((edge) => ({
+  runtimeGraph.edges = toArray(snapshotView.edges).map((edge) => ({
     ...(edge || {}),
   }));
   runtimeGraph.batchJournal = toArray(
-    normalizedSnapshot.meta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
   );
   runtimeGraph.lastRecallResult = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
   runtimeGraph.maintenanceJournal = toArray(
-    normalizedSnapshot.meta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
   );
   runtimeGraph.knowledgeState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
     runtimeGraph.knowledgeState || {},
   );
   runtimeGraph.regionState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_REGION_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_REGION_STATE_META_KEY],
     runtimeGraph.regionState || {},
   );
   runtimeGraph.timelineState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_TIMELINE_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_TIMELINE_STATE_META_KEY],
     runtimeGraph.timelineState || {},
   );
   runtimeGraph.summaryState = toPlainData(
-    normalizedSnapshot.meta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
+    snapshotMeta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
     runtimeGraph.summaryState || {},
   );
   const rawKnowledgeState =
@@ -654,21 +2036,21 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
 
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
-    ...(normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
+    ...(snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
     lastProcessedAssistantFloor: Number.isFinite(
-      Number(normalizedSnapshot.state?.lastProcessedFloor),
+      Number(snapshotState?.lastProcessedFloor),
     )
-      ? Number(normalizedSnapshot.state.lastProcessedFloor)
+      ? Number(snapshotState.lastProcessedFloor)
       : Number(
-          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
+          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
             ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
     extractionCount: Number.isFinite(
-      Number(normalizedSnapshot.state?.extractionCount),
+      Number(snapshotState?.extractionCount),
     )
-      ? Number(normalizedSnapshot.state.extractionCount)
+      ? Number(snapshotState.extractionCount)
       : Number(
-          normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]
+          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
             ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
@@ -727,19 +2109,19 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
-    ...(normalizedSnapshot.meta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
+    ...(snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
     collectionId: buildVectorCollectionId(
       chatId ||
-        normalizedSnapshot.meta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
+        snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
         runtimeGraph.historyState?.chatId ||
         "",
     ),
   };
 
   runtimeGraph.lastProcessedSeq = Number.isFinite(
-    Number(normalizedSnapshot.meta?.[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]),
+    Number(snapshotMeta?.[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY]),
   )
-    ? Number(normalizedSnapshot.meta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
+    ? Number(snapshotMeta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
 
   const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
@@ -941,6 +2323,8 @@ export class BmeDatabase {
     this.options = {
       dexieClass: options.dexieClass || null,
     };
+    this.storeKind = "indexeddb";
+    this.storeMode = "indexeddb";
 
     this.db = null;
     this._openPromise = null;
@@ -1099,6 +2483,12 @@ export class BmeDatabase {
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const normalizedCountDelta =
+      normalizedDelta.countDelta &&
+      typeof normalizedDelta.countDelta === "object" &&
+      !Array.isArray(normalizedDelta.countDelta)
+        ? normalizedDelta.countDelta
+        : {};
 
     let nextRevision = 0;
     let counts = {
@@ -1136,7 +2526,7 @@ export class BmeDatabase {
           await this._setMetaInTx(db, key, value, nowMs);
         }
 
-        counts = await this._updateCountMetaInTx(db, nowMs);
+        counts = await this._applyCountDeltaMetaInTx(db, normalizedCountDelta, nowMs);
         const currentRevision = normalizeRevision(
           (await db.table("meta").get("revision"))?.value,
         );
@@ -1592,11 +2982,12 @@ export class BmeDatabase {
         ]),
     );
 
+    const metaMap = toMetaMap(metaRows);
     const meta = {
-      ...toMetaMap(metaRows),
+      ...metaMap,
       schemaVersion: BME_DB_SCHEMA_VERSION,
       chatId: this.chatId,
-      revision: normalizeRevision(toMetaMap(metaRows)?.revision),
+      revision: normalizeRevision(metaMap?.revision),
       nodeCount: nodes.length,
       edgeCount: edges.length,
       tombstoneCount: tombstones.length,
@@ -1613,9 +3004,9 @@ export class BmeDatabase {
 
     return {
       meta,
-      nodes: toPlainData(nodes, []),
-      edges: toPlainData(edges, []),
-      tombstones: toPlainData(tombstones, []),
+      nodes,
+      edges,
+      tombstones,
       state,
     };
   }
@@ -1915,6 +3306,69 @@ export class BmeDatabase {
       edges,
       tombstones,
     };
+  }
+
+  async _applyCountDeltaMetaInTx(
+    db,
+    countDelta = null,
+    nowMs = Date.now(),
+  ) {
+    const nextCounts =
+      countDelta?.next &&
+      typeof countDelta.next === "object" &&
+      !Array.isArray(countDelta.next)
+        ? countDelta.next
+        : null;
+    if (nextCounts) {
+      const nodes = normalizeNonNegativeInteger(nextCounts.nodes, 0);
+      const edges = normalizeNonNegativeInteger(nextCounts.edges, 0);
+      const tombstones = normalizeNonNegativeInteger(nextCounts.tombstones, 0);
+      await this._setMetaInTx(db, "nodeCount", nodes, nowMs);
+      await this._setMetaInTx(db, "edgeCount", edges, nowMs);
+      await this._setMetaInTx(db, "tombstoneCount", tombstones, nowMs);
+      return {
+        nodes,
+        edges,
+        tombstones,
+      };
+    }
+
+    const previousCounts =
+      countDelta?.previous &&
+      typeof countDelta.previous === "object" &&
+      !Array.isArray(countDelta.previous)
+        ? countDelta.previous
+        : null;
+    const deltaCounts =
+      countDelta?.delta &&
+      typeof countDelta.delta === "object" &&
+      !Array.isArray(countDelta.delta)
+        ? countDelta.delta
+        : null;
+    if (previousCounts && deltaCounts) {
+      const nodes = normalizeNonNegativeInteger(
+        Number(previousCounts.nodes || 0) + Number(deltaCounts.nodes || 0),
+        0,
+      );
+      const edges = normalizeNonNegativeInteger(
+        Number(previousCounts.edges || 0) + Number(deltaCounts.edges || 0),
+        0,
+      );
+      const tombstones = normalizeNonNegativeInteger(
+        Number(previousCounts.tombstones || 0) + Number(deltaCounts.tombstones || 0),
+        0,
+      );
+      await this._setMetaInTx(db, "nodeCount", nodes, nowMs);
+      await this._setMetaInTx(db, "edgeCount", edges, nowMs);
+      await this._setMetaInTx(db, "tombstoneCount", tombstones, nowMs);
+      return {
+        nodes,
+        edges,
+        tombstones,
+      };
+    }
+
+    return await this._updateCountMetaInTx(db, nowMs);
   }
 
   _applyListOptions(records, options = {}) {

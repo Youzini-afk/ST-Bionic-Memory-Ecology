@@ -1,5 +1,6 @@
 node_modules/
 .claude/
+native/**/target/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

@@ -4,6 +4,10 @@ function normalizeChatId(chatId) {
   return String(chatId ?? "").trim();
 }
 
+function normalizeSelectorKey(selectorKey) {
+  return String(selectorKey ?? "").trim();
+}
+
 export class BmeChatManager {
   constructor(options = {}) {
     this.options = options;
@@ -14,6 +18,10 @@ export class BmeChatManager {
       typeof options.databaseFactory === "function"
         ? options.databaseFactory
         : (chatId) => new BmeDatabase(chatId, options.databaseOptions || {});
+    this._selectorKeyResolver =
+      typeof options.selectorKeyResolver === "function"
+        ? options.selectorKeyResolver
+        : () => "";
   }
 
   async switchChat(chatId) {
@@ -39,13 +47,33 @@ export class BmeChatManager {
       this._currentChatId = normalizedChatId;
     }
 
-    let db = this._dbByChatId.get(normalizedChatId);
+    const desiredSelectorKey = normalizeSelectorKey(
+      await Promise.resolve(this._selectorKeyResolver(normalizedChatId)),
+    );
+    let entry = this._dbByChatId.get(normalizedChatId) || null;
+    if (
+      entry?.db &&
+      desiredSelectorKey &&
+      entry.selectorKey &&
+      entry.selectorKey !== desiredSelectorKey
+    ) {
+      if (typeof entry.db.close === "function") {
+        await entry.db.close();
+      }
+      this._dbByChatId.delete(normalizedChatId);
+      entry = null;
+    }
+
+    let db = entry?.db || null;
     if (!db) {
-      db = this._databaseFactory(normalizedChatId);
+      db = await Promise.resolve(this._databaseFactory(normalizedChatId));
       if (!db || typeof db.open !== "function") {
         throw new Error("BmeChatManager: databaseFactory 必须返回可 open() 的实例");
       }
-      this._dbByChatId.set(normalizedChatId, db);
+      this._dbByChatId.set(normalizedChatId, {
+        db,
+        selectorKey: desiredSelectorKey,
+      });
     }
 
     await db.open();
@@ -62,7 +90,7 @@ export class BmeChatManager {
       return;
     }
 
-    const db = this._dbByChatId.get(chatId);
+    const db = this._dbByChatId.get(chatId)?.db;
     if (db && typeof db.close === "function") {
       await db.close();
     }
@@ -72,7 +100,9 @@ export class BmeChatManager {
   }
 
   async closeAll() {
-    const dbInstances = Array.from(this._dbByChatId.values());
+    const dbInstances = Array.from(this._dbByChatId.values()).map(
+      (entry) => entry?.db,
+    );
 
     for (const db of dbInstances) {
       if (!db || typeof db.close !== "function") continue;
