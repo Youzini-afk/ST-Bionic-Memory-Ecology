@@ -340,6 +340,19 @@ async function maybeGetFileHandle(parentHandle, name) {
   }
 }
 
+async function maybeGetDirectoryHandle(parentHandle, name) {
+  try {
+    return await parentHandle.getDirectoryHandle(String(name || ""), {
+      create: false,
+    });
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 async function readJsonFile(parentHandle, name, fallbackValue = null) {
   const fileHandle = await maybeGetFileHandle(parentHandle, name);
   if (!fileHandle) {
@@ -594,6 +607,116 @@ export async function detectOpfsSupport(options = {}) {
     return {
       available: false,
       reason: error?.message || String(error),
+      error,
+    };
+  }
+}
+
+export async function deleteOpfsChatStorage(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) {
+    return {
+      deleted: false,
+      reason: "missing-chat-id",
+      chatId: "",
+    };
+  }
+  const rootDirectoryFactory =
+    typeof options.rootDirectoryFactory === "function"
+      ? options.rootDirectoryFactory
+      : getDefaultOpfsRootDirectory;
+  try {
+    const rootDirectory = await rootDirectoryFactory();
+    if (!rootDirectory || typeof rootDirectory.getDirectoryHandle !== "function") {
+      return {
+        deleted: false,
+        reason: "missing-directory-handle",
+        chatId: normalizedChatId,
+      };
+    }
+    const opfsRoot = await maybeGetDirectoryHandle(
+      rootDirectory,
+      OPFS_ROOT_DIRECTORY_NAME,
+    );
+    if (!opfsRoot) {
+      return {
+        deleted: false,
+        reason: "not-found",
+        chatId: normalizedChatId,
+      };
+    }
+    const chatsDirectory = await maybeGetDirectoryHandle(
+      opfsRoot,
+      OPFS_CHATS_DIRECTORY_NAME,
+    );
+    if (!chatsDirectory) {
+      return {
+        deleted: false,
+        reason: "not-found",
+        chatId: normalizedChatId,
+      };
+    }
+    const chatDirectoryName = buildChatDirectoryName(normalizedChatId);
+    const chatDirectory = await maybeGetDirectoryHandle(chatsDirectory, chatDirectoryName);
+    if (!chatDirectory) {
+      return {
+        deleted: false,
+        reason: "not-found",
+        chatId: normalizedChatId,
+      };
+    }
+    await chatsDirectory.removeEntry(chatDirectoryName, {
+      recursive: true,
+    });
+    return {
+      deleted: true,
+      reason: "deleted",
+      chatId: normalizedChatId,
+    };
+  } catch (error) {
+    return {
+      deleted: false,
+      reason: "delete-failed",
+      chatId: normalizedChatId,
+      error,
+    };
+  }
+}
+
+export async function deleteAllOpfsStorage(options = {}) {
+  const rootDirectoryFactory =
+    typeof options.rootDirectoryFactory === "function"
+      ? options.rootDirectoryFactory
+      : getDefaultOpfsRootDirectory;
+  try {
+    const rootDirectory = await rootDirectoryFactory();
+    if (!rootDirectory || typeof rootDirectory.getDirectoryHandle !== "function") {
+      return {
+        deleted: false,
+        reason: "missing-directory-handle",
+      };
+    }
+    const opfsRoot = await maybeGetDirectoryHandle(
+      rootDirectory,
+      OPFS_ROOT_DIRECTORY_NAME,
+    );
+    if (!opfsRoot) {
+      return {
+        deleted: false,
+        reason: "not-found",
+      };
+    }
+    await rootDirectory.removeEntry(OPFS_ROOT_DIRECTORY_NAME, {
+      recursive: true,
+    });
+    return {
+      deleted: true,
+      reason: "deleted",
+    };
+  } catch (error) {
+    return {
+      deleted: false,
+      reason: "delete-failed",
       error,
     };
   }

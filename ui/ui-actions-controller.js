@@ -1168,9 +1168,19 @@ export async function onDeleteCurrentIdbController(runtime) {
 
   const dbName = runtime.buildBmeDbName(chatId);
   const restoreSafetyDbName = runtime.buildRestoreSafetyDbName?.(chatId) || "";
+  const restoreSafetyChatId =
+    typeof runtime.buildRestoreSafetyChatId === "function"
+      ? runtime.buildRestoreSafetyChatId(chatId)
+      : `__restore_safety__${chatId}`;
+  const persistenceState = runtime.getGraphPersistenceState?.() || {};
+  const hostProfile = String(persistenceState.hostProfile || "generic-st");
+  const localStoreLabel =
+    hostProfile === "luker"
+      ? "当前聊天的本地缓存（IndexedDB / OPFS，不影响 Luker 侧车主存储）"
+      : "当前聊天的本地图谱存储（IndexedDB / OPFS）";
   if (
     !runtime.confirm(
-      `确定要删除当前聊天的本地缓存数据库？\n\n目标: ${dbName}\n操作不可撤销。`,
+      `确定要删除${localStoreLabel}？\n\n将尝试清理：\n- ${dbName}\n- OPFS 当前聊天目录\n- restore safety 本地副本\n\n操作不可撤销。`,
     )
   ) {
     return { cancelled: true };
@@ -1178,32 +1188,50 @@ export async function onDeleteCurrentIdbController(runtime) {
 
   try {
     await runtime.closeBmeDb?.(chatId);
+    let deletedIndexedDbCount = 0;
     await new Promise((resolve, reject) => {
       const req = indexedDB.deleteDatabase(dbName);
-      req.onsuccess = () => resolve();
+      req.onsuccess = () => {
+        deletedIndexedDbCount += 1;
+        resolve();
+      };
       req.onerror = () => reject(req.error);
       req.onblocked = () => resolve();
     });
     if (restoreSafetyDbName) {
       await new Promise((resolve, reject) => {
         const req = indexedDB.deleteDatabase(restoreSafetyDbName);
-        req.onsuccess = () => resolve();
+        req.onsuccess = () => {
+          deletedIndexedDbCount += 1;
+          resolve();
+        };
         req.onerror = () => reject(req.error);
         req.onblocked = () => resolve();
       });
     }
+    const currentOpfsResult = await runtime.deleteCurrentChatOpfsStorage?.(chatId);
+    const restoreSafetyOpfsResult =
+      restoreSafetyChatId && restoreSafetyChatId !== chatId
+        ? await runtime.deleteCurrentChatOpfsStorage?.(restoreSafetyChatId)
+        : null;
     runtime.clearCachedIndexedDbSnapshot?.(chatId);
+    runtime.clearCachedIndexedDbSnapshot?.(restoreSafetyChatId);
     runtime.clearCurrentChatCommitMarker?.({
-      reason: "manual-delete-current-idb",
+      reason: "manual-delete-current-local-storage",
       immediate: true,
       resetAcceptedRevision: true,
     });
     runtime.syncGraphLoadFromLiveContext?.({
-      source: "manual-delete-current-idb",
+      source: "manual-delete-current-local-storage",
       force: true,
     });
     runtime.refreshPanelLiveState?.();
-    runtime.toastr.success(`已删除数据库 ${dbName}`);
+    const deletedOpfs =
+      currentOpfsResult?.deleted === true ||
+      restoreSafetyOpfsResult?.deleted === true;
+    runtime.toastr.success(
+      `已清空当前聊天本地存储：IndexedDB ${deletedIndexedDbCount > 0 ? "已处理" : "无"}，OPFS ${deletedOpfs ? "已处理" : "无"}`,
+    );
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);
   }
@@ -1212,7 +1240,7 @@ export async function onDeleteCurrentIdbController(runtime) {
 
 export async function onDeleteAllIdbController(runtime) {
   const userInput = runtime.prompt(
-    "此操作会删除所有聊天的 BME 本地缓存数据库，不可恢复。\n\n请输入 DELETE 确认：",
+    "此操作会删除所有聊天的 BME 本地图谱存储（IndexedDB / OPFS），不影响 Luker 侧车主存储。\n\n请输入 DELETE 确认：",
   );
   if (userInput !== "DELETE") {
     if (userInput != null) {
@@ -1246,22 +1274,29 @@ export async function onDeleteAllIdbController(runtime) {
         // continue deleting others
       }
     }
+    const opfsResult = await runtime.deleteAllOpfsStorage?.();
 
     runtime.clearAllCachedIndexedDbSnapshots?.();
     const activeChatId = runtime.getCurrentChatId?.();
     if (activeChatId) {
       runtime.clearCurrentChatCommitMarker?.({
-        reason: "manual-delete-all-idb",
+        reason: "manual-delete-all-local-storage",
         immediate: true,
         resetAcceptedRevision: true,
       });
       runtime.syncGraphLoadFromLiveContext?.({
-        source: "manual-delete-all-idb",
+        source: "manual-delete-all-local-storage",
         force: true,
       });
     }
     runtime.refreshPanelLiveState?.();
-    runtime.toastr.success(`已删除 ${deletedCount}/${bmeDbs.length} 个 BME 数据库`);
+    if (bmeDbs.length === 0 && opfsResult?.deleted !== true) {
+      runtime.toastr.info("没有找到 BME 本地图谱存储");
+      return { handledToast: true };
+    }
+    runtime.toastr.success(
+      `已清空 BME 本地图谱存储：IndexedDB ${deletedCount}/${bmeDbs.length}，OPFS ${opfsResult?.deleted ? "已处理" : "无"}`,
+    );
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);
   }
@@ -1276,7 +1311,7 @@ export async function onDeleteServerSyncFileController(runtime) {
   }
 
   const userInput = runtime.prompt(
-    "此操作会删除当前聊天在服务端的同步文件，不可恢复。\n\n请输入 DELETE 确认：",
+    "此操作会删除当前聊天在服务端的同步数据。\n\n如果该聊天已经升级到远端 v2，同步 manifest 和 chunk 文件都会一起删除。\n\n请输入 DELETE 确认：",
   );
   if (userInput !== "DELETE") {
     if (userInput != null) {
@@ -1288,11 +1323,11 @@ export async function onDeleteServerSyncFileController(runtime) {
   try {
     const result = await runtime.deleteRemoteSyncFile(chatId);
     if (result?.deleted) {
-      runtime.toastr.success(`已删除服务端同步文件: ${result.filename}`);
+      runtime.toastr.success(`已删除服务端同步数据: ${result.filename}`);
     } else {
       runtime.toastr.info(
         result?.reason === "not-found"
-          ? "服务端没有找到同步文件"
+          ? "服务端没有找到同步数据"
           : `删除未成功: ${result?.reason || "未知原因"}`,
       );
     }

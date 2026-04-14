@@ -31,6 +31,8 @@ import {
   BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+  deleteAllOpfsStorage,
+  deleteOpfsChatStorage,
   OpfsGraphStore,
   detectOpfsSupport,
   isGraphLocalStorageModeOpfs,
@@ -15280,6 +15282,7 @@ const _cleanupRuntime = () => ({
   buildBmeDbName,
   buildRestoreSafetyDbName: (chatId) =>
     buildBmeDbName(buildRestoreSafetyChatId(chatId)),
+  buildRestoreSafetyChatId,
   closeBmeDb: async (chatId) => {
     const normalizedChatId = normalizeChatIdCandidate(chatId);
     if (!normalizedChatId || !bmeChatManager) return;
@@ -15299,10 +15302,15 @@ const _cleanupRuntime = () => ({
   clearCachedIndexedDbSnapshot,
   clearAllCachedIndexedDbSnapshots,
   clearCurrentChatCommitMarker,
+  deleteCurrentChatOpfsStorage: async (chatId) =>
+    await deleteOpfsChatStorage(chatId),
+  deleteAllOpfsStorage: async () =>
+    await deleteAllOpfsStorage(),
   deleteRemoteSyncFile: (chatId) => deleteRemoteSyncFile(chatId, {
     fetch: globalThis.fetch?.bind(globalThis),
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
   }),
+  getGraphPersistenceState: () => graphPersistenceState,
   toastr,
 });
 

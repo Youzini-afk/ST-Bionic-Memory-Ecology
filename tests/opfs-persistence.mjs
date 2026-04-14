@@ -8,6 +8,8 @@ import {
 import {
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+  deleteAllOpfsStorage,
+  deleteOpfsChatStorage,
   OpfsGraphStore,
   detectOpfsSupport,
 } from "../sync/bme-opfs-store.js";
@@ -520,6 +522,59 @@ async function testPruneExpiredTombstonesAndClearAll() {
   await store.close();
 }
 
+async function testDeleteCurrentAndAllOpfsStorage() {
+  const rootDirectory = createMemoryOpfsRoot();
+  const storeA = new OpfsGraphStore("chat-opfs-delete-a", {
+    rootDirectoryFactory: async () => rootDirectory,
+    storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  });
+  const storeB = new OpfsGraphStore("chat-opfs-delete-b", {
+    rootDirectoryFactory: async () => rootDirectory,
+    storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  });
+  await storeA.open();
+  await storeB.open();
+
+  await storeA.importSnapshot(
+    {
+      meta: { revision: 1 },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+      nodes: [{ id: "node-a", type: "event", fields: { title: "A" }, archived: false, updatedAt: 1 }],
+      edges: [],
+      tombstones: [],
+    },
+    { mode: "replace", preserveRevision: true },
+  );
+  await storeB.importSnapshot(
+    {
+      meta: { revision: 1 },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+      nodes: [{ id: "node-b", type: "event", fields: { title: "B" }, archived: false, updatedAt: 1 }],
+      edges: [],
+      tombstones: [],
+    },
+    { mode: "replace", preserveRevision: true },
+  );
+
+  const deleteCurrentResult = await deleteOpfsChatStorage("chat-opfs-delete-a", {
+    rootDirectoryFactory: async () => rootDirectory,
+  });
+  assert.equal(deleteCurrentResult.deleted, true);
+
+  const chatsDirectory = getNestedDirectory(
+    getNestedDirectory(rootDirectory, "st-bme"),
+    "chats",
+  );
+  assert.equal(chatsDirectory.directories.has(encodeURIComponent("chat-opfs-delete-a")), false);
+  assert.equal(chatsDirectory.directories.has(encodeURIComponent("chat-opfs-delete-b")), true);
+
+  const deleteAllResult = await deleteAllOpfsStorage({
+    rootDirectoryFactory: async () => rootDirectory,
+  });
+  assert.equal(deleteAllResult.deleted, true);
+  assert.equal(rootDirectory.directories.has("st-bme"), false);
+}
+
 async function main() {
   console.log(`${PREFIX} starting`);
 
@@ -527,6 +582,7 @@ async function main() {
   await testImportExportPersistenceAndFileRotation();
   await testImportLegacyGraphMigrationAndSkipPaths();
   await testPruneExpiredTombstonesAndClearAll();
+  await testDeleteCurrentAndAllOpfsStorage();
 
   console.log("opfs-persistence tests passed");
 }

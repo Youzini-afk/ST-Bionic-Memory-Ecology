@@ -5246,9 +5246,9 @@ function _bindActions() {
     clearGraph: "清空图谱",
     clearVectorCache: "清空向量缓存",
     clearBatchJournal: "清空提取历史",
-    deleteCurrentIdb: "清空当前 IDB",
-    deleteAllIdb: "清空全部 IDB",
-    deleteServerSyncFile: "清空服务端同步文件",
+    deleteCurrentIdb: "清空当前本地存储",
+    deleteAllIdb: "清空全部本地存储",
+    deleteServerSyncFile: "清空服务端同步数据",
     backupToCloud: "\u5907\u4efd\u5230\u4e91\u7aef",
     restoreFromCloud: "\u4ece\u4e91\u7aef\u83b7\u53d6\u5907\u4efd",
     manageServerBackups: "\u7ba1\u7406\u670d\u52a1\u5668\u5907\u4efd",
@@ -11356,7 +11356,7 @@ function _formatPersistMismatchReason(reason = "") {
   if (!normalized) return "—";
   switch (normalized) {
     case "persist-mismatch:indexeddb-behind-commit-marker":
-      return "本地 IndexedDB 缓存版本落后于当前聊天已确认版本";
+      return "本地图谱存储版本落后于当前聊天已确认版本";
     default:
       return normalized;
   }
@@ -11366,7 +11366,7 @@ function _formatPersistMismatchHelp(reason = "") {
   const normalized = String(reason || "").trim();
   switch (normalized) {
     case "persist-mismatch:indexeddb-behind-commit-marker":
-      return "当前聊天记录显示图谱已经确认到更高版本，但本地 IndexedDB 里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
+      return "当前聊天记录显示图谱已经确认到更高版本，但本地 OPFS / IndexedDB 存储里还没有对应数据。常见于刚清空本地缓存，或写入确认还没完成。建议先点“重新探测图谱”；如果仍异常，再点“重试持久化”或执行重建/恢复。";
     default:
       return `检测到持久化一致性异常：${_formatPersistMismatchReason(normalized)}。建议先重新探测图谱；如果仍异常，再执行重建或恢复。`;
   }
@@ -11750,7 +11750,7 @@ function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
   if (helpText) {
     helpText.textContent =
       mode === "manual"
-        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
+        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 OPFS / IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
         : "\u81ea\u52a8\u50a8\u5b58\u4f1a\u7ee7\u7eed\u6cbf\u7528\u5f53\u524d\u955c\u50cf\u540c\u6b65\u903b\u8f91\u4e0e\u95f4\u9694\uff1b\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730\u5199\u5165\uff0c\u9700\u8981\u4f60\u4e3b\u52a8\u5907\u4efd\u548c\u6062\u590d\u3002";
   }
   _renderCloudStorageModeStatus(settings, _getGraphPersistenceSnapshot());
