@@ -168,7 +168,7 @@ export const defaultSettings = {
   // UI 面板
   noticeDisplayMode: "normal",
   panelTheme: "crimson",
-  graphLocalStorageMode: "indexeddb",
+  graphLocalStorageMode: "auto",
   cloudStorageMode: "automatic",
 };
 

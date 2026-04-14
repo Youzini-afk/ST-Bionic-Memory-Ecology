@@ -2075,6 +2075,8 @@ function _refreshTaskPersistence() {
       ? `活跃中 · queue ${Number(opfsLock.queueDepth || 0)}`
       : `空闲 · queue ${Number(opfsLock.queueDepth || 0)}`
     : "—";
+  const opfsCompactionState = String(ps.opfsCompactionState?.state || "").trim();
+  const opfsCompactionLabel = opfsCompactionState || "—";
 
   const kvs = [
     ["加载状态", loadStateLabel],
@@ -2084,12 +2086,18 @@ function _refreshTaskPersistence() {
     ["accepted by", ps.acceptedBy || "—"],
     ["本地缓存", cacheTierLabel],
     ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
+    ["解析本地引擎", ps.resolvedLocalStore || "—"],
+    ["本地格式", `v${Number(ps.localStoreFormatVersion || 0) || 1}`],
+    ["本地迁移", ps.localStoreMigrationState || "—"],
     ["版本号", ps.revision ?? "—"],
     ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
     ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
     ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
     ["OPFS 写锁", opfsLockLabel],
+    ["OPFS WAL", `${Number(ps.opfsWalDepth || 0)} 条 / ${Number(ps.opfsPendingBytes || 0)} B`],
+    ["OPFS 压实", opfsCompactionLabel],
+    ["远端同步格式", `v${Number(ps.remoteSyncFormatVersion || 0) || 1}`],
   ];
 
   const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
@@ -2111,12 +2119,18 @@ function _refreshTaskPersistence() {
     ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
     ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
     ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
+    ["解析本地引擎", "当前模式最终解析到的本地引擎，例如 auto 解析成 OPFS 或 IndexedDB。"],
+    ["本地格式", "当前本地存储格式版本。OPFS v2 代表分片基线 + WAL。"],
+    ["本地迁移", "当前本地存储迁移状态，例如 idle / promoting。"],
     ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
     ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
     ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
     ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
     ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
     ["OPFS 写锁", "OPFS 本地存储的串行写状态。活跃表示当前有写任务排队或执行中。"],
+    ["OPFS WAL", "当前尚未被压实进基线分片的日志条目数和累计字节数。"],
+    ["OPFS 压实", "OPFS 基线压实状态。pending 表示达到阈值后等待后台压实。"],
+    ["远端同步格式", "当前自动同步使用的远端存储格式版本。v2 代表 manifest + chunk。"],
     ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
     ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
     ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
@@ -11288,7 +11302,14 @@ function _getGraphPersistenceSnapshot() {
     commitMarker: null,
     chatId: "",
     storageMode: "indexeddb",
+    resolvedLocalStore: "indexeddb:indexeddb",
+    localStoreFormatVersion: 1,
+    localStoreMigrationState: "idle",
     opfsWriteLockState: null,
+    opfsWalDepth: 0,
+    opfsPendingBytes: 0,
+    opfsCompactionState: null,
+    remoteSyncFormatVersion: 1,
     dbReady: false,
     syncState: "idle",
     syncDirty: false,

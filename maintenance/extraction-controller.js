@@ -332,6 +332,12 @@ function buildCommittedBatchPersistSnapshot(
   }
 
   return {
+    persistDelta:
+      typeof runtime.buildPersistDelta === "function"
+        ? runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
+            useNativeDelta: false,
+          })
+        : null,
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
@@ -633,6 +639,7 @@ export async function executeExtractionBatchController(
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
     graphSnapshot: committedPersistState.persistGraphSnapshot,
+    persistDelta: committedPersistState.persistDelta,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;

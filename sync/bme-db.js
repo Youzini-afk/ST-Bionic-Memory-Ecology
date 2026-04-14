@@ -1542,6 +1542,30 @@ function buildPersistDeltaFromIdShape(preparedContext, delta = null) {
   };
 }
 
+function buildPersistCountDelta(beforeSnapshot = {}, afterSnapshot = {}) {
+  const normalizedBefore = normalizePersistSnapshotView(beforeSnapshot);
+  const normalizedAfter = normalizePersistSnapshotView(afterSnapshot);
+  const previous = {
+    nodes: toArray(normalizedBefore.nodes).length,
+    edges: toArray(normalizedBefore.edges).length,
+    tombstones: toArray(normalizedBefore.tombstones).length,
+  };
+  const next = {
+    nodes: toArray(normalizedAfter.nodes).length,
+    edges: toArray(normalizedAfter.edges).length,
+    tombstones: toArray(normalizedAfter.tombstones).length,
+  };
+  return {
+    previous,
+    next,
+    delta: {
+      nodes: next.nodes - previous.nodes,
+      edges: next.edges - previous.edges,
+      tombstones: next.tombstones - previous.tombstones,
+    },
+  };
+}
+
 function readPersistDeltaNow() {
   if (typeof performance === "object" && typeof performance.now === "function") {
     return performance.now();
@@ -1710,6 +1734,7 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
   if (nativeDelta) {
     const result = {
       ...nativeDelta,
+      countDelta: buildPersistCountDelta(normalizedBefore, normalizedAfter),
       runtimeMetaPatch: {
         ...buildRuntimeMetaPatch(normalizedAfter),
         ...nativeDelta.runtimeMetaPatch,
@@ -1876,6 +1901,7 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
     deleteNodeIds,
     deleteEdgeIds,
     tombstones: Array.from(tombstoneMap.values()),
+    countDelta: buildPersistCountDelta(normalizedBefore, normalizedAfter),
     runtimeMetaPatch: {
       ...buildRuntimeMetaPatch(normalizedAfter),
       ...(options.runtimeMetaPatch &&
@@ -2457,6 +2483,12 @@ export class BmeDatabase {
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const normalizedCountDelta =
+      normalizedDelta.countDelta &&
+      typeof normalizedDelta.countDelta === "object" &&
+      !Array.isArray(normalizedDelta.countDelta)
+        ? normalizedDelta.countDelta
+        : {};
 
     let nextRevision = 0;
     let counts = {
@@ -2494,7 +2526,7 @@ export class BmeDatabase {
           await this._setMetaInTx(db, key, value, nowMs);
         }
 
-        counts = await this._updateCountMetaInTx(db, nowMs);
+        counts = await this._applyCountDeltaMetaInTx(db, normalizedCountDelta, nowMs);
         const currentRevision = normalizeRevision(
           (await db.table("meta").get("revision"))?.value,
         );
@@ -3274,6 +3306,69 @@ export class BmeDatabase {
       edges,
       tombstones,
     };
+  }
+
+  async _applyCountDeltaMetaInTx(
+    db,
+    countDelta = null,
+    nowMs = Date.now(),
+  ) {
+    const nextCounts =
+      countDelta?.next &&
+      typeof countDelta.next === "object" &&
+      !Array.isArray(countDelta.next)
+        ? countDelta.next
+        : null;
+    if (nextCounts) {
+      const nodes = normalizeNonNegativeInteger(nextCounts.nodes, 0);
+      const edges = normalizeNonNegativeInteger(nextCounts.edges, 0);
+      const tombstones = normalizeNonNegativeInteger(nextCounts.tombstones, 0);
+      await this._setMetaInTx(db, "nodeCount", nodes, nowMs);
+      await this._setMetaInTx(db, "edgeCount", edges, nowMs);
+      await this._setMetaInTx(db, "tombstoneCount", tombstones, nowMs);
+      return {
+        nodes,
+        edges,
+        tombstones,
+      };
+    }
+
+    const previousCounts =
+      countDelta?.previous &&
+      typeof countDelta.previous === "object" &&
+      !Array.isArray(countDelta.previous)
+        ? countDelta.previous
+        : null;
+    const deltaCounts =
+      countDelta?.delta &&
+      typeof countDelta.delta === "object" &&
+      !Array.isArray(countDelta.delta)
+        ? countDelta.delta
+        : null;
+    if (previousCounts && deltaCounts) {
+      const nodes = normalizeNonNegativeInteger(
+        Number(previousCounts.nodes || 0) + Number(deltaCounts.nodes || 0),
+        0,
+      );
+      const edges = normalizeNonNegativeInteger(
+        Number(previousCounts.edges || 0) + Number(deltaCounts.edges || 0),
+        0,
+      );
+      const tombstones = normalizeNonNegativeInteger(
+        Number(previousCounts.tombstones || 0) + Number(deltaCounts.tombstones || 0),
+        0,
+      );
+      await this._setMetaInTx(db, "nodeCount", nodes, nowMs);
+      await this._setMetaInTx(db, "edgeCount", edges, nowMs);
+      await this._setMetaInTx(db, "tombstoneCount", tombstones, nowMs);
+      return {
+        nodes,
+        edges,
+        tombstones,
+      };
+    }
+
+    return await this._updateCountMetaInTx(db, nowMs);
   }
 
   _applyListOptions(records, options = {}) {

@@ -27,7 +27,9 @@ import {
   ensureDexieLoaded,
 } from "./sync/bme-db.js";
 import {
+  BME_GRAPH_LOCAL_STORAGE_MODE_AUTO,
   BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+  BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
   OpfsGraphStore,
   detectOpfsSupport,
@@ -1227,10 +1229,25 @@ function getGraphPersistenceLiveState() {
     updatedAt: graphPersistenceState.updatedAt,
     storagePrimary: graphPersistenceState.storagePrimary || "indexeddb",
     storageMode: graphPersistenceState.storageMode || "indexeddb",
+    resolvedLocalStore: String(
+      graphPersistenceState.resolvedLocalStore ||
+        buildGraphLocalStoreSelectorKey(getPreferredGraphLocalStorePresentationSync()),
+    ),
+    localStoreFormatVersion: Number(graphPersistenceState.localStoreFormatVersion || 0) || 1,
+    localStoreMigrationState: String(
+      graphPersistenceState.localStoreMigrationState || "idle",
+    ),
     opfsWriteLockState: cloneRuntimeDebugValue(
       graphPersistenceState.opfsWriteLockState,
       null,
     ),
+    opfsWalDepth: Number(graphPersistenceState.opfsWalDepth || 0),
+    opfsPendingBytes: Number(graphPersistenceState.opfsPendingBytes || 0),
+    opfsCompactionState: cloneRuntimeDebugValue(
+      graphPersistenceState.opfsCompactionState,
+      null,
+    ),
+    remoteSyncFormatVersion: Number(graphPersistenceState.remoteSyncFormatVersion || 0) || 1,
     dbReady:
       graphPersistenceState.dbReady ??
       isGraphLoadStateDbReady(graphPersistenceState.loadState),
@@ -3880,14 +3897,18 @@ function buildIndexedDbStorePresentation() {
 }
 
 function buildOpfsStorePresentation(
-  mode = BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+  mode = BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
 ) {
+  const normalizedMode = normalizeGraphLocalStorageMode(
+    mode,
+    BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  );
   return {
     storagePrimary: "opfs",
-    storageMode: normalizeGraphLocalStorageMode(
-      mode,
-      BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
-    ),
+    storageMode:
+      normalizedMode === BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW
+        ? BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY
+        : normalizedMode,
     statusLabel: "OPFS",
     reasonPrefix: "opfs",
   };
@@ -3900,7 +3921,7 @@ function getRequestedGraphLocalStorageMode(settings = getSettings()) {
       : {};
   return normalizeGraphLocalStorageMode(
     sourceSettings.graphLocalStorageMode,
-    BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+    "auto",
   );
 }
 
@@ -3909,6 +3930,34 @@ function resolveDbGraphStorePresentation(db = null) {
     return buildOpfsStorePresentation(db?.storeMode);
   }
   return buildIndexedDbStorePresentation();
+}
+
+function readLocalStoreDiagnosticsSync(
+  db = null,
+  presentation = buildIndexedDbStorePresentation(),
+) {
+  const resolvedPresentation =
+    presentation && typeof presentation === "object"
+      ? presentation
+      : resolveDbGraphStorePresentation(db);
+  const rawDiagnostics =
+    typeof db?.getStorageDiagnosticsSync === "function"
+      ? db.getStorageDiagnosticsSync()
+      : null;
+  return {
+    resolvedLocalStore: buildGraphLocalStoreSelectorKey(resolvedPresentation),
+    localStoreFormatVersion:
+      Number(rawDiagnostics?.formatVersion || 0) ||
+      (resolvedPresentation.storagePrimary === "opfs" ? 2 : 1),
+    localStoreMigrationState:
+      String(rawDiagnostics?.migrationState || "").trim() || "idle",
+    opfsWalDepth: Number(rawDiagnostics?.walCount || 0),
+    opfsPendingBytes: Number(rawDiagnostics?.walTotalBytes || 0),
+    opfsCompactionState: cloneRuntimeDebugValue(
+      rawDiagnostics?.compactionState || null,
+      null,
+    ),
+  };
 }
 
 function resolveSnapshotGraphStorePresentation(
@@ -3945,10 +3994,10 @@ function buildGraphLocalStoreSelectorKey(
       ? "opfs"
       : "indexeddb";
   const storageMode =
-    storagePrimary === "opfs"
+        storagePrimary === "opfs"
       ? normalizeGraphLocalStorageMode(
           normalizedPresentation.storageMode,
-          BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+          BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
         )
       : BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB;
   return `${storagePrimary}:${storageMode}`;
@@ -4004,6 +4053,12 @@ async function getGraphLocalStoreCapability(forceRefresh = false) {
 function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
   const requestedMode = getRequestedGraphLocalStorageMode(settings);
   if (
+    requestedMode === "auto" &&
+    bmeLocalStoreCapabilitySnapshot?.opfsAvailable
+  ) {
+    return buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY);
+  }
+  if (
     isGraphLocalStorageModeOpfs(requestedMode) &&
     bmeLocalStoreCapabilitySnapshot?.opfsAvailable
   ) {
@@ -4016,6 +4071,12 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
    settings = getSettings(),
  ) {
    const requestedMode = getRequestedGraphLocalStorageMode(settings);
+   if (requestedMode === "auto") {
+     const capability = await getGraphLocalStoreCapability();
+     return capability.opfsAvailable
+       ? buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY)
+       : buildIndexedDbStorePresentation();
+   }
    if (!isGraphLocalStorageModeOpfs(requestedMode)) {
      return buildIndexedDbStorePresentation();
   }
@@ -4843,6 +4904,18 @@ async function syncIndexedDbMetaToPersistenceState(
     }
 
     const storePresentation = resolveDbGraphStorePresentation(db);
+    const localStoreDiagnostics =
+      typeof readLocalStoreDiagnosticsSync === "function"
+        ? readLocalStoreDiagnosticsSync(db, storePresentation)
+        : {
+            resolvedLocalStore: `${storePresentation?.storagePrimary || "indexeddb"}:${storePresentation?.storageMode || "indexeddb"}`,
+            localStoreFormatVersion:
+              storePresentation.storagePrimary === "opfs" ? 2 : 1,
+            localStoreMigrationState: "idle",
+            opfsWalDepth: 0,
+            opfsPendingBytes: 0,
+            opfsCompactionState: null,
+          };
     const persistenceEnvironment = buildPersistenceEnvironment(
       getContext(),
       storePresentation,
@@ -4858,6 +4931,7 @@ async function syncIndexedDbMetaToPersistenceState(
       lastBackupRestoredAt,
       lastBackupRollbackAt,
       lastBackupFilename,
+      remoteSyncFormatVersion,
     ] = await Promise.all([
       typeof db.getRevision === "function" ? db.getRevision() : 0,
       typeof db.getMeta === "function" ? db.getMeta("syncDirty", false) : false,
@@ -4879,6 +4953,7 @@ async function syncIndexedDbMetaToPersistenceState(
         ? db.getMeta("lastBackupRollbackAt", 0)
         : 0,
       typeof db.getMeta === "function" ? db.getMeta("lastBackupFilename", "") : "",
+      typeof db.getMeta === "function" ? db.getMeta("remoteSyncFormatVersion", 1) : 1,
     ]);
 
     const patch = {
@@ -4887,6 +4962,12 @@ async function syncIndexedDbMetaToPersistenceState(
       cacheStorageTier: persistenceEnvironment.cacheStorageTier,
       storagePrimary: storePresentation.storagePrimary,
       storageMode: storePresentation.storageMode,
+      resolvedLocalStore: localStoreDiagnostics.resolvedLocalStore,
+      localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
+      localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
+      opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
+      opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
+      opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
       indexedDbRevision: normalizeIndexedDbRevision(revision),
       syncState: normalizeGraphSyncState(syncState),
       syncDirty: Boolean(syncDirty),
@@ -4898,6 +4979,10 @@ async function syncIndexedDbMetaToPersistenceState(
       lastBackupRestoredAt: Number(lastBackupRestoredAt) || 0,
       lastBackupRollbackAt: Number(lastBackupRollbackAt) || 0,
       lastBackupFilename: String(lastBackupFilename || ""),
+      remoteSyncFormatVersion:
+        Number(remoteSyncFormatVersion || 0) ||
+        Number(graphPersistenceState.remoteSyncFormatVersion || 0) ||
+        1,
       lastSyncError: String(lastSyncError || ""),
       opfsWriteLockState:
         typeof db.getWriteLockSnapshot === "function"
@@ -6730,6 +6815,10 @@ async function loadGraphFromIndexedDb(
       updateGraphPersistenceState({
         storagePrimary: recoveredStore.storagePrimary,
         storageMode: recoveredStore.storageMode,
+        resolvedLocalStore: buildGraphLocalStoreSelectorKey(recoveredStore),
+        localStoreFormatVersion:
+          recoveredStore.storagePrimary === "opfs" ? 2 : 1,
+        localStoreMigrationState: "completed",
         indexedDbRevision: recoveredRevision,
         indexedDbLastError: "",
         lastSyncError: "",
@@ -6790,6 +6879,10 @@ async function loadGraphFromIndexedDb(
       updateGraphPersistenceState({
         storagePrimary: migratedStore.storagePrimary,
         storageMode: migratedStore.storageMode,
+        resolvedLocalStore: buildGraphLocalStoreSelectorKey(migratedStore),
+        localStoreFormatVersion:
+          migratedStore.storagePrimary === "opfs" ? 2 : 1,
+        localStoreMigrationState: "completed",
         indexedDbRevision: migratedRevision,
         indexedDbLastError: "",
         lastSyncError: "",
@@ -6809,6 +6902,7 @@ async function loadGraphFromIndexedDb(
         indexedDbLastError: String(
           migrationResult?.error || "migration-failed",
         ),
+        localStoreMigrationState: "failed",
         dualWriteLastResult: {
           action: "migration",
           source: "chat_metadata",
@@ -7855,6 +7949,7 @@ async function persistGraphToConfiguredDurableTier(
     revision,
     reason,
     lastProcessedAssistantFloor = null,
+    persistDelta = null,
   } = {},
 ) {
   const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
@@ -7924,6 +8019,7 @@ async function persistGraphToConfiguredDurableTier(
           reason: `${reason}:local-cache-mirror`,
           persistRole: "cache-mirror",
           scheduleCloudUpload: false,
+          persistDelta,
         });
       }
       return buildGraphPersistResult({
@@ -7944,6 +8040,7 @@ async function persistGraphToConfiguredDurableTier(
   const indexedDbResult = await saveGraphToIndexedDb(chatId, graph, {
     revision,
     reason,
+    persistDelta,
   });
   if (indexedDbResult?.saved) {
     persistGraphCommitMarker(context, {
@@ -8021,6 +8118,7 @@ async function persistGraphToConfiguredDurableTier(
       queueGraphPersistToIndexedDb(chatId, graph, {
         revision: acceptedRevision,
         reason: `${reason}:chat-state-fallback:promote-indexeddb`,
+        persistDelta,
       });
       return buildGraphPersistResult({
         saved: true,
@@ -8630,6 +8728,7 @@ async function persistExtractionBatchResult({
   reason = "extraction-batch-complete",
   lastProcessedAssistantFloor = null,
   graphSnapshot = null,
+  persistDelta = null,
 } = {}) {
   ensureCurrentGraphRuntimeState();
   const context = getContext();
@@ -8667,6 +8766,7 @@ async function persistExtractionBatchResult({
       revision,
       reason,
       lastProcessedAssistantFloor,
+      persistDelta,
     },
   );
   if (acceptedPersistResult?.accepted) {
@@ -10392,14 +10492,15 @@ async function saveGraphToIndexedDb(
     reason = "graph-save",
     persistRole = "primary",
     scheduleCloudUpload: scheduleCloudUploadOption = undefined,
+    persistDelta = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || !graph) {
+  if (!normalizedChatId || (!graph && !persistDelta)) {
     return {
       saved: false,
       chatId: normalizedChatId,
-      reason: "indexeddb-missing-chat-or-graph",
+      reason: "indexeddb-missing-chat-graph-or-delta",
       revision: normalizeIndexedDbRevision(revision),
     };
   }
@@ -10420,70 +10521,107 @@ async function saveGraphToIndexedDb(
     db = await manager.getCurrentDb(normalizedChatId);
     localStore = resolveDbGraphStorePresentation(db);
     const persistenceEnvironment = buildPersistenceEnvironment(context, localStore);
-    const currentIdentity = resolveCurrentChatIdentity(context);
-    const baseSnapshot =
-      readCachedIndexedDbSnapshot(normalizedChatId, localStore) ||
-      (await db.exportSnapshot());
-    const requestedRevision = resolvePersistRevisionFloor(revision, graph);
-    const snapshot = buildSnapshotFromGraph(graph, {
-      chatId: normalizedChatId,
-      revision: requestedRevision,
-      baseSnapshot,
-      lastModified: Date.now(),
-      meta: {
-        storagePrimary: localStore.storagePrimary,
-        storageMode: localStore.storageMode,
-        lastMutationReason: String(reason || "graph-save"),
-        integrity:
-          currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
-        hostChatId: currentIdentity.hostChatId || "",
-      },
-    });
-    const currentSettings = getSettings();
     const localStoreTier = resolveLocalStoreTierFromPresentation(localStore);
+    const currentIdentity = resolveCurrentChatIdentity(context);
+    const requestedRevision = resolvePersistRevisionFloor(revision, graph);
+    const currentSettings = getSettings();
     const shouldScheduleCloudUpload =
       scheduleCloudUploadOption != null
         ? scheduleCloudUploadOption === true
         : persistenceEnvironment.hostProfile !== "luker" &&
           persistRole !== "cache-mirror";
+    const directPersistDelta =
+      persistDelta &&
+      typeof persistDelta === "object" &&
+      !Array.isArray(persistDelta)
+        ? cloneRuntimeDebugValue(persistDelta, persistDelta)
+        : null;
+    let baseSnapshot = null;
+    let snapshot = null;
+    let delta = directPersistDelta;
+    let persistDeltaBuildDiagnostics = null;
+    let nativePersistModuleStatus = null;
+    let nativePersistPreloadStatus = "not-requested";
+    let nativePersistPreloadError = "";
+    let nativePersistPreloadMs = 0;
+    const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
+
+    if (!delta) {
+      baseSnapshot =
+        readCachedIndexedDbSnapshot(normalizedChatId, localStore) ||
+        (await db.exportSnapshot());
+      snapshot = buildSnapshotFromGraph(graph, {
+        chatId: normalizedChatId,
+        revision: requestedRevision,
+        baseSnapshot,
+        lastModified: Date.now(),
+        meta: {
+          storagePrimary: localStore.storagePrimary,
+          storageMode: localStore.storageMode,
+          lastMutationReason: String(reason || "graph-save"),
+          integrity:
+            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+          hostChatId: currentIdentity.hostChatId || "",
+        },
+      });
+    }
     const nativePersistBridgeMode = String(
       currentSettings.persistNativeDeltaBridgeMode || "json",
     );
-    const nativePersistRequested = currentSettings.persistUseNativeDelta === true;
+    const nativePersistRequested =
+      !directPersistDelta && currentSettings.persistUseNativeDelta === true;
     const nativePersistForceDisabled = currentSettings.graphNativeForceDisable === true;
-    const nativePersistGate = evaluatePersistNativeDeltaGate(
-      baseSnapshot,
-      snapshot,
-      currentSettings,
-    );
+    const nativePersistGate =
+      baseSnapshot && snapshot
+        ? evaluatePersistNativeDeltaGate(baseSnapshot, snapshot, currentSettings)
+        : {
+            allowed: false,
+            reasons: ["direct-delta"],
+            minSnapshotRecords: Number(
+              currentSettings.persistNativeDeltaThresholdRecords || 0,
+            ),
+            minStructuralDelta: Number(
+              currentSettings.persistNativeDeltaThresholdStructuralDelta || 0,
+            ),
+            minCombinedSerializedChars: Number(
+              currentSettings.persistNativeDeltaThresholdSerializedChars || 0,
+            ),
+            beforeRecordCount: 0,
+            afterRecordCount: 0,
+            maxSnapshotRecords: 0,
+            structuralDelta: 0,
+          };
     const shouldUseNativePersistDelta =
       nativePersistRequested &&
       nativePersistForceDisabled !== true &&
       nativePersistGate.allowed;
-    const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
-    let persistDeltaBuildDiagnostics = null;
-    let nativePersistModuleStatus = null;
-    let nativePersistPreloadStatus = nativePersistRequested
-      ? nativePersistForceDisabled
-        ? "force-disabled"
-        : nativePersistGate.allowed
-          ? "pending"
-          : "gated-out"
-      : "not-requested";
-    let nativePersistPreloadError = "";
-    let nativePersistPreloadMs = 0;
+    if (!directPersistDelta) {
+      nativePersistPreloadStatus = nativePersistRequested
+        ? nativePersistForceDisabled
+          ? "force-disabled"
+          : nativePersistGate.allowed
+            ? "pending"
+            : "gated-out"
+        : "not-requested";
+    }
     updatePersistDeltaDiagnostics({
       chatId: normalizedChatId,
       saveReason: String(reason || "graph-save"),
       requestedRevision,
       requestedNative: nativePersistRequested,
-      requestedBridgeMode: nativePersistBridgeMode,
+      requestedBridgeMode: directPersistDelta ? "direct-delta" : nativePersistBridgeMode,
       nativeForceDisabled: nativePersistForceDisabled,
       nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
-      gateAllowed: nativePersistGate.allowed,
-      gateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
-      preloadGateAllowed: nativePersistGate.allowed,
-      preloadGateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
+      gateAllowed: directPersistDelta ? true : nativePersistGate.allowed,
+      gateReasons: cloneRuntimeDebugValue(
+        directPersistDelta ? ["direct-delta"] : nativePersistGate.reasons,
+        [],
+      ),
+      preloadGateAllowed: directPersistDelta ? true : nativePersistGate.allowed,
+      preloadGateReasons: cloneRuntimeDebugValue(
+        directPersistDelta ? ["direct-delta"] : nativePersistGate.reasons,
+        [],
+      ),
       minSnapshotRecords: nativePersistGate.minSnapshotRecords,
       minStructuralDelta: nativePersistGate.minStructuralDelta,
       minCombinedSerializedChars: nativePersistGate.minCombinedSerializedChars,
@@ -10495,8 +10633,9 @@ async function saveGraphToIndexedDb(
       preloadMs: 0,
       preloadError: "",
       status: "building",
+      path: directPersistDelta ? "direct-delta" : undefined,
     });
-    if (shouldUseNativePersistDelta) {
+    if (!directPersistDelta && shouldUseNativePersistDelta) {
       const preloadStartedAt = readPersistDeltaDiagnosticsNow();
       try {
         if (!nativePersistDeltaInstallPromise) {
@@ -10528,20 +10667,70 @@ async function saveGraphToIndexedDb(
         }
       }
     }
-    const delta = buildPersistDelta(baseSnapshot, snapshot, {
-      useNativeDelta: shouldUseNativePersistDelta,
-      nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
-      persistNativeDeltaThresholdRecords:
-        currentSettings.persistNativeDeltaThresholdRecords,
-      persistNativeDeltaThresholdStructuralDelta:
-        currentSettings.persistNativeDeltaThresholdStructuralDelta,
-      persistNativeDeltaThresholdSerializedChars:
-        currentSettings.persistNativeDeltaThresholdSerializedChars,
-      persistNativeDeltaBridgeMode: nativePersistBridgeMode,
-      onDiagnostics(snapshot) {
-        persistDeltaBuildDiagnostics = snapshot;
-      },
-    });
+    if (!delta) {
+      delta = buildPersistDelta(baseSnapshot, snapshot, {
+        useNativeDelta: shouldUseNativePersistDelta,
+        nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
+        persistNativeDeltaThresholdRecords:
+          currentSettings.persistNativeDeltaThresholdRecords,
+        persistNativeDeltaThresholdStructuralDelta:
+          currentSettings.persistNativeDeltaThresholdStructuralDelta,
+        persistNativeDeltaThresholdSerializedChars:
+          currentSettings.persistNativeDeltaThresholdSerializedChars,
+        persistNativeDeltaBridgeMode: nativePersistBridgeMode,
+        onDiagnostics(snapshotValue) {
+          persistDeltaBuildDiagnostics = snapshotValue;
+        },
+      });
+    } else {
+      persistDeltaBuildDiagnostics = {
+        requestedNative: false,
+        requestedBridgeMode: "direct-delta",
+        usedNative: false,
+        path: "direct-delta",
+        gateAllowed: true,
+        gateReasons: ["direct-delta"],
+        nativeAttemptStatus: "not-requested",
+        nativeError: "",
+        beforeRecordCount: Number(
+          delta?.countDelta?.previous?.nodes || 0,
+        ) + Number(delta?.countDelta?.previous?.edges || 0),
+        afterRecordCount: Number(
+          delta?.countDelta?.next?.nodes || 0,
+        ) + Number(delta?.countDelta?.next?.edges || 0),
+        maxSnapshotRecords: Math.max(
+          Number(delta?.countDelta?.previous?.nodes || 0) +
+            Number(delta?.countDelta?.previous?.edges || 0),
+          Number(delta?.countDelta?.next?.nodes || 0) +
+            Number(delta?.countDelta?.next?.edges || 0),
+        ),
+        structuralDelta:
+          Number(delta?.upsertNodes?.length || 0) +
+          Number(delta?.upsertEdges?.length || 0) +
+          Number(delta?.deleteNodeIds?.length || 0) +
+          Number(delta?.deleteEdgeIds?.length || 0),
+        beforeSerializedChars: 0,
+        afterSerializedChars: 0,
+        combinedSerializedChars: 0,
+        prepareMs: 0,
+        nativeAttemptMs: 0,
+        lookupMs: 0,
+        jsDiffMs: 0,
+        hydrateMs: 0,
+        serializationCacheObjectHits: 0,
+        serializationCacheTokenHits: 0,
+        serializationCacheMisses: 0,
+        serializationCacheHits: 0,
+        preparedRecordSetCacheHits: 0,
+        preparedRecordSetCacheMisses: 0,
+        minCombinedSerializedChars: 0,
+        upsertNodeCount: Number(delta?.upsertNodes?.length || 0),
+        upsertEdgeCount: Number(delta?.upsertEdges?.length || 0),
+        deleteNodeCount: Number(delta?.deleteNodeIds?.length || 0),
+        deleteEdgeCount: Number(delta?.deleteEdgeIds?.length || 0),
+        tombstoneCount: Number(delta?.tombstones?.length || 0),
+      };
+    }
     const commitResult = await db.commitDelta(delta, {
       reason,
       requestedRevision,
@@ -10549,19 +10738,35 @@ async function saveGraphToIndexedDb(
     });
 
     let scheduleUploadWarning = "";
-    snapshot.meta.revision = normalizeIndexedDbRevision(
-      commitResult?.revision,
-      requestedRevision,
-    );
-    snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
-    snapshot.meta.lastMutationReason = String(reason || "graph-save");
-    snapshot.meta.storagePrimary = localStore.storagePrimary;
-    snapshot.meta.storageMode = localStore.storageMode;
-    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    if (graph) {
+      snapshot = buildSnapshotFromGraph(graph, {
+        chatId: normalizedChatId,
+        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
+        baseSnapshot: baseSnapshot || undefined,
+        lastModified: Number(commitResult?.lastModified || Date.now()),
+        meta: {
+          storagePrimary: localStore.storagePrimary,
+          storageMode: localStore.storageMode,
+          lastMutationReason: String(reason || "graph-save"),
+          integrity:
+            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+          hostChatId: currentIdentity.hostChatId || "",
+        },
+      });
+      snapshot.meta.revision = normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      );
+      snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
+      snapshot.meta.lastMutationReason = String(reason || "graph-save");
+      snapshot.meta.storagePrimary = localStore.storagePrimary;
+      snapshot.meta.storageMode = localStore.storageMode;
+      cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    }
 
     if (graph === currentGraph) {
       stampGraphPersistenceMeta(currentGraph, {
-        revision: snapshot.meta.revision,
+        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
         reason: String(reason || "graph-save"),
         chatId: normalizedChatId,
         integrity:
@@ -10596,18 +10801,23 @@ async function saveGraphToIndexedDb(
       requestedRevision,
       requestedNative: nativePersistRequested,
       requestedBridgeMode:
-        persistDeltaBuildDiagnostics?.requestedBridgeMode || nativePersistBridgeMode,
+        persistDeltaBuildDiagnostics?.requestedBridgeMode ||
+        (directPersistDelta ? "direct-delta" : nativePersistBridgeMode),
       buildRequestedNative: Boolean(persistDeltaBuildDiagnostics?.requestedNative),
       nativeForceDisabled: nativePersistForceDisabled,
       nativeFailOpen: currentSettings.nativeEngineFailOpen !== false,
       gateAllowed:
-        persistDeltaBuildDiagnostics?.gateAllowed ?? nativePersistGate.allowed,
+        persistDeltaBuildDiagnostics?.gateAllowed ??
+        (directPersistDelta ? true : nativePersistGate.allowed),
       gateReasons: cloneRuntimeDebugValue(
         persistDeltaBuildDiagnostics?.gateReasons,
-        nativePersistGate.reasons,
+        directPersistDelta ? ["direct-delta"] : nativePersistGate.reasons,
       ),
-      preloadGateAllowed: nativePersistGate.allowed,
-      preloadGateReasons: cloneRuntimeDebugValue(nativePersistGate.reasons, []),
+      preloadGateAllowed: directPersistDelta ? true : nativePersistGate.allowed,
+      preloadGateReasons: cloneRuntimeDebugValue(
+        directPersistDelta ? ["direct-delta"] : nativePersistGate.reasons,
+        [],
+      ),
       minSnapshotRecords: nativePersistGate.minSnapshotRecords,
       minStructuralDelta: nativePersistGate.minStructuralDelta,
       minCombinedSerializedChars:
@@ -10634,7 +10844,10 @@ async function saveGraphToIndexedDb(
         nativePersistModuleStatus?.error || nativePersistPreloadError || "",
       ),
       status: "committed",
-      commitRevision: snapshot.meta.revision,
+      commitRevision: normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      ),
       commitDelta: cloneRuntimeDebugValue(commitResult?.delta, null),
       totalMs: readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt,
     };
@@ -10653,6 +10866,18 @@ async function saveGraphToIndexedDb(
       typeof db?.getWriteLockSnapshot === "function"
         ? cloneRuntimeDebugValue(db.getWriteLockSnapshot(), null)
         : null;
+    const localStoreDiagnostics =
+      typeof readLocalStoreDiagnosticsSync === "function"
+        ? readLocalStoreDiagnosticsSync(db, localStore)
+        : {
+            resolvedLocalStore: `${localStore?.storagePrimary || "indexeddb"}:${localStore?.storageMode || "indexeddb"}`,
+            localStoreFormatVersion:
+              localStore.storagePrimary === "opfs" ? 2 : 1,
+            localStoreMigrationState: "idle",
+            opfsWalDepth: 0,
+            opfsPendingBytes: 0,
+            opfsCompactionState: null,
+          };
 
     if (persistRole === "cache-mirror") {
       updateGraphPersistenceState({
@@ -10662,16 +10887,28 @@ async function saveGraphToIndexedDb(
         cacheMirrorState: "saved",
         storagePrimary: localStore.storagePrimary,
         storageMode: localStore.storageMode,
-        indexedDbRevision: snapshot.meta.revision,
+        resolvedLocalStore: localStoreDiagnostics.resolvedLocalStore,
+        localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
+        localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
+        indexedDbRevision: normalizeIndexedDbRevision(
+          commitResult?.revision,
+          requestedRevision,
+        ),
         indexedDbLastError: "",
         lastSyncError: scheduleUploadWarning,
         opfsWriteLockState,
+        opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
+        opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
+        opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
         dualWriteLastResult: {
           action: "cache-mirror",
           target: localStore.storagePrimary,
           success: true,
           chatId: normalizedChatId,
-          revision: snapshot.meta.revision,
+          revision: normalizeIndexedDbRevision(
+            commitResult?.revision,
+            requestedRevision,
+          ),
           reason: String(reason || "graph-save"),
           warning: scheduleUploadWarning || "",
           delta: cloneRuntimeDebugValue(commitResult?.delta, null),
@@ -10684,7 +10921,10 @@ async function saveGraphToIndexedDb(
         accepted: false,
         mirrored: true,
         chatId: normalizedChatId,
-        revision: snapshot.meta.revision,
+        revision: normalizeIndexedDbRevision(
+          commitResult?.revision,
+          requestedRevision,
+        ),
         reason: String(reason || "graph-save"),
         saveMode: `${localStore.reasonPrefix}-cache-mirror`,
         storageTier: localStoreTier,
@@ -10700,18 +10940,30 @@ async function saveGraphToIndexedDb(
       cacheStorageTier: persistenceEnvironment.cacheStorageTier,
       cacheMirrorState:
         persistenceEnvironment.hostProfile === "luker" ? "idle" : "none",
-      revision: snapshot.meta.revision,
+      revision: normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      ),
       storagePrimary: localStore.storagePrimary,
       storageMode: localStore.storageMode,
+      resolvedLocalStore: localStoreDiagnostics.resolvedLocalStore,
+      localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
+      localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
       dbReady: true,
-      lastPersistedRevision: snapshot.meta.revision,
+      lastPersistedRevision: normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      ),
       pendingPersist: false,
       queuedPersistRevision: 0,
       queuedPersistChatId: "",
       queuedPersistMode: "",
       queuedPersistRotateIntegrity: false,
       queuedPersistReason: "",
-      indexedDbRevision: snapshot.meta.revision,
+      indexedDbRevision: normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      ),
       metadataIntegrity:
         getChatMetadataIntegrity(context) ||
           currentIdentity.integrity ||
@@ -10721,22 +10973,30 @@ async function saveGraphToIndexedDb(
       syncDirty: true,
       syncDirtyReason: String(reason || "graph-save"),
       lastPersistReason: String(reason || "graph-save"),
-      lastPersistMode: `${localStore.reasonPrefix}-delta`,
+      lastPersistMode: directPersistDelta
+        ? `${localStore.reasonPrefix}-direct-delta`
+        : `${localStore.reasonPrefix}-delta`,
       lastAcceptedRevision: Math.max(
         Number(graphPersistenceState.lastAcceptedRevision || 0),
-        snapshot.meta.revision,
+        normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
       ),
       acceptedStorageTier: localStoreTier,
       acceptedBy: localStoreTier,
       lastRecoverableStorageTier: "none",
       persistDiagnosticTier: "none",
       opfsWriteLockState,
+      opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
+      opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
+      opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
       dualWriteLastResult: {
         action: "save",
         target: localStore.storagePrimary,
         success: true,
         chatId: normalizedChatId,
-        revision: snapshot.meta.revision,
+        revision: normalizeIndexedDbRevision(
+          commitResult?.revision,
+          requestedRevision,
+        ),
         reason: String(reason || "graph-save"),
         warning: scheduleUploadWarning || "",
         delta: cloneRuntimeDebugValue(commitResult?.delta, null),
@@ -10755,15 +11015,21 @@ async function saveGraphToIndexedDb(
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
         chatId: normalizedChatId,
         reason: `shadow-promoted:${String(reason || "graph-save")}`,
-        revision: snapshot.meta.revision,
-        lastPersistedRevision: snapshot.meta.revision,
+        revision: normalizeIndexedDbRevision(
+          commitResult?.revision,
+          requestedRevision,
+        ),
+        lastPersistedRevision: normalizeIndexedDbRevision(
+          commitResult?.revision,
+          requestedRevision,
+        ),
         queuedPersistRevision: 0,
         queuedPersistChatId: "",
         pendingPersist: false,
         shadowSnapshotUsed: true,
         shadowSnapshotRevision: Math.max(
           Number(graphPersistenceState.shadowSnapshotRevision || 0),
-          snapshot.meta.revision,
+          normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
         ),
         shadowSnapshotUpdatedAt: String(
           graphPersistenceState.shadowSnapshotUpdatedAt || "",
@@ -10782,9 +11048,14 @@ async function saveGraphToIndexedDb(
       saved: true,
       accepted: true,
       chatId: normalizedChatId,
-      revision: snapshot.meta.revision,
+      revision: normalizeIndexedDbRevision(
+        commitResult?.revision,
+        requestedRevision,
+      ),
       reason: String(reason || "graph-save"),
-      saveMode: `${localStore.reasonPrefix}-delta`,
+      saveMode: directPersistDelta
+        ? `${localStore.reasonPrefix}-direct-delta`
+        : `${localStore.reasonPrefix}-delta`,
       storageTier: localStoreTier,
       warning: scheduleUploadWarning || "",
       delta: cloneRuntimeDebugValue(commitResult?.delta, null),
@@ -10849,10 +11120,11 @@ function queueGraphPersistToIndexedDb(
     reason = "graph-save",
     persistRole = "primary",
     scheduleCloudUpload = undefined,
+    persistDelta = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || !graph) return;
+  if (!normalizedChatId || (!graph && !persistDelta)) return;
 
   if (persistRole === "cache-mirror") {
     const persistenceEnvironment = buildPersistenceEnvironment(
@@ -10896,12 +11168,15 @@ function queueGraphPersistToIndexedDb(
           revision: normalizedRevision,
         };
       }
-      const graphSnapshot = cloneGraphForPersistence(graph, normalizedChatId);
+      const graphSnapshot = graph
+        ? cloneGraphForPersistence(graph, normalizedChatId)
+        : null;
       return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
         revision: normalizedRevision,
         reason,
         persistRole,
         scheduleCloudUpload,
+        persistDelta,
       });
     })
     .finally(() => {
@@ -13012,6 +13287,7 @@ async function executeExtractionBatch({
     {
       appendBatchJournal,
       applyProcessedHistorySnapshotToGraph,
+      buildPersistDelta,
       buildExtractionMessages,
       cloneGraphSnapshot,
       computePostProcessArtifacts,

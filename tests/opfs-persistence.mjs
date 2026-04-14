@@ -125,6 +125,15 @@ function getChatDirectory(rootDirectory, chatId) {
   return chatDirectory;
 }
 
+function getNestedDirectory(directoryHandle, ...names) {
+  let current = directoryHandle;
+  for (const name of names) {
+    current = current?.directories?.get(String(name || "")) || null;
+    assert.ok(current, `目录必须存在: ${names.join("/")}`);
+  }
+  return current;
+}
+
 function readJsonFromDirectory(directoryHandle, filename) {
   assert.ok(directoryHandle.files.has(filename), `文件必须存在: ${filename}`);
   return JSON.parse(String(directoryHandle.files.get(filename) || ""));
@@ -252,12 +261,21 @@ async function testImportExportPersistenceAndFileRotation() {
   );
 
   const manifestAfterFirstImport = readJsonFromDirectory(chatDirectory, "manifest.json");
-  const firstCoreFilename = manifestAfterFirstImport.activeCoreFilename;
-  const firstAuxFilename = manifestAfterFirstImport.activeAuxFilename;
-  assert.ok(firstCoreFilename.startsWith("core.snapshot."));
-  assert.ok(firstAuxFilename.startsWith("aux.snapshot."));
-  assert.ok(chatDirectory.files.has(firstCoreFilename));
-  assert.ok(chatDirectory.files.has(firstAuxFilename));
+  assert.equal(manifestAfterFirstImport.formatVersion, 2);
+  assert.equal(manifestAfterFirstImport.baseRevision, 4);
+  assert.equal(manifestAfterFirstImport.headRevision, 4);
+  assert.equal(manifestAfterFirstImport.wal.count, 0);
+  const metaDirectory = getNestedDirectory(chatDirectory, "meta");
+  const shardDirectory = getNestedDirectory(chatDirectory, "shards");
+  const nodeShardDirectory = getNestedDirectory(shardDirectory, "nodes");
+  const edgeShardDirectory = getNestedDirectory(shardDirectory, "edges");
+  const tombstoneShardDirectory = getNestedDirectory(shardDirectory, "tombstones");
+  const walDirectory = getNestedDirectory(chatDirectory, "wal");
+  assert.ok(metaDirectory.files.size > 0);
+  assert.ok(nodeShardDirectory.files.size > 0);
+  assert.ok(edgeShardDirectory.files.size > 0);
+  assert.ok(tombstoneShardDirectory.files.size > 0);
+  assert.equal(walDirectory.files.size, 0);
 
   const firstExportedSnapshot = await store.exportSnapshot();
   assert.equal(firstExportedSnapshot.meta.revision, 4);
@@ -325,15 +343,14 @@ async function testImportExportPersistenceAndFileRotation() {
   );
 
   const manifestAfterSecondImport = readJsonFromDirectory(chatDirectory, "manifest.json");
-  assert.notEqual(manifestAfterSecondImport.activeCoreFilename, firstCoreFilename);
-  assert.notEqual(manifestAfterSecondImport.activeAuxFilename, firstAuxFilename);
-  assert.ok(!chatDirectory.files.has(firstCoreFilename));
-  assert.ok(!chatDirectory.files.has(firstAuxFilename));
-  assert.deepEqual(Array.from(chatDirectory.files.keys()).sort(), [
-    manifestAfterSecondImport.activeAuxFilename,
-    manifestAfterSecondImport.activeCoreFilename,
-    "manifest.json",
-  ].sort());
+  assert.equal(manifestAfterSecondImport.formatVersion, 2);
+  assert.equal(manifestAfterSecondImport.baseRevision, 6);
+  assert.equal(manifestAfterSecondImport.headRevision, 6);
+  assert.equal(manifestAfterSecondImport.wal.count, 0);
+  const secondSnapshot = await reopenedStore.exportSnapshot();
+  assert.deepEqual(secondSnapshot.nodes.map((item) => item.id), ["node-2"]);
+  assert.equal(secondSnapshot.edges.length, 0);
+  assert.equal(secondSnapshot.tombstones.length, 0);
 
   await reopenedStore.close();
 }
@@ -366,7 +383,7 @@ async function testImportLegacyGraphMigrationAndSkipPaths() {
   assert.equal(migratedSnapshot.meta.migrationSource, "chat_metadata");
   assert.equal(migratedSnapshot.meta.legacyRetentionUntil, nowMs + 5000);
   assert.equal(migratedSnapshot.meta.storagePrimary, "opfs");
-  assert.equal(migratedSnapshot.meta.storageMode, "opfs-shadow");
+  assert.equal(migratedSnapshot.meta.storageMode, "opfs-primary");
   assert.equal(migratedSnapshot.nodes.length, 1);
   assert.equal(migratedSnapshot.edges.length, 1);
   assert.equal(migratedSnapshot.nodes[0]?.sourceFloor, 5);
@@ -495,7 +512,7 @@ async function testPruneExpiredTombstonesAndClearAll() {
   assert.equal(afterClearSnapshot.edges.length, 0);
   assert.equal(afterClearSnapshot.tombstones.length, 0);
   assert.equal(afterClearSnapshot.meta.storagePrimary, "opfs");
-  assert.equal(afterClearSnapshot.meta.storageMode, "opfs-shadow");
+  assert.equal(afterClearSnapshot.meta.storageMode, "opfs-primary");
 
   const emptyAfterClear = await store.isEmpty({ includeTombstones: true });
   assert.equal(emptyAfterClear.empty, true);

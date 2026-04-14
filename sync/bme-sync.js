@@ -7,6 +7,10 @@ import {
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
 const BME_SYNC_FILENAME_MAX_LENGTH = 180;
+const BME_REMOTE_SYNC_FORMAT_VERSION_V2 = 2;
+const BME_REMOTE_SYNC_NODE_CHUNK_SIZE = 2000;
+const BME_REMOTE_SYNC_EDGE_CHUNK_SIZE = 4000;
+const BME_REMOTE_SYNC_TOMBSTONE_CHUNK_SIZE = 2000;
 const BME_BACKUP_FILE_PREFIX = "ST-BME_backup_";
 const BME_BACKUP_MANIFEST_FILENAME = "ST-BME_BackupManifest.json";
 const BME_BACKUP_SCHEMA_VERSION = 1;
@@ -790,6 +794,95 @@ function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
     edges,
     tombstones,
     state,
+  };
+}
+
+function buildRemoteChunkFilename(baseFilename, kind, index, payload) {
+  const normalizedBase = String(baseFilename || "sync.json").replace(/\.json$/i, "");
+  const normalizedKind = String(kind || "chunk").trim().toLowerCase() || "chunk";
+  const serialized = JSON.stringify(payload);
+  const hash = createStableFilenameHash(`${normalizedBase}:${normalizedKind}:${serialized}`);
+  return `${normalizedBase}.__${normalizedKind}.${String(index).padStart(3, "0")}.${hash}.json`;
+}
+
+function chunkArray(records = [], chunkSize = 1000) {
+  const normalizedRecords = Array.isArray(records) ? records : [];
+  const normalizedChunkSize = Math.max(1, Math.floor(Number(chunkSize) || 1));
+  const chunks = [];
+  for (let index = 0; index < normalizedRecords.length; index += normalizedChunkSize) {
+    chunks.push(normalizedRecords.slice(index, index + normalizedChunkSize));
+  }
+  return chunks;
+}
+
+function buildRemoteSyncEnvelopeV2(snapshot = {}, chatId = "", filename = "") {
+  const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const runtimeMeta = toSerializableData(normalizedSnapshot.meta, {});
+  const manifestMeta = {
+    chatId: normalizedSnapshot.meta.chatId,
+    revision: normalizeRevision(normalizedSnapshot.meta.revision),
+    lastModified: normalizeTimestamp(normalizedSnapshot.meta.lastModified, 0),
+    deviceId: String(normalizedSnapshot.meta.deviceId || "").trim(),
+    nodeCount: normalizedSnapshot.nodes.length,
+    edgeCount: normalizedSnapshot.edges.length,
+    tombstoneCount: normalizedSnapshot.tombstones.length,
+    schemaVersion: normalizeNonNegativeInteger(normalizedSnapshot.meta.schemaVersion, 1),
+  };
+  const chunkSpecs = [
+    ...chunkArray(normalizedSnapshot.nodes, BME_REMOTE_SYNC_NODE_CHUNK_SIZE).map(
+      (records, index) => ({ kind: "nodes", records, index }),
+    ),
+    ...chunkArray(normalizedSnapshot.edges, BME_REMOTE_SYNC_EDGE_CHUNK_SIZE).map(
+      (records, index) => ({ kind: "edges", records, index }),
+    ),
+    ...chunkArray(
+      normalizedSnapshot.tombstones,
+      BME_REMOTE_SYNC_TOMBSTONE_CHUNK_SIZE,
+    ).map((records, index) => ({ kind: "tombstones", records, index })),
+    {
+      kind: "runtime-meta",
+      records: [runtimeMeta],
+      index: 0,
+    },
+  ];
+  const chunks = chunkSpecs.map((chunk) => {
+    const payload = {
+      kind: chunk.kind,
+      index: chunk.index,
+      records: toSerializableData(chunk.records, []),
+    };
+    const chunkFilename = buildRemoteChunkFilename(
+      filename,
+      chunk.kind,
+      chunk.index,
+      payload,
+    );
+    return {
+      kind: chunk.kind,
+      index: chunk.index,
+      count: Array.isArray(chunk.records) ? chunk.records.length : 0,
+      filename: chunkFilename,
+      payload,
+    };
+  });
+  return {
+    manifest: {
+      kind: "st-bme-sync",
+      formatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+      chatId: normalizedSnapshot.meta.chatId,
+      meta: manifestMeta,
+      state: toSerializableData(normalizedSnapshot.state, {
+        lastProcessedFloor: -1,
+        extractionCount: 0,
+      }),
+      chunks: chunks.map((chunk) => ({
+        kind: chunk.kind,
+        index: chunk.index,
+        count: chunk.count,
+        filename: chunk.filename,
+      })),
+    },
+    chunks,
   };
 }
 
@@ -1791,7 +1884,19 @@ async function readRemoteSnapshot(chatId, options = {}) {
 
     try {
       const remotePayload = await response.json();
-      const snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
+      let snapshot = null;
+      if (Number(remotePayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
+        snapshot = await readRemoteSnapshotV2Manifest(
+          remotePayload,
+          normalizedChatId,
+          {
+            ...options,
+            filename,
+          },
+        );
+      } else {
+        snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
+      }
       rememberResolvedSyncFilename(normalizedChatId, filename);
       return {
         exists: true,
@@ -1819,32 +1924,112 @@ async function readRemoteSnapshot(chatId, options = {}) {
   };
 }
 
+async function readRemoteJsonFile(filename, options = {}) {
+  const fetchImpl = getFetch(options);
+  const response = await fetchImpl(
+    `/user/files/${encodeURIComponent(filename)}?t=${Date.now()}`,
+    {
+      method: "GET",
+      cache: "no-store",
+    },
+  );
+  if (response.status === 404) {
+    throw new Error("remote-chunk-not-found");
+  }
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+  return await response.json();
+}
+
+async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  const chunks = Array.isArray(manifest?.chunks) ? manifest.chunks : [];
+  const nodes = [];
+  const edges = [];
+  const tombstones = [];
+  let runtimeMeta = {};
+
+  for (const chunk of chunks) {
+    const filename = String(chunk?.filename || "").trim();
+    if (!filename) continue;
+    const payload = await readRemoteJsonFile(filename, options);
+    const records = Array.isArray(payload?.records) ? payload.records : [];
+    switch (String(chunk.kind || "").trim()) {
+      case "nodes":
+        nodes.push(...sanitizeSnapshotRecordArray(records));
+        break;
+      case "edges":
+        edges.push(...sanitizeSnapshotRecordArray(records));
+        break;
+      case "tombstones":
+        tombstones.push(...sanitizeSnapshotRecordArray(records));
+        break;
+      case "runtime-meta":
+        runtimeMeta =
+          records[0] && typeof records[0] === "object" && !Array.isArray(records[0])
+            ? toSerializableData(records[0], {})
+            : {};
+        break;
+      default:
+        break;
+    }
+  }
+
+  return normalizeSyncSnapshot(
+    {
+      meta: {
+        ...runtimeMeta,
+        ...(manifest?.meta || {}),
+        formatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+      },
+      nodes,
+      edges,
+      tombstones,
+      state: toSerializableData(manifest?.state, {
+        lastProcessedFloor: -1,
+        extractionCount: 0,
+      }),
+    },
+    normalizedChatId,
+  );
+}
+
 async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   const normalizedSnapshot = normalizeSyncSnapshot(snapshot, normalizedChatId);
   const filename = await resolveSyncFilename(normalizedChatId, options);
   const fetchImpl = getFetch(options);
-
-  const payload = {
-    meta: toSerializableData(normalizedSnapshot.meta, {}),
-    nodes: toSerializableData(normalizedSnapshot.nodes, []),
-    edges: toSerializableData(normalizedSnapshot.edges, []),
-    tombstones: toSerializableData(normalizedSnapshot.tombstones, []),
-    state: toSerializableData(normalizedSnapshot.state, {
-      lastProcessedFloor: -1,
-      extractionCount: 0,
-    }),
+  const syncEnvelope = buildRemoteSyncEnvelopeV2(
+    normalizedSnapshot,
+    normalizedChatId,
+    filename,
+  );
+  const requestHeaders = {
+    ...getRequestHeadersSafe(options),
+    "Content-Type": "application/json",
   };
-
+  for (const chunk of syncEnvelope.chunks) {
+    const chunkResponse = await fetchImpl("/api/files/upload", {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify({
+        name: chunk.filename,
+        data: encodeBase64Utf8(JSON.stringify(chunk.payload, null, 2)),
+      }),
+    });
+    if (!chunkResponse.ok) {
+      const errorText = await chunkResponse.text().catch(() => chunkResponse.statusText);
+      throw new Error(errorText || `HTTP ${chunkResponse.status}`);
+    }
+  }
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
-    headers: {
-      ...getRequestHeadersSafe(options),
-      "Content-Type": "application/json",
-    },
+    headers: requestHeaders,
     body: JSON.stringify({
       name: filename,
-      data: encodeBase64Utf8(JSON.stringify(payload, null, 2)),
+      data: encodeBase64Utf8(JSON.stringify(syncEnvelope.manifest, null, 2)),
     }),
   });
 
@@ -1857,7 +2042,7 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
   return {
     filename,
     path: String(uploadResult?.path || ""),
-    payload,
+    payload: syncEnvelope.manifest,
   };
 }
 
@@ -2292,6 +2477,7 @@ export async function upload(chatId, options = {}) {
       syncDirty: false,
       syncDirtyReason: "",
       lastModified: localSnapshot.meta.lastModified,
+      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
 
     return {
@@ -2357,6 +2543,7 @@ export async function download(chatId, options = {}) {
       lastSyncedRevision: remoteRevision,
       syncDirty: false,
       syncDirtyReason: "",
+      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
 
     await invokeSyncAppliedHook(options, {
@@ -2694,6 +2881,7 @@ export async function syncNow(chatId, options = {}) {
       syncDirtyReason: "",
       lastProcessedFloor: mergedSnapshot.state.lastProcessedFloor,
       extractionCount: mergedSnapshot.state.extractionCount,
+      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
 
     const uploadResult = await writeSnapshotToRemote(mergedSnapshot, normalizedChatId, options);
@@ -2703,6 +2891,7 @@ export async function syncNow(chatId, options = {}) {
       lastSyncedRevision: normalizeRevision(mergedSnapshot.meta.revision),
       syncDirty: false,
       syncDirtyReason: "",
+      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
 
     await invokeSyncAppliedHook(options, {
@@ -2849,6 +3038,27 @@ export async function deleteRemoteSyncFile(chatId, options = {}) {
     let lastNotFoundFilename = filenames[0] || "";
 
     for (const filename of filenames) {
+      try {
+        const manifestPayload = await readRemoteJsonFile(filename, options);
+        if (Number(manifestPayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
+          for (const chunk of Array.isArray(manifestPayload?.chunks) ? manifestPayload.chunks : []) {
+            const chunkFilename = String(chunk?.filename || "").trim();
+            if (!chunkFilename) continue;
+            await fetchImpl("/api/files/delete", {
+              method: "POST",
+              headers: {
+                ...getRequestHeadersSafe(options),
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                path: `/user/files/${chunkFilename}`,
+              }),
+            }).catch(() => null);
+          }
+        }
+      } catch {
+        // best-effort chunk cleanup
+      }
       const response = await fetchImpl("/api/files/delete", {
         method: "POST",
         headers: {
