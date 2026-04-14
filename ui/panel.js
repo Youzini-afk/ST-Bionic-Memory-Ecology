@@ -1021,21 +1021,21 @@ function _bindFabToggle() {
 }
 
 function _initFloatingBall() {
-  const existing = document.getElementById("bme-floating-ball");
-  if (existing) {
-    _fabEl = existing;
-    ensureFabMountedAtRoot();
-    syncFabPosition();
-    return;
+  let fab = document.getElementById("bme-floating-ball");
+  if (!fab) {
+    fab = document.createElement("div");
+    fab.id = "bme-floating-ball";
+    fab.setAttribute("data-status", "idle");
+    fab.innerHTML = `
+      <i class="fa-solid fa-brain bme-fab-icon"></i>
+      <span class="bme-fab-tooltip">BME 记忆图谱</span>
+    `;
+  } else if (!fab.querySelector(".bme-fab-icon")) {
+    fab.innerHTML = `
+      <i class="fa-solid fa-brain bme-fab-icon"></i>
+      <span class="bme-fab-tooltip">BME 记忆图谱</span>
+    `;
   }
-
-  const fab = document.createElement("div");
-  fab.id = "bme-floating-ball";
-  fab.setAttribute("data-status", "idle");
-  fab.innerHTML = `
-    <i class="fa-solid fa-brain bme-fab-icon"></i>
-    <span class="bme-fab-tooltip">BME 记忆图谱</span>
-  `;
   _fabEl = fab;
   ensureFabMountedAtRoot();
 
@@ -1047,10 +1047,16 @@ function _initFloatingBall() {
   if (saved) {
     fab.dataset.positionMode = "saved";
     applyFabPosition(saved, fab);
-  } else {
+  } else if (!fab.style.left || !fab.style.top) {
     fab.dataset.positionMode = "default";
     syncFabPosition();
   }
+
+  if (fab.dataset.bmeFabBound === "true") {
+    return;
+  }
+  fab.dataset.bmeFabBound = "true";
+  delete fab.dataset.bmeBootstrap;
 
   // 拖拽 + 点击逻辑
   let isDragging = false;
