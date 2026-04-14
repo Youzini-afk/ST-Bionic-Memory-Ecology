@@ -883,6 +883,64 @@ async function createGraphPersistenceHarness({
     buildSnapshotFromGraph,
     evaluatePersistNativeDeltaGate,
     buildBmeDbName,
+    BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB: "indexeddb",
+    BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW: "opfs-shadow",
+    detectOpfsSupport: async () => ({
+      available: false,
+      reason: "opfs-unsupported-in-test",
+    }),
+    isGraphLocalStorageModeOpfs: (mode = "") =>
+      /^opfs-/.test(String(mode || "").trim().toLowerCase()),
+    normalizeGraphLocalStorageMode: (mode = "", fallback = "indexeddb") => {
+      const normalized = String(mode || "").trim().toLowerCase();
+      if (
+        normalized === "indexeddb" ||
+        normalized === "opfs-shadow" ||
+        normalized === "opfs-primary"
+      ) {
+        return normalized;
+      }
+      return String(fallback || "indexeddb").trim().toLowerCase() || "indexeddb";
+    },
+    OpfsGraphStore: class {
+      constructor(dbChatId = "") {
+        this.chatId = String(dbChatId || "");
+        this.storeKind = "opfs";
+        this.storeMode = "opfs-shadow";
+      }
+      async open() {}
+      async close() {}
+      async exportSnapshot() {
+        return getIndexedDbSnapshotForChat(this.chatId);
+      }
+      async commitDelta(delta, options = {}) {
+        return commitIndexedDbDelta(this.chatId, delta, options);
+      }
+      async importSnapshot(snapshot) {
+        setIndexedDbSnapshotForChat(this.chatId, snapshot);
+        return {
+          revision: Number(snapshot?.meta?.revision) || 0,
+        };
+      }
+      async isEmpty() {
+        const snapshot = getIndexedDbSnapshotForChat(this.chatId);
+        return {
+          empty:
+            !snapshot ||
+            (!snapshot.nodes?.length && !snapshot.edges?.length && !snapshot.tombstones?.length),
+        };
+      }
+      async getRevision() {
+        return Number(getIndexedDbSnapshotForChat(this.chatId)?.meta?.revision || 0);
+      }
+      async getMeta(key, fallbackValue = 0) {
+        const snapshot = getIndexedDbSnapshotForChat(this.chatId) || {};
+        if (!snapshot?.meta || !(key in snapshot.meta)) {
+          return fallbackValue;
+        }
+        return snapshot.meta[key];
+      }
+    },
     scheduleUpload() {
       if (runtimeContext.__scheduleUploadShouldThrow) {
         throw new Error("schedule-upload-failed");

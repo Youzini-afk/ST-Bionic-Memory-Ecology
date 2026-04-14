@@ -122,6 +122,7 @@ export function createGenerationRecallHarness(options = {}) {
       },
       isRecalling: false,
       getCurrentChatId: () => "chat-main",
+      normalizeChatIdCandidate: (value = "") => String(value ?? "").trim(),
       normalizeRecallInputText: (text = "") => String(text || "").trim(),
       isTrivialUserInput,
       getAssistantTurns: (chat = []) =>
