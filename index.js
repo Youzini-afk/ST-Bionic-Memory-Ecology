@@ -8989,6 +8989,10 @@ function shouldSyncGraphLoadFromLiveContext(
 
 function syncGraphLoadFromLiveContext(options = {}) {
   const { source = "live-context-sync", force = false } = options;
+  const attemptIndex = Math.max(
+    0,
+    Math.floor(Number(options?.attemptIndex) || 0),
+  );
   const context = getContext();
   syncCommitMarkerToPersistenceState(context);
   if (!shouldSyncGraphLoadFromLiveContext(context, { force })) {

@@ -1849,6 +1849,47 @@ result = {
 }
 
 {
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-luker-panel-open",
+    globalChatId: "chat-luker-panel-open",
+    characterId: "char-luker-panel-open",
+    chatMetadata: {
+      integrity: "chat-luker-panel-open-integrity",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  harness.api.setGraphPersistenceState({
+    loadState: "idle",
+    chatId: "chat-luker-panel-open",
+    reason: "cold-start",
+    revision: 0,
+    lastPersistedRevision: 0,
+    dbReady: false,
+    writesBlocked: false,
+  });
+
+  const result = harness.api.syncGraphLoadFromLiveContext({
+    source: "panel-open-sync",
+  });
+
+  assert.equal(
+    result.reason,
+    "luker-chat-state-probe-pending",
+    "Luker 面板打开时应进入 chat-state probe，而不是抛出未定义变量异常",
+  );
+  assert.equal(result.attemptIndex, 0);
+  assert.equal(harness.api.getGraphPersistenceState().loadState, "loading");
+  assert.equal(
+    harness.api.getGraphPersistenceState().primaryStorageTier,
+    "luker-chat-state",
+  );
+}
+
+{
   const metadataGraph = stampPersistedGraph(
     createMeaningfulGraph("chat-stale-metadata", "metadata-older"),
     {
