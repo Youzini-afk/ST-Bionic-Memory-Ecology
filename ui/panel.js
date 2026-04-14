@@ -323,6 +323,8 @@ let currentTabId = "dashboard";
 let currentConfigSectionId = "toggles";
 let currentTaskSectionId = "pipeline";
 let currentSelectedMemoryNodeId = "";
+let taskMemorySearchDraft = _createTaskMemorySearchState();
+let taskMemorySearchApplied = _createTaskMemorySearchState();
 let currentTaskProfileTaskType = "extract";
 let currentTaskProfileTabId = "generation";
 let currentTaskProfileBlockId = "";
@@ -1733,6 +1735,88 @@ function _matchesFloorFilter(node, ranges) {
   return false;
 }
 
+function _createTaskMemorySearchState(overrides = {}) {
+  return {
+    query: String(overrides.query || ""),
+    floorQuery: String(overrides.floorQuery || ""),
+    filter: String(overrides.filter || "all") || "all",
+  };
+}
+
+function _readTaskMemoryDraftFromControls() {
+  taskMemorySearchDraft = _createTaskMemorySearchState({
+    query: document.getElementById("bme-task-memory-search")?.value,
+    floorQuery: document.getElementById("bme-task-memory-floor")?.value,
+    filter: document.getElementById("bme-task-memory-filter")?.value,
+  });
+  return _createTaskMemorySearchState(taskMemorySearchDraft);
+}
+
+function _applyTaskMemorySearchDraft() {
+  taskMemorySearchApplied = _readTaskMemoryDraftFromControls();
+  _refreshTaskMemoryBrowser();
+}
+
+function _ensureTaskMemoryBrowserShell(el) {
+  if (!el) return null;
+
+  let listEl = document.getElementById("bme-task-memory-list");
+  let detailEl = document.getElementById("bme-task-memory-detail");
+  if (!listEl || !detailEl) {
+    const draft = _createTaskMemorySearchState(taskMemorySearchDraft);
+    el.innerHTML = `
+      <div class="bme-memory-master-detail">
+        <div class="bme-memory-list-panel">
+          <div class="bme-memory-list-filters">
+            <input type="text" class="bme-search-input" id="bme-task-memory-search" placeholder="搜索记忆节点..." value="${_escHtml(draft.query)}" />
+            <input type="text" class="bme-search-input bme-floor-input" id="bme-task-memory-floor" placeholder="楼层 (如 4, 3-10)" value="${_escHtml(draft.floorQuery)}" />
+            <select class="bme-filter-select" id="bme-task-memory-filter">
+              <option value="all"${draft.filter === "all" ? " selected" : ""}>全部</option>
+              <option value="scope:objective"${draft.filter === "scope:objective" ? " selected" : ""}>客观</option>
+              <option value="scope:characterPov"${draft.filter === "scope:characterPov" ? " selected" : ""}>角色 POV</option>
+              <option value="scope:userPov"${draft.filter === "scope:userPov" ? " selected" : ""}>用户 POV</option>
+              <option value="pov_memory"${draft.filter === "pov_memory" ? " selected" : ""}>主观记忆</option>
+              <option value="event"${draft.filter === "event" ? " selected" : ""}>事件</option>
+              <option value="location"${draft.filter === "location" ? " selected" : ""}>地点</option>
+              <option value="thread"${draft.filter === "thread" ? " selected" : ""}>线索</option>
+              <option value="rule"${draft.filter === "rule" ? " selected" : ""}>规则</option>
+            </select>
+            <button
+              type="button"
+              class="bme-config-secondary-btn bme-task-memory-search-btn"
+              id="bme-task-memory-apply"
+            >
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <span>搜索</span>
+            </button>
+          </div>
+          <div class="bme-memory-list-scroll" id="bme-task-memory-list"></div>
+        </div>
+        <div class="bme-memory-detail-panel" id="bme-task-memory-detail"></div>
+      </div>
+    `;
+    listEl = document.getElementById("bme-task-memory-list");
+    detailEl = document.getElementById("bme-task-memory-detail");
+  }
+
+  const searchInput = document.getElementById("bme-task-memory-search");
+  const floorInput = document.getElementById("bme-task-memory-floor");
+  const filterSelect = document.getElementById("bme-task-memory-filter");
+  const applyButton = document.getElementById("bme-task-memory-apply");
+  if (searchInput && !searchInput._bmeBound) {
+    const syncDraft = () => {
+      _readTaskMemoryDraftFromControls();
+    };
+    searchInput.addEventListener("input", syncDraft);
+    floorInput?.addEventListener("input", syncDraft);
+    filterSelect?.addEventListener("change", syncDraft);
+    applyButton?.addEventListener("click", () => _applyTaskMemorySearchDraft());
+    searchInput._bmeBound = true;
+  }
+
+  return { listEl, detailEl };
+}
+
 function _refreshTaskMemoryBrowser() {
   const el = document.getElementById("bme-task-memory");
   if (!el) return;
@@ -1744,11 +1828,14 @@ function _refreshTaskMemoryBrowser() {
     return;
   }
 
-  const currentQuery = String(document.getElementById("bme-task-memory-search")?.value || "")
-    .trim()
-    .toLowerCase();
-  const currentFilter = document.getElementById("bme-task-memory-filter")?.value || "all";
-  const currentFloorQuery = String(document.getElementById("bme-task-memory-floor")?.value || "").trim();
+  const shell = _ensureTaskMemoryBrowserShell(el);
+  const listEl = shell?.listEl;
+  if (!listEl) return;
+
+  const currentQuery = String(taskMemorySearchApplied.query || "");
+  const normalizedQuery = currentQuery.trim().toLowerCase();
+  const currentFilter = taskMemorySearchApplied.filter || "all";
+  const currentFloorQuery = String(taskMemorySearchApplied.floorQuery || "").trim();
 
   let nodes = Array.isArray(graph.nodes)
     ? graph.nodes.filter((node) => !node?.archived)
@@ -1758,15 +1845,15 @@ function _refreshTaskMemoryBrowser() {
     nodes = nodes.filter((node) => _matchesMemoryFilter(node, currentFilter));
   }
 
-  if (currentQuery) {
+  if (normalizedQuery) {
     nodes = nodes.filter((node) => {
       const name = getNodeDisplayName(node).toLowerCase();
       const snippet = _getNodeSnippet(node).toLowerCase();
       const fieldsText = JSON.stringify(node?.fields || {}).toLowerCase();
       return (
-        name.includes(currentQuery) ||
-        snippet.includes(currentQuery) ||
-        fieldsText.includes(currentQuery)
+        name.includes(normalizedQuery) ||
+        snippet.includes(normalizedQuery) ||
+        fieldsText.includes(normalizedQuery)
       );
     });
   }
@@ -1810,6 +1897,14 @@ function _refreshTaskMemoryBrowser() {
       </div>`;
   }).join("");
 
+  listEl.innerHTML =
+    listItems ||
+    '<div style="padding:16px;font-size:12px;color:var(--bme-on-surface-dim)">鏃犺妭鐐?/div>';
+
+  _renderTaskMemoryDetailSelection(graph);
+  _bindTaskMemoryListClick();
+  return;
+
   el.innerHTML = `
     <div class="bme-memory-master-detail">
       <div class="bme-memory-list-panel">
@@ -1838,27 +1933,11 @@ function _refreshTaskMemoryBrowser() {
 
   _renderTaskMemoryDetailSelection(graph);
   _bindTaskMemoryListClick();
-
-  const searchInput = document.getElementById("bme-task-memory-search");
-  const floorInput = document.getElementById("bme-task-memory-floor");
-  const filterSelect = document.getElementById("bme-task-memory-filter");
-  if (searchInput) {
-    let timer = null;
-    searchInput.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
-    });
-    floorInput?.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => _refreshTaskMemoryBrowser(), 180);
-    });
-  }
-  filterSelect?.addEventListener("change", () => _refreshTaskMemoryBrowser());
 }
 
 function _bindTaskMemoryListClick() {
   const list = document.getElementById("bme-task-memory-list");
-  if (!list) return;
+  if (!list || list._bmeBound) return;
   list.addEventListener("click", (e) => {
     const item = e.target.closest(".bme-memory-node-item");
     if (!item) return;
@@ -1872,6 +1951,7 @@ function _bindTaskMemoryListClick() {
       _renderTaskMemoryDetailSelection(graph);
     }
   });
+  list._bmeBound = true;
 }
 
 function _renderTaskMemoryDetailSelection(graph = _getGraph?.()) {
