@@ -63,6 +63,7 @@ globalThis.__lukerLlmRoutingExtensionSettings = {
 globalThis.require = require;
 
 const llm = await import("../llm/llm.js");
+const { createDefaultTaskProfiles } = await import("../prompting/prompt-profiles.js");
 const extensionsApi = await import("../../../../extensions.js");
 
 if (originalRequire === undefined) {
@@ -124,7 +125,9 @@ globalThis.__lukerLlmRoutingSendOpenAIRequest = async (
   };
 };
 
-extensionsApi.extension_settings.st_bme = {};
+extensionsApi.extension_settings.st_bme = {
+  taskProfiles: createDefaultTaskProfiles(),
+};
 
 try {
   const result = await llm.callLLMForJSON({
@@ -144,6 +147,81 @@ try {
     reverse_proxy: "https://example-luker-route.test/v1",
     proxy_password: "sk-luker-route",
     secret_id: "luker-secret-1",
+  });
+
+  capturedOptions = null;
+  capturedMessages = null;
+  extensionsApi.extension_settings.st_bme = {
+    llmApiUrl: "https://stale-generic-config.invalid/v1",
+    llmApiKey: "sk-stale-generic",
+    llmModel: "stale-model",
+    taskProfiles: createDefaultTaskProfiles(),
+  };
+
+  const routedResult = await llm.callLLMForJSON({
+    systemPrompt: "system",
+    userPrompt: "user",
+    maxRetries: 0,
+    taskType: "extract",
+    requestSource: "test:luker-global-stale",
+  });
+
+  assert.deepEqual(routedResult, { operations: [] });
+  assert.deepEqual(capturedOptions?.apiSettingsOverride, {
+    chat_completion_source: "openai",
+    reverse_proxy: "https://example-luker-route.test/v1",
+    proxy_password: "sk-luker-route",
+    secret_id: "luker-secret-1",
+  });
+
+  capturedOptions = null;
+  capturedMessages = null;
+  const taskProfiles = createDefaultTaskProfiles();
+  taskProfiles.extract.profiles[0].generation.llm_preset = "luker-profile-alpha";
+  extensionsApi.extension_settings.st_bme = {
+    llmApiUrl: "https://stale-generic-config.invalid/v1",
+    llmApiKey: "sk-stale-generic",
+    llmModel: "stale-model",
+    taskProfiles,
+  };
+  globalThis.Luker = {
+    getContext() {
+      return {
+        mainApi: "openai",
+        chatCompletionSettings: {
+          chat_completion_source: "openai",
+        },
+        getChatState() {},
+        updateChatState() {},
+        getChatStateBatch() {},
+        resolveChatCompletionRequestProfile({ profileName }) {
+          assert.equal(profileName, "luker-profile-alpha");
+          return {
+            requestApi: "openai",
+            apiSettingsOverride: {
+              chat_completion_source: "openai",
+              reverse_proxy: "https://example-luker-profile.test/v1",
+              proxy_password: "sk-luker-profile",
+            },
+          };
+        },
+      };
+    },
+  };
+
+  const profileRoutedResult = await llm.callLLMForJSON({
+    systemPrompt: "system",
+    userPrompt: "user",
+    maxRetries: 0,
+    taskType: "extract",
+    requestSource: "test:luker-profile-route",
+  });
+
+  assert.deepEqual(profileRoutedResult, { operations: [] });
+  assert.deepEqual(capturedOptions?.apiSettingsOverride, {
+    chat_completion_source: "openai",
+    reverse_proxy: "https://example-luker-profile.test/v1",
+    proxy_password: "sk-luker-profile",
   });
 } finally {
   if (originalSendOpenAIRequest === undefined) {
