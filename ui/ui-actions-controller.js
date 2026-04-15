@@ -1056,6 +1056,18 @@ export async function onClearGraphController(runtime) {
     return { cancelled: true };
   }
   if (!runtime.ensureGraphMutationReady("清空图谱")) return;
+  const chatId = runtime.getCurrentChatId?.();
+
+  if (chatId && typeof runtime.clearCurrentChatRecoveryAnchors === "function") {
+    runtime.clearCurrentChatRecoveryAnchors({
+      chatId,
+      reason: "manual-clear-graph",
+      immediate: true,
+      clearMetadataFull: true,
+      clearCommitMarker: true,
+      clearPendingPersist: true,
+    });
+  }
 
   const nextGraph = runtime.normalizeGraphRuntimeState(
     runtime.createEmptyGraph(),
@@ -1066,9 +1078,21 @@ export async function onClearGraphController(runtime) {
   runtime.markVectorStateDirty?.("清空图谱后需要重建向量索引");
   runtime.setExtractionCount(0);
   runtime.setLastExtractedItems([]);
-  runtime.saveGraphToChat({ reason: "manual-clear-graph" });
+  runtime.saveGraphToChat({
+    reason: "manual-clear-graph",
+    persistMetadata: true,
+    captureShadow: false,
+  });
   runtime.refreshPanelLiveState();
-  runtime.toastr.success("当前图谱已清空");
+  const persistenceState = runtime.getGraphPersistenceState?.() || {};
+  const remoteSyncMayRestore =
+    Number(persistenceState.lastSyncedRevision || 0) > 0 &&
+    String(runtime.getSettings?.()?.cloudStorageMode || "automatic") !== "manual";
+  runtime.toastr.success(
+    remoteSyncMayRestore
+      ? "当前图谱已清空；若刷新后旧节点重新出现，请再清空服务端同步数据"
+      : "当前图谱已清空",
+  );
   return { handledToast: true };
 }
 
@@ -1256,8 +1280,11 @@ export async function onDeleteCurrentIdbController(runtime) {
     const deletedOpfs =
       currentOpfsResult?.deleted === true ||
       restoreSafetyOpfsResult?.deleted === true;
+    const remoteSyncMayRestore =
+      Number(runtime.getGraphPersistenceState?.()?.lastSyncedRevision || 0) > 0 &&
+      String(runtime.getSettings?.()?.cloudStorageMode || "automatic") !== "manual";
     runtime.toastr.success(
-      `已清空当前聊天本地存储：IndexedDB ${deletedIndexedDbCount > 0 ? "已处理" : "无"}，OPFS ${deletedOpfs ? "已处理" : "无"}`,
+      `已清空当前聊天本地存储：IndexedDB ${deletedIndexedDbCount > 0 ? "已处理" : "无"}，OPFS ${deletedOpfs ? "已处理" : "无"}${remoteSyncMayRestore ? "；若刷新后旧图恢复，请再删除服务端同步数据" : ""}`,
     );
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);

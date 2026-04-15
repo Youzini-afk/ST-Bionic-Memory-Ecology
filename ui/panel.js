@@ -11627,6 +11627,7 @@ function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
 
 function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   const persistence = batchStatus?.persistence || null;
+  const localPersistError = String(loadInfo?.indexedDbLastError || "").trim();
   if (_hasMeaningfulPersistenceRecord(persistence)) {
     const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
@@ -11640,6 +11641,7 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
         ? `rev ${Number(persistence.revision)}`
         : "",
       persistence.reason || "",
+      !accepted && localPersistError ? `本地错误 ${localPersistError}` : "",
     ].filter(Boolean);
     return parts.join(" · ") || "尚无持久化记录";
   }
@@ -11674,6 +11676,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
     graph?.historyState?.lastProcessedAssistantFloor ?? -1;
   const persistence = batchStatus?.persistence || null;
   const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
+  const localPersistError = String(loadInfo?.indexedDbLastError || "").trim();
   const processedRange = Array.isArray(batchStatus?.processedRange)
     ? batchStatus.processedRange
     : [];
@@ -11683,7 +11686,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
       : null;
 
   if (_hasMeaningfulPersistenceRecord(persistence) && !accepted && pendingFloor != null) {
-    return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
+    return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}${localPersistError ? ` · 本地错误 ${localPersistError}` : ""}`;
   }
 
   if (loadInfo?.persistMismatchReason) {

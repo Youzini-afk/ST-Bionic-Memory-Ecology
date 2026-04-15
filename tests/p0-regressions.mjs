@@ -67,6 +67,7 @@ import {
   shouldRunRecallForTransaction,
 } from "../ui/ui-status.js";
 import {
+  onClearGraphController,
   onDeleteCurrentIdbController,
   onManualCompressController,
   onManualEvolveController,
@@ -2082,6 +2083,16 @@ async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
           options.immediate === true,
         ]);
       },
+      getGraphPersistenceState() {
+        return {
+          lastSyncedRevision: 9,
+        };
+      },
+      getSettings() {
+        return {
+          cloudStorageMode: "automatic",
+        };
+      },
       syncGraphLoadFromLiveContext(options = {}) {
         callLog.push([
           "sync-graph-load",
@@ -2119,9 +2130,126 @@ async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
       clearMarkerIndex < syncLoadIndex,
       "应先清理 commit marker，再触发图谱重探测",
     );
+    assert.ok(
+      callLog.some(
+        (entry) =>
+          entry[0] === "toast-success" &&
+          /删除服务端同步数据/.test(String(entry[1] || "")),
+      ),
+      "若当前聊天存在远端同步记录，应提示用户本地缓存删除后仍可能被远端恢复",
+    );
   } finally {
     globalThis.indexedDB = originalIndexedDb;
   }
+}
+
+async function testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata() {
+  const callLog = [];
+  const runtime = {
+    confirm() {
+      return true;
+    },
+    ensureGraphMutationReady() {
+      return true;
+    },
+    getCurrentChatId() {
+      return "chat-clear-graph";
+    },
+    clearCurrentChatRecoveryAnchors(options = {}) {
+      callLog.push([
+        "clear-recovery-anchors",
+        String(options.chatId || ""),
+        String(options.reason || ""),
+        options.clearMetadataFull === true,
+        options.clearCommitMarker === true,
+        options.clearPendingPersist === true,
+      ]);
+    },
+    normalizeGraphRuntimeState(graph, chatId) {
+      return {
+        ...(graph || {}),
+        historyState: {
+          chatId,
+        },
+      };
+    },
+    createEmptyGraph() {
+      return {
+        nodes: [],
+        edges: [],
+        historyState: {},
+      };
+    },
+    setCurrentGraph(graph) {
+      callLog.push(["set-current-graph", Array.isArray(graph?.nodes) ? graph.nodes.length : -1]);
+    },
+    clearInjectionState() {
+      callLog.push(["clear-injection"]);
+    },
+    markVectorStateDirty(reason) {
+      callLog.push(["mark-vector-dirty", String(reason || "")]);
+    },
+    setExtractionCount(count) {
+      callLog.push(["set-extraction-count", Number(count)]);
+    },
+    setLastExtractedItems(items = []) {
+      callLog.push(["set-last-extracted-items", Array.isArray(items) ? items.length : -1]);
+    },
+    saveGraphToChat(options = {}) {
+      callLog.push([
+        "save-graph",
+        String(options.reason || ""),
+        options.persistMetadata === true,
+        options.captureShadow === false,
+      ]);
+    },
+    refreshPanelLiveState() {
+      callLog.push(["refresh-panel"]);
+    },
+    getGraphPersistenceState() {
+      return {
+        lastSyncedRevision: 0,
+      };
+    },
+    getSettings() {
+      return {
+        cloudStorageMode: "automatic",
+      };
+    },
+    toastr: {
+      success(message) {
+        callLog.push(["toast-success", String(message || "")]);
+      },
+      warning(message) {
+        callLog.push(["toast-warning", String(message || "")]);
+      },
+      error(message) {
+        callLog.push(["toast-error", String(message || "")]);
+      },
+    },
+  };
+
+  const result = await onClearGraphController(runtime);
+  assert.equal(result?.handledToast, true);
+  assert.ok(
+    callLog.some(
+      (entry) =>
+        entry[0] === "clear-recovery-anchors" &&
+        entry[1] === "chat-clear-graph" &&
+        entry[2] === "manual-clear-graph",
+    ),
+    "清空图谱时应先清理当前聊天的恢复锚点",
+  );
+  assert.ok(
+    callLog.some(
+      (entry) =>
+        entry[0] === "save-graph" &&
+        entry[1] === "manual-clear-graph" &&
+        entry[2] === true &&
+        entry[3] === true,
+    ),
+    "清空图谱时应显式把空图写入 metadata，避免旧恢复锚点复活",
+  );
 }
 
 async function testCompressTypeAcceptsTopLevelFieldsResult() {
@@ -6919,6 +7047,8 @@ await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();
+await testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata();
+await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testLagModeSmartTriggerOnlyScoresEligibleWindow();
 await testLagModeRespectsExtractEveryAgainstEligibleWindow();
 await testGenerationEndedResumesPendingAutoExtractionAfterSettle();

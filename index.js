@@ -17042,6 +17042,7 @@ const _cleanupRuntime = () => ({
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
   }),
   getGraphPersistenceState: () => graphPersistenceState,
+  getSettings,
   toastr,
 });
 
