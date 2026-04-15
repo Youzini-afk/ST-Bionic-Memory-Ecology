@@ -46,6 +46,26 @@ try {
   assert.equal(resolveChatStateTargetChatId(target), "group-1");
   assert.equal(serializeBmeChatStateTarget(target), "group:group-1");
 
+  const noChatSelectedContext = {
+    chatId: "",
+    characterId: "",
+    groupId: null,
+    getChatState() {},
+    updateChatState() {},
+    getChatStateBatch() {},
+  };
+  globalThis.Luker = {
+    getContext() {
+      return noChatSelectedContext;
+    },
+  };
+  assert.equal(
+    resolveBmeHostProfile(noChatSelectedContext),
+    "luker",
+    "未进入聊天时，宿主档案仍应反映 Luker 环境，而不是退回 generic-st",
+  );
+  assert.equal(resolveCurrentBmeChatStateTarget(noChatSelectedContext), null);
+
   const characterContext = {
     chatId: "chat-char-1",
     characterId: "char-1",

@@ -182,17 +182,12 @@ function isAndroidWebViewLike() {
 export function isLukerHostContext(context = getHostRuntimeContext()) {
   const activeContext =
     context && typeof context === "object" ? context : getHostRuntimeContext();
-  const hasImplicitCurrentChat =
-    Boolean(resolveChatFileName(activeContext)) ||
-    normalizeString(activeContext.groupId) !== "" ||
-    normalizeString(activeContext.characterId) !== "";
   return (
     !!globalThis.Luker &&
     typeof globalThis.Luker?.getContext === "function" &&
     typeof activeContext.getChatState === "function" &&
     typeof activeContext.updateChatState === "function" &&
-    typeof activeContext.getChatStateBatch === "function" &&
-    hasImplicitCurrentChat
+    typeof activeContext.getChatStateBatch === "function"
   );
 }
 
