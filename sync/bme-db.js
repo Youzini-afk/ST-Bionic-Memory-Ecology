@@ -2224,6 +2224,31 @@ async function loadDexieFromNodeFallback() {
   throw new Error("Dexie 不可用（Node 环境缺少 dexie 依赖）");
 }
 
+async function loadDexieByModuleImport() {
+  const moduleUrl = new URL(DEXIE_SCRIPT_SOURCE, import.meta.url).toString();
+  try {
+    const imported = await import(moduleUrl);
+    const DexieCtor =
+      imported?.default ||
+      imported?.Dexie ||
+      globalThis.Dexie ||
+      null;
+    if (typeof DexieCtor === "function") {
+      globalThis.Dexie = DexieCtor;
+      return DexieCtor;
+    }
+    if (typeof globalThis.Dexie === "function") {
+      return globalThis.Dexie;
+    }
+  } catch (error) {
+    throw new Error(
+      `Dexie 模块导入失败: ${error?.message || String(error) || moduleUrl}`,
+    );
+  }
+
+  throw new Error("Dexie 模块已加载但未导出可用构造函数");
+}
+
 async function loadDexieByScriptInjection() {
   const scriptUrl = new URL(DEXIE_SCRIPT_SOURCE, import.meta.url).toString();
   const doc = globalThis.document;
@@ -2289,6 +2314,12 @@ export async function ensureDexieLoaded() {
 
       if (typeof globalThis.document === "undefined") {
         return await loadDexieFromNodeFallback();
+      }
+
+      try {
+        return await loadDexieByModuleImport();
+      } catch (moduleError) {
+        console.warn("[ST-BME] Dexie 模块导入失败，回退脚本注入:", moduleError);
       }
 
       return await loadDexieByScriptInjection();

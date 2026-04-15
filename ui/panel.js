@@ -11759,10 +11759,13 @@ function _refreshPersistenceRepairUi(
   }
 
   if (loadInfo?.pendingPersist === true) {
-    help.textContent =
+    const baseMessage =
       isLuker
         ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再试“修复主 Sidecar”或“重建本地缓存”。"
         : "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
+    help.textContent = loadInfo?.indexedDbLastError
+      ? `${baseMessage}\n本地错误：${loadInfo.indexedDbLastError}`
+      : baseMessage;
     return;
   }
 
