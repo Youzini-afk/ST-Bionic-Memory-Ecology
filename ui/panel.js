@@ -11750,12 +11750,15 @@ function _refreshPersistenceRepairUi(
   loadInfo = _getGraphPersistenceSnapshot(),
   batchStatus = _getLatestBatchStatusSnapshot(),
 ) {
-  const row = document.getElementById("bme-persist-repair-row");
   const help = document.getElementById("bme-persist-repair-help");
+  const lukerGroup = document.getElementById("bme-luker-sidecar-group");
+  const actionHelp = document.getElementById("bme-actions-persist-repair-help");
   const lukerCacheBtn = document.getElementById("bme-act-rebuild-luker-cache");
   const lukerRepairBtn = document.getElementById("bme-act-repair-luker-sidecar");
   const lukerCompactBtn = document.getElementById("bme-act-compact-luker-sidecar");
-  if (!row || !help) return;
+  const retryBtn = document.getElementById("bme-act-retry-persist");
+  const probeBtn = document.getElementById("bme-act-probe-graph-load");
+  if (!help) return;
 
   const persistence = batchStatus?.persistence || null;
   const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
@@ -11764,41 +11767,45 @@ function _refreshPersistenceRepairUi(
     Boolean(loadInfo?.persistMismatchReason) ||
     (_hasMeaningfulPersistenceRecord(persistence) && !accepted);
 
-  row.hidden = !shouldShow;
   help.hidden = !shouldShow;
   const isLuker = String(loadInfo?.hostProfile || "") === "luker";
+  if (lukerGroup) lukerGroup.hidden = !shouldShow;
+  if (retryBtn) retryBtn.hidden = false;
+  if (probeBtn) probeBtn.hidden = false;
   if (lukerCacheBtn) lukerCacheBtn.hidden = !isLuker;
   if (lukerRepairBtn) lukerRepairBtn.hidden = !isLuker;
   if (lukerCompactBtn) lukerCompactBtn.hidden = !isLuker;
   if (!shouldShow) {
     help.textContent = "";
+    if (actionHelp) actionHelp.textContent = "";
     return;
   }
 
+  let helpText = "";
   if (loadInfo?.pendingPersist === true) {
-    const baseMessage =
+    helpText =
       isLuker
-        ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再试“修复主 Sidecar”或“重建本地缓存”。"
+        ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再到“操作”页的 Luker Sidecar 区域做“修复主 Sidecar”或“重建本地缓存”。"
         : "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
-    help.textContent = loadInfo?.indexedDbLastError
-      ? `${baseMessage}\n本地错误：${loadInfo.indexedDbLastError}`
-      : baseMessage;
-    return;
+    if (loadInfo?.indexedDbLastError) {
+      helpText = `${helpText}\n本地错误：${loadInfo.indexedDbLastError}`;
+    }
+  } else if (loadInfo?.persistMismatchReason) {
+    helpText = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
+  } else {
+    helpText =
+      persistence?.recoverable === true
+        ? isLuker
+          ? "最近一批已经捕获了恢复锚点，但 Luker 主 sidecar 还没确认。可以先重试持久化；必要时再到“操作”页的持久化修复区域执行更深修复。"
+          : "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
+        : isLuker
+          ? "最近一批持久化没有被 Luker manifest 接受。可以先重试持久化；如果主 sidecar 与本地缓存脱节，再到“操作”页的持久化修复区域执行更深修复。"
+          : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
   }
-
-  if (loadInfo?.persistMismatchReason) {
-    help.textContent = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
-    return;
+  help.textContent = helpText;
+  if (actionHelp) {
+    actionHelp.textContent = helpText;
   }
-
-  help.textContent =
-    persistence?.recoverable === true
-      ? isLuker
-        ? "最近一批已经捕获了恢复锚点，但 Luker 主 sidecar 还没确认。可以先重试持久化；必要时再修复主 Sidecar或重建本地缓存。"
-        : "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
-      : isLuker
-        ? "最近一批持久化没有被 Luker manifest 接受。可以先重试持久化；如果主 sidecar 与本地缓存脱节，再修复主 Sidecar或重建本地缓存。"
-        : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
