@@ -544,6 +544,147 @@ function clearCurrentChatCommitMarker(
   };
 }
 
+function clearCurrentChatMetadataGraphFallback(
+  {
+    context = getContext(),
+    reason = "manual-clear-graph-metadata-fallback",
+    immediate = true,
+    clearPendingPersist = false,
+  } = {},
+) {
+  if (!context) {
+    return {
+      cleared: false,
+      reason: "missing-context",
+      saveMode: "",
+    };
+  }
+
+  const hadGraphMetadata =
+    context?.chatMetadata &&
+    Object.prototype.hasOwnProperty.call(context.chatMetadata, GRAPH_METADATA_KEY) &&
+    context.chatMetadata[GRAPH_METADATA_KEY] != null;
+  writeChatMetadataPatch(context, {
+    [GRAPH_METADATA_KEY]: null,
+  });
+  const saveMode = triggerChatMetadataSave(context, { immediate });
+  updateGraphPersistenceState({
+    persistMismatchReason: "",
+    lastPersistReason: String(
+      reason || "manual-clear-graph-metadata-fallback",
+    ),
+    lastPersistMode: `metadata-full-clear:${saveMode}`,
+    lastRecoverableStorageTier:
+      graphPersistenceState.lastRecoverableStorageTier === "metadata-full"
+        ? "none"
+        : graphPersistenceState.lastRecoverableStorageTier,
+    pendingPersist:
+      clearPendingPersist === true ? false : graphPersistenceState.pendingPersist,
+    writesBlocked:
+      clearPendingPersist === true ? false : graphPersistenceState.writesBlocked,
+    queuedPersistRevision:
+      clearPendingPersist === true ? 0 : graphPersistenceState.queuedPersistRevision,
+    queuedPersistChatId:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistChatId,
+    queuedPersistMode:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistMode,
+    queuedPersistRotateIntegrity:
+      clearPendingPersist === true
+        ? false
+        : graphPersistenceState.queuedPersistRotateIntegrity,
+    queuedPersistReason:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistReason,
+  });
+  if (clearPendingPersist === true) {
+    clearPendingGraphPersistRetry();
+  }
+
+  return {
+    cleared: hadGraphMetadata,
+    reason: String(reason || "manual-clear-graph-metadata-fallback"),
+    saveMode,
+  };
+}
+
+function clearCurrentChatRecoveryAnchors(
+  {
+    context = getContext(),
+    chatId = getCurrentChatId(context),
+    reason = "manual-clear-recovery-anchors",
+    immediate = true,
+    clearMetadataFull = true,
+    clearCommitMarker = true,
+    clearPendingPersist = true,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const shadowCleared = normalizedChatId
+    ? removeGraphShadowSnapshot(normalizedChatId)
+    : false;
+  const metadataResult = clearMetadataFull
+    ? clearCurrentChatMetadataGraphFallback({
+        context,
+        reason: `${reason}:metadata-full`,
+        immediate,
+        clearPendingPersist,
+      })
+    : {
+        cleared: false,
+        reason: "metadata-full-retained",
+        saveMode: "",
+      };
+  const markerResult = clearCommitMarker
+    ? clearCurrentChatCommitMarker({
+        context,
+        reason: `${reason}:commit-marker`,
+        immediate,
+        resetAcceptedRevision: clearPendingPersist === true,
+      })
+    : {
+        cleared: false,
+        reason: "commit-marker-retained",
+        saveMode: "",
+        marker: null,
+      };
+
+  updateGraphPersistenceState({
+    shadowSnapshotUsed: false,
+    shadowSnapshotRevision: 0,
+    shadowSnapshotUpdatedAt: "",
+    shadowSnapshotReason: "",
+    lastRecoverableStorageTier:
+      shadowCleared || metadataResult?.cleared ? "none" : graphPersistenceState.lastRecoverableStorageTier,
+    pendingPersist:
+      clearPendingPersist === true ? false : graphPersistenceState.pendingPersist,
+    writesBlocked:
+      clearPendingPersist === true ? false : graphPersistenceState.writesBlocked,
+    queuedPersistRevision:
+      clearPendingPersist === true ? 0 : graphPersistenceState.queuedPersistRevision,
+    queuedPersistChatId:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistChatId,
+    queuedPersistMode:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistMode,
+    queuedPersistRotateIntegrity:
+      clearPendingPersist === true
+        ? false
+        : graphPersistenceState.queuedPersistRotateIntegrity,
+    queuedPersistReason:
+      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistReason,
+  });
+  if (clearPendingPersist === true) {
+    clearPendingGraphPersistRetry();
+  }
+
+  return {
+    chatId: normalizedChatId,
+    shadowCleared,
+    metadataCleared: metadataResult?.cleared === true,
+    markerCleared: markerResult?.cleared === true,
+    metadataResult,
+    markerResult,
+  };
+}
+
 function isAcceptedPersistTier(storageTier = "none") {
   const normalizedTier = String(storageTier || "none").trim().toLowerCase();
   return normalizedTier === "indexeddb" || normalizedTier === "chat-state";
@@ -4110,6 +4251,182 @@ async function createPreferredGraphLocalStore(
     });
   }
   return new BmeDatabase(chatId);
+}
+
+async function refreshCurrentChatLocalStoreBinding(
+  {
+    chatId = getCurrentChatId(getContext()),
+    forceCapabilityRefresh = false,
+    reopenCurrentDb = false,
+    source = "manual-refresh",
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const settings = getSettings();
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  const shouldProbeCapability =
+    forceCapabilityRefresh === true ||
+    !bmeLocalStoreCapabilitySnapshot.checked ||
+    requestedMode === "auto" ||
+    isGraphLocalStorageModeOpfs(requestedMode);
+
+  if (shouldProbeCapability) {
+    await getGraphLocalStoreCapability(forceCapabilityRefresh === true);
+  }
+
+  const preferredLocalStore =
+    await resolvePreferredGraphLocalStorePresentation(settings);
+  let resolvedLocalStore = preferredLocalStore;
+  let localStoreDiagnostics = {
+    resolvedLocalStore: buildGraphLocalStoreSelectorKey(preferredLocalStore),
+    localStoreFormatVersion:
+      preferredLocalStore.storagePrimary === "opfs" ? 2 : 1,
+    localStoreMigrationState: "idle",
+    opfsWalDepth: 0,
+    opfsPendingBytes: 0,
+    opfsCompactionState: null,
+  };
+  let opfsWriteLockState = cloneRuntimeDebugValue(
+    graphPersistenceState.opfsWriteLockState,
+    null,
+  );
+  let reopenError = "";
+
+  if (
+    reopenCurrentDb === true &&
+    normalizedChatId &&
+    bmeChatManager &&
+    typeof bmeChatManager.getCurrentChatId === "function" &&
+    typeof bmeChatManager.closeCurrent === "function" &&
+    bmeChatManager.getCurrentChatId() === normalizedChatId
+  ) {
+    await bmeChatManager.closeCurrent();
+  }
+
+  if (normalizedChatId) {
+    clearCachedIndexedDbSnapshot(normalizedChatId);
+    try {
+      const manager = ensureBmeChatManager();
+      if (manager) {
+        const db = await manager.getCurrentDb(normalizedChatId);
+        resolvedLocalStore = resolveDbGraphStorePresentation(db);
+        localStoreDiagnostics = readLocalStoreDiagnosticsSync(
+          db,
+          resolvedLocalStore,
+        );
+        opfsWriteLockState =
+          typeof db?.getWriteLockSnapshot === "function"
+            ? cloneRuntimeDebugValue(db.getWriteLockSnapshot(), null)
+            : opfsWriteLockState;
+      }
+    } catch (error) {
+      reopenError = error?.message || String(error);
+      console.warn(
+        "[ST-BME] 刷新当前聊天本地存储绑定失败:",
+        {
+          chatId: normalizedChatId,
+          source,
+          requestedMode,
+          error: reopenError,
+        },
+      );
+    }
+  }
+
+  const persistenceEnvironment = buildPersistenceEnvironment(
+    getContext(),
+    resolvedLocalStore,
+  );
+  updateGraphPersistenceState({
+    hostProfile: persistenceEnvironment.hostProfile,
+    primaryStorageTier: persistenceEnvironment.primaryStorageTier,
+    cacheStorageTier: persistenceEnvironment.cacheStorageTier,
+    storagePrimary: resolvedLocalStore.storagePrimary,
+    storageMode: resolvedLocalStore.storageMode,
+    resolvedLocalStore: localStoreDiagnostics.resolvedLocalStore,
+    localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
+    localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
+    opfsWriteLockState,
+    opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
+    opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
+    opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
+    indexedDbLastError: reopenError ? reopenError : "",
+  });
+
+  return {
+    capability: cloneRuntimeDebugValue(bmeLocalStoreCapabilitySnapshot, null),
+    requestedMode,
+    resolvedLocalStore,
+    localStoreDiagnostics,
+    reopenError,
+  };
+}
+
+function buildPanelOpenLocalStoreRefreshPlan(
+  context = getContext(),
+  settings = getSettings(),
+) {
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  const usesOpfsPreference =
+    requestedMode === "auto" || isGraphLocalStorageModeOpfs(requestedMode);
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+  const preferredLocalStore = getPreferredGraphLocalStorePresentationSync(settings);
+  const resolvedLocalStoreKey = String(
+    graphPersistenceState.resolvedLocalStore ||
+      buildGraphLocalStoreSelectorKey(preferredLocalStore),
+  ).trim();
+  const resolvedIsOpfs = resolvedLocalStoreKey.startsWith("opfs:");
+  const preferredIsOpfs = preferredLocalStore.storagePrimary === "opfs";
+  const capabilityUnchecked = bmeLocalStoreCapabilitySnapshot.checked !== true;
+  const pendingPersist = graphPersistenceState.pendingPersist === true;
+  const writesBlocked = graphPersistenceState.writesBlocked === true;
+  const loadState = String(graphPersistenceState.loadState || "");
+  const loadingWithoutDb =
+    loadState === GRAPH_LOAD_STATES.LOADING && graphPersistenceState.dbReady !== true;
+  const blocked = loadState === GRAPH_LOAD_STATES.BLOCKED;
+  const persistError = String(graphPersistenceState.indexedDbLastError || "").trim();
+  const localStoreMismatch =
+    Boolean(activeChatId) &&
+    preferredIsOpfs &&
+    Boolean(resolvedLocalStoreKey) &&
+    !resolvedIsOpfs;
+  const shouldRefresh =
+    usesOpfsPreference &&
+    (capabilityUnchecked ||
+      pendingPersist ||
+      writesBlocked ||
+      blocked ||
+      loadingWithoutDb ||
+      Boolean(persistError) ||
+      localStoreMismatch);
+  const forceCapabilityRefresh =
+    capabilityUnchecked ||
+    pendingPersist ||
+    blocked ||
+    loadingWithoutDb ||
+    Boolean(persistError) ||
+    localStoreMismatch;
+  const reopenCurrentDb =
+    Boolean(activeChatId) &&
+    (pendingPersist || writesBlocked || blocked || Boolean(persistError) || localStoreMismatch);
+  const reasons = [];
+  if (capabilityUnchecked) reasons.push("capability-unchecked");
+  if (pendingPersist) reasons.push("pending-persist");
+  if (writesBlocked) reasons.push("writes-blocked");
+  if (blocked) reasons.push("load-blocked");
+  if (loadingWithoutDb) reasons.push("loading-without-db");
+  if (persistError) reasons.push("local-store-error");
+  if (localStoreMismatch) reasons.push("resolved-store-mismatch");
+
+  return {
+    shouldRefresh,
+    forceCapabilityRefresh,
+    reopenCurrentDb,
+    requestedMode,
+    resolvedLocalStoreKey,
+    preferredLocalStore,
+    reasons,
+  };
 }
 
 function getMessageHideSettings(settings = null) {
@@ -8631,6 +8948,21 @@ async function retryPendingGraphPersist({
     });
   }
 
+  const requestedLocalStoreMode = getRequestedGraphLocalStorageMode(
+    getSettings(),
+  );
+  if (
+    requestedLocalStoreMode === "auto" ||
+    isGraphLocalStorageModeOpfs(requestedLocalStoreMode)
+  ) {
+    await refreshCurrentChatLocalStoreBinding({
+      chatId: activeChatId,
+      forceCapabilityRefresh: true,
+      reopenCurrentDb: true,
+      source: reason,
+    });
+  }
+
   const pendingPersistGraphSource = resolvePendingPersistGraphSource(
     queuedChatId,
   );
@@ -11082,6 +11414,18 @@ async function saveGraphToIndexedDb(
       typeof db?.getWriteLockSnapshot === "function"
         ? cloneRuntimeDebugValue(db.getWriteLockSnapshot(), null)
         : null;
+    const localStoreDiagnostics =
+      typeof readLocalStoreDiagnosticsSync === "function"
+        ? readLocalStoreDiagnosticsSync(db, localStore)
+        : {
+            resolvedLocalStore: `${localStore?.storagePrimary || "indexeddb"}:${localStore?.storageMode || "indexeddb"}`,
+            localStoreFormatVersion:
+              localStore?.storagePrimary === "opfs" ? 2 : 1,
+            localStoreMigrationState: "idle",
+            opfsWalDepth: 0,
+            opfsPendingBytes: 0,
+            opfsCompactionState: null,
+          };
     updateGraphPersistenceState({
       hostProfile: persistenceEnvironment.hostProfile,
       primaryStorageTier: persistenceEnvironment.primaryStorageTier,
@@ -11092,8 +11436,14 @@ async function saveGraphToIndexedDb(
           : graphPersistenceState.cacheMirrorState,
       storagePrimary: localStore.storagePrimary,
       storageMode: localStore.storageMode,
+      resolvedLocalStore: localStoreDiagnostics.resolvedLocalStore,
+      localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
+      localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
       indexedDbLastError: error?.message || String(error),
       opfsWriteLockState,
+      opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
+      opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
+      opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
       dualWriteLastResult: {
         action: persistRole === "cache-mirror" ? "cache-mirror" : "save",
         target: localStore.storagePrimary,
@@ -11112,7 +11462,7 @@ async function saveGraphToIndexedDb(
       reason:
         persistRole === "cache-mirror"
           ? "cache-mirror-write-failed"
-          : "indexeddb-write-failed",
+          : `${String(localStore?.reasonPrefix || "indexeddb")}-write-failed`,
       error,
     };
   }
@@ -15306,6 +15656,8 @@ const _cleanupRuntime = () => ({
   clearCachedIndexedDbSnapshot,
   clearAllCachedIndexedDbSnapshots,
   clearCurrentChatCommitMarker,
+  clearCurrentChatRecoveryAnchors,
+  refreshCurrentChatLocalStoreBinding,
   deleteCurrentChatOpfsStorage: async (chatId) =>
     await deleteOpfsChatStorage(chatId),
   deleteAllOpfsStorage: async () =>
@@ -15564,6 +15916,11 @@ async function onRollbackLastRestore() {
 }
 
 async function onRetryPendingPersist() {
+  await refreshCurrentChatLocalStoreBinding({
+    forceCapabilityRefresh: true,
+    reopenCurrentDb: true,
+    source: "panel-manual-persist-retry",
+  });
   const hadPending = graphPersistenceState.pendingPersist === true;
   const result = await retryPendingGraphPersist({
     reason: "panel-manual-persist-retry",
@@ -15589,6 +15946,11 @@ async function onRetryPendingPersist() {
 }
 
 async function onProbeGraphLoad() {
+  await refreshCurrentChatLocalStoreBinding({
+    forceCapabilityRefresh: true,
+    reopenCurrentDb: true,
+    source: "panel-manual-graph-probe",
+  });
   const result = syncGraphLoadFromLiveContext({
     source: "panel-manual-graph-probe",
     force: true,
@@ -15617,10 +15979,19 @@ async function onProbeGraphLoad() {
   await initializePanelBridgeController({
     $,
     actions: {
-      syncGraphLoad: () =>
-        syncGraphLoadFromLiveContext({
+      syncGraphLoad: async () => {
+        const refreshPlan = buildPanelOpenLocalStoreRefreshPlan();
+        if (refreshPlan.shouldRefresh) {
+          await refreshCurrentChatLocalStoreBinding({
+            forceCapabilityRefresh: refreshPlan.forceCapabilityRefresh,
+            reopenCurrentDb: refreshPlan.reopenCurrentDb,
+            source: `panel-open-sync:${refreshPlan.reasons.join(",") || "refresh"}`,
+          });
+        }
+        return syncGraphLoadFromLiveContext({
           source: "panel-open-sync",
-        }),
+        });
+      },
       extractTask: onExtractionTask,
       extract: onManualExtract,
       compress: onManualCompress,

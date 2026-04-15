@@ -883,7 +883,9 @@ async function createGraphPersistenceHarness({
     buildSnapshotFromGraph,
     evaluatePersistNativeDeltaGate,
     buildBmeDbName,
+    BME_GRAPH_LOCAL_STORAGE_MODE_AUTO: "auto",
     BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB: "indexeddb",
+    BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY: "opfs-primary",
     BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW: "opfs-shadow",
     detectOpfsSupport: async () => ({
       available: false,
@@ -1089,6 +1091,7 @@ result = {
   writeGraphShadowSnapshot,
   removeGraphShadowSnapshot,
   maybeCaptureGraphShadowSnapshot,
+  buildPanelOpenLocalStoreRefreshPlan,
   loadGraphFromChat,
   loadGraphFromIndexedDb,
   saveGraphToChat,
@@ -1128,6 +1131,13 @@ result = {
   },
   getGraphPersistenceState() {
     return graphPersistenceState;
+  },
+  setLocalStoreCapabilitySnapshot(patch = {}) {
+    bmeLocalStoreCapabilitySnapshot = {
+      ...bmeLocalStoreCapabilitySnapshot,
+      ...(patch || {}),
+    };
+    return bmeLocalStoreCapabilitySnapshot;
   },
   setChatContext(nextContext) {
     globalThis.__chatContext = nextContext;
@@ -1846,6 +1856,84 @@ result = {
     "hostChatId 与 integrity 只是同一聊天的不同身份时，面板打开不应误判成要重新同步",
   );
   assert.equal(result.reason, "no-sync-needed");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-panel-open-healthy",
+    globalChatId: "chat-panel-open-healthy",
+    chatMetadata: {
+      integrity: "chat-panel-open-healthy-integrity",
+    },
+  });
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    graphLocalStorageMode: "auto",
+  };
+  harness.api.setLocalStoreCapabilitySnapshot({
+    checked: true,
+    opfsAvailable: true,
+    reason: "ok",
+  });
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-panel-open-healthy",
+    reason: "healthy",
+    dbReady: true,
+    writesBlocked: false,
+    pendingPersist: false,
+    indexedDbLastError: "",
+    resolvedLocalStore: "opfs:opfs-primary",
+    storagePrimary: "opfs",
+    storageMode: "opfs-primary",
+  });
+
+  const plan = harness.api.buildPanelOpenLocalStoreRefreshPlan();
+
+  assert.equal(
+    plan.shouldRefresh,
+    false,
+    "健康态的面板打开不应每次都强刷本地引擎绑定",
+  );
+  assert.equal(Array.isArray(plan.reasons), true);
+  assert.equal(plan.reasons.length, 0);
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-panel-open-pending",
+    globalChatId: "chat-panel-open-pending",
+    chatMetadata: {
+      integrity: "chat-panel-open-pending-integrity",
+    },
+  });
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    graphLocalStorageMode: "auto",
+  };
+  harness.api.setLocalStoreCapabilitySnapshot({
+    checked: true,
+    opfsAvailable: true,
+    reason: "ok",
+  });
+  harness.api.setGraphPersistenceState({
+    loadState: "blocked",
+    chatId: "chat-panel-open-pending",
+    reason: "persist-queued",
+    dbReady: false,
+    writesBlocked: true,
+    pendingPersist: true,
+    indexedDbLastError: "opfs-write-failed",
+    resolvedLocalStore: "indexeddb:indexeddb",
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+  });
+
+  const plan = harness.api.buildPanelOpenLocalStoreRefreshPlan();
+
+  assert.equal(plan.shouldRefresh, true);
+  assert.equal(plan.forceCapabilityRefresh, true);
+  assert.equal(plan.reopenCurrentDb, true);
+  assert.equal(plan.reasons.includes("pending-persist"), true);
+  assert.equal(plan.reasons.includes("resolved-store-mismatch"), true);
 }
 
 {

@@ -1216,10 +1216,37 @@ export async function onDeleteCurrentIdbController(runtime) {
         : null;
     runtime.clearCachedIndexedDbSnapshot?.(chatId);
     runtime.clearCachedIndexedDbSnapshot?.(restoreSafetyChatId);
-    runtime.clearCurrentChatCommitMarker?.({
-      reason: "manual-delete-current-local-storage",
-      immediate: true,
-      resetAcceptedRevision: true,
+    if (typeof runtime.clearCurrentChatRecoveryAnchors === "function") {
+      runtime.clearCurrentChatRecoveryAnchors({
+        chatId,
+        reason: "manual-delete-current-local-storage",
+        immediate: true,
+        clearMetadataFull: true,
+        clearCommitMarker: true,
+        clearPendingPersist: true,
+      });
+      if (restoreSafetyChatId && restoreSafetyChatId !== chatId) {
+        runtime.clearCurrentChatRecoveryAnchors({
+          chatId: restoreSafetyChatId,
+          reason: "manual-delete-current-local-storage:restore-safety",
+          immediate: true,
+          clearMetadataFull: false,
+          clearCommitMarker: false,
+          clearPendingPersist: false,
+        });
+      }
+    } else {
+      runtime.clearCurrentChatCommitMarker?.({
+        reason: "manual-delete-current-local-storage",
+        immediate: true,
+        resetAcceptedRevision: true,
+      });
+    }
+    await runtime.refreshCurrentChatLocalStoreBinding?.({
+      chatId,
+      forceCapabilityRefresh: true,
+      reopenCurrentDb: true,
+      source: "manual-delete-current-local-storage",
     });
     runtime.syncGraphLoadFromLiveContext?.({
       source: "manual-delete-current-local-storage",
@@ -1279,10 +1306,27 @@ export async function onDeleteAllIdbController(runtime) {
     runtime.clearAllCachedIndexedDbSnapshots?.();
     const activeChatId = runtime.getCurrentChatId?.();
     if (activeChatId) {
-      runtime.clearCurrentChatCommitMarker?.({
-        reason: "manual-delete-all-local-storage",
-        immediate: true,
-        resetAcceptedRevision: true,
+      if (typeof runtime.clearCurrentChatRecoveryAnchors === "function") {
+        runtime.clearCurrentChatRecoveryAnchors({
+          chatId: activeChatId,
+          reason: "manual-delete-all-local-storage",
+          immediate: true,
+          clearMetadataFull: true,
+          clearCommitMarker: true,
+          clearPendingPersist: true,
+        });
+      } else {
+        runtime.clearCurrentChatCommitMarker?.({
+          reason: "manual-delete-all-local-storage",
+          immediate: true,
+          resetAcceptedRevision: true,
+        });
+      }
+      await runtime.refreshCurrentChatLocalStoreBinding?.({
+        chatId: activeChatId,
+        forceCapabilityRefresh: true,
+        reopenCurrentDb: true,
+        source: "manual-delete-all-local-storage",
       });
       runtime.syncGraphLoadFromLiveContext?.({
         source: "manual-delete-all-local-storage",
