@@ -101,6 +101,14 @@ function normalizeTimestamp(value, fallbackValue = Date.now()) {
   return Math.floor(Number(fallbackValue) || Date.now());
 }
 
+function normalizeNonNegativeInteger(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return Math.max(0, Math.floor(Number(fallback) || 0));
+  }
+  return Math.max(0, Math.floor(parsed));
+}
+
 function toPlainData(value, fallbackValue = null) {
   if (value == null) {
     return fallbackValue;
