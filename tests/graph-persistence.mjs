@@ -3707,4 +3707,193 @@ result = {
   );
 }
 
+{
+  const chatId = "chat-luker-revision-drift";
+  const integrity = "meta-luker-revision-drift";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-revision-drift",
+    chatMetadata: {
+      integrity,
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+
+  const checkpointGraph = stampPersistedGraph(
+    createMeaningfulGraph(chatId, "luker-revision-base"),
+    {
+      revision: 1,
+      integrity,
+      chatId,
+      reason: "luker-revision-base",
+    },
+  );
+  const runtimeGraph = stampPersistedGraph(
+    createMeaningfulGraph(chatId, "luker-revision-next"),
+    {
+      revision: 3,
+      integrity,
+      chatId,
+      reason: "luker-revision-next",
+    },
+  );
+  harness.api.setCurrentGraph(runtimeGraph);
+  harness.api.setGraphPersistenceState({
+    hostProfile: "luker",
+    primaryStorageTier: "luker-chat-state",
+    cacheStorageTier: "indexeddb",
+    revision: 3,
+    lastPersistedRevision: 3,
+    lastAcceptedRevision: 3,
+  });
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    buildLukerGraphCheckpointV2(checkpointGraph, {
+      revision: 1,
+      chatId,
+      integrity,
+      reason: "luker-revision-base",
+      storageTier: "luker-chat-state",
+    }),
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_JOURNAL_NAMESPACE,
+    buildLukerGraphJournalV2([], {
+      chatId,
+      integrity,
+      headRevision: 1,
+    }),
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+    buildLukerGraphManifestV2(checkpointGraph, {
+      baseRevision: 1,
+      headRevision: 1,
+      checkpointRevision: 1,
+      lastCompactedRevision: 1,
+      journalDepth: 0,
+      journalBytes: 0,
+      chatId,
+      integrity,
+      reason: "luker-revision-base",
+      storageTier: "luker-chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 2,
+      extractionCount: 1,
+    }),
+  );
+
+  const baseSnapshot = buildSnapshotFromGraph(checkpointGraph, {
+    chatId,
+    revision: 1,
+  });
+  const driftedSnapshot = buildSnapshotFromGraph(runtimeGraph, {
+    chatId,
+    revision: 3,
+  });
+  const directDelta = buildPersistDelta(baseSnapshot, driftedSnapshot, {
+    useNativeDelta: false,
+  });
+
+  const result = await harness.runtimeContext.persistGraphToHostChatState(
+    harness.runtimeContext.__chatContext,
+    {
+      graph: runtimeGraph,
+      revision: 3,
+      reason: "luker-revision-drift-save",
+      storageTier: "luker-chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 4,
+      extractionCount: 2,
+      mode: "primary",
+      persistDelta: directDelta,
+    },
+  );
+
+  assert.equal(result.saved, true);
+  assert.equal(
+    result.revision,
+    2,
+    "Luker sidecar 应基于已接受 head 连续推进，而不是沿用跳号 revision",
+  );
+  const manifest = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+  );
+  const journal = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_JOURNAL_NAMESPACE,
+  );
+  assert.equal(Number(manifest?.headRevision || 0), 2);
+  assert.equal(Number(journal?.entries?.length || 0), 1);
+  assert.equal(Number(journal?.entries?.[0]?.revision || 0), 2);
+}
+
+{
+  const chatId = "chat-luker-bootstrap-journal-fail";
+  const integrity = "meta-luker-bootstrap-journal-fail";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-bootstrap-journal-fail",
+    chatMetadata: {
+      integrity,
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph(chatId, "luker-bootstrap-journal-fail"),
+    {
+      revision: 5,
+      integrity,
+      chatId,
+      reason: "luker-bootstrap-journal-fail",
+    },
+  );
+  const originalUpdateChatState = harness.runtimeContext.__chatContext.updateChatState;
+  harness.runtimeContext.__chatContext.updateChatState = async function(namespace, updater) {
+    const key = String(namespace || "").trim().toLowerCase();
+    if (key === LUKER_GRAPH_JOURNAL_NAMESPACE) {
+      return { ok: false, state: null, updated: false };
+    }
+    return await originalUpdateChatState.call(this, namespace, updater);
+  };
+
+  const result = await harness.runtimeContext.persistGraphToHostChatState(
+    harness.runtimeContext.__chatContext,
+    {
+      graph,
+      revision: 5,
+      reason: "luker-bootstrap-journal-fail",
+      storageTier: "luker-chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 3,
+      extractionCount: 1,
+      mode: "primary",
+    },
+  );
+
+  assert.equal(result.saved, false);
+  assert.equal(result.accepted, false);
+  const manifest = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+  );
+  const checkpoint = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+  );
+  assert.equal(
+    manifest ?? null,
+    null,
+    "bootstrap journal reset 失败时不应继续写 manifest 假装 accepted",
+  );
+  assert.equal(Number(checkpoint?.revision || 0), 5);
+}
+
 console.log("graph-persistence tests passed");

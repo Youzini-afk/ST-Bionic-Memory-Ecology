@@ -1243,8 +1243,10 @@ const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
 const bmeChatStateManifestCacheByChatId = new Map();
 const bmeChatStateLoadInFlightByChatId = new Map();
 const bmeLukerSidecarCompactionByChatId = new Map();
+const bmeLukerSidecarWriteByChatId = new Map();
 const PENDING_GRAPH_PERSIST_RETRY_DELAYS_MS = [500, 1500, 5000];
 const PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS = 5;
+const LUKER_SIDECAR_CONSISTENCY_RETRY_DELAYS_MS = [80, 220];
 const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = new Set([
   GRAPH_LOAD_STATES.LOADING,
   GRAPH_LOAD_STATES.BLOCKED,
@@ -5986,6 +5988,189 @@ function resolveLukerBaseRevision(manifest = null, checkpoint = null) {
   );
 }
 
+function resolveLukerHeadRevision(manifest = null, checkpoint = null) {
+  return Math.max(
+    resolveLukerBaseRevision(manifest, checkpoint),
+    Number(manifest?.headRevision || 0),
+  );
+}
+
+function queueLukerSidecarWrite(chatId, operation) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || typeof operation !== "function") {
+    return Promise.resolve().then(() => operation());
+  }
+
+  const previous = bmeLukerSidecarWriteByChatId.get(normalizedChatId) || Promise.resolve();
+  let settled = null;
+  const queued = previous
+    .catch(() => null)
+    .then(() => operation());
+  settled = queued.finally(() => {
+    if (bmeLukerSidecarWriteByChatId.get(normalizedChatId) === settled) {
+      bmeLukerSidecarWriteByChatId.delete(normalizedChatId);
+    }
+  });
+  bmeLukerSidecarWriteByChatId.set(normalizedChatId, settled);
+  return settled;
+}
+
+function buildSnapshotFromLukerSidecarState(
+  sidecar = null,
+  {
+    chatId = "",
+    source = "luker-sidecar-snapshot",
+    manifest = sidecar?.manifest || null,
+  } = {},
+) {
+  const normalizedChatId =
+    normalizeChatIdCandidate(chatId) ||
+    normalizeChatIdCandidate(manifest?.chatId) ||
+    normalizeChatIdCandidate(sidecar?.checkpoint?.chatId);
+  const normalizedManifest =
+    manifest && typeof manifest === "object" && !Array.isArray(manifest)
+      ? manifest
+      : null;
+  if (!normalizedManifest) {
+    return {
+      ok: false,
+      reason: "luker-chat-state-v2-empty",
+      snapshot: null,
+      manifest: null,
+      baseRevision: 0,
+      headRevision: 0,
+    };
+  }
+
+  const baseRevision = resolveLukerBaseRevision(normalizedManifest, sidecar?.checkpoint);
+  const checkpointRevision = Number(sidecar?.checkpoint?.revision || 0);
+  let snapshot = null;
+  if (sidecar?.checkpoint?.serializedGraph) {
+    try {
+      const checkpointGraph = cloneGraphForPersistence(
+        normalizeGraphRuntimeState(
+          deserializeGraph(sidecar.checkpoint.serializedGraph),
+          normalizedChatId,
+        ),
+        normalizedChatId,
+      );
+      snapshot = buildSnapshotFromGraph(checkpointGraph, {
+        chatId: normalizedChatId,
+        revision: Math.max(checkpointRevision, baseRevision, 0),
+        meta: {
+          integrity:
+            sidecar.checkpoint.integrity ||
+            normalizedManifest.integrity ||
+            graphPersistenceState.metadataIntegrity,
+          storagePrimary: "chat-state",
+          storageMode: "luker-chat-state",
+          lastMutationReason: String(
+            sidecar.checkpoint.reason || `${source}:luker-checkpoint`,
+          ),
+        },
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "luker-sidecar-checkpoint-invalid",
+        error,
+        snapshot: null,
+        manifest: normalizedManifest,
+        baseRevision,
+        headRevision: Number(normalizedManifest.headRevision || 0),
+      };
+    }
+  } else if (baseRevision > 0) {
+    return {
+      ok: false,
+      reason: "luker-sidecar-checkpoint-missing",
+      snapshot: null,
+      manifest: normalizedManifest,
+      baseRevision,
+      headRevision: Number(normalizedManifest.headRevision || 0),
+    };
+  } else {
+    const emptyGraph = cloneGraphForPersistence(
+      normalizeGraphRuntimeState(createEmptyGraph(), normalizedChatId),
+      normalizedChatId,
+    );
+    snapshot = buildSnapshotFromGraph(emptyGraph, {
+      chatId: normalizedChatId,
+      revision: 0,
+      meta: {
+        integrity: normalizedManifest.integrity || graphPersistenceState.metadataIntegrity,
+        storagePrimary: "chat-state",
+        storageMode: "luker-chat-state",
+        lastMutationReason: `${source}:luker-empty-base`,
+      },
+    });
+  }
+
+  const journalEntries = Array.isArray(sidecar?.journal?.entries)
+    ? sidecar.journal.entries
+        .filter(
+          (entry) =>
+            Number(entry?.revision || 0) > baseRevision &&
+            Number(entry?.revision || 0) <= Number(normalizedManifest.headRevision || 0),
+        )
+        .sort((left, right) => Number(left?.revision || 0) - Number(right?.revision || 0))
+    : [];
+
+  if (Number(normalizedManifest.headRevision || 0) > baseRevision) {
+    let expectedRevision = baseRevision + 1;
+    for (const entry of journalEntries) {
+      if (Number(entry?.revision || 0) !== expectedRevision) {
+        return {
+          ok: false,
+          reason: "luker-sidecar-journal-gap",
+          snapshot: null,
+          manifest: normalizedManifest,
+          baseRevision,
+          headRevision: Number(normalizedManifest.headRevision || 0),
+          expectedRevision,
+        };
+      }
+      snapshot = applyPersistDeltaToSnapshot(snapshot, entry.persistDelta, {
+        revision: entry.revision,
+        reason: entry.reason,
+        chatId: normalizedChatId,
+        lastModified: Date.now(),
+      });
+      expectedRevision += 1;
+    }
+    if (expectedRevision - 1 !== Number(normalizedManifest.headRevision || 0)) {
+      return {
+        ok: false,
+        reason: "luker-sidecar-journal-incomplete",
+        snapshot: null,
+        manifest: normalizedManifest,
+        baseRevision,
+        headRevision: Number(normalizedManifest.headRevision || 0),
+        expectedRevision,
+      };
+    }
+  }
+
+  snapshot.meta = {
+    ...(snapshot.meta || {}),
+    revision: Number(normalizedManifest.headRevision || snapshot?.meta?.revision || 0),
+    chatId: normalizedChatId,
+    integrity: normalizedManifest.integrity || snapshot?.meta?.integrity || "",
+    storagePrimary: "chat-state",
+    storageMode: "luker-chat-state",
+    lastMutationReason: String(normalizedManifest.reason || source || "luker-chat-state"),
+  };
+  return {
+    ok: true,
+    reason: "luker-sidecar-snapshot-ready",
+    snapshot,
+    manifest: normalizedManifest,
+    journalEntries,
+    baseRevision,
+    headRevision: Number(normalizedManifest.headRevision || 0),
+  };
+}
+
 async function compactLukerGraphSidecarV2(
   context = getContext(),
   {
@@ -6008,151 +6193,162 @@ async function compactLukerGraphSidecarV2(
     };
   }
 
-  const normalizedIntegrity =
-    normalizeChatIdCandidate(integrity) ||
-    getChatMetadataIntegrity(context) ||
-    graphPersistenceState.metadataIntegrity;
-  const revisionFloor = Math.max(1, Number(revision || 0), Number(getGraphPersistedRevision(graph) || 0), Number(graphPersistenceState.lukerManifestRevision || 0), Number(graphPersistenceState.revision || 0));
-  const startedAt = Date.now();
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
-      cacheMirrorState: graphPersistenceState.cacheMirrorState,
-      lastPersistReason: reason,
-      lastPersistMode: "luker-chat-state-v2-compacting",
-    }),
-    opfsCompactionState: buildLukerJournalCompactionState("running", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-
-  const checkpoint = buildLukerGraphCheckpointV2(graph, {
-    revision: revisionFloor,
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    persistedAt: new Date(startedAt).toISOString(),
-  });
-  const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
-    namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
-  });
-  if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+  return await queueLukerSidecarWrite(normalizedChatId, async () => {
+    const normalizedIntegrity =
+      normalizeChatIdCandidate(integrity) ||
+      getChatMetadataIntegrity(context) ||
+      graphPersistenceState.metadataIntegrity;
+    const revisionFloor = Math.max(
+      1,
+      Number(revision || 0),
+      Number(getGraphPersistedRevision(graph) || 0),
+      Number(graphPersistenceState.lukerManifestRevision || 0),
+      Number(graphPersistenceState.revision || 0),
+    );
+    const startedAt = Date.now();
     updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
+      ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
+        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        lastPersistReason: reason,
+        lastPersistMode: "luker-chat-state-v2-compacting",
+      }),
+      opfsCompactionState: buildLukerJournalCompactionState("running", {
         lastAt: startedAt,
         lastReason: reason,
-        error:
-          checkpointResult?.error?.message ||
-          checkpointResult?.reason ||
-          "luker-sidecar-checkpoint-failed",
+      }),
+    });
+
+    const checkpoint = buildLukerGraphCheckpointV2(graph, {
+      revision: revisionFloor,
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      reason,
+      storageTier: "luker-chat-state",
+      persistedAt: new Date(startedAt).toISOString(),
+    });
+    const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
+      namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    });
+    if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            checkpointResult?.error?.message ||
+            checkpointResult?.reason ||
+            "luker-sidecar-checkpoint-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: checkpointResult?.reason || "luker-sidecar-checkpoint-failed",
+        error: checkpointResult?.error || null,
+      };
+    }
+
+    const emptyJournal = buildLukerGraphJournalV2([], {
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      headRevision: revisionFloor,
+      updatedAt: checkpointResult.checkpoint.persistedAt,
+    });
+    const journalResult = await replaceLukerGraphJournalV2(context, emptyJournal, {
+      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+    });
+    if (!journalResult?.ok || !journalResult?.journal) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            journalResult?.error?.message ||
+            journalResult?.reason ||
+            "luker-sidecar-journal-reset-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: journalResult?.reason || "luker-sidecar-journal-reset-failed",
+        error: journalResult?.error || null,
+      };
+    }
+
+    const manifest = buildLukerGraphManifestV2(graph, {
+      baseRevision: revisionFloor,
+      headRevision: revisionFloor,
+      checkpointRevision: revisionFloor,
+      lastCompactedRevision: revisionFloor,
+      journalDepth: 0,
+      journalBytes: 0,
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      reason,
+      storageTier: "luker-chat-state",
+      accepted: true,
+      persistedAt: checkpointResult.checkpoint.persistedAt,
+      lastProcessedAssistantFloor:
+        graph?.historyState?.lastProcessedAssistantFloor ?? null,
+      extractionCount: graph?.historyState?.extractionCount ?? null,
+      compactionState: buildLukerJournalCompactionState("idle", {
+        lastAt: startedAt,
+        lastReason: reason,
+      }),
+    });
+    const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
+      namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+    });
+    if (!manifestResult?.ok || !manifestResult?.manifest) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            manifestResult?.error?.message ||
+            manifestResult?.reason ||
+            "luker-sidecar-manifest-save-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
+        error: manifestResult?.error || null,
+      };
+    }
+
+    cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
+    updateGraphPersistenceState({
+      ...buildLukerManifestStatePatch(manifestResult.manifest, {
+        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        lastPersistReason: reason,
+        lastPersistMode: "luker-chat-state-v2-compacted",
+        acceptedStorageTier: "luker-chat-state",
+        acceptedBy: "luker-chat-state",
+        dualWriteLastResult: {
+          action: "compact",
+          target: "luker-chat-state",
+          success: true,
+          chatId: normalizedChatId,
+          revision: revisionFloor,
+          reason,
+          at: Date.now(),
+        },
+      }),
+      revision: revisionFloor,
+      lastPersistedRevision: revisionFloor,
+      lastAcceptedRevision: revisionFloor,
+      opfsCompactionState: buildLukerJournalCompactionState("idle", {
+        lastAt: startedAt,
+        lastReason: reason,
       }),
     });
     return {
-      ok: false,
-      reason: checkpointResult?.reason || "luker-sidecar-checkpoint-failed",
-      error: checkpointResult?.error || null,
+      ok: true,
+      reason,
+      manifest: manifestResult.manifest,
+      checkpoint: checkpointResult.checkpoint,
     };
-  }
-
-  const emptyJournal = buildLukerGraphJournalV2([], {
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    headRevision: revisionFloor,
-    updatedAt: checkpointResult.checkpoint.persistedAt,
   });
-  const journalResult = await replaceLukerGraphJournalV2(context, emptyJournal, {
-    namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-  });
-  if (!journalResult?.ok || !journalResult?.journal) {
-    updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
-        lastAt: startedAt,
-        lastReason: reason,
-        error:
-          journalResult?.error?.message ||
-          journalResult?.reason ||
-          "luker-sidecar-journal-reset-failed",
-      }),
-    });
-    return {
-      ok: false,
-      reason: journalResult?.reason || "luker-sidecar-journal-reset-failed",
-      error: journalResult?.error || null,
-    };
-  }
-
-  const manifest = buildLukerGraphManifestV2(graph, {
-    baseRevision: revisionFloor,
-    headRevision: revisionFloor,
-    checkpointRevision: revisionFloor,
-    lastCompactedRevision: revisionFloor,
-    journalDepth: 0,
-    journalBytes: 0,
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    accepted: true,
-    persistedAt: checkpointResult.checkpoint.persistedAt,
-    lastProcessedAssistantFloor:
-      graph?.historyState?.lastProcessedAssistantFloor ?? null,
-    extractionCount: graph?.historyState?.extractionCount ?? null,
-    compactionState: buildLukerJournalCompactionState("idle", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-  const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
-    namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-  });
-  if (!manifestResult?.ok || !manifestResult?.manifest) {
-    updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
-        lastAt: startedAt,
-        lastReason: reason,
-        error:
-          manifestResult?.error?.message ||
-          manifestResult?.reason ||
-          "luker-sidecar-manifest-save-failed",
-      }),
-    });
-    return {
-      ok: false,
-      reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
-      error: manifestResult?.error || null,
-    };
-  }
-
-  cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(manifestResult.manifest, {
-      cacheMirrorState: graphPersistenceState.cacheMirrorState,
-      lastPersistReason: reason,
-      lastPersistMode: "luker-chat-state-v2-compacted",
-      acceptedStorageTier: "luker-chat-state",
-      acceptedBy: "luker-chat-state",
-      dualWriteLastResult: {
-        action: "compact",
-        target: "luker-chat-state",
-        success: true,
-        chatId: normalizedChatId,
-        revision: revisionFloor,
-        reason,
-        at: Date.now(),
-      },
-    }),
-    opfsCompactionState: buildLukerJournalCompactionState("idle", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-  return {
-    ok: true,
-    reason,
-    manifest: manifestResult.manifest,
-    checkpoint: checkpointResult.checkpoint,
-  };
 }
 
 function scheduleLukerGraphSidecarCompaction(
@@ -6217,7 +6413,7 @@ async function persistGraphToLukerSidecarV2(
     };
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, graph);
   if (!chatId) {
     return {
       saved: false,
@@ -6234,126 +6430,319 @@ async function persistGraphToLukerSidecarV2(
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
     graphPersistenceState.metadataIntegrity;
 
-  const directDelta =
-    persistDelta &&
-    typeof persistDelta === "object" &&
-    !Array.isArray(persistDelta)
-      ? cloneRuntimeDebugValue(persistDelta, persistDelta)
-      : null;
-  let resolvedPersistDelta = directDelta;
-  if (!resolvedPersistDelta) {
-    const baseSnapshot =
-      (await readLocalCacheSnapshotForChat(
+  return await queueLukerSidecarWrite(chatId, async () => {
+    const directDelta =
+      persistDelta &&
+      typeof persistDelta === "object" &&
+      !Array.isArray(persistDelta)
+        ? cloneRuntimeDebugValue(persistDelta, persistDelta)
+        : null;
+
+    const existingSidecar = await readLukerGraphSidecarV2(context, {
+      manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    });
+    if (existingSidecar?.manifest) {
+      cacheChatStateManifest(chatId, existingSidecar.manifest);
+    }
+
+    const previousManifest =
+      existingSidecar?.manifest || readCachedChatStateManifest(chatId);
+    const previousHeadRevision = resolveLukerHeadRevision(
+      previousManifest,
+      existingSidecar?.checkpoint,
+    );
+    const shouldBootstrapCheckpoint =
+      !existingSidecar?.manifest && !existingSidecar?.checkpoint;
+    const effectiveRevision = shouldBootstrapCheckpoint
+      ? Math.max(1, Number(revision || 0))
+      : Math.max(1, previousHeadRevision + 1);
+
+    let resolvedPersistDelta =
+      directDelta && Number(revision || 0) === effectiveRevision
+        ? directDelta
+        : null;
+    if (!shouldBootstrapCheckpoint && !resolvedPersistDelta) {
+      const baseResult = buildSnapshotFromLukerSidecarState(existingSidecar, {
         chatId,
-        `${reason}:luker-sidecar-fallback-base`,
-      )) ||
-      buildSnapshotFromGraph(
-        cloneGraphForPersistence(
-          normalizeGraphRuntimeState(createEmptyGraph(), chatId),
-          chatId,
-        ),
+        source: `${reason}:luker-sidecar-base`,
+      });
+      if (!baseResult?.ok || !baseResult?.snapshot) {
+        updateGraphPersistenceState({
+          ...buildLukerManifestStatePatch(previousManifest, {
+            persistMismatchReason:
+              baseResult?.reason || "luker-sidecar-base-load-failed",
+            lastPersistReason: String(reason || ""),
+            lastPersistMode: "luker-chat-state-v2-base-rebuild-failed",
+          }),
+        });
+        return {
+          saved: false,
+          accepted: false,
+          reason: baseResult?.reason || "luker-sidecar-base-load-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: baseResult?.error || null,
+        };
+      }
+
+      const nextSnapshot = buildSnapshotFromGraph(graph, {
+        chatId,
+        revision: effectiveRevision,
+        baseSnapshot: baseResult.snapshot,
+        lastModified: Date.now(),
+        meta: {
+          integrity: nextIntegrity,
+          storagePrimary: "chat-state",
+          storageMode: "luker-chat-state",
+          lastMutationReason: reason,
+          hostChatId: resolvedIdentity?.hostChatId || "",
+        },
+      });
+      resolvedPersistDelta = buildPersistDelta(baseResult.snapshot, nextSnapshot, {
+        useNativeDelta: false,
+      });
+    }
+
+    if (shouldBootstrapCheckpoint) {
+      const checkpoint = buildLukerGraphCheckpointV2(graph, {
+        revision: effectiveRevision,
+        chatId,
+        integrity: nextIntegrity,
+        reason: `${reason}:bootstrap`,
+        storageTier: "luker-chat-state",
+      });
+      const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
+        namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+      });
+      if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            checkpointResult?.reason || "luker-sidecar-bootstrap-checkpoint-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: checkpointResult?.error || null,
+        };
+      }
+      const emptyJournal = buildLukerGraphJournalV2([], {
+        chatId,
+        integrity: nextIntegrity,
+        headRevision: effectiveRevision,
+        updatedAt: checkpointResult.checkpoint.persistedAt,
+      });
+      const bootstrapJournalResult = await replaceLukerGraphJournalV2(
+        context,
+        emptyJournal,
         {
-          chatId,
-          revision: 0,
-          meta: {
-            integrity: nextIntegrity,
-            storagePrimary: "chat-state",
-            storageMode: "luker-chat-state",
-            lastMutationReason: `${reason}:luker-sidecar-fallback-base`,
-          },
+          namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
         },
       );
-    const nextSnapshot = buildSnapshotFromGraph(graph, {
-      chatId,
-      revision: resolvePersistRevisionFloor(revision, graph),
-      baseSnapshot,
-      lastModified: Date.now(),
-      meta: {
+      if (!bootstrapJournalResult?.ok || !bootstrapJournalResult?.journal) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            bootstrapJournalResult?.reason ||
+            "luker-sidecar-bootstrap-journal-reset-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: bootstrapJournalResult?.error || null,
+        };
+      }
+      const bootstrapManifest = buildLukerGraphManifestV2(graph, {
+        baseRevision: Number(effectiveRevision || 0),
+        headRevision: Number(effectiveRevision || 0),
+        checkpointRevision: Number(effectiveRevision || 0),
+        lastCompactedRevision: Number(effectiveRevision || 0),
+        journalDepth: 0,
+        journalBytes: 0,
+        chatId,
         integrity: nextIntegrity,
-        storagePrimary: "chat-state",
-        storageMode: "luker-chat-state",
-        lastMutationReason: reason,
-        hostChatId: resolvedIdentity?.hostChatId || "",
-      },
-    });
-    resolvedPersistDelta = buildPersistDelta(baseSnapshot, nextSnapshot, {
-      useNativeDelta: false,
-    });
-  }
+        reason: `${reason}:bootstrap`,
+        storageTier: "luker-chat-state",
+        accepted,
+        lastProcessedAssistantFloor,
+        extractionCount: nextExtractionCount,
+        compactionState: buildLukerJournalCompactionState("idle", {
+          lastAt: Date.now(),
+          lastReason: `${reason}:bootstrap`,
+        }),
+      });
+      const manifestResult = await writeLukerGraphManifestV2(context, bootstrapManifest, {
+        namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      });
+      if (!manifestResult?.ok || !manifestResult?.manifest) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            manifestResult?.reason || "luker-sidecar-bootstrap-manifest-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: manifestResult?.error || null,
+        };
+      }
+      cacheChatStateManifest(chatId, manifestResult.manifest);
+      rememberResolvedGraphIdentityAlias(context, chatId);
+      updateGraphPersistenceState({
+        ...buildLukerManifestStatePatch(manifestResult.manifest, {
+          cacheMirrorState:
+            mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
+          lastPersistReason: String(reason || ""),
+          lastPersistMode: "luker-chat-state-v2-bootstrap",
+          acceptedStorageTier:
+            accepted === true
+              ? "luker-chat-state"
+              : graphPersistenceState.acceptedStorageTier,
+          acceptedBy:
+            accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+          dualWriteLastResult: {
+            action: mode === "mirror" ? "cache-mirror" : "save",
+            target: "luker-chat-state",
+            success: true,
+            chatId,
+            revision: Number(effectiveRevision || 0),
+            reason: `${reason}:bootstrap`,
+            mode: String(mode || "primary"),
+            at: Date.now(),
+          },
+        }),
+        metadataIntegrity: String(
+          nextIntegrity || graphPersistenceState.metadataIntegrity || "",
+        ),
+        revision: Number(effectiveRevision || 0),
+        lastPersistedRevision: Number(effectiveRevision || 0),
+        lastAcceptedRevision:
+          accepted === true
+            ? Number(effectiveRevision || 0)
+            : Number(graphPersistenceState.lastAcceptedRevision || 0),
+        pendingPersist: false,
+        persistMismatchReason: "",
+        persistDiagnosticTier: "none",
+      });
+      if (mode !== "mirror") {
+        clearPendingGraphPersistRetry();
+      }
+      return {
+        saved: true,
+        accepted,
+        chatId,
+        revision: Number(effectiveRevision || 0),
+        manifestRevision: Number(effectiveRevision || 0),
+        journalDepth: 0,
+        checkpointRevision: Number(effectiveRevision || 0),
+        reason: String(reason || "luker-chat-state-save"),
+        saveMode: "luker-chat-state-v2-bootstrap",
+        storageTier: "luker-chat-state",
+        manifest: manifestResult.manifest,
+      };
+    }
 
-  const existingSidecar = await readLukerGraphSidecarV2(context, {
-    manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-    journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
-  });
-  if (existingSidecar?.manifest) {
-    cacheChatStateManifest(chatId, existingSidecar.manifest);
-  }
-
-  const shouldBootstrapCheckpoint =
-    !existingSidecar?.manifest && !existingSidecar?.checkpoint;
-  if (shouldBootstrapCheckpoint) {
-    const checkpoint = buildLukerGraphCheckpointV2(graph, {
-      revision,
+    const journalEntry = buildLukerGraphJournalEntry(resolvedPersistDelta, {
+      revision: effectiveRevision,
+      reason,
+      storageTier: "luker-chat-state",
       chatId,
       integrity: nextIntegrity,
-      reason: `${reason}:bootstrap`,
-      storageTier: "luker-chat-state",
     });
-    const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
-      namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    const journalResult = await appendLukerGraphJournalEntryV2(context, journalEntry, {
+      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      chatId,
+      integrity: nextIntegrity,
     });
-    if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+    if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
+      updateGraphPersistenceState({
+        dualWriteLastResult: {
+          action: "save",
+          target: "luker-chat-state",
+          success: false,
+          chatId,
+          revision: Number(effectiveRevision || 0),
+          reason: String(reason || "luker-chat-state-save"),
+          mode: String(mode || "primary"),
+          error:
+            journalResult?.error?.message ||
+            journalResult?.reason ||
+            "luker-sidecar-journal-save-failed",
+          at: Date.now(),
+        },
+      });
       return {
         saved: false,
         accepted: false,
-        reason: checkpointResult?.reason || "luker-sidecar-bootstrap-checkpoint-failed",
-        revision,
+        reason: journalResult?.reason || "luker-sidecar-journal-save-failed",
+        revision: effectiveRevision,
         storageTier: "luker-chat-state",
-        error: checkpointResult?.error || null,
+        error: journalResult?.error || null,
       };
     }
-    const emptyJournal = buildLukerGraphJournalV2([], {
+
+    const checkpointRevision = Math.max(
+      Number(existingSidecar?.checkpoint?.revision || 0),
+      Number(previousManifest?.checkpointRevision || 0),
+    );
+    const manifest = buildLukerGraphManifestV2(graph, {
+      baseRevision: resolveLukerBaseRevision(previousManifest, existingSidecar?.checkpoint),
+      headRevision: Number(journalResult.entry.revision || effectiveRevision || 0),
+      checkpointRevision,
+      lastCompactedRevision: Math.max(
+        Number(previousManifest?.lastCompactedRevision || 0),
+        checkpointRevision,
+      ),
+      journalDepth: Number(journalResult.journal.entryCount || 0),
+      journalBytes: Number(journalResult.journal.totalBytes || 0),
       chatId,
       integrity: nextIntegrity,
-      headRevision: revision,
-      updatedAt: checkpointResult.checkpoint.persistedAt,
-    });
-    await replaceLukerGraphJournalV2(context, emptyJournal, {
-      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    });
-    const bootstrapManifest = buildLukerGraphManifestV2(graph, {
-      baseRevision: Number(revision || 0),
-      headRevision: Number(revision || 0),
-      checkpointRevision: Number(revision || 0),
-      lastCompactedRevision: Number(revision || 0),
-      journalDepth: 0,
-      journalBytes: 0,
-      chatId,
-      integrity: nextIntegrity,
-      reason: `${reason}:bootstrap`,
+      reason,
       storageTier: "luker-chat-state",
       accepted,
       lastProcessedAssistantFloor,
       extractionCount: nextExtractionCount,
-      compactionState: buildLukerJournalCompactionState("idle", {
-        lastAt: Date.now(),
-        lastReason: `${reason}:bootstrap`,
-      }),
+      compactionState:
+        previousManifest?.compactionState ||
+        buildLukerJournalCompactionState("idle", {
+          lastAt: Date.now(),
+          lastReason: reason,
+        }),
     });
-    const manifestResult = await writeLukerGraphManifestV2(context, bootstrapManifest, {
+    const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
       namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
+      updateGraphPersistenceState({
+        ...buildLukerManifestStatePatch(previousManifest, {
+          persistMismatchReason: "luker-manifest-pending-after-journal",
+          lastPersistReason: reason,
+          lastPersistMode: "luker-chat-state-v2-journal-only",
+          dualWriteLastResult: {
+            action: "save",
+            target: "luker-chat-state",
+            success: false,
+            chatId,
+            revision: Number(effectiveRevision || 0),
+            reason: String(reason || "luker-chat-state-save"),
+            mode: String(mode || "primary"),
+            error:
+              manifestResult?.error?.message ||
+              manifestResult?.reason ||
+              "luker-sidecar-manifest-save-failed",
+            at: Date.now(),
+          },
+        }),
+      });
       return {
         saved: false,
         accepted: false,
-        reason: manifestResult?.reason || "luker-sidecar-bootstrap-manifest-failed",
-        revision,
+        reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
+        revision: effectiveRevision,
         storageTier: "luker-chat-state",
         error: manifestResult?.error || null,
       };
     }
+
     cacheChatStateManifest(chatId, manifestResult.manifest);
     rememberResolvedGraphIdentityAlias(context, chatId);
     updateGraphPersistenceState({
@@ -6361,25 +6750,40 @@ async function persistGraphToLukerSidecarV2(
         cacheMirrorState:
           mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
         lastPersistReason: String(reason || ""),
-        lastPersistMode: "luker-chat-state-v2-bootstrap",
-        acceptedStorageTier: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedStorageTier,
-        acceptedBy: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+        lastPersistMode:
+          mode === "mirror"
+            ? "luker-chat-state-v2-mirror"
+            : "luker-chat-state-v2",
+        acceptedStorageTier:
+          accepted === true
+            ? "luker-chat-state"
+            : graphPersistenceState.acceptedStorageTier,
+        acceptedBy:
+          accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
         dualWriteLastResult: {
           action: mode === "mirror" ? "cache-mirror" : "save",
           target: "luker-chat-state",
           success: true,
           chatId,
-          revision: Number(revision || 0),
-          reason: `${reason}:bootstrap`,
+          revision: Number(
+            manifestResult.manifest.headRevision || effectiveRevision || 0,
+          ),
+          reason: String(reason || "luker-chat-state-save"),
           mode: String(mode || "primary"),
           at: Date.now(),
         },
       }),
-      metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
-      revision: Math.max(
-        Number(graphPersistenceState.revision || 0),
-        Number(revision || 0),
+      metadataIntegrity: String(
+        nextIntegrity || graphPersistenceState.metadataIntegrity || "",
       ),
+      revision: Number(manifestResult.manifest.headRevision || effectiveRevision || 0),
+      lastPersistedRevision: Number(
+        manifestResult.manifest.headRevision || effectiveRevision || 0,
+      ),
+      lastAcceptedRevision:
+        accepted === true
+          ? Number(manifestResult.manifest.headRevision || effectiveRevision || 0)
+          : Number(graphPersistenceState.lastAcceptedRevision || 0),
       pendingPersist: false,
       persistMismatchReason: "",
       persistDiagnosticTier: "none",
@@ -6387,182 +6791,34 @@ async function persistGraphToLukerSidecarV2(
     if (mode !== "mirror") {
       clearPendingGraphPersistRetry();
     }
+    if (shouldQueueLukerSidecarCompaction(manifestResult.manifest)) {
+      scheduleLukerGraphSidecarCompaction(chatId, {
+        graph: cloneGraphForPersistence(graph, chatId),
+        revision: manifestResult.manifest.headRevision,
+        reason: `${reason}:auto-compact`,
+        integrity: nextIntegrity,
+      });
+    }
+
     return {
       saved: true,
       accepted,
       chatId,
-      revision: Number(revision || 0),
-      manifestRevision: Number(revision || 0),
-      journalDepth: 0,
-      checkpointRevision: Number(revision || 0),
+      revision: Number(manifestResult.manifest.headRevision || effectiveRevision || 0),
+      manifestRevision: Number(
+        manifestResult.manifest.headRevision || effectiveRevision || 0,
+      ),
+      journalDepth: Number(manifestResult.manifest.journalDepth || 0),
+      checkpointRevision: Number(manifestResult.manifest.checkpointRevision || 0),
       reason: String(reason || "luker-chat-state-save"),
-      saveMode: "luker-chat-state-v2-bootstrap",
-      storageTier: "luker-chat-state",
-      manifest: manifestResult.manifest,
-    };
-  }
-
-  const journalEntry = buildLukerGraphJournalEntry(resolvedPersistDelta, {
-    revision,
-    reason,
-    storageTier: "luker-chat-state",
-    chatId,
-    integrity: nextIntegrity,
-  });
-  const journalResult = await appendLukerGraphJournalEntryV2(context, journalEntry, {
-    namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    chatId,
-    integrity: nextIntegrity,
-  });
-  if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
-    updateGraphPersistenceState({
-      dualWriteLastResult: {
-        action: "save",
-        target: "luker-chat-state",
-        success: false,
-        chatId,
-        revision: Number(revision || 0),
-        reason: String(reason || "luker-chat-state-save"),
-        mode: String(mode || "primary"),
-        error:
-          journalResult?.error?.message ||
-          journalResult?.reason ||
-          "luker-sidecar-journal-save-failed",
-        at: Date.now(),
-      },
-    });
-    return {
-      saved: false,
-      accepted: false,
-      reason: journalResult?.reason || "luker-sidecar-journal-save-failed",
-      revision,
-      storageTier: "luker-chat-state",
-      error: journalResult?.error || null,
-    };
-  }
-
-  const previousManifest = existingSidecar?.manifest || readCachedChatStateManifest(chatId);
-  const checkpointRevision = Math.max(
-    Number(existingSidecar?.checkpoint?.revision || 0),
-    Number(previousManifest?.checkpointRevision || 0),
-  );
-  const manifest = buildLukerGraphManifestV2(graph, {
-    baseRevision: resolveLukerBaseRevision(previousManifest, existingSidecar?.checkpoint),
-    headRevision: Number(journalResult.entry.revision || revision || 0),
-    checkpointRevision,
-    lastCompactedRevision: Math.max(
-      Number(previousManifest?.lastCompactedRevision || 0),
-      checkpointRevision,
-    ),
-    journalDepth: Number(journalResult.journal.entryCount || 0),
-    journalBytes: Number(journalResult.journal.totalBytes || 0),
-    chatId,
-    integrity: nextIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    accepted,
-    lastProcessedAssistantFloor,
-    extractionCount: nextExtractionCount,
-    compactionState:
-      previousManifest?.compactionState || buildLukerJournalCompactionState("idle", {
-        lastAt: Date.now(),
-        lastReason: reason,
-      }),
-  });
-  const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
-    namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-  });
-  if (!manifestResult?.ok || !manifestResult?.manifest) {
-    updateGraphPersistenceState({
-      ...buildLukerManifestStatePatch(previousManifest, {
-        persistMismatchReason: "luker-manifest-pending-after-journal",
-        lastPersistReason: reason,
-        lastPersistMode: "luker-chat-state-v2-journal-only",
-        dualWriteLastResult: {
-          action: "save",
-          target: "luker-chat-state",
-          success: false,
-          chatId,
-          revision: Number(revision || 0),
-          reason: String(reason || "luker-chat-state-save"),
-          mode: String(mode || "primary"),
-          error:
-            manifestResult?.error?.message ||
-            manifestResult?.reason ||
-            "luker-sidecar-manifest-save-failed",
-          at: Date.now(),
-        },
-      }),
-    });
-    return {
-      saved: false,
-      accepted: false,
-      reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
-      revision,
-      storageTier: "luker-chat-state",
-      error: manifestResult?.error || null,
-    };
-  }
-
-  cacheChatStateManifest(chatId, manifestResult.manifest);
-  rememberResolvedGraphIdentityAlias(context, chatId);
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(manifestResult.manifest, {
-      cacheMirrorState:
-        mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
-      lastPersistReason: String(reason || ""),
-      lastPersistMode:
+      saveMode:
         mode === "mirror"
           ? "luker-chat-state-v2-mirror"
           : "luker-chat-state-v2",
-      acceptedStorageTier: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedStorageTier,
-      acceptedBy: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
-      dualWriteLastResult: {
-        action: mode === "mirror" ? "cache-mirror" : "save",
-        target: "luker-chat-state",
-        success: true,
-        chatId,
-        revision: Number(manifestResult.manifest.headRevision || revision || 0),
-        reason: String(reason || "luker-chat-state-save"),
-        mode: String(mode || "primary"),
-        at: Date.now(),
-      },
-    }),
-    metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
-    revision: Math.max(
-      Number(graphPersistenceState.revision || 0),
-      Number(manifestResult.manifest.headRevision || revision || 0),
-    ),
-    pendingPersist: false,
-    persistMismatchReason: "",
-    persistDiagnosticTier: "none",
+      storageTier: "luker-chat-state",
+      manifest: manifestResult.manifest,
+    };
   });
-  if (mode !== "mirror") {
-    clearPendingGraphPersistRetry();
-  }
-  if (shouldQueueLukerSidecarCompaction(manifestResult.manifest)) {
-    scheduleLukerGraphSidecarCompaction(chatId, {
-      graph: cloneGraphForPersistence(graph, chatId),
-      revision: manifestResult.manifest.headRevision,
-      reason: `${reason}:auto-compact`,
-      integrity: nextIntegrity,
-    });
-  }
-
-  return {
-    saved: true,
-    accepted,
-    chatId,
-    revision: Number(manifestResult.manifest.headRevision || revision || 0),
-    manifestRevision: Number(manifestResult.manifest.headRevision || revision || 0),
-    journalDepth: Number(manifestResult.manifest.journalDepth || 0),
-    checkpointRevision: Number(manifestResult.manifest.checkpointRevision || 0),
-    reason: String(reason || "luker-chat-state-save"),
-    saveMode:
-      mode === "mirror" ? "luker-chat-state-v2-mirror" : "luker-chat-state-v2",
-    storageTier: "luker-chat-state",
-    manifest: manifestResult.manifest,
-  };
 }
 
 async function loadGraphFromLukerSidecarV2(
@@ -6571,6 +6827,8 @@ async function loadGraphFromLukerSidecarV2(
     source = "luker-chat-state-probe",
     attemptIndex = 0,
     allowOverride = false,
+    consistencyRetryIndex = 0,
+    consistencyRetryDelays = LUKER_SIDECAR_CONSISTENCY_RETRY_DELAYS_MS,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
@@ -6639,161 +6897,72 @@ async function loadGraphFromLukerSidecarV2(
     return cachedResult;
   }
 
-  const baseRevision = resolveLukerBaseRevision(manifest, sidecar?.checkpoint);
-  let snapshot = null;
-  if (sidecar?.checkpoint?.serializedGraph) {
-    try {
-      const checkpointGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(sidecar.checkpoint.serializedGraph),
-          normalizedChatId,
-        ),
-        normalizedChatId,
-      );
-      snapshot = buildSnapshotFromGraph(checkpointGraph, {
-        chatId: normalizedChatId,
-        revision: Number(sidecar.checkpoint.revision || baseRevision || 0),
-        meta: {
-          integrity:
-            sidecar.checkpoint.integrity ||
-            manifest.integrity ||
-            graphPersistenceState.metadataIntegrity,
-          storagePrimary: "chat-state",
-          storageMode: "luker-chat-state",
-          lastMutationReason: String(
-            sidecar.checkpoint.reason || `${source}:luker-checkpoint`,
-          ),
-        },
-      });
-    } catch (error) {
-      console.warn("[ST-BME] Luker checkpoint 反序列化失败:", error);
-      applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-        chatId: normalizedChatId,
-        reason: "luker-sidecar-checkpoint-invalid",
-        attemptIndex,
-        dbReady: false,
-        writesBlocked: true,
-        hostProfile: "luker",
-        primaryStorageTier: "luker-chat-state",
-        cacheStorageTier: buildPersistenceEnvironment(
-          context,
-          getPreferredGraphLocalStorePresentationSync(),
-        ).cacheStorageTier,
-      });
-      updateGraphPersistenceState({
-        ...buildLukerManifestStatePatch(manifest, {
-          persistMismatchReason: "luker-sidecar-checkpoint-invalid",
-        }),
-      });
-      return {
-        success: false,
-        loaded: false,
-        reason: "luker-sidecar-checkpoint-invalid",
-        chatId: normalizedChatId,
-        attemptIndex,
-        error,
-      };
-    }
-  } else {
-    const emptyGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(createEmptyGraph(), normalizedChatId),
-      normalizedChatId,
-    );
-    snapshot = buildSnapshotFromGraph(emptyGraph, {
-      chatId: normalizedChatId,
-      revision: 0,
-      meta: {
-        integrity: manifest.integrity || graphPersistenceState.metadataIntegrity,
-        storagePrimary: "chat-state",
-        storageMode: "luker-chat-state",
-        lastMutationReason: `${source}:luker-empty-base`,
-      },
-    });
-  }
-
-  const journalEntries = Array.isArray(sidecar?.journal?.entries)
-    ? sidecar.journal.entries.filter(
-        (entry) =>
-          Number(entry?.revision || 0) > baseRevision &&
-          Number(entry?.revision || 0) <= Number(manifest.headRevision || 0),
-      )
-    : [];
-  if (Number(manifest.headRevision || 0) > baseRevision) {
-    let expectedRevision = baseRevision + 1;
-    for (const entry of journalEntries) {
-      if (Number(entry?.revision || 0) !== expectedRevision) {
-        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-          chatId: normalizedChatId,
-          reason: "luker-sidecar-journal-gap",
-          attemptIndex,
-          dbReady: false,
-          writesBlocked: true,
-          hostProfile: "luker",
-          primaryStorageTier: "luker-chat-state",
-          cacheStorageTier: buildPersistenceEnvironment(
-            context,
-            getPreferredGraphLocalStorePresentationSync(),
-          ).cacheStorageTier,
-        });
-        updateGraphPersistenceState({
-          ...buildLukerManifestStatePatch(manifest, {
-            persistMismatchReason: "luker-sidecar-journal-gap",
-          }),
-        });
-        return {
-          success: false,
-          loaded: false,
-          reason: "luker-sidecar-journal-gap",
-          chatId: normalizedChatId,
-          attemptIndex,
-        };
-      }
-      snapshot = applyPersistDeltaToSnapshot(snapshot, entry.persistDelta, {
-        revision: entry.revision,
-        reason: entry.reason,
-        chatId: normalizedChatId,
-        lastModified: Date.now(),
-      });
-      expectedRevision += 1;
-    }
-    if (expectedRevision - 1 !== Number(manifest.headRevision || 0)) {
-      applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-        chatId: normalizedChatId,
-        reason: "luker-sidecar-journal-incomplete",
-        attemptIndex,
-        dbReady: false,
-        writesBlocked: true,
-        hostProfile: "luker",
-        primaryStorageTier: "luker-chat-state",
-        cacheStorageTier: buildPersistenceEnvironment(
-          context,
-          getPreferredGraphLocalStorePresentationSync(),
-        ).cacheStorageTier,
-      });
-      updateGraphPersistenceState({
-        ...buildLukerManifestStatePatch(manifest, {
-          persistMismatchReason: "luker-sidecar-journal-incomplete",
-        }),
-      });
-      return {
-        success: false,
-        loaded: false,
-        reason: "luker-sidecar-journal-incomplete",
-        chatId: normalizedChatId,
-        attemptIndex,
-      };
-    }
-  }
-
-  snapshot.meta = {
-    ...(snapshot.meta || {}),
-    revision: Number(manifest.headRevision || snapshot?.meta?.revision || 0),
+  const baseResult = buildSnapshotFromLukerSidecarState(sidecar, {
     chatId: normalizedChatId,
-    integrity: manifest.integrity || snapshot?.meta?.integrity || "",
-    storagePrimary: "chat-state",
-    storageMode: "luker-chat-state",
-    lastMutationReason: String(manifest.reason || source || "luker-chat-state"),
-  };
+    source,
+    manifest,
+  });
+  const nextConsistencyRetryDelay =
+    consistencyRetryIndex < consistencyRetryDelays.length
+      ? Number(
+          consistencyRetryDelays[consistencyRetryIndex] || 0,
+        )
+      : null;
+  if (!baseResult?.ok || !baseResult?.snapshot) {
+    if (
+      (baseResult?.reason === "luker-sidecar-journal-gap" ||
+        baseResult?.reason === "luker-sidecar-journal-incomplete") &&
+      Number.isFinite(nextConsistencyRetryDelay) &&
+      nextConsistencyRetryDelay >= 0
+    ) {
+      if (nextConsistencyRetryDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, nextConsistencyRetryDelay));
+      } else {
+        await Promise.resolve();
+      }
+      return await loadGraphFromLukerSidecarV2(normalizedChatId, {
+        source,
+        attemptIndex,
+        allowOverride,
+        consistencyRetryIndex: consistencyRetryIndex + 1,
+        consistencyRetryDelays,
+      });
+    }
+    const blockedReason = String(
+      baseResult?.reason || "luker-sidecar-load-invalid",
+    );
+    if (baseResult?.error) {
+      console.warn(`[ST-BME] Luker sidecar 加载失败: ${blockedReason}`, baseResult.error);
+    }
+    applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+      chatId: normalizedChatId,
+      reason: blockedReason,
+      attemptIndex,
+      dbReady: false,
+      writesBlocked: true,
+      hostProfile: "luker",
+      primaryStorageTier: "luker-chat-state",
+      cacheStorageTier: buildPersistenceEnvironment(
+        context,
+        getPreferredGraphLocalStorePresentationSync(),
+      ).cacheStorageTier,
+    });
+    updateGraphPersistenceState({
+      ...buildLukerManifestStatePatch(manifest, {
+        persistMismatchReason: blockedReason,
+      }),
+    });
+    return {
+      success: false,
+      loaded: false,
+      reason: blockedReason,
+      chatId: normalizedChatId,
+      attemptIndex,
+      error: baseResult?.error || null,
+    };
+  }
+
+  const snapshot = baseResult.snapshot;
   const shouldAllowOverride =
     allowOverride ||
     BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(graphPersistenceState.loadState) ||
@@ -9694,22 +9863,25 @@ async function persistGraphToConfiguredDurableTier(
         extractionCount,
         immediate: true,
       });
+      stampGraphPersistenceMeta(graph, {
+        revision: acceptedRevision,
+        reason: `luker-chat-state:${String(reason || "graph-persist")}`,
+        chatId,
+        integrity:
+          getChatMetadataIntegrity(context) ||
+          graphPersistenceState.metadataIntegrity,
+      });
       updateGraphPersistenceState({
         hostProfile: persistenceEnvironment.hostProfile,
         primaryStorageTier: persistenceEnvironment.primaryStorageTier,
         cacheStorageTier: persistenceEnvironment.cacheStorageTier,
         cacheMirrorState:
           persistenceEnvironment.cacheStorageTier !== "none" ? "queued" : "idle",
-        revision: Math.max(
-          Number(graphPersistenceState.revision || 0),
-          acceptedRevision,
-        ),
+        revision: acceptedRevision,
+        lastPersistedRevision: acceptedRevision,
         pendingPersist: false,
         persistMismatchReason: "",
-        lastAcceptedRevision: Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          acceptedRevision,
-        ),
+        lastAcceptedRevision: acceptedRevision,
         acceptedStorageTier: "luker-chat-state",
         acceptedBy: "luker-chat-state",
         lastRecoverableStorageTier: "none",
@@ -17729,5 +17901,6 @@ async function onCompactLukerSidecar() {
   }
   debugLog("[ST-BME] 初始化完成");
 })();
+
 
 
