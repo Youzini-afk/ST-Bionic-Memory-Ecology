@@ -110,9 +110,165 @@ function recordTaskPromptBuild(taskType, snapshot = {}) {
   const state = getRuntimeDebugState();
   state.taskPromptBuilds[normalizedTaskType] = {
     updatedAt: new Date().toISOString(),
-    ...cloneRuntimeDebugValue(snapshot, {}),
+    ...sanitizePromptBuildDebugSnapshot(snapshot),
   };
   state.updatedAt = new Date().toISOString();
+}
+
+function isVerboseRuntimeDebugEnabled() {
+  return globalThis.__stBmeVerboseDebug === true;
+}
+
+function buildPreviewText(value, maxChars = 240) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
+
+function summarizeExecutionMessages(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  const roles = {};
+  let totalChars = 0;
+  const preview = [];
+  for (const message of list) {
+    const role = String(message?.role || "system");
+    const content = String(message?.content || "");
+    roles[role] = Number(roles[role] || 0) + 1;
+    totalChars += content.length;
+    if (preview.length < 3) {
+      const compact = buildPreviewText(content, 96);
+      if (compact) {
+        preview.push(`${role}: ${compact}`);
+      }
+    }
+  }
+  return {
+    count: list.length,
+    roles,
+    totalChars,
+    preview,
+  };
+}
+
+function compactExecutionMessages(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  return list.slice(0, 6).map((message) => ({
+    role: String(message?.role || ""),
+    content: buildPreviewText(message?.content || "", 160),
+    source: String(message?.source || ""),
+    blockId: String(message?.blockId || ""),
+    blockType: String(message?.blockType || ""),
+    sourceKey: String(message?.sourceKey || ""),
+    regexSourceType: String(message?.regexSourceType || ""),
+  }));
+}
+
+function summarizeRenderedBlocks(blocks = []) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  return {
+    count: list.length,
+    preview: list.slice(0, 6).map((block) => ({
+      id: String(block?.id || ""),
+      name: String(block?.name || ""),
+      type: String(block?.type || ""),
+      role: String(block?.role || ""),
+      chars: String(block?.content || "").length,
+    })),
+  };
+}
+
+function summarizeWorldInfoResolution(worldInfoResolution = null) {
+  const source =
+    worldInfoResolution &&
+    typeof worldInfoResolution === "object" &&
+    !Array.isArray(worldInfoResolution)
+      ? worldInfoResolution
+      : {};
+  return {
+    beforeCount: Array.isArray(source.beforeEntries) ? source.beforeEntries.length : 0,
+    afterCount: Array.isArray(source.afterEntries) ? source.afterEntries.length : 0,
+    atDepthCount: Array.isArray(source.atDepthEntries) ? source.atDepthEntries.length : 0,
+    additionalMessageCount: Array.isArray(source.additionalMessages)
+      ? source.additionalMessages.length
+      : 0,
+    activatedEntryNames: Array.isArray(source.activatedEntryNames)
+      ? source.activatedEntryNames.slice(0, 12)
+      : [],
+    debug:
+      source.debug && typeof source.debug === "object" && !Array.isArray(source.debug)
+        ? {
+            ejsRuntimeStatus: String(source.debug.ejsRuntimeStatus || ""),
+            cacheHit: Boolean(source.debug.cache?.hit),
+            loadMs: Number(source.debug.loadMs || 0),
+          }
+        : null,
+  };
+}
+
+function sanitizePromptBuildDebugSnapshot(snapshot = {}) {
+  const cloned = cloneRuntimeDebugValue(snapshot, {});
+  if (isVerboseRuntimeDebugEnabled()) {
+    return {
+      ...cloned,
+      debugMode: "verbose",
+    };
+  }
+
+  return {
+    updatedAt: new Date().toISOString(),
+    debugMode: "summary",
+    taskType: String(cloned?.taskType || ""),
+    profileId: String(cloned?.profileId || ""),
+    profileName: String(cloned?.profileName || ""),
+    systemPromptPreview: buildPreviewText(cloned?.systemPrompt || ""),
+    executionMessages: compactExecutionMessages(cloned?.executionMessages),
+    privateTaskMessages: compactExecutionMessages(cloned?.privateTaskMessages),
+    renderedBlocks: [],
+    hostInjections: cloned?.hostInjections
+      ? {
+          before: Array.isArray(cloned.hostInjections.before)
+            ? cloned.hostInjections.before.length
+            : 0,
+          after: Array.isArray(cloned.hostInjections.after)
+            ? cloned.hostInjections.after.length
+            : 0,
+          atDepth: Array.isArray(cloned.hostInjections.atDepth)
+            ? cloned.hostInjections.atDepth.length
+            : 0,
+        }
+      : null,
+    executionMessagesSummary: summarizeExecutionMessages(cloned?.executionMessages),
+    privateTaskMessagesSummary: summarizeExecutionMessages(cloned?.privateTaskMessages),
+    renderedBlocksSummary: summarizeRenderedBlocks(cloned?.renderedBlocks),
+    worldInfoResolutionSummary: summarizeWorldInfoResolution(cloned?.worldInfoResolution),
+    mvu: cloneRuntimeDebugValue(cloned?.mvu, null),
+    inputContext: null,
+    inputContextSummary:
+      cloned?.inputContext && typeof cloned.inputContext === "object"
+        ? {
+            keys: Object.keys(cloned.inputContext).slice(0, 16),
+          }
+        : null,
+    regexInput:
+      cloned?.regexInput && typeof cloned.regexInput === "object"
+        ? {
+            entryCount: Array.isArray(cloned.regexInput.entries)
+              ? cloned.regexInput.entries.length
+              : 0,
+          }
+        : null,
+    debug:
+      cloned?.debug && typeof cloned.debug === "object"
+        ? {
+            renderedBlockCount: Number(cloned.debug.renderedBlockCount || 0),
+            executionMessageCount: Number(cloned.debug.executionMessageCount || 0),
+            hostInjectionCount: Number(cloned.debug.hostInjectionCount || 0),
+            worldInfoRequested: cloned.debug.worldInfoRequested !== false,
+            worldInfoCacheHit: Boolean(cloned.debug.worldInfoCacheHit),
+            ejsRuntimeStatus: String(cloned.debug.ejsRuntimeStatus || ""),
+          }
+        : null,
+  };
 }
 
 function mergeRegexCollectors(...collectors) {

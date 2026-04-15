@@ -15,6 +15,11 @@ import { onMessageReceivedController } from "../host/event-binding.js";
 import {
   buildGraphCommitMarker,
   buildGraphChatStateSnapshot,
+  buildLukerGraphCheckpointV2,
+  buildLukerGraphJournalEntry,
+  buildLukerGraphJournalV2,
+  buildLukerGraphManifestV2,
+  appendLukerGraphJournalEntryV2,
   canUseGraphChatState,
   detectIndexedDbSnapshotCommitMarkerMismatch,
   cloneGraphForPersistence,
@@ -26,6 +31,12 @@ import {
   getGraphIdentityAliasCandidates,
   getGraphPersistenceMeta,
   GRAPH_COMMIT_MARKER_KEY,
+  LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+  LUKER_GRAPH_JOURNAL_COMPACTION_BYTES,
+  LUKER_GRAPH_JOURNAL_COMPACTION_DEPTH,
+  LUKER_GRAPH_JOURNAL_COMPACTION_REVISION_GAP,
+  LUKER_GRAPH_JOURNAL_NAMESPACE,
+  LUKER_GRAPH_MANIFEST_NAMESPACE,
   getGraphShadowSnapshotStorageKey,
   GRAPH_LOAD_PENDING_CHAT_ID,
   GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
@@ -39,7 +50,9 @@ import {
   normalizeGraphCommitMarker,
   readGraphCommitMarker,
   readGraphChatStateSnapshot,
+  readLukerGraphSidecarV2,
   readGraphShadowSnapshot,
+  replaceLukerGraphJournalV2,
   rememberGraphIdentityAlias,
   removeGraphShadowSnapshot,
   resolveGraphIdentityAliasByHostChatId,
@@ -47,6 +60,8 @@ import {
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
   writeGraphChatStateSnapshot,
+  writeLukerGraphCheckpointV2,
+  writeLukerGraphManifestV2,
   writeGraphShadowSnapshot,
 } from "../graph/graph-persistence.js";
 import {
@@ -502,6 +517,10 @@ async function createGraphPersistenceHarness({
     cloneGraphForPersistence,
     buildGraphCommitMarker,
     buildGraphChatStateSnapshot,
+    buildLukerGraphCheckpointV2,
+    buildLukerGraphJournalEntry,
+    buildLukerGraphJournalV2,
+    buildLukerGraphManifestV2,
     canUseGraphChatState,
     cloneRuntimeDebugValue,
     detectIndexedDbSnapshotCommitMarkerMismatch,
@@ -512,6 +531,12 @@ async function createGraphPersistenceHarness({
     getGraphPersistedRevision,
     getGraphIdentityAliasCandidates,
     GRAPH_COMMIT_MARKER_KEY,
+    LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    LUKER_GRAPH_JOURNAL_COMPACTION_BYTES,
+    LUKER_GRAPH_JOURNAL_COMPACTION_DEPTH,
+    LUKER_GRAPH_JOURNAL_COMPACTION_REVISION_GAP,
+    LUKER_GRAPH_JOURNAL_NAMESPACE,
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
     getGraphShadowSnapshotStorageKey,
     GRAPH_IDENTITY_ALIAS_STORAGE_KEY,
     GRAPH_LOAD_PENDING_CHAT_ID,
@@ -526,14 +551,19 @@ async function createGraphPersistenceHarness({
     normalizeGraphCommitMarker,
     readGraphCommitMarker,
     readGraphChatStateSnapshot,
+    readLukerGraphSidecarV2,
     readGraphShadowSnapshot,
     rememberGraphIdentityAlias,
     removeGraphShadowSnapshot,
     resolveGraphIdentityAliasByHostChatId,
     shouldPreferShadowSnapshotOverOfficial,
     stampGraphPersistenceMeta,
+    replaceLukerGraphJournalV2,
+    appendLukerGraphJournalEntryV2,
     writeChatMetadataPatch,
     writeGraphChatStateSnapshot,
+    writeLukerGraphManifestV2,
+    writeLukerGraphCheckpointV2,
     writeGraphShadowSnapshot,
     // Shadow snapshot functions need VM-local sessionStorage overrides
     // because imported versions use the outer globalThis (no sessionStorage)
@@ -3383,11 +3413,26 @@ result = {
   assert.equal(result.storageTier, "luker-chat-state");
   assert.equal(result.acceptedBy, "luker-chat-state");
 
-  const stored = await harness.runtimeContext.__chatContext.getChatState(
+  const manifest = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+  );
+  const journal = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_JOURNAL_NAMESPACE,
+  );
+  const checkpoint = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+  );
+  const legacyStored = await harness.runtimeContext.__chatContext.getChatState(
     GRAPH_CHAT_STATE_NAMESPACE,
   );
-  assert.equal(stored?.revision, result.revision);
-  assert.equal(stored?.storageTier, "luker-chat-state");
+  assert.equal(manifest?.headRevision, result.revision);
+  assert.equal(manifest?.formatVersion, 2);
+  assert.equal(manifest?.storageTier, "luker-chat-state");
+  assert.equal(manifest?.checkpointRevision, result.revision);
+  assert.equal(checkpoint?.revision, result.revision);
+  assert.equal(Array.isArray(journal?.entries), true);
+  assert.equal(journal?.entries?.length, 0);
+  assert.equal(legacyStored ?? null, null);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(
     Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0) >= result.revision,
@@ -3397,6 +3442,97 @@ result = {
   assert.equal(
     harness.api.getGraphPersistenceState().acceptedStorageTier,
     "luker-chat-state",
+  );
+  assert.equal(
+    harness.api.getGraphPersistenceState().lukerManifestRevision,
+    result.revision,
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-luker-v2-load",
+    globalChatId: "chat-luker-v2-load",
+    characterId: "char-luker-v2",
+    chatMetadata: {
+      integrity: "meta-luker-v2-load",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("chat-luker-v2-load", "luker-v2-load"),
+    {
+      revision: 4,
+      integrity: "meta-luker-v2-load",
+      chatId: "chat-luker-v2-load",
+      reason: "luker-v2-load-seed",
+    },
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_JOURNAL_NAMESPACE,
+    buildLukerGraphJournalV2([], {
+      chatId: "chat-luker-v2-load",
+      integrity: "meta-luker-v2-load",
+      headRevision: 4,
+    }),
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    {
+      formatVersion: 2,
+      revision: 4,
+      serializedGraph: serializeGraph(graph),
+      chatId: "chat-luker-v2-load",
+      integrity: "meta-luker-v2-load",
+      counts: {
+        nodeCount: 1,
+        edgeCount: 0,
+        archivedCount: 0,
+        tombstoneCount: 0,
+      },
+      persistedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      reason: "luker-v2-load-seed",
+      storageTier: "luker-chat-state",
+    },
+  );
+  harness.runtimeContext.__chatContext.__chatStateStore.set(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+    buildLukerGraphManifestV2(graph, {
+      baseRevision: 4,
+      headRevision: 4,
+      checkpointRevision: 4,
+      lastCompactedRevision: 4,
+      journalDepth: 0,
+      journalBytes: 0,
+      chatId: "chat-luker-v2-load",
+      integrity: "meta-luker-v2-load",
+      reason: "luker-v2-load-seed",
+      storageTier: "luker-chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+    }),
+  );
+
+  const sidecar = await harness.runtimeContext.readLukerGraphSidecarV2(
+    harness.runtimeContext.__chatContext,
+  );
+
+  assert.equal(Number(sidecar?.manifest?.headRevision || 0), 4);
+  assert.equal(Number(sidecar?.checkpoint?.revision || 0), 4);
+  assert.equal(Number(sidecar?.journal?.entryCount || 0), 0);
+  assert.equal(
+    sidecar?.manifest?.chatId,
+    "chat-luker-v2-load",
+  );
+  assert.equal(
+    sidecar?.checkpoint?.chatId,
+    "chat-luker-v2-load",
   );
 }
 

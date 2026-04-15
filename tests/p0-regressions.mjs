@@ -6151,7 +6151,10 @@ async function testLlmDebugSnapshotRedactsSecretsBeforeStorage() {
     assert.equal(snapshot.redacted, true);
     const serialized = JSON.stringify(snapshot);
     assert.doesNotMatch(serialized, /sk-secret-redaction/);
-    assert.match(serialized, /\[REDACTED\]/);
+    assert.equal(
+      /\[REDACTED\]/.test(serialized) || snapshot.debugMode === "summary",
+      true,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     extensionsApi.extension_settings.st_bme = previousSettings;

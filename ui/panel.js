@@ -2217,6 +2217,21 @@ function _refreshTaskPersistence() {
     : "—";
   const opfsCompactionState = String(ps.opfsCompactionState?.state || "").trim();
   const opfsCompactionLabel = opfsCompactionState || "—";
+  const sidecarFormatLabel =
+    ps.hostProfile === "luker"
+      ? `v${Number(ps.lukerSidecarFormatVersion || 0) || 1}`
+      : "—";
+  const manifestRevisionLabel =
+    ps.hostProfile === "luker" ? String(Number(ps.lukerManifestRevision || 0)) : "—";
+  const journalStateLabel =
+    ps.hostProfile === "luker"
+      ? `${Number(ps.lukerJournalDepth || 0)} 条 / ${Number(ps.lukerJournalBytes || 0)} B`
+      : "—";
+  const checkpointRevisionLabel =
+    ps.hostProfile === "luker" ? String(Number(ps.lukerCheckpointRevision || 0)) : "—";
+  const cacheLagLabel =
+    ps.hostProfile === "luker" ? String(Number(ps.cacheLag || 0)) : "—";
+  const verboseDebugLabel = globalThis.__stBmeVerboseDebug === true ? "开启" : "关闭";
 
   const kvs = [
     ["加载状态", loadStateLabel],
@@ -2224,13 +2239,19 @@ function _refreshTaskPersistence() {
     ["主 durable", primaryTierLabel],
     ["当前 accepted", acceptedTierLabel],
     ["accepted by", ps.acceptedBy || "—"],
+    ["Sidecar 格式", sidecarFormatLabel],
+    ["Manifest rev", manifestRevisionLabel],
+    ["Journal", journalStateLabel],
+    ["Checkpoint rev", checkpointRevisionLabel],
     ["本地缓存", cacheTierLabel],
     ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
+    ["缓存落后", cacheLagLabel],
     ["解析本地引擎", ps.resolvedLocalStore || "—"],
     ["本地格式", `v${Number(ps.localStoreFormatVersion || 0) || 1}`],
     ["本地迁移", ps.localStoreMigrationState || "—"],
     ["版本号", ps.revision ?? "—"],
     ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["Verbose Debug", verboseDebugLabel],
     ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
     ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
@@ -2257,13 +2278,19 @@ function _refreshTaskPersistence() {
     ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
     ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
     ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
+    ["Sidecar 格式", "Luker 主 sidecar 的格式版本。v2 代表 manifest + journal + checkpoint。"],
+    ["Manifest rev", "Luker 主 sidecar manifest 当前确认的 head revision。"],
+    ["Journal", "Luker sidecar 未压实 journal 的条目数和累计字节数。"],
+    ["Checkpoint rev", "Luker sidecar 最近一次压实基线的 revision。"],
     ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
     ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
+    ["缓存落后", "Luker manifest revision 与本地缓存 revision 的差值。0 表示本地缓存已追平。"],
     ["解析本地引擎", "当前模式最终解析到的本地引擎，例如 auto 解析成 OPFS 或 IndexedDB。"],
     ["本地格式", "当前本地存储格式版本。OPFS v2 代表分片基线 + WAL。"],
     ["本地迁移", "当前本地存储迁移状态，例如 idle / promoting。"],
     ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
     ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
+    ["Verbose Debug", "是否抓取完整调试载荷。默认关闭，仅保留轻量摘要。"],
     ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
     ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
     ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
@@ -5349,6 +5376,9 @@ function _bindActions() {
     "bme-act-summary-rollup": "summaryRollup",
     "bme-act-retry-persist": "retryPendingPersist",
     "bme-act-probe-graph-load": "probeGraphLoad",
+    "bme-act-rebuild-luker-cache": "rebuildLukerLocalCache",
+    "bme-act-repair-luker-sidecar": "repairLukerSidecar",
+    "bme-act-compact-luker-sidecar": "compactLukerSidecar",
     "bme-act-export": "export",
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
@@ -5375,6 +5405,9 @@ function _bindActions() {
     summaryRollup: "执行总结折叠",
     retryPendingPersist: "重试持久化",
     probeGraphLoad: "重新探测图谱",
+    rebuildLukerLocalCache: "重建本地缓存",
+    repairLukerSidecar: "修复主 Sidecar",
+    compactLukerSidecar: "压实主 Sidecar",
     rebuildSummaryState: "重建总结状态",
     export: "导出图谱",
     import: "导入图谱",
@@ -9606,6 +9639,42 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
         <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.lastAcceptedRevision ?? 0))}</span>
       </div>
       <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">宿主档案</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.hostProfile || "generic-st"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">主 durable</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.primaryStorageTier || "none"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">本地缓存</span>
+        <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.cacheStorageTier || "none"))}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Luker Sidecar</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          graphPersistence.hostProfile === "luker"
+            ? `v${Number(graphPersistence.lukerSidecarFormatVersion || 0) || 1}`
+            : "—",
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Manifest / Checkpoint</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          graphPersistence.hostProfile === "luker"
+            ? `rev ${Number(graphPersistence.lukerManifestRevision || 0)} / cp ${Number(graphPersistence.lukerCheckpointRevision || 0)}`
+            : "—",
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Journal / Cache Lag</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          graphPersistence.hostProfile === "luker"
+            ? `${Number(graphPersistence.lukerJournalDepth || 0)} 条 / lag ${Number(graphPersistence.cacheLag || 0)}`
+            : "—",
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
         <span class="bme-debug-kv-key">排队中的 revision</span>
         <span class="bme-debug-kv-value">${_escHtml(String(graphPersistence.queuedPersistRevision ?? 0))}</span>
       </div>
@@ -11445,10 +11514,16 @@ function _getGraphPersistenceSnapshot() {
     primaryStorageTier: "indexeddb",
     cacheStorageTier: "none",
     cacheMirrorState: "idle",
+    cacheLag: 0,
     acceptedBy: "none",
     persistDiagnosticTier: "none",
     persistMismatchReason: "",
     commitMarker: null,
+    lukerSidecarFormatVersion: 0,
+    lukerManifestRevision: 0,
+    lukerJournalDepth: 0,
+    lukerJournalBytes: 0,
+    lukerCheckpointRevision: 0,
     chatId: "",
     storageMode: "indexeddb",
     resolvedLocalStore: "indexeddb:indexeddb",
@@ -11651,6 +11726,9 @@ function _refreshPersistenceRepairUi(
 ) {
   const row = document.getElementById("bme-persist-repair-row");
   const help = document.getElementById("bme-persist-repair-help");
+  const lukerCacheBtn = document.getElementById("bme-act-rebuild-luker-cache");
+  const lukerRepairBtn = document.getElementById("bme-act-repair-luker-sidecar");
+  const lukerCompactBtn = document.getElementById("bme-act-compact-luker-sidecar");
   if (!row || !help) return;
 
   const persistence = batchStatus?.persistence || null;
@@ -11662,6 +11740,10 @@ function _refreshPersistenceRepairUi(
 
   row.hidden = !shouldShow;
   help.hidden = !shouldShow;
+  const isLuker = String(loadInfo?.hostProfile || "") === "luker";
+  if (lukerCacheBtn) lukerCacheBtn.hidden = !isLuker;
+  if (lukerRepairBtn) lukerRepairBtn.hidden = !isLuker;
+  if (lukerCompactBtn) lukerCompactBtn.hidden = !isLuker;
   if (!shouldShow) {
     help.textContent = "";
     return;
@@ -11669,7 +11751,9 @@ function _refreshPersistenceRepairUi(
 
   if (loadInfo?.pendingPersist === true) {
     help.textContent =
-      "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
+      isLuker
+        ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再试“修复主 Sidecar”或“重建本地缓存”。"
+        : "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
     return;
   }
 
@@ -11680,8 +11764,12 @@ function _refreshPersistenceRepairUi(
 
   help.textContent =
     persistence?.recoverable === true
-      ? "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
-      : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
+      ? isLuker
+        ? "最近一批已经捕获了恢复锚点，但 Luker 主 sidecar 还没确认。可以先重试持久化；必要时再修复主 Sidecar或重建本地缓存。"
+        : "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
+      : isLuker
+        ? "最近一批持久化没有被 Luker manifest 接受。可以先重试持久化；如果主 sidecar 与本地缓存脱节，再修复主 Sidecar或重建本地缓存。"
+        : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {

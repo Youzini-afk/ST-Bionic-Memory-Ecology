@@ -528,9 +528,16 @@ try {
 
   assert.ok(runtimePromptBuild);
   assert.ok(runtimeLlmRequest);
-  assert.match(JSON.stringify(runtimeLlmRequest.messages), /FINAL_GOOD/);
+  assert.equal(runtimePromptBuild.debugMode, "summary");
+  assert.equal(runtimeLlmRequest.debugMode, "summary");
+  assert.equal(runtimeLlmRequest.messages.length <= 6, true);
   assert.equal(
-    runtimeLlmRequest.messages.some((message) =>
+    Number(runtimeLlmRequest.messagesSummary?.count || 0) >=
+      runtimeLlmRequest.messages.length,
+    true,
+  );
+  assert.equal(
+    runtimePromptBuild.executionMessages.some((message) =>
       String(message?.regexSourceType || "").trim(),
     ),
     true,
@@ -570,7 +577,16 @@ try {
   );
   assert.deepEqual(
     runtimeLlmRequest.transportMessages,
-    runtimeLlmRequest.requestBody.messages,
+    runtimeLlmRequest.requestBody?.messages || [],
+  );
+  assert.equal(
+    Array.isArray(runtimePromptBuild.executionMessages),
+    true,
+  );
+  assert.equal(
+    Number(runtimePromptBuild.executionMessagesSummary?.count || 0) >=
+      runtimePromptBuild.executionMessages.length,
+    true,
   );
   assert.equal(
     runtimeLlmRequest.promptExecution?.mvu?.sanitizedFieldCount,

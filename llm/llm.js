@@ -20,6 +20,8 @@ const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const STREAM_DEBUG_PREVIEW_MAX_CHARS = 1200;
 const STREAM_DEBUG_UPDATE_INTERVAL_MS = 120;
+const TASK_DEBUG_TIMELINE_LIMIT = 24;
+const TASK_DEBUG_PREVIEW_MAX_CHARS = 280;
 const SENSITIVE_DEBUG_KEY_PATTERN =
   /^(authorization|proxy_password|api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)$/i;
 
@@ -80,10 +82,237 @@ function redactSensitiveValue(value, currentKey = "") {
 function sanitizeLlmDebugSnapshot(snapshot = {}) {
   const cloned = cloneRuntimeDebugValue(snapshot, {});
   const redacted = redactSensitiveValue(cloned);
+  if (!isVerboseRuntimeDebugEnabled()) {
+    return buildCompactLlmDebugSnapshot(redacted);
+  }
   if (redacted && typeof redacted === "object" && !Array.isArray(redacted)) {
     redacted.redacted = true;
+    redacted.debugMode = "verbose";
   }
   return redacted;
+}
+
+function isVerboseRuntimeDebugEnabled() {
+  return globalThis.__stBmeVerboseDebug === true;
+}
+
+function buildPreviewText(value, maxChars = TASK_DEBUG_PREVIEW_MAX_CHARS) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+}
+
+function summarizeMessageArray(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  const roles = {};
+  let totalChars = 0;
+  const preview = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const message = list[index] || {};
+    const role = String(message.role || message.name || "unknown");
+    roles[role] = Number(roles[role] || 0) + 1;
+    const content = Array.isArray(message.content)
+      ? message.content
+          .map((part) =>
+            typeof part === "string"
+              ? part
+              : String(part?.text || part?.content || ""),
+          )
+          .join(" ")
+      : String(message.content || message.text || "");
+    totalChars += content.length;
+    if (preview.length < 3) {
+      const compact = buildPreviewText(content, 96);
+      if (compact) {
+        preview.push(`${role}: ${compact}`);
+      }
+    }
+  }
+  return {
+    count: list.length,
+    roles,
+    totalChars,
+    preview,
+  };
+}
+
+function compactMessageDebugEntries(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  return list.slice(0, 6).map((message) => {
+    const compact = {
+      role: String(message?.role || ""),
+      content: buildPreviewText(message?.content || message?.text || "", 160),
+    };
+    for (const key of [
+      "regexSourceType",
+      "source",
+      "blockId",
+      "blockType",
+      "sourceKey",
+      "contentOrigin",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(message || {}, key)) {
+        compact[key] = cloneRuntimeDebugValue(message[key], message[key]);
+      }
+    }
+    return compact;
+  });
+}
+
+function summarizePlainObject(value = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value == null ? null : buildPreviewText(value, 96);
+  }
+  const keys = Object.keys(value);
+  return {
+    keyCount: keys.length,
+    keys: keys.slice(0, 12),
+  };
+}
+
+function summarizeRequestBody(value = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return summarizePlainObject(value);
+  }
+  const messageSummary = Array.isArray(value.messages)
+    ? summarizeMessageArray(value.messages)
+    : null;
+  return {
+    keyCount: Object.keys(value).length,
+    keys: Object.keys(value).slice(0, 16),
+    model: String(value.model || ""),
+    stream: value.stream === true,
+    maxTokens: Number(value.max_tokens || value.max_completion_tokens || 0) || 0,
+    messages: messageSummary,
+    messagesCompact: compactMessageDebugEntries(value.messages),
+    promptPreview: buildPreviewText(
+      value.prompt ||
+        value.input ||
+        value.user_input ||
+        value.system_prompt ||
+        "",
+    ),
+  };
+}
+
+function buildCompactLlmDebugSnapshot(snapshot = {}) {
+  const compactMessages = compactMessageDebugEntries(
+    Array.isArray(snapshot?.messages) && snapshot.messages.length > 0
+      ? snapshot.messages
+      : Array.isArray(snapshot?.requestBody?.messages)
+        ? snapshot.requestBody.messages
+        : snapshot?.transportMessages,
+  );
+  const compactTransportMessages = compactMessageDebugEntries(
+    Array.isArray(snapshot?.transportMessages) && snapshot.transportMessages.length > 0
+      ? snapshot.transportMessages
+      : Array.isArray(snapshot?.requestBody?.messages)
+        ? snapshot.requestBody.messages
+        : [],
+  );
+  return {
+    updatedAt: nowIso(),
+    debugMode: "summary",
+    redacted: true,
+    startedAt: String(snapshot?.startedAt || snapshot?.streamStartedAt || ""),
+    finishedAt: String(snapshot?.finishedAt || snapshot?.streamFinishedAt || ""),
+    model: String(snapshot?.model || ""),
+    route: String(snapshot?.route || snapshot?.effectiveRoute || ""),
+    effectiveRoute: String(snapshot?.effectiveRoute || snapshot?.route || ""),
+    llmConfigSourceLabel: String(snapshot?.llmConfigSourceLabel || ""),
+    llmPresetName: String(snapshot?.llmPresetName || ""),
+    llmProviderLabel: String(snapshot?.llmProviderLabel || ""),
+    llmTransportLabel: String(snapshot?.llmTransportLabel || ""),
+    filteredGeneration:
+      snapshot?.filteredGeneration &&
+      typeof snapshot.filteredGeneration === "object" &&
+      !Array.isArray(snapshot.filteredGeneration)
+        ? cloneRuntimeDebugValue(snapshot.filteredGeneration, {})
+        : null,
+    streamForceDisabled:
+      typeof snapshot?.streamForceDisabled === "boolean"
+        ? snapshot.streamForceDisabled
+        : undefined,
+    streamRequested:
+      typeof snapshot?.streamRequested === "boolean"
+        ? snapshot.streamRequested
+        : undefined,
+    streamActive:
+      typeof snapshot?.streamActive === "boolean"
+        ? snapshot.streamActive
+        : undefined,
+    streamCompleted:
+      typeof snapshot?.streamCompleted === "boolean"
+        ? snapshot.streamCompleted
+        : undefined,
+    streamFallback:
+      typeof snapshot?.streamFallback === "boolean"
+        ? snapshot.streamFallback
+        : undefined,
+    streamFallbackSucceeded:
+      typeof snapshot?.streamFallbackSucceeded === "boolean"
+        ? snapshot.streamFallbackSucceeded
+        : undefined,
+    streamFallbackReason:
+      snapshot?.streamFallbackReason != null
+        ? String(snapshot.streamFallbackReason || "")
+        : undefined,
+    streamFinishReason:
+      snapshot?.streamFinishReason != null
+        ? String(snapshot.streamFinishReason || "")
+        : undefined,
+    streamPreviewText:
+      snapshot?.streamPreviewText != null ||
+      snapshot?.streamTextPreview != null ||
+      snapshot?.preview != null
+        ? buildPreviewText(
+            snapshot?.streamPreviewText ||
+              snapshot?.streamTextPreview ||
+              snapshot?.preview ||
+              "",
+            STREAM_DEBUG_PREVIEW_MAX_CHARS,
+          )
+        : undefined,
+    promptExecution: cloneRuntimeDebugValue(snapshot?.promptExecution, null),
+    requestCleaning: cloneRuntimeDebugValue(snapshot?.requestCleaning, null),
+    responseCleaning: cloneRuntimeDebugValue(snapshot?.responseCleaning, null),
+    jsonFailure: cloneRuntimeDebugValue(snapshot?.jsonFailure, null),
+    messages: compactMessages,
+    transportMessages: compactTransportMessages,
+    requestBody: (() => {
+      const summary = summarizeRequestBody(snapshot?.requestBody);
+      return summary && typeof summary === "object"
+        ? {
+            ...summary,
+            messages: compactTransportMessages,
+          }
+        : summary;
+    })(),
+    messagesSummary: summarizeMessageArray(
+      Array.isArray(snapshot?.messages) && snapshot.messages.length > 0
+        ? snapshot.messages
+        : snapshot?.requestBody?.messages,
+    ),
+    transportMessagesSummary: summarizeMessageArray(
+      Array.isArray(snapshot?.transportMessages) && snapshot.transportMessages.length > 0
+        ? snapshot.transportMessages
+        : snapshot?.requestBody?.messages,
+    ),
+    requestBodySummary: summarizeRequestBody(snapshot?.requestBody),
+    responsePreview: buildPreviewText(
+      snapshot?.cleanedText ||
+        snapshot?.responseText ||
+        snapshot?.preview ||
+        snapshot?.content ||
+        "",
+    ),
+    promptPreview: buildPreviewText(
+      snapshot?.systemPrompt ||
+        snapshot?.userPrompt ||
+        snapshot?.promptText ||
+        "",
+    ),
+  };
 }
 
 function nowIso() {
@@ -131,9 +360,21 @@ function summarizeTaskTimelineEntry(taskType, snapshot = {}) {
     requestCleaning: cloneRuntimeDebugValue(snapshot?.requestCleaning, null),
     responseCleaning: cloneRuntimeDebugValue(snapshot?.responseCleaning, null),
     jsonFailure: cloneRuntimeDebugValue(snapshot?.jsonFailure, null),
-    messages: cloneRuntimeDebugValue(snapshot?.messages, []),
-    transportMessages: cloneRuntimeDebugValue(snapshot?.transportMessages, []),
-    requestBody: cloneRuntimeDebugValue(snapshot?.requestBody, null),
+    messagesSummary:
+      cloneRuntimeDebugValue(snapshot?.messagesSummary, null) ||
+      summarizeMessageArray(snapshot?.messages),
+    transportMessagesSummary:
+      cloneRuntimeDebugValue(snapshot?.transportMessagesSummary, null) ||
+      summarizeMessageArray(snapshot?.transportMessages),
+    requestBodySummary:
+      cloneRuntimeDebugValue(snapshot?.requestBodySummary, null) ||
+      summarizeRequestBody(snapshot?.requestBody),
+    responsePreview: buildPreviewText(
+      snapshot?.responsePreview ||
+        snapshot?.cleanedText ||
+        snapshot?.responseText ||
+        "",
+    ),
   };
 }
 
@@ -155,17 +396,49 @@ function getRuntimeDebugState() {
   return globalThis[stateKey];
 }
 
+function preserveStreamingDebugFields(previousSnapshot = {}, nextSnapshot = {}) {
+  const merged = {
+    ...cloneRuntimeDebugValue(previousSnapshot, {}),
+    ...cloneRuntimeDebugValue(nextSnapshot, {}),
+  };
+  for (const key of [
+    "streamRequested",
+    "streamActive",
+    "streamCompleted",
+    "streamFallback",
+    "streamFallbackReason",
+    "streamFallbackSucceeded",
+    "streamStartedAt",
+    "streamFinishedAt",
+    "streamChunkCount",
+    "streamReceivedChars",
+    "streamPreviewText",
+    "streamFinishReason",
+    "streamLastEventAt",
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(nextSnapshot, key)) {
+      merged[key] = previousSnapshot?.[key];
+    }
+  }
+  return merged;
+}
+
 function recordTaskLlmRequest(taskType, snapshot = {}, options = {}) {
   const normalizedTaskType = String(taskType || "").trim() || "unknown";
   const state = getRuntimeDebugState();
   const shouldMerge = options?.merge === true;
-  const previousSnapshot = shouldMerge
-    ? cloneRuntimeDebugValue(state.taskLlmRequests[normalizedTaskType], {})
-    : {};
+  const existingSnapshot = cloneRuntimeDebugValue(
+    state.taskLlmRequests[normalizedTaskType],
+    {},
+  );
+  const previousSnapshot = shouldMerge ? existingSnapshot : {};
+  const sanitizedSnapshot = sanitizeLlmDebugSnapshot(snapshot);
   state.taskLlmRequests[normalizedTaskType] = {
-    ...previousSnapshot,
+    ...(shouldMerge
+      ? previousSnapshot
+      : preserveStreamingDebugFields(existingSnapshot, sanitizedSnapshot)),
     updatedAt: new Date().toISOString(),
-    ...sanitizeLlmDebugSnapshot(snapshot),
+    ...sanitizedSnapshot,
   };
   const timelineEntry = summarizeTaskTimelineEntry(
     normalizedTaskType,
@@ -173,7 +446,7 @@ function recordTaskLlmRequest(taskType, snapshot = {}, options = {}) {
   );
   if (timelineEntry) {
     state.taskTimeline = Array.isArray(state.taskTimeline)
-      ? [...state.taskTimeline, timelineEntry].slice(-40)
+      ? [...state.taskTimeline, timelineEntry].slice(-TASK_DEBUG_TIMELINE_LIMIT)
       : [timelineEntry];
   }
   state.updatedAt = new Date().toISOString();
