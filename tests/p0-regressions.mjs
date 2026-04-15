@@ -3945,7 +3945,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
   registerCoreEventHooksController(runtime);
   registerCoreEventHooksController(runtime);
 
-  assert.equal(eventRegistrations.length, 12);
+  assert.equal(eventRegistrations.length, 11);
   assert.equal(makeFirstRegistrations.length, 2);
   assert.equal(bindingState.registered, true);
 }

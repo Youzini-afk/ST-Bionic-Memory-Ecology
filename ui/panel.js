@@ -2232,10 +2232,13 @@ function _refreshTaskPersistence() {
   const cacheLagLabel =
     ps.hostProfile === "luker" ? String(Number(ps.cacheLag || 0)) : "—";
   const verboseDebugLabel = globalThis.__stBmeVerboseDebug === true ? "开启" : "关闭";
+  const projectionLabel =
+    ps?.projectionState?.runtime?.status || ps?.projectionState?.persistent?.status || "—";
 
   const kvs = [
     ["加载状态", loadStateLabel],
     ["宿主档案", hostProfileLabel],
+    ["Chat Target", ps.chatStateTarget ? JSON.stringify(ps.chatStateTarget) : "—"],
     ["主 durable", primaryTierLabel],
     ["当前 accepted", acceptedTierLabel],
     ["accepted by", ps.acceptedBy || "—"],
@@ -2252,6 +2255,11 @@ function _refreshTaskPersistence() {
     ["版本号", ps.revision ?? "—"],
     ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
     ["Verbose Debug", verboseDebugLabel],
+    ["轻量模式", ps.lightweightHostMode ? "开启" : "关闭"],
+    ["Luker Hook", ps.lastHookPhase || "—"],
+    ["Projection", projectionLabel],
+    ["Rescan 原因", ps.lastRequestRescanReason || "—"],
+    ["忽略变更", ps.lastIgnoredMutationEvent || "—"],
     ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
     ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
@@ -2275,6 +2283,7 @@ function _refreshTaskPersistence() {
   const guidePairs = [
     ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
     ["宿主档案", "当前运行环境。Luker 会把聊天侧车当主 durable 存储，其它宿主仍以本地存储为主。"],
+    ["Chat Target", "Luker 当前绑定的 chat-state target。branch 派生和后台任务应显式指向它，而不是依赖当前聊天。"],
     ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
     ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
     ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
@@ -2291,6 +2300,11 @@ function _refreshTaskPersistence() {
     ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
     ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
     ["Verbose Debug", "是否抓取完整调试载荷。默认关闭，仅保留轻量摘要。"],
+    ["轻量模式", "Luker Android/WebView 或移动端下默认启用，主动收紧调试和运行态缓存。"],
+    ["Luker Hook", "最近一次命中的 Luker 正式 generation hook 阶段。"],
+    ["Projection", "当前 runtime / persistent projection 的轻量状态。runtime projection 会在生成结束后回落为空闲。"],
+    ["Rescan 原因", "如果当前轮次通过 runtime projection 请求了 world-info rescan，这里会显示最后一次原因。"],
+    ["忽略变更", "最近一次被按 MESSAGE_UPDATED 轻刷新降级处理的消息变更。"],
     ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
     ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
     ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],

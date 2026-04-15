@@ -81,6 +81,7 @@ import {
   onGenerationStartedController,
   onMessageDeletedController,
   onMessageEditedController,
+  onMessageUpdatedController,
   onMessageReceivedController,
   onMessageSentController,
   onMessageSwipedController,
@@ -90,6 +91,16 @@ import {
   registerGenerationAfterCommandsController,
   scheduleSendIntentHookRetryController,
 } from "./host/event-binding.js";
+import {
+  BME_HOST_PROFILE_LUKER,
+  getBmeHostAdapter,
+  isBmeLightweightHostMode,
+  normalizeBmeChatStateTarget,
+  resolveBmeHostProfile,
+  resolveChatStateTargetChatId,
+  resolveCurrentBmeChatStateTarget,
+  serializeBmeChatStateTarget,
+} from "./host/runtime-host-adapter.js";
 import {
   executeExtractionBatchController,
   onExtractionTaskController,
@@ -125,6 +136,7 @@ import {
   buildLukerGraphJournalV2,
   buildLukerGraphManifestV2,
   canUseGraphChatState,
+  deleteGraphChatStateNamespace,
   detectIndexedDbSnapshotCommitMarkerMismatch,
   findGraphShadowSnapshotByIntegrity,
   getAcceptedCommitMarkerRevision,
@@ -140,6 +152,8 @@ import {
   LUKER_GRAPH_JOURNAL_COMPACTION_REVISION_GAP,
   LUKER_GRAPH_JOURNAL_NAMESPACE,
   LUKER_GRAPH_MANIFEST_NAMESPACE,
+  LUKER_PROJECTION_STATE_NAMESPACE,
+  LUKER_DEBUG_STATE_NAMESPACE,
   LUKER_GRAPH_SIDECAR_V2_FORMAT,
   MODULE_NAME,
   cloneGraphForPersistence,
@@ -147,6 +161,7 @@ import {
   getGraphPersistedRevision,
   getGraphPersistenceMeta,
   getGraphIdentityAliasCandidates,
+  readGraphChatStateNamespaces,
   readGraphShadowSnapshot,
   removeGraphShadowSnapshot,
   rememberGraphIdentityAlias,
@@ -158,6 +173,7 @@ import {
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
+  writeGraphChatStatePayload,
   writeGraphChatStateSnapshot,
   writeLukerGraphCheckpointV2,
   writeLukerGraphManifestV2,
@@ -335,6 +351,65 @@ const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
 function normalizeChatIdCandidate(value = "") {
   return String(value ?? "").trim();
+}
+
+function getActiveBmeHostAdapter(context = getContext()) {
+  if (typeof getBmeHostAdapter === "function") {
+    return getBmeHostAdapter(context);
+  }
+  return {
+    hostProfile: resolvePersistenceHostProfile(context),
+    resolveCurrentTarget() {
+      return resolveCurrentChatStateTarget(context);
+    },
+    isLightweightHostMode() {
+      return false;
+    },
+  };
+}
+
+function resolveCurrentChatStateTarget(
+  context = getContext(),
+  explicitTarget = null,
+) {
+  if (
+    typeof normalizeBmeChatStateTarget === "function" &&
+    typeof resolveCurrentBmeChatStateTarget === "function"
+  ) {
+    return normalizeBmeChatStateTarget(
+      resolveCurrentBmeChatStateTarget(context, explicitTarget),
+    );
+  }
+  if (explicitTarget && typeof explicitTarget === "object") {
+    return explicitTarget;
+  }
+  const activeContext =
+    context && typeof context === "object" ? context : getContext();
+  const chatId = normalizeChatIdCandidate(
+    activeContext?.chatId ||
+      (typeof activeContext?.getCurrentChatId === "function"
+        ? activeContext.getCurrentChatId()
+        : ""),
+  );
+  if (activeContext?.groupId != null && String(activeContext.groupId || "").trim()) {
+    return chatId ? { is_group: true, id: chatId } : null;
+  }
+  return null;
+}
+
+function syncBmeHostRuntimeFlags(context = getContext()) {
+  const adapter = getActiveBmeHostAdapter(context);
+  const target = adapter.resolveCurrentTarget();
+  const lightweightHostMode =
+    typeof adapter.isLightweightHostMode === "function"
+      ? adapter.isLightweightHostMode()
+      : false;
+  globalThis.__stBmeLightweightHostMode = lightweightHostMode === true;
+  return {
+    adapter,
+    target,
+    lightweightHostMode,
+  };
 }
 
 function readGlobalCurrentChatId() {
@@ -1308,28 +1383,13 @@ function resolveLocalStoreTierFromPresentation(
 }
 
 function hasValidLukerChatStateTarget(context = getContext()) {
-  if (!context || typeof context !== "object") {
-    return false;
-  }
-  const chatId = normalizeChatIdCandidate(
-    context.chatId ||
-      (typeof context.getCurrentChatId === "function"
-        ? context.getCurrentChatId()
-        : getCurrentChatId(context)),
-  );
-  if (!chatId) {
-    return false;
-  }
-  if (context.groupId != null && String(context.groupId || "").trim()) {
-    return true;
-  }
-  if (context.characterId != null && String(context.characterId || "").trim()) {
-    return true;
-  }
-  return true;
+  return resolveCurrentChatStateTarget(context) !== null;
 }
 
 function resolvePersistenceHostProfile(context = getContext()) {
+  if (typeof resolveBmeHostProfile === "function") {
+    return resolveBmeHostProfile(context);
+  }
   const activeContext =
     context && typeof context === "object" ? context : getContext();
   const hasLukerApi =
@@ -1337,7 +1397,12 @@ function resolvePersistenceHostProfile(context = getContext()) {
   if (
     hasLukerApi &&
     canUseGraphChatState(activeContext) &&
-    hasValidLukerChatStateTarget(activeContext)
+    normalizeChatIdCandidate(
+      activeContext?.chatId ||
+        (typeof activeContext?.getCurrentChatId === "function"
+          ? activeContext.getCurrentChatId()
+          : ""),
+    )
   ) {
     return "luker";
   }
@@ -1372,8 +1437,11 @@ function getGraphPersistenceLiveState() {
     getContext(),
     getPreferredGraphLocalStorePresentationSync(),
   );
+  const adapterRuntime = syncBmeHostRuntimeFlags(getContext());
   const hostProfile = normalizePersistenceHostProfile(
-    graphPersistenceState.hostProfile || persistenceEnvironment.hostProfile,
+    graphPersistenceState.hostProfile ||
+      adapterRuntime.adapter.hostProfile ||
+      persistenceEnvironment.hostProfile,
   );
   const primaryStorageTier = normalizePersistenceStorageTier(
     graphPersistenceState.primaryStorageTier ||
@@ -1411,6 +1479,13 @@ function getGraphPersistenceLiveState() {
     cacheStorageTier,
     cacheMirrorState: String(graphPersistenceState.cacheMirrorState || "idle"),
     cacheLag: Number(graphPersistenceState.cacheLag || 0),
+    chatStateTarget: cloneRuntimeDebugValue(
+      graphPersistenceState.chatStateTarget || adapterRuntime.target,
+      null,
+    ),
+    lightweightHostMode:
+      graphPersistenceState.lightweightHostMode ??
+      adapterRuntime.lightweightHostMode,
     persistDiagnosticTier: String(
       graphPersistenceState.persistDiagnosticTier || "none",
     ),
@@ -1442,6 +1517,28 @@ function getGraphPersistenceLiveState() {
     lukerJournalBytes: Number(graphPersistenceState.lukerJournalBytes || 0),
     lukerCheckpointRevision: Number(
       graphPersistenceState.lukerCheckpointRevision || 0,
+    ),
+    projectionState: cloneRuntimeDebugValue(
+      graphPersistenceState.projectionState,
+      null,
+    ),
+    lastHookPhase: String(graphPersistenceState.lastHookPhase || ""),
+    lastRequestRescanReason: String(
+      graphPersistenceState.lastRequestRescanReason || "",
+    ),
+    lastIgnoredMutationEvent: String(
+      graphPersistenceState.lastIgnoredMutationEvent || "",
+    ),
+    lastIgnoredMutationReason: String(
+      graphPersistenceState.lastIgnoredMutationReason || "",
+    ),
+    lastChatStateConflict: cloneRuntimeDebugValue(
+      graphPersistenceState.lastChatStateConflict,
+      null,
+    ),
+    lastBranchInheritResult: cloneRuntimeDebugValue(
+      graphPersistenceState.lastBranchInheritResult,
+      null,
     ),
     localStoreFormatVersion: Number(graphPersistenceState.localStoreFormatVersion || 0) || 1,
     localStoreMigrationState: String(
@@ -1501,6 +1598,49 @@ function updateGraphPersistenceState(patch = {}) {
   };
   syncGraphPersistenceDebugState();
   return graphPersistenceState;
+}
+
+function recordIgnoredMutationEvent(eventName = "", detail = {}) {
+  updateGraphPersistenceState({
+    lastIgnoredMutationEvent: String(eventName || ""),
+    lastIgnoredMutationReason: String(
+      detail?.reason || detail?.message || "lightweight-only",
+    ),
+  });
+}
+
+function recordLukerHookPhase(phase = "", detail = {}) {
+  updateGraphPersistenceState({
+    lastHookPhase: String(phase || ""),
+    chatStateTarget:
+      cloneRuntimeDebugValue(detail?.chatStateTarget, null) ||
+      graphPersistenceState.chatStateTarget ||
+      resolveCurrentChatStateTarget(getContext()),
+    lightweightHostMode:
+      detail?.lightweightHostMode ??
+      graphPersistenceState.lightweightHostMode ??
+      isBmeLightweightHostMode(getContext()),
+  });
+}
+
+function updateLukerProjectionState(patch = {}) {
+  const previous =
+    graphPersistenceState.projectionState &&
+    typeof graphPersistenceState.projectionState === "object" &&
+    !Array.isArray(graphPersistenceState.projectionState)
+      ? graphPersistenceState.projectionState
+      : {
+          runtime: { status: "idle", updatedAt: 0, reason: "" },
+          persistent: { status: "idle", updatedAt: 0, reason: "" },
+        };
+  const nextState = {
+    ...cloneRuntimeDebugValue(previous, previous),
+    ...cloneRuntimeDebugValue(patch, {}),
+  };
+  updateGraphPersistenceState({
+    projectionState: nextState,
+  });
+  return nextState;
 }
 
 function readPersistDeltaDiagnosticsNow() {
@@ -5928,6 +6068,12 @@ function buildLukerManifestStatePatch(
   return {
     hostProfile: "luker",
     primaryStorageTier: "luker-chat-state",
+    chatStateTarget:
+      cloneRuntimeDebugValue(graphPersistenceState.chatStateTarget, null) ||
+      resolveCurrentChatStateTarget(getContext()),
+    lightweightHostMode:
+      graphPersistenceState.lightweightHostMode ??
+      isBmeLightweightHostMode(getContext()),
     cacheStorageTier: buildPersistenceEnvironment(
       getContext(),
       getPreferredGraphLocalStorePresentationSync(),
@@ -5995,23 +6141,27 @@ function resolveLukerHeadRevision(manifest = null, checkpoint = null) {
   );
 }
 
-function queueLukerSidecarWrite(chatId, operation) {
+function queueLukerSidecarWrite(chatId, operation, { chatStateTarget = null } = {}) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || typeof operation !== "function") {
+  const normalizedTarget = normalizeBmeChatStateTarget(chatStateTarget);
+  const queueKey =
+    serializeBmeChatStateTarget(normalizedTarget) ||
+    normalizedChatId;
+  if (!queueKey || typeof operation !== "function") {
     return Promise.resolve().then(() => operation());
   }
 
-  const previous = bmeLukerSidecarWriteByChatId.get(normalizedChatId) || Promise.resolve();
+  const previous = bmeLukerSidecarWriteByChatId.get(queueKey) || Promise.resolve();
   let settled = null;
   const queued = previous
     .catch(() => null)
     .then(() => operation());
   settled = queued.finally(() => {
-    if (bmeLukerSidecarWriteByChatId.get(normalizedChatId) === settled) {
-      bmeLukerSidecarWriteByChatId.delete(normalizedChatId);
+    if (bmeLukerSidecarWriteByChatId.get(queueKey) === settled) {
+      bmeLukerSidecarWriteByChatId.delete(queueKey);
     }
   });
-  bmeLukerSidecarWriteByChatId.set(normalizedChatId, settled);
+  bmeLukerSidecarWriteByChatId.set(queueKey, settled);
   return settled;
 }
 
@@ -6179,9 +6329,11 @@ async function compactLukerGraphSidecarV2(
     revision = graphPersistenceState.lukerManifestRevision || graphPersistenceState.revision,
     reason = "luker-chat-state-compaction",
     integrity = "",
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   if (
     !normalizedChatId ||
     !graph ||
@@ -6228,6 +6380,7 @@ async function compactLukerGraphSidecarV2(
     });
     const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
       namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
       updateGraphPersistenceState({
@@ -6255,6 +6408,7 @@ async function compactLukerGraphSidecarV2(
     });
     const journalResult = await replaceLukerGraphJournalV2(context, emptyJournal, {
       namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (!journalResult?.ok || !journalResult?.journal) {
       updateGraphPersistenceState({
@@ -6297,6 +6451,7 @@ async function compactLukerGraphSidecarV2(
     });
     const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
       namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
       updateGraphPersistenceState({
@@ -6348,6 +6503,8 @@ async function compactLukerGraphSidecarV2(
       manifest: manifestResult.manifest,
       checkpoint: checkpointResult.checkpoint,
     };
+  }, {
+    chatStateTarget: normalizedTarget,
   });
 }
 
@@ -6356,7 +6513,10 @@ function scheduleLukerGraphSidecarCompaction(
   options = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(normalizedChatId)) {
+  const queueKey =
+    serializeBmeChatStateTarget(options?.chatStateTarget) ||
+    normalizedChatId;
+  if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(queueKey)) {
     return;
   }
   updateGraphPersistenceState({
@@ -6383,17 +6543,18 @@ function scheduleLukerGraphSidecarCompaction(
       return null;
     })
     .finally(() => {
-      if (bmeLukerSidecarCompactionByChatId.get(normalizedChatId) === promise) {
-        bmeLukerSidecarCompactionByChatId.delete(normalizedChatId);
+      if (bmeLukerSidecarCompactionByChatId.get(queueKey) === promise) {
+        bmeLukerSidecarCompactionByChatId.delete(queueKey);
       }
     });
-  bmeLukerSidecarCompactionByChatId.set(normalizedChatId, promise);
+  bmeLukerSidecarCompactionByChatId.set(queueKey, promise);
 }
 
 async function persistGraphToLukerSidecarV2(
   context = getContext(),
   {
     graph = currentGraph,
+    chatId: explicitChatId = "",
     revision = graphPersistenceState.revision,
     reason = "luker-chat-state-save",
     accepted = true,
@@ -6401,6 +6562,7 @@ async function persistGraphToLukerSidecarV2(
     extractionCount: nextExtractionCount = null,
     mode = "primary",
     persistDelta = null,
+    chatStateTarget = null,
   } = {},
 ) {
   if (!context || !graph || !canUseHostGraphChatStatePersistence(context)) {
@@ -6413,7 +6575,14 @@ async function persistGraphToLukerSidecarV2(
     };
   }
 
-  const chatId = resolvePersistenceChatId(context, graph);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const chatId = resolvePersistenceChatId(
+    context,
+    graph,
+    explicitChatId ||
+      resolveChatStateTargetChatId(normalizedTarget) ||
+      "",
+  );
   if (!chatId) {
     return {
       saved: false,
@@ -6425,7 +6594,14 @@ async function persistGraphToLukerSidecarV2(
   }
 
   const resolvedIdentity = resolveCurrentChatIdentity(context);
+  const currentTargetKey = serializeBmeChatStateTarget(
+    resolveCurrentChatStateTarget(context),
+  );
+  const requestedTargetKey = serializeBmeChatStateTarget(normalizedTarget);
+  const shouldRememberAlias =
+    !requestedTargetKey || requestedTargetKey === currentTargetKey;
   const nextIntegrity =
+    getGraphPersistenceMeta(graph)?.integrity ||
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
     graphPersistenceState.metadataIntegrity;
@@ -6442,6 +6618,7 @@ async function persistGraphToLukerSidecarV2(
       manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
       journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
       checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (existingSidecar?.manifest) {
       cacheChatStateManifest(chatId, existingSidecar.manifest);
@@ -6515,6 +6692,7 @@ async function persistGraphToLukerSidecarV2(
       });
       const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
         namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+        chatStateTarget: normalizedTarget,
       });
       if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
         return {
@@ -6538,6 +6716,7 @@ async function persistGraphToLukerSidecarV2(
         emptyJournal,
         {
           namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+          chatStateTarget: normalizedTarget,
         },
       );
       if (!bootstrapJournalResult?.ok || !bootstrapJournalResult?.journal) {
@@ -6573,6 +6752,7 @@ async function persistGraphToLukerSidecarV2(
       });
       const manifestResult = await writeLukerGraphManifestV2(context, bootstrapManifest, {
         namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+        chatStateTarget: normalizedTarget,
       });
       if (!manifestResult?.ok || !manifestResult?.manifest) {
         return {
@@ -6586,7 +6766,9 @@ async function persistGraphToLukerSidecarV2(
         };
       }
       cacheChatStateManifest(chatId, manifestResult.manifest);
-      rememberResolvedGraphIdentityAlias(context, chatId);
+      if (shouldRememberAlias) {
+        rememberResolvedGraphIdentityAlias(context, chatId);
+      }
       updateGraphPersistenceState({
         ...buildLukerManifestStatePatch(manifestResult.manifest, {
           cacheMirrorState:
@@ -6652,6 +6834,7 @@ async function persistGraphToLukerSidecarV2(
       namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
       chatId,
       integrity: nextIntegrity,
+      chatStateTarget: normalizedTarget,
     });
     if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
       updateGraphPersistenceState({
@@ -6710,6 +6893,7 @@ async function persistGraphToLukerSidecarV2(
     });
     const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
       namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
       updateGraphPersistenceState({
@@ -6744,7 +6928,9 @@ async function persistGraphToLukerSidecarV2(
     }
 
     cacheChatStateManifest(chatId, manifestResult.manifest);
-    rememberResolvedGraphIdentityAlias(context, chatId);
+    if (shouldRememberAlias) {
+      rememberResolvedGraphIdentityAlias(context, chatId);
+    }
     updateGraphPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
         cacheMirrorState:
@@ -6797,6 +6983,7 @@ async function persistGraphToLukerSidecarV2(
         revision: manifestResult.manifest.headRevision,
         reason: `${reason}:auto-compact`,
         integrity: nextIntegrity,
+        chatStateTarget: normalizedTarget,
       });
     }
 
@@ -6818,6 +7005,8 @@ async function persistGraphToLukerSidecarV2(
       storageTier: "luker-chat-state",
       manifest: manifestResult.manifest,
     };
+  }, {
+    chatStateTarget: normalizedTarget,
   });
 }
 
@@ -6829,10 +7018,12 @@ async function loadGraphFromLukerSidecarV2(
     allowOverride = false,
     consistencyRetryIndex = 0,
     consistencyRetryDelays = LUKER_SIDECAR_CONSISTENCY_RETRY_DELAYS_MS,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const context = getContext();
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   if (!normalizedChatId) {
     return {
       success: false,
@@ -6847,6 +7038,7 @@ async function loadGraphFromLukerSidecarV2(
     manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
     journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
     checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    chatStateTarget: normalizedTarget,
   });
   const manifest = sidecar?.manifest || null;
   if (!manifest) {
@@ -6926,6 +7118,7 @@ async function loadGraphFromLukerSidecarV2(
         allowOverride,
         consistencyRetryIndex: consistencyRetryIndex + 1,
         consistencyRetryDelays,
+        chatStateTarget: normalizedTarget,
       });
     }
     const blockedReason = String(
@@ -7009,6 +7202,7 @@ async function loadGraphFromLukerSidecarV2(
         acceptedStorageTier: "luker-chat-state",
         acceptedBy: "luker-chat-state",
       }),
+      chatStateTarget: cloneRuntimeDebugValue(normalizedTarget, null),
       metadataIntegrity: String(
         manifest.integrity || graphPersistenceState.metadataIntegrity || "",
       ),
@@ -7026,6 +7220,7 @@ async function persistGraphToHostChatState(
   context = getContext(),
   {
     graph = currentGraph,
+    chatId: explicitChatId = "",
     revision = graphPersistenceState.revision,
     reason = "graph-chat-state",
     storageTier = "chat-state",
@@ -7034,6 +7229,7 @@ async function persistGraphToHostChatState(
     extractionCount: nextExtractionCount = null,
     mode = "primary",
     persistDelta = null,
+    chatStateTarget = null,
   } = {},
 ) {
   if (!context || !graph || !canUseHostGraphChatStatePersistence(context)) {
@@ -7046,7 +7242,14 @@ async function persistGraphToHostChatState(
     };
   }
 
-  const chatId = resolvePersistenceChatId(context, graph);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const chatId = resolvePersistenceChatId(
+    context,
+    graph,
+    explicitChatId ||
+      resolveChatStateTargetChatId(normalizedTarget) ||
+      "",
+  );
   if (!chatId) {
     return {
       saved: false,
@@ -7065,6 +7268,7 @@ async function persistGraphToHostChatState(
   if (persistenceEnvironment.hostProfile === "luker") {
     return await persistGraphToLukerSidecarV2(context, {
       graph,
+      chatId,
       revision,
       reason,
       accepted,
@@ -7072,6 +7276,7 @@ async function persistGraphToHostChatState(
       extractionCount: nextExtractionCount,
       mode,
       persistDelta,
+      chatStateTarget: normalizedTarget,
     });
   }
   const effectiveStorageTier =
@@ -7103,6 +7308,7 @@ async function persistGraphToHostChatState(
       integrity: nextIntegrity,
       lastProcessedAssistantFloor,
       extractionCount: nextExtractionCount,
+      target: normalizedTarget,
     },
   );
 
@@ -7193,10 +7399,12 @@ async function loadGraphFromChatState(
     source = "chat-state-probe",
     attemptIndex = 0,
     allowOverride = false,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const context = getContext();
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   const shouldFallbackToLocalStore = isLukerPrimaryPersistenceHost(context);
   if (!normalizedChatId) {
     return {
@@ -7222,6 +7430,7 @@ async function loadGraphFromChatState(
       source,
       attemptIndex,
       allowOverride,
+      chatStateTarget: normalizedTarget,
     });
     if (lukerResult?.loaded || lukerResult?.reason !== "luker-chat-state-v2-empty") {
       return lukerResult;
@@ -7231,6 +7440,7 @@ async function loadGraphFromChatState(
   const payload =
     (await readGraphChatStateSnapshot(context, {
       namespace: GRAPH_CHAT_STATE_NAMESPACE,
+      target: normalizedTarget,
     })) || null;
   if (!payload?.serializedGraph) {
     if (shouldFallbackToLocalStore) {
@@ -7416,6 +7626,316 @@ async function loadGraphFromChatState(
     });
   }
   return loadResult;
+}
+
+function getNodeBranchCutoffSeq(node = null) {
+  if (!node || typeof node !== "object") return -1;
+  if (Array.isArray(node.seqRange) && Number.isFinite(Number(node.seqRange[1]))) {
+    return Number(node.seqRange[1]);
+  }
+  return Number.isFinite(Number(node.seq)) ? Number(node.seq) : -1;
+}
+
+function deriveBranchGraphFromSourceGraph(
+  sourceGraph = null,
+  {
+    targetChatId = "",
+    cutoffFloor = null,
+    assistantMessageCount = null,
+  } = {},
+) {
+  if (!sourceGraph) return null;
+  const nextChatId =
+    normalizeChatIdCandidate(targetChatId) ||
+    normalizeChatIdCandidate(sourceGraph?.historyState?.chatId);
+  const branchGraph = cloneGraphForPersistence(sourceGraph, nextChatId);
+  normalizeGraphRuntimeState(branchGraph, nextChatId);
+
+  const safeCutoff =
+    Number.isFinite(Number(cutoffFloor)) && Number(cutoffFloor) >= 0
+      ? Math.floor(Number(cutoffFloor))
+      : null;
+  if (safeCutoff != null) {
+    const allowedNodeIds = new Set(
+      (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : [])
+        .filter((node) => {
+          const nodeCutoffSeq = getNodeBranchCutoffSeq(node);
+          return nodeCutoffSeq < 0 || nodeCutoffSeq <= safeCutoff;
+        })
+        .map((node) => String(node.id || "")),
+    );
+
+    branchGraph.nodes = (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : []).filter(
+      (node) => allowedNodeIds.has(String(node.id || "")),
+    );
+    branchGraph.edges = (Array.isArray(branchGraph.edges) ? branchGraph.edges : []).filter(
+      (edge) =>
+        allowedNodeIds.has(String(edge?.fromId || "")) &&
+        allowedNodeIds.has(String(edge?.toId || "")),
+    );
+    branchGraph.batchJournal = (Array.isArray(branchGraph.batchJournal)
+      ? branchGraph.batchJournal
+      : []
+    ).filter((journal) => {
+      const rangeEnd = Number(journal?.processedRange?.[1]);
+      return !Number.isFinite(rangeEnd) || rangeEnd <= safeCutoff;
+    });
+
+    const summaryEntries = Array.isArray(branchGraph.summaryState?.entries)
+      ? branchGraph.summaryState.entries
+      : [];
+    branchGraph.summaryState.entries = summaryEntries.filter((entry) => {
+      const messageRangeEnd = Number(entry?.messageRange?.[1]);
+      return !Number.isFinite(messageRangeEnd) || messageRangeEnd <= safeCutoff;
+    });
+    branchGraph.summaryState.activeEntryIds = (branchGraph.summaryState.activeEntryIds || [])
+      .filter((entryId) =>
+        branchGraph.summaryState.entries.some((entry) => entry.id === entryId),
+      );
+    branchGraph.summaryState.lastSummarizedAssistantFloor = Math.max(
+      -1,
+      ...branchGraph.summaryState.entries.map((entry) =>
+        Number.isFinite(Number(entry?.messageRange?.[1]))
+          ? Number(entry.messageRange[1])
+          : -1,
+      ),
+    );
+
+    pruneProcessedMessageHashesFromFloor(branchGraph, safeCutoff + 1);
+    branchGraph.historyState.lastProcessedAssistantFloor = Math.min(
+      Number(branchGraph.historyState.lastProcessedAssistantFloor ?? safeCutoff),
+      safeCutoff,
+    );
+    if (
+      Array.isArray(branchGraph.historyState?.lastBatchStatus?.processedRange) &&
+      Number(branchGraph.historyState.lastBatchStatus.processedRange[1]) > safeCutoff
+    ) {
+      branchGraph.historyState.lastBatchStatus = null;
+    }
+  }
+
+  const extractionCountCeiling =
+    Number.isFinite(Number(assistantMessageCount)) && Number(assistantMessageCount) >= 0
+      ? Math.floor(Number(assistantMessageCount))
+      : Number.isFinite(Number(branchGraph.historyState.extractionCount))
+        ? Number(branchGraph.historyState.extractionCount)
+        : 0;
+  branchGraph.historyState.chatId = nextChatId;
+  branchGraph.historyState.extractionCount = Math.max(
+    0,
+    Math.min(
+      Number(branchGraph.historyState.extractionCount || 0),
+      extractionCountCeiling,
+    ),
+  );
+  branchGraph.historyState.lastRecoveryResult = null;
+  branchGraph.historyState.lastBatchStatus = null;
+  branchGraph.historyState.historyDirtyFrom = null;
+  branchGraph.historyState.lastMutationSource = "chat-branch-created";
+  branchGraph.historyState.lastMutationReason = "chat-branch-created";
+  branchGraph.lastRecallResult = null;
+  return normalizeGraphRuntimeState(branchGraph, nextChatId);
+}
+
+async function readPersistedGraphForChatStateTarget(
+  context = getContext(),
+  chatStateTarget = null,
+) {
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const targetChatId = resolveChatStateTargetChatId(normalizedTarget);
+  if (!normalizedTarget || !targetChatId) {
+    return null;
+  }
+
+  const sidecar = await readLukerGraphSidecarV2(context, {
+    chatStateTarget: normalizedTarget,
+  });
+  const sidecarResult = buildSnapshotFromLukerSidecarState(sidecar, {
+    chatId: targetChatId,
+    source: "branch-source-sidecar",
+  });
+  if (sidecarResult?.ok && sidecarResult?.snapshot) {
+    try {
+      return cloneGraphForPersistence(
+        normalizeGraphRuntimeState(
+          buildGraphFromSnapshot(sidecarResult.snapshot),
+          targetChatId,
+        ),
+        targetChatId,
+      );
+    } catch (error) {
+      console.warn("[ST-BME] 读取 Luker branch source snapshot 失败:", error);
+    }
+  }
+
+  const legacySnapshot = await readGraphChatStateSnapshot(context, {
+    namespace: GRAPH_CHAT_STATE_NAMESPACE,
+    target: normalizedTarget,
+  });
+  if (legacySnapshot?.serializedGraph) {
+    try {
+      return cloneGraphForPersistence(
+        normalizeGraphRuntimeState(
+          deserializeGraph(legacySnapshot.serializedGraph),
+          targetChatId,
+        ),
+        targetChatId,
+      );
+    } catch (error) {
+      console.warn("[ST-BME] 读取 Luker branch source legacy snapshot 失败:", error);
+    }
+  }
+
+  return null;
+}
+
+async function persistLukerAuxStateNamespace(
+  namespace,
+  payload,
+  {
+    chatStateTarget = null,
+    maxOperations = 1024,
+  } = {},
+) {
+  const context = getContext();
+  if (!isLukerPrimaryPersistenceHost(context)) {
+    return false;
+  }
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  if (!normalizedTarget) {
+    return false;
+  }
+  const result = await writeGraphChatStatePayload(
+    context,
+    namespace,
+    payload,
+    {
+      maxOperations,
+      asyncDiff: false,
+      target: normalizedTarget,
+    },
+  );
+  return result?.ok === true;
+}
+
+async function onChatBranchCreated(payload = {}) {
+  const context = getContext();
+  if (!isLukerPrimaryPersistenceHost(context)) {
+    return { skipped: true, reason: "not-luker" };
+  }
+
+  const sourceTarget = resolveCurrentChatStateTarget(context, payload?.sourceTarget);
+  const targetTarget = resolveCurrentChatStateTarget(context, payload?.targetTarget);
+  const targetChatId =
+    resolveChatStateTargetChatId(targetTarget) ||
+    normalizeChatIdCandidate(payload?.branchName);
+  const cutoffFloor = Number.isFinite(Number(payload?.mesId))
+    ? Math.floor(Number(payload.mesId))
+    : null;
+  const assistantMessageCount = Number.isFinite(Number(payload?.assistantMessageCount))
+    ? Math.max(0, Math.floor(Number(payload.assistantMessageCount)))
+    : null;
+
+  if (!sourceTarget || !targetTarget || !targetChatId) {
+    const skipped = {
+      ok: false,
+      reason: "invalid-branch-target",
+      sourceTarget: cloneRuntimeDebugValue(sourceTarget, null),
+      targetTarget: cloneRuntimeDebugValue(targetTarget, null),
+    };
+    updateGraphPersistenceState({
+      lastBranchInheritResult: skipped,
+    });
+    return skipped;
+  }
+
+  const sourceGraph = await readPersistedGraphForChatStateTarget(
+    context,
+    sourceTarget,
+  );
+  if (!sourceGraph) {
+    const missing = {
+      ok: false,
+      reason: "source-graph-unavailable",
+      targetChatId,
+      cutoffFloor,
+      assistantMessageCount,
+    };
+    updateGraphPersistenceState({
+      lastBranchInheritResult: missing,
+    });
+    return missing;
+  }
+
+  const branchGraph = deriveBranchGraphFromSourceGraph(sourceGraph, {
+    targetChatId,
+    cutoffFloor,
+    assistantMessageCount,
+  });
+  const branchRevision = Math.max(
+    1,
+    Number(getGraphPersistedRevision(sourceGraph) || 0) + 1,
+  );
+  const persistResult = await persistGraphToLukerSidecarV2(context, {
+    graph: branchGraph,
+    chatId: targetChatId,
+    revision: branchRevision,
+    reason: "chat-branch-created",
+    accepted: true,
+    lastProcessedAssistantFloor:
+      branchGraph?.historyState?.lastProcessedAssistantFloor ?? null,
+    extractionCount: branchGraph?.historyState?.extractionCount ?? null,
+    mode: "primary",
+    chatStateTarget: targetTarget,
+  });
+
+  await persistLukerAuxStateNamespace(
+    LUKER_PROJECTION_STATE_NAMESPACE,
+    {
+      version: 1,
+      runtime: {
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "chat-branch-created",
+      },
+      persistent: {
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "chat-branch-created",
+      },
+      targetChatId,
+      derivedFrom: resolveChatStateTargetChatId(sourceTarget),
+    },
+    { chatStateTarget: targetTarget },
+  );
+  await persistLukerAuxStateNamespace(
+    LUKER_DEBUG_STATE_NAMESPACE,
+    {
+      version: 1,
+      updatedAt: Date.now(),
+      lastBranchInheritResult: {
+        targetChatId,
+        cutoffFloor,
+        assistantMessageCount,
+      },
+    },
+    { chatStateTarget: targetTarget },
+  );
+
+  const result = {
+    ok: persistResult?.saved === true,
+    reason: persistResult?.reason || "",
+    targetChatId,
+    cutoffFloor,
+    assistantMessageCount,
+    sourceTarget: cloneRuntimeDebugValue(sourceTarget, null),
+    targetTarget: cloneRuntimeDebugValue(targetTarget, null),
+    revision: Number(persistResult?.revision || branchRevision || 0),
+  };
+  updateGraphPersistenceState({
+    lastBranchInheritResult: result,
+  });
+  return result;
 }
 
 function scheduleGraphChatStateProbe(chatId, options = {}) {
@@ -9828,6 +10348,7 @@ async function persistGraphToConfiguredDurableTier(
     reason,
     lastProcessedAssistantFloor = null,
     persistDelta = null,
+    chatStateTarget = null,
   } = {},
 ) {
   const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
@@ -9843,6 +10364,7 @@ async function persistGraphToConfiguredDurableTier(
   ) {
     const chatStateResult = await persistGraphToHostChatState(context, {
       graph,
+      chatId,
       revision,
       reason,
       storageTier: "luker-chat-state",
@@ -9851,6 +10373,7 @@ async function persistGraphToConfiguredDurableTier(
       extractionCount,
       mode: "primary",
       persistDelta,
+      chatStateTarget,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -9973,6 +10496,7 @@ async function persistGraphToConfiguredDurableTier(
   if (canUseHostGraphChatStatePersistence(context)) {
     const chatStateResult = await persistGraphToHostChatState(context, {
       graph,
+      chatId,
       revision,
       reason: `${reason}:chat-state-fallback`,
       storageTier: "chat-state",
@@ -9981,6 +10505,7 @@ async function persistGraphToConfiguredDurableTier(
       extractionCount,
       mode: "primary",
       persistDelta,
+      chatStateTarget,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -13256,6 +13781,7 @@ function saveGraphToChat(options = {}) {
 
   if (persistenceEnvironment.hostProfile === "luker") {
     const persistGraph = cloneGraphForPersistence(currentGraph, chatId);
+    const chatStateTarget = resolveCurrentChatStateTarget(context);
     const lastProcessedAssistantFloor = Number.isFinite(
       Number(persistGraph?.historyState?.lastProcessedAssistantFloor),
     )
@@ -13270,6 +13796,7 @@ function saveGraphToChat(options = {}) {
           revision,
           reason,
           lastProcessedAssistantFloor,
+          chatStateTarget,
         },
       );
       if (!persistResult?.accepted) {
@@ -15963,7 +16490,7 @@ async function runExtraction() {
 }
 
 function applyRecallInjection(settings, recallInput, recentMessages, result) {
-  return applyRecallInjectionController(
+  const injectionResult = applyRecallInjectionController(
     settings,
     recallInput,
     recentMessages,
@@ -15993,6 +16520,20 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       updateLastRecalledItems,
     },
   );
+  if (
+    isLukerPrimaryPersistenceHost(getContext()) &&
+    String(injectionResult?.injectionText || "").trim()
+  ) {
+    updateLukerProjectionState({
+      runtime: {
+        status: "pending",
+        updatedAt: Date.now(),
+        reason:
+          String(recallInput?.hookName || "").trim() || "recall-injection",
+      },
+    });
+  }
+  return injectionResult;
 }
 
 function buildRecallRetrieveOptions(settings, context) {
@@ -16271,6 +16812,12 @@ async function runRecall(options = {}) {
 function onChatChanged() {
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = 0;
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   if (typeof clearMessageHideState === "function") {
     clearMessageHideState("chat-changed");
   }
@@ -16327,6 +16874,12 @@ function onChatChanged() {
 }
 
 function onChatLoaded() {
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   const result = onChatLoadedController({
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     syncGraphLoadFromLiveContext,
@@ -16426,6 +16979,18 @@ function onMessageEdited(messageId, meta = null) {
   return result;
 }
 
+function onMessageUpdated(messageId, meta = null) {
+  const result = onMessageUpdatedController(
+    {
+      recordIgnoredMutationEvent,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    },
+    messageId,
+    meta,
+  );
+  return result;
+}
+
 async function onMessageSwiped(messageId, meta = null) {
   const result = await onMessageSwipedController(
     {
@@ -16441,6 +17006,99 @@ async function onMessageSwiped(messageId, meta = null) {
     scheduleMessageHideApply("message-swiped", 80);
   }
   return result;
+}
+
+function onGenerationContextReady(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_CONTEXT_READY", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  updateLukerProjectionState({
+    runtime: {
+      ...(graphPersistenceState.projectionState?.runtime || {}),
+      status: "context-ready",
+      updatedAt: Date.now(),
+      reason: "generation-context-ready",
+    },
+  });
+  return {
+    phase: "GENERATION_CONTEXT_READY",
+    lightweightHostMode,
+  };
+}
+
+function onGenerationBeforeWorldInfoScan(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_BEFORE_WORLD_INFO_SCAN", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  return {
+    phase: "GENERATION_BEFORE_WORLD_INFO_SCAN",
+    lightweightHostMode,
+  };
+}
+
+function onGenerationAfterWorldInfoScan(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_AFTER_WORLD_INFO_SCAN", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  if (String(graphPersistenceState.projectionState?.runtime?.status || "") === "pending") {
+    payload.__stBmeProjectionRequestedRescan = true;
+  }
+  return {
+    phase: "GENERATION_AFTER_WORLD_INFO_SCAN",
+    requestRescan: payload?.__stBmeProjectionRequestedRescan === true,
+  };
+}
+
+function onGenerationWorldInfoFinalized(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_WORLD_INFO_FINALIZED", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+
+  if (
+    isLukerPrimaryPersistenceHost(getContext()) &&
+    graphPersistenceState.projectionState?.runtime?.status === "pending"
+  ) {
+    payload.requestRescan = true;
+    const reason =
+      graphPersistenceState.projectionState?.runtime?.reason ||
+      "runtime-projection-pending";
+    updateGraphPersistenceState({
+      lastRequestRescanReason: String(reason || ""),
+    });
+    updateLukerProjectionState({
+      runtime: {
+        ...(graphPersistenceState.projectionState?.runtime || {}),
+        status: "rescan-requested",
+        updatedAt: Date.now(),
+        reason,
+      },
+    });
+  }
+
+  return {
+    phase: "GENERATION_WORLD_INFO_FINALIZED",
+    requestRescan: payload?.requestRescan === true,
+  };
+}
+
+function onGenerationBeforeApiRequest(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_BEFORE_API_REQUEST", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  return {
+    phase: "GENERATION_BEFORE_API_REQUEST",
+    lightweightHostMode,
+  };
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
@@ -16480,6 +17138,16 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
 function onGenerationEnded(_chatLength = null) {
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = Date.now();
+  if (isLukerPrimaryPersistenceHost(getContext())) {
+    updateLukerProjectionState({
+      runtime: {
+        ...(graphPersistenceState.projectionState?.runtime || {}),
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "generation-ended",
+      },
+    });
+  }
   const recentTransaction = findRecentGenerationRecallTransactionForChat();
   const recentRecallResult =
     getGenerationRecallTransactionResult(recentTransaction);
@@ -17614,6 +18282,7 @@ async function onProbeGraphLoad() {
 
 async function onRebuildLocalCacheFromLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需从主 sidecar 重建本地缓存");
     return { handledToast: true, reason: "not-luker" };
@@ -17627,6 +18296,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
   const loadResult = await loadGraphFromLukerSidecarV2(chatId, {
     source: "panel-manual-luker-cache-rebuild",
     allowOverride: true,
+    chatStateTarget,
   });
   if (!loadResult?.loaded || !currentGraph) {
     toastr.warning(
@@ -17652,6 +18322,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
 
 async function onRepairLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需修复主 sidecar");
     return { handledToast: true, reason: "not-luker" };
@@ -17667,6 +18338,7 @@ async function onRepairLukerSidecar() {
     !(await loadGraphFromLukerSidecarV2(chatId, {
       source: "panel-manual-luker-sidecar-repair",
       allowOverride: true,
+      chatStateTarget,
     }))?.loaded
   ) {
     toastr.warning("当前无法从 Luker 主 sidecar 恢复运行时图谱，暂时不能修复");
@@ -17684,6 +18356,7 @@ async function onRepairLukerSidecar() {
     reason: "panel-manual-luker-sidecar-repair",
     integrity:
       getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+    chatStateTarget,
   });
   refreshPanelLiveState();
   if (result?.ok) {
@@ -17697,6 +18370,7 @@ async function onRepairLukerSidecar() {
 
 async function onCompactLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需压实主 sidecar");
     return { handledToast: true, reason: "not-luker" };
@@ -17718,6 +18392,7 @@ async function onCompactLukerSidecar() {
     reason: "panel-manual-luker-sidecar-compact",
     integrity:
       getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+    chatStateTarget,
   });
   refreshPanelLiveState();
   if (result?.ok) {
@@ -17730,6 +18405,12 @@ async function onCompactLukerSidecar() {
 
 (async function init() {
   await loadServerSettings();
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   syncGraphPersistenceDebugState();
 
   await initializePanelBridgeController({
@@ -17846,13 +18527,20 @@ async function onCompactLukerSidecar() {
       handlers: {
         onBeforeCombinePrompts,
         onCharacterMessageRendered,
+        onChatBranchCreated,
         onChatChanged,
         onChatLoaded,
+        onGenerationBeforeApiRequest,
+        onGenerationBeforeWorldInfoScan,
         onGenerationAfterCommands,
+        onGenerationAfterWorldInfoScan,
+        onGenerationContextReady,
         onGenerationEnded,
         onGenerationStarted,
+        onGenerationWorldInfoFinalized,
         onMessageDeleted,
         onMessageEdited,
+        onMessageUpdated,
         onMessageReceived,
         onMessageSent,
         onMessageSwiped,

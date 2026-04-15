@@ -17,6 +17,12 @@ export const GRAPH_CHAT_STATE_MAX_OPERATIONS = 4000;
 export const LUKER_GRAPH_MANIFEST_NAMESPACE = `${MODULE_NAME}_graph_manifest`;
 export const LUKER_GRAPH_JOURNAL_NAMESPACE = `${MODULE_NAME}_graph_journal`;
 export const LUKER_GRAPH_CHECKPOINT_NAMESPACE = `${MODULE_NAME}_graph_checkpoint`;
+export const LUKER_HISTORY_STATE_NAMESPACE = `${MODULE_NAME}_history_state`;
+export const LUKER_SUMMARY_STATE_NAMESPACE = `${MODULE_NAME}_summary_state`;
+export const LUKER_RECALL_STATE_NAMESPACE = `${MODULE_NAME}_recall_state`;
+export const LUKER_PROJECTION_STATE_NAMESPACE = `${MODULE_NAME}_projection_state`;
+export const LUKER_UI_STATE_NAMESPACE = `${MODULE_NAME}_ui_state`;
+export const LUKER_DEBUG_STATE_NAMESPACE = `${MODULE_NAME}_debug_state`;
 export const LUKER_GRAPH_SIDECAR_V2_FORMAT = 2;
 export const LUKER_GRAPH_JOURNAL_COMPACTION_DEPTH = 32;
 export const LUKER_GRAPH_JOURNAL_COMPACTION_BYTES = 2 * 1024 * 1024;
@@ -795,9 +801,10 @@ export function buildLukerGraphManifestV2(
   });
 }
 
-async function readGraphChatStateNamespaces(
+export async function readGraphChatStateNamespaces(
   context = null,
   namespaces = [],
+  { target = null } = {},
 ) {
   if (!canUseGraphChatState(context) || !Array.isArray(namespaces) || namespaces.length === 0) {
     return new Map();
@@ -805,7 +812,10 @@ async function readGraphChatStateNamespaces(
 
   try {
     if (canBatchReadGraphChatState(context)) {
-      const batch = await context.getChatStateBatch(namespaces);
+      const batch = await context.getChatStateBatch(
+        namespaces,
+        target ? { target } : undefined,
+      );
       if (batch instanceof Map) {
         return batch;
       }
@@ -820,7 +830,10 @@ async function readGraphChatStateNamespaces(
   const result = new Map();
   for (const namespace of namespaces) {
     try {
-      result.set(namespace, await context.getChatState(namespace));
+      result.set(
+        namespace,
+        await context.getChatState(namespace, target ? { target } : undefined),
+      );
     } catch {
       result.set(namespace, null);
     }
@@ -828,11 +841,15 @@ async function readGraphChatStateNamespaces(
   return result;
 }
 
-async function writeGraphChatStatePayload(
+export async function writeGraphChatStatePayload(
   context = null,
   namespace = "",
   payload = null,
-  { maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS, asyncDiff = false } = {},
+  {
+    maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+    asyncDiff = false,
+    target = null,
+  } = {},
 ) {
   if (!canUseGraphChatState(context) || !namespace || !payload) {
     return {
@@ -848,6 +865,7 @@ async function writeGraphChatStatePayload(
       namespace,
       () => cloneRuntimeDebugValue(payload, payload),
       {
+        ...(target ? { target } : {}),
         maxOperations,
         asyncDiff,
         maxRetries: 1,
@@ -882,6 +900,7 @@ export async function readLukerGraphSidecarV2(
     manifestNamespace = LUKER_GRAPH_MANIFEST_NAMESPACE,
     journalNamespace = LUKER_GRAPH_JOURNAL_NAMESPACE,
     checkpointNamespace = LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    chatStateTarget = null,
   } = {},
 ) {
   if (!canUseGraphChatState(context)) {
@@ -896,7 +915,9 @@ export async function readLukerGraphSidecarV2(
     manifestNamespace,
     journalNamespace,
     checkpointNamespace,
-  ]);
+  ], {
+    target: chatStateTarget,
+  });
 
   return {
     manifest: normalizeLukerGraphManifestV2(payloads.get(manifestNamespace) || null),
@@ -911,6 +932,7 @@ export async function writeLukerGraphManifestV2(
   {
     namespace = LUKER_GRAPH_MANIFEST_NAMESPACE,
     maxOperations = 512,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedManifest = normalizeLukerGraphManifestV2(manifest);
@@ -926,6 +948,7 @@ export async function writeLukerGraphManifestV2(
   const result = await writeGraphChatStatePayload(context, namespace, normalizedManifest, {
     maxOperations,
     asyncDiff: false,
+    target: chatStateTarget,
   });
   return {
     ...result,
@@ -941,6 +964,7 @@ export async function appendLukerGraphJournalEntryV2(
     chatId = "",
     integrity = "",
     maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedEntry = normalizeLukerGraphJournalEntry(entry);
@@ -988,12 +1012,17 @@ export async function appendLukerGraphJournalEntryV2(
         return nextJournal;
       },
       {
+        ...(chatStateTarget ? { target: chatStateTarget } : {}),
         maxOperations,
         asyncDiff: false,
         maxRetries: 1,
       },
     );
-    const journal = await readGraphChatStateNamespaces(context, [namespace]);
+    const journal = await readGraphChatStateNamespaces(
+      context,
+      [namespace],
+      { target: chatStateTarget },
+    );
     return {
       ok: result?.ok === true,
       updated: result?.updated !== false,
@@ -1025,6 +1054,7 @@ export async function replaceLukerGraphJournalV2(
   {
     namespace = LUKER_GRAPH_JOURNAL_NAMESPACE,
     maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedJournal = normalizeLukerGraphJournalV2(journal);
@@ -1040,6 +1070,7 @@ export async function replaceLukerGraphJournalV2(
   const result = await writeGraphChatStatePayload(context, namespace, normalizedJournal, {
     maxOperations,
     asyncDiff: false,
+    target: chatStateTarget,
   });
   return {
     ...result,
@@ -1053,6 +1084,7 @@ export async function writeLukerGraphCheckpointV2(
   {
     namespace = LUKER_GRAPH_CHECKPOINT_NAMESPACE,
     maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedCheckpoint = normalizeLukerGraphCheckpointV2(checkpoint);
@@ -1068,6 +1100,7 @@ export async function writeLukerGraphCheckpointV2(
   const result = await writeGraphChatStatePayload(context, namespace, normalizedCheckpoint, {
     maxOperations,
     asyncDiff: false,
+    target: chatStateTarget,
   });
   return {
     ...result,
@@ -1153,14 +1186,17 @@ export function buildGraphChatStateSnapshot(
 
 export async function readGraphChatStateSnapshot(
   context = null,
-  { namespace = GRAPH_CHAT_STATE_NAMESPACE } = {},
+  { namespace = GRAPH_CHAT_STATE_NAMESPACE, target = null } = {},
 ) {
   if (!canUseGraphChatState(context)) {
     return null;
   }
 
   try {
-    const payload = await context.getChatState(namespace);
+    const payload = await context.getChatState(
+      namespace,
+      target ? { target } : undefined,
+    );
     return normalizeGraphChatStateSnapshot(payload);
   } catch (error) {
     console.warn("[ST-BME] 读取聊天侧车图谱失败:", error);
@@ -1182,6 +1218,7 @@ export async function writeGraphChatStateSnapshot(
     lastProcessedAssistantFloor = null,
     extractionCount = null,
     maxOperations = GRAPH_CHAT_STATE_MAX_OPERATIONS,
+    target = null,
   } = {},
 ) {
   if (!canUseGraphChatState(context) || !graph) {
@@ -1217,6 +1254,7 @@ export async function writeGraphChatStateSnapshot(
       namespace,
       () => snapshot,
       {
+        ...(target ? { target } : {}),
         maxOperations,
         asyncDiff: false,
         maxRetries: 1,
@@ -1242,6 +1280,32 @@ export async function writeGraphChatStateSnapshot(
       reason: "chat-state-save-failed",
       error,
     };
+  }
+}
+
+export async function deleteGraphChatStateNamespace(
+  context = null,
+  namespace = "",
+  { target = null } = {},
+) {
+  if (
+    !canUseGraphChatState(context) ||
+    typeof context?.deleteChatState !== "function" ||
+    !String(namespace || "").trim()
+  ) {
+    return false;
+  }
+
+  try {
+    return Boolean(
+      await context.deleteChatState(
+        namespace,
+        target ? { target } : undefined,
+      ),
+    );
+  } catch (error) {
+    console.warn(`[ST-BME] 删除聊天侧车 ${namespace} 失败:`, error);
+    return false;
   }
 }
 

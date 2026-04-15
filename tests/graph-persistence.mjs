@@ -13,6 +13,15 @@ import {
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
 import {
+  getBmeHostAdapter,
+  isBmeLightweightHostMode,
+  normalizeBmeChatStateTarget,
+  resolveBmeHostProfile,
+  resolveChatStateTargetChatId,
+  resolveCurrentBmeChatStateTarget,
+  serializeBmeChatStateTarget,
+} from "../host/runtime-host-adapter.js";
+import {
   buildGraphCommitMarker,
   buildGraphChatStateSnapshot,
   buildLukerGraphCheckpointV2,
@@ -22,6 +31,7 @@ import {
   appendLukerGraphJournalEntryV2,
   canUseGraphChatState,
   detectIndexedDbSnapshotCommitMarkerMismatch,
+  deleteGraphChatStateNamespace,
   cloneGraphForPersistence,
   cloneRuntimeDebugValue,
   findGraphShadowSnapshotByIntegrity,
@@ -48,6 +58,7 @@ import {
   GRAPH_STARTUP_RECONCILE_DELAYS_MS,
   MODULE_NAME,
   normalizeGraphCommitMarker,
+  readGraphChatStateNamespaces,
   readGraphCommitMarker,
   readGraphChatStateSnapshot,
   readLukerGraphSidecarV2,
@@ -59,6 +70,7 @@ import {
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
+  writeGraphChatStatePayload,
   writeGraphChatStateSnapshot,
   writeLukerGraphCheckpointV2,
   writeLukerGraphManifestV2,
@@ -513,6 +525,77 @@ async function createGraphPersistenceHarness({
     clampInt,
     clampFloat,
     formatRecallContextLine,
+    getBmeHostAdapter(context = null) {
+      const activeContext = context || runtimeContext.__chatContext || {};
+      return {
+        context: activeContext,
+        hostProfile: runtimeContext.resolveBmeHostProfile(activeContext),
+        resolveCurrentTarget(options = {}) {
+          return runtimeContext.resolveCurrentBmeChatStateTarget(
+            activeContext,
+            options?.target,
+          );
+        },
+        getChatIdFromTarget(target = null) {
+          return runtimeContext.resolveChatStateTargetChatId(target);
+        },
+        isLightweightHostMode() {
+          return runtimeContext.isBmeLightweightHostMode(activeContext);
+        },
+      };
+    },
+    isBmeLightweightHostMode(context = null) {
+      return runtimeContext.resolveBmeHostProfile(context) === "luker";
+    },
+    normalizeBmeChatStateTarget,
+    resolveBmeHostProfile(context = null) {
+      const activeContext = context || runtimeContext.__chatContext || {};
+      const hasImplicitCurrentChat =
+        String(activeContext?.chatId || "").trim() ||
+        String(activeContext?.groupId || "").trim() ||
+        String(activeContext?.characterId || "").trim();
+      return runtimeContext.Luker &&
+        typeof runtimeContext.Luker?.getContext === "function" &&
+        typeof activeContext.getChatState === "function" &&
+        typeof activeContext.updateChatState === "function" &&
+        typeof activeContext.getChatStateBatch === "function" &&
+        hasImplicitCurrentChat
+        ? "luker"
+        : "generic-st";
+    },
+    resolveChatStateTargetChatId(target = null) {
+      return resolveChatStateTargetChatId(target);
+    },
+    resolveCurrentBmeChatStateTarget(context = null, explicitTarget = null) {
+      if (explicitTarget) {
+        return normalizeBmeChatStateTarget(explicitTarget);
+      }
+      const activeContext = context || runtimeContext.__chatContext || {};
+      if (String(activeContext?.groupId || "").trim()) {
+        return {
+          is_group: true,
+          id: String(activeContext.chatId || activeContext.groupId).trim(),
+        };
+      }
+      const avatar =
+        activeContext?.characterAvatar ||
+        activeContext?.avatar_url ||
+        activeContext?.characters?.[activeContext?.characterId]?.avatar ||
+        activeContext?.characters?.[Number(activeContext?.characterId)]?.avatar ||
+        "";
+      const fileName = String(activeContext?.chatId || "").trim();
+      if (avatar && fileName) {
+        return {
+          is_group: false,
+          avatar_url: String(avatar),
+          file_name: fileName,
+        };
+      }
+      return null;
+    },
+    serializeBmeChatStateTarget(target = null) {
+      return serializeBmeChatStateTarget(target);
+    },
     readPersistedRecallFromUserMessage,
     cloneGraphForPersistence,
     buildGraphCommitMarker,
@@ -523,6 +606,7 @@ async function createGraphPersistenceHarness({
     buildLukerGraphManifestV2,
     canUseGraphChatState,
     cloneRuntimeDebugValue,
+    deleteGraphChatStateNamespace,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     onMessageReceivedController,
     GRAPH_CHAT_STATE_NAMESPACE,
@@ -549,6 +633,7 @@ async function createGraphPersistenceHarness({
     MODULE_NAME,
     findGraphShadowSnapshotByIntegrity,
     normalizeGraphCommitMarker,
+    readGraphChatStateNamespaces,
     readGraphCommitMarker,
     readGraphChatStateSnapshot,
     readLukerGraphSidecarV2,
@@ -561,6 +646,7 @@ async function createGraphPersistenceHarness({
     replaceLukerGraphJournalV2,
     appendLukerGraphJournalEntryV2,
     writeChatMetadataPatch,
+    writeGraphChatStatePayload,
     writeGraphChatStateSnapshot,
     writeLukerGraphManifestV2,
     writeLukerGraphCheckpointV2,
@@ -875,22 +961,45 @@ async function createGraphPersistenceHarness({
       async saveMetadata() {
         runtimeContext.__contextImmediateSaveCalls += 1;
       },
-      async getChatState(namespace) {
+      __chatStateTargetStore: new Map(),
+      __chatStateCalls: [],
+      async getChatState(namespace, options = {}) {
         const key = String(namespace || "").trim().toLowerCase();
-        const value = this.__chatStateStore.get(key);
+        const targetKey = serializeBmeChatStateTarget(options?.target);
+        const scopedKey = targetKey ? `${targetKey}::${key}` : key;
+        this.__chatStateCalls.push({
+          type: "get",
+          namespace: key,
+          target: options?.target ? structuredClone(options.target) : null,
+        });
+        const value = this.__chatStateStore.get(scopedKey);
         return value == null ? null : structuredClone(value);
       },
-      async updateChatState(namespace, updater) {
+      async getChatStateBatch(namespaces = [], options = {}) {
+        const batch = new Map();
+        for (const namespace of namespaces) {
+          batch.set(namespace, await this.getChatState(namespace, options));
+        }
+        return batch;
+      },
+      async updateChatState(namespace, updater, options = {}) {
         const key = String(namespace || "").trim().toLowerCase();
+        const targetKey = serializeBmeChatStateTarget(options?.target);
+        const scopedKey = targetKey ? `${targetKey}::${key}` : key;
         if (!key || typeof updater !== "function") {
           return { ok: false, state: null, updated: false };
         }
-        const current = this.__chatStateStore.has(key)
-          ? structuredClone(this.__chatStateStore.get(key))
+        this.__chatStateCalls.push({
+          type: "update",
+          namespace: key,
+          target: options?.target ? structuredClone(options.target) : null,
+        });
+        const current = this.__chatStateStore.has(scopedKey)
+          ? structuredClone(this.__chatStateStore.get(scopedKey))
           : {};
         const next = await updater(structuredClone(current), {
           attempt: 0,
-          target: null,
+          target: options?.target ?? null,
           namespace: key,
         });
         if (next == null) {
@@ -898,12 +1007,24 @@ async function createGraphPersistenceHarness({
         }
         const currentJson = JSON.stringify(current);
         const nextJson = JSON.stringify(next);
-        this.__chatStateStore.set(key, structuredClone(next));
+        this.__chatStateStore.set(scopedKey, structuredClone(next));
         return {
           ok: true,
           state: structuredClone(next),
           updated: currentJson !== nextJson,
         };
+      },
+      async deleteChatState(namespace, options = {}) {
+        const key = String(namespace || "").trim().toLowerCase();
+        const targetKey = serializeBmeChatStateTarget(options?.target);
+        const scopedKey = targetKey ? `${targetKey}::${key}` : key;
+        this.__chatStateStore.delete(scopedKey);
+        this.__chatStateCalls.push({
+          type: "delete",
+          namespace: key,
+          target: options?.target ? structuredClone(options.target) : null,
+        });
+        return true;
       },
     },
     __contextSaveCalls: 0,
@@ -3894,6 +4015,63 @@ result = {
     "bootstrap journal reset 失败时不应继续写 manifest 假装 accepted",
   );
   assert.equal(Number(checkpoint?.revision || 0), 5);
+}
+
+{
+  const chatId = "chat-luker-targeted-write";
+  const integrity = "meta-luker-targeted-write";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    groupId: "group-luker-targeted-write",
+    chatMetadata: {
+      integrity,
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const branchTarget = {
+    is_group: true,
+    id: "group-luker-targeted-branch",
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph("group-luker-targeted-branch", "luker-targeted-write"),
+    {
+      revision: 2,
+      integrity,
+      chatId: "group-luker-targeted-branch",
+      reason: "luker-targeted-write",
+    },
+  );
+
+  const result = await harness.runtimeContext.persistGraphToHostChatState(
+    harness.runtimeContext.__chatContext,
+    {
+      graph,
+      chatId: "group-luker-targeted-branch",
+      revision: 2,
+      reason: "luker-targeted-write",
+      storageTier: "luker-chat-state",
+      accepted: true,
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+      mode: "primary",
+      chatStateTarget: branchTarget,
+    },
+  );
+
+  assert.equal(result.saved, true);
+  assert.equal(result.accepted, true);
+  const targetedCalls = harness.runtimeContext.__chatContext.__chatStateCalls.filter(
+    (call) => call.type === "update" && call.target?.id === branchTarget.id,
+  );
+  assert.ok(
+    targetedCalls.length >= 3,
+    "显式 chatStateTarget 写入 Luker sidecar 时应把 target 传给 manifest/journal/checkpoint 链路",
+  );
 }
 
 console.log("graph-persistence tests passed");
