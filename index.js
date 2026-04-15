@@ -1201,6 +1201,7 @@ let bmeLocalStoreCapabilityWarningShown = false;
 const bmeIndexedDbSnapshotCacheByChatId = new Map();
 const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
+const bmeIndexedDbRuntimeRepairInFlightByChatId = new Set();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLocalStoreMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
@@ -1345,6 +1346,9 @@ function getGraphPersistenceLiveState() {
     graphPersistenceState.cacheStorageTier ||
       persistenceEnvironment.cacheStorageTier,
   );
+  const runtimeGraphReadable = hasMeaningfulRuntimeGraphForChat(
+    graphPersistenceState.chatId || getCurrentChatId(),
+  );
   const snapshot = {
     loadState: graphPersistenceState.loadState,
     chatId: graphPersistenceState.chatId,
@@ -1416,6 +1420,7 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.opfsCompactionState,
       null,
     ),
+    runtimeGraphReadable,
     remoteSyncFormatVersion: Number(graphPersistenceState.remoteSyncFormatVersion || 0) || 1,
     dbReady:
       graphPersistenceState.dbReady ??
@@ -1549,6 +1554,52 @@ function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   return currentGraph.nodes.length > 0 || currentGraph.edges.length > 0;
 }
 
+function hasMeaningfulRuntimeGraphForChat(
+  chatId = getCurrentChatId(),
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  if (
+    !currentGraph ||
+    typeof currentGraph !== "object" ||
+    !Array.isArray(currentGraph.nodes) ||
+    !Array.isArray(currentGraph.edges) ||
+    !currentGraph.historyState ||
+    typeof currentGraph.historyState !== "object" ||
+    Array.isArray(currentGraph.historyState)
+  ) {
+    return false;
+  }
+
+  const normalizedTargetChatId = normalizeChatIdCandidate(chatId);
+  const runtimeChatId = normalizeChatIdCandidate(
+    currentGraph.historyState.chatId,
+  );
+
+  if (normalizedTargetChatId && runtimeChatId) {
+    const sameChat =
+      areChatIdsEquivalentForResolvedIdentity(
+        runtimeChatId,
+        normalizedTargetChatId,
+        identity,
+      ) ||
+      areChatIdsEquivalentForResolvedIdentity(
+        normalizedTargetChatId,
+        runtimeChatId,
+        identity,
+      );
+    if (!sameChat) {
+      return false;
+    }
+  } else if (
+    normalizedTargetChatId &&
+    !doesChatIdMatchResolvedGraphIdentity(normalizedTargetChatId, identity)
+  ) {
+    return false;
+  }
+
+  return !isGraphEffectivelyEmpty(currentGraph);
+}
+
 function isGraphReadableForRecall(
   loadState = graphPersistenceState.loadState,
   chatId = getCurrentChatId(),
@@ -1571,6 +1622,15 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.NO_CHAT:
       return createUiStatus("待命", "当前尚未进入聊天", "idle");
     case GRAPH_LOAD_STATES.LOADING:
+      if (hasMeaningfulRuntimeGraphForChat(chatId)) {
+        return createUiStatus(
+          "图谱已暂载",
+          chatId
+            ? `已读到聊天 ${chatId} 的临时图谱，正在确认本地存储`
+            : "已读到临时图谱，正在确认本地存储",
+          "warning",
+        );
+      }
       return createUiStatus(
         "图谱加载中",
         chatId
@@ -1631,7 +1691,9 @@ function getGraphMutationBlockReason(operationLabel = "当前操作") {
 
   switch (graphPersistenceState.loadState) {
     case GRAPH_LOAD_STATES.LOADING:
-      return `${operationLabel}已暂停：正在加载 IndexedDB 图谱。`;
+      return hasMeaningfulRuntimeGraphForChat()
+        ? `${operationLabel}已暂停：当前图谱已暂载，正在确认本地存储。`
+        : `${operationLabel}已暂停：正在加载 IndexedDB 图谱。`;
     case GRAPH_LOAD_STATES.SHADOW_RESTORED:
       return `${operationLabel}已暂停：当前图谱仍处于旧恢复状态，请等待 IndexedDB 初始化完成。`;
     case GRAPH_LOAD_STATES.BLOCKED:
@@ -7844,6 +7906,102 @@ function applyIndexedDbEmptyToRuntime(
   };
 }
 
+function queueRuntimeGraphLocalStoreRepair(
+  chatId,
+  {
+    source = "runtime-local-store-repair",
+    scheduleCloudUpload = false,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const identity = resolveCurrentChatIdentity(getContext());
+  if (
+    !normalizedChatId ||
+    bmeIndexedDbRuntimeRepairInFlightByChatId.has(normalizedChatId) ||
+    !hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+  ) {
+    return {
+      queued: false,
+      chatId: normalizedChatId || "",
+      reason: !normalizedChatId
+        ? "missing-chat-id"
+        : bmeIndexedDbRuntimeRepairInFlightByChatId.has(normalizedChatId)
+          ? "already-running"
+          : "runtime-graph-unavailable",
+    };
+  }
+
+  const graphSnapshot = cloneGraphForPersistence(currentGraph, normalizedChatId);
+  const requestedRevision = Math.max(
+    1,
+    Number(getGraphPersistedRevision(graphSnapshot) || 0),
+    Number(graphPersistenceState.revision || 0),
+    Number(graphPersistenceState.lastAcceptedRevision || 0),
+    Number(graphPersistenceState.lastPersistedRevision || 0),
+  );
+  const repairReason = `${String(source || "runtime-local-store-repair")}:repair-local-store`;
+  bmeIndexedDbRuntimeRepairInFlightByChatId.add(normalizedChatId);
+  updateGraphPersistenceState({
+    indexedDbLastError: "",
+    lastPersistReason: repairReason,
+    lastPersistMode: "runtime-local-store-repair-queued",
+  });
+
+  scheduleBmeIndexedDbTask(async () => {
+    try {
+      const result = await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
+        revision: requestedRevision,
+        reason: repairReason,
+        scheduleCloudUpload,
+      });
+      if (
+        result?.accepted !== true &&
+        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+      ) {
+        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+          chatId: normalizedChatId,
+          reason: result?.reason || "runtime-local-store-repair-failed",
+          revision: Math.max(
+            Number(graphPersistenceState.revision || 0),
+            Number(result?.revision || requestedRevision),
+          ),
+          lastPersistedRevision: Math.max(
+            Number(graphPersistenceState.lastPersistedRevision || 0),
+            Number(result?.revision || 0),
+          ),
+          pendingPersist: false,
+          dbReady: false,
+          writesBlocked: true,
+        });
+      }
+    } catch (error) {
+      if (
+        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+      ) {
+        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+          chatId: normalizedChatId,
+          reason: error?.message || "runtime-local-store-repair-failed",
+          pendingPersist: false,
+          dbReady: false,
+          writesBlocked: true,
+        });
+      }
+    } finally {
+      bmeIndexedDbRuntimeRepairInFlightByChatId.delete(normalizedChatId);
+      refreshPanelLiveState();
+    }
+  });
+
+  return {
+    queued: true,
+    chatId: normalizedChatId,
+    reason: repairReason,
+    revision: requestedRevision,
+  };
+}
+
 async function maybeResolveOrphanAcceptedCommitMarker(
   chatId,
   {
@@ -8454,6 +8612,22 @@ async function loadGraphFromIndexedDb(
           }
           return orphanMarkerResolution.result;
         }
+      }
+      const runtimeRepair = queueRuntimeGraphLocalStoreRepair(normalizedChatId, {
+        source: `${source}:empty-local-store`,
+        scheduleCloudUpload: false,
+      });
+      if (runtimeRepair.queued) {
+        return {
+          success: true,
+          loaded: false,
+          repairQueued: true,
+          loadState: GRAPH_LOAD_STATES.LOADING,
+          reason: `${snapshotStore.reasonPrefix}-repair-queued`,
+          chatId: normalizedChatId,
+          attemptIndex,
+          revision: Number(runtimeRepair.revision || 0),
+        };
       }
       if (
         applyEmptyState &&
@@ -10399,7 +10573,7 @@ function reconcileIndexedDbProbeFailureState(
   result = {},
   { attemptIndex = 0 } = {},
 ) {
-  if (result?.loaded || result?.emptyConfirmed) {
+  if (result?.loaded || result?.emptyConfirmed || result?.repairQueued) {
     clearPendingGraphLoadRetry();
     return result;
   }
@@ -12534,15 +12708,26 @@ async function saveGraphToIndexedDb(
     });
     clearPendingGraphPersistRetry();
     if (
-      graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
-      areChatIdsEquivalentForResolvedIdentity(
+      (graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
+        (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+          hasMeaningfulRuntimeGraphForChat(normalizedChatId, currentIdentity))) &&
+      (areChatIdsEquivalentForResolvedIdentity(
         normalizedChatId,
         graphPersistenceState.chatId || getCurrentChatId(),
-      )
+        currentIdentity,
+      ) ||
+        areChatIdsEquivalentForResolvedIdentity(
+          graphPersistenceState.chatId || getCurrentChatId(),
+          normalizedChatId,
+          currentIdentity,
+        ))
     ) {
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
         chatId: normalizedChatId,
-        reason: `shadow-promoted:${String(reason || "graph-save")}`,
+        reason:
+          graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED
+            ? `shadow-promoted:${String(reason || "graph-save")}`
+            : `local-store-confirmed:${String(reason || "graph-save")}`,
         revision: normalizeIndexedDbRevision(
           commitResult?.revision,
           requestedRevision,

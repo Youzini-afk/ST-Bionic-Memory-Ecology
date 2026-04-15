@@ -2539,7 +2539,7 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
   if (!el) return;
 
   if (!canRender) {
-    el.innerHTML = `<div class="bme-cog-status-card" style="grid-column:1/-1"><div class="bme-cog-status-card__value">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div></div>`;
+    el.innerHTML = `<div class="bme-cog-status-card" style="grid-column:1/-1"><div class="bme-cog-status-card__value">${_escHtml(_getGraphLoadLabel(loadInfo))}</div></div>`;
     return;
   }
 
@@ -2941,7 +2941,7 @@ function _refreshSummaryWorkspace(targetEl) {
 
   if (!graph || !_canRenderGraphData(loadInfo)) {
     workspace.innerHTML = `
-      <div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo?.loadState))}</div>
+      <div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo))}</div>
     `;
     return;
   }
@@ -3056,7 +3056,7 @@ function _refreshDashboard() {
     _setText("bme-stat-archived", "—");
     _setText("bme-stat-frag", "—");
     _setText("bme-status-chat-id", loadInfo.chatId || "—");
-    _setText("bme-status-history", _getGraphLoadLabel(loadInfo.loadState));
+    _setText("bme-status-history", _getGraphLoadLabel(loadInfo));
     _setText("bme-status-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-recovery", "等待聊天图谱元数据加载");
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
@@ -3066,11 +3066,11 @@ function _refreshDashboard() {
     _refreshPersistenceRepairUi(loadInfo, null);
     _renderStatefulListPlaceholder(
       document.getElementById("bme-recent-extract"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     _renderStatefulListPlaceholder(
       document.getElementById("bme-recent-recall"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     _refreshCognitionDashboard(graph, loadInfo);
     _refreshAiMonitorDashboard();
@@ -3569,17 +3569,17 @@ function _refreshCognitionDashboard(
 
   if (!canRenderGraph) {
     _setText("bme-cognition-active-owner", "—");
-    _setText("bme-cognition-active-region", _getGraphLoadLabel(loadInfo.loadState));
+    _setText("bme-cognition-active-region", _getGraphLoadLabel(loadInfo));
     _setText("bme-cognition-adjacent-regions", "—");
     _setText("bme-cognition-owner-count", "—");
     _renderStatefulListPlaceholder(
       document.getElementById("bme-cognition-owner-list"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     const detailEl = document.getElementById("bme-cognition-detail");
     if (detailEl) {
       detailEl.innerHTML = `
-        <div class="bme-cognition-empty">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div>
+        <div class="bme-cognition-empty">${_escHtml(_getGraphLoadLabel(loadInfo))}</div>
       `;
     }
     _setInputValueIfIdle("bme-cognition-manual-region", "");
@@ -3738,7 +3738,7 @@ function _refreshMemoryBrowser() {
   if (filterSelect) filterSelect.disabled = !canRenderGraph;
 
   if (!canRenderGraph && loadInfo.loadState !== "empty-confirmed") {
-    _renderStatefulListPlaceholder(listEl, _getGraphLoadLabel(loadInfo.loadState));
+    _renderStatefulListPlaceholder(listEl, _getGraphLoadLabel(loadInfo));
     return;
   }
 
@@ -11702,10 +11702,19 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   return `干净，已确认处理到楼层 ${lastConfirmedFloor}`;
 }
 
-function _getGraphLoadLabel(loadState = "") {
+function _getGraphLoadLabel(loadInfoOrState = "") {
+  const loadInfo =
+    loadInfoOrState && typeof loadInfoOrState === "object"
+      ? loadInfoOrState
+      : null;
+  const loadState = String(
+    loadInfo ? loadInfo.loadState || "" : loadInfoOrState || "",
+  );
   switch (loadState) {
     case "loading":
-      return "正在加载当前聊天图谱";
+      return loadInfo?.runtimeGraphReadable === true
+        ? "图谱已暂载，正在确认本地存储"
+        : "正在加载当前聊天图谱";
     case "shadow-restored":
       return "已从本次会话临时恢复，正在等待正式聊天元数据";
     case "empty-confirmed":
@@ -11808,7 +11817,7 @@ function _refreshGraphAvailabilityState() {
   const mobileOverlay = document.getElementById("bme-mobile-graph-overlay");
   const mobileOverlayText = document.getElementById("bme-mobile-graph-overlay-text");
   const blocked = _isGraphWriteBlocked(loadInfo);
-  const loadLabel = _getGraphLoadLabel(loadInfo.loadState);
+  const loadLabel = _getGraphLoadLabel(loadInfo);
   const pausedLabel = "图谱渲染已暂停，可点击工具栏按钮恢复。";
   const renderingPaused = !_isGraphRenderingEnabled();
 

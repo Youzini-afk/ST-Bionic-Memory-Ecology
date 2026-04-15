@@ -87,6 +87,7 @@ export function createGraphPersistenceState() {
     opfsWalDepth: 0,
     opfsPendingBytes: 0,
     opfsCompactionState: null,
+    runtimeGraphReadable: false,
     remoteSyncFormatVersion: 1,
     dbReady: false,
     indexedDbRevision: 0,

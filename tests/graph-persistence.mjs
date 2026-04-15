@@ -1375,6 +1375,105 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-loading-local-confirm",
+    globalChatId: "chat-loading-local-confirm",
+    chatMetadata: {
+      integrity: "meta-chat-loading-local-confirm",
+    },
+  });
+  const graph = createMeaningfulGraph(
+    "chat-loading-local-confirm",
+    "loading-local-confirm",
+  );
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loading",
+    chatId: "chat-loading-local-confirm",
+    reason: "metadata-compat-provisional",
+    dbReady: false,
+    writesBlocked: true,
+    revision: 5,
+    lastPersistedRevision: 0,
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+  });
+
+  const result = await harness.api.saveGraphToIndexedDb(
+    "chat-loading-local-confirm",
+    graph,
+    {
+      revision: 6,
+      reason: "test-loading-local-confirm",
+    },
+  );
+
+  assert.equal(result.accepted, true);
+  assert.equal(harness.api.getGraphPersistenceState().loadState, "loaded");
+  assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
+  assert.equal(harness.api.getGraphPersistenceState().writesBlocked, false);
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-metadata-runtime-repair",
+    globalChatId: "chat-metadata-runtime-repair",
+    chatMetadata: {
+      integrity: "meta-chat-metadata-runtime-repair",
+    },
+  });
+  const metadataGraph = createMeaningfulGraph(
+    "chat-metadata-runtime-repair",
+    "metadata-runtime-repair",
+  );
+  harness.api.setChatContext({
+    chatId: "chat-metadata-runtime-repair",
+    chatMetadata: {
+      integrity: "meta-chat-metadata-runtime-repair",
+      [GRAPH_METADATA_KEY]: metadataGraph,
+    },
+    characterId: "char-runtime-repair",
+    groupId: null,
+    chat: [{ is_user: true, mes: "repair me" }],
+    updateChatMetadata(patch) {
+      const base =
+        this.chatMetadata &&
+        typeof this.chatMetadata === "object" &&
+        !Array.isArray(this.chatMetadata)
+          ? this.chatMetadata
+          : {};
+      this.chatMetadata = {
+        ...base,
+        ...(patch || {}),
+      };
+    },
+    saveMetadataDebounced() {},
+  });
+
+  const result = harness.api.loadGraphFromChat({
+    attemptIndex: 0,
+    source: "metadata-runtime-repair",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(result.loadState, "loading");
+  assert.equal(harness.api.getCurrentGraph().nodes.length > 0, true);
+  assert.equal(harness.api.getGraphPersistenceState().loadState, "loaded");
+  assert.equal(harness.api.getGraphPersistenceState().dbReady, true);
+  const repairedChatId =
+    harness.api.getGraphPersistenceState().chatId ||
+    harness.api.getCurrentGraph().historyState.chatId ||
+    "chat-metadata-runtime-repair";
+  assert.equal(
+    harness.api.getIndexedDbSnapshotForChat(repairedChatId)?.nodes?.length > 0,
+    true,
+    "metadata 暂载图谱应自动回填到本地存储",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "",
     globalChatId: "",
     chatMetadata: {},
