@@ -11769,7 +11769,7 @@ function _refreshPersistenceRepairUi(
 
   help.hidden = !shouldShow;
   const isLuker = String(loadInfo?.hostProfile || "") === "luker";
-  if (lukerGroup) lukerGroup.hidden = !shouldShow;
+  if (lukerGroup) lukerGroup.hidden = false;
   if (retryBtn) retryBtn.hidden = false;
   if (probeBtn) probeBtn.hidden = false;
   if (lukerCacheBtn) lukerCacheBtn.hidden = !isLuker;
@@ -11777,7 +11777,11 @@ function _refreshPersistenceRepairUi(
   if (lukerCompactBtn) lukerCompactBtn.hidden = !isLuker;
   if (!shouldShow) {
     help.textContent = "";
-    if (actionHelp) actionHelp.textContent = "";
+    if (actionHelp) {
+      actionHelp.textContent = isLuker
+        ? "这里集中放持久化修复入口。通用情况先用“重试持久化”和“重新探测图谱”；如果是 Luker 主 sidecar 脱节，再用右侧 3 个专项修复按钮。"
+        : "这里集中放持久化修复入口。通常先用“重试持久化”，状态没恢复再试“重新探测图谱”。";
+    }
     return;
   }
 
