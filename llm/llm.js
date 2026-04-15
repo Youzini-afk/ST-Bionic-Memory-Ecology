@@ -10,6 +10,7 @@ import {
   resolveDedicatedLlmProviderConfig,
   resolveLlmConfigSelection,
 } from "./llm-preset-utils.js";
+import { getBmeHostAdapter } from "../host/runtime-host-adapter.js";
 import { getActiveTaskProfile } from "../prompting/prompt-profiles.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
@@ -521,6 +522,74 @@ function getMemoryLLMConfig(taskType = "") {
     llmPresetName: selection.presetName || "",
     requestedLlmPresetName: selection.requestedPresetName || "",
     llmPresetFallbackReason: selection.fallbackReason || "",
+  };
+}
+
+function resolveHostChatCompletionRouting(taskType = "", options = {}) {
+  const adapter =
+    typeof getBmeHostAdapter === "function" ? getBmeHostAdapter() : null;
+  if (!adapter || String(adapter.hostProfile || "") !== "luker") {
+    return {
+      hostProfile: String(adapter?.hostProfile || "generic-st"),
+      requestApi: "",
+      apiSettingsOverride: null,
+      requestScope: "chat",
+      routeApplied: false,
+      routeReason: "not-luker",
+    };
+  }
+
+  const context =
+    adapter.context && typeof adapter.context === "object"
+      ? adapter.context
+      : {};
+  const resolver =
+    typeof adapter.resolveChatCompletionRequestProfile === "function"
+      ? adapter.resolveChatCompletionRequestProfile.bind(adapter)
+      : null;
+  if (!resolver) {
+    return {
+      hostProfile: "luker",
+      requestApi: "",
+      apiSettingsOverride: null,
+      requestScope: "extension_internal",
+      routeApplied: false,
+      routeReason: "resolver-unavailable",
+    };
+  }
+
+  const profileName = String(options?.profileName || "").trim();
+  const resolution =
+    resolver({
+      profileName,
+      defaultApi: String(context?.mainApi || "openai").trim() || "openai",
+      defaultSource: String(
+        context?.chatCompletionSettings?.chat_completion_source || "",
+      ).trim(),
+      taskType: String(taskType || "").trim(),
+    }) || null;
+
+  return {
+    hostProfile: "luker",
+    requestApi: String(
+      resolution?.requestApi ||
+        context?.mainApi ||
+        "openai",
+    ).trim() || "openai",
+    apiSettingsOverride:
+      resolution?.apiSettingsOverride &&
+      typeof resolution.apiSettingsOverride === "object"
+        ? cloneRuntimeDebugValue(resolution.apiSettingsOverride, null)
+        : null,
+    requestScope: "extension_internal",
+    routeApplied: Boolean(
+      resolution?.apiSettingsOverride &&
+        typeof resolution.apiSettingsOverride === "object",
+    ),
+    routeReason:
+      resolution && typeof resolution === "object"
+        ? "profile-resolved"
+        : "profile-resolution-empty",
   };
 }
 
@@ -1892,6 +1961,9 @@ async function callDedicatedOpenAICompatible(
   );
   const transportMessages = buildTransportMessages(messages);
   const config = getMemoryLLMConfig(taskType);
+  const hostRouting = resolveHostChatCompletionRouting(taskType, {
+    profileName: "",
+  });
   const settings = extension_settings[MODULE_NAME] || {};
   const hasDedicatedConfig = hasDedicatedLLMConfig(config);
   if (taskType && config.llmPresetFallbackReason) {
@@ -1966,6 +2038,11 @@ async function callDedicatedOpenAICompatible(
       taskType,
       config,
     ),
+    hostProfile: hostRouting.hostProfile,
+    hostRequestApi: hostRouting.requestApi,
+    hostRouteApplied: hostRouting.routeApplied,
+    hostRouteReason: hostRouting.routeReason,
+    apiSettingsOverride: hostRouting.apiSettingsOverride,
     maxCompletionTokens,
     ...buildStreamDebugSnapshot(streamState),
   });
@@ -1974,7 +2051,11 @@ async function callDedicatedOpenAICompatible(
       "quiet",
       transportMessages,
       signal,
-      jsonMode ? { jsonSchema: createGenericJsonSchema() } : {},
+      {
+        ...(jsonMode ? { jsonSchema: createGenericJsonSchema() } : {}),
+        apiSettingsOverride: hostRouting.apiSettingsOverride,
+        requestScope: hostRouting.requestScope,
+      },
     );
     const normalized = normalizeLLMResponsePayload(payload);
     if (
