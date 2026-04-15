@@ -16089,14 +16089,30 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       isBackendVectorConfig(config) &&
       recoveryPlan.backendDeleteHashes.length > 0
     ) {
+      setRuntimeStatus(
+        "重新提取准备中",
+        `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+        "running",
+      );
       assertRecoveryChatStillActive(chatId, "reroll-pre-vector");
-      await deleteBackendVectorHashesForRecovery(
+      await tryDeleteBackendVectorHashesForRecovery(
         currentGraph.vectorIndexState.collectionId,
         config,
         recoveryPlan.backendDeleteHashes,
+        undefined,
+        {
+          source: "reroll",
+        },
       );
     }
 
+    if (isBackendVectorConfig(config)) {
+      setRuntimeStatus(
+        "重新提取准备中",
+        "正在准备向量回放状态",
+        "running",
+      );
+    }
     assertRecoveryChatStillActive(chatId, "reroll-pre-prepare");
     await prepareVectorStateForReplay(false, undefined, {
       skipBackendPurge: isBackendVectorConfig(config),
@@ -16185,6 +16201,106 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
   };
 }
 
+const VECTOR_RECOVERY_PREP_TIMEOUT_MS = 15000;
+
+async function tryDeleteBackendVectorHashesForRecovery(
+  collectionId,
+  config,
+  hashes,
+  signal = undefined,
+  { source = "recovery" } = {},
+) {
+  if (
+    !collectionId ||
+    !isBackendVectorConfig(config) ||
+    !Array.isArray(hashes) ||
+    hashes.length === 0
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "no-backend-hashes",
+    };
+  }
+
+  const canAbortWithTimeout =
+    typeof AbortController !== "undefined" &&
+    typeof DOMException !== "undefined";
+  const controller = canAbortWithTimeout ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(
+        () =>
+          controller.abort(
+            new DOMException(
+              `向量恢复准备超时 (${Math.round(VECTOR_RECOVERY_PREP_TIMEOUT_MS / 1000)}s)`,
+              "AbortError",
+            ),
+          ),
+        VECTOR_RECOVERY_PREP_TIMEOUT_MS,
+      )
+    : null;
+  let combinedSignal = controller?.signal;
+  if (signal && controller) {
+    if (
+      typeof AbortSignal !== "undefined" &&
+      typeof AbortSignal.any === "function"
+    ) {
+      combinedSignal = AbortSignal.any([signal, controller.signal]);
+    } else {
+      combinedSignal = controller.signal;
+      signal.addEventListener(
+        "abort",
+        () => controller.abort(signal.reason),
+        { once: true },
+      );
+    }
+  } else if (signal) {
+    combinedSignal = signal;
+  }
+
+  try {
+    await deleteBackendVectorHashesForRecovery(
+      collectionId,
+      config,
+      hashes,
+      combinedSignal,
+    );
+    return {
+      ok: true,
+      skipped: false,
+      reason: "",
+    };
+  } catch (error) {
+    if (isAbortError(error) && signal?.aborted) {
+      throw error;
+    }
+    console.warn("[ST-BME] 向量恢复预清理失败，已降级为后续修复:", {
+      source,
+      collectionId,
+      hashCount: hashes.length,
+      error,
+    });
+    if (currentGraph?.vectorIndexState) {
+      currentGraph.vectorIndexState.dirty = true;
+      currentGraph.vectorIndexState.dirtyReason =
+        currentGraph.vectorIndexState.dirtyReason ||
+        "history-recovery-replay";
+      currentGraph.vectorIndexState.lastWarning =
+        "向量恢复预清理失败，已跳过并标记为后续修复";
+    }
+    return {
+      ok: false,
+      skipped: false,
+      reason: error?.message || String(error),
+      error,
+    };
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   if (!currentGraph || isRecoveringHistory) {
     return !isRecoveringHistory;
@@ -16264,12 +16380,37 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         isBackendVectorConfig(config) &&
         recoveryPlan.backendDeleteHashes.length > 0
       ) {
+        updateStageNotice(
+          "history",
+          "历史恢复中",
+          `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+          "running",
+          {
+            persist: true,
+            busy: true,
+          },
+        );
         assertRecoveryChatStillActive(chatId, "pre-backend-delete");
-        await deleteBackendVectorHashesForRecovery(
+        await tryDeleteBackendVectorHashesForRecovery(
           currentGraph.vectorIndexState.collectionId,
           config,
           recoveryPlan.backendDeleteHashes,
           historySignal,
+          {
+            source: "history-recovery",
+          },
+        );
+      }
+      if (isBackendVectorConfig(config)) {
+        updateStageNotice(
+          "history",
+          "历史恢复中",
+          "正在准备向量回放状态",
+          "running",
+          {
+            persist: true,
+            busy: true,
+          },
         );
       }
       await prepareVectorStateForReplay(false, historySignal, {

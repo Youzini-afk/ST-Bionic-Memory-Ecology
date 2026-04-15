@@ -1187,6 +1187,30 @@ export async function onExtractionTaskController(runtime, options = {}) {
     context,
   );
   if (!rollbackResult?.success) {
+    const rollbackError = String(
+      rollbackResult?.error ||
+        rollbackResult?.reason ||
+        rollbackResult?.recoveryPath ||
+        "回滚失败",
+    ).trim() || "回滚失败";
+    setExtractionProgressStatus(
+      runtime,
+      "重新提取失败",
+      rollbackError,
+      "warning",
+      {
+        syncRuntime: true,
+        toastKind: "",
+        toastTitle: "ST-BME 重新提取",
+      },
+    );
+    runtime.toastr?.warning?.(
+      `重新提取未开始：${rollbackError}`,
+      "ST-BME 重新提取",
+      {
+        timeOut: 4500,
+      },
+    );
     return {
       ...rollbackResult,
       rerunPerformed: false,
