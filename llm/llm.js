@@ -1965,17 +1965,7 @@ async function callDedicatedOpenAICompatible(
     profileName: config.requestedLlmPresetName || "",
   });
   const settings = extension_settings[MODULE_NAME] || {};
-  const shouldPreferLukerHostRoute =
-    hostRouting.hostProfile === "luker" &&
-    (
-      config.llmConfigSource === "global" ||
-      (
-        String(config.llmConfigSource || "").startsWith("global-fallback-") &&
-        hostRouting.routeApplied === true
-      )
-    );
-  const hasDedicatedConfig =
-    hasDedicatedLLMConfig(config) && !shouldPreferLukerHostRoute;
+  const hasDedicatedConfig = hasDedicatedLLMConfig(config);
   if (taskType && config.llmPresetFallbackReason) {
     debugWarn(
       `[ST-BME] 任务 ${taskType} 指定的 API 模板不可用，已回退当前 API: ` +
@@ -2052,7 +2042,10 @@ async function callDedicatedOpenAICompatible(
     hostRequestApi: hostRouting.requestApi,
     hostRouteApplied: hostRouting.routeApplied,
     hostRouteReason: hostRouting.routeReason,
-    preferHostRoute: shouldPreferLukerHostRoute,
+    preferHostRoute:
+      !hasDedicatedConfig &&
+      hostRouting.hostProfile === "luker" &&
+      hostRouting.routeApplied === true,
     apiSettingsOverride: hostRouting.apiSettingsOverride,
     maxCompletionTokens,
     ...buildStreamDebugSnapshot(streamState),

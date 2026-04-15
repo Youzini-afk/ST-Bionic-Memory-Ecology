@@ -2565,6 +2565,38 @@ async function testExtractorNormalizesArrayPayloadAndPreservesScopeField() {
   }
 }
 
+async function testExtractorPropagatesLlmFailureReason() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          ok: false,
+          errorType: "provider-error",
+          failureReason: "Invalid character name",
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 9, role: "assistant", content: "测试 LLM 失败原因" }],
+      startSeq: 9,
+      endSeq: 9,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /Invalid character name/);
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testConsolidatorMergeUpdatesSeqRange() {
   const graph = createEmptyGraph();
   const target = createNode({
@@ -7005,6 +7037,7 @@ await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
 await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
+await testExtractorPropagatesLlmFailureReason();
 await testConsolidatorMergeUpdatesSeqRange();
 await testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing();
 await testBatchJournalVectorDeltaCapturesRecoveryFields();

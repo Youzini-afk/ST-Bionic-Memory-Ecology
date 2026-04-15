@@ -1152,7 +1152,7 @@ export async function extractMemories({
   }
 
   // 调用 LLM
-  const result = await callLLMForJSON({
+  const llmResult = await callLLMForJSON({
     systemPrompt: llmSystemPrompt,
     userPrompt: promptPayload.userPrompt,
     maxRetries: 2,
@@ -1166,8 +1166,18 @@ export async function extractMemories({
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayloadAdditionalMessages,
     onStreamProgress,
+    returnFailureDetails: true,
   });
   throwIfAborted(signal);
+  const llmFailure =
+    llmResult && typeof llmResult === "object" && "ok" in llmResult
+      ? llmResult
+      : null;
+  const result = llmFailure
+    ? llmFailure.ok
+      ? llmFailure.data
+      : null
+    : llmResult;
   const normalizedResult = normalizeExtractionResultPayload(result, schema);
   const ownershipWarnings = [];
   const extractionOwnerContext = deriveExtractionOwnerContext(
@@ -1199,11 +1209,23 @@ export async function extractMemories({
       `[ST-BME] 提取 LLM 未返回有效操作 ` +
         `[type=${diagType}]` +
         (diagKeys ? ` [keys=${diagKeys}]` : "") +
-        (diagPreview ? ` [preview=${diagPreview}]` : ""),
+        (diagPreview ? ` [preview=${diagPreview}]` : "") +
+        (llmFailure?.ok === false && llmFailure?.errorType
+          ? ` [failureType=${String(llmFailure.errorType)}]`
+          : "") +
+        (llmFailure?.ok === false && llmFailure?.failureReason
+          ? ` [failureReason=${String(llmFailure.failureReason).slice(0, 200)}]`
+          : ""),
     );
+    const failureReason =
+      llmFailure?.ok === false
+        ? String(llmFailure.failureReason || "").trim()
+        : "";
     return {
       success: false,
-      error: "提取 LLM 未返回有效操作",
+      error: failureReason
+        ? `提取 LLM 未返回有效操作: ${failureReason}`
+        : "提取 LLM 未返回有效操作",
       newNodes: 0,
       updatedNodes: 0,
       newEdges: 0,

@@ -56,6 +56,7 @@ const originalRequire = globalThis.require;
 const originalExtensionSettings = globalThis.__lukerLlmRoutingExtensionSettings;
 const originalSendOpenAIRequest = globalThis.__lukerLlmRoutingSendOpenAIRequest;
 const originalLuker = globalThis.Luker;
+const originalFetch = globalThis.fetch;
 
 globalThis.__lukerLlmRoutingExtensionSettings = {
   st_bme: {},
@@ -80,6 +81,8 @@ if (originalExtensionSettings === undefined) {
 
 let capturedOptions = null;
 let capturedMessages = null;
+let sendOpenAIRequestCalls = 0;
+let capturedFetchBody = null;
 
 globalThis.Luker = {
   getContext() {
@@ -112,6 +115,7 @@ globalThis.__lukerLlmRoutingSendOpenAIRequest = async (
   signal,
   options = {},
 ) => {
+  sendOpenAIRequestCalls += 1;
   capturedOptions = { ...(options || {}) };
   capturedMessages = Array.isArray(messages) ? [...messages] : messages;
   return {
@@ -123,6 +127,28 @@ globalThis.__lukerLlmRoutingSendOpenAIRequest = async (
       },
     ],
   };
+};
+
+globalThis.fetch = async (_url, options = {}) => {
+  capturedFetchBody = JSON.parse(String(options.body || "{}"));
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: '{"operations":[]}',
+          },
+          finish_reason: "stop",
+        },
+      ],
+    }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  );
 };
 
 extensionsApi.extension_settings.st_bme = {
@@ -151,6 +177,8 @@ try {
 
   capturedOptions = null;
   capturedMessages = null;
+  capturedFetchBody = null;
+  sendOpenAIRequestCalls = 0;
   extensionsApi.extension_settings.st_bme = {
     llmApiUrl: "https://stale-generic-config.invalid/v1",
     llmApiKey: "sk-stale-generic",
@@ -167,15 +195,20 @@ try {
   });
 
   assert.deepEqual(routedResult, { operations: [] });
-  assert.deepEqual(capturedOptions?.apiSettingsOverride, {
-    chat_completion_source: "openai",
-    reverse_proxy: "https://example-luker-route.test/v1",
-    proxy_password: "sk-luker-route",
-    secret_id: "luker-secret-1",
-  });
+  assert.equal(
+    sendOpenAIRequestCalls,
+    0,
+    "存在可用的 BME 全局专用 LLM 配置时，不应退回宿主当前聊天路由",
+  );
+  assert.equal(
+    capturedFetchBody?.custom_url,
+    "https://stale-generic-config.invalid/v1",
+  );
 
   capturedOptions = null;
   capturedMessages = null;
+  capturedFetchBody = null;
+  sendOpenAIRequestCalls = 0;
   const taskProfiles = createDefaultTaskProfiles();
   taskProfiles.extract.profiles[0].generation.llm_preset = "luker-profile-alpha";
   extensionsApi.extension_settings.st_bme = {
@@ -218,16 +251,26 @@ try {
   });
 
   assert.deepEqual(profileRoutedResult, { operations: [] });
-  assert.deepEqual(capturedOptions?.apiSettingsOverride, {
-    chat_completion_source: "openai",
-    reverse_proxy: "https://example-luker-profile.test/v1",
-    proxy_password: "sk-luker-profile",
-  });
+  assert.equal(
+    sendOpenAIRequestCalls,
+    0,
+    "存在可用的 BME 全局专用 LLM 配置时，不应因为 Luker profile 名而劫持到当前聊天路由",
+  );
+  assert.equal(
+    capturedFetchBody?.custom_url,
+    "https://stale-generic-config.invalid/v1",
+  );
 } finally {
   if (originalSendOpenAIRequest === undefined) {
     delete globalThis.__lukerLlmRoutingSendOpenAIRequest;
   } else {
     globalThis.__lukerLlmRoutingSendOpenAIRequest = originalSendOpenAIRequest;
+  }
+
+  if (originalFetch === undefined) {
+    delete globalThis.fetch;
+  } else {
+    globalThis.fetch = originalFetch;
   }
 
   if (originalLuker === undefined) {
