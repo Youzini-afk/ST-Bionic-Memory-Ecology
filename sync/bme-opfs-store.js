@@ -321,10 +321,50 @@ function isNotFoundError(error) {
   return name === "NotFoundError" || /not.?found/i.test(message);
 }
 
+function isTypeMismatchError(error) {
+  const name = String(error?.name || "");
+  const message = String(error?.message || "");
+  return (
+    name === "TypeMismatchError" ||
+    /type.?mismatch/i.test(message) ||
+    /different file type/i.test(message)
+  );
+}
+
 async function ensureDirectoryHandle(parentHandle, name) {
   return await parentHandle.getDirectoryHandle(String(name || ""), {
     create: true,
   });
+}
+
+async function ensureOpfsRootDirectory(
+  rootDirectory,
+  { repairFileConflict = false } = {},
+) {
+  if (!rootDirectory || typeof rootDirectory.getDirectoryHandle !== "function") {
+    throw new Error("OPFS 根目录不可用");
+  }
+
+  try {
+    return await ensureDirectoryHandle(rootDirectory, OPFS_ROOT_DIRECTORY_NAME);
+  } catch (error) {
+    if (!repairFileConflict || !isTypeMismatchError(error)) {
+      throw error;
+    }
+
+    const conflictingFile = await maybeGetFileHandle(
+      rootDirectory,
+      OPFS_ROOT_DIRECTORY_NAME,
+    ).catch(() => null);
+    if (!conflictingFile || typeof rootDirectory.removeEntry !== "function") {
+      throw error;
+    }
+
+    await rootDirectory.removeEntry(OPFS_ROOT_DIRECTORY_NAME, {
+      recursive: false,
+    });
+    return await ensureDirectoryHandle(rootDirectory, OPFS_ROOT_DIRECTORY_NAME);
+  }
 }
 
 async function maybeGetFileHandle(parentHandle, name) {
@@ -598,7 +638,9 @@ export async function detectOpfsSupport(options = {}) {
         reason: "missing-directory-handle",
       };
     }
-    await ensureDirectoryHandle(rootDirectory, OPFS_ROOT_DIRECTORY_NAME);
+    await ensureOpfsRootDirectory(rootDirectory, {
+      repairFileConflict: true,
+    });
     return {
       available: true,
       reason: "ok",
@@ -1534,10 +1576,9 @@ class LegacyOpfsGraphStore {
         if (!rootDirectory || typeof rootDirectory.getDirectoryHandle !== "function") {
           throw new Error("OPFS 根目录不可用");
         }
-        const opfsRoot = await ensureDirectoryHandle(
-          rootDirectory,
-          OPFS_ROOT_DIRECTORY_NAME,
-        );
+        const opfsRoot = await ensureOpfsRootDirectory(rootDirectory, {
+          repairFileConflict: true,
+        });
         const chatsDirectory = await ensureDirectoryHandle(
           opfsRoot,
           OPFS_CHATS_DIRECTORY_NAME,
@@ -2810,10 +2851,9 @@ export class OpfsGraphStore {
         if (!rootDirectory || typeof rootDirectory.getDirectoryHandle !== "function") {
           throw new Error("OPFS 根目录不可用");
         }
-        const opfsRoot = await ensureDirectoryHandle(
-          rootDirectory,
-          OPFS_ROOT_DIRECTORY_NAME,
-        );
+        const opfsRoot = await ensureOpfsRootDirectory(rootDirectory, {
+          repairFileConflict: true,
+        });
         const chatsDirectory = await ensureDirectoryHandle(
           opfsRoot,
           OPFS_CHATS_DIRECTORY_NAME,

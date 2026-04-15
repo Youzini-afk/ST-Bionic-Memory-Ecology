@@ -1308,6 +1308,7 @@ let bmeLocalStoreCapabilitySnapshot = {
   reason: "unprobed",
 };
 let bmeLocalStoreCapabilityWarningShown = false;
+const BME_LOCAL_STORE_CAPABILITY_FAILURE_RETRY_MS = 4000;
 const bmeIndexedDbSnapshotCacheByChatId = new Map();
 const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
@@ -4425,23 +4426,65 @@ function isCachedIndexedDbSnapshotCompatible(snapshot = null, expectedStore = nu
 }
 
 async function getGraphLocalStoreCapability(forceRefresh = false) {
-  if (!forceRefresh && bmeLocalStoreCapabilitySnapshot.checked) {
+  const settings =
+    arguments.length > 1 && arguments[1] && typeof arguments[1] === "object"
+      ? arguments[1].settings || getSettings()
+      : getSettings();
+  const eagerRetry =
+    arguments.length > 1 &&
+    arguments[1] &&
+    typeof arguments[1] === "object" &&
+    arguments[1].eagerRetry === true;
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  const usesOpfsPreference =
+    requestedMode === "auto" || isGraphLocalStorageModeOpfs(requestedMode);
+  const capabilityReason = String(
+    bmeLocalStoreCapabilitySnapshot?.reason || "",
+  ).trim();
+  const capabilityFailureStable =
+    capabilityReason === "missing-directory-handle" ||
+    capabilityReason === "OPFS 不可用" ||
+    /not.?supported/i.test(capabilityReason) ||
+    /missing.+getdirectory/i.test(capabilityReason);
+  const capabilityFailureRetryable =
+    usesOpfsPreference &&
+    bmeLocalStoreCapabilitySnapshot.checked === true &&
+    bmeLocalStoreCapabilitySnapshot.opfsAvailable !== true &&
+    capabilityFailureStable !== true;
+  const capabilityFailureAgeMs = Math.max(
+    0,
+    Date.now() - Number(bmeLocalStoreCapabilitySnapshot?.checkedAt || 0),
+  );
+  const shouldRetryFailedProbe =
+    forceRefresh !== true &&
+    capabilityFailureRetryable &&
+    (eagerRetry === true ||
+      capabilityFailureAgeMs >= BME_LOCAL_STORE_CAPABILITY_FAILURE_RETRY_MS);
+
+  if (
+    !forceRefresh &&
+    !shouldRetryFailedProbe &&
+    bmeLocalStoreCapabilitySnapshot.checked
+  ) {
     return bmeLocalStoreCapabilitySnapshot;
   }
-  if (!forceRefresh && bmeLocalStoreCapabilityPromise) {
+  if (!forceRefresh && !shouldRetryFailedProbe && bmeLocalStoreCapabilityPromise) {
     return await bmeLocalStoreCapabilityPromise;
   }
 
   bmeLocalStoreCapabilityPromise = detectOpfsSupport()
-    .then((result) => {
-      bmeLocalStoreCapabilitySnapshot = {
-        checked: true,
-        checkedAt: Date.now(),
-        opfsAvailable: Boolean(result?.available),
-        reason: String(result?.reason || (result?.available ? "ok" : "unavailable")),
-      };
-      return bmeLocalStoreCapabilitySnapshot;
-    })
+     .then((result) => {
+        bmeLocalStoreCapabilitySnapshot = {
+          checked: true,
+          checkedAt: Date.now(),
+          opfsAvailable: Boolean(result?.available),
+          reason: String(result?.reason || (result?.available ? "ok" : "unavailable")),
+        };
+        if (bmeLocalStoreCapabilitySnapshot.opfsAvailable) {
+          bmeLocalStoreCapabilityWarningShown = false;
+        }
+        return bmeLocalStoreCapabilitySnapshot;
+      })
     .catch((error) => {
       bmeLocalStoreCapabilitySnapshot = {
         checked: true,
@@ -4480,7 +4523,9 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
  ) {
    const requestedMode = getRequestedGraphLocalStorageMode(settings);
    if (requestedMode === "auto") {
-     const capability = await getGraphLocalStoreCapability();
+     const capability = await getGraphLocalStoreCapability(false, {
+       settings,
+     });
      return capability.opfsAvailable
        ? buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY)
        : buildIndexedDbStorePresentation();
@@ -4489,7 +4534,9 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
      return buildIndexedDbStorePresentation();
   }
 
-  const capability = await getGraphLocalStoreCapability();
+  const capability = await getGraphLocalStoreCapability(false, {
+    settings,
+  });
   if (capability.opfsAvailable) {
     return buildOpfsStorePresentation(requestedMode);
   }
@@ -4536,7 +4583,10 @@ async function refreshCurrentChatLocalStoreBinding(
     isGraphLocalStorageModeOpfs(requestedMode);
 
   if (shouldProbeCapability) {
-    await getGraphLocalStoreCapability(forceCapabilityRefresh === true);
+    await getGraphLocalStoreCapability(forceCapabilityRefresh === true, {
+      settings,
+      eagerRetry: forceCapabilityRefresh === true,
+    });
   }
 
   const preferredLocalStore =
@@ -4643,6 +4693,21 @@ function buildPanelOpenLocalStoreRefreshPlan(
   const resolvedIsOpfs = resolvedLocalStoreKey.startsWith("opfs:");
   const preferredIsOpfs = preferredLocalStore.storagePrimary === "opfs";
   const capabilityUnchecked = bmeLocalStoreCapabilitySnapshot.checked !== true;
+  const capabilityRetryRecommended =
+    usesOpfsPreference &&
+    bmeLocalStoreCapabilitySnapshot.checked === true &&
+    bmeLocalStoreCapabilitySnapshot.opfsAvailable !== true &&
+    !(
+      String(bmeLocalStoreCapabilitySnapshot.reason || "") ===
+        "missing-directory-handle" ||
+      String(bmeLocalStoreCapabilitySnapshot.reason || "") === "OPFS 不可用" ||
+      /not.?supported/i.test(
+        String(bmeLocalStoreCapabilitySnapshot.reason || ""),
+      ) ||
+      /missing.+getdirectory/i.test(
+        String(bmeLocalStoreCapabilitySnapshot.reason || ""),
+      )
+    );
   const pendingPersist = graphPersistenceState.pendingPersist === true;
   const writesBlocked = graphPersistenceState.writesBlocked === true;
   const loadState = String(graphPersistenceState.loadState || "");
@@ -4658,6 +4723,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
   const shouldRefresh =
     usesOpfsPreference &&
     (capabilityUnchecked ||
+      capabilityRetryRecommended ||
       pendingPersist ||
       writesBlocked ||
       blocked ||
@@ -4666,6 +4732,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
       localStoreMismatch);
   const forceCapabilityRefresh =
     capabilityUnchecked ||
+    capabilityRetryRecommended ||
     pendingPersist ||
     blocked ||
     loadingWithoutDb ||
@@ -4676,6 +4743,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
     (pendingPersist || writesBlocked || blocked || Boolean(persistError) || localStoreMismatch);
   const reasons = [];
   if (capabilityUnchecked) reasons.push("capability-unchecked");
+  if (capabilityRetryRecommended) reasons.push("capability-retryable-failure");
   if (pendingPersist) reasons.push("pending-persist");
   if (writesBlocked) reasons.push("writes-blocked");
   if (blocked) reasons.push("load-blocked");
@@ -5715,6 +5783,18 @@ async function syncBmeChatManagerWithCurrentChat(
   source = "unknown",
   context = getContext(),
 ) {
+  const currentSettings = getSettings();
+  const requestedMode = getRequestedGraphLocalStorageMode(currentSettings);
+  if (
+    requestedMode === "auto" ||
+    isGraphLocalStorageModeOpfs(requestedMode)
+  ) {
+    await getGraphLocalStoreCapability(false, {
+      settings: currentSettings,
+      eagerRetry: true,
+    });
+  }
+
   const manager = ensureBmeChatManager();
   if (!manager) {
     return {

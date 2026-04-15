@@ -2188,6 +2188,47 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-panel-open-capability-retry",
+    globalChatId: "chat-panel-open-capability-retry",
+    chatMetadata: {
+      integrity: "chat-panel-open-capability-retry-integrity",
+    },
+  });
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    graphLocalStorageMode: "auto",
+  };
+  harness.api.setLocalStoreCapabilitySnapshot({
+    checked: true,
+    checkedAt: Date.now(),
+    opfsAvailable: false,
+    reason: "UnknownError: transient-opfs-init-failure",
+  });
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-panel-open-capability-retry",
+    reason: "healthy",
+    dbReady: true,
+    writesBlocked: false,
+    pendingPersist: false,
+    indexedDbLastError: "",
+    resolvedLocalStore: "indexeddb:indexeddb",
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+  });
+
+  const plan = harness.api.buildPanelOpenLocalStoreRefreshPlan();
+
+  assert.equal(plan.shouldRefresh, true);
+  assert.equal(plan.forceCapabilityRefresh, true);
+  assert.equal(
+    plan.reasons.includes("capability-retryable-failure"),
+    true,
+    "可恢复的 OPFS 探测失败应在面板打开时触发重新探测",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-luker-panel-open",
     globalChatId: "chat-luker-panel-open",
     characterId: "char-luker-panel-open",
