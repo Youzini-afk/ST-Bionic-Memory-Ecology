@@ -2234,107 +2234,158 @@ function _refreshTaskPersistence() {
   const verboseDebugLabel = globalThis.__stBmeVerboseDebug === true ? "开启" : "关闭";
   const projectionLabel =
     ps?.projectionState?.runtime?.status || ps?.projectionState?.persistent?.status || "—";
+  const compactTargetLabel = (() => {
+    const target = ps.chatStateTarget;
+    if (!target || typeof target !== "object") return "未绑定";
+    if (target.is_group === true) {
+      return `群聊 · ${String(target.id || "—")}`;
+    }
+    return `角色聊天 · ${String(target.file_name || "—")}`;
+  })();
+  const mirrorLabel =
+    CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—";
+  const acceptedSummaryLabel =
+    ps.pendingPersist === true
+      ? "待确认"
+      : ps.persistMismatchReason
+        ? "一致性异常"
+        : acceptedTierLabel !== "—" && acceptedTierLabel !== "无"
+          ? acceptedTierLabel
+          : ps.shadowSnapshotUsed
+            ? "仅恢复锚点"
+            : "未确认";
+  const healthLabel = ps.pendingPersist === true
+    ? "等待正式持久化确认"
+    : ps.persistMismatchReason
+      ? _formatPersistMismatchReason(ps.persistMismatchReason)
+      : ps.blockedReason || (ps.loadState === "blocked" ? ps.reason : "") || "正常";
+  const localEngineLabel =
+    ps.resolvedLocalStore
+      ? String(ps.resolvedLocalStore).replace(":", " / ")
+      : cacheTierLabel;
+  const sidecarSummaryLabel =
+    ps.hostProfile === "luker"
+      ? `rev ${manifestRevisionLabel} · ${journalStateLabel}`
+      : "—";
+  const historyState = graph?.historyState || {};
+  const summaryState = graph?.summaryState || {};
+  const journalCount = Array.isArray(graph?.batchJournal) ? graph.batchJournal.length : 0;
+  const summaryCount = Array.isArray(summaryState?.entries) ? summaryState.entries.length : 0;
+  const activeSummaryCount = Array.isArray(summaryState?.activeEntryIds)
+    ? summaryState.activeEntryIds.length
+    : 0;
+  const processedFloorLabel = Number.isFinite(Number(historyState?.lastProcessedAssistantFloor))
+    ? String(Number(historyState.lastProcessedAssistantFloor))
+    : "—";
+  const extractionCountLabel = Number.isFinite(Number(historyState?.extractionCount))
+    ? String(Number(historyState.extractionCount))
+    : "0";
+  const activeRegionLabel = String(
+    historyState?.activeRegion ||
+      historyState?.lastExtractedRegion ||
+      "—",
+  );
+  const dirtyFromLabel = Number.isFinite(Number(historyState?.historyDirtyFrom))
+    ? String(Number(historyState.historyDirtyFrom))
+    : "无";
 
-  const kvs = [
-    ["加载状态", loadStateLabel],
-    ["宿主档案", hostProfileLabel],
-    ["Chat Target", ps.chatStateTarget ? JSON.stringify(ps.chatStateTarget) : "—"],
+  const summaryPills = [
+    `加载 · ${loadStateLabel}`,
+    `宿主 · ${hostProfileLabel}`,
+    `主存储 · ${primaryTierLabel}`,
+    `确认 · ${acceptedSummaryLabel}`,
+  ];
+  const renderRows = (rows = []) =>
+    rows
+      .filter(([, value]) => value !== null && value !== undefined && value !== "")
+      .map(
+        ([key, value]) =>
+          `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`,
+      )
+      .join("");
+
+  const primaryRows = [
+    ["当前状态", acceptedSummaryLabel],
+    ["健康状态", healthLabel],
+    ["Chat Target", compactTargetLabel],
     ["主 durable", primaryTierLabel],
-    ["当前 accepted", acceptedTierLabel],
+    ps.hostProfile === "luker"
+      ? ["Luker Sidecar", sidecarSummaryLabel]
+      : ["本地引擎", localEngineLabel],
+    ps.hostProfile === "luker"
+      ? ["本地缓存", `${cacheTierLabel} · ${mirrorLabel}`]
+      : ["恢复锚点", ps.shadowSnapshotUsed ? "影子快照已接管" : "无"],
+  ];
+
+  const runtimeRows = [
+    ["图谱节点", String((graph.nodes || []).length)],
+    ["图谱边", String((graph.edges || []).length)],
+    ["批次日志", String(journalCount)],
+    ["提取次数", extractionCountLabel],
+    ["已处理楼层", processedFloorLabel],
+    ["总结条目", `${summaryCount}（活跃 ${activeSummaryCount}）`],
+    ["当前区域", activeRegionLabel],
+    ["脏区起点", dirtyFromLabel],
+    ["运行版本", String(rs.graphRevision ?? "—")],
+  ];
+
+  const diagnosticRows = [
+    ["宿主档案", hostProfileLabel],
     ["accepted by", ps.acceptedBy || "—"],
-    ["Sidecar 格式", sidecarFormatLabel],
-    ["Manifest rev", manifestRevisionLabel],
-    ["Journal", journalStateLabel],
-    ["Checkpoint rev", checkpointRevisionLabel],
-    ["本地缓存", cacheTierLabel],
-    ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
-    ["缓存落后", cacheLagLabel],
-    ["解析本地引擎", ps.resolvedLocalStore || "—"],
+    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
+    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["版本号", ps.revision ?? "—"],
     ["本地格式", `v${Number(ps.localStoreFormatVersion || 0) || 1}`],
     ["本地迁移", ps.localStoreMigrationState || "—"],
-    ["版本号", ps.revision ?? "—"],
-    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
-    ["Verbose Debug", verboseDebugLabel],
     ["轻量模式", ps.lightweightHostMode ? "开启" : "关闭"],
+    ["Verbose Debug", verboseDebugLabel],
     ["Luker Hook", ps.lastHookPhase || "—"],
     ["Projection", projectionLabel],
     ["Rescan 原因", ps.lastRequestRescanReason || "—"],
     ["忽略变更", ps.lastIgnoredMutationEvent || "—"],
-    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
-    ["阻塞原因", ps.blockedReason || ps.reason || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
     ["OPFS 写锁", opfsLockLabel],
     ["OPFS WAL", `${Number(ps.opfsWalDepth || 0)} 条 / ${Number(ps.opfsPendingBytes || 0)} B`],
     ["OPFS 压实", opfsCompactionLabel],
     ["远端同步格式", `v${Number(ps.remoteSyncFormatVersion || 0) || 1}`],
   ];
-
-  const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
-
-  const journalCount = Array.isArray(rs.historyState?.batchJournal) ? rs.historyState.batchJournal.length : 0;
-  const secondaryKvs = [
-    ["图谱节点", String((graph.nodes || []).length)],
-    ["图谱边", String((graph.edges || []).length)],
-    ["批次日志", String(journalCount)],
-    ["运行版本", String(rs.graphRevision ?? "—")],
-  ];
-  const secondaryHtml = secondaryKvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(v)}</strong></div>`).join("");
-
-  const guidePairs = [
-    ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
-    ["宿主档案", "当前运行环境。Luker 会把聊天侧车当主 durable 存储，其它宿主仍以本地存储为主。"],
-    ["Chat Target", "Luker 当前绑定的 chat-state target。branch 派生和后台任务应显式指向它，而不是依赖当前聊天。"],
-    ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
-    ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
-    ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
-    ["Sidecar 格式", "Luker 主 sidecar 的格式版本。v2 代表 manifest + journal + checkpoint。"],
-    ["Manifest rev", "Luker 主 sidecar manifest 当前确认的 head revision。"],
-    ["Journal", "Luker sidecar 未压实 journal 的条目数和累计字节数。"],
-    ["Checkpoint rev", "Luker sidecar 最近一次压实基线的 revision。"],
-    ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
-    ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
-    ["缓存落后", "Luker manifest revision 与本地缓存 revision 的差值。0 表示本地缓存已追平。"],
-    ["解析本地引擎", "当前模式最终解析到的本地引擎，例如 auto 解析成 OPFS 或 IndexedDB。"],
-    ["本地格式", "当前本地存储格式版本。OPFS v2 代表分片基线 + WAL。"],
-    ["本地迁移", "当前本地存储迁移状态，例如 idle / promoting。"],
-    ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
-    ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
-    ["Verbose Debug", "是否抓取完整调试载荷。默认关闭，仅保留轻量摘要。"],
-    ["轻量模式", "Luker Android/WebView 或移动端下默认启用，主动收紧调试和运行态缓存。"],
-    ["Luker Hook", "最近一次命中的 Luker 正式 generation hook 阶段。"],
-    ["Projection", "当前 runtime / persistent projection 的轻量状态。runtime projection 会在生成结束后回落为空闲。"],
-    ["Rescan 原因", "如果当前轮次通过 runtime projection 请求了 world-info rescan，这里会显示最后一次原因。"],
-    ["忽略变更", "最近一次被按 MESSAGE_UPDATED 轻刷新降级处理的消息变更。"],
-    ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
-    ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
-    ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
-    ["OPFS 写锁", "OPFS 本地存储的串行写状态。活跃表示当前有写任务排队或执行中。"],
-    ["OPFS WAL", "当前尚未被压实进基线分片的日志条目数和累计字节数。"],
-    ["OPFS 压实", "OPFS 基线压实状态。pending 表示达到阈值后等待后台压实。"],
-    ["远端同步格式", "当前自动同步使用的远端存储格式版本。v2 代表 manifest + chunk。"],
-    ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
-    ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
-    ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
-  ];
-
-  const guideHtml = guidePairs.map(([term, desc]) =>
-    `<div class="bme-persist-guide__item"><strong>${_escHtml(term)}</strong><span>${_escHtml(desc)}</span></div>`
-  ).join("");
+  if (ps.hostProfile === "luker") {
+    diagnosticRows.splice(5, 0,
+      ["Sidecar 格式", sidecarFormatLabel],
+      ["Manifest rev", manifestRevisionLabel],
+      ["Journal", journalStateLabel],
+      ["Checkpoint rev", checkpointRevisionLabel],
+      ["缓存落后", cacheLagLabel],
+    );
+  }
 
   el.innerHTML = `
     <div class="bme-persist-grid">
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
-        ${kvHtml}
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+          ${summaryPills.map((pill) => `<span class="bme-task-pill">${_escHtml(pill)}</span>`).join("")}
+        </div>
+        <div class="bme-config-help" style="margin-bottom:12px">
+          这里只保留日常最常用的持久化信息。更偏技术性的字段已下沉到诊断细节，避免和右侧运行概览失衡。
+        </div>
+        ${renderRows(primaryRows)}
+        <details style="margin-top:14px;border-top:1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.10));padding-top:12px">
+          <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--bme-on-surface);list-style:none">
+            <i class="fa-solid fa-stethoscope" style="margin-right:6px;color:var(--bme-primary)"></i>查看诊断细节
+          </summary>
+          <div style="margin-top:12px">
+            ${renderRows(diagnosticRows)}
+          </div>
+        </details>
       </div>
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行统计</div>
-        ${secondaryHtml}
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行概览</div>
+        <div class="bme-config-help" style="margin-bottom:12px">
+          右侧专门展示当前图谱规模、处理进度和运行态前沿，减少左侧“持久化状态”承担太多运行职责。
+        </div>
+        ${renderRows(runtimeRows)}
       </div>
-    </div>
-    <div class="bme-persist-guide">
-      <div class="bme-persist-guide__title"><i class="fa-solid fa-circle-info" style="margin-right:6px;opacity:.5"></i>字段说明</div>
-      ${guideHtml}
     </div>
   `;
 }
