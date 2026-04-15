@@ -439,6 +439,41 @@ function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
 }
 
+function resolvePersistenceChatId(
+  context = getContext(),
+  graph = currentGraph,
+  explicitChatId = "",
+) {
+  const directChatId = normalizeChatIdCandidate(explicitChatId);
+  if (directChatId) return directChatId;
+
+  const resolvedIdentity = resolveCurrentChatIdentity(context);
+  const resolvedChatId = normalizeChatIdCandidate(resolvedIdentity.chatId);
+  if (resolvedChatId) return resolvedChatId;
+
+  const graphMeta = getGraphPersistenceMeta(graph) || {};
+  const fallbackCandidates = [
+    graph?.historyState?.chatId,
+    graphMeta.chatId,
+    currentGraph?.historyState?.chatId,
+    getGraphPersistenceMeta(currentGraph)?.chatId,
+    graphPersistenceState.chatId,
+    graphPersistenceState.queuedPersistChatId,
+    graphPersistenceState.commitMarker?.chatId,
+    context?.chatMetadata?.integrity,
+    context?.chatMetadata?.chat_id,
+    context?.chatMetadata?.chatId,
+    context?.chatMetadata?.session_id,
+    context?.chatMetadata?.sessionId,
+  ];
+
+  return (
+    fallbackCandidates
+      .map((candidate) => normalizeChatIdCandidate(candidate))
+      .find(Boolean) || ""
+  );
+}
+
 function rememberResolvedGraphIdentityAlias(
   context = getContext(),
   persistenceChatId = getCurrentChatId(context),
@@ -5491,6 +5526,34 @@ function ensureBmeChatManager() {
   return bmeChatManager;
 }
 
+function recordLocalPersistEarlyFailure(
+  reason = "indexeddb-unavailable",
+  {
+    chatId = "",
+    storagePrimary = graphPersistenceState.storagePrimary || "indexeddb",
+    storageMode = graphPersistenceState.storageMode || "indexeddb",
+    revision = 0,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedReason = String(reason || "indexeddb-unavailable").trim();
+  updateGraphPersistenceState({
+    storagePrimary,
+    storageMode,
+    indexedDbLastError: normalizedReason,
+    dualWriteLastResult: {
+      action: "save",
+      target: storagePrimary,
+      success: false,
+      chatId: normalizedChatId,
+      revision: normalizeIndexedDbRevision(revision),
+      reason: normalizedReason,
+      at: Date.now(),
+    },
+  });
+  return normalizedReason;
+}
+
 function scheduleBmeIndexedDbTask(task) {
   const scheduler =
     typeof globalThis.queueMicrotask === "function"
@@ -6814,7 +6877,7 @@ async function persistGraphToHostChatState(
     };
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, graph);
   if (!chatId) {
     return {
       saved: false,
@@ -10035,7 +10098,7 @@ function persistGraphToChatMetadata(
     });
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, graph);
   if (!chatId) {
     return buildGraphPersistResult({
       saved: false,
@@ -10431,8 +10494,12 @@ async function persistExtractionBatchResult({
     });
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, persistGraph);
   if (!chatId) {
+    recordLocalPersistEarlyFailure("missing-chat-id", {
+      chatId,
+      revision: 0,
+    });
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
@@ -12186,6 +12253,10 @@ async function saveGraphToIndexedDb(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || (!graph && !persistDelta)) {
+    recordLocalPersistEarlyFailure("indexeddb-missing-chat-graph-or-delta", {
+      chatId: normalizedChatId,
+      revision,
+    });
     return {
       saved: false,
       chatId: normalizedChatId,
@@ -12200,6 +12271,10 @@ async function saveGraphToIndexedDb(
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
+      recordLocalPersistEarlyFailure("indexeddb-manager-unavailable", {
+        chatId: normalizedChatId,
+        revision,
+      });
       return {
         saved: false,
         chatId: normalizedChatId,
@@ -12208,6 +12283,18 @@ async function saveGraphToIndexedDb(
       };
     }
     db = await manager.getCurrentDb(normalizedChatId);
+    if (!db) {
+      recordLocalPersistEarlyFailure("indexeddb-db-unavailable", {
+        chatId: normalizedChatId,
+        revision,
+      });
+      return {
+        saved: false,
+        chatId: normalizedChatId,
+        reason: "indexeddb-db-unavailable",
+        revision: normalizeIndexedDbRevision(revision),
+      };
+    }
     localStore = resolveDbGraphStorePresentation(db);
     const persistenceEnvironment = buildPersistenceEnvironment(context, localStore);
     const localStoreTier = resolveLocalStoreTierFromPresentation(localStore);
@@ -12931,7 +13018,7 @@ function saveGraphToChat(options = {}) {
       reason: "missing-context-or-graph",
     });
   }
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, currentGraph);
   const {
     reason = "graph-save",
     markMutation = true,
@@ -12943,6 +13030,10 @@ function saveGraphToChat(options = {}) {
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
   if (!chatId) {
+    recordLocalPersistEarlyFailure("missing-chat-id", {
+      chatId,
+      revision: 0,
+    });
     return buildGraphPersistResult({
       saved: false,
       blocked: true,

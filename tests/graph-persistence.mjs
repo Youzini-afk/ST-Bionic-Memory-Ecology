@@ -2450,6 +2450,78 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-manager-unavailable-write",
+    globalChatId: "chat-manager-unavailable-write",
+    chatMetadata: {
+      integrity: "meta-manager-unavailable-write",
+    },
+  });
+  harness.runtimeContext.BmeChatManager = null;
+
+  const result = await harness.api.saveGraphToIndexedDb(
+    "chat-manager-unavailable-write",
+    createMeaningfulGraph("chat-manager-unavailable-write", "manager-unavailable-write"),
+    {
+      revision: 3,
+      reason: "manager-unavailable-write",
+    },
+  );
+
+  assert.equal(result.saved, false);
+  assert.equal(result.reason, "indexeddb-manager-unavailable");
+  assert.equal(
+    harness.api.getGraphPersistenceState().indexedDbLastError,
+    "indexeddb-manager-unavailable",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "",
+    globalChatId: "",
+    chatMetadata: {
+      integrity: "",
+    },
+  });
+  const graph = createMeaningfulGraph("chat-persist-fallback", "persist-fallback");
+  harness.api.setCurrentGraph(graph);
+  harness.api.setChatContext({
+    chatId: "",
+    chatMetadata: {},
+    characterId: "char-fallback",
+    groupId: null,
+    chat: [{ is_user: true, mes: "fallback chat id" }],
+    updateChatMetadata(patch) {
+      const base =
+        this.chatMetadata &&
+        typeof this.chatMetadata === "object" &&
+        !Array.isArray(this.chatMetadata)
+          ? this.chatMetadata
+          : {};
+      this.chatMetadata = {
+        ...base,
+        ...(patch || {}),
+      };
+    },
+    saveMetadataDebounced() {},
+  });
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "persist-fallback-chat-id",
+    lastProcessedAssistantFloor: 6,
+    graphSnapshot: null,
+    persistDelta: null,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(
+    harness.api.getIndexedDbSnapshotForChat("chat-persist-fallback")?.meta?.chatId,
+    "chat-persist-fallback",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-indexeddb-read-failed-fallback",
     globalChatId: "chat-indexeddb-read-failed-fallback",
     chatMetadata: {
