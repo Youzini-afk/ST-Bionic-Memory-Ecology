@@ -731,6 +731,9 @@ function createRerollHarness() {
       setRuntimeStatus(text, meta = "", level = "info") {
         context.runtimeStatus = { text, meta, level };
       },
+      setLastExtractionStatus(text, meta = "", level = "info") {
+        context.lastExtractionStatus = { text, meta, level };
+      },
       clearInjectionState() {
         context.clearInjectionCalls += 1;
       },

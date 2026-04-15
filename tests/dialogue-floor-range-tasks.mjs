@@ -4,7 +4,10 @@ import {
   buildDialogueFloorMap,
   normalizeDialogueFloorRange,
 } from "../maintenance/chat-history.js";
-import { onExtractionTaskController } from "../maintenance/extraction-controller.js";
+import {
+  onExtractionTaskController,
+  onManualExtractController,
+} from "../maintenance/extraction-controller.js";
 import { onRebuildSummaryStateController } from "../ui/ui-actions-controller.js";
 
 const chat = [
@@ -50,6 +53,7 @@ const chat = [
     manual: [],
     warning: [],
     info: [],
+    extractionStatus: [],
   };
   const runtime = {
     getContext() {
@@ -62,6 +66,9 @@ const chat = [
       return true;
     },
     setRuntimeStatus() {},
+    setLastExtractionStatus(text, meta, level) {
+      calls.extractionStatus.push({ text, meta, level });
+    },
     rollbackGraphForReroll: async (fromFloor) => {
       calls.rollback.push(fromFloor);
       return { success: true, effectiveFromFloor: fromFloor };
@@ -91,6 +98,11 @@ const chat = [
   assert.equal(calls.manual.length, 1);
   assert.equal(calls.manual[0].lockedEndFloor, null);
   assert.equal(calls.manual[0].taskLabel, "重新提取");
+  assert.equal(calls.manual[0].showStartToast, false);
+  assert.equal(calls.extractionStatus[0]?.text, "重新提取准备中");
+  assert.match(calls.extractionStatus[0]?.meta || "", /退化为从 2 到最新重提/);
+  assert.equal(calls.extractionStatus[1]?.text, "重新提取中");
+  assert.match(calls.extractionStatus[1]?.meta || "", /正在开始重新提取/);
   assert.match(result.reason, /退化为从起始楼层到最新重提/);
 }
 
@@ -98,6 +110,7 @@ const chat = [
   const calls = {
     rollback: [],
     manual: [],
+    extractionStatus: [],
   };
   const runtime = {
     getContext() {
@@ -110,6 +123,9 @@ const chat = [
       return true;
     },
     setRuntimeStatus() {},
+    setLastExtractionStatus(text, meta, level) {
+      calls.extractionStatus.push({ text, meta, level });
+    },
     rollbackGraphForReroll: async (fromFloor) => {
       calls.rollback.push(fromFloor);
       return { success: true, effectiveFromFloor: fromFloor };
@@ -131,6 +147,95 @@ const chat = [
   assert.equal(result.fallbackToLatest, false);
   assert.deepEqual(calls.rollback, [6]);
   assert.equal(calls.manual[0].lockedEndFloor, 6);
+  assert.equal(calls.manual[0].showStartToast, false);
+  assert.equal(calls.extractionStatus[0]?.text, "重新提取准备中");
+}
+
+{
+  const statuses = [];
+  let lastProcessedAssistantFloor = -1;
+  const runtime = {
+    getIsExtracting() {
+      return false;
+    },
+    ensureGraphMutationReady() {
+      return true;
+    },
+    async recoverHistoryIfNeeded() {
+      return true;
+    },
+    getCurrentGraph() {
+      return { historyState: {} };
+    },
+    getContext() {
+      return { chat };
+    },
+    getAssistantTurns() {
+      return [2, 6];
+    },
+    getLastProcessedAssistantFloor() {
+      return lastProcessedAssistantFloor;
+    },
+    getSettings() {
+      return { extractEvery: 1 };
+    },
+    clampInt(value, fallback, min, max) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return fallback;
+      return Math.min(max, Math.max(min, Math.trunc(numeric)));
+    },
+    setIsExtracting() {},
+    beginStageAbortController() {
+      return { signal: null };
+    },
+    finishStageAbortController() {},
+    setLastExtractionStatus(text, meta, level) {
+      statuses.push({ text, meta, level });
+    },
+    async executeExtractionBatch({ endIdx }) {
+      lastProcessedAssistantFloor = endIdx;
+      return {
+        success: true,
+        result: {
+          newNodes: 1,
+          updatedNodes: 0,
+          newEdges: 1,
+        },
+        effects: {
+          warnings: [],
+        },
+        historyAdvanceAllowed: true,
+      };
+    },
+    isAbortError() {
+      return false;
+    },
+    refreshPanelLiveState() {},
+    retryPendingGraphPersist: async () => ({ accepted: true }),
+    toastr: {
+      info() {},
+      success() {},
+      warning() {},
+      error() {},
+    },
+  };
+
+  await onManualExtractController(runtime, {
+    taskLabel: "重新提取",
+    toastTitle: "ST-BME 重新提取",
+    showStartToast: false,
+  });
+
+  assert.equal(statuses[0]?.text, "重新提取中");
+  assert.match(statuses[0]?.meta || "", /待处理 AI 回复 2 条/);
+  assert.ok(
+    statuses.some(
+      (entry) =>
+        entry.text === "重新提取中" &&
+        /已处理 1\/2 条 AI 回复/.test(entry.meta || ""),
+    ),
+  );
+  assert.equal(statuses[statuses.length - 1]?.text, "重新提取完成");
 }
 
 {

@@ -115,6 +115,22 @@ function cloneSerializable(value, fallback = null) {
   }
 }
 
+function setExtractionProgressStatus(
+  runtime,
+  text,
+  meta = "",
+  level = "info",
+  options = {},
+) {
+  if (typeof runtime?.setLastExtractionStatus === "function") {
+    runtime.setLastExtractionStatus(text, meta, level, options);
+    return;
+  }
+  if (options?.syncRuntime !== false && typeof runtime?.setRuntimeStatus === "function") {
+    runtime.setRuntimeStatus(text, meta, level);
+  }
+}
+
 function resolveLatestAssistantDialogueFloor(chat = []) {
   const map = buildDialogueFloorMap(chat);
   const assistantDialogueFloors = Array.isArray(map.assistantDialogueFloors)
@@ -866,6 +882,7 @@ export async function onManualExtractController(runtime, options = {}) {
   const taskLabel = String(options?.taskLabel || "手动提取").trim() || "手动提取";
   const toastTitle = String(options?.toastTitle || `ST-BME ${taskLabel}`).trim() ||
     `ST-BME ${taskLabel}`;
+  const showStartToast = options?.showStartToast !== false;
   const lockedEndFloor = toSafeFloor(options?.lockedEndFloor, null);
   if (!runtime.ensureGraphMutationReady(taskLabel)) return;
   const pendingPersistGate = await maybeRetryPendingPersistence(
@@ -907,6 +924,10 @@ export async function onManualExtractController(runtime, options = {}) {
   const assistantTurns = runtime.getAssistantTurns(chat);
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const pendingAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
+  const targetAssistantTurns = pendingAssistantTurns.filter((i) => {
+    if (lockedEndFloor != null && i > lockedEndFloor) return false;
+    return true;
+  });
   if (pendingAssistantTurns.length === 0) {
     runtime.toastr.info("没有待提取的新回复");
     return;
@@ -920,18 +941,24 @@ export async function onManualExtractController(runtime, options = {}) {
     newEdges: 0,
     batches: 0,
   };
+  let processedAssistantTurns = 0;
   const warnings = [];
 
   runtime.setIsExtracting(true);
   const extractionController = runtime.beginStageAbortController("extraction");
   const extractionSignal = extractionController.signal;
-  runtime.setLastExtractionStatus(
+  setExtractionProgressStatus(
+    runtime,
     `${taskLabel}中`,
     lockedEndFloor != null
-      ? `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条 · 截止 chatIndex ${lockedEndFloor}`
-      : `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
+      ? `待处理 AI 回复 ${targetAssistantTurns.length} 条 · 截止 chatIndex ${lockedEndFloor}`
+      : `待处理 AI 回复 ${targetAssistantTurns.length} 条`,
     "running",
-    { syncRuntime: true, toastKind: "info", toastTitle },
+    {
+      syncRuntime: true,
+      toastKind: showStartToast ? "info" : "",
+      toastTitle,
+    },
   );
   try {
     while (true) {
@@ -967,10 +994,29 @@ export async function onManualExtractController(runtime, options = {}) {
       totals.updatedNodes += batchResult.result.updatedNodes || 0;
       totals.newEdges += batchResult.result.newEdges || 0;
       totals.batches++;
+      processedAssistantTurns += batchAssistantTurns.length;
 
       if (Array.isArray(batchResult.effects?.warnings)) {
         warnings.push(...batchResult.effects.warnings);
       }
+
+      const totalTurnsForDisplay = Math.max(
+        processedAssistantTurns,
+        targetAssistantTurns.length,
+      );
+      setExtractionProgressStatus(
+        runtime,
+        `${taskLabel}中`,
+        totalTurnsForDisplay > 0
+          ? `已处理 ${processedAssistantTurns}/${totalTurnsForDisplay} 条 AI 回复 · 当前楼层 ${startIdx}-${endIdx} · 累计 ${totals.batches} 批`
+          : `当前楼层 ${startIdx}-${endIdx} · 累计 ${totals.batches} 批`,
+        "running",
+        {
+          syncRuntime: true,
+          toastKind: "",
+          toastTitle,
+        },
+      );
 
       if (batchResult.historyAdvanceAllowed === false) {
         warnings.push(
@@ -986,7 +1032,8 @@ export async function onManualExtractController(runtime, options = {}) {
     }
 
     if (totals.batches === 0) {
-      runtime.setLastExtractionStatus(
+      setExtractionProgressStatus(
+        runtime,
         "无待提取内容",
         lockedEndFloor != null
           ? "指定范围内没有新的 assistant 回复需要处理"
@@ -1121,12 +1168,18 @@ export async function onExtractionTaskController(runtime, options = {}) {
       : rerunTask.endFloor,
   ];
 
-  runtime.setRuntimeStatus(
-    "重新提取中",
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取准备中",
     fallbackInfo.fallbackToLatest
       ? `范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor} 命中旧批次，但当前将退化为从 ${effectiveDialogueRange[0]} 到最新重提`
       : `准备重提范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor}`,
     fallbackInfo.fallbackToLatest ? "warning" : "running",
+    {
+      syncRuntime: true,
+      toastKind: "info",
+      toastTitle: "ST-BME 重新提取",
+    },
   );
 
   const rollbackResult = await runtime.rollbackGraphForReroll(
@@ -1149,11 +1202,28 @@ export async function onExtractionTaskController(runtime, options = {}) {
     });
   }
 
+  const rollbackDesc =
+    rollbackResult.effectiveFromFloor !== fallbackInfo.startAssistantChatIndex
+      ? `已按批次边界回滚到楼层 ${rollbackResult.effectiveFromFloor}，正在开始重新提取`
+      : `已回滚到楼层 ${fallbackInfo.startAssistantChatIndex}，正在开始重新提取`;
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取中",
+    rollbackDesc,
+    "running",
+    {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 重新提取",
+    },
+  );
+
   await runManualExtract({
     drainAll: true,
     lockedEndFloor: effectiveLockedEndFloor,
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
+    showStartToast: false,
   });
 
   return {
@@ -1254,12 +1324,18 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     targetFloor = assistantTurns[assistantTurns.length - 1];
   }
 
-  runtime.setRuntimeStatus(
-    "重新提取中",
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取准备中",
     Number.isFinite(targetFloor)
       ? `准备从楼层 ${targetFloor} 开始回滚并重新提取`
       : "准备回滚最新 AI 楼并重新提取",
     "running",
+    {
+      syncRuntime: true,
+      toastKind: "info",
+      toastTitle: "ST-BME 重 Roll",
+    },
   );
 
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
@@ -1289,10 +1365,14 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     rollbackResult = await runtime.rollbackGraphForReroll(targetFloor, context);
   } catch (e) {
     if (runtime.isAbortError(e)) {
-      runtime.setRuntimeStatus(
+      setExtractionProgressStatus(
+        runtime,
         "重新提取已取消",
         e.message || "聊天已切换",
         "warning",
+        {
+          syncRuntime: true,
+        },
       );
       return {
         success: false,
@@ -1309,10 +1389,14 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
   }
 
   if (!rollbackResult?.success) {
-    runtime.setRuntimeStatus(
+    setExtractionProgressStatus(
+      runtime,
       "重新提取失败",
       rollbackResult.error || "回滚失败",
       "error",
+      {
+        syncRuntime: true,
+      },
     );
     runtime.toastr?.error?.(rollbackResult.error, "ST-BME 重 Roll");
     return rollbackResult;
@@ -1326,7 +1410,19 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     timeOut: 2500,
   });
 
-  await runtime.onManualExtract({ drainAll: false });
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取中",
+    rerollDesc,
+    "running",
+    {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 重 Roll",
+    },
+  );
+
+  await runtime.onManualExtract({ drainAll: false, showStartToast: false });
   runtime.refreshPanelLiveState();
   return {
     ...rollbackResult,

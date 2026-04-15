@@ -17841,6 +17841,7 @@ async function onReroll({ fromFloor } = {}) {
       onManualExtract,
       refreshPanelLiveState,
       rollbackGraphForReroll,
+      setLastExtractionStatus,
       setRuntimeStatus,
       toastr,
     },
