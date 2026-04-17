@@ -205,18 +205,47 @@ function normalizePersistSnapshotView(snapshot = {}) {
     };
   }
 
+  const hasExplicitMeta =
+    snapshot.meta &&
+    typeof snapshot.meta === "object" &&
+    !Array.isArray(snapshot.meta);
+  const hasExplicitState =
+    snapshot.state &&
+    typeof snapshot.state === "object" &&
+    !Array.isArray(snapshot.state);
+  const shouldDeriveFromRuntimeGraph =
+    !hasExplicitMeta &&
+    !hasExplicitState &&
+    (Object.prototype.hasOwnProperty.call(snapshot, "historyState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "vectorIndexState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "batchJournal") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "maintenanceJournal") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "summaryState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "knowledgeState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "regionState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "timelineState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "lastRecallResult") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "lastProcessedSeq"));
+  const derivedRuntimeSnapshot = shouldDeriveFromRuntimeGraph
+    ? buildSnapshotFromGraph(snapshot, {
+        chatId: normalizeChatId(snapshot?.historyState?.chatId || ""),
+      })
+    : null;
+
   return {
-    meta:
-      snapshot.meta &&
-      typeof snapshot.meta === "object" &&
-      !Array.isArray(snapshot.meta)
-        ? snapshot.meta
+    meta: hasExplicitMeta
+      ? snapshot.meta
+      : derivedRuntimeSnapshot?.meta &&
+          typeof derivedRuntimeSnapshot.meta === "object" &&
+          !Array.isArray(derivedRuntimeSnapshot.meta)
+        ? derivedRuntimeSnapshot.meta
         : {},
-    state:
-      snapshot.state &&
-      typeof snapshot.state === "object" &&
-      !Array.isArray(snapshot.state)
-        ? snapshot.state
+    state: hasExplicitState
+      ? snapshot.state
+      : derivedRuntimeSnapshot?.state &&
+          typeof derivedRuntimeSnapshot.state === "object" &&
+          !Array.isArray(derivedRuntimeSnapshot.state)
+        ? derivedRuntimeSnapshot.state
         : {},
     nodes: toArray(snapshot.nodes),
     edges: toArray(snapshot.edges),
