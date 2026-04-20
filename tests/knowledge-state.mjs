@@ -5,9 +5,12 @@ import {
   applyCognitionUpdates,
   applyManualKnowledgeOverride,
   clearManualKnowledgeOverride,
+  deleteKnowledgeOwner,
+  mergeKnowledgeOwners,
   applyRegionUpdates,
   computeKnowledgeGateForNode,
   listKnowledgeOwners,
+  renameKnowledgeOwner,
   resolveActiveRegionContext,
   resolveAdjacentRegions,
   resolveKnowledgeOwner,
@@ -288,5 +291,306 @@ assert.equal(
   dedupedCharacterOwners[0].aliases.includes("艾琳"),
   true,
 );
+
+const renameGraph = createEmptyGraph();
+const renameCharacter = createNode({
+  type: "character",
+  fields: { name: "艾琳", state: "守塔人" },
+  seq: 1,
+});
+const renameObjectiveEvent = createNode({
+  type: "event",
+  fields: { title: "塔楼晨钟", summary: "晨钟再次响起" },
+  seq: 2,
+});
+const renamePovMemory = createNode({
+  type: "pov_memory",
+  fields: { summary: "艾琳记得晨钟响起" },
+  seq: 3,
+  scope: {
+    layer: "pov",
+    ownerType: "character",
+    ownerName: "艾琳",
+    ownerId: "艾琳",
+  },
+});
+addNode(renameGraph, renameCharacter);
+addNode(renameGraph, renameObjectiveEvent);
+addNode(renameGraph, renamePovMemory);
+applyCognitionUpdates(
+  renameGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "艾琳",
+      ownerNodeId: renameCharacter.id,
+      knownRefs: [renameObjectiveEvent.id],
+      visibility: [{ ref: renameObjectiveEvent.id, score: 1 }],
+    },
+  ],
+  { changedNodeIds: [renameObjectiveEvent.id] },
+);
+const renameOwner = resolveKnowledgeOwner(renameGraph, {
+  ownerType: "character",
+  ownerName: "艾琳",
+  nodeId: renameCharacter.id,
+});
+renameGraph.historyState.activeCharacterPovOwner = "艾琳";
+renameGraph.historyState.activeRecallOwnerKey = renameOwner.ownerKey;
+renameGraph.historyState.recentRecallOwnerKeys = [renameOwner.ownerKey];
+const renameResult = renameKnowledgeOwner(renameGraph, renameOwner.ownerKey, "艾琳娜");
+assert.equal(renameResult.ok, true);
+assert.equal(renameCharacter.fields.name, "艾琳娜");
+assert.equal(renamePovMemory.scope.ownerName, "艾琳娜");
+assert.equal(renamePovMemory.scope.ownerId, "艾琳娜");
+assert.equal(renameGraph.historyState.activeCharacterPovOwner, "艾琳娜");
+assert.equal(renameGraph.historyState.activeRecallOwnerKey, renameResult.ownerKey);
+assert.equal(renameGraph.knowledgeState.owners[renameOwner.ownerKey], undefined);
+assert.equal(renameGraph.knowledgeState.owners[renameResult.ownerKey].ownerName, "艾琳娜");
+assert.equal(
+  renameGraph.knowledgeState.owners[renameResult.ownerKey].aliases.includes("艾琳"),
+  true,
+);
+
+const mergeGraph = createEmptyGraph();
+const mergeSourceCharacter = createNode({
+  type: "character",
+  fields: { name: "艾琳", state: "旧身份" },
+  seq: 1,
+});
+const mergeTargetCharacter = createNode({
+  type: "character",
+  fields: { name: "艾琳娜", state: "新身份" },
+  seq: 2,
+});
+const mergeSourceEvent = createNode({
+  type: "event",
+  fields: { title: "旧钟楼记忆", summary: "她想起了旧钟楼" },
+  seq: 3,
+});
+const mergeTargetEvent = createNode({
+  type: "event",
+  fields: { title: "新花园记忆", summary: "她想起了新花园" },
+  seq: 4,
+});
+const mergeSourcePov = createNode({
+  type: "pov_memory",
+  fields: { summary: "艾琳的 POV 记忆" },
+  seq: 5,
+  scope: {
+    layer: "pov",
+    ownerType: "character",
+    ownerName: "艾琳",
+    ownerId: "艾琳",
+  },
+});
+addNode(mergeGraph, mergeSourceCharacter);
+addNode(mergeGraph, mergeTargetCharacter);
+addNode(mergeGraph, mergeSourceEvent);
+addNode(mergeGraph, mergeTargetEvent);
+addNode(mergeGraph, mergeSourcePov);
+applyCognitionUpdates(
+  mergeGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "艾琳",
+      ownerNodeId: mergeSourceCharacter.id,
+      knownRefs: [mergeSourceEvent.id],
+      visibility: [{ ref: mergeSourceEvent.id, score: 0.95 }],
+    },
+    {
+      ownerType: "character",
+      ownerName: "艾琳娜",
+      ownerNodeId: mergeTargetCharacter.id,
+      knownRefs: [mergeTargetEvent.id],
+      visibility: [{ ref: mergeTargetEvent.id, score: 0.9 }],
+    },
+  ],
+  { changedNodeIds: [mergeSourceEvent.id, mergeTargetEvent.id] },
+);
+const mergeSourceOwner = resolveKnowledgeOwner(mergeGraph, {
+  ownerType: "character",
+  ownerName: "艾琳",
+  nodeId: mergeSourceCharacter.id,
+});
+const mergeTargetOwner = resolveKnowledgeOwner(mergeGraph, {
+  ownerType: "character",
+  ownerName: "艾琳娜",
+  nodeId: mergeTargetCharacter.id,
+});
+mergeGraph.historyState.activeCharacterPovOwner = "艾琳";
+mergeGraph.historyState.activeRecallOwnerKey = mergeSourceOwner.ownerKey;
+mergeGraph.historyState.recentRecallOwnerKeys = [
+  mergeSourceOwner.ownerKey,
+  mergeTargetOwner.ownerKey,
+];
+const mergeResult = mergeKnowledgeOwners(mergeGraph, {
+  sourceOwnerKey: mergeSourceOwner.ownerKey,
+  targetOwnerKey: mergeTargetOwner.ownerKey,
+});
+assert.equal(mergeResult.ok, true);
+assert.equal(mergeGraph.knowledgeState.owners[mergeSourceOwner.ownerKey], undefined);
+assert.equal(mergeGraph.knowledgeState.owners[mergeTargetOwner.ownerKey].knownNodeIds.includes(mergeSourceEvent.id), true);
+assert.equal(mergeGraph.knowledgeState.owners[mergeTargetOwner.ownerKey].knownNodeIds.includes(mergeTargetEvent.id), true);
+assert.equal(mergeGraph.knowledgeState.owners[mergeTargetOwner.ownerKey].aliases.includes("艾琳"), true);
+assert.equal(mergeSourcePov.scope.ownerName, "艾琳娜");
+assert.equal(mergeSourcePov.scope.ownerId, "艾琳娜");
+assert.equal(mergeSourceCharacter.archived, true);
+assert.equal(mergeGraph.historyState.activeCharacterPovOwner, "艾琳娜");
+assert.equal(mergeGraph.historyState.activeRecallOwnerKey, mergeTargetOwner.ownerKey);
+
+const deleteOwnerOnlyGraph = createEmptyGraph();
+const deleteOwnerOnlyCharacter = createNode({
+  type: "character",
+  fields: { name: "米娅", state: "书记官" },
+  seq: 1,
+});
+const deleteOwnerOnlyEvent = createNode({
+  type: "event",
+  fields: { title: "记录密报", summary: "米娅记录了一份密报" },
+  seq: 2,
+});
+const deleteOwnerOnlyPov = createNode({
+  type: "pov_memory",
+  fields: { summary: "米娅的 POV" },
+  seq: 3,
+  scope: {
+    layer: "pov",
+    ownerType: "character",
+    ownerName: "米娅",
+    ownerId: "米娅",
+  },
+});
+addNode(deleteOwnerOnlyGraph, deleteOwnerOnlyCharacter);
+addNode(deleteOwnerOnlyGraph, deleteOwnerOnlyEvent);
+addNode(deleteOwnerOnlyGraph, deleteOwnerOnlyPov);
+applyCognitionUpdates(
+  deleteOwnerOnlyGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "米娅",
+      ownerNodeId: deleteOwnerOnlyCharacter.id,
+      knownRefs: [deleteOwnerOnlyEvent.id],
+      visibility: [{ ref: deleteOwnerOnlyEvent.id, score: 0.85 }],
+    },
+  ],
+  { changedNodeIds: [deleteOwnerOnlyEvent.id] },
+);
+const deleteOwnerOnly = resolveKnowledgeOwner(deleteOwnerOnlyGraph, {
+  ownerType: "character",
+  ownerName: "米娅",
+  nodeId: deleteOwnerOnlyCharacter.id,
+});
+const deleteOwnerOnlyResult = deleteKnowledgeOwner(deleteOwnerOnlyGraph, deleteOwnerOnly.ownerKey, {
+  mode: "owner-only",
+});
+assert.equal(deleteOwnerOnlyResult.ok, true);
+assert.equal(deleteOwnerOnlyGraph.knowledgeState.owners[deleteOwnerOnly.ownerKey], undefined);
+assert.equal(deleteOwnerOnlyCharacter.archived, false);
+assert.equal(deleteOwnerOnlyPov.archived, false);
+
+const deleteArchiveCharacterGraph = createEmptyGraph();
+const deleteArchiveCharacterNode = createNode({
+  type: "character",
+  fields: { name: "诺拉", state: "侍女" },
+  seq: 1,
+});
+const deleteArchiveCharacterEvent = createNode({
+  type: "event",
+  fields: { title: "诺拉送信", summary: "诺拉送出了一封信" },
+  seq: 2,
+});
+const deleteArchiveCharacterPov = createNode({
+  type: "pov_memory",
+  fields: { summary: "诺拉的 POV" },
+  seq: 3,
+  scope: {
+    layer: "pov",
+    ownerType: "character",
+    ownerName: "诺拉",
+    ownerId: "诺拉",
+  },
+});
+addNode(deleteArchiveCharacterGraph, deleteArchiveCharacterNode);
+addNode(deleteArchiveCharacterGraph, deleteArchiveCharacterEvent);
+addNode(deleteArchiveCharacterGraph, deleteArchiveCharacterPov);
+applyCognitionUpdates(
+  deleteArchiveCharacterGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "诺拉",
+      ownerNodeId: deleteArchiveCharacterNode.id,
+      knownRefs: [deleteArchiveCharacterEvent.id],
+      visibility: [{ ref: deleteArchiveCharacterEvent.id, score: 0.82 }],
+    },
+  ],
+  { changedNodeIds: [deleteArchiveCharacterEvent.id] },
+);
+const deleteArchiveCharacterOwner = resolveKnowledgeOwner(deleteArchiveCharacterGraph, {
+  ownerType: "character",
+  ownerName: "诺拉",
+  nodeId: deleteArchiveCharacterNode.id,
+});
+const deleteArchiveCharacterResult = deleteKnowledgeOwner(
+  deleteArchiveCharacterGraph,
+  deleteArchiveCharacterOwner.ownerKey,
+  { mode: "archive-character" },
+);
+assert.equal(deleteArchiveCharacterResult.ok, true);
+assert.equal(deleteArchiveCharacterNode.archived, true);
+assert.equal(deleteArchiveCharacterPov.archived, false);
+
+const deleteArchiveAllGraph = createEmptyGraph();
+const deleteArchiveAllCharacter = createNode({
+  type: "character",
+  fields: { name: "赛拉", state: "守卫" },
+  seq: 1,
+});
+const deleteArchiveAllEvent = createNode({
+  type: "event",
+  fields: { title: "赛拉巡逻", summary: "赛拉完成了巡逻" },
+  seq: 2,
+});
+const deleteArchiveAllPov = createNode({
+  type: "pov_memory",
+  fields: { summary: "赛拉的 POV" },
+  seq: 3,
+  scope: {
+    layer: "pov",
+    ownerType: "character",
+    ownerName: "赛拉",
+    ownerId: "赛拉",
+  },
+});
+addNode(deleteArchiveAllGraph, deleteArchiveAllCharacter);
+addNode(deleteArchiveAllGraph, deleteArchiveAllEvent);
+addNode(deleteArchiveAllGraph, deleteArchiveAllPov);
+applyCognitionUpdates(
+  deleteArchiveAllGraph,
+  [
+    {
+      ownerType: "character",
+      ownerName: "赛拉",
+      ownerNodeId: deleteArchiveAllCharacter.id,
+      knownRefs: [deleteArchiveAllEvent.id],
+      visibility: [{ ref: deleteArchiveAllEvent.id, score: 0.88 }],
+    },
+  ],
+  { changedNodeIds: [deleteArchiveAllEvent.id] },
+);
+const deleteArchiveAllOwner = resolveKnowledgeOwner(deleteArchiveAllGraph, {
+  ownerType: "character",
+  ownerName: "赛拉",
+  nodeId: deleteArchiveAllCharacter.id,
+});
+const deleteArchiveAllResult = deleteKnowledgeOwner(deleteArchiveAllGraph, deleteArchiveAllOwner.ownerKey, {
+  mode: "archive-all",
+});
+assert.equal(deleteArchiveAllResult.ok, true);
+assert.equal(deleteArchiveAllCharacter.archived, true);
+assert.equal(deleteArchiveAllPov.archived, true);
 
 console.log("knowledge-state tests passed");

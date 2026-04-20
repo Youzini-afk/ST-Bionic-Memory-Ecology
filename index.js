@@ -271,6 +271,9 @@ import { DEFAULT_NODE_SCHEMA, validateSchema } from "./graph/schema.js";
 import {
   applyManualKnowledgeOverride,
   clearManualKnowledgeOverride,
+  deleteKnowledgeOwner,
+  mergeKnowledgeOwners,
+  renameKnowledgeOwner,
   setManualActiveRegion,
   updateRegionAdjacencyManual,
 } from "./graph/knowledge-state.js";
@@ -17689,6 +17692,89 @@ function onClearPanelKnowledgeOverride(payload = {}) {
   };
 }
 
+function onRenamePanelKnowledgeOwner(payload = {}) {
+  const ownerKey = String(payload.ownerKey || "").trim();
+  const nextName = String(payload.nextName || "").trim();
+  if (!currentGraph || !ownerKey || !nextName) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知重命名", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = renameKnowledgeOwner(currentGraph, ownerKey, nextName);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "rename-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-knowledge-owner-rename" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    previousOwnerKey: result.previousOwnerKey || ownerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onMergePanelKnowledgeOwners(payload = {}) {
+  const sourceOwnerKey = String(payload.sourceOwnerKey || payload.ownerKey || "").trim();
+  const targetOwnerKey = String(payload.targetOwnerKey || "").trim();
+  if (!currentGraph || !sourceOwnerKey || !targetOwnerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知合并", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = mergeKnowledgeOwners(currentGraph, {
+    sourceOwnerKey,
+    targetOwnerKey,
+  });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "merge-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-knowledge-owner-merge" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || targetOwnerKey,
+    sourceOwnerKey: result.sourceOwnerKey || sourceOwnerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onDeletePanelKnowledgeOwner(payload = {}) {
+  const ownerKey = String(payload.ownerKey || "").trim();
+  const mode = String(payload.mode || "owner-only").trim() || "owner-only";
+  if (!currentGraph || !ownerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知删除", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = deleteKnowledgeOwner(currentGraph, ownerKey, { mode });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "delete-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({
+    reason: `panel-knowledge-owner-delete-${result.mode || mode}`,
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    mode: result.mode || mode,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 function onSetPanelActiveRegion(payload = {}) {
   const region = String(payload.region || "").trim();
   if (!currentGraph) {
@@ -18681,6 +18767,9 @@ async function onCompactLukerSidecar() {
       deleteGraphNode: onDeletePanelGraphNode,
       applyKnowledgeOverride: onApplyPanelKnowledgeOverride,
       clearKnowledgeOverride: onClearPanelKnowledgeOverride,
+      renameKnowledgeOwner: onRenamePanelKnowledgeOwner,
+      mergeKnowledgeOwners: onMergePanelKnowledgeOwners,
+      deleteKnowledgeOwner: onDeletePanelKnowledgeOwner,
       setActiveRegion: onSetPanelActiveRegion,
       setActiveStoryTime: onSetPanelActiveStoryTime,
       clearActiveStoryTime: onClearPanelActiveStoryTime,

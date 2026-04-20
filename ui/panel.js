@@ -2778,6 +2778,56 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender, targetEl) {
   const suppressedCount = new Set([...(ownerState.manualHiddenNodeIds || []), ...(ownerState.mistakenNodeIds || [])]).size;
   const disabledAttr = !selectedNode || writeBlocked ? "disabled" : "";
   const displayInfo = _getOwnerDisplayInfo(selectedOwner, collisionIndex);
+  const isCharacterOwner = String(selectedOwner.ownerType || "") === "character";
+  const ownerActionDisabledAttr = writeBlocked || !isCharacterOwner ? "disabled" : "";
+  const mergeCandidates = _getCognitionOwnerCollection(graph).filter(
+    (entry) =>
+      String(entry?.ownerType || "") === "character" &&
+      String(entry?.ownerKey || "") !== String(selectedOwner.ownerKey || ""),
+  );
+  const mergeOptions = mergeCandidates.length
+    ? mergeCandidates
+        .map((entry) => {
+          const targetDisplayInfo = _getOwnerDisplayInfo(entry, collisionIndex);
+          return `<option value="${_escAttr(entry.ownerKey || "")}">${_escHtml(targetDisplayInfo.title)}</option>`;
+        })
+        .join("")
+    : '<option value="">暂无可合并目标</option>';
+  const mergeDisabledAttr =
+    writeBlocked || !isCharacterOwner || mergeCandidates.length === 0 ? "disabled" : "";
+  const ownerManagementSection = isCharacterOwner
+    ? `
+    <div class="bme-cog-override-section">
+      <div class="bme-cog-override-title">角色认知管理</div>
+      <div class="bme-cog-space-row">
+        <label>重命名角色认知</label>
+        <input class="bme-config-input" type="text" data-bme-cognition-owner-rename-input
+               placeholder="输入新的角色名称..." value="${_escHtml(selectedOwner.ownerName || "")}" ${ownerActionDisabledAttr} />
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">会同步更新 owner 名称、角色节点名和 POV scope，并把旧名加入 aliases。</div>
+        <button class="bme-cog-btn bme-cog-btn--known" type="button" data-bme-cognition-owner-action="rename" ${ownerActionDisabledAttr}>重命名</button>
+      </div>
+      <div class="bme-cog-space-row">
+        <label>合并到其他角色认知</label>
+        <select class="bme-config-input" data-bme-cognition-owner-merge-target ${mergeDisabledAttr}>${mergeOptions}</select>
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">会把当前角色的 POV scope 改写到目标角色，并合并认知状态与 aliases。</div>
+        <button class="bme-cog-btn bme-cog-btn--mistaken" type="button" data-bme-cognition-owner-action="merge" ${mergeDisabledAttr}>合并到目标角色</button>
+      </div>
+      <div class="bme-cog-space-row">
+        <label>删除范围</label>
+        <select class="bme-config-input" data-bme-cognition-owner-delete-mode ${ownerActionDisabledAttr}>
+          <option value="owner-only">只删除 owner，保留角色节点与 POV</option>
+          <option value="archive-character">删除 owner，并归档角色节点</option>
+          <option value="archive-all">删除 owner，并归档角色节点与 POV 记忆</option>
+        </select>
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">删除前会再次确认；不会无提示直接删除。</div>
+        <button class="bme-cog-btn bme-cog-btn--clear" type="button" data-bme-cognition-owner-action="delete" ${ownerActionDisabledAttr}>删除角色认知</button>
+      </div>
+    </div>`
+    : `
+    <div class="bme-cog-override-section">
+      <div class="bme-cog-override-title">角色认知管理</div>
+      <div class="bme-cog-override-status">当前条目不是角色 owner，暂不支持重命名、合并或删除。</div>
+    </div>`;
 
   const visChips = strongVisibleNames.length
     ? strongVisibleNames.map((n) => `<span class="bme-cog-chip is-visible">${_escHtml(n)}</span>`).join("")
@@ -2829,6 +2879,8 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender, targetEl) {
       <div class="bme-cog-chip-label">被压制节点 · SUPPRESSED</div>
       <div class="bme-cog-chip-wrap">${supChips}</div>
     </div>
+
+    ${ownerManagementSection}
 
     <div class="bme-cog-override-section">
       <div class="bme-cog-override-title">对当前选中节点做手动覆盖</div>
@@ -5311,7 +5363,155 @@ async function _runCognitionNodeOverrideAction(mode = "") {
   } else {
     toastr.success(successMap[mode] || "认知覆盖已更新", "ST-BME");
   }
+  _refreshCognitionSurfaces();
+}
+
+function _refreshCognitionSurfaces() {
   _refreshDashboard();
+  _refreshCognitionWorkspace();
+  _refreshMobileCognitionFull();
+}
+
+async function _callAction(actionKey = "", payload = {}) {
+  const handler = _actionHandlers?.[String(actionKey || "")];
+  if (typeof handler !== "function") {
+    return { ok: false, error: "missing-action-handler" };
+  }
+  const result = await handler(payload);
+  _refreshCognitionSurfaces();
+  return result;
+}
+
+async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
+  const graph = _getGraph?.();
+  const ownerEntries = _getCognitionOwnerCollection(graph);
+  const ownerEntry =
+    ownerEntries.find((entry) => entry.ownerKey === currentCognitionOwnerKey) || null;
+  if (!ownerEntry) {
+    toastr.info("先选择一个角色，再管理认知条目", "ST-BME");
+    return;
+  }
+  if (String(ownerEntry.ownerType || "") !== "character") {
+    toastr.info("当前只支持角色 owner 的重命名、合并和删除", "ST-BME");
+    return;
+  }
+
+  const container =
+    triggerEl?.closest?.(".bme-cog-owner-detail") ||
+    document.getElementById("bme-cog-owner-detail") ||
+    document.getElementById("bme-mobile-cog-owner-detail");
+  const collisionIndex = _buildOwnerCollisionIndex(ownerEntries);
+  const displayInfo = _getOwnerDisplayInfo(ownerEntry, collisionIndex);
+  let result = null;
+
+  if (mode === "rename") {
+    const input = container?.querySelector?.("[data-bme-cognition-owner-rename-input]");
+    const nextName = String(input?.value || "").trim();
+    if (!nextName) {
+      toastr.info("先输入新的角色名称", "ST-BME");
+      return;
+    }
+    if (nextName === String(ownerEntry.ownerName || "").trim()) {
+      toastr.info("新名称与当前名称相同，无需重命名", "ST-BME");
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定将角色认知「${displayInfo.title}」重命名为「${nextName}」吗？\n\n这会同步更新 owner 名称、角色节点名和 POV scope。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.renameKnowledgeOwner?.({
+      ownerKey: ownerEntry.ownerKey,
+      nextName,
+    });
+  } else if (mode === "merge") {
+    const select = container?.querySelector?.("[data-bme-cognition-owner-merge-target]");
+    const targetOwnerKey = String(select?.value || "").trim();
+    if (!targetOwnerKey) {
+      toastr.info("先选择要合并到的目标角色", "ST-BME");
+      return;
+    }
+    if (targetOwnerKey === ownerEntry.ownerKey) {
+      toastr.info("不能把角色合并到自己", "ST-BME");
+      return;
+    }
+    const targetEntry =
+      ownerEntries.find((entry) => String(entry.ownerKey || "") === targetOwnerKey) || null;
+    const targetDisplayInfo = targetEntry
+      ? _getOwnerDisplayInfo(targetEntry, collisionIndex)
+      : { title: targetOwnerKey };
+    if (
+      !window.confirm(
+        `确定将角色认知「${displayInfo.title}」合并到「${targetDisplayInfo.title}」吗？\n\n这会把当前角色的 POV scope 改写到目标角色，并合并认知状态。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.mergeKnowledgeOwners?.({
+      sourceOwnerKey: ownerEntry.ownerKey,
+      targetOwnerKey,
+    });
+  } else if (mode === "delete") {
+    const select = container?.querySelector?.("[data-bme-cognition-owner-delete-mode]");
+    const deleteMode = String(select?.value || "owner-only").trim() || "owner-only";
+    const deleteModeLabelMap = {
+      "owner-only": "只删除 owner，保留角色节点与 POV",
+      "archive-character": "删除 owner，并归档角色节点",
+      "archive-all": "删除 owner，并归档角色节点与 POV 记忆",
+    };
+    if (
+      !window.confirm(
+        `确定删除角色认知「${displayInfo.title}」吗？\n\n删除范围：${deleteModeLabelMap[deleteMode] || deleteMode}\n\n此操作会立即写回图谱。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.deleteKnowledgeOwner?.({
+      ownerKey: ownerEntry.ownerKey,
+      mode: deleteMode,
+    });
+  } else {
+    return;
+  }
+
+  if (!result?.ok) {
+    const messageMap = {
+      "graph-write-blocked": "当前图谱还在保护写入阶段，请稍后再试",
+      "owner-not-found": "没有找到这个角色的认知状态，请先让她参与一轮提取",
+      "same-owner": "不能把角色合并到自己",
+      "missing-owner-or-name": "缺少角色或新名称",
+      "invalid-delete-mode": "删除范围无效，请重新选择",
+      "unsupported-owner-type": "当前只支持角色 owner 操作",
+    };
+    toastr.error(messageMap[result?.error] || "角色认知操作失败", "ST-BME");
+    return;
+  }
+
+  if (mode === "rename") {
+    currentCognitionOwnerKey = String(result.ownerKey || ownerEntry.ownerKey || "").trim();
+  } else if (mode === "merge") {
+    currentCognitionOwnerKey = String(result.ownerKey || "").trim();
+  } else if (mode === "delete") {
+    currentCognitionOwnerKey = "";
+  }
+
+  const successMap = {
+    rename: "角色认知已重命名",
+    merge: "角色认知已合并",
+    delete: "角色认知已删除",
+  };
+  if (result.persistBlocked) {
+    toastr.warning(
+      `${successMap[mode] || "角色认知已更新"}，但正式写回可能仍在等待图谱就绪`,
+      "ST-BME",
+    );
+  } else {
+    toastr.success(successMap[mode] || "角色认知已更新", "ST-BME");
+  }
+
+  _refreshCognitionSurfaces();
 }
 
 async function _applyManualActiveRegionFromDashboard(clear = false) {
@@ -5833,6 +6033,43 @@ function _bindActions() {
     currentCognitionOwnerKey = card.dataset.ownerKey;
     _refreshMobileCognitionFull();
   });
+
+  const cogOwnerDetail = document.getElementById("bme-cog-owner-detail");
+  if (cogOwnerDetail && cogOwnerDetail.dataset.bmeOwnerActionsBound !== "true") {
+    cogOwnerDetail.addEventListener("click", async (e) => {
+      const ownerActionBtn = e.target.closest("[data-bme-cognition-owner-action]");
+      if (!ownerActionBtn || ownerActionBtn.disabled) return;
+      await _runCognitionOwnerManagementAction(
+        String(ownerActionBtn.dataset.bmeCognitionOwnerAction || ""),
+        ownerActionBtn,
+      );
+    });
+    cogOwnerDetail.dataset.bmeOwnerActionsBound = "true";
+  }
+
+  const mobileCogOwnerDetail = document.getElementById("bme-mobile-cog-owner-detail");
+  if (
+    mobileCogOwnerDetail &&
+    mobileCogOwnerDetail.dataset.bmeOwnerActionsBound !== "true"
+  ) {
+    mobileCogOwnerDetail.addEventListener("click", async (e) => {
+      const ownerActionBtn = e.target.closest("[data-bme-cognition-owner-action]");
+      if (ownerActionBtn && !ownerActionBtn.disabled) {
+        await _runCognitionOwnerManagementAction(
+          String(ownerActionBtn.dataset.bmeCognitionOwnerAction || ""),
+          ownerActionBtn,
+        );
+        return;
+      }
+
+      const nodeActionBtn = e.target.closest("[data-bme-cognition-node-action]");
+      if (!nodeActionBtn || nodeActionBtn.disabled) return;
+      await _runCognitionNodeOverrideAction(
+        String(nodeActionBtn.dataset.bmeCognitionNodeAction || ""),
+      );
+    });
+    mobileCogOwnerDetail.dataset.bmeOwnerActionsBound = "true";
+  }
 
   // Dashboard 跳转认知视图
   document.getElementById("bme-cognition-jump-to-view")?.addEventListener("click", () => {
