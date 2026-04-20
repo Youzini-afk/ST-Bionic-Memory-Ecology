@@ -3063,6 +3063,102 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
   return edited;
 }
 
+function syncEditedUserMessageDom(messageIndex, nextText) {
+  const chatRoot = document?.getElementById?.("chat");
+  if (!chatRoot?.querySelectorAll) return false;
+
+  for (const messageElement of Array.from(chatRoot.querySelectorAll(".mes") || [])) {
+    if (resolveMessageIndexFromElement(messageElement) !== messageIndex) continue;
+    const userTextElement = messageElement.querySelector?.(".mes_text");
+    if (!userTextElement) return false;
+    userTextElement.textContent = String(nextText || "");
+    return true;
+  }
+  return false;
+}
+
+function persistEditedUserMessage(context = getContext()) {
+  const candidates = [
+    ["saveChatConditional", context?.saveChatConditional],
+    ["saveChat", context?.saveChat],
+  ];
+
+  for (const [label, handler] of candidates) {
+    if (typeof handler !== "function") continue;
+    try {
+      const result = handler.call(context);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => {
+          console.error(`[ST-BME] 保存用户输入编辑失败 (${label}):`, error);
+        });
+      }
+      return label;
+    } catch (error) {
+      console.error(`[ST-BME] 调用 ${label} 保存用户输入编辑失败:`, error);
+    }
+  }
+
+  return triggerChatMetadataSave(context, { immediate: true });
+}
+
+function editMessageUserInputText(messageIndex, nextUserInputText) {
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat)) {
+    return { ok: false, error: "missing-chat" };
+  }
+
+  const message = chat[messageIndex];
+  if (!message?.is_user) {
+    return { ok: false, error: "not-user-message" };
+  }
+
+  const normalizedText = normalizeRecallInputText(nextUserInputText);
+  if (!normalizedText) {
+    return { ok: false, error: "empty-user-input" };
+  }
+
+  const previousText = normalizeRecallInputText(message.mes || "");
+  const currentRecord = readPersistedRecallFromUserMessage(chat, messageIndex);
+  const recallBoundText = normalizeRecallInputText(
+    currentRecord?.boundUserFloorText || previousText,
+  );
+  const recallMayBeStale = Boolean(currentRecord) && recallBoundText !== normalizedText;
+
+  message.mes = normalizedText;
+  const swipeIndex = Number.isFinite(Number(message?.swipe_id))
+    ? Math.max(0, Math.floor(Number(message.swipe_id)))
+    : null;
+  if (
+    Array.isArray(message?.swipes) &&
+    swipeIndex !== null &&
+    swipeIndex < message.swipes.length
+  ) {
+    message.swipes[swipeIndex] = normalizedText;
+  }
+
+  if (message.extra && typeof message.extra === "object") {
+    if (typeof message.extra.display_text === "string") {
+      message.extra.display_text = normalizedText;
+    }
+    if (typeof message.extra.current_display_text === "string") {
+      message.extra.current_display_text = normalizedText;
+    }
+  }
+
+  const saveMode = persistEditedUserMessage(context);
+  const domSynced = syncEditedUserMessageDom(messageIndex, normalizedText);
+
+  return {
+    ok: true,
+    nextText: normalizedText,
+    recallMayBeStale,
+    unchanged: previousText === normalizedText,
+    saveMode,
+    domSynced,
+  };
+}
+
 function rewriteRecallPayloadWithInjection(
   promptData = null,
   injectionText = "",
@@ -4055,6 +4151,24 @@ function getRecallCardCallbacks() {
           estimateTokens,
         },
       });
+    },
+    onEditUserInput: (messageIndex, nextUserInputText) => {
+      const result = editMessageUserInputText(messageIndex, nextUserInputText);
+      if (!result?.ok) {
+        toastr.warning("编辑失败：内容不能为空或此楼层非用户消息");
+        return result;
+      }
+
+      if (result.unchanged) {
+        toastr.info("用户输入未变化");
+      } else {
+        toastr.success("已更新本轮用户输入");
+      }
+      if (result.recallMayBeStale) {
+        toastr.info("输入已改，当前召回结果可能需要重新召回");
+      }
+      schedulePersistedRecallMessageUiRefresh();
+      return result;
     },
     onDelete: (messageIndex) => {
       if (removeMessageRecallRecord(messageIndex)) {

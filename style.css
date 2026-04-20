@@ -5895,11 +5895,54 @@
 .bme-recall-user-label {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   padding: 10px 14px 4px;
   font-size: 12px;
   color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
   font-weight: 500;
+}
+
+.bme-recall-user-label-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bme-recall-user-label-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.bme-recall-user-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  background: transparent;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.bme-recall-user-edit-btn:hover:not(:disabled) {
+  background: var(--bme-surface-high, #2a2a2d);
+  border-color: var(--bme-border-active, rgba(233, 69, 96, 0.4));
+  color: var(--bme-on-surface, #e4e1e6);
+}
+
+.bme-recall-user-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .bme-recall-user-text {
@@ -5910,6 +5953,63 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.bme-recall-user-edit-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 14px 10px;
+}
+
+.bme-recall-user-edit-textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  background: var(--bme-surface-low, #1b1b1e);
+  color: var(--bme-on-surface, #e4e1e6);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+
+.bme-recall-user-edit-textarea:focus {
+  outline: none;
+  border-color: var(--bme-border-active, rgba(233, 69, 96, 0.4));
+}
+
+.bme-recall-user-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.bme-recall-user-edit-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 68px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  background: transparent;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.bme-recall-user-edit-action.primary {
+  background: var(--bme-primary-dim, rgba(233, 69, 96, 0.15));
+  border-color: var(--bme-primary, #e94560);
+  color: var(--bme-primary-text, #ffb2b7);
+}
+
+.bme-recall-user-edit-action.secondary:hover,
+.bme-recall-user-edit-action.primary:hover {
+  filter: brightness(1.06);
 }
 
 .bme-recall-card.bme-recall-hide-user-input .bme-recall-user-label,
@@ -6049,6 +6149,103 @@
   border-radius: 4px;
   background: var(--bme-accent3, #ffc107);
   color: #000;
+}
+
+.bme-recall-meta-tag.is-ena {
+  background: rgba(111, 194, 255, 0.16);
+  color: #9dd6ff;
+  border: 1px solid rgba(111, 194, 255, 0.28);
+}
+
+.bme-recall-meta-text {
+  min-width: 0;
+}
+
+.bme-recall-injection-preview {
+  margin: 0 14px 8px;
+  border: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bme-surface-low, #1b1b1e);
+}
+
+.bme-recall-injection-preview.is-ena {
+  border-left: 3px solid #6fc2ff;
+}
+
+.bme-recall-injection-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--bme-on-surface, #e4e1e6);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.bme-recall-injection-toggle-arrow {
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.6));
+  transition: transform 0.2s ease;
+}
+
+.bme-recall-injection-preview.expanded .bme-recall-injection-toggle-arrow {
+  transform: rotate(90deg);
+}
+
+.bme-recall-injection-content {
+  display: none;
+  padding: 0 10px 10px;
+  border-top: 1px solid var(--bme-border, rgba(255, 255, 255, 0.08));
+}
+
+.bme-recall-injection-preview.expanded .bme-recall-injection-content {
+  display: block;
+}
+
+.bme-recall-injection-note {
+  padding-top: 10px;
+  font-size: 11px;
+  color: #9dd6ff;
+}
+
+.bme-recall-injection-section-title {
+  margin-top: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--bme-primary-text, #ffb2b7);
+}
+
+.bme-recall-injection-subsection {
+  margin-top: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bme-on-surface, #e4e1e6);
+}
+
+.bme-recall-injection-line,
+.bme-recall-injection-table {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--bme-on-surface-dim, rgba(228, 225, 230, 0.78));
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bme-recall-injection-table {
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bme-surface-lowest, #0e0e11);
+  overflow-x: auto;
+}
+
+.bme-recall-injection-spacer {
+  height: 6px;
 }
 
 /* --- Recall Actions --- */
@@ -6310,6 +6507,21 @@
 @media (max-width: 768px) {
   .bme-recall-canvas-wrap {
     height: 180px;
+  }
+
+  .bme-recall-user-label {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .bme-recall-user-label-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .bme-recall-injection-preview {
+    margin-left: 10px;
+    margin-right: 10px;
   }
 
   .bme-recall-sidebar {

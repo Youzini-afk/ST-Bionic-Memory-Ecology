@@ -1867,6 +1867,176 @@ async function testRecallCardDisplayModeToggleRestoresOriginalUserText() {
   }
 }
 
+async function testRecallCardSupportsManagedUserInputEditing() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "原始用户输入",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Recalled]\nline-1",
+          selectedNodeIds: ["n1"],
+          boundUserFloorText: "原始用户输入",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  const userTextElement = messageElement.querySelector(".mes_text");
+  userTextElement.textContent = chat[0].mes;
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    const saveResults = [];
+    const cardModule = await import("../ui/recall-message-ui.js");
+    const mountedCard = cardModule.createRecallCardElement({
+      messageIndex: 0,
+      record: chat[0].extra.bme_recall,
+      userMessageText: chat[0].mes,
+      callbacks: {
+        onEditUserInput: async (_messageIndex, nextText) => {
+          saveResults.push(nextText);
+          return {
+            ok: true,
+            nextText,
+            recallMayBeStale: true,
+          };
+        },
+      },
+    });
+    messageElement.querySelector(".mes_block")?.appendChild(mountedCard);
+
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    const editBtn = card.querySelector(".bme-recall-user-edit-btn");
+    assert.equal(Boolean(editBtn), true);
+
+    editBtn.click();
+    const textarea = card.querySelector(".bme-recall-user-edit-textarea");
+    assert.equal(Boolean(textarea), true);
+    assert.equal(card.classList.contains("bme-recall-user-input-editing"), true);
+
+    textarea.value = "新的用户输入";
+    const saveBtn = card.querySelector(".bme-recall-user-edit-action.primary");
+    await saveBtn.dispatchEvent({ type: "click", stopPropagation() {} });
+
+    assert.deepEqual(saveResults, ["新的用户输入"]);
+    assert.equal(chat[0].mes, "原始用户输入");
+    assert.equal(
+      card.querySelector(".bme-recall-user-text")?.textContent,
+      "新的用户输入",
+    );
+    assert.equal(card.classList.contains("bme-recall-user-input-editing"), false);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardShowsEnaSourceChipAndExpandedPreview() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "planner user input",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Recalled]\n### 当前状态记忆\nline-1\n|a|b|",
+          selectedNodeIds: ["n1"],
+          recallSource: "planner-handoff",
+          hookName: "ena-planner",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    card.querySelector(".bme-recall-bar")?.click();
+
+    const enaTag = card.querySelector(".bme-recall-meta-tag.is-ena");
+    assert.equal(Boolean(enaTag), true);
+    assert.equal(enaTag?.textContent, "🧭 ENA Planner");
+
+    const preview = card.querySelector(".bme-recall-injection-preview.is-ena");
+    assert.equal(Boolean(preview), true);
+    assert.equal(preview.classList.contains("expanded"), true);
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-note")?.textContent,
+      "由 Ena Planner 触发的本轮记忆块",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardBeautifiesInjectionPreviewSections() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "normal user input",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Objective / Global]\n#### 子标题\n普通行\n\n|col1|col2|",
+          selectedNodeIds: ["n1"],
+          recallSource: "history",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    card.querySelector(".bme-recall-bar")?.click();
+
+    const preview = card.querySelector(".bme-recall-injection-preview");
+    assert.equal(Boolean(preview), true);
+    assert.equal(preview.classList.contains("expanded"), false);
+
+    preview.querySelector(".bme-recall-injection-toggle")?.click();
+    assert.equal(preview.classList.contains("expanded"), true);
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-section-title")?.textContent,
+      "[Memory - Objective / Global]",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-subsection")?.textContent,
+      "子标题",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-line")?.textContent,
+      "普通行",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-table")?.textContent,
+      "|col1|col2|",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 function makeEvent(seq, title) {
   return createNode({
     type: "event",
@@ -7114,6 +7284,9 @@ await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
 await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();
+await testRecallCardSupportsManagedUserInputEditing();
+await testRecallCardShowsEnaSourceChipAndExpandedPreview();
+await testRecallCardBeautifiesInjectionPreviewSections();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();
