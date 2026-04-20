@@ -5956,10 +5956,18 @@
 }
 
 .bme-recall-user-edit-wrap {
-  display: flex;
+  display: none;
   flex-direction: column;
   gap: 8px;
   padding: 4px 14px 10px;
+}
+
+.bme-recall-card.bme-recall-user-input-editing .bme-recall-user-edit-wrap {
+  display: flex;
+}
+
+.bme-recall-card.bme-recall-user-input-editing .bme-recall-user-text {
+  display: none;
 }
 
 .bme-recall-user-edit-textarea {
