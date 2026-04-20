@@ -2767,6 +2767,156 @@ async function testExtractorPropagatesLlmFailureReason() {
   }
 }
 
+async function testExtractorAddsWeakDefaultRelatedEdgeForSameBatchNodes() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "钟楼初见",
+              summary: "两人在钟楼第一次正式见面。",
+              participants: "艾琳, 用户",
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "钟楼密谈",
+              summary: "见面后立刻进入短暂密谈。",
+              participants: "艾琳, 用户",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 10, role: "assistant", content: "测试批次默认弱连边" }],
+      startSeq: 10,
+      endSeq: 10,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 1);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 1);
+    assert.equal(activeEdges[0]?.relation, "related");
+    assert.equal(activeEdges[0]?.strength, 0.25);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorExplicitLinksOverrideDefaultBatchWeakEdge() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "档案室发现",
+              summary: "发现了一份关键档案。",
+              participants: "艾琳",
+              links: [{ targetRef: "evt2", relation: "related", strength: 0.91 }],
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "档案内容核对",
+              summary: "紧接着对档案内容进行核对。",
+              participants: "艾琳",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 11, role: "assistant", content: "测试显式 links 覆盖默认弱边" }],
+      startSeq: 11,
+      endSeq: 11,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 1);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 1);
+    assert.equal(activeEdges[0]?.relation, "related");
+    assert.equal(activeEdges[0]?.strength, 0.91);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorExplicitRemoveSuppressesDefaultBatchWeakEdge() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "花园交错",
+              summary: "两条线索在花园中短暂交错。",
+              participants: "艾琳, 守卫",
+              links: [{ targetRef: "evt2", relation: "related", remove: true }],
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "花园分流",
+              summary: "随后两条线索各自分流。",
+              participants: "艾琳, 守卫",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 12, role: "assistant", content: "测试显式移除默认弱边" }],
+      startSeq: 12,
+      endSeq: 12,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 0);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 0);
+  } finally {
+    restoreOverrides();
+  }
+}
+
 async function testConsolidatorMergeUpdatesSeqRange() {
   const graph = createEmptyGraph();
   const target = createNode({
@@ -7208,6 +7358,9 @@ await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
 await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
 await testExtractorPropagatesLlmFailureReason();
+await testExtractorAddsWeakDefaultRelatedEdgeForSameBatchNodes();
+await testExtractorExplicitLinksOverrideDefaultBatchWeakEdge();
+await testExtractorExplicitRemoveSuppressesDefaultBatchWeakEdge();
 await testConsolidatorMergeUpdatesSeqRange();
 await testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing();
 await testBatchJournalVectorDeltaCapturesRecoveryFields();
