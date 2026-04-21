@@ -1938,6 +1938,51 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-sync-refresh-restore",
+    chatMetadata: {
+      integrity: "chat-sync-refresh-restore-ready",
+    },
+  });
+  harness.api.setCurrentGraph(
+    normalizeGraphRuntimeState(
+      createMeaningfulGraph("chat-sync-refresh-restore", "stale-runtime-restore"),
+      "chat-sync-refresh-restore",
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-sync-refresh-restore",
+    reason: "runtime-stale",
+    revision: 5,
+    lastPersistedRevision: 5,
+    dbReady: true,
+    writesBlocked: false,
+  });
+  harness.api.setIndexedDbSnapshot(
+    buildSnapshotFromGraph(
+      createMeaningfulGraph("chat-sync-refresh-restore", "fresh-indexeddb-restore"),
+      {
+        chatId: "chat-sync-refresh-restore",
+        revision: 9,
+      },
+    ),
+  );
+
+  const runtimeOptions = harness.api.buildBmeSyncRuntimeOptions();
+  await runtimeOptions.onSyncApplied({
+    chatId: "chat-sync-refresh-restore",
+    action: "restore-backup",
+  });
+
+  assert.equal(
+    harness.api.getCurrentGraph().nodes[0]?.fields?.title,
+    "事件-fresh-indexeddb-restore",
+    "restore-backup 后应刷新当前运行时图谱",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-sync-refresh-active",
     chatMetadata: {
       integrity: "chat-sync-refresh-active-ready",
