@@ -125,6 +125,7 @@ export function createGraphPersistenceState() {
     lastSyncError: "",
     dualWriteLastResult: null,
     persistDelta: null,
+    loadDiagnostics: null,
     updatedAt: new Date().toISOString(),
   };
 }

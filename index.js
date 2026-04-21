@@ -1585,6 +1585,10 @@ function getGraphPersistenceLiveState() {
       null,
     ),
     persistDelta: cloneRuntimeDebugValue(graphPersistenceState.persistDelta, null),
+    loadDiagnostics: cloneRuntimeDebugValue(
+      graphPersistenceState.loadDiagnostics,
+      null,
+    ),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -1654,6 +1658,14 @@ function readPersistDeltaDiagnosticsNow() {
   return Date.now();
 }
 
+function readLoadDiagnosticsNow() {
+  return readPersistDeltaDiagnosticsNow();
+}
+
+function normalizeLoadDiagnosticsMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
 function updatePersistDeltaDiagnostics(snapshot = null) {
   const nextSnapshot =
     snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
@@ -1668,6 +1680,23 @@ function updatePersistDeltaDiagnostics(snapshot = null) {
         }
       : null;
   updateGraphPersistenceState({ persistDelta: nextSnapshot });
+  return nextSnapshot;
+}
+
+function updateLoadDiagnostics(snapshot = null) {
+  const nextSnapshot =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? {
+          ...(graphPersistenceState.loadDiagnostics &&
+          typeof graphPersistenceState.loadDiagnostics === "object" &&
+          !Array.isArray(graphPersistenceState.loadDiagnostics)
+            ? cloneRuntimeDebugValue(graphPersistenceState.loadDiagnostics, {})
+            : {}),
+          ...cloneRuntimeDebugValue(snapshot, {}),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
+  updateGraphPersistenceState({ loadDiagnostics: nextSnapshot });
   return nextSnapshot;
 }
 
@@ -9093,14 +9122,37 @@ function applyIndexedDbSnapshotToRuntime(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   syncCommitMarkerToPersistenceState(getContext());
+  const loadStartedAt = readLoadDiagnosticsNow();
+  const recordLoadDiagnostics = (patch = {}) =>
+    updateLoadDiagnostics({
+      stage: "apply-indexeddb-snapshot",
+      source: String(source || reasonPrefix),
+      reasonPrefix: String(reasonPrefix || "indexeddb"),
+      statusLabel: String(statusLabel || "IndexedDB"),
+      chatId: normalizedChatId || "",
+      attemptIndex: Number.isFinite(Number(attemptIndex))
+        ? Math.max(0, Math.floor(Number(attemptIndex)))
+        : 0,
+      storagePrimary: String(storagePrimary || "indexeddb"),
+      storageMode: String(storageMode || storagePrimary || "indexeddb"),
+      ...cloneRuntimeDebugValue(patch, {}),
+      totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+    });
+  let hydrateMs = 0;
   if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot)) {
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${reasonPrefix}-empty`,
       chatId: normalizedChatId,
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+    });
+    return result;
   }
 
   const revision = Math.max(
@@ -9145,7 +9197,7 @@ function applyIndexedDbSnapshotToRuntime(
       revision,
       staleDetail: staleDecision,
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${reasonPrefix}-stale-runtime`,
@@ -9154,12 +9206,22 @@ function applyIndexedDbSnapshotToRuntime(
       revision,
       staleDetail: cloneRuntimeDebugValue(staleDecision, null),
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+      revision,
+      staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+    });
+    return result;
   }
   let graphFromSnapshot = null;
   try {
+    const hydrateStartedAt = readLoadDiagnosticsNow();
     graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
       chatId: normalizedChatId,
     });
+    hydrateMs = readLoadDiagnosticsNow() - hydrateStartedAt;
   } catch (error) {
     const failureReason =
       error?.code === "BME_SNAPSHOT_INTEGRITY_ERROR"
@@ -9194,7 +9256,7 @@ function applyIndexedDbSnapshotToRuntime(
       detail: error?.message || String(error),
       integrityReasons: Array.isArray(error?.reasons) ? error.reasons : [],
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: failureReason,
@@ -9203,7 +9265,18 @@ function applyIndexedDbSnapshotToRuntime(
       chatId: normalizedChatId,
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: failureReason,
+      revision,
+      hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+      error: error?.message || String(error),
+      integrityReasons: Array.isArray(error?.reasons) ? [...error.reasons] : [],
+    });
+    return result;
   }
+  const applyRuntimeStartedAt = readLoadDiagnosticsNow();
   currentGraph = graphFromSnapshot;
   stampGraphPersistenceMeta(currentGraph, {
     revision,
@@ -9298,7 +9371,7 @@ function applyIndexedDbSnapshotToRuntime(
     ...getGraphStats(currentGraph),
   });
 
-  return {
+  const result = {
     success: true,
     loaded: true,
     loadState: GRAPH_LOAD_STATES.LOADED,
@@ -9308,6 +9381,17 @@ function applyIndexedDbSnapshotToRuntime(
     shadowSnapshotUsed: false,
     revision,
   };
+  recordLoadDiagnostics({
+    success: true,
+    loaded: true,
+    reason: result.reason,
+    revision,
+    hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+    applyRuntimeMs: normalizeLoadDiagnosticsMs(
+      readLoadDiagnosticsNow() - applyRuntimeStartedAt,
+    ),
+  });
+  return result;
 }
 
 async function loadGraphFromIndexedDb(
@@ -9321,27 +9405,55 @@ async function loadGraphFromIndexedDb(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const commitMarker = syncCommitMarkerToPersistenceState(getContext());
+  const loadStartedAt = readLoadDiagnosticsNow();
+  const recordLoadDiagnostics = (patch = {}) =>
+    updateLoadDiagnostics({
+      stage: "load-indexeddb",
+      source: String(source || "indexeddb-probe"),
+      chatId: normalizedChatId || "",
+      attemptIndex: Number.isFinite(Number(attemptIndex))
+        ? Math.max(0, Math.floor(Number(attemptIndex)))
+        : 0,
+      ...cloneRuntimeDebugValue(patch, {}),
+      totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+    });
+  let exportSnapshotMs = 0;
+  let exportSnapshotSource = "";
   if (!normalizedChatId) {
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: "indexeddb-missing-chat-id",
       chatId: "",
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+    });
+    return result;
   }
 
   let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
-      return {
+      const result = {
         success: false,
         loaded: false,
         reason: "indexeddb-manager-unavailable",
         chatId: normalizedChatId,
         attemptIndex,
       };
+      recordLoadDiagnostics({
+        success: false,
+        loaded: false,
+        reason: result.reason,
+        storagePrimary: localStore.storagePrimary,
+        storageMode: localStore.storageMode,
+      });
+      return result;
     }
     const db = await manager.getCurrentDb(normalizedChatId);
     localStore = resolveDbGraphStorePresentation(db);
@@ -9464,11 +9576,22 @@ async function loadGraphFromIndexedDb(
         },
       });
     }
-    const snapshot =
-      identityRecoveryResult?.snapshot ||
-      localStoreMigrationResult?.snapshot ||
-      migrationResult?.snapshot ||
-      (await db.exportSnapshot({ includeTombstones: false }));
+    let snapshot = null;
+    if (identityRecoveryResult?.snapshot) {
+      snapshot = identityRecoveryResult.snapshot;
+      exportSnapshotSource = "identity-recovery";
+    } else if (localStoreMigrationResult?.snapshot) {
+      snapshot = localStoreMigrationResult.snapshot;
+      exportSnapshotSource = "local-store-migration";
+    } else if (migrationResult?.snapshot) {
+      snapshot = migrationResult.snapshot;
+      exportSnapshotSource = "legacy-migration";
+    } else {
+      const exportStartedAt = readLoadDiagnosticsNow();
+      snapshot = await db.exportSnapshot({ includeTombstones: false });
+      exportSnapshotMs = readLoadDiagnosticsNow() - exportStartedAt;
+      exportSnapshotSource = "indexeddb-export";
+    }
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
       resolveCurrentChatIdentity(getContext()),
     );
@@ -9678,6 +9801,7 @@ async function loadGraphFromIndexedDb(
       };
     }
 
+    const applyInvokeStartedAt = readLoadDiagnosticsNow();
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
       source,
       attemptIndex,
@@ -9686,11 +9810,26 @@ async function loadGraphFromIndexedDb(
       statusLabel: snapshotStore.statusLabel,
       reasonPrefix: snapshotStore.reasonPrefix,
     });
+    const applyInvokeMs = readLoadDiagnosticsNow() - applyInvokeStartedAt;
     if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
       updateGraphPersistenceState({
         persistMismatchReason: commitMarkerDiagnostic.reason,
       });
     }
+    recordLoadDiagnostics({
+      success: loadResult?.success === true,
+      loaded: loadResult?.loaded === true,
+      reason: String(loadResult?.reason || ""),
+      revision: Number.isFinite(Number(loadResult?.revision))
+        ? Number(loadResult.revision)
+        : snapshotRevision,
+      storagePrimary: snapshotStore.storagePrimary,
+      storageMode: snapshotStore.storageMode,
+      commitMarkerMismatched: commitMarkerMismatch.mismatched === true,
+      exportSnapshotSource: exportSnapshotSource || "snapshot-prepared",
+      exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+      applyInvokeMs: normalizeLoadDiagnosticsMs(applyInvokeMs),
+    });
     return loadResult;
   } catch (error) {
     console.warn(`[ST-BME] ${localStore.statusLabel} 读取失败，回退 metadata:`, error);
@@ -9706,7 +9845,7 @@ async function loadGraphFromIndexedDb(
         at: Date.now(),
       },
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${localStore.reasonPrefix}-read-failed`,
@@ -9714,6 +9853,17 @@ async function loadGraphFromIndexedDb(
       attemptIndex,
       error,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+      storagePrimary: localStore.storagePrimary,
+      storageMode: localStore.storageMode,
+      error: error?.message || String(error),
+      exportSnapshotSource: exportSnapshotSource || "unknown",
+      exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+    });
+    return result;
   }
 }
 
@@ -16030,6 +16180,7 @@ async function executeExtractionBatch({
       getEmbeddingConfig,
       getExtractionCount: () => extractionCount,
       getLastProcessedAssistantFloor,
+      getSettings,
       getSchema,
       handleExtractionSuccess,
       persistExtractionBatchResult,

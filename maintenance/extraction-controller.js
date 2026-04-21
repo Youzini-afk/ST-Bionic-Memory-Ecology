@@ -7,6 +7,8 @@ import {
   normalizeDialogueFloorRange,
 } from "./chat-history.js";
 
+let nativePersistDeltaInstallPromise = null;
+
 function toSafeFloor(value, fallback = null) {
   if (value == null || value === "") return fallback;
   const numeric = Number(value);
@@ -113,6 +115,31 @@ function cloneSerializable(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function readNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+async function ensureNativePersistDeltaHookInstalled() {
+  if (typeof globalThis.__stBmeNativeBuildPersistDelta === "function") {
+    return {
+      loaded: true,
+      source: "global-hook",
+    };
+  }
+  if (!nativePersistDeltaInstallPromise) {
+    nativePersistDeltaInstallPromise = import("../vendor/wasm/stbme_core.js")
+      .then((module) => module?.installNativePersistDeltaHook?.())
+      .catch((error) => {
+        nativePersistDeltaInstallPromise = null;
+        throw error;
+      });
+  }
+  return await nativePersistDeltaInstallPromise;
 }
 
 function setExtractionProgressStatus(
@@ -247,11 +274,12 @@ function buildRerunFallbackInfo(chat = [], targetDialogueRange = [-1, -1]) {
   };
 }
 
-function buildCommittedBatchPersistSnapshot(
+async function buildCommittedBatchPersistSnapshot(
   runtime,
   {
     graph = null,
     chat = [],
+    settings = null,
     beforeSnapshot = null,
     processedRange = [null, null],
     postProcessArtifacts = [],
@@ -274,6 +302,10 @@ function buildCommittedBatchPersistSnapshot(
   const range = Array.isArray(processedRange) ? processedRange : [null, null];
   const rangeStart = Number.isFinite(Number(range[0])) ? Number(range[0]) : null;
   const rangeEnd = Number.isFinite(Number(range[1])) ? Number(range[1]) : null;
+  const runtimeSettings =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : runtime?.getSettings?.() || {};
   const dialogueMap = buildDialogueFloorMap(chat);
   const processedDialogueRange = [
     Number.isFinite(Number(rangeStart))
@@ -290,7 +322,7 @@ function buildCommittedBatchPersistSnapshot(
           Number(rangeStart) -
             Math.max(
               0,
-              Number(runtime?.getSettings?.()?.extractContextTurns) || 0,
+              Number(runtimeSettings?.extractContextTurns) || 0,
             ) *
               2,
         )
@@ -347,13 +379,45 @@ function buildCommittedBatchPersistSnapshot(
     );
   }
 
+  let persistDelta = null;
+  const shouldUseNativePersistDelta =
+    runtimeSettings?.persistUseNativeDelta === true &&
+    runtimeSettings?.graphNativeForceDisable !== true;
+  const nativeFailOpen = runtimeSettings?.nativeEngineFailOpen !== false;
+  if (typeof runtime.buildPersistDelta === "function") {
+    if (shouldUseNativePersistDelta) {
+      const preloadStartedAt = readNow();
+      try {
+        await ensureNativePersistDeltaHookInstalled();
+      } catch (error) {
+        if (!nativeFailOpen) {
+          throw error;
+        }
+        runtime?.console?.warn?.(
+          "[ST-BME] extraction native persist delta preload failed, fallback to JS delta:",
+          {
+            error: error?.message || String(error),
+            preloadMs: readNow() - preloadStartedAt,
+          },
+        );
+      }
+    }
+
+    persistDelta = runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
+      useNativeDelta: shouldUseNativePersistDelta,
+      nativeFailOpen,
+      persistNativeDeltaThresholdRecords:
+        runtimeSettings?.persistNativeDeltaThresholdRecords,
+      persistNativeDeltaThresholdStructuralDelta:
+        runtimeSettings?.persistNativeDeltaThresholdStructuralDelta,
+      persistNativeDeltaThresholdSerializedChars:
+        runtimeSettings?.persistNativeDeltaThresholdSerializedChars,
+      persistNativeDeltaBridgeMode: runtimeSettings?.persistNativeDeltaBridgeMode,
+    });
+  }
+
   return {
-    persistDelta:
-      typeof runtime.buildPersistDelta === "function"
-        ? runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
-            useNativeDelta: false,
-          })
-        : null,
+    persistDelta,
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
@@ -367,7 +431,9 @@ function isPersistenceRevisionAccepted(runtime, persistence = null) {
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const lastAcceptedRevision = Number(graphPersistenceState?.lastAcceptedRevision || 0);
+  const lastAcceptedRevision = Number(
+    runtime?.getGraphPersistenceState?.()?.lastAcceptedRevision || 0,
+  );
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
@@ -633,9 +699,10 @@ export async function executeExtractionBatchController(
     batchStatus,
   );
   const batchStatusRef = effects?.batchStatus || batchStatus;
-  const committedPersistState = buildCommittedBatchPersistSnapshot(runtime, {
+  const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
     graph: runtime.getCurrentGraph(),
     chat,
+    settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(

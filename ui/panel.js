@@ -1461,6 +1461,159 @@ function _resolvePipelineStatus(statusObj) {
   return { label: text || "IDLE", color, detail: meta };
 }
 
+function _readPersistenceDiagnosticObject(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  return snapshot;
+}
+
+function _formatLoadDiagnosticsStageLabel(stage = "") {
+  const normalized = String(stage || "").trim();
+  if (!normalized) return "—";
+  const labels = {
+    "load-indexeddb": "IndexedDB 加载",
+    "apply-indexeddb-snapshot": "快照应用",
+  };
+  return labels[normalized] || normalized;
+}
+
+function _formatPipelineLoadDiagnosticsMeta(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  if (totalText !== "—") return `load ${totalText}`;
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  return stageLabel === "—" ? "" : stageLabel;
+}
+
+function _formatPipelinePersistDeltaMeta(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "";
+
+  const parts = [];
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  if (totalText !== "—") {
+    parts.push(`delta ${totalText}`);
+  }
+
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  if (gateText) {
+    const compactGate = gateText.startsWith("已拦截") ? "已拦截" : gateText;
+    parts.push(`native ${compactGate}`);
+  }
+
+  return parts.join(" · ");
+}
+
+function _formatPersistenceLoadSummary(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "暂无";
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  const reasonText = String(diagnostics.reason || "").trim();
+  const parts = [statusText];
+  if (stageLabel !== "—") parts.push(stageLabel);
+  if (totalText !== "—") parts.push(`total ${totalText}`);
+  if (reasonText) parts.push(reasonText);
+  return parts.join(" · ");
+}
+
+function _formatPersistencePersistDeltaSummary(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "暂无";
+
+  const pathText = String(diagnostics.path || "").trim() || "—";
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  const parts = [pathText];
+  if (totalText !== "—") parts.push(totalText);
+  if (gateText) parts.push(`native ${gateText}`);
+  return parts.join(" · ");
+}
+
+function _buildLoadDiagnosticRows(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) {
+    return [["Load 诊断", "无"]];
+  }
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+
+  return [
+    ["Load 阶段", _formatLoadDiagnosticsStageLabel(diagnostics.stage)],
+    ["Load 来源", String(diagnostics.source || diagnostics.statusLabel || "—")],
+    ["Load 状态", statusText],
+    ["Load 原因", String(diagnostics.reason || "—")],
+    ["Load 总耗时", _formatDurationMs(diagnostics.totalMs)],
+    ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
+    ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
+    ["Load 更新时间", updatedAtText],
+  ];
+}
+
+function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) {
+    return [["Persist Delta 诊断", "无"]];
+  }
+
+  const errorText = String(
+    diagnostics.moduleError || diagnostics.preloadError || diagnostics.nativeError || "",
+  ).trim();
+  const bridgeText = `${String(diagnostics.requestedBridgeMode || "none")} → ${String(
+    diagnostics.preparedBridgeMode || "none",
+  )}`;
+  const deltaSizeText = `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(
+    diagnostics.upsertEdgeCount || 0,
+  )}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(
+    diagnostics.deleteEdgeCount || 0,
+  )}DE`;
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+
+  return [
+    ["Persist 路径", String(diagnostics.path || "—")],
+    ["Native Gate", _formatPersistDeltaGateText(diagnostics)],
+    ["Bridge 模式", bridgeText],
+    ["Persist 总耗时", _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs)],
+    ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
+    [
+      "Prepare / Native",
+      `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
+    ],
+    [
+      "Lookup / JS Diff",
+      `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
+    ],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Preload", String(diagnostics.preloadStatus || "—")],
+    ["Native 来源", String(diagnostics.moduleSource || "—")],
+    ["Fallback 原因", String(diagnostics.fallbackReason || "—")],
+    ["Preload / Native 错误", errorText || "—"],
+    ["增量规模", deltaSizeText],
+    ["Persist 更新时间", updatedAtText],
+  ];
+}
+
 function _refreshTaskPipelineOverview() {
   const el = document.getElementById("bme-task-pipeline");
   if (!el) return;
@@ -1473,9 +1626,22 @@ function _refreshTaskPipelineOverview() {
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
   const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
   const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
+  const persistenceMetaParts = [`rev ${loadInfo.revision || 0}`];
+  const pipelineLoadMeta = _formatPipelineLoadDiagnosticsMeta(
+    loadInfo.loadDiagnostics,
+  );
+  if (pipelineLoadMeta) {
+    persistenceMetaParts.push(pipelineLoadMeta);
+  }
+  const pipelinePersistDeltaMeta = _formatPipelinePersistDeltaMeta(
+    loadInfo.persistDelta,
+  );
+  if (pipelinePersistDeltaMeta) {
+    persistenceMetaParts.push(pipelinePersistDeltaMeta);
+  }
   const persistence = _resolvePipelineStatus({
     text: loadInfo.loadState || "unknown",
-    meta: `rev ${loadInfo.revision || 0}`,
+    meta: persistenceMetaParts.join(" · "),
     level: persistLevel,
   });
 
@@ -2166,6 +2332,8 @@ function _refreshTaskPersistence() {
   const graph = _getGraph?.() || {};
   const ps = _getGraphPersistenceSnapshot();
   const rs = graph.runtimeState || {};
+  const loadDiagnostics = _readPersistenceDiagnosticObject(ps.loadDiagnostics);
+  const persistDeltaDiagnostics = _readPersistenceDiagnosticObject(ps.persistDelta);
 
   const LOAD_STATE_LABELS = {
     "no-chat": "无聊天",
@@ -2307,6 +2475,8 @@ function _refreshTaskPersistence() {
   const primaryRows = [
     ["当前状态", acceptedSummaryLabel],
     ["健康状态", healthLabel],
+    ["Load 诊断", _formatPersistenceLoadSummary(loadDiagnostics)],
+    ["Persist Delta", _formatPersistencePersistDeltaSummary(persistDeltaDiagnostics)],
     ["Chat Target", compactTargetLabel],
     ["主 durable", primaryTierLabel],
     ps.hostProfile === "luker"
@@ -2358,6 +2528,10 @@ function _refreshTaskPersistence() {
       ["缓存落后", cacheLagLabel],
     );
   }
+  diagnosticRows.push(
+    ..._buildLoadDiagnosticRows(loadDiagnostics),
+    ..._buildPersistDeltaDiagnosticRows(persistDeltaDiagnostics),
+  );
 
   el.innerHTML = `
     <div class="bme-persist-grid">
@@ -11849,6 +12023,7 @@ function _getGraphPersistenceSnapshot() {
     lastBackupFilename: "",
     lastSyncError: "",
     persistDelta: null,
+    loadDiagnostics: null,
   };
 }
 

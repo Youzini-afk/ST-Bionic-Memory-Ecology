@@ -16,6 +16,7 @@ function createRuntime(persistResult) {
   };
   let processedHistoryUpdates = 0;
   let persistedGraphSnapshot = null;
+  let lastPersistDeltaOptions = null;
 
   return {
     graph,
@@ -34,6 +35,22 @@ function createRuntime(persistResult) {
     },
     cloneGraphSnapshot(value) {
       return JSON.parse(JSON.stringify(value));
+    },
+    buildPersistDelta(_beforeSnapshot, _afterSnapshot, options = {}) {
+      lastPersistDeltaOptions = { ...(options || {}) };
+      return {
+        upsertNodes: [],
+        upsertEdges: [],
+        deleteNodeIds: [],
+        deleteEdgeIds: [],
+        tombstones: [],
+        countDelta: {
+          nodes: 0,
+          edges: 0,
+          tombstones: 0,
+        },
+        runtimeMetaPatch: {},
+      };
     },
     buildExtractionMessages() {
       return [{ seq: 5, role: "assistant", content: "测试消息" }];
@@ -100,6 +117,9 @@ function createRuntime(persistResult) {
     },
     get persistedGraphSnapshot() {
       return persistedGraphSnapshot;
+    },
+    get lastPersistDeltaOptions() {
+      return lastPersistDeltaOptions;
     },
   };
 }
@@ -210,6 +230,87 @@ function createRuntime(persistResult) {
   assert.equal(result.batchStatus.stages.core.outcome, "failed");
   assert.equal(result.batchStatus.stages.finalize.outcome, "failed");
   assert.equal(runtime.graph.historyState.lastBatchStatus.persistence, null);
+}
+
+{
+  const originalNativeBuilder = globalThis.__stBmeNativeBuildPersistDelta;
+  globalThis.__stBmeNativeBuildPersistDelta = () => ({
+    upsertNodes: [],
+    upsertEdges: [],
+    deleteNodeIds: [],
+    deleteEdgeIds: [],
+    tombstones: [],
+    runtimeMetaPatch: {},
+  });
+  const runtime = createRuntime({
+    saved: true,
+    queued: false,
+    blocked: false,
+    accepted: true,
+    reason: "indexeddb",
+    revision: 9,
+    saveMode: "indexeddb",
+    storageTier: "indexeddb",
+  });
+  const result = await executeExtractionBatchController(runtime, {
+    chat: [{ is_user: false, mes: "测试" }],
+    startIdx: 5,
+    endIdx: 5,
+    settings: {
+      persistUseNativeDelta: true,
+      graphNativeForceDisable: false,
+      nativeEngineFailOpen: true,
+      persistNativeDeltaThresholdRecords: 123,
+      persistNativeDeltaThresholdStructuralDelta: 45,
+      persistNativeDeltaThresholdSerializedChars: 6789,
+      persistNativeDeltaBridgeMode: "hash",
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(runtime.lastPersistDeltaOptions.useNativeDelta, true);
+  assert.equal(runtime.lastPersistDeltaOptions.nativeFailOpen, true);
+  assert.equal(runtime.lastPersistDeltaOptions.persistNativeDeltaThresholdRecords, 123);
+  assert.equal(
+    runtime.lastPersistDeltaOptions.persistNativeDeltaThresholdStructuralDelta,
+    45,
+  );
+  assert.equal(
+    runtime.lastPersistDeltaOptions.persistNativeDeltaThresholdSerializedChars,
+    6789,
+  );
+  assert.equal(runtime.lastPersistDeltaOptions.persistNativeDeltaBridgeMode, "hash");
+
+  if (typeof originalNativeBuilder === "function") {
+    globalThis.__stBmeNativeBuildPersistDelta = originalNativeBuilder;
+  } else {
+    delete globalThis.__stBmeNativeBuildPersistDelta;
+  }
+}
+
+{
+  const runtime = createRuntime({
+    saved: true,
+    queued: false,
+    blocked: false,
+    accepted: true,
+    reason: "indexeddb",
+    revision: 10,
+    saveMode: "indexeddb",
+    storageTier: "indexeddb",
+  });
+  const result = await executeExtractionBatchController(runtime, {
+    chat: [{ is_user: false, mes: "测试" }],
+    startIdx: 5,
+    endIdx: 5,
+    settings: {
+      persistUseNativeDelta: true,
+      graphNativeForceDisable: true,
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(runtime.lastPersistDeltaOptions.useNativeDelta, false);
 }
 
 console.log("extraction-persistence-gating tests passed");

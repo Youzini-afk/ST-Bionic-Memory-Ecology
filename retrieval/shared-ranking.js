@@ -536,6 +536,8 @@ export async function rankNodesForTaskContext({
     ? options.activeNodes.filter((node) => node && !node.archived)
     : getActiveNodes(graph).filter((node) => node && !node.archived);
   const vectorValidation = validateVectorConfig(embeddingConfig);
+  const rankingStartedAt = nowMs();
+  const queryBlendStartedAt = nowMs();
   const contextQueryBlend = buildContextQueryBlend(userMessage, recentMessages, {
     enabled: enableContextQueryBlend,
     assistantWeight: contextAssistantWeight,
@@ -553,6 +555,7 @@ export async function rankNodesForTaskContext({
       maxSegments: multiIntentMaxSegments,
     },
   );
+  const queryBlendMs = roundMs(nowMs() - queryBlendStartedAt);
   const diagnostics = {
     queryBlendActive: contextQueryBlend.active,
     queryBlendParts: (contextQueryBlend.parts || []).map((part) => ({
@@ -577,12 +580,17 @@ export async function rankNodesForTaskContext({
     lexicalTopHits: [],
     skipReasons: [],
     timings: {
+      queryBlend: queryBlendMs,
       vector: 0,
       diffusion: 0,
+      lexical: 0,
+      scoring: 0,
+      total: 0,
     },
   };
 
   if (!graph || activeNodes.length === 0) {
+    diagnostics.timings.total = roundMs(nowMs() - rankingStartedAt);
     return {
       activeNodes,
       contextQueryBlend,
@@ -688,13 +696,19 @@ export async function rankNodesForTaskContext({
     }
   }
 
+  const scoringStartedAt = nowMs();
+  let lexicalMs = 0;
   const scoredNodes = [];
   for (const [nodeId, scores] of scoreMap.entries()) {
     const node = getNode(graph, nodeId);
     if (!node || node.archived) continue;
+    const lexicalStartedAt = enableLexicalBoost ? nowMs() : 0;
     const lexicalScore = enableLexicalBoost
       ? computeLexicalScore(node, lexicalQuery.sources)
       : 0;
+    if (enableLexicalBoost) {
+      lexicalMs += nowMs() - lexicalStartedAt;
+    }
     const finalScore = hybridScore(
       {
         graphScore: scores.graphScore,
@@ -719,6 +733,8 @@ export async function rankNodesForTaskContext({
       weightedScore: finalScore,
     });
   }
+  diagnostics.timings.lexical = roundMs(lexicalMs);
+  diagnostics.timings.scoring = roundMs(nowMs() - scoringStartedAt);
 
   scoredNodes.sort((left, right) => {
     const weightedDelta =
@@ -737,6 +753,7 @@ export async function rankNodesForTaskContext({
     (item) => (Number(item.lexicalScore) || 0) > 0,
   ).length;
   diagnostics.lexicalTopHits = buildLexicalTopHits(scoredNodes);
+  diagnostics.timings.total = roundMs(nowMs() - rankingStartedAt);
 
   return {
     activeNodes,
