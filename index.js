@@ -5149,7 +5149,6 @@ function buildRecoveredSnapshotForChatIdentity(
   const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
   const normalizedIntegrity = normalizeChatIdCandidate(integrity);
   const normalizedLegacyChatId = normalizeChatIdCandidate(legacyChatId);
-  const normalizedGraph = cloneGraphForPersistence(graph, normalizedTargetChatId);
   const effectiveRevision = Math.max(
     1,
     normalizeIndexedDbRevision(
@@ -5157,14 +5156,7 @@ function buildRecoveredSnapshotForChatIdentity(
     ),
   );
 
-  stampGraphPersistenceMeta(normalizedGraph, {
-    revision: effectiveRevision,
-    reason: source,
-    chatId: normalizedTargetChatId,
-    integrity: normalizedIntegrity,
-  });
-
-  return buildSnapshotFromGraph(normalizedGraph, {
+  return buildSnapshotFromGraph(graph, {
     chatId: normalizedTargetChatId,
     revision: effectiveRevision,
     lastModified: Date.now(),
@@ -7845,7 +7837,6 @@ function deriveBranchGraphFromSourceGraph(
     normalizeChatIdCandidate(targetChatId) ||
     normalizeChatIdCandidate(sourceGraph?.historyState?.chatId);
   const branchGraph = cloneGraphForPersistence(sourceGraph, nextChatId);
-  normalizeGraphRuntimeState(branchGraph, nextChatId);
 
   const safeCutoff =
     Number.isFinite(Number(cutoffFloor)) && Number(cutoffFloor) >= 0
@@ -11269,6 +11260,10 @@ async function retryPendingGraphPersist({
     queuedChatId,
   );
   const pendingPersistGraph = pendingPersistGraphSource?.graph || currentGraph;
+  const pendingPersistGraphDetached =
+    Boolean(pendingPersistGraph) &&
+    typeof pendingPersistGraph === "object" &&
+    pendingPersistGraph !== currentGraph;
   const targetRevision = Math.max(
     Number(graphPersistenceState.queuedPersistRevision || 0),
     Number(graphPersistenceState.revision || 0),
@@ -11286,6 +11281,7 @@ async function retryPendingGraphPersist({
       revision: targetRevision,
       reason,
       lastProcessedAssistantFloor,
+      graphDetached: pendingPersistGraphDetached,
     },
   );
   if (acceptedPersistResult?.accepted) {
@@ -12864,20 +12860,18 @@ function loadGraphFromChat(options = {}) {
         1,
         getGraphPersistedRevision(officialGraph),
       );
+      const officialSnapshot = buildSnapshotFromGraph(officialGraph, {
+        chatId,
+        revision: officialRevision,
+      });
       const metadataCommitMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
-        buildSnapshotFromGraph(officialGraph, {
-          chatId,
-          revision: officialRevision,
-        }),
+        officialSnapshot,
         commitMarker,
       );
       const officialRuntimeStaleDecision =
         detectStaleIndexedDbSnapshotAgainstRuntime(
           chatId,
-          buildSnapshotFromGraph(officialGraph, {
-            chatId,
-            revision: officialRevision,
-          }),
+          officialSnapshot,
           {
             identity: chatIdentity,
           },
@@ -13411,28 +13405,35 @@ async function saveGraphToIndexedDb(
       requestedRevision,
       markSyncDirty: true,
     });
+    const committedRevision = normalizeIndexedDbRevision(
+      commitResult?.revision,
+      requestedRevision,
+    );
+    const committedLastModified = Number(commitResult?.lastModified || Date.now());
 
     let scheduleUploadWarning = "";
     if (graph) {
-      snapshot = buildSnapshotFromGraph(graph, {
-        chatId: normalizedChatId,
-        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
-        baseSnapshot: baseSnapshot || undefined,
-        lastModified: Number(commitResult?.lastModified || Date.now()),
-        meta: {
-          storagePrimary: localStore.storagePrimary,
-          storageMode: localStore.storageMode,
-          lastMutationReason: String(reason || "graph-save"),
-          integrity:
-            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
-          hostChatId: currentIdentity.hostChatId || "",
-        },
-      });
-      snapshot.meta.revision = normalizeIndexedDbRevision(
-        commitResult?.revision,
-        requestedRevision,
-      );
-      snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
+      if (!snapshot) {
+        snapshot = buildSnapshotFromGraph(graph, {
+          chatId: normalizedChatId,
+          revision: committedRevision,
+          baseSnapshot: baseSnapshot || undefined,
+          lastModified: committedLastModified,
+          meta: {
+            storagePrimary: localStore.storagePrimary,
+            storageMode: localStore.storageMode,
+            lastMutationReason: String(reason || "graph-save"),
+            integrity:
+              currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+            hostChatId: currentIdentity.hostChatId || "",
+          },
+        });
+      }
+      if (!snapshot.meta || typeof snapshot.meta !== "object" || Array.isArray(snapshot.meta)) {
+        snapshot.meta = {};
+      }
+      snapshot.meta.revision = committedRevision;
+      snapshot.meta.lastModified = committedLastModified;
       snapshot.meta.lastMutationReason = String(reason || "graph-save");
       snapshot.meta.storagePrimary = localStore.storagePrimary;
       snapshot.meta.storageMode = localStore.storageMode;
@@ -13441,7 +13442,7 @@ async function saveGraphToIndexedDb(
 
     if (graph === currentGraph) {
       stampGraphPersistenceMeta(currentGraph, {
-        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
+        revision: committedRevision,
         reason: String(reason || "graph-save"),
         chatId: normalizedChatId,
         integrity:

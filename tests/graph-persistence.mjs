@@ -3191,6 +3191,56 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-idb-single-snapshot-build",
+    globalChatId: "chat-idb-single-snapshot-build",
+    chatMetadata: {
+      integrity: "meta-idb-single-snapshot-build",
+    },
+  });
+  harness.api.setCurrentGraph(
+    createMeaningfulGraph("chat-idb-single-snapshot-build", "single-snapshot-build"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-idb-single-snapshot-build",
+    revision: 8,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const originalBuildSnapshotFromGraph = harness.runtimeContext.buildSnapshotFromGraph;
+  let buildSnapshotCallCount = 0;
+  harness.runtimeContext.buildSnapshotFromGraph = (...args) => {
+    buildSnapshotCallCount += 1;
+    return originalBuildSnapshotFromGraph(...args);
+  };
+
+  const result = await harness.api.saveGraphToIndexedDb(
+    "chat-idb-single-snapshot-build",
+    harness.api.getCurrentGraph(),
+    {
+      revision: 8,
+      reason: "single-snapshot-build-save",
+      scheduleCloudUpload: false,
+    },
+  );
+
+  assert.equal(result.saved, true);
+  assert.equal(
+    buildSnapshotCallCount,
+    1,
+    "saveGraphToIndexedDb 热路径应复用首次构建的 snapshot，而不是提交后再重建一次",
+  );
+  assert.equal(result.snapshot?.meta?.revision, 8);
+  assert.equal(
+    harness.api.getIndexedDbSnapshot()?.meta?.revision,
+    8,
+    "复用首次 snapshot 后仍应正确回填缓存 revision",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-pending-persist-retry",
     globalChatId: "chat-pending-persist-retry",
     chatMetadata: {
