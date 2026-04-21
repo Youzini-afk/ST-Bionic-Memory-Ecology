@@ -297,7 +297,7 @@ function buildCommittedBatchPersistSnapshot(
       : null,
     rangeEnd,
   ];
-  const afterSnapshot = runtime.cloneGraphSnapshot(graph);
+  const afterSnapshot = graph;
   const effectiveArtifacts = Array.isArray(postProcessArtifacts)
     ? [...postProcessArtifacts]
     : [];
@@ -357,17 +357,12 @@ function buildCommittedBatchPersistSnapshot(
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
-    committedAfterSnapshot: runtime.cloneGraphSnapshot(committedGraphSnapshot),
+    committedAfterSnapshot: committedGraphSnapshot,
     postProcessArtifacts: effectiveArtifacts,
   };
 }
 
 function isPersistenceRevisionAccepted(runtime, persistence = null) {
-  if (!persistence || persistence.accepted === true) return true;
-  const graphPersistenceState = runtime?.getGraphPersistenceState?.() || {};
-  if (graphPersistenceState.pendingPersist === true) {
-    return false;
-  }
   const persistenceRevision = Number(persistence?.revision || 0);
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
@@ -645,7 +640,7 @@ export async function executeExtractionBatchController(
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(
       beforeSnapshot,
-      runtime.cloneGraphSnapshot(runtime.getCurrentGraph()),
+      runtime.getCurrentGraph(),
       effects?.postProcessArtifacts || [],
     ),
     vectorHashesInserted: effects?.vectorHashesInserted || [],

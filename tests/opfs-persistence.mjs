@@ -311,6 +311,12 @@ async function testImportExportPersistenceAndFileRotation() {
   assert.equal(firstExportedSnapshot.state.extractionCount, 2);
   assert.equal(firstExportedSnapshot.meta.storagePrimary, "opfs");
   assert.equal(firstExportedSnapshot.meta.storageMode, "opfs-primary");
+  const lightweightSnapshot = await store.exportSnapshot({
+    includeTombstones: false,
+  });
+  assert.equal(lightweightSnapshot.__stBmeTombstonesOmitted, true);
+  assert.deepEqual(lightweightSnapshot.tombstones, []);
+  assert.equal(lightweightSnapshot.meta.tombstoneCount, 1);
   assert.deepEqual(firstExportedSnapshot.meta[BME_RUNTIME_BATCH_JOURNAL_META_KEY], {
     pending: ["job-1"],
   });

@@ -1345,15 +1345,23 @@ class LegacyOpfsGraphStore {
     };
   }
 
-  async exportSnapshot() {
-    const snapshot = await this._loadSnapshot();
-    return {
+  async exportSnapshot(options = {}) {
+    const includeTombstones =
+      options && typeof options === "object"
+        ? options.includeTombstones !== false
+        : options !== false;
+    const snapshot = await this._loadSnapshot({ includeTombstones });
+    const exported = {
       meta: toPlainData(snapshot.meta, {}),
       nodes: toPlainData(snapshot.nodes, []),
       edges: toPlainData(snapshot.edges, []),
-      tombstones: toPlainData(snapshot.tombstones, []),
+      tombstones: includeTombstones ? toPlainData(snapshot.tombstones, []) : [],
       state: toPlainData(snapshot.state, {}),
     };
+    if (!includeTombstones) {
+      exported.__stBmeTombstonesOmitted = true;
+    }
+    return exported;
   }
 
   async importSnapshot(snapshot, options = {}) {
@@ -2643,15 +2651,23 @@ export class OpfsGraphStore {
     };
   }
 
-  async exportSnapshot() {
-    const snapshot = await this._loadSnapshot();
-    return {
+  async exportSnapshot(options = {}) {
+    const includeTombstones =
+      options && typeof options === "object"
+        ? options.includeTombstones !== false
+        : options !== false;
+    const snapshot = await this._loadSnapshot({ includeTombstones });
+    const exported = {
       meta: toPlainData(snapshot.meta, {}),
       nodes: toPlainData(snapshot.nodes, []),
       edges: toPlainData(snapshot.edges, []),
-      tombstones: toPlainData(snapshot.tombstones, []),
+      tombstones: includeTombstones ? toPlainData(snapshot.tombstones, []) : [],
       state: toPlainData(snapshot.state, {}),
     };
+    if (!includeTombstones) {
+      exported.__stBmeTombstonesOmitted = true;
+    }
+    return exported;
   }
 
   async importSnapshot(snapshot, options = {}) {
@@ -3263,7 +3279,7 @@ export class OpfsGraphStore {
     return records;
   }
 
-  async _loadBaseSnapshotFromV2(manifest = null) {
+  async _loadBaseSnapshotFromV2(manifest = null, { includeTombstones = true } = {}) {
     const normalizedManifest = manifest || (await this._ensureV2Ready());
     const runtimeMeta = await this._readRuntimeMetaEntries();
     const nodes = [];
@@ -3275,8 +3291,10 @@ export class OpfsGraphStore {
     for (let index = 0; index < OPFS_V2_EDGE_BUCKET_COUNT; index += 1) {
       edges.push(...(await this._readShardRecords("edges", index)));
     }
-    for (let index = 0; index < OPFS_V2_TOMBSTONE_BUCKET_COUNT; index += 1) {
-      tombstones.push(...(await this._readShardRecords("tombstones", index)));
+    if (includeTombstones) {
+      for (let index = 0; index < OPFS_V2_TOMBSTONE_BUCKET_COUNT; index += 1) {
+        tombstones.push(...(await this._readShardRecords("tombstones", index)));
+      }
     }
     const meta = {
       ...createDefaultMetaValues(this.chatId),
@@ -3311,7 +3329,7 @@ export class OpfsGraphStore {
     return snapshot;
   }
 
-  async _loadSnapshot({ awaitWrites = true } = {}) {
+  async _loadSnapshot({ awaitWrites = true, includeTombstones = true } = {}) {
     if (awaitWrites) {
       await this._awaitPendingWrites();
     }
@@ -3319,10 +3337,24 @@ export class OpfsGraphStore {
     const headRevision = normalizeRevision(
       manifest?.headRevision || manifest?.meta?.revision,
     );
-    if (this._snapshotCache && normalizeRevision(this._snapshotCache.meta?.revision) === headRevision) {
-      return this._snapshotCache;
+    if (
+      this._snapshotCache &&
+      normalizeRevision(this._snapshotCache.meta?.revision) === headRevision
+    ) {
+      if (includeTombstones) {
+        return this._snapshotCache;
+      }
+      return {
+        meta: this._snapshotCache.meta,
+        state: this._snapshotCache.state,
+        nodes: this._snapshotCache.nodes,
+        edges: this._snapshotCache.edges,
+        tombstones: [],
+      };
     }
-    const snapshot = await this._loadBaseSnapshotFromV2(manifest);
+    const snapshot = await this._loadBaseSnapshotFromV2(manifest, {
+      includeTombstones,
+    });
     const walRecords = await this._readWalRecords(manifest);
     for (const walRecord of walRecords) {
       const nextSnapshot = applyOpfsV2DeltaToSnapshot(snapshot, walRecord.delta, walRecord.committedAt);
@@ -3355,7 +3387,11 @@ export class OpfsGraphStore {
     snapshot.state = normalizeSnapshotState(snapshot);
     snapshot.meta.lastProcessedFloor = snapshot.state.lastProcessedFloor;
     snapshot.meta.extractionCount = snapshot.state.extractionCount;
-    this._snapshotCache = snapshot;
+    if (includeTombstones) {
+      this._snapshotCache = snapshot;
+      return snapshot;
+    }
+    snapshot.tombstones = [];
     return snapshot;
   }
 

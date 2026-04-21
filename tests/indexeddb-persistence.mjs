@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 
 import {
   BME_DB_SCHEMA_VERSION,
+  BME_RUNTIME_BATCH_JOURNAL_META_KEY,
+  BME_RUNTIME_HISTORY_META_KEY,
+  BME_RUNTIME_VECTOR_META_KEY,
   BME_TOMBSTONE_RETENTION_MS,
   BmeDatabase,
   buildBmeDbName,
@@ -20,6 +23,7 @@ const chatIdsForCleanup = new Set([
   "chat-manager-a",
   "chat-manager-b",
   "chat-manager-selector",
+  "chat-export-without-tombstones",
   "chat-replace-reset",
 ]);
 
@@ -192,6 +196,41 @@ async function testSnapshotExportImport() {
   assert.equal(importResult.mode, "replace");
   assert.ok(importResult.imported.nodes >= 1);
   assert.ok((await db.listNodes()).some((item) => item.id === "node-snapshot"));
+
+  await db.close();
+}
+
+async function testSnapshotExportWithoutTombstones() {
+  const db = new BmeDatabase("chat-export-without-tombstones", {
+    dexieClass: globalThis.Dexie,
+  });
+  await db.open();
+
+  await db.bulkUpsertNodes([
+    {
+      id: "node-light-snapshot",
+      type: "event",
+      sourceFloor: 3,
+      archived: false,
+      updatedAt: Date.now(),
+    },
+  ]);
+  await db.bulkUpsertTombstones([
+    {
+      id: "tomb-light-snapshot",
+      kind: "node",
+      targetId: "node-deleted-light-snapshot",
+      deletedAt: Date.now(),
+      sourceDeviceId: "device-light-snapshot",
+    },
+  ]);
+
+  const exported = await db.exportSnapshot({ includeTombstones: false });
+  assert.equal(exported.__stBmeTombstonesOmitted, true);
+  assert.ok(Array.isArray(exported.nodes));
+  assert.ok(Array.isArray(exported.edges));
+  assert.deepEqual(exported.tombstones, []);
+  assert.equal(exported.meta.tombstoneCount, 1);
 
   await db.close();
 }
@@ -532,6 +571,9 @@ async function testGraphSnapshotConverters() {
     id: "node-converter",
     type: "event",
     sourceFloor: 9,
+    fields: {
+      title: "Converter Node",
+    },
     updatedAt: Date.now(),
   });
 
@@ -583,6 +625,32 @@ async function testGraphSnapshotConverters() {
   assert.equal(rebuilt.regionState.activeRegion, "camp");
   assert.equal(rebuilt.timelineState.activeSegmentId, "segment-1");
   assert.equal(rebuilt.summaryState.entries[0].id, "summary-1");
+
+  rebuilt.nodes[0].fields.title = "Mutated Converter Node";
+  rebuilt.historyState.processedMessageHashes[1] = "mutated-hash";
+  rebuilt.vectorIndexState.hashToNodeId["vec-hash"] = "node-mutated";
+  rebuilt.batchJournal[0].processedRange[0] = 99;
+
+  assert.equal(
+    snapshot.nodes[0].fields.title,
+    "Converter Node",
+    "buildGraphFromSnapshot 不应复用 snapshot 节点的嵌套字段引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_HISTORY_META_KEY].processedMessageHashes[1],
+    "hash-1",
+    "buildGraphFromSnapshot 不应复用 snapshot historyState 的嵌套对象引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_VECTOR_META_KEY].hashToNodeId["vec-hash"],
+    "node-converter",
+    "buildGraphFromSnapshot 不应复用 snapshot vectorState 的嵌套对象引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_BATCH_JOURNAL_META_KEY][0].processedRange[0],
+    8,
+    "buildGraphFromSnapshot 不应复用 snapshot batchJournal 的嵌套数组引用",
+  );
 }
 
 async function main() {
@@ -593,6 +661,7 @@ async function main() {
   await testCrudAndMeta();
   await testTransactionRollback();
   await testSnapshotExportImport();
+  await testSnapshotExportWithoutTombstones();
   await testReplaceImportResetsStaleMeta();
   await testRevisionMonotonicity();
   await testTombstonePrune();

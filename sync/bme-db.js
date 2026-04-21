@@ -2013,6 +2013,14 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     normalizeChatId(options.chatId) ||
     normalizeChatId(snapshotMeta?.chatId) ||
     normalizeChatId(snapshotState?.chatId);
+  const snapshotHistoryState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY],
+    {},
+  );
+  const snapshotVectorState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY],
+    {},
+  );
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
@@ -2020,21 +2028,17 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(snapshotMeta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(snapshotView.nodes).map((node) => ({
-    ...(node || {}),
-  }));
-  runtimeGraph.edges = toArray(snapshotView.edges).map((edge) => ({
-    ...(edge || {}),
-  }));
+  runtimeGraph.nodes = toArray(toPlainData(snapshotView.nodes, []));
+  runtimeGraph.edges = toArray(toPlainData(snapshotView.edges, []));
   runtimeGraph.batchJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY], []),
   );
   runtimeGraph.lastRecallResult = toPlainData(
     snapshotMeta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
   runtimeGraph.maintenanceJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY], []),
   );
   runtimeGraph.knowledgeState = toPlainData(
     snapshotMeta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
@@ -2073,22 +2077,21 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
 
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
+    ...snapshotHistoryState,
     lastProcessedAssistantFloor: Number.isFinite(
       Number(snapshotState?.lastProcessedFloor),
     )
       ? Number(snapshotState.lastProcessedFloor)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
+          snapshotHistoryState?.lastProcessedAssistantFloor ??
+            META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
     extractionCount: Number.isFinite(
       Number(snapshotState?.extractionCount),
     )
       ? Number(snapshotState.extractionCount)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
+          snapshotHistoryState?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
   if (
@@ -2146,10 +2149,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
+    ...snapshotVectorState,
     collectionId: buildVectorCollectionId(
       chatId ||
-        snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
+        snapshotHistoryState?.chatId ||
         runtimeGraph.historyState?.chatId ||
         "",
     ),
@@ -3032,23 +3035,47 @@ export class BmeDatabase {
     };
   }
 
-  async exportSnapshot() {
+  async exportSnapshot(options = {}) {
     const db = await this.open();
 
-    const [nodes, edges, tombstones, metaRows] = await db.transaction(
-      "r",
-      db.table("nodes"),
-      db.table("edges"),
-      db.table("tombstones"),
-      db.table("meta"),
-      async () =>
-        await Promise.all([
-          db.table("nodes").toArray(),
-          db.table("edges").toArray(),
-          db.table("tombstones").toArray(),
-          db.table("meta").toArray(),
-        ]),
-    );
+    const includeTombstones =
+      options && typeof options === "object"
+        ? options.includeTombstones !== false
+        : options !== false;
+    let nodes = [];
+    let edges = [];
+    let tombstones = [];
+    let metaRows = [];
+
+    if (includeTombstones) {
+      [nodes, edges, tombstones, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("tombstones"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("tombstones").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    } else {
+      [nodes, edges, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    }
 
     const metaMap = toMetaMap(metaRows);
     const meta = {
@@ -3058,7 +3085,10 @@ export class BmeDatabase {
       revision: normalizeRevision(metaMap?.revision),
       nodeCount: nodes.length,
       edgeCount: edges.length,
-      tombstoneCount: tombstones.length,
+      tombstoneCount: normalizeNonNegativeInteger(
+        metaMap?.tombstoneCount,
+        tombstones.length,
+      ),
     };
 
     const state = {
@@ -3070,13 +3100,19 @@ export class BmeDatabase {
         : META_DEFAULT_EXTRACTION_COUNT,
     };
 
-    return {
+    const snapshot = {
       meta,
       nodes,
       edges,
-      tombstones,
+      tombstones: includeTombstones ? tombstones : [],
       state,
     };
+
+    if (!includeTombstones) {
+      snapshot.__stBmeTombstonesOmitted = true;
+    }
+
+    return snapshot;
   }
 
   async importSnapshot(snapshot, options = {}) {

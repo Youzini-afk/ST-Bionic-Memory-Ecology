@@ -5423,11 +5423,8 @@ function applyShadowSnapshotToRuntime(
 
   let shadowGraph = null;
   try {
-    shadowGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(
-        deserializeGraph(shadowSnapshot.serializedGraph),
-        normalizedChatId,
-      ),
+    shadowGraph = normalizeGraphRuntimeState(
+      deserializeGraph(shadowSnapshot.serializedGraph),
       normalizedChatId,
     );
   } catch (error) {
@@ -5970,6 +5967,12 @@ function isIndexedDbSnapshotMeaningful(snapshot = null) {
 
   if (Array.isArray(snapshot.nodes) && snapshot.nodes.length > 0) return true;
   if (Array.isArray(snapshot.edges) && snapshot.edges.length > 0) return true;
+  if (
+    snapshot.__stBmeTombstonesOmitted === true &&
+    Number(snapshot?.meta?.tombstoneCount || 0) > 0
+  ) {
+    return true;
+  }
   if (Array.isArray(snapshot.tombstones) && snapshot.tombstones.length > 0)
     return true;
 
@@ -6017,6 +6020,7 @@ function isIndexedDbSnapshotMeaningful(snapshot = null) {
 function cacheIndexedDbSnapshot(chatId, snapshot = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
+  if (snapshot.__stBmeTombstonesOmitted === true) return;
   const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot);
   bmeIndexedDbSnapshotCacheByChatId.set(normalizedChatId, {
     chatId: normalizedChatId,
@@ -6311,10 +6315,7 @@ async function readLocalCacheSnapshotForChat(chatId, source = "luker-sidecar-loa
     const manager = ensureBmeChatManager();
     if (!manager) return null;
     const db = await manager.getCurrentDb(normalizedChatId);
-    const snapshot = await db.exportSnapshot();
-    if (snapshot) {
-      cacheIndexedDbSnapshot(normalizedChatId, snapshot);
-    }
+    const snapshot = await db.exportSnapshot({ includeTombstones: false });
     return snapshot;
   } catch (error) {
     console.warn("[ST-BME] 读取 Luker 本地缓存快照失败:", source, error);
@@ -6394,11 +6395,8 @@ function buildSnapshotFromLukerSidecarState(
   let snapshot = null;
   if (sidecar?.checkpoint?.serializedGraph) {
     try {
-      const checkpointGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(sidecar.checkpoint.serializedGraph),
-          normalizedChatId,
-        ),
+      const checkpointGraph = normalizeGraphRuntimeState(
+        deserializeGraph(sidecar.checkpoint.serializedGraph),
         normalizedChatId,
       );
       snapshot = buildSnapshotFromGraph(checkpointGraph, {
@@ -6437,8 +6435,8 @@ function buildSnapshotFromLukerSidecarState(
       headRevision: Number(normalizedManifest.headRevision || 0),
     };
   } else {
-    const emptyGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(createEmptyGraph(), normalizedChatId),
+    const emptyGraph = normalizeGraphRuntimeState(
+      createEmptyGraph(),
       normalizedChatId,
     );
     snapshot = buildSnapshotFromGraph(emptyGraph, {
@@ -7659,11 +7657,8 @@ async function loadGraphFromChatState(
 
   let chatStateGraph = null;
   try {
-    chatStateGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(
-        deserializeGraph(payload.serializedGraph),
-        normalizedChatId,
-      ),
+    chatStateGraph = normalizeGraphRuntimeState(
+      deserializeGraph(payload.serializedGraph),
       normalizedChatId,
     );
   } catch (error) {
@@ -7953,13 +7948,9 @@ async function readPersistedGraphForChatStateTarget(
   });
   if (sidecarResult?.ok && sidecarResult?.snapshot) {
     try {
-      return cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          buildGraphFromSnapshot(sidecarResult.snapshot),
-          targetChatId,
-        ),
-        targetChatId,
-      );
+      return buildGraphFromSnapshot(sidecarResult.snapshot, {
+        chatId: targetChatId,
+      });
     } catch (error) {
       console.warn("[ST-BME] 读取 Luker branch source snapshot 失败:", error);
     }
@@ -7971,11 +7962,8 @@ async function readPersistedGraphForChatStateTarget(
   });
   if (legacySnapshot?.serializedGraph) {
     try {
-      return cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(legacySnapshot.serializedGraph),
-          targetChatId,
-        ),
+      return normalizeGraphRuntimeState(
+        deserializeGraph(legacySnapshot.serializedGraph),
         targetChatId,
       );
     } catch (error) {
@@ -8175,10 +8163,13 @@ function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
       typeof legacyGraph === "string"
         ? deserializeGraph(legacyGraph)
         : legacyGraph;
-    return cloneGraphForPersistence(
-      normalizeGraphRuntimeState(hydratedLegacyGraph, normalizedChatId),
+    const normalizedLegacyGraph = normalizeGraphRuntimeState(
+      hydratedLegacyGraph,
       normalizedChatId,
     );
+    return typeof legacyGraph === "string"
+      ? normalizedLegacyGraph
+      : cloneGraphForPersistence(normalizedLegacyGraph, normalizedChatId);
   } catch (error) {
     console.warn("[ST-BME] 读取 legacy chat_metadata 图谱失败:", error);
     return null;
@@ -9218,10 +9209,7 @@ function applyIndexedDbSnapshotToRuntime(
       attemptIndex,
     };
   }
-  currentGraph = cloneGraphForPersistence(
-    normalizeGraphRuntimeState(graphFromSnapshot, normalizedChatId),
-    normalizedChatId,
-  );
+  currentGraph = graphFromSnapshot;
   stampGraphPersistenceMeta(currentGraph, {
     revision,
     reason: `${reasonPrefix}:${String(source || reasonPrefix)}`,
@@ -9485,7 +9473,7 @@ async function loadGraphFromIndexedDb(
       identityRecoveryResult?.snapshot ||
       localStoreMigrationResult?.snapshot ||
       migrationResult?.snapshot ||
-      (await db.exportSnapshot());
+      (await db.exportSnapshot({ includeTombstones: false }));
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
       resolveCurrentChatIdentity(getContext()),
     );
@@ -10802,11 +10790,8 @@ function resolvePendingPersistGraphSource(chatId = "") {
     shadowSnapshot.serializedGraph
   ) {
     try {
-      const shadowGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(shadowSnapshot.serializedGraph),
-          normalizedChatId,
-        ),
+      const shadowGraph = normalizeGraphRuntimeState(
+        deserializeGraph(shadowSnapshot.serializedGraph),
         normalizedChatId,
       );
       return {
@@ -11376,7 +11361,9 @@ async function persistExtractionBatchResult({
   const context = getContext();
   const persistGraph =
     graphSnapshot && typeof graphSnapshot === "object"
-      ? cloneGraphSnapshot(graphSnapshot)
+      ? graphSnapshot === currentGraph
+        ? cloneGraphSnapshot(graphSnapshot)
+        : graphSnapshot
       : currentGraph;
   if (!context || !persistGraph) {
     return buildGraphPersistResult({
@@ -12847,10 +12834,14 @@ function loadGraphFromChat(options = {}) {
     : undefined;
   if (savedData != null && savedData !== "") {
     try {
-      const officialGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
+      const hydratedOfficialGraph = normalizeGraphRuntimeState(
+        deserializeGraph(savedData),
         chatId,
       );
+      const officialGraph =
+        typeof savedData === "string"
+          ? hydratedOfficialGraph
+          : cloneGraphForPersistence(hydratedOfficialGraph, chatId);
       const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
         officialGraph,
         shadowSnapshot,
