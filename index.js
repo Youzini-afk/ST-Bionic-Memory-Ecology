@@ -7425,6 +7425,7 @@ async function persistGraphToHostChatState(
     mode = "primary",
     persistDelta = null,
     chatStateTarget = null,
+    graphDetached = false,
   } = {},
 ) {
   if (!context || !graph || !canUseHostGraphChatStatePersistence(context)) {
@@ -7482,7 +7483,10 @@ async function persistGraphToHostChatState(
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
     graphPersistenceState.metadataIntegrity;
-  const persistedGraph = cloneGraphForPersistence(graph, chatId);
+  const persistedGraph =
+    graphDetached === true
+      ? normalizeGraphRuntimeState(graph, chatId)
+      : cloneGraphForPersistence(graph, chatId);
   stampGraphPersistenceMeta(persistedGraph, {
     revision,
     reason: `chat-state:${String(reason || "graph-chat-state")}`,
@@ -10534,6 +10538,7 @@ async function persistGraphToConfiguredDurableTier(
     lastProcessedAssistantFloor = null,
     persistDelta = null,
     chatStateTarget = null,
+    graphDetached = false,
   } = {},
 ) {
   const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
@@ -10559,6 +10564,7 @@ async function persistGraphToConfiguredDurableTier(
       mode: "primary",
       persistDelta,
       chatStateTarget,
+      graphDetached,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -10624,6 +10630,7 @@ async function persistGraphToConfiguredDurableTier(
           persistRole: "cache-mirror",
           scheduleCloudUpload: false,
           persistDelta,
+          graphDetached,
         });
       }
       return buildGraphPersistResult({
@@ -10691,6 +10698,7 @@ async function persistGraphToConfiguredDurableTier(
       mode: "primary",
       persistDelta,
       chatStateTarget,
+      graphDetached,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -10734,6 +10742,7 @@ async function persistGraphToConfiguredDurableTier(
         revision: acceptedRevision,
         reason: `${reason}:chat-state-fallback:promote-indexeddb`,
         persistDelta,
+        graphDetached,
       });
       return buildGraphPersistResult({
         saved: true,
@@ -11359,6 +11368,10 @@ async function persistExtractionBatchResult({
 } = {}) {
   ensureCurrentGraphRuntimeState();
   const context = getContext();
+  const persistGraphDetached =
+    Boolean(graphSnapshot) &&
+    typeof graphSnapshot === "object" &&
+    graphSnapshot !== currentGraph;
   const persistGraph =
     graphSnapshot && typeof graphSnapshot === "object"
       ? graphSnapshot === currentGraph
@@ -11400,6 +11413,7 @@ async function persistExtractionBatchResult({
       reason,
       lastProcessedAssistantFloor,
       persistDelta,
+      graphDetached: persistGraphDetached,
     },
   );
   if (acceptedPersistResult?.accepted) {
@@ -13824,6 +13838,7 @@ function queueGraphPersistToIndexedDb(
     persistRole = "primary",
     scheduleCloudUpload = undefined,
     persistDelta = null,
+    graphDetached = false,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
@@ -13872,7 +13887,9 @@ function queueGraphPersistToIndexedDb(
         };
       }
       const graphSnapshot = graph
-        ? cloneGraphForPersistence(graph, normalizedChatId)
+        ? graphDetached === true
+          ? normalizeGraphRuntimeState(graph, normalizedChatId)
+          : cloneGraphForPersistence(graph, normalizedChatId)
         : null;
       return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
         revision: normalizedRevision,
@@ -13939,7 +13956,8 @@ function saveGraphToChat(options = {}) {
   }
 
   const shouldQueueIndexedDbPersist =
-    markMutation || !isGraphEffectivelyEmpty(currentGraph);
+    persistenceEnvironment.hostProfile !== "luker" &&
+    (markMutation || !isGraphEffectivelyEmpty(currentGraph));
   if (shouldQueueIndexedDbPersist) {
     queueGraphPersistToIndexedDb(chatId, currentGraph, {
       revision,
@@ -13985,6 +14003,7 @@ function saveGraphToChat(options = {}) {
           reason,
           lastProcessedAssistantFloor,
           chatStateTarget,
+          graphDetached: true,
         },
       );
       if (!persistResult?.accepted) {
@@ -18727,6 +18746,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
     reason: "panel-manual-luker-cache-rebuild",
     persistRole: "cache-mirror",
     scheduleCloudUpload: false,
+    graphDetached: true,
   });
   refreshPanelLiveState();
   toastr.success("已开始从 Luker 主 sidecar 重建本地缓存");

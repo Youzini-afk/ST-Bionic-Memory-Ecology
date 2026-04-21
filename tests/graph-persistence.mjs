@@ -3784,6 +3784,59 @@ result = {
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-luker-queued-save-detached",
+    globalChatId: "chat-luker-queued-save-detached",
+    characterId: "char-luker-queued-save",
+    chatMetadata: {
+      integrity: "meta-luker-queued-save-detached",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  harness.api.setCurrentGraph(
+    stampPersistedGraph(
+      createMeaningfulGraph("chat-luker-queued-save-detached", "luker-detached"),
+      {
+        revision: 6,
+        integrity: "meta-luker-queued-save-detached",
+        chatId: "chat-luker-queued-save-detached",
+        reason: "luker-detached-seed",
+      },
+    ),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-luker-queued-save-detached",
+    revision: 6,
+    lastPersistedRevision: 6,
+    writesBlocked: false,
+  });
+
+  const result = harness.api.saveGraphToChat({
+    reason: "luker-detached-save",
+    markMutation: false,
+  });
+
+  assert.equal(result.queued, true);
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.saveMode, "luker-chat-state-queued");
+
+  harness.api.getCurrentGraph().nodes[0].fields.title = "runtime-mutated-after-queued-save";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(
+    harness.api.getIndexedDbSnapshot()?.nodes?.[0]?.fields?.title,
+    "事件-luker-detached",
+    "Luker queued save 的异步本地 mirror 不应被后续 live graph 修改污染",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-luker-v2-load",
     globalChatId: "chat-luker-v2-load",
     characterId: "char-luker-v2",
