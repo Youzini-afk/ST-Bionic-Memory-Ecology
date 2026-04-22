@@ -454,6 +454,28 @@ function isPersistenceRevisionAccepted(runtime, persistence = null) {
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
+function hasRecoverablePendingPersistence(runtime) {
+  const persistenceState = runtime?.getGraphPersistenceState?.() || {};
+  if (persistenceState.pendingPersist !== true) {
+    return false;
+  }
+  const recoverableTier = String(
+    persistenceState.lastRecoverableStorageTier || "none",
+  ).trim();
+  if (recoverableTier === "metadata-full") {
+    return true;
+  }
+  if (recoverableTier !== "shadow") {
+    return false;
+  }
+  const queuedRevision = Number(persistenceState.queuedPersistRevision || 0);
+  const shadowRevision = Number(persistenceState.shadowSnapshotRevision || 0);
+  if (!Number.isFinite(queuedRevision) || queuedRevision <= 0) {
+    return true;
+  }
+  return Number.isFinite(shadowRevision) && shadowRevision >= queuedRevision;
+}
+
 function getPendingPersistenceGateInfo(runtime) {
   const graph = runtime?.getCurrentGraph?.();
   const batchStatus = graph?.historyState?.lastBatchStatus || null;
@@ -479,8 +501,12 @@ function getPendingPersistenceGateInfo(runtime) {
 
 async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-retry") {
   const gate = getPendingPersistenceGateInfo(runtime);
-  if (!gate || typeof runtime?.retryPendingGraphPersist !== "function") {
+  if (!gate) {
     return gate;
+  }
+
+  if (typeof runtime?.retryPendingGraphPersist !== "function") {
+    return hasRecoverablePendingPersistence(runtime) ? null : gate;
   }
 
   try {
@@ -492,7 +518,11 @@ async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-r
     runtime?.console?.warn?.("[ST-BME] pending persistence retry failed", error);
   }
 
-  return getPendingPersistenceGateInfo(runtime);
+  const nextGate = getPendingPersistenceGateInfo(runtime);
+  if (nextGate && hasRecoverablePendingPersistence(runtime)) {
+    return null;
+  }
+  return nextGate;
 }
 
 function formatPendingPersistenceGateMessage(runtime, operationLabel = "当前提取") {

@@ -329,6 +329,135 @@ async function testManualExtractIgnoresSupersededPendingPersistence() {
   assert.notEqual(context.lastExtractionStatus.text, "等待持久化确认");
 }
 
+async function testManualExtractContinuesWithRecoverablePendingPersistence() {
+  let executeExtractionBatchCalls = 0;
+  let assistantTurnCallCount = 0;
+  const chat = [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }];
+  const context = {
+    ...createBaseStatusContext(),
+    isExtracting: false,
+    graphPersistenceState: {
+      pendingPersist: true,
+      lastAcceptedRevision: 0,
+      queuedPersistRevision: 7,
+      shadowSnapshotRevision: 7,
+      lastRecoverableStorageTier: "shadow",
+    },
+    currentGraph: {
+      historyState: {
+        lastBatchStatus: {
+          processedRange: [1, 1],
+          persistence: {
+            outcome: "queued",
+            accepted: false,
+            revision: 7,
+            reason: "extraction-batch-complete:pending",
+            storageTier: "shadow",
+          },
+        },
+      },
+    },
+    getCurrentChatId() {
+      return "chat-mobile";
+    },
+    getCurrentGraph() {
+      return context.currentGraph;
+    },
+    getIsExtracting() {
+      return context.isExtracting;
+    },
+    getGraphPersistenceState() {
+      return {
+        pendingPersist: true,
+        lastAcceptedRevision: 0,
+        queuedPersistRevision: 7,
+        shadowSnapshotRevision: 7,
+        lastRecoverableStorageTier: "shadow",
+      };
+    },
+    ensureGraphMutationReady() {
+      return true;
+    },
+    async recoverHistoryIfNeeded() {
+      return true;
+    },
+    normalizeGraphRuntimeState(graph) {
+      return graph;
+    },
+    setCurrentGraph(graph) {
+      context.currentGraph = graph;
+    },
+    createEmptyGraph() {
+      return {};
+    },
+    getContext() {
+      return { chat };
+    },
+    getAssistantTurns() {
+      assistantTurnCallCount += 1;
+      return assistantTurnCallCount <= 2 ? [1] : [];
+    },
+    getLastProcessedAssistantFloor() {
+      return 0;
+    },
+    clampInt(value, fallback) {
+      return Number.isFinite(Number(value)) ? Number(value) : fallback;
+    },
+    getSettings() {
+      return { extractEvery: 1 };
+    },
+    beginStageAbortController() {
+      return { signal: {} };
+    },
+    async executeExtractionBatch() {
+      executeExtractionBatchCalls += 1;
+      return {
+        success: true,
+        result: {
+          newNodes: 0,
+          updatedNodes: 0,
+          newEdges: 0,
+        },
+        effects: {},
+        batchStatus: {
+          persistence: {
+            accepted: true,
+          },
+        },
+        historyAdvanceAllowed: true,
+      };
+    },
+    async retryPendingGraphPersist() {
+      return {
+        accepted: false,
+        reason: "shadow-still-pending",
+      };
+    },
+    isAbortError() {
+      return false;
+    },
+    onManualExtractController,
+    finishStageAbortController() {},
+    setIsExtracting(value) {
+      context.isExtracting = value;
+    },
+    setLastExtractionStatus(text, meta, level) {
+      context.lastExtractionStatus = { text, meta, level };
+      context.runtimeStatus = { text, meta, level };
+    },
+    toastr: {
+      info() {},
+      success() {},
+      warning() {},
+      error() {},
+    },
+    result: null,
+  };
+  await onManualExtractController(context, { drainAll: false });
+  assert.equal(executeExtractionBatchCalls, 1);
+  assert.notEqual(context.lastExtractionStatus.text, "等待持久化确认");
+}
+
 async function testManualExtractIgnoresFailedBatchWithoutPersistenceAttempt() {
   let executeExtractionBatchCalls = 0;
   const chat = [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }];
@@ -567,6 +696,7 @@ testIndexDefinesLastProcessedAssistantFloorHelper();
 await testVectorSyncTerminalStateUpdatesRuntime();
 await testManualExtractNoBatchesDoesNotStayRunning();
 await testManualExtractIgnoresSupersededPendingPersistence();
+await testManualExtractContinuesWithRecoverablePendingPersistence();
 await testManualExtractIgnoresFailedBatchWithoutPersistenceAttempt();
 await testManualRebuildSetsTerminalRuntimeStatus();
 

@@ -4902,6 +4902,86 @@ async function testAutoExtractionDefersWhenHistoryRecoveryBusy() {
   assert.deepEqual(deferredReasons, ["history-recovering"]);
 }
 
+async function testAutoExtractionContinuesWithRecoverablePendingPersistence() {
+  const deferredReasons = [];
+  const executeCalls = [];
+  const currentGraph = {
+    historyState: {
+      lastBatchStatus: {
+        processedRange: [1, 1],
+        persistence: {
+          outcome: "queued",
+          accepted: false,
+          revision: 7,
+          reason: "extraction-batch-complete:pending",
+          storageTier: "shadow",
+        },
+      },
+    },
+  };
+
+  await runExtractionController({
+    console,
+    getIsExtracting: () => false,
+    getCurrentGraph: () => currentGraph,
+    getSettings: () => ({ enabled: true, extractEvery: 1 }),
+    getContext: () => ({
+      chat: [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }],
+    }),
+    getAssistantTurns: () => [1],
+    getLastProcessedAssistantFloor: () => 0,
+    getGraphPersistenceState: () => ({
+      loadState: "loaded",
+      pendingPersist: true,
+      lastAcceptedRevision: 0,
+      queuedPersistRevision: 7,
+      shadowSnapshotRevision: 7,
+      lastRecoverableStorageTier: "shadow",
+    }),
+    ensureGraphMutationReady: () => true,
+    async retryPendingGraphPersist() {
+      return {
+        accepted: false,
+        reason: "shadow-still-pending",
+      };
+    },
+    async recoverHistoryIfNeeded() {
+      return true;
+    },
+    deferAutoExtraction(reason) {
+      deferredReasons.push(reason);
+    },
+    setIsExtracting() {},
+    beginStageAbortController() {
+      return { signal: {} };
+    },
+    setLastExtractionStatus() {},
+    async executeExtractionBatch(options) {
+      executeCalls.push(options);
+      return {
+        success: true,
+        result: {
+          newNodes: 0,
+          updatedNodes: 0,
+          newEdges: 0,
+        },
+        batchStatus: {
+          persistence: {
+            accepted: true,
+          },
+        },
+        historyAdvanceAllowed: true,
+      };
+    },
+    finishStageAbortController() {},
+    isAbortError: () => false,
+    notifyExtractionIssue() {},
+  });
+
+  assert.equal(executeCalls.length, 1);
+  assert.deepEqual(deferredReasons, []);
+}
+
 async function testRemoveNodeHandlesCyclicChildGraph() {
   const graph = createEmptyGraph();
   const nodeA = addNode(
@@ -7415,6 +7495,7 @@ await testLagModePendingResumeKeepsLockedPreviousAssistantAfterLatestDisappears(
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
 await testAutoExtractionDefersWhenHistoryRecoveryBusy();
+await testAutoExtractionContinuesWithRecoverablePendingPersistence();
 await testRemoveNodeHandlesCyclicChildGraph();
 await testGenerationRecallAppliesFinalInjectionOncePerTransaction();
 await testHistoryGenerationReusesPersistedRecallForStableUserFloor();

@@ -11583,7 +11583,7 @@ function queueGraphPersist(
     queuedPersistRotateIntegrity: false,
     queuedPersistReason: String(reason || ""),
     pendingPersist: true,
-    writesBlocked: true,
+    writesBlocked: !isRecoveryOnlyPersistTier(effectiveRecoverableTier),
     lastPersistReason: String(reason || ""),
     lastPersistMode: immediate ? "pending-immediate" : "pending-debounced",
     lastRecoverableStorageTier: isRecoveryOnlyPersistTier(effectiveRecoverableTier)
