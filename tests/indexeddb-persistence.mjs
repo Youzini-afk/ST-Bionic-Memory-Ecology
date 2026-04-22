@@ -4,6 +4,7 @@ import {
   BME_DB_SCHEMA_VERSION,
   BME_RUNTIME_BATCH_JOURNAL_META_KEY,
   BME_RUNTIME_HISTORY_META_KEY,
+  BME_RUNTIME_RECORDS_NORMALIZED_META_KEY,
   BME_RUNTIME_VECTOR_META_KEY,
   BME_TOMBSTONE_RETENTION_MS,
   BmeDatabase,
@@ -618,6 +619,33 @@ async function testGraphSnapshotConverters() {
       title: "Converter Node",
     },
     updatedAt: Date.now(),
+    embedding: [0.25, 0.5, 0.75],
+    scope: {
+      layer: "pov",
+      ownerType: "character",
+      ownerId: "hero",
+      ownerName: "Hero",
+      regionPrimary: "camp",
+      regionPath: ["camp", "tent"],
+      regionSecondary: ["forest"],
+    },
+    storyTime: {
+      segmentId: "segment-1",
+      label: "Dawn",
+      tense: "ongoing",
+      relation: "same",
+      anchorLabel: "Night",
+      confidence: "high",
+      source: "derived",
+    },
+    storyTimeSpan: {
+      startSegmentId: "segment-0",
+      endSegmentId: "segment-1",
+      startLabel: "Night",
+      endLabel: "Dawn",
+      mixed: false,
+      source: "derived",
+    },
   });
 
   let snapshotDiagnostics = null;
@@ -630,6 +658,7 @@ async function testGraphSnapshotConverters() {
   });
   assert.equal(snapshot.meta.chatId, "chat-a");
   assert.equal(snapshot.meta.revision, 17);
+  assert.equal(snapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY], true);
   assert.equal(snapshot.state.lastProcessedFloor, 9);
   assert.equal(snapshot.state.extractionCount, 4);
   assert.equal(snapshot.nodes.length, 1);
@@ -687,18 +716,44 @@ async function testGraphSnapshotConverters() {
   const rebuilt = buildGraphFromSnapshot(snapshot, {
     chatId: "chat-a",
   });
+  const legacyCompatibleSnapshot = {
+    ...snapshot,
+    meta: {
+      ...snapshot.meta,
+    },
+  };
+  delete legacyCompatibleSnapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY];
+  legacyCompatibleSnapshot.nodes = [
+    {
+      ...legacyCompatibleSnapshot.nodes[0],
+      scope: undefined,
+      storyTime: undefined,
+      storyTimeSpan: undefined,
+    },
+  ];
+  const rebuiltLegacyCompatible = buildGraphFromSnapshot(legacyCompatibleSnapshot, {
+    chatId: "chat-a",
+  });
   assert.equal(rebuilt.historyState.lastProcessedAssistantFloor, 9);
   assert.equal(rebuilt.historyState.extractionCount, 4);
   assert.equal(rebuilt.nodes.length, 1);
   assert.equal(rebuilt.nodes[0].id, "node-converter");
+  assert.equal(rebuilt.nodes[0].scope?.ownerType, "character");
+  assert.equal(rebuilt.nodes[0].scope?.regionPrimary, "camp");
+  assert.equal(rebuilt.nodes[0].storyTime?.label, "Dawn");
+  assert.equal(rebuilt.nodes[0].storyTimeSpan?.endLabel, "Dawn");
   assert.equal(rebuilt.vectorIndexState.hashToNodeId["vec-hash"], "node-converter");
   assert.equal(rebuilt.maintenanceJournal[0].id, "maintenance-1");
   assert.equal(rebuilt.knowledgeState.activeOwnerKey, "owner:hero");
   assert.equal(rebuilt.regionState.activeRegion, "camp");
   assert.equal(rebuilt.timelineState.activeSegmentId, "segment-1");
   assert.equal(rebuilt.summaryState.entries[0].id, "summary-1");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].scope?.layer, "objective");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].storyTime?.tense, "unknown");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].storyTimeSpan?.mixed, false);
 
   rebuilt.nodes[0].fields.title = "Mutated Converter Node";
+  rebuilt.nodes[0].embedding[0] = 99;
   rebuilt.historyState.processedMessageHashes[1] = "mutated-hash";
   rebuilt.vectorIndexState.hashToNodeId["vec-hash"] = "node-mutated";
   rebuilt.batchJournal[0].processedRange[0] = 99;
@@ -712,6 +767,11 @@ async function testGraphSnapshotConverters() {
     snapshot.meta[BME_RUNTIME_HISTORY_META_KEY].processedMessageHashes[1],
     "hash-1",
     "buildGraphFromSnapshot 不应复用 snapshot historyState 的嵌套对象引用",
+  );
+  assert.equal(
+    snapshot.nodes[0].embedding[0],
+    0.25,
+    "buildGraphFromSnapshot 不应复用 snapshot 节点的数组字段引用",
   );
   assert.equal(
     snapshot.meta[BME_RUNTIME_VECTOR_META_KEY].hashToNodeId["vec-hash"],

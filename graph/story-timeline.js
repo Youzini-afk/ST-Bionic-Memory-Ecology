@@ -147,7 +147,50 @@ export function createDefaultTimelineState(overrides = {}) {
   };
 }
 
+function canReuseNormalizedStoryTime(value = {}, defaults = {}) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (defaults && typeof defaults === "object" && Object.keys(defaults).length > 0)
+  ) {
+    return false;
+  }
+  return (
+    normalizeString(value.segmentId || "") === String(value.segmentId || "") &&
+    normalizeString(value.label || "") === String(value.label || "") &&
+    normalizeEnum(value.tense, STORY_TENSE_VALUES, "unknown") === value.tense &&
+    normalizeEnum(value.relation, STORY_RELATION_VALUES, "unknown") === value.relation &&
+    normalizeString(value.anchorLabel || "") === String(value.anchorLabel || "") &&
+    normalizeEnum(value.confidence, STORY_CONFIDENCE_VALUES, "medium") ===
+      value.confidence &&
+    normalizeEnum(value.source, STORY_SOURCE_VALUES, "derived") === value.source
+  );
+}
+
+function canReuseNormalizedStoryTimeSpan(value = {}, defaults = {}) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (defaults && typeof defaults === "object" && Object.keys(defaults).length > 0)
+  ) {
+    return false;
+  }
+  return (
+    normalizeString(value.startSegmentId || "") === String(value.startSegmentId || "") &&
+    normalizeString(value.endSegmentId || "") === String(value.endSegmentId || "") &&
+    normalizeString(value.startLabel || "") === String(value.startLabel || "") &&
+    normalizeString(value.endLabel || "") === String(value.endLabel || "") &&
+    (value.mixed === true || value.mixed === false) &&
+    normalizeEnum(value.source, STORY_SOURCE_VALUES, "derived") === value.source
+  );
+}
+
 export function normalizeStoryTime(value = {}, defaults = {}) {
+  if (canReuseNormalizedStoryTime(value, defaults)) {
+    return value;
+  }
   return createDefaultStoryTime({
     ...defaults,
     ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),
@@ -155,6 +198,9 @@ export function normalizeStoryTime(value = {}, defaults = {}) {
 }
 
 export function normalizeStoryTimeSpan(value = {}, defaults = {}) {
+  if (canReuseNormalizedStoryTimeSpan(value, defaults)) {
+    return value;
+  }
   return createDefaultStoryTimeSpan({
     ...defaults,
     ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}),

@@ -40,6 +40,8 @@ export const BME_RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY =
   "runtimeLastProcessedSeq";
 export const BME_RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
+export const BME_RUNTIME_RECORDS_NORMALIZED_META_KEY =
+  "runtimeRecordsNormalized";
 
 export const BME_DB_TABLE_SCHEMAS = Object.freeze({
   nodes:
@@ -151,6 +153,169 @@ function toPlainData(value, fallbackValue = null) {
 
 function toArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function cloneHydrateSnapshotNestedValue(value, fallbackValue = null) {
+  if (value == null || typeof value !== "object") {
+    return value == null ? fallbackValue : value;
+  }
+  if (Array.isArray(value)) {
+    const output = new Array(value.length);
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      output[index] =
+        entry != null && typeof entry === "object"
+          ? cloneHydrateSnapshotNestedValue(entry, entry)
+          : entry;
+    }
+    return output;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return toPlainData(value, fallbackValue ?? value);
+  }
+  const output = {};
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const entry = value[key];
+    output[key] =
+      entry != null && typeof entry === "object"
+        ? cloneHydrateSnapshotNestedValue(entry, entry)
+        : entry;
+  }
+  return output;
+}
+
+function cloneHydrateSnapshotMemoryScope(scope = null) {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    return cloneHydrateSnapshotNestedValue(scope, scope);
+  }
+  return {
+    ...scope,
+    regionPath: Array.isArray(scope.regionPath) ? [...scope.regionPath] : [],
+    regionSecondary: Array.isArray(scope.regionSecondary)
+      ? [...scope.regionSecondary]
+      : [],
+  };
+}
+
+function cloneHydrateSnapshotStoryTime(storyTime = null) {
+  if (!storyTime || typeof storyTime !== "object" || Array.isArray(storyTime)) {
+    return cloneHydrateSnapshotNestedValue(storyTime, storyTime);
+  }
+  return {
+    ...storyTime,
+  };
+}
+
+function cloneHydrateSnapshotStoryTimeSpan(storyTimeSpan = null) {
+  if (
+    !storyTimeSpan ||
+    typeof storyTimeSpan !== "object" ||
+    Array.isArray(storyTimeSpan)
+  ) {
+    return cloneHydrateSnapshotNestedValue(storyTimeSpan, storyTimeSpan);
+  }
+  return {
+    ...storyTimeSpan,
+  };
+}
+
+function cloneHydrateSnapshotNodeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const cloned = {};
+  for (const key in record) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const value = record[key];
+    switch (key) {
+      case "fields":
+        cloned.fields = cloneHydrateSnapshotNestedValue(value, {});
+        break;
+      case "seqRange":
+        cloned.seqRange = Array.isArray(value)
+          ? value.slice()
+          : cloneHydrateSnapshotNestedValue(value, value);
+        break;
+      case "childIds":
+        cloned.childIds = Array.isArray(value)
+          ? value.slice()
+          : cloneHydrateSnapshotNestedValue(value, value);
+        break;
+      case "clusters":
+        cloned.clusters = Array.isArray(value)
+          ? value.slice()
+          : cloneHydrateSnapshotNestedValue(value, value);
+        break;
+      case "scope":
+        cloned.scope = cloneHydrateSnapshotMemoryScope(value);
+        break;
+      case "storyTime":
+        cloned.storyTime = cloneHydrateSnapshotStoryTime(value);
+        break;
+      case "storyTimeSpan":
+        cloned.storyTimeSpan = cloneHydrateSnapshotStoryTimeSpan(value);
+        break;
+      default:
+        cloned[key] =
+          value != null && typeof value === "object"
+            ? cloneHydrateSnapshotNestedValue(value, value)
+            : value;
+        break;
+    }
+  }
+  return cloned;
+}
+
+function cloneHydrateSnapshotEdgeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const cloned = {};
+  for (const key in record) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const value = record[key];
+    if (key === "scope") {
+      cloned.scope = cloneHydrateSnapshotMemoryScope(value);
+      continue;
+    }
+    cloned[key] =
+      value != null && typeof value === "object"
+        ? cloneHydrateSnapshotNestedValue(value, value)
+        : value;
+  }
+  return cloned;
+}
+
+function cloneHydrateSnapshotNodeRecords(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const cloned = cloneHydrateSnapshotNodeRecord(sourceRecords[index]);
+    if (!cloned) continue;
+    output[writeIndex] = cloned;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
+}
+
+function cloneHydrateSnapshotEdgeRecords(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const cloned = cloneHydrateSnapshotEdgeRecord(sourceRecords[index]);
+    if (!cloned) continue;
+    output[writeIndex] = cloned;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
 }
 
 function toMetaMap(rows = []) {
@@ -927,6 +1092,7 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     )
       ? Number(runtimeGraph.version)
       : Number(baseSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY] || 0),
+    [BME_RUNTIME_RECORDS_NORMALIZED_META_KEY]: true,
   };
   if (snapshotDiagnostics) {
     snapshotDiagnostics.metaMs = readPersistDeltaNow() - metaStartedAt;
@@ -2133,6 +2299,8 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY],
     {},
   );
+  const snapshotRecordsNormalized =
+    snapshotMeta?.[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY] === true;
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
@@ -2142,14 +2310,14 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     : runtimeGraph.version;
 
   const hydrateNodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
-  runtimeGraph.nodes = toArray(toPlainData(snapshotView.nodes, []));
+  runtimeGraph.nodes = cloneHydrateSnapshotNodeRecords(snapshotView.nodes);
   if (hydrateDiagnostics) {
     hydrateDiagnostics.nodeCount = runtimeGraph.nodes.length;
     hydrateDiagnostics.nodesMs = readPersistDeltaNow() - hydrateNodesStartedAt;
   }
 
   const hydrateEdgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
-  runtimeGraph.edges = toArray(toPlainData(snapshotView.edges, []));
+  runtimeGraph.edges = cloneHydrateSnapshotEdgeRecords(snapshotView.edges);
   if (hydrateDiagnostics) {
     hydrateDiagnostics.edgeCount = runtimeGraph.edges.length;
     hydrateDiagnostics.edgesMs = readPersistDeltaNow() - hydrateEdgesStartedAt;
@@ -2302,7 +2470,9 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
 
   const normalizeStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
-  const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
+  const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId, {
+    skipRecordFieldNormalization: snapshotRecordsNormalized,
+  });
   if (hydrateDiagnostics) {
     hydrateDiagnostics.normalizeMs = readPersistDeltaNow() - normalizeStartedAt;
   }

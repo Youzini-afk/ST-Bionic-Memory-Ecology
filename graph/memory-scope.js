@@ -58,6 +58,48 @@ function normalizeStringArray(values = []) {
   return result;
 }
 
+function isAlreadyNormalizedStringArray(values = []) {
+  if (!Array.isArray(values)) return false;
+  const seen = new Set();
+  for (const value of values) {
+    if (typeof value !== "string") return false;
+    const normalized = normalizeString(value);
+    const key = normalizeKey(normalized);
+    if (!normalized || normalized !== value || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+  }
+  return true;
+}
+
+function canReuseNormalizedMemoryScope(scope = {}, defaults = {}) {
+  if (
+    !scope ||
+    typeof scope !== "object" ||
+    Array.isArray(scope) ||
+    (defaults && typeof defaults === "object" && Object.keys(defaults).length > 0)
+  ) {
+    return false;
+  }
+  const layer = normalizeLayer(scope.layer);
+  const ownerType = normalizeOwnerType(layer, normalizeString(scope.ownerType));
+  const ownerId = ownerType
+    ? normalizeString(scope.ownerId || scope.ownerName)
+    : "";
+  const ownerName = ownerType ? normalizeString(scope.ownerName) : "";
+  const regionPrimary = normalizeString(scope.regionPrimary);
+  return (
+    scope.layer === layer &&
+    normalizeString(scope.ownerType) === ownerType &&
+    normalizeString(scope.ownerId || "") === ownerId &&
+    normalizeString(scope.ownerName || "") === ownerName &&
+    normalizeString(scope.regionPrimary || "") === regionPrimary &&
+    isAlreadyNormalizedStringArray(scope.regionPath) &&
+    isAlreadyNormalizedStringArray(scope.regionSecondary)
+  );
+}
+
 function normalizeOwnerValueSet(values = []) {
   return new Set(
     normalizeStringArray(values).map((value) => normalizeKey(value)),
@@ -88,6 +130,9 @@ export function createDefaultMemoryScope(overrides = {}) {
 }
 
 export function normalizeMemoryScope(scope = {}, defaults = {}) {
+  if (canReuseNormalizedMemoryScope(scope, defaults)) {
+    return scope;
+  }
   const merged = {
     ...DEFAULT_MEMORY_SCOPE,
     ...(defaults || {}),

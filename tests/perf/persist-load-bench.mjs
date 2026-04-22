@@ -12,6 +12,7 @@ import {
 import { createMemoryOpfsRoot } from "../helpers/memory-opfs.mjs";
 
 const RUNS = 4;
+const outputJson = process.argv.includes("--json");
 const SIZE_PRESETS = [
   { label: "M", seed: 17, nodeCount: 1200, edgeCount: 3600, churn: 0.08 },
   { label: "L", seed: 29, nodeCount: 3600, edgeCount: 10800, churn: 0.1 },
@@ -260,6 +261,11 @@ async function runPreset(preset) {
   const opfsCommitSamples = [];
   const snapshotNodesSamples = [];
   const hydrateRuntimeMetaSamples = [];
+  const hydrateNodesSamples = [];
+  const hydrateEdgesSamples = [];
+  const hydrateStateSamples = [];
+  const hydrateNormalizeSamples = [];
+  const hydrateIntegritySamples = [];
   const walFileWriteSamples = [];
   const manifestFileWriteSamples = [];
 
@@ -295,31 +301,64 @@ async function runPreset(preset) {
     opfsCommitSamples.push(opfsCommitResult.elapsedMs);
     snapshotNodesSamples.push(Number(afterSnapshotResult.diagnostics?.nodesMs || 0));
     hydrateRuntimeMetaSamples.push(Number(hydrateResult.diagnostics?.runtimeMetaMs || 0));
+    hydrateNodesSamples.push(Number(hydrateResult.diagnostics?.nodesMs || 0));
+    hydrateEdgesSamples.push(Number(hydrateResult.diagnostics?.edgesMs || 0));
+    hydrateStateSamples.push(Number(hydrateResult.diagnostics?.stateMs || 0));
+    hydrateNormalizeSamples.push(Number(hydrateResult.diagnostics?.normalizeMs || 0));
+    hydrateIntegritySamples.push(Number(hydrateResult.diagnostics?.integrityMs || 0));
     walFileWriteSamples.push(Number(opfsCommitResult.diagnostics?.walFileWriteMs || 0));
     manifestFileWriteSamples.push(
       Number(opfsCommitResult.diagnostics?.manifestFileWriteMs || 0),
     );
   }
 
-  console.log(`\n[ST-BME][persist-load-bench] ${preset.label}`);
-  console.log(
-    formatSummary("snapshot-build", snapshotBuildSamples),
-    `nodesPhaseP95=${summarize(snapshotNodesSamples).p95.toFixed(2)}ms`,
-  );
-  console.log(
-    formatSummary("hydrate", hydrateSamples),
-    `runtimeMetaP95=${summarize(hydrateRuntimeMetaSamples).p95.toFixed(2)}ms`,
-  );
-  console.log(
-    formatSummary("opfs-commit", opfsCommitSamples),
-    `walFileP95=${summarize(walFileWriteSamples).p95.toFixed(2)}ms`,
-    `manifestFileP95=${summarize(manifestFileWriteSamples).p95.toFixed(2)}ms`,
-  );
+  const result = {
+    snapshotBuildMs: summarize(snapshotBuildSamples),
+    snapshotNodesMs: summarize(snapshotNodesSamples),
+    hydrateMs: summarize(hydrateSamples),
+    hydrateNodesMs: summarize(hydrateNodesSamples),
+    hydrateEdgesMs: summarize(hydrateEdgesSamples),
+    hydrateStateMs: summarize(hydrateStateSamples),
+    hydrateNormalizeMs: summarize(hydrateNormalizeSamples),
+    hydrateIntegrityMs: summarize(hydrateIntegritySamples),
+    hydrateRuntimeMetaMs: summarize(hydrateRuntimeMetaSamples),
+    opfsCommitMs: summarize(opfsCommitSamples),
+    opfsWalFileWriteMs: summarize(walFileWriteSamples),
+    opfsManifestFileWriteMs: summarize(manifestFileWriteSamples),
+  };
+  if (!outputJson) {
+    console.log(`\n[ST-BME][persist-load-bench] ${preset.label}`);
+    console.log(
+      formatSummary("snapshot-build", snapshotBuildSamples),
+      `nodesPhaseP95=${result.snapshotNodesMs.p95.toFixed(2)}ms`,
+    );
+    console.log(
+      formatSummary("hydrate", hydrateSamples),
+      `nodesP95=${result.hydrateNodesMs.p95.toFixed(2)}ms`,
+      `edgesP95=${result.hydrateEdgesMs.p95.toFixed(2)}ms`,
+      `normalizeP95=${result.hydrateNormalizeMs.p95.toFixed(2)}ms`,
+      `integrityP95=${result.hydrateIntegrityMs.p95.toFixed(2)}ms`,
+      `runtimeMetaP95=${result.hydrateRuntimeMetaMs.p95.toFixed(2)}ms`,
+    );
+    console.log(
+      formatSummary("opfs-commit", opfsCommitSamples),
+      `walFileP95=${result.opfsWalFileWriteMs.p95.toFixed(2)}ms`,
+      `manifestFileP95=${result.opfsManifestFileWriteMs.p95.toFixed(2)}ms`,
+    );
+  }
+  return result;
 }
 
 async function main() {
+  const results = {};
   for (const preset of SIZE_PRESETS) {
-    await runPreset(preset);
+    results[preset.label] = await runPreset(preset);
+  }
+  if (outputJson) {
+    console.log(JSON.stringify({
+      runs: RUNS,
+      presets: results,
+    }));
   }
 }
 

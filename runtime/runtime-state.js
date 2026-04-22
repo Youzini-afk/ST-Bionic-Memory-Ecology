@@ -10,6 +10,7 @@ import {
 } from "../graph/knowledge-state.js";
 import {
   createDefaultTimelineState,
+  normalizeTimelineState,
   normalizeGraphStoryTimeline,
 } from "../graph/story-timeline.js";
 import {
@@ -224,10 +225,12 @@ function getRequiredJournalCoverageStartFloor(graph, journals = []) {
   return null;
 }
 
-export function normalizeGraphRuntimeState(graph, chatId = "") {
+export function normalizeGraphRuntimeState(graph, chatId = "", options = {}) {
   if (!graph || typeof graph !== "object") {
     return graph;
   }
+  const skipRecordFieldNormalization =
+    options?.skipRecordFieldNormalization === true;
   const hadSummaryState =
     graph.summaryState &&
     typeof graph.summaryState === "object" &&
@@ -475,10 +478,10 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
 
   graph.historyState = historyState;
   graph.vectorIndexState = vectorIndexState;
-  if (Array.isArray(graph.nodes)) {
+  if (!skipRecordFieldNormalization && Array.isArray(graph.nodes)) {
     graph.nodes.forEach((node) => normalizeNodeMemoryScope(node));
   }
-  if (Array.isArray(graph.edges)) {
+  if (!skipRecordFieldNormalization && Array.isArray(graph.edges)) {
     graph.edges.forEach((edge) => normalizeEdgeMemoryScope(edge));
   }
   graph.batchJournal = Array.isArray(graph.batchJournal)
@@ -496,10 +499,16 @@ export function normalizeGraphRuntimeState(graph, chatId = "") {
     : createDefaultMaintenanceJournal();
   graph.knowledgeState = createDefaultKnowledgeState(graph.knowledgeState);
   graph.regionState = createDefaultRegionState(graph.regionState);
-  graph.timelineState = createDefaultTimelineState(graph.timelineState);
+  graph.timelineState = skipRecordFieldNormalization
+    ? normalizeTimelineState(graph.timelineState)
+    : createDefaultTimelineState(graph.timelineState);
   graph.summaryState = createDefaultSummaryState(graph.summaryState);
   normalizeGraphCognitiveState(graph);
-  normalizeGraphStoryTimeline(graph);
+  if (skipRecordFieldNormalization) {
+    graph.timelineState = normalizeTimelineState(graph.timelineState);
+  } else {
+    normalizeGraphStoryTimeline(graph);
+  }
   normalizeGraphSummaryState(graph);
   if (!hadSummaryState) {
     importLegacySynopsisToSummaryState(graph);
