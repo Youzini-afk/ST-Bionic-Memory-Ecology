@@ -144,7 +144,7 @@ function createRuntime(persistResult) {
 
   assert.equal(result.success, true);
   assert.equal(result.historyAdvanceAllowed, false);
-  assert.equal(runtime.processedHistoryUpdates, 0);
+  assert.equal(runtime.processedHistoryUpdates, 1);
   assert.equal(
     runtime.graph.historyState.lastBatchStatus.persistence.outcome,
     "queued",
@@ -153,6 +153,11 @@ function createRuntime(persistResult) {
     runtime.graph.historyState.lastBatchStatus.historyAdvanceAllowed,
     false,
   );
+  assert.equal(
+    runtime.graph.historyState.lastBatchStatus.historyAdvanced,
+    false,
+  );
+  assert.equal(runtime.graph.batchJournal.length, 0);
   assert.equal(
     runtime.persistedGraphSnapshot?.historyState?.lastProcessedAssistantFloor,
     5,
