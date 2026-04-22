@@ -101,6 +101,34 @@ function normalizeTimestamp(value, fallbackValue = Date.now()) {
   return Math.floor(Number(fallbackValue) || Date.now());
 }
 
+function normalizeNonNegativeInteger(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return Math.max(0, Math.floor(Number(fallback) || 0));
+  }
+  return Math.max(0, Math.floor(parsed));
+}
+
+function readPersistCommitNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function normalizePersistCommitMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function estimatePersistPayloadBytes(value = null) {
+  if (value == null) return 0;
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
 function toPlainData(value, fallbackValue = null) {
   if (value == null) {
     return fallbackValue;
@@ -197,18 +225,47 @@ function normalizePersistSnapshotView(snapshot = {}) {
     };
   }
 
+  const hasExplicitMeta =
+    snapshot.meta &&
+    typeof snapshot.meta === "object" &&
+    !Array.isArray(snapshot.meta);
+  const hasExplicitState =
+    snapshot.state &&
+    typeof snapshot.state === "object" &&
+    !Array.isArray(snapshot.state);
+  const shouldDeriveFromRuntimeGraph =
+    !hasExplicitMeta &&
+    !hasExplicitState &&
+    (Object.prototype.hasOwnProperty.call(snapshot, "historyState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "vectorIndexState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "batchJournal") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "maintenanceJournal") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "summaryState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "knowledgeState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "regionState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "timelineState") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "lastRecallResult") ||
+      Object.prototype.hasOwnProperty.call(snapshot, "lastProcessedSeq"));
+  const derivedRuntimeSnapshot = shouldDeriveFromRuntimeGraph
+    ? buildSnapshotFromGraph(snapshot, {
+        chatId: normalizeChatId(snapshot?.historyState?.chatId || ""),
+      })
+    : null;
+
   return {
-    meta:
-      snapshot.meta &&
-      typeof snapshot.meta === "object" &&
-      !Array.isArray(snapshot.meta)
-        ? snapshot.meta
+    meta: hasExplicitMeta
+      ? snapshot.meta
+      : derivedRuntimeSnapshot?.meta &&
+          typeof derivedRuntimeSnapshot.meta === "object" &&
+          !Array.isArray(derivedRuntimeSnapshot.meta)
+        ? derivedRuntimeSnapshot.meta
         : {},
-    state:
-      snapshot.state &&
-      typeof snapshot.state === "object" &&
-      !Array.isArray(snapshot.state)
-        ? snapshot.state
+    state: hasExplicitState
+      ? snapshot.state
+      : derivedRuntimeSnapshot?.state &&
+          typeof derivedRuntimeSnapshot.state === "object" &&
+          !Array.isArray(derivedRuntimeSnapshot.state)
+        ? derivedRuntimeSnapshot.state
         : {},
     nodes: toArray(snapshot.nodes),
     edges: toArray(snapshot.edges),
@@ -589,6 +646,26 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     !Array.isArray(options.baseSnapshot)
       ? options.baseSnapshot
       : {};
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const snapshotStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const snapshotDiagnostics = shouldCollectDiagnostics
+    ? {
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+        reusedNodeCount: 0,
+        reusedEdgeCount: 0,
+        reusedTombstoneCount: 0,
+        clonedNodeCount: 0,
+        clonedEdgeCount: 0,
+        clonedTombstoneCount: 0,
+        nodesMs: 0,
+        edgesMs: 0,
+        tombstonesMs: 0,
+        stateMs: 0,
+        metaMs: 0,
+      }
+    : null;
   const baseSnapshot = sanitizeSnapshot(baseSnapshotInput);
   const baseSnapshotView = normalizePersistSnapshotView(baseSnapshotInput);
   const nowMs = normalizeTimestamp(options.nowMs, Date.now());
@@ -617,6 +694,7 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     baseSnapshotView.tombstones,
   );
 
+  const nodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const nodes = toArray(runtimeGraph?.nodes)
     .map((node) => {
       if (!node || typeof node !== "object" || Array.isArray(node)) {
@@ -632,18 +710,29 @@ export function buildSnapshotFromGraph(graph, options = {}) {
           updatedAt: normalizedUpdatedAt,
         })
       ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedNodeCount += 1;
+        }
         return baseNode;
       }
       const plainNode = clonePersistSnapshotRecord(node);
       if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
         return null;
       }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedNodeCount += 1;
+      }
       plainNode.id = id;
       plainNode.updatedAt = normalizedUpdatedAt;
       return plainNode;
     })
     .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.nodeCount = nodes.length;
+    snapshotDiagnostics.nodesMs = readPersistDeltaNow() - nodesStartedAt;
+  }
 
+  const edgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const edges = toArray(runtimeGraph?.edges)
     .map((edge) => {
       if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
@@ -662,11 +751,17 @@ export function buildSnapshotFromGraph(graph, options = {}) {
           updatedAt: normalizedUpdatedAt,
         })
       ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedEdgeCount += 1;
+        }
         return baseEdge;
       }
       const plainEdge = clonePersistSnapshotRecord(edge);
       if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
         return null;
+      }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedEdgeCount += 1;
       }
       plainEdge.id = id;
       plainEdge.fromId = normalizedFromId;
@@ -675,7 +770,12 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       return plainEdge;
     })
     .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.edgeCount = edges.length;
+    snapshotDiagnostics.edgesMs = readPersistDeltaNow() - edgesStartedAt;
+  }
 
+  const tombstonesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const tombstones = toArray(options.tombstones ?? baseSnapshotView.tombstones)
     .map((record) => {
       if (!record || typeof record !== "object" || Array.isArray(record))
@@ -695,11 +795,17 @@ export function buildSnapshotFromGraph(graph, options = {}) {
           deletedAt: normalizedDeletedAt,
         })
       ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedTombstoneCount += 1;
+        }
         return baseTombstone;
       }
       const plainRecord = clonePersistSnapshotRecord(record);
       if (!plainRecord || typeof plainRecord !== "object" || Array.isArray(plainRecord)) {
         return null;
+      }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedTombstoneCount += 1;
       }
       plainRecord.id = id;
       plainRecord.kind = normalizedKind;
@@ -709,7 +815,13 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       return plainRecord;
     })
     .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.tombstoneCount = tombstones.length;
+    snapshotDiagnostics.tombstonesMs =
+      readPersistDeltaNow() - tombstonesStartedAt;
+  }
 
+  const stateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const state = {
     ...normalizeStateSnapshot(baseSnapshot),
     ...(options.state || {}),
@@ -726,7 +838,11 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       ? Number(runtimeGraph.historyState.extractionCount)
       : META_DEFAULT_EXTRACTION_COUNT,
   };
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.stateMs = readPersistDeltaNow() - stateStartedAt;
+  }
 
+  const metaStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const mergedMeta = {
     ...baseSnapshot.meta,
     ...(options.meta || {}),
@@ -812,14 +928,26 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       ? Number(runtimeGraph.version)
       : Number(baseSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY] || 0),
   };
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.metaMs = readPersistDeltaNow() - metaStartedAt;
+  }
 
-  return {
+  const snapshotResult = {
     meta: mergedMeta,
     nodes,
     edges,
     tombstones,
     state,
   };
+  if (snapshotDiagnostics) {
+    emitOptionalDiagnostics(options, {
+      ...snapshotDiagnostics,
+      runtimeMetaKeyCount: Object.keys(mergedMeta).length,
+      totalMs: readPersistDeltaNow() - snapshotStartedAt,
+    });
+  }
+
+  return snapshotResult;
 }
 
 function normalizeSnapshotMetaState(snapshot = {}) {
@@ -1573,13 +1701,17 @@ function readPersistDeltaNow() {
   return Date.now();
 }
 
-function emitPersistDeltaDiagnostics(options = {}, snapshot = null) {
+function emitOptionalDiagnostics(options = {}, snapshot = null) {
   if (typeof options?.onDiagnostics !== "function") return;
   try {
     options.onDiagnostics(snapshot ? toPlainData(snapshot, snapshot) : null);
   } catch {
     // ignore diagnostics callback failures
   }
+}
+
+function emitPersistDeltaDiagnostics(options = {}, snapshot = null) {
+  emitOptionalDiagnostics(options, snapshot);
 }
 
 function tryBuildNativePersistDelta(
@@ -1959,6 +2091,23 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
 }
 
 export function buildGraphFromSnapshot(snapshot, options = {}) {
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const hydrateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const hydrateDiagnostics = shouldCollectDiagnostics
+    ? {
+        success: false,
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+        nodesMs: 0,
+        edgesMs: 0,
+        runtimeMetaMs: 0,
+        stateMs: 0,
+        normalizeMs: 0,
+        integrityMs: 0,
+        integrityReasonCount: 0,
+      }
+    : null;
   const snapshotView = normalizePersistSnapshotView(snapshot);
   const snapshotMeta =
     snapshotView.meta &&
@@ -1976,6 +2125,14 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     normalizeChatId(options.chatId) ||
     normalizeChatId(snapshotMeta?.chatId) ||
     normalizeChatId(snapshotState?.chatId);
+  const snapshotHistoryState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY],
+    {},
+  );
+  const snapshotVectorState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY],
+    {},
+  );
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
@@ -1983,21 +2140,33 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(snapshotMeta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(snapshotView.nodes).map((node) => ({
-    ...(node || {}),
-  }));
-  runtimeGraph.edges = toArray(snapshotView.edges).map((edge) => ({
-    ...(edge || {}),
-  }));
+
+  const hydrateNodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  runtimeGraph.nodes = toArray(toPlainData(snapshotView.nodes, []));
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.nodeCount = runtimeGraph.nodes.length;
+    hydrateDiagnostics.nodesMs = readPersistDeltaNow() - hydrateNodesStartedAt;
+  }
+
+  const hydrateEdgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  runtimeGraph.edges = toArray(toPlainData(snapshotView.edges, []));
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.edgeCount = runtimeGraph.edges.length;
+    hydrateDiagnostics.edgesMs = readPersistDeltaNow() - hydrateEdgesStartedAt;
+  }
+
+  const hydrateRuntimeMetaStartedAt = shouldCollectDiagnostics
+    ? readPersistDeltaNow()
+    : 0;
   runtimeGraph.batchJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY], []),
   );
   runtimeGraph.lastRecallResult = toPlainData(
     snapshotMeta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
   runtimeGraph.maintenanceJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY], []),
   );
   runtimeGraph.knowledgeState = toPlainData(
     snapshotMeta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
@@ -2015,6 +2184,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     snapshotMeta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
     runtimeGraph.summaryState || {},
   );
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.runtimeMetaMs =
+      readPersistDeltaNow() - hydrateRuntimeMetaStartedAt;
+  }
   const rawKnowledgeState =
     runtimeGraph.knowledgeState &&
     typeof runtimeGraph.knowledgeState === "object" &&
@@ -2034,24 +2207,24 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
       ? runtimeGraph.timelineState
       : {};
 
+  const hydrateStateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
+    ...snapshotHistoryState,
     lastProcessedAssistantFloor: Number.isFinite(
       Number(snapshotState?.lastProcessedFloor),
     )
       ? Number(snapshotState.lastProcessedFloor)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
+          snapshotHistoryState?.lastProcessedAssistantFloor ??
+            META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
     extractionCount: Number.isFinite(
       Number(snapshotState?.extractionCount),
     )
       ? Number(snapshotState.extractionCount)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
+          snapshotHistoryState?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
   if (
@@ -2109,10 +2282,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
+    ...snapshotVectorState,
     collectionId: buildVectorCollectionId(
       chatId ||
-        snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
+        snapshotHistoryState?.chatId ||
         runtimeGraph.historyState?.chatId ||
         "",
     ),
@@ -2123,8 +2296,16 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(snapshotMeta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.tombstoneCount = toArray(snapshotView.tombstones).length;
+    hydrateDiagnostics.stateMs = readPersistDeltaNow() - hydrateStateStartedAt;
+  }
 
+  const normalizeStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.normalizeMs = readPersistDeltaNow() - normalizeStartedAt;
+  }
   if (
     normalizedGraph.knowledgeState &&
     typeof normalizedGraph.knowledgeState === "object" &&
@@ -2178,6 +2359,7 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   );
   const inconsistentReasons = [];
 
+  const integrityStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   if (
     Number.isFinite(resolvedLastProcessedFloor) &&
     Number.isFinite(resolvedLastProcessedSeq) &&
@@ -2195,8 +2377,20 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   if (collectionId && collectionId !== expectedCollectionId) {
     inconsistentReasons.push("vector-collection-mismatch");
   }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.integrityMs = readPersistDeltaNow() - integrityStartedAt;
+    hydrateDiagnostics.integrityReasonCount = inconsistentReasons.length;
+  }
 
   if (inconsistentReasons.length > 0) {
+    if (hydrateDiagnostics) {
+      emitOptionalDiagnostics(options, {
+        ...hydrateDiagnostics,
+        success: false,
+        integrityReasons: [...inconsistentReasons],
+        totalMs: readPersistDeltaNow() - hydrateStartedAt,
+      });
+    }
     const error = new Error(
       `图谱快照完整性校验失败: ${inconsistentReasons.join(", ")}`,
     );
@@ -2204,6 +2398,15 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     error.reasons = inconsistentReasons;
     error.snapshotChatId = chatId;
     throw error;
+  }
+
+  if (hydrateDiagnostics) {
+    emitOptionalDiagnostics(options, {
+      ...hydrateDiagnostics,
+      success: true,
+      integrityReasons: [],
+      totalMs: readPersistDeltaNow() - hydrateStartedAt,
+    });
   }
 
   return normalizedGraph;
@@ -2222,6 +2425,31 @@ async function loadDexieFromNodeFallback() {
   }
 
   throw new Error("Dexie 不可用（Node 环境缺少 dexie 依赖）");
+}
+
+async function loadDexieByModuleImport() {
+  const moduleUrl = new URL(DEXIE_SCRIPT_SOURCE, import.meta.url).toString();
+  try {
+    const imported = await import(moduleUrl);
+    const DexieCtor =
+      imported?.default ||
+      imported?.Dexie ||
+      globalThis.Dexie ||
+      null;
+    if (typeof DexieCtor === "function") {
+      globalThis.Dexie = DexieCtor;
+      return DexieCtor;
+    }
+    if (typeof globalThis.Dexie === "function") {
+      return globalThis.Dexie;
+    }
+  } catch (error) {
+    throw new Error(
+      `Dexie 模块导入失败: ${error?.message || String(error) || moduleUrl}`,
+    );
+  }
+
+  throw new Error("Dexie 模块已加载但未导出可用构造函数");
 }
 
 async function loadDexieByScriptInjection() {
@@ -2289,6 +2517,12 @@ export async function ensureDexieLoaded() {
 
       if (typeof globalThis.document === "undefined") {
         return await loadDexieFromNodeFallback();
+      }
+
+      try {
+        return await loadDexieByModuleImport();
+      } catch (moduleError) {
+        console.warn("[ST-BME] Dexie 模块导入失败，回退脚本注入:", moduleError);
       }
 
       return await loadDexieByScriptInjection();
@@ -2459,6 +2693,7 @@ export class BmeDatabase {
 
   async commitDelta(delta = {}, options = {}) {
     const db = await this.open();
+    const commitRequestedAt = readPersistCommitNow();
     const nowMs = Date.now();
     const normalizedDelta =
       delta && typeof delta === "object" && !Array.isArray(delta) ? delta : {};
@@ -2483,6 +2718,7 @@ export class BmeDatabase {
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
     const normalizedCountDelta =
       normalizedDelta.countDelta &&
       typeof normalizedDelta.countDelta === "object" &&
@@ -2496,7 +2732,9 @@ export class BmeDatabase {
       edges: 0,
       tombstones: 0,
     };
+    let transactionMs = 0;
 
+    const transactionStartedAt = readPersistCommitNow();
     await db.transaction(
       "rw",
       db.table("nodes"),
@@ -2543,6 +2781,7 @@ export class BmeDatabase {
         );
       },
     );
+    transactionMs = readPersistCommitNow() - transactionStartedAt;
 
     return {
       revision: nextRevision,
@@ -2558,6 +2797,17 @@ export class BmeDatabase {
         deleteNodeIds: deleteNodeIds.length,
         deleteEdgeIds: deleteEdgeIds.length,
         tombstones: tombstones.length,
+      },
+      diagnostics: {
+        storageKind: "indexeddb",
+        storeMode: "indexeddb",
+        queueWaitMs: 0,
+        commitMs: normalizePersistCommitMs(
+          readPersistCommitNow() - commitRequestedAt,
+        ),
+        txMs: normalizePersistCommitMs(transactionMs),
+        payloadBytes,
+        runtimeMetaKeyCount: Object.keys(runtimeMetaPatch).length,
       },
     };
   }
@@ -2964,23 +3214,47 @@ export class BmeDatabase {
     };
   }
 
-  async exportSnapshot() {
+  async exportSnapshot(options = {}) {
     const db = await this.open();
 
-    const [nodes, edges, tombstones, metaRows] = await db.transaction(
-      "r",
-      db.table("nodes"),
-      db.table("edges"),
-      db.table("tombstones"),
-      db.table("meta"),
-      async () =>
-        await Promise.all([
-          db.table("nodes").toArray(),
-          db.table("edges").toArray(),
-          db.table("tombstones").toArray(),
-          db.table("meta").toArray(),
-        ]),
-    );
+    const includeTombstones =
+      options && typeof options === "object"
+        ? options.includeTombstones !== false
+        : options !== false;
+    let nodes = [];
+    let edges = [];
+    let tombstones = [];
+    let metaRows = [];
+
+    if (includeTombstones) {
+      [nodes, edges, tombstones, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("tombstones"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("tombstones").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    } else {
+      [nodes, edges, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    }
 
     const metaMap = toMetaMap(metaRows);
     const meta = {
@@ -2990,7 +3264,10 @@ export class BmeDatabase {
       revision: normalizeRevision(metaMap?.revision),
       nodeCount: nodes.length,
       edgeCount: edges.length,
-      tombstoneCount: tombstones.length,
+      tombstoneCount: normalizeNonNegativeInteger(
+        metaMap?.tombstoneCount,
+        tombstones.length,
+      ),
     };
 
     const state = {
@@ -3002,12 +3279,52 @@ export class BmeDatabase {
         : META_DEFAULT_EXTRACTION_COUNT,
     };
 
-    return {
+    const snapshot = {
       meta,
       nodes,
       edges,
-      tombstones,
+      tombstones: includeTombstones ? tombstones : [],
       state,
+    };
+
+    if (!includeTombstones) {
+      snapshot.__stBmeTombstonesOmitted = true;
+    }
+
+    return snapshot;
+  }
+
+  async exportSnapshotProbe() {
+    const db = await this.open();
+    const metaRows = await db.transaction("r", db.table("meta"), async () =>
+      await db.table("meta").toArray(),
+    );
+    const metaMap = toMetaMap(metaRows);
+    const meta = {
+      ...metaMap,
+      schemaVersion: BME_DB_SCHEMA_VERSION,
+      chatId: this.chatId,
+      revision: normalizeRevision(metaMap?.revision),
+      nodeCount: normalizeNonNegativeInteger(metaMap?.nodeCount, 0),
+      edgeCount: normalizeNonNegativeInteger(metaMap?.edgeCount, 0),
+      tombstoneCount: normalizeNonNegativeInteger(metaMap?.tombstoneCount, 0),
+    };
+    const state = {
+      lastProcessedFloor: Number.isFinite(Number(meta.lastProcessedFloor))
+        ? Number(meta.lastProcessedFloor)
+        : META_DEFAULT_LAST_PROCESSED_FLOOR,
+      extractionCount: Number.isFinite(Number(meta.extractionCount))
+        ? Number(meta.extractionCount)
+        : META_DEFAULT_EXTRACTION_COUNT,
+    };
+    return {
+      meta,
+      state,
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      __stBmeProbeOnly: true,
+      __stBmeTombstonesOmitted: true,
     };
   }
 

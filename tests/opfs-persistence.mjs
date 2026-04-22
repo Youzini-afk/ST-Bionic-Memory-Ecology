@@ -23,6 +23,12 @@ function createNotFoundError(message) {
   return error;
 }
 
+function createTypeMismatchError(message) {
+  const error = new Error(String(message || "Type mismatch"));
+  error.name = "TypeMismatchError";
+  return error;
+}
+
 class MemoryOpfsFileHandle {
   constructor(parent, name) {
     this.parent = parent;
@@ -71,6 +77,11 @@ class MemoryOpfsDirectoryHandle {
 
   async getDirectoryHandle(name, options = {}) {
     const normalizedName = String(name || "");
+    if (this.files.has(normalizedName)) {
+      throw createTypeMismatchError(
+        `A file already exists for directory: ${normalizedName}`,
+      );
+    }
     let directory = this.directories.get(normalizedName) || null;
     if (!directory) {
       if (!options.create) {
@@ -84,6 +95,11 @@ class MemoryOpfsDirectoryHandle {
 
   async getFileHandle(name, options = {}) {
     const normalizedName = String(name || "");
+    if (this.directories.has(normalizedName)) {
+      throw createTypeMismatchError(
+        `A directory already exists for file: ${normalizedName}`,
+      );
+    }
     if (!this.files.has(normalizedName)) {
       if (!options.create) {
         throw createNotFoundError(`File not found: ${normalizedName}`);
@@ -176,6 +192,16 @@ async function testDetectOpfsSupport() {
   });
   assert.equal(supported.available, true);
   assert.equal(supported.reason, "ok");
+
+  const conflictedRootDirectory = createMemoryOpfsRoot();
+  conflictedRootDirectory.files.set("st-bme", "legacy-conflict");
+  const repairedConflict = await detectOpfsSupport({
+    rootDirectoryFactory: async () => conflictedRootDirectory,
+  });
+  assert.equal(repairedConflict.available, true);
+  assert.equal(repairedConflict.reason, "ok");
+  assert.equal(conflictedRootDirectory.files.has("st-bme"), false);
+  assert.ok(conflictedRootDirectory.directories.has("st-bme"));
 
   const missingHandle = await detectOpfsSupport({
     rootDirectoryFactory: async () => ({}),
@@ -285,6 +311,12 @@ async function testImportExportPersistenceAndFileRotation() {
   assert.equal(firstExportedSnapshot.state.extractionCount, 2);
   assert.equal(firstExportedSnapshot.meta.storagePrimary, "opfs");
   assert.equal(firstExportedSnapshot.meta.storageMode, "opfs-primary");
+  const lightweightSnapshot = await store.exportSnapshot({
+    includeTombstones: false,
+  });
+  assert.equal(lightweightSnapshot.__stBmeTombstonesOmitted, true);
+  assert.deepEqual(lightweightSnapshot.tombstones, []);
+  assert.equal(lightweightSnapshot.meta.tombstoneCount, 1);
   assert.deepEqual(firstExportedSnapshot.meta[BME_RUNTIME_BATCH_JOURNAL_META_KEY], {
     pending: ["job-1"],
   });

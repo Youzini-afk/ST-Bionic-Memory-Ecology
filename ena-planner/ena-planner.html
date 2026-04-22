@@ -27,7 +27,7 @@
           <div class="stat-val" id="ep_save_status">就绪</div>
           <div class="stat-lbl">保存</div>
         </div>
-        <button class="modal-close" id="ep_close" title="关闭">
+        <button class="modal-close" id="ep_close" type="button" title="关闭">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18" />
             <line x1="6" y1="6" x2="18" y2="18" />
@@ -85,7 +85,7 @@
             <textarea id="ep_test_input" class="input" rows="3" placeholder="输入一段剧情描述，测试规划器输出..."></textarea>
           </div>
           <div class="btn-group">
-            <button id="ep_run_test" class="btn btn-p">运行规划测试</button>
+            <button id="ep_run_test" type="button" class="btn btn-p">运行规划测试</button>
           </div>
           <div id="ep_test_status" class="status-text"></div>
         </section>
@@ -125,7 +125,7 @@
               <label class="form-label">API Key</label>
               <div class="input-row">
                 <input id="ep_api_key" type="password" class="input" placeholder="sk-...">
-                <button id="ep_toggle_key" class="btn">显示</button>
+                <button id="ep_toggle_key" type="button" class="btn">显示</button>
               </div>
             </div>
             <div class="form-group">
@@ -140,8 +140,8 @@
             </select>
           </div>
           <div class="btn-group" style="margin-top:16px;">
-            <button id="ep_fetch_models" class="btn">拉取模型列表</button>
-            <button id="ep_test_conn" class="btn">测试连接</button>
+            <button id="ep_fetch_models" type="button" class="btn">拉取模型列表</button>
+            <button id="ep_test_conn" type="button" class="btn">测试连接</button>
           </div>
           <div id="ep_api_status" class="status-text"></div>
         </section>
@@ -205,15 +205,15 @@
             </div>
             <div class="form-group" style="flex:3;">
               <div class="btn-group">
-                <button id="ep_tpl_save" class="btn btn-p">保存</button>
-                <button id="ep_tpl_saveas" class="btn">另存为</button>
-                <button id="ep_tpl_delete" class="btn btn-del">删除</button>
+                <button id="ep_tpl_save" type="button" class="btn btn-p">保存</button>
+                <button id="ep_tpl_saveas" type="button" class="btn">另存为</button>
+                <button id="ep_tpl_delete" type="button" class="btn btn-del">删除</button>
               </div>
             </div>
           </div>
           <div id="ep_tpl_undo" class="undo-bar hidden">
             <span>模板 <strong id="ep_tpl_undo_name"></strong> 已删除</span>
-            <button id="ep_tpl_undo_btn" class="btn btn-p btn-sm">撤销</button>
+            <button id="ep_tpl_undo_btn" type="button" class="btn btn-p btn-sm">撤销</button>
           </div>
         </section>
 
@@ -222,8 +222,8 @@
           <div id="ep_prompt_list"></div>
           <div class="prompt-empty" id="ep_prompt_empty" style="display:none;">暂无提示词块</div>
           <div class="btn-group" style="margin-top:16px;">
-            <button id="ep_add_prompt" class="btn">添加区块</button>
-            <button id="ep_reset_prompt" class="btn btn-del">恢复默认</button>
+            <button id="ep_add_prompt" type="button" class="btn">添加区块</button>
+            <button id="ep_reset_prompt" type="button" class="btn btn-del">恢复默认</button>
           </div>
         </section>
       </div>
@@ -278,9 +278,9 @@
         <section class="card">
           <div class="card-title">诊断工具</div>
           <div class="btn-group">
-            <button id="ep_debug_worldbook" class="btn">诊断世界书</button>
-            <button id="ep_debug_char" class="btn">诊断角色卡</button>
-            <button id="ep_test_planner" class="btn btn-p">运行规划测试</button>
+            <button id="ep_debug_worldbook" type="button" class="btn">诊断世界书</button>
+            <button id="ep_debug_char" type="button" class="btn">诊断角色卡</button>
+            <button id="ep_test_planner" type="button" class="btn btn-p">运行规划测试</button>
           </div>
           <pre id="ep_debug_output" class="debug-output"></pre>
         </section>
@@ -301,9 +301,9 @@
             </div>
           </div>
           <div class="btn-group" style="margin-bottom:16px;">
-            <button id="ep_open_logs" class="btn">刷新</button>
-            <button id="ep_log_export" class="btn">导出 JSON</button>
-            <button id="ep_log_clear" class="btn btn-del">清空日志</button>
+            <button id="ep_open_logs" type="button" class="btn">刷新</button>
+            <button id="ep_log_export" type="button" class="btn">导出 JSON</button>
+            <button id="ep_log_clear" type="button" class="btn btn-del">清空日志</button>
           </div>
           <div id="ep_log_body" class="log-list">
             <div class="log-empty">暂无日志</div>
@@ -517,29 +517,38 @@
       right.className = 'prompt-head-right';
 
       const upBtn = document.createElement('button');
+      upBtn.type = 'button';
       upBtn.className = 'btn btn-sm';
       upBtn.textContent = '↑';
       upBtn.disabled = idx === 0;
-      upBtn.addEventListener('click', () => {
+      upBtn.addEventListener('click', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
         if (idx === 0) return;
         [cfg.promptBlocks[idx - 1], cfg.promptBlocks[idx]] = [cfg.promptBlocks[idx], cfg.promptBlocks[idx - 1]];
         renderPromptList(); scheduleSave();
       });
 
       const downBtn = document.createElement('button');
+      downBtn.type = 'button';
       downBtn.className = 'btn btn-sm';
       downBtn.textContent = '↓';
       downBtn.disabled = idx === total - 1;
-      downBtn.addEventListener('click', () => {
+      downBtn.addEventListener('click', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
         if (idx >= total - 1) return;
         [cfg.promptBlocks[idx], cfg.promptBlocks[idx + 1]] = [cfg.promptBlocks[idx + 1], cfg.promptBlocks[idx]];
         renderPromptList(); scheduleSave();
       });
 
       const delBtn = document.createElement('button');
+      delBtn.type = 'button';
       delBtn.className = 'btn btn-sm btn-del';
       delBtn.textContent = '删除';
-      delBtn.addEventListener('click', () => {
+      delBtn.addEventListener('click', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
         cfg.promptBlocks.splice(idx, 1);
         renderPromptList(); scheduleSave();
       });
@@ -757,21 +766,40 @@
     /* ── Event bindings ── */
 
     function bindEvents() {
+      document.addEventListener('submit', ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+      });
+
+      document.querySelectorAll('button').forEach(btn => {
+        if (!btn.getAttribute('type')) btn.setAttribute('type', 'button');
+      });
+
+      const bindButtonAction = (id, handler) => {
+        const element = $(id);
+        if (!element) return;
+        element.addEventListener('click', ev => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          handler(ev);
+        });
+      };
+
       $$('.nav-item, .mobile-nav-item').forEach(item => {
         item.addEventListener('click', () => activateTab(item.dataset.view));
       });
 
-      $('ep_close').addEventListener('click', () => post('xb-ena:close'));
+      bindButtonAction('ep_close', () => post('xb-ena:close'));
 
       $('ep_enabled').addEventListener('change', () => setBadge(toBool($('ep_enabled').value, true)));
 
-      $('ep_run_test').addEventListener('click', () => {
+      bindButtonAction('ep_run_test', () => {
         const text = $('ep_test_input').value.trim() || '（测试输入）我想让你帮我规划下一步剧情。';
         post('xb-ena:run-test', { text });
         setLocalStatus('ep_test_status', '测试中…', 'loading');
       });
 
-      $('ep_toggle_key').addEventListener('click', () => {
+      bindButtonAction('ep_toggle_key', () => {
         const input = $('ep_api_key');
         const btn = $('ep_toggle_key');
         if (input.type === 'password') {
@@ -783,11 +811,11 @@
 
       $('ep_prefix_mode').addEventListener('change', updatePrefixModeUI);
 
-      $('ep_fetch_models').addEventListener('click', () => {
+      bindButtonAction('ep_fetch_models', () => {
         post('xb-ena:fetch-models');
         setLocalStatus('ep_api_status', '拉取中…', 'loading');
       });
-      $('ep_test_conn').addEventListener('click', () => {
+      bindButtonAction('ep_test_conn', () => {
         post('xb-ena:fetch-models');
         setLocalStatus('ep_api_status', '测试中…', 'loading');
       });
@@ -801,13 +829,13 @@
         $('ep_keep_tags').value = normalized.join(', ');
       });
 
-      $('ep_add_prompt').addEventListener('click', () => {
+      bindButtonAction('ep_add_prompt', () => {
         cfg.promptBlocks = cfg.promptBlocks || [];
         cfg.promptBlocks.push({ id: genId(), role: 'system', name: '新块', content: '' });
         renderPromptList(); scheduleSave();
       });
 
-      $('ep_reset_prompt').addEventListener('click', () => {
+      bindButtonAction('ep_reset_prompt', () => {
         if (!confirm('确定恢复默认提示词块？当前提示词块将被覆盖。')) return;
         if (pendingSave) return;
         const requestId = `ena_reset_${Date.now()}`;
@@ -825,7 +853,7 @@
         renderPromptList(); scheduleSave();
       });
 
-      $('ep_tpl_save').addEventListener('click', () => {
+      bindButtonAction('ep_tpl_save', () => {
         const name = $('ep_tpl_select').value;
         if (!name) { setSaveIndicator('error', '请先选择或创建模板'); return; }
         cfg.promptTemplates = cfg.promptTemplates || {};
@@ -834,7 +862,7 @@
         renderTemplateSelect(name); scheduleSave();
       });
 
-      $('ep_tpl_saveas').addEventListener('click', () => {
+      bindButtonAction('ep_tpl_saveas', () => {
         const name = prompt('新模板名称');
         if (!name) return;
         cfg.promptTemplates = cfg.promptTemplates || {};
@@ -843,7 +871,7 @@
         renderTemplateSelect(name); scheduleSave();
       });
 
-      $('ep_tpl_delete').addEventListener('click', () => {
+      bindButtonAction('ep_tpl_delete', () => {
         const name = $('ep_tpl_select').value;
         if (!name) return;
         const backup = structuredClone(cfg.promptTemplates[name]);
@@ -853,7 +881,7 @@
         showUndoBar(name, backup);
       });
 
-      $('ep_tpl_undo_btn').addEventListener('click', () => {
+      bindButtonAction('ep_tpl_undo_btn', () => {
         if (!undoState) return;
         cfg.promptTemplates = cfg.promptTemplates || {};
         cfg.promptTemplates[undoState.name] = undoState.blocks;
@@ -862,28 +890,28 @@
         clearUndo(); scheduleSave();
       });
 
-      $('ep_debug_worldbook').addEventListener('click', () => {
+      bindButtonAction('ep_debug_worldbook', () => {
         $('ep_debug_output').classList.add('visible');
         $('ep_debug_output').textContent = '诊断中…';
         post('xb-ena:debug-worldbook');
       });
-      $('ep_debug_char').addEventListener('click', () => {
+      bindButtonAction('ep_debug_char', () => {
         $('ep_debug_output').classList.add('visible');
         $('ep_debug_output').textContent = '诊断中…';
         post('xb-ena:debug-char');
       });
-      $('ep_test_planner').addEventListener('click', () => {
+      bindButtonAction('ep_test_planner', () => {
         post('xb-ena:run-test', { text: '（测试输入）请规划下一步剧情走向。' });
         $('ep_debug_output').classList.add('visible');
         $('ep_debug_output').textContent = '规划测试中…';
       });
 
-      $('ep_open_logs').addEventListener('click', () => post('xb-ena:logs-request'));
-      $('ep_log_clear').addEventListener('click', () => {
+      bindButtonAction('ep_open_logs', () => post('xb-ena:logs-request'));
+      bindButtonAction('ep_log_clear', () => {
         if (!confirm('确定清空所有日志？')) return;
         post('xb-ena:logs-clear');
       });
-      $('ep_log_export').addEventListener('click', () => {
+      bindButtonAction('ep_log_export', () => {
         const blob = new Blob([JSON.stringify(logs || [], null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');

@@ -252,31 +252,6 @@
                 <label>最近持久化</label>
                 <div class="bme-recent-meta" id="bme-status-last-persist">—</div>
               </div>
-              <div class="bme-config-row" id="bme-persist-repair-row" hidden>
-                <label>持久化修复</label>
-                <div class="bme-task-inline-actions">
-                  <button class="bme-config-secondary-btn" id="bme-act-retry-persist" type="button">
-                    <i class="fa-solid fa-arrows-rotate"></i>
-                    <span>重试持久化</span>
-                  </button>
-                  <button class="bme-config-secondary-btn" id="bme-act-probe-graph-load" type="button">
-                    <i class="fa-solid fa-satellite-dish"></i>
-                    <span>重新探测图谱</span>
-                  </button>
-                  <button class="bme-config-secondary-btn" id="bme-act-rebuild-luker-cache" type="button">
-                    <i class="fa-solid fa-database"></i>
-                    <span>重建本地缓存</span>
-                  </button>
-                  <button class="bme-config-secondary-btn" id="bme-act-repair-luker-sidecar" type="button">
-                    <i class="fa-solid fa-screwdriver-wrench"></i>
-                    <span>修复主 Sidecar</span>
-                  </button>
-                  <button class="bme-config-secondary-btn" id="bme-act-compact-luker-sidecar" type="button">
-                    <i class="fa-solid fa-box-archive"></i>
-                    <span>压实主 Sidecar</span>
-                  </button>
-                </div>
-              </div>
               <div class="bme-config-help" id="bme-persist-repair-help" hidden></div>
               <div class="bme-config-row">
                 <label>最近向量</label>
@@ -486,6 +461,38 @@
                     <i class="fa-solid fa-triangle-exclamation"></i>
                     <span>重建图谱</span>
                   </button>
+                </div>
+              </div>
+
+              <div class="bme-action-group" id="bme-luker-sidecar-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title">持久化修复</span>
+                  <span class="bme-action-group-sub">本地持久化与 Luker 主 sidecar 的统一修复区域</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-retry-persist" type="button">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                    <span>重试持久化</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-probe-graph-load" type="button">
+                    <i class="fa-solid fa-satellite-dish"></i>
+                    <span>重新探测图谱</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-rebuild-luker-cache" type="button">
+                    <i class="fa-solid fa-database"></i>
+                    <span>重建本地缓存</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-repair-luker-sidecar" type="button">
+                    <i class="fa-solid fa-screwdriver-wrench"></i>
+                    <span>修复主 Sidecar</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-compact-luker-sidecar" type="button">
+                    <i class="fa-solid fa-box-archive"></i>
+                    <span>压实主 Sidecar</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help" id="bme-actions-persist-repair-help"></div>
                 </div>
               </div>
             </div>

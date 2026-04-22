@@ -67,6 +67,7 @@ import {
   shouldRunRecallForTransaction,
 } from "../ui/ui-status.js";
 import {
+  onClearGraphController,
   onDeleteCurrentIdbController,
   onManualCompressController,
   onManualEvolveController,
@@ -729,6 +730,9 @@ function createRerollHarness() {
       },
       setRuntimeStatus(text, meta = "", level = "info") {
         context.runtimeStatus = { text, meta, level };
+      },
+      setLastExtractionStatus(text, meta = "", level = "info") {
+        context.lastExtractionStatus = { text, meta, level };
       },
       clearInjectionState() {
         context.clearInjectionCalls += 1;
@@ -1863,6 +1867,176 @@ async function testRecallCardDisplayModeToggleRestoresOriginalUserText() {
   }
 }
 
+async function testRecallCardSupportsManagedUserInputEditing() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "原始用户输入",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Recalled]\nline-1",
+          selectedNodeIds: ["n1"],
+          boundUserFloorText: "原始用户输入",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  const userTextElement = messageElement.querySelector(".mes_text");
+  userTextElement.textContent = chat[0].mes;
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    const saveResults = [];
+    const cardModule = await import("../ui/recall-message-ui.js");
+    const mountedCard = cardModule.createRecallCardElement({
+      messageIndex: 0,
+      record: chat[0].extra.bme_recall,
+      userMessageText: chat[0].mes,
+      callbacks: {
+        onEditUserInput: async (_messageIndex, nextText) => {
+          saveResults.push(nextText);
+          return {
+            ok: true,
+            nextText,
+            recallMayBeStale: true,
+          };
+        },
+      },
+    });
+    messageElement.querySelector(".mes_block")?.appendChild(mountedCard);
+
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    const editBtn = card.querySelector(".bme-recall-user-edit-btn");
+    assert.equal(Boolean(editBtn), true);
+
+    editBtn.click();
+    const textarea = card.querySelector(".bme-recall-user-edit-textarea");
+    assert.equal(Boolean(textarea), true);
+    assert.equal(card.classList.contains("bme-recall-user-input-editing"), true);
+
+    textarea.value = "新的用户输入";
+    const saveBtn = card.querySelector(".bme-recall-user-edit-action.primary");
+    await saveBtn.dispatchEvent({ type: "click", stopPropagation() {} });
+
+    assert.deepEqual(saveResults, ["新的用户输入"]);
+    assert.equal(chat[0].mes, "原始用户输入");
+    assert.equal(
+      card.querySelector(".bme-recall-user-text")?.textContent,
+      "新的用户输入",
+    );
+    assert.equal(card.classList.contains("bme-recall-user-input-editing"), false);
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardShowsEnaSourceChipAndExpandedPreview() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "planner user input",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Recalled]\n### 当前状态记忆\nline-1\n|a|b|",
+          selectedNodeIds: ["n1"],
+          recallSource: "planner-handoff",
+          hookName: "ena-planner",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    card.querySelector(".bme-recall-bar")?.click();
+
+    const enaTag = card.querySelector(".bme-recall-meta-tag.is-ena");
+    assert.equal(Boolean(enaTag), true);
+    assert.equal(enaTag?.textContent, "🧭 ENA Planner");
+
+    const preview = card.querySelector(".bme-recall-injection-preview.is-ena");
+    assert.equal(Boolean(preview), true);
+    assert.equal(preview.classList.contains("expanded"), true);
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-note")?.textContent,
+      "由 Ena Planner 触发的本轮记忆块",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
+async function testRecallCardBeautifiesInjectionPreviewSections() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "normal user input",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "[Memory - Objective / Global]\n#### 子标题\n普通行\n\n|col1|col2|",
+          selectedNodeIds: ["n1"],
+          recallSource: "history",
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    card.querySelector(".bme-recall-bar")?.click();
+
+    const preview = card.querySelector(".bme-recall-injection-preview");
+    assert.equal(Boolean(preview), true);
+    assert.equal(preview.classList.contains("expanded"), false);
+
+    preview.querySelector(".bme-recall-injection-toggle")?.click();
+    assert.equal(preview.classList.contains("expanded"), true);
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-section-title")?.textContent,
+      "[Memory - Objective / Global]",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-subsection")?.textContent,
+      "子标题",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-line")?.textContent,
+      "普通行",
+    );
+    assert.equal(
+      preview.querySelector(".bme-recall-injection-table")?.textContent,
+      "|col1|col2|",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 function makeEvent(seq, title) {
   return createNode({
     type: "event",
@@ -2082,6 +2256,16 @@ async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
           options.immediate === true,
         ]);
       },
+      getGraphPersistenceState() {
+        return {
+          lastSyncedRevision: 9,
+        };
+      },
+      getSettings() {
+        return {
+          cloudStorageMode: "automatic",
+        };
+      },
       syncGraphLoadFromLiveContext(options = {}) {
         callLog.push([
           "sync-graph-load",
@@ -2119,9 +2303,126 @@ async function testDeleteCurrentIdbClearsCommitMarkerBeforeReload() {
       clearMarkerIndex < syncLoadIndex,
       "应先清理 commit marker，再触发图谱重探测",
     );
+    assert.ok(
+      callLog.some(
+        (entry) =>
+          entry[0] === "toast-success" &&
+          /删除服务端同步数据/.test(String(entry[1] || "")),
+      ),
+      "若当前聊天存在远端同步记录，应提示用户本地缓存删除后仍可能被远端恢复",
+    );
   } finally {
     globalThis.indexedDB = originalIndexedDb;
   }
+}
+
+async function testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata() {
+  const callLog = [];
+  const runtime = {
+    confirm() {
+      return true;
+    },
+    ensureGraphMutationReady() {
+      return true;
+    },
+    getCurrentChatId() {
+      return "chat-clear-graph";
+    },
+    clearCurrentChatRecoveryAnchors(options = {}) {
+      callLog.push([
+        "clear-recovery-anchors",
+        String(options.chatId || ""),
+        String(options.reason || ""),
+        options.clearMetadataFull === true,
+        options.clearCommitMarker === true,
+        options.clearPendingPersist === true,
+      ]);
+    },
+    normalizeGraphRuntimeState(graph, chatId) {
+      return {
+        ...(graph || {}),
+        historyState: {
+          chatId,
+        },
+      };
+    },
+    createEmptyGraph() {
+      return {
+        nodes: [],
+        edges: [],
+        historyState: {},
+      };
+    },
+    setCurrentGraph(graph) {
+      callLog.push(["set-current-graph", Array.isArray(graph?.nodes) ? graph.nodes.length : -1]);
+    },
+    clearInjectionState() {
+      callLog.push(["clear-injection"]);
+    },
+    markVectorStateDirty(reason) {
+      callLog.push(["mark-vector-dirty", String(reason || "")]);
+    },
+    setExtractionCount(count) {
+      callLog.push(["set-extraction-count", Number(count)]);
+    },
+    setLastExtractedItems(items = []) {
+      callLog.push(["set-last-extracted-items", Array.isArray(items) ? items.length : -1]);
+    },
+    saveGraphToChat(options = {}) {
+      callLog.push([
+        "save-graph",
+        String(options.reason || ""),
+        options.persistMetadata === true,
+        options.captureShadow === false,
+      ]);
+    },
+    refreshPanelLiveState() {
+      callLog.push(["refresh-panel"]);
+    },
+    getGraphPersistenceState() {
+      return {
+        lastSyncedRevision: 0,
+      };
+    },
+    getSettings() {
+      return {
+        cloudStorageMode: "automatic",
+      };
+    },
+    toastr: {
+      success(message) {
+        callLog.push(["toast-success", String(message || "")]);
+      },
+      warning(message) {
+        callLog.push(["toast-warning", String(message || "")]);
+      },
+      error(message) {
+        callLog.push(["toast-error", String(message || "")]);
+      },
+    },
+  };
+
+  const result = await onClearGraphController(runtime);
+  assert.equal(result?.handledToast, true);
+  assert.ok(
+    callLog.some(
+      (entry) =>
+        entry[0] === "clear-recovery-anchors" &&
+        entry[1] === "chat-clear-graph" &&
+        entry[2] === "manual-clear-graph",
+    ),
+    "清空图谱时应先清理当前聊天的恢复锚点",
+  );
+  assert.ok(
+    callLog.some(
+      (entry) =>
+        entry[0] === "save-graph" &&
+        entry[1] === "manual-clear-graph" &&
+        entry[2] === true &&
+        entry[3] === true,
+    ),
+    "清空图谱时应显式把空图写入 metadata，避免旧恢复锚点复活",
+  );
 }
 
 async function testCompressTypeAcceptsTopLevelFieldsResult() {
@@ -2429,6 +2730,188 @@ async function testExtractorNormalizesArrayPayloadAndPreservesScopeField() {
     assert.equal(created.fields.summary, "最近的整体剧情进入高压对峙阶段。");
     assert.equal(created.fields.scope, "20-2-2");
     assert.equal(created.scope?.layer, "objective");
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorPropagatesLlmFailureReason() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          ok: false,
+          errorType: "provider-error",
+          failureReason: "Invalid character name",
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 9, role: "assistant", content: "测试 LLM 失败原因" }],
+      startSeq: 9,
+      endSeq: 9,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /Invalid character name/);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorAddsWeakDefaultRelatedEdgeForSameBatchNodes() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "钟楼初见",
+              summary: "两人在钟楼第一次正式见面。",
+              participants: "艾琳, 用户",
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "钟楼密谈",
+              summary: "见面后立刻进入短暂密谈。",
+              participants: "艾琳, 用户",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 10, role: "assistant", content: "测试批次默认弱连边" }],
+      startSeq: 10,
+      endSeq: 10,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 1);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 1);
+    assert.equal(activeEdges[0]?.relation, "related");
+    assert.equal(activeEdges[0]?.strength, 0.25);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorExplicitLinksOverrideDefaultBatchWeakEdge() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "档案室发现",
+              summary: "发现了一份关键档案。",
+              participants: "艾琳",
+              links: [{ targetRef: "evt2", relation: "related", strength: 0.91 }],
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "档案内容核对",
+              summary: "紧接着对档案内容进行核对。",
+              participants: "艾琳",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 11, role: "assistant", content: "测试显式 links 覆盖默认弱边" }],
+      startSeq: 11,
+      endSeq: 11,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 1);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 1);
+    assert.equal(activeEdges[0]?.relation, "related");
+    assert.equal(activeEdges[0]?.strength, 0.91);
+  } finally {
+    restoreOverrides();
+  }
+}
+
+async function testExtractorExplicitRemoveSuppressesDefaultBatchWeakEdge() {
+  const graph = createEmptyGraph();
+  const restoreOverrides = pushTestOverrides({
+    llm: {
+      async callLLMForJSON() {
+        return {
+          operations: [
+            {
+              type: "event",
+              id: "evt1",
+              title: "花园交错",
+              summary: "两条线索在花园中短暂交错。",
+              participants: "艾琳, 守卫",
+              links: [{ targetRef: "evt2", relation: "related", remove: true }],
+            },
+            {
+              type: "event",
+              id: "evt2",
+              title: "花园分流",
+              summary: "随后两条线索各自分流。",
+              participants: "艾琳, 守卫",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  try {
+    const result = await extractMemories({
+      graph,
+      messages: [{ seq: 12, role: "assistant", content: "测试显式移除默认弱边" }],
+      startSeq: 12,
+      endSeq: 12,
+      schema,
+      embeddingConfig: null,
+      settings: {},
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.newNodes, 2);
+    assert.equal(result.newEdges, 0);
+    const activeEdges = graph.edges.filter((edge) => !edge.invalidAt && !edge.expiredAt);
+    assert.equal(activeEdges.length, 0);
   } finally {
     restoreOverrides();
   }
@@ -3817,7 +4300,7 @@ async function testRegisterCoreEventHooksIsIdempotent() {
   registerCoreEventHooksController(runtime);
   registerCoreEventHooksController(runtime);
 
-  assert.equal(eventRegistrations.length, 12);
+  assert.equal(eventRegistrations.length, 11);
   assert.equal(makeFirstRegistrations.length, 2);
   assert.equal(bindingState.registered, true);
 }
@@ -6874,6 +7357,10 @@ await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
 await testExtractorNormalizesArrayPayloadAndPreservesScopeField();
+await testExtractorPropagatesLlmFailureReason();
+await testExtractorAddsWeakDefaultRelatedEdgeForSameBatchNodes();
+await testExtractorExplicitLinksOverrideDefaultBatchWeakEdge();
+await testExtractorExplicitRemoveSuppressesDefaultBatchWeakEdge();
 await testConsolidatorMergeUpdatesSeqRange();
 await testConsolidatorMergeFallbackKeepsNodeWhenTargetMissing();
 await testBatchJournalVectorDeltaCapturesRecoveryFields();
@@ -6919,6 +7406,8 @@ await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();
+await testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata();
+await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testLagModeSmartTriggerOnlyScoresEligibleWindow();
 await testLagModeRespectsExtractEveryAgainstEligibleWindow();
 await testGenerationEndedResumesPendingAutoExtractionAfterSettle();
@@ -6948,6 +7437,9 @@ await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
 await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();
+await testRecallCardSupportsManagedUserInputEditing();
+await testRecallCardShowsEnaSourceChipAndExpandedPreview();
+await testRecallCardBeautifiesInjectionPreviewSections();
 await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();

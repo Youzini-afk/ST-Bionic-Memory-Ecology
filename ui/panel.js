@@ -1461,6 +1461,303 @@ function _resolvePipelineStatus(statusObj) {
   return { label: text || "IDLE", color, detail: meta };
 }
 
+function _readPersistenceDiagnosticObject(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  return snapshot;
+}
+
+function _formatLoadDiagnosticsStageLabel(stage = "") {
+  const normalized = String(stage || "").trim();
+  if (!normalized) return "—";
+  const labels = {
+    "load-indexeddb": "IndexedDB 加载",
+    "apply-indexeddb-snapshot": "快照应用",
+  };
+  return labels[normalized] || normalized;
+}
+
+function _formatPipelineLoadDiagnosticsMeta(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  if (totalText !== "—") return `load ${totalText}`;
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  return stageLabel === "—" ? "" : stageLabel;
+}
+
+function _formatPipelinePersistDeltaMeta(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "";
+
+  const parts = [];
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  if (totalText !== "—") {
+    parts.push(`delta ${totalText}`);
+  }
+
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  if (gateText) {
+    const compactGate = gateText.startsWith("已拦截") ? "已拦截" : gateText;
+    parts.push(`native ${compactGate}`);
+  }
+
+  return parts.join(" · ");
+}
+
+function _formatPersistenceLoadSummary(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "暂无";
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  const reasonText = String(diagnostics.reason || "").trim();
+  const parts = [statusText];
+  if (stageLabel !== "—") parts.push(stageLabel);
+  if (totalText !== "—") parts.push(`total ${totalText}`);
+  if (reasonText) parts.push(reasonText);
+  return parts.join(" · ");
+}
+
+function _formatPersistencePersistDeltaSummary(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "暂无";
+
+  const pathText = String(diagnostics.path || "").trim() || "—";
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  const commitText = _formatDurationMs(diagnostics.commitMs);
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  const parts = [pathText];
+  if (totalText !== "—") parts.push(totalText);
+  if (commitText !== "—") parts.push(`commit ${commitText}`);
+  if (gateText) parts.push(`native ${gateText}`);
+  return parts.join(" · ");
+}
+
+function _formatPersistCommitPhaseText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const queueText = _formatDurationMs(snapshot.commitQueueWaitMs);
+  const commitText = _formatDurationMs(snapshot.commitMs);
+  if (queueText === "—" && commitText === "—") return "—";
+  return `${queueText} / ${commitText}`;
+}
+
+function _formatPersistCommitBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.commitTxMs ? `tx ${_formatDurationMs(snapshot.commitTxMs)}` : "",
+    snapshot.commitSnapshotReadMs
+      ? `snapshot-read ${_formatDurationMs(snapshot.commitSnapshotReadMs)}`
+      : "",
+    snapshot.commitSnapshotWriteMs
+      ? `snapshot-write ${_formatDurationMs(snapshot.commitSnapshotWriteMs)}`
+      : "",
+    snapshot.commitManifestReadMs
+      ? `manifest-read ${_formatDurationMs(snapshot.commitManifestReadMs)}`
+      : "",
+    snapshot.commitWalSerializeMs
+      ? `wal-serialize ${_formatDurationMs(snapshot.commitWalSerializeMs)}`
+      : "",
+    snapshot.commitWalFileWriteMs
+      ? `wal-file ${_formatDurationMs(snapshot.commitWalFileWriteMs)}`
+      : snapshot.commitWalWriteMs
+        ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+        : "",
+    snapshot.commitManifestSerializeMs
+      ? `manifest-serialize ${_formatDurationMs(snapshot.commitManifestSerializeMs)}`
+      : "",
+    snapshot.commitManifestFileWriteMs
+      ? `manifest-file ${_formatDurationMs(snapshot.commitManifestFileWriteMs)}`
+      : snapshot.commitManifestWriteMs
+        ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+        : "",
+    snapshot.commitCacheApplyMs
+      ? `cache ${_formatDurationMs(snapshot.commitCacheApplyMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistSnapshotBuildBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.snapshotNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.snapshotNodesMs)}`
+      : "",
+    snapshot.snapshotEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.snapshotEdgesMs)}`
+      : "",
+    snapshot.snapshotTombstonesMs
+      ? `tombstones ${_formatDurationMs(snapshot.snapshotTombstonesMs)}`
+      : "",
+    snapshot.snapshotStateMs
+      ? `state ${_formatDurationMs(snapshot.snapshotStateMs)}`
+      : "",
+    snapshot.snapshotMetaMs
+      ? `meta ${_formatDurationMs(snapshot.snapshotMetaMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatLoadHydrateBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.hydrateNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.hydrateNodesMs)}`
+      : "",
+    snapshot.hydrateEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.hydrateEdgesMs)}`
+      : "",
+    snapshot.hydrateRuntimeMetaMs
+      ? `meta ${_formatDurationMs(snapshot.hydrateRuntimeMetaMs)}`
+      : "",
+    snapshot.hydrateStateMs
+      ? `state ${_formatDurationMs(snapshot.hydrateStateMs)}`
+      : "",
+    snapshot.hydrateNormalizeMs
+      ? `normalize ${_formatDurationMs(snapshot.hydrateNormalizeMs)}`
+      : "",
+    snapshot.hydrateIntegrityMs
+      ? `integrity ${_formatDurationMs(snapshot.hydrateIntegrityMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistObservabilityText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const pathKey = String(snapshot.pathKey || snapshot.path || "").trim();
+  const reasonKey = String(snapshot.reasonKey || snapshot.saveReason || "").trim();
+  const pathCount = Number(snapshot.pathSampleCount || 0);
+  const reasonCount = Number(snapshot.reasonSampleCount || 0);
+  if (pathKey) parts.push(`path ${pathKey}`);
+  if (pathCount > 0) parts.push(`${pathCount} samples`);
+  if (reasonKey) parts.push(`reason ${reasonKey}`);
+  if (reasonCount > 0) parts.push(`${reasonCount} reason-hits`);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistCommitBytesText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const payloadText = _formatDataSizeBytes(snapshot.commitPayloadBytes);
+  const walText = _formatDataSizeBytes(snapshot.commitWalBytes);
+  const metaKeyCount = Number(snapshot.commitRuntimeMetaKeyCount || 0);
+  if (payloadText !== "—") parts.push(`payload ${payloadText}`);
+  if (walText !== "—") parts.push(`wal ${walText}`);
+  if (metaKeyCount > 0) parts.push(`meta ${metaKeyCount} keys`);
+  return parts.join(" · ") || "—";
+}
+
+function _buildLoadDiagnosticRows(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) {
+    return [["Load 诊断", "无"]];
+  }
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+
+  return [
+    ["Load 阶段", _formatLoadDiagnosticsStageLabel(diagnostics.stage)],
+    ["Load 来源", String(diagnostics.source || diagnostics.statusLabel || "—")],
+    ["Load 状态", statusText],
+    ["Load 原因", String(diagnostics.reason || "—")],
+    ["Load 总耗时", _formatDurationMs(diagnostics.totalMs)],
+    ["Load 前置", _formatDurationMs(diagnostics.preApplyMs)],
+    ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
+    ["前置（除导出）", _formatDurationMs(diagnostics.preApplyOtherMs)],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Hydrate 细分", _formatLoadHydrateBreakdownText(diagnostics)],
+    ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
+    ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
+    ["Load 未归因", _formatDurationMs(diagnostics.untrackedMs)],
+    ["Load 更新时间", updatedAtText],
+  ];
+}
+
+function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) {
+    return [["Persist Delta 诊断", "无"]];
+  }
+
+  const errorText = String(
+    diagnostics.moduleError || diagnostics.preloadError || diagnostics.nativeError || "",
+  ).trim();
+  const bridgeText = `${String(diagnostics.requestedBridgeMode || "none")} → ${String(
+    diagnostics.preparedBridgeMode || "none",
+  )}`;
+  const deltaSizeText = `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(
+    diagnostics.upsertEdgeCount || 0,
+  )}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(
+    diagnostics.deleteEdgeCount || 0,
+  )}DE`;
+  const commitStoreText = `${String(diagnostics.commitStorageKind || "—")} / ${String(
+    diagnostics.commitStoreMode || "—",
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+
+  return [
+    ["Persist 路径", String(diagnostics.path || "—")],
+    ["Native Gate", _formatPersistDeltaGateText(diagnostics)],
+    ["Bridge 模式", bridgeText],
+    ["Commit 存储", commitStoreText],
+    ["Persist 总耗时", _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs)],
+    ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
+    ["Base 快照读取", _formatDurationMs(diagnostics.baseSnapshotReadMs)],
+    ["图谱快照构建", _formatDurationMs(diagnostics.snapshotBuildMs)],
+    ["快照构建细分", _formatPersistSnapshotBuildBreakdownText(diagnostics)],
+    [
+      "Prepare / Native",
+      `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
+    ],
+    [
+      "Lookup / JS Diff",
+      `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
+    ],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Commit 排队 / 提交", commitPhaseText],
+    ["Commit 细分", commitBreakdownText],
+    ["Commit Payload", commitBytesText],
+    ["样本聚合", _formatPersistObservabilityText(diagnostics)],
+    ["Preload", String(diagnostics.preloadStatus || "—")],
+    ["Native 来源", String(diagnostics.moduleSource || "—")],
+    ["Fallback 原因", String(diagnostics.fallbackReason || "—")],
+    ["Preload / Native 错误", errorText || "—"],
+    ["增量规模", deltaSizeText],
+    ["Persist 未归因", _formatDurationMs(diagnostics.untrackedMs)],
+    ["Persist 更新时间", updatedAtText],
+  ];
+}
+
 function _refreshTaskPipelineOverview() {
   const el = document.getElementById("bme-task-pipeline");
   if (!el) return;
@@ -1473,9 +1770,22 @@ function _refreshTaskPipelineOverview() {
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
   const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
   const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
+  const persistenceMetaParts = [`rev ${loadInfo.revision || 0}`];
+  const pipelineLoadMeta = _formatPipelineLoadDiagnosticsMeta(
+    loadInfo.loadDiagnostics,
+  );
+  if (pipelineLoadMeta) {
+    persistenceMetaParts.push(pipelineLoadMeta);
+  }
+  const pipelinePersistDeltaMeta = _formatPipelinePersistDeltaMeta(
+    loadInfo.persistDelta,
+  );
+  if (pipelinePersistDeltaMeta) {
+    persistenceMetaParts.push(pipelinePersistDeltaMeta);
+  }
   const persistence = _resolvePipelineStatus({
     text: loadInfo.loadState || "unknown",
-    meta: `rev ${loadInfo.revision || 0}`,
+    meta: persistenceMetaParts.join(" · "),
     level: persistLevel,
   });
 
@@ -2166,6 +2476,8 @@ function _refreshTaskPersistence() {
   const graph = _getGraph?.() || {};
   const ps = _getGraphPersistenceSnapshot();
   const rs = graph.runtimeState || {};
+  const loadDiagnostics = _readPersistenceDiagnosticObject(ps.loadDiagnostics);
+  const persistDeltaDiagnostics = _readPersistenceDiagnosticObject(ps.persistDelta);
 
   const LOAD_STATE_LABELS = {
     "no-chat": "无聊天",
@@ -2232,95 +2544,177 @@ function _refreshTaskPersistence() {
   const cacheLagLabel =
     ps.hostProfile === "luker" ? String(Number(ps.cacheLag || 0)) : "—";
   const verboseDebugLabel = globalThis.__stBmeVerboseDebug === true ? "开启" : "关闭";
+  const projectionLabel =
+    ps?.projectionState?.runtime?.status || ps?.projectionState?.persistent?.status || "—";
+  const compactTargetLabel = (() => {
+    const target = ps.chatStateTarget;
+    if (!target || typeof target !== "object") return "未绑定";
+    if (target.is_group === true) {
+      return `群聊 · ${String(target.id || "—")}`;
+    }
+    return `角色聊天 · ${String(target.file_name || "—")}`;
+  })();
+  const mirrorLabel =
+    CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—";
+  const acceptedSummaryLabel =
+    ps.pendingPersist === true
+      ? "待确认"
+      : ps.persistMismatchReason
+        ? "一致性异常"
+        : acceptedTierLabel !== "—" && acceptedTierLabel !== "无"
+          ? acceptedTierLabel
+          : ps.shadowSnapshotUsed
+            ? "仅恢复锚点"
+            : "未确认";
+  const healthLabel = ps.pendingPersist === true
+    ? "等待正式持久化确认"
+    : ps.persistMismatchReason
+      ? _formatPersistMismatchReason(ps.persistMismatchReason)
+      : ps.blockedReason || (ps.loadState === "blocked" ? ps.reason : "") || "正常";
+  const localEngineLabel =
+    ps.resolvedLocalStore
+      ? String(ps.resolvedLocalStore).replace(":", " / ")
+      : cacheTierLabel;
+  const sidecarSummaryLabel =
+    ps.hostProfile === "luker"
+      ? `rev ${manifestRevisionLabel} · ${journalStateLabel}`
+      : "—";
+  const historyState = graph?.historyState || {};
+  const summaryState = graph?.summaryState || {};
+  const journalCount = Array.isArray(graph?.batchJournal) ? graph.batchJournal.length : 0;
+  const summaryCount = Array.isArray(summaryState?.entries) ? summaryState.entries.length : 0;
+  const activeSummaryCount = Array.isArray(summaryState?.activeEntryIds)
+    ? summaryState.activeEntryIds.length
+    : 0;
+  const processedFloorLabel = Number.isFinite(Number(historyState?.lastProcessedAssistantFloor))
+    ? String(Number(historyState.lastProcessedAssistantFloor))
+    : "—";
+  const extractionCountLabel = Number.isFinite(Number(historyState?.extractionCount))
+    ? String(Number(historyState.extractionCount))
+    : "0";
+  const activeRegionLabel = String(
+    historyState?.activeRegion ||
+      historyState?.lastExtractedRegion ||
+      "—",
+  );
+  const dirtyFromLabel = Number.isFinite(Number(historyState?.historyDirtyFrom))
+    ? String(Number(historyState.historyDirtyFrom))
+    : "无";
 
-  const kvs = [
-    ["加载状态", loadStateLabel],
-    ["宿主档案", hostProfileLabel],
+  const summaryPills = [
+    `加载 · ${loadStateLabel}`,
+    `宿主 · ${hostProfileLabel}`,
+    `主存储 · ${primaryTierLabel}`,
+    `确认 · ${acceptedSummaryLabel}`,
+  ];
+  const collectVisibleRows = (rows = []) =>
+    rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  const renderRow = ([key, value]) =>
+    `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`;
+  const renderRows = (rows = []) =>
+    collectVisibleRows(rows)
+      .map(renderRow)
+      .join("");
+  const renderRowsTwoColumn = (rows = []) => {
+    const visibleRows = collectVisibleRows(rows);
+    if (!visibleRows.length) return "";
+    const splitIndex = Math.ceil(visibleRows.length / 2);
+    return `
+      <div class="bme-persist-kv-columns">
+        <div class="bme-persist-kv-column">${visibleRows.slice(0, splitIndex).map(renderRow).join("")}</div>
+        <div class="bme-persist-kv-column">${visibleRows.slice(splitIndex).map(renderRow).join("")}</div>
+      </div>
+    `;
+  };
+
+  const primaryRows = [
+    ["当前状态", acceptedSummaryLabel],
+    ["健康状态", healthLabel],
+    ["Load 诊断", _formatPersistenceLoadSummary(loadDiagnostics)],
+    ["Persist Delta", _formatPersistencePersistDeltaSummary(persistDeltaDiagnostics)],
+    ["Chat Target", compactTargetLabel],
     ["主 durable", primaryTierLabel],
-    ["当前 accepted", acceptedTierLabel],
+    ps.hostProfile === "luker"
+      ? ["Luker Sidecar", sidecarSummaryLabel]
+      : ["本地引擎", localEngineLabel],
+    ps.hostProfile === "luker"
+      ? ["本地缓存", `${cacheTierLabel} · ${mirrorLabel}`]
+      : ["恢复锚点", ps.shadowSnapshotUsed ? "影子快照已接管" : "无"],
+  ];
+
+  const runtimeRows = [
+    ["图谱节点", String((graph.nodes || []).length)],
+    ["图谱边", String((graph.edges || []).length)],
+    ["批次日志", String(journalCount)],
+    ["提取次数", extractionCountLabel],
+    ["已处理楼层", processedFloorLabel],
+    ["总结条目", `${summaryCount}（活跃 ${activeSummaryCount}）`],
+    ["当前区域", activeRegionLabel],
+    ["脏区起点", dirtyFromLabel],
+    ["运行版本", String(rs.graphRevision ?? "—")],
+  ];
+
+  const diagnosticRows = [
+    ["宿主档案", hostProfileLabel],
     ["accepted by", ps.acceptedBy || "—"],
-    ["Sidecar 格式", sidecarFormatLabel],
-    ["Manifest rev", manifestRevisionLabel],
-    ["Journal", journalStateLabel],
-    ["Checkpoint rev", checkpointRevisionLabel],
-    ["本地缓存", cacheTierLabel],
-    ["缓存镜像", CACHE_MIRROR_LABELS[ps.cacheMirrorState] || ps.cacheMirrorState || "—"],
-    ["缓存落后", cacheLagLabel],
-    ["解析本地引擎", ps.resolvedLocalStore || "—"],
+    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
+    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["版本号", ps.revision ?? "—"],
     ["本地格式", `v${Number(ps.localStoreFormatVersion || 0) || 1}`],
     ["本地迁移", ps.localStoreMigrationState || "—"],
-    ["版本号", ps.revision ?? "—"],
-    ["提交标记", ps.commitMarker ? "存在（诊断锚点）" : "无"],
+    ["轻量模式", ps.lightweightHostMode ? "开启" : "关闭"],
     ["Verbose Debug", verboseDebugLabel],
-    ["诊断层", STORAGE_TIER_LABELS[ps.persistDiagnosticTier] || ps.persistDiagnosticTier || "无"],
-    ["阻塞原因", ps.blockedReason || ps.reason || "—"],
+    ["Luker Hook", ps.lastHookPhase || "—"],
+    ["Projection", projectionLabel],
+    ["Rescan 原因", ps.lastRequestRescanReason || "—"],
+    ["忽略变更", ps.lastIgnoredMutationEvent || "—"],
     ["影子快照", ps.shadowSnapshotUsed ? "已使用" : "未使用"],
     ["OPFS 写锁", opfsLockLabel],
     ["OPFS WAL", `${Number(ps.opfsWalDepth || 0)} 条 / ${Number(ps.opfsPendingBytes || 0)} B`],
     ["OPFS 压实", opfsCompactionLabel],
     ["远端同步格式", `v${Number(ps.remoteSyncFormatVersion || 0) || 1}`],
   ];
-
-  const kvHtml = kvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(String(v))}</strong></div>`).join("");
-
-  const journalCount = Array.isArray(rs.historyState?.batchJournal) ? rs.historyState.batchJournal.length : 0;
-  const secondaryKvs = [
-    ["图谱节点", String((graph.nodes || []).length)],
-    ["图谱边", String((graph.edges || []).length)],
-    ["批次日志", String(journalCount)],
-    ["运行版本", String(rs.graphRevision ?? "—")],
-  ];
-  const secondaryHtml = secondaryKvs.map(([k, v]) => `<div class="bme-persist-kv__row"><span>${_escHtml(k)}</span><strong>${_escHtml(v)}</strong></div>`).join("");
-
-  const guidePairs = [
-    ["加载状态", "记忆图谱在当前聊天中的加载进度。\"已加载\" 表示正常运行。"],
-    ["宿主档案", "当前运行环境。Luker 会把聊天侧车当主 durable 存储，其它宿主仍以本地存储为主。"],
-    ["主 durable", "当前宿主下真正负责 accepted 的主存储层。"],
-    ["当前 accepted", "最近一次已确认持久化最终落在哪一层。"],
-    ["accepted by", "本批最近一次 accepted 是由哪一层确认的。"],
-    ["Sidecar 格式", "Luker 主 sidecar 的格式版本。v2 代表 manifest + journal + checkpoint。"],
-    ["Manifest rev", "Luker 主 sidecar manifest 当前确认的 head revision。"],
-    ["Journal", "Luker sidecar 未压实 journal 的条目数和累计字节数。"],
-    ["Checkpoint rev", "Luker sidecar 最近一次压实基线的 revision。"],
-    ["本地缓存", "主存储之外的本地缓存层。Luker 下这里通常是 IndexedDB 或 OPFS。"],
-    ["缓存镜像", "本地缓存 mirror 的当前状态。失败不会自动等价为主持久化失败。"],
-    ["缓存落后", "Luker manifest revision 与本地缓存 revision 的差值。0 表示本地缓存已追平。"],
-    ["解析本地引擎", "当前模式最终解析到的本地引擎，例如 auto 解析成 OPFS 或 IndexedDB。"],
-    ["本地格式", "当前本地存储格式版本。OPFS v2 代表分片基线 + WAL。"],
-    ["本地迁移", "当前本地存储迁移状态，例如 idle / promoting。"],
-    ["版本号", "图谱修订号，每次写入操作自增。用于检测并发冲突。"],
-    ["提交标记", "聊天元数据中的诊断锚点，只用于对账与修复建议，不再单独代表 accepted。"],
-    ["Verbose Debug", "是否抓取完整调试载荷。默认关闭，仅保留轻量摘要。"],
-    ["诊断层", "最近一次仅作诊断/恢复用途的层级，例如影子快照或完整 metadata。"],
-    ["阻塞原因", "如果加载被阻塞，这里显示具体原因。\"—\" 表示未阻塞。"],
-    ["影子快照", "是否在启动时使用了上次会话留下的影子快照来加速加载。"],
-    ["OPFS 写锁", "OPFS 本地存储的串行写状态。活跃表示当前有写任务排队或执行中。"],
-    ["OPFS WAL", "当前尚未被压实进基线分片的日志条目数和累计字节数。"],
-    ["OPFS 压实", "OPFS 基线压实状态。pending 表示达到阈值后等待后台压实。"],
-    ["远端同步格式", "当前自动同步使用的远端存储格式版本。v2 代表 manifest + chunk。"],
-    ["图谱节点 / 边", "当前内存中图谱的节点和边数量。"],
-    ["批次日志", "尚未合并到主快照的增量操作日志条目数。"],
-    ["运行版本", "运行时图谱的内部版本号，和版本号联动。"],
-  ];
-
-  const guideHtml = guidePairs.map(([term, desc]) =>
-    `<div class="bme-persist-guide__item"><strong>${_escHtml(term)}</strong><span>${_escHtml(desc)}</span></div>`
-  ).join("");
+  if (ps.hostProfile === "luker") {
+    diagnosticRows.splice(5, 0,
+      ["Sidecar 格式", sidecarFormatLabel],
+      ["Manifest rev", manifestRevisionLabel],
+      ["Journal", journalStateLabel],
+      ["Checkpoint rev", checkpointRevisionLabel],
+      ["缓存落后", cacheLagLabel],
+    );
+  }
+  diagnosticRows.push(
+    ..._buildLoadDiagnosticRows(loadDiagnostics),
+    ..._buildPersistDeltaDiagnosticRows(persistDeltaDiagnostics),
+  );
 
   el.innerHTML = `
     <div class="bme-persist-grid">
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
-        ${kvHtml}
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-database" style="margin-right:6px;color:var(--bme-primary)"></i>持久化状态</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+          ${summaryPills.map((pill) => `<span class="bme-task-pill">${_escHtml(pill)}</span>`).join("")}
+        </div>
+        <div class="bme-config-help" style="margin-bottom:12px">
+          这里只保留日常最常用的持久化信息。更偏技术性的字段已下沉到诊断细节，避免和右侧运行概览失衡。
+        </div>
+        ${renderRows(primaryRows)}
+        <details style="margin-top:14px;border-top:1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.10));padding-top:12px">
+          <summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--bme-on-surface);list-style:none">
+            <i class="fa-solid fa-stethoscope" style="margin-right:6px;color:var(--bme-primary)"></i>查看诊断细节
+          </summary>
+          <div style="margin-top:12px">
+            ${renderRowsTwoColumn(diagnosticRows)}
+          </div>
+        </details>
       </div>
       <div class="bme-persist-kv">
-        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:8px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行统计</div>
-        ${secondaryHtml}
+        <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-chart-bar" style="margin-right:6px;color:var(--bme-primary)"></i>运行概览</div>
+        <div class="bme-config-help" style="margin-bottom:12px">
+          右侧专门展示当前图谱规模、处理进度和运行态前沿，减少左侧“持久化状态”承担太多运行职责。
+        </div>
+        ${renderRows(runtimeRows)}
       </div>
-    </div>
-    <div class="bme-persist-guide">
-      <div class="bme-persist-guide__title"><i class="fa-solid fa-circle-info" style="margin-right:6px;opacity:.5"></i>字段说明</div>
-      ${guideHtml}
     </div>
   `;
 }
@@ -2539,7 +2933,7 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
   if (!el) return;
 
   if (!canRender) {
-    el.innerHTML = `<div class="bme-cog-status-card" style="grid-column:1/-1"><div class="bme-cog-status-card__value">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div></div>`;
+    el.innerHTML = `<div class="bme-cog-status-card" style="grid-column:1/-1"><div class="bme-cog-status-card__value">${_escHtml(_getGraphLoadLabel(loadInfo))}</div></div>`;
     return;
   }
 
@@ -2713,6 +3107,56 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender, targetEl) {
   const suppressedCount = new Set([...(ownerState.manualHiddenNodeIds || []), ...(ownerState.mistakenNodeIds || [])]).size;
   const disabledAttr = !selectedNode || writeBlocked ? "disabled" : "";
   const displayInfo = _getOwnerDisplayInfo(selectedOwner, collisionIndex);
+  const isCharacterOwner = String(selectedOwner.ownerType || "") === "character";
+  const ownerActionDisabledAttr = writeBlocked || !isCharacterOwner ? "disabled" : "";
+  const mergeCandidates = _getCognitionOwnerCollection(graph).filter(
+    (entry) =>
+      String(entry?.ownerType || "") === "character" &&
+      String(entry?.ownerKey || "") !== String(selectedOwner.ownerKey || ""),
+  );
+  const mergeOptions = mergeCandidates.length
+    ? mergeCandidates
+        .map((entry) => {
+          const targetDisplayInfo = _getOwnerDisplayInfo(entry, collisionIndex);
+          return `<option value="${_escAttr(entry.ownerKey || "")}">${_escHtml(targetDisplayInfo.title)}</option>`;
+        })
+        .join("")
+    : '<option value="">暂无可合并目标</option>';
+  const mergeDisabledAttr =
+    writeBlocked || !isCharacterOwner || mergeCandidates.length === 0 ? "disabled" : "";
+  const ownerManagementSection = isCharacterOwner
+    ? `
+    <div class="bme-cog-override-section">
+      <div class="bme-cog-override-title">角色认知管理</div>
+      <div class="bme-cog-space-row">
+        <label>重命名角色认知</label>
+        <input class="bme-config-input" type="text" data-bme-cognition-owner-rename-input
+               placeholder="输入新的角色名称..." value="${_escHtml(selectedOwner.ownerName || "")}" ${ownerActionDisabledAttr} />
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">会同步更新 owner 名称、角色节点名和 POV scope，并把旧名加入 aliases。</div>
+        <button class="bme-cog-btn bme-cog-btn--known" type="button" data-bme-cognition-owner-action="rename" ${ownerActionDisabledAttr}>重命名</button>
+      </div>
+      <div class="bme-cog-space-row">
+        <label>合并到其他角色认知</label>
+        <select class="bme-config-input" data-bme-cognition-owner-merge-target ${mergeDisabledAttr}>${mergeOptions}</select>
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">会把当前角色的 POV scope 改写到目标角色，并合并认知状态与 aliases。</div>
+        <button class="bme-cog-btn bme-cog-btn--mistaken" type="button" data-bme-cognition-owner-action="merge" ${mergeDisabledAttr}>合并到目标角色</button>
+      </div>
+      <div class="bme-cog-space-row">
+        <label>删除范围</label>
+        <select class="bme-config-input" data-bme-cognition-owner-delete-mode ${ownerActionDisabledAttr}>
+          <option value="owner-only">只删除 owner，保留角色节点与 POV</option>
+          <option value="archive-character">删除 owner，并归档角色节点</option>
+          <option value="archive-all">删除 owner，并归档角色节点与 POV 记忆</option>
+        </select>
+        <div class="bme-config-help" style="font-size:10px;margin-top:2px">删除前会再次确认；不会无提示直接删除。</div>
+        <button class="bme-cog-btn bme-cog-btn--clear" type="button" data-bme-cognition-owner-action="delete" ${ownerActionDisabledAttr}>删除角色认知</button>
+      </div>
+    </div>`
+    : `
+    <div class="bme-cog-override-section">
+      <div class="bme-cog-override-title">角色认知管理</div>
+      <div class="bme-cog-override-status">当前条目不是角色 owner，暂不支持重命名、合并或删除。</div>
+    </div>`;
 
   const visChips = strongVisibleNames.length
     ? strongVisibleNames.map((n) => `<span class="bme-cog-chip is-visible">${_escHtml(n)}</span>`).join("")
@@ -2764,6 +3208,8 @@ function _renderCogOwnerDetail(graph, loadInfo, canRender, targetEl) {
       <div class="bme-cog-chip-label">被压制节点 · SUPPRESSED</div>
       <div class="bme-cog-chip-wrap">${supChips}</div>
     </div>
+
+    ${ownerManagementSection}
 
     <div class="bme-cog-override-section">
       <div class="bme-cog-override-title">对当前选中节点做手动覆盖</div>
@@ -2941,7 +3387,7 @@ function _refreshSummaryWorkspace(targetEl) {
 
   if (!graph || !_canRenderGraphData(loadInfo)) {
     workspace.innerHTML = `
-      <div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo?.loadState))}</div>
+      <div class="bme-cog-monitor-empty">${_escHtml(_getGraphLoadLabel(loadInfo))}</div>
     `;
     return;
   }
@@ -3056,7 +3502,7 @@ function _refreshDashboard() {
     _setText("bme-stat-archived", "—");
     _setText("bme-stat-frag", "—");
     _setText("bme-status-chat-id", loadInfo.chatId || "—");
-    _setText("bme-status-history", _getGraphLoadLabel(loadInfo.loadState));
+    _setText("bme-status-history", _getGraphLoadLabel(loadInfo));
     _setText("bme-status-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-recovery", "等待聊天图谱元数据加载");
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
@@ -3066,11 +3512,11 @@ function _refreshDashboard() {
     _refreshPersistenceRepairUi(loadInfo, null);
     _renderStatefulListPlaceholder(
       document.getElementById("bme-recent-extract"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     _renderStatefulListPlaceholder(
       document.getElementById("bme-recent-recall"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     _refreshCognitionDashboard(graph, loadInfo);
     _refreshAiMonitorDashboard();
@@ -3569,17 +4015,17 @@ function _refreshCognitionDashboard(
 
   if (!canRenderGraph) {
     _setText("bme-cognition-active-owner", "—");
-    _setText("bme-cognition-active-region", _getGraphLoadLabel(loadInfo.loadState));
+    _setText("bme-cognition-active-region", _getGraphLoadLabel(loadInfo));
     _setText("bme-cognition-adjacent-regions", "—");
     _setText("bme-cognition-owner-count", "—");
     _renderStatefulListPlaceholder(
       document.getElementById("bme-cognition-owner-list"),
-      _getGraphLoadLabel(loadInfo.loadState),
+      _getGraphLoadLabel(loadInfo),
     );
     const detailEl = document.getElementById("bme-cognition-detail");
     if (detailEl) {
       detailEl.innerHTML = `
-        <div class="bme-cognition-empty">${_escHtml(_getGraphLoadLabel(loadInfo.loadState))}</div>
+        <div class="bme-cognition-empty">${_escHtml(_getGraphLoadLabel(loadInfo))}</div>
       `;
     }
     _setInputValueIfIdle("bme-cognition-manual-region", "");
@@ -3738,7 +4184,7 @@ function _refreshMemoryBrowser() {
   if (filterSelect) filterSelect.disabled = !canRenderGraph;
 
   if (!canRenderGraph && loadInfo.loadState !== "empty-confirmed") {
-    _renderStatefulListPlaceholder(listEl, _getGraphLoadLabel(loadInfo.loadState));
+    _renderStatefulListPlaceholder(listEl, _getGraphLoadLabel(loadInfo));
     return;
   }
 
@@ -5246,7 +5692,155 @@ async function _runCognitionNodeOverrideAction(mode = "") {
   } else {
     toastr.success(successMap[mode] || "认知覆盖已更新", "ST-BME");
   }
+  _refreshCognitionSurfaces();
+}
+
+function _refreshCognitionSurfaces() {
   _refreshDashboard();
+  _refreshCognitionWorkspace();
+  _refreshMobileCognitionFull();
+}
+
+async function _callAction(actionKey = "", payload = {}) {
+  const handler = _actionHandlers?.[String(actionKey || "")];
+  if (typeof handler !== "function") {
+    return { ok: false, error: "missing-action-handler" };
+  }
+  const result = await handler(payload);
+  _refreshCognitionSurfaces();
+  return result;
+}
+
+async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
+  const graph = _getGraph?.();
+  const ownerEntries = _getCognitionOwnerCollection(graph);
+  const ownerEntry =
+    ownerEntries.find((entry) => entry.ownerKey === currentCognitionOwnerKey) || null;
+  if (!ownerEntry) {
+    toastr.info("先选择一个角色，再管理认知条目", "ST-BME");
+    return;
+  }
+  if (String(ownerEntry.ownerType || "") !== "character") {
+    toastr.info("当前只支持角色 owner 的重命名、合并和删除", "ST-BME");
+    return;
+  }
+
+  const container =
+    triggerEl?.closest?.(".bme-cog-owner-detail") ||
+    document.getElementById("bme-cog-owner-detail") ||
+    document.getElementById("bme-mobile-cog-owner-detail");
+  const collisionIndex = _buildOwnerCollisionIndex(ownerEntries);
+  const displayInfo = _getOwnerDisplayInfo(ownerEntry, collisionIndex);
+  let result = null;
+
+  if (mode === "rename") {
+    const input = container?.querySelector?.("[data-bme-cognition-owner-rename-input]");
+    const nextName = String(input?.value || "").trim();
+    if (!nextName) {
+      toastr.info("先输入新的角色名称", "ST-BME");
+      return;
+    }
+    if (nextName === String(ownerEntry.ownerName || "").trim()) {
+      toastr.info("新名称与当前名称相同，无需重命名", "ST-BME");
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定将角色认知「${displayInfo.title}」重命名为「${nextName}」吗？\n\n这会同步更新 owner 名称、角色节点名和 POV scope。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.renameKnowledgeOwner?.({
+      ownerKey: ownerEntry.ownerKey,
+      nextName,
+    });
+  } else if (mode === "merge") {
+    const select = container?.querySelector?.("[data-bme-cognition-owner-merge-target]");
+    const targetOwnerKey = String(select?.value || "").trim();
+    if (!targetOwnerKey) {
+      toastr.info("先选择要合并到的目标角色", "ST-BME");
+      return;
+    }
+    if (targetOwnerKey === ownerEntry.ownerKey) {
+      toastr.info("不能把角色合并到自己", "ST-BME");
+      return;
+    }
+    const targetEntry =
+      ownerEntries.find((entry) => String(entry.ownerKey || "") === targetOwnerKey) || null;
+    const targetDisplayInfo = targetEntry
+      ? _getOwnerDisplayInfo(targetEntry, collisionIndex)
+      : { title: targetOwnerKey };
+    if (
+      !window.confirm(
+        `确定将角色认知「${displayInfo.title}」合并到「${targetDisplayInfo.title}」吗？\n\n这会把当前角色的 POV scope 改写到目标角色，并合并认知状态。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.mergeKnowledgeOwners?.({
+      sourceOwnerKey: ownerEntry.ownerKey,
+      targetOwnerKey,
+    });
+  } else if (mode === "delete") {
+    const select = container?.querySelector?.("[data-bme-cognition-owner-delete-mode]");
+    const deleteMode = String(select?.value || "owner-only").trim() || "owner-only";
+    const deleteModeLabelMap = {
+      "owner-only": "只删除 owner，保留角色节点与 POV",
+      "archive-character": "删除 owner，并归档角色节点",
+      "archive-all": "删除 owner，并归档角色节点与 POV 记忆",
+    };
+    if (
+      !window.confirm(
+        `确定删除角色认知「${displayInfo.title}」吗？\n\n删除范围：${deleteModeLabelMap[deleteMode] || deleteMode}\n\n此操作会立即写回图谱。`,
+      )
+    ) {
+      return;
+    }
+    result = await _actionHandlers.deleteKnowledgeOwner?.({
+      ownerKey: ownerEntry.ownerKey,
+      mode: deleteMode,
+    });
+  } else {
+    return;
+  }
+
+  if (!result?.ok) {
+    const messageMap = {
+      "graph-write-blocked": "当前图谱还在保护写入阶段，请稍后再试",
+      "owner-not-found": "没有找到这个角色的认知状态，请先让她参与一轮提取",
+      "same-owner": "不能把角色合并到自己",
+      "missing-owner-or-name": "缺少角色或新名称",
+      "invalid-delete-mode": "删除范围无效，请重新选择",
+      "unsupported-owner-type": "当前只支持角色 owner 操作",
+    };
+    toastr.error(messageMap[result?.error] || "角色认知操作失败", "ST-BME");
+    return;
+  }
+
+  if (mode === "rename") {
+    currentCognitionOwnerKey = String(result.ownerKey || ownerEntry.ownerKey || "").trim();
+  } else if (mode === "merge") {
+    currentCognitionOwnerKey = String(result.ownerKey || "").trim();
+  } else if (mode === "delete") {
+    currentCognitionOwnerKey = "";
+  }
+
+  const successMap = {
+    rename: "角色认知已重命名",
+    merge: "角色认知已合并",
+    delete: "角色认知已删除",
+  };
+  if (result.persistBlocked) {
+    toastr.warning(
+      `${successMap[mode] || "角色认知已更新"}，但正式写回可能仍在等待图谱就绪`,
+      "ST-BME",
+    );
+  } else {
+    toastr.success(successMap[mode] || "角色认知已更新", "ST-BME");
+  }
+
+  _refreshCognitionSurfaces();
 }
 
 async function _applyManualActiveRegionFromDashboard(clear = false) {
@@ -5768,6 +6362,43 @@ function _bindActions() {
     currentCognitionOwnerKey = card.dataset.ownerKey;
     _refreshMobileCognitionFull();
   });
+
+  const cogOwnerDetail = document.getElementById("bme-cog-owner-detail");
+  if (cogOwnerDetail && cogOwnerDetail.dataset.bmeOwnerActionsBound !== "true") {
+    cogOwnerDetail.addEventListener("click", async (e) => {
+      const ownerActionBtn = e.target.closest("[data-bme-cognition-owner-action]");
+      if (!ownerActionBtn || ownerActionBtn.disabled) return;
+      await _runCognitionOwnerManagementAction(
+        String(ownerActionBtn.dataset.bmeCognitionOwnerAction || ""),
+        ownerActionBtn,
+      );
+    });
+    cogOwnerDetail.dataset.bmeOwnerActionsBound = "true";
+  }
+
+  const mobileCogOwnerDetail = document.getElementById("bme-mobile-cog-owner-detail");
+  if (
+    mobileCogOwnerDetail &&
+    mobileCogOwnerDetail.dataset.bmeOwnerActionsBound !== "true"
+  ) {
+    mobileCogOwnerDetail.addEventListener("click", async (e) => {
+      const ownerActionBtn = e.target.closest("[data-bme-cognition-owner-action]");
+      if (ownerActionBtn && !ownerActionBtn.disabled) {
+        await _runCognitionOwnerManagementAction(
+          String(ownerActionBtn.dataset.bmeCognitionOwnerAction || ""),
+          ownerActionBtn,
+        );
+        return;
+      }
+
+      const nodeActionBtn = e.target.closest("[data-bme-cognition-node-action]");
+      if (!nodeActionBtn || nodeActionBtn.disabled) return;
+      await _runCognitionNodeOverrideAction(
+        String(nodeActionBtn.dataset.bmeCognitionNodeAction || ""),
+      );
+    });
+    mobileCogOwnerDetail.dataset.bmeOwnerActionsBound = "true";
+  }
 
   // Dashboard 跳转认知视图
   document.getElementById("bme-cognition-jump-to-view")?.addEventListener("click", () => {
@@ -7817,6 +8448,16 @@ function _formatDurationMs(durationMs) {
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
 }
 
+function _formatDataSizeBytes(byteCount) {
+  const normalized = Number(byteCount);
+  if (!Number.isFinite(normalized) || normalized <= 0) return "—";
+  if (normalized < 1024) return `${Math.round(normalized)} B`;
+  if (normalized < 1024 * 1024) {
+    return `${(normalized / 1024).toFixed(normalized >= 10 * 1024 ? 0 : 1)} KB`;
+  }
+  return `${(normalized / (1024 * 1024)).toFixed(normalized >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
 function _getMonitorTaskTypeLabel(taskType = "") {
   const normalized = String(taskType || "").trim().toLowerCase();
   const labels = {
@@ -8291,6 +8932,12 @@ function _renderPersistDeltaTraceCard(state) {
   const payloadCharsText = diagnostics.combinedSerializedChars
     ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
     : "—";
+  const snapshotBuildText = `${_formatDurationMs(diagnostics.baseSnapshotReadMs)} / ${_formatDurationMs(
+    diagnostics.snapshotBuildMs,
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
   const cacheText = `${Number(diagnostics.serializationCacheHits || 0)}H / ${Number(
     diagnostics.serializationCacheMisses || 0,
   )}M`;
@@ -8344,6 +8991,10 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Base / Snapshot</span>
+        <strong>${_escHtml(snapshotBuildText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>Prepare / Native</span>
         <strong>${_escHtml(
           `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -8362,6 +9013,18 @@ function _renderPersistDeltaTraceCard(state) {
         )}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Commit 排队 / 提交</span>
+        <strong>${_escHtml(commitPhaseText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit 细分</span>
+        <strong>${_escHtml(commitBreakdownText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit Payload</span>
+        <strong>${_escHtml(commitBytesText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>PreparedSet Cache</span>
         <strong>${_escHtml(preparedSetCacheText)}</strong>
       </div>
@@ -8378,6 +9041,10 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(
           `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(diagnostics.upsertEdgeCount || 0)}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(diagnostics.deleteEdgeCount || 0)}DE`,
         )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>未归因</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.untrackedMs))}</strong>
       </div>
     </div>
     ${_renderMessageTraceTextBlock(
@@ -11547,6 +12214,7 @@ function _getGraphPersistenceSnapshot() {
     lastBackupFilename: "",
     lastSyncError: "",
     persistDelta: null,
+    loadDiagnostics: null,
   };
 }
 
@@ -11627,6 +12295,7 @@ function _isPersistenceRevisionAccepted(persistence = null, loadInfo = {}) {
 
 function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   const persistence = batchStatus?.persistence || null;
+  const localPersistError = String(loadInfo?.indexedDbLastError || "").trim();
   if (_hasMeaningfulPersistenceRecord(persistence)) {
     const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
     const parts = [
@@ -11640,6 +12309,7 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
         ? `rev ${Number(persistence.revision)}`
         : "",
       persistence.reason || "",
+      !accepted && localPersistError ? `本地错误 ${localPersistError}` : "",
     ].filter(Boolean);
     return parts.join(" · ") || "尚无持久化记录";
   }
@@ -11674,6 +12344,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
     graph?.historyState?.lastProcessedAssistantFloor ?? -1;
   const persistence = batchStatus?.persistence || null;
   const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
+  const localPersistError = String(loadInfo?.indexedDbLastError || "").trim();
   const processedRange = Array.isArray(batchStatus?.processedRange)
     ? batchStatus.processedRange
     : [];
@@ -11683,7 +12354,7 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
       : null;
 
   if (_hasMeaningfulPersistenceRecord(persistence) && !accepted && pendingFloor != null) {
-    return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}`;
+    return `持久化待确认：本地已抽取到楼层 ${pendingFloor}，已确认楼层 ${lastConfirmedFloor}${localPersistError ? ` · 本地错误 ${localPersistError}` : ""}`;
   }
 
   if (loadInfo?.persistMismatchReason) {
@@ -11702,10 +12373,19 @@ function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = 
   return `干净，已确认处理到楼层 ${lastConfirmedFloor}`;
 }
 
-function _getGraphLoadLabel(loadState = "") {
+function _getGraphLoadLabel(loadInfoOrState = "") {
+  const loadInfo =
+    loadInfoOrState && typeof loadInfoOrState === "object"
+      ? loadInfoOrState
+      : null;
+  const loadState = String(
+    loadInfo ? loadInfo.loadState || "" : loadInfoOrState || "",
+  );
   switch (loadState) {
     case "loading":
-      return "正在加载当前聊天图谱";
+      return loadInfo?.runtimeGraphReadable === true
+        ? "图谱已暂载，正在确认本地存储"
+        : "正在加载当前聊天图谱";
     case "shadow-restored":
       return "已从本次会话临时恢复，正在等待正式聊天元数据";
     case "empty-confirmed":
@@ -11724,12 +12404,15 @@ function _refreshPersistenceRepairUi(
   loadInfo = _getGraphPersistenceSnapshot(),
   batchStatus = _getLatestBatchStatusSnapshot(),
 ) {
-  const row = document.getElementById("bme-persist-repair-row");
   const help = document.getElementById("bme-persist-repair-help");
+  const lukerGroup = document.getElementById("bme-luker-sidecar-group");
+  const actionHelp = document.getElementById("bme-actions-persist-repair-help");
   const lukerCacheBtn = document.getElementById("bme-act-rebuild-luker-cache");
   const lukerRepairBtn = document.getElementById("bme-act-repair-luker-sidecar");
   const lukerCompactBtn = document.getElementById("bme-act-compact-luker-sidecar");
-  if (!row || !help) return;
+  const retryBtn = document.getElementById("bme-act-retry-persist");
+  const probeBtn = document.getElementById("bme-act-probe-graph-load");
+  if (!help) return;
 
   const persistence = batchStatus?.persistence || null;
   const accepted = _isPersistenceRevisionAccepted(persistence, loadInfo);
@@ -11738,38 +12421,49 @@ function _refreshPersistenceRepairUi(
     Boolean(loadInfo?.persistMismatchReason) ||
     (_hasMeaningfulPersistenceRecord(persistence) && !accepted);
 
-  row.hidden = !shouldShow;
   help.hidden = !shouldShow;
   const isLuker = String(loadInfo?.hostProfile || "") === "luker";
+  if (lukerGroup) lukerGroup.hidden = false;
+  if (retryBtn) retryBtn.hidden = false;
+  if (probeBtn) probeBtn.hidden = false;
   if (lukerCacheBtn) lukerCacheBtn.hidden = !isLuker;
   if (lukerRepairBtn) lukerRepairBtn.hidden = !isLuker;
   if (lukerCompactBtn) lukerCompactBtn.hidden = !isLuker;
   if (!shouldShow) {
     help.textContent = "";
+    if (actionHelp) {
+      actionHelp.textContent = isLuker
+        ? "这里集中放持久化修复入口。通用情况先用“重试持久化”和“重新探测图谱”；如果是 Luker 主 sidecar 脱节，再用右侧 3 个专项修复按钮。"
+        : "这里集中放持久化修复入口。通常先用“重试持久化”，状态没恢复再试“重新探测图谱”。";
+    }
     return;
   }
 
+  let helpText = "";
   if (loadInfo?.pendingPersist === true) {
-    help.textContent =
+    helpText =
       isLuker
-        ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再试“修复主 Sidecar”或“重建本地缓存”。"
+        ? "最近一批提取已经完成，但 Luker manifest 还没确认。先试“重试持久化”，如果仍未确认，再到“操作”页的 Luker Sidecar 区域做“修复主 Sidecar”或“重建本地缓存”。"
         : "最近一批提取已经完成，但正式写回还没确认。先试“重试持久化”，如果状态没变化，再试“重新探测图谱”。";
-    return;
+    if (loadInfo?.indexedDbLastError) {
+      helpText = `${helpText}\n本地错误：${loadInfo.indexedDbLastError}`;
+    }
+  } else if (loadInfo?.persistMismatchReason) {
+    helpText = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
+  } else {
+    helpText =
+      persistence?.recoverable === true
+        ? isLuker
+          ? "最近一批已经捕获了恢复锚点，但 Luker 主 sidecar 还没确认。可以先重试持久化；必要时再到“操作”页的持久化修复区域执行更深修复。"
+          : "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
+        : isLuker
+          ? "最近一批持久化没有被 Luker manifest 接受。可以先重试持久化；如果主 sidecar 与本地缓存脱节，再到“操作”页的持久化修复区域执行更深修复。"
+          : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
   }
-
-  if (loadInfo?.persistMismatchReason) {
-    help.textContent = _formatPersistMismatchHelp(loadInfo.persistMismatchReason);
-    return;
+  help.textContent = helpText;
+  if (actionHelp) {
+    actionHelp.textContent = helpText;
   }
-
-  help.textContent =
-    persistence?.recoverable === true
-      ? isLuker
-        ? "最近一批已经捕获了恢复锚点，但 Luker 主 sidecar 还没确认。可以先重试持久化；必要时再修复主 Sidecar或重建本地缓存。"
-        : "最近一批已经捕获了恢复锚点，但还没有进入正式 accepted 存储。可以先重试持久化；如果仍未确认，再重新探测图谱。"
-      : isLuker
-        ? "最近一批持久化没有被 Luker manifest 接受。可以先重试持久化；如果主 sidecar 与本地缓存脱节，再修复主 Sidecar或重建本地缓存。"
-        : "最近一批持久化没有被接受。可以先重试持久化；如果宿主延迟加载了本地存储，再重新探测图谱。";
 }
 
 function _canRenderGraphData(loadInfo = _getGraphPersistenceSnapshot()) {
@@ -11808,7 +12502,7 @@ function _refreshGraphAvailabilityState() {
   const mobileOverlay = document.getElementById("bme-mobile-graph-overlay");
   const mobileOverlayText = document.getElementById("bme-mobile-graph-overlay-text");
   const blocked = _isGraphWriteBlocked(loadInfo);
-  const loadLabel = _getGraphLoadLabel(loadInfo.loadState);
+  const loadLabel = _getGraphLoadLabel(loadInfo);
   const pausedLabel = "图谱渲染已暂停，可点击工具栏按钮恢复。";
   const renderingPaused = !_isGraphRenderingEnabled();
 

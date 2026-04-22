@@ -119,10 +119,19 @@ function isVerboseRuntimeDebugEnabled() {
   return globalThis.__stBmeVerboseDebug === true;
 }
 
+function isLightweightHostModeEnabled() {
+  return globalThis.__stBmeLightweightHostMode === true;
+}
+
 function buildPreviewText(value, maxChars = 240) {
+  const effectiveMaxChars = isLightweightHostModeEnabled()
+    ? Math.min(maxChars, 160)
+    : maxChars;
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!text) return "";
-  return text.length > maxChars ? `${text.slice(0, maxChars)}...` : text;
+  return text.length > effectiveMaxChars
+    ? `${text.slice(0, effectiveMaxChars)}...`
+    : text;
 }
 
 function summarizeExecutionMessages(messages = []) {

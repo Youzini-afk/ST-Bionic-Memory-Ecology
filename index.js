@@ -81,6 +81,7 @@ import {
   onGenerationStartedController,
   onMessageDeletedController,
   onMessageEditedController,
+  onMessageUpdatedController,
   onMessageReceivedController,
   onMessageSentController,
   onMessageSwipedController,
@@ -90,6 +91,16 @@ import {
   registerGenerationAfterCommandsController,
   scheduleSendIntentHookRetryController,
 } from "./host/event-binding.js";
+import {
+  BME_HOST_PROFILE_LUKER,
+  getBmeHostAdapter,
+  isBmeLightweightHostMode,
+  normalizeBmeChatStateTarget,
+  resolveBmeHostProfile,
+  resolveChatStateTargetChatId,
+  resolveCurrentBmeChatStateTarget,
+  serializeBmeChatStateTarget,
+} from "./host/runtime-host-adapter.js";
 import {
   executeExtractionBatchController,
   onExtractionTaskController,
@@ -125,6 +136,7 @@ import {
   buildLukerGraphJournalV2,
   buildLukerGraphManifestV2,
   canUseGraphChatState,
+  deleteGraphChatStateNamespace,
   detectIndexedDbSnapshotCommitMarkerMismatch,
   findGraphShadowSnapshotByIntegrity,
   getAcceptedCommitMarkerRevision,
@@ -140,6 +152,8 @@ import {
   LUKER_GRAPH_JOURNAL_COMPACTION_REVISION_GAP,
   LUKER_GRAPH_JOURNAL_NAMESPACE,
   LUKER_GRAPH_MANIFEST_NAMESPACE,
+  LUKER_PROJECTION_STATE_NAMESPACE,
+  LUKER_DEBUG_STATE_NAMESPACE,
   LUKER_GRAPH_SIDECAR_V2_FORMAT,
   MODULE_NAME,
   cloneGraphForPersistence,
@@ -147,6 +161,7 @@ import {
   getGraphPersistedRevision,
   getGraphPersistenceMeta,
   getGraphIdentityAliasCandidates,
+  readGraphChatStateNamespaces,
   readGraphShadowSnapshot,
   removeGraphShadowSnapshot,
   rememberGraphIdentityAlias,
@@ -158,6 +173,7 @@ import {
   shouldPreferShadowSnapshotOverOfficial,
   stampGraphPersistenceMeta,
   writeChatMetadataPatch,
+  writeGraphChatStatePayload,
   writeGraphChatStateSnapshot,
   writeLukerGraphCheckpointV2,
   writeLukerGraphManifestV2,
@@ -255,6 +271,9 @@ import { DEFAULT_NODE_SCHEMA, validateSchema } from "./graph/schema.js";
 import {
   applyManualKnowledgeOverride,
   clearManualKnowledgeOverride,
+  deleteKnowledgeOwner,
+  mergeKnowledgeOwners,
+  renameKnowledgeOwner,
   setManualActiveRegion,
   updateRegionAdjacencyManual,
 } from "./graph/knowledge-state.js";
@@ -335,6 +354,65 @@ const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
 
 function normalizeChatIdCandidate(value = "") {
   return String(value ?? "").trim();
+}
+
+function getActiveBmeHostAdapter(context = getContext()) {
+  if (typeof getBmeHostAdapter === "function") {
+    return getBmeHostAdapter(context);
+  }
+  return {
+    hostProfile: resolvePersistenceHostProfile(context),
+    resolveCurrentTarget() {
+      return resolveCurrentChatStateTarget(context);
+    },
+    isLightweightHostMode() {
+      return false;
+    },
+  };
+}
+
+function resolveCurrentChatStateTarget(
+  context = getContext(),
+  explicitTarget = null,
+) {
+  if (
+    typeof normalizeBmeChatStateTarget === "function" &&
+    typeof resolveCurrentBmeChatStateTarget === "function"
+  ) {
+    return normalizeBmeChatStateTarget(
+      resolveCurrentBmeChatStateTarget(context, explicitTarget),
+    );
+  }
+  if (explicitTarget && typeof explicitTarget === "object") {
+    return explicitTarget;
+  }
+  const activeContext =
+    context && typeof context === "object" ? context : getContext();
+  const chatId = normalizeChatIdCandidate(
+    activeContext?.chatId ||
+      (typeof activeContext?.getCurrentChatId === "function"
+        ? activeContext.getCurrentChatId()
+        : ""),
+  );
+  if (activeContext?.groupId != null && String(activeContext.groupId || "").trim()) {
+    return chatId ? { is_group: true, id: chatId } : null;
+  }
+  return null;
+}
+
+function syncBmeHostRuntimeFlags(context = getContext()) {
+  const adapter = getActiveBmeHostAdapter(context);
+  const target = adapter.resolveCurrentTarget();
+  const lightweightHostMode =
+    typeof adapter.isLightweightHostMode === "function"
+      ? adapter.isLightweightHostMode()
+      : false;
+  globalThis.__stBmeLightweightHostMode = lightweightHostMode === true;
+  return {
+    adapter,
+    target,
+    lightweightHostMode,
+  };
 }
 
 function readGlobalCurrentChatId() {
@@ -437,6 +515,41 @@ function resolveCurrentChatIdentity(context = getContext()) {
 
 function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
+}
+
+function resolvePersistenceChatId(
+  context = getContext(),
+  graph = currentGraph,
+  explicitChatId = "",
+) {
+  const directChatId = normalizeChatIdCandidate(explicitChatId);
+  if (directChatId) return directChatId;
+
+  const resolvedIdentity = resolveCurrentChatIdentity(context);
+  const resolvedChatId = normalizeChatIdCandidate(resolvedIdentity.chatId);
+  if (resolvedChatId) return resolvedChatId;
+
+  const graphMeta = getGraphPersistenceMeta(graph) || {};
+  const fallbackCandidates = [
+    graph?.historyState?.chatId,
+    graphMeta.chatId,
+    currentGraph?.historyState?.chatId,
+    getGraphPersistenceMeta(currentGraph)?.chatId,
+    graphPersistenceState.chatId,
+    graphPersistenceState.queuedPersistChatId,
+    graphPersistenceState.commitMarker?.chatId,
+    context?.chatMetadata?.integrity,
+    context?.chatMetadata?.chat_id,
+    context?.chatMetadata?.chatId,
+    context?.chatMetadata?.session_id,
+    context?.chatMetadata?.sessionId,
+  ];
+
+  return (
+    fallbackCandidates
+      .map((candidate) => normalizeChatIdCandidate(candidate))
+      .find(Boolean) || ""
+  );
 }
 
 function rememberResolvedGraphIdentityAlias(
@@ -1198,17 +1311,21 @@ let bmeLocalStoreCapabilitySnapshot = {
   reason: "unprobed",
 };
 let bmeLocalStoreCapabilityWarningShown = false;
+const BME_LOCAL_STORE_CAPABILITY_FAILURE_RETRY_MS = 4000;
 const bmeIndexedDbSnapshotCacheByChatId = new Map();
 const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
+const bmeIndexedDbRuntimeRepairInFlightByChatId = new Set();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLocalStoreMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
 const bmeChatStateManifestCacheByChatId = new Map();
 const bmeChatStateLoadInFlightByChatId = new Map();
 const bmeLukerSidecarCompactionByChatId = new Map();
+const bmeLukerSidecarWriteByChatId = new Map();
 const PENDING_GRAPH_PERSIST_RETRY_DELAYS_MS = [500, 1500, 5000];
 const PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS = 5;
+const LUKER_SIDECAR_CONSISTENCY_RETRY_DELAYS_MS = [80, 220];
 const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = new Set([
   GRAPH_LOAD_STATES.LOADING,
   GRAPH_LOAD_STATES.BLOCKED,
@@ -1270,28 +1387,13 @@ function resolveLocalStoreTierFromPresentation(
 }
 
 function hasValidLukerChatStateTarget(context = getContext()) {
-  if (!context || typeof context !== "object") {
-    return false;
-  }
-  const chatId = normalizeChatIdCandidate(
-    context.chatId ||
-      (typeof context.getCurrentChatId === "function"
-        ? context.getCurrentChatId()
-        : getCurrentChatId(context)),
-  );
-  if (!chatId) {
-    return false;
-  }
-  if (context.groupId != null && String(context.groupId || "").trim()) {
-    return true;
-  }
-  if (context.characterId != null && String(context.characterId || "").trim()) {
-    return true;
-  }
-  return true;
+  return resolveCurrentChatStateTarget(context) !== null;
 }
 
 function resolvePersistenceHostProfile(context = getContext()) {
+  if (typeof resolveBmeHostProfile === "function") {
+    return resolveBmeHostProfile(context);
+  }
   const activeContext =
     context && typeof context === "object" ? context : getContext();
   const hasLukerApi =
@@ -1299,7 +1401,12 @@ function resolvePersistenceHostProfile(context = getContext()) {
   if (
     hasLukerApi &&
     canUseGraphChatState(activeContext) &&
-    hasValidLukerChatStateTarget(activeContext)
+    normalizeChatIdCandidate(
+      activeContext?.chatId ||
+        (typeof activeContext?.getCurrentChatId === "function"
+          ? activeContext.getCurrentChatId()
+          : ""),
+    )
   ) {
     return "luker";
   }
@@ -1334,8 +1441,11 @@ function getGraphPersistenceLiveState() {
     getContext(),
     getPreferredGraphLocalStorePresentationSync(),
   );
+  const adapterRuntime = syncBmeHostRuntimeFlags(getContext());
   const hostProfile = normalizePersistenceHostProfile(
-    graphPersistenceState.hostProfile || persistenceEnvironment.hostProfile,
+    graphPersistenceState.hostProfile ||
+      adapterRuntime.adapter.hostProfile ||
+      persistenceEnvironment.hostProfile,
   );
   const primaryStorageTier = normalizePersistenceStorageTier(
     graphPersistenceState.primaryStorageTier ||
@@ -1344,6 +1454,9 @@ function getGraphPersistenceLiveState() {
   const cacheStorageTier = normalizePersistenceStorageTier(
     graphPersistenceState.cacheStorageTier ||
       persistenceEnvironment.cacheStorageTier,
+  );
+  const runtimeGraphReadable = hasMeaningfulRuntimeGraphForChat(
+    graphPersistenceState.chatId || getCurrentChatId(),
   );
   const snapshot = {
     loadState: graphPersistenceState.loadState,
@@ -1370,6 +1483,13 @@ function getGraphPersistenceLiveState() {
     cacheStorageTier,
     cacheMirrorState: String(graphPersistenceState.cacheMirrorState || "idle"),
     cacheLag: Number(graphPersistenceState.cacheLag || 0),
+    chatStateTarget: cloneRuntimeDebugValue(
+      graphPersistenceState.chatStateTarget || adapterRuntime.target,
+      null,
+    ),
+    lightweightHostMode:
+      graphPersistenceState.lightweightHostMode ??
+      adapterRuntime.lightweightHostMode,
     persistDiagnosticTier: String(
       graphPersistenceState.persistDiagnosticTier || "none",
     ),
@@ -1402,6 +1522,28 @@ function getGraphPersistenceLiveState() {
     lukerCheckpointRevision: Number(
       graphPersistenceState.lukerCheckpointRevision || 0,
     ),
+    projectionState: cloneRuntimeDebugValue(
+      graphPersistenceState.projectionState,
+      null,
+    ),
+    lastHookPhase: String(graphPersistenceState.lastHookPhase || ""),
+    lastRequestRescanReason: String(
+      graphPersistenceState.lastRequestRescanReason || "",
+    ),
+    lastIgnoredMutationEvent: String(
+      graphPersistenceState.lastIgnoredMutationEvent || "",
+    ),
+    lastIgnoredMutationReason: String(
+      graphPersistenceState.lastIgnoredMutationReason || "",
+    ),
+    lastChatStateConflict: cloneRuntimeDebugValue(
+      graphPersistenceState.lastChatStateConflict,
+      null,
+    ),
+    lastBranchInheritResult: cloneRuntimeDebugValue(
+      graphPersistenceState.lastBranchInheritResult,
+      null,
+    ),
     localStoreFormatVersion: Number(graphPersistenceState.localStoreFormatVersion || 0) || 1,
     localStoreMigrationState: String(
       graphPersistenceState.localStoreMigrationState || "idle",
@@ -1416,6 +1558,7 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.opfsCompactionState,
       null,
     ),
+    runtimeGraphReadable,
     remoteSyncFormatVersion: Number(graphPersistenceState.remoteSyncFormatVersion || 0) || 1,
     dbReady:
       graphPersistenceState.dbReady ??
@@ -1442,6 +1585,10 @@ function getGraphPersistenceLiveState() {
       null,
     ),
     persistDelta: cloneRuntimeDebugValue(graphPersistenceState.persistDelta, null),
+    loadDiagnostics: cloneRuntimeDebugValue(
+      graphPersistenceState.loadDiagnostics,
+      null,
+    ),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -1461,11 +1608,66 @@ function updateGraphPersistenceState(patch = {}) {
   return graphPersistenceState;
 }
 
+function recordIgnoredMutationEvent(eventName = "", detail = {}) {
+  updateGraphPersistenceState({
+    lastIgnoredMutationEvent: String(eventName || ""),
+    lastIgnoredMutationReason: String(
+      detail?.reason || detail?.message || "lightweight-only",
+    ),
+  });
+}
+
+function recordLukerHookPhase(phase = "", detail = {}) {
+  updateGraphPersistenceState({
+    lastHookPhase: String(phase || ""),
+    chatStateTarget:
+      cloneRuntimeDebugValue(detail?.chatStateTarget, null) ||
+      graphPersistenceState.chatStateTarget ||
+      resolveCurrentChatStateTarget(getContext()),
+    lightweightHostMode:
+      detail?.lightweightHostMode ??
+      graphPersistenceState.lightweightHostMode ??
+      isBmeLightweightHostMode(getContext()),
+  });
+}
+
+function updateLukerProjectionState(patch = {}) {
+  const previous =
+    graphPersistenceState.projectionState &&
+    typeof graphPersistenceState.projectionState === "object" &&
+    !Array.isArray(graphPersistenceState.projectionState)
+      ? graphPersistenceState.projectionState
+      : {
+          runtime: { status: "idle", updatedAt: 0, reason: "" },
+          persistent: { status: "idle", updatedAt: 0, reason: "" },
+        };
+  const nextState = {
+    ...cloneRuntimeDebugValue(previous, previous),
+    ...cloneRuntimeDebugValue(patch, {}),
+  };
+  updateGraphPersistenceState({
+    projectionState: nextState,
+  });
+  return nextState;
+}
+
 function readPersistDeltaDiagnosticsNow() {
   if (typeof performance === "object" && typeof performance.now === "function") {
     return performance.now();
   }
   return Date.now();
+}
+
+function readLoadDiagnosticsNow() {
+  return readPersistDeltaDiagnosticsNow();
+}
+
+function normalizeLoadDiagnosticsMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function normalizePersistDeltaDiagnosticsMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
 }
 
 function updatePersistDeltaDiagnostics(snapshot = null) {
@@ -1482,6 +1684,23 @@ function updatePersistDeltaDiagnostics(snapshot = null) {
         }
       : null;
   updateGraphPersistenceState({ persistDelta: nextSnapshot });
+  return nextSnapshot;
+}
+
+function updateLoadDiagnostics(snapshot = null) {
+  const nextSnapshot =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? {
+          ...(graphPersistenceState.loadDiagnostics &&
+          typeof graphPersistenceState.loadDiagnostics === "object" &&
+          !Array.isArray(graphPersistenceState.loadDiagnostics)
+            ? cloneRuntimeDebugValue(graphPersistenceState.loadDiagnostics, {})
+            : {}),
+          ...cloneRuntimeDebugValue(snapshot, {}),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
+  updateGraphPersistenceState({ loadDiagnostics: nextSnapshot });
   return nextSnapshot;
 }
 
@@ -1549,6 +1768,52 @@ function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   return currentGraph.nodes.length > 0 || currentGraph.edges.length > 0;
 }
 
+function hasMeaningfulRuntimeGraphForChat(
+  chatId = getCurrentChatId(),
+  identity = resolveCurrentChatIdentity(getContext()),
+) {
+  if (
+    !currentGraph ||
+    typeof currentGraph !== "object" ||
+    !Array.isArray(currentGraph.nodes) ||
+    !Array.isArray(currentGraph.edges) ||
+    !currentGraph.historyState ||
+    typeof currentGraph.historyState !== "object" ||
+    Array.isArray(currentGraph.historyState)
+  ) {
+    return false;
+  }
+
+  const normalizedTargetChatId = normalizeChatIdCandidate(chatId);
+  const runtimeChatId = normalizeChatIdCandidate(
+    currentGraph.historyState.chatId,
+  );
+
+  if (normalizedTargetChatId && runtimeChatId) {
+    const sameChat =
+      areChatIdsEquivalentForResolvedIdentity(
+        runtimeChatId,
+        normalizedTargetChatId,
+        identity,
+      ) ||
+      areChatIdsEquivalentForResolvedIdentity(
+        normalizedTargetChatId,
+        runtimeChatId,
+        identity,
+      );
+    if (!sameChat) {
+      return false;
+    }
+  } else if (
+    normalizedTargetChatId &&
+    !doesChatIdMatchResolvedGraphIdentity(normalizedTargetChatId, identity)
+  ) {
+    return false;
+  }
+
+  return !isGraphEffectivelyEmpty(currentGraph);
+}
+
 function isGraphReadableForRecall(
   loadState = graphPersistenceState.loadState,
   chatId = getCurrentChatId(),
@@ -1571,6 +1836,15 @@ function createGraphLoadUiStatus() {
     case GRAPH_LOAD_STATES.NO_CHAT:
       return createUiStatus("待命", "当前尚未进入聊天", "idle");
     case GRAPH_LOAD_STATES.LOADING:
+      if (hasMeaningfulRuntimeGraphForChat(chatId)) {
+        return createUiStatus(
+          "图谱已暂载",
+          chatId
+            ? `已读到聊天 ${chatId} 的临时图谱，正在确认本地存储`
+            : "已读到临时图谱，正在确认本地存储",
+          "warning",
+        );
+      }
       return createUiStatus(
         "图谱加载中",
         chatId
@@ -1631,7 +1905,9 @@ function getGraphMutationBlockReason(operationLabel = "当前操作") {
 
   switch (graphPersistenceState.loadState) {
     case GRAPH_LOAD_STATES.LOADING:
-      return `${operationLabel}已暂停：正在加载 IndexedDB 图谱。`;
+      return hasMeaningfulRuntimeGraphForChat()
+        ? `${operationLabel}已暂停：当前图谱已暂载，正在确认本地存储。`
+        : `${operationLabel}已暂停：正在加载 IndexedDB 图谱。`;
     case GRAPH_LOAD_STATES.SHADOW_RESTORED:
       return `${operationLabel}已暂停：当前图谱仍处于旧恢复状态，请等待 IndexedDB 初始化完成。`;
     case GRAPH_LOAD_STATES.BLOCKED:
@@ -2820,6 +3096,102 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
   return edited;
 }
 
+function syncEditedUserMessageDom(messageIndex, nextText) {
+  const chatRoot = document?.getElementById?.("chat");
+  if (!chatRoot?.querySelectorAll) return false;
+
+  for (const messageElement of Array.from(chatRoot.querySelectorAll(".mes") || [])) {
+    if (resolveMessageIndexFromElement(messageElement) !== messageIndex) continue;
+    const userTextElement = messageElement.querySelector?.(".mes_text");
+    if (!userTextElement) return false;
+    userTextElement.textContent = String(nextText || "");
+    return true;
+  }
+  return false;
+}
+
+function persistEditedUserMessage(context = getContext()) {
+  const candidates = [
+    ["saveChatConditional", context?.saveChatConditional],
+    ["saveChat", context?.saveChat],
+  ];
+
+  for (const [label, handler] of candidates) {
+    if (typeof handler !== "function") continue;
+    try {
+      const result = handler.call(context);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => {
+          console.error(`[ST-BME] 保存用户输入编辑失败 (${label}):`, error);
+        });
+      }
+      return label;
+    } catch (error) {
+      console.error(`[ST-BME] 调用 ${label} 保存用户输入编辑失败:`, error);
+    }
+  }
+
+  return triggerChatMetadataSave(context, { immediate: true });
+}
+
+function editMessageUserInputText(messageIndex, nextUserInputText) {
+  const context = getContext();
+  const chat = context?.chat;
+  if (!Array.isArray(chat)) {
+    return { ok: false, error: "missing-chat" };
+  }
+
+  const message = chat[messageIndex];
+  if (!message?.is_user) {
+    return { ok: false, error: "not-user-message" };
+  }
+
+  const normalizedText = normalizeRecallInputText(nextUserInputText);
+  if (!normalizedText) {
+    return { ok: false, error: "empty-user-input" };
+  }
+
+  const previousText = normalizeRecallInputText(message.mes || "");
+  const currentRecord = readPersistedRecallFromUserMessage(chat, messageIndex);
+  const recallBoundText = normalizeRecallInputText(
+    currentRecord?.boundUserFloorText || previousText,
+  );
+  const recallMayBeStale = Boolean(currentRecord) && recallBoundText !== normalizedText;
+
+  message.mes = normalizedText;
+  const swipeIndex = Number.isFinite(Number(message?.swipe_id))
+    ? Math.max(0, Math.floor(Number(message.swipe_id)))
+    : null;
+  if (
+    Array.isArray(message?.swipes) &&
+    swipeIndex !== null &&
+    swipeIndex < message.swipes.length
+  ) {
+    message.swipes[swipeIndex] = normalizedText;
+  }
+
+  if (message.extra && typeof message.extra === "object") {
+    if (typeof message.extra.display_text === "string") {
+      message.extra.display_text = normalizedText;
+    }
+    if (typeof message.extra.current_display_text === "string") {
+      message.extra.current_display_text = normalizedText;
+    }
+  }
+
+  const saveMode = persistEditedUserMessage(context);
+  const domSynced = syncEditedUserMessageDom(messageIndex, normalizedText);
+
+  return {
+    ok: true,
+    nextText: normalizedText,
+    recallMayBeStale,
+    unchanged: previousText === normalizedText,
+    saveMode,
+    domSynced,
+  };
+}
+
 function rewriteRecallPayloadWithInjection(
   promptData = null,
   injectionText = "",
@@ -3813,6 +4185,24 @@ function getRecallCardCallbacks() {
         },
       });
     },
+    onEditUserInput: (messageIndex, nextUserInputText) => {
+      const result = editMessageUserInputText(messageIndex, nextUserInputText);
+      if (!result?.ok) {
+        toastr.warning("编辑失败：内容不能为空或此楼层非用户消息");
+        return result;
+      }
+
+      if (result.unchanged) {
+        toastr.info("用户输入未变化");
+      } else {
+        toastr.success("已更新本轮用户输入");
+      }
+      if (result.recallMayBeStale) {
+        toastr.info("输入已改，当前召回结果可能需要重新召回");
+      }
+      schedulePersistedRecallMessageUiRefresh();
+      return result;
+    },
     onDelete: (messageIndex) => {
       if (removeMessageRecallRecord(messageIndex)) {
         toastr.success("已删除持久召回注入");
@@ -4186,23 +4576,65 @@ function isCachedIndexedDbSnapshotCompatible(snapshot = null, expectedStore = nu
 }
 
 async function getGraphLocalStoreCapability(forceRefresh = false) {
-  if (!forceRefresh && bmeLocalStoreCapabilitySnapshot.checked) {
+  const settings =
+    arguments.length > 1 && arguments[1] && typeof arguments[1] === "object"
+      ? arguments[1].settings || getSettings()
+      : getSettings();
+  const eagerRetry =
+    arguments.length > 1 &&
+    arguments[1] &&
+    typeof arguments[1] === "object" &&
+    arguments[1].eagerRetry === true;
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  const usesOpfsPreference =
+    requestedMode === "auto" || isGraphLocalStorageModeOpfs(requestedMode);
+  const capabilityReason = String(
+    bmeLocalStoreCapabilitySnapshot?.reason || "",
+  ).trim();
+  const capabilityFailureStable =
+    capabilityReason === "missing-directory-handle" ||
+    capabilityReason === "OPFS 不可用" ||
+    /not.?supported/i.test(capabilityReason) ||
+    /missing.+getdirectory/i.test(capabilityReason);
+  const capabilityFailureRetryable =
+    usesOpfsPreference &&
+    bmeLocalStoreCapabilitySnapshot.checked === true &&
+    bmeLocalStoreCapabilitySnapshot.opfsAvailable !== true &&
+    capabilityFailureStable !== true;
+  const capabilityFailureAgeMs = Math.max(
+    0,
+    Date.now() - Number(bmeLocalStoreCapabilitySnapshot?.checkedAt || 0),
+  );
+  const shouldRetryFailedProbe =
+    forceRefresh !== true &&
+    capabilityFailureRetryable &&
+    (eagerRetry === true ||
+      capabilityFailureAgeMs >= BME_LOCAL_STORE_CAPABILITY_FAILURE_RETRY_MS);
+
+  if (
+    !forceRefresh &&
+    !shouldRetryFailedProbe &&
+    bmeLocalStoreCapabilitySnapshot.checked
+  ) {
     return bmeLocalStoreCapabilitySnapshot;
   }
-  if (!forceRefresh && bmeLocalStoreCapabilityPromise) {
+  if (!forceRefresh && !shouldRetryFailedProbe && bmeLocalStoreCapabilityPromise) {
     return await bmeLocalStoreCapabilityPromise;
   }
 
   bmeLocalStoreCapabilityPromise = detectOpfsSupport()
-    .then((result) => {
-      bmeLocalStoreCapabilitySnapshot = {
-        checked: true,
-        checkedAt: Date.now(),
-        opfsAvailable: Boolean(result?.available),
-        reason: String(result?.reason || (result?.available ? "ok" : "unavailable")),
-      };
-      return bmeLocalStoreCapabilitySnapshot;
-    })
+     .then((result) => {
+        bmeLocalStoreCapabilitySnapshot = {
+          checked: true,
+          checkedAt: Date.now(),
+          opfsAvailable: Boolean(result?.available),
+          reason: String(result?.reason || (result?.available ? "ok" : "unavailable")),
+        };
+        if (bmeLocalStoreCapabilitySnapshot.opfsAvailable) {
+          bmeLocalStoreCapabilityWarningShown = false;
+        }
+        return bmeLocalStoreCapabilitySnapshot;
+      })
     .catch((error) => {
       bmeLocalStoreCapabilitySnapshot = {
         checked: true,
@@ -4241,7 +4673,9 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
  ) {
    const requestedMode = getRequestedGraphLocalStorageMode(settings);
    if (requestedMode === "auto") {
-     const capability = await getGraphLocalStoreCapability();
+     const capability = await getGraphLocalStoreCapability(false, {
+       settings,
+     });
      return capability.opfsAvailable
        ? buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY)
        : buildIndexedDbStorePresentation();
@@ -4250,7 +4684,9 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
      return buildIndexedDbStorePresentation();
   }
 
-  const capability = await getGraphLocalStoreCapability();
+  const capability = await getGraphLocalStoreCapability(false, {
+    settings,
+  });
   if (capability.opfsAvailable) {
     return buildOpfsStorePresentation(requestedMode);
   }
@@ -4297,7 +4733,10 @@ async function refreshCurrentChatLocalStoreBinding(
     isGraphLocalStorageModeOpfs(requestedMode);
 
   if (shouldProbeCapability) {
-    await getGraphLocalStoreCapability(forceCapabilityRefresh === true);
+    await getGraphLocalStoreCapability(forceCapabilityRefresh === true, {
+      settings,
+      eagerRetry: forceCapabilityRefresh === true,
+    });
   }
 
   const preferredLocalStore =
@@ -4404,6 +4843,21 @@ function buildPanelOpenLocalStoreRefreshPlan(
   const resolvedIsOpfs = resolvedLocalStoreKey.startsWith("opfs:");
   const preferredIsOpfs = preferredLocalStore.storagePrimary === "opfs";
   const capabilityUnchecked = bmeLocalStoreCapabilitySnapshot.checked !== true;
+  const capabilityRetryRecommended =
+    usesOpfsPreference &&
+    bmeLocalStoreCapabilitySnapshot.checked === true &&
+    bmeLocalStoreCapabilitySnapshot.opfsAvailable !== true &&
+    !(
+      String(bmeLocalStoreCapabilitySnapshot.reason || "") ===
+        "missing-directory-handle" ||
+      String(bmeLocalStoreCapabilitySnapshot.reason || "") === "OPFS 不可用" ||
+      /not.?supported/i.test(
+        String(bmeLocalStoreCapabilitySnapshot.reason || ""),
+      ) ||
+      /missing.+getdirectory/i.test(
+        String(bmeLocalStoreCapabilitySnapshot.reason || ""),
+      )
+    );
   const pendingPersist = graphPersistenceState.pendingPersist === true;
   const writesBlocked = graphPersistenceState.writesBlocked === true;
   const loadState = String(graphPersistenceState.loadState || "");
@@ -4419,6 +4873,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
   const shouldRefresh =
     usesOpfsPreference &&
     (capabilityUnchecked ||
+      capabilityRetryRecommended ||
       pendingPersist ||
       writesBlocked ||
       blocked ||
@@ -4427,6 +4882,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
       localStoreMismatch);
   const forceCapabilityRefresh =
     capabilityUnchecked ||
+    capabilityRetryRecommended ||
     pendingPersist ||
     blocked ||
     loadingWithoutDb ||
@@ -4437,6 +4893,7 @@ function buildPanelOpenLocalStoreRefreshPlan(
     (pendingPersist || writesBlocked || blocked || Boolean(persistError) || localStoreMismatch);
   const reasons = [];
   if (capabilityUnchecked) reasons.push("capability-unchecked");
+  if (capabilityRetryRecommended) reasons.push("capability-retryable-failure");
   if (pendingPersist) reasons.push("pending-persist");
   if (writesBlocked) reasons.push("writes-blocked");
   if (blocked) reasons.push("load-blocked");
@@ -4725,7 +5182,6 @@ function buildRecoveredSnapshotForChatIdentity(
   const normalizedTargetChatId = normalizeChatIdCandidate(targetChatId);
   const normalizedIntegrity = normalizeChatIdCandidate(integrity);
   const normalizedLegacyChatId = normalizeChatIdCandidate(legacyChatId);
-  const normalizedGraph = cloneGraphForPersistence(graph, normalizedTargetChatId);
   const effectiveRevision = Math.max(
     1,
     normalizeIndexedDbRevision(
@@ -4733,14 +5189,7 @@ function buildRecoveredSnapshotForChatIdentity(
     ),
   );
 
-  stampGraphPersistenceMeta(normalizedGraph, {
-    revision: effectiveRevision,
-    reason: source,
-    chatId: normalizedTargetChatId,
-    integrity: normalizedIntegrity,
-  });
-
-  return buildSnapshotFromGraph(normalizedGraph, {
+  return buildSnapshotFromGraph(graph, {
     chatId: normalizedTargetChatId,
     revision: effectiveRevision,
     lastModified: Date.now(),
@@ -4999,11 +5448,8 @@ function applyShadowSnapshotToRuntime(
 
   let shadowGraph = null;
   try {
-    shadowGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(
-        deserializeGraph(shadowSnapshot.serializedGraph),
-        normalizedChatId,
-      ),
+    shadowGraph = normalizeGraphRuntimeState(
+      deserializeGraph(shadowSnapshot.serializedGraph),
       normalizedChatId,
     );
   } catch (error) {
@@ -5429,6 +5875,34 @@ function ensureBmeChatManager() {
   return bmeChatManager;
 }
 
+function recordLocalPersistEarlyFailure(
+  reason = "indexeddb-unavailable",
+  {
+    chatId = "",
+    storagePrimary = graphPersistenceState.storagePrimary || "indexeddb",
+    storageMode = graphPersistenceState.storageMode || "indexeddb",
+    revision = 0,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedReason = String(reason || "indexeddb-unavailable").trim();
+  updateGraphPersistenceState({
+    storagePrimary,
+    storageMode,
+    indexedDbLastError: normalizedReason,
+    dualWriteLastResult: {
+      action: "save",
+      target: storagePrimary,
+      success: false,
+      chatId: normalizedChatId,
+      revision: normalizeIndexedDbRevision(revision),
+      reason: normalizedReason,
+      at: Date.now(),
+    },
+  });
+  return normalizedReason;
+}
+
 function scheduleBmeIndexedDbTask(task) {
   const scheduler =
     typeof globalThis.queueMicrotask === "function"
@@ -5448,6 +5922,18 @@ async function syncBmeChatManagerWithCurrentChat(
   source = "unknown",
   context = getContext(),
 ) {
+  const currentSettings = getSettings();
+  const requestedMode = getRequestedGraphLocalStorageMode(currentSettings);
+  if (
+    requestedMode === "auto" ||
+    isGraphLocalStorageModeOpfs(requestedMode)
+  ) {
+    await getGraphLocalStoreCapability(false, {
+      settings: currentSettings,
+      eagerRetry: true,
+    });
+  }
+
   const manager = ensureBmeChatManager();
   if (!manager) {
     return {
@@ -5506,6 +5992,12 @@ function isIndexedDbSnapshotMeaningful(snapshot = null) {
 
   if (Array.isArray(snapshot.nodes) && snapshot.nodes.length > 0) return true;
   if (Array.isArray(snapshot.edges) && snapshot.edges.length > 0) return true;
+  if (
+    snapshot.__stBmeTombstonesOmitted === true &&
+    Number(snapshot?.meta?.tombstoneCount || 0) > 0
+  ) {
+    return true;
+  }
   if (Array.isArray(snapshot.tombstones) && snapshot.tombstones.length > 0)
     return true;
 
@@ -5553,6 +6045,7 @@ function isIndexedDbSnapshotMeaningful(snapshot = null) {
 function cacheIndexedDbSnapshot(chatId, snapshot = null) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
+  if (snapshot.__stBmeTombstonesOmitted === true) return;
   const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot);
   bmeIndexedDbSnapshotCacheByChatId.set(normalizedChatId, {
     chatId: normalizedChatId,
@@ -5801,6 +6294,12 @@ function buildLukerManifestStatePatch(
   return {
     hostProfile: "luker",
     primaryStorageTier: "luker-chat-state",
+    chatStateTarget:
+      cloneRuntimeDebugValue(graphPersistenceState.chatStateTarget, null) ||
+      resolveCurrentChatStateTarget(getContext()),
+    lightweightHostMode:
+      graphPersistenceState.lightweightHostMode ??
+      isBmeLightweightHostMode(getContext()),
     cacheStorageTier: buildPersistenceEnvironment(
       getContext(),
       getPreferredGraphLocalStorePresentationSync(),
@@ -5841,10 +6340,7 @@ async function readLocalCacheSnapshotForChat(chatId, source = "luker-sidecar-loa
     const manager = ensureBmeChatManager();
     if (!manager) return null;
     const db = await manager.getCurrentDb(normalizedChatId);
-    const snapshot = await db.exportSnapshot();
-    if (snapshot) {
-      cacheIndexedDbSnapshot(normalizedChatId, snapshot);
-    }
+    const snapshot = await db.exportSnapshot({ includeTombstones: false });
     return snapshot;
   } catch (error) {
     console.warn("[ST-BME] 读取 Luker 本地缓存快照失败:", source, error);
@@ -5861,6 +6357,190 @@ function resolveLukerBaseRevision(manifest = null, checkpoint = null) {
   );
 }
 
+function resolveLukerHeadRevision(manifest = null, checkpoint = null) {
+  return Math.max(
+    resolveLukerBaseRevision(manifest, checkpoint),
+    Number(manifest?.headRevision || 0),
+  );
+}
+
+function queueLukerSidecarWrite(chatId, operation, { chatStateTarget = null } = {}) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedTarget = normalizeBmeChatStateTarget(chatStateTarget);
+  const queueKey =
+    serializeBmeChatStateTarget(normalizedTarget) ||
+    normalizedChatId;
+  if (!queueKey || typeof operation !== "function") {
+    return Promise.resolve().then(() => operation());
+  }
+
+  const previous = bmeLukerSidecarWriteByChatId.get(queueKey) || Promise.resolve();
+  let settled = null;
+  const queued = previous
+    .catch(() => null)
+    .then(() => operation());
+  settled = queued.finally(() => {
+    if (bmeLukerSidecarWriteByChatId.get(queueKey) === settled) {
+      bmeLukerSidecarWriteByChatId.delete(queueKey);
+    }
+  });
+  bmeLukerSidecarWriteByChatId.set(queueKey, settled);
+  return settled;
+}
+
+function buildSnapshotFromLukerSidecarState(
+  sidecar = null,
+  {
+    chatId = "",
+    source = "luker-sidecar-snapshot",
+    manifest = sidecar?.manifest || null,
+  } = {},
+) {
+  const normalizedChatId =
+    normalizeChatIdCandidate(chatId) ||
+    normalizeChatIdCandidate(manifest?.chatId) ||
+    normalizeChatIdCandidate(sidecar?.checkpoint?.chatId);
+  const normalizedManifest =
+    manifest && typeof manifest === "object" && !Array.isArray(manifest)
+      ? manifest
+      : null;
+  if (!normalizedManifest) {
+    return {
+      ok: false,
+      reason: "luker-chat-state-v2-empty",
+      snapshot: null,
+      manifest: null,
+      baseRevision: 0,
+      headRevision: 0,
+    };
+  }
+
+  const baseRevision = resolveLukerBaseRevision(normalizedManifest, sidecar?.checkpoint);
+  const checkpointRevision = Number(sidecar?.checkpoint?.revision || 0);
+  let snapshot = null;
+  if (sidecar?.checkpoint?.serializedGraph) {
+    try {
+      const checkpointGraph = normalizeGraphRuntimeState(
+        deserializeGraph(sidecar.checkpoint.serializedGraph),
+        normalizedChatId,
+      );
+      snapshot = buildSnapshotFromGraph(checkpointGraph, {
+        chatId: normalizedChatId,
+        revision: Math.max(checkpointRevision, baseRevision, 0),
+        meta: {
+          integrity:
+            sidecar.checkpoint.integrity ||
+            normalizedManifest.integrity ||
+            graphPersistenceState.metadataIntegrity,
+          storagePrimary: "chat-state",
+          storageMode: "luker-chat-state",
+          lastMutationReason: String(
+            sidecar.checkpoint.reason || `${source}:luker-checkpoint`,
+          ),
+        },
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "luker-sidecar-checkpoint-invalid",
+        error,
+        snapshot: null,
+        manifest: normalizedManifest,
+        baseRevision,
+        headRevision: Number(normalizedManifest.headRevision || 0),
+      };
+    }
+  } else if (baseRevision > 0) {
+    return {
+      ok: false,
+      reason: "luker-sidecar-checkpoint-missing",
+      snapshot: null,
+      manifest: normalizedManifest,
+      baseRevision,
+      headRevision: Number(normalizedManifest.headRevision || 0),
+    };
+  } else {
+    const emptyGraph = normalizeGraphRuntimeState(
+      createEmptyGraph(),
+      normalizedChatId,
+    );
+    snapshot = buildSnapshotFromGraph(emptyGraph, {
+      chatId: normalizedChatId,
+      revision: 0,
+      meta: {
+        integrity: normalizedManifest.integrity || graphPersistenceState.metadataIntegrity,
+        storagePrimary: "chat-state",
+        storageMode: "luker-chat-state",
+        lastMutationReason: `${source}:luker-empty-base`,
+      },
+    });
+  }
+
+  const journalEntries = Array.isArray(sidecar?.journal?.entries)
+    ? sidecar.journal.entries
+        .filter(
+          (entry) =>
+            Number(entry?.revision || 0) > baseRevision &&
+            Number(entry?.revision || 0) <= Number(normalizedManifest.headRevision || 0),
+        )
+        .sort((left, right) => Number(left?.revision || 0) - Number(right?.revision || 0))
+    : [];
+
+  if (Number(normalizedManifest.headRevision || 0) > baseRevision) {
+    let expectedRevision = baseRevision + 1;
+    for (const entry of journalEntries) {
+      if (Number(entry?.revision || 0) !== expectedRevision) {
+        return {
+          ok: false,
+          reason: "luker-sidecar-journal-gap",
+          snapshot: null,
+          manifest: normalizedManifest,
+          baseRevision,
+          headRevision: Number(normalizedManifest.headRevision || 0),
+          expectedRevision,
+        };
+      }
+      snapshot = applyPersistDeltaToSnapshot(snapshot, entry.persistDelta, {
+        revision: entry.revision,
+        reason: entry.reason,
+        chatId: normalizedChatId,
+        lastModified: Date.now(),
+      });
+      expectedRevision += 1;
+    }
+    if (expectedRevision - 1 !== Number(normalizedManifest.headRevision || 0)) {
+      return {
+        ok: false,
+        reason: "luker-sidecar-journal-incomplete",
+        snapshot: null,
+        manifest: normalizedManifest,
+        baseRevision,
+        headRevision: Number(normalizedManifest.headRevision || 0),
+        expectedRevision,
+      };
+    }
+  }
+
+  snapshot.meta = {
+    ...(snapshot.meta || {}),
+    revision: Number(normalizedManifest.headRevision || snapshot?.meta?.revision || 0),
+    chatId: normalizedChatId,
+    integrity: normalizedManifest.integrity || snapshot?.meta?.integrity || "",
+    storagePrimary: "chat-state",
+    storageMode: "luker-chat-state",
+    lastMutationReason: String(normalizedManifest.reason || source || "luker-chat-state"),
+  };
+  return {
+    ok: true,
+    reason: "luker-sidecar-snapshot-ready",
+    snapshot,
+    manifest: normalizedManifest,
+    journalEntries,
+    baseRevision,
+    headRevision: Number(normalizedManifest.headRevision || 0),
+  };
+}
+
 async function compactLukerGraphSidecarV2(
   context = getContext(),
   {
@@ -5869,9 +6549,11 @@ async function compactLukerGraphSidecarV2(
     revision = graphPersistenceState.lukerManifestRevision || graphPersistenceState.revision,
     reason = "luker-chat-state-compaction",
     integrity = "",
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   if (
     !normalizedChatId ||
     !graph ||
@@ -5883,151 +6565,167 @@ async function compactLukerGraphSidecarV2(
     };
   }
 
-  const normalizedIntegrity =
-    normalizeChatIdCandidate(integrity) ||
-    getChatMetadataIntegrity(context) ||
-    graphPersistenceState.metadataIntegrity;
-  const revisionFloor = Math.max(1, Number(revision || 0), Number(getGraphPersistedRevision(graph) || 0), Number(graphPersistenceState.lukerManifestRevision || 0), Number(graphPersistenceState.revision || 0));
-  const startedAt = Date.now();
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
-      cacheMirrorState: graphPersistenceState.cacheMirrorState,
-      lastPersistReason: reason,
-      lastPersistMode: "luker-chat-state-v2-compacting",
-    }),
-    opfsCompactionState: buildLukerJournalCompactionState("running", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-
-  const checkpoint = buildLukerGraphCheckpointV2(graph, {
-    revision: revisionFloor,
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    persistedAt: new Date(startedAt).toISOString(),
-  });
-  const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
-    namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
-  });
-  if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+  return await queueLukerSidecarWrite(normalizedChatId, async () => {
+    const normalizedIntegrity =
+      normalizeChatIdCandidate(integrity) ||
+      getChatMetadataIntegrity(context) ||
+      graphPersistenceState.metadataIntegrity;
+    const revisionFloor = Math.max(
+      1,
+      Number(revision || 0),
+      Number(getGraphPersistedRevision(graph) || 0),
+      Number(graphPersistenceState.lukerManifestRevision || 0),
+      Number(graphPersistenceState.revision || 0),
+    );
+    const startedAt = Date.now();
     updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
+      ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
+        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        lastPersistReason: reason,
+        lastPersistMode: "luker-chat-state-v2-compacting",
+      }),
+      opfsCompactionState: buildLukerJournalCompactionState("running", {
         lastAt: startedAt,
         lastReason: reason,
-        error:
-          checkpointResult?.error?.message ||
-          checkpointResult?.reason ||
-          "luker-sidecar-checkpoint-failed",
+      }),
+    });
+
+    const checkpoint = buildLukerGraphCheckpointV2(graph, {
+      revision: revisionFloor,
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      reason,
+      storageTier: "luker-chat-state",
+      persistedAt: new Date(startedAt).toISOString(),
+    });
+    const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
+      namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+      chatStateTarget: normalizedTarget,
+    });
+    if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            checkpointResult?.error?.message ||
+            checkpointResult?.reason ||
+            "luker-sidecar-checkpoint-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: checkpointResult?.reason || "luker-sidecar-checkpoint-failed",
+        error: checkpointResult?.error || null,
+      };
+    }
+
+    const emptyJournal = buildLukerGraphJournalV2([], {
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      headRevision: revisionFloor,
+      updatedAt: checkpointResult.checkpoint.persistedAt,
+    });
+    const journalResult = await replaceLukerGraphJournalV2(context, emptyJournal, {
+      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      chatStateTarget: normalizedTarget,
+    });
+    if (!journalResult?.ok || !journalResult?.journal) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            journalResult?.error?.message ||
+            journalResult?.reason ||
+            "luker-sidecar-journal-reset-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: journalResult?.reason || "luker-sidecar-journal-reset-failed",
+        error: journalResult?.error || null,
+      };
+    }
+
+    const manifest = buildLukerGraphManifestV2(graph, {
+      baseRevision: revisionFloor,
+      headRevision: revisionFloor,
+      checkpointRevision: revisionFloor,
+      lastCompactedRevision: revisionFloor,
+      journalDepth: 0,
+      journalBytes: 0,
+      chatId: normalizedChatId,
+      integrity: normalizedIntegrity,
+      reason,
+      storageTier: "luker-chat-state",
+      accepted: true,
+      persistedAt: checkpointResult.checkpoint.persistedAt,
+      lastProcessedAssistantFloor:
+        graph?.historyState?.lastProcessedAssistantFloor ?? null,
+      extractionCount: graph?.historyState?.extractionCount ?? null,
+      compactionState: buildLukerJournalCompactionState("idle", {
+        lastAt: startedAt,
+        lastReason: reason,
+      }),
+    });
+    const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
+      namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      chatStateTarget: normalizedTarget,
+    });
+    if (!manifestResult?.ok || !manifestResult?.manifest) {
+      updateGraphPersistenceState({
+        opfsCompactionState: buildLukerJournalCompactionState("error", {
+          lastAt: startedAt,
+          lastReason: reason,
+          error:
+            manifestResult?.error?.message ||
+            manifestResult?.reason ||
+            "luker-sidecar-manifest-save-failed",
+        }),
+      });
+      return {
+        ok: false,
+        reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
+        error: manifestResult?.error || null,
+      };
+    }
+
+    cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
+    updateGraphPersistenceState({
+      ...buildLukerManifestStatePatch(manifestResult.manifest, {
+        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        lastPersistReason: reason,
+        lastPersistMode: "luker-chat-state-v2-compacted",
+        acceptedStorageTier: "luker-chat-state",
+        acceptedBy: "luker-chat-state",
+        dualWriteLastResult: {
+          action: "compact",
+          target: "luker-chat-state",
+          success: true,
+          chatId: normalizedChatId,
+          revision: revisionFloor,
+          reason,
+          at: Date.now(),
+        },
+      }),
+      revision: revisionFloor,
+      lastPersistedRevision: revisionFloor,
+      lastAcceptedRevision: revisionFloor,
+      opfsCompactionState: buildLukerJournalCompactionState("idle", {
+        lastAt: startedAt,
+        lastReason: reason,
       }),
     });
     return {
-      ok: false,
-      reason: checkpointResult?.reason || "luker-sidecar-checkpoint-failed",
-      error: checkpointResult?.error || null,
+      ok: true,
+      reason,
+      manifest: manifestResult.manifest,
+      checkpoint: checkpointResult.checkpoint,
     };
-  }
-
-  const emptyJournal = buildLukerGraphJournalV2([], {
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    headRevision: revisionFloor,
-    updatedAt: checkpointResult.checkpoint.persistedAt,
+  }, {
+    chatStateTarget: normalizedTarget,
   });
-  const journalResult = await replaceLukerGraphJournalV2(context, emptyJournal, {
-    namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-  });
-  if (!journalResult?.ok || !journalResult?.journal) {
-    updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
-        lastAt: startedAt,
-        lastReason: reason,
-        error:
-          journalResult?.error?.message ||
-          journalResult?.reason ||
-          "luker-sidecar-journal-reset-failed",
-      }),
-    });
-    return {
-      ok: false,
-      reason: journalResult?.reason || "luker-sidecar-journal-reset-failed",
-      error: journalResult?.error || null,
-    };
-  }
-
-  const manifest = buildLukerGraphManifestV2(graph, {
-    baseRevision: revisionFloor,
-    headRevision: revisionFloor,
-    checkpointRevision: revisionFloor,
-    lastCompactedRevision: revisionFloor,
-    journalDepth: 0,
-    journalBytes: 0,
-    chatId: normalizedChatId,
-    integrity: normalizedIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    accepted: true,
-    persistedAt: checkpointResult.checkpoint.persistedAt,
-    lastProcessedAssistantFloor:
-      graph?.historyState?.lastProcessedAssistantFloor ?? null,
-    extractionCount: graph?.historyState?.extractionCount ?? null,
-    compactionState: buildLukerJournalCompactionState("idle", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-  const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
-    namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-  });
-  if (!manifestResult?.ok || !manifestResult?.manifest) {
-    updateGraphPersistenceState({
-      opfsCompactionState: buildLukerJournalCompactionState("error", {
-        lastAt: startedAt,
-        lastReason: reason,
-        error:
-          manifestResult?.error?.message ||
-          manifestResult?.reason ||
-          "luker-sidecar-manifest-save-failed",
-      }),
-    });
-    return {
-      ok: false,
-      reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
-      error: manifestResult?.error || null,
-    };
-  }
-
-  cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(manifestResult.manifest, {
-      cacheMirrorState: graphPersistenceState.cacheMirrorState,
-      lastPersistReason: reason,
-      lastPersistMode: "luker-chat-state-v2-compacted",
-      acceptedStorageTier: "luker-chat-state",
-      acceptedBy: "luker-chat-state",
-      dualWriteLastResult: {
-        action: "compact",
-        target: "luker-chat-state",
-        success: true,
-        chatId: normalizedChatId,
-        revision: revisionFloor,
-        reason,
-        at: Date.now(),
-      },
-    }),
-    opfsCompactionState: buildLukerJournalCompactionState("idle", {
-      lastAt: startedAt,
-      lastReason: reason,
-    }),
-  });
-  return {
-    ok: true,
-    reason,
-    manifest: manifestResult.manifest,
-    checkpoint: checkpointResult.checkpoint,
-  };
 }
 
 function scheduleLukerGraphSidecarCompaction(
@@ -6035,7 +6733,10 @@ function scheduleLukerGraphSidecarCompaction(
   options = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(normalizedChatId)) {
+  const queueKey =
+    serializeBmeChatStateTarget(options?.chatStateTarget) ||
+    normalizedChatId;
+  if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(queueKey)) {
     return;
   }
   updateGraphPersistenceState({
@@ -6062,17 +6763,18 @@ function scheduleLukerGraphSidecarCompaction(
       return null;
     })
     .finally(() => {
-      if (bmeLukerSidecarCompactionByChatId.get(normalizedChatId) === promise) {
-        bmeLukerSidecarCompactionByChatId.delete(normalizedChatId);
+      if (bmeLukerSidecarCompactionByChatId.get(queueKey) === promise) {
+        bmeLukerSidecarCompactionByChatId.delete(queueKey);
       }
     });
-  bmeLukerSidecarCompactionByChatId.set(normalizedChatId, promise);
+  bmeLukerSidecarCompactionByChatId.set(queueKey, promise);
 }
 
 async function persistGraphToLukerSidecarV2(
   context = getContext(),
   {
     graph = currentGraph,
+    chatId: explicitChatId = "",
     revision = graphPersistenceState.revision,
     reason = "luker-chat-state-save",
     accepted = true,
@@ -6080,6 +6782,7 @@ async function persistGraphToLukerSidecarV2(
     extractionCount: nextExtractionCount = null,
     mode = "primary",
     persistDelta = null,
+    chatStateTarget = null,
   } = {},
 ) {
   if (!context || !graph || !canUseHostGraphChatStatePersistence(context)) {
@@ -6092,7 +6795,14 @@ async function persistGraphToLukerSidecarV2(
     };
   }
 
-  const chatId = getCurrentChatId(context);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const chatId = resolvePersistenceChatId(
+    context,
+    graph,
+    explicitChatId ||
+      resolveChatStateTargetChatId(normalizedTarget) ||
+      "",
+  );
   if (!chatId) {
     return {
       saved: false,
@@ -6104,157 +6814,382 @@ async function persistGraphToLukerSidecarV2(
   }
 
   const resolvedIdentity = resolveCurrentChatIdentity(context);
+  const currentTargetKey = serializeBmeChatStateTarget(
+    resolveCurrentChatStateTarget(context),
+  );
+  const requestedTargetKey = serializeBmeChatStateTarget(normalizedTarget);
+  const shouldRememberAlias =
+    !requestedTargetKey || requestedTargetKey === currentTargetKey;
   const nextIntegrity =
+    getGraphPersistenceMeta(graph)?.integrity ||
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
     graphPersistenceState.metadataIntegrity;
 
-  const directDelta =
-    persistDelta &&
-    typeof persistDelta === "object" &&
-    !Array.isArray(persistDelta)
-      ? cloneRuntimeDebugValue(persistDelta, persistDelta)
-      : null;
-  let resolvedPersistDelta = directDelta;
-  if (!resolvedPersistDelta) {
-    const baseSnapshot =
-      (await readLocalCacheSnapshotForChat(
+  return await queueLukerSidecarWrite(chatId, async () => {
+    const directDelta =
+      persistDelta &&
+      typeof persistDelta === "object" &&
+      !Array.isArray(persistDelta)
+        ? cloneRuntimeDebugValue(persistDelta, persistDelta)
+        : null;
+
+    const existingSidecar = await readLukerGraphSidecarV2(context, {
+      manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+      chatStateTarget: normalizedTarget,
+    });
+    if (existingSidecar?.manifest) {
+      cacheChatStateManifest(chatId, existingSidecar.manifest);
+    }
+
+    const previousManifest =
+      existingSidecar?.manifest || readCachedChatStateManifest(chatId);
+    const previousHeadRevision = resolveLukerHeadRevision(
+      previousManifest,
+      existingSidecar?.checkpoint,
+    );
+    const shouldBootstrapCheckpoint =
+      !existingSidecar?.manifest && !existingSidecar?.checkpoint;
+    const effectiveRevision = shouldBootstrapCheckpoint
+      ? Math.max(1, Number(revision || 0))
+      : Math.max(1, previousHeadRevision + 1);
+
+    let resolvedPersistDelta =
+      directDelta && Number(revision || 0) === effectiveRevision
+        ? directDelta
+        : null;
+    if (!shouldBootstrapCheckpoint && !resolvedPersistDelta) {
+      const baseResult = buildSnapshotFromLukerSidecarState(existingSidecar, {
         chatId,
-        `${reason}:luker-sidecar-fallback-base`,
-      )) ||
-      buildSnapshotFromGraph(
-        cloneGraphForPersistence(
-          normalizeGraphRuntimeState(createEmptyGraph(), chatId),
-          chatId,
-        ),
+        source: `${reason}:luker-sidecar-base`,
+      });
+      if (!baseResult?.ok || !baseResult?.snapshot) {
+        updateGraphPersistenceState({
+          ...buildLukerManifestStatePatch(previousManifest, {
+            persistMismatchReason:
+              baseResult?.reason || "luker-sidecar-base-load-failed",
+            lastPersistReason: String(reason || ""),
+            lastPersistMode: "luker-chat-state-v2-base-rebuild-failed",
+          }),
+        });
+        return {
+          saved: false,
+          accepted: false,
+          reason: baseResult?.reason || "luker-sidecar-base-load-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: baseResult?.error || null,
+        };
+      }
+
+      const nextSnapshot = buildSnapshotFromGraph(graph, {
+        chatId,
+        revision: effectiveRevision,
+        baseSnapshot: baseResult.snapshot,
+        lastModified: Date.now(),
+        meta: {
+          integrity: nextIntegrity,
+          storagePrimary: "chat-state",
+          storageMode: "luker-chat-state",
+          lastMutationReason: reason,
+          hostChatId: resolvedIdentity?.hostChatId || "",
+        },
+      });
+      resolvedPersistDelta = buildPersistDelta(baseResult.snapshot, nextSnapshot, {
+        useNativeDelta: false,
+      });
+    }
+
+    if (shouldBootstrapCheckpoint) {
+      const checkpoint = buildLukerGraphCheckpointV2(graph, {
+        revision: effectiveRevision,
+        chatId,
+        integrity: nextIntegrity,
+        reason: `${reason}:bootstrap`,
+        storageTier: "luker-chat-state",
+      });
+      const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
+        namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+        chatStateTarget: normalizedTarget,
+      });
+      if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            checkpointResult?.reason || "luker-sidecar-bootstrap-checkpoint-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: checkpointResult?.error || null,
+        };
+      }
+      const emptyJournal = buildLukerGraphJournalV2([], {
+        chatId,
+        integrity: nextIntegrity,
+        headRevision: effectiveRevision,
+        updatedAt: checkpointResult.checkpoint.persistedAt,
+      });
+      const bootstrapJournalResult = await replaceLukerGraphJournalV2(
+        context,
+        emptyJournal,
         {
-          chatId,
-          revision: 0,
-          meta: {
-            integrity: nextIntegrity,
-            storagePrimary: "chat-state",
-            storageMode: "luker-chat-state",
-            lastMutationReason: `${reason}:luker-sidecar-fallback-base`,
-          },
+          namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+          chatStateTarget: normalizedTarget,
         },
       );
-    const nextSnapshot = buildSnapshotFromGraph(graph, {
-      chatId,
-      revision: resolvePersistRevisionFloor(revision, graph),
-      baseSnapshot,
-      lastModified: Date.now(),
-      meta: {
+      if (!bootstrapJournalResult?.ok || !bootstrapJournalResult?.journal) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            bootstrapJournalResult?.reason ||
+            "luker-sidecar-bootstrap-journal-reset-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: bootstrapJournalResult?.error || null,
+        };
+      }
+      const bootstrapManifest = buildLukerGraphManifestV2(graph, {
+        baseRevision: Number(effectiveRevision || 0),
+        headRevision: Number(effectiveRevision || 0),
+        checkpointRevision: Number(effectiveRevision || 0),
+        lastCompactedRevision: Number(effectiveRevision || 0),
+        journalDepth: 0,
+        journalBytes: 0,
+        chatId,
         integrity: nextIntegrity,
-        storagePrimary: "chat-state",
-        storageMode: "luker-chat-state",
-        lastMutationReason: reason,
-        hostChatId: resolvedIdentity?.hostChatId || "",
-      },
-    });
-    resolvedPersistDelta = buildPersistDelta(baseSnapshot, nextSnapshot, {
-      useNativeDelta: false,
-    });
-  }
+        reason: `${reason}:bootstrap`,
+        storageTier: "luker-chat-state",
+        accepted,
+        lastProcessedAssistantFloor,
+        extractionCount: nextExtractionCount,
+        compactionState: buildLukerJournalCompactionState("idle", {
+          lastAt: Date.now(),
+          lastReason: `${reason}:bootstrap`,
+        }),
+      });
+      const manifestResult = await writeLukerGraphManifestV2(context, bootstrapManifest, {
+        namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+        chatStateTarget: normalizedTarget,
+      });
+      if (!manifestResult?.ok || !manifestResult?.manifest) {
+        return {
+          saved: false,
+          accepted: false,
+          reason:
+            manifestResult?.reason || "luker-sidecar-bootstrap-manifest-failed",
+          revision: effectiveRevision,
+          storageTier: "luker-chat-state",
+          error: manifestResult?.error || null,
+        };
+      }
+      cacheChatStateManifest(chatId, manifestResult.manifest);
+      if (shouldRememberAlias) {
+        rememberResolvedGraphIdentityAlias(context, chatId);
+      }
+      updateGraphPersistenceState({
+        ...buildLukerManifestStatePatch(manifestResult.manifest, {
+          cacheMirrorState:
+            mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
+          lastPersistReason: String(reason || ""),
+          lastPersistMode: "luker-chat-state-v2-bootstrap",
+          acceptedStorageTier:
+            accepted === true
+              ? "luker-chat-state"
+              : graphPersistenceState.acceptedStorageTier,
+          acceptedBy:
+            accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+          dualWriteLastResult: {
+            action: mode === "mirror" ? "cache-mirror" : "save",
+            target: "luker-chat-state",
+            success: true,
+            chatId,
+            revision: Number(effectiveRevision || 0),
+            reason: `${reason}:bootstrap`,
+            mode: String(mode || "primary"),
+            at: Date.now(),
+          },
+        }),
+        metadataIntegrity: String(
+          nextIntegrity || graphPersistenceState.metadataIntegrity || "",
+        ),
+        revision: Number(effectiveRevision || 0),
+        lastPersistedRevision: Number(effectiveRevision || 0),
+        lastAcceptedRevision:
+          accepted === true
+            ? Number(effectiveRevision || 0)
+            : Number(graphPersistenceState.lastAcceptedRevision || 0),
+        pendingPersist: false,
+        persistMismatchReason: "",
+        persistDiagnosticTier: "none",
+      });
+      if (mode !== "mirror") {
+        clearPendingGraphPersistRetry();
+      }
+      return {
+        saved: true,
+        accepted,
+        chatId,
+        revision: Number(effectiveRevision || 0),
+        manifestRevision: Number(effectiveRevision || 0),
+        journalDepth: 0,
+        checkpointRevision: Number(effectiveRevision || 0),
+        reason: String(reason || "luker-chat-state-save"),
+        saveMode: "luker-chat-state-v2-bootstrap",
+        storageTier: "luker-chat-state",
+        manifest: manifestResult.manifest,
+      };
+    }
 
-  const existingSidecar = await readLukerGraphSidecarV2(context, {
-    manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-    journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
-  });
-  if (existingSidecar?.manifest) {
-    cacheChatStateManifest(chatId, existingSidecar.manifest);
-  }
-
-  const shouldBootstrapCheckpoint =
-    !existingSidecar?.manifest && !existingSidecar?.checkpoint;
-  if (shouldBootstrapCheckpoint) {
-    const checkpoint = buildLukerGraphCheckpointV2(graph, {
-      revision,
+    const journalEntry = buildLukerGraphJournalEntry(resolvedPersistDelta, {
+      revision: effectiveRevision,
+      reason,
+      storageTier: "luker-chat-state",
       chatId,
       integrity: nextIntegrity,
-      reason: `${reason}:bootstrap`,
-      storageTier: "luker-chat-state",
     });
-    const checkpointResult = await writeLukerGraphCheckpointV2(context, checkpoint, {
-      namespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    const journalResult = await appendLukerGraphJournalEntryV2(context, journalEntry, {
+      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
+      chatId,
+      integrity: nextIntegrity,
+      chatStateTarget: normalizedTarget,
     });
-    if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
+    if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
+      updateGraphPersistenceState({
+        dualWriteLastResult: {
+          action: "save",
+          target: "luker-chat-state",
+          success: false,
+          chatId,
+          revision: Number(effectiveRevision || 0),
+          reason: String(reason || "luker-chat-state-save"),
+          mode: String(mode || "primary"),
+          error:
+            journalResult?.error?.message ||
+            journalResult?.reason ||
+            "luker-sidecar-journal-save-failed",
+          at: Date.now(),
+        },
+      });
       return {
         saved: false,
         accepted: false,
-        reason: checkpointResult?.reason || "luker-sidecar-bootstrap-checkpoint-failed",
-        revision,
+        reason: journalResult?.reason || "luker-sidecar-journal-save-failed",
+        revision: effectiveRevision,
         storageTier: "luker-chat-state",
-        error: checkpointResult?.error || null,
+        error: journalResult?.error || null,
       };
     }
-    const emptyJournal = buildLukerGraphJournalV2([], {
+
+    const checkpointRevision = Math.max(
+      Number(existingSidecar?.checkpoint?.revision || 0),
+      Number(previousManifest?.checkpointRevision || 0),
+    );
+    const manifest = buildLukerGraphManifestV2(graph, {
+      baseRevision: resolveLukerBaseRevision(previousManifest, existingSidecar?.checkpoint),
+      headRevision: Number(journalResult.entry.revision || effectiveRevision || 0),
+      checkpointRevision,
+      lastCompactedRevision: Math.max(
+        Number(previousManifest?.lastCompactedRevision || 0),
+        checkpointRevision,
+      ),
+      journalDepth: Number(journalResult.journal.entryCount || 0),
+      journalBytes: Number(journalResult.journal.totalBytes || 0),
       chatId,
       integrity: nextIntegrity,
-      headRevision: revision,
-      updatedAt: checkpointResult.checkpoint.persistedAt,
-    });
-    await replaceLukerGraphJournalV2(context, emptyJournal, {
-      namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    });
-    const bootstrapManifest = buildLukerGraphManifestV2(graph, {
-      baseRevision: Number(revision || 0),
-      headRevision: Number(revision || 0),
-      checkpointRevision: Number(revision || 0),
-      lastCompactedRevision: Number(revision || 0),
-      journalDepth: 0,
-      journalBytes: 0,
-      chatId,
-      integrity: nextIntegrity,
-      reason: `${reason}:bootstrap`,
+      reason,
       storageTier: "luker-chat-state",
       accepted,
       lastProcessedAssistantFloor,
       extractionCount: nextExtractionCount,
-      compactionState: buildLukerJournalCompactionState("idle", {
-        lastAt: Date.now(),
-        lastReason: `${reason}:bootstrap`,
-      }),
+      compactionState:
+        previousManifest?.compactionState ||
+        buildLukerJournalCompactionState("idle", {
+          lastAt: Date.now(),
+          lastReason: reason,
+        }),
     });
-    const manifestResult = await writeLukerGraphManifestV2(context, bootstrapManifest, {
+    const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
       namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
+      chatStateTarget: normalizedTarget,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
+      updateGraphPersistenceState({
+        ...buildLukerManifestStatePatch(previousManifest, {
+          persistMismatchReason: "luker-manifest-pending-after-journal",
+          lastPersistReason: reason,
+          lastPersistMode: "luker-chat-state-v2-journal-only",
+          dualWriteLastResult: {
+            action: "save",
+            target: "luker-chat-state",
+            success: false,
+            chatId,
+            revision: Number(effectiveRevision || 0),
+            reason: String(reason || "luker-chat-state-save"),
+            mode: String(mode || "primary"),
+            error:
+              manifestResult?.error?.message ||
+              manifestResult?.reason ||
+              "luker-sidecar-manifest-save-failed",
+            at: Date.now(),
+          },
+        }),
+      });
       return {
         saved: false,
         accepted: false,
-        reason: manifestResult?.reason || "luker-sidecar-bootstrap-manifest-failed",
-        revision,
+        reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
+        revision: effectiveRevision,
         storageTier: "luker-chat-state",
         error: manifestResult?.error || null,
       };
     }
+
     cacheChatStateManifest(chatId, manifestResult.manifest);
-    rememberResolvedGraphIdentityAlias(context, chatId);
+    if (shouldRememberAlias) {
+      rememberResolvedGraphIdentityAlias(context, chatId);
+    }
     updateGraphPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
         cacheMirrorState:
           mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
         lastPersistReason: String(reason || ""),
-        lastPersistMode: "luker-chat-state-v2-bootstrap",
-        acceptedStorageTier: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedStorageTier,
-        acceptedBy: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+        lastPersistMode:
+          mode === "mirror"
+            ? "luker-chat-state-v2-mirror"
+            : "luker-chat-state-v2",
+        acceptedStorageTier:
+          accepted === true
+            ? "luker-chat-state"
+            : graphPersistenceState.acceptedStorageTier,
+        acceptedBy:
+          accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
         dualWriteLastResult: {
           action: mode === "mirror" ? "cache-mirror" : "save",
           target: "luker-chat-state",
           success: true,
           chatId,
-          revision: Number(revision || 0),
-          reason: `${reason}:bootstrap`,
+          revision: Number(
+            manifestResult.manifest.headRevision || effectiveRevision || 0,
+          ),
+          reason: String(reason || "luker-chat-state-save"),
           mode: String(mode || "primary"),
           at: Date.now(),
         },
       }),
-      metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
-      revision: Math.max(
-        Number(graphPersistenceState.revision || 0),
-        Number(revision || 0),
+      metadataIntegrity: String(
+        nextIntegrity || graphPersistenceState.metadataIntegrity || "",
       ),
+      revision: Number(manifestResult.manifest.headRevision || effectiveRevision || 0),
+      lastPersistedRevision: Number(
+        manifestResult.manifest.headRevision || effectiveRevision || 0,
+      ),
+      lastAcceptedRevision:
+        accepted === true
+          ? Number(manifestResult.manifest.headRevision || effectiveRevision || 0)
+          : Number(graphPersistenceState.lastAcceptedRevision || 0),
       pendingPersist: false,
       persistMismatchReason: "",
       persistDiagnosticTier: "none",
@@ -6262,182 +7197,37 @@ async function persistGraphToLukerSidecarV2(
     if (mode !== "mirror") {
       clearPendingGraphPersistRetry();
     }
+    if (shouldQueueLukerSidecarCompaction(manifestResult.manifest)) {
+      scheduleLukerGraphSidecarCompaction(chatId, {
+        graph: cloneGraphForPersistence(graph, chatId),
+        revision: manifestResult.manifest.headRevision,
+        reason: `${reason}:auto-compact`,
+        integrity: nextIntegrity,
+        chatStateTarget: normalizedTarget,
+      });
+    }
+
     return {
       saved: true,
       accepted,
       chatId,
-      revision: Number(revision || 0),
-      manifestRevision: Number(revision || 0),
-      journalDepth: 0,
-      checkpointRevision: Number(revision || 0),
+      revision: Number(manifestResult.manifest.headRevision || effectiveRevision || 0),
+      manifestRevision: Number(
+        manifestResult.manifest.headRevision || effectiveRevision || 0,
+      ),
+      journalDepth: Number(manifestResult.manifest.journalDepth || 0),
+      checkpointRevision: Number(manifestResult.manifest.checkpointRevision || 0),
       reason: String(reason || "luker-chat-state-save"),
-      saveMode: "luker-chat-state-v2-bootstrap",
-      storageTier: "luker-chat-state",
-      manifest: manifestResult.manifest,
-    };
-  }
-
-  const journalEntry = buildLukerGraphJournalEntry(resolvedPersistDelta, {
-    revision,
-    reason,
-    storageTier: "luker-chat-state",
-    chatId,
-    integrity: nextIntegrity,
-  });
-  const journalResult = await appendLukerGraphJournalEntryV2(context, journalEntry, {
-    namespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
-    chatId,
-    integrity: nextIntegrity,
-  });
-  if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
-    updateGraphPersistenceState({
-      dualWriteLastResult: {
-        action: "save",
-        target: "luker-chat-state",
-        success: false,
-        chatId,
-        revision: Number(revision || 0),
-        reason: String(reason || "luker-chat-state-save"),
-        mode: String(mode || "primary"),
-        error:
-          journalResult?.error?.message ||
-          journalResult?.reason ||
-          "luker-sidecar-journal-save-failed",
-        at: Date.now(),
-      },
-    });
-    return {
-      saved: false,
-      accepted: false,
-      reason: journalResult?.reason || "luker-sidecar-journal-save-failed",
-      revision,
-      storageTier: "luker-chat-state",
-      error: journalResult?.error || null,
-    };
-  }
-
-  const previousManifest = existingSidecar?.manifest || readCachedChatStateManifest(chatId);
-  const checkpointRevision = Math.max(
-    Number(existingSidecar?.checkpoint?.revision || 0),
-    Number(previousManifest?.checkpointRevision || 0),
-  );
-  const manifest = buildLukerGraphManifestV2(graph, {
-    baseRevision: resolveLukerBaseRevision(previousManifest, existingSidecar?.checkpoint),
-    headRevision: Number(journalResult.entry.revision || revision || 0),
-    checkpointRevision,
-    lastCompactedRevision: Math.max(
-      Number(previousManifest?.lastCompactedRevision || 0),
-      checkpointRevision,
-    ),
-    journalDepth: Number(journalResult.journal.entryCount || 0),
-    journalBytes: Number(journalResult.journal.totalBytes || 0),
-    chatId,
-    integrity: nextIntegrity,
-    reason,
-    storageTier: "luker-chat-state",
-    accepted,
-    lastProcessedAssistantFloor,
-    extractionCount: nextExtractionCount,
-    compactionState:
-      previousManifest?.compactionState || buildLukerJournalCompactionState("idle", {
-        lastAt: Date.now(),
-        lastReason: reason,
-      }),
-  });
-  const manifestResult = await writeLukerGraphManifestV2(context, manifest, {
-    namespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
-  });
-  if (!manifestResult?.ok || !manifestResult?.manifest) {
-    updateGraphPersistenceState({
-      ...buildLukerManifestStatePatch(previousManifest, {
-        persistMismatchReason: "luker-manifest-pending-after-journal",
-        lastPersistReason: reason,
-        lastPersistMode: "luker-chat-state-v2-journal-only",
-        dualWriteLastResult: {
-          action: "save",
-          target: "luker-chat-state",
-          success: false,
-          chatId,
-          revision: Number(revision || 0),
-          reason: String(reason || "luker-chat-state-save"),
-          mode: String(mode || "primary"),
-          error:
-            manifestResult?.error?.message ||
-            manifestResult?.reason ||
-            "luker-sidecar-manifest-save-failed",
-          at: Date.now(),
-        },
-      }),
-    });
-    return {
-      saved: false,
-      accepted: false,
-      reason: manifestResult?.reason || "luker-sidecar-manifest-save-failed",
-      revision,
-      storageTier: "luker-chat-state",
-      error: manifestResult?.error || null,
-    };
-  }
-
-  cacheChatStateManifest(chatId, manifestResult.manifest);
-  rememberResolvedGraphIdentityAlias(context, chatId);
-  updateGraphPersistenceState({
-    ...buildLukerManifestStatePatch(manifestResult.manifest, {
-      cacheMirrorState:
-        mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
-      lastPersistReason: String(reason || ""),
-      lastPersistMode:
+      saveMode:
         mode === "mirror"
           ? "luker-chat-state-v2-mirror"
           : "luker-chat-state-v2",
-      acceptedStorageTier: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedStorageTier,
-      acceptedBy: accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
-      dualWriteLastResult: {
-        action: mode === "mirror" ? "cache-mirror" : "save",
-        target: "luker-chat-state",
-        success: true,
-        chatId,
-        revision: Number(manifestResult.manifest.headRevision || revision || 0),
-        reason: String(reason || "luker-chat-state-save"),
-        mode: String(mode || "primary"),
-        at: Date.now(),
-      },
-    }),
-    metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
-    revision: Math.max(
-      Number(graphPersistenceState.revision || 0),
-      Number(manifestResult.manifest.headRevision || revision || 0),
-    ),
-    pendingPersist: false,
-    persistMismatchReason: "",
-    persistDiagnosticTier: "none",
+      storageTier: "luker-chat-state",
+      manifest: manifestResult.manifest,
+    };
+  }, {
+    chatStateTarget: normalizedTarget,
   });
-  if (mode !== "mirror") {
-    clearPendingGraphPersistRetry();
-  }
-  if (shouldQueueLukerSidecarCompaction(manifestResult.manifest)) {
-    scheduleLukerGraphSidecarCompaction(chatId, {
-      graph: cloneGraphForPersistence(graph, chatId),
-      revision: manifestResult.manifest.headRevision,
-      reason: `${reason}:auto-compact`,
-      integrity: nextIntegrity,
-    });
-  }
-
-  return {
-    saved: true,
-    accepted,
-    chatId,
-    revision: Number(manifestResult.manifest.headRevision || revision || 0),
-    manifestRevision: Number(manifestResult.manifest.headRevision || revision || 0),
-    journalDepth: Number(manifestResult.manifest.journalDepth || 0),
-    checkpointRevision: Number(manifestResult.manifest.checkpointRevision || 0),
-    reason: String(reason || "luker-chat-state-save"),
-    saveMode:
-      mode === "mirror" ? "luker-chat-state-v2-mirror" : "luker-chat-state-v2",
-    storageTier: "luker-chat-state",
-    manifest: manifestResult.manifest,
-  };
 }
 
 async function loadGraphFromLukerSidecarV2(
@@ -6446,10 +7236,14 @@ async function loadGraphFromLukerSidecarV2(
     source = "luker-chat-state-probe",
     attemptIndex = 0,
     allowOverride = false,
+    consistencyRetryIndex = 0,
+    consistencyRetryDelays = LUKER_SIDECAR_CONSISTENCY_RETRY_DELAYS_MS,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const context = getContext();
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   if (!normalizedChatId) {
     return {
       success: false,
@@ -6464,6 +7258,7 @@ async function loadGraphFromLukerSidecarV2(
     manifestNamespace: LUKER_GRAPH_MANIFEST_NAMESPACE,
     journalNamespace: LUKER_GRAPH_JOURNAL_NAMESPACE,
     checkpointNamespace: LUKER_GRAPH_CHECKPOINT_NAMESPACE,
+    chatStateTarget: normalizedTarget,
   });
   const manifest = sidecar?.manifest || null;
   if (!manifest) {
@@ -6514,161 +7309,73 @@ async function loadGraphFromLukerSidecarV2(
     return cachedResult;
   }
 
-  const baseRevision = resolveLukerBaseRevision(manifest, sidecar?.checkpoint);
-  let snapshot = null;
-  if (sidecar?.checkpoint?.serializedGraph) {
-    try {
-      const checkpointGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(sidecar.checkpoint.serializedGraph),
-          normalizedChatId,
-        ),
-        normalizedChatId,
-      );
-      snapshot = buildSnapshotFromGraph(checkpointGraph, {
-        chatId: normalizedChatId,
-        revision: Number(sidecar.checkpoint.revision || baseRevision || 0),
-        meta: {
-          integrity:
-            sidecar.checkpoint.integrity ||
-            manifest.integrity ||
-            graphPersistenceState.metadataIntegrity,
-          storagePrimary: "chat-state",
-          storageMode: "luker-chat-state",
-          lastMutationReason: String(
-            sidecar.checkpoint.reason || `${source}:luker-checkpoint`,
-          ),
-        },
-      });
-    } catch (error) {
-      console.warn("[ST-BME] Luker checkpoint 反序列化失败:", error);
-      applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-        chatId: normalizedChatId,
-        reason: "luker-sidecar-checkpoint-invalid",
-        attemptIndex,
-        dbReady: false,
-        writesBlocked: true,
-        hostProfile: "luker",
-        primaryStorageTier: "luker-chat-state",
-        cacheStorageTier: buildPersistenceEnvironment(
-          context,
-          getPreferredGraphLocalStorePresentationSync(),
-        ).cacheStorageTier,
-      });
-      updateGraphPersistenceState({
-        ...buildLukerManifestStatePatch(manifest, {
-          persistMismatchReason: "luker-sidecar-checkpoint-invalid",
-        }),
-      });
-      return {
-        success: false,
-        loaded: false,
-        reason: "luker-sidecar-checkpoint-invalid",
-        chatId: normalizedChatId,
-        attemptIndex,
-        error,
-      };
-    }
-  } else {
-    const emptyGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(createEmptyGraph(), normalizedChatId),
-      normalizedChatId,
-    );
-    snapshot = buildSnapshotFromGraph(emptyGraph, {
-      chatId: normalizedChatId,
-      revision: 0,
-      meta: {
-        integrity: manifest.integrity || graphPersistenceState.metadataIntegrity,
-        storagePrimary: "chat-state",
-        storageMode: "luker-chat-state",
-        lastMutationReason: `${source}:luker-empty-base`,
-      },
-    });
-  }
-
-  const journalEntries = Array.isArray(sidecar?.journal?.entries)
-    ? sidecar.journal.entries.filter(
-        (entry) =>
-          Number(entry?.revision || 0) > baseRevision &&
-          Number(entry?.revision || 0) <= Number(manifest.headRevision || 0),
-      )
-    : [];
-  if (Number(manifest.headRevision || 0) > baseRevision) {
-    let expectedRevision = baseRevision + 1;
-    for (const entry of journalEntries) {
-      if (Number(entry?.revision || 0) !== expectedRevision) {
-        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-          chatId: normalizedChatId,
-          reason: "luker-sidecar-journal-gap",
-          attemptIndex,
-          dbReady: false,
-          writesBlocked: true,
-          hostProfile: "luker",
-          primaryStorageTier: "luker-chat-state",
-          cacheStorageTier: buildPersistenceEnvironment(
-            context,
-            getPreferredGraphLocalStorePresentationSync(),
-          ).cacheStorageTier,
-        });
-        updateGraphPersistenceState({
-          ...buildLukerManifestStatePatch(manifest, {
-            persistMismatchReason: "luker-sidecar-journal-gap",
-          }),
-        });
-        return {
-          success: false,
-          loaded: false,
-          reason: "luker-sidecar-journal-gap",
-          chatId: normalizedChatId,
-          attemptIndex,
-        };
-      }
-      snapshot = applyPersistDeltaToSnapshot(snapshot, entry.persistDelta, {
-        revision: entry.revision,
-        reason: entry.reason,
-        chatId: normalizedChatId,
-        lastModified: Date.now(),
-      });
-      expectedRevision += 1;
-    }
-    if (expectedRevision - 1 !== Number(manifest.headRevision || 0)) {
-      applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
-        chatId: normalizedChatId,
-        reason: "luker-sidecar-journal-incomplete",
-        attemptIndex,
-        dbReady: false,
-        writesBlocked: true,
-        hostProfile: "luker",
-        primaryStorageTier: "luker-chat-state",
-        cacheStorageTier: buildPersistenceEnvironment(
-          context,
-          getPreferredGraphLocalStorePresentationSync(),
-        ).cacheStorageTier,
-      });
-      updateGraphPersistenceState({
-        ...buildLukerManifestStatePatch(manifest, {
-          persistMismatchReason: "luker-sidecar-journal-incomplete",
-        }),
-      });
-      return {
-        success: false,
-        loaded: false,
-        reason: "luker-sidecar-journal-incomplete",
-        chatId: normalizedChatId,
-        attemptIndex,
-      };
-    }
-  }
-
-  snapshot.meta = {
-    ...(snapshot.meta || {}),
-    revision: Number(manifest.headRevision || snapshot?.meta?.revision || 0),
+  const baseResult = buildSnapshotFromLukerSidecarState(sidecar, {
     chatId: normalizedChatId,
-    integrity: manifest.integrity || snapshot?.meta?.integrity || "",
-    storagePrimary: "chat-state",
-    storageMode: "luker-chat-state",
-    lastMutationReason: String(manifest.reason || source || "luker-chat-state"),
-  };
+    source,
+    manifest,
+  });
+  const nextConsistencyRetryDelay =
+    consistencyRetryIndex < consistencyRetryDelays.length
+      ? Number(
+          consistencyRetryDelays[consistencyRetryIndex] || 0,
+        )
+      : null;
+  if (!baseResult?.ok || !baseResult?.snapshot) {
+    if (
+      (baseResult?.reason === "luker-sidecar-journal-gap" ||
+        baseResult?.reason === "luker-sidecar-journal-incomplete") &&
+      Number.isFinite(nextConsistencyRetryDelay) &&
+      nextConsistencyRetryDelay >= 0
+    ) {
+      if (nextConsistencyRetryDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, nextConsistencyRetryDelay));
+      } else {
+        await Promise.resolve();
+      }
+      return await loadGraphFromLukerSidecarV2(normalizedChatId, {
+        source,
+        attemptIndex,
+        allowOverride,
+        consistencyRetryIndex: consistencyRetryIndex + 1,
+        consistencyRetryDelays,
+        chatStateTarget: normalizedTarget,
+      });
+    }
+    const blockedReason = String(
+      baseResult?.reason || "luker-sidecar-load-invalid",
+    );
+    if (baseResult?.error) {
+      console.warn(`[ST-BME] Luker sidecar 加载失败: ${blockedReason}`, baseResult.error);
+    }
+    applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+      chatId: normalizedChatId,
+      reason: blockedReason,
+      attemptIndex,
+      dbReady: false,
+      writesBlocked: true,
+      hostProfile: "luker",
+      primaryStorageTier: "luker-chat-state",
+      cacheStorageTier: buildPersistenceEnvironment(
+        context,
+        getPreferredGraphLocalStorePresentationSync(),
+      ).cacheStorageTier,
+    });
+    updateGraphPersistenceState({
+      ...buildLukerManifestStatePatch(manifest, {
+        persistMismatchReason: blockedReason,
+      }),
+    });
+    return {
+      success: false,
+      loaded: false,
+      reason: blockedReason,
+      chatId: normalizedChatId,
+      attemptIndex,
+      error: baseResult?.error || null,
+    };
+  }
+
+  const snapshot = baseResult.snapshot;
   const shouldAllowOverride =
     allowOverride ||
     BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(graphPersistenceState.loadState) ||
@@ -6715,6 +7422,7 @@ async function loadGraphFromLukerSidecarV2(
         acceptedStorageTier: "luker-chat-state",
         acceptedBy: "luker-chat-state",
       }),
+      chatStateTarget: cloneRuntimeDebugValue(normalizedTarget, null),
       metadataIntegrity: String(
         manifest.integrity || graphPersistenceState.metadataIntegrity || "",
       ),
@@ -6732,6 +7440,7 @@ async function persistGraphToHostChatState(
   context = getContext(),
   {
     graph = currentGraph,
+    chatId: explicitChatId = "",
     revision = graphPersistenceState.revision,
     reason = "graph-chat-state",
     storageTier = "chat-state",
@@ -6740,6 +7449,8 @@ async function persistGraphToHostChatState(
     extractionCount: nextExtractionCount = null,
     mode = "primary",
     persistDelta = null,
+    chatStateTarget = null,
+    graphDetached = false,
   } = {},
 ) {
   if (!context || !graph || !canUseHostGraphChatStatePersistence(context)) {
@@ -6752,7 +7463,14 @@ async function persistGraphToHostChatState(
     };
   }
 
-  const chatId = getCurrentChatId(context);
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const chatId = resolvePersistenceChatId(
+    context,
+    graph,
+    explicitChatId ||
+      resolveChatStateTargetChatId(normalizedTarget) ||
+      "",
+  );
   if (!chatId) {
     return {
       saved: false,
@@ -6771,6 +7489,7 @@ async function persistGraphToHostChatState(
   if (persistenceEnvironment.hostProfile === "luker") {
     return await persistGraphToLukerSidecarV2(context, {
       graph,
+      chatId,
       revision,
       reason,
       accepted,
@@ -6778,6 +7497,7 @@ async function persistGraphToHostChatState(
       extractionCount: nextExtractionCount,
       mode,
       persistDelta,
+      chatStateTarget: normalizedTarget,
     });
   }
   const effectiveStorageTier =
@@ -6788,7 +7508,10 @@ async function persistGraphToHostChatState(
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
     graphPersistenceState.metadataIntegrity;
-  const persistedGraph = cloneGraphForPersistence(graph, chatId);
+  const persistedGraph =
+    graphDetached === true
+      ? normalizeGraphRuntimeState(graph, chatId)
+      : cloneGraphForPersistence(graph, chatId);
   stampGraphPersistenceMeta(persistedGraph, {
     revision,
     reason: `chat-state:${String(reason || "graph-chat-state")}`,
@@ -6809,6 +7532,7 @@ async function persistGraphToHostChatState(
       integrity: nextIntegrity,
       lastProcessedAssistantFloor,
       extractionCount: nextExtractionCount,
+      target: normalizedTarget,
     },
   );
 
@@ -6899,10 +7623,12 @@ async function loadGraphFromChatState(
     source = "chat-state-probe",
     attemptIndex = 0,
     allowOverride = false,
+    chatStateTarget = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const context = getContext();
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
   const shouldFallbackToLocalStore = isLukerPrimaryPersistenceHost(context);
   if (!normalizedChatId) {
     return {
@@ -6928,6 +7654,7 @@ async function loadGraphFromChatState(
       source,
       attemptIndex,
       allowOverride,
+      chatStateTarget: normalizedTarget,
     });
     if (lukerResult?.loaded || lukerResult?.reason !== "luker-chat-state-v2-empty") {
       return lukerResult;
@@ -6937,6 +7664,7 @@ async function loadGraphFromChatState(
   const payload =
     (await readGraphChatStateSnapshot(context, {
       namespace: GRAPH_CHAT_STATE_NAMESPACE,
+      target: normalizedTarget,
     })) || null;
   if (!payload?.serializedGraph) {
     if (shouldFallbackToLocalStore) {
@@ -6958,11 +7686,8 @@ async function loadGraphFromChatState(
 
   let chatStateGraph = null;
   try {
-    chatStateGraph = cloneGraphForPersistence(
-      normalizeGraphRuntimeState(
-        deserializeGraph(payload.serializedGraph),
-        normalizedChatId,
-      ),
+    chatStateGraph = normalizeGraphRuntimeState(
+      deserializeGraph(payload.serializedGraph),
       normalizedChatId,
     );
   } catch (error) {
@@ -7124,6 +7849,308 @@ async function loadGraphFromChatState(
   return loadResult;
 }
 
+function getNodeBranchCutoffSeq(node = null) {
+  if (!node || typeof node !== "object") return -1;
+  if (Array.isArray(node.seqRange) && Number.isFinite(Number(node.seqRange[1]))) {
+    return Number(node.seqRange[1]);
+  }
+  return Number.isFinite(Number(node.seq)) ? Number(node.seq) : -1;
+}
+
+function deriveBranchGraphFromSourceGraph(
+  sourceGraph = null,
+  {
+    targetChatId = "",
+    cutoffFloor = null,
+    assistantMessageCount = null,
+  } = {},
+) {
+  if (!sourceGraph) return null;
+  const nextChatId =
+    normalizeChatIdCandidate(targetChatId) ||
+    normalizeChatIdCandidate(sourceGraph?.historyState?.chatId);
+  const branchGraph = cloneGraphForPersistence(sourceGraph, nextChatId);
+
+  const safeCutoff =
+    Number.isFinite(Number(cutoffFloor)) && Number(cutoffFloor) >= 0
+      ? Math.floor(Number(cutoffFloor))
+      : null;
+  if (safeCutoff != null) {
+    const allowedNodeIds = new Set(
+      (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : [])
+        .filter((node) => {
+          const nodeCutoffSeq = getNodeBranchCutoffSeq(node);
+          return nodeCutoffSeq < 0 || nodeCutoffSeq <= safeCutoff;
+        })
+        .map((node) => String(node.id || "")),
+    );
+
+    branchGraph.nodes = (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : []).filter(
+      (node) => allowedNodeIds.has(String(node.id || "")),
+    );
+    branchGraph.edges = (Array.isArray(branchGraph.edges) ? branchGraph.edges : []).filter(
+      (edge) =>
+        allowedNodeIds.has(String(edge?.fromId || "")) &&
+        allowedNodeIds.has(String(edge?.toId || "")),
+    );
+    branchGraph.batchJournal = (Array.isArray(branchGraph.batchJournal)
+      ? branchGraph.batchJournal
+      : []
+    ).filter((journal) => {
+      const rangeEnd = Number(journal?.processedRange?.[1]);
+      return !Number.isFinite(rangeEnd) || rangeEnd <= safeCutoff;
+    });
+
+    const summaryEntries = Array.isArray(branchGraph.summaryState?.entries)
+      ? branchGraph.summaryState.entries
+      : [];
+    branchGraph.summaryState.entries = summaryEntries.filter((entry) => {
+      const messageRangeEnd = Number(entry?.messageRange?.[1]);
+      return !Number.isFinite(messageRangeEnd) || messageRangeEnd <= safeCutoff;
+    });
+    branchGraph.summaryState.activeEntryIds = (branchGraph.summaryState.activeEntryIds || [])
+      .filter((entryId) =>
+        branchGraph.summaryState.entries.some((entry) => entry.id === entryId),
+      );
+    branchGraph.summaryState.lastSummarizedAssistantFloor = Math.max(
+      -1,
+      ...branchGraph.summaryState.entries.map((entry) =>
+        Number.isFinite(Number(entry?.messageRange?.[1]))
+          ? Number(entry.messageRange[1])
+          : -1,
+      ),
+    );
+
+    pruneProcessedMessageHashesFromFloor(branchGraph, safeCutoff + 1);
+    branchGraph.historyState.lastProcessedAssistantFloor = Math.min(
+      Number(branchGraph.historyState.lastProcessedAssistantFloor ?? safeCutoff),
+      safeCutoff,
+    );
+    if (
+      Array.isArray(branchGraph.historyState?.lastBatchStatus?.processedRange) &&
+      Number(branchGraph.historyState.lastBatchStatus.processedRange[1]) > safeCutoff
+    ) {
+      branchGraph.historyState.lastBatchStatus = null;
+    }
+  }
+
+  const extractionCountCeiling =
+    Number.isFinite(Number(assistantMessageCount)) && Number(assistantMessageCount) >= 0
+      ? Math.floor(Number(assistantMessageCount))
+      : Number.isFinite(Number(branchGraph.historyState.extractionCount))
+        ? Number(branchGraph.historyState.extractionCount)
+        : 0;
+  branchGraph.historyState.chatId = nextChatId;
+  branchGraph.historyState.extractionCount = Math.max(
+    0,
+    Math.min(
+      Number(branchGraph.historyState.extractionCount || 0),
+      extractionCountCeiling,
+    ),
+  );
+  branchGraph.historyState.lastRecoveryResult = null;
+  branchGraph.historyState.lastBatchStatus = null;
+  branchGraph.historyState.historyDirtyFrom = null;
+  branchGraph.historyState.lastMutationSource = "chat-branch-created";
+  branchGraph.historyState.lastMutationReason = "chat-branch-created";
+  branchGraph.lastRecallResult = null;
+  return normalizeGraphRuntimeState(branchGraph, nextChatId);
+}
+
+async function readPersistedGraphForChatStateTarget(
+  context = getContext(),
+  chatStateTarget = null,
+) {
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const targetChatId = resolveChatStateTargetChatId(normalizedTarget);
+  if (!normalizedTarget || !targetChatId) {
+    return null;
+  }
+
+  const sidecar = await readLukerGraphSidecarV2(context, {
+    chatStateTarget: normalizedTarget,
+  });
+  const sidecarResult = buildSnapshotFromLukerSidecarState(sidecar, {
+    chatId: targetChatId,
+    source: "branch-source-sidecar",
+  });
+  if (sidecarResult?.ok && sidecarResult?.snapshot) {
+    try {
+      return buildGraphFromSnapshot(sidecarResult.snapshot, {
+        chatId: targetChatId,
+      });
+    } catch (error) {
+      console.warn("[ST-BME] 读取 Luker branch source snapshot 失败:", error);
+    }
+  }
+
+  const legacySnapshot = await readGraphChatStateSnapshot(context, {
+    namespace: GRAPH_CHAT_STATE_NAMESPACE,
+    target: normalizedTarget,
+  });
+  if (legacySnapshot?.serializedGraph) {
+    try {
+      return normalizeGraphRuntimeState(
+        deserializeGraph(legacySnapshot.serializedGraph),
+        targetChatId,
+      );
+    } catch (error) {
+      console.warn("[ST-BME] 读取 Luker branch source legacy snapshot 失败:", error);
+    }
+  }
+
+  return null;
+}
+
+async function persistLukerAuxStateNamespace(
+  namespace,
+  payload,
+  {
+    chatStateTarget = null,
+    maxOperations = 1024,
+  } = {},
+) {
+  const context = getContext();
+  if (!isLukerPrimaryPersistenceHost(context)) {
+    return false;
+  }
+  const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  if (!normalizedTarget) {
+    return false;
+  }
+  const result = await writeGraphChatStatePayload(
+    context,
+    namespace,
+    payload,
+    {
+      maxOperations,
+      asyncDiff: false,
+      target: normalizedTarget,
+    },
+  );
+  return result?.ok === true;
+}
+
+async function onChatBranchCreated(payload = {}) {
+  const context = getContext();
+  if (!isLukerPrimaryPersistenceHost(context)) {
+    return { skipped: true, reason: "not-luker" };
+  }
+
+  const sourceTarget = resolveCurrentChatStateTarget(context, payload?.sourceTarget);
+  const targetTarget = resolveCurrentChatStateTarget(context, payload?.targetTarget);
+  const targetChatId =
+    resolveChatStateTargetChatId(targetTarget) ||
+    normalizeChatIdCandidate(payload?.branchName);
+  const cutoffFloor = Number.isFinite(Number(payload?.mesId))
+    ? Math.floor(Number(payload.mesId))
+    : null;
+  const assistantMessageCount = Number.isFinite(Number(payload?.assistantMessageCount))
+    ? Math.max(0, Math.floor(Number(payload.assistantMessageCount)))
+    : null;
+
+  if (!sourceTarget || !targetTarget || !targetChatId) {
+    const skipped = {
+      ok: false,
+      reason: "invalid-branch-target",
+      sourceTarget: cloneRuntimeDebugValue(sourceTarget, null),
+      targetTarget: cloneRuntimeDebugValue(targetTarget, null),
+    };
+    updateGraphPersistenceState({
+      lastBranchInheritResult: skipped,
+    });
+    return skipped;
+  }
+
+  const sourceGraph = await readPersistedGraphForChatStateTarget(
+    context,
+    sourceTarget,
+  );
+  if (!sourceGraph) {
+    const missing = {
+      ok: false,
+      reason: "source-graph-unavailable",
+      targetChatId,
+      cutoffFloor,
+      assistantMessageCount,
+    };
+    updateGraphPersistenceState({
+      lastBranchInheritResult: missing,
+    });
+    return missing;
+  }
+
+  const branchGraph = deriveBranchGraphFromSourceGraph(sourceGraph, {
+    targetChatId,
+    cutoffFloor,
+    assistantMessageCount,
+  });
+  const branchRevision = Math.max(
+    1,
+    Number(getGraphPersistedRevision(sourceGraph) || 0) + 1,
+  );
+  const persistResult = await persistGraphToLukerSidecarV2(context, {
+    graph: branchGraph,
+    chatId: targetChatId,
+    revision: branchRevision,
+    reason: "chat-branch-created",
+    accepted: true,
+    lastProcessedAssistantFloor:
+      branchGraph?.historyState?.lastProcessedAssistantFloor ?? null,
+    extractionCount: branchGraph?.historyState?.extractionCount ?? null,
+    mode: "primary",
+    chatStateTarget: targetTarget,
+  });
+
+  await persistLukerAuxStateNamespace(
+    LUKER_PROJECTION_STATE_NAMESPACE,
+    {
+      version: 1,
+      runtime: {
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "chat-branch-created",
+      },
+      persistent: {
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "chat-branch-created",
+      },
+      targetChatId,
+      derivedFrom: resolveChatStateTargetChatId(sourceTarget),
+    },
+    { chatStateTarget: targetTarget },
+  );
+  await persistLukerAuxStateNamespace(
+    LUKER_DEBUG_STATE_NAMESPACE,
+    {
+      version: 1,
+      updatedAt: Date.now(),
+      lastBranchInheritResult: {
+        targetChatId,
+        cutoffFloor,
+        assistantMessageCount,
+      },
+    },
+    { chatStateTarget: targetTarget },
+  );
+
+  const result = {
+    ok: persistResult?.saved === true,
+    reason: persistResult?.reason || "",
+    targetChatId,
+    cutoffFloor,
+    assistantMessageCount,
+    sourceTarget: cloneRuntimeDebugValue(sourceTarget, null),
+    targetTarget: cloneRuntimeDebugValue(targetTarget, null),
+    revision: Number(persistResult?.revision || branchRevision || 0),
+  };
+  updateGraphPersistenceState({
+    lastBranchInheritResult: result,
+  });
+  return result;
+}
+
 function scheduleGraphChatStateProbe(chatId, options = {}) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (
@@ -7164,10 +8191,13 @@ function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
       typeof legacyGraph === "string"
         ? deserializeGraph(legacyGraph)
         : legacyGraph;
-    return cloneGraphForPersistence(
-      normalizeGraphRuntimeState(hydratedLegacyGraph, normalizedChatId),
+    const normalizedLegacyGraph = normalizeGraphRuntimeState(
+      hydratedLegacyGraph,
       normalizedChatId,
     );
+    return typeof legacyGraph === "string"
+      ? normalizedLegacyGraph
+      : cloneGraphForPersistence(normalizedLegacyGraph, normalizedChatId);
   } catch (error) {
     console.warn("[ST-BME] 读取 legacy chat_metadata 图谱失败:", error);
     return null;
@@ -7844,6 +8874,102 @@ function applyIndexedDbEmptyToRuntime(
   };
 }
 
+function queueRuntimeGraphLocalStoreRepair(
+  chatId,
+  {
+    source = "runtime-local-store-repair",
+    scheduleCloudUpload = false,
+  } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const identity = resolveCurrentChatIdentity(getContext());
+  if (
+    !normalizedChatId ||
+    bmeIndexedDbRuntimeRepairInFlightByChatId.has(normalizedChatId) ||
+    !hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+  ) {
+    return {
+      queued: false,
+      chatId: normalizedChatId || "",
+      reason: !normalizedChatId
+        ? "missing-chat-id"
+        : bmeIndexedDbRuntimeRepairInFlightByChatId.has(normalizedChatId)
+          ? "already-running"
+          : "runtime-graph-unavailable",
+    };
+  }
+
+  const graphSnapshot = cloneGraphForPersistence(currentGraph, normalizedChatId);
+  const requestedRevision = Math.max(
+    1,
+    Number(getGraphPersistedRevision(graphSnapshot) || 0),
+    Number(graphPersistenceState.revision || 0),
+    Number(graphPersistenceState.lastAcceptedRevision || 0),
+    Number(graphPersistenceState.lastPersistedRevision || 0),
+  );
+  const repairReason = `${String(source || "runtime-local-store-repair")}:repair-local-store`;
+  bmeIndexedDbRuntimeRepairInFlightByChatId.add(normalizedChatId);
+  updateGraphPersistenceState({
+    indexedDbLastError: "",
+    lastPersistReason: repairReason,
+    lastPersistMode: "runtime-local-store-repair-queued",
+  });
+
+  scheduleBmeIndexedDbTask(async () => {
+    try {
+      const result = await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
+        revision: requestedRevision,
+        reason: repairReason,
+        scheduleCloudUpload,
+      });
+      if (
+        result?.accepted !== true &&
+        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+      ) {
+        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+          chatId: normalizedChatId,
+          reason: result?.reason || "runtime-local-store-repair-failed",
+          revision: Math.max(
+            Number(graphPersistenceState.revision || 0),
+            Number(result?.revision || requestedRevision),
+          ),
+          lastPersistedRevision: Math.max(
+            Number(graphPersistenceState.lastPersistedRevision || 0),
+            Number(result?.revision || 0),
+          ),
+          pendingPersist: false,
+          dbReady: false,
+          writesBlocked: true,
+        });
+      }
+    } catch (error) {
+      if (
+        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
+      ) {
+        applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
+          chatId: normalizedChatId,
+          reason: error?.message || "runtime-local-store-repair-failed",
+          pendingPersist: false,
+          dbReady: false,
+          writesBlocked: true,
+        });
+      }
+    } finally {
+      bmeIndexedDbRuntimeRepairInFlightByChatId.delete(normalizedChatId);
+      refreshPanelLiveState();
+    }
+  });
+
+  return {
+    queued: true,
+    chatId: normalizedChatId,
+    reason: repairReason,
+    revision: requestedRevision,
+  };
+}
+
 async function maybeResolveOrphanAcceptedCommitMarker(
   chatId,
   {
@@ -8000,14 +9126,37 @@ function applyIndexedDbSnapshotToRuntime(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   syncCommitMarkerToPersistenceState(getContext());
+  const loadStartedAt = readLoadDiagnosticsNow();
+  const recordLoadDiagnostics = (patch = {}) =>
+    updateLoadDiagnostics({
+      stage: "apply-indexeddb-snapshot",
+      source: String(source || reasonPrefix),
+      reasonPrefix: String(reasonPrefix || "indexeddb"),
+      statusLabel: String(statusLabel || "IndexedDB"),
+      chatId: normalizedChatId || "",
+      attemptIndex: Number.isFinite(Number(attemptIndex))
+        ? Math.max(0, Math.floor(Number(attemptIndex)))
+        : 0,
+      storagePrimary: String(storagePrimary || "indexeddb"),
+      storageMode: String(storageMode || storagePrimary || "indexeddb"),
+      ...cloneRuntimeDebugValue(patch, {}),
+      totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+    });
+  let hydrateMs = 0;
   if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot)) {
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${reasonPrefix}-empty`,
       chatId: normalizedChatId,
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+    });
+    return result;
   }
 
   const revision = Math.max(
@@ -8052,7 +9201,7 @@ function applyIndexedDbSnapshotToRuntime(
       revision,
       staleDetail: staleDecision,
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${reasonPrefix}-stale-runtime`,
@@ -8061,12 +9210,31 @@ function applyIndexedDbSnapshotToRuntime(
       revision,
       staleDetail: cloneRuntimeDebugValue(staleDecision, null),
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+      revision,
+      staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+    });
+    return result;
   }
   let graphFromSnapshot = null;
+  let hydrateDiagnostics = null;
   try {
+    const hydrateStartedAt = readLoadDiagnosticsNow();
     graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
       chatId: normalizedChatId,
+      onDiagnostics(snapshotValue) {
+        hydrateDiagnostics =
+          snapshotValue &&
+          typeof snapshotValue === "object" &&
+          !Array.isArray(snapshotValue)
+            ? snapshotValue
+            : null;
+      },
     });
+    hydrateMs = readLoadDiagnosticsNow() - hydrateStartedAt;
   } catch (error) {
     const failureReason =
       error?.code === "BME_SNAPSHOT_INTEGRITY_ERROR"
@@ -8101,7 +9269,7 @@ function applyIndexedDbSnapshotToRuntime(
       detail: error?.message || String(error),
       integrityReasons: Array.isArray(error?.reasons) ? error.reasons : [],
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: failureReason,
@@ -8110,11 +9278,31 @@ function applyIndexedDbSnapshotToRuntime(
       chatId: normalizedChatId,
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: failureReason,
+      revision,
+      hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+      hydrateNodesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.nodesMs),
+      hydrateEdgesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.edgesMs),
+      hydrateRuntimeMetaMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.runtimeMetaMs,
+      ),
+      hydrateStateMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.stateMs),
+      hydrateNormalizeMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.normalizeMs,
+      ),
+      hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.integrityMs,
+      ),
+      error: error?.message || String(error),
+      integrityReasons: Array.isArray(error?.reasons) ? [...error.reasons] : [],
+    });
+    return result;
   }
-  currentGraph = cloneGraphForPersistence(
-    normalizeGraphRuntimeState(graphFromSnapshot, normalizedChatId),
-    normalizedChatId,
-  );
+  const applyRuntimeStartedAt = readLoadDiagnosticsNow();
+  currentGraph = graphFromSnapshot;
   stampGraphPersistenceMeta(currentGraph, {
     revision,
     reason: `${reasonPrefix}:${String(source || reasonPrefix)}`,
@@ -8208,7 +9396,7 @@ function applyIndexedDbSnapshotToRuntime(
     ...getGraphStats(currentGraph),
   });
 
-  return {
+  const result = {
     success: true,
     loaded: true,
     loadState: GRAPH_LOAD_STATES.LOADED,
@@ -8218,6 +9406,29 @@ function applyIndexedDbSnapshotToRuntime(
     shadowSnapshotUsed: false,
     revision,
   };
+  recordLoadDiagnostics({
+    success: true,
+    loaded: true,
+    reason: result.reason,
+    revision,
+    hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+    hydrateNodesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.nodesMs),
+    hydrateEdgesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.edgesMs),
+    hydrateRuntimeMetaMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.runtimeMetaMs,
+    ),
+    hydrateStateMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.stateMs),
+    hydrateNormalizeMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.normalizeMs,
+    ),
+    hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.integrityMs,
+    ),
+    applyRuntimeMs: normalizeLoadDiagnosticsMs(
+      readLoadDiagnosticsNow() - applyRuntimeStartedAt,
+    ),
+  });
+  return result;
 }
 
 async function loadGraphFromIndexedDb(
@@ -8231,27 +9442,57 @@ async function loadGraphFromIndexedDb(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const commitMarker = syncCommitMarkerToPersistenceState(getContext());
+  const loadStartedAt = readLoadDiagnosticsNow();
+  const recordLoadDiagnostics = (patch = {}) =>
+    updateLoadDiagnostics({
+      stage: "load-indexeddb",
+      source: String(source || "indexeddb-probe"),
+      chatId: normalizedChatId || "",
+      attemptIndex: Number.isFinite(Number(attemptIndex))
+        ? Math.max(0, Math.floor(Number(attemptIndex)))
+        : 0,
+      ...cloneRuntimeDebugValue(patch, {}),
+      totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+    });
+  let exportSnapshotMs = 0;
+  let exportProbeMs = 0;
+  let preApplyMs = 0;
+  let exportSnapshotSource = "";
   if (!normalizedChatId) {
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: "indexeddb-missing-chat-id",
       chatId: "",
       attemptIndex,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+    });
+    return result;
   }
 
   let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
-      return {
+      const result = {
         success: false,
         loaded: false,
         reason: "indexeddb-manager-unavailable",
         chatId: normalizedChatId,
         attemptIndex,
       };
+      recordLoadDiagnostics({
+        success: false,
+        loaded: false,
+        reason: result.reason,
+        storagePrimary: localStore.storagePrimary,
+        storageMode: localStore.storageMode,
+      });
+      return result;
     }
     const db = await manager.getCurrentDb(normalizedChatId);
     localStore = resolveDbGraphStorePresentation(db);
@@ -8374,24 +9615,50 @@ async function loadGraphFromIndexedDb(
         },
       });
     }
-    const snapshot =
-      identityRecoveryResult?.snapshot ||
-      localStoreMigrationResult?.snapshot ||
-      migrationResult?.snapshot ||
-      (await db.exportSnapshot());
+    let snapshot = null;
+    let inspectionSnapshot = null;
+    if (identityRecoveryResult?.snapshot) {
+      snapshot = identityRecoveryResult.snapshot;
+      inspectionSnapshot = snapshot;
+      exportSnapshotSource = "identity-recovery";
+    } else if (localStoreMigrationResult?.snapshot) {
+      snapshot = localStoreMigrationResult.snapshot;
+      inspectionSnapshot = snapshot;
+      exportSnapshotSource = "local-store-migration";
+    } else if (migrationResult?.snapshot) {
+      snapshot = migrationResult.snapshot;
+      inspectionSnapshot = snapshot;
+      exportSnapshotSource = "legacy-migration";
+    } else {
+      if (typeof db.exportSnapshotProbe === "function") {
+        const probeStartedAt = readLoadDiagnosticsNow();
+        inspectionSnapshot = await db.exportSnapshotProbe({ includeTombstones: false });
+        exportProbeMs = readLoadDiagnosticsNow() - probeStartedAt;
+        exportSnapshotSource = "indexeddb-probe";
+      }
+      if (!inspectionSnapshot) {
+        const exportStartedAt = readLoadDiagnosticsNow();
+        snapshot = await db.exportSnapshot({ includeTombstones: false });
+        exportSnapshotMs = readLoadDiagnosticsNow() - exportStartedAt;
+        inspectionSnapshot = snapshot;
+        exportSnapshotSource = "indexeddb-export";
+      }
+    }
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
       resolveCurrentChatIdentity(getContext()),
     );
 
-    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
-    const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot, localStore);
+    const snapshotStore = resolveSnapshotGraphStorePresentation(
+      inspectionSnapshot || snapshot,
+      localStore,
+    );
 
     const commitMarkerMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
-      snapshot,
+      inspectionSnapshot,
       commitMarker,
     );
     let commitMarkerDiagnostic = null;
-    if (!isIndexedDbSnapshotMeaningful(snapshot)) {
+    if (!isIndexedDbSnapshotMeaningful(inspectionSnapshot)) {
       if (commitMarkerMismatch.mismatched) {
         commitMarkerDiagnostic = recordPersistMismatchDiagnostic(
           commitMarkerMismatch,
@@ -8455,6 +9722,22 @@ async function loadGraphFromIndexedDb(
           return orphanMarkerResolution.result;
         }
       }
+      const runtimeRepair = queueRuntimeGraphLocalStoreRepair(normalizedChatId, {
+        source: `${source}:empty-local-store`,
+        scheduleCloudUpload: false,
+      });
+      if (runtimeRepair.queued) {
+        return {
+          success: true,
+          loaded: false,
+          repairQueued: true,
+          loadState: GRAPH_LOAD_STATES.LOADING,
+          reason: `${snapshotStore.reasonPrefix}-repair-queued`,
+          chatId: normalizedChatId,
+          attemptIndex,
+          revision: Number(runtimeRepair.revision || 0),
+        };
+      }
       if (
         applyEmptyState &&
         !commitMarkerDiagnostic?.reason &&
@@ -8475,9 +9758,9 @@ async function loadGraphFromIndexedDb(
     }
 
     const snapshotRevision = normalizeIndexedDbRevision(
-      snapshot?.meta?.revision,
+      inspectionSnapshot?.meta?.revision,
     );
-    const snapshotIntegrity = String(snapshot?.meta?.integrity || "").trim();
+    const snapshotIntegrity = String(inspectionSnapshot?.meta?.integrity || "").trim();
     const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
       createShadowComparisonGraph({
         chatId: normalizedChatId,
@@ -8572,6 +9855,70 @@ async function loadGraphFromIndexedDb(
       };
     }
 
+    const staleDecision = detectStaleIndexedDbSnapshotAgainstRuntime(
+      normalizedChatId,
+      inspectionSnapshot,
+    );
+    if (staleDecision.stale) {
+      const result = {
+        success: false,
+        loaded: false,
+        reason: `${snapshotStore.reasonPrefix}-stale-runtime`,
+        chatId: normalizedChatId,
+        attemptIndex,
+        revision: snapshotRevision,
+        staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+      };
+      updateGraphPersistenceState({
+        storagePrimary: snapshotStore.storagePrimary,
+        storageMode: snapshotStore.storageMode,
+        indexedDbLastError: "",
+        dualWriteLastResult: {
+          action: "load",
+          source: String(source || snapshotStore.reasonPrefix),
+          success: false,
+          rejected: true,
+          reason: result.reason,
+          revision: snapshotRevision,
+          staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+          at: Date.now(),
+        },
+      });
+      recordLoadDiagnostics({
+        success: false,
+        loaded: false,
+        reason: result.reason,
+        revision: snapshotRevision,
+        storagePrimary: snapshotStore.storagePrimary,
+        storageMode: snapshotStore.storageMode,
+        exportSnapshotSource: exportSnapshotSource || "snapshot-probe",
+        exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
+        exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+        preApplyMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+        preApplyOtherMs: normalizeLoadDiagnosticsMs(
+          Math.max(
+            0,
+            readLoadDiagnosticsNow() - loadStartedAt - exportSnapshotMs - exportProbeMs,
+          ),
+        ),
+        staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+      });
+      return result;
+    }
+
+    if (!snapshot) {
+      const exportStartedAt = readLoadDiagnosticsNow();
+      snapshot = await db.exportSnapshot({ includeTombstones: false });
+      exportSnapshotMs += readLoadDiagnosticsNow() - exportStartedAt;
+      exportSnapshotSource =
+        exportSnapshotSource === "indexeddb-probe"
+          ? "indexeddb-probe+indexeddb-export"
+          : exportSnapshotSource || "indexeddb-export";
+    }
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+
+    preApplyMs = readLoadDiagnosticsNow() - loadStartedAt;
+    const applyInvokeStartedAt = readLoadDiagnosticsNow();
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
       source,
       attemptIndex,
@@ -8580,11 +9927,36 @@ async function loadGraphFromIndexedDb(
       statusLabel: snapshotStore.statusLabel,
       reasonPrefix: snapshotStore.reasonPrefix,
     });
+    const applyInvokeMs = readLoadDiagnosticsNow() - applyInvokeStartedAt;
+    const totalLoadMs = readLoadDiagnosticsNow() - loadStartedAt;
+    const loadAccountedMs = preApplyMs + applyInvokeMs;
     if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
       updateGraphPersistenceState({
         persistMismatchReason: commitMarkerDiagnostic.reason,
       });
     }
+    recordLoadDiagnostics({
+      success: loadResult?.success === true,
+      loaded: loadResult?.loaded === true,
+      reason: String(loadResult?.reason || ""),
+      revision: Number.isFinite(Number(loadResult?.revision))
+        ? Number(loadResult.revision)
+        : snapshotRevision,
+      storagePrimary: snapshotStore.storagePrimary,
+      storageMode: snapshotStore.storageMode,
+      commitMarkerMismatched: commitMarkerMismatch.mismatched === true,
+      exportSnapshotSource: exportSnapshotSource || "snapshot-prepared",
+      exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
+      exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+      preApplyMs: normalizeLoadDiagnosticsMs(preApplyMs),
+      preApplyOtherMs: normalizeLoadDiagnosticsMs(
+        Math.max(0, preApplyMs - exportSnapshotMs - exportProbeMs),
+      ),
+      applyInvokeMs: normalizeLoadDiagnosticsMs(applyInvokeMs),
+      untrackedMs: normalizeLoadDiagnosticsMs(
+        Math.max(0, totalLoadMs - loadAccountedMs),
+      ),
+    });
     return loadResult;
   } catch (error) {
     console.warn(`[ST-BME] ${localStore.statusLabel} 读取失败，回退 metadata:`, error);
@@ -8600,7 +9972,7 @@ async function loadGraphFromIndexedDb(
         at: Date.now(),
       },
     });
-    return {
+    const result = {
       success: false,
       loaded: false,
       reason: `${localStore.reasonPrefix}-read-failed`,
@@ -8608,6 +9980,29 @@ async function loadGraphFromIndexedDb(
       attemptIndex,
       error,
     };
+    recordLoadDiagnostics({
+      success: false,
+      loaded: false,
+      reason: result.reason,
+      storagePrimary: localStore.storagePrimary,
+      storageMode: localStore.storageMode,
+      error: error?.message || String(error),
+      exportSnapshotSource: exportSnapshotSource || "unknown",
+      exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
+      exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+      preApplyMs: normalizeLoadDiagnosticsMs(
+        preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt),
+      ),
+      preApplyOtherMs: normalizeLoadDiagnosticsMs(
+        Math.max(
+          0,
+          (preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt)) -
+            exportSnapshotMs -
+            exportProbeMs,
+        ),
+      ),
+    });
+    return result;
   }
 }
 
@@ -9422,6 +10817,10 @@ async function persistGraphToConfiguredDurableTier(
     reason,
     lastProcessedAssistantFloor = null,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
+    chatStateTarget = null,
+    graphDetached = false,
   } = {},
 ) {
   const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
@@ -9437,6 +10836,7 @@ async function persistGraphToConfiguredDurableTier(
   ) {
     const chatStateResult = await persistGraphToHostChatState(context, {
       graph,
+      chatId,
       revision,
       reason,
       storageTier: "luker-chat-state",
@@ -9445,6 +10845,8 @@ async function persistGraphToConfiguredDurableTier(
       extractionCount,
       mode: "primary",
       persistDelta,
+      chatStateTarget,
+      graphDetached,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -9457,22 +10859,25 @@ async function persistGraphToConfiguredDurableTier(
         extractionCount,
         immediate: true,
       });
+      stampGraphPersistenceMeta(graph, {
+        revision: acceptedRevision,
+        reason: `luker-chat-state:${String(reason || "graph-persist")}`,
+        chatId,
+        integrity:
+          getChatMetadataIntegrity(context) ||
+          graphPersistenceState.metadataIntegrity,
+      });
       updateGraphPersistenceState({
         hostProfile: persistenceEnvironment.hostProfile,
         primaryStorageTier: persistenceEnvironment.primaryStorageTier,
         cacheStorageTier: persistenceEnvironment.cacheStorageTier,
         cacheMirrorState:
           persistenceEnvironment.cacheStorageTier !== "none" ? "queued" : "idle",
-        revision: Math.max(
-          Number(graphPersistenceState.revision || 0),
-          acceptedRevision,
-        ),
+        revision: acceptedRevision,
+        lastPersistedRevision: acceptedRevision,
         pendingPersist: false,
         persistMismatchReason: "",
-        lastAcceptedRevision: Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          acceptedRevision,
-        ),
+        lastAcceptedRevision: acceptedRevision,
         acceptedStorageTier: "luker-chat-state",
         acceptedBy: "luker-chat-state",
         lastRecoverableStorageTier: "none",
@@ -9507,6 +10912,9 @@ async function persistGraphToConfiguredDurableTier(
           persistRole: "cache-mirror",
           scheduleCloudUpload: false,
           persistDelta,
+          graphSnapshot,
+          persistSnapshot,
+          graphDetached,
         });
       }
       return buildGraphPersistResult({
@@ -9536,6 +10944,8 @@ async function persistGraphToConfiguredDurableTier(
     revision,
     reason,
     persistDelta,
+    graphSnapshot,
+    persistSnapshot,
   });
   if (indexedDbResult?.saved) {
     persistGraphCommitMarker(context, {
@@ -9564,6 +10974,7 @@ async function persistGraphToConfiguredDurableTier(
   if (canUseHostGraphChatStatePersistence(context)) {
     const chatStateResult = await persistGraphToHostChatState(context, {
       graph,
+      chatId,
       revision,
       reason: `${reason}:chat-state-fallback`,
       storageTier: "chat-state",
@@ -9572,6 +10983,8 @@ async function persistGraphToConfiguredDurableTier(
       extractionCount,
       mode: "primary",
       persistDelta,
+      chatStateTarget,
+      graphDetached,
     });
     if (chatStateResult?.saved) {
       const acceptedRevision = Number(chatStateResult.revision || revision);
@@ -9615,6 +11028,7 @@ async function persistGraphToConfiguredDurableTier(
         revision: acceptedRevision,
         reason: `${reason}:chat-state-fallback:promote-indexeddb`,
         persistDelta,
+        graphDetached,
       });
       return buildGraphPersistResult({
         saved: true,
@@ -9671,11 +11085,8 @@ function resolvePendingPersistGraphSource(chatId = "") {
     shadowSnapshot.serializedGraph
   ) {
     try {
-      const shadowGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(
-          deserializeGraph(shadowSnapshot.serializedGraph),
-          normalizedChatId,
-        ),
+      const shadowGraph = normalizeGraphRuntimeState(
+        deserializeGraph(shadowSnapshot.serializedGraph),
         normalizedChatId,
       );
       return {
@@ -9861,7 +11272,7 @@ function persistGraphToChatMetadata(
     });
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, graph);
   if (!chatId) {
     return buildGraphPersistResult({
       saved: false,
@@ -10144,6 +11555,10 @@ async function retryPendingGraphPersist({
     queuedChatId,
   );
   const pendingPersistGraph = pendingPersistGraphSource?.graph || currentGraph;
+  const pendingPersistGraphDetached =
+    Boolean(pendingPersistGraph) &&
+    typeof pendingPersistGraph === "object" &&
+    pendingPersistGraph !== currentGraph;
   const targetRevision = Math.max(
     Number(graphPersistenceState.queuedPersistRevision || 0),
     Number(graphPersistenceState.revision || 0),
@@ -10161,6 +11576,7 @@ async function retryPendingGraphPersist({
       revision: targetRevision,
       reason,
       lastProcessedAssistantFloor,
+      graphDetached: pendingPersistGraphDetached,
     },
   );
   if (acceptedPersistResult?.accepted) {
@@ -10239,13 +11655,20 @@ async function persistExtractionBatchResult({
   reason = "extraction-batch-complete",
   lastProcessedAssistantFloor = null,
   graphSnapshot = null,
+  persistSnapshot = null,
   persistDelta = null,
 } = {}) {
   ensureCurrentGraphRuntimeState();
   const context = getContext();
+  const persistGraphDetached =
+    Boolean(graphSnapshot) &&
+    typeof graphSnapshot === "object" &&
+    graphSnapshot !== currentGraph;
   const persistGraph =
     graphSnapshot && typeof graphSnapshot === "object"
-      ? cloneGraphSnapshot(graphSnapshot)
+      ? graphSnapshot === currentGraph
+        ? cloneGraphSnapshot(graphSnapshot)
+        : graphSnapshot
       : currentGraph;
   if (!context || !persistGraph) {
     return buildGraphPersistResult({
@@ -10257,8 +11680,12 @@ async function persistExtractionBatchResult({
     });
   }
 
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, persistGraph);
   if (!chatId) {
+    recordLocalPersistEarlyFailure("missing-chat-id", {
+      chatId,
+      revision: 0,
+    });
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
@@ -10278,6 +11705,9 @@ async function persistExtractionBatchResult({
       reason,
       lastProcessedAssistantFloor,
       persistDelta,
+      graphSnapshot,
+      persistSnapshot,
+      graphDetached: persistGraphDetached,
     },
   );
   if (acceptedPersistResult?.accepted) {
@@ -10399,7 +11829,7 @@ function reconcileIndexedDbProbeFailureState(
   result = {},
   { attemptIndex = 0 } = {},
 ) {
-  if (result?.loaded || result?.emptyConfirmed) {
+  if (result?.loaded || result?.emptyConfirmed || result?.repairQueued) {
     clearPendingGraphLoadRetry();
     return result;
   }
@@ -11712,10 +13142,14 @@ function loadGraphFromChat(options = {}) {
     : undefined;
   if (savedData != null && savedData !== "") {
     try {
-      const officialGraph = cloneGraphForPersistence(
-        normalizeGraphRuntimeState(deserializeGraph(savedData), chatId),
+      const hydratedOfficialGraph = normalizeGraphRuntimeState(
+        deserializeGraph(savedData),
         chatId,
       );
+      const officialGraph =
+        typeof savedData === "string"
+          ? hydratedOfficialGraph
+          : cloneGraphForPersistence(hydratedOfficialGraph, chatId);
       const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
         officialGraph,
         shadowSnapshot,
@@ -11724,20 +13158,18 @@ function loadGraphFromChat(options = {}) {
         1,
         getGraphPersistedRevision(officialGraph),
       );
+      const officialSnapshot = buildSnapshotFromGraph(officialGraph, {
+        chatId,
+        revision: officialRevision,
+      });
       const metadataCommitMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
-        buildSnapshotFromGraph(officialGraph, {
-          chatId,
-          revision: officialRevision,
-        }),
+        officialSnapshot,
         commitMarker,
       );
       const officialRuntimeStaleDecision =
         detectStaleIndexedDbSnapshotAgainstRuntime(
           chatId,
-          buildSnapshotFromGraph(officialGraph, {
-            chatId,
-            revision: officialRevision,
-          }),
+          officialSnapshot,
           {
             identity: chatIdentity,
           },
@@ -12008,10 +13440,16 @@ async function saveGraphToIndexedDb(
     persistRole = "primary",
     scheduleCloudUpload: scheduleCloudUploadOption = undefined,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || (!graph && !persistDelta)) {
+    recordLocalPersistEarlyFailure("indexeddb-missing-chat-graph-or-delta", {
+      chatId: normalizedChatId,
+      revision,
+    });
     return {
       saved: false,
       chatId: normalizedChatId,
@@ -12026,6 +13464,10 @@ async function saveGraphToIndexedDb(
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
+      recordLocalPersistEarlyFailure("indexeddb-manager-unavailable", {
+        chatId: normalizedChatId,
+        revision,
+      });
       return {
         saved: false,
         chatId: normalizedChatId,
@@ -12034,6 +13476,18 @@ async function saveGraphToIndexedDb(
       };
     }
     db = await manager.getCurrentDb(normalizedChatId);
+    if (!db) {
+      recordLocalPersistEarlyFailure("indexeddb-db-unavailable", {
+        chatId: normalizedChatId,
+        revision,
+      });
+      return {
+        saved: false,
+        chatId: normalizedChatId,
+        reason: "indexeddb-db-unavailable",
+        revision: normalizeIndexedDbRevision(revision),
+      };
+    }
     localStore = resolveDbGraphStorePresentation(db);
     const persistenceEnvironment = buildPersistenceEnvironment(context, localStore);
     const localStoreTier = resolveLocalStoreTierFromPresentation(localStore);
@@ -12051,34 +13505,67 @@ async function saveGraphToIndexedDb(
       !Array.isArray(persistDelta)
         ? cloneRuntimeDebugValue(persistDelta, persistDelta)
         : null;
+    const detachedGraphSnapshot =
+      graphSnapshot &&
+      typeof graphSnapshot === "object" &&
+      !Array.isArray(graphSnapshot)
+        ? graphSnapshot
+        : null;
+    const prebuiltPersistSnapshot =
+      persistSnapshot &&
+      typeof persistSnapshot === "object" &&
+      !Array.isArray(persistSnapshot)
+        ? persistSnapshot
+        : null;
+    const persistGraphInput = detachedGraphSnapshot || graph;
     let baseSnapshot = null;
-    let snapshot = null;
+    let snapshot = prebuiltPersistSnapshot;
     let delta = directPersistDelta;
     let persistDeltaBuildDiagnostics = null;
     let nativePersistModuleStatus = null;
     let nativePersistPreloadStatus = "not-requested";
     let nativePersistPreloadError = "";
     let nativePersistPreloadMs = 0;
+    let baseSnapshotReadMs = 0;
+    let graphSnapshotBuildMs = 0;
+    let snapshotBuildDiagnostics = null;
     const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
 
     if (!delta) {
-      baseSnapshot =
-        readCachedIndexedDbSnapshot(normalizedChatId, localStore) ||
-        (await db.exportSnapshot());
-      snapshot = buildSnapshotFromGraph(graph, {
-        chatId: normalizedChatId,
-        revision: requestedRevision,
-        baseSnapshot,
-        lastModified: Date.now(),
-        meta: {
-          storagePrimary: localStore.storagePrimary,
-          storageMode: localStore.storageMode,
-          lastMutationReason: String(reason || "graph-save"),
-          integrity:
-            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
-          hostChatId: currentIdentity.hostChatId || "",
-        },
-      });
+      const baseSnapshotReadStartedAt = readPersistDeltaDiagnosticsNow();
+      baseSnapshot = readCachedIndexedDbSnapshot(normalizedChatId, localStore);
+      if (!baseSnapshot) {
+        baseSnapshot = await db.exportSnapshot();
+      }
+      baseSnapshotReadMs =
+        readPersistDeltaDiagnosticsNow() - baseSnapshotReadStartedAt;
+      if (!snapshot) {
+        const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
+        snapshot = buildSnapshotFromGraph(persistGraphInput, {
+          chatId: normalizedChatId,
+          revision: requestedRevision,
+          baseSnapshot,
+          lastModified: Date.now(),
+          meta: {
+            storagePrimary: localStore.storagePrimary,
+            storageMode: localStore.storageMode,
+            lastMutationReason: String(reason || "graph-save"),
+            integrity:
+              currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+            hostChatId: currentIdentity.hostChatId || "",
+          },
+          onDiagnostics(snapshotValue) {
+            snapshotBuildDiagnostics =
+              snapshotValue &&
+              typeof snapshotValue === "object" &&
+              !Array.isArray(snapshotValue)
+                ? snapshotValue
+                : null;
+          },
+        });
+        graphSnapshotBuildMs =
+          readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
+      }
     }
     const nativePersistBridgeMode = String(
       currentSettings.persistNativeDeltaBridgeMode || "json",
@@ -12250,29 +13737,54 @@ async function saveGraphToIndexedDb(
       reason,
       requestedRevision,
       markSyncDirty: true,
+      committedSnapshot: snapshot,
     });
+    const commitDiagnostics =
+      commitResult?.diagnostics &&
+      typeof commitResult.diagnostics === "object" &&
+      !Array.isArray(commitResult.diagnostics)
+        ? cloneRuntimeDebugValue(commitResult.diagnostics, {})
+        : null;
+    const committedRevision = normalizeIndexedDbRevision(
+      commitResult?.revision,
+      requestedRevision,
+    );
+    const committedLastModified = Number(commitResult?.lastModified || Date.now());
 
     let scheduleUploadWarning = "";
-    if (graph) {
-      snapshot = buildSnapshotFromGraph(graph, {
-        chatId: normalizedChatId,
-        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
-        baseSnapshot: baseSnapshot || undefined,
-        lastModified: Number(commitResult?.lastModified || Date.now()),
-        meta: {
-          storagePrimary: localStore.storagePrimary,
-          storageMode: localStore.storageMode,
-          lastMutationReason: String(reason || "graph-save"),
-          integrity:
-            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
-          hostChatId: currentIdentity.hostChatId || "",
-        },
-      });
-      snapshot.meta.revision = normalizeIndexedDbRevision(
-        commitResult?.revision,
-        requestedRevision,
-      );
-      snapshot.meta.lastModified = Number(commitResult?.lastModified || Date.now());
+    if (persistGraphInput) {
+      if (!snapshot) {
+        const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
+        snapshot = buildSnapshotFromGraph(persistGraphInput, {
+          chatId: normalizedChatId,
+          revision: committedRevision,
+          baseSnapshot: baseSnapshot || undefined,
+          lastModified: committedLastModified,
+          meta: {
+            storagePrimary: localStore.storagePrimary,
+            storageMode: localStore.storageMode,
+            lastMutationReason: String(reason || "graph-save"),
+            integrity:
+              currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+            hostChatId: currentIdentity.hostChatId || "",
+          },
+          onDiagnostics(snapshotValue) {
+            snapshotBuildDiagnostics =
+              snapshotValue &&
+              typeof snapshotValue === "object" &&
+              !Array.isArray(snapshotValue)
+                ? snapshotValue
+                : null;
+          },
+        });
+        graphSnapshotBuildMs +=
+          readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
+      }
+      if (!snapshot.meta || typeof snapshot.meta !== "object" || Array.isArray(snapshot.meta)) {
+        snapshot.meta = {};
+      }
+      snapshot.meta.revision = committedRevision;
+      snapshot.meta.lastModified = committedLastModified;
       snapshot.meta.lastMutationReason = String(reason || "graph-save");
       snapshot.meta.storagePrimary = localStore.storagePrimary;
       snapshot.meta.storageMode = localStore.storageMode;
@@ -12281,7 +13793,7 @@ async function saveGraphToIndexedDb(
 
     if (graph === currentGraph) {
       stampGraphPersistenceMeta(currentGraph, {
-        revision: normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
+        revision: committedRevision,
         reason: String(reason || "graph-save"),
         chatId: normalizedChatId,
         integrity:
@@ -12309,6 +13821,14 @@ async function saveGraphToIndexedDb(
       }
     }
 
+    const persistTotalMs = readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt;
+    const persistAccountedMs =
+      Number(nativePersistPreloadMs || 0) +
+      Number(baseSnapshotReadMs || 0) +
+      Number(graphSnapshotBuildMs || 0) +
+      Number(persistDeltaBuildDiagnostics?.buildMs || 0) +
+      Number(commitDiagnostics?.queueWaitMs || 0) +
+      Number(commitDiagnostics?.commitMs || 0);
     const persistDeltaDiagnostics = {
       ...cloneRuntimeDebugValue(persistDeltaBuildDiagnostics, {}),
       chatId: normalizedChatId,
@@ -12358,13 +13878,98 @@ async function saveGraphToIndexedDb(
       moduleError: String(
         nativePersistModuleStatus?.error || nativePersistPreloadError || "",
       ),
+      baseSnapshotReadMs: normalizePersistDeltaDiagnosticsMs(baseSnapshotReadMs),
+      snapshotBuildMs: normalizePersistDeltaDiagnosticsMs(graphSnapshotBuildMs),
+      snapshotNodesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.nodesMs,
+      ),
+      snapshotEdgesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.edgesMs,
+      ),
+      snapshotTombstonesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.tombstonesMs,
+      ),
+      snapshotStateMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.stateMs,
+      ),
+      snapshotMetaMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.metaMs,
+      ),
+      snapshotNodeCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.nodeCount || 0)),
+      ),
+      snapshotEdgeCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.edgeCount || 0)),
+      ),
+      snapshotTombstoneCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.tombstoneCount || 0)),
+      ),
+      commitStorageKind: String(
+        commitDiagnostics?.storageKind || localStore.storagePrimary || "",
+      ),
+      commitStoreMode: String(
+        commitDiagnostics?.storeMode || localStore.storageMode || "",
+      ),
+      commitQueueWaitMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.queueWaitMs,
+      ),
+      commitMs: normalizePersistDeltaDiagnosticsMs(commitDiagnostics?.commitMs),
+      commitTxMs: normalizePersistDeltaDiagnosticsMs(commitDiagnostics?.txMs),
+      commitSnapshotReadMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.snapshotReadMs,
+      ),
+      commitSnapshotWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.snapshotWriteMs,
+      ),
+      commitManifestReadMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestReadMs,
+      ),
+      commitWalSerializeMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walSerializeMs,
+      ),
+      commitWalFileWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walFileWriteMs,
+      ),
+      commitWalWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walWriteMs,
+      ),
+      commitManifestSerializeMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestSerializeMs,
+      ),
+      commitManifestFileWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestFileWriteMs,
+      ),
+      commitManifestWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestWriteMs,
+      ),
+      commitCacheApplyMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.cacheApplyMs,
+      ),
+      commitPayloadBytes: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.payloadBytes || 0)),
+      ),
+      commitWalBytes: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.walBytes || 0)),
+      ),
+      commitRuntimeMetaKeyCount: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.runtimeMetaKeyCount || 0)),
+      ),
       status: "committed",
       commitRevision: normalizeIndexedDbRevision(
         commitResult?.revision,
         requestedRevision,
       ),
       commitDelta: cloneRuntimeDebugValue(commitResult?.delta, null),
-      totalMs: readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt,
+      totalMs: normalizePersistDeltaDiagnosticsMs(persistTotalMs),
+      untrackedMs: normalizePersistDeltaDiagnosticsMs(
+        Math.max(0, persistTotalMs - persistAccountedMs),
+      ),
     };
     persistDeltaDiagnostics.fallbackReason =
       persistDeltaDiagnostics.requestedNative && !persistDeltaDiagnostics.usedNative
@@ -12376,6 +13981,34 @@ async function saveGraphToIndexedDb(
               "js",
           )
         : "";
+    const persistObservability = buildPersistObservabilitySummary(
+      persistDeltaDiagnostics,
+    );
+    persistDeltaDiagnostics.pathKey = String(
+      persistObservability?.lastPathKey || "unknown",
+    );
+    persistDeltaDiagnostics.reasonKey = String(
+      persistObservability?.lastReasonKey || "graph-save",
+    );
+    persistDeltaDiagnostics.pathReasonKey = String(
+      persistObservability?.lastPathReasonKey || "unknown::graph-save",
+    );
+    persistDeltaDiagnostics.pathSampleCount = Math.max(
+      0,
+      Math.floor(
+        Number(
+          persistObservability?.byPath?.[persistDeltaDiagnostics.pathKey]?.count || 0,
+        ),
+      ),
+    );
+    persistDeltaDiagnostics.reasonSampleCount = Math.max(
+      0,
+      Math.floor(
+        Number(
+          persistObservability?.byReason?.[persistDeltaDiagnostics.reasonKey]?.count || 0,
+        ),
+      ),
+    );
 
     const opfsWriteLockState =
       typeof db?.getWriteLockSnapshot === "function"
@@ -12420,6 +14053,7 @@ async function saveGraphToIndexedDb(
         opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
         opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
         opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
+        persistObservability,
         dualWriteLastResult: {
           action: "cache-mirror",
           target: localStore.storagePrimary,
@@ -12516,6 +14150,7 @@ async function saveGraphToIndexedDb(
       opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
       opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
       opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
+      persistObservability,
       dualWriteLastResult: {
         action: "save",
         target: localStore.storagePrimary,
@@ -12534,15 +14169,26 @@ async function saveGraphToIndexedDb(
     });
     clearPendingGraphPersistRetry();
     if (
-      graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED &&
-      areChatIdsEquivalentForResolvedIdentity(
+      (graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
+        (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+          hasMeaningfulRuntimeGraphForChat(normalizedChatId, currentIdentity))) &&
+      (areChatIdsEquivalentForResolvedIdentity(
         normalizedChatId,
         graphPersistenceState.chatId || getCurrentChatId(),
-      )
+        currentIdentity,
+      ) ||
+        areChatIdsEquivalentForResolvedIdentity(
+          graphPersistenceState.chatId || getCurrentChatId(),
+          normalizedChatId,
+          currentIdentity,
+        ))
     ) {
       applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
         chatId: normalizedChatId,
-        reason: `shadow-promoted:${String(reason || "graph-save")}`,
+        reason:
+          graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED
+            ? `shadow-promoted:${String(reason || "graph-save")}`
+            : `local-store-confirmed:${String(reason || "graph-save")}`,
         revision: normalizeIndexedDbRevision(
           commitResult?.revision,
           requestedRevision,
@@ -12658,6 +14304,104 @@ async function saveGraphToIndexedDb(
   }
 }
 
+function normalizePersistObservabilityKey(value = "", fallback = "unknown") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9:_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || String(fallback || "unknown");
+}
+
+function trimPersistObservabilityBuckets(buckets = {}, maxEntries = 16) {
+  const entries = Object.values(buckets || {}).filter(
+    (entry) => entry && typeof entry === "object" && !Array.isArray(entry),
+  );
+  entries.sort((left, right) => {
+    const countDelta = Number(right?.count || 0) - Number(left?.count || 0);
+    if (countDelta !== 0) return countDelta;
+    return String(right?.lastAt || "").localeCompare(String(left?.lastAt || ""));
+  });
+  return Object.fromEntries(
+    entries.slice(0, Math.max(1, Math.floor(Number(maxEntries) || 16))).map((entry) => [
+      String(entry.key || "unknown"),
+      entry,
+    ]),
+  );
+}
+
+function buildPersistObservabilitySummary(diagnostics = null) {
+  const source =
+    diagnostics && typeof diagnostics === "object" && !Array.isArray(diagnostics)
+      ? diagnostics
+      : {};
+  const previous =
+    graphPersistenceState.persistObservability &&
+    typeof graphPersistenceState.persistObservability === "object" &&
+    !Array.isArray(graphPersistenceState.persistObservability)
+      ? cloneRuntimeDebugValue(graphPersistenceState.persistObservability, {})
+      : {};
+  const totalMs = normalizePersistDeltaDiagnosticsMs(
+    source.totalMs || source.buildMs || 0,
+  );
+  const pathKey = normalizePersistObservabilityKey(
+    source.path || source.requestedBridgeMode || "unknown",
+    "unknown",
+  );
+  const reasonKey = normalizePersistObservabilityKey(
+    source.saveReason || "graph-save",
+    "graph-save",
+  );
+  const pathReasonKey = `${pathKey}::${reasonKey}`;
+  const recordedAt = new Date().toISOString();
+  const recordBucket = (buckets = {}, key = "unknown") => {
+    const current =
+      buckets[key] && typeof buckets[key] === "object" && !Array.isArray(buckets[key])
+        ? buckets[key]
+        : null;
+    const count = Math.max(0, Math.floor(Number(current?.count || 0))) + 1;
+    const totalBucketMs = normalizePersistDeltaDiagnosticsMs(
+      Number(current?.totalMs || 0) + totalMs,
+    );
+    buckets[key] = {
+      key,
+      count,
+      totalMs: totalBucketMs,
+      avgMs: normalizePersistDeltaDiagnosticsMs(totalBucketMs / count),
+      maxMs: normalizePersistDeltaDiagnosticsMs(
+        Math.max(Number(current?.maxMs || 0), totalMs),
+      ),
+      lastMs: totalMs,
+      lastAt: recordedAt,
+    };
+    return buckets;
+  };
+  const nextByPath = recordBucket(
+    cloneRuntimeDebugValue(previous.byPath || {}, {}),
+    pathKey,
+  );
+  const nextByReason = recordBucket(
+    cloneRuntimeDebugValue(previous.byReason || {}, {}),
+    reasonKey,
+  );
+  const nextByPathReason = recordBucket(
+    cloneRuntimeDebugValue(previous.byPathReason || {}, {}),
+    pathReasonKey,
+  );
+  return {
+    totalSamples: Math.max(0, Math.floor(Number(previous.totalSamples || 0))) + 1,
+    byPath: trimPersistObservabilityBuckets(nextByPath, 12),
+    byReason: trimPersistObservabilityBuckets(nextByReason, 16),
+    byPathReason: trimPersistObservabilityBuckets(nextByPathReason, 24),
+    lastPathKey: pathKey,
+    lastReasonKey: reasonKey,
+    lastPathReasonKey: pathReasonKey,
+    lastRecordedAt: recordedAt,
+  };
+}
+
 function queueGraphPersistToIndexedDb(
   chatId,
   graph,
@@ -12667,6 +14411,9 @@ function queueGraphPersistToIndexedDb(
     persistRole = "primary",
     scheduleCloudUpload = undefined,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
+    graphDetached = false,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
@@ -12714,15 +14461,21 @@ function queueGraphPersistToIndexedDb(
           revision: normalizedRevision,
         };
       }
-      const graphSnapshot = graph
-        ? cloneGraphForPersistence(graph, normalizedChatId)
-        : null;
-      return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
+      const persistGraphSnapshot = graphSnapshot
+        ? graphSnapshot
+        : graph
+          ? graphDetached === true
+            ? normalizeGraphRuntimeState(graph, normalizedChatId)
+            : cloneGraphForPersistence(graph, normalizedChatId)
+          : null;
+      return await saveGraphToIndexedDb(normalizedChatId, persistGraphSnapshot, {
         revision: normalizedRevision,
         reason,
         persistRole,
         scheduleCloudUpload,
         persistDelta,
+        graphSnapshot: persistGraphSnapshot,
+        persistSnapshot,
       });
     })
     .finally(() => {
@@ -12746,7 +14499,7 @@ function saveGraphToChat(options = {}) {
       reason: "missing-context-or-graph",
     });
   }
-  const chatId = getCurrentChatId(context);
+  const chatId = resolvePersistenceChatId(context, currentGraph);
   const {
     reason = "graph-save",
     markMutation = true,
@@ -12758,6 +14511,10 @@ function saveGraphToChat(options = {}) {
   ensureCurrentGraphRuntimeState();
   currentGraph.historyState.extractionCount = extractionCount;
   if (!chatId) {
+    recordLocalPersistEarlyFailure("missing-chat-id", {
+      chatId,
+      revision: 0,
+    });
     return buildGraphPersistResult({
       saved: false,
       blocked: true,
@@ -12778,7 +14535,8 @@ function saveGraphToChat(options = {}) {
   }
 
   const shouldQueueIndexedDbPersist =
-    markMutation || !isGraphEffectivelyEmpty(currentGraph);
+    persistenceEnvironment.hostProfile !== "luker" &&
+    (markMutation || !isGraphEffectivelyEmpty(currentGraph));
   if (shouldQueueIndexedDbPersist) {
     queueGraphPersistToIndexedDb(chatId, currentGraph, {
       revision,
@@ -12808,6 +14566,7 @@ function saveGraphToChat(options = {}) {
 
   if (persistenceEnvironment.hostProfile === "luker") {
     const persistGraph = cloneGraphForPersistence(currentGraph, chatId);
+    const chatStateTarget = resolveCurrentChatStateTarget(context);
     const lastProcessedAssistantFloor = Number.isFinite(
       Number(persistGraph?.historyState?.lastProcessedAssistantFloor),
     )
@@ -12822,6 +14581,8 @@ function saveGraphToChat(options = {}) {
           revision,
           reason,
           lastProcessedAssistantFloor,
+          chatStateTarget,
+          graphDetached: true,
         },
       );
       if (!persistResult?.accepted) {
@@ -14847,6 +16608,7 @@ async function executeExtractionBatch({
       getEmbeddingConfig,
       getExtractionCount: () => extractionCount,
       getLastProcessedAssistantFloor,
+      getSettings,
       getSchema,
       handleExtractionSuccess,
       persistExtractionBatchResult,
@@ -15034,14 +16796,30 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       isBackendVectorConfig(config) &&
       recoveryPlan.backendDeleteHashes.length > 0
     ) {
+      setRuntimeStatus(
+        "重新提取准备中",
+        `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+        "running",
+      );
       assertRecoveryChatStillActive(chatId, "reroll-pre-vector");
-      await deleteBackendVectorHashesForRecovery(
+      await tryDeleteBackendVectorHashesForRecovery(
         currentGraph.vectorIndexState.collectionId,
         config,
         recoveryPlan.backendDeleteHashes,
+        undefined,
+        {
+          source: "reroll",
+        },
       );
     }
 
+    if (isBackendVectorConfig(config)) {
+      setRuntimeStatus(
+        "重新提取准备中",
+        "正在准备向量回放状态",
+        "running",
+      );
+    }
     assertRecoveryChatStillActive(chatId, "reroll-pre-prepare");
     await prepareVectorStateForReplay(false, undefined, {
       skipBackendPurge: isBackendVectorConfig(config),
@@ -15130,6 +16908,106 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
   };
 }
 
+const VECTOR_RECOVERY_PREP_TIMEOUT_MS = 15000;
+
+async function tryDeleteBackendVectorHashesForRecovery(
+  collectionId,
+  config,
+  hashes,
+  signal = undefined,
+  { source = "recovery" } = {},
+) {
+  if (
+    !collectionId ||
+    !isBackendVectorConfig(config) ||
+    !Array.isArray(hashes) ||
+    hashes.length === 0
+  ) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "no-backend-hashes",
+    };
+  }
+
+  const canAbortWithTimeout =
+    typeof AbortController !== "undefined" &&
+    typeof DOMException !== "undefined";
+  const controller = canAbortWithTimeout ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(
+        () =>
+          controller.abort(
+            new DOMException(
+              `向量恢复准备超时 (${Math.round(VECTOR_RECOVERY_PREP_TIMEOUT_MS / 1000)}s)`,
+              "AbortError",
+            ),
+          ),
+        VECTOR_RECOVERY_PREP_TIMEOUT_MS,
+      )
+    : null;
+  let combinedSignal = controller?.signal;
+  if (signal && controller) {
+    if (
+      typeof AbortSignal !== "undefined" &&
+      typeof AbortSignal.any === "function"
+    ) {
+      combinedSignal = AbortSignal.any([signal, controller.signal]);
+    } else {
+      combinedSignal = controller.signal;
+      signal.addEventListener(
+        "abort",
+        () => controller.abort(signal.reason),
+        { once: true },
+      );
+    }
+  } else if (signal) {
+    combinedSignal = signal;
+  }
+
+  try {
+    await deleteBackendVectorHashesForRecovery(
+      collectionId,
+      config,
+      hashes,
+      combinedSignal,
+    );
+    return {
+      ok: true,
+      skipped: false,
+      reason: "",
+    };
+  } catch (error) {
+    if (isAbortError(error) && signal?.aborted) {
+      throw error;
+    }
+    console.warn("[ST-BME] 向量恢复预清理失败，已降级为后续修复:", {
+      source,
+      collectionId,
+      hashCount: hashes.length,
+      error,
+    });
+    if (currentGraph?.vectorIndexState) {
+      currentGraph.vectorIndexState.dirty = true;
+      currentGraph.vectorIndexState.dirtyReason =
+        currentGraph.vectorIndexState.dirtyReason ||
+        "history-recovery-replay";
+      currentGraph.vectorIndexState.lastWarning =
+        "向量恢复预清理失败，已跳过并标记为后续修复";
+    }
+    return {
+      ok: false,
+      skipped: false,
+      reason: error?.message || String(error),
+      error,
+    };
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
 async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   if (!currentGraph || isRecoveringHistory) {
     return !isRecoveringHistory;
@@ -15209,12 +17087,37 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
         isBackendVectorConfig(config) &&
         recoveryPlan.backendDeleteHashes.length > 0
       ) {
+        updateStageNotice(
+          "history",
+          "历史恢复中",
+          `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+          "running",
+          {
+            persist: true,
+            busy: true,
+          },
+        );
         assertRecoveryChatStillActive(chatId, "pre-backend-delete");
-        await deleteBackendVectorHashesForRecovery(
+        await tryDeleteBackendVectorHashesForRecovery(
           currentGraph.vectorIndexState.collectionId,
           config,
           recoveryPlan.backendDeleteHashes,
           historySignal,
+          {
+            source: "history-recovery",
+          },
+        );
+      }
+      if (isBackendVectorConfig(config)) {
+        updateStageNotice(
+          "history",
+          "历史恢复中",
+          "正在准备向量回放状态",
+          "running",
+          {
+            persist: true,
+            busy: true,
+          },
         );
       }
       await prepareVectorStateForReplay(false, historySignal, {
@@ -15515,7 +17418,7 @@ async function runExtraction() {
 }
 
 function applyRecallInjection(settings, recallInput, recentMessages, result) {
-  return applyRecallInjectionController(
+  const injectionResult = applyRecallInjectionController(
     settings,
     recallInput,
     recentMessages,
@@ -15545,6 +17448,20 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       updateLastRecalledItems,
     },
   );
+  if (
+    isLukerPrimaryPersistenceHost(getContext()) &&
+    String(injectionResult?.injectionText || "").trim()
+  ) {
+    updateLukerProjectionState({
+      runtime: {
+        status: "pending",
+        updatedAt: Date.now(),
+        reason:
+          String(recallInput?.hookName || "").trim() || "recall-injection",
+      },
+    });
+  }
+  return injectionResult;
 }
 
 function buildRecallRetrieveOptions(settings, context) {
@@ -15823,6 +17740,12 @@ async function runRecall(options = {}) {
 function onChatChanged() {
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = 0;
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   if (typeof clearMessageHideState === "function") {
     clearMessageHideState("chat-changed");
   }
@@ -15879,6 +17802,12 @@ function onChatChanged() {
 }
 
 function onChatLoaded() {
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   const result = onChatLoadedController({
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     syncGraphLoadFromLiveContext,
@@ -15978,6 +17907,18 @@ function onMessageEdited(messageId, meta = null) {
   return result;
 }
 
+function onMessageUpdated(messageId, meta = null) {
+  const result = onMessageUpdatedController(
+    {
+      recordIgnoredMutationEvent,
+      refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
+    },
+    messageId,
+    meta,
+  );
+  return result;
+}
+
 async function onMessageSwiped(messageId, meta = null) {
   const result = await onMessageSwipedController(
     {
@@ -15993,6 +17934,99 @@ async function onMessageSwiped(messageId, meta = null) {
     scheduleMessageHideApply("message-swiped", 80);
   }
   return result;
+}
+
+function onGenerationContextReady(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_CONTEXT_READY", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  updateLukerProjectionState({
+    runtime: {
+      ...(graphPersistenceState.projectionState?.runtime || {}),
+      status: "context-ready",
+      updatedAt: Date.now(),
+      reason: "generation-context-ready",
+    },
+  });
+  return {
+    phase: "GENERATION_CONTEXT_READY",
+    lightweightHostMode,
+  };
+}
+
+function onGenerationBeforeWorldInfoScan(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_BEFORE_WORLD_INFO_SCAN", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  return {
+    phase: "GENERATION_BEFORE_WORLD_INFO_SCAN",
+    lightweightHostMode,
+  };
+}
+
+function onGenerationAfterWorldInfoScan(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_AFTER_WORLD_INFO_SCAN", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  if (String(graphPersistenceState.projectionState?.runtime?.status || "") === "pending") {
+    payload.__stBmeProjectionRequestedRescan = true;
+  }
+  return {
+    phase: "GENERATION_AFTER_WORLD_INFO_SCAN",
+    requestRescan: payload?.__stBmeProjectionRequestedRescan === true,
+  };
+}
+
+function onGenerationWorldInfoFinalized(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_WORLD_INFO_FINALIZED", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+
+  if (
+    isLukerPrimaryPersistenceHost(getContext()) &&
+    graphPersistenceState.projectionState?.runtime?.status === "pending"
+  ) {
+    payload.requestRescan = true;
+    const reason =
+      graphPersistenceState.projectionState?.runtime?.reason ||
+      "runtime-projection-pending";
+    updateGraphPersistenceState({
+      lastRequestRescanReason: String(reason || ""),
+    });
+    updateLukerProjectionState({
+      runtime: {
+        ...(graphPersistenceState.projectionState?.runtime || {}),
+        status: "rescan-requested",
+        updatedAt: Date.now(),
+        reason,
+      },
+    });
+  }
+
+  return {
+    phase: "GENERATION_WORLD_INFO_FINALIZED",
+    requestRescan: payload?.requestRescan === true,
+  };
+}
+
+function onGenerationBeforeApiRequest(payload = {}) {
+  const { target, lightweightHostMode } = syncBmeHostRuntimeFlags(getContext());
+  recordLukerHookPhase("GENERATION_BEFORE_API_REQUEST", {
+    chatStateTarget: target,
+    lightweightHostMode,
+  });
+  return {
+    phase: "GENERATION_BEFORE_API_REQUEST",
+    lightweightHostMode,
+  };
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
@@ -16032,6 +18066,16 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
 function onGenerationEnded(_chatLength = null) {
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = Date.now();
+  if (isLukerPrimaryPersistenceHost(getContext())) {
+    updateLukerProjectionState({
+      runtime: {
+        ...(graphPersistenceState.projectionState?.runtime || {}),
+        status: "idle",
+        updatedAt: Date.now(),
+        reason: "generation-ended",
+      },
+    });
+  }
   const recentTransaction = findRecentGenerationRecallTransactionForChat();
   const recentRecallResult =
     getGenerationRecallTransactionResult(recentTransaction);
@@ -16352,6 +18396,89 @@ function onClearPanelKnowledgeOverride(payload = {}) {
   };
 }
 
+function onRenamePanelKnowledgeOwner(payload = {}) {
+  const ownerKey = String(payload.ownerKey || "").trim();
+  const nextName = String(payload.nextName || "").trim();
+  if (!currentGraph || !ownerKey || !nextName) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知重命名", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = renameKnowledgeOwner(currentGraph, ownerKey, nextName);
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "rename-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-knowledge-owner-rename" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    previousOwnerKey: result.previousOwnerKey || ownerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onMergePanelKnowledgeOwners(payload = {}) {
+  const sourceOwnerKey = String(payload.sourceOwnerKey || payload.ownerKey || "").trim();
+  const targetOwnerKey = String(payload.targetOwnerKey || "").trim();
+  if (!currentGraph || !sourceOwnerKey || !targetOwnerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知合并", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = mergeKnowledgeOwners(currentGraph, {
+    sourceOwnerKey,
+    targetOwnerKey,
+  });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "merge-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({ reason: "panel-knowledge-owner-merge" });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || targetOwnerKey,
+    sourceOwnerKey: result.sourceOwnerKey || sourceOwnerKey,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
+function onDeletePanelKnowledgeOwner(payload = {}) {
+  const ownerKey = String(payload.ownerKey || "").trim();
+  const mode = String(payload.mode || "owner-only").trim() || "owner-only";
+  if (!currentGraph || !ownerKey) {
+    return { ok: false, error: "invalid-payload" };
+  }
+  if (!ensureGraphMutationReady("角色认知删除", { notify: false })) {
+    return { ok: false, error: "graph-write-blocked" };
+  }
+
+  const result = deleteKnowledgeOwner(currentGraph, ownerKey, { mode });
+  if (!result?.ok) {
+    return { ok: false, error: result?.reason || "delete-owner-failed" };
+  }
+
+  const persist = saveGraphToChat({
+    reason: `panel-knowledge-owner-delete-${result.mode || mode}`,
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    ownerKey: result.ownerKey || ownerKey,
+    mode: result.mode || mode,
+    persist,
+    persistBlocked: Boolean(persist?.blocked),
+  };
+}
+
 function onSetPanelActiveRegion(payload = {}) {
   const region = String(payload.region || "").trim();
   if (!currentGraph) {
@@ -16645,6 +18772,7 @@ async function onReroll({ fromFloor } = {}) {
       onManualExtract,
       refreshPanelLiveState,
       rollbackGraphForReroll,
+      setLastExtractionStatus,
       setRuntimeStatus,
       toastr,
     },
@@ -16857,6 +18985,7 @@ const _cleanupRuntime = () => ({
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
   }),
   getGraphPersistenceState: () => graphPersistenceState,
+  getSettings,
   toastr,
 });
 
@@ -17165,6 +19294,7 @@ async function onProbeGraphLoad() {
 
 async function onRebuildLocalCacheFromLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需从主 sidecar 重建本地缓存");
     return { handledToast: true, reason: "not-luker" };
@@ -17178,6 +19308,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
   const loadResult = await loadGraphFromLukerSidecarV2(chatId, {
     source: "panel-manual-luker-cache-rebuild",
     allowOverride: true,
+    chatStateTarget,
   });
   if (!loadResult?.loaded || !currentGraph) {
     toastr.warning(
@@ -17195,6 +19326,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
     reason: "panel-manual-luker-cache-rebuild",
     persistRole: "cache-mirror",
     scheduleCloudUpload: false,
+    graphDetached: true,
   });
   refreshPanelLiveState();
   toastr.success("已开始从 Luker 主 sidecar 重建本地缓存");
@@ -17203,6 +19335,7 @@ async function onRebuildLocalCacheFromLukerSidecar() {
 
 async function onRepairLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需修复主 sidecar");
     return { handledToast: true, reason: "not-luker" };
@@ -17218,6 +19351,7 @@ async function onRepairLukerSidecar() {
     !(await loadGraphFromLukerSidecarV2(chatId, {
       source: "panel-manual-luker-sidecar-repair",
       allowOverride: true,
+      chatStateTarget,
     }))?.loaded
   ) {
     toastr.warning("当前无法从 Luker 主 sidecar 恢复运行时图谱，暂时不能修复");
@@ -17235,6 +19369,7 @@ async function onRepairLukerSidecar() {
     reason: "panel-manual-luker-sidecar-repair",
     integrity:
       getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+    chatStateTarget,
   });
   refreshPanelLiveState();
   if (result?.ok) {
@@ -17248,6 +19383,7 @@ async function onRepairLukerSidecar() {
 
 async function onCompactLukerSidecar() {
   const context = getContext();
+  const chatStateTarget = resolveCurrentChatStateTarget(context);
   if (!isLukerPrimaryPersistenceHost(context)) {
     toastr.info("当前宿主不是 Luker，无需压实主 sidecar");
     return { handledToast: true, reason: "not-luker" };
@@ -17269,6 +19405,7 @@ async function onCompactLukerSidecar() {
     reason: "panel-manual-luker-sidecar-compact",
     integrity:
       getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+    chatStateTarget,
   });
   refreshPanelLiveState();
   if (result?.ok) {
@@ -17281,6 +19418,12 @@ async function onCompactLukerSidecar() {
 
 (async function init() {
   await loadServerSettings();
+  const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
+  updateGraphPersistenceState({
+    hostProfile: adapter.hostProfile,
+    chatStateTarget: cloneRuntimeDebugValue(target, null),
+    lightweightHostMode,
+  });
   syncGraphPersistenceDebugState();
 
   await initializePanelBridgeController({
@@ -17329,6 +19472,9 @@ async function onCompactLukerSidecar() {
       deleteGraphNode: onDeletePanelGraphNode,
       applyKnowledgeOverride: onApplyPanelKnowledgeOverride,
       clearKnowledgeOverride: onClearPanelKnowledgeOverride,
+      renameKnowledgeOwner: onRenamePanelKnowledgeOwner,
+      mergeKnowledgeOwners: onMergePanelKnowledgeOwners,
+      deleteKnowledgeOwner: onDeletePanelKnowledgeOwner,
       setActiveRegion: onSetPanelActiveRegion,
       setActiveStoryTime: onSetPanelActiveStoryTime,
       clearActiveStoryTime: onClearPanelActiveStoryTime,
@@ -17397,13 +19543,20 @@ async function onCompactLukerSidecar() {
       handlers: {
         onBeforeCombinePrompts,
         onCharacterMessageRendered,
+        onChatBranchCreated,
         onChatChanged,
         onChatLoaded,
+        onGenerationBeforeApiRequest,
+        onGenerationBeforeWorldInfoScan,
         onGenerationAfterCommands,
+        onGenerationAfterWorldInfoScan,
+        onGenerationContextReady,
         onGenerationEnded,
         onGenerationStarted,
+        onGenerationWorldInfoFinalized,
         onMessageDeleted,
         onMessageEdited,
+        onMessageUpdated,
         onMessageReceived,
         onMessageSent,
         onMessageSwiped,

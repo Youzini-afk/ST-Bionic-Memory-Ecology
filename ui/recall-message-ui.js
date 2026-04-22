@@ -81,7 +81,9 @@ function formatTokenHint(tokenEstimate) {
 
 function formatMetaLine(record) {
   const parts = [];
-  if (record.recallSource) parts.push(`来源: ${record.recallSource}`);
+  if (record.recallSource && !buildRecallSourceLabel(record)) {
+    parts.push(`来源: ${record.recallSource}`);
+  }
   if (record.authoritativeInputUsed) parts.push("权威输入");
   if (record.tokenEstimate > 0) parts.push(`~${record.tokenEstimate} tokens`);
   if (Number.isFinite(record.generationCount) && record.generationCount > 0) {
@@ -172,6 +174,109 @@ function summarizeSubGraphForSignature(subGraph) {
   return { nodes, edges };
 }
 
+function isPlannerRecallSource(record = {}) {
+  const recallSource = String(record?.recallSource || "").trim().toLowerCase();
+  const hookName = String(record?.hookName || "").trim().toLowerCase();
+  return recallSource.startsWith("planner") || hookName.includes("planner") || hookName.includes("ena");
+}
+
+function buildRecallSourceLabel(record = {}) {
+  if (isPlannerRecallSource(record)) return "ENA Planner";
+  return "";
+}
+
+function classifyInjectionLine(line = "") {
+  const text = String(line || "");
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "blank", text };
+  if (/^\[[^\]]+\]$/.test(trimmed)) return { kind: "section", text: trimmed };
+  if (/^#{2,6}\s+/.test(trimmed)) {
+    return { kind: "subsection", text: trimmed.replace(/^#{2,6}\s+/, "") };
+  }
+  if (/^\|.*\|$/.test(trimmed)) return { kind: "table", text };
+  return { kind: "line", text };
+}
+
+function appendInjectionPreviewContent(container, injectionText = "") {
+  const lines = String(injectionText || "").replace(/\r\n/g, "\n").split("\n");
+  let tableBuffer = [];
+
+  const flushTable = () => {
+    if (tableBuffer.length === 0) return;
+    const pre = el("pre", "bme-recall-injection-table", tableBuffer.join("\n"));
+    container.appendChild(pre);
+    tableBuffer = [];
+  };
+
+  for (const rawLine of lines) {
+    const classified = classifyInjectionLine(rawLine);
+    if (classified.kind === "table") {
+      tableBuffer.push(classified.text);
+      continue;
+    }
+
+    flushTable();
+
+    if (classified.kind === "blank") {
+      container.appendChild(el("div", "bme-recall-injection-spacer"));
+      continue;
+    }
+    if (classified.kind === "section") {
+      container.appendChild(
+        el("div", "bme-recall-injection-section-title", classified.text),
+      );
+      continue;
+    }
+    if (classified.kind === "subsection") {
+      container.appendChild(
+        el("div", "bme-recall-injection-subsection", classified.text),
+      );
+      continue;
+    }
+    container.appendChild(el("div", "bme-recall-injection-line", classified.text));
+  }
+
+  flushTable();
+}
+
+function buildInjectionPreviewBlock(record = {}) {
+  const injectionText = String(record?.injectionText || "").trim();
+  if (!injectionText) return null;
+
+  const isEna = isPlannerRecallSource(record);
+  const wrap = el(
+    "div",
+    `bme-recall-injection-preview${isEna ? " is-ena" : ""}`,
+  );
+  const header = el("button", "bme-recall-injection-toggle");
+  header.type = "button";
+  const defaultExpanded = isEna;
+  header.setAttribute("aria-expanded", defaultExpanded ? "true" : "false");
+  header.innerHTML = `
+    <span class="bme-recall-injection-toggle-label">${isEna ? "ENA 注入预览" : "注入预览"}</span>
+    <span class="bme-recall-injection-toggle-arrow">▶</span>
+  `;
+  wrap.appendChild(header);
+
+  const content = el("div", "bme-recall-injection-content");
+  if (isEna) {
+    content.appendChild(
+      el("div", "bme-recall-injection-note", "由 Ena Planner 触发的本轮记忆块"),
+    );
+  }
+  appendInjectionPreviewContent(content, injectionText);
+  wrap.appendChild(content);
+  wrap.classList.toggle("expanded", defaultExpanded);
+
+  header.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const expanded = wrap.classList.toggle("expanded");
+    header.setAttribute("aria-expanded", expanded ? "true" : "false");
+  });
+
+  return wrap;
+}
+
 function buildExpandedRenderSignature({
   record,
   userMessageText,
@@ -231,14 +336,38 @@ export function createRecallCardElement({
     userInputDisplayMode,
   );
   let expandedRenderSignature = "";
+  let isEditingUserInput = false;
 
   // -- 用户消息区 --
   const userLabel = el("div", "bme-recall-user-label");
-  userLabel.innerHTML = "💬 <span>本轮用户输入</span>";
+  const userLabelText = el("div", "bme-recall-user-label-text");
+  userLabelText.innerHTML = "💬 <span>本轮用户输入</span>";
+  userLabel.appendChild(userLabelText);
+
+  const userLabelActions = el("div", "bme-recall-user-label-actions");
+  const editUserInputBtn = el("button", "bme-recall-user-edit-btn");
+  editUserInputBtn.type = "button";
+  editUserInputBtn.innerHTML = '<span class="bme-recall-btn-icon">✏️</span><span>编辑</span>';
+  userLabelActions.appendChild(editUserInputBtn);
+  userLabel.appendChild(userLabelActions);
   card.appendChild(userLabel);
 
   const userText = el("div", "bme-recall-user-text", activeUserMessageText || "(empty)");
   card.appendChild(userText);
+
+  const userEditWrap = el("div", "bme-recall-user-edit-wrap");
+  const userEditTextarea = document.createElement("textarea");
+  userEditTextarea.className = "bme-recall-user-edit-textarea";
+  userEditWrap.appendChild(userEditTextarea);
+  const userEditActions = el("div", "bme-recall-user-edit-actions");
+  const userEditSaveBtn = el("button", "bme-recall-user-edit-action primary", "保存");
+  userEditSaveBtn.type = "button";
+  const userEditCancelBtn = el("button", "bme-recall-user-edit-action secondary", "取消");
+  userEditCancelBtn.type = "button";
+  userEditActions.appendChild(userEditSaveBtn);
+  userEditActions.appendChild(userEditCancelBtn);
+  userEditWrap.appendChild(userEditActions);
+  card.appendChild(userEditWrap);
 
   // -- 召回条 --
   const initialNodeCount = Array.isArray(activeRecord?.selectedNodeIds)
@@ -278,6 +407,22 @@ export function createRecallCardElement({
 
   // renderer 实例管理
   let renderer = null;
+
+  function setUserInputEditMode(editing = false) {
+    isEditingUserInput = Boolean(editing);
+    card.classList.toggle("bme-recall-user-input-editing", isEditingUserInput);
+    userText.hidden = isEditingUserInput;
+    userEditWrap.hidden = !isEditingUserInput;
+    editUserInputBtn.disabled = isEditingUserInput;
+    if (!isEditingUserInput) return;
+
+    userEditTextarea.value = activeUserMessageText || "";
+    const lineCount = Math.max(3, String(activeUserMessageText || "").split(/\n/).length);
+    if (userEditTextarea.style && typeof userEditTextarea.style === "object") {
+      userEditTextarea.style.minHeight = `${Math.min(12, lineCount) * 22}px`;
+    }
+    userEditTextarea.focus?.();
+  }
 
   function destroyRenderer() {
     if (renderer) {
@@ -332,12 +477,33 @@ export function createRecallCardElement({
     }
 
     // 元信息行
-    const meta = el("div", "bme-recall-meta", formatMetaLine(activeRecord || {}));
+    const meta = el("div", "bme-recall-meta");
+    const sourceLabel = buildRecallSourceLabel(activeRecord || {});
+    const metaText = formatMetaLine(activeRecord || {});
+    if (typeof HTMLElement === "undefined" || !(meta instanceof HTMLElement)) {
+      meta.textContent = metaText;
+    }
+    if (sourceLabel) {
+      const sourceTag = el(
+        "span",
+        `bme-recall-meta-tag${isPlannerRecallSource(activeRecord) ? " is-ena" : ""}`,
+        isPlannerRecallSource(activeRecord) ? `🧭 ${sourceLabel}` : sourceLabel,
+      );
+      meta.appendChild(sourceTag);
+    }
+    if (metaText) {
+      meta.appendChild(el("span", "bme-recall-meta-text", metaText));
+    }
     if (activeRecord?.manuallyEdited) {
       const tag = el("span", "bme-recall-meta-tag", "✍ 手动编辑");
       meta.appendChild(tag);
     }
     body.appendChild(meta);
+
+    const injectionPreviewBlock = buildInjectionPreviewBlock(activeRecord || {});
+    if (injectionPreviewBlock) {
+      body.appendChild(injectionPreviewBlock);
+    }
 
     // 操作按钮行
     const actions = el("div", "bme-recall-actions");
@@ -413,6 +579,9 @@ export function createRecallCardElement({
       activeUserInputDisplayMode === "off",
     );
     userText.textContent = activeUserMessageText || "(empty)";
+    if (isEditingUserInput) {
+      userEditTextarea.value = activeUserMessageText || "";
+    }
 
     const nodeCount = Array.isArray(activeRecord?.selectedNodeIds)
       ? activeRecord.selectedNodeIds.length
@@ -439,6 +608,31 @@ export function createRecallCardElement({
 
   card._bmeUpdateRecallCard = applyCardRuntimeData;
 
+  editUserInputBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setUserInputEditMode(true);
+  });
+
+  userEditCancelBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setUserInputEditMode(false);
+  });
+
+  userEditSaveBtn.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const result = await activeCallbacks.onEditUserInput?.(
+      messageIndex,
+      userEditTextarea.value,
+    );
+    if (result?.ok) {
+      if (Object.prototype.hasOwnProperty.call(result, "nextText")) {
+        activeUserMessageText = String(result.nextText || "");
+        userText.textContent = activeUserMessageText || "(empty)";
+      }
+      setUserInputEditMode(false);
+    }
+  });
+
   // 点击召回条 toggle 展开/折叠
   bar.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -455,6 +649,7 @@ export function createRecallCardElement({
   });
 
   applyCardRuntimeData({}, { skipExpandedRerender: true });
+  setUserInputEditMode(false);
 
   // 暴露清理方法
   card._bmeDestroyRenderer = () => {

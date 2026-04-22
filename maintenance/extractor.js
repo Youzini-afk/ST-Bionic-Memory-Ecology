@@ -1152,7 +1152,7 @@ export async function extractMemories({
   }
 
   // 调用 LLM
-  const result = await callLLMForJSON({
+  const llmResult = await callLLMForJSON({
     systemPrompt: llmSystemPrompt,
     userPrompt: promptPayload.userPrompt,
     maxRetries: 2,
@@ -1166,8 +1166,18 @@ export async function extractMemories({
     promptMessages: promptPayload.promptMessages,
     additionalMessages: promptPayloadAdditionalMessages,
     onStreamProgress,
+    returnFailureDetails: true,
   });
   throwIfAborted(signal);
+  const llmFailure =
+    llmResult && typeof llmResult === "object" && "ok" in llmResult
+      ? llmResult
+      : null;
+  const result = llmFailure
+    ? llmFailure.ok
+      ? llmFailure.data
+      : null
+    : llmResult;
   const normalizedResult = normalizeExtractionResultPayload(result, schema);
   const ownershipWarnings = [];
   const extractionOwnerContext = deriveExtractionOwnerContext(
@@ -1199,11 +1209,23 @@ export async function extractMemories({
       `[ST-BME] 提取 LLM 未返回有效操作 ` +
         `[type=${diagType}]` +
         (diagKeys ? ` [keys=${diagKeys}]` : "") +
-        (diagPreview ? ` [preview=${diagPreview}]` : ""),
+        (diagPreview ? ` [preview=${diagPreview}]` : "") +
+        (llmFailure?.ok === false && llmFailure?.errorType
+          ? ` [failureType=${String(llmFailure.errorType)}]`
+          : "") +
+        (llmFailure?.ok === false && llmFailure?.failureReason
+          ? ` [failureReason=${String(llmFailure.failureReason).slice(0, 200)}]`
+          : ""),
     );
+    const failureReason =
+      llmFailure?.ok === false
+        ? String(llmFailure.failureReason || "").trim()
+        : "";
     return {
       success: false,
-      error: "提取 LLM 未返回有效操作",
+      error: failureReason
+        ? `提取 LLM 未返回有效操作: ${failureReason}`
+        : "提取 LLM 未返回有效操作",
       newNodes: 0,
       updatedNodes: 0,
       newEdges: 0,
@@ -1217,6 +1239,8 @@ export async function extractMemories({
   const newNodeIds = []; // v2: 收集新建节点 ID（用于进化引擎）
   const updatedNodeIds = [];
   const refMap = new Map();
+  const pendingLinkJobs = [];
+  const suppressedDefaultPairKeys = new Set();
   const operationErrors = [];
   const normalizedBatchStoryTime = normalizedResult?.batchStoryTime || null;
 
@@ -1224,7 +1248,7 @@ export async function extractMemories({
     try {
       switch (op.action) {
         case "create": {
-          const createdId = handleCreate(
+          const createResult = handleCreate(
             graph,
             op,
             currentSeq,
@@ -1236,7 +1260,15 @@ export async function extractMemories({
             ownershipWarnings,
             normalizedBatchStoryTime,
           );
-          if (createdId) newNodeIds.push(createdId);
+          if (createResult?.nodeId) {
+            queueOperationLinks(pendingLinkJobs, createResult.nodeId, op.links);
+          }
+          if (createResult?.created === true && createResult.nodeId) {
+            newNodeIds.push(createResult.nodeId);
+          }
+          if (createResult?.updated === true && createResult.nodeId) {
+            updatedNodeIds.push(createResult.nodeId);
+          }
           break;
         }
         case "update":
@@ -1251,7 +1283,10 @@ export async function extractMemories({
               ownershipWarnings,
               normalizedBatchStoryTime,
             );
-            if (updatedNodeId) updatedNodeIds.push(updatedNodeId);
+            if (updatedNodeId) {
+              updatedNodeIds.push(updatedNodeId);
+              queueOperationLinks(pendingLinkJobs, updatedNodeId, op.links);
+            }
           }
           break;
         case "delete":
@@ -1282,6 +1317,19 @@ export async function extractMemories({
       processedRange: [effectiveStartSeq, effectiveEndSeq],
     };
   }
+
+  applyPendingLinks(graph, pendingLinkJobs, refMap, stats, {
+    suppressedDefaultPairKeys,
+  });
+  applyDefaultBatchEdges(
+    graph,
+    [...new Set([...newNodeIds, ...updatedNodeIds])],
+    stats,
+    settings,
+    {
+      suppressedDefaultPairKeys,
+    },
+  );
 
   // 为新建节点生成 embedding。失败不应回滚整批图谱写入。
   try {
@@ -1394,11 +1442,7 @@ function handleCreate(
 
       if (op.ref) refMap.set(op.ref, existing.id);
 
-      // 处理关联边
-      if (op.links) {
-        handleLinks(graph, existing.id, op.links, refMap, stats);
-      }
-      return null;
+      return { nodeId: existing.id, created: false, updated: true };
     }
   }
 
@@ -1421,12 +1465,7 @@ function handleCreate(
     refMap.set(op.ref, node.id);
   }
 
-  // 处理关联边
-  if (op.links) {
-    handleLinks(graph, node.id, op.links, refMap, stats);
-  }
-
-  return node.id;
+  return { nodeId: node.id, created: true, updated: false };
 }
 
 /**
@@ -1519,9 +1558,7 @@ function handleUpdate(
         strength: op.temporalStrength ?? 0.95,
         edgeType: 0,
       });
-      if (addEdge(graph, temporalEdge)) {
-        stats.newEdges++;
-      }
+      addEdgeWithStats(graph, temporalEdge, stats);
     }
 
     if (changeSummary) {
@@ -1561,12 +1598,207 @@ function handleUpdate(
         edgeType: 0,
         scope: updateEventNode.scope,
       });
-      if (addEdge(graph, updateEdge)) {
-        stats.newEdges++;
-      }
+      addEdgeWithStats(graph, updateEdge, stats);
     }
   }
   return updated ? op.nodeId : "";
+}
+
+function addEdgeWithStats(graph, edge, stats) {
+  const addedEdge = addEdge(graph, edge);
+  if (addedEdge === edge) {
+    stats.newEdges++;
+  }
+  return addedEdge;
+}
+
+function buildUndirectedPairKey(leftId, rightId) {
+  const normalizedLeft = String(leftId || "").trim();
+  const normalizedRight = String(rightId || "").trim();
+  if (!normalizedLeft || !normalizedRight || normalizedLeft === normalizedRight) {
+    return "";
+  }
+  return [normalizedLeft, normalizedRight].sort().join("::");
+}
+
+function queueOperationLinks(pendingLinkJobs, sourceId, links) {
+  if (!sourceId || !Array.isArray(links) || links.length === 0) return;
+  pendingLinkJobs.push({
+    sourceId: String(sourceId || ""),
+    links,
+  });
+}
+
+function resolveLinkTargetId(link = {}, refMap = new Map()) {
+  let targetId = link.targetNodeId || null;
+  if (!targetId && link.targetRef) {
+    targetId = refMap.get(link.targetRef);
+  }
+  return targetId ? String(targetId) : "";
+}
+
+function shouldInvalidateLink(link = {}) {
+  const action = String(link?.action || "").trim().toLowerCase();
+  return (
+    link?.remove === true ||
+    link?.delete === true ||
+    link?.unlink === true ||
+    link?.invalidate === true ||
+    action === "remove" ||
+    action === "delete" ||
+    action === "unlink" ||
+    action === "invalidate"
+  );
+}
+
+function isEdgeCurrentlyActive(edge) {
+  if (!edge) return false;
+  if (edge.invalidAt) return false;
+  if (edge.expiredAt) return false;
+  return true;
+}
+
+function resolveLinkRelation(link = {}, { fallback = "related" } = {}) {
+  const relation = String(link?.relation || "").trim();
+  if (RELATION_TYPES.includes(relation)) {
+    return relation;
+  }
+  return fallback;
+}
+
+function invalidateLinksBetween(graph, sourceId, targetId, relation = "related") {
+  if (!sourceId || !targetId) return 0;
+  let changed = 0;
+  for (const edge of Array.isArray(graph?.edges) ? graph.edges : []) {
+    if (!isEdgeCurrentlyActive(edge)) continue;
+    if (edge.relation !== relation) continue;
+    const sameDirection = edge.fromId === sourceId && edge.toId === targetId;
+    const reverseDirection = edge.fromId === targetId && edge.toId === sourceId;
+    if (!sameDirection && !reverseDirection) continue;
+    invalidateEdge(edge);
+    changed += 1;
+  }
+  return changed;
+}
+
+function handleLinks(graph, sourceId, links, refMap, stats, options = {}) {
+  const suppressedDefaultPairKeys =
+    options?.suppressedDefaultPairKeys instanceof Set
+      ? options.suppressedDefaultPairKeys
+      : null;
+  const sourceNode = getNode(graph, sourceId);
+  const sourceScope = normalizeMemoryScope(sourceNode?.scope);
+  for (const link of links) {
+    const targetId = resolveLinkTargetId(link, refMap);
+    if (!targetId) continue;
+
+    if (shouldInvalidateLink(link)) {
+      const relation = resolveLinkRelation(link, { fallback: "related" });
+      if (suppressedDefaultPairKeys && relation === "related") {
+        const pairKey = buildUndirectedPairKey(sourceId, targetId);
+        if (pairKey) {
+          suppressedDefaultPairKeys.add(pairKey);
+        }
+      }
+      invalidateLinksBetween(graph, sourceId, targetId, relation);
+      continue;
+    }
+
+    const relation = resolveLinkRelation(link, { fallback: "related" });
+    const edgeType = relation === "contradicts" ? 255 : 0;
+    const edge = createEdge({
+      fromId: sourceId,
+      toId: targetId,
+      relation,
+      strength: link.strength ?? 0.8,
+      edgeType,
+      scope: link.scope || sourceScope,
+    });
+
+    addEdgeWithStats(graph, edge, stats);
+  }
+}
+
+function applyPendingLinks(
+  graph,
+  pendingLinkJobs,
+  refMap,
+  stats,
+  { suppressedDefaultPairKeys = null } = {},
+) {
+  for (const job of Array.isArray(pendingLinkJobs) ? pendingLinkJobs : []) {
+    if (!job?.sourceId || !Array.isArray(job?.links) || job.links.length === 0) {
+      continue;
+    }
+    handleLinks(graph, job.sourceId, job.links, refMap, stats, {
+      suppressedDefaultPairKeys,
+    });
+  }
+}
+
+function hasActiveEdgeBetween(graph, leftId, rightId) {
+  if (!leftId || !rightId) return false;
+  return (Array.isArray(graph?.edges) ? graph.edges : []).some((edge) => {
+    if (!isEdgeCurrentlyActive(edge)) return false;
+    return (
+      (edge.fromId === leftId && edge.toId === rightId) ||
+      (edge.fromId === rightId && edge.toId === leftId)
+    );
+  });
+}
+
+function applyDefaultBatchEdges(
+  graph,
+  nodeIds,
+  stats,
+  settings = {},
+  { suppressedDefaultPairKeys = null } = {},
+) {
+  if (settings?.extractDefaultBatchRelatedEdges === false) {
+    return 0;
+  }
+  const strength = Math.max(
+    0,
+    Math.min(1, Number(settings?.extractDefaultBatchRelatedEdgeStrength) || 0.25),
+  );
+  if (strength <= 0) return 0;
+
+  const orderedIds = [...new Set(
+    (Array.isArray(nodeIds) ? nodeIds : [])
+      .map((nodeId) => String(nodeId || "").trim())
+      .filter(Boolean),
+  )].filter((nodeId) => {
+    const node = getNode(graph, nodeId);
+    return Boolean(node) && node.archived !== true;
+  });
+
+  let createdCount = 0;
+  for (let leftIndex = 0; leftIndex < orderedIds.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < orderedIds.length; rightIndex += 1) {
+      const sourceId = orderedIds[leftIndex];
+      const targetId = orderedIds[rightIndex];
+      const pairKey = buildUndirectedPairKey(sourceId, targetId);
+      if (suppressedDefaultPairKeys?.has(pairKey)) {
+        continue;
+      }
+      if (hasActiveEdgeBetween(graph, sourceId, targetId)) {
+        continue;
+      }
+      const sourceNode = getNode(graph, sourceId);
+      const edge = createEdge({
+        fromId: sourceId,
+        toId: targetId,
+        relation: "related",
+        strength,
+        edgeType: 0,
+        scope: normalizeMemoryScope(sourceNode?.scope),
+      });
+      if (addEdgeWithStats(graph, edge, stats) === edge) {
+        createdCount += 1;
+      }
+    }
+  }
+  return createdCount;
 }
 
 function buildFieldChangeSummary(previousFields = {}, nextFields = {}) {
@@ -1597,44 +1829,6 @@ function handleDelete(graph, op, stats) {
   const node = graph.nodes.find((n) => n.id === op.nodeId);
   if (node) {
     node.archived = true; // 软删除
-  }
-}
-
-/**
- * 处理关联边
- */
-function handleLinks(graph, sourceId, links, refMap, stats) {
-  const sourceNode = getNode(graph, sourceId);
-  const sourceScope = normalizeMemoryScope(sourceNode?.scope);
-  for (const link of links) {
-    let targetId = link.targetNodeId || null;
-
-    // 通过 ref 解析目标节点
-    if (!targetId && link.targetRef) {
-      targetId = refMap.get(link.targetRef);
-    }
-
-    if (!targetId) continue;
-
-    // 验证关系类型
-    const relation = RELATION_TYPES.includes(link.relation)
-      ? link.relation
-      : "related";
-
-    const edgeType = relation === "contradicts" ? 255 : 0;
-
-    const edge = createEdge({
-      fromId: sourceId,
-      toId: targetId,
-      relation,
-      strength: link.strength ?? 0.8,
-      edgeType,
-      scope: link.scope || sourceScope,
-    });
-
-    if (addEdge(graph, edge)) {
-      stats.newEdges++;
-    }
   }
 }
 

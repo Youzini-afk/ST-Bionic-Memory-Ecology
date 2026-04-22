@@ -7,6 +7,8 @@ import {
   normalizeDialogueFloorRange,
 } from "./chat-history.js";
 
+let nativePersistDeltaInstallPromise = null;
+
 function toSafeFloor(value, fallback = null) {
   if (value == null || value === "") return fallback;
   const numeric = Number(value);
@@ -112,6 +114,47 @@ function cloneSerializable(value, fallback = null) {
     return JSON.parse(JSON.stringify(value));
   } catch {
     return fallback;
+  }
+}
+
+function readNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+async function ensureNativePersistDeltaHookInstalled() {
+  if (typeof globalThis.__stBmeNativeBuildPersistDelta === "function") {
+    return {
+      loaded: true,
+      source: "global-hook",
+    };
+  }
+  if (!nativePersistDeltaInstallPromise) {
+    nativePersistDeltaInstallPromise = import("../vendor/wasm/stbme_core.js")
+      .then((module) => module?.installNativePersistDeltaHook?.())
+      .catch((error) => {
+        nativePersistDeltaInstallPromise = null;
+        throw error;
+      });
+  }
+  return await nativePersistDeltaInstallPromise;
+}
+
+function setExtractionProgressStatus(
+  runtime,
+  text,
+  meta = "",
+  level = "info",
+  options = {},
+) {
+  if (typeof runtime?.setLastExtractionStatus === "function") {
+    runtime.setLastExtractionStatus(text, meta, level, options);
+    return;
+  }
+  if (options?.syncRuntime !== false && typeof runtime?.setRuntimeStatus === "function") {
+    runtime.setRuntimeStatus(text, meta, level);
   }
 }
 
@@ -231,11 +274,12 @@ function buildRerunFallbackInfo(chat = [], targetDialogueRange = [-1, -1]) {
   };
 }
 
-function buildCommittedBatchPersistSnapshot(
+async function buildCommittedBatchPersistSnapshot(
   runtime,
   {
     graph = null,
     chat = [],
+    settings = null,
     beforeSnapshot = null,
     processedRange = [null, null],
     postProcessArtifacts = [],
@@ -258,6 +302,10 @@ function buildCommittedBatchPersistSnapshot(
   const range = Array.isArray(processedRange) ? processedRange : [null, null];
   const rangeStart = Number.isFinite(Number(range[0])) ? Number(range[0]) : null;
   const rangeEnd = Number.isFinite(Number(range[1])) ? Number(range[1]) : null;
+  const runtimeSettings =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : runtime?.getSettings?.() || {};
   const dialogueMap = buildDialogueFloorMap(chat);
   const processedDialogueRange = [
     Number.isFinite(Number(rangeStart))
@@ -274,14 +322,14 @@ function buildCommittedBatchPersistSnapshot(
           Number(rangeStart) -
             Math.max(
               0,
-              Number(runtime?.getSettings?.()?.extractContextTurns) || 0,
+              Number(runtimeSettings?.extractContextTurns) || 0,
             ) *
               2,
         )
       : null,
     rangeEnd,
   ];
-  const afterSnapshot = runtime.cloneGraphSnapshot(graph);
+  const afterSnapshot = graph;
   const effectiveArtifacts = Array.isArray(postProcessArtifacts)
     ? [...postProcessArtifacts]
     : [];
@@ -331,32 +379,78 @@ function buildCommittedBatchPersistSnapshot(
     );
   }
 
+  let persistDelta = null;
+  let persistSnapshot = null;
+  const shouldUseNativePersistDelta =
+    runtimeSettings?.persistUseNativeDelta === true &&
+    runtimeSettings?.graphNativeForceDisable !== true;
+  const nativeFailOpen = runtimeSettings?.nativeEngineFailOpen !== false;
+  if (typeof runtime.buildSnapshotFromGraph === "function") {
+    persistSnapshot = runtime.buildSnapshotFromGraph(committedGraphSnapshot, {
+      chatId:
+        committedGraphSnapshot?.historyState?.chatId ||
+        beforeSnapshot?.meta?.chatId ||
+        "",
+      revision: Number(beforeSnapshot?.meta?.revision || 0) + 1,
+      baseSnapshot: beforeSnapshot || undefined,
+      lastModified: Date.now(),
+    });
+  }
+  if (typeof runtime.buildPersistDelta === "function") {
+    if (shouldUseNativePersistDelta) {
+      const preloadStartedAt = readNow();
+      try {
+        await ensureNativePersistDeltaHookInstalled();
+      } catch (error) {
+        if (!nativeFailOpen) {
+          throw error;
+        }
+        runtime?.console?.warn?.(
+          "[ST-BME] extraction native persist delta preload failed, fallback to JS delta:",
+          {
+            error: error?.message || String(error),
+            preloadMs: readNow() - preloadStartedAt,
+          },
+        );
+      }
+    }
+
+    persistDelta = runtime.buildPersistDelta(
+      beforeSnapshot,
+      persistSnapshot || committedGraphSnapshot,
+      {
+      useNativeDelta: shouldUseNativePersistDelta,
+      nativeFailOpen,
+      persistNativeDeltaThresholdRecords:
+        runtimeSettings?.persistNativeDeltaThresholdRecords,
+      persistNativeDeltaThresholdStructuralDelta:
+        runtimeSettings?.persistNativeDeltaThresholdStructuralDelta,
+      persistNativeDeltaThresholdSerializedChars:
+        runtimeSettings?.persistNativeDeltaThresholdSerializedChars,
+      persistNativeDeltaBridgeMode: runtimeSettings?.persistNativeDeltaBridgeMode,
+      },
+    );
+  }
+
   return {
-    persistDelta:
-      typeof runtime.buildPersistDelta === "function"
-        ? runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
-            useNativeDelta: false,
-          })
-        : null,
+    persistDelta,
+    persistSnapshot,
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
-    committedAfterSnapshot: runtime.cloneGraphSnapshot(committedGraphSnapshot),
+    committedAfterSnapshot: committedGraphSnapshot,
     postProcessArtifacts: effectiveArtifacts,
   };
 }
 
 function isPersistenceRevisionAccepted(runtime, persistence = null) {
-  if (!persistence || persistence.accepted === true) return true;
-  const graphPersistenceState = runtime?.getGraphPersistenceState?.() || {};
-  if (graphPersistenceState.pendingPersist === true) {
-    return false;
-  }
   const persistenceRevision = Number(persistence?.revision || 0);
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const lastAcceptedRevision = Number(graphPersistenceState?.lastAcceptedRevision || 0);
+  const lastAcceptedRevision = Number(
+    runtime?.getGraphPersistenceState?.()?.lastAcceptedRevision || 0,
+  );
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
 }
 
@@ -622,14 +716,15 @@ export async function executeExtractionBatchController(
     batchStatus,
   );
   const batchStatusRef = effects?.batchStatus || batchStatus;
-  const committedPersistState = buildCommittedBatchPersistSnapshot(runtime, {
+  const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
     graph: runtime.getCurrentGraph(),
     chat,
+    settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(
       beforeSnapshot,
-      runtime.cloneGraphSnapshot(runtime.getCurrentGraph()),
+      runtime.getCurrentGraph(),
       effects?.postProcessArtifacts || [],
     ),
     vectorHashesInserted: effects?.vectorHashesInserted || [],
@@ -639,6 +734,7 @@ export async function executeExtractionBatchController(
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
     graphSnapshot: committedPersistState.persistGraphSnapshot,
+    persistSnapshot: committedPersistState.persistSnapshot,
     persistDelta: committedPersistState.persistDelta,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);
@@ -866,6 +962,7 @@ export async function onManualExtractController(runtime, options = {}) {
   const taskLabel = String(options?.taskLabel || "手动提取").trim() || "手动提取";
   const toastTitle = String(options?.toastTitle || `ST-BME ${taskLabel}`).trim() ||
     `ST-BME ${taskLabel}`;
+  const showStartToast = options?.showStartToast !== false;
   const lockedEndFloor = toSafeFloor(options?.lockedEndFloor, null);
   if (!runtime.ensureGraphMutationReady(taskLabel)) return;
   const pendingPersistGate = await maybeRetryPendingPersistence(
@@ -907,6 +1004,10 @@ export async function onManualExtractController(runtime, options = {}) {
   const assistantTurns = runtime.getAssistantTurns(chat);
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const pendingAssistantTurns = assistantTurns.filter((i) => i > lastProcessed);
+  const targetAssistantTurns = pendingAssistantTurns.filter((i) => {
+    if (lockedEndFloor != null && i > lockedEndFloor) return false;
+    return true;
+  });
   if (pendingAssistantTurns.length === 0) {
     runtime.toastr.info("没有待提取的新回复");
     return;
@@ -920,18 +1021,24 @@ export async function onManualExtractController(runtime, options = {}) {
     newEdges: 0,
     batches: 0,
   };
+  let processedAssistantTurns = 0;
   const warnings = [];
 
   runtime.setIsExtracting(true);
   const extractionController = runtime.beginStageAbortController("extraction");
   const extractionSignal = extractionController.signal;
-  runtime.setLastExtractionStatus(
+  setExtractionProgressStatus(
+    runtime,
     `${taskLabel}中`,
     lockedEndFloor != null
-      ? `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条 · 截止 chatIndex ${lockedEndFloor}`
-      : `待处理 assistant 楼层 ${pendingAssistantTurns.length} 条`,
+      ? `待处理 AI 回复 ${targetAssistantTurns.length} 条 · 截止 chatIndex ${lockedEndFloor}`
+      : `待处理 AI 回复 ${targetAssistantTurns.length} 条`,
     "running",
-    { syncRuntime: true, toastKind: "info", toastTitle },
+    {
+      syncRuntime: true,
+      toastKind: showStartToast ? "info" : "",
+      toastTitle,
+    },
   );
   try {
     while (true) {
@@ -967,10 +1074,29 @@ export async function onManualExtractController(runtime, options = {}) {
       totals.updatedNodes += batchResult.result.updatedNodes || 0;
       totals.newEdges += batchResult.result.newEdges || 0;
       totals.batches++;
+      processedAssistantTurns += batchAssistantTurns.length;
 
       if (Array.isArray(batchResult.effects?.warnings)) {
         warnings.push(...batchResult.effects.warnings);
       }
+
+      const totalTurnsForDisplay = Math.max(
+        processedAssistantTurns,
+        targetAssistantTurns.length,
+      );
+      setExtractionProgressStatus(
+        runtime,
+        `${taskLabel}中`,
+        totalTurnsForDisplay > 0
+          ? `已处理 ${processedAssistantTurns}/${totalTurnsForDisplay} 条 AI 回复 · 当前楼层 ${startIdx}-${endIdx} · 累计 ${totals.batches} 批`
+          : `当前楼层 ${startIdx}-${endIdx} · 累计 ${totals.batches} 批`,
+        "running",
+        {
+          syncRuntime: true,
+          toastKind: "",
+          toastTitle,
+        },
+      );
 
       if (batchResult.historyAdvanceAllowed === false) {
         warnings.push(
@@ -986,7 +1112,8 @@ export async function onManualExtractController(runtime, options = {}) {
     }
 
     if (totals.batches === 0) {
-      runtime.setLastExtractionStatus(
+      setExtractionProgressStatus(
+        runtime,
         "无待提取内容",
         lockedEndFloor != null
           ? "指定范围内没有新的 assistant 回复需要处理"
@@ -1121,12 +1248,18 @@ export async function onExtractionTaskController(runtime, options = {}) {
       : rerunTask.endFloor,
   ];
 
-  runtime.setRuntimeStatus(
-    "重新提取中",
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取准备中",
     fallbackInfo.fallbackToLatest
       ? `范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor} 命中旧批次，但当前将退化为从 ${effectiveDialogueRange[0]} 到最新重提`
       : `准备重提范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor}`,
     fallbackInfo.fallbackToLatest ? "warning" : "running",
+    {
+      syncRuntime: true,
+      toastKind: "info",
+      toastTitle: "ST-BME 重新提取",
+    },
   );
 
   const rollbackResult = await runtime.rollbackGraphForReroll(
@@ -1134,6 +1267,30 @@ export async function onExtractionTaskController(runtime, options = {}) {
     context,
   );
   if (!rollbackResult?.success) {
+    const rollbackError = String(
+      rollbackResult?.error ||
+        rollbackResult?.reason ||
+        rollbackResult?.recoveryPath ||
+        "回滚失败",
+    ).trim() || "回滚失败";
+    setExtractionProgressStatus(
+      runtime,
+      "重新提取失败",
+      rollbackError,
+      "warning",
+      {
+        syncRuntime: true,
+        toastKind: "",
+        toastTitle: "ST-BME 重新提取",
+      },
+    );
+    runtime.toastr?.warning?.(
+      `重新提取未开始：${rollbackError}`,
+      "ST-BME 重新提取",
+      {
+        timeOut: 4500,
+      },
+    );
     return {
       ...rollbackResult,
       rerunPerformed: false,
@@ -1149,11 +1306,28 @@ export async function onExtractionTaskController(runtime, options = {}) {
     });
   }
 
+  const rollbackDesc =
+    rollbackResult.effectiveFromFloor !== fallbackInfo.startAssistantChatIndex
+      ? `已按批次边界回滚到楼层 ${rollbackResult.effectiveFromFloor}，正在开始重新提取`
+      : `已回滚到楼层 ${fallbackInfo.startAssistantChatIndex}，正在开始重新提取`;
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取中",
+    rollbackDesc,
+    "running",
+    {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 重新提取",
+    },
+  );
+
   await runManualExtract({
     drainAll: true,
     lockedEndFloor: effectiveLockedEndFloor,
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
+    showStartToast: false,
   });
 
   return {
@@ -1254,12 +1428,18 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     targetFloor = assistantTurns[assistantTurns.length - 1];
   }
 
-  runtime.setRuntimeStatus(
-    "重新提取中",
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取准备中",
     Number.isFinite(targetFloor)
       ? `准备从楼层 ${targetFloor} 开始回滚并重新提取`
       : "准备回滚最新 AI 楼并重新提取",
     "running",
+    {
+      syncRuntime: true,
+      toastKind: "info",
+      toastTitle: "ST-BME 重 Roll",
+    },
   );
 
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
@@ -1289,10 +1469,14 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     rollbackResult = await runtime.rollbackGraphForReroll(targetFloor, context);
   } catch (e) {
     if (runtime.isAbortError(e)) {
-      runtime.setRuntimeStatus(
+      setExtractionProgressStatus(
+        runtime,
         "重新提取已取消",
         e.message || "聊天已切换",
         "warning",
+        {
+          syncRuntime: true,
+        },
       );
       return {
         success: false,
@@ -1309,10 +1493,14 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
   }
 
   if (!rollbackResult?.success) {
-    runtime.setRuntimeStatus(
+    setExtractionProgressStatus(
+      runtime,
       "重新提取失败",
       rollbackResult.error || "回滚失败",
       "error",
+      {
+        syncRuntime: true,
+      },
     );
     runtime.toastr?.error?.(rollbackResult.error, "ST-BME 重 Roll");
     return rollbackResult;
@@ -1326,7 +1514,19 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     timeOut: 2500,
   });
 
-  await runtime.onManualExtract({ drainAll: false });
+  setExtractionProgressStatus(
+    runtime,
+    "重新提取中",
+    rerollDesc,
+    "running",
+    {
+      syncRuntime: true,
+      toastKind: "",
+      toastTitle: "ST-BME 重 Roll",
+    },
+  );
+
+  await runtime.onManualExtract({ drainAll: false, showStartToast: false });
   runtime.refreshPanelLiveState();
   return {
     ...rollbackResult,

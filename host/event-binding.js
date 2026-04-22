@@ -139,9 +139,9 @@ export function registerCoreEventHooksController(runtime) {
   }
 
   const cleanups = [];
-  const bind = (eventName, listener) => {
+  const bind = (eventName, listener, options = undefined) => {
     if (!eventName || typeof listener !== "function") return;
-    eventSource.on(eventName, listener);
+    eventSource.on(eventName, listener, options);
     if (typeof eventSource.off === "function") {
       cleanups.push(() => eventSource.off(eventName, listener));
     } else if (typeof eventSource.removeListener === "function") {
@@ -182,7 +182,10 @@ export function registerCoreEventHooksController(runtime) {
   bind(eventTypes.MESSAGE_EDITED, handlers.onMessageEdited);
   bind(eventTypes.MESSAGE_SWIPED, handlers.onMessageSwiped);
   if (eventTypes.MESSAGE_UPDATED) {
-    bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageEdited);
+    bind(eventTypes.MESSAGE_UPDATED, handlers.onMessageUpdated);
+  }
+  if (eventTypes.MESSAGE_SWIPE_DELETED && typeof handlers.onMessageDeleted === "function") {
+    bind(eventTypes.MESSAGE_SWIPE_DELETED, handlers.onMessageDeleted);
   }
   if (eventTypes.USER_MESSAGE_RENDERED) {
     bind(eventTypes.USER_MESSAGE_RENDERED, handlers.onUserMessageRendered);
@@ -193,6 +196,32 @@ export function registerCoreEventHooksController(runtime) {
       handlers.onCharacterMessageRendered,
     );
   }
+  bind(eventTypes.GENERATION_CONTEXT_READY, handlers.onGenerationContextReady, {
+    priority: 20,
+  });
+  bind(
+    eventTypes.GENERATION_BEFORE_WORLD_INFO_SCAN,
+    handlers.onGenerationBeforeWorldInfoScan,
+    { priority: 20 },
+  );
+  bind(
+    eventTypes.GENERATION_AFTER_WORLD_INFO_SCAN,
+    handlers.onGenerationAfterWorldInfoScan,
+    { priority: 20 },
+  );
+  bind(
+    eventTypes.GENERATION_WORLD_INFO_FINALIZED,
+    handlers.onGenerationWorldInfoFinalized,
+    { priority: 20 },
+  );
+  bind(
+    eventTypes.GENERATION_BEFORE_API_REQUEST,
+    handlers.onGenerationBeforeApiRequest,
+    { priority: 20 },
+  );
+  bind(eventTypes.CHAT_BRANCH_CREATED, handlers.onChatBranchCreated, {
+    priority: 20,
+  });
 
   const nextState = {
     registered: true,
@@ -416,6 +445,20 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
+}
+
+export function onMessageUpdatedController(runtime, messageId, meta = null) {
+  runtime.recordIgnoredMutationEvent?.("message-updated", {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    meta,
+    reason: "lightweight-refresh-only",
+  });
+  runtime.refreshPersistedRecallMessageUi?.();
+  return {
+    messageId: Number.isFinite(Number(messageId)) ? Number(messageId) : null,
+    lightweight: true,
+    refreshed: true,
+  };
 }
 
 export async function onMessageSwipedController(runtime, messageId, meta = null) {

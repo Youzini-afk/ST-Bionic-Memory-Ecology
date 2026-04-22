@@ -1526,6 +1526,452 @@ export function updateRegionAdjacencyManual(graph, region = "", adjacent = []) {
   return { ok: true, region: normalizedRegion };
 }
 
+function buildKnowledgeOwnerAliasVariantSet(owner = {}) {
+  return buildOwnerAliasVariantSet([
+    owner?.ownerName,
+    ...(Array.isArray(owner?.aliases) ? owner.aliases : []),
+  ]);
+}
+
+function doesKnowledgeOwnerVariantSetMatchValue(variantSet, value = "") {
+  if (!(variantSet instanceof Set) || variantSet.size === 0) return false;
+  for (const variant of collectAliasMatchVariants(value)) {
+    if (variantSet.has(variant)) return true;
+  }
+  return false;
+}
+
+function doesScopeReferenceCharacterOwner(graph, scope = {}, owner = {}) {
+  const normalizedScope = normalizeMemoryScope(scope);
+  if (normalizeOwnerType(normalizedScope.ownerType) !== OWNER_TYPE_CHARACTER) {
+    return false;
+  }
+
+  const normalizedOwnerKey = normalizeString(owner?.ownerKey);
+  if (normalizedOwnerKey) {
+    const resolvedOwnerKey = resolveKnowledgeOwner(graph, {
+      ownerType: OWNER_TYPE_CHARACTER,
+      ownerName: normalizedScope.ownerName || normalizedScope.ownerId,
+      ownerId: normalizedScope.ownerId,
+    }).ownerKey;
+    if (resolvedOwnerKey && resolvedOwnerKey === normalizedOwnerKey) {
+      return true;
+    }
+  }
+
+  const aliasVariantSet = buildKnowledgeOwnerAliasVariantSet(owner);
+  return (
+    doesKnowledgeOwnerVariantSetMatchValue(aliasVariantSet, normalizedScope.ownerName) ||
+    doesKnowledgeOwnerVariantSetMatchValue(aliasVariantSet, normalizedScope.ownerId)
+  );
+}
+
+function doesCharacterNodeReferenceOwner(graph, node = {}, owner = {}) {
+  if (
+    !node ||
+    node.archived === true ||
+    normalizeString(node?.type) !== "character" ||
+    !normalizeString(node?.fields?.name)
+  ) {
+    return false;
+  }
+
+  const normalizedOwnerKey = normalizeString(owner?.ownerKey);
+  if (normalizedOwnerKey) {
+    const resolvedOwnerKey = resolveKnowledgeOwner(graph, {
+      ownerType: OWNER_TYPE_CHARACTER,
+      ownerName: node?.fields?.name,
+      nodeId: node?.id,
+    }).ownerKey;
+    if (resolvedOwnerKey && resolvedOwnerKey === normalizedOwnerKey) {
+      return true;
+    }
+  }
+
+  const aliasVariantSet = buildKnowledgeOwnerAliasVariantSet(owner);
+  return (
+    doesKnowledgeOwnerVariantSetMatchValue(aliasVariantSet, node?.fields?.name) ||
+    normalizeString(owner?.nodeId) === normalizeString(node?.id)
+  );
+}
+
+function collectCharacterNodesForOwner(graph, owner = {}) {
+  return Array.isArray(graph?.nodes)
+    ? graph.nodes.filter((node) => doesCharacterNodeReferenceOwner(graph, node, owner))
+    : [];
+}
+
+function rewriteScopedCharacterOwnerReferences(
+  graph,
+  owner = {},
+  { ownerName = "", ownerId = "" } = {},
+) {
+  const normalizedOwnerName = normalizeString(ownerName || ownerId);
+  const normalizedOwnerId = normalizeString(ownerId || ownerName);
+  if (!normalizedOwnerName || !normalizedOwnerId) {
+    return {
+      changedNodeIds: [],
+      changedEdgeCount: 0,
+    };
+  }
+
+  const changedNodeIds = [];
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    const normalizedScope = normalizeMemoryScope(node?.scope);
+    if (!doesScopeReferenceCharacterOwner(graph, normalizedScope, owner)) {
+      continue;
+    }
+    node.scope = normalizeMemoryScope({
+      ...normalizedScope,
+      layer: "pov",
+      ownerType: OWNER_TYPE_CHARACTER,
+      ownerName: normalizedOwnerName,
+      ownerId: normalizedOwnerId,
+    });
+    const normalizedNodeId = normalizeString(node?.id);
+    if (normalizedNodeId) changedNodeIds.push(normalizedNodeId);
+  }
+
+  let changedEdgeCount = 0;
+  for (const edge of Array.isArray(graph?.edges) ? graph.edges : []) {
+    const normalizedScope = normalizeMemoryScope(edge?.scope);
+    if (!doesScopeReferenceCharacterOwner(graph, normalizedScope, owner)) {
+      continue;
+    }
+    edge.scope = normalizeMemoryScope({
+      ...normalizedScope,
+      layer: "pov",
+      ownerType: OWNER_TYPE_CHARACTER,
+      ownerName: normalizedOwnerName,
+      ownerId: normalizedOwnerId,
+    });
+    changedEdgeCount += 1;
+  }
+
+  return {
+    changedNodeIds: uniqueIds(changedNodeIds),
+    changedEdgeCount,
+  };
+}
+
+function renameCharacterNodesForOwner(graph, owner = {}, nextName = "") {
+  const normalizedNextName = normalizeString(nextName);
+  if (!normalizedNextName) return [];
+
+  const changedNodeIds = [];
+  for (const node of collectCharacterNodesForOwner(graph, owner)) {
+    node.fields = {
+      ...(node?.fields || {}),
+      name: normalizedNextName,
+    };
+    const normalizedNodeId = normalizeString(node?.id);
+    if (normalizedNodeId) changedNodeIds.push(normalizedNodeId);
+  }
+  return uniqueIds(changedNodeIds);
+}
+
+function updateHistoryOwnerReferences(historyState, previousOwner = {}, nextOwner = null) {
+  if (!historyState || typeof historyState !== "object") return;
+
+  const previousOwnerKey = normalizeString(previousOwner?.ownerKey);
+  const nextOwnerKey = normalizeString(nextOwner?.ownerKey);
+  const nextOwnerName = normalizeString(nextOwner?.ownerName);
+  const previousAliasVariants = buildKnowledgeOwnerAliasVariantSet(previousOwner);
+
+  if (
+    doesKnowledgeOwnerVariantSetMatchValue(
+      previousAliasVariants,
+      historyState.activeCharacterPovOwner,
+    )
+  ) {
+    historyState.activeCharacterPovOwner = nextOwnerName;
+  }
+
+  if (normalizeString(historyState.activeRecallOwnerKey) === previousOwnerKey) {
+    historyState.activeRecallOwnerKey = nextOwnerKey;
+  }
+
+  historyState.recentRecallOwnerKeys = uniqueStrings(
+    (historyState.recentRecallOwnerKeys || [])
+      .map((value) => {
+        const normalizedValue = normalizeString(value);
+        if (!normalizedValue) return "";
+        return normalizedValue === previousOwnerKey ? nextOwnerKey : normalizedValue;
+      })
+      .filter(Boolean),
+  ).slice(0, RECENT_RECALL_OWNER_LIMIT);
+}
+
+function archiveOwnerCharacterNodesForMerge(graph, sourceOwner = {}, targetOwner = {}) {
+  const sourceNodes = collectCharacterNodesForOwner(graph, sourceOwner);
+  const archivedNodeIds = [];
+  let adoptedNodeId = normalizeString(targetOwner?.nodeId);
+
+  if (!adoptedNodeId && sourceNodes.length > 0) {
+    const keeper = sourceNodes[0];
+    keeper.fields = {
+      ...(keeper?.fields || {}),
+      name: normalizeString(targetOwner?.ownerName || keeper?.fields?.name),
+    };
+    keeper.archived = false;
+    adoptedNodeId = normalizeString(keeper?.id);
+
+    for (const node of sourceNodes.slice(1)) {
+      node.archived = true;
+      const normalizedNodeId = normalizeString(node?.id);
+      if (normalizedNodeId) archivedNodeIds.push(normalizedNodeId);
+    }
+    return {
+      adoptedNodeId,
+      archivedNodeIds: uniqueIds(archivedNodeIds),
+    };
+  }
+
+  for (const node of sourceNodes) {
+    node.archived = true;
+    const normalizedNodeId = normalizeString(node?.id);
+    if (normalizedNodeId) archivedNodeIds.push(normalizedNodeId);
+  }
+  return {
+    adoptedNodeId,
+    archivedNodeIds: uniqueIds(archivedNodeIds),
+  };
+}
+
+function archiveCharacterNodesForOwner(graph, owner = {}) {
+  const archivedNodeIds = [];
+  for (const node of collectCharacterNodesForOwner(graph, owner)) {
+    node.archived = true;
+    const normalizedNodeId = normalizeString(node?.id);
+    if (normalizedNodeId) archivedNodeIds.push(normalizedNodeId);
+  }
+  return uniqueIds(archivedNodeIds);
+}
+
+function archivePovNodesForOwner(graph, owner = {}) {
+  const archivedNodeIds = [];
+  for (const node of Array.isArray(graph?.nodes) ? graph.nodes : []) {
+    const normalizedScope = normalizeMemoryScope(node?.scope);
+    if (normalizedScope.layer !== "pov") continue;
+    if (!doesScopeReferenceCharacterOwner(graph, normalizedScope, owner)) continue;
+    node.archived = true;
+    const normalizedNodeId = normalizeString(node?.id);
+    if (normalizedNodeId) archivedNodeIds.push(normalizedNodeId);
+  }
+  return uniqueIds(archivedNodeIds);
+}
+
+export function renameKnowledgeOwner(graph, ownerKey = "", nextName = "") {
+  normalizeGraphCognitiveState(graph);
+  const normalizedOwnerKey = normalizeString(ownerKey);
+  const normalizedNextName = normalizeString(nextName);
+  if (!normalizedOwnerKey || !normalizedNextName) {
+    return { ok: false, reason: "missing-owner-or-name" };
+  }
+
+  const sourceEntry = createDefaultKnowledgeOwnerState(
+    graph?.knowledgeState?.owners?.[normalizedOwnerKey] || {},
+  );
+  if (!sourceEntry.ownerKey) {
+    return { ok: false, reason: "owner-not-found" };
+  }
+  if (normalizeOwnerType(sourceEntry.ownerType) !== OWNER_TYPE_CHARACTER) {
+    return { ok: false, reason: "unsupported-owner-type" };
+  }
+  if (normalizeKey(sourceEntry.ownerName) === normalizeKey(normalizedNextName)) {
+    return {
+      ok: true,
+      ownerKey: normalizedOwnerKey,
+      unchanged: true,
+    };
+  }
+
+  const scopeRewrite = rewriteScopedCharacterOwnerReferences(graph, sourceEntry, {
+    ownerName: normalizedNextName,
+    ownerId: normalizedNextName,
+  });
+  const renamedCharacterNodeIds = renameCharacterNodesForOwner(
+    graph,
+    sourceEntry,
+    normalizedNextName,
+  );
+  const nextOwnerKey = buildOwnerKey(
+    OWNER_TYPE_CHARACTER,
+    normalizedNextName,
+    sourceEntry.nodeId,
+    graph,
+  );
+  const nextEntry = createDefaultKnowledgeOwnerState({
+    ...sourceEntry,
+    ownerKey: nextOwnerKey,
+    ownerName: normalizedNextName,
+    aliases: uniqueStrings([
+      normalizedNextName,
+      sourceEntry.ownerName,
+      ...(sourceEntry.aliases || []),
+    ]),
+    updatedAt: Date.now(),
+    lastSource: "manual-owner-rename",
+  });
+
+  delete graph.knowledgeState.owners[normalizedOwnerKey];
+  graph.knowledgeState.owners[nextOwnerKey] = graph.knowledgeState.owners[nextOwnerKey]
+    ? mergeKnowledgeOwnerEntries(graph.knowledgeState.owners[nextOwnerKey], nextEntry)
+    : nextEntry;
+
+  const resolvedNextOwner = createDefaultKnowledgeOwnerState(
+    graph.knowledgeState.owners[nextOwnerKey],
+  );
+  updateHistoryOwnerReferences(graph.historyState, sourceEntry, resolvedNextOwner);
+  graph.knowledgeState = normalizeKnowledgeState(graph.knowledgeState, graph);
+  return {
+    ok: true,
+    ownerKey: nextOwnerKey,
+    previousOwnerKey: normalizedOwnerKey,
+    renamedCharacterNodeIds,
+    updatedPovNodeIds: scopeRewrite.changedNodeIds,
+    updatedPovEdgeCount: scopeRewrite.changedEdgeCount,
+  };
+}
+
+export function mergeKnowledgeOwners(
+  graph,
+  { sourceOwnerKey = "", targetOwnerKey = "" } = {},
+) {
+  normalizeGraphCognitiveState(graph);
+  const normalizedSourceOwnerKey = normalizeString(sourceOwnerKey);
+  const normalizedTargetOwnerKey = normalizeString(targetOwnerKey);
+  if (!normalizedSourceOwnerKey || !normalizedTargetOwnerKey) {
+    return { ok: false, reason: "missing-owner-key" };
+  }
+  if (normalizedSourceOwnerKey === normalizedTargetOwnerKey) {
+    return { ok: false, reason: "same-owner" };
+  }
+
+  const sourceEntry = createDefaultKnowledgeOwnerState(
+    graph?.knowledgeState?.owners?.[normalizedSourceOwnerKey] || {},
+  );
+  const targetEntry = createDefaultKnowledgeOwnerState(
+    graph?.knowledgeState?.owners?.[normalizedTargetOwnerKey] || {},
+  );
+  if (!sourceEntry.ownerKey || !targetEntry.ownerKey) {
+    return { ok: false, reason: "owner-not-found" };
+  }
+  if (
+    normalizeOwnerType(sourceEntry.ownerType) !== OWNER_TYPE_CHARACTER ||
+    normalizeOwnerType(targetEntry.ownerType) !== OWNER_TYPE_CHARACTER
+  ) {
+    return { ok: false, reason: "unsupported-owner-type" };
+  }
+
+  const scopeRewrite = rewriteScopedCharacterOwnerReferences(graph, sourceEntry, {
+    ownerName: targetEntry.ownerName,
+    ownerId: targetEntry.ownerName,
+  });
+  const characterNodeMerge = archiveOwnerCharacterNodesForMerge(
+    graph,
+    sourceEntry,
+    targetEntry,
+  );
+  const mergedEntry = mergeKnowledgeOwnerEntries(
+    createDefaultKnowledgeOwnerState({
+      ...targetEntry,
+      nodeId: targetEntry.nodeId || characterNodeMerge.adoptedNodeId || sourceEntry.nodeId,
+      aliases: uniqueStrings([
+        ...(targetEntry.aliases || []),
+        ...(sourceEntry.aliases || []),
+        targetEntry.ownerName,
+        sourceEntry.ownerName,
+      ]),
+      updatedAt: Date.now(),
+      lastSource: "manual-owner-merge",
+    }),
+    createDefaultKnowledgeOwnerState({
+      ...sourceEntry,
+      ownerKey: targetEntry.ownerKey,
+      ownerName: targetEntry.ownerName,
+      nodeId: targetEntry.nodeId || characterNodeMerge.adoptedNodeId || sourceEntry.nodeId,
+      aliases: uniqueStrings([
+        ...(targetEntry.aliases || []),
+        ...(sourceEntry.aliases || []),
+        targetEntry.ownerName,
+        sourceEntry.ownerName,
+      ]),
+      updatedAt: Date.now(),
+      lastSource: "manual-owner-merge",
+    }),
+  );
+
+  graph.knowledgeState.owners[targetEntry.ownerKey] = mergedEntry;
+  delete graph.knowledgeState.owners[sourceEntry.ownerKey];
+
+  updateHistoryOwnerReferences(
+    graph.historyState,
+    sourceEntry,
+    createDefaultKnowledgeOwnerState(graph.knowledgeState.owners[targetEntry.ownerKey]),
+  );
+  graph.knowledgeState = normalizeKnowledgeState(graph.knowledgeState, graph);
+  return {
+    ok: true,
+    ownerKey: targetEntry.ownerKey,
+    sourceOwnerKey: sourceEntry.ownerKey,
+    archivedCharacterNodeIds: characterNodeMerge.archivedNodeIds,
+    adoptedCharacterNodeId: characterNodeMerge.adoptedNodeId || "",
+    updatedPovNodeIds: scopeRewrite.changedNodeIds,
+    updatedPovEdgeCount: scopeRewrite.changedEdgeCount,
+  };
+}
+
+export function deleteKnowledgeOwner(
+  graph,
+  ownerKey = "",
+  { mode = "owner-only" } = {},
+) {
+  normalizeGraphCognitiveState(graph);
+  const normalizedOwnerKey = normalizeString(ownerKey);
+  const normalizedMode = normalizeString(mode) || "owner-only";
+  if (!normalizedOwnerKey) {
+    return { ok: false, reason: "missing-owner-key" };
+  }
+  if (
+    !["owner-only", "archive-character", "archive-all"].includes(
+      normalizedMode,
+    )
+  ) {
+    return { ok: false, reason: "invalid-delete-mode" };
+  }
+
+  const sourceEntry = createDefaultKnowledgeOwnerState(
+    graph?.knowledgeState?.owners?.[normalizedOwnerKey] || {},
+  );
+  if (!sourceEntry.ownerKey) {
+    return { ok: false, reason: "owner-not-found" };
+  }
+  if (normalizeOwnerType(sourceEntry.ownerType) !== OWNER_TYPE_CHARACTER) {
+    return { ok: false, reason: "unsupported-owner-type" };
+  }
+
+  const archivedCharacterNodeIds =
+    normalizedMode === "archive-character" || normalizedMode === "archive-all"
+      ? archiveCharacterNodesForOwner(graph, sourceEntry)
+      : [];
+  const archivedPovNodeIds =
+    normalizedMode === "archive-all"
+      ? archivePovNodesForOwner(graph, sourceEntry)
+      : [];
+
+  delete graph.knowledgeState.owners[normalizedOwnerKey];
+  updateHistoryOwnerReferences(graph.historyState, sourceEntry, null);
+  graph.knowledgeState = normalizeKnowledgeState(graph.knowledgeState, graph);
+  return {
+    ok: true,
+    ownerKey: normalizedOwnerKey,
+    mode: normalizedMode,
+    archivedCharacterNodeIds,
+    archivedPovNodeIds,
+  };
+}
+
 export function getKnowledgeOwnerEntry(graph, ownerKey = "") {
   normalizeGraphCognitiveState(graph);
   const normalizedOwnerKey = normalizeString(ownerKey);
