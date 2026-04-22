@@ -428,7 +428,7 @@ async function readJsonFile(parentHandle, name, fallbackValue = null) {
 
 async function writeJsonFile(parentHandle, name, value, options = {}) {
   const serializedText =
-    typeof options?.serializedText === "string"
+    typeof options?.serializedText === "string" && options.serializedText
       ? options.serializedText
       : JSON.stringify(value);
   const fileHandle = await parentHandle.getFileHandle(String(name || ""), {

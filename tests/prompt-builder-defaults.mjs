@@ -69,15 +69,17 @@ const extractPromptBuild = await buildTaskPrompt(settings, "extract", {
 const extractPayload = buildTaskLlmPayload(extractPromptBuild, "fallback-user");
 assert.equal(extractPayload.systemPrompt, "");
 assert.equal(extractPayload.userPrompt, "");
-assert.equal(
-  extractPayload.promptMessages.filter((message) => message.role === "user").length,
-  2,
-);
 assert.deepEqual(
   extractPayload.promptMessages
     .filter((message) => message.role === "user")
     .map((message) => message.blockName),
   ["输出格式", "行为规则"],
+);
+assert.deepEqual(
+  extractPayload.promptMessages
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.blockName),
+  ["身份确认", "信息确认"],
 );
 const extractFormatBlock = extractPayload.promptMessages.find(
   (message) => message.blockName === "输出格式",
@@ -98,10 +100,10 @@ assert.deepEqual(
   [
     "charDescription",
     "userPersona",
-    "recentMessages",
     "graphStats",
     "schema",
     "currentRange",
+    "recentMessages",
   ],
 );
 
@@ -118,9 +120,17 @@ const recallPromptBuild = await buildTaskPrompt(settings, "recall", {
 const recallPayload = buildTaskLlmPayload(recallPromptBuild, "fallback-user");
 assert.equal(recallPayload.systemPrompt, "");
 assert.equal(recallPayload.userPrompt, "");
-assert.equal(
-  recallPayload.promptMessages.filter((message) => message.role === "user").length,
-  2,
+assert.deepEqual(
+  recallPayload.promptMessages
+    .filter((message) => message.role === "user")
+    .map((message) => message.blockName),
+  ["输出格式", "行为规则"],
+);
+assert.deepEqual(
+  recallPayload.promptMessages
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.blockName),
+  ["身份确认", "信息确认"],
 );
 assert.deepEqual(
   recallPayload.promptMessages
@@ -129,11 +139,11 @@ assert.deepEqual(
   [
     "charDescription",
     "userPersona",
+    "graphStats",
+    "sceneOwnerCandidates",
+    "candidateNodes",
     "recentMessages",
     "userMessage",
-    "candidateNodes",
-    "sceneOwnerCandidates",
-    "graphStats",
   ],
 );
 const recallFormatBlock = recallPayload.promptMessages.find(

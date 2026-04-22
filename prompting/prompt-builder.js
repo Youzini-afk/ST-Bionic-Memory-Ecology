@@ -2100,7 +2100,7 @@ function splitSectionedTranscriptPayloadMessage(message = {}) {
       ? EXTRACTION_TARGET_CONTENT_HEADER
       : "";
   if (
-    normalizedRole !== "system" ||
+    !["system", "user"].includes(normalizedRole) ||
     !["recentMessages", "dialogueText"].includes(sourceKey) ||
     !content.includes(EXTRACTION_CONTEXT_REVIEW_HEADER) ||
     !targetSectionHeader
@@ -2154,7 +2154,7 @@ function splitSectionedTranscriptPayloadMessage(message = {}) {
       current.header === EXTRACTION_CONTEXT_REVIEW_HEADER ? "context" : "target";
     splitMessages.push(
       createExecutionMessage(
-        "system",
+        normalizedRole,
         sectionBody ? `${current.header}\n\n${sectionBody}` : current.header,
         {
           ...sharedMeta,

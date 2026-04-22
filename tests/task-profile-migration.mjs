@@ -34,22 +34,24 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 14);
+assert.equal(extractProfile.blocks.length, 16);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
   [
     "抬头",
     "角色定义",
+    "身份确认",
     "角色描述",
     "用户设定",
     "世界书前块",
     "世界书后块",
-    "最近消息",
     "图统计",
     "Schema",
-    "当前范围",
     "活跃总结",
     "故事时间",
+    "当前范围",
+    "最近消息",
+    "信息确认",
     "输出格式",
     "行为规则",
   ],
@@ -59,6 +61,7 @@ assert.deepEqual(
   [
     "custom",
     "custom",
+    "custom",
     "builtin",
     "builtin",
     "builtin",
@@ -69,6 +72,7 @@ assert.deepEqual(
     "builtin",
     "builtin",
     "builtin",
+    "custom",
     "custom",
     "custom",
   ],
@@ -78,6 +82,7 @@ assert.deepEqual(
   [
     "system",
     "system",
+    "assistant",
     "system",
     "system",
     "system",
@@ -88,6 +93,7 @@ assert.deepEqual(
     "system",
     "system",
     "system",
+    "assistant",
     "user",
     "user",
   ],
@@ -112,15 +118,17 @@ assert.deepEqual(
   [
     "default-heading",
     "default-role",
+    "default-identity-ack",
     "charDescription",
     "userPersona",
     "worldInfoBefore",
     "worldInfoAfter",
+    "graphStats",
+    "sceneOwnerCandidates",
+    "candidateNodes",
     "recentMessages",
     "userMessage",
-    "candidateNodes",
-    "sceneOwnerCandidates",
-    "graphStats",
+    "default-info-ack",
     "default-format",
     "default-rules",
   ],
@@ -130,14 +138,16 @@ assert.deepEqual(
   [
     "default-heading",
     "default-role",
+    "default-identity-ack",
     "charDescription",
     "userPersona",
     "worldInfoBefore",
     "worldInfoAfter",
-    "recentMessages",
+    "graphStats",
     "candidateText",
     "currentRange",
-    "graphStats",
+    "recentMessages",
+    "default-info-ack",
     "default-format",
     "default-rules",
   ],
@@ -220,16 +230,34 @@ const upgradedLegacyDefault = getActiveTaskProfile(
   },
   "extract",
 );
-assert.equal(upgradedLegacyDefault.blocks.length, 14);
+assert.equal(upgradedLegacyDefault.blocks.length, 16);
 assert.equal(upgradedLegacyDefault.blocks[0].name, "抬头");
 assert.match(upgradedLegacyDefault.blocks[0].content, /虚拟的世界/);
 assert.equal(upgradedLegacyDefault.blocks[0].role, "system");
 assert.equal(upgradedLegacyDefault.blocks[0].injectionMode, "relative");
 assert.equal(upgradedLegacyDefault.blocks[1].content, "保留我自己的角色定义");
-assert.equal(upgradedLegacyDefault.blocks[12].content, "保留我自己的输出格式");
-assert.equal(upgradedLegacyDefault.blocks[13].content, "保留我自己的行为规则");
-assert.equal(upgradedLegacyDefault.blocks[12].role, "user");
-assert.equal(upgradedLegacyDefault.blocks[13].role, "user");
+const upgradedIdentityAck = upgradedLegacyDefault.blocks.find(
+  (block) => block.id === "default-identity-ack",
+);
+assert.ok(
+  upgradedIdentityAck,
+  "legacy upgrade should backfill default-identity-ack block",
+);
+assert.equal(upgradedIdentityAck.role, "assistant");
+const upgradedInfoAck = upgradedLegacyDefault.blocks.find(
+  (block) => block.id === "default-info-ack",
+);
+assert.ok(
+  upgradedInfoAck,
+  "legacy upgrade should backfill default-info-ack block",
+);
+assert.equal(upgradedInfoAck.role, "assistant");
+assert.equal(upgradedLegacyDefault.blocks[14].id, "default-format");
+assert.equal(upgradedLegacyDefault.blocks[15].id, "default-rules");
+assert.equal(upgradedLegacyDefault.blocks[14].content, "保留我自己的输出格式");
+assert.equal(upgradedLegacyDefault.blocks[15].content, "保留我自己的行为规则");
+assert.equal(upgradedLegacyDefault.blocks[14].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[15].role, "user");
 
 const currentDefaults = createDefaultTaskProfiles();
 const currentDefaultExtract = currentDefaults.extract.profiles[0];
@@ -389,15 +417,33 @@ assert.equal(
 
 assert.deepEqual(
   upgradedLegacyDefault.blocks
-    .slice(6, 10)
+    .slice(7, 13)
     .map((block) => block.sourceKey),
-  ["recentMessages", "graphStats", "schema", "currentRange"],
+  [
+    "graphStats",
+    "schema",
+    "activeSummaries",
+    "storyTimeContext",
+    "currentRange",
+    "recentMessages",
+  ],
 );
 assert.ok(
   upgradedLegacyDefault.blocks
-    .slice(0, 12)
+    .slice(0, 2)
     .every((block) => block.role === "system"),
+  "heading / role 头部块应保持 system 角色",
 );
+assert.equal(upgradedLegacyDefault.blocks[2].id, "default-identity-ack");
+assert.equal(upgradedLegacyDefault.blocks[2].role, "assistant");
+assert.ok(
+  upgradedLegacyDefault.blocks
+    .slice(3, 13)
+    .every((block) => block.role === "system"),
+  "参考材料与本轮输入块应为 system 角色",
+);
+assert.equal(upgradedLegacyDefault.blocks[13].id, "default-info-ack");
+assert.equal(upgradedLegacyDefault.blocks[13].role, "assistant");
 
 const legacyRegexSettings = {
   taskProfilesVersion: 3,

@@ -155,7 +155,16 @@ try {
     },
   });
 
-  assert.equal(JSON.stringify(graph), graphBefore, "shared ranking should be side-effect-free");
+  const stripDiagnosticTimings = (json) => {
+    const obj = JSON.parse(json);
+    if (obj?.vectorIndexState) delete obj.vectorIndexState.lastSearchTimings;
+    return JSON.stringify(obj);
+  };
+  assert.equal(
+    stripDiagnosticTimings(JSON.stringify(graph)),
+    stripDiagnosticTimings(graphBefore),
+    "shared ranking should be side-effect-free (ignoring diagnostic timings)",
+  );
   assert.equal(first.scoredNodes[0]?.nodeId, confession.id);
   assert.equal(second.scoredNodes[0]?.nodeId, confession.id);
   assert.deepEqual(
