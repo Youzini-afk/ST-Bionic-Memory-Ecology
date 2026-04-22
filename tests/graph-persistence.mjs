@@ -9,6 +9,7 @@ import {
   buildGraphFromSnapshot,
   buildPersistDelta,
   buildSnapshotFromGraph,
+  evaluateNativeHydrateGate,
   evaluatePersistNativeDeltaGate,
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
@@ -1032,6 +1033,7 @@ async function createGraphPersistenceHarness({
     buildGraphFromSnapshot,
     buildPersistDelta,
     buildSnapshotFromGraph,
+    evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
     buildBmeDbName,
     BME_GRAPH_LOCAL_STORAGE_MODE_AUTO: "auto",

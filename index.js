@@ -23,6 +23,7 @@ import {
   buildPersistDelta,
   buildGraphFromSnapshot,
   buildSnapshotFromGraph,
+  evaluateNativeHydrateGate,
   evaluatePersistNativeDeltaGate,
   ensureDexieLoaded,
 } from "./sync/bme-db.js";
@@ -1207,6 +1208,7 @@ let isRecalling = false;
 let activeRecallPromise = null;
 let recallRunSequence = 0;
 let nativePersistDeltaInstallPromise = null;
+let nativeHydrateInstallPromise = null;
 let lastInjectionContent = "";
 let lastExtractedItems = []; // 最近提取的节点（面板展示用）
 let lastRecalledItems = []; // 最近召回的节点（面板展示用）
@@ -9122,6 +9124,14 @@ function applyIndexedDbSnapshotToRuntime(
     storageMode = storagePrimary,
     statusLabel = "IndexedDB",
     reasonPrefix = "indexeddb",
+    currentSettings = null,
+    nativeHydrateRequested = null,
+    nativeHydrateForceDisabled = null,
+    nativeHydrateGate = null,
+    nativeHydratePreloadStatus = "",
+    nativeHydratePreloadMs = 0,
+    nativeHydratePreloadError = "",
+    nativeHydrateModuleStatus = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
@@ -9221,10 +9231,35 @@ function applyIndexedDbSnapshotToRuntime(
   }
   let graphFromSnapshot = null;
   let hydrateDiagnostics = null;
+  const effectiveSettings = currentSettings || getSettings();
+  const resolvedNativeHydrateRequested =
+    nativeHydrateRequested == null
+      ? effectiveSettings.loadUseNativeHydrate === true
+      : nativeHydrateRequested === true;
+  const resolvedNativeHydrateForceDisabled =
+    nativeHydrateForceDisabled == null
+      ? effectiveSettings.graphNativeForceDisable === true
+      : nativeHydrateForceDisabled === true;
+  const resolvedNativeHydrateGate =
+    nativeHydrateGate && typeof nativeHydrateGate === "object"
+      ? nativeHydrateGate
+      : evaluateNativeHydrateGate(snapshot, effectiveSettings);
+  const shouldUseNativeHydrate =
+    resolvedNativeHydrateRequested &&
+    resolvedNativeHydrateForceDisabled !== true &&
+    resolvedNativeHydrateGate.allowed;
+  const resolvedNativeHydratePreloadStatus = String(
+    nativeHydratePreloadStatus ||
+      (resolvedNativeHydrateRequested ? "not-preloaded" : "not-requested"),
+  );
   try {
     const hydrateStartedAt = readLoadDiagnosticsNow();
     graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
       chatId: normalizedChatId,
+      useNativeHydrate: shouldUseNativeHydrate,
+      nativeFailOpen: effectiveSettings.nativeEngineFailOpen !== false,
+      loadNativeHydrateThresholdRecords:
+        effectiveSettings.loadNativeHydrateThresholdRecords,
       onDiagnostics(snapshotValue) {
         hydrateDiagnostics =
           snapshotValue &&
@@ -9277,6 +9312,17 @@ function applyIndexedDbSnapshotToRuntime(
       integrityReasons: Array.isArray(error?.reasons) ? error.reasons : [],
       chatId: normalizedChatId,
       attemptIndex,
+      hydrateDiagnostics: cloneRuntimeDebugValue(hydrateDiagnostics, null),
+      nativeHydrateRequested: resolvedNativeHydrateRequested,
+      nativeHydrateForceDisabled: resolvedNativeHydrateForceDisabled,
+      nativeHydrateGate: cloneRuntimeDebugValue(resolvedNativeHydrateGate, null),
+      nativeHydratePreloadStatus: resolvedNativeHydratePreloadStatus,
+      nativeHydratePreloadMs: nativeHydratePreloadMs,
+      nativeHydratePreloadError: nativeHydratePreloadError,
+      nativeHydrateModuleStatus: cloneRuntimeDebugValue(
+        nativeHydrateModuleStatus,
+        null,
+      ),
     };
     recordLoadDiagnostics({
       success: false,
@@ -9295,6 +9341,27 @@ function applyIndexedDbSnapshotToRuntime(
       ),
       hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
         hydrateDiagnostics?.integrityMs,
+      ),
+      hydrateNativeRequested: resolvedNativeHydrateRequested,
+      hydrateNativeForceDisabled: resolvedNativeHydrateForceDisabled,
+      hydrateNativeGateAllowed: resolvedNativeHydrateGate.allowed === true,
+      hydrateNativeGateReasons: cloneRuntimeDebugValue(
+        resolvedNativeHydrateGate.reasons,
+        [],
+      ),
+      hydrateNativePreloadStatus: resolvedNativeHydratePreloadStatus,
+      hydrateNativePreloadMs: normalizeLoadDiagnosticsMs(nativeHydratePreloadMs),
+      hydrateNativePreloadError: String(nativeHydratePreloadError || ""),
+      hydrateNativeModuleLoaded: Boolean(nativeHydrateModuleStatus?.loaded),
+      hydrateNativeModuleSource: String(nativeHydrateModuleStatus?.source || ""),
+      hydrateNativeModuleError: String(
+        nativeHydrateModuleStatus?.error || nativeHydratePreloadError || "",
+      ),
+      hydrateNativeUsed: hydrateDiagnostics?.nativeUsed === true,
+      hydrateNativeStatus: String(hydrateDiagnostics?.nativeStatus || ""),
+      hydrateNativeError: String(hydrateDiagnostics?.nativeError || ""),
+      hydrateNativeRecordsMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.nativeRecordsMs,
       ),
       error: error?.message || String(error),
       integrityReasons: Array.isArray(error?.reasons) ? [...error.reasons] : [],
@@ -9405,6 +9472,17 @@ function applyIndexedDbSnapshotToRuntime(
     attemptIndex,
     shadowSnapshotUsed: false,
     revision,
+    hydrateDiagnostics: cloneRuntimeDebugValue(hydrateDiagnostics, null),
+    nativeHydrateRequested: resolvedNativeHydrateRequested,
+    nativeHydrateForceDisabled: resolvedNativeHydrateForceDisabled,
+    nativeHydrateGate: cloneRuntimeDebugValue(resolvedNativeHydrateGate, null),
+    nativeHydratePreloadStatus: resolvedNativeHydratePreloadStatus,
+    nativeHydratePreloadMs: nativeHydratePreloadMs,
+    nativeHydratePreloadError: nativeHydratePreloadError,
+    nativeHydrateModuleStatus: cloneRuntimeDebugValue(
+      nativeHydrateModuleStatus,
+      null,
+    ),
   };
   recordLoadDiagnostics({
     success: true,
@@ -9423,6 +9501,27 @@ function applyIndexedDbSnapshotToRuntime(
     ),
     hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
       hydrateDiagnostics?.integrityMs,
+    ),
+    hydrateNativeRequested: resolvedNativeHydrateRequested,
+    hydrateNativeForceDisabled: resolvedNativeHydrateForceDisabled,
+    hydrateNativeGateAllowed: resolvedNativeHydrateGate.allowed === true,
+    hydrateNativeGateReasons: cloneRuntimeDebugValue(
+      resolvedNativeHydrateGate.reasons,
+      [],
+    ),
+    hydrateNativePreloadStatus: resolvedNativeHydratePreloadStatus,
+    hydrateNativePreloadMs: normalizeLoadDiagnosticsMs(nativeHydratePreloadMs),
+    hydrateNativePreloadError: String(nativeHydratePreloadError || ""),
+    hydrateNativeModuleLoaded: Boolean(nativeHydrateModuleStatus?.loaded),
+    hydrateNativeModuleSource: String(nativeHydrateModuleStatus?.source || ""),
+    hydrateNativeModuleError: String(
+      nativeHydrateModuleStatus?.error || nativeHydratePreloadError || "",
+    ),
+    hydrateNativeUsed: hydrateDiagnostics?.nativeUsed === true,
+    hydrateNativeStatus: String(hydrateDiagnostics?.nativeStatus || ""),
+    hydrateNativeError: String(hydrateDiagnostics?.nativeError || ""),
+    hydrateNativeRecordsMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.nativeRecordsMs,
     ),
     applyRuntimeMs: normalizeLoadDiagnosticsMs(
       readLoadDiagnosticsNow() - applyRuntimeStartedAt,
@@ -9458,6 +9557,7 @@ async function loadGraphFromIndexedDb(
   let exportProbeMs = 0;
   let preApplyMs = 0;
   let exportSnapshotSource = "";
+  const currentSettings = getSettings();
   if (!normalizedChatId) {
     const result = {
       success: false,
@@ -9917,6 +10017,57 @@ async function loadGraphFromIndexedDb(
     }
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
+    const nativeHydrateRequested = currentSettings.loadUseNativeHydrate === true;
+    const nativeHydrateForceDisabled =
+      currentSettings.graphNativeForceDisable === true;
+    const nativeHydrateGate = evaluateNativeHydrateGate(snapshot, currentSettings);
+    const shouldUseNativeHydrate =
+      nativeHydrateRequested &&
+      nativeHydrateForceDisabled !== true &&
+      nativeHydrateGate.allowed;
+    let nativeHydrateModuleStatus = null;
+    let nativeHydratePreloadStatus = nativeHydrateRequested
+      ? nativeHydrateForceDisabled
+        ? "force-disabled"
+        : nativeHydrateGate.allowed
+          ? "pending"
+          : "gated-out"
+      : "not-requested";
+    let nativeHydratePreloadError = "";
+    let nativeHydratePreloadMs = 0;
+    if (shouldUseNativeHydrate) {
+      const preloadStartedAt = readLoadDiagnosticsNow();
+      try {
+        if (!nativeHydrateInstallPromise) {
+          nativeHydrateInstallPromise = import("./vendor/wasm/stbme_core.js")
+            .then((module) => module?.installNativeHydrateHook?.())
+            .catch((error) => {
+              nativeHydrateInstallPromise = null;
+              throw error;
+            });
+        }
+        nativeHydrateModuleStatus = await nativeHydrateInstallPromise;
+        nativeHydratePreloadStatus = nativeHydrateModuleStatus?.loaded
+          ? "loaded"
+          : "not-loaded";
+        nativeHydratePreloadMs =
+          readLoadDiagnosticsNow() - preloadStartedAt;
+      } catch (error) {
+        nativeHydratePreloadStatus = "failed";
+        nativeHydratePreloadMs =
+          readLoadDiagnosticsNow() - preloadStartedAt;
+        nativeHydratePreloadError = error?.message || String(error);
+        if (currentSettings.nativeEngineFailOpen !== false) {
+          console.warn(
+            "[ST-BME] native hydrate preload failed, fallback to JS hydrate:",
+            error,
+          );
+        } else {
+          throw error;
+        }
+      }
+    }
+
     preApplyMs = readLoadDiagnosticsNow() - loadStartedAt;
     const applyInvokeStartedAt = readLoadDiagnosticsNow();
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
@@ -9926,6 +10077,14 @@ async function loadGraphFromIndexedDb(
       storageMode: snapshotStore.storageMode,
       statusLabel: snapshotStore.statusLabel,
       reasonPrefix: snapshotStore.reasonPrefix,
+      currentSettings,
+      nativeHydrateRequested,
+      nativeHydrateForceDisabled,
+      nativeHydrateGate,
+      nativeHydratePreloadStatus,
+      nativeHydratePreloadMs,
+      nativeHydratePreloadError,
+      nativeHydrateModuleStatus,
     });
     const applyInvokeMs = readLoadDiagnosticsNow() - applyInvokeStartedAt;
     const totalLoadMs = readLoadDiagnosticsNow() - loadStartedAt;
@@ -9951,6 +10110,39 @@ async function loadGraphFromIndexedDb(
       preApplyMs: normalizeLoadDiagnosticsMs(preApplyMs),
       preApplyOtherMs: normalizeLoadDiagnosticsMs(
         Math.max(0, preApplyMs - exportSnapshotMs - exportProbeMs),
+      ),
+      hydrateNativeRequested: loadResult?.nativeHydrateRequested === true,
+      hydrateNativeForceDisabled: loadResult?.nativeHydrateForceDisabled === true,
+      hydrateNativeGateAllowed: loadResult?.nativeHydrateGate?.allowed === true,
+      hydrateNativeGateReasons: cloneRuntimeDebugValue(
+        loadResult?.nativeHydrateGate?.reasons,
+        [],
+      ),
+      hydrateNativePreloadStatus: String(
+        loadResult?.nativeHydratePreloadStatus || nativeHydratePreloadStatus || "",
+      ),
+      hydrateNativePreloadMs: normalizeLoadDiagnosticsMs(
+        loadResult?.nativeHydratePreloadMs,
+      ),
+      hydrateNativePreloadError: String(
+        loadResult?.nativeHydratePreloadError || "",
+      ),
+      hydrateNativeModuleLoaded: Boolean(
+        loadResult?.nativeHydrateModuleStatus?.loaded,
+      ),
+      hydrateNativeModuleSource: String(
+        loadResult?.nativeHydrateModuleStatus?.source || "",
+      ),
+      hydrateNativeModuleError: String(
+        loadResult?.nativeHydrateModuleStatus?.error || "",
+      ),
+      hydrateNativeUsed: loadResult?.hydrateDiagnostics?.nativeUsed === true,
+      hydrateNativeStatus: String(
+        loadResult?.hydrateDiagnostics?.nativeStatus || "",
+      ),
+      hydrateNativeError: String(loadResult?.hydrateDiagnostics?.nativeError || ""),
+      hydrateNativeRecordsMs: normalizeLoadDiagnosticsMs(
+        loadResult?.hydrateDiagnostics?.nativeRecordsMs,
       ),
       applyInvokeMs: normalizeLoadDiagnosticsMs(applyInvokeMs),
       untrackedMs: normalizeLoadDiagnosticsMs(

@@ -17,6 +17,8 @@ const args = new Map(
 const baselineRef = String(args.get("--baseline") || "origin/main");
 const currentRef = String(args.get("--current") || "HEAD");
 const outputJson = args.has("--json");
+const useNativeHydrate = args.has("--native-hydrate");
+const nativeHydrateThreshold = args.get("--native-hydrate-threshold");
 
 async function runCommand(command, commandArgs, cwd) {
   const { stdout, stderr } = await execFileAsync(command, commandArgs, {
@@ -78,9 +80,16 @@ function printRows(rows = [], title = "") {
 }
 
 async function runBenchSuite(cwd) {
+  const persistLoadArgs = ["tests/perf/persist-load-bench.mjs", "--json"];
+  if (useNativeHydrate) {
+    persistLoadArgs.push("--native-hydrate");
+  }
+  if (nativeHydrateThreshold !== undefined && nativeHydrateThreshold !== true) {
+    persistLoadArgs.push(`--native-hydrate-threshold=${nativeHydrateThreshold}`);
+  }
   const persistLoad = await runCommand(
     process.execPath,
-    ["tests/perf/persist-load-bench.mjs", "--json"],
+    persistLoadArgs,
     cwd,
   );
   const loadPreapply = await runCommand(
@@ -153,6 +162,11 @@ async function main() {
           baselineSha,
           currentRef,
           currentSha,
+          nativeHydrateRequested: useNativeHydrate,
+          nativeHydrateThreshold:
+            nativeHydrateThreshold !== undefined && nativeHydrateThreshold !== true
+              ? String(nativeHydrateThreshold)
+              : null,
           compare,
         }),
       );
@@ -161,6 +175,15 @@ async function main() {
 
     console.log(`[ST-BME][P1-compare] baseline=${baselineRef} (${baselineSha.slice(0, 7)})`);
     console.log(`[ST-BME][P1-compare] current=${currentRef} (${currentSha.slice(0, 7)})`);
+    if (useNativeHydrate) {
+      console.log(
+        `[ST-BME][P1-compare] nativeHydrate=on threshold=${
+          nativeHydrateThreshold !== undefined && nativeHydrateThreshold !== true
+            ? nativeHydrateThreshold
+            : "default"
+        }`,
+      );
+    }
 
     printRows(
       collectMetricRows(compare, (entry) => entry.opfsCommitMs?.p95, "opfsCommitMs.p95"),

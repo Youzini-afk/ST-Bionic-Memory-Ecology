@@ -13,11 +13,26 @@ import { createMemoryOpfsRoot } from "../helpers/memory-opfs.mjs";
 
 const RUNS = 4;
 const outputJson = process.argv.includes("--json");
+const useNativeHydrate = process.argv.includes("--native-hydrate");
+const nativeHydrateThresholdArg = process.argv.find((entry) =>
+  String(entry || "").startsWith("--native-hydrate-threshold="),
+);
+const nativeHydrateThresholdRecords = nativeHydrateThresholdArg
+  ? Math.max(
+      0,
+      Math.floor(
+        Number(String(nativeHydrateThresholdArg).split("=").slice(1).join("=") || 0) || 0,
+      ),
+    )
+  : undefined;
 const SIZE_PRESETS = [
   { label: "M", seed: 17, nodeCount: 1200, edgeCount: 3600, churn: 0.08 },
   { label: "L", seed: 29, nodeCount: 3600, edgeCount: 10800, churn: 0.1 },
   { label: "XL", seed: 43, nodeCount: 7200, edgeCount: 21600, churn: 0.12 },
 ];
+
+let nativeHydratePreloadStatus = useNativeHydrate ? "pending" : "not-requested";
+let nativeHydratePreloadError = "";
 
 function summarize(values = []) {
   if (!values.length) {
@@ -218,6 +233,9 @@ function measureHydrate(snapshot, chatId) {
   const startedAt = performance.now();
   buildGraphFromSnapshot(snapshot, {
     chatId,
+    useNativeHydrate,
+    loadNativeHydrateThresholdRecords: nativeHydrateThresholdRecords,
+    nativeFailOpen: true,
     onDiagnostics(snapshotValue) {
       diagnostics = snapshotValue;
     },
@@ -266,8 +284,10 @@ async function runPreset(preset) {
   const hydrateStateSamples = [];
   const hydrateNormalizeSamples = [];
   const hydrateIntegritySamples = [];
+  const hydrateNativeRecordsSamples = [];
   const walFileWriteSamples = [];
   const manifestFileWriteSamples = [];
+  let hydrateNativeUsedRuns = 0;
 
   for (let run = 0; run < RUNS; run += 1) {
     const pair = buildBenchPair({
@@ -306,6 +326,12 @@ async function runPreset(preset) {
     hydrateStateSamples.push(Number(hydrateResult.diagnostics?.stateMs || 0));
     hydrateNormalizeSamples.push(Number(hydrateResult.diagnostics?.normalizeMs || 0));
     hydrateIntegritySamples.push(Number(hydrateResult.diagnostics?.integrityMs || 0));
+    hydrateNativeRecordsSamples.push(
+      Number(hydrateResult.diagnostics?.nativeRecordsMs || 0),
+    );
+    if (hydrateResult.diagnostics?.nativeUsed === true) {
+      hydrateNativeUsedRuns += 1;
+    }
     walFileWriteSamples.push(Number(opfsCommitResult.diagnostics?.walFileWriteMs || 0));
     manifestFileWriteSamples.push(
       Number(opfsCommitResult.diagnostics?.manifestFileWriteMs || 0),
@@ -321,6 +347,11 @@ async function runPreset(preset) {
     hydrateStateMs: summarize(hydrateStateSamples),
     hydrateNormalizeMs: summarize(hydrateNormalizeSamples),
     hydrateIntegrityMs: summarize(hydrateIntegritySamples),
+    hydrateNativeRecordsMs: summarize(hydrateNativeRecordsSamples),
+    hydrateNativeUsedRuns,
+    nativeHydrateRequested: useNativeHydrate,
+    nativeHydrateThresholdRecords:
+      nativeHydrateThresholdRecords == null ? null : nativeHydrateThresholdRecords,
     hydrateRuntimeMetaMs: summarize(hydrateRuntimeMetaSamples),
     opfsCommitMs: summarize(opfsCommitSamples),
     opfsWalFileWriteMs: summarize(walFileWriteSamples),
@@ -338,6 +369,8 @@ async function runPreset(preset) {
       `edgesP95=${result.hydrateEdgesMs.p95.toFixed(2)}ms`,
       `normalizeP95=${result.hydrateNormalizeMs.p95.toFixed(2)}ms`,
       `integrityP95=${result.hydrateIntegrityMs.p95.toFixed(2)}ms`,
+      `nativeRecordsP95=${result.hydrateNativeRecordsMs.p95.toFixed(2)}ms`,
+      `nativeUsed=${result.hydrateNativeUsedRuns}/${RUNS}`,
       `runtimeMetaP95=${result.hydrateRuntimeMetaMs.p95.toFixed(2)}ms`,
     );
     console.log(
@@ -350,15 +383,36 @@ async function runPreset(preset) {
 }
 
 async function main() {
-  const results = {};
-  for (const preset of SIZE_PRESETS) {
-    results[preset.label] = await runPreset(preset);
+  if (useNativeHydrate) {
+    try {
+      const nativeModule = await import("../../vendor/wasm/stbme_core.js");
+      const nativeStatus = await nativeModule?.installNativeHydrateHook?.();
+      nativeHydratePreloadStatus = nativeStatus?.loaded ? "loaded" : "not-loaded";
+      nativeHydratePreloadError = String(nativeStatus?.error || "");
+    } catch (error) {
+      nativeHydratePreloadStatus = "failed";
+      nativeHydratePreloadError = error?.message || String(error);
+      console.warn(
+        "[ST-BME][persist-load-bench] native hydrate preload failed, fallback to JS hydrate:",
+        error,
+      );
+    }
   }
+  const presets = {};
+  for (const preset of SIZE_PRESETS) {
+    presets[preset.label] = await runPreset(preset);
+  }
+  const payload = {
+    runs: RUNS,
+    nativeHydrateRequested: useNativeHydrate,
+    nativeHydratePreloadStatus,
+    nativeHydratePreloadError,
+    nativeHydrateThresholdRecords:
+      nativeHydrateThresholdRecords == null ? null : nativeHydrateThresholdRecords,
+    presets,
+  };
   if (outputJson) {
-    console.log(JSON.stringify({
-      runs: RUNS,
-      presets: results,
-    }));
+    console.log(JSON.stringify(payload));
   }
 }
 

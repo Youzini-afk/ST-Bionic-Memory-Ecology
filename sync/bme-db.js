@@ -19,6 +19,7 @@ const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_RECORDS = 20000;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_STRUCTURAL_DELTA = 600;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS = 4000000;
 const DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE = "json";
+const DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS = 12000;
 const SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES = new Set(["json", "hash"]);
 const PERSIST_RECORD_SERIALIZATION_CACHE_LIMIT = 50000;
 
@@ -128,6 +129,52 @@ function estimatePersistPayloadBytes(value = null) {
     return JSON.stringify(value).length;
   } catch {
     return 0;
+  }
+}
+
+function tryBuildNativeHydrateRecords(snapshotView, options = {}) {
+  if (options?.useNativeHydrate !== true) {
+    return {
+      rawResult: null,
+      status: "not-requested",
+      error: "",
+    };
+  }
+  const nativeBuilder = globalThis.__stBmeNativeHydrateSnapshotRecords;
+  if (typeof nativeBuilder !== "function") {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-hydrate-builder-unavailable");
+    }
+    return {
+      rawResult: null,
+      status: "builder-unavailable",
+      error: "native-hydrate-builder-unavailable",
+    };
+  }
+
+  try {
+    return {
+      rawResult: nativeBuilder(
+        {
+          nodes: toArray(snapshotView?.nodes),
+          edges: toArray(snapshotView?.edges),
+        },
+        {
+          recordsNormalized: options?.recordsNormalized === true,
+        },
+      ),
+      status: "ok",
+      error: "",
+    };
+  } catch (error) {
+    if (options?.nativeFailOpen === false) {
+      throw error;
+    }
+    return {
+      rawResult: null,
+      status: "builder-error",
+      error: error?.message || String(error),
+    };
   }
 }
 
@@ -303,6 +350,72 @@ function cloneHydrateSnapshotNodeRecords(records = []) {
   return output;
 }
 
+function hasSharedHydrateRecordReferences(records = [], sourceRecords = []) {
+  const normalizedSourceRecords = toArray(sourceRecords);
+  if (!normalizedSourceRecords.length || !Array.isArray(records) || !records.length) {
+    return false;
+  }
+  const sourceRecordSet = new WeakSet();
+  for (let index = 0; index < normalizedSourceRecords.length; index += 1) {
+    const record = normalizedSourceRecords[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    sourceRecordSet.add(record);
+  }
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    if (sourceRecordSet.has(record)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeNativeHydrateRecordArray(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const record = sourceRecords[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    output[writeIndex] = record;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
+}
+
+function normalizeNativeHydrateResult(rawResult = null, snapshotView = {}) {
+  if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+    return null;
+  }
+  if (
+    rawResult.nodes === snapshotView?.nodes ||
+    rawResult.edges === snapshotView?.edges
+  ) {
+    return null;
+  }
+  const nodes = normalizeNativeHydrateRecordArray(rawResult.nodes);
+  const edges = normalizeNativeHydrateRecordArray(rawResult.edges);
+  if (
+    hasSharedHydrateRecordReferences(nodes, snapshotView?.nodes) ||
+    hasSharedHydrateRecordReferences(edges, snapshotView?.edges)
+  ) {
+    return null;
+  }
+  return {
+    nodes,
+    edges,
+    diagnostics:
+      rawResult.diagnostics &&
+      typeof rawResult.diagnostics === "object" &&
+      !Array.isArray(rawResult.diagnostics)
+        ? rawResult.diagnostics
+        : null,
+  };
+}
+
 function cloneHydrateSnapshotEdgeRecords(records = []) {
   const sourceRecords = toArray(records);
   if (sourceRecords.length === 0) return [];
@@ -450,6 +563,40 @@ function countPersistSnapshotRecords(snapshot = {}) {
     toArray(snapshot?.edges).length +
     toArray(snapshot?.tombstones).length
   );
+}
+
+function countHydrateSnapshotRecords(snapshot = {}) {
+  return toArray(snapshot?.nodes).length + toArray(snapshot?.edges).length;
+}
+
+export function resolveNativeHydrateGateOptions(options = {}) {
+  return {
+    minSnapshotRecords: normalizePersistNativeDeltaThreshold(
+      options?.loadNativeHydrateThresholdRecords ??
+        options?.hydrateNativeThresholdRecords ??
+        options?.minSnapshotRecords,
+      DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS,
+    ),
+  };
+}
+
+export function evaluateNativeHydrateGate(snapshot, options = {}) {
+  const normalizedSnapshot = normalizePersistSnapshotView(snapshot);
+  const gateOptions = resolveNativeHydrateGateOptions(options);
+  const recordCount = countHydrateSnapshotRecords(normalizedSnapshot);
+  const reasons = [];
+  if (
+    gateOptions.minSnapshotRecords > 0 &&
+    recordCount < gateOptions.minSnapshotRecords
+  ) {
+    reasons.push("below-min-snapshot-records");
+  }
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    minSnapshotRecords: gateOptions.minSnapshotRecords,
+    recordCount,
+  };
 }
 
 function countPersistSnapshotStructuralDelta(beforeSnapshot = {}, afterSnapshot = {}) {
@@ -2272,6 +2419,14 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
         normalizeMs: 0,
         integrityMs: 0,
         integrityReasonCount: 0,
+        nativeRequested: false,
+        nativeUsed: false,
+        nativeStatus: "not-requested",
+        nativeError: "",
+        nativeRecordsMs: 0,
+        nativeGateAllowed: false,
+        nativeGateReasons: [],
+        nativeModuleDiagnostics: null,
       }
     : null;
   const snapshotView = normalizePersistSnapshotView(snapshot);
@@ -2301,6 +2456,58 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   );
   const snapshotRecordsNormalized =
     snapshotMeta?.[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY] === true;
+  const nativeHydrateGate =
+    options?.useNativeHydrate === true
+      ? evaluateNativeHydrateGate(snapshotView, options)
+      : null;
+  const nativeHydrateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  let nativeHydrateAttempt =
+    options?.useNativeHydrate !== true
+      ? {
+          rawResult: null,
+          status: "not-requested",
+          error: "",
+        }
+      : nativeHydrateGate?.allowed === false
+        ? {
+            rawResult: null,
+            status: "gated-out",
+            error: "",
+          }
+        : tryBuildNativeHydrateRecords(
+            snapshotView,
+            {
+              ...options,
+              recordsNormalized: snapshotRecordsNormalized,
+            },
+          );
+  let nativeHydrateResult = normalizeNativeHydrateResult(
+    nativeHydrateAttempt.rawResult,
+    snapshotView,
+  );
+  if (nativeHydrateAttempt.rawResult && !nativeHydrateResult) {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-hydrate-invalid-result");
+    }
+    nativeHydrateAttempt = {
+      rawResult: null,
+      status: "invalid-result",
+      error: "native-hydrate-invalid-result",
+    };
+  }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.nativeRequested = options?.useNativeHydrate === true;
+    hydrateDiagnostics.nativeStatus = nativeHydrateAttempt.status;
+    hydrateDiagnostics.nativeError = nativeHydrateAttempt.error;
+    hydrateDiagnostics.nativeGateAllowed = nativeHydrateGate?.allowed ?? false;
+    hydrateDiagnostics.nativeGateReasons = nativeHydrateGate?.reasons || [];
+    hydrateDiagnostics.nativeModuleDiagnostics =
+      nativeHydrateResult?.diagnostics || null;
+    if (nativeHydrateAttempt.rawResult) {
+      hydrateDiagnostics.nativeRecordsMs =
+        readPersistDeltaNow() - nativeHydrateStartedAt;
+    }
+  }
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
@@ -2310,17 +2517,22 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     : runtimeGraph.version;
 
   const hydrateNodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
-  runtimeGraph.nodes = cloneHydrateSnapshotNodeRecords(snapshotView.nodes);
+  runtimeGraph.nodes = nativeHydrateResult
+    ? nativeHydrateResult.nodes
+    : cloneHydrateSnapshotNodeRecords(snapshotView.nodes);
   if (hydrateDiagnostics) {
     hydrateDiagnostics.nodeCount = runtimeGraph.nodes.length;
     hydrateDiagnostics.nodesMs = readPersistDeltaNow() - hydrateNodesStartedAt;
   }
 
   const hydrateEdgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
-  runtimeGraph.edges = cloneHydrateSnapshotEdgeRecords(snapshotView.edges);
+  runtimeGraph.edges = nativeHydrateResult
+    ? nativeHydrateResult.edges
+    : cloneHydrateSnapshotEdgeRecords(snapshotView.edges);
   if (hydrateDiagnostics) {
     hydrateDiagnostics.edgeCount = runtimeGraph.edges.length;
     hydrateDiagnostics.edgesMs = readPersistDeltaNow() - hydrateEdgesStartedAt;
+    hydrateDiagnostics.nativeUsed = Boolean(nativeHydrateResult);
   }
 
   const hydrateRuntimeMetaStartedAt = shouldCollectDiagnostics
