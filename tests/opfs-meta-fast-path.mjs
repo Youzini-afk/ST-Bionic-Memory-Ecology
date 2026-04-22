@@ -56,12 +56,18 @@ await store.patchMeta({
   lastProcessedFloor: 9,
   extractionCount: 4,
 });
+const probe = await store.exportSnapshotProbe();
 
 assert.equal(
   loadSnapshotCalls,
   0,
   "manifest-only meta fast path should not load full snapshot",
 );
+assert.equal(probe.__stBmeProbeOnly, true);
+assert.equal(probe.meta.lastBackupFilename, "after.json");
+assert.equal(probe.meta.nodeCount, 1);
+assert.equal(probe.state.lastProcessedFloor, 9);
+assert.equal(probe.state.extractionCount, 4);
 
 const snapshot = await originalLoadSnapshot();
 assert.equal(snapshot.meta.lastBackupFilename, "after.json");

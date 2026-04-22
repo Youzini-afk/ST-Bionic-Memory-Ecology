@@ -1,0 +1,15 @@
+{
+  "name": "stbme-core",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "stbme_core_pkg_bg.wasm",
+    "stbme_core_pkg.js",
+    "stbme_core_pkg.d.ts"
+  ],
+  "main": "stbme_core_pkg.js",
+  "types": "stbme_core_pkg.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

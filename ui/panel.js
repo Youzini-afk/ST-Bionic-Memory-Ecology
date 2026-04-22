@@ -1250,6 +1250,7 @@ export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
+  _refreshNativeRolloutStatusUi(_getSettings?.() || {});
 
   switch (currentTabId) {
     case "dashboard":
@@ -1468,6 +1469,132 @@ function _readPersistenceDiagnosticObject(snapshot = null) {
   return snapshot;
 }
 
+function _formatNativeHydrateGateReasonText(reasons = []) {
+  const labels = {
+    "below-min-snapshot-records": "记录数不足",
+  };
+  const normalized = Array.isArray(reasons)
+    ? reasons.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!normalized.length) return "—";
+  return normalized.map((item) => labels[item] || item).join(" · ");
+}
+
+function _formatNativeHydrateGateText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  if (diagnostics.hydrateNativeRequested !== true) return "未请求 native";
+  if (diagnostics.hydrateNativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.hydrateNativeGateAllowed === true) return "通过";
+  return `已拦截 · ${_formatNativeHydrateGateReasonText(diagnostics.hydrateNativeGateReasons)}`;
+}
+
+function _formatNativeHydrateResultText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "暂无";
+  if (diagnostics.hydrateNativeRequested !== true) return "未请求 native";
+  if (diagnostics.hydrateNativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.hydrateNativeGateAllowed !== true) return "已拦截";
+  if (diagnostics.hydrateNativeUsed === true) {
+    const status = String(diagnostics.hydrateNativeStatus || "").trim();
+    return status ? `已命中 · ${status}` : "已命中";
+  }
+  const fallbackReason =
+    String(diagnostics.hydrateNativeStatus || "").trim() ||
+    String(diagnostics.hydrateNativePreloadStatus || "").trim() ||
+    "js";
+  return `已回退 · ${fallbackReason}`;
+}
+
+function _formatNativeHydrateModuleText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  const parts = [];
+  const preload = String(diagnostics.hydrateNativePreloadStatus || "").trim();
+  const source = String(diagnostics.hydrateNativeModuleSource || "").trim();
+  if (preload) parts.push(`preload ${preload}`);
+  if (diagnostics.hydrateNativeModuleLoaded === true) parts.push("loaded");
+  if (source) parts.push(source);
+  return parts.join(" · ") || "—";
+}
+
+function _formatNativeLayoutStatusSummary(layout = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.graphUseNativeLayout !== true) return "已关闭";
+  if (!layout || typeof layout !== "object") return "暂无最近布局诊断";
+  const parts = [String(layout.mode || layout.solver || "unknown").trim() || "unknown"];
+  const totalText = _formatDurationMs(layout.totalMs);
+  const moduleSource = String(layout.moduleSource || "").trim();
+  const reason = String(layout.reason || "").trim();
+  if (totalText !== "—") parts.push(totalText);
+  if (moduleSource) parts.push(moduleSource);
+  if (reason && reason !== parts[0]) parts.push(reason);
+  return parts.join(" · ");
+}
+
+function _formatNativePersistStatusSummary(diagnostics = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.persistUseNativeDelta !== true) return "已关闭";
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "暂无最近写回诊断";
+  const parts = [String(snapshot.path || "pending")];
+  const gateText = String(_formatPersistDeltaGateText(snapshot) || "").trim();
+  const fallbackReason = String(snapshot.fallbackReason || "").trim();
+  if (gateText && gateText !== "—") parts.push(gateText);
+  if (fallbackReason) parts.push(`回退 ${fallbackReason}`);
+  return parts.join(" · ");
+}
+
+function _formatNativeHydrateStatusSummary(diagnostics = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.loadUseNativeHydrate !== true) return "已关闭";
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "暂无最近加载诊断";
+  const parts = [_formatNativeHydrateResultText(snapshot)];
+  const gateText = String(_formatNativeHydrateGateText(snapshot) || "").trim();
+  const preload = String(snapshot.hydrateNativePreloadStatus || "").trim();
+  if (gateText && gateText !== "—" && gateText !== "通过") parts.push(gateText);
+  if (preload && preload !== "loaded" && preload !== "not-requested") {
+    parts.push(`preload ${preload}`);
+  }
+  return Array.from(new Set(parts.filter(Boolean))).join(" · ");
+}
+
+function _refreshNativeRolloutStatusUi(
+  settings = _getSettings?.() || {},
+  loadInfo = _getGraphPersistenceSnapshot(),
+) {
+  const summaryEl = document.getElementById("bme-native-rollout-status");
+  const layoutEl = document.getElementById("bme-native-layout-status");
+  const persistEl = document.getElementById("bme-native-persist-status");
+  const hydrateEl = document.getElementById("bme-native-hydrate-status");
+  if (!summaryEl && !layoutEl && !persistEl && !hydrateEl) return;
+
+  const panelDebug = _getRuntimeDebugSnapshot?.() || {};
+  const runtimeDebug = panelDebug.runtimeDebug || {};
+  const layout = runtimeDebug?.graphLayout || null;
+  const persistDelta = _readPersistenceDiagnosticObject(
+    loadInfo?.persistDelta || runtimeDebug?.graphPersistence?.persistDelta,
+  );
+  const loadDiagnostics = _readPersistenceDiagnosticObject(
+    loadInfo?.loadDiagnostics || runtimeDebug?.graphPersistence?.loadDiagnostics,
+  );
+  const rolloutVersion = Math.max(
+    0,
+    Math.floor(Number(settings?.nativeRolloutVersion || 0)),
+  );
+  const summaryText = settings.graphNativeForceDisable === true
+    ? `rollout v${rolloutVersion} · 全局强制关闭 · ${settings.nativeEngineFailOpen !== false ? "fail-open 已启用" : "严格模式"}`
+    : `rollout v${rolloutVersion} · 按阈值自动尝试 native · ${settings.nativeEngineFailOpen !== false ? "fail-open 已启用" : "严格模式"}`;
+  if (summaryEl) summaryEl.textContent = summaryText;
+  if (layoutEl) {
+    layoutEl.textContent = `Layout：${_formatNativeLayoutStatusSummary(layout, settings)}`;
+  }
+  if (persistEl) {
+    persistEl.textContent = `Persist：${_formatNativePersistStatusSummary(persistDelta, settings)}`;
+  }
+  if (hydrateEl) {
+    hydrateEl.textContent = `Hydrate：${_formatNativeHydrateStatusSummary(loadDiagnostics, settings)}`;
+  }
+}
+
 function _formatLoadDiagnosticsStageLabel(stage = "") {
   const normalized = String(stage || "").trim();
   if (!normalized) return "—";
@@ -1522,6 +1649,9 @@ function _formatPersistenceLoadSummary(loadDiagnostics = null) {
   const parts = [statusText];
   if (stageLabel !== "—") parts.push(stageLabel);
   if (totalText !== "—") parts.push(`total ${totalText}`);
+  if (diagnostics.hydrateNativeRequested === true) {
+    parts.push(`native ${_formatNativeHydrateResultText(diagnostics)}`);
+  }
   if (reasonText) parts.push(reasonText);
   return parts.join(" · ");
 }
@@ -1564,16 +1694,90 @@ function _formatPersistCommitBreakdownText(diagnostics = null) {
     snapshot.commitManifestReadMs
       ? `manifest-read ${_formatDurationMs(snapshot.commitManifestReadMs)}`
       : "",
-    snapshot.commitWalWriteMs
-      ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+    snapshot.commitWalSerializeMs
+      ? `wal-serialize ${_formatDurationMs(snapshot.commitWalSerializeMs)}`
       : "",
-    snapshot.commitManifestWriteMs
-      ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+    snapshot.commitWalFileWriteMs
+      ? `wal-file ${_formatDurationMs(snapshot.commitWalFileWriteMs)}`
+      : snapshot.commitWalWriteMs
+        ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+        : "",
+    snapshot.commitManifestSerializeMs
+      ? `manifest-serialize ${_formatDurationMs(snapshot.commitManifestSerializeMs)}`
       : "",
+    snapshot.commitManifestFileWriteMs
+      ? `manifest-file ${_formatDurationMs(snapshot.commitManifestFileWriteMs)}`
+      : snapshot.commitManifestWriteMs
+        ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+        : "",
     snapshot.commitCacheApplyMs
       ? `cache ${_formatDurationMs(snapshot.commitCacheApplyMs)}`
       : "",
   ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistSnapshotBuildBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.snapshotNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.snapshotNodesMs)}`
+      : "",
+    snapshot.snapshotEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.snapshotEdgesMs)}`
+      : "",
+    snapshot.snapshotTombstonesMs
+      ? `tombstones ${_formatDurationMs(snapshot.snapshotTombstonesMs)}`
+      : "",
+    snapshot.snapshotStateMs
+      ? `state ${_formatDurationMs(snapshot.snapshotStateMs)}`
+      : "",
+    snapshot.snapshotMetaMs
+      ? `meta ${_formatDurationMs(snapshot.snapshotMetaMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatLoadHydrateBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.hydrateNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.hydrateNodesMs)}`
+      : "",
+    snapshot.hydrateEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.hydrateEdgesMs)}`
+      : "",
+    snapshot.hydrateRuntimeMetaMs
+      ? `meta ${_formatDurationMs(snapshot.hydrateRuntimeMetaMs)}`
+      : "",
+    snapshot.hydrateStateMs
+      ? `state ${_formatDurationMs(snapshot.hydrateStateMs)}`
+      : "",
+    snapshot.hydrateNormalizeMs
+      ? `normalize ${_formatDurationMs(snapshot.hydrateNormalizeMs)}`
+      : "",
+    snapshot.hydrateIntegrityMs
+      ? `integrity ${_formatDurationMs(snapshot.hydrateIntegrityMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistObservabilityText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const pathKey = String(snapshot.pathKey || snapshot.path || "").trim();
+  const reasonKey = String(snapshot.reasonKey || snapshot.saveReason || "").trim();
+  const pathCount = Number(snapshot.pathSampleCount || 0);
+  const reasonCount = Number(snapshot.reasonSampleCount || 0);
+  if (pathKey) parts.push(`path ${pathKey}`);
+  if (pathCount > 0) parts.push(`${pathCount} samples`);
+  if (reasonKey) parts.push(`reason ${reasonKey}`);
+  if (reasonCount > 0) parts.push(`${reasonCount} reason-hits`);
   return parts.join(" · ") || "—";
 }
 
@@ -1605,6 +1809,12 @@ function _buildLoadDiagnosticRows(loadDiagnostics = null) {
   const updatedAtText = diagnostics.updatedAt
     ? _formatTaskProfileTime(diagnostics.updatedAt)
     : "—";
+  const nativeErrorText = String(
+    diagnostics.hydrateNativeModuleError ||
+      diagnostics.hydrateNativePreloadError ||
+      diagnostics.hydrateNativeError ||
+      "",
+  ).trim();
 
   return [
     ["Load 阶段", _formatLoadDiagnosticsStageLabel(diagnostics.stage)],
@@ -1616,6 +1826,12 @@ function _buildLoadDiagnosticRows(loadDiagnostics = null) {
     ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
     ["前置（除导出）", _formatDurationMs(diagnostics.preApplyOtherMs)],
     ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Hydrate 细分", _formatLoadHydrateBreakdownText(diagnostics)],
+    ["Hydrate Native Gate", _formatNativeHydrateGateText(diagnostics)],
+    ["Hydrate Native 结果", _formatNativeHydrateResultText(diagnostics)],
+    ["Hydrate Native Module", _formatNativeHydrateModuleText(diagnostics)],
+    ["Hydrate Native Records", _formatDurationMs(diagnostics.hydrateNativeRecordsMs)],
+    ["Hydrate Native 错误", nativeErrorText || "—"],
     ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
     ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
     ["Load 未归因", _formatDurationMs(diagnostics.untrackedMs)],
@@ -1659,6 +1875,7 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
     ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
     ["Base 快照读取", _formatDurationMs(diagnostics.baseSnapshotReadMs)],
     ["图谱快照构建", _formatDurationMs(diagnostics.snapshotBuildMs)],
+    ["快照构建细分", _formatPersistSnapshotBuildBreakdownText(diagnostics)],
     [
       "Prepare / Native",
       `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -1671,6 +1888,7 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
     ["Commit 排队 / 提交", commitPhaseText],
     ["Commit 细分", commitBreakdownText],
     ["Commit Payload", commitBytesText],
+    ["样本聚合", _formatPersistObservabilityText(diagnostics)],
     ["Preload", String(diagnostics.preloadStatus || "—")],
     ["Native 来源", String(diagnostics.moduleSource || "—")],
     ["Fallback 原因", String(diagnostics.fallbackReason || "—")],
@@ -6431,6 +6649,26 @@ function _refreshConfigTab() {
     settings.enableAiMonitor ?? true,
   );
   _setCheckboxValue(
+    "bme-setting-graph-native-force-disable",
+    settings.graphNativeForceDisable === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-native-engine-fail-open",
+    settings.nativeEngineFailOpen !== false,
+  );
+  _setCheckboxValue(
+    "bme-setting-graph-use-native-layout",
+    settings.graphUseNativeLayout === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-persist-use-native-delta",
+    settings.persistUseNativeDelta === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-load-use-native-hydrate",
+    settings.loadUseNativeHydrate === true,
+  );
+  _setCheckboxValue(
     "bme-setting-hide-old-messages-enabled",
     settings.hideOldMessagesEnabled ?? false,
   );
@@ -6764,6 +7002,34 @@ function _refreshConfigTab() {
     settings.probRecallChance ?? 0.15,
   );
   _setInputValue("bme-setting-reflect-every", settings.reflectEveryN ?? 10);
+  _setInputValue(
+    "bme-setting-graph-native-layout-threshold-nodes",
+    settings.graphNativeLayoutThresholdNodes ?? 280,
+  );
+  _setInputValue(
+    "bme-setting-graph-native-layout-threshold-edges",
+    settings.graphNativeLayoutThresholdEdges ?? 1600,
+  );
+  _setInputValue(
+    "bme-setting-graph-native-layout-worker-timeout-ms",
+    settings.graphNativeLayoutWorkerTimeoutMs ?? 260,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-records",
+    settings.persistNativeDeltaThresholdRecords ?? 20000,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-structural-delta",
+    settings.persistNativeDeltaThresholdStructuralDelta ?? 600,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-serialized-chars",
+    settings.persistNativeDeltaThresholdSerializedChars ?? 4000000,
+  );
+  _setInputValue(
+    "bme-setting-load-native-hydrate-threshold-records",
+    settings.loadNativeHydrateThresholdRecords ?? 12000,
+  );
 
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
   _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
@@ -6833,6 +7099,7 @@ function _refreshConfigTab() {
   _refreshPromptCardStates(settings);
   _refreshTaskProfileWorkspace(settings);
   _refreshMessageTraceWorkspace(settings);
+  _refreshNativeRolloutStatusUi(settings);
   _highlightThemeChoice(settings.panelTheme || "crimson");
   _syncConfigSectionState();
 }
@@ -6858,6 +7125,21 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-ai-monitor-enabled", (checked) => {
     _patchSettings({ enableAiMonitor: checked });
     _refreshDashboard();
+  });
+  bindCheckbox("bme-setting-graph-native-force-disable", (checked) => {
+    _patchSettings({ graphNativeForceDisable: checked });
+  });
+  bindCheckbox("bme-setting-native-engine-fail-open", (checked) => {
+    _patchSettings({ nativeEngineFailOpen: checked });
+  });
+  bindCheckbox("bme-setting-graph-use-native-layout", (checked) => {
+    _patchSettings({ graphUseNativeLayout: checked });
+  });
+  bindCheckbox("bme-setting-persist-use-native-delta", (checked) => {
+    _patchSettings({ persistUseNativeDelta: checked });
+  });
+  bindCheckbox("bme-setting-load-use-native-hydrate", (checked) => {
+    _patchSettings({ loadUseNativeHydrate: checked });
   });
   bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
     _patchSettings({ hideOldMessagesEnabled: checked });
@@ -7275,6 +7557,55 @@ function _bindConfigControls() {
   );
   bindNumber("bme-setting-reflect-every", 10, 1, 200, (value) =>
     _patchSettings({ reflectEveryN: value }),
+  );
+  bindNumber(
+    "bme-setting-graph-native-layout-threshold-nodes",
+    280,
+    1,
+    20000,
+    (value) => _patchSettings({ graphNativeLayoutThresholdNodes: value }),
+  );
+  bindNumber(
+    "bme-setting-graph-native-layout-threshold-edges",
+    1600,
+    1,
+    50000,
+    (value) => _patchSettings({ graphNativeLayoutThresholdEdges: value }),
+  );
+  bindNumber(
+    "bme-setting-graph-native-layout-worker-timeout-ms",
+    260,
+    40,
+    15000,
+    (value) => _patchSettings({ graphNativeLayoutWorkerTimeoutMs: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-records",
+    20000,
+    0,
+    200000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdRecords: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-structural-delta",
+    600,
+    0,
+    200000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdStructuralDelta: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-serialized-chars",
+    4000000,
+    0,
+    50000000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdSerializedChars: value }),
+  );
+  bindNumber(
+    "bme-setting-load-native-hydrate-threshold-records",
+    12000,
+    0,
+    200000,
+    (value) => _patchSettings({ loadNativeHydrateThresholdRecords: value }),
   );
 
   const llmPresetSelect = document.getElementById("bme-llm-preset-select");
@@ -8205,6 +8536,7 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     runtimeDebug: null,
   };
   const runtimeDebug = panelDebug.runtimeDebug || {};
+  const graphPersistence = _getGraphPersistenceSnapshot();
 
   return {
     settings,
@@ -8212,7 +8544,12 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     runtimeDebug,
     recallInjection: runtimeDebug?.injections?.recall || null,
     graphLayout: runtimeDebug?.graphLayout || null,
-    persistDelta: runtimeDebug?.graphPersistence?.persistDelta || null,
+    persistDelta:
+      graphPersistence?.persistDelta || runtimeDebug?.graphPersistence?.persistDelta || null,
+    loadDiagnostics:
+      graphPersistence?.loadDiagnostics ||
+      runtimeDebug?.graphPersistence?.loadDiagnostics ||
+      null,
     messageTrace: runtimeDebug?.messageTrace || null,
     recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
     recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
@@ -8238,6 +8575,7 @@ function _renderMessageTraceWorkspace(state) {
     state.recallInjection?.updatedAt,
     state.graphLayout?.updatedAt,
     state.persistDelta?.updatedAt,
+    state.loadDiagnostics?.updatedAt,
     state.recallLlmRequest?.updatedAt,
     state.extractLlmRequest?.updatedAt,
     state.extractPromptBuild?.updatedAt,
@@ -8275,6 +8613,9 @@ function _renderMessageTraceWorkspace(state) {
         </div>
         <div class="bme-config-card">
           ${_renderPersistDeltaTraceCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderHydrateNativeTraceCard(state)}
         </div>
       </div>
     </div>
@@ -8979,6 +9320,97 @@ function _renderPersistDeltaTraceCard(state) {
       "Preload / native error",
       errorText,
       "当前没有 preload / native error。",
+    )}
+  `;
+}
+
+function _renderHydrateNativeTraceCard(state) {
+  const diagnostics = _readPersistenceDiagnosticObject(state.loadDiagnostics);
+  if (!diagnostics) {
+    return `
+      <div class="bme-config-card-title">Hydrate / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有 hydrate 诊断快照。等图谱完成一次真实加载后，这里会显示 load hydrate 是否命中 native、是否被 gate 拦截，以及 preload / module / fallback 状态。
+      </div>
+    `;
+  }
+
+  const errorText = String(
+    diagnostics.hydrateNativeModuleError ||
+      diagnostics.hydrateNativePreloadError ||
+      diagnostics.hydrateNativeError ||
+      diagnostics.error ||
+      "",
+  ).trim();
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">Hydrate / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图谱加载的 hydrate 是否尝试 native、是否命中、以及 preload / module / fallback 明细。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(diagnostics.updatedAt))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 阶段</span>
+        <strong>${_escHtml(_formatLoadDiagnosticsStageLabel(diagnostics.stage))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 来源</span>
+        <strong>${_escHtml(String(diagnostics.source || diagnostics.statusLabel || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 状态</span>
+        <strong>${_escHtml(
+          diagnostics.success === true
+            ? "成功"
+            : diagnostics.success === false
+              ? "失败"
+              : "未知",
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate Native Gate</span>
+        <strong>${_escHtml(_formatNativeHydrateGateText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate Native 结果</span>
+        <strong>${_escHtml(_formatNativeHydrateResultText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Preload</span>
+        <strong>${_escHtml(String(diagnostics.hydrateNativePreloadStatus || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Module</span>
+        <strong>${_escHtml(_formatNativeHydrateModuleText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load / Hydrate</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.totalMs)} / ${_formatDurationMs(diagnostics.hydrateMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate 细分</span>
+        <strong>${_escHtml(_formatLoadHydrateBreakdownText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native Records</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.hydrateNativeRecordsMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>未归因</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.untrackedMs))}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "Hydrate / native error",
+      errorText,
+      "当前没有 hydrate / native error。",
     )}
   `;
 }
@@ -10192,6 +10624,15 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
   }
 
   const persistDelta = graphPersistence.persistDelta || null;
+  const loadDiagnostics = _readPersistenceDiagnosticObject(
+    graphPersistence.loadDiagnostics,
+  );
+  const hydrateNativeError = String(
+    loadDiagnostics?.hydrateNativeModuleError ||
+      loadDiagnostics?.hydrateNativePreloadError ||
+      loadDiagnostics?.hydrateNativeError ||
+      "",
+  ).trim();
 
   return `
     <div class="bme-config-card-head">
@@ -10296,6 +10737,30 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
                 .filter(Boolean)
                 .join(" · ")
             : "—",
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native Gate</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateGateText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native 结果</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateResultText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native Module</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateModuleText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native 错误</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          hydrateNativeError || "—",
         )}</span>
       </div>
       <div class="bme-debug-kv-item">
@@ -12646,6 +13111,7 @@ function _patchSettings(patch = {}, options = {}) {
   if (options.refreshTheme)
     _highlightThemeChoice(settings.panelTheme || "crimson");
   _refreshCloudStorageModeUi(settings);
+  _refreshNativeRolloutStatusUi(settings);
   return settings;
 }
 

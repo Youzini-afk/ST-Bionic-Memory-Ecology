@@ -67,15 +67,18 @@ assert.equal(defaultSettings.worldInfoFilterMode, "default");
 assert.equal(defaultSettings.worldInfoFilterCustomKeywords, "");
 assert.equal("maintenanceAutoMinNewNodes" in defaultSettings, false);
 assert.equal(defaultSettings.embeddingTransportMode, "direct");
-assert.equal(defaultSettings.graphUseNativeLayout, false);
+assert.equal(defaultSettings.graphUseNativeLayout, true);
 assert.equal(defaultSettings.graphNativeLayoutThresholdNodes, 280);
 assert.equal(defaultSettings.graphNativeLayoutThresholdEdges, 1600);
 assert.equal(defaultSettings.graphNativeLayoutWorkerTimeoutMs, 260);
-assert.equal(defaultSettings.persistUseNativeDelta, false);
+assert.equal(defaultSettings.persistUseNativeDelta, true);
 assert.equal(defaultSettings.persistNativeDeltaThresholdRecords, 20000);
 assert.equal(defaultSettings.persistNativeDeltaThresholdStructuralDelta, 600);
 assert.equal(defaultSettings.persistNativeDeltaThresholdSerializedChars, 4000000);
 assert.equal(defaultSettings.persistNativeDeltaBridgeMode, "json");
+assert.equal(defaultSettings.loadUseNativeHydrate, true);
+assert.equal(defaultSettings.loadNativeHydrateThresholdRecords, 30000);
+assert.equal(defaultSettings.nativeRolloutVersion, 2);
 assert.equal(defaultSettings.nativeEngineFailOpen, true);
 assert.equal(defaultSettings.graphNativeForceDisable, false);
 assert.equal(defaultSettings.taskProfilesVersion, 3);
@@ -113,5 +116,45 @@ assert.equal(
   migratedLegacyCompressionDisabled.compressionEveryN,
   defaultSettings.compressionEveryN,
 );
+
+const migratedLegacyNativeDisabled = mergePersistedSettings({
+  graphUseNativeLayout: false,
+  persistUseNativeDelta: false,
+  loadUseNativeHydrate: false,
+  graphNativeForceDisable: true,
+});
+assert.equal(migratedLegacyNativeDisabled.graphUseNativeLayout, true);
+assert.equal(migratedLegacyNativeDisabled.persistUseNativeDelta, true);
+assert.equal(migratedLegacyNativeDisabled.loadUseNativeHydrate, true);
+assert.equal(migratedLegacyNativeDisabled.loadNativeHydrateThresholdRecords, 30000);
+assert.equal(migratedLegacyNativeDisabled.graphNativeForceDisable, true);
+assert.equal(migratedLegacyNativeDisabled.nativeRolloutVersion, 2);
+
+const migratedVersionedManualNativeDisabled = mergePersistedSettings({
+  nativeRolloutVersion: 2,
+  graphUseNativeLayout: false,
+  persistUseNativeDelta: false,
+  loadUseNativeHydrate: false,
+  graphNativeForceDisable: true,
+});
+assert.equal(migratedVersionedManualNativeDisabled.graphUseNativeLayout, false);
+assert.equal(migratedVersionedManualNativeDisabled.persistUseNativeDelta, false);
+assert.equal(migratedVersionedManualNativeDisabled.loadUseNativeHydrate, false);
+assert.equal(migratedVersionedManualNativeDisabled.graphNativeForceDisable, true);
+assert.equal(migratedVersionedManualNativeDisabled.nativeRolloutVersion, 2);
+
+const migratedLegacyHydrateThresholdDefault = mergePersistedSettings({
+  nativeRolloutVersion: 1,
+  loadNativeHydrateThresholdRecords: 12000,
+});
+assert.equal(migratedLegacyHydrateThresholdDefault.loadNativeHydrateThresholdRecords, 30000);
+assert.equal(migratedLegacyHydrateThresholdDefault.nativeRolloutVersion, 2);
+
+const preservedCustomHydrateThreshold = mergePersistedSettings({
+  nativeRolloutVersion: 1,
+  loadNativeHydrateThresholdRecords: 45000,
+});
+assert.equal(preservedCustomHydrateThreshold.loadNativeHydrateThresholdRecords, 45000);
+assert.equal(preservedCustomHydrateThreshold.nativeRolloutVersion, 2);
 
 console.log("default-settings tests passed");

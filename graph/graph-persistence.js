@@ -2,7 +2,10 @@
 // 不依赖 index.js 模块级可变状态（currentGraph / graphPersistenceState 等）
 
 import { deserializeGraph, getGraphStats, serializeGraph } from "./graph.js";
-import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
+import {
+  cloneGraphPersistDirtyState,
+  normalizeGraphRuntimeState,
+} from "../runtime/runtime-state.js";
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -1594,10 +1597,12 @@ export function removeGraphShadowSnapshot(chatId = "") {
 // ═══════════════════════════════════════════════════════════
 
 export function cloneGraphForPersistence(graph, chatId = "") {
-  return normalizeGraphRuntimeState(
+  const clonedGraph = normalizeGraphRuntimeState(
     deserializeGraph(serializeGraph(graph)),
     chatId,
   );
+  cloneGraphPersistDirtyState(graph, clonedGraph);
+  return clonedGraph;
 }
 
 export function shouldPreferShadowSnapshotOverOfficial(

@@ -8,7 +8,9 @@ import {
   buildBmeDbName,
   buildGraphFromSnapshot,
   buildPersistDelta,
+  buildPersistDeltaFromGraphDirtyState,
   buildSnapshotFromGraph,
+  evaluateNativeHydrateGate,
   evaluatePersistNativeDeltaGate,
 } from "../sync/bme-db.js";
 import { onMessageReceivedController } from "../host/event-binding.js";
@@ -82,13 +84,17 @@ import {
   getGraphStats,
   getNode,
   serializeGraph,
+  updateNode,
 } from "../graph/graph.js";
 import {
   buildPersistedRecallRecord,
   readPersistedRecallFromUserMessage,
 } from "../retrieval/recall-persistence.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
-import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
+import {
+  normalizeGraphRuntimeState,
+  pruneGraphPersistDirtyState,
+} from "../runtime/runtime-state.js";
 import {
   defaultSettings,
   getPersistedSettingsSnapshot,
@@ -1031,8 +1037,11 @@ async function createGraphPersistenceHarness({
     __contextImmediateSaveCalls: 0,
     buildGraphFromSnapshot,
     buildPersistDelta,
+    buildPersistDeltaFromGraphDirtyState,
     buildSnapshotFromGraph,
+    evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
+    pruneGraphPersistDirtyState,
     buildBmeDbName,
     BME_GRAPH_LOCAL_STORAGE_MODE_AUTO: "auto",
     BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB: "indexeddb",
@@ -3154,6 +3163,10 @@ result = {
     lastPersistedRevision: 0,
     writesBlocked: false,
   });
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    nativeRolloutVersion: 1,
+    persistUseNativeDelta: false,
+  };
   harness.runtimeContext.__scheduleUploadShouldThrow = true;
 
   const result = await harness.api.saveGraphToIndexedDb(
@@ -3237,6 +3250,218 @@ result = {
     8,
     "复用首次 snapshot 后仍应正确回填缓存 revision",
   );
+}
+
+{
+  const chatId = "chat-idb-direct-delta-prebuilt-persist-snapshot";
+  const baseGraph = createMeaningfulGraph(chatId, "direct-delta-base");
+  const runtimeGraph = createMeaningfulGraph(chatId, "direct-delta-after");
+  const baseSnapshot = buildSnapshotFromGraph(baseGraph, {
+    chatId,
+    revision: 7,
+  });
+  const persistSnapshot = buildSnapshotFromGraph(runtimeGraph, {
+    chatId,
+    revision: 8,
+    baseSnapshot,
+  });
+  const directDelta = buildPersistDelta(baseSnapshot, persistSnapshot, {
+    useNativeDelta: false,
+  });
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: {
+      integrity: "meta-idb-direct-delta-prebuilt-persist-snapshot",
+    },
+    indexedDbSnapshot: baseSnapshot,
+  });
+  harness.api.setCurrentGraph(runtimeGraph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 8,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const originalBuildSnapshotFromGraph = harness.runtimeContext.buildSnapshotFromGraph;
+  let buildSnapshotCallCount = 0;
+  harness.runtimeContext.buildSnapshotFromGraph = (...args) => {
+    buildSnapshotCallCount += 1;
+    return originalBuildSnapshotFromGraph(...args);
+  };
+
+  const result = await harness.api.saveGraphToIndexedDb(chatId, runtimeGraph, {
+    revision: 8,
+    reason: "direct-delta-prebuilt-persist-snapshot-save",
+    scheduleCloudUpload: false,
+    persistDelta: directDelta,
+    persistSnapshot,
+  });
+
+  assert.equal(result.saved, true);
+  assert.equal(
+    buildSnapshotCallCount,
+    0,
+    "direct-delta 且已提供 persistSnapshot 时不应再次构建 snapshot",
+  );
+  assert.equal(result.snapshot?.meta?.revision, 8);
+  assert.equal(harness.api.getIndexedDbSnapshot()?.meta?.revision, 8);
+}
+
+{
+  const chatId = "chat-idb-dirty-runtime-fast-path";
+  const baseGraph = createMeaningfulGraph(chatId, "dirty-runtime-base");
+  const runtimeGraph = cloneGraphForPersistence(baseGraph, chatId);
+  updateNode(runtimeGraph, runtimeGraph.nodes[0]?.id, {
+    importance: Number(runtimeGraph.nodes[0]?.importance || 0) + 2,
+  });
+  const baseSnapshot = buildSnapshotFromGraph(baseGraph, {
+    chatId,
+    revision: 7,
+  });
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: {
+      integrity: "meta-idb-dirty-runtime-fast-path",
+    },
+    indexedDbSnapshot: baseSnapshot,
+  });
+  harness.api.setCurrentGraph(runtimeGraph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 8,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const originalBuildSnapshotFromGraph = harness.runtimeContext.buildSnapshotFromGraph;
+  let buildSnapshotCallCount = 0;
+  harness.runtimeContext.buildSnapshotFromGraph = (...args) => {
+    buildSnapshotCallCount += 1;
+    return originalBuildSnapshotFromGraph(...args);
+  };
+
+  const result = await harness.api.saveGraphToIndexedDb(chatId, runtimeGraph, {
+    revision: 8,
+    reason: "dirty-runtime-fast-path-save",
+    scheduleCloudUpload: false,
+    sourceGraph: runtimeGraph,
+  });
+
+  assert.equal(result.saved, true);
+  assert.equal(
+    buildSnapshotCallCount,
+    0,
+    "dirty-set 命中时 saveGraphToIndexedDb 不应退回 full snapshot build",
+  );
+  assert.equal(result.snapshot?.meta?.revision, 8);
+  assert.equal(harness.api.getIndexedDbSnapshot()?.meta?.revision, 8);
+}
+
+{
+  const chatId = "chat-indexeddb-probe-empty-early-return";
+  const persistedSnapshot = {
+    meta: { revision: 0, chatId },
+    nodes: [],
+    edges: [],
+    tombstones: [],
+    state: {
+      lastProcessedFloor: -1,
+      extractionCount: 0,
+    },
+  };
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: {
+      integrity: "meta-indexeddb-probe-empty-early-return",
+    },
+    indexedDbSnapshot: persistedSnapshot,
+  });
+  harness.runtimeContext.__globalChatId = chatId;
+  harness.runtimeContext.__chatContext.chatId = chatId;
+  harness.api.setChatContext({
+    ...harness.api.getChatContext(),
+    chatId,
+    chatMetadata: {
+      integrity: "meta-indexeddb-probe-empty-early-return",
+    },
+  });
+  harness.api.setCurrentGraph(
+    createMeaningfulGraph(chatId, "probe-empty-runtime-current"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 1,
+    lastPersistedRevision: 1,
+    storagePrimary: "indexeddb",
+    storageMode: "indexeddb",
+    writesBlocked: false,
+  });
+
+  const originalCreateDb = harness.runtimeContext.BmeChatManager.prototype._createDb;
+  let exportSnapshotCalls = 0;
+  let exportProbeCalls = 0;
+  harness.runtimeContext.BmeChatManager.prototype._createDb = function(dbChatId = "") {
+    const baseDb = originalCreateDb.call(this, dbChatId);
+    return {
+      ...baseDb,
+      async exportSnapshot() {
+        exportSnapshotCalls += 1;
+        return await baseDb.exportSnapshot();
+      },
+      async exportSnapshotProbe() {
+        exportProbeCalls += 1;
+        const snapshot = harness.api.getIndexedDbSnapshotForChat(dbChatId) || {
+          meta: { revision: 0, chatId: String(dbChatId || "") },
+          state: { lastProcessedFloor: -1, extractionCount: 0 },
+          nodes: [],
+          edges: [],
+          tombstones: [],
+        };
+        return {
+          meta: {
+            ...(snapshot.meta || {}),
+            chatId: String(dbChatId || ""),
+            revision: Number(snapshot?.meta?.revision || 0),
+            nodeCount: Array.isArray(snapshot?.nodes) ? snapshot.nodes.length : 0,
+            edgeCount: Array.isArray(snapshot?.edges) ? snapshot.edges.length : 0,
+            tombstoneCount: Array.isArray(snapshot?.tombstones)
+              ? snapshot.tombstones.length
+              : 0,
+          },
+          state: {
+            lastProcessedFloor: Number(snapshot?.state?.lastProcessedFloor ?? -1),
+            extractionCount: Number(snapshot?.state?.extractionCount ?? 0),
+          },
+          nodes: [],
+          edges: [],
+          tombstones: [],
+          __stBmeProbeOnly: true,
+          __stBmeTombstonesOmitted: true,
+        };
+      },
+    };
+  };
+
+  const result = await harness.api.loadGraphFromIndexedDb(chatId, {
+    source: "probe-empty-early-return",
+    attemptIndex: 0,
+  });
+
+  assert.equal(result.loaded, false);
+  assert.equal(exportProbeCalls, 1);
+  assert.equal(
+    exportSnapshotCalls,
+    0,
+    "empty/probe 早退应在 probe 阶段终止，而不是继续全量导出 snapshot",
+  );
+  harness.runtimeContext.BmeChatManager.prototype._createDb = originalCreateDb;
 }
 
 {

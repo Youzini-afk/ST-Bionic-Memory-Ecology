@@ -95,6 +95,8 @@ function resolveCurrentChatIdentity() {
 }
 function readCachedIndexedDbSnapshot() { return null; }
 function resolvePersistRevisionFloor(revision = 0) { return Number(revision) || 1; }
+function buildPersistDeltaFromGraphDirtyState() { return null; }
+function pruneGraphPersistDirtyState() { return null; }
 function buildSnapshotFromGraph(graph, options = {}) {
   return {
     meta: {

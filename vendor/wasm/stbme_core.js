@@ -69,6 +69,14 @@ async function loadFromWasmPackArtifacts() {
 
   return {
     solve_layout: module.solve_layout,
+    build_hydrate_records:
+      typeof module.build_hydrate_records === "function"
+        ? module.build_hydrate_records
+        : null,
+    build_hydrate_records_compact:
+      typeof module.build_hydrate_records_compact === "function"
+        ? module.build_hydrate_records_compact
+        : null,
     build_persist_delta_compact_hash:
       typeof module.build_persist_delta_compact_hash === "function"
         ? module.build_persist_delta_compact_hash
@@ -216,6 +224,36 @@ export async function installNativePersistDeltaHook() {
         nowMs: options?.nowMs,
       });
     }
+    return raw && typeof raw === "object" ? raw : null;
+  };
+
+  return getNativeModuleStatus();
+}
+
+export async function installNativeHydrateHook() {
+  const module = await loadNativeModule({
+    forceRetry: shouldRetryNativeLoad(),
+  });
+  if (
+    !module ||
+    (typeof module.build_hydrate_records !== "function" &&
+      typeof module.build_hydrate_records_compact !== "function")
+  ) {
+    throw new Error("native hydrate builder unavailable");
+  }
+
+  globalThis.__stBmeNativeHydrateSnapshotRecords = (snapshotView = {}, options = {}) => {
+    const hydratePayload = {
+      nodes: Array.isArray(snapshotView?.nodes) ? snapshotView.nodes : [],
+      edges: Array.isArray(snapshotView?.edges) ? snapshotView.edges : [],
+      recordsNormalized: options?.recordsNormalized === true,
+      preferCompactResult: options?.preferCompactResult !== false,
+    };
+    const raw =
+      typeof module.build_hydrate_records_compact === "function" &&
+      options?.preferCompactResult !== false
+        ? module.build_hydrate_records_compact(hydratePayload)
+        : module.build_hydrate_records(hydratePayload);
     return raw && typeof raw === "object" ? raw : null;
   };
 

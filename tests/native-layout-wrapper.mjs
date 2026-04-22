@@ -22,6 +22,24 @@ try {
         },
       };
     },
+    build_hydrate_records(payload = {}) {
+      return {
+        ok: true,
+        usedNative: true,
+        nodes: Array.isArray(payload?.nodes)
+          ? payload.nodes.map((node) => ({ ...node, nativeHydrated: true }))
+          : [],
+        edges: Array.isArray(payload?.edges)
+          ? payload.edges.map((edge) => ({ ...edge, nativeHydrated: true }))
+          : [],
+        diagnostics: {
+          solver: "mock-loader",
+          nodeCount: Array.isArray(payload?.nodes) ? payload.nodes.length : 0,
+          edgeCount: Array.isArray(payload?.edges) ? payload.edges.length : 0,
+          recordsNormalized: payload?.recordsNormalized === true,
+        },
+      };
+    },
     build_persist_delta_compact(payload = {}) {
       return {
         upsertNodeIds: Array.isArray(payload?.afterNodes?.ids)
@@ -105,8 +123,29 @@ try {
   assert.deepEqual(deltaResult.upsertNodes, [{ id: "persist-native-node", marker: "after-chat" }]);
   assert.equal(deltaResult.runtimeMetaPatch.native, true);
 
+  const hydrateInstallStatus = await wrapper.installNativeHydrateHook();
+  assert.equal(hydrateInstallStatus.loaded, true);
+  assert.equal(
+    typeof globalThis.__stBmeNativeHydrateSnapshotRecords,
+    "function",
+  );
+  const hydrateResult = globalThis.__stBmeNativeHydrateSnapshotRecords(
+    {
+      nodes: [{ id: "hydrate-node", type: "event" }],
+      edges: [{ id: "hydrate-edge", fromId: "hydrate-node", toId: "hydrate-node-2" }],
+    },
+    {
+      recordsNormalized: true,
+    },
+  );
+  assert.equal(hydrateResult.ok, true);
+  assert.equal(hydrateResult.nodes[0].nativeHydrated, true);
+  assert.equal(hydrateResult.edges[0].nativeHydrated, true);
+  assert.equal(hydrateResult.diagnostics.recordsNormalized, true);
+
   delete globalThis.__stBmeLoadRustWasmLayout;
   delete globalThis.__stBmeNativeBuildPersistDelta;
+  delete globalThis.__stBmeNativeHydrateSnapshotRecords;
   delete globalThis.__stBmeDisableWasmPackArtifacts;
 
   const wrapperNoLoader = await importFreshWrapper("no-loader");
@@ -136,6 +175,7 @@ try {
   }
   delete globalThis.__stBmeDisableWasmPackArtifacts;
   delete globalThis.__stBmeNativeBuildPersistDelta;
+  delete globalThis.__stBmeNativeHydrateSnapshotRecords;
 }
 
 console.log("native-layout-wrapper tests passed");

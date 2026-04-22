@@ -261,7 +261,62 @@ async function testGraphLikeDeltaPreservesHistoryFrontier() {
   );
 }
 
+async function testCommitDeltaDiagnosticsSplitWalAndManifestStages() {
+  const rootDirectory = createMemoryOpfsRoot();
+  const store = new OpfsGraphStore("chat-opfs-diagnostics-split", {
+    rootDirectoryFactory: async () => rootDirectory,
+    storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  });
+  await store.open();
+
+  await store.importSnapshot(
+    {
+      meta: { revision: 1 },
+      state: { lastProcessedFloor: 0, extractionCount: 0 },
+      nodes: [],
+      edges: [],
+      tombstones: [],
+    },
+    { mode: "replace", preserveRevision: true },
+  );
+
+  const result = await store.commitDelta(
+    {
+      upsertNodes: [
+        {
+          id: "diag-node-1",
+          type: "event",
+          fields: { title: "diag" },
+          archived: false,
+          updatedAt: 10,
+        },
+      ],
+    },
+    {
+      reason: "diagnostics-split",
+      requestedRevision: 2,
+      markSyncDirty: true,
+    },
+  );
+
+  assert.equal(Number.isFinite(result.diagnostics?.walSerializeMs), true);
+  assert.equal(Number.isFinite(result.diagnostics?.walFileWriteMs), true);
+  assert.equal(Number.isFinite(result.diagnostics?.walWriteMs), true);
+  assert.equal(Number.isFinite(result.diagnostics?.manifestSerializeMs), true);
+  assert.equal(Number.isFinite(result.diagnostics?.manifestFileWriteMs), true);
+  assert.equal(Number.isFinite(result.diagnostics?.manifestWriteMs), true);
+  assert.equal(
+    result.diagnostics.walWriteMs >= result.diagnostics.walSerializeMs,
+    true,
+  );
+  assert.equal(
+    result.diagnostics.manifestWriteMs >= result.diagnostics.manifestSerializeMs,
+    true,
+  );
+}
+
 await testCommitDeltaAndPatchMetaSerialize();
 await testImportSnapshotAndClearAllSerialize();
 await testGraphLikeDeltaPreservesHistoryFrontier();
+await testCommitDeltaDiagnosticsSplitWalAndManifestStages();
 console.log("opfs-write-serialization tests passed");

@@ -8,6 +8,11 @@ import {
   findLatestNode,
   serializeGraph,
 } from "../graph/graph.js";
+import { normalizeMemoryScope } from "../graph/memory-scope.js";
+import {
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
+} from "../graph/story-timeline.js";
 
 const graph = createEmptyGraph();
 const objectiveNode = createNode({
@@ -52,6 +57,50 @@ const latestPov = findLatestNode(
 
 assert.equal(latestObjective?.id, objectiveNode.id);
 assert.equal(latestPov?.id, povNode.id);
+
+const normalizedScope = {
+  layer: "pov",
+  ownerType: "character",
+  ownerId: "艾琳",
+  ownerName: "艾琳",
+  regionPrimary: "钟楼",
+  regionPath: ["钟楼", "塔顶"],
+  regionSecondary: ["旧城区"],
+};
+assert.equal(
+  normalizeMemoryScope(normalizedScope),
+  normalizedScope,
+  "已规范的 scope 对象应直接复用",
+);
+
+const normalizedStoryTime = {
+  segmentId: "tl-1",
+  label: "第二天清晨",
+  tense: "ongoing",
+  relation: "same",
+  anchorLabel: "昨夜",
+  confidence: "high",
+  source: "derived",
+};
+assert.equal(
+  normalizeStoryTime(normalizedStoryTime),
+  normalizedStoryTime,
+  "已规范的 storyTime 对象应直接复用",
+);
+
+const normalizedStoryTimeSpan = {
+  startSegmentId: "tl-0",
+  endSegmentId: "tl-1",
+  startLabel: "昨夜",
+  endLabel: "第二天清晨",
+  mixed: false,
+  source: "derived",
+};
+assert.equal(
+  normalizeStoryTimeSpan(normalizedStoryTimeSpan),
+  normalizedStoryTimeSpan,
+  "已规范的 storyTimeSpan 对象应直接复用",
+);
 
 const legacyGraph = deserializeGraph({
   version: 6,
