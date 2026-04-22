@@ -2673,14 +2673,24 @@ function rebindRecallRecordToNewUserMessage(newUserMessageIndex) {
   ) {
     return;
   }
+  const frozenOpts = recentTransaction?.frozenRecallOptions;
   const record = buildPersistedRecallRecord(
     {
       injectionText: String(recallResult.injectionText || "").trim(),
       selectedNodeIds: recallResult.selectedNodeIds || [],
       recallInput: String(
-        recallResult.recallInput || recallResult.userMessage || "",
+        recallResult.recallInput ||
+          recallResult.userMessage ||
+          frozenOpts?.overrideUserMessage ||
+          frozenOpts?.userMessage ||
+          "",
       ),
-      recallSource: String(recallResult.source || ""),
+      recallSource: String(
+        recallResult.source ||
+          frozenOpts?.lockedSource ||
+          frozenOpts?.overrideSource ||
+          "",
+      ),
       hookName: String(
         recallResult.hookName ||
           recentTransaction?.lastRecallMeta?.hookName ||
@@ -2690,6 +2700,12 @@ function rebindRecallRecordToNewUserMessage(newUserMessageIndex) {
         String(recallResult.injectionText || "").trim(),
       ),
       manuallyEdited: false,
+      authoritativeInputUsed: Boolean(
+        recallResult.authoritativeInputUsed ?? frozenOpts?.authoritativeInputUsed,
+      ),
+      boundUserFloorText: String(
+        recallResult.boundUserFloorText || frozenOpts?.boundUserFloorText || "",
+      ),
     },
     null,
   );
@@ -2970,7 +2986,8 @@ function ensurePersistedRecallRecordForGeneration({
   if (
     existingRecord &&
     String(existingRecord.injectionText || "").trim() === injectionText &&
-    areRecallNodeIdListsEqual(existingRecord.selectedNodeIds, selectedNodeIds)
+    areRecallNodeIdListsEqual(existingRecord.selectedNodeIds, selectedNodeIds) &&
+    String(existingRecord.recallInput || "").trim()
   ) {
     return {
       persisted: false,

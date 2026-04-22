@@ -1,0 +1,353 @@
+// ST-BME: regression tests — reroll should reuse persisted recall record
+//
+// Covers:
+//   1. ensurePersistedRecallRecordForGeneration re-writes when existing record
+//      has same injectionText/nodeIds but empty recallInput
+//   2. resolveReusablePersistedRecallRecord (inside runRecallController) reuses
+//      a persisted record when recallInput matches the user floor text
+//   3. End-to-end: regenerate does NOT call retrieve when a valid persisted
+//      record exists
+
+import assert from "node:assert/strict";
+import {
+  buildPersistedRecallRecord,
+  readPersistedRecallFromUserMessage,
+  writePersistedRecallToUserMessage,
+  BME_RECALL_EXTRA_KEY,
+} from "../retrieval/recall-persistence.js";
+import { runRecallController } from "../retrieval/recall-controller.js";
+import { createGenerationRecallHarness } from "./helpers/generation-recall-harness.mjs";
+import {
+  normalizeRecallInputText,
+  createRecallRunResult,
+  createRecallInputRecord,
+  isFreshRecallInputRecord,
+} from "../ui/ui-status.js";
+import { defaultSettings } from "../runtime/settings-defaults.js";
+
+// ═══════════════════════════════════════════════════════════════
+// 1. ensurePersistedRecallRecordForGeneration: empty recallInput override
+// ═══════════════════════════════════════════════════════════════
+
+const harness = await createGenerationRecallHarness({ realApplyFinal: true });
+
+// Prime settings
+Object.assign(harness.settings, {
+  ...defaultSettings,
+  enabled: true,
+  recallEnabled: true,
+});
+
+// Set up chat: user + assistant
+harness.chat = [
+  { is_user: true, mes: "去摩耶山看夜景" },
+  { is_user: false, mes: "好的，我们出发吧。", is_system: false },
+];
+
+// Pre-write a persisted record with EMPTY recallInput (simulates old bug)
+const emptyRecallInputRecord = buildPersistedRecallRecord({
+  injectionText: "注入:去摩耶山看夜景",
+  selectedNodeIds: ["node-test-1"],
+  recallInput: "",
+  recallSource: "chat-tail-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+});
+writePersistedRecallToUserMessage(harness.chat, 0, emptyRecallInputRecord);
+
+// Verify the record is written with empty recallInput
+const beforeRecord = readPersistedRecallFromUserMessage(harness.chat, 0);
+assert.ok(beforeRecord, "persisted record should exist before ensure");
+assert.equal(beforeRecord.recallInput, "", "recallInput should be empty before fix");
+assert.equal(
+  beforeRecord.injectionText,
+  "注入:去摩耶山看夜景",
+  "injectionText should match",
+);
+
+// Build a mock recall result with the same injectionText
+const mockRecallResult = {
+  status: "completed",
+  didRecall: true,
+  ok: true,
+  injectionText: "注入:去摩耶山看夜景",
+  selectedNodeIds: ["node-test-1"],
+  source: "chat-last-user",
+  sourceLabel: "历史最后用户楼层",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  authoritativeInputUsed: false,
+  boundUserFloorText: "去摩耶山看夜景",
+};
+
+// Build frozen recall options with overrideUserMessage
+const frozenRecallOptions = {
+  generationType: "regenerate",
+  targetUserMessageIndex: 0,
+  overrideUserMessage: "去摩耶山看夜景",
+  overrideSource: "chat-last-user",
+  overrideSourceLabel: "历史最后用户楼层",
+  lockedSource: "chat-last-user",
+  lockedSourceLabel: "历史最后用户楼层",
+  authoritativeInputUsed: false,
+  boundUserFloorText: "去摩耶山看夜景",
+};
+
+// Call ensurePersistedRecallRecordForGeneration
+const ensureResult = harness.result.ensurePersistedRecallRecordForGeneration({
+  generationType: "regenerate",
+  recallResult: mockRecallResult,
+  transaction: { frozenRecallOptions },
+  recallOptions: frozenRecallOptions,
+  hookName: "GENERATION_AFTER_COMMANDS",
+});
+
+// After fix: the record should be overwritten because existing recallInput is empty
+const afterRecord = readPersistedRecallFromUserMessage(harness.chat, 0);
+assert.ok(afterRecord, "persisted record should still exist after ensure");
+assert.equal(
+  afterRecord.recallInput,
+  "去摩耶山看夜景",
+  "recallInput should now be populated after ensure overwrites empty-recallInput record",
+);
+assert.equal(
+  afterRecord.boundUserFloorText,
+  "去摩耶山看夜景",
+  "boundUserFloorText should be populated",
+);
+
+console.log("  ✓ ensurePersistedRecallRecordForGeneration overwrites record with empty recallInput");
+
+// ═══════════════════════════════════════════════════════════════
+// 2. ensurePersistedRecallRecordForGeneration: populated recallInput skip
+// ═══════════════════════════════════════════════════════════════
+
+// Now the record has proper recallInput — calling ensure again should skip
+const ensureResult2 = harness.result.ensurePersistedRecallRecordForGeneration({
+  generationType: "regenerate",
+  recallResult: mockRecallResult,
+  transaction: { frozenRecallOptions },
+  recallOptions: frozenRecallOptions,
+  hookName: "GENERATION_AFTER_COMMANDS",
+});
+assert.equal(
+  ensureResult2.reason,
+  "already-up-to-date",
+  "should skip when recallInput is already populated",
+);
+
+console.log("  ✓ ensurePersistedRecallRecordForGeneration skips when recallInput is populated");
+
+// ═══════════════════════════════════════════════════════════════
+// 3. runRecallController: regenerate reuses persisted record
+// ═══════════════════════════════════════════════════════════════
+
+// Set up a fresh chat with a properly persisted recall record
+const rerollChat = [
+  { is_user: true, mes: "明日去摩耶山看夜景" },
+  { is_user: false, mes: "好的，明天约好了。", is_system: false },
+];
+
+const validRecord = buildPersistedRecallRecord({
+  injectionText: "注入:明日去摩耶山看夜景",
+  selectedNodeIds: ["node-a"],
+  recallInput: "明日去摩耶山看夜景",
+  recallSource: "chat-tail-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+  boundUserFloorText: "明日去摩耶山看夜景",
+});
+writePersistedRecallToUserMessage(rerollChat, 0, validRecord);
+
+let retrieveCalled = false;
+const rerollRuntime = {
+  getIsRecalling: () => false,
+  getCurrentGraph: () => ({ nodes: [], edges: [] }),
+  getSettings: () => ({
+    ...defaultSettings,
+    enabled: true,
+    recallEnabled: true,
+    recallLlmContextMessages: 5,
+  }),
+  isGraphReadableForRecall: () => true,
+  isGraphMetadataWriteAllowed: () => true,
+  recoverHistoryIfNeeded: async () => true,
+  getContext: () => ({ chat: rerollChat, chatId: "chat-reroll" }),
+  nextRecallRunSequence: () => 1,
+  beginStageAbortController: () => ({ signal: { aborted: false } }),
+  finishStageAbortController: () => {},
+  setIsRecalling: () => {},
+  setActiveRecallPromise: () => {},
+  getActiveRecallPromise: () => null,
+  setLastRecallStatus: () => {},
+  clampInt: (v, f, mn, mx) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return f;
+    return Math.min(mx, Math.max(mn, Math.trunc(n)));
+  },
+  normalizeRecallInputText,
+  createRecallInputRecord,
+  createRecallRunResult,
+  isFreshRecallInputRecord,
+  getLatestUserChatMessage: (chat = []) =>
+    [...chat].reverse().find((m) => m?.is_user) || null,
+  getLastNonSystemChatMessage: (chat = []) =>
+    [...chat].reverse().find((m) => !m?.is_system) || null,
+  getRecallUserMessageSourceLabel: (s) => s,
+  buildRecallRecentMessages: () => [],
+  readPersistedRecallFromUserMessage,
+  bumpPersistedRecallGenerationCount: (chat, idx) => {
+    // no-op in test; just return the record
+    return readPersistedRecallFromUserMessage(chat, idx);
+  },
+  triggerChatMetadataSave: () => {},
+  schedulePersistedRecallMessageUiRefresh: () => {},
+  refreshPanelLiveState: () => {},
+  ensureVectorReadyIfNeeded: async () => {},
+  resolveRecallInput: (chat, limit, override) => {
+    // Simulate resolveRecallInputController override path
+    const overrideText = normalizeRecallInputText(
+      override?.overrideUserMessage || override?.userMessage || "",
+    );
+    return {
+      userMessage: overrideText,
+      generationType: String(override?.generationType || "normal"),
+      targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex)
+        ? override.targetUserMessageIndex
+        : null,
+      source: override?.overrideSource || "chat-last-user",
+      sourceLabel: override?.overrideSourceLabel || "历史最后用户楼层",
+      reason: "override-bound",
+      authoritativeInputUsed: Boolean(override?.authoritativeInputUsed),
+      boundUserFloorText: normalizeRecallInputText(
+        override?.boundUserFloorText || "",
+      ),
+      recentMessages: [],
+      hookName: override?.hookName || "",
+      deliveryMode: "immediate",
+    };
+  },
+  applyRecallInjection: (_settings, _input, _recent, result) => ({
+    injectionText: result?.injectionText || "",
+    applied: true,
+    source: "persisted-reuse",
+    mode: "module-injection",
+  }),
+  retrieve: async () => {
+    retrieveCalled = true;
+    return {
+      injectionText: "should-not-appear",
+      selectedNodeIds: ["node-b"],
+    };
+  },
+  buildRecallRetrieveOptions: () => ({}),
+  getEmbeddingConfig: () => ({}),
+  getSchema: () => ({}),
+  console,
+  isAbortError: () => false,
+  toastr: { error: () => {} },
+  getRecallHookLabel: () => "",
+  setPendingRecallSendIntent: () => {},
+};
+
+// Simulate regenerate: override with the user floor text and generationType regenerate
+const rerollResult = await runRecallController(rerollRuntime, {
+  overrideUserMessage: "明日去摩耶山看夜景",
+  generationType: "regenerate",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  overrideSourceLabel: "历史最后用户楼层",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(rerollResult.status, "completed", "reroll should complete");
+assert.equal(
+  rerollResult.reason,
+  "persisted-user-floor-reused",
+  "reroll should reuse persisted record, not run fresh recall",
+);
+assert.equal(
+  retrieveCalled,
+  false,
+  "retrieve() should NOT be called when persisted record is reused",
+);
+assert.equal(
+  rerollResult.injectionText,
+  "注入:明日去摩耶山看夜景",
+  "injection text should come from persisted record",
+);
+
+console.log("  ✓ runRecallController reuses persisted record on regenerate");
+
+// ═══════════════════════════════════════════════════════════════
+// 4. runRecallController: regenerate with empty recallInput does NOT reuse
+// ═══════════════════════════════════════════════════════════════
+
+const noReuseChat = [
+  { is_user: true, mes: "去看星星" },
+  { is_user: false, mes: "好的。", is_system: false },
+];
+const emptyInputRecord = buildPersistedRecallRecord({
+  injectionText: "注入:去看星星",
+  selectedNodeIds: ["node-c"],
+  recallInput: "",
+  recallSource: "chat-tail-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 3,
+  manuallyEdited: false,
+});
+writePersistedRecallToUserMessage(noReuseChat, 0, emptyInputRecord);
+
+let noReuseRetrieveCalled = false;
+const noReuseRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: noReuseChat, chatId: "chat-no-reuse" }),
+  readPersistedRecallFromUserMessage,
+  retrieve: async () => {
+    noReuseRetrieveCalled = true;
+    return {
+      injectionText: "新召回结果",
+      selectedNodeIds: ["node-d"],
+    };
+  },
+  resolveRecallInput: (chat, limit, override) => ({
+    userMessage: normalizeRecallInputText(
+      override?.overrideUserMessage || "",
+    ),
+    generationType: String(override?.generationType || "normal"),
+    targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex)
+      ? override.targetUserMessageIndex
+      : null,
+    source: override?.overrideSource || "chat-last-user",
+    sourceLabel: override?.overrideSourceLabel || "",
+    reason: "override-bound",
+    authoritativeInputUsed: false,
+    boundUserFloorText: "",
+    recentMessages: [],
+    hookName: override?.hookName || "",
+    deliveryMode: "immediate",
+  }),
+};
+
+const noReuseResult = await runRecallController(noReuseRuntime, {
+  overrideUserMessage: "去看星星",
+  generationType: "regenerate",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(noReuseResult.status, "completed", "no-reuse should complete");
+assert.equal(
+  noReuseRetrieveCalled,
+  true,
+  "retrieve() SHOULD be called when persisted record has empty recallInput",
+);
+
+console.log("  ✓ runRecallController does NOT reuse record with empty recallInput");
+
+// ═══════════════════════════════════════════════════════════════
+console.log("recall-reroll-reuse tests passed");
