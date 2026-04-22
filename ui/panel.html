@@ -1465,6 +1465,199 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
+                      <div class="bme-config-card-title">Native 性能加速</div>
+                      <div class="bme-config-card-subtitle">
+                        控制图布局、图谱增量写回与加载 hydrate 是否尝试使用 Worker / WASM 加速；默认按阈值自动命中。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-graph-native-force-disable"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">全局强制关闭 Native</span>
+                      <span class="bme-toggle-desc">
+                        打开后会统一禁止 layout / persist / hydrate 的 native 路径，直接走 JS 回退。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-graph-native-force-disable"
+                      type="checkbox"
+                    />
+                  </label>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-native-engine-fail-open"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">Fail-open 回退</span>
+                      <span class="bme-toggle-desc">
+                        native 模块不可用或执行失败时，自动回退到 JS；关闭后会按严格模式抛错。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-native-engine-fail-open"
+                      type="checkbox"
+                    />
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-graph-use-native-layout"
+                  >
+                    <input
+                      id="bme-setting-graph-use-native-layout"
+                      type="checkbox"
+                    />
+                    <span>图布局使用 native Worker / WASM</span>
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-persist-use-native-delta"
+                  >
+                    <input
+                      id="bme-setting-persist-use-native-delta"
+                      type="checkbox"
+                    />
+                    <span>Persist Delta 使用 native 加速</span>
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-load-use-native-hydrate"
+                  >
+                    <input
+                      id="bme-setting-load-use-native-hydrate"
+                      type="checkbox"
+                    />
+                    <span>快照 Hydrate 使用 native 加速</span>
+                  </label>
+                  <div class="bme-config-help" id="bme-native-rollout-status">
+                    当前会在这里显示 native rollout 总状态与最近一次命中/回退摘要。
+                  </div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-layout-status"
+                    style="margin-top: 6px;"
+                  ></div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-persist-status"
+                    style="margin-top: 4px;"
+                  ></div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-hydrate-status"
+                    style="margin-top: 4px;"
+                  ></div>
+                  <details
+                    class="bme-config-subdetails bme-collapsible-card"
+                    id="bme-native-rollout-threshold-settings"
+                  >
+                    <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                      <div>
+                        <div class="bme-config-subgroup-title">阈值与超时</div>
+                        <div class="bme-config-subgroup-desc">
+                          调整 layout / persist / hydrate 什么时候值得尝试 native；通常保持默认即可。
+                        </div>
+                      </div>
+                      <span class="bme-collapsible-indicator" aria-hidden="true">
+                        <i class="fa-solid fa-chevron-down"></i>
+                      </span>
+                    </summary>
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-threshold-nodes">
+                          布局节点阈值
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-threshold-nodes"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="20000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-threshold-edges">
+                          布局边阈值
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-threshold-edges"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-worker-timeout-ms">
+                          Layout Worker 超时（ms）
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-worker-timeout-ms"
+                          class="bme-config-input"
+                          type="number"
+                          min="40"
+                          max="15000"
+                          step="10"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-records">
+                          Persist 记录数阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-records"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-structural-delta">
+                          Persist 结构变化阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-structural-delta"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-serialized-chars">
+                          Persist 序列化体积阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-serialized-chars"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="50000000"
+                          step="1000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-load-native-hydrate-threshold-records">
+                          Hydrate 记录数阈值
+                        </label>
+                        <input
+                          id="bme-setting-load-native-hydrate-threshold-records"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
                       <div class="bme-config-card-title">美化用户输入</div>
                       <div class="bme-config-card-subtitle">
                         控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。

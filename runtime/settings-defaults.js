@@ -9,7 +9,9 @@ function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   return Math.min(max, Math.max(min, Math.trunc(numeric)));
 }
 
-const NATIVE_ROLLOUT_VERSION = 1;
+const NATIVE_ROLLOUT_VERSION = 2;
+const LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS = 12000;
+const DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS = 30000;
 
 export const defaultSettings = {
   enabled: true,
@@ -125,7 +127,7 @@ export const defaultSettings = {
   persistNativeDeltaThresholdSerializedChars: 4000000,
   persistNativeDeltaBridgeMode: "json",
   loadUseNativeHydrate: true,
-  loadNativeHydrateThresholdRecords: 12000,
+  loadNativeHydrateThresholdRecords: DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS,
   nativeRolloutVersion: NATIVE_ROLLOUT_VERSION,
   nativeEngineFailOpen: true,
   graphNativeForceDisable: false,
@@ -252,10 +254,26 @@ export function migrateNativeRolloutSettings(loaded = {}) {
     0,
     NATIVE_ROLLOUT_VERSION,
   );
-  if (rolloutVersion < NATIVE_ROLLOUT_VERSION) {
+  if (rolloutVersion < 1) {
     migrated.graphUseNativeLayout = defaultSettings.graphUseNativeLayout;
     migrated.persistUseNativeDelta = defaultSettings.persistUseNativeDelta;
     migrated.loadUseNativeHydrate = defaultSettings.loadUseNativeHydrate;
+  }
+  if (
+    rolloutVersion < 2 &&
+    (!Object.prototype.hasOwnProperty.call(
+      migrated,
+      "loadNativeHydrateThresholdRecords",
+    ) ||
+      clampIntValue(
+        migrated.loadNativeHydrateThresholdRecords,
+        LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS,
+        0,
+        1000000,
+      ) === LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS)
+  ) {
+    migrated.loadNativeHydrateThresholdRecords =
+      defaultSettings.loadNativeHydrateThresholdRecords;
   }
   migrated.nativeRolloutVersion = NATIVE_ROLLOUT_VERSION;
   return migrated;

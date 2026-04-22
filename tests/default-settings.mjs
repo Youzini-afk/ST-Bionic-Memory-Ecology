@@ -77,8 +77,8 @@ assert.equal(defaultSettings.persistNativeDeltaThresholdStructuralDelta, 600);
 assert.equal(defaultSettings.persistNativeDeltaThresholdSerializedChars, 4000000);
 assert.equal(defaultSettings.persistNativeDeltaBridgeMode, "json");
 assert.equal(defaultSettings.loadUseNativeHydrate, true);
-assert.equal(defaultSettings.loadNativeHydrateThresholdRecords, 12000);
-assert.equal(defaultSettings.nativeRolloutVersion, 1);
+assert.equal(defaultSettings.loadNativeHydrateThresholdRecords, 30000);
+assert.equal(defaultSettings.nativeRolloutVersion, 2);
 assert.equal(defaultSettings.nativeEngineFailOpen, true);
 assert.equal(defaultSettings.graphNativeForceDisable, false);
 assert.equal(defaultSettings.taskProfilesVersion, 3);
@@ -126,11 +126,12 @@ const migratedLegacyNativeDisabled = mergePersistedSettings({
 assert.equal(migratedLegacyNativeDisabled.graphUseNativeLayout, true);
 assert.equal(migratedLegacyNativeDisabled.persistUseNativeDelta, true);
 assert.equal(migratedLegacyNativeDisabled.loadUseNativeHydrate, true);
+assert.equal(migratedLegacyNativeDisabled.loadNativeHydrateThresholdRecords, 30000);
 assert.equal(migratedLegacyNativeDisabled.graphNativeForceDisable, true);
-assert.equal(migratedLegacyNativeDisabled.nativeRolloutVersion, 1);
+assert.equal(migratedLegacyNativeDisabled.nativeRolloutVersion, 2);
 
 const migratedVersionedManualNativeDisabled = mergePersistedSettings({
-  nativeRolloutVersion: 1,
+  nativeRolloutVersion: 2,
   graphUseNativeLayout: false,
   persistUseNativeDelta: false,
   loadUseNativeHydrate: false,
@@ -140,6 +141,20 @@ assert.equal(migratedVersionedManualNativeDisabled.graphUseNativeLayout, false);
 assert.equal(migratedVersionedManualNativeDisabled.persistUseNativeDelta, false);
 assert.equal(migratedVersionedManualNativeDisabled.loadUseNativeHydrate, false);
 assert.equal(migratedVersionedManualNativeDisabled.graphNativeForceDisable, true);
-assert.equal(migratedVersionedManualNativeDisabled.nativeRolloutVersion, 1);
+assert.equal(migratedVersionedManualNativeDisabled.nativeRolloutVersion, 2);
+
+const migratedLegacyHydrateThresholdDefault = mergePersistedSettings({
+  nativeRolloutVersion: 1,
+  loadNativeHydrateThresholdRecords: 12000,
+});
+assert.equal(migratedLegacyHydrateThresholdDefault.loadNativeHydrateThresholdRecords, 30000);
+assert.equal(migratedLegacyHydrateThresholdDefault.nativeRolloutVersion, 2);
+
+const preservedCustomHydrateThreshold = mergePersistedSettings({
+  nativeRolloutVersion: 1,
+  loadNativeHydrateThresholdRecords: 45000,
+});
+assert.equal(preservedCustomHydrateThreshold.loadNativeHydrateThresholdRecords, 45000);
+assert.equal(preservedCustomHydrateThreshold.nativeRolloutVersion, 2);
 
 console.log("default-settings tests passed");

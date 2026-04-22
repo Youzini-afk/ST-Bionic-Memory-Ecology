@@ -110,14 +110,14 @@ const snapshot = {
 };
 
 const defaultGate = resolveNativeHydrateGateOptions({});
-assert.equal(defaultGate.minSnapshotRecords, 12000);
+assert.equal(defaultGate.minSnapshotRecords, 30000);
 const gatedSmall = evaluateNativeHydrateGate(snapshot, {});
 assert.equal(gatedSmall.allowed, false);
 assert.deepEqual(gatedSmall.reasons, ["below-min-snapshot-records"]);
 const gatedLarge = evaluateNativeHydrateGate(
   {
-    nodes: new Array(6000).fill({ id: "node-x" }),
-    edges: new Array(6000).fill({ id: "edge-x" }),
+    nodes: new Array(15000).fill({ id: "node-x" }),
+    edges: new Array(15000).fill({ id: "edge-x" }),
   },
   {},
 );
