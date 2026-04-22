@@ -700,7 +700,7 @@ function applyRuntimeDefaultTemplateOverrides(taskType, template = null) {
   replaceContent("default-rules", overrideContent.rules);
 
   template.version = Math.max(Number(template.version || 0), 4);
-  template.updatedAt = "2026-04-10T23:20:00.000Z";
+  template.updatedAt = "2026-04-23T00:30:00.000Z";
   return template;
 }
 
