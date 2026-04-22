@@ -767,6 +767,11 @@ export async function executeExtractionBatchController(
       );
     }
   } else if (!persistence.accepted) {
+    // 即使持久化未被接受，仍在内存中推进 lastProcessedAssistantFloor，
+    // 防止同一会话内对已经抽取过的楼层重复提取。
+    // 此时不追加 batchJournal（保持回滚完整性）。
+    // 如果用户重载，floor 和图谱都会回退到最后持久化状态，保持一致。
+    runtime.updateProcessedHistorySnapshot(chat, endIdx);
     runtime.setLastExtractionStatus(
       "提取待恢复",
       `楼层 ${startIdx}-${endIdx} 已抽取，但持久化状态为 ${persistence.outcome || "failed"}${persistence.reason ? ` · ${persistence.reason}` : ""}`,
