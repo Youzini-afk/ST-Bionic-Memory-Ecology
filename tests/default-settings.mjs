@@ -78,6 +78,7 @@ assert.equal(defaultSettings.persistNativeDeltaThresholdSerializedChars, 4000000
 assert.equal(defaultSettings.persistNativeDeltaBridgeMode, "json");
 assert.equal(defaultSettings.loadUseNativeHydrate, true);
 assert.equal(defaultSettings.loadNativeHydrateThresholdRecords, 12000);
+assert.equal(defaultSettings.nativeRolloutVersion, 1);
 assert.equal(defaultSettings.nativeEngineFailOpen, true);
 assert.equal(defaultSettings.graphNativeForceDisable, false);
 assert.equal(defaultSettings.taskProfilesVersion, 3);
@@ -115,5 +116,30 @@ assert.equal(
   migratedLegacyCompressionDisabled.compressionEveryN,
   defaultSettings.compressionEveryN,
 );
+
+const migratedLegacyNativeDisabled = mergePersistedSettings({
+  graphUseNativeLayout: false,
+  persistUseNativeDelta: false,
+  loadUseNativeHydrate: false,
+  graphNativeForceDisable: true,
+});
+assert.equal(migratedLegacyNativeDisabled.graphUseNativeLayout, true);
+assert.equal(migratedLegacyNativeDisabled.persistUseNativeDelta, true);
+assert.equal(migratedLegacyNativeDisabled.loadUseNativeHydrate, true);
+assert.equal(migratedLegacyNativeDisabled.graphNativeForceDisable, true);
+assert.equal(migratedLegacyNativeDisabled.nativeRolloutVersion, 1);
+
+const migratedVersionedManualNativeDisabled = mergePersistedSettings({
+  nativeRolloutVersion: 1,
+  graphUseNativeLayout: false,
+  persistUseNativeDelta: false,
+  loadUseNativeHydrate: false,
+  graphNativeForceDisable: true,
+});
+assert.equal(migratedVersionedManualNativeDisabled.graphUseNativeLayout, false);
+assert.equal(migratedVersionedManualNativeDisabled.persistUseNativeDelta, false);
+assert.equal(migratedVersionedManualNativeDisabled.loadUseNativeHydrate, false);
+assert.equal(migratedVersionedManualNativeDisabled.graphNativeForceDisable, true);
+assert.equal(migratedVersionedManualNativeDisabled.nativeRolloutVersion, 1);
 
 console.log("default-settings tests passed");

@@ -9,6 +9,8 @@ function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   return Math.min(max, Math.max(min, Math.trunc(numeric)));
 }
 
+const NATIVE_ROLLOUT_VERSION = 1;
+
 export const defaultSettings = {
   enabled: true,
   debugLoggingEnabled: false,
@@ -124,6 +126,7 @@ export const defaultSettings = {
   persistNativeDeltaBridgeMode: "json",
   loadUseNativeHydrate: true,
   loadNativeHydrateThresholdRecords: 12000,
+  nativeRolloutVersion: NATIVE_ROLLOUT_VERSION,
   nativeEngineFailOpen: true,
   graphNativeForceDisable: false,
 
@@ -237,8 +240,31 @@ export function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
   return migrated;
 }
 
+export function migrateNativeRolloutSettings(loaded = {}) {
+  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
+    return {};
+  }
+
+  const migrated = { ...loaded };
+  const rolloutVersion = clampIntValue(
+    migrated.nativeRolloutVersion,
+    0,
+    0,
+    NATIVE_ROLLOUT_VERSION,
+  );
+  if (rolloutVersion < NATIVE_ROLLOUT_VERSION) {
+    migrated.graphUseNativeLayout = defaultSettings.graphUseNativeLayout;
+    migrated.persistUseNativeDelta = defaultSettings.persistUseNativeDelta;
+    migrated.loadUseNativeHydrate = defaultSettings.loadUseNativeHydrate;
+  }
+  migrated.nativeRolloutVersion = NATIVE_ROLLOUT_VERSION;
+  return migrated;
+}
+
 export function mergePersistedSettings(loaded = {}) {
-  const compatibleLoaded = migrateLegacyAutoMaintenanceSettings(loaded);
+  const compatibleLoaded = migrateNativeRolloutSettings(
+    migrateLegacyAutoMaintenanceSettings(loaded),
+  );
   const merged = { ...defaultSettings };
   for (const key of DEFAULT_SETTING_KEYS) {
     if (Object.prototype.hasOwnProperty.call(compatibleLoaded, key)) {

@@ -3157,6 +3157,7 @@ result = {
     writesBlocked: false,
   });
   harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    nativeRolloutVersion: 1,
     persistUseNativeDelta: false,
   };
   harness.runtimeContext.__scheduleUploadShouldThrow = true;
