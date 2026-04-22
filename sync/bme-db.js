@@ -1,4 +1,9 @@
 import { createEmptyGraph, deserializeGraph } from "../graph/graph.js";
+import { normalizeMemoryScope } from "../graph/memory-scope.js";
+import {
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
+} from "../graph/story-timeline.js";
 import {
   buildVectorCollectionId,
   cloneGraphPersistDirtyState,
@@ -506,6 +511,49 @@ function cloneHydrateSnapshotEdgeRecords(records = []) {
   }
   output.length = writeIndex;
   return output;
+}
+
+function isNormalizedSnapshotNodeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  if (!Array.isArray(record.seqRange) || record.seqRange.length < 2) {
+    return false;
+  }
+  if (!Array.isArray(record.childIds) || !Array.isArray(record.clusters)) {
+    return false;
+  }
+  if (normalizeMemoryScope(record.scope) !== record.scope) {
+    return false;
+  }
+  if (normalizeStoryTime(record.storyTime) !== record.storyTime) {
+    return false;
+  }
+  if (normalizeStoryTimeSpan(record.storyTimeSpan) !== record.storyTimeSpan) {
+    return false;
+  }
+  return true;
+}
+
+function isNormalizedSnapshotEdgeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  return normalizeMemoryScope(record.scope) === record.scope;
+}
+
+function areSnapshotRecordsNormalized(snapshotView = {}) {
+  for (const node of toArray(snapshotView?.nodes)) {
+    if (!isNormalizedSnapshotNodeRecord(node)) {
+      return false;
+    }
+  }
+  for (const edge of toArray(snapshotView?.edges)) {
+    if (!isNormalizedSnapshotEdgeRecord(edge)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function toMetaMap(rows = []) {
@@ -2906,7 +2954,8 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     {},
   );
   const snapshotRecordsNormalized =
-    snapshotMeta?.[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY] === true;
+    snapshotMeta?.[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY] === true &&
+    areSnapshotRecordsNormalized(snapshotView);
   const nativeHydrateGate =
     options?.useNativeHydrate === true
       ? evaluateNativeHydrateGate(snapshotView, options)

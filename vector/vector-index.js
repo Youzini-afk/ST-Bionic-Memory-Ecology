@@ -302,14 +302,18 @@ export function buildNodeVectorText(node) {
 
   const scope = normalizeMemoryScope(node?.scope);
   const scopeText = describeMemoryScope(scope);
+  const regionPath = Array.isArray(scope?.regionPath) ? scope.regionPath : [];
+  const regionSecondary = Array.isArray(scope?.regionSecondary)
+    ? scope.regionSecondary
+    : [];
   if (scopeText) {
     parts.push(`memory_scope: ${scopeText}`);
   }
-  if (scope.regionPath.length > 0) {
-    parts.push(`memory_region_path: ${scope.regionPath.join(" / ")}`);
+  if (regionPath.length > 0) {
+    parts.push(`memory_region_path: ${regionPath.join(" / ")}`);
   }
-  if (scope.regionSecondary.length > 0) {
-    parts.push(`memory_region_secondary: ${scope.regionSecondary.join(", ")}`);
+  if (regionSecondary.length > 0) {
+    parts.push(`memory_region_secondary: ${regionSecondary.join(", ")}`);
   }
 
   return parts.join(" | ").trim();

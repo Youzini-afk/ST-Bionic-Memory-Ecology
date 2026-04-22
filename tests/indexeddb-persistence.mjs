@@ -734,6 +734,16 @@ async function testGraphSnapshotConverters() {
   const rebuiltLegacyCompatible = buildGraphFromSnapshot(legacyCompatibleSnapshot, {
     chatId: "chat-a",
   });
+  const malformedButFlaggedSnapshot = {
+    ...legacyCompatibleSnapshot,
+    meta: {
+      ...legacyCompatibleSnapshot.meta,
+      [BME_RUNTIME_RECORDS_NORMALIZED_META_KEY]: true,
+    },
+  };
+  const rebuiltMalformedButFlagged = buildGraphFromSnapshot(malformedButFlaggedSnapshot, {
+    chatId: "chat-a",
+  });
   assert.equal(rebuilt.historyState.lastProcessedAssistantFloor, 9);
   assert.equal(rebuilt.historyState.extractionCount, 4);
   assert.equal(rebuilt.nodes.length, 1);
@@ -751,6 +761,9 @@ async function testGraphSnapshotConverters() {
   assert.equal(rebuiltLegacyCompatible.nodes[0].scope?.layer, "objective");
   assert.equal(rebuiltLegacyCompatible.nodes[0].storyTime?.tense, "unknown");
   assert.equal(rebuiltLegacyCompatible.nodes[0].storyTimeSpan?.mixed, false);
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].scope?.layer, "objective");
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTime?.tense, "unknown");
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTimeSpan?.mixed, false);
 
   rebuilt.nodes[0].fields.title = "Mutated Converter Node";
   rebuilt.nodes[0].embedding[0] = 99;
