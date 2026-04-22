@@ -152,9 +152,27 @@ function getNestedDirectory(directoryHandle, ...names) {
   return current;
 }
 
-function readJsonFromDirectory(directoryHandle, filename) {
+async function readJsonFromDirectory(directoryHandle, filename, { retries = 5 } = {}) {
   assert.ok(directoryHandle.files.has(filename), `文件必须存在: ${filename}`);
-  return JSON.parse(String(directoryHandle.files.get(filename) || ""));
+  let lastError = null;
+  let lastText = "";
+  const normalizedRetries = Math.max(0, Math.floor(Number(retries) || 0));
+  for (let attempt = 0; attempt <= normalizedRetries; attempt += 1) {
+    lastText = String(directoryHandle.files.get(filename) || "");
+    if (lastText) {
+      try {
+        return JSON.parse(lastText);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (attempt < normalizedRetries) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw new Error(
+    `读取目录 JSON 失败: ${filename} len=${lastText.length} error=${String(lastError?.message || "empty")}`,
+  );
 }
 
 function buildLegacyGraph(chatId) {
@@ -288,7 +306,7 @@ async function testImportExportPersistenceAndFileRotation() {
     },
   );
 
-  const manifestAfterFirstImport = readJsonFromDirectory(chatDirectory, "manifest.json");
+  const manifestAfterFirstImport = await readJsonFromDirectory(chatDirectory, "manifest.json");
   assert.equal(manifestAfterFirstImport.formatVersion, 2);
   assert.equal(manifestAfterFirstImport.baseRevision, 4);
   assert.equal(manifestAfterFirstImport.headRevision, 4);
@@ -376,7 +394,7 @@ async function testImportExportPersistenceAndFileRotation() {
     },
   );
 
-  const manifestAfterSecondImport = readJsonFromDirectory(chatDirectory, "manifest.json");
+  const manifestAfterSecondImport = await readJsonFromDirectory(chatDirectory, "manifest.json");
   assert.equal(manifestAfterSecondImport.formatVersion, 2);
   assert.equal(manifestAfterSecondImport.baseRevision, 6);
   assert.equal(manifestAfterSecondImport.headRevision, 6);
