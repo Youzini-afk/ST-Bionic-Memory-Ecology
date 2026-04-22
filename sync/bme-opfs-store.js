@@ -112,6 +112,26 @@ function normalizeNonNegativeInteger(value, fallback = 0) {
   return Math.floor(parsed);
 }
 
+function readPersistCommitNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function normalizePersistCommitMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function estimatePersistPayloadBytes(value = null) {
+  if (value == null) return 0;
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
 function deriveNodeSourceFloor(node = {}) {
   const directSourceFloor = normalizeSourceFloor(node?.sourceFloor);
   if (directSourceFloor != null) return directSourceFloor;
@@ -970,13 +990,19 @@ class LegacyOpfsGraphStore {
   }
 
   async commitDelta(delta = {}, options = {}) {
+    const commitRequestedAt = readPersistCommitNow();
     return await this._runSerializedWrite(
       String(options?.reason || "commitDelta"),
       async () => {
+        const commitStartedAt = readPersistCommitNow();
+        const queueWaitMs = commitStartedAt - commitRequestedAt;
         const nowMs = Date.now();
         const normalizedDelta =
           delta && typeof delta === "object" && !Array.isArray(delta) ? delta : {};
+        const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
+        const snapshotReadStartedAt = readPersistCommitNow();
         const currentSnapshot = await this._loadSnapshot({ awaitWrites: false });
+        const snapshotReadMs = readPersistCommitNow() - snapshotReadStartedAt;
         const nodeMap = new Map();
         const edgeMap = new Map();
         const tombstoneMap = new Map();
@@ -1093,7 +1119,9 @@ class LegacyOpfsGraphStore {
           edges: Array.from(edgeMap.values()),
           tombstones: Array.from(tombstoneMap.values()),
         };
+        const snapshotWriteStartedAt = readPersistCommitNow();
         await this._writeResolvedSnapshot(nextSnapshot);
+        const snapshotWriteMs = readPersistCommitNow() - snapshotWriteStartedAt;
 
         return {
           revision: nextRevision,
@@ -1109,6 +1137,18 @@ class LegacyOpfsGraphStore {
             deleteNodeIds: deleteNodeIds.length,
             deleteEdgeIds: deleteEdgeIds.length,
             tombstones: tombstones.length,
+          },
+          diagnostics: {
+            storageKind: OPFS_STORE_KIND,
+            storeMode: this.storeMode,
+            queueWaitMs: normalizePersistCommitMs(queueWaitMs),
+            commitMs: normalizePersistCommitMs(
+              readPersistCommitNow() - commitStartedAt,
+            ),
+            snapshotReadMs: normalizePersistCommitMs(snapshotReadMs),
+            snapshotWriteMs: normalizePersistCommitMs(snapshotWriteMs),
+            payloadBytes,
+            runtimeMetaKeyCount: Object.keys(runtimeMetaPatch).length,
           },
         };
       },
@@ -2326,12 +2366,18 @@ export class OpfsGraphStore {
   }
 
   async commitDelta(delta = {}, options = {}) {
+    const commitRequestedAt = readPersistCommitNow();
     return await this._runSerializedWrite(
       String(options?.reason || "commitDelta"),
       async () => {
+        const commitStartedAt = readPersistCommitNow();
+        const queueWaitMs = commitStartedAt - commitRequestedAt;
+        const manifestReadStartedAt = readPersistCommitNow();
         const manifest = await this._ensureV2Ready({ awaitWrites: false });
+        const manifestReadMs = readPersistCommitNow() - manifestReadStartedAt;
         const nowMs = Date.now();
         const normalizedDelta = sanitizeOpfsV2Delta(delta, nowMs);
+        const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
         const requestedRevision = normalizeRevision(options.requestedRevision);
         const shouldMarkSyncDirty = options.markSyncDirty !== false;
         const reason = String(options.reason || "commitDelta");
@@ -2370,10 +2416,12 @@ export class OpfsGraphStore {
           runtimeMetaPatch: normalizedDelta.runtimeMetaPatch,
           countDelta: nextCountDelta,
         };
+        const walWriteStartedAt = readPersistCommitNow();
         const walDirectory = await this._getWalDirectory();
         const walFilename = buildOpfsV2WalFilename(nextRevision);
         await writeJsonFile(walDirectory, walFilename, walRecord);
         const walByteLength = JSON.stringify(walRecord).length;
+        const walWriteMs = readPersistCommitNow() - walWriteStartedAt;
 
         const hadPendingWal =
           normalizeRevision(manifest?.pendingLogFromRevision) <= currentHeadRevision;
@@ -2400,9 +2448,13 @@ export class OpfsGraphStore {
             lastReason: reason,
           },
         };
+        const manifestWriteStartedAt = readPersistCommitNow();
         await this._writeManifest(nextManifest);
+        const manifestWriteMs = readPersistCommitNow() - manifestWriteStartedAt;
 
+        let cacheApplyMs = 0;
         if (this._snapshotCache) {
+          const cacheApplyStartedAt = readPersistCommitNow();
           const nextSnapshot = applyOpfsV2DeltaToSnapshot(
             this._snapshotCache,
             normalizedDelta,
@@ -2414,6 +2466,7 @@ export class OpfsGraphStore {
           };
           nextSnapshot.state = normalizeSnapshotState(nextSnapshot);
           this._snapshotCache = nextSnapshot;
+          cacheApplyMs = readPersistCommitNow() - cacheApplyStartedAt;
         }
 
         this._maybeScheduleCompaction(nextManifest, reason);
@@ -2432,6 +2485,23 @@ export class OpfsGraphStore {
             deleteNodeIds: normalizedDelta.deleteNodeIds.length,
             deleteEdgeIds: normalizedDelta.deleteEdgeIds.length,
             tombstones: normalizedDelta.tombstones.length,
+          },
+          diagnostics: {
+            storageKind: OPFS_STORE_KIND,
+            storeMode: this.storeMode,
+            queueWaitMs: normalizePersistCommitMs(queueWaitMs),
+            commitMs: normalizePersistCommitMs(
+              readPersistCommitNow() - commitStartedAt,
+            ),
+            manifestReadMs: normalizePersistCommitMs(manifestReadMs),
+            walWriteMs: normalizePersistCommitMs(walWriteMs),
+            manifestWriteMs: normalizePersistCommitMs(manifestWriteMs),
+            cacheApplyMs: normalizePersistCommitMs(cacheApplyMs),
+            payloadBytes,
+            walBytes: walByteLength,
+            runtimeMetaKeyCount: Object.keys(
+              normalizedDelta.runtimeMetaPatch || {},
+            ).length,
           },
         };
       },

@@ -109,6 +109,26 @@ function normalizeNonNegativeInteger(value, fallback = 0) {
   return Math.max(0, Math.floor(parsed));
 }
 
+function readPersistCommitNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function normalizePersistCommitMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function estimatePersistPayloadBytes(value = null) {
+  if (value == null) return 0;
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
 function toPlainData(value, fallbackValue = null) {
   if (value == null) {
     return fallbackValue;
@@ -2530,6 +2550,7 @@ export class BmeDatabase {
 
   async commitDelta(delta = {}, options = {}) {
     const db = await this.open();
+    const commitRequestedAt = readPersistCommitNow();
     const nowMs = Date.now();
     const normalizedDelta =
       delta && typeof delta === "object" && !Array.isArray(delta) ? delta : {};
@@ -2554,6 +2575,7 @@ export class BmeDatabase {
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
     const normalizedCountDelta =
       normalizedDelta.countDelta &&
       typeof normalizedDelta.countDelta === "object" &&
@@ -2567,7 +2589,9 @@ export class BmeDatabase {
       edges: 0,
       tombstones: 0,
     };
+    let transactionMs = 0;
 
+    const transactionStartedAt = readPersistCommitNow();
     await db.transaction(
       "rw",
       db.table("nodes"),
@@ -2614,6 +2638,7 @@ export class BmeDatabase {
         );
       },
     );
+    transactionMs = readPersistCommitNow() - transactionStartedAt;
 
     return {
       revision: nextRevision,
@@ -2629,6 +2654,17 @@ export class BmeDatabase {
         deleteNodeIds: deleteNodeIds.length,
         deleteEdgeIds: deleteEdgeIds.length,
         tombstones: tombstones.length,
+      },
+      diagnostics: {
+        storageKind: "indexeddb",
+        storeMode: "indexeddb",
+        queueWaitMs: 0,
+        commitMs: normalizePersistCommitMs(
+          readPersistCommitNow() - commitRequestedAt,
+        ),
+        txMs: normalizePersistCommitMs(transactionMs),
+        payloadBytes,
+        runtimeMetaKeyCount: Object.keys(runtimeMetaPatch).length,
       },
     };
   }

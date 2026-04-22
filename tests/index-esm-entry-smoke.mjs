@@ -123,6 +123,7 @@ function evaluatePersistNativeDeltaGate() {
   };
 }
 function readPersistDeltaDiagnosticsNow() { return Date.now(); }
+function normalizePersistDeltaDiagnosticsMs(value = 0) { return Math.round((Number(value) || 0) * 10) / 10; }
 function updatePersistDeltaDiagnostics() {}
 function buildPersistDelta() {
   return {

@@ -1532,11 +1532,62 @@ function _formatPersistencePersistDeltaSummary(persistDelta = null) {
 
   const pathText = String(diagnostics.path || "").trim() || "—";
   const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  const commitText = _formatDurationMs(diagnostics.commitMs);
   const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
   const parts = [pathText];
   if (totalText !== "—") parts.push(totalText);
+  if (commitText !== "—") parts.push(`commit ${commitText}`);
   if (gateText) parts.push(`native ${gateText}`);
   return parts.join(" · ");
+}
+
+function _formatPersistCommitPhaseText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const queueText = _formatDurationMs(snapshot.commitQueueWaitMs);
+  const commitText = _formatDurationMs(snapshot.commitMs);
+  if (queueText === "—" && commitText === "—") return "—";
+  return `${queueText} / ${commitText}`;
+}
+
+function _formatPersistCommitBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.commitTxMs ? `tx ${_formatDurationMs(snapshot.commitTxMs)}` : "",
+    snapshot.commitSnapshotReadMs
+      ? `snapshot-read ${_formatDurationMs(snapshot.commitSnapshotReadMs)}`
+      : "",
+    snapshot.commitSnapshotWriteMs
+      ? `snapshot-write ${_formatDurationMs(snapshot.commitSnapshotWriteMs)}`
+      : "",
+    snapshot.commitManifestReadMs
+      ? `manifest-read ${_formatDurationMs(snapshot.commitManifestReadMs)}`
+      : "",
+    snapshot.commitWalWriteMs
+      ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+      : "",
+    snapshot.commitManifestWriteMs
+      ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+      : "",
+    snapshot.commitCacheApplyMs
+      ? `cache ${_formatDurationMs(snapshot.commitCacheApplyMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistCommitBytesText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const payloadText = _formatDataSizeBytes(snapshot.commitPayloadBytes);
+  const walText = _formatDataSizeBytes(snapshot.commitWalBytes);
+  const metaKeyCount = Number(snapshot.commitRuntimeMetaKeyCount || 0);
+  if (payloadText !== "—") parts.push(`payload ${payloadText}`);
+  if (walText !== "—") parts.push(`wal ${walText}`);
+  if (metaKeyCount > 0) parts.push(`meta ${metaKeyCount} keys`);
+  return parts.join(" · ") || "—";
 }
 
 function _buildLoadDiagnosticRows(loadDiagnostics = null) {
@@ -1561,10 +1612,13 @@ function _buildLoadDiagnosticRows(loadDiagnostics = null) {
     ["Load 状态", statusText],
     ["Load 原因", String(diagnostics.reason || "—")],
     ["Load 总耗时", _formatDurationMs(diagnostics.totalMs)],
+    ["Load 前置", _formatDurationMs(diagnostics.preApplyMs)],
     ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
+    ["前置（除导出）", _formatDurationMs(diagnostics.preApplyOtherMs)],
     ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
     ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
     ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
+    ["Load 未归因", _formatDurationMs(diagnostics.untrackedMs)],
     ["Load 更新时间", updatedAtText],
   ];
 }
@@ -1586,6 +1640,12 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
   )}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(
     diagnostics.deleteEdgeCount || 0,
   )}DE`;
+  const commitStoreText = `${String(diagnostics.commitStorageKind || "—")} / ${String(
+    diagnostics.commitStoreMode || "—",
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
   const updatedAtText = diagnostics.updatedAt
     ? _formatTaskProfileTime(diagnostics.updatedAt)
     : "—";
@@ -1594,8 +1654,11 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
     ["Persist 路径", String(diagnostics.path || "—")],
     ["Native Gate", _formatPersistDeltaGateText(diagnostics)],
     ["Bridge 模式", bridgeText],
+    ["Commit 存储", commitStoreText],
     ["Persist 总耗时", _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs)],
     ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
+    ["Base 快照读取", _formatDurationMs(diagnostics.baseSnapshotReadMs)],
+    ["图谱快照构建", _formatDurationMs(diagnostics.snapshotBuildMs)],
     [
       "Prepare / Native",
       `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -1605,11 +1668,15 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
       `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
     ],
     ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Commit 排队 / 提交", commitPhaseText],
+    ["Commit 细分", commitBreakdownText],
+    ["Commit Payload", commitBytesText],
     ["Preload", String(diagnostics.preloadStatus || "—")],
     ["Native 来源", String(diagnostics.moduleSource || "—")],
     ["Fallback 原因", String(diagnostics.fallbackReason || "—")],
     ["Preload / Native 错误", errorText || "—"],
     ["增量规模", deltaSizeText],
+    ["Persist 未归因", _formatDurationMs(diagnostics.untrackedMs)],
     ["Persist 更新时间", updatedAtText],
   ];
 }
@@ -8293,6 +8360,16 @@ function _formatDurationMs(durationMs) {
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
 }
 
+function _formatDataSizeBytes(byteCount) {
+  const normalized = Number(byteCount);
+  if (!Number.isFinite(normalized) || normalized <= 0) return "—";
+  if (normalized < 1024) return `${Math.round(normalized)} B`;
+  if (normalized < 1024 * 1024) {
+    return `${(normalized / 1024).toFixed(normalized >= 10 * 1024 ? 0 : 1)} KB`;
+  }
+  return `${(normalized / (1024 * 1024)).toFixed(normalized >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+}
+
 function _getMonitorTaskTypeLabel(taskType = "") {
   const normalized = String(taskType || "").trim().toLowerCase();
   const labels = {
@@ -8767,6 +8844,12 @@ function _renderPersistDeltaTraceCard(state) {
   const payloadCharsText = diagnostics.combinedSerializedChars
     ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
     : "—";
+  const snapshotBuildText = `${_formatDurationMs(diagnostics.baseSnapshotReadMs)} / ${_formatDurationMs(
+    diagnostics.snapshotBuildMs,
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
   const cacheText = `${Number(diagnostics.serializationCacheHits || 0)}H / ${Number(
     diagnostics.serializationCacheMisses || 0,
   )}M`;
@@ -8820,6 +8903,10 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Base / Snapshot</span>
+        <strong>${_escHtml(snapshotBuildText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>Prepare / Native</span>
         <strong>${_escHtml(
           `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -8838,6 +8925,18 @@ function _renderPersistDeltaTraceCard(state) {
         )}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Commit 排队 / 提交</span>
+        <strong>${_escHtml(commitPhaseText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit 细分</span>
+        <strong>${_escHtml(commitBreakdownText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit Payload</span>
+        <strong>${_escHtml(commitBytesText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>PreparedSet Cache</span>
         <strong>${_escHtml(preparedSetCacheText)}</strong>
       </div>
@@ -8854,6 +8953,10 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(
           `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(diagnostics.upsertEdgeCount || 0)}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(diagnostics.deleteEdgeCount || 0)}DE`,
         )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>未归因</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.untrackedMs))}</strong>
       </div>
     </div>
     ${_renderMessageTraceTextBlock(

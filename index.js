@@ -1666,6 +1666,10 @@ function normalizeLoadDiagnosticsMs(value = 0) {
   return Math.round((Number(value) || 0) * 10) / 10;
 }
 
+function normalizePersistDeltaDiagnosticsMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
 function updatePersistDeltaDiagnostics(snapshot = null) {
   const nextSnapshot =
     snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
@@ -9418,6 +9422,7 @@ async function loadGraphFromIndexedDb(
       totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
     });
   let exportSnapshotMs = 0;
+  let preApplyMs = 0;
   let exportSnapshotSource = "";
   if (!normalizedChatId) {
     const result = {
@@ -9801,6 +9806,7 @@ async function loadGraphFromIndexedDb(
       };
     }
 
+    preApplyMs = readLoadDiagnosticsNow() - loadStartedAt;
     const applyInvokeStartedAt = readLoadDiagnosticsNow();
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
       source,
@@ -9811,6 +9817,8 @@ async function loadGraphFromIndexedDb(
       reasonPrefix: snapshotStore.reasonPrefix,
     });
     const applyInvokeMs = readLoadDiagnosticsNow() - applyInvokeStartedAt;
+    const totalLoadMs = readLoadDiagnosticsNow() - loadStartedAt;
+    const loadAccountedMs = preApplyMs + applyInvokeMs;
     if (commitMarkerDiagnostic?.reason && loadResult?.loaded) {
       updateGraphPersistenceState({
         persistMismatchReason: commitMarkerDiagnostic.reason,
@@ -9828,7 +9836,14 @@ async function loadGraphFromIndexedDb(
       commitMarkerMismatched: commitMarkerMismatch.mismatched === true,
       exportSnapshotSource: exportSnapshotSource || "snapshot-prepared",
       exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+      preApplyMs: normalizeLoadDiagnosticsMs(preApplyMs),
+      preApplyOtherMs: normalizeLoadDiagnosticsMs(
+        Math.max(0, preApplyMs - exportSnapshotMs),
+      ),
       applyInvokeMs: normalizeLoadDiagnosticsMs(applyInvokeMs),
+      untrackedMs: normalizeLoadDiagnosticsMs(
+        Math.max(0, totalLoadMs - loadAccountedMs),
+      ),
     });
     return loadResult;
   } catch (error) {
@@ -9862,6 +9877,16 @@ async function loadGraphFromIndexedDb(
       error: error?.message || String(error),
       exportSnapshotSource: exportSnapshotSource || "unknown",
       exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+      preApplyMs: normalizeLoadDiagnosticsMs(
+        preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt),
+      ),
+      preApplyOtherMs: normalizeLoadDiagnosticsMs(
+        Math.max(
+          0,
+          (preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt)) -
+            exportSnapshotMs,
+        ),
+      ),
     });
     return result;
   }
@@ -13363,12 +13388,19 @@ async function saveGraphToIndexedDb(
     let nativePersistPreloadStatus = "not-requested";
     let nativePersistPreloadError = "";
     let nativePersistPreloadMs = 0;
+    let baseSnapshotReadMs = 0;
+    let graphSnapshotBuildMs = 0;
     const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
 
     if (!delta) {
-      baseSnapshot =
-        readCachedIndexedDbSnapshot(normalizedChatId, localStore) ||
-        (await db.exportSnapshot());
+      const baseSnapshotReadStartedAt = readPersistDeltaDiagnosticsNow();
+      baseSnapshot = readCachedIndexedDbSnapshot(normalizedChatId, localStore);
+      if (!baseSnapshot) {
+        baseSnapshot = await db.exportSnapshot();
+      }
+      baseSnapshotReadMs =
+        readPersistDeltaDiagnosticsNow() - baseSnapshotReadStartedAt;
+      const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
       snapshot = buildSnapshotFromGraph(graph, {
         chatId: normalizedChatId,
         revision: requestedRevision,
@@ -13383,6 +13415,8 @@ async function saveGraphToIndexedDb(
           hostChatId: currentIdentity.hostChatId || "",
         },
       });
+      graphSnapshotBuildMs =
+        readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
     }
     const nativePersistBridgeMode = String(
       currentSettings.persistNativeDeltaBridgeMode || "json",
@@ -13555,6 +13589,12 @@ async function saveGraphToIndexedDb(
       requestedRevision,
       markSyncDirty: true,
     });
+    const commitDiagnostics =
+      commitResult?.diagnostics &&
+      typeof commitResult.diagnostics === "object" &&
+      !Array.isArray(commitResult.diagnostics)
+        ? cloneRuntimeDebugValue(commitResult.diagnostics, {})
+        : null;
     const committedRevision = normalizeIndexedDbRevision(
       commitResult?.revision,
       requestedRevision,
@@ -13564,6 +13604,7 @@ async function saveGraphToIndexedDb(
     let scheduleUploadWarning = "";
     if (graph) {
       if (!snapshot) {
+        const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
         snapshot = buildSnapshotFromGraph(graph, {
           chatId: normalizedChatId,
           revision: committedRevision,
@@ -13578,6 +13619,8 @@ async function saveGraphToIndexedDb(
             hostChatId: currentIdentity.hostChatId || "",
           },
         });
+        graphSnapshotBuildMs +=
+          readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
       }
       if (!snapshot.meta || typeof snapshot.meta !== "object" || Array.isArray(snapshot.meta)) {
         snapshot.meta = {};
@@ -13620,6 +13663,14 @@ async function saveGraphToIndexedDb(
       }
     }
 
+    const persistTotalMs = readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt;
+    const persistAccountedMs =
+      Number(nativePersistPreloadMs || 0) +
+      Number(baseSnapshotReadMs || 0) +
+      Number(graphSnapshotBuildMs || 0) +
+      Number(persistDeltaBuildDiagnostics?.buildMs || 0) +
+      Number(commitDiagnostics?.queueWaitMs || 0) +
+      Number(commitDiagnostics?.commitMs || 0);
     const persistDeltaDiagnostics = {
       ...cloneRuntimeDebugValue(persistDeltaBuildDiagnostics, {}),
       chatId: normalizedChatId,
@@ -13669,13 +13720,59 @@ async function saveGraphToIndexedDb(
       moduleError: String(
         nativePersistModuleStatus?.error || nativePersistPreloadError || "",
       ),
+      baseSnapshotReadMs: normalizePersistDeltaDiagnosticsMs(baseSnapshotReadMs),
+      snapshotBuildMs: normalizePersistDeltaDiagnosticsMs(graphSnapshotBuildMs),
+      commitStorageKind: String(
+        commitDiagnostics?.storageKind || localStore.storagePrimary || "",
+      ),
+      commitStoreMode: String(
+        commitDiagnostics?.storeMode || localStore.storageMode || "",
+      ),
+      commitQueueWaitMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.queueWaitMs,
+      ),
+      commitMs: normalizePersistDeltaDiagnosticsMs(commitDiagnostics?.commitMs),
+      commitTxMs: normalizePersistDeltaDiagnosticsMs(commitDiagnostics?.txMs),
+      commitSnapshotReadMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.snapshotReadMs,
+      ),
+      commitSnapshotWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.snapshotWriteMs,
+      ),
+      commitManifestReadMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestReadMs,
+      ),
+      commitWalWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walWriteMs,
+      ),
+      commitManifestWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestWriteMs,
+      ),
+      commitCacheApplyMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.cacheApplyMs,
+      ),
+      commitPayloadBytes: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.payloadBytes || 0)),
+      ),
+      commitWalBytes: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.walBytes || 0)),
+      ),
+      commitRuntimeMetaKeyCount: Math.max(
+        0,
+        Math.floor(Number(commitDiagnostics?.runtimeMetaKeyCount || 0)),
+      ),
       status: "committed",
       commitRevision: normalizeIndexedDbRevision(
         commitResult?.revision,
         requestedRevision,
       ),
       commitDelta: cloneRuntimeDebugValue(commitResult?.delta, null),
-      totalMs: readPersistDeltaDiagnosticsNow() - persistDeltaStartedAt,
+      totalMs: normalizePersistDeltaDiagnosticsMs(persistTotalMs),
+      untrackedMs: normalizePersistDeltaDiagnosticsMs(
+        Math.max(0, persistTotalMs - persistAccountedMs),
+      ),
     };
     persistDeltaDiagnostics.fallbackReason =
       persistDeltaDiagnostics.requestedNative && !persistDeltaDiagnostics.usedNative
