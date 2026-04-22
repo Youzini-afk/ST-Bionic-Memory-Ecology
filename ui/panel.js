@@ -2530,14 +2530,25 @@ function _refreshTaskPersistence() {
     `主存储 · ${primaryTierLabel}`,
     `确认 · ${acceptedSummaryLabel}`,
   ];
+  const collectVisibleRows = (rows = []) =>
+    rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  const renderRow = ([key, value]) =>
+    `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`;
   const renderRows = (rows = []) =>
-    rows
-      .filter(([, value]) => value !== null && value !== undefined && value !== "")
-      .map(
-        ([key, value]) =>
-          `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`,
-      )
+    collectVisibleRows(rows)
+      .map(renderRow)
       .join("");
+  const renderRowsTwoColumn = (rows = []) => {
+    const visibleRows = collectVisibleRows(rows);
+    if (!visibleRows.length) return "";
+    const splitIndex = Math.ceil(visibleRows.length / 2);
+    return `
+      <div class="bme-persist-kv-columns">
+        <div class="bme-persist-kv-column">${visibleRows.slice(0, splitIndex).map(renderRow).join("")}</div>
+        <div class="bme-persist-kv-column">${visibleRows.slice(splitIndex).map(renderRow).join("")}</div>
+      </div>
+    `;
+  };
 
   const primaryRows = [
     ["当前状态", acceptedSummaryLabel],
@@ -2616,7 +2627,7 @@ function _refreshTaskPersistence() {
             <i class="fa-solid fa-stethoscope" style="margin-right:6px;color:var(--bme-primary)"></i>查看诊断细节
           </summary>
           <div style="margin-top:12px">
-            ${renderRows(diagnosticRows)}
+            ${renderRowsTwoColumn(diagnosticRows)}
           </div>
         </details>
       </div>

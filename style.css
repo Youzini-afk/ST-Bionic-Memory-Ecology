@@ -1689,6 +1689,16 @@
 .bme-persist-kv__row span { color: var(--bme-on-surface-dim); }
 .bme-persist-kv__row strong { color: var(--bme-on-surface); font-weight: 600; }
 
+.bme-persist-kv-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.bme-persist-kv-column {
+  min-width: 0;
+}
+
 .bme-persist-guide {
   margin-top: 4px;
   padding: 14px 16px;
@@ -1726,6 +1736,12 @@
 
 .bme-persist-guide__item span {
   color: var(--bme-on-surface-dim);
+}
+
+@media (max-width: 900px) {
+  .bme-persist-kv-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .bme-persist-actions {
