@@ -1,0 +1,7 @@
+*
+!.gitignore
+!package.json
+!stbme_core_pkg.js
+!stbme_core_pkg.d.ts
+!stbme_core_pkg_bg.wasm
+!stbme_core_pkg_bg.wasm.d.ts

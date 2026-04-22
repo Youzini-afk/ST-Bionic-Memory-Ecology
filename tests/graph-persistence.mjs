@@ -3156,6 +3156,9 @@ result = {
     lastPersistedRevision: 0,
     writesBlocked: false,
   });
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    persistUseNativeDelta: false,
+  };
   harness.runtimeContext.__scheduleUploadShouldThrow = true;
 
   const result = await harness.api.saveGraphToIndexedDb(
