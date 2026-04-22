@@ -248,6 +248,7 @@ export class GraphRenderer {
         this._nativeLayoutBridge = null;
         this._layoutSolveRevision = 0;
         this._lastLayoutDiagnostics = null;
+        this._lastLayoutReuseStats = { reused: 0, total: 0, ratio: 0 };
 
         this._regionPanels = [];
         this._lastGraph = null;
@@ -298,6 +299,7 @@ export class GraphRenderer {
         const loadStartedAt = performance.now();
         const prevSelectedId = this.selectedNode?.id || null;
         const solveRevision = this._nextLayoutSolveRevision();
+        const previousLayoutSeedByNodeId = this._captureLayoutSeedByNodeId();
         this._nativeLayoutBridge?.cancelPending?.('graph-load-replaced');
         this._lastGraph = graph;
         this._lastLayoutHints = layoutHints && typeof layoutHints === 'object'
@@ -352,6 +354,7 @@ export class GraphRenderer {
 
         const parts = partitionNodesByScope(this.nodes, this._userPovAliasSet);
         this._regionPanels = this._computeRegionPanels(W, H, parts);
+        const layoutReuse = this._applyPreviousLayoutSeed(previousLayoutSeedByNodeId);
         this._layoutAllPartitions(parts);
         const layoutFinishedAt = performance.now();
         const neuralPlan = this._resolveNeuralSimulationPlan();
@@ -374,6 +377,7 @@ export class GraphRenderer {
                         loadStartedAt,
                         prepareFinishedAt,
                         layoutFinishedAt,
+                        layoutReuse,
                     },
                 );
             } else {
@@ -399,6 +403,9 @@ export class GraphRenderer {
                 layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
                 solveMs,
                 totalMs: Math.max(0, performance.now() - loadStartedAt),
+                layoutReuseCount: Number(layoutReuse?.reused || 0),
+                layoutReuseTotal: Number(layoutReuse?.total || this.nodes.length || 0),
+                layoutReuseRatio: Number(layoutReuse?.ratio || 0),
                 at: Date.now(),
             });
             return;
@@ -632,13 +639,76 @@ export class GraphRenderer {
     }
 
     _layoutAllPartitions({ objective, userPov, charMap }) {
-        this._seedNeuralCloudInRect(objective, objective[0]?.regionRect);
+        this._seedNeuralCloudInRect(
+            objective.filter((node) => node._layoutSeedReused !== true),
+            objective[0]?.regionRect,
+        );
         if (userPov.length) {
-            this._seedNeuralCloudInRect(userPov, userPov[0]?.regionRect);
+            this._seedNeuralCloudInRect(
+                userPov.filter((node) => node._layoutSeedReused !== true),
+                userPov[0]?.regionRect,
+            );
         }
         for (const [, arr] of charMap) {
-            this._seedNeuralCloudInRect(arr, arr[0]?.regionRect);
+            this._seedNeuralCloudInRect(
+                arr.filter((node) => node._layoutSeedReused !== true),
+                arr[0]?.regionRect,
+            );
         }
+    }
+
+    _captureLayoutSeedByNodeId() {
+        const seedByNodeId = new Map();
+        for (const node of Array.isArray(this.nodes) ? this.nodes : []) {
+            if (!node?.id) continue;
+            if (!Number.isFinite(node.x) || !Number.isFinite(node.y) || !node.regionRect) {
+                continue;
+            }
+            seedByNodeId.set(node.id, {
+                x: node.x,
+                y: node.y,
+                regionKey: node.regionKey || 'objective',
+                regionRect: {
+                    x: node.regionRect.x,
+                    y: node.regionRect.y,
+                    w: node.regionRect.w,
+                    h: node.regionRect.h,
+                },
+            });
+        }
+        return seedByNodeId;
+    }
+
+    _applyPreviousLayoutSeed(seedByNodeId = null) {
+        let reused = 0;
+        const total = Array.isArray(this.nodes) ? this.nodes.length : 0;
+        for (const node of this.nodes) {
+            node._layoutSeedReused = false;
+            const previousSeed = seedByNodeId instanceof Map ? seedByNodeId.get(node.id) : null;
+            if (!previousSeed?.regionRect || !node.regionRect) continue;
+            const nextPosition = remapPositionBetweenRects(
+                previousSeed.x,
+                previousSeed.y,
+                previousSeed.regionRect,
+                node.regionRect,
+            );
+            if (!Number.isFinite(nextPosition?.x) || !Number.isFinite(nextPosition?.y)) {
+                continue;
+            }
+            node.x = nextPosition.x;
+            node.y = nextPosition.y;
+            node.vx = 0;
+            node.vy = 0;
+            node._layoutSeedReused = true;
+            this._clampNodeToRegion(node);
+            reused += 1;
+        }
+        this._lastLayoutReuseStats = {
+            reused,
+            total,
+            ratio: total > 0 ? reused / total : 0,
+        };
+        return this._lastLayoutReuseStats;
     }
 
     _rebuildLayoutForCurrentViewport(W, H) {
@@ -724,6 +794,7 @@ export class GraphRenderer {
     _resolveNeuralSimulationPlan() {
         const nodeCount = Array.isArray(this.nodes) ? this.nodes.length : 0;
         const edgeCount = Array.isArray(this.edges) ? this.edges.length : 0;
+        const reuseRatio = Math.max(0, Math.min(1, Number(this._lastLayoutReuseStats?.ratio || 0)));
         const baseIterations = Math.max(
             8,
             Math.min(220, Number(this.config.neuralIterations) || 80),
@@ -754,6 +825,20 @@ export class GraphRenderer {
                 iterations,
                 ADAPTIVE_NEURAL_LAYOUT_POLICY.reduceIterationsCap,
             );
+        }
+
+        if (!skip && nodeCount >= 24) {
+            if (reuseRatio >= 0.9) {
+                iterations = Math.min(
+                    iterations,
+                    Math.max(8, Math.round(baseIterations * 0.18)),
+                );
+            } else if (reuseRatio >= 0.65) {
+                iterations = Math.min(
+                    iterations,
+                    Math.max(10, Math.round(baseIterations * 0.35)),
+                );
+            }
         }
 
         return {
@@ -857,6 +942,9 @@ export class GraphRenderer {
         const loadStartedAt = Number(timings.loadStartedAt) || performance.now();
         const prepareFinishedAt = Number(timings.prepareFinishedAt) || loadStartedAt;
         const layoutFinishedAt = Number(timings.layoutFinishedAt) || prepareFinishedAt;
+        const layoutReuse = timings.layoutReuse && typeof timings.layoutReuse === 'object'
+            ? timings.layoutReuse
+            : this._lastLayoutReuseStats;
 
         const bridge = this._ensureNativeLayoutBridge();
         const solveStartedAt = performance.now();
@@ -886,6 +974,9 @@ export class GraphRenderer {
                     layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
                     solveMs: Math.max(0, performance.now() - solveStartedAt),
                     totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    layoutReuseCount: Number(layoutReuse?.reused || 0),
+                    layoutReuseTotal: Number(layoutReuse?.total || this.nodes.length || 0),
+                    layoutReuseRatio: Number(layoutReuse?.ratio || 0),
                     reason: 'stale-layout-result',
                 },
             };
@@ -906,6 +997,9 @@ export class GraphRenderer {
                         ? Math.max(0, workerElapsedMs)
                         : 0,
                     totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    layoutReuseCount: Number(layoutReuse?.reused || 0),
+                    layoutReuseTotal: Number(layoutReuse?.total || this.nodes.length || 0),
+                    layoutReuseRatio: Number(layoutReuse?.ratio || 0),
                     reason: '',
                 },
             };
@@ -922,6 +1016,9 @@ export class GraphRenderer {
                     layoutSeedMs: Math.max(0, layoutFinishedAt - prepareFinishedAt),
                     solveMs: Math.max(0, performance.now() - solveStartedAt),
                     totalMs: Math.max(0, performance.now() - loadStartedAt),
+                    layoutReuseCount: Number(layoutReuse?.reused || 0),
+                    layoutReuseTotal: Number(layoutReuse?.total || this.nodes.length || 0),
+                    layoutReuseRatio: Number(layoutReuse?.ratio || 0),
                     reason: nativeResult?.reason || 'native-layout-failed',
                 },
             };
@@ -941,6 +1038,9 @@ export class GraphRenderer {
                 solveMs: Math.max(0, performance.now() - solveStartedAt) + fallbackSolveMs,
                 fallbackSolveMs,
                 totalMs: Math.max(0, performance.now() - loadStartedAt),
+                layoutReuseCount: Number(layoutReuse?.reused || 0),
+                layoutReuseTotal: Number(layoutReuse?.total || this.nodes.length || 0),
+                layoutReuseRatio: Number(layoutReuse?.ratio || 0),
                 reason: nativeResult?.reason || 'native-layout-failed',
             },
         };

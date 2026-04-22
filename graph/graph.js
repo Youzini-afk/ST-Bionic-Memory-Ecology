@@ -6,6 +6,10 @@ import {
   createDefaultHistoryState,
   createDefaultMaintenanceJournal,
   createDefaultVectorIndexState,
+  markGraphPersistEdgeDelete,
+  markGraphPersistEdgeUpsert,
+  markGraphPersistNodeDelete,
+  markGraphPersistNodeUpsert,
   normalizeGraphRuntimeState,
   PROCESSED_MESSAGE_HASH_VERSION,
 } from "../runtime/runtime-state.js";
@@ -138,9 +142,11 @@ export function addNode(graph, node) {
     const lastNode = sameTypeNodes[sameTypeNodes.length - 1];
     lastNode.nextId = node.id;
     node.prevId = lastNode.id;
+    markGraphPersistNodeUpsert(graph, lastNode, "add-node-link", "graph.addNode");
   }
 
   graph.nodes.push(node);
+  markGraphPersistNodeUpsert(graph, node, "add-node", "graph.addNode");
   return node;
 }
 
@@ -192,6 +198,7 @@ export function updateNode(graph, nodeId, updates) {
 
   Object.assign(node, updates);
   node.updatedAt = nextUpdatedAt;
+  markGraphPersistNodeUpsert(graph, node, "update-node", "graph.updateNode");
   return true;
 }
 
@@ -213,11 +220,17 @@ export function removeNode(graph, nodeId, visited = new Set()) {
   // 修复时间链表
   if (node.prevId) {
     const prev = getNode(graph, node.prevId);
-    if (prev) prev.nextId = node.nextId;
+    if (prev) {
+      prev.nextId = node.nextId;
+      markGraphPersistNodeUpsert(graph, prev, "remove-node-link-prev", "graph.removeNode");
+    }
   }
   if (node.nextId) {
     const next = getNode(graph, node.nextId);
-    if (next) next.prevId = node.prevId;
+    if (next) {
+      next.prevId = node.prevId;
+      markGraphPersistNodeUpsert(graph, next, "remove-node-link-next", "graph.removeNode");
+    }
   }
 
   // 递归删除子节点（带环保护）
@@ -230,6 +243,7 @@ export function removeNode(graph, nodeId, visited = new Set()) {
     const parent = getNode(graph, node.parentId);
     if (parent) {
       parent.childIds = parent.childIds.filter((id) => id !== normalizedNodeId);
+      markGraphPersistNodeUpsert(graph, parent, "remove-node-parent-detach", "graph.removeNode");
     }
   }
 
@@ -244,15 +258,24 @@ export function removeNode(graph, nodeId, visited = new Set()) {
     candidate.childIds = candidate.childIds.filter(
       (id) => id !== normalizedNodeId,
     );
+    markGraphPersistNodeUpsert(graph, candidate, "remove-node-child-detach", "graph.removeNode");
   }
 
   // 删除相关边
+  const deletedEdgeIds = graph.edges
+    .filter((e) => e.fromId === normalizedNodeId || e.toId === normalizedNodeId)
+    .map((edge) => String(edge.id || "").trim())
+    .filter(Boolean);
   graph.edges = graph.edges.filter(
     (e) => e.fromId !== normalizedNodeId && e.toId !== normalizedNodeId,
   );
+  for (const edgeId of deletedEdgeIds) {
+    markGraphPersistEdgeDelete(graph, edgeId, "remove-node-edge-cascade", "graph.removeNode");
+  }
 
   // 删除节点本身
   graph.nodes = graph.nodes.filter((n) => n.id !== normalizedNodeId);
+  markGraphPersistNodeDelete(graph, normalizedNodeId, "remove-node", "graph.removeNode");
 
   return true;
 }
@@ -389,6 +412,7 @@ export function addEdge(graph, edge) {
         Number(existing.expiredAt || 0),
       );
     }
+    markGraphPersistEdgeUpsert(graph, existing, "merge-edge", "graph.addEdge");
     return existing;
   }
 
@@ -400,6 +424,7 @@ export function addEdge(graph, edge) {
   }
 
   graph.edges.push(edge);
+  markGraphPersistEdgeUpsert(graph, edge, "add-edge", "graph.addEdge");
   return edge;
 }
 
@@ -413,6 +438,7 @@ export function removeEdge(graph, edgeId) {
   const idx = graph.edges.findIndex((e) => e.id === edgeId);
   if (idx === -1) return false;
   graph.edges.splice(idx, 1);
+  markGraphPersistEdgeDelete(graph, edgeId, "remove-edge", "graph.removeEdge");
   return true;
 }
 
@@ -558,7 +584,7 @@ function isEdgeActive(edge, now = Date.now()) {
  * 将边标记为失效（不删除，保留历史）
  * @param {object} edge
  */
-export function invalidateEdge(edge) {
+export function invalidateEdge(edge, graph = null) {
   if (!edge) return;
   const now = Date.now();
   if (!edge.invalidAt) {
@@ -568,6 +594,9 @@ export function invalidateEdge(edge) {
     Number(edge.updatedAt || 0),
     Number(edge.invalidAt || now),
   );
+  if (graph) {
+    markGraphPersistEdgeUpsert(graph, edge, "invalidate-edge", "graph.invalidateEdge");
+  }
 }
 
 /**

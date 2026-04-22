@@ -8,6 +8,7 @@ import {
   buildBmeDbName,
   buildGraphFromSnapshot,
   buildPersistDelta,
+  buildPersistDeltaFromGraphDirtyState,
   buildSnapshotFromGraph,
   evaluateNativeHydrateGate,
   evaluatePersistNativeDeltaGate,
@@ -83,13 +84,17 @@ import {
   getGraphStats,
   getNode,
   serializeGraph,
+  updateNode,
 } from "../graph/graph.js";
 import {
   buildPersistedRecallRecord,
   readPersistedRecallFromUserMessage,
 } from "../retrieval/recall-persistence.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
-import { normalizeGraphRuntimeState } from "../runtime/runtime-state.js";
+import {
+  normalizeGraphRuntimeState,
+  pruneGraphPersistDirtyState,
+} from "../runtime/runtime-state.js";
 import {
   defaultSettings,
   getPersistedSettingsSnapshot,
@@ -1032,9 +1037,11 @@ async function createGraphPersistenceHarness({
     __contextImmediateSaveCalls: 0,
     buildGraphFromSnapshot,
     buildPersistDelta,
+    buildPersistDeltaFromGraphDirtyState,
     buildSnapshotFromGraph,
     evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
+    pruneGraphPersistDirtyState,
     buildBmeDbName,
     BME_GRAPH_LOCAL_STORAGE_MODE_AUTO: "auto",
     BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB: "indexeddb",
@@ -3298,6 +3305,58 @@ result = {
     buildSnapshotCallCount,
     0,
     "direct-delta 且已提供 persistSnapshot 时不应再次构建 snapshot",
+  );
+  assert.equal(result.snapshot?.meta?.revision, 8);
+  assert.equal(harness.api.getIndexedDbSnapshot()?.meta?.revision, 8);
+}
+
+{
+  const chatId = "chat-idb-dirty-runtime-fast-path";
+  const baseGraph = createMeaningfulGraph(chatId, "dirty-runtime-base");
+  const runtimeGraph = cloneGraphForPersistence(baseGraph, chatId);
+  updateNode(runtimeGraph, runtimeGraph.nodes[0]?.id, {
+    importance: Number(runtimeGraph.nodes[0]?.importance || 0) + 2,
+  });
+  const baseSnapshot = buildSnapshotFromGraph(baseGraph, {
+    chatId,
+    revision: 7,
+  });
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: {
+      integrity: "meta-idb-dirty-runtime-fast-path",
+    },
+    indexedDbSnapshot: baseSnapshot,
+  });
+  harness.api.setCurrentGraph(runtimeGraph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 8,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const originalBuildSnapshotFromGraph = harness.runtimeContext.buildSnapshotFromGraph;
+  let buildSnapshotCallCount = 0;
+  harness.runtimeContext.buildSnapshotFromGraph = (...args) => {
+    buildSnapshotCallCount += 1;
+    return originalBuildSnapshotFromGraph(...args);
+  };
+
+  const result = await harness.api.saveGraphToIndexedDb(chatId, runtimeGraph, {
+    revision: 8,
+    reason: "dirty-runtime-fast-path-save",
+    scheduleCloudUpload: false,
+    sourceGraph: runtimeGraph,
+  });
+
+  assert.equal(result.saved, true);
+  assert.equal(
+    buildSnapshotCallCount,
+    0,
+    "dirty-set 命中时 saveGraphToIndexedDb 不应退回 full snapshot build",
   );
   assert.equal(result.snapshot?.meta?.revision, 8);
   assert.equal(harness.api.getIndexedDbSnapshot()?.meta?.revision, 8);

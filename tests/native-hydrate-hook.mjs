@@ -171,6 +171,45 @@ rebuilt.nodes[0].embedding[0] = 99;
 assert.equal(snapshot.nodes[0].fields.title, "Native Node");
 assert.equal(snapshot.nodes[0].embedding[0], 1);
 
+globalThis.__stBmeNativeHydrateSnapshotRecords = (snapshotView = {}, options = {}) => {
+  assert.equal(options.recordsNormalized, true);
+  return {
+    ok: true,
+    usedNative: true,
+    nodesJson: JSON.stringify(
+      cloneValue(snapshotView.nodes).map((node) => ({
+        ...node,
+        compactHydrated: true,
+      })),
+    ),
+    edgesJson: JSON.stringify(
+      cloneValue(snapshotView.edges).map((edge) => ({
+        ...edge,
+        compactHydrated: true,
+      })),
+    ),
+    diagnostics: {
+      solver: "test-native-hydrate-compact",
+    },
+  };
+};
+
+let compactDiagnostics = null;
+const compactGraph = buildGraphFromSnapshot(snapshot, {
+  chatId: "chat-native-hydrate",
+  useNativeHydrate: true,
+  minSnapshotRecords: 0,
+  onDiagnostics(snapshotValue) {
+    compactDiagnostics = snapshotValue;
+  },
+});
+assert.equal(compactGraph.nodes[0].compactHydrated, true);
+assert.equal(compactGraph.edges[0].compactHydrated, true);
+assert.equal(
+  compactDiagnostics.nativeModuleDiagnostics?.hydrateBridgeMode,
+  "compact-json",
+);
+
 delete globalThis.__stBmeNativeHydrateSnapshotRecords;
 
 let fallbackDiagnostics = null;
