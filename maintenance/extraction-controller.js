@@ -1262,10 +1262,65 @@ export async function onExtractionTaskController(runtime, options = {}) {
     },
   );
 
-  const rollbackResult = await runtime.rollbackGraphForReroll(
+  let rollbackResult = await runtime.rollbackGraphForReroll(
     fallbackInfo.startAssistantChatIndex,
     context,
   );
+
+  // 回滚点不可用时，自动尝试历史恢复后降级为 pending 模式
+  if (
+    !rollbackResult?.success &&
+    rollbackResult?.resultCode === "reroll.rollback.unavailable" &&
+    typeof runtime.recoverHistoryIfNeeded === "function"
+  ) {
+    setExtractionProgressStatus(
+      runtime,
+      "重新提取准备中",
+      "未找到回滚点，正在自动执行历史恢复后重新提取",
+      "running",
+      {
+        syncRuntime: true,
+        toastKind: "info",
+        toastTitle: "ST-BME 重新提取",
+      },
+    );
+    const recovered = await runtime.recoverHistoryIfNeeded(
+      "rerun-rollback-unavailable",
+    );
+    if (recovered) {
+      // 历史恢复成功，降级为 pending 模式继续提取
+      setExtractionProgressStatus(
+        runtime,
+        "重新提取中",
+        "历史恢复完成，正在提取未处理内容",
+        "running",
+        {
+          syncRuntime: true,
+          toastKind: "",
+          toastTitle: "ST-BME 重新提取",
+        },
+      );
+      await runManualExtract({
+        drainAll: true,
+        taskLabel: "重新提取（恢复后）",
+        toastTitle: "ST-BME 重新提取",
+        showStartToast: false,
+      });
+      return {
+        success: true,
+        rerunPerformed: true,
+        recoveryFallback: true,
+        fallbackToLatest: true,
+        requestedRange: [
+          rerunTask.requestedStartFloor,
+          rerunTask.requestedEndFloor,
+        ],
+        effectiveDialogueRange,
+        reason: "rollback-unavailable-recovered-pending",
+      };
+    }
+  }
+
   if (!rollbackResult?.success) {
     const rollbackError = String(
       rollbackResult?.error ||
