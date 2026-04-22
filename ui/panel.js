@@ -1564,16 +1564,90 @@ function _formatPersistCommitBreakdownText(diagnostics = null) {
     snapshot.commitManifestReadMs
       ? `manifest-read ${_formatDurationMs(snapshot.commitManifestReadMs)}`
       : "",
-    snapshot.commitWalWriteMs
-      ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+    snapshot.commitWalSerializeMs
+      ? `wal-serialize ${_formatDurationMs(snapshot.commitWalSerializeMs)}`
       : "",
-    snapshot.commitManifestWriteMs
-      ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+    snapshot.commitWalFileWriteMs
+      ? `wal-file ${_formatDurationMs(snapshot.commitWalFileWriteMs)}`
+      : snapshot.commitWalWriteMs
+        ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+        : "",
+    snapshot.commitManifestSerializeMs
+      ? `manifest-serialize ${_formatDurationMs(snapshot.commitManifestSerializeMs)}`
       : "",
+    snapshot.commitManifestFileWriteMs
+      ? `manifest-file ${_formatDurationMs(snapshot.commitManifestFileWriteMs)}`
+      : snapshot.commitManifestWriteMs
+        ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+        : "",
     snapshot.commitCacheApplyMs
       ? `cache ${_formatDurationMs(snapshot.commitCacheApplyMs)}`
       : "",
   ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistSnapshotBuildBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.snapshotNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.snapshotNodesMs)}`
+      : "",
+    snapshot.snapshotEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.snapshotEdgesMs)}`
+      : "",
+    snapshot.snapshotTombstonesMs
+      ? `tombstones ${_formatDurationMs(snapshot.snapshotTombstonesMs)}`
+      : "",
+    snapshot.snapshotStateMs
+      ? `state ${_formatDurationMs(snapshot.snapshotStateMs)}`
+      : "",
+    snapshot.snapshotMetaMs
+      ? `meta ${_formatDurationMs(snapshot.snapshotMetaMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatLoadHydrateBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.hydrateNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.hydrateNodesMs)}`
+      : "",
+    snapshot.hydrateEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.hydrateEdgesMs)}`
+      : "",
+    snapshot.hydrateRuntimeMetaMs
+      ? `meta ${_formatDurationMs(snapshot.hydrateRuntimeMetaMs)}`
+      : "",
+    snapshot.hydrateStateMs
+      ? `state ${_formatDurationMs(snapshot.hydrateStateMs)}`
+      : "",
+    snapshot.hydrateNormalizeMs
+      ? `normalize ${_formatDurationMs(snapshot.hydrateNormalizeMs)}`
+      : "",
+    snapshot.hydrateIntegrityMs
+      ? `integrity ${_formatDurationMs(snapshot.hydrateIntegrityMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistObservabilityText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const pathKey = String(snapshot.pathKey || snapshot.path || "").trim();
+  const reasonKey = String(snapshot.reasonKey || snapshot.saveReason || "").trim();
+  const pathCount = Number(snapshot.pathSampleCount || 0);
+  const reasonCount = Number(snapshot.reasonSampleCount || 0);
+  if (pathKey) parts.push(`path ${pathKey}`);
+  if (pathCount > 0) parts.push(`${pathCount} samples`);
+  if (reasonKey) parts.push(`reason ${reasonKey}`);
+  if (reasonCount > 0) parts.push(`${reasonCount} reason-hits`);
   return parts.join(" · ") || "—";
 }
 
@@ -1616,6 +1690,7 @@ function _buildLoadDiagnosticRows(loadDiagnostics = null) {
     ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
     ["前置（除导出）", _formatDurationMs(diagnostics.preApplyOtherMs)],
     ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Hydrate 细分", _formatLoadHydrateBreakdownText(diagnostics)],
     ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
     ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
     ["Load 未归因", _formatDurationMs(diagnostics.untrackedMs)],
@@ -1659,6 +1734,7 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
     ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
     ["Base 快照读取", _formatDurationMs(diagnostics.baseSnapshotReadMs)],
     ["图谱快照构建", _formatDurationMs(diagnostics.snapshotBuildMs)],
+    ["快照构建细分", _formatPersistSnapshotBuildBreakdownText(diagnostics)],
     [
       "Prepare / Native",
       `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -1671,6 +1747,7 @@ function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
     ["Commit 排队 / 提交", commitPhaseText],
     ["Commit 细分", commitBreakdownText],
     ["Commit Payload", commitBytesText],
+    ["样本聚合", _formatPersistObservabilityText(diagnostics)],
     ["Preload", String(diagnostics.preloadStatus || "—")],
     ["Native 来源", String(diagnostics.moduleSource || "—")],
     ["Fallback 原因", String(diagnostics.fallbackReason || "—")],

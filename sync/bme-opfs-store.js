@@ -426,12 +426,16 @@ async function readJsonFile(parentHandle, name, fallbackValue = null) {
   return JSON.parse(text);
 }
 
-async function writeJsonFile(parentHandle, name, value) {
+async function writeJsonFile(parentHandle, name, value, options = {}) {
+  const serializedText =
+    typeof options?.serializedText === "string"
+      ? options.serializedText
+      : JSON.stringify(value);
   const fileHandle = await parentHandle.getFileHandle(String(name || ""), {
     create: true,
   });
   const writable = await fileHandle.createWritable();
-  await writable.write(JSON.stringify(value));
+  await writable.write(serializedText);
   await writable.close();
   return fileHandle;
 }
@@ -2416,12 +2420,18 @@ export class OpfsGraphStore {
           runtimeMetaPatch: normalizedDelta.runtimeMetaPatch,
           countDelta: nextCountDelta,
         };
+        const walSerializeStartedAt = readPersistCommitNow();
+        const walSerializedText = JSON.stringify(walRecord);
+        const walSerializeMs = readPersistCommitNow() - walSerializeStartedAt;
         const walWriteStartedAt = readPersistCommitNow();
         const walDirectory = await this._getWalDirectory();
         const walFilename = buildOpfsV2WalFilename(nextRevision);
-        await writeJsonFile(walDirectory, walFilename, walRecord);
-        const walByteLength = JSON.stringify(walRecord).length;
-        const walWriteMs = readPersistCommitNow() - walWriteStartedAt;
+        await writeJsonFile(walDirectory, walFilename, walRecord, {
+          serializedText: walSerializedText,
+        });
+        const walByteLength = walSerializedText.length;
+        const walFileWriteMs = readPersistCommitNow() - walWriteStartedAt;
+        const walWriteMs = walSerializeMs + walFileWriteMs;
 
         const hadPendingWal =
           normalizeRevision(manifest?.pendingLogFromRevision) <= currentHeadRevision;
@@ -2448,12 +2458,40 @@ export class OpfsGraphStore {
             lastReason: reason,
           },
         };
-        const manifestWriteStartedAt = readPersistCommitNow();
-        await this._writeManifest(nextManifest);
-        const manifestWriteMs = readPersistCommitNow() - manifestWriteStartedAt;
+        const manifestWriteDiagnostics = {};
+        await this._writeManifest(nextManifest, {
+          diagnostics: manifestWriteDiagnostics,
+        });
+        const manifestSerializeMs = Number(
+          manifestWriteDiagnostics.serializeMs || 0,
+        );
+        const manifestFileWriteMs = Number(
+          manifestWriteDiagnostics.writeMs || 0,
+        );
+        const manifestWriteMs = manifestSerializeMs + manifestFileWriteMs;
 
+        const committedSnapshot =
+          options?.committedSnapshot &&
+          typeof options.committedSnapshot === "object" &&
+          !Array.isArray(options.committedSnapshot)
+            ? sanitizeSnapshot(options.committedSnapshot)
+            : null;
         let cacheApplyMs = 0;
-        if (this._snapshotCache) {
+        if (committedSnapshot) {
+          const cacheApplyStartedAt = readPersistCommitNow();
+          committedSnapshot.meta = {
+            ...committedSnapshot.meta,
+            ...nextMeta,
+          };
+          committedSnapshot.state = normalizeSnapshotState(committedSnapshot);
+          committedSnapshot.meta.lastProcessedFloor = committedSnapshot.state.lastProcessedFloor;
+          committedSnapshot.meta.extractionCount = committedSnapshot.state.extractionCount;
+          committedSnapshot.meta.nodeCount = committedSnapshot.nodes.length;
+          committedSnapshot.meta.edgeCount = committedSnapshot.edges.length;
+          committedSnapshot.meta.tombstoneCount = committedSnapshot.tombstones.length;
+          this._snapshotCache = committedSnapshot;
+          cacheApplyMs = readPersistCommitNow() - cacheApplyStartedAt;
+        } else if (this._snapshotCache) {
           const cacheApplyStartedAt = readPersistCommitNow();
           const nextSnapshot = applyOpfsV2DeltaToSnapshot(
             this._snapshotCache,
@@ -2494,7 +2532,11 @@ export class OpfsGraphStore {
               readPersistCommitNow() - commitStartedAt,
             ),
             manifestReadMs: normalizePersistCommitMs(manifestReadMs),
+            walSerializeMs: normalizePersistCommitMs(walSerializeMs),
+            walFileWriteMs: normalizePersistCommitMs(walFileWriteMs),
             walWriteMs: normalizePersistCommitMs(walWriteMs),
+            manifestSerializeMs: normalizePersistCommitMs(manifestSerializeMs),
+            manifestFileWriteMs: normalizePersistCommitMs(manifestFileWriteMs),
             manifestWriteMs: normalizePersistCommitMs(manifestWriteMs),
             cacheApplyMs: normalizePersistCommitMs(cacheApplyMs),
             payloadBytes,
@@ -2738,6 +2780,39 @@ export class OpfsGraphStore {
       exported.__stBmeTombstonesOmitted = true;
     }
     return exported;
+  }
+
+  async exportSnapshotProbe() {
+    const manifest = await this._ensureV2Ready();
+    const meta = {
+      ...createDefaultMetaValues(this.chatId),
+      ...(manifest?.meta || {}),
+      chatId: this.chatId,
+      revision: normalizeRevision(manifest?.headRevision || manifest?.meta?.revision),
+      nodeCount: normalizeNonNegativeInteger(manifest?.meta?.nodeCount, 0),
+      edgeCount: normalizeNonNegativeInteger(manifest?.meta?.edgeCount, 0),
+      tombstoneCount: normalizeNonNegativeInteger(manifest?.meta?.tombstoneCount, 0),
+      storagePrimary: OPFS_STORE_KIND,
+      storageMode: this.storeMode,
+      schemaVersion: BME_DB_SCHEMA_VERSION,
+    };
+    const state = {
+      lastProcessedFloor: Number.isFinite(Number(meta.lastProcessedFloor))
+        ? Number(meta.lastProcessedFloor)
+        : META_DEFAULT_LAST_PROCESSED_FLOOR,
+      extractionCount: Number.isFinite(Number(meta.extractionCount))
+        ? Number(meta.extractionCount)
+        : META_DEFAULT_EXTRACTION_COUNT,
+    };
+    return {
+      meta,
+      state,
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      __stBmeProbeOnly: true,
+      __stBmeTombstonesOmitted: true,
+    };
   }
 
   async importSnapshot(snapshot, options = {}) {
@@ -2993,7 +3068,7 @@ export class OpfsGraphStore {
     return manifest;
   }
 
-  async _writeManifest(manifest = {}) {
+  async _writeManifest(manifest = {}, options = {}) {
     const chatDirectory = await this._getChatDirectory();
     const nextManifest = {
       ...manifest,
@@ -3017,7 +3092,24 @@ export class OpfsGraphStore {
         storageMode: this.storeMode,
       },
     };
-    await writeJsonFile(chatDirectory, OPFS_MANIFEST_FILENAME, nextManifest);
+    let serializedText = "";
+    let serializeMs = 0;
+    if (options?.diagnostics && typeof options.diagnostics === "object") {
+      const serializeStartedAt = readPersistCommitNow();
+      serializedText = JSON.stringify(nextManifest);
+      serializeMs = readPersistCommitNow() - serializeStartedAt;
+    }
+    const writeStartedAt =
+      options?.diagnostics && typeof options.diagnostics === "object"
+        ? readPersistCommitNow()
+        : 0;
+    await writeJsonFile(chatDirectory, OPFS_MANIFEST_FILENAME, nextManifest, {
+      serializedText,
+    });
+    if (options?.diagnostics && typeof options.diagnostics === "object") {
+      options.diagnostics.serializeMs = serializeMs;
+      options.diagnostics.writeMs = readPersistCommitNow() - writeStartedAt;
+    }
     this._manifestCache = nextManifest;
     return nextManifest;
   }

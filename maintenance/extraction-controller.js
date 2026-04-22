@@ -380,10 +380,22 @@ async function buildCommittedBatchPersistSnapshot(
   }
 
   let persistDelta = null;
+  let persistSnapshot = null;
   const shouldUseNativePersistDelta =
     runtimeSettings?.persistUseNativeDelta === true &&
     runtimeSettings?.graphNativeForceDisable !== true;
   const nativeFailOpen = runtimeSettings?.nativeEngineFailOpen !== false;
+  if (typeof runtime.buildSnapshotFromGraph === "function") {
+    persistSnapshot = runtime.buildSnapshotFromGraph(committedGraphSnapshot, {
+      chatId:
+        committedGraphSnapshot?.historyState?.chatId ||
+        beforeSnapshot?.meta?.chatId ||
+        "",
+      revision: Number(beforeSnapshot?.meta?.revision || 0) + 1,
+      baseSnapshot: beforeSnapshot || undefined,
+      lastModified: Date.now(),
+    });
+  }
   if (typeof runtime.buildPersistDelta === "function") {
     if (shouldUseNativePersistDelta) {
       const preloadStartedAt = readNow();
@@ -403,7 +415,10 @@ async function buildCommittedBatchPersistSnapshot(
       }
     }
 
-    persistDelta = runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
+    persistDelta = runtime.buildPersistDelta(
+      beforeSnapshot,
+      persistSnapshot || committedGraphSnapshot,
+      {
       useNativeDelta: shouldUseNativePersistDelta,
       nativeFailOpen,
       persistNativeDeltaThresholdRecords:
@@ -413,11 +428,13 @@ async function buildCommittedBatchPersistSnapshot(
       persistNativeDeltaThresholdSerializedChars:
         runtimeSettings?.persistNativeDeltaThresholdSerializedChars,
       persistNativeDeltaBridgeMode: runtimeSettings?.persistNativeDeltaBridgeMode,
-    });
+      },
+    );
   }
 
   return {
     persistDelta,
+    persistSnapshot,
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
@@ -717,6 +734,7 @@ export async function executeExtractionBatchController(
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
     graphSnapshot: committedPersistState.persistGraphSnapshot,
+    persistSnapshot: committedPersistState.persistSnapshot,
     persistDelta: committedPersistState.persistDelta,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);

@@ -9220,10 +9220,19 @@ function applyIndexedDbSnapshotToRuntime(
     return result;
   }
   let graphFromSnapshot = null;
+  let hydrateDiagnostics = null;
   try {
     const hydrateStartedAt = readLoadDiagnosticsNow();
     graphFromSnapshot = buildGraphFromSnapshot(snapshot, {
       chatId: normalizedChatId,
+      onDiagnostics(snapshotValue) {
+        hydrateDiagnostics =
+          snapshotValue &&
+          typeof snapshotValue === "object" &&
+          !Array.isArray(snapshotValue)
+            ? snapshotValue
+            : null;
+      },
     });
     hydrateMs = readLoadDiagnosticsNow() - hydrateStartedAt;
   } catch (error) {
@@ -9275,6 +9284,18 @@ function applyIndexedDbSnapshotToRuntime(
       reason: failureReason,
       revision,
       hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+      hydrateNodesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.nodesMs),
+      hydrateEdgesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.edgesMs),
+      hydrateRuntimeMetaMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.runtimeMetaMs,
+      ),
+      hydrateStateMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.stateMs),
+      hydrateNormalizeMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.normalizeMs,
+      ),
+      hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
+        hydrateDiagnostics?.integrityMs,
+      ),
       error: error?.message || String(error),
       integrityReasons: Array.isArray(error?.reasons) ? [...error.reasons] : [],
     });
@@ -9391,6 +9412,18 @@ function applyIndexedDbSnapshotToRuntime(
     reason: result.reason,
     revision,
     hydrateMs: normalizeLoadDiagnosticsMs(hydrateMs),
+    hydrateNodesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.nodesMs),
+    hydrateEdgesMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.edgesMs),
+    hydrateRuntimeMetaMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.runtimeMetaMs,
+    ),
+    hydrateStateMs: normalizeLoadDiagnosticsMs(hydrateDiagnostics?.stateMs),
+    hydrateNormalizeMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.normalizeMs,
+    ),
+    hydrateIntegrityMs: normalizeLoadDiagnosticsMs(
+      hydrateDiagnostics?.integrityMs,
+    ),
     applyRuntimeMs: normalizeLoadDiagnosticsMs(
       readLoadDiagnosticsNow() - applyRuntimeStartedAt,
     ),
@@ -9422,6 +9455,7 @@ async function loadGraphFromIndexedDb(
       totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
     });
   let exportSnapshotMs = 0;
+  let exportProbeMs = 0;
   let preApplyMs = 0;
   let exportSnapshotSource = "";
   if (!normalizedChatId) {
@@ -9582,34 +9616,49 @@ async function loadGraphFromIndexedDb(
       });
     }
     let snapshot = null;
+    let inspectionSnapshot = null;
     if (identityRecoveryResult?.snapshot) {
       snapshot = identityRecoveryResult.snapshot;
+      inspectionSnapshot = snapshot;
       exportSnapshotSource = "identity-recovery";
     } else if (localStoreMigrationResult?.snapshot) {
       snapshot = localStoreMigrationResult.snapshot;
+      inspectionSnapshot = snapshot;
       exportSnapshotSource = "local-store-migration";
     } else if (migrationResult?.snapshot) {
       snapshot = migrationResult.snapshot;
+      inspectionSnapshot = snapshot;
       exportSnapshotSource = "legacy-migration";
     } else {
-      const exportStartedAt = readLoadDiagnosticsNow();
-      snapshot = await db.exportSnapshot({ includeTombstones: false });
-      exportSnapshotMs = readLoadDiagnosticsNow() - exportStartedAt;
-      exportSnapshotSource = "indexeddb-export";
+      if (typeof db.exportSnapshotProbe === "function") {
+        const probeStartedAt = readLoadDiagnosticsNow();
+        inspectionSnapshot = await db.exportSnapshotProbe({ includeTombstones: false });
+        exportProbeMs = readLoadDiagnosticsNow() - probeStartedAt;
+        exportSnapshotSource = "indexeddb-probe";
+      }
+      if (!inspectionSnapshot) {
+        const exportStartedAt = readLoadDiagnosticsNow();
+        snapshot = await db.exportSnapshot({ includeTombstones: false });
+        exportSnapshotMs = readLoadDiagnosticsNow() - exportStartedAt;
+        inspectionSnapshot = snapshot;
+        exportSnapshotSource = "indexeddb-export";
+      }
     }
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
       resolveCurrentChatIdentity(getContext()),
     );
 
-    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
-    const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot, localStore);
+    const snapshotStore = resolveSnapshotGraphStorePresentation(
+      inspectionSnapshot || snapshot,
+      localStore,
+    );
 
     const commitMarkerMismatch = detectIndexedDbSnapshotCommitMarkerMismatch(
-      snapshot,
+      inspectionSnapshot,
       commitMarker,
     );
     let commitMarkerDiagnostic = null;
-    if (!isIndexedDbSnapshotMeaningful(snapshot)) {
+    if (!isIndexedDbSnapshotMeaningful(inspectionSnapshot)) {
       if (commitMarkerMismatch.mismatched) {
         commitMarkerDiagnostic = recordPersistMismatchDiagnostic(
           commitMarkerMismatch,
@@ -9709,9 +9758,9 @@ async function loadGraphFromIndexedDb(
     }
 
     const snapshotRevision = normalizeIndexedDbRevision(
-      snapshot?.meta?.revision,
+      inspectionSnapshot?.meta?.revision,
     );
-    const snapshotIntegrity = String(snapshot?.meta?.integrity || "").trim();
+    const snapshotIntegrity = String(inspectionSnapshot?.meta?.integrity || "").trim();
     const shadowDecision = shouldPreferShadowSnapshotOverOfficial(
       createShadowComparisonGraph({
         chatId: normalizedChatId,
@@ -9806,6 +9855,68 @@ async function loadGraphFromIndexedDb(
       };
     }
 
+    const staleDecision = detectStaleIndexedDbSnapshotAgainstRuntime(
+      normalizedChatId,
+      inspectionSnapshot,
+    );
+    if (staleDecision.stale) {
+      const result = {
+        success: false,
+        loaded: false,
+        reason: `${snapshotStore.reasonPrefix}-stale-runtime`,
+        chatId: normalizedChatId,
+        attemptIndex,
+        revision: snapshotRevision,
+        staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+      };
+      updateGraphPersistenceState({
+        storagePrimary: snapshotStore.storagePrimary,
+        storageMode: snapshotStore.storageMode,
+        indexedDbLastError: "",
+        dualWriteLastResult: {
+          action: "load",
+          source: String(source || snapshotStore.reasonPrefix),
+          success: false,
+          rejected: true,
+          reason: result.reason,
+          revision: snapshotRevision,
+          staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+          at: Date.now(),
+        },
+      });
+      recordLoadDiagnostics({
+        success: false,
+        loaded: false,
+        reason: result.reason,
+        revision: snapshotRevision,
+        storagePrimary: snapshotStore.storagePrimary,
+        storageMode: snapshotStore.storageMode,
+        exportSnapshotSource: exportSnapshotSource || "snapshot-probe",
+        exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
+        exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
+        preApplyMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+        preApplyOtherMs: normalizeLoadDiagnosticsMs(
+          Math.max(
+            0,
+            readLoadDiagnosticsNow() - loadStartedAt - exportSnapshotMs - exportProbeMs,
+          ),
+        ),
+        staleDetail: cloneRuntimeDebugValue(staleDecision, null),
+      });
+      return result;
+    }
+
+    if (!snapshot) {
+      const exportStartedAt = readLoadDiagnosticsNow();
+      snapshot = await db.exportSnapshot({ includeTombstones: false });
+      exportSnapshotMs += readLoadDiagnosticsNow() - exportStartedAt;
+      exportSnapshotSource =
+        exportSnapshotSource === "indexeddb-probe"
+          ? "indexeddb-probe+indexeddb-export"
+          : exportSnapshotSource || "indexeddb-export";
+    }
+    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+
     preApplyMs = readLoadDiagnosticsNow() - loadStartedAt;
     const applyInvokeStartedAt = readLoadDiagnosticsNow();
     const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
@@ -9835,10 +9946,11 @@ async function loadGraphFromIndexedDb(
       storageMode: snapshotStore.storageMode,
       commitMarkerMismatched: commitMarkerMismatch.mismatched === true,
       exportSnapshotSource: exportSnapshotSource || "snapshot-prepared",
+      exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
       exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
       preApplyMs: normalizeLoadDiagnosticsMs(preApplyMs),
       preApplyOtherMs: normalizeLoadDiagnosticsMs(
-        Math.max(0, preApplyMs - exportSnapshotMs),
+        Math.max(0, preApplyMs - exportSnapshotMs - exportProbeMs),
       ),
       applyInvokeMs: normalizeLoadDiagnosticsMs(applyInvokeMs),
       untrackedMs: normalizeLoadDiagnosticsMs(
@@ -9876,6 +9988,7 @@ async function loadGraphFromIndexedDb(
       storageMode: localStore.storageMode,
       error: error?.message || String(error),
       exportSnapshotSource: exportSnapshotSource || "unknown",
+      exportProbeMs: normalizeLoadDiagnosticsMs(exportProbeMs),
       exportSnapshotMs: normalizeLoadDiagnosticsMs(exportSnapshotMs),
       preApplyMs: normalizeLoadDiagnosticsMs(
         preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt),
@@ -9884,7 +9997,8 @@ async function loadGraphFromIndexedDb(
         Math.max(
           0,
           (preApplyMs || (readLoadDiagnosticsNow() - loadStartedAt)) -
-            exportSnapshotMs,
+            exportSnapshotMs -
+            exportProbeMs,
         ),
       ),
     });
@@ -10703,6 +10817,8 @@ async function persistGraphToConfiguredDurableTier(
     reason,
     lastProcessedAssistantFloor = null,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
     chatStateTarget = null,
     graphDetached = false,
   } = {},
@@ -10796,6 +10912,8 @@ async function persistGraphToConfiguredDurableTier(
           persistRole: "cache-mirror",
           scheduleCloudUpload: false,
           persistDelta,
+          graphSnapshot,
+          persistSnapshot,
           graphDetached,
         });
       }
@@ -10826,6 +10944,8 @@ async function persistGraphToConfiguredDurableTier(
     revision,
     reason,
     persistDelta,
+    graphSnapshot,
+    persistSnapshot,
   });
   if (indexedDbResult?.saved) {
     persistGraphCommitMarker(context, {
@@ -11535,6 +11655,7 @@ async function persistExtractionBatchResult({
   reason = "extraction-batch-complete",
   lastProcessedAssistantFloor = null,
   graphSnapshot = null,
+  persistSnapshot = null,
   persistDelta = null,
 } = {}) {
   ensureCurrentGraphRuntimeState();
@@ -11584,6 +11705,8 @@ async function persistExtractionBatchResult({
       reason,
       lastProcessedAssistantFloor,
       persistDelta,
+      graphSnapshot,
+      persistSnapshot,
       graphDetached: persistGraphDetached,
     },
   );
@@ -13317,6 +13440,8 @@ async function saveGraphToIndexedDb(
     persistRole = "primary",
     scheduleCloudUpload: scheduleCloudUploadOption = undefined,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
@@ -13380,8 +13505,21 @@ async function saveGraphToIndexedDb(
       !Array.isArray(persistDelta)
         ? cloneRuntimeDebugValue(persistDelta, persistDelta)
         : null;
+    const detachedGraphSnapshot =
+      graphSnapshot &&
+      typeof graphSnapshot === "object" &&
+      !Array.isArray(graphSnapshot)
+        ? graphSnapshot
+        : null;
+    const prebuiltPersistSnapshot =
+      persistSnapshot &&
+      typeof persistSnapshot === "object" &&
+      !Array.isArray(persistSnapshot)
+        ? persistSnapshot
+        : null;
+    const persistGraphInput = detachedGraphSnapshot || graph;
     let baseSnapshot = null;
-    let snapshot = null;
+    let snapshot = prebuiltPersistSnapshot;
     let delta = directPersistDelta;
     let persistDeltaBuildDiagnostics = null;
     let nativePersistModuleStatus = null;
@@ -13390,6 +13528,7 @@ async function saveGraphToIndexedDb(
     let nativePersistPreloadMs = 0;
     let baseSnapshotReadMs = 0;
     let graphSnapshotBuildMs = 0;
+    let snapshotBuildDiagnostics = null;
     const persistDeltaStartedAt = readPersistDeltaDiagnosticsNow();
 
     if (!delta) {
@@ -13400,23 +13539,33 @@ async function saveGraphToIndexedDb(
       }
       baseSnapshotReadMs =
         readPersistDeltaDiagnosticsNow() - baseSnapshotReadStartedAt;
-      const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
-      snapshot = buildSnapshotFromGraph(graph, {
-        chatId: normalizedChatId,
-        revision: requestedRevision,
-        baseSnapshot,
-        lastModified: Date.now(),
-        meta: {
-          storagePrimary: localStore.storagePrimary,
-          storageMode: localStore.storageMode,
-          lastMutationReason: String(reason || "graph-save"),
-          integrity:
-            currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
-          hostChatId: currentIdentity.hostChatId || "",
-        },
-      });
-      graphSnapshotBuildMs =
-        readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
+      if (!snapshot) {
+        const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
+        snapshot = buildSnapshotFromGraph(persistGraphInput, {
+          chatId: normalizedChatId,
+          revision: requestedRevision,
+          baseSnapshot,
+          lastModified: Date.now(),
+          meta: {
+            storagePrimary: localStore.storagePrimary,
+            storageMode: localStore.storageMode,
+            lastMutationReason: String(reason || "graph-save"),
+            integrity:
+              currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
+            hostChatId: currentIdentity.hostChatId || "",
+          },
+          onDiagnostics(snapshotValue) {
+            snapshotBuildDiagnostics =
+              snapshotValue &&
+              typeof snapshotValue === "object" &&
+              !Array.isArray(snapshotValue)
+                ? snapshotValue
+                : null;
+          },
+        });
+        graphSnapshotBuildMs =
+          readPersistDeltaDiagnosticsNow() - graphSnapshotBuildStartedAt;
+      }
     }
     const nativePersistBridgeMode = String(
       currentSettings.persistNativeDeltaBridgeMode || "json",
@@ -13588,6 +13737,7 @@ async function saveGraphToIndexedDb(
       reason,
       requestedRevision,
       markSyncDirty: true,
+      committedSnapshot: snapshot,
     });
     const commitDiagnostics =
       commitResult?.diagnostics &&
@@ -13602,10 +13752,10 @@ async function saveGraphToIndexedDb(
     const committedLastModified = Number(commitResult?.lastModified || Date.now());
 
     let scheduleUploadWarning = "";
-    if (graph) {
+    if (persistGraphInput) {
       if (!snapshot) {
         const graphSnapshotBuildStartedAt = readPersistDeltaDiagnosticsNow();
-        snapshot = buildSnapshotFromGraph(graph, {
+        snapshot = buildSnapshotFromGraph(persistGraphInput, {
           chatId: normalizedChatId,
           revision: committedRevision,
           baseSnapshot: baseSnapshot || undefined,
@@ -13617,6 +13767,14 @@ async function saveGraphToIndexedDb(
             integrity:
               currentIdentity.integrity || graphPersistenceState.metadataIntegrity,
             hostChatId: currentIdentity.hostChatId || "",
+          },
+          onDiagnostics(snapshotValue) {
+            snapshotBuildDiagnostics =
+              snapshotValue &&
+              typeof snapshotValue === "object" &&
+              !Array.isArray(snapshotValue)
+                ? snapshotValue
+                : null;
           },
         });
         graphSnapshotBuildMs +=
@@ -13722,6 +13880,33 @@ async function saveGraphToIndexedDb(
       ),
       baseSnapshotReadMs: normalizePersistDeltaDiagnosticsMs(baseSnapshotReadMs),
       snapshotBuildMs: normalizePersistDeltaDiagnosticsMs(graphSnapshotBuildMs),
+      snapshotNodesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.nodesMs,
+      ),
+      snapshotEdgesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.edgesMs,
+      ),
+      snapshotTombstonesMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.tombstonesMs,
+      ),
+      snapshotStateMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.stateMs,
+      ),
+      snapshotMetaMs: normalizePersistDeltaDiagnosticsMs(
+        snapshotBuildDiagnostics?.metaMs,
+      ),
+      snapshotNodeCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.nodeCount || 0)),
+      ),
+      snapshotEdgeCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.edgeCount || 0)),
+      ),
+      snapshotTombstoneCount: Math.max(
+        0,
+        Math.floor(Number(snapshotBuildDiagnostics?.tombstoneCount || 0)),
+      ),
       commitStorageKind: String(
         commitDiagnostics?.storageKind || localStore.storagePrimary || "",
       ),
@@ -13742,8 +13927,20 @@ async function saveGraphToIndexedDb(
       commitManifestReadMs: normalizePersistDeltaDiagnosticsMs(
         commitDiagnostics?.manifestReadMs,
       ),
+      commitWalSerializeMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walSerializeMs,
+      ),
+      commitWalFileWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.walFileWriteMs,
+      ),
       commitWalWriteMs: normalizePersistDeltaDiagnosticsMs(
         commitDiagnostics?.walWriteMs,
+      ),
+      commitManifestSerializeMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestSerializeMs,
+      ),
+      commitManifestFileWriteMs: normalizePersistDeltaDiagnosticsMs(
+        commitDiagnostics?.manifestFileWriteMs,
       ),
       commitManifestWriteMs: normalizePersistDeltaDiagnosticsMs(
         commitDiagnostics?.manifestWriteMs,
@@ -13784,6 +13981,34 @@ async function saveGraphToIndexedDb(
               "js",
           )
         : "";
+    const persistObservability = buildPersistObservabilitySummary(
+      persistDeltaDiagnostics,
+    );
+    persistDeltaDiagnostics.pathKey = String(
+      persistObservability?.lastPathKey || "unknown",
+    );
+    persistDeltaDiagnostics.reasonKey = String(
+      persistObservability?.lastReasonKey || "graph-save",
+    );
+    persistDeltaDiagnostics.pathReasonKey = String(
+      persistObservability?.lastPathReasonKey || "unknown::graph-save",
+    );
+    persistDeltaDiagnostics.pathSampleCount = Math.max(
+      0,
+      Math.floor(
+        Number(
+          persistObservability?.byPath?.[persistDeltaDiagnostics.pathKey]?.count || 0,
+        ),
+      ),
+    );
+    persistDeltaDiagnostics.reasonSampleCount = Math.max(
+      0,
+      Math.floor(
+        Number(
+          persistObservability?.byReason?.[persistDeltaDiagnostics.reasonKey]?.count || 0,
+        ),
+      ),
+    );
 
     const opfsWriteLockState =
       typeof db?.getWriteLockSnapshot === "function"
@@ -13828,6 +14053,7 @@ async function saveGraphToIndexedDb(
         opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
         opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
         opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
+        persistObservability,
         dualWriteLastResult: {
           action: "cache-mirror",
           target: localStore.storagePrimary,
@@ -13924,6 +14150,7 @@ async function saveGraphToIndexedDb(
       opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
       opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
       opfsCompactionState: localStoreDiagnostics.opfsCompactionState,
+      persistObservability,
       dualWriteLastResult: {
         action: "save",
         target: localStore.storagePrimary,
@@ -14077,6 +14304,104 @@ async function saveGraphToIndexedDb(
   }
 }
 
+function normalizePersistObservabilityKey(value = "", fallback = "unknown") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9:_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || String(fallback || "unknown");
+}
+
+function trimPersistObservabilityBuckets(buckets = {}, maxEntries = 16) {
+  const entries = Object.values(buckets || {}).filter(
+    (entry) => entry && typeof entry === "object" && !Array.isArray(entry),
+  );
+  entries.sort((left, right) => {
+    const countDelta = Number(right?.count || 0) - Number(left?.count || 0);
+    if (countDelta !== 0) return countDelta;
+    return String(right?.lastAt || "").localeCompare(String(left?.lastAt || ""));
+  });
+  return Object.fromEntries(
+    entries.slice(0, Math.max(1, Math.floor(Number(maxEntries) || 16))).map((entry) => [
+      String(entry.key || "unknown"),
+      entry,
+    ]),
+  );
+}
+
+function buildPersistObservabilitySummary(diagnostics = null) {
+  const source =
+    diagnostics && typeof diagnostics === "object" && !Array.isArray(diagnostics)
+      ? diagnostics
+      : {};
+  const previous =
+    graphPersistenceState.persistObservability &&
+    typeof graphPersistenceState.persistObservability === "object" &&
+    !Array.isArray(graphPersistenceState.persistObservability)
+      ? cloneRuntimeDebugValue(graphPersistenceState.persistObservability, {})
+      : {};
+  const totalMs = normalizePersistDeltaDiagnosticsMs(
+    source.totalMs || source.buildMs || 0,
+  );
+  const pathKey = normalizePersistObservabilityKey(
+    source.path || source.requestedBridgeMode || "unknown",
+    "unknown",
+  );
+  const reasonKey = normalizePersistObservabilityKey(
+    source.saveReason || "graph-save",
+    "graph-save",
+  );
+  const pathReasonKey = `${pathKey}::${reasonKey}`;
+  const recordedAt = new Date().toISOString();
+  const recordBucket = (buckets = {}, key = "unknown") => {
+    const current =
+      buckets[key] && typeof buckets[key] === "object" && !Array.isArray(buckets[key])
+        ? buckets[key]
+        : null;
+    const count = Math.max(0, Math.floor(Number(current?.count || 0))) + 1;
+    const totalBucketMs = normalizePersistDeltaDiagnosticsMs(
+      Number(current?.totalMs || 0) + totalMs,
+    );
+    buckets[key] = {
+      key,
+      count,
+      totalMs: totalBucketMs,
+      avgMs: normalizePersistDeltaDiagnosticsMs(totalBucketMs / count),
+      maxMs: normalizePersistDeltaDiagnosticsMs(
+        Math.max(Number(current?.maxMs || 0), totalMs),
+      ),
+      lastMs: totalMs,
+      lastAt: recordedAt,
+    };
+    return buckets;
+  };
+  const nextByPath = recordBucket(
+    cloneRuntimeDebugValue(previous.byPath || {}, {}),
+    pathKey,
+  );
+  const nextByReason = recordBucket(
+    cloneRuntimeDebugValue(previous.byReason || {}, {}),
+    reasonKey,
+  );
+  const nextByPathReason = recordBucket(
+    cloneRuntimeDebugValue(previous.byPathReason || {}, {}),
+    pathReasonKey,
+  );
+  return {
+    totalSamples: Math.max(0, Math.floor(Number(previous.totalSamples || 0))) + 1,
+    byPath: trimPersistObservabilityBuckets(nextByPath, 12),
+    byReason: trimPersistObservabilityBuckets(nextByReason, 16),
+    byPathReason: trimPersistObservabilityBuckets(nextByPathReason, 24),
+    lastPathKey: pathKey,
+    lastReasonKey: reasonKey,
+    lastPathReasonKey: pathReasonKey,
+    lastRecordedAt: recordedAt,
+  };
+}
+
 function queueGraphPersistToIndexedDb(
   chatId,
   graph,
@@ -14086,6 +14411,8 @@ function queueGraphPersistToIndexedDb(
     persistRole = "primary",
     scheduleCloudUpload = undefined,
     persistDelta = null,
+    graphSnapshot = null,
+    persistSnapshot = null,
     graphDetached = false,
   } = {},
 ) {
@@ -14134,17 +14461,21 @@ function queueGraphPersistToIndexedDb(
           revision: normalizedRevision,
         };
       }
-      const graphSnapshot = graph
-        ? graphDetached === true
-          ? normalizeGraphRuntimeState(graph, normalizedChatId)
-          : cloneGraphForPersistence(graph, normalizedChatId)
-        : null;
-      return await saveGraphToIndexedDb(normalizedChatId, graphSnapshot, {
+      const persistGraphSnapshot = graphSnapshot
+        ? graphSnapshot
+        : graph
+          ? graphDetached === true
+            ? normalizeGraphRuntimeState(graph, normalizedChatId)
+            : cloneGraphForPersistence(graph, normalizedChatId)
+          : null;
+      return await saveGraphToIndexedDb(normalizedChatId, persistGraphSnapshot, {
         revision: normalizedRevision,
         reason,
         persistRole,
         scheduleCloudUpload,
         persistDelta,
+        graphSnapshot: persistGraphSnapshot,
+        persistSnapshot,
       });
     })
     .finally(() => {

@@ -235,6 +235,49 @@ async function testSnapshotExportWithoutTombstones() {
   await db.close();
 }
 
+async function testSnapshotProbeExport() {
+  const db = new BmeDatabase("chat-export-probe", {
+    dexieClass: globalThis.Dexie,
+  });
+  await db.open();
+
+  await db.bulkUpsertNodes([
+    {
+      id: "node-probe",
+      type: "event",
+      sourceFloor: 4,
+      archived: false,
+      updatedAt: Date.now(),
+    },
+  ]);
+  await db.patchMeta({
+    lastProcessedFloor: 6,
+    extractionCount: 3,
+    runtimeHistoryState: {
+      chatId: "chat-export-probe",
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+    },
+  });
+
+  const probe = await db.exportSnapshotProbe();
+  assert.equal(probe.__stBmeProbeOnly, true);
+  assert.equal(probe.__stBmeTombstonesOmitted, true);
+  assert.deepEqual(probe.nodes, []);
+  assert.deepEqual(probe.edges, []);
+  assert.deepEqual(probe.tombstones, []);
+  assert.equal(probe.meta.chatId, "chat-export-probe");
+  assert.equal(probe.meta.nodeCount, 1);
+  assert.equal(probe.state.lastProcessedFloor, 6);
+  assert.equal(probe.state.extractionCount, 3);
+  assert.equal(
+    probe.meta.runtimeHistoryState.lastProcessedAssistantFloor,
+    6,
+  );
+
+  await db.close();
+}
+
 async function testReplaceImportResetsStaleMeta() {
   const chatId = "chat-replace-reset";
   const db = new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
@@ -577,29 +620,58 @@ async function testGraphSnapshotConverters() {
     updatedAt: Date.now(),
   });
 
+  let snapshotDiagnostics = null;
   const snapshot = buildSnapshotFromGraph(graph, {
     chatId: "chat-a",
     revision: 17,
+    onDiagnostics(snapshotValue) {
+      snapshotDiagnostics = snapshotValue;
+    },
   });
   assert.equal(snapshot.meta.chatId, "chat-a");
   assert.equal(snapshot.meta.revision, 17);
   assert.equal(snapshot.state.lastProcessedFloor, 9);
   assert.equal(snapshot.state.extractionCount, 4);
   assert.equal(snapshot.nodes.length, 1);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.nodesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.edgesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.tombstonesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.stateMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.metaMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.totalMs), true);
+  assert.equal(snapshotDiagnostics?.nodeCount, 1);
 
+  let hydrateDiagnostics = null;
   const nextGraph = buildGraphFromSnapshot(snapshot, {
     chatId: "chat-a",
+    onDiagnostics(snapshotValue) {
+      hydrateDiagnostics = snapshotValue;
+    },
   });
+  assert.equal(hydrateDiagnostics?.success, true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.nodesMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.edgesMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.runtimeMetaMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.stateMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.normalizeMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.integrityMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.totalMs), true);
+
+  let reusedSnapshotDiagnostics = null;
   const reusedSnapshot = buildSnapshotFromGraph(nextGraph, {
     chatId: "chat-a",
     revision: 18,
     baseSnapshot: snapshot,
+    onDiagnostics(snapshotValue) {
+      reusedSnapshotDiagnostics = snapshotValue;
+    },
   });
   assert.equal(
     reusedSnapshot.nodes[0],
     snapshot.nodes[0],
     "未变化节点应直接复用 baseSnapshot 记录对象",
   );
+  assert.equal(reusedSnapshotDiagnostics?.reusedNodeCount, 1);
   nextGraph.nodes[0].updatedAt = Number(nextGraph.nodes[0].updatedAt || 0) + 1;
   const changedSnapshot = buildSnapshotFromGraph(nextGraph, {
     chatId: "chat-a",
@@ -662,6 +734,7 @@ async function main() {
   await testTransactionRollback();
   await testSnapshotExportImport();
   await testSnapshotExportWithoutTombstones();
+  await testSnapshotProbeExport();
   await testReplaceImportResetsStaleMeta();
   await testRevisionMonotonicity();
   await testTombstonePrune();
