@@ -287,6 +287,7 @@ export function removeNode(graph, nodeId, visited = new Set()) {
  * @returns {object[]}
  */
 export function getActiveNodes(graph, typeFilter = null) {
+  if (!Array.isArray(graph?.nodes)) return [];
   let nodes = graph.nodes.filter((n) => !n.archived);
   if (typeFilter) {
     nodes = nodes.filter((n) => n.type === typeFilter);
