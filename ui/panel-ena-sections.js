@@ -602,6 +602,11 @@ function updatePrefixModeUI() {
   setHidden($('bme-planner-prefix-custom-row'), mode !== 'custom');
 }
 
+function resetPlannerSaveStatusIfReady() {
+  if (autosaveInProgress) return;
+  setStatusChip('bme-planner-save-chip', '就绪', 'idle');
+}
+
 /* ── Save flow ──────────────────────────────────────────────────────────── */
 
 function scheduleSave() {
@@ -969,6 +974,7 @@ export function initPlannerSections(rootEl, options = {}) {
 
   const cfg = typeof api.getConfig === 'function' ? api.getConfig() : null;
   if (cfg) applyConfigToFields(cfg);
+  resetPlannerSaveStatusIfReady();
 
   if (typeof api.getLogs === 'function') {
     logsCache = api.getLogs() || [];
@@ -986,6 +992,7 @@ export function refreshPlannerSections(options = {}) {
     return;
   }
   if (typeof api.getConfig === 'function') applyConfigToFields(api.getConfig());
+  resetPlannerSaveStatusIfReady();
   if (typeof api.getLogs === 'function') {
     logsCache = api.getLogs() || [];
     renderLogs();
