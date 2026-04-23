@@ -1132,15 +1132,20 @@
                 </p>
               </div>
 
-              <div class="bme-capability-grid">
-                <label class="bme-capability-card" for="bme-setting-enabled">
+              <div class="bme-capability-master">
+                <label class="bme-capability-card bme-capability-card-master" for="bme-setting-enabled">
                   <div class="bme-cap-header">
-                    <span class="bme-cap-icon"><i class="fa-solid fa-brain"></i></span>
+                    <span class="bme-cap-icon"><i class="fa-solid fa-power-off"></i></span>
                     <input id="bme-setting-enabled" type="checkbox" />
                   </div>
-                  <div class="bme-cap-title">自动记忆</div>
-                  <div class="bme-cap-desc">开启自动提取、图谱写入与维护。</div>
+                  <div class="bme-cap-title">插件总开关</div>
+                  <div class="bme-cap-desc">
+                    关闭后停用 ST-BME 的自动提取、召回、向量、维护与手动操作；配置面板仍可打开，方便你随时重新启用或调整设置。
+                  </div>
                 </label>
+              </div>
+
+              <div class="bme-capability-grid">
                 <label class="bme-capability-card" for="bme-setting-recall-enabled">
                   <div class="bme-cap-header">
                     <span class="bme-cap-icon"><i class="fa-solid fa-magnifying-glass"></i></span>

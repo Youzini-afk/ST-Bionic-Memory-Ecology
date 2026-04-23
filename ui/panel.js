@@ -350,6 +350,26 @@ let lastVisibleGraphRefreshToken = "";
 let lastVisibleGraphRefreshAt = 0;
 let graphRenderingEnabled = true;
 
+function _isPluginEnabled(settings = _getSettings?.() || {}) {
+  return settings?.enabled !== false;
+}
+
+function _notifyPluginDisabled(actionLabel = "该操作") {
+  toastr.info(
+    `ST-BME 已关闭，暂时不能执行${actionLabel}。请先在配置页顶部打开“插件总开关”。`,
+    "ST-BME",
+  );
+  _refreshRuntimeStatus();
+}
+
+function _ensurePluginEnabledForAction(actionLabel = "该操作") {
+  if (_isPluginEnabled()) {
+    return true;
+  }
+  _notifyPluginDisabled(actionLabel);
+  return false;
+}
+
 // 由 index.js 注入的引用
 let _getGraph = null;
 let _getSettings = null;
@@ -1139,6 +1159,7 @@ function _onFabSingleClick() {
 
 async function _onFabDoubleClick() {
   if (!_actionHandlers.extractTask) return;
+  if (!_ensurePluginEnabledForAction("重新提取")) return;
 
   try {
     _fabEl?.setAttribute("data-status", "running");
@@ -5488,6 +5509,9 @@ function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {
 
 function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点编辑")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5522,6 +5546,9 @@ function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
 
 function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点删除")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5847,12 +5874,16 @@ async function _callAction(actionKey = "", payload = {}) {
   if (typeof handler !== "function") {
     return { ok: false, error: "missing-action-handler" };
   }
+  if (!_ensurePluginEnabledForAction("该操作")) {
+    return { ok: false, error: "plugin-disabled", handledToast: true };
+  }
   const result = await handler(payload);
   _refreshCognitionSurfaces();
   return result;
 }
 
 async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
+  if (!_ensurePluginEnabledForAction("认知管理")) return;
   const graph = _getGraph?.();
   const ownerEntries = _getCognitionOwnerCollection(graph);
   const ownerEntry =
@@ -5985,6 +6016,9 @@ async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
 }
 
 async function _applyManualActiveRegionFromDashboard(clear = false) {
+  if (!_ensurePluginEnabledForAction(clear ? "清除当前地区" : "设置当前地区")) {
+    return;
+  }
   const input = document.getElementById("bme-cognition-manual-region");
   const region = clear ? "" : String(input?.value || "").trim();
   const result = await _actionHandlers.setActiveRegion?.({ region });
@@ -6009,6 +6043,9 @@ async function _applyManualActiveRegionFromDashboard(clear = false) {
 }
 
 async function _saveRegionAdjacencyFromDashboard() {
+  if (!_ensurePluginEnabledForAction("保存地区邻接")) {
+    return;
+  }
   const graph = _getGraph?.();
   const regionInput = document.getElementById("bme-cognition-manual-region");
   const adjacencyInput = document.getElementById("bme-cognition-adjacency-input");
@@ -6189,6 +6226,9 @@ function _bindActions() {
     if (!btn) continue;
 
     btn.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || actionKey)) {
+        return;
+      }
       const handler =
         actionKey === "manageServerBackups"
           ? _openServerBackupManagerModal
@@ -6261,6 +6301,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-extract");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重新提取")) return;
       const mode =
         String(
           document.getElementById("bme-extract-mode")?.value ||
@@ -6320,6 +6361,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-vector-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("范围重建")) return;
       if (btn) {
         btn.disabled = true;
         btn.style.opacity = "0.5";
@@ -6360,6 +6402,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-summary-rebuild");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重建总结状态")) return;
       const startFloor = _parseOptionalInt(
         document.getElementById("bme-extract-start-floor")?.value,
       );
@@ -6402,6 +6445,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-clear-graph-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("按楼层范围清理")) return;
 
       const startStr = document.getElementById("bme-cleanup-range-start")?.value;
       const endStr = document.getElementById("bme-cleanup-range-end")?.value;
@@ -6620,6 +6664,14 @@ function _bindActions() {
     const [, actionKey] = matched;
     const handler = _actionHandlers[actionKey];
     if (!handler) return;
+    const actionLabels = {
+      synopsis: "生成小总结",
+      summaryRollup: "执行总结折叠",
+      rebuildSummaryState: "重建总结状态",
+    };
+    if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || "总结操作")) {
+      return;
+    }
 
     try {
       await handler();
@@ -7118,6 +7170,8 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
     _refreshGuardedConfigStates();
+    _refreshStageCardStates();
+    _refreshRuntimeStatus();
   });
   bindCheckbox("bme-setting-debug-logging-enabled", (checked) => {
     _patchSettings({ debugLoggingEnabled: checked });
@@ -7856,6 +7910,7 @@ function _bindConfigControls() {
   document
     .getElementById("bme-apply-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("应用消息隐藏")) return;
       const result = await _actionHandlers.applyCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");
@@ -7866,6 +7921,7 @@ function _bindConfigControls() {
   document
     .getElementById("bme-clear-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("清除消息隐藏")) return;
       const result = await _actionHandlers.clearCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");

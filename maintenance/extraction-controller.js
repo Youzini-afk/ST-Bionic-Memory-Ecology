@@ -567,6 +567,29 @@ export function resolveAutoExtractionPlanController(
     1,
     50,
   );
+  if (resolvedSettings.enabled === false) {
+    return {
+      strategy,
+      chat: resolvedChat,
+      settings: resolvedSettings,
+      lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+      lockedEndFloor: safeLockedEndFloor,
+      extractEvery,
+      pendingAssistantTurns: [],
+      candidateAssistantTurns: [],
+      eligibleAssistantTurns: [],
+      eligibleEndFloor: null,
+      waitingForNextAssistant: false,
+      smartTriggerDecision: { triggered: false, score: 0, reasons: [] },
+      meetsExtractEvery: false,
+      canRun: false,
+      batchAssistantTurns: [],
+      plannedBatchEndFloor: null,
+      startIdx: null,
+      endIdx: null,
+      reason: "plugin-disabled",
+    };
+  }
   const assistantTurns =
     typeof runtime?.getAssistantTurns === "function"
       ? runtime.getAssistantTurns(resolvedChat)

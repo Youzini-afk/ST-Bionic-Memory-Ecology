@@ -3371,6 +3371,10 @@
 
 /* --- CAPABILITY CARD GRID (Feature Toggles) --- */
 
+.bme-capability-master {
+  margin-bottom: 14px;
+}
+
 .bme-capability-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -3392,6 +3396,18 @@
 .bme-capability-card:hover {
   border-color: var(--bme-primary);
   box-shadow: 0 0 0 1px var(--bme-primary), 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.bme-capability-card-master {
+  min-height: 0;
+}
+
+.bme-capability-card-master .bme-cap-desc {
+  max-width: 820px;
+}
+
+.bme-capability-card.is-disabled {
+  opacity: 0.56;
 }
 
 .bme-cap-header {
