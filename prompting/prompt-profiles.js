@@ -2,6 +2,7 @@
 
 import {
   DEFAULT_PROMPT_BLOCKS as DEFAULT_PLANNER_PROMPT_BLOCKS,
+  LEGACY_PLANNER_SYSTEM_PROMPT,
   PLANNER_HEADING,
   PLANNER_ROLE,
   PLANNER_IDENTITY_ACK,
@@ -1120,6 +1121,235 @@ function normalizePromptBlock(taskType, block = {}, index = 0) {
   };
 }
 
+function sortPromptBlocksForComparison(blocks = []) {
+  return [...(Array.isArray(blocks) ? blocks : [])]
+    .map((block, index) => ({ ...block, _orderIndex: index }))
+    .sort((left, right) => {
+      const leftOrder = Number.isFinite(Number(left?.order))
+        ? Number(left.order)
+        : left._orderIndex;
+      const rightOrder = Number.isFinite(Number(right?.order))
+        ? Number(right.order)
+        : right._orderIndex;
+      return leftOrder - rightOrder;
+    });
+}
+
+function buildPromptBlockComparisonPayload(blocks = []) {
+  return sortPromptBlocksForComparison(blocks).map((block) => ({
+    role: normalizeRole(block?.role),
+    type: String(block?.type || "custom"),
+    sourceKey: String(block?.sourceKey || ""),
+    content: String(block?.content || "").trim(),
+    enabled: block?.enabled !== false,
+  }));
+}
+
+function buildLegacyPlannerDefaultLikeBlocks() {
+  return [
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-system",
+        name: "Ena Planner System",
+        type: "custom",
+        enabled: true,
+        role: "system",
+        sourceKey: "",
+        sourceField: "",
+        content: LEGACY_PLANNER_SYSTEM_PROMPT,
+        injectionMode: "relative",
+        order: 0,
+      },
+      0,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-char",
+        name: "角色卡",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerCharacterCard",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 1,
+      },
+      1,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-worldbook",
+        name: "世界书",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerWorldbook",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 2,
+      },
+      2,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-recent-chat",
+        name: "最近聊天",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerRecentChat",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 3,
+      },
+      3,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-memory",
+        name: "BME 记忆",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerMemory",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 4,
+      },
+      4,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-previous-plots",
+        name: "历史 plot",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerPreviousPlots",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 5,
+      },
+      5,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-user-input",
+        name: "玩家输入",
+        type: "builtin",
+        enabled: true,
+        role: "user",
+        sourceKey: "plannerUserInput",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 6,
+      },
+      6,
+    ),
+    normalizePromptBlock(
+      "planner",
+      {
+        id: "planner-legacy-default-seed",
+        name: "Assistant Seed",
+        type: "custom",
+        enabled: true,
+        role: "assistant",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_ASSISTANT_SEED,
+        injectionMode: "relative",
+        order: 7,
+      },
+      7,
+    ),
+  ];
+}
+
+function isPlannerLegacyDefaultLikeProfile(profile = {}) {
+  if (String(profile?.taskType || "") !== "planner") {
+    return false;
+  }
+  if (profile?.builtin !== false) {
+    return false;
+  }
+  if (profile?.metadata?.migratedFromLegacy !== true) {
+    return false;
+  }
+  const legacySource = String(profile?.metadata?.enaLegacySource || "").trim();
+  if (!legacySource) {
+    return false;
+  }
+  return (
+    JSON.stringify(buildPromptBlockComparisonPayload(profile?.blocks || [])) ===
+    JSON.stringify(
+      buildPromptBlockComparisonPayload(buildLegacyPlannerDefaultLikeBlocks()),
+    )
+  );
+}
+
+function alignPlannerLegacyDefaultLikeProfiles(
+  profiles = [],
+  defaultProfile = null,
+  activeProfileId = "",
+) {
+  if (!Array.isArray(profiles) || !defaultProfile) {
+    return {
+      profiles,
+      activeProfileId,
+    };
+  }
+
+  const defaultBlocks = cloneJson(defaultProfile.blocks || []);
+  const defaultGenerationSignature = JSON.stringify(defaultProfile.generation || {});
+  let nextActiveProfileId = String(activeProfileId || "");
+  let changed = false;
+
+  const nextProfiles = profiles.map((profile) => {
+    if (!isPlannerLegacyDefaultLikeProfile(profile)) {
+      return profile;
+    }
+    changed = true;
+    if (
+      JSON.stringify(profile?.generation || {}) === defaultGenerationSignature &&
+      String(profile?.id || "") === nextActiveProfileId
+    ) {
+      nextActiveProfileId = DEFAULT_PROFILE_ID;
+    }
+    return {
+      ...profile,
+      updatedAt: nowIso(),
+      blocks: cloneJson(defaultBlocks),
+      metadata: {
+        ...(profile?.metadata || {}),
+        plannerLegacyDefaultAligned: true,
+        plannerLegacyDefaultAlignedAt: String(
+          defaultProfile?.metadata?.defaultTemplateUpdatedAt ||
+            defaultProfile?.updatedAt ||
+            "",
+        ),
+      },
+    };
+  });
+
+  return {
+    profiles: changed ? nextProfiles : profiles,
+    activeProfileId: nextActiveProfileId,
+  };
+}
+
 function normalizeRegexLocalRule(rule = {}, taskType = "task", index = 0) {
   return {
     id: String(rule?.id || createRegexRuleId(taskType)),
@@ -1981,10 +2211,28 @@ export function ensureTaskProfiles(settings = {}) {
       ];
     }
 
+    let preferredActiveProfileId =
+      typeof current.activeProfileId === "string" ? current.activeProfileId : "";
+    if (taskType === "planner") {
+      const defaultProfile =
+        profiles.find((profile) => String(profile?.id || "") === DEFAULT_PROFILE_ID) ||
+        defaultBucket.profiles.find(
+          (profile) => String(profile?.id || "") === DEFAULT_PROFILE_ID,
+        ) ||
+        null;
+      const alignedPlannerProfiles = alignPlannerLegacyDefaultLikeProfiles(
+        profiles,
+        defaultProfile,
+        preferredActiveProfileId,
+      );
+      profiles = alignedPlannerProfiles.profiles;
+      preferredActiveProfileId = alignedPlannerProfiles.activeProfileId;
+    }
+
     const activeProfileId =
-      typeof current.activeProfileId === "string" &&
-      profiles.some((profile) => profile.id === current.activeProfileId)
-        ? current.activeProfileId
+      typeof preferredActiveProfileId === "string" &&
+      profiles.some((profile) => profile.id === preferredActiveProfileId)
+        ? preferredActiveProfileId
         : profiles[0]?.id || DEFAULT_PROFILE_ID;
 
     normalized[taskType] = {
