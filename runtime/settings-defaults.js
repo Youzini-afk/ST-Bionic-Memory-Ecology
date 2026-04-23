@@ -76,7 +76,6 @@ export const defaultSettings = {
   enableRegionScopedObjective: true,
   enableCognitiveMemory: true,
   enableSpatialAdjacency: true,
-  enableAiMonitor: false,
   injectLowConfidenceObjectiveMemory: false,
   enableStoryTimeline: true,
   injectStoryTimeLabel: true,

@@ -2963,7 +2963,6 @@ function _refreshMobileCognitionFull() {
   _renderCogOwnerList(graph, canRender, document.getElementById("bme-mobile-cog-owner-list"));
   _renderCogOwnerDetail(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-owner-detail"));
   _renderCogSpaceTools(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-space-tools"));
-  _renderCogMonitorMini(document.getElementById("bme-mobile-cog-monitor-mini"));
 }
 
 function _refreshMobileSummaryFull() {
@@ -3087,7 +3086,6 @@ function _refreshCognitionWorkspace() {
   _renderCogOwnerList(graph, canRender);
   _renderCogOwnerDetail(graph, loadInfo, canRender);
   _renderCogSpaceTools(graph, loadInfo, canRender);
-  _renderCogMonitorMini();
 }
 
 function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
@@ -3134,19 +3132,6 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 当前场景锚点</div>
       <div class="bme-cog-status-card__value">${_escHtml(
         activeOwnerLabels.length > 0
-          ? activeOwnerLabels.join(" / ")
-          : activeOwner
-            ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
-            : activeOwnerKey || "—",
-      )}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(activeRegionLabel)}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-diagram-project"></i> 邻接地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(adjacentRegions.length > 0 ? adjacentRegions.join(" / ") : "—")}</div>
     </div>
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
@@ -3451,52 +3436,6 @@ function _renderCogSpaceTools(graph, loadInfo, canRender, targetEl) {
   `;
 }
 
-function _renderCogMonitorMini(targetEl) {
-  const el = targetEl || document.getElementById("bme-cog-monitor-mini");
-  if (!el) return;
-
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">任务监视器已关闭</div>`;
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline : [];
-
-  if (!timeline.length) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">暂无任务流水</div>`;
-    return;
-  }
-
-  el.innerHTML = timeline
-    .slice(-8)
-    .reverse()
-    .map((entry) => {
-      const status = String(entry?.status || "").toLowerCase();
-      const statusClass = status.includes("error") || status.includes("fail") ? "is-error"
-        : status.includes("run") ? "is-running" : "is-success";
-      const taskType = String(entry?.taskType || "unknown");
-      const route =
-        _getMonitorRouteLabel(entry?.route) ||
-        _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-        String(entry?.model || "").trim();
-      const durationMs = Number(entry?.durationMs);
-      const durationText = Number.isFinite(durationMs) && durationMs > 0
-        ? durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${Math.round(durationMs)}ms`
-        : "—";
-      return `
-        <div class="bme-cog-monitor-entry ${statusClass}">
-          <span class="bme-cog-monitor-badge">${_escHtml(_getMonitorTaskTypeLabel(taskType))}</span>
-          <span class="bme-cog-monitor-info">${_escHtml(route || _getMonitorStatusLabel(entry?.status) || "—")}</span>
-          <span class="bme-cog-monitor-duration">${_escHtml(durationText)}</span>
-        </div>`;
-    })
-    .join("");
-}
-
-
 function _formatSummaryEntryCard(entry = {}) {
   const messageRange = Array.isArray(entry?.dialogueRange)
     ? entry.dialogueRange
@@ -3681,7 +3620,6 @@ function _refreshDashboard() {
       _getGraphLoadLabel(loadInfo),
     );
     _refreshCognitionDashboard(graph, loadInfo);
-    _refreshAiMonitorDashboard();
     return;
   }
 
@@ -3753,30 +3691,8 @@ function _refreshDashboard() {
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
   _refreshCognitionDashboard(graph);
-  _refreshAiMonitorDashboard();
   _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
   _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
-}
-
-function _renderMiniRecentList(elementId, entries = [], emptyText = "暂无数据") {
-  const listEl = document.getElementById(elementId);
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (!Array.isArray(entries) || entries.length === 0) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = emptyText;
-    listEl.appendChild(li);
-    return;
-  }
-
-  for (const entry of entries) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = String(entry || "");
-    listEl.appendChild(li);
-  }
 }
 
 function _setInputValueIfIdle(elementId, value = "") {
@@ -4238,49 +4154,6 @@ function _refreshCognitionDashboard(
   if (currentGraphView === "cognition") {
     _refreshCognitionWorkspace();
   }
-}
-
-function _refreshAiMonitorDashboard() {
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    _renderMiniRecentList(
-      "bme-ai-monitor-list",
-      [],
-      "任务监视器已关闭",
-    );
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline
-    : [];
-  _renderMiniRecentList(
-    "bme-ai-monitor-list",
-    timeline
-      .slice(-6)
-      .reverse()
-      .map((entry) => {
-        const route =
-          _getMonitorRouteLabel(entry?.route) ||
-          _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-          "";
-        const model = String(entry?.model || "").trim();
-        const durationText =
-          Number.isFinite(Number(entry?.durationMs)) && Number(entry.durationMs) > 0
-            ? `${Math.round(Number(entry.durationMs))}ms`
-            : "";
-        return [
-          _getMonitorTaskTypeLabel(entry?.taskType),
-          _getMonitorStatusLabel(entry?.status),
-          route || model ? `${route || model}` : "",
-          durationText,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-      }),
-    "暂无任务流水",
-  );
 }
 
 function _renderRecentList(elementId, items) {
@@ -6697,10 +6570,6 @@ function _refreshConfigTab() {
     settings.debugLoggingEnabled ?? false,
   );
   _setCheckboxValue(
-    "bme-setting-ai-monitor-enabled",
-    settings.enableAiMonitor ?? true,
-  );
-  _setCheckboxValue(
     "bme-setting-graph-native-force-disable",
     settings.graphNativeForceDisable === true,
   );
@@ -7175,10 +7044,6 @@ function _bindConfigControls() {
   });
   bindCheckbox("bme-setting-debug-logging-enabled", (checked) => {
     _patchSettings({ debugLoggingEnabled: checked });
-  });
-  bindCheckbox("bme-setting-ai-monitor-enabled", (checked) => {
-    _patchSettings({ enableAiMonitor: checked });
-    _refreshDashboard();
   });
   bindCheckbox("bme-setting-graph-native-force-disable", (checked) => {
     _patchSettings({ graphNativeForceDisable: checked });
@@ -8954,18 +8819,10 @@ function _buildMonitorMessagesPreview(messages = []) {
 
 function _renderAiMonitorTraceCard(state) {
   const timeline = Array.isArray(state.taskTimeline) ? state.taskTimeline : [];
-  if (state.settings?.enableAiMonitor !== true) {
-    return `
-      <div class="bme-config-card-title">任务监视器流水</div>
-      <div class="bme-config-help">
-        任务监视器当前已关闭。打开后，这里会保留最近的提取 / 召回 / 维护任务快照，便于排查到底发了什么、用了哪套模型、做了哪些清洗。
-      </div>
-    `;
-  }
 
   if (!timeline.length) {
     return `
-      <div class="bme-config-card-title">任务监视器流水</div>
+      <div class="bme-config-card-title">最近任务快照</div>
       <div class="bme-config-help">
         还没有任务流水。等提取、召回或维护任务跑过一轮后，这里就会出现最近记录。
       </div>
@@ -9061,7 +8918,7 @@ function _renderAiMonitorTraceCard(state) {
   return `
     <div class="bme-config-card-head">
       <div>
-        <div class="bme-config-card-title">任务监视器流水</div>
+        <div class="bme-config-card-title">最近任务快照</div>
         <div class="bme-config-card-subtitle">
           最近 ${Math.min(timeline.length, 8)} 条任务快照 · 点击展开查看详情
         </div>

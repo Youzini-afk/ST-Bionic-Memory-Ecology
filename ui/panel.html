@@ -291,14 +291,6 @@
               </button>
             </div>
 
-            <div class="bme-config-card">
-              <div class="bme-section-header">任务监视器</div>
-              <div class="bme-config-help">
-                默认跟随调试总开关；开启后展示最近的记忆任务流水。
-              </div>
-              <ul class="bme-recent-list" id="bme-ai-monitor-list"></ul>
-            </div>
-
             <div class="bme-section-header">最近提取</div>
             <ul class="bme-recent-list" id="bme-recent-extract"></ul>
 
@@ -573,10 +565,6 @@
                         <i class="fa-solid fa-map-location-dot"></i> 空间控制台
                       </div>
                       <div class="bme-cog-space-tools" id="bme-mobile-cog-space-tools"></div>
-                      <div class="bme-cog-section-title" style="margin-top:16px">
-                        <i class="fa-solid fa-wave-square"></i> 任务监视器
-                      </div>
-                      <div class="bme-cog-monitor-mini" id="bme-mobile-cog-monitor-mini"></div>
                     </div>
                   </div>
                 </div>
@@ -682,10 +670,6 @@
                   <i class="fa-solid fa-map-location-dot"></i> 空间控制台
                 </div>
                 <div class="bme-cog-space-tools" id="bme-cog-space-tools"></div>
-                <div class="bme-cog-section-title" style="margin-top:16px">
-                  <i class="fa-solid fa-wave-square"></i> 任务监视器
-                </div>
-                <div class="bme-cog-monitor-mini" id="bme-cog-monitor-mini"></div>
               </div>
             </div>
           </div>
@@ -1439,29 +1423,6 @@
                     </span>
                     <input
                       id="bme-setting-debug-logging-enabled"
-                      type="checkbox"
-                    />
-                  </label>
-                </div>
-
-                <div class="bme-config-card">
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">任务监视器</div>
-                      <div class="bme-config-card-subtitle">
-                        记录最近的提取、召回、压缩等任务流水；默认关闭，建议配合调试开关一起使用。
-                      </div>
-                    </div>
-                  </div>
-                  <label class="bme-toggle-item" for="bme-setting-ai-monitor-enabled">
-                    <span class="bme-toggle-copy">
-                      <span class="bme-toggle-title">启用任务监视器</span>
-                      <span class="bme-toggle-desc">
-                        开启后面板会显示最近任务的模型路由、清洗摘要和最终消息预览。
-                      </span>
-                    </span>
-                    <input
-                      id="bme-setting-ai-monitor-enabled"
                       type="checkbox"
                     />
                   </label>

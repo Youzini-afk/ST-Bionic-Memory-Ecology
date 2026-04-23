@@ -50,7 +50,6 @@ assert.equal(defaultSettings.injectUserPovMemory, true);
 assert.equal(defaultSettings.injectObjectiveGlobalMemory, true);
 assert.equal(defaultSettings.enableCognitiveMemory, true);
 assert.equal(defaultSettings.enableSpatialAdjacency, true);
-assert.equal(defaultSettings.enableAiMonitor, false);
 assert.equal(defaultSettings.injectLowConfidenceObjectiveMemory, false);
 assert.equal(defaultSettings.enableStoryTimeline, true);
 assert.equal(defaultSettings.injectStoryTimeLabel, true);
