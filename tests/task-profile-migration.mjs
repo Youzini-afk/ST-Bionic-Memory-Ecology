@@ -158,13 +158,18 @@ assert.ok(defaults.planner.profiles.length > 0);
 assert.deepEqual(
   defaults.planner.profiles[0].blocks.map((block) => block.sourceKey || block.id),
   [
-    "planner-default-system",
+    "planner-default-heading",
+    "planner-default-role",
+    "planner-default-identity-ack",
     "plannerCharacterCard",
     "plannerWorldbook",
-    "plannerRecentChat",
     "plannerMemory",
     "plannerPreviousPlots",
+    "plannerRecentChat",
     "plannerUserInput",
+    "planner-default-info-ack",
+    "planner-default-format",
+    "planner-default-rules",
     "planner-default-assistant-seed",
   ],
 );

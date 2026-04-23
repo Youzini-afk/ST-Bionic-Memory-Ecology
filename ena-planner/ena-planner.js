@@ -1679,19 +1679,29 @@ function resolvePlannerBuiltinBlockContent(block = {}, context = {}) {
     const sourceKey = String(block?.sourceKey || '').trim();
     switch (sourceKey) {
         case 'plannerCharacterCard':
+        case 'charDescription':
             return String(context.charBlock || '');
         case 'plannerWorldbook':
+        case 'worldInfoBefore':
+        case 'worldInfoAfter':
             return String(context.worldbook || '');
         case 'plannerRecentChat':
+        case 'recentMessages':
             return String(context.recentChat || '');
         case 'plannerMemory':
+        case 'activeSummaries':
             return String(context.bmeMemory || '').trim()
                 ? `<bme_memory>\n${String(context.bmeMemory || '').trim()}\n</bme_memory>`
                 : '';
         case 'plannerPreviousPlots':
             return String(context.plots || '');
         case 'plannerUserInput':
+        case 'userMessage':
             return String(context.userMsgContent || '');
+        case 'userPersona':
+            return String(context.userPersona || '');
+        case 'storyTimeContext':
+            return String(context.storyTimeContext || '');
         default:
             return '';
     }
@@ -1764,6 +1774,24 @@ async function buildPlannerMessages(rawUserInput) {
     const userInput = await renderTemplateAll(rawUserInput, env, messageVars);
     const userMsgContent = `以下是玩家的最新指令哦~:\n[${userInput}]`;
 
+    // --- User persona (optional, for generic userPersona builtin) ---
+    let userPersona = '';
+    try {
+        userPersona = ctx?.powerUserSettings?.persona_description
+            || ctx?.extensionSettings?.persona_description
+            || ctx?.name1_description
+            || ctx?.persona
+            || '';
+    } catch { /* graceful */ }
+
+    // --- Story time context (optional, for generic storyTimeContext builtin) ---
+    let storyTimeContext = '';
+    try {
+        if (_bmeRuntime?.buildStoryTimeContextText) {
+            storyTimeContext = _bmeRuntime.buildStoryTimeContextText() || '';
+        }
+    } catch { /* graceful */ }
+
     const plannerBlockContext = {
         charBlock,
         worldbook,
@@ -1772,6 +1800,8 @@ async function buildPlannerMessages(rawUserInput) {
         plots,
         userInput,
         userMsgContent,
+        userPersona,
+        storyTimeContext,
     };
 
     const messages = [];

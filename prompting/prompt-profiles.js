@@ -1,6 +1,15 @@
 // ST-BME: 任务预设与兼容迁移层
 
-import { DEFAULT_PROMPT_BLOCKS as DEFAULT_PLANNER_PROMPT_BLOCKS } from "../ena-planner/ena-planner-presets.js";
+import {
+  DEFAULT_PROMPT_BLOCKS as DEFAULT_PLANNER_PROMPT_BLOCKS,
+  PLANNER_HEADING,
+  PLANNER_ROLE,
+  PLANNER_IDENTITY_ACK,
+  PLANNER_INFO_ACK,
+  PLANNER_FORMAT,
+  PLANNER_RULES,
+  PLANNER_ASSISTANT_SEED,
+} from "../ena-planner/ena-planner-presets.js";
 import { DEFAULT_TASK_PROFILE_TEMPLATES } from "./default-task-profile-templates.js";
 
 const TASK_TYPES = [
@@ -732,25 +741,53 @@ function buildPlannerDefaultTaskProfileTemplate() {
     id: "default",
     name: "默认预设",
     taskType: "planner",
-    version: 4,
+    version: 5,
     builtin: true,
     enabled: true,
     description: TASK_TYPE_META.planner?.description || "",
     promptMode: "block-based",
-    updatedAt: "2026-04-23T16:30:00.000Z",
+    updatedAt: "2026-06-12T00:00:00.000Z",
     blocks: [
+      // --- Jailbreak heading (same pattern as extract/recall) ---
       {
-        id: "planner-default-system",
-        name: "Ena Planner System",
+        id: "planner-default-heading",
+        name: "抬头",
         type: "custom",
         enabled: true,
         role: "system",
         sourceKey: "",
         sourceField: "",
-        content: getPlannerPromptBlockContentByRole("system"),
+        content: PLANNER_HEADING,
         injectionMode: "relative",
         order: 0,
       },
+      // --- Role definition ---
+      {
+        id: "planner-default-role",
+        name: "角色定义",
+        type: "custom",
+        enabled: true,
+        role: "system",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_ROLE,
+        injectionMode: "relative",
+        order: 1,
+      },
+      // --- Identity confirmation (assistant) ---
+      {
+        id: "planner-default-identity-ack",
+        name: "身份确认",
+        type: "custom",
+        enabled: true,
+        role: "assistant",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_IDENTITY_ACK,
+        injectionMode: "relative",
+        order: 2,
+      },
+      // --- Context builtins (planner-specific sourceKeys) ---
       {
         id: "planner-default-character-card",
         name: "角色卡",
@@ -761,7 +798,7 @@ function buildPlannerDefaultTaskProfileTemplate() {
         sourceField: "",
         content: "",
         injectionMode: "relative",
-        order: 1,
+        order: 3,
       },
       {
         id: "planner-default-worldbook",
@@ -773,19 +810,7 @@ function buildPlannerDefaultTaskProfileTemplate() {
         sourceField: "",
         content: "",
         injectionMode: "relative",
-        order: 2,
-      },
-      {
-        id: "planner-default-recent-chat",
-        name: "最近聊天",
-        type: "builtin",
-        enabled: true,
-        role: "system",
-        sourceKey: "plannerRecentChat",
-        sourceField: "",
-        content: "",
-        injectionMode: "relative",
-        order: 3,
+        order: 4,
       },
       {
         id: "planner-default-memory",
@@ -797,7 +822,7 @@ function buildPlannerDefaultTaskProfileTemplate() {
         sourceField: "",
         content: "",
         injectionMode: "relative",
-        order: 4,
+        order: 5,
       },
       {
         id: "planner-default-previous-plots",
@@ -809,7 +834,19 @@ function buildPlannerDefaultTaskProfileTemplate() {
         sourceField: "",
         content: "",
         injectionMode: "relative",
-        order: 5,
+        order: 6,
+      },
+      {
+        id: "planner-default-recent-chat",
+        name: "最近聊天",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerRecentChat",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 7,
       },
       {
         id: "planner-default-user-input",
@@ -821,8 +858,48 @@ function buildPlannerDefaultTaskProfileTemplate() {
         sourceField: "",
         content: "",
         injectionMode: "relative",
-        order: 6,
+        order: 8,
       },
+      // --- Info acknowledgment (assistant) ---
+      {
+        id: "planner-default-info-ack",
+        name: "信息确认",
+        type: "custom",
+        enabled: true,
+        role: "assistant",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_INFO_ACK,
+        injectionMode: "relative",
+        order: 9,
+      },
+      // --- Output format (user) ---
+      {
+        id: "planner-default-format",
+        name: "输出格式",
+        type: "custom",
+        enabled: true,
+        role: "user",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_FORMAT,
+        injectionMode: "relative",
+        order: 10,
+      },
+      // --- Behavior rules (user) ---
+      {
+        id: "planner-default-rules",
+        name: "行为规则",
+        type: "custom",
+        enabled: true,
+        role: "user",
+        sourceKey: "",
+        sourceField: "",
+        content: PLANNER_RULES,
+        injectionMode: "relative",
+        order: 11,
+      },
+      // --- Assistant seed ---
       {
         id: "planner-default-assistant-seed",
         name: "Assistant Seed",
@@ -831,9 +908,9 @@ function buildPlannerDefaultTaskProfileTemplate() {
         role: "assistant",
         sourceKey: "",
         sourceField: "",
-        content: getPlannerPromptBlockContentByRole("assistant"),
+        content: PLANNER_ASSISTANT_SEED,
         injectionMode: "relative",
-        order: 7,
+        order: 12,
       },
     ],
     generation: {
@@ -2202,12 +2279,17 @@ export function getBuiltinBlockDefinitions(taskType = "") {
   const normalizedTaskType = String(taskType || "").trim();
   return BUILTIN_BLOCK_DEFINITIONS
     .filter(
-      (definition) =>
-        normalizedTaskType === "planner"
-          ? Array.isArray(definition.taskTypes) && definition.taskTypes.includes("planner")
-          : !Array.isArray(definition.taskTypes) ||
-            !normalizedTaskType ||
-            definition.taskTypes.includes(normalizedTaskType),
+      (definition) => {
+        const hasRestriction = Array.isArray(definition.taskTypes);
+        if (normalizedTaskType === "planner") {
+          // Show planner-specific builtins + generic builtins (no taskTypes restriction)
+          return !hasRestriction || definition.taskTypes.includes("planner");
+        }
+        // Non-planner tasks: exclude planner-only builtins; show everything else
+        return !hasRestriction ||
+          !normalizedTaskType ||
+          definition.taskTypes.includes(normalizedTaskType);
+      },
     )
     .map((definition) => ({ ...definition }));
 }
