@@ -1356,7 +1356,9 @@ function _switchTab(tabId) {
 
 function _refreshPlannerLauncher() {
   try {
-    refreshPlannerSections();
+    refreshPlannerSections({
+      getSettings: _getSettings,
+    });
   } catch (err) {
     console.warn("[ST-BME] planner section refresh failed:", err);
   }
@@ -1364,7 +1366,9 @@ function _refreshPlannerLauncher() {
 
 function _bindPlannerLauncher() {
   try {
-    initPlannerSections(panelEl || document);
+    initPlannerSections(panelEl || document, {
+      getSettings: _getSettings,
+    });
   } catch (err) {
     console.warn("[ST-BME] planner section init failed:", err);
   }

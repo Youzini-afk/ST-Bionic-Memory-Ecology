@@ -2924,6 +2924,20 @@
                       </div>
                     </div>
                   </div>
+                  <div class="bme-config-row bme-llm-preset-row">
+                    <label for="bme-planner-llm-preset-select">复用 BME LLM 配置模板</label>
+                    <div class="bme-llm-preset-controls">
+                      <select
+                        id="bme-planner-llm-preset-select"
+                        class="bme-config-input"
+                      >
+                        <option value="">-- 手动模式 / 当前 ENA 配置 --</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="bme-config-help">
+                    直接复用主面板的 LLM 预设，将 URL、Key、Model 拷贝到 ENA 规划器，并自动推断渠道与默认前缀；套用后仍可单独微调。
+                  </div>
                   <div class="bme-config-row">
                     <label for="bme-planner-api-channel">渠道类型</label>
                     <select id="bme-planner-api-channel" class="bme-config-input">

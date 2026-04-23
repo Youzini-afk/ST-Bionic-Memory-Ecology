@@ -9,6 +9,12 @@
  * BME theming automatically.
  */
 
+import {
+  isSameLlmConfigSnapshot,
+  resolveDedicatedLlmProviderConfig,
+  sanitizeLlmPresetSettings,
+} from '../llm/llm-preset-utils.js';
+
 const SECTION_SELECTOR = '[data-config-section="planner"]';
 const AUTOSAVE_DELAY_MS = 600;
 
@@ -21,6 +27,7 @@ let fetchedModels = [];
 let undoState = null;
 let fieldChangeHandler = null;
 let autosaveInProgress = false;
+let externalGetSettings = null;
 
 /* ── DOM helpers ────────────────────────────────────────────────────────── */
 
@@ -97,6 +104,118 @@ function normalizeKeepTagsInput(text) {
 function genId() {
   try { return crypto.randomUUID(); }
   catch { return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
+}
+
+function getSharedSettingsSnapshot() {
+  return typeof externalGetSettings === 'function'
+    ? (externalGetSettings() || {})
+    : {};
+}
+
+function getSharedLlmPresetState() {
+  const settings = getSharedSettingsSnapshot();
+  return sanitizeLlmPresetSettings(settings || {});
+}
+
+function buildPlannerLlmSnapshot(source = {}) {
+  return {
+    llmApiUrl: String(source?.llmApiUrl || '').trim(),
+    llmApiKey: String(source?.llmApiKey || '').trim(),
+    llmModel: String(source?.llmModel || '').trim(),
+  };
+}
+
+function getCurrentPlannerLlmSnapshot() {
+  const rawUrl = String(
+    $('bme-planner-api-base')?.value ?? cfgCache?.api?.baseUrl ?? '',
+  ).trim();
+  const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
+  return buildPlannerLlmSnapshot({
+    llmApiUrl: resolved.apiUrl || rawUrl,
+    llmApiKey: $('bme-planner-api-key')?.value ?? cfgCache?.api?.apiKey ?? '',
+    llmModel: $('bme-planner-model')?.value ?? cfgCache?.api?.model ?? '',
+  });
+}
+
+function normalizePlannerPresetSnapshot(preset = {}) {
+  const rawUrl = String(preset?.llmApiUrl || '').trim();
+  const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
+  return buildPlannerLlmSnapshot({
+    llmApiUrl: resolved.apiUrl || rawUrl,
+    llmApiKey: preset?.llmApiKey || '',
+    llmModel: preset?.llmModel || '',
+  });
+}
+
+function resolveMatchingPlannerLlmPresetName(snapshot = getCurrentPlannerLlmSnapshot()) {
+  const { presets, activePreset } = getSharedLlmPresetState();
+  const exactMatches = Object.keys(presets || {}).filter((name) =>
+    isSameLlmConfigSnapshot(snapshot, normalizePlannerPresetSnapshot(presets[name])),
+  );
+  if (exactMatches.length === 1) return exactMatches[0];
+  if (exactMatches.length > 1 && activePreset && exactMatches.includes(activePreset)) {
+    return activePreset;
+  }
+  return '';
+}
+
+function populatePlannerLlmPresetSelect(selectedPreset = resolveMatchingPlannerLlmPresetName()) {
+  const select = $('bme-planner-llm-preset-select');
+  if (!select) return;
+
+  while (select.options.length > 1) {
+    select.remove(1);
+  }
+
+  const { presets } = getSharedLlmPresetState();
+  Object.keys(presets || {})
+    .sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'))
+    .forEach((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      select.appendChild(option);
+    });
+
+  select.value = selectedPreset || '';
+}
+
+function syncPlannerLlmPresetSelect() {
+  populatePlannerLlmPresetSelect(resolveMatchingPlannerLlmPresetName());
+}
+
+function inferPlannerApiConfigFromPreset(preset = {}) {
+  const rawUrl = String(preset?.llmApiUrl || '').trim();
+  const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
+  let channel = 'openai';
+  if (resolved.providerId === 'google-ai-studio') channel = 'gemini';
+  else if (resolved.providerId === 'anthropic-claude') channel = 'claude';
+
+  return {
+    channel,
+    prefixMode: 'auto',
+    customPrefix: '',
+    baseUrl: resolved.apiUrl || rawUrl,
+    apiKey: String(preset?.llmApiKey || '').trim(),
+    model: String(preset?.llmModel || '').trim(),
+  };
+}
+
+function applyPlannerLlmPresetToFields(name, preset = {}) {
+  const inferred = inferPlannerApiConfigFromPreset(preset);
+  const setVal = (id, value) => {
+    const el = $(id);
+    if (el) el.value = value;
+  };
+
+  setVal('bme-planner-api-channel', inferred.channel || 'openai');
+  setVal('bme-planner-prefix-mode', inferred.prefixMode || 'auto');
+  setVal('bme-planner-prefix-custom', inferred.customPrefix || '');
+  setVal('bme-planner-api-base', inferred.baseUrl || '');
+  setVal('bme-planner-api-key', inferred.apiKey || '');
+  setVal('bme-planner-model', inferred.model || '');
+  updatePrefixModeUI();
+  populatePlannerLlmPresetSelect(name);
 }
 
 /* ── Prompt block editor ────────────────────────────────────────────────── */
@@ -364,6 +483,7 @@ function applyConfigToFields(cfg) {
     toBool(cfgCache.enabled, false) ? 'active' : 'idle',
   );
   updatePrefixModeUI();
+  syncPlannerLlmPresetSelect();
 
   const keepSelected = cfgCache.activePromptTemplate || $('bme-planner-tpl-select')?.value || '';
   renderTemplateSelect(keepSelected);
@@ -539,6 +659,26 @@ function bindOnce(section) {
     if (!val) return;
     const modelInput = $('bme-planner-model');
     if (modelInput) modelInput.value = val;
+    syncPlannerLlmPresetSelect();
+    scheduleSave();
+  });
+
+  $('bme-planner-llm-preset-select')?.addEventListener('change', () => {
+    const select = $('bme-planner-llm-preset-select');
+    const selectedName = String(select?.value || '');
+    if (!selectedName) {
+      setLocalStatus('bme-planner-api-status', '', '');
+      return;
+    }
+    const { presets } = getSharedLlmPresetState();
+    const preset = presets?.[selectedName];
+    if (!preset) {
+      populatePlannerLlmPresetSelect('');
+      setLocalStatus('bme-planner-api-status', '选中的 BME 模板不存在，已切回手动模式', 'error');
+      return;
+    }
+    applyPlannerLlmPresetToFields(selectedName, preset);
+    setLocalStatus('bme-planner-api-status', `已套用 BME 模板：${selectedName}`, 'success');
     scheduleSave();
   });
 
@@ -678,7 +818,9 @@ function bindOnce(section) {
     if (!target) return;
     if (target.closest('.bme-planner-prompt-block')) return;
     if (target.id === 'bme-planner-test-input') return;
+    if (target.id === 'bme-planner-llm-preset-select') return;
     if (!target.classList?.contains('bme-config-input')) return;
+    syncPlannerLlmPresetSelect();
     scheduleSave();
   };
   section.addEventListener('change', fieldChangeHandler);
@@ -686,10 +828,13 @@ function bindOnce(section) {
 
 /* ── Public controller ──────────────────────────────────────────────────── */
 
-export function initPlannerSections(rootEl) {
+export function initPlannerSections(rootEl, options = {}) {
   const root = rootEl || document;
   const section = root.querySelector(SECTION_SELECTOR);
   if (!section) return;
+  if (typeof options.getSettings === 'function') {
+    externalGetSettings = options.getSettings;
+  }
   bindOnce(section);
 
   const api = getPlannerApi();
@@ -719,7 +864,10 @@ export function initPlannerSections(rootEl) {
   }
 }
 
-export function refreshPlannerSections() {
+export function refreshPlannerSections(options = {}) {
+  if (typeof options.getSettings === 'function') {
+    externalGetSettings = options.getSettings;
+  }
   const api = getPlannerApi();
   if (!api) {
     setStatusChip('bme-planner-state-chip', '模块未加载', 'error');
@@ -750,5 +898,6 @@ export function cleanupPlannerSections() {
   cfgCache = null;
   logsCache = [];
   fetchedModels = [];
+  externalGetSettings = null;
   clearUndo();
 }
