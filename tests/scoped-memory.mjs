@@ -8,6 +8,15 @@ import {
   findLatestNode,
   serializeGraph,
 } from "../graph/graph.js";
+import {
+  buildRegionLine,
+  getScopeRegionTokens,
+  normalizeMemoryScope,
+} from "../graph/memory-scope.js";
+import {
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
+} from "../graph/story-timeline.js";
 
 const graph = createEmptyGraph();
 const objectiveNode = createNode({
@@ -52,6 +61,105 @@ const latestPov = findLatestNode(
 
 assert.equal(latestObjective?.id, objectiveNode.id);
 assert.equal(latestPov?.id, povNode.id);
+
+const normalizedScope = {
+  layer: "pov",
+  ownerType: "character",
+  ownerId: "艾琳",
+  ownerName: "艾琳",
+  regionPrimary: "钟楼",
+  regionPath: ["钟楼", "塔顶"],
+  regionSecondary: ["旧城区"],
+};
+assert.equal(
+  normalizeMemoryScope(normalizedScope),
+  normalizedScope,
+  "已规范的 scope 对象应直接复用",
+);
+
+const malformedSecondaryScope = normalizeMemoryScope({
+  layer: "objective",
+  regionPrimary: "王都/钟楼",
+  regionSecondary: "旧城区, 集市 / 下水道 / 钟楼",
+});
+assert.equal(malformedSecondaryScope.regionPrimary, "钟楼");
+assert.deepEqual(malformedSecondaryScope.regionPath, ["王都", "钟楼"]);
+assert.deepEqual(malformedSecondaryScope.regionSecondary, [
+  "旧城区",
+  "集市",
+  "下水道",
+]);
+assert.deepEqual(getScopeRegionTokens(malformedSecondaryScope), [
+  "钟楼",
+  "王都",
+  "旧城区",
+  "集市",
+  "下水道",
+]);
+assert.match(buildRegionLine(malformedSecondaryScope), /次级地区/);
+
+const accessorBackedScope = {};
+Object.defineProperty(accessorBackedScope, "layer", {
+  get() {
+    return "objective";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionPrimary", {
+  get() {
+    return "钟楼";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionPath", {
+  get() {
+    return "王都 > 钟楼";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionSecondary", {
+  get() {
+    return { label: "旧城区 / 集市" };
+  },
+  enumerable: true,
+});
+const normalizedAccessorScope = normalizeMemoryScope(accessorBackedScope);
+assert.notEqual(
+  normalizedAccessorScope,
+  accessorBackedScope,
+  "带 accessor 的 scope 不应复用原对象",
+);
+assert.deepEqual(normalizedAccessorScope.regionPath, ["王都", "钟楼"]);
+assert.deepEqual(normalizedAccessorScope.regionSecondary, ["旧城区", "集市"]);
+
+const normalizedStoryTime = {
+  segmentId: "tl-1",
+  label: "第二天清晨",
+  tense: "ongoing",
+  relation: "same",
+  anchorLabel: "昨夜",
+  confidence: "high",
+  source: "derived",
+};
+assert.equal(
+  normalizeStoryTime(normalizedStoryTime),
+  normalizedStoryTime,
+  "已规范的 storyTime 对象应直接复用",
+);
+
+const normalizedStoryTimeSpan = {
+  startSegmentId: "tl-0",
+  endSegmentId: "tl-1",
+  startLabel: "昨夜",
+  endLabel: "第二天清晨",
+  mixed: false,
+  source: "derived",
+};
+assert.equal(
+  normalizeStoryTimeSpan(normalizedStoryTimeSpan),
+  normalizedStoryTimeSpan,
+  "已规范的 storyTimeSpan 对象应直接复用",
+);
 
 const legacyGraph = deserializeGraph({
   version: 6,

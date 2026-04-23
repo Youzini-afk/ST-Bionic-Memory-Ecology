@@ -53,7 +53,7 @@ const activeProfile = getActiveTaskProfile(
   "extract",
 );
 assert.equal(activeProfile.name, "激进提取");
-assert.equal(activeProfile.blocks.length, 16);
+assert.equal(activeProfile.blocks.length, 18);
 const builtinBlock = activeProfile.blocks.find(
   (block) => block.type === "builtin" && block.sourceKey === "userMessage",
 );

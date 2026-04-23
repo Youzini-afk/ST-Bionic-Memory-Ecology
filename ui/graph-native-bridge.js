@@ -1,5 +1,5 @@
 const DEFAULT_NATIVE_RUNTIME_OPTIONS = Object.freeze({
-  graphUseNativeLayout: false,
+  graphUseNativeLayout: true,
   graphNativeLayoutThresholdNodes: 280,
   graphNativeLayoutThresholdEdges: 1600,
   graphNativeLayoutWorkerTimeoutMs: 260,

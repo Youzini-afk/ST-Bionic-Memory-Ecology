@@ -47,6 +47,30 @@ export function buildRestoreSafetyChatId(chatId) {
   return `__restore_safety__${normalizeChatId(chatId)}`;
 }
 
+function readSyncTimingNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function normalizeSyncTimingMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function finalizeSyncTimings(record = {}, startedAt = 0) {
+  const result = {};
+  for (const [key, value] of Object.entries(record || {})) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      result[key] = normalizeSyncTimingMs(value);
+    }
+  }
+  if (startedAt > 0) {
+    result.totalMs = normalizeSyncTimingMs(readSyncTimingNow() - startedAt);
+  }
+  return result;
+}
+
 function resolveCloudStorageMode(options = {}) {
   const mode =
     typeof options.getCloudStorageMode === "function"
@@ -494,14 +518,20 @@ async function resolveBackupLookupContext(chatId, options = {}) {
 }
 
 async function readBackupEnvelope(chatId, options = {}) {
+  const readStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
+  const lookupStartedAt = readSyncTimingNow();
   const lookup = await resolveBackupLookupContext(normalizedChatId, options);
+  const lookupMs = readSyncTimingNow() - lookupStartedAt;
   const fetchImpl = getFetch(options);
   const fallbackFilename = buildBackupFilename(normalizedChatId);
   let lastMissingFilename = lookup.candidates[0]?.filename || fallbackFilename;
+  let networkMs = 0;
+  let parseMs = 0;
 
   for (const candidate of lookup.candidates) {
     try {
+      const networkStartedAt = readSyncTimingNow();
       const response = await fetchImpl(
         `${candidate.serverPath || `/user/files/${encodeURIComponent(candidate.filename)}`}?t=${Date.now()}`,
         {
@@ -509,6 +539,7 @@ async function readBackupEnvelope(chatId, options = {}) {
           cache: "no-store",
         },
       );
+      networkMs += readSyncTimingNow() - networkStartedAt;
       if (response.status === 404) {
         lastMissingFilename = candidate.filename;
         continue;
@@ -521,10 +552,13 @@ async function readBackupEnvelope(chatId, options = {}) {
           envelope: null,
           reason: "backup-read-error",
           error: new Error(errorText || `HTTP ${response.status}`),
+          timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
         };
       }
 
+      const parseStartedAt = readSyncTimingNow();
       const payload = await response.json();
+      parseMs += readSyncTimingNow() - parseStartedAt;
       const envelope = normalizeBackupEnvelope(payload, normalizedChatId);
       if (!envelope) {
         return {
@@ -532,6 +566,7 @@ async function readBackupEnvelope(chatId, options = {}) {
           filename: candidate.filename,
           envelope: null,
           reason: "invalid-backup",
+          timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
         };
       }
       return {
@@ -539,6 +574,7 @@ async function readBackupEnvelope(chatId, options = {}) {
         filename: candidate.filename,
         envelope,
         reason: "ok",
+        timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
       };
     } catch (error) {
       return {
@@ -547,6 +583,7 @@ async function readBackupEnvelope(chatId, options = {}) {
         envelope: null,
         reason: "backup-read-error",
         error,
+        timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
       };
     }
   }
@@ -557,6 +594,7 @@ async function readBackupEnvelope(chatId, options = {}) {
     envelope: null,
     reason: "not-found",
     manifestError: lookup.manifestError,
+    timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
   };
 }
 
@@ -581,10 +619,14 @@ async function syncDeletedBackupMeta(chatId, remainingEntry, options = {}) {
 }
 
 async function writeBackupEnvelope(envelope, chatId, options = {}) {
+  const writeStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
   const filename = buildBackupFilename(normalizedChatId);
   const fetchImpl = getFetch(options);
+  const serializeStartedAt = readSyncTimingNow();
   const payload = JSON.stringify(envelope);
+  const serializeMs = readSyncTimingNow() - serializeStartedAt;
+  const uploadStartedAt = readSyncTimingNow();
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: {
@@ -596,16 +638,27 @@ async function writeBackupEnvelope(envelope, chatId, options = {}) {
       data: encodeBase64Utf8(payload),
     }),
   });
+  const uploadMs = readSyncTimingNow() - uploadStartedAt;
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => response.statusText);
     throw new Error(errorText || `HTTP ${response.status}`);
   }
 
+  const responseParseStartedAt = readSyncTimingNow();
   const uploadResult = await response.json().catch(() => ({}));
+  const responseParseMs = readSyncTimingNow() - responseParseStartedAt;
   return {
     filename,
     path: String(uploadResult?.path || `/user/files/${filename}`),
+    timings: finalizeSyncTimings(
+      {
+        serializeMs,
+        uploadMs,
+        responseParseMs,
+      },
+      writeStartedAt,
+    ),
   };
 }
 
@@ -1825,6 +1878,7 @@ async function resolveSyncFilenameCandidates(chatId, options = {}) {
 }
 
 async function readRemoteSnapshot(chatId, options = {}) {
+  const readStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
   if (!normalizedChatId) {
     return {
@@ -1832,15 +1886,22 @@ async function readRemoteSnapshot(chatId, options = {}) {
       status: "missing-chat-id",
       filename: "",
       snapshot: null,
+      timings: finalizeSyncTimings({}, readStartedAt),
     };
   }
 
   const fetchImpl = getFetch(options);
+  const resolveStartedAt = readSyncTimingNow();
   const candidateFilenames = await resolveSyncFilenameCandidates(
     normalizedChatId,
     options,
   );
+  const resolveCandidatesMs = readSyncTimingNow() - resolveStartedAt;
   let lastNotFoundFilename = candidateFilenames[0] || "";
+  let networkMs = 0;
+  let parseMs = 0;
+  let chunkReadMs = 0;
+  let normalizeMs = 0;
 
   for (const filename of candidateFilenames) {
     const cacheBust = `t=${Date.now()}`;
@@ -1848,10 +1909,12 @@ async function readRemoteSnapshot(chatId, options = {}) {
 
     let response;
     try {
+      const networkStartedAt = readSyncTimingNow();
       response = await fetchImpl(url, {
         method: "GET",
         cache: "no-store",
       });
+      networkMs += readSyncTimingNow() - networkStartedAt;
     } catch (error) {
       console.warn("[ST-BME] 读取远端同步文件失败:", error);
       return {
@@ -1860,6 +1923,10 @@ async function readRemoteSnapshot(chatId, options = {}) {
         filename,
         snapshot: null,
         error,
+        timings: finalizeSyncTimings(
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          readStartedAt,
+        ),
       };
     }
 
@@ -1879,14 +1946,20 @@ async function readRemoteSnapshot(chatId, options = {}) {
         snapshot: null,
         error,
         statusCode: response.status,
+        timings: finalizeSyncTimings(
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          readStartedAt,
+        ),
       };
     }
 
     try {
+      const parseStartedAt = readSyncTimingNow();
       const remotePayload = await response.json();
+      parseMs += readSyncTimingNow() - parseStartedAt;
       let snapshot = null;
       if (Number(remotePayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
-        snapshot = await readRemoteSnapshotV2Manifest(
+        const manifestResult = await readRemoteSnapshotV2Manifest(
           remotePayload,
           normalizedChatId,
           {
@@ -1894,8 +1967,13 @@ async function readRemoteSnapshot(chatId, options = {}) {
             filename,
           },
         );
+        snapshot = manifestResult.snapshot;
+        chunkReadMs += Number(manifestResult?.timings?.chunkReadMs || 0);
+        normalizeMs += Number(manifestResult?.timings?.normalizeMs || 0);
       } else {
+        const normalizeStartedAt = readSyncTimingNow();
         snapshot = normalizeSyncSnapshot(remotePayload, normalizedChatId);
+        normalizeMs += readSyncTimingNow() - normalizeStartedAt;
       }
       rememberResolvedSyncFilename(normalizedChatId, filename);
       return {
@@ -1903,6 +1981,10 @@ async function readRemoteSnapshot(chatId, options = {}) {
         status: "ok",
         filename,
         snapshot,
+        timings: finalizeSyncTimings(
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          readStartedAt,
+        ),
       };
     } catch (error) {
       console.warn("[ST-BME] 解析远端同步文件失败:", error);
@@ -1912,6 +1994,10 @@ async function readRemoteSnapshot(chatId, options = {}) {
         filename,
         snapshot: null,
         error,
+        timings: finalizeSyncTimings(
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          readStartedAt,
+        ),
       };
     }
   }
@@ -1921,6 +2007,10 @@ async function readRemoteSnapshot(chatId, options = {}) {
     status: "not-found",
     filename: lastNotFoundFilename,
     snapshot: null,
+    timings: finalizeSyncTimings(
+      { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+      readStartedAt,
+    ),
   };
 }
 
@@ -1944,17 +2034,21 @@ async function readRemoteJsonFile(filename, options = {}) {
 }
 
 async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options = {}) {
+  const readStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
   const chunks = Array.isArray(manifest?.chunks) ? manifest.chunks : [];
   const nodes = [];
   const edges = [];
   const tombstones = [];
   let runtimeMeta = {};
+  let chunkReadMs = 0;
 
   for (const chunk of chunks) {
     const filename = String(chunk?.filename || "").trim();
     if (!filename) continue;
+    const chunkStartedAt = readSyncTimingNow();
     const payload = await readRemoteJsonFile(filename, options);
+    chunkReadMs += readSyncTimingNow() - chunkStartedAt;
     const records = Array.isArray(payload?.records) ? payload.records : [];
     switch (String(chunk.kind || "").trim()) {
       case "nodes":
@@ -1977,7 +2071,8 @@ async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options 
     }
   }
 
-  return normalizeSyncSnapshot(
+  const normalizeStartedAt = readSyncTimingNow();
+  const snapshot = normalizeSyncSnapshot(
     {
       meta: {
         ...runtimeMeta,
@@ -1994,55 +2089,94 @@ async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options 
     },
     normalizedChatId,
   );
+  const normalizeMs = readSyncTimingNow() - normalizeStartedAt;
+  return {
+    snapshot,
+    timings: finalizeSyncTimings(
+      {
+        chunkReadMs,
+        normalizeMs,
+      },
+      readStartedAt,
+    ),
+  };
 }
 
 async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
+  const writeStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
   const normalizedSnapshot = normalizeSyncSnapshot(snapshot, normalizedChatId);
   const filename = await resolveSyncFilename(normalizedChatId, options);
   const fetchImpl = getFetch(options);
+  const envelopeBuildStartedAt = readSyncTimingNow();
   const syncEnvelope = buildRemoteSyncEnvelopeV2(
     normalizedSnapshot,
     normalizedChatId,
     filename,
   );
+  const envelopeBuildMs = readSyncTimingNow() - envelopeBuildStartedAt;
   const requestHeaders = {
     ...getRequestHeadersSafe(options),
     "Content-Type": "application/json",
   };
+  let chunkSerializeMs = 0;
+  let chunkUploadMs = 0;
   for (const chunk of syncEnvelope.chunks) {
+    const serializeStartedAt = readSyncTimingNow();
+    const chunkPayload = JSON.stringify(chunk.payload, null, 2);
+    chunkSerializeMs += readSyncTimingNow() - serializeStartedAt;
+    const uploadStartedAt = readSyncTimingNow();
     const chunkResponse = await fetchImpl("/api/files/upload", {
       method: "POST",
       headers: requestHeaders,
       body: JSON.stringify({
         name: chunk.filename,
-        data: encodeBase64Utf8(JSON.stringify(chunk.payload, null, 2)),
+        data: encodeBase64Utf8(chunkPayload),
       }),
     });
+    chunkUploadMs += readSyncTimingNow() - uploadStartedAt;
     if (!chunkResponse.ok) {
       const errorText = await chunkResponse.text().catch(() => chunkResponse.statusText);
       throw new Error(errorText || `HTTP ${chunkResponse.status}`);
     }
   }
+  const manifestSerializeStartedAt = readSyncTimingNow();
+  const manifestPayload = JSON.stringify(syncEnvelope.manifest, null, 2);
+  const manifestSerializeMs = readSyncTimingNow() - manifestSerializeStartedAt;
+  const manifestUploadStartedAt = readSyncTimingNow();
   const response = await fetchImpl("/api/files/upload", {
     method: "POST",
     headers: requestHeaders,
     body: JSON.stringify({
       name: filename,
-      data: encodeBase64Utf8(JSON.stringify(syncEnvelope.manifest, null, 2)),
+      data: encodeBase64Utf8(manifestPayload),
     }),
   });
+  const manifestUploadMs = readSyncTimingNow() - manifestUploadStartedAt;
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => response.statusText);
     throw new Error(errorText || `HTTP ${response.status}`);
   }
 
+  const responseParseStartedAt = readSyncTimingNow();
   const uploadResult = await response.json().catch(() => ({}));
+  const responseParseMs = readSyncTimingNow() - responseParseStartedAt;
   return {
     filename,
     path: String(uploadResult?.path || ""),
     payload: syncEnvelope.manifest,
+    timings: finalizeSyncTimings(
+      {
+        envelopeBuildMs,
+        chunkSerializeMs,
+        chunkUploadMs,
+        manifestSerializeMs,
+        manifestUploadMs,
+        responseParseMs,
+      },
+      writeStartedAt,
+    ),
   };
 }
 
@@ -2160,15 +2294,19 @@ export async function backupToServer(chatId, options = {}) {
       backedUp: false,
       chatId: "",
       reason: "missing-chat-id",
+      timings: finalizeSyncTimings({}, readSyncTimingNow()),
     };
   }
 
+  const backupStartedAt = readSyncTimingNow();
   try {
     const db = await getDb(normalizedChatId, options);
+    const exportStartedAt = readSyncTimingNow();
     const snapshot = normalizeSyncSnapshot(
       await db.exportSnapshot(),
       normalizedChatId,
     );
+    const exportMs = readSyncTimingNow() - exportStartedAt;
     const nowMs = Date.now();
     const deviceId = getOrCreateDeviceId();
 
@@ -2179,6 +2317,7 @@ export async function backupToServer(chatId, options = {}) {
       nowMs,
     );
 
+    const envelopeBuildStartedAt = readSyncTimingNow();
     const backupSnapshot = buildManualBackupSnapshot(snapshot, normalizedChatId);
     const envelope = {
       kind: "st-bme-backup",
@@ -2188,15 +2327,18 @@ export async function backupToServer(chatId, options = {}) {
       sourceDeviceId: deviceId,
       snapshot: backupSnapshot,
     };
+    const envelopeBuildMs = readSyncTimingNow() - envelopeBuildStartedAt;
 
     const uploadResult = await writeBackupEnvelope(
       envelope,
       normalizedChatId,
       options,
     );
+    const uploadTimings = uploadResult?.timings || {};
     const serializedEnvelope = JSON.stringify(envelope);
 
     try {
+      const manifestWriteStartedAt = readSyncTimingNow();
       await upsertBackupManifestEntry(
         {
           filename: uploadResult.filename,
@@ -2210,6 +2352,37 @@ export async function backupToServer(chatId, options = {}) {
         },
         options,
       );
+      const manifestWriteMs = readSyncTimingNow() - manifestWriteStartedAt;
+      const metaPatchStartedAt = readSyncTimingNow();
+      await patchDbMeta(db, {
+        deviceId,
+        syncDirty: false,
+        syncDirtyReason: "",
+        lastBackupUploadedAt: nowMs,
+        lastBackupFilename: uploadResult.filename,
+      });
+      const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
+
+      return {
+        backedUp: true,
+        chatId: normalizedChatId,
+        filename: uploadResult.filename,
+        remotePath: uploadResult.path,
+        revision: normalizeRevision(snapshot.meta.revision),
+        backupTime: nowMs,
+        timings: finalizeSyncTimings(
+          {
+            exportMs,
+            envelopeBuildMs,
+            uploadMs: Number(uploadTimings.totalMs || 0),
+            envelopeSerializeMs: Number(uploadTimings.serializeMs || 0),
+            envelopeResponseParseMs: Number(uploadTimings.responseParseMs || 0),
+            manifestWriteMs,
+            metaPatchMs,
+          },
+          backupStartedAt,
+        ),
+      };
     } catch (manifestError) {
       return {
         backedUp: false,
@@ -2219,25 +2392,18 @@ export async function backupToServer(chatId, options = {}) {
         reason: "backup-manifest-error",
         backupUploaded: true,
         error: manifestError,
+        timings: finalizeSyncTimings(
+          {
+            exportMs,
+            envelopeBuildMs,
+            uploadMs: Number(uploadTimings.totalMs || 0),
+            envelopeSerializeMs: Number(uploadTimings.serializeMs || 0),
+            envelopeResponseParseMs: Number(uploadTimings.responseParseMs || 0),
+          },
+          backupStartedAt,
+        ),
       };
     }
-
-    await patchDbMeta(db, {
-      deviceId,
-      syncDirty: false,
-      syncDirtyReason: "",
-      lastBackupUploadedAt: nowMs,
-      lastBackupFilename: uploadResult.filename,
-    });
-
-    return {
-      backedUp: true,
-      chatId: normalizedChatId,
-      filename: uploadResult.filename,
-      remotePath: uploadResult.path,
-      revision: normalizeRevision(snapshot.meta.revision),
-      backupTime: nowMs,
-    };
   } catch (error) {
     console.warn("[ST-BME] 手动备份到云端失败:", error);
     return {
@@ -2245,6 +2411,7 @@ export async function backupToServer(chatId, options = {}) {
       chatId: normalizedChatId,
       reason: "backup-error",
       error,
+      timings: finalizeSyncTimings({}, backupStartedAt),
     };
   }
 }
@@ -2256,18 +2423,30 @@ export async function restoreFromServer(chatId, options = {}) {
       restored: false,
       chatId: "",
       reason: "missing-chat-id",
+      timings: finalizeSyncTimings({}, readSyncTimingNow()),
     };
   }
 
+  const restoreStartedAt = readSyncTimingNow();
   try {
     const db = await getDb(normalizedChatId, options);
     const remoteResult = await readBackupEnvelope(normalizedChatId, options);
+    const downloadTimings = remoteResult?.timings || {};
     if (!remoteResult.exists || !remoteResult.envelope) {
       return {
         restored: false,
         chatId: normalizedChatId,
         filename: remoteResult.filename || "",
         reason: remoteResult.reason || "backup-missing",
+        timings: finalizeSyncTimings(
+          {
+            downloadMs: Number(downloadTimings.totalMs || 0),
+            lookupMs: Number(downloadTimings.lookupMs || 0),
+            networkMs: Number(downloadTimings.networkMs || 0),
+            envelopeParseMs: Number(downloadTimings.parseMs || 0),
+          },
+          restoreStartedAt,
+        ),
       };
     }
 
@@ -2278,6 +2457,15 @@ export async function restoreFromServer(chatId, options = {}) {
         chatId: normalizedChatId,
         filename: remoteResult.filename,
         reason: "backup-version-mismatch",
+        timings: finalizeSyncTimings(
+          {
+            downloadMs: Number(downloadTimings.totalMs || 0),
+            lookupMs: Number(downloadTimings.lookupMs || 0),
+            networkMs: Number(downloadTimings.networkMs || 0),
+            envelopeParseMs: Number(downloadTimings.parseMs || 0),
+          },
+          restoreStartedAt,
+        ),
       };
     }
 
@@ -2287,6 +2475,15 @@ export async function restoreFromServer(chatId, options = {}) {
         chatId: normalizedChatId,
         filename: remoteResult.filename,
         reason: "backup-chat-id-mismatch",
+        timings: finalizeSyncTimings(
+          {
+            downloadMs: Number(downloadTimings.totalMs || 0),
+            lookupMs: Number(downloadTimings.lookupMs || 0),
+            networkMs: Number(downloadTimings.networkMs || 0),
+            envelopeParseMs: Number(downloadTimings.parseMs || 0),
+          },
+          restoreStartedAt,
+        ),
       };
     }
 
@@ -2304,26 +2501,42 @@ export async function restoreFromServer(chatId, options = {}) {
         chatId: normalizedChatId,
         filename: remoteResult.filename,
         reason: "snapshot-chat-id-mismatch",
+        timings: finalizeSyncTimings(
+          {
+            downloadMs: Number(downloadTimings.totalMs || 0),
+            lookupMs: Number(downloadTimings.lookupMs || 0),
+            networkMs: Number(downloadTimings.networkMs || 0),
+            envelopeParseMs: Number(downloadTimings.parseMs || 0),
+          },
+          restoreStartedAt,
+        ),
       };
     }
 
+    const localExportStartedAt = readSyncTimingNow();
     const localSnapshot = normalizeSyncSnapshot(
       await db.exportSnapshot(),
       normalizedChatId,
     );
+    const localExportMs = readSyncTimingNow() - localExportStartedAt;
+    const safetySnapshotStartedAt = readSyncTimingNow();
     await createRestoreSafetySnapshot(
       normalizedChatId,
       localSnapshot,
       options,
     );
+    const safetySnapshotMs = readSyncTimingNow() - safetySnapshotStartedAt;
 
+    const importStartedAt = readSyncTimingNow();
     await db.importSnapshot(snapshot, {
       mode: "replace",
       preserveRevision: true,
       revision: normalizeRevision(snapshot.meta.revision),
       markSyncDirty: false,
     });
+    const importMs = readSyncTimingNow() - importStartedAt;
 
+    const metaPatchStartedAt = readSyncTimingNow();
     await patchDbMeta(db, {
       deviceId: getOrCreateDeviceId(),
       syncDirty: false,
@@ -2332,12 +2545,15 @@ export async function restoreFromServer(chatId, options = {}) {
       lastBackupFilename:
         remoteResult.filename || buildBackupFilename(normalizedChatId),
     });
+    const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
 
+    const hookStartedAt = readSyncTimingNow();
     await invokeSyncAppliedHook(options, {
       chatId: normalizedChatId,
       action: "restore-backup",
       revision: normalizeRevision(snapshot.meta.revision),
     });
+    const hookMs = readSyncTimingNow() - hookStartedAt;
 
     return {
       restored: true,
@@ -2345,6 +2561,20 @@ export async function restoreFromServer(chatId, options = {}) {
       filename: remoteResult.filename,
       revision: normalizeRevision(snapshot.meta.revision),
       backupTime: normalizeTimestamp(envelope.createdAt, 0),
+      timings: finalizeSyncTimings(
+        {
+          downloadMs: Number(downloadTimings.totalMs || 0),
+          lookupMs: Number(downloadTimings.lookupMs || 0),
+          networkMs: Number(downloadTimings.networkMs || 0),
+          envelopeParseMs: Number(downloadTimings.parseMs || 0),
+          localExportMs,
+          safetySnapshotMs,
+          importMs,
+          metaPatchMs,
+          hookMs,
+        },
+        restoreStartedAt,
+      ),
     };
   } catch (error) {
     console.warn("[ST-BME] 从云端恢复备份失败:", error);
@@ -2353,6 +2583,7 @@ export async function restoreFromServer(chatId, options = {}) {
       chatId: normalizedChatId,
       reason: "restore-error",
       error,
+      timings: finalizeSyncTimings({}, restoreStartedAt),
     };
   }
 }
@@ -2455,12 +2686,16 @@ export async function upload(chatId, options = {}) {
       uploaded: false,
       chatId: "",
       reason: "missing-chat-id",
+      timings: finalizeSyncTimings({}, readSyncTimingNow()),
     };
   }
 
+  const uploadStartedAt = readSyncTimingNow();
   try {
     const db = await getDb(normalizedChatId, options);
+    const exportStartedAt = readSyncTimingNow();
     const localSnapshot = normalizeSyncSnapshot(await db.exportSnapshot(), normalizedChatId);
+    const exportMs = readSyncTimingNow() - exportStartedAt;
     const nowMs = Date.now();
 
     const deviceId = getOrCreateDeviceId();
@@ -2469,7 +2704,9 @@ export async function upload(chatId, options = {}) {
     localSnapshot.meta.lastModified = normalizeTimestamp(localSnapshot.meta.lastModified, nowMs);
 
     const uploadResult = await writeSnapshotToRemote(localSnapshot, normalizedChatId, options);
+    const uploadTimings = uploadResult?.timings || {};
 
+    const metaPatchStartedAt = readSyncTimingNow();
     await patchDbMeta(db, {
       deviceId,
       lastSyncUploadedAt: nowMs,
@@ -2479,6 +2716,7 @@ export async function upload(chatId, options = {}) {
       lastModified: localSnapshot.meta.lastModified,
       remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
+    const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
 
     return {
       uploaded: true,
@@ -2486,6 +2724,19 @@ export async function upload(chatId, options = {}) {
       filename: uploadResult.filename,
       remotePath: uploadResult.path,
       revision: normalizeRevision(localSnapshot.meta.revision),
+      timings: finalizeSyncTimings(
+        {
+          exportMs,
+          envelopeBuildMs: Number(uploadTimings.envelopeBuildMs || 0),
+          chunkSerializeMs: Number(uploadTimings.chunkSerializeMs || 0),
+          chunkUploadMs: Number(uploadTimings.chunkUploadMs || 0),
+          manifestSerializeMs: Number(uploadTimings.manifestSerializeMs || 0),
+          manifestUploadMs: Number(uploadTimings.manifestUploadMs || 0),
+          responseParseMs: Number(uploadTimings.responseParseMs || 0),
+          metaPatchMs,
+        },
+        uploadStartedAt,
+      ),
     };
   } catch (error) {
     console.warn("[ST-BME] 上传同步文件失败:", error);
@@ -2494,6 +2745,7 @@ export async function upload(chatId, options = {}) {
       chatId: normalizedChatId,
       reason: "upload-error",
       error,
+      timings: finalizeSyncTimings({}, uploadStartedAt),
     };
   }
 }
@@ -2506,12 +2758,15 @@ export async function download(chatId, options = {}) {
       exists: false,
       chatId: "",
       reason: "missing-chat-id",
+      timings: finalizeSyncTimings({}, readSyncTimingNow()),
     };
   }
 
+  const downloadStartedAt = readSyncTimingNow();
   try {
     const db = await getDb(normalizedChatId, options);
     const remoteResult = await readRemoteSnapshot(normalizedChatId, options);
+    const remoteTimings = remoteResult?.timings || {};
 
     if (!remoteResult.exists || !remoteResult.snapshot) {
       return {
@@ -2520,6 +2775,16 @@ export async function download(chatId, options = {}) {
         chatId: normalizedChatId,
         filename: remoteResult.filename || "",
         reason: remoteResult.status || "remote-missing",
+        timings: finalizeSyncTimings(
+          {
+            resolveCandidatesMs: Number(remoteTimings.resolveCandidatesMs || 0),
+            networkMs: Number(remoteTimings.networkMs || 0),
+            parseMs: Number(remoteTimings.parseMs || 0),
+            chunkReadMs: Number(remoteTimings.chunkReadMs || 0),
+            normalizeMs: Number(remoteTimings.normalizeMs || 0),
+          },
+          downloadStartedAt,
+        ),
       };
     }
 
@@ -2530,13 +2795,16 @@ export async function download(chatId, options = {}) {
     );
     const remoteRevision = normalizeRevision(remoteSnapshot.meta.revision);
 
+    const importStartedAt = readSyncTimingNow();
     await db.importSnapshot(remoteSnapshot, {
       mode: "replace",
       preserveRevision: true,
       revision: remoteRevision,
       markSyncDirty: false,
     });
+    const importMs = readSyncTimingNow() - importStartedAt;
 
+    const metaPatchStartedAt = readSyncTimingNow();
     await patchDbMeta(db, {
       deviceId: getOrCreateDeviceId(),
       lastSyncDownloadedAt: Date.now(),
@@ -2545,12 +2813,15 @@ export async function download(chatId, options = {}) {
       syncDirtyReason: "",
       remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
+    const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
 
+    const hookStartedAt = readSyncTimingNow();
     await invokeSyncAppliedHook(options, {
       chatId: normalizedChatId,
       action: "download",
       revision: remoteRevision,
     });
+    const hookMs = readSyncTimingNow() - hookStartedAt;
 
     return {
       downloaded: true,
@@ -2558,6 +2829,19 @@ export async function download(chatId, options = {}) {
       chatId: normalizedChatId,
       filename: remoteResult.filename,
       revision: remoteRevision,
+      timings: finalizeSyncTimings(
+        {
+          resolveCandidatesMs: Number(remoteTimings.resolveCandidatesMs || 0),
+          networkMs: Number(remoteTimings.networkMs || 0),
+          parseMs: Number(remoteTimings.parseMs || 0),
+          chunkReadMs: Number(remoteTimings.chunkReadMs || 0),
+          normalizeMs: Number(remoteTimings.normalizeMs || 0),
+          importMs,
+          metaPatchMs,
+          hookMs,
+        },
+        downloadStartedAt,
+      ),
     };
   } catch (error) {
     console.warn("[ST-BME] 下载同步文件失败:", error);
@@ -2567,6 +2851,7 @@ export async function download(chatId, options = {}) {
       chatId: normalizedChatId,
       reason: "download-error",
       error,
+      timings: finalizeSyncTimings({}, downloadStartedAt),
     };
   }
 }

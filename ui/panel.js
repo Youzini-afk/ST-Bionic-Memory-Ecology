@@ -5,6 +5,10 @@ import {
   buildVisibleGraphRefreshToken,
   resolveVisibleGraphWorkspaceMode,
 } from "./panel-graph-refresh-utils.js";
+import {
+  initPlannerSections,
+  refreshPlannerSections,
+} from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
   buildRegionLine,
@@ -169,6 +173,7 @@ const GRAPH_WRITE_ACTION_IDS = [
 const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "API 配置",
+    excludeTaskTypes: ["planner"],
     fields: [
       {
         key: "llm_preset",
@@ -349,6 +354,26 @@ let pendingVisibleGraphRefreshForce = false;
 let lastVisibleGraphRefreshToken = "";
 let lastVisibleGraphRefreshAt = 0;
 let graphRenderingEnabled = true;
+
+function _isPluginEnabled(settings = _getSettings?.() || {}) {
+  return settings?.enabled !== false;
+}
+
+function _notifyPluginDisabled(actionLabel = "该操作") {
+  toastr.info(
+    `ST-BME 已关闭，暂时不能执行${actionLabel}。请先在配置页顶部打开“插件总开关”。`,
+    "ST-BME",
+  );
+  _refreshRuntimeStatus();
+}
+
+function _ensurePluginEnabledForAction(actionLabel = "该操作") {
+  if (_isPluginEnabled()) {
+    return true;
+  }
+  _notifyPluginDisabled(actionLabel);
+  return false;
+}
 
 // 由 index.js 注入的引用
 let _getGraph = null;
@@ -1139,6 +1164,7 @@ function _onFabSingleClick() {
 
 async function _onFabDoubleClick() {
   if (!_actionHandlers.extractTask) return;
+  if (!_ensurePluginEnabledForAction("重新提取")) return;
 
   try {
     _fabEl?.setAttribute("data-status", "running");
@@ -1250,6 +1276,7 @@ export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
+  _refreshNativeRolloutStatusUi(_getSettings?.() || {});
 
   switch (currentTabId) {
     case "dashboard":
@@ -1328,42 +1355,24 @@ function _switchTab(tabId) {
   }
 }
 
-function _getPlannerApi() {
-  return globalThis?.stBmeEnaPlanner || null;
-}
-
 function _refreshPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  const hint = document.getElementById("bme-open-ena-planner-hint");
-  if (!button || !hint) return;
-
-  const plannerApi = _getPlannerApi();
-  const ready = typeof plannerApi?.openSettings === "function";
-
-  button.disabled = !ready;
-  button.classList.toggle("is-runtime-disabled", !ready);
-  hint.textContent = ready
-    ? "已加载，可打开独立的 Ena Planner 设置页。"
-    : "未检测到 Ena Planner 模块，请重载 ST-BME 后再试。";
+  try {
+    refreshPlannerSections({
+      getSettings: _getSettings,
+    });
+  } catch (err) {
+    console.warn("[ST-BME] planner section refresh failed:", err);
+  }
 }
 
 function _bindPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  if (!button || button.dataset.bmeBound === "true") {
-    _refreshPlannerLauncher();
-    return;
+  try {
+    initPlannerSections(panelEl || document, {
+      getSettings: _getSettings,
+    });
+  } catch (err) {
+    console.warn("[ST-BME] planner section init failed:", err);
   }
-
-  button.addEventListener("click", () => {
-    const plannerApi = _getPlannerApi();
-    if (typeof plannerApi?.openSettings === "function") {
-      plannerApi.openSettings();
-    }
-    _refreshPlannerLauncher();
-  });
-
-  button.dataset.bmeBound = "true";
-  _refreshPlannerLauncher();
 }
 
 function _applyWorkspaceMode() {
@@ -1461,6 +1470,443 @@ function _resolvePipelineStatus(statusObj) {
   return { label: text || "IDLE", color, detail: meta };
 }
 
+function _readPersistenceDiagnosticObject(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  return snapshot;
+}
+
+function _formatNativeHydrateGateReasonText(reasons = []) {
+  const labels = {
+    "below-min-snapshot-records": "记录数不足",
+  };
+  const normalized = Array.isArray(reasons)
+    ? reasons.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!normalized.length) return "—";
+  return normalized.map((item) => labels[item] || item).join(" · ");
+}
+
+function _formatNativeHydrateGateText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  if (diagnostics.hydrateNativeRequested !== true) return "未请求 native";
+  if (diagnostics.hydrateNativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.hydrateNativeGateAllowed === true) return "通过";
+  return `已拦截 · ${_formatNativeHydrateGateReasonText(diagnostics.hydrateNativeGateReasons)}`;
+}
+
+function _formatNativeHydrateResultText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "暂无";
+  if (diagnostics.hydrateNativeRequested !== true) return "未请求 native";
+  if (diagnostics.hydrateNativeForceDisabled === true) return "已强制关闭";
+  if (diagnostics.hydrateNativeGateAllowed !== true) return "已拦截";
+  if (diagnostics.hydrateNativeUsed === true) {
+    const status = String(diagnostics.hydrateNativeStatus || "").trim();
+    return status ? `已命中 · ${status}` : "已命中";
+  }
+  const fallbackReason =
+    String(diagnostics.hydrateNativeStatus || "").trim() ||
+    String(diagnostics.hydrateNativePreloadStatus || "").trim() ||
+    "js";
+  return `已回退 · ${fallbackReason}`;
+}
+
+function _formatNativeHydrateModuleText(diagnostics = null) {
+  if (!diagnostics || typeof diagnostics !== "object") return "—";
+  const parts = [];
+  const preload = String(diagnostics.hydrateNativePreloadStatus || "").trim();
+  const source = String(diagnostics.hydrateNativeModuleSource || "").trim();
+  if (preload) parts.push(`preload ${preload}`);
+  if (diagnostics.hydrateNativeModuleLoaded === true) parts.push("loaded");
+  if (source) parts.push(source);
+  return parts.join(" · ") || "—";
+}
+
+function _formatNativeLayoutStatusSummary(layout = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.graphUseNativeLayout !== true) return "已关闭";
+  if (!layout || typeof layout !== "object") return "暂无最近布局诊断";
+  const parts = [String(layout.mode || layout.solver || "unknown").trim() || "unknown"];
+  const totalText = _formatDurationMs(layout.totalMs);
+  const moduleSource = String(layout.moduleSource || "").trim();
+  const reason = String(layout.reason || "").trim();
+  if (totalText !== "—") parts.push(totalText);
+  if (moduleSource) parts.push(moduleSource);
+  if (reason && reason !== parts[0]) parts.push(reason);
+  return parts.join(" · ");
+}
+
+function _formatNativePersistStatusSummary(diagnostics = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.persistUseNativeDelta !== true) return "已关闭";
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "暂无最近写回诊断";
+  const parts = [String(snapshot.path || "pending")];
+  const gateText = String(_formatPersistDeltaGateText(snapshot) || "").trim();
+  const fallbackReason = String(snapshot.fallbackReason || "").trim();
+  if (gateText && gateText !== "—") parts.push(gateText);
+  if (fallbackReason) parts.push(`回退 ${fallbackReason}`);
+  return parts.join(" · ");
+}
+
+function _formatNativeHydrateStatusSummary(diagnostics = null, settings = _getSettings?.() || {}) {
+  if (settings.graphNativeForceDisable === true) return "已强制关闭";
+  if (settings.loadUseNativeHydrate !== true) return "已关闭";
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "暂无最近加载诊断";
+  const parts = [_formatNativeHydrateResultText(snapshot)];
+  const gateText = String(_formatNativeHydrateGateText(snapshot) || "").trim();
+  const preload = String(snapshot.hydrateNativePreloadStatus || "").trim();
+  if (gateText && gateText !== "—" && gateText !== "通过") parts.push(gateText);
+  if (preload && preload !== "loaded" && preload !== "not-requested") {
+    parts.push(`preload ${preload}`);
+  }
+  return Array.from(new Set(parts.filter(Boolean))).join(" · ");
+}
+
+function _refreshNativeRolloutStatusUi(
+  settings = _getSettings?.() || {},
+  loadInfo = _getGraphPersistenceSnapshot(),
+) {
+  const summaryEl = document.getElementById("bme-native-rollout-status");
+  const layoutEl = document.getElementById("bme-native-layout-status");
+  const persistEl = document.getElementById("bme-native-persist-status");
+  const hydrateEl = document.getElementById("bme-native-hydrate-status");
+  if (!summaryEl && !layoutEl && !persistEl && !hydrateEl) return;
+
+  const panelDebug = _getRuntimeDebugSnapshot?.() || {};
+  const runtimeDebug = panelDebug.runtimeDebug || {};
+  const layout = runtimeDebug?.graphLayout || null;
+  const persistDelta = _readPersistenceDiagnosticObject(
+    loadInfo?.persistDelta || runtimeDebug?.graphPersistence?.persistDelta,
+  );
+  const loadDiagnostics = _readPersistenceDiagnosticObject(
+    loadInfo?.loadDiagnostics || runtimeDebug?.graphPersistence?.loadDiagnostics,
+  );
+  const rolloutVersion = Math.max(
+    0,
+    Math.floor(Number(settings?.nativeRolloutVersion || 0)),
+  );
+  const summaryText = settings.graphNativeForceDisable === true
+    ? `rollout v${rolloutVersion} · 全局强制关闭 · ${settings.nativeEngineFailOpen !== false ? "fail-open 已启用" : "严格模式"}`
+    : `rollout v${rolloutVersion} · 按阈值自动尝试 native · ${settings.nativeEngineFailOpen !== false ? "fail-open 已启用" : "严格模式"}`;
+  if (summaryEl) summaryEl.textContent = summaryText;
+  if (layoutEl) {
+    layoutEl.textContent = `Layout：${_formatNativeLayoutStatusSummary(layout, settings)}`;
+  }
+  if (persistEl) {
+    persistEl.textContent = `Persist：${_formatNativePersistStatusSummary(persistDelta, settings)}`;
+  }
+  if (hydrateEl) {
+    hydrateEl.textContent = `Hydrate：${_formatNativeHydrateStatusSummary(loadDiagnostics, settings)}`;
+  }
+}
+
+function _formatLoadDiagnosticsStageLabel(stage = "") {
+  const normalized = String(stage || "").trim();
+  if (!normalized) return "—";
+  const labels = {
+    "load-indexeddb": "IndexedDB 加载",
+    "apply-indexeddb-snapshot": "快照应用",
+  };
+  return labels[normalized] || normalized;
+}
+
+function _formatPipelineLoadDiagnosticsMeta(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  if (totalText !== "—") return `load ${totalText}`;
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  return stageLabel === "—" ? "" : stageLabel;
+}
+
+function _formatPipelinePersistDeltaMeta(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "";
+
+  const parts = [];
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  if (totalText !== "—") {
+    parts.push(`delta ${totalText}`);
+  }
+
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  if (gateText) {
+    const compactGate = gateText.startsWith("已拦截") ? "已拦截" : gateText;
+    parts.push(`native ${compactGate}`);
+  }
+
+  return parts.join(" · ");
+}
+
+function _formatPersistenceLoadSummary(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) return "暂无";
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const totalText = _formatDurationMs(diagnostics.totalMs);
+  const stageLabel = _formatLoadDiagnosticsStageLabel(diagnostics.stage);
+  const reasonText = String(diagnostics.reason || "").trim();
+  const parts = [statusText];
+  if (stageLabel !== "—") parts.push(stageLabel);
+  if (totalText !== "—") parts.push(`total ${totalText}`);
+  if (diagnostics.hydrateNativeRequested === true) {
+    parts.push(`native ${_formatNativeHydrateResultText(diagnostics)}`);
+  }
+  if (reasonText) parts.push(reasonText);
+  return parts.join(" · ");
+}
+
+function _formatPersistencePersistDeltaSummary(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) return "暂无";
+
+  const pathText = String(diagnostics.path || "").trim() || "—";
+  const totalText = _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs);
+  const commitText = _formatDurationMs(diagnostics.commitMs);
+  const gateText = String(_formatPersistDeltaGateText(diagnostics) || "").trim();
+  const parts = [pathText];
+  if (totalText !== "—") parts.push(totalText);
+  if (commitText !== "—") parts.push(`commit ${commitText}`);
+  if (gateText) parts.push(`native ${gateText}`);
+  return parts.join(" · ");
+}
+
+function _formatPersistCommitPhaseText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const queueText = _formatDurationMs(snapshot.commitQueueWaitMs);
+  const commitText = _formatDurationMs(snapshot.commitMs);
+  if (queueText === "—" && commitText === "—") return "—";
+  return `${queueText} / ${commitText}`;
+}
+
+function _formatPersistCommitBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.commitTxMs ? `tx ${_formatDurationMs(snapshot.commitTxMs)}` : "",
+    snapshot.commitSnapshotReadMs
+      ? `snapshot-read ${_formatDurationMs(snapshot.commitSnapshotReadMs)}`
+      : "",
+    snapshot.commitSnapshotWriteMs
+      ? `snapshot-write ${_formatDurationMs(snapshot.commitSnapshotWriteMs)}`
+      : "",
+    snapshot.commitManifestReadMs
+      ? `manifest-read ${_formatDurationMs(snapshot.commitManifestReadMs)}`
+      : "",
+    snapshot.commitWalSerializeMs
+      ? `wal-serialize ${_formatDurationMs(snapshot.commitWalSerializeMs)}`
+      : "",
+    snapshot.commitWalFileWriteMs
+      ? `wal-file ${_formatDurationMs(snapshot.commitWalFileWriteMs)}`
+      : snapshot.commitWalWriteMs
+        ? `wal ${_formatDurationMs(snapshot.commitWalWriteMs)}`
+        : "",
+    snapshot.commitManifestSerializeMs
+      ? `manifest-serialize ${_formatDurationMs(snapshot.commitManifestSerializeMs)}`
+      : "",
+    snapshot.commitManifestFileWriteMs
+      ? `manifest-file ${_formatDurationMs(snapshot.commitManifestFileWriteMs)}`
+      : snapshot.commitManifestWriteMs
+        ? `manifest-write ${_formatDurationMs(snapshot.commitManifestWriteMs)}`
+        : "",
+    snapshot.commitCacheApplyMs
+      ? `cache ${_formatDurationMs(snapshot.commitCacheApplyMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistSnapshotBuildBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.snapshotNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.snapshotNodesMs)}`
+      : "",
+    snapshot.snapshotEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.snapshotEdgesMs)}`
+      : "",
+    snapshot.snapshotTombstonesMs
+      ? `tombstones ${_formatDurationMs(snapshot.snapshotTombstonesMs)}`
+      : "",
+    snapshot.snapshotStateMs
+      ? `state ${_formatDurationMs(snapshot.snapshotStateMs)}`
+      : "",
+    snapshot.snapshotMetaMs
+      ? `meta ${_formatDurationMs(snapshot.snapshotMetaMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatLoadHydrateBreakdownText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [
+    snapshot.hydrateNodesMs
+      ? `nodes ${_formatDurationMs(snapshot.hydrateNodesMs)}`
+      : "",
+    snapshot.hydrateEdgesMs
+      ? `edges ${_formatDurationMs(snapshot.hydrateEdgesMs)}`
+      : "",
+    snapshot.hydrateRuntimeMetaMs
+      ? `meta ${_formatDurationMs(snapshot.hydrateRuntimeMetaMs)}`
+      : "",
+    snapshot.hydrateStateMs
+      ? `state ${_formatDurationMs(snapshot.hydrateStateMs)}`
+      : "",
+    snapshot.hydrateNormalizeMs
+      ? `normalize ${_formatDurationMs(snapshot.hydrateNormalizeMs)}`
+      : "",
+    snapshot.hydrateIntegrityMs
+      ? `integrity ${_formatDurationMs(snapshot.hydrateIntegrityMs)}`
+      : "",
+  ].filter(Boolean);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistObservabilityText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const pathKey = String(snapshot.pathKey || snapshot.path || "").trim();
+  const reasonKey = String(snapshot.reasonKey || snapshot.saveReason || "").trim();
+  const pathCount = Number(snapshot.pathSampleCount || 0);
+  const reasonCount = Number(snapshot.reasonSampleCount || 0);
+  if (pathKey) parts.push(`path ${pathKey}`);
+  if (pathCount > 0) parts.push(`${pathCount} samples`);
+  if (reasonKey) parts.push(`reason ${reasonKey}`);
+  if (reasonCount > 0) parts.push(`${reasonCount} reason-hits`);
+  return parts.join(" · ") || "—";
+}
+
+function _formatPersistCommitBytesText(diagnostics = null) {
+  const snapshot = _readPersistenceDiagnosticObject(diagnostics);
+  if (!snapshot) return "—";
+  const parts = [];
+  const payloadText = _formatDataSizeBytes(snapshot.commitPayloadBytes);
+  const walText = _formatDataSizeBytes(snapshot.commitWalBytes);
+  const metaKeyCount = Number(snapshot.commitRuntimeMetaKeyCount || 0);
+  if (payloadText !== "—") parts.push(`payload ${payloadText}`);
+  if (walText !== "—") parts.push(`wal ${walText}`);
+  if (metaKeyCount > 0) parts.push(`meta ${metaKeyCount} keys`);
+  return parts.join(" · ") || "—";
+}
+
+function _buildLoadDiagnosticRows(loadDiagnostics = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(loadDiagnostics);
+  if (!diagnostics) {
+    return [["Load 诊断", "无"]];
+  }
+
+  const statusText =
+    diagnostics.success === true
+      ? "成功"
+      : diagnostics.success === false
+        ? "失败"
+        : "未知";
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+  const nativeErrorText = String(
+    diagnostics.hydrateNativeModuleError ||
+      diagnostics.hydrateNativePreloadError ||
+      diagnostics.hydrateNativeError ||
+      "",
+  ).trim();
+
+  return [
+    ["Load 阶段", _formatLoadDiagnosticsStageLabel(diagnostics.stage)],
+    ["Load 来源", String(diagnostics.source || diagnostics.statusLabel || "—")],
+    ["Load 状态", statusText],
+    ["Load 原因", String(diagnostics.reason || "—")],
+    ["Load 总耗时", _formatDurationMs(diagnostics.totalMs)],
+    ["Load 前置", _formatDurationMs(diagnostics.preApplyMs)],
+    ["导出快照", _formatDurationMs(diagnostics.exportSnapshotMs)],
+    ["前置（除导出）", _formatDurationMs(diagnostics.preApplyOtherMs)],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Hydrate 细分", _formatLoadHydrateBreakdownText(diagnostics)],
+    ["Hydrate Native Gate", _formatNativeHydrateGateText(diagnostics)],
+    ["Hydrate Native 结果", _formatNativeHydrateResultText(diagnostics)],
+    ["Hydrate Native Module", _formatNativeHydrateModuleText(diagnostics)],
+    ["Hydrate Native Records", _formatDurationMs(diagnostics.hydrateNativeRecordsMs)],
+    ["Hydrate Native 错误", nativeErrorText || "—"],
+    ["Apply 调用", _formatDurationMs(diagnostics.applyInvokeMs)],
+    ["Apply 运行", _formatDurationMs(diagnostics.applyRuntimeMs)],
+    ["Load 未归因", _formatDurationMs(diagnostics.untrackedMs)],
+    ["Load 更新时间", updatedAtText],
+  ];
+}
+
+function _buildPersistDeltaDiagnosticRows(persistDelta = null) {
+  const diagnostics = _readPersistenceDiagnosticObject(persistDelta);
+  if (!diagnostics) {
+    return [["Persist Delta 诊断", "无"]];
+  }
+
+  const errorText = String(
+    diagnostics.moduleError || diagnostics.preloadError || diagnostics.nativeError || "",
+  ).trim();
+  const bridgeText = `${String(diagnostics.requestedBridgeMode || "none")} → ${String(
+    diagnostics.preparedBridgeMode || "none",
+  )}`;
+  const deltaSizeText = `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(
+    diagnostics.upsertEdgeCount || 0,
+  )}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(
+    diagnostics.deleteEdgeCount || 0,
+  )}DE`;
+  const commitStoreText = `${String(diagnostics.commitStorageKind || "—")} / ${String(
+    diagnostics.commitStoreMode || "—",
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
+  const updatedAtText = diagnostics.updatedAt
+    ? _formatTaskProfileTime(diagnostics.updatedAt)
+    : "—";
+
+  return [
+    ["Persist 路径", String(diagnostics.path || "—")],
+    ["Native Gate", _formatPersistDeltaGateText(diagnostics)],
+    ["Bridge 模式", bridgeText],
+    ["Commit 存储", commitStoreText],
+    ["Persist 总耗时", _formatDurationMs(diagnostics.totalMs || diagnostics.buildMs)],
+    ["构建耗时", _formatDurationMs(diagnostics.buildMs)],
+    ["Base 快照读取", _formatDurationMs(diagnostics.baseSnapshotReadMs)],
+    ["图谱快照构建", _formatDurationMs(diagnostics.snapshotBuildMs)],
+    ["快照构建细分", _formatPersistSnapshotBuildBreakdownText(diagnostics)],
+    [
+      "Prepare / Native",
+      `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
+    ],
+    [
+      "Lookup / JS Diff",
+      `${_formatDurationMs(diagnostics.lookupMs)} / ${_formatDurationMs(diagnostics.jsDiffMs)}`,
+    ],
+    ["Hydrate", _formatDurationMs(diagnostics.hydrateMs)],
+    ["Commit 排队 / 提交", commitPhaseText],
+    ["Commit 细分", commitBreakdownText],
+    ["Commit Payload", commitBytesText],
+    ["样本聚合", _formatPersistObservabilityText(diagnostics)],
+    ["Preload", String(diagnostics.preloadStatus || "—")],
+    ["Native 来源", String(diagnostics.moduleSource || "—")],
+    ["Fallback 原因", String(diagnostics.fallbackReason || "—")],
+    ["Preload / Native 错误", errorText || "—"],
+    ["增量规模", deltaSizeText],
+    ["Persist 未归因", _formatDurationMs(diagnostics.untrackedMs)],
+    ["Persist 更新时间", updatedAtText],
+  ];
+}
+
 function _refreshTaskPipelineOverview() {
   const el = document.getElementById("bme-task-pipeline");
   if (!el) return;
@@ -1473,9 +1919,22 @@ function _refreshTaskPipelineOverview() {
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
   const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
   const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
+  const persistenceMetaParts = [`rev ${loadInfo.revision || 0}`];
+  const pipelineLoadMeta = _formatPipelineLoadDiagnosticsMeta(
+    loadInfo.loadDiagnostics,
+  );
+  if (pipelineLoadMeta) {
+    persistenceMetaParts.push(pipelineLoadMeta);
+  }
+  const pipelinePersistDeltaMeta = _formatPipelinePersistDeltaMeta(
+    loadInfo.persistDelta,
+  );
+  if (pipelinePersistDeltaMeta) {
+    persistenceMetaParts.push(pipelinePersistDeltaMeta);
+  }
   const persistence = _resolvePipelineStatus({
     text: loadInfo.loadState || "unknown",
-    meta: `rev ${loadInfo.revision || 0}`,
+    meta: persistenceMetaParts.join(" · "),
     level: persistLevel,
   });
 
@@ -2166,6 +2625,8 @@ function _refreshTaskPersistence() {
   const graph = _getGraph?.() || {};
   const ps = _getGraphPersistenceSnapshot();
   const rs = graph.runtimeState || {};
+  const loadDiagnostics = _readPersistenceDiagnosticObject(ps.loadDiagnostics);
+  const persistDeltaDiagnostics = _readPersistenceDiagnosticObject(ps.persistDelta);
 
   const LOAD_STATE_LABELS = {
     "no-chat": "无聊天",
@@ -2295,18 +2756,31 @@ function _refreshTaskPersistence() {
     `主存储 · ${primaryTierLabel}`,
     `确认 · ${acceptedSummaryLabel}`,
   ];
+  const collectVisibleRows = (rows = []) =>
+    rows.filter(([, value]) => value !== null && value !== undefined && value !== "");
+  const renderRow = ([key, value]) =>
+    `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`;
   const renderRows = (rows = []) =>
-    rows
-      .filter(([, value]) => value !== null && value !== undefined && value !== "")
-      .map(
-        ([key, value]) =>
-          `<div class="bme-persist-kv__row"><span>${_escHtml(String(key))}</span><strong>${_escHtml(String(value))}</strong></div>`,
-      )
+    collectVisibleRows(rows)
+      .map(renderRow)
       .join("");
+  const renderRowsTwoColumn = (rows = []) => {
+    const visibleRows = collectVisibleRows(rows);
+    if (!visibleRows.length) return "";
+    const splitIndex = Math.ceil(visibleRows.length / 2);
+    return `
+      <div class="bme-persist-kv-columns">
+        <div class="bme-persist-kv-column">${visibleRows.slice(0, splitIndex).map(renderRow).join("")}</div>
+        <div class="bme-persist-kv-column">${visibleRows.slice(splitIndex).map(renderRow).join("")}</div>
+      </div>
+    `;
+  };
 
   const primaryRows = [
     ["当前状态", acceptedSummaryLabel],
     ["健康状态", healthLabel],
+    ["Load 诊断", _formatPersistenceLoadSummary(loadDiagnostics)],
+    ["Persist Delta", _formatPersistencePersistDeltaSummary(persistDeltaDiagnostics)],
     ["Chat Target", compactTargetLabel],
     ["主 durable", primaryTierLabel],
     ps.hostProfile === "luker"
@@ -2358,6 +2832,10 @@ function _refreshTaskPersistence() {
       ["缓存落后", cacheLagLabel],
     );
   }
+  diagnosticRows.push(
+    ..._buildLoadDiagnosticRows(loadDiagnostics),
+    ..._buildPersistDeltaDiagnosticRows(persistDeltaDiagnostics),
+  );
 
   el.innerHTML = `
     <div class="bme-persist-grid">
@@ -2375,7 +2853,7 @@ function _refreshTaskPersistence() {
             <i class="fa-solid fa-stethoscope" style="margin-right:6px;color:var(--bme-primary)"></i>查看诊断细节
           </summary>
           <div style="margin-top:12px">
-            ${renderRows(diagnosticRows)}
+            ${renderRowsTwoColumn(diagnosticRows)}
           </div>
         </details>
       </div>
@@ -2472,7 +2950,6 @@ function _refreshMobileCognitionFull() {
   _renderCogOwnerList(graph, canRender, document.getElementById("bme-mobile-cog-owner-list"));
   _renderCogOwnerDetail(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-owner-detail"));
   _renderCogSpaceTools(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-space-tools"));
-  _renderCogMonitorMini(document.getElementById("bme-mobile-cog-monitor-mini"));
 }
 
 function _refreshMobileSummaryFull() {
@@ -2596,7 +3073,6 @@ function _refreshCognitionWorkspace() {
   _renderCogOwnerList(graph, canRender);
   _renderCogOwnerDetail(graph, loadInfo, canRender);
   _renderCogSpaceTools(graph, loadInfo, canRender);
-  _renderCogMonitorMini();
 }
 
 function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
@@ -2648,14 +3124,6 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
             ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
             : activeOwnerKey || "—",
       )}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(activeRegionLabel)}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-diagram-project"></i> 邻接地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(adjacentRegions.length > 0 ? adjacentRegions.join(" / ") : "—")}</div>
     </div>
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
@@ -2960,52 +3428,6 @@ function _renderCogSpaceTools(graph, loadInfo, canRender, targetEl) {
   `;
 }
 
-function _renderCogMonitorMini(targetEl) {
-  const el = targetEl || document.getElementById("bme-cog-monitor-mini");
-  if (!el) return;
-
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">任务监视器已关闭</div>`;
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline : [];
-
-  if (!timeline.length) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">暂无任务流水</div>`;
-    return;
-  }
-
-  el.innerHTML = timeline
-    .slice(-8)
-    .reverse()
-    .map((entry) => {
-      const status = String(entry?.status || "").toLowerCase();
-      const statusClass = status.includes("error") || status.includes("fail") ? "is-error"
-        : status.includes("run") ? "is-running" : "is-success";
-      const taskType = String(entry?.taskType || "unknown");
-      const route =
-        _getMonitorRouteLabel(entry?.route) ||
-        _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-        String(entry?.model || "").trim();
-      const durationMs = Number(entry?.durationMs);
-      const durationText = Number.isFinite(durationMs) && durationMs > 0
-        ? durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${Math.round(durationMs)}ms`
-        : "—";
-      return `
-        <div class="bme-cog-monitor-entry ${statusClass}">
-          <span class="bme-cog-monitor-badge">${_escHtml(_getMonitorTaskTypeLabel(taskType))}</span>
-          <span class="bme-cog-monitor-info">${_escHtml(route || _getMonitorStatusLabel(entry?.status) || "—")}</span>
-          <span class="bme-cog-monitor-duration">${_escHtml(durationText)}</span>
-        </div>`;
-    })
-    .join("");
-}
-
-
 function _formatSummaryEntryCard(entry = {}) {
   const messageRange = Array.isArray(entry?.dialogueRange)
     ? entry.dialogueRange
@@ -3141,6 +3563,8 @@ function _switchConfigSection(sectionId) {
     _refreshTaskProfileWorkspace();
   } else if (currentConfigSectionId === "trace") {
     _refreshMessageTraceWorkspace();
+  } else if (currentConfigSectionId === "planner") {
+    _refreshPlannerLauncher();
   }
 }
 
@@ -3190,7 +3614,6 @@ function _refreshDashboard() {
       _getGraphLoadLabel(loadInfo),
     );
     _refreshCognitionDashboard(graph, loadInfo);
-    _refreshAiMonitorDashboard();
     return;
   }
 
@@ -3262,30 +3685,8 @@ function _refreshDashboard() {
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
   _refreshCognitionDashboard(graph);
-  _refreshAiMonitorDashboard();
   _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
   _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
-}
-
-function _renderMiniRecentList(elementId, entries = [], emptyText = "暂无数据") {
-  const listEl = document.getElementById(elementId);
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (!Array.isArray(entries) || entries.length === 0) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = emptyText;
-    listEl.appendChild(li);
-    return;
-  }
-
-  for (const entry of entries) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = String(entry || "");
-    listEl.appendChild(li);
-  }
 }
 
 function _setInputValueIfIdle(elementId, value = "") {
@@ -3749,49 +4150,6 @@ function _refreshCognitionDashboard(
   }
 }
 
-function _refreshAiMonitorDashboard() {
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    _renderMiniRecentList(
-      "bme-ai-monitor-list",
-      [],
-      "任务监视器已关闭",
-    );
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline
-    : [];
-  _renderMiniRecentList(
-    "bme-ai-monitor-list",
-    timeline
-      .slice(-6)
-      .reverse()
-      .map((entry) => {
-        const route =
-          _getMonitorRouteLabel(entry?.route) ||
-          _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-          "";
-        const model = String(entry?.model || "").trim();
-        const durationText =
-          Number.isFinite(Number(entry?.durationMs)) && Number(entry.durationMs) > 0
-            ? `${Math.round(Number(entry.durationMs))}ms`
-            : "";
-        return [
-          _getMonitorTaskTypeLabel(entry?.taskType),
-          _getMonitorStatusLabel(entry?.status),
-          route || model ? `${route || model}` : "",
-          durationText,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-      }),
-    "暂无任务流水",
-  );
-}
-
 function _renderRecentList(elementId, items) {
   const listEl = document.getElementById(elementId);
   if (!listEl) return;
@@ -3883,8 +4241,8 @@ function _refreshMemoryBrowser() {
       const scope = normalizeMemoryScope(node.scope);
       const regionText = [
         scope.regionPrimary,
-        ...(scope.regionPath || []),
-        ...(scope.regionSecondary || []),
+        ...(Array.isArray(scope.regionPath) ? scope.regionPath : []),
+        ...(Array.isArray(scope.regionSecondary) ? scope.regionSecondary : []),
       ]
         .join(" ")
         .toLowerCase();
@@ -5018,6 +5376,9 @@ function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {
 
 function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点编辑")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5052,6 +5413,9 @@ function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
 
 function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点删除")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5377,12 +5741,16 @@ async function _callAction(actionKey = "", payload = {}) {
   if (typeof handler !== "function") {
     return { ok: false, error: "missing-action-handler" };
   }
+  if (!_ensurePluginEnabledForAction("该操作")) {
+    return { ok: false, error: "plugin-disabled", handledToast: true };
+  }
   const result = await handler(payload);
   _refreshCognitionSurfaces();
   return result;
 }
 
 async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
+  if (!_ensurePluginEnabledForAction("认知管理")) return;
   const graph = _getGraph?.();
   const ownerEntries = _getCognitionOwnerCollection(graph);
   const ownerEntry =
@@ -5515,6 +5883,9 @@ async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
 }
 
 async function _applyManualActiveRegionFromDashboard(clear = false) {
+  if (!_ensurePluginEnabledForAction(clear ? "清除当前地区" : "设置当前地区")) {
+    return;
+  }
   const input = document.getElementById("bme-cognition-manual-region");
   const region = clear ? "" : String(input?.value || "").trim();
   const result = await _actionHandlers.setActiveRegion?.({ region });
@@ -5539,6 +5910,9 @@ async function _applyManualActiveRegionFromDashboard(clear = false) {
 }
 
 async function _saveRegionAdjacencyFromDashboard() {
+  if (!_ensurePluginEnabledForAction("保存地区邻接")) {
+    return;
+  }
   const graph = _getGraph?.();
   const regionInput = document.getElementById("bme-cognition-manual-region");
   const adjacencyInput = document.getElementById("bme-cognition-adjacency-input");
@@ -5719,6 +6093,9 @@ function _bindActions() {
     if (!btn) continue;
 
     btn.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || actionKey)) {
+        return;
+      }
       const handler =
         actionKey === "manageServerBackups"
           ? _openServerBackupManagerModal
@@ -5791,6 +6168,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-extract");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重新提取")) return;
       const mode =
         String(
           document.getElementById("bme-extract-mode")?.value ||
@@ -5850,6 +6228,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-vector-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("范围重建")) return;
       if (btn) {
         btn.disabled = true;
         btn.style.opacity = "0.5";
@@ -5890,6 +6269,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-summary-rebuild");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重建总结状态")) return;
       const startFloor = _parseOptionalInt(
         document.getElementById("bme-extract-start-floor")?.value,
       );
@@ -5932,6 +6312,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-clear-graph-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("按楼层范围清理")) return;
 
       const startStr = document.getElementById("bme-cleanup-range-start")?.value;
       const endStr = document.getElementById("bme-cleanup-range-end")?.value;
@@ -6150,6 +6531,14 @@ function _bindActions() {
     const [, actionKey] = matched;
     const handler = _actionHandlers[actionKey];
     if (!handler) return;
+    const actionLabels = {
+      synopsis: "生成小总结",
+      summaryRollup: "执行总结折叠",
+      rebuildSummaryState: "重建总结状态",
+    };
+    if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || "总结操作")) {
+      return;
+    }
 
     try {
       await handler();
@@ -6175,8 +6564,24 @@ function _refreshConfigTab() {
     settings.debugLoggingEnabled ?? false,
   );
   _setCheckboxValue(
-    "bme-setting-ai-monitor-enabled",
-    settings.enableAiMonitor ?? true,
+    "bme-setting-graph-native-force-disable",
+    settings.graphNativeForceDisable === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-native-engine-fail-open",
+    settings.nativeEngineFailOpen !== false,
+  );
+  _setCheckboxValue(
+    "bme-setting-graph-use-native-layout",
+    settings.graphUseNativeLayout === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-persist-use-native-delta",
+    settings.persistUseNativeDelta === true,
+  );
+  _setCheckboxValue(
+    "bme-setting-load-use-native-hydrate",
+    settings.loadUseNativeHydrate === true,
   );
   _setCheckboxValue(
     "bme-setting-hide-old-messages-enabled",
@@ -6512,6 +6917,34 @@ function _refreshConfigTab() {
     settings.probRecallChance ?? 0.15,
   );
   _setInputValue("bme-setting-reflect-every", settings.reflectEveryN ?? 10);
+  _setInputValue(
+    "bme-setting-graph-native-layout-threshold-nodes",
+    settings.graphNativeLayoutThresholdNodes ?? 280,
+  );
+  _setInputValue(
+    "bme-setting-graph-native-layout-threshold-edges",
+    settings.graphNativeLayoutThresholdEdges ?? 1600,
+  );
+  _setInputValue(
+    "bme-setting-graph-native-layout-worker-timeout-ms",
+    settings.graphNativeLayoutWorkerTimeoutMs ?? 260,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-records",
+    settings.persistNativeDeltaThresholdRecords ?? 20000,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-structural-delta",
+    settings.persistNativeDeltaThresholdStructuralDelta ?? 600,
+  );
+  _setInputValue(
+    "bme-setting-persist-native-delta-threshold-serialized-chars",
+    settings.persistNativeDeltaThresholdSerializedChars ?? 4000000,
+  );
+  _setInputValue(
+    "bme-setting-load-native-hydrate-threshold-records",
+    settings.loadNativeHydrateThresholdRecords ?? 12000,
+  );
 
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
   _setInputValue("bme-setting-llm-key", settings.llmApiKey || "");
@@ -6581,6 +7014,7 @@ function _refreshConfigTab() {
   _refreshPromptCardStates(settings);
   _refreshTaskProfileWorkspace(settings);
   _refreshMessageTraceWorkspace(settings);
+  _refreshNativeRolloutStatusUi(settings);
   _highlightThemeChoice(settings.panelTheme || "crimson");
   _syncConfigSectionState();
 }
@@ -6599,13 +7033,26 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
     _refreshGuardedConfigStates();
+    _refreshStageCardStates();
+    _refreshRuntimeStatus();
   });
   bindCheckbox("bme-setting-debug-logging-enabled", (checked) => {
     _patchSettings({ debugLoggingEnabled: checked });
   });
-  bindCheckbox("bme-setting-ai-monitor-enabled", (checked) => {
-    _patchSettings({ enableAiMonitor: checked });
-    _refreshDashboard();
+  bindCheckbox("bme-setting-graph-native-force-disable", (checked) => {
+    _patchSettings({ graphNativeForceDisable: checked });
+  });
+  bindCheckbox("bme-setting-native-engine-fail-open", (checked) => {
+    _patchSettings({ nativeEngineFailOpen: checked });
+  });
+  bindCheckbox("bme-setting-graph-use-native-layout", (checked) => {
+    _patchSettings({ graphUseNativeLayout: checked });
+  });
+  bindCheckbox("bme-setting-persist-use-native-delta", (checked) => {
+    _patchSettings({ persistUseNativeDelta: checked });
+  });
+  bindCheckbox("bme-setting-load-use-native-hydrate", (checked) => {
+    _patchSettings({ loadUseNativeHydrate: checked });
   });
   bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
     _patchSettings({ hideOldMessagesEnabled: checked });
@@ -7024,6 +7471,55 @@ function _bindConfigControls() {
   bindNumber("bme-setting-reflect-every", 10, 1, 200, (value) =>
     _patchSettings({ reflectEveryN: value }),
   );
+  bindNumber(
+    "bme-setting-graph-native-layout-threshold-nodes",
+    280,
+    1,
+    20000,
+    (value) => _patchSettings({ graphNativeLayoutThresholdNodes: value }),
+  );
+  bindNumber(
+    "bme-setting-graph-native-layout-threshold-edges",
+    1600,
+    1,
+    50000,
+    (value) => _patchSettings({ graphNativeLayoutThresholdEdges: value }),
+  );
+  bindNumber(
+    "bme-setting-graph-native-layout-worker-timeout-ms",
+    260,
+    40,
+    15000,
+    (value) => _patchSettings({ graphNativeLayoutWorkerTimeoutMs: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-records",
+    20000,
+    0,
+    200000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdRecords: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-structural-delta",
+    600,
+    0,
+    200000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdStructuralDelta: value }),
+  );
+  bindNumber(
+    "bme-setting-persist-native-delta-threshold-serialized-chars",
+    4000000,
+    0,
+    50000000,
+    (value) => _patchSettings({ persistNativeDeltaThresholdSerializedChars: value }),
+  );
+  bindNumber(
+    "bme-setting-load-native-hydrate-threshold-records",
+    12000,
+    0,
+    200000,
+    (value) => _patchSettings({ loadNativeHydrateThresholdRecords: value }),
+  );
 
   const llmPresetSelect = document.getElementById("bme-llm-preset-select");
   if (llmPresetSelect && llmPresetSelect.dataset.bmeBound !== "true") {
@@ -7273,6 +7769,7 @@ function _bindConfigControls() {
   document
     .getElementById("bme-apply-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("应用消息隐藏")) return;
       const result = await _actionHandlers.applyCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");
@@ -7283,6 +7780,7 @@ function _bindConfigControls() {
   document
     .getElementById("bme-clear-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("清除消息隐藏")) return;
       const result = await _actionHandlers.clearCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");
@@ -7915,6 +8413,8 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     currentGlobalRegexRuleId = globalRegexRules[0]?.id || "";
   }
 
+  const builtinBlockDefinitions = getBuiltinBlockDefinitions(currentTaskProfileTaskType);
+
   return {
     settings,
     taskProfiles,
@@ -7934,7 +8434,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
       regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
     selectedGlobalRegexRule:
       globalRegexRules.find((rule) => rule.id === currentGlobalRegexRuleId) || null,
-    builtinBlockDefinitions: getBuiltinBlockDefinitions(),
+    builtinBlockDefinitions,
     runtimeDebug,
   };
 }
@@ -7953,6 +8453,7 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     runtimeDebug: null,
   };
   const runtimeDebug = panelDebug.runtimeDebug || {};
+  const graphPersistence = _getGraphPersistenceSnapshot();
 
   return {
     settings,
@@ -7960,7 +8461,12 @@ function _getMessageTraceWorkspaceState(settings = _getSettings?.() || {}) {
     runtimeDebug,
     recallInjection: runtimeDebug?.injections?.recall || null,
     graphLayout: runtimeDebug?.graphLayout || null,
-    persistDelta: runtimeDebug?.graphPersistence?.persistDelta || null,
+    persistDelta:
+      graphPersistence?.persistDelta || runtimeDebug?.graphPersistence?.persistDelta || null,
+    loadDiagnostics:
+      graphPersistence?.loadDiagnostics ||
+      runtimeDebug?.graphPersistence?.loadDiagnostics ||
+      null,
     messageTrace: runtimeDebug?.messageTrace || null,
     recallLlmRequest: runtimeDebug?.taskLlmRequests?.recall || null,
     recallPromptBuild: runtimeDebug?.taskPromptBuilds?.recall || null,
@@ -7986,6 +8492,7 @@ function _renderMessageTraceWorkspace(state) {
     state.recallInjection?.updatedAt,
     state.graphLayout?.updatedAt,
     state.persistDelta?.updatedAt,
+    state.loadDiagnostics?.updatedAt,
     state.recallLlmRequest?.updatedAt,
     state.extractLlmRequest?.updatedAt,
     state.extractPromptBuild?.updatedAt,
@@ -8023,6 +8530,9 @@ function _renderMessageTraceWorkspace(state) {
         </div>
         <div class="bme-config-card">
           ${_renderPersistDeltaTraceCard(state)}
+        </div>
+        <div class="bme-config-card">
+          ${_renderHydrateNativeTraceCard(state)}
         </div>
       </div>
     </div>
@@ -8117,6 +8627,16 @@ function _formatDurationMs(durationMs) {
   if (!Number.isFinite(normalized) || normalized <= 0) return "—";
   if (normalized < 1000) return `${Math.round(normalized)}ms`;
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
+}
+
+function _formatDataSizeBytes(byteCount) {
+  const normalized = Number(byteCount);
+  if (!Number.isFinite(normalized) || normalized <= 0) return "—";
+  if (normalized < 1024) return `${Math.round(normalized)} B`;
+  if (normalized < 1024 * 1024) {
+    return `${(normalized / 1024).toFixed(normalized >= 10 * 1024 ? 0 : 1)} KB`;
+  }
+  return `${(normalized / (1024 * 1024)).toFixed(normalized >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
 }
 
 function _getMonitorTaskTypeLabel(taskType = "") {
@@ -8295,18 +8815,10 @@ function _buildMonitorMessagesPreview(messages = []) {
 
 function _renderAiMonitorTraceCard(state) {
   const timeline = Array.isArray(state.taskTimeline) ? state.taskTimeline : [];
-  if (state.settings?.enableAiMonitor !== true) {
-    return `
-      <div class="bme-config-card-title">任务监视器流水</div>
-      <div class="bme-config-help">
-        任务监视器当前已关闭。打开后，这里会保留最近的提取 / 召回 / 维护任务快照，便于排查到底发了什么、用了哪套模型、做了哪些清洗。
-      </div>
-    `;
-  }
 
   if (!timeline.length) {
     return `
-      <div class="bme-config-card-title">任务监视器流水</div>
+      <div class="bme-config-card-title">最近任务快照</div>
       <div class="bme-config-help">
         还没有任务流水。等提取、召回或维护任务跑过一轮后，这里就会出现最近记录。
       </div>
@@ -8402,7 +8914,7 @@ function _renderAiMonitorTraceCard(state) {
   return `
     <div class="bme-config-card-head">
       <div>
-        <div class="bme-config-card-title">任务监视器流水</div>
+        <div class="bme-config-card-title">最近任务快照</div>
         <div class="bme-config-card-subtitle">
           最近 ${Math.min(timeline.length, 8)} 条任务快照 · 点击展开查看详情
         </div>
@@ -8593,6 +9105,12 @@ function _renderPersistDeltaTraceCard(state) {
   const payloadCharsText = diagnostics.combinedSerializedChars
     ? `${Number(diagnostics.combinedSerializedChars || 0)} / ${Number(diagnostics.minCombinedSerializedChars || 0)}`
     : "—";
+  const snapshotBuildText = `${_formatDurationMs(diagnostics.baseSnapshotReadMs)} / ${_formatDurationMs(
+    diagnostics.snapshotBuildMs,
+  )}`;
+  const commitPhaseText = _formatPersistCommitPhaseText(diagnostics);
+  const commitBreakdownText = _formatPersistCommitBreakdownText(diagnostics);
+  const commitBytesText = _formatPersistCommitBytesText(diagnostics);
   const cacheText = `${Number(diagnostics.serializationCacheHits || 0)}H / ${Number(
     diagnostics.serializationCacheMisses || 0,
   )}M`;
@@ -8646,6 +9164,10 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(_formatDurationMs(diagnostics.buildMs))}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
+        <span>Base / Snapshot</span>
+        <strong>${_escHtml(snapshotBuildText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
         <span>Prepare / Native</span>
         <strong>${_escHtml(
           `${_formatDurationMs(diagnostics.prepareMs)} / ${_formatDurationMs(diagnostics.nativeAttemptMs)}`,
@@ -8662,6 +9184,18 @@ function _renderPersistDeltaTraceCard(state) {
         <strong>${_escHtml(
           `${_formatDurationMs(diagnostics.hydrateMs)} / ${cacheText}`,
         )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit 排队 / 提交</span>
+        <strong>${_escHtml(commitPhaseText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit 细分</span>
+        <strong>${_escHtml(commitBreakdownText)}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Commit Payload</span>
+        <strong>${_escHtml(commitBytesText)}</strong>
       </div>
       <div class="bme-ai-monitor-kv__row">
         <span>PreparedSet Cache</span>
@@ -8681,6 +9215,10 @@ function _renderPersistDeltaTraceCard(state) {
           `${Number(diagnostics.upsertNodeCount || 0)}N / ${Number(diagnostics.upsertEdgeCount || 0)}E / ${Number(diagnostics.deleteNodeCount || 0)}DN / ${Number(diagnostics.deleteEdgeCount || 0)}DE`,
         )}</strong>
       </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>未归因</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.untrackedMs))}</strong>
+      </div>
     </div>
     ${_renderMessageTraceTextBlock(
       "Fallback reason",
@@ -8691,6 +9229,97 @@ function _renderPersistDeltaTraceCard(state) {
       "Preload / native error",
       errorText,
       "当前没有 preload / native error。",
+    )}
+  `;
+}
+
+function _renderHydrateNativeTraceCard(state) {
+  const diagnostics = _readPersistenceDiagnosticObject(state.loadDiagnostics);
+  if (!diagnostics) {
+    return `
+      <div class="bme-config-card-title">Hydrate / Native 诊断</div>
+      <div class="bme-config-help">
+        还没有 hydrate 诊断快照。等图谱完成一次真实加载后，这里会显示 load hydrate 是否命中 native、是否被 gate 拦截，以及 preload / module / fallback 状态。
+      </div>
+    `;
+  }
+
+  const errorText = String(
+    diagnostics.hydrateNativeModuleError ||
+      diagnostics.hydrateNativePreloadError ||
+      diagnostics.hydrateNativeError ||
+      diagnostics.error ||
+      "",
+  ).trim();
+
+  return `
+    <div class="bme-config-card-head">
+      <div>
+        <div class="bme-config-card-title">Hydrate / Native 诊断</div>
+        <div class="bme-config-card-subtitle">
+          记录最近一次图谱加载的 hydrate 是否尝试 native、是否命中、以及 preload / module / fallback 明细。
+        </div>
+      </div>
+      <span class="bme-task-pill">${_escHtml(_formatTaskProfileTime(diagnostics.updatedAt))}</span>
+    </div>
+    <div class="bme-ai-monitor-kv">
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 阶段</span>
+        <strong>${_escHtml(_formatLoadDiagnosticsStageLabel(diagnostics.stage))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 来源</span>
+        <strong>${_escHtml(String(diagnostics.source || diagnostics.statusLabel || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load 状态</span>
+        <strong>${_escHtml(
+          diagnostics.success === true
+            ? "成功"
+            : diagnostics.success === false
+              ? "失败"
+              : "未知",
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate Native Gate</span>
+        <strong>${_escHtml(_formatNativeHydrateGateText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate Native 结果</span>
+        <strong>${_escHtml(_formatNativeHydrateResultText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Preload</span>
+        <strong>${_escHtml(String(diagnostics.hydrateNativePreloadStatus || "—"))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Module</span>
+        <strong>${_escHtml(_formatNativeHydrateModuleText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Load / Hydrate</span>
+        <strong>${_escHtml(
+          `${_formatDurationMs(diagnostics.totalMs)} / ${_formatDurationMs(diagnostics.hydrateMs)}`,
+        )}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Hydrate 细分</span>
+        <strong>${_escHtml(_formatLoadHydrateBreakdownText(diagnostics))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>Native Records</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.hydrateNativeRecordsMs))}</strong>
+      </div>
+      <div class="bme-ai-monitor-kv__row">
+        <span>未归因</span>
+        <strong>${_escHtml(_formatDurationMs(diagnostics.untrackedMs))}</strong>
+      </div>
+    </div>
+    ${_renderMessageTraceTextBlock(
+      "Hydrate / native error",
+      errorText,
+      "当前没有 hydrate / native error。",
     )}
   `;
 }
@@ -9000,11 +9629,11 @@ async function _handleTaskProfileWorkspaceClick(event) {
       document.getElementById("bme-task-profile-import-all")?.click();
       return;
     case "restore-all-profiles": {
+      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       const confirmed = window.confirm(
-        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？",
+        `这会将全部 ${taskTypes.length} 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？`,
       );
       if (!confirmed) return;
-      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       let restored = state.taskProfiles;
       const extraPatch = {};
       for (const tt of taskTypes) {
@@ -9101,6 +9730,7 @@ function _renderTaskProfileWorkspace(state) {
     state.taskTypeOptions.find((item) => item.id === state.taskType) ||
     state.taskTypeOptions[0];
   const profileUpdatedAt = _formatTaskProfileTime(state.profile.updatedAt);
+  const totalTaskTypes = Array.isArray(state.taskTypeOptions) ? state.taskTypeOptions.length : 0;
 
   return `
     <div class="bme-task-shell">
@@ -9131,10 +9761,10 @@ function _renderTaskProfileWorkspace(state) {
           </div>
         </div>
         <div class="bme-task-action-bar-right">
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务的默认预设">
             <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务预设">
             <i class="fa-solid fa-file-export"></i><span>导出全部</span>
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
@@ -9255,9 +9885,12 @@ function _renderTaskPromptTab(state) {
 
 function _renderTaskGenerationTab(state) {
   const inputGroups = TASK_PROFILE_INPUT_GROUPS[state.taskType] || [];
+  const generationGroups = TASK_PROFILE_GENERATION_GROUPS.filter(
+    (group) => !Array.isArray(group.excludeTaskTypes) || !group.excludeTaskTypes.includes(state.taskType),
+  );
   return `
     <div class="bme-task-tab-body">
-      ${TASK_PROFILE_GENERATION_GROUPS.map(
+      ${generationGroups.map(
         (group) => `
           <div class="bme-config-card">
             <div class="bme-config-card-head">
@@ -9904,6 +10537,15 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
   }
 
   const persistDelta = graphPersistence.persistDelta || null;
+  const loadDiagnostics = _readPersistenceDiagnosticObject(
+    graphPersistence.loadDiagnostics,
+  );
+  const hydrateNativeError = String(
+    loadDiagnostics?.hydrateNativeModuleError ||
+      loadDiagnostics?.hydrateNativePreloadError ||
+      loadDiagnostics?.hydrateNativeError ||
+      "",
+  ).trim();
 
   return `
     <div class="bme-config-card-head">
@@ -10008,6 +10650,30 @@ function _renderTaskDebugGraphPersistenceCard(graphPersistence) {
                 .filter(Boolean)
                 .join(" · ")
             : "—",
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native Gate</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateGateText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native 结果</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateResultText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native Module</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          _formatNativeHydrateModuleText(loadDiagnostics),
+        )}</span>
+      </div>
+      <div class="bme-debug-kv-item">
+        <span class="bme-debug-kv-key">Hydrate Native 错误</span>
+        <span class="bme-debug-kv-value">${_escHtml(
+          hydrateNativeError || "—",
         )}</span>
       </div>
       <div class="bme-debug-kv-item">
@@ -11849,6 +12515,7 @@ function _getGraphPersistenceSnapshot() {
     lastBackupFilename: "",
     lastSyncError: "",
     persistDelta: null,
+    loadDiagnostics: null,
   };
 }
 
@@ -12357,6 +13024,7 @@ function _patchSettings(patch = {}, options = {}) {
   if (options.refreshTheme)
     _highlightThemeChoice(settings.panelTheme || "crimson");
   _refreshCloudStorageModeUi(settings);
+  _refreshNativeRolloutStatusUi(settings);
   return settings;
 }
 

@@ -1547,7 +1547,7 @@ function handleUpdate(
             e.fromId === op.sourceNodeId)),
     );
     for (const e of oldEdges) {
-      invalidateEdge(e);
+      invalidateEdge(e, graph);
     }
 
     if (op.sourceNodeId && op.sourceNodeId !== op.nodeId) {
@@ -1675,7 +1675,7 @@ function invalidateLinksBetween(graph, sourceId, targetId, relation = "related")
     const sameDirection = edge.fromId === sourceId && edge.toId === targetId;
     const reverseDirection = edge.fromId === targetId && edge.toId === sourceId;
     if (!sameDirection && !reverseDirection) continue;
-    invalidateEdge(edge);
+    invalidateEdge(edge, graph);
     changed += 1;
   }
   return changed;
@@ -1826,10 +1826,7 @@ function buildFieldChangeSummary(previousFields = {}, nextFields = {}) {
  */
 function handleDelete(graph, op, stats) {
   if (!op.nodeId) return;
-  const node = graph.nodes.find((n) => n.id === op.nodeId);
-  if (node) {
-    node.archived = true; // 软删除
-  }
+  updateNode(graph, op.nodeId, { archived: true });
 }
 
 function resolveOperationScope(

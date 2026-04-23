@@ -22,6 +22,25 @@ struct LayoutNode {
     region_rect: RegionRect,
 }
 
+fn solve_hydrate_records_in_rust(payload: HydrateRecordsPayload) -> HydrateRecordsResult {
+    let nodes = clone_hydrate_records(payload.nodes);
+    let edges = clone_hydrate_records(payload.edges);
+    let node_count = nodes.len();
+    let edge_count = edges.len();
+    HydrateRecordsResult {
+        ok: true,
+        used_native: true,
+        nodes,
+        edges,
+        diagnostics: HydrateRecordsDiagnostics {
+            solver: "rust-wasm".to_string(),
+            node_count,
+            edge_count,
+            records_normalized: payload.records_normalized,
+        },
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LayoutEdge {
@@ -224,6 +243,36 @@ struct PersistDeltaIdResult {
     upsert_tombstone_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct HydrateRecordsPayload {
+    #[serde(default)]
+    nodes: Vec<JsonValue>,
+    #[serde(default)]
+    edges: Vec<JsonValue>,
+    #[serde(default)]
+    records_normalized: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HydrateRecordsDiagnostics {
+    solver: String,
+    node_count: usize,
+    edge_count: usize,
+    records_normalized: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HydrateRecordsResult {
+    ok: bool,
+    used_native: bool,
+    nodes: Vec<JsonValue>,
+    edges: Vec<JsonValue>,
+    diagnostics: HydrateRecordsDiagnostics,
+}
+
 fn default_iterations() -> u32 {
     80
 }
@@ -296,6 +345,13 @@ fn sanitize_json_records(records: Vec<JsonValue>) -> Vec<JsonValue> {
         .into_iter()
         .filter(|record| record.is_object())
         .filter(|record| normalize_json_record_id(record.get("id")).is_empty() == false)
+        .collect()
+}
+
+fn clone_hydrate_records(records: Vec<JsonValue>) -> Vec<JsonValue> {
+    records
+        .into_iter()
+        .filter(|record| record.is_object())
         .collect()
 }
 
@@ -1017,4 +1073,13 @@ pub fn build_persist_delta_compact_hash(payload: JsValue) -> Result<JsValue, JsV
     serde_wasm_bindgen::to_value(&solved).map_err(|error| {
         JsValue::from_str(&format!("serialize hash compact persist result failed: {error}"))
     })
+}
+
+#[wasm_bindgen]
+pub fn build_hydrate_records(payload: JsValue) -> Result<JsValue, JsValue> {
+    let parsed: HydrateRecordsPayload = serde_wasm_bindgen::from_value(payload)
+        .map_err(|error| JsValue::from_str(&format!("invalid hydrate payload: {error}")))?;
+    let solved = solve_hydrate_records_in_rust(parsed);
+    serde_wasm_bindgen::to_value(&solved)
+        .map_err(|error| JsValue::from_str(&format!("serialize hydrate result failed: {error}")))
 }

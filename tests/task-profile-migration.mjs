@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  LEGACY_PLANNER_SYSTEM_PROMPT,
+  PLANNER_ASSISTANT_SEED,
+} from "../ena-planner/ena-planner-presets.js";
+import {
   createDefaultTaskProfiles,
   ensureTaskProfiles,
   getActiveTaskProfile,
@@ -23,6 +27,7 @@ assert.equal(migrated.taskProfilesVersion, 3);
 assert.ok(migrated.taskProfiles);
 assert.ok(migrated.taskProfiles.extract);
 assert.ok(migrated.taskProfiles.recall);
+assert.ok(migrated.taskProfiles.planner);
 
 const extractProfile = getActiveTaskProfile(
   {
@@ -34,22 +39,24 @@ const extractProfile = getActiveTaskProfile(
 assert.equal(extractProfile.taskType, "extract");
 assert.equal(extractProfile.id, "default");
 assert.ok(Array.isArray(extractProfile.blocks));
-assert.equal(extractProfile.blocks.length, 14);
+assert.equal(extractProfile.blocks.length, 16);
 assert.deepEqual(
   extractProfile.blocks.map((block) => block.name),
   [
     "抬头",
     "角色定义",
+    "身份确认",
     "角色描述",
     "用户设定",
     "世界书前块",
     "世界书后块",
-    "最近消息",
     "图统计",
     "Schema",
-    "当前范围",
     "活跃总结",
     "故事时间",
+    "当前范围",
+    "最近消息",
+    "信息确认",
     "输出格式",
     "行为规则",
   ],
@@ -59,6 +66,7 @@ assert.deepEqual(
   [
     "custom",
     "custom",
+    "custom",
     "builtin",
     "builtin",
     "builtin",
@@ -69,6 +77,7 @@ assert.deepEqual(
     "builtin",
     "builtin",
     "builtin",
+    "custom",
     "custom",
     "custom",
   ],
@@ -78,6 +87,7 @@ assert.deepEqual(
   [
     "system",
     "system",
+    "assistant",
     "system",
     "system",
     "system",
@@ -88,6 +98,7 @@ assert.deepEqual(
     "system",
     "system",
     "system",
+    "assistant",
     "user",
     "user",
   ],
@@ -112,15 +123,17 @@ assert.deepEqual(
   [
     "default-heading",
     "default-role",
+    "default-identity-ack",
     "charDescription",
     "userPersona",
     "worldInfoBefore",
     "worldInfoAfter",
+    "graphStats",
+    "sceneOwnerCandidates",
+    "candidateNodes",
     "recentMessages",
     "userMessage",
-    "candidateNodes",
-    "sceneOwnerCandidates",
-    "graphStats",
+    "default-info-ack",
     "default-format",
     "default-rules",
   ],
@@ -130,19 +143,259 @@ assert.deepEqual(
   [
     "default-heading",
     "default-role",
+    "default-identity-ack",
     "charDescription",
     "userPersona",
     "worldInfoBefore",
     "worldInfoAfter",
-    "recentMessages",
+    "graphStats",
     "candidateText",
     "currentRange",
-    "graphStats",
+    "recentMessages",
+    "default-info-ack",
     "default-format",
     "default-rules",
   ],
 );
 assert.ok(defaults.summary_rollup.profiles.length > 0);
+assert.ok(defaults.planner.profiles.length > 0);
+assert.deepEqual(
+  defaults.planner.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "planner-default-heading",
+    "planner-default-role",
+    "planner-default-identity-ack",
+    "plannerCharacterCard",
+    "plannerWorldbook",
+    "plannerMemory",
+    "plannerPreviousPlots",
+    "plannerRecentChat",
+    "plannerUserInput",
+    "planner-default-info-ack",
+    "planner-default-format",
+    "planner-default-rules",
+    "planner-default-assistant-seed",
+  ],
+);
+assert.equal(defaults.planner.profiles[0].generation.stream, true);
+assert.equal(defaults.planner.profiles[0].generation.temperature, 1);
+
+const currentDefaultPlanner = defaults.planner.profiles[0];
+const cloneValue = (value) => JSON.parse(JSON.stringify(value));
+
+function buildLegacyPlannerDefaultLikeBlocks() {
+  return [
+    {
+      id: "planner-legacy-default-system",
+      name: "Ena Planner System",
+      type: "custom",
+      enabled: true,
+      role: "system",
+      sourceKey: "",
+      sourceField: "",
+      content: LEGACY_PLANNER_SYSTEM_PROMPT,
+      injectionMode: "relative",
+      order: 0,
+    },
+    {
+      id: "planner-legacy-default-char",
+      name: "角色卡",
+      type: "builtin",
+      enabled: true,
+      role: "system",
+      sourceKey: "plannerCharacterCard",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 1,
+    },
+    {
+      id: "planner-legacy-default-worldbook",
+      name: "世界书",
+      type: "builtin",
+      enabled: true,
+      role: "system",
+      sourceKey: "plannerWorldbook",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 2,
+    },
+    {
+      id: "planner-legacy-default-recent-chat",
+      name: "最近聊天",
+      type: "builtin",
+      enabled: true,
+      role: "system",
+      sourceKey: "plannerRecentChat",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 3,
+    },
+    {
+      id: "planner-legacy-default-memory",
+      name: "BME 记忆",
+      type: "builtin",
+      enabled: true,
+      role: "system",
+      sourceKey: "plannerMemory",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 4,
+    },
+    {
+      id: "planner-legacy-default-previous-plots",
+      name: "历史 plot",
+      type: "builtin",
+      enabled: true,
+      role: "system",
+      sourceKey: "plannerPreviousPlots",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 5,
+    },
+    {
+      id: "planner-legacy-default-user-input",
+      name: "玩家输入",
+      type: "builtin",
+      enabled: true,
+      role: "user",
+      sourceKey: "plannerUserInput",
+      sourceField: "",
+      content: "",
+      injectionMode: "relative",
+      order: 6,
+    },
+    {
+      id: "planner-legacy-default-seed",
+      name: "Assistant Seed",
+      type: "custom",
+      enabled: true,
+      role: "assistant",
+      sourceKey: "",
+      sourceField: "",
+      content: PLANNER_ASSISTANT_SEED,
+      injectionMode: "relative",
+      order: 7,
+    },
+  ];
+}
+
+function createLegacyPlannerDefaultLikeProfile(overrides = {}) {
+  return {
+    id: "planner-legacy-default-like",
+    taskType: "planner",
+    builtin: false,
+    name: "ENA 当前配置",
+    promptMode: "block-based",
+    enabled: true,
+    updatedAt: "2026-04-23T00:00:00.000Z",
+    blocks: buildLegacyPlannerDefaultLikeBlocks(),
+    generation: cloneValue(currentDefaultPlanner.generation),
+    metadata: {
+      migratedFromLegacy: true,
+      enaLegacySource: "legacy-working-copy",
+    },
+    ...overrides,
+    blocks: Array.isArray(overrides.blocks)
+      ? overrides.blocks
+      : buildLegacyPlannerDefaultLikeBlocks(),
+    generation: {
+      ...cloneValue(currentDefaultPlanner.generation),
+      ...(overrides.generation || {}),
+    },
+    metadata: {
+      migratedFromLegacy: true,
+      enaLegacySource: "legacy-working-copy",
+      ...(overrides.metadata || {}),
+    },
+  };
+}
+
+const legacyPlannerDefaultLikeProfile = createLegacyPlannerDefaultLikeProfile();
+const alignedLegacyPlannerDefaults = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    planner: {
+      activeProfileId: legacyPlannerDefaultLikeProfile.id,
+      profiles: [cloneValue(currentDefaultPlanner), legacyPlannerDefaultLikeProfile],
+    },
+  },
+});
+const alignedLegacyPlannerProfile = alignedLegacyPlannerDefaults.planner.profiles.find(
+  (profile) => profile.id === legacyPlannerDefaultLikeProfile.id,
+);
+assert.equal(alignedLegacyPlannerDefaults.planner.activeProfileId, "default");
+assert.deepEqual(
+  alignedLegacyPlannerProfile.blocks.map((block) => block.sourceKey || block.id),
+  currentDefaultPlanner.blocks.map((block) => block.sourceKey || block.id),
+);
+assert.equal(alignedLegacyPlannerProfile.metadata.plannerLegacyDefaultAligned, true);
+
+const legacyPlannerCustomGenerationProfile = createLegacyPlannerDefaultLikeProfile({
+  id: "planner-legacy-custom-generation",
+  generation: {
+    temperature: 0.7,
+  },
+});
+const alignedLegacyPlannerCustomGeneration = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    planner: {
+      activeProfileId: legacyPlannerCustomGenerationProfile.id,
+      profiles: [
+        cloneValue(currentDefaultPlanner),
+        legacyPlannerCustomGenerationProfile,
+      ],
+    },
+  },
+});
+const alignedLegacyPlannerCustomGenerationProfile =
+  alignedLegacyPlannerCustomGeneration.planner.profiles.find(
+    (profile) => profile.id === legacyPlannerCustomGenerationProfile.id,
+  );
+assert.equal(
+  alignedLegacyPlannerCustomGeneration.planner.activeProfileId,
+  legacyPlannerCustomGenerationProfile.id,
+);
+assert.deepEqual(
+  alignedLegacyPlannerCustomGenerationProfile.blocks.map(
+    (block) => block.sourceKey || block.id,
+  ),
+  currentDefaultPlanner.blocks.map((block) => block.sourceKey || block.id),
+);
+assert.equal(alignedLegacyPlannerCustomGenerationProfile.generation.temperature, 0.7);
+
+const customizedLegacyPlannerBlocks = buildLegacyPlannerDefaultLikeBlocks();
+customizedLegacyPlannerBlocks[0].content = `${customizedLegacyPlannerBlocks[0].content}\n\n自定义补充`; 
+const customizedLegacyPlannerProfile = createLegacyPlannerDefaultLikeProfile({
+  id: "planner-legacy-customized",
+  blocks: customizedLegacyPlannerBlocks,
+});
+const preservedCustomizedLegacyPlanner = ensureTaskProfiles({
+  taskProfilesVersion: 3,
+  taskProfiles: {
+    planner: {
+      activeProfileId: customizedLegacyPlannerProfile.id,
+      profiles: [cloneValue(currentDefaultPlanner), customizedLegacyPlannerProfile],
+    },
+  },
+});
+const preservedCustomizedLegacyPlannerProfile =
+  preservedCustomizedLegacyPlanner.planner.profiles.find(
+    (profile) => profile.id === customizedLegacyPlannerProfile.id,
+  );
+assert.equal(
+  preservedCustomizedLegacyPlanner.planner.activeProfileId,
+  customizedLegacyPlannerProfile.id,
+);
+assert.match(
+  preservedCustomizedLegacyPlannerProfile.blocks[0].content,
+  /自定义补充/,
+);
 
 const upgradedLegacyDefault = getActiveTaskProfile(
   {
@@ -220,16 +473,34 @@ const upgradedLegacyDefault = getActiveTaskProfile(
   },
   "extract",
 );
-assert.equal(upgradedLegacyDefault.blocks.length, 14);
+assert.equal(upgradedLegacyDefault.blocks.length, 16);
 assert.equal(upgradedLegacyDefault.blocks[0].name, "抬头");
 assert.match(upgradedLegacyDefault.blocks[0].content, /虚拟的世界/);
 assert.equal(upgradedLegacyDefault.blocks[0].role, "system");
 assert.equal(upgradedLegacyDefault.blocks[0].injectionMode, "relative");
 assert.equal(upgradedLegacyDefault.blocks[1].content, "保留我自己的角色定义");
-assert.equal(upgradedLegacyDefault.blocks[12].content, "保留我自己的输出格式");
-assert.equal(upgradedLegacyDefault.blocks[13].content, "保留我自己的行为规则");
-assert.equal(upgradedLegacyDefault.blocks[12].role, "user");
-assert.equal(upgradedLegacyDefault.blocks[13].role, "user");
+const upgradedIdentityAck = upgradedLegacyDefault.blocks.find(
+  (block) => block.id === "default-identity-ack",
+);
+assert.ok(
+  upgradedIdentityAck,
+  "legacy upgrade should backfill default-identity-ack block",
+);
+assert.equal(upgradedIdentityAck.role, "assistant");
+const upgradedInfoAck = upgradedLegacyDefault.blocks.find(
+  (block) => block.id === "default-info-ack",
+);
+assert.ok(
+  upgradedInfoAck,
+  "legacy upgrade should backfill default-info-ack block",
+);
+assert.equal(upgradedInfoAck.role, "assistant");
+assert.equal(upgradedLegacyDefault.blocks[14].id, "default-format");
+assert.equal(upgradedLegacyDefault.blocks[15].id, "default-rules");
+assert.equal(upgradedLegacyDefault.blocks[14].content, "保留我自己的输出格式");
+assert.equal(upgradedLegacyDefault.blocks[15].content, "保留我自己的行为规则");
+assert.equal(upgradedLegacyDefault.blocks[14].role, "user");
+assert.equal(upgradedLegacyDefault.blocks[15].role, "user");
 
 const currentDefaults = createDefaultTaskProfiles();
 const currentDefaultExtract = currentDefaults.extract.profiles[0];
@@ -389,15 +660,33 @@ assert.equal(
 
 assert.deepEqual(
   upgradedLegacyDefault.blocks
-    .slice(6, 10)
+    .slice(7, 13)
     .map((block) => block.sourceKey),
-  ["recentMessages", "graphStats", "schema", "currentRange"],
+  [
+    "graphStats",
+    "schema",
+    "activeSummaries",
+    "storyTimeContext",
+    "currentRange",
+    "recentMessages",
+  ],
 );
 assert.ok(
   upgradedLegacyDefault.blocks
-    .slice(0, 12)
+    .slice(0, 2)
     .every((block) => block.role === "system"),
+  "heading / role 头部块应保持 system 角色",
 );
+assert.equal(upgradedLegacyDefault.blocks[2].id, "default-identity-ack");
+assert.equal(upgradedLegacyDefault.blocks[2].role, "assistant");
+assert.ok(
+  upgradedLegacyDefault.blocks
+    .slice(3, 13)
+    .every((block) => block.role === "system"),
+  "参考材料与本轮输入块应为 system 角色",
+);
+assert.equal(upgradedLegacyDefault.blocks[13].id, "default-info-ack");
+assert.equal(upgradedLegacyDefault.blocks[13].role, "assistant");
 
 const legacyRegexSettings = {
   taskProfilesVersion: 3,

@@ -1379,6 +1379,24 @@ export async function retrieve({
   )
     ? [...sharedRanking.diagnostics.lexicalTopHits]
     : [];
+  retrievalMeta.timings.sharedQueryBlend = Number(
+    sharedRanking?.diagnostics?.timings?.queryBlend || 0,
+  );
+  retrievalMeta.timings.sharedLexical = Number(
+    sharedRanking?.diagnostics?.timings?.lexical || 0,
+  );
+  retrievalMeta.timings.sharedScoring = Number(
+    sharedRanking?.diagnostics?.timings?.scoring || 0,
+  );
+  retrievalMeta.timings.sharedTotal = Number(
+    sharedRanking?.diagnostics?.timings?.total || 0,
+  );
+  retrievalMeta.timings.sharedVector = Number(
+    sharedRanking?.diagnostics?.timings?.vector || 0,
+  );
+  retrievalMeta.timings.sharedDiffusion = Number(
+    sharedRanking?.diagnostics?.timings?.diffusion || 0,
+  );
   retrievalMeta.timings.vector = Number(
     sharedRanking?.diagnostics?.timings?.vector || 0,
   );
@@ -1395,12 +1413,14 @@ export async function retrieve({
     ? [...sharedRanking.diffusionResults]
     : [];
   exactEntityAnchors.push(...(sharedRanking?.exactEntityAnchors || []));
+  const anchorCollectStartedAt = nowMs();
   supplementalAnchorNodeIds = collectSupplementalAnchorNodeIds(
     graph,
     vectorResults,
     exactEntityAnchors.map((item) => item.nodeId),
     5,
   );
+  retrievalMeta.timings.anchorCollect = roundMs(nowMs() - anchorCollectStartedAt);
 
   let residualResult = {
     triggered: false,

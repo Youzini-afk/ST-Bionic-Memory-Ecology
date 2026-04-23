@@ -2,14 +2,28 @@ import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced, substituteParamsExtended } from '../../../../../script.js';
 import { EnaPlannerStorage, migrateFromLWBIfNeeded } from './ena-planner-storage.js';
 import { DEFAULT_PROMPT_BLOCKS, BUILTIN_TEMPLATES } from './ena-planner-presets.js';
+import {
+    createBuiltinPromptBlock,
+    createCustomPromptBlock,
+    createProfileId,
+    ensureTaskProfiles,
+    getActiveTaskProfile,
+    setActiveTaskProfileId,
+    upsertTaskProfile,
+} from '../prompting/prompt-profiles.js';
+import {
+    resolveDedicatedLlmProviderConfig,
+    resolveLlmConfigSelection,
+} from '../llm/llm-preset-utils.js';
 import { debugLog } from '../runtime/debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';
-const OVERLAY_ID = 'xiaobaix-ena-planner-overlay';
+const BME_MODULE_NAME = 'st_bme';
+const PLANNER_TASK_TYPE = 'planner';
+const LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION = 1;
 const VECTOR_RECALL_TIMEOUT_MS = 30000;
 const PLANNER_REQUEST_TIMEOUT_MS = 90000;
-const _currentModuleUrl = import.meta.url;
 
 let _bmeRuntime = null;
 
@@ -25,36 +39,6 @@ function getPlannerRequestTimeoutMs() {
     return Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : PLANNER_REQUEST_TIMEOUT_MS;
-}
-
-function getTrustedOrigin() { return window.location.origin; }
-
-function postToIframe(iframe, payload) {
-    if (!iframe?.contentWindow) return false;
-    iframe.contentWindow.postMessage(payload, getTrustedOrigin());
-    return true;
-}
-
-function isTrustedIframeEvent(event, iframe) {
-    return !!iframe && event.origin === getTrustedOrigin()
-        && event.source === iframe.contentWindow;
-}
-
-function getPluginBasePath() {
-    try {
-        const url = new URL(_currentModuleUrl);
-        const parts = url.pathname.split('/');
-        const idx = parts.lastIndexOf('ena-planner');
-        if (idx > 0) {
-            return parts.slice(0, idx).join('/');
-        }
-    } catch { }
-    return _bmeRuntime?.getExtensionPath?.()
-        || 'scripts/extensions/third-party/ST-Bionic-Memory-Ecology-main';
-}
-
-function getHtmlPath() {
-    return `${getPluginBasePath()}/ena-planner/ena-planner.html`;
 }
 
 /**
@@ -94,6 +78,7 @@ function getDefaultSettings(options = {}) {
 
         // Planner API
         api: {
+            llmPreset: '',
             channel: 'openai',
             baseUrl: '',
             prefixMode: 'auto',
@@ -128,11 +113,333 @@ const state = {
 };
 
 let config = null;
-let overlay = null;
-let iframeMessageBound = false;
 let sendListenersInstalled = false;
 let sendClickHandler = null;
 let sendKeydownHandler = null;
+
+/**
+ * Native UI subscribers (replaces the iframe postMessage channel).
+ * Callbacks receive `(kind, payload)` where kind is 'config' or 'logs'.
+ */
+const nativeSubscribers = new Set();
+
+function notifyNativeChange(kind, payload) {
+    if (!nativeSubscribers.size) return;
+    for (const cb of nativeSubscribers) {
+        try { cb(kind, payload); }
+        catch (err) { console.warn('[Ena] native subscriber error:', err); }
+    }
+}
+
+function getBmeSettings() {
+    const settings = extension_settings?.[BME_MODULE_NAME];
+    return settings && typeof settings === 'object' ? settings : {};
+}
+
+function hasPlannerTaskProfileMigration(settings = getBmeSettings()) {
+    return Number(settings?.enaPlannerTaskProfileMigrationVersion || 0) >= LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION;
+}
+
+function getPlannerTaskProfile() {
+    return getActiveTaskProfile(getBmeSettings(), PLANNER_TASK_TYPE);
+}
+
+function sortPlannerProfileBlocks(blocks = []) {
+    return [...(Array.isArray(blocks) ? blocks : [])]
+        .map((block, index) => ({ ...block, _orderIndex: index }))
+        .sort((left, right) => {
+            const leftOrder = Number.isFinite(Number(left?.order))
+                ? Number(left.order)
+                : left._orderIndex;
+            const rightOrder = Number.isFinite(Number(right?.order))
+                ? Number(right.order)
+                : right._orderIndex;
+            return leftOrder - rightOrder;
+        });
+}
+
+function normalizeLegacyPlannerPromptBlocks(blocks = []) {
+    return (Array.isArray(blocks) ? blocks : [])
+        .filter((block) => block && typeof block === 'object')
+        .map((block, index) => ({
+            id: String(block?.id || `ena-legacy-block-${index + 1}`),
+            name: String(block?.name || `提示词块 ${index + 1}`),
+            role: ['system', 'user', 'assistant'].includes(String(block?.role || '').trim())
+                ? String(block.role).trim()
+                : 'system',
+            content: String(block?.content || ''),
+            order: Number.isFinite(Number(block?.order)) ? Number(block.order) : index,
+        }))
+        .filter((block) => String(block.content || '').trim());
+}
+
+function buildPlannerProfileBlocksFromLegacy(promptBlocks = []) {
+    const normalizedBlocks = normalizeLegacyPlannerPromptBlocks(promptBlocks);
+    const systemBlocks = normalizedBlocks.filter((block) => block.role === 'system');
+    const userBlocks = normalizedBlocks.filter((block) => block.role === 'user');
+    const assistantBlocks = normalizedBlocks.filter((block) => block.role === 'assistant');
+    const builtins = [
+        'plannerCharacterCard',
+        'plannerWorldbook',
+        'plannerRecentChat',
+        'plannerMemory',
+        'plannerPreviousPlots',
+    ];
+    const result = [];
+    let order = 0;
+
+    const pushCustom = (block) => {
+        result.push(createCustomPromptBlock(PLANNER_TASK_TYPE, {
+            name: block.name,
+            role: block.role,
+            content: block.content,
+            injectionMode: 'relative',
+            order: order++,
+        }));
+    };
+
+    systemBlocks.forEach(pushCustom);
+    builtins.forEach((sourceKey) => {
+        result.push(createBuiltinPromptBlock(PLANNER_TASK_TYPE, sourceKey, {
+            injectionMode: 'relative',
+            order: order++,
+        }));
+    });
+    userBlocks.forEach(pushCustom);
+    result.push(createBuiltinPromptBlock(PLANNER_TASK_TYPE, 'plannerUserInput', {
+        injectionMode: 'relative',
+        order: order++,
+    }));
+    assistantBlocks.forEach(pushCustom);
+
+    return result;
+}
+
+function normalizePlannerGenerationNumber(value) {
+    if (value == null || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+}
+
+function buildPlannerGenerationFromLegacyConfig(plannerConfig = {}) {
+    const api = plannerConfig?.api && typeof plannerConfig.api === 'object'
+        ? plannerConfig.api
+        : {};
+    return {
+        stream:
+            typeof api.stream === 'boolean'
+                ? api.stream
+                : api.stream === 'true'
+                    ? true
+                    : api.stream === 'false'
+                        ? false
+                        : true,
+        temperature: normalizePlannerGenerationNumber(api.temperature),
+        top_p: normalizePlannerGenerationNumber(api.top_p),
+        top_k: normalizePlannerGenerationNumber(api.top_k),
+        frequency_penalty: normalizePlannerGenerationNumber(api.frequency_penalty),
+        presence_penalty: normalizePlannerGenerationNumber(api.presence_penalty),
+        max_completion_tokens: normalizePlannerGenerationNumber(api.max_tokens),
+    };
+}
+
+function buildComparablePlannerGenerationSnapshot(generation = {}) {
+    return {
+        stream:
+            generation?.stream === true
+                ? true
+                : generation?.stream === false
+                    ? false
+                    : null,
+        temperature: normalizePlannerGenerationNumber(generation?.temperature),
+        top_p: normalizePlannerGenerationNumber(generation?.top_p),
+        top_k: normalizePlannerGenerationNumber(generation?.top_k),
+        frequency_penalty: normalizePlannerGenerationNumber(generation?.frequency_penalty),
+        presence_penalty: normalizePlannerGenerationNumber(generation?.presence_penalty),
+        max_completion_tokens: normalizePlannerGenerationNumber(generation?.max_completion_tokens),
+    };
+}
+
+function arePlannerGenerationSettingsEquivalent(left = {}, right = {}) {
+    return JSON.stringify(buildComparablePlannerGenerationSnapshot(left)) === JSON.stringify(buildComparablePlannerGenerationSnapshot(right));
+}
+
+function normalizePlannerProfileBlockComparisonPayload(blocks = []) {
+    return sortPlannerProfileBlocks(blocks).map((block) => ({
+        role: String(block?.role || ''),
+        type: String(block?.type || 'custom'),
+        sourceKey: String(block?.sourceKey || ''),
+        content: String(block?.content || '').trim(),
+        enabled: block?.enabled !== false,
+    }));
+}
+
+function arePlannerProfileBlocksEquivalent(left = [], right = []) {
+    return JSON.stringify(normalizePlannerProfileBlockComparisonPayload(left)) === JSON.stringify(normalizePlannerProfileBlockComparisonPayload(right));
+}
+
+function buildPlannerMigrationProfileName(baseName = '', fallbackName = 'ENA 当前配置', usedNames = new Set()) {
+    const base = String(baseName || '').trim() || fallbackName;
+    let nextName = base;
+    let suffix = 2;
+    while (usedNames.has(nextName)) {
+        nextName = `${base} ${suffix}`;
+        suffix += 1;
+    }
+    usedNames.add(nextName);
+    return nextName;
+}
+
+function createLegacyPlannerTaskProfile(name, promptBlocks, plannerConfig, options = {}) {
+    return {
+        id: createProfileId(PLANNER_TASK_TYPE),
+        name,
+        taskType: PLANNER_TASK_TYPE,
+        builtin: false,
+        enabled: true,
+        promptMode: 'block-based',
+        updatedAt: nowISO(),
+        blocks: buildPlannerProfileBlocksFromLegacy(promptBlocks),
+        generation: buildPlannerGenerationFromLegacyConfig(plannerConfig),
+        metadata: {
+            migratedFromLegacy: true,
+            enaLegacyTemplateName: String(options.templateName || ''),
+            enaLegacySource: String(options.source || 'legacy-ena'),
+        },
+    };
+}
+
+function migrateLegacyPlannerTaskProfilesIfNeeded() {
+    const settings = getBmeSettings();
+    if (hasPlannerTaskProfileMigration(settings)) {
+        return false;
+    }
+
+    const plannerConfig = ensureSettings({ defaultEnabled: false });
+    let nextTaskProfiles = ensureTaskProfiles(settings);
+    const plannerBucket = nextTaskProfiles?.[PLANNER_TASK_TYPE] || {
+        activeProfileId: 'default',
+        profiles: [],
+    };
+    const hasExistingCustomProfiles = Array.isArray(plannerBucket.profiles)
+        && plannerBucket.profiles.some((profile) => String(profile?.id || '') !== 'default');
+
+    if (hasExistingCustomProfiles) {
+        extension_settings[BME_MODULE_NAME] = {
+            ...settings,
+            taskProfiles: nextTaskProfiles,
+            enaPlannerTaskProfileMigrationVersion: LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION,
+        };
+        saveSettingsDebounced?.();
+        return false;
+    }
+
+    const defaultPlannerProfile = getActiveTaskProfile({}, PLANNER_TASK_TYPE);
+    const defaultPlannerBlocks = Array.isArray(defaultPlannerProfile?.blocks)
+        ? defaultPlannerProfile.blocks
+        : [];
+    const defaultPlannerGeneration = defaultPlannerProfile?.generation || {};
+    const currentBlocks = Array.isArray(plannerConfig.promptBlocks)
+        ? plannerConfig.promptBlocks
+        : getDefaultSettings().promptBlocks;
+    const promptTemplates = plannerConfig?.promptTemplates && typeof plannerConfig.promptTemplates === 'object'
+        ? plannerConfig.promptTemplates
+        : {};
+    const activeTemplateName = String(plannerConfig.activePromptTemplate || '').trim();
+    const usedNames = new Set(
+        (Array.isArray(plannerBucket.profiles) ? plannerBucket.profiles : [])
+            .map((profile) => String(profile?.name || '').trim())
+            .filter(Boolean),
+    );
+    const seenSignatures = new Set();
+    const profileSpecs = [];
+    let activeProfileName = '';
+
+    const appendProfileSpec = (name, promptBlocks, options = {}) => {
+        const migratedBlocks = buildPlannerProfileBlocksFromLegacy(promptBlocks);
+        const migratedGeneration = buildPlannerGenerationFromLegacyConfig(plannerConfig);
+        if (
+            arePlannerProfileBlocksEquivalent(migratedBlocks, defaultPlannerBlocks)
+            && arePlannerGenerationSettingsEquivalent(migratedGeneration, defaultPlannerGeneration)
+            && options.allowDefaultDuplicate !== true
+        ) {
+            return '';
+        }
+
+        const signature = JSON.stringify({
+            blocks: normalizePlannerProfileBlockComparisonPayload(migratedBlocks),
+            generation: buildComparablePlannerGenerationSnapshot(migratedGeneration),
+        });
+        if (seenSignatures.has(signature)) {
+            return '';
+        }
+        seenSignatures.add(signature);
+
+        const uniqueName = buildPlannerMigrationProfileName(name, options.fallbackName, usedNames);
+        profileSpecs.push({
+            name: uniqueName,
+            promptBlocks,
+            templateName: options.templateName || '',
+            source: options.source || 'legacy-ena',
+            active: options.active === true,
+        });
+        return uniqueName;
+    };
+
+    for (const [templateName, templateBlocks] of Object.entries(promptTemplates)) {
+        if (!Array.isArray(templateBlocks)) continue;
+        const appendedName = appendProfileSpec(templateName, templateBlocks, {
+            fallbackName: 'ENA 模板',
+            templateName,
+            source: 'legacy-template',
+        });
+        if (
+            appendedName
+            && activeTemplateName === templateName
+            && arePlannerProfileBlocksEquivalent(templateBlocks, currentBlocks)
+        ) {
+            activeProfileName = appendedName;
+        }
+    }
+
+    if (!activeProfileName) {
+        activeProfileName = appendProfileSpec(
+            activeTemplateName ? `${activeTemplateName}（当前）` : 'ENA 当前配置',
+            currentBlocks,
+            {
+                fallbackName: 'ENA 当前配置',
+                source: 'legacy-working-copy',
+                active: true,
+            },
+        );
+    }
+
+    let activeProfileId = '';
+    for (const spec of profileSpecs) {
+        const profile = createLegacyPlannerTaskProfile(spec.name, spec.promptBlocks, plannerConfig, {
+            templateName: spec.templateName,
+            source: spec.source,
+        });
+        nextTaskProfiles = upsertTaskProfile(nextTaskProfiles, PLANNER_TASK_TYPE, profile, {
+            setActive: false,
+        });
+        if (spec.name === activeProfileName || (spec.active && !activeProfileId)) {
+            activeProfileId = profile.id;
+        }
+    }
+
+    if (activeProfileId) {
+        nextTaskProfiles = setActiveTaskProfileId(nextTaskProfiles, PLANNER_TASK_TYPE, activeProfileId);
+    }
+
+    extension_settings[BME_MODULE_NAME] = {
+        ...settings,
+        taskProfiles: nextTaskProfiles,
+        enaPlannerTaskProfileMigrationVersion: LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION,
+    };
+    saveSettingsDebounced?.();
+    return profileSpecs.length > 0;
+}
 
 /**
  * -------------------------
@@ -192,6 +499,7 @@ async function loadConfig() {
     const hasSavedConfig = !!(loaded && typeof loaded === 'object');
     config = hasSavedConfig ? loaded : getDefaultSettings({ enabled: false });
     ensureSettings({ defaultEnabled: hasSavedConfig ? true : false });
+    migrateLegacyPlannerTaskProfilesIfNeeded();
     state.logs = Array.isArray(await EnaPlannerStorage.get('logs', [])) ? await EnaPlannerStorage.get('logs', []) : [];
 
     if (extension_settings?.[EXT_NAME]) {
@@ -228,9 +536,11 @@ function clampLogs() {
 
 function persistLogsMaybe() {
     const s = ensureSettings();
-    if (!s.logsPersist) return;
-    state.logs = state.logs.slice(0, s.logsMax);
-    EnaPlannerStorage.set('logs', state.logs).catch(() => {});
+    if (s.logsPersist) {
+        state.logs = state.logs.slice(0, s.logsMax);
+        EnaPlannerStorage.set('logs', state.logs).catch(() => {});
+    }
+    try { notifyNativeChange('logs', getPlannerLogsSnapshot()); } catch {}
 }
 
 function loadPersistedLogsMaybe() {
@@ -258,21 +568,87 @@ function normalizeUrlBase(u) {
     return u.replace(/\/+$/g, '');
 }
 
+function hasPlannerLegacyDedicatedApiConfig(api = {}) {
+    return Boolean(
+        String(api?.baseUrl || '').trim() &&
+        String(api?.model || '').trim(),
+    );
+}
+
+function inferPlannerChannelFromUrl(url) {
+    const resolved = resolveDedicatedLlmProviderConfig(String(url || '').trim());
+    if (resolved.providerId === 'google-ai-studio') return 'gemini';
+    if (resolved.providerId === 'anthropic-claude') return 'claude';
+    return 'openai';
+}
+
+function buildResolvedPlannerApiConfigFromLlmSelection(selection = {}) {
+    const snapshot = selection?.config && typeof selection.config === 'object'
+        ? selection.config
+        : {};
+    const inputUrl = String(snapshot?.llmApiUrl || '').trim();
+    const resolved = resolveDedicatedLlmProviderConfig(inputUrl);
+    const baseUrl = String(resolved.apiUrl || inputUrl).trim();
+    return {
+        mode: selection?.requestedPresetName ? 'preset' : 'global',
+        source: String(selection?.source || ''),
+        requestedPresetName: String(selection?.requestedPresetName || ''),
+        presetName: String(selection?.presetName || ''),
+        fallbackReason: String(selection?.fallbackReason || ''),
+        channel: inferPlannerChannelFromUrl(baseUrl),
+        prefixMode: 'auto',
+        customPrefix: '',
+        baseUrl,
+        apiKey: String(snapshot?.llmApiKey || '').trim(),
+        model: String(snapshot?.llmModel || '').trim(),
+    };
+}
+
+function buildLegacyPlannerApiConfig(api = {}) {
+    return {
+        mode: 'legacy',
+        source: 'legacy-ena-config',
+        requestedPresetName: '',
+        presetName: '',
+        fallbackReason: '',
+        channel: String(api?.channel || 'openai').trim() || 'openai',
+        prefixMode: String(api?.prefixMode || 'auto').trim() || 'auto',
+        customPrefix: String(api?.customPrefix || '').trim(),
+        baseUrl: String(api?.baseUrl || '').trim(),
+        apiKey: String(api?.apiKey || '').trim(),
+        model: String(api?.model || '').trim(),
+    };
+}
+
+function resolvePlannerApiConfig() {
+    const s = ensureSettings();
+    const selectedPresetName = String(s?.api?.llmPreset || '').trim();
+    if (selectedPresetName) {
+        return buildResolvedPlannerApiConfigFromLlmSelection(
+            resolveLlmConfigSelection(getBmeSettings(), selectedPresetName),
+        );
+    }
+    if (hasPlannerLegacyDedicatedApiConfig(s?.api)) {
+        return buildLegacyPlannerApiConfig(s.api);
+    }
+    return buildResolvedPlannerApiConfigFromLlmSelection(
+        resolveLlmConfigSelection(getBmeSettings(), ''),
+    );
+}
+
 function getDefaultPrefixByChannel(channel) {
     if (channel === 'gemini') return '/v1beta';
     return '/v1';
 }
 
-function buildApiPrefix() {
-    const s = ensureSettings();
-    if (s.api.prefixMode === 'custom' && s.api.customPrefix?.trim()) return s.api.customPrefix.trim();
-    return getDefaultPrefixByChannel(s.api.channel);
+function buildApiPrefix(apiConfig = resolvePlannerApiConfig()) {
+    if (apiConfig?.prefixMode === 'custom' && apiConfig?.customPrefix?.trim()) return apiConfig.customPrefix.trim();
+    return getDefaultPrefixByChannel(apiConfig?.channel);
 }
 
-function buildUrl(path) {
-    const s = ensureSettings();
-    const base = normalizeUrlBase(s.api.baseUrl);
-    const prefix = buildApiPrefix();
+function buildUrl(path, apiConfig = resolvePlannerApiConfig()) {
+    const base = normalizeUrlBase(apiConfig?.baseUrl);
+    const prefix = buildApiPrefix(apiConfig);
     const p = prefix.startsWith('/') ? prefix : `/${prefix}`;
     const finalPrefix = p.replace(/\/+$/g, '');
     const finalPath = path.startsWith('/') ? path : `/${path}`;
@@ -968,43 +1344,40 @@ function filterPlannerPreview(rawPartial) {
  * --------------------------
  */
 async function callPlanner(messages, options = {}) {
-    const s = ensureSettings();
-    if (!s.api.baseUrl) throw new Error('未配置 API URL');
-    if (!s.api.apiKey) throw new Error('未配置 API KEY');
-    if (!s.api.model) throw new Error('未选择模型');
+    const apiConfig = resolvePlannerApiConfig();
+    if (!apiConfig.baseUrl) throw new Error('未配置可用的 API URL');
+    if (!apiConfig.model) throw new Error('未配置可用的模型');
+    const generation = resolvePlannerGenerationSettings();
 
-    const url = buildUrl('/chat/completions');
+    const url = buildUrl('/chat/completions', apiConfig);
 
     const body = {
-        model: s.api.model,
+        model: apiConfig.model,
         messages,
-        stream: !!s.api.stream
+        stream: generation.stream === true
     };
 
-    const t = Number(s.api.temperature);
-    if (!Number.isNaN(t)) body.temperature = t;
-    const tp = Number(s.api.top_p);
-    if (!Number.isNaN(tp)) body.top_p = tp;
-    const tk = Number(s.api.top_k);
-    if (!Number.isNaN(tk) && tk > 0) body.top_k = tk;
-    const pp = s.api.presence_penalty === '' ? null : Number(s.api.presence_penalty);
-    if (pp != null && !Number.isNaN(pp)) body.presence_penalty = pp;
-    const fp = s.api.frequency_penalty === '' ? null : Number(s.api.frequency_penalty);
-    if (fp != null && !Number.isNaN(fp)) body.frequency_penalty = fp;
-    const mt = s.api.max_tokens === '' ? null : Number(s.api.max_tokens);
-    if (mt != null && !Number.isNaN(mt) && mt > 0) body.max_tokens = mt;
+    if (generation.temperature != null) body.temperature = generation.temperature;
+    if (generation.top_p != null) body.top_p = generation.top_p;
+    if (generation.top_k != null && generation.top_k > 0) body.top_k = generation.top_k;
+    if (generation.presence_penalty != null) body.presence_penalty = generation.presence_penalty;
+    if (generation.frequency_penalty != null) body.frequency_penalty = generation.frequency_penalty;
+    if (generation.max_tokens != null && generation.max_tokens > 0) body.max_tokens = generation.max_tokens;
 
     const controller = new AbortController();
     const plannerRequestTimeoutMs = getPlannerRequestTimeoutMs();
     const timeoutId = setTimeout(() => controller.abort(), plannerRequestTimeoutMs);
     try {
+        const headers = {
+            ...getRequestHeaders(),
+            'Content-Type': 'application/json',
+        };
+        if (apiConfig.apiKey) {
+            headers.Authorization = `Bearer ${apiConfig.apiKey}`;
+        }
         const res = await fetch(url, {
             method: 'POST',
-            headers: {
-                ...getRequestHeaders(),
-                Authorization: `Bearer ${s.api.apiKey}`,
-                'Content-Type': 'application/json'
-            },
+            headers,
             body: JSON.stringify(body),
             signal: controller.signal
         });
@@ -1014,7 +1387,7 @@ async function callPlanner(messages, options = {}) {
             throw new Error(`规划请求失败: ${res.status} ${text}`.slice(0, 500));
         }
 
-        if (!s.api.stream) {
+        if (!generation.stream) {
             const data = await res.json();
             const text = String(data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? '');
             if (text) options?.onDelta?.(text, text);
@@ -1064,16 +1437,18 @@ async function callPlanner(messages, options = {}) {
 }
 
 async function fetchModelsForUi() {
-    const s = ensureSettings();
-    if (!s.api.baseUrl) throw new Error('请先填写 API URL');
-    if (!s.api.apiKey) throw new Error('请先填写 API KEY');
-    const url = buildUrl('/models');
+    const apiConfig = resolvePlannerApiConfig();
+    if (!apiConfig.baseUrl) throw new Error('当前没有可用的 API URL');
+    const url = buildUrl('/models', apiConfig);
+    const headers = {
+        ...getRequestHeaders(),
+    };
+    if (apiConfig.apiKey) {
+        headers.Authorization = `Bearer ${apiConfig.apiKey}`;
+    }
     const res = await fetch(url, {
         method: 'GET',
-        headers: {
-            ...getRequestHeaders(),
-            Authorization: `Bearer ${s.api.apiKey}`
-        }
+        headers
     });
     if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -1139,12 +1514,197 @@ function debugCharForUi() {
 
 /**
  * -------------------------
+ * Native UI API (consumed by ui/panel-ena-sections.js)
+ * These replace the iframe postMessage channel with direct function calls.
+ * --------------------------
+ */
+function getPlannerConfigSnapshot() {
+    return structuredClone(ensureSettings());
+}
+
+function getPlannerLogsSnapshot() {
+    return Array.isArray(state.logs) ? structuredClone(state.logs) : [];
+}
+
+function subscribePlannerChanges(cb) {
+    if (typeof cb !== 'function') return () => {};
+    nativeSubscribers.add(cb);
+    return () => nativeSubscribers.delete(cb);
+}
+
+async function patchPlannerConfig(patch) {
+    if (!patch || typeof patch !== 'object') {
+        return { ok: false, error: '无效的补丁' };
+    }
+    const s = ensureSettings();
+    for (const key of Object.keys(patch)) {
+        if (patch[key] && typeof patch[key] === 'object' && !Array.isArray(patch[key])) {
+            s[key] = { ...(s[key] || {}), ...patch[key] };
+        } else {
+            s[key] = patch[key];
+        }
+    }
+    const ok = await saveConfigNow();
+    if (ok) {
+        notifyNativeChange('config', getPlannerConfigSnapshot());
+        return { ok: true, config: getPlannerConfigSnapshot() };
+    }
+    return { ok: false, error: '保存失败' };
+}
+
+async function resetPlannerPromptToDefault() {
+    const s = ensureSettings();
+    s.promptBlocks = getDefaultSettings().promptBlocks;
+    const ok = await saveConfigNow();
+    if (ok) {
+        notifyNativeChange('config', getPlannerConfigSnapshot());
+        return { ok: true, config: getPlannerConfigSnapshot() };
+    }
+    return { ok: false, error: '重置失败' };
+}
+
+async function runPlannerTestFromUi(text) {
+    const fake = String(text || '').trim() || '（测试输入）我想让你帮我规划下一步剧情。';
+    try {
+        await runPlanningOnce(fake, true);
+        notifyNativeChange('logs', getPlannerLogsSnapshot());
+        return { ok: true };
+    } catch (err) {
+        notifyNativeChange('logs', getPlannerLogsSnapshot());
+        return { ok: false, error: String(err?.message ?? err) };
+    }
+}
+
+async function fetchPlannerModelsFromUi() {
+    try {
+        const models = await fetchModelsForUi();
+        return { ok: true, models };
+    } catch (err) {
+        return { ok: false, error: String(err?.message ?? err) };
+    }
+}
+
+async function debugPlannerWorldbookFromUi() {
+    try {
+        return { ok: true, output: await debugWorldbookForUi() };
+    } catch (err) {
+        return { ok: false, output: String(err?.message ?? err) };
+    }
+}
+
+function debugPlannerCharFromUi() {
+    try {
+        return { ok: true, output: debugCharForUi() };
+    } catch (err) {
+        return { ok: false, output: String(err?.message ?? err) };
+    }
+}
+
+async function clearPlannerLogs() {
+    state.logs = [];
+    const ok = await saveConfigNow();
+    notifyNativeChange('logs', getPlannerLogsSnapshot());
+    return { ok };
+}
+
+/**
+ * -------------------------
  * Build planner messages
  * --------------------------
  */
-function getPromptBlocksByRole(role) {
+function resolvePlannerGenerationSettings() {
     const s = ensureSettings();
-    return (s.promptBlocks || []).filter(b => b?.role === role && String(b?.content ?? '').trim());
+    const profile = getPlannerTaskProfile();
+    const generation = profile?.generation && typeof profile.generation === 'object'
+        ? profile.generation
+        : {};
+
+    const pickNumber = (profileValue, fallbackValue) => {
+        const normalizedProfileValue = normalizePlannerGenerationNumber(profileValue);
+        if (normalizedProfileValue != null) return normalizedProfileValue;
+        return normalizePlannerGenerationNumber(fallbackValue);
+    };
+
+    const stream =
+        generation?.stream === true
+            ? true
+            : generation?.stream === false
+                ? false
+                : Boolean(s.api.stream);
+
+    return {
+        profile,
+        stream,
+        temperature: pickNumber(generation?.temperature, s.api.temperature),
+        top_p: pickNumber(generation?.top_p, s.api.top_p),
+        top_k: pickNumber(generation?.top_k, s.api.top_k),
+        presence_penalty: pickNumber(generation?.presence_penalty, s.api.presence_penalty),
+        frequency_penalty: pickNumber(generation?.frequency_penalty, s.api.frequency_penalty),
+        max_tokens: pickNumber(generation?.max_completion_tokens, s.api.max_tokens),
+    };
+}
+
+function getPlannerPromptBlocksForRuntime() {
+    const profile = getPlannerTaskProfile();
+    const blocks = sortPlannerProfileBlocks(profile?.blocks || []).filter(
+        (block) => block?.enabled !== false,
+    );
+    if (blocks.length > 0) {
+        return {
+            source: 'task-profile',
+            profile,
+            blocks,
+        };
+    }
+
+    return {
+        source: 'legacy-config',
+        profile: null,
+        blocks: normalizeLegacyPlannerPromptBlocks(ensureSettings().promptBlocks || []).map(
+            (block, index) => ({
+                id: block.id,
+                name: block.name,
+                role: block.role,
+                type: 'custom',
+                sourceKey: '',
+                content: block.content,
+                order: Number.isFinite(Number(block?.order)) ? Number(block.order) : index,
+                enabled: true,
+            }),
+        ),
+    };
+}
+
+function resolvePlannerBuiltinBlockContent(block = {}, context = {}) {
+    const sourceKey = String(block?.sourceKey || '').trim();
+    switch (sourceKey) {
+        case 'plannerCharacterCard':
+        case 'charDescription':
+            return String(context.charBlock || '');
+        case 'plannerWorldbook':
+        case 'worldInfoBefore':
+        case 'worldInfoAfter':
+            return String(context.worldbook || '');
+        case 'plannerRecentChat':
+        case 'recentMessages':
+            return String(context.recentChat || '');
+        case 'plannerMemory':
+        case 'activeSummaries':
+            return String(context.bmeMemory || '').trim()
+                ? `<bme_memory>\n${String(context.bmeMemory || '').trim()}\n</bme_memory>`
+                : '';
+        case 'plannerPreviousPlots':
+            return String(context.plots || '');
+        case 'plannerUserInput':
+        case 'userMessage':
+            return String(context.userMsgContent || '');
+        case 'userPersona':
+            return String(context.userPersona || '');
+        case 'storyTimeContext':
+            return String(context.storyTimeContext || '');
+        default:
+            return '';
+    }
 }
 
 async function buildPlannerMessages(rawUserInput) {
@@ -1154,10 +1714,7 @@ async function buildPlannerMessages(rawUserInput) {
     const charObj = getCurrentCharSafe();
     const env = await prepareEjsEnv();
     const messageVars = getLatestMessageVarTable();
-
-    const enaSystemBlocks = getPromptBlocksByRole('system');
-    const enaAssistantBlocks = getPromptBlocksByRole('assistant');
-    const enaUserBlocks = getPromptBlocksByRole('user');
+    const plannerPromptConfig = getPlannerPromptBlocksForRuntime();
 
     const charBlockRaw = formatCharCardBlock(charObj);
 
@@ -1215,51 +1772,67 @@ async function buildPlannerMessages(rawUserInput) {
     const bmeMemory = memoryBlock || '';
     const worldbook = await renderTemplateAll(worldbookRaw, env, messageVars);
     const userInput = await renderTemplateAll(rawUserInput, env, messageVars);
+    const userMsgContent = `以下是玩家的最新指令哦~:\n[${userInput}]`;
+
+    // --- User persona (optional, for generic userPersona builtin) ---
+    let userPersona = '';
+    try {
+        userPersona = ctx?.powerUserSettings?.persona_description
+            || ctx?.extensionSettings?.persona_description
+            || ctx?.name1_description
+            || ctx?.persona
+            || '';
+    } catch { /* graceful */ }
+
+    // --- Story time context (optional, for generic storyTimeContext builtin) ---
+    let storyTimeContext = '';
+    try {
+        if (_bmeRuntime?.buildStoryTimeContextText) {
+            storyTimeContext = _bmeRuntime.buildStoryTimeContextText() || '';
+        }
+    } catch { /* graceful */ }
+
+    const plannerBlockContext = {
+        charBlock,
+        worldbook,
+        recentChat,
+        bmeMemory,
+        plots,
+        userInput,
+        userMsgContent,
+        userPersona,
+        storyTimeContext,
+    };
 
     const messages = [];
 
-    // 1) Ena system prompts
-    for (const b of enaSystemBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.push({ role: 'system', content });
-    }
-
-    // 2) Character card
-    if (String(charBlock).trim()) messages.push({ role: 'system', content: charBlock });
-
-    // 3) Worldbook
-    if (String(worldbook).trim()) messages.push({ role: 'system', content: worldbook });
-
-    // 4) Chat history (last 2 AI responses — floors N-1 & N-3)
-    if (String(recentChat).trim()) messages.push({ role: 'system', content: recentChat });
-
-    // 4.5) BME memory — after chat context, before plots
-    if (bmeMemory.trim()) {
-        messages.push({ role: 'system', content: `<bme_memory>\n${bmeMemory}\n</bme_memory>` });
-    }
-
-    // 5) Previous plots
-    if (String(plots).trim()) messages.push({ role: 'system', content: plots });
-
-    // 6) User input (with friendly framing)
-    const userMsgContent = `以下是玩家的最新指令哦~:\n[${userInput}]`;
-    messages.push({ role: 'user', content: userMsgContent });
-
-    // Extra user blocks before user message
-    for (const b of enaUserBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.splice(Math.max(0, messages.length - 1), 0, { role: 'user', content: `【extra-user-block】\n${content}` });
-    }
-
-    // 7) Assistant blocks
-    for (const b of enaAssistantBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.push({ role: 'assistant', content });
+    for (const block of plannerPromptConfig.blocks) {
+        if (!block || block.enabled === false) continue;
+        let content = '';
+        if (String(block.type || 'custom') === 'builtin') {
+            if (String(block.content || '').trim()) {
+                content = await renderTemplateAll(block.content, env, messageVars);
+            } else {
+                content = resolvePlannerBuiltinBlockContent(block, plannerBlockContext);
+            }
+        } else {
+            content = await renderTemplateAll(block.content, env, messageVars);
+        }
+        if (!String(content || '').trim()) continue;
+        messages.push({
+            role: ['system', 'user', 'assistant'].includes(String(block.role || '').trim())
+                ? String(block.role).trim()
+                : 'system',
+            content,
+        });
     }
 
     return {
         messages,
         meta: {
+            promptSource: plannerPromptConfig.source,
+            profileId: plannerPromptConfig.profile?.id || '',
+            profileName: plannerPromptConfig.profile?.name || '',
             charBlockRaw,
             worldbookRaw,
             recentChatRaw,
@@ -1276,16 +1849,21 @@ async function buildPlannerMessages(rawUserInput) {
  * --------------------------
  */
 async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
-    const s = ensureSettings();
+    const apiConfig = resolvePlannerApiConfig();
 
     const log = {
-        time: nowISO(), ok: false, model: s.api.model,
+        time: nowISO(), ok: false, model: apiConfig.model,
         requestMessages: [], rawReply: '', filteredReply: '', error: ''
     };
 
     try {
         const { messages, meta } = await buildPlannerMessages(rawUserInput);
         log.requestMessages = messages;
+        if (meta && typeof meta === 'object') {
+            log.promptSource = String(meta.promptSource || '');
+            log.profileId = String(meta.profileId || '');
+            log.profileName = String(meta.profileName || '');
+        }
 
         const rawReply = await callPlanner(messages, options);
         log.rawReply = rawReply;
@@ -1346,7 +1924,7 @@ async function doInterceptAndPlanThenSend() {
         const { filtered, plannerRecall } = await runPlanningOnce(raw, false, {
             onDelta(_piece, full) {
                 if (!state.isPlanning) return;
-                if (!ensureSettings().api.stream) return;
+                if (!resolvePlannerGenerationSettings().stream) return;
                 const preview = filterPlannerPreview(full);
                 ta.value = `${raw}\n\n${preview}`.trim();
             }
@@ -1413,183 +1991,29 @@ function uninstallSendInterceptors() {
     sendListenersInstalled = false;
 }
 
-function getIframeConfigPayload() {
-    const s = ensureSettings();
-    return {
-        ...s,
-        logs: state.logs,
-    };
-}
-
-function openSettings() {
-    if (document.getElementById(OVERLAY_ID)) return;
-
-    overlay = document.createElement('div');
-    overlay.id = OVERLAY_ID;
-    overlay.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: ${window.innerHeight}px;
-        background: rgba(0,0,0,0.5);
-        z-index: 99999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        overflow: hidden;
-    `;
-
-    const iframe = document.createElement('iframe');
-    iframe.src = getHtmlPath();
-    iframe.style.cssText = `
-        width: min(1200px, 96vw);
-        height: min(980px, 94vh);
-        max-height: calc(100% - 24px);
-        border: none;
-        border-radius: 12px;
-        background: #1a1a1a;
-    `;
-
-    overlay.appendChild(iframe);
-    document.body.appendChild(overlay);
-
-    if (!iframeMessageBound) {
-        // Guarded by isTrustedIframeEvent (origin + source).
-        // eslint-disable-next-line no-restricted-syntax
-        window.addEventListener('message', handleIframeMessage);
-        iframeMessageBound = true;
-    }
-}
-
-function closeSettings() {
-    const overlayEl = document.getElementById(OVERLAY_ID);
-    if (overlayEl) overlayEl.remove();
-    overlay = null;
-}
-
-async function handleIframeMessage(ev) {
-    const iframe = overlay?.querySelector('iframe');
-    if (!isTrustedIframeEvent(ev, iframe)) return;
-    if (!ev.data?.type?.startsWith('xb-ena:')) return;
-
-    const { type, payload } = ev.data;
-    switch (type) {
-        case 'xb-ena:ready':
-            postToIframe(iframe, { type: 'xb-ena:config', payload: getIframeConfigPayload() });
-            break;
-        case 'xb-ena:close':
-            closeSettings();
-            break;
-        case 'xb-ena:save-config': {
-            const requestId = payload?.requestId || '';
-            const patch = (payload && typeof payload.patch === 'object') ? payload.patch : payload;
-            Object.assign(ensureSettings(), patch || {});
-            const ok = await saveConfigNow();
-            if (ok) {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-saved',
-                    payload: {
-                        ...getIframeConfigPayload(),
-                        requestId
-                    }
-                });
-            } else {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-save-error',
-                    payload: {
-                        message: '保存失败',
-                        requestId
-                    }
-                });
-            }
-            break;
-        }
-        case 'xb-ena:reset-prompt-default': {
-            const requestId = payload?.requestId || '';
-            const s = ensureSettings();
-            s.promptBlocks = getDefaultSettings().promptBlocks;
-            const ok = await saveConfigNow();
-            if (ok) {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-saved',
-                    payload: {
-                        ...getIframeConfigPayload(),
-                        requestId
-                    }
-                });
-            } else {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-save-error',
-                    payload: {
-                        message: '重置失败',
-                        requestId
-                    }
-                });
-            }
-            break;
-        }
-        case 'xb-ena:run-test': {
-            try {
-                const fake = payload?.text || '（测试输入）我想让你帮我规划下一步剧情。';
-                await runPlanningOnce(fake, true);
-                postToIframe(iframe, { type: 'xb-ena:test-done' });
-                postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:test-error', payload: { message: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:logs-request':
-            postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            break;
-        case 'xb-ena:logs-clear':
-            state.logs = [];
-            await saveConfigNow();
-            postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            break;
-        case 'xb-ena:fetch-models': {
-            try {
-                const models = await fetchModelsForUi();
-                postToIframe(iframe, { type: 'xb-ena:models', payload: { models } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:models-error', payload: { message: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:debug-worldbook': {
-            try {
-                const output = await debugWorldbookForUi();
-                postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:debug-char': {
-            const output = debugCharForUi();
-            postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output } });
-            break;
-        }
-    }
-}
-
 export async function initEnaPlanner(bmeRuntime) {
     _bmeRuntime = bmeRuntime || null;
     await migrateFromLWBIfNeeded();
     await loadConfig();
     loadPersistedLogsMaybe();
     installSendInterceptors();
-    window.stBmeEnaPlanner = { openSettings, closeSettings };
+    window.stBmeEnaPlanner = {
+        getConfig: getPlannerConfigSnapshot,
+        getLogs: getPlannerLogsSnapshot,
+        subscribe: subscribePlannerChanges,
+        patchConfig: patchPlannerConfig,
+        resetPromptToDefault: resetPlannerPromptToDefault,
+        runTest: runPlannerTestFromUi,
+        fetchModels: fetchPlannerModelsFromUi,
+        debugWorldbook: debugPlannerWorldbookFromUi,
+        debugChar: debugPlannerCharFromUi,
+        clearLogs: clearPlannerLogs,
+    };
 }
 
 export function cleanupEnaPlanner() {
     uninstallSendInterceptors();
-    closeSettings();
-    if (iframeMessageBound) {
-        window.removeEventListener('message', handleIframeMessage);
-        iframeMessageBound = false;
-    }
+    nativeSubscribers.clear();
     delete window.stBmeEnaPlanner;
     _bmeRuntime = null;
 }

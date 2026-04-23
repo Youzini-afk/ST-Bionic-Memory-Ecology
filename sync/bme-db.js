@@ -1,6 +1,19 @@
 import { createEmptyGraph, deserializeGraph } from "../graph/graph.js";
 import {
+  hasMeaningfulMemoryScope,
+  normalizeMemoryScope,
+} from "../graph/memory-scope.js";
+import {
+  normalizeStoryTime,
+  normalizeStoryTimeSpan,
+} from "../graph/story-timeline.js";
+import {
   buildVectorCollectionId,
+  cloneGraphPersistDirtyState,
+  getGraphPersistDirtyStateSnapshot,
+  markGraphPersistEdgeUpsert,
+  markGraphPersistNodeUpsert,
+  markGraphPersistRuntimeMetaDirty,
   normalizeGraphRuntimeState,
 } from "../runtime/runtime-state.js";
 
@@ -19,6 +32,7 @@ const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_RECORDS = 20000;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_STRUCTURAL_DELTA = 600;
 const DEFAULT_PERSIST_NATIVE_DELTA_THRESHOLD_SERIALIZED_CHARS = 4000000;
 const DEFAULT_PERSIST_NATIVE_DELTA_BRIDGE_MODE = "json";
+const DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS = 30000;
 const SUPPORTED_PERSIST_NATIVE_DELTA_BRIDGE_MODES = new Set(["json", "hash"]);
 const PERSIST_RECORD_SERIALIZATION_CACHE_LIMIT = 50000;
 
@@ -40,6 +54,8 @@ export const BME_RUNTIME_TIMELINE_STATE_META_KEY = "timelineState";
 export const BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY =
   "runtimeLastProcessedSeq";
 export const BME_RUNTIME_GRAPH_VERSION_META_KEY = "runtimeGraphVersion";
+export const BME_RUNTIME_RECORDS_NORMALIZED_META_KEY =
+  "runtimeRecordsNormalized";
 
 export const BME_DB_TABLE_SCHEMAS = Object.freeze({
   nodes:
@@ -109,6 +125,72 @@ function normalizeNonNegativeInteger(value, fallback = 0) {
   return Math.max(0, Math.floor(parsed));
 }
 
+function readPersistCommitNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function normalizePersistCommitMs(value = 0) {
+  return Math.round((Number(value) || 0) * 10) / 10;
+}
+
+function estimatePersistPayloadBytes(value = null) {
+  if (value == null) return 0;
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
+function tryBuildNativeHydrateRecords(snapshotView, options = {}) {
+  if (options?.useNativeHydrate !== true) {
+    return {
+      rawResult: null,
+      status: "not-requested",
+      error: "",
+    };
+  }
+  const nativeBuilder = globalThis.__stBmeNativeHydrateSnapshotRecords;
+  if (typeof nativeBuilder !== "function") {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-hydrate-builder-unavailable");
+    }
+    return {
+      rawResult: null,
+      status: "builder-unavailable",
+      error: "native-hydrate-builder-unavailable",
+    };
+  }
+
+  try {
+    return {
+      rawResult: nativeBuilder(
+        {
+          nodes: toArray(snapshotView?.nodes),
+          edges: toArray(snapshotView?.edges),
+        },
+        {
+          recordsNormalized: options?.recordsNormalized === true,
+        },
+      ),
+      status: "ok",
+      error: "",
+    };
+  } catch (error) {
+    if (options?.nativeFailOpen === false) {
+      throw error;
+    }
+    return {
+      rawResult: null,
+      status: "builder-error",
+      error: error?.message || String(error),
+    };
+  }
+}
+
 function toPlainData(value, fallbackValue = null) {
   if (value == null) {
     return fallbackValue;
@@ -131,6 +213,358 @@ function toPlainData(value, fallbackValue = null) {
 
 function toArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function cloneHydrateSnapshotNestedValue(value, fallbackValue = null) {
+  if (value == null || typeof value !== "object") {
+    return value == null ? fallbackValue : value;
+  }
+  if (Array.isArray(value)) {
+    const output = new Array(value.length);
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      output[index] =
+        entry != null && typeof entry === "object"
+          ? cloneHydrateSnapshotNestedValue(entry, entry)
+          : entry;
+    }
+    return output;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return toPlainData(value, fallbackValue ?? value);
+  }
+  const output = {};
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const entry = value[key];
+    output[key] =
+      entry != null && typeof entry === "object"
+        ? cloneHydrateSnapshotNestedValue(entry, entry)
+        : entry;
+  }
+  return output;
+}
+
+function cloneHydrateSnapshotMemoryScope(scope = null) {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    return cloneHydrateSnapshotNestedValue(scope, scope);
+  }
+  return {
+    ...scope,
+    regionPath: Array.isArray(scope.regionPath)
+      ? cloneHydrateSnapshotNestedValue(scope.regionPath, [])
+      : cloneHydrateSnapshotNestedValue(scope.regionPath, scope.regionPath),
+    regionSecondary: Array.isArray(scope.regionSecondary)
+      ? cloneHydrateSnapshotNestedValue(scope.regionSecondary, [])
+      : cloneHydrateSnapshotNestedValue(
+          scope.regionSecondary,
+          scope.regionSecondary,
+        ),
+  };
+}
+
+function cloneHydrateSnapshotStoryTime(storyTime = null) {
+  if (!storyTime || typeof storyTime !== "object" || Array.isArray(storyTime)) {
+    return cloneHydrateSnapshotNestedValue(storyTime, storyTime);
+  }
+  return {
+    ...storyTime,
+  };
+}
+
+function cloneHydrateSnapshotStoryTimeSpan(storyTimeSpan = null) {
+  if (
+    !storyTimeSpan ||
+    typeof storyTimeSpan !== "object" ||
+    Array.isArray(storyTimeSpan)
+  ) {
+    return cloneHydrateSnapshotNestedValue(storyTimeSpan, storyTimeSpan);
+  }
+  return {
+    ...storyTimeSpan,
+  };
+}
+
+function isPlainHydrateCloneableObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function cloneHydrateSnapshotPropertyValue(key, value) {
+  switch (key) {
+    case "fields":
+      return cloneHydrateSnapshotNestedValue(value, {});
+    case "seqRange":
+      return Array.isArray(value)
+        ? value.slice()
+        : cloneHydrateSnapshotNestedValue(value, value);
+    case "childIds":
+      return Array.isArray(value)
+        ? value.slice()
+        : cloneHydrateSnapshotNestedValue(value, value);
+    case "clusters":
+      return Array.isArray(value)
+        ? value.slice()
+        : cloneHydrateSnapshotNestedValue(value, value);
+    case "scope":
+      return cloneHydrateSnapshotMemoryScope(value);
+    case "storyTime":
+      return cloneHydrateSnapshotStoryTime(value);
+    case "storyTimeSpan":
+      return cloneHydrateSnapshotStoryTimeSpan(value);
+    default:
+      return value != null && typeof value === "object"
+        ? cloneHydrateSnapshotNestedValue(value, value)
+        : value;
+  }
+}
+
+function shouldLazyHydrateCloneProperty(key, value) {
+  if (value == null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return true;
+  switch (key) {
+    case "fields":
+    case "scope":
+    case "storyTime":
+    case "storyTimeSpan":
+      return true;
+    default:
+      return isPlainHydrateCloneableObject(value);
+  }
+}
+
+function defineLazyHydrateCloneProperty(target, key, value) {
+  let materialized = false;
+  let cachedValue;
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (!materialized) {
+        cachedValue = cloneHydrateSnapshotPropertyValue(key, value);
+        materialized = true;
+      }
+      return cachedValue;
+    },
+    set(nextValue) {
+      cachedValue = nextValue;
+      materialized = true;
+    },
+  });
+}
+
+function cloneHydrateSnapshotNodeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const cloned = {};
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (shouldLazyHydrateCloneProperty(key, value)) {
+      defineLazyHydrateCloneProperty(cloned, key, value);
+      continue;
+    }
+    cloned[key] = value;
+  }
+  return cloned;
+}
+
+function cloneHydrateSnapshotEdgeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const cloned = {};
+  for (const key of Object.keys(record)) {
+    const value = record[key];
+    if (shouldLazyHydrateCloneProperty(key, value)) {
+      defineLazyHydrateCloneProperty(cloned, key, value);
+      continue;
+    }
+    cloned[key] = value;
+  }
+  return cloned;
+}
+
+function cloneHydrateSnapshotNodeRecords(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const cloned = cloneHydrateSnapshotNodeRecord(sourceRecords[index]);
+    if (!cloned) continue;
+    output[writeIndex] = cloned;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
+}
+
+function hasSharedHydrateRecordReferences(records = [], sourceRecords = []) {
+  const normalizedSourceRecords = toArray(sourceRecords);
+  if (!normalizedSourceRecords.length || !Array.isArray(records) || !records.length) {
+    return false;
+  }
+  const sourceRecordSet = new WeakSet();
+  for (let index = 0; index < normalizedSourceRecords.length; index += 1) {
+    const record = normalizedSourceRecords[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    sourceRecordSet.add(record);
+  }
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    if (sourceRecordSet.has(record)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function normalizeNativeHydrateRecordArray(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const record = sourceRecords[index];
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    output[writeIndex] = record;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
+}
+
+function decodeNativeHydrateCompactValue(value) {
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (
+    typeof TextDecoder === "function" &&
+    ((typeof Uint8Array !== "undefined" && value instanceof Uint8Array) ||
+      (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer))
+  ) {
+    try {
+      const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function normalizeNativeHydrateResult(rawResult = null, snapshotView = {}) {
+  if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+    return null;
+  }
+  if (
+    rawResult.nodes === snapshotView?.nodes ||
+    rawResult.edges === snapshotView?.edges
+  ) {
+    return null;
+  }
+  const compactPayload =
+    decodeNativeHydrateCompactValue(rawResult.payloadJson) ||
+    decodeNativeHydrateCompactValue(rawResult.compactJson) ||
+    null;
+  const rawNodes =
+    rawResult.nodes ??
+    compactPayload?.nodes ??
+    decodeNativeHydrateCompactValue(rawResult.nodesJson);
+  const rawEdges =
+    rawResult.edges ??
+    compactPayload?.edges ??
+    decodeNativeHydrateCompactValue(rawResult.edgesJson);
+  const nodes = normalizeNativeHydrateRecordArray(rawNodes);
+  const edges = normalizeNativeHydrateRecordArray(rawEdges);
+  if (
+    hasSharedHydrateRecordReferences(nodes, snapshotView?.nodes) ||
+    hasSharedHydrateRecordReferences(edges, snapshotView?.edges)
+  ) {
+    return null;
+  }
+  const compactBridgeUsed =
+    rawNodes !== rawResult.nodes || rawEdges !== rawResult.edges;
+  return {
+    nodes,
+    edges,
+    diagnostics: {
+      ...((rawResult.diagnostics &&
+        typeof rawResult.diagnostics === "object" &&
+        !Array.isArray(rawResult.diagnostics)
+        ? rawResult.diagnostics
+        : null) || {}),
+      hydrateBridgeMode: compactBridgeUsed ? "compact-json" : "object",
+    },
+  };
+}
+
+function cloneHydrateSnapshotEdgeRecords(records = []) {
+  const sourceRecords = toArray(records);
+  if (sourceRecords.length === 0) return [];
+  const output = new Array(sourceRecords.length);
+  let writeIndex = 0;
+  for (let index = 0; index < sourceRecords.length; index += 1) {
+    const cloned = cloneHydrateSnapshotEdgeRecord(sourceRecords[index]);
+    if (!cloned) continue;
+    output[writeIndex] = cloned;
+    writeIndex += 1;
+  }
+  output.length = writeIndex;
+  return output;
+}
+
+function isNormalizedSnapshotNodeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  if (!Array.isArray(record.seqRange) || record.seqRange.length < 2) {
+    return false;
+  }
+  if (!Array.isArray(record.childIds) || !Array.isArray(record.clusters)) {
+    return false;
+  }
+  if (normalizeMemoryScope(record.scope) !== record.scope) {
+    return false;
+  }
+  if (normalizeStoryTime(record.storyTime) !== record.storyTime) {
+    return false;
+  }
+  if (normalizeStoryTimeSpan(record.storyTimeSpan) !== record.storyTimeSpan) {
+    return false;
+  }
+  return true;
+}
+
+function isNormalizedSnapshotEdgeRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  return normalizeMemoryScope(record.scope) === record.scope;
+}
+
+function areSnapshotRecordsNormalized(snapshotView = {}) {
+  for (const node of toArray(snapshotView?.nodes)) {
+    if (!isNormalizedSnapshotNodeRecord(node)) {
+      return false;
+    }
+  }
+  for (const edge of toArray(snapshotView?.edges)) {
+    if (!isNormalizedSnapshotEdgeRecord(edge)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function toMetaMap(rows = []) {
@@ -265,6 +699,40 @@ function countPersistSnapshotRecords(snapshot = {}) {
     toArray(snapshot?.edges).length +
     toArray(snapshot?.tombstones).length
   );
+}
+
+function countHydrateSnapshotRecords(snapshot = {}) {
+  return toArray(snapshot?.nodes).length + toArray(snapshot?.edges).length;
+}
+
+export function resolveNativeHydrateGateOptions(options = {}) {
+  return {
+    minSnapshotRecords: normalizePersistNativeDeltaThreshold(
+      options?.loadNativeHydrateThresholdRecords ??
+        options?.hydrateNativeThresholdRecords ??
+        options?.minSnapshotRecords,
+      DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS,
+    ),
+  };
+}
+
+export function evaluateNativeHydrateGate(snapshot, options = {}) {
+  const normalizedSnapshot = normalizePersistSnapshotView(snapshot);
+  const gateOptions = resolveNativeHydrateGateOptions(options);
+  const recordCount = countHydrateSnapshotRecords(normalizedSnapshot);
+  const reasons = [];
+  if (
+    gateOptions.minSnapshotRecords > 0 &&
+    recordCount < gateOptions.minSnapshotRecords
+  ) {
+    reasons.push("below-min-snapshot-records");
+  }
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    minSnapshotRecords: gateOptions.minSnapshotRecords,
+    recordCount,
+  };
 }
 
 function countPersistSnapshotStructuralDelta(beforeSnapshot = {}, afterSnapshot = {}) {
@@ -498,6 +966,7 @@ function buildPersistSnapshotGraphInput(graph = null, chatId = "") {
   if (chatId) {
     graphInput.historyState.chatId = chatId;
   }
+  cloneGraphPersistDirtyState(sourceGraph, graphInput);
   return graphInput;
 }
 
@@ -619,137 +1088,26 @@ function hasReusablePersistTombstoneRecord(baseRecord, normalized = {}) {
   return true;
 }
 
-export function buildSnapshotFromGraph(graph, options = {}) {
-  const baseSnapshotInput =
-    options?.baseSnapshot &&
-    typeof options.baseSnapshot === "object" &&
-    !Array.isArray(options.baseSnapshot)
-      ? options.baseSnapshot
-      : {};
-  const baseSnapshot = sanitizeSnapshot(baseSnapshotInput);
-  const baseSnapshotView = normalizePersistSnapshotView(baseSnapshotInput);
-  const nowMs = normalizeTimestamp(options.nowMs, Date.now());
-  const chatId =
-    normalizeChatId(options.chatId) ||
-    normalizeChatId(graph?.historyState?.chatId) ||
-    normalizeChatId(baseSnapshot.meta?.chatId);
-
-  const graphInput = buildPersistSnapshotGraphInput(graph, chatId);
-  const legacyActiveOwnerKey = String(
-    graphInput?.knowledgeState?.activeOwnerKey || "",
-  ).trim();
-  const legacyActiveRegion = String(
-    graphInput?.regionState?.activeRegion || "",
-  ).trim();
-  const legacyActiveSegmentId = String(
-    graphInput?.timelineState?.activeSegmentId || "",
-  ).trim();
-  graphInput.vectorIndexState.collectionId = buildVectorCollectionId(
-    chatId || graphInput.historyState.chatId || "",
-  );
-  const runtimeGraph = normalizeGraphRuntimeState(graphInput, chatId);
-  const baseNodeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.nodes);
-  const baseEdgeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.edges);
-  const baseTombstoneById = buildPersistSnapshotRecordByIdMap(
-    baseSnapshotView.tombstones,
-  );
-
-  const nodes = toArray(runtimeGraph?.nodes)
-    .map((node) => {
-      if (!node || typeof node !== "object" || Array.isArray(node)) {
-        return null;
-      }
-      const id = normalizeRecordId(node.id);
-      if (!id) return null;
-      const normalizedUpdatedAt = normalizeNodeUpdatedAt(node, nowMs);
-      const baseNode = baseNodeById.get(id);
-      if (
-        hasReusablePersistNodeRecord(baseNode, node, {
-          type: node.type,
-          updatedAt: normalizedUpdatedAt,
-        })
-      ) {
-        return baseNode;
-      }
-      const plainNode = clonePersistSnapshotRecord(node);
-      if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
-        return null;
-      }
-      plainNode.id = id;
-      plainNode.updatedAt = normalizedUpdatedAt;
-      return plainNode;
-    })
-    .filter(Boolean);
-
-  const edges = toArray(runtimeGraph?.edges)
-    .map((edge) => {
-      if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
-        return null;
-      }
-      const id = normalizeRecordId(edge.id);
-      if (!id) return null;
-      const normalizedFromId = normalizeRecordId(edge.fromId);
-      const normalizedToId = normalizeRecordId(edge.toId);
-      const normalizedUpdatedAt = normalizeEdgeUpdatedAt(edge, nowMs);
-      const baseEdge = baseEdgeById.get(id);
-      if (
-        hasReusablePersistEdgeRecord(baseEdge, edge, {
-          fromId: normalizedFromId,
-          toId: normalizedToId,
-          updatedAt: normalizedUpdatedAt,
-        })
-      ) {
-        return baseEdge;
-      }
-      const plainEdge = clonePersistSnapshotRecord(edge);
-      if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
-        return null;
-      }
-      plainEdge.id = id;
-      plainEdge.fromId = normalizedFromId;
-      plainEdge.toId = normalizedToId;
-      plainEdge.updatedAt = normalizedUpdatedAt;
-      return plainEdge;
-    })
-    .filter(Boolean);
-
-  const tombstones = toArray(options.tombstones ?? baseSnapshotView.tombstones)
-    .map((record) => {
-      if (!record || typeof record !== "object" || Array.isArray(record))
-        return null;
-      const id = normalizeRecordId(record.id);
-      if (!id) return null;
-      const normalizedKind = normalizeRecordId(record.kind);
-      const normalizedTargetId = normalizeRecordId(record.targetId);
-      const normalizedSourceDeviceId = normalizeRecordId(record.sourceDeviceId);
-      const normalizedDeletedAt = normalizeTimestamp(record.deletedAt, nowMs);
-      const baseTombstone = baseTombstoneById.get(id);
-      if (
-        hasReusablePersistTombstoneRecord(baseTombstone, {
-          kind: normalizedKind,
-          targetId: normalizedTargetId,
-          sourceDeviceId: normalizedSourceDeviceId,
-          deletedAt: normalizedDeletedAt,
-        })
-      ) {
-        return baseTombstone;
-      }
-      const plainRecord = clonePersistSnapshotRecord(record);
-      if (!plainRecord || typeof plainRecord !== "object" || Array.isArray(plainRecord)) {
-        return null;
-      }
-      plainRecord.id = id;
-      plainRecord.kind = normalizedKind;
-      plainRecord.targetId = normalizedTargetId;
-      plainRecord.sourceDeviceId = normalizedSourceDeviceId;
-      plainRecord.deletedAt = normalizedDeletedAt;
-      return plainRecord;
-    })
-    .filter(Boolean);
-
+function buildSnapshotRuntimeStateAndMeta(
+  runtimeGraph,
+  baseSnapshot = {},
+  {
+    chatId = "",
+    meta = null,
+    state: stateOverrides = null,
+    revision = undefined,
+    lastModified = undefined,
+    nodeCount = 0,
+    edgeCount = 0,
+    tombstoneCount = 0,
+    legacyActiveOwnerKey = "",
+    legacyActiveRegion = "",
+    legacyActiveSegmentId = "",
+  } = {},
+) {
   const state = {
     ...normalizeStateSnapshot(baseSnapshot),
-    ...(options.state || {}),
+    ...(stateOverrides || {}),
     lastProcessedFloor: Number.isFinite(
       Number(runtimeGraph?.historyState?.lastProcessedAssistantFloor),
     )
@@ -763,22 +1121,19 @@ export function buildSnapshotFromGraph(graph, options = {}) {
       ? Number(runtimeGraph.historyState.extractionCount)
       : META_DEFAULT_EXTRACTION_COUNT,
   };
-
   const mergedMeta = {
     ...baseSnapshot.meta,
-    ...(options.meta || {}),
+    ...(meta || {}),
     schemaVersion: BME_DB_SCHEMA_VERSION,
     chatId,
-    revision: normalizeRevision(
-      options.revision ?? baseSnapshot.meta?.revision,
-    ),
+    revision: normalizeRevision(revision ?? baseSnapshot.meta?.revision),
     lastModified: normalizeTimestamp(
-      options.lastModified ?? baseSnapshot.meta?.lastModified,
-      nowMs,
+      lastModified ?? baseSnapshot.meta?.lastModified,
+      Date.now(),
     ),
-    nodeCount: nodes.length,
-    edgeCount: edges.length,
-    tombstoneCount: tombstones.length,
+    nodeCount: normalizeNonNegativeInteger(nodeCount, 0),
+    edgeCount: normalizeNonNegativeInteger(edgeCount, 0),
+    tombstoneCount: normalizeNonNegativeInteger(tombstoneCount, 0),
     [BME_RUNTIME_HISTORY_META_KEY]: toPlainData(
       runtimeGraph?.historyState || {},
       {},
@@ -848,15 +1203,574 @@ export function buildSnapshotFromGraph(graph, options = {}) {
     )
       ? Number(runtimeGraph.version)
       : Number(baseSnapshot.meta?.[BME_RUNTIME_GRAPH_VERSION_META_KEY] || 0),
+    [BME_RUNTIME_RECORDS_NORMALIZED_META_KEY]: true,
   };
-
   return {
+    state,
+    meta: mergedMeta,
+  };
+}
+
+function buildDirtyPersistNodeRecord(node, baseNodeById = new Map(), nowMs = Date.now()) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    return null;
+  }
+  const id = normalizeRecordId(node.id);
+  if (!id) return null;
+  const normalizedUpdatedAt = normalizeNodeUpdatedAt(node, nowMs);
+  const baseNode = baseNodeById.get(id);
+  if (
+    hasReusablePersistNodeRecord(baseNode, node, {
+      type: node.type,
+      updatedAt: normalizedUpdatedAt,
+    })
+  ) {
+    return baseNode;
+  }
+  const plainNode = clonePersistSnapshotRecord(node);
+  if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
+    return null;
+  }
+  plainNode.id = id;
+  plainNode.updatedAt = normalizedUpdatedAt;
+  return plainNode;
+}
+
+function buildDirtyPersistEdgeRecord(edge, baseEdgeById = new Map(), nowMs = Date.now()) {
+  if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
+    return null;
+  }
+  const id = normalizeRecordId(edge.id);
+  if (!id) return null;
+  const normalizedFromId = normalizeRecordId(edge.fromId);
+  const normalizedToId = normalizeRecordId(edge.toId);
+  const normalizedUpdatedAt = normalizeEdgeUpdatedAt(edge, nowMs);
+  const baseEdge = baseEdgeById.get(id);
+  if (
+    hasReusablePersistEdgeRecord(baseEdge, edge, {
+      fromId: normalizedFromId,
+      toId: normalizedToId,
+      updatedAt: normalizedUpdatedAt,
+    })
+  ) {
+    return baseEdge;
+  }
+  const plainEdge = clonePersistSnapshotRecord(edge);
+  if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
+    return null;
+  }
+  plainEdge.id = id;
+  plainEdge.fromId = normalizedFromId;
+  plainEdge.toId = normalizedToId;
+  plainEdge.updatedAt = normalizedUpdatedAt;
+  return plainEdge;
+}
+
+export function buildPersistDeltaFromGraphDirtyState(
+  baseSnapshotInput,
+  graph,
+  options = {},
+) {
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const buildStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const baseSnapshot = sanitizeSnapshot(baseSnapshotInput);
+  const baseSnapshotView = normalizePersistSnapshotView(baseSnapshotInput);
+  const nowMs = normalizeTimestamp(options.nowMs, Date.now());
+  const chatId =
+    normalizeChatId(options.chatId) ||
+    normalizeChatId(graph?.historyState?.chatId) ||
+    normalizeChatId(baseSnapshot.meta?.chatId);
+  const graphInput = buildPersistSnapshotGraphInput(graph, chatId);
+  const runtimeGraph = normalizeGraphRuntimeState(graphInput, chatId);
+  const dirtyState = getGraphPersistDirtyStateSnapshot(runtimeGraph);
+  const baseDiagnostics = {
+    requestedNative: false,
+    requestedBridgeMode: "dirty-runtime",
+    usedNative: false,
+    path: "dirty-runtime",
+    gateAllowed: true,
+    gateReasons: ["dirty-runtime"],
+    nativeAttemptStatus: "not-requested",
+    nativeError: "",
+    beforeRecordCount:
+      toArray(baseSnapshotView.nodes).length +
+      toArray(baseSnapshotView.edges).length +
+      toArray(baseSnapshotView.tombstones).length,
+    afterRecordCount:
+      toArray(runtimeGraph?.nodes).length +
+      toArray(runtimeGraph?.edges).length +
+      toArray(baseSnapshotView.tombstones).length,
+    maxSnapshotRecords: 0,
+    structuralDelta: 0,
+    beforeSerializedChars: 0,
+    afterSerializedChars: 0,
+    combinedSerializedChars: 0,
+    prepareMs: 0,
+    nativeAttemptMs: 0,
+    lookupMs: 0,
+    jsDiffMs: 0,
+    hydrateMs: 0,
+    serializationCacheObjectHits: 0,
+    serializationCacheTokenHits: 0,
+    serializationCacheMisses: 0,
+    serializationCacheHits: 0,
+    preparedRecordSetCacheHits: 0,
+    preparedRecordSetCacheMisses: 0,
+    minCombinedSerializedChars: 0,
+    upsertNodeCount: 0,
+    upsertEdgeCount: 0,
+    deleteNodeCount: 0,
+    deleteEdgeCount: 0,
+    tombstoneCount: 0,
+    dirtyStateVersion: Math.max(0, Math.floor(Number(dirtyState?.version || 0))),
+    dirtyRuntimeMeta: dirtyState?.runtimeMetaDirty === true,
+    dirtyRequiresFullSnapshot: dirtyState?.fullSnapshotRequired === true,
+  };
+  if (!dirtyState) {
+    emitOptionalDiagnostics(options, {
+      ...baseDiagnostics,
+      path: "dirty-runtime-miss",
+      gateAllowed: false,
+      gateReasons: ["dirty-state-missing"],
+      buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+    });
+    return null;
+  }
+  if (dirtyState.fullSnapshotRequired === true) {
+    emitOptionalDiagnostics(options, {
+      ...baseDiagnostics,
+      path: "dirty-runtime-fallback",
+      gateAllowed: false,
+      gateReasons: ["full-snapshot-required"],
+      buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+    });
+    return null;
+  }
+  const dirtyNodeUpsertIds = Array.isArray(dirtyState.nodeUpsertIds)
+    ? dirtyState.nodeUpsertIds
+    : [];
+  const dirtyEdgeUpsertIds = Array.isArray(dirtyState.edgeUpsertIds)
+    ? dirtyState.edgeUpsertIds
+    : [];
+  const deleteNodeIds = Array.isArray(dirtyState.deleteNodeIds)
+    ? dirtyState.deleteNodeIds.map((id) => normalizeRecordId(id)).filter(Boolean)
+    : [];
+  const deleteEdgeIds = Array.isArray(dirtyState.deleteEdgeIds)
+    ? dirtyState.deleteEdgeIds.map((id) => normalizeRecordId(id)).filter(Boolean)
+    : [];
+  const hasDirtyPayload =
+    dirtyNodeUpsertIds.length > 0 ||
+    dirtyEdgeUpsertIds.length > 0 ||
+    deleteNodeIds.length > 0 ||
+    deleteEdgeIds.length > 0 ||
+    dirtyState.runtimeMetaDirty === true;
+  if (!hasDirtyPayload) {
+    emitOptionalDiagnostics(options, {
+      ...baseDiagnostics,
+      path: "dirty-runtime-empty",
+      gateAllowed: false,
+      gateReasons: ["dirty-state-empty"],
+      buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+    });
+    return null;
+  }
+
+  const baseNodeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.nodes);
+  const baseEdgeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.edges);
+  const baseTombstoneById = buildPersistSnapshotRecordByIdMap(
+    baseSnapshotView.tombstones,
+  );
+  const runtimeNodeById = buildPersistSnapshotRecordByIdMap(runtimeGraph.nodes);
+  const runtimeEdgeById = buildPersistSnapshotRecordByIdMap(runtimeGraph.edges);
+
+  const upsertNodes = [];
+  for (const nodeId of dirtyNodeUpsertIds) {
+    const node = runtimeNodeById.get(normalizeRecordId(nodeId));
+    if (!node) {
+      emitOptionalDiagnostics(options, {
+        ...baseDiagnostics,
+        path: "dirty-runtime-fallback",
+        gateAllowed: false,
+        gateReasons: ["missing-dirty-node-record"],
+        buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+      });
+      return null;
+    }
+    const plainNode = buildDirtyPersistNodeRecord(node, baseNodeById, nowMs);
+    if (!plainNode) {
+      emitOptionalDiagnostics(options, {
+        ...baseDiagnostics,
+        path: "dirty-runtime-fallback",
+        gateAllowed: false,
+        gateReasons: ["clone-dirty-node-failed"],
+        buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+      });
+      return null;
+    }
+    upsertNodes.push(plainNode);
+  }
+
+  const upsertEdges = [];
+  for (const edgeId of dirtyEdgeUpsertIds) {
+    const edge = runtimeEdgeById.get(normalizeRecordId(edgeId));
+    if (!edge) {
+      emitOptionalDiagnostics(options, {
+        ...baseDiagnostics,
+        path: "dirty-runtime-fallback",
+        gateAllowed: false,
+        gateReasons: ["missing-dirty-edge-record"],
+        buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+      });
+      return null;
+    }
+    const plainEdge = buildDirtyPersistEdgeRecord(edge, baseEdgeById, nowMs);
+    if (!plainEdge) {
+      emitOptionalDiagnostics(options, {
+        ...baseDiagnostics,
+        path: "dirty-runtime-fallback",
+        gateAllowed: false,
+        gateReasons: ["clone-dirty-edge-failed"],
+        buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+      });
+      return null;
+    }
+    upsertEdges.push(plainEdge);
+  }
+
+  const sourceDeviceId = normalizeRecordId(
+    options?.meta?.deviceId || baseSnapshot.meta?.deviceId || "",
+  );
+  const tombstones = [];
+  const nextTombstoneIds = new Set(
+    toArray(baseSnapshotView.tombstones)
+      .map((record) => normalizeRecordId(record?.id))
+      .filter(Boolean),
+  );
+  const pushDeleteTombstone = (kind, targetId) => {
+    const normalizedKind = normalizeRecordId(kind);
+    const normalizedTargetId = normalizeRecordId(targetId);
+    if (!normalizedKind || !normalizedTargetId) return;
+    const tombstoneRecord = {
+      id: `${normalizedKind}:${normalizedTargetId}`,
+      kind: normalizedKind,
+      targetId: normalizedTargetId,
+      sourceDeviceId,
+      deletedAt: nowMs,
+    };
+    const baseTombstone = baseTombstoneById.get(tombstoneRecord.id);
+    if (
+      hasReusablePersistTombstoneRecord(baseTombstone, tombstoneRecord)
+    ) {
+      nextTombstoneIds.add(tombstoneRecord.id);
+      return;
+    }
+    tombstones.push(tombstoneRecord);
+    nextTombstoneIds.add(tombstoneRecord.id);
+  };
+  for (const nodeId of deleteNodeIds) {
+    pushDeleteTombstone("node", nodeId);
+  }
+  for (const edgeId of deleteEdgeIds) {
+    pushDeleteTombstone("edge", edgeId);
+  }
+
+  const legacyActiveOwnerKey = String(
+    graphInput?.knowledgeState?.activeOwnerKey || "",
+  ).trim();
+  const legacyActiveRegion = String(
+    graphInput?.regionState?.activeRegion || "",
+  ).trim();
+  const legacyActiveSegmentId = String(
+    graphInput?.timelineState?.activeSegmentId || "",
+  ).trim();
+  const runtimeMetaBundle = buildSnapshotRuntimeStateAndMeta(runtimeGraph, baseSnapshot, {
+    chatId,
+    meta: options.meta || {},
+    state: options.state || {},
+    revision: options.revision,
+    lastModified: options.lastModified ?? nowMs,
+    nodeCount: toArray(runtimeGraph?.nodes).length,
+    edgeCount: toArray(runtimeGraph?.edges).length,
+    tombstoneCount: nextTombstoneIds.size,
+    legacyActiveOwnerKey,
+    legacyActiveRegion,
+    legacyActiveSegmentId,
+  });
+  const runtimeMetaPatch = buildRuntimeMetaPatch({
+    meta: runtimeMetaBundle.meta,
+    state: runtimeMetaBundle.state,
+  });
+
+  const previousCounts = {
+    nodes: toArray(baseSnapshotView.nodes).length,
+    edges: toArray(baseSnapshotView.edges).length,
+    tombstones: toArray(baseSnapshotView.tombstones).length,
+  };
+  const nextCounts = {
+    nodes: toArray(runtimeGraph?.nodes).length,
+    edges: toArray(runtimeGraph?.edges).length,
+    tombstones: nextTombstoneIds.size,
+  };
+  const result = {
+    upsertNodes,
+    upsertEdges,
+    deleteNodeIds,
+    deleteEdgeIds,
+    tombstones,
+    runtimeMetaPatch,
+    countDelta: {
+      previous: previousCounts,
+      next: nextCounts,
+    },
+  };
+  const diagnostics = {
+    ...baseDiagnostics,
+    beforeRecordCount:
+      previousCounts.nodes + previousCounts.edges + previousCounts.tombstones,
+    afterRecordCount: nextCounts.nodes + nextCounts.edges + nextCounts.tombstones,
+    maxSnapshotRecords: Math.max(
+      previousCounts.nodes + previousCounts.edges + previousCounts.tombstones,
+      nextCounts.nodes + nextCounts.edges + nextCounts.tombstones,
+    ),
+    structuralDelta:
+      upsertNodes.length +
+      upsertEdges.length +
+      deleteNodeIds.length +
+      deleteEdgeIds.length,
+    upsertNodeCount: upsertNodes.length,
+    upsertEdgeCount: upsertEdges.length,
+    deleteNodeCount: deleteNodeIds.length,
+    deleteEdgeCount: deleteEdgeIds.length,
+    tombstoneCount: tombstones.length,
+    buildMs: shouldCollectDiagnostics ? readPersistDeltaNow() - buildStartedAt : 0,
+  };
+  emitOptionalDiagnostics(options, diagnostics);
+  return result;
+}
+
+export function buildSnapshotFromGraph(graph, options = {}) {
+  const baseSnapshotInput =
+    options?.baseSnapshot &&
+    typeof options.baseSnapshot === "object" &&
+    !Array.isArray(options.baseSnapshot)
+      ? options.baseSnapshot
+      : {};
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const snapshotStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const snapshotDiagnostics = shouldCollectDiagnostics
+    ? {
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+        reusedNodeCount: 0,
+        reusedEdgeCount: 0,
+        reusedTombstoneCount: 0,
+        clonedNodeCount: 0,
+        clonedEdgeCount: 0,
+        clonedTombstoneCount: 0,
+        nodesMs: 0,
+        edgesMs: 0,
+        tombstonesMs: 0,
+        stateMs: 0,
+        metaMs: 0,
+      }
+    : null;
+  const baseSnapshot = sanitizeSnapshot(baseSnapshotInput);
+  const baseSnapshotView = normalizePersistSnapshotView(baseSnapshotInput);
+  const nowMs = normalizeTimestamp(options.nowMs, Date.now());
+  const chatId =
+    normalizeChatId(options.chatId) ||
+    normalizeChatId(graph?.historyState?.chatId) ||
+    normalizeChatId(baseSnapshot.meta?.chatId);
+
+  const graphInput = buildPersistSnapshotGraphInput(graph, chatId);
+  const legacyActiveOwnerKey = String(
+    graphInput?.knowledgeState?.activeOwnerKey || "",
+  ).trim();
+  const legacyActiveRegion = String(
+    graphInput?.regionState?.activeRegion || "",
+  ).trim();
+  const legacyActiveSegmentId = String(
+    graphInput?.timelineState?.activeSegmentId || "",
+  ).trim();
+  graphInput.vectorIndexState.collectionId = buildVectorCollectionId(
+    chatId || graphInput.historyState.chatId || "",
+  );
+  const runtimeGraph = normalizeGraphRuntimeState(graphInput, chatId);
+  const baseNodeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.nodes);
+  const baseEdgeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.edges);
+  const baseTombstoneById = buildPersistSnapshotRecordByIdMap(
+    baseSnapshotView.tombstones,
+  );
+
+  const nodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const nodes = toArray(runtimeGraph?.nodes)
+    .map((node) => {
+      if (!node || typeof node !== "object" || Array.isArray(node)) {
+        return null;
+      }
+      const id = normalizeRecordId(node.id);
+      if (!id) return null;
+      const normalizedUpdatedAt = normalizeNodeUpdatedAt(node, nowMs);
+      const baseNode = baseNodeById.get(id);
+      if (
+        hasReusablePersistNodeRecord(baseNode, node, {
+          type: node.type,
+          updatedAt: normalizedUpdatedAt,
+        })
+      ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedNodeCount += 1;
+        }
+        return baseNode;
+      }
+      const plainNode = clonePersistSnapshotRecord(node);
+      if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
+        return null;
+      }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedNodeCount += 1;
+      }
+      plainNode.id = id;
+      plainNode.updatedAt = normalizedUpdatedAt;
+      return plainNode;
+    })
+    .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.nodeCount = nodes.length;
+    snapshotDiagnostics.nodesMs = readPersistDeltaNow() - nodesStartedAt;
+  }
+
+  const edgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const edges = toArray(runtimeGraph?.edges)
+    .map((edge) => {
+      if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
+        return null;
+      }
+      const id = normalizeRecordId(edge.id);
+      if (!id) return null;
+      const normalizedFromId = normalizeRecordId(edge.fromId);
+      const normalizedToId = normalizeRecordId(edge.toId);
+      const normalizedUpdatedAt = normalizeEdgeUpdatedAt(edge, nowMs);
+      const baseEdge = baseEdgeById.get(id);
+      if (
+        hasReusablePersistEdgeRecord(baseEdge, edge, {
+          fromId: normalizedFromId,
+          toId: normalizedToId,
+          updatedAt: normalizedUpdatedAt,
+        })
+      ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedEdgeCount += 1;
+        }
+        return baseEdge;
+      }
+      const plainEdge = clonePersistSnapshotRecord(edge);
+      if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
+        return null;
+      }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedEdgeCount += 1;
+      }
+      plainEdge.id = id;
+      plainEdge.fromId = normalizedFromId;
+      plainEdge.toId = normalizedToId;
+      plainEdge.updatedAt = normalizedUpdatedAt;
+      return plainEdge;
+    })
+    .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.edgeCount = edges.length;
+    snapshotDiagnostics.edgesMs = readPersistDeltaNow() - edgesStartedAt;
+  }
+
+  const tombstonesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const tombstones = toArray(options.tombstones ?? baseSnapshotView.tombstones)
+    .map((record) => {
+      if (!record || typeof record !== "object" || Array.isArray(record))
+        return null;
+      const id = normalizeRecordId(record.id);
+      if (!id) return null;
+      const normalizedKind = normalizeRecordId(record.kind);
+      const normalizedTargetId = normalizeRecordId(record.targetId);
+      const normalizedSourceDeviceId = normalizeRecordId(record.sourceDeviceId);
+      const normalizedDeletedAt = normalizeTimestamp(record.deletedAt, nowMs);
+      const baseTombstone = baseTombstoneById.get(id);
+      if (
+        hasReusablePersistTombstoneRecord(baseTombstone, {
+          kind: normalizedKind,
+          targetId: normalizedTargetId,
+          sourceDeviceId: normalizedSourceDeviceId,
+          deletedAt: normalizedDeletedAt,
+        })
+      ) {
+        if (snapshotDiagnostics) {
+          snapshotDiagnostics.reusedTombstoneCount += 1;
+        }
+        return baseTombstone;
+      }
+      const plainRecord = clonePersistSnapshotRecord(record);
+      if (!plainRecord || typeof plainRecord !== "object" || Array.isArray(plainRecord)) {
+        return null;
+      }
+      if (snapshotDiagnostics) {
+        snapshotDiagnostics.clonedTombstoneCount += 1;
+      }
+      plainRecord.id = id;
+      plainRecord.kind = normalizedKind;
+      plainRecord.targetId = normalizedTargetId;
+      plainRecord.sourceDeviceId = normalizedSourceDeviceId;
+      plainRecord.deletedAt = normalizedDeletedAt;
+      return plainRecord;
+    })
+    .filter(Boolean);
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.tombstoneCount = tombstones.length;
+    snapshotDiagnostics.tombstonesMs =
+      readPersistDeltaNow() - tombstonesStartedAt;
+  }
+
+  const stateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const runtimeMetaBundle = buildSnapshotRuntimeStateAndMeta(runtimeGraph, baseSnapshot, {
+    chatId,
+    meta: options.meta || {},
+    state: options.state || {},
+    revision: options.revision,
+    lastModified: options.lastModified,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    tombstoneCount: tombstones.length,
+    legacyActiveOwnerKey,
+    legacyActiveRegion,
+    legacyActiveSegmentId,
+  });
+  const state = runtimeMetaBundle.state;
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.stateMs = readPersistDeltaNow() - stateStartedAt;
+  }
+
+  const metaStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const mergedMeta = runtimeMetaBundle.meta;
+  if (snapshotDiagnostics) {
+    snapshotDiagnostics.metaMs = readPersistDeltaNow() - metaStartedAt;
+  }
+
+  const snapshotResult = {
     meta: mergedMeta,
     nodes,
     edges,
     tombstones,
     state,
   };
+  if (snapshotDiagnostics) {
+    emitOptionalDiagnostics(options, {
+      ...snapshotDiagnostics,
+      runtimeMetaKeyCount: Object.keys(mergedMeta).length,
+      totalMs: readPersistDeltaNow() - snapshotStartedAt,
+    });
+  }
+
+  return snapshotResult;
 }
 
 function normalizeSnapshotMetaState(snapshot = {}) {
@@ -1610,13 +2524,17 @@ function readPersistDeltaNow() {
   return Date.now();
 }
 
-function emitPersistDeltaDiagnostics(options = {}, snapshot = null) {
+function emitOptionalDiagnostics(options = {}, snapshot = null) {
   if (typeof options?.onDiagnostics !== "function") return;
   try {
     options.onDiagnostics(snapshot ? toPlainData(snapshot, snapshot) : null);
   } catch {
     // ignore diagnostics callback failures
   }
+}
+
+function emitPersistDeltaDiagnostics(options = {}, snapshot = null) {
+  emitOptionalDiagnostics(options, snapshot);
 }
 
 function tryBuildNativePersistDelta(
@@ -1996,6 +2914,31 @@ export function buildPersistDelta(beforeSnapshot, afterSnapshot, options = {}) {
 }
 
 export function buildGraphFromSnapshot(snapshot, options = {}) {
+  const shouldCollectDiagnostics = typeof options?.onDiagnostics === "function";
+  const hydrateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const hydrateDiagnostics = shouldCollectDiagnostics
+    ? {
+        success: false,
+        nodeCount: 0,
+        edgeCount: 0,
+        tombstoneCount: 0,
+        nodesMs: 0,
+        edgesMs: 0,
+        runtimeMetaMs: 0,
+        stateMs: 0,
+        normalizeMs: 0,
+        integrityMs: 0,
+        integrityReasonCount: 0,
+        nativeRequested: false,
+        nativeUsed: false,
+        nativeStatus: "not-requested",
+        nativeError: "",
+        nativeRecordsMs: 0,
+        nativeGateAllowed: false,
+        nativeGateReasons: [],
+        nativeModuleDiagnostics: null,
+      }
+    : null;
   const snapshotView = normalizePersistSnapshotView(snapshot);
   const snapshotMeta =
     snapshotView.meta &&
@@ -2013,6 +2956,69 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     normalizeChatId(options.chatId) ||
     normalizeChatId(snapshotMeta?.chatId) ||
     normalizeChatId(snapshotState?.chatId);
+  const snapshotHistoryState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY],
+    {},
+  );
+  const snapshotVectorState = toPlainData(
+    snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY],
+    {},
+  );
+  const snapshotRecordsNormalized =
+    snapshotMeta?.[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY] === true &&
+    areSnapshotRecordsNormalized(snapshotView);
+  const nativeHydrateGate =
+    options?.useNativeHydrate === true
+      ? evaluateNativeHydrateGate(snapshotView, options)
+      : null;
+  const nativeHydrateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  let nativeHydrateAttempt =
+    options?.useNativeHydrate !== true
+      ? {
+          rawResult: null,
+          status: "not-requested",
+          error: "",
+        }
+      : nativeHydrateGate?.allowed === false
+        ? {
+            rawResult: null,
+            status: "gated-out",
+            error: "",
+          }
+        : tryBuildNativeHydrateRecords(
+            snapshotView,
+            {
+              ...options,
+              recordsNormalized: snapshotRecordsNormalized,
+            },
+          );
+  let nativeHydrateResult = normalizeNativeHydrateResult(
+    nativeHydrateAttempt.rawResult,
+    snapshotView,
+  );
+  if (nativeHydrateAttempt.rawResult && !nativeHydrateResult) {
+    if (options?.nativeFailOpen === false) {
+      throw new Error("native-hydrate-invalid-result");
+    }
+    nativeHydrateAttempt = {
+      rawResult: null,
+      status: "invalid-result",
+      error: "native-hydrate-invalid-result",
+    };
+  }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.nativeRequested = options?.useNativeHydrate === true;
+    hydrateDiagnostics.nativeStatus = nativeHydrateAttempt.status;
+    hydrateDiagnostics.nativeError = nativeHydrateAttempt.error;
+    hydrateDiagnostics.nativeGateAllowed = nativeHydrateGate?.allowed ?? false;
+    hydrateDiagnostics.nativeGateReasons = nativeHydrateGate?.reasons || [];
+    hydrateDiagnostics.nativeModuleDiagnostics =
+      nativeHydrateResult?.diagnostics || null;
+    if (nativeHydrateAttempt.rawResult) {
+      hydrateDiagnostics.nativeRecordsMs =
+        readPersistDeltaNow() - nativeHydrateStartedAt;
+    }
+  }
 
   const runtimeGraph = createEmptyGraph();
   runtimeGraph.version = Number.isFinite(
@@ -2020,21 +3026,38 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(snapshotMeta[BME_RUNTIME_GRAPH_VERSION_META_KEY])
     : runtimeGraph.version;
-  runtimeGraph.nodes = toArray(snapshotView.nodes).map((node) => ({
-    ...(node || {}),
-  }));
-  runtimeGraph.edges = toArray(snapshotView.edges).map((edge) => ({
-    ...(edge || {}),
-  }));
+
+  const hydrateNodesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  runtimeGraph.nodes = nativeHydrateResult
+    ? nativeHydrateResult.nodes
+    : cloneHydrateSnapshotNodeRecords(snapshotView.nodes);
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.nodeCount = runtimeGraph.nodes.length;
+    hydrateDiagnostics.nodesMs = readPersistDeltaNow() - hydrateNodesStartedAt;
+  }
+
+  const hydrateEdgesStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  runtimeGraph.edges = nativeHydrateResult
+    ? nativeHydrateResult.edges
+    : cloneHydrateSnapshotEdgeRecords(snapshotView.edges);
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.edgeCount = runtimeGraph.edges.length;
+    hydrateDiagnostics.edgesMs = readPersistDeltaNow() - hydrateEdgesStartedAt;
+    hydrateDiagnostics.nativeUsed = Boolean(nativeHydrateResult);
+  }
+
+  const hydrateRuntimeMetaStartedAt = shouldCollectDiagnostics
+    ? readPersistDeltaNow()
+    : 0;
   runtimeGraph.batchJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_BATCH_JOURNAL_META_KEY], []),
   );
   runtimeGraph.lastRecallResult = toPlainData(
     snapshotMeta?.[BME_RUNTIME_LAST_RECALL_META_KEY],
     null,
   );
   runtimeGraph.maintenanceJournal = toArray(
-    snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY],
+    toPlainData(snapshotMeta?.[BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY], []),
   );
   runtimeGraph.knowledgeState = toPlainData(
     snapshotMeta?.[BME_RUNTIME_KNOWLEDGE_STATE_META_KEY],
@@ -2052,6 +3075,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     snapshotMeta?.[BME_RUNTIME_SUMMARY_STATE_META_KEY],
     runtimeGraph.summaryState || {},
   );
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.runtimeMetaMs =
+      readPersistDeltaNow() - hydrateRuntimeMetaStartedAt;
+  }
   const rawKnowledgeState =
     runtimeGraph.knowledgeState &&
     typeof runtimeGraph.knowledgeState === "object" &&
@@ -2071,24 +3098,24 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
       ? runtimeGraph.timelineState
       : {};
 
+  const hydrateStateStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   runtimeGraph.historyState = {
     ...(runtimeGraph.historyState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY] || {}),
+    ...snapshotHistoryState,
     lastProcessedAssistantFloor: Number.isFinite(
       Number(snapshotState?.lastProcessedFloor),
     )
       ? Number(snapshotState.lastProcessedFloor)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.lastProcessedAssistantFloor ?? META_DEFAULT_LAST_PROCESSED_FLOOR,
+          snapshotHistoryState?.lastProcessedAssistantFloor ??
+            META_DEFAULT_LAST_PROCESSED_FLOOR,
         ),
     extractionCount: Number.isFinite(
       Number(snapshotState?.extractionCount),
     )
       ? Number(snapshotState.extractionCount)
       : Number(
-          snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]
-            ?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
+          snapshotHistoryState?.extractionCount ?? META_DEFAULT_EXTRACTION_COUNT,
         ),
   };
   if (
@@ -2146,10 +3173,10 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   }
   runtimeGraph.vectorIndexState = {
     ...(runtimeGraph.vectorIndexState || {}),
-    ...(snapshotMeta?.[BME_RUNTIME_VECTOR_META_KEY] || {}),
+    ...snapshotVectorState,
     collectionId: buildVectorCollectionId(
       chatId ||
-        snapshotMeta?.[BME_RUNTIME_HISTORY_META_KEY]?.chatId ||
+        snapshotHistoryState?.chatId ||
         runtimeGraph.historyState?.chatId ||
         "",
     ),
@@ -2160,8 +3187,98 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   )
     ? Number(snapshotMeta[BME_RUNTIME_LAST_PROCESSED_SEQ_META_KEY])
     : Number(runtimeGraph.historyState.lastProcessedAssistantFloor);
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.tombstoneCount = toArray(snapshotView.tombstones).length;
+    hydrateDiagnostics.stateMs = readPersistDeltaNow() - hydrateStateStartedAt;
+  }
 
-  const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId);
+  const recordNormalizationContext = {};
+  const normalizeStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
+  const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId, {
+    skipRecordFieldNormalization: snapshotRecordsNormalized,
+    recordNormalizationContext,
+  });
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.normalizeMs = readPersistDeltaNow() - normalizeStartedAt;
+  }
+  const normalizedNodeIds = Array.isArray(
+    recordNormalizationContext.normalizedNodeIds,
+  )
+    ? recordNormalizationContext.normalizedNodeIds
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean)
+    : [];
+  const normalizedEdgeIds = Array.isArray(
+    recordNormalizationContext.normalizedEdgeIds,
+  )
+    ? recordNormalizationContext.normalizedEdgeIds
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean)
+    : [];
+  if (normalizedNodeIds.length > 0 || normalizedEdgeIds.length > 0) {
+    const nodeById = new Map(
+      toArray(normalizedGraph.nodes)
+        .map((node) => [normalizeRecordId(node?.id), node])
+        .filter(([id]) => Boolean(id)),
+    );
+    const vectorReplayRequiredNodeIds = new Set(
+      toArray(normalizedGraph.vectorIndexState?.replayRequiredNodeIds)
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean),
+    );
+    let repairFloor = Number.isFinite(
+      Number(normalizedGraph.vectorIndexState?.pendingRepairFromFloor),
+    )
+      ? Number(normalizedGraph.vectorIndexState.pendingRepairFromFloor)
+      : null;
+    for (const nodeId of normalizedNodeIds) {
+      const node = nodeById.get(nodeId) || null;
+      if (!node) {
+        continue;
+      }
+      markGraphPersistNodeUpsert(normalizedGraph, node, "scope-auto-repair", "snapshot.hydrate");
+      if (hasMeaningfulMemoryScope(node.scope)) {
+        vectorReplayRequiredNodeIds.add(nodeId);
+        const sourceFloor = Number(node?.sourceFloor ?? node?.seq);
+        if (Number.isFinite(sourceFloor)) {
+          repairFloor =
+            repairFloor == null
+              ? Math.max(0, Math.floor(sourceFloor))
+              : Math.min(repairFloor, Math.max(0, Math.floor(sourceFloor)));
+        }
+      }
+    }
+    for (const edgeId of normalizedEdgeIds) {
+      const edge = toArray(normalizedGraph.edges).find(
+        (entry) => normalizeRecordId(entry?.id) === edgeId,
+      );
+      if (!edge) {
+        continue;
+      }
+      markGraphPersistEdgeUpsert(normalizedGraph, edge, "scope-auto-repair", "snapshot.hydrate");
+    }
+    markGraphPersistRuntimeMetaDirty(
+      normalizedGraph,
+      "scope-auto-repair-runtime-meta",
+      "snapshot.hydrate",
+    );
+    if (vectorReplayRequiredNodeIds.size > 0) {
+      normalizedGraph.vectorIndexState.replayRequiredNodeIds = [
+        ...vectorReplayRequiredNodeIds,
+      ];
+      normalizedGraph.vectorIndexState.dirty = true;
+      normalizedGraph.vectorIndexState.dirtyReason =
+        normalizedGraph.vectorIndexState.dirtyReason || "scope-auto-repair";
+      normalizedGraph.vectorIndexState.lastWarning =
+        normalizedGraph.vectorIndexState.lastWarning ||
+        "已自动修复旧作用域结构，相关向量会按需重放";
+      normalizedGraph.vectorIndexState.pendingRepairFromFloor = repairFloor;
+    }
+  }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.scopeRepairNodeCount = normalizedNodeIds.length;
+    hydrateDiagnostics.scopeRepairEdgeCount = normalizedEdgeIds.length;
+  }
   if (
     normalizedGraph.knowledgeState &&
     typeof normalizedGraph.knowledgeState === "object" &&
@@ -2215,6 +3332,7 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   );
   const inconsistentReasons = [];
 
+  const integrityStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   if (
     Number.isFinite(resolvedLastProcessedFloor) &&
     Number.isFinite(resolvedLastProcessedSeq) &&
@@ -2232,8 +3350,20 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
   if (collectionId && collectionId !== expectedCollectionId) {
     inconsistentReasons.push("vector-collection-mismatch");
   }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.integrityMs = readPersistDeltaNow() - integrityStartedAt;
+    hydrateDiagnostics.integrityReasonCount = inconsistentReasons.length;
+  }
 
   if (inconsistentReasons.length > 0) {
+    if (hydrateDiagnostics) {
+      emitOptionalDiagnostics(options, {
+        ...hydrateDiagnostics,
+        success: false,
+        integrityReasons: [...inconsistentReasons],
+        totalMs: readPersistDeltaNow() - hydrateStartedAt,
+      });
+    }
     const error = new Error(
       `图谱快照完整性校验失败: ${inconsistentReasons.join(", ")}`,
     );
@@ -2241,6 +3371,15 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     error.reasons = inconsistentReasons;
     error.snapshotChatId = chatId;
     throw error;
+  }
+
+  if (hydrateDiagnostics) {
+    emitOptionalDiagnostics(options, {
+      ...hydrateDiagnostics,
+      success: true,
+      integrityReasons: [],
+      totalMs: readPersistDeltaNow() - hydrateStartedAt,
+    });
   }
 
   return normalizedGraph;
@@ -2527,6 +3666,7 @@ export class BmeDatabase {
 
   async commitDelta(delta = {}, options = {}) {
     const db = await this.open();
+    const commitRequestedAt = readPersistCommitNow();
     const nowMs = Date.now();
     const normalizedDelta =
       delta && typeof delta === "object" && !Array.isArray(delta) ? delta : {};
@@ -2551,6 +3691,7 @@ export class BmeDatabase {
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
     const normalizedCountDelta =
       normalizedDelta.countDelta &&
       typeof normalizedDelta.countDelta === "object" &&
@@ -2564,7 +3705,9 @@ export class BmeDatabase {
       edges: 0,
       tombstones: 0,
     };
+    let transactionMs = 0;
 
+    const transactionStartedAt = readPersistCommitNow();
     await db.transaction(
       "rw",
       db.table("nodes"),
@@ -2611,6 +3754,7 @@ export class BmeDatabase {
         );
       },
     );
+    transactionMs = readPersistCommitNow() - transactionStartedAt;
 
     return {
       revision: nextRevision,
@@ -2626,6 +3770,17 @@ export class BmeDatabase {
         deleteNodeIds: deleteNodeIds.length,
         deleteEdgeIds: deleteEdgeIds.length,
         tombstones: tombstones.length,
+      },
+      diagnostics: {
+        storageKind: "indexeddb",
+        storeMode: "indexeddb",
+        queueWaitMs: 0,
+        commitMs: normalizePersistCommitMs(
+          readPersistCommitNow() - commitRequestedAt,
+        ),
+        txMs: normalizePersistCommitMs(transactionMs),
+        payloadBytes,
+        runtimeMetaKeyCount: Object.keys(runtimeMetaPatch).length,
       },
     };
   }
@@ -3032,23 +4187,47 @@ export class BmeDatabase {
     };
   }
 
-  async exportSnapshot() {
+  async exportSnapshot(options = {}) {
     const db = await this.open();
 
-    const [nodes, edges, tombstones, metaRows] = await db.transaction(
-      "r",
-      db.table("nodes"),
-      db.table("edges"),
-      db.table("tombstones"),
-      db.table("meta"),
-      async () =>
-        await Promise.all([
-          db.table("nodes").toArray(),
-          db.table("edges").toArray(),
-          db.table("tombstones").toArray(),
-          db.table("meta").toArray(),
-        ]),
-    );
+    const includeTombstones =
+      options && typeof options === "object"
+        ? options.includeTombstones !== false
+        : options !== false;
+    let nodes = [];
+    let edges = [];
+    let tombstones = [];
+    let metaRows = [];
+
+    if (includeTombstones) {
+      [nodes, edges, tombstones, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("tombstones"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("tombstones").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    } else {
+      [nodes, edges, metaRows] = await db.transaction(
+        "r",
+        db.table("nodes"),
+        db.table("edges"),
+        db.table("meta"),
+        async () =>
+          await Promise.all([
+            db.table("nodes").toArray(),
+            db.table("edges").toArray(),
+            db.table("meta").toArray(),
+          ]),
+      );
+    }
 
     const metaMap = toMetaMap(metaRows);
     const meta = {
@@ -3058,7 +4237,10 @@ export class BmeDatabase {
       revision: normalizeRevision(metaMap?.revision),
       nodeCount: nodes.length,
       edgeCount: edges.length,
-      tombstoneCount: tombstones.length,
+      tombstoneCount: normalizeNonNegativeInteger(
+        metaMap?.tombstoneCount,
+        tombstones.length,
+      ),
     };
 
     const state = {
@@ -3070,12 +4252,52 @@ export class BmeDatabase {
         : META_DEFAULT_EXTRACTION_COUNT,
     };
 
-    return {
+    const snapshot = {
       meta,
       nodes,
       edges,
-      tombstones,
+      tombstones: includeTombstones ? tombstones : [],
       state,
+    };
+
+    if (!includeTombstones) {
+      snapshot.__stBmeTombstonesOmitted = true;
+    }
+
+    return snapshot;
+  }
+
+  async exportSnapshotProbe() {
+    const db = await this.open();
+    const metaRows = await db.transaction("r", db.table("meta"), async () =>
+      await db.table("meta").toArray(),
+    );
+    const metaMap = toMetaMap(metaRows);
+    const meta = {
+      ...metaMap,
+      schemaVersion: BME_DB_SCHEMA_VERSION,
+      chatId: this.chatId,
+      revision: normalizeRevision(metaMap?.revision),
+      nodeCount: normalizeNonNegativeInteger(metaMap?.nodeCount, 0),
+      edgeCount: normalizeNonNegativeInteger(metaMap?.edgeCount, 0),
+      tombstoneCount: normalizeNonNegativeInteger(metaMap?.tombstoneCount, 0),
+    };
+    const state = {
+      lastProcessedFloor: Number.isFinite(Number(meta.lastProcessedFloor))
+        ? Number(meta.lastProcessedFloor)
+        : META_DEFAULT_LAST_PROCESSED_FLOOR,
+      extractionCount: Number.isFinite(Number(meta.extractionCount))
+        ? Number(meta.extractionCount)
+        : META_DEFAULT_EXTRACTION_COUNT,
+    };
+    return {
+      meta,
+      state,
+      nodes: [],
+      edges: [],
+      tombstones: [],
+      __stBmeProbeOnly: true,
+      __stBmeTombstonesOmitted: true,
     };
   }
 

@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 
 import {
   BME_DB_SCHEMA_VERSION,
+  BME_RUNTIME_BATCH_JOURNAL_META_KEY,
+  BME_RUNTIME_HISTORY_META_KEY,
+  BME_RUNTIME_RECORDS_NORMALIZED_META_KEY,
+  BME_RUNTIME_VECTOR_META_KEY,
   BME_TOMBSTONE_RETENTION_MS,
   BmeDatabase,
   buildBmeDbName,
@@ -11,6 +15,7 @@ import {
 } from "../sync/bme-db.js";
 import { BmeChatManager } from "../sync/bme-chat-manager.js";
 import { createEmptyGraph } from "../graph/graph.js";
+import { getGraphPersistDirtyStateSnapshot } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-persistence]";
 
@@ -20,6 +25,7 @@ const chatIdsForCleanup = new Set([
   "chat-manager-a",
   "chat-manager-b",
   "chat-manager-selector",
+  "chat-export-without-tombstones",
   "chat-replace-reset",
 ]);
 
@@ -192,6 +198,84 @@ async function testSnapshotExportImport() {
   assert.equal(importResult.mode, "replace");
   assert.ok(importResult.imported.nodes >= 1);
   assert.ok((await db.listNodes()).some((item) => item.id === "node-snapshot"));
+
+  await db.close();
+}
+
+async function testSnapshotExportWithoutTombstones() {
+  const db = new BmeDatabase("chat-export-without-tombstones", {
+    dexieClass: globalThis.Dexie,
+  });
+  await db.open();
+
+  await db.bulkUpsertNodes([
+    {
+      id: "node-light-snapshot",
+      type: "event",
+      sourceFloor: 3,
+      archived: false,
+      updatedAt: Date.now(),
+    },
+  ]);
+  await db.bulkUpsertTombstones([
+    {
+      id: "tomb-light-snapshot",
+      kind: "node",
+      targetId: "node-deleted-light-snapshot",
+      deletedAt: Date.now(),
+      sourceDeviceId: "device-light-snapshot",
+    },
+  ]);
+
+  const exported = await db.exportSnapshot({ includeTombstones: false });
+  assert.equal(exported.__stBmeTombstonesOmitted, true);
+  assert.ok(Array.isArray(exported.nodes));
+  assert.ok(Array.isArray(exported.edges));
+  assert.deepEqual(exported.tombstones, []);
+  assert.equal(exported.meta.tombstoneCount, 1);
+
+  await db.close();
+}
+
+async function testSnapshotProbeExport() {
+  const db = new BmeDatabase("chat-export-probe", {
+    dexieClass: globalThis.Dexie,
+  });
+  await db.open();
+
+  await db.bulkUpsertNodes([
+    {
+      id: "node-probe",
+      type: "event",
+      sourceFloor: 4,
+      archived: false,
+      updatedAt: Date.now(),
+    },
+  ]);
+  await db.patchMeta({
+    lastProcessedFloor: 6,
+    extractionCount: 3,
+    runtimeHistoryState: {
+      chatId: "chat-export-probe",
+      lastProcessedAssistantFloor: 6,
+      extractionCount: 3,
+    },
+  });
+
+  const probe = await db.exportSnapshotProbe();
+  assert.equal(probe.__stBmeProbeOnly, true);
+  assert.equal(probe.__stBmeTombstonesOmitted, true);
+  assert.deepEqual(probe.nodes, []);
+  assert.deepEqual(probe.edges, []);
+  assert.deepEqual(probe.tombstones, []);
+  assert.equal(probe.meta.chatId, "chat-export-probe");
+  assert.equal(probe.meta.nodeCount, 1);
+  assert.equal(probe.state.lastProcessedFloor, 6);
+  assert.equal(probe.state.extractionCount, 3);
+  assert.equal(
+    probe.meta.runtimeHistoryState.lastProcessedAssistantFloor,
+    6,
+  );
 
   await db.close();
 }
@@ -532,32 +616,92 @@ async function testGraphSnapshotConverters() {
     id: "node-converter",
     type: "event",
     sourceFloor: 9,
+    fields: {
+      title: "Converter Node",
+    },
     updatedAt: Date.now(),
+    embedding: [0.25, 0.5, 0.75],
+    scope: {
+      layer: "pov",
+      ownerType: "character",
+      ownerId: "hero",
+      ownerName: "Hero",
+      regionPrimary: "camp",
+      regionPath: ["camp", "tent"],
+      regionSecondary: ["forest"],
+    },
+    storyTime: {
+      segmentId: "segment-1",
+      label: "Dawn",
+      tense: "ongoing",
+      relation: "same",
+      anchorLabel: "Night",
+      confidence: "high",
+      source: "derived",
+    },
+    storyTimeSpan: {
+      startSegmentId: "segment-0",
+      endSegmentId: "segment-1",
+      startLabel: "Night",
+      endLabel: "Dawn",
+      mixed: false,
+      source: "derived",
+    },
   });
 
+  let snapshotDiagnostics = null;
   const snapshot = buildSnapshotFromGraph(graph, {
     chatId: "chat-a",
     revision: 17,
+    onDiagnostics(snapshotValue) {
+      snapshotDiagnostics = snapshotValue;
+    },
   });
   assert.equal(snapshot.meta.chatId, "chat-a");
   assert.equal(snapshot.meta.revision, 17);
+  assert.equal(snapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY], true);
   assert.equal(snapshot.state.lastProcessedFloor, 9);
   assert.equal(snapshot.state.extractionCount, 4);
   assert.equal(snapshot.nodes.length, 1);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.nodesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.edgesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.tombstonesMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.stateMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.metaMs), true);
+  assert.equal(Number.isFinite(snapshotDiagnostics?.totalMs), true);
+  assert.equal(snapshotDiagnostics?.nodeCount, 1);
 
+  let hydrateDiagnostics = null;
   const nextGraph = buildGraphFromSnapshot(snapshot, {
     chatId: "chat-a",
+    onDiagnostics(snapshotValue) {
+      hydrateDiagnostics = snapshotValue;
+    },
   });
+  assert.equal(hydrateDiagnostics?.success, true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.nodesMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.edgesMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.runtimeMetaMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.stateMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.normalizeMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.integrityMs), true);
+  assert.equal(Number.isFinite(hydrateDiagnostics?.totalMs), true);
+
+  let reusedSnapshotDiagnostics = null;
   const reusedSnapshot = buildSnapshotFromGraph(nextGraph, {
     chatId: "chat-a",
     revision: 18,
     baseSnapshot: snapshot,
+    onDiagnostics(snapshotValue) {
+      reusedSnapshotDiagnostics = snapshotValue;
+    },
   });
   assert.equal(
     reusedSnapshot.nodes[0],
     snapshot.nodes[0],
     "未变化节点应直接复用 baseSnapshot 记录对象",
   );
+  assert.equal(reusedSnapshotDiagnostics?.reusedNodeCount, 1);
   nextGraph.nodes[0].updatedAt = Number(nextGraph.nodes[0].updatedAt || 0) + 1;
   const changedSnapshot = buildSnapshotFromGraph(nextGraph, {
     chatId: "chat-a",
@@ -573,16 +717,126 @@ async function testGraphSnapshotConverters() {
   const rebuilt = buildGraphFromSnapshot(snapshot, {
     chatId: "chat-a",
   });
+  const legacyCompatibleSnapshot = {
+    ...snapshot,
+    meta: {
+      ...snapshot.meta,
+    },
+  };
+  delete legacyCompatibleSnapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY];
+  legacyCompatibleSnapshot.nodes = [
+    {
+      ...legacyCompatibleSnapshot.nodes[0],
+      scope: undefined,
+      storyTime: undefined,
+      storyTimeSpan: undefined,
+    },
+  ];
+  const rebuiltLegacyCompatible = buildGraphFromSnapshot(legacyCompatibleSnapshot, {
+    chatId: "chat-a",
+  });
+  const malformedButFlaggedSnapshot = {
+    ...legacyCompatibleSnapshot,
+    meta: {
+      ...legacyCompatibleSnapshot.meta,
+      [BME_RUNTIME_RECORDS_NORMALIZED_META_KEY]: true,
+    },
+  };
+  const rebuiltMalformedButFlagged = buildGraphFromSnapshot(malformedButFlaggedSnapshot, {
+    chatId: "chat-a",
+  });
+  const scopeRepairSnapshot = {
+    ...snapshot,
+    meta: {
+      ...snapshot.meta,
+    },
+    nodes: [
+      {
+        ...snapshot.nodes[0],
+        scope: {
+          layer: "objective",
+          regionPrimary: "王都/钟楼",
+          regionSecondary: "旧城区 / 集市 / 钟楼",
+        },
+      },
+    ],
+  };
+  delete scopeRepairSnapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY];
+  const rebuiltScopeRepair = buildGraphFromSnapshot(scopeRepairSnapshot, {
+    chatId: "chat-a",
+  });
+  const scopeRepairDirtyState = getGraphPersistDirtyStateSnapshot(
+    rebuiltScopeRepair,
+  );
   assert.equal(rebuilt.historyState.lastProcessedAssistantFloor, 9);
   assert.equal(rebuilt.historyState.extractionCount, 4);
   assert.equal(rebuilt.nodes.length, 1);
   assert.equal(rebuilt.nodes[0].id, "node-converter");
+  assert.equal(rebuilt.nodes[0].scope?.ownerType, "character");
+  assert.equal(rebuilt.nodes[0].scope?.regionPrimary, "camp");
+  assert.equal(rebuilt.nodes[0].storyTime?.label, "Dawn");
+  assert.equal(rebuilt.nodes[0].storyTimeSpan?.endLabel, "Dawn");
   assert.equal(rebuilt.vectorIndexState.hashToNodeId["vec-hash"], "node-converter");
   assert.equal(rebuilt.maintenanceJournal[0].id, "maintenance-1");
   assert.equal(rebuilt.knowledgeState.activeOwnerKey, "owner:hero");
   assert.equal(rebuilt.regionState.activeRegion, "camp");
   assert.equal(rebuilt.timelineState.activeSegmentId, "segment-1");
   assert.equal(rebuilt.summaryState.entries[0].id, "summary-1");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].scope?.layer, "objective");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].storyTime?.tense, "unknown");
+  assert.equal(rebuiltLegacyCompatible.nodes[0].storyTimeSpan?.mixed, false);
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].scope?.layer, "objective");
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTime?.tense, "unknown");
+  assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTimeSpan?.mixed, false);
+  assert.equal(rebuiltScopeRepair.nodes[0].scope?.regionPrimary, "钟楼");
+  assert.deepEqual(rebuiltScopeRepair.nodes[0].scope?.regionPath, ["王都", "钟楼"]);
+  assert.deepEqual(rebuiltScopeRepair.nodes[0].scope?.regionSecondary, [
+    "旧城区",
+    "集市",
+  ]);
+  assert.equal(
+    scopeRepairDirtyState?.nodeUpsertIds?.includes("node-converter"),
+    true,
+  );
+  assert.equal(rebuiltScopeRepair.vectorIndexState?.dirty, true);
+  assert.equal(
+    rebuiltScopeRepair.vectorIndexState?.replayRequiredNodeIds?.includes(
+      "node-converter",
+    ),
+    true,
+  );
+
+  rebuilt.nodes[0].fields.title = "Mutated Converter Node";
+  rebuilt.nodes[0].embedding[0] = 99;
+  rebuilt.historyState.processedMessageHashes[1] = "mutated-hash";
+  rebuilt.vectorIndexState.hashToNodeId["vec-hash"] = "node-mutated";
+  rebuilt.batchJournal[0].processedRange[0] = 99;
+
+  assert.equal(
+    snapshot.nodes[0].fields.title,
+    "Converter Node",
+    "buildGraphFromSnapshot 不应复用 snapshot 节点的嵌套字段引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_HISTORY_META_KEY].processedMessageHashes[1],
+    "hash-1",
+    "buildGraphFromSnapshot 不应复用 snapshot historyState 的嵌套对象引用",
+  );
+  assert.equal(
+    snapshot.nodes[0].embedding[0],
+    0.25,
+    "buildGraphFromSnapshot 不应复用 snapshot 节点的数组字段引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_VECTOR_META_KEY].hashToNodeId["vec-hash"],
+    "node-converter",
+    "buildGraphFromSnapshot 不应复用 snapshot vectorState 的嵌套对象引用",
+  );
+  assert.equal(
+    snapshot.meta[BME_RUNTIME_BATCH_JOURNAL_META_KEY][0].processedRange[0],
+    8,
+    "buildGraphFromSnapshot 不应复用 snapshot batchJournal 的嵌套数组引用",
+  );
 }
 
 async function main() {
@@ -593,6 +847,8 @@ async function main() {
   await testCrudAndMeta();
   await testTransactionRollback();
   await testSnapshotExportImport();
+  await testSnapshotExportWithoutTombstones();
+  await testSnapshotProbeExport();
   await testReplaceImportResetsStaleMeta();
   await testRevisionMonotonicity();
   await testTombstonePrune();

@@ -125,6 +125,17 @@ export function createGraphPersistenceState() {
     lastSyncError: "",
     dualWriteLastResult: null,
     persistDelta: null,
+    persistObservability: {
+      totalSamples: 0,
+      byPath: {},
+      byReason: {},
+      byPathReason: {},
+      lastPathKey: "",
+      lastReasonKey: "",
+      lastPathReasonKey: "",
+      lastRecordedAt: "",
+    },
+    loadDiagnostics: null,
     updatedAt: new Date().toISOString(),
   };
 }

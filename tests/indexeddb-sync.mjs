@@ -298,6 +298,10 @@ async function testUploadPayloadMetaFirstAndDebounce() {
   assert.equal(uploadResult.uploaded, true);
   assert.equal(logs.uploadCalls, 1);
   assert.equal(logs.uploadChunkCalls > 0, true);
+  assert.equal(Number.isFinite(uploadResult.timings?.exportMs), true);
+  assert.equal(Number.isFinite(uploadResult.timings?.chunkUploadMs), true);
+  assert.equal(Number.isFinite(uploadResult.timings?.manifestUploadMs), true);
+  assert.equal(Number.isFinite(uploadResult.timings?.metaPatchMs), true);
 
   const uploadedPayload = logs.uploadedPayloads[0].payload;
   assert.equal(uploadedPayload.formatVersion, 2);
@@ -375,6 +379,10 @@ async function testDownloadImport() {
   const result = await download("chat-download", runtime);
 
   assert.equal(result.downloaded, true);
+  assert.equal(Number.isFinite(result.timings?.networkMs), true);
+  assert.equal(Number.isFinite(result.timings?.importMs), true);
+  assert.equal(Number.isFinite(result.timings?.metaPatchMs), true);
+  assert.equal(Number.isFinite(result.timings?.hookMs), true);
   assert.equal(db.lastImportPayload.meta.revision, 12);
   assert.equal(db.lastImportPayload.nodes[0].id, "remote-node");
   assert.equal(db.lastImportPayload.meta.runtimeVectorIndexState.dirty, true);
@@ -731,6 +739,10 @@ async function testManualBackupAndRestoreFlow() {
 
   const backupResult = await backupToServer("chat-backup-flow", runtime);
   assert.equal(backupResult.backedUp, true);
+  assert.equal(Number.isFinite(backupResult.timings?.exportMs), true);
+  assert.equal(Number.isFinite(backupResult.timings?.uploadMs), true);
+  assert.equal(Number.isFinite(backupResult.timings?.manifestWriteMs), true);
+  assert.equal(Number.isFinite(backupResult.timings?.metaPatchMs), true);
   assert.equal(db.meta.get("syncDirty"), false);
   assert.ok(Number(db.meta.get("lastBackupUploadedAt")) > 0);
   assert.ok(String(db.meta.get("lastBackupFilename") || "").startsWith("ST-BME_backup_"));
@@ -801,6 +813,12 @@ async function testManualBackupAndRestoreFlow() {
 
   const restoreResult = await restoreFromServer("chat-backup-flow", runtime);
   assert.equal(restoreResult.restored, true);
+  assert.equal(Number.isFinite(restoreResult.timings?.downloadMs), true);
+  assert.equal(Number.isFinite(restoreResult.timings?.localExportMs), true);
+  assert.equal(Number.isFinite(restoreResult.timings?.safetySnapshotMs), true);
+  assert.equal(Number.isFinite(restoreResult.timings?.importMs), true);
+  assert.equal(Number.isFinite(restoreResult.timings?.metaPatchMs), true);
+  assert.equal(Number.isFinite(restoreResult.timings?.hookMs), true);
   assert.equal(db.snapshot.nodes[0].id, "local-node");
   assert.equal(db.snapshot.meta.runtimeBatchJournal.length, 4);
   assert.equal(db.snapshot.meta.maintenanceJournal.length, 0);
@@ -963,6 +981,7 @@ async function testRestoreValidationDoesNotCreateSafetySnapshot() {
   const restoreResult = await restoreFromServer("chat-no-backup", runtime);
   assert.equal(restoreResult.restored, false);
   assert.equal(restoreResult.reason, "not-found");
+  assert.equal(Number.isFinite(restoreResult.timings?.downloadMs), true);
 
   const safetyStatus = await getRestoreSafetySnapshotStatus(
     "chat-no-backup",

@@ -7,6 +7,8 @@ import {
   normalizeDialogueFloorRange,
 } from "./chat-history.js";
 
+let nativePersistDeltaInstallPromise = null;
+
 function toSafeFloor(value, fallback = null) {
   if (value == null || value === "") return fallback;
   const numeric = Number(value);
@@ -113,6 +115,31 @@ function cloneSerializable(value, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function readNow() {
+  if (typeof performance === "object" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+async function ensureNativePersistDeltaHookInstalled() {
+  if (typeof globalThis.__stBmeNativeBuildPersistDelta === "function") {
+    return {
+      loaded: true,
+      source: "global-hook",
+    };
+  }
+  if (!nativePersistDeltaInstallPromise) {
+    nativePersistDeltaInstallPromise = import("../vendor/wasm/stbme_core.js")
+      .then((module) => module?.installNativePersistDeltaHook?.())
+      .catch((error) => {
+        nativePersistDeltaInstallPromise = null;
+        throw error;
+      });
+  }
+  return await nativePersistDeltaInstallPromise;
 }
 
 function setExtractionProgressStatus(
@@ -247,11 +274,12 @@ function buildRerunFallbackInfo(chat = [], targetDialogueRange = [-1, -1]) {
   };
 }
 
-function buildCommittedBatchPersistSnapshot(
+async function buildCommittedBatchPersistSnapshot(
   runtime,
   {
     graph = null,
     chat = [],
+    settings = null,
     beforeSnapshot = null,
     processedRange = [null, null],
     postProcessArtifacts = [],
@@ -274,6 +302,10 @@ function buildCommittedBatchPersistSnapshot(
   const range = Array.isArray(processedRange) ? processedRange : [null, null];
   const rangeStart = Number.isFinite(Number(range[0])) ? Number(range[0]) : null;
   const rangeEnd = Number.isFinite(Number(range[1])) ? Number(range[1]) : null;
+  const runtimeSettings =
+    settings && typeof settings === "object" && !Array.isArray(settings)
+      ? settings
+      : runtime?.getSettings?.() || {};
   const dialogueMap = buildDialogueFloorMap(chat);
   const processedDialogueRange = [
     Number.isFinite(Number(rangeStart))
@@ -290,14 +322,14 @@ function buildCommittedBatchPersistSnapshot(
           Number(rangeStart) -
             Math.max(
               0,
-              Number(runtime?.getSettings?.()?.extractContextTurns) || 0,
+              Number(runtimeSettings?.extractContextTurns) || 0,
             ) *
               2,
         )
       : null,
     rangeEnd,
   ];
-  const afterSnapshot = runtime.cloneGraphSnapshot(graph);
+  const afterSnapshot = graph;
   const effectiveArtifacts = Array.isArray(postProcessArtifacts)
     ? [...postProcessArtifacts]
     : [];
@@ -347,33 +379,101 @@ function buildCommittedBatchPersistSnapshot(
     );
   }
 
+  let persistDelta = null;
+  let persistSnapshot = null;
+  const shouldUseNativePersistDelta =
+    runtimeSettings?.persistUseNativeDelta === true &&
+    runtimeSettings?.graphNativeForceDisable !== true;
+  const nativeFailOpen = runtimeSettings?.nativeEngineFailOpen !== false;
+  if (typeof runtime.buildSnapshotFromGraph === "function") {
+    persistSnapshot = runtime.buildSnapshotFromGraph(committedGraphSnapshot, {
+      chatId:
+        committedGraphSnapshot?.historyState?.chatId ||
+        beforeSnapshot?.meta?.chatId ||
+        "",
+      revision: Number(beforeSnapshot?.meta?.revision || 0) + 1,
+      baseSnapshot: beforeSnapshot || undefined,
+      lastModified: Date.now(),
+    });
+  }
+  if (typeof runtime.buildPersistDelta === "function") {
+    if (shouldUseNativePersistDelta) {
+      const preloadStartedAt = readNow();
+      try {
+        await ensureNativePersistDeltaHookInstalled();
+      } catch (error) {
+        if (!nativeFailOpen) {
+          throw error;
+        }
+        runtime?.console?.warn?.(
+          "[ST-BME] extraction native persist delta preload failed, fallback to JS delta:",
+          {
+            error: error?.message || String(error),
+            preloadMs: readNow() - preloadStartedAt,
+          },
+        );
+      }
+    }
+
+    persistDelta = runtime.buildPersistDelta(
+      beforeSnapshot,
+      persistSnapshot || committedGraphSnapshot,
+      {
+      useNativeDelta: shouldUseNativePersistDelta,
+      nativeFailOpen,
+      persistNativeDeltaThresholdRecords:
+        runtimeSettings?.persistNativeDeltaThresholdRecords,
+      persistNativeDeltaThresholdStructuralDelta:
+        runtimeSettings?.persistNativeDeltaThresholdStructuralDelta,
+      persistNativeDeltaThresholdSerializedChars:
+        runtimeSettings?.persistNativeDeltaThresholdSerializedChars,
+      persistNativeDeltaBridgeMode: runtimeSettings?.persistNativeDeltaBridgeMode,
+      },
+    );
+  }
+
   return {
-    persistDelta:
-      typeof runtime.buildPersistDelta === "function"
-        ? runtime.buildPersistDelta(beforeSnapshot, committedGraphSnapshot, {
-            useNativeDelta: false,
-          })
-        : null,
+    persistDelta,
+    persistSnapshot,
     persistGraphSnapshot: committedGraphSnapshot,
     committedBatchJournalEntry,
     afterSnapshot,
-    committedAfterSnapshot: runtime.cloneGraphSnapshot(committedGraphSnapshot),
+    committedAfterSnapshot: committedGraphSnapshot,
     postProcessArtifacts: effectiveArtifacts,
   };
 }
 
 function isPersistenceRevisionAccepted(runtime, persistence = null) {
-  if (!persistence || persistence.accepted === true) return true;
-  const graphPersistenceState = runtime?.getGraphPersistenceState?.() || {};
-  if (graphPersistenceState.pendingPersist === true) {
-    return false;
-  }
   const persistenceRevision = Number(persistence?.revision || 0);
   if (!Number.isFinite(persistenceRevision) || persistenceRevision <= 0) {
     return false;
   }
-  const lastAcceptedRevision = Number(graphPersistenceState?.lastAcceptedRevision || 0);
+  const lastAcceptedRevision = Number(
+    runtime?.getGraphPersistenceState?.()?.lastAcceptedRevision || 0,
+  );
   return Number.isFinite(lastAcceptedRevision) && lastAcceptedRevision >= persistenceRevision;
+}
+
+function hasRecoverablePendingPersistence(runtime) {
+  const persistenceState = runtime?.getGraphPersistenceState?.() || {};
+  if (persistenceState.pendingPersist !== true) {
+    return false;
+  }
+  const recoverableTier = String(
+    persistenceState.lastRecoverableStorageTier || "none",
+  ).trim();
+  if (recoverableTier === "metadata-full") {
+    return true;
+  }
+  if (recoverableTier !== "shadow") {
+    return false;
+  }
+  const queuedRevision = Number(persistenceState.queuedPersistRevision || 0);
+  const shadowRevision = Number(persistenceState.shadowSnapshotRevision || 0);
+  if (!Number.isFinite(queuedRevision) || queuedRevision <= 0) {
+    return true;
+  }
+  return Number.isFinite(shadowRevision) && shadowRevision >= queuedRevision;
 }
 
 function getPendingPersistenceGateInfo(runtime) {
@@ -401,8 +501,12 @@ function getPendingPersistenceGateInfo(runtime) {
 
 async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-retry") {
   const gate = getPendingPersistenceGateInfo(runtime);
-  if (!gate || typeof runtime?.retryPendingGraphPersist !== "function") {
+  if (!gate) {
     return gate;
+  }
+
+  if (typeof runtime?.retryPendingGraphPersist !== "function") {
+    return hasRecoverablePendingPersistence(runtime) ? null : gate;
   }
 
   try {
@@ -414,7 +518,11 @@ async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-r
     runtime?.console?.warn?.("[ST-BME] pending persistence retry failed", error);
   }
 
-  return getPendingPersistenceGateInfo(runtime);
+  const nextGate = getPendingPersistenceGateInfo(runtime);
+  if (nextGate && hasRecoverablePendingPersistence(runtime)) {
+    return null;
+  }
+  return nextGate;
 }
 
 function formatPendingPersistenceGateMessage(runtime, operationLabel = "当前提取") {
@@ -459,6 +567,29 @@ export function resolveAutoExtractionPlanController(
     1,
     50,
   );
+  if (resolvedSettings.enabled === false) {
+    return {
+      strategy,
+      chat: resolvedChat,
+      settings: resolvedSettings,
+      lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+      lockedEndFloor: safeLockedEndFloor,
+      extractEvery,
+      pendingAssistantTurns: [],
+      candidateAssistantTurns: [],
+      eligibleAssistantTurns: [],
+      eligibleEndFloor: null,
+      waitingForNextAssistant: false,
+      smartTriggerDecision: { triggered: false, score: 0, reasons: [] },
+      meetsExtractEvery: false,
+      canRun: false,
+      batchAssistantTurns: [],
+      plannedBatchEndFloor: null,
+      startIdx: null,
+      endIdx: null,
+      reason: "plugin-disabled",
+    };
+  }
   const assistantTurns =
     typeof runtime?.getAssistantTurns === "function"
       ? runtime.getAssistantTurns(resolvedChat)
@@ -638,14 +769,15 @@ export async function executeExtractionBatchController(
     batchStatus,
   );
   const batchStatusRef = effects?.batchStatus || batchStatus;
-  const committedPersistState = buildCommittedBatchPersistSnapshot(runtime, {
+  const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
     graph: runtime.getCurrentGraph(),
     chat,
+    settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(
       beforeSnapshot,
-      runtime.cloneGraphSnapshot(runtime.getCurrentGraph()),
+      runtime.getCurrentGraph(),
       effects?.postProcessArtifacts || [],
     ),
     vectorHashesInserted: effects?.vectorHashesInserted || [],
@@ -655,6 +787,7 @@ export async function executeExtractionBatchController(
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
     graphSnapshot: committedPersistState.persistGraphSnapshot,
+    persistSnapshot: committedPersistState.persistSnapshot,
     persistDelta: committedPersistState.persistDelta,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);
@@ -687,6 +820,11 @@ export async function executeExtractionBatchController(
       );
     }
   } else if (!persistence.accepted) {
+    // 即使持久化未被接受，仍在内存中推进 lastProcessedAssistantFloor，
+    // 防止同一会话内对已经抽取过的楼层重复提取。
+    // 此时不追加 batchJournal（保持回滚完整性）。
+    // 如果用户重载，floor 和图谱都会回退到最后持久化状态，保持一致。
+    runtime.updateProcessedHistorySnapshot(chat, endIdx);
     runtime.setLastExtractionStatus(
       "提取待恢复",
       `楼层 ${startIdx}-${endIdx} 已抽取，但持久化状态为 ${persistence.outcome || "failed"}${persistence.reason ? ` · ${persistence.reason}` : ""}`,
@@ -1182,10 +1320,65 @@ export async function onExtractionTaskController(runtime, options = {}) {
     },
   );
 
-  const rollbackResult = await runtime.rollbackGraphForReroll(
+  let rollbackResult = await runtime.rollbackGraphForReroll(
     fallbackInfo.startAssistantChatIndex,
     context,
   );
+
+  // 回滚点不可用时，自动尝试历史恢复后降级为 pending 模式
+  if (
+    !rollbackResult?.success &&
+    rollbackResult?.resultCode === "reroll.rollback.unavailable" &&
+    typeof runtime.recoverHistoryIfNeeded === "function"
+  ) {
+    setExtractionProgressStatus(
+      runtime,
+      "重新提取准备中",
+      "未找到回滚点，正在自动执行历史恢复后重新提取",
+      "running",
+      {
+        syncRuntime: true,
+        toastKind: "info",
+        toastTitle: "ST-BME 重新提取",
+      },
+    );
+    const recovered = await runtime.recoverHistoryIfNeeded(
+      "rerun-rollback-unavailable",
+    );
+    if (recovered) {
+      // 历史恢复成功，降级为 pending 模式继续提取
+      setExtractionProgressStatus(
+        runtime,
+        "重新提取中",
+        "历史恢复完成，正在提取未处理内容",
+        "running",
+        {
+          syncRuntime: true,
+          toastKind: "",
+          toastTitle: "ST-BME 重新提取",
+        },
+      );
+      await runManualExtract({
+        drainAll: true,
+        taskLabel: "重新提取（恢复后）",
+        toastTitle: "ST-BME 重新提取",
+        showStartToast: false,
+      });
+      return {
+        success: true,
+        rerunPerformed: true,
+        recoveryFallback: true,
+        fallbackToLatest: true,
+        requestedRange: [
+          rerunTask.requestedStartFloor,
+          rerunTask.requestedEndFloor,
+        ],
+        effectiveDialogueRange,
+        reason: "rollback-unavailable-recovered-pending",
+      };
+    }
+  }
+
   if (!rollbackResult?.success) {
     const rollbackError = String(
       rollbackResult?.error ||

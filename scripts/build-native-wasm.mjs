@@ -1,10 +1,21 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
 const ROOT = process.cwd();
 const CRATE_DIR = path.resolve(ROOT, "native", "stbme-core");
 const OUT_DIR = path.resolve(ROOT, "vendor", "wasm", "pkg");
+const OUT_GITIGNORE = path.resolve(OUT_DIR, ".gitignore");
+const OUT_GITIGNORE_CONTENT = [
+  "*",
+  "!.gitignore",
+  "!package.json",
+  "!stbme_core_pkg.js",
+  "!stbme_core_pkg.d.ts",
+  "!stbme_core_pkg_bg.wasm",
+  "!stbme_core_pkg_bg.wasm.d.ts",
+  "",
+].join("\n");
 
 function runCommand(command, args, cwd) {
   return new Promise((resolve, reject) => {
@@ -47,6 +58,7 @@ async function main() {
     ],
     CRATE_DIR,
   );
+  await writeFile(OUT_GITIGNORE, OUT_GITIGNORE_CONTENT, "utf8");
 
   console.log("[ST-BME][native] wasm artifact build completed");
 }
