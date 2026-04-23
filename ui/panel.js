@@ -4241,8 +4241,8 @@ function _refreshMemoryBrowser() {
       const scope = normalizeMemoryScope(node.scope);
       const regionText = [
         scope.regionPrimary,
-        ...(scope.regionPath || []),
-        ...(scope.regionSecondary || []),
+        ...(Array.isArray(scope.regionPath) ? scope.regionPath : []),
+        ...(Array.isArray(scope.regionSecondary) ? scope.regionSecondary : []),
       ]
         .join(" ")
         .toLowerCase();

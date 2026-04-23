@@ -15,6 +15,7 @@ import {
 } from "../sync/bme-db.js";
 import { BmeChatManager } from "../sync/bme-chat-manager.js";
 import { createEmptyGraph } from "../graph/graph.js";
+import { getGraphPersistDirtyStateSnapshot } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-persistence]";
 
@@ -744,6 +745,29 @@ async function testGraphSnapshotConverters() {
   const rebuiltMalformedButFlagged = buildGraphFromSnapshot(malformedButFlaggedSnapshot, {
     chatId: "chat-a",
   });
+  const scopeRepairSnapshot = {
+    ...snapshot,
+    meta: {
+      ...snapshot.meta,
+    },
+    nodes: [
+      {
+        ...snapshot.nodes[0],
+        scope: {
+          layer: "objective",
+          regionPrimary: "王都/钟楼",
+          regionSecondary: "旧城区 / 集市 / 钟楼",
+        },
+      },
+    ],
+  };
+  delete scopeRepairSnapshot.meta[BME_RUNTIME_RECORDS_NORMALIZED_META_KEY];
+  const rebuiltScopeRepair = buildGraphFromSnapshot(scopeRepairSnapshot, {
+    chatId: "chat-a",
+  });
+  const scopeRepairDirtyState = getGraphPersistDirtyStateSnapshot(
+    rebuiltScopeRepair,
+  );
   assert.equal(rebuilt.historyState.lastProcessedAssistantFloor, 9);
   assert.equal(rebuilt.historyState.extractionCount, 4);
   assert.equal(rebuilt.nodes.length, 1);
@@ -764,6 +788,23 @@ async function testGraphSnapshotConverters() {
   assert.equal(rebuiltMalformedButFlagged.nodes[0].scope?.layer, "objective");
   assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTime?.tense, "unknown");
   assert.equal(rebuiltMalformedButFlagged.nodes[0].storyTimeSpan?.mixed, false);
+  assert.equal(rebuiltScopeRepair.nodes[0].scope?.regionPrimary, "钟楼");
+  assert.deepEqual(rebuiltScopeRepair.nodes[0].scope?.regionPath, ["王都", "钟楼"]);
+  assert.deepEqual(rebuiltScopeRepair.nodes[0].scope?.regionSecondary, [
+    "旧城区",
+    "集市",
+  ]);
+  assert.equal(
+    scopeRepairDirtyState?.nodeUpsertIds?.includes("node-converter"),
+    true,
+  );
+  assert.equal(rebuiltScopeRepair.vectorIndexState?.dirty, true);
+  assert.equal(
+    rebuiltScopeRepair.vectorIndexState?.replayRequiredNodeIds?.includes(
+      "node-converter",
+    ),
+    true,
+  );
 
   rebuilt.nodes[0].fields.title = "Mutated Converter Node";
   rebuilt.nodes[0].embedding[0] = 99;

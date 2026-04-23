@@ -92,6 +92,7 @@ import {
 } from "../retrieval/recall-persistence.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
+  hasGraphPersistDirtyState,
   normalizeGraphRuntimeState,
   pruneGraphPersistDirtyState,
 } from "../runtime/runtime-state.js";
@@ -1041,6 +1042,7 @@ async function createGraphPersistenceHarness({
     buildSnapshotFromGraph,
     evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
+    hasGraphPersistDirtyState,
     pruneGraphPersistDirtyState,
     buildBmeDbName,
     BME_GRAPH_LOCAL_STORAGE_MODE_AUTO: "auto",

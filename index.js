@@ -262,6 +262,7 @@ import {
   createMaintenanceJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
+  hasGraphPersistDirtyState,
   markHistoryDirty,
   normalizeGraphRuntimeState,
   pruneGraphPersistDirtyState,
@@ -9470,7 +9471,34 @@ function applyIndexedDbSnapshotToRuntime(
     persistencePatch.indexedDbRevision = revision;
   }
   updateGraphPersistenceState(persistencePatch);
+  const shouldPersistPostLoadRepairs = hasGraphPersistDirtyState(currentGraph);
   rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
+
+  if (shouldPersistPostLoadRepairs) {
+    const repairedNodeCount = Number(hydrateDiagnostics?.scopeRepairNodeCount) || 0;
+    const repairedEdgeCount = Number(hydrateDiagnostics?.scopeRepairEdgeCount) || 0;
+    void Promise.resolve().then(() => {
+      if (currentGraph !== graphFromSnapshot) {
+        return;
+      }
+      if (
+        normalizeChatIdCandidate(currentGraph?.historyState?.chatId) !== normalizedChatId
+      ) {
+        return;
+      }
+      debugDebug("[ST-BME] 已检测到加载后作用域自愈，后台写回修复结果", {
+        chatId: normalizedChatId,
+        repairedNodeCount,
+        repairedEdgeCount,
+        source,
+      });
+      saveGraphToChat({
+        reason: "scope-auto-repair-after-load",
+        markMutation: false,
+        immediate: false,
+      });
+    });
+  }
 
   removeGraphShadowSnapshot(normalizedChatId);
   refreshPanelLiveState();

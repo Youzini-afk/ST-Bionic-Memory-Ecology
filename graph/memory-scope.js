@@ -45,6 +45,24 @@ function normalizeKey(value) {
   return normalizeString(value).toLowerCase();
 }
 
+const SCOPE_REGION_TEXT_KEYS = ["name", "title", "label", "value", "text"];
+
+function isPlainScopeObject(scope = null) {
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(scope);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasScopeAccessor(scope = {}, key = "") {
+  const descriptor = Object.getOwnPropertyDescriptor(scope, key);
+  return Boolean(
+    descriptor &&
+      (typeof descriptor.get === "function" || typeof descriptor.set === "function"),
+  );
+}
+
 function normalizeStringArray(values = []) {
   const result = [];
   const seen = new Set();
@@ -56,6 +74,101 @@ function normalizeStringArray(values = []) {
     result.push(normalized);
   }
   return result;
+}
+
+function splitScopeRegionText(value = "", { allowSlash = true } = {}) {
+  const normalized = normalizeString(value)
+    .replace(/[＞>→]+/g, "/")
+    .replace(/\r/g, "\n");
+  if (!normalized) {
+    return [];
+  }
+  const separatorPattern = allowSlash
+    ? /[,\n，/\\、；;|]+/
+    : /[,\n，、；;|]+/;
+  return normalized
+    .split(separatorPattern)
+    .map((entry) => normalizeString(entry))
+    .filter(Boolean);
+}
+
+function extractScopeRegionText(value = null) {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "string" || typeof value === "number") {
+    return normalizeString(value);
+  }
+  if (typeof value === "boolean" || typeof value === "symbol") {
+    return "";
+  }
+  if (Array.isArray(value)) {
+    return "";
+  }
+  if (typeof value === "object") {
+    for (const key of SCOPE_REGION_TEXT_KEYS) {
+      let candidate = "";
+      try {
+        candidate = value?.[key];
+      } catch {
+        candidate = "";
+      }
+      if (typeof candidate === "string" || typeof candidate === "number") {
+        return normalizeString(candidate);
+      }
+    }
+    return "";
+  }
+  return normalizeString(value);
+}
+
+function normalizeScopeRegionList(values = [], { allowSlash = true } = {}) {
+  const result = [];
+  const seen = new Set();
+  const pushValue = (value) => {
+    const normalized = normalizeString(value);
+    const key = normalizeKey(normalized);
+    if (!normalized || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    result.push(normalized);
+  };
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        visit(entry);
+      }
+      return;
+    }
+    const text = extractScopeRegionText(value);
+    if (!text) {
+      return;
+    }
+    const parts = splitScopeRegionText(text, { allowSlash });
+    if (parts.length === 0) {
+      pushValue(text);
+      return;
+    }
+    for (const part of parts) {
+      pushValue(part);
+    }
+  };
+  visit(values);
+  return result;
+}
+
+function appendUniqueTokenToPath(values = [], token = "") {
+  const normalizedToken = normalizeString(token);
+  if (!normalizedToken) {
+    return normalizeScopeRegionList(values, { allowSlash: true });
+  }
+  const tokenKey = normalizeKey(normalizedToken);
+  const filtered = normalizeScopeRegionList(values, { allowSlash: true });
+  if (filtered.some((value) => normalizeKey(value) === tokenKey)) {
+    return filtered;
+  }
+  return [...filtered, normalizedToken];
 }
 
 function isAlreadyNormalizedStringArray(values = []) {
@@ -75,10 +188,21 @@ function isAlreadyNormalizedStringArray(values = []) {
 
 function canReuseNormalizedMemoryScope(scope = {}, defaults = {}) {
   if (
-    !scope ||
-    typeof scope !== "object" ||
-    Array.isArray(scope) ||
+    !isPlainScopeObject(scope) ||
     (defaults && typeof defaults === "object" && Object.keys(defaults).length > 0)
+  ) {
+    return false;
+  }
+  if (
+    [
+      "layer",
+      "ownerType",
+      "ownerId",
+      "ownerName",
+      "regionPrimary",
+      "regionPath",
+      "regionSecondary",
+    ].some((key) => hasScopeAccessor(scope, key))
   ) {
     return false;
   }
@@ -144,9 +268,37 @@ export function normalizeMemoryScope(scope = {}, defaults = {}) {
     ? normalizeString(merged.ownerId || merged.ownerName)
     : "";
   const ownerName = ownerType ? normalizeString(merged.ownerName) : "";
-  const regionPrimary = normalizeString(merged.regionPrimary);
-  const regionPath = normalizeStringArray(merged.regionPath);
-  const regionSecondary = normalizeStringArray(merged.regionSecondary);
+  const regionPrimaryTokens = normalizeScopeRegionList(merged.regionPrimary, {
+    allowSlash: true,
+  });
+  let regionPath = normalizeScopeRegionList(merged.regionPath, {
+    allowSlash: true,
+  });
+  let regionSecondary = normalizeScopeRegionList(merged.regionSecondary, {
+    allowSlash: true,
+  });
+  if (regionPath.length === 0 && regionPrimaryTokens.length > 1) {
+    regionPath = [...regionPrimaryTokens];
+  }
+  let regionPrimary = regionPrimaryTokens[regionPrimaryTokens.length - 1] || "";
+  if (!regionPrimary && regionPath.length > 0) {
+    regionPrimary = regionPath[regionPath.length - 1] || "";
+  }
+  if (regionPrimary && regionPath.length > 0) {
+    regionPath = appendUniqueTokenToPath(regionPath, regionPrimary);
+  }
+  if (regionPrimary) {
+    const regionPrimaryKey = normalizeKey(regionPrimary);
+    regionSecondary = regionSecondary.filter(
+      (value) => normalizeKey(value) !== regionPrimaryKey,
+    );
+  }
+  if (regionPath.length > 0) {
+    const regionPathKeys = new Set(regionPath.map((value) => normalizeKey(value)));
+    regionSecondary = regionSecondary.filter(
+      (value) => !regionPathKeys.has(normalizeKey(value)),
+    );
+  }
 
   return {
     layer,
@@ -192,10 +344,12 @@ export function getScopeOwnerKey(scope) {
 
 export function getScopeRegionTokens(scope) {
   const normalized = normalizeMemoryScope(scope);
+  const regionPath = normalizeStringArray(normalized.regionPath);
+  const regionSecondary = normalizeStringArray(normalized.regionSecondary);
   return normalizeStringArray([
     normalized.regionPrimary,
-    ...normalized.regionPath,
-    ...normalized.regionSecondary,
+    ...regionPath,
+    ...regionSecondary,
   ]);
 }
 
@@ -217,6 +371,18 @@ export function getScopeSummary(scope) {
     regionKey: getScopeRegionKey(normalized),
     regionTokens,
   };
+}
+
+export function hasMeaningfulMemoryScope(scope) {
+  const normalized = normalizeMemoryScope(scope);
+  return (
+    normalized.layer === MEMORY_SCOPE_LAYER.POV ||
+    Boolean(normalized.ownerType || normalized.ownerId || normalized.ownerName) ||
+    Boolean(normalized.regionPrimary) ||
+    (Array.isArray(normalized.regionPath) && normalized.regionPath.length > 0) ||
+    (Array.isArray(normalized.regionSecondary) &&
+      normalized.regionSecondary.length > 0)
+  );
 }
 
 export function matchesScopeOwner(scope, ownerType, ownerValue = "") {
@@ -419,15 +585,17 @@ export function buildScopeBadgeText(scope) {
 
 export function buildRegionLine(scope) {
   const normalized = normalizeMemoryScope(scope);
+  const regionPath = normalizeStringArray(normalized.regionPath);
+  const regionSecondary = normalizeStringArray(normalized.regionSecondary);
   const parts = [];
   if (normalized.regionPrimary) {
     parts.push(`主地区: ${normalized.regionPrimary}`);
   }
-  if (normalized.regionPath.length > 0) {
-    parts.push(`地区路径: ${normalized.regionPath.join(" / ")}`);
+  if (regionPath.length > 0) {
+    parts.push(`地区路径: ${regionPath.join(" / ")}`);
   }
-  if (normalized.regionSecondary.length > 0) {
-    parts.push(`次级地区: ${normalized.regionSecondary.join(", ")}`);
+  if (regionSecondary.length > 0) {
+    parts.push(`次级地区: ${regionSecondary.join(", ")}`);
   }
   return parts.join(" | ");
 }

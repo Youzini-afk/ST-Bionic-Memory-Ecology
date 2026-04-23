@@ -1,5 +1,8 @@
 import { createEmptyGraph, deserializeGraph } from "../graph/graph.js";
-import { normalizeMemoryScope } from "../graph/memory-scope.js";
+import {
+  hasMeaningfulMemoryScope,
+  normalizeMemoryScope,
+} from "../graph/memory-scope.js";
 import {
   normalizeStoryTime,
   normalizeStoryTimeSpan,
@@ -8,6 +11,9 @@ import {
   buildVectorCollectionId,
   cloneGraphPersistDirtyState,
   getGraphPersistDirtyStateSnapshot,
+  markGraphPersistEdgeUpsert,
+  markGraphPersistNodeUpsert,
+  markGraphPersistRuntimeMetaDirty,
   normalizeGraphRuntimeState,
 } from "../runtime/runtime-state.js";
 
@@ -246,10 +252,15 @@ function cloneHydrateSnapshotMemoryScope(scope = null) {
   }
   return {
     ...scope,
-    regionPath: Array.isArray(scope.regionPath) ? [...scope.regionPath] : [],
+    regionPath: Array.isArray(scope.regionPath)
+      ? cloneHydrateSnapshotNestedValue(scope.regionPath, [])
+      : cloneHydrateSnapshotNestedValue(scope.regionPath, scope.regionPath),
     regionSecondary: Array.isArray(scope.regionSecondary)
-      ? [...scope.regionSecondary]
-      : [],
+      ? cloneHydrateSnapshotNestedValue(scope.regionSecondary, [])
+      : cloneHydrateSnapshotNestedValue(
+          scope.regionSecondary,
+          scope.regionSecondary,
+        ),
   };
 }
 
@@ -3181,12 +3192,92 @@ export function buildGraphFromSnapshot(snapshot, options = {}) {
     hydrateDiagnostics.stateMs = readPersistDeltaNow() - hydrateStateStartedAt;
   }
 
+  const recordNormalizationContext = {};
   const normalizeStartedAt = shouldCollectDiagnostics ? readPersistDeltaNow() : 0;
   const normalizedGraph = normalizeGraphRuntimeState(runtimeGraph, chatId, {
     skipRecordFieldNormalization: snapshotRecordsNormalized,
+    recordNormalizationContext,
   });
   if (hydrateDiagnostics) {
     hydrateDiagnostics.normalizeMs = readPersistDeltaNow() - normalizeStartedAt;
+  }
+  const normalizedNodeIds = Array.isArray(
+    recordNormalizationContext.normalizedNodeIds,
+  )
+    ? recordNormalizationContext.normalizedNodeIds
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean)
+    : [];
+  const normalizedEdgeIds = Array.isArray(
+    recordNormalizationContext.normalizedEdgeIds,
+  )
+    ? recordNormalizationContext.normalizedEdgeIds
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean)
+    : [];
+  if (normalizedNodeIds.length > 0 || normalizedEdgeIds.length > 0) {
+    const nodeById = new Map(
+      toArray(normalizedGraph.nodes)
+        .map((node) => [normalizeRecordId(node?.id), node])
+        .filter(([id]) => Boolean(id)),
+    );
+    const vectorReplayRequiredNodeIds = new Set(
+      toArray(normalizedGraph.vectorIndexState?.replayRequiredNodeIds)
+        .map((value) => normalizeRecordId(value))
+        .filter(Boolean),
+    );
+    let repairFloor = Number.isFinite(
+      Number(normalizedGraph.vectorIndexState?.pendingRepairFromFloor),
+    )
+      ? Number(normalizedGraph.vectorIndexState.pendingRepairFromFloor)
+      : null;
+    for (const nodeId of normalizedNodeIds) {
+      const node = nodeById.get(nodeId) || null;
+      if (!node) {
+        continue;
+      }
+      markGraphPersistNodeUpsert(normalizedGraph, node, "scope-auto-repair", "snapshot.hydrate");
+      if (hasMeaningfulMemoryScope(node.scope)) {
+        vectorReplayRequiredNodeIds.add(nodeId);
+        const sourceFloor = Number(node?.sourceFloor ?? node?.seq);
+        if (Number.isFinite(sourceFloor)) {
+          repairFloor =
+            repairFloor == null
+              ? Math.max(0, Math.floor(sourceFloor))
+              : Math.min(repairFloor, Math.max(0, Math.floor(sourceFloor)));
+        }
+      }
+    }
+    for (const edgeId of normalizedEdgeIds) {
+      const edge = toArray(normalizedGraph.edges).find(
+        (entry) => normalizeRecordId(entry?.id) === edgeId,
+      );
+      if (!edge) {
+        continue;
+      }
+      markGraphPersistEdgeUpsert(normalizedGraph, edge, "scope-auto-repair", "snapshot.hydrate");
+    }
+    markGraphPersistRuntimeMetaDirty(
+      normalizedGraph,
+      "scope-auto-repair-runtime-meta",
+      "snapshot.hydrate",
+    );
+    if (vectorReplayRequiredNodeIds.size > 0) {
+      normalizedGraph.vectorIndexState.replayRequiredNodeIds = [
+        ...vectorReplayRequiredNodeIds,
+      ];
+      normalizedGraph.vectorIndexState.dirty = true;
+      normalizedGraph.vectorIndexState.dirtyReason =
+        normalizedGraph.vectorIndexState.dirtyReason || "scope-auto-repair";
+      normalizedGraph.vectorIndexState.lastWarning =
+        normalizedGraph.vectorIndexState.lastWarning ||
+        "已自动修复旧作用域结构，相关向量会按需重放";
+      normalizedGraph.vectorIndexState.pendingRepairFromFloor = repairFloor;
+    }
+  }
+  if (hydrateDiagnostics) {
+    hydrateDiagnostics.scopeRepairNodeCount = normalizedNodeIds.length;
+    hydrateDiagnostics.scopeRepairEdgeCount = normalizedEdgeIds.length;
   }
   if (
     normalizedGraph.knowledgeState &&
