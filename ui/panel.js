@@ -3132,6 +3132,11 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-user"></i> 当前场景锚点</div>
       <div class="bme-cog-status-card__value">${_escHtml(
         activeOwnerLabels.length > 0
+          ? activeOwnerLabels.join(" / ")
+          : activeOwner
+            ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
+            : activeOwnerKey || "—",
+      )}</div>
     </div>
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
