@@ -119,8 +119,13 @@ function getSharedLlmPresetState() {
 }
 
 function openPlannerTaskPresetWorkspace() {
-  const taskTabBtn = document.querySelector('.bme-tab-btn[data-tab="task"]');
-  taskTabBtn?.click();
+  const configTabBtn = document.querySelector('.bme-tab-btn[data-tab="config"]');
+  configTabBtn?.click();
+
+  const promptsSectionBtn = document.querySelector(
+    '.bme-config-nav-btn[data-config-section="prompts"]',
+  );
+  promptsSectionBtn?.click();
 
   const activatePlannerTaskType = () => {
     const plannerBtn = document.querySelector(
@@ -136,10 +141,11 @@ function openPlannerTaskPresetWorkspace() {
 
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
+      promptsSectionBtn?.click();
       activatePlannerTaskType();
     });
   });
-  return Boolean(taskTabBtn);
+  return Boolean(configTabBtn || promptsSectionBtn);
 }
 
 function buildPlannerLlmSnapshot(source = {}) {
