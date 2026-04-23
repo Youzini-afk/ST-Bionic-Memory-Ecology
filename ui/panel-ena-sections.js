@@ -17,6 +17,7 @@ import {
 
 const SECTION_SELECTOR = '[data-config-section="planner"]';
 const AUTOSAVE_DELAY_MS = 600;
+const LEGACY_PLANNER_LLM_OPTION = '__planner_legacy_dedicated__';
 
 let bound = false;
 let unsubscribePlanner = null;
@@ -149,15 +150,13 @@ function buildPlannerLlmSnapshot(source = {}) {
   };
 }
 
-function getCurrentPlannerLlmSnapshot() {
-  const rawUrl = String(
-    $('bme-planner-api-base')?.value ?? cfgCache?.api?.baseUrl ?? '',
-  ).trim();
+function buildPlannerSnapshotFromConfigApi(api = {}) {
+  const rawUrl = String(api?.baseUrl || '').trim();
   const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
   return buildPlannerLlmSnapshot({
     llmApiUrl: resolved.apiUrl || rawUrl,
-    llmApiKey: $('bme-planner-api-key')?.value ?? cfgCache?.api?.apiKey ?? '',
-    llmModel: $('bme-planner-model')?.value ?? cfgCache?.api?.model ?? '',
+    llmApiKey: api?.apiKey || '',
+    llmModel: api?.model || '',
   });
 }
 
@@ -171,21 +170,79 @@ function normalizePlannerPresetSnapshot(preset = {}) {
   });
 }
 
-function resolveMatchingPlannerLlmPresetName(snapshot = getCurrentPlannerLlmSnapshot()) {
-  const { presets, activePreset } = getSharedLlmPresetState();
-  const exactMatches = Object.keys(presets || {}).filter((name) =>
-    isSameLlmConfigSnapshot(snapshot, normalizePlannerPresetSnapshot(presets[name])),
+function hasPlannerLegacyDedicatedApiConfig(api = {}) {
+  return Boolean(
+    String(api?.baseUrl || '').trim() &&
+    String(api?.model || '').trim(),
   );
-  if (exactMatches.length === 1) return exactMatches[0];
-  if (exactMatches.length > 1 && activePreset && exactMatches.includes(activePreset)) {
-    return activePreset;
-  }
-  return '';
 }
 
-function populatePlannerLlmPresetSelect(selectedPreset = resolveMatchingPlannerLlmPresetName()) {
+function resolvePlannerLlmSelectState(config = cfgCache || {}) {
+  const api = config?.api && typeof config.api === 'object' ? config.api : {};
+  const selectedPresetName = String(api?.llmPreset || '').trim();
+  const { presets, activePreset } = getSharedLlmPresetState();
+
+  if (selectedPresetName) {
+    if (Object.prototype.hasOwnProperty.call(presets || {}, selectedPresetName)) {
+      return {
+        value: selectedPresetName,
+        mode: 'preset',
+      };
+    }
+    return {
+      value: '',
+      mode: 'global',
+      missingPresetName: selectedPresetName,
+    };
+  }
+
+  if (!hasPlannerLegacyDedicatedApiConfig(api)) {
+    return {
+      value: '',
+      mode: 'global',
+    };
+  }
+
+  const legacySnapshot = buildPlannerSnapshotFromConfigApi(api);
+  const globalSnapshot = buildPlannerLlmSnapshot(getSharedSettingsSnapshot());
+  if (isSameLlmConfigSnapshot(legacySnapshot, globalSnapshot)) {
+    return {
+      value: '',
+      mode: 'global',
+      matchedLegacySource: 'global',
+    };
+  }
+
+  const exactMatches = Object.keys(presets || {}).filter((name) =>
+    isSameLlmConfigSnapshot(legacySnapshot, normalizePlannerPresetSnapshot(presets[name])),
+  );
+  if (exactMatches.length === 1) {
+    return {
+      value: exactMatches[0],
+      mode: 'preset',
+      matchedLegacySource: 'preset',
+    };
+  }
+  if (exactMatches.length > 1 && activePreset && exactMatches.includes(activePreset)) {
+    return {
+      value: activePreset,
+      mode: 'preset',
+      matchedLegacySource: 'preset',
+    };
+  }
+  return {
+    value: LEGACY_PLANNER_LLM_OPTION,
+    mode: 'legacy',
+  };
+}
+
+function populatePlannerLlmPresetSelect(selectedPreset = resolvePlannerLlmSelectState().value) {
   const select = $('bme-planner-llm-preset-select');
   if (!select) return;
+
+  if (select.options.length > 0) {
+    select.options[0].textContent = '-- 跟随全局（当前 BME API） --';
+  }
 
   while (select.options.length > 1) {
     select.remove(1);
@@ -201,45 +258,18 @@ function populatePlannerLlmPresetSelect(selectedPreset = resolveMatchingPlannerL
       select.appendChild(option);
     });
 
+  if (selectedPreset === LEGACY_PLANNER_LLM_OPTION) {
+    const legacyOption = document.createElement('option');
+    legacyOption.value = LEGACY_PLANNER_LLM_OPTION;
+    legacyOption.textContent = '旧 ENA 独立连接（兼容）';
+    select.appendChild(legacyOption);
+  }
+
   select.value = selectedPreset || '';
 }
 
 function syncPlannerLlmPresetSelect() {
-  populatePlannerLlmPresetSelect(resolveMatchingPlannerLlmPresetName());
-}
-
-function inferPlannerApiConfigFromPreset(preset = {}) {
-  const rawUrl = String(preset?.llmApiUrl || '').trim();
-  const resolved = resolveDedicatedLlmProviderConfig(rawUrl);
-  let channel = 'openai';
-  if (resolved.providerId === 'google-ai-studio') channel = 'gemini';
-  else if (resolved.providerId === 'anthropic-claude') channel = 'claude';
-
-  return {
-    channel,
-    prefixMode: 'auto',
-    customPrefix: '',
-    baseUrl: resolved.apiUrl || rawUrl,
-    apiKey: String(preset?.llmApiKey || '').trim(),
-    model: String(preset?.llmModel || '').trim(),
-  };
-}
-
-function applyPlannerLlmPresetToFields(name, preset = {}) {
-  const inferred = inferPlannerApiConfigFromPreset(preset);
-  const setVal = (id, value) => {
-    const el = $(id);
-    if (el) el.value = value;
-  };
-
-  setVal('bme-planner-api-channel', inferred.channel || 'openai');
-  setVal('bme-planner-prefix-mode', inferred.prefixMode || 'auto');
-  setVal('bme-planner-prefix-custom', inferred.customPrefix || '');
-  setVal('bme-planner-api-base', inferred.baseUrl || '');
-  setVal('bme-planner-api-key', inferred.apiKey || '');
-  setVal('bme-planner-model', inferred.model || '');
-  updatePrefixModeUI();
-  populatePlannerLlmPresetSelect(name);
+  populatePlannerLlmPresetSelect(resolvePlannerLlmSelectState().value);
 }
 
 /* ── Prompt block editor ────────────────────────────────────────────────── */
@@ -508,6 +538,14 @@ function applyConfigToFields(cfg) {
   );
   updatePrefixModeUI();
   syncPlannerLlmPresetSelect();
+  const llmSelectState = resolvePlannerLlmSelectState(cfgCache);
+  if (llmSelectState.mode === 'legacy') {
+    setLocalStatus('bme-planner-api-status', '当前仍在使用旧版 ENA 独立连接；切换为全局或预设后将不再保留这套隐藏配置。', '');
+  } else if (llmSelectState.missingPresetName) {
+    setLocalStatus('bme-planner-api-status', `已回退为跟随全局：缺少预设 ${llmSelectState.missingPresetName}`, 'error');
+  } else {
+    setLocalStatus('bme-planner-api-status', '', '');
+  }
 
   const keepSelected = cfgCache.activePromptTemplate || $('bme-planner-tpl-select')?.value || '';
   renderTemplateSelect(keepSelected);
@@ -516,18 +554,32 @@ function applyConfigToFields(cfg) {
 
 function collectPatch() {
   const getVal = (id) => $(id)?.value ?? '';
+  const selectedPlannerPreset = String(getVal('bme-planner-llm-preset-select') || '').trim();
+  const existingApi = cfgCache?.api && typeof cfgCache.api === 'object' ? cfgCache.api : {};
+  const preserveLegacyApi = selectedPlannerPreset === LEGACY_PLANNER_LLM_OPTION;
 
   return {
     enabled: toBool(getVal('bme-planner-enabled'), false),
     skipIfPlotPresent: toBool(getVal('bme-planner-skip-plot'), true),
-    api: {
-      channel: getVal('bme-planner-api-channel'),
-      prefixMode: getVal('bme-planner-prefix-mode'),
-      baseUrl: getVal('bme-planner-api-base').trim(),
-      customPrefix: getVal('bme-planner-prefix-custom').trim(),
-      apiKey: getVal('bme-planner-api-key'),
-      model: getVal('bme-planner-model').trim(),
-    },
+    api: preserveLegacyApi
+      ? {
+          llmPreset: '',
+          channel: String(existingApi.channel || 'openai'),
+          prefixMode: String(existingApi.prefixMode || 'auto'),
+          customPrefix: String(existingApi.customPrefix || ''),
+          baseUrl: String(existingApi.baseUrl || '').trim(),
+          apiKey: String(existingApi.apiKey || ''),
+          model: String(existingApi.model || '').trim(),
+        }
+      : {
+          llmPreset: selectedPlannerPreset,
+          channel: 'openai',
+          prefixMode: 'auto',
+          customPrefix: '',
+          baseUrl: '',
+          apiKey: '',
+          model: '',
+        },
     includeGlobalWorldbooks: toBool(getVal('bme-planner-include-global-wb'), false),
     excludeWorldbookPosition4: toBool(getVal('bme-planner-wb-pos4'), true),
     worldbookExcludeNames: csvToArr(getVal('bme-planner-wb-exclude-names')),
@@ -680,19 +732,50 @@ function bindOnce(section) {
   $('bme-planner-llm-preset-select')?.addEventListener('change', () => {
     const select = $('bme-planner-llm-preset-select');
     const selectedName = String(select?.value || '');
+    cfgCache = cfgCache || {};
+    cfgCache.api = cfgCache.api && typeof cfgCache.api === 'object' ? cfgCache.api : {};
     if (!selectedName) {
-      setLocalStatus('bme-planner-api-status', '', '');
+      cfgCache.api.llmPreset = '';
+      cfgCache.api.channel = 'openai';
+      cfgCache.api.prefixMode = 'auto';
+      cfgCache.api.customPrefix = '';
+      cfgCache.api.baseUrl = '';
+      cfgCache.api.apiKey = '';
+      cfgCache.api.model = '';
+      syncPlannerLlmPresetSelect();
+      setLocalStatus('bme-planner-api-status', '已改为跟随全局 BME API', 'success');
+      scheduleSave();
+      return;
+    }
+    if (selectedName === LEGACY_PLANNER_LLM_OPTION) {
+      syncPlannerLlmPresetSelect();
+      setLocalStatus('bme-planner-api-status', '继续保留旧版 ENA 独立连接', '');
+      scheduleSave();
       return;
     }
     const { presets } = getSharedLlmPresetState();
-    const preset = presets?.[selectedName];
-    if (!preset) {
-      populatePlannerLlmPresetSelect('');
-      setLocalStatus('bme-planner-api-status', '选中的 BME 模板不存在，已切回手动模式', 'error');
+    if (!presets?.[selectedName]) {
+      cfgCache.api.llmPreset = '';
+      cfgCache.api.channel = 'openai';
+      cfgCache.api.prefixMode = 'auto';
+      cfgCache.api.customPrefix = '';
+      cfgCache.api.baseUrl = '';
+      cfgCache.api.apiKey = '';
+      cfgCache.api.model = '';
+      syncPlannerLlmPresetSelect();
+      setLocalStatus('bme-planner-api-status', '选中的 API 预设不存在，已回退为跟随全局', 'error');
+      scheduleSave();
       return;
     }
-    applyPlannerLlmPresetToFields(selectedName, preset);
-    setLocalStatus('bme-planner-api-status', `已套用 BME 模板：${selectedName}`, 'success');
+    cfgCache.api.llmPreset = selectedName;
+    cfgCache.api.channel = 'openai';
+    cfgCache.api.prefixMode = 'auto';
+    cfgCache.api.customPrefix = '';
+    cfgCache.api.baseUrl = '';
+    cfgCache.api.apiKey = '';
+    cfgCache.api.model = '';
+    syncPlannerLlmPresetSelect();
+    setLocalStatus('bme-planner-api-status', `已切换为 API 预设：${selectedName}`, 'success');
     scheduleSave();
   });
 

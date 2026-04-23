@@ -2920,110 +2920,23 @@
                     <div>
                       <div class="bme-config-card-title">规划 LLM · 连接</div>
                       <div class="bme-config-card-subtitle">
-                        独立的规划 LLM 通道，与 BME 记忆 LLM 相互隔离。支持 OpenAI / Gemini / Claude 兼容协议。
+                        默认跟随当前全局 BME API，也可以切换到任意已保存的 API 预设。
                       </div>
                     </div>
                   </div>
                   <div class="bme-config-row bme-llm-preset-row">
-                    <label for="bme-planner-llm-preset-select">复用 BME LLM 配置模板</label>
+                    <label for="bme-planner-llm-preset-select">API 预设</label>
                     <div class="bme-llm-preset-controls">
                       <select
                         id="bme-planner-llm-preset-select"
                         class="bme-config-input"
                       >
-                        <option value="">-- 手动模式 / 当前 ENA 配置 --</option>
+                        <option value="">-- 跟随全局（当前 BME API） --</option>
                       </select>
                     </div>
                   </div>
                   <div class="bme-config-help">
-                    直接复用主面板的 LLM 预设，将 URL、Key、Model 拷贝到 ENA 规划器，并自动推断渠道与默认前缀；套用后仍可单独微调。
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-api-channel">渠道类型</label>
-                    <select id="bme-planner-api-channel" class="bme-config-input">
-                      <option value="openai">OpenAI 兼容</option>
-                      <option value="gemini">Gemini 兼容</option>
-                      <option value="claude">Claude 兼容</option>
-                    </select>
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-prefix-mode">路径前缀</label>
-                    <select id="bme-planner-prefix-mode" class="bme-config-input">
-                      <option value="auto">自动（如 /v1）</option>
-                      <option value="custom">自定义</option>
-                    </select>
-                  </div>
-                  <div class="bme-config-row" id="bme-planner-prefix-custom-row" hidden>
-                    <label for="bme-planner-prefix-custom">自定义前缀</label>
-                    <input
-                      id="bme-planner-prefix-custom"
-                      class="bme-config-input"
-                      type="text"
-                      placeholder="/v1"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-api-base">API 地址</label>
-                    <input
-                      id="bme-planner-api-base"
-                      class="bme-config-input"
-                      type="text"
-                      placeholder="https://api.openai.com"
-                    />
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-api-key">API Key</label>
-                    <div class="bme-planner-inline-row">
-                      <input
-                        id="bme-planner-api-key"
-                        class="bme-config-input"
-                        type="password"
-                        placeholder="sk-..."
-                      />
-                      <button
-                        class="bme-config-secondary-btn"
-                        id="bme-planner-toggle-key"
-                        type="button"
-                      >
-                        <span>显示</span>
-                      </button>
-                    </div>
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-model">模型</label>
-                    <input
-                      id="bme-planner-model"
-                      class="bme-config-input"
-                      type="text"
-                      placeholder="gpt-4o / claude-3-5-sonnet / gemini-2.0-flash"
-                    />
-                  </div>
-                  <div class="bme-model-fetch-block">
-                    <button
-                      class="bme-config-secondary-btn"
-                      id="bme-planner-fetch-models"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-rotate"></i>
-                      <span>拉取模型</span>
-                    </button>
-                    <select
-                      id="bme-planner-model-select"
-                      class="bme-config-input bme-model-select"
-                      style="display: none"
-                    >
-                      <option value="">-- 从列表选择 --</option>
-                    </select>
-                  </div>
-                  <div class="bme-config-actions">
-                    <button
-                      class="bme-config-test-btn"
-                      id="bme-planner-test-conn"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-plug"></i>
-                      <span>测试连接</span>
-                    </button>
+                    留空表示直接跟随当前全局 API；选择某个预设后，规划器会固定使用那套 URL / Key / Model。
                   </div>
                   <div class="bme-planner-status-text" id="bme-planner-api-status"></div>
                 </div>

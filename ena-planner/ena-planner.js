@@ -11,6 +11,10 @@ import {
     setActiveTaskProfileId,
     upsertTaskProfile,
 } from '../prompting/prompt-profiles.js';
+import {
+    resolveDedicatedLlmProviderConfig,
+    resolveLlmConfigSelection,
+} from '../llm/llm-preset-utils.js';
 import { debugLog } from '../runtime/debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
@@ -74,6 +78,7 @@ function getDefaultSettings(options = {}) {
 
         // Planner API
         api: {
+            llmPreset: '',
             channel: 'openai',
             baseUrl: '',
             prefixMode: 'auto',
@@ -563,21 +568,87 @@ function normalizeUrlBase(u) {
     return u.replace(/\/+$/g, '');
 }
 
+function hasPlannerLegacyDedicatedApiConfig(api = {}) {
+    return Boolean(
+        String(api?.baseUrl || '').trim() &&
+        String(api?.model || '').trim(),
+    );
+}
+
+function inferPlannerChannelFromUrl(url) {
+    const resolved = resolveDedicatedLlmProviderConfig(String(url || '').trim());
+    if (resolved.providerId === 'google-ai-studio') return 'gemini';
+    if (resolved.providerId === 'anthropic-claude') return 'claude';
+    return 'openai';
+}
+
+function buildResolvedPlannerApiConfigFromLlmSelection(selection = {}) {
+    const snapshot = selection?.config && typeof selection.config === 'object'
+        ? selection.config
+        : {};
+    const inputUrl = String(snapshot?.llmApiUrl || '').trim();
+    const resolved = resolveDedicatedLlmProviderConfig(inputUrl);
+    const baseUrl = String(resolved.apiUrl || inputUrl).trim();
+    return {
+        mode: selection?.requestedPresetName ? 'preset' : 'global',
+        source: String(selection?.source || ''),
+        requestedPresetName: String(selection?.requestedPresetName || ''),
+        presetName: String(selection?.presetName || ''),
+        fallbackReason: String(selection?.fallbackReason || ''),
+        channel: inferPlannerChannelFromUrl(baseUrl),
+        prefixMode: 'auto',
+        customPrefix: '',
+        baseUrl,
+        apiKey: String(snapshot?.llmApiKey || '').trim(),
+        model: String(snapshot?.llmModel || '').trim(),
+    };
+}
+
+function buildLegacyPlannerApiConfig(api = {}) {
+    return {
+        mode: 'legacy',
+        source: 'legacy-ena-config',
+        requestedPresetName: '',
+        presetName: '',
+        fallbackReason: '',
+        channel: String(api?.channel || 'openai').trim() || 'openai',
+        prefixMode: String(api?.prefixMode || 'auto').trim() || 'auto',
+        customPrefix: String(api?.customPrefix || '').trim(),
+        baseUrl: String(api?.baseUrl || '').trim(),
+        apiKey: String(api?.apiKey || '').trim(),
+        model: String(api?.model || '').trim(),
+    };
+}
+
+function resolvePlannerApiConfig() {
+    const s = ensureSettings();
+    const selectedPresetName = String(s?.api?.llmPreset || '').trim();
+    if (selectedPresetName) {
+        return buildResolvedPlannerApiConfigFromLlmSelection(
+            resolveLlmConfigSelection(getBmeSettings(), selectedPresetName),
+        );
+    }
+    if (hasPlannerLegacyDedicatedApiConfig(s?.api)) {
+        return buildLegacyPlannerApiConfig(s.api);
+    }
+    return buildResolvedPlannerApiConfigFromLlmSelection(
+        resolveLlmConfigSelection(getBmeSettings(), ''),
+    );
+}
+
 function getDefaultPrefixByChannel(channel) {
     if (channel === 'gemini') return '/v1beta';
     return '/v1';
 }
 
-function buildApiPrefix() {
-    const s = ensureSettings();
-    if (s.api.prefixMode === 'custom' && s.api.customPrefix?.trim()) return s.api.customPrefix.trim();
-    return getDefaultPrefixByChannel(s.api.channel);
+function buildApiPrefix(apiConfig = resolvePlannerApiConfig()) {
+    if (apiConfig?.prefixMode === 'custom' && apiConfig?.customPrefix?.trim()) return apiConfig.customPrefix.trim();
+    return getDefaultPrefixByChannel(apiConfig?.channel);
 }
 
-function buildUrl(path) {
-    const s = ensureSettings();
-    const base = normalizeUrlBase(s.api.baseUrl);
-    const prefix = buildApiPrefix();
+function buildUrl(path, apiConfig = resolvePlannerApiConfig()) {
+    const base = normalizeUrlBase(apiConfig?.baseUrl);
+    const prefix = buildApiPrefix(apiConfig);
     const p = prefix.startsWith('/') ? prefix : `/${prefix}`;
     const finalPrefix = p.replace(/\/+$/g, '');
     const finalPath = path.startsWith('/') ? path : `/${path}`;
@@ -1273,16 +1344,15 @@ function filterPlannerPreview(rawPartial) {
  * --------------------------
  */
 async function callPlanner(messages, options = {}) {
-    const s = ensureSettings();
-    if (!s.api.baseUrl) throw new Error('未配置 API URL');
-    if (!s.api.apiKey) throw new Error('未配置 API KEY');
-    if (!s.api.model) throw new Error('未选择模型');
+    const apiConfig = resolvePlannerApiConfig();
+    if (!apiConfig.baseUrl) throw new Error('未配置可用的 API URL');
+    if (!apiConfig.model) throw new Error('未配置可用的模型');
     const generation = resolvePlannerGenerationSettings();
 
-    const url = buildUrl('/chat/completions');
+    const url = buildUrl('/chat/completions', apiConfig);
 
     const body = {
-        model: s.api.model,
+        model: apiConfig.model,
         messages,
         stream: generation.stream === true
     };
@@ -1298,13 +1368,16 @@ async function callPlanner(messages, options = {}) {
     const plannerRequestTimeoutMs = getPlannerRequestTimeoutMs();
     const timeoutId = setTimeout(() => controller.abort(), plannerRequestTimeoutMs);
     try {
+        const headers = {
+            ...getRequestHeaders(),
+            'Content-Type': 'application/json',
+        };
+        if (apiConfig.apiKey) {
+            headers.Authorization = `Bearer ${apiConfig.apiKey}`;
+        }
         const res = await fetch(url, {
             method: 'POST',
-            headers: {
-                ...getRequestHeaders(),
-                Authorization: `Bearer ${s.api.apiKey}`,
-                'Content-Type': 'application/json'
-            },
+            headers,
             body: JSON.stringify(body),
             signal: controller.signal
         });
@@ -1364,16 +1437,18 @@ async function callPlanner(messages, options = {}) {
 }
 
 async function fetchModelsForUi() {
-    const s = ensureSettings();
-    if (!s.api.baseUrl) throw new Error('请先填写 API URL');
-    if (!s.api.apiKey) throw new Error('请先填写 API KEY');
-    const url = buildUrl('/models');
+    const apiConfig = resolvePlannerApiConfig();
+    if (!apiConfig.baseUrl) throw new Error('当前没有可用的 API URL');
+    const url = buildUrl('/models', apiConfig);
+    const headers = {
+        ...getRequestHeaders(),
+    };
+    if (apiConfig.apiKey) {
+        headers.Authorization = `Bearer ${apiConfig.apiKey}`;
+    }
     const res = await fetch(url, {
         method: 'GET',
-        headers: {
-            ...getRequestHeaders(),
-            Authorization: `Bearer ${s.api.apiKey}`
-        }
+        headers
     });
     if (!res.ok) {
         const text = await res.text().catch(() => '');
@@ -1744,10 +1819,10 @@ async function buildPlannerMessages(rawUserInput) {
  * --------------------------
  */
 async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
-    const s = ensureSettings();
+    const apiConfig = resolvePlannerApiConfig();
 
     const log = {
-        time: nowISO(), ok: false, model: s.api.model,
+        time: nowISO(), ok: false, model: apiConfig.model,
         requestMessages: [], rawReply: '', filteredReply: '', error: ''
     };
 
