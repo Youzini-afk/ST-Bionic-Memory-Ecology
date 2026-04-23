@@ -6,10 +6,8 @@ import { debugLog } from '../runtime/debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';
-const OVERLAY_ID = 'xiaobaix-ena-planner-overlay';
 const VECTOR_RECALL_TIMEOUT_MS = 30000;
 const PLANNER_REQUEST_TIMEOUT_MS = 90000;
-const _currentModuleUrl = import.meta.url;
 
 let _bmeRuntime = null;
 
@@ -25,36 +23,6 @@ function getPlannerRequestTimeoutMs() {
     return Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : PLANNER_REQUEST_TIMEOUT_MS;
-}
-
-function getTrustedOrigin() { return window.location.origin; }
-
-function postToIframe(iframe, payload) {
-    if (!iframe?.contentWindow) return false;
-    iframe.contentWindow.postMessage(payload, getTrustedOrigin());
-    return true;
-}
-
-function isTrustedIframeEvent(event, iframe) {
-    return !!iframe && event.origin === getTrustedOrigin()
-        && event.source === iframe.contentWindow;
-}
-
-function getPluginBasePath() {
-    try {
-        const url = new URL(_currentModuleUrl);
-        const parts = url.pathname.split('/');
-        const idx = parts.lastIndexOf('ena-planner');
-        if (idx > 0) {
-            return parts.slice(0, idx).join('/');
-        }
-    } catch { }
-    return _bmeRuntime?.getExtensionPath?.()
-        || 'scripts/extensions/third-party/ST-Bionic-Memory-Ecology-main';
-}
-
-function getHtmlPath() {
-    return `${getPluginBasePath()}/ena-planner/ena-planner.html`;
 }
 
 /**
@@ -128,11 +96,23 @@ const state = {
 };
 
 let config = null;
-let overlay = null;
-let iframeMessageBound = false;
 let sendListenersInstalled = false;
 let sendClickHandler = null;
 let sendKeydownHandler = null;
+
+/**
+ * Native UI subscribers (replaces the iframe postMessage channel).
+ * Callbacks receive `(kind, payload)` where kind is 'config' or 'logs'.
+ */
+const nativeSubscribers = new Set();
+
+function notifyNativeChange(kind, payload) {
+    if (!nativeSubscribers.size) return;
+    for (const cb of nativeSubscribers) {
+        try { cb(kind, payload); }
+        catch (err) { console.warn('[Ena] native subscriber error:', err); }
+    }
+}
 
 /**
  * -------------------------
@@ -228,9 +208,11 @@ function clampLogs() {
 
 function persistLogsMaybe() {
     const s = ensureSettings();
-    if (!s.logsPersist) return;
-    state.logs = state.logs.slice(0, s.logsMax);
-    EnaPlannerStorage.set('logs', state.logs).catch(() => {});
+    if (s.logsPersist) {
+        state.logs = state.logs.slice(0, s.logsMax);
+        EnaPlannerStorage.set('logs', state.logs).catch(() => {});
+    }
+    try { notifyNativeChange('logs', getPlannerLogsSnapshot()); } catch {}
 }
 
 function loadPersistedLogsMaybe() {
@@ -1139,6 +1121,101 @@ function debugCharForUi() {
 
 /**
  * -------------------------
+ * Native UI API (consumed by ui/panel-ena-sections.js)
+ * These replace the iframe postMessage channel with direct function calls.
+ * --------------------------
+ */
+function getPlannerConfigSnapshot() {
+    return structuredClone(ensureSettings());
+}
+
+function getPlannerLogsSnapshot() {
+    return Array.isArray(state.logs) ? structuredClone(state.logs) : [];
+}
+
+function subscribePlannerChanges(cb) {
+    if (typeof cb !== 'function') return () => {};
+    nativeSubscribers.add(cb);
+    return () => nativeSubscribers.delete(cb);
+}
+
+async function patchPlannerConfig(patch) {
+    if (!patch || typeof patch !== 'object') {
+        return { ok: false, error: '无效的补丁' };
+    }
+    const s = ensureSettings();
+    for (const key of Object.keys(patch)) {
+        if (patch[key] && typeof patch[key] === 'object' && !Array.isArray(patch[key])) {
+            s[key] = { ...(s[key] || {}), ...patch[key] };
+        } else {
+            s[key] = patch[key];
+        }
+    }
+    const ok = await saveConfigNow();
+    if (ok) {
+        notifyNativeChange('config', getPlannerConfigSnapshot());
+        return { ok: true, config: getPlannerConfigSnapshot() };
+    }
+    return { ok: false, error: '保存失败' };
+}
+
+async function resetPlannerPromptToDefault() {
+    const s = ensureSettings();
+    s.promptBlocks = getDefaultSettings().promptBlocks;
+    const ok = await saveConfigNow();
+    if (ok) {
+        notifyNativeChange('config', getPlannerConfigSnapshot());
+        return { ok: true, config: getPlannerConfigSnapshot() };
+    }
+    return { ok: false, error: '重置失败' };
+}
+
+async function runPlannerTestFromUi(text) {
+    const fake = String(text || '').trim() || '（测试输入）我想让你帮我规划下一步剧情。';
+    try {
+        await runPlanningOnce(fake, true);
+        notifyNativeChange('logs', getPlannerLogsSnapshot());
+        return { ok: true };
+    } catch (err) {
+        notifyNativeChange('logs', getPlannerLogsSnapshot());
+        return { ok: false, error: String(err?.message ?? err) };
+    }
+}
+
+async function fetchPlannerModelsFromUi() {
+    try {
+        const models = await fetchModelsForUi();
+        return { ok: true, models };
+    } catch (err) {
+        return { ok: false, error: String(err?.message ?? err) };
+    }
+}
+
+async function debugPlannerWorldbookFromUi() {
+    try {
+        return { ok: true, output: await debugWorldbookForUi() };
+    } catch (err) {
+        return { ok: false, output: String(err?.message ?? err) };
+    }
+}
+
+function debugPlannerCharFromUi() {
+    try {
+        return { ok: true, output: debugCharForUi() };
+    } catch (err) {
+        return { ok: false, output: String(err?.message ?? err) };
+    }
+}
+
+async function clearPlannerLogs() {
+    state.logs = [];
+    const ok = await saveConfigNow();
+    notifyNativeChange('logs', getPlannerLogsSnapshot());
+    return { ok };
+}
+
+/**
+ * -------------------------
  * Build planner messages
  * --------------------------
  */
@@ -1413,183 +1490,29 @@ function uninstallSendInterceptors() {
     sendListenersInstalled = false;
 }
 
-function getIframeConfigPayload() {
-    const s = ensureSettings();
-    return {
-        ...s,
-        logs: state.logs,
-    };
-}
-
-function openSettings() {
-    if (document.getElementById(OVERLAY_ID)) return;
-
-    overlay = document.createElement('div');
-    overlay.id = OVERLAY_ID;
-    overlay.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100vw;
-        height: ${window.innerHeight}px;
-        background: rgba(0,0,0,0.5);
-        z-index: 99999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        overflow: hidden;
-    `;
-
-    const iframe = document.createElement('iframe');
-    iframe.src = getHtmlPath();
-    iframe.style.cssText = `
-        width: min(1200px, 96vw);
-        height: min(980px, 94vh);
-        max-height: calc(100% - 24px);
-        border: none;
-        border-radius: 12px;
-        background: #1a1a1a;
-    `;
-
-    overlay.appendChild(iframe);
-    document.body.appendChild(overlay);
-
-    if (!iframeMessageBound) {
-        // Guarded by isTrustedIframeEvent (origin + source).
-        // eslint-disable-next-line no-restricted-syntax
-        window.addEventListener('message', handleIframeMessage);
-        iframeMessageBound = true;
-    }
-}
-
-function closeSettings() {
-    const overlayEl = document.getElementById(OVERLAY_ID);
-    if (overlayEl) overlayEl.remove();
-    overlay = null;
-}
-
-async function handleIframeMessage(ev) {
-    const iframe = overlay?.querySelector('iframe');
-    if (!isTrustedIframeEvent(ev, iframe)) return;
-    if (!ev.data?.type?.startsWith('xb-ena:')) return;
-
-    const { type, payload } = ev.data;
-    switch (type) {
-        case 'xb-ena:ready':
-            postToIframe(iframe, { type: 'xb-ena:config', payload: getIframeConfigPayload() });
-            break;
-        case 'xb-ena:close':
-            closeSettings();
-            break;
-        case 'xb-ena:save-config': {
-            const requestId = payload?.requestId || '';
-            const patch = (payload && typeof payload.patch === 'object') ? payload.patch : payload;
-            Object.assign(ensureSettings(), patch || {});
-            const ok = await saveConfigNow();
-            if (ok) {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-saved',
-                    payload: {
-                        ...getIframeConfigPayload(),
-                        requestId
-                    }
-                });
-            } else {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-save-error',
-                    payload: {
-                        message: '保存失败',
-                        requestId
-                    }
-                });
-            }
-            break;
-        }
-        case 'xb-ena:reset-prompt-default': {
-            const requestId = payload?.requestId || '';
-            const s = ensureSettings();
-            s.promptBlocks = getDefaultSettings().promptBlocks;
-            const ok = await saveConfigNow();
-            if (ok) {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-saved',
-                    payload: {
-                        ...getIframeConfigPayload(),
-                        requestId
-                    }
-                });
-            } else {
-                postToIframe(iframe, {
-                    type: 'xb-ena:config-save-error',
-                    payload: {
-                        message: '重置失败',
-                        requestId
-                    }
-                });
-            }
-            break;
-        }
-        case 'xb-ena:run-test': {
-            try {
-                const fake = payload?.text || '（测试输入）我想让你帮我规划下一步剧情。';
-                await runPlanningOnce(fake, true);
-                postToIframe(iframe, { type: 'xb-ena:test-done' });
-                postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:test-error', payload: { message: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:logs-request':
-            postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            break;
-        case 'xb-ena:logs-clear':
-            state.logs = [];
-            await saveConfigNow();
-            postToIframe(iframe, { type: 'xb-ena:logs', payload: { logs: state.logs } });
-            break;
-        case 'xb-ena:fetch-models': {
-            try {
-                const models = await fetchModelsForUi();
-                postToIframe(iframe, { type: 'xb-ena:models', payload: { models } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:models-error', payload: { message: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:debug-worldbook': {
-            try {
-                const output = await debugWorldbookForUi();
-                postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output } });
-            } catch (err) {
-                postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output: String(err?.message ?? err) } });
-            }
-            break;
-        }
-        case 'xb-ena:debug-char': {
-            const output = debugCharForUi();
-            postToIframe(iframe, { type: 'xb-ena:debug-output', payload: { output } });
-            break;
-        }
-    }
-}
-
 export async function initEnaPlanner(bmeRuntime) {
     _bmeRuntime = bmeRuntime || null;
     await migrateFromLWBIfNeeded();
     await loadConfig();
     loadPersistedLogsMaybe();
     installSendInterceptors();
-    window.stBmeEnaPlanner = { openSettings, closeSettings };
+    window.stBmeEnaPlanner = {
+        getConfig: getPlannerConfigSnapshot,
+        getLogs: getPlannerLogsSnapshot,
+        subscribe: subscribePlannerChanges,
+        patchConfig: patchPlannerConfig,
+        resetPromptToDefault: resetPlannerPromptToDefault,
+        runTest: runPlannerTestFromUi,
+        fetchModels: fetchPlannerModelsFromUi,
+        debugWorldbook: debugPlannerWorldbookFromUi,
+        debugChar: debugPlannerCharFromUi,
+        clearLogs: clearPlannerLogs,
+    };
 }
 
 export function cleanupEnaPlanner() {
     uninstallSendInterceptors();
-    closeSettings();
-    if (iframeMessageBound) {
-        window.removeEventListener('message', handleIframeMessage);
-        iframeMessageBound = false;
-    }
+    nativeSubscribers.clear();
     delete window.stBmeEnaPlanner;
     _bmeRuntime = null;
 }

@@ -478,6 +478,7 @@ ST-BME/
 │   ├── graph-renderer.js       # Canvas 力导向图谱渲染器
 │   ├── graph-renderer-utils.js # 渲染工具函数
 │   ├── panel-graph-refresh-utils.js # 面板图谱刷新工具
+│   ├── panel-ena-sections.js   # ENA Planner 原生配置区绑定
 │   ├── recall-message-ui.js    # 消息级召回卡片 UI（子图渲染 + 侧边栏编辑）
 │   ├── hide-engine.js          # 旧消息隐藏引擎（使用酒馆原生 /hide /unhide）
 │   ├── notice.js               # 通知系统
@@ -487,8 +488,7 @@ ST-BME/
 │   ├── ena-planner.js          # Planner 主逻辑
 │   ├── ena-planner-storage.js  # Planner 存储
 │   ├── ena-planner-presets.js  # Planner 预设
-│   ├── ena-planner.html        # Planner UI
-│   └── ena-planner.css         # Planner 样式
+│   └── （UI 已并入主面板配置页）
 │
 ├── vendor/                     # 第三方依赖
 │   └── js-yaml.mjs             # YAML 解析器

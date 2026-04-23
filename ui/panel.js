@@ -5,6 +5,10 @@ import {
   buildVisibleGraphRefreshToken,
   resolveVisibleGraphWorkspaceMode,
 } from "./panel-graph-refresh-utils.js";
+import {
+  initPlannerSections,
+  refreshPlannerSections,
+} from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
   buildRegionLine,
@@ -1350,42 +1354,20 @@ function _switchTab(tabId) {
   }
 }
 
-function _getPlannerApi() {
-  return globalThis?.stBmeEnaPlanner || null;
-}
-
 function _refreshPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  const hint = document.getElementById("bme-open-ena-planner-hint");
-  if (!button || !hint) return;
-
-  const plannerApi = _getPlannerApi();
-  const ready = typeof plannerApi?.openSettings === "function";
-
-  button.disabled = !ready;
-  button.classList.toggle("is-runtime-disabled", !ready);
-  hint.textContent = ready
-    ? "已加载，可打开独立的 Ena Planner 设置页。"
-    : "未检测到 Ena Planner 模块，请重载 ST-BME 后再试。";
+  try {
+    refreshPlannerSections();
+  } catch (err) {
+    console.warn("[ST-BME] planner section refresh failed:", err);
+  }
 }
 
 function _bindPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  if (!button || button.dataset.bmeBound === "true") {
-    _refreshPlannerLauncher();
-    return;
+  try {
+    initPlannerSections(panelEl || document);
+  } catch (err) {
+    console.warn("[ST-BME] planner section init failed:", err);
   }
-
-  button.addEventListener("click", () => {
-    const plannerApi = _getPlannerApi();
-    if (typeof plannerApi?.openSettings === "function") {
-      plannerApi.openSettings();
-    }
-    _refreshPlannerLauncher();
-  });
-
-  button.dataset.bmeBound = "true";
-  _refreshPlannerLauncher();
 }
 
 function _applyWorkspaceMode() {
@@ -3576,6 +3558,8 @@ function _switchConfigSection(sectionId) {
     _refreshTaskProfileWorkspace();
   } else if (currentConfigSectionId === "trace") {
     _refreshMessageTraceWorkspace();
+  } else if (currentConfigSectionId === "planner") {
+    _refreshPlannerLauncher();
   }
 }
 
