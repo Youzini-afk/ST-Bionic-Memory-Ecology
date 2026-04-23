@@ -1,5 +1,6 @@
 // ST-BME: 任务预设与兼容迁移层
 
+import { DEFAULT_PROMPT_BLOCKS as DEFAULT_PLANNER_PROMPT_BLOCKS } from "../ena-planner/ena-planner-presets.js";
 import { DEFAULT_TASK_PROFILE_TEMPLATES } from "./default-task-profile-templates.js";
 
 const TASK_TYPES = [
@@ -10,6 +11,7 @@ const TASK_TYPES = [
   "summary_rollup",
   "reflection",
   "consolidation",
+  "planner",
 ];
 
 const TASK_TYPE_META = {
@@ -40,6 +42,10 @@ const TASK_TYPE_META = {
   consolidation: {
     label: "整合",
     description: "分析新旧记忆的冲突、去重与进化。",
+  },
+  planner: {
+    label: "规划",
+    description: "为下一轮回复生成剧情规划与写作提示。",
   },
 };
 
@@ -169,6 +175,48 @@ const BUILTIN_BLOCK_DEFINITIONS = [
     name: "故事时间",
     role: "system",
     description: "注入当前活跃的故事时间线标签与来源。extract 任务使用，帮助 LLM 定位本批对话在剧情时间轴上的位置。",
+  },
+  {
+    sourceKey: "plannerCharacterCard",
+    name: "规划:角色卡",
+    role: "system",
+    description: "注入 ENA Planner 使用的角色卡整合块（description / personality / scenario）。",
+    taskTypes: ["planner"],
+  },
+  {
+    sourceKey: "plannerWorldbook",
+    name: "规划:世界书",
+    role: "system",
+    description: "注入 ENA Planner 自己解析出的世界书块，保持当前规划链路的激活与排序语义。",
+    taskTypes: ["planner"],
+  },
+  {
+    sourceKey: "plannerRecentChat",
+    name: "规划:最近聊天",
+    role: "system",
+    description: "注入最近若干条 AI 回复片段，并沿用 ENA 的清洗规则去掉 think/排除标签。",
+    taskTypes: ["planner"],
+  },
+  {
+    sourceKey: "plannerMemory",
+    name: "规划:BME 记忆",
+    role: "system",
+    description: "注入供 ENA 规划使用的 BME 召回记忆块。",
+    taskTypes: ["planner"],
+  },
+  {
+    sourceKey: "plannerPreviousPlots",
+    name: "规划:历史 plot",
+    role: "system",
+    description: "注入最近的 <plot> 历史规划块，帮助保持剧情推进连续性。",
+    taskTypes: ["planner"],
+  },
+  {
+    sourceKey: "plannerUserInput",
+    name: "规划:玩家输入",
+    role: "user",
+    description: "注入当前玩家输入，并保留 ENA 当前使用的用户消息包裹格式。",
+    taskTypes: ["planner"],
   },
 ];
 
@@ -671,6 +719,173 @@ const DEFAULT_TRAILING_BLOCK_BLUEPRINTS = [
   },
 ];
 
+function getPlannerPromptBlockContentByRole(role = "system") {
+  return String(
+    (Array.isArray(DEFAULT_PLANNER_PROMPT_BLOCKS) ? DEFAULT_PLANNER_PROMPT_BLOCKS : []).find(
+      (block) => String(block?.role || "").trim() === String(role || "").trim(),
+    )?.content || "",
+  );
+}
+
+function buildPlannerDefaultTaskProfileTemplate() {
+  return {
+    id: "default",
+    name: "默认预设",
+    taskType: "planner",
+    version: 4,
+    builtin: true,
+    enabled: true,
+    description: TASK_TYPE_META.planner?.description || "",
+    promptMode: "block-based",
+    updatedAt: "2026-04-23T16:30:00.000Z",
+    blocks: [
+      {
+        id: "planner-default-system",
+        name: "Ena Planner System",
+        type: "custom",
+        enabled: true,
+        role: "system",
+        sourceKey: "",
+        sourceField: "",
+        content: getPlannerPromptBlockContentByRole("system"),
+        injectionMode: "relative",
+        order: 0,
+      },
+      {
+        id: "planner-default-character-card",
+        name: "角色卡",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerCharacterCard",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 1,
+      },
+      {
+        id: "planner-default-worldbook",
+        name: "世界书",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerWorldbook",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 2,
+      },
+      {
+        id: "planner-default-recent-chat",
+        name: "最近聊天",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerRecentChat",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 3,
+      },
+      {
+        id: "planner-default-memory",
+        name: "BME 记忆",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerMemory",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 4,
+      },
+      {
+        id: "planner-default-previous-plots",
+        name: "历史 plot",
+        type: "builtin",
+        enabled: true,
+        role: "system",
+        sourceKey: "plannerPreviousPlots",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 5,
+      },
+      {
+        id: "planner-default-user-input",
+        name: "玩家输入",
+        type: "builtin",
+        enabled: true,
+        role: "user",
+        sourceKey: "plannerUserInput",
+        sourceField: "",
+        content: "",
+        injectionMode: "relative",
+        order: 6,
+      },
+      {
+        id: "planner-default-assistant-seed",
+        name: "Assistant Seed",
+        type: "custom",
+        enabled: true,
+        role: "assistant",
+        sourceKey: "",
+        sourceField: "",
+        content: getPlannerPromptBlockContentByRole("assistant"),
+        injectionMode: "relative",
+        order: 7,
+      },
+    ],
+    generation: {
+      llm_preset: "",
+      max_context_tokens: null,
+      max_completion_tokens: null,
+      reply_count: null,
+      stream: true,
+      temperature: 1,
+      top_p: 1,
+      top_k: 0,
+      top_a: null,
+      min_p: null,
+      seed: null,
+      frequency_penalty: null,
+      presence_penalty: null,
+      repetition_penalty: null,
+      squash_system_messages: null,
+      reasoning_effort: null,
+      request_thoughts: null,
+      enable_function_calling: null,
+      enable_web_search: null,
+      character_name_prefix: null,
+      wrap_user_messages_in_quotes: null,
+    },
+    regex: {
+      enabled: true,
+      inheritStRegex: true,
+      sources: {
+        global: true,
+        preset: true,
+        character: true,
+      },
+      stages: {
+        "input.userMessage": true,
+        "input.recentMessages": true,
+        "input.candidateText": true,
+        "input.finalPrompt": false,
+        "output.rawResponse": false,
+        "output.beforeParse": false,
+        input: true,
+        output: false,
+      },
+      localRules: [],
+    },
+    metadata: {
+      migratedFromLegacy: false,
+      legacyPromptField: "",
+    },
+  };
+}
+
 function applyRuntimeDefaultTemplateOverrides(taskType, template = null) {
   if (!template || typeof template !== "object") {
     return template;
@@ -705,6 +920,9 @@ function applyRuntimeDefaultTemplateOverrides(taskType, template = null) {
 }
 
 function getDefaultTaskProfileTemplate(taskType) {
+  if (String(taskType || "") === "planner") {
+    return buildPlannerDefaultTaskProfileTemplate();
+  }
   const template = DEFAULT_TASK_PROFILE_TEMPLATES?.[taskType];
   if (!template || typeof template !== "object") {
     return null;
@@ -1590,6 +1808,11 @@ export function createCustomPromptBlock(taskType, overrides = {}) {
 
 export function createBuiltinPromptBlock(taskType, sourceKey = "", overrides = {}) {
   const definition =
+    BUILTIN_BLOCK_DEFINITIONS.find(
+      (item) =>
+        item.sourceKey === sourceKey &&
+        (!Array.isArray(item.taskTypes) || item.taskTypes.includes(taskType)),
+    ) ||
     BUILTIN_BLOCK_DEFINITIONS.find((item) => item.sourceKey === sourceKey) ||
     BUILTIN_BLOCK_DEFINITIONS[0];
   return normalizePromptBlock(taskType, {
@@ -1975,8 +2198,18 @@ export function getTaskTypes() {
   return [...TASK_TYPES];
 }
 
-export function getBuiltinBlockDefinitions() {
-  return BUILTIN_BLOCK_DEFINITIONS.map((definition) => ({ ...definition }));
+export function getBuiltinBlockDefinitions(taskType = "") {
+  const normalizedTaskType = String(taskType || "").trim();
+  return BUILTIN_BLOCK_DEFINITIONS
+    .filter(
+      (definition) =>
+        normalizedTaskType === "planner"
+          ? Array.isArray(definition.taskTypes) && definition.taskTypes.includes("planner")
+          : !Array.isArray(definition.taskTypes) ||
+            !normalizedTaskType ||
+            definition.taskTypes.includes(normalizedTaskType),
+    )
+    .map((definition) => ({ ...definition }));
 }
 
 export function cloneTaskProfile(profile = {}, options = {}) {

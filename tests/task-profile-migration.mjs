@@ -23,6 +23,7 @@ assert.equal(migrated.taskProfilesVersion, 3);
 assert.ok(migrated.taskProfiles);
 assert.ok(migrated.taskProfiles.extract);
 assert.ok(migrated.taskProfiles.recall);
+assert.ok(migrated.taskProfiles.planner);
 
 const extractProfile = getActiveTaskProfile(
   {
@@ -153,6 +154,22 @@ assert.deepEqual(
   ],
 );
 assert.ok(defaults.summary_rollup.profiles.length > 0);
+assert.ok(defaults.planner.profiles.length > 0);
+assert.deepEqual(
+  defaults.planner.profiles[0].blocks.map((block) => block.sourceKey || block.id),
+  [
+    "planner-default-system",
+    "plannerCharacterCard",
+    "plannerWorldbook",
+    "plannerRecentChat",
+    "plannerMemory",
+    "plannerPreviousPlots",
+    "plannerUserInput",
+    "planner-default-assistant-seed",
+  ],
+);
+assert.equal(defaults.planner.profiles[0].generation.stream, true);
+assert.equal(defaults.planner.profiles[0].generation.temperature, 1);
 
 const upgradedLegacyDefault = getActiveTaskProfile(
   {

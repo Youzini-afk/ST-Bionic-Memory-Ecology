@@ -3031,170 +3031,23 @@
                 <div class="bme-config-card">
                   <div class="bme-config-card-head">
                     <div>
-                      <div class="bme-config-card-title">规划 LLM · 生成参数</div>
+                      <div class="bme-config-card-title">生成参数 · Prompt 编排</div>
                       <div class="bme-config-card-subtitle">
-                        流式输出用于实时预览，数值留空表示不覆盖渠道默认。
+                        这两部分现在统一收敛到任务预设里的“规划”任务，避免 ENA 面板和任务面板各维护一套配置。
                       </div>
                     </div>
                   </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-stream">流式输出</label>
-                    <select id="bme-planner-stream" class="bme-config-input">
-                      <option value="true">开启</option>
-                      <option value="false">关闭</option>
-                    </select>
-                  </div>
-                  <div class="bme-planner-param-grid">
-                    <div class="bme-config-row">
-                      <label for="bme-planner-temp">Temperature</label>
-                      <input
-                        id="bme-planner-temp"
-                        class="bme-config-input"
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max="2"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-planner-top-p">Top P</label>
-                      <input
-                        id="bme-planner-top-p"
-                        class="bme-config-input"
-                        type="number"
-                        step="0.05"
-                        min="0"
-                        max="1"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-planner-top-k">Top K</label>
-                      <input
-                        id="bme-planner-top-k"
-                        class="bme-config-input"
-                        type="number"
-                        step="1"
-                        min="0"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-planner-pp">Presence penalty</label>
-                      <input
-                        id="bme-planner-pp"
-                        class="bme-config-input"
-                        type="text"
-                        placeholder="-2 ~ 2"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-planner-fp">Frequency penalty</label>
-                      <input
-                        id="bme-planner-fp"
-                        class="bme-config-input"
-                        type="text"
-                        placeholder="-2 ~ 2"
-                      />
-                    </div>
-                    <div class="bme-config-row">
-                      <label for="bme-planner-mt">最大 Token 数</label>
-                      <input
-                        id="bme-planner-mt"
-                        class="bme-config-input"
-                        type="text"
-                        placeholder="留空则不限制"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div class="bme-config-card">
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">提示词 · 模板</div>
-                      <div class="bme-config-card-subtitle">
-                        模板保存的是当前提示词块列表；切换模板会覆盖当前编辑中的块。
-                      </div>
-                    </div>
-                  </div>
-                  <div class="bme-config-row">
-                    <label for="bme-planner-tpl-select">活动模板</label>
-                    <select id="bme-planner-tpl-select" class="bme-config-input">
-                      <option value="">-- 选择模板 --</option>
-                    </select>
+                  <div class="bme-config-help">
+                    现在每个规划预设都可以同时携带自己的生成参数和 Prompt block。ENA 这里仍然只负责连接配置、上下文来源、输出过滤和调试日志。
                   </div>
                   <div class="bme-config-actions">
                     <button
                       class="bme-config-secondary-btn"
-                      id="bme-planner-tpl-save"
+                      id="bme-planner-open-task-presets"
                       type="button"
                     >
-                      <i class="fa-solid fa-floppy-disk"></i>
-                      <span>覆盖保存</span>
-                    </button>
-                    <button
-                      class="bme-config-secondary-btn"
-                      id="bme-planner-tpl-saveas"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-file-circle-plus"></i>
-                      <span>另存为</span>
-                    </button>
-                    <button
-                      class="bme-config-secondary-btn bme-config-danger-btn"
-                      id="bme-planner-tpl-delete"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-trash-can"></i>
-                      <span>删除</span>
-                    </button>
-                  </div>
-                  <div class="bme-planner-undo-bar" id="bme-planner-tpl-undo" hidden>
-                    <span
-                      >模板 <strong id="bme-planner-tpl-undo-name"></strong> 已删除</span
-                    >
-                    <button
-                      class="bme-config-secondary-btn"
-                      id="bme-planner-tpl-undo-btn"
-                      type="button"
-                    >
-                      撤销
-                    </button>
-                  </div>
-                </div>
-
-                <div class="bme-config-card">
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">提示词 · 块编排</div>
-                      <div class="bme-config-card-subtitle">
-                        每个块会作为一条独立消息发送给规划 LLM。系统会在块之后自动追加：角色卡、世界书、BME 结构化记忆、聊天历史和历史 plot。
-                      </div>
-                    </div>
-                  </div>
-                  <div id="bme-planner-prompt-list" class="bme-planner-prompt-list"></div>
-                  <div
-                    class="bme-planner-prompt-empty"
-                    id="bme-planner-prompt-empty"
-                    hidden
-                  >
-                    暂无提示词块
-                  </div>
-                  <div class="bme-config-actions">
-                    <button
-                      class="bme-config-secondary-btn"
-                      id="bme-planner-add-prompt"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-plus"></i>
-                      <span>添加块</span>
-                    </button>
-                    <button
-                      class="bme-config-secondary-btn bme-config-danger-btn"
-                      id="bme-planner-reset-prompt"
-                      type="button"
-                    >
-                      <i class="fa-solid fa-rotate-left"></i>
-                      <span>恢复默认</span>
+                      <i class="fa-solid fa-list-check"></i>
+                      <span>打开任务预设 · 规划</span>
                     </button>
                   </div>
                 </div>

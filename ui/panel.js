@@ -173,6 +173,7 @@ const GRAPH_WRITE_ACTION_IDS = [
 const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "API 配置",
+    excludeTaskTypes: ["planner"],
     fields: [
       {
         key: "llm_preset",
@@ -8412,6 +8413,8 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     currentGlobalRegexRuleId = globalRegexRules[0]?.id || "";
   }
 
+  const builtinBlockDefinitions = getBuiltinBlockDefinitions(currentTaskProfileTaskType);
+
   return {
     settings,
     taskProfiles,
@@ -8431,7 +8434,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
       regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
     selectedGlobalRegexRule:
       globalRegexRules.find((rule) => rule.id === currentGlobalRegexRuleId) || null,
-    builtinBlockDefinitions: getBuiltinBlockDefinitions(),
+    builtinBlockDefinitions,
     runtimeDebug,
   };
 }
@@ -9626,11 +9629,11 @@ async function _handleTaskProfileWorkspaceClick(event) {
       document.getElementById("bme-task-profile-import-all")?.click();
       return;
     case "restore-all-profiles": {
+      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       const confirmed = window.confirm(
-        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？",
+        `这会将全部 ${taskTypes.length} 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？`,
       );
       if (!confirmed) return;
-      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       let restored = state.taskProfiles;
       const extraPatch = {};
       for (const tt of taskTypes) {
@@ -9727,6 +9730,7 @@ function _renderTaskProfileWorkspace(state) {
     state.taskTypeOptions.find((item) => item.id === state.taskType) ||
     state.taskTypeOptions[0];
   const profileUpdatedAt = _formatTaskProfileTime(state.profile.updatedAt);
+  const totalTaskTypes = Array.isArray(state.taskTypeOptions) ? state.taskTypeOptions.length : 0;
 
   return `
     <div class="bme-task-shell">
@@ -9757,10 +9761,10 @@ function _renderTaskProfileWorkspace(state) {
           </div>
         </div>
         <div class="bme-task-action-bar-right">
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务的默认预设">
             <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务预设">
             <i class="fa-solid fa-file-export"></i><span>导出全部</span>
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
@@ -9881,9 +9885,12 @@ function _renderTaskPromptTab(state) {
 
 function _renderTaskGenerationTab(state) {
   const inputGroups = TASK_PROFILE_INPUT_GROUPS[state.taskType] || [];
+  const generationGroups = TASK_PROFILE_GENERATION_GROUPS.filter(
+    (group) => !Array.isArray(group.excludeTaskTypes) || !group.excludeTaskTypes.includes(state.taskType),
+  );
   return `
     <div class="bme-task-tab-body">
-      ${TASK_PROFILE_GENERATION_GROUPS.map(
+      ${generationGroups.map(
         (group) => `
           <div class="bme-config-card">
             <div class="bme-config-card-head">

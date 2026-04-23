@@ -2,10 +2,22 @@ import { extension_settings } from '../../../../extensions.js';
 import { getRequestHeaders, saveSettingsDebounced, substituteParamsExtended } from '../../../../../script.js';
 import { EnaPlannerStorage, migrateFromLWBIfNeeded } from './ena-planner-storage.js';
 import { DEFAULT_PROMPT_BLOCKS, BUILTIN_TEMPLATES } from './ena-planner-presets.js';
+import {
+    createBuiltinPromptBlock,
+    createCustomPromptBlock,
+    createProfileId,
+    ensureTaskProfiles,
+    getActiveTaskProfile,
+    setActiveTaskProfileId,
+    upsertTaskProfile,
+} from '../prompting/prompt-profiles.js';
 import { debugLog } from '../runtime/debug-logging.js';
 import jsyaml from '../vendor/js-yaml.mjs';
 
 const EXT_NAME = 'ena-planner';
+const BME_MODULE_NAME = 'st_bme';
+const PLANNER_TASK_TYPE = 'planner';
+const LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION = 1;
 const VECTOR_RECALL_TIMEOUT_MS = 30000;
 const PLANNER_REQUEST_TIMEOUT_MS = 90000;
 
@@ -114,6 +126,316 @@ function notifyNativeChange(kind, payload) {
     }
 }
 
+function getBmeSettings() {
+    const settings = extension_settings?.[BME_MODULE_NAME];
+    return settings && typeof settings === 'object' ? settings : {};
+}
+
+function hasPlannerTaskProfileMigration(settings = getBmeSettings()) {
+    return Number(settings?.enaPlannerTaskProfileMigrationVersion || 0) >= LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION;
+}
+
+function getPlannerTaskProfile() {
+    return getActiveTaskProfile(getBmeSettings(), PLANNER_TASK_TYPE);
+}
+
+function sortPlannerProfileBlocks(blocks = []) {
+    return [...(Array.isArray(blocks) ? blocks : [])]
+        .map((block, index) => ({ ...block, _orderIndex: index }))
+        .sort((left, right) => {
+            const leftOrder = Number.isFinite(Number(left?.order))
+                ? Number(left.order)
+                : left._orderIndex;
+            const rightOrder = Number.isFinite(Number(right?.order))
+                ? Number(right.order)
+                : right._orderIndex;
+            return leftOrder - rightOrder;
+        });
+}
+
+function normalizeLegacyPlannerPromptBlocks(blocks = []) {
+    return (Array.isArray(blocks) ? blocks : [])
+        .filter((block) => block && typeof block === 'object')
+        .map((block, index) => ({
+            id: String(block?.id || `ena-legacy-block-${index + 1}`),
+            name: String(block?.name || `提示词块 ${index + 1}`),
+            role: ['system', 'user', 'assistant'].includes(String(block?.role || '').trim())
+                ? String(block.role).trim()
+                : 'system',
+            content: String(block?.content || ''),
+            order: Number.isFinite(Number(block?.order)) ? Number(block.order) : index,
+        }))
+        .filter((block) => String(block.content || '').trim());
+}
+
+function buildPlannerProfileBlocksFromLegacy(promptBlocks = []) {
+    const normalizedBlocks = normalizeLegacyPlannerPromptBlocks(promptBlocks);
+    const systemBlocks = normalizedBlocks.filter((block) => block.role === 'system');
+    const userBlocks = normalizedBlocks.filter((block) => block.role === 'user');
+    const assistantBlocks = normalizedBlocks.filter((block) => block.role === 'assistant');
+    const builtins = [
+        'plannerCharacterCard',
+        'plannerWorldbook',
+        'plannerRecentChat',
+        'plannerMemory',
+        'plannerPreviousPlots',
+    ];
+    const result = [];
+    let order = 0;
+
+    const pushCustom = (block) => {
+        result.push(createCustomPromptBlock(PLANNER_TASK_TYPE, {
+            name: block.name,
+            role: block.role,
+            content: block.content,
+            injectionMode: 'relative',
+            order: order++,
+        }));
+    };
+
+    systemBlocks.forEach(pushCustom);
+    builtins.forEach((sourceKey) => {
+        result.push(createBuiltinPromptBlock(PLANNER_TASK_TYPE, sourceKey, {
+            injectionMode: 'relative',
+            order: order++,
+        }));
+    });
+    userBlocks.forEach(pushCustom);
+    result.push(createBuiltinPromptBlock(PLANNER_TASK_TYPE, 'plannerUserInput', {
+        injectionMode: 'relative',
+        order: order++,
+    }));
+    assistantBlocks.forEach(pushCustom);
+
+    return result;
+}
+
+function normalizePlannerGenerationNumber(value) {
+    if (value == null || value === '') return null;
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+}
+
+function buildPlannerGenerationFromLegacyConfig(plannerConfig = {}) {
+    const api = plannerConfig?.api && typeof plannerConfig.api === 'object'
+        ? plannerConfig.api
+        : {};
+    return {
+        stream:
+            typeof api.stream === 'boolean'
+                ? api.stream
+                : api.stream === 'true'
+                    ? true
+                    : api.stream === 'false'
+                        ? false
+                        : true,
+        temperature: normalizePlannerGenerationNumber(api.temperature),
+        top_p: normalizePlannerGenerationNumber(api.top_p),
+        top_k: normalizePlannerGenerationNumber(api.top_k),
+        frequency_penalty: normalizePlannerGenerationNumber(api.frequency_penalty),
+        presence_penalty: normalizePlannerGenerationNumber(api.presence_penalty),
+        max_completion_tokens: normalizePlannerGenerationNumber(api.max_tokens),
+    };
+}
+
+function buildComparablePlannerGenerationSnapshot(generation = {}) {
+    return {
+        stream:
+            generation?.stream === true
+                ? true
+                : generation?.stream === false
+                    ? false
+                    : null,
+        temperature: normalizePlannerGenerationNumber(generation?.temperature),
+        top_p: normalizePlannerGenerationNumber(generation?.top_p),
+        top_k: normalizePlannerGenerationNumber(generation?.top_k),
+        frequency_penalty: normalizePlannerGenerationNumber(generation?.frequency_penalty),
+        presence_penalty: normalizePlannerGenerationNumber(generation?.presence_penalty),
+        max_completion_tokens: normalizePlannerGenerationNumber(generation?.max_completion_tokens),
+    };
+}
+
+function arePlannerGenerationSettingsEquivalent(left = {}, right = {}) {
+    return JSON.stringify(buildComparablePlannerGenerationSnapshot(left)) === JSON.stringify(buildComparablePlannerGenerationSnapshot(right));
+}
+
+function normalizePlannerProfileBlockComparisonPayload(blocks = []) {
+    return sortPlannerProfileBlocks(blocks).map((block) => ({
+        role: String(block?.role || ''),
+        type: String(block?.type || 'custom'),
+        sourceKey: String(block?.sourceKey || ''),
+        content: String(block?.content || '').trim(),
+        enabled: block?.enabled !== false,
+    }));
+}
+
+function arePlannerProfileBlocksEquivalent(left = [], right = []) {
+    return JSON.stringify(normalizePlannerProfileBlockComparisonPayload(left)) === JSON.stringify(normalizePlannerProfileBlockComparisonPayload(right));
+}
+
+function buildPlannerMigrationProfileName(baseName = '', fallbackName = 'ENA 当前配置', usedNames = new Set()) {
+    const base = String(baseName || '').trim() || fallbackName;
+    let nextName = base;
+    let suffix = 2;
+    while (usedNames.has(nextName)) {
+        nextName = `${base} ${suffix}`;
+        suffix += 1;
+    }
+    usedNames.add(nextName);
+    return nextName;
+}
+
+function createLegacyPlannerTaskProfile(name, promptBlocks, plannerConfig, options = {}) {
+    return {
+        id: createProfileId(PLANNER_TASK_TYPE),
+        name,
+        taskType: PLANNER_TASK_TYPE,
+        builtin: false,
+        enabled: true,
+        promptMode: 'block-based',
+        updatedAt: nowISO(),
+        blocks: buildPlannerProfileBlocksFromLegacy(promptBlocks),
+        generation: buildPlannerGenerationFromLegacyConfig(plannerConfig),
+        metadata: {
+            migratedFromLegacy: true,
+            enaLegacyTemplateName: String(options.templateName || ''),
+            enaLegacySource: String(options.source || 'legacy-ena'),
+        },
+    };
+}
+
+function migrateLegacyPlannerTaskProfilesIfNeeded() {
+    const settings = getBmeSettings();
+    if (hasPlannerTaskProfileMigration(settings)) {
+        return false;
+    }
+
+    const plannerConfig = ensureSettings({ defaultEnabled: false });
+    let nextTaskProfiles = ensureTaskProfiles(settings);
+    const plannerBucket = nextTaskProfiles?.[PLANNER_TASK_TYPE] || {
+        activeProfileId: 'default',
+        profiles: [],
+    };
+    const hasExistingCustomProfiles = Array.isArray(plannerBucket.profiles)
+        && plannerBucket.profiles.some((profile) => String(profile?.id || '') !== 'default');
+
+    if (hasExistingCustomProfiles) {
+        extension_settings[BME_MODULE_NAME] = {
+            ...settings,
+            taskProfiles: nextTaskProfiles,
+            enaPlannerTaskProfileMigrationVersion: LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION,
+        };
+        saveSettingsDebounced?.();
+        return false;
+    }
+
+    const defaultPlannerProfile = getActiveTaskProfile({}, PLANNER_TASK_TYPE);
+    const defaultPlannerBlocks = Array.isArray(defaultPlannerProfile?.blocks)
+        ? defaultPlannerProfile.blocks
+        : [];
+    const defaultPlannerGeneration = defaultPlannerProfile?.generation || {};
+    const currentBlocks = Array.isArray(plannerConfig.promptBlocks)
+        ? plannerConfig.promptBlocks
+        : getDefaultSettings().promptBlocks;
+    const promptTemplates = plannerConfig?.promptTemplates && typeof plannerConfig.promptTemplates === 'object'
+        ? plannerConfig.promptTemplates
+        : {};
+    const activeTemplateName = String(plannerConfig.activePromptTemplate || '').trim();
+    const usedNames = new Set(
+        (Array.isArray(plannerBucket.profiles) ? plannerBucket.profiles : [])
+            .map((profile) => String(profile?.name || '').trim())
+            .filter(Boolean),
+    );
+    const seenSignatures = new Set();
+    const profileSpecs = [];
+    let activeProfileName = '';
+
+    const appendProfileSpec = (name, promptBlocks, options = {}) => {
+        const migratedBlocks = buildPlannerProfileBlocksFromLegacy(promptBlocks);
+        const migratedGeneration = buildPlannerGenerationFromLegacyConfig(plannerConfig);
+        if (
+            arePlannerProfileBlocksEquivalent(migratedBlocks, defaultPlannerBlocks)
+            && arePlannerGenerationSettingsEquivalent(migratedGeneration, defaultPlannerGeneration)
+            && options.allowDefaultDuplicate !== true
+        ) {
+            return '';
+        }
+
+        const signature = JSON.stringify({
+            blocks: normalizePlannerProfileBlockComparisonPayload(migratedBlocks),
+            generation: buildComparablePlannerGenerationSnapshot(migratedGeneration),
+        });
+        if (seenSignatures.has(signature)) {
+            return '';
+        }
+        seenSignatures.add(signature);
+
+        const uniqueName = buildPlannerMigrationProfileName(name, options.fallbackName, usedNames);
+        profileSpecs.push({
+            name: uniqueName,
+            promptBlocks,
+            templateName: options.templateName || '',
+            source: options.source || 'legacy-ena',
+            active: options.active === true,
+        });
+        return uniqueName;
+    };
+
+    for (const [templateName, templateBlocks] of Object.entries(promptTemplates)) {
+        if (!Array.isArray(templateBlocks)) continue;
+        const appendedName = appendProfileSpec(templateName, templateBlocks, {
+            fallbackName: 'ENA 模板',
+            templateName,
+            source: 'legacy-template',
+        });
+        if (
+            appendedName
+            && activeTemplateName === templateName
+            && arePlannerProfileBlocksEquivalent(templateBlocks, currentBlocks)
+        ) {
+            activeProfileName = appendedName;
+        }
+    }
+
+    if (!activeProfileName) {
+        activeProfileName = appendProfileSpec(
+            activeTemplateName ? `${activeTemplateName}（当前）` : 'ENA 当前配置',
+            currentBlocks,
+            {
+                fallbackName: 'ENA 当前配置',
+                source: 'legacy-working-copy',
+                active: true,
+            },
+        );
+    }
+
+    let activeProfileId = '';
+    for (const spec of profileSpecs) {
+        const profile = createLegacyPlannerTaskProfile(spec.name, spec.promptBlocks, plannerConfig, {
+            templateName: spec.templateName,
+            source: spec.source,
+        });
+        nextTaskProfiles = upsertTaskProfile(nextTaskProfiles, PLANNER_TASK_TYPE, profile, {
+            setActive: false,
+        });
+        if (spec.name === activeProfileName || (spec.active && !activeProfileId)) {
+            activeProfileId = profile.id;
+        }
+    }
+
+    if (activeProfileId) {
+        nextTaskProfiles = setActiveTaskProfileId(nextTaskProfiles, PLANNER_TASK_TYPE, activeProfileId);
+    }
+
+    extension_settings[BME_MODULE_NAME] = {
+        ...settings,
+        taskProfiles: nextTaskProfiles,
+        enaPlannerTaskProfileMigrationVersion: LEGACY_PLANNER_TASK_PROFILE_MIGRATION_VERSION,
+    };
+    saveSettingsDebounced?.();
+    return profileSpecs.length > 0;
+}
+
 /**
  * -------------------------
  * Helpers
@@ -172,6 +494,7 @@ async function loadConfig() {
     const hasSavedConfig = !!(loaded && typeof loaded === 'object');
     config = hasSavedConfig ? loaded : getDefaultSettings({ enabled: false });
     ensureSettings({ defaultEnabled: hasSavedConfig ? true : false });
+    migrateLegacyPlannerTaskProfilesIfNeeded();
     state.logs = Array.isArray(await EnaPlannerStorage.get('logs', [])) ? await EnaPlannerStorage.get('logs', []) : [];
 
     if (extension_settings?.[EXT_NAME]) {
@@ -954,27 +1277,22 @@ async function callPlanner(messages, options = {}) {
     if (!s.api.baseUrl) throw new Error('未配置 API URL');
     if (!s.api.apiKey) throw new Error('未配置 API KEY');
     if (!s.api.model) throw new Error('未选择模型');
+    const generation = resolvePlannerGenerationSettings();
 
     const url = buildUrl('/chat/completions');
 
     const body = {
         model: s.api.model,
         messages,
-        stream: !!s.api.stream
+        stream: generation.stream === true
     };
 
-    const t = Number(s.api.temperature);
-    if (!Number.isNaN(t)) body.temperature = t;
-    const tp = Number(s.api.top_p);
-    if (!Number.isNaN(tp)) body.top_p = tp;
-    const tk = Number(s.api.top_k);
-    if (!Number.isNaN(tk) && tk > 0) body.top_k = tk;
-    const pp = s.api.presence_penalty === '' ? null : Number(s.api.presence_penalty);
-    if (pp != null && !Number.isNaN(pp)) body.presence_penalty = pp;
-    const fp = s.api.frequency_penalty === '' ? null : Number(s.api.frequency_penalty);
-    if (fp != null && !Number.isNaN(fp)) body.frequency_penalty = fp;
-    const mt = s.api.max_tokens === '' ? null : Number(s.api.max_tokens);
-    if (mt != null && !Number.isNaN(mt) && mt > 0) body.max_tokens = mt;
+    if (generation.temperature != null) body.temperature = generation.temperature;
+    if (generation.top_p != null) body.top_p = generation.top_p;
+    if (generation.top_k != null && generation.top_k > 0) body.top_k = generation.top_k;
+    if (generation.presence_penalty != null) body.presence_penalty = generation.presence_penalty;
+    if (generation.frequency_penalty != null) body.frequency_penalty = generation.frequency_penalty;
+    if (generation.max_tokens != null && generation.max_tokens > 0) body.max_tokens = generation.max_tokens;
 
     const controller = new AbortController();
     const plannerRequestTimeoutMs = getPlannerRequestTimeoutMs();
@@ -996,7 +1314,7 @@ async function callPlanner(messages, options = {}) {
             throw new Error(`规划请求失败: ${res.status} ${text}`.slice(0, 500));
         }
 
-        if (!s.api.stream) {
+        if (!generation.stream) {
             const data = await res.json();
             const text = String(data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? '');
             if (text) options?.onDelta?.(text, text);
@@ -1219,9 +1537,89 @@ async function clearPlannerLogs() {
  * Build planner messages
  * --------------------------
  */
-function getPromptBlocksByRole(role) {
+function resolvePlannerGenerationSettings() {
     const s = ensureSettings();
-    return (s.promptBlocks || []).filter(b => b?.role === role && String(b?.content ?? '').trim());
+    const profile = getPlannerTaskProfile();
+    const generation = profile?.generation && typeof profile.generation === 'object'
+        ? profile.generation
+        : {};
+
+    const pickNumber = (profileValue, fallbackValue) => {
+        const normalizedProfileValue = normalizePlannerGenerationNumber(profileValue);
+        if (normalizedProfileValue != null) return normalizedProfileValue;
+        return normalizePlannerGenerationNumber(fallbackValue);
+    };
+
+    const stream =
+        generation?.stream === true
+            ? true
+            : generation?.stream === false
+                ? false
+                : Boolean(s.api.stream);
+
+    return {
+        profile,
+        stream,
+        temperature: pickNumber(generation?.temperature, s.api.temperature),
+        top_p: pickNumber(generation?.top_p, s.api.top_p),
+        top_k: pickNumber(generation?.top_k, s.api.top_k),
+        presence_penalty: pickNumber(generation?.presence_penalty, s.api.presence_penalty),
+        frequency_penalty: pickNumber(generation?.frequency_penalty, s.api.frequency_penalty),
+        max_tokens: pickNumber(generation?.max_completion_tokens, s.api.max_tokens),
+    };
+}
+
+function getPlannerPromptBlocksForRuntime() {
+    const profile = getPlannerTaskProfile();
+    const blocks = sortPlannerProfileBlocks(profile?.blocks || []).filter(
+        (block) => block?.enabled !== false,
+    );
+    if (blocks.length > 0) {
+        return {
+            source: 'task-profile',
+            profile,
+            blocks,
+        };
+    }
+
+    return {
+        source: 'legacy-config',
+        profile: null,
+        blocks: normalizeLegacyPlannerPromptBlocks(ensureSettings().promptBlocks || []).map(
+            (block, index) => ({
+                id: block.id,
+                name: block.name,
+                role: block.role,
+                type: 'custom',
+                sourceKey: '',
+                content: block.content,
+                order: Number.isFinite(Number(block?.order)) ? Number(block.order) : index,
+                enabled: true,
+            }),
+        ),
+    };
+}
+
+function resolvePlannerBuiltinBlockContent(block = {}, context = {}) {
+    const sourceKey = String(block?.sourceKey || '').trim();
+    switch (sourceKey) {
+        case 'plannerCharacterCard':
+            return String(context.charBlock || '');
+        case 'plannerWorldbook':
+            return String(context.worldbook || '');
+        case 'plannerRecentChat':
+            return String(context.recentChat || '');
+        case 'plannerMemory':
+            return String(context.bmeMemory || '').trim()
+                ? `<bme_memory>\n${String(context.bmeMemory || '').trim()}\n</bme_memory>`
+                : '';
+        case 'plannerPreviousPlots':
+            return String(context.plots || '');
+        case 'plannerUserInput':
+            return String(context.userMsgContent || '');
+        default:
+            return '';
+    }
 }
 
 async function buildPlannerMessages(rawUserInput) {
@@ -1231,10 +1629,7 @@ async function buildPlannerMessages(rawUserInput) {
     const charObj = getCurrentCharSafe();
     const env = await prepareEjsEnv();
     const messageVars = getLatestMessageVarTable();
-
-    const enaSystemBlocks = getPromptBlocksByRole('system');
-    const enaAssistantBlocks = getPromptBlocksByRole('assistant');
-    const enaUserBlocks = getPromptBlocksByRole('user');
+    const plannerPromptConfig = getPlannerPromptBlocksForRuntime();
 
     const charBlockRaw = formatCharCardBlock(charObj);
 
@@ -1292,51 +1687,47 @@ async function buildPlannerMessages(rawUserInput) {
     const bmeMemory = memoryBlock || '';
     const worldbook = await renderTemplateAll(worldbookRaw, env, messageVars);
     const userInput = await renderTemplateAll(rawUserInput, env, messageVars);
+    const userMsgContent = `以下是玩家的最新指令哦~:\n[${userInput}]`;
+
+    const plannerBlockContext = {
+        charBlock,
+        worldbook,
+        recentChat,
+        bmeMemory,
+        plots,
+        userInput,
+        userMsgContent,
+    };
 
     const messages = [];
 
-    // 1) Ena system prompts
-    for (const b of enaSystemBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.push({ role: 'system', content });
-    }
-
-    // 2) Character card
-    if (String(charBlock).trim()) messages.push({ role: 'system', content: charBlock });
-
-    // 3) Worldbook
-    if (String(worldbook).trim()) messages.push({ role: 'system', content: worldbook });
-
-    // 4) Chat history (last 2 AI responses — floors N-1 & N-3)
-    if (String(recentChat).trim()) messages.push({ role: 'system', content: recentChat });
-
-    // 4.5) BME memory — after chat context, before plots
-    if (bmeMemory.trim()) {
-        messages.push({ role: 'system', content: `<bme_memory>\n${bmeMemory}\n</bme_memory>` });
-    }
-
-    // 5) Previous plots
-    if (String(plots).trim()) messages.push({ role: 'system', content: plots });
-
-    // 6) User input (with friendly framing)
-    const userMsgContent = `以下是玩家的最新指令哦~:\n[${userInput}]`;
-    messages.push({ role: 'user', content: userMsgContent });
-
-    // Extra user blocks before user message
-    for (const b of enaUserBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.splice(Math.max(0, messages.length - 1), 0, { role: 'user', content: `【extra-user-block】\n${content}` });
-    }
-
-    // 7) Assistant blocks
-    for (const b of enaAssistantBlocks) {
-        const content = await renderTemplateAll(b.content, env, messageVars);
-        messages.push({ role: 'assistant', content });
+    for (const block of plannerPromptConfig.blocks) {
+        if (!block || block.enabled === false) continue;
+        let content = '';
+        if (String(block.type || 'custom') === 'builtin') {
+            if (String(block.content || '').trim()) {
+                content = await renderTemplateAll(block.content, env, messageVars);
+            } else {
+                content = resolvePlannerBuiltinBlockContent(block, plannerBlockContext);
+            }
+        } else {
+            content = await renderTemplateAll(block.content, env, messageVars);
+        }
+        if (!String(content || '').trim()) continue;
+        messages.push({
+            role: ['system', 'user', 'assistant'].includes(String(block.role || '').trim())
+                ? String(block.role).trim()
+                : 'system',
+            content,
+        });
     }
 
     return {
         messages,
         meta: {
+            promptSource: plannerPromptConfig.source,
+            profileId: plannerPromptConfig.profile?.id || '',
+            profileName: plannerPromptConfig.profile?.name || '',
             charBlockRaw,
             worldbookRaw,
             recentChatRaw,
@@ -1363,6 +1754,11 @@ async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
     try {
         const { messages, meta } = await buildPlannerMessages(rawUserInput);
         log.requestMessages = messages;
+        if (meta && typeof meta === 'object') {
+            log.promptSource = String(meta.promptSource || '');
+            log.profileId = String(meta.profileId || '');
+            log.profileName = String(meta.profileName || '');
+        }
 
         const rawReply = await callPlanner(messages, options);
         log.rawReply = rawReply;
@@ -1423,7 +1819,7 @@ async function doInterceptAndPlanThenSend() {
         const { filtered, plannerRecall } = await runPlanningOnce(raw, false, {
             onDelta(_piece, full) {
                 if (!state.isPlanning) return;
-                if (!ensureSettings().api.stream) return;
+                if (!resolvePlannerGenerationSettings().stream) return;
                 const preview = filterPlannerPreview(full);
                 ta.value = `${raw}\n\n${preview}`.trim();
             }

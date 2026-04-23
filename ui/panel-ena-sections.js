@@ -117,6 +117,30 @@ function getSharedLlmPresetState() {
   return sanitizeLlmPresetSettings(settings || {});
 }
 
+function openPlannerTaskPresetWorkspace() {
+  const taskTabBtn = document.querySelector('.bme-tab-btn[data-tab="task"]');
+  taskTabBtn?.click();
+
+  const activatePlannerTaskType = () => {
+    const plannerBtn = document.querySelector(
+      '[data-task-action="switch-task-type"][data-task-type="planner"]',
+    );
+    plannerBtn?.click();
+    return Boolean(plannerBtn);
+  };
+
+  if (activatePlannerTaskType()) {
+    return true;
+  }
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      activatePlannerTaskType();
+    });
+  });
+  return Boolean(taskTabBtn);
+}
+
 function buildPlannerLlmSnapshot(source = {}) {
   return {
     llmApiUrl: String(source?.llmApiUrl || '').trim(),
@@ -503,13 +527,6 @@ function collectPatch() {
       customPrefix: getVal('bme-planner-prefix-custom').trim(),
       apiKey: getVal('bme-planner-api-key'),
       model: getVal('bme-planner-model').trim(),
-      stream: toBool(getVal('bme-planner-stream'), false),
-      temperature: toNum(getVal('bme-planner-temp'), 1),
-      top_p: toNum(getVal('bme-planner-top-p'), 1),
-      top_k: Math.floor(toNum(getVal('bme-planner-top-k'), 0)),
-      presence_penalty: getVal('bme-planner-pp').trim(),
-      frequency_penalty: getVal('bme-planner-fp').trim(),
-      max_tokens: getVal('bme-planner-mt').trim(),
     },
     includeGlobalWorldbooks: toBool(getVal('bme-planner-include-global-wb'), false),
     excludeWorldbookPosition4: toBool(getVal('bme-planner-wb-pos4'), true),
@@ -519,9 +536,6 @@ function collectPatch() {
     chatExcludeTags: csvToArr(getVal('bme-planner-exclude-tags')),
     logsPersist: toBool(getVal('bme-planner-logs-persist'), true),
     logsMax: Math.max(1, Math.min(200, Math.floor(toNum(getVal('bme-planner-logs-max'), 20)))),
-    promptBlocks: cfgCache?.promptBlocks || [],
-    promptTemplates: cfgCache?.promptTemplates || {},
-    activePromptTemplate: $('bme-planner-tpl-select')?.value || '',
   };
 }
 
@@ -680,6 +694,15 @@ function bindOnce(section) {
     applyPlannerLlmPresetToFields(selectedName, preset);
     setLocalStatus('bme-planner-api-status', `已套用 BME 模板：${selectedName}`, 'success');
     scheduleSave();
+  });
+
+  $('bme-planner-open-task-presets')?.addEventListener('click', () => {
+    const opened = openPlannerTaskPresetWorkspace();
+    if (!opened) {
+      setLocalStatus('bme-planner-api-status', '未找到任务预设工作区，请手动切到“任务 -> 规划”', 'error');
+      return;
+    }
+    setLocalStatus('bme-planner-api-status', '已切换到“任务 -> 规划”预设编辑器', 'success');
   });
 
   /* Prompts + templates */
