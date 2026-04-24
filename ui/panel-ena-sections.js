@@ -616,6 +616,15 @@ function scheduleSave() {
   autoSaveTimer = setTimeout(doSave, AUTOSAVE_DELAY_MS);
 }
 
+function flushSave() {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+  }
+  pendingSavePatch = collectPatch();
+  void doSave();
+}
+
 async function doSave() {
   if (autosaveInProgress) return;
   const api = getPlannerApi();
@@ -668,6 +677,11 @@ function bindOnce(section) {
       toBool($('bme-planner-enabled').value, false) ? '已启用' : '未启用',
       toBool($('bme-planner-enabled').value, false) ? 'active' : 'idle',
     );
+    flushSave();
+  });
+
+  $('bme-planner-skip-plot')?.addEventListener('change', () => {
+    flushSave();
   });
 
   $('bme-planner-run-test')?.addEventListener('click', async () => {
@@ -939,6 +953,8 @@ function bindOnce(section) {
     if (target.closest('.bme-planner-prompt-block')) return;
     if (target.id === 'bme-planner-test-input') return;
     if (target.id === 'bme-planner-llm-preset-select') return;
+    if (target.id === 'bme-planner-enabled') return;
+    if (target.id === 'bme-planner-skip-plot') return;
     if (!target.classList?.contains('bme-config-input')) return;
     syncPlannerLlmPresetSelect();
     scheduleSave();
