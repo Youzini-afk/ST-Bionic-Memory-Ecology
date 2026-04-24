@@ -29,6 +29,7 @@ let undoState = null;
 let fieldChangeHandler = null;
 let autosaveInProgress = false;
 let externalGetSettings = null;
+let pendingSavePatch = null;
 
 /* ── DOM helpers ────────────────────────────────────────────────────────── */
 
@@ -610,6 +611,7 @@ function resetPlannerSaveStatusIfReady() {
 /* ── Save flow ──────────────────────────────────────────────────────────── */
 
 function scheduleSave() {
+  pendingSavePatch = collectPatch();
   if (autoSaveTimer) clearTimeout(autoSaveTimer);
   autoSaveTimer = setTimeout(doSave, AUTOSAVE_DELAY_MS);
 }
@@ -624,9 +626,10 @@ async function doSave() {
   autosaveInProgress = true;
   setStatusChip('bme-planner-save-chip', '保存中…', 'loading');
   try {
-    const patch = collectPatch();
+    const patch = pendingSavePatch || collectPatch();
     const res = await api.patchConfig(patch);
     if (res?.ok) {
+      pendingSavePatch = null;
       setStatusChip('bme-planner-save-chip', '已保存', 'success');
       setTimeout(() => {
         if ($('bme-planner-save-chip')?.dataset?.tone === 'success') {
@@ -1017,6 +1020,7 @@ export function cleanupPlannerSections() {
   cfgCache = null;
   logsCache = [];
   fetchedModels = [];
+  pendingSavePatch = null;
   externalGetSettings = null;
   clearUndo();
 }
