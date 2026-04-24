@@ -5603,7 +5603,11 @@ async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
   const action = String(syncPayload?.action || "")
     .trim()
     .toLowerCase();
-  if (action !== "download" && action !== "merge") {
+  if (
+    action !== "download" &&
+    action !== "merge" &&
+    action !== "restore-backup"
+  ) {
     return {
       refreshed: false,
       reason: "action-not-supported",
