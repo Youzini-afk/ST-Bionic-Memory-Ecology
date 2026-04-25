@@ -33,6 +33,7 @@ let powerUser = { chat_truncation: 0 };
 let reloadCount = 0;
 let inputValue = "";
 let counterValue = "";
+let currentGraph = null;
 const triggeredEvents = [];
 
 function getContext() {
@@ -83,10 +84,16 @@ function getState() {
   };
 }
 
+function setCurrentGraph(graph) {
+  currentGraph = graph;
+}
+
 export {
   applyMessageRenderLimit,
+  getRenderLimitedHistoryRecoveryGuard,
   getMessageRenderLimitSettings,
   getState,
+  setCurrentGraph,
 };
 `,
   "utf8",
@@ -133,6 +140,51 @@ try {
     reloadCount: 1,
     triggeredEvents: ["change"],
   });
+  const guarded = module.getRenderLimitedHistoryRecoveryGuard(
+    new Array(10).fill({ mes: "visible" }),
+    {
+      settings: {
+        enabled: true,
+        hideOldMessagesRenderLimitEnabled: true,
+        hideOldMessagesRenderLimit: 10,
+      },
+      historyState: {
+        lastProcessedAssistantFloor: 30,
+        processedMessageHashes: { 0: "a", 30: "b" },
+      },
+    },
+  );
+  assert.equal(guarded.blocked, true);
+  assert.equal(guarded.renderLimit, 10);
+  assert.equal(guarded.highestProcessedFloor, 30);
+
+  const notGuardedWhenFullerThanRenderWindow =
+    module.getRenderLimitedHistoryRecoveryGuard(new Array(20).fill({}), {
+      settings: {
+        enabled: true,
+        hideOldMessagesRenderLimitEnabled: true,
+        hideOldMessagesRenderLimit: 10,
+      },
+      historyState: {
+        lastProcessedAssistantFloor: 30,
+        processedMessageHashes: { 30: "b" },
+      },
+    });
+  assert.equal(notGuardedWhenFullerThanRenderWindow.blocked, false);
+
+  const notGuardedWhenHistoryFitsVisibleChat =
+    module.getRenderLimitedHistoryRecoveryGuard(new Array(10).fill({}), {
+      settings: {
+        enabled: true,
+        hideOldMessagesRenderLimitEnabled: true,
+        hideOldMessagesRenderLimit: 10,
+      },
+      historyState: {
+        lastProcessedAssistantFloor: 5,
+        processedMessageHashes: { 5: "b" },
+      },
+    });
+  assert.equal(notGuardedWhenHistoryFitsVisibleChat.blocked, false);
 
   const skipped = module.applyMessageRenderLimit({
     enabled: true,
