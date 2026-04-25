@@ -5,6 +5,7 @@ import {
   getHideStateSnapshot,
   resetHideState,
   runIncrementalHideCheck,
+  scheduleHideSettingsApply,
   unhideAll,
 } from "../ui/hide-engine.js";
 
@@ -174,10 +175,45 @@ async function testUnhideAllRecoversPersistedManagedMarkersAfterStateLoss() {
   assert.equal(chat[1].extra, undefined);
 }
 
+async function testScheduledApplyRefreshesPanelState() {
+  resetHideState();
+  const chat = [
+    { mes: "user-1", is_user: true, is_system: false },
+    { mes: "assistant-1", is_user: false, is_system: false },
+    { mes: "user-2", is_user: true, is_system: false },
+  ];
+  const runtime = createRuntime(chat);
+  const timers = [];
+  let refreshCount = 0;
+  runtime.setTimeout = (callback, delayMs) => {
+    timers.push({ callback, delayMs });
+    return timers.length;
+  };
+  runtime.clearTimeout = () => {};
+  runtime.refreshPanelLiveState = () => {
+    refreshCount += 1;
+  };
+
+  scheduleHideSettingsApply({ enabled: true, hide_last_n: 1 }, runtime, 25);
+
+  assert.equal(refreshCount, 1);
+  assert.equal(getHideStateSnapshot().scheduled, true);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delayMs, 25);
+
+  timers[0].callback();
+  await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+
+  assert.equal(getHideStateSnapshot().scheduled, false);
+  assert.equal(getHideStateSnapshot().managedHiddenCount, 2);
+  assert.equal(refreshCount, 2);
+}
+
 await testApplyUsesNativeHide();
 await testDisableUnhidesManagedRange();
 await testIncrementalOnlyHidesOverflowDelta();
 await testResetClearsStateWithoutIssuingCommands();
 await testUnhideAllRecoversPersistedManagedMarkersAfterStateLoss();
+await testScheduledApplyRefreshesPanelState();
 
 console.log("hide-engine tests passed");

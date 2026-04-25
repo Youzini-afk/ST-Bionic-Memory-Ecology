@@ -388,6 +388,7 @@ let _getLastRecallStatus = null;
 let _getLastInjection = null;
 let _getRuntimeDebugSnapshot = null;
 let _getGraphPersistenceState = null;
+let _getHideStateSnapshot = null;
 let _updateSettings = null;
 let _actionHandlers = {};
 
@@ -952,6 +953,7 @@ export async function initPanel({
   getLastInjection,
   getRuntimeDebugSnapshot,
   getGraphPersistenceState,
+  getHideStateSnapshot,
   updateSettings,
   actions,
 }) {
@@ -967,6 +969,7 @@ export async function initPanel({
   _getLastInjection = getLastInjection;
   _getRuntimeDebugSnapshot = getRuntimeDebugSnapshot;
   _getGraphPersistenceState = getGraphPersistenceState;
+  _getHideStateSnapshot = getHideStateSnapshot;
   _updateSettings = updateSettings;
   _actionHandlers = actions || {};
 
@@ -1277,6 +1280,7 @@ export function refreshLiveState() {
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
   _refreshNativeRolloutStatusUi(_getSettings?.() || {});
+  _refreshHideOldMessagesStatus(_getSettings?.() || {});
 
   switch (currentTabId) {
     case "dashboard":
@@ -1298,6 +1302,45 @@ export function refreshLiveState() {
   }
 
   _scheduleVisibleGraphWorkspaceRefresh();
+}
+
+function _refreshHideOldMessagesStatus(settings = _getSettings?.() || {}) {
+  const countEl = document.getElementById("bme-hide-old-messages-hidden-count");
+  const detailEl = document.getElementById("bme-hide-old-messages-status-detail");
+  if (!countEl && !detailEl) return;
+
+  const snapshot =
+    typeof _getHideStateSnapshot === "function" ? _getHideStateSnapshot() || {} : {};
+  const hiddenCount = Math.max(
+    0,
+    Math.trunc(Number(snapshot.managedHiddenCount ?? 0) || 0),
+  );
+  const scannedCount = Math.max(
+    0,
+    Math.trunc(Number(snapshot.lastProcessedLength ?? 0) || 0),
+  );
+  const keepLastN = Math.max(
+    0,
+    Math.trunc(Number(settings.hideOldMessagesKeepLastN ?? 0) || 0),
+  );
+  const detailParts = [];
+
+  if (settings.hideOldMessagesEnabled !== true) {
+    detailParts.push("旧楼层隐藏未启用");
+  } else if (keepLastN <= 0) {
+    detailParts.push("保留最近 N 为 0，不会隐藏");
+  } else {
+    detailParts.push(`保留最近 ${keepLastN} 层`);
+  }
+  if (scannedCount > 0) {
+    detailParts.push(`已扫描 ${scannedCount} 层`);
+  }
+  if (snapshot.scheduled === true) {
+    detailParts.push("等待自动应用");
+  }
+
+  if (countEl) countEl.textContent = String(hiddenCount);
+  if (detailEl) detailEl.textContent = detailParts.join(" · ") || "未应用";
 }
 
 // ==================== Tab 切换 ====================
@@ -6588,6 +6631,10 @@ function _refreshConfigTab() {
     settings.hideOldMessagesEnabled ?? false,
   );
   _setCheckboxValue(
+    "bme-setting-hide-old-messages-render-limit-enabled",
+    settings.hideOldMessagesRenderLimitEnabled ?? false,
+  );
+  _setCheckboxValue(
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,
   );
@@ -6746,6 +6793,11 @@ function _refreshConfigTab() {
     "bme-setting-hide-old-messages-keep-last-n",
     settings.hideOldMessagesKeepLastN ?? 12,
   );
+  _setInputValue(
+    "bme-setting-hide-old-messages-render-limit",
+    settings.hideOldMessagesRenderLimit ?? 0,
+  );
+  _refreshHideOldMessagesStatus(settings);
   _setInputValue(
     "bme-setting-extract-context-turns",
     settings.extractContextTurns ?? 2,
@@ -7057,6 +7109,12 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
     _patchSettings({ hideOldMessagesEnabled: checked });
   });
+  bindCheckbox(
+    "bme-setting-hide-old-messages-render-limit-enabled",
+    (checked) => {
+      _patchSettings({ hideOldMessagesRenderLimitEnabled: checked });
+    },
+  );
   bindCheckbox("bme-setting-recall-enabled", (checked) => {
     _patchSettings({ recallEnabled: checked });
     _refreshGuardedConfigStates();
@@ -7253,6 +7311,13 @@ function _bindConfigControls() {
     0,
     200,
     (value) => _patchSettings({ hideOldMessagesKeepLastN: value }),
+  );
+  bindNumber(
+    "bme-setting-hide-old-messages-render-limit",
+    0,
+    0,
+    1000,
+    (value) => _patchSettings({ hideOldMessagesRenderLimit: value }),
   );
   bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
     _patchSettings({ extractContextTurns: value }),
@@ -7775,6 +7840,7 @@ function _bindConfigControls() {
         toastr.error(result.error, "ST-BME");
         return;
       }
+      _refreshHideOldMessagesStatus(_getSettings?.() || {});
       toastr.success("当前聊天的隐藏设置已重新应用", "ST-BME");
     });
   document
@@ -7786,6 +7852,7 @@ function _bindConfigControls() {
         toastr.error(result.error, "ST-BME");
         return;
       }
+      _refreshHideOldMessagesStatus(_getSettings?.() || {});
       toastr.info("已取消当前聊天里由 ST-BME 应用的隐藏", "ST-BME");
     });
   document

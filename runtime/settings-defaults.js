@@ -19,6 +19,8 @@ export const defaultSettings = {
   timeoutMs: 300000,
   hideOldMessagesEnabled: false,
   hideOldMessagesKeepLastN: 12,
+  hideOldMessagesRenderLimitEnabled: false,
+  hideOldMessagesRenderLimit: 0,
 
   // 提取设置
   extractEvery: 1,

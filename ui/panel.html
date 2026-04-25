@@ -1366,6 +1366,41 @@
                   <div class="bme-config-help">
                     设置修改后会自动生效。`0` 表示不隐藏；“取消全部隐藏”会立即把当前聊天里由 ST-BME 隐藏的楼层恢复。
                   </div>
+                  <div class="bme-config-help">
+                    当前隐藏：<strong id="bme-hide-old-messages-hidden-count">0</strong>
+                    层；<span id="bme-hide-old-messages-status-detail">未应用</span>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-hide-old-messages-render-limit-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">限制聊天区渲染楼层</span>
+                      <span class="bme-toggle-desc">
+                        只控制前端最多加载最近多少层；不等于隐藏，未隐藏楼层仍可能进入上下文。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-hide-old-messages-render-limit">
+                      最多渲染最近 N 条消息
+                    </label>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="1000"
+                      placeholder="0 = 不限制渲染"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    参考隐藏助手的“限制楼层”：用于减少超长聊天界面卡顿；真正节省上下文 token 仍由上方“旧楼层隐藏”负责。
+                  </div>
                   <div class="bme-config-actions">
                     <button
                       class="bme-config-secondary-btn"
