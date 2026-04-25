@@ -8,8 +8,8 @@ import {
 assert.equal(defaultSettings.extractContextTurns, 2);
 assert.equal(defaultSettings.extractActionMode, "pending");
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
-assert.equal(defaultSettings.hideOldMessagesRenderLimitEnabled, false);
-assert.equal(defaultSettings.hideOldMessagesRenderLimit, 0);
+assert.equal(defaultSettings.hideOldMessagesRenderLimitEnabled, true);
+assert.equal(defaultSettings.hideOldMessagesRenderLimit, 10);
 assert.equal(defaultSettings.recallTopK, 20);
 assert.equal(defaultSettings.recallMaxNodes, 12);
 assert.equal(defaultSettings.recallEnableVectorPrefilter, true);
