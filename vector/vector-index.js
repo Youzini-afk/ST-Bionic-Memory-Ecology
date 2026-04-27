@@ -6,6 +6,25 @@ import { getActiveNodes } from "../graph/graph.js";
 import { describeMemoryScope, normalizeMemoryScope } from "../graph/memory-scope.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 import { buildVectorCollectionId, stableHashString } from "../runtime/runtime-state.js";
+import {
+  AUTHORITY_VECTOR_MODE,
+  AUTHORITY_VECTOR_SOURCE,
+  deleteAuthorityTriviumNodes,
+  isAuthorityVectorConfig,
+  normalizeAuthorityVectorConfig,
+  purgeAuthorityTriviumNamespace,
+  searchAuthorityTriviumNodes,
+  syncAuthorityTriviumLinks,
+  testAuthorityTriviumConnection,
+  upsertAuthorityTriviumEntries,
+} from "./authority-vector-primary-adapter.js";
+
+export {
+  AUTHORITY_VECTOR_MODE,
+  AUTHORITY_VECTOR_SOURCE,
+  isAuthorityVectorConfig,
+  normalizeAuthorityVectorConfig,
+};
 
 export const BACKEND_VECTOR_SOURCES = [
   "openai",
@@ -213,6 +232,15 @@ export function isDirectVectorConfig(config) {
 export function getVectorModelScope(config) {
   if (!config) return "";
 
+  if (config?.mode === "authority" || config?.source === "authority-trivium") {
+    return [
+      "authority",
+      config.source || "authority-trivium",
+      normalizeOpenAICompatibleBaseUrl(config.baseUrl || ""),
+      config.model || "",
+    ].join("|");
+  }
+
   if (isDirectVectorConfig(config)) {
     return [
       "direct",
@@ -232,6 +260,13 @@ export function getVectorModelScope(config) {
 export function validateVectorConfig(config) {
   if (!config) {
     return { valid: false, error: "未找到向量配置" };
+  }
+
+  if (config?.mode === "authority" || config?.source === "authority-trivium") {
+    if (!config.baseUrl) {
+      return { valid: false, error: "Authority Trivium 地址不可用" };
+    }
+    return { valid: true, error: "" };
   }
 
   if (isDirectVectorConfig(config)) {
@@ -569,6 +604,42 @@ function markBackendVectorStateDirty(
   state.lastWarning = String(warning || "后端向量查询失败，已标记待重建");
 }
 
+function markAuthorityVectorStateDirty(
+  graph,
+  config,
+  reason = "authority-trivium-failed",
+  warning = "Authority Trivium 索引失败，已标记待重建",
+) {
+  if (!graph?.vectorIndexState || !isAuthorityVectorConfig(config)) {
+    return;
+  }
+  const state = graph.vectorIndexState;
+  const total = Math.max(
+    Number(state.lastStats?.total || 0),
+    Object.keys(state.nodeToHash || {}).length,
+    Object.keys(state.hashToNodeId || {}).length,
+  );
+  const previousIndexed = Number.isFinite(Number(state.lastStats?.indexed))
+    ? Math.max(0, Math.floor(Number(state.lastStats.indexed)))
+    : 0;
+  state.mode = "authority";
+  state.source = config.source || "authority-trivium";
+  state.modelScope = getVectorModelScope(config) || state.modelScope || "";
+  state.collectionId = state.collectionId || buildVectorCollectionId(graph?.historyState?.chatId);
+  state.dirty = true;
+  state.dirtyReason = String(reason || "authority-trivium-failed");
+  state.pendingRepairFromFloor = Number.isFinite(Number(state.pendingRepairFromFloor))
+    ? Math.max(0, Math.floor(Number(state.pendingRepairFromFloor)))
+    : 0;
+  state.lastStats = {
+    total,
+    indexed: previousIndexed,
+    stale: total > 0 ? Math.max(1, Number(state.lastStats?.stale || 0)) : 0,
+    pending: total > 0 ? Math.max(1, Number(state.lastStats?.pending || 0)) : 0,
+  };
+  state.lastWarning = String(warning || "Authority Trivium 索引失败，已标记待重建");
+}
+
 export async function syncGraphVectorIndex(
   graph,
   config,
@@ -578,6 +649,9 @@ export async function syncGraphVectorIndex(
     force = false,
     range = null,
     signal = undefined,
+    triviumClient = undefined,
+    headerProvider = undefined,
+    fetchImpl = undefined,
   } = {},
 ) {
   if (!graph || !config) {
@@ -590,7 +664,11 @@ export async function syncGraphVectorIndex(
   throwIfAborted(signal);
 
   const syncStartedAt = nowMs();
-  const syncMode = isBackendVectorConfig(config) ? "backend" : "direct";
+  const syncMode = isAuthorityVectorConfig(config)
+    ? "authority"
+    : isBackendVectorConfig(config)
+      ? "backend"
+      : "direct";
 
   const validation = validateVectorConfig(config);
   if (!validation.valid) {
@@ -629,14 +707,163 @@ export async function syncGraphVectorIndex(
   let backendPurgeMs = 0;
   let backendDeleteMs = 0;
   let backendInsertMs = 0;
+  let authorityPurgeMs = 0;
+  let authorityDeleteMs = 0;
+  let authorityUpsertMs = 0;
+  let authorityLinkMs = 0;
   let embedBatchMs = 0;
   let deletedHashCount = 0;
+  let deletedNodeCount = 0;
   let embeddingsRequested = 0;
   const hasConcreteRange =
     range && Number.isFinite(range.start) && Number.isFinite(range.end);
   const rangedNodeIds = new Set(desiredEntries.map((entry) => entry.nodeId));
 
-  if (isBackendVectorConfig(config)) {
+  if (isAuthorityVectorConfig(config)) {
+    const effectiveChatId = chatId || graph?.historyState?.chatId || "";
+    const authorityOptions = {
+      namespace: collectionId,
+      collectionId,
+      chatId: effectiveChatId,
+      modelScope: getVectorModelScope(config),
+      revision: graph?.meta?.revision || graph?.revision || 0,
+      signal,
+      triviumClient,
+      headerProvider,
+      fetchImpl,
+    };
+    const scopeChanged =
+      state.mode !== "authority" ||
+      state.source !== (config.source || "authority-trivium") ||
+      state.modelScope !== getVectorModelScope(config) ||
+      state.collectionId !== collectionId;
+    const fullReset = purge || state.dirty || scopeChanged;
+
+    try {
+      if (fullReset) {
+        const purgeStartedAt = nowMs();
+        await purgeAuthorityTriviumNamespace(config, authorityOptions);
+        authorityPurgeMs += nowMs() - purgeStartedAt;
+        resetVectorMappings(graph, config, effectiveChatId);
+        const upsertStartedAt = nowMs();
+        await upsertAuthorityTriviumEntries(
+          graph,
+          config,
+          desiredEntries,
+          authorityOptions,
+        );
+        authorityUpsertMs += nowMs() - upsertStartedAt;
+        for (const entry of desiredEntries) {
+          state.hashToNodeId[entry.hash] = entry.nodeId;
+          state.nodeToHash[entry.nodeId] = entry.hash;
+          insertedHashes.push(entry.hash);
+        }
+      } else {
+        const nodeIdsToDelete = [];
+        const entriesToUpsert = [];
+        const queuedNodeIds = new Set();
+
+        if (force && hasConcreteRange) {
+          for (const entry of desiredEntries) {
+            entriesToUpsert.push(entry);
+            queuedNodeIds.add(entry.nodeId);
+          }
+        }
+
+        for (const [nodeId, hash] of Object.entries(state.nodeToHash || {})) {
+          if (hasConcreteRange && !rangedNodeIds.has(nodeId)) {
+            continue;
+          }
+          const desired = desiredByNodeId.get(nodeId);
+          if (!desired) {
+            nodeIdsToDelete.push(nodeId);
+            delete state.nodeToHash[nodeId];
+            delete state.hashToNodeId[hash];
+          } else if (desired.hash !== hash && !queuedNodeIds.has(nodeId)) {
+            entriesToUpsert.push(desired);
+            queuedNodeIds.add(nodeId);
+            delete state.hashToNodeId[hash];
+          }
+        }
+
+        for (const entry of desiredEntries) {
+          if (force && hasConcreteRange) continue;
+          if (state.nodeToHash[entry.nodeId] === entry.hash) continue;
+          if (queuedNodeIds.has(entry.nodeId)) continue;
+          entriesToUpsert.push(entry);
+          queuedNodeIds.add(entry.nodeId);
+        }
+
+        deletedNodeCount = nodeIdsToDelete.length;
+        const deleteStartedAt = nowMs();
+        await deleteAuthorityTriviumNodes(config, nodeIdsToDelete, authorityOptions);
+        authorityDeleteMs += nowMs() - deleteStartedAt;
+        const upsertStartedAt = nowMs();
+        await upsertAuthorityTriviumEntries(
+          graph,
+          config,
+          entriesToUpsert,
+          authorityOptions,
+        );
+        authorityUpsertMs += nowMs() - upsertStartedAt;
+
+        for (const entry of entriesToUpsert) {
+          state.hashToNodeId[entry.hash] = entry.nodeId;
+          state.nodeToHash[entry.nodeId] = entry.hash;
+          insertedHashes.push(entry.hash);
+        }
+      }
+
+      const linkStartedAt = nowMs();
+      await syncAuthorityTriviumLinks(graph, config, authorityOptions);
+      authorityLinkMs += nowMs() - linkStartedAt;
+
+      for (const node of graph.nodes || []) {
+        if (Array.isArray(node.embedding) && node.embedding.length > 0) {
+          node.embedding = null;
+        }
+      }
+      state.mode = "authority";
+      state.source = config.source || "authority-trivium";
+      state.modelScope = getVectorModelScope(config);
+      state.collectionId = collectionId;
+      state.dirty = false;
+      state.lastWarning = "";
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      const message = error?.message || String(error) || "Authority Trivium 同步失败";
+      markAuthorityVectorStateDirty(
+        graph,
+        config,
+        "authority-trivium-sync-failed",
+        `Authority Trivium 同步失败（${message}），已标记待重建`,
+      );
+      state.lastSyncAt = Date.now();
+      state.lastTimings = {
+        mode: syncMode,
+        success: false,
+        error: message,
+        desiredEntries: Number(desiredBuildDiagnostics.entryCount || desiredEntries.length),
+        desiredBuildMs: roundMs(desiredBuildMs),
+        authorityPurgeMs: roundMs(authorityPurgeMs),
+        authorityDeleteMs: roundMs(authorityDeleteMs),
+        authorityUpsertMs: roundMs(authorityUpsertMs),
+        authorityLinkMs: roundMs(authorityLinkMs),
+        totalMs: roundMs(nowMs() - syncStartedAt),
+        updatedAt: Date.now(),
+      };
+      const result = {
+        insertedHashes,
+        stats: state.lastStats,
+        timings: state.lastTimings,
+        error: message,
+      };
+      if (config.failOpen === false) {
+        throw error;
+      }
+      return result;
+    }
+  } else if (isBackendVectorConfig(config)) {
     const scopeChanged =
       state.mode !== "backend" ||
       state.source !== config.source ||
@@ -810,9 +1037,14 @@ export async function syncGraphVectorIndex(
     backendPurgeMs: roundMs(backendPurgeMs),
     backendDeleteMs: roundMs(backendDeleteMs),
     backendInsertMs: roundMs(backendInsertMs),
+    authorityPurgeMs: roundMs(authorityPurgeMs),
+    authorityDeleteMs: roundMs(authorityDeleteMs),
+    authorityUpsertMs: roundMs(authorityUpsertMs),
+    authorityLinkMs: roundMs(authorityLinkMs),
     embedBatchMs: roundMs(embedBatchMs),
     statsBuildMs: roundMs(statsBuildMs),
     deletedHashes: Math.max(0, Math.floor(deletedHashCount)),
+    deletedNodes: Math.max(0, Math.floor(deletedNodeCount)),
     insertedEntries: insertedHashes.length,
     embeddingsRequested: Math.max(0, Math.floor(embeddingsRequested)),
     totalMs: roundMs(nowMs() - syncStartedAt),
@@ -841,7 +1073,11 @@ export async function findSimilarNodesByText(
     ? candidates
     : getEligibleVectorNodes(graph);
   const searchStartedAt = nowMs();
-  const mode = isDirectVectorConfig(config) ? "direct" : "backend";
+  const mode = isAuthorityVectorConfig(config)
+    ? "authority"
+    : isDirectVectorConfig(config)
+      ? "direct"
+      : "backend";
   const recordSearchTimings = (patch = {}) => {
     const state = graph?.vectorIndexState;
     if (!state || typeof state !== "object" || Array.isArray(state)) return;
@@ -916,6 +1152,60 @@ export async function findSimilarNodesByText(
       resultCount: 0,
     });
     return [];
+  }
+
+  if (isAuthorityVectorConfig(config)) {
+    const requestStartedAt = nowMs();
+    try {
+      const allowedIds = new Set(candidateNodes.map((node) => node.id));
+      const results = (
+        await searchAuthorityTriviumNodes(graph, text, config, {
+          namespace: graph.vectorIndexState?.collectionId,
+          collectionId: graph.vectorIndexState?.collectionId,
+          chatId: graph?.historyState?.chatId || "",
+          modelScope: getVectorModelScope(config),
+          topK,
+          candidateIds: candidateNodes.map((node) => node.id),
+          signal,
+        })
+      )
+        .filter((entry) => entry.nodeId && allowedIds.has(entry.nodeId))
+        .slice(0, topK);
+      recordSearchTimings({
+        success: true,
+        reason: "ok",
+        requestMs: roundMs(nowMs() - requestStartedAt),
+        resultCount: results.length,
+      });
+      return results;
+    } catch (error) {
+      if (isAbortError(error)) {
+        recordSearchTimings({
+          success: false,
+          reason: "aborted",
+          error: error?.message || String(error),
+        });
+        throw error;
+      }
+      const message = error?.message || String(error) || "Authority Trivium 查询失败";
+      markAuthorityVectorStateDirty(
+        graph,
+        config,
+        "authority-trivium-query-failed",
+        `Authority Trivium 查询失败（${message}），已标记待重建`,
+      );
+      recordSearchTimings({
+        success: false,
+        reason: "authority-trivium-query-failed",
+        requestMs: roundMs(nowMs() - requestStartedAt),
+        error: message,
+        resultCount: 0,
+      });
+      if (config.failOpen === false) {
+        throw error;
+      }
+      return [];
+    }
   }
 
   try {
@@ -1020,6 +1310,17 @@ export async function testVectorConnection(config, chatId = "connection-test") {
         return { success: true, dimensions: vec.length, error: "" };
       }
       return { success: false, dimensions: 0, error: "API 返回空结果" };
+    } catch (error) {
+      return { success: false, dimensions: 0, error: String(error) };
+    }
+  }
+
+  if (isAuthorityVectorConfig(config)) {
+    try {
+      return await testAuthorityTriviumConnection(config, {
+        collectionId: buildVectorCollectionId(chatId),
+        chatId,
+      });
     } catch (error) {
       return { success: false, dimensions: 0, error: String(error) };
     }
@@ -1223,6 +1524,14 @@ export async function fetchAvailableEmbeddingModels(config) {
   }
 
   try {
+    if (isAuthorityVectorConfig(config)) {
+      return {
+        success: false,
+        models: [],
+        error: "Authority Trivium 使用服务端索引配置，无需拉取 Embedding 模型",
+      };
+    }
+
     if (isDirectVectorConfig(config)) {
       const models = normalizeModelOptions(
         await fetchOpenAICompatibleModelList(config.apiUrl, config.apiKey),

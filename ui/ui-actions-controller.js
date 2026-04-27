@@ -589,7 +589,10 @@ export async function onRebuildVectorIndexController(runtime, range = null) {
   try {
     const result = await runtime.syncVectorState({
       force: true,
-      purge: runtime.isBackendVectorConfig(config) && !range,
+      purge:
+        !range &&
+        (runtime.isBackendVectorConfig(config) ||
+          runtime.isAuthorityVectorConfig?.(config)),
       range,
       signal: vectorController.signal,
     });

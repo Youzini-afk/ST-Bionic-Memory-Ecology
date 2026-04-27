@@ -358,8 +358,10 @@ import {
   fetchAvailableEmbeddingModels,
   getVectorConfigFromSettings,
   getVectorIndexStats,
+  isAuthorityVectorConfig,
   isBackendVectorConfig,
   isDirectVectorConfig,
+  normalizeAuthorityVectorConfig,
   syncGraphVectorIndex,
   testVectorConnection,
   validateVectorConfig,
@@ -5744,6 +5746,18 @@ function getPlannerRecallTimeoutMs() {
 
 function getEmbeddingConfig(mode = null) {
   const settings = getSettings();
+  if (!mode) {
+    const authorityRuntime = getAuthorityRuntimeSnapshot(settings);
+    const vectorMode = String(settings.authorityVectorMode || "auto-primary");
+    if (
+      settings.authorityTriviumPrimary !== false &&
+      vectorMode !== "off" &&
+      vectorMode !== "local-fallback" &&
+      authorityRuntime.capability.triviumPrimaryReady
+    ) {
+      return normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+    }
+  }
   return getVectorConfigFromSettings(
     mode ? { ...settings, embeddingTransportMode: mode } : settings,
   );
@@ -13676,7 +13690,15 @@ async function syncVectorState({
       purge,
       range,
       signal,
+      headerProvider:
+        typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,
     });
+    if (result?.error) {
+      setLastVectorStatus("向量待修复", result.error, "warning", {
+        syncRuntime: true,
+      });
+      return result;
+    }
     setLastVectorStatus(
       "向量完成",
       `${scopeLabel} · indexed ${result.stats?.indexed ?? 0} · pending ${result.stats?.pending ?? 0}`,
@@ -20078,6 +20100,7 @@ async function onRebuildVectorIndex(range = null) {
       ensureGraphMutationReady,
       finishStageAbortController,
       getEmbeddingConfig,
+      isAuthorityVectorConfig,
       isBackendVectorConfig,
       refreshPanelLiveState,
       saveGraphToChat,
