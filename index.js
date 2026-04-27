@@ -249,6 +249,16 @@ import {
   getPersistedSettingsSnapshot,
   mergePersistedSettings,
 } from "./runtime/settings-defaults.js";
+import {
+  createDefaultAuthorityCapabilityState,
+  normalizeAuthorityCapabilityState,
+  probeAuthorityCapabilities,
+} from "./runtime/authority-capabilities.js";
+import {
+  createAuthorityBrowserState,
+  getAuthorityBrowserStateSnapshot,
+  normalizeAuthorityBrowserState,
+} from "./sync/authority-browser-state.js";
 import { retrieve } from "./retrieval/retriever.js";
 import {
   applyProcessedHistorySnapshotToGraph,
@@ -1234,6 +1244,9 @@ let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle"
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
 let lastRecallStatus = createUiStatus("待命", "尚未执行召回", "idle");
 let graphPersistenceState = createGraphPersistenceState();
+let authorityCapabilityState = createDefaultAuthorityCapabilityState();
+let authorityBrowserState = createAuthorityBrowserState();
+let authorityProbePromise = null;
 const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
@@ -1437,6 +1450,115 @@ function isLukerPrimaryPersistenceHost(context = getContext()) {
   return resolvePersistenceHostProfile(context) === "luker";
 }
 
+function getAuthorityRuntimeSnapshot(settings = getSettings()) {
+  authorityCapabilityState = normalizeAuthorityCapabilityState(
+    authorityCapabilityState,
+    settings,
+  );
+  authorityBrowserState = normalizeAuthorityBrowserState(
+    authorityBrowserState,
+    settings,
+  );
+  return {
+    capability: authorityCapabilityState,
+    browserState: getAuthorityBrowserStateSnapshot(authorityBrowserState, settings),
+  };
+}
+
+function buildAuthorityPersistenceStatePatch(settings = getSettings()) {
+  const { capability, browserState } = getAuthorityRuntimeSnapshot(settings);
+  return {
+    authority: cloneRuntimeDebugValue(capability, null),
+    authorityBrowserState: cloneRuntimeDebugValue(browserState, null),
+    authorityInstalled: Boolean(capability.installed),
+    authorityHealthy: Boolean(capability.healthy),
+    authorityServerPrimaryReady: Boolean(capability.serverPrimaryReady),
+    authorityStoragePrimaryReady: Boolean(capability.storagePrimaryReady),
+    authorityTriviumPrimaryReady: Boolean(capability.triviumPrimaryReady),
+    authorityBrowserCacheMode: String(browserState.mode || "minimal"),
+    authorityOfflineQueueBytes: Number(browserState.offlineQueueBytes || 0),
+    authorityOfflineQueueItems: Number(browserState.offlineQueueItems || 0),
+    authorityDegradedReason: capability.serverPrimaryReady
+      ? ""
+      : String(capability.reason || capability.lastError || ""),
+  };
+}
+
+async function refreshAuthorityRuntimeState({
+  force = false,
+  source = "authority-refresh",
+} = {}) {
+  if (authorityProbePromise && !force) {
+    return await authorityProbePromise;
+  }
+  const settings = getSettings();
+  authorityBrowserState = normalizeAuthorityBrowserState(
+    authorityBrowserState,
+    settings,
+  );
+  updateGraphPersistenceState({
+    ...buildAuthorityPersistenceStatePatch(settings),
+    authorityLastRefreshSource: String(source || "authority-refresh"),
+  });
+
+  const allowRelativeUrl =
+    typeof window === "object" &&
+    Boolean(window?.location) &&
+    typeof window.location.href === "string";
+  authorityProbePromise = probeAuthorityCapabilities({
+    settings,
+    fetchImpl:
+      typeof globalThis.fetch === "function"
+        ? globalThis.fetch.bind(globalThis)
+        : null,
+    headerProvider:
+      typeof getRequestHeaders === "function" ? getRequestHeaders : null,
+    allowRelativeUrl,
+    nowMs: Date.now(),
+  })
+    .then((snapshot) => {
+      authorityCapabilityState = normalizeAuthorityCapabilityState(
+        snapshot,
+        settings,
+      );
+      authorityBrowserState = normalizeAuthorityBrowserState(
+        {
+          ...authorityBrowserState,
+          lastProbeAt: authorityCapabilityState.lastProbeAt,
+          lastError: authorityCapabilityState.lastError,
+        },
+        settings,
+      );
+      updateGraphPersistenceState({
+        ...buildAuthorityPersistenceStatePatch(settings),
+        authorityLastRefreshSource: String(source || "authority-refresh"),
+      });
+      return authorityCapabilityState;
+    })
+    .catch((error) => {
+      authorityCapabilityState = normalizeAuthorityCapabilityState(
+        {
+          installed: false,
+          healthy: false,
+          reason: "probe-failed",
+          lastError: error?.message || String(error),
+          lastProbeAt: Date.now(),
+          updatedAt: new Date().toISOString(),
+        },
+        settings,
+      );
+      updateGraphPersistenceState({
+        ...buildAuthorityPersistenceStatePatch(settings),
+        authorityLastRefreshSource: String(source || "authority-refresh"),
+      });
+      return authorityCapabilityState;
+    })
+    .finally(() => {
+      authorityProbePromise = null;
+    });
+  return await authorityProbePromise;
+}
+
 function getGraphPersistenceLiveState() {
   const liveCommitMarker =
     cloneRuntimeDebugValue(graphPersistenceState.commitMarker, null) ||
@@ -1452,6 +1574,7 @@ function getGraphPersistenceLiveState() {
       adapterRuntime.adapter.hostProfile ||
       persistenceEnvironment.hostProfile,
   );
+  const authorityRuntime = getAuthorityRuntimeSnapshot();
   const primaryStorageTier = normalizePersistenceStorageTier(
     graphPersistenceState.primaryStorageTier ||
       persistenceEnvironment.primaryStorageTier,
@@ -1515,6 +1638,38 @@ function getGraphPersistenceLiveState() {
     updatedAt: graphPersistenceState.updatedAt,
     storagePrimary: graphPersistenceState.storagePrimary || "indexeddb",
     storageMode: graphPersistenceState.storageMode || "indexeddb",
+    authority: cloneRuntimeDebugValue(authorityRuntime.capability, null),
+    authorityBrowserState: cloneRuntimeDebugValue(
+      authorityRuntime.browserState,
+      null,
+    ),
+    authorityInstalled: Boolean(authorityRuntime.capability.installed),
+    authorityHealthy: Boolean(authorityRuntime.capability.healthy),
+    authorityServerPrimaryReady: Boolean(
+      authorityRuntime.capability.serverPrimaryReady,
+    ),
+    authorityStoragePrimaryReady: Boolean(
+      authorityRuntime.capability.storagePrimaryReady,
+    ),
+    authorityTriviumPrimaryReady: Boolean(
+      authorityRuntime.capability.triviumPrimaryReady,
+    ),
+    authorityBrowserCacheMode: String(
+      authorityRuntime.browserState.mode || "minimal",
+    ),
+    authorityOfflineQueueBytes: Number(
+      authorityRuntime.browserState.offlineQueueBytes || 0,
+    ),
+    authorityOfflineQueueItems: Number(
+      authorityRuntime.browserState.offlineQueueItems || 0,
+    ),
+    authorityDegradedReason: authorityRuntime.capability.serverPrimaryReady
+      ? ""
+      : String(
+          authorityRuntime.capability.reason ||
+            authorityRuntime.capability.lastError ||
+            "",
+        ),
     resolvedLocalStore: String(
       graphPersistenceState.resolvedLocalStore ||
         buildGraphLocalStoreSelectorKey(getPreferredGraphLocalStorePresentationSync()),
@@ -13299,6 +13454,27 @@ function updateModuleSettings(patch = {}) {
   ]);
   const recallUiKeys = new Set(["recallCardUserInputDisplayMode"]);
   const noticeUiKeys = new Set(["noticeDisplayMode"]);
+  const authorityKeys = new Set([
+    "authorityEnabled",
+    "authorityBaseUrl",
+    "authorityPrimaryWhenAvailable",
+    "authorityStorageMode",
+    "authorityVectorMode",
+    "authoritySqlPrimary",
+    "authorityTriviumPrimary",
+    "authorityGraphQueryEnabled",
+    "authorityJobsEnabled",
+    "authorityBlobCheckpointEnabled",
+    "authorityBrowserCacheMode",
+    "authorityOfflineWritePolicy",
+    "authorityOfflineQueueMaxBytes",
+    "authorityOfflineQueueMaxItems",
+    "authorityOfflineQueueMaxAgeMs",
+    "authorityVectorSyncChunkSize",
+    "authorityVectorFailOpen",
+    "authorityDiagnosticsEnabled",
+    "authorityProbeIntervalMs",
+  ]);
   const settings = getSettings();
   const previousCloudStorageMode = String(
     settings.cloudStorageMode || "automatic",
@@ -13378,6 +13554,13 @@ function updateModuleSettings(patch = {}) {
 
   if (Object.keys(patch).some((key) => noticeUiKeys.has(key))) {
     refreshVisibleStageNotices();
+  }
+
+  if (Object.keys(patch).some((key) => authorityKeys.has(key))) {
+    void refreshAuthorityRuntimeState({
+      force: true,
+      source: "settings-updated",
+    });
   }
 
   const currentGraphLocalStorageMode = getRequestedGraphLocalStorageMode(
@@ -20007,6 +20190,10 @@ async function onCompactLukerSidecar() {
 
 (async function init() {
   await loadServerSettings();
+  void refreshAuthorityRuntimeState({
+    force: true,
+    source: "init",
+  });
   const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
   updateGraphPersistenceState({
     hostProfile: adapter.hostProfile,
