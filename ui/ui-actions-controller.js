@@ -587,6 +587,32 @@ export async function onRebuildVectorIndexController(runtime, range = null) {
 
   const vectorController = runtime.beginStageAbortController("vector");
   try {
+    if (
+      !range &&
+      typeof runtime.shouldUseAuthorityJobs === "function" &&
+      runtime.shouldUseAuthorityJobs(config) &&
+      typeof runtime.submitAuthorityVectorRebuildJob === "function"
+    ) {
+      const jobResult = await runtime.submitAuthorityVectorRebuildJob({
+        config,
+        purge: true,
+        range,
+        signal: vectorController.signal,
+      });
+      if (jobResult?.submitted) {
+        runtime.saveGraphToChat({ reason: "authority-vector-rebuild-job-submitted" });
+        runtime.toastr.info(
+          `Authority 向量重建任务已提交：${jobResult.job?.id || "pending"}`,
+        );
+        return;
+      }
+      if (jobResult?.error) {
+        runtime.toastr.warning(
+          `Authority Job 提交失败，已回退本地重建：${jobResult.error}`,
+        );
+      }
+    }
+
     const result = await runtime.syncVectorState({
       force: true,
       purge:

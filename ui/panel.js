@@ -1975,6 +1975,23 @@ function _refreshTaskPipelineOverview() {
   if (pipelinePersistDeltaMeta) {
     persistenceMetaParts.push(pipelinePersistDeltaMeta);
   }
+  const authorityJob = loadInfo.authorityLastJob || {};
+  const authorityJobParts = [
+    authorityJob.id || loadInfo.authorityLastJobId
+      ? `job ${authorityJob.id || loadInfo.authorityLastJobId}`
+      : "",
+    authorityJob.kind || loadInfo.authorityLastJobKind || "",
+    authorityJob.status || loadInfo.authorityLastJobStatus || "",
+  ].filter(Boolean);
+  const authorityJobProgress = Number(
+    authorityJob.progress ?? loadInfo.authorityLastJobProgress,
+  );
+  if (Number.isFinite(authorityJobProgress) && authorityJobProgress > 0) {
+    authorityJobParts.push(`${Math.round(authorityJobProgress * 100)}%`);
+  }
+  if (loadInfo.authorityLastJobError) {
+    authorityJobParts.push(`error ${loadInfo.authorityLastJobError}`);
+  }
   const persistence = _resolvePipelineStatus({
     text: loadInfo.loadState || "unknown",
     meta: persistenceMetaParts.join(" · "),
@@ -2026,7 +2043,16 @@ function _refreshTaskPipelineOverview() {
 
   const statusRows = [
     { label: "提取", color: extraction.color, value: extraction.label + (extraction.detail ? ` — ${extraction.detail}` : "") },
-    { label: "向量", color: vector.color, value: vector.label + (vector.detail ? ` — ${vector.detail}` : "") },
+    {
+      label: "向量",
+      color: vector.color,
+      value:
+        vector.label +
+        (vector.detail ? ` — ${vector.detail}` : "") +
+        (authorityJobParts.length
+          ? ` · Authority ${authorityJobParts.join(" · ")}`
+          : ""),
+    },
     { label: "召回", color: recall.color, value: recall.label + (recall.detail ? ` — ${recall.detail}` : "") },
     { label: "持久化", color: persistence.color, value: persistence.label + (persistence.detail ? ` — ${persistence.detail}` : "") },
   ];

@@ -288,6 +288,7 @@ import {
   rebindProcessedHistoryStateToChat,
   snapshotProcessedMessageHashes,
   undoLatestMaintenance,
+  buildVectorCollectionId,
 } from "./runtime/runtime-state.js";
 import { DEFAULT_NODE_SCHEMA, validateSchema } from "./graph/schema.js";
 import {
@@ -358,6 +359,7 @@ import {
   fetchAvailableEmbeddingModels,
   getVectorConfigFromSettings,
   getVectorIndexStats,
+  getVectorModelScope,
   isAuthorityVectorConfig,
   isBackendVectorConfig,
   isDirectVectorConfig,
@@ -366,6 +368,11 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector/vector-index.js";
+import {
+  buildAuthorityJobIdempotencyKey,
+  createAuthorityJobAdapter,
+  normalizeAuthorityJobConfig,
+} from "./maintenance/authority-job-adapter.js";
 
 export { DEFAULT_TRIGGER_KEYWORDS, getSmartTriggerDecision };
 
@@ -1497,6 +1504,7 @@ function buildAuthorityPersistenceStatePatch(settings = getSettings()) {
     authorityServerPrimaryReady: Boolean(capability.serverPrimaryReady),
     authorityStoragePrimaryReady: Boolean(capability.storagePrimaryReady),
     authorityTriviumPrimaryReady: Boolean(capability.triviumPrimaryReady),
+    authorityJobsReady: Boolean(capability.jobsReady),
     authorityBrowserCacheMode: String(browserState.mode || "minimal"),
     authorityOfflineQueueBytes: Number(browserState.offlineQueueBytes || 0),
     authorityOfflineQueueItems: Number(browserState.offlineQueueItems || 0),
@@ -1901,6 +1909,162 @@ function updateGraphPersistenceState(patch = {}) {
   };
   syncGraphPersistenceDebugState();
   return graphPersistenceState;
+}
+
+function getAuthorityJobAdapter(options = {}) {
+  const settings = getSettings();
+  const config = normalizeAuthorityJobConfig(settings);
+  return createAuthorityJobAdapter(config, {
+    fetchImpl: globalThis.fetch?.bind(globalThis),
+    headerProvider:
+      typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,
+    ...options,
+  });
+}
+
+function shouldUseAuthorityJobs(config = null) {
+  const settings = getSettings();
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  const jobConfig = normalizeAuthorityJobConfig(settings);
+  return Boolean(
+    jobConfig.enabled &&
+      capability.jobsReady &&
+      settings.authorityJobsEnabled !== false &&
+      isAuthorityVectorConfig(config),
+  );
+}
+
+function recordAuthorityJobSnapshot(job = null, options = {}) {
+  const normalizedJob =
+    job && typeof job === "object" && !Array.isArray(job) ? job : {};
+  const progress = Number(normalizedJob.progress || 0);
+  const status = String(normalizedJob.status || options.status || "");
+  const error = String(normalizedJob.error || options.error || "");
+  const queueState =
+    options.queueState ||
+    (error
+      ? "error"
+      : normalizedJob.terminal
+        ? normalizedJob.success
+          ? "success"
+          : "failed"
+        : normalizedJob.id
+          ? "running"
+          : "idle");
+  updateGraphPersistenceState({
+    authorityJobQueueState: queueState,
+    authorityLastJob: cloneRuntimeDebugValue(normalizedJob, null),
+    authorityLastJobId: String(normalizedJob.id || options.jobId || ""),
+    authorityLastJobKind: String(normalizedJob.kind || options.kind || ""),
+    authorityLastJobStatus: status,
+    authorityLastJobProgress: Number.isFinite(progress)
+      ? Math.max(0, Math.min(1, progress))
+      : 0,
+    authorityLastJobError: error,
+    authorityLastJobUpdatedAt: new Date().toISOString(),
+  });
+}
+
+async function submitAuthorityVectorRebuildJob({
+  config = null,
+  range = null,
+  purge = true,
+  signal = undefined,
+} = {}) {
+  const vectorConfig = config || getEmbeddingConfig();
+  if (!shouldUseAuthorityJobs(vectorConfig)) {
+    return {
+      submitted: false,
+      fallbackRequired: true,
+      reason: "authority-jobs-unavailable",
+    };
+  }
+
+  ensureCurrentGraphRuntimeState();
+  const chatId = getCurrentChatId();
+  const collectionId =
+    currentGraph?.vectorIndexState?.collectionId || buildVectorCollectionId(chatId);
+  const kind = range
+    ? "authority.vector.rebuild-range"
+    : "authority.vector.rebuild";
+  const idempotencyKey = buildAuthorityJobIdempotencyKey({
+    kind,
+    chatId,
+    collectionId,
+    revision:
+      currentGraph?.meta?.revision ||
+      currentGraph?.historyState?.extractionCount ||
+      graphPersistenceState?.revision ||
+      0,
+    range,
+  });
+  const payload = {
+    chatId,
+    collectionId,
+    namespace: collectionId,
+    modelScope: getVectorModelScope(vectorConfig),
+    source: "authority-trivium",
+    purge: Boolean(purge),
+    range: range || null,
+    graphRevision:
+      currentGraph?.meta?.revision || graphPersistenceState?.revision || 0,
+    idempotencyKey,
+  };
+
+  try {
+    const adapter = getAuthorityJobAdapter();
+    const job = await adapter.submit(kind, payload, {
+      idempotencyKey,
+      signal,
+    });
+    recordAuthorityJobSnapshot(job, { kind, queueState: "running" });
+    if (currentGraph?.vectorIndexState) {
+      currentGraph.vectorIndexState.dirty = true;
+      currentGraph.vectorIndexState.dirtyReason = "authority-vector-rebuild-job-submitted";
+      currentGraph.vectorIndexState.lastWarning =
+        "Authority 向量重建 Job 已提交，等待服务端完成";
+      currentGraph.vectorIndexState.lastRebuildJob =
+        cloneRuntimeDebugValue(job, null);
+    }
+    setLastVectorStatus(
+      "向量重建 Job 已提交",
+      `${kind} · ${job.id || "pending"} · ${job.status || "queued"}`,
+      "running",
+      { syncRuntime: true },
+    );
+    return {
+      submitted: true,
+      fallbackRequired: false,
+      job,
+      stats: getVectorIndexStats(currentGraph),
+      insertedHashes: [],
+    };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority Job 提交失败";
+    recordAuthorityJobSnapshot(null, {
+      kind,
+      queueState: "fallback",
+      error: message,
+    });
+    return {
+      submitted: false,
+      fallbackRequired: true,
+      error: message,
+    };
+  }
+}
+
+async function requeueAuthorityJob(jobId, options = {}) {
+  try {
+    const adapter = getAuthorityJobAdapter();
+    const job = await adapter.requeue(jobId, options);
+    recordAuthorityJobSnapshot(job, { queueState: "running" });
+    return { success: true, job };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority Job 重试失败";
+    recordAuthorityJobSnapshot(null, { queueState: "error", error: message });
+    return { success: false, error: message };
+  }
 }
 
 function recordIgnoredMutationEvent(eventName = "", detail = {}) {
@@ -20104,6 +20268,8 @@ async function onRebuildVectorIndex(range = null) {
       isBackendVectorConfig,
       refreshPanelLiveState,
       saveGraphToChat,
+      shouldUseAuthorityJobs,
+      submitAuthorityVectorRebuildJob,
       syncVectorState,
       toastr,
       validateVectorConfig,
@@ -20683,6 +20849,7 @@ async function onCompactLukerSidecar() {
       updateRegionAdjacency: onUpdatePanelRegionAdjacency,
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
+      requeueAuthorityJob: async (jobId) => await requeueAuthorityJob(jobId),
       reembedDirect: onReembedDirect,
       reroll: onReroll,
       clearGraph: onClearGraph,
