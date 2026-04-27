@@ -46,6 +46,17 @@ import {
   defaultSettings,
   mergePersistedSettings,
 } from "../../runtime/settings-defaults.js";
+import {
+  createDefaultAuthorityCapabilityState,
+  normalizeAuthoritySettings,
+  normalizeAuthorityCapabilityState,
+  probeAuthorityCapabilities,
+} from "../../runtime/authority-capabilities.js";
+import {
+  createAuthorityBrowserState,
+  getAuthorityBrowserStateSnapshot,
+  normalizeAuthorityBrowserState,
+} from "../../sync/authority-browser-state.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../../index.js");
@@ -89,6 +100,13 @@ export function createGenerationRecallHarness(options = {}) {
       _panelModule: null,
       defaultSettings,
       mergePersistedSettings,
+      createDefaultAuthorityCapabilityState,
+      normalizeAuthoritySettings,
+      normalizeAuthorityCapabilityState,
+      probeAuthorityCapabilities,
+      createAuthorityBrowserState,
+      getAuthorityBrowserStateSnapshot,
+      normalizeAuthorityBrowserState,
       settings: {},
       graphPersistenceState: createGraphPersistenceState(),
       extension_settings: { [MODULE_NAME]: {} },

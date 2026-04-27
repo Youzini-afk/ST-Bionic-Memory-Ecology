@@ -102,6 +102,22 @@ import {
   mergePersistedSettings,
 } from "../runtime/settings-defaults.js";
 import {
+  createDefaultAuthorityCapabilityState,
+  normalizeAuthoritySettings,
+  normalizeAuthorityCapabilityState,
+  probeAuthorityCapabilities,
+} from "../runtime/authority-capabilities.js";
+import {
+  createAuthorityBrowserState,
+  getAuthorityBrowserStateSnapshot,
+  normalizeAuthorityBrowserState,
+} from "../sync/authority-browser-state.js";
+import {
+  AUTHORITY_GRAPH_STORE_KIND,
+  AUTHORITY_GRAPH_STORE_MODE,
+  AuthorityGraphStore,
+} from "../sync/authority-graph-store.js";
+import {
   clampFloat,
   clampInt,
   createGraphPersistenceState,
@@ -434,6 +450,16 @@ async function createGraphPersistenceHarness({
     defaultSettings,
     getPersistedSettingsSnapshot,
     mergePersistedSettings,
+    createDefaultAuthorityCapabilityState,
+    normalizeAuthoritySettings,
+    normalizeAuthorityCapabilityState,
+    probeAuthorityCapabilities,
+    createAuthorityBrowserState,
+    getAuthorityBrowserStateSnapshot,
+    normalizeAuthorityBrowserState,
+    AUTHORITY_GRAPH_STORE_KIND,
+    AUTHORITY_GRAPH_STORE_MODE,
+    AuthorityGraphStore,
     migrateLegacyTaskProfiles(settings = {}) {
       return {
         taskProfilesVersion: Number(settings?.taskProfilesVersion || 0),

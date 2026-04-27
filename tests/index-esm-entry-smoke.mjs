@@ -30,6 +30,7 @@ await fs.writeFile(
   tempModulePath,
   `
 const GRAPH_LOAD_STATES = { SHADOW_RESTORED: "shadow-restored", LOADED: "loaded" };
+const AUTHORITY_GRAPH_STORE_KIND = "authority";
 let currentGraph = null;
 let graphPersistenceState = {
   metadataIntegrity: "",

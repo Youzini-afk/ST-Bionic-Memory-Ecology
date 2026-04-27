@@ -41,6 +41,11 @@ import {
   normalizeGraphLocalStorageMode,
 } from "./sync/bme-opfs-store.js";
 import {
+  AUTHORITY_GRAPH_STORE_KIND,
+  AUTHORITY_GRAPH_STORE_MODE,
+  AuthorityGraphStore,
+} from "./sync/authority-graph-store.js";
+import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
   backupToServer,
@@ -251,6 +256,7 @@ import {
 } from "./runtime/settings-defaults.js";
 import {
   createDefaultAuthorityCapabilityState,
+  normalizeAuthoritySettings,
   normalizeAuthorityCapabilityState,
   probeAuthorityCapabilities,
 } from "./runtime/authority-capabilities.js";
@@ -1382,6 +1388,7 @@ function normalizePersistenceStorageTier(value = "none") {
     [
       "indexeddb",
       "opfs",
+      "authority-sql",
       "chat-state",
       "luker-chat-state",
       "shadow",
@@ -1401,6 +1408,9 @@ function resolveLocalStoreTierFromPresentation(
     presentation && typeof presentation === "object"
       ? presentation
       : getPreferredGraphLocalStorePresentationSync();
+  if (normalizedPresentation.storagePrimary === AUTHORITY_GRAPH_STORE_KIND) {
+    return "authority-sql";
+  }
   return normalizedPresentation.storagePrimary === "opfs" ? "opfs" : "indexeddb";
 }
 
@@ -1437,12 +1447,20 @@ function buildPersistenceEnvironment(
 ) {
   const hostProfile = resolvePersistenceHostProfile(context);
   const localStoreTier = resolveLocalStoreTierFromPresentation(presentation);
+  const authorityPrimary = localStoreTier === "authority-sql";
   return {
     hostProfile,
     localStoreTier,
-    primaryStorageTier:
-      hostProfile === "luker" ? "luker-chat-state" : localStoreTier,
-    cacheStorageTier: hostProfile === "luker" ? localStoreTier : "none",
+    primaryStorageTier: authorityPrimary
+      ? "authority-sql"
+      : hostProfile === "luker"
+        ? "luker-chat-state"
+        : localStoreTier,
+    cacheStorageTier: authorityPrimary
+      ? "none"
+      : hostProfile === "luker"
+        ? localStoreTier
+        : "none",
   };
 }
 
@@ -4650,6 +4668,15 @@ function buildOpfsStorePresentation(
   };
 }
 
+function buildAuthorityStorePresentation() {
+  return {
+    storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
+    storageMode: AUTHORITY_GRAPH_STORE_MODE,
+    statusLabel: "Authority SQL",
+    reasonPrefix: "authority-sql",
+  };
+}
+
 function getRequestedGraphLocalStorageMode(settings = getSettings()) {
   const sourceSettings =
     settings && typeof settings === "object" && !Array.isArray(settings)
@@ -4661,7 +4688,66 @@ function getRequestedGraphLocalStorageMode(settings = getSettings()) {
   );
 }
 
+function shouldUseAuthorityGraphStore(settings = getSettings(), capability = authorityCapabilityState) {
+  const normalizedSettings = normalizeAuthoritySettings(settings);
+  const normalizedCapability = normalizeAuthorityCapabilityState(capability, settings);
+  return (
+    normalizedSettings.enabled &&
+    normalizedSettings.primaryWhenAvailable &&
+    normalizedSettings.sqlPrimary &&
+    normalizedSettings.storageMode !== "local-primary" &&
+    normalizedSettings.storageMode !== "off" &&
+    normalizedCapability.serverPrimaryReady &&
+    normalizedCapability.storagePrimaryReady
+  );
+}
+
+function shouldProbeAuthorityForStoreSelection(settings = getSettings()) {
+  const normalizedSettings = normalizeAuthoritySettings(settings);
+  if (
+    !normalizedSettings.enabled ||
+    !normalizedSettings.primaryWhenAvailable ||
+    !normalizedSettings.sqlPrimary ||
+    normalizedSettings.storageMode === "local-primary" ||
+    normalizedSettings.storageMode === "off"
+  ) {
+    return false;
+  }
+  if (authorityProbePromise) return true;
+  const lastProbeAt = Number(authorityCapabilityState?.lastProbeAt || 0);
+  if (!lastProbeAt) return true;
+  return Date.now() - lastProbeAt >= normalizedSettings.probeIntervalMs;
+}
+
+async function resolveAuthorityCapabilityForStoreSelection(settings = getSettings()) {
+  if (shouldProbeAuthorityForStoreSelection(settings)) {
+    return await refreshAuthorityRuntimeState({
+      source: "store-selection",
+    });
+  }
+  authorityCapabilityState = normalizeAuthorityCapabilityState(
+    authorityCapabilityState,
+    settings,
+  );
+  return authorityCapabilityState;
+}
+
+function buildAuthorityGraphStoreOptions(settings = getSettings()) {
+  const normalizedSettings = normalizeAuthoritySettings(settings);
+  return {
+    baseUrl: normalizedSettings.baseUrl,
+    headerProvider:
+      typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,
+  };
+}
+
 function resolveDbGraphStorePresentation(db = null) {
+  if (
+    db?.storeKind === AUTHORITY_GRAPH_STORE_KIND ||
+    db?.storeMode === AUTHORITY_GRAPH_STORE_MODE
+  ) {
+    return buildAuthorityStorePresentation();
+  }
   if (db?.storeKind === "opfs" || isGraphLocalStorageModeOpfs(db?.storeMode)) {
     return buildOpfsStorePresentation(db?.storeMode);
   }
@@ -4707,6 +4793,15 @@ function resolveSnapshotGraphStorePresentation(
   const snapshotPrimary = String(snapshot?.meta?.storagePrimary || "")
     .trim()
     .toLowerCase();
+  const snapshotStorageMode = String(snapshot?.meta?.storageMode || "")
+    .trim()
+    .toLowerCase();
+  if (
+    snapshotPrimary === AUTHORITY_GRAPH_STORE_KIND ||
+    snapshotStorageMode === AUTHORITY_GRAPH_STORE_MODE
+  ) {
+    return buildAuthorityStorePresentation();
+  }
   const snapshotMode = normalizeGraphLocalStorageMode(
     snapshot?.meta?.storageMode,
     normalizedFallback.storageMode,
@@ -4724,6 +4819,12 @@ function buildGraphLocalStoreSelectorKey(
     presentation && typeof presentation === "object"
       ? presentation
       : buildIndexedDbStorePresentation();
+  if (
+    normalizedPresentation.storagePrimary === AUTHORITY_GRAPH_STORE_KIND ||
+    normalizedPresentation.storageMode === AUTHORITY_GRAPH_STORE_MODE
+  ) {
+    return `${AUTHORITY_GRAPH_STORE_KIND}:${AUTHORITY_GRAPH_STORE_MODE}`;
+  }
   const storagePrimary =
     normalizedPresentation.storagePrimary === "opfs" ||
     isGraphLocalStorageModeOpfs(normalizedPresentation.storageMode)
@@ -4829,6 +4930,9 @@ async function getGraphLocalStoreCapability(forceRefresh = false) {
 }
 
 function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
+  if (shouldUseAuthorityGraphStore(settings, authorityCapabilityState)) {
+    return buildAuthorityStorePresentation();
+  }
   const requestedMode = getRequestedGraphLocalStorageMode(settings);
   if (
     requestedMode === "auto" &&
@@ -4845,20 +4949,25 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
   return buildIndexedDbStorePresentation();
 }
 
- async function resolvePreferredGraphLocalStorePresentation(
-   settings = getSettings(),
- ) {
-   const requestedMode = getRequestedGraphLocalStorageMode(settings);
-   if (requestedMode === "auto") {
-     const capability = await getGraphLocalStoreCapability(false, {
-       settings,
-     });
-     return capability.opfsAvailable
-       ? buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY)
-       : buildIndexedDbStorePresentation();
-   }
-   if (!isGraphLocalStorageModeOpfs(requestedMode)) {
-     return buildIndexedDbStorePresentation();
+async function resolvePreferredGraphLocalStorePresentation(
+  settings = getSettings(),
+) {
+  const authorityCapability =
+    await resolveAuthorityCapabilityForStoreSelection(settings);
+  if (shouldUseAuthorityGraphStore(settings, authorityCapability)) {
+    return buildAuthorityStorePresentation();
+  }
+  const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  if (requestedMode === "auto") {
+    const capability = await getGraphLocalStoreCapability(false, {
+      settings,
+    });
+    return capability.opfsAvailable
+      ? buildOpfsStorePresentation(BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY)
+      : buildIndexedDbStorePresentation();
+  }
+  if (!isGraphLocalStorageModeOpfs(requestedMode)) {
+    return buildIndexedDbStorePresentation();
   }
 
   const capability = await getGraphLocalStoreCapability(false, {
@@ -4871,9 +4980,9 @@ function getPreferredGraphLocalStorePresentationSync(settings = getSettings()) {
   if (!bmeLocalStoreCapabilityWarningShown) {
     console.warn("[ST-BME] OPFS 不可用，已回退到 IndexedDB:", capability.reason);
     bmeLocalStoreCapabilityWarningShown = true;
-   }
-   return buildIndexedDbStorePresentation();
- }
+  }
+  return buildIndexedDbStorePresentation();
+}
 
 async function createPreferredGraphLocalStore(
   chatId,
@@ -4881,6 +4990,12 @@ async function createPreferredGraphLocalStore(
 ) {
   const preferredLocalStore =
     await resolvePreferredGraphLocalStorePresentation(settings);
+  if (
+    preferredLocalStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND &&
+    typeof AuthorityGraphStore === "function"
+  ) {
+    return new AuthorityGraphStore(chatId, buildAuthorityGraphStoreOptions(settings));
+  }
   if (
     preferredLocalStore.storagePrimary === "opfs" &&
     typeof OpfsGraphStore === "function"
@@ -4903,11 +5018,18 @@ async function refreshCurrentChatLocalStoreBinding(
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const settings = getSettings();
   const requestedMode = getRequestedGraphLocalStorageMode(settings);
+  const authorityCapability =
+    await resolveAuthorityCapabilityForStoreSelection(settings);
+  const authorityPrimary = shouldUseAuthorityGraphStore(
+    settings,
+    authorityCapability,
+  );
   const shouldProbeCapability =
-    forceCapabilityRefresh === true ||
-    !bmeLocalStoreCapabilitySnapshot.checked ||
-    requestedMode === "auto" ||
-    isGraphLocalStorageModeOpfs(requestedMode);
+    !authorityPrimary &&
+    (forceCapabilityRefresh === true ||
+      !bmeLocalStoreCapabilitySnapshot.checked ||
+      requestedMode === "auto" ||
+      isGraphLocalStorageModeOpfs(requestedMode));
 
   if (shouldProbeCapability) {
     await getGraphLocalStoreCapability(forceCapabilityRefresh === true, {
@@ -14150,7 +14272,8 @@ async function saveGraphToIndexedDb(
     const shouldScheduleCloudUpload =
       scheduleCloudUploadOption != null
         ? scheduleCloudUploadOption === true
-        : persistenceEnvironment.hostProfile !== "luker" &&
+        : persistenceEnvironment.primaryStorageTier !== "authority-sql" &&
+          persistenceEnvironment.hostProfile !== "luker" &&
           persistRole !== "cache-mirror";
     const directPersistDelta =
       persistDelta &&
@@ -14521,7 +14644,9 @@ async function saveGraphToIndexedDb(
       snapshot.meta.lastMutationReason = String(reason || "graph-save");
       snapshot.meta.storagePrimary = localStore.storagePrimary;
       snapshot.meta.storageMode = localStore.storageMode;
-      cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+      if (localStore.storagePrimary !== AUTHORITY_GRAPH_STORE_KIND) {
+        cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+      }
     }
 
     if (dirtyPersistDeltaVersion > 0) {
@@ -15276,7 +15401,8 @@ function saveGraphToChat(options = {}) {
   }
 
   const shouldQueueIndexedDbPersist =
-    persistenceEnvironment.hostProfile !== "luker" &&
+    (persistenceEnvironment.hostProfile !== "luker" ||
+      persistenceEnvironment.primaryStorageTier === "authority-sql") &&
     (markMutation || !isGraphEffectivelyEmpty(currentGraph));
   if (shouldQueueIndexedDbPersist) {
     queueGraphPersistToIndexedDb(chatId, currentGraph, {
@@ -15305,7 +15431,7 @@ function saveGraphToChat(options = {}) {
     }
   }
 
-  if (persistenceEnvironment.hostProfile === "luker") {
+  if (persistenceEnvironment.primaryStorageTier === "luker-chat-state") {
     const persistGraph = cloneGraphForPersistence(currentGraph, chatId);
     const chatStateTarget = resolveCurrentChatStateTarget(context);
     const lastProcessedAssistantFloor = Number.isFinite(
