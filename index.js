@@ -50,6 +50,7 @@ import {
   autoSyncOnVisibility,
   backupToServer,
   buildRestoreSafetyChatId,
+  createRestoreSafetySnapshot,
   deleteRemoteSyncFile,
   deleteServerBackup,
   getRestoreSafetySnapshotStatus,
@@ -264,6 +265,7 @@ import {
   createAuthorityBrowserState,
   getAuthorityBrowserStateSnapshot,
   normalizeAuthorityBrowserState,
+  recordAuthorityAcceptedRevision,
 } from "./sync/authority-browser-state.js";
 import { retrieve } from "./retrieval/retriever.js";
 import {
@@ -1502,6 +1504,103 @@ function buildAuthorityPersistenceStatePatch(settings = getSettings()) {
   };
 }
 
+function isAuthorityGraphStorePresentation(presentation = null) {
+  if (!presentation || typeof presentation !== "object") return false;
+  return (
+    presentation.storagePrimary === AUTHORITY_GRAPH_STORE_KIND ||
+    presentation.storageMode === AUTHORITY_GRAPH_STORE_MODE
+  );
+}
+
+function isAuthorityGraphStoreDb(db = null) {
+  return (
+    db?.storeKind === AUTHORITY_GRAPH_STORE_KIND ||
+    db?.storeMode === AUTHORITY_GRAPH_STORE_MODE
+  );
+}
+
+function recordAuthorityAcceptedRevisionPointer({
+  revision = 0,
+  integrity = "",
+  committedAt = Date.now(),
+} = {}) {
+  const settings = getSettings();
+  authorityBrowserState = recordAuthorityAcceptedRevision(
+    authorityBrowserState,
+    {
+      revision: normalizeIndexedDbRevision(revision),
+      integrity: String(integrity || ""),
+      committedAt,
+    },
+    settings,
+    committedAt,
+  );
+  updateGraphPersistenceState(buildAuthorityPersistenceStatePatch(settings));
+  return authorityBrowserState;
+}
+
+async function captureAuthorityMigrationSafetySnapshot(
+  chatId,
+  snapshot,
+  { source = "authority-migration", reason = "authority-migration-safety" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot)) {
+    return {
+      captured: false,
+      reason: "authority-migration-safety-source-empty",
+      chatId: normalizedChatId || "",
+    };
+  }
+
+  try {
+    await createRestoreSafetySnapshot(
+      normalizedChatId,
+      snapshot,
+      buildBmeSyncRuntimeOptions({
+        reason,
+        trigger: String(source || "authority-migration"),
+      }),
+    );
+    const migrationGraph = buildGraphFromSnapshot(snapshot, {
+      chatId: normalizedChatId,
+    });
+    const revision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
+    const identity = resolveCurrentChatIdentity(getContext());
+    const integrity = String(
+      snapshot?.meta?.integrity || identity?.integrity || "",
+    ).trim();
+    let shadowCaptured = false;
+    try {
+      shadowCaptured = writeGraphShadowSnapshot(normalizedChatId, migrationGraph, {
+        revision,
+        reason,
+        integrity,
+        debugReason: String(source || "authority-migration"),
+      });
+    } catch (shadowError) {
+      console.warn("[ST-BME] Authority 迁移影子安全快照创建失败:", shadowError);
+    }
+    return {
+      captured: true,
+      restoreSafetyCaptured: true,
+      shadowCaptured,
+      reason: "authority-migration-restore-safety-created",
+      chatId: normalizedChatId,
+      revision,
+      integrity,
+    };
+  } catch (error) {
+    console.warn("[ST-BME] Authority 迁移安全快照创建失败:", error);
+    return {
+      captured: false,
+      reason: "authority-migration-safety-failed",
+      chatId: normalizedChatId,
+      error: error?.message || String(error),
+    };
+  }
+}
+
 async function refreshAuthorityRuntimeState({
   force = false,
   source = "authority-refresh",
@@ -1688,6 +1787,22 @@ function getGraphPersistenceLiveState() {
             authorityRuntime.capability.lastError ||
             "",
         ),
+    authorityMigrationState: String(
+      graphPersistenceState.authorityMigrationState || "idle",
+    ),
+    authorityMigrationSource: String(
+      graphPersistenceState.authorityMigrationSource || "",
+    ),
+    authorityMigrationRevision: Number(
+      graphPersistenceState.authorityMigrationRevision || 0,
+    ),
+    authorityMigrationLastError: String(
+      graphPersistenceState.authorityMigrationLastError || "",
+    ),
+    lastAuthorityMigrationResult: cloneRuntimeDebugValue(
+      graphPersistenceState.lastAuthorityMigrationResult,
+      null,
+    ),
     resolvedLocalStore: String(
       graphPersistenceState.resolvedLocalStore ||
         buildGraphLocalStoreSelectorKey(getPreferredGraphLocalStorePresentationSync()),
@@ -5714,7 +5829,14 @@ async function importRecoveredSnapshotToIndexedDb(
   targetDb,
   targetChatId,
   graph,
-  { revision = 0, integrity = "", source = "identity-recovery", legacyChatId = "" } = {},
+  {
+    revision = 0,
+    integrity = "",
+    source = "identity-recovery",
+    legacyChatId = "",
+    markSyncDirty = true,
+    beforeImport = null,
+  } = {},
 ) {
   const snapshot = buildRecoveredSnapshotForChatIdentity(graph, targetChatId, {
     revision,
@@ -5722,11 +5844,14 @@ async function importRecoveredSnapshotToIndexedDb(
     source,
     legacyChatId,
   });
+  if (typeof beforeImport === "function") {
+    await beforeImport(snapshot);
+  }
   const importResult = await targetDb.importSnapshot(snapshot, {
     mode: "replace",
     preserveRevision: true,
     revision: snapshot.meta.revision,
-    markSyncDirty: true,
+    markSyncDirty,
   });
   snapshot.meta.revision = normalizeIndexedDbRevision(
     importResult?.revision,
@@ -6154,9 +6279,11 @@ function buildBmeSyncRuntimeOptions(extra = {}) {
       return await manager.getCurrentDb(chatId);
     },
     getSafetyDb: async (chatId) => {
-      const safetyDb = await createPreferredGraphLocalStore(
-        buildRestoreSafetyChatId(chatId),
-      );
+      const safetyChatId = buildRestoreSafetyChatId(chatId);
+      const safetyStore = await resolvePreferredGraphLocalStorePresentation();
+      const safetyDb = isAuthorityGraphStorePresentation(safetyStore)
+        ? new BmeDatabase(safetyChatId)
+        : await createPreferredGraphLocalStore(safetyChatId);
       await safetyDb.open();
       return safetyDb;
     },
@@ -6558,6 +6685,7 @@ function cacheIndexedDbSnapshot(chatId, snapshot = null) {
   if (!normalizedChatId || !snapshot || typeof snapshot !== "object") return;
   if (snapshot.__stBmeTombstonesOmitted === true) return;
   const snapshotStore = resolveSnapshotGraphStorePresentation(snapshot);
+  if (snapshotStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND) return;
   bmeIndexedDbSnapshotCacheByChatId.set(normalizedChatId, {
     chatId: normalizedChatId,
     revision: normalizeIndexedDbRevision(snapshot?.meta?.revision),
@@ -8797,6 +8925,8 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
       chatId: normalizedChatId,
     };
   }
+  const targetStore = resolveDbGraphStorePresentation(targetDb);
+  const authorityTarget = isAuthorityGraphStorePresentation(targetStore);
 
   const emptyStatus = await targetDb.isEmpty();
   if (!emptyStatus?.empty) {
@@ -8817,6 +8947,7 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
       shadowChatId = "",
     } = {},
   ) => {
+    let safetySnapshotResult = null;
     const snapshot = await importRecoveredSnapshotToIndexedDb(
       targetDb,
       normalizedChatId,
@@ -8826,9 +8957,24 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
         integrity: identity.integrity,
         source: migrationSource,
         legacyChatId,
+        markSyncDirty: !authorityTarget,
+        beforeImport: authorityTarget
+          ? async (candidateSnapshot) => {
+              safetySnapshotResult = await captureAuthorityMigrationSafetySnapshot(
+                normalizedChatId,
+                candidateSnapshot,
+                {
+                  source: migrationSource,
+                  reason: "authority-identity-recovery-safety",
+                },
+              );
+            }
+          : null,
       },
     );
-    cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    if (!authorityTarget) {
+      cacheIndexedDbSnapshot(normalizedChatId, snapshot);
+    }
     rememberResolvedGraphIdentityAlias(context, normalizedChatId);
 
     if (shadowChatId && shadowChatId !== normalizedChatId) {
@@ -8840,32 +8986,49 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
       reason: "identity-recovery-sync-skipped",
       chatId: normalizedChatId,
     };
-    try {
-      syncResult = await syncNow(
-        normalizedChatId,
-        buildBmeSyncRuntimeOptions({
-          reason: "identity-recovery",
-          trigger: `${String(source || "identity-recovery")}:identity-recovery`,
-        }),
-      );
-    } catch (syncError) {
-      console.warn("[ST-BME] 身份恢复后的同步失败:", syncError);
+    if (authorityTarget) {
+      const acceptedRevision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
+      recordAuthorityAcceptedRevisionPointer({
+        revision: acceptedRevision,
+        integrity: snapshot?.meta?.integrity || identity.integrity,
+      });
       syncResult = {
         synced: false,
-        reason: "identity-recovery-sync-failed",
+        reason: "authority-primary-legacy-sync-skipped",
         chatId: normalizedChatId,
-        error: syncError?.message || String(syncError),
       };
+    } else {
+      try {
+        syncResult = await syncNow(
+          normalizedChatId,
+          buildBmeSyncRuntimeOptions({
+            reason: "identity-recovery",
+            trigger: `${String(source || "identity-recovery")}:identity-recovery`,
+          }),
+        );
+      } catch (syncError) {
+        console.warn("[ST-BME] 身份恢复后的同步失败:", syncError);
+        syncResult = {
+          synced: false,
+          reason: "identity-recovery-sync-failed",
+          chatId: normalizedChatId,
+          error: syncError?.message || String(syncError),
+        };
+      }
     }
 
     return {
       migrated: true,
-      reason: "identity-recovery-completed",
+      reason: authorityTarget
+        ? "authority-identity-recovery-completed"
+        : "identity-recovery-completed",
       chatId: normalizedChatId,
       legacyChatId: normalizeChatIdCandidate(legacyChatId),
       source: migrationSource,
       snapshot,
       syncResult,
+      safetySnapshotResult,
+      targetStore,
     };
   };
 
@@ -9013,6 +9176,8 @@ async function maybeMigrateLegacyGraphToIndexedDb(
           chatId: normalizedChatId,
         };
       }
+      const targetStore = resolveDbGraphStorePresentation(targetDb);
+      const authorityTarget = isAuthorityGraphStorePresentation(targetStore);
 
       const contextChatId = resolveCurrentChatIdentity(context).chatId;
       if (contextChatId && contextChatId !== normalizedChatId) {
@@ -9062,9 +9227,26 @@ async function maybeMigrateLegacyGraphToIndexedDb(
         normalizeIndexedDbRevision(getGraphPersistedRevision(legacyGraph), 0),
         1,
       );
+      const safetySnapshotResult = authorityTarget
+        ? await captureAuthorityMigrationSafetySnapshot(
+            normalizedChatId,
+            buildSnapshotFromGraph(legacyGraph, {
+              chatId: normalizedChatId,
+              revision: legacyRevision,
+              meta: {
+                migrationSource: "chat_metadata",
+              },
+            }),
+            {
+              source: "chat_metadata",
+              reason: "authority-chat-metadata-migration-safety",
+            },
+          )
+        : null;
       const migrationResult = await targetDb.importLegacyGraph(legacyGraph, {
         source: "chat_metadata",
         revision: legacyRevision,
+        markSyncDirty: !authorityTarget,
       });
       if (!migrationResult?.migrated) {
         return {
@@ -9076,7 +9258,18 @@ async function maybeMigrateLegacyGraphToIndexedDb(
       }
 
       const postMigrationSnapshot = await targetDb.exportSnapshot();
-      cacheIndexedDbSnapshot(normalizedChatId, postMigrationSnapshot);
+      if (!authorityTarget) {
+        cacheIndexedDbSnapshot(normalizedChatId, postMigrationSnapshot);
+      }
+      if (authorityTarget) {
+        recordAuthorityAcceptedRevisionPointer({
+          revision:
+            postMigrationSnapshot?.meta?.revision ||
+            migrationResult?.revision ||
+            legacyRevision,
+          integrity: postMigrationSnapshot?.meta?.integrity,
+        });
+      }
       debugDebug("[ST-BME] legacy chat_metadata 图谱迁移完成", {
         source,
         chatId: normalizedChatId,
@@ -9092,31 +9285,43 @@ async function maybeMigrateLegacyGraphToIndexedDb(
         reason: "post-migration-sync-skipped",
         chatId: normalizedChatId,
       };
-      try {
-        syncResult = await syncNow(
-          normalizedChatId,
-          buildBmeSyncRuntimeOptions({
-            reason: "post-migration",
-            trigger: `${String(source || "migration")}:post-migration`,
-          }),
-        );
-      } catch (syncError) {
-        console.warn("[ST-BME] legacy 迁移后立即同步失败:", syncError);
+      if (authorityTarget) {
         syncResult = {
           synced: false,
-          reason: "post-migration-sync-failed",
+          reason: "authority-primary-legacy-sync-skipped",
           chatId: normalizedChatId,
-          error: syncError?.message || String(syncError),
         };
+      } else {
+        try {
+          syncResult = await syncNow(
+            normalizedChatId,
+            buildBmeSyncRuntimeOptions({
+              reason: "post-migration",
+              trigger: `${String(source || "migration")}:post-migration`,
+            }),
+          );
+        } catch (syncError) {
+          console.warn("[ST-BME] legacy 迁移后立即同步失败:", syncError);
+          syncResult = {
+            synced: false,
+            reason: "post-migration-sync-failed",
+            chatId: normalizedChatId,
+            error: syncError?.message || String(syncError),
+          };
+        }
       }
 
       return {
         migrated: true,
-        reason: "migration-completed",
+        reason: authorityTarget
+          ? "authority-chat-metadata-migration-completed"
+          : "migration-completed",
         chatId: normalizedChatId,
         migrationResult,
         snapshot: postMigrationSnapshot,
         syncResult,
+        safetySnapshotResult,
+        targetStore,
       };
     } catch (error) {
       console.warn("[ST-BME] legacy chat_metadata 迁移失败:", error);
@@ -9179,6 +9384,7 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
       }
 
       const targetStore = resolveDbGraphStorePresentation(targetDb);
+      const authorityTarget = isAuthorityGraphStorePresentation(targetStore);
       if (targetStore.storagePrimary === "indexeddb") {
         return {
           migrated: false,
@@ -9225,14 +9431,29 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
         !Array.isArray(legacySnapshot.state)
           ? legacySnapshot.state
           : {};
+      const migrationSource = authorityTarget
+        ? "legacy_indexeddb_to_authority"
+        : "legacy_indexeddb_snapshot";
+      const safetySnapshotResult = authorityTarget
+        ? await captureAuthorityMigrationSafetySnapshot(normalizedChatId, legacySnapshot, {
+            source: migrationSource,
+            reason: "authority-indexeddb-migration-safety",
+          })
+        : null;
       const importSnapshot = {
         meta: {
           ...legacyMeta,
           chatId: normalizedChatId,
           migrationCompletedAt: nowMs,
-          migrationSource: "legacy_indexeddb_snapshot",
+          migrationSource,
           migratedFromStoragePrimary: "indexeddb",
           migratedFromStorageMode: BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+          migratedToStoragePrimary: authorityTarget
+            ? AUTHORITY_GRAPH_STORE_KIND
+            : targetStore.storagePrimary,
+          migratedToStorageMode: authorityTarget
+            ? AUTHORITY_GRAPH_STORE_MODE
+            : targetStore.storageMode,
         },
         state: {
           ...legacyState,
@@ -9258,9 +9479,15 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
         mode: "replace",
         preserveRevision: true,
         revision: normalizedRevision,
-        markSyncDirty: Boolean(legacyMeta.syncDirty),
+        markSyncDirty: authorityTarget ? false : Boolean(legacyMeta.syncDirty),
       });
       const snapshot = await targetDb.exportSnapshot();
+      if (authorityTarget) {
+        recordAuthorityAcceptedRevisionPointer({
+          revision: snapshot?.meta?.revision || migrationResult?.revision || normalizedRevision,
+          integrity: snapshot?.meta?.integrity || legacyMeta.integrity,
+        });
+      }
 
       debugDebug("[ST-BME] 已将 legacy IndexedDB 快照迁移到当前本地存储", {
         source,
@@ -9272,12 +9499,15 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
 
       return {
         migrated: true,
-        reason: "migration-local-store-completed",
-        source: "legacy_indexeddb_snapshot",
+        reason: authorityTarget
+          ? "authority-indexeddb-migration-completed"
+          : "migration-local-store-completed",
+        source: migrationSource,
         chatId: normalizedChatId,
         migrationResult,
         snapshot,
         targetStore,
+        safetySnapshotResult,
       };
     } catch (error) {
       console.warn("[ST-BME] 迁移 legacy IndexedDB 快照到当前本地存储失败:", {
@@ -10148,6 +10378,8 @@ async function loadGraphFromIndexedDb(
         identityRecoveryResult?.snapshot,
         localStore,
       );
+      const recoveredAuthorityStore =
+        isAuthorityGraphStorePresentation(recoveredStore);
       const recoveredRevision = normalizeIndexedDbRevision(
         identityRecoveryResult?.snapshot?.meta?.revision,
       );
@@ -10158,6 +10390,19 @@ async function loadGraphFromIndexedDb(
         localStoreFormatVersion:
           recoveredStore.storagePrimary === "opfs" ? 2 : 1,
         localStoreMigrationState: "completed",
+        authorityMigrationState: recoveredAuthorityStore ? "completed" : graphPersistenceState.authorityMigrationState,
+        authorityMigrationSource: recoveredAuthorityStore
+          ? String(identityRecoveryResult?.source || "identity-recovery")
+          : graphPersistenceState.authorityMigrationSource,
+        authorityMigrationRevision: recoveredAuthorityStore
+          ? recoveredRevision
+          : graphPersistenceState.authorityMigrationRevision,
+        authorityMigrationLastError: recoveredAuthorityStore
+          ? ""
+          : graphPersistenceState.authorityMigrationLastError,
+        lastAuthorityMigrationResult: recoveredAuthorityStore
+          ? cloneRuntimeDebugValue(identityRecoveryResult, null)
+          : graphPersistenceState.lastAuthorityMigrationResult,
         indexedDbRevision: recoveredRevision,
         indexedDbLastError: "",
         lastSyncError: "",
@@ -10195,7 +10440,9 @@ async function loadGraphFromIndexedDb(
         );
 
     const migrationResult =
-      identityRecoveryResult?.migrated || localStoreMigrationResult?.migrated
+      identityRecoveryResult?.migrated ||
+      localStoreMigrationResult?.migrated ||
+      localStoreMigrationResult?.reason === "migration-local-store-failed"
         ? localStoreMigrationResult
         : await maybeMigrateLegacyGraphToIndexedDb(
           normalizedChatId,
@@ -10211,6 +10458,8 @@ async function loadGraphFromIndexedDb(
         migrationResult?.snapshot,
         localStore,
       );
+      const migratedAuthorityStore =
+        isAuthorityGraphStorePresentation(migratedStore);
       const migratedRevision = normalizeIndexedDbRevision(
         migrationResult?.snapshot?.meta?.revision ||
           migrationResult?.migrationResult?.revision,
@@ -10222,6 +10471,19 @@ async function loadGraphFromIndexedDb(
         localStoreFormatVersion:
           migratedStore.storagePrimary === "opfs" ? 2 : 1,
         localStoreMigrationState: "completed",
+        authorityMigrationState: migratedAuthorityStore ? "completed" : graphPersistenceState.authorityMigrationState,
+        authorityMigrationSource: migratedAuthorityStore
+          ? String(migrationResult?.source || migrationResult?.reason || "")
+          : graphPersistenceState.authorityMigrationSource,
+        authorityMigrationRevision: migratedAuthorityStore
+          ? migratedRevision
+          : graphPersistenceState.authorityMigrationRevision,
+        authorityMigrationLastError: migratedAuthorityStore
+          ? ""
+          : graphPersistenceState.authorityMigrationLastError,
+        lastAuthorityMigrationResult: migratedAuthorityStore
+          ? cloneRuntimeDebugValue(migrationResult, null)
+          : graphPersistenceState.lastAuthorityMigrationResult,
         indexedDbRevision: migratedRevision,
         indexedDbLastError: "",
         lastSyncError: "",
@@ -10236,12 +10498,27 @@ async function loadGraphFromIndexedDb(
           syncResult: cloneRuntimeDebugValue(migrationResult?.syncResult, null),
         },
       });
-    } else if (migrationResult?.reason === "migration-failed") {
+    } else if (
+      migrationResult?.reason === "migration-failed" ||
+      migrationResult?.reason === "migration-local-store-failed"
+    ) {
       updateGraphPersistenceState({
         indexedDbLastError: String(
           migrationResult?.error || "migration-failed",
         ),
         localStoreMigrationState: "failed",
+        authorityMigrationState:
+          localStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND
+            ? "failed"
+            : graphPersistenceState.authorityMigrationState,
+        authorityMigrationLastError:
+          localStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND
+            ? String(migrationResult?.error || migrationResult?.reason || "migration-failed")
+            : graphPersistenceState.authorityMigrationLastError,
+        lastAuthorityMigrationResult:
+          localStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND
+            ? cloneRuntimeDebugValue(migrationResult, null)
+            : graphPersistenceState.lastAuthorityMigrationResult,
         dualWriteLastResult: {
           action: "migration",
           source: "chat_metadata",

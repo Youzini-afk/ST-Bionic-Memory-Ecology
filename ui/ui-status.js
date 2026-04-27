@@ -141,6 +141,11 @@ export function createGraphPersistenceState() {
     authorityOfflineQueueBytes: 0,
     authorityOfflineQueueItems: 0,
     authorityDegradedReason: "",
+    authorityMigrationState: "idle",
+    authorityMigrationSource: "",
+    authorityMigrationRevision: 0,
+    authorityMigrationLastError: "",
+    lastAuthorityMigrationResult: null,
     localStoreFormatVersion: 1,
     localStoreMigrationState: "idle",
     opfsWriteLockState: {

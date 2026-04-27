@@ -56,6 +56,7 @@ import {
   createAuthorityBrowserState,
   getAuthorityBrowserStateSnapshot,
   normalizeAuthorityBrowserState,
+  recordAuthorityAcceptedRevision,
 } from "../../sync/authority-browser-state.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -107,6 +108,7 @@ export function createGenerationRecallHarness(options = {}) {
       createAuthorityBrowserState,
       getAuthorityBrowserStateSnapshot,
       normalizeAuthorityBrowserState,
+      recordAuthorityAcceptedRevision,
       settings: {},
       graphPersistenceState: createGraphPersistenceState(),
       extension_settings: { [MODULE_NAME]: {} },

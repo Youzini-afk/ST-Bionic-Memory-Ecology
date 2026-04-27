@@ -662,7 +662,7 @@ async function writeBackupEnvelope(envelope, chatId, options = {}) {
   };
 }
 
-async function createRestoreSafetySnapshot(chatId, snapshot, options = {}) {
+export async function createRestoreSafetySnapshot(chatId, snapshot, options = {}) {
   const safetyDb = await getSafetyDb(chatId, options);
   const revision = normalizeRevision(snapshot?.meta?.revision);
   try {
