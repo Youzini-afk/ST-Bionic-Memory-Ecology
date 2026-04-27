@@ -34,6 +34,13 @@ function getTimerApi(runtime = {}) {
   };
 }
 
+function notifyRuntimeHideStateChanged(runtime = {}) {
+  try {
+    runtime.refreshPanelLiveState?.();
+  } catch {
+  }
+}
+
 function getCurrentContext(runtime = {}) {
   try {
     return typeof runtime.getContext === "function" ? runtime.getContext() : null;
@@ -487,10 +494,15 @@ export function scheduleHideSettingsApply(
   const snapshot = normalizeHideSettings(settings);
   hideState.scheduledTimer = timers.setTimeout(() => {
     hideState.scheduledTimer = null;
-    void applyHideSettings(snapshot, runtime).catch((error) => {
-      console.warn?.("[ST-BME] scheduled hide apply failed", error);
-    });
+    void applyHideSettings(snapshot, runtime)
+      .then(() => {
+        notifyRuntimeHideStateChanged(runtime);
+      })
+      .catch((error) => {
+        console.warn?.("[ST-BME] scheduled hide apply failed", error);
+      });
   }, Math.max(0, Math.trunc(Number(delayMs) || 0)));
+  notifyRuntimeHideStateChanged(runtime);
 }
 
 export async function unhideAll(runtime = {}) {

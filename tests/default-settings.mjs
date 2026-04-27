@@ -8,6 +8,8 @@ import {
 assert.equal(defaultSettings.extractContextTurns, 2);
 assert.equal(defaultSettings.extractActionMode, "pending");
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
+assert.equal(defaultSettings.hideOldMessagesRenderLimitEnabled, true);
+assert.equal(defaultSettings.hideOldMessagesRenderLimit, 10);
 assert.equal(defaultSettings.recallTopK, 20);
 assert.equal(defaultSettings.recallMaxNodes, 12);
 assert.equal(defaultSettings.recallEnableVectorPrefilter, true);
@@ -50,7 +52,6 @@ assert.equal(defaultSettings.injectUserPovMemory, true);
 assert.equal(defaultSettings.injectObjectiveGlobalMemory, true);
 assert.equal(defaultSettings.enableCognitiveMemory, true);
 assert.equal(defaultSettings.enableSpatialAdjacency, true);
-assert.equal(defaultSettings.enableAiMonitor, false);
 assert.equal(defaultSettings.injectLowConfidenceObjectiveMemory, false);
 assert.equal(defaultSettings.enableStoryTimeline, true);
 assert.equal(defaultSettings.injectStoryTimeLabel, true);

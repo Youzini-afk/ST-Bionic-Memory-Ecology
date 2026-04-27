@@ -527,6 +527,26 @@ export function normalizeGraphRuntimeState(graph, chatId = "", options = {}) {
   }
   const skipRecordFieldNormalization =
     options?.skipRecordFieldNormalization === true;
+  const recordNormalizationContext =
+    options?.recordNormalizationContext &&
+    typeof options.recordNormalizationContext === "object" &&
+    !Array.isArray(options.recordNormalizationContext)
+      ? options.recordNormalizationContext
+      : null;
+  const normalizedNodeIds = new Set(
+    Array.isArray(recordNormalizationContext?.normalizedNodeIds)
+      ? recordNormalizationContext.normalizedNodeIds
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      : [],
+  );
+  const normalizedEdgeIds = new Set(
+    Array.isArray(recordNormalizationContext?.normalizedEdgeIds)
+      ? recordNormalizationContext.normalizedEdgeIds
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      : [],
+  );
   const hadSummaryState =
     graph.summaryState &&
     typeof graph.summaryState === "object" &&
@@ -775,10 +795,32 @@ export function normalizeGraphRuntimeState(graph, chatId = "", options = {}) {
   graph.historyState = historyState;
   graph.vectorIndexState = vectorIndexState;
   if (!skipRecordFieldNormalization && Array.isArray(graph.nodes)) {
-    graph.nodes.forEach((node) => normalizeNodeMemoryScope(node));
+    graph.nodes.forEach((node) => {
+      const previousScope = node?.scope;
+      const nextScope = normalizeNodeMemoryScope(node);
+      if (previousScope !== nextScope) {
+        const nodeId = String(node?.id || "").trim();
+        if (nodeId) {
+          normalizedNodeIds.add(nodeId);
+        }
+      }
+    });
   }
   if (!skipRecordFieldNormalization && Array.isArray(graph.edges)) {
-    graph.edges.forEach((edge) => normalizeEdgeMemoryScope(edge));
+    graph.edges.forEach((edge) => {
+      const previousScope = edge?.scope;
+      const nextScope = normalizeEdgeMemoryScope(edge);
+      if (previousScope !== nextScope) {
+        const edgeId = String(edge?.id || "").trim();
+        if (edgeId) {
+          normalizedEdgeIds.add(edgeId);
+        }
+      }
+    });
+  }
+  if (recordNormalizationContext) {
+    recordNormalizationContext.normalizedNodeIds = [...normalizedNodeIds];
+    recordNormalizationContext.normalizedEdgeIds = [...normalizedEdgeIds];
   }
   graph.batchJournal = Array.isArray(graph.batchJournal)
     ? graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT)

@@ -151,6 +151,7 @@ async function ensurePanelBridgeReady(runtime) {
     getLastInjection: runtime.getLastInjection,
     getRuntimeDebugSnapshot: runtime.getRuntimeDebugSnapshot,
     getGraphPersistenceState: runtime.getGraphPersistenceState,
+    getHideStateSnapshot: runtime.getHideStateSnapshot,
     updateSettings: (patch) => {
       const nextSettings = runtime.updateSettings(patch);
       if (Object.prototype.hasOwnProperty.call(patch || {}, "panelTheme")) {

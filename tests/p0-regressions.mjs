@@ -358,6 +358,7 @@ function createHistoryRecoveryHarness() {
       prepareVectorStateCalls: [],
       saveGraphToChatCalls: 0,
       refreshPanelCalls: 0,
+      renderLimitBlockedCalls: [],
       notices: [],
       toastCalls: {
         success: [],
@@ -470,6 +471,12 @@ function createHistoryRecoveryHarness() {
       },
       getSettings() {
         return {};
+      },
+      getRenderLimitedHistoryRecoveryGuard() {
+        return context.renderLimitedGuard || { blocked: false };
+      },
+      notifyRenderLimitedHistoryRecoveryBlocked(guard, trigger) {
+        context.renderLimitBlockedCalls.push({ guard, trigger });
       },
       isBackendVectorConfig(config) {
         return config?.mode === "backend";
@@ -6324,6 +6331,56 @@ async function testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast
   assert.equal(harness.toastCalls.error.length, 0);
 }
 
+async function testHistoryRecoveryPausesWhenRenderLimitedChatSlice() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = new Array(10).fill(null).map((_, index) => ({
+    is_user: index % 2 === 0,
+    mes: `visible-${index}`,
+  }));
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 30,
+      processedMessageHashes: { 30: "hash-30" },
+      historyDirtyFrom: 10,
+      lastMutationSource: "hash-recheck",
+      lastMutationReason: "已处理楼层超出当前聊天长度，检测到历史截断",
+      extractionCount: 8,
+    },
+    vectorIndexState: {
+      collectionId: "col-1",
+      dirty: false,
+      dirtyReason: "",
+      pendingRepairFromFloor: null,
+      replayRequiredNodeIds: [],
+      lastWarning: "",
+      lastIntegrityIssue: null,
+    },
+    batchJournal: [],
+    lastProcessedSeq: 30,
+  };
+  harness.renderLimitedGuard = {
+    blocked: true,
+    chatLength: 10,
+    renderLimit: 10,
+    highestProcessedFloor: 30,
+    reason: "render-limited-chat-slice",
+    message: "render limited",
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation("manual-extract");
+
+  assert.equal(result, false);
+  assert.equal(harness.prepareVectorStateCalls.length, 0);
+  assert.equal(harness.saveGraphToChatCalls, 0);
+  assert.equal(harness.refreshPanelCalls, 1);
+  assert.equal(harness.renderLimitBlockedCalls.length, 1);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult?.resultCode,
+    "history.recovery.paused.render-limit",
+  );
+  assert.equal(harness.currentGraph.historyState.lastProcessedAssistantFloor, 30);
+}
+
 async function testHistoryRecoveryFullRebuildStillWarnsUser() {
   const harness = await createHistoryRecoveryHarness();
   harness.chat = [
@@ -7525,6 +7582,7 @@ await testRecallSubGraphAndDataLayerEntryPoints();
 await testRerollUsesBatchBoundaryRollbackAndPersistsState();
 await testNotifyHistoryDirtyUsesStageNoticeWithoutGenericWarningToast();
 await testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast();
+await testHistoryRecoveryPausesWhenRenderLimitedChatSlice();
 await testHistoryRecoveryFullRebuildStillWarnsUser();
 await testHistoryRecoveryAbortClearsVectorRepairState();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();

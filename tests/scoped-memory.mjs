@@ -8,7 +8,11 @@ import {
   findLatestNode,
   serializeGraph,
 } from "../graph/graph.js";
-import { normalizeMemoryScope } from "../graph/memory-scope.js";
+import {
+  buildRegionLine,
+  getScopeRegionTokens,
+  normalizeMemoryScope,
+} from "../graph/memory-scope.js";
 import {
   normalizeStoryTime,
   normalizeStoryTimeSpan,
@@ -72,6 +76,61 @@ assert.equal(
   normalizedScope,
   "已规范的 scope 对象应直接复用",
 );
+
+const malformedSecondaryScope = normalizeMemoryScope({
+  layer: "objective",
+  regionPrimary: "王都/钟楼",
+  regionSecondary: "旧城区, 集市 / 下水道 / 钟楼",
+});
+assert.equal(malformedSecondaryScope.regionPrimary, "钟楼");
+assert.deepEqual(malformedSecondaryScope.regionPath, ["王都", "钟楼"]);
+assert.deepEqual(malformedSecondaryScope.regionSecondary, [
+  "旧城区",
+  "集市",
+  "下水道",
+]);
+assert.deepEqual(getScopeRegionTokens(malformedSecondaryScope), [
+  "钟楼",
+  "王都",
+  "旧城区",
+  "集市",
+  "下水道",
+]);
+assert.match(buildRegionLine(malformedSecondaryScope), /次级地区/);
+
+const accessorBackedScope = {};
+Object.defineProperty(accessorBackedScope, "layer", {
+  get() {
+    return "objective";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionPrimary", {
+  get() {
+    return "钟楼";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionPath", {
+  get() {
+    return "王都 > 钟楼";
+  },
+  enumerable: true,
+});
+Object.defineProperty(accessorBackedScope, "regionSecondary", {
+  get() {
+    return { label: "旧城区 / 集市" };
+  },
+  enumerable: true,
+});
+const normalizedAccessorScope = normalizeMemoryScope(accessorBackedScope);
+assert.notEqual(
+  normalizedAccessorScope,
+  accessorBackedScope,
+  "带 accessor 的 scope 不应复用原对象",
+);
+assert.deepEqual(normalizedAccessorScope.regionPath, ["王都", "钟楼"]);
+assert.deepEqual(normalizedAccessorScope.regionSecondary, ["旧城区", "集市"]);
 
 const normalizedStoryTime = {
   segmentId: "tl-1",

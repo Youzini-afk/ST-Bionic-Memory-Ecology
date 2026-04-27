@@ -262,6 +262,7 @@ import {
   createMaintenanceJournalEntry,
   detectHistoryMutation,
   findJournalRecoveryPoint,
+  hasGraphPersistDirtyState,
   markHistoryDirty,
   normalizeGraphRuntimeState,
   pruneGraphPersistDirtyState,
@@ -4952,11 +4953,215 @@ function getMessageHideSettings(settings = null) {
   };
 }
 
+function getMessageRenderLimitSettings(settings = null) {
+  let sourceSettings = settings;
+  if (!sourceSettings || typeof sourceSettings !== "object") {
+    try {
+      sourceSettings =
+        typeof getSettings === "function" ? getSettings() : {};
+    } catch {
+      sourceSettings = {};
+    }
+  }
+  return {
+    enabled:
+      sourceSettings.enabled !== false &&
+      Boolean(sourceSettings.hideOldMessagesRenderLimitEnabled),
+    render_last_n: Math.max(
+      0,
+      Math.trunc(Number(sourceSettings.hideOldMessagesRenderLimit ?? 0) || 0),
+    ),
+  };
+}
+
+function getHostPowerUserSettings() {
+  try {
+    const context = typeof getContext === "function" ? getContext() : null;
+    return (
+      context?.power_user ||
+      context?.powerUserSettings ||
+      globalThis.power_user ||
+      null
+    );
+  } catch {
+    return globalThis.power_user || null;
+  }
+}
+
+function applyMessageRenderLimit(settings = null, options = {}) {
+  const normalized = getMessageRenderLimitSettings(settings);
+  const shouldClear = options.clearWhenDisabled === true;
+  if (!normalized.enabled && !shouldClear) {
+    return {
+      active: false,
+      renderLimit: 0,
+      applied: false,
+      skipped: true,
+    };
+  }
+
+  const renderLimit =
+    normalized.enabled && normalized.render_last_n > 0
+      ? normalized.render_last_n
+      : 0;
+  let applied = false;
+  const powerUserSettings = getHostPowerUserSettings();
+  if (powerUserSettings && typeof powerUserSettings === "object") {
+    powerUserSettings.chat_truncation = renderLimit;
+    applied = true;
+  }
+
+  try {
+    const jq = typeof $ === "function" ? $ : null;
+    if (jq) {
+      const value = String(renderLimit);
+      const truncationInput = jq("#chat_truncation");
+      if (
+        truncationInput &&
+        Number(truncationInput.length || 0) > 0 &&
+        typeof truncationInput.val === "function"
+      ) {
+        truncationInput.val(value);
+        if (typeof truncationInput.trigger === "function") {
+          truncationInput.trigger("change");
+        }
+        applied = true;
+      }
+      const truncationCounter = jq("#chat_truncation_counter");
+      if (
+        truncationCounter &&
+        Number(truncationCounter.length || 0) > 0 &&
+        typeof truncationCounter.val === "function"
+      ) {
+        truncationCounter.val(value);
+        applied = true;
+      }
+    }
+  } catch (error) {
+    console.warn("[ST-BME] 同步聊天区渲染楼层限制失败:", error);
+  }
+
+  if (options.reloadCurrentChat === true) {
+    try {
+      const context = typeof getContext === "function" ? getContext() : null;
+      if (typeof context?.reloadCurrentChat === "function") {
+        context.reloadCurrentChat();
+      }
+    } catch (error) {
+      console.warn("[ST-BME] 重新加载聊天区渲染楼层失败:", error);
+    }
+  }
+
+  return {
+    active: renderLimit > 0,
+    renderLimit,
+    applied,
+    skipped: false,
+  };
+}
+
+function getActiveMessageRenderLimitForHistoryGuard(settings = null) {
+  const normalized = getMessageRenderLimitSettings(settings);
+  const configuredLimit =
+    normalized.enabled && normalized.render_last_n > 0
+      ? normalized.render_last_n
+      : 0;
+  let hostLimit = 0;
+  try {
+    const powerUserSettings = getHostPowerUserSettings();
+    hostLimit = Math.max(
+      0,
+      Math.trunc(Number(powerUserSettings?.chat_truncation ?? 0) || 0),
+    );
+  } catch {
+    hostLimit = 0;
+  }
+
+  if (configuredLimit > 0 && hostLimit > 0) {
+    return Math.min(configuredLimit, hostLimit);
+  }
+  return Math.max(configuredLimit, hostLimit);
+}
+
+function getHighestTrackedProcessedHistoryFloor(historyState = {}) {
+  const lastProcessed = Number.isFinite(
+    Number(historyState?.lastProcessedAssistantFloor),
+  )
+    ? Math.floor(Number(historyState.lastProcessedAssistantFloor))
+    : -1;
+  const hashes =
+    historyState?.processedMessageHashes &&
+    typeof historyState.processedMessageHashes === "object" &&
+    !Array.isArray(historyState.processedMessageHashes)
+      ? historyState.processedMessageHashes
+      : {};
+  const maxHashFloor = Object.keys(hashes).reduce((maxFloor, key) => {
+    const floor = Number.parseInt(key, 10);
+    return Number.isFinite(floor) ? Math.max(maxFloor, floor) : maxFloor;
+  }, -1);
+
+  return Math.max(lastProcessed, maxHashFloor);
+}
+
+function getRenderLimitedHistoryRecoveryGuard(
+  chat,
+  { settings = null, historyState = currentGraph?.historyState } = {},
+) {
+  const renderLimit = getActiveMessageRenderLimitForHistoryGuard(settings);
+  if (!Array.isArray(chat) || renderLimit <= 0) {
+    return { blocked: false };
+  }
+
+  const chatLength = chat.length;
+  const highestProcessedFloor =
+    getHighestTrackedProcessedHistoryFloor(historyState);
+  const renderWindowTolerance = renderLimit + 1;
+  if (
+    chatLength > renderWindowTolerance ||
+    highestProcessedFloor < chatLength
+  ) {
+    return { blocked: false };
+  }
+
+  return {
+    blocked: true,
+    chatLength,
+    highestProcessedFloor,
+    renderLimit,
+    reason: "render-limited-chat-slice",
+    message:
+      `当前聊天区最多只渲染最近 ${renderLimit} 条消息，当前可见 ${chatLength} 条；` +
+      `图谱已处理到楼层 ${highestProcessedFloor}。为避免把截断视图误判为历史删除并清空运行时图谱，已暂停历史恢复。` +
+      "请临时关闭“限制聊天区渲染楼层”或调大渲染数量并刷新后再提取。",
+  };
+}
+
+function notifyRenderLimitedHistoryRecoveryBlocked(guard, trigger = "") {
+  if (!guard?.blocked) return;
+  console.warn?.("[ST-BME] 历史恢复因聊天渲染限制暂停:", {
+    trigger,
+    chatLength: guard.chatLength,
+    highestProcessedFloor: guard.highestProcessedFloor,
+    renderLimit: guard.renderLimit,
+  });
+  updateStageNotice(
+    "history",
+    "历史恢复已暂停",
+    guard.message,
+    "warning",
+    {
+      busy: false,
+      persist: true,
+    },
+  );
+}
+
 function getHideRuntimeAdapters() {
   return {
     $,
     clearTimeout,
     getContext,
+    refreshPanelLiveState,
     setTimeout,
   };
 }
@@ -4968,6 +5173,7 @@ async function applyMessageHideNow(reason = "manual-apply") {
       getHideRuntimeAdapters(),
     );
     debugLog("[ST-BME] 已应用旧楼层隐藏:", reason, result);
+    refreshPanelLiveState();
     return result;
   } catch (error) {
     console.warn("[ST-BME] 应用旧楼层隐藏失败:", reason, error);
@@ -4999,6 +5205,7 @@ async function runIncrementalMessageHide(reason = "incremental") {
     if (result?.active) {
       debugLog("[ST-BME] 已增量更新旧楼层隐藏:", reason, result);
     }
+    refreshPanelLiveState();
     return result;
   } catch (error) {
     console.warn("[ST-BME] 增量更新旧楼层隐藏失败:", reason, error);
@@ -5013,6 +5220,7 @@ function clearMessageHideState(reason = "reset") {
   try {
     resetHideState(getHideRuntimeAdapters());
     debugLog("[ST-BME] 已重置旧楼层隐藏状态:", reason);
+    refreshPanelLiveState();
   } catch (error) {
     console.warn("[ST-BME] 重置旧楼层隐藏状态失败:", reason, error);
   }
@@ -5022,6 +5230,7 @@ async function clearAllHiddenMessages(reason = "manual-clear") {
   try {
     const result = await unhideAll(getHideRuntimeAdapters());
     debugLog("[ST-BME] 已取消全部旧楼层隐藏:", reason, result);
+    refreshPanelLiveState();
     return result;
   } catch (error) {
     console.warn("[ST-BME] 取消全部旧楼层隐藏失败:", reason, error);
@@ -5602,7 +5811,11 @@ async function refreshRuntimeGraphAfterSyncApplied(syncPayload = {}) {
   const action = String(syncPayload?.action || "")
     .trim()
     .toLowerCase();
-  if (action !== "download" && action !== "merge") {
+  if (
+    action !== "download" &&
+    action !== "merge" &&
+    action !== "restore-backup"
+  ) {
     return {
       refreshed: false,
       reason: "action-not-supported",
@@ -9470,7 +9683,34 @@ function applyIndexedDbSnapshotToRuntime(
     persistencePatch.indexedDbRevision = revision;
   }
   updateGraphPersistenceState(persistencePatch);
+  const shouldPersistPostLoadRepairs = hasGraphPersistDirtyState(currentGraph);
   rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
+
+  if (shouldPersistPostLoadRepairs) {
+    const repairedNodeCount = Number(hydrateDiagnostics?.scopeRepairNodeCount) || 0;
+    const repairedEdgeCount = Number(hydrateDiagnostics?.scopeRepairEdgeCount) || 0;
+    void Promise.resolve().then(() => {
+      if (currentGraph !== graphFromSnapshot) {
+        return;
+      }
+      if (
+        normalizeChatIdCandidate(currentGraph?.historyState?.chatId) !== normalizedChatId
+      ) {
+        return;
+      }
+      debugDebug("[ST-BME] 已检测到加载后作用域自愈，后台写回修复结果", {
+        chatId: normalizedChatId,
+        repairedNodeCount,
+        repairedEdgeCount,
+        source,
+      });
+      saveGraphToChat({
+        reason: "scope-auto-repair-after-load",
+        markMutation: false,
+        immediate: false,
+      });
+    });
+  }
 
   removeGraphShadowSnapshot(normalizedChatId);
   refreshPanelLiveState();
@@ -12336,6 +12576,10 @@ function refreshPanelLiveState() {
   });
 }
 
+function getMessageHideStateSnapshotForPanel() {
+  return getHideStateSnapshot();
+}
+
 function notifyStatusToast(key, kind, message, title = "ST-BME") {
   const now = Date.now();
   if (now - (lastStatusToastAt[key] || 0) < STATUS_TOAST_THROTTLE_MS) return;
@@ -13048,6 +13292,11 @@ function updateModuleSettings(patch = {}) {
     "hideOldMessagesEnabled",
     "hideOldMessagesKeepLastN",
   ]);
+  const messageRenderLimitKeys = new Set([
+    "enabled",
+    "hideOldMessagesRenderLimitEnabled",
+    "hideOldMessagesRenderLimit",
+  ]);
   const recallUiKeys = new Set(["recallCardUserInputDisplayMode"]);
   const noticeUiKeys = new Set(["noticeDisplayMode"]);
   const settings = getSettings();
@@ -13113,6 +13362,14 @@ function updateModuleSettings(patch = {}) {
     } else {
       scheduleMessageHideApply("settings-updated", 30);
     }
+  }
+
+  if (Object.keys(patch).some((key) => messageRenderLimitKeys.has(key))) {
+    const renderResult = applyMessageRenderLimit(settings, {
+      clearWhenDisabled: true,
+      reloadCurrentChat: true,
+    });
+    debugLog("[ST-BME] 已同步聊天区渲染楼层限制:", renderResult);
   }
 
   if (Object.keys(patch).some((key) => recallUiKeys.has(key))) {
@@ -16739,6 +16996,17 @@ function inspectHistoryMutation(
   ensureCurrentGraphRuntimeState();
   const context = getContext();
   const chat = context?.chat;
+  const renderLimitedGuard = getRenderLimitedHistoryRecoveryGuard(chat);
+  if (renderLimitedGuard.blocked) {
+    notifyRenderLimitedHistoryRecoveryBlocked(renderLimitedGuard, trigger);
+    return {
+      dirty: false,
+      earliestAffectedFloor: null,
+      reason: renderLimitedGuard.reason,
+      source: "render-limit-guard",
+      skipped: true,
+    };
+  }
   if (
     Array.isArray(chat) &&
     currentGraph.historyState?.processedMessageHashesNeedRefresh === true
@@ -17318,6 +17586,26 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   const context = getContext();
   const chat = context?.chat;
   if (!Array.isArray(chat)) return true;
+  const renderLimitedGuard = getRenderLimitedHistoryRecoveryGuard(chat);
+  if (renderLimitedGuard.blocked) {
+    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+      "paused",
+      {
+        fromFloor: currentGraph.historyState?.historyDirtyFrom ?? null,
+        path: "render-limit-guard",
+        detectionSource:
+          currentGraph.historyState?.lastMutationSource || "render-limit-guard",
+        reason: renderLimitedGuard.message,
+        resultCode: "history.recovery.paused.render-limit",
+        chatLength: renderLimitedGuard.chatLength,
+        renderLimit: renderLimitedGuard.renderLimit,
+        highestProcessedFloor: renderLimitedGuard.highestProcessedFloor,
+      },
+    );
+    notifyRenderLimitedHistoryRecoveryBlocked(renderLimitedGuard, trigger);
+    refreshPanelLiveState();
+    return false;
+  }
 
   const detection = inspectHistoryMutation(trigger);
   const dirtyFrom = currentGraph?.historyState?.historyDirtyFrom;
@@ -19802,6 +20090,7 @@ async function onCompactLukerSidecar() {
     document,
     getGraph: () => currentGraph,
     getGraphPersistenceState: () => getGraphPersistenceLiveState(),
+    getHideStateSnapshot: () => getMessageHideStateSnapshotForPanel(),
     getLastBatchStatus: () =>
       currentGraph?.historyState?.lastBatchStatus || null,
     getLastExtract: () => lastExtractedItems,
@@ -19832,6 +20121,7 @@ async function onCompactLukerSidecar() {
     scheduleBmeIndexedDbWarmup("init");
     initializeHostCapabilityBridge();
     installSendIntentHooks();
+    applyMessageRenderLimit(getSettings());
     autoSyncOnVisibility(buildBmeSyncRuntimeOptions());
     scheduleMessageHideApply("init", 180);
 

@@ -126,6 +126,14 @@
             </button>
             <button
               class="bme-config-nav-btn"
+              data-config-section="planner"
+              type="button"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span>ENA 规划器</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
               data-config-section="appearance"
               type="button"
             >
@@ -289,14 +297,6 @@
                 <i class="fa-solid fa-brain"></i>
                 <span>在认知视图中查看完整认知 →</span>
               </button>
-            </div>
-
-            <div class="bme-config-card">
-              <div class="bme-section-header">任务监视器</div>
-              <div class="bme-config-help">
-                默认跟随调试总开关；开启后展示最近的记忆任务流水。
-              </div>
-              <ul class="bme-recent-list" id="bme-ai-monitor-list"></ul>
             </div>
 
             <div class="bme-section-header">最近提取</div>
@@ -573,10 +573,6 @@
                         <i class="fa-solid fa-map-location-dot"></i> 空间控制台
                       </div>
                       <div class="bme-cog-space-tools" id="bme-mobile-cog-space-tools"></div>
-                      <div class="bme-cog-section-title" style="margin-top:16px">
-                        <i class="fa-solid fa-wave-square"></i> 任务监视器
-                      </div>
-                      <div class="bme-cog-monitor-mini" id="bme-mobile-cog-monitor-mini"></div>
                     </div>
                   </div>
                 </div>
@@ -682,10 +678,6 @@
                   <i class="fa-solid fa-map-location-dot"></i> 空间控制台
                 </div>
                 <div class="bme-cog-space-tools" id="bme-cog-space-tools"></div>
-                <div class="bme-cog-section-title" style="margin-top:16px">
-                  <i class="fa-solid fa-wave-square"></i> 任务监视器
-                </div>
-                <div class="bme-cog-monitor-mini" id="bme-cog-monitor-mini"></div>
               </div>
             </div>
           </div>
@@ -735,15 +727,7 @@
                 在这里集中配置第二记忆模型、功能开关、细粒度参数、任务预设和面板主题。
               </p>
             </div>
-            <div class="bme-config-workspace-actions">
-              <button class="bme-config-launch-btn" id="bme-open-ena-planner" type="button">
-                <i class="fa-solid fa-wand-magic-sparkles"></i>
-                <span>Ena Planner 设置</span>
-              </button>
-              <div class="bme-config-launch-hint" id="bme-open-ena-planner-hint">
-                检测中...
-              </div>
-            </div>
+            <div class="bme-config-workspace-actions"></div>
           </div>
 
           <div class="bme-config-nav bme-config-nav-mobile">
@@ -778,6 +762,14 @@
             >
               <i class="fa-solid fa-scroll"></i>
               <span>任务预设</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="planner"
+              type="button"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span>ENA 规划器</span>
             </button>
             <button
               class="bme-config-nav-btn"
@@ -1132,15 +1124,20 @@
                 </p>
               </div>
 
-              <div class="bme-capability-grid">
-                <label class="bme-capability-card" for="bme-setting-enabled">
+              <div class="bme-capability-master">
+                <label class="bme-capability-card bme-capability-card-master" for="bme-setting-enabled">
                   <div class="bme-cap-header">
-                    <span class="bme-cap-icon"><i class="fa-solid fa-brain"></i></span>
+                    <span class="bme-cap-icon"><i class="fa-solid fa-power-off"></i></span>
                     <input id="bme-setting-enabled" type="checkbox" />
                   </div>
-                  <div class="bme-cap-title">自动记忆</div>
-                  <div class="bme-cap-desc">开启自动提取、图谱写入与维护。</div>
+                  <div class="bme-cap-title">插件总开关</div>
+                  <div class="bme-cap-desc">
+                    关闭后停用 ST-BME 的自动提取、召回、向量、维护与手动操作；配置面板仍可打开，方便你随时重新启用或调整设置。
+                  </div>
                 </label>
+              </div>
+
+              <div class="bme-capability-grid">
                 <label class="bme-capability-card" for="bme-setting-recall-enabled">
                   <div class="bme-cap-header">
                     <span class="bme-cap-icon"><i class="fa-solid fa-magnifying-glass"></i></span>
@@ -1369,6 +1366,41 @@
                   <div class="bme-config-help">
                     设置修改后会自动生效。`0` 表示不隐藏；“取消全部隐藏”会立即把当前聊天里由 ST-BME 隐藏的楼层恢复。
                   </div>
+                  <div class="bme-config-help">
+                    当前隐藏：<strong id="bme-hide-old-messages-hidden-count">0</strong>
+                    层；<span id="bme-hide-old-messages-status-detail">未应用</span>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-hide-old-messages-render-limit-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title">限制聊天区渲染楼层</span>
+                      <span class="bme-toggle-desc">
+                        只控制前端最多加载最近多少层；不等于隐藏，未隐藏楼层仍可能进入上下文。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-hide-old-messages-render-limit">
+                      最多渲染最近 N 条消息
+                    </label>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="1000"
+                      placeholder="0 = 不限制渲染"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    用于减少超长聊天界面卡顿；真正节省上下文 token 仍由上方“旧楼层隐藏”负责。
+                  </div>
                   <div class="bme-config-actions">
                     <button
                       class="bme-config-secondary-btn"
@@ -1434,29 +1466,6 @@
                     </span>
                     <input
                       id="bme-setting-debug-logging-enabled"
-                      type="checkbox"
-                    />
-                  </label>
-                </div>
-
-                <div class="bme-config-card">
-                  <div class="bme-config-card-head">
-                    <div>
-                      <div class="bme-config-card-title">任务监视器</div>
-                      <div class="bme-config-card-subtitle">
-                        记录最近的提取、召回、压缩等任务流水；默认关闭，建议配合调试开关一起使用。
-                      </div>
-                    </div>
-                  </div>
-                  <label class="bme-toggle-item" for="bme-setting-ai-monitor-enabled">
-                    <span class="bme-toggle-copy">
-                      <span class="bme-toggle-title">启用任务监视器</span>
-                      <span class="bme-toggle-desc">
-                        开启后面板会显示最近任务的模型路由、清洗摘要和最终消息预览。
-                      </span>
-                    </span>
-                    <input
-                      id="bme-setting-ai-monitor-enabled"
                       type="checkbox"
                     />
                   </label>
@@ -2865,6 +2874,306 @@
                 accept=".json,application/json"
                 hidden
               />
+            </section>
+
+            <section class="bme-config-section" data-config-section="planner">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker">ENA 规划器</div>
+                <h3 class="bme-config-section-title">剧情规划 · LLM 接入</h3>
+                <p class="bme-config-section-desc">
+                  发送前自动拦截并调用规划 LLM，从角色卡、世界书、BME 记忆、历史 plot 中收集上下文，生成
+                  <code>&lt;plot&gt;</code> 和 <code>&lt;note&gt;</code> 追加到你的输入。
+                </p>
+                <div class="bme-planner-status-strip" id="bme-planner-status-strip">
+                  <span class="bme-planner-status-chip" id="bme-planner-state-chip">加载中…</span>
+                  <span class="bme-planner-status-chip" id="bme-planner-save-chip" data-tone="idle">就绪</span>
+                </div>
+              </div>
+
+              <div class="bme-config-grid">
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">基本设置</div>
+                      <div class="bme-config-card-subtitle">
+                        启用后，发送消息将先走规划 LLM；输入中已存在 <code>&lt;plot&gt;</code> 标签时自动跳过。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-enabled">启用规划器</label>
+                    <select id="bme-planner-enabled" class="bme-config-input">
+                      <option value="true">开启</option>
+                      <option value="false">关闭</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-skip-plot">跳过已有规划的输入</label>
+                    <select id="bme-planner-skip-plot" class="bme-config-input">
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-help">
+                    检测到输入里已有 <code>&lt;plot&gt;</code> 标签时跳过规划，避免重复拼接。
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">快速测试</div>
+                      <div class="bme-config-card-subtitle">
+                        输入一段剧情描述，立即调用规划 LLM 试跑一次，日志会写入下方“调试 &amp; 日志”。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-test-input">测试输入（留空使用默认）</label>
+                    <textarea
+                      id="bme-planner-test-input"
+                      class="bme-config-input bme-planner-textarea"
+                      rows="3"
+                      placeholder="输入一段剧情描述，测试规划器输出..."
+                    ></textarea>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-test-btn"
+                      id="bme-planner-run-test"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-flask"></i>
+                      <span>运行规划测试</span>
+                    </button>
+                  </div>
+                  <div class="bme-planner-status-text" id="bme-planner-test-status"></div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">规划 LLM · 连接</div>
+                      <div class="bme-config-card-subtitle">
+                        默认跟随当前全局 BME API，也可以切换到任意已保存的 API 预设。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row bme-llm-preset-row">
+                    <label for="bme-planner-llm-preset-select">API 预设</label>
+                    <div class="bme-llm-preset-controls">
+                      <select
+                        id="bme-planner-llm-preset-select"
+                        class="bme-config-input"
+                      >
+                        <option value="">-- 跟随全局（当前 BME API） --</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="bme-config-help">
+                    留空表示直接跟随当前全局 API；选择某个预设后，规划器会固定使用那套 URL / Key / Model。
+                  </div>
+                  <div class="bme-planner-status-text" id="bme-planner-api-status"></div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">生成参数 · Prompt 编排</div>
+                      <div class="bme-config-card-subtitle">
+                        这两部分现在统一收敛到任务预设里的“规划”任务，避免 ENA 面板和任务面板各维护一套配置。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-help">
+                    现在每个规划预设都可以同时携带自己的生成参数和 Prompt block。ENA 这里仍然只负责连接配置、上下文来源、输出过滤和调试日志。
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-open-task-presets"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-list-check"></i>
+                      <span>打开任务预设 · 规划</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">上下文 · 世界书</div>
+                      <div class="bme-config-card-subtitle">
+                        默认读取角色卡绑定的世界书；可选择是否附加全局世界书。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-include-global-wb">读取全局世界书</label>
+                    <select id="bme-planner-include-global-wb" class="bme-config-input">
+                      <option value="false">否</option>
+                      <option value="true">是</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-wb-pos4">排除 position=4 的条目</label>
+                    <select id="bme-planner-wb-pos4" class="bme-config-input">
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-wb-exclude-names"
+                      >按条目名称关键词排除（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-wb-exclude-names"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="mvu_update, system, ..."
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">上下文 · 聊天与历史</div>
+                      <div class="bme-config-card-subtitle">
+                        控制从历史消息中提取的 plot 数量，以及过滤 AI 回复里的干扰标签。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-keep-tags"
+                      >保留的规划输出标签（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-keep-tags"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="plot, note, plot-log, state"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    仅支持英文标签（如 plot, note, memory）。留空表示不按标签过滤（仅去除
+                    <code>&lt;think&gt;</code>）。无效标签会自动忽略。
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-exclude-tags"
+                      >清理 AI 回复中的干扰标签（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-exclude-tags"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="行动选项, UpdateVariable, StatusPlaceHolderImpl"
+                    />
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-plot-n">携带最近 N 条历史 plot</label>
+                    <input
+                      id="bme-planner-plot-n"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="10"
+                      step="1"
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">调试 · 诊断</div>
+                      <div class="bme-config-card-subtitle">
+                        直接诊断世界书/角色卡读取是否正常，定位上下文拼装问题。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-debug-wb"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-book"></i>
+                      <span>诊断世界书</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-debug-char"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-user"></i>
+                      <span>诊断角色卡</span>
+                    </button>
+                  </div>
+                  <pre class="bme-planner-debug-output" id="bme-planner-debug-output" hidden></pre>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">调试 · 日志</div>
+                      <div class="bme-config-card-subtitle">
+                        保留最近的规划调用，便于查看请求消息、原始回复与过滤结果。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-planner-param-grid">
+                    <div class="bme-config-row">
+                      <label for="bme-planner-logs-persist">持久化日志</label>
+                      <select id="bme-planner-logs-persist" class="bme-config-input">
+                        <option value="true">是</option>
+                        <option value="false">否</option>
+                      </select>
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-planner-logs-max">最大日志条数</label>
+                      <input
+                        id="bme-planner-logs-max"
+                        class="bme-config-input"
+                        type="number"
+                        min="1"
+                        max="200"
+                        step="1"
+                      />
+                    </div>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-logs-refresh"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-rotate"></i>
+                      <span>刷新</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-logs-export"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-file-arrow-down"></i>
+                      <span>导出 JSON</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn bme-config-danger-btn"
+                      id="bme-planner-logs-clear"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-trash-can"></i>
+                      <span>清空日志</span>
+                    </button>
+                  </div>
+                  <div id="bme-planner-log-body" class="bme-planner-log-list">
+                    <div class="bme-planner-log-empty">暂无日志</div>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <section

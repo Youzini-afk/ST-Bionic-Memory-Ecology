@@ -5,6 +5,10 @@ import {
   buildVisibleGraphRefreshToken,
   resolveVisibleGraphWorkspaceMode,
 } from "./panel-graph-refresh-utils.js";
+import {
+  initPlannerSections,
+  refreshPlannerSections,
+} from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import {
   buildRegionLine,
@@ -169,6 +173,7 @@ const GRAPH_WRITE_ACTION_IDS = [
 const TASK_PROFILE_GENERATION_GROUPS = [
   {
     title: "API 配置",
+    excludeTaskTypes: ["planner"],
     fields: [
       {
         key: "llm_preset",
@@ -350,6 +355,26 @@ let lastVisibleGraphRefreshToken = "";
 let lastVisibleGraphRefreshAt = 0;
 let graphRenderingEnabled = true;
 
+function _isPluginEnabled(settings = _getSettings?.() || {}) {
+  return settings?.enabled !== false;
+}
+
+function _notifyPluginDisabled(actionLabel = "该操作") {
+  toastr.info(
+    `ST-BME 已关闭，暂时不能执行${actionLabel}。请先在配置页顶部打开“插件总开关”。`,
+    "ST-BME",
+  );
+  _refreshRuntimeStatus();
+}
+
+function _ensurePluginEnabledForAction(actionLabel = "该操作") {
+  if (_isPluginEnabled()) {
+    return true;
+  }
+  _notifyPluginDisabled(actionLabel);
+  return false;
+}
+
 // 由 index.js 注入的引用
 let _getGraph = null;
 let _getSettings = null;
@@ -363,6 +388,7 @@ let _getLastRecallStatus = null;
 let _getLastInjection = null;
 let _getRuntimeDebugSnapshot = null;
 let _getGraphPersistenceState = null;
+let _getHideStateSnapshot = null;
 let _updateSettings = null;
 let _actionHandlers = {};
 
@@ -927,6 +953,7 @@ export async function initPanel({
   getLastInjection,
   getRuntimeDebugSnapshot,
   getGraphPersistenceState,
+  getHideStateSnapshot,
   updateSettings,
   actions,
 }) {
@@ -942,6 +969,7 @@ export async function initPanel({
   _getLastInjection = getLastInjection;
   _getRuntimeDebugSnapshot = getRuntimeDebugSnapshot;
   _getGraphPersistenceState = getGraphPersistenceState;
+  _getHideStateSnapshot = getHideStateSnapshot;
   _updateSettings = updateSettings;
   _actionHandlers = actions || {};
 
@@ -1139,6 +1167,7 @@ function _onFabSingleClick() {
 
 async function _onFabDoubleClick() {
   if (!_actionHandlers.extractTask) return;
+  if (!_ensurePluginEnabledForAction("重新提取")) return;
 
   try {
     _fabEl?.setAttribute("data-status", "running");
@@ -1251,6 +1280,7 @@ export function refreshLiveState() {
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
   _refreshNativeRolloutStatusUi(_getSettings?.() || {});
+  _refreshHideOldMessagesStatus(_getSettings?.() || {});
 
   switch (currentTabId) {
     case "dashboard":
@@ -1272,6 +1302,45 @@ export function refreshLiveState() {
   }
 
   _scheduleVisibleGraphWorkspaceRefresh();
+}
+
+function _refreshHideOldMessagesStatus(settings = _getSettings?.() || {}) {
+  const countEl = document.getElementById("bme-hide-old-messages-hidden-count");
+  const detailEl = document.getElementById("bme-hide-old-messages-status-detail");
+  if (!countEl && !detailEl) return;
+
+  const snapshot =
+    typeof _getHideStateSnapshot === "function" ? _getHideStateSnapshot() || {} : {};
+  const hiddenCount = Math.max(
+    0,
+    Math.trunc(Number(snapshot.managedHiddenCount ?? 0) || 0),
+  );
+  const scannedCount = Math.max(
+    0,
+    Math.trunc(Number(snapshot.lastProcessedLength ?? 0) || 0),
+  );
+  const keepLastN = Math.max(
+    0,
+    Math.trunc(Number(settings.hideOldMessagesKeepLastN ?? 0) || 0),
+  );
+  const detailParts = [];
+
+  if (settings.hideOldMessagesEnabled !== true) {
+    detailParts.push("旧楼层隐藏未启用");
+  } else if (keepLastN <= 0) {
+    detailParts.push("保留最近 N 为 0，不会隐藏");
+  } else {
+    detailParts.push(`保留最近 ${keepLastN} 层`);
+  }
+  if (scannedCount > 0) {
+    detailParts.push(`已扫描 ${scannedCount} 层`);
+  }
+  if (snapshot.scheduled === true) {
+    detailParts.push("等待自动应用");
+  }
+
+  if (countEl) countEl.textContent = String(hiddenCount);
+  if (detailEl) detailEl.textContent = detailParts.join(" · ") || "未应用";
 }
 
 // ==================== Tab 切换 ====================
@@ -1329,42 +1398,24 @@ function _switchTab(tabId) {
   }
 }
 
-function _getPlannerApi() {
-  return globalThis?.stBmeEnaPlanner || null;
-}
-
 function _refreshPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  const hint = document.getElementById("bme-open-ena-planner-hint");
-  if (!button || !hint) return;
-
-  const plannerApi = _getPlannerApi();
-  const ready = typeof plannerApi?.openSettings === "function";
-
-  button.disabled = !ready;
-  button.classList.toggle("is-runtime-disabled", !ready);
-  hint.textContent = ready
-    ? "已加载，可打开独立的 Ena Planner 设置页。"
-    : "未检测到 Ena Planner 模块，请重载 ST-BME 后再试。";
+  try {
+    refreshPlannerSections({
+      getSettings: _getSettings,
+    });
+  } catch (err) {
+    console.warn("[ST-BME] planner section refresh failed:", err);
+  }
 }
 
 function _bindPlannerLauncher() {
-  const button = document.getElementById("bme-open-ena-planner");
-  if (!button || button.dataset.bmeBound === "true") {
-    _refreshPlannerLauncher();
-    return;
+  try {
+    initPlannerSections(panelEl || document, {
+      getSettings: _getSettings,
+    });
+  } catch (err) {
+    console.warn("[ST-BME] planner section init failed:", err);
   }
-
-  button.addEventListener("click", () => {
-    const plannerApi = _getPlannerApi();
-    if (typeof plannerApi?.openSettings === "function") {
-      plannerApi.openSettings();
-    }
-    _refreshPlannerLauncher();
-  });
-
-  button.dataset.bmeBound = "true";
-  _refreshPlannerLauncher();
 }
 
 function _applyWorkspaceMode() {
@@ -2942,7 +2993,6 @@ function _refreshMobileCognitionFull() {
   _renderCogOwnerList(graph, canRender, document.getElementById("bme-mobile-cog-owner-list"));
   _renderCogOwnerDetail(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-owner-detail"));
   _renderCogSpaceTools(graph, loadInfo, canRender, document.getElementById("bme-mobile-cog-space-tools"));
-  _renderCogMonitorMini(document.getElementById("bme-mobile-cog-monitor-mini"));
 }
 
 function _refreshMobileSummaryFull() {
@@ -3066,7 +3116,6 @@ function _refreshCognitionWorkspace() {
   _renderCogOwnerList(graph, canRender);
   _renderCogOwnerDetail(graph, loadInfo, canRender);
   _renderCogSpaceTools(graph, loadInfo, canRender);
-  _renderCogMonitorMini();
 }
 
 function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
@@ -3118,14 +3167,6 @@ function _renderCogStatusStrip(graph, loadInfo, canRender, targetEl) {
             ? _getOwnerDisplayInfo(activeOwner, collisionIndex).title
             : activeOwnerKey || "—",
       )}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-location-dot"></i> 当前地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(activeRegionLabel)}</div>
-    </div>
-    <div class="bme-cog-status-card">
-      <div class="bme-cog-status-card__label"><i class="fa-solid fa-diagram-project"></i> 邻接地区</div>
-      <div class="bme-cog-status-card__value">${_escHtml(adjacentRegions.length > 0 ? adjacentRegions.join(" / ") : "—")}</div>
     </div>
     <div class="bme-cog-status-card">
       <div class="bme-cog-status-card__label"><i class="fa-solid fa-users"></i> 认知角色数</div>
@@ -3430,52 +3471,6 @@ function _renderCogSpaceTools(graph, loadInfo, canRender, targetEl) {
   `;
 }
 
-function _renderCogMonitorMini(targetEl) {
-  const el = targetEl || document.getElementById("bme-cog-monitor-mini");
-  if (!el) return;
-
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">任务监视器已关闭</div>`;
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline : [];
-
-  if (!timeline.length) {
-    el.innerHTML = `<div class="bme-cog-monitor-empty">暂无任务流水</div>`;
-    return;
-  }
-
-  el.innerHTML = timeline
-    .slice(-8)
-    .reverse()
-    .map((entry) => {
-      const status = String(entry?.status || "").toLowerCase();
-      const statusClass = status.includes("error") || status.includes("fail") ? "is-error"
-        : status.includes("run") ? "is-running" : "is-success";
-      const taskType = String(entry?.taskType || "unknown");
-      const route =
-        _getMonitorRouteLabel(entry?.route) ||
-        _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-        String(entry?.model || "").trim();
-      const durationMs = Number(entry?.durationMs);
-      const durationText = Number.isFinite(durationMs) && durationMs > 0
-        ? durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${Math.round(durationMs)}ms`
-        : "—";
-      return `
-        <div class="bme-cog-monitor-entry ${statusClass}">
-          <span class="bme-cog-monitor-badge">${_escHtml(_getMonitorTaskTypeLabel(taskType))}</span>
-          <span class="bme-cog-monitor-info">${_escHtml(route || _getMonitorStatusLabel(entry?.status) || "—")}</span>
-          <span class="bme-cog-monitor-duration">${_escHtml(durationText)}</span>
-        </div>`;
-    })
-    .join("");
-}
-
-
 function _formatSummaryEntryCard(entry = {}) {
   const messageRange = Array.isArray(entry?.dialogueRange)
     ? entry.dialogueRange
@@ -3611,6 +3606,8 @@ function _switchConfigSection(sectionId) {
     _refreshTaskProfileWorkspace();
   } else if (currentConfigSectionId === "trace") {
     _refreshMessageTraceWorkspace();
+  } else if (currentConfigSectionId === "planner") {
+    _refreshPlannerLauncher();
   }
 }
 
@@ -3660,7 +3657,6 @@ function _refreshDashboard() {
       _getGraphLoadLabel(loadInfo),
     );
     _refreshCognitionDashboard(graph, loadInfo);
-    _refreshAiMonitorDashboard();
     return;
   }
 
@@ -3732,30 +3728,8 @@ function _refreshDashboard() {
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
   _refreshCognitionDashboard(graph);
-  _refreshAiMonitorDashboard();
   _renderRecentList("bme-recent-extract", _getLastExtract?.() || []);
   _renderRecentList("bme-recent-recall", _getLastRecall?.() || []);
-}
-
-function _renderMiniRecentList(elementId, entries = [], emptyText = "暂无数据") {
-  const listEl = document.getElementById(elementId);
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (!Array.isArray(entries) || entries.length === 0) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = emptyText;
-    listEl.appendChild(li);
-    return;
-  }
-
-  for (const entry of entries) {
-    const li = document.createElement("li");
-    li.className = "bme-recent-item";
-    li.textContent = String(entry || "");
-    listEl.appendChild(li);
-  }
 }
 
 function _setInputValueIfIdle(elementId, value = "") {
@@ -4219,49 +4193,6 @@ function _refreshCognitionDashboard(
   }
 }
 
-function _refreshAiMonitorDashboard() {
-  const settings = _getSettings?.() || {};
-  if (settings.enableAiMonitor !== true) {
-    _renderMiniRecentList(
-      "bme-ai-monitor-list",
-      [],
-      "任务监视器已关闭",
-    );
-    return;
-  }
-
-  const runtimeDebug = _getRuntimeDebugSnapshot?.() || {};
-  const timeline = Array.isArray(runtimeDebug?.runtimeDebug?.taskTimeline)
-    ? runtimeDebug.runtimeDebug.taskTimeline
-    : [];
-  _renderMiniRecentList(
-    "bme-ai-monitor-list",
-    timeline
-      .slice(-6)
-      .reverse()
-      .map((entry) => {
-        const route =
-          _getMonitorRouteLabel(entry?.route) ||
-          _getMonitorRouteLabel(entry?.llmConfigSourceLabel) ||
-          "";
-        const model = String(entry?.model || "").trim();
-        const durationText =
-          Number.isFinite(Number(entry?.durationMs)) && Number(entry.durationMs) > 0
-            ? `${Math.round(Number(entry.durationMs))}ms`
-            : "";
-        return [
-          _getMonitorTaskTypeLabel(entry?.taskType),
-          _getMonitorStatusLabel(entry?.status),
-          route || model ? `${route || model}` : "",
-          durationText,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-      }),
-    "暂无任务流水",
-  );
-}
-
 function _renderRecentList(elementId, items) {
   const listEl = document.getElementById(elementId);
   if (!listEl) return;
@@ -4353,8 +4284,8 @@ function _refreshMemoryBrowser() {
       const scope = normalizeMemoryScope(node.scope);
       const regionText = [
         scope.regionPrimary,
-        ...(scope.regionPath || []),
-        ...(scope.regionSecondary || []),
+        ...(Array.isArray(scope.regionPath) ? scope.regionPath : []),
+        ...(Array.isArray(scope.regionSecondary) ? scope.regionSecondary : []),
       ]
         .join(" ")
         .toLowerCase();
@@ -5488,6 +5419,9 @@ function _collectNodeDetailEditorUpdates(bodyEl, { idPrefix = "bme-detail" } = {
 
 function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点编辑")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5522,6 +5456,9 @@ function _persistNodeDetailEdits(nodeId, updates, { afterSuccess } = {}) {
 
 function _deleteGraphNodeById(nodeId, { afterSuccess } = {}) {
   if (!nodeId) return false;
+  if (!_ensurePluginEnabledForAction("节点删除")) {
+    return false;
+  }
   if (_isGraphWriteBlocked()) {
     toastr.error("当前图谱不可写入，请稍后再试", "ST-BME");
     return false;
@@ -5847,12 +5784,16 @@ async function _callAction(actionKey = "", payload = {}) {
   if (typeof handler !== "function") {
     return { ok: false, error: "missing-action-handler" };
   }
+  if (!_ensurePluginEnabledForAction("该操作")) {
+    return { ok: false, error: "plugin-disabled", handledToast: true };
+  }
   const result = await handler(payload);
   _refreshCognitionSurfaces();
   return result;
 }
 
 async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
+  if (!_ensurePluginEnabledForAction("认知管理")) return;
   const graph = _getGraph?.();
   const ownerEntries = _getCognitionOwnerCollection(graph);
   const ownerEntry =
@@ -5985,6 +5926,9 @@ async function _runCognitionOwnerManagementAction(mode = "", triggerEl = null) {
 }
 
 async function _applyManualActiveRegionFromDashboard(clear = false) {
+  if (!_ensurePluginEnabledForAction(clear ? "清除当前地区" : "设置当前地区")) {
+    return;
+  }
   const input = document.getElementById("bme-cognition-manual-region");
   const region = clear ? "" : String(input?.value || "").trim();
   const result = await _actionHandlers.setActiveRegion?.({ region });
@@ -6009,6 +5953,9 @@ async function _applyManualActiveRegionFromDashboard(clear = false) {
 }
 
 async function _saveRegionAdjacencyFromDashboard() {
+  if (!_ensurePluginEnabledForAction("保存地区邻接")) {
+    return;
+  }
   const graph = _getGraph?.();
   const regionInput = document.getElementById("bme-cognition-manual-region");
   const adjacencyInput = document.getElementById("bme-cognition-adjacency-input");
@@ -6189,6 +6136,9 @@ function _bindActions() {
     if (!btn) continue;
 
     btn.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || actionKey)) {
+        return;
+      }
       const handler =
         actionKey === "manageServerBackups"
           ? _openServerBackupManagerModal
@@ -6261,6 +6211,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-extract");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重新提取")) return;
       const mode =
         String(
           document.getElementById("bme-extract-mode")?.value ||
@@ -6320,6 +6271,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-vector-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("范围重建")) return;
       if (btn) {
         btn.disabled = true;
         btn.style.opacity = "0.5";
@@ -6360,6 +6312,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-summary-rebuild");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("重建总结状态")) return;
       const startFloor = _parseOptionalInt(
         document.getElementById("bme-extract-start-floor")?.value,
       );
@@ -6402,6 +6355,7 @@ function _bindActions() {
     ?.addEventListener("click", async () => {
       const btn = document.getElementById("bme-act-clear-graph-range");
       if (btn?.disabled) return;
+      if (!_ensurePluginEnabledForAction("按楼层范围清理")) return;
 
       const startStr = document.getElementById("bme-cleanup-range-start")?.value;
       const endStr = document.getElementById("bme-cleanup-range-end")?.value;
@@ -6620,6 +6574,14 @@ function _bindActions() {
     const [, actionKey] = matched;
     const handler = _actionHandlers[actionKey];
     if (!handler) return;
+    const actionLabels = {
+      synopsis: "生成小总结",
+      summaryRollup: "执行总结折叠",
+      rebuildSummaryState: "重建总结状态",
+    };
+    if (!_ensurePluginEnabledForAction(actionLabels[actionKey] || "总结操作")) {
+      return;
+    }
 
     try {
       await handler();
@@ -6645,10 +6607,6 @@ function _refreshConfigTab() {
     settings.debugLoggingEnabled ?? false,
   );
   _setCheckboxValue(
-    "bme-setting-ai-monitor-enabled",
-    settings.enableAiMonitor ?? true,
-  );
-  _setCheckboxValue(
     "bme-setting-graph-native-force-disable",
     settings.graphNativeForceDisable === true,
   );
@@ -6671,6 +6629,10 @@ function _refreshConfigTab() {
   _setCheckboxValue(
     "bme-setting-hide-old-messages-enabled",
     settings.hideOldMessagesEnabled ?? false,
+  );
+  _setCheckboxValue(
+    "bme-setting-hide-old-messages-render-limit-enabled",
+    settings.hideOldMessagesRenderLimitEnabled ?? false,
   );
   _setCheckboxValue(
     "bme-setting-recall-enabled",
@@ -6831,6 +6793,11 @@ function _refreshConfigTab() {
     "bme-setting-hide-old-messages-keep-last-n",
     settings.hideOldMessagesKeepLastN ?? 12,
   );
+  _setInputValue(
+    "bme-setting-hide-old-messages-render-limit",
+    settings.hideOldMessagesRenderLimit ?? 0,
+  );
+  _refreshHideOldMessagesStatus(settings);
   _setInputValue(
     "bme-setting-extract-context-turns",
     settings.extractContextTurns ?? 2,
@@ -7118,13 +7085,11 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-enabled", (checked) => {
     _patchSettings({ enabled: checked });
     _refreshGuardedConfigStates();
+    _refreshStageCardStates();
+    _refreshRuntimeStatus();
   });
   bindCheckbox("bme-setting-debug-logging-enabled", (checked) => {
     _patchSettings({ debugLoggingEnabled: checked });
-  });
-  bindCheckbox("bme-setting-ai-monitor-enabled", (checked) => {
-    _patchSettings({ enableAiMonitor: checked });
-    _refreshDashboard();
   });
   bindCheckbox("bme-setting-graph-native-force-disable", (checked) => {
     _patchSettings({ graphNativeForceDisable: checked });
@@ -7144,6 +7109,12 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-hide-old-messages-enabled", (checked) => {
     _patchSettings({ hideOldMessagesEnabled: checked });
   });
+  bindCheckbox(
+    "bme-setting-hide-old-messages-render-limit-enabled",
+    (checked) => {
+      _patchSettings({ hideOldMessagesRenderLimitEnabled: checked });
+    },
+  );
   bindCheckbox("bme-setting-recall-enabled", (checked) => {
     _patchSettings({ recallEnabled: checked });
     _refreshGuardedConfigStates();
@@ -7340,6 +7311,13 @@ function _bindConfigControls() {
     0,
     200,
     (value) => _patchSettings({ hideOldMessagesKeepLastN: value }),
+  );
+  bindNumber(
+    "bme-setting-hide-old-messages-render-limit",
+    0,
+    0,
+    1000,
+    (value) => _patchSettings({ hideOldMessagesRenderLimit: value }),
   );
   bindNumber("bme-setting-extract-context-turns", 2, 0, 20, (value) =>
     _patchSettings({ extractContextTurns: value }),
@@ -7856,21 +7834,25 @@ function _bindConfigControls() {
   document
     .getElementById("bme-apply-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("应用消息隐藏")) return;
       const result = await _actionHandlers.applyCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");
         return;
       }
+      _refreshHideOldMessagesStatus(_getSettings?.() || {});
       toastr.success("当前聊天的隐藏设置已重新应用", "ST-BME");
     });
   document
     .getElementById("bme-clear-hide-settings")
     ?.addEventListener("click", async () => {
+      if (!_ensurePluginEnabledForAction("清除消息隐藏")) return;
       const result = await _actionHandlers.clearCurrentHide?.();
       if (result?.error) {
         toastr.error(result.error, "ST-BME");
         return;
       }
+      _refreshHideOldMessagesStatus(_getSettings?.() || {});
       toastr.info("已取消当前聊天里由 ST-BME 应用的隐藏", "ST-BME");
     });
   document
@@ -8498,6 +8480,8 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
     currentGlobalRegexRuleId = globalRegexRules[0]?.id || "";
   }
 
+  const builtinBlockDefinitions = getBuiltinBlockDefinitions(currentTaskProfileTaskType);
+
   return {
     settings,
     taskProfiles,
@@ -8517,7 +8501,7 @@ function _getTaskProfileWorkspaceState(settings = _getSettings?.() || {}) {
       regexRules.find((rule) => rule.id === currentTaskProfileRuleId) || null,
     selectedGlobalRegexRule:
       globalRegexRules.find((rule) => rule.id === currentGlobalRegexRuleId) || null,
-    builtinBlockDefinitions: getBuiltinBlockDefinitions(),
+    builtinBlockDefinitions,
     runtimeDebug,
   };
 }
@@ -8898,18 +8882,10 @@ function _buildMonitorMessagesPreview(messages = []) {
 
 function _renderAiMonitorTraceCard(state) {
   const timeline = Array.isArray(state.taskTimeline) ? state.taskTimeline : [];
-  if (state.settings?.enableAiMonitor !== true) {
-    return `
-      <div class="bme-config-card-title">任务监视器流水</div>
-      <div class="bme-config-help">
-        任务监视器当前已关闭。打开后，这里会保留最近的提取 / 召回 / 维护任务快照，便于排查到底发了什么、用了哪套模型、做了哪些清洗。
-      </div>
-    `;
-  }
 
   if (!timeline.length) {
     return `
-      <div class="bme-config-card-title">任务监视器流水</div>
+      <div class="bme-config-card-title">最近任务快照</div>
       <div class="bme-config-help">
         还没有任务流水。等提取、召回或维护任务跑过一轮后，这里就会出现最近记录。
       </div>
@@ -9005,7 +8981,7 @@ function _renderAiMonitorTraceCard(state) {
   return `
     <div class="bme-config-card-head">
       <div>
-        <div class="bme-config-card-title">任务监视器流水</div>
+        <div class="bme-config-card-title">最近任务快照</div>
         <div class="bme-config-card-subtitle">
           最近 ${Math.min(timeline.length, 8)} 条任务快照 · 点击展开查看详情
         </div>
@@ -9720,11 +9696,11 @@ async function _handleTaskProfileWorkspaceClick(event) {
       document.getElementById("bme-task-profile-import-all")?.click();
       return;
     case "restore-all-profiles": {
+      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       const confirmed = window.confirm(
-        "这会将全部 6 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？",
+        `这会将全部 ${taskTypes.length} 个任务的默认预设恢复为出厂状态。已保存的自定义预设不受影响，通用正则规则也不受影响。是否继续？`,
       );
       if (!confirmed) return;
-      const taskTypes = getTaskTypeOptions().map((t) => t.id);
       let restored = state.taskProfiles;
       const extraPatch = {};
       for (const tt of taskTypes) {
@@ -9821,6 +9797,7 @@ function _renderTaskProfileWorkspace(state) {
     state.taskTypeOptions.find((item) => item.id === state.taskType) ||
     state.taskTypeOptions[0];
   const profileUpdatedAt = _formatTaskProfileTime(state.profile.updatedAt);
+  const totalTaskTypes = Array.isArray(state.taskTypeOptions) ? state.taskTypeOptions.length : 0;
 
   return `
     <div class="bme-task-shell">
@@ -9851,10 +9828,10 @@ function _renderTaskProfileWorkspace(state) {
           </div>
         </div>
         <div class="bme-task-action-bar-right">
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 6 个任务的默认预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn bme-task-btn-danger" data-task-action="restore-all-profiles" type="button" title="恢复全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务的默认预设">
             <i class="fa-solid fa-arrows-rotate"></i><span>恢复全部</span>
           </button>
-          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 6 个任务预设">
+          <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="export-all-profiles" type="button" title="导出全部 ${_escAttr(String(totalTaskTypes || 0))} 个任务预设">
             <i class="fa-solid fa-file-export"></i><span>导出全部</span>
           </button>
           <button class="bme-config-secondary-btn bme-bulk-profile-btn" data-task-action="import-all-profiles" type="button" title="导入全部预设（覆盖当前）">
@@ -9975,9 +9952,12 @@ function _renderTaskPromptTab(state) {
 
 function _renderTaskGenerationTab(state) {
   const inputGroups = TASK_PROFILE_INPUT_GROUPS[state.taskType] || [];
+  const generationGroups = TASK_PROFILE_GENERATION_GROUPS.filter(
+    (group) => !Array.isArray(group.excludeTaskTypes) || !group.excludeTaskTypes.includes(state.taskType),
+  );
   return `
     <div class="bme-task-tab-body">
-      ${TASK_PROFILE_GENERATION_GROUPS.map(
+      ${generationGroups.map(
         (group) => `
           <div class="bme-config-card">
             <div class="bme-config-card-head">

@@ -19,6 +19,8 @@ export const defaultSettings = {
   timeoutMs: 300000,
   hideOldMessagesEnabled: false,
   hideOldMessagesKeepLastN: 12,
+  hideOldMessagesRenderLimitEnabled: true,
+  hideOldMessagesRenderLimit: 10,
 
   // 提取设置
   extractEvery: 1,
@@ -76,7 +78,6 @@ export const defaultSettings = {
   enableRegionScopedObjective: true,
   enableCognitiveMemory: true,
   enableSpatialAdjacency: true,
-  enableAiMonitor: false,
   injectLowConfidenceObjectiveMemory: false,
   enableStoryTimeline: true,
   injectStoryTimeLabel: true,
