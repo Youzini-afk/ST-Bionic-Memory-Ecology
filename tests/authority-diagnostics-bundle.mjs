@@ -369,4 +369,32 @@ function createMockAdapter() {
   assert.equal(removeResult.entries[0].path, "user/files/diag-b.json");
 }
 
+{
+  const adapter = createMockAdapter();
+  await upsertAuthorityDiagnosticsManifestEntry(adapter, {
+    chatId: "chat-main",
+    path: "user/files/diag-1.json",
+    reason: "first",
+    size: 80,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }, { limit: 2 });
+  await upsertAuthorityDiagnosticsManifestEntry(adapter, {
+    chatId: "chat-main",
+    path: "user/files/diag-2.json",
+    reason: "second",
+    size: 90,
+    updatedAt: "2026-01-02T00:00:00.000Z",
+  }, { limit: 2 });
+  const pruneResult = await upsertAuthorityDiagnosticsManifestEntry(adapter, {
+    chatId: "chat-main",
+    path: "user/files/diag-3.json",
+    reason: "third",
+    size: 100,
+    updatedAt: "2026-01-03T00:00:00.000Z",
+  }, { limit: 2 });
+  assert.equal(pruneResult.entries.length, 2);
+  assert.equal(pruneResult.prunedEntries.length, 1);
+  assert.equal(pruneResult.prunedEntries[0].path, "user/files/diag-1.json");
+}
+
 console.log("authority-diagnostics-bundle tests passed");

@@ -379,6 +379,7 @@ import {
 import { trackAuthorityJobUntilTerminal } from "./maintenance/authority-job-tracker.js";
 import {
   applyAuthorityCheckpointToStore,
+  buildAuthorityConsistencyRepairPlan,
   buildAuthorityConsistencyAudit,
 } from "./maintenance/authority-consistency.js";
 import {
@@ -386,6 +387,7 @@ import {
   normalizeAuthorityBlobConfig,
 } from "./maintenance/authority-blob-adapter.js";
 import {
+  AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
   buildAuthorityDiagnosticsBundle,
   buildAuthorityDiagnosticsBundlePath,
   buildAuthorityDiagnosticsManifestPath,
@@ -1826,6 +1828,15 @@ function getGraphPersistenceLiveState() {
     authorityLastJobUpdatedAt: String(
       graphPersistenceState.authorityLastJobUpdatedAt || "",
     ),
+    authorityJobTrackingMode: String(
+      graphPersistenceState.authorityJobTrackingMode || "idle",
+    ),
+    authorityJobTrackingReason: String(
+      graphPersistenceState.authorityJobTrackingReason || "",
+    ),
+    authorityJobTrackingUpdatedAt: String(
+      graphPersistenceState.authorityJobTrackingUpdatedAt || "",
+    ),
     authorityRecentJobs: cloneRuntimeDebugValue(
       graphPersistenceState.authorityRecentJobs,
       [],
@@ -1891,6 +1902,15 @@ function getGraphPersistenceLiveState() {
     authorityCheckpointRestoreError: String(
       graphPersistenceState.authorityCheckpointRestoreError || "",
     ),
+    authorityRepairState: String(graphPersistenceState.authorityRepairState || "idle"),
+    authorityRepairResult: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityRepairResult,
+      null,
+    ),
+    authorityRepairUpdatedAt: String(
+      graphPersistenceState.authorityRepairUpdatedAt || "",
+    ),
+    authorityRepairError: String(graphPersistenceState.authorityRepairError || ""),
     authorityPerformanceBaseline: cloneRuntimeDebugValue(
       graphPersistenceState.authorityPerformanceBaseline,
       null,
@@ -2041,6 +2061,19 @@ function getGraphPersistenceLiveState() {
     authorityDiagnosticsArtifactsError: String(
       graphPersistenceState.authorityDiagnosticsArtifactsError || "",
     ),
+    authorityDiagnosticsRetentionLimit: Number(
+      graphPersistenceState.authorityDiagnosticsRetentionLimit ||
+        AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
+    ),
+    authorityDiagnosticsLastPrunedCount: Number(
+      graphPersistenceState.authorityDiagnosticsLastPrunedCount || 0,
+    ),
+    authorityDiagnosticsLastPrunedAt: String(
+      graphPersistenceState.authorityDiagnosticsLastPrunedAt || "",
+    ),
+    authorityDiagnosticsLastPruneError: String(
+      graphPersistenceState.authorityDiagnosticsLastPruneError || "",
+    ),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -2112,6 +2145,14 @@ function mergeAuthorityRecentJobsIntoState(incomingJobs = [], options = {}) {
         : Boolean(graphPersistenceState.authorityRecentJobsHasMore),
   });
   return nextRecentJobs;
+}
+
+function setAuthorityJobTrackingState(mode = "idle", reason = "") {
+  updateGraphPersistenceState({
+    authorityJobTrackingMode: String(mode || "idle"),
+    authorityJobTrackingReason: String(reason || ""),
+    authorityJobTrackingUpdatedAt: new Date().toISOString(),
+  });
 }
 
 async function refreshAuthorityRecentJobs(options = {}) {
@@ -2317,6 +2358,49 @@ function getAuthorityBlobAdapter(options = {}) {
   });
 }
 
+async function enforceAuthorityDiagnosticsRetention(adapter, prunedEntries = [], options = {}) {
+  const normalizedEntries = Array.isArray(prunedEntries)
+    ? prunedEntries.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const results = [];
+  const errors = [];
+  for (const entry of normalizedEntries) {
+    const artifactPath = String(entry?.path || "").trim();
+    if (!artifactPath) {
+      continue;
+    }
+    try {
+      const deleteResult = await adapter.delete(artifactPath, {
+        signal: options.signal,
+      });
+      const ok = deleteResult?.ok !== false;
+      results.push({
+        path: artifactPath,
+        ok,
+        deleted: deleteResult?.deleted === true,
+        missing: deleteResult?.missing === true,
+      });
+      if (!ok) {
+        errors.push(`${artifactPath}: ${deleteResult?.error || deleteResult?.reason || "delete failed"}`);
+      }
+    } catch (error) {
+      const message = error?.message || String(error) || "delete failed";
+      results.push({
+        path: artifactPath,
+        ok: false,
+        error: message,
+      });
+      errors.push(`${artifactPath}: ${message}`);
+    }
+  }
+  return {
+    ok: errors.length === 0,
+    count: results.filter((item) => item.ok !== false).length,
+    results,
+    error: errors.join(" | "),
+  };
+}
+
 function buildAuthorityPerformanceBaselineSnapshot(options = {}) {
   const liveGraphPersistence = getGraphPersistenceLiveState();
   return buildAuthorityPerformanceBaseline({
@@ -2444,6 +2528,20 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       path: manifestPath,
       signal: options.signal,
     }).catch(() => null);
+    const retentionResult = manifestResult
+      ? await enforceAuthorityDiagnosticsRetention(
+          adapter,
+          manifestResult?.prunedEntries,
+          {
+            signal: options.signal,
+          },
+        )
+      : {
+          ok: true,
+          count: 0,
+          results: [],
+          error: "",
+        };
     const nextArtifactEntries = manifestResult?.entries || [
       manifestEntry,
       ...((Array.isArray(graphPersistenceState.authorityDiagnosticsArtifacts)
@@ -2473,6 +2571,11 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
         manifestResult?.manifest?.updatedAt || updatedAt,
       ),
       authorityDiagnosticsArtifactsError: "",
+      authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
+      authorityDiagnosticsLastPrunedCount: Number(retentionResult?.count || 0),
+      authorityDiagnosticsLastPrunedAt:
+        Number(retentionResult?.count || 0) > 0 ? updatedAt : String(graphPersistenceState.authorityDiagnosticsLastPrunedAt || ""),
+      authorityDiagnosticsLastPruneError: String(retentionResult?.error || ""),
     });
     if (options.refreshHost !== false) {
       refreshPanelLiveState();
@@ -2483,6 +2586,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       size: bundleSize,
       baseline,
       bundle,
+      retention: retentionResult,
     };
   } catch (error) {
     const message =
@@ -2534,6 +2638,7 @@ async function refreshAuthorityDiagnosticsArtifacts(options = {}) {
         result?.manifest?.updatedAt || new Date().toISOString(),
       ),
       authorityDiagnosticsArtifactsError: "",
+      authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
     });
     if (options.refreshHost !== false) {
       refreshPanelLiveState();
@@ -2549,6 +2654,7 @@ async function refreshAuthorityDiagnosticsArtifacts(options = {}) {
       authorityDiagnosticsManifestPath: manifestPath,
       authorityDiagnosticsArtifactsError: message,
       authorityDiagnosticsArtifactsUpdatedAt: new Date().toISOString(),
+      authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
     });
     if (options.refreshHost !== false) {
       refreshPanelLiveState();
@@ -2632,6 +2738,7 @@ async function deleteAuthorityDiagnosticsArtifact(path = "", options = {}) {
         manifestResult?.manifest?.updatedAt || updatedAt,
       ),
       authorityDiagnosticsArtifactsError: "",
+      authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
       authorityDiagnosticsBundlePath: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundlePath,
       authorityDiagnosticsBundleReason: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleReason,
       authorityDiagnosticsBundleUpdatedAt: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleUpdatedAt,
@@ -3164,6 +3271,354 @@ async function writeAuthorityCheckpointFromCurrentGraph(options = {}) {
   };
 }
 
+async function rebuildAuthorityTrivium(options = {}) {
+  const vectorConfig = options.config || getEmbeddingConfig();
+  const validation = validateVectorConfig(vectorConfig);
+  if (!validation.valid) {
+    return {
+      success: false,
+      error: validation.error || "Authority Trivium 配置无效",
+    };
+  }
+
+  const range = options.range || null;
+  const reason = String(options.reason || "authority-trivium-rebuild");
+  if (!range && options.useJobs !== false && shouldUseAuthorityJobs(vectorConfig)) {
+    const jobResult = await submitAuthorityVectorRebuildJob({
+      config: vectorConfig,
+      range,
+      purge: options.purge !== false,
+      signal: options.signal,
+    });
+    if (jobResult?.submitted) {
+      saveGraphToChat({ reason: `${reason}-job-submitted` });
+      return {
+        success: true,
+        submitted: true,
+        terminal: false,
+        mode: "job",
+        job: jobResult.job,
+      };
+    }
+    if (jobResult?.error) {
+      const fallbackResult = await syncVectorState({
+        force: true,
+        purge: isBackendVectorConfig(vectorConfig) || isAuthorityVectorConfig(vectorConfig),
+        range,
+        signal: options.signal,
+      });
+      if (fallbackResult?.aborted) {
+        return {
+          success: false,
+          aborted: true,
+          error: "aborted",
+        };
+      }
+      if (fallbackResult?.error) {
+        return {
+          success: false,
+          error: fallbackResult.error,
+        };
+      }
+      saveGraphToChat({ reason: `${reason}-complete` });
+      return {
+        success: true,
+        submitted: false,
+        terminal: true,
+        mode: "local-fallback",
+        fallbackError: jobResult.error,
+        result: fallbackResult,
+        stats: fallbackResult?.stats || getVectorIndexStats(currentGraph),
+      };
+    }
+  }
+
+  const result = await syncVectorState({
+    force: true,
+    purge: !range && (isBackendVectorConfig(vectorConfig) || isAuthorityVectorConfig(vectorConfig)),
+    range,
+    signal: options.signal,
+  });
+  if (result?.aborted) {
+    return {
+      success: false,
+      aborted: true,
+      error: "aborted",
+    };
+  }
+  if (result?.error) {
+    return {
+      success: false,
+      error: result.error,
+    };
+  }
+  saveGraphToChat({ reason: `${reason}-complete` });
+  return {
+    success: true,
+    submitted: false,
+    terminal: true,
+    mode: "local",
+    result,
+    stats: result?.stats || getVectorIndexStats(currentGraph),
+  };
+}
+
+async function runAuthorityConsistencyRepairPlan(options = {}) {
+  const updatedAt = new Date().toISOString();
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!chatId) {
+    return {
+      success: false,
+      error: "missing-chat-id",
+    };
+  }
+
+  let audit =
+    options.audit && typeof options.audit === "object" && !Array.isArray(options.audit)
+      ? options.audit
+      : graphPersistenceState.authorityConsistencyAudit &&
+          typeof graphPersistenceState.authorityConsistencyAudit === "object" &&
+          !Array.isArray(graphPersistenceState.authorityConsistencyAudit)
+        ? graphPersistenceState.authorityConsistencyAudit
+        : null;
+  if (!audit) {
+    const auditResult = await runAuthorityConsistencyAudit({
+      chatId,
+      collectionId: options.collectionId,
+    });
+    if (!auditResult?.success || !auditResult?.audit) {
+      updateGraphPersistenceState({
+        authorityRepairState: "error",
+        authorityRepairUpdatedAt: updatedAt,
+        authorityRepairError: auditResult?.error || "Authority 审计失败，无法继续修复",
+      });
+      refreshPanelLiveState();
+      return {
+        success: false,
+        error: auditResult?.error || "Authority 审计失败，无法继续修复",
+      };
+    }
+    audit = auditResult.audit;
+  }
+
+  const plan = buildAuthorityConsistencyRepairPlan(audit);
+  if (plan.blockedIssueCodes.length > 0 && options.force !== true) {
+    const message = `存在阻塞问题：${plan.blockedIssueCodes.join(", ")}`;
+    updateGraphPersistenceState({
+      authorityRepairState: "error",
+      authorityRepairUpdatedAt: updatedAt,
+      authorityRepairError: message,
+      authorityRepairResult: cloneRuntimeDebugValue(
+        {
+          plan,
+          steps: [],
+          auditSummary: audit.summary || null,
+        },
+        null,
+      ),
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: message,
+      plan,
+      audit,
+    };
+  }
+
+  if (!plan.ok) {
+    const result = {
+      plan,
+      steps: [],
+      auditSummary: audit.summary || null,
+      handoffRequired: false,
+      finalAuditSummary: audit.summary || null,
+      finalAuditDrift: audit.drift || null,
+    };
+    updateGraphPersistenceState({
+      authorityRepairState: "success",
+      authorityRepairUpdatedAt: updatedAt,
+      authorityRepairError: "",
+      authorityRepairResult: cloneRuntimeDebugValue(result, null),
+    });
+    refreshPanelLiveState();
+    return {
+      success: true,
+      plan,
+      results: [],
+      audit,
+      handoffRequired: false,
+      repairResult: result,
+    };
+  }
+
+  updateGraphPersistenceState({
+    authorityRepairState: "running",
+    authorityRepairUpdatedAt: updatedAt,
+    authorityRepairError: "",
+    authorityRepairResult: cloneRuntimeDebugValue(
+      {
+        plan,
+        steps: [],
+        auditSummary: audit.summary || null,
+      },
+      null,
+    ),
+  });
+  refreshPanelLiveState();
+
+  try {
+    const stepResults = [];
+    let handoffRequired = false;
+    for (const step of plan.steps) {
+      let stepOutcome = null;
+      if (step.action === "write-authority-checkpoint") {
+        stepOutcome = await writeAuthorityCheckpointFromCurrentGraph({
+          chatId,
+          collectionId: options.collectionId,
+          reason: "authority-repair-write-checkpoint",
+          signal: options.signal,
+        });
+        stepResults.push({
+          action: step.action,
+          label: step.label,
+          detail: step.detail,
+          success: stepOutcome?.success === true,
+          submitted: false,
+          terminal: true,
+          result: stepOutcome?.result || null,
+          error: stepOutcome?.error || "",
+        });
+      } else if (step.action === "restore-from-authority-blob-checkpoint") {
+        stepOutcome = await restoreAuthorityCheckpointFromBlob({
+          chatId,
+          reason: "authority-repair-restore-checkpoint",
+          signal: options.signal,
+        });
+        stepResults.push({
+          action: step.action,
+          label: step.label,
+          detail: step.detail,
+          success: stepOutcome?.success === true,
+          submitted: false,
+          terminal: true,
+          result: stepOutcome?.result || null,
+          error: stepOutcome?.error || "",
+        });
+      } else if (step.action === "rebuild-authority-trivium") {
+        stepOutcome = await rebuildAuthorityTrivium({
+          chatId,
+          reason: "authority-repair-trivium-rebuild",
+          signal: options.signal,
+        });
+        handoffRequired = stepOutcome?.submitted === true && stepOutcome?.terminal === false;
+        stepResults.push({
+          action: step.action,
+          label: step.label,
+          detail: step.detail,
+          success: stepOutcome?.success === true,
+          submitted: stepOutcome?.submitted === true,
+          terminal: stepOutcome?.terminal !== false,
+          mode: stepOutcome?.mode || "",
+          job: cloneRuntimeDebugValue(stepOutcome?.job, null),
+          result: stepOutcome?.result || null,
+          stats: cloneRuntimeDebugValue(stepOutcome?.stats, null),
+          fallbackError: stepOutcome?.fallbackError || "",
+          error: stepOutcome?.error || "",
+        });
+      } else {
+        stepResults.push({
+          action: step.action,
+          label: step.label,
+          detail: step.detail,
+          success: false,
+          submitted: false,
+          terminal: true,
+          error: `unsupported action: ${step.action}`,
+        });
+      }
+
+      const latestStep = stepResults[stepResults.length - 1];
+      if (!latestStep?.success) {
+        const failedResult = {
+          plan,
+          steps: stepResults,
+          auditSummary: audit.summary || null,
+          handoffRequired: false,
+          finalAuditSummary: null,
+          finalAuditDrift: null,
+        };
+        updateGraphPersistenceState({
+          authorityRepairState: "error",
+          authorityRepairUpdatedAt: new Date().toISOString(),
+          authorityRepairError: latestStep?.error || `${step.label} 失败`,
+          authorityRepairResult: cloneRuntimeDebugValue(failedResult, null),
+        });
+        refreshPanelLiveState();
+        return {
+          success: false,
+          error: latestStep?.error || `${step.label} 失败`,
+          plan,
+          results: stepResults,
+          audit,
+          handoffRequired: false,
+          repairResult: failedResult,
+        };
+      }
+      if (handoffRequired) {
+        break;
+      }
+    }
+
+    const finalAuditResult = handoffRequired
+      ? null
+      : await runAuthorityConsistencyAudit({
+          chatId,
+          collectionId: options.collectionId,
+        }).catch(() => null);
+    const finishedAt = new Date().toISOString();
+    const repairResult = {
+      plan,
+      steps: stepResults,
+      auditSummary: audit.summary || null,
+      handoffRequired,
+      finalAuditSummary: finalAuditResult?.audit?.summary || null,
+      finalAuditDrift: finalAuditResult?.audit?.drift || null,
+    };
+    updateGraphPersistenceState({
+      authorityRepairState: handoffRequired ? "running" : "success",
+      authorityRepairUpdatedAt: finishedAt,
+      authorityRepairError: "",
+      authorityRepairResult: cloneRuntimeDebugValue(repairResult, null),
+    });
+    refreshPanelLiveState();
+    return {
+      success: true,
+      plan,
+      results: stepResults,
+      audit: finalAuditResult?.audit || audit,
+      handoffRequired,
+      repairResult,
+    };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority repair orchestration failed";
+    updateGraphPersistenceState({
+      authorityRepairState: "error",
+      authorityRepairUpdatedAt: new Date().toISOString(),
+      authorityRepairError: message,
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: message,
+      plan,
+      audit,
+    };
+  }
+}
+
 async function submitAuthorityVectorRebuildJob({
   config = null,
   range = null,
@@ -3273,6 +3728,7 @@ function stopTrackingAuthorityJob(reason = "authority-job-tracking-stopped") {
   authorityJobPollJobId = "";
   authorityJobPollChatId = "";
   authorityJobPollPromise = null;
+  setAuthorityJobTrackingState("idle", reason);
 }
 
 function buildAuthorityJobStatusMeta(job = null, fallbackKind = "") {
@@ -3350,6 +3806,10 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
   authorityJobPollChatId = trackedChatId;
   const effectiveKind = String(options.kind || normalizedJob.kind || "").trim();
   const jobConfig = normalizeAuthorityJobConfig(getSettings());
+  setAuthorityJobTrackingState(
+    jobConfig.preferStream !== false ? "stream" : "polling",
+    jobConfig.preferStream !== false ? "stream-first" : "polling-only",
+  );
 
   const applyTrackedJobUpdate = async (nextJob, state = {}) => {
     const normalizedNextJob =
@@ -3408,6 +3868,13 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
     pollIntervalMs: jobConfig.pollIntervalMs,
     timeoutMs: jobConfig.waitTimeoutMs,
     signal: controller.signal,
+    streamJob:
+      jobConfig.preferStream !== false
+        ? async (targetJobId) => {
+            const adapter = getAuthorityJobAdapter();
+            return await adapter.stream(targetJobId, { signal: controller.signal });
+          }
+        : null,
     loadJob: async (targetJobId) => {
       const activeChatId =
         normalizeChatIdCandidate(getCurrentChatId()) ||
@@ -3420,9 +3887,23 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
       return await adapter.get(targetJobId, { signal: controller.signal });
     },
     onUpdate: applyTrackedJobUpdate,
+    onModeChange: async ({ mode, reason }) => {
+      if (authorityJobPollAbortController !== controller) {
+        return;
+      }
+      setAuthorityJobTrackingState(mode, reason);
+      refreshPanelLiveState();
+    },
   })
     .catch((error) => {
       if (isAbortError(error)) {
+        if (authorityJobPollAbortController === controller) {
+          const abortReason = String(
+            controller.signal?.reason?.message || controller.signal?.reason || "authority-job-tracking-stopped",
+          );
+          setAuthorityJobTrackingState("idle", abortReason);
+          refreshPanelLiveState();
+        }
         return null;
       }
       const message = error?.message || String(error) || "Authority Job 状态轮询失败";
@@ -3440,6 +3921,7 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
         queueState: "error",
       });
       syncAuthorityVectorJobState(failedJob);
+      setAuthorityJobTrackingState("error", message);
       setLastVectorStatus(
         "Authority Job 失败",
         buildAuthorityJobStatusMeta(failedJob, effectiveKind || normalizedJob.kind),
@@ -21728,6 +22210,12 @@ async function onRunAuthorityConsistencyAudit() {
   });
 }
 
+async function onRunAuthorityConsistencyRepairPlan() {
+  return await runAuthorityConsistencyRepairPlan({
+    reason: "panel-authority-consistency-repair-plan",
+  });
+}
+
 async function onWriteAuthorityCheckpoint() {
   return await writeAuthorityCheckpointFromCurrentGraph({
     reason: "panel-authority-checkpoint-write",
@@ -22344,6 +22832,7 @@ async function onCompactLukerSidecar() {
       requeueAuthorityJob: async (jobId) => await requeueAuthorityJob(jobId),
       refreshAuthorityJobs: onRefreshAuthorityJobs,
       runAuthorityConsistencyAudit: onRunAuthorityConsistencyAudit,
+      runAuthorityConsistencyRepairPlan: onRunAuthorityConsistencyRepairPlan,
       writeAuthorityCheckpoint: onWriteAuthorityCheckpoint,
       restoreAuthorityCheckpoint: onRestoreAuthorityCheckpoint,
       captureAuthorityPerformanceBaseline: onCaptureAuthorityPerformanceBaseline,

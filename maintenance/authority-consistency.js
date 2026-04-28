@@ -77,6 +77,92 @@ function buildRevisionDelta(left = null, right = null) {
   return Number(left) - Number(right);
 }
 
+function normalizeRepairAction(value = "") {
+  return String(value || "").trim();
+}
+
+function collectIssueCodes(audit = null) {
+  return new Set(
+    (Array.isArray(audit?.issues) ? audit.issues : [])
+      .map((issue) => String(issue?.code || "").trim())
+      .filter(Boolean),
+  );
+}
+
+export function buildAuthorityConsistencyRepairPlan(audit = null) {
+  const source = audit && typeof audit === "object" && !Array.isArray(audit) ? audit : {};
+  const actions = Array.isArray(source.actions)
+    ? source.actions.map(normalizeRepairAction).filter(Boolean)
+    : [];
+  const issueCodes = collectIssueCodes(source);
+  const steps = [];
+  const addStep = (action, label, detail, codes = []) => {
+    const normalizedAction = normalizeRepairAction(action);
+    if (!normalizedAction || !actions.includes(normalizedAction)) {
+      return;
+    }
+    if (Array.isArray(codes) && codes.length > 0) {
+      const matched = codes.some((code) => issueCodes.has(String(code || "").trim()));
+      if (!matched) {
+        return;
+      }
+    }
+    if (steps.some((step) => step.action === normalizedAction)) {
+      return;
+    }
+    steps.push({
+      action: normalizedAction,
+      label: String(label || normalizedAction),
+      detail: String(detail || ""),
+      issueCodes: Array.isArray(codes) ? codes.map((code) => String(code || "").trim()).filter(Boolean) : [],
+    });
+  };
+
+  addStep(
+    "write-authority-checkpoint",
+    "写入当前 Checkpoint",
+    "Authority Blob 尚无 checkpoint，先把当前 runtime 图谱写成 checkpoint，再继续后续修复。",
+    ["blob-checkpoint-missing"],
+  );
+  addStep(
+    "restore-from-authority-blob-checkpoint",
+    "从 Blob Checkpoint 恢复 SQL",
+    "检测到 runtime / SQL / Blob revision 漂移，可用 Blob checkpoint 回灌 Authority SQL。",
+    ["sql-runtime-revision-drift", "blob-runtime-revision-drift"],
+  );
+  addStep(
+    "rebuild-authority-trivium",
+    "重建 Authority Trivium",
+    "Trivium 与 SQL revision 不一致，或当前向量索引仍为 dirty，需要重建 Trivium。",
+    ["trivium-sql-revision-drift", "trivium-collection-mismatch", "vector-dirty"],
+  );
+
+  const blockedIssueCodes = (Array.isArray(source.issues) ? source.issues : [])
+    .filter((issue) => String(issue?.severity || "") === "error")
+    .map((issue) => String(issue?.code || "").trim())
+    .filter(Boolean);
+  const unsupportedActions = actions.filter(
+    (action) => action !== "run-authority-consistency-audit" && !steps.some((step) => step.action === action),
+  );
+  const detail = steps.length
+    ? `建议顺序：${steps.map((step) => step.label).join(" → ")}`
+    : String(source?.summary?.detail || "当前审计未发现需要自动编排的修复步骤");
+
+  return {
+    ok: steps.length > 0,
+    steps,
+    stepCount: steps.length,
+    requiresConfirmation: steps.some((step) => step.action === "restore-from-authority-blob-checkpoint"),
+    blockedIssueCodes,
+    unsupportedActions,
+    summary: {
+      level: steps.length > 0 ? "warning" : String(source?.summary?.level || "idle"),
+      label: steps.length > 0 ? `建议修复 ${steps.length} 步` : "当前无需编排修复",
+      detail,
+    },
+  };
+}
+
 export function buildAuthorityCheckpointImportSnapshot(checkpoint = null, options = {}) {
   const normalizedCheckpoint =
     checkpoint && typeof checkpoint === "object" && !Array.isArray(checkpoint)

@@ -57,7 +57,7 @@ function buildCompactTimestamp(date = new Date()) {
 }
 
 const AUTHORITY_DIAGNOSTICS_MANIFEST_VERSION = 1;
-const AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT = 12;
+export const AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT = 12;
 
 function isSensitiveKey(key = "") {
   return /(api[_-]?key|token|secret|password|authorization|auth[_-]?header|cookie)/i.test(
@@ -458,6 +458,19 @@ function buildAuthorityDiagnosticsManifestEntries(entries = [], limit = AUTHORIT
   return normalizedEntries.slice(0, normalizeManifestLimit(limit));
 }
 
+function buildAuthorityDiagnosticsPrunedEntries(previousEntries = [], nextEntries = []) {
+  const normalizedPreviousEntries = buildAuthorityDiagnosticsManifestEntries(
+    previousEntries,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const keptPaths = new Set(
+    buildAuthorityDiagnosticsManifestEntries(nextEntries, Number.MAX_SAFE_INTEGER).map(
+      (entry) => entry.path,
+    ),
+  );
+  return normalizedPreviousEntries.filter((entry) => !keptPaths.has(entry.path));
+}
+
 function normalizeAuthorityDiagnosticsManifest(manifest = null, options = {}) {
   const source = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : {};
   const chatId = normalizeRecordId(options.chatId || source.chatId);
@@ -560,10 +573,12 @@ export async function upsertAuthorityDiagnosticsManifestEntry(adapter, entry = n
     signal: options.signal,
     limit: options.limit,
   });
-  const entries = buildAuthorityDiagnosticsManifestEntries(
-    [normalizedEntry, ...current.entries.filter((item) => item.path !== normalizedEntry.path)],
-    options.limit,
-  );
+  const candidateEntries = [
+    normalizedEntry,
+    ...current.entries.filter((item) => item.path !== normalizedEntry.path),
+  ];
+  const entries = buildAuthorityDiagnosticsManifestEntries(candidateEntries, options.limit);
+  const prunedEntries = buildAuthorityDiagnosticsPrunedEntries(candidateEntries, entries);
   const writeResult = await writeAuthorityDiagnosticsManifest(
     adapter,
     {
@@ -583,6 +598,7 @@ export async function upsertAuthorityDiagnosticsManifestEntry(adapter, entry = n
   return {
     ...writeResult,
     entry: normalizedEntry,
+    prunedEntries,
   };
 }
 

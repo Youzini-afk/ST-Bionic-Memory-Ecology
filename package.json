@@ -17,6 +17,7 @@
     "bench:persist-load": "node tests/perf/persist-load-bench.mjs",
     "bench:persist-load:native-hydrate": "node tests/perf/persist-load-bench.mjs --native-hydrate",
     "bench:load-preapply": "node tests/perf/load-preapply-bench.mjs",
+    "bench:authority-recall": "node tests/perf/authority-recall-bench.mjs",
     "bench:p1-compare": "node scripts/compare-p1-bench.mjs",
     "bench:native": "npm run bench:graph-layout && npm run bench:persist-delta",
     "test:indexeddb": "npm run test:indexeddb-persistence && npm run test:indexeddb-sync && npm run test:indexeddb-migration",

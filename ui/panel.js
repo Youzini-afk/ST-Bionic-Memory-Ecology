@@ -58,6 +58,7 @@ import {
   getSuggestedBackendModel,
   getVectorIndexStats,
 } from "../vector/vector-index.js";
+import { buildAuthorityConsistencyRepairPlan } from "../maintenance/authority-consistency.js";
 
 let defaultPromptCache = null;
 
@@ -3104,6 +3105,42 @@ function _refreshTaskPersistence() {
   const authorityRestoreUpdatedLabel = ps.authorityCheckpointRestoreUpdatedAt
     ? _formatTaskProfileTime(ps.authorityCheckpointRestoreUpdatedAt)
     : "—";
+  const authorityRepairResult =
+    ps.authorityRepairResult &&
+    typeof ps.authorityRepairResult === "object" &&
+    !Array.isArray(ps.authorityRepairResult)
+      ? ps.authorityRepairResult
+      : null;
+  const authorityRepairPlan = buildAuthorityConsistencyRepairPlan(ps.authorityConsistencyAudit);
+  const authorityRepairState = String(ps.authorityRepairState || "idle").trim();
+  const authorityRepairHandoffJobId = String(
+    authorityRepairResult?.steps?.find((step) => step?.submitted && step?.job?.id)?.job?.id || "",
+  ).trim();
+  const authorityRepairLabel =
+    authorityRepairState === "success"
+      ? "修复完成"
+      : authorityRepairState === "error"
+        ? "修复失败"
+        : authorityRepairState === "running"
+          ? authorityRepairResult?.handoffRequired
+            ? "等待 Job 交接"
+            : "修复中"
+          : "未执行";
+  const authorityRepairUpdatedLabel = ps.authorityRepairUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityRepairUpdatedAt)
+    : "—";
+  const authorityRepairPlanLabel = authorityRepairPlan.ok
+    ? authorityRepairPlan.steps.map((step) => step.label).join(" → ")
+    : authorityRepairPlan.summary.label || "当前无需编排修复";
+  const authorityRepairResultLabel = authorityRepairResult?.steps?.length
+    ? `${Number(authorityRepairResult.steps.length || 0)} 步${
+        authorityRepairResult?.handoffRequired
+          ? authorityRepairHandoffJobId
+            ? ` · job ${authorityRepairHandoffJobId}`
+            : " · 已交接异步 Job"
+          : ""
+      }`
+    : "—";
   const authorityBaseline =
     ps.authorityPerformanceBaseline &&
     typeof ps.authorityPerformanceBaseline === "object" &&
@@ -3160,6 +3197,15 @@ function _refreshTaskPersistence() {
   const authorityArtifactHistoryUpdatedLabel = ps.authorityDiagnosticsArtifactsUpdatedAt
     ? _formatTaskProfileTime(ps.authorityDiagnosticsArtifactsUpdatedAt)
     : "—";
+  const authorityJobTrackingLabel = (() => {
+    const mode = String(ps.authorityJobTrackingMode || "idle").trim() || "idle";
+    const reason = String(ps.authorityJobTrackingReason || "").trim();
+    return reason ? `${mode} · ${reason}` : mode;
+  })();
+  const authorityArtifactRetentionLabel = `最近 ${Number(ps.authorityDiagnosticsRetentionLimit || 0) || 0} 条`;
+  const authorityArtifactPruneLabel = ps.authorityDiagnosticsLastPrunedAt
+    ? `${Number(ps.authorityDiagnosticsLastPrunedCount || 0)} 条 · ${_formatTaskProfileTime(ps.authorityDiagnosticsLastPrunedAt)}`
+    : "未触发";
   const activeRegionLabel = String(
     historyState?.activeRegion ||
       historyState?.lastExtractedRegion ||
@@ -3262,10 +3308,15 @@ function _refreshTaskPersistence() {
     ["Blob rev", authorityAuditBlobRevision],
     ["Blob path", authorityAuditBlobPath],
     ["建议动作", authorityAuditActionsLabel],
+    ["建议修复", authorityRepairPlanLabel],
+    ["修复状态", authorityRepairLabel],
+    ["修复结果", authorityRepairResultLabel],
     ["最近审计", authorityAuditUpdatedLabel],
+    ["最近修复", authorityRepairUpdatedLabel],
     ["恢复状态", authorityRestoreLabel],
     ["恢复结果", authorityRestoreResult?.revision ? `rev ${Number(authorityRestoreResult.revision)}` : "—"],
     ["最近恢复", authorityRestoreUpdatedLabel],
+    ["Job 追踪", authorityJobTrackingLabel],
     ["Baseline 图谱", authorityBaselineGraphLabel],
     ["Baseline Load", authorityBaselineLoadLabel],
     ["Baseline Persist", authorityBaselinePersistLabel],
@@ -3282,11 +3333,17 @@ function _refreshTaskPersistence() {
     ["诊断包原因", ps.authorityDiagnosticsBundleReason || "—"],
     ["诊断清单", authorityArtifactManifestPathLabel],
     ["工件记录", `${authorityArtifactEntries.length} 条`],
+    ["Retention", authorityArtifactRetentionLabel],
+    ["最近 Prune", authorityArtifactPruneLabel],
+    ["Prune 错误", ps.authorityDiagnosticsLastPruneError || ""],
     ["列表刷新", authorityArtifactHistoryUpdatedLabel],
   ];
   const authorityAuditActions = Array.isArray(ps.authorityConsistencyAudit?.actions)
     ? ps.authorityConsistencyAudit.actions.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
+  const showAuthorityRepairAction =
+    authorityRepairPlan.ok &&
+    authorityRepairPlan.blockedIssueCodes.length === 0;
   const showAuthorityCheckpointWriteAction =
     authorityAuditActions.includes("write-authority-checkpoint") ||
     (!ps.authorityBlobCheckpointPath && ps.authorityBlobReady);
@@ -3295,6 +3352,9 @@ function _refreshTaskPersistence() {
   const authorityActionButtons = [
     typeof _actionHandlers.runAuthorityConsistencyAudit === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="audit">执行 Authority 审计</button>`
+      : "",
+    showAuthorityRepairAction && typeof _actionHandlers.runAuthorityConsistencyRepairPlan === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="repair-plan">执行建议修复</button>`
       : "",
     showAuthorityCheckpointWriteAction && typeof _actionHandlers.writeAuthorityCheckpoint === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="checkpoint">写入当前 Checkpoint</button>`
@@ -3386,8 +3446,10 @@ function _refreshTaskPersistence() {
       ${renderRowsTwoColumn(authorityRows)}
       <div class="bme-config-help" style="margin-top:10px">${_escHtml(authorityAuditSummary.detail || "—")}</div>
       <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityAuditIssuesLabel)}</div>
+      <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityRepairPlan.summary.detail || "—")}</div>
       <div class="bme-config-help" style="margin-top:10px">最近 diagnostics artifacts</div>
       ${authorityArtifactsHtml}
+      ${ps.authorityRepairError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityRepairError)}</div>` : ""}
       ${ps.authorityCheckpointRestoreError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityCheckpointRestoreError)}</div>` : ""}
     </div>
   `;
@@ -3408,6 +3470,26 @@ function _refreshTaskPersistence() {
             toastr.success(result?.audit?.summary?.label || "Authority 审计完成", "ST-BME");
           } else {
             toastr.warning(`Authority 审计失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "repair-plan") {
+          if (typeof _actionHandlers.runAuthorityConsistencyRepairPlan !== "function") return;
+          if (authorityRepairPlan.requiresConfirmation) {
+            const confirmed = globalThis.confirm?.(
+              `建议修复将按以下顺序执行：\n${authorityRepairPlan.steps.map((step, index) => `${index + 1}. ${step.label}`).join("\n")}\n\n其中包含从 Blob Checkpoint 恢复 SQL，确定继续？`,
+            );
+            if (!confirmed) return;
+          }
+          toastr.info("Authority 建议修复执行中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.runAuthorityConsistencyRepairPlan();
+          if (result?.success) {
+            const stepCount = Number(result?.repairResult?.steps?.length || result?.results?.length || 0);
+            if (result?.handoffRequired || result?.repairResult?.handoffRequired) {
+              toastr.success(`Authority 建议修复已交接异步 Job${stepCount > 0 ? `（${stepCount} 步）` : ""}`, "ST-BME");
+            } else {
+              toastr.success(`Authority 建议修复已完成${stepCount > 0 ? `（${stepCount} 步）` : ""}`, "ST-BME");
+            }
+          } else {
+            toastr.warning(`Authority 建议修复失败：${result?.error || "unknown"}`, "ST-BME");
           }
         } else if (action === "checkpoint") {
           if (typeof _actionHandlers.writeAuthorityCheckpoint !== "function") return;
@@ -3458,6 +3540,8 @@ function _refreshTaskPersistence() {
         toastr.error(
           action === "restore"
             ? `Authority Checkpoint 恢复失败: ${error?.message || error}`
+            : action === "repair-plan"
+              ? `Authority 建议修复失败: ${error?.message || error}`
             : action === "checkpoint"
               ? `Authority Checkpoint 写入失败: ${error?.message || error}`
             : action === "rebuild-trivium"

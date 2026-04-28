@@ -2,6 +2,7 @@
 // 此模块中的函数均不依赖 index.js 模块级可变状态，
 // 可被 index.js 及其他模块安全导入。
 import { sanitizePlannerMessageText } from "../runtime/planner-tag-utils.js";
+import { AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT } from "../maintenance/authority-diagnostics-bundle.js";
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -156,6 +157,9 @@ export function createGraphPersistenceState() {
     authorityLastJobProgress: 0,
     authorityLastJobError: "",
     authorityLastJobUpdatedAt: "",
+    authorityJobTrackingMode: "idle",
+    authorityJobTrackingReason: "",
+    authorityJobTrackingUpdatedAt: "",
     authorityRecentJobs: [],
     authorityRecentJobsUpdatedAt: "",
     authorityRecentJobsError: "",
@@ -180,6 +184,10 @@ export function createGraphPersistenceState() {
     authorityCheckpointRestoreResult: null,
     authorityCheckpointRestoreUpdatedAt: "",
     authorityCheckpointRestoreError: "",
+    authorityRepairState: "idle",
+    authorityRepairResult: null,
+    authorityRepairUpdatedAt: "",
+    authorityRepairError: "",
     authorityPerformanceBaseline: null,
     authorityPerformanceBaselineComparison: null,
     authorityPerformanceBaselineUpdatedAt: "",
@@ -192,6 +200,10 @@ export function createGraphPersistenceState() {
     authorityDiagnosticsArtifacts: [],
     authorityDiagnosticsArtifactsUpdatedAt: "",
     authorityDiagnosticsArtifactsError: "",
+    authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
+    authorityDiagnosticsLastPrunedCount: 0,
+    authorityDiagnosticsLastPrunedAt: "",
+    authorityDiagnosticsLastPruneError: "",
     localStoreFormatVersion: 1,
     localStoreMigrationState: "idle",
     opfsWriteLockState: {

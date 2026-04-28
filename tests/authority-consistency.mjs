@@ -5,6 +5,7 @@ import {
   applyAuthorityCheckpointToStore,
   buildAuthorityCheckpointImportSnapshot,
   buildAuthorityConsistencyAudit,
+  buildAuthorityConsistencyRepairPlan,
 } from "../maintenance/authority-consistency.js";
 
 const graph = createEmptyGraph();
@@ -108,6 +109,9 @@ assert.equal(auditAligned.summary.level, "success");
 assert.equal(auditAligned.issues.length, 0);
 assert.equal(auditAligned.drift.checkpointRestorable, true);
 assert.ok(auditAligned.actions.includes("restore-from-authority-blob-checkpoint"));
+const alignedRepairPlan = buildAuthorityConsistencyRepairPlan(auditAligned);
+assert.equal(alignedRepairPlan.ok, false);
+assert.equal(alignedRepairPlan.stepCount, 0);
 
 const auditDrift = buildAuthorityConsistencyAudit({
   chatId: "chat-a",
@@ -146,5 +150,36 @@ assert.ok(auditDrift.issues.some((issue) => issue.code === "sql-runtime-revision
 assert.ok(auditDrift.issues.some((issue) => issue.code === "vector-dirty"));
 assert.ok(auditDrift.actions.includes("rebuild-authority-trivium"));
 assert.ok(auditDrift.actions.includes("write-authority-checkpoint"));
+const driftRepairPlan = buildAuthorityConsistencyRepairPlan(auditDrift);
+assert.equal(driftRepairPlan.ok, true);
+assert.equal(driftRepairPlan.requiresConfirmation, false);
+assert.deepEqual(
+  driftRepairPlan.steps.map((step) => step.action),
+  [
+    "write-authority-checkpoint",
+    "rebuild-authority-trivium",
+  ],
+);
+
+const restoreRepairPlan = buildAuthorityConsistencyRepairPlan({
+  issues: [
+    {
+      severity: "warning",
+      code: "sql-runtime-revision-drift",
+      message: "SQL revision drift",
+    },
+  ],
+  actions: ["restore-from-authority-blob-checkpoint"],
+  summary: {
+    level: "warning",
+    detail: "runtime / SQL drift",
+  },
+});
+assert.equal(restoreRepairPlan.ok, true);
+assert.equal(restoreRepairPlan.requiresConfirmation, true);
+assert.deepEqual(
+  restoreRepairPlan.steps.map((step) => step.action),
+  ["restore-from-authority-blob-checkpoint"],
+);
 
 console.log("authority-consistency tests passed");

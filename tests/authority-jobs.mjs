@@ -197,6 +197,95 @@ assert.deepEqual(trackerPhases, [
   ["terminal", "completed", 1],
 ]);
 
+const streamedPhases = [];
+const streamedModes = [];
+const streamedJob = await trackAuthorityJobUntilTerminal({
+  initialJob: {
+    id: "job-stream",
+    kind: "authority.vector.rebuild",
+    status: "queued",
+    progress: 0,
+    terminal: false,
+    success: false,
+  },
+  async streamJob(jobId) {
+    return (async function* () {
+      yield {
+        job: {
+          id: jobId,
+          kind: "authority.vector.rebuild",
+          status: "running",
+          progress: 0.5,
+          terminal: false,
+          success: false,
+        },
+      };
+      yield {
+        job: {
+          id: jobId,
+          kind: "authority.vector.rebuild",
+          status: "completed",
+          progress: 1,
+          terminal: true,
+          success: true,
+        },
+      };
+    })();
+  },
+  async onModeChange(state) {
+    streamedModes.push([state.mode, state.reason]);
+  },
+  async onUpdate(job, state) {
+    streamedPhases.push([state.phase, state.transport, job.status, Number(job.progress || 0)]);
+  },
+});
+assert.equal(streamedJob.status, "completed");
+assert.equal(streamedJob.success, true);
+assert.deepEqual(streamedModes, [["stream", "stream-first"]]);
+assert.deepEqual(streamedPhases, [
+  ["initial", "stream", "queued", 0],
+  ["stream", "stream", "running", 0.5],
+  ["terminal", "stream", "completed", 1],
+]);
+
+const fallbackModes = [];
+let fallbackLoadCount = 0;
+const fallbackTrackedJob = await trackAuthorityJobUntilTerminal({
+  initialJob: {
+    id: "job-fallback",
+    kind: "authority.vector.rebuild",
+    status: "queued",
+    progress: 0,
+    terminal: false,
+    success: false,
+  },
+  pollIntervalMs: 0,
+  timeoutMs: 1000,
+  async streamJob() {
+    throw new Error("stream offline");
+  },
+  async loadJob(jobId) {
+    fallbackLoadCount += 1;
+    return {
+      id: jobId,
+      kind: "authority.vector.rebuild",
+      status: "completed",
+      progress: 1,
+      terminal: true,
+      success: true,
+    };
+  },
+  async onModeChange(state) {
+    fallbackModes.push([state.mode, state.reason]);
+  },
+});
+assert.equal(fallbackTrackedJob.status, "completed");
+assert.equal(fallbackLoadCount, 1);
+assert.deepEqual(fallbackModes, [
+  ["stream", "stream-first"],
+  ["polling", "stream offline"],
+]);
+
 const timedOutJob = await trackAuthorityJobUntilTerminal({
   initialJob: {
     id: "job-timeout",
@@ -220,6 +309,45 @@ const timedOutJob = await trackAuthorityJobUntilTerminal({
 assert.equal(timedOutJob.status, "timeout");
 assert.equal(timedOutJob.terminal, true);
 assert.equal(timedOutJob.success, false);
+
+const streamingClient = {
+  async streamJob(payload) {
+    return (async function* () {
+      yield {
+        job: {
+          id: payload.jobId,
+          kind: "authority.vector.rebuild",
+          status: "running",
+          progress: 0.25,
+          terminal: false,
+          success: false,
+        },
+      };
+      yield {
+        job: {
+          id: payload.jobId,
+          kind: "authority.vector.rebuild",
+          status: "completed",
+          progress: 1,
+          terminal: true,
+          success: true,
+        },
+      };
+    })();
+  },
+};
+const streamingAdapter = createAuthorityJobAdapter(
+  { authorityBaseUrl: "/api/plugins/authority" },
+  { jobClient: streamingClient },
+);
+const streamedUpdates = [];
+for await (const update of await streamingAdapter.stream("job-stream-adapter")) {
+  streamedUpdates.push([update.status, Number(update.progress || 0)]);
+}
+assert.deepEqual(streamedUpdates, [
+  ["running", 0.25],
+  ["completed", 1],
+]);
 
 function createVectorControllerRuntime(overrides = {}) {
   const calls = [];
