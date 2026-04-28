@@ -5,6 +5,7 @@ import {
   buildAuthorityDiagnosticsBundlePath,
   buildAuthorityDiagnosticsManifestPath,
   buildAuthorityPerformanceBaseline,
+  buildAuthorityPerformanceBaselineComparison,
   readAuthorityDiagnosticsManifest,
   removeAuthorityDiagnosticsManifestEntry,
   sanitizeDiagnosticsSettings,
@@ -124,6 +125,70 @@ function createMockAdapter() {
 }
 
 {
+  const previousBaseline = {
+    kind: "authority-performance-baseline",
+    chatId: "chat/main",
+    capturedAt: "2026-01-01T00:00:00.000Z",
+    graphRevision: 12,
+    graphNodeCount: 2,
+    graphEdgeCount: 1,
+    extractionCount: 5,
+    load: {
+      totalMs: 45,
+      hydrateMs: 18,
+    },
+    persist: {
+      totalMs: 22,
+      commitMs: 8,
+      commitPayloadBytes: 2048,
+      commitWalBytes: 128,
+    },
+    soak: {
+      recentJobCount: 2,
+      runningJobCount: 0,
+      failedJobCount: 1,
+    },
+  };
+  const currentBaseline = {
+    kind: "authority-performance-baseline",
+    chatId: "chat/main",
+    capturedAt: "2026-01-02T00:00:00.000Z",
+    graphRevision: 15,
+    graphNodeCount: 4,
+    graphEdgeCount: 3,
+    extractionCount: 8,
+    load: {
+      totalMs: 60,
+      hydrateMs: 24,
+    },
+    persist: {
+      totalMs: 30,
+      commitMs: 11,
+      commitPayloadBytes: 3072,
+      commitWalBytes: 256,
+    },
+    soak: {
+      recentJobCount: 4,
+      runningJobCount: 1,
+      failedJobCount: 0,
+    },
+  };
+  const comparison = buildAuthorityPerformanceBaselineComparison(
+    previousBaseline,
+    currentBaseline,
+  );
+  assert.equal(comparison.kind, "authority-performance-baseline-comparison");
+  assert.equal(comparison.previousCapturedAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(comparison.currentCapturedAt, "2026-01-02T00:00:00.000Z");
+  assert.equal(comparison.deltaGraphRevision, 3);
+  assert.equal(comparison.deltaNodeCount, 2);
+  assert.equal(comparison.deltaEdgeCount, 2);
+  assert.equal(comparison.load.totalMs, 15);
+  assert.equal(comparison.persist.commitMs, 3);
+  assert.equal(comparison.soak.failedJobCount, -1);
+}
+
+{
   const bundle = buildAuthorityDiagnosticsBundle({
     chatId: "chat/main",
     reason: "manual-export",
@@ -209,6 +274,13 @@ function createMockAdapter() {
       graphRevision: 9,
       load: { totalMs: 12 },
     },
+    performanceBaselineComparison: {
+      kind: "authority-performance-baseline-comparison",
+      deltaGraphRevision: 2,
+      load: { totalMs: 4 },
+      persist: { totalMs: 3 },
+      soak: { failedJobCount: -1 },
+    },
   });
 
   assert.equal(bundle.kind, "st-bme-authority-diagnostics");
@@ -223,6 +295,7 @@ function createMockAdapter() {
   assert.equal(bundle.recentExtractedItems.length, 1);
   assert.equal(bundle.recentRecalledItems.length, 1);
   assert.equal(bundle.performanceBaseline?.graphRevision, 9);
+  assert.equal(bundle.performanceBaselineComparison?.deltaGraphRevision, 2);
 }
 
 {

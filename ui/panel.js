@@ -3110,6 +3110,12 @@ function _refreshTaskPersistence() {
     !Array.isArray(ps.authorityPerformanceBaseline)
       ? ps.authorityPerformanceBaseline
       : null;
+  const authorityBaselineComparison =
+    ps.authorityPerformanceBaselineComparison &&
+    typeof ps.authorityPerformanceBaselineComparison === "object" &&
+    !Array.isArray(ps.authorityPerformanceBaselineComparison)
+      ? ps.authorityPerformanceBaselineComparison
+      : null;
   const authorityBaselineUpdatedLabel = ps.authorityPerformanceBaselineUpdatedAt
     ? _formatTaskProfileTime(ps.authorityPerformanceBaselineUpdatedAt)
     : authorityBaseline?.capturedAt
@@ -3126,6 +3132,21 @@ function _refreshTaskPersistence() {
     : "—";
   const authorityBaselineGraphLabel = authorityBaseline
     ? `rev ${Number(authorityBaseline.graphRevision || 0)} · ${Number(authorityBaseline.graphNodeCount || 0)} 节点 / ${Number(authorityBaseline.graphEdgeCount || 0)} 边`
+    : "—";
+  const authorityBaselinePreviousLabel = authorityBaselineComparison?.previousCapturedAt
+    ? _formatTaskProfileTime(authorityBaselineComparison.previousCapturedAt)
+    : "—";
+  const authorityBaselineDeltaLoadLabel = authorityBaselineComparison?.load
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.load.totalMs, _formatDurationMs)} / hydrate ${_formatSignedMetricDelta(authorityBaselineComparison.load.hydrateMs, _formatDurationMs)}`
+    : "—";
+  const authorityBaselineDeltaPersistLabel = authorityBaselineComparison?.persist
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.persist.totalMs, _formatDurationMs)} / commit ${_formatSignedMetricDelta(authorityBaselineComparison.persist.commitMs, _formatDurationMs)}`
+    : "—";
+  const authorityBaselineDeltaSoakLabel = authorityBaselineComparison?.soak
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.soak.recentJobCount, null, "0")} recent / ${_formatSignedMetricDelta(authorityBaselineComparison.soak.failedJobCount, null, "0")} failed / ${_formatSignedMetricDelta(authorityBaselineComparison.soak.runningJobCount, null, "0")} running`
+    : "—";
+  const authorityBaselineDeltaGraphLabel = authorityBaselineComparison
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.deltaGraphRevision, null, "0")} rev · ${_formatSignedMetricDelta(authorityBaselineComparison.deltaNodeCount, null, "0")} 节点 / ${_formatSignedMetricDelta(authorityBaselineComparison.deltaEdgeCount, null, "0")} 边`
     : "—";
   const authorityBundlePathLabel = String(ps.authorityDiagnosticsBundlePath || "").trim() || "—";
   const authorityBundleUpdatedLabel = ps.authorityDiagnosticsBundleUpdatedAt
@@ -3249,6 +3270,11 @@ function _refreshTaskPersistence() {
     ["Baseline Load", authorityBaselineLoadLabel],
     ["Baseline Persist", authorityBaselinePersistLabel],
     ["Baseline Soak", authorityBaselineSoakLabel],
+    ["对比基线", authorityBaselinePreviousLabel],
+    ["Delta 图谱", authorityBaselineDeltaGraphLabel],
+    ["Delta Load", authorityBaselineDeltaLoadLabel],
+    ["Delta Persist", authorityBaselineDeltaPersistLabel],
+    ["Delta Soak", authorityBaselineDeltaSoakLabel],
     ["最近 Baseline", authorityBaselineUpdatedLabel],
     ["诊断包路径", authorityBundlePathLabel],
     ["诊断包大小", authorityBundleSizeLabel],
@@ -9286,6 +9312,18 @@ function _formatDurationMs(durationMs) {
   if (!Number.isFinite(normalized) || normalized <= 0) return "—";
   if (normalized < 1000) return `${Math.round(normalized)}ms`;
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
+}
+
+function _formatSignedMetricDelta(value, formatter = null, zeroLabel = "0") {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) return "—";
+  if (normalized === 0) return zeroLabel;
+  const sign = normalized > 0 ? "+" : "-";
+  const absValue = Math.abs(normalized);
+  const formatted = typeof formatter === "function"
+    ? formatter(absValue)
+    : String(Math.round(absValue));
+  return `${sign}${formatted === "—" ? String(Math.round(absValue)) : formatted}`;
 }
 
 function _formatDataSizeBytes(byteCount) {

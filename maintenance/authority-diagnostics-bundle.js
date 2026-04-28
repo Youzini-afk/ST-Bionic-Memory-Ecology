@@ -87,8 +87,9 @@ function sanitizeValue(value, key = "", depth = 0) {
 }
 
 function buildGraphSummary(graph = null) {
-  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
-  const edges = Array.isArray(graph?.edges) ? graph.edges : [];
+  const runtimeGraph = graph && typeof graph === "object" && !Array.isArray(graph) ? graph : {};
+  const nodes = Array.isArray(runtimeGraph.nodes) ? runtimeGraph.nodes : [];
+  const edges = Array.isArray(runtimeGraph.edges) ? runtimeGraph.edges : [];
   const activeNodes = nodes.filter((node) => !node?.archived);
   const archivedNodes = nodes.filter((node) => node?.archived);
   const typeCounts = {};
@@ -155,6 +156,15 @@ function buildGraphSummary(graph = null) {
       null,
     ),
   };
+}
+
+function readFiniteNumber(value, fallback = 0) {
+  const normalized = Number(value);
+  return Number.isFinite(normalized) ? normalized : fallback;
+}
+
+function buildBaselineDelta(currentValue, previousValue) {
+  return readFiniteNumber(currentValue) - readFiniteNumber(previousValue);
 }
 
 function buildStatusSnapshot(status = null) {
@@ -285,6 +295,89 @@ export function buildAuthorityPerformanceBaseline({
         blobCheckpointRevision: Number(persistence.authorityBlobCheckpointRevision || 0),
         blobCheckpointUpdatedAt: String(
           persistence.authorityBlobCheckpointUpdatedAt || "",
+        ),
+      },
+      null,
+    ),
+  };
+}
+
+export function buildAuthorityPerformanceBaselineComparison(previousBaseline = null, currentBaseline = null) {
+  const previous =
+    previousBaseline && typeof previousBaseline === "object" && !Array.isArray(previousBaseline)
+      ? previousBaseline
+      : null;
+  const current =
+    currentBaseline && typeof currentBaseline === "object" && !Array.isArray(currentBaseline)
+      ? currentBaseline
+      : null;
+  if (!previous || !current) {
+    return null;
+  }
+  return {
+    kind: "authority-performance-baseline-comparison",
+    chatId: normalizeRecordId(current.chatId || previous.chatId),
+    previousCapturedAt: String(previous.capturedAt || ""),
+    currentCapturedAt: String(current.capturedAt || ""),
+    previousGraphRevision: readFiniteNumber(previous.graphRevision),
+    currentGraphRevision: readFiniteNumber(current.graphRevision),
+    deltaGraphRevision: buildBaselineDelta(current.graphRevision, previous.graphRevision),
+    deltaNodeCount: buildBaselineDelta(current.graphNodeCount, previous.graphNodeCount),
+    deltaEdgeCount: buildBaselineDelta(current.graphEdgeCount, previous.graphEdgeCount),
+    deltaExtractionCount: buildBaselineDelta(current.extractionCount, previous.extractionCount),
+    load: safeClone(
+      {
+        totalMs: buildBaselineDelta(current.load?.totalMs, previous.load?.totalMs),
+        preApplyMs: buildBaselineDelta(current.load?.preApplyMs, previous.load?.preApplyMs),
+        hydrateMs: buildBaselineDelta(current.load?.hydrateMs, previous.load?.hydrateMs),
+        hydrateNativeRecordsMs: buildBaselineDelta(
+          current.load?.hydrateNativeRecordsMs,
+          previous.load?.hydrateNativeRecordsMs,
+        ),
+        applyRuntimeMs: buildBaselineDelta(
+          current.load?.applyRuntimeMs,
+          previous.load?.applyRuntimeMs,
+        ),
+      },
+      null,
+    ),
+    persist: safeClone(
+      {
+        totalMs: buildBaselineDelta(current.persist?.totalMs, previous.persist?.totalMs),
+        buildMs: buildBaselineDelta(current.persist?.buildMs, previous.persist?.buildMs),
+        snapshotBuildMs: buildBaselineDelta(
+          current.persist?.snapshotBuildMs,
+          previous.persist?.snapshotBuildMs,
+        ),
+        commitQueueWaitMs: buildBaselineDelta(
+          current.persist?.commitQueueWaitMs,
+          previous.persist?.commitQueueWaitMs,
+        ),
+        commitMs: buildBaselineDelta(current.persist?.commitMs, previous.persist?.commitMs),
+        commitPayloadBytes: buildBaselineDelta(
+          current.persist?.commitPayloadBytes,
+          previous.persist?.commitPayloadBytes,
+        ),
+        commitWalBytes: buildBaselineDelta(
+          current.persist?.commitWalBytes,
+          previous.persist?.commitWalBytes,
+        ),
+      },
+      null,
+    ),
+    soak: safeClone(
+      {
+        recentJobCount: buildBaselineDelta(
+          current.soak?.recentJobCount,
+          previous.soak?.recentJobCount,
+        ),
+        runningJobCount: buildBaselineDelta(
+          current.soak?.runningJobCount,
+          previous.soak?.runningJobCount,
+        ),
+        failedJobCount: buildBaselineDelta(
+          current.soak?.failedJobCount,
+          previous.soak?.failedJobCount,
         ),
       },
       null,
@@ -542,6 +635,7 @@ export function buildAuthorityDiagnosticsBundle({
   lastExtract = [],
   lastRecall = [],
   performanceBaseline = null,
+  performanceBaselineComparison = null,
 } = {}) {
   const createdAt = new Date().toISOString();
   return {
@@ -556,6 +650,7 @@ export function buildAuthorityDiagnosticsBundle({
     graphPersistence: safeClone(graphPersistence, null),
     graphSummary: buildGraphSummary(graph),
     performanceBaseline: safeClone(performanceBaseline, null),
+    performanceBaselineComparison: safeClone(performanceBaselineComparison, null),
     lastStatuses: {
       extraction: buildStatusSnapshot(lastExtractionStatus),
       vector: buildStatusSnapshot(lastVectorStatus),

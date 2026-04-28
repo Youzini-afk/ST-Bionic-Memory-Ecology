@@ -181,6 +181,7 @@ export function createGraphPersistenceState() {
     authorityCheckpointRestoreUpdatedAt: "",
     authorityCheckpointRestoreError: "",
     authorityPerformanceBaseline: null,
+    authorityPerformanceBaselineComparison: null,
     authorityPerformanceBaselineUpdatedAt: "",
     authorityPerformanceBaselineReason: "",
     authorityDiagnosticsBundlePath: "",

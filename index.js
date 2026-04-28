@@ -390,6 +390,7 @@ import {
   buildAuthorityDiagnosticsBundlePath,
   buildAuthorityDiagnosticsManifestPath,
   buildAuthorityPerformanceBaseline,
+  buildAuthorityPerformanceBaselineComparison,
   readAuthorityDiagnosticsManifest,
   removeAuthorityDiagnosticsManifestEntry,
   upsertAuthorityDiagnosticsManifestEntry,
@@ -1894,6 +1895,10 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.authorityPerformanceBaseline,
       null,
     ),
+    authorityPerformanceBaselineComparison: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityPerformanceBaselineComparison,
+      null,
+    ),
     authorityPerformanceBaselineUpdatedAt: String(
       graphPersistenceState.authorityPerformanceBaselineUpdatedAt || "",
     ),
@@ -2326,11 +2331,19 @@ function buildAuthorityPerformanceBaselineSnapshot(options = {}) {
 }
 
 function captureAuthorityPerformanceBaseline(options = {}) {
+  const previousBaseline =
+    graphPersistenceState.authorityPerformanceBaseline &&
+    typeof graphPersistenceState.authorityPerformanceBaseline === "object" &&
+    !Array.isArray(graphPersistenceState.authorityPerformanceBaseline)
+      ? graphPersistenceState.authorityPerformanceBaseline
+      : null;
   const baseline = buildAuthorityPerformanceBaselineSnapshot(options);
+  const comparison = buildAuthorityPerformanceBaselineComparison(previousBaseline, baseline);
   const capturedAt = String(baseline?.capturedAt || new Date().toISOString());
   const reason = String(options.reason || "manual-authority-performance-baseline");
   updateGraphPersistenceState({
     authorityPerformanceBaseline: cloneRuntimeDebugValue(baseline, null),
+    authorityPerformanceBaselineComparison: cloneRuntimeDebugValue(comparison, null),
     authorityPerformanceBaselineUpdatedAt: capturedAt,
     authorityPerformanceBaselineReason: reason,
   });
@@ -2360,12 +2373,19 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
   }
   const reason = String(options.reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
   const liveGraphPersistence = getGraphPersistenceLiveState();
+  const previousBaseline =
+    liveGraphPersistence.authorityPerformanceBaseline &&
+    typeof liveGraphPersistence.authorityPerformanceBaseline === "object" &&
+    !Array.isArray(liveGraphPersistence.authorityPerformanceBaseline)
+      ? liveGraphPersistence.authorityPerformanceBaseline
+      : null;
   const baseline = buildAuthorityPerformanceBaseline({
     chatId,
     graphPersistence: liveGraphPersistence,
     graph: currentGraph,
     consistencyAudit: liveGraphPersistence.authorityConsistencyAudit,
   });
+  const baselineComparison = buildAuthorityPerformanceBaselineComparison(previousBaseline, baseline);
   const bundle = buildAuthorityDiagnosticsBundle({
     chatId,
     reason,
@@ -2387,6 +2407,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
     lastExtract: lastExtractedItems,
     lastRecall: lastRecalledItems,
     performanceBaseline: baseline,
+    performanceBaselineComparison: baselineComparison,
   });
   const path = buildAuthorityDiagnosticsBundlePath(chatId, reason);
   const manifestPath = buildAuthorityDiagnosticsManifestPath(chatId);
@@ -2439,6 +2460,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
     });
     updateGraphPersistenceState({
       authorityPerformanceBaseline: cloneRuntimeDebugValue(baseline, null),
+      authorityPerformanceBaselineComparison: cloneRuntimeDebugValue(baselineComparison, null),
       authorityPerformanceBaselineUpdatedAt: String(baseline?.capturedAt || updatedAt),
       authorityPerformanceBaselineReason: reason,
       authorityDiagnosticsBundlePath: String(result?.path || path),
