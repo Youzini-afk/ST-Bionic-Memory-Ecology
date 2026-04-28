@@ -3043,6 +3043,67 @@ function _refreshTaskPersistence() {
   const extractionCountLabel = Number.isFinite(Number(historyState?.extractionCount))
     ? String(Number(historyState.extractionCount))
     : "0";
+  const authorityAudit =
+    ps.authorityConsistencyAudit &&
+    typeof ps.authorityConsistencyAudit === "object" &&
+    !Array.isArray(ps.authorityConsistencyAudit)
+      ? ps.authorityConsistencyAudit
+      : null;
+  const authorityAuditSummary = authorityAudit?.summary || {
+    level: String(ps.authorityConsistencyState || "idle"),
+    label:
+      ps.authorityConsistencyState === "success"
+        ? "Authority 工件已对齐"
+        : ps.authorityConsistencyState === "warning"
+          ? "存在待处理漂移"
+          : ps.authorityConsistencyState === "error"
+            ? "Authority 审计失败"
+            : ps.authorityConsistencyState === "running"
+              ? "Authority 审计中"
+              : "等待审计",
+    detail: String(ps.authorityConsistencyError || "尚未运行一致性审计"),
+  };
+  const authorityAuditSqlRevision = Number.isFinite(Number(authorityAudit?.sql?.revision))
+    ? String(Number(authorityAudit.sql.revision))
+    : "—";
+  const authorityAuditTriviumRevision = Number.isFinite(Number(authorityAudit?.trivium?.revision))
+    ? String(Number(authorityAudit.trivium.revision))
+    : "—";
+  const authorityAuditBlobRevision = Number.isFinite(Number(authorityAudit?.blob?.revision))
+    ? String(Number(authorityAudit.blob.revision))
+    : Number.isFinite(Number(ps.authorityBlobCheckpointRevision)) && Number(ps.authorityBlobCheckpointRevision) > 0
+      ? String(Number(ps.authorityBlobCheckpointRevision))
+      : "—";
+  const authorityAuditBlobPath = String(
+    authorityAudit?.blob?.path || ps.authorityBlobCheckpointPath || "",
+  ).trim() || "—";
+  const authorityAuditIssuesLabel = Array.isArray(authorityAudit?.issues) && authorityAudit.issues.length
+    ? authorityAudit.issues.map((issue) => issue.message).filter(Boolean).join(" / ")
+    : authorityAuditSummary.detail || "—";
+  const authorityAuditActionsLabel = Array.isArray(authorityAudit?.actions) && authorityAudit.actions.length
+    ? authorityAudit.actions.join(" · ")
+    : "—";
+  const authorityAuditUpdatedLabel = ps.authorityConsistencyUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityConsistencyUpdatedAt)
+    : "—";
+  const authorityRestoreResult =
+    ps.authorityCheckpointRestoreResult &&
+    typeof ps.authorityCheckpointRestoreResult === "object" &&
+    !Array.isArray(ps.authorityCheckpointRestoreResult)
+      ? ps.authorityCheckpointRestoreResult
+      : null;
+  const authorityRestoreState = String(ps.authorityCheckpointRestoreState || "idle").trim();
+  const authorityRestoreLabel =
+    authorityRestoreState === "success"
+      ? "已恢复"
+      : authorityRestoreState === "error"
+        ? "恢复失败"
+        : authorityRestoreState === "running"
+          ? "恢复中"
+          : "未执行";
+  const authorityRestoreUpdatedLabel = ps.authorityCheckpointRestoreUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityCheckpointRestoreUpdatedAt)
+    : "—";
   const activeRegionLabel = String(
     historyState?.activeRegion ||
       historyState?.lastExtractedRegion ||
@@ -3138,6 +3199,26 @@ function _refreshTaskPersistence() {
     ..._buildLoadDiagnosticRows(loadDiagnostics),
     ..._buildPersistDeltaDiagnosticRows(persistDeltaDiagnostics),
   );
+  const authorityRows = [
+    ["审计状态", authorityAuditSummary.label],
+    ["SQL rev", authorityAuditSqlRevision],
+    ["Trivium rev", authorityAuditTriviumRevision],
+    ["Blob rev", authorityAuditBlobRevision],
+    ["Blob path", authorityAuditBlobPath],
+    ["建议动作", authorityAuditActionsLabel],
+    ["最近审计", authorityAuditUpdatedLabel],
+    ["恢复状态", authorityRestoreLabel],
+    ["恢复结果", authorityRestoreResult?.revision ? `rev ${Number(authorityRestoreResult.revision)}` : "—"],
+    ["最近恢复", authorityRestoreUpdatedLabel],
+  ];
+  const authorityActionButtons = [
+    typeof _actionHandlers.runAuthorityConsistencyAudit === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="audit">执行 Authority 审计</button>`
+      : "",
+    typeof _actionHandlers.restoreAuthorityCheckpoint === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="restore">从 Checkpoint 恢复</button>`
+      : "",
+  ].filter(Boolean).join("");
 
   el.innerHTML = `
     <div class="bme-persist-grid">
@@ -3167,7 +3248,58 @@ function _refreshTaskPersistence() {
         ${renderRows(runtimeRows)}
       </div>
     </div>
+    <div class="bme-persist-kv" style="margin-top:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-shield-halved" style="margin-right:6px;color:var(--bme-primary)"></i>Authority 一致性 / Checkpoint</div>
+      <div class="bme-config-help" style="margin-bottom:12px">
+        审计当前 chat 的 Authority SQL / Trivium / Blob checkpoint 是否同 revision 前进；restore 会把 Blob checkpoint 回灌到 Authority SQL，并在 Authority 主存储启用时触发当前聊天重载。
+      </div>
+      ${authorityActionButtons ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${authorityActionButtons}</div>` : ""}
+      ${renderRowsTwoColumn(authorityRows)}
+      <div class="bme-config-help" style="margin-top:10px">${_escHtml(authorityAuditSummary.detail || "—")}</div>
+      <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityAuditIssuesLabel)}</div>
+      ${ps.authorityCheckpointRestoreError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityCheckpointRestoreError)}</div>` : ""}
+    </div>
   `;
+
+  el
+    .querySelectorAll('[data-authority-persistence-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityPersistenceAction || "").trim();
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        if (action === "audit") {
+          if (typeof _actionHandlers.runAuthorityConsistencyAudit !== "function") return;
+          toastr.info("Authority 一致性审计中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.runAuthorityConsistencyAudit();
+          if (result?.success) {
+            toastr.success(result?.audit?.summary?.label || "Authority 审计完成", "ST-BME");
+          } else {
+            toastr.warning(`Authority 审计失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "restore") {
+          if (typeof _actionHandlers.restoreAuthorityCheckpoint !== "function") return;
+          toastr.info("Authority Checkpoint 恢复中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.restoreAuthorityCheckpoint();
+          if (result?.success) {
+            toastr.success(`Authority Checkpoint 已恢复：rev ${Number(result?.result?.revision || 0) || "?"}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Checkpoint 恢复失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        }
+      } catch (error) {
+        toastr.error(
+          action === "restore"
+            ? `Authority Checkpoint 恢复失败: ${error?.message || error}`
+            : `Authority 审计失败: ${error?.message || error}`,
+          "ST-BME",
+        );
+      } finally {
+        button.disabled = false;
+        _refreshTaskPersistence();
+      }
+    }));
 }
 
 // ==================== 图谱视图切换 ====================

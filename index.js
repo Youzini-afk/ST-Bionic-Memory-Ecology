@@ -369,6 +369,7 @@ import {
   testVectorConnection,
   validateVectorConfig,
 } from "./vector/vector-index.js";
+import { createAuthorityTriviumClient } from "./vector/authority-vector-primary-adapter.js";
 import {
   buildAuthorityJobIdempotencyKey,
   createAuthorityJobAdapter,
@@ -376,6 +377,10 @@ import {
   normalizeAuthorityJobConfig,
 } from "./maintenance/authority-job-adapter.js";
 import { trackAuthorityJobUntilTerminal } from "./maintenance/authority-job-tracker.js";
+import {
+  applyAuthorityCheckpointToStore,
+  buildAuthorityConsistencyAudit,
+} from "./maintenance/authority-consistency.js";
 import {
   createAuthorityBlobAdapter,
   normalizeAuthorityBlobConfig,
@@ -1831,6 +1836,55 @@ function getGraphPersistenceLiveState() {
     authorityRecentJobsHasMore: Boolean(
       graphPersistenceState.authorityRecentJobsHasMore,
     ),
+    authorityBlobReady: Boolean(authorityRuntime.capability.blobReady),
+    authorityBlobState: String(graphPersistenceState.authorityBlobState || "idle"),
+    authorityLastBlobEvent: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityLastBlobEvent,
+      null,
+    ),
+    authorityLastBlobAction: String(graphPersistenceState.authorityLastBlobAction || ""),
+    authorityLastBlobBackend: String(graphPersistenceState.authorityLastBlobBackend || ""),
+    authorityLastBlobPath: String(graphPersistenceState.authorityLastBlobPath || ""),
+    authorityLastBlobReason: String(graphPersistenceState.authorityLastBlobReason || ""),
+    authorityLastBlobError: String(graphPersistenceState.authorityLastBlobError || ""),
+    authorityLastBlobUpdatedAt: String(
+      graphPersistenceState.authorityLastBlobUpdatedAt || "",
+    ),
+    authorityBlobCheckpointPath: String(
+      graphPersistenceState.authorityBlobCheckpointPath || "",
+    ),
+    authorityBlobCheckpointRevision: Number(
+      graphPersistenceState.authorityBlobCheckpointRevision || 0,
+    ),
+    authorityBlobCheckpointUpdatedAt: String(
+      graphPersistenceState.authorityBlobCheckpointUpdatedAt || "",
+    ),
+    authorityConsistencyState: String(
+      graphPersistenceState.authorityConsistencyState || "idle",
+    ),
+    authorityConsistencyAudit: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityConsistencyAudit,
+      null,
+    ),
+    authorityConsistencyUpdatedAt: String(
+      graphPersistenceState.authorityConsistencyUpdatedAt || "",
+    ),
+    authorityConsistencyError: String(
+      graphPersistenceState.authorityConsistencyError || "",
+    ),
+    authorityCheckpointRestoreState: String(
+      graphPersistenceState.authorityCheckpointRestoreState || "idle",
+    ),
+    authorityCheckpointRestoreResult: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityCheckpointRestoreResult,
+      null,
+    ),
+    authorityCheckpointRestoreUpdatedAt: String(
+      graphPersistenceState.authorityCheckpointRestoreUpdatedAt || "",
+    ),
+    authorityCheckpointRestoreError: String(
+      graphPersistenceState.authorityCheckpointRestoreError || "",
+    ),
     authorityBrowserCacheMode: String(
       authorityRuntime.browserState.mode || "minimal",
     ),
@@ -2325,6 +2379,11 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
       reason: exists ? "checkpoint-found" : "checkpoint-missing",
       revision: Number(result?.payload?.revision || 0),
     });
+    updateGraphPersistenceState({
+      authorityBlobCheckpointPath: result?.path || path,
+      authorityBlobCheckpointRevision: Number(result?.payload?.revision || 0),
+      authorityBlobCheckpointUpdatedAt: new Date().toISOString(),
+    });
     return {
       ok: result?.ok !== false,
       exists,
@@ -2369,6 +2428,264 @@ async function readLukerGraphSidecarV2WithAuthorityBlob(context = null, options 
       backend: "authority-blob",
     },
   };
+}
+
+async function exportAuthoritySqlSnapshotProbe(chatId = "", settings = getSettings()) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+  const db = new AuthorityGraphStore(
+    normalizedChatId,
+    buildAuthorityGraphStoreOptions(settings),
+  );
+  try {
+    await db.open();
+    return await db.exportSnapshotProbe();
+  } finally {
+    await db.close?.().catch(() => null);
+  }
+}
+
+async function readAuthorityTriviumStat({
+  chatId = "",
+  collectionId = "",
+  settings = getSettings(),
+} = {}) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+  const normalizedCollectionId =
+    normalizeChatIdCandidate(collectionId) ||
+    buildVectorCollectionId(normalizedChatId);
+  const config = normalizeAuthorityVectorConfig(
+    settings,
+    buildAuthorityGraphStoreOptions(settings),
+  );
+  const client = createAuthorityTriviumClient(config, {
+    fetchImpl: globalThis.fetch?.bind(globalThis),
+    headerProvider:
+      typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,
+  });
+  return await client.stat({
+    namespace: normalizedCollectionId,
+    collectionId: normalizedCollectionId,
+    chatId: normalizedChatId,
+  });
+}
+
+async function runAuthorityConsistencyAudit(options = {}) {
+  const settings = getSettings();
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  const updatedAt = new Date().toISOString();
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!chatId) {
+    return {
+      success: false,
+      error: "missing-chat-id",
+    };
+  }
+
+  updateGraphPersistenceState({
+    authorityConsistencyState: "running",
+    authorityConsistencyUpdatedAt: updatedAt,
+    authorityConsistencyError: "",
+  });
+  refreshPanelLiveState();
+
+  try {
+    const collectionId =
+      normalizeChatIdCandidate(options.collectionId) ||
+      normalizeChatIdCandidate(currentGraph?.vectorIndexState?.collectionId) ||
+      buildVectorCollectionId(chatId);
+    const [sqlProbe, triviumProbe, blobProbe] = await Promise.all([
+      capability.storagePrimaryReady
+        ? exportAuthoritySqlSnapshotProbe(chatId, settings)
+            .then((value) => ({ value, error: null }))
+            .catch((error) => ({ value: null, error }))
+        : Promise.resolve({ value: null, error: null }),
+      capability.triviumPrimaryReady
+        ? readAuthorityTriviumStat({
+            chatId,
+            collectionId,
+            settings,
+          })
+            .then((value) => ({ value, error: null }))
+            .catch((error) => ({ value: null, error }))
+        : Promise.resolve({ value: null, error: null }),
+      capability.blobReady
+        ? readAuthorityLukerCheckpointBlob(chatId)
+            .then((value) => ({ value, error: null }))
+            .catch((error) => ({ value: null, error }))
+        : Promise.resolve({ value: null, error: null }),
+    ]);
+    const audit = buildAuthorityConsistencyAudit({
+      updatedAt,
+      chatId,
+      collectionId,
+      capability,
+      runtimeGraph: currentGraph,
+      graphPersistenceState,
+      sqlSnapshot: sqlProbe.value,
+      sqlError: sqlProbe.error,
+      triviumStat: triviumProbe.value,
+      triviumError: triviumProbe.error,
+      blobResult: blobProbe.value,
+      blobError: blobProbe.error,
+      lastJob: graphPersistenceState.authorityLastJob,
+    });
+    updateGraphPersistenceState({
+      authorityConsistencyState: audit.summary.level,
+      authorityConsistencyAudit: cloneRuntimeDebugValue(audit, null),
+      authorityConsistencyUpdatedAt: updatedAt,
+      authorityConsistencyError: "",
+    });
+    refreshPanelLiveState();
+    return {
+      success: true,
+      audit,
+    };
+  } catch (error) {
+    const message =
+      error?.message || String(error) || "Authority consistency audit failed";
+    updateGraphPersistenceState({
+      authorityConsistencyState: "error",
+      authorityConsistencyUpdatedAt: updatedAt,
+      authorityConsistencyError: message,
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: message,
+    };
+  }
+}
+
+async function restoreAuthorityCheckpointFromBlob(options = {}) {
+  const settings = getSettings();
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  const updatedAt = new Date().toISOString();
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!chatId) {
+    return {
+      success: false,
+      error: "missing-chat-id",
+    };
+  }
+  if (!capability.storagePrimaryReady) {
+    updateGraphPersistenceState({
+      authorityCheckpointRestoreState: "error",
+      authorityCheckpointRestoreUpdatedAt: updatedAt,
+      authorityCheckpointRestoreError: "Authority SQL unavailable",
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: "Authority SQL unavailable",
+    };
+  }
+
+  updateGraphPersistenceState({
+    authorityCheckpointRestoreState: "running",
+    authorityCheckpointRestoreUpdatedAt: updatedAt,
+    authorityCheckpointRestoreError: "",
+  });
+  refreshPanelLiveState();
+
+  let targetDb = null;
+  try {
+    const blobResult = await readAuthorityLukerCheckpointBlob(chatId);
+    if (!blobResult?.exists || !blobResult?.checkpoint) {
+      const message = blobResult?.reason || "Authority checkpoint missing";
+      updateGraphPersistenceState({
+        authorityCheckpointRestoreState: "error",
+        authorityCheckpointRestoreUpdatedAt: updatedAt,
+        authorityCheckpointRestoreError: message,
+      });
+      refreshPanelLiveState();
+      return {
+        success: false,
+        error: message,
+      };
+    }
+
+    targetDb = new AuthorityGraphStore(chatId, buildAuthorityGraphStoreOptions(settings));
+    const restoreResult = await applyAuthorityCheckpointToStore(
+      targetDb,
+      blobResult.checkpoint,
+      {
+        chatId,
+        path: blobResult.path,
+        source: "authority-blob-checkpoint-restore",
+        storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
+        storageMode: AUTHORITY_GRAPH_STORE_MODE,
+        markSyncDirty: false,
+      },
+    );
+    await targetDb.close?.().catch(() => null);
+    targetDb = null;
+
+    const preferredStore = getPreferredGraphLocalStorePresentationSync(settings);
+    const authorityActive =
+      isAuthorityGraphStorePresentation(preferredStore) ||
+      isAuthorityGraphStoreDb(currentDb);
+    if (authorityActive) {
+      await refreshCurrentChatLocalStoreBinding({
+        chatId,
+        forceCapabilityRefresh: true,
+        reopenCurrentDb: true,
+        source: "authority-checkpoint-restore",
+      });
+      syncGraphLoadFromLiveContext({
+        source: "authority-checkpoint-restore",
+        force: true,
+      });
+    }
+
+    const auditResult = await runAuthorityConsistencyAudit({ chatId });
+    const result = {
+      restored: restoreResult.restored === true,
+      revision: Number(restoreResult.revision || 0),
+      path: blobResult.path,
+      checkpointRevision: Number(blobResult?.checkpoint?.revision || 0),
+      reloadApplied: authorityActive,
+      auditSummary: auditResult?.audit?.summary || null,
+      auditDrift: auditResult?.audit?.drift || null,
+    };
+    updateGraphPersistenceState({
+      authorityCheckpointRestoreState: restoreResult.restored === true ? "success" : "error",
+      authorityCheckpointRestoreResult: cloneRuntimeDebugValue(result, null),
+      authorityCheckpointRestoreUpdatedAt: updatedAt,
+      authorityCheckpointRestoreError:
+        restoreResult.restored === true
+          ? ""
+          : String(restoreResult.reason || restoreResult.error || "restore-failed"),
+      authorityBlobCheckpointPath: blobResult.path,
+      authorityBlobCheckpointRevision: Number(blobResult?.checkpoint?.revision || 0),
+      authorityBlobCheckpointUpdatedAt: updatedAt,
+    });
+    refreshPanelLiveState();
+    return {
+      success: restoreResult.restored === true,
+      result,
+    };
+  } catch (error) {
+    const message =
+      error?.message || String(error) || "Authority checkpoint restore failed";
+    updateGraphPersistenceState({
+      authorityCheckpointRestoreState: "error",
+      authorityCheckpointRestoreUpdatedAt: updatedAt,
+      authorityCheckpointRestoreError: message,
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      error: message,
+    };
+  } finally {
+    await targetDb?.close?.().catch(() => null);
+  }
 }
 
 async function submitAuthorityVectorRebuildJob({
@@ -20929,6 +21246,18 @@ async function onRefreshAuthorityJobs() {
   });
 }
 
+async function onRunAuthorityConsistencyAudit() {
+  return await runAuthorityConsistencyAudit({
+    reason: "panel-authority-consistency-audit",
+  });
+}
+
+async function onRestoreAuthorityCheckpoint() {
+  return await restoreAuthorityCheckpointFromBlob({
+    reason: "panel-authority-checkpoint-restore",
+  });
+}
+
 async function onReembedDirect() {
   return await onReembedDirectController({
     getEmbeddingConfig,
@@ -21508,6 +21837,8 @@ async function onCompactLukerSidecar() {
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       requeueAuthorityJob: async (jobId) => await requeueAuthorityJob(jobId),
       refreshAuthorityJobs: onRefreshAuthorityJobs,
+      runAuthorityConsistencyAudit: onRunAuthorityConsistencyAudit,
+      restoreAuthorityCheckpoint: onRestoreAuthorityCheckpoint,
       reembedDirect: onReembedDirect,
       reroll: onReroll,
       clearGraph: onClearGraph,
