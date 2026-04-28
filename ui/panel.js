@@ -3104,6 +3104,34 @@ function _refreshTaskPersistence() {
   const authorityRestoreUpdatedLabel = ps.authorityCheckpointRestoreUpdatedAt
     ? _formatTaskProfileTime(ps.authorityCheckpointRestoreUpdatedAt)
     : "—";
+  const authorityBaseline =
+    ps.authorityPerformanceBaseline &&
+    typeof ps.authorityPerformanceBaseline === "object" &&
+    !Array.isArray(ps.authorityPerformanceBaseline)
+      ? ps.authorityPerformanceBaseline
+      : null;
+  const authorityBaselineUpdatedLabel = ps.authorityPerformanceBaselineUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityPerformanceBaselineUpdatedAt)
+    : authorityBaseline?.capturedAt
+      ? _formatTaskProfileTime(authorityBaseline.capturedAt)
+      : "—";
+  const authorityBaselineLoadLabel = authorityBaseline?.load
+    ? `${_formatDurationMs(authorityBaseline.load.totalMs)} / hydrate ${_formatDurationMs(authorityBaseline.load.hydrateMs)}`
+    : "—";
+  const authorityBaselinePersistLabel = authorityBaseline?.persist
+    ? `${_formatDurationMs(authorityBaseline.persist.totalMs)} / commit ${_formatDurationMs(authorityBaseline.persist.commitMs)}`
+    : "—";
+  const authorityBaselineSoakLabel = authorityBaseline?.soak
+    ? `${Number(authorityBaseline.soak.recentJobCount || 0)} recent / ${Number(authorityBaseline.soak.failedJobCount || 0)} failed / ${Number(authorityBaseline.soak.runningJobCount || 0)} running`
+    : "—";
+  const authorityBaselineGraphLabel = authorityBaseline
+    ? `rev ${Number(authorityBaseline.graphRevision || 0)} · ${Number(authorityBaseline.graphNodeCount || 0)} 节点 / ${Number(authorityBaseline.graphEdgeCount || 0)} 边`
+    : "—";
+  const authorityBundlePathLabel = String(ps.authorityDiagnosticsBundlePath || "").trim() || "—";
+  const authorityBundleUpdatedLabel = ps.authorityDiagnosticsBundleUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityDiagnosticsBundleUpdatedAt)
+    : "—";
+  const authorityBundleSizeLabel = _formatDataSizeBytes(ps.authorityDiagnosticsBundleSize);
   const activeRegionLabel = String(
     historyState?.activeRegion ||
       historyState?.lastExtractedRegion ||
@@ -3210,6 +3238,15 @@ function _refreshTaskPersistence() {
     ["恢复状态", authorityRestoreLabel],
     ["恢复结果", authorityRestoreResult?.revision ? `rev ${Number(authorityRestoreResult.revision)}` : "—"],
     ["最近恢复", authorityRestoreUpdatedLabel],
+    ["Baseline 图谱", authorityBaselineGraphLabel],
+    ["Baseline Load", authorityBaselineLoadLabel],
+    ["Baseline Persist", authorityBaselinePersistLabel],
+    ["Baseline Soak", authorityBaselineSoakLabel],
+    ["最近 Baseline", authorityBaselineUpdatedLabel],
+    ["诊断包路径", authorityBundlePathLabel],
+    ["诊断包大小", authorityBundleSizeLabel],
+    ["诊断包时间", authorityBundleUpdatedLabel],
+    ["诊断包原因", ps.authorityDiagnosticsBundleReason || "—"],
   ];
   const authorityActionButtons = [
     typeof _actionHandlers.runAuthorityConsistencyAudit === "function"
@@ -3217,6 +3254,12 @@ function _refreshTaskPersistence() {
       : "",
     typeof _actionHandlers.restoreAuthorityCheckpoint === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="restore">从 Checkpoint 恢复</button>`
+      : "",
+    typeof _actionHandlers.captureAuthorityPerformanceBaseline === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="baseline">捕获 Perf Baseline</button>`
+      : "",
+    typeof _actionHandlers.exportDiagnosticsBundle === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="bundle">导出诊断包</button>`
       : "",
   ].filter(Boolean).join("");
 
@@ -3287,11 +3330,27 @@ function _refreshTaskPersistence() {
           } else {
             toastr.warning(`Authority Checkpoint 恢复失败：${result?.error || "unknown"}`, "ST-BME");
           }
+        } else if (action === "baseline") {
+          if (typeof _actionHandlers.captureAuthorityPerformanceBaseline !== "function") return;
+          const result = await _actionHandlers.captureAuthorityPerformanceBaseline();
+          if (result?.ok) {
+            toastr.success("Authority Perf Baseline 已捕获", "ST-BME");
+          } else {
+            toastr.warning(`Authority Perf Baseline 捕获失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "bundle") {
+          if (typeof _actionHandlers.exportDiagnosticsBundle !== "function") return;
+          const result = await _actionHandlers.exportDiagnosticsBundle();
+          if (result?.handledToast) {
+            return;
+          }
         }
       } catch (error) {
         toastr.error(
           action === "restore"
             ? `Authority Checkpoint 恢复失败: ${error?.message || error}`
+            : action === "baseline"
+              ? `Authority Perf Baseline 捕获失败: ${error?.message || error}`
             : `Authority 审计失败: ${error?.message || error}`,
           "ST-BME",
         );

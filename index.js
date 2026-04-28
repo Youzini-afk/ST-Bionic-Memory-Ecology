@@ -388,6 +388,7 @@ import {
 import {
   buildAuthorityDiagnosticsBundle,
   buildAuthorityDiagnosticsBundlePath,
+  buildAuthorityPerformanceBaseline,
   writeAuthorityDiagnosticsBundle as writeAuthorityDiagnosticsBundleFile,
 } from "./maintenance/authority-diagnostics-bundle.js";
 
@@ -1885,6 +1886,16 @@ function getGraphPersistenceLiveState() {
     authorityCheckpointRestoreError: String(
       graphPersistenceState.authorityCheckpointRestoreError || "",
     ),
+    authorityPerformanceBaseline: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityPerformanceBaseline,
+      null,
+    ),
+    authorityPerformanceBaselineUpdatedAt: String(
+      graphPersistenceState.authorityPerformanceBaselineUpdatedAt || "",
+    ),
+    authorityPerformanceBaselineReason: String(
+      graphPersistenceState.authorityPerformanceBaselineReason || "",
+    ),
     authorityBrowserCacheMode: String(
       authorityRuntime.browserState.mode || "minimal",
     ),
@@ -2282,6 +2293,147 @@ function getAuthorityBlobAdapter(options = {}) {
       typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,
     ...options,
   });
+}
+
+function buildAuthorityPerformanceBaselineSnapshot(options = {}) {
+  const liveGraphPersistence = getGraphPersistenceLiveState();
+  return buildAuthorityPerformanceBaseline({
+    chatId:
+      normalizeChatIdCandidate(options.chatId) ||
+      normalizeChatIdCandidate(getCurrentChatId()) ||
+      normalizeChatIdCandidate(graphPersistenceState.chatId),
+    graphPersistence: liveGraphPersistence,
+    graph: currentGraph,
+    consistencyAudit: liveGraphPersistence.authorityConsistencyAudit,
+  });
+}
+
+function captureAuthorityPerformanceBaseline(options = {}) {
+  const baseline = buildAuthorityPerformanceBaselineSnapshot(options);
+  const capturedAt = String(baseline?.capturedAt || new Date().toISOString());
+  const reason = String(options.reason || "manual-authority-performance-baseline");
+  updateGraphPersistenceState({
+    authorityPerformanceBaseline: cloneRuntimeDebugValue(baseline, null),
+    authorityPerformanceBaselineUpdatedAt: capturedAt,
+    authorityPerformanceBaselineReason: reason,
+  });
+  refreshPanelLiveState();
+  return {
+    ok: true,
+    baseline,
+  };
+}
+
+async function exportAuthorityDiagnosticsBundle(options = {}) {
+  const settings = getSettings();
+  if (!shouldUseAuthorityDiagnosticsBundle()) {
+    return {
+      ok: false,
+      reason: "authority-diagnostics-unavailable",
+    };
+  }
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!chatId) {
+    return {
+      ok: false,
+      reason: "missing-chat-id",
+    };
+  }
+  const reason = String(options.reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
+  const liveGraphPersistence = getGraphPersistenceLiveState();
+  const baseline = buildAuthorityPerformanceBaseline({
+    chatId,
+    graphPersistence: liveGraphPersistence,
+    graph: currentGraph,
+    consistencyAudit: liveGraphPersistence.authorityConsistencyAudit,
+  });
+  const bundle = buildAuthorityDiagnosticsBundle({
+    chatId,
+    reason,
+    settings,
+    runtimeStatus,
+    runtimeDebug: readRuntimeDebugSnapshot(),
+    graphPersistence: {
+      ...liveGraphPersistence,
+      authorityPerformanceBaseline: cloneRuntimeDebugValue(baseline, null),
+      authorityPerformanceBaselineUpdatedAt: String(baseline?.capturedAt || ""),
+      authorityPerformanceBaselineReason: reason,
+    },
+    graph: currentGraph,
+    lastExtractionStatus,
+    lastVectorStatus,
+    lastRecallStatus,
+    lastBatchStatus: cloneRuntimeDebugValue(currentGraph?.historyState?.lastBatchStatus, null),
+    lastInjection: lastInjectionContent,
+    lastExtract: lastExtractedItems,
+    lastRecall: lastRecalledItems,
+    performanceBaseline: baseline,
+  });
+  const path = buildAuthorityDiagnosticsBundlePath(chatId, reason);
+  const adapter = getAuthorityBlobAdapter();
+  try {
+    const result = await writeAuthorityDiagnosticsBundleFile(adapter, bundle, {
+      chatId,
+      reason,
+      path,
+      signal: options.signal,
+    });
+    const updatedAt = new Date().toISOString();
+    const bundleSize = (() => {
+      if (Number.isFinite(Number(result?.result?.size))) {
+        return Number(result.result.size);
+      }
+      try {
+        return JSON.stringify(bundle).length;
+      } catch {
+        return 0;
+      }
+    })();
+    recordAuthorityBlobSnapshot({
+      action: "diagnostics-write",
+      ok: result?.ok !== false,
+      backend: "authority-blob",
+      path: result?.path || path,
+      reason,
+    });
+    updateGraphPersistenceState({
+      authorityPerformanceBaseline: cloneRuntimeDebugValue(baseline, null),
+      authorityPerformanceBaselineUpdatedAt: String(baseline?.capturedAt || updatedAt),
+      authorityPerformanceBaselineReason: reason,
+      authorityDiagnosticsBundlePath: String(result?.path || path),
+      authorityDiagnosticsBundleReason: reason,
+      authorityDiagnosticsBundleUpdatedAt: updatedAt,
+      authorityDiagnosticsBundleSize: bundleSize,
+    });
+    if (options.refreshHost !== false) {
+      refreshPanelLiveState();
+    }
+    return {
+      ok: result?.ok !== false,
+      path: String(result?.path || path),
+      size: bundleSize,
+      baseline,
+      bundle,
+    };
+  } catch (error) {
+    const message =
+      error?.message || String(error) || "Authority diagnostics bundle failed";
+    recordAuthorityBlobSnapshot({
+      action: "diagnostics-write",
+      ok: false,
+      backend: "authority-blob",
+      path,
+      reason,
+      error: message,
+    });
+    return {
+      ok: false,
+      reason: "authority-diagnostics-bundle-error",
+      error,
+    };
+  }
 }
 
 async function writeAuthorityLukerCheckpointBlob(
@@ -21258,6 +21410,12 @@ async function onRestoreAuthorityCheckpoint() {
   });
 }
 
+async function onCaptureAuthorityPerformanceBaseline() {
+  return captureAuthorityPerformanceBaseline({
+    reason: "panel-authority-performance-baseline",
+  });
+}
+
 async function onReembedDirect() {
   return await onReembedDirectController({
     getEmbeddingConfig,
@@ -21839,6 +21997,7 @@ async function onCompactLukerSidecar() {
       refreshAuthorityJobs: onRefreshAuthorityJobs,
       runAuthorityConsistencyAudit: onRunAuthorityConsistencyAudit,
       restoreAuthorityCheckpoint: onRestoreAuthorityCheckpoint,
+      captureAuthorityPerformanceBaseline: onCaptureAuthorityPerformanceBaseline,
       reembedDirect: onReembedDirect,
       reroll: onReroll,
       clearGraph: onClearGraph,

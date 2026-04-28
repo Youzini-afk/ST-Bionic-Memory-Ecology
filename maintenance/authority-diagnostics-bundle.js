@@ -169,6 +169,126 @@ function buildStatusSnapshot(status = null) {
   );
 }
 
+export function buildAuthorityPerformanceBaseline({
+  chatId = "",
+  graphPersistence = null,
+  graph = null,
+  consistencyAudit = null,
+} = {}) {
+  const persistence =
+    graphPersistence && typeof graphPersistence === "object" && !Array.isArray(graphPersistence)
+      ? graphPersistence
+      : {};
+  const runtimeGraph = graph && typeof graph === "object" && !Array.isArray(graph) ? graph : {};
+  const audit =
+    consistencyAudit && typeof consistencyAudit === "object" && !Array.isArray(consistencyAudit)
+      ? consistencyAudit
+      : persistence.authorityConsistencyAudit &&
+          typeof persistence.authorityConsistencyAudit === "object" &&
+          !Array.isArray(persistence.authorityConsistencyAudit)
+        ? persistence.authorityConsistencyAudit
+        : null;
+  const loadDiagnostics =
+    persistence.loadDiagnostics && typeof persistence.loadDiagnostics === "object"
+      ? persistence.loadDiagnostics
+      : {};
+  const persistDelta =
+    persistence.persistDelta && typeof persistence.persistDelta === "object"
+      ? persistence.persistDelta
+      : {};
+  const recentJobs = Array.isArray(persistence.authorityRecentJobs)
+    ? persistence.authorityRecentJobs
+    : [];
+  const failedJobs = recentJobs.filter((job) => {
+    const queueState = String(job?.queueState || "").trim();
+    return queueState === "failed" || queueState === "error";
+  });
+  const runningJobs = recentJobs.filter(
+    (job) => String(job?.queueState || "").trim() === "running",
+  );
+  const graphRevision = Number(
+    runtimeGraph?.meta?.revision || persistence.revision || 0,
+  );
+  return {
+    kind: "authority-performance-baseline",
+    capturedAt: new Date().toISOString(),
+    chatId: normalizeRecordId(chatId || persistence.chatId || runtimeGraph?.chatId),
+    graphRevision: Number.isFinite(graphRevision) ? graphRevision : 0,
+    graphNodeCount: Array.isArray(runtimeGraph?.nodes) ? runtimeGraph.nodes.length : 0,
+    graphEdgeCount: Array.isArray(runtimeGraph?.edges) ? runtimeGraph.edges.length : 0,
+    extractionCount: Number(runtimeGraph?.historyState?.extractionCount || 0),
+    load: safeClone(
+      {
+        state: String(persistence.loadState || ""),
+        source: String(loadDiagnostics.source || ""),
+        totalMs: Number(loadDiagnostics.totalMs || 0),
+        preApplyMs: Number(loadDiagnostics.preApplyMs || 0),
+        exportSnapshotMs: Number(loadDiagnostics.exportSnapshotMs || 0),
+        hydrateMs: Number(loadDiagnostics.hydrateMs || 0),
+        hydrateNativeRecordsMs: Number(loadDiagnostics.hydrateNativeRecordsMs || 0),
+        applyRuntimeMs: Number(loadDiagnostics.applyRuntimeMs || 0),
+        updatedAt: String(loadDiagnostics.updatedAt || ""),
+      },
+      null,
+    ),
+    persist: safeClone(
+      {
+        totalMs: Number(persistDelta.totalMs || persistDelta.buildMs || 0),
+        buildMs: Number(persistDelta.buildMs || 0),
+        baseSnapshotReadMs: Number(persistDelta.baseSnapshotReadMs || 0),
+        snapshotBuildMs: Number(persistDelta.snapshotBuildMs || 0),
+        prepareMs: Number(persistDelta.prepareMs || 0),
+        nativeAttemptMs: Number(persistDelta.nativeAttemptMs || 0),
+        lookupMs: Number(persistDelta.lookupMs || 0),
+        jsDiffMs: Number(persistDelta.jsDiffMs || 0),
+        hydrateMs: Number(persistDelta.hydrateMs || 0),
+        commitQueueWaitMs: Number(persistDelta.commitQueueWaitMs || 0),
+        commitMs: Number(persistDelta.commitMs || 0),
+        commitPayloadBytes: Number(persistDelta.commitPayloadBytes || 0),
+        commitWalBytes: Number(persistDelta.commitWalBytes || 0),
+        updatedAt: String(persistDelta.updatedAt || ""),
+      },
+      null,
+    ),
+    soak: {
+      recentJobCount: recentJobs.length,
+      runningJobCount: runningJobs.length,
+      failedJobCount: failedJobs.length,
+      lastJobId: String(persistence.authorityLastJobId || ""),
+      lastJobStatus: String(persistence.authorityLastJobStatus || ""),
+      lastJobUpdatedAt: String(persistence.authorityLastJobUpdatedAt || ""),
+    },
+    audit: safeClone(
+      {
+        state: String(persistence.authorityConsistencyState || audit?.summary?.level || "idle"),
+        issueCount: Array.isArray(audit?.issues) ? audit.issues.length : 0,
+        sqlRevision: Number(audit?.sql?.revision || 0),
+        triviumRevision: Number(audit?.trivium?.revision || 0),
+        blobRevision: Number(
+          audit?.blob?.revision || persistence.authorityBlobCheckpointRevision || 0,
+        ),
+      },
+      null,
+    ),
+    artifacts: safeClone(
+      {
+        diagnosticsBundlePath: String(persistence.authorityDiagnosticsBundlePath || ""),
+        diagnosticsBundleReason: String(persistence.authorityDiagnosticsBundleReason || ""),
+        diagnosticsBundleUpdatedAt: String(
+          persistence.authorityDiagnosticsBundleUpdatedAt || "",
+        ),
+        diagnosticsBundleSize: Number(persistence.authorityDiagnosticsBundleSize || 0),
+        blobCheckpointPath: String(persistence.authorityBlobCheckpointPath || ""),
+        blobCheckpointRevision: Number(persistence.authorityBlobCheckpointRevision || 0),
+        blobCheckpointUpdatedAt: String(
+          persistence.authorityBlobCheckpointUpdatedAt || "",
+        ),
+      },
+      null,
+    ),
+  };
+}
+
 export function sanitizeDiagnosticsSettings(settings = {}) {
   return sanitizeValue(settings, "settings", 0);
 }
@@ -197,6 +317,7 @@ export function buildAuthorityDiagnosticsBundle({
   lastInjection = "",
   lastExtract = [],
   lastRecall = [],
+  performanceBaseline = null,
 } = {}) {
   const createdAt = new Date().toISOString();
   return {
@@ -210,6 +331,7 @@ export function buildAuthorityDiagnosticsBundle({
     runtimeDebug: safeClone(runtimeDebug, null),
     graphPersistence: safeClone(graphPersistence, null),
     graphSummary: buildGraphSummary(graph),
+    performanceBaseline: safeClone(performanceBaseline, null),
     lastStatuses: {
       extraction: buildStatusSnapshot(lastExtractionStatus),
       vector: buildStatusSnapshot(lastVectorStatus),

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildAuthorityDiagnosticsBundle,
   buildAuthorityDiagnosticsBundlePath,
+  buildAuthorityPerformanceBaseline,
   sanitizeDiagnosticsSettings,
   writeAuthorityDiagnosticsBundle,
 } from "../maintenance/authority-diagnostics-bundle.js";
@@ -40,6 +41,57 @@ function createMockAdapter() {
   assert.equal(sanitized.nested.embeddingApiKey, "[REDACTED]");
   assert.equal(sanitized.nested.label, "ok");
   assert.equal(sanitized.models[0].token, "[REDACTED]");
+}
+
+{
+  const baseline = buildAuthorityPerformanceBaseline({
+    chatId: "chat/main",
+    graphPersistence: {
+      chatId: "chat/main",
+      revision: 12,
+      loadState: "loaded",
+      loadDiagnostics: {
+        source: "authority-sql",
+        totalMs: 45,
+        hydrateMs: 18,
+      },
+      persistDelta: {
+        totalMs: 22,
+        commitMs: 8,
+        commitPayloadBytes: 2048,
+      },
+      authorityRecentJobs: [
+        { id: "job-1", queueState: "success" },
+        { id: "job-2", queueState: "failed" },
+      ],
+      authorityLastJobId: "job-2",
+      authorityLastJobStatus: "failed",
+      authorityConsistencyState: "warning",
+      authorityBlobCheckpointRevision: 11,
+      authorityDiagnosticsBundlePath: "user/files/diag.json",
+      authorityDiagnosticsBundleSize: 512,
+    },
+    graph: {
+      chatId: "chat/main",
+      meta: { revision: 12 },
+      nodes: [{ id: "n1" }, { id: "n2" }],
+      edges: [{ id: "e1" }],
+      historyState: { extractionCount: 5 },
+    },
+    consistencyAudit: {
+      issues: [{ code: "revision-drift" }],
+      sql: { revision: 12 },
+      trivium: { revision: 10 },
+      blob: { revision: 11 },
+    },
+  });
+  assert.equal(baseline.kind, "authority-performance-baseline");
+  assert.equal(baseline.graphRevision, 12);
+  assert.equal(baseline.graphNodeCount, 2);
+  assert.equal(baseline.soak.recentJobCount, 2);
+  assert.equal(baseline.soak.failedJobCount, 1);
+  assert.equal(baseline.audit.issueCount, 1);
+  assert.equal(baseline.artifacts.diagnosticsBundlePath, "user/files/diag.json");
 }
 
 {
@@ -123,6 +175,11 @@ function createMockAdapter() {
     lastInjection: "A".repeat(4500),
     lastExtract: [{ id: "n1" }],
     lastRecall: [{ id: "n2" }],
+    performanceBaseline: {
+      kind: "authority-performance-baseline",
+      graphRevision: 9,
+      load: { totalMs: 12 },
+    },
   });
 
   assert.equal(bundle.kind, "st-bme-authority-diagnostics");
@@ -136,6 +193,7 @@ function createMockAdapter() {
   assert.equal(bundle.lastInjection.textPreview.length, 4000);
   assert.equal(bundle.recentExtractedItems.length, 1);
   assert.equal(bundle.recentRecalledItems.length, 1);
+  assert.equal(bundle.performanceBaseline?.graphRevision, 9);
 }
 
 {
