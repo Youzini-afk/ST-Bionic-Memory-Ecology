@@ -6,6 +6,7 @@ import {
 } from "../runtime/settings-defaults.js";
 
 assert.equal(defaultSettings.extractContextTurns, 2);
+assert.equal(defaultSettings.extractAutoEnabled, true);
 assert.equal(defaultSettings.extractActionMode, "pending");
 assert.equal(defaultSettings.extractAutoDelayLatestAssistant, false);
 assert.equal(defaultSettings.hideOldMessagesRenderLimitEnabled, true);

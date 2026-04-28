@@ -4671,6 +4671,79 @@ async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask()
   assert.equal(refreshCalls, 1);
 }
 
+async function testMessageReceivedSkipsWhenAutoExtractionDisabled() {
+  let runExtractionCalls = 0;
+  let refreshCalls = 0;
+  const deferredReasons = [];
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const settings = {
+    enabled: true,
+    extractAutoEnabled: false,
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: false,
+    enableSmartTrigger: false,
+  };
+
+  const plan = buildAutoExtractionPlan({
+    chat,
+    settings,
+    lastProcessedAssistantFloor: -1,
+  });
+  assert.equal(plan.canRun, false);
+  assert.equal(plan.reason, "auto-extraction-disabled");
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({
+        chat,
+      }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
+      deferAutoExtraction(reason) {
+        deferredReasons.push(reason);
+      },
+      runExtraction: async () => {
+        runExtractionCalls += 1;
+      },
+      console: {
+        debug() {},
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+    },
+    1,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls, 0);
+  assert.deepEqual(deferredReasons, []);
+  assert.equal(refreshCalls, 1);
+}
+
 async function testMessageReceivedDefersExtractionDuringHostGeneration() {
   let runExtractionCalls = 0;
   const deferred = [];
@@ -7690,6 +7763,7 @@ await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
 await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
+await testMessageReceivedSkipsWhenAutoExtractionDisabled();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();

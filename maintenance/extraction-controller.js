@@ -681,6 +681,29 @@ export function resolveAutoExtractionPlanController(
       reason: "plugin-disabled",
     };
   }
+  if (resolvedSettings.extractAutoEnabled === false) {
+    return {
+      strategy,
+      chat: resolvedChat,
+      settings: resolvedSettings,
+      lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+      lockedEndFloor: safeLockedEndFloor,
+      extractEvery,
+      pendingAssistantTurns: [],
+      candidateAssistantTurns: [],
+      eligibleAssistantTurns: [],
+      eligibleEndFloor: null,
+      waitingForNextAssistant: false,
+      smartTriggerDecision: { triggered: false, score: 0, reasons: [] },
+      meetsExtractEvery: false,
+      canRun: false,
+      batchAssistantTurns: [],
+      plannedBatchEndFloor: null,
+      startIdx: null,
+      endIdx: null,
+      reason: "auto-extraction-disabled",
+    };
+  }
   const assistantTurns =
     typeof runtime?.getAssistantTurns === "function"
       ? runtime.getAssistantTurns(resolvedChat)
@@ -972,7 +995,7 @@ export async function runExtractionController(runtime, options = {}) {
     return;
   }
 
-  if (!settings.enabled) return;
+  if (!settings.enabled || settings.extractAutoEnabled === false) return;
   if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
     runtime.console?.debug?.("[ST-BME] auto extraction blocked: graph-not-ready", {
       loadState: runtime.getGraphPersistenceState?.()?.loadState || "",

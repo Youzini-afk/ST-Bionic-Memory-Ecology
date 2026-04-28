@@ -7340,6 +7340,10 @@ function _refreshConfigTab() {
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,
   );
+  _setCheckboxValue(
+    "bme-setting-extract-auto-enabled",
+    settings.extractAutoEnabled ?? true,
+  );
   _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
   _setCheckboxValue(
     "bme-setting-recall-vector-prefilter-enabled",
@@ -7821,6 +7825,9 @@ function _bindConfigControls() {
     _patchSettings({ recallEnabled: checked });
     _refreshGuardedConfigStates();
     _refreshStageCardStates();
+  });
+  bindCheckbox("bme-setting-extract-auto-enabled", (checked) => {
+    _patchSettings({ extractAutoEnabled: checked });
   });
   bindCheckbox("bme-setting-recall-llm", (checked) => {
     _patchSettings({ recallEnableLLM: checked });

@@ -23,6 +23,7 @@ export const defaultSettings = {
   hideOldMessagesRenderLimit: 10,
 
   // 提取设置
+  extractAutoEnabled: true,
   extractEvery: 1,
   extractContextTurns: 2,
   extractAutoDelayLatestAssistant: false,
