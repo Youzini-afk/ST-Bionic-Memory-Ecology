@@ -3132,6 +3132,13 @@ function _refreshTaskPersistence() {
     ? _formatTaskProfileTime(ps.authorityDiagnosticsBundleUpdatedAt)
     : "—";
   const authorityBundleSizeLabel = _formatDataSizeBytes(ps.authorityDiagnosticsBundleSize);
+  const authorityArtifactEntries = Array.isArray(ps.authorityDiagnosticsArtifacts)
+    ? ps.authorityDiagnosticsArtifacts.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const authorityArtifactManifestPathLabel = String(ps.authorityDiagnosticsManifestPath || "").trim() || "—";
+  const authorityArtifactHistoryUpdatedLabel = ps.authorityDiagnosticsArtifactsUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityDiagnosticsArtifactsUpdatedAt)
+    : "—";
   const activeRegionLabel = String(
     historyState?.activeRegion ||
       historyState?.lastExtractedRegion ||
@@ -3247,6 +3254,9 @@ function _refreshTaskPersistence() {
     ["诊断包大小", authorityBundleSizeLabel],
     ["诊断包时间", authorityBundleUpdatedLabel],
     ["诊断包原因", ps.authorityDiagnosticsBundleReason || "—"],
+    ["诊断清单", authorityArtifactManifestPathLabel],
+    ["工件记录", `${authorityArtifactEntries.length} 条`],
+    ["列表刷新", authorityArtifactHistoryUpdatedLabel],
   ];
   const authorityAuditActions = Array.isArray(ps.authorityConsistencyAudit?.actions)
     ? ps.authorityConsistencyAudit.actions.map((value) => String(value || "").trim()).filter(Boolean)
@@ -3275,7 +3285,43 @@ function _refreshTaskPersistence() {
     typeof _actionHandlers.exportDiagnosticsBundle === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="bundle">导出诊断包</button>`
       : "",
+    typeof _actionHandlers.refreshAuthorityDiagnosticsArtifacts === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="artifacts-refresh">刷新工件列表</button>`
+      : "",
   ].filter(Boolean).join("");
+  const authorityArtifactsHtml = authorityArtifactEntries.length
+    ? `
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        ${authorityArtifactEntries.map((entry) => {
+          const path = String(entry?.path || "").trim();
+          const updatedLabel = entry?.updatedAt || entry?.createdAt
+            ? _formatTaskProfileTime(entry.updatedAt || entry.createdAt)
+            : "未记录";
+          const reasonLabel = String(entry?.reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
+          const sizeLabel = _formatDataSizeBytes(entry?.size);
+          return `
+            <div style="padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                <div class="bme-status-row-label">${_escHtml(reasonLabel)}</div>
+                <div style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(updatedLabel)}</div>
+              </div>
+              <div class="bme-config-help" style="margin-top:4px;word-break:break-all">${_escHtml(path)}</div>
+              <div class="bme-config-help" style="margin-top:4px">${_escHtml(sizeLabel)} · ${_escHtml(reasonLabel)}</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="copy-path" data-authority-artifact-path="${_escAttr(path)}">复制路径</button>
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="download" data-authority-artifact-path="${_escAttr(path)}" data-authority-artifact-reason="${_escAttr(reasonLabel)}">下载 JSON</button>
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="delete" data-authority-artifact-path="${_escAttr(path)}">删除</button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>`
+    : `<div class="bme-config-help" style="margin-top:12px">${_escHtml(
+        ps.authorityDiagnosticsArtifactsError
+          ? `工件列表刷新失败：${ps.authorityDiagnosticsArtifactsError}`
+          : ps.authorityDiagnosticsArtifactsUpdatedAt
+            ? "最近工件列表已刷新，但暂无可用诊断包记录"
+            : "尚未刷新 diagnostics artifact 列表"
+      )}</div>`;
 
   el.innerHTML = `
     <div class="bme-persist-grid">
@@ -3314,6 +3360,8 @@ function _refreshTaskPersistence() {
       ${renderRowsTwoColumn(authorityRows)}
       <div class="bme-config-help" style="margin-top:10px">${_escHtml(authorityAuditSummary.detail || "—")}</div>
       <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityAuditIssuesLabel)}</div>
+      <div class="bme-config-help" style="margin-top:10px">最近 diagnostics artifacts</div>
+      ${authorityArtifactsHtml}
       ${ps.authorityCheckpointRestoreError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityCheckpointRestoreError)}</div>` : ""}
     </div>
   `;
@@ -3371,6 +3419,14 @@ function _refreshTaskPersistence() {
           if (result?.handledToast) {
             return;
           }
+        } else if (action === "artifacts-refresh") {
+          if (typeof _actionHandlers.refreshAuthorityDiagnosticsArtifacts !== "function") return;
+          const result = await _actionHandlers.refreshAuthorityDiagnosticsArtifacts();
+          if (result?.ok) {
+            toastr.success(`已刷新 diagnostics artifact 列表（${Number(result?.entries?.length || 0)} 条）`, "ST-BME");
+          } else {
+            toastr.warning(`diagnostics artifact 列表刷新失败：${result?.error || "unknown"}`, "ST-BME");
+          }
         }
       } catch (error) {
         toastr.error(
@@ -3382,7 +3438,57 @@ function _refreshTaskPersistence() {
               ? `Authority Trivium 重建失败: ${error?.message || error}`
             : action === "baseline"
               ? `Authority Perf Baseline 捕获失败: ${error?.message || error}`
+            : action === "artifacts-refresh"
+              ? `diagnostics artifact 列表刷新失败: ${error?.message || error}`
             : `Authority 审计失败: ${error?.message || error}`,
+          "ST-BME",
+        );
+      } finally {
+        button.disabled = false;
+        _refreshTaskPersistence();
+      }
+    }));
+  el
+    .querySelectorAll('[data-authority-diagnostics-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityDiagnosticsAction || "").trim();
+      const artifactPath = String(button?.dataset?.authorityArtifactPath || "").trim();
+      const artifactReason = String(button?.dataset?.authorityArtifactReason || "diagnostics-bundle").trim();
+      if (button.disabled || !artifactPath) return;
+      button.disabled = true;
+      try {
+        if (action === "copy-path") {
+          await _copyTextToClipboard(artifactPath);
+          toastr.success("诊断包路径已复制", "ST-BME");
+        } else if (action === "download") {
+          if (typeof _actionHandlers.readAuthorityDiagnosticsArtifact !== "function") return;
+          const result = await _actionHandlers.readAuthorityDiagnosticsArtifact(artifactPath);
+          if (!result?.ok || !result?.payload) {
+            toastr.warning(`诊断包读取失败：${result?.error || "unknown"}`, "ST-BME");
+            return;
+          }
+          const fileName = String(artifactPath.split("/").pop() || `st-bme-diagnostics-${artifactReason}.json`);
+          _downloadJsonFile(result.payload, fileName);
+          toastr.success("诊断包已下载", "ST-BME");
+        } else if (action === "delete") {
+          if (typeof _actionHandlers.deleteAuthorityDiagnosticsArtifact !== "function") return;
+          const confirmed = globalThis.confirm?.(`确定删除该 diagnostics artifact？\n${artifactPath}`);
+          if (!confirmed) return;
+          const result = await _actionHandlers.deleteAuthorityDiagnosticsArtifact(artifactPath);
+          if (result?.ok) {
+            toastr.success("诊断包已删除", "ST-BME");
+          } else {
+            toastr.warning(`诊断包删除失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        }
+      } catch (error) {
+        toastr.error(
+          action === "copy-path"
+            ? `复制路径失败: ${error?.message || error}`
+            : action === "download"
+              ? `下载诊断包失败: ${error?.message || error}`
+              : `删除诊断包失败: ${error?.message || error}`,
           "ST-BME",
         );
       } finally {
@@ -12938,6 +13044,44 @@ function _downloadTaskProfile(taskProfiles, taskType, profile, globalTaskRegex =
 }
 function _sanitizeFileName(fileName = "profile.json") {
   return String(fileName || "profile.json").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
+}
+
+async function _copyTextToClipboard(text = "") {
+  const normalized = String(text || "");
+  if (!normalized) {
+    throw new Error("没有可复制的内容");
+  }
+  if (globalThis.navigator?.clipboard?.writeText) {
+    await globalThis.navigator.clipboard.writeText(normalized);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = normalized;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.left = "-9999px";
+  document.body.appendChild(input);
+  input.select();
+  input.setSelectionRange(0, normalized.length);
+  const copied = document.execCommand?.("copy");
+  input.remove();
+  if (!copied) {
+    throw new Error("浏览器不支持复制到剪贴板");
+  }
+}
+
+function _downloadJsonFile(payload, fileName = "st-bme-export.json") {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = _sanitizeFileName(fileName);
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function _downloadAllTaskProfiles(taskProfiles, globalTaskRegex = {}) {

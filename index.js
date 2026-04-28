@@ -388,7 +388,11 @@ import {
 import {
   buildAuthorityDiagnosticsBundle,
   buildAuthorityDiagnosticsBundlePath,
+  buildAuthorityDiagnosticsManifestPath,
   buildAuthorityPerformanceBaseline,
+  readAuthorityDiagnosticsManifest,
+  removeAuthorityDiagnosticsManifestEntry,
+  upsertAuthorityDiagnosticsManifestEntry,
   writeAuthorityDiagnosticsBundle as writeAuthorityDiagnosticsBundleFile,
 } from "./maintenance/authority-diagnostics-bundle.js";
 
@@ -2019,6 +2023,19 @@ function getGraphPersistenceLiveState() {
     authorityDiagnosticsBundleSize: Number(
       graphPersistenceState.authorityDiagnosticsBundleSize || 0,
     ),
+    authorityDiagnosticsManifestPath: String(
+      graphPersistenceState.authorityDiagnosticsManifestPath || "",
+    ),
+    authorityDiagnosticsArtifacts: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityDiagnosticsArtifacts,
+      [],
+    ),
+    authorityDiagnosticsArtifactsUpdatedAt: String(
+      graphPersistenceState.authorityDiagnosticsArtifactsUpdatedAt || "",
+    ),
+    authorityDiagnosticsArtifactsError: String(
+      graphPersistenceState.authorityDiagnosticsArtifactsError || "",
+    ),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -2372,6 +2389,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
     performanceBaseline: baseline,
   });
   const path = buildAuthorityDiagnosticsBundlePath(chatId, reason);
+  const manifestPath = buildAuthorityDiagnosticsManifestPath(chatId);
   const adapter = getAuthorityBlobAdapter();
   try {
     const result = await writeAuthorityDiagnosticsBundleFile(adapter, bundle, {
@@ -2391,6 +2409,27 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
         return 0;
       }
     })();
+    const manifestEntry = {
+      chatId,
+      path: String(result?.path || path),
+      reason,
+      size: bundleSize,
+      bundleVersion: Number(bundle?.bundleVersion || 1),
+      createdAt: String(bundle?.createdAt || updatedAt),
+      updatedAt,
+    };
+    const manifestResult = await upsertAuthorityDiagnosticsManifestEntry(adapter, manifestEntry, {
+      chatId,
+      path: manifestPath,
+      signal: options.signal,
+    }).catch(() => null);
+    const nextArtifactEntries = manifestResult?.entries || [
+      manifestEntry,
+      ...((Array.isArray(graphPersistenceState.authorityDiagnosticsArtifacts)
+        ? graphPersistenceState.authorityDiagnosticsArtifacts
+        : []
+      ).filter((entry) => String(entry?.path || "") !== manifestEntry.path)),
+    ];
     recordAuthorityBlobSnapshot({
       action: "diagnostics-write",
       ok: result?.ok !== false,
@@ -2406,6 +2445,12 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       authorityDiagnosticsBundleReason: reason,
       authorityDiagnosticsBundleUpdatedAt: updatedAt,
       authorityDiagnosticsBundleSize: bundleSize,
+      authorityDiagnosticsManifestPath: String(manifestResult?.path || manifestPath),
+      authorityDiagnosticsArtifacts: cloneRuntimeDebugValue(nextArtifactEntries, []),
+      authorityDiagnosticsArtifactsUpdatedAt: String(
+        manifestResult?.manifest?.updatedAt || updatedAt,
+      ),
+      authorityDiagnosticsArtifactsError: "",
     });
     if (options.refreshHost !== false) {
       refreshPanelLiveState();
@@ -2432,6 +2477,173 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       ok: false,
       reason: "authority-diagnostics-bundle-error",
       error,
+    };
+  }
+}
+
+async function refreshAuthorityDiagnosticsArtifacts(options = {}) {
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!chatId) {
+    return {
+      ok: false,
+      error: "missing-chat-id",
+    };
+  }
+  if (!shouldUseAuthorityDiagnosticsBundle()) {
+    return {
+      ok: false,
+      error: "authority-diagnostics-unavailable",
+    };
+  }
+  const adapter = getAuthorityBlobAdapter();
+  const manifestPath = buildAuthorityDiagnosticsManifestPath(chatId);
+  try {
+    const result = await readAuthorityDiagnosticsManifest(adapter, {
+      chatId,
+      path: manifestPath,
+      signal: options.signal,
+    });
+    updateGraphPersistenceState({
+      authorityDiagnosticsManifestPath: String(result?.path || manifestPath),
+      authorityDiagnosticsArtifacts: cloneRuntimeDebugValue(result?.entries, []),
+      authorityDiagnosticsArtifactsUpdatedAt: String(
+        result?.manifest?.updatedAt || new Date().toISOString(),
+      ),
+      authorityDiagnosticsArtifactsError: "",
+    });
+    if (options.refreshHost !== false) {
+      refreshPanelLiveState();
+    }
+    return {
+      ok: true,
+      entries: result?.entries || [],
+      path: String(result?.path || manifestPath),
+    };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority diagnostics manifest failed";
+    updateGraphPersistenceState({
+      authorityDiagnosticsManifestPath: manifestPath,
+      authorityDiagnosticsArtifactsError: message,
+      authorityDiagnosticsArtifactsUpdatedAt: new Date().toISOString(),
+    });
+    if (options.refreshHost !== false) {
+      refreshPanelLiveState();
+    }
+    return {
+      ok: false,
+      error: message,
+    };
+  }
+}
+
+async function readAuthorityDiagnosticsArtifact(path = "", options = {}) {
+  const normalizedPath = String(path || "").trim();
+  if (!normalizedPath) {
+    return {
+      ok: false,
+      error: "missing-artifact-path",
+    };
+  }
+  const adapter = getAuthorityBlobAdapter();
+  try {
+    const result = await adapter.readJson(normalizedPath, {
+      signal: options.signal,
+    });
+    if (!result?.exists || !result?.payload) {
+      return {
+        ok: false,
+        error: "artifact-not-found",
+      };
+    }
+    return {
+      ok: true,
+      path: String(result.path || normalizedPath),
+      payload: result.payload,
+      result,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || String(error) || "Authority diagnostics artifact read failed",
+    };
+  }
+}
+
+async function deleteAuthorityDiagnosticsArtifact(path = "", options = {}) {
+  const normalizedPath = String(path || "").trim();
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  if (!normalizedPath) {
+    return {
+      ok: false,
+      error: "missing-artifact-path",
+    };
+  }
+  const adapter = getAuthorityBlobAdapter();
+  const manifestPath = buildAuthorityDiagnosticsManifestPath(chatId);
+  try {
+    const deleteResult = await adapter.delete(normalizedPath, {
+      signal: options.signal,
+    });
+    const manifestResult = chatId
+      ? await removeAuthorityDiagnosticsManifestEntry(adapter, normalizedPath, {
+          chatId,
+          path: manifestPath,
+          signal: options.signal,
+        }).catch(() => null)
+      : null;
+    const updatedAt = new Date().toISOString();
+    const wasLatestArtifact =
+      String(graphPersistenceState.authorityDiagnosticsBundlePath || "") === normalizedPath;
+    const nextArtifactEntries = manifestResult?.entries ||
+      (Array.isArray(graphPersistenceState.authorityDiagnosticsArtifacts)
+        ? graphPersistenceState.authorityDiagnosticsArtifacts
+        : []
+      ).filter((entry) => String(entry?.path || "") !== normalizedPath);
+    updateGraphPersistenceState({
+      authorityDiagnosticsManifestPath: String(manifestResult?.path || manifestPath),
+      authorityDiagnosticsArtifacts: cloneRuntimeDebugValue(nextArtifactEntries, []),
+      authorityDiagnosticsArtifactsUpdatedAt: String(
+        manifestResult?.manifest?.updatedAt || updatedAt,
+      ),
+      authorityDiagnosticsArtifactsError: "",
+      authorityDiagnosticsBundlePath: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundlePath,
+      authorityDiagnosticsBundleReason: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleReason,
+      authorityDiagnosticsBundleUpdatedAt: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleUpdatedAt,
+      authorityDiagnosticsBundleSize: wasLatestArtifact ? 0 : graphPersistenceState.authorityDiagnosticsBundleSize,
+    });
+    recordAuthorityBlobSnapshot({
+      action: "diagnostics-delete",
+      ok: deleteResult?.ok !== false,
+      backend: "authority-blob",
+      path: normalizedPath,
+      reason: "manual-diagnostics-delete",
+    });
+    if (options.refreshHost !== false) {
+      refreshPanelLiveState();
+    }
+    return {
+      ok: deleteResult?.ok !== false,
+      deleted: deleteResult?.deleted === true,
+      missing: deleteResult?.missing === true,
+      path: normalizedPath,
+      entries: manifestResult?.entries || [],
+    };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority diagnostics artifact delete failed";
+    updateGraphPersistenceState({
+      authorityDiagnosticsArtifactsError: message,
+      authorityDiagnosticsArtifactsUpdatedAt: new Date().toISOString(),
+    });
+    if (options.refreshHost !== false) {
+      refreshPanelLiveState();
+    }
+    return {
+      ok: false,
+      error: message,
     };
   }
 }
@@ -21512,6 +21724,24 @@ async function onCaptureAuthorityPerformanceBaseline() {
   });
 }
 
+async function onRefreshAuthorityDiagnosticsArtifacts() {
+  return await refreshAuthorityDiagnosticsArtifacts({
+    refreshHost: true,
+  });
+}
+
+async function onReadAuthorityDiagnosticsArtifact(path = "") {
+  return await readAuthorityDiagnosticsArtifact(path, {
+    refreshHost: true,
+  });
+}
+
+async function onDeleteAuthorityDiagnosticsArtifact(path = "") {
+  return await deleteAuthorityDiagnosticsArtifact(path, {
+    refreshHost: true,
+  });
+}
+
 async function onReembedDirect() {
   return await onReembedDirectController({
     getEmbeddingConfig,
@@ -22095,6 +22325,9 @@ async function onCompactLukerSidecar() {
       writeAuthorityCheckpoint: onWriteAuthorityCheckpoint,
       restoreAuthorityCheckpoint: onRestoreAuthorityCheckpoint,
       captureAuthorityPerformanceBaseline: onCaptureAuthorityPerformanceBaseline,
+      refreshAuthorityDiagnosticsArtifacts: onRefreshAuthorityDiagnosticsArtifacts,
+      readAuthorityDiagnosticsArtifact: onReadAuthorityDiagnosticsArtifact,
+      deleteAuthorityDiagnosticsArtifact: onDeleteAuthorityDiagnosticsArtifact,
       reembedDirect: onReembedDirect,
       reroll: onReroll,
       clearGraph: onClearGraph,

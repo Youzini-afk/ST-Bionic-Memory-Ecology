@@ -187,6 +187,10 @@ export function createGraphPersistenceState() {
     authorityDiagnosticsBundleReason: "",
     authorityDiagnosticsBundleUpdatedAt: "",
     authorityDiagnosticsBundleSize: 0,
+    authorityDiagnosticsManifestPath: "",
+    authorityDiagnosticsArtifacts: [],
+    authorityDiagnosticsArtifactsUpdatedAt: "",
+    authorityDiagnosticsArtifactsError: "",
     localStoreFormatVersion: 1,
     localStoreMigrationState: "idle",
     opfsWriteLockState: {

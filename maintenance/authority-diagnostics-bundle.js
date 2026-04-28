@@ -56,6 +56,9 @@ function buildCompactTimestamp(date = new Date()) {
   return `${year}${month}${day}-${hour}${minute}${second}`;
 }
 
+const AUTHORITY_DIAGNOSTICS_MANIFEST_VERSION = 1;
+const AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT = 12;
+
 function isSensitiveKey(key = "") {
   return /(api[_-]?key|token|secret|password|authorization|auth[_-]?header|cookie)/i.test(
     String(key || ""),
@@ -300,6 +303,227 @@ export function buildAuthorityDiagnosticsBundlePath(chatId = "", reason = "diagn
   const hash = buildHash(`${normalizedChatId}:${safeReason}`);
   const timestamp = buildCompactTimestamp(new Date());
   return `user/files/ST-BME_diagnostics_${safeChatId}-${safeReason}-${hash}-${timestamp}.json`;
+}
+
+function normalizeIsoTimestamp(value = "") {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function normalizeManifestLimit(value, fallback = AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.max(1, Math.trunc(parsed));
+}
+
+export function buildAuthorityDiagnosticsManifestPath(chatId = "") {
+  const normalizedChatId = normalizeRecordId(chatId);
+  const safeChatId = buildSafeSlug(normalizedChatId || "global");
+  const hash = buildHash(`${normalizedChatId}:diagnostics-manifest`);
+  return `user/files/ST-BME_diagnostics_manifest_${safeChatId}-${hash}.json`;
+}
+
+export function normalizeAuthorityDiagnosticsArtifactRecord(record = null) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const path = normalizeRecordId(record.path);
+  if (!path) return null;
+  const createdAt =
+    normalizeIsoTimestamp(record.createdAt) || normalizeIsoTimestamp(record.updatedAt);
+  const updatedAt =
+    normalizeIsoTimestamp(record.updatedAt) || createdAt || new Date().toISOString();
+  return {
+    kind: "diagnostics-bundle",
+    chatId: normalizeRecordId(record.chatId),
+    path,
+    reason: String(record.reason || "diagnostics-bundle"),
+    size: Math.max(0, Number(record.size || 0) || 0),
+    bundleVersion: Math.max(1, Number(record.bundleVersion || 1) || 1),
+    createdAt: createdAt || updatedAt,
+    updatedAt,
+  };
+}
+
+function buildAuthorityDiagnosticsManifestEntries(entries = [], limit = AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT) {
+  const normalizedEntries = [];
+  const seenPaths = new Set();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const normalized = normalizeAuthorityDiagnosticsArtifactRecord(entry);
+    if (!normalized || seenPaths.has(normalized.path)) continue;
+    seenPaths.add(normalized.path);
+    normalizedEntries.push(normalized);
+  }
+  normalizedEntries.sort((left, right) => {
+    const leftTime = Date.parse(left.updatedAt || left.createdAt || 0) || 0;
+    const rightTime = Date.parse(right.updatedAt || right.createdAt || 0) || 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return String(left.path).localeCompare(String(right.path));
+  });
+  return normalizedEntries.slice(0, normalizeManifestLimit(limit));
+}
+
+function normalizeAuthorityDiagnosticsManifest(manifest = null, options = {}) {
+  const source = manifest && typeof manifest === "object" && !Array.isArray(manifest) ? manifest : {};
+  const chatId = normalizeRecordId(options.chatId || source.chatId);
+  const entries = buildAuthorityDiagnosticsManifestEntries(
+    source.entries,
+    options.limit,
+  );
+  const updatedAt =
+    normalizeIsoTimestamp(options.updatedAt || source.updatedAt) ||
+    entries[0]?.updatedAt ||
+    new Date().toISOString();
+  return {
+    kind: "st-bme-authority-diagnostics-manifest",
+    version: AUTHORITY_DIAGNOSTICS_MANIFEST_VERSION,
+    chatId,
+    updatedAt,
+    entries,
+  };
+}
+
+export async function readAuthorityDiagnosticsManifest(adapter, options = {}) {
+  if (!adapter || typeof adapter.readJson !== "function") {
+    throw new Error("Authority diagnostics adapter unavailable");
+  }
+  const chatId = normalizeRecordId(options.chatId);
+  const path = String(options.path || buildAuthorityDiagnosticsManifestPath(chatId));
+  const result = await adapter.readJson(path, {
+    signal: options.signal,
+  });
+  if (!result?.exists || !result?.payload) {
+    const manifest = normalizeAuthorityDiagnosticsManifest(null, {
+      chatId,
+      updatedAt: options.updatedAt,
+      limit: options.limit,
+    });
+    return {
+      ok: true,
+      exists: false,
+      path,
+      entries: manifest.entries,
+      manifest,
+      result,
+    };
+  }
+  const manifest = normalizeAuthorityDiagnosticsManifest(result.payload, {
+    chatId,
+    updatedAt: options.updatedAt,
+    limit: options.limit,
+  });
+  return {
+    ok: true,
+    exists: true,
+    path,
+    entries: manifest.entries,
+    manifest,
+    result,
+  };
+}
+
+export async function writeAuthorityDiagnosticsManifest(adapter, manifest = null, options = {}) {
+  if (!adapter || typeof adapter.writeJson !== "function") {
+    throw new Error("Authority diagnostics adapter unavailable");
+  }
+  const chatId = normalizeRecordId(options.chatId || manifest?.chatId);
+  const path = String(options.path || buildAuthorityDiagnosticsManifestPath(chatId));
+  const normalizedManifest = normalizeAuthorityDiagnosticsManifest(manifest, {
+    chatId,
+    updatedAt: options.updatedAt,
+    limit: options.limit,
+  });
+  const result = await adapter.writeJson(path, normalizedManifest, {
+    signal: options.signal,
+    metadata: safeClone(
+      {
+        chatId,
+        kind: "diagnostics-manifest",
+        entryCount: normalizedManifest.entries.length,
+        updatedAt: normalizedManifest.updatedAt,
+      },
+      {},
+    ),
+  });
+  return {
+    ok: result?.ok !== false,
+    path: String(result?.path || path),
+    manifest: normalizedManifest,
+    entries: normalizedManifest.entries,
+    result,
+  };
+}
+
+export async function upsertAuthorityDiagnosticsManifestEntry(adapter, entry = null, options = {}) {
+  const normalizedEntry = normalizeAuthorityDiagnosticsArtifactRecord(entry);
+  if (!normalizedEntry) {
+    throw new Error("Authority diagnostics artifact entry unavailable");
+  }
+  const current = await readAuthorityDiagnosticsManifest(adapter, {
+    chatId: options.chatId || normalizedEntry.chatId,
+    path: options.path,
+    signal: options.signal,
+    limit: options.limit,
+  });
+  const entries = buildAuthorityDiagnosticsManifestEntries(
+    [normalizedEntry, ...current.entries.filter((item) => item.path !== normalizedEntry.path)],
+    options.limit,
+  );
+  const writeResult = await writeAuthorityDiagnosticsManifest(
+    adapter,
+    {
+      ...current.manifest,
+      chatId:
+        normalizeRecordId(options.chatId || normalizedEntry.chatId || current.manifest?.chatId),
+      updatedAt: normalizedEntry.updatedAt || new Date().toISOString(),
+      entries,
+    },
+    {
+      chatId: options.chatId || normalizedEntry.chatId,
+      path: current.path,
+      signal: options.signal,
+      limit: options.limit,
+    },
+  );
+  return {
+    ...writeResult,
+    entry: normalizedEntry,
+  };
+}
+
+export async function removeAuthorityDiagnosticsManifestEntry(adapter, artifactPath = "", options = {}) {
+  const normalizedPath = normalizeRecordId(artifactPath);
+  if (!normalizedPath) {
+    throw new Error("Authority diagnostics artifact path is required");
+  }
+  const current = await readAuthorityDiagnosticsManifest(adapter, {
+    chatId: options.chatId,
+    path: options.path,
+    signal: options.signal,
+    limit: options.limit,
+  });
+  const entries = current.entries.filter((entry) => entry.path !== normalizedPath);
+  const removed = entries.length !== current.entries.length;
+  const writeResult = await writeAuthorityDiagnosticsManifest(
+    adapter,
+    {
+      ...current.manifest,
+      updatedAt: options.updatedAt || new Date().toISOString(),
+      entries,
+    },
+    {
+      chatId: options.chatId || current.manifest?.chatId,
+      path: current.path,
+      signal: options.signal,
+      limit: options.limit,
+    },
+  );
+  return {
+    ...writeResult,
+    removed,
+  };
 }
 
 export function buildAuthorityDiagnosticsBundle({

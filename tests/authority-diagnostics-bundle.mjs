@@ -3,21 +3,50 @@ import assert from "node:assert/strict";
 import {
   buildAuthorityDiagnosticsBundle,
   buildAuthorityDiagnosticsBundlePath,
+  buildAuthorityDiagnosticsManifestPath,
   buildAuthorityPerformanceBaseline,
+  readAuthorityDiagnosticsManifest,
+  removeAuthorityDiagnosticsManifestEntry,
   sanitizeDiagnosticsSettings,
+  upsertAuthorityDiagnosticsManifestEntry,
   writeAuthorityDiagnosticsBundle,
 } from "../maintenance/authority-diagnostics-bundle.js";
 
 function createMockAdapter() {
   const calls = [];
+  const storage = new Map();
   return {
     calls,
+    storage,
     async writeJson(path, payload, options = {}) {
+      storage.set(path, structuredClone(payload));
       calls.push([path, payload, options]);
       return {
         ok: true,
         path,
         size: JSON.stringify(payload).length,
+      };
+    },
+    async readJson(path) {
+      if (!storage.has(path)) {
+        return {
+          exists: false,
+          path,
+        };
+      }
+      return {
+        exists: true,
+        path,
+        payload: structuredClone(storage.get(path)),
+      };
+    },
+    async delete(path) {
+      const existed = storage.delete(path);
+      return {
+        ok: true,
+        path,
+        deleted: existed,
+        missing: !existed,
       };
     },
   };
@@ -205,6 +234,14 @@ function createMockAdapter() {
 }
 
 {
+  const manifestPath = buildAuthorityDiagnosticsManifestPath("chat/main");
+  assert.match(
+    manifestPath,
+    /^user\/files\/ST-BME_diagnostics_manifest_chat_main-[a-z0-9]+\.json$/,
+  );
+}
+
+{
   const adapter = createMockAdapter();
   const bundle = buildAuthorityDiagnosticsBundle({
     chatId: "chat-main",
@@ -223,6 +260,40 @@ function createMockAdapter() {
   assert.equal(adapter.calls.length, 1);
   assert.equal(adapter.calls[0][2]?.metadata?.kind, "diagnostics-bundle");
   assert.equal(adapter.calls[0][2]?.metadata?.chatId, "chat-main");
+}
+
+{
+  const adapter = createMockAdapter();
+  await upsertAuthorityDiagnosticsManifestEntry(adapter, {
+    chatId: "chat-main",
+    path: "user/files/diag-a.json",
+    reason: "manual-export",
+    size: 100,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  });
+  await upsertAuthorityDiagnosticsManifestEntry(adapter, {
+    chatId: "chat-main",
+    path: "user/files/diag-b.json",
+    reason: "scheduled-export",
+    size: 120,
+    updatedAt: "2026-01-02T00:00:00.000Z",
+  });
+  const readResult = await readAuthorityDiagnosticsManifest(adapter, {
+    chatId: "chat-main",
+  });
+  assert.equal(readResult.exists, true);
+  assert.equal(readResult.entries.length, 2);
+  assert.equal(readResult.entries[0].path, "user/files/diag-b.json");
+  assert.equal(readResult.entries[1].path, "user/files/diag-a.json");
+
+  const removeResult = await removeAuthorityDiagnosticsManifestEntry(
+    adapter,
+    "user/files/diag-a.json",
+    { chatId: "chat-main" },
+  );
+  assert.equal(removeResult.removed, true);
+  assert.equal(removeResult.entries.length, 1);
+  assert.equal(removeResult.entries[0].path, "user/files/diag-b.json");
 }
 
 console.log("authority-diagnostics-bundle tests passed");
