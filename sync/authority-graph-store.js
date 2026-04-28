@@ -342,6 +342,22 @@ function normalizeUpsertCountDelta(delta = {}) {
   };
 }
 
+export function convertNamedParamsToPositional(sql, params = {}) {
+  if (Array.isArray(params)) return { sql, params };
+  if (!params || typeof params !== "object") return { sql, params: [] };
+  const names = [];
+  const positionalSql = sql.replace(/(?<!:):(\w+)/g, (_, name) => {
+    names.push(name);
+    return "?";
+  });
+  if (!names.length) return { sql: positionalSql, params: [] };
+  const positionalParams = names.map((name) => {
+    if (!Object.prototype.hasOwnProperty.call(params, name)) return null;
+    return params[name];
+  });
+  return { sql: positionalSql, params: positionalParams };
+}
+
 export class AuthoritySqlHttpClient {
   constructor(options = {}) {
     this.http = new AuthorityHttpClient({
@@ -352,18 +368,20 @@ export class AuthoritySqlHttpClient {
   }
 
   async query(sql, params = {}) {
+    const positional = convertNamedParamsToPositional(String(sql || ""), params);
     return await this._request(AUTHORITY_SQL_QUERY_ENDPOINT, {
       database: this.database,
-      statement: String(sql || ""),
-      params,
+      statement: positional.sql,
+      params: positional.params,
     });
   }
 
   async execute(sql, params = {}) {
+    const positional = convertNamedParamsToPositional(String(sql || ""), params);
     return await this._request(AUTHORITY_SQL_EXEC_ENDPOINT, {
       database: this.database,
-      statement: String(sql || ""),
-      params,
+      statement: positional.sql,
+      params: positional.params,
     });
   }
 
@@ -372,10 +390,13 @@ export class AuthoritySqlHttpClient {
       database: this.database,
       statements: toArray(statements)
         .filter((statement) => statement?.sql)
-        .map((statement) => ({
-          statement: String(statement.sql || ""),
-          params: statement.params || {},
-        })),
+        .map((statement) => {
+          const positional = convertNamedParamsToPositional(String(statement.sql || ""), statement.params || {});
+          return {
+            statement: positional.sql,
+            params: positional.params,
+          };
+        }),
     });
   }
 

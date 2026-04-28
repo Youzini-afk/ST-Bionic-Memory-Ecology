@@ -5,6 +5,7 @@ import {
   AUTHORITY_GRAPH_STORE_MODE,
   AuthorityGraphStore,
   AuthoritySqlHttpClient,
+  convertNamedParamsToPositional,
 } from "../sync/authority-graph-store.js";
 import {
   BME_DB_SCHEMA_VERSION,
@@ -335,10 +336,61 @@ async function testHttpSqlClientBoundary() {
   assert.deepEqual(JSON.parse(requests[1].init.body), {
     database: "default",
     statement: "SELECT 1",
-    params: { chatId: "chat" },
+    params: [],
   });
 }
 
+async function testConvertNamedParamsToPositional() {
+  // Named params with :placeholders get converted to positional ? with array
+  const r1 = convertNamedParamsToPositional(
+    "SELECT * FROM t WHERE chat_id = :chatId AND meta_key = :key",
+    { chatId: "abc", key: "rev" },
+  );
+  assert.equal(r1.sql, "SELECT * FROM t WHERE chat_id = ? AND meta_key = ?");
+  assert.deepEqual(r1.params, ["abc", "rev"]);
+
+  // Duplicate named params produce multiple positional entries
+  const r2 = convertNamedParamsToPositional(
+    "INSERT INTO t (a, b) VALUES (:chatId, :chatId)",
+    { chatId: "dup" },
+  );
+  assert.equal(r2.sql, "INSERT INTO t (a, b) VALUES (?, ?)");
+  assert.deepEqual(r2.params, ["dup", "dup"]);
+
+  // No placeholders → empty array
+  const r3 = convertNamedParamsToPositional("SELECT 1", { chatId: "x" });
+  assert.equal(r3.sql, "SELECT 1");
+  assert.deepEqual(r3.params, []);
+
+  // Already-array params pass through unchanged
+  const r4 = convertNamedParamsToPositional("SELECT ?", [42]);
+  assert.equal(r4.sql, "SELECT ?");
+  assert.deepEqual(r4.params, [42]);
+
+  // Empty/null params → empty array
+  const r5 = convertNamedParamsToPositional("SELECT 1", null);
+  assert.deepEqual(r5.params, []);
+  const r6 = convertNamedParamsToPositional("SELECT 1", undefined);
+  assert.deepEqual(r6.params, []);
+
+  // Missing param name → null in array
+  const r7 = convertNamedParamsToPositional(
+    "WHERE x = :x AND y = :y",
+    { x: 1 },
+  );
+  assert.equal(r7.sql, "WHERE x = ? AND y = ?");
+  assert.deepEqual(r7.params, [1, null]);
+
+  // ::typecast is not treated as a named param
+  const r8 = convertNamedParamsToPositional(
+    "SELECT x::text FROM t WHERE id = :id",
+    { id: 5 },
+  );
+  assert.equal(r8.sql, "SELECT x::text FROM t WHERE id = ?");
+  assert.deepEqual(r8.params, [5]);
+}
+
+await testConvertNamedParamsToPositional();
 await testOpenSeedsAuthorityMeta();
 await testImportCommitAndExportSnapshot();
 await testPruneAndClear();
