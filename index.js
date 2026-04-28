@@ -1274,6 +1274,7 @@ let isRecoveringHistory = false;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 300000;
+const EXTRACTION_VECTOR_SYNC_TIMEOUT_MS = 120000;
 const STATUS_TOAST_THROTTLE_MS = 1500;
 const RECALL_INPUT_RECORD_TTL_MS = 60000;
 const TRIVIAL_GENERATION_SKIP_TTL_MS = 60000;
@@ -19953,9 +19954,36 @@ async function handleExtractionSuccess(
       "向量同步中",
       "正在同步本批提取后的向量索引",
     );
-    vectorSync = await syncVectorState({ signal });
+    const vectorSyncTimeoutController = new AbortController();
+    const vectorSyncTimeout = setTimeout(
+      () => vectorSyncTimeoutController.abort(
+        new DOMException(
+          `向量同步超时 (${Math.round(EXTRACTION_VECTOR_SYNC_TIMEOUT_MS / 1000)}s)`,
+          "AbortError",
+        ),
+      ),
+      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
+    );
+    let vectorSyncSignal = vectorSyncTimeoutController.signal;
+    if (signal) {
+      try {
+        if (typeof AbortSignal.any === "function") {
+          vectorSyncSignal = AbortSignal.any([signal, vectorSyncTimeoutController.signal]);
+        }
+      } catch {}
+    }
+    try {
+      vectorSync = await syncVectorState({ signal: vectorSyncSignal });
+    } finally {
+      clearTimeout(vectorSyncTimeout);
+    }
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    if (isAbortError(error)) {
+      const isVectorSyncTimeout = error?.name === "AbortError" &&
+        typeof error?.message === "string" &&
+        error.message.includes("向量同步超时");
+      if (!isVectorSyncTimeout) throw error;
+    }
     const message = error?.message || String(error) || "向量同步阶段失败";
     setBatchStageOutcome(
       status,

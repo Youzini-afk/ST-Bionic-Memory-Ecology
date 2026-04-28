@@ -17,6 +17,7 @@ import { applyTaskRegex } from "../prompting/task-regex.js";
 
 const MODULE_NAME = "st_bme";
 const LLM_REQUEST_TIMEOUT_MS = 300000;
+const LLM_STREAM_IDLE_TIMEOUT_MS = 90000;
 const DEFAULT_TEXT_COMPLETION_TOKENS = 64000;
 const DEFAULT_JSON_COMPLETION_TOKENS = 64000;
 const STREAM_DEBUG_PREVIEW_MAX_CHARS = 1200;
@@ -1640,7 +1641,7 @@ function isAbortError(error) {
 
 async function parseDedicatedStreamingResponse(
   response,
-  { taskKey = "", streamState = null, onStreamProgress = null } = {},
+  { taskKey = "", streamState = null, onStreamProgress = null, idleTimeoutMs = LLM_STREAM_IDLE_TIMEOUT_MS } = {},
 ) {
   const reader = response?.body?.getReader?.();
   if (!reader) {
@@ -1663,12 +1664,55 @@ async function parseDedicatedStreamingResponse(
   streamState.finishedAt = "";
   recordTaskLlmStreamState(taskKey, streamState, {}, { force: true });
 
+  let lastChunkAt = Date.now();
+  const idleAbortController = new AbortController();
+  let idleTimer = null;
+
+  const resetIdleTimer = () => {
+    lastChunkAt = Date.now();
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      try {
+        idleAbortController.abort(
+          new DOMException(
+            `LLM 流式响应空闲超时 (${Math.round(idleTimeoutMs / 1000)}s 未收到数据)`,
+            "AbortError",
+          ),
+        );
+      } catch {}
+    }, idleTimeoutMs);
+  };
+
+  const clearIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
+  resetIdleTimer();
+
   try {
+    const combinedSignal = idleAbortController.signal;
     while (true) {
-      const { done, value } = await reader.read();
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (readError) {
+        if (idleAbortController.signal.aborted) {
+          throw new Error(
+            `LLM 流式响应空闲超时 (${Math.round(idleTimeoutMs / 1000)}s 未收到数据)`,
+          );
+        }
+        throw readError;
+      }
+
+      const { done, value } = readResult;
       if (done) {
         break;
       }
+
+      resetIdleTimer();
 
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
@@ -1801,6 +1845,7 @@ async function parseDedicatedStreamingResponse(
     recordTaskLlmStreamState(taskKey, streamState, {}, { force: true });
     throw error;
   } finally {
+    clearIdleTimer();
     try {
       reader.releaseLock?.();
     } catch {
@@ -1818,6 +1863,7 @@ async function executeDedicatedRequest(
     taskKey = "",
     streamState = null,
     onStreamProgress = null,
+    idleTimeoutMs = LLM_STREAM_IDLE_TIMEOUT_MS,
   } = {},
 ) {
   const requestBody = cloneRuntimeDebugValue(body, {}) || {};
@@ -1879,6 +1925,7 @@ async function executeDedicatedRequest(
         taskKey,
         streamState,
         onStreamProgress,
+        idleTimeoutMs,
       });
     }
 
@@ -2167,6 +2214,9 @@ async function callDedicatedOpenAICompatible(
       taskKey,
       streamState,
       onStreamProgress,
+      idleTimeoutMs: config.timeoutMs
+        ? Math.max(Math.floor(config.timeoutMs * 0.3), 30000)
+        : LLM_STREAM_IDLE_TIMEOUT_MS,
     });
   } catch (error) {
     if (
@@ -2199,6 +2249,9 @@ async function callDedicatedOpenAICompatible(
       jsonMode,
       taskKey,
       streamState,
+      idleTimeoutMs: config.timeoutMs
+        ? Math.max(Math.floor(config.timeoutMs * 0.3), 30000)
+        : LLM_STREAM_IDLE_TIMEOUT_MS,
     });
 
     streamState.fallbackSucceeded = true;
