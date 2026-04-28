@@ -1321,6 +1321,58 @@ export async function onDeleteCurrentIdbController(runtime) {
   return { handledToast: true };
 }
 
+export async function onExportDiagnosticsBundleController(runtime) {
+  const chatId = runtime.getCurrentChatId?.();
+  if (!chatId) {
+    runtime.toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+  if (typeof runtime.exportDiagnosticsBundle !== "function") {
+    runtime.toastr.info("当前运行时没有接入诊断包导出入口");
+    return { handledToast: true, result: { ok: false, reason: "missing-export-hook" } };
+  }
+
+  updateManualActionUiState(
+    runtime,
+    "导出诊断包中",
+    "正在收集运行时与持久化快照，并写入 Authority Blob",
+    "running",
+  );
+  try {
+    const result = await runtime.exportDiagnosticsBundle({
+      chatId,
+      reason: "manual-diagnostics-bundle",
+      refreshHost: true,
+    });
+    if (result?.ok) {
+      updateManualActionUiState(
+        runtime,
+        "诊断包已导出",
+        result?.path || "Authority Blob",
+        "success",
+      );
+      runtime.toastr.success(`诊断包已写入: ${result?.path || "Authority Blob"}`);
+    } else {
+      const reason = String(result?.reason || "authority-diagnostics-unavailable");
+      updateManualActionUiState(runtime, "诊断包未导出", reason, "idle");
+      runtime.toastr.info(`诊断包未导出: ${reason}`);
+    }
+    return { handledToast: true, result };
+  } catch (error) {
+    const message = error?.message || String(error) || "未知错误";
+    updateManualActionUiState(runtime, "诊断包导出失败", message, "error");
+    runtime.toastr.error(`诊断包导出失败: ${message}`);
+    return {
+      handledToast: true,
+      result: {
+        ok: false,
+        reason: "authority-diagnostics-bundle-error",
+        error,
+      },
+    };
+  }
+}
+
 export async function onDeleteAllIdbController(runtime) {
   const userInput = runtime.prompt(
     "此操作会删除所有聊天的 BME 本地图谱存储（IndexedDB / OPFS），不影响 Luker 侧车主存储。\n\n请输入 DELETE 确认：",

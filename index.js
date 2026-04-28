@@ -330,6 +330,7 @@ import {
   onClearBatchJournalController,
   onDeleteCurrentIdbController,
   onDeleteAllIdbController,
+  onExportDiagnosticsBundleController,
   onDeleteServerSyncFileController,
 } from "./ui/ui-actions-controller.js";
 import {
@@ -377,6 +378,11 @@ import {
   createAuthorityBlobAdapter,
   normalizeAuthorityBlobConfig,
 } from "./maintenance/authority-blob-adapter.js";
+import {
+  buildAuthorityDiagnosticsBundle,
+  buildAuthorityDiagnosticsBundlePath,
+  writeAuthorityDiagnosticsBundle as writeAuthorityDiagnosticsBundleFile,
+} from "./maintenance/authority-diagnostics-bundle.js";
 
 export { DEFAULT_TRIGGER_KEYWORDS, getSmartTriggerDecision };
 
@@ -1897,6 +1903,18 @@ function getGraphPersistenceLiveState() {
       graphPersistenceState.loadDiagnostics,
       null,
     ),
+    authorityDiagnosticsBundlePath: String(
+      graphPersistenceState.authorityDiagnosticsBundlePath || "",
+    ),
+    authorityDiagnosticsBundleReason: String(
+      graphPersistenceState.authorityDiagnosticsBundleReason || "",
+    ),
+    authorityDiagnosticsBundleUpdatedAt: String(
+      graphPersistenceState.authorityDiagnosticsBundleUpdatedAt || "",
+    ),
+    authorityDiagnosticsBundleSize: Number(
+      graphPersistenceState.authorityDiagnosticsBundleSize || 0,
+    ),
   };
 
   return cloneRuntimeDebugValue(snapshot, snapshot);
@@ -2014,6 +2032,17 @@ function shouldUseAuthorityBlobCheckpoint() {
   return Boolean(
     authoritySettings.enabled &&
       authoritySettings.blobCheckpointEnabled &&
+      capability.blobReady,
+  );
+}
+
+function shouldUseAuthorityDiagnosticsBundle() {
+  const settings = getSettings();
+  const authoritySettings = normalizeAuthoritySettings(settings);
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  return Boolean(
+    authoritySettings.enabled &&
+      settings.authorityDiagnosticsEnabled !== false &&
       capability.blobReady,
   );
 }
@@ -2146,6 +2175,103 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
       exists: false,
       path,
       reason: "authority-blob-checkpoint-read-error",
+      error,
+    };
+  }
+}
+
+async function exportAuthorityDiagnosticsBundle({
+  chatId = "",
+  reason = "diagnostics-bundle",
+  signal = undefined,
+  refreshHost = false,
+} = {}) {
+  const normalizedChatId =
+    normalizeChatIdCandidate(chatId) ||
+    normalizeChatIdCandidate(graphPersistenceState.chatId) ||
+    normalizeChatIdCandidate(getCurrentChatId());
+  if (!normalizedChatId) {
+    return {
+      ok: false,
+      reason: "missing-chat-id",
+    };
+  }
+  if (!shouldUseAuthorityDiagnosticsBundle()) {
+    return {
+      ok: false,
+      reason: "authority-diagnostics-unavailable",
+    };
+  }
+  const normalizedReason = String(reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
+  const path = buildAuthorityDiagnosticsBundlePath(normalizedChatId, normalizedReason);
+  try {
+    const bundle = buildAuthorityDiagnosticsBundle({
+      chatId: normalizedChatId,
+      reason: normalizedReason,
+      settings: getSettings(),
+      runtimeStatus: getPanelRuntimeStatus(),
+      runtimeDebug: getPanelRuntimeDebugSnapshot({ refreshHost }),
+      graphPersistence: getGraphPersistenceLiveState(),
+      graph: currentGraph,
+      lastExtractionStatus,
+      lastVectorStatus,
+      lastRecallStatus,
+      lastBatchStatus: currentGraph?.historyState?.lastBatchStatus || null,
+      lastInjection: lastInjectionContent,
+      lastExtract: lastExtractedItems,
+      lastRecall: lastRecalledItems,
+    });
+    const adapter = getAuthorityBlobAdapter();
+    const result = await writeAuthorityDiagnosticsBundleFile(adapter, bundle, {
+      chatId: normalizedChatId,
+      reason: normalizedReason,
+      path,
+      signal,
+    });
+    const bundleSize = Math.max(
+      0,
+      Number(result?.result?.size || 0) || JSON.stringify(bundle).length || 0,
+    );
+    recordAuthorityBlobSnapshot({
+      action: "diagnostics-write",
+      ok: result?.ok !== false,
+      backend: "authority-blob",
+      path: result?.path || path,
+      reason: normalizedReason,
+      size: bundleSize,
+    });
+    updateGraphPersistenceState({
+      authorityDiagnosticsBundlePath: String(result?.path || path),
+      authorityDiagnosticsBundleReason: normalizedReason,
+      authorityDiagnosticsBundleUpdatedAt: new Date().toISOString(),
+      authorityDiagnosticsBundleSize: bundleSize,
+    });
+    return {
+      ok: result?.ok !== false,
+      path: String(result?.path || path),
+      size: bundleSize,
+      result,
+    };
+  } catch (error) {
+    const message = error?.message || String(error) || "Authority diagnostics bundle failed";
+    recordAuthorityBlobSnapshot({
+      action: "diagnostics-write",
+      ok: false,
+      backend: "authority-blob",
+      path,
+      reason: normalizedReason,
+      error: message,
+    });
+    updateGraphPersistenceState({
+      authorityDiagnosticsBundlePath: path,
+      authorityDiagnosticsBundleReason: normalizedReason,
+      authorityDiagnosticsBundleUpdatedAt: new Date().toISOString(),
+      authorityDiagnosticsBundleSize: 0,
+    });
+    return {
+      ok: false,
+      path,
+      reason: "authority-diagnostics-bundle-error",
       error,
     };
   }
@@ -20524,6 +20650,7 @@ const _cleanupRuntime = () => ({
   createEmptyGraph,
   clearInjectionState,
   ensureGraphMutationReady,
+  exportDiagnosticsBundle: async (options = {}) => await exportAuthorityDiagnosticsBundle(options),
   getCurrentChatId,
   getCurrentGraph: () => currentGraph,
   markVectorStateDirty: (reason) => {
@@ -20538,6 +20665,7 @@ const _cleanupRuntime = () => ({
   saveGraphToChat,
   syncGraphLoadFromLiveContext,
   setCurrentGraph: (graph) => { currentGraph = graph; },
+  setRuntimeStatus,
   setExtractionCount: (count) => {
     if (currentGraph?.historyState) {
       currentGraph.historyState.extractionCount = count;
@@ -20608,6 +20736,10 @@ async function onDeleteAllIdb() {
 
 async function onDeleteServerSyncFile() {
   return await onDeleteServerSyncFileController(_cleanupRuntime());
+}
+
+async function onExportDiagnosticsBundle() {
+  return await onExportDiagnosticsBundleController(_cleanupRuntime());
 }
 
 async function onBackupCurrentChatToCloud() {
@@ -21087,6 +21219,7 @@ async function onCompactLukerSidecar() {
       clearBatchJournal: onClearBatchJournal,
       deleteCurrentIdb: onDeleteCurrentIdb,
       deleteAllIdb: onDeleteAllIdb,
+      exportDiagnosticsBundle: onExportDiagnosticsBundle,
       deleteServerSyncFile: onDeleteServerSyncFile,
       backupToCloud: onBackupCurrentChatToCloud,
       restoreFromCloud: onRestoreCurrentChatFromCloud,

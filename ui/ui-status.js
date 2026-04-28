@@ -164,6 +164,10 @@ export function createGraphPersistenceState() {
     authorityLastBlobReason: "",
     authorityLastBlobError: "",
     authorityLastBlobUpdatedAt: "",
+    authorityDiagnosticsBundlePath: "",
+    authorityDiagnosticsBundleReason: "",
+    authorityDiagnosticsBundleUpdatedAt: "",
+    authorityDiagnosticsBundleSize: 0,
     localStoreFormatVersion: 1,
     localStoreMigrationState: "idle",
     opfsWriteLockState: {
