@@ -21,6 +21,37 @@ function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
   return Math.min(max, Math.max(min, Math.trunc(numeric)));
 }
 
+function uniqueStringList(values = []) {
+  const seen = new Set();
+  const result = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const normalized = String(value || "").trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function resolveBulkAutoConsolidationWindow(settings = {}, options = {}) {
+  return {
+    everyBatches: clampIntValue(
+      options?.bulkAutoConsolidationEveryBatches ??
+        settings?.bulkAutoConsolidationEveryBatches,
+      20,
+      2,
+      200,
+    ),
+    minNewNodes: clampIntValue(
+      options?.bulkAutoConsolidationMinNewNodes ??
+        settings?.bulkAutoConsolidationMinNewNodes,
+      60,
+      4,
+      500,
+    ),
+  };
+}
+
 function isAssistantFloor(runtime, chat, index) {
   if (!Array.isArray(chat)) return false;
   const message = chat[index];
@@ -203,6 +234,66 @@ function resolveRerunDialogueTask(chat = [], options = {}) {
     requestedStartFloor: hasStart ? Number(options.startFloor) : null,
     requestedEndFloor: hasEnd ? Number(options.endFloor) : null,
   };
+}
+
+function buildRerunVisibilityWarning(runtime, chat = [], rerunTask = null) {
+  const settings =
+    typeof runtime?.getSettings === "function" ? runtime.getSettings() || {} : {};
+  const requestedStart = Number.isFinite(Number(rerunTask?.requestedStartFloor))
+    ? Number(rerunTask.requestedStartFloor)
+    : null;
+  const requestedEnd = Number.isFinite(Number(rerunTask?.requestedEndFloor))
+    ? Number(rerunTask.requestedEndFloor)
+    : null;
+  const latestDialogueFloor = Number.isFinite(Number(rerunTask?.latestDialogueFloor))
+    ? Number(rerunTask.latestDialogueFloor)
+    : null;
+  const chatLength = Array.isArray(chat) ? chat.length : 0;
+  const keepLastN = Math.max(
+    0,
+    Math.trunc(Number(settings?.hideOldMessagesKeepLastN ?? 0) || 0),
+  );
+  const renderLastN = Math.max(
+    0,
+    Math.trunc(Number(settings?.hideOldMessagesRenderLimit ?? 0) || 0),
+  );
+  const hiddenActive = settings?.hideOldMessagesEnabled === true && keepLastN > 0;
+  const renderLimitActive =
+    settings?.enabled !== false &&
+    settings?.hideOldMessagesRenderLimitEnabled === true &&
+    renderLastN > 0;
+  const warnings = [];
+
+  if (
+    latestDialogueFloor != null &&
+    ((requestedStart != null && requestedStart > latestDialogueFloor) ||
+      (requestedEnd != null && requestedEnd > latestDialogueFloor))
+  ) {
+    warnings.push(
+      `当前可见聊天最高楼层只有 ${latestDialogueFloor}，请求范围已被夹到可见范围内`,
+    );
+  }
+
+  if (hiddenActive) {
+    const hiddenBoundary = Math.max(-1, chatLength - keepLastN - 1);
+    if (
+      hiddenBoundary >= 0 &&
+      (requestedStart == null || requestedStart <= hiddenBoundary || requestedEnd == null)
+    ) {
+      warnings.push(
+        `当前启用了旧楼层隐藏（保留最近 ${keepLastN} 层），如需重提隐藏范围，请先在面板中清除/解除消息隐藏`,
+      );
+    }
+  }
+
+  if (renderLimitActive) {
+    warnings.push(
+      `当前启用了聊天区渲染楼层限制（最近 ${renderLastN} 层），如需重提更早楼层，请先关闭该限制并重新加载聊天`,
+    );
+  }
+
+  const uniqueWarnings = Array.from(new Set(warnings.filter(Boolean)));
+  return uniqueWarnings.length > 0 ? uniqueWarnings.join("；") : "";
 }
 
 function resolveAssistantTargetRange(chat = [], dialogueRange = [-1, -1]) {
@@ -688,6 +779,7 @@ export async function executeExtractionBatchController(
     settings,
     smartTriggerDecision = null,
     signal = undefined,
+    postProcessContext = null,
   } = {},
 ) {
   runtime.ensureCurrentGraphRuntimeState();
@@ -767,6 +859,7 @@ export async function executeExtractionBatchController(
     settings,
     signal,
     batchStatus,
+    postProcessContext,
   );
   const batchStatusRef = effects?.batchStatus || batchStatus;
   const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
@@ -1073,6 +1166,13 @@ export async function onManualExtractController(runtime, options = {}) {
 
   const settings = runtime.getSettings();
   const extractEvery = runtime.clampInt(settings.extractEvery, 1, 1, 50);
+  const bulkConsolidationRequested =
+    options?.suppressIntermediateAutoConsolidation === true &&
+    options?.drainAll !== false;
+  const bulkConsolidationWindow = resolveBulkAutoConsolidationWindow(
+    settings,
+    options,
+  );
   const totals = {
     newNodes: 0,
     updatedNodes: 0,
@@ -1080,6 +1180,8 @@ export async function onManualExtractController(runtime, options = {}) {
     batches: 0,
   };
   let processedAssistantTurns = 0;
+  let deferredAutoConsolidationBatches = 0;
+  let deferredAutoConsolidationNodeIds = [];
   const warnings = [];
 
   runtime.setIsExtracting(true);
@@ -1112,12 +1214,59 @@ export async function onManualExtractController(runtime, options = {}) {
       const batchAssistantTurns = pendingTurns.slice(0, extractEvery);
       const startIdx = batchAssistantTurns[0];
       const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
+      const remainingAfterBatch = Math.max(
+        0,
+        pendingTurns.length - batchAssistantTurns.length,
+      );
+      const finalBulkBatch =
+        bulkConsolidationRequested && remainingAfterBatch <= 0;
+      const windowReady =
+        bulkConsolidationRequested &&
+        remainingAfterBatch > 0 &&
+        (deferredAutoConsolidationBatches + 1 >=
+          bulkConsolidationWindow.everyBatches ||
+          deferredAutoConsolidationNodeIds.length >=
+            bulkConsolidationWindow.minNewNodes);
+      const shouldDelayAutoConsolidation =
+        bulkConsolidationRequested &&
+        remainingAfterBatch > 0 &&
+        !windowReady;
+      const pendingAutoConsolidationNodeIds =
+        windowReady || finalBulkBatch ? deferredAutoConsolidationNodeIds : [];
+      const bulkPostProcessContext =
+        !bulkConsolidationRequested
+          ? null
+          : shouldDelayAutoConsolidation
+            ? {
+              suppressAutoConsolidation: true,
+              autoConsolidationSuppressReason: `批量重新提取仍有 ${remainingAfterBatch} 条 AI 回复待处理，已延后本批自动整合（累计 ${deferredAutoConsolidationBatches + 1}/${bulkConsolidationWindow.everyBatches} 批，${deferredAutoConsolidationNodeIds.length}/${bulkConsolidationWindow.minNewNodes} 个待整合节点）`,
+              bulkExtraction: true,
+              remainingAssistantTurnsAfterBatch: remainingAfterBatch,
+              deferredAutoConsolidationBatches,
+              deferredAutoConsolidationNodeCount:
+                deferredAutoConsolidationNodeIds.length,
+            }
+            : pendingAutoConsolidationNodeIds.length > 0
+              ? {
+                  suppressAutoConsolidation: false,
+                  bulkExtraction: true,
+                  pendingAutoConsolidationNodeIds,
+                  autoConsolidationWindowReason: finalBulkBatch
+                    ? "批量重新提取已到最后一批，执行窗口整合"
+                    : `批量重新提取累计达到窗口阈值（${deferredAutoConsolidationBatches} 批，${deferredAutoConsolidationNodeIds.length} 个待整合节点），执行一次中间整合`,
+                  remainingAssistantTurnsAfterBatch: remainingAfterBatch,
+                  deferredAutoConsolidationBatches,
+                  deferredAutoConsolidationNodeCount:
+                    deferredAutoConsolidationNodeIds.length,
+                }
+              : null;
       const batchResult = await runtime.executeExtractionBatch({
         chat,
         startIdx,
         endIdx,
         settings,
         signal: extractionSignal,
+        postProcessContext: bulkPostProcessContext,
       });
 
       if (!batchResult.success) {
@@ -1133,6 +1282,21 @@ export async function onManualExtractController(runtime, options = {}) {
       totals.newEdges += batchResult.result.newEdges || 0;
       totals.batches++;
       processedAssistantTurns += batchAssistantTurns.length;
+
+      if (bulkConsolidationRequested) {
+        if (shouldDelayAutoConsolidation) {
+          deferredAutoConsolidationBatches += 1;
+          deferredAutoConsolidationNodeIds = uniqueStringList([
+            ...deferredAutoConsolidationNodeIds,
+            ...(Array.isArray(batchResult.result?.newNodeIds)
+              ? batchResult.result.newNodeIds
+              : []),
+          ]);
+        } else {
+          deferredAutoConsolidationBatches = 0;
+          deferredAutoConsolidationNodeIds = [];
+        }
+      }
 
       if (Array.isArray(batchResult.effects?.warnings)) {
         warnings.push(...batchResult.effects.warnings);
@@ -1282,6 +1446,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
     rerunTask.startFloor,
     rerunTask.endFloor,
   ]);
+  const visibilityWarning = buildRerunVisibilityWarning(runtime, chat, rerunTask);
   if (!fallbackInfo.valid) {
     runtime.toastr?.info?.(fallbackInfo.reason || "目标范围内没有可重提的 AI 回复");
     return {
@@ -1291,6 +1456,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
       requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
       effectiveDialogueRange: [rerunTask.startFloor, rerunTask.endFloor],
       reason: fallbackInfo.reason || "no-assistant-in-range",
+      visibilityWarning,
     };
   }
 
@@ -1309,16 +1475,27 @@ export async function onExtractionTaskController(runtime, options = {}) {
   setExtractionProgressStatus(
     runtime,
     "重新提取准备中",
-    fallbackInfo.fallbackToLatest
-      ? `范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor} 命中旧批次，但当前将退化为从 ${effectiveDialogueRange[0]} 到最新重提`
-      : `准备重提范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor}`,
-    fallbackInfo.fallbackToLatest ? "warning" : "running",
+    [
+      fallbackInfo.fallbackToLatest
+        ? `范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor} 命中旧批次，但当前将退化为从 ${effectiveDialogueRange[0]} 到最新重提`
+        : `准备重提范围 ${rerunTask.startFloor} ~ ${rerunTask.endFloor}`,
+      visibilityWarning,
+    ]
+      .filter(Boolean)
+      .join("；"),
+    fallbackInfo.fallbackToLatest || visibilityWarning ? "warning" : "running",
     {
       syncRuntime: true,
       toastKind: "info",
       toastTitle: "ST-BME 重新提取",
     },
   );
+
+  if (visibilityWarning) {
+    runtime.toastr?.warning?.(visibilityWarning, "ST-BME 重新提取", {
+      timeOut: 7000,
+    });
+  }
 
   let rollbackResult = await runtime.rollbackGraphForReroll(
     fallbackInfo.startAssistantChatIndex,
@@ -1360,6 +1537,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
       );
       await runManualExtract({
         drainAll: true,
+        suppressIntermediateAutoConsolidation: true,
         taskLabel: "重新提取（恢复后）",
         toastTitle: "ST-BME 重新提取",
         showStartToast: false,
@@ -1374,6 +1552,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
           rerunTask.requestedEndFloor,
         ],
         effectiveDialogueRange,
+        visibilityWarning,
         reason: "rollback-unavailable-recovered-pending",
       };
     }
@@ -1410,6 +1589,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
       fallbackToLatest: fallbackInfo.fallbackToLatest,
       requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
       effectiveDialogueRange,
+      visibilityWarning,
     };
   }
 
@@ -1438,6 +1618,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
   await runManualExtract({
     drainAll: true,
     lockedEndFloor: effectiveLockedEndFloor,
+    suppressIntermediateAutoConsolidation: true,
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
     showStartToast: false,
@@ -1454,6 +1635,7 @@ export async function onExtractionTaskController(runtime, options = {}) {
       effectiveLockedEndFloor,
     ],
     rollbackResult,
+    visibilityWarning,
     reason: fallbackInfo.reason || "",
   };
 }

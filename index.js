@@ -19486,6 +19486,7 @@ async function handleExtractionSuccess(
     processedRange: [endIdx, endIdx],
     extractionCountBefore: extractionCount,
   }),
+  postProcessContext = null,
 ) {
   const postProcessArtifacts = [];
   const newNodeCount = Array.isArray(result?.newNodeIds)
@@ -19686,85 +19687,113 @@ async function handleExtractionSuccess(
     `已抽取 ${newNodeCount} 个新节点，正在处理后续阶段`,
   );
 
-  if (settings.enableConsolidation && result.newNodeIds?.length > 0) {
-    let consolidationAnalysis = null;
-    const minNewNodes = Math.max(
-      1,
-      Math.min(
-        50,
-        Math.floor(Number(settings?.consolidationAutoMinNewNodes ?? 2)) || 2,
-      ),
-    );
-    if (newNodeCount < minNewNodes) {
-      updateExtractionPostProcessStatus(
-        "整合判定中",
-        `本批新增 ${newNodeCount} 个节点，正在检查是否需要自动整合/进化`,
-      );
-      consolidationAnalysis = await analyzeConsolidationGate({
-        graph: currentGraph,
-        newNodeIds: result.newNodeIds,
-        embeddingConfig: getEmbeddingConfig(),
-        schema: getSchema(),
-        conflictThreshold: settings.consolidationThreshold,
-        signal,
-      });
-    }
-    const gate = resolveAutoConsolidationGate(
-      newNodeCount,
-      consolidationAnalysis,
-      settings,
-    );
-    status.consolidationGateTriggered = Boolean(gate.shouldRun);
-    status.consolidationGateReason = String(gate.reason || "");
-    status.consolidationGateSimilarity = Number.isFinite(
-      Number(gate.matchedScore),
-    )
-      ? Number(gate.matchedScore)
-      : null;
-    status.consolidationGateMatchedNodeId = String(gate.matchedNodeId || "");
-    if (!gate.shouldRun) {
-      applyMaintenanceGateNote(status, "consolidate", gate.reason);
+  const consolidationCandidateNodeIds = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(postProcessContext?.pendingAutoConsolidationNodeIds)
+          ? postProcessContext.pendingAutoConsolidationNodeIds
+          : []),
+        ...(Array.isArray(result?.newNodeIds) ? result.newNodeIds : []),
+      ]
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const consolidationCandidateCount = consolidationCandidateNodeIds.length;
+
+  if (settings.enableConsolidation && consolidationCandidateCount > 0) {
+    const suppressAutoConsolidation =
+      postProcessContext?.suppressAutoConsolidation === true;
+    if (suppressAutoConsolidation) {
+      const reason =
+        String(postProcessContext?.autoConsolidationSuppressReason || "").trim() ||
+        "批量提取进行中，已跳过本批自动整合";
+      status.consolidationGateTriggered = false;
+      status.consolidationGateReason = reason;
+      status.consolidationGateSimilarity = null;
+      status.consolidationGateMatchedNodeId = "";
+      applyMaintenanceGateNote(status, "consolidate", reason);
       pushBatchStageArtifact(status, "structural", "consolidation-skipped");
     } else {
-      try {
+      let consolidationAnalysis = null;
+      const minNewNodes = Math.max(
+        1,
+        Math.min(
+          50,
+          Math.floor(Number(settings?.consolidationAutoMinNewNodes ?? 2)) || 2,
+        ),
+      );
+      if (consolidationCandidateCount < minNewNodes) {
         updateExtractionPostProcessStatus(
-          "整合/进化中",
-          String(gate.reason || "").trim() || "正在自动整合新旧记忆",
+          "整合判定中",
+          `本窗口候选 ${consolidationCandidateCount} 个节点，正在检查是否需要自动整合/进化`,
         );
-        const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
-        const consolidationResult = await consolidateMemories({
+        consolidationAnalysis = await analyzeConsolidationGate({
           graph: currentGraph,
-          newNodeIds: result.newNodeIds,
+          newNodeIds: consolidationCandidateNodeIds,
           embeddingConfig: getEmbeddingConfig(),
-          options: {
-            neighborCount: settings.consolidationNeighborCount,
-            conflictThreshold: settings.consolidationThreshold,
-          },
-          settings,
+          schema: getSchema(),
+          conflictThreshold: settings.consolidationThreshold,
           signal,
         });
-        persistMaintenanceAction({
-          action: "consolidate",
-          beforeSnapshot,
-          mode: "auto",
-          summary: summarizeMaintenance(
-            "consolidate",
-            consolidationResult,
-            "auto",
-          ),
-        });
-        postProcessArtifacts.push("consolidation");
-        pushBatchStageArtifact(status, "structural", "consolidation");
-      } catch (e) {
-        if (isAbortError(e)) throw e;
-        const message = e?.message || String(e) || "记忆整合阶段失败";
-        setBatchStageOutcome(
-          status,
-          "structural",
-          "partial",
-          `记忆整合失败: ${message}`,
-        );
-        console.error("[ST-BME] 记忆整合失败:", e);
+      }
+      const gate = resolveAutoConsolidationGate(
+        consolidationCandidateCount,
+        consolidationAnalysis,
+        settings,
+      );
+      status.consolidationGateTriggered = Boolean(gate.shouldRun);
+      status.consolidationGateReason = String(gate.reason || "");
+      status.consolidationGateSimilarity = Number.isFinite(
+        Number(gate.matchedScore),
+      )
+        ? Number(gate.matchedScore)
+        : null;
+      status.consolidationGateMatchedNodeId = String(gate.matchedNodeId || "");
+      if (!gate.shouldRun) {
+        applyMaintenanceGateNote(status, "consolidate", gate.reason);
+        pushBatchStageArtifact(status, "structural", "consolidation-skipped");
+      } else {
+        try {
+          updateExtractionPostProcessStatus(
+            "整合/进化中",
+            String(gate.reason || "").trim() || "正在自动整合新旧记忆",
+          );
+          const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
+          const consolidationResult = await consolidateMemories({
+            graph: currentGraph,
+            newNodeIds: consolidationCandidateNodeIds,
+            embeddingConfig: getEmbeddingConfig(),
+            options: {
+              neighborCount: settings.consolidationNeighborCount,
+              conflictThreshold: settings.consolidationThreshold,
+            },
+            settings,
+            signal,
+          });
+          persistMaintenanceAction({
+            action: "consolidate",
+            beforeSnapshot,
+            mode: "auto",
+            summary: summarizeMaintenance(
+              "consolidate",
+              consolidationResult,
+              "auto",
+            ),
+          });
+          postProcessArtifacts.push("consolidation");
+          pushBatchStageArtifact(status, "structural", "consolidation");
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          const message = e?.message || String(e) || "记忆整合阶段失败";
+          setBatchStageOutcome(
+            status,
+            "structural",
+            "partial",
+            `记忆整合失败: ${message}`,
+          );
+          console.error("[ST-BME] 记忆整合失败:", e);
+        }
       }
     }
   }
@@ -20321,6 +20350,7 @@ async function executeExtractionBatch({
   settings,
   smartTriggerDecision = null,
   signal = undefined,
+  postProcessContext = null,
 } = {}) {
   return await executeExtractionBatchController(
     {
@@ -20350,7 +20380,15 @@ async function executeExtractionBatch({
       throwIfAborted,
       updateProcessedHistorySnapshot,
     },
-    { chat, startIdx, endIdx, settings, smartTriggerDecision, signal },
+    {
+      chat,
+      startIdx,
+      endIdx,
+      settings,
+      smartTriggerDecision,
+      signal,
+      postProcessContext,
+    },
   );
 }
 

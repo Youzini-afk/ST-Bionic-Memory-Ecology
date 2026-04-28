@@ -281,6 +281,12 @@ function createBatchStageHarness() {
       .replace(/^export\s+/gm, "");
     const context = {
       console,
+      AbortController,
+      AbortSignal,
+      DOMException,
+      setTimeout,
+      clearTimeout,
+      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS: 120000,
       result: null,
       extractionCount: 0,
       currentGraph: null,
@@ -3674,6 +3680,148 @@ async function testAutoConsolidationSkipsLowRiskSingleNode() {
     effects.batchStatus.stages.structural.artifacts.includes(
       "consolidation-skipped",
     ),
+    true,
+  );
+}
+
+async function testAutoConsolidationSuppressedForBulkExtractionBatch() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let consolidateCalls = 0;
+  let gateCalls = 0;
+  harness.analyzeAutoConsolidationGate = async () => {
+    gateCalls += 1;
+    return {
+      triggered: true,
+      reason: "should-not-run",
+      matchedScore: 0.99,
+      matchedNodeId: "old-bulk",
+    };
+  };
+  harness.consolidateMemories = async () => {
+    consolidateCalls += 1;
+    return {
+      merged: 1,
+      skipped: 0,
+      kept: 0,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [8, 8],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-a", "node-b", "node-c"] },
+    8,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+    {
+      suppressAutoConsolidation: true,
+      autoConsolidationSuppressReason: "bulk rerun still draining",
+    },
+  );
+
+  assert.equal(gateCalls, 0);
+  assert.equal(consolidateCalls, 0);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, false);
+  assert.equal(effects.batchStatus.consolidationGateReason, "bulk rerun still draining");
+  assert.equal(
+    effects.batchStatus.stages.structural.artifacts.includes(
+      "consolidation-skipped",
+    ),
+    true,
+  );
+}
+
+async function testAutoConsolidationUsesDeferredBulkCandidates() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let candidateIds = [];
+  harness.consolidateMemories = async ({ newNodeIds = [] } = {}) => {
+    candidateIds = [...newNodeIds];
+    return {
+      merged: 1,
+      skipped: 0,
+      kept: 0,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [10, 10],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-current", "node-old"] },
+    10,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+    {
+      suppressAutoConsolidation: false,
+      pendingAutoConsolidationNodeIds: ["node-old", "node-deferred"],
+    },
+  );
+
+  assert.deepEqual(candidateIds, ["node-old", "node-deferred", "node-current"]);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, true);
+  assert.equal(
+    effects.batchStatus.stages.structural.artifacts.includes("consolidation"),
     true,
   );
 }
@@ -7510,6 +7658,8 @@ await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
 await testExtractionPostProcessStatusesExposeMaintenancePhases();
 await testAutoConsolidationRunsOnHighDuplicateRiskSingleNode();
 await testAutoConsolidationSkipsLowRiskSingleNode();
+await testAutoConsolidationSuppressedForBulkExtractionBatch();
+await testAutoConsolidationUsesDeferredBulkCandidates();
 await testAutoCompressionRunsOnlyOnConfiguredInterval();
 await testAutoCompressionSkipsWhenNotScheduledOrNoCandidates();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
