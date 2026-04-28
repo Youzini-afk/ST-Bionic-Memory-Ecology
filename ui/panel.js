@@ -1513,6 +1513,75 @@ function _resolvePipelineStatus(statusObj) {
   return { label: text || "IDLE", color, detail: meta };
 }
 
+function _buildAuthorityJobUiState(loadInfo = _getGraphPersistenceSnapshot()) {
+  const snapshot =
+    loadInfo && typeof loadInfo === "object" && !Array.isArray(loadInfo)
+      ? loadInfo
+      : {};
+  const job =
+    snapshot.authorityLastJob &&
+    typeof snapshot.authorityLastJob === "object" &&
+    !Array.isArray(snapshot.authorityLastJob)
+      ? snapshot.authorityLastJob
+      : {};
+  const jobId = String(job.id || snapshot.authorityLastJobId || "").trim();
+  const kind = String(job.kind || snapshot.authorityLastJobKind || "").trim();
+  const status = String(
+    job.status || snapshot.authorityLastJobStatus || snapshot.authorityJobQueueState || "",
+  ).trim();
+  const error = String(job.error || snapshot.authorityLastJobError || "").trim();
+  const progressRaw = Number(job.progress ?? snapshot.authorityLastJobProgress);
+  const progress = Number.isFinite(progressRaw)
+    ? Math.max(0, Math.min(1, progressRaw))
+    : 0;
+  const queueState = String(snapshot.authorityJobQueueState || "").trim() ||
+    (error
+      ? "error"
+      : status === "completed" || status === "succeeded" || status === "success"
+        ? "success"
+        : status === "failed" || status === "error" || status === "timeout"
+          ? "failed"
+          : jobId
+            ? "running"
+            : "idle");
+  const progressText = progress > 0 ? `${Math.round(progress * 100)}%` : "";
+  const detail = [
+    jobId ? `job ${jobId}` : "",
+    kind,
+    status || queueState,
+    progressText,
+    error,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    jobId,
+    kind,
+    status,
+    error,
+    progress,
+    progressText,
+    queueState,
+    label: jobId
+      ? queueState === "success"
+        ? "已完成"
+        : queueState === "failed" || queueState === "error"
+          ? "失败"
+          : queueState === "running"
+            ? "运行中"
+            : "空闲"
+      : snapshot.authorityJobsReady
+        ? "空闲"
+        : "未就绪",
+    detail:
+      detail ||
+      (snapshot.authorityJobsReady ? "Authority Jobs ready" : "Authority Jobs unavailable"),
+    canRequeue: Boolean(
+      jobId && (queueState === "failed" || queueState === "error"),
+    ),
+  };
+}
+
 function _readPersistenceDiagnosticObject(snapshot = null) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     return null;
@@ -1957,10 +2026,19 @@ function _refreshTaskPipelineOverview() {
   const graph = _getGraph?.() || {};
   const historyState = graph.runtimeState?.historyState || graph.historyState || {};
   const loadInfo = _getGraphPersistenceSnapshot();
+  const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
 
   const extraction = _resolvePipelineStatus(_getLastExtractionStatus?.());
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
   const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
+  const authorityJobStatus = _resolvePipelineStatus({
+    text: authorityJobUi.label,
+    meta: authorityJobUi.detail,
+    level:
+      authorityJobUi.queueState === "failed" || authorityJobUi.queueState === "error"
+        ? "error"
+        : "info",
+  });
   const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
   const persistenceMetaParts = [`rev ${loadInfo.revision || 0}`];
   const pipelineLoadMeta = _formatPipelineLoadDiagnosticsMeta(
@@ -2046,13 +2124,9 @@ function _refreshTaskPipelineOverview() {
     {
       label: "向量",
       color: vector.color,
-      value:
-        vector.label +
-        (vector.detail ? ` — ${vector.detail}` : "") +
-        (authorityJobParts.length
-          ? ` · Authority ${authorityJobParts.join(" · ")}`
-          : ""),
+      value: vector.label + (vector.detail ? ` — ${vector.detail}` : ""),
     },
+    { label: "Authority Job", color: authorityJobStatus.color, value: authorityJobUi.detail },
     { label: "召回", color: recall.color, value: recall.label + (recall.detail ? ` — ${recall.detail}` : "") },
     { label: "持久化", color: persistence.color, value: persistence.label + (persistence.detail ? ` — ${persistence.detail}` : "") },
   ];
@@ -2067,10 +2141,31 @@ function _refreshTaskPipelineOverview() {
       </div>
     </div>`;
 
+  const authorityJobProgressColor =
+    authorityJobUi.queueState === "success"
+      ? "#2ecc71"
+      : authorityJobUi.queueState === "failed" || authorityJobUi.queueState === "error"
+        ? "#e74c3c"
+        : authorityJobUi.queueState === "running"
+          ? "#00d4ff"
+          : "#7f8c8d";
+  const authorityJobProgressWidth = authorityJobUi.queueState === "success"
+    ? 100
+    : authorityJobUi.queueState === "running"
+      ? Math.max(8, Math.round(authorityJobUi.progress * 100))
+      : Math.round(authorityJobUi.progress * 100);
+  const authorityJobActions = authorityJobUi.canRequeue && typeof _actionHandlers.requeueAuthorityJob === "function"
+    ? `
+      <div style="margin-top:10px;display:flex;justify-content:flex-end">
+        <button class="bme-config-secondary-btn" type="button" data-authority-job-action="requeue" data-job-id="${_escHtml(authorityJobUi.jobId)}">重试 Authority Job</button>
+      </div>`
+    : "";
+
   el.innerHTML = `
     <div class="bme-pipeline-grid">
       ${pipelineCard("提取 Extraction", extraction, "scissors")}
       ${pipelineCard("向量 Vector", vector, "share-nodes")}
+      ${pipelineCard("Authority Jobs", authorityJobStatus, "server")}
       ${pipelineCard("召回 Recall", recall, "magnifying-glass")}
       ${pipelineCard("持久化 Persistence", persistence, "database")}
     </div>
@@ -2091,7 +2186,42 @@ function _refreshTaskPipelineOverview() {
         </div>
       `).join("")}
     </div>
+    <div class="bme-batch-progress" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:700;color:var(--bme-on-surface)"><i class="fa-solid fa-server" style="margin-right:6px;color:var(--bme-primary)"></i>Authority Job</span>
+        <span style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(authorityJobUi.label)}</span>
+      </div>
+      <div class="bme-config-help" style="margin-bottom:10px">${_escHtml(authorityJobUi.detail)}</div>
+      <div style="height:8px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden">
+        <div style="height:100%;width:${authorityJobProgressWidth}%;background:${authorityJobProgressColor};transition:width .2s ease"></div>
+      </div>
+      ${authorityJobActions}
+    </div>
   `;
+
+  el
+    .querySelector('[data-authority-job-action="requeue"]')
+    ?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const jobId = String(button?.dataset?.jobId || "").trim();
+      if (!jobId || typeof _actionHandlers.requeueAuthorityJob !== "function") return;
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        toastr.info("Authority Job 重试中…", "ST-BME", { timeOut: 2000 });
+        const result = await _actionHandlers.requeueAuthorityJob(jobId);
+        if (result?.success) {
+          toastr.success(`Authority Job 已重试：${result?.job?.id || jobId}`, "ST-BME");
+        } else {
+          toastr.warning(`Authority Job 重试失败：${result?.error || "unknown"}`, "ST-BME");
+        }
+      } catch (error) {
+        toastr.error(`Authority Job 重试失败: ${error?.message || error}`, "ST-BME");
+      } finally {
+        _refreshDashboard();
+        _refreshTaskMonitor();
+      }
+    });
 }
 
 // ---------- Task Timeline ----------
@@ -3672,6 +3802,7 @@ function _refreshDashboard() {
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
     _setText("bme-status-last-persist", "等待聊天图谱元数据加载");
     _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
+    _setText("bme-status-authority-job", "等待聊天图谱元数据加载");
     _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
     _refreshPersistenceRepairUi(loadInfo, null);
     _renderStatefulListPlaceholder(
@@ -3708,6 +3839,7 @@ function _refreshDashboard() {
   const lastBatchStatus = _getLatestBatchStatusSnapshot();
   const vectorStatus = _getLastVectorStatus?.() || {};
   const recallStatus = _getLastRecallStatus?.() || {};
+  const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
   const historyPrefix =
     loadInfo.loadState === "shadow-restored"
       ? "临时恢复 · "
@@ -3751,6 +3883,7 @@ function _refreshDashboard() {
   );
   _refreshPersistenceRepairUi(loadInfo, lastBatchStatus);
   _setText("bme-status-last-vector", vectorStatus.meta || "尚未执行向量任务");
+  _setText("bme-status-authority-job", authorityJobUi.detail || authorityJobUi.label);
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
   _refreshCognitionDashboard(graph);

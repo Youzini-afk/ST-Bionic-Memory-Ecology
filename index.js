@@ -374,6 +374,7 @@ import {
   createAuthorityJobAdapter,
   normalizeAuthorityJobConfig,
 } from "./maintenance/authority-job-adapter.js";
+import { trackAuthorityJobUntilTerminal } from "./maintenance/authority-job-tracker.js";
 import {
   createAuthorityBlobAdapter,
   normalizeAuthorityBlobConfig,
@@ -1295,6 +1296,10 @@ let pendingGraphPersistRetryTimer = null;
 let pendingGraphPersistRetryChatId = "";
 let pendingGraphPersistRetryAttempt = 0;
 let pendingAutoExtractionTimer = null;
+let authorityJobPollAbortController = null;
+let authorityJobPollJobId = "";
+let authorityJobPollChatId = "";
+let authorityJobPollPromise = null;
 let pendingAutoExtraction = {
   chatId: "",
   messageId: null,
@@ -2180,110 +2185,13 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
   }
 }
 
-async function exportAuthorityDiagnosticsBundle({
-  chatId = "",
-  reason = "diagnostics-bundle",
-  signal = undefined,
-  refreshHost = false,
-} = {}) {
-  const normalizedChatId =
-    normalizeChatIdCandidate(chatId) ||
-    normalizeChatIdCandidate(graphPersistenceState.chatId) ||
-    normalizeChatIdCandidate(getCurrentChatId());
-  if (!normalizedChatId) {
-    return {
-      ok: false,
-      reason: "missing-chat-id",
-    };
-  }
-  if (!shouldUseAuthorityDiagnosticsBundle()) {
-    return {
-      ok: false,
-      reason: "authority-diagnostics-unavailable",
-    };
-  }
-  const normalizedReason = String(reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
-  const path = buildAuthorityDiagnosticsBundlePath(normalizedChatId, normalizedReason);
-  try {
-    const bundle = buildAuthorityDiagnosticsBundle({
-      chatId: normalizedChatId,
-      reason: normalizedReason,
-      settings: getSettings(),
-      runtimeStatus: getPanelRuntimeStatus(),
-      runtimeDebug: getPanelRuntimeDebugSnapshot({ refreshHost }),
-      graphPersistence: getGraphPersistenceLiveState(),
-      graph: currentGraph,
-      lastExtractionStatus,
-      lastVectorStatus,
-      lastRecallStatus,
-      lastBatchStatus: currentGraph?.historyState?.lastBatchStatus || null,
-      lastInjection: lastInjectionContent,
-      lastExtract: lastExtractedItems,
-      lastRecall: lastRecalledItems,
-    });
-    const adapter = getAuthorityBlobAdapter();
-    const result = await writeAuthorityDiagnosticsBundleFile(adapter, bundle, {
-      chatId: normalizedChatId,
-      reason: normalizedReason,
-      path,
-      signal,
-    });
-    const bundleSize = Math.max(
-      0,
-      Number(result?.result?.size || 0) || JSON.stringify(bundle).length || 0,
-    );
-    recordAuthorityBlobSnapshot({
-      action: "diagnostics-write",
-      ok: result?.ok !== false,
-      backend: "authority-blob",
-      path: result?.path || path,
-      reason: normalizedReason,
-      size: bundleSize,
-    });
-    updateGraphPersistenceState({
-      authorityDiagnosticsBundlePath: String(result?.path || path),
-      authorityDiagnosticsBundleReason: normalizedReason,
-      authorityDiagnosticsBundleUpdatedAt: new Date().toISOString(),
-      authorityDiagnosticsBundleSize: bundleSize,
-    });
-    return {
-      ok: result?.ok !== false,
-      path: String(result?.path || path),
-      size: bundleSize,
-      result,
-    };
-  } catch (error) {
-    const message = error?.message || String(error) || "Authority diagnostics bundle failed";
-    recordAuthorityBlobSnapshot({
-      action: "diagnostics-write",
-      ok: false,
-      backend: "authority-blob",
-      path,
-      reason: normalizedReason,
-      error: message,
-    });
-    updateGraphPersistenceState({
-      authorityDiagnosticsBundlePath: path,
-      authorityDiagnosticsBundleReason: normalizedReason,
-      authorityDiagnosticsBundleUpdatedAt: new Date().toISOString(),
-      authorityDiagnosticsBundleSize: 0,
-    });
-    return {
-      ok: false,
-      path,
-      reason: "authority-diagnostics-bundle-error",
-      error,
-    };
-  }
-}
-
 async function readLukerGraphSidecarV2WithAuthorityBlob(context = null, options = {}) {
   const sidecar = await readLukerGraphSidecarV2(context, options);
   if (sidecar?.checkpoint) return sidecar;
   const chatId =
     normalizeChatIdCandidate(options.chatId) ||
     normalizeChatIdCandidate(sidecar?.manifest?.chatId) ||
-    normalizeChatIdCandidate(getCurrentChatId(context));
+    normalizeChatIdCandidate(getCurrentChatId());
   const blobResult = await readAuthorityLukerCheckpointBlob(chatId);
   if (!blobResult?.exists || !blobResult?.checkpoint) return sidecar;
   return {
@@ -2363,6 +2271,7 @@ async function submitAuthorityVectorRebuildJob({
       "running",
       { syncRuntime: true },
     );
+    void startTrackingAuthorityJob(job, { kind, chatId });
     return {
       submitted: true,
       fallbackRequired: false,
@@ -2385,11 +2294,217 @@ async function submitAuthorityVectorRebuildJob({
   }
 }
 
+function createAbortTrackingError(reason = "authority-job-tracking-stopped") {
+  if (typeof DOMException !== "undefined") {
+    return new DOMException(reason, "AbortError");
+  }
+  return Object.assign(new Error(reason), { name: "AbortError" });
+}
+
+function stopTrackingAuthorityJob(reason = "authority-job-tracking-stopped") {
+  if (authorityJobPollAbortController) {
+    try {
+      authorityJobPollAbortController.abort(createAbortTrackingError(reason));
+    } catch {
+    }
+  }
+  authorityJobPollAbortController = null;
+  authorityJobPollJobId = "";
+  authorityJobPollChatId = "";
+  authorityJobPollPromise = null;
+}
+
+function buildAuthorityJobStatusMeta(job = null, fallbackKind = "") {
+  const normalizedJob =
+    job && typeof job === "object" && !Array.isArray(job) ? job : {};
+  const progress = Number(normalizedJob.progress || 0);
+  return [
+    String(fallbackKind || normalizedJob.kind || "").trim(),
+    normalizedJob.id ? `job ${normalizedJob.id}` : "",
+    String(normalizedJob.status || "").trim(),
+    Number.isFinite(progress) && progress > 0
+      ? `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`
+      : "",
+    String(normalizedJob.error || "").trim(),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function syncAuthorityVectorJobState(job = null) {
+  if (!currentGraph?.vectorIndexState) return;
+  const normalizedJob =
+    job && typeof job === "object" && !Array.isArray(job) ? job : {};
+  currentGraph.vectorIndexState.lastRebuildJob =
+    cloneRuntimeDebugValue(normalizedJob, null);
+  currentGraph.vectorIndexState.lastAuthorityJobId = String(normalizedJob.id || "");
+  currentGraph.vectorIndexState.lastAuthorityJobStatus = String(
+    normalizedJob.status || "",
+  );
+  currentGraph.vectorIndexState.lastAuthorityJobProgress = Number(
+    normalizedJob.progress || 0,
+  );
+  if (!normalizedJob.id) {
+    return;
+  }
+  if (normalizedJob.terminal) {
+    if (normalizedJob.success) {
+      currentGraph.vectorIndexState.dirty = false;
+      currentGraph.vectorIndexState.dirtyReason = "";
+      currentGraph.vectorIndexState.lastWarning = "";
+    } else {
+      currentGraph.vectorIndexState.dirty = true;
+      currentGraph.vectorIndexState.dirtyReason =
+        String(normalizedJob.status || "failed") || "failed";
+      currentGraph.vectorIndexState.lastWarning =
+        String(normalizedJob.error || normalizedJob.status || "Authority Job 失败") ||
+        "Authority Job 失败";
+    }
+    return;
+  }
+  currentGraph.vectorIndexState.dirty = true;
+  currentGraph.vectorIndexState.dirtyReason =
+    "authority-vector-rebuild-job-running";
+  currentGraph.vectorIndexState.lastWarning =
+    buildAuthorityJobStatusMeta(normalizedJob, normalizedJob.kind) ||
+    "Authority Job 运行中";
+}
+
+async function startTrackingAuthorityJob(job = null, options = {}) {
+  const normalizedJob =
+    job && typeof job === "object" && !Array.isArray(job) ? job : {};
+  const jobId = String(normalizedJob.id || "").trim();
+  const trackedChatId =
+    normalizeChatIdCandidate(options.chatId) ||
+    normalizeChatIdCandidate(getCurrentChatId()) ||
+    normalizeChatIdCandidate(graphPersistenceState.chatId);
+  if (!jobId || !trackedChatId) {
+    return null;
+  }
+
+  stopTrackingAuthorityJob("authority-job-replaced");
+  const controller = new AbortController();
+  authorityJobPollAbortController = controller;
+  authorityJobPollJobId = jobId;
+  authorityJobPollChatId = trackedChatId;
+  const effectiveKind = String(options.kind || normalizedJob.kind || "").trim();
+  const jobConfig = normalizeAuthorityJobConfig(getSettings());
+
+  const applyTrackedJobUpdate = async (nextJob, state = {}) => {
+    const normalizedNextJob =
+      nextJob && typeof nextJob === "object" && !Array.isArray(nextJob) ? nextJob : {};
+    const queueState = normalizedNextJob.terminal
+      ? normalizedNextJob.success
+        ? "success"
+        : "failed"
+      : normalizedNextJob.id
+        ? "running"
+        : "idle";
+    recordAuthorityJobSnapshot(normalizedNextJob, {
+      kind: effectiveKind || normalizedNextJob.kind || "",
+      queueState,
+    });
+    syncAuthorityVectorJobState(normalizedNextJob);
+    const meta = buildAuthorityJobStatusMeta(
+      normalizedNextJob,
+      effectiveKind || normalizedNextJob.kind,
+    );
+    if (normalizedNextJob.terminal) {
+      setLastVectorStatus(
+        normalizedNextJob.success ? "Authority Job 已完成" : "Authority Job 失败",
+        meta,
+        normalizedNextJob.success ? "success" : "error",
+        { syncRuntime: true },
+      );
+      const activeChatId =
+        normalizeChatIdCandidate(getCurrentChatId()) ||
+        normalizeChatIdCandidate(graphPersistenceState.chatId);
+      if (activeChatId && activeChatId === trackedChatId) {
+        saveGraphToChat({
+          reason: normalizedNextJob.success
+            ? "authority-vector-rebuild-job-completed"
+            : "authority-vector-rebuild-job-failed",
+        });
+      }
+    } else {
+      setLastVectorStatus(
+        state.phase === "initial" ? "Authority Job 已提交" : "Authority Job 运行中",
+        meta,
+        "running",
+        { syncRuntime: true },
+      );
+    }
+    refreshPanelLiveState();
+  };
+
+  authorityJobPollPromise = trackAuthorityJobUntilTerminal({
+    initialJob: normalizedJob,
+    pollIntervalMs: jobConfig.pollIntervalMs,
+    timeoutMs: jobConfig.waitTimeoutMs,
+    signal: controller.signal,
+    loadJob: async (targetJobId) => {
+      const activeChatId =
+        normalizeChatIdCandidate(getCurrentChatId()) ||
+        normalizeChatIdCandidate(graphPersistenceState.chatId);
+      if (activeChatId && activeChatId !== trackedChatId) {
+        controller.abort(createAbortTrackingError("authority-job-chat-changed"));
+        throw controller.signal.reason;
+      }
+      const adapter = getAuthorityJobAdapter();
+      return await adapter.get(targetJobId, { signal: controller.signal });
+    },
+    onUpdate: applyTrackedJobUpdate,
+  })
+    .catch((error) => {
+      if (isAbortError(error)) {
+        return null;
+      }
+      const message = error?.message || String(error) || "Authority Job 状态轮询失败";
+      const failedJob = {
+        ...normalizedJob,
+        id: jobId,
+        kind: effectiveKind || normalizedJob.kind || "",
+        status: "error",
+        terminal: true,
+        success: false,
+        error: message,
+      };
+      recordAuthorityJobSnapshot(failedJob, {
+        kind: effectiveKind || normalizedJob.kind || "",
+        queueState: "error",
+      });
+      syncAuthorityVectorJobState(failedJob);
+      setLastVectorStatus(
+        "Authority Job 失败",
+        buildAuthorityJobStatusMeta(failedJob, effectiveKind || normalizedJob.kind),
+        "error",
+        { syncRuntime: true },
+      );
+      refreshPanelLiveState();
+      return failedJob;
+    })
+    .finally(() => {
+      if (authorityJobPollAbortController === controller) {
+        authorityJobPollAbortController = null;
+        authorityJobPollJobId = "";
+        authorityJobPollChatId = "";
+        authorityJobPollPromise = null;
+      }
+    });
+  return authorityJobPollPromise;
+}
+
 async function requeueAuthorityJob(jobId, options = {}) {
   try {
     const adapter = getAuthorityJobAdapter();
     const job = await adapter.requeue(jobId, options);
     recordAuthorityJobSnapshot(job, { queueState: "running" });
+    syncAuthorityVectorJobState(job);
+    saveGraphToChat({ reason: "authority-vector-rebuild-job-requeued" });
+    void startTrackingAuthorityJob(job, {
+      kind: job?.kind || graphPersistenceState.authorityLastJobKind,
+      chatId: getCurrentChatId(),
+    });
     return { success: true, job };
   } catch (error) {
     const message = error?.message || String(error) || "Authority Job 重试失败";

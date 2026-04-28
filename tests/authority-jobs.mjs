@@ -7,6 +7,7 @@ import {
   normalizeAuthorityJobList,
   normalizeAuthorityJobRecord,
 } from "../maintenance/authority-job-adapter.js";
+import { trackAuthorityJobUntilTerminal } from "../maintenance/authority-job-tracker.js";
 import { onRebuildVectorIndexController } from "../ui/ui-actions-controller.js";
 
 function createMockJobClient() {
@@ -119,6 +120,77 @@ assert.deepEqual(client.calls.map(([name]) => name), [
   "listPage",
   "requeue",
 ]);
+
+const trackerPhases = [];
+let trackerLoadCount = 0;
+const trackedJob = await trackAuthorityJobUntilTerminal({
+  initialJob: {
+    id: "job-track",
+    kind: "authority.vector.rebuild",
+    status: "queued",
+    progress: 0,
+    terminal: false,
+    success: false,
+  },
+  pollIntervalMs: 0,
+  timeoutMs: 1000,
+  async loadJob(jobId) {
+    trackerLoadCount += 1;
+    if (trackerLoadCount === 1) {
+      return {
+        id: jobId,
+        kind: "authority.vector.rebuild",
+        status: "running",
+        progress: 0.4,
+        terminal: false,
+        success: false,
+      };
+    }
+    return {
+      id: jobId,
+      kind: "authority.vector.rebuild",
+      status: "completed",
+      progress: 1,
+      terminal: true,
+      success: true,
+    };
+  },
+  async onUpdate(job, state) {
+    trackerPhases.push([state.phase, job.status, Number(job.progress || 0)]);
+  },
+});
+assert.equal(trackedJob.status, "completed");
+assert.equal(trackedJob.success, true);
+assert.equal(trackerLoadCount, 2);
+assert.deepEqual(trackerPhases, [
+  ["initial", "queued", 0],
+  ["poll", "running", 0.4],
+  ["terminal", "completed", 1],
+]);
+
+const timedOutJob = await trackAuthorityJobUntilTerminal({
+  initialJob: {
+    id: "job-timeout",
+    status: "running",
+    progress: 0.2,
+    terminal: false,
+    success: false,
+  },
+  pollIntervalMs: 5,
+  timeoutMs: 1,
+  async loadJob(jobId) {
+    return {
+      id: jobId,
+      status: "running",
+      progress: 0.3,
+      terminal: false,
+      success: false,
+    };
+  },
+});
+assert.equal(timedOutJob.status, "timeout");
+assert.equal(timedOutJob.terminal, true);
+assert.equal(timedOutJob.success, false);
 
 function createVectorControllerRuntime(overrides = {}) {
   const calls = [];
