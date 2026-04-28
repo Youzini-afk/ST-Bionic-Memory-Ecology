@@ -742,6 +742,12 @@ export class AuthorityGraphStore {
           edges: emptyStatus.edges,
           tombstones: emptyStatus.tombstones,
         },
+        isEmptyCheck: {
+          empty: false,
+          nodes: emptyStatus.nodes,
+          edges: emptyStatus.edges,
+          tombstones: emptyStatus.tombstones,
+        },
         migrationCompletedAt: 0,
         migrationSource,
         legacyRetentionUntil,
@@ -1032,12 +1038,42 @@ export class AuthorityGraphStore {
   async _executeStatements(statements = []) {
     const normalizedStatements = toArray(statements).filter((statement) => statement?.sql);
     if (!normalizedStatements.length) return null;
+
+    const BATCH_SIZE = 150;
     if (typeof this.sqlClient?.transaction === "function") {
-      return await this.sqlClient.transaction(normalizedStatements);
+      if (normalizedStatements.length <= BATCH_SIZE) {
+        return await this.sqlClient.transaction(normalizedStatements);
+      }
+      let lastResult = null;
+      for (let i = 0; i < normalizedStatements.length; i += BATCH_SIZE) {
+        const batch = normalizedStatements.slice(i, i + BATCH_SIZE);
+        lastResult = await this.sqlClient.transaction(batch);
+      }
+      return lastResult;
+    }
+
+    const upsertStatements = [];
+    const deleteStatements = [];
+    for (const stmt of normalizedStatements) {
+      if (stmt.sql.trim().toUpperCase().startsWith("DELETE")) {
+        deleteStatements.push(stmt);
+      } else {
+        upsertStatements.push(stmt);
+      }
     }
     let result = null;
-    for (const statement of normalizedStatements) {
-      result = await this._execute(statement.sql, statement.params || {});
+    for (const stmt of upsertStatements) {
+      result = await this._execute(stmt.sql, stmt.params || {});
+    }
+    for (const stmt of deleteStatements) {
+      result = await this._execute(stmt.sql, stmt.params || {});
+    }
+    if (deleteStatements.length > 0 && upsertStatements.length > 0) {
+      console.warn("[ST-BME] _executeStatements fallback 路径执行：先 upsert 后 delete，无事务保护", {
+        chatId: this.chatId,
+        upsertCount: upsertStatements.length,
+        deleteCount: deleteStatements.length,
+      });
     }
     return result;
   }

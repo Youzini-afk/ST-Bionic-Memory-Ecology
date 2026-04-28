@@ -174,6 +174,7 @@ import {
   removeGraphShadowSnapshot,
   rememberGraphIdentityAlias,
   readGraphCommitMarker,
+  normalizeGraphCommitMarker,
   readGraphChatStateSnapshot,
   readLukerGraphSidecarV2,
   replaceLukerGraphJournalV2,
@@ -1383,6 +1384,7 @@ const bmeIndexedDbWriteInFlightByChatId = new Map();
 const bmeIndexedDbRuntimeRepairInFlightByChatId = new Set();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLocalStoreMigrationInFlightByChatId = new Map();
+const bmeIndexedDbOpfsMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
 const bmeChatStateManifestCacheByChatId = new Map();
 const bmeChatStateLoadInFlightByChatId = new Map();
@@ -1622,10 +1624,25 @@ async function captureAuthorityMigrationSafetySnapshot(
     } catch (shadowError) {
       console.warn("[ST-BME] Authority 迁移影子安全快照创建失败:", shadowError);
     }
+    let blobCaptured = false;
+    try {
+      const blobAdapter = getAuthorityBlobAdapter();
+      if (blobAdapter && typeof blobAdapter.writeJson === "function") {
+        await blobAdapter.writeJson(
+          `ST-BME/migration-safety/${normalizedChatId}.json`,
+          snapshot,
+          { namespace: "st-bme-safety" },
+        );
+        blobCaptured = true;
+      }
+    } catch (blobError) {
+      console.warn("[ST-BME] 安全快照写入 Authority blob 失败（非致命）:", blobError);
+    }
     return {
       captured: true,
       restoreSafetyCaptured: true,
       shadowCaptured,
+      blobCaptured,
       reason: "authority-migration-restore-safety-created",
       chatId: normalizedChatId,
       revision,
@@ -7864,6 +7881,34 @@ async function exportIndexedDbSnapshotForChat(chatId = "") {
   }
 }
 
+async function exportOpfsSnapshotForChat(chatId) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) return null;
+  if (!bmeLocalStoreCapabilitySnapshot?.opfsAvailable) return null;
+  try {
+    if (typeof OpfsGraphStore !== "function") return null;
+    const opfsDb = new OpfsGraphStore(normalizedChatId);
+    await opfsDb.open();
+    try {
+      const emptyStatus = await opfsDb.isEmpty();
+      if (emptyStatus?.empty) return null;
+      const snapshot = await opfsDb.exportSnapshot({ includeTombstones: true });
+      if (!isIndexedDbSnapshotMeaningful(snapshot)) return null;
+      snapshot.meta = {
+        ...snapshot.meta,
+        migratedFromStoragePrimary: "opfs",
+        migratedFromStorageMode: opfsDb.storeMode || "opfs-primary",
+      };
+      return snapshot;
+    } finally {
+      if (typeof opfsDb.close === "function") await opfsDb.close();
+    }
+  } catch (error) {
+    console.warn("[ST-BME] 导出 OPFS 旧快照失败:", error);
+    return null;
+  }
+}
+
 function buildRecoveredSnapshotForChatIdentity(
   graph,
   targetChatId,
@@ -10915,9 +10960,18 @@ function scheduleGraphChatStateProbe(chatId, options = {}) {
   });
 }
 
+function isChatMetadataMigratedToAuthority(context = null) {
+  const marker = readGraphCommitMarker(context || getContext());
+  return marker?.migratedToAuthority === true;
+}
+
 function readLegacyGraphFromChatMetadata(chatId, context = getContext()) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId) return null;
+
+  if (isChatMetadataMigratedToAuthority(context)) {
+    return null;
+  }
 
   const legacyGraph = context?.chatMetadata?.[GRAPH_METADATA_KEY];
   if (!legacyGraph) return null;
@@ -11312,6 +11366,16 @@ async function maybeMigrateLegacyGraphToIndexedDb(
 
       const emptyStatus = await targetDb.isEmpty();
       if (!emptyStatus?.empty) {
+        const existingNodes = Number(emptyStatus?.nodes || 0);
+        const existingEdges = Number(emptyStatus?.edges || 0);
+        if (existingNodes + existingEdges < 5) {
+          console.warn(
+            "[ST-BME] Authority store 非空但数据量极少，可能是残留数据。" +
+            `节点: ${existingNodes}, 边: ${existingEdges}。` +
+            "如需强制重新迁移，请在面板中清除 Authority 数据后重试。",
+            { chatId: normalizedChatId, emptyStatus },
+          );
+        }
         return {
           migrated: false,
           reason: "migration-indexeddb-not-empty",
@@ -11367,6 +11431,52 @@ async function maybeMigrateLegacyGraphToIndexedDb(
           integrity: postMigrationSnapshot?.meta?.integrity,
         });
       }
+
+      if (authorityTarget && migrationResult?.migrated) {
+        try {
+          writeChatMetadataPatch(context, {
+            [GRAPH_COMMIT_MARKER_KEY]: {
+              ...normalizeGraphCommitMarker(readGraphCommitMarker(context)),
+              migratedToAuthority: true,
+              migratedAt: new Date().toISOString(),
+              migratedRevision: migrationResult.revision || legacyRevision,
+            },
+          });
+        } catch (markerError) {
+          console.warn("[ST-BME] 写入迁移完成标记失败（非致命）:", markerError);
+        }
+      }
+
+      if (authorityTarget && migrationResult?.migrated) {
+        try {
+          await targetDb.patchMeta({
+            runtimeVectorIndexState: {
+              dirty: true,
+              dirtyReason: "authority-migration-trivium-rebuild",
+              triviumRebuildRequired: true,
+              lastWarning: "Authority 迁移完成，Trivium 向量需重建",
+            },
+          });
+        } catch (metaError) {
+          console.warn("[ST-BME] 写入 Trivium 重建标记失败（非致命）:", metaError);
+        }
+        try {
+          const settings = getSettings();
+          if (shouldUseAuthorityJobs(settings)) {
+            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+            if (vectorConfig?.mode === "authority") {
+              await submitAuthorityVectorRebuildJob({
+                config: vectorConfig,
+                purge: true,
+                reason: "authority-migration-trivium-rebuild",
+              });
+            }
+          }
+        } catch (vectorJobError) {
+          console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
+        }
+      }
+
       debugDebug("[ST-BME] legacy chat_metadata 图谱迁移完成", {
         source,
         chatId: normalizedChatId,
@@ -11492,6 +11602,16 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
 
       const emptyStatus = await targetDb.isEmpty();
       if (!emptyStatus?.empty) {
+        const existingNodes = Number(emptyStatus?.nodes || 0);
+        const existingEdges = Number(emptyStatus?.edges || 0);
+        if (existingNodes + existingEdges < 5) {
+          console.warn(
+            "[ST-BME] 本地存储非空但数据量极少，可能是残留数据。" +
+            `节点: ${existingNodes}, 边: ${existingEdges}。` +
+            "如需强制重新迁移，请在面板中清除数据后重试。",
+            { chatId: normalizedChatId, emptyStatus },
+          );
+        }
         return {
           migrated: false,
           reason: "migration-local-store-not-empty",
@@ -11586,6 +11706,53 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
         });
       }
 
+      if (authorityTarget && migrationResult?.imported !== undefined) {
+        try {
+          const ctx = getContext();
+          writeChatMetadataPatch(ctx, {
+            [GRAPH_COMMIT_MARKER_KEY]: {
+              ...normalizeGraphCommitMarker(readGraphCommitMarker(ctx)),
+              migratedToAuthority: true,
+              migratedAt: new Date().toISOString(),
+              migratedRevision: migrationResult.revision || normalizedRevision,
+              migrationSource: migrationSource,
+            },
+          });
+        } catch (markerError) {
+          console.warn("[ST-BME] 写入 IndexedDB→Authority 迁移完成标记失败（非致命）:", markerError);
+        }
+      }
+
+      if (authorityTarget) {
+        try {
+          await targetDb.patchMeta({
+            runtimeVectorIndexState: {
+              dirty: true,
+              dirtyReason: "authority-migration-trivium-rebuild",
+              triviumRebuildRequired: true,
+              lastWarning: "Authority 迁移完成，Trivium 向量需重建",
+            },
+          });
+        } catch (metaError) {
+          console.warn("[ST-BME] 写入 Trivium 重建标记失败（非致命）:", metaError);
+        }
+        try {
+          const settings = getSettings();
+          if (shouldUseAuthorityJobs(settings)) {
+            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+            if (vectorConfig?.mode === "authority") {
+              await submitAuthorityVectorRebuildJob({
+                config: vectorConfig,
+                purge: true,
+                reason: "authority-migration-trivium-rebuild",
+              });
+            }
+          }
+        } catch (vectorJobError) {
+          console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
+        }
+      }
+
       debugDebug("[ST-BME] 已将 legacy IndexedDB 快照迁移到当前本地存储", {
         source,
         chatId: normalizedChatId,
@@ -11630,6 +11797,265 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
   });
 
   bmeIndexedDbLocalStoreMigrationInFlightByChatId.set(
+    normalizedChatId,
+    migrationTask,
+  );
+  return await migrationTask;
+}
+
+async function maybeImportLegacyOpfsSnapshotToLocalStore(
+  chatId,
+  targetDb,
+  { source = "unknown" } = {},
+) {
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return {
+      migrated: false,
+      reason: "migration-opfs-missing-chat-id",
+      chatId: "",
+    };
+  }
+
+  const inFlightMigration =
+    bmeIndexedDbOpfsMigrationInFlightByChatId.get(normalizedChatId);
+  if (inFlightMigration) {
+    return await inFlightMigration;
+  }
+
+  const migrationTask = (async () => {
+    try {
+      if (
+        !targetDb ||
+        typeof targetDb.isEmpty !== "function" ||
+        typeof targetDb.importSnapshot !== "function" ||
+        typeof targetDb.exportSnapshot !== "function"
+      ) {
+        return {
+          migrated: false,
+          reason: "migration-opfs-store-unavailable",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const targetStore = resolveDbGraphStorePresentation(targetDb);
+      const authorityTarget = isAuthorityGraphStorePresentation(targetStore);
+      if (targetStore.storagePrimary === "opfs") {
+        return {
+          migrated: false,
+          reason: "migration-opfs-same-storage",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const migrationCompletedAt = Number(
+        await targetDb.getMeta("migrationCompletedAt", 0),
+      );
+      if (Number.isFinite(migrationCompletedAt) && migrationCompletedAt > 0) {
+        return {
+          migrated: false,
+          reason: "migration-already-completed",
+          chatId: normalizedChatId,
+          migrationCompletedAt,
+        };
+      }
+
+      const emptyStatus = await targetDb.isEmpty();
+      if (!emptyStatus?.empty) {
+        const existingNodes = Number(emptyStatus?.nodes || 0);
+        const existingEdges = Number(emptyStatus?.edges || 0);
+        if (existingNodes + existingEdges < 5) {
+          console.warn(
+            "[ST-BME] OPFS 迁移目标非空但数据量极少，可能是残留数据。" +
+            `节点: ${existingNodes}, 边: ${existingEdges}。` +
+            "如需强制重新迁移，请在面板中清除数据后重试。",
+            { chatId: normalizedChatId, emptyStatus },
+          );
+        }
+        return {
+          migrated: false,
+          reason: "migration-opfs-target-not-empty",
+          chatId: normalizedChatId,
+          emptyStatus,
+        };
+      }
+
+      const legacySnapshot = await exportOpfsSnapshotForChat(normalizedChatId);
+      if (!isIndexedDbSnapshotMeaningful(legacySnapshot)) {
+        return {
+          migrated: false,
+          reason: "migration-opfs-legacy-snapshot-missing",
+          chatId: normalizedChatId,
+        };
+      }
+
+      const nowMs = Date.now();
+      const normalizedRevision = Math.max(
+        normalizeIndexedDbRevision(legacySnapshot?.meta?.revision),
+        1,
+      );
+      const legacyMeta =
+        legacySnapshot?.meta &&
+        typeof legacySnapshot.meta === "object" &&
+        !Array.isArray(legacySnapshot.meta)
+          ? legacySnapshot.meta
+          : {};
+      const legacyState =
+        legacySnapshot?.state &&
+        typeof legacySnapshot.state === "object" &&
+        !Array.isArray(legacySnapshot.state)
+          ? legacySnapshot.state
+          : {};
+      const migrationSource = authorityTarget
+        ? "legacy_opfs_to_authority"
+        : "legacy_opfs_snapshot";
+      const safetySnapshotResult = authorityTarget
+        ? await captureAuthorityMigrationSafetySnapshot(normalizedChatId, legacySnapshot, {
+            source: migrationSource,
+            reason: "authority-opfs-migration-safety",
+          })
+        : null;
+      const importSnapshot = {
+        meta: {
+          ...legacyMeta,
+          chatId: normalizedChatId,
+          migrationCompletedAt: nowMs,
+          migrationSource,
+          migratedFromStoragePrimary: "opfs",
+          migratedFromStorageMode: legacyMeta.migratedFromStorageMode || "opfs-primary",
+          migratedToStoragePrimary: authorityTarget
+            ? AUTHORITY_GRAPH_STORE_KIND
+            : targetStore.storagePrimary,
+          migratedToStorageMode: authorityTarget
+            ? AUTHORITY_GRAPH_STORE_MODE
+            : targetStore.storageMode,
+          opfsMigrationCompletedAt: nowMs,
+        },
+        state: {
+          ...legacyState,
+        },
+        nodes: Array.isArray(legacySnapshot?.nodes)
+          ? legacySnapshot.nodes.map((node) =>
+              cloneRuntimeDebugValue(node, node),
+            )
+          : [],
+        edges: Array.isArray(legacySnapshot?.edges)
+          ? legacySnapshot.edges.map((edge) =>
+              cloneRuntimeDebugValue(edge, edge),
+            )
+          : [],
+        tombstones: Array.isArray(legacySnapshot?.tombstones)
+          ? legacySnapshot.tombstones.map((record) =>
+              cloneRuntimeDebugValue(record, record),
+            )
+          : [],
+      };
+
+      const migrationResult = await targetDb.importSnapshot(importSnapshot, {
+        mode: "replace",
+        preserveRevision: true,
+        revision: normalizedRevision,
+        markSyncDirty: authorityTarget ? false : Boolean(legacyMeta.syncDirty),
+      });
+      const snapshot = await targetDb.exportSnapshot();
+      if (authorityTarget) {
+        recordAuthorityAcceptedRevisionPointer({
+          revision: snapshot?.meta?.revision || migrationResult?.revision || normalizedRevision,
+          integrity: snapshot?.meta?.integrity || legacyMeta.integrity,
+        });
+      }
+
+      if (authorityTarget) {
+        try {
+          const ctx = getContext();
+          writeChatMetadataPatch(ctx, {
+            [GRAPH_COMMIT_MARKER_KEY]: {
+              ...normalizeGraphCommitMarker(readGraphCommitMarker(ctx)),
+              migratedToAuthority: true,
+              migratedAt: new Date().toISOString(),
+              migratedRevision: migrationResult.revision || normalizedRevision,
+              migrationSource: migrationSource,
+            },
+          });
+        } catch (markerError) {
+          console.warn("[ST-BME] 写入 OPFS→Authority 迁移完成标记失败（非致命）:", markerError);
+        }
+      }
+
+      if (authorityTarget) {
+        try {
+          await targetDb.patchMeta({
+            runtimeVectorIndexState: {
+              dirty: true,
+              dirtyReason: "authority-migration-trivium-rebuild",
+              triviumRebuildRequired: true,
+              lastWarning: "Authority 迁移完成，Trivium 向量需重建",
+            },
+          });
+        } catch (metaError) {
+          console.warn("[ST-BME] 写入 Trivium 重建标记失败（非致命）:", metaError);
+        }
+        try {
+          const settings = getSettings();
+          if (shouldUseAuthorityJobs(settings)) {
+            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+            if (vectorConfig?.mode === "authority") {
+              await submitAuthorityVectorRebuildJob({
+                config: vectorConfig,
+                purge: true,
+                reason: "authority-migration-trivium-rebuild",
+              });
+            }
+          }
+        } catch (vectorJobError) {
+          console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
+        }
+      }
+
+      debugDebug("[ST-BME] 已将 legacy OPFS 快照迁移到当前本地存储", {
+        source,
+        chatId: normalizedChatId,
+        targetStore: cloneRuntimeDebugValue(targetStore, null),
+        revision:
+          snapshot?.meta?.revision || migrationResult?.revision || normalizedRevision,
+      });
+
+      return {
+        migrated: true,
+        reason: authorityTarget
+          ? "authority-opfs-migration-completed"
+          : "migration-opfs-completed",
+        source: migrationSource,
+        chatId: normalizedChatId,
+        migrationResult,
+        snapshot,
+        targetStore,
+        safetySnapshotResult,
+      };
+    } catch (error) {
+      console.warn("[ST-BME] 迁移 legacy OPFS 快照到当前本地存储失败:", {
+        chatId: normalizedChatId,
+        error,
+      });
+      return {
+        migrated: false,
+        reason: "migration-opfs-failed",
+        chatId: normalizedChatId,
+        error: error?.message || String(error),
+      };
+    }
+  })().finally(() => {
+    if (
+      bmeIndexedDbOpfsMigrationInFlightByChatId.get(normalizedChatId) ===
+      migrationTask
+    ) {
+      bmeIndexedDbOpfsMigrationInFlightByChatId.delete(
+        normalizedChatId,
+      );
+    }
+  });
+
+  bmeIndexedDbOpfsMigrationInFlightByChatId.set(
     normalizedChatId,
     migrationTask,
   );
@@ -12522,13 +12948,13 @@ async function loadGraphFromIndexedDb(
       });
     }
 
-    const localStoreMigrationResult = identityRecoveryResult?.migrated
+    const opfsMigrationResult = identityRecoveryResult?.migrated
       ? {
           migrated: false,
           reason: "identity-recovery-already-applied",
           chatId: normalizedChatId,
         }
-      : await maybeImportLegacyIndexedDbSnapshotToLocalStore(
+      : await maybeImportLegacyOpfsSnapshotToLocalStore(
           normalizedChatId,
           db,
           {
@@ -12536,18 +12962,36 @@ async function loadGraphFromIndexedDb(
           },
         );
 
+    const localStoreMigrationResult =
+      identityRecoveryResult?.migrated || opfsMigrationResult?.migrated
+        ? {
+            migrated: false,
+            reason: opfsMigrationResult?.migrated
+              ? "opfs-migration-already-applied"
+              : "identity-recovery-already-applied",
+            chatId: normalizedChatId,
+          }
+        : await maybeImportLegacyIndexedDbSnapshotToLocalStore(
+            normalizedChatId,
+            db,
+            {
+              source,
+            },
+          );
+
     const migrationResult =
       identityRecoveryResult?.migrated ||
+      opfsMigrationResult?.migrated ||
       localStoreMigrationResult?.migrated ||
       localStoreMigrationResult?.reason === "migration-local-store-failed"
         ? localStoreMigrationResult
         : await maybeMigrateLegacyGraphToIndexedDb(
-          normalizedChatId,
-          getContext(),
-          {
-            source,
-            db,
-          },
+            normalizedChatId,
+            getContext(),
+            {
+              source,
+              db,
+            },
         );
 
     if (migrationResult?.migrated) {

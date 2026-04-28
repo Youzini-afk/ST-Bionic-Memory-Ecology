@@ -1156,6 +1156,50 @@ export async function rollbackFromRestoreSafetySnapshot(chatId, options = {}) {
   try {
     const status = await getRestoreSafetySnapshotStatus(normalizedChatId, options);
     if (!status.exists) {
+      try {
+        const blobAdapter = getAuthorityBlobAdapter(options);
+        if (blobAdapter && typeof blobAdapter.readJson === "function") {
+          const blobSnapshot = await blobAdapter.readJson(
+            `ST-BME/migration-safety/${normalizedChatId}.json`,
+            { namespace: "st-bme-safety" },
+          );
+          if (blobSnapshot && typeof blobSnapshot === "object" && !Array.isArray(blobSnapshot)) {
+            const snapshot = normalizeSyncSnapshot(blobSnapshot, normalizedChatId);
+            const hasNodes = Array.isArray(snapshot.nodes) && snapshot.nodes.length > 0;
+            const hasEdges = Array.isArray(snapshot.edges) && snapshot.edges.length > 0;
+            if (hasNodes || hasEdges) {
+              const db = await getDb(normalizedChatId, options);
+              await db.importSnapshot(snapshot, {
+                mode: "replace",
+                preserveRevision: true,
+                revision: normalizeRevision(snapshot.meta?.revision),
+                markSyncDirty: false,
+              });
+              await patchDbMeta(db, {
+                deviceId: getOrCreateDeviceId(),
+                syncDirty: true,
+                syncDirtyReason: "restore-safety-rollback-from-blob",
+                lastBackupRollbackAt: Date.now(),
+              });
+              await invokeSyncAppliedHook(options, {
+                chatId: normalizedChatId,
+                action: "restore-backup-from-blob",
+                revision: normalizeRevision(snapshot.meta?.revision),
+              });
+              return {
+                restored: true,
+                chatId: normalizedChatId,
+                revision: normalizeRevision(snapshot.meta?.revision),
+                createdAt: 0,
+                blobRestored: true,
+                reason: "restored-from-authority-blob",
+              };
+            }
+          }
+        }
+      } catch (blobError) {
+        console.warn("[ST-BME] 从 Authority blob 恢复安全快照失败:", blobError);
+      }
       return {
         restored: false,
         chatId: normalizedChatId,

@@ -144,6 +144,18 @@ export function enqueueAuthorityOfflineMutation(state = {}, mutation = {}, setti
   const nextItems = [...current.offlineQueue, item];
   const nextSummary = summarizeQueue(nextItems);
   if (policy.maxItems > 0 && nextSummary.items > policy.maxItems) {
+    console.warn(
+      `[ST-BME] Authority 离线队列溢出 (maxItems=${policy.maxItems})，新突变被丢弃。` +
+      "恢复连接后请手动同步图谱。",
+      { rejectedMutation: item },
+    );
+    try {
+      sessionStorage.setItem("st_bme:authority:overflow:global", JSON.stringify({
+        overflowAt: new Date(nowMs).toISOString(),
+        reason: "max-items-exceeded",
+        lostItemCount: 1,
+      }));
+    } catch {}
     const nextState = createAuthorityBrowserState({
       ...current,
       offlineQueueOverflow: true,
@@ -153,6 +165,18 @@ export function enqueueAuthorityOfflineMutation(state = {}, mutation = {}, setti
     return { accepted: false, reason: "max-items-exceeded", state: nextState };
   }
   if (policy.maxBytes > 0 && nextSummary.bytes > policy.maxBytes) {
+    console.warn(
+      `[ST-BME] Authority 离线队列溢出 (maxBytes=${policy.maxBytes})，新突变被丢弃。` +
+      "恢复连接后请手动同步图谱。",
+      { rejectedMutation: item },
+    );
+    try {
+      sessionStorage.setItem("st_bme:authority:overflow:global", JSON.stringify({
+        overflowAt: new Date(nowMs).toISOString(),
+        reason: "max-bytes-exceeded",
+        lostItemCount: 1,
+      }));
+    } catch {}
     const nextState = createAuthorityBrowserState({
       ...current,
       offlineQueueOverflow: true,
@@ -176,6 +200,9 @@ export function enqueueAuthorityOfflineMutation(state = {}, mutation = {}, setti
 
 export function clearAuthorityOfflineQueue(state = {}, settings = {}, nowMs = Date.now()) {
   const current = normalizeAuthorityBrowserState(state, settings, nowMs);
+  try {
+    sessionStorage.removeItem("st_bme:authority:overflow:global");
+  } catch {}
   return createAuthorityBrowserState({
     ...current,
     offlineQueue: [],
