@@ -114,6 +114,56 @@ export function normalizeAuthorityJobList(payload = null) {
   };
 }
 
+export function normalizeAuthorityRecentJobRecord(input = null, options = {}) {
+  const normalized = normalizeAuthorityJobRecord(input);
+  const queueState = String(options.queueState || "").trim() ||
+    (normalized.error
+      ? "error"
+      : normalized.terminal
+        ? normalized.success
+          ? "success"
+          : "failed"
+        : normalized.id
+          ? "running"
+          : "idle");
+  return {
+    ...normalized,
+    updatedAt: String(normalized.updatedAt || options.updatedAt || ""),
+    queueState,
+  };
+}
+
+export function mergeAuthorityRecentJobs(existingJobs = [], incomingJobs = [], options = {}) {
+  const limit = normalizeInteger(options.limit, 8, 1, 100);
+  const updatedAt = String(options.updatedAt || "");
+  const normalizedExisting = Array.isArray(existingJobs) ? existingJobs : [];
+  const normalizedIncoming = Array.isArray(incomingJobs) ? incomingJobs : [incomingJobs];
+  const seen = new Set();
+  const merged = [];
+
+  for (const item of normalizedIncoming) {
+    const job = normalizeAuthorityRecentJobRecord(item, { updatedAt });
+    if (!job.id || seen.has(job.id)) continue;
+    seen.add(job.id);
+    merged.push(job);
+    if (merged.length >= limit) {
+      return merged;
+    }
+  }
+
+  for (const item of normalizedExisting) {
+    const job = normalizeAuthorityRecentJobRecord(item);
+    if (!job.id || seen.has(job.id)) continue;
+    seen.add(job.id);
+    merged.push(job);
+    if (merged.length >= limit) {
+      break;
+    }
+  }
+
+  return merged;
+}
+
 export function buildAuthorityJobIdempotencyKey({
   kind = "job",
   chatId = "",

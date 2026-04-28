@@ -1582,6 +1582,61 @@ function _buildAuthorityJobUiState(loadInfo = _getGraphPersistenceSnapshot()) {
   };
 }
 
+function _buildAuthorityRecentJobsUiState(loadInfo = _getGraphPersistenceSnapshot()) {
+  const snapshot =
+    loadInfo && typeof loadInfo === "object" && !Array.isArray(loadInfo)
+      ? loadInfo
+      : {};
+  const jobs = Array.isArray(snapshot.authorityRecentJobs)
+    ? snapshot.authorityRecentJobs
+    : [];
+  return {
+    jobs: jobs.map((job) => {
+      const normalizedJob =
+        job && typeof job === "object" && !Array.isArray(job) ? job : {};
+      const jobId = String(normalizedJob.id || "").trim();
+      const kind = String(normalizedJob.kind || "").trim();
+      const status = String(normalizedJob.status || "").trim();
+      const error = String(normalizedJob.error || "").trim();
+      const progressRaw = Number(normalizedJob.progress);
+      const progress = Number.isFinite(progressRaw)
+        ? Math.max(0, Math.min(1, progressRaw))
+        : 0;
+      const queueState = String(normalizedJob.queueState || "").trim() ||
+        (error
+          ? "error"
+          : status === "completed" || status === "succeeded" || status === "success"
+            ? "success"
+            : status === "failed" || status === "error" || status === "timeout"
+              ? "failed"
+              : jobId
+                ? "running"
+                : "idle");
+      const progressText = progress > 0 ? `${Math.round(progress * 100)}%` : "";
+      return {
+        jobId,
+        kind,
+        status,
+        error,
+        progress,
+        queueState,
+        updatedAt: String(normalizedJob.updatedAt || ""),
+        updatedAtLabel: _formatTaskProfileTime(normalizedJob.updatedAt),
+        detail: [kind, status || queueState, progressText, error]
+          .filter(Boolean)
+          .join(" · "),
+      };
+    }),
+    updatedAt: String(snapshot.authorityRecentJobsUpdatedAt || ""),
+    updatedAtLabel: snapshot.authorityRecentJobsUpdatedAt
+      ? _formatTaskProfileTime(snapshot.authorityRecentJobsUpdatedAt)
+      : "未刷新",
+    error: String(snapshot.authorityRecentJobsError || "").trim(),
+    hasMore: Boolean(snapshot.authorityRecentJobsHasMore),
+    nextCursor: String(snapshot.authorityRecentJobsNextCursor || ""),
+  };
+}
+
 function _readPersistenceDiagnosticObject(snapshot = null) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     return null;
@@ -2027,6 +2082,7 @@ function _refreshTaskPipelineOverview() {
   const historyState = graph.runtimeState?.historyState || graph.historyState || {};
   const loadInfo = _getGraphPersistenceSnapshot();
   const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
+  const authorityRecentJobsUi = _buildAuthorityRecentJobsUiState(loadInfo);
 
   const extraction = _resolvePipelineStatus(_getLastExtractionStatus?.());
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
@@ -2052,23 +2108,6 @@ function _refreshTaskPipelineOverview() {
   );
   if (pipelinePersistDeltaMeta) {
     persistenceMetaParts.push(pipelinePersistDeltaMeta);
-  }
-  const authorityJob = loadInfo.authorityLastJob || {};
-  const authorityJobParts = [
-    authorityJob.id || loadInfo.authorityLastJobId
-      ? `job ${authorityJob.id || loadInfo.authorityLastJobId}`
-      : "",
-    authorityJob.kind || loadInfo.authorityLastJobKind || "",
-    authorityJob.status || loadInfo.authorityLastJobStatus || "",
-  ].filter(Boolean);
-  const authorityJobProgress = Number(
-    authorityJob.progress ?? loadInfo.authorityLastJobProgress,
-  );
-  if (Number.isFinite(authorityJobProgress) && authorityJobProgress > 0) {
-    authorityJobParts.push(`${Math.round(authorityJobProgress * 100)}%`);
-  }
-  if (loadInfo.authorityLastJobError) {
-    authorityJobParts.push(`error ${loadInfo.authorityLastJobError}`);
   }
   const persistence = _resolvePipelineStatus({
     text: loadInfo.loadState || "unknown",
@@ -2154,11 +2193,53 @@ function _refreshTaskPipelineOverview() {
     : authorityJobUi.queueState === "running"
       ? Math.max(8, Math.round(authorityJobUi.progress * 100))
       : Math.round(authorityJobUi.progress * 100);
-  const authorityJobActions = authorityJobUi.canRequeue && typeof _actionHandlers.requeueAuthorityJob === "function"
+  const authorityJobActions = [
+    typeof _actionHandlers.refreshAuthorityJobs === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-job-action="refresh">刷新 Jobs</button>`
+      : "",
+    authorityJobUi.canRequeue && typeof _actionHandlers.requeueAuthorityJob === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-job-action="requeue" data-job-id="${_escHtml(authorityJobUi.jobId)}">重试 Authority Job</button>`
+      : "",
+  ].filter(Boolean).join("");
+  const authorityRecentJobsHtml = authorityRecentJobsUi.jobs.length
     ? `
-      <div style="margin-top:10px;display:flex;justify-content:flex-end">
-        <button class="bme-config-secondary-btn" type="button" data-authority-job-action="requeue" data-job-id="${_escHtml(authorityJobUi.jobId)}">重试 Authority Job</button>
+      <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+        ${authorityRecentJobsUi.jobs.map((job) => {
+          const dotColor = job.queueState === "success"
+            ? "#2ecc71"
+            : job.queueState === "failed" || job.queueState === "error"
+              ? "#e74c3c"
+              : job.queueState === "running"
+                ? "#00d4ff"
+                : "#7f8c8d";
+          return `
+            <div style="padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <div class="bme-status-row-label"><span class="bme-sdot" style="background:${dotColor}"></span>${_escHtml(job.jobId ? `job ${job.jobId}` : job.kind || "job")}</div>
+                <div style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(job.updatedAtLabel)}</div>
+              </div>
+              <div class="bme-config-help" style="margin-top:4px">${_escHtml(job.detail || job.queueState || "—")}</div>
+            </div>`;
+        }).join("")}
       </div>`
+    : `<div class="bme-config-help" style="margin-top:12px">${_escHtml(
+        authorityRecentJobsUi.error
+          ? `最近任务刷新失败：${authorityRecentJobsUi.error}`
+          : authorityRecentJobsUi.updatedAt
+            ? `最近任务为空 · ${authorityRecentJobsUi.updatedAtLabel}`
+            : "尚未拉取 recent jobs"
+      )}</div>`;
+  const authorityRecentJobsFooter = authorityRecentJobsUi.jobs.length || authorityRecentJobsUi.hasMore || authorityRecentJobsUi.error
+    ? `<div class="bme-config-help" style="margin-top:8px">${_escHtml(
+        authorityRecentJobsUi.error
+          ? authorityRecentJobsUi.error
+          : authorityRecentJobsUi.hasMore
+            ? `仅展示最近 ${authorityRecentJobsUi.jobs.length} 条，服务端仍有更多记录`
+            : `最近刷新：${authorityRecentJobsUi.updatedAtLabel}`
+      )}</div>`
+    : "";
+  const authorityJobActionsRow = authorityJobActions
+    ? `<div style="margin-top:10px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">${authorityJobActions}</div>`
     : "";
 
   el.innerHTML = `
@@ -2195,33 +2276,55 @@ function _refreshTaskPipelineOverview() {
       <div style="height:8px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden">
         <div style="height:100%;width:${authorityJobProgressWidth}%;background:${authorityJobProgressColor};transition:width .2s ease"></div>
       </div>
-      ${authorityJobActions}
+      ${authorityJobActionsRow}
+      ${authorityRecentJobsHtml}
+      ${authorityRecentJobsFooter}
     </div>
   `;
 
   el
-    .querySelector('[data-authority-job-action="requeue"]')
-    ?.addEventListener("click", async (event) => {
+    .querySelectorAll('[data-authority-job-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
       const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityJobAction || "").trim();
       const jobId = String(button?.dataset?.jobId || "").trim();
-      if (!jobId || typeof _actionHandlers.requeueAuthorityJob !== "function") return;
       if (button.disabled) return;
       button.disabled = true;
       try {
-        toastr.info("Authority Job 重试中…", "ST-BME", { timeOut: 2000 });
-        const result = await _actionHandlers.requeueAuthorityJob(jobId);
-        if (result?.success) {
-          toastr.success(`Authority Job 已重试：${result?.job?.id || jobId}`, "ST-BME");
+        if (action === "refresh") {
+          if (typeof _actionHandlers.refreshAuthorityJobs !== "function") return;
+          toastr.info("Authority Jobs 刷新中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.refreshAuthorityJobs();
+          if (result?.success) {
+            toastr.success(`Authority Jobs 已刷新：${(result.jobs || []).length} 条`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Jobs 刷新失败：${result?.error || result?.reason || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "requeue") {
+          if (!jobId || typeof _actionHandlers.requeueAuthorityJob !== "function") return;
+          toastr.info("Authority Job 重试中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.requeueAuthorityJob(jobId);
+          if (result?.success) {
+            toastr.success(`Authority Job 已重试：${result?.job?.id || jobId}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Job 重试失败：${result?.error || "unknown"}`, "ST-BME");
+          }
         } else {
-          toastr.warning(`Authority Job 重试失败：${result?.error || "unknown"}`, "ST-BME");
+          return;
         }
       } catch (error) {
-        toastr.error(`Authority Job 重试失败: ${error?.message || error}`, "ST-BME");
+        toastr.error(
+          action === "refresh"
+            ? `Authority Jobs 刷新失败: ${error?.message || error}`
+            : `Authority Job 重试失败: ${error?.message || error}`,
+          "ST-BME",
+        );
       } finally {
+        button.disabled = false;
         _refreshDashboard();
         _refreshTaskMonitor();
       }
-    });
+    }));
 }
 
 // ---------- Task Timeline ----------

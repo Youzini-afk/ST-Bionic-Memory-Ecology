@@ -372,6 +372,7 @@ import {
 import {
   buildAuthorityJobIdempotencyKey,
   createAuthorityJobAdapter,
+  mergeAuthorityRecentJobs,
   normalizeAuthorityJobConfig,
 } from "./maintenance/authority-job-adapter.js";
 import { trackAuthorityJobUntilTerminal } from "./maintenance/authority-job-tracker.js";
@@ -1267,6 +1268,7 @@ const HISTORY_MUTATION_RETRY_DELAYS_MS = [80, 220, 500, 900];
 const GRAPH_LOAD_RETRY_DELAYS_MS = [120, 450, 1200, 2500];
 const AUTO_EXTRACTION_DEFER_RETRY_DELAYS_MS = [120, 320, 800, 1600, 2800];
 const AUTO_EXTRACTION_HOST_SETTLE_MS = 120;
+const AUTHORITY_RECENT_JOBS_LIMIT = 8;
 let runtimeStatus = createUiStatus("待命", "准备就绪", "idle");
 let lastExtractionStatus = createUiStatus("待命", "尚未执行提取", "idle");
 let lastVectorStatus = createUiStatus("待命", "尚未执行向量任务", "idle");
@@ -1797,6 +1799,38 @@ function getGraphPersistenceLiveState() {
     authorityTriviumPrimaryReady: Boolean(
       authorityRuntime.capability.triviumPrimaryReady,
     ),
+    authorityJobsReady: Boolean(authorityRuntime.capability.jobsReady),
+    authorityJobQueueState: String(graphPersistenceState.authorityJobQueueState || "idle"),
+    authorityLastJob: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityLastJob,
+      null,
+    ),
+    authorityLastJobId: String(graphPersistenceState.authorityLastJobId || ""),
+    authorityLastJobKind: String(graphPersistenceState.authorityLastJobKind || ""),
+    authorityLastJobStatus: String(graphPersistenceState.authorityLastJobStatus || ""),
+    authorityLastJobProgress: Number(
+      graphPersistenceState.authorityLastJobProgress || 0,
+    ),
+    authorityLastJobError: String(graphPersistenceState.authorityLastJobError || ""),
+    authorityLastJobUpdatedAt: String(
+      graphPersistenceState.authorityLastJobUpdatedAt || "",
+    ),
+    authorityRecentJobs: cloneRuntimeDebugValue(
+      graphPersistenceState.authorityRecentJobs,
+      [],
+    ),
+    authorityRecentJobsUpdatedAt: String(
+      graphPersistenceState.authorityRecentJobsUpdatedAt || "",
+    ),
+    authorityRecentJobsError: String(
+      graphPersistenceState.authorityRecentJobsError || "",
+    ),
+    authorityRecentJobsNextCursor: String(
+      graphPersistenceState.authorityRecentJobsNextCursor || "",
+    ),
+    authorityRecentJobsHasMore: Boolean(
+      graphPersistenceState.authorityRecentJobsHasMore,
+    ),
     authorityBrowserCacheMode: String(
       authorityRuntime.browserState.mode || "minimal",
     ),
@@ -1962,12 +1996,108 @@ function shouldUseAuthorityJobs(config = null) {
   );
 }
 
+function mergeAuthorityRecentJobsIntoState(incomingJobs = [], options = {}) {
+  const updatedAt = String(options.updatedAt || new Date().toISOString());
+  const nextRecentJobs = mergeAuthorityRecentJobs(
+    options.replace === true ? [] : graphPersistenceState.authorityRecentJobs,
+    incomingJobs,
+    {
+      limit: Number.isFinite(Number(options.limit))
+        ? Math.max(1, Math.floor(Number(options.limit)))
+        : AUTHORITY_RECENT_JOBS_LIMIT,
+      updatedAt,
+    },
+  );
+  updateGraphPersistenceState({
+    authorityRecentJobs: cloneRuntimeDebugValue(nextRecentJobs, []),
+    authorityRecentJobsUpdatedAt: updatedAt,
+    authorityRecentJobsError:
+      options.error !== undefined
+        ? String(options.error || "")
+        : String(graphPersistenceState.authorityRecentJobsError || ""),
+    authorityRecentJobsNextCursor:
+      options.nextCursor !== undefined
+        ? String(options.nextCursor || "")
+        : String(graphPersistenceState.authorityRecentJobsNextCursor || ""),
+    authorityRecentJobsHasMore:
+      options.hasMore !== undefined
+        ? Boolean(options.hasMore)
+        : Boolean(graphPersistenceState.authorityRecentJobsHasMore),
+  });
+  return nextRecentJobs;
+}
+
+async function refreshAuthorityRecentJobs(options = {}) {
+  const settings = getSettings();
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  const updatedAt = new Date().toISOString();
+  const currentChatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+  );
+  const limit = Number.isFinite(Number(options.limit))
+    ? Math.max(1, Math.floor(Number(options.limit)))
+    : AUTHORITY_RECENT_JOBS_LIMIT;
+  if (!capability.jobsReady || settings.authorityJobsEnabled === false) {
+    updateGraphPersistenceState({
+      authorityRecentJobsError: "Authority Jobs unavailable",
+      authorityRecentJobsUpdatedAt: updatedAt,
+    });
+    refreshPanelLiveState();
+    return {
+      success: false,
+      reason: "authority-jobs-unavailable",
+      error: "Authority Jobs unavailable",
+    };
+  }
+  try {
+    const adapter = getAuthorityJobAdapter();
+    const filter =
+      options.filter && typeof options.filter === "object" && !Array.isArray(options.filter)
+        ? { ...options.filter }
+        : {};
+    if (currentChatId && !String(filter.chatId || "").trim()) {
+      filter.chatId = currentChatId;
+    }
+    const page = await adapter.listPage({
+      limit,
+      cursor: String(options.cursor || ""),
+      filter,
+      signal: options.signal,
+    });
+    const jobs = mergeAuthorityRecentJobsIntoState(page.jobs, {
+      replace: options.replace === true,
+      limit,
+      updatedAt,
+      error: "",
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+    });
+    refreshPanelLiveState();
+    return {
+      success: true,
+      jobs,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+    };
+  } catch (error) {
+    const message =
+      error?.message || String(error) || "Authority Jobs 列表刷新失败";
+    updateGraphPersistenceState({
+      authorityRecentJobsError: message,
+      authorityRecentJobsUpdatedAt: updatedAt,
+    });
+    refreshPanelLiveState();
+    return { success: false, error: message };
+  }
+}
+
 function recordAuthorityJobSnapshot(job = null, options = {}) {
   const normalizedJob =
     job && typeof job === "object" && !Array.isArray(job) ? job : {};
   const progress = Number(normalizedJob.progress || 0);
   const status = String(normalizedJob.status || options.status || "");
   const error = String(normalizedJob.error || options.error || "");
+  const updatedAt = new Date().toISOString();
   const queueState =
     options.queueState ||
     (error
@@ -1979,6 +2109,42 @@ function recordAuthorityJobSnapshot(job = null, options = {}) {
         : normalizedJob.id
           ? "running"
           : "idle");
+  const recentJobsPatch = normalizedJob.id
+    ? {
+        authorityRecentJobs: cloneRuntimeDebugValue(
+          mergeAuthorityRecentJobs(
+            graphPersistenceState.authorityRecentJobs,
+            [
+              {
+                ...normalizedJob,
+                kind: normalizedJob.kind || options.kind || "",
+                status,
+                progress: Number.isFinite(progress)
+                  ? Math.max(0, Math.min(1, progress))
+                  : 0,
+                error,
+                updatedAt,
+              },
+            ],
+            {
+              limit: AUTHORITY_RECENT_JOBS_LIMIT,
+              updatedAt,
+            },
+          ),
+          [],
+        ),
+        authorityRecentJobsUpdatedAt: updatedAt,
+        authorityRecentJobsError:
+          options.recentJobsError !== undefined
+            ? String(options.recentJobsError || "")
+            : String(graphPersistenceState.authorityRecentJobsError || ""),
+      }
+    : options.recentJobsError !== undefined
+      ? {
+          authorityRecentJobsError: String(options.recentJobsError || ""),
+          authorityRecentJobsUpdatedAt: updatedAt,
+        }
+      : {};
   updateGraphPersistenceState({
     authorityJobQueueState: queueState,
     authorityLastJob: cloneRuntimeDebugValue(normalizedJob, null),
@@ -1989,7 +2155,8 @@ function recordAuthorityJobSnapshot(job = null, options = {}) {
       ? Math.max(0, Math.min(1, progress))
       : 0,
     authorityLastJobError: error,
-    authorityLastJobUpdatedAt: new Date().toISOString(),
+    authorityLastJobUpdatedAt: updatedAt,
+    ...recentJobsPatch,
   });
 }
 
@@ -2271,6 +2438,7 @@ async function submitAuthorityVectorRebuildJob({
       "running",
       { syncRuntime: true },
     );
+    void refreshAuthorityRecentJobs({ reason: "authority-job-submitted" });
     void startTrackingAuthorityJob(job, { kind, chatId });
     return {
       submitted: true,
@@ -2416,6 +2584,11 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
         normalizedNextJob.success ? "success" : "error",
         { syncRuntime: true },
       );
+      void refreshAuthorityRecentJobs({
+        reason: normalizedNextJob.success
+          ? "authority-job-completed"
+          : "authority-job-failed",
+      });
       const activeChatId =
         normalizeChatIdCandidate(getCurrentChatId()) ||
         normalizeChatIdCandidate(graphPersistenceState.chatId);
@@ -2501,6 +2674,7 @@ async function requeueAuthorityJob(jobId, options = {}) {
     recordAuthorityJobSnapshot(job, { queueState: "running" });
     syncAuthorityVectorJobState(job);
     saveGraphToChat({ reason: "authority-vector-rebuild-job-requeued" });
+    void refreshAuthorityRecentJobs({ reason: "authority-job-requeued" });
     void startTrackingAuthorityJob(job, {
       kind: job?.kind || graphPersistenceState.authorityLastJobKind,
       chatId: getCurrentChatId(),
@@ -20748,6 +20922,13 @@ async function onRebuildVectorIndex(range = null) {
   );
 }
 
+async function onRefreshAuthorityJobs() {
+  return await refreshAuthorityRecentJobs({
+    replace: true,
+    reason: "panel-authority-jobs-refresh",
+  });
+}
+
 async function onReembedDirect() {
   return await onReembedDirectController({
     getEmbeddingConfig,
@@ -21326,6 +21507,7 @@ async function onCompactLukerSidecar() {
       rebuildVectorIndex: () => onRebuildVectorIndex(),
       rebuildVectorRange: (range) => onRebuildVectorIndex(range),
       requeueAuthorityJob: async (jobId) => await requeueAuthorityJob(jobId),
+      refreshAuthorityJobs: onRefreshAuthorityJobs,
       reembedDirect: onReembedDirect,
       reroll: onReroll,
       clearGraph: onClearGraph,

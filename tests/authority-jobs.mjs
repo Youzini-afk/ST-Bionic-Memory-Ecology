@@ -4,8 +4,10 @@ import {
   AUTHORITY_JOB_STATUS_SUCCESS,
   buildAuthorityJobIdempotencyKey,
   createAuthorityJobAdapter,
+  mergeAuthorityRecentJobs,
   normalizeAuthorityJobList,
   normalizeAuthorityJobRecord,
+  normalizeAuthorityRecentJobRecord,
 } from "../maintenance/authority-job-adapter.js";
 import { trackAuthorityJobUntilTerminal } from "../maintenance/authority-job-tracker.js";
 import { onRebuildVectorIndexController } from "../ui/ui-actions-controller.js";
@@ -77,6 +79,33 @@ const list = normalizeAuthorityJobList({
 assert.equal(list.jobs.length, 1);
 assert.equal(list.jobs[0].progress, 0.33);
 assert.equal(list.nextCursor, "cursor-2");
+
+const recentJob = normalizeAuthorityRecentJobRecord(
+  { id: "job-recent", status: "completed", progress: 1 },
+  { updatedAt: "2026-04-28T08:00:00.000Z" },
+);
+assert.equal(recentJob.queueState, "success");
+assert.equal(recentJob.updatedAt, "2026-04-28T08:00:00.000Z");
+
+const mergedRecentJobs = mergeAuthorityRecentJobs(
+  [
+    { id: "job-old", status: "failed", updatedAt: "2026-04-28T07:50:00.000Z" },
+    { id: "job-dup", status: "queued", updatedAt: "2026-04-28T07:45:00.000Z" },
+  ],
+  [
+    { id: "job-new", status: "running", progress: 0.4 },
+    { id: "job-dup", status: "completed", progress: 1 },
+  ],
+  { limit: 3, updatedAt: "2026-04-28T08:10:00.000Z" },
+);
+assert.deepEqual(mergedRecentJobs.map((job) => job.id), [
+  "job-new",
+  "job-dup",
+  "job-old",
+]);
+assert.equal(mergedRecentJobs[0].queueState, "running");
+assert.equal(mergedRecentJobs[1].queueState, "success");
+assert.equal(mergedRecentJobs[1].updatedAt, "2026-04-28T08:10:00.000Z");
 
 const idempotencyKey = buildAuthorityJobIdempotencyKey({
   kind: "authority.vector.rebuild",
