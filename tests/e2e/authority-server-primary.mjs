@@ -1,8 +1,32 @@
 import assert from "node:assert/strict";
 
-import { probeAuthorityCapabilities } from "../../runtime/authority-capabilities.js";
-import { AuthorityGraphStore } from "../../sync/authority-graph-store.js";
 import {
+  installResolveHooks,
+  toDataModuleUrl,
+} from "../helpers/register-hooks-compat.mjs";
+
+installResolveHooks([
+  {
+    specifiers: ["../../../../../script.js"],
+    url: toDataModuleUrl("export function getRequestHeaders() { return {}; }"),
+  },
+  {
+    specifiers: ["../../../../extensions.js"],
+    url: toDataModuleUrl("export const extension_settings = { st_bme: {} };"),
+  },
+]);
+
+import {
+  buildAuthorityE2eVectorEntries,
+  createAuthorityE2eContext,
+  createAuthorityE2eContractGraph,
+  createAuthorityE2eContractNode,
+  runAuthorityE2eStep,
+} from "../helpers/authority-e2e-context.mjs";
+
+const { probeAuthorityCapabilities } = await import("../../runtime/authority-capabilities.js");
+const { AuthorityGraphStore } = await import("../../sync/authority-graph-store.js");
+const {
   deleteAuthorityTriviumNodes,
   filterAuthorityTriviumNodes,
   normalizeAuthorityVectorConfig,
@@ -11,19 +35,12 @@ import {
   searchAuthorityTriviumNodes,
   syncAuthorityTriviumLinks,
   upsertAuthorityTriviumEntries,
-} from "../../vector/authority-vector-primary-adapter.js";
-import {
+} = await import("../../vector/authority-vector-primary-adapter.js");
+const {
   buildAuthorityJobIdempotencyKey,
   createAuthorityJobAdapter,
-} from "../../maintenance/authority-job-adapter.js";
-import { createAuthorityBlobAdapter } from "../../maintenance/authority-blob-adapter.js";
-import {
-  buildAuthorityE2eVectorEntries,
-  createAuthorityE2eContext,
-  createAuthorityE2eContractGraph,
-  createAuthorityE2eContractNode,
-  runAuthorityE2eStep,
-} from "../helpers/authority-e2e-context.mjs";
+} = await import("../../maintenance/authority-job-adapter.js");
+const { createAuthorityBlobAdapter } = await import("../../maintenance/authority-blob-adapter.js");
 
 const context = createAuthorityE2eContext({
   skipMessage:
@@ -35,7 +52,7 @@ if (context.skip) {
   process.exit(0);
 }
 const resolvedBaseUrl = context.baseUrl;
-const { chatId, namespace, collectionId, blobPath, fetchImpl, headerProvider, runId } = context;
+const { chatId, namespace, collectionId, blobPath, fetchImpl, headerProvider, runId, embeddingApiUrl, embeddingApiKey, embeddingModel } = context;
 const graph = createAuthorityE2eContractGraph(chatId, runId);
 
 const runContext = {
@@ -105,7 +122,12 @@ await runAuthorityE2eStep("sql", async () => {
 });
 
 await runAuthorityE2eStep("trivium", async () => {
-  const config = normalizeAuthorityVectorConfig({ authorityBaseUrl: resolvedBaseUrl });
+  const config = normalizeAuthorityVectorConfig({
+    authorityBaseUrl: resolvedBaseUrl,
+    authorityEmbeddingApiUrl: embeddingApiUrl,
+    authorityEmbeddingApiKey: embeddingApiKey,
+    authorityEmbeddingModel: embeddingModel,
+  });
   const entries = buildAuthorityE2eVectorEntries(graph);
   await purgeAuthorityTriviumNamespace(config, {
     namespace,
@@ -141,6 +163,7 @@ await runAuthorityE2eStep("trivium", async () => {
       namespace,
       collectionId,
       chatId,
+      queryVector: [1, 1, 0.18],
       topK: 5,
       fetchImpl,
       headerProvider,

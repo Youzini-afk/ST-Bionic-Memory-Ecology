@@ -20,6 +20,86 @@ const SOURCE_ROOTS = [
   "native",
 ];
 
+function toDataModuleUrl(source = "") {
+  return `data:text/javascript,${encodeURIComponent(String(source || ""))}`;
+}
+
+const CHECK_SYNTAX_HOOK_BOOTSTRAP_URL = toDataModuleUrl(`
+import * as nodeModule from "node:module";
+
+const register = typeof nodeModule.register === "function" ? nodeModule.register : undefined;
+const registerHooks = typeof nodeModule.registerHooks === "function"
+  ? nodeModule.registerHooks
+  : undefined;
+
+const scriptShimUrl = ${JSON.stringify(toDataModuleUrl([
+  "export function getRequestHeaders() { return {}; }",
+  "export function saveMetadata() {}",
+  "export function saveSettingsDebounced() {}",
+  "export function substituteParamsExtended(value) { return String(value ?? ''); }",
+].join("\n")))};
+const extensionsShimUrl = ${JSON.stringify(toDataModuleUrl([
+  "export const extension_settings = { st_bme: {} };",
+  "export function getContext() { return {}; }",
+  "export function saveMetadataDebounced() {}",
+].join("\n")))};
+const openaiShimUrl = ${JSON.stringify(toDataModuleUrl([
+  "export const chat_completion_sources = {};",
+  "export async function sendOpenAIRequest() { return {}; }",
+].join("\n")))};
+
+function resolveShim(specifier) {
+  const normalized = String(specifier || "");
+  if (normalized.endsWith("/script.js")) return scriptShimUrl;
+  if (normalized.endsWith("/extensions.js")) return extensionsShimUrl;
+  if (normalized.endsWith("/openai.js")) return openaiShimUrl;
+  return "";
+}
+
+if (typeof registerHooks === "function") {
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      const shimUrl = resolveShim(specifier);
+      if (shimUrl) {
+        return {
+          shortCircuit: true,
+          url: shimUrl,
+        };
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+} else if (typeof register === "function") {
+  register(${JSON.stringify(toDataModuleUrl(`
+export async function resolve(specifier, context, nextResolve) {
+  const normalized = String(specifier || "");
+  if (normalized.endsWith("/script.js")) {
+    return { shortCircuit: true, url: ${JSON.stringify(toDataModuleUrl([
+      "export function getRequestHeaders() { return {}; }",
+      "export function saveMetadata() {}",
+      "export function saveSettingsDebounced() {}",
+      "export function substituteParamsExtended(value) { return String(value ?? ''); }",
+    ].join("\n")))} };
+  }
+  if (normalized.endsWith("/extensions.js")) {
+    return { shortCircuit: true, url: ${JSON.stringify(toDataModuleUrl([
+      "export const extension_settings = { st_bme: {} };",
+      "export function getContext() { return {}; }",
+      "export function saveMetadataDebounced() {}",
+    ].join("\n")))} };
+  }
+  if (normalized.endsWith("/openai.js")) {
+    return { shortCircuit: true, url: ${JSON.stringify(toDataModuleUrl([
+      "export const chat_completion_sources = {};",
+      "export async function sendOpenAIRequest() { return {}; }",
+    ].join("\n")))} };
+  }
+  return nextResolve(specifier, context);
+}
+`))}, import.meta.url);
+}
+`);
+
 async function collectFiles(targetPath) {
   const absolutePath = path.resolve(process.cwd(), targetPath);
   const fileStat = await stat(absolutePath);
@@ -48,7 +128,7 @@ function toPosixPath(filePath) {
 
 async function runNodeCheck(filePath) {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--check", filePath], {
+    const child = spawn(process.execPath, ["--import", CHECK_SYNTAX_HOOK_BOOTSTRAP_URL, "--check", filePath], {
       cwd: process.cwd(),
       stdio: "inherit",
       windowsHide: true,

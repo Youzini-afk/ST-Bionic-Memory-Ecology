@@ -16,6 +16,14 @@ installResolveHooks([
   },
 ]);
 
+globalThis.__stBmeTestOverrides = {
+  embedding: {
+    async embedText(text = "") {
+      return [1, 0.25, String(text || "").length / 100];
+    },
+  },
+};
+
 const outputJson = process.argv.includes("--json");
 const RUNS = 5;
 const SIZE_PRESETS = [
@@ -233,6 +241,8 @@ async function runPreset(preset) {
     const config = normalizeAuthorityVectorConfig(
       {
         authorityBaseUrl: "/api/plugins/authority",
+        authorityEmbeddingApiUrl: "https://example.com/v1",
+        authorityEmbeddingModel: "test-embedding",
         authorityVectorFailOpen: true,
       },
       { triviumClient },

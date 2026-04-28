@@ -1,6 +1,7 @@
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
+import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
 
-export const AUTHORITY_BLOB_ENDPOINT = "/v1/blob";
+export const AUTHORITY_BLOB_ENDPOINT = "/fs/private";
 
 function toPlainData(value, fallbackValue = null) {
   if (value == null) return fallbackValue;
@@ -97,7 +98,8 @@ function normalizeBlobRecordSource(input = null) {
 
 export function normalizeAuthorityBlobReadResult(input = null, fallbackPath = "") {
   const source = normalizeBlobRecordSource(input);
-  const path = normalizeAuthorityBlobPath(source.path || source.name || fallbackPath);
+  const entry = source.entry && typeof source.entry === "object" ? source.entry : null;
+  const path = normalizeAuthorityBlobPath(entry?.path || source.path || source.name || fallbackPath);
   const missing =
     source.exists === false ||
     source.found === false ||
@@ -118,21 +120,22 @@ export function normalizeAuthorityBlobReadResult(input = null, fallbackPath = ""
     payload: normalizeBlobPayload(input),
     contentType: String(source.contentType || source.type || "application/json"),
     etag: String(source.etag || source.hash || ""),
-    updatedAt: source.updatedAt || source.updated_at || source.lastModified || "",
+    updatedAt: source.updatedAt || source.updated_at || source.lastModified || entry?.updatedAt || "",
     raw: toPlainData(input, input),
   };
 }
 
 export function normalizeAuthorityBlobWriteResult(input = null, fallbackPath = "") {
   const source = normalizeBlobRecordSource(input);
-  const path = normalizeAuthorityBlobPath(source.path || source.name || fallbackPath);
+  const entry = source.entry && typeof source.entry === "object" ? source.entry : null;
+  const path = normalizeAuthorityBlobPath(entry?.path || source.path || source.name || fallbackPath);
   return {
     ok: input == null ? true : source.ok !== false && source.error == null,
     path,
     url: String(source.url || source.href || ""),
-    size: normalizeInteger(source.size || source.bytes, 0, 0),
+    size: normalizeInteger(source.size || source.bytes || entry?.sizeBytes, 0, 0),
     etag: String(source.etag || source.hash || ""),
-    updatedAt: source.updatedAt || source.updated_at || source.lastModified || "",
+    updatedAt: source.updatedAt || source.updated_at || source.lastModified || entry?.updatedAt || "",
     raw: toPlainData(input, input),
   };
 }
@@ -170,49 +173,56 @@ export function normalizeAuthorityBlobConfig(settings = {}, overrides = {}) {
 
 export class AuthorityBlobHttpClient {
   constructor(options = {}) {
-    this.baseUrl = normalizeAuthorityBaseUrl(options.baseUrl);
-    this.fetchImpl = options.fetchImpl || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
-    this.headerProvider = typeof options.headerProvider === "function" ? options.headerProvider : null;
+    this.http = new AuthorityHttpClient({
+      ...options,
+      baseUrl: normalizeAuthorityBaseUrl(options.baseUrl),
+    });
   }
 
-  async request(action, payload = {}) {
-    if (typeof this.fetchImpl !== "function") {
-      throw new Error("Authority Blob fetch unavailable");
-    }
-    const response = await this.fetchImpl(`${this.baseUrl}${AUTHORITY_BLOB_ENDPOINT}`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(this.headerProvider ? this.headerProvider() || {} : {}),
-      },
-      body: JSON.stringify({ action, ...payload }),
+  async request(path, payload = {}, options = {}) {
+    return await this.http.requestJson(path, {
+      method: options.method || "POST",
+      body: payload,
+      session: true,
+      signal: options.signal,
     });
-    if (!response?.ok) {
-      const text = await response?.text?.().catch(() => "");
-      throw new Error(text || `Authority Blob HTTP ${response?.status || "unknown"}`);
-    }
-    return await response.json().catch(() => ({}));
   }
 
   async writeJson(payload = {}) {
-    return await this.request("writeJson", payload);
+    return await this.writeText({
+      ...payload,
+      contentType: payload.contentType || "application/json",
+      text: JSON.stringify(toPlainData(payload.payload ?? payload.data, payload.payload ?? payload.data)),
+    });
   }
 
   async writeText(payload = {}) {
-    return await this.request("writeText", payload);
+    return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/write-file`, {
+      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      content: String(payload.text ?? payload.data ?? payload.content ?? ""),
+      encoding: "utf8",
+      createParents: true,
+    }, { signal: payload.signal });
   }
 
   async readJson(payload = {}) {
-    return await this.request("readJson", payload);
+    return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/read-file`, {
+      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      encoding: "utf8",
+    }, { signal: payload.signal });
   }
 
   async delete(payload = {}) {
-    return await this.request("delete", payload);
+    return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/delete`, {
+      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      recursive: false,
+    }, { signal: payload.signal });
   }
 
   async stat(payload = {}) {
-    return await this.request("stat", payload);
+    return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/stat`, {
+      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+    }, { signal: payload.signal });
   }
 }
 
@@ -247,6 +257,10 @@ function throwIfAborted(signal) {
       ? signal.reason
       : Object.assign(new Error("操作已终止"), { name: "AbortError" });
   }
+}
+
+function isMissingAuthorityBlobError(error) {
+  return Number(error?.status || 0) === 404;
 }
 
 export class AuthorityBlobAdapter {
@@ -291,36 +305,57 @@ export class AuthorityBlobAdapter {
     throwIfAborted(options.signal);
     const normalizedPath = normalizeAuthorityBlobPath(path);
     if (!normalizedPath) return normalizeAuthorityBlobReadResult({ exists: false }, "");
-    const result = await callClient(this.client, ["readJson", "getJson", "readFile", "get"], "readJson", {
-      namespace: options.namespace || this.config.namespace,
-      path: normalizedPath,
-      name: normalizedPath,
-    });
-    return normalizeAuthorityBlobReadResult(result, normalizedPath);
+    try {
+      const result = await callClient(this.client, ["readJson", "getJson", "readFile", "get"], "readJson", {
+        namespace: options.namespace || this.config.namespace,
+        path: normalizedPath,
+        name: normalizedPath,
+      });
+      return normalizeAuthorityBlobReadResult(result, normalizedPath);
+    } catch (error) {
+      if (isMissingAuthorityBlobError(error)) {
+        return normalizeAuthorityBlobReadResult({ exists: false, status: 404 }, normalizedPath);
+      }
+      throw error;
+    }
   }
 
   async delete(path, options = {}) {
     throwIfAborted(options.signal);
     const normalizedPath = normalizeAuthorityBlobPath(path);
     if (!normalizedPath) return normalizeAuthorityBlobDeleteResult({ exists: false }, "");
-    const result = await callClient(this.client, ["delete", "deleteFile", "remove", "unlink"], "delete", {
-      namespace: options.namespace || this.config.namespace,
-      path: normalizedPath,
-      name: normalizedPath,
-    });
-    return normalizeAuthorityBlobDeleteResult(result, normalizedPath);
+    try {
+      const result = await callClient(this.client, ["delete", "deleteFile", "remove", "unlink"], "delete", {
+        namespace: options.namespace || this.config.namespace,
+        path: normalizedPath,
+        name: normalizedPath,
+      });
+      return normalizeAuthorityBlobDeleteResult(result, normalizedPath);
+    } catch (error) {
+      if (isMissingAuthorityBlobError(error)) {
+        return normalizeAuthorityBlobDeleteResult({ exists: false, status: 404 }, normalizedPath);
+      }
+      throw error;
+    }
   }
 
   async stat(path, options = {}) {
     throwIfAborted(options.signal);
     const normalizedPath = normalizeAuthorityBlobPath(path);
     if (!normalizedPath) return normalizeAuthorityBlobReadResult({ exists: false }, "");
-    const result = await callClient(this.client, ["stat", "head", "metadata"], "stat", {
-      namespace: options.namespace || this.config.namespace,
-      path: normalizedPath,
-      name: normalizedPath,
-    });
-    return normalizeAuthorityBlobReadResult(result, normalizedPath);
+    try {
+      const result = await callClient(this.client, ["stat", "head", "metadata"], "stat", {
+        namespace: options.namespace || this.config.namespace,
+        path: normalizedPath,
+        name: normalizedPath,
+      });
+      return normalizeAuthorityBlobReadResult(result, normalizedPath);
+    } catch (error) {
+      if (isMissingAuthorityBlobError(error)) {
+        return normalizeAuthorityBlobReadResult({ exists: false, status: 404 }, normalizedPath);
+      }
+      throw error;
+    }
   }
 }
 

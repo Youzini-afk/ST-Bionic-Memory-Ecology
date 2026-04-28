@@ -6,11 +6,17 @@
  * 调用外部 API 获取文本向量，并提供暴力搜索 cosine 相似度
  */
 
+import { getRequestHeaders } from "../../../../../script.js";
 import { extension_settings } from "../../../../extensions.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 
 const MODULE_NAME = "st_bme";
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000;
+const BACKEND_SOURCES_REQUIRING_API_URL = new Set([
+  "ollama",
+  "llamacpp",
+  "vllm",
+]);
 
 function getEmbeddingTestOverride(name) {
   const override = globalThis.__stBmeTestOverrides?.embedding?.[name];
@@ -39,6 +45,69 @@ function normalizeOpenAICompatibleBaseUrl(value) {
     .trim()
     .replace(/\/+(chat\/completions|embeddings)$/i, "")
     .replace(/\/+$/, "");
+}
+
+function normalizeVector(value) {
+  if (!Array.isArray(value)) return null;
+  const vector = value.map((item) => Number(item)).filter((item) => Number.isFinite(item));
+  return vector.length ? new Float64Array(vector) : null;
+}
+
+function readEmbeddingMode(config = {}) {
+  return String(config?.embeddingMode || config?.mode || "direct").trim().toLowerCase();
+}
+
+function readEmbeddingSource(config = {}) {
+  return String(config?.embeddingSource || config?.source || "openai").trim().toLowerCase() || "openai";
+}
+
+function buildBackendEmbeddingRequestBody(config = {}, payload = {}) {
+  const source = readEmbeddingSource(config);
+  const body = {
+    source,
+    model: String(config?.model || "").trim(),
+    isQuery: Boolean(payload.isQuery),
+  };
+  if (payload.text !== undefined) {
+    body.text = String(payload.text ?? "");
+  }
+  if (Array.isArray(payload.texts)) {
+    body.texts = payload.texts.map((item) => String(item ?? ""));
+  }
+  if (BACKEND_SOURCES_REQUIRING_API_URL.has(source)) {
+    body.apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
+  }
+  if (source === "ollama") {
+    body.keep = false;
+  }
+  return body;
+}
+
+async function requestBackendEmbeddings(config = {}, payload = {}, { signal } = {}) {
+  const response = await fetchWithTimeout(
+    "/api/vector/embed",
+    {
+      method: "POST",
+      headers: {
+        ...getRequestHeaders(),
+        "Content-Type": "application/json",
+      },
+      signal,
+      body: JSON.stringify(buildBackendEmbeddingRequestBody(config, payload)),
+    },
+    getConfiguredTimeoutMs(config),
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    console.error(
+      `[ST-BME] Backend Embedding API 错误 (${response.status}):`,
+      errorText,
+    );
+    return null;
+  }
+
+  return await response.json().catch(() => ({}));
 }
 
 function createCombinedAbortSignal(...signals) {
@@ -107,10 +176,31 @@ async function fetchWithTimeout(
  * @param {string} config.model - 模型名（如 text-embedding-3-small）
  * @returns {Promise<Float64Array|null>} 向量或 null
  */
-export async function embedText(text, config, { signal } = {}) {
+export async function embedText(text, config, { signal, isQuery = false } = {}) {
   const override = getEmbeddingTestOverride("embedText");
   if (override) {
-    return await override(text, config, { signal });
+    return await override(text, config, { signal, isQuery });
+  }
+
+  if (readEmbeddingMode(config) === "backend") {
+    if (!text || !config?.model) {
+      console.warn("[ST-BME] Embedding 配置不完整，跳过");
+      return null;
+    }
+    try {
+      const payload = await requestBackendEmbeddings(
+        config,
+        { text, isQuery },
+        { signal },
+      );
+      return normalizeVector(payload?.vector);
+    } catch (e) {
+      if (isAbortError(e)) {
+        throw e;
+      }
+      console.error("[ST-BME] Backend Embedding 调用失败:", e);
+      return null;
+    }
   }
 
   const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);
@@ -173,10 +263,31 @@ export async function embedText(text, config, { signal } = {}) {
  * @param {object} config
  * @returns {Promise<(Float64Array|null)[]>}
  */
-export async function embedBatch(texts, config, { signal } = {}) {
+export async function embedBatch(texts, config, { signal, isQuery = false } = {}) {
   const override = getEmbeddingTestOverride("embedBatch");
   if (override) {
-    return await override(texts, config, { signal });
+    return await override(texts, config, { signal, isQuery });
+  }
+
+  if (readEmbeddingMode(config) === "backend") {
+    if (!texts.length || !config?.model) {
+      return texts.map(() => null);
+    }
+    try {
+      const payload = await requestBackendEmbeddings(
+        config,
+        { texts, isQuery },
+        { signal },
+      );
+      const vectors = Array.isArray(payload?.vectors) ? payload.vectors : [];
+      return texts.map((_, index) => normalizeVector(vectors[index]));
+    } catch (e) {
+      if (isAbortError(e)) {
+        throw e;
+      }
+      console.error("[ST-BME] Backend Embedding 批量调用失败:", e);
+      return texts.map(() => null);
+    }
   }
 
   const apiUrl = normalizeOpenAICompatibleBaseUrl(config?.apiUrl);

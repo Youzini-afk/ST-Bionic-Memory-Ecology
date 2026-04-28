@@ -301,6 +301,15 @@ async function testHttpSqlClientBoundary() {
     headerProvider: () => ({ "X-Test": "1" }),
     fetchImpl: async (url, init) => {
       requests.push({ url, init });
+      if (url.endsWith("/session/init")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { sessionToken: "sql-session-token" };
+          },
+        };
+      }
       return {
         ok: true,
         status: 200,
@@ -313,12 +322,19 @@ async function testHttpSqlClientBoundary() {
 
   const result = await client.query("SELECT 1", { chatId: "chat" });
   assert.deepEqual(result, { rows: [{ value: 1 }] });
-  assert.equal(requests[0].url, "https://authority.example.test/root/v1/sql");
-  assert.equal(requests[0].init.method, "POST");
-  assert.equal(requests[0].init.headers["X-Test"], "1");
-  assert.deepEqual(JSON.parse(requests[0].init.body), {
-    action: "query",
-    sql: "SELECT 1",
+  assert.deepEqual(
+    requests.map((request) => request.url),
+    [
+      "https://authority.example.test/root/session/init",
+      "https://authority.example.test/root/sql/query",
+    ],
+  );
+  assert.equal(requests[1].init.method, "POST");
+  assert.equal(requests[1].init.headers["X-Test"], "1");
+  assert.equal(requests[1].init.headers["x-authority-session-token"], "sql-session-token");
+  assert.deepEqual(JSON.parse(requests[1].init.body), {
+    database: "default",
+    statement: "SELECT 1",
     params: { chatId: "chat" },
   });
 }

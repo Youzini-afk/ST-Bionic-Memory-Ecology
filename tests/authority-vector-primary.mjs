@@ -16,6 +16,17 @@ installResolveHooks([
   },
 ]);
 
+globalThis.__stBmeTestOverrides = {
+  embedding: {
+    async embedBatch(texts = []) {
+      return texts.map((text, index) => [1, index / 10, String(text || "").length / 100]);
+    },
+    async embedText(text = "") {
+      return [1, 0.5, String(text || "").length / 100];
+    },
+  },
+};
+
 const {
   filterAuthorityTriviumNodes,
   isAuthorityVectorConfig,
@@ -112,8 +123,20 @@ function createMockTriviumClient({ failBulkUpsert = false } = {}) {
   };
 }
 
+async function withMockFetch(handler, fn) {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = handler;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+}
+
 const config = normalizeAuthorityVectorConfig({
   authorityBaseUrl: "/api/plugins/authority",
+  authorityEmbeddingApiUrl: "https://example.com/v1",
+  authorityEmbeddingModel: "test-embedding",
   authorityVectorSyncChunkSize: 1,
   authorityVectorFailOpen: true,
 });
@@ -144,6 +167,10 @@ assert.equal(isAuthorityVectorConfig(config), true);
     upserts.flatMap(([, payload]) => payload.items.map((item) => item.nodeId)).sort(),
     ["node-a", "node-b"],
   );
+  assert.equal(
+    upserts.every(([, payload]) => payload.items.every((item) => Array.isArray(item.vector) && item.vector.length > 0)),
+    true,
+  );
   const linkCall = triviumClient.calls.find(([name]) => name === "linkMany");
   assert.equal(linkCall?.[1]?.links?.[0]?.fromId, "node-a");
   assert.equal(linkCall?.[1]?.links?.[0]?.toId, "node-b");
@@ -170,6 +197,8 @@ assert.equal(isAuthorityVectorConfig(config), true);
   assert.deepEqual(results, [{ nodeId: "node-b", score: 0.91 }]);
   const searchCall = triviumClient.calls.find(([name]) => name === "search");
   assert.deepEqual(searchCall?.[1]?.candidateIds.sort(), ["node-a", "node-b"]);
+  assert.equal(Array.isArray(searchCall?.[1]?.queryVector), true);
+  assert.ok(searchCall?.[1]?.queryVector.length > 0);
   assert.equal(graph.vectorIndexState.lastSearchTimings.mode, "authority");
   assert.equal(graph.vectorIndexState.lastSearchTimings.success, true);
 }
@@ -219,6 +248,74 @@ assert.equal(isAuthorityVectorConfig(config), true);
   assert.deepEqual(neighborIds, ["node-b", "node-c"]);
   const neighborCall = triviumClient.calls.find(([name]) => name === "neighbors");
   assert.deepEqual(neighborCall?.[1]?.nodeIds, ["node-a"]);
+}
+
+{
+  const previousOverrides = globalThis.__stBmeTestOverrides;
+  globalThis.__stBmeTestOverrides = {};
+  const fetchCalls = [];
+  try {
+    await withMockFetch(async (url, options = {}) => {
+      fetchCalls.push([url, JSON.parse(String(options.body || "{}"))]);
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          const body = JSON.parse(String(options.body || "{}"));
+          if (Array.isArray(body.texts)) {
+            return {
+              vectors: body.texts.map((text, index) => [1, index + 1, String(text || "").length / 100]),
+            };
+          }
+          return {
+            vector: [1, 9, String(body.text || "").length / 100],
+          };
+        },
+        async text() {
+          return "";
+        },
+      };
+    }, async () => {
+      const backendConfig = normalizeAuthorityVectorConfig({
+        authorityBaseUrl: "/api/plugins/authority",
+        embeddingTransportMode: "backend",
+        embeddingBackendSource: "openai",
+        embeddingBackendModel: "text-embedding-3-small",
+        authorityVectorSyncChunkSize: 2,
+      });
+      const { graph, first, second } = createAuthorityVectorGraph();
+      first.embedding = null;
+      second.embedding = null;
+      const triviumClient = createMockTriviumClient();
+      await syncGraphVectorIndexFromIndex(graph, backendConfig, {
+        chatId: "chat-authority-vector",
+        purge: true,
+        triviumClient,
+      });
+      const results = await findSimilarNodesByTextFromIndex(
+        graph,
+        "archive door",
+        { ...backendConfig, triviumClient },
+        5,
+        [first, second],
+      );
+      assert.deepEqual(results, [{ nodeId: "node-b", score: 0.91 }]);
+      const upsertCall = triviumClient.calls.find(([name]) => name === "bulkUpsert");
+      assert.equal(
+        upsertCall?.[1]?.items?.every((item) => Array.isArray(item.vector) && item.vector.length > 0),
+        true,
+      );
+      const searchCall = triviumClient.calls.find(([name]) => name === "search");
+      assert.equal(Array.isArray(searchCall?.[1]?.queryVector), true);
+      assert.equal(fetchCalls.every(([url]) => url === "/api/vector/embed"), true);
+      assert.equal(fetchCalls[0]?.[1]?.source, "openai");
+      assert.equal(fetchCalls[0]?.[1]?.model, "text-embedding-3-small");
+      assert.equal(Array.isArray(fetchCalls[0]?.[1]?.texts), true);
+      assert.equal(fetchCalls[fetchCalls.length - 1]?.[1]?.isQuery, true);
+    });
+  } finally {
+    globalThis.__stBmeTestOverrides = previousOverrides;
+  }
 }
 
 console.log("authority-vector-primary tests passed");

@@ -1,18 +1,35 @@
 import assert from "node:assert/strict";
 
-import { buildLukerGraphCheckpointV2 } from "../../graph/graph-persistence.js";
 import {
-  applyAuthorityCheckpointToStore,
-  buildAuthorityConsistencyAudit,
-  buildAuthorityCheckpointImportSnapshot,
-} from "../../maintenance/authority-consistency.js";
-import { createAuthorityBlobAdapter } from "../../maintenance/authority-blob-adapter.js";
-import { AuthorityGraphStore } from "../../sync/authority-graph-store.js";
+  installResolveHooks,
+  toDataModuleUrl,
+} from "../helpers/register-hooks-compat.mjs";
+
+installResolveHooks([
+  {
+    specifiers: ["../../../../../script.js"],
+    url: toDataModuleUrl("export function getRequestHeaders() { return {}; }"),
+  },
+  {
+    specifiers: ["../../../../extensions.js"],
+    url: toDataModuleUrl("export const extension_settings = { st_bme: {} };"),
+  },
+]);
+
 import {
   createAuthorityE2eContext,
   createAuthorityE2eContractGraph,
   runAuthorityE2eStep,
 } from "../helpers/authority-e2e-context.mjs";
+
+const { buildLukerGraphCheckpointV2 } = await import("../../graph/graph-persistence.js");
+const {
+  applyAuthorityCheckpointToStore,
+  buildAuthorityConsistencyAudit,
+  buildAuthorityCheckpointImportSnapshot,
+} = await import("../../maintenance/authority-consistency.js");
+const { createAuthorityBlobAdapter } = await import("../../maintenance/authority-blob-adapter.js");
+const { AuthorityGraphStore } = await import("../../sync/authority-graph-store.js");
 
 const context = createAuthorityE2eContext({
   skipMessage:

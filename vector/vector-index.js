@@ -236,6 +236,9 @@ export function getVectorModelScope(config) {
     return [
       "authority",
       config.source || "authority-trivium",
+      config.embeddingMode || "direct",
+      config.embeddingSource || "direct",
+      normalizeOpenAICompatibleBaseUrl(config.apiUrl || "", config.autoSuffix),
       normalizeOpenAICompatibleBaseUrl(config.baseUrl || ""),
       config.model || "",
     ].join("|");
@@ -265,6 +268,20 @@ export function validateVectorConfig(config) {
   if (config?.mode === "authority" || config?.source === "authority-trivium") {
     if (!config.baseUrl) {
       return { valid: false, error: "Authority Trivium 地址不可用" };
+    }
+    if (!config.model) {
+      return { valid: false, error: "请先填写 Embedding 模型（Authority 默认复用当前用户设置）" };
+    }
+    const authorityEmbeddingMode = String(config.embeddingMode || "direct").trim().toLowerCase();
+    const authorityEmbeddingSource = String(config.embeddingSource || "openai").trim().toLowerCase();
+    if (authorityEmbeddingMode === "backend") {
+      if (BACKEND_SOURCES_REQUIRING_API_URL.has(authorityEmbeddingSource) && !config.apiUrl) {
+        return { valid: false, error: "当前后端 Embedding 源需要 API 地址（Authority 默认复用当前用户设置）" };
+      }
+      return { valid: true, error: "" };
+    }
+    if (!config.apiUrl) {
+      return { valid: false, error: "请先填写 Embedding API 地址（Authority 默认复用当前用户设置）" };
     }
     return { valid: true, error: "" };
   }
@@ -606,7 +623,7 @@ function markBackendVectorStateDirty(
 
 function markAuthorityVectorStateDirty(
   graph,
-  config,
+  config = {},
   reason = "authority-trivium-failed",
   warning = "Authority Trivium 索引失败，已标记待重建",
 ) {
@@ -638,6 +655,42 @@ function markAuthorityVectorStateDirty(
     pending: total > 0 ? Math.max(1, Number(state.lastStats?.pending || 0)) : 0,
   };
   state.lastWarning = String(warning || "Authority Trivium 索引失败，已标记待重建");
+}
+
+async function ensureEntryEmbeddings(graph, entries = [], config = {}, signal = undefined) {
+  const nodesById = new Map((graph?.nodes || []).map((node) => [String(node?.id || ""), node]));
+  const entriesToEmbed = [];
+  for (const entry of entries || []) {
+    const node = nodesById.get(String(entry?.nodeId || ""));
+    const hasEmbedding = Array.isArray(node?.embedding) && node.embedding.length > 0;
+    if (node && !hasEmbedding) {
+      entriesToEmbed.push({ entry, node });
+    }
+  }
+  if (!entriesToEmbed.length) {
+    return { requested: 0, failures: 0, elapsedMs: 0 };
+  }
+  throwIfAborted(signal);
+  const startedAt = nowMs();
+  const embeddings = await embedBatch(
+    entriesToEmbed.map(({ entry }) => entry.text),
+    config,
+    { signal },
+  );
+  let failures = 0;
+  for (let index = 0; index < entriesToEmbed.length; index++) {
+    const embedding = embeddings[index];
+    if (embedding) {
+      entriesToEmbed[index].node.embedding = Array.from(embedding);
+    } else {
+      failures += 1;
+    }
+  }
+  return {
+    requested: entriesToEmbed.length,
+    failures,
+    elapsedMs: nowMs() - startedAt,
+  };
 }
 
 export async function syncGraphVectorIndex(
@@ -741,6 +794,12 @@ export async function syncGraphVectorIndex(
 
     try {
       if (fullReset) {
+        const embeddingResult = await ensureEntryEmbeddings(graph, desiredEntries, config, signal);
+        embeddingsRequested += embeddingResult.requested;
+        embedBatchMs += embeddingResult.elapsedMs;
+        if (embeddingResult.failures > 0) {
+          throw new Error(`Authority Trivium embedding failed for ${embeddingResult.failures} item(s)`);
+        }
         const purgeStartedAt = nowMs();
         await purgeAuthorityTriviumNamespace(config, authorityOptions);
         authorityPurgeMs += nowMs() - purgeStartedAt;
@@ -794,6 +853,12 @@ export async function syncGraphVectorIndex(
           queuedNodeIds.add(entry.nodeId);
         }
 
+        const embeddingResult = await ensureEntryEmbeddings(graph, entriesToUpsert, config, signal);
+        embeddingsRequested += embeddingResult.requested;
+        embedBatchMs += embeddingResult.elapsedMs;
+        if (embeddingResult.failures > 0) {
+          throw new Error(`Authority Trivium embedding failed for ${embeddingResult.failures} item(s)`);
+        }
         deletedNodeCount = nodeIdsToDelete.length;
         const deleteStartedAt = nowMs();
         await deleteAuthorityTriviumNodes(config, nodeIdsToDelete, authorityOptions);
@@ -1108,7 +1173,7 @@ export async function findSimilarNodesByText(
 
   if (isDirectVectorConfig(config)) {
     const queryEmbedStartedAt = nowMs();
-    const queryVec = await embedText(text, config, { signal });
+    const queryVec = await embedText(text, config, { signal, isQuery: true });
     const queryEmbedMs = nowMs() - queryEmbedStartedAt;
     if (!queryVec) {
       recordSearchTimings({
@@ -1157,6 +1222,18 @@ export async function findSimilarNodesByText(
   if (isAuthorityVectorConfig(config)) {
     const requestStartedAt = nowMs();
     try {
+      const queryEmbedStartedAt = nowMs();
+      const queryVec = await embedText(text, config, { signal, isQuery: true });
+      const queryEmbedMs = nowMs() - queryEmbedStartedAt;
+      if (!queryVec) {
+        recordSearchTimings({
+          success: false,
+          reason: "authority-query-embed-empty",
+          queryEmbedMs: roundMs(queryEmbedMs),
+          resultCount: 0,
+        });
+        return [];
+      }
       const allowedIds = new Set(candidateNodes.map((node) => node.id));
       const results = (
         await searchAuthorityTriviumNodes(graph, text, config, {
@@ -1166,6 +1243,7 @@ export async function findSimilarNodesByText(
           modelScope: getVectorModelScope(config),
           topK,
           candidateIds: candidateNodes.map((node) => node.id),
+          queryVector: Array.from(queryVec),
           signal,
         })
       )
@@ -1174,6 +1252,7 @@ export async function findSimilarNodesByText(
       recordSearchTimings({
         success: true,
         reason: "ok",
+        queryEmbedMs: roundMs(queryEmbedMs),
         requestMs: roundMs(nowMs() - requestStartedAt),
         resultCount: results.length,
       });

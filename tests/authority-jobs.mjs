@@ -455,4 +455,150 @@ const rangeSync = rangeRuntime.calls.find(([name]) => name === "syncVectorState"
 assert.equal(rangeSync?.[1]?.purge, false);
 assert.equal(rangeSync?.[1]?.range, range);
 
+const httpRequests = [];
+const httpAdapter = createAuthorityJobAdapter(
+  { authorityBaseUrl: "https://authority.example.test/root" },
+  {
+    headerProvider: () => ({ "X-Test": "1" }),
+    fetchImpl: async (url, options = {}) => {
+      httpRequests.push({ url, options });
+      if (url.endsWith("/session/init")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return { sessionToken: "job-session-token" };
+          },
+        };
+      }
+      if (url.endsWith("/jobs/create")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              id: "job-http-1",
+              type: "authority.vector.rebuild",
+              status: "queued",
+              progress: 0,
+              idempotencyKey: "idem-http-1",
+            };
+          },
+        };
+      }
+      if (url.endsWith("/jobs/job-http-1")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              id: "job-http-1",
+              type: "authority.vector.rebuild",
+              status: "completed",
+              progress: 1,
+            };
+          },
+        };
+      }
+      if (url.endsWith("/jobs/list")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              jobs: [
+                {
+                  id: "job-http-1",
+                  type: "authority.vector.rebuild",
+                  status: "completed",
+                  progress: 1,
+                },
+              ],
+              page: {
+                nextCursor: "next-http-1",
+                hasMore: true,
+              },
+            };
+          },
+        };
+      }
+      if (url.endsWith("/jobs/job-http-1/requeue")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              id: "job-http-2",
+              type: "authority.vector.rebuild",
+              status: "queued",
+              progress: 0,
+            };
+          },
+        };
+      }
+      if (url.endsWith("/jobs/job-http-1/cancel")) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              id: "job-http-1",
+              type: "authority.vector.rebuild",
+              status: "cancelled",
+              progress: 1,
+            };
+          },
+        };
+      }
+      return {
+        ok: false,
+        status: 404,
+        async json() {
+          return {};
+        },
+      };
+    },
+  },
+);
+
+const httpSubmitted = await httpAdapter.submit(
+  "authority.vector.rebuild",
+  { chatId: "chat-http" },
+  { idempotencyKey: "idem-http-1" },
+);
+assert.equal(httpSubmitted.id, "job-http-1");
+const httpLoaded = await httpAdapter.get("job-http-1");
+assert.equal(httpLoaded.status, "completed");
+const httpPage = await httpAdapter.listPage({ cursor: "cursor-http", limit: 10 });
+assert.equal(httpPage.nextCursor, "next-http-1");
+assert.equal(httpPage.hasMore, true);
+const httpRequeued = await httpAdapter.requeue("job-http-1");
+assert.equal(httpRequeued.id, "job-http-2");
+const httpCancelled = await httpAdapter.cancel("job-http-1");
+assert.equal(httpCancelled.status, "cancelled");
+assert.deepEqual(
+  httpRequests.map((request) => request.url),
+  [
+    "https://authority.example.test/root/session/init",
+    "https://authority.example.test/root/jobs/create",
+    "https://authority.example.test/root/jobs/job-http-1",
+    "https://authority.example.test/root/jobs/list",
+    "https://authority.example.test/root/jobs/job-http-1/requeue",
+    "https://authority.example.test/root/jobs/job-http-1/cancel",
+  ],
+);
+assert.equal(httpRequests[1].options.headers["x-authority-session-token"], "job-session-token");
+assert.equal(httpRequests[1].options.headers["X-Test"], "1");
+assert.deepEqual(JSON.parse(String(httpRequests[1].options.body || "{}")), {
+  type: "authority.vector.rebuild",
+  payload: { chatId: "chat-http" },
+  idempotencyKey: "idem-http-1",
+});
+assert.deepEqual(JSON.parse(String(httpRequests[3].options.body || "{}")), {
+  page: {
+    cursor: "cursor-http",
+    limit: 10,
+  },
+});
+
 console.log("authority-jobs tests passed");

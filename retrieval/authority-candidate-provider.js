@@ -9,6 +9,7 @@ import {
   queryAuthorityTriviumNeighbors,
   searchAuthorityTriviumNodes,
 } from "../vector/authority-vector-primary-adapter.js";
+import { embedText } from "../vector/embedding.js";
 
 function nowMs() {
   if (typeof performance?.now === "function") {
@@ -247,6 +248,11 @@ export async function resolveAuthorityRecallCandidates({
   const searchStartedAt = nowMs();
   for (const queryEntry of queryPlan.queries) {
     try {
+      const queryVec = await embedText(queryEntry.text, embeddingConfig, { signal, isQuery: true });
+      if (!queryVec) {
+        diagnostics.fallbackReason = diagnostics.fallbackReason || "authority-candidate-query-embed-empty";
+        continue;
+      }
       const searchResults = await searchAuthorityTriviumNodes(
         graph,
         queryEntry.text,
@@ -257,6 +263,7 @@ export async function resolveAuthorityRecallCandidates({
           chatId,
           topK: limit,
           candidateIds: filteredIds.length > 0 ? filteredIds : undefined,
+          queryVector: Array.from(queryVec),
           signal,
         },
       );

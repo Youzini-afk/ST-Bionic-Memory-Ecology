@@ -7,13 +7,17 @@ import {
   buildSnapshotFromGraph,
 } from "./bme-db.js";
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
+import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
 
 export const AUTHORITY_GRAPH_STORE_KIND = "authority";
 export const AUTHORITY_GRAPH_STORE_MODE = "authority-sql-primary";
 
 const META_DEFAULT_LAST_PROCESSED_FLOOR = -1;
 const META_DEFAULT_EXTRACTION_COUNT = 0;
-const AUTHORITY_SQL_ENDPOINT = "/v1/sql";
+const DEFAULT_AUTHORITY_SQL_DATABASE = "default";
+const AUTHORITY_SQL_QUERY_ENDPOINT = "/sql/query";
+const AUTHORITY_SQL_EXEC_ENDPOINT = "/sql/exec";
+const AUTHORITY_SQL_TRANSACTION_ENDPOINT = "/sql/transaction";
 
 const AUTHORITY_TABLES = Object.freeze({
   meta: "st_bme_graph_meta",
@@ -340,41 +344,47 @@ function normalizeUpsertCountDelta(delta = {}) {
 
 export class AuthoritySqlHttpClient {
   constructor(options = {}) {
-    this.baseUrl = normalizeAuthorityBaseUrl(options.baseUrl);
-    this.fetchImpl = options.fetchImpl || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
-    this.headerProvider = typeof options.headerProvider === "function" ? options.headerProvider : null;
+    this.http = new AuthorityHttpClient({
+      ...options,
+      baseUrl: normalizeAuthorityBaseUrl(options.baseUrl),
+    });
+    this.database = normalizeRecordId(options.database) || DEFAULT_AUTHORITY_SQL_DATABASE;
   }
 
   async query(sql, params = {}) {
-    return await this._request({ action: "query", sql, params });
+    return await this._request(AUTHORITY_SQL_QUERY_ENDPOINT, {
+      database: this.database,
+      statement: String(sql || ""),
+      params,
+    });
   }
 
   async execute(sql, params = {}) {
-    return await this._request({ action: "execute", sql, params });
+    return await this._request(AUTHORITY_SQL_EXEC_ENDPOINT, {
+      database: this.database,
+      statement: String(sql || ""),
+      params,
+    });
   }
 
   async transaction(statements = []) {
-    return await this._request({ action: "transaction", statements });
+    return await this._request(AUTHORITY_SQL_TRANSACTION_ENDPOINT, {
+      database: this.database,
+      statements: toArray(statements)
+        .filter((statement) => statement?.sql)
+        .map((statement) => ({
+          statement: String(statement.sql || ""),
+          params: statement.params || {},
+        })),
+    });
   }
 
-  async _request(body = {}) {
-    if (typeof this.fetchImpl !== "function") {
-      throw new Error("Authority SQL fetch unavailable");
-    }
-    const headers = {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...(this.headerProvider ? this.headerProvider() || {} : {}),
-    };
-    const response = await this.fetchImpl(`${this.baseUrl}${AUTHORITY_SQL_ENDPOINT}`, {
+  async _request(path, body = {}) {
+    return await this.http.requestJson(path, {
       method: "POST",
-      headers,
-      body: JSON.stringify(body),
+      body,
+      session: true,
     });
-    if (!response?.ok) {
-      throw new Error(`Authority SQL HTTP ${response?.status || "unknown"}`);
-    }
-    return await response.json().catch(() => ({}));
   }
 }
 

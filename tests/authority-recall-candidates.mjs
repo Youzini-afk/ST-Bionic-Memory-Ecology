@@ -16,6 +16,15 @@ installResolveHooks([
   },
 ]);
 
+globalThis.__stBmeTestOverrides = {
+  embedding: {
+    async embedText(text) {
+      const seed = String(text || "").length || 1;
+      return [seed / 100, 0.2, 0.3];
+    },
+  },
+};
+
 const { normalizeAuthorityVectorConfig } = await import(
   "../vector/authority-vector-primary-adapter.js"
 );
@@ -153,6 +162,8 @@ function createMockTriviumClient({ failFilter = false, failSearch = false, failN
   const config = normalizeAuthorityVectorConfig(
     {
       authorityBaseUrl: "/api/plugins/authority",
+      authorityEmbeddingApiUrl: "https://example.com/v1",
+      authorityEmbeddingModel: "test-embedding",
       authorityVectorFailOpen: true,
     },
     { triviumClient },
@@ -216,6 +227,8 @@ function createMockTriviumClient({ failFilter = false, failSearch = false, failN
   const config = normalizeAuthorityVectorConfig(
     {
       authorityBaseUrl: "/api/plugins/authority",
+      authorityEmbeddingApiUrl: "https://example.com/v1",
+      authorityEmbeddingModel: "test-embedding",
       authorityVectorFailOpen: true,
     },
     { triviumClient },

@@ -18,31 +18,29 @@ assert.equal(normalizedSettings.vectorMode, "auto-primary");
 assert.equal(normalizedSettings.primaryWhenAvailable, true);
 
 assert.deepEqual(buildAuthorityProbeUrls("/api/plugins/authority/"), [
-  "/api/plugins/authority/v1/diagnostics/probe",
-  "/api/plugins/authority/v1/probe",
   "/api/plugins/authority/probe",
-  "/api/plugins/authority",
 ]);
 
 const collected = collectAuthorityFeatures({
-  features: ["sql.query", "trivium.search"],
-  services: {
-    sql: true,
-    jobs: true,
-    blob: true,
+  features: {
+    sql: { queryPage: true },
+    trivium: { upsert: true },
+    jobs: { background: true },
+    transfers: { fs: true },
   },
 });
-assert.equal(collected.has("sql.query"), true);
-assert.equal(collected.has("trivium.search"), true);
 assert.equal(collected.has("sql"), true);
-assert.equal(collected.has("jobs"), true);
-assert.equal(collected.has("blob"), true);
+assert.equal(collected.has("sql.querypage"), true);
+assert.equal(collected.has("sql"), true);
+assert.equal(collected.has("trivium"), true);
+assert.equal(collected.has("jobs.background"), true);
+assert.equal(collected.has("transfers.fs"), true);
 
 const readyState = normalizeAuthorityCapabilityState(
   {
     installed: true,
     healthy: true,
-    features: ["sql", "trivium", "jobs", "blob"],
+    features: ["sql", "trivium", "jobs", "transfers.fs"],
   },
   defaultSettings,
 );
@@ -77,28 +75,91 @@ assert.equal(disabledState.reason, "disabled");
 assert.equal(disabledState.serverPrimaryReady, false);
 assert.equal(disabledState.lastProbeAt, 1000);
 
-let requestedUrl = "";
+const requestedUrls = [];
 const probedState = await probeAuthorityCapabilities({
   settings: defaultSettings,
   allowRelativeUrl: true,
   nowMs: 2000,
-  fetchImpl: async (url) => {
-    requestedUrl = url;
+  fetchImpl: async (url, options = {}) => {
+    requestedUrls.push([url, options.method || "GET", options.headers || {}]);
+    if (url.endsWith("/probe")) {
+      assert.equal(options.method, "POST");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            healthy: true,
+            features: {
+              sql: { queryPage: true },
+              trivium: { upsert: true },
+              jobs: { background: true },
+              transfers: { fs: true },
+            },
+          };
+        },
+      };
+    }
+    if (url.endsWith("/session/init")) {
+      assert.equal(options.method, "POST");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { sessionToken: "session-probe-token" };
+        },
+      };
+    }
+    if (url.endsWith("/session/current")) {
+      assert.equal(options.method, "GET");
+      assert.equal(options.headers["x-authority-session-token"], "session-probe-token");
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true };
+        },
+      };
+    }
+    if (url.endsWith("/permissions/evaluate-batch")) {
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers["x-authority-session-token"], "session-probe-token");
+      const body = JSON.parse(String(options.body || "{}"));
+      assert.equal(Array.isArray(body.requests), true);
+      assert.equal(body.requests.some((request) => request.resource === "fs.private"), true);
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            results: body.requests.map((request) => ({
+              decision: "granted",
+              resource: request.resource,
+              target: request.target || "",
+            })),
+          };
+        },
+      };
+    }
     return {
-      ok: true,
-      status: 200,
+      ok: false,
+      status: 404,
       async json() {
-        return {
-          healthy: true,
-          sessionReady: true,
-          permissionReady: true,
-          features: ["sql", "trivium", "jobs", "blob"],
-        };
+        return {};
       },
     };
   },
 });
-assert.equal(requestedUrl, "/api/plugins/authority/v1/diagnostics/probe");
+assert.equal(requestedUrls[0]?.[0], "/api/plugins/authority/probe");
+assert.deepEqual(
+  requestedUrls.map(([url]) => url),
+  [
+    "/api/plugins/authority/probe",
+    "/api/plugins/authority/session/init",
+    "/api/plugins/authority/session/current",
+    "/api/plugins/authority/permissions/evaluate-batch",
+  ],
+);
 assert.equal(probedState.installed, true);
 assert.equal(probedState.healthy, true);
 assert.equal(probedState.serverPrimaryReady, true);

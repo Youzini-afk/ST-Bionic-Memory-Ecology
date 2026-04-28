@@ -432,8 +432,150 @@ async function testSyncUploadDownloadUsesAuthorityBlob() {
   assert.equal(db.snapshot.nodes[0].id, "sync-blob-node");
 }
 
+async function testAuthorityBlobHttpBoundary() {
+  const requests = [];
+  const adapter = createAuthorityBlobAdapter(
+    { authorityBaseUrl: "https://authority.example.test/root" },
+    {
+      headerProvider: () => ({ "X-Test": "1" }),
+      fetchImpl: async (url, options = {}) => {
+        requests.push({ url, options });
+        if (url.endsWith("/session/init")) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { sessionToken: "blob-session-token" };
+            },
+          };
+        }
+        if (url.endsWith("/fs/private/write-file")) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                entry: {
+                  path: "user/files/demo.json",
+                  sizeBytes: 17,
+                  updatedAt: "2026-04-28T12:00:00.000Z",
+                },
+              };
+            },
+          };
+        }
+        if (url.endsWith("/fs/private/read-file")) {
+          const body = JSON.parse(String(options.body || "{}"));
+          if (body.path === "user/files/missing.json") {
+            return {
+              ok: false,
+              status: 404,
+              async json() {
+                return { error: "not found" };
+              },
+              async text() {
+                return "not found";
+              },
+              headers: { get: () => "application/json" },
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                entry: {
+                  path: "user/files/demo.json",
+                  sizeBytes: 17,
+                  updatedAt: "2026-04-28T12:00:00.000Z",
+                },
+                content: JSON.stringify({ hello: "world" }),
+                encoding: "utf8",
+              };
+            },
+          };
+        }
+        if (url.endsWith("/fs/private/stat")) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return {
+                entry: {
+                  path: "user/files/demo.json",
+                  sizeBytes: 17,
+                  updatedAt: "2026-04-28T12:00:00.000Z",
+                },
+              };
+            },
+          };
+        }
+        if (url.endsWith("/fs/private/delete")) {
+          return {
+            ok: true,
+            status: 200,
+            async json() {
+              return { ok: true };
+            },
+          };
+        }
+        return {
+          ok: false,
+          status: 404,
+          async json() {
+            return {};
+          },
+          async text() {
+            return "not found";
+          },
+          headers: { get: () => "application/json" },
+        };
+      },
+    },
+  );
+
+  const writeResult = await adapter.writeJson("user/files/demo.json", { hello: "world" });
+  assert.equal(writeResult.ok, true);
+  assert.equal(writeResult.path, "user/files/demo.json");
+
+  const readResult = await adapter.readJson("user/files/demo.json");
+  assert.equal(readResult.exists, true);
+  assert.deepEqual(readResult.payload, { hello: "world" });
+
+  const statResult = await adapter.stat("user/files/demo.json");
+  assert.equal(statResult.exists, true);
+  assert.equal(statResult.path, "user/files/demo.json");
+
+  const missingResult = await adapter.readJson("user/files/missing.json");
+  assert.equal(missingResult.exists, false);
+
+  const deleteResult = await adapter.delete("user/files/demo.json");
+  assert.equal(deleteResult.ok, true);
+
+  assert.deepEqual(
+    requests.map((request) => request.url),
+    [
+      "https://authority.example.test/root/session/init",
+      "https://authority.example.test/root/fs/private/write-file",
+      "https://authority.example.test/root/fs/private/read-file",
+      "https://authority.example.test/root/fs/private/stat",
+      "https://authority.example.test/root/fs/private/read-file",
+      "https://authority.example.test/root/fs/private/delete",
+    ],
+  );
+  assert.equal(requests[1].options.headers["x-authority-session-token"], "blob-session-token");
+  assert.equal(requests[1].options.headers["X-Test"], "1");
+  assert.deepEqual(JSON.parse(String(requests[1].options.body || "{}")), {
+    path: "user/files/demo.json",
+    content: JSON.stringify({ hello: "world" }),
+    encoding: "utf8",
+    createParents: true,
+  });
+}
+
 await testAdapterBasics();
 await testAuthorityBlobFailOpenFallsBackToUserFiles();
 await testBackupRestoreUsesAuthorityBlob();
 await testSyncUploadDownloadUsesAuthorityBlob();
+await testAuthorityBlobHttpBoundary();
 console.log("authority-blob tests passed");

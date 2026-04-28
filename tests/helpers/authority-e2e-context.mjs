@@ -97,6 +97,9 @@ export function createAuthorityE2eContext(options = {}) {
   const namespace = String(env.AUTHORITY_E2E_NAMESPACE || `st-bme-e2e-${runId}`);
   const collectionId = String(env.AUTHORITY_E2E_COLLECTION_ID || `${namespace}::${chatId}`);
   const blobPath = String(env.AUTHORITY_E2E_BLOB_PATH || `st-bme/e2e/${runId}/contract.json`);
+  const embeddingApiUrl = String(env.AUTHORITY_E2E_EMBEDDING_API_URL || "").trim();
+  const embeddingApiKey = String(env.AUTHORITY_E2E_EMBEDDING_API_KEY || "").trim();
+  const embeddingModel = String(env.AUTHORITY_E2E_EMBEDDING_MODEL || "").trim();
   return {
     skip: false,
     env,
@@ -110,6 +113,9 @@ export function createAuthorityE2eContext(options = {}) {
     namespace,
     collectionId,
     blobPath,
+    embeddingApiUrl,
+    embeddingApiKey,
+    embeddingModel,
   };
 }
 
@@ -181,6 +187,7 @@ export function buildAuthorityE2eVectorEntries(graph = null) {
     index,
     hash: `${node.id}:hash`,
     text: `${node.fields?.title || node.id}. ${node.fields?.summary || ""}`,
+    vector: [1, index + 1, String(node.fields?.title || node.id || "").length / 100],
   }));
 }
 

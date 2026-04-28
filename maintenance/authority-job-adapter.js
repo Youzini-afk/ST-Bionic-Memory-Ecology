@@ -1,6 +1,7 @@
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
+import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
 
-export const AUTHORITY_JOB_ENDPOINT = "/v1/jobs";
+export const AUTHORITY_JOB_ENDPOINT = "/jobs";
 export const AUTHORITY_JOB_STATUS_TERMINAL = new Set([
   "completed",
   "succeeded",
@@ -158,8 +159,8 @@ export function normalizeAuthorityJobList(payload = null) {
   const jobs = readJobRows(payload).map(normalizeAuthorityJobRecord).filter((job) => job.id);
   return {
     jobs,
-    nextCursor: String(source.nextCursor || source.next_cursor || source.cursor?.next || ""),
-    hasMore: Boolean(source.hasMore || source.has_more || source.cursor?.hasMore),
+    nextCursor: String(source.nextCursor || source.next_cursor || source.page?.nextCursor || source.cursor?.next || ""),
+    hasMore: Boolean(source.hasMore || source.has_more || source.page?.hasMore || source.cursor?.hasMore),
     raw: toPlainData(payload, payload),
   };
 }
@@ -251,49 +252,68 @@ export function normalizeAuthorityJobConfig(settings = {}, overrides = {}) {
 
 export class AuthorityJobHttpClient {
   constructor(options = {}) {
-    this.baseUrl = normalizeAuthorityBaseUrl(options.baseUrl);
-    this.fetchImpl = options.fetchImpl || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
-    this.headerProvider = typeof options.headerProvider === "function" ? options.headerProvider : null;
+    this.http = new AuthorityHttpClient({
+      ...options,
+      baseUrl: normalizeAuthorityBaseUrl(options.baseUrl),
+    });
   }
 
-  async request(action, payload = {}) {
-    if (typeof this.fetchImpl !== "function") {
-      throw new Error("Authority Jobs fetch unavailable");
-    }
-    const response = await this.fetchImpl(`${this.baseUrl}${AUTHORITY_JOB_ENDPOINT}`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(this.headerProvider ? this.headerProvider() || {} : {}),
-      },
-      body: JSON.stringify({ action, ...payload }),
+  async request(path, payload = {}, options = {}) {
+    return await this.http.requestJson(path, {
+      method: options.method || "POST",
+      body: payload,
+      session: true,
+      signal: options.signal,
     });
-    if (!response?.ok) {
-      const text = await response?.text?.().catch(() => "");
-      throw new Error(text || `Authority Jobs HTTP ${response?.status || "unknown"}`);
-    }
-    return await response.json().catch(() => ({}));
   }
 
   async submit(payload = {}) {
-    return await this.request("submit", payload);
+    return await this.request(`${AUTHORITY_JOB_ENDPOINT}/create`, {
+      type: String(payload.type || payload.kind || "").trim(),
+      payload: toPlainData(payload.payload, payload.payload),
+      ...(payload.timeoutMs != null ? { timeoutMs: normalizeInteger(payload.timeoutMs, 0, 0, 3600000) } : {}),
+      ...(payload.idempotencyKey ? { idempotencyKey: String(payload.idempotencyKey) } : {}),
+      ...(payload.maxAttempts != null ? { maxAttempts: normalizeInteger(payload.maxAttempts, 1, 1, 1000) } : {}),
+    });
   }
 
   async listPage(payload = {}) {
-    return await this.request("listPage", payload);
+    return await this.request(`${AUTHORITY_JOB_ENDPOINT}/list`, {
+      page: {
+        ...(payload.cursor ? { cursor: String(payload.cursor) } : {}),
+        limit: normalizeInteger(payload.limit, 20, 1, 100),
+      },
+      ...(payload.filter && typeof payload.filter === "object" && !Array.isArray(payload.filter) && Object.keys(payload.filter).length > 0
+        ? { filter: toPlainData(payload.filter, {}) }
+        : {}),
+    });
   }
 
-  async waitForCompletion(payload = {}) {
-    return await this.request("waitForCompletion", payload);
+  async get(payload = {}) {
+    const id = encodeURIComponent(normalizeRecordId(payload.jobId || payload.id));
+    if (!id) {
+      throw new Error("Authority Jobs get requires job id");
+    }
+    return await this.request(`${AUTHORITY_JOB_ENDPOINT}/${id}`, undefined, {
+      method: "GET",
+      signal: payload.signal,
+    });
   }
 
   async requeue(payload = {}) {
-    return await this.request("requeue", payload);
+    const id = encodeURIComponent(normalizeRecordId(payload.jobId || payload.id));
+    if (!id) {
+      throw new Error("Authority Jobs requeue requires job id");
+    }
+    return await this.request(`${AUTHORITY_JOB_ENDPOINT}/${id}/requeue`, {}, { signal: payload.signal });
   }
 
   async cancel(payload = {}) {
-    return await this.request("cancel", payload);
+    const id = encodeURIComponent(normalizeRecordId(payload.jobId || payload.id));
+    if (!id) {
+      throw new Error("Authority Jobs cancel requires job id");
+    }
+    return await this.request(`${AUTHORITY_JOB_ENDPOINT}/${id}/cancel`, {}, { signal: payload.signal });
   }
 }
 

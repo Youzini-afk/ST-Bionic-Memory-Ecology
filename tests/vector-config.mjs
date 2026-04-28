@@ -70,6 +70,54 @@ const defaultModeConfig = getVectorConfigFromSettings({
 assert.equal(defaultModeConfig.mode, "direct");
 assert.equal(validateVectorConfig(defaultModeConfig).valid, true);
 
+const validAuthorityConfig = {
+  mode: "authority",
+  source: "authority-trivium",
+  baseUrl: "/api/plugins/authority",
+  apiUrl: "https://example.com/v1",
+  model: "text-embedding-3-small",
+};
+assert.equal(validateVectorConfig(validAuthorityConfig).valid, true);
+
+const invalidAuthorityConfig = {
+  mode: "authority",
+  source: "authority-trivium",
+  baseUrl: "/api/plugins/authority",
+  apiUrl: "",
+  model: "",
+};
+assert.equal(validateVectorConfig(invalidAuthorityConfig).valid, false);
+
+const validAuthorityBackendConfig = {
+  mode: "authority",
+  source: "authority-trivium",
+  baseUrl: "/api/plugins/authority",
+  embeddingMode: "backend",
+  embeddingSource: "openai",
+  apiUrl: "",
+  model: "text-embedding-3-small",
+};
+assert.equal(validateVectorConfig(validAuthorityBackendConfig).valid, true);
+
+const invalidAuthorityBackendConfig = {
+  mode: "authority",
+  source: "authority-trivium",
+  baseUrl: "/api/plugins/authority",
+  embeddingMode: "backend",
+  embeddingSource: "vllm",
+  apiUrl: "",
+  model: "BAAI/bge-m3",
+};
+assert.equal(validateVectorConfig(invalidAuthorityBackendConfig).valid, false);
+
+const authorityLikeConfig = getVectorConfigFromSettings({
+  embeddingApiUrl: "https://example.com/v1/embeddings",
+  embeddingApiKey: "sk-test",
+  embeddingModel: "text-embedding-3-small",
+});
+assert.equal(authorityLikeConfig.apiUrl, "https://example.com/v1");
+assert.equal(authorityLikeConfig.model, "text-embedding-3-small");
+
 const invalidBackendConfig = getVectorConfigFromSettings({
   embeddingTransportMode: "backend",
   embeddingBackendSource: "vllm",

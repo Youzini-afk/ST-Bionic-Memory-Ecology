@@ -1,11 +1,17 @@
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
+import {
+  AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06,
+  AuthorityHttpClient,
+} from "../runtime/authority-http-client.js";
+import { embedText } from "./embedding.js";
 
 export const AUTHORITY_VECTOR_MODE = "authority";
 export const AUTHORITY_VECTOR_SOURCE = "authority-trivium";
 
-const AUTHORITY_TRIVIUM_ENDPOINT = "/v1/trivium";
+const DEFAULT_AUTHORITY_TRIVIUM_DATABASE = "st_bme_vectors";
 const DEFAULT_AUTHORITY_VECTOR_CHUNK_SIZE = 1000;
 const MAX_AUTHORITY_VECTOR_CHUNK_SIZE = 2000;
+const DEFAULT_AUTHORITY_EMBEDDING_BACKEND_SOURCE = "openai";
 
 function clampInteger(value, fallback, min, max) {
   const parsed = Number(value);
@@ -34,6 +40,27 @@ function clonePlain(value, fallbackValue = null) {
 
 function normalizeRecordId(value) {
   return String(value ?? "").trim();
+}
+
+function normalizeVector(value = null) {
+  const source = ArrayBuffer.isView(value) ? Array.from(value) : value;
+  if (!Array.isArray(source)) return [];
+  return source
+    .map((item) => Number(item))
+    .filter((item) => Number.isFinite(item));
+}
+
+function normalizePositiveInteger(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
+function normalizeOpenAICompatibleBaseUrl(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\/+(chat\/completions|embeddings)$/i, "")
+    .replace(/\/+$/, "");
 }
 
 function readNestedValue(source = null, path = []) {
@@ -68,12 +95,14 @@ function readResultRows(payload = null) {
   if (Array.isArray(payload.data)) return payload.data;
   if (Array.isArray(payload.neighbors)) return payload.neighbors;
   if (Array.isArray(payload.links)) return payload.links;
+  if (Array.isArray(payload.nodes)) return payload.nodes;
   if (Array.isArray(payload.result?.results)) return payload.result.results;
   if (Array.isArray(payload.result?.items)) return payload.result.items;
   if (Array.isArray(payload.result?.rows)) return payload.result.rows;
   if (Array.isArray(payload.result?.data)) return payload.result.data;
   if (Array.isArray(payload.result?.neighbors)) return payload.result.neighbors;
   if (Array.isArray(payload.result?.links)) return payload.result.links;
+  if (Array.isArray(payload.result?.nodes)) return payload.result.nodes;
   return [];
 }
 
@@ -145,6 +174,32 @@ function normalizeSearchResults(payload = null) {
     .filter(Boolean);
 }
 
+function buildOpenOptions(config = {}, payload = {}) {
+  const database = normalizeRecordId(payload.database || config.database) || DEFAULT_AUTHORITY_TRIVIUM_DATABASE;
+  return {
+    database,
+    ...(normalizePositiveInteger(payload.dim ?? config.dim, 0) > 0 ? { dim: normalizePositiveInteger(payload.dim ?? config.dim, 0) } : {}),
+    ...(payload.dtype || config.dtype ? { dtype: String(payload.dtype || config.dtype) } : {}),
+    ...(payload.syncMode || config.syncMode ? { syncMode: String(payload.syncMode || config.syncMode) } : {}),
+    ...(payload.storageMode || config.storageMode ? { storageMode: String(payload.storageMode || config.storageMode) } : {}),
+  };
+}
+
+function getNamespace(payload = {}) {
+  return normalizeRecordId(payload.namespace || payload.collectionId || payload.chatId);
+}
+
+function buildNodeReference(id, namespace = "") {
+  return {
+    externalId: normalizeRecordId(id),
+    ...(namespace ? { namespace } : {}),
+  };
+}
+
+function buildV06PayloadSource(payload = {}) {
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+}
+
 function buildAuthorityNodePayload(node = {}, entry = {}, { chatId = "", modelScope = "", revision = 0 } = {}) {
   const scope = node?.scope && typeof node.scope === "object" ? node.scope : {};
   const seqRange = Array.isArray(node?.seqRange) ? node.seqRange : [node?.seq ?? 0, node?.seq ?? 0];
@@ -166,6 +221,7 @@ function buildAuthorityNodePayload(node = {}, entry = {}, { chatId = "", modelSc
     regionKey: String(scope.regionKey || node?.regionKey || ""),
     storySegmentId: String(node?.storySegmentId || node?.storyTime?.segmentId || ""),
     storyTimeLabel: String(node?.storyTime?.label || ""),
+    text: String(entry?.text || ""),
     title: getNodeFieldText(node, ["title"]),
     name: getNodeFieldText(node, ["name"]),
     summaryPreview: getNodeFieldText(node, ["summary", "insight", "state"]),
@@ -190,6 +246,7 @@ function buildAuthorityVectorItems(graph, entries = [], options = {}) {
         text: String(entry?.text || ""),
         index: Number(entry?.index || 0) || 0,
         hash: String(entry?.hash || ""),
+        vector: normalizeVector(entry?.vector || entry?.embedding || node?.embedding),
         payload,
       };
     })
@@ -229,11 +286,43 @@ export function isAuthorityVectorConfig(config = null) {
 
 export function normalizeAuthorityVectorConfig(settings = {}, overrides = {}) {
   const source = settings && typeof settings === "object" && !Array.isArray(settings) ? settings : {};
+  const hasAuthorityEmbeddingOverride = [
+    source.authorityEmbeddingApiUrl,
+    source.authorityEmbeddingApiKey,
+    source.authorityEmbeddingModel,
+  ].some((value) => String(value ?? "").trim());
+  const embeddingMode = hasAuthorityEmbeddingOverride
+    ? "direct"
+    : String(source.embeddingTransportMode || "direct").trim().toLowerCase() === "backend"
+      ? "backend"
+      : "direct";
+  const embeddingSource = embeddingMode === "backend"
+    ? String(source.embeddingBackendSource || DEFAULT_AUTHORITY_EMBEDDING_BACKEND_SOURCE).trim().toLowerCase() || DEFAULT_AUTHORITY_EMBEDDING_BACKEND_SOURCE
+    : "direct";
   return {
     mode: AUTHORITY_VECTOR_MODE,
     source: AUTHORITY_VECTOR_SOURCE,
     baseUrl: normalizeAuthorityBaseUrl(source.authorityBaseUrl ?? source.baseUrl),
-    model: String(source.embeddingBackendModel || source.embeddingModel || "").trim(),
+    protocol: AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06,
+    database: normalizeRecordId(source.authorityTriviumDatabase ?? source.triviumDatabase) || DEFAULT_AUTHORITY_TRIVIUM_DATABASE,
+    dim: normalizePositiveInteger(source.authorityTriviumDim ?? source.triviumDim, 0),
+    dtype: String(source.authorityTriviumDtype ?? source.triviumDtype ?? "").trim(),
+    syncMode: String(source.authorityTriviumSyncMode ?? source.triviumSyncMode ?? "").trim(),
+    storageMode: String(source.authorityTriviumStorageMode ?? source.triviumStorageMode ?? "").trim(),
+    embeddingMode,
+    embeddingSource,
+    apiUrl: normalizeOpenAICompatibleBaseUrl(
+      embeddingMode === "backend"
+        ? source.embeddingBackendApiUrl
+        : source.authorityEmbeddingApiUrl ?? source.embeddingApiUrl ?? source.embeddingBackendApiUrl,
+    ),
+    apiKey: embeddingMode === "backend"
+      ? ""
+      : String(source.authorityEmbeddingApiKey ?? source.embeddingApiKey ?? "").trim(),
+    model: embeddingMode === "backend"
+      ? String(source.embeddingBackendModel ?? source.embeddingModel ?? "").trim()
+      : String(source.authorityEmbeddingModel ?? source.embeddingModel ?? source.embeddingBackendModel ?? "").trim(),
+    autoSuffix: source.embeddingAutoSuffix !== false,
     chunkSize: clampInteger(
       source.authorityVectorSyncChunkSize ?? source.chunkSize,
       DEFAULT_AUTHORITY_VECTOR_CHUNK_SIZE,
@@ -251,61 +340,225 @@ export class AuthorityTriviumHttpClient {
     this.baseUrl = normalizeAuthorityBaseUrl(options.baseUrl);
     this.fetchImpl = options.fetchImpl || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
     this.headerProvider = typeof options.headerProvider === "function" ? options.headerProvider : null;
+    this.protocol = AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06;
+    this.config = {
+      database: normalizeRecordId(options.database) || DEFAULT_AUTHORITY_TRIVIUM_DATABASE,
+      dim: normalizePositiveInteger(options.dim, 0),
+      dtype: String(options.dtype || "").trim(),
+      syncMode: String(options.syncMode || "").trim(),
+      storageMode: String(options.storageMode || "").trim(),
+    };
+    this.http = new AuthorityHttpClient({
+      ...options,
+      baseUrl: this.baseUrl,
+      fetchImpl: this.fetchImpl,
+      headerProvider: this.headerProvider,
+      protocol: this.protocol,
+    });
   }
 
   async request(action, payload = {}) {
-    if (typeof this.fetchImpl !== "function") {
-      throw new Error("Authority Trivium fetch unavailable");
-    }
-    const response = await this.fetchImpl(`${this.baseUrl}${AUTHORITY_TRIVIUM_ENDPOINT}`, {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...(this.headerProvider ? this.headerProvider() || {} : {}),
-      },
-      body: JSON.stringify({ action, ...payload }),
+    if (action === "purge") return await this.purge(payload);
+    if (action === "bulkUpsert") return await this.bulkUpsert(payload);
+    if (action === "deleteMany") return await this.deleteMany(payload);
+    if (action === "linkMany") return await this.linkMany(payload);
+    if (action === "search") return await this.search(payload);
+    if (action === "filterWhere") return await this.filterWhere(payload);
+    if (action === "queryPage") return await this.queryPage(payload);
+    if (action === "neighbors") return await this.neighbors(payload);
+    if (action === "stat") return await this.stat(payload);
+    throw new Error(`Authority Trivium v0.6 action unavailable: ${action}`);
+  }
+
+  async requestV06(path, payload = {}, method = "POST") {
+    return await this.http.requestJson(path, {
+      method,
+      body: payload,
+      session: true,
+      protocol: AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06,
     });
-    if (!response?.ok) {
-      throw new Error(`Authority Trivium HTTP ${response?.status || "unknown"}`);
-    }
-    return await response.json().catch(() => ({}));
+  }
+
+  buildOpenOptions(payload = {}) {
+    return buildOpenOptions(this.config, payload);
   }
 
   async purge(payload = {}) {
-    return await this.request("purge", payload);
+    const namespace = getNamespace(payload);
+    const openOptions = this.buildOpenOptions(payload);
+    let cursor = "";
+    let deleted = 0;
+    let scanned = 0;
+    for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+      const page = await this.requestV06("/trivium/list-mappings", {
+        ...openOptions,
+        namespace,
+        page: { cursor, limit: 200 },
+      });
+      const mappings = toArray(page?.mappings);
+      if (!mappings.length && !page?.page?.hasMore) break;
+      scanned += mappings.length;
+      const items = mappings
+        .map((item) => buildNodeReference(item?.externalId, item?.namespace || namespace))
+        .filter((item) => item.externalId);
+      if (items.length) {
+        const result = await this.requestV06("/trivium/bulk-delete", {
+          ...openOptions,
+          items,
+        });
+        deleted += Number(result?.successCount ?? items.length) || 0;
+      }
+      if (!page?.page?.hasMore) break;
+      cursor = String(page?.page?.nextCursor || "");
+      if (!cursor) break;
+    }
+    return { ok: true, scanned, deleted };
   }
 
   async bulkUpsert(payload = {}) {
-    return await this.request("bulkUpsert", payload);
+    const namespace = getNamespace(payload);
+    const items = toArray(payload.items);
+    const missingVector = items.find((item) => !normalizeVector(item?.vector || item?.embedding).length);
+    if (missingVector) {
+      throw new Error("Authority Trivium v0.6 bulkUpsert requires vector for every item");
+    }
+    const mappedItems = items.map((item) => {
+      const nodeId = normalizeRecordId(item?.externalId || item?.nodeId || item?.id);
+      const payloadSource = buildV06PayloadSource(item?.payload);
+      return {
+        externalId: nodeId,
+        namespace,
+        vector: normalizeVector(item?.vector || item?.embedding),
+        payload: {
+          ...payloadSource,
+          nodeId: payloadSource.nodeId || nodeId,
+          externalId: payloadSource.externalId || nodeId,
+          collectionId: payload.collectionId || payloadSource.collectionId || "",
+          text: payloadSource.text || item?.text || "",
+          contentHash: payloadSource.contentHash || item?.hash || "",
+          index: Number(item?.index || payloadSource.index || 0) || 0,
+        },
+      };
+    });
+    return await this.requestV06("/trivium/bulk-upsert", {
+      ...this.buildOpenOptions(payload),
+      items: mappedItems,
+    });
   }
 
   async deleteMany(payload = {}) {
-    return await this.request("deleteMany", payload);
+    const namespace = getNamespace(payload);
+    const ids = [
+      ...toArray(payload.ids),
+      ...toArray(payload.externalIds),
+      ...toArray(payload.items).map((item) => item?.externalId || item?.nodeId || item?.id),
+    ].map(normalizeRecordId).filter(Boolean);
+    return await this.requestV06("/trivium/bulk-delete", {
+      ...this.buildOpenOptions(payload),
+      items: ids.map((id) => buildNodeReference(id, namespace)),
+    });
   }
 
   async linkMany(payload = {}) {
-    return await this.request("linkMany", payload);
+    const namespace = getNamespace(payload);
+    const sourceLinks = toArray(payload.links || payload.items);
+    return await this.requestV06("/trivium/bulk-link", {
+      ...this.buildOpenOptions(payload),
+      items: sourceLinks
+        .map((link) => {
+          const src = normalizeRecordId(link?.fromId || link?.src || link?.sourceId);
+          const dst = normalizeRecordId(link?.toId || link?.dst || link?.targetId);
+          if (!src || !dst) return null;
+          return {
+            src: buildNodeReference(src, namespace),
+            dst: buildNodeReference(dst, namespace),
+            label: String(link?.relation || link?.label || "related"),
+            weight: Number(link?.weight ?? link?.strength ?? 1) || 1,
+          };
+        })
+        .filter(Boolean),
+    });
   }
 
   async search(payload = {}) {
-    return await this.request("search", payload);
+    const vector = normalizeVector(payload.vector || payload.embedding || payload.queryVector);
+    if (!vector.length) {
+      throw new Error("Authority Trivium v0.6 search requires vector");
+    }
+    const queryText = String(payload.queryText || payload.text || payload.searchText || payload.query || "");
+    const body = {
+      ...this.buildOpenOptions(payload),
+      vector,
+      topK: Number(payload.topK || payload.limit || 0) || undefined,
+      expandDepth: Number(payload.expandDepth || payload.depth || 0) || undefined,
+      minScore: Number.isFinite(Number(payload.minScore)) ? Number(payload.minScore) : undefined,
+      ...(payload.payloadFilter || payload.filter ? { payloadFilter: payload.payloadFilter || payload.filter } : {}),
+    };
+    if (queryText) {
+      return await this.requestV06("/trivium/search-hybrid", {
+        ...body,
+        queryText,
+        hybridAlpha: Number.isFinite(Number(payload.hybridAlpha)) ? Number(payload.hybridAlpha) : undefined,
+      });
+    }
+    return await this.requestV06("/trivium/search", body);
   }
 
   async filterWhere(payload = {}) {
-    return await this.request("filterWhere", payload);
+    const namespace = getNamespace(payload);
+    const result = await this.requestV06("/trivium/list-mappings", {
+      ...this.buildOpenOptions(payload),
+      namespace,
+      page: {
+        limit: Number(payload.limit || payload.topK || payload.pageSize || 100) || 100,
+      },
+    });
+    return { items: toArray(result?.mappings) };
   }
 
   async queryPage(payload = {}) {
-    return await this.request("queryPage", payload);
+    return await this.filterWhere(payload);
   }
 
   async neighbors(payload = {}) {
-    return await this.request("neighbors", payload);
+    const namespace = getNamespace(payload);
+    const seedIds = [
+      ...toArray(payload.ids),
+      ...toArray(payload.nodeIds),
+      ...toArray(payload.seedIds),
+      payload.id,
+    ].map(normalizeRecordId).filter(Boolean);
+    const openOptions = this.buildOpenOptions(payload);
+    const resolved = await this.requestV06("/trivium/resolve-many", {
+      ...openOptions,
+      items: seedIds.map((id) => buildNodeReference(id, namespace)),
+    });
+    const neighbors = [];
+    for (const item of toArray(resolved?.items)) {
+      const internalId = Number(item?.id);
+      if (!Number.isFinite(internalId) || internalId <= 0) continue;
+      const result = await this.requestV06("/trivium/neighbors", {
+        ...openOptions,
+        id: internalId,
+        depth: Number(payload.depth || payload.expandDepth || 1) || 1,
+      });
+      for (const node of toArray(result?.nodes)) {
+        neighbors.push({
+          externalId: node?.externalId,
+          nodeId: node?.externalId,
+          id: node?.id,
+          namespace: node?.namespace,
+        });
+      }
+    }
+    return { neighbors };
   }
 
   async stat(payload = {}) {
-    return await this.request("stat", payload);
+    return await this.requestV06("/trivium/stat", {
+      ...this.buildOpenOptions(payload),
+      ...(payload.includeMappingIntegrity ? { includeMappingIntegrity: true } : {}),
+    });
   }
 }
 
@@ -313,9 +566,13 @@ export function createAuthorityTriviumClient(config = {}, options = {}) {
   const injected = options.triviumClient || config.triviumClient || globalThis.__stBmeAuthorityTriviumClient;
   if (injected) return injected;
   return new AuthorityTriviumHttpClient({
+    ...config,
     baseUrl: config.baseUrl,
     fetchImpl: options.fetchImpl || config.fetchImpl,
     headerProvider: options.headerProvider || config.headerProvider,
+    protocol: config.protocol,
+    sessionToken: options.sessionToken || config.sessionToken,
+    sessionInitConfig: options.sessionInitConfig || config.sessionInitConfig,
   });
 }
 
@@ -451,6 +708,8 @@ export async function searchAuthorityTriviumNodes(graph, text, config = {}, opti
     chatId: options.chatId,
     text: String(text || ""),
     searchText: String(text || ""),
+    vector: normalizeVector(options.vector || options.queryVector || options.embedding),
+    queryVector: normalizeVector(options.queryVector || options.vector || options.embedding),
     topK: Math.max(1, Math.floor(Number(options.topK) || 1)),
     candidateIds: toArray(options.candidateIds).map(normalizeRecordId).filter(Boolean),
   });
@@ -458,11 +717,15 @@ export async function searchAuthorityTriviumNodes(graph, text, config = {}, opti
 }
 
 export async function testAuthorityTriviumConnection(config = {}, options = {}) {
+  const probeVector = await embedText("test connection", config, { isQuery: true });
+  if (!probeVector || probeVector.length === 0) {
+    return { success: false, dimensions: 0, error: "Embedding API 返回空结果" };
+  }
   const client = createAuthorityTriviumClient(config, options);
   await callClient(client, ["stat"], "stat", {
     namespace: options.namespace,
     collectionId: options.collectionId,
     chatId: options.chatId,
   });
-  return { success: true, dimensions: 0, error: "" };
+  return { success: true, dimensions: probeVector.length, error: "" };
 }
