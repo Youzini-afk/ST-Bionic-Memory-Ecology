@@ -36,6 +36,7 @@ import {
   normalizeMemoryScope,
   resolveScopeBucketWeight,
 } from "../graph/memory-scope.js";
+import { resolveAuthorityRecallCandidates } from "./authority-candidate-provider.js";
 import { rankNodesForTaskContext } from "./shared-ranking.js";
 import {
   computeKnowledgeGateForNode,
@@ -207,9 +208,19 @@ function createRetrievalMeta(enableLLMRecall) {
     activeRecallOwnerKey: "",
     activeRecallOwnerKeys: [],
     activeRecallOwnerScores: {},
+    activeNodeCount: 0,
+    rankingNodeCount: 0,
     sceneOwnerResolutionMode: "unresolved",
     sceneOwnerCandidates: [],
     bucketWeights: {},
+    authorityCandidateProvider: "",
+    authorityCandidateUsed: false,
+    authorityCandidateCount: 0,
+    authorityCandidateFilteredCount: 0,
+    authorityCandidateSearchHits: 0,
+    authorityCandidateNeighborCount: 0,
+    authorityCandidateQueryTexts: [],
+    authorityCandidateFallbackReason: "",
     selectedByBucket: {},
     knowledgeGateMode: "disabled",
     knowledgeAnchoredNodes: [],
@@ -1228,6 +1239,7 @@ export async function retrieve({
   }
 
   const nodeCount = activeNodes.length;
+  let rankingActiveNodes = activeNodes;
   const normalizedTopK = Math.max(1, topK);
   const normalizedMaxRecallNodes = Math.max(1, maxRecallNodes);
   const normalizedDiffusionTopK = Math.max(1, diffusionTopK);
@@ -1249,6 +1261,8 @@ export async function retrieve({
   retrievalMeta.activeRecallOwnerKey = activeRecallOwnerKeys[0] || "";
   retrievalMeta.activeRecallOwnerKeys = [...activeRecallOwnerKeys];
   retrievalMeta.activeRecallOwnerScores = { ...activeRecallOwnerScores };
+  retrievalMeta.activeNodeCount = nodeCount;
+  retrievalMeta.rankingNodeCount = nodeCount;
   retrievalMeta.sceneOwnerResolutionMode = sceneOwnerResolutionMode;
   retrievalMeta.sceneOwnerCandidates = preliminarySceneOwnerCandidates.map((candidate) => ({
     ownerKey: candidate.ownerKey,
@@ -1262,8 +1276,83 @@ export async function retrieve({
   retrievalMeta.knowledgeGateMode = enableCognitiveMemory
     ? "anchored-soft-visibility"
     : "disabled";
+  const authorityCandidateStartedAt = nowMs();
+  const authorityCandidateResult = await resolveAuthorityRecallCandidates({
+    graph,
+    userMessage,
+    recentMessages,
+    embeddingConfig,
+    availableNodes: activeNodes,
+    activeRegion,
+    activeStoryContext,
+    activeRecallOwnerKeys,
+    sceneOwnerCandidates: preliminarySceneOwnerCandidates,
+    signal,
+    options: {
+      enabled: settings.authorityGraphQueryEnabled !== false,
+      topK: normalizedTopK,
+      maxRecallNodes: normalizedMaxRecallNodes,
+      limit: options.authorityCandidateLimit,
+      neighborLimit: options.authorityCandidateNeighborLimit,
+      minimumUsedCandidateCount: options.authorityCandidateMinCount,
+      enableContextQueryBlend,
+      contextAssistantWeight,
+      contextPreviousUserWeight,
+      enableMultiIntent,
+      multiIntentMaxSegments,
+    },
+  });
+  retrievalMeta.authorityCandidateProvider =
+    String(authorityCandidateResult?.diagnostics?.provider || "");
+  retrievalMeta.authorityCandidateUsed = authorityCandidateResult?.used === true;
+  retrievalMeta.authorityCandidateCount = Number(
+    authorityCandidateResult?.diagnostics?.candidateCount || 0,
+  );
+  retrievalMeta.authorityCandidateFilteredCount = Number(
+    authorityCandidateResult?.diagnostics?.filteredCount || 0,
+  );
+  retrievalMeta.authorityCandidateSearchHits = Number(
+    authorityCandidateResult?.diagnostics?.searchHits || 0,
+  );
+  retrievalMeta.authorityCandidateNeighborCount = Number(
+    authorityCandidateResult?.diagnostics?.neighborCount || 0,
+  );
+  retrievalMeta.authorityCandidateQueryTexts = Array.isArray(
+    authorityCandidateResult?.diagnostics?.queryTexts,
+  )
+    ? [...authorityCandidateResult.diagnostics.queryTexts]
+    : [];
+  retrievalMeta.authorityCandidateFallbackReason = String(
+    authorityCandidateResult?.diagnostics?.fallbackReason || "",
+  );
+  retrievalMeta.timings.authorityCandidates = Number(
+    authorityCandidateResult?.diagnostics?.timings?.total || 0,
+  );
+  retrievalMeta.timings.authorityCandidateFilter = Number(
+    authorityCandidateResult?.diagnostics?.timings?.filter || 0,
+  );
+  retrievalMeta.timings.authorityCandidateSearch = Number(
+    authorityCandidateResult?.diagnostics?.timings?.search || 0,
+  );
+  retrievalMeta.timings.authorityCandidateNeighbors = Number(
+    authorityCandidateResult?.diagnostics?.timings?.neighbors || 0,
+  );
+  if (authorityCandidateResult?.used && authorityCandidateResult?.candidateNodes?.length > 0) {
+    rankingActiveNodes = authorityCandidateResult.candidateNodes;
+    retrievalMeta.rankingNodeCount = rankingActiveNodes.length;
+  } else if (retrievalMeta.authorityCandidateFallbackReason) {
+    pushSkipReason(
+      retrievalMeta,
+      `authority-candidate:${retrievalMeta.authorityCandidateFallbackReason}`,
+    );
+  }
+  if (!Number.isFinite(retrievalMeta.timings.authorityCandidates)) {
+    retrievalMeta.timings.authorityCandidates = roundMs(
+      nowMs() - authorityCandidateStartedAt,
+    );
+  }
   debugLog(
-    `[ST-BME] 检索开始: ${nodeCount} 个活跃节点${enableVisibility ? " (认知边界已启用)" : ""}`,
+    `[ST-BME] 检索开始: ${nodeCount} 个活跃节点 -> ${rankingActiveNodes.length} 个候选${enableVisibility ? " (认知边界已启用)" : ""}`,
   );
 
   let vectorResults = [];
@@ -1338,7 +1427,7 @@ export async function retrieve({
       enableLexicalBoost,
       lexicalWeight,
       weights,
-      activeNodes,
+      activeNodes: rankingActiveNodes,
     },
   });
   const contextQueryBlend = sharedRanking.contextQueryBlend;

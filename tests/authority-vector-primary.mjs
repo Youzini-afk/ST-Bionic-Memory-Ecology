@@ -17,11 +17,12 @@ installResolveHooks([
 ]);
 
 const {
-  findSimilarNodesByText,
+  filterAuthorityTriviumNodes,
   isAuthorityVectorConfig,
   normalizeAuthorityVectorConfig,
-  syncGraphVectorIndex,
-} = await import("../vector/vector-index.js");
+  queryAuthorityTriviumNeighbors,
+} = await import("../vector/authority-vector-primary-adapter.js");
+const { findSimilarNodesByText: findSimilarNodesByTextFromIndex, syncGraphVectorIndex: syncGraphVectorIndexFromIndex } = await import("../vector/vector-index.js");
 
 function createAuthorityVectorGraph() {
   const graph = createEmptyGraph();
@@ -86,6 +87,24 @@ function createMockTriviumClient({ failBulkUpsert = false } = {}) {
         ],
       };
     },
+    async filterWhere(payload) {
+      calls.push(["filterWhere", payload]);
+      return {
+        items: [
+          { externalId: "node-a" },
+          { payload: { nodeId: "node-b" } },
+        ],
+      };
+    },
+    async neighbors(payload) {
+      calls.push(["neighbors", payload]);
+      return {
+        neighbors: [
+          { fromId: "node-a", toId: "node-b" },
+          { fromId: "node-a", toId: "node-c" },
+        ],
+      };
+    },
     async stat(payload) {
       calls.push(["stat", payload]);
       return { ok: true };
@@ -103,7 +122,7 @@ assert.equal(isAuthorityVectorConfig(config), true);
 {
   const { graph, first, second } = createAuthorityVectorGraph();
   const triviumClient = createMockTriviumClient();
-  const result = await syncGraphVectorIndex(graph, config, {
+  const result = await syncGraphVectorIndexFromIndex(graph, config, {
     chatId: "chat-authority-vector",
     purge: true,
     triviumClient,
@@ -134,13 +153,13 @@ assert.equal(isAuthorityVectorConfig(config), true);
   const { graph, first, second } = createAuthorityVectorGraph();
   const triviumClient = createMockTriviumClient();
   const queryConfig = { ...config, triviumClient };
-  await syncGraphVectorIndex(graph, queryConfig, {
+  await syncGraphVectorIndexFromIndex(graph, queryConfig, {
     chatId: "chat-authority-vector",
     purge: true,
     triviumClient,
   });
 
-  const results = await findSimilarNodesByText(
+  const results = await findSimilarNodesByTextFromIndex(
     graph,
     "archive door",
     queryConfig,
@@ -158,7 +177,7 @@ assert.equal(isAuthorityVectorConfig(config), true);
 {
   const { graph } = createAuthorityVectorGraph();
   const triviumClient = createMockTriviumClient({ failBulkUpsert: true });
-  const result = await syncGraphVectorIndex(graph, config, {
+  const result = await syncGraphVectorIndexFromIndex(graph, config, {
     chatId: "chat-authority-vector",
     purge: true,
     triviumClient,
@@ -169,6 +188,37 @@ assert.equal(isAuthorityVectorConfig(config), true);
   assert.equal(graph.vectorIndexState.dirty, true);
   assert.equal(graph.vectorIndexState.dirtyReason, "authority-trivium-sync-failed");
   assert.match(graph.vectorIndexState.lastWarning, /Authority Trivium 同步失败/);
+}
+
+{
+  const triviumClient = createMockTriviumClient();
+  const queryConfig = { ...config, triviumClient };
+  const filteredIds = await filterAuthorityTriviumNodes(queryConfig, {
+    collectionId: "authority-filter",
+    chatId: "chat-authority-vector",
+    limit: 8,
+    filters: {
+      archived: false,
+      ownerKeys: ["character:Alice"],
+    },
+  });
+  assert.deepEqual(filteredIds, ["node-a", "node-b"]);
+  const filterCall = triviumClient.calls.find(([name]) => name === "filterWhere");
+  assert.equal(filterCall?.[1]?.collectionId, "authority-filter");
+  assert.equal(filterCall?.[1]?.filters?.ownerKeys?.[0], "character:Alice");
+}
+
+{
+  const triviumClient = createMockTriviumClient();
+  const queryConfig = { ...config, triviumClient };
+  const neighborIds = await queryAuthorityTriviumNeighbors(queryConfig, ["node-a"], {
+    collectionId: "authority-filter",
+    chatId: "chat-authority-vector",
+    limit: 4,
+  });
+  assert.deepEqual(neighborIds, ["node-b", "node-c"]);
+  const neighborCall = triviumClient.calls.find(([name]) => name === "neighbors");
+  assert.deepEqual(neighborCall?.[1]?.nodeIds, ["node-a"]);
 }
 
 console.log("authority-vector-primary tests passed");

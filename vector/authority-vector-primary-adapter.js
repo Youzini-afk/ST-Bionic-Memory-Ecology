@@ -36,6 +36,80 @@ function normalizeRecordId(value) {
   return String(value ?? "").trim();
 }
 
+function readNestedValue(source = null, path = []) {
+  let current = source;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+  return current;
+}
+
+function normalizeNodeResultId(item = null) {
+  return normalizeRecordId(
+    item?.nodeId ||
+      item?.externalId ||
+      item?.id ||
+      readNestedValue(item, ["payload", "nodeId"]) ||
+      readNestedValue(item, ["payload", "externalId"]) ||
+      readNestedValue(item, ["payload", "id"]),
+  );
+}
+
+function readResultRows(payload = null) {
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== "object") return [];
+  if (Array.isArray(payload.results)) return payload.results;
+  if (Array.isArray(payload.hits)) return payload.hits;
+  if (Array.isArray(payload.items)) return payload.items;
+  if (Array.isArray(payload.rows)) return payload.rows;
+  if (Array.isArray(payload.data)) return payload.data;
+  if (Array.isArray(payload.neighbors)) return payload.neighbors;
+  if (Array.isArray(payload.links)) return payload.links;
+  if (Array.isArray(payload.result?.results)) return payload.result.results;
+  if (Array.isArray(payload.result?.items)) return payload.result.items;
+  if (Array.isArray(payload.result?.rows)) return payload.result.rows;
+  if (Array.isArray(payload.result?.data)) return payload.result.data;
+  if (Array.isArray(payload.result?.neighbors)) return payload.result.neighbors;
+  if (Array.isArray(payload.result?.links)) return payload.result.links;
+  return [];
+}
+
+function normalizeNodeIdRows(payload = null) {
+  const seen = new Set();
+  const result = [];
+  for (const item of readResultRows(payload)) {
+    const nodeId = normalizeNodeResultId(item);
+    if (!nodeId || seen.has(nodeId)) continue;
+    seen.add(nodeId);
+    result.push(nodeId);
+  }
+  return result;
+}
+
+function normalizeNeighborNodeIds(payload = null, seedIds = []) {
+  const seedSet = new Set((Array.isArray(seedIds) ? seedIds : []).map(normalizeRecordId));
+  const seen = new Set();
+  const result = [];
+  for (const item of readResultRows(payload)) {
+    const directId = normalizeNodeResultId(item);
+    const preferredId =
+      normalizeRecordId(item?.neighborId || item?.targetId || item?.toId) || directId;
+    const alternateId = normalizeRecordId(item?.sourceId || item?.fromId);
+    const nodeId = !seedSet.has(preferredId)
+      ? preferredId
+      : !seedSet.has(alternateId)
+        ? alternateId
+        : preferredId;
+    if (!nodeId || seedSet.has(nodeId) || seen.has(nodeId)) continue;
+    seen.add(nodeId);
+    result.push(nodeId);
+  }
+  return result;
+}
+
 function throwIfAborted(signal) {
   if (signal?.aborted) {
     throw signal.reason instanceof Error
@@ -54,22 +128,10 @@ function getNodeFieldText(node = {}, keys = []) {
 }
 
 function normalizeSearchResults(payload = null) {
-  const rows = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.results)
-      ? payload.results
-      : Array.isArray(payload?.hits)
-        ? payload.hits
-        : Array.isArray(payload?.items)
-          ? payload.items
-          : Array.isArray(payload?.data)
-            ? payload.data
-            : [];
+  const rows = readResultRows(payload);
   return rows
     .map((item, index) => {
-      const nodeId = normalizeRecordId(
-        item?.nodeId || item?.externalId || item?.id || item?.payload?.nodeId,
-      );
+      const nodeId = normalizeNodeResultId(item);
       if (!nodeId) return null;
       const rawScore = Number(item?.score ?? item?.similarity ?? item?.rankScore);
       const distance = Number(item?.distance);
@@ -230,6 +292,18 @@ export class AuthorityTriviumHttpClient {
     return await this.request("search", payload);
   }
 
+  async filterWhere(payload = {}) {
+    return await this.request("filterWhere", payload);
+  }
+
+  async queryPage(payload = {}) {
+    return await this.request("queryPage", payload);
+  }
+
+  async neighbors(payload = {}) {
+    return await this.request("neighbors", payload);
+  }
+
   async stat(payload = {}) {
     return await this.request("stat", payload);
   }
@@ -284,6 +358,31 @@ export async function deleteAuthorityTriviumNodes(config = {}, nodeIds = [], opt
   });
 }
 
+export async function filterAuthorityTriviumNodes(config = {}, options = {}) {
+  throwIfAborted(options.signal);
+  const client = createAuthorityTriviumClient(config, options);
+  const payload = await callClient(
+    client,
+    ["filterWhere", "queryPage", "query"],
+    "filterWhere",
+    {
+      namespace: options.namespace,
+      collectionId: options.collectionId,
+      chatId: options.chatId,
+      limit: Number(options.limit || options.topK || 0) || undefined,
+      topK: Number(options.topK || options.limit || 0) || undefined,
+      pageSize: Number(options.limit || options.topK || 0) || undefined,
+      filters: options.filters,
+      filter: options.filter,
+      where: options.where,
+      query: String(options.query || options.searchText || ""),
+      searchText: String(options.searchText || options.query || ""),
+      candidateIds: toArray(options.candidateIds).map(normalizeRecordId).filter(Boolean),
+    },
+  );
+  return normalizeNodeIdRows(payload);
+}
+
 export async function upsertAuthorityTriviumEntries(graph, config = {}, entries = [], options = {}) {
   const items = buildAuthorityVectorItems(graph, entries, options);
   if (!items.length) return { upserted: 0 };
@@ -317,6 +416,30 @@ export async function syncAuthorityTriviumLinks(graph, config = {}, options = {}
     links,
   });
   return { linked: links.length };
+}
+
+export async function queryAuthorityTriviumNeighbors(config = {}, nodeIds = [], options = {}) {
+  const ids = toArray(nodeIds).map(normalizeRecordId).filter(Boolean);
+  if (!ids.length) return [];
+  throwIfAborted(options.signal);
+  const client = createAuthorityTriviumClient(config, options);
+  const payload = await callClient(
+    client,
+    ["neighbors", "queryLinks", "queryNeighbors"],
+    "neighbors",
+    {
+      namespace: options.namespace,
+      collectionId: options.collectionId,
+      chatId: options.chatId,
+      ids,
+      nodeIds: ids,
+      seedIds: ids,
+      limit: Number(options.limit || options.topK || 0) || undefined,
+      topK: Number(options.topK || options.limit || 0) || undefined,
+      candidateIds: toArray(options.candidateIds).map(normalizeRecordId).filter(Boolean),
+    },
+  );
+  return normalizeNeighborNodeIds(payload, ids);
 }
 
 export async function searchAuthorityTriviumNodes(graph, text, config = {}, options = {}) {
