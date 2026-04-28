@@ -61,6 +61,31 @@ export function normalizeAuthorityBlobPath(path = "") {
   return normalized.replace(/\/+$/g, "");
 }
 
+function decodePathForValidation(path = "") {
+  try {
+    return decodeURIComponent(String(path || ""));
+  } catch {
+    return String(path || "");
+  }
+}
+
+function assertSafeAuthorityBlobPath(path = "", options = {}) {
+  const normalized = normalizeAuthorityBlobPath(path);
+  if (!normalized) {
+    if (options.allowEmpty) return "";
+    throw new Error("Authority Blob path is required");
+  }
+  const decoded = decodePathForValidation(normalized).replace(/\\/g, "/");
+  if (/^[A-Za-z]:(?:\/|$)/.test(decoded) || decoded.includes(":/")) {
+    throw new Error(`Unsafe Authority Blob path: ${normalized}`);
+  }
+  const segments = decoded.split("/").filter(Boolean);
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`Unsafe Authority Blob path: ${normalized}`);
+  }
+  return normalized;
+}
+
 function normalizeBlobPayload(result = null) {
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   const source = result.file || result.blob || result.result || result;
@@ -197,8 +222,9 @@ export class AuthorityBlobHttpClient {
   }
 
   async writeText(payload = {}) {
+    const path = assertSafeAuthorityBlobPath(payload.path || payload.name);
     return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/write-file`, {
-      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      path,
       content: String(payload.text ?? payload.data ?? payload.content ?? ""),
       encoding: "utf8",
       createParents: true,
@@ -206,22 +232,25 @@ export class AuthorityBlobHttpClient {
   }
 
   async readJson(payload = {}) {
+    const path = assertSafeAuthorityBlobPath(payload.path || payload.name);
     return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/read-file`, {
-      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      path,
       encoding: "utf8",
     }, { signal: payload.signal });
   }
 
   async delete(payload = {}) {
+    const path = assertSafeAuthorityBlobPath(payload.path || payload.name);
     return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/delete`, {
-      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      path,
       recursive: false,
     }, { signal: payload.signal });
   }
 
   async stat(payload = {}) {
+    const path = assertSafeAuthorityBlobPath(payload.path || payload.name);
     return await this.request(`${AUTHORITY_BLOB_ENDPOINT}/stat`, {
-      path: normalizeAuthorityBlobPath(payload.path || payload.name),
+      path,
     }, { signal: payload.signal });
   }
 }
@@ -271,8 +300,7 @@ export class AuthorityBlobAdapter {
 
   async writeJson(path, payload = null, options = {}) {
     throwIfAborted(options.signal);
-    const normalizedPath = normalizeAuthorityBlobPath(path);
-    if (!normalizedPath) throw new Error("Authority Blob path is required");
+    const normalizedPath = assertSafeAuthorityBlobPath(path);
     const result = await callClient(this.client, ["writeJson", "putJson", "writeFile", "put"], "writeJson", {
       namespace: options.namespace || this.config.namespace,
       path: normalizedPath,
@@ -287,8 +315,7 @@ export class AuthorityBlobAdapter {
 
   async writeText(path, text = "", options = {}) {
     throwIfAborted(options.signal);
-    const normalizedPath = normalizeAuthorityBlobPath(path);
-    if (!normalizedPath) throw new Error("Authority Blob path is required");
+    const normalizedPath = assertSafeAuthorityBlobPath(path);
     const result = await callClient(this.client, ["writeText", "writeFile", "putText", "put"], "writeText", {
       namespace: options.namespace || this.config.namespace,
       path: normalizedPath,
@@ -303,7 +330,7 @@ export class AuthorityBlobAdapter {
 
   async readJson(path, options = {}) {
     throwIfAborted(options.signal);
-    const normalizedPath = normalizeAuthorityBlobPath(path);
+    const normalizedPath = assertSafeAuthorityBlobPath(path, { allowEmpty: true });
     if (!normalizedPath) return normalizeAuthorityBlobReadResult({ exists: false }, "");
     try {
       const result = await callClient(this.client, ["readJson", "getJson", "readFile", "get"], "readJson", {
@@ -322,7 +349,7 @@ export class AuthorityBlobAdapter {
 
   async delete(path, options = {}) {
     throwIfAborted(options.signal);
-    const normalizedPath = normalizeAuthorityBlobPath(path);
+    const normalizedPath = assertSafeAuthorityBlobPath(path, { allowEmpty: true });
     if (!normalizedPath) return normalizeAuthorityBlobDeleteResult({ exists: false }, "");
     try {
       const result = await callClient(this.client, ["delete", "deleteFile", "remove", "unlink"], "delete", {
@@ -341,7 +368,7 @@ export class AuthorityBlobAdapter {
 
   async stat(path, options = {}) {
     throwIfAborted(options.signal);
-    const normalizedPath = normalizeAuthorityBlobPath(path);
+    const normalizedPath = assertSafeAuthorityBlobPath(path, { allowEmpty: true });
     if (!normalizedPath) return normalizeAuthorityBlobReadResult({ exists: false }, "");
     try {
       const result = await callClient(this.client, ["stat", "head", "metadata"], "stat", {

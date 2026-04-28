@@ -764,6 +764,10 @@ export async function syncGraphVectorIndex(
   let authorityDeleteMs = 0;
   let authorityUpsertMs = 0;
   let authorityLinkMs = 0;
+  let authorityPurgeDiagnostics = null;
+  let authorityDeleteDiagnostics = null;
+  let authorityUpsertDiagnostics = null;
+  let authorityLinkDiagnostics = null;
   let embedBatchMs = 0;
   let deletedHashCount = 0;
   let deletedNodeCount = 0;
@@ -801,17 +805,22 @@ export async function syncGraphVectorIndex(
           throw new Error(`Authority Trivium embedding failed for ${embeddingResult.failures} item(s)`);
         }
         const purgeStartedAt = nowMs();
-        await purgeAuthorityTriviumNamespace(config, authorityOptions);
+        const purgeResult = await purgeAuthorityTriviumNamespace(config, authorityOptions);
         authorityPurgeMs += nowMs() - purgeStartedAt;
+        authorityPurgeDiagnostics = purgeResult?.diagnostics || null;
+        if (purgeResult?.truncated) {
+          throw new Error(`Authority Trivium purge truncated after ${purgeResult.pages || 0} page(s)`);
+        }
         resetVectorMappings(graph, config, effectiveChatId);
         const upsertStartedAt = nowMs();
-        await upsertAuthorityTriviumEntries(
+        const upsertResult = await upsertAuthorityTriviumEntries(
           graph,
           config,
           desiredEntries,
           authorityOptions,
         );
         authorityUpsertMs += nowMs() - upsertStartedAt;
+        authorityUpsertDiagnostics = upsertResult?.diagnostics || null;
         for (const entry of desiredEntries) {
           state.hashToNodeId[entry.hash] = entry.nodeId;
           state.nodeToHash[entry.nodeId] = entry.hash;
@@ -861,16 +870,18 @@ export async function syncGraphVectorIndex(
         }
         deletedNodeCount = nodeIdsToDelete.length;
         const deleteStartedAt = nowMs();
-        await deleteAuthorityTriviumNodes(config, nodeIdsToDelete, authorityOptions);
+        const deleteResult = await deleteAuthorityTriviumNodes(config, nodeIdsToDelete, authorityOptions);
         authorityDeleteMs += nowMs() - deleteStartedAt;
+        authorityDeleteDiagnostics = deleteResult?.diagnostics || null;
         const upsertStartedAt = nowMs();
-        await upsertAuthorityTriviumEntries(
+        const upsertResult = await upsertAuthorityTriviumEntries(
           graph,
           config,
           entriesToUpsert,
           authorityOptions,
         );
         authorityUpsertMs += nowMs() - upsertStartedAt;
+        authorityUpsertDiagnostics = upsertResult?.diagnostics || null;
 
         for (const entry of entriesToUpsert) {
           state.hashToNodeId[entry.hash] = entry.nodeId;
@@ -880,8 +891,9 @@ export async function syncGraphVectorIndex(
       }
 
       const linkStartedAt = nowMs();
-      await syncAuthorityTriviumLinks(graph, config, authorityOptions);
+      const linkResult = await syncAuthorityTriviumLinks(graph, config, authorityOptions);
       authorityLinkMs += nowMs() - linkStartedAt;
+      authorityLinkDiagnostics = linkResult?.diagnostics || null;
 
       for (const node of graph.nodes || []) {
         if (Array.isArray(node.embedding) && node.embedding.length > 0) {
@@ -914,6 +926,12 @@ export async function syncGraphVectorIndex(
         authorityDeleteMs: roundMs(authorityDeleteMs),
         authorityUpsertMs: roundMs(authorityUpsertMs),
         authorityLinkMs: roundMs(authorityLinkMs),
+        authorityDiagnostics: {
+          purge: authorityPurgeDiagnostics,
+          delete: authorityDeleteDiagnostics,
+          upsert: error?.authorityDiagnostics || authorityUpsertDiagnostics,
+          link: authorityLinkDiagnostics,
+        },
         totalMs: roundMs(nowMs() - syncStartedAt),
         updatedAt: Date.now(),
       };
@@ -1106,6 +1124,12 @@ export async function syncGraphVectorIndex(
     authorityDeleteMs: roundMs(authorityDeleteMs),
     authorityUpsertMs: roundMs(authorityUpsertMs),
     authorityLinkMs: roundMs(authorityLinkMs),
+    authorityDiagnostics: {
+      purge: authorityPurgeDiagnostics,
+      delete: authorityDeleteDiagnostics,
+      upsert: authorityUpsertDiagnostics,
+      link: authorityLinkDiagnostics,
+    },
     embedBatchMs: roundMs(embedBatchMs),
     statsBuildMs: roundMs(statsBuildMs),
     deletedHashes: Math.max(0, Math.floor(deletedHashCount)),

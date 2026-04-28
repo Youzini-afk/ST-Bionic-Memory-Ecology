@@ -260,6 +260,18 @@ async function testAdapterBasics() {
   assert.deepEqual(readResult.payload, { hello: "world" });
   const deleteResult = await adapter.delete("user/files/demo.json");
   assert.equal(deleteResult.deleted, true);
+  await assert.rejects(
+    () => adapter.writeJson("../secret.json", {}),
+    /Unsafe Authority Blob path/,
+  );
+  await assert.rejects(
+    () => adapter.readJson("user/files/%2e%2e/secret.json"),
+    /Unsafe Authority Blob path/,
+  );
+  await assert.rejects(
+    () => adapter.stat("C:/Users/demo.json"),
+    /Unsafe Authority Blob path/,
+  );
 }
 
 async function testAuthorityBlobFailOpenFallsBackToUserFiles() {

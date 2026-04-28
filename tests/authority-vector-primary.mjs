@@ -72,7 +72,18 @@ function createMockTriviumClient({ failBulkUpsert = false } = {}) {
     calls,
     async purge(payload) {
       calls.push(["purge", payload]);
-      return { ok: true };
+      return {
+        ok: true,
+        diagnostics: {
+          operation: "purge",
+          pageSize: payload.purgePageSize || 200,
+          maxPages: payload.purgeMaxPages || 1000,
+          pages: 1,
+          scanned: 0,
+          deleted: 0,
+          truncated: false,
+        },
+      };
     },
     async bulkUpsert(payload) {
       calls.push(["bulkUpsert", payload]);
@@ -174,6 +185,13 @@ assert.equal(isAuthorityVectorConfig(config), true);
   const linkCall = triviumClient.calls.find(([name]) => name === "linkMany");
   assert.equal(linkCall?.[1]?.links?.[0]?.fromId, "node-a");
   assert.equal(linkCall?.[1]?.links?.[0]?.toId, "node-b");
+  assert.equal(result.timings.authorityDiagnostics.purge.operation, "purge");
+  assert.equal(result.timings.authorityDiagnostics.upsert.operation, "bulkUpsert");
+  assert.equal(result.timings.authorityDiagnostics.upsert.chunks.length, 2);
+  assert.equal(result.timings.authorityDiagnostics.upsert.chunks.every((chunk) => chunk.ok), true);
+  assert.ok(result.timings.authorityDiagnostics.upsert.totalBytes > 0);
+  assert.equal(result.timings.authorityDiagnostics.link.operation, "linkMany");
+  assert.equal(result.timings.authorityDiagnostics.link.totalItems, 1);
 }
 
 {
@@ -230,11 +248,15 @@ assert.equal(isAuthorityVectorConfig(config), true);
       archived: false,
       ownerKeys: ["character:Alice"],
     },
+    candidateIds: ["node-a"],
+    searchText: "Alice archive",
   });
   assert.deepEqual(filteredIds, ["node-a", "node-b"]);
   const filterCall = triviumClient.calls.find(([name]) => name === "filterWhere");
   assert.equal(filterCall?.[1]?.collectionId, "authority-filter");
   assert.equal(filterCall?.[1]?.filters?.ownerKeys?.[0], "character:Alice");
+  assert.deepEqual(filterCall?.[1]?.candidateIds, ["node-a"]);
+  assert.equal(filterCall?.[1]?.searchText, "Alice archive");
 }
 
 {

@@ -245,6 +245,8 @@ export function normalizeAuthorityJobConfig(settings = {}, overrides = {}) {
     failOpen: source.authorityFailOpen !== false && source.failOpen !== false,
     preferStream: source.authorityJobPreferStream !== false && source.jobStreamPreferred !== false,
     pollIntervalMs: normalizeInteger(source.authorityJobPollIntervalMs ?? source.pollIntervalMs, 1200, 250, 30000),
+    pollMaxIntervalMs: normalizeInteger(source.authorityJobPollMaxIntervalMs ?? source.pollMaxIntervalMs, 5000, 250, 60000),
+    pollBackoffFactor: Math.min(5, Math.max(1, Number(source.authorityJobPollBackoffFactor ?? source.pollBackoffFactor ?? 1.25) || 1.25)),
     waitTimeoutMs: normalizeInteger(source.authorityJobWaitTimeoutMs ?? source.waitTimeoutMs, 0, 0, 3600000),
     ...overrides,
   };
@@ -439,20 +441,75 @@ export class AuthorityJobAdapter {
         id,
         timeoutMs: normalizeInteger(options.timeoutMs, this.config.waitTimeoutMs, 0, 3600000),
       });
-      return normalizeAuthorityJobRecord(result?.job || result?.result || result);
+      const normalized = normalizeAuthorityJobRecord(result?.job || result?.result || result);
+      return {
+        ...normalized,
+        waitDiagnostics: {
+          mode: "client",
+          pollCount: 0,
+          elapsedMs: 0,
+          timeoutMs: normalizeInteger(options.timeoutMs, this.config.waitTimeoutMs, 0, 3600000),
+          terminal: normalized.terminal,
+        },
+      };
     }
 
     const startedAt = Date.now();
     const timeoutMs = normalizeInteger(options.timeoutMs, this.config.waitTimeoutMs, 0, 3600000);
-    const pollIntervalMs = normalizeInteger(options.pollIntervalMs, this.config.pollIntervalMs, 250, 30000);
+    const initialPollIntervalMs = normalizeInteger(options.pollIntervalMs, this.config.pollIntervalMs, 250, 30000);
+    const maxPollIntervalMs = Math.max(
+      initialPollIntervalMs,
+      normalizeInteger(options.pollMaxIntervalMs, this.config.pollMaxIntervalMs, 250, 60000),
+    );
+    const backoffFactor = Math.min(5, Math.max(1, Number(options.pollBackoffFactor ?? this.config.pollBackoffFactor) || 1));
+    let pollIntervalMs = initialPollIntervalMs;
+    let pollCount = 0;
+    let lastJob = normalizeAuthorityJobRecord(null);
     while (true) {
       throwIfAborted(options.signal);
       const job = await this.get(id, options);
-      if (job.terminal) return job;
-      if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
-        return { ...job, status: "timeout", terminal: true, success: false, error: "wait timeout" };
+      pollCount += 1;
+      lastJob = job;
+      const elapsedMs = Date.now() - startedAt;
+      if (job.terminal) {
+        return {
+          ...job,
+          waitDiagnostics: {
+            mode: "poll",
+            pollCount,
+            elapsedMs,
+            timeoutMs,
+            pollIntervalMs: initialPollIntervalMs,
+            maxPollIntervalMs,
+            backoffFactor,
+            terminal: true,
+          },
+        };
       }
-      await sleep(pollIntervalMs, options.signal);
+      if (timeoutMs > 0 && elapsedMs >= timeoutMs) {
+        return {
+          ...job,
+          status: "timeout",
+          terminal: true,
+          success: false,
+          error: "wait timeout",
+          waitDiagnostics: {
+            mode: "poll",
+            pollCount,
+            elapsedMs,
+            timeoutMs,
+            pollIntervalMs: initialPollIntervalMs,
+            maxPollIntervalMs,
+            backoffFactor,
+            terminal: false,
+            lastStatus: lastJob.status,
+            lastProgress: lastJob.progress,
+          },
+        };
+      }
+      const remainingMs = timeoutMs > 0 ? Math.max(0, timeoutMs - elapsedMs) : pollIntervalMs;
+      await sleep(timeoutMs > 0 ? Math.min(pollIntervalMs, remainingMs) : pollIntervalMs, options.signal);
+      pollIntervalMs = Math.min(maxPollIntervalMs, Math.max(initialPollIntervalMs, Math.ceil(pollIntervalMs * backoffFactor)));
     }
   }
 

@@ -135,6 +135,9 @@ assert.equal(submitted.idempotencyKey, idempotencyKey);
 const completed = await adapter.waitForCompletion(submitted.id, { timeoutMs: 1000 });
 assert.equal(completed.status, "completed");
 assert.equal(completed.success, true);
+assert.equal(completed.waitDiagnostics.mode, "poll");
+assert.equal(completed.waitDiagnostics.pollCount, 1);
+assert.equal(completed.waitDiagnostics.terminal, true);
 
 const page = await adapter.listPage({ limit: 10 });
 assert.equal(page.jobs.length, 1);
@@ -309,6 +312,36 @@ const timedOutJob = await trackAuthorityJobUntilTerminal({
 assert.equal(timedOutJob.status, "timeout");
 assert.equal(timedOutJob.terminal, true);
 assert.equal(timedOutJob.success, false);
+
+let adapterTimeoutPolls = 0;
+const timeoutAdapter = createAuthorityJobAdapter(
+  {
+    authorityBaseUrl: "/api/plugins/authority",
+    authorityJobPollIntervalMs: 1,
+    authorityJobPollMaxIntervalMs: 2,
+    authorityJobPollBackoffFactor: 2,
+  },
+  {
+    jobClient: {
+      async get(payload = {}) {
+        adapterTimeoutPolls += 1;
+        return {
+          job: {
+            id: payload.jobId,
+            status: "running",
+            progress: 0.4,
+          },
+        };
+      },
+    },
+  },
+);
+const adapterTimedOutJob = await timeoutAdapter.waitForCompletion("job-wait-timeout", { timeoutMs: 1 });
+assert.equal(adapterTimedOutJob.status, "timeout");
+assert.equal(adapterTimedOutJob.waitDiagnostics.mode, "poll");
+assert.equal(adapterTimedOutJob.waitDiagnostics.pollCount >= 1, true);
+assert.equal(adapterTimedOutJob.waitDiagnostics.lastStatus, "running");
+assert.equal(adapterTimeoutPolls >= 1, true);
 
 const streamingClient = {
   async streamJob(payload) {

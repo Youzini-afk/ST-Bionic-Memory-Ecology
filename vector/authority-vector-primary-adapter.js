@@ -11,6 +11,8 @@ export const AUTHORITY_VECTOR_SOURCE = "authority-trivium";
 const DEFAULT_AUTHORITY_TRIVIUM_DATABASE = "st_bme_vectors";
 const DEFAULT_AUTHORITY_VECTOR_CHUNK_SIZE = 1000;
 const MAX_AUTHORITY_VECTOR_CHUNK_SIZE = 2000;
+const DEFAULT_AUTHORITY_PURGE_PAGE_SIZE = 200;
+const DEFAULT_AUTHORITY_PURGE_MAX_PAGES = 1000;
 const DEFAULT_AUTHORITY_EMBEDDING_BACKEND_SOURCE = "openai";
 
 function clampInteger(value, fallback, min, max) {
@@ -21,6 +23,17 @@ function clampInteger(value, fallback, min, max) {
 
 function toArray(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function nowMs() {
+  if (typeof performance?.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function roundMs(value) {
+  return Math.round((Number(value) || 0) * 10) / 10;
 }
 
 function clonePlain(value, fallbackValue = null) {
@@ -54,6 +67,26 @@ function normalizePositiveInteger(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.floor(parsed);
+}
+
+function estimateJsonBytes(value = null) {
+  try {
+    const text = JSON.stringify(value ?? null);
+    if (typeof TextEncoder === "function") {
+      return new TextEncoder().encode(text).length;
+    }
+    return text.length;
+  } catch {
+    return 0;
+  }
+}
+
+function isPlainObject(value = null) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function hasPlainKeys(value = null) {
+  return isPlainObject(value) && Object.keys(value).length > 0;
 }
 
 function normalizeOpenAICompatibleBaseUrl(value) {
@@ -329,6 +362,18 @@ export function normalizeAuthorityVectorConfig(settings = {}, overrides = {}) {
       1,
       MAX_AUTHORITY_VECTOR_CHUNK_SIZE,
     ),
+    purgePageSize: clampInteger(
+      source.authorityTriviumPurgePageSize ?? source.authorityVectorPurgePageSize,
+      DEFAULT_AUTHORITY_PURGE_PAGE_SIZE,
+      1,
+      1000,
+    ),
+    purgeMaxPages: clampInteger(
+      source.authorityTriviumPurgeMaxPages ?? source.authorityVectorPurgeMaxPages,
+      DEFAULT_AUTHORITY_PURGE_MAX_PAGES,
+      1,
+      100000,
+    ),
     timeoutMs: Math.max(0, Number(source.timeoutMs || 0) || 0),
     failOpen: source.authorityVectorFailOpen !== false && source.failOpen !== false,
     ...overrides,
@@ -347,6 +392,8 @@ export class AuthorityTriviumHttpClient {
       dtype: String(options.dtype || "").trim(),
       syncMode: String(options.syncMode || "").trim(),
       storageMode: String(options.storageMode || "").trim(),
+      purgePageSize: clampInteger(options.purgePageSize, DEFAULT_AUTHORITY_PURGE_PAGE_SIZE, 1, 1000),
+      purgeMaxPages: clampInteger(options.purgeMaxPages, DEFAULT_AUTHORITY_PURGE_MAX_PAGES, 1, 100000),
     };
     this.http = new AuthorityHttpClient({
       ...options,
@@ -386,15 +433,34 @@ export class AuthorityTriviumHttpClient {
   async purge(payload = {}) {
     const namespace = getNamespace(payload);
     const openOptions = this.buildOpenOptions(payload);
+    const pageSize = clampInteger(
+      payload.pageSize ?? payload.limit ?? payload.purgePageSize ?? this.config.purgePageSize,
+      DEFAULT_AUTHORITY_PURGE_PAGE_SIZE,
+      1,
+      1000,
+    );
+    const maxPages = clampInteger(
+      payload.maxPages ?? payload.purgeMaxPages ?? this.config.purgeMaxPages,
+      DEFAULT_AUTHORITY_PURGE_MAX_PAGES,
+      1,
+      100000,
+    );
+    const startedAt = nowMs();
     let cursor = "";
     let deleted = 0;
     let scanned = 0;
-    for (let pageIndex = 0; pageIndex < 100; pageIndex++) {
+    let pages = 0;
+    let truncated = false;
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex++) {
       const page = await this.requestV06("/trivium/list-mappings", {
         ...openOptions,
         namespace,
-        page: { cursor, limit: 200 },
+        page: {
+          ...(cursor ? { cursor } : {}),
+          limit: pageSize,
+        },
       });
+      pages += 1;
       const mappings = toArray(page?.mappings);
       if (!mappings.length && !page?.page?.hasMore) break;
       scanned += mappings.length;
@@ -411,8 +477,28 @@ export class AuthorityTriviumHttpClient {
       if (!page?.page?.hasMore) break;
       cursor = String(page?.page?.nextCursor || "");
       if (!cursor) break;
+      if (pageIndex === maxPages - 1) truncated = true;
     }
-    return { ok: true, scanned, deleted };
+    return {
+      ok: !truncated,
+      scanned,
+      deleted,
+      pages,
+      truncated,
+      nextCursor: truncated ? cursor : "",
+      diagnostics: {
+        operation: "purge",
+        namespace,
+        pageSize,
+        maxPages,
+        pages,
+        scanned,
+        deleted,
+        truncated,
+        nextCursor: truncated ? cursor : "",
+        totalMs: roundMs(nowMs() - startedAt),
+      },
+    };
   }
 
   async bulkUpsert(payload = {}) {
@@ -506,12 +592,21 @@ export class AuthorityTriviumHttpClient {
 
   async filterWhere(payload = {}) {
     const namespace = getNamespace(payload);
+    const filters = payload.filters || payload.filter || payload.where || null;
+    const payloadFilter = payload.payloadFilter || filters;
+    const candidateIds = toArray(payload.candidateIds).map(normalizeRecordId).filter(Boolean);
+    const query = String(payload.query || payload.searchText || "").trim();
     const result = await this.requestV06("/trivium/list-mappings", {
       ...this.buildOpenOptions(payload),
       namespace,
       page: {
+        ...(payload.cursor ? { cursor: String(payload.cursor) } : {}),
         limit: Number(payload.limit || payload.topK || payload.pageSize || 100) || 100,
       },
+      ...(hasPlainKeys(filters) ? { filters, where: filters } : {}),
+      ...(hasPlainKeys(payloadFilter) ? { payloadFilter } : {}),
+      ...(candidateIds.length ? { candidateIds } : {}),
+      ...(query ? { query, searchText: query } : {}),
     });
     return { items: toArray(result?.mappings) };
   }
@@ -598,21 +693,44 @@ export async function purgeAuthorityTriviumNamespace(config = {}, options = {}) 
     namespace: options.namespace,
     collectionId: options.collectionId,
     chatId: options.chatId,
+    purgePageSize: options.purgePageSize,
+    purgeMaxPages: options.purgeMaxPages,
   });
 }
 
 export async function deleteAuthorityTriviumNodes(config = {}, nodeIds = [], options = {}) {
   const ids = toArray(nodeIds).map(normalizeRecordId).filter(Boolean);
-  if (!ids.length) return { deleted: 0 };
+  if (!ids.length) {
+    return {
+      deleted: 0,
+      diagnostics: {
+        operation: "deleteMany",
+        requested: 0,
+        deleted: 0,
+        totalMs: 0,
+      },
+    };
+  }
   throwIfAborted(options.signal);
   const client = createAuthorityTriviumClient(config, options);
-  return await callClient(client, ["deleteMany", "deleteNodes"], "deleteMany", {
+  const startedAt = nowMs();
+  const result = await callClient(client, ["deleteMany", "deleteNodes"], "deleteMany", {
     namespace: options.namespace,
     collectionId: options.collectionId,
     chatId: options.chatId,
     ids,
     externalIds: ids,
   });
+  return {
+    ...result,
+    deleted: Number(result?.deleted ?? result?.successCount ?? ids.length) || 0,
+    diagnostics: {
+      operation: "deleteMany",
+      requested: ids.length,
+      deleted: Number(result?.deleted ?? result?.successCount ?? ids.length) || 0,
+      totalMs: roundMs(nowMs() - startedAt),
+    },
+  };
 }
 
 export async function filterAuthorityTriviumNodes(config = {}, options = {}) {
@@ -642,37 +760,122 @@ export async function filterAuthorityTriviumNodes(config = {}, options = {}) {
 
 export async function upsertAuthorityTriviumEntries(graph, config = {}, entries = [], options = {}) {
   const items = buildAuthorityVectorItems(graph, entries, options);
-  if (!items.length) return { upserted: 0 };
+  if (!items.length) {
+    return {
+      upserted: 0,
+      diagnostics: {
+        operation: "bulkUpsert",
+        totalItems: 0,
+        chunkSize: 0,
+        chunks: [],
+        totalBytes: 0,
+        totalMs: 0,
+      },
+    };
+  }
   throwIfAborted(options.signal);
   const client = createAuthorityTriviumClient(config, options);
   const chunkSize = clampInteger(config.chunkSize, DEFAULT_AUTHORITY_VECTOR_CHUNK_SIZE, 1, MAX_AUTHORITY_VECTOR_CHUNK_SIZE);
   let upserted = 0;
+  let totalBytes = 0;
+  const chunks = [];
+  const startedAt = nowMs();
   for (let index = 0; index < items.length; index += chunkSize) {
     throwIfAborted(options.signal);
     const chunk = items.slice(index, index + chunkSize);
-    await callClient(client, ["bulkUpsert", "upsertMany", "upsert"], "bulkUpsert", {
-      namespace: options.namespace,
-      collectionId: options.collectionId,
-      chatId: options.chatId,
-      items: chunk,
-    });
-    upserted += chunk.length;
+    const chunkStartedAt = nowMs();
+    const estimatedBytes = estimateJsonBytes(chunk);
+    totalBytes += estimatedBytes;
+    try {
+      const result = await callClient(client, ["bulkUpsert", "upsertMany", "upsert"], "bulkUpsert", {
+        namespace: options.namespace,
+        collectionId: options.collectionId,
+        chatId: options.chatId,
+        items: chunk,
+      });
+      const successCount = Number(result?.successCount ?? result?.upserted ?? chunk.length) || chunk.length;
+      upserted += successCount;
+      chunks.push({
+        index: chunks.length,
+        offset: index,
+        itemCount: chunk.length,
+        upserted: successCount,
+        vectorDim: normalizeVector(chunk[0]?.vector || chunk[0]?.embedding).length,
+        estimatedBytes,
+        durationMs: roundMs(nowMs() - chunkStartedAt),
+        ok: true,
+      });
+    } catch (error) {
+      chunks.push({
+        index: chunks.length,
+        offset: index,
+        itemCount: chunk.length,
+        upserted: 0,
+        vectorDim: normalizeVector(chunk[0]?.vector || chunk[0]?.embedding).length,
+        estimatedBytes,
+        durationMs: roundMs(nowMs() - chunkStartedAt),
+        ok: false,
+        error: error?.message || String(error),
+      });
+      error.authorityDiagnostics = {
+        operation: "bulkUpsert",
+        totalItems: items.length,
+        chunkSize,
+        chunks,
+        totalBytes,
+        totalMs: roundMs(nowMs() - startedAt),
+      };
+      throw error;
+    }
   }
-  return { upserted };
+  return {
+    upserted,
+    diagnostics: {
+      operation: "bulkUpsert",
+      totalItems: items.length,
+      chunkSize,
+      chunks,
+      totalBytes,
+      totalMs: roundMs(nowMs() - startedAt),
+    },
+  };
 }
 
 export async function syncAuthorityTriviumLinks(graph, config = {}, options = {}) {
   const links = buildAuthorityLinkItems(graph, options);
-  if (!links.length) return { linked: 0 };
+  if (!links.length) {
+    return {
+      linked: 0,
+      diagnostics: {
+        operation: "linkMany",
+        totalItems: 0,
+        estimatedBytes: 0,
+        totalMs: 0,
+      },
+    };
+  }
   throwIfAborted(options.signal);
   const client = createAuthorityTriviumClient(config, options);
-  await callClient(client, ["linkMany", "upsertLinks"], "linkMany", {
+  const startedAt = nowMs();
+  const estimatedBytes = estimateJsonBytes(links);
+  const result = await callClient(client, ["linkMany", "upsertLinks"], "linkMany", {
     namespace: options.namespace,
     collectionId: options.collectionId,
     chatId: options.chatId,
     links,
   });
-  return { linked: links.length };
+  const linked = Number(result?.linked ?? result?.successCount ?? links.length) || links.length;
+  return {
+    ...result,
+    linked,
+    diagnostics: {
+      operation: "linkMany",
+      totalItems: links.length,
+      linked,
+      estimatedBytes,
+      totalMs: roundMs(nowMs() - startedAt),
+    },
+  };
 }
 
 export async function queryAuthorityTriviumNeighbors(config = {}, nodeIds = [], options = {}) {
