@@ -145,5 +145,6 @@ assert.equal(auditDrift.summary.level, "warning");
 assert.ok(auditDrift.issues.some((issue) => issue.code === "sql-runtime-revision-drift"));
 assert.ok(auditDrift.issues.some((issue) => issue.code === "vector-dirty"));
 assert.ok(auditDrift.actions.includes("rebuild-authority-trivium"));
+assert.ok(auditDrift.actions.includes("write-authority-checkpoint"));
 
 console.log("authority-consistency tests passed");

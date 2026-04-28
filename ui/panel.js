@@ -3248,12 +3248,26 @@ function _refreshTaskPersistence() {
     ["诊断包时间", authorityBundleUpdatedLabel],
     ["诊断包原因", ps.authorityDiagnosticsBundleReason || "—"],
   ];
+  const authorityAuditActions = Array.isArray(ps.authorityConsistencyAudit?.actions)
+    ? ps.authorityConsistencyAudit.actions.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const showAuthorityCheckpointWriteAction =
+    authorityAuditActions.includes("write-authority-checkpoint") ||
+    (!ps.authorityBlobCheckpointPath && ps.authorityBlobReady);
+  const showAuthorityTriviumRebuildAction =
+    authorityAuditActions.includes("rebuild-authority-trivium");
   const authorityActionButtons = [
     typeof _actionHandlers.runAuthorityConsistencyAudit === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="audit">执行 Authority 审计</button>`
       : "",
+    showAuthorityCheckpointWriteAction && typeof _actionHandlers.writeAuthorityCheckpoint === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="checkpoint">写入当前 Checkpoint</button>`
+      : "",
     typeof _actionHandlers.restoreAuthorityCheckpoint === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="restore">从 Checkpoint 恢复</button>`
+      : "",
+    showAuthorityTriviumRebuildAction && typeof _actionHandlers.rebuildVectorIndex === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="rebuild-trivium">重建 Authority Trivium</button>`
       : "",
     typeof _actionHandlers.captureAuthorityPerformanceBaseline === "function"
       ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="baseline">捕获 Perf Baseline</button>`
@@ -3321,6 +3335,15 @@ function _refreshTaskPersistence() {
           } else {
             toastr.warning(`Authority 审计失败：${result?.error || "unknown"}`, "ST-BME");
           }
+        } else if (action === "checkpoint") {
+          if (typeof _actionHandlers.writeAuthorityCheckpoint !== "function") return;
+          toastr.info("Authority Checkpoint 写入中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.writeAuthorityCheckpoint();
+          if (result?.success) {
+            toastr.success(`Authority Checkpoint 已写入：rev ${Number(result?.result?.checkpointRevision || result?.result?.revision || 0) || "?"}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Checkpoint 写入失败：${result?.error || "unknown"}`, "ST-BME");
+          }
         } else if (action === "restore") {
           if (typeof _actionHandlers.restoreAuthorityCheckpoint !== "function") return;
           toastr.info("Authority Checkpoint 恢复中…", "ST-BME", { timeOut: 2000 });
@@ -3330,6 +3353,10 @@ function _refreshTaskPersistence() {
           } else {
             toastr.warning(`Authority Checkpoint 恢复失败：${result?.error || "unknown"}`, "ST-BME");
           }
+        } else if (action === "rebuild-trivium") {
+          if (typeof _actionHandlers.rebuildVectorIndex !== "function") return;
+          await _actionHandlers.rebuildVectorIndex();
+          return;
         } else if (action === "baseline") {
           if (typeof _actionHandlers.captureAuthorityPerformanceBaseline !== "function") return;
           const result = await _actionHandlers.captureAuthorityPerformanceBaseline();
@@ -3349,6 +3376,10 @@ function _refreshTaskPersistence() {
         toastr.error(
           action === "restore"
             ? `Authority Checkpoint 恢复失败: ${error?.message || error}`
+            : action === "checkpoint"
+              ? `Authority Checkpoint 写入失败: ${error?.message || error}`
+            : action === "rebuild-trivium"
+              ? `Authority Trivium 重建失败: ${error?.message || error}`
             : action === "baseline"
               ? `Authority Perf Baseline 捕获失败: ${error?.message || error}`
             : `Authority 审计失败: ${error?.message || error}`,

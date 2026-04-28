@@ -2840,6 +2840,96 @@ async function restoreAuthorityCheckpointFromBlob(options = {}) {
   }
 }
 
+async function writeAuthorityCheckpointFromCurrentGraph(options = {}) {
+  const settings = getSettings();
+  const { capability } = getAuthorityRuntimeSnapshot(settings);
+  const updatedAt = new Date().toISOString();
+  const chatId = normalizeChatIdCandidate(
+    options.chatId || getCurrentChatId() || graphPersistenceState.chatId || currentGraph?.chatId,
+  );
+  if (!chatId) {
+    return {
+      success: false,
+      error: "missing-chat-id",
+    };
+  }
+  if (!capability.blobReady || !shouldUseAuthorityBlobCheckpoint()) {
+    return {
+      success: false,
+      error: "Authority Blob unavailable",
+    };
+  }
+
+  ensureCurrentGraphRuntimeState();
+  if (!currentGraph) {
+    return {
+      success: false,
+      error: "Authority runtime graph unavailable",
+    };
+  }
+
+  const revision = Math.max(
+    1,
+    Number(options.revision || 0),
+    Number(currentGraph?.meta?.revision || 0),
+    Number(getGraphPersistedRevision(currentGraph) || 0),
+    Number(graphPersistenceState.revision || 0),
+  );
+  const integrity =
+    normalizeChatIdCandidate(options.integrity) ||
+    normalizeChatIdCandidate(getGraphPersistenceMeta(currentGraph)?.integrity) ||
+    getChatMetadataIntegrity(getContext()) ||
+    graphPersistenceState.metadataIntegrity;
+  const reason = String(options.reason || "manual-authority-checkpoint");
+  const checkpoint = buildLukerGraphCheckpointV2(currentGraph, {
+    revision,
+    chatId,
+    integrity,
+    reason,
+    storageTier: "authority-sql-primary",
+    persistedAt: updatedAt,
+  });
+  if (!checkpoint) {
+    return {
+      success: false,
+      error: "Authority checkpoint payload unavailable",
+    };
+  }
+
+  const writeResult = await writeAuthorityLukerCheckpointBlob(checkpoint, {
+    chatId,
+    reason,
+    signal: options.signal,
+  });
+  if (!writeResult?.ok) {
+    return {
+      success: false,
+      error:
+        writeResult?.error?.message ||
+        writeResult?.reason ||
+        "authority-blob-checkpoint-write-failed",
+    };
+  }
+
+  const auditResult = await runAuthorityConsistencyAudit({
+    chatId,
+    collectionId:
+      normalizeChatIdCandidate(options.collectionId) ||
+      normalizeChatIdCandidate(currentGraph?.vectorIndexState?.collectionId) ||
+      buildVectorCollectionId(chatId),
+  }).catch(() => null);
+  return {
+    success: true,
+    result: {
+      path: writeResult.path,
+      revision,
+      checkpointRevision: Number(checkpoint.revision || revision || 0),
+      auditSummary: auditResult?.audit?.summary || null,
+      auditActions: auditResult?.audit?.actions || [],
+    },
+  };
+}
+
 async function submitAuthorityVectorRebuildJob({
   config = null,
   range = null,
@@ -21404,6 +21494,12 @@ async function onRunAuthorityConsistencyAudit() {
   });
 }
 
+async function onWriteAuthorityCheckpoint() {
+  return await writeAuthorityCheckpointFromCurrentGraph({
+    reason: "panel-authority-checkpoint-write",
+  });
+}
+
 async function onRestoreAuthorityCheckpoint() {
   return await restoreAuthorityCheckpointFromBlob({
     reason: "panel-authority-checkpoint-restore",
@@ -21996,6 +22092,7 @@ async function onCompactLukerSidecar() {
       requeueAuthorityJob: async (jobId) => await requeueAuthorityJob(jobId),
       refreshAuthorityJobs: onRefreshAuthorityJobs,
       runAuthorityConsistencyAudit: onRunAuthorityConsistencyAudit,
+      writeAuthorityCheckpoint: onWriteAuthorityCheckpoint,
       restoreAuthorityCheckpoint: onRestoreAuthorityCheckpoint,
       captureAuthorityPerformanceBaseline: onCaptureAuthorityPerformanceBaseline,
       reembedDirect: onReembedDirect,
