@@ -3,6 +3,7 @@ import {
   MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
   PROCESSED_MESSAGE_HASH_VERSION,
 } from "../runtime/runtime-state.js";
+import { createAuthorityBlobAdapter } from "../maintenance/authority-blob-adapter.js";
 
 const BME_SYNC_FILE_PREFIX = "ST-BME_sync_";
 const BME_SYNC_FILE_SUFFIX = ".json";
@@ -336,6 +337,454 @@ function getFetch(options = {}) {
   return fetchImpl;
 }
 
+function normalizeRemoteFileName(fileName = "") {
+  const normalized = String(fileName ?? "")
+    .trim()
+    .replace(/^\/+/, "");
+  if (!normalized || /[\\/]/.test(normalized)) return "";
+  return normalized;
+}
+
+function normalizeRemoteServerPath(pathOrFilename = "", fallbackFilename = "") {
+  const raw = String(pathOrFilename || fallbackFilename || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^authority:\/\/private\//i, "")
+    .replace(/^\/+/, "")
+    .split("?")[0];
+  if (!raw) return "";
+  if (raw.startsWith("user/files/")) {
+    const fileName = normalizeRemoteFileName(raw.slice("user/files/".length));
+    return fileName ? `user/files/${fileName}` : "";
+  }
+  const fileName = normalizeRemoteFileName(raw) || normalizeRemoteFileName(fallbackFilename);
+  return fileName ? `user/files/${fileName}` : "";
+}
+
+function buildRemoteFileUrl(pathOrFilename = "", fallbackFilename = "") {
+  const serverPath = normalizeRemoteServerPath(pathOrFilename, fallbackFilename);
+  if (!serverPath) return "";
+  const fileName = normalizeRemoteFileName(serverPath.slice("user/files/".length));
+  return fileName ? `/user/files/${encodeURIComponent(fileName)}` : `/${serverPath}`;
+}
+
+function resolveRemoteFileName(pathOrFilename = "", fallbackFilename = "") {
+  const serverPath = normalizeRemoteServerPath(pathOrFilename, fallbackFilename);
+  return normalizeRemoteFileName(serverPath.slice("user/files/".length));
+}
+
+function parseSerializedJsonPayload(payload = "") {
+  try {
+    return {
+      ok: true,
+      value: JSON.parse(String(payload ?? "")),
+    };
+  } catch {
+    return {
+      ok: false,
+      value: null,
+    };
+  }
+}
+
+function shouldUseAuthorityBlobFiles(options = {}) {
+  if (options.authorityBlobEnabled === false) return false;
+  if (options.authorityBlobAdapter || options.authorityBlobClient || options.blobClient) return true;
+  return options.authorityBlobEnabled === true;
+}
+
+function getAuthorityBlobAdapter(options = {}) {
+  if (!shouldUseAuthorityBlobFiles(options)) return null;
+  if (options.authorityBlobAdapter) return options.authorityBlobAdapter;
+  return createAuthorityBlobAdapter(options.authorityBlobConfig || options.authoritySettings || {}, {
+    blobClient: options.authorityBlobClient || options.blobClient,
+    fetchImpl: options.fetch,
+    headerProvider: () => getRequestHeadersSafe(options),
+  });
+}
+
+function readAuthorityBlobFailOpen(options = {}) {
+  return options.authorityBlobFailOpen !== false;
+}
+
+function recordAuthorityBlobFileEvent(options = {}, event = {}) {
+  if (typeof options.onAuthorityBlobEvent !== "function") return;
+  try {
+    options.onAuthorityBlobEvent({
+      ...event,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch {
+  }
+}
+
+async function readAuthorityBlobJsonFile(pathOrFilename = "", options = {}) {
+  const adapter = getAuthorityBlobAdapter(options);
+  const path = normalizeRemoteServerPath(pathOrFilename);
+  if (!adapter || !path) {
+    return {
+      available: false,
+      exists: false,
+      path,
+      payload: null,
+      reason: "authority-blob-disabled",
+    };
+  }
+  const startedAt = readSyncTimingNow();
+  try {
+    const result = await adapter.readJson(path, {
+      signal: options.signal,
+      namespace: options.authorityBlobNamespace,
+    });
+    const elapsedMs = readSyncTimingNow() - startedAt;
+    const exists = result?.exists === true;
+    recordAuthorityBlobFileEvent(options, {
+      action: "read",
+      ok: result?.ok !== false,
+      path,
+      backend: "authority-blob",
+      reason: exists ? "ok" : "not-found",
+      elapsedMs: normalizeSyncTimingMs(elapsedMs),
+    });
+    return {
+      available: true,
+      exists,
+      path: result?.path || path,
+      payload: exists ? result.payload : null,
+      reason: exists ? "ok" : "not-found",
+      timings: {
+        authorityBlobMs: normalizeSyncTimingMs(elapsedMs),
+      },
+    };
+  } catch (error) {
+    const elapsedMs = readSyncTimingNow() - startedAt;
+    recordAuthorityBlobFileEvent(options, {
+      action: "read",
+      ok: false,
+      path,
+      backend: "authority-blob",
+      reason: "authority-blob-error",
+      error: error instanceof Error ? error.message : String(error || ""),
+      elapsedMs: normalizeSyncTimingMs(elapsedMs),
+    });
+    if (!readAuthorityBlobFailOpen(options)) throw error;
+    return {
+      available: true,
+      exists: false,
+      path,
+      payload: null,
+      reason: "authority-blob-error",
+      error,
+      timings: {
+        authorityBlobMs: normalizeSyncTimingMs(elapsedMs),
+      },
+    };
+  }
+}
+
+async function writeRemoteJsonFile(pathOrFilename = "", serializedPayload = "", options = {}) {
+  const serverPath = normalizeRemoteServerPath(pathOrFilename);
+  const fileName = resolveRemoteFileName(serverPath);
+  if (!serverPath || !fileName) throw new Error("remote filename is required");
+  const adapter = getAuthorityBlobAdapter(options);
+  if (adapter) {
+    const startedAt = readSyncTimingNow();
+    try {
+      const parsedPayload = parseSerializedJsonPayload(serializedPayload);
+      const result = parsedPayload.ok
+        ? await adapter.writeJson(serverPath, parsedPayload.value, {
+            signal: options.signal,
+            namespace: options.authorityBlobNamespace,
+            metadata: {
+              filename: fileName,
+            },
+          })
+        : await adapter.writeText(serverPath, String(serializedPayload ?? ""), {
+            signal: options.signal,
+            namespace: options.authorityBlobNamespace,
+            contentType: "application/json; charset=utf-8",
+            metadata: {
+              filename: fileName,
+            },
+          });
+      const elapsedMs = readSyncTimingNow() - startedAt;
+      if (result?.ok !== false) {
+        recordAuthorityBlobFileEvent(options, {
+          action: "write",
+          ok: true,
+          path: serverPath,
+          backend: "authority-blob",
+          elapsedMs: normalizeSyncTimingMs(elapsedMs),
+        });
+        return {
+          path: `/${serverPath}`,
+          authorityPath: result?.path || serverPath,
+          backend: "authority-blob",
+        };
+      }
+    } catch (error) {
+      const elapsedMs = readSyncTimingNow() - startedAt;
+      recordAuthorityBlobFileEvent(options, {
+        action: "write",
+        ok: false,
+        path: serverPath,
+        backend: "authority-blob",
+        reason: "authority-blob-error",
+        error: error instanceof Error ? error.message : String(error || ""),
+        elapsedMs: normalizeSyncTimingMs(elapsedMs),
+      });
+      if (!readAuthorityBlobFailOpen(options)) throw error;
+    }
+  }
+
+  const fetchImpl = getFetch(options);
+  const response = await fetchImpl("/api/files/upload", {
+    method: "POST",
+    headers: {
+      ...getRequestHeadersSafe(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: fileName,
+      data: encodeBase64Utf8(serializedPayload),
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+
+  const uploadResult = await response.json().catch(() => ({}));
+  return {
+    path: String(uploadResult?.path || `/${serverPath}`),
+    backend: "user-files",
+  };
+}
+
+async function readRemoteJsonFileResult(pathOrFilename = "", options = {}) {
+  const serverPath = normalizeRemoteServerPath(pathOrFilename);
+  const fileName = resolveRemoteFileName(serverPath);
+  if (!serverPath || !fileName) {
+    return {
+      ok: false,
+      status: 404,
+      reason: "remote-file-name-invalid",
+      path: serverPath,
+      filename: fileName,
+      payload: null,
+    };
+  }
+
+  const authorityResult = await readAuthorityBlobJsonFile(serverPath, options);
+  if (authorityResult.exists) {
+    return {
+      ok: true,
+      status: 200,
+      reason: "ok",
+      path: authorityResult.path || serverPath,
+      filename: fileName,
+      payload: authorityResult.payload,
+      backend: "authority-blob",
+      timings: authorityResult.timings || {},
+    };
+  }
+
+  const fetchImpl = getFetch(options);
+  let response;
+  let networkMs = 0;
+  let parseMs = 0;
+  try {
+    const networkStartedAt = readSyncTimingNow();
+    response = await fetchImpl(`${buildRemoteFileUrl(serverPath)}?t=${Date.now()}`, {
+      method: "GET",
+      cache: "no-store",
+    });
+    networkMs = readSyncTimingNow() - networkStartedAt;
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: "network-error",
+      path: serverPath,
+      filename: fileName,
+      payload: null,
+      error,
+      timings: {
+        networkMs: normalizeSyncTimingMs(networkMs),
+        parseMs: 0,
+      },
+    };
+  }
+
+  if (response.status === 404) {
+    return {
+      ok: false,
+      status: 404,
+      reason: "not-found",
+      path: serverPath,
+      filename: fileName,
+      payload: null,
+      timings: {
+        networkMs: normalizeSyncTimingMs(networkMs),
+        parseMs: 0,
+      },
+    };
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    return {
+      ok: false,
+      status: response.status,
+      reason: "http-error",
+      path: serverPath,
+      filename: fileName,
+      payload: null,
+      error: new Error(errorText || `HTTP ${response.status}`),
+      timings: {
+        networkMs: normalizeSyncTimingMs(networkMs),
+        parseMs: 0,
+      },
+    };
+  }
+
+  try {
+    const parseStartedAt = readSyncTimingNow();
+    const payload = await response.json();
+    parseMs = readSyncTimingNow() - parseStartedAt;
+    return {
+      ok: true,
+      status: 200,
+      reason: "ok",
+      path: serverPath,
+      filename: fileName,
+      payload,
+      backend: "user-files",
+      timings: {
+        networkMs: normalizeSyncTimingMs(networkMs),
+        parseMs: normalizeSyncTimingMs(parseMs),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: "invalid-json",
+      path: serverPath,
+      filename: fileName,
+      payload: null,
+      error,
+      timings: {
+        networkMs: normalizeSyncTimingMs(networkMs),
+        parseMs: normalizeSyncTimingMs(parseMs),
+      },
+    };
+  }
+}
+
+async function deleteRemoteJsonFile(pathOrFilename = "", options = {}) {
+  const serverPath = normalizeRemoteServerPath(pathOrFilename);
+  const fileName = resolveRemoteFileName(serverPath);
+  if (!serverPath || !fileName) {
+    return {
+      deleted: false,
+      reason: "remote-file-name-invalid",
+      path: serverPath,
+      filename: fileName,
+    };
+  }
+
+  const adapter = getAuthorityBlobAdapter(options);
+  let authorityDeleted = false;
+  if (adapter) {
+    const startedAt = readSyncTimingNow();
+    try {
+      const result = await adapter.delete(serverPath, {
+        signal: options.signal,
+        namespace: options.authorityBlobNamespace,
+      });
+      const elapsedMs = readSyncTimingNow() - startedAt;
+      authorityDeleted = result?.deleted === true;
+      recordAuthorityBlobFileEvent(options, {
+        action: "delete",
+        ok: result?.ok !== false,
+        path: serverPath,
+        backend: "authority-blob",
+        reason: authorityDeleted ? "ok" : "not-found",
+        elapsedMs: normalizeSyncTimingMs(elapsedMs),
+      });
+      if (authorityDeleted) {
+        try {
+          const fetchImpl = getFetch(options);
+          await fetchImpl("/api/files/delete", {
+            method: "POST",
+            headers: {
+              ...getRequestHeadersSafe(options),
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              path: `/${serverPath}`,
+            }),
+          }).catch(() => null);
+        } catch {
+        }
+        return {
+          deleted: true,
+          path: serverPath,
+          filename: fileName,
+          backend: "authority-blob",
+        };
+      }
+    } catch (error) {
+      const elapsedMs = readSyncTimingNow() - startedAt;
+      recordAuthorityBlobFileEvent(options, {
+        action: "delete",
+        ok: false,
+        path: serverPath,
+        backend: "authority-blob",
+        reason: "authority-blob-error",
+        error: error instanceof Error ? error.message : String(error || ""),
+        elapsedMs: normalizeSyncTimingMs(elapsedMs),
+      });
+      if (!readAuthorityBlobFailOpen(options)) throw error;
+    }
+  }
+
+  const fetchImpl = getFetch(options);
+  const response = await fetchImpl("/api/files/delete", {
+    method: "POST",
+    headers: {
+      ...getRequestHeadersSafe(options),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      path: `/${serverPath}`,
+    }),
+  });
+
+  if (response.status === 404) {
+    return {
+      deleted: false,
+      reason: "not-found",
+      path: serverPath,
+      filename: fileName,
+    };
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => response.statusText);
+    throw new Error(errorText || `HTTP ${response.status}`);
+  }
+
+  return {
+    deleted: true,
+    path: serverPath,
+    filename: fileName,
+    backend: "user-files",
+  };
+}
+
 async function getSafetyDb(chatId, options = {}) {
   if (typeof options.getSafetyDb === "function") {
     return await options.getSafetyDb(chatId);
@@ -347,22 +796,14 @@ async function getSafetyDb(chatId, options = {}) {
 }
 
 async function fetchBackupManifest(options = {}) {
-  const fetchImpl = getFetch(options);
-  const response = await fetchImpl(
-    `/user/files/${BME_BACKUP_MANIFEST_FILENAME}?t=${Date.now()}`,
-    {
-      method: "GET",
-      cache: "no-store",
-    },
-  );
-  if (response.status === 404) {
+  const result = await readRemoteJsonFileResult(BME_BACKUP_MANIFEST_FILENAME, options);
+  if (result.status === 404) {
     return [];
   }
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(errorText || `manifest read failed: HTTP ${response.status}`);
+  if (!result.ok) {
+    throw result.error || new Error(result.reason || "manifest read failed");
   }
-  const rawPayload = await response.json();
+  const rawPayload = result.payload;
   if (!Array.isArray(rawPayload)) {
     throw new Error("backup manifest payload is not an array");
   }
@@ -370,24 +811,8 @@ async function fetchBackupManifest(options = {}) {
 }
 
 async function writeBackupManifest(entries = [], options = {}) {
-  const fetchImpl = getFetch(options);
   const payload = JSON.stringify(entries);
-  const response = await fetchImpl("/api/files/upload", {
-    method: "POST",
-    headers: {
-      ...getRequestHeadersSafe(options),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: BME_BACKUP_MANIFEST_FILENAME,
-      data: encodeBase64Utf8(payload),
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(errorText || `HTTP ${response.status}`);
-  }
+  await writeRemoteJsonFile(BME_BACKUP_MANIFEST_FILENAME, payload, options);
 }
 
 async function upsertBackupManifestEntry(entry, options = {}) {
@@ -523,50 +948,50 @@ async function readBackupEnvelope(chatId, options = {}) {
   const lookupStartedAt = readSyncTimingNow();
   const lookup = await resolveBackupLookupContext(normalizedChatId, options);
   const lookupMs = readSyncTimingNow() - lookupStartedAt;
-  const fetchImpl = getFetch(options);
   const fallbackFilename = buildBackupFilename(normalizedChatId);
   let lastMissingFilename = lookup.candidates[0]?.filename || fallbackFilename;
   let networkMs = 0;
   let parseMs = 0;
+  let authorityBlobMs = 0;
 
   for (const candidate of lookup.candidates) {
     try {
-      const networkStartedAt = readSyncTimingNow();
-      const response = await fetchImpl(
-        `${candidate.serverPath || `/user/files/${encodeURIComponent(candidate.filename)}`}?t=${Date.now()}`,
-        {
-          method: "GET",
-          cache: "no-store",
-        },
+      const result = await readRemoteJsonFileResult(
+        candidate.serverPath || candidate.filename,
+        options,
       );
-      networkMs += readSyncTimingNow() - networkStartedAt;
-      if (response.status === 404) {
+      networkMs += Number(result.timings?.networkMs || 0);
+      parseMs += Number(result.timings?.parseMs || 0);
+      authorityBlobMs += Number(result.timings?.authorityBlobMs || 0);
+      if (result.status === 404) {
         lastMissingFilename = candidate.filename;
         continue;
       }
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => response.statusText);
+      if (!result.ok) {
         return {
           exists: false,
           filename: candidate.filename,
           envelope: null,
           reason: "backup-read-error",
-          error: new Error(errorText || `HTTP ${response.status}`),
-          timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
+          error: result.error || new Error(result.reason || "backup-read-error"),
+          timings: finalizeSyncTimings(
+            { lookupMs, networkMs, parseMs, authorityBlobMs },
+            readStartedAt,
+          ),
         };
       }
 
-      const parseStartedAt = readSyncTimingNow();
-      const payload = await response.json();
-      parseMs += readSyncTimingNow() - parseStartedAt;
-      const envelope = normalizeBackupEnvelope(payload, normalizedChatId);
+      const envelope = normalizeBackupEnvelope(result.payload, normalizedChatId);
       if (!envelope) {
         return {
           exists: false,
           filename: candidate.filename,
           envelope: null,
           reason: "invalid-backup",
-          timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
+          timings: finalizeSyncTimings(
+            { lookupMs, networkMs, parseMs, authorityBlobMs },
+            readStartedAt,
+          ),
         };
       }
       return {
@@ -574,7 +999,10 @@ async function readBackupEnvelope(chatId, options = {}) {
         filename: candidate.filename,
         envelope,
         reason: "ok",
-        timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
+        timings: finalizeSyncTimings(
+          { lookupMs, networkMs, parseMs, authorityBlobMs },
+          readStartedAt,
+        ),
       };
     } catch (error) {
       return {
@@ -583,7 +1011,10 @@ async function readBackupEnvelope(chatId, options = {}) {
         envelope: null,
         reason: "backup-read-error",
         error,
-        timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
+        timings: finalizeSyncTimings(
+          { lookupMs, networkMs, parseMs, authorityBlobMs },
+          readStartedAt,
+        ),
       };
     }
   }
@@ -594,7 +1025,10 @@ async function readBackupEnvelope(chatId, options = {}) {
     envelope: null,
     reason: "not-found",
     manifestError: lookup.manifestError,
-    timings: finalizeSyncTimings({ lookupMs, networkMs, parseMs }, readStartedAt),
+    timings: finalizeSyncTimings(
+      { lookupMs, networkMs, parseMs, authorityBlobMs },
+      readStartedAt,
+    ),
   };
 }
 
@@ -622,40 +1056,22 @@ async function writeBackupEnvelope(envelope, chatId, options = {}) {
   const writeStartedAt = readSyncTimingNow();
   const normalizedChatId = normalizeChatId(chatId);
   const filename = buildBackupFilename(normalizedChatId);
-  const fetchImpl = getFetch(options);
   const serializeStartedAt = readSyncTimingNow();
   const payload = JSON.stringify(envelope);
   const serializeMs = readSyncTimingNow() - serializeStartedAt;
   const uploadStartedAt = readSyncTimingNow();
-  const response = await fetchImpl("/api/files/upload", {
-    method: "POST",
-    headers: {
-      ...getRequestHeadersSafe(options),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: filename,
-      data: encodeBase64Utf8(payload),
-    }),
-  });
+  const uploadResult = await writeRemoteJsonFile(filename, payload, options);
   const uploadMs = readSyncTimingNow() - uploadStartedAt;
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(errorText || `HTTP ${response.status}`);
-  }
-
-  const responseParseStartedAt = readSyncTimingNow();
-  const uploadResult = await response.json().catch(() => ({}));
-  const responseParseMs = readSyncTimingNow() - responseParseStartedAt;
   return {
     filename,
     path: String(uploadResult?.path || `/user/files/${filename}`),
+    backend: String(uploadResult?.backend || ""),
     timings: finalizeSyncTimings(
       {
         serializeMs,
         uploadMs,
-        responseParseMs,
+        responseParseMs: 0,
       },
       writeStartedAt,
     ),
@@ -1890,7 +2306,6 @@ async function readRemoteSnapshot(chatId, options = {}) {
     };
   }
 
-  const fetchImpl = getFetch(options);
   const resolveStartedAt = readSyncTimingNow();
   const candidateFilenames = await resolveSyncFilenameCandidates(
     normalizedChatId,
@@ -1902,20 +2317,15 @@ async function readRemoteSnapshot(chatId, options = {}) {
   let parseMs = 0;
   let chunkReadMs = 0;
   let normalizeMs = 0;
+  let authorityBlobMs = 0;
 
   for (const filename of candidateFilenames) {
-    const cacheBust = `t=${Date.now()}`;
-    const url = `/user/files/${encodeURIComponent(filename)}?${cacheBust}`;
-
-    let response;
-    try {
-      const networkStartedAt = readSyncTimingNow();
-      response = await fetchImpl(url, {
-        method: "GET",
-        cache: "no-store",
-      });
-      networkMs += readSyncTimingNow() - networkStartedAt;
-    } catch (error) {
+    const result = await readRemoteJsonFileResult(filename, options);
+    networkMs += Number(result.timings?.networkMs || 0);
+    parseMs += Number(result.timings?.parseMs || 0);
+    authorityBlobMs += Number(result.timings?.authorityBlobMs || 0);
+    if (result.reason === "network-error") {
+      const error = result.error || new Error("network-error");
       console.warn("[ST-BME] 读取远端同步文件失败:", error);
       return {
         exists: false,
@@ -1924,39 +2334,36 @@ async function readRemoteSnapshot(chatId, options = {}) {
         snapshot: null,
         error,
         timings: finalizeSyncTimings(
-          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
           readStartedAt,
         ),
       };
     }
 
-    if (response.status === 404) {
+    if (result.status === 404) {
       lastNotFoundFilename = filename;
       continue;
     }
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => response.statusText);
-      const error = new Error(errorText || `HTTP ${response.status}`);
+    if (!result.ok) {
+      const error = result.error || new Error(result.reason || "remote-read-error");
       console.warn("[ST-BME] 读取远端同步文件失败:", error);
       return {
         exists: false,
-        status: "http-error",
+        status: result.reason || "http-error",
         filename,
         snapshot: null,
         error,
-        statusCode: response.status,
+        statusCode: result.status,
         timings: finalizeSyncTimings(
-          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
           readStartedAt,
         ),
       };
     }
 
     try {
-      const parseStartedAt = readSyncTimingNow();
-      const remotePayload = await response.json();
-      parseMs += readSyncTimingNow() - parseStartedAt;
+      const remotePayload = result.payload;
       let snapshot = null;
       if (Number(remotePayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
         const manifestResult = await readRemoteSnapshotV2Manifest(
@@ -1982,7 +2389,7 @@ async function readRemoteSnapshot(chatId, options = {}) {
         filename,
         snapshot,
         timings: finalizeSyncTimings(
-          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
           readStartedAt,
         ),
       };
@@ -1995,7 +2402,7 @@ async function readRemoteSnapshot(chatId, options = {}) {
         snapshot: null,
         error,
         timings: finalizeSyncTimings(
-          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+          { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
           readStartedAt,
         ),
       };
@@ -2008,29 +2415,21 @@ async function readRemoteSnapshot(chatId, options = {}) {
     filename: lastNotFoundFilename,
     snapshot: null,
     timings: finalizeSyncTimings(
-      { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs },
+      { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
       readStartedAt,
     ),
   };
 }
 
 async function readRemoteJsonFile(filename, options = {}) {
-  const fetchImpl = getFetch(options);
-  const response = await fetchImpl(
-    `/user/files/${encodeURIComponent(filename)}?t=${Date.now()}`,
-    {
-      method: "GET",
-      cache: "no-store",
-    },
-  );
-  if (response.status === 404) {
+  const result = await readRemoteJsonFileResult(filename, options);
+  if (result.status === 404) {
     throw new Error("remote-chunk-not-found");
   }
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(errorText || `HTTP ${response.status}`);
+  if (!result.ok) {
+    throw result.error || new Error(result.reason || `HTTP ${result.status || "unknown"}`);
   }
-  return await response.json();
+  return result.payload;
 }
 
 async function readRemoteSnapshotV2Manifest(manifest = {}, chatId = "", options = {}) {
@@ -2107,7 +2506,6 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   const normalizedSnapshot = normalizeSyncSnapshot(snapshot, normalizedChatId);
   const filename = await resolveSyncFilename(normalizedChatId, options);
-  const fetchImpl = getFetch(options);
   const envelopeBuildStartedAt = readSyncTimingNow();
   const syncEnvelope = buildRemoteSyncEnvelopeV2(
     normalizedSnapshot,
@@ -2115,10 +2513,6 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     filename,
   );
   const envelopeBuildMs = readSyncTimingNow() - envelopeBuildStartedAt;
-  const requestHeaders = {
-    ...getRequestHeadersSafe(options),
-    "Content-Type": "application/json",
-  };
   let chunkSerializeMs = 0;
   let chunkUploadMs = 0;
   for (const chunk of syncEnvelope.chunks) {
@@ -2126,45 +2520,20 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     const chunkPayload = JSON.stringify(chunk.payload, null, 2);
     chunkSerializeMs += readSyncTimingNow() - serializeStartedAt;
     const uploadStartedAt = readSyncTimingNow();
-    const chunkResponse = await fetchImpl("/api/files/upload", {
-      method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify({
-        name: chunk.filename,
-        data: encodeBase64Utf8(chunkPayload),
-      }),
-    });
+    await writeRemoteJsonFile(chunk.filename, chunkPayload, options);
     chunkUploadMs += readSyncTimingNow() - uploadStartedAt;
-    if (!chunkResponse.ok) {
-      const errorText = await chunkResponse.text().catch(() => chunkResponse.statusText);
-      throw new Error(errorText || `HTTP ${chunkResponse.status}`);
-    }
   }
   const manifestSerializeStartedAt = readSyncTimingNow();
   const manifestPayload = JSON.stringify(syncEnvelope.manifest, null, 2);
   const manifestSerializeMs = readSyncTimingNow() - manifestSerializeStartedAt;
   const manifestUploadStartedAt = readSyncTimingNow();
-  const response = await fetchImpl("/api/files/upload", {
-    method: "POST",
-    headers: requestHeaders,
-    body: JSON.stringify({
-      name: filename,
-      data: encodeBase64Utf8(manifestPayload),
-    }),
-  });
+  const uploadResult = await writeRemoteJsonFile(filename, manifestPayload, options);
   const manifestUploadMs = readSyncTimingNow() - manifestUploadStartedAt;
 
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => response.statusText);
-    throw new Error(errorText || `HTTP ${response.status}`);
-  }
-
-  const responseParseStartedAt = readSyncTimingNow();
-  const uploadResult = await response.json().catch(() => ({}));
-  const responseParseMs = readSyncTimingNow() - responseParseStartedAt;
   return {
     filename,
     path: String(uploadResult?.path || ""),
+    backend: String(uploadResult?.backend || ""),
     payload: syncEnvelope.manifest,
     timings: finalizeSyncTimings(
       {
@@ -2173,7 +2542,7 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
         chunkUploadMs,
         manifestSerializeMs,
         manifestUploadMs,
-        responseParseMs,
+        responseParseMs: 0,
       },
       writeStartedAt,
     ),
@@ -2610,24 +2979,9 @@ export async function deleteServerBackup(chatId, options = {}) {
   const serverPath =
     targetCandidate.serverPath ||
     normalizeSelectedBackupServerPath("", filename);
-  const fetchImpl = getFetch(options);
 
   try {
-    const response = await fetchImpl("/api/files/delete", {
-      method: "POST",
-      headers: {
-        ...getRequestHeadersSafe(options),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        path: serverPath,
-      }),
-    });
-
-    if (!response.ok && response.status !== 404) {
-      const errorText = await response.text().catch(() => response.statusText);
-      throw new Error(errorText || `HTTP ${response.status}`);
-    }
+    const deleteResult = await deleteRemoteJsonFile(serverPath || filename, options);
 
     try {
       const existingEntries =
@@ -2655,6 +3009,7 @@ export async function deleteServerBackup(chatId, options = {}) {
         deleted: true,
         chatId: normalizedChatId,
         filename,
+        remoteDeleted: deleteResult.deleted === true,
         localMetaUpdated,
       };
     } catch (manifestError) {
@@ -3315,7 +3670,6 @@ export async function deleteRemoteSyncFile(chatId, options = {}) {
   }
 
   try {
-    const fetchImpl = getFetch(options);
     const filenames = await resolveSyncFilenameCandidates(
       normalizedChatId,
       options,
@@ -3329,40 +3683,16 @@ export async function deleteRemoteSyncFile(chatId, options = {}) {
           for (const chunk of Array.isArray(manifestPayload?.chunks) ? manifestPayload.chunks : []) {
             const chunkFilename = String(chunk?.filename || "").trim();
             if (!chunkFilename) continue;
-            await fetchImpl("/api/files/delete", {
-              method: "POST",
-              headers: {
-                ...getRequestHeadersSafe(options),
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                path: `/user/files/${chunkFilename}`,
-              }),
-            }).catch(() => null);
+            await deleteRemoteJsonFile(chunkFilename, options).catch(() => null);
           }
         }
       } catch {
         // best-effort chunk cleanup
       }
-      const response = await fetchImpl("/api/files/delete", {
-        method: "POST",
-        headers: {
-          ...getRequestHeadersSafe(options),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          path: `/user/files/${filename}`,
-        }),
-      });
-
-      if (response.status === 404) {
+      const deleteResult = await deleteRemoteJsonFile(filename, options);
+      if (!deleteResult.deleted) {
         lastNotFoundFilename = filename;
         continue;
-      }
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => response.statusText);
-        throw new Error(errorText || `HTTP ${response.status}`);
       }
 
       sanitizedFilenameByChatId.delete(normalizedChatId);
@@ -3370,6 +3700,7 @@ export async function deleteRemoteSyncFile(chatId, options = {}) {
         deleted: true,
         chatId: normalizedChatId,
         filename,
+        backend: String(deleteResult.backend || ""),
       };
     }
 
