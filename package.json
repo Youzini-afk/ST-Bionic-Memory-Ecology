@@ -22,6 +22,7 @@
     "test:indexeddb": "npm run test:indexeddb-persistence && npm run test:indexeddb-sync && npm run test:indexeddb-migration",
     "test:persistence-matrix": "npm run test:p0 && npm run test:runtime-history && npm run test:graph-persistence && npm run test:indexeddb",
     "test:stable": "node scripts/run-test-suite.mjs",
+    "test:authority:e2e": "node tests/e2e/authority-server-primary.mjs",
     "test:all": "npm run test:stable",
     "check": "node scripts/check-syntax.mjs"
   },
