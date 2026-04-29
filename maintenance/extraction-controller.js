@@ -909,6 +909,35 @@ export async function executeExtractionBatchController(
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
   batchStatusRef.historyAdvanceAllowed = persistence.accepted === true;
+  let backgroundMaintenanceQueue = null;
+  if (
+    persistence.accepted === true &&
+    Array.isArray(effects?.backgroundMaintenance) &&
+    effects.backgroundMaintenance.length > 0 &&
+    typeof runtime.scheduleBackgroundMaintenancePostProcess === "function"
+  ) {
+    backgroundMaintenanceQueue = runtime.scheduleBackgroundMaintenancePostProcess(
+      effects.backgroundMaintenance,
+      settings,
+    );
+    batchStatusRef.backgroundMaintenanceState =
+      backgroundMaintenanceQueue?.queued === true ? "queued" : "queue-failed";
+    batchStatusRef.backgroundMaintenanceQueue =
+      cloneSerializable(backgroundMaintenanceQueue, backgroundMaintenanceQueue);
+    if (backgroundMaintenanceQueue?.queued !== true) {
+      runtime.setBatchStageOutcome(
+        batchStatusRef,
+        "finalize",
+        "partial",
+        `后台维护入队失败: ${backgroundMaintenanceQueue?.reason || "queue-failed"}`,
+      );
+    }
+  } else if (
+    Array.isArray(effects?.backgroundMaintenance) &&
+    effects.backgroundMaintenance.length > 0
+  ) {
+    batchStatusRef.backgroundMaintenanceState = "blocked-by-persistence";
+  }
   let backgroundVectorSyncQueue = null;
   if (
     persistence.accepted === true &&
@@ -985,6 +1014,7 @@ export async function executeExtractionBatchController(
     effects: {
       ...(effects || {}),
       persistResult,
+      backgroundMaintenanceQueue,
       backgroundVectorSyncQueue,
     },
     batchStatus: finalizedBatchStatus,

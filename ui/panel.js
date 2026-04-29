@@ -4346,6 +4346,7 @@ function _refreshDashboard() {
     _setText("bme-status-recovery", "等待聊天图谱元数据加载");
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
     _setText("bme-status-last-persist", "等待聊天图谱元数据加载");
+    _setText("bme-status-background-maintenance", "等待聊天图谱元数据加载");
     _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
     _setText("bme-status-authority-job", "等待聊天图谱元数据加载");
     _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
@@ -4425,6 +4426,10 @@ function _refreshDashboard() {
   _setText(
     "bme-status-last-persist",
     _formatDashboardPersistMeta(loadInfo, lastBatchStatus),
+  );
+  _setText(
+    "bme-status-background-maintenance",
+    _formatBackgroundMaintenanceSummary(loadInfo?.backgroundMaintenance, lastBatchStatus),
   );
   _refreshPersistenceRepairUi(loadInfo, lastBatchStatus);
   _setText("bme-status-last-vector", vectorStatus.meta || "尚未执行向量任务");
@@ -13529,6 +13534,39 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   }
 
   return "尚未执行持久化";
+}
+
+function _formatBackgroundMaintenanceSummary(queue = null, batchStatus = null) {
+  const queuedTasks = Array.isArray(batchStatus?.backgroundMaintenanceTasks)
+    ? batchStatus.backgroundMaintenanceTasks
+    : [];
+  const batchState = String(batchStatus?.backgroundMaintenanceState || "").trim();
+  if (queue && typeof queue === "object") {
+    const state = String(queue.state || "idle").trim() || "idle";
+    const queued = Math.max(0, Math.floor(Number(queue.queued || 0)) || 0);
+    const completed = Math.max(0, Math.floor(Number(queue.completed || 0)) || 0);
+    const failed = Math.max(0, Math.floor(Number(queue.failed || 0)) || 0);
+    const dropped = Math.max(0, Math.floor(Number(queue.dropped || 0)) || 0);
+    const activeName = String(queue.activeName || "").trim();
+    const parts = [
+      state,
+      queued > 0 ? `queued ${queued}` : "",
+      activeName ? `active ${activeName}` : "",
+      completed > 0 ? `done ${completed}` : "",
+      failed > 0 ? `failed ${failed}` : "",
+      dropped > 0 ? `dropped ${dropped}` : "",
+    ].filter(Boolean);
+    return parts.join(" · ") || "idle";
+  }
+  if (batchState) {
+    return [
+      batchState,
+      queuedTasks.length > 0
+        ? queuedTasks.map((task) => String(task.type || "").trim()).filter(Boolean).join(" / ")
+        : "",
+    ].filter(Boolean).join(" · ");
+  }
+  return "暂无后台维护任务";
 }
 
 function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = null) {
