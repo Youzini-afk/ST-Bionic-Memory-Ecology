@@ -59,6 +59,10 @@ import {
   getVectorIndexStats,
 } from "../vector/vector-index.js";
 import { buildAuthorityConsistencyRepairPlan } from "../maintenance/authority-consistency.js";
+import {
+  getMaintenanceExecutionModeLevel,
+  normalizeMaintenanceExecutionMode,
+} from "../runtime/concurrency.js";
 
 let defaultPromptCache = null;
 
@@ -4453,6 +4457,53 @@ function _getSelectedGraphNode(graph = _getGraph?.()) {
   return graph.nodes.find((node) => String(node?.id || "") === nodeId) || null;
 }
 
+function _getMaintenanceExecutionModeUiMeta(modeValue = "strict") {
+  const mode = normalizeMaintenanceExecutionMode(modeValue);
+  switch (mode) {
+    case "balanced":
+      return {
+        mode,
+        title: "2 均衡加速",
+        desc: "2 均衡加速：提取主链同步，只读查询限流并发，维护任务逐步后台化。",
+      };
+    case "fast":
+      return {
+        mode,
+        title: "3 快速后台",
+        desc: "3 快速后台：核心写入优先完成，其余维护后台最终一致。",
+      };
+    case "strict":
+    default:
+      return {
+        mode: "strict",
+        title: "1 严格串行",
+        desc: "1 严格串行：全部同步执行，稳定优先。",
+      };
+  }
+}
+
+function _refreshMaintenanceExecutionModeUi(settings = _getSettings?.() || {}) {
+  const meta = _getMaintenanceExecutionModeUiMeta(
+    settings.maintenanceExecutionMode || "strict",
+  );
+  const segmented = document.getElementById("bme-setting-maintenance-execution-mode");
+  const desc = document.getElementById("bme-maintenance-mode-desc");
+  const card = document.getElementById("bme-maintenance-mode-card");
+  const level = getMaintenanceExecutionModeLevel(meta.mode);
+  if (desc) desc.textContent = meta.desc;
+  if (card) {
+    card.dataset.mode = meta.mode;
+    card.title = `${meta.title}；1 严格串行 / 2 均衡加速 / 3 快速后台（最终一致）`;
+  }
+  segmented?.querySelectorAll("button[data-mode]").forEach((button) => {
+    const active =
+      normalizeMaintenanceExecutionMode(button.dataset.mode) === meta.mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active ? `${level} · ${meta.title}` : button.getAttribute("aria-label") || "";
+  });
+}
+
 function _getCognitionOwnerCollection(graph) {
   return typeof listKnowledgeOwners === "function" ? listKnowledgeOwners(graph) : [];
 }
@@ -7344,6 +7395,7 @@ function _refreshConfigTab() {
     "bme-setting-extract-auto-enabled",
     settings.extractAutoEnabled ?? true,
   );
+  _refreshMaintenanceExecutionModeUi(settings);
   _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
   _setCheckboxValue(
     "bme-setting-recall-vector-prefilter-enabled",
@@ -7829,6 +7881,19 @@ function _bindConfigControls() {
   bindCheckbox("bme-setting-extract-auto-enabled", (checked) => {
     _patchSettings({ extractAutoEnabled: checked });
   });
+  const maintenanceModeEl = document.getElementById(
+    "bme-setting-maintenance-execution-mode",
+  );
+  if (maintenanceModeEl && maintenanceModeEl.dataset.bmeBound !== "true") {
+    maintenanceModeEl.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-mode]");
+      if (!button) return;
+      const mode = normalizeMaintenanceExecutionMode(button.dataset.mode);
+      const settings = _patchSettings({ maintenanceExecutionMode: mode });
+      _refreshMaintenanceExecutionModeUi(settings);
+    });
+    maintenanceModeEl.dataset.bmeBound = "true";
+  }
   bindCheckbox("bme-setting-recall-llm", (checked) => {
     _patchSettings({ recallEnableLLM: checked });
     _refreshGuardedConfigStates();

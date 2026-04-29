@@ -540,6 +540,7 @@ async function summarizeBatch(
     activeNodes: getActiveNodes(graph).filter(
       (node) => !excludedNodeIds.has(String(node?.id || "").trim()),
     ),
+    settings,
     rankingOptions: {
       topK: 12,
       diffusionTopK: 48,

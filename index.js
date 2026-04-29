@@ -256,6 +256,7 @@ import {
   getPersistedSettingsSnapshot,
   mergePersistedSettings,
 } from "./runtime/settings-defaults.js";
+import { resolveConcurrencyConfig } from "./runtime/concurrency.js";
 import {
   createDefaultAuthorityCapabilityState,
   normalizeAuthoritySettings,
@@ -21255,6 +21256,7 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
 }
 
 function buildRecallRetrieveOptions(settings, context) {
+  const concurrency = resolveConcurrencyConfig(settings);
   return {
     topK: settings.recallTopK,
     maxRecallNodes: settings.recallMaxNodes,
@@ -21298,6 +21300,8 @@ function buildRecallRetrieveOptions(settings, context) {
     residualNmfNoveltyThreshold: settings.recallNmfNoveltyThreshold ?? 0.4,
     residualThreshold: settings.recallResidualThreshold ?? 0.3,
     residualTopK: settings.recallResidualTopK ?? 5,
+    vectorQueryConcurrency: concurrency.vectorQueryConcurrency,
+    authorityCandidateQueryConcurrency: concurrency.vectorQueryConcurrency,
     enableScopedMemory: settings.enableScopedMemory ?? true,
     enablePovMemory: settings.enablePovMemory ?? true,
     enableRegionScopedObjective:

@@ -3,6 +3,7 @@ import { findSimilarNodesByText, validateVectorConfig } from "../vector/vector-i
 import { hybridScore } from "./dynamics.js";
 import { diffuseAndRank } from "./diffusion.js";
 import { mergeVectorResults, splitIntentSegments } from "./retrieval-enhancer.js";
+import { runLimited } from "../runtime/concurrency.js";
 
 function nowMs() {
   if (typeof performance?.now === "function") {
@@ -607,9 +608,22 @@ export async function rankNodesForTaskContext({
   let vectorResults = [];
   const vectorStartedAt = nowMs();
   if (enableVectorPrefilter && vectorValidation.valid) {
-    const groups = [];
+    const vectorTasks = [];
     for (const part of queryPlan.plan) {
       for (const queryText of part.queries) {
+        vectorTasks.push({
+          queryText,
+          weight: part.weight || 1,
+        });
+      }
+    }
+    const vectorQueryConcurrency = clampPositiveInt(
+      options.vectorQueryConcurrency,
+      1,
+    );
+    const groups = await runLimited(
+      vectorTasks,
+      async ({ queryText, weight }) => {
         const results = await vectorPreFilter(
           graph,
           queryText,
@@ -618,9 +632,13 @@ export async function rankNodesForTaskContext({
           topK,
           signal,
         );
-        groups.push(scaleVectorResults(results, part.weight || 1));
-      }
-    }
+        return scaleVectorResults(results, weight);
+      },
+      {
+        concurrency: vectorQueryConcurrency,
+        signal,
+      },
+    );
 
     const merged = mergeVectorResults(groups, Math.max(topK * 2, 24));
     diagnostics.vectorHits = merged.rawHitCount;

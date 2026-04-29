@@ -3483,6 +3483,46 @@
   background: var(--bme-primary-text, #ffb2b7);
 }
 
+.bme-capability-card-mode {
+  cursor: default;
+}
+
+.bme-mode-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--bme-border);
+  border-radius: 999px;
+  background: var(--bme-surface-high);
+  flex-shrink: 0;
+}
+
+.bme-mode-segmented button {
+  width: 24px;
+  height: 20px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--bme-on-surface-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+}
+
+.bme-mode-segmented button:hover {
+  color: var(--bme-on-surface);
+  background: var(--bme-surface-highest);
+}
+
+.bme-mode-segmented button.is-active {
+  background: color-mix(in srgb, var(--bme-primary) 72%, var(--bme-surface-high));
+  color: var(--bme-primary-text, #fff);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bme-primary) 55%, transparent);
+}
+
 /* --- STRIPE ROW LAYOUT (Advanced Settings) --- */
 
 .bme-stripe-section {

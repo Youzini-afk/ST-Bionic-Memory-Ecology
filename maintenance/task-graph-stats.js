@@ -1,6 +1,7 @@
 import { getActiveNodes } from "../graph/graph.js";
 import { createPromptNodeReferenceMap } from "../prompting/prompt-node-references.js";
 import { rankNodesForTaskContext } from "../retrieval/shared-ranking.js";
+import { resolveConcurrencyConfig } from "../runtime/concurrency.js";
 
 const DEFAULT_TYPE_LABELS = Object.freeze({
   event: "事件",
@@ -155,6 +156,7 @@ export async function buildTaskGraphStats({
   signal,
   activeNodes = null,
   rankingOptions = {},
+  settings = {},
   relevantHeading = "与当前任务最相关的既有节点",
   maxRelevantNodes = 6,
   prefix = "G",
@@ -162,6 +164,7 @@ export async function buildTaskGraphStats({
 } = {}) {
   const normalizedActiveNodes = normalizeActiveNodes(graph, activeNodes);
   const normalizedUserMessage = String(userMessage || "").trim();
+  const concurrency = resolveConcurrencyConfig(settings);
 
   let ranking = null;
   if (graph && normalizedActiveNodes.length > 0 && normalizedUserMessage) {
@@ -178,6 +181,7 @@ export async function buildTaskGraphStats({
         enableContextQueryBlend: false,
         enableMultiIntent: true,
         maxTextLength: 1200,
+        vectorQueryConcurrency: concurrency.vectorQueryConcurrency,
         ...rankingOptions,
       },
     });

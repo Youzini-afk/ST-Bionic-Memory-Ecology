@@ -1295,6 +1295,7 @@ export async function retrieve({
       limit: options.authorityCandidateLimit,
       neighborLimit: options.authorityCandidateNeighborLimit,
       minimumUsedCandidateCount: options.authorityCandidateMinCount,
+      queryConcurrency: options.authorityCandidateQueryConcurrency || options.vectorQueryConcurrency,
       enableContextQueryBlend,
       contextAssistantWeight,
       contextPreviousUserWeight,
@@ -1427,6 +1428,7 @@ export async function retrieve({
       enableLexicalBoost,
       lexicalWeight,
       weights,
+      vectorQueryConcurrency: options.vectorQueryConcurrency,
       activeNodes: rankingActiveNodes,
     },
   });

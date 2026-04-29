@@ -1162,6 +1162,24 @@
                   <div class="bme-cap-title">生成后提取</div>
                   <div class="bme-cap-desc">AI 回复生成后自动抽取新记忆并写入图谱。</div>
                 </label>
+                <div
+                  class="bme-capability-card bme-capability-card-mode"
+                  id="bme-maintenance-mode-card"
+                  role="group"
+                  aria-label="维护执行模式"
+                  title="1 严格串行；2 均衡加速；3 快速后台（最终一致）"
+                >
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-gauge-high"></i></span>
+                    <div class="bme-mode-segmented" id="bme-setting-maintenance-execution-mode">
+                      <button type="button" data-mode="strict" aria-label="1 严格串行">1</button>
+                      <button type="button" data-mode="balanced" aria-label="2 均衡加速">2</button>
+                      <button type="button" data-mode="fast" aria-label="3 快速后台">3</button>
+                    </div>
+                  </div>
+                  <div class="bme-cap-title">并发模式</div>
+                  <div class="bme-cap-desc" id="bme-maintenance-mode-desc">1 严格串行：全部同步执行。</div>
+                </div>
                 <label class="bme-capability-card" for="bme-setting-consolidation-enabled">
                   <div class="bme-cap-header">
                     <span class="bme-cap-icon"><i class="fa-solid fa-code-merge"></i></span>

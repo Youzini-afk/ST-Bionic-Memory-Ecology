@@ -10,6 +10,7 @@ import {
   searchAuthorityTriviumNodes,
 } from "../vector/authority-vector-primary-adapter.js";
 import { embedText } from "../vector/embedding.js";
+import { runLimited } from "../runtime/concurrency.js";
 
 function nowMs() {
   if (typeof performance?.now === "function") {
@@ -148,6 +149,7 @@ export async function resolveAuthorityRecallCandidates({
     fallbackReason: "",
     timings: {
       total: 0,
+      embed: 0,
       filter: 0,
       search: 0,
       neighbors: 0,
@@ -245,13 +247,20 @@ export async function resolveAuthorityRecallCandidates({
   diagnostics.timings.filter = roundMs(nowMs() - filterStartedAt);
 
   const searchScores = new Map();
+  let embedMs = 0;
   const searchStartedAt = nowMs();
-  for (const queryEntry of queryPlan.queries) {
-    try {
-      const queryVec = await embedText(queryEntry.text, embeddingConfig, { signal, isQuery: true });
+  const searchResultsByQuery = await runLimited(
+    queryPlan.queries,
+    async (queryEntry) => {
+      const embedStartedAt = nowMs();
+      const queryVec = await embedText(queryEntry.text, embeddingConfig, {
+        signal,
+        isQuery: true,
+      });
+      embedMs += nowMs() - embedStartedAt;
       if (!queryVec) {
-        diagnostics.fallbackReason = diagnostics.fallbackReason || "authority-candidate-query-embed-empty";
-        continue;
+        diagnostics.fallbackReason ||= "authority-candidate-query-embed-empty";
+        return [];
       }
       const searchResults = await searchAuthorityTriviumNodes(
         graph,
@@ -267,16 +276,38 @@ export async function resolveAuthorityRecallCandidates({
           signal,
         },
       );
-      for (const result of searchResults) {
-        const nodeId = normalizeRecordId(result?.nodeId);
-        if (!nodeId || !allowedIds.has(nodeId)) continue;
-        const weightedScore = Math.max(0.001, Number(result?.score || 0) || 0) * queryEntry.weight;
-        const previous = Number(searchScores.get(nodeId) || 0) || 0;
-        if (weightedScore > previous) {
-          searchScores.set(nodeId, weightedScore);
-        }
+      return searchResults.map((result) => ({ ...result, queryWeight: queryEntry.weight }));
+    },
+    {
+      concurrency: Math.max(1, Math.floor(Number(options.queryConcurrency || 1)) || 1),
+      signal,
+      failFast: false,
+    },
+  );
+  diagnostics.timings.embed = roundMs(embedMs);
+  for (const searchResults of searchResultsByQuery) {
+    if (searchResults?.error) {
+      diagnostics.fallbackReason ||= "authority-candidate-search-failed";
+      if (embeddingConfig?.failOpen === false) {
+        throw searchResults.error;
       }
-    } catch (error) {
+      continue;
+    }
+    for (const result of searchResults || []) {
+      const nodeId = normalizeRecordId(result?.nodeId);
+      if (!nodeId || !allowedIds.has(nodeId)) continue;
+      const weightedScore =
+        Math.max(0.001, Number(result?.score || 0) || 0) *
+        Math.max(0.05, Number(result?.queryWeight || 0) || 0.05);
+      const previous = Number(searchScores.get(nodeId) || 0) || 0;
+      if (weightedScore > previous) {
+        searchScores.set(nodeId, weightedScore);
+      }
+    }
+  }
+  for (const item of searchResultsByQuery) {
+    if (item?.error) {
+      const error = item.error;
       if (isAbortError(error)) throw error;
       diagnostics.fallbackReason ||= "authority-candidate-search-failed";
       if (embeddingConfig?.failOpen === false) {

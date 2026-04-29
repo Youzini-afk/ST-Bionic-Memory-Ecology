@@ -193,6 +193,13 @@ export const defaultSettings = {
   consolidationAutoMinNewNodes: 2,
   enableAutoCompression: true,
   compressionEveryN: 10,
+  maintenanceExecutionMode: "strict",
+  parallelVectorQueryConcurrency: 3,
+  parallelNeighborQueryConcurrency: 3,
+  parallelLlmConcurrency: 2,
+  backgroundMaintenanceMaxRetries: 2,
+  backgroundMaintenanceRetryBaseMs: 800,
+  backgroundMaintenanceMaxQueueItems: 24,
 
   // UI 面板
   noticeDisplayMode: "normal",
