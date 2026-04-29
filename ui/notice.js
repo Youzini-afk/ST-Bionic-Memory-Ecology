@@ -69,28 +69,25 @@ function ensureStyle(doc) {
       display: flex;
       align-items: center;
       gap: 10px;
-      width: fit-content;
-      max-width: 100%;
+      max-width: min(400px, calc(100vw - 28px));
       align-self: flex-end;
       padding: 10px;
     }
 
     .st-bme-notice__content {
       min-width: 0;
+      flex: 1 1 0%;
       transition: max-width 280ms cubic-bezier(0.22, 1, 0.36, 1),
                  opacity 220ms ease;
     }
 
     .st-bme-notice[data-layout="normal"] .st-bme-notice__content {
-      max-width: 360px;
       overflow: hidden;
     }
 
     .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
       display: flex;
       align-items: center;
-      min-width: 0;
-      max-width: 320px;
       overflow: hidden;
     }
 
