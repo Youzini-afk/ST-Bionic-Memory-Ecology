@@ -88,6 +88,7 @@ function ensureStyle(doc) {
     .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
       display: flex;
       align-items: center;
+      min-width: 0;
       overflow: hidden;
     }
 
@@ -107,6 +108,8 @@ function ensureStyle(doc) {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      flex: 0 1 auto;
+      min-width: 0;
     }
 
     .st-bme-notice__message {
@@ -131,6 +134,7 @@ function ensureStyle(doc) {
       max-height: 0;
       opacity: 0;
       margin-top: 0;
+      display: none;
     }
 
     .st-bme-notice::after {
@@ -271,6 +275,7 @@ function ensureStyle(doc) {
       opacity: 0;
       margin-top: 0;
       overflow: hidden;
+      display: none;
     }
 
     .st-bme-notice[data-layout="normal"] .st-bme-notice__actions {
