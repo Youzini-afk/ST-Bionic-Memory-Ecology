@@ -3500,14 +3500,15 @@
   width: 20px;
   height: 12px;
   box-sizing: border-box;
-  border: 3px solid color-mix(in srgb, var(--bme-primary-text, #fff) 82%, transparent);
+  border: 3px solid var(--bme-primary-text, #fff);
   border-bottom: 0;
   border-radius: 20px 20px 0 0;
   background: radial-gradient(
     circle at 50% 100%,
-    var(--bme-primary-text, #fff) 0 2px,
-    transparent 2.5px
+    var(--bme-primary-text, #fff) 0 2.5px,
+    transparent 3px
   );
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--bme-primary-text, #fff) 42%, transparent));
 }
 
 .bme-mode-gauge::after {
@@ -3515,11 +3516,13 @@
   position: absolute;
   left: 16px;
   top: 12px;
-  width: 2px;
-  height: 9px;
+  width: 3px;
+  height: 10px;
   border-radius: 999px;
   background: var(--bme-primary-text, #fff);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--bme-primary-text, #fff) 60%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--bme-primary-text, #fff) 18%, transparent),
+    0 0 8px color-mix(in srgb, var(--bme-primary-text, #fff) 76%, transparent);
   transform: rotate(-46deg);
   transform-origin: 50% 100%;
   transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
