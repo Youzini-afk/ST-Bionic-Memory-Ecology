@@ -353,6 +353,9 @@ let fetchedDirectEmbeddingModels = [];
 let viewportSyncBound = false;
 let popupRuntimePromise = null;
 const GRAPH_LIVE_REFRESH_THROTTLE_MS = 240;
+let _pendingRafRefreshId = null;
+let _lastRafRefreshAt = 0;
+const PANEL_LIVE_STATE_REFRESH_MIN_MS = 80;
 let pendingVisibleGraphRefreshTimer = null;
 let pendingVisibleGraphRefreshToken = "";
 let pendingVisibleGraphRefreshForce = false;
@@ -1282,6 +1285,30 @@ export function updatePanelTheme(themeName) {
 
 export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
+
+  const now = Date.now();
+  const elapsed = now - _lastRafRefreshAt;
+
+  if (elapsed < PANEL_LIVE_STATE_REFRESH_MIN_MS) {
+    if (!_pendingRafRefreshId) {
+      _pendingRafRefreshId = requestAnimationFrame(() => {
+        _pendingRafRefreshId = null;
+        _lastRafRefreshAt = Date.now();
+        _doRefreshLiveState();
+      });
+    }
+    return;
+  }
+
+  if (_pendingRafRefreshId) {
+    cancelAnimationFrame(_pendingRafRefreshId);
+    _pendingRafRefreshId = null;
+  }
+  _lastRafRefreshAt = now;
+  _doRefreshLiveState();
+}
+
+function _doRefreshLiveState() {
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
   _refreshNativeRolloutStatusUi(_getSettings?.() || {});

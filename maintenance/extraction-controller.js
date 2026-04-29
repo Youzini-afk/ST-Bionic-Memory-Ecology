@@ -843,7 +843,7 @@ export async function executeExtractionBatchController(
         "AI 生成中",
         `${preview}  [${receivedChars}字]`,
         "running",
-        { noticeMarquee: true },
+        { syncRuntime: false, noticeMarquee: true },
       );
     },
   });

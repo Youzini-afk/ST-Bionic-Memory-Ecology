@@ -688,16 +688,16 @@ export async function runRecallController(runtime, options = {}) {
         schema: runtime.getSchema(),
         signal: recallSignal,
         settings,
-        onStreamProgress: ({ previewText, receivedChars }) => {
-          const preview =
-            previewText?.length > 60
-              ? "…" + previewText.slice(-60)
-              : previewText || "";
-          runtime.setLastRecallStatus(
-            "AI 生成中",
-            `${preview}  [${receivedChars}字]`,
-            "running",
-            { syncRuntime: true, noticeMarquee: true },
+          onStreamProgress: ({ previewText, receivedChars }) => {
+            const preview =
+              previewText?.length > 60
+                ? "…" + previewText.slice(-60)
+                : previewText || "";
+            runtime.setLastRecallStatus(
+              "AI 生成中",
+              `${preview}  [${receivedChars}字]`,
+              "running",
+              { syncRuntime: false, noticeMarquee: true },
           );
         },
         options: runtime.buildRecallRetrieveOptions(settings, context),
