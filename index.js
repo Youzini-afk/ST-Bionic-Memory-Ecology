@@ -5250,6 +5250,12 @@ function persistRecallInjectionRecord({
     return null;
   }
 
+  const targetUserFloorText = normalizeRecallInputText(
+    chat[resolvedTargetIndex]?.mes || "",
+  );
+  const boundUserFloorText = normalizeRecallInputText(
+    recallInput?.boundUserFloorText || targetUserFloorText,
+  );
   const record = buildPersistedRecallRecord(
     {
       injectionText,
@@ -5259,6 +5265,8 @@ function persistRecallInjectionRecord({
       hookName: String(recallInput?.hookName || ""),
       tokenEstimate,
       manuallyEdited: false,
+      authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
+      boundUserFloorText,
     },
     readPersistedRecallFromUserMessage(chat, resolvedTargetIndex),
   );
@@ -5379,11 +5387,34 @@ function ensurePersistedRecallRecordForGeneration({
     chat,
     targetUserMessageIndex,
   );
+  const nextAuthoritativeInputUsed = Boolean(
+    recallResult?.authoritativeInputUsed ??
+      frozenRecallOptions?.authoritativeInputUsed ??
+      recallOptions?.authoritativeInputUsed,
+  );
+  const targetUserFloorText = normalizeRecallInputText(
+    chat[targetUserMessageIndex]?.mes || "",
+  );
+  const nextBoundUserFloorText = normalizeRecallInputText(
+    recallResult?.boundUserFloorText ||
+      frozenRecallOptions?.boundUserFloorText ||
+      recallOptions?.boundUserFloorText ||
+      targetUserFloorText ||
+      "",
+  );
+  const existingBoundUserFloorText = normalizeRecallInputText(
+    existingRecord?.boundUserFloorText || "",
+  );
+  const existingMetadataUpToDate =
+    Boolean(existingRecord?.authoritativeInputUsed) === nextAuthoritativeInputUsed &&
+    (!nextBoundUserFloorText ||
+      existingBoundUserFloorText === nextBoundUserFloorText);
   if (
     existingRecord &&
     String(existingRecord.injectionText || "").trim() === injectionText &&
     areRecallNodeIdListsEqual(existingRecord.selectedNodeIds, selectedNodeIds) &&
-    String(existingRecord.recallInput || "").trim()
+    String(existingRecord.recallInput || "").trim() &&
+    existingMetadataUpToDate
   ) {
     return {
       persisted: false,
@@ -5421,17 +5452,8 @@ function ensurePersistedRecallRecordForGeneration({
       ),
       tokenEstimate: estimateTokens(injectionText),
       manuallyEdited: false,
-      authoritativeInputUsed: Boolean(
-        recallResult?.authoritativeInputUsed ??
-          frozenRecallOptions?.authoritativeInputUsed ??
-          recallOptions?.authoritativeInputUsed,
-      ),
-      boundUserFloorText: String(
-        recallResult?.boundUserFloorText ||
-          frozenRecallOptions?.boundUserFloorText ||
-          recallOptions?.boundUserFloorText ||
-          "",
-      ),
+      authoritativeInputUsed: nextAuthoritativeInputUsed,
+      boundUserFloorText: nextBoundUserFloorText,
     },
     existingRecord,
   );
@@ -20042,10 +20064,14 @@ function createGenerationRecallContext({
     transaction.chatId,
   );
   const transactionRecallKey = String(transaction.recallKey || "").trim();
+  const peerHookName = getGenerationRecallPeerHookName(hookName);
+  const hasPeerHookState = Boolean(
+    peerHookName && transaction.hookStates?.[peerHookName],
+  );
   if (
     normalizedTransactionChatId !== normalizedChatId ||
     !transactionRecallKey ||
-    transactionRecallKey !== String(fallbackRecallKey)
+    (!hasPeerHookState && transactionRecallKey !== String(fallbackRecallKey))
   ) {
     return {
       hookName,

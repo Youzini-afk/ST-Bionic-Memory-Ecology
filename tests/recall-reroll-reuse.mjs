@@ -38,6 +38,40 @@ Object.assign(harness.settings, {
   recallEnabled: true,
 });
 
+harness.chat = [
+  { is_user: true, mes: "楼层里的稳定用户输入" },
+  { is_user: false, mes: "好的。", is_system: false },
+];
+
+const persistedWriteResult = harness.result.persistRecallInjectionRecord({
+  recallInput: {
+    userMessage: "发送前捕获的权威输入",
+    source: "send-intent",
+    hookName: "GENERATION_AFTER_COMMANDS",
+    targetUserMessageIndex: 0,
+    authoritativeInputUsed: true,
+    boundUserFloorText: "楼层里的稳定用户输入",
+  },
+  result: {
+    selectedNodeIds: ["node-write-1"],
+  },
+  injectionText: "注入:楼层里的稳定用户输入",
+  tokenEstimate: 8,
+});
+assert.ok(persistedWriteResult?.record, "persistRecallInjectionRecord should write a record");
+assert.equal(
+  persistedWriteResult.record.authoritativeInputUsed,
+  true,
+  "initial persisted record should keep authoritativeInputUsed",
+);
+assert.equal(
+  persistedWriteResult.record.boundUserFloorText,
+  "楼层里的稳定用户输入",
+  "initial persisted record should keep boundUserFloorText",
+);
+
+console.log("  ✓ persistRecallInjectionRecord stores authoritative input metadata");
+
 // Set up chat: user + assistant
 harness.chat = [
   { is_user: true, mes: "去摩耶山看夜景" },
@@ -118,9 +152,76 @@ assert.equal(
 
 console.log("  ✓ ensurePersistedRecallRecordForGeneration overwrites record with empty recallInput");
 
+harness.chat = [
+  { is_user: true, mes: "稳定楼层文本" },
+  { is_user: false, mes: "好的。", is_system: false },
+];
+const staleMetadataRecord = buildPersistedRecallRecord({
+  injectionText: "注入:稳定楼层文本",
+  selectedNodeIds: ["node-stale-meta"],
+  recallInput: "发送前捕获文本",
+  recallSource: "send-intent",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 4,
+  manuallyEdited: false,
+});
+writePersistedRecallToUserMessage(harness.chat, 0, staleMetadataRecord);
+const staleMetadataEnsureResult = harness.result.ensurePersistedRecallRecordForGeneration({
+  generationType: "regenerate",
+  recallResult: {
+    status: "completed",
+    didRecall: true,
+    ok: true,
+    injectionText: "注入:稳定楼层文本",
+    selectedNodeIds: ["node-stale-meta"],
+    recallInput: "发送前捕获文本",
+    source: "send-intent",
+    hookName: "GENERATION_AFTER_COMMANDS",
+    authoritativeInputUsed: false,
+    boundUserFloorText: "稳定楼层文本",
+  },
+  transaction: {
+    frozenRecallOptions: {
+      generationType: "regenerate",
+      targetUserMessageIndex: 0,
+      overrideUserMessage: "稳定楼层文本",
+      overrideSource: "chat-last-user",
+      authoritativeInputUsed: false,
+      boundUserFloorText: "稳定楼层文本",
+    },
+  },
+  recallOptions: {
+    generationType: "regenerate",
+    targetUserMessageIndex: 0,
+    overrideUserMessage: "稳定楼层文本",
+    authoritativeInputUsed: false,
+    boundUserFloorText: "稳定楼层文本",
+  },
+  hookName: "GENERATION_AFTER_COMMANDS",
+});
+assert.equal(
+  staleMetadataEnsureResult.persisted,
+  true,
+  "ensure should rewrite records whose metadata is stale even when text/nodeIds match",
+);
+const repairedMetadataRecord = readPersistedRecallFromUserMessage(harness.chat, 0);
+assert.equal(
+  repairedMetadataRecord.boundUserFloorText,
+  "稳定楼层文本",
+  "ensure should repair missing boundUserFloorText",
+);
+
+console.log("  ✓ ensurePersistedRecallRecordForGeneration repairs stale metadata");
+
 // ═══════════════════════════════════════════════════════════════
 // 2. ensurePersistedRecallRecordForGeneration: populated recallInput skip
 // ═══════════════════════════════════════════════════════════════
+
+harness.chat = [
+  { is_user: true, mes: "去摩耶山看夜景" },
+  { is_user: false, mes: "好的，我们出发吧。", is_system: false },
+];
+writePersistedRecallToUserMessage(harness.chat, 0, afterRecord);
 
 // Now the record has proper recallInput — calling ensure again should skip
 const ensureResult2 = harness.result.ensurePersistedRecallRecordForGeneration({
@@ -138,6 +239,56 @@ assert.equal(
 
 console.log("  ✓ ensurePersistedRecallRecordForGeneration skips when recallInput is populated");
 
+harness.chat = [
+  { is_user: true, mes: "继续写摩耶山夜景" },
+  { is_user: false, mes: "前一次回复。", is_system: false },
+];
+harness.result.cleanupGenerationRecallTransactions(Date.now() + 60000);
+const afterCommandsRecallOptions = harness.result.buildGenerationAfterCommandsRecallInput(
+  "regenerate",
+  {},
+  harness.chat,
+);
+const afterCommandsContext = harness.result.createGenerationRecallContext({
+  hookName: "GENERATION_AFTER_COMMANDS",
+  generationType: "regenerate",
+  recallOptions: afterCommandsRecallOptions,
+});
+assert.ok(
+  afterCommandsContext.transaction,
+  "after-commands should create a history transaction",
+);
+harness.result.markGenerationRecallTransactionHookState(
+  afterCommandsContext.transaction,
+  "GENERATION_AFTER_COMMANDS",
+  "completed",
+);
+const beforeCombineNormalFallback = harness.result.buildNormalGenerationRecallInput(
+  harness.chat,
+);
+const beforeCombineContext = harness.result.createGenerationRecallContext({
+  hookName: "GENERATE_BEFORE_COMBINE_PROMPTS",
+  generationType: "normal",
+  recallOptions: beforeCombineNormalFallback,
+});
+assert.equal(
+  beforeCombineContext.transaction,
+  afterCommandsContext.transaction,
+  "before-combine should reuse the existing history transaction despite normal fallback input",
+);
+assert.equal(
+  beforeCombineContext.generationType,
+  "regenerate",
+  "before-combine should keep the transaction's history generation type",
+);
+assert.equal(
+  beforeCombineContext.shouldRun,
+  false,
+  "before-combine should not run recall again after after-commands completed",
+);
+
+console.log("  ✓ before-combine reuses existing history transaction");
+
 // ═══════════════════════════════════════════════════════════════
 // 3. runRecallController: regenerate reuses persisted record
 // ═══════════════════════════════════════════════════════════════
@@ -151,8 +302,8 @@ const rerollChat = [
 const validRecord = buildPersistedRecallRecord({
   injectionText: "注入:明日去摩耶山看夜景",
   selectedNodeIds: ["node-a"],
-  recallInput: "明日去摩耶山看夜景",
-  recallSource: "chat-tail-user",
+  recallInput: "发送意图中的扩展文本，不等于当前用户楼层",
+  recallSource: "send-intent",
   hookName: "GENERATION_AFTER_COMMANDS",
   tokenEstimate: 5,
   manuallyEdited: false,

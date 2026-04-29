@@ -132,8 +132,8 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
   );
   const matchesCurrentUserFloor = Boolean(
     currentUserFloorText &&
-      recordRecallInput &&
-      currentUserFloorText === recordRecallInput,
+      boundUserFloorText &&
+      currentUserFloorText === boundUserFloorText,
   );
 
   if (record.authoritativeInputUsed) {
