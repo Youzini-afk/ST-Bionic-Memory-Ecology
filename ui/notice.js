@@ -77,15 +77,39 @@ function ensureStyle(doc) {
 
     .st-bme-notice__content {
       min-width: 0;
-      overflow: hidden;
       transition: max-width 280ms cubic-bezier(0.22, 1, 0.36, 1),
                  opacity 220ms ease;
+    }
+
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__content {
+      max-width: 360px;
+      overflow: hidden;
     }
 
     .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
       display: flex;
       align-items: center;
       min-width: 0;
+      max-width: 320px;
+      overflow: hidden;
+    }
+
+    .st-bme-notice__title {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.18;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      color: #f0f6ff;
+      transition: font-size 260ms ease;
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__title {
+      font-size: 16px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .st-bme-notice__message {
@@ -95,18 +119,21 @@ function ensureStyle(doc) {
       color: rgba(240, 246, 255, 0.86);
       white-space: pre-wrap;
       word-break: break-word;
+      overflow: hidden;
       transition: max-height 280ms cubic-bezier(0.22, 1, 0.36, 1),
                  opacity 220ms ease,
                  margin 260ms ease;
     }
 
-    .st-bme-notice__actions {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-      transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1),
-                 opacity 220ms ease,
-                 margin 260ms ease;
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__message {
+      max-height: 200px;
+      opacity: 1;
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__message {
+      max-height: 0;
+      opacity: 0;
+      margin-top: 0;
     }
 
     .st-bme-notice::after {
@@ -141,32 +168,6 @@ function ensureStyle(doc) {
 
     .st-bme-notice[data-busy="true"] .st-bme-notice__icon {
       animation: stBmeNoticeBusy 900ms linear infinite;
-    }
-
-    .st-bme-notice__title {
-      margin: 0;
-      font-size: 17px;
-      line-height: 1.18;
-      font-weight: 800;
-      letter-spacing: 0.01em;
-      color: #f0f6ff;
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__title {
-      font-size: 16px;
-      line-height: 1.2;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .st-bme-notice__message {
-      margin: 4px 0 0;
-      font-size: 14px;
-      line-height: 1.38;
-      color: rgba(240, 246, 255, 0.86);
-      white-space: pre-wrap;
-      word-break: break-word;
     }
 
     .st-bme-notice__message--marquee {
@@ -258,8 +259,14 @@ function ensureStyle(doc) {
       opacity: 0;
     }
 
-    .st-bme-notice[data-layout="normal"] .st-bme-notice__content {
-      max-width: 360px;
+    .st-bme-notice__actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      overflow: hidden;
+      transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1),
+                 opacity 220ms ease,
+                 margin 260ms ease;
     }
 
     .st-bme-notice[data-layout="compact"] .st-bme-notice__actions {
@@ -274,15 +281,8 @@ function ensureStyle(doc) {
       opacity: 1;
     }
 
-    .st-bme-notice[data-layout="normal"] .st-bme-notice__message {
-      max-height: 200px;
-      opacity: 1;
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__message {
-      max-height: 0;
-      opacity: 0;
-      margin-top: 0;
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__progress {
+      display: none;
     }
 
     .st-bme-notice__progress {
