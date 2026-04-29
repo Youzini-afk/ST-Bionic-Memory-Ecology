@@ -22469,6 +22469,7 @@ function onMessageEdited(messageId, meta = null) {
     {
       invalidateRecallAfterHistoryMutation,
       isMvuExtraAnalysisGuardActive,
+      removeMessageRecallRecord,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleHistoryMutationRecheck,
     },

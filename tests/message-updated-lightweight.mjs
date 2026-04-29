@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  onMessageEditedController,
   onMessageUpdatedController,
   registerCoreEventHooksController,
 } from "../host/event-binding.js";
@@ -36,6 +37,38 @@ import {
   assert.equal(result.lightweight, true);
   assert.equal(ignored?.eventName, "message-updated");
   assert.equal(ignored?.detail?.reason, "lightweight-refresh-only");
+}
+
+{
+  let removedMessageIndex = null;
+  let invalidated = 0;
+  let rechecked = 0;
+  let refreshed = 0;
+
+  onMessageEditedController(
+    {
+      isMvuExtraAnalysisGuardActive: () => false,
+      removeMessageRecallRecord(messageIndex) {
+        removedMessageIndex = messageIndex;
+      },
+      invalidateRecallAfterHistoryMutation() {
+        invalidated += 1;
+      },
+      scheduleHistoryMutationRecheck() {
+        rechecked += 1;
+      },
+      refreshPersistedRecallMessageUi() {
+        refreshed += 1;
+      },
+    },
+    9,
+    { source: "unit-test" },
+  );
+
+  assert.equal(removedMessageIndex, 9);
+  assert.equal(invalidated, 1);
+  assert.equal(rechecked, 1);
+  assert.equal(refreshed, 1);
 }
 
 {

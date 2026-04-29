@@ -432,8 +432,210 @@ assert.equal(
 
 console.log("  ✓ runRecallController reuses persisted record on regenerate");
 
+const normalTypedReuseChat = [
+  { is_user: true, mes: "重 Roll 但宿主仍标 normal" },
+  { is_user: false, mes: "上一条回复。", is_system: false },
+];
+const normalTypedReuseRecord = buildPersistedRecallRecord({
+  injectionText: "注入:重 Roll 但宿主仍标 normal",
+  selectedNodeIds: ["node-normal-type"],
+  recallInput: "旧捕获文本",
+  recallSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+  boundUserFloorText: "重 Roll 但宿主仍标 normal",
+});
+writePersistedRecallToUserMessage(normalTypedReuseChat, 0, normalTypedReuseRecord);
+
+let normalTypedRetrieveCalled = false;
+const normalTypedReuseRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: normalTypedReuseChat, chatId: "chat-normal-typed-reroll" }),
+  retrieve: async () => {
+    normalTypedRetrieveCalled = true;
+    return {
+      injectionText: "不应出现的新召回",
+      selectedNodeIds: ["node-new"],
+    };
+  },
+};
+
+const normalTypedReuseResult = await runRecallController(normalTypedReuseRuntime, {
+  overrideUserMessage: "重 Roll 但宿主仍标 normal",
+  generationType: "normal",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(
+  normalTypedReuseResult.reason,
+  "persisted-user-floor-reused",
+  "normal-typed reroll should still reuse target user-floor recall",
+);
+assert.equal(
+  normalTypedRetrieveCalled,
+  false,
+  "normal-typed reroll should not call retrieve when target user floor has recall",
+);
+
+console.log("  ✓ runRecallController reuses persisted record when host reports reroll as normal");
+
+const legacyUnboundReuseChat = [
+  { is_user: true, mes: "旧记录没有绑定楼层" },
+  { is_user: false, mes: "上一条回复。", is_system: false },
+];
+const legacyUnboundRecord = buildPersistedRecallRecord({
+  injectionText: "注入:旧记录没有绑定楼层",
+  selectedNodeIds: ["node-legacy-unbound"],
+  recallInput: "历史旧输入",
+  recallSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+});
+writePersistedRecallToUserMessage(legacyUnboundReuseChat, 0, legacyUnboundRecord);
+
+let legacyUnboundRetrieveCalled = false;
+const legacyUnboundRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: legacyUnboundReuseChat, chatId: "chat-legacy-unbound" }),
+  retrieve: async () => {
+    legacyUnboundRetrieveCalled = true;
+    return {
+      injectionText: "不应出现的旧记录新召回",
+      selectedNodeIds: ["node-new"],
+    };
+  },
+};
+
+const legacyUnboundResult = await runRecallController(legacyUnboundRuntime, {
+  overrideUserMessage: "旧记录没有绑定楼层",
+  generationType: "normal",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(
+  legacyUnboundResult.reason,
+  "persisted-user-floor-reused",
+  "legacy unbound user-floor recall should be reused for normal-typed history generation",
+);
+assert.equal(
+  legacyUnboundRetrieveCalled,
+  false,
+  "legacy unbound user-floor recall should not call retrieve",
+);
+
+console.log("  ✓ runRecallController reuses legacy unbound user-floor recall");
+
+const activeInputUnboundChat = [
+  { is_user: true, mes: "主动新输入不应复用旧召回" },
+  { is_user: false, mes: "上一条回复。", is_system: false },
+];
+const activeInputUnboundRecord = buildPersistedRecallRecord({
+  injectionText: "旧注入:主动新输入不应复用旧召回",
+  selectedNodeIds: ["node-active-old"],
+  recallInput: "旧输入",
+  recallSource: "send-intent",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+});
+writePersistedRecallToUserMessage(activeInputUnboundChat, 0, activeInputUnboundRecord);
+
+let activeInputRetrieveCalled = false;
+const activeInputRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: activeInputUnboundChat, chatId: "chat-active-input" }),
+  retrieve: async () => {
+    activeInputRetrieveCalled = true;
+    return {
+      injectionText: "新召回:主动新输入不应复用旧召回",
+      selectedNodeIds: ["node-active-new"],
+    };
+  },
+};
+
+const activeInputResult = await runRecallController(activeInputRuntime, {
+  overrideUserMessage: "主动新输入不应复用旧召回",
+  generationType: "normal",
+  targetUserMessageIndex: 0,
+  overrideSource: "send-intent",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(
+  activeInputRetrieveCalled,
+  true,
+  "active send-intent input should not reuse an unbound stale record",
+);
+assert.equal(
+  activeInputResult.injectionText,
+  "新召回:主动新输入不应复用旧召回",
+  "active send-intent input should use the fresh recall result",
+);
+
+console.log("  ✓ runRecallController does not reuse unbound record for active input");
+
+const mismatchedBoundChat = [
+  { is_user: true, mes: "已经编辑过的新楼层" },
+  { is_user: false, mes: "上一条回复。", is_system: false },
+];
+const mismatchedBoundRecord = buildPersistedRecallRecord({
+  injectionText: "旧注入:已经编辑过的新楼层",
+  selectedNodeIds: ["node-mismatch-old"],
+  recallInput: "已经编辑过的新楼层",
+  recallSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 5,
+  manuallyEdited: false,
+  boundUserFloorText: "编辑前的旧楼层",
+});
+writePersistedRecallToUserMessage(mismatchedBoundChat, 0, mismatchedBoundRecord);
+
+let mismatchedBoundRetrieveCalled = false;
+const mismatchedBoundRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: mismatchedBoundChat, chatId: "chat-bound-mismatch" }),
+  retrieve: async () => {
+    mismatchedBoundRetrieveCalled = true;
+    return {
+      injectionText: "新召回:已经编辑过的新楼层",
+      selectedNodeIds: ["node-mismatch-new"],
+    };
+  },
+};
+
+const mismatchedBoundResult = await runRecallController(mismatchedBoundRuntime, {
+  overrideUserMessage: "已经编辑过的新楼层",
+  generationType: "normal",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(
+  mismatchedBoundRetrieveCalled,
+  true,
+  "bound user-floor mismatch should force a fresh recall",
+);
+assert.equal(
+  mismatchedBoundResult.injectionText,
+  "新召回:已经编辑过的新楼层",
+  "bound user-floor mismatch should not reuse stale persisted recall",
+);
+
+console.log("  ✓ runRecallController does not reuse record when bound user floor mismatches");
+
 // ═══════════════════════════════════════════════════════════════
-// 4. runRecallController: regenerate with empty recallInput does NOT reuse
+// 4. runRecallController: regenerate with empty recallInput reuses user-floor record
 // ═══════════════════════════════════════════════════════════════
 
 const noReuseChat = [
@@ -494,11 +696,16 @@ const noReuseResult = await runRecallController(noReuseRuntime, {
 assert.equal(noReuseResult.status, "completed", "no-reuse should complete");
 assert.equal(
   noReuseRetrieveCalled,
-  true,
-  "retrieve() SHOULD be called when persisted record has empty recallInput",
+  false,
+  "retrieve() should NOT be called when target user floor has a persisted recall record",
+);
+assert.equal(
+  noReuseResult.reason,
+  "persisted-user-floor-reused",
+  "empty recallInput legacy records should still be reused from the user floor",
 );
 
-console.log("  ✓ runRecallController does NOT reuse record with empty recallInput");
+console.log("  ✓ runRecallController reuses user-floor record with empty recallInput");
 
 // ═══════════════════════════════════════════════════════════════
 console.log("recall-reroll-reuse tests passed");

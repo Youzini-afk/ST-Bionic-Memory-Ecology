@@ -93,7 +93,6 @@ function buildPersistedRecallReuseResult(record = {}) {
 
 function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
   const generationType = String(recallInput?.generationType || "normal").trim() || "normal";
-  if (generationType === "normal") return null;
 
   const targetUserMessageIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
     ? Math.floor(Number(recallInput.targetUserMessageIndex))
@@ -119,6 +118,16 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
   const currentRecallInputText = normalizeText(recallInput?.userMessage || "");
   const recordRecallInput = normalizeText(record?.recallInput || "");
   const boundUserFloorText = normalizeText(record?.boundUserFloorText || "");
+  const recallSource = String(recallInput?.source || "").trim();
+  const activeInputSources = new Set([
+    "send-intent",
+    "generation-started-send-intent",
+    "generation-started-textarea",
+    "host-generation-lifecycle",
+    "textarea-live",
+    "planner-handoff",
+  ]);
+  const isActiveInputSource = activeInputSources.has(recallSource);
 
   const matchesBoundUserFloor = Boolean(
     currentUserFloorText &&
@@ -135,10 +144,38 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
       boundUserFloorText &&
       currentUserFloorText === boundUserFloorText,
   );
+  const boundUserFloorMismatch = Boolean(
+    boundUserFloorText && currentUserFloorText !== boundUserFloorText,
+  );
+  if (boundUserFloorMismatch) return null;
 
-  if (record.authoritativeInputUsed) {
-    if (!matchesBoundUserFloor) return null;
-  } else if (!matchesRecallInput && !matchesCurrentUserFloor) {
+  const matchesPersistedRecord = record.authoritativeInputUsed
+    ? matchesBoundUserFloor
+    : matchesRecallInput || matchesCurrentUserFloor;
+  const canReuseUnboundTargetRecord = Boolean(
+    currentUserFloorText &&
+      !boundUserFloorText &&
+      !isActiveInputSource &&
+      String(record?.injectionText || "").trim(),
+  );
+  const userFloorSources = new Set([
+    "chat-last-user",
+    "chat-latest-user",
+    "chat-tail-user",
+    "message-sent",
+    "persisted-user-floor",
+  ]);
+  const canTrustUserFloorRecord = Boolean(
+    !isActiveInputSource &&
+      !boundUserFloorText &&
+      (generationType !== "normal" || userFloorSources.has(recallSource)),
+  );
+
+  if (
+    !matchesPersistedRecord &&
+    !canReuseUnboundTargetRecord &&
+    !canTrustUserFloorRecord
+  ) {
     return null;
   }
 
