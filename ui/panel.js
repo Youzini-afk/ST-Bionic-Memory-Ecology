@@ -4496,6 +4496,7 @@ function _refreshMaintenanceExecutionModeUi(settings = _getSettings?.() || {}) {
   const card = document.getElementById("bme-maintenance-mode-card");
   const level = getMaintenanceExecutionModeLevel(meta.mode);
   if (desc) desc.textContent = meta.desc;
+  if (segmented) segmented.dataset.mode = meta.mode;
   if (card) {
     card.dataset.mode = meta.mode;
     card.title = `${meta.title}；1 严格串行 / 2 均衡加速 / 3 快速后台（最终一致）`;
