@@ -22,6 +22,7 @@ import {
   registerCoreEventHooksController,
 } from "../host/event-binding.js";
 import {
+  executeExtractionBatchController,
   onRerollController,
   resolveAutoExtractionPlanController,
   runExtractionController,
@@ -281,6 +282,12 @@ function createBatchStageHarness() {
       .replace(/^export\s+/gm, "");
     const context = {
       console,
+      AbortController,
+      AbortSignal,
+      DOMException,
+      setTimeout,
+      clearTimeout,
+      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS: 120000,
       result: null,
       extractionCount: 0,
       currentGraph: null,
@@ -3518,6 +3525,365 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   assert.ok(statusTexts.includes("向量同步中"));
 }
 
+async function testBalancedModeDefersExtractionVectorSync() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  let syncCalls = 0;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  harness.syncVectorState = async () => {
+    syncCalls += 1;
+    return {
+      insertedHashes: ["should-not-run"],
+      stats: { pending: 0 },
+    };
+  };
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [12, 13],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    {
+      newNodeIds: ["node-bg"],
+      processedRange: [12, 13],
+    },
+    13,
+    {
+      maintenanceExecutionMode: "balanced",
+      enableConsolidation: false,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      compressionEveryN: 0,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  assert.equal(syncCalls, 0);
+  assert.equal(effects.backgroundVectorSync?.enabled, true);
+  assert.equal(effects.backgroundVectorSync?.mode, "balanced");
+  assert.equal(effects.backgroundVectorSync?.range?.start, 12);
+  assert.equal(effects.backgroundVectorSync?.range?.end, 13);
+  assert.equal(harness.currentGraph.vectorIndexState.dirty, true);
+  assert.equal(effects.batchStatus.stages.finalize.outcome, "success");
+  assert.ok(
+    effects.batchStatus.stages.finalize.artifacts.includes("vector-sync-queued"),
+  );
+  assert.equal(effects.batchStatus.backgroundVectorSyncQueued, true);
+}
+
+async function testBalancedModeDefersExtractionMaintenancePostProcess() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  let synopsisCalls = 0;
+  let reflectionCalls = 0;
+  let compressionCalls = 0;
+  let vectorSyncCalls = 0;
+  harness.currentGraph = {
+    nodes: [],
+    edges: [],
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  harness.generateSynopsis = async () => {
+    synopsisCalls += 1;
+    harness.currentGraph.nodes.push({ id: "synopsis-queued", type: "synopsis" });
+    return { ok: true };
+  };
+  harness.generateReflection = async () => {
+    reflectionCalls += 1;
+    harness.currentGraph.nodes.push({ id: "reflection-queued", type: "reflection" });
+    return "reflection-queued";
+  };
+  harness.inspectAutoCompressionCandidates = () => ({
+    hasCandidates: true,
+    reason: "",
+  });
+  harness.compressAll = async () => {
+    compressionCalls += 1;
+    harness.currentGraph.nodes.push({ id: "compression-queued", level: 1 });
+    return { created: 1, archived: 0 };
+  };
+  harness.syncVectorState = async () => {
+    vectorSyncCalls += 1;
+    return {
+      insertedHashes: ["should-not-run"],
+      stats: { pending: 0 },
+    };
+  };
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [21, 21],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    {
+      newNodeIds: ["node-maintenance-bg"],
+      processedRange: [21, 21],
+    },
+    21,
+    {
+      maintenanceExecutionMode: "balanced",
+      enableConsolidation: false,
+      enableHierarchicalSummary: true,
+      enableReflection: true,
+      reflectEveryN: 1,
+      enableSleepCycle: false,
+      sleepEveryN: 1,
+      enableAutoCompression: true,
+      compressionEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+  );
+
+  assert.equal(synopsisCalls, 0);
+  assert.equal(reflectionCalls, 0);
+  assert.equal(compressionCalls, 0);
+  assert.equal(vectorSyncCalls, 0);
+  assert.deepEqual(
+    Array.from(effects.backgroundMaintenance, (task) => task.type),
+    ["summary", "reflection", "compression"],
+  );
+  assert.equal(effects.batchStatus.backgroundMaintenanceQueued, true);
+  assert.equal(effects.batchStatus.backgroundMaintenanceMode, "balanced");
+  assert.ok(
+    effects.batchStatus.stages.semantic.artifacts.includes("summary-queued"),
+  );
+  assert.ok(
+    effects.batchStatus.stages.semantic.artifacts.includes("reflection-queued"),
+  );
+  assert.ok(
+    effects.batchStatus.stages.structural.artifacts.includes("compression-queued"),
+  );
+  assert.equal(effects.backgroundVectorSync?.enabled, true);
+  assert.equal(effects.backgroundVectorSync?.mode, "balanced");
+}
+
+async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
+  const graph = {
+    nodes: [],
+    edges: [],
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  let scheduledTask = null;
+  let scheduleCalls = 0;
+  const runtime = {
+    appendBatchJournal(targetGraph, entry) {
+      targetGraph.batchJournal = [...(targetGraph.batchJournal || []), entry];
+    },
+    applyProcessedHistorySnapshotToGraph(targetGraph, _chat, endFloor) {
+      targetGraph.historyState ||= {};
+      targetGraph.historyState.lastProcessedAssistantFloor = endFloor;
+      targetGraph.lastProcessedSeq = endFloor;
+    },
+    buildPersistDelta: () => null,
+    buildExtractionMessages: () => [],
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value)),
+    computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
+    console,
+    createBatchJournalEntry: (_before, _after, options) => ({
+      type: "batch",
+      ...options,
+    }),
+    createBatchStatusSkeleton,
+    ensureCurrentGraphRuntimeState() {
+      graph.historyState ||= {};
+      graph.vectorIndexState ||= {};
+    },
+    extractMemories: async () => ({
+      success: true,
+      newNodeIds: ["node-bg"],
+      processedRange: [1, 1],
+    }),
+    finalizeBatchStatus,
+    getCurrentGraph: () => graph,
+    getEmbeddingConfig: () => null,
+    getExtractionCount: () => 1,
+    getLastProcessedAssistantFloor: () => -1,
+    getSettings: () => ({}),
+    getSchema: () => schema,
+    handleExtractionSuccess: async (_result, _endIdx, _settings, _signal, status) => {
+      setBatchStageOutcome(status, "finalize", "success");
+      return {
+        postProcessArtifacts: [],
+        vectorHashesInserted: [],
+        vectorStats: { pending: 1 },
+        vectorError: "",
+        batchStatus: finalizeBatchStatus(status, 1),
+        backgroundVectorSync: {
+          enabled: true,
+          id: "vector-sync:test",
+          mode: "balanced",
+          reason: "background-vector-sync-after-extraction",
+          range: { start: 1, end: 1 },
+        },
+      };
+    },
+    persistExtractionBatchResult: async () => ({
+      accepted: true,
+      revision: 1,
+      storageTier: "metadata-full",
+      saveMode: "full",
+      outcome: "accepted",
+    }),
+    scheduleBackgroundVectorSync(task) {
+      scheduleCalls += 1;
+      scheduledTask = task;
+      return {
+        queued: true,
+        id: task.id,
+        snapshot: { state: "queued", queued: 1 },
+      };
+    },
+    setBatchStageOutcome,
+    setLastExtractionStatus: () => {},
+    shouldAdvanceProcessedHistory: () => true,
+    throwIfAborted: () => {},
+    updateProcessedHistorySnapshot(chat, endFloor) {
+      graph.historyState.processedChatLength = chat.length;
+      graph.historyState.lastProcessedAssistantFloor = endFloor;
+    },
+  };
+
+  const result = await executeExtractionBatchController(runtime, {
+    chat: [{ is_user: true }, { is_user: false }],
+    startIdx: 1,
+    endIdx: 1,
+    settings: { maintenanceExecutionMode: "balanced" },
+  });
+
+  assert.equal(result.historyAdvanceAllowed, true);
+  assert.equal(scheduleCalls, 1);
+  assert.deepEqual(scheduledTask?.range, { start: 1, end: 1 });
+  assert.equal(result.batchStatus.backgroundVectorSyncState, "queued");
+  assert.equal(result.effects.backgroundVectorSyncQueue?.queued, true);
+}
+
+async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
+  const graph = {
+    nodes: [],
+    edges: [],
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  let scheduledTasks = [];
+  let scheduleCalls = 0;
+  const runtime = {
+    appendBatchJournal(targetGraph, entry) {
+      targetGraph.batchJournal = [...(targetGraph.batchJournal || []), entry];
+    },
+    applyProcessedHistorySnapshotToGraph(targetGraph, _chat, endFloor) {
+      targetGraph.historyState ||= {};
+      targetGraph.historyState.lastProcessedAssistantFloor = endFloor;
+      targetGraph.lastProcessedSeq = endFloor;
+    },
+    buildPersistDelta: () => null,
+    buildExtractionMessages: () => [],
+    cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value)),
+    computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
+    console,
+    createBatchJournalEntry: (_before, _after, options) => ({
+      type: "batch",
+      ...options,
+    }),
+    createBatchStatusSkeleton,
+    ensureCurrentGraphRuntimeState() {
+      graph.historyState ||= {};
+      graph.vectorIndexState ||= {};
+    },
+    extractMemories: async () => ({
+      success: true,
+      newNodeIds: ["node-bg-maintenance"],
+      processedRange: [2, 2],
+    }),
+    finalizeBatchStatus,
+    getCurrentGraph: () => graph,
+    getEmbeddingConfig: () => null,
+    getExtractionCount: () => 1,
+    getLastProcessedAssistantFloor: () => -1,
+    getSettings: () => ({}),
+    getSchema: () => schema,
+    handleExtractionSuccess: async (_result, _endIdx, _settings, _signal, status) => {
+      setBatchStageOutcome(status, "finalize", "success");
+      status.backgroundMaintenanceQueued = true;
+      status.backgroundMaintenanceMode = "balanced";
+      status.backgroundMaintenanceTasks = [
+        { id: "summary:test", type: "summary", reason: "test" },
+        { id: "reflection:test", type: "reflection", reason: "test" },
+      ];
+      return {
+        postProcessArtifacts: [],
+        vectorHashesInserted: [],
+        vectorStats: { pending: 0 },
+        vectorError: "",
+        batchStatus: finalizeBatchStatus(status, 1),
+        backgroundMaintenance: [
+          { id: "summary:test", type: "summary", reason: "test", payload: {} },
+          { id: "reflection:test", type: "reflection", reason: "test", payload: {} },
+        ],
+        backgroundVectorSync: null,
+      };
+    },
+    persistExtractionBatchResult: async () => ({
+      accepted: true,
+      revision: 1,
+      storageTier: "metadata-full",
+      saveMode: "full",
+      outcome: "accepted",
+    }),
+    scheduleBackgroundMaintenancePostProcess(tasks) {
+      scheduleCalls += 1;
+      scheduledTasks = tasks;
+      return {
+        queued: true,
+        id: "post-process:test",
+        snapshot: { state: "queued", queued: 1 },
+      };
+    },
+    setBatchStageOutcome,
+    setLastExtractionStatus: () => {},
+    shouldAdvanceProcessedHistory: () => true,
+    throwIfAborted: () => {},
+    updateProcessedHistorySnapshot(chat, endFloor) {
+      graph.historyState.processedChatLength = chat.length;
+      graph.historyState.lastProcessedAssistantFloor = endFloor;
+    },
+  };
+
+  const result = await executeExtractionBatchController(runtime, {
+    chat: [{ is_user: true }, { is_user: false }],
+    startIdx: 2,
+    endIdx: 2,
+    settings: { maintenanceExecutionMode: "balanced" },
+  });
+
+  assert.equal(result.historyAdvanceAllowed, true);
+  assert.equal(scheduleCalls, 1);
+  assert.deepEqual(
+    scheduledTasks.map((task) => task.type),
+    ["summary", "reflection"],
+  );
+  assert.equal(result.batchStatus.backgroundMaintenanceState, "queued");
+  assert.equal(result.effects.backgroundMaintenanceQueue?.queued, true);
+}
+
 async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
   const harness = await createBatchStageHarness();
   const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
@@ -3674,6 +4040,148 @@ async function testAutoConsolidationSkipsLowRiskSingleNode() {
     effects.batchStatus.stages.structural.artifacts.includes(
       "consolidation-skipped",
     ),
+    true,
+  );
+}
+
+async function testAutoConsolidationSuppressedForBulkExtractionBatch() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let consolidateCalls = 0;
+  let gateCalls = 0;
+  harness.analyzeAutoConsolidationGate = async () => {
+    gateCalls += 1;
+    return {
+      triggered: true,
+      reason: "should-not-run",
+      matchedScore: 0.99,
+      matchedNodeId: "old-bulk",
+    };
+  };
+  harness.consolidateMemories = async () => {
+    consolidateCalls += 1;
+    return {
+      merged: 1,
+      skipped: 0,
+      kept: 0,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [8, 8],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-a", "node-b", "node-c"] },
+    8,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+    {
+      suppressAutoConsolidation: true,
+      autoConsolidationSuppressReason: "bulk rerun still draining",
+    },
+  );
+
+  assert.equal(gateCalls, 0);
+  assert.equal(consolidateCalls, 0);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, false);
+  assert.equal(effects.batchStatus.consolidationGateReason, "bulk rerun still draining");
+  assert.equal(
+    effects.batchStatus.stages.structural.artifacts.includes(
+      "consolidation-skipped",
+    ),
+    true,
+  );
+}
+
+async function testAutoConsolidationUsesDeferredBulkCandidates() {
+  const harness = await createBatchStageHarness();
+  const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
+  harness.currentGraph = {
+    historyState: { extractionCount: 0 },
+    vectorIndexState: {},
+  };
+  harness.ensureCurrentGraphRuntimeState = () => {
+    harness.currentGraph.historyState ||= {};
+    harness.currentGraph.vectorIndexState ||= {};
+  };
+  let candidateIds = [];
+  harness.consolidateMemories = async ({ newNodeIds = [] } = {}) => {
+    candidateIds = [...newNodeIds];
+    return {
+      merged: 1,
+      skipped: 0,
+      kept: 0,
+      evolved: 0,
+      connections: 0,
+      updates: 0,
+    };
+  };
+  harness.syncVectorState = async () => ({
+    insertedHashes: [],
+    stats: { pending: 0 },
+  });
+
+  const batchStatus = createBatchStatusSkeleton({
+    processedRange: [10, 10],
+    extractionCountBefore: 0,
+  });
+  const effects = await handleExtractionSuccess(
+    { newNodeIds: ["node-current", "node-old"] },
+    10,
+    {
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 2,
+      consolidationThreshold: 0.85,
+      enableAutoCompression: false,
+      compressionEveryN: 10,
+      enableSynopsis: false,
+      enableReflection: false,
+      enableSleepCycle: false,
+      synopsisEveryN: 1,
+      reflectEveryN: 1,
+      sleepEveryN: 1,
+    },
+    undefined,
+    batchStatus,
+    {
+      suppressAutoConsolidation: false,
+      pendingAutoConsolidationNodeIds: ["node-old", "node-deferred"],
+    },
+  );
+
+  assert.deepEqual(candidateIds, ["node-old", "node-deferred", "node-current"]);
+  assert.equal(effects.batchStatus.consolidationGateTriggered, true);
+  assert.equal(
+    effects.batchStatus.stages.structural.artifacts.includes("consolidation"),
     true,
   );
 }
@@ -4520,6 +5028,79 @@ async function testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask()
   await waitForTick();
 
   assert.equal(runExtractionCalls, 1);
+  assert.equal(refreshCalls, 1);
+}
+
+async function testMessageReceivedSkipsWhenAutoExtractionDisabled() {
+  let runExtractionCalls = 0;
+  let refreshCalls = 0;
+  const deferredReasons = [];
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const settings = {
+    enabled: true,
+    extractAutoEnabled: false,
+    extractEvery: 1,
+    extractAutoDelayLatestAssistant: false,
+    enableSmartTrigger: false,
+  };
+
+  const plan = buildAutoExtractionPlan({
+    chat,
+    settings,
+    lastProcessedAssistantFloor: -1,
+  });
+  assert.equal(plan.canRun, false);
+  assert.equal(plan.reason, "auto-extraction-disabled");
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => null,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({
+        chat,
+      }),
+      getSettings: () => settings,
+      getLastProcessedAssistantFloor: () => -1,
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      resolveAutoExtractionPlan: (options = {}) =>
+        buildAutoExtractionPlan({
+          chat,
+          settings,
+          lastProcessedAssistantFloor: -1,
+          ...(options || {}),
+        }),
+      deferAutoExtraction(reason) {
+        deferredReasons.push(reason);
+      },
+      runExtraction: async () => {
+        runExtractionCalls += 1;
+      },
+      console: {
+        debug() {},
+        error() {},
+      },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {
+        refreshCalls += 1;
+      },
+    },
+    1,
+    "assistant",
+  );
+
+  await waitForTick();
+
+  assert.equal(runExtractionCalls, 0);
+  assert.deepEqual(deferredReasons, []);
   assert.equal(refreshCalls, 1);
 }
 
@@ -7508,8 +8089,14 @@ await testReverseJournalRecoveryPlanMixedLegacyAndCurrentRetainsRepairSet();
 await testBatchStatusStructuralPartialRemainsRecoverable();
 await testBatchStatusSemanticFailureDoesNotHideCoreSuccess();
 await testExtractionPostProcessStatusesExposeMaintenancePhases();
+await testBalancedModeDefersExtractionVectorSync();
+await testBalancedModeDefersExtractionMaintenancePostProcess();
+await testBackgroundVectorSyncScheduledAfterAcceptedPersistence();
+await testBackgroundMaintenanceScheduledAfterAcceptedPersistence();
 await testAutoConsolidationRunsOnHighDuplicateRiskSingleNode();
 await testAutoConsolidationSkipsLowRiskSingleNode();
+await testAutoConsolidationSuppressedForBulkExtractionBatch();
+await testAutoConsolidationUsesDeferredBulkCandidates();
 await testAutoCompressionRunsOnlyOnConfiguredInterval();
 await testAutoCompressionSkipsWhenNotScheduledOrNoCandidates();
 await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
@@ -7540,6 +8127,7 @@ await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
 await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
+await testMessageReceivedSkipsWhenAutoExtractionDisabled();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();

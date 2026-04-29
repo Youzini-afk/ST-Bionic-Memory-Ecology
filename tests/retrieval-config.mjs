@@ -435,6 +435,7 @@ async function rankNodesForTaskContext({
     skipReasons: [],
     timings: { vector: 0, diffusion: 0 },
   };
+  const activeNodeIds = new Set(activeNodes.map((node) => node.id));
 
   let vectorResults = [];
   if (enableVectorPrefilter) {
@@ -446,10 +447,12 @@ async function rankNodesForTaskContext({
           { nodeId: "rule-1", score: 0.9 },
           { nodeId: "rule-2", score: 0.8 },
           { nodeId: "rule-3", score: 0.7 },
-        ].map((item) => ({
-          ...item,
-          score: item.score * Math.max(0, Number(part.weight) || 0),
-        }));
+        ]
+          .filter((item) => activeNodeIds.has(item.nodeId))
+          .map((item) => ({
+            ...item,
+            score: item.score * Math.max(0, Number(part.weight) || 0),
+          }));
         groups.push(results);
       }
     }
@@ -487,7 +490,7 @@ async function rankNodesForTaskContext({
       diffusionResults = [
         { nodeId: "rule-2", energy: 1.2 },
         { nodeId: "rule-3", energy: 0.9 },
-      ];
+      ].filter((item) => activeNodeIds.has(item.nodeId));
     }
   }
   diagnostics.diffusionHits = diffusionResults.length;
@@ -566,6 +569,10 @@ const state = {
   llmCandidateCount: 0,
   llmResponse: { selected_keys: ["R1", "R2"] },
   llmOptions: [],
+  authorityCandidateCalls: [],
+  authorityCandidateEnabled: false,
+  authorityCandidateNodeIds: [],
+  authorityCandidateDiagnostics: null,
 };
 
 const graph = createGraph();
@@ -575,6 +582,80 @@ const retrieve = await loadRetrieve({
   createPromptNodeReferenceMap,
   getPromptNodeLabel,
   rankNodesForTaskContext,
+  async resolveAuthorityRecallCandidates({
+    availableNodes = [],
+    activeRegion = "",
+    activeStoryContext = {},
+    activeRecallOwnerKeys = [],
+    options = {},
+  } = {}) {
+    state.authorityCandidateCalls.push({
+      availableNodeIds: availableNodes.map((node) => node.id),
+      activeRegion,
+      activeStorySegmentId: String(activeStoryContext?.activeSegmentId || ""),
+      activeRecallOwnerKeys: [...(activeRecallOwnerKeys || [])],
+      minimumUsedCandidateCount: Number(options.minimumUsedCandidateCount || 0) || 0,
+    });
+    if (!state.authorityCandidateEnabled) {
+      return {
+        available: false,
+        used: false,
+        candidateNodes: [],
+        diagnostics: {
+          provider: "authority-trivium",
+          candidateCount: 0,
+          filteredCount: 0,
+          searchHits: 0,
+          neighborCount: 0,
+          queryTexts: [],
+          fallbackReason: "authority-vector-unavailable",
+          timings: {
+            total: 0,
+            filter: 0,
+            search: 0,
+            neighbors: 0,
+          },
+        },
+      };
+    }
+    const requestedIds = Array.isArray(state.authorityCandidateNodeIds)
+      ? state.authorityCandidateNodeIds
+      : [];
+    const candidateNodes = availableNodes.filter((node) => requestedIds.includes(node.id));
+    const minimumUsedCandidateCount = Number(options.minimumUsedCandidateCount || 0) || 0;
+    const used =
+      candidateNodes.length > 0 &&
+      candidateNodes.length < availableNodes.length &&
+      candidateNodes.length >= minimumUsedCandidateCount;
+    const diagnostics = {
+      provider: "authority-trivium",
+      candidateCount: candidateNodes.length,
+      filteredCount: candidateNodes.length,
+      searchHits: candidateNodes.length,
+      neighborCount: 0,
+      queryTexts: ["authority-candidate-query"],
+      fallbackReason: used
+        ? ""
+        : candidateNodes.length === 0
+          ? "authority-candidate-empty"
+          : candidateNodes.length >= availableNodes.length
+            ? "authority-candidate-not-reduced"
+            : "authority-candidate-too-small",
+      timings: {
+        total: 1,
+        filter: 0.2,
+        search: 0.4,
+        neighbors: 0,
+      },
+      ...(state.authorityCandidateDiagnostics || {}),
+    };
+    return {
+      available: true,
+      used,
+      candidateNodes: used ? candidateNodes : [],
+      diagnostics,
+    };
+  },
   STORY_TEMPORAL_BUCKETS: {
     CURRENT: "current",
     ADJACENT_PAST: "adjacentPast",
@@ -901,6 +982,44 @@ assert.equal(state.vectorCalls.length, 0);
 assert.equal(state.diffusionCalls.length, 0);
 assert.equal(state.llmCalls.length, 0);
 assert.deepEqual(Array.from(noStageResult.selectedNodeIds), ["rule-2", "rule-1"]);
+
+state.authorityCandidateCalls.length = 0;
+state.authorityCandidateEnabled = true;
+state.authorityCandidateNodeIds = ["rule-2"];
+state.authorityCandidateDiagnostics = null;
+state.vectorCalls.length = 0;
+state.diffusionCalls.length = 0;
+const authorityCandidateResult = await retrieve({
+  graph,
+  userMessage: "只看规则二",
+  recentMessages: ["assistant: 请聚焦最新规则。"],
+  embeddingConfig: {
+    mode: "authority",
+    source: "authority-trivium",
+    failOpen: true,
+  },
+  schema,
+  options: {
+    topK: 2,
+    maxRecallNodes: 2,
+    enableVectorPrefilter: true,
+    enableGraphDiffusion: false,
+    enableLLMRecall: false,
+    authorityCandidateMinCount: 1,
+  },
+  settings: {
+    authorityGraphQueryEnabled: true,
+  },
+});
+assert.equal(state.authorityCandidateCalls.length, 1);
+assert.deepEqual(state.authorityCandidateCalls[0].availableNodeIds, ["rule-1", "rule-2", "rule-3"]);
+assert.equal(authorityCandidateResult.meta.retrieval.authorityCandidateUsed, true);
+assert.equal(authorityCandidateResult.meta.retrieval.authorityCandidateCount, 1);
+assert.equal(authorityCandidateResult.meta.retrieval.rankingNodeCount, 1);
+assert.deepEqual(Array.from(authorityCandidateResult.selectedNodeIds), ["rule-2"]);
+state.authorityCandidateEnabled = false;
+state.authorityCandidateNodeIds = [];
+state.authorityCandidateDiagnostics = null;
 
 state.vectorCalls.length = 0;
 await retrieve({

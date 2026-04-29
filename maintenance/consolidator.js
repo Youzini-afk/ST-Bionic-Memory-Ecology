@@ -29,6 +29,7 @@ import {
   isDirectVectorConfig,
   validateVectorConfig,
 } from "../vector/vector-index.js";
+import { resolveConcurrencyConfig, runLimited } from "../runtime/concurrency.js";
 
 function createAbortError(message = "操作已终止") {
   const error = new Error(message);
@@ -335,6 +336,7 @@ export async function consolidateMemories({
     connections: 0,
     updates: 0,
   };
+  const concurrency = resolveConcurrencyConfig(settings);
 
   if (!newNodeIds || newNodeIds.length === 0) return stats;
   if (!validateVectorConfig(embeddingConfig).valid) {
@@ -394,24 +396,26 @@ export async function consolidateMemories({
       .filter((n) => Array.isArray(n.embedding) && n.embedding.length > 0)
       .map((n) => ({ nodeId: n.id, embedding: n.embedding }));
 
-    for (let i = 0; i < newEntries.length; i++) {
-      throwIfAborted(signal);
-      const entry = newEntries[i];
-      const candidates = candidatePool.filter((c) => {
-        if (c.nodeId === entry.id) return false;
-        const candidateNode = getNode(graph, c.nodeId);
-        return canMergeTemporalScopedMemories(entry.node, candidateNode);
-      });
+    const directNeighborResults = await runLimited(
+      newEntries,
+      async (entry, i) => {
+        throwIfAborted(signal);
+        const candidates = candidatePool.filter((c) => {
+          if (c.nodeId === entry.id) return false;
+          const candidateNode = getNode(graph, c.nodeId);
+          return canMergeTemporalScopedMemories(entry.node, candidateNode);
+        });
 
-      if (queryVectors?.[i] && candidates.length > 0) {
-        // 本地 cosine 搜索（0 API 调用）
-        const neighbors = searchSimilar(
-          queryVectors[i],
-          candidates,
-          neighborCount,
-        );
-        neighborsMap.set(entry.id, neighbors);
-      } else {
+        if (queryVectors?.[i] && candidates.length > 0) {
+          // 本地 cosine 搜索（0 API 调用）
+          const neighbors = searchSimilar(
+            queryVectors[i],
+            candidates,
+            neighborCount,
+          );
+          return { id: entry.id, neighbors };
+        }
+
         // fallback: 逐条 embed
         try {
           const neighbors = await findSimilarNodesByText(
@@ -422,36 +426,52 @@ export async function consolidateMemories({
             activeNodes.filter((n) => n.id !== entry.id),
             signal,
           );
-          neighborsMap.set(entry.id, neighbors);
+          return { id: entry.id, neighbors };
         } catch (e) {
           if (isAbortError(e)) throw e;
           console.warn(`[ST-BME] 近邻查询失败 (${entry.id}):`, e.message);
-          neighborsMap.set(entry.id, []);
+          return { id: entry.id, neighbors: [] };
         }
-      }
+      },
+      {
+        concurrency: concurrency.neighborQueryConcurrency,
+        signal,
+      },
+    );
+    for (const result of directNeighborResults) {
+      neighborsMap.set(result.id, result.neighbors || []);
     }
   } else {
     // ── 后端模式: 逐条 /api/vector/query ──
-    for (let i = 0; i < newEntries.length; i++) {
-      throwIfAborted(signal);
-      const entry = newEntries[i];
-      try {
-        const neighbors = await findSimilarNodesByText(
-          graph,
-          entry.text,
-          embeddingConfig,
-          neighborCount,
-          activeNodes.filter(
-            (n) => n.id !== entry.id && canMergeTemporalScopedMemories(entry.node, n),
-          ),
-          signal,
-        );
-        neighborsMap.set(entry.id, neighbors);
-      } catch (e) {
-        if (isAbortError(e)) throw e;
-        console.warn(`[ST-BME] 近邻查询失败 (${entry.id}):`, e.message);
-        neighborsMap.set(entry.id, []);
-      }
+    const backendNeighborResults = await runLimited(
+      newEntries,
+      async (entry) => {
+        throwIfAborted(signal);
+        try {
+          const neighbors = await findSimilarNodesByText(
+            graph,
+            entry.text,
+            embeddingConfig,
+            neighborCount,
+            activeNodes.filter(
+              (n) => n.id !== entry.id && canMergeTemporalScopedMemories(entry.node, n),
+            ),
+            signal,
+          );
+          return { id: entry.id, neighbors };
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          console.warn(`[ST-BME] 近邻查询失败 (${entry.id}):`, e.message);
+          return { id: entry.id, neighbors: [] };
+        }
+      },
+      {
+        concurrency: concurrency.neighborQueryConcurrency,
+        signal,
+      },
+    );
+    for (const result of backendNeighborResults) {
+      neighborsMap.set(result.id, result.neighbors || []);
     }
   }
 
@@ -522,9 +542,10 @@ export async function consolidateMemories({
     recentMessages: [],
     embeddingConfig,
     signal,
-    activeNodes: activeNodes.filter(
+    activeNodes: getActiveNodes(graph).filter(
       (node) => !newNodeIdSet.has(String(node?.id || "").trim()),
     ),
+    settings,
     rankingOptions: {
       topK: 12,
       diffusionTopK: 48,

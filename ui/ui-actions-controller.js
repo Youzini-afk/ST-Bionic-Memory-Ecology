@@ -587,9 +587,38 @@ export async function onRebuildVectorIndexController(runtime, range = null) {
 
   const vectorController = runtime.beginStageAbortController("vector");
   try {
+    if (
+      !range &&
+      typeof runtime.shouldUseAuthorityJobs === "function" &&
+      runtime.shouldUseAuthorityJobs(config) &&
+      typeof runtime.submitAuthorityVectorRebuildJob === "function"
+    ) {
+      const jobResult = await runtime.submitAuthorityVectorRebuildJob({
+        config,
+        purge: true,
+        range,
+        signal: vectorController.signal,
+      });
+      if (jobResult?.submitted) {
+        runtime.saveGraphToChat({ reason: "authority-vector-rebuild-job-submitted" });
+        runtime.toastr.info(
+          `Authority 向量重建任务已提交：${jobResult.job?.id || "pending"}`,
+        );
+        return;
+      }
+      if (jobResult?.error) {
+        runtime.toastr.warning(
+          `Authority Job 提交失败，已回退本地重建：${jobResult.error}`,
+        );
+      }
+    }
+
     const result = await runtime.syncVectorState({
       force: true,
-      purge: runtime.isBackendVectorConfig(config) && !range,
+      purge:
+        !range &&
+        (runtime.isBackendVectorConfig(config) ||
+          runtime.isAuthorityVectorConfig?.(config)),
       range,
       signal: vectorController.signal,
     });
@@ -1290,6 +1319,58 @@ export async function onDeleteCurrentIdbController(runtime) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);
   }
   return { handledToast: true };
+}
+
+export async function onExportDiagnosticsBundleController(runtime) {
+  const chatId = runtime.getCurrentChatId?.();
+  if (!chatId) {
+    runtime.toastr.warning("当前没有聊天上下文");
+    return { handledToast: true };
+  }
+  if (typeof runtime.exportDiagnosticsBundle !== "function") {
+    runtime.toastr.info("当前运行时没有接入诊断包导出入口");
+    return { handledToast: true, result: { ok: false, reason: "missing-export-hook" } };
+  }
+
+  updateManualActionUiState(
+    runtime,
+    "导出诊断包中",
+    "正在收集运行时与持久化快照，并写入 Authority Blob",
+    "running",
+  );
+  try {
+    const result = await runtime.exportDiagnosticsBundle({
+      chatId,
+      reason: "manual-diagnostics-bundle",
+      refreshHost: true,
+    });
+    if (result?.ok) {
+      updateManualActionUiState(
+        runtime,
+        "诊断包已导出",
+        result?.path || "Authority Blob",
+        "success",
+      );
+      runtime.toastr.success(`诊断包已写入: ${result?.path || "Authority Blob"}`);
+    } else {
+      const reason = String(result?.reason || "authority-diagnostics-unavailable");
+      updateManualActionUiState(runtime, "诊断包未导出", reason, "idle");
+      runtime.toastr.info(`诊断包未导出: ${reason}`);
+    }
+    return { handledToast: true, result };
+  } catch (error) {
+    const message = error?.message || String(error) || "未知错误";
+    updateManualActionUiState(runtime, "诊断包导出失败", message, "error");
+    runtime.toastr.error(`诊断包导出失败: ${message}`);
+    return {
+      handledToast: true,
+      result: {
+        ok: false,
+        reason: "authority-diagnostics-bundle-error",
+        error,
+      },
+    };
+  }
 }
 
 export async function onDeleteAllIdbController(runtime) {

@@ -58,6 +58,11 @@ import {
   getSuggestedBackendModel,
   getVectorIndexStats,
 } from "../vector/vector-index.js";
+import { buildAuthorityConsistencyRepairPlan } from "../maintenance/authority-consistency.js";
+import {
+  getMaintenanceExecutionModeLevel,
+  normalizeMaintenanceExecutionMode,
+} from "../runtime/concurrency.js";
 
 let defaultPromptCache = null;
 
@@ -348,6 +353,9 @@ let fetchedDirectEmbeddingModels = [];
 let viewportSyncBound = false;
 let popupRuntimePromise = null;
 const GRAPH_LIVE_REFRESH_THROTTLE_MS = 240;
+let _pendingRafRefreshId = null;
+let _lastRafRefreshAt = 0;
+const PANEL_LIVE_STATE_REFRESH_MIN_MS = 80;
 let pendingVisibleGraphRefreshTimer = null;
 let pendingVisibleGraphRefreshToken = "";
 let pendingVisibleGraphRefreshForce = false;
@@ -1277,6 +1285,30 @@ export function updatePanelTheme(themeName) {
 
 export function refreshLiveState() {
   if (!overlayEl?.classList.contains("active")) return;
+
+  const now = Date.now();
+  const elapsed = now - _lastRafRefreshAt;
+
+  if (elapsed < PANEL_LIVE_STATE_REFRESH_MIN_MS) {
+    if (!_pendingRafRefreshId) {
+      _pendingRafRefreshId = requestAnimationFrame(() => {
+        _pendingRafRefreshId = null;
+        _lastRafRefreshAt = Date.now();
+        _doRefreshLiveState();
+      });
+    }
+    return;
+  }
+
+  if (_pendingRafRefreshId) {
+    cancelAnimationFrame(_pendingRafRefreshId);
+    _pendingRafRefreshId = null;
+  }
+  _lastRafRefreshAt = now;
+  _doRefreshLiveState();
+}
+
+function _doRefreshLiveState() {
   _applyGraphRuntimeConfig(_getSettings?.() || {});
   _refreshRuntimeStatus();
   _refreshNativeRolloutStatusUi(_getSettings?.() || {});
@@ -1511,6 +1543,130 @@ function _resolvePipelineStatus(statusObj) {
   else if (level === "error") color = "red";
   else if (text.toLowerCase().includes("running") || text.toLowerCase().includes("进行中") || text.includes("正在")) color = "cyan";
   return { label: text || "IDLE", color, detail: meta };
+}
+
+function _buildAuthorityJobUiState(loadInfo = _getGraphPersistenceSnapshot()) {
+  const snapshot =
+    loadInfo && typeof loadInfo === "object" && !Array.isArray(loadInfo)
+      ? loadInfo
+      : {};
+  const job =
+    snapshot.authorityLastJob &&
+    typeof snapshot.authorityLastJob === "object" &&
+    !Array.isArray(snapshot.authorityLastJob)
+      ? snapshot.authorityLastJob
+      : {};
+  const jobId = String(job.id || snapshot.authorityLastJobId || "").trim();
+  const kind = String(job.kind || snapshot.authorityLastJobKind || "").trim();
+  const status = String(
+    job.status || snapshot.authorityLastJobStatus || snapshot.authorityJobQueueState || "",
+  ).trim();
+  const error = String(job.error || snapshot.authorityLastJobError || "").trim();
+  const progressRaw = Number(job.progress ?? snapshot.authorityLastJobProgress);
+  const progress = Number.isFinite(progressRaw)
+    ? Math.max(0, Math.min(1, progressRaw))
+    : 0;
+  const queueState = String(snapshot.authorityJobQueueState || "").trim() ||
+    (error
+      ? "error"
+      : status === "completed" || status === "succeeded" || status === "success"
+        ? "success"
+        : status === "failed" || status === "error" || status === "timeout"
+          ? "failed"
+          : jobId
+            ? "running"
+            : "idle");
+  const progressText = progress > 0 ? `${Math.round(progress * 100)}%` : "";
+  const detail = [
+    jobId ? `job ${jobId}` : "",
+    kind,
+    status || queueState,
+    progressText,
+    error,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    jobId,
+    kind,
+    status,
+    error,
+    progress,
+    progressText,
+    queueState,
+    label: jobId
+      ? queueState === "success"
+        ? "已完成"
+        : queueState === "failed" || queueState === "error"
+          ? "失败"
+          : queueState === "running"
+            ? "运行中"
+            : "空闲"
+      : snapshot.authorityJobsReady
+        ? "空闲"
+        : "未就绪",
+    detail:
+      detail ||
+      (snapshot.authorityJobsReady ? "Authority Jobs ready" : "Authority Jobs unavailable"),
+    canRequeue: Boolean(
+      jobId && (queueState === "failed" || queueState === "error"),
+    ),
+  };
+}
+
+function _buildAuthorityRecentJobsUiState(loadInfo = _getGraphPersistenceSnapshot()) {
+  const snapshot =
+    loadInfo && typeof loadInfo === "object" && !Array.isArray(loadInfo)
+      ? loadInfo
+      : {};
+  const jobs = Array.isArray(snapshot.authorityRecentJobs)
+    ? snapshot.authorityRecentJobs
+    : [];
+  return {
+    jobs: jobs.map((job) => {
+      const normalizedJob =
+        job && typeof job === "object" && !Array.isArray(job) ? job : {};
+      const jobId = String(normalizedJob.id || "").trim();
+      const kind = String(normalizedJob.kind || "").trim();
+      const status = String(normalizedJob.status || "").trim();
+      const error = String(normalizedJob.error || "").trim();
+      const progressRaw = Number(normalizedJob.progress);
+      const progress = Number.isFinite(progressRaw)
+        ? Math.max(0, Math.min(1, progressRaw))
+        : 0;
+      const queueState = String(normalizedJob.queueState || "").trim() ||
+        (error
+          ? "error"
+          : status === "completed" || status === "succeeded" || status === "success"
+            ? "success"
+            : status === "failed" || status === "error" || status === "timeout"
+              ? "failed"
+              : jobId
+                ? "running"
+                : "idle");
+      const progressText = progress > 0 ? `${Math.round(progress * 100)}%` : "";
+      return {
+        jobId,
+        kind,
+        status,
+        error,
+        progress,
+        queueState,
+        updatedAt: String(normalizedJob.updatedAt || ""),
+        updatedAtLabel: _formatTaskProfileTime(normalizedJob.updatedAt),
+        detail: [kind, status || queueState, progressText, error]
+          .filter(Boolean)
+          .join(" · "),
+      };
+    }),
+    updatedAt: String(snapshot.authorityRecentJobsUpdatedAt || ""),
+    updatedAtLabel: snapshot.authorityRecentJobsUpdatedAt
+      ? _formatTaskProfileTime(snapshot.authorityRecentJobsUpdatedAt)
+      : "未刷新",
+    error: String(snapshot.authorityRecentJobsError || "").trim(),
+    hasMore: Boolean(snapshot.authorityRecentJobsHasMore),
+    nextCursor: String(snapshot.authorityRecentJobsNextCursor || ""),
+  };
 }
 
 function _readPersistenceDiagnosticObject(snapshot = null) {
@@ -1957,10 +2113,20 @@ function _refreshTaskPipelineOverview() {
   const graph = _getGraph?.() || {};
   const historyState = graph.runtimeState?.historyState || graph.historyState || {};
   const loadInfo = _getGraphPersistenceSnapshot();
+  const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
+  const authorityRecentJobsUi = _buildAuthorityRecentJobsUiState(loadInfo);
 
   const extraction = _resolvePipelineStatus(_getLastExtractionStatus?.());
   const vector = _resolvePipelineStatus(_getLastVectorStatus?.());
   const recall = _resolvePipelineStatus(_getLastRecallStatus?.());
+  const authorityJobStatus = _resolvePipelineStatus({
+    text: authorityJobUi.label,
+    meta: authorityJobUi.detail,
+    level:
+      authorityJobUi.queueState === "failed" || authorityJobUi.queueState === "error"
+        ? "error"
+        : "info",
+  });
   const persistLevel = loadInfo.loadState === "loaded" ? "info" : loadInfo.loadState === "loading" ? "info" : "warn";
   const persistenceMetaParts = [`rev ${loadInfo.revision || 0}`];
   const pipelineLoadMeta = _formatPipelineLoadDiagnosticsMeta(
@@ -2026,7 +2192,12 @@ function _refreshTaskPipelineOverview() {
 
   const statusRows = [
     { label: "提取", color: extraction.color, value: extraction.label + (extraction.detail ? ` — ${extraction.detail}` : "") },
-    { label: "向量", color: vector.color, value: vector.label + (vector.detail ? ` — ${vector.detail}` : "") },
+    {
+      label: "向量",
+      color: vector.color,
+      value: vector.label + (vector.detail ? ` — ${vector.detail}` : ""),
+    },
+    { label: "Authority Job", color: authorityJobStatus.color, value: authorityJobUi.detail },
     { label: "召回", color: recall.color, value: recall.label + (recall.detail ? ` — ${recall.detail}` : "") },
     { label: "持久化", color: persistence.color, value: persistence.label + (persistence.detail ? ` — ${persistence.detail}` : "") },
   ];
@@ -2041,10 +2212,73 @@ function _refreshTaskPipelineOverview() {
       </div>
     </div>`;
 
+  const authorityJobProgressColor =
+    authorityJobUi.queueState === "success"
+      ? "#2ecc71"
+      : authorityJobUi.queueState === "failed" || authorityJobUi.queueState === "error"
+        ? "#e74c3c"
+        : authorityJobUi.queueState === "running"
+          ? "#00d4ff"
+          : "#7f8c8d";
+  const authorityJobProgressWidth = authorityJobUi.queueState === "success"
+    ? 100
+    : authorityJobUi.queueState === "running"
+      ? Math.max(8, Math.round(authorityJobUi.progress * 100))
+      : Math.round(authorityJobUi.progress * 100);
+  const authorityJobActions = [
+    typeof _actionHandlers.refreshAuthorityJobs === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-job-action="refresh">刷新 Jobs</button>`
+      : "",
+    authorityJobUi.canRequeue && typeof _actionHandlers.requeueAuthorityJob === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-job-action="requeue" data-job-id="${_escHtml(authorityJobUi.jobId)}">重试 Authority Job</button>`
+      : "",
+  ].filter(Boolean).join("");
+  const authorityRecentJobsHtml = authorityRecentJobsUi.jobs.length
+    ? `
+      <div style="margin-top:12px;display:flex;flex-direction:column;gap:8px">
+        ${authorityRecentJobsUi.jobs.map((job) => {
+          const dotColor = job.queueState === "success"
+            ? "#2ecc71"
+            : job.queueState === "failed" || job.queueState === "error"
+              ? "#e74c3c"
+              : job.queueState === "running"
+                ? "#00d4ff"
+                : "#7f8c8d";
+          return `
+            <div style="padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <div class="bme-status-row-label"><span class="bme-sdot" style="background:${dotColor}"></span>${_escHtml(job.jobId ? `job ${job.jobId}` : job.kind || "job")}</div>
+                <div style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(job.updatedAtLabel)}</div>
+              </div>
+              <div class="bme-config-help" style="margin-top:4px">${_escHtml(job.detail || job.queueState || "—")}</div>
+            </div>`;
+        }).join("")}
+      </div>`
+    : `<div class="bme-config-help" style="margin-top:12px">${_escHtml(
+        authorityRecentJobsUi.error
+          ? `最近任务刷新失败：${authorityRecentJobsUi.error}`
+          : authorityRecentJobsUi.updatedAt
+            ? `最近任务为空 · ${authorityRecentJobsUi.updatedAtLabel}`
+            : "尚未拉取 recent jobs"
+      )}</div>`;
+  const authorityRecentJobsFooter = authorityRecentJobsUi.jobs.length || authorityRecentJobsUi.hasMore || authorityRecentJobsUi.error
+    ? `<div class="bme-config-help" style="margin-top:8px">${_escHtml(
+        authorityRecentJobsUi.error
+          ? authorityRecentJobsUi.error
+          : authorityRecentJobsUi.hasMore
+            ? `仅展示最近 ${authorityRecentJobsUi.jobs.length} 条，服务端仍有更多记录`
+            : `最近刷新：${authorityRecentJobsUi.updatedAtLabel}`
+      )}</div>`
+    : "";
+  const authorityJobActionsRow = authorityJobActions
+    ? `<div style="margin-top:10px;display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">${authorityJobActions}</div>`
+    : "";
+
   el.innerHTML = `
     <div class="bme-pipeline-grid">
       ${pipelineCard("提取 Extraction", extraction, "scissors")}
       ${pipelineCard("向量 Vector", vector, "share-nodes")}
+      ${pipelineCard("Authority Jobs", authorityJobStatus, "server")}
       ${pipelineCard("召回 Recall", recall, "magnifying-glass")}
       ${pipelineCard("持久化 Persistence", persistence, "database")}
     </div>
@@ -2065,7 +2299,64 @@ function _refreshTaskPipelineOverview() {
         </div>
       `).join("")}
     </div>
+    <div class="bme-batch-progress" style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span style="font-size:12px;font-weight:700;color:var(--bme-on-surface)"><i class="fa-solid fa-server" style="margin-right:6px;color:var(--bme-primary)"></i>Authority Job</span>
+        <span style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(authorityJobUi.label)}</span>
+      </div>
+      <div class="bme-config-help" style="margin-bottom:10px">${_escHtml(authorityJobUi.detail)}</div>
+      <div style="height:8px;border-radius:999px;background:rgba(255,255,255,0.08);overflow:hidden">
+        <div style="height:100%;width:${authorityJobProgressWidth}%;background:${authorityJobProgressColor};transition:width .2s ease"></div>
+      </div>
+      ${authorityJobActionsRow}
+      ${authorityRecentJobsHtml}
+      ${authorityRecentJobsFooter}
+    </div>
   `;
+
+  el
+    .querySelectorAll('[data-authority-job-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityJobAction || "").trim();
+      const jobId = String(button?.dataset?.jobId || "").trim();
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        if (action === "refresh") {
+          if (typeof _actionHandlers.refreshAuthorityJobs !== "function") return;
+          toastr.info("Authority Jobs 刷新中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.refreshAuthorityJobs();
+          if (result?.success) {
+            toastr.success(`Authority Jobs 已刷新：${(result.jobs || []).length} 条`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Jobs 刷新失败：${result?.error || result?.reason || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "requeue") {
+          if (!jobId || typeof _actionHandlers.requeueAuthorityJob !== "function") return;
+          toastr.info("Authority Job 重试中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.requeueAuthorityJob(jobId);
+          if (result?.success) {
+            toastr.success(`Authority Job 已重试：${result?.job?.id || jobId}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Job 重试失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else {
+          return;
+        }
+      } catch (error) {
+        toastr.error(
+          action === "refresh"
+            ? `Authority Jobs 刷新失败: ${error?.message || error}`
+            : `Authority Job 重试失败: ${error?.message || error}`,
+          "ST-BME",
+        );
+      } finally {
+        button.disabled = false;
+        _refreshDashboard();
+        _refreshTaskMonitor();
+      }
+    }));
 }
 
 // ---------- Task Timeline ----------
@@ -2784,6 +3075,168 @@ function _refreshTaskPersistence() {
   const extractionCountLabel = Number.isFinite(Number(historyState?.extractionCount))
     ? String(Number(historyState.extractionCount))
     : "0";
+  const authorityAudit =
+    ps.authorityConsistencyAudit &&
+    typeof ps.authorityConsistencyAudit === "object" &&
+    !Array.isArray(ps.authorityConsistencyAudit)
+      ? ps.authorityConsistencyAudit
+      : null;
+  const authorityAuditSummary = authorityAudit?.summary || {
+    level: String(ps.authorityConsistencyState || "idle"),
+    label:
+      ps.authorityConsistencyState === "success"
+        ? "Authority 工件已对齐"
+        : ps.authorityConsistencyState === "warning"
+          ? "存在待处理漂移"
+          : ps.authorityConsistencyState === "error"
+            ? "Authority 审计失败"
+            : ps.authorityConsistencyState === "running"
+              ? "Authority 审计中"
+              : "等待审计",
+    detail: String(ps.authorityConsistencyError || "尚未运行一致性审计"),
+  };
+  const authorityAuditSqlRevision = Number.isFinite(Number(authorityAudit?.sql?.revision))
+    ? String(Number(authorityAudit.sql.revision))
+    : "—";
+  const authorityAuditTriviumRevision = Number.isFinite(Number(authorityAudit?.trivium?.revision))
+    ? String(Number(authorityAudit.trivium.revision))
+    : "—";
+  const authorityAuditBlobRevision = Number.isFinite(Number(authorityAudit?.blob?.revision))
+    ? String(Number(authorityAudit.blob.revision))
+    : Number.isFinite(Number(ps.authorityBlobCheckpointRevision)) && Number(ps.authorityBlobCheckpointRevision) > 0
+      ? String(Number(ps.authorityBlobCheckpointRevision))
+      : "—";
+  const authorityAuditBlobPath = String(
+    authorityAudit?.blob?.path || ps.authorityBlobCheckpointPath || "",
+  ).trim() || "—";
+  const authorityAuditIssuesLabel = Array.isArray(authorityAudit?.issues) && authorityAudit.issues.length
+    ? authorityAudit.issues.map((issue) => issue.message).filter(Boolean).join(" / ")
+    : authorityAuditSummary.detail || "—";
+  const authorityAuditActionsLabel = Array.isArray(authorityAudit?.actions) && authorityAudit.actions.length
+    ? authorityAudit.actions.join(" · ")
+    : "—";
+  const authorityAuditUpdatedLabel = ps.authorityConsistencyUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityConsistencyUpdatedAt)
+    : "—";
+  const authorityRestoreResult =
+    ps.authorityCheckpointRestoreResult &&
+    typeof ps.authorityCheckpointRestoreResult === "object" &&
+    !Array.isArray(ps.authorityCheckpointRestoreResult)
+      ? ps.authorityCheckpointRestoreResult
+      : null;
+  const authorityRestoreState = String(ps.authorityCheckpointRestoreState || "idle").trim();
+  const authorityRestoreLabel =
+    authorityRestoreState === "success"
+      ? "已恢复"
+      : authorityRestoreState === "error"
+        ? "恢复失败"
+        : authorityRestoreState === "running"
+          ? "恢复中"
+          : "未执行";
+  const authorityRestoreUpdatedLabel = ps.authorityCheckpointRestoreUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityCheckpointRestoreUpdatedAt)
+    : "—";
+  const authorityRepairResult =
+    ps.authorityRepairResult &&
+    typeof ps.authorityRepairResult === "object" &&
+    !Array.isArray(ps.authorityRepairResult)
+      ? ps.authorityRepairResult
+      : null;
+  const authorityRepairPlan = buildAuthorityConsistencyRepairPlan(ps.authorityConsistencyAudit);
+  const authorityRepairState = String(ps.authorityRepairState || "idle").trim();
+  const authorityRepairHandoffJobId = String(
+    authorityRepairResult?.steps?.find((step) => step?.submitted && step?.job?.id)?.job?.id || "",
+  ).trim();
+  const authorityRepairLabel =
+    authorityRepairState === "success"
+      ? "修复完成"
+      : authorityRepairState === "error"
+        ? "修复失败"
+        : authorityRepairState === "running"
+          ? authorityRepairResult?.handoffRequired
+            ? "等待 Job 交接"
+            : "修复中"
+          : "未执行";
+  const authorityRepairUpdatedLabel = ps.authorityRepairUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityRepairUpdatedAt)
+    : "—";
+  const authorityRepairPlanLabel = authorityRepairPlan.ok
+    ? authorityRepairPlan.steps.map((step) => step.label).join(" → ")
+    : authorityRepairPlan.summary.label || "当前无需编排修复";
+  const authorityRepairResultLabel = authorityRepairResult?.steps?.length
+    ? `${Number(authorityRepairResult.steps.length || 0)} 步${
+        authorityRepairResult?.handoffRequired
+          ? authorityRepairHandoffJobId
+            ? ` · job ${authorityRepairHandoffJobId}`
+            : " · 已交接异步 Job"
+          : ""
+      }`
+    : "—";
+  const authorityBaseline =
+    ps.authorityPerformanceBaseline &&
+    typeof ps.authorityPerformanceBaseline === "object" &&
+    !Array.isArray(ps.authorityPerformanceBaseline)
+      ? ps.authorityPerformanceBaseline
+      : null;
+  const authorityBaselineComparison =
+    ps.authorityPerformanceBaselineComparison &&
+    typeof ps.authorityPerformanceBaselineComparison === "object" &&
+    !Array.isArray(ps.authorityPerformanceBaselineComparison)
+      ? ps.authorityPerformanceBaselineComparison
+      : null;
+  const authorityBaselineUpdatedLabel = ps.authorityPerformanceBaselineUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityPerformanceBaselineUpdatedAt)
+    : authorityBaseline?.capturedAt
+      ? _formatTaskProfileTime(authorityBaseline.capturedAt)
+      : "—";
+  const authorityBaselineLoadLabel = authorityBaseline?.load
+    ? `${_formatDurationMs(authorityBaseline.load.totalMs)} / hydrate ${_formatDurationMs(authorityBaseline.load.hydrateMs)}`
+    : "—";
+  const authorityBaselinePersistLabel = authorityBaseline?.persist
+    ? `${_formatDurationMs(authorityBaseline.persist.totalMs)} / commit ${_formatDurationMs(authorityBaseline.persist.commitMs)}`
+    : "—";
+  const authorityBaselineSoakLabel = authorityBaseline?.soak
+    ? `${Number(authorityBaseline.soak.recentJobCount || 0)} recent / ${Number(authorityBaseline.soak.failedJobCount || 0)} failed / ${Number(authorityBaseline.soak.runningJobCount || 0)} running`
+    : "—";
+  const authorityBaselineGraphLabel = authorityBaseline
+    ? `rev ${Number(authorityBaseline.graphRevision || 0)} · ${Number(authorityBaseline.graphNodeCount || 0)} 节点 / ${Number(authorityBaseline.graphEdgeCount || 0)} 边`
+    : "—";
+  const authorityBaselinePreviousLabel = authorityBaselineComparison?.previousCapturedAt
+    ? _formatTaskProfileTime(authorityBaselineComparison.previousCapturedAt)
+    : "—";
+  const authorityBaselineDeltaLoadLabel = authorityBaselineComparison?.load
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.load.totalMs, _formatDurationMs)} / hydrate ${_formatSignedMetricDelta(authorityBaselineComparison.load.hydrateMs, _formatDurationMs)}`
+    : "—";
+  const authorityBaselineDeltaPersistLabel = authorityBaselineComparison?.persist
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.persist.totalMs, _formatDurationMs)} / commit ${_formatSignedMetricDelta(authorityBaselineComparison.persist.commitMs, _formatDurationMs)}`
+    : "—";
+  const authorityBaselineDeltaSoakLabel = authorityBaselineComparison?.soak
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.soak.recentJobCount, null, "0")} recent / ${_formatSignedMetricDelta(authorityBaselineComparison.soak.failedJobCount, null, "0")} failed / ${_formatSignedMetricDelta(authorityBaselineComparison.soak.runningJobCount, null, "0")} running`
+    : "—";
+  const authorityBaselineDeltaGraphLabel = authorityBaselineComparison
+    ? `${_formatSignedMetricDelta(authorityBaselineComparison.deltaGraphRevision, null, "0")} rev · ${_formatSignedMetricDelta(authorityBaselineComparison.deltaNodeCount, null, "0")} 节点 / ${_formatSignedMetricDelta(authorityBaselineComparison.deltaEdgeCount, null, "0")} 边`
+    : "—";
+  const authorityBundlePathLabel = String(ps.authorityDiagnosticsBundlePath || "").trim() || "—";
+  const authorityBundleUpdatedLabel = ps.authorityDiagnosticsBundleUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityDiagnosticsBundleUpdatedAt)
+    : "—";
+  const authorityBundleSizeLabel = _formatDataSizeBytes(ps.authorityDiagnosticsBundleSize);
+  const authorityArtifactEntries = Array.isArray(ps.authorityDiagnosticsArtifacts)
+    ? ps.authorityDiagnosticsArtifacts.filter((entry) => entry && typeof entry === "object")
+    : [];
+  const authorityArtifactManifestPathLabel = String(ps.authorityDiagnosticsManifestPath || "").trim() || "—";
+  const authorityArtifactHistoryUpdatedLabel = ps.authorityDiagnosticsArtifactsUpdatedAt
+    ? _formatTaskProfileTime(ps.authorityDiagnosticsArtifactsUpdatedAt)
+    : "—";
+  const authorityJobTrackingLabel = (() => {
+    const mode = String(ps.authorityJobTrackingMode || "idle").trim() || "idle";
+    const reason = String(ps.authorityJobTrackingReason || "").trim();
+    return reason ? `${mode} · ${reason}` : mode;
+  })();
+  const authorityArtifactRetentionLabel = `最近 ${Number(ps.authorityDiagnosticsRetentionLimit || 0) || 0} 条`;
+  const authorityArtifactPruneLabel = ps.authorityDiagnosticsLastPrunedAt
+    ? `${Number(ps.authorityDiagnosticsLastPrunedCount || 0)} 条 · ${_formatTaskProfileTime(ps.authorityDiagnosticsLastPrunedAt)}`
+    : "未触发";
   const activeRegionLabel = String(
     historyState?.activeRegion ||
       historyState?.lastExtractedRegion ||
@@ -2879,6 +3332,113 @@ function _refreshTaskPersistence() {
     ..._buildLoadDiagnosticRows(loadDiagnostics),
     ..._buildPersistDeltaDiagnosticRows(persistDeltaDiagnostics),
   );
+  const authorityRows = [
+    ["审计状态", authorityAuditSummary.label],
+    ["SQL rev", authorityAuditSqlRevision],
+    ["Trivium rev", authorityAuditTriviumRevision],
+    ["Blob rev", authorityAuditBlobRevision],
+    ["Blob path", authorityAuditBlobPath],
+    ["建议动作", authorityAuditActionsLabel],
+    ["建议修复", authorityRepairPlanLabel],
+    ["修复状态", authorityRepairLabel],
+    ["修复结果", authorityRepairResultLabel],
+    ["最近审计", authorityAuditUpdatedLabel],
+    ["最近修复", authorityRepairUpdatedLabel],
+    ["恢复状态", authorityRestoreLabel],
+    ["恢复结果", authorityRestoreResult?.revision ? `rev ${Number(authorityRestoreResult.revision)}` : "—"],
+    ["最近恢复", authorityRestoreUpdatedLabel],
+    ["Job 追踪", authorityJobTrackingLabel],
+    ["Baseline 图谱", authorityBaselineGraphLabel],
+    ["Baseline Load", authorityBaselineLoadLabel],
+    ["Baseline Persist", authorityBaselinePersistLabel],
+    ["Baseline Soak", authorityBaselineSoakLabel],
+    ["对比基线", authorityBaselinePreviousLabel],
+    ["Delta 图谱", authorityBaselineDeltaGraphLabel],
+    ["Delta Load", authorityBaselineDeltaLoadLabel],
+    ["Delta Persist", authorityBaselineDeltaPersistLabel],
+    ["Delta Soak", authorityBaselineDeltaSoakLabel],
+    ["最近 Baseline", authorityBaselineUpdatedLabel],
+    ["诊断包路径", authorityBundlePathLabel],
+    ["诊断包大小", authorityBundleSizeLabel],
+    ["诊断包时间", authorityBundleUpdatedLabel],
+    ["诊断包原因", ps.authorityDiagnosticsBundleReason || "—"],
+    ["诊断清单", authorityArtifactManifestPathLabel],
+    ["工件记录", `${authorityArtifactEntries.length} 条`],
+    ["Retention", authorityArtifactRetentionLabel],
+    ["最近 Prune", authorityArtifactPruneLabel],
+    ["Prune 错误", ps.authorityDiagnosticsLastPruneError || ""],
+    ["列表刷新", authorityArtifactHistoryUpdatedLabel],
+  ];
+  const authorityAuditActions = Array.isArray(ps.authorityConsistencyAudit?.actions)
+    ? ps.authorityConsistencyAudit.actions.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const showAuthorityRepairAction =
+    authorityRepairPlan.ok &&
+    authorityRepairPlan.blockedIssueCodes.length === 0;
+  const showAuthorityCheckpointWriteAction =
+    authorityAuditActions.includes("write-authority-checkpoint") ||
+    (!ps.authorityBlobCheckpointPath && ps.authorityBlobReady);
+  const showAuthorityTriviumRebuildAction =
+    authorityAuditActions.includes("rebuild-authority-trivium");
+  const authorityActionButtons = [
+    typeof _actionHandlers.runAuthorityConsistencyAudit === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="audit">执行 Authority 审计</button>`
+      : "",
+    showAuthorityRepairAction && typeof _actionHandlers.runAuthorityConsistencyRepairPlan === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="repair-plan">执行建议修复</button>`
+      : "",
+    showAuthorityCheckpointWriteAction && typeof _actionHandlers.writeAuthorityCheckpoint === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="checkpoint">写入当前 Checkpoint</button>`
+      : "",
+    typeof _actionHandlers.restoreAuthorityCheckpoint === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="restore">从 Checkpoint 恢复</button>`
+      : "",
+    showAuthorityTriviumRebuildAction && typeof _actionHandlers.rebuildVectorIndex === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="rebuild-trivium">重建 Authority Trivium</button>`
+      : "",
+    typeof _actionHandlers.captureAuthorityPerformanceBaseline === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="baseline">捕获 Perf Baseline</button>`
+      : "",
+    typeof _actionHandlers.exportDiagnosticsBundle === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="bundle">导出诊断包</button>`
+      : "",
+    typeof _actionHandlers.refreshAuthorityDiagnosticsArtifacts === "function"
+      ? `<button class="bme-config-secondary-btn" type="button" data-authority-persistence-action="artifacts-refresh">刷新工件列表</button>`
+      : "",
+  ].filter(Boolean).join("");
+  const authorityArtifactsHtml = authorityArtifactEntries.length
+    ? `
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+        ${authorityArtifactEntries.map((entry) => {
+          const path = String(entry?.path || "").trim();
+          const updatedLabel = entry?.updatedAt || entry?.createdAt
+            ? _formatTaskProfileTime(entry.updatedAt || entry.createdAt)
+            : "未记录";
+          const reasonLabel = String(entry?.reason || "diagnostics-bundle").trim() || "diagnostics-bundle";
+          const sizeLabel = _formatDataSizeBytes(entry?.size);
+          return `
+            <div style="padding:8px 10px;border-radius:10px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05)">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+                <div class="bme-status-row-label">${_escHtml(reasonLabel)}</div>
+                <div style="font-size:10px;color:var(--bme-on-surface-dim)">${_escHtml(updatedLabel)}</div>
+              </div>
+              <div class="bme-config-help" style="margin-top:4px;word-break:break-all">${_escHtml(path)}</div>
+              <div class="bme-config-help" style="margin-top:4px">${_escHtml(sizeLabel)} · ${_escHtml(reasonLabel)}</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="copy-path" data-authority-artifact-path="${_escAttr(path)}">复制路径</button>
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="download" data-authority-artifact-path="${_escAttr(path)}" data-authority-artifact-reason="${_escAttr(reasonLabel)}">下载 JSON</button>
+                <button class="bme-config-secondary-btn" type="button" data-authority-diagnostics-action="delete" data-authority-artifact-path="${_escAttr(path)}">删除</button>
+              </div>
+            </div>`;
+        }).join("")}
+      </div>`
+    : `<div class="bme-config-help" style="margin-top:12px">${_escHtml(
+        ps.authorityDiagnosticsArtifactsError
+          ? `工件列表刷新失败：${ps.authorityDiagnosticsArtifactsError}`
+          : ps.authorityDiagnosticsArtifactsUpdatedAt
+            ? "最近工件列表已刷新，但暂无可用诊断包记录"
+            : "尚未刷新 diagnostics artifact 列表"
+      )}</div>`;
 
   el.innerHTML = `
     <div class="bme-persist-grid">
@@ -2908,7 +3468,175 @@ function _refreshTaskPersistence() {
         ${renderRows(runtimeRows)}
       </div>
     </div>
+    <div class="bme-persist-kv" style="margin-top:12px">
+      <div style="font-size:12px;font-weight:700;color:var(--bme-on-surface);margin-bottom:10px"><i class="fa-solid fa-shield-halved" style="margin-right:6px;color:var(--bme-primary)"></i>Authority 一致性 / Checkpoint</div>
+      <div class="bme-config-help" style="margin-bottom:12px">
+        审计当前 chat 的 Authority SQL / Trivium / Blob checkpoint 是否同 revision 前进；restore 会把 Blob checkpoint 回灌到 Authority SQL，并在 Authority 主存储启用时触发当前聊天重载。
+      </div>
+      ${authorityActionButtons ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">${authorityActionButtons}</div>` : ""}
+      ${renderRowsTwoColumn(authorityRows)}
+      <div class="bme-config-help" style="margin-top:10px">${_escHtml(authorityAuditSummary.detail || "—")}</div>
+      <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityAuditIssuesLabel)}</div>
+      <div class="bme-config-help" style="margin-top:6px">${_escHtml(authorityRepairPlan.summary.detail || "—")}</div>
+      <div class="bme-config-help" style="margin-top:10px">最近 diagnostics artifacts</div>
+      ${authorityArtifactsHtml}
+      ${ps.authorityRepairError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityRepairError)}</div>` : ""}
+      ${ps.authorityCheckpointRestoreError ? `<div class="bme-config-help" style="margin-top:6px;color:#e74c3c">${_escHtml(ps.authorityCheckpointRestoreError)}</div>` : ""}
+    </div>
   `;
+
+  el
+    .querySelectorAll('[data-authority-persistence-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityPersistenceAction || "").trim();
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        if (action === "audit") {
+          if (typeof _actionHandlers.runAuthorityConsistencyAudit !== "function") return;
+          toastr.info("Authority 一致性审计中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.runAuthorityConsistencyAudit();
+          if (result?.success) {
+            toastr.success(result?.audit?.summary?.label || "Authority 审计完成", "ST-BME");
+          } else {
+            toastr.warning(`Authority 审计失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "repair-plan") {
+          if (typeof _actionHandlers.runAuthorityConsistencyRepairPlan !== "function") return;
+          if (authorityRepairPlan.requiresConfirmation) {
+            const confirmed = globalThis.confirm?.(
+              `建议修复将按以下顺序执行：\n${authorityRepairPlan.steps.map((step, index) => `${index + 1}. ${step.label}`).join("\n")}\n\n其中包含从 Blob Checkpoint 恢复 SQL，确定继续？`,
+            );
+            if (!confirmed) return;
+          }
+          toastr.info("Authority 建议修复执行中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.runAuthorityConsistencyRepairPlan();
+          if (result?.success) {
+            const stepCount = Number(result?.repairResult?.steps?.length || result?.results?.length || 0);
+            if (result?.handoffRequired || result?.repairResult?.handoffRequired) {
+              toastr.success(`Authority 建议修复已交接异步 Job${stepCount > 0 ? `（${stepCount} 步）` : ""}`, "ST-BME");
+            } else {
+              toastr.success(`Authority 建议修复已完成${stepCount > 0 ? `（${stepCount} 步）` : ""}`, "ST-BME");
+            }
+          } else {
+            toastr.warning(`Authority 建议修复失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "checkpoint") {
+          if (typeof _actionHandlers.writeAuthorityCheckpoint !== "function") return;
+          toastr.info("Authority Checkpoint 写入中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.writeAuthorityCheckpoint();
+          if (result?.success) {
+            toastr.success(`Authority Checkpoint 已写入：rev ${Number(result?.result?.checkpointRevision || result?.result?.revision || 0) || "?"}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Checkpoint 写入失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "restore") {
+          if (typeof _actionHandlers.restoreAuthorityCheckpoint !== "function") return;
+          toastr.info("Authority Checkpoint 恢复中…", "ST-BME", { timeOut: 2000 });
+          const result = await _actionHandlers.restoreAuthorityCheckpoint();
+          if (result?.success) {
+            toastr.success(`Authority Checkpoint 已恢复：rev ${Number(result?.result?.revision || 0) || "?"}`, "ST-BME");
+          } else {
+            toastr.warning(`Authority Checkpoint 恢复失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "rebuild-trivium") {
+          if (typeof _actionHandlers.rebuildVectorIndex !== "function") return;
+          await _actionHandlers.rebuildVectorIndex();
+          return;
+        } else if (action === "baseline") {
+          if (typeof _actionHandlers.captureAuthorityPerformanceBaseline !== "function") return;
+          const result = await _actionHandlers.captureAuthorityPerformanceBaseline();
+          if (result?.ok) {
+            toastr.success("Authority Perf Baseline 已捕获", "ST-BME");
+          } else {
+            toastr.warning(`Authority Perf Baseline 捕获失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        } else if (action === "bundle") {
+          if (typeof _actionHandlers.exportDiagnosticsBundle !== "function") return;
+          const result = await _actionHandlers.exportDiagnosticsBundle();
+          if (result?.handledToast) {
+            return;
+          }
+        } else if (action === "artifacts-refresh") {
+          if (typeof _actionHandlers.refreshAuthorityDiagnosticsArtifacts !== "function") return;
+          const result = await _actionHandlers.refreshAuthorityDiagnosticsArtifacts();
+          if (result?.ok) {
+            toastr.success(`已刷新 diagnostics artifact 列表（${Number(result?.entries?.length || 0)} 条）`, "ST-BME");
+          } else {
+            toastr.warning(`diagnostics artifact 列表刷新失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        }
+      } catch (error) {
+        toastr.error(
+          action === "restore"
+            ? `Authority Checkpoint 恢复失败: ${error?.message || error}`
+            : action === "repair-plan"
+              ? `Authority 建议修复失败: ${error?.message || error}`
+            : action === "checkpoint"
+              ? `Authority Checkpoint 写入失败: ${error?.message || error}`
+            : action === "rebuild-trivium"
+              ? `Authority Trivium 重建失败: ${error?.message || error}`
+            : action === "baseline"
+              ? `Authority Perf Baseline 捕获失败: ${error?.message || error}`
+            : action === "artifacts-refresh"
+              ? `diagnostics artifact 列表刷新失败: ${error?.message || error}`
+            : `Authority 审计失败: ${error?.message || error}`,
+          "ST-BME",
+        );
+      } finally {
+        button.disabled = false;
+        _refreshTaskPersistence();
+      }
+    }));
+  el
+    .querySelectorAll('[data-authority-diagnostics-action]')
+    .forEach((buttonEl) => buttonEl.addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const action = String(button?.dataset?.authorityDiagnosticsAction || "").trim();
+      const artifactPath = String(button?.dataset?.authorityArtifactPath || "").trim();
+      const artifactReason = String(button?.dataset?.authorityArtifactReason || "diagnostics-bundle").trim();
+      if (button.disabled || !artifactPath) return;
+      button.disabled = true;
+      try {
+        if (action === "copy-path") {
+          await _copyTextToClipboard(artifactPath);
+          toastr.success("诊断包路径已复制", "ST-BME");
+        } else if (action === "download") {
+          if (typeof _actionHandlers.readAuthorityDiagnosticsArtifact !== "function") return;
+          const result = await _actionHandlers.readAuthorityDiagnosticsArtifact(artifactPath);
+          if (!result?.ok || !result?.payload) {
+            toastr.warning(`诊断包读取失败：${result?.error || "unknown"}`, "ST-BME");
+            return;
+          }
+          const fileName = String(artifactPath.split("/").pop() || `st-bme-diagnostics-${artifactReason}.json`);
+          _downloadJsonFile(result.payload, fileName);
+          toastr.success("诊断包已下载", "ST-BME");
+        } else if (action === "delete") {
+          if (typeof _actionHandlers.deleteAuthorityDiagnosticsArtifact !== "function") return;
+          const confirmed = globalThis.confirm?.(`确定删除该 diagnostics artifact？\n${artifactPath}`);
+          if (!confirmed) return;
+          const result = await _actionHandlers.deleteAuthorityDiagnosticsArtifact(artifactPath);
+          if (result?.ok) {
+            toastr.success("诊断包已删除", "ST-BME");
+          } else {
+            toastr.warning(`诊断包删除失败：${result?.error || "unknown"}`, "ST-BME");
+          }
+        }
+      } catch (error) {
+        toastr.error(
+          action === "copy-path"
+            ? `复制路径失败: ${error?.message || error}`
+            : action === "download"
+              ? `下载诊断包失败: ${error?.message || error}`
+              : `删除诊断包失败: ${error?.message || error}`,
+          "ST-BME",
+        );
+      } finally {
+        button.disabled = false;
+        _refreshTaskPersistence();
+      }
+    }));
 }
 
 // ==================== 图谱视图切换 ====================
@@ -3645,7 +4373,9 @@ function _refreshDashboard() {
     _setText("bme-status-recovery", "等待聊天图谱元数据加载");
     _setText("bme-status-last-extract", "等待聊天图谱元数据加载");
     _setText("bme-status-last-persist", "等待聊天图谱元数据加载");
+    _setText("bme-status-background-maintenance", "等待聊天图谱元数据加载");
     _setText("bme-status-last-vector", "等待聊天图谱元数据加载");
+    _setText("bme-status-authority-job", "等待聊天图谱元数据加载");
     _setText("bme-status-last-recall", "等待聊天图谱元数据加载");
     _refreshPersistenceRepairUi(loadInfo, null);
     _renderStatefulListPlaceholder(
@@ -3682,6 +4412,7 @@ function _refreshDashboard() {
   const lastBatchStatus = _getLatestBatchStatusSnapshot();
   const vectorStatus = _getLastVectorStatus?.() || {};
   const recallStatus = _getLastRecallStatus?.() || {};
+  const authorityJobUi = _buildAuthorityJobUiState(loadInfo);
   const historyPrefix =
     loadInfo.loadState === "shadow-restored"
       ? "临时恢复 · "
@@ -3723,8 +4454,13 @@ function _refreshDashboard() {
     "bme-status-last-persist",
     _formatDashboardPersistMeta(loadInfo, lastBatchStatus),
   );
+  _setText(
+    "bme-status-background-maintenance",
+    _formatBackgroundMaintenanceSummary(loadInfo?.backgroundMaintenance, lastBatchStatus),
+  );
   _refreshPersistenceRepairUi(loadInfo, lastBatchStatus);
   _setText("bme-status-last-vector", vectorStatus.meta || "尚未执行向量任务");
+  _setText("bme-status-authority-job", authorityJobUi.detail || authorityJobUi.label);
   _setText("bme-status-last-recall", recallStatus.meta || "尚未执行召回");
 
   _refreshCognitionDashboard(graph);
@@ -3751,6 +4487,54 @@ function _getSelectedGraphNode(graph = _getGraph?.()) {
   const nodeId = detailNodeId || rendererNodeId;
   if (!nodeId || !Array.isArray(graph?.nodes)) return null;
   return graph.nodes.find((node) => String(node?.id || "") === nodeId) || null;
+}
+
+function _getMaintenanceExecutionModeUiMeta(modeValue = "strict") {
+  const mode = normalizeMaintenanceExecutionMode(modeValue);
+  switch (mode) {
+    case "balanced":
+      return {
+        mode,
+        title: "2 均衡加速",
+        desc: "2 均衡加速：提取主链同步，只读查询限流并发，维护任务逐步后台化。",
+      };
+    case "fast":
+      return {
+        mode,
+        title: "3 快速后台",
+        desc: "3 快速后台：核心写入优先完成，其余维护后台最终一致。",
+      };
+    case "strict":
+    default:
+      return {
+        mode: "strict",
+        title: "1 严格串行",
+        desc: "1 严格串行：全部同步执行，稳定优先。",
+      };
+  }
+}
+
+function _refreshMaintenanceExecutionModeUi(settings = _getSettings?.() || {}) {
+  const meta = _getMaintenanceExecutionModeUiMeta(
+    settings.maintenanceExecutionMode || "strict",
+  );
+  const segmented = document.getElementById("bme-setting-maintenance-execution-mode");
+  const desc = document.getElementById("bme-maintenance-mode-desc");
+  const card = document.getElementById("bme-maintenance-mode-card");
+  const level = getMaintenanceExecutionModeLevel(meta.mode);
+  if (desc) desc.textContent = meta.desc;
+  if (segmented) segmented.dataset.mode = meta.mode;
+  if (card) {
+    card.dataset.mode = meta.mode;
+    card.title = `${meta.title}；1 严格串行 / 2 均衡加速 / 3 快速后台（最终一致）`;
+  }
+  segmented?.querySelectorAll("button[data-mode]").forEach((button) => {
+    const active =
+      normalizeMaintenanceExecutionMode(button.dataset.mode) === meta.mode;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+    button.title = active ? `${level} · ${meta.title}` : button.getAttribute("aria-label") || "";
+  });
 }
 
 function _getCognitionOwnerCollection(graph) {
@@ -6061,6 +6845,7 @@ function _bindActions() {
     "bme-act-rebuild-luker-cache": "rebuildLukerLocalCache",
     "bme-act-repair-luker-sidecar": "repairLukerSidecar",
     "bme-act-compact-luker-sidecar": "compactLukerSidecar",
+    "bme-act-export-diagnostics": "exportDiagnosticsBundle",
     "bme-act-export": "export",
     "bme-act-import": "import",
     "bme-act-rebuild": "rebuild",
@@ -6090,6 +6875,7 @@ function _bindActions() {
     rebuildLukerLocalCache: "重建本地缓存",
     repairLukerSidecar: "修复主 Sidecar",
     compactLukerSidecar: "压实主 Sidecar",
+    exportDiagnosticsBundle: "导出诊断包",
     rebuildSummaryState: "重建总结状态",
     export: "导出图谱",
     import: "导入图谱",
@@ -6638,6 +7424,11 @@ function _refreshConfigTab() {
     "bme-setting-recall-enabled",
     settings.recallEnabled ?? true,
   );
+  _setCheckboxValue(
+    "bme-setting-extract-auto-enabled",
+    settings.extractAutoEnabled ?? true,
+  );
+  _refreshMaintenanceExecutionModeUi(settings);
   _setCheckboxValue("bme-setting-recall-llm", settings.recallEnableLLM ?? true);
   _setCheckboxValue(
     "bme-setting-recall-vector-prefilter-enabled",
@@ -7120,6 +7911,22 @@ function _bindConfigControls() {
     _refreshGuardedConfigStates();
     _refreshStageCardStates();
   });
+  bindCheckbox("bme-setting-extract-auto-enabled", (checked) => {
+    _patchSettings({ extractAutoEnabled: checked });
+  });
+  const maintenanceModeEl = document.getElementById(
+    "bme-setting-maintenance-execution-mode",
+  );
+  if (maintenanceModeEl && maintenanceModeEl.dataset.bmeBound !== "true") {
+    maintenanceModeEl.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-mode]");
+      if (!button) return;
+      const mode = normalizeMaintenanceExecutionMode(button.dataset.mode);
+      const settings = _patchSettings({ maintenanceExecutionMode: mode });
+      _refreshMaintenanceExecutionModeUi(settings);
+    });
+    maintenanceModeEl.dataset.bmeBound = "true";
+  }
   bindCheckbox("bme-setting-recall-llm", (checked) => {
     _patchSettings({ recallEnableLLM: checked });
     _refreshGuardedConfigStates();
@@ -8694,6 +9501,18 @@ function _formatDurationMs(durationMs) {
   if (!Number.isFinite(normalized) || normalized <= 0) return "—";
   if (normalized < 1000) return `${Math.round(normalized)}ms`;
   return `${(normalized / 1000).toFixed(normalized >= 10000 ? 0 : 1)}s`;
+}
+
+function _formatSignedMetricDelta(value, formatter = null, zeroLabel = "0") {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized)) return "—";
+  if (normalized === 0) return zeroLabel;
+  const sign = normalized > 0 ? "+" : "-";
+  const absValue = Math.abs(normalized);
+  const formatted = typeof formatter === "function"
+    ? formatter(absValue)
+    : String(Math.round(absValue));
+  return `${sign}${formatted === "—" ? String(Math.round(absValue)) : formatted}`;
 }
 
 function _formatDataSizeBytes(byteCount) {
@@ -12454,6 +13273,44 @@ function _sanitizeFileName(fileName = "profile.json") {
   return String(fileName || "profile.json").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-");
 }
 
+async function _copyTextToClipboard(text = "") {
+  const normalized = String(text || "");
+  if (!normalized) {
+    throw new Error("没有可复制的内容");
+  }
+  if (globalThis.navigator?.clipboard?.writeText) {
+    await globalThis.navigator.clipboard.writeText(normalized);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = normalized;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.left = "-9999px";
+  document.body.appendChild(input);
+  input.select();
+  input.setSelectionRange(0, normalized.length);
+  const copied = document.execCommand?.("copy");
+  input.remove();
+  if (!copied) {
+    throw new Error("浏览器不支持复制到剪贴板");
+  }
+}
+
+function _downloadJsonFile(payload, fileName = "st-bme-export.json") {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = _sanitizeFileName(fileName);
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 function _downloadAllTaskProfiles(taskProfiles, globalTaskRegex = {}) {
   try {
     const taskTypes = getTaskTypeOptions().map((t) => t.id);
@@ -12705,6 +13562,39 @@ function _formatDashboardPersistMeta(loadInfo = {}, batchStatus = null) {
   }
 
   return "尚未执行持久化";
+}
+
+function _formatBackgroundMaintenanceSummary(queue = null, batchStatus = null) {
+  const queuedTasks = Array.isArray(batchStatus?.backgroundMaintenanceTasks)
+    ? batchStatus.backgroundMaintenanceTasks
+    : [];
+  const batchState = String(batchStatus?.backgroundMaintenanceState || "").trim();
+  if (queue && typeof queue === "object") {
+    const state = String(queue.state || "idle").trim() || "idle";
+    const queued = Math.max(0, Math.floor(Number(queue.queued || 0)) || 0);
+    const completed = Math.max(0, Math.floor(Number(queue.completed || 0)) || 0);
+    const failed = Math.max(0, Math.floor(Number(queue.failed || 0)) || 0);
+    const dropped = Math.max(0, Math.floor(Number(queue.dropped || 0)) || 0);
+    const activeName = String(queue.activeName || "").trim();
+    const parts = [
+      state,
+      queued > 0 ? `queued ${queued}` : "",
+      activeName ? `active ${activeName}` : "",
+      completed > 0 ? `done ${completed}` : "",
+      failed > 0 ? `failed ${failed}` : "",
+      dropped > 0 ? `dropped ${dropped}` : "",
+    ].filter(Boolean);
+    return parts.join(" · ") || "idle";
+  }
+  if (batchState) {
+    return [
+      batchState,
+      queuedTasks.length > 0
+        ? queuedTasks.map((task) => String(task.type || "").trim()).filter(Boolean).join(" / ")
+        : "",
+    ].filter(Boolean).join(" · ");
+  }
+  return "暂无后台维护任务";
 }
 
 function _formatDashboardHistoryMeta(graph = null, loadInfo = {}, batchStatus = null) {

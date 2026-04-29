@@ -1320,6 +1320,12 @@ class LegacyOpfsGraphStore {
           edges: emptyStatus.edges,
           tombstones: emptyStatus.tombstones,
         },
+        isEmptyCheck: {
+          empty: false,
+          nodes: emptyStatus.nodes,
+          edges: emptyStatus.edges,
+          tombstones: emptyStatus.tombstones,
+        },
         migrationCompletedAt: 0,
         migrationSource,
         legacyRetentionUntil,
@@ -2703,6 +2709,12 @@ export class OpfsGraphStore {
         reason: "local-store-not-empty",
         revision: await this.getRevision(),
         imported: {
+          nodes: emptyStatus.nodes,
+          edges: emptyStatus.edges,
+          tombstones: emptyStatus.tombstones,
+        },
+        isEmptyCheck: {
+          empty: false,
           nodes: emptyStatus.nodes,
           edges: emptyStatus.edges,
           tombstones: emptyStatus.tombstones,

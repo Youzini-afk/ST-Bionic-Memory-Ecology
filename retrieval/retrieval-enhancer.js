@@ -484,7 +484,7 @@ export async function runResidualRecall({
     };
   }
 
-  const queryVec = await embedText(queryText, embeddingConfig, { signal });
+  const queryVec = await embedText(queryText, embeddingConfig, { signal, isQuery: true });
   if (!queryVec || queryVec.length === 0) {
     return {
       triggered: false,

@@ -260,10 +260,18 @@
                 <label>最近持久化</label>
                 <div class="bme-recent-meta" id="bme-status-last-persist">—</div>
               </div>
+              <div class="bme-config-row">
+                <label>后台维护</label>
+                <div class="bme-recent-meta" id="bme-status-background-maintenance">—</div>
+              </div>
               <div class="bme-config-help" id="bme-persist-repair-help" hidden></div>
               <div class="bme-config-row">
                 <label>最近向量</label>
                 <div class="bme-recent-meta" id="bme-status-last-vector">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>Authority Job</label>
+                <div class="bme-recent-meta" id="bme-status-authority-job">—</div>
               </div>
               <div class="bme-config-row">
                 <label>最近召回</label>
@@ -489,6 +497,10 @@
                   <button class="bme-action-btn" id="bme-act-compact-luker-sidecar" type="button">
                     <i class="fa-solid fa-box-archive"></i>
                     <span>压实主 Sidecar</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-export-diagnostics" type="button">
+                    <i class="fa-solid fa-file-waveform"></i>
+                    <span>导出诊断包</span>
                   </button>
                 </div>
                 <div class="bme-action-group-extra">
@@ -1146,6 +1158,32 @@
                   <div class="bme-cap-title">生成前召回</div>
                   <div class="bme-cap-desc">在生成前检索相关记忆并注入 prompt。</div>
                 </label>
+                <label class="bme-capability-card" for="bme-setting-extract-auto-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
+                    <input id="bme-setting-extract-auto-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">生成后提取</div>
+                  <div class="bme-cap-desc">AI 回复生成后自动抽取新记忆并写入图谱。</div>
+                </label>
+                <div
+                  class="bme-capability-card bme-capability-card-mode"
+                  id="bme-maintenance-mode-card"
+                  role="group"
+                  aria-label="维护执行模式"
+                  title="1 严格串行；2 均衡加速；3 快速后台（最终一致）"
+                >
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon bme-mode-gauge" aria-hidden="true"></span>
+                    <div class="bme-mode-segmented" id="bme-setting-maintenance-execution-mode">
+                      <button type="button" data-mode="strict" aria-label="1 严格串行">1</button>
+                      <button type="button" data-mode="balanced" aria-label="2 均衡加速">2</button>
+                      <button type="button" data-mode="fast" aria-label="3 快速后台">3</button>
+                    </div>
+                  </div>
+                  <div class="bme-cap-title">并发模式</div>
+                  <div class="bme-cap-desc" id="bme-maintenance-mode-desc">1 严格串行：全部同步执行。</div>
+                </div>
                 <label class="bme-capability-card" for="bme-setting-consolidation-enabled">
                   <div class="bme-cap-header">
                     <span class="bme-cap-icon"><i class="fa-solid fa-code-merge"></i></span>

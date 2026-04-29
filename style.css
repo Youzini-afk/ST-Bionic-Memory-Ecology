@@ -3483,6 +3483,125 @@
   background: var(--bme-primary-text, #ffb2b7);
 }
 
+.bme-capability-card-mode {
+  cursor: default;
+}
+
+.bme-mode-gauge {
+  position: relative;
+  overflow: hidden;
+}
+
+.bme-mode-gauge::before {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 8px;
+  width: 20px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 3px solid #fff;
+  border-bottom: 0;
+  border-radius: 20px 20px 0 0;
+  background: radial-gradient(
+    circle at 50% 100%,
+    #fff 0 2.5px,
+    transparent 3px
+  );
+  opacity: 1;
+}
+
+.bme-mode-gauge::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 18px;
+  width: 9px;
+  height: 3px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: none;
+  transform: rotate(-135deg);
+  transform-origin: 1px 50%;
+  transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.bme-capability-card-mode[data-mode="balanced"] .bme-mode-gauge::after {
+  transform: rotate(-90deg);
+}
+
+.bme-capability-card-mode[data-mode="fast"] .bme-mode-gauge::after {
+  transform: rotate(-45deg);
+}
+
+.bme-mode-segmented {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--bme-border);
+  border-radius: 999px;
+  background: var(--bme-surface-high);
+  flex-shrink: 0;
+  isolation: isolate;
+}
+
+.bme-mode-segmented::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  left: 2px;
+  top: 2px;
+  width: 24px;
+  height: 20px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bme-primary) 72%, var(--bme-surface-high));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--bme-primary) 55%, transparent),
+    0 6px 14px color-mix(in srgb, var(--bme-primary) 26%, transparent);
+  transform: translateX(0);
+  transition:
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 0.16s,
+    box-shadow 0.16s;
+}
+
+.bme-mode-segmented[data-mode="balanced"]::before {
+  transform: translateX(26px);
+}
+
+.bme-mode-segmented[data-mode="fast"]::before {
+  transform: translateX(52px);
+}
+
+.bme-mode-segmented button {
+  position: relative;
+  z-index: 1;
+  width: 24px;
+  height: 20px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--bme-on-surface-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  transition: background 0.16s, color 0.16s, box-shadow 0.16s;
+}
+
+.bme-mode-segmented button:hover {
+  color: var(--bme-on-surface);
+  background: var(--bme-surface-highest);
+}
+
+.bme-mode-segmented button.is-active {
+  background: transparent;
+  color: var(--bme-primary-text, #fff);
+  box-shadow: none;
+}
+
 /* --- STRIPE ROW LAYOUT (Advanced Settings) --- */
 
 .bme-stripe-section {

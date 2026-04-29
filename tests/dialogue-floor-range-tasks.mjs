@@ -111,10 +111,19 @@ const chat = [
     rollback: [],
     manual: [],
     extractionStatus: [],
+    warning: [],
   };
   const runtime = {
     getContext() {
       return { chat };
+    },
+    getSettings() {
+      return {
+        hideOldMessagesEnabled: true,
+        hideOldMessagesKeepLastN: 2,
+        hideOldMessagesRenderLimitEnabled: true,
+        hideOldMessagesRenderLimit: 4,
+      };
     },
     getIsExtracting() {
       return false;
@@ -134,7 +143,9 @@ const chat = [
       calls.manual.push({ ...options });
     },
     toastr: {
-      warning() {},
+      warning(message) {
+        calls.warning.push(String(message || ""));
+      },
       info() {},
     },
   };
@@ -147,12 +158,18 @@ const chat = [
   assert.equal(result.fallbackToLatest, false);
   assert.deepEqual(calls.rollback, [6]);
   assert.equal(calls.manual[0].lockedEndFloor, 6);
+  assert.equal(calls.manual[0].suppressIntermediateAutoConsolidation, true);
   assert.equal(calls.manual[0].showStartToast, false);
   assert.equal(calls.extractionStatus[0]?.text, "重新提取准备中");
+  assert.match(calls.extractionStatus[0]?.meta || "", /旧楼层隐藏/);
+  assert.match(calls.extractionStatus[0]?.meta || "", /渲染楼层限制/);
+  assert.match(calls.warning[0] || "", /解除消息隐藏/);
+  assert.match(result.visibilityWarning || "", /渲染楼层限制/);
 }
 
 {
   const statuses = [];
+  const executeCalls = [];
   let lastProcessedAssistantFloor = -1;
   const runtime = {
     getIsExtracting() {
@@ -192,7 +209,9 @@ const chat = [
     setLastExtractionStatus(text, meta, level) {
       statuses.push({ text, meta, level });
     },
-    async executeExtractionBatch({ endIdx }) {
+    async executeExtractionBatch(options = {}) {
+      executeCalls.push(options);
+      const endIdx = options.endIdx;
       lastProcessedAssistantFloor = endIdx;
       return {
         success: true,
@@ -224,6 +243,7 @@ const chat = [
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
     showStartToast: false,
+    suppressIntermediateAutoConsolidation: true,
   });
 
   assert.equal(statuses[0]?.text, "重新提取中");
@@ -236,6 +256,117 @@ const chat = [
     ),
   );
   assert.equal(statuses[statuses.length - 1]?.text, "重新提取完成");
+  assert.equal(executeCalls.length, 2);
+  assert.equal(
+    executeCalls[0]?.postProcessContext?.suppressAutoConsolidation,
+    true,
+  );
+  assert.equal(executeCalls[0]?.postProcessContext?.remainingAssistantTurnsAfterBatch, 1);
+  assert.equal(executeCalls[1]?.postProcessContext, null);
+}
+
+{
+  const executeCalls = [];
+  let lastProcessedAssistantFloor = -1;
+  const assistantTurns = [2, 4, 6, 8];
+  const runtime = {
+    getIsExtracting() {
+      return false;
+    },
+    ensureGraphMutationReady() {
+      return true;
+    },
+    async recoverHistoryIfNeeded() {
+      return true;
+    },
+    getCurrentGraph() {
+      return { historyState: {} };
+    },
+    getContext() {
+      return { chat };
+    },
+    getAssistantTurns() {
+      return assistantTurns;
+    },
+    getLastProcessedAssistantFloor() {
+      return lastProcessedAssistantFloor;
+    },
+    getSettings() {
+      return { extractEvery: 1, bulkAutoConsolidationEveryBatches: 2 };
+    },
+    clampInt(value, fallback, min, max) {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return fallback;
+      return Math.min(max, Math.max(min, Math.trunc(numeric)));
+    },
+    setIsExtracting() {},
+    beginStageAbortController() {
+      return { signal: null };
+    },
+    finishStageAbortController() {},
+    setLastExtractionStatus() {},
+    async executeExtractionBatch(options = {}) {
+      executeCalls.push(options);
+      lastProcessedAssistantFloor = options.endIdx;
+      return {
+        success: true,
+        result: {
+          newNodes: 1,
+          newNodeIds: [`node-${options.endIdx}`],
+          updatedNodes: 0,
+          newEdges: 1,
+        },
+        effects: {
+          warnings: [],
+        },
+        historyAdvanceAllowed: true,
+      };
+    },
+    isAbortError() {
+      return false;
+    },
+    refreshPanelLiveState() {},
+    retryPendingGraphPersist: async () => ({ accepted: true }),
+    toastr: {
+      info() {},
+      success() {},
+      warning() {},
+      error() {},
+    },
+  };
+
+  await onManualExtractController(runtime, {
+    taskLabel: "重新提取",
+    toastTitle: "ST-BME 重新提取",
+    showStartToast: false,
+    suppressIntermediateAutoConsolidation: true,
+  });
+
+  assert.equal(executeCalls.length, 4);
+  assert.equal(
+    executeCalls[0]?.postProcessContext?.suppressAutoConsolidation,
+    true,
+  );
+  assert.equal(
+    executeCalls[1]?.postProcessContext?.suppressAutoConsolidation,
+    false,
+  );
+  assert.deepEqual(
+    executeCalls[1]?.postProcessContext?.pendingAutoConsolidationNodeIds,
+    ["node-2"],
+  );
+  assert.equal(
+    executeCalls[2]?.postProcessContext?.suppressAutoConsolidation,
+    true,
+  );
+  assert.equal(
+    executeCalls[3]?.postProcessContext?.suppressAutoConsolidation,
+    false,
+  );
+  assert.deepEqual(
+    executeCalls[3]?.postProcessContext?.pendingAutoConsolidationNodeIds,
+    ["node-6"],
+  );
 }
 
 {

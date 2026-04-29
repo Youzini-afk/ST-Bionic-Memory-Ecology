@@ -23,6 +23,7 @@ export const defaultSettings = {
   hideOldMessagesRenderLimit: 10,
 
   // 提取设置
+  extractAutoEnabled: true,
   extractEvery: 1,
   extractContextTurns: 2,
   extractAutoDelayLatestAssistant: false,
@@ -117,6 +118,26 @@ export const defaultSettings = {
   embeddingBackendApiUrl: "",
   embeddingAutoSuffix: true,
 
+  authorityEnabled: "auto",
+  authorityBaseUrl: "/api/plugins/authority",
+  authorityPrimaryWhenAvailable: true,
+  authorityStorageMode: "auto-server-primary",
+  authorityVectorMode: "auto-primary",
+  authoritySqlPrimary: true,
+  authorityTriviumPrimary: true,
+  authorityGraphQueryEnabled: true,
+  authorityJobsEnabled: true,
+  authorityBlobCheckpointEnabled: true,
+  authorityBrowserCacheMode: "minimal",
+  authorityOfflineWritePolicy: "queue-local-dirty",
+  authorityOfflineQueueMaxBytes: 1048576,
+  authorityOfflineQueueMaxItems: 128,
+  authorityOfflineQueueMaxAgeMs: 3600000,
+  authorityVectorSyncChunkSize: 1000,
+  authorityVectorFailOpen: true,
+  authorityDiagnosticsEnabled: true,
+  authorityProbeIntervalMs: 60000,
+
   // Native 性能加速（灰度）
   graphUseNativeLayout: true,
   graphNativeLayoutThresholdNodes: 280,
@@ -172,6 +193,13 @@ export const defaultSettings = {
   consolidationAutoMinNewNodes: 2,
   enableAutoCompression: true,
   compressionEveryN: 10,
+  maintenanceExecutionMode: "strict",
+  parallelVectorQueryConcurrency: 3,
+  parallelNeighborQueryConcurrency: 3,
+  parallelLlmConcurrency: 2,
+  backgroundMaintenanceMaxRetries: 2,
+  backgroundMaintenanceRetryBaseMs: 800,
+  backgroundMaintenanceMaxQueueItems: 24,
 
   // UI 面板
   noticeDisplayMode: "normal",

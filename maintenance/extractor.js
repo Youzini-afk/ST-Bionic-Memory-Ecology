@@ -949,6 +949,7 @@ export async function extractMemories({
     recentMessages: [],
     embeddingConfig,
     signal,
+    settings,
     rankingOptions: {
       topK: 12,
       diffusionTopK: 48,
@@ -2338,6 +2339,7 @@ export async function generateReflection({
     recentMessages: [],
     embeddingConfig,
     signal,
+    settings,
     rankingOptions: {
       topK: 12,
       diffusionTopK: 48,
