@@ -256,7 +256,10 @@ import {
   getPersistedSettingsSnapshot,
   mergePersistedSettings,
 } from "./runtime/settings-defaults.js";
-import { resolveConcurrencyConfig } from "./runtime/concurrency.js";
+import {
+  createBackgroundMaintenanceQueue,
+  resolveConcurrencyConfig,
+} from "./runtime/concurrency.js";
 import {
   createDefaultAuthorityCapabilityState,
   normalizeAuthoritySettings,
@@ -1293,6 +1296,10 @@ let graphPersistenceState = createGraphPersistenceState();
 let authorityCapabilityState = createDefaultAuthorityCapabilityState();
 let authorityBrowserState = createAuthorityBrowserState();
 let authorityProbePromise = null;
+const backgroundMaintenanceQueue =
+  typeof createBackgroundMaintenanceQueue === "function"
+    ? createBackgroundMaintenanceQueue()
+    : null;
 const lastStatusToastAt = {};
 let pendingRecallSendIntent = createRecallInputRecord();
 let lastRecallSentUserMessage = createRecallInputRecord();
@@ -1805,6 +1812,20 @@ function getGraphPersistenceLiveState() {
     persistMismatchReason: String(graphPersistenceState.persistMismatchReason || ""),
     commitMarker: cloneRuntimeDebugValue(liveCommitMarker, null),
     restoreLock,
+    backgroundMaintenance: cloneRuntimeDebugValue(
+      graphPersistenceState.backgroundMaintenance,
+      {
+        state: "idle",
+        queued: 0,
+        activeId: "",
+        activeName: "",
+        completed: 0,
+        failed: 0,
+        dropped: 0,
+        lastTask: null,
+        updatedAt: 0,
+      },
+    ),
     queuedPersistMode: graphPersistenceState.queuedPersistMode,
     queuedPersistRotateIntegrity:
       graphPersistenceState.queuedPersistRotateIntegrity,
@@ -16146,6 +16167,107 @@ function shouldAdvanceProcessedHistory(batchStatus) {
   );
 }
 
+function resolveMaintenancePostProcessConcurrency(settings = {}) {
+  if (typeof resolveConcurrencyConfig === "function") {
+    try {
+      return resolveConcurrencyConfig(settings);
+    } catch {
+    }
+  }
+  const mode = String(settings?.maintenanceExecutionMode || "strict")
+    .trim()
+    .toLowerCase();
+  const strict = mode !== "balanced" && mode !== "fast";
+  return {
+    mode: strict ? "strict" : mode,
+    level: strict ? 1 : mode === "balanced" ? 2 : 3,
+    backgroundMaintenanceMaxRetries: Math.max(
+      0,
+      Math.min(10, Math.floor(Number(settings?.backgroundMaintenanceMaxRetries ?? 2)) || 0),
+    ),
+    backgroundMaintenanceRetryBaseMs: Math.max(
+      50,
+      Math.min(60000, Math.floor(Number(settings?.backgroundMaintenanceRetryBaseMs ?? 800)) || 800),
+    ),
+    backgroundMaintenanceMaxQueueItems: Math.max(
+      1,
+      Math.min(256, Math.floor(Number(settings?.backgroundMaintenanceMaxQueueItems ?? 24)) || 24),
+    ),
+  };
+}
+
+function shouldDeferExtractionVectorSync(settings = {}) {
+  return resolveMaintenancePostProcessConcurrency(settings).mode !== "strict";
+}
+
+function updateBackgroundMaintenanceQueueState(snapshot = null) {
+  const normalized =
+    snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? {
+          state: String(snapshot.state || "idle"),
+          queued: Math.max(0, Math.floor(Number(snapshot.queued || 0)) || 0),
+          activeId: String(snapshot.activeId || ""),
+          activeName: String(snapshot.activeName || ""),
+          completed: Math.max(0, Math.floor(Number(snapshot.completed || 0)) || 0),
+          failed: Math.max(0, Math.floor(Number(snapshot.failed || 0)) || 0),
+          dropped: Math.max(0, Math.floor(Number(snapshot.dropped || 0)) || 0),
+          lastTask:
+            snapshot.lastTask && typeof snapshot.lastTask === "object"
+              ? { ...snapshot.lastTask }
+              : null,
+          updatedAt: Number(snapshot.updatedAt || Date.now()) || Date.now(),
+        }
+      : {
+          state: "idle",
+          queued: 0,
+          activeId: "",
+          activeName: "",
+          completed: 0,
+          failed: 0,
+          dropped: 0,
+          lastTask: null,
+          updatedAt: Date.now(),
+        };
+  if (typeof updateGraphPersistenceState === "function") {
+    updateGraphPersistenceState({ backgroundMaintenance: normalized });
+  }
+  if (typeof recordMaintenanceDebugSnapshot === "function") {
+    recordMaintenanceDebugSnapshot({ backgroundQueue: normalized });
+  }
+  if (typeof refreshPanelLiveState === "function") {
+    refreshPanelLiveState();
+  }
+  return normalized;
+}
+
+function enqueueBackgroundMaintenanceTask(name, run, settings = {}, options = {}) {
+  const concurrency = resolveMaintenancePostProcessConcurrency(settings);
+  const queue =
+    typeof backgroundMaintenanceQueue !== "undefined"
+      ? backgroundMaintenanceQueue
+      : null;
+  if (!queue || typeof queue.enqueue !== "function") {
+    return {
+      queued: false,
+      reason: "background-maintenance-queue-unavailable",
+      snapshot: updateBackgroundMaintenanceQueueState(null),
+    };
+  }
+  if (typeof queue.configure === "function") {
+    queue.configure({
+      maxItems: concurrency.backgroundMaintenanceMaxQueueItems,
+      maxRetries: concurrency.backgroundMaintenanceMaxRetries,
+      retryBaseMs: concurrency.backgroundMaintenanceRetryBaseMs,
+      onStatus: updateBackgroundMaintenanceQueueState,
+    });
+  }
+  return queue.enqueue(name, run, {
+    maxRetries: concurrency.backgroundMaintenanceMaxRetries,
+    retryBaseMs: concurrency.backgroundMaintenanceRetryBaseMs,
+    ...(options || {}),
+  });
+}
+
 function computePostProcessArtifacts(
   beforeSnapshot,
   afterSnapshot,
@@ -16260,6 +16382,53 @@ async function syncVectorState({
       error: message,
     };
   }
+}
+
+function scheduleBackgroundVectorSync(task = null, settings = {}) {
+  const normalizedTask =
+    task && typeof task === "object" && !Array.isArray(task) ? task : {};
+  const range =
+    normalizedTask.range &&
+    Number.isFinite(Number(normalizedTask.range.start)) &&
+    Number.isFinite(Number(normalizedTask.range.end))
+      ? {
+          start: Math.floor(Number(normalizedTask.range.start)),
+          end: Math.floor(Number(normalizedTask.range.end)),
+        }
+      : null;
+  const reason =
+    String(normalizedTask.reason || "background-vector-sync").trim() ||
+    "background-vector-sync";
+  const mode =
+    String(
+      normalizedTask.mode ||
+        resolveMaintenancePostProcessConcurrency(settings).mode ||
+        "balanced",
+    ).trim() || "balanced";
+  return enqueueBackgroundMaintenanceTask(
+    "vector-sync",
+    async () => {
+      setLastVectorStatus(
+        "后台向量同步中",
+        `${mode} 模式 · 正在同步提取后的向量索引`,
+        "running",
+        { syncRuntime: false },
+      );
+      const result = await syncVectorState({ range });
+      if (result?.aborted) {
+        throw createAbortError(result.error || "后台向量同步已终止");
+      }
+      if (result?.error) {
+        throw new Error(result.error);
+      }
+      saveGraphToChat({ reason });
+      return result;
+    },
+    settings,
+    {
+      id: String(normalizedTask.id || ""),
+    },
+  );
 }
 
 async function ensureVectorReadyIfNeeded(
@@ -19979,70 +20148,121 @@ async function handleExtractionSuccess(
   }
 
   let vectorSync = null;
-  try {
-    updateExtractionPostProcessStatus(
-      "向量同步中",
-      "正在同步本批提取后的向量索引",
-    );
-    const vectorSyncTimeoutController = new AbortController();
-    const vectorSyncTimeout = setTimeout(
-      () => vectorSyncTimeoutController.abort(
-        new DOMException(
-          `向量同步超时 (${Math.round(EXTRACTION_VECTOR_SYNC_TIMEOUT_MS / 1000)}s)`,
-          "AbortError",
-        ),
-      ),
-      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
-    );
-    let vectorSyncSignal = vectorSyncTimeoutController.signal;
-    if (signal) {
-      try {
-        if (typeof AbortSignal.any === "function") {
-          vectorSyncSignal = AbortSignal.any([signal, vectorSyncTimeoutController.signal]);
-        }
-      } catch {}
-    }
-    try {
-      vectorSync = await syncVectorState({ signal: vectorSyncSignal });
-    } finally {
-      clearTimeout(vectorSyncTimeout);
-    }
-  } catch (error) {
-    if (isAbortError(error)) {
-      const isVectorSyncTimeout = error?.name === "AbortError" &&
-        typeof error?.message === "string" &&
-        error.message.includes("向量同步超时");
-      if (!isVectorSyncTimeout) throw error;
-    }
-    const message = error?.message || String(error) || "向量同步阶段失败";
-    setBatchStageOutcome(
-      status,
-      "finalize",
-      "failed",
-      `向量同步失败: ${message}`,
-    );
-    return {
-      postProcessArtifacts,
-      vectorHashesInserted: [],
-      vectorStats: getVectorIndexStats(currentGraph),
-      vectorError: message,
-      warnings: status.warnings,
-      batchStatus: finalizeBatchStatus(status, extractionCount),
+  let backgroundVectorSync = null;
+  const vectorSyncRangeSource = Array.isArray(result?.processedRange)
+    ? result.processedRange
+    : Array.isArray(status?.processedRange)
+      ? status.processedRange
+      : [endIdx, endIdx];
+  const vectorSyncRange = {
+    start: Math.min(
+      Number(vectorSyncRangeSource[0] ?? endIdx),
+      Number(vectorSyncRangeSource[1] ?? endIdx),
+    ),
+    end: Math.max(
+      Number(vectorSyncRangeSource[0] ?? endIdx),
+      Number(vectorSyncRangeSource[1] ?? endIdx),
+    ),
+  };
+  if (shouldDeferExtractionVectorSync(settings)) {
+    const concurrency = resolveMaintenancePostProcessConcurrency(settings);
+    ensureCurrentGraphRuntimeState();
+    currentGraph.vectorIndexState ||= {};
+    currentGraph.vectorIndexState.dirty = true;
+    currentGraph.vectorIndexState.dirtyReason = "background-vector-sync-queued";
+    currentGraph.vectorIndexState.lastWarning =
+      `${concurrency.mode} 模式已将本批向量同步放入后台队列`;
+    backgroundVectorSync = {
+      enabled: true,
+      mode: concurrency.mode,
+      id: `vector-sync:${Date.now()}:${endIdx}`,
+      reason: "background-vector-sync-after-extraction",
+      range: vectorSyncRange,
     };
-  }
-
-  if (vectorSync?.aborted) {
-    throw createAbortError(vectorSync.error || "提取已终止");
-  }
-  if (vectorSync?.error) {
-    setBatchStageOutcome(
-      status,
-      "finalize",
-      "failed",
-      `向量同步失败: ${vectorSync.error}`,
+    status.backgroundVectorSyncQueued = true;
+    status.backgroundVectorSyncMode = concurrency.mode;
+    status.backgroundVectorSyncTaskId = backgroundVectorSync.id;
+    updateExtractionPostProcessStatus(
+      "向量同步已排队",
+      `${concurrency.mode} 模式：本批向量将在持久化后后台同步`,
     );
-  } else {
+    if (typeof setLastVectorStatus === "function") {
+      setLastVectorStatus(
+        "后台向量已排队",
+        `${concurrency.mode} 模式 · 等待批次持久化确认`,
+        "running",
+        { syncRuntime: false },
+      );
+    }
+    pushBatchStageArtifact(status, "finalize", "vector-sync-queued");
     setBatchStageOutcome(status, "finalize", "success");
+  } else {
+    try {
+      updateExtractionPostProcessStatus(
+        "向量同步中",
+        "正在同步本批提取后的向量索引",
+      );
+      const vectorSyncTimeoutController = new AbortController();
+      const vectorSyncTimeout = setTimeout(
+        () => vectorSyncTimeoutController.abort(
+          new DOMException(
+            `向量同步超时 (${Math.round(EXTRACTION_VECTOR_SYNC_TIMEOUT_MS / 1000)}s)`,
+            "AbortError",
+          ),
+        ),
+        EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
+      );
+      let vectorSyncSignal = vectorSyncTimeoutController.signal;
+      if (signal) {
+        try {
+          if (typeof AbortSignal.any === "function") {
+            vectorSyncSignal = AbortSignal.any([signal, vectorSyncTimeoutController.signal]);
+          }
+        } catch {}
+      }
+      try {
+        vectorSync = await syncVectorState({ signal: vectorSyncSignal });
+      } finally {
+        clearTimeout(vectorSyncTimeout);
+      }
+    } catch (error) {
+      if (isAbortError(error)) {
+        const isVectorSyncTimeout = error?.name === "AbortError" &&
+          typeof error?.message === "string" &&
+          error.message.includes("向量同步超时");
+        if (!isVectorSyncTimeout) throw error;
+      }
+      const message = error?.message || String(error) || "向量同步阶段失败";
+      setBatchStageOutcome(
+        status,
+        "finalize",
+        "failed",
+        `向量同步失败: ${message}`,
+      );
+      return {
+        postProcessArtifacts,
+        vectorHashesInserted: [],
+        vectorStats: getVectorIndexStats(currentGraph),
+        vectorError: message,
+        warnings: status.warnings,
+        batchStatus: finalizeBatchStatus(status, extractionCount),
+        backgroundVectorSync: null,
+      };
+    }
+
+    if (vectorSync?.aborted) {
+      throw createAbortError(vectorSync.error || "提取已终止");
+    }
+    if (vectorSync?.error) {
+      setBatchStageOutcome(
+        status,
+        "finalize",
+        "failed",
+        `向量同步失败: ${vectorSync.error}`,
+      );
+    } else {
+      setBatchStageOutcome(status, "finalize", "success");
+    }
   }
 
   status.maintenanceJournalSize =
@@ -20064,6 +20284,7 @@ async function handleExtractionSuccess(
     vectorError: vectorSync?.error || "",
     warnings: status.warnings,
     batchStatus: finalizeBatchStatus(status, extractionCount),
+    backgroundVectorSync,
   };
 }
 
@@ -20375,6 +20596,7 @@ async function executeExtractionBatch({
       getSchema,
       handleExtractionSuccess,
       persistExtractionBatchResult,
+      scheduleBackgroundVectorSync,
       setBatchStageOutcome,
       setLastExtractionStatus,
       shouldAdvanceProcessedHistory,

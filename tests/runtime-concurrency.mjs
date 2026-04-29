@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  createBackgroundMaintenanceQueue,
   getMaintenanceExecutionModeLevel,
   normalizeMaintenanceExecutionMode,
   resolveConcurrencyConfig,
@@ -85,6 +86,46 @@ assert.equal(
     }, { failFast: false }),
     /stop/,
   );
+}
+
+{
+  const statuses = [];
+  const queue = createBackgroundMaintenanceQueue({
+    maxItems: 1,
+    maxRetries: 1,
+    retryBaseMs: 1,
+    onStatus: (snapshot) => statuses.push(snapshot),
+  });
+  let attempts = 0;
+  const enqueued = queue.enqueue("retry-once", async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("transient");
+    return "ok";
+  });
+
+  assert.equal(enqueued.queued, true);
+  assert.equal(enqueued.snapshot.state, "queued");
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const finalSnapshot = queue.getSnapshot();
+  assert.equal(attempts, 2);
+  assert.equal(finalSnapshot.completed, 1);
+  assert.equal(finalSnapshot.failed, 0);
+  assert.equal(finalSnapshot.state, "idle");
+  assert.equal(finalSnapshot.lastTask?.status, "success");
+  assert.ok(statuses.some((snapshot) => snapshot.state === "running"));
+}
+
+{
+  const queue = createBackgroundMaintenanceQueue({ maxItems: 1 });
+  const first = queue.enqueue("slow", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  const second = queue.enqueue("overflow", async () => {});
+
+  assert.equal(first.queued, true);
+  assert.equal(second.queued, false);
+  assert.equal(second.reason, "background-maintenance-queue-full");
+  assert.equal(queue.getSnapshot().dropped, 1);
 }
 
 console.log("runtime-concurrency tests passed");

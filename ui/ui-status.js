@@ -206,6 +206,17 @@ export function createGraphPersistenceState() {
     authorityDiagnosticsLastPruneError: "",
     localStoreFormatVersion: 1,
     localStoreMigrationState: "idle",
+    backgroundMaintenance: {
+      state: "idle",
+      queued: 0,
+      activeId: "",
+      activeName: "",
+      completed: 0,
+      failed: 0,
+      dropped: 0,
+      lastTask: null,
+      updatedAt: 0,
+    },
     opfsWriteLockState: {
       active: false,
       queueDepth: 0,

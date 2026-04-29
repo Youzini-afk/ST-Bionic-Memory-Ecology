@@ -909,6 +909,31 @@ export async function executeExtractionBatchController(
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
   batchStatusRef.historyAdvanceAllowed = persistence.accepted === true;
+  let backgroundVectorSyncQueue = null;
+  if (
+    persistence.accepted === true &&
+    effects?.backgroundVectorSync?.enabled === true &&
+    typeof runtime.scheduleBackgroundVectorSync === "function"
+  ) {
+    backgroundVectorSyncQueue = runtime.scheduleBackgroundVectorSync(
+      effects.backgroundVectorSync,
+      settings,
+    );
+    batchStatusRef.backgroundVectorSyncState =
+      backgroundVectorSyncQueue?.queued === true ? "queued" : "queue-failed";
+    batchStatusRef.backgroundVectorSyncQueue =
+      cloneSerializable(backgroundVectorSyncQueue, backgroundVectorSyncQueue);
+    if (backgroundVectorSyncQueue?.queued !== true) {
+      runtime.setBatchStageOutcome(
+        batchStatusRef,
+        "finalize",
+        "partial",
+        `后台向量同步入队失败: ${backgroundVectorSyncQueue?.reason || "queue-failed"}`,
+      );
+    }
+  } else if (effects?.backgroundVectorSync?.enabled === true) {
+    batchStatusRef.backgroundVectorSyncState = "blocked-by-persistence";
+  }
   const finalizedBatchStatus = runtime.finalizeBatchStatus(
     batchStatusRef,
     runtime.getExtractionCount(),
@@ -960,6 +985,7 @@ export async function executeExtractionBatchController(
     effects: {
       ...(effects || {}),
       persistResult,
+      backgroundVectorSyncQueue,
     },
     batchStatus: finalizedBatchStatus,
     persistResult,
