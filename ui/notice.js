@@ -58,6 +58,11 @@ function ensureStyle(doc) {
       font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", sans-serif;
       backdrop-filter: blur(10px) saturate(125%);
       -webkit-backdrop-filter: blur(10px) saturate(125%);
+      transition:
+        grid-template-columns 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        padding 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        border-radius 260ms cubic-bezier(0.22, 1, 0.36, 1),
+        width 260ms cubic-bezier(0.22, 1, 0.36, 1);
     }
 
     .st-bme-notice[data-layout="compact"] {
@@ -68,6 +73,40 @@ function ensureStyle(doc) {
       max-width: 100%;
       align-self: flex-end;
       padding: 10px;
+    }
+
+    .st-bme-notice__content {
+      min-width: 0;
+      overflow: hidden;
+      transition: max-width 280ms cubic-bezier(0.22, 1, 0.36, 1),
+                 opacity 220ms ease;
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .st-bme-notice__message {
+      margin: 4px 0 0;
+      font-size: 14px;
+      line-height: 1.38;
+      color: rgba(240, 246, 255, 0.86);
+      white-space: pre-wrap;
+      word-break: break-word;
+      transition: max-height 280ms cubic-bezier(0.22, 1, 0.36, 1),
+                 opacity 220ms ease,
+                 margin 260ms ease;
+    }
+
+    .st-bme-notice__actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1),
+                 opacity 220ms ease,
+                 margin 260ms ease;
     }
 
     .st-bme-notice::after {
@@ -102,16 +141,6 @@ function ensureStyle(doc) {
 
     .st-bme-notice[data-busy="true"] .st-bme-notice__icon {
       animation: stBmeNoticeBusy 900ms linear infinite;
-    }
-
-    .st-bme-notice__content {
-      min-width: 0;
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__content {
-      display: flex;
-      align-items: center;
-      min-width: 0;
     }
 
     .st-bme-notice__title {
@@ -149,21 +178,6 @@ function ensureStyle(doc) {
       color: rgba(240, 246, 255, 0.72);
       mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
       -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 6%, black 88%, transparent 100%);
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__message,
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__progress {
-      display: none !important;
-    }
-
-    .st-bme-notice[data-layout="compact"] .st-bme-notice__actions {
-      margin: 0 0 0 8px;
-    }
-
-    .st-bme-notice__actions {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
     }
 
     .st-bme-notice__action {
@@ -211,6 +225,64 @@ function ensureStyle(doc) {
     .st-bme-notice__close:focus-visible {
       background: rgba(255, 255, 255, 0.2);
       outline: none;
+    }
+
+    .st-bme-notice__toggle-hint {
+      position: absolute;
+      bottom: 6px;
+      right: 32px;
+      font-size: 10px;
+      color: rgba(240, 246, 255, 0.35);
+      pointer-events: none;
+      transition: opacity 180ms ease;
+      opacity: 0;
+    }
+
+    .st-bme-notice:hover .st-bme-notice__toggle-hint {
+      opacity: 1;
+    }
+
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__toggle-hint::after {
+      content: "▸ 简洁";
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__toggle-hint::after {
+      content: "▸ 详细";
+    }
+
+    .st-bme-notice--switching {
+      pointer-events: none;
+    }
+
+    .st-bme-notice--switching .st-bme-notice__content {
+      opacity: 0;
+    }
+
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__content {
+      max-width: 360px;
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__actions {
+      max-height: 0;
+      opacity: 0;
+      margin-top: 0;
+      overflow: hidden;
+    }
+
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__actions {
+      max-height: 60px;
+      opacity: 1;
+    }
+
+    .st-bme-notice[data-layout="normal"] .st-bme-notice__message {
+      max-height: 200px;
+      opacity: 1;
+    }
+
+    .st-bme-notice[data-layout="compact"] .st-bme-notice__message {
+      max-height: 0;
+      opacity: 0;
+      margin-top: 0;
     }
 
     .st-bme-notice__progress {
@@ -334,7 +406,7 @@ function applyNoticeState(item, input, progress) {
   const message = item.querySelector(".st-bme-notice__message");
   if (message) {
     message.textContent = input.message || "";
-    message.hidden = isCompact || !String(input.message || "").trim();
+    message.hidden = !String(input.message || "").trim();
     if (input.marquee) {
       message.classList.add("st-bme-notice__message--marquee");
     } else {
@@ -346,12 +418,10 @@ function applyNoticeState(item, input, progress) {
   const actionButton = item.querySelector(".st-bme-notice__action");
   if (actionWrap && actionButton) {
     if (input.action?.label) {
-      actionWrap.style.display = "";
       actionButton.style.display = "";
       actionButton.textContent = input.action.label;
       actionButton.dataset.kind = input.action.kind || "neutral";
     } else {
-      actionWrap.style.display = "none";
       actionButton.style.display = "none";
       actionButton.textContent = "";
       actionButton.dataset.kind = "neutral";
@@ -405,6 +475,9 @@ export function showManagedBmeNotice(input) {
   const progress = doc.createElement("div");
   progress.className = "st-bme-notice__progress";
 
+  const toggleHint = doc.createElement("span");
+  toggleHint.className = "st-bme-notice__toggle-hint";
+
   content.appendChild(title);
   content.appendChild(message);
   actions.appendChild(actionButton);
@@ -412,11 +485,13 @@ export function showManagedBmeNotice(input) {
   item.appendChild(icon);
   item.appendChild(content);
   item.appendChild(closeButton);
+  item.appendChild(toggleHint);
   item.appendChild(progress);
 
   let currentInput = input || {};
   let closed = false;
   let closeTimer = null;
+  let switching = false;
 
   const clearCloseTimer = () => {
     if (!closeTimer) return;
@@ -463,6 +538,47 @@ export function showManagedBmeNotice(input) {
     event.preventDefault();
     event.stopPropagation();
     close();
+  });
+
+  content.addEventListener("click", (event) => {
+    if (closed || switching) return;
+    if (event.target === actionButton || event.target === closeButton) return;
+    if (actionButton.contains(event.target) || closeButton.contains(event.target)) return;
+
+    switching = true;
+    item.classList.add("st-bme-notice--switching");
+
+    const currentLayout = item.dataset.layout || "normal";
+    const nextLayout = currentLayout === "compact" ? "normal" : "compact";
+
+    setTimeout(() => {
+      item.dataset.layout = nextLayout;
+      currentInput.displayMode = nextLayout;
+
+      if (nextLayout === "normal") {
+        const msgEl = item.querySelector(".st-bme-notice__message");
+        if (msgEl) msgEl.hidden = !String(currentInput.message || "").trim();
+      }
+
+      if (nextLayout === "normal" && !currentInput.persist) {
+        clearCloseTimer();
+        const duration = Math.max(1400, currentInput.duration_ms || 3200);
+        closeTimer = setTimeout(close, duration);
+        const progressEl = item.querySelector(".st-bme-notice__progress");
+        if (progressEl) {
+          progressEl.style.display = "";
+          progressEl.style.animationDuration = `${duration}ms`;
+          progressEl.style.animation = "none";
+          void progressEl.offsetHeight;
+          progressEl.style.animation = "";
+        }
+      }
+
+      setTimeout(() => {
+        item.classList.remove("st-bme-notice--switching");
+        switching = false;
+      }, 60);
+    }, 180);
   });
 
   host.appendChild(item);
