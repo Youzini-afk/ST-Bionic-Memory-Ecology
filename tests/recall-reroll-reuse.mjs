@@ -708,4 +708,73 @@ assert.equal(
 console.log("  ✓ runRecallController reuses user-floor record with empty recallInput");
 
 // ═══════════════════════════════════════════════════════════════
+// 5. runRecallController: normal generation below an assistant reuses user-floor record
+// ═══════════════════════════════════════════════════════════════
+
+const assistantTailChat = [
+  { is_user: true, mes: "今晚去海边看烟花" },
+  { is_user: false, mes: "好，我会准备好相机。", is_system: false },
+];
+const assistantTailRecord = buildPersistedRecallRecord({
+  injectionText: "注入:今晚去海边看烟花",
+  selectedNodeIds: ["node-fireworks"],
+  recallInput: "今晚去海边看烟花",
+  recallSource: "chat-latest-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  tokenEstimate: 4,
+  manuallyEdited: false,
+  boundUserFloorText: "今晚去海边看烟花",
+});
+writePersistedRecallToUserMessage(assistantTailChat, 0, assistantTailRecord);
+
+let assistantTailRetrieveCalled = false;
+const assistantTailRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: assistantTailChat, chatId: "chat-assistant-tail" }),
+  readPersistedRecallFromUserMessage,
+  retrieve: async () => {
+    assistantTailRetrieveCalled = true;
+    return {
+      injectionText: "fresh recall should not run",
+      selectedNodeIds: ["node-fresh"],
+    };
+  },
+  resolveRecallInput: (chat, limit, override) => ({
+    userMessage: normalizeRecallInputText(
+      override?.overrideUserMessage || override?.userMessage || "今晚去海边看烟花",
+    ),
+    generationType: String(override?.generationType || "normal"),
+    targetUserMessageIndex: Number.isFinite(override?.targetUserMessageIndex)
+      ? override.targetUserMessageIndex
+      : null,
+    source: override?.overrideSource || "chat-latest-user",
+    sourceLabel: override?.overrideSourceLabel || "最近用户消息",
+    reason: "assistant-tail-normal-generation",
+    authoritativeInputUsed: Boolean(override?.authoritativeInputUsed),
+    boundUserFloorText: normalizeRecallInputText(
+      override?.boundUserFloorText || "今晚去海边看烟花",
+    ),
+    recentMessages: [],
+    hookName: override?.hookName || "",
+    deliveryMode: "immediate",
+  }),
+};
+
+const assistantTailResult = await runRecallController(assistantTailRuntime, {
+  overrideUserMessage: "今晚去海边看烟花",
+  generationType: "normal",
+  overrideSource: "chat-latest-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+
+assert.equal(assistantTailResult.status, "completed");
+assert.equal(
+  assistantTailRetrieveCalled,
+  false,
+  "normal generation below an assistant should find and reuse the matching user-floor persisted recall",
+);
+assert.equal(assistantTailResult.reason, "persisted-user-floor-reused");
+
+console.log("  ✓ runRecallController reuses user-floor record below assistant tail");
 console.log("recall-reroll-reuse tests passed");

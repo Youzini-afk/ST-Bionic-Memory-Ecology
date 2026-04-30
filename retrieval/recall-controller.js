@@ -94,19 +94,12 @@ function buildPersistedRecallReuseResult(record = {}) {
 function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
   const generationType = String(recallInput?.generationType || "normal").trim() || "normal";
 
-  const targetUserMessageIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
+  let targetUserMessageIndex = Number.isFinite(recallInput?.targetUserMessageIndex)
     ? Math.floor(Number(recallInput.targetUserMessageIndex))
     : null;
-  if (!Number.isFinite(targetUserMessageIndex)) return null;
-
-  const targetMessage = Array.isArray(chat) ? chat[targetUserMessageIndex] : null;
-  if (!targetMessage?.is_user) return null;
 
   const readPersistedRecallFromUserMessage = runtime.readPersistedRecallFromUserMessage;
   if (typeof readPersistedRecallFromUserMessage !== "function") return null;
-
-  const record = readPersistedRecallFromUserMessage(chat, targetUserMessageIndex);
-  if (!record?.injectionText) return null;
 
   const normalizeText = (value = "") =>
     typeof runtime.normalizeRecallInputText === "function"
@@ -114,10 +107,7 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
       : String(value ?? "")
           .replace(/\r\n/g, "\n")
           .trim();
-  const currentUserFloorText = normalizeText(targetMessage?.mes || "");
   const currentRecallInputText = normalizeText(recallInput?.userMessage || "");
-  const recordRecallInput = normalizeText(record?.recallInput || "");
-  const boundUserFloorText = normalizeText(record?.boundUserFloorText || "");
   const recallSource = String(recallInput?.source || "").trim();
   const activeInputSources = new Set([
     "send-intent",
@@ -128,6 +118,50 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
     "planner-handoff",
   ]);
   const isActiveInputSource = activeInputSources.has(recallSource);
+
+  if (!Number.isFinite(targetUserMessageIndex)) {
+    if (!currentRecallInputText || isActiveInputSource || !Array.isArray(chat)) {
+      return null;
+    }
+    for (let index = chat.length - 1; index >= 0; index--) {
+      const message = chat[index];
+      if (!message?.is_user) continue;
+      const candidateRecord = readPersistedRecallFromUserMessage(chat, index);
+      if (!candidateRecord?.injectionText) continue;
+      const candidateUserFloorText = normalizeText(message?.mes || "");
+      const candidateBoundUserFloorText = normalizeText(
+        candidateRecord?.boundUserFloorText || "",
+      );
+      if (
+        candidateBoundUserFloorText &&
+        candidateUserFloorText !== candidateBoundUserFloorText
+      ) {
+        continue;
+      }
+      const candidateRecallInput = normalizeText(candidateRecord?.recallInput || "");
+      if (
+        currentRecallInputText === candidateUserFloorText ||
+        (candidateBoundUserFloorText &&
+          currentRecallInputText === candidateBoundUserFloorText) ||
+        (candidateRecallInput && currentRecallInputText === candidateRecallInput)
+      ) {
+        targetUserMessageIndex = index;
+        break;
+      }
+    }
+  }
+
+  if (!Number.isFinite(targetUserMessageIndex)) return null;
+
+  const targetMessage = Array.isArray(chat) ? chat[targetUserMessageIndex] : null;
+  if (!targetMessage?.is_user) return null;
+
+  const record = readPersistedRecallFromUserMessage(chat, targetUserMessageIndex);
+  if (!record?.injectionText) return null;
+
+  const currentUserFloorText = normalizeText(targetMessage?.mes || "");
+  const recordRecallInput = normalizeText(record?.recallInput || "");
+  const boundUserFloorText = normalizeText(record?.boundUserFloorText || "");
 
   const matchesBoundUserFloor = Boolean(
     currentUserFloorText &&
