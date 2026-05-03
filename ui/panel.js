@@ -3326,6 +3326,7 @@ function _refreshTaskPersistence() {
       ["Journal", journalStateLabel],
       ["Checkpoint rev", checkpointRevisionLabel],
       ["缓存落后", cacheLagLabel],
+      ["浏览器缓存", ps.cacheStorageTier === "none" ? "已关闭（推荐）" : `${cacheTierLabel} · ${mirrorLabel}`],
     );
   }
   diagnosticRows.push(
