@@ -159,6 +159,10 @@ const messageSnippet = extractSnippet(
   'function onMessageReceived(messageId = null, type = "") {',
   "async function onViewGraph() {",
 );
+const lukerCacheActionSnippet = extractSnippet(
+  "async function onRebuildLocalCacheFromLukerSidecar() {",
+  "async function onRepairLukerSidecar() {",
+);
 
 function createSessionStorage(seed = null) {
   const store = seed instanceof Map ? seed : new Map();
@@ -1555,6 +1559,7 @@ async function createGraphPersistenceHarness({
       persistencePrelude,
       persistenceCore,
       messageSnippet,
+      lukerCacheActionSnippet,
       `
 result = {
   GRAPH_LOAD_STATES,
@@ -1576,6 +1581,7 @@ result = {
   maybeFlushQueuedGraphPersist,
   retryPendingGraphPersist,
   persistExtractionBatchResult,
+  onRebuildLocalCacheFromLukerSidecar,
   saveGraphToIndexedDb,
   cloneGraphForPersistence,
   assertRecoveryChatStillActive,
@@ -4648,6 +4654,60 @@ result = {
     Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
     0,
     "Luker queued save 默认不应写入浏览器本地大图谱缓存 nodes",
+  );
+}
+
+{
+  const chatId = "chat-luker-manual-cache-rebuild";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-manual-cache-rebuild",
+    chatMetadata: {
+      integrity: "meta-luker-manual-cache-rebuild",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph(chatId, "luker-manual-cache"),
+    {
+      revision: 10,
+      integrity: "meta-luker-manual-cache-rebuild",
+      chatId,
+      reason: "luker-manual-cache-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+  const persistResult = await harness.api.persistExtractionBatchResult({
+    reason: "luker-manual-cache-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(persistResult.cacheTier, "none");
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker 默认路径不应自动重建浏览器缓存",
+  );
+
+  const rebuildResult = await harness.api.onRebuildLocalCacheFromLukerSidecar();
+  assert.equal(rebuildResult.handledToast, true);
+  assert.equal(rebuildResult.result?.loaded, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    persistResult.revision,
+    "只有手动重建本地缓存时才应写入浏览器缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    1,
+    "只有手动重建本地缓存时才应写入浏览器缓存 nodes",
   );
 }
 
