@@ -4526,6 +4526,74 @@ result = {
 }
 
 {
+  const chatId = "chat-luker-no-authority-primary";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-no-authority",
+    chatMetadata: {
+      integrity: "meta-luker-no-authority-primary",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    authorityEnabled: "on",
+    authorityPrimaryWhenAvailable: true,
+    authorityStorageMode: "server-primary",
+    authoritySqlPrimary: true,
+    authorityBrowserCacheMode: "minimal",
+  };
+  harness.api.setAuthorityCapabilityState({
+    installed: false,
+    healthy: false,
+    serverPrimaryReady: false,
+    storagePrimaryReady: false,
+    reason: "authority-not-installed",
+  });
+  harness.api.setCurrentGraph(
+    stampPersistedGraph(
+      createMeaningfulGraph(chatId, "luker-no-authority"),
+      {
+        revision: 7,
+        integrity: "meta-luker-no-authority-primary",
+        chatId,
+        reason: "luker-no-authority-seed",
+      },
+    ),
+  );
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "luker-no-authority-persist",
+    lastProcessedAssistantFloor: 5,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.acceptedBy, "luker-chat-state");
+  assert.equal(result.primaryTier, "luker-chat-state");
+  assert.equal(result.cacheTier, "none");
+  const manifest = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+  );
+  assert.equal(manifest?.storageTier, "luker-chat-state");
+  assert.equal(manifest?.headRevision, result.revision);
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Authority 不可用时，Luker 主存储不应回退写浏览器大图谱缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Authority 不可用时，Luker 主存储不应回退写浏览器大图谱缓存 nodes",
+  );
+}
+
+{
   const harness = await createGraphPersistenceHarness({
     chatId: "chat-luker-queued-save-detached",
     globalChatId: "chat-luker-queued-save-detached",
