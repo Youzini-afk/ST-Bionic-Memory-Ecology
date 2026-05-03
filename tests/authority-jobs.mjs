@@ -634,4 +634,55 @@ assert.deepEqual(JSON.parse(String(httpRequests[3].options.body || "{}")), {
   },
 });
 
+// Regression: onRebuildVectorIndexController skips submitAuthorityVectorRebuildJob when
+// shouldUseAuthorityJobs() returns false and still runs syncVectorState with purge: true
+// for Authority vector config.
+const noJobsRuntime = createVectorControllerRuntime({
+  shouldUseAuthorityJobs() {
+    this.calls.push(["shouldUseAuthorityJobs"]);
+    return false;
+  },
+});
+await onRebuildVectorIndexController(noJobsRuntime);
+assert.equal(
+  noJobsRuntime.calls.some(([name]) => name === "submitAuthorityVectorRebuildJob"),
+  false,
+  "submitAuthorityVectorRebuildJob should NOT be called when shouldUseAuthorityJobs returns false",
+);
+const noJobsSync = noJobsRuntime.calls.find(([name]) => name === "syncVectorState");
+assert.equal(noJobsSync?.[1]?.purge, true, "syncVectorState should use purge:true for Authority config fallback");
+assert.equal(
+  noJobsRuntime.calls.some(([name]) => name === "saveGraphToChat"),
+  true,
+  "saveGraphToChat should still be called in fallback path",
+);
+
+// Regression: Fallback warning wording no longer says 本地重建; instead it uses
+// direct/synchronous rebuild wording.
+const fallbackWarningRuntime = createVectorControllerRuntime({
+  async submitAuthorityVectorRebuildJob(payload) {
+    this.calls.push(["submitAuthorityVectorRebuildJob", payload]);
+    return { submitted: false, error: "job-type-unsupported" };
+  },
+});
+await onRebuildVectorIndexController(fallbackWarningRuntime);
+const fallbackWarningMessage = fallbackWarningRuntime.calls.find(
+  ([name]) => name === "toastr.warning",
+)?.[1];
+assert.equal(
+  typeof fallbackWarningMessage === "string",
+  true,
+  "a warning toast should be emitted when job submission fails",
+);
+assert.equal(
+  fallbackWarningMessage.includes("本地重建"),
+  false,
+  "fallback warning should NOT contain 本地重建",
+);
+assert.equal(
+  /直接|同步|direct|synchronous/i.test(fallbackWarningMessage),
+  true,
+  "fallback warning should contain direct/synchronous rebuild wording",
+);
+
 console.log("authority-jobs tests passed");

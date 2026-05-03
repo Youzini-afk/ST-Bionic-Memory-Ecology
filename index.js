@@ -418,6 +418,8 @@ let _themesModule = null;
 
 const SERVER_SETTINGS_FILENAME = "st-bme-settings.json";
 const SERVER_SETTINGS_URL = `/user/files/${SERVER_SETTINGS_FILENAME}`;
+const AUTHORITY_VECTOR_REBUILD_JOB_TYPE = "authority.vector.rebuild";
+const AUTHORITY_VECTOR_REBUILD_RANGE_JOB_TYPE = "authority.vector.rebuild-range";
 
 function normalizeChatIdCandidate(value = "") {
   return String(value ?? "").trim();
@@ -2150,16 +2152,30 @@ function getAuthorityJobAdapter(options = {}) {
   });
 }
 
-function shouldUseAuthorityJobs(config = null) {
+function normalizeAuthorityJobType(kind = "") {
+  return String(kind || "").trim().toLowerCase();
+}
+
+function shouldUseAuthorityJobs(config = null, kind = AUTHORITY_VECTOR_REBUILD_JOB_TYPE) {
   const settings = getSettings();
   const { capability } = getAuthorityRuntimeSnapshot(settings);
+  if (
+    !capability.jobsReady ||
+    settings.authorityJobsEnabled === false ||
+    !isAuthorityJobTypeSupported(capability, kind) ||
+    !isAuthorityVectorConfig(config)
+  ) {
+    return false;
+  }
   const jobConfig = normalizeAuthorityJobConfig(settings);
-  return Boolean(
-    jobConfig.enabled &&
-      capability.jobsReady &&
-      settings.authorityJobsEnabled !== false &&
-      isAuthorityVectorConfig(config),
-  );
+  return Boolean(jobConfig.enabled);
+}
+
+function isAuthorityJobTypeSupported(capability = {}, kind = "") {
+  if (!capability?.supportedJobTypesKnown) return true;
+  const normalizedKind = normalizeAuthorityJobType(kind);
+  if (!normalizedKind) return true;
+  return Array.isArray(capability.supportedJobTypes) && capability.supportedJobTypes.includes(normalizedKind);
 }
 
 function mergeAuthorityRecentJobsIntoState(incomingJobs = [], options = {}) {
@@ -3329,7 +3345,7 @@ async function rebuildAuthorityTrivium(options = {}) {
 
   const range = options.range || null;
   const reason = String(options.reason || "authority-trivium-rebuild");
-  if (!range && options.useJobs !== false && shouldUseAuthorityJobs(vectorConfig)) {
+  if (!range && options.useJobs !== false && shouldUseAuthorityJobs(vectorConfig, AUTHORITY_VECTOR_REBUILD_JOB_TYPE)) {
     const jobResult = await submitAuthorityVectorRebuildJob({
       config: vectorConfig,
       range,
@@ -3672,7 +3688,20 @@ async function submitAuthorityVectorRebuildJob({
   signal = undefined,
 } = {}) {
   const vectorConfig = config || getEmbeddingConfig();
-  if (!shouldUseAuthorityJobs(vectorConfig)) {
+  const kind = range
+    ? AUTHORITY_VECTOR_REBUILD_RANGE_JOB_TYPE
+    : AUTHORITY_VECTOR_REBUILD_JOB_TYPE;
+  const { capability } = getAuthorityRuntimeSnapshot(getSettings());
+  if (!shouldUseAuthorityJobs(vectorConfig, kind)) {
+    if (!isAuthorityJobTypeSupported(capability, kind)) {
+      const message = `Authority Job type ${kind} is not supported by this Authority runtime`;
+      return {
+        submitted: false,
+        fallbackRequired: true,
+        reason: "authority-job-type-unsupported",
+        error: message,
+      };
+    }
     return {
       submitted: false,
       fallbackRequired: true,
@@ -3684,9 +3713,6 @@ async function submitAuthorityVectorRebuildJob({
   const chatId = getCurrentChatId();
   const collectionId =
     currentGraph?.vectorIndexState?.collectionId || buildVectorCollectionId(chatId);
-  const kind = range
-    ? "authority.vector.rebuild-range"
-    : "authority.vector.rebuild";
   const idempotencyKey = buildAuthorityJobIdempotencyKey({
     kind,
     chatId,
@@ -11513,15 +11539,13 @@ async function maybeMigrateLegacyGraphToIndexedDb(
         }
         try {
           const settings = getSettings();
-          if (shouldUseAuthorityJobs(settings)) {
-            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
-            if (vectorConfig?.mode === "authority") {
-              await submitAuthorityVectorRebuildJob({
-                config: vectorConfig,
-                purge: true,
-                reason: "authority-migration-trivium-rebuild",
-              });
-            }
+          const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+          if (shouldUseAuthorityJobs(vectorConfig, AUTHORITY_VECTOR_REBUILD_JOB_TYPE)) {
+            await submitAuthorityVectorRebuildJob({
+              config: vectorConfig,
+              purge: true,
+              reason: "authority-migration-trivium-rebuild",
+            });
           }
         } catch (vectorJobError) {
           console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
@@ -11789,15 +11813,13 @@ async function maybeImportLegacyIndexedDbSnapshotToLocalStore(
         }
         try {
           const settings = getSettings();
-          if (shouldUseAuthorityJobs(settings)) {
-            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
-            if (vectorConfig?.mode === "authority") {
-              await submitAuthorityVectorRebuildJob({
-                config: vectorConfig,
-                purge: true,
-                reason: "authority-migration-trivium-rebuild",
-              });
-            }
+          const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+          if (shouldUseAuthorityJobs(vectorConfig, AUTHORITY_VECTOR_REBUILD_JOB_TYPE)) {
+            await submitAuthorityVectorRebuildJob({
+              config: vectorConfig,
+              purge: true,
+              reason: "authority-migration-trivium-rebuild",
+            });
           }
         } catch (vectorJobError) {
           console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
@@ -12048,15 +12070,13 @@ async function maybeImportLegacyOpfsSnapshotToLocalStore(
         }
         try {
           const settings = getSettings();
-          if (shouldUseAuthorityJobs(settings)) {
-            const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
-            if (vectorConfig?.mode === "authority") {
-              await submitAuthorityVectorRebuildJob({
-                config: vectorConfig,
-                purge: true,
-                reason: "authority-migration-trivium-rebuild",
-              });
-            }
+          const vectorConfig = normalizeAuthorityVectorConfig(settings, buildAuthorityGraphStoreOptions(settings));
+          if (shouldUseAuthorityJobs(vectorConfig, AUTHORITY_VECTOR_REBUILD_JOB_TYPE)) {
+            await submitAuthorityVectorRebuildJob({
+              config: vectorConfig,
+              purge: true,
+              reason: "authority-migration-trivium-rebuild",
+            });
           }
         } catch (vectorJobError) {
           console.warn("[ST-BME] 迁移后触发 Trivium 重建 Job 失败（非阻塞）:", vectorJobError);
@@ -24261,4 +24281,3 @@ async function onCompactLukerSidecar() {
   }
   debugLog("[ST-BME] 初始化完成");
 })();
-

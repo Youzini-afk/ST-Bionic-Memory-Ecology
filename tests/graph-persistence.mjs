@@ -107,6 +107,7 @@ import {
   normalizeAuthorityCapabilityState,
   probeAuthorityCapabilities,
 } from "../runtime/authority-capabilities.js";
+import { normalizeAuthorityBlobConfig } from "../maintenance/authority-blob-adapter.js";
 import {
   createAuthorityBrowserState,
   getAuthorityBrowserStateSnapshot,
@@ -137,6 +138,27 @@ import {
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const indexPath = path.resolve(moduleDir, "../index.js");
 const indexSource = await fs.readFile(indexPath, "utf8");
+
+function isAuthorityVectorConfig(config = null) {
+  return config?.mode === "authority" || config?.source === "authority-trivium";
+}
+
+function normalizeAuthorityVectorConfig(settings = {}, overrides = {}) {
+  return {
+    ...overrides,
+    mode: "authority",
+    source: "authority-trivium",
+    baseUrl: String(settings?.authorityBaseUrl || overrides?.baseUrl || "/api/plugins/authority"),
+  };
+}
+
+function createAuthorityBlobAdapter() {
+  return {
+    async writeJson(path = "", payload = null) {
+      return { path, payload, written: true };
+    },
+  };
+}
 
 function extractSnippet(startMarker, endMarker) {
   const start = indexSource.indexOf(startMarker);
@@ -629,6 +651,10 @@ async function createGraphPersistenceHarness({
     normalizeAuthoritySettings,
     normalizeAuthorityCapabilityState,
     probeAuthorityCapabilities,
+    isAuthorityVectorConfig,
+    normalizeAuthorityVectorConfig,
+    normalizeAuthorityBlobConfig,
+    createAuthorityBlobAdapter,
     createAuthorityBrowserState,
     getAuthorityBrowserStateSnapshot,
     normalizeAuthorityBrowserState,
@@ -1581,6 +1607,7 @@ result = {
   maybeFlushQueuedGraphPersist,
   retryPendingGraphPersist,
   persistExtractionBatchResult,
+  shouldUseAuthorityJobs,
   onRebuildLocalCacheFromLukerSidecar,
   saveGraphToIndexedDb,
   cloneGraphForPersistence,
@@ -3993,6 +4020,12 @@ result = {
     sessionReady: true,
     permissionReady: true,
     features: ["sql.query", "sql.mutation", "trivium.search", "jobs", "blob"],
+    jobs: {
+      builtinTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+      registry: {
+        jobTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+      },
+    },
     reason: "ok",
     lastProbeAt: Date.now(),
   });
@@ -4034,6 +4067,29 @@ result = {
     harness.runtimeContext.__indexedDbSnapshots.has(chatId),
     true,
     "迁移成功后仍保留 legacy IndexedDB 源数据，不删除本地数据",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-authority-empty-jobs",
+    globalChatId: "chat-authority-empty-jobs",
+  });
+  harness.api.setAuthorityCapabilityState({
+    installed: true,
+    healthy: true,
+    sessionReady: true,
+    permissionReady: true,
+    features: ["sql.query", "sql.mutation", "trivium.search", "jobs", "blob"],
+    supportedJobTypes: [],
+    supportedJobTypesKnown: true,
+    reason: "ok",
+  });
+
+  assert.equal(
+    harness.api.shouldUseAuthorityJobs({ mode: "authority", source: "authority-trivium" }),
+    false,
+    "显式空 Authority job 白名单应阻止 vector rebuild job 提交",
   );
 }
 

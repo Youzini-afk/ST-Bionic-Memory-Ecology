@@ -608,7 +608,7 @@ export async function onRebuildVectorIndexController(runtime, range = null) {
       }
       if (jobResult?.error) {
         runtime.toastr.warning(
-          `Authority Job 提交失败，已回退本地重建：${jobResult.error}`,
+          `Authority Job 提交失败，已回退直接同步重建：${jobResult.error}`,
         );
       }
     }
