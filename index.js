@@ -1517,7 +1517,7 @@ function buildPersistenceEnvironment(
     cacheStorageTier: authorityPrimary
       ? "none"
       : hostProfile === "luker"
-        ? localStoreTier
+        ? "none"
         : "none",
   };
 }
@@ -24234,5 +24234,4 @@ async function onCompactLukerSidecar() {
   }
   debugLog("[ST-BME] 初始化完成");
 })();
-
 

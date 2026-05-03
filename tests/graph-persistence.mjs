@@ -4505,10 +4505,16 @@ result = {
   assert.equal(legacyStored ?? null, null);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(
-    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0) >= result.revision,
-    true,
-    "Luker 主存储成功后应异步补写本地缓存",
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker 主存储成功后默认不应补写浏览器本地大图谱缓存 revision",
   );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Luker 主存储成功后默认不应补写浏览器本地大图谱缓存 nodes",
+  );
+  assert.equal(result.cacheTier, "none");
   assert.equal(
     harness.api.getGraphPersistenceState().acceptedStorageTier,
     "luker-chat-state",
@@ -4566,9 +4572,14 @@ result = {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(
-    harness.api.getIndexedDbSnapshot()?.nodes?.[0]?.fields?.title,
-    "事件-luker-detached",
-    "Luker queued save 的异步本地 mirror 不应被后续 live graph 修改污染",
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker queued save 默认不应写入浏览器本地大图谱缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Luker queued save 默认不应写入浏览器本地大图谱缓存 nodes",
   );
 }
 
