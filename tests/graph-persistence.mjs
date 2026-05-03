@@ -159,6 +159,10 @@ const messageSnippet = extractSnippet(
   'function onMessageReceived(messageId = null, type = "") {',
   "async function onViewGraph() {",
 );
+const lukerCacheActionSnippet = extractSnippet(
+  "async function onRebuildLocalCacheFromLukerSidecar() {",
+  "async function onRepairLukerSidecar() {",
+);
 
 function createSessionStorage(seed = null) {
   const store = seed instanceof Map ? seed : new Map();
@@ -1555,6 +1559,7 @@ async function createGraphPersistenceHarness({
       persistencePrelude,
       persistenceCore,
       messageSnippet,
+      lukerCacheActionSnippet,
       `
 result = {
   GRAPH_LOAD_STATES,
@@ -1576,6 +1581,7 @@ result = {
   maybeFlushQueuedGraphPersist,
   retryPendingGraphPersist,
   persistExtractionBatchResult,
+  onRebuildLocalCacheFromLukerSidecar,
   saveGraphToIndexedDb,
   cloneGraphForPersistence,
   assertRecoveryChatStillActive,
@@ -4505,10 +4511,16 @@ result = {
   assert.equal(legacyStored ?? null, null);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(
-    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0) >= result.revision,
-    true,
-    "Luker 主存储成功后应异步补写本地缓存",
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker 主存储成功后默认不应补写浏览器本地大图谱缓存 revision",
   );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Luker 主存储成功后默认不应补写浏览器本地大图谱缓存 nodes",
+  );
+  assert.equal(result.cacheTier, "none");
   assert.equal(
     harness.api.getGraphPersistenceState().acceptedStorageTier,
     "luker-chat-state",
@@ -4516,6 +4528,74 @@ result = {
   assert.equal(
     harness.api.getGraphPersistenceState().lukerManifestRevision,
     result.revision,
+  );
+}
+
+{
+  const chatId = "chat-luker-no-authority-primary";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-no-authority",
+    chatMetadata: {
+      integrity: "meta-luker-no-authority-primary",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  harness.runtimeContext.extension_settings[MODULE_NAME] = {
+    authorityEnabled: "on",
+    authorityPrimaryWhenAvailable: true,
+    authorityStorageMode: "server-primary",
+    authoritySqlPrimary: true,
+    authorityBrowserCacheMode: "minimal",
+  };
+  harness.api.setAuthorityCapabilityState({
+    installed: false,
+    healthy: false,
+    serverPrimaryReady: false,
+    storagePrimaryReady: false,
+    reason: "authority-not-installed",
+  });
+  harness.api.setCurrentGraph(
+    stampPersistedGraph(
+      createMeaningfulGraph(chatId, "luker-no-authority"),
+      {
+        revision: 7,
+        integrity: "meta-luker-no-authority-primary",
+        chatId,
+        reason: "luker-no-authority-seed",
+      },
+    ),
+  );
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "luker-no-authority-persist",
+    lastProcessedAssistantFloor: 5,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.acceptedBy, "luker-chat-state");
+  assert.equal(result.primaryTier, "luker-chat-state");
+  assert.equal(result.cacheTier, "none");
+  const manifest = await harness.runtimeContext.__chatContext.getChatState(
+    LUKER_GRAPH_MANIFEST_NAMESPACE,
+  );
+  assert.equal(manifest?.storageTier, "luker-chat-state");
+  assert.equal(manifest?.headRevision, result.revision);
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Authority 不可用时，Luker 主存储不应回退写浏览器大图谱缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Authority 不可用时，Luker 主存储不应回退写浏览器大图谱缓存 nodes",
   );
 }
 
@@ -4566,9 +4646,68 @@ result = {
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(
-    harness.api.getIndexedDbSnapshot()?.nodes?.[0]?.fields?.title,
-    "事件-luker-detached",
-    "Luker queued save 的异步本地 mirror 不应被后续 live graph 修改污染",
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker queued save 默认不应写入浏览器本地大图谱缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    0,
+    "Luker queued save 默认不应写入浏览器本地大图谱缓存 nodes",
+  );
+}
+
+{
+  const chatId = "chat-luker-manual-cache-rebuild";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-manual-cache-rebuild",
+    chatMetadata: {
+      integrity: "meta-luker-manual-cache-rebuild",
+    },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = stampPersistedGraph(
+    createMeaningfulGraph(chatId, "luker-manual-cache"),
+    {
+      revision: 10,
+      integrity: "meta-luker-manual-cache-rebuild",
+      chatId,
+      reason: "luker-manual-cache-seed",
+    },
+  );
+  harness.api.setCurrentGraph(graph);
+  const persistResult = await harness.api.persistExtractionBatchResult({
+    reason: "luker-manual-cache-persist",
+    lastProcessedAssistantFloor: 6,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(persistResult.cacheTier, "none");
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    0,
+    "Luker 默认路径不应自动重建浏览器缓存",
+  );
+
+  const rebuildResult = await harness.api.onRebuildLocalCacheFromLukerSidecar();
+  assert.equal(rebuildResult.handledToast, true);
+  assert.equal(rebuildResult.result?.loaded, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.meta?.revision || 0),
+    persistResult.revision,
+    "只有手动重建本地缓存时才应写入浏览器缓存 revision",
+  );
+  assert.equal(
+    Number(harness.api.getIndexedDbSnapshot()?.nodes?.length || 0),
+    1,
+    "只有手动重建本地缓存时才应写入浏览器缓存 nodes",
   );
 }
 
