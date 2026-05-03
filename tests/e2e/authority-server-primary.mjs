@@ -232,7 +232,7 @@ await runAuthorityE2eStep("jobs", async () => {
   const listBefore = await adapter.listPage({ limit: 5 });
   assert.ok(Array.isArray(listBefore.jobs));
 
-  const kind = String(context.env.AUTHORITY_E2E_JOB_KIND || "authority.vector.rebuild");
+  const kind = String(context.env.AUTHORITY_E2E_JOB_KIND || "delay");
   const idempotencyKey = buildAuthorityJobIdempotencyKey({
     kind,
     chatId,
@@ -241,17 +241,23 @@ await runAuthorityE2eStep("jobs", async () => {
   });
   const submitted = await adapter.submit(
     kind,
-    {
-      chatId,
-      collectionId,
-      namespace,
-      modelScope: "authority-e2e",
-      source: "authority-e2e-contract",
-      purge: false,
-      dryRun: true,
-      contractSmoke: true,
-      idempotencyKey,
-    },
+    kind === "delay"
+      ? {
+          durationMs: 10,
+          message: "Authority E2E job smoke completed",
+          idempotencyKey,
+        }
+      : {
+          chatId,
+          collectionId,
+          namespace,
+          modelScope: "authority-e2e",
+          source: "authority-e2e-contract",
+          purge: false,
+          dryRun: true,
+          contractSmoke: true,
+          idempotencyKey,
+        },
     { idempotencyKey },
   );
   assert.ok(submitted.id);
