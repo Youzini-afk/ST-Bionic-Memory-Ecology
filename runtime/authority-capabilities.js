@@ -33,6 +33,10 @@ function normalizeFeatureName(value) {
   return String(value ?? "").trim().toLowerCase();
 }
 
+function normalizeJobType(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
 function addFeature(features, value) {
   const normalized = normalizeFeatureName(value);
   if (normalized) features.add(normalized);
@@ -319,6 +323,71 @@ export function collectAuthorityFeatures(payload = {}) {
   return features;
 }
 
+function collectJobTypesFromArray(jobTypes, value) {
+  if (!Array.isArray(value)) return false;
+  for (const item of value) {
+    const normalized = normalizeJobType(item);
+    if (normalized) jobTypes.add(normalized);
+  }
+  return true;
+}
+
+function collectJobTypesFromEntries(jobTypes, value) {
+  if (!Array.isArray(value)) return false;
+  for (const entry of value) {
+    const normalized = normalizeJobType(entry?.type);
+    if (normalized) jobTypes.add(normalized);
+  }
+  return true;
+}
+
+function collectSupportedJobTypes(payload = {}) {
+  const source = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {};
+  const jobTypes = new Set();
+  let known = source.supportedJobTypesKnown === true;
+
+  const topLevelSupportedJobTypes = source.supportedJobTypes;
+  if (Array.isArray(topLevelSupportedJobTypes)) {
+    collectJobTypesFromArray(jobTypes, topLevelSupportedJobTypes);
+    known =
+      known ||
+      topLevelSupportedJobTypes.length > 0 ||
+      source.reason === "ok" ||
+      Number(source.lastProbeAt || 0) > 0 ||
+      source.installed === true ||
+      source.healthy === true;
+  }
+
+  for (const value of [
+    source.jobs?.supportedTypes,
+    source.jobs?.builtinTypes,
+    source.jobs?.registry?.jobTypes,
+    source.features?.jobs?.supportedTypes,
+    source.features?.jobs?.builtinTypes,
+    source.features?.jobs?.registry?.jobTypes,
+    source.featureDetails?.jobs?.supportedTypes,
+    source.featureDetails?.jobs?.builtinTypes,
+    source.featureDetails?.jobs?.registry?.jobTypes,
+    source.core?.health?.jobRegistrySummary?.jobTypes,
+  ]) {
+    known = collectJobTypesFromArray(jobTypes, value) || known;
+  }
+
+  for (const value of [
+    source.jobs?.registry?.entries,
+    source.features?.jobs?.registry?.entries,
+    source.featureDetails?.jobs?.registry?.entries,
+    source.core?.health?.jobRegistrySummary?.entries,
+  ]) {
+    known = collectJobTypesFromEntries(jobTypes, value) || known;
+  }
+
+  return {
+    supportedJobTypes: Array.from(jobTypes).sort(),
+    supportedJobTypesKnown: known,
+  };
+}
+
 export function createDefaultAuthorityCapabilityState(overrides = {}) {
   return {
     enabledMode: "auto",
@@ -332,6 +401,8 @@ export function createDefaultAuthorityCapabilityState(overrides = {}) {
     storagePrimaryReady: false,
     triviumPrimaryReady: false,
     jobsReady: false,
+    supportedJobTypes: [],
+    supportedJobTypesKnown: false,
     blobReady: false,
     features: [],
     missingFeatures: ["sql.query", "sql.mutation", "trivium.search", "jobs", "blob-or-private-files"],
@@ -351,6 +422,7 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const features = new Set((Array.isArray(source.features) ? source.features : []).map(normalizeFeatureName).filter(Boolean));
   const readiness = createFeatureReadiness(features);
+  const supportedJobs = collectSupportedJobTypes(source);
   const missingFeatures = Array.isArray(source.missingFeatures) && source.missingFeatures.length
     ? source.missingFeatures.map(String)
     : collectMissingFeatures(readiness);
@@ -380,6 +452,8 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
     storagePrimaryReady,
     triviumPrimaryReady,
     jobsReady,
+    supportedJobTypes: supportedJobs.supportedJobTypes,
+    supportedJobTypesKnown: supportedJobs.supportedJobTypesKnown,
     blobReady,
     features: Array.from(features).sort(),
     missingFeatures,
@@ -396,6 +470,7 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
 export function normalizeAuthorityProbeResponse(payload = {}, context = {}) {
   const settings = normalizeAuthoritySettings(context.settings || {});
   const features = collectAuthorityFeatures(payload);
+  const supportedJobs = collectSupportedJobTypes(payload);
   const readiness = createFeatureReadiness(features);
   const missingFeatures = collectMissingFeatures(readiness);
   const sessionReady = payload?.sessionReady ?? payload?.session?.ready ?? payload?.session?.active ?? true;
@@ -408,6 +483,8 @@ export function normalizeAuthorityProbeResponse(payload = {}, context = {}) {
       sessionReady: Boolean(sessionReady),
       permissionReady: Boolean(permissionReady),
       features: Array.from(features),
+      supportedJobTypes: supportedJobs.supportedJobTypes,
+      supportedJobTypesKnown: supportedJobs.supportedJobTypesKnown,
       missingFeatures,
       reason: missingFeatures.length ? "missing-required-features" : "ok",
       endpoint: context.endpoint || "",
@@ -519,6 +596,7 @@ export async function probeAuthorityCapabilities(options = {}) {
         payload = {};
       }
       const features = collectAuthorityFeatures(payload);
+      const supportedJobs = collectSupportedJobTypes(payload);
       const readiness = createFeatureReadiness(features);
       const missingFeatures = collectMissingFeatures(readiness);
       const healthy = payload?.healthy ?? payload?.ok ?? true;
@@ -544,6 +622,8 @@ export async function probeAuthorityCapabilities(options = {}) {
           sessionReady: Boolean(sessionReady),
           permissionReady: Boolean(permissionReady),
           features: Array.from(features),
+          supportedJobTypes: supportedJobs.supportedJobTypes,
+          supportedJobTypesKnown: supportedJobs.supportedJobTypesKnown,
           missingFeatures,
           reason,
           lastError: dataPlaneLastError,

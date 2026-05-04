@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   buildAuthorityProbeUrls,
   collectAuthorityFeatures,
+  createDefaultAuthorityCapabilityState,
   normalizeAuthorityCapabilityState,
+  normalizeAuthorityProbeResponse,
   normalizeAuthoritySettings,
   probeAuthorityCapabilities,
 } from "../runtime/authority-capabilities.js";
@@ -173,5 +175,133 @@ const relativeUnavailable = await probeAuthorityCapabilities({
 });
 assert.equal(relativeUnavailable.reason, "relative-url-unavailable");
 assert.equal(relativeUnavailable.serverPrimaryReady, false);
+
+// Regression: Authority capability normalization records explicit supported job types from probe payloads.
+// When a probe payload provides jobs.supportedTypes, normalizeAuthorityCapabilityState should surface
+// them as supportedJobTypes and set supportedJobTypesKnown = true.
+const explicitJobTypesState = normalizeAuthorityCapabilityState(
+  {
+    installed: true,
+    healthy: true,
+    features: ["sql", "trivium", "jobs", "transfers.fs"],
+    jobs: { supportedTypes: ["authority.vector.rebuild", "authority.cache.invalidate"] },
+  },
+  defaultSettings,
+);
+assert.equal(explicitJobTypesState.supportedJobTypesKnown, true);
+assert.deepEqual(explicitJobTypesState.supportedJobTypes, [
+  "authority.cache.invalidate",
+  "authority.vector.rebuild",
+]);
+
+// Regression: Current Authority builtin job list is known and excludes authority.vector.rebuild.
+// When the probe payload reports a restricted job type list that omits authority.vector.rebuild,
+// supportedJobTypes should NOT contain it and supportedJobTypesKnown should be true.
+const restrictedJobTypesState = normalizeAuthorityCapabilityState(
+  {
+    installed: true,
+    healthy: true,
+    features: ["sql", "trivium", "jobs", "transfers.fs"],
+    jobs: {
+      builtinTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+      registry: {
+        jobTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+        entries: [{ type: "delay" }],
+      },
+    },
+  },
+  defaultSettings,
+);
+assert.equal(restrictedJobTypesState.supportedJobTypesKnown, true);
+assert.equal(
+  restrictedJobTypesState.supportedJobTypes.includes("authority.vector.rebuild"),
+  false,
+);
+
+const authorityProbeJobTypesState = normalizeAuthorityProbeResponse(
+  {
+    healthy: true,
+    features: {
+      sql: { queryPage: true },
+      trivium: { upsert: true },
+      jobs: {
+        background: true,
+        builtinTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+      },
+      transfers: { fs: true },
+    },
+    jobs: {
+      builtinTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+      registry: {
+        jobTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+        entries: [{ type: "fs.import-jsonl" }],
+      },
+    },
+    core: {
+      health: {
+        jobRegistrySummary: {
+          jobTypes: ["delay", "sql.backup", "trivium.flush", "fs.import-jsonl"],
+          entries: [{ type: "trivium.flush" }],
+        },
+      },
+    },
+  },
+  { settings: defaultSettings, nowMs: 4000 },
+);
+assert.equal(authorityProbeJobTypesState.supportedJobTypesKnown, true);
+assert.deepEqual(authorityProbeJobTypesState.supportedJobTypes, [
+  "delay",
+  "fs.import-jsonl",
+  "sql.backup",
+  "trivium.flush",
+]);
+assert.equal(
+  authorityProbeJobTypesState.supportedJobTypes.includes("authority.vector.rebuild"),
+  false,
+);
+
+const renormalizedJobTypesState = normalizeAuthorityCapabilityState(
+  authorityProbeJobTypesState,
+  defaultSettings,
+);
+assert.equal(renormalizedJobTypesState.supportedJobTypesKnown, true);
+assert.deepEqual(renormalizedJobTypesState.supportedJobTypes, authorityProbeJobTypesState.supportedJobTypes);
+
+const emptySupportedJobTypesProbeState = normalizeAuthorityProbeResponse(
+  {
+    healthy: true,
+    features: {
+      sql: { queryPage: true },
+      trivium: { upsert: true },
+      jobs: { background: true },
+      transfers: { fs: true },
+    },
+    supportedJobTypes: [],
+  },
+  { settings: defaultSettings, nowMs: 5000 },
+);
+assert.equal(emptySupportedJobTypesProbeState.supportedJobTypesKnown, true);
+assert.deepEqual(emptySupportedJobTypesProbeState.supportedJobTypes, []);
+
+// Regression: Legacy probes with generic jobs.background but no explicit job type list keep
+// jobsReady === true and mark job type support as unknown (supportedJobTypesKnown === false).
+const legacyProbeState = normalizeAuthorityCapabilityState(
+  {
+    installed: true,
+    healthy: true,
+    features: ["sql", "trivium", "jobs", "transfers.fs"],
+  },
+  defaultSettings,
+);
+assert.equal(legacyProbeState.jobsReady, true);
+assert.equal(legacyProbeState.supportedJobTypesKnown, false);
+assert.deepEqual(legacyProbeState.supportedJobTypes, []);
+
+const defaultCapabilityState = normalizeAuthorityCapabilityState(
+  createDefaultAuthorityCapabilityState(),
+  defaultSettings,
+);
+assert.equal(defaultCapabilityState.supportedJobTypesKnown, false);
+assert.deepEqual(defaultCapabilityState.supportedJobTypes, []);
 
 console.log("authority-capabilities tests passed");

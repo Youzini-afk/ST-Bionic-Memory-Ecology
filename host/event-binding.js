@@ -442,6 +442,10 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
     runtime.refreshPersistedRecallMessageUi?.();
     return;
   }
+  const parsedMessageId = Number(messageId);
+  if (Number.isFinite(parsedMessageId)) {
+    runtime.removeMessageRecallRecord?.(Math.floor(parsedMessageId));
+  }
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
