@@ -84,6 +84,19 @@
       "timeoutMs": 120000,
       "maxRequestBytes": 67108864,
       "maxResponseBytes": 67108864
+    },
+    "extraction.commitBatch": {
+      "name": "extraction.commitBatch",
+      "version": "1",
+      "title": "BME extraction commitBatch",
+      "description": "Atomically commits a BME extraction batch: graph delta, extraction cursor, message hashes, durable batch journal, vector dirty state, and compatibility graph meta under per-chat lock + idempotency + CAS.",
+      "riskLevel": "high",
+      "permissionTarget": { "kind": "transaction" },
+      "requiredResources": [{ "resource": "sql.private" }],
+      "idempotency": "required",
+      "timeoutMs": 120000,
+      "maxRequestBytes": 67108864,
+      "maxResponseBytes": 67108864
     }
   }
 }

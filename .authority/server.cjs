@@ -389,6 +389,50 @@ function computeHeadHash(nodeIds, edgeIds, revision) {
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+function createValidationError(message, details) {
+  var err = new Error(message);
+  err.status = 400;
+  err.code = 'validation_error';
+  if (details) err.details = details;
+  return err;
+}
+
+function createConflictError(code, message, details) {
+  var err = new Error(message);
+  err.status = 409;
+  err.code = code;
+  if (details) err.details = details;
+  return err;
+}
+
+function stableJson(value) {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return '[' + value.map(stableJson).join(',') + ']';
+  if (typeof value === 'object') {
+    var keys = Object.keys(value).sort();
+    return '{' + keys.map(function (key) {
+      return JSON.stringify(key) + ':' + stableJson(value[key]);
+    }).join(',') + '}';
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(String(value == null ? '' : value)).digest('hex');
+}
+
+function readInteger(value, fallback) {
+  var parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.trunc(parsed);
+}
+
+function normalizeCommittedAtValue(value) {
+  var numeric = Number(value);
+  if (Number.isFinite(numeric)) return new Date(Math.trunc(numeric)).toISOString();
+  return value || null;
+}
+
 // CREATE TABLE / CREATE INDEX IF NOT EXISTS for BME graph authority tables.
 // Safe to call repeatedly — companion handlers call this lazily before reads
 // so a fresh database does not error on SELECT from a missing table.
@@ -852,6 +896,223 @@ function buildCommitDeltaStatements(chatId, baseRevision, delta, options, existi
   };
 }
 
+function normalizeMessageHashRecords(records) {
+  return toArray(records).map(function (record) {
+    var floor = readInteger(record && record.floor, NaN);
+    var messageHash = normalizeString(record && record.messageHash, '');
+    if (!Number.isFinite(floor) || floor < 0 || !messageHash) return null;
+    var hashVersion = readInteger(record.hashVersion, 1);
+    if (!Number.isFinite(hashVersion) || hashVersion <= 0) hashVersion = 1;
+    return { floor: floor, messageHash: messageHash, hashVersion: hashVersion };
+  }).filter(Boolean);
+}
+
+function buildMessageHashesUpsertStatements(chatId, batchId, nextRevision, messageHashes, nowMs) {
+  var statements = [];
+  var chunks = chunkArray(messageHashes, CHUNK_ROWS_INSERT);
+  for (var c = 0; c < chunks.length; c++) {
+    var rows = [];
+    var params = [];
+    for (var i = 0; i < chunks[c].length; i++) {
+      var item = chunks[c][i];
+      rows.push('(?, ?, ?, ?, ?, ?, ?)');
+      params.push(chatId, item.floor, item.messageHash, item.hashVersion, batchId, nextRevision, nowMs);
+    }
+    if (!rows.length) continue;
+    statements.push({
+      statement:
+        'INSERT INTO ' + GRAPH_TABLES.messageHashes +
+        ' (chat_id, floor, message_hash, hash_version, batch_id, graph_revision, updated_at) VALUES ' +
+        rows.join(', ') +
+        ' ON CONFLICT(chat_id, floor) DO UPDATE SET message_hash = excluded.message_hash, hash_version = excluded.hash_version, batch_id = excluded.batch_id, graph_revision = excluded.graph_revision, updated_at = excluded.updated_at',
+      params: params,
+    });
+  }
+  return statements;
+}
+
+function buildExtractionStateUpsertStatement(chatId, batchId, nextRevision, extraction, nowMs) {
+  return {
+    statement:
+      'INSERT INTO ' + GRAPH_TABLES.extractionState +
+      ' (chat_id, last_processed_assistant_floor, extraction_count, last_batch_id, last_graph_revision, updated_at) VALUES (?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(chat_id) DO UPDATE SET last_processed_assistant_floor = excluded.last_processed_assistant_floor, extraction_count = excluded.extraction_count, last_batch_id = excluded.last_batch_id, last_graph_revision = excluded.last_graph_revision, updated_at = excluded.updated_at',
+    params: [chatId, extraction.nextLastProcessedFloor, extraction.nextExtractionCount, batchId, nextRevision, nowMs],
+  };
+}
+
+function buildBatchJournalInsertStatement(chatId, batchId, idempotencyKey, fingerprint, baseRevision, nextRevision, headHash, processedRange, extraction, journal, vectorDirtyGeneration, nowMs) {
+  return {
+    statement:
+      'INSERT INTO ' + GRAPH_TABLES.batchJournal +
+      ' (chat_id, batch_id, idempotency_key, request_fingerprint, base_revision, revision, head_hash, source_floor_start, source_floor_end, last_processed_floor_before, last_processed_floor_after, extraction_count_before, extraction_count_after, journal_json, vector_dirty_generation, committed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    params: [
+      chatId,
+      batchId,
+      idempotencyKey || null,
+      fingerprint,
+      baseRevision,
+      nextRevision,
+      headHash,
+      processedRange.startFloor,
+      processedRange.endFloor,
+      extraction.previousLastProcessedFloor,
+      extraction.nextLastProcessedFloor,
+      extraction.previousExtractionCount,
+      extraction.nextExtractionCount,
+      JSON.stringify(journal),
+      vectorDirtyGeneration,
+      nowMs,
+      nowMs,
+    ],
+  };
+}
+
+function buildVectorDirtyStateUpsertStatement(chatId, collectionId, nextRevision, dirtyGeneration, cleanGeneration, dirtyFromFloor, dirtyReason, nowMs) {
+  return {
+    statement:
+      'INSERT INTO ' + GRAPH_TABLES.vectorDirtyState +
+      ' (chat_id, dirty_generation, clean_generation, dirty_from_floor, dirty_reason, graph_revision, collection_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ' +
+      'ON CONFLICT(chat_id) DO UPDATE SET dirty_generation = excluded.dirty_generation, clean_generation = excluded.clean_generation, dirty_from_floor = excluded.dirty_from_floor, dirty_reason = excluded.dirty_reason, graph_revision = excluded.graph_revision, collection_id = excluded.collection_id, updated_at = excluded.updated_at',
+    params: [chatId, dirtyGeneration, cleanGeneration, dirtyFromFloor, dirtyReason, nextRevision, collectionId || null, nowMs],
+  };
+}
+
+function validateExtractionCommitBatchInput(input) {
+  input = input || {};
+  var chatId = resolveGraphChatId(input);
+  var baseRevision = Number(input.baseRevision);
+  if (!Number.isFinite(baseRevision) || baseRevision < 0) throw createValidationError('BME extraction.commitBatch requires baseRevision (non-negative number)');
+  var batchId = normalizeString(input.batchId, '');
+  if (!batchId) throw createValidationError('BME extraction.commitBatch requires batchId');
+  var delta = input.delta;
+  if (!delta || typeof delta !== 'object' || Array.isArray(delta)) throw createValidationError('BME extraction.commitBatch requires delta (object)');
+  var extractionInput = input.extraction;
+  if (!extractionInput || typeof extractionInput !== 'object' || Array.isArray(extractionInput)) throw createValidationError('BME extraction.commitBatch requires extraction (object)');
+  var nextLastProcessedFloor = readInteger(extractionInput.nextLastProcessedFloor, NaN);
+  var nextExtractionCount = readInteger(extractionInput.nextExtractionCount, NaN);
+  if (!Number.isFinite(nextLastProcessedFloor)) throw createValidationError('BME extraction.commitBatch requires extraction.nextLastProcessedFloor');
+  if (!Number.isFinite(nextExtractionCount)) throw createValidationError('BME extraction.commitBatch requires extraction.nextExtractionCount');
+  var processedRangeInput = (input.processedRange && typeof input.processedRange === 'object') ? input.processedRange : {};
+  var endFloor = readInteger(processedRangeInput.endFloor, nextLastProcessedFloor);
+  if (!Number.isFinite(endFloor)) throw createValidationError('BME extraction.commitBatch requires processedRange.endFloor or extraction.nextLastProcessedFloor');
+  var startFloor = readInteger(processedRangeInput.startFloor, endFloor);
+  var journal = input.journal;
+  if (!journal || typeof journal !== 'object' || Array.isArray(journal)) throw createValidationError('BME extraction.commitBatch requires journal (object)');
+  return {
+    chatId: chatId,
+    baseRevision: Math.trunc(baseRevision),
+    batchId: batchId,
+    collectionId: normalizeString(input.collectionId, ''),
+    idempotencyKey: normalizeString(input.idempotencyKey, ''),
+    processedRange: { startFloor: startFloor, endFloor: endFloor },
+    extraction: {
+      previousLastProcessedFloor: readInteger(extractionInput.previousLastProcessedFloor, -1),
+      nextLastProcessedFloor: nextLastProcessedFloor,
+      previousExtractionCount: readInteger(extractionInput.previousExtractionCount, 0),
+      nextExtractionCount: nextExtractionCount,
+    },
+    messageHashes: normalizeMessageHashRecords(input.messageHashes),
+    pruneMessageHashesFromFloor: input.pruneMessageHashesFromFloor === null || input.pruneMessageHashesFromFloor === undefined ? null : readInteger(input.pruneMessageHashesFromFloor, NaN),
+    delta: delta,
+    journal: journal,
+    options: (input.options && typeof input.options === 'object' && !Array.isArray(input.options)) ? input.options : {},
+  };
+}
+
+function buildExtractionCommitBatchFingerprint(database, normalized) {
+  return sha256Hex(stableJson({
+    database: database,
+    chatId: normalized.chatId,
+    collectionId: normalized.collectionId,
+    baseRevision: normalized.baseRevision,
+    batchId: normalized.batchId,
+    processedRange: normalized.processedRange,
+    extraction: normalized.extraction,
+    delta: normalized.delta,
+    messageHashes: normalized.messageHashes,
+    pruneMessageHashesFromFloor: normalized.pruneMessageHashesFromFloor,
+    journal: normalized.journal,
+    options: normalized.options,
+  }));
+}
+
+async function readExistingBatchJournal(txCtx, database, chatId, batchId, idempotencyKey) {
+  var rows = normalizeSqlRows(await txCtx.sql.query(
+    database,
+    'SELECT batch_id, idempotency_key, request_fingerprint, revision, head_hash, source_floor_start, source_floor_end, last_processed_floor_after, extraction_count_after, vector_dirty_generation, committed_at FROM ' + GRAPH_TABLES.batchJournal + ' WHERE chat_id = ? AND (batch_id = ? OR (? IS NOT NULL AND idempotency_key = ?)) LIMIT 1',
+    [chatId, batchId, idempotencyKey || null, idempotencyKey || null]
+  ));
+  return rows[0] || null;
+}
+
+function shouldTreatGraphRecordAsActive(record) {
+  if (!record || typeof record !== 'object') return false;
+  var deletedAt = record.deletedAt != null ? record.deletedAt : record.deleted_at;
+  return !Number.isFinite(Number(deletedAt));
+}
+
+function projectRecordIdsAfterDelta(currentIds, upsertRecords, deleteIds) {
+  var projected = new Set(toArray(currentIds).map(normalizeRecordId).filter(Boolean));
+  var deletes = toArray(deleteIds).map(normalizeRecordId).filter(Boolean);
+  for (var d = 0; d < deletes.length; d++) projected.delete(deletes[d]);
+  var upserts = toArray(upsertRecords);
+  for (var i = 0; i < upserts.length; i++) {
+    var record = upserts[i] || {};
+    var id = normalizeRecordId(record.id || record.recordId || record.record_id);
+    if (!id) continue;
+    if (shouldTreatGraphRecordAsActive(record)) projected.add(id);
+    else projected.delete(id);
+  }
+  return Array.from(projected);
+}
+
+function computeProjectedHeadHash(currentNodeIds, currentEdgeIds, delta, nextRevision) {
+  delta = delta || {};
+  var projectedNodeIds = projectRecordIdsAfterDelta(currentNodeIds, delta.upsertNodes, delta.deleteNodeIds);
+  var projectedEdgeIds = projectRecordIdsAfterDelta(currentEdgeIds, delta.upsertEdges, delta.deleteEdgeIds);
+  return computeHeadHash(projectedNodeIds, projectedEdgeIds, nextRevision);
+}
+
+function buildExtractionCommitBatchStatements(chatId, baseRevision, normalized, existingMeta, currentDirtyState, fingerprint, projectedHeadHash) {
+  var nowMs = Date.now();
+  var reason = normalizeString(normalized.options.reason, 'extraction.commitBatch');
+  var runtimeMetaPatch = Object.assign({}, (normalized.delta.runtimeMetaPatch && typeof normalized.delta.runtimeMetaPatch === 'object' && !Array.isArray(normalized.delta.runtimeMetaPatch)) ? normalized.delta.runtimeMetaPatch : {}, {
+    lastProcessedFloor: normalized.extraction.nextLastProcessedFloor,
+    extractionCount: normalized.extraction.nextExtractionCount,
+    schemaVersion: BME_GRAPH_SCHEMA_VERSION,
+    lastBatchId: normalized.batchId,
+  });
+  var delta = Object.assign({}, normalized.delta, { runtimeMetaPatch: runtimeMetaPatch });
+  var graphBuilt = buildCommitDeltaStatements(chatId, baseRevision, delta, Object.assign({}, normalized.options, { reason: reason }), existingMeta);
+  var nextRevision = graphBuilt.nextRevision;
+  var shouldMarkVectorDirty = normalized.options.vectorDirty !== false || normalized.messageHashes.length > 0 || normalized.options.vectorDirtyHint === true;
+  var currentDirtyGeneration = readInteger(currentDirtyState && currentDirtyState.dirty_generation, readInteger(currentDirtyState && currentDirtyState.dirtyGeneration, 0));
+  var currentCleanGeneration = readInteger(currentDirtyState && currentDirtyState.clean_generation, readInteger(currentDirtyState && currentDirtyState.cleanGeneration, 0));
+  var nextDirtyGeneration = shouldMarkVectorDirty ? currentDirtyGeneration + 1 : currentDirtyGeneration;
+  var dirtyFromFloor = normalized.options.dirtyFromFloor == null ? normalized.processedRange.startFloor : readInteger(normalized.options.dirtyFromFloor, normalized.processedRange.startFloor);
+  var headHash = normalizeString(projectedHeadHash, '') || computeHeadHash([], [], nextRevision);
+  var statements = graphBuilt.statements.slice();
+  if (Number.isFinite(normalized.pruneMessageHashesFromFloor)) {
+    statements.push({ statement: 'DELETE FROM ' + GRAPH_TABLES.messageHashes + ' WHERE chat_id = ? AND floor >= ?', params: [chatId, normalized.pruneMessageHashesFromFloor] });
+  }
+  statements = statements.concat(buildMessageHashesUpsertStatements(chatId, normalized.batchId, nextRevision, normalized.messageHashes, nowMs));
+  statements.push(buildExtractionStateUpsertStatement(chatId, normalized.batchId, nextRevision, normalized.extraction, nowMs));
+  statements.push(buildBatchJournalInsertStatement(chatId, normalized.batchId, normalized.idempotencyKey, fingerprint, baseRevision, nextRevision, headHash, normalized.processedRange, normalized.extraction, normalized.journal, nextDirtyGeneration, nowMs));
+  if (shouldMarkVectorDirty) {
+    statements.push(buildVectorDirtyStateUpsertStatement(chatId, normalized.collectionId, nextRevision, nextDirtyGeneration, currentCleanGeneration, dirtyFromFloor, reason, nowMs));
+  }
+  if (statements.length > MAX_SQL_BATCH_STATEMENTS) throw createValidationError('BME extraction.commitBatch exceeds MAX_SQL_BATCH_STATEMENTS (' + MAX_SQL_BATCH_STATEMENTS + '): generated ' + statements.length + ' statements', { statementCount: statements.length, maxStatements: MAX_SQL_BATCH_STATEMENTS });
+  return Object.assign({}, graphBuilt, {
+    statements: statements,
+    headHash: headHash,
+    vectorDirtyGeneration: nextDirtyGeneration,
+    vectorDirtyApplied: shouldMarkVectorDirty,
+    committedAtMs: nowMs,
+    committedAt: new Date(nowMs).toISOString(),
+  });
+}
+
 // --- activate ---
 
 module.exports.activate = async function activate(ctx) {
@@ -1245,6 +1506,152 @@ module.exports.activate = async function activate(ctx) {
             extractionCount: extractionCount,
           },
         },
+      };
+    },
+  });
+
+  ctx.registerTransaction('extraction.commitBatch', {
+    handler: async function (txCtx, input) {
+      input = input || {};
+      var database = resolveGraphDatabase(input);
+      var normalized = validateExtractionCommitBatchInput(input);
+      var chatId = normalized.chatId;
+
+      if (!txCtx || typeof txCtx.locks !== 'object' || typeof txCtx.locks.withLock !== 'function') {
+        var lockErr = new Error('BME extraction.commitBatch requires ctx.locks.withLock');
+        lockErr.status = 500;
+        lockErr.code = 'capability_unavailable';
+        throw lockErr;
+      }
+      if (!txCtx || typeof txCtx.idempotency !== 'object' || typeof txCtx.idempotency.run !== 'function') {
+        var idemErr = new Error('BME extraction.commitBatch requires ctx.idempotency.run');
+        idemErr.status = 500;
+        idemErr.code = 'capability_unavailable';
+        throw idemErr;
+      }
+
+      var idempotencyKey = normalized.idempotencyKey || normalizeString(input.idempotencyKey, 'commitBatch:' + chatId + ':' + normalized.batchId);
+      normalized.idempotencyKey = idempotencyKey;
+      var fingerprint = buildExtractionCommitBatchFingerprint(database, normalized);
+
+      return {
+        result: await txCtx.locks.withLock('chat:' + chatId, { timeoutMs: 30000 }, async function () {
+          return await txCtx.idempotency.run(idempotencyKey, fingerprint, async function () {
+            await ensureGraphSchema(txCtx, database);
+
+            var existingBatch = await readExistingBatchJournal(txCtx, database, chatId, normalized.batchId, idempotencyKey);
+            if (existingBatch) {
+              var existingFingerprint = String(readRowValue(existingBatch, ['request_fingerprint', 'requestFingerprint']) || '');
+              var existingBatchId = String(readRowValue(existingBatch, ['batch_id', 'batchId']) || '');
+              var existingIdempotencyKey = String(readRowValue(existingBatch, ['idempotency_key', 'idempotencyKey']) || '');
+              if (existingFingerprint === fingerprint) {
+                return {
+                  ok: true,
+                  accepted: true,
+                  replay: true,
+                  chatId: chatId,
+                  batchId: existingBatchId || normalized.batchId,
+                  revision: readInteger(readRowValue(existingBatch, ['revision']), normalized.baseRevision + 1),
+                  headHash: String(readRowValue(existingBatch, ['head_hash', 'headHash']) || ''),
+                  committedAt: normalizeCommittedAtValue(readRowValue(existingBatch, ['committed_at', 'committedAt'])),
+                  vectorDirtyGeneration: readInteger(readRowValue(existingBatch, ['vector_dirty_generation', 'vectorDirtyGeneration']), 0),
+                  vectorDirty: true,
+                  extraction: {
+                    lastProcessedAssistantFloor: readInteger(readRowValue(existingBatch, ['last_processed_floor_after', 'lastProcessedFloorAfter']), 0),
+                    extractionCount: readInteger(readRowValue(existingBatch, ['extraction_count_after', 'extractionCountAfter']), 0),
+                  },
+                  processedRange: {
+                    startFloor: readInteger(readRowValue(existingBatch, ['source_floor_start', 'sourceFloorStart']), 0),
+                    endFloor: readInteger(readRowValue(existingBatch, ['source_floor_end', 'sourceFloorEnd']), 0),
+                  },
+                  statementCount: 0,
+                };
+              }
+              var conflictCode = existingBatchId === normalized.batchId ? 'batch_conflict' : 'idempotency_conflict';
+              throw createConflictError(conflictCode, 'BME extraction.commitBatch durable idempotency conflict', {
+                batchId: normalized.batchId,
+                existingBatchId: existingBatchId,
+                idempotencyKey: idempotencyKey,
+                existingIdempotencyKey: existingIdempotencyKey,
+              });
+            }
+
+            var metaRows = normalizeSqlRows(
+              await txCtx.sql.query(
+                database,
+                'SELECT meta_key, value_json FROM ' + GRAPH_TABLES.meta + ' WHERE chat_id = ?',
+                [chatId]
+              )
+            );
+            var existingMeta = metaRows.length > 0 ? toMetaMap(metaRows) : {};
+            var currentRevision = Number(existingMeta.revision);
+            if (!Number.isFinite(currentRevision)) currentRevision = 0;
+            if (currentRevision !== normalized.baseRevision) {
+              throw createConflictError(
+                'transaction_conflict',
+                'BME extraction.commitBatch CAS conflict: baseRevision=' + normalized.baseRevision + ' but serverRevision=' + currentRevision,
+                { serverRevision: currentRevision, baseRevision: normalized.baseRevision, chatId: chatId }
+              );
+            }
+
+            var dirtyRows = normalizeSqlRows(
+              await txCtx.sql.query(
+                database,
+                'SELECT dirty_generation, clean_generation FROM ' + GRAPH_TABLES.vectorDirtyState + ' WHERE chat_id = ? LIMIT 1',
+                [chatId]
+              )
+            );
+            var dirtyState = dirtyRows[0] || null;
+            var nodeRows = normalizeSqlRows(
+              await txCtx.sql.query(
+                database,
+                'SELECT record_id FROM ' + GRAPH_TABLES.nodes + ' WHERE chat_id = ? AND deleted_at IS NULL',
+                [chatId]
+              )
+            );
+            var edgeRows = normalizeSqlRows(
+              await txCtx.sql.query(
+                database,
+                'SELECT record_id FROM ' + GRAPH_TABLES.edges + ' WHERE chat_id = ? AND deleted_at IS NULL',
+                [chatId]
+              )
+            );
+            var projectedHeadHash = computeProjectedHeadHash(
+              extractRecordIds(nodeRows),
+              extractRecordIds(edgeRows),
+              normalized.delta,
+              normalized.baseRevision + 1
+            );
+            var built = buildExtractionCommitBatchStatements(chatId, normalized.baseRevision, normalized, existingMeta, dirtyState, fingerprint, projectedHeadHash);
+            await txCtx.sql.transaction(database, built.statements);
+
+            return {
+              ok: true,
+              accepted: true,
+              replay: false,
+              chatId: chatId,
+              batchId: normalized.batchId,
+              revision: built.nextRevision,
+              headHash: built.headHash,
+              committedAt: built.committedAt,
+              statementCount: built.statements.length,
+              vectorDirtyGeneration: built.vectorDirtyGeneration,
+              vectorDirty: built.vectorDirtyApplied,
+              extraction: {
+                lastProcessedAssistantFloor: normalized.extraction.nextLastProcessedFloor,
+                extractionCount: normalized.extraction.nextExtractionCount,
+              },
+              messageHashCount: normalized.messageHashes.length,
+              applied: {
+                upsertedNodes: built.upsertedNodes,
+                upsertedEdges: built.upsertedEdges,
+                upsertedTombstones: built.upsertedTombstones,
+                deletedNodeIds: built.deletedNodeIds,
+                deletedEdgeIds: built.deletedEdgeIds,
+              },
+            };
+          });
+        }),
       };
     },
   });
