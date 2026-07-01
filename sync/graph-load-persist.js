@@ -35,6 +35,50 @@ function isAuthorityLockedPersistResult(result = null) {
   );
 }
 
+function hasExtractionCommitBatchData(options = {}) {
+  return Boolean(
+    options?.persistDelta &&
+      options?.committedBatchJournalEntry,
+  );
+}
+
+function resolveAuthorityExtractionMeta(graphPersistenceState = {}, persistSnapshot = null, db = null) {
+  return normalizeGraphAuthorityMeta({
+    authorityOwned: graphPersistenceState?.authorityOwned === true || persistSnapshot?.meta?.authorityOwned === true || db?.authorityOwned === true,
+    graphOperationalMode: graphPersistenceState?.graphOperationalMode || persistSnapshot?.meta?.graphOperationalMode || db?.graphOperationalMode,
+  });
+}
+
+function shouldRouteExtractionCommitBatch(runtime = {}, graphPersistenceState = {}, persistSnapshot = null, db = null, options = {}) {
+  if (!hasExtractionCommitBatchData(options)) return false;
+  const authorityMeta = resolveAuthorityExtractionMeta(graphPersistenceState, persistSnapshot, db);
+  if (!authorityMeta.authorityOwned) return false;
+  const capability = runtime.getAuthorityCapabilityState?.() || {};
+  return Boolean(
+    capability.bmeExtractionCommitBatchReady === true ||
+      db?.bmeExtractionCommitBatchReady === true ||
+      db?.isAuthorityModuleExtractionCommitBatchReady === true,
+  );
+}
+
+function buildAuthorityBlockedPersistResult(buildGraphPersistResult, { reason = "authority-module-unavailable", revision = 0, error = null } = {}) {
+  return {
+    ...buildGraphPersistResult({
+    saved: false,
+    queued: false,
+    blocked: true,
+    accepted: false,
+    reason,
+    revision,
+    storageTier: "none",
+    acceptedBy: "none",
+    }),
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+    error,
+  };
+}
+
 export function shouldUseAuthorityJobsImpl(runtime, config = null, kind = AUTHORITY_VECTOR_REBUILD_JOB_TYPE) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {
@@ -806,6 +850,15 @@ export async function persistExtractionBatchResultImpl(runtime, {
   graphSnapshot = null,
   persistSnapshot = null,
   persistDelta = null,
+  committedBatchJournalEntry = null,
+  processedRange = null,
+  extractionCountBefore = null,
+  extractionCountAfter = null,
+  previousLastProcessedFloor = null,
+  messageHashes = [],
+  pruneMessageHashesFromFloor = null,
+  vectorDirty = undefined,
+  dirtyFromFloor = undefined,
 } = {}) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {
@@ -951,6 +1004,80 @@ export async function persistExtractionBatchResultImpl(runtime, {
 
   const revision = allocateRequestedPersistRevision(0, persistGraph);
   let authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState, persistSnapshot);
+  let extractionDb = null;
+  if (hasExtractionCommitBatchData({ persistDelta, committedBatchJournalEntry })) {
+    try {
+      const manager = ensureBmeChatManager?.();
+      extractionDb = typeof manager?.getCurrentDb === "function"
+        ? await manager.getCurrentDb(chatId)
+        : await createPreferredGraphLocalStore(chatId);
+      const authorityExtractionMeta = resolveAuthorityExtractionMeta(graphPersistenceState, persistSnapshot, extractionDb);
+      if (authorityExtractionMeta.authorityOwned && shouldRouteExtractionCommitBatch(runtime, graphPersistenceState, persistSnapshot, extractionDb, {
+        persistDelta,
+        committedBatchJournalEntry,
+      })) {
+        if (typeof extractionDb?.commitExtractionBatch !== "function") {
+          throw Object.assign(new Error("BME extraction.commitBatch store capability unavailable"), { code: "authority_module_unavailable" });
+        }
+        const commitResult = await extractionDb.commitExtractionBatch({
+          persistDelta,
+          committedBatchJournalEntry,
+          processedRange,
+          lastProcessedAssistantFloor,
+          previousLastProcessedFloor,
+          extractionCountBefore,
+          extractionCountAfter,
+          messageHashes,
+          pruneMessageHashesFromFloor,
+          vectorDirty,
+          dirtyFromFloor,
+          reason,
+        }, { reason, vectorDirty, dirtyFromFloor });
+        if (commitResult?.accepted === true) {
+          updateGraphPersistenceState({
+            pendingPersist: false,
+            authorityOwned: true,
+            graphOperationalMode: commitResult.graphOperationalMode || "authority-primary",
+            lastAcceptedRevision: Number(commitResult.revision || revision),
+            acceptedStorageTier: String(commitResult.storageTier || "authority-sql"),
+            lastPersistReason: reason,
+            lastPersistMode: String(commitResult.saveMode || "extraction.commitBatch"),
+          });
+          return commitResult;
+        }
+        return commitResult;
+      }
+      if (authorityExtractionMeta.authorityOwned) {
+        updateGraphPersistenceState({
+          pendingPersist: false,
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+          lastPersistReason: "authority-extraction-commitbatch-unavailable",
+          lastPersistMode: "extraction.commitBatch",
+        });
+        return buildAuthorityBlockedPersistResult(buildGraphPersistResult, {
+          reason: "authority-extraction-commitbatch-unavailable",
+          revision,
+        });
+      }
+    } catch (error) {
+      if (isAuthorityModuleUnavailableError(error) || String(error?.code || "").toLowerCase() === "transaction_conflict") {
+        updateGraphPersistenceState({
+          pendingPersist: false,
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+          lastPersistReason: String(error?.code || "authority-module-unavailable"),
+          lastPersistMode: "extraction.commitBatch",
+        });
+        return buildAuthorityBlockedPersistResult(buildGraphPersistResult, {
+          reason: String(error?.code || "authority-module-unavailable").replace(/_/g, "-"),
+          revision,
+          error,
+        });
+      }
+      throw error;
+    }
+  }
   let acceptedPersistResult = null;
   try {
     acceptedPersistResult = await persistGraphToConfiguredDurableTier(

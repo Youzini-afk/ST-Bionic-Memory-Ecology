@@ -23,6 +23,7 @@ export const AUTHORITY_GRAPH_STORE_MODE = "authority-sql-primary";
 const BME_AUTHORITY_MODULE_ID = "third-party.st-bme";
 const BME_GRAPH_COMMIT_DELTA_TRANSACTION = "graph.commitDelta";
 const BME_GRAPH_GET_HEAD_TRANSACTION = "graph.getHead";
+const BME_EXTRACTION_COMMIT_BATCH_TRANSACTION = "extraction.commitBatch";
 
 const META_DEFAULT_LAST_PROCESSED_FLOOR = -1;
 const META_DEFAULT_EXTRACTION_COUNT = 0;
@@ -624,6 +625,45 @@ async function computeDeltaFingerprintHash(value) {
   return sha1Hash(json);
 }
 
+function stripVolatileJournalIdentity(journal = null) {
+  const clone = toPlainData(journal, {});
+  if (!clone || typeof clone !== "object" || Array.isArray(clone)) return {};
+  delete clone.id;
+  delete clone.createdAt;
+  return clone;
+}
+
+function stripGeneratedRecordTimestampsForFingerprint(records = [], rawRecords = [], timestampKeys = ["updatedAt"]) {
+  const rawArray = toArray(rawRecords);
+  return toArray(records).map((record, index) => {
+    const clone = toPlainData(record, record) || {};
+    const raw = rawArray[index] && typeof rawArray[index] === "object" && !Array.isArray(rawArray[index])
+      ? rawArray[index]
+      : {};
+    for (const key of timestampKeys) {
+      if (!Object.prototype.hasOwnProperty.call(raw, key)) delete clone[key];
+    }
+    return clone;
+  });
+}
+
+function buildStableExtractionDeltaFingerprintShape(rawDelta = {}, normalizedDelta = {}) {
+  const raw = rawDelta && typeof rawDelta === "object" && !Array.isArray(rawDelta) ? rawDelta : {};
+  return {
+    ...toPlainData(normalizedDelta, normalizedDelta),
+    upsertNodes: stripGeneratedRecordTimestampsForFingerprint(normalizedDelta.upsertNodes, raw.upsertNodes, ["updatedAt"]),
+    upsertEdges: stripGeneratedRecordTimestampsForFingerprint(normalizedDelta.upsertEdges, raw.upsertEdges, ["updatedAt"]),
+    tombstones: stripGeneratedRecordTimestampsForFingerprint(normalizedDelta.tombstones, raw.tombstones, ["deletedAt"]),
+  };
+}
+
+function normalizeFingerprintToken(value = "") {
+  return String(value || "")
+    .replace(/^[a-z0-9]+:/i, "")
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 48) || "0";
+}
+
 export class AuthorityGraphStore {
   constructor(chatId, options = {}) {
     this.chatId = normalizeChatId(chatId);
@@ -642,6 +682,10 @@ export class AuthorityGraphStore {
     this.bmeGraphCommitReady = Boolean(options.bmeGraphCommitReady);
     this.isAuthorityModuleGraphCommitReady = Boolean(
       options.isAuthorityModuleGraphCommitReady ?? options.bmeGraphCommitReady,
+    );
+    this.bmeExtractionCommitBatchReady = Boolean(options.bmeExtractionCommitBatchReady);
+    this.isAuthorityModuleExtractionCommitBatchReady = Boolean(
+      options.isAuthorityModuleExtractionCommitBatchReady ?? options.bmeExtractionCommitBatchReady,
     );
     this.bmeGraphModuleClient = options.bmeGraphModuleClient || null;
     this._setInMemoryAuthorityMeta({
@@ -865,6 +909,222 @@ export class AuthorityGraphStore {
         (this.bmeGraphModuleClient ||
           (this.sqlClient?.http && typeof this.sqlClient.http.requestModuleTransaction === "function")),
     );
+  }
+
+  _shouldUseBmeExtractionCommitBatch() {
+    return Boolean(
+      this.bmeExtractionCommitBatchReady &&
+        this.isAuthorityModuleExtractionCommitBatchReady &&
+        (this.bmeGraphModuleClient ||
+          (this.sqlClient?.http && typeof this.sqlClient.http.requestModuleTransaction === "function")),
+    );
+  }
+
+  async commitExtractionBatch(input = {}, options = {}) {
+    await this.open();
+    const commitRequestedAt = readPersistCommitNow();
+    if (!this._shouldUseBmeExtractionCommitBatch()) {
+      this._setInMemoryAuthorityMeta({
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+      });
+      throw new AuthorityGraphModuleUnavailableError(
+        "BME extraction.commitBatch module is not ready for authority-owned graph",
+        {
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+        },
+      );
+    }
+
+    const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+    const journal = source.committedBatchJournalEntry || source.journal;
+    if (!journal || typeof journal !== "object" || Array.isArray(journal)) {
+      throw new Error("AuthorityGraphStore.commitExtractionBatch requires committedBatchJournalEntry/journal");
+    }
+    const rangeSource = source.processedRange || journal.processedRange || [];
+    const processedRange = Array.isArray(rangeSource)
+      ? { startFloor: Number(rangeSource[0]), endFloor: Number(rangeSource[1]) }
+      : {
+          startFloor: Number(rangeSource.startFloor ?? rangeSource.start ?? rangeSource[0]),
+          endFloor: Number(rangeSource.endFloor ?? rangeSource.end ?? rangeSource[1]),
+        };
+    const nextLastProcessedFloor = Number(
+      source.nextLastProcessedFloor ?? source.lastProcessedAssistantFloor ?? processedRange.endFloor,
+    );
+    const previousLastProcessedFloor = Number(
+      source.previousLastProcessedFloor ?? journal?.stateBefore?.lastProcessedAssistantFloor ?? -1,
+    );
+    const previousExtractionCount = Number(source.extractionCountBefore ?? source.previousExtractionCount ?? 0);
+    const nextExtractionCount = Number(
+      source.extractionCountAfter ?? source.nextExtractionCount ?? previousExtractionCount + 1,
+    );
+    const normalizedDelta = source.persistDelta && typeof source.persistDelta === "object" && !Array.isArray(source.persistDelta)
+      ? source.persistDelta
+      : (source.delta && typeof source.delta === "object" && !Array.isArray(source.delta) ? source.delta : {});
+    const nowMs = Date.now();
+    const delta = {
+      upsertNodes: normalizeNodeRecords(normalizedDelta.upsertNodes, nowMs),
+      upsertEdges: normalizeEdgeRecords(normalizedDelta.upsertEdges, nowMs),
+      tombstones: normalizeTombstoneRecords(normalizedDelta.tombstones, nowMs),
+      deleteNodeIds: toArray(normalizedDelta.deleteNodeIds).map(normalizeRecordId).filter(Boolean),
+      deleteEdgeIds: toArray(normalizedDelta.deleteEdgeIds).map(normalizeRecordId).filter(Boolean),
+      countDelta: normalizedDelta.countDelta && typeof normalizedDelta.countDelta === "object" ? normalizedDelta.countDelta : null,
+      runtimeMetaPatch: {
+        ...(normalizedDelta.runtimeMetaPatch && typeof normalizedDelta.runtimeMetaPatch === "object" && !Array.isArray(normalizedDelta.runtimeMetaPatch)
+          ? normalizedDelta.runtimeMetaPatch
+          : {}),
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+      },
+    };
+    const client = this._getBmeGraphModuleClient();
+    try {
+      let head = null;
+      if (typeof client.bmeGraphGetHead === "function") {
+        head = await client.bmeGraphGetHead(
+          {
+            chatId: this.chatId,
+            collectionId: String(this.options.collectionId || this.options.namespace || source.collectionId || ""),
+            ...(this.options.database ? { database: this.options.database } : {}),
+          },
+          {
+            ...(options.signal !== undefined ? { signal: options.signal } : {}),
+            ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          },
+        );
+      }
+      const baseRevision = Number.isFinite(Number(options.baseRevision ?? source.baseRevision))
+        ? normalizeRevision(options.baseRevision ?? source.baseRevision)
+        : normalizeRevision(head?.revision ?? await this.getRevision());
+      const stableFingerprint = await computeDeltaFingerprintHash({
+        chatId: this.chatId,
+        database: this.options.database || "",
+        collectionId: String(this.options.collectionId || this.options.namespace || source.collectionId || ""),
+        baseRevision,
+        processedRange,
+        extraction: {
+          previousLastProcessedFloor,
+          nextLastProcessedFloor,
+          previousExtractionCount,
+          nextExtractionCount,
+        },
+        messageHashes: toArray(source.messageHashes),
+        pruneMessageHashesFromFloor: source.pruneMessageHashesFromFloor ?? null,
+        delta: buildStableExtractionDeltaFingerprintShape(normalizedDelta, delta),
+        journal: stripVolatileJournalIdentity(journal),
+        options: {
+          reason: String(options.reason || source.reason || "extraction-batch-complete"),
+          markSyncDirty: options.markSyncDirty !== false,
+          vectorDirty: options.vectorDirty ?? source.vectorDirty ?? (toArray(source.messageHashes).length > 0),
+          dirtyFromFloor: options.dirtyFromFloor ?? source.dirtyFromFloor ?? processedRange.startFloor,
+        },
+      });
+      const batchId = `batch-${normalizeFingerprintToken(stableFingerprint)}`;
+      const idempotencyKey = String(
+        options.idempotencyKey || source.idempotencyKey || `extraction:${this.chatId}:${batchId}`,
+      );
+      const transactionInput = {
+        chatId: this.chatId,
+        collectionId: String(this.options.collectionId || this.options.namespace || source.collectionId || ""),
+        baseRevision,
+        batchId,
+        idempotencyKey,
+        processedRange,
+        extraction: {
+          previousLastProcessedFloor,
+          nextLastProcessedFloor,
+          previousExtractionCount,
+          nextExtractionCount,
+        },
+        messageHashes: toArray(source.messageHashes),
+        pruneMessageHashesFromFloor: source.pruneMessageHashesFromFloor ?? null,
+        delta,
+        journal,
+        options: {
+          reason: String(options.reason || source.reason || "extraction-batch-complete"),
+          markSyncDirty: options.markSyncDirty !== false,
+          vectorDirty: options.vectorDirty ?? source.vectorDirty ?? (toArray(source.messageHashes).length > 0),
+          dirtyFromFloor: options.dirtyFromFloor ?? source.dirtyFromFloor ?? processedRange.startFloor,
+        },
+        ...(this.options.database ? { database: this.options.database } : {}),
+      };
+
+      const response = await client.bmeExtractionCommitBatch(transactionInput, {
+        idempotencyKey,
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      });
+      const revision = normalizeRevision(response?.revision);
+      const committedAtMs = Number.isFinite(Number(response?.committedAt))
+        ? Number(response.committedAt)
+        : Date.parse(String(response?.committedAt || ""));
+      const lastModified = Number.isFinite(committedAtMs) ? Math.floor(committedAtMs) : nowMs;
+      try {
+        await this.patchMeta({
+          revision,
+          headHash: String(response?.headHash || ""),
+          lastProcessedFloor: nextLastProcessedFloor,
+          lastProcessedAssistantFloor: nextLastProcessedFloor,
+          extractionCount: nextExtractionCount,
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+          lastBatchId: batchId,
+          lastModified,
+        });
+      } catch (metaPatchError) {
+        console.warn(`[ST-BME] extraction.commitBatch local meta cache patch failed after server commit:`, metaPatchError?.message || metaPatchError);
+      }
+      this._setInMemoryAuthorityMeta({ authorityOwned: true, graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY });
+      return {
+        saved: true,
+        accepted: true,
+        queued: false,
+        blocked: false,
+        storageTier: "authority-sql",
+        acceptedBy: BME_EXTRACTION_COMMIT_BATCH_TRANSACTION,
+        saveMode: BME_EXTRACTION_COMMIT_BATCH_TRANSACTION,
+        reason: String(options.reason || source.reason || "extraction-batch-complete"),
+        revision,
+        headHash: String(response?.headHash || ""),
+        batchId,
+        batchJournalDurable: true,
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+        extraction: response?.extraction || { lastProcessedAssistantFloor: nextLastProcessedFloor, extractionCount: nextExtractionCount },
+        diagnostics: {
+          commitPath: BME_EXTRACTION_COMMIT_BATCH_TRANSACTION,
+          idempotencyKey,
+          baseRevision,
+          commitMs: normalizePersistCommitMs(readPersistCommitNow() - commitRequestedAt),
+          statementCount: Number(response?.statementCount || 0),
+        },
+      };
+    } catch (error) {
+      if (isBmeGraphCommitConflictError(error)) {
+        throw error instanceof AuthorityGraphCommitConflictError
+          ? error
+          : new AuthorityGraphCommitConflictError(error?.message || "BME extraction.commitBatch transaction_conflict", {
+              status: error?.status || 409,
+              serverRevision: error?.payload?.details?.serverRevision,
+              baseRevision: error?.payload?.details?.baseRevision,
+              headHash: error?.payload?.details?.headHash,
+              payload: error?.payload,
+              cause: error,
+            });
+      }
+      this._setInMemoryAuthorityMeta({ authorityOwned: true, graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED });
+      throw new AuthorityGraphModuleUnavailableError(
+        error?.message || "BME extraction.commitBatch module transaction unavailable",
+        {
+          cause: error,
+          status: error?.status || 503,
+          payload: error?.payload,
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+        },
+      );
+    }
   }
 
   /**
@@ -1098,6 +1358,22 @@ export class AuthorityGraphStore {
           BME_GRAPH_GET_HEAD_TRANSACTION,
           input,
           {
+            ...(options.signal !== undefined ? { signal: options.signal } : {}),
+            ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+          },
+        );
+        return response?.result ?? response ?? {};
+      },
+      async bmeExtractionCommitBatch(input, options = {}) {
+        const idempotencyKey =
+          (options.idempotencyKey ? String(options.idempotencyKey) : "") ||
+          (input?.idempotencyKey ? String(input.idempotencyKey) : undefined);
+        const response = await http.requestModuleTransaction(
+          BME_AUTHORITY_MODULE_ID,
+          BME_EXTRACTION_COMMIT_BATCH_TRANSACTION,
+          input,
+          {
+            ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
           },

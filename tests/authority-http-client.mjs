@@ -317,6 +317,7 @@ function jsonResponse(status, payload) {
   assert.ok(perms.modules.execute.includes("third-party.st-bme:vector.manifest"), "must declare vector.manifest execute");
   assert.ok(perms.modules.execute.includes("third-party.st-bme:vector.apply"), "must declare vector.apply execute");
   assert.ok(perms.modules.execute.includes("third-party.st-bme:recall.candidates"), "must declare recall.candidates execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:extraction.commitBatch"), "must declare extraction.commitBatch execute");
   // Existing permissions preserved.
   assert.equal(perms.storage.kv, true);
   assert.equal(perms.storage.blob, true);
