@@ -42,7 +42,7 @@ const DEFAULT_NAMESPACE = 'default';
 // store with when no explicit database is configured. Companion handlers use
 // this when the request omits `database`.
 const DEFAULT_BME_GRAPH_DATABASE = 'default';
-const BME_GRAPH_SCHEMA_VERSION = 1;
+const BME_GRAPH_SCHEMA_VERSION = 2;
 
 // DOA enforces a hard cap of 100 statements per ctx.sql.transaction call
 // (see MAX_SQL_BATCH_STATEMENTS in packages/server-plugin/src/constants.ts).
@@ -389,15 +389,18 @@ function computeHeadHash(nodeIds, edgeIds, revision) {
   return crypto.createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
-// CREATE TABLE IF NOT EXISTS for all 4 BME graph tables. Matches the schema
-// in sync/authority-graph-store.js `_ensureSchema` (:1067-1086). Safe to call
-// repeatedly — companion handlers call this lazily before reads so a fresh
-// database does not error on SELECT from a missing table.
+// CREATE TABLE / CREATE INDEX IF NOT EXISTS for BME graph authority tables.
+// Safe to call repeatedly — companion handlers call this lazily before reads
+// so a fresh database does not error on SELECT from a missing table.
 var GRAPH_TABLES = {
   meta: 'st_bme_graph_meta',
   nodes: 'st_bme_graph_nodes',
   edges: 'st_bme_graph_edges',
   tombstones: 'st_bme_graph_tombstones',
+  extractionState: 'st_bme_extraction_state',
+  messageHashes: 'st_bme_message_hashes',
+  batchJournal: 'st_bme_batch_journal',
+  vectorDirtyState: 'st_bme_vector_dirty_state',
 };
 
 var GRAPH_SCHEMA_STATEMENTS = [
@@ -405,6 +408,25 @@ var GRAPH_SCHEMA_STATEMENTS = [
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.nodes + ' (chat_id TEXT NOT NULL, record_id TEXT NOT NULL, payload_json TEXT NOT NULL, node_type TEXT, source_floor INTEGER, archived INTEGER, updated_at INTEGER, deleted_at INTEGER, PRIMARY KEY(chat_id, record_id))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.edges + ' (chat_id TEXT NOT NULL, record_id TEXT NOT NULL, payload_json TEXT NOT NULL, from_id TEXT, to_id TEXT, relation TEXT, source_floor INTEGER, updated_at INTEGER, deleted_at INTEGER, PRIMARY KEY(chat_id, record_id))',
   'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.tombstones + ' (chat_id TEXT NOT NULL, record_id TEXT NOT NULL, payload_json TEXT NOT NULL, tombstone_kind TEXT, target_id TEXT, deleted_at INTEGER, source_device_id TEXT, PRIMARY KEY(chat_id, record_id))',
+  'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.extractionState + ' (chat_id TEXT NOT NULL, last_processed_assistant_floor INTEGER NOT NULL DEFAULT -1, extraction_count INTEGER NOT NULL DEFAULT 0, last_batch_id TEXT, last_graph_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id))',
+  'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.messageHashes + ' (chat_id TEXT NOT NULL, floor INTEGER NOT NULL, message_hash TEXT NOT NULL, hash_version INTEGER NOT NULL DEFAULT 1, batch_id TEXT, graph_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id, floor))',
+  'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.batchJournal + ' (chat_id TEXT NOT NULL, batch_id TEXT NOT NULL, idempotency_key TEXT, request_fingerprint TEXT NOT NULL, base_revision INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 0, head_hash TEXT, source_floor_start INTEGER, source_floor_end INTEGER, last_processed_floor_before INTEGER, last_processed_floor_after INTEGER NOT NULL, extraction_count_before INTEGER, extraction_count_after INTEGER NOT NULL, journal_json TEXT NOT NULL, vector_dirty_generation INTEGER NOT NULL DEFAULT 0, committed_at INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(chat_id, batch_id))',
+  'CREATE TABLE IF NOT EXISTS ' + GRAPH_TABLES.vectorDirtyState + ' (chat_id TEXT NOT NULL, dirty_generation INTEGER NOT NULL DEFAULT 0, clean_generation INTEGER NOT NULL DEFAULT 0, dirty_from_floor INTEGER, dirty_reason TEXT, graph_revision INTEGER NOT NULL DEFAULT 0, collection_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id))',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_nodes_chat_deleted_at ON ' + GRAPH_TABLES.nodes + ' (chat_id, deleted_at)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_nodes_chat_source_floor ON ' + GRAPH_TABLES.nodes + ' (chat_id, source_floor)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_edges_chat_deleted_at ON ' + GRAPH_TABLES.edges + ' (chat_id, deleted_at)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_edges_chat_source_floor ON ' + GRAPH_TABLES.edges + ' (chat_id, source_floor)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_edges_chat_from_id ON ' + GRAPH_TABLES.edges + ' (chat_id, from_id)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_edges_chat_to_id ON ' + GRAPH_TABLES.edges + ' (chat_id, to_id)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_tombstones_chat_deleted_at ON ' + GRAPH_TABLES.tombstones + ' (chat_id, deleted_at)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_graph_tombstones_chat_target_id ON ' + GRAPH_TABLES.tombstones + ' (chat_id, target_id)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_message_hashes_chat_hash ON ' + GRAPH_TABLES.messageHashes + ' (chat_id, message_hash)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_message_hashes_chat_batch ON ' + GRAPH_TABLES.messageHashes + ' (chat_id, batch_id)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_st_bme_batch_journal_chat_idempotency ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, idempotency_key)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_batch_journal_chat_revision ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, revision)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_batch_journal_chat_source_floor_end ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, source_floor_end)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_batch_journal_chat_committed_at ON ' + GRAPH_TABLES.batchJournal + ' (chat_id, committed_at)',
+  'CREATE INDEX IF NOT EXISTS ix_st_bme_vector_dirty_state_generations ON ' + GRAPH_TABLES.vectorDirtyState + ' (dirty_generation, clean_generation)',
 ];
 
 async function ensureGraphSchema(txCtx, database) {
@@ -1099,6 +1121,7 @@ module.exports.activate = async function activate(ctx) {
             revision: 0,
             headHash: null,
             exists: false,
+            schemaVersion: BME_GRAPH_SCHEMA_VERSION,
           },
         };
       }
@@ -1110,6 +1133,7 @@ module.exports.activate = async function activate(ctx) {
           chatId: chatId,
           revision: head.revision,
           headHash: head.headHash,
+          schemaVersion: BME_GRAPH_SCHEMA_VERSION,
           lastModified: metaReport.lastModified != null ? metaReport.lastModified : null,
           syncDirty: Boolean(metaReport.syncDirty),
           exists: true,
@@ -1141,6 +1165,7 @@ module.exports.activate = async function activate(ctx) {
               chatId: chatId,
               revision: head.revision,
               headHash: head.headHash,
+              schemaVersion: BME_GRAPH_SCHEMA_VERSION,
             },
           };
         }

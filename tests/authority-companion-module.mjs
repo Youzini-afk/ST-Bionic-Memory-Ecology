@@ -266,6 +266,29 @@ async function run() {
   console.log('[test:authority-companion-module] loading server.cjs');
   const mod = require(SERVER_CJS);
   assert.strictEqual(typeof mod.activate, 'function', 'activate must be a function');
+  assert.strictEqual(mod.BME_GRAPH_SCHEMA_VERSION, 2, 'BME graph schema version must be 2');
+
+  console.log('[test:authority-companion-module] testing graph schema v2 DDL shape');
+  {
+    const ddl = mod.GRAPH_SCHEMA_STATEMENTS.join('\n');
+    assert.ok(ddl.includes('st_bme_extraction_state'), 'DDL must include extraction state table');
+    assert.ok(ddl.includes('last_processed_assistant_floor'), 'extraction state must include last_processed_assistant_floor');
+    assert.ok(ddl.includes('st_bme_message_hashes'), 'DDL must include message hashes table');
+    assert.ok(ddl.includes('message_hash'), 'message hashes table must include message_hash');
+    assert.ok(ddl.includes('st_bme_batch_journal'), 'DDL must include batch journal table');
+    assert.ok(ddl.includes('request_fingerprint'), 'batch journal must include request_fingerprint');
+    assert.ok(ddl.includes('request_fingerprint TEXT NOT NULL'), 'batch journal request_fingerprint must be NOT NULL');
+    assert.ok(ddl.includes('last_processed_floor_after INTEGER NOT NULL'), 'batch journal last_processed_floor_after must be NOT NULL');
+    assert.ok(ddl.includes('extraction_count_after INTEGER NOT NULL'), 'batch journal extraction_count_after must be NOT NULL');
+    assert.ok(ddl.includes('journal_json TEXT NOT NULL'), 'batch journal journal_json must be NOT NULL');
+    assert.ok(ddl.includes('ux_st_bme_batch_journal_chat_idempotency'), 'batch journal idempotency unique index must exist');
+    assert.ok(ddl.includes('st_bme_vector_dirty_state'), 'DDL must include vector dirty state table');
+    assert.ok(ddl.includes('dirty_generation'), 'vector dirty state must include dirty_generation');
+    assert.ok(ddl.includes('ix_st_bme_graph_nodes_chat_deleted_at'), 'nodes deleted_at index must exist');
+    assert.ok(ddl.includes('ix_st_bme_graph_edges_chat_from_id'), 'edges from_id index must exist');
+    assert.ok(ddl.includes('ix_st_bme_graph_tombstones_chat_target_id'), 'tombstones target_id index must exist');
+    assert.ok(ddl.includes('ix_st_bme_message_hashes_chat_hash'), 'message hash lookup index must exist');
+  }
 
   // --- activate registers exactly the 6 transactions ---
   console.log('[test:authority-companion-module] testing activate registers all six transactions');
@@ -847,13 +870,14 @@ async function run() {
     assert.strictEqual(result.result.meta.tombstoneCount, 0);
     assert.strictEqual(result.result.meta.lastProcessedFloor, 3);
     assert.strictEqual(result.result.meta.extractionCount, 12);
+    assert.strictEqual(result.result.schemaVersion, 2);
     assert.strictEqual(result.result.meta.schemaVersion, 1);
     assert.strictEqual(result.result.meta.syncDirty, false);
     assert.strictEqual(result.result.meta.syncDirtyReason, null);
 
-    // ensureGraphSchema called first — exec called with 4 CREATE TABLE statements.
+    // ensureGraphSchema called first — exec called with idempotent CREATE TABLE statements.
     const createTableCalls = calls.exec.filter((c) => c.statement.includes('CREATE TABLE'));
-    assert.strictEqual(createTableCalls.length, 4, 'must run 4 CREATE TABLE statements before reading');
+    assert.ok(createTableCalls.length >= 8, 'must run graph + authority schema CREATE TABLE statements before reading');
     assert.ok(createTableCalls.every((c) => c.statement.includes('IF NOT EXISTS')), 'CREATE TABLE must be idempotent (IF NOT EXISTS)');
 
     // Database defaults to BME's graph default ('default') when not specified.
@@ -875,10 +899,11 @@ async function run() {
     assert.strictEqual(result.result.revision, 0, 'revision should be 0 for new chat');
     assert.strictEqual(result.result.exists, false, 'exists should be false when no meta rows');
     assert.strictEqual(result.result.headHash, null, 'headHash must be null for new chat');
+    assert.strictEqual(result.result.schemaVersion, 2);
 
     // Schema ensure still runs even for new chats.
     const createTableCalls = calls.exec.filter((c) => c.statement.includes('CREATE TABLE'));
-    assert.strictEqual(createTableCalls.length, 4, 'ensureGraphSchema must run before the meta read');
+    assert.ok(createTableCalls.length >= 8, 'ensureGraphSchema must run before the meta read');
   }
 
   console.log('[test:authority-companion-module] testing graph.getHead respects explicit database');
@@ -930,7 +955,7 @@ async function run() {
     assert.strictEqual(result.result.ok, true);
     assert.strictEqual(result.result.chatId, 'chat-snap');
     assert.strictEqual(result.result.revision, 7);
-    assert.strictEqual(result.result.schemaVersion, 1, 'schemaVersion should be 1');
+    assert.strictEqual(result.result.schemaVersion, 2, 'schemaVersion should be 2');
     assert.strictEqual(typeof result.result.headHash, 'string', 'headHash must be a string');
     assert.ok(result.result.headHash.length > 0);
 
@@ -956,7 +981,7 @@ async function run() {
 
     // ensureGraphSchema called first.
     const createTableCalls = calls.exec.filter((c) => c.statement.includes('CREATE TABLE'));
-    assert.strictEqual(createTableCalls.length, 4, 'must run 4 CREATE TABLE statements before reading');
+    assert.ok(createTableCalls.length >= 8, 'must run graph + authority schema CREATE TABLE statements before reading');
 
     // Only ctx.sql.query and ctx.sql.exec are used.
     assert.ok(calls.query.length > 0, 'must use ctx.sql.query for reads');
@@ -976,6 +1001,7 @@ async function run() {
     assert.strictEqual(result.result.unchanged, true, 'unchanged must be true when minRevision matches current revision');
     assert.strictEqual(result.result.revision, 7);
     assert.strictEqual(result.result.chatId, 'chat-unchanged');
+    assert.strictEqual(result.result.schemaVersion, 2);
     assert.strictEqual(typeof result.result.headHash, 'string', 'headHash must still be present');
 
     // Should NOT have queried payload tables — short-circuit before the payload reads.
@@ -1016,7 +1042,7 @@ async function run() {
     assert.strictEqual(result.result.chatId, 'new-chat-snap');
     assert.strictEqual(result.result.revision, 0);
     assert.strictEqual(result.result.headHash, null);
-    assert.strictEqual(result.result.schemaVersion, 1);
+    assert.strictEqual(result.result.schemaVersion, 2);
     assert.deepStrictEqual(result.result.nodes, []);
     assert.deepStrictEqual(result.result.edges, []);
     assert.deepStrictEqual(result.result.tombstones, []);
@@ -1146,9 +1172,9 @@ async function run() {
     assert.strictEqual(calls.idempotencyRun.length, 1, 'idempotency.run should be called once');
     assert.strictEqual(calls.idempotencyRun[0].key, 'test-commit-key-1', 'idempotency key must match input');
 
-    // Schema ensure ran first (4 CREATE TABLE statements before any query).
+    // Schema ensure ran first before any query.
     const createTableCalls = calls.exec.filter((c) => c.statement.includes('CREATE TABLE'));
-    assert.strictEqual(createTableCalls.length, 4, 'ensureGraphSchema must run before any queries');
+    assert.ok(createTableCalls.length >= 8, 'ensureGraphSchema must run before any queries');
     assert.ok(calls.query.length > 0, 'must use ctx.sql.query for CAS read + post-commit headHash');
     assert.ok(calls.exec[0] === createTableCalls[0] || calls.exec[0].statement.includes('CREATE TABLE'), 'first exec must be CREATE TABLE');
 
@@ -1224,7 +1250,7 @@ async function run() {
     assert.strictEqual(calls.idempotencyRun.length, 1, 'idempotency.run must be called before CAS check');
     // Schema ensure ran (before the CAS read).
     const createTableCalls = calls.exec.filter((c) => c.statement.includes('CREATE TABLE'));
-    assert.strictEqual(createTableCalls.length, 4, 'ensureGraphSchema must run before CAS read');
+    assert.ok(createTableCalls.length >= 8, 'ensureGraphSchema must run before CAS read');
   }
 
   console.log('[test:authority-companion-module] testing graph.commitDelta idempotency replay returns cached result');
