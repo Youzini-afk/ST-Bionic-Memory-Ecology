@@ -1,6 +1,11 @@
 // Extracted graph persistence IndexedDB I/O controllers.
 // Dependencies are supplied by index.js/test harnesses through runtime.
 
+import {
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+  normalizeGraphAuthorityMeta,
+} from "./authority-graph-mode.js";
+
 function createGraphPersistenceStateProxy(runtime = {}) {
   return new Proxy({}, {
     get(_target, prop) {
@@ -55,6 +60,39 @@ function importNativeCore(runtime = {}) {
   return typeof runtime.importNativeCore === "function"
     ? runtime.importNativeCore()
     : import("../vendor/wasm/stbme_core.js");
+}
+
+function isAuthorityModuleUnavailableError(error = null) {
+  return Boolean(
+    error &&
+      (error.name === "AuthorityGraphModuleUnavailableError" ||
+        String(error?.code || error?.payload?.code || "").toLowerCase() === "authority_module_unavailable"),
+  );
+}
+
+function resolveAuthorityPersistenceMeta(state = {}, db = null) {
+  return normalizeGraphAuthorityMeta({
+    authorityOwned: state?.authorityOwned === true || db?.authorityOwned === true,
+    graphOperationalMode: state?.graphOperationalMode || db?.graphOperationalMode,
+  });
+}
+
+function isAuthorityPersistenceLocked(state = {}, db = null) {
+  const meta = resolveAuthorityPersistenceMeta(state, db);
+  return meta.authorityOwned || meta.graphOperationalMode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED;
+}
+
+function isAuthorityLockedPersistResult(result = null) {
+  if (!result || typeof result !== "object") return false;
+  const mode = String(result.graphOperationalMode || result.meta?.graphOperationalMode || "").toLowerCase();
+  const reason = String(result.reason || result.code || result.payload?.code || "").toLowerCase();
+  return (
+    result.authorityOwned === true ||
+    mode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED ||
+    reason.includes("authority_module_unavailable") ||
+    reason.includes("authority-module-unavailable") ||
+    isAuthorityModuleUnavailableError(result.error)
+  );
 }
 
 export async function loadGraphFromIndexedDbImpl(runtime, 
@@ -1171,6 +1209,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
   }
 
   const context = getContext();
+  let authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState);
   const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
   const queuedChatId = normalizeChatIdCandidate(
     graphPersistenceState.queuedPersistChatId ||
@@ -1259,17 +1298,33 @@ export async function retryPendingGraphPersistImpl(runtime, {
   );
   const lastProcessedAssistantFloor =
     resolvePendingPersistLastProcessedAssistantFloor();
-  const acceptedPersistResult = await persistGraphToConfiguredDurableTier(
-    context,
-    pendingPersistGraph,
-    {
-      chatId: activeChatId,
+  let acceptedPersistResult = null;
+  try {
+    acceptedPersistResult = await persistGraphToConfiguredDurableTier(
+      context,
+      pendingPersistGraph,
+      {
+        chatId: activeChatId,
+        revision: targetRevision,
+        reason,
+        lastProcessedAssistantFloor,
+        graphDetached: pendingPersistGraphDetached,
+      },
+    );
+  } catch (error) {
+    if (!isAuthorityModuleUnavailableError(error)) throw error;
+    acceptedPersistResult = buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "authority-module-unavailable",
       revision: targetRevision,
-      reason,
-      lastProcessedAssistantFloor,
-      graphDetached: pendingPersistGraphDetached,
-    },
-  );
+      storageTier: "none",
+      error,
+    });
+  }
+  authorityLocked = authorityLocked || isAuthorityPersistenceLocked(graphPersistenceState) || isAuthorityLockedPersistResult(acceptedPersistResult);
   if (acceptedPersistResult?.accepted) {
     applyAcceptedPendingPersistState(acceptedPersistResult, {
       lastProcessedAssistantFloor,
@@ -1282,7 +1337,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
   }
 
   let recoverableTier = "none";
-  if (canPersistGraphToMetadataFallback(context, pendingPersistGraph)) {
+  if (!authorityLocked && canPersistGraphToMetadataFallback(context, pendingPersistGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
@@ -1297,6 +1352,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
 
   if (
     recoverableTier === "none" &&
+    !authorityLocked &&
     maybeCaptureGraphShadowSnapshot(`${reason}:shadow-fallback`, {
       graph: pendingPersistGraph,
       chatId: activeChatId,
@@ -1311,13 +1367,15 @@ export async function retryPendingGraphPersistImpl(runtime, {
     immediate: graphPersistenceState.queuedPersistMode !== "debounced",
     graph: pendingPersistGraph,
     chatId: activeChatId,
-    captureShadow: recoverableTier === "none",
+    captureShadow: !authorityLocked && recoverableTier === "none",
     recoverableTier,
   });
-  if (recoverableTier !== "none") {
+  if (recoverableTier !== "none" || authorityLocked) {
     updateGraphPersistenceState({
       lastPersistReason: queuedReason,
       lastRecoverableStorageTier: recoverableTier,
+      authorityOwned: authorityLocked ? true : graphPersistenceState.authorityOwned,
+      graphOperationalMode: authorityLocked ? GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED : graphPersistenceState.graphOperationalMode,
     });
   }
   if (scheduleRetryOnFailure && recoverableTier === "none") {
@@ -2458,8 +2516,11 @@ export async function saveGraphToIndexedDbImpl(runtime,
       snapshot,
     };
   } catch (error) {
+    const authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState, db) || isAuthorityModuleUnavailableError(error);
     console.warn(
-      `[ST-BME] ${localStore.statusLabel} 写入失败，保留 metadata 兜底:`,
+      authorityLocked
+        ? `[ST-BME] ${localStore.statusLabel} 权威图谱写入失败，已进入降级队列:`
+        : `[ST-BME] ${localStore.statusLabel} 写入失败，保留 metadata 兜底:`,
       error,
     );
     updatePersistDeltaDiagnostics({
@@ -2498,6 +2559,8 @@ export async function saveGraphToIndexedDbImpl(runtime,
       localStoreFormatVersion: localStoreDiagnostics.localStoreFormatVersion,
       localStoreMigrationState: localStoreDiagnostics.localStoreMigrationState,
       indexedDbLastError: error?.message || String(error),
+      authorityOwned: authorityLocked ? true : graphPersistenceState.authorityOwned,
+      graphOperationalMode: authorityLocked ? GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED : graphPersistenceState.graphOperationalMode,
       opfsWriteLockState,
       opfsWalDepth: localStoreDiagnostics.opfsWalDepth,
       opfsPendingBytes: localStoreDiagnostics.opfsPendingBytes,
@@ -2517,10 +2580,16 @@ export async function saveGraphToIndexedDbImpl(runtime,
       saved: false,
       chatId: normalizedChatId,
       revision: normalizeIndexedDbRevision(revision),
+      queued: authorityLocked,
+      blocked: authorityLocked,
+      accepted: false,
       reason:
-        persistRole === "cache-mirror"
+        authorityLocked
+          ? "authority-module-unavailable"
+          : persistRole === "cache-mirror"
           ? "cache-mirror-write-failed"
           : `${String(localStore?.reasonPrefix || "indexeddb")}-write-failed`,
+      storageTier: authorityLocked ? "none" : undefined,
       error,
     };
   }

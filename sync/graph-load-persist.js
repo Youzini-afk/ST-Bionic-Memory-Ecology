@@ -1,6 +1,40 @@
 // Extracted graph load/persist and Authority routing orchestration helpers.
 // Dependencies are supplied by index.js/test harnesses through runtime.
 
+import {
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+  normalizeGraphAuthorityMeta,
+} from "./authority-graph-mode.js";
+
+function isAuthorityPersistenceLocked(state = {}, snapshot = null) {
+  const meta = normalizeGraphAuthorityMeta({
+    authorityOwned: state?.authorityOwned === true || snapshot?.meta?.authorityOwned === true,
+    graphOperationalMode: state?.graphOperationalMode || snapshot?.meta?.graphOperationalMode,
+  });
+  return meta.authorityOwned || meta.graphOperationalMode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED;
+}
+
+function isAuthorityModuleUnavailableError(error = null) {
+  return Boolean(
+    error &&
+      (error.name === "AuthorityGraphModuleUnavailableError" ||
+        String(error?.code || error?.payload?.code || "").toLowerCase() === "authority_module_unavailable"),
+  );
+}
+
+function isAuthorityLockedPersistResult(result = null) {
+  if (!result || typeof result !== "object") return false;
+  const mode = String(result.graphOperationalMode || result.meta?.graphOperationalMode || "").toLowerCase();
+  const reason = String(result.reason || result.code || result.payload?.code || "").toLowerCase();
+  return (
+    result.authorityOwned === true ||
+    mode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED ||
+    reason.includes("authority_module_unavailable") ||
+    reason.includes("authority-module-unavailable") ||
+    isAuthorityModuleUnavailableError(result.error)
+  );
+}
+
 export function shouldUseAuthorityJobsImpl(runtime, config = null, kind = AUTHORITY_VECTOR_REBUILD_JOB_TYPE) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {
@@ -916,26 +950,44 @@ export async function persistExtractionBatchResultImpl(runtime, {
   }
 
   const revision = allocateRequestedPersistRevision(0, persistGraph);
-  const acceptedPersistResult = await persistGraphToConfiguredDurableTier(
-    context,
-    persistGraph,
-    {
-      chatId,
+  let authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState, persistSnapshot);
+  let acceptedPersistResult = null;
+  try {
+    acceptedPersistResult = await persistGraphToConfiguredDurableTier(
+      context,
+      persistGraph,
+      {
+        chatId,
+        revision,
+        reason,
+        lastProcessedAssistantFloor,
+        persistDelta,
+        graphSnapshot,
+        persistSnapshot,
+        graphDetached: persistGraphDetached,
+      },
+    );
+  } catch (error) {
+    if (!isAuthorityModuleUnavailableError(error)) throw error;
+    acceptedPersistResult = buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "authority-module-unavailable",
       revision,
-      reason,
-      lastProcessedAssistantFloor,
-      persistDelta,
-      graphSnapshot,
-      persistSnapshot,
-      graphDetached: persistGraphDetached,
-    },
-  );
+      storageTier: "none",
+      error,
+    });
+  }
+  authorityLocked = authorityLocked || isAuthorityPersistenceLocked(graphPersistenceState, persistSnapshot) || isAuthorityLockedPersistResult(acceptedPersistResult);
   if (acceptedPersistResult?.accepted) {
     return acceptedPersistResult;
   }
 
   let recoverableTier = "none";
   if (
+    !authorityLocked &&
     maybeCaptureGraphShadowSnapshotImpl(runtime, `${reason}:shadow-fallback`, {
       graph: persistGraph,
       chatId,
@@ -945,7 +997,7 @@ export async function persistExtractionBatchResultImpl(runtime, {
     recoverableTier = "shadow";
   }
 
-  if (canPersistGraphToMetadataFallback(context, persistGraph)) {
+  if (!authorityLocked && canPersistGraphToMetadataFallback(context, persistGraph)) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
@@ -962,11 +1014,13 @@ export async function persistExtractionBatchResultImpl(runtime, {
     immediate: true,
     graph: persistGraph,
     chatId,
-    captureShadow: recoverableTier === "none",
+    captureShadow: !authorityLocked && recoverableTier === "none",
     recoverableTier,
   });
   updateGraphPersistenceState({
     pendingPersist: true,
+    authorityOwned: authorityLocked ? true : graphPersistenceState.authorityOwned,
+    graphOperationalMode: authorityLocked ? GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED : graphPersistenceState.graphOperationalMode,
     lastPersistReason: String(queuedResult.reason || `${reason}:pending`),
     lastPersistMode: String(queuedResult.saveMode || ""),
     lastRecoverableStorageTier:

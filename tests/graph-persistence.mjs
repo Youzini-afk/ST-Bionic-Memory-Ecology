@@ -131,6 +131,7 @@ import {
   AUTHORITY_GRAPH_STORE_MODE,
   AuthorityGraphStore,
 } from "../sync/authority-graph-store.js";
+import { GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED } from "../sync/authority-graph-mode.js";
 import {
   isAcceptedLegacyPersistenceTier,
   isRecoveryOnlyLegacyPersistenceTier,
@@ -2607,11 +2608,24 @@ async function createGraphPersistenceHarness({
         }
         return runtimeContext.buildGraphPersistResult({ saved: false, accepted: false, reason, revision, storageTier: "luker-chat-state", acceptedBy: "none" });
       }
-      const indexedDbResult = await runtimeContext.saveGraphToIndexedDb(chatId, graph, { revision, reason, persistDelta, graphSnapshot, persistSnapshot, sourceGraph: graph });
+      let indexedDbResult = null;
+      try {
+        indexedDbResult = await runtimeContext.saveGraphToIndexedDb(chatId, graph, { revision, reason, persistDelta, graphSnapshot, persistSnapshot, sourceGraph: graph });
+      } catch (error) {
+        if (!isAuthorityModuleUnavailablePersistenceError(error)) throw error;
+        return runtimeContext.buildGraphPersistResult({ saved: false, queued: true, blocked: true, accepted: false, reason: "authority-module-unavailable", revision, storageTier: "none", acceptedBy: "none", primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
+      }
       if (indexedDbResult?.saved) {
         runtimeContext.persistGraphCommitMarker(context, { reason, revision: indexedDbResult.revision || revision, storageTier: indexedDbResult.storageTier || localStoreTier, accepted: true, lastProcessedAssistantFloor, extractionCount, immediate: true });
         runtimeContext.clearPendingGraphPersistRetry();
         return runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason, revision: indexedDbResult.revision || revision, saveMode: String(indexedDbResult.saveMode || "indexeddb-delta"), storageTier: indexedDbResult.storageTier || localStoreTier, acceptedBy: indexedDbResult.storageTier || localStoreTier, primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
+      }
+      if (isAuthorityBlockedPersistenceResult(indexedDbResult)) return indexedDbResult;
+      if (runtimeContext.__enableConfiguredDurableTierChatStateFallback === true && runtimeContext.canUseHostGraphChatStatePersistence(context)) {
+        const chatStateResult = await runtimeContext.persistGraphToHostChatState(context, { graph, chatId, revision, reason: `${reason}:chat-state-fallback`, storageTier: "chat-state", accepted: true, lastProcessedAssistantFloor, extractionCount, mode: "primary", persistDelta, chatStateTarget, graphDetached });
+        if (chatStateResult?.saved) {
+          return runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason: `${reason}:chat-state-fallback`, revision: chatStateResult.revision || revision, saveMode: String(chatStateResult.saveMode || "chat-state"), storageTier: "chat-state", acceptedBy: "chat-state", primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
+        }
       }
       return null;
     },
@@ -7462,6 +7476,369 @@ function installConflictDeltaStub(harness, { failFirst = true, failRetry = false
       harness.runtimeContext.BmeChatManager.prototype._createDb = originalCreateDb;
     },
   };
+}
+
+function createAuthorityModuleUnavailableError() {
+  const error = new Error("BME authority graph module unavailable");
+  error.name = "AuthorityGraphModuleUnavailableError";
+  error.code = "authority_module_unavailable";
+  error.status = 503;
+  error.category = "module-unavailable";
+  return error;
+}
+
+function isAuthorityModuleUnavailablePersistenceError(error = null) {
+  return Boolean(
+    error &&
+      (error.name === "AuthorityGraphModuleUnavailableError" ||
+        String(error?.code || error?.payload?.code || "").toLowerCase() === "authority_module_unavailable"),
+  );
+}
+
+function isAuthorityBlockedPersistenceResult(result = null) {
+  if (!result || typeof result !== "object") return false;
+  const mode = String(result.graphOperationalMode || result.meta?.graphOperationalMode || "").toLowerCase();
+  const reason = String(result.reason || result.code || result.payload?.code || "").toLowerCase();
+  return (
+    result.authorityOwned === true ||
+    mode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED ||
+    reason.includes("authority_module_unavailable") ||
+    reason.includes("authority-module-unavailable") ||
+    isAuthorityModuleUnavailablePersistenceError(result.error)
+  );
+}
+
+// Phase 0 blocker: persistGraphToConfiguredDurableTier must not accept a lower
+// host chat-state fallback once the local authority graph path reports an
+// authority-owned/degraded blocked result.
+{
+  const chatId = "chat-authority-configured-tier-no-chat-state-result";
+  const graph = createMeaningfulGraph(chatId, "authority-configured-tier-result");
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  harness.api.setCurrentGraph(graph);
+  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = true;
+
+  let chatStateCalls = 0;
+  const originalSaveGraphToIndexedDb = harness.runtimeContext.saveGraphToIndexedDb;
+  const originalPersistGraphToHostChatState = harness.runtimeContext.persistGraphToHostChatState;
+  harness.runtimeContext.saveGraphToIndexedDb = async () => harness.runtimeContext.buildGraphPersistResult({
+    saved: false,
+    queued: true,
+    blocked: true,
+    accepted: false,
+    reason: "authority-module-unavailable",
+    revision: 5,
+    storageTier: "none",
+    acceptedBy: "none",
+  });
+  harness.runtimeContext.persistGraphToHostChatState = async (...args) => {
+    chatStateCalls += 1;
+    return originalPersistGraphToHostChatState(...args);
+  };
+
+  const result = await harness.runtimeContext.persistGraphToConfiguredDurableTier(
+    harness.runtimeContext.getContext(),
+    graph,
+    { chatId, revision: 5, reason: "authority-configured-tier-result" },
+  );
+
+  harness.runtimeContext.saveGraphToIndexedDb = originalSaveGraphToIndexedDb;
+  harness.runtimeContext.persistGraphToHostChatState = originalPersistGraphToHostChatState;
+  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = false;
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.reason, "authority-module-unavailable");
+  assert.equal(chatStateCalls, 0, "authority blocked result must not attempt chat-state fallback");
+  assert.equal(harness.runtimeContext.__chatContext.__chatStateStore.size, 0);
+}
+
+// Phase 0 blocker: thrown authority module unavailable from saveGraphToIndexedDb
+// must also stop before chat-state fallback.
+{
+  const chatId = "chat-authority-configured-tier-no-chat-state-throw";
+  const graph = createMeaningfulGraph(chatId, "authority-configured-tier-throw");
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  harness.api.setCurrentGraph(graph);
+  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = true;
+
+  let chatStateCalls = 0;
+  const originalSaveGraphToIndexedDb = harness.runtimeContext.saveGraphToIndexedDb;
+  const originalPersistGraphToHostChatState = harness.runtimeContext.persistGraphToHostChatState;
+  harness.runtimeContext.saveGraphToIndexedDb = async () => {
+    throw createAuthorityModuleUnavailableError();
+  };
+  harness.runtimeContext.persistGraphToHostChatState = async (...args) => {
+    chatStateCalls += 1;
+    return originalPersistGraphToHostChatState(...args);
+  };
+
+  const result = await harness.runtimeContext.persistGraphToConfiguredDurableTier(
+    harness.runtimeContext.getContext(),
+    graph,
+    { chatId, revision: 5, reason: "authority-configured-tier-throw" },
+  );
+
+  harness.runtimeContext.saveGraphToIndexedDb = originalSaveGraphToIndexedDb;
+  harness.runtimeContext.persistGraphToHostChatState = originalPersistGraphToHostChatState;
+  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = false;
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.reason, "authority-module-unavailable");
+  assert.equal(chatStateCalls, 0, "authority unavailable throw must not attempt chat-state fallback");
+  assert.equal(harness.runtimeContext.__chatContext.__chatStateStore.size, 0);
+}
+
+// Phase 0 blocker: authority-module-unavailable discovered only during the
+// durable commit must still suppress metadata/shadow fallback, even when the
+// pre-call graphPersistenceState did not yet advertise authority ownership.
+{
+  const chatId = "chat-authority-unavailable-discovered-during-extraction";
+  const graph = createMeaningfulGraph(chatId, "authority-discovered-extraction");
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 5,
+    lastPersistedRevision: 4,
+    authorityOwned: false,
+    graphOperationalMode: "local-only",
+    writesBlocked: false,
+  });
+
+  const calls = { metadata: 0, shadow: 0, queue: [] };
+  const originalPersistGraphToConfiguredDurableTier = harness.runtimeContext.persistGraphToConfiguredDurableTier;
+  const originalCanPersistGraphToMetadataFallback = harness.runtimeContext.canPersistGraphToMetadataFallback;
+  const originalPersistGraphToChatMetadata = harness.runtimeContext.persistGraphToChatMetadata;
+  const originalMaybeCaptureGraphShadowSnapshot = harness.runtimeContext.maybeCaptureGraphShadowSnapshot;
+  const originalQueueGraphPersist = harness.runtimeContext.queueGraphPersist;
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => harness.runtimeContext.buildGraphPersistResult({
+    saved: false,
+    queued: true,
+    blocked: true,
+    accepted: false,
+    reason: "authority-module-unavailable",
+    revision: 5,
+    storageTier: "none",
+    error: createAuthorityModuleUnavailableError(),
+  });
+  harness.runtimeContext.canPersistGraphToMetadataFallback = () => true;
+  harness.runtimeContext.persistGraphToChatMetadata = (...args) => {
+    calls.metadata += 1;
+    return originalPersistGraphToChatMetadata(...args);
+  };
+  harness.runtimeContext.maybeCaptureGraphShadowSnapshot = (...args) => {
+    calls.shadow += 1;
+    return originalMaybeCaptureGraphShadowSnapshot(...args) || true;
+  };
+  harness.runtimeContext.queueGraphPersist = (queuedReason, revision, options = {}) => {
+    calls.queue.push({ queuedReason, revision, options: structuredClone(options) });
+    return harness.runtimeContext.buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      recoverable: false,
+      reason: queuedReason,
+      revision,
+      saveMode: "immediate",
+      storageTier: "none",
+      acceptedBy: "none",
+    });
+  };
+
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "authority-discovered-extraction",
+    lastProcessedAssistantFloor: 6,
+  });
+
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = originalPersistGraphToConfiguredDurableTier;
+  harness.runtimeContext.canPersistGraphToMetadataFallback = originalCanPersistGraphToMetadataFallback;
+  harness.runtimeContext.persistGraphToChatMetadata = originalPersistGraphToChatMetadata;
+  harness.runtimeContext.maybeCaptureGraphShadowSnapshot = originalMaybeCaptureGraphShadowSnapshot;
+  harness.runtimeContext.queueGraphPersist = originalQueueGraphPersist;
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.queued, true);
+  assert.equal(calls.metadata, 0, "authority unavailable discovered during commit must not metadata fallback");
+  assert.equal(calls.shadow, 0, "authority unavailable discovered during commit must not shadow fallback");
+  assert.equal(calls.queue.length, 1);
+  assert.equal(calls.queue[0].options.captureShadow, false, "queueGraphPersist must not re-enable shadow capture");
+  assert.equal(harness.api.getGraphPersistenceState().authorityOwned, true);
+  assert.equal(harness.api.getGraphPersistenceState().graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED);
+  assert.equal(harness.api.getGraphPersistenceState().lastPersistedRevision, 4);
+}
+
+// Phase 0 blocker: pending retry must recompute authority lock from the
+// durable persist result and avoid both metadata/shadow fallback and queued
+// shadow capture.
+{
+  const chatId = "chat-authority-unavailable-pending-retry";
+  const graph = createMeaningfulGraph(chatId, "authority-pending-retry");
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 5,
+    lastPersistedRevision: 4,
+    queuedPersistRevision: 5,
+    queuedPersistChatId: chatId,
+    queuedPersistMode: "immediate",
+    pendingPersist: true,
+    authorityOwned: false,
+    graphOperationalMode: "local-only",
+    writesBlocked: false,
+  });
+
+  const calls = { metadata: 0, shadow: 0, queue: [] };
+  const originalPersistGraphToConfiguredDurableTier = harness.runtimeContext.persistGraphToConfiguredDurableTier;
+  const originalCanPersistGraphToMetadataFallback = harness.runtimeContext.canPersistGraphToMetadataFallback;
+  const originalPersistGraphToChatMetadata = harness.runtimeContext.persistGraphToChatMetadata;
+  const originalMaybeCaptureGraphShadowSnapshot = harness.runtimeContext.maybeCaptureGraphShadowSnapshot;
+  const originalQueueGraphPersist = harness.runtimeContext.queueGraphPersist;
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => harness.runtimeContext.buildGraphPersistResult({
+    saved: false,
+    queued: true,
+    blocked: true,
+    accepted: false,
+    reason: "authority-module-unavailable",
+    revision: 5,
+    storageTier: "none",
+    error: createAuthorityModuleUnavailableError(),
+  });
+  harness.runtimeContext.canPersistGraphToMetadataFallback = () => true;
+  harness.runtimeContext.persistGraphToChatMetadata = (...args) => {
+    calls.metadata += 1;
+    return originalPersistGraphToChatMetadata(...args);
+  };
+  harness.runtimeContext.maybeCaptureGraphShadowSnapshot = (...args) => {
+    calls.shadow += 1;
+    return originalMaybeCaptureGraphShadowSnapshot(...args) || true;
+  };
+  harness.runtimeContext.queueGraphPersist = (queuedReason, revision, options = {}) => {
+    calls.queue.push({ queuedReason, revision, options: structuredClone(options) });
+    return harness.runtimeContext.buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      recoverable: false,
+      reason: queuedReason,
+      revision,
+      saveMode: "immediate",
+      storageTier: "none",
+      acceptedBy: "none",
+    });
+  };
+
+  const result = await harness.api.retryPendingGraphPersist({
+    reason: "authority-pending-retry",
+    scheduleRetryOnFailure: false,
+  });
+
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = originalPersistGraphToConfiguredDurableTier;
+  harness.runtimeContext.canPersistGraphToMetadataFallback = originalCanPersistGraphToMetadataFallback;
+  harness.runtimeContext.persistGraphToChatMetadata = originalPersistGraphToChatMetadata;
+  harness.runtimeContext.maybeCaptureGraphShadowSnapshot = originalMaybeCaptureGraphShadowSnapshot;
+  harness.runtimeContext.queueGraphPersist = originalQueueGraphPersist;
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.queued, true);
+  assert.equal(calls.metadata, 0, "pending retry authority unavailable must not metadata fallback");
+  assert.equal(calls.shadow, 0, "pending retry authority unavailable must not shadow fallback");
+  assert.equal(calls.queue.length, 1);
+  assert.equal(calls.queue[0].options.captureShadow, false, "pending retry queueGraphPersist must not re-enable shadow capture");
+  assert.equal(harness.api.getGraphPersistenceState().authorityOwned, true);
+  assert.equal(harness.api.getGraphPersistenceState().graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED);
+  assert.equal(harness.api.getGraphPersistenceState().lastPersistedRevision, 4);
+}
+
+// Phase 0: authority-owned/degraded graph failures must not degrade into
+// metadata/chat fallback or advance accepted floor/hash state.
+{
+  const chatId = "chat-authority-degraded-no-metadata-fallback";
+  const graph = createMeaningfulGraph(chatId, "authority-degraded");
+  const baseSnapshot = buildSnapshotFromGraph(graph, { chatId, revision: 4 });
+  const persistSnapshot = buildSnapshotFromGraph(graph, {
+    chatId,
+    revision: 5,
+    baseSnapshot,
+    meta: {
+      authorityOwned: true,
+      graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+    },
+  });
+  const directDelta = buildPersistDelta(baseSnapshot, persistSnapshot, { useNativeDelta: false });
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+    indexedDbSnapshot: baseSnapshot,
+  });
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 5,
+    lastPersistedRevision: 4,
+    lastProcessedAssistantFloor: 2,
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+    writesBlocked: false,
+  });
+  const originalCreateDb = harness.runtimeContext.BmeChatManager.prototype._createDb;
+  harness.runtimeContext.BmeChatManager.prototype._createDb = function(dbChatId = "") {
+    const baseDb = originalCreateDb.call(this, dbChatId);
+    return {
+      ...baseDb,
+      authorityOwned: true,
+      graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+      async commitDelta() {
+        throw createAuthorityModuleUnavailableError();
+      },
+    };
+  };
+
+  const result = await harness.api.saveGraphToIndexedDb(chatId, graph, {
+    revision: 5,
+    reason: "authority-degraded-save",
+    scheduleCloudUpload: false,
+    persistDelta: directDelta,
+    persistSnapshot,
+  });
+  harness.runtimeContext.BmeChatManager.prototype._createDb = originalCreateDb;
+
+  assert.equal(result.saved, false);
+  assert.equal(result.accepted, false);
+  assert.equal(result.queued, true);
+  assert.equal(result.blocked, true);
+  assert.equal(result.reason, "authority-module-unavailable");
+  assert.equal(result.storageTier, "none");
+  assert.equal(harness.api.getGraphPersistenceState().lastPersistedRevision, 4);
+  assert.equal(harness.api.getGraphPersistenceState().graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED);
+  assert.equal(
+    harness.runtimeContext.__chatContext.chatMetadata?.[GRAPH_METADATA_KEY],
+    undefined,
+    "authority module unavailable must not write metadata fallback",
+  );
 }
 
 // Test 1: transaction_conflict + rebuild unavailable (no persistGraphInput)

@@ -4,10 +4,16 @@ import {
   AUTHORITY_GRAPH_STORE_KIND,
   AUTHORITY_GRAPH_STORE_MODE,
   AuthorityGraphCommitConflictError,
+  AuthorityGraphModuleUnavailableError,
   AuthorityGraphStore,
   AuthoritySqlHttpClient,
   convertNamedParamsToPositional,
 } from "../sync/authority-graph-store.js";
+import {
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
+} from "../sync/authority-graph-mode.js";
 import {
   BME_DB_SCHEMA_VERSION,
   BME_TOMBSTONE_RETENTION_MS,
@@ -191,6 +197,8 @@ async function testOpenSeedsAuthorityMeta() {
   assert.equal(store.storeMode, AUTHORITY_GRAPH_STORE_MODE);
   assert.equal(await store.getMeta("schemaVersion"), BME_DB_SCHEMA_VERSION);
   assert.equal(await store.getMeta("storagePrimary"), AUTHORITY_GRAPH_STORE_KIND);
+  assert.equal(await store.getMeta("authorityOwned"), false);
+  assert.equal(await store.getMeta("graphOperationalMode"), GRAPH_OPERATIONAL_MODE_LOCAL_ONLY);
   assert.equal(await store.getRevision(), 0);
 
   const diagnostics = store.getStorageDiagnosticsSync();
@@ -596,12 +604,22 @@ async function testCommitDeltaViaModuleSuccess() {
   assert.equal(commitCall.input.baseRevision, 0, "baseRevision defaults to local revision");
   assert.ok(Array.isArray(commitCall.input.delta.upsertNodes));
   assert.equal(commitCall.input.delta.upsertNodes.length, 1);
+  assert.equal(commitCall.input.delta.runtimeMetaPatch.authorityOwned, true);
+  assert.equal(
+    commitCall.input.delta.runtimeMetaPatch.graphOperationalMode,
+    GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  );
+  assert.equal(commitCall.input.delta.runtimeMetaPatch.lastProcessedFloor, 5);
   assert.equal(commitCall.input.options.markSyncDirty, true);
   assert.equal(commitCall.input.options.reason, "module-commit-test");
 
   // Verify local meta cache was patched after the server commit.
   assert.equal(await store.getMeta("revision"), 42);
   assert.equal(await store.getMeta("lastMutationReason"), "module-commit-test");
+  assert.equal(await store.getMeta("authorityOwned"), true);
+  assert.equal(await store.getMeta("graphOperationalMode"), GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY);
+  assert.equal(store.authorityOwned, true);
+  assert.equal(store.graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY);
 }
 
 async function testCommitDeltaViaModuleTransactionConflictThrows() {
@@ -712,6 +730,44 @@ async function testCommitDeltaViaModuleOtherModuleErrorFallsBackToLocal() {
   assert.equal(bmeGraphModuleClient.calls.bmeGraphCommit.length, 1, "module client should have been attempted once before fallback");
 }
 
+async function testCommitDeltaViaModuleOtherModuleErrorThrowsForAuthorityPrimary() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const moduleError = new AuthorityHttpError(
+    "BME companion module unavailable",
+    {
+      status: 503,
+      code: "module_unavailable",
+      category: "module-unavailable",
+      payload: { error: "module unavailable", code: "module_unavailable" },
+    },
+  );
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({ commitError: moduleError });
+  const store = new AuthorityGraphStore("authority-chat-primary-no-fallback", {
+    sqlClient,
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  });
+  await store.open();
+
+  await assert.rejects(
+    () => store.commitDelta({ upsertNodes: [{ id: "node-no-fallback", type: "event", updatedAt: 1 }] }),
+    (error) => {
+      assert.ok(error instanceof AuthorityGraphModuleUnavailableError);
+      assert.equal(error.code, "authority_module_unavailable");
+      return true;
+    },
+  );
+
+  const nodeUpserts = sqlClient.statements.filter((s) =>
+    String(s.sql || "").toLowerCase().includes("insert into st_bme_graph_nodes"),
+  );
+  assert.equal(nodeUpserts.length, 0, "authority-primary module errors must not fall back to local write");
+  assert.equal(store.graphOperationalMode, GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED);
+}
+
 async function testCommitDeltaLocalPathWhenModuleNotReady() {
   const sqlClient = new MockAuthoritySqlClient();
   const bmeGraphModuleClient = createBmeGraphModuleClientMock();
@@ -734,9 +790,60 @@ async function testCommitDeltaLocalPathWhenModuleNotReady() {
   assert.equal(result.revision, 1);
 }
 
+async function testCommitDeltaModuleNotReadyThrowsForAuthorityOwned() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock();
+  const store = new AuthorityGraphStore("authority-chat-not-ready-owned", {
+    sqlClient,
+    bmeGraphModuleClient,
+    authorityOwned: true,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  });
+  await store.open();
+
+  await assert.rejects(
+    () => store.commitDelta({ upsertNodes: [{ id: "node-owned", type: "event", updatedAt: 300 }] }),
+    (error) => {
+      assert.ok(error instanceof AuthorityGraphModuleUnavailableError);
+      assert.equal(error.code, "authority_module_unavailable");
+      return true;
+    },
+  );
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphCommit.length, 0, "module client must not be called when readiness is false");
+  const nodeUpserts = sqlClient.statements.filter((s) =>
+    String(s.sql || "").toLowerCase().includes("insert into st_bme_graph_nodes"),
+  );
+  assert.equal(nodeUpserts.length, 0, "authority-owned not-ready path must not write locally");
+}
+
+async function testGetHeadUsesModule() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({
+    headResult: { ok: true, revision: 77, headHash: "sha256:module-head", chatId: "authority-chat-head" },
+  });
+  const store = new AuthorityGraphStore("authority-chat-head", {
+    sqlClient,
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.open();
+
+  const head = await store.getHead({ timeoutMs: 1234 });
+
+  assert.equal(head.revision, 77);
+  assert.equal(head.headHash, "sha256:module-head");
+  assert.equal(head.source, "bme-module");
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphGetHead.length, 1);
+  assert.equal(bmeGraphModuleClient.calls.bmeGraphGetHead[0].options.timeoutMs, 1234);
+}
+
 await testCommitDeltaViaModuleSuccess();
 await testCommitDeltaViaModuleTransactionConflictThrows();
 await testCommitDeltaViaModuleOtherModuleErrorFallsBackToLocal();
+await testCommitDeltaViaModuleOtherModuleErrorThrowsForAuthorityPrimary();
 await testCommitDeltaLocalPathWhenModuleNotReady();
+await testCommitDeltaModuleNotReadyThrowsForAuthorityOwned();
+await testGetHeadUsesModule();
 
 console.log(`${PREFIX} all tests passed`);

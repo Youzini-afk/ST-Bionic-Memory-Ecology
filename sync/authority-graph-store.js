@@ -7,7 +7,15 @@ import {
   buildSnapshotFromGraph,
 } from "./bme-db.js";
 import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js";
-import { AuthorityHttpClient, AuthorityHttpError } from "../runtime/authority-http-client.js";
+import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
+import {
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+  GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+  GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
+  isAuthorityGraphOperationalMode,
+  normalizeGraphAuthorityMeta,
+  resolveGraphOperationalMode,
+} from "./authority-graph-mode.js";
 
 export const AUTHORITY_GRAPH_STORE_KIND = "authority";
 export const AUTHORITY_GRAPH_STORE_MODE = "authority-sql-primary";
@@ -240,6 +248,8 @@ function createDefaultMetaValues(chatId = "", nowMs = Date.now()) {
     legacyRetentionUntil: 0,
     storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
     storageMode: AUTHORITY_GRAPH_STORE_MODE,
+    authorityOwned: false,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
   };
 }
 
@@ -551,21 +561,28 @@ export class AuthorityGraphCommitConflictError extends Error {
   }
 }
 
+export class AuthorityGraphModuleUnavailableError extends Error {
+  constructor(message = "BME authority graph module unavailable", options = {}) {
+    super(message);
+    this.name = "AuthorityGraphModuleUnavailableError";
+    this.code = "authority_module_unavailable";
+    this.status = Number(options.status || 503);
+    this.category = "module-unavailable";
+    this.authorityOwned = options.authorityOwned === true;
+    this.graphOperationalMode = resolveGraphOperationalMode({
+      authorityOwned: this.authorityOwned,
+      graphOperationalMode: options.graphOperationalMode,
+    });
+    this.payload = toPlainData(options.payload, null);
+    this.cause = options.cause || null;
+  }
+}
+
 function isBmeGraphCommitConflictError(error = null) {
   if (!error) return false;
   if (error instanceof AuthorityGraphCommitConflictError) return true;
   const code = String(error?.code || error?.payload?.details?.code || error?.payload?.code || "").toLowerCase();
   return code === "transaction_conflict";
-}
-
-function readBmeModuleErrorCode(error = null) {
-  if (!error) return "";
-  return String(
-    error?.payload?.details?.code ||
-      error?.payload?.code ||
-      error?.code ||
-      "",
-  ).trim().toLowerCase();
 }
 
 function sha1Hash(input) {
@@ -627,6 +644,10 @@ export class AuthorityGraphStore {
       options.isAuthorityModuleGraphCommitReady ?? options.bmeGraphCommitReady,
     );
     this.bmeGraphModuleClient = options.bmeGraphModuleClient || null;
+    this._setInMemoryAuthorityMeta({
+      authorityOwned: options.authorityOwned === true,
+      graphOperationalMode: options.graphOperationalMode,
+    });
     this._openPromise = null;
     this._opened = false;
   }
@@ -740,6 +761,7 @@ export class AuthorityGraphStore {
     // once. On other module errors (module_not_loaded, timeout, network,
     // validation_error other than CAS), fall back to the local chunked
     // `commitDeltaLocal` path (acceptable degradation) and log the fallback.
+    const authorityMeta = await this._resolveAuthorityMeta(options);
     if (this._shouldUseBmeGraphCommit()) {
       try {
         return await this.commitDeltaViaModule(delta, options);
@@ -762,7 +784,22 @@ export class AuthorityGraphStore {
                 },
               );
         }
-        // Other module errors — fall back to local chunked path.
+        if (this._isAuthorityPrimaryOrDegraded(authorityMeta)) {
+          this._setInMemoryAuthorityMeta({
+            authorityOwned: true,
+            graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+          });
+          throw new AuthorityGraphModuleUnavailableError(
+            error?.message || "BME graph.commitDelta module transaction unavailable",
+            {
+              cause: error,
+              payload: error?.payload,
+              authorityOwned: true,
+              graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+            },
+          );
+        }
+        // Other local-only module errors — preserve local chunked fallback.
         console.warn(
           `[ST-BME] graph.commitDelta module transaction failed, falling back to local chunked commit:`,
           error?.message || error,
@@ -770,7 +807,55 @@ export class AuthorityGraphStore {
         return await this.commitDeltaLocal(delta, options);
       }
     }
+    if (this._isAuthorityPrimaryOrDegraded(authorityMeta)) {
+      this._setInMemoryAuthorityMeta({
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+      });
+      throw new AuthorityGraphModuleUnavailableError(
+        "BME graph.commitDelta module is not ready for authority-owned graph",
+        {
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+        },
+      );
+    }
     return await this.commitDeltaLocal(delta, options);
+  }
+
+  async _resolveAuthorityMeta(options = {}) {
+    const explicit = normalizeGraphAuthorityMeta({
+      authorityOwned: options.authorityOwned === true || this.authorityOwned === true,
+      graphOperationalMode: options.graphOperationalMode || this.graphOperationalMode,
+    });
+    try {
+      const persisted = normalizeGraphAuthorityMeta({
+        authorityOwned:
+          explicit.authorityOwned === true ||
+          (await this.getMeta("authorityOwned", explicit.authorityOwned)) === true,
+        graphOperationalMode: explicit.authorityOwned === true
+          ? explicit.graphOperationalMode
+          : await this.getMeta("graphOperationalMode", explicit.graphOperationalMode),
+      });
+      return this._setInMemoryAuthorityMeta(persisted);
+    } catch {
+      return this._setInMemoryAuthorityMeta(explicit);
+    }
+  }
+
+  _setInMemoryAuthorityMeta(meta = {}) {
+    const normalized = normalizeGraphAuthorityMeta(meta);
+    this.authorityOwned = normalized.authorityOwned;
+    this.graphOperationalMode = normalized.graphOperationalMode;
+    return normalized;
+  }
+
+  _isAuthorityPrimaryOrDegraded(meta = null) {
+    const normalized = normalizeGraphAuthorityMeta(meta || {
+      authorityOwned: this.authorityOwned,
+      graphOperationalMode: this.graphOperationalMode,
+    });
+    return normalized.authorityOwned || isAuthorityGraphOperationalMode(normalized.graphOperationalMode);
   }
 
   _shouldUseBmeGraphCommit() {
@@ -806,6 +891,11 @@ export class AuthorityGraphStore {
       !Array.isArray(normalizedDelta.runtimeMetaPatch)
         ? normalizedDelta.runtimeMetaPatch
         : {};
+    const moduleRuntimeMetaPatch = {
+      ...runtimeMetaPatch,
+      authorityOwned: true,
+      graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+    };
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
@@ -839,7 +929,7 @@ export class AuthorityGraphStore {
         tombstones,
         deleteNodeIds,
         deleteEdgeIds,
-        runtimeMetaPatch,
+        runtimeMetaPatch: moduleRuntimeMetaPatch,
         countDelta: normalizedDelta.countDelta && typeof normalizedDelta.countDelta === "object"
           ? normalizedDelta.countDelta
           : null,
@@ -888,6 +978,8 @@ export class AuthorityGraphStore {
         nodeCount: counts.nodes,
         edgeCount: counts.edges,
         tombstoneCount: counts.tombstones,
+        authorityOwned: true,
+        graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
         ...(response?.headHash ? { headHash: String(response.headHash) } : {}),
       });
     } catch (metaPatchError) {
@@ -896,6 +988,10 @@ export class AuthorityGraphStore {
         metaPatchError?.message || metaPatchError,
       );
     }
+    this._setInMemoryAuthorityMeta({
+      authorityOwned: true,
+      graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
+    });
 
     return {
       revision: nextRevision,
@@ -917,12 +1013,55 @@ export class AuthorityGraphStore {
         commitMs: normalizePersistCommitMs(readPersistCommitNow() - commitRequestedAt),
         txMs: 0,
         payloadBytes,
-        runtimeMetaKeyCount: Object.keys(runtimeMetaPatch).length,
+        runtimeMetaKeyCount: Object.keys(moduleRuntimeMetaPatch).length,
         browserCacheMode: "minimal",
         idempotencyKey,
         baseRevision,
         serverRevision: nextRevision,
       },
+    };
+  }
+
+  async getHead(options = {}) {
+    if (this._shouldUseBmeGraphCommit()) {
+      const client = this._getBmeGraphModuleClient();
+      const response = await client.bmeGraphGetHead(
+        {
+          chatId: this.chatId,
+          collectionId: String(this.options.collectionId || this.options.namespace || ""),
+          ...(this.options.database ? { database: this.options.database } : {}),
+        },
+        {
+          ...(options.signal !== undefined ? { signal: options.signal } : {}),
+          ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+        },
+      );
+      return {
+        ok: response?.ok !== false,
+        chatId: String(response?.chatId || this.chatId),
+        revision: normalizeRevision(response?.revision),
+        headHash: String(response?.headHash || ""),
+        source: "bme-module",
+      };
+    }
+
+    const authorityMeta = await this._resolveAuthorityMeta(options);
+    if (this._isAuthorityPrimaryOrDegraded(authorityMeta)) {
+      throw new AuthorityGraphModuleUnavailableError(
+        "BME graph.getHead module is not ready for authority-owned graph",
+        {
+          authorityOwned: true,
+          graphOperationalMode: GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
+        },
+      );
+    }
+    const snapshot = await this.exportSnapshot({ includeTombstones: false });
+    return {
+      ok: true,
+      chatId: this.chatId,
+      revision: normalizeRevision(snapshot?.meta?.revision),
+      headHash: String(snapshot?.meta?.headHash || ""),
+      source: "local-snapshot",
     };
   }
 
@@ -1254,6 +1393,7 @@ export class AuthorityGraphStore {
         : normalizeNonNegativeInteger(metaMap?.tombstoneCount, 0),
       storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
       storageMode: AUTHORITY_GRAPH_STORE_MODE,
+      ...normalizeGraphAuthorityMeta(metaMap),
     };
     const snapshot = {
       meta,
@@ -1297,6 +1437,7 @@ export class AuthorityGraphStore {
       schemaVersion: BME_DB_SCHEMA_VERSION,
       storagePrimary: AUTHORITY_GRAPH_STORE_KIND,
       storageMode: AUTHORITY_GRAPH_STORE_MODE,
+      ...normalizeGraphAuthorityMeta(normalizedSnapshot.meta),
     };
     delete metaPatch.revision;
 
@@ -1332,6 +1473,7 @@ export class AuthorityGraphStore {
     statements.push(this._upsertMetaStatement("edgeCount", edges.length, nowMs));
     statements.push(this._upsertMetaStatement("tombstoneCount", tombstones.length, nowMs));
     await this._executeStatements(statements);
+    this._setInMemoryAuthorityMeta(metaPatch);
 
     return {
       mode,
@@ -1357,6 +1499,12 @@ export class AuthorityGraphStore {
       this._upsertMetaStatement("schemaVersion", BME_DB_SCHEMA_VERSION, nowMs),
       this._upsertMetaStatement("storagePrimary", AUTHORITY_GRAPH_STORE_KIND, nowMs),
       this._upsertMetaStatement("storageMode", AUTHORITY_GRAPH_STORE_MODE, nowMs),
+      this._upsertMetaStatement("authorityOwned", this.authorityOwned === true, nowMs),
+      this._upsertMetaStatement(
+        "graphOperationalMode",
+        this.authorityOwned === true ? this.graphOperationalMode : GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
+        nowMs,
+      ),
       this._upsertMetaStatement("nodeCount", 0, nowMs),
       this._upsertMetaStatement("edgeCount", 0, nowMs),
       this._upsertMetaStatement("tombstoneCount", 0, nowMs),

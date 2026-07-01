@@ -21,6 +21,10 @@ import {
   markGraphPersistRuntimeMetaDirty,
   normalizeGraphRuntimeState,
 } from "../runtime/runtime-state.js";
+import {
+  GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
+  normalizeGraphAuthorityMeta,
+} from "./authority-graph-mode.js";
 
 const DEXIE_LOAD_PROMISE_KEY = "__stBmeDexieLoadPromise";
 const DEXIE_SCRIPT_MARKER = "data-st-bme-dexie";
@@ -97,6 +101,8 @@ function createDefaultMetaValues(chatId = "", nowMs = Date.now()) {
     migrationCompletedAt: 0,
     migrationSource: "",
     legacyRetentionUntil: 0,
+    authorityOwned: false,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
   };
 }
 
@@ -1129,6 +1135,7 @@ function buildSnapshotRuntimeStateAndMeta(
   const mergedMeta = {
     ...baseSnapshot.meta,
     ...(meta || {}),
+    ...normalizeGraphAuthorityMeta({ ...baseSnapshot.meta, ...(meta || {}) }),
     schemaVersion: BME_DB_SCHEMA_VERSION,
     chatId,
     revision: normalizeRevision(revision ?? baseSnapshot.meta?.revision),

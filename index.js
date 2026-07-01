@@ -45,6 +45,7 @@ import {
   AUTHORITY_GRAPH_STORE_MODE,
   AuthorityGraphStore,
 } from "./sync/authority-graph-store.js";
+import { GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED } from "./sync/authority-graph-mode.js";
 import {
   autoSyncOnChatChange,
   autoSyncOnVisibility,
@@ -11911,6 +11912,27 @@ function buildGraphPersistResult({
   };
 }
 
+function isAuthorityModuleUnavailablePersistenceError(error = null) {
+  return Boolean(
+    error &&
+      (error.name === "AuthorityGraphModuleUnavailableError" ||
+        String(error?.code || error?.payload?.code || "").toLowerCase() === "authority_module_unavailable"),
+  );
+}
+
+function isAuthorityBlockedPersistenceResult(result = null) {
+  if (!result || typeof result !== "object") return false;
+  const mode = String(result.graphOperationalMode || result.meta?.graphOperationalMode || "").toLowerCase();
+  const reason = String(result.reason || result.code || result.payload?.code || "").toLowerCase();
+  return (
+    result.authorityOwned === true ||
+    mode === GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED ||
+    reason.includes("authority_module_unavailable") ||
+    reason.includes("authority-module-unavailable") ||
+    isAuthorityModuleUnavailablePersistenceError(result.error)
+  );
+}
+
 function maybeCaptureGraphShadowSnapshot(
   reason = "runtime-shadow",
   {
@@ -12126,14 +12148,31 @@ async function persistGraphToConfiguredDurableTier(
     }
   }
 
-  const indexedDbResult = await saveGraphToIndexedDb(chatId, graph, {
-    revision,
-    reason,
-    persistDelta,
-    graphSnapshot,
-    persistSnapshot,
-    sourceGraph: graph,
-  });
+  let indexedDbResult = null;
+  try {
+    indexedDbResult = await saveGraphToIndexedDb(chatId, graph, {
+      revision,
+      reason,
+      persistDelta,
+      graphSnapshot,
+      persistSnapshot,
+      sourceGraph: graph,
+    });
+  } catch (error) {
+    if (!isAuthorityModuleUnavailablePersistenceError(error)) throw error;
+    return buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "authority-module-unavailable",
+      revision,
+      storageTier: "none",
+      acceptedBy: "none",
+      primaryTier: persistenceEnvironment.primaryStorageTier,
+      cacheTier: persistenceEnvironment.cacheStorageTier,
+    });
+  }
   if (indexedDbResult?.saved) {
     persistGraphCommitMarker(context, {
       reason,
@@ -12156,6 +12195,10 @@ async function persistGraphToConfiguredDurableTier(
       primaryTier: persistenceEnvironment.primaryStorageTier,
       cacheTier: persistenceEnvironment.cacheStorageTier,
     });
+  }
+
+  if (isAuthorityBlockedPersistenceResult(indexedDbResult)) {
+    return indexedDbResult;
   }
 
   if (canUseHostGraphChatStatePersistence(context)) {

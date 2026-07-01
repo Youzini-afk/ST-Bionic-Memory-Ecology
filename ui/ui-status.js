@@ -5,6 +5,7 @@ import { sanitizePlannerMessageText } from "../runtime/planner-tag-utils.js";
 import { AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT } from "../maintenance/authority-diagnostics-bundle.js";
 import { createAuthorityUpgradeState } from "../runtime/authority-upgrade-state.js";
 import { createI18nStatus, t } from "../i18n/index.js";
+import { GRAPH_OPERATIONAL_MODE_LOCAL_ONLY } from "../sync/authority-graph-mode.js";
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -77,6 +78,8 @@ export function createGraphPersistenceState() {
     lightweightHostMode: false,
     persistDiagnosticTier: "none",
     acceptedBy: "none",
+    authorityOwned: false,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
     lastRecoverableStorageTier: "none",
     persistMismatchReason: "",
     commitMarker: null,

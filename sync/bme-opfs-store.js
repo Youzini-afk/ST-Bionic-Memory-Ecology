@@ -8,6 +8,7 @@ import {
   BME_TOMBSTONE_RETENTION_MS,
   buildSnapshotFromGraph,
 } from "./bme-db.js";
+import { GRAPH_OPERATIONAL_MODE_LOCAL_ONLY } from "./authority-graph-mode.js";
 
 const META_DEFAULT_LAST_PROCESSED_FLOOR = -1;
 const META_DEFAULT_EXTRACTION_COUNT = 0;
@@ -261,6 +262,8 @@ function createDefaultMetaValues(chatId = "", nowMs = Date.now()) {
     legacyRetentionUntil: 0,
     storagePrimary: OPFS_STORE_KIND,
     storageMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_SHADOW,
+    authorityOwned: false,
+    graphOperationalMode: GRAPH_OPERATIONAL_MODE_LOCAL_ONLY,
   };
 }
 
