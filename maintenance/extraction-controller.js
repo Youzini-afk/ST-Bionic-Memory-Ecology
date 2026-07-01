@@ -149,6 +149,30 @@ function cloneSerializable(value, fallback = null) {
   }
 }
 
+function buildMessageHashesForRange(graph = null, range = [null, null]) {
+  const hashes = graph?.historyState?.processedMessageHashes;
+  if (!hashes || typeof hashes !== "object" || Array.isArray(hashes)) return [];
+  const start = Number(range?.[0]);
+  const end = Number(range?.[1]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+  const rows = [];
+  for (let floor = Math.floor(start); floor <= Math.floor(end); floor += 1) {
+    const messageHash = hashes[String(floor)] ?? hashes[floor];
+    if (typeof messageHash !== "string" || !messageHash) continue;
+    rows.push({ floor, messageHash, hashVersion: 1 });
+  }
+  return rows;
+}
+
+function isAuthorityBlockedPersistence(persistence = null) {
+  const reason = String(persistence?.reason || "").toLowerCase();
+  const saveMode = String(persistence?.saveMode || "").toLowerCase();
+  return (
+    persistence?.blocked === true &&
+    (reason.includes("authority") || saveMode.includes("extraction.commitbatch"))
+  );
+}
+
 function readNow() {
   if (typeof performance === "object" && typeof performance.now === "function") {
     return performance.now();
@@ -921,6 +945,18 @@ export async function executeExtractionBatchController(
     graphSnapshot: committedPersistState.persistGraphSnapshot,
     persistSnapshot: committedPersistState.persistSnapshot,
     persistDelta: committedPersistState.persistDelta,
+    committedBatchJournalEntry: committedPersistState.committedBatchJournalEntry,
+    processedRange: [startIdx, endIdx],
+    extractionCountBefore,
+    extractionCountAfter: runtime.getExtractionCount(),
+    previousLastProcessedFloor: lastProcessed,
+    messageHashes: buildMessageHashesForRange(
+      committedPersistState.committedAfterSnapshot || committedPersistState.persistGraphSnapshot,
+      [startIdx, endIdx],
+    ),
+    pruneMessageHashesFromFloor: startIdx,
+    vectorDirty: Array.isArray(effects?.vectorHashesInserted) && effects.vectorHashesInserted.length > 0,
+    dirtyFromFloor: startIdx,
   });
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
@@ -1005,7 +1041,7 @@ export async function executeExtractionBatchController(
         ),
       );
     }
-  } else if (!persistence.accepted) {
+  } else if (!persistence.accepted && !isAuthorityBlockedPersistence(persistence)) {
     // 即使持久化未被接受，仍在内存中推进 lastProcessedAssistantFloor，
     // 防止同一会话内对已经抽取过的楼层重复提取。
     // 此时不追加 batchJournal（保持回滚完整性）。

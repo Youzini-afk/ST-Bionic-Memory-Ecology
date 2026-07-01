@@ -6691,6 +6691,136 @@ async function createGraphPersistenceHarness({
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-authority-commitbatch-ready",
+    globalChatId: "chat-authority-commitbatch-ready",
+    chatMetadata: { integrity: "meta-authority-commitbatch-ready" },
+  });
+  let commitBatchCalls = 0;
+  let genericPersistCalls = 0;
+  let metadataFallbackCalls = 0;
+  harness.runtimeContext.getAuthorityCapabilityState = () => ({ bmeExtractionCommitBatchReady: true });
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => {
+    genericPersistCalls += 1;
+    return harness.runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, storageTier: "indexeddb" });
+  };
+  harness.runtimeContext.persistGraphToChatMetadata = () => {
+    metadataFallbackCalls += 1;
+    return { saved: true };
+  };
+  const graph = createMeaningfulGraph("chat-authority-commitbatch-ready", "authority-ready");
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({
+    chatId: "chat-authority-commitbatch-ready",
+    authorityOwned: true,
+    graphOperationalMode: "authority-primary",
+  });
+  harness.runtimeContext.ensureBmeChatManager = () => ({
+    async getCurrentDb() {
+      return {
+        authorityOwned: true,
+        graphOperationalMode: "authority-primary",
+        bmeExtractionCommitBatchReady: true,
+        async commitExtractionBatch(input) {
+          commitBatchCalls += 1;
+          assert.equal(input.committedBatchJournalEntry.id, "random-journal-ready");
+          return { saved: true, accepted: true, storageTier: "authority-sql", acceptedBy: "extraction.commitBatch", saveMode: "extraction.commitBatch", revision: 12, authorityOwned: true, graphOperationalMode: "authority-primary" };
+        },
+      };
+    },
+  });
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "authority-commitbatch-ready",
+    lastProcessedAssistantFloor: 6,
+    graphSnapshot: graph,
+    persistDelta: { upsertNodes: [{ id: "node-authority-ready" }] },
+    persistSnapshot: { meta: { authorityOwned: true, graphOperationalMode: "authority-primary" } },
+    committedBatchJournalEntry: { id: "random-journal-ready", processedRange: [4, 6] },
+    processedRange: [4, 6],
+    extractionCountBefore: 1,
+    extractionCountAfter: 2,
+  });
+  assert.equal(result.accepted, true);
+  assert.equal(result.acceptedBy, "extraction.commitBatch");
+  assert.equal(commitBatchCalls, 1);
+  assert.equal(genericPersistCalls, 0, "authority commitBatch success must skip generic persist");
+  assert.equal(metadataFallbackCalls, 0, "authority commitBatch success must skip metadata fallback");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-authority-commitbatch-fail",
+    globalChatId: "chat-authority-commitbatch-fail",
+    chatMetadata: { integrity: "meta-authority-commitbatch-fail" },
+  });
+  let genericPersistCalls = 0;
+  let queueCalls = 0;
+  harness.runtimeContext.getAuthorityCapabilityState = () => ({ bmeExtractionCommitBatchReady: true });
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => { genericPersistCalls += 1; return null; };
+  harness.runtimeContext.queueGraphPersist = () => { queueCalls += 1; return { queued: true }; };
+  const graph = createMeaningfulGraph("chat-authority-commitbatch-fail", "authority-fail");
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({ chatId: "chat-authority-commitbatch-fail", authorityOwned: true, graphOperationalMode: "authority-primary", pendingPersist: false });
+  harness.runtimeContext.ensureBmeChatManager = () => ({
+    async getCurrentDb() {
+      return {
+        authorityOwned: true,
+        graphOperationalMode: "authority-primary",
+        bmeExtractionCommitBatchReady: true,
+        async commitExtractionBatch() {
+          const error = new Error("module down");
+          error.name = "AuthorityGraphModuleUnavailableError";
+          error.code = "authority_module_unavailable";
+          throw error;
+        },
+      };
+    },
+  });
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "authority-commitbatch-fail",
+    lastProcessedAssistantFloor: 6,
+    graphSnapshot: graph,
+    persistDelta: { upsertNodes: [{ id: "node-authority-fail" }] },
+    persistSnapshot: { meta: { authorityOwned: true, graphOperationalMode: "authority-primary" } },
+    committedBatchJournalEntry: { id: "random-journal-fail", processedRange: [4, 6] },
+    processedRange: [4, 6],
+  });
+  assert.equal(result.accepted, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.queued, false, "failed authority commitBatch must not enter old pending queue");
+  assert.equal(harness.api.getGraphPersistenceState().pendingPersist, false);
+  assert.equal(genericPersistCalls, 0, "failed authority commitBatch must not call generic durable persist");
+  assert.equal(queueCalls, 0, "failed authority commitBatch must not call old queueGraphPersist");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
+    chatId: "chat-authority-commitbatch-not-ready",
+    globalChatId: "chat-authority-commitbatch-not-ready",
+    chatMetadata: { integrity: "meta-authority-commitbatch-not-ready" },
+  });
+  let genericPersistCalls = 0;
+  harness.runtimeContext.getAuthorityCapabilityState = () => ({ bmeExtractionCommitBatchReady: false });
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => { genericPersistCalls += 1; return null; };
+  const graph = createMeaningfulGraph("chat-authority-commitbatch-not-ready", "authority-not-ready");
+  harness.api.setCurrentGraph(graph);
+  harness.api.setGraphPersistenceState({ chatId: "chat-authority-commitbatch-not-ready", authorityOwned: true, graphOperationalMode: "authority-primary" });
+  harness.runtimeContext.ensureBmeChatManager = () => ({ async getCurrentDb() { return { authorityOwned: true, graphOperationalMode: "authority-primary", bmeExtractionCommitBatchReady: false }; } });
+  const result = await harness.api.persistExtractionBatchResult({
+    reason: "authority-commitbatch-not-ready",
+    lastProcessedAssistantFloor: 6,
+    graphSnapshot: graph,
+    persistDelta: { upsertNodes: [{ id: "node-authority-not-ready" }] },
+    persistSnapshot: { meta: { authorityOwned: true, graphOperationalMode: "authority-primary" } },
+    committedBatchJournalEntry: { id: "random-journal-not-ready", processedRange: [4, 6] },
+  });
+  assert.equal(result.accepted, false);
+  assert.equal(result.blocked, true);
+  assert.equal(result.queued, false);
+  assert.equal(genericPersistCalls, 0, "authority-owned commitBatch-not-ready must not fall through generic path");
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-luker-primary",
     globalChatId: "chat-luker-primary",
     characterId: "char-luker",

@@ -5825,6 +5825,8 @@ function buildAuthorityGraphStoreOptions(settings = getSettings()) {
     bmeCandidateSearchReady: Boolean(capability.bmeCandidateSearchReady),
     bmeGraphCommitReady: Boolean(capability.bmeGraphCommitReady),
     isAuthorityModuleGraphCommitReady: Boolean(capability.bmeGraphCommitReady),
+    bmeExtractionCommitBatchReady: Boolean(capability.bmeExtractionCommitBatchReady),
+    isAuthorityModuleExtractionCommitBatchReady: Boolean(capability.bmeExtractionCommitBatchReady),
     bmeProtocolVersion: Math.max(0, Number(capability.bmeProtocolVersion) || 0),
     headerProvider:
       typeof getRequestHeaders === "function" ? () => getRequestHeaders() : null,

@@ -67,6 +67,30 @@ assert.equal(legacy.bmeProtocolVersion, 0);
   assert.equal(state.bmeCandidateSearchReady, true);
 }
 
+// Phase 3 frontend wiring: extraction.commitBatch readiness is module-manifest gated.
+{
+  const readiness = deriveModuleReadiness({
+    modules: [{
+      id: BME_AUTHORITY_MODULE_ID,
+      transactions: {
+        "graph.commitDelta": { name: "graph.commitDelta" },
+        "extraction.commitBatch": { name: "extraction.commitBatch" },
+      },
+    }],
+    records: [],
+  });
+  assert.equal(readiness.bmeExtractionCommitBatchReady, true);
+  const state = normalizeAuthorityCapabilityState({
+    installed: true,
+    healthy: true,
+    sessionReady: true,
+    permissionReady: true,
+    features: ["sql.query", "sql.mutation", "trivium.search", "jobs", "storage.blob"],
+    moduleReadiness: readiness,
+  });
+  assert.equal(state.bmeExtractionCommitBatchReady, true);
+}
+
 // Phase C: load_error record does not set bmeVectorApplyReady.
 {
   const state = normalizeAuthorityCapabilityState({

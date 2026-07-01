@@ -524,12 +524,15 @@ await testSingleStatement413IsTerminal();
 function createBmeGraphModuleClientMock({
   commitResult = null,
   commitError = null,
+  extractionResult = null,
+  extractionError = null,
   headResult = null,
   headError = null,
 } = {}) {
   const calls = {
     bmeGraphCommit: [],
     bmeGraphGetHead: [],
+    bmeExtractionCommitBatch: [],
   };
   return {
     calls,
@@ -562,7 +565,109 @@ function createBmeGraphModuleClientMock({
       if (headError) throw headError;
       return headResult || { ok: true, revision: 42, headHash: "sha256:head" };
     },
+    async bmeExtractionCommitBatch(input, options = {}) {
+      calls.bmeExtractionCommitBatch.push({ input, options });
+      if (extractionError) throw extractionError;
+      return extractionResult || {
+        ok: true,
+        accepted: true,
+        revision: 43,
+        headHash: "sha256:batch",
+        committedAt: "2026-01-01T00:00:00.000Z",
+        batchId: input?.batchId,
+        vectorDirtyGeneration: 2,
+        extraction: { lastProcessedAssistantFloor: input?.extraction?.nextLastProcessedFloor, extractionCount: input?.extraction?.nextExtractionCount },
+        statementCount: 7,
+      };
+    },
   };
+}
+
+async function testCommitExtractionBatchSuccess() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({ headResult: { ok: true, revision: 9, headHash: "sha256:head9" } });
+  const store = new AuthorityGraphStore("authority-chat-extraction", {
+    sqlClient,
+    bmeGraphCommitReady: true,
+    isAuthorityModuleGraphCommitReady: true,
+    bmeExtractionCommitBatchReady: true,
+    isAuthorityModuleExtractionCommitBatchReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.open();
+  const result = await store.commitExtractionBatch({
+    persistDelta: { upsertNodes: [{ id: "node-batch", type: "event" }], runtimeMetaPatch: { custom: true } },
+    committedBatchJournalEntry: { id: "batch-abc", processedRange: [4, 6], stateBefore: { lastProcessedAssistantFloor: 3 } },
+    processedRange: [4, 6],
+    previousLastProcessedFloor: 3,
+    lastProcessedAssistantFloor: 6,
+    extractionCountBefore: 10,
+    extractionCountAfter: 11,
+    messageHashes: [{ floor: 6, messageHash: "hash-6", hashVersion: 1 }],
+    pruneMessageHashesFromFloor: 4,
+  }, { reason: "extraction-test" });
+  assert.equal(result.accepted, true);
+  assert.equal(result.storageTier, "authority-sql");
+  assert.equal(result.acceptedBy, "extraction.commitBatch");
+  assert.equal(result.batchJournalDurable, true);
+  const call = bmeGraphModuleClient.calls.bmeExtractionCommitBatch[0];
+  assert.equal(call.input.baseRevision, 9, "baseRevision must come from fresh getHead");
+  assert.ok(call.input.batchId.startsWith("batch-"));
+  assert.equal(call.options.idempotencyKey, `extraction:authority-chat-extraction:${call.input.batchId}`);
+  assert.equal(call.input.delta.runtimeMetaPatch.authorityOwned, true);
+  assert.deepEqual(call.input.messageHashes, [{ floor: 6, messageHash: "hash-6", hashVersion: 1 }]);
+  assert.equal(await store.getMeta("revision"), 43);
+  assert.equal(await store.getMeta("lastProcessedAssistantFloor"), 6);
+  assert.equal(await store.getMeta("extractionCount"), 11);
+  assert.equal(await store.getMeta("authorityOwned"), true);
+}
+
+async function testCommitExtractionBatchStableBatchIdIgnoresRandomJournalId() {
+  const sqlClient = new MockAuthoritySqlClient();
+  const bmeGraphModuleClient = createBmeGraphModuleClientMock({ headResult: { ok: true, revision: 9, headHash: "sha256:head9" } });
+  const store = new AuthorityGraphStore("authority-chat-extraction-stable", {
+    sqlClient,
+    bmeExtractionCommitBatchReady: true,
+    isAuthorityModuleExtractionCommitBatchReady: true,
+    bmeGraphModuleClient,
+  });
+  await store.open();
+  const base = {
+    persistDelta: { upsertNodes: [{ id: "node-stable", type: "event" }] },
+    processedRange: [4, 6],
+    previousLastProcessedFloor: 3,
+    lastProcessedAssistantFloor: 6,
+    extractionCountBefore: 10,
+    extractionCountAfter: 11,
+    messageHashes: [{ floor: 6, messageHash: "hash-6", hashVersion: 1 }],
+  };
+  await store.commitExtractionBatch({ ...base, committedBatchJournalEntry: { id: "batch-random-a", createdAt: 1700000000000, processedRange: [4, 6], stable: true } });
+  await store.commitExtractionBatch({ ...base, committedBatchJournalEntry: { id: "batch-random-b", createdAt: 1800000000000, processedRange: [4, 6], stable: true } });
+  const first = bmeGraphModuleClient.calls.bmeExtractionCommitBatch[0];
+  const second = bmeGraphModuleClient.calls.bmeExtractionCommitBatch[1];
+  assert.equal(first.input.batchId, second.input.batchId, "logical retries with different journal ids must use same durable batchId");
+  assert.equal(first.options.idempotencyKey, second.options.idempotencyKey, "logical retries with different journal ids must use same idempotency key");
+  await store.commitExtractionBatch({ ...base, extractionCountAfter: 12, committedBatchJournalEntry: { id: "batch-random-c", createdAt: 1800000000000, processedRange: [4, 6], stable: true } });
+  const third = bmeGraphModuleClient.calls.bmeExtractionCommitBatch[2];
+  assert.notEqual(first.input.batchId, third.input.batchId, "semantic extraction changes must produce a different durable batchId");
+}
+
+async function testCommitExtractionBatchConflictAndUnavailableNoFallback() {
+  const conflictError = new AuthorityHttpError("conflict", { status: 409, code: "transaction_conflict", payload: { code: "transaction_conflict", details: { serverRevision: 10, baseRevision: 9 } } });
+  const conflictClient = createBmeGraphModuleClientMock({ extractionError: conflictError, headResult: { ok: true, revision: 9 } });
+  const conflictStore = new AuthorityGraphStore("authority-chat-extraction-conflict", { sqlClient: new MockAuthoritySqlClient(), bmeExtractionCommitBatchReady: true, isAuthorityModuleExtractionCommitBatchReady: true, bmeGraphModuleClient: conflictClient });
+  await conflictStore.open();
+  await assert.rejects(
+    () => conflictStore.commitExtractionBatch({ persistDelta: {}, committedBatchJournalEntry: { id: "batch-conflict", processedRange: [1, 2] }, lastProcessedAssistantFloor: 2, extractionCountAfter: 1 }),
+    (error) => error instanceof AuthorityGraphCommitConflictError,
+  );
+
+  const unavailableStore = new AuthorityGraphStore("authority-chat-extraction-unavail", { sqlClient: new MockAuthoritySqlClient(), bmeExtractionCommitBatchReady: false, isAuthorityModuleExtractionCommitBatchReady: false, bmeGraphModuleClient: createBmeGraphModuleClientMock() });
+  await unavailableStore.open();
+  await assert.rejects(
+    () => unavailableStore.commitExtractionBatch({ persistDelta: {}, committedBatchJournalEntry: { id: "batch-unavail", processedRange: [1, 2] }, lastProcessedAssistantFloor: 2, extractionCountAfter: 1 }),
+    (error) => error instanceof AuthorityGraphModuleUnavailableError,
+  );
 }
 
 async function testCommitDeltaViaModuleSuccess() {
@@ -845,5 +950,8 @@ await testCommitDeltaViaModuleOtherModuleErrorThrowsForAuthorityPrimary();
 await testCommitDeltaLocalPathWhenModuleNotReady();
 await testCommitDeltaModuleNotReadyThrowsForAuthorityOwned();
 await testGetHeadUsesModule();
+await testCommitExtractionBatchSuccess();
+await testCommitExtractionBatchStableBatchIdIgnoresRandomJournalId();
+await testCommitExtractionBatchConflictAndUnavailableNoFallback();
 
 console.log(`${PREFIX} all tests passed`);

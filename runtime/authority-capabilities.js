@@ -150,6 +150,7 @@ function buildDefaultSessionInitConfig(source = {}) {
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:vector.apply`,
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:recall.candidates`,
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:graph.commitDelta`,
+          `${BME_AUTHORITY_MODULE_ID_LOCAL}:extraction.commitBatch`,
         ],
       },
     },
@@ -370,6 +371,7 @@ const BME_VECTOR_MANIFEST_TRANSACTION = "vector.manifest";
 const BME_VECTOR_APPLY_TRANSACTION = "vector.apply";
 const BME_RECALL_CANDIDATES_TRANSACTION = "recall.candidates";
 const BME_GRAPH_COMMIT_DELTA_TRANSACTION = "graph.commitDelta";
+export const BME_EXTRACTION_COMMIT_BATCH_TRANSACTION = "extraction.commitBatch";
 
 /**
  * Derive module readiness from a generic DOA `/modules` response.
@@ -412,6 +414,7 @@ export function deriveModuleReadiness(modulesPayload = {}) {
   const hasVectorApply = Boolean(transactions[BME_VECTOR_APPLY_TRANSACTION]);
   const hasRecallCandidates = Boolean(transactions[BME_RECALL_CANDIDATES_TRANSACTION]);
   const hasGraphCommitDelta = Boolean(transactions[BME_GRAPH_COMMIT_DELTA_TRANSACTION]);
+  const hasExtractionCommitBatch = Boolean(transactions[BME_EXTRACTION_COMMIT_BATCH_TRANSACTION]);
 
   return {
     modulesReady,
@@ -420,6 +423,7 @@ export function deriveModuleReadiness(modulesPayload = {}) {
     bmeVectorApplyReady: bmeModuleReady && hasVectorApply,
     bmeCandidateSearchReady: bmeModuleReady && hasRecallCandidates,
     bmeGraphCommitReady: bmeModuleReady && hasGraphCommitDelta,
+    bmeExtractionCommitBatchReady: bmeModuleReady && hasExtractionCommitBatch,
   };
 }
 
@@ -554,6 +558,7 @@ export function createDefaultAuthorityCapabilityState(overrides = {}) {
     bmeServerEmbeddingProbeReady: false,
     bmeCandidateSearchReady: false,
     bmeGraphCommitReady: false,
+    bmeExtractionCommitBatchReady: false,
     bmeProtocolVersion: 0,
     features: [],
     missingFeatures: ["sql.query", "sql.mutation", "trivium.search", "jobs", "blob-or-private-files"],
@@ -600,6 +605,7 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
   const bmeModuleVectorApplyReady = Boolean(moduleReadiness.bmeVectorApplyReady);
   const bmeModuleCandidateSearchReady = Boolean(moduleReadiness.bmeCandidateSearchReady);
   const bmeModuleGraphCommitReady = Boolean(moduleReadiness.bmeGraphCommitReady);
+  const bmeModuleExtractionCommitBatchReady = Boolean(moduleReadiness.bmeExtractionCommitBatchReady);
 
   // Legacy: if module readiness is not available, fall back to features.
   const legacyBmeVectorManifestReady = healthy && sessionReady && permissionReady && readiness.bmeVectorManifest;
@@ -622,6 +628,9 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
   // the existing local chunked AuthorityGraphStore.commitDelta path.
   const bmeGraphCommitReady = moduleReadiness.modulesReady
     ? (bmeModuleReady && bmeModuleGraphCommitReady)
+    : false;
+  const bmeExtractionCommitBatchReady = moduleReadiness.modulesReady
+    ? (bmeModuleReady && bmeModuleExtractionCommitBatchReady)
     : false;
 
   const bmeVectorApplyJobsReady = healthy && sessionReady && permissionReady && readiness.bmeVectorApplyJobs;
@@ -656,6 +665,7 @@ export function normalizeAuthorityCapabilityState(input = {}, settings = {}) {
     bmeServerEmbeddingProbeReady,
     bmeCandidateSearchReady,
     bmeGraphCommitReady,
+    bmeExtractionCommitBatchReady,
     bmeProtocolVersion,
     features: Array.from(features).sort(),
     missingFeatures,
