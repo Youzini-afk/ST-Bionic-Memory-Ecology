@@ -121,6 +121,8 @@ function createMockSqlTxCtx(options = {}) {
     nodes = [],
     edges = [],
     tombstones = [],
+    batchJournalRows = [],
+    vectorDirtyRows = [],
     idempotencyCache = new Map(),
     transactionDelayMs = 0,
   } = options;
@@ -151,7 +153,15 @@ function createMockSqlTxCtx(options = {}) {
       calls.query.push({ database, statement, params });
       let rows = [];
       let columns = [];
-      if (statement.includes('st_bme_graph_meta')) {
+      if (statement.includes('st_bme_batch_journal')) {
+        const batchId = params?.[1];
+        const idem = params?.[2];
+        rows = batchJournalRows.filter((row) => row.batch_id === batchId || (idem != null && row.idempotency_key === idem));
+        columns = ['batch_id', 'idempotency_key', 'request_fingerprint', 'revision', 'head_hash', 'committed_at'];
+      } else if (statement.includes('st_bme_vector_dirty_state')) {
+        rows = vectorDirtyRows;
+        columns = ['dirty_generation', 'clean_generation'];
+      } else if (statement.includes('st_bme_graph_meta')) {
         rows = metaRows;
         columns = ['meta_key', 'value_json'];
       } else if (statement.includes('st_bme_graph_nodes') && statement.includes('record_id')) {
@@ -262,6 +272,15 @@ function createMockSqlTxCtx(options = {}) {
   };
 }
 
+function expectedGraphHeadHash(nodeIds, edgeIds, revision) {
+  const parts = [];
+  for (const id of nodeIds) if (id) parts.push('n:' + id);
+  for (const id of edgeIds) if (id) parts.push('e:' + id);
+  parts.sort();
+  parts.push('r:' + revision);
+  return require('node:crypto').createHash('sha256').update(parts.join('|')).digest('hex');
+}
+
 async function run() {
   console.log('[test:authority-companion-module] loading server.cjs');
   const mod = require(SERVER_CJS);
@@ -307,8 +326,8 @@ async function run() {
     const keys = Object.keys(registered).sort();
     assert.deepStrictEqual(
       keys,
-      ['graph.commitDelta', 'graph.getHead', 'graph.loadSnapshot', 'recall.candidates', 'vector.apply', 'vector.manifest'],
-      'must register exactly vector.manifest, vector.apply, recall.candidates, graph.getHead, graph.loadSnapshot, and graph.commitDelta',
+      ['extraction.commitBatch', 'graph.commitDelta', 'graph.getHead', 'graph.loadSnapshot', 'recall.candidates', 'vector.apply', 'vector.manifest'],
+      'must register exactly seven BME companion transactions',
     );
     assert.strictEqual(typeof registered['vector.manifest'].handler, 'function', 'vector.manifest handler must be a function');
     assert.strictEqual(typeof registered['vector.apply'].handler, 'function', 'vector.apply handler must be a function');
@@ -316,6 +335,7 @@ async function run() {
     assert.strictEqual(typeof registered['graph.getHead'].handler, 'function', 'graph.getHead handler must be a function');
     assert.strictEqual(typeof registered['graph.loadSnapshot'].handler, 'function', 'graph.loadSnapshot handler must be a function');
     assert.strictEqual(typeof registered['graph.commitDelta'].handler, 'function', 'graph.commitDelta handler must be a function');
+    assert.strictEqual(typeof registered['extraction.commitBatch'].handler, 'function', 'extraction.commitBatch handler must be a function');
   }
 
   // --- vector.apply calls bulkUpsert and bulkLink with correct payload ---
@@ -500,6 +520,7 @@ async function run() {
     assert.ok(manifest.transactions['recall.candidates'], 'must declare recall.candidates');
     assert.ok(manifest.transactions['graph.getHead'], 'must declare graph.getHead');
     assert.ok(manifest.transactions['graph.loadSnapshot'], 'must declare graph.loadSnapshot');
+    assert.ok(manifest.transactions['extraction.commitBatch'], 'must declare extraction.commitBatch');
     assert.strictEqual(manifest.transactions['vector.apply'].idempotency, 'required', 'vector.apply idempotency must be required');
     assert.strictEqual(manifest.transactions['recall.candidates'].idempotency, 'none', 'recall.candidates idempotency must be none');
     assert.strictEqual(manifest.transactions['recall.candidates'].riskLevel, 'low', 'recall.candidates riskLevel must be low');
@@ -552,6 +573,16 @@ async function run() {
     assert.ok(
       manifest.transactions['graph.commitDelta'].requiredResources.every(function (r) { return r.target === undefined; }),
       'graph.commitDelta must not pin a static database target',
+    );
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].idempotency, 'required', 'extraction.commitBatch idempotency must be required');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].riskLevel, 'high', 'extraction.commitBatch riskLevel must be high');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].version, '1', 'extraction.commitBatch version must be "1"');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].timeoutMs, 120000, 'extraction.commitBatch timeoutMs must be 120000');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].maxRequestBytes, 67108864, 'extraction.commitBatch maxRequestBytes must be 64 MiB');
+    assert.strictEqual(manifest.transactions['extraction.commitBatch'].maxResponseBytes, 67108864, 'extraction.commitBatch maxResponseBytes must be 64 MiB');
+    assert.ok(
+      manifest.transactions['extraction.commitBatch'].requiredResources.some(function (r) { return r.resource === 'sql.private'; }),
+      'extraction.commitBatch must require sql.private',
     );
     assert.ok(manifest.transactions['vector.manifest'].requiredResources.some(function (r) { return r.resource === 'trivium.private'; }), 'vector.manifest must require trivium.private');
     assert.ok(manifest.transactions['vector.apply'].requiredResources.some(function (r) { return r.resource === 'trivium.private'; }), 'vector.apply must require trivium.private');
@@ -1106,6 +1137,163 @@ async function run() {
       resultA.result.headHash,
       resultC.result.headHash,
       'same revision + same node/edge ids must produce the same headHash',
+    );
+  }
+
+  // ===========================================================================
+  // Phase 2: extraction.commitBatch server-side MVP
+  // ===========================================================================
+
+  function buildCommitBatchInput(overrides = {}) {
+    return {
+      chatId: 'chat-batch-1',
+      collectionId: 'col-batch',
+      baseRevision: 2,
+      batchId: 'batch-1',
+      idempotencyKey: 'idem-batch-1',
+      processedRange: { startFloor: 4, endFloor: 6 },
+      extraction: {
+        previousLastProcessedFloor: 3,
+        nextLastProcessedFloor: 6,
+        previousExtractionCount: 10,
+        nextExtractionCount: 11,
+      },
+      messageHashes: [
+        { floor: 4, messageHash: 'hash-floor-4', hashVersion: 2 },
+        { floor: 6, messageHash: 'hash-floor-6' },
+      ],
+      pruneMessageHashesFromFloor: 4,
+      delta: {
+        upsertNodes: [{ id: 'node-batch', type: 'event', sourceFloor: 6 }],
+        upsertEdges: [{ id: 'edge-batch', fromId: 'node-a', toId: 'node-batch', relation: 'mentions', sourceFloor: 6 }],
+        tombstones: [],
+        deleteNodeIds: [],
+        deleteEdgeIds: [],
+        runtimeMetaPatch: { authorityOwned: true, graphOperationalMode: 'authority-primary' },
+        countDelta: { nodeCount: 3, edgeCount: 2, tombstoneCount: 0 },
+      },
+      journal: { kind: 'extraction', ids: ['node-batch'], nested: { ok: true } },
+      options: { reason: 'batch-test', markSyncDirty: true, vectorDirty: true, dirtyFromFloor: 4 },
+      ...overrides,
+    };
+  }
+
+  console.log('[test:authority-companion-module] testing extraction.commitBatch success path');
+  {
+    const { calls, ctx } = createMockSqlTxCtx({
+      meta: { revision: 2, nodeCount: 2, edgeCount: 1, tombstoneCount: 0 },
+      nodes: [{ id: 'node-a' }, { id: 'node-batch' }],
+      edges: [{ id: 'edge-batch' }],
+      vectorDirtyRows: [{ dirty_generation: 4, clean_generation: 2 }],
+    });
+    ctx.transactionName = 'extraction.commitBatch';
+    const input = buildCommitBatchInput();
+    const result = await (await getHandler(mod, 'extraction.commitBatch'))(ctx, input, {});
+    assert.strictEqual(result.result.ok, true);
+    assert.strictEqual(result.result.accepted, true);
+    assert.strictEqual(result.result.replay, false);
+    assert.strictEqual(result.result.revision, 3);
+    assert.strictEqual(result.result.batchId, 'batch-1');
+    assert.strictEqual(result.result.vectorDirtyGeneration, 5);
+    assert.strictEqual(result.result.extraction.lastProcessedAssistantFloor, 6);
+    assert.strictEqual(result.result.extraction.extractionCount, 11);
+    assert.strictEqual(result.result.messageHashCount, 2);
+    const expectedHeadHash = expectedGraphHeadHash(['node-a', 'node-batch'], ['edge-batch'], 3);
+    assert.strictEqual(result.result.headHash, expectedHeadHash, 'commitBatch headHash must match graph.getHead semantics');
+    assert.strictEqual(calls.lock.length, 1, 'extraction.commitBatch must acquire one lock');
+    assert.strictEqual(calls.lock[0].scope, 'chat:chat-batch-1');
+    assert.strictEqual(calls.idempotencyRun.length, 1, 'extraction.commitBatch must use outer idempotency');
+    assert.strictEqual(calls.transaction.length, 1, 'extraction.commitBatch must use exactly one SQL transaction');
+    const stmts = calls.transaction[0].statements;
+    assert.ok(stmts.some((s) => s.statement.includes('INSERT INTO st_bme_graph_meta')), 'must include graph meta compatibility upsert');
+    assert.ok(stmts.some((s) => s.statement.includes('INSERT INTO st_bme_extraction_state')), 'must include extraction_state upsert');
+    assert.ok(stmts.some((s) => s.statement.includes('INSERT INTO st_bme_message_hashes')), 'must include message_hashes upsert');
+    assert.ok(stmts.some((s) => s.statement.includes('INSERT INTO st_bme_batch_journal')), 'must include batch_journal insert');
+    assert.ok(stmts.some((s) => s.statement.includes('INSERT INTO st_bme_vector_dirty_state')), 'must include vector_dirty_state upsert');
+    assert.ok(stmts.some((s) => s.statement.includes('DELETE FROM st_bme_message_hashes')), 'must include optional message hash prune');
+    const hashStmt = stmts.find((s) => s.statement.includes('INSERT INTO st_bme_message_hashes'));
+    assert.deepStrictEqual(hashStmt.params.slice(0, 7), ['chat-batch-1', 4, 'hash-floor-4', 2, 'batch-1', 3, hashStmt.params[6]]);
+    assert.deepStrictEqual(hashStmt.params.slice(7, 14), ['chat-batch-1', 6, 'hash-floor-6', 1, 'batch-1', 3, hashStmt.params[13]]);
+    const journalStmt = stmts.find((s) => s.statement.includes('INSERT INTO st_bme_batch_journal'));
+    assert.strictEqual(journalStmt.params[3], calls.idempotencyRun[0].fingerprint, 'journal stores request fingerprint');
+    assert.strictEqual(journalStmt.params[6], expectedHeadHash, 'journal head_hash must use graph head hash semantics');
+    assert.strictEqual(journalStmt.params[8], 6, 'source_floor_end must be stored');
+    assert.strictEqual(journalStmt.params[10], 6, 'last_processed_floor_after must be stored');
+    assert.strictEqual(journalStmt.params[12], 11, 'extraction_count_after must be stored');
+    assert.deepStrictEqual(JSON.parse(journalStmt.params[13]), input.journal, 'journal_json must roundtrip');
+  }
+
+  console.log('[test:authority-companion-module] testing extraction.commitBatch CAS conflict no transaction');
+  {
+    const { calls, ctx } = createMockSqlTxCtx({ meta: { revision: 9 } });
+    ctx.transactionName = 'extraction.commitBatch';
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(ctx, buildCommitBatchInput(), {}),
+      (error) => error && error.status === 409 && error.code === 'transaction_conflict',
+    );
+    assert.strictEqual(calls.transaction.length, 0, 'CAS conflict must not write a transaction');
+  }
+
+  console.log('[test:authority-companion-module] testing extraction.commitBatch durable idempotency replay and conflict');
+  {
+    const first = createMockSqlTxCtx({ meta: { revision: 2 } });
+    first.ctx.transactionName = 'extraction.commitBatch';
+    const input = buildCommitBatchInput();
+    const firstResult = await (await getHandler(mod, 'extraction.commitBatch'))(first.ctx, input, {});
+    const fp = first.calls.idempotencyRun[0].fingerprint;
+    const committedAtMs = Date.parse(firstResult.result.committedAt);
+    assert.ok(Number.isFinite(committedAtMs), 'initial committedAt must be an ISO date string');
+    const replay = createMockSqlTxCtx({
+      meta: { revision: 2 },
+      batchJournalRows: [{
+        batch_id: 'batch-1',
+        idempotency_key: 'idem-batch-1',
+        request_fingerprint: fp,
+        revision: 3,
+        head_hash: firstResult.result.headHash,
+        source_floor_start: 4,
+        source_floor_end: 6,
+        last_processed_floor_after: 6,
+        extraction_count_after: 11,
+        vector_dirty_generation: firstResult.result.vectorDirtyGeneration,
+        committed_at: committedAtMs,
+      }],
+    });
+    replay.ctx.transactionName = 'extraction.commitBatch';
+    const replayResult = await (await getHandler(mod, 'extraction.commitBatch'))(replay.ctx, input, {});
+    assert.strictEqual(replayResult.result.replay, true);
+    assert.strictEqual(replayResult.result.revision, 3);
+    assert.strictEqual(replayResult.result.headHash, firstResult.result.headHash, 'durable replay must return same headHash');
+    assert.strictEqual(replayResult.result.committedAt, firstResult.result.committedAt, 'durable replay committedAt must match ISO initial shape/value');
+    assert.strictEqual(replayResult.result.extraction.lastProcessedAssistantFloor, 6);
+    assert.strictEqual(replayResult.result.extraction.extractionCount, 11);
+    assert.strictEqual(replayResult.result.vectorDirtyGeneration, firstResult.result.vectorDirtyGeneration);
+    assert.strictEqual(replay.calls.transaction.length, 0, 'durable replay must not duplicate mutation');
+
+    const conflict = createMockSqlTxCtx({
+      meta: { revision: 2 },
+      batchJournalRows: [{ batch_id: 'batch-1', idempotency_key: 'idem-batch-1', request_fingerprint: 'different', revision: 3, head_hash: 'head', committed_at: 123 }],
+    });
+    conflict.ctx.transactionName = 'extraction.commitBatch';
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(conflict.ctx, input, {}),
+      (error) => error && error.status === 409 && (error.code === 'batch_conflict' || error.code === 'idempotency_conflict'),
+    );
+  }
+
+  console.log('[test:authority-companion-module] testing extraction.commitBatch validation and statement budget');
+  {
+    const { ctx } = createMockSqlTxCtx({ meta: { revision: 2 } });
+    ctx.transactionName = 'extraction.commitBatch';
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(ctx, { chatId: 'x', baseRevision: 0, delta: {}, journal: {} }, {}),
+      /requires batchId/,
+    );
+    const manyNodes = Array.from({ length: mod.CHUNK_ROWS_INSERT * mod.MAX_SQL_BATCH_STATEMENTS }, (_, i) => ({ id: 'node-over-' + i }));
+    await assert.rejects(
+      async () => await (await getHandler(mod, 'extraction.commitBatch'))(ctx, buildCommitBatchInput({ delta: { upsertNodes: manyNodes } }), {}),
+      (error) => error && error.code === 'validation_error',
+      'oversized statement budget must reject before SQL transaction',
     );
   }
 
