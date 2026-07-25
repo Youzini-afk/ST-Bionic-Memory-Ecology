@@ -134,7 +134,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
   const nativePersistDeltaInstallPromiseRef = createNativePersistDeltaInstallPromiseRef(runtime);
   const bmeIndexedDbLatestQueuedRevisionByChatId = runtime.bmeIndexedDbLatestQueuedRevisionByChatId;
   const bmeIndexedDbWriteInFlightByChatId = runtime.bmeIndexedDbWriteInFlightByChatId;
-  const updateGraphPersistenceState = runtime.updateGraphPersistenceState || ((patch = {}) => runtime.setGraphPersistenceState?.({ ...(runtime.getGraphPersistenceState?.() || {}), ...(patch || {}) }));
+  const updateGraphPersistenceStateRaw = runtime.updateGraphPersistenceState || ((patch = {}) => runtime.setGraphPersistenceState?.({ ...(runtime.getGraphPersistenceState?.() || {}), ...(patch || {}) }));
   const AUTHORITY_GRAPH_STORE_KIND = runtime.AUTHORITY_GRAPH_STORE_KIND;
   const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = runtime.BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET;
   const GRAPH_LOAD_STATES = runtime.GRAPH_LOAD_STATES;
@@ -221,19 +221,38 @@ export async function loadGraphFromIndexedDbImpl(runtime,
   const console = runtime.console || globalThis.console;
 
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  const commitMarker = syncCommitMarkerToPersistenceState(getContext());
+  const isLoadTargetActive = () => {
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId?.());
+    return !normalizedChatId || activeChatId === normalizedChatId;
+  };
+  const buildChatSwitchedResult = (reasonPrefix = "indexeddb") => ({
+    success: false,
+    loaded: false,
+    reason: `${String(reasonPrefix || "indexeddb")}-chat-switched`,
+    chatId: normalizedChatId,
+    attemptIndex,
+  });
+  const updateGraphPersistenceState = (patch = {}) =>
+    isLoadTargetActive()
+      ? updateGraphPersistenceStateRaw(patch)
+      : runtime.getGraphPersistenceState?.();
+  const commitMarker = isLoadTargetActive()
+    ? syncCommitMarkerToPersistenceState(getContext())
+    : null;
   const loadStartedAt = readLoadDiagnosticsNow();
   const recordLoadDiagnostics = (patch = {}) =>
-    updateLoadDiagnostics({
-      stage: "load-indexeddb",
-      source: String(source || "indexeddb-probe"),
-      chatId: normalizedChatId || "",
-      attemptIndex: Number.isFinite(Number(attemptIndex))
-        ? Math.max(0, Math.floor(Number(attemptIndex)))
-        : 0,
-      ...cloneRuntimeDebugValue(patch, {}),
-      totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
-    });
+    isLoadTargetActive()
+      ? updateLoadDiagnostics({
+          stage: "load-indexeddb",
+          source: String(source || "indexeddb-probe"),
+          chatId: normalizedChatId || "",
+          attemptIndex: Number.isFinite(Number(attemptIndex))
+            ? Math.max(0, Math.floor(Number(attemptIndex)))
+            : 0,
+          ...cloneRuntimeDebugValue(patch, {}),
+          totalMs: normalizeLoadDiagnosticsMs(readLoadDiagnosticsNow() - loadStartedAt),
+        })
+      : null;
   let exportSnapshotMs = 0;
   let exportProbeMs = 0;
   let preApplyMs = 0;
@@ -254,6 +273,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
     });
     return result;
   }
+  if (!isLoadTargetActive()) return buildChatSwitchedResult();
 
   let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
@@ -276,6 +296,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
       return result;
     }
     const db = await manager.getCurrentDb(normalizedChatId);
+    if (!isLoadTargetActive()) return buildChatSwitchedResult();
     localStore = resolveDbGraphStorePresentation(db);
 
     const identityRecoveryResult =
@@ -287,6 +308,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
           db,
         },
       );
+    if (!isLoadTargetActive()) return buildChatSwitchedResult(localStore.reasonPrefix);
 
     if (identityRecoveryResult?.migrated) {
       const recoveredStore = resolveSnapshotGraphStorePresentation(
@@ -385,6 +407,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
               db,
             },
         );
+    if (!isLoadTargetActive()) return buildChatSwitchedResult(localStore.reasonPrefix);
 
     if (migrationResult?.migrated) {
       const migratedStore = resolveSnapshotGraphStorePresentation(
@@ -490,6 +513,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
         exportSnapshotSource = "indexeddb-export";
       }
     }
+    if (!isLoadTargetActive()) return buildChatSwitchedResult(localStore.reasonPrefix);
     const shadowSnapshot = resolveCompatibleGraphShadowSnapshot(
       resolveCurrentChatIdentity(getContext()),
     );
@@ -556,6 +580,9 @@ export async function loadGraphFromIndexedDbImpl(runtime,
             shadowSnapshot,
             applyEmptyState,
           });
+        if (!isLoadTargetActive()) {
+          return buildChatSwitchedResult(snapshotStore.reasonPrefix);
+        }
         if (orphanMarkerResolution?.result) {
           if (
             !orphanMarkerResolution.orphanCleared &&
@@ -761,6 +788,9 @@ export async function loadGraphFromIndexedDbImpl(runtime,
           ? "indexeddb-probe+indexeddb-export"
           : exportSnapshotSource || "indexeddb-export";
     }
+    if (!isLoadTargetActive()) {
+      return buildChatSwitchedResult(snapshotStore.reasonPrefix);
+    }
     cacheIndexedDbSnapshot(normalizedChatId, snapshot);
 
     const nativeHydrateRequested = currentSettings.loadUseNativeHydrate === true;
@@ -812,6 +842,10 @@ export async function loadGraphFromIndexedDbImpl(runtime,
           throw error;
         }
       }
+    }
+
+    if (!isLoadTargetActive()) {
+      return buildChatSwitchedResult(snapshotStore.reasonPrefix);
     }
 
     preApplyMs = readLoadDiagnosticsNow() - loadStartedAt;
@@ -897,6 +931,9 @@ export async function loadGraphFromIndexedDbImpl(runtime,
     });
     return loadResult;
   } catch (error) {
+    if (!isLoadTargetActive()) {
+      return buildChatSwitchedResult(localStore.reasonPrefix);
+    }
     console.warn(`[ST-BME] ${localStore.statusLabel} 读取失败，回退 metadata:`, error);
     updateGraphPersistenceState({
       storagePrimary: localStore.storagePrimary,
@@ -1477,7 +1514,7 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
   const nativePersistDeltaInstallPromiseRef = createNativePersistDeltaInstallPromiseRef(runtime);
   const bmeIndexedDbLatestQueuedRevisionByChatId = runtime.bmeIndexedDbLatestQueuedRevisionByChatId;
   const bmeIndexedDbWriteInFlightByChatId = runtime.bmeIndexedDbWriteInFlightByChatId;
-  const updateGraphPersistenceState = runtime.updateGraphPersistenceState || ((patch = {}) => runtime.setGraphPersistenceState?.({ ...(runtime.getGraphPersistenceState?.() || {}), ...(patch || {}) }));
+  const updateGraphPersistenceStateRaw = runtime.updateGraphPersistenceState || ((patch = {}) => runtime.setGraphPersistenceState?.({ ...(runtime.getGraphPersistenceState?.() || {}), ...(patch || {}) }));
   const AUTHORITY_GRAPH_STORE_KIND = runtime.AUTHORITY_GRAPH_STORE_KIND;
   const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = runtime.BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET;
   const GRAPH_LOAD_STATES = runtime.GRAPH_LOAD_STATES;
@@ -1560,12 +1597,28 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
   const stampGraphPersistenceMeta = runtime.stampGraphPersistenceMeta;
   const syncCommitMarkerToPersistenceState = runtime.syncCommitMarkerToPersistenceState;
   const updateLoadDiagnostics = runtime.updateLoadDiagnostics;
-  const updatePersistDeltaDiagnostics = runtime.updatePersistDeltaDiagnostics;
+  const updatePersistDeltaDiagnosticsRaw = runtime.updatePersistDeltaDiagnostics;
   const console = runtime.console || globalThis.console;
 
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const isPersistTargetActive = () => {
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId?.());
+    return !normalizedChatId || activeChatId === normalizedChatId;
+  };
+  const updateGraphPersistenceState = (patch = {}) =>
+    isPersistTargetActive()
+      ? updateGraphPersistenceStateRaw(patch)
+      : runtime.getGraphPersistenceState?.();
+  const updatePersistDeltaDiagnostics = (patch = {}) =>
+    isPersistTargetActive()
+      ? updatePersistDeltaDiagnosticsRaw?.(patch)
+      : null;
+  const recordLocalPersistEarlyFailureIfActive = (...args) =>
+    isPersistTargetActive()
+      ? recordLocalPersistEarlyFailure?.(...args)
+      : null;
   if (!normalizedChatId || (!graph && !persistDelta)) {
-    recordLocalPersistEarlyFailure("indexeddb-missing-chat-graph-or-delta", {
+    recordLocalPersistEarlyFailureIfActive("indexeddb-missing-chat-graph-or-delta", {
       chatId: normalizedChatId,
       revision,
     });
@@ -1583,7 +1636,7 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
   try {
     const manager = ensureBmeChatManager();
     if (!manager) {
-      recordLocalPersistEarlyFailure("indexeddb-manager-unavailable", {
+      recordLocalPersistEarlyFailureIfActive("indexeddb-manager-unavailable", {
         chatId: normalizedChatId,
         revision,
       });
@@ -1596,7 +1649,7 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
     }
     db = await manager.getCurrentDb(normalizedChatId);
     if (!db) {
-      recordLocalPersistEarlyFailure("indexeddb-db-unavailable", {
+      recordLocalPersistEarlyFailureIfActive("indexeddb-db-unavailable", {
         chatId: normalizedChatId,
         revision,
       });
@@ -2510,56 +2563,58 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
       },
       persistDelta: persistDeltaDiagnostics,
     });
-    clearPendingGraphPersistRetry();
-    if (
-      (graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
-        (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
-          hasMeaningfulRuntimeGraphForChat(normalizedChatId, currentIdentity))) &&
-      (areChatIdsEquivalentForResolvedIdentity(
-        normalizedChatId,
-        graphPersistenceState.chatId || getCurrentChatId(),
-        currentIdentity,
-      ) ||
-        areChatIdsEquivalentForResolvedIdentity(
-          graphPersistenceState.chatId || getCurrentChatId(),
+    if (isPersistTargetActive()) {
+      clearPendingGraphPersistRetry();
+      if (
+        (graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
+          (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+            hasMeaningfulRuntimeGraphForChat(normalizedChatId, currentIdentity))) &&
+        (areChatIdsEquivalentForResolvedIdentity(
           normalizedChatId,
+          graphPersistenceState.chatId || getCurrentChatId(),
           currentIdentity,
-        ))
-    ) {
-      applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
-        chatId: normalizedChatId,
-        reason:
-          graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED
-            ? `shadow-promoted:${String(reason || "graph-save")}`
-            : `local-store-confirmed:${String(reason || "graph-save")}`,
-        revision: normalizeIndexedDbRevision(
-          commitResult?.revision,
-          requestedRevision,
-        ),
-        lastPersistedRevision: normalizeIndexedDbRevision(
-          commitResult?.revision,
-          requestedRevision,
-        ),
-        queuedPersistRevision: 0,
-        queuedPersistChatId: "",
-        pendingPersist: false,
-        shadowSnapshotUsed: true,
-        shadowSnapshotRevision: Math.max(
-          Number(graphPersistenceState.shadowSnapshotRevision || 0),
-          normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
-        ),
-        shadowSnapshotUpdatedAt: String(
-          graphPersistenceState.shadowSnapshotUpdatedAt || "",
-        ),
-        shadowSnapshotReason: String(
-          graphPersistenceState.shadowSnapshotReason ||
-            "shadow-restore-promoted",
-        ),
-        dbReady: true,
-        writesBlocked: false,
-      });
+        ) ||
+          areChatIdsEquivalentForResolvedIdentity(
+            graphPersistenceState.chatId || getCurrentChatId(),
+            normalizedChatId,
+            currentIdentity,
+          ))
+      ) {
+        applyGraphLoadState(GRAPH_LOAD_STATES.LOADED, {
+          chatId: normalizedChatId,
+          reason:
+            graphPersistenceState.loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED
+              ? `shadow-promoted:${String(reason || "graph-save")}`
+              : `local-store-confirmed:${String(reason || "graph-save")}`,
+          revision: normalizeIndexedDbRevision(
+            commitResult?.revision,
+            requestedRevision,
+          ),
+          lastPersistedRevision: normalizeIndexedDbRevision(
+            commitResult?.revision,
+            requestedRevision,
+          ),
+          queuedPersistRevision: 0,
+          queuedPersistChatId: "",
+          pendingPersist: false,
+          shadowSnapshotUsed: true,
+          shadowSnapshotRevision: Math.max(
+            Number(graphPersistenceState.shadowSnapshotRevision || 0),
+            normalizeIndexedDbRevision(commitResult?.revision, requestedRevision),
+          ),
+          shadowSnapshotUpdatedAt: String(
+            graphPersistenceState.shadowSnapshotUpdatedAt || "",
+          ),
+          shadowSnapshotReason: String(
+            graphPersistenceState.shadowSnapshotReason ||
+              "shadow-restore-promoted",
+          ),
+          dbReady: true,
+          writesBlocked: false,
+        });
+      }
+      rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
     }
-    rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
     return {
       saved: true,

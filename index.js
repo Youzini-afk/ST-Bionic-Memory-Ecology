@@ -6874,6 +6874,21 @@ function applyShadowSnapshotToRuntime(
       attemptIndex,
     };
   }
+  const activeIdentity = resolveCurrentChatIdentity(getContext());
+  if (
+    normalizedChatId &&
+    normalizeChatIdCandidate(activeIdentity.chatId) &&
+    !doesChatIdMatchResolvedGraphIdentity(normalizedChatId, activeIdentity)
+  ) {
+    return {
+      success: false,
+      loaded: false,
+      loadState: graphPersistenceState.loadState,
+      reason: "shadow-chat-switched",
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
 
   let shadowGraph = null;
   try {
@@ -10698,6 +10713,19 @@ function applyIndexedDbEmptyToRuntime(
       attemptIndex,
     };
   }
+  const activeIdentity = resolveCurrentChatIdentity(getContext());
+  if (
+    normalizeChatIdCandidate(activeIdentity.chatId) &&
+    !doesChatIdMatchResolvedGraphIdentity(normalizedChatId, activeIdentity)
+  ) {
+    return {
+      success: false,
+      loaded: false,
+      reason: "indexeddb-chat-switched",
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
 
   currentGraph = normalizeGraphRuntimeState(
     createEmptyGraph(),
@@ -11019,6 +11047,20 @@ function applyIndexedDbSnapshotToRuntime(
   } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const activeIdentity = resolveCurrentChatIdentity(getContext());
+  if (
+    normalizedChatId &&
+    normalizeChatIdCandidate(activeIdentity.chatId) &&
+    !doesChatIdMatchResolvedGraphIdentity(normalizedChatId, activeIdentity)
+  ) {
+    return {
+      success: false,
+      loaded: false,
+      reason: `${reasonPrefix}-chat-switched`,
+      chatId: normalizedChatId,
+      attemptIndex,
+    };
+  }
   syncCommitMarkerToPersistenceState(getContext());
   const loadStartedAt = readLoadDiagnosticsNow();
   const recordLoadDiagnostics = (patch = {}) =>
@@ -11052,7 +11094,6 @@ function applyIndexedDbSnapshotToRuntime(
     });
     return result;
   }
-
   const revision = Math.max(
     1,
     normalizeIndexedDbRevision(snapshot?.meta?.revision),
@@ -13144,19 +13185,30 @@ async function recordGraphMutation({
   extractionCountBefore = extractionCount,
 } = {}) {
   ensureCurrentGraphRuntimeState();
+  const mutationGraph = currentGraph;
+  const mutationChatId = normalizeChatIdCandidate(getCurrentChatId());
+  const mutationLastProcessedFloor = getLastProcessedAssistantFloor();
+  const mutationRevision =
+    Math.max(
+      normalizeIndexedDbRevision(graphPersistenceState.revision),
+      normalizeIndexedDbRevision(getGraphPersistedRevision(mutationGraph)),
+    ) + 1;
   const vectorSync = await syncVectorState({
     force: true,
     purge: isBackendVectorConfig(getEmbeddingConfig()) && !syncRange,
     range: syncRange,
     signal,
   });
-  const afterSnapshot = cloneGraphSnapshot(currentGraph);
+  const contextChanged =
+    currentGraph !== mutationGraph ||
+    normalizeChatIdCandidate(getCurrentChatId()) !== mutationChatId;
+  const afterSnapshot = cloneGraphSnapshot(mutationGraph);
   const effectiveRange = Array.isArray(processedRange)
     ? processedRange
-    : [getLastProcessedAssistantFloor(), getLastProcessedAssistantFloor()];
+    : [mutationLastProcessedFloor, mutationLastProcessedFloor];
 
   appendBatchJournal(
-    currentGraph,
+    mutationGraph,
     createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
       processedRange: effectiveRange,
       postProcessArtifacts: computePostProcessArtifacts(
@@ -13168,6 +13220,23 @@ async function recordGraphMutation({
       extractionCountBefore,
     }),
   );
+  if (contextChanged) {
+    const recoverable = maybeCaptureGraphShadowSnapshot(
+      "graph-mutation-context-changed",
+      {
+        graph: mutationGraph,
+        chatId: mutationChatId,
+        revision: mutationRevision,
+      },
+    );
+    return {
+      ...(vectorSync && typeof vectorSync === "object" ? vectorSync : {}),
+      aborted: true,
+      stale: true,
+      recoverable,
+      error: vectorSync?.error || "graph-mutation-context-changed",
+    };
+  }
   saveGraphToChat({ reason: "record-graph-mutation" });
   return vectorSync;
 }
@@ -13921,7 +13990,20 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
           "running",
           { syncRuntime: false },
         );
-        const result = await syncVectorState({ range: scheduledTask.range });
+        const result = await syncVectorState({
+          range: scheduledTask.range,
+          expectedChatId: scheduledTask.chatId,
+        });
+        const completedChatId = normalizeChatIdCandidate(getCurrentChatId());
+        if (
+          result?.stale ||
+          backgroundVectorSyncCoalescer.isStale(
+            scheduledTask,
+            completedChatId,
+          )
+        ) {
+          return { skipped: true, reason: "stale-background-vector-sync" };
+        }
         if (result?.aborted) {
           throw createAbortError(result.error || "后台向量同步已终止");
         }
@@ -13971,12 +14053,23 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
     };
   }
   const scheduledSettings = clonePlanCommitValue(settings, settings) || settings;
+  const scheduledChatId = normalizeChatIdCandidate(getCurrentChatId());
+  const scheduledGraph = currentGraph;
+  const scheduledExtractionCount = extractionCount;
+  const isScheduledContextActive = () =>
+    currentGraph === scheduledGraph &&
+    normalizeChatIdCandidate(getCurrentChatId()) === scheduledChatId;
+  const staleResult = () => ({
+    skipped: true,
+    reason: "stale-background-post-process",
+  });
   const mode = resolveMaintenancePostProcessConcurrency(scheduledSettings).mode;
   const taskId = taskList.map((task) => String(task.id || task.type)).join("+");
   return enqueueBackgroundMaintenanceTask(
     "post-process",
     async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
+      if (!isScheduledContextActive()) return staleResult();
       ensureCurrentGraphRuntimeState();
       const details = [];
       let changed = false;
@@ -13996,18 +14089,21 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
             : {};
         if (type === "summary") {
           const result = await runSummaryPostProcessPlanCommit({
-            graph: currentGraph,
+            graph: scheduledGraph,
             chat: Array.isArray(payload.chat)
               ? payload.chat
               : typeof getContext === "function" && Array.isArray(getContext()?.chat)
                 ? getContext().chat
                 : [],
             settings: scheduledSettings,
-            currentExtractionCount: Number(payload.currentExtractionCount || 0) || extractionCount,
+            currentExtractionCount:
+              Number(payload.currentExtractionCount || 0) ||
+              scheduledExtractionCount,
             currentAssistantFloor: Number(payload.currentAssistantFloor ?? -1),
             currentRange: Array.isArray(payload.currentRange) ? payload.currentRange : null,
             currentNodeIds: Array.isArray(payload.currentNodeIds) ? payload.currentNodeIds : [],
           });
+          if (!isScheduledContextActive()) return staleResult();
           const taskChanged =
             Boolean(result?.smallSummary?.created) ||
             Number(result?.rollup?.createdCount || 0) > 0 ||
@@ -14016,12 +14112,13 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
           details.push({ type, changed: taskChanged, result });
         } else if (type === "reflection") {
           const result = await runReflectionPostProcessPlanCommit({
-            graph: currentGraph,
+            graph: scheduledGraph,
             currentSeq: Number(payload.currentSeq ?? -1),
             schema: getSchema(),
             embeddingConfig: getEmbeddingConfig(),
             settings: scheduledSettings,
           });
+          if (!isScheduledContextActive()) return staleResult();
           const taskChanged =
             Boolean(result?.reflectionId) || hasPlanCommitChanges(result?.planCommit);
           changed = changed || taskChanged;
@@ -14029,16 +14126,17 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
         } else if (type === "compression") {
           const beforeSnapshot =
             typeof cloneGraphSnapshot === "function"
-              ? cloneGraphSnapshot(currentGraph)
-              : clonePlanCommitValue(currentGraph, currentGraph);
+              ? cloneGraphSnapshot(scheduledGraph)
+              : clonePlanCommitValue(scheduledGraph, scheduledGraph);
           const result = await runCompressionPostProcessPlanCommit({
-            graph: currentGraph,
+            graph: scheduledGraph,
             schema: getSchema(),
             embeddingConfig: getEmbeddingConfig(),
             force: Boolean(payload.force),
             customPrompt: payload.customPrompt ?? undefined,
             settings: scheduledSettings,
           });
+          if (!isScheduledContextActive()) return staleResult();
           const taskChanged =
             Number(result?.created || 0) > 0 ||
             Number(result?.archived || 0) > 0 ||
@@ -14061,6 +14159,7 @@ function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
           details.push({ type, changed: taskChanged, result });
         }
       }
+      if (!isScheduledContextActive()) return staleResult();
       if (changed) {
         saveGraphToChat({
           reason: `background-post-process:${taskList.map((task) => task.type).join("+")}`,
@@ -14145,6 +14244,7 @@ async function ensureVectorReadyIfNeeded(
     signal,
   });
 
+  if (result?.aborted) return result;
   if (result?.error) {
     currentGraph.vectorIndexState.lastWarning = result.error;
     saveGraphToChat({ reason: "vector-auto-repair-failed" });
@@ -15073,7 +15173,32 @@ function getCurrentChatSeq(context = getContext()) {
   return currentGraph?.lastProcessedSeq ?? 0;
 }
 
-async function handleExtractionSuccess(result, endIdx, settings, signal = undefined, status = undefined, postProcessContext = null) {
+async function handleExtractionSuccess(
+  result,
+  endIdx,
+  settings,
+  signal = undefined,
+  status = undefined,
+  postProcessContext = null,
+  taskContext = null,
+) {
+  const taskGraph = taskContext?.graph || currentGraph;
+  const taskChatId = normalizeChatIdCandidate(
+    taskContext?.chatId || getCurrentChatId(),
+  );
+  const taskHostContext = getContext();
+  const isTaskContextActive = () =>
+    currentGraph === taskGraph &&
+    (!taskChatId ||
+      normalizeChatIdCandidate(getCurrentChatId()) === taskChatId);
+  const syncTaskVectorState = (options = {}) =>
+    isTaskContextActive()
+      ? syncVectorState({ ...options, expectedChatId: taskChatId })
+      : Promise.resolve({
+          aborted: true,
+          stale: true,
+          error: "extraction-context-changed",
+        });
   return await handleExtractionSuccessController(
     {
       // local fns
@@ -15085,7 +15210,7 @@ async function handleExtractionSuccess(result, endIdx, settings, signal = undefi
       evaluateAutoConsolidationGate,
       evaluateAutoCompressionSchedule,
       finalizeBatchStatus,
-      getContext,
+      getContext: () => taskHostContext,
       getEmbeddingConfig,
       getSchema,
       getSummaryStageLabel,
@@ -15098,18 +15223,21 @@ async function handleExtractionSuccess(result, endIdx, settings, signal = undefi
       runCompressionPostProcessPlanCommit,
       runReflectionPostProcessPlanCommit,
       setBatchStageOutcome,
-      setLastExtractionStatus,
-      setLastVectorStatus,
+      setLastExtractionStatus: (...args) =>
+        isTaskContextActive() ? setLastExtractionStatus(...args) : null,
+      setLastVectorStatus: (...args) =>
+        isTaskContextActive() ? setLastVectorStatus(...args) : null,
       shouldDeferExtractionMaintenance,
       shouldDeferExtractionVectorSync,
       sleepCycle,
-      syncVectorState,
+      syncVectorState: syncTaskVectorState,
       throwIfAborted,
       updateLastExtractedItems,
       // imported/local maintenance fns
       analyzeAutoConsolidationGate,
       cloneMaintenanceSnapshot: cloneGraphSnapshot,
-      persistMaintenanceAction: recordMaintenanceAction,
+      persistMaintenanceAction: (...args) =>
+        isTaskContextActive() ? recordMaintenanceAction(...args) : null,
       runSummaryPostProcess: runSummaryPostProcessPlanCommit,
       summarizeMaintenance: buildMaintenanceSummary,
       // state accessors
@@ -15441,12 +15569,14 @@ async function executeExtractionBatch({
       cloneGraphSnapshot,
       computePostProcessArtifacts,
       console,
+      createAbortError,
       createBatchJournalEntry,
       createBatchStatusSkeleton,
       ensureCurrentGraphRuntimeState,
       extractMemories,
       finalizeBatchStatus,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => taskGraph,
+      getCurrentChatId,
       getEmbeddingConfig,
       getExtractionCount: () => extractionCount,
       getLastProcessedAssistantFloor,

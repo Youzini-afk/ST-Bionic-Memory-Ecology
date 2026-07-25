@@ -959,7 +959,7 @@ export async function persistExtractionBatchResultImpl(runtime, {
   const shouldUseAuthorityGraphStore = runtime.shouldUseAuthorityGraphStore;
   const stampGraphPersistenceMeta = runtime.stampGraphPersistenceMeta;
   const syncCommitMarkerToPersistenceState = runtime.syncCommitMarkerToPersistenceState;
-  const updateGraphPersistenceState = runtime.updateGraphPersistenceState;
+  const updateGraphPersistenceStateRaw = runtime.updateGraphPersistenceState;
   const writeAuthorityLukerCheckpointBlob = runtime.writeAuthorityLukerCheckpointBlob;
   const writeGraphShadowSnapshot = runtime.writeGraphShadowSnapshot;
   const console = runtime.console || globalThis.console;
@@ -1001,6 +1001,15 @@ export async function persistExtractionBatchResultImpl(runtime, {
       storageTier: "none",
     });
   }
+  const isPersistTargetActive = () => {
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId?.());
+    const normalizedChatId = normalizeChatIdCandidate(chatId);
+    return !normalizedChatId || activeChatId === normalizedChatId;
+  };
+  const updateGraphPersistenceState = (patch = {}) =>
+    isPersistTargetActive()
+      ? updateGraphPersistenceStateRaw?.(patch)
+      : runtime.getGraphPersistenceState?.();
 
   const revision = allocateRequestedPersistRevision(0, persistGraph);
   let authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState, persistSnapshot);
@@ -1137,13 +1146,24 @@ export async function persistExtractionBatchResultImpl(runtime, {
     }
   }
 
-  const queuedResult = queueGraphPersist(`${reason}:pending`, revision, {
-    immediate: true,
-    graph: persistGraph,
-    chatId,
-    captureShadow: !authorityLocked && recoverableTier === "none",
-    recoverableTier,
-  });
+  const queuedResult = isPersistTargetActive()
+    ? queueGraphPersist(`${reason}:pending`, revision, {
+        immediate: true,
+        graph: persistGraph,
+        chatId,
+        captureShadow: !authorityLocked && recoverableTier === "none",
+        recoverableTier,
+      })
+    : buildGraphPersistResult({
+        saved: false,
+        queued: false,
+        blocked: true,
+        accepted: false,
+        recoverable: recoverableTier !== "none",
+        reason: `${reason}:chat-switched`,
+        revision,
+        storageTier: recoverableTier,
+      });
   updateGraphPersistenceState({
     pendingPersist: true,
     authorityOwned: authorityLocked ? true : graphPersistenceState.authorityOwned,

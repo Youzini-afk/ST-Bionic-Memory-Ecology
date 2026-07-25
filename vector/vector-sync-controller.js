@@ -28,6 +28,7 @@
  * @param {boolean} [options.purge]
  * @param {{start: number, end: number}|null} [options.range]
  * @param {AbortSignal} [options.signal]
+ * @param {string} [options.expectedChatId]
  */
 export async function syncVectorStateController(runtime, options = {}) {
   const {
@@ -50,11 +51,35 @@ export async function syncVectorStateController(runtime, options = {}) {
   // rebuild controllers.
   const setLastVectorStatus = (...args) => runtime.setLastVectorStatus(...args);
 
-  const { force = false, purge = false, range = null, signal = undefined } =
-    options || {};
+  const {
+    force = false,
+    purge = false,
+    range = null,
+    signal = undefined,
+    expectedChatId = "",
+  } = options || {};
 
   ensureCurrentGraphRuntimeState();
   const currentGraph = getCurrentGraph();
+  const syncChatId = String(
+    expectedChatId || resolveOperationalChatId(getContext(), currentGraph) || "",
+  ).trim();
+  const isSyncContextCurrent = () => {
+    const activeGraph = getCurrentGraph();
+    const activeChatId = String(
+      resolveOperationalChatId(getContext(), activeGraph) || "",
+    ).trim();
+    return (
+      activeGraph === currentGraph &&
+      (!syncChatId || !activeChatId || activeChatId === syncChatId)
+    );
+  };
+  const buildStaleResult = (result = {}) => ({
+    ...(result && typeof result === "object" ? result : {}),
+    aborted: true,
+    stale: true,
+    error: "vector-sync-context-changed",
+  });
 
   const scopeLabel =
     range && Number.isFinite(range.start) && Number.isFinite(range.end)
@@ -85,7 +110,7 @@ export async function syncVectorStateController(runtime, options = {}) {
 
   try {
     const result = await syncGraphVectorIndex(currentGraph, config, {
-      chatId: resolveOperationalChatId(getContext(), currentGraph),
+      chatId: syncChatId,
       force,
       purge,
       range,
@@ -95,6 +120,19 @@ export async function syncVectorStateController(runtime, options = {}) {
           ? () => getRequestHeaders()
           : null,
     });
+    if (signal?.aborted) {
+      return {
+        ...(result && typeof result === "object" ? result : {}),
+        aborted: true,
+        error:
+          signal.reason instanceof Error
+            ? signal.reason.message
+            : "vector-sync-aborted",
+      };
+    }
+    if (!isSyncContextCurrent()) {
+      return buildStaleResult(result);
+    }
     if (result?.error) {
       setLastVectorStatus("向量待修复", result.error, "warning", {
         syncRuntime: true,
@@ -109,6 +147,12 @@ export async function syncVectorStateController(runtime, options = {}) {
     );
     return result;
   } catch (error) {
+    if (!isSyncContextCurrent()) {
+      return buildStaleResult({
+        insertedHashes: [],
+        stats: getVectorIndexStats(currentGraph),
+      });
+    }
     if (isAbortError(error)) {
       setLastVectorStatus("向量已终止", scopeLabel, "warning", {
         syncRuntime: true,

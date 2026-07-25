@@ -11,9 +11,11 @@ function createRuntime(persistResult) {
   const graph = {
     nodes: [],
     edges: [],
-    historyState: {},
+    historyState: { chatId: "chat-test" },
     batchJournal: [],
   };
+  let activeGraph = graph;
+  let activeChatId = "chat-test";
   let processedHistoryUpdates = 0;
   let persistedGraphSnapshot = null;
   let lastPersistDeltaOptions = null;
@@ -25,7 +27,19 @@ function createRuntime(persistResult) {
     ensureCurrentGraphRuntimeState() {},
     throwIfAborted() {},
     getCurrentGraph() {
-      return graph;
+      return activeGraph;
+    },
+    getCurrentChatId() {
+      return activeChatId;
+    },
+    setActiveContext(nextGraph, nextChatId) {
+      activeGraph = nextGraph;
+      activeChatId = String(nextChatId || "");
+    },
+    createAbortError(message) {
+      const error = new Error(message);
+      error.name = "AbortError";
+      return error;
     },
     getLastProcessedAssistantFloor() {
       return 4;
@@ -316,6 +330,81 @@ function createRuntime(persistResult) {
 
   assert.equal(result.success, true);
   assert.equal(runtime.lastPersistDeltaOptions.useNativeDelta, false);
+}
+
+{
+  let releaseExtraction;
+  let notifyStarted;
+  let handleSuccessCalls = 0;
+  let persistCalls = 0;
+  let extractionStatusCalls = 0;
+  let reportStreamProgress = null;
+  const started = new Promise((resolve) => {
+    notifyStarted = resolve;
+  });
+  const runtime = createRuntime({
+    saved: true,
+    queued: false,
+    blocked: false,
+    accepted: true,
+    reason: "indexeddb",
+    revision: 11,
+    saveMode: "indexeddb",
+    storageTier: "indexeddb",
+  });
+  runtime.extractMemories = async ({ onStreamProgress }) => {
+    reportStreamProgress = onStreamProgress;
+    notifyStarted();
+    return await new Promise((resolve) => {
+      releaseExtraction = resolve;
+    });
+  };
+  runtime.handleExtractionSuccess = async () => {
+    handleSuccessCalls += 1;
+    return {};
+  };
+  runtime.persistExtractionBatchResult = async () => {
+    persistCalls += 1;
+    return { accepted: true, saved: true };
+  };
+  runtime.setLastExtractionStatus = () => {
+    extractionStatusCalls += 1;
+  };
+
+  const pending = executeExtractionBatchController(runtime, {
+    chat: [{ is_user: false, mes: "chat A" }],
+    startIdx: 5,
+    endIdx: 5,
+    settings: {},
+  });
+  await started;
+  const graphB = {
+    nodes: [],
+    edges: [],
+    historyState: { chatId: "chat-b" },
+    batchJournal: [],
+  };
+  runtime.setActiveContext(graphB, "chat-b");
+  reportStreamProgress({ previewText: "late A stream", receivedChars: 13 });
+  releaseExtraction({
+    success: true,
+    newNodes: 1,
+    updatedNodes: 0,
+    newEdges: 0,
+    newNodeIds: ["late-a"],
+    processedRange: [5, 5],
+  });
+
+  await assert.rejects(
+    pending,
+    (error) =>
+      error?.name === "AbortError" &&
+      error?.message === "extraction-context-changed",
+  );
+  assert.equal(handleSuccessCalls, 0);
+  assert.equal(persistCalls, 0);
+  assert.equal(extractionStatusCalls, 0);
+  assert.equal(graphB.historyState.lastBatchStatus, undefined);
 }
 
 console.log("extraction-persistence-gating tests passed");

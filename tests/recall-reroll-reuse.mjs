@@ -1103,4 +1103,66 @@ assert.equal(
 assert.equal(assistantTailResult.reason, "persisted-user-floor-reused");
 
 console.log("  ✓ runRecallController reuses user-floor record below assistant tail");
+
+let releaseLateRecall;
+let notifyLateRecallStarted;
+let lateRecallApplyCalls = 0;
+const lateRecallStarted = new Promise((resolve) => {
+  notifyLateRecallStarted = resolve;
+});
+const lateRecallChatA = [{ is_user: true, mes: "chat A recall" }];
+const lateRecallChatB = [{ is_user: true, mes: "chat B recall" }];
+const lateRecallGraphA = { nodes: [], edges: [] };
+const lateRecallGraphB = { nodes: [], edges: [] };
+let activeRecallContext = { chat: lateRecallChatA, chatId: "chat-a" };
+let activeRecallGraph = lateRecallGraphA;
+const lateRecallStatuses = [];
+const lateRecallRuntime = {
+  ...rerollRuntime,
+  getContext: () => activeRecallContext,
+  getCurrentGraph: () => activeRecallGraph,
+  setLastRecallStatus: (label) => {
+    lateRecallStatuses.push(String(label || ""));
+  },
+  createAbortError(message) {
+    const error = new Error(message);
+    error.name = "AbortError";
+    return error;
+  },
+  isAbortError: (error) => error?.name === "AbortError",
+  retrieve: async () => {
+    notifyLateRecallStarted();
+    return await new Promise((resolve) => {
+      releaseLateRecall = resolve;
+    });
+  },
+  applyRecallInjection: () => {
+    lateRecallApplyCalls += 1;
+    return { injectionText: "late-a", applied: true };
+  },
+};
+const lateRecallPending = runRecallController(lateRecallRuntime, {
+  forceFreshRecall: true,
+  overrideUserMessage: "chat A recall",
+  targetUserMessageIndex: 0,
+  overrideSource: "chat-last-user",
+  overrideSourceLabel: "历史最后用户楼层",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+await lateRecallStarted;
+activeRecallContext = { chat: lateRecallChatB, chatId: "chat-b" };
+activeRecallGraph = lateRecallGraphB;
+const statusCountAtChatSwitch = lateRecallStatuses.length;
+releaseLateRecall({
+  injectionText: "late-a",
+  selectedNodeIds: ["node-late-a"],
+});
+const lateRecallResult = await lateRecallPending;
+assert.equal(lateRecallResult.status, "aborted");
+assert.equal(lateRecallResult.reason, "recall-context-changed");
+assert.equal(lateRecallApplyCalls, 0);
+assert.equal(lateRecallStatuses.length, statusCountAtChatSwitch);
+
+console.log("  ✓ late recall completion cannot inject into a newly selected chat");
 console.log("recall-reroll-reuse tests passed");

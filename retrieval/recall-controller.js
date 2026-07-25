@@ -510,6 +510,17 @@ export async function runRecallController(runtime, options = {}) {
     });
   }
 
+  const recallChatId = String(context?.chatId || "").trim();
+  const recallGraph = runtime.getCurrentGraph();
+  const isRecallContextCurrent = () => {
+    const activeContext = runtime.getContext();
+    const activeChatId = String(activeContext?.chatId || "").trim();
+    if (recallChatId && activeChatId) return activeChatId === recallChatId;
+    return (
+      activeContext?.chat === chat || runtime.getCurrentGraph() === recallGraph
+    );
+  };
+
   const recentContextMessageLimit = runtime.clampInt(
     settings.recallLlmContextMessages,
     4,
@@ -663,6 +674,12 @@ export async function runRecallController(runtime, options = {}) {
     }
   }
 
+  if (!isRecallContextCurrent()) {
+    return runtime.createRecallRunResult("aborted", {
+      reason: "recall-context-changed",
+    });
+  }
+
   const runId = runtime.nextRecallRunSequence();
   let recallPromise = null;
   recallPromise = (async () => {
@@ -689,6 +706,9 @@ export async function runRecallController(runtime, options = {}) {
 
     try {
       await runtime.ensureVectorReadyIfNeeded("pre-recall", recallSignal);
+      if (recallSignal.aborted || !isRecallContextCurrent()) {
+        throw runtime.createAbortError("recall-context-changed");
+      }
 
       debugLog("[ST-BME] 开始召回", {
         source: recallInput.source,
@@ -723,20 +743,25 @@ export async function runRecallController(runtime, options = {}) {
         schema: runtime.getSchema(),
         signal: recallSignal,
         settings,
-          onStreamProgress: ({ previewText, receivedChars }) => {
-            const preview =
-              previewText?.length > 60
-                ? "…" + previewText.slice(-60)
-                : previewText || "";
-            runtime.setLastRecallStatus(
-              "AI 生成中",
-              `${preview}  [${receivedChars}字]`,
-              "running",
-              { syncRuntime: false, noticeMarquee: true },
+        onStreamProgress: ({ previewText, receivedChars }) => {
+          if (recallSignal.aborted || !isRecallContextCurrent()) return;
+          const preview =
+            previewText?.length > 60
+              ? "…" + previewText.slice(-60)
+              : previewText || "";
+          runtime.setLastRecallStatus(
+            "AI 生成中",
+            `${preview}  [${receivedChars}字]`,
+            "running",
+            { syncRuntime: false, noticeMarquee: true },
           );
         },
         options: runtime.buildRecallRetrieveOptions(settings, context),
       });
+
+      if (recallSignal.aborted || !isRecallContextCurrent()) {
+        throw runtime.createAbortError("recall-context-changed");
+      }
 
       const applied = runtime.applyRecallInjection(
         settings,
@@ -770,6 +795,11 @@ export async function runRecallController(runtime, options = {}) {
         stats: result?.stats || {},
       });
     } catch (e) {
+      if (!isRecallContextCurrent()) {
+        return runtime.createRecallRunResult("aborted", {
+          reason: "recall-context-changed",
+        });
+      }
       if (runtime.isAbortError(e)) {
         runtime.setLastRecallStatus(
           "召回已终止",

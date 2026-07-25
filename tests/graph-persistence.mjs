@@ -8305,6 +8305,162 @@ function isAuthorityBlockedPersistenceResult(result = null) {
   );
 }
 
+// A load started for chat A must not apply or publish terminal state after chat B wins.
+{
+  const chatA = "chat-late-load-a";
+  const chatB = "chat-late-load-b";
+  const graphA = createMeaningfulGraph(chatA, "late-load-a");
+  const snapshotA = buildSnapshotFromGraph(graphA, {
+    chatId: chatA,
+    revision: 12,
+  });
+  const harness = await createGraphPersistenceHarness({
+    chatId: chatA,
+    globalChatId: chatA,
+    chatMetadata: { integrity: `meta-${chatA}` },
+    indexedDbSnapshot: snapshotA,
+  });
+  const manager = harness.runtimeContext.ensureBmeChatManager();
+  const originalGetCurrentDb = manager.getCurrentDb.bind(manager);
+  let releaseLoad;
+  let notifyLoadStarted;
+  const loadStarted = new Promise((resolve) => {
+    notifyLoadStarted = resolve;
+  });
+  harness.runtimeContext.ensureBmeChatManager = () => ({
+    async getCurrentDb(requestedChatId) {
+      notifyLoadStarted();
+      await new Promise((resolve) => {
+        releaseLoad = resolve;
+      });
+      return await originalGetCurrentDb(requestedChatId);
+    },
+  });
+
+  const pendingLoad = harness.api.loadGraphFromIndexedDb(chatA, {
+    source: "late-load-isolation",
+    allowOverride: true,
+    applyEmptyState: true,
+  });
+  await loadStarted;
+  const graphB = createMeaningfulGraph(chatB, "late-load-b");
+  harness.runtimeContext.__globalChatId = chatB;
+  harness.api.setChatContext({
+    ...harness.api.getChatContext(),
+    chatId: chatB,
+    chatMetadata: { integrity: `meta-${chatB}` },
+    chat: [{ is_user: true, mes: "chat B" }],
+  });
+  harness.api.setCurrentGraph(graphB);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: chatB,
+    revision: 77,
+    lastPersistedRevision: 77,
+    writesBlocked: false,
+    dualWriteLastResult: { sentinel: "chat-b" },
+  });
+  releaseLoad();
+
+  const result = await pendingLoad;
+  assert.equal(result.reason, "indexeddb-chat-switched");
+  assert.strictEqual(harness.api.getCurrentGraph(), graphB);
+  assert.equal(harness.api.getGraphPersistenceState().chatId, chatB);
+  assert.equal(harness.api.getGraphPersistenceState().revision, 77);
+  assert.deepEqual(harness.api.getGraphPersistenceState().dualWriteLastResult, {
+    sentinel: "chat-b",
+  });
+}
+
+{
+  const chatA = "chat-late-persist-a";
+  const chatB = "chat-late-persist-b";
+  const harness = await createGraphPersistenceHarness({
+    chatId: chatA,
+    globalChatId: chatA,
+    chatMetadata: { integrity: `meta-${chatA}` },
+  });
+  const graphA = createMeaningfulGraph(chatA, "late-persist-a");
+  harness.api.setCurrentGraph(graphA);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: chatA,
+    revision: 12,
+    lastPersistedRevision: 11,
+    writesBlocked: false,
+  });
+  let releasePersist;
+  let notifyPersistStarted;
+  let queueCalls = 0;
+  const shadowWrites = [];
+  const persistStarted = new Promise((resolve) => {
+    notifyPersistStarted = resolve;
+  });
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => {
+    notifyPersistStarted();
+    await new Promise((resolve) => {
+      releasePersist = resolve;
+    });
+    return harness.runtimeContext.buildGraphPersistResult({
+      saved: false,
+      accepted: false,
+      reason: "late-persist-failed",
+      storageTier: "none",
+    });
+  };
+  harness.runtimeContext.canPersistGraphToMetadataFallback = () => false;
+  harness.runtimeContext.writeGraphShadowSnapshot = (chatId, graph) => {
+    shadowWrites.push({ chatId, graph });
+    return true;
+  };
+  harness.runtimeContext.queueGraphPersist = () => {
+    queueCalls += 1;
+    return harness.runtimeContext.buildGraphPersistResult({
+      queued: true,
+      blocked: true,
+      accepted: false,
+      reason: "should-not-queue",
+    });
+  };
+
+  const pendingPersist = harness.api.persistExtractionBatchResult({
+    reason: "late-persist-isolation",
+    lastProcessedAssistantFloor: 4,
+    graphSnapshot: graphA,
+  });
+  await persistStarted;
+  const graphB = createMeaningfulGraph(chatB, "late-persist-b");
+  harness.runtimeContext.__globalChatId = chatB;
+  harness.api.setChatContext({
+    ...harness.api.getChatContext(),
+    chatId: chatB,
+    chatMetadata: { integrity: `meta-${chatB}` },
+    chat: [{ is_user: true, mes: "chat B" }],
+  });
+  harness.api.setCurrentGraph(graphB);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: chatB,
+    revision: 88,
+    lastPersistedRevision: 88,
+    pendingPersist: false,
+    queuedPersistChatId: "",
+    writesBlocked: false,
+  });
+  releasePersist();
+
+  const result = await pendingPersist;
+  assert.equal(result.reason, "late-persist-isolation:chat-switched");
+  assert.equal(result.recoverable, true);
+  assert.equal(queueCalls, 0);
+  assert.equal(shadowWrites.length, 1);
+  assert.equal(shadowWrites[0].chatId, chatA);
+  assert.equal(harness.api.getGraphPersistenceState().chatId, chatB);
+  assert.equal(harness.api.getGraphPersistenceState().revision, 88);
+  assert.equal(harness.api.getGraphPersistenceState().pendingPersist, false);
+  assert.equal(harness.api.getGraphPersistenceState().queuedPersistChatId, "");
+}
+
 // Test 3: transaction_conflict + rebuild succeeds
 // → retry ONCE with rebuilt delta and baseRevision: freshRevision.
 {

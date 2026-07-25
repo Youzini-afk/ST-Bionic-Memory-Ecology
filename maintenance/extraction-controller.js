@@ -977,6 +977,25 @@ export async function executeExtractionBatchController(
   runtime.throwIfAborted(signal, "提取已终止");
 
   const currentGraph = runtime.getCurrentGraph();
+  const batchChatId = String(
+    runtime.getCurrentChatId?.() || currentGraph?.historyState?.chatId || "",
+  ).trim();
+  const isBatchContextCurrent = () => {
+    const activeChatId = String(runtime.getCurrentChatId?.() || "").trim();
+    return (
+      runtime.getCurrentGraph() === currentGraph &&
+      (!batchChatId || !activeChatId || activeChatId === batchChatId)
+    );
+  };
+  const assertBatchContextCurrent = () => {
+    runtime.throwIfAborted(signal, "extraction-context-changed");
+    if (isBatchContextCurrent()) return;
+    const error =
+      runtime.createAbortError?.("extraction-context-changed") ||
+      new Error("extraction-context-changed");
+    error.name = "AbortError";
+    throw error;
+  };
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const extractionCountBefore = runtime.getExtractionCount();
   const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
@@ -1004,6 +1023,7 @@ export async function executeExtractionBatchController(
     settings,
     signal,
     onStreamProgress: ({ previewText, receivedChars }) => {
+      if (signal?.aborted || !isBatchContextCurrent()) return;
       const preview =
         previewText?.length > 60 ? "…" + previewText.slice(-60) : previewText || "";
       runtime.setLastExtractionStatus(
@@ -1014,6 +1034,7 @@ export async function executeExtractionBatchController(
       );
     },
   });
+  assertBatchContextCurrent();
 
   if (!result.success) {
     runtime.setBatchStageOutcome(
@@ -1032,7 +1053,7 @@ export async function executeExtractionBatchController(
     batchStatus.historyAdvanceAllowed = false;
     batchStatus.historyAdvanced = false;
     runtime.finalizeBatchStatus(batchStatus, runtime.getExtractionCount());
-    runtime.getCurrentGraph().historyState.lastBatchStatus = batchStatus;
+    currentGraph.historyState.lastBatchStatus = batchStatus;
     return {
       success: false,
       result,
@@ -1050,22 +1071,25 @@ export async function executeExtractionBatchController(
     signal,
     batchStatus,
     postProcessContext,
+    { graph: currentGraph, chatId: batchChatId },
   );
+  assertBatchContextCurrent();
   const batchStatusRef = effects?.batchStatus || batchStatus;
   const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
-    graph: runtime.getCurrentGraph(),
+    graph: currentGraph,
     chat,
     settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(
       beforeSnapshot,
-      runtime.getCurrentGraph(),
+      currentGraph,
       effects?.postProcessArtifacts || [],
     ),
     vectorHashesInserted: effects?.vectorHashesInserted || [],
     extractionCountBefore,
   });
+  assertBatchContextCurrent();
   const persistResult = await runtime.persistExtractionBatchResult({
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
@@ -1085,6 +1109,7 @@ export async function executeExtractionBatchController(
     vectorDirty: Array.isArray(effects?.vectorHashesInserted) && effects.vectorHashesInserted.length > 0,
     dirtyFromFloor: startIdx,
   });
+  assertBatchContextCurrent();
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
   batchStatusRef.historyAdvanceAllowed = persistence.accepted === true;
@@ -1147,7 +1172,7 @@ export async function executeExtractionBatchController(
     runtime.getExtractionCount(),
   );
 
-  runtime.getCurrentGraph().historyState.lastBatchStatus = {
+  currentGraph.historyState.lastBatchStatus = {
     ...finalizedBatchStatus,
     persistence,
     historyAdvanceAllowed: persistence.accepted === true,
@@ -1157,11 +1182,11 @@ export async function executeExtractionBatchController(
     }),
   };
 
-  if (runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanced) {
+  if (currentGraph.historyState.lastBatchStatus.historyAdvanced) {
     runtime.updateProcessedHistorySnapshot(chat, endIdx);
     if (committedPersistState.committedBatchJournalEntry) {
       runtime.appendBatchJournal(
-        runtime.getCurrentGraph(),
+        currentGraph,
         cloneSerializable(
           committedPersistState.committedBatchJournalEntry,
           committedPersistState.committedBatchJournalEntry,

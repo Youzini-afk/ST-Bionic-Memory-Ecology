@@ -131,6 +131,70 @@ async function testVectorSyncTerminalStateUpdatesRuntime() {
   assert.equal(context.runtimeStatus.level, "success");
 }
 
+async function testVectorSyncIgnoresLateCompletionAfterChatSwitch() {
+  let releaseSync;
+  let markDirtyCalls = 0;
+  let notifyStarted;
+  const started = new Promise((resolve) => {
+    notifyStarted = resolve;
+  });
+  const graphA = {
+    historyState: { chatId: "chat-a" },
+    vectorIndexState: { dirty: true, lastWarning: "" },
+  };
+  const graphB = {
+    historyState: { chatId: "chat-b" },
+    vectorIndexState: { dirty: false, lastWarning: "" },
+  };
+  const context = {
+    ...createBaseStatusContext(),
+    currentGraph: graphA,
+    ensureCurrentGraphRuntimeState() {},
+    getCurrentGraph() {
+      return context.currentGraph;
+    },
+    getEmbeddingConfig() {
+      return { mode: "direct" };
+    },
+    validateVectorConfig() {
+      return { valid: true };
+    },
+    async syncGraphVectorIndex() {
+      notifyStarted();
+      return await new Promise((resolve) => {
+        releaseSync = resolve;
+      });
+    },
+    getVectorIndexStats(graph) {
+      return { indexed: graph === graphA ? 1 : 2, pending: 0 };
+    },
+    isAbortError() {
+      return false;
+    },
+    markVectorStateDirty() {
+      markDirtyCalls += 1;
+    },
+  };
+
+  const pending = syncVectorStateController(context, {
+    force: true,
+    expectedChatId: "chat-a",
+  });
+  await started;
+  context.currentGraph = graphB;
+  context.lastVectorStatus = { text: "B-vector", meta: "", level: "idle" };
+  context.runtimeStatus = { text: "B-runtime", meta: "", level: "idle" };
+  releaseSync({ insertedHashes: ["late-a"], stats: { indexed: 1, pending: 0 } });
+
+  const result = await pending;
+  assert.equal(result.aborted, true);
+  assert.equal(result.stale, true);
+  assert.equal(result.error, "vector-sync-context-changed");
+  assert.equal(context.lastVectorStatus.text, "B-vector");
+  assert.equal(context.runtimeStatus.text, "B-runtime");
+  assert.equal(markDirtyCalls, 0);
+}
+
 async function testManualExtractNoBatchesDoesNotStayRunning() {
   let assistantTurnCallCount = 0;
   const chat = [{ is_user: true, mes: "u" }, { is_user: false, mes: "a" }];
@@ -699,6 +763,7 @@ async function testManualRebuildSetsTerminalRuntimeStatus() {
 }
 
 await testVectorSyncTerminalStateUpdatesRuntime();
+await testVectorSyncIgnoresLateCompletionAfterChatSwitch();
 await testManualExtractNoBatchesDoesNotStayRunning();
 await testManualExtractIgnoresSupersededPendingPersistence();
 await testManualExtractContinuesWithRecoverablePendingPersistence();
