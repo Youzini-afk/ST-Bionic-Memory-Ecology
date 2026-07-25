@@ -26,6 +26,30 @@ function createGraphPersistenceStateProxy(runtime = {}) {
   });
 }
 
+function enqueueGraphPersistWrite(runtime, chatId, task) {
+  const writes = runtime.bmeIndexedDbWriteInFlightByChatId;
+  const previousWrite = writes.get(chatId) || Promise.resolve();
+  const nextWrite = previousWrite
+    .catch(() => null)
+    .then(task)
+    .finally(() => {
+      if (writes.get(chatId) === nextWrite) {
+        writes.delete(chatId);
+      }
+    });
+  writes.set(chatId, nextWrite);
+  return nextWrite;
+}
+
+function cloneGraphPersistPayload(runtime, payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  return typeof runtime.cloneRuntimeDebugValue === "function"
+    ? runtime.cloneRuntimeDebugValue(payload, payload)
+    : payload;
+}
+
 function createNativeHydrateInstallPromiseRef(runtime = {}) {
   return {
     get value() {
@@ -1401,7 +1425,38 @@ export async function retryPendingGraphPersistImpl(runtime, {
 
 }
 
-export async function saveGraphToIndexedDbImpl(runtime, 
+export async function saveGraphToIndexedDbImpl(runtime, chatId, graph, options = {}) {
+  const normalizedChatId = runtime.normalizeChatIdCandidate(chatId);
+  if (!normalizedChatId) {
+    return await saveGraphToIndexedDbCoreImpl(runtime, chatId, graph, options);
+  }
+
+  const graphSource = options.graphSnapshot || graph;
+  const graphSnapshot =
+    graphSource && typeof runtime.cloneGraphForPersistence === "function"
+      ? runtime.cloneGraphForPersistence(graphSource, normalizedChatId)
+      : graphSource;
+  const baseRevision =
+    options.baseRevision != null && Number.isFinite(Number(options.baseRevision))
+    ? Number(options.baseRevision)
+    : graphSnapshot && typeof runtime.getGraphPersistedRevision === "function"
+      ? runtime.getGraphPersistedRevision(graphSnapshot)
+      : undefined;
+  const persistDelta = cloneGraphPersistPayload(runtime, options.persistDelta);
+  const persistSnapshot = cloneGraphPersistPayload(runtime, options.persistSnapshot);
+
+  return await enqueueGraphPersistWrite(runtime, normalizedChatId, () =>
+    saveGraphToIndexedDbCoreImpl(runtime, normalizedChatId, graph, {
+      ...options,
+      graphSnapshot,
+      baseRevision,
+      persistDelta,
+      persistSnapshot,
+    }),
+  );
+}
+
+async function saveGraphToIndexedDbCoreImpl(runtime,
   chatId,
   graph,
   {
@@ -1413,6 +1468,7 @@ export async function saveGraphToIndexedDbImpl(runtime,
     graphSnapshot = null,
     persistSnapshot = null,
     sourceGraph = null,
+    baseRevision = undefined,
   } = {},
 ) {
   const graphPersistenceState = createGraphPersistenceStateProxy(runtime);
@@ -1556,6 +1612,10 @@ export async function saveGraphToIndexedDbImpl(runtime,
     const localStoreTier = resolveLocalStoreTierFromPresentation(localStore);
     const currentIdentity = resolveCurrentChatIdentity(context);
     const requestedRevision = resolvePersistRevisionFloor(revision, graph);
+    const expectedBaseRevision =
+      baseRevision != null && Number.isFinite(Number(baseRevision))
+      ? normalizeIndexedDbRevision(baseRevision)
+      : null;
     const currentSettings = getSettings();
     const shouldScheduleCloudUpload =
       scheduleCloudUploadOption != null
@@ -1894,6 +1954,9 @@ export async function saveGraphToIndexedDbImpl(runtime,
       commitResult = await db.commitDelta(delta, {
         reason,
         requestedRevision,
+        ...(expectedBaseRevision != null
+          ? { baseRevision: expectedBaseRevision }
+          : {}),
         markSyncDirty: true,
         committedSnapshot: snapshot,
       });
@@ -1922,7 +1985,7 @@ export async function saveGraphToIndexedDbImpl(runtime,
         throw commitError;
       }
       const freshRevision = normalizeIndexedDbRevision(freshSnapshot?.meta?.revision);
-      if (!Number.isFinite(freshRevision) || freshRevision <= 0) {
+      if (!Number.isFinite(freshRevision) || freshRevision < 0) {
         console.warn(
           `[ST-BME] graph.commitDelta transaction_conflict 后读取到非法 revision (${freshRevision}); 不再重试`,
         );
@@ -2611,96 +2674,15 @@ export function queueGraphPersistToIndexedDbImpl(runtime,
   } = {},
 ) {
   const graphPersistenceState = createGraphPersistenceStateProxy(runtime);
-  const currentGraph = runtime.getCurrentGraph?.() || null;
-  const nativeHydrateInstallPromiseRef = createNativeHydrateInstallPromiseRef(runtime);
-  const nativePersistDeltaInstallPromiseRef = createNativePersistDeltaInstallPromiseRef(runtime);
   const bmeIndexedDbLatestQueuedRevisionByChatId = runtime.bmeIndexedDbLatestQueuedRevisionByChatId;
-  const bmeIndexedDbWriteInFlightByChatId = runtime.bmeIndexedDbWriteInFlightByChatId;
   const updateGraphPersistenceState = runtime.updateGraphPersistenceState || ((patch = {}) => runtime.setGraphPersistenceState?.({ ...(runtime.getGraphPersistenceState?.() || {}), ...(patch || {}) }));
-  const AUTHORITY_GRAPH_STORE_KIND = runtime.AUTHORITY_GRAPH_STORE_KIND;
-  const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = runtime.BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET;
-  const GRAPH_LOAD_STATES = runtime.GRAPH_LOAD_STATES;
-  const applyAcceptedPendingPersistState = runtime.applyAcceptedPendingPersistState;
-  const applyGraphLoadState = runtime.applyGraphLoadState;
-  const applyIndexedDbEmptyToRuntime = runtime.applyIndexedDbEmptyToRuntime;
-  const applyIndexedDbSnapshotToRuntime = runtime.applyIndexedDbSnapshotToRuntime;
-  const applyPersistDeltaToSnapshot = runtime.applyPersistDeltaToSnapshot;
-  const applyShadowSnapshotToRuntime = runtime.applyShadowSnapshotToRuntime;
-  const areChatIdsEquivalentForResolvedIdentity = runtime.areChatIdsEquivalentForResolvedIdentity;
-  const buildBmeSyncRuntimeOptions = runtime.buildBmeSyncRuntimeOptions;
-  const buildGraphLocalStoreSelectorKey = runtime.buildGraphLocalStoreSelectorKey;
-  const buildGraphPersistResult = runtime.buildGraphPersistResult;
-  const buildPersistDelta = runtime.buildPersistDelta;
-  const buildPersistDeltaFromGraphDirtyState = runtime.buildPersistDeltaFromGraphDirtyState;
-  const buildPersistObservabilitySummary = runtime.buildPersistObservabilitySummary;
   const buildPersistenceEnvironment = runtime.buildPersistenceEnvironment;
-  const buildSnapshotFromGraph = runtime.buildSnapshotFromGraph;
-  const cacheIndexedDbSnapshot = runtime.cacheIndexedDbSnapshot;
-  const canPersistGraphToMetadataFallback = runtime.canPersistGraphToMetadataFallback;
-  const clearPendingGraphPersistRetry = runtime.clearPendingGraphPersistRetry;
   const cloneGraphForPersistence = runtime.cloneGraphForPersistence;
-  const cloneRuntimeDebugValue = runtime.cloneRuntimeDebugValue;
-  const createShadowComparisonGraph = runtime.createShadowComparisonGraph;
-  const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
-  const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
-  const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
-  const evaluateNativeHydrateGate = runtime.evaluateNativeHydrateGate;
-  const evaluatePersistNativeDeltaGate = runtime.evaluatePersistNativeDeltaGate;
-  const getChatMetadataIntegrity = runtime.getChatMetadataIntegrity;
   const getContext = runtime.getContext;
-  const getCurrentChatId = runtime.getCurrentChatId;
   const getGraphPersistedRevision = runtime.getGraphPersistedRevision;
   const getPreferredGraphLocalStorePresentationSync = runtime.getPreferredGraphLocalStorePresentationSync;
-  const getRequestedGraphLocalStorageMode = runtime.getRequestedGraphLocalStorageMode;
-  const getSettings = runtime.getSettings;
-  const hasMeaningfulRuntimeGraphForChat = runtime.hasMeaningfulRuntimeGraphForChat;
-  const isAuthorityGraphStorePresentation = runtime.isAuthorityGraphStorePresentation;
-  const isGraphLocalStorageModeOpfs = runtime.isGraphLocalStorageModeOpfs;
-  const isIndexedDbSnapshotMeaningful = runtime.isIndexedDbSnapshotMeaningful;
-  const isRestoreLockActive = runtime.isRestoreLockActive;
-  const maybeCaptureGraphShadowSnapshot = runtime.maybeCaptureGraphShadowSnapshot;
-  const maybeClearAcceptedPendingPersistState = runtime.maybeClearAcceptedPendingPersistState;
-  const maybeImportLegacyIndexedDbSnapshotToLocalStore = runtime.maybeImportLegacyIndexedDbSnapshotToLocalStore;
-  const maybeImportLegacyOpfsSnapshotToLocalStore = runtime.maybeImportLegacyOpfsSnapshotToLocalStore;
-  const maybeMigrateLegacyGraphToIndexedDb = runtime.maybeMigrateLegacyGraphToIndexedDb;
-  const maybeRecoverIndexedDbGraphFromStableIdentity = runtime.maybeRecoverIndexedDbGraphFromStableIdentity;
-  const maybeResolveOrphanAcceptedCommitMarker = runtime.maybeResolveOrphanAcceptedCommitMarker;
-  const maybeResumePendingAutoExtraction = runtime.maybeResumePendingAutoExtraction;
   const normalizeChatIdCandidate = runtime.normalizeChatIdCandidate;
-  const normalizeGraphRuntimeState = runtime.normalizeGraphRuntimeState;
   const normalizeIndexedDbRevision = runtime.normalizeIndexedDbRevision;
-  const normalizeLoadDiagnosticsMs = runtime.normalizeLoadDiagnosticsMs;
-  const normalizePersistDeltaDiagnosticsMs = runtime.normalizePersistDeltaDiagnosticsMs;
-  const persistGraphToChatMetadata = runtime.persistGraphToChatMetadata;
-  const persistGraphToConfiguredDurableTier = runtime.persistGraphToConfiguredDurableTier;
-  const pruneGraphPersistDirtyState = runtime.pruneGraphPersistDirtyState;
-  const queueGraphPersist = runtime.queueGraphPersist;
-  const queueRuntimeGraphLocalStoreRepair = runtime.queueRuntimeGraphLocalStoreRepair;
-  const readCachedIndexedDbSnapshot = runtime.readCachedIndexedDbSnapshot;
-  const readLoadDiagnosticsNow = runtime.readLoadDiagnosticsNow;
-  const readLocalStoreDiagnosticsSync = runtime.readLocalStoreDiagnosticsSync;
-  const readPersistDeltaDiagnosticsNow = runtime.readPersistDeltaDiagnosticsNow;
-  const recordLocalPersistEarlyFailure = runtime.recordLocalPersistEarlyFailure;
-  const recordPersistMismatchDiagnostic = runtime.recordPersistMismatchDiagnostic;
-  const refreshCurrentChatLocalStoreBinding = runtime.refreshCurrentChatLocalStoreBinding;
-  const rememberResolvedGraphIdentityAlias = runtime.rememberResolvedGraphIdentityAlias;
-  const resolveCompatibleGraphShadowSnapshot = runtime.resolveCompatibleGraphShadowSnapshot;
-  const resolveCurrentChatIdentity = runtime.resolveCurrentChatIdentity;
-  const resolveDbGraphStorePresentation = runtime.resolveDbGraphStorePresentation;
-  const resolveLocalStoreTierFromPresentation = runtime.resolveLocalStoreTierFromPresentation;
-  const resolvePendingPersistGraphSource = runtime.resolvePendingPersistGraphSource;
-  const resolvePendingPersistLastProcessedAssistantFloor = runtime.resolvePendingPersistLastProcessedAssistantFloor;
-  const resolvePersistRevisionFloor = runtime.resolvePersistRevisionFloor;
-  const resolveSnapshotGraphStorePresentation = runtime.resolveSnapshotGraphStorePresentation;
-  const schedulePendingGraphPersistRetry = runtime.schedulePendingGraphPersistRetry;
-  const scheduleUpload = runtime.scheduleUpload;
-  const shouldPreferShadowSnapshotOverOfficial = runtime.shouldPreferShadowSnapshotOverOfficial;
-  const stampGraphPersistenceMeta = runtime.stampGraphPersistenceMeta;
-  const syncCommitMarkerToPersistenceState = runtime.syncCommitMarkerToPersistenceState;
-  const updateLoadDiagnostics = runtime.updateLoadDiagnostics;
-  const updatePersistDeltaDiagnostics = runtime.updatePersistDeltaDiagnostics;
-  const console = runtime.console || globalThis.console;
 
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   if (!normalizedChatId || (!graph && !persistDelta)) return;
@@ -2727,12 +2709,17 @@ export function queueGraphPersistToIndexedDbImpl(runtime,
     Math.max(latestQueuedRevision, normalizedRevision),
   );
 
-  const previousWritePromise =
-    bmeIndexedDbWriteInFlightByChatId.get(normalizedChatId) ||
-    Promise.resolve();
-  const nextWritePromise = previousWritePromise
-    .catch(() => null)
-    .then(async () => {
+  const persistGraphSnapshot = graphSnapshot
+    ? cloneGraphForPersistence(graphSnapshot, normalizedChatId)
+    : graph
+      ? cloneGraphForPersistence(graph, normalizedChatId)
+      : null;
+  const baseRevision = persistGraphSnapshot
+    ? getGraphPersistedRevision(persistGraphSnapshot)
+    : undefined;
+  const detachedPersistDelta = cloneGraphPersistPayload(runtime, persistDelta);
+  const detachedPersistSnapshot = cloneGraphPersistPayload(runtime, persistSnapshot);
+  return enqueueGraphPersistWrite(runtime, normalizedChatId, async () => {
       const currentLatestRevision = normalizeIndexedDbRevision(
         bmeIndexedDbLatestQueuedRevisionByChatId.get(normalizedChatId),
       );
@@ -2747,33 +2734,17 @@ export function queueGraphPersistToIndexedDbImpl(runtime,
           revision: normalizedRevision,
         };
       }
-      const persistGraphSnapshot = graphSnapshot
-        ? graphSnapshot
-        : graph
-          ? graphDetached === true
-            ? normalizeGraphRuntimeState(graph, normalizedChatId)
-            : cloneGraphForPersistence(graph, normalizedChatId)
-          : null;
-      return await saveGraphToIndexedDbImpl(runtime, normalizedChatId, persistGraphSnapshot, {
+      return await saveGraphToIndexedDbCoreImpl(runtime, normalizedChatId, graph, {
         revision: normalizedRevision,
         reason,
         persistRole,
         scheduleCloudUpload,
-        persistDelta,
+        persistDelta: detachedPersistDelta,
         graphSnapshot: persistGraphSnapshot,
-        persistSnapshot,
+        persistSnapshot: detachedPersistSnapshot,
         sourceGraph: graphDetached === true ? null : graph,
+        baseRevision,
       });
-    })
-    .finally(() => {
-      if (
-        bmeIndexedDbWriteInFlightByChatId.get(normalizedChatId) ===
-        nextWritePromise
-      ) {
-        bmeIndexedDbWriteInFlightByChatId.delete(normalizedChatId);
-      }
     });
-
-  bmeIndexedDbWriteInFlightByChatId.set(normalizedChatId, nextWritePromise);
 
 }

@@ -27,6 +27,7 @@ const chatIdsForCleanup = new Set([
   "chat-manager-selector",
   "chat-export-without-tombstones",
   "chat-replace-reset",
+  "chat-commit-delta-cas",
 ]);
 
 async function setupIndexedDbTestEnv() {
@@ -384,6 +385,90 @@ async function testRevisionMonotonicity() {
 
   assert.ok(afterNode.revision > revisionBefore);
   assert.ok(afterEdge.revision > afterNode.revision);
+
+  await db.close();
+}
+
+async function testCommitDeltaRejectsStaleBaseRevision() {
+  const db = new BmeDatabase("chat-commit-delta-cas", {
+    dexieClass: globalThis.Dexie,
+  });
+  await db.open();
+
+  const seedResult = await db.commitDelta(
+    {
+      upsertNodes: [
+        {
+          id: "node-cas-seed",
+          type: "event",
+          sourceFloor: 1,
+          updatedAt: 1,
+        },
+      ],
+    },
+    {
+      reason: "cas-seed",
+      baseRevision: await db.getRevision(),
+      requestedRevision: 1,
+    },
+  );
+  const beforeConflict = await db.exportSnapshot();
+
+  await assert.rejects(
+    db.commitDelta(
+      {
+        upsertNodes: [
+          {
+            id: "node-cas-stale",
+            type: "event",
+            sourceFloor: 2,
+            updatedAt: 2,
+          },
+        ],
+        runtimeMetaPatch: {
+          lastProcessedFloor: 99,
+          extractionCount: 99,
+        },
+      },
+      {
+        reason: "cas-stale",
+        baseRevision: seedResult.revision - 1,
+        requestedRevision: seedResult.revision + 1,
+      },
+    ),
+    (error) => {
+      assert.equal(error?.name, "GraphCommitConflictError");
+      assert.equal(error?.code, "transaction_conflict");
+      assert.equal(error?.baseRevision, seedResult.revision - 1);
+      assert.equal(error?.currentRevision, seedResult.revision);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    await db.exportSnapshot(),
+    beforeConflict,
+    "stale CAS must reject before mutating graph records or runtime metadata",
+  );
+
+  const accepted = await db.commitDelta(
+    {
+      upsertNodes: [
+        {
+          id: "node-cas-accepted",
+          type: "fact",
+          sourceFloor: 2,
+          updatedAt: 2,
+        },
+      ],
+    },
+    {
+      reason: "cas-accepted",
+      baseRevision: seedResult.revision,
+      requestedRevision: seedResult.revision + 1,
+    },
+  );
+  assert.equal(accepted.revision, seedResult.revision + 1);
+  assert.ok((await db.listNodes()).some((node) => node.id === "node-cas-accepted"));
 
   await db.close();
 }
@@ -851,6 +936,7 @@ async function main() {
   await testSnapshotProbeExport();
   await testReplaceImportResetsStaleMeta();
   await testRevisionMonotonicity();
+  await testCommitDeltaRejectsStaleBaseRevision();
   await testTombstonePrune();
   await testChatIsolationAndManager();
   await testManagerRecreatesDbWhenSelectorKeyChanges();

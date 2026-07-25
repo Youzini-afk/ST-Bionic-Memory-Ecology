@@ -120,6 +120,21 @@ function normalizeRevision(value) {
   return Math.floor(parsed);
 }
 
+export function createGraphCommitConflictError(baseRevision, currentRevision) {
+  const expected = normalizeRevision(baseRevision);
+  const current = normalizeRevision(currentRevision);
+  const error = new Error(
+    `BME graph commit conflict: baseRevision=${expected} but currentRevision=${current}`,
+  );
+  error.name = "GraphCommitConflictError";
+  error.code = "transaction_conflict";
+  error.status = 409;
+  error.baseRevision = expected;
+  error.serverRevision = current;
+  error.currentRevision = current;
+  return error;
+}
+
 function normalizeTimestamp(value, fallbackValue = Date.now()) {
   const parsed = Number(value);
   if (Number.isFinite(parsed)) {
@@ -1223,22 +1238,13 @@ function buildSnapshotRuntimeStateAndMeta(
   };
 }
 
-function buildDirtyPersistNodeRecord(node, baseNodeById = new Map(), nowMs = Date.now()) {
+function buildDirtyPersistNodeRecord(node, nowMs = Date.now()) {
   if (!node || typeof node !== "object" || Array.isArray(node)) {
     return null;
   }
   const id = normalizeRecordId(node.id);
   if (!id) return null;
   const normalizedUpdatedAt = normalizeNodeUpdatedAt(node, nowMs);
-  const baseNode = baseNodeById.get(id);
-  if (
-    hasReusablePersistNodeRecord(baseNode, node, {
-      type: node.type,
-      updatedAt: normalizedUpdatedAt,
-    })
-  ) {
-    return baseNode;
-  }
   const plainNode = clonePersistSnapshotRecord(node);
   if (!plainNode || typeof plainNode !== "object" || Array.isArray(plainNode)) {
     return null;
@@ -1248,7 +1254,7 @@ function buildDirtyPersistNodeRecord(node, baseNodeById = new Map(), nowMs = Dat
   return plainNode;
 }
 
-function buildDirtyPersistEdgeRecord(edge, baseEdgeById = new Map(), nowMs = Date.now()) {
+function buildDirtyPersistEdgeRecord(edge, nowMs = Date.now()) {
   if (!edge || typeof edge !== "object" || Array.isArray(edge)) {
     return null;
   }
@@ -1257,16 +1263,6 @@ function buildDirtyPersistEdgeRecord(edge, baseEdgeById = new Map(), nowMs = Dat
   const normalizedFromId = normalizeRecordId(edge.fromId);
   const normalizedToId = normalizeRecordId(edge.toId);
   const normalizedUpdatedAt = normalizeEdgeUpdatedAt(edge, nowMs);
-  const baseEdge = baseEdgeById.get(id);
-  if (
-    hasReusablePersistEdgeRecord(baseEdge, edge, {
-      fromId: normalizedFromId,
-      toId: normalizedToId,
-      updatedAt: normalizedUpdatedAt,
-    })
-  ) {
-    return baseEdge;
-  }
   const plainEdge = clonePersistSnapshotRecord(edge);
   if (!plainEdge || typeof plainEdge !== "object" || Array.isArray(plainEdge)) {
     return null;
@@ -1387,8 +1383,6 @@ export function buildPersistDeltaFromGraphDirtyState(
     return null;
   }
 
-  const baseNodeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.nodes);
-  const baseEdgeById = buildPersistSnapshotRecordByIdMap(baseSnapshotView.edges);
   const baseTombstoneById = buildPersistSnapshotRecordByIdMap(
     baseSnapshotView.tombstones,
   );
@@ -1408,7 +1402,7 @@ export function buildPersistDeltaFromGraphDirtyState(
       });
       return null;
     }
-    const plainNode = buildDirtyPersistNodeRecord(node, baseNodeById, nowMs);
+    const plainNode = buildDirtyPersistNodeRecord(node, nowMs);
     if (!plainNode) {
       emitOptionalDiagnostics(options, {
         ...baseDiagnostics,
@@ -1435,7 +1429,7 @@ export function buildPersistDeltaFromGraphDirtyState(
       });
       return null;
     }
-    const plainEdge = buildDirtyPersistEdgeRecord(edge, baseEdgeById, nowMs);
+    const plainEdge = buildDirtyPersistEdgeRecord(edge, nowMs);
     if (!plainEdge) {
       emitOptionalDiagnostics(options, {
         ...baseDiagnostics,
@@ -3732,6 +3726,9 @@ export class BmeDatabase {
         : {};
     const reason = String(options.reason || "commitDelta");
     const requestedRevision = normalizeRevision(options.requestedRevision);
+    const hasBaseRevision =
+      options.baseRevision != null && Number.isFinite(Number(options.baseRevision));
+    const baseRevision = normalizeRevision(options.baseRevision);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
     const payloadBytes = estimatePersistPayloadBytes(normalizedDelta);
     const normalizedCountDelta =
@@ -3757,6 +3754,13 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
+        const currentRevision = normalizeRevision(
+          (await db.table("meta").get("revision"))?.value,
+        );
+        if (hasBaseRevision && baseRevision !== currentRevision) {
+          throw createGraphCommitConflictError(baseRevision, currentRevision);
+        }
+
         if (deleteEdgeIds.length) {
           await db.table("edges").bulkDelete(deleteEdgeIds);
         }
@@ -3780,9 +3784,6 @@ export class BmeDatabase {
         }
 
         counts = await this._applyCountDeltaMetaInTx(db, normalizedCountDelta, nowMs);
-        const currentRevision = normalizeRevision(
-          (await db.table("meta").get("revision"))?.value,
-        );
         nextRevision = Math.max(currentRevision + 1, requestedRevision);
         await this._setMetaInTx(db, "revision", nextRevision, nowMs);
         await this._setMetaInTx(db, "lastModified", nowMs, nowMs);

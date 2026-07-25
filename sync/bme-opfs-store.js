@@ -7,6 +7,7 @@ import {
   BME_RUNTIME_MAINTENANCE_JOURNAL_META_KEY,
   BME_TOMBSTONE_RETENTION_MS,
   buildSnapshotFromGraph,
+  createGraphCommitConflictError,
 } from "./bme-db.js";
 import { GRAPH_OPERATIONAL_MODE_LOCAL_ONLY } from "./authority-graph-mode.js";
 
@@ -2221,7 +2222,18 @@ export class OpfsGraphStore {
     });
     const runTask = async () => {
       try {
-        return await task();
+        const runWithFreshHead = async () => {
+          this._manifestCache = null;
+          this._snapshotCache = null;
+          return await task();
+        };
+        const lockManager = globalThis.navigator?.locks;
+        return typeof lockManager?.request === "function"
+          ? await lockManager.request(
+              `st-bme-opfs:${this.chatId}`,
+              runWithFreshHead,
+            )
+          : await runWithFreshHead();
       } finally {
         this._writeQueueDepth = Math.max(0, this._writeQueueDepth - 1);
         this._setWriteLockState({
@@ -2397,6 +2409,16 @@ export class OpfsGraphStore {
         const currentHeadRevision = normalizeRevision(
           manifest?.headRevision || manifest?.meta?.revision,
         );
+        if (
+          options.baseRevision != null &&
+          Number.isFinite(Number(options.baseRevision)) &&
+          normalizeRevision(options.baseRevision) !== currentHeadRevision
+        ) {
+          throw createGraphCommitConflictError(
+            options.baseRevision,
+            currentHeadRevision,
+          );
+        }
         const nextRevision = Math.max(currentHeadRevision + 1, requestedRevision);
         const nextCountDelta = normalizeOpfsV2CountDelta(normalizedDelta.countDelta);
         const nextMeta = {
@@ -3132,7 +3154,7 @@ export class OpfsGraphStore {
   async _ensureV2Ready({ awaitWrites = true } = {}) {
     const manifest = await this._readRawManifest({ awaitWrites });
     if (isOpfsV2Manifest(manifest)) {
-      return await this._writeManifest(manifest);
+      return manifest;
     }
     return await this._runSerializedWrite("ensureV2Ready", async () => {
       const latestManifest = await this._readRawManifest({ awaitWrites: false });

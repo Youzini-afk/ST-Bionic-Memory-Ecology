@@ -315,8 +315,123 @@ async function testCommitDeltaDiagnosticsSplitWalAndManifestStages() {
   );
 }
 
+async function testCommitDeltaRejectsStaleBaseRevision() {
+  const rootDirectory = createMemoryOpfsRoot();
+  const store = new OpfsGraphStore("chat-opfs-commit-delta-cas", {
+    rootDirectoryFactory: async () => rootDirectory,
+    storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  });
+  await store.open();
+  await store.importSnapshot(
+    {
+      meta: { revision: 1 },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+      nodes: [
+        {
+          id: "node-opfs-cas-seed",
+          type: "event",
+          fields: { title: "seed" },
+          archived: false,
+          updatedAt: 1,
+        },
+      ],
+      edges: [],
+      tombstones: [],
+    },
+    { mode: "replace", preserveRevision: true },
+  );
+
+  const staleStore = new OpfsGraphStore("chat-opfs-commit-delta-cas", {
+    rootDirectoryFactory: async () => rootDirectory,
+    storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+  });
+  await staleStore.open();
+  const staleBaseRevision = await staleStore.getRevision();
+  const advanced = await store.commitDelta(
+    {
+      upsertNodes: [
+        {
+          id: "node-opfs-cas-advanced",
+          type: "event",
+          fields: { title: "advanced" },
+          archived: false,
+          updatedAt: 2,
+        },
+      ],
+    },
+    {
+      reason: "opfs-cas-advance-head",
+      baseRevision: staleBaseRevision,
+      requestedRevision: staleBaseRevision + 1,
+    },
+  );
+  const beforeConflict = await store.exportSnapshot();
+  await assert.rejects(
+    staleStore.commitDelta(
+      {
+        upsertNodes: [
+          {
+            id: "node-opfs-cas-stale",
+            type: "event",
+            fields: { title: "stale" },
+            archived: false,
+            updatedAt: 2,
+          },
+        ],
+        runtimeMetaPatch: {
+          lastProcessedFloor: 99,
+          extractionCount: 99,
+        },
+      },
+      {
+        reason: "opfs-cas-stale",
+        baseRevision: staleBaseRevision,
+        requestedRevision: advanced.revision + 1,
+      },
+    ),
+    (error) => {
+      assert.equal(error?.name, "GraphCommitConflictError");
+      assert.equal(error?.code, "transaction_conflict");
+      assert.equal(error?.baseRevision, staleBaseRevision);
+      assert.equal(error?.currentRevision, advanced.revision);
+      return true;
+    },
+  );
+  assert.deepEqual(
+    await store.exportSnapshot(),
+    beforeConflict,
+    "stale OPFS CAS must reject before writing WAL or manifest state",
+  );
+
+  const accepted = await staleStore.commitDelta(
+    {
+      upsertNodes: [
+        {
+          id: "node-opfs-cas-accepted",
+          type: "fact",
+          fields: { title: "accepted" },
+          archived: false,
+          updatedAt: 3,
+        },
+      ],
+    },
+    {
+      reason: "opfs-cas-accepted",
+      baseRevision: advanced.revision,
+      requestedRevision: advanced.revision + 1,
+    },
+  );
+  assert.equal(accepted.revision, advanced.revision + 1);
+  assert.ok(
+    (await staleStore.listNodes()).some(
+      (node) => node.id === "node-opfs-cas-accepted",
+    ),
+  );
+}
+
 await testCommitDeltaAndPatchMetaSerialize();
 await testImportSnapshotAndClearAllSerialize();
 await testGraphLikeDeltaPreservesHistoryFrontier();
 await testCommitDeltaDiagnosticsSplitWalAndManifestStages();
+await testCommitDeltaRejectsStaleBaseRevision();
 console.log("opfs-write-serialization tests passed");

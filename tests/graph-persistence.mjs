@@ -7535,6 +7535,148 @@ async function createGraphPersistenceHarness({
   );
 }
 
+// Direct and queued durable writes share one per-chat lane. Other chats remain independent.
+{
+  const chatA = "chat-persist-lane-a";
+  const chatB = "chat-persist-lane-b";
+  const harness = await createGraphPersistenceHarness({
+    chatId: chatA,
+    globalChatId: chatA,
+    chatMetadata: { integrity: `meta-${chatA}` },
+  });
+  const graphA1 = stampPersistedGraph(
+    createMeaningfulGraph(chatA, "persist-lane-a-direct"),
+    { chatId: chatA, revision: 0 },
+  );
+  const graphA2 = cloneGraphForPersistence(graphA1, chatA);
+  updateNode(graphA2, graphA2.nodes[0].id, {
+    fields: { title: "queued-snapshot" },
+  });
+  const graphB = stampPersistedGraph(
+    createMeaningfulGraph(chatB, "persist-lane-b-direct"),
+    { chatId: chatB, revision: 0 },
+  );
+  const queuedTitle = graphA2.nodes[0].fields.title;
+  const chatBTitle = graphB.nodes[0].fields.title;
+  harness.api.setCurrentGraph(graphA1);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: chatA,
+    revision: 0,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const baseManager = new harness.runtimeContext.BmeChatManager();
+  const commitCalls = [];
+  let releaseFirstChatA;
+  const firstChatAGate = new Promise((resolve) => {
+    releaseFirstChatA = resolve;
+  });
+  let markFirstChatAStarted;
+  const firstChatAStarted = new Promise((resolve) => {
+    markFirstChatAStarted = resolve;
+  });
+  let firstChatACommit = true;
+  harness.runtimeContext.ensureBmeChatManager = () => ({
+    async getCurrentDb(targetChatId) {
+      const baseDb = baseManager._createDb(targetChatId);
+      return {
+        ...baseDb,
+        async commitDelta(delta, options = {}) {
+          commitCalls.push({
+            chatId: targetChatId,
+            reason: String(options.reason || ""),
+            baseRevision: Number(options.baseRevision),
+            nodeTitles: (delta?.upsertNodes || []).map((node) => node?.fields?.title),
+          });
+          if (targetChatId === chatA && firstChatACommit) {
+            firstChatACommit = false;
+            markFirstChatAStarted();
+            await firstChatAGate;
+          }
+          const currentRevision = Number(
+            harness.api.getIndexedDbSnapshotForChat(targetChatId)?.meta?.revision || 0,
+          );
+          if (
+            Number.isFinite(Number(options.baseRevision)) &&
+            Number(options.baseRevision) !== currentRevision
+          ) {
+            throw createTransactionConflictError(
+              currentRevision,
+              Number(options.baseRevision),
+            );
+          }
+          return await baseDb.commitDelta(delta, options);
+        },
+      };
+    },
+  });
+
+  const directA = harness.api.saveGraphToIndexedDb(chatA, graphA1, {
+    revision: 1,
+    reason: "persist-lane-a-direct",
+    scheduleCloudUpload: false,
+  });
+  await firstChatAStarted;
+  const queuedA = harness.runtimeContext.queueGraphPersistToIndexedDb(chatA, graphA2, {
+    revision: 2,
+    reason: "persist-lane-a-queued",
+    scheduleCloudUpload: false,
+  });
+  graphA2.nodes[0].fields.title = "mutated-after-queue";
+  const directB = harness.api.saveGraphToIndexedDb(chatB, graphB, {
+    revision: 1,
+    reason: "persist-lane-b-direct",
+    scheduleCloudUpload: false,
+  });
+  graphB.nodes[0].fields.title = "mutated-after-direct-save";
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(
+      commitCalls.some((call) => call.chatId === chatB),
+      "a blocked chat must not block another chat's durable writer",
+    );
+    assert.equal(
+      commitCalls.some((call) => call.reason === "persist-lane-a-queued"),
+      false,
+      "queued write must not enter commitDelta before the same-chat direct write finishes",
+    );
+  } finally {
+    releaseFirstChatA();
+  }
+
+  const [directAResult, queuedAResult, directBResult] = await Promise.all([
+    directA,
+    queuedA,
+    directB,
+  ]);
+  assert.equal(directAResult.saved, true);
+  assert.equal(queuedAResult.saved, true);
+  assert.equal(directBResult.saved, true);
+  assert.equal(
+    commitCalls.filter((call) => call.reason === "persist-lane-a-queued").length,
+    2,
+    "the queued stale base must rebase once after the serialized direct commit",
+  );
+  assert.equal(
+    harness.api
+      .getIndexedDbSnapshotForChat(chatA)
+      .nodes.find((node) => node.id === graphA2.nodes[0].id)?.fields?.title,
+    queuedTitle,
+    `queued writer must persist the graph snapshot captured at enqueue time: ${JSON.stringify(commitCalls)}`,
+  );
+  assert.equal(
+    harness.api
+      .getIndexedDbSnapshotForChat(chatB)
+      .nodes.find((node) => node.id === graphB.nodes[0].id)?.fields?.title,
+    chatBTitle,
+    "direct writer must persist the graph snapshot captured before its async lane starts",
+  );
+  assert.equal(harness.runtimeContext.bmeIndexedDbWriteInFlightByChatId.size, 0);
+}
+
 // --- Phase F: graph.commitDelta transaction_conflict retry semantics ---
 // On `transaction_conflict`, saveGraphToIndexedDbImpl must:
 //   1. Fetch fresh head/snapshot.
