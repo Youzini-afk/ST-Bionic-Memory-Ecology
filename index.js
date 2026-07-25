@@ -12714,16 +12714,10 @@ async function retryPendingGraphPersist({
   );
 }
 
-async function persistExtractionBatchResult({
-  reason = "extraction-batch-complete",
-  lastProcessedAssistantFloor = null,
-  graphSnapshot = null,
-  persistSnapshot = null,
-  persistDelta = null,
-} = {}) {
+async function persistExtractionBatchResult(options = {}) {
   return await persistExtractionBatchResultImpl(
     createGraphLoadPersistRuntime(),
-    { reason, lastProcessedAssistantFloor, graphSnapshot, persistSnapshot, persistDelta },
+    options,
   );
 }
 

@@ -6723,6 +6723,12 @@ async function createGraphPersistenceHarness({
         async commitExtractionBatch(input) {
           commitBatchCalls += 1;
           assert.equal(input.committedBatchJournalEntry.id, "random-journal-ready");
+          assert.deepEqual(input.committedBatchJournalEntry.processedRange, [4, 6]);
+          assert.deepEqual(input.processedRange, [4, 6]);
+          assert.deepEqual(input.messageHashes, [
+            { floor: 4, messageHash: "hash-4", hashVersion: 1 },
+            { floor: 6, messageHash: "hash-6", hashVersion: 1 },
+          ]);
           return { saved: true, accepted: true, storageTier: "authority-sql", acceptedBy: "extraction.commitBatch", saveMode: "extraction.commitBatch", revision: 12, authorityOwned: true, graphOperationalMode: "authority-primary" };
         },
       };
@@ -6738,6 +6744,10 @@ async function createGraphPersistenceHarness({
     processedRange: [4, 6],
     extractionCountBefore: 1,
     extractionCountAfter: 2,
+    messageHashes: [
+      { floor: 4, messageHash: "hash-4", hashVersion: 1 },
+      { floor: 6, messageHash: "hash-6", hashVersion: 1 },
+    ],
   });
   assert.equal(result.accepted, true);
   assert.equal(result.acceptedBy, "extraction.commitBatch");
