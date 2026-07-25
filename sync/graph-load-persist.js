@@ -2075,6 +2075,7 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     persistMetadata = false,
     captureShadow = Boolean(persistMetadata),
     immediate = markMutation,
+    awaitDurable = false,
   } = options;
 
   ensureCurrentGraphRuntimeState();
@@ -2108,12 +2109,12 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     (persistenceEnvironment.hostProfile !== "luker" ||
       persistenceEnvironment.primaryStorageTier === "authority-sql") &&
     (markMutation || !isGraphEffectivelyEmpty(currentGraph));
-  if (shouldQueueIndexedDbPersist) {
-    queueGraphPersistToIndexedDb(chatId, currentGraph, {
-      revision,
-      reason,
-    });
-  }
+  const indexedDbPersistPromise = shouldQueueIndexedDbPersist
+    ? queueGraphPersistToIndexedDb(chatId, currentGraph, {
+        revision,
+        reason,
+      })
+    : null;
 
   const metadataFallbackEnabled =
     Boolean(persistMetadata) || !ensureBmeChatManager();
@@ -2143,7 +2144,7 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     )
       ? Number(persistGraph.historyState.lastProcessedAssistantFloor)
       : null;
-    scheduleBmeIndexedDbTask(async () => {
+    const persistTask = async () => {
       const persistResult = await persistGraphToConfiguredDurableTier(
         context,
         persistGraph,
@@ -2165,7 +2166,12 @@ export function saveGraphToChatImpl(runtime, options = {}) {
         });
       }
       refreshPanelLiveState();
-    });
+      return persistResult;
+    };
+    if (awaitDurable) {
+      return persistTask();
+    }
+    scheduleBmeIndexedDbTask(persistTask);
     updateGraphPersistenceState({
       hostProfile: persistenceEnvironment.hostProfile,
       primaryStorageTier: persistenceEnvironment.primaryStorageTier,
@@ -2188,6 +2194,9 @@ export function saveGraphToChatImpl(runtime, options = {}) {
   }
 
   if (!metadataFallbackEnabled) {
+    if (awaitDurable && indexedDbPersistPromise) {
+      return indexedDbPersistPromise;
+    }
     const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
     const saveMode = shouldQueueIndexedDbPersist
       ? `${preferredLocalStore.reasonPrefix}-queued`
@@ -2236,7 +2245,10 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     console.warn(
       `[ST-BME] 图谱写回已被安全保护拦截（chat=${chatId}，state=${graphPersistenceState.loadState}，reason=${reason}）`,
     );
-    return queueGraphPersist(reason, revision, { immediate });
+    const queuedResult = queueGraphPersist(reason, revision, { immediate });
+    return awaitDurable && indexedDbPersistPromise
+      ? indexedDbPersistPromise
+      : queuedResult;
   }
 
   const metadataPersistResult = persistGraphToChatMetadata(context, {
@@ -2259,6 +2271,11 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     },
   });
 
+  if (awaitDurable && indexedDbPersistPromise) {
+    return Promise.resolve(indexedDbPersistPromise).then((localResult) =>
+      localResult?.accepted === true ? localResult : metadataPersistResult,
+    );
+  }
   return metadataPersistResult;
 }
 

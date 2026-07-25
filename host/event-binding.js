@@ -541,6 +541,13 @@ export async function onMessageSwipedController(runtime, messageId, meta = null)
       { messageId, meta },
     );
   }
+  if (result?.success !== true) {
+    runtime.scheduleHistoryMutationRecheck?.(
+      "message-swiped",
+      messageId,
+      meta,
+    );
+  }
   runtime.refreshPersistedRecallMessageUi?.();
   return result;
 }

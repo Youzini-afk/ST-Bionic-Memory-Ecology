@@ -3819,6 +3819,36 @@ async function createGraphPersistenceHarness({
 
 {
   const harness = await createGraphPersistenceHarness({
+    chatId: "chat-await-durable",
+    chatMetadata: undefined,
+  });
+  harness.api.setCurrentGraph(
+    createMeaningfulGraph("chat-await-durable", "await-durable"),
+  );
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId: "chat-await-durable",
+    revision: 0,
+    lastPersistedRevision: 0,
+    writesBlocked: false,
+  });
+
+  const pendingResult = harness.api.saveGraphToChat({
+    reason: "await-durable-save",
+    awaitDurable: true,
+  });
+  assert.equal(typeof pendingResult?.then, "function");
+  const result = await pendingResult;
+
+  assert.equal(result.accepted, true);
+  assert.equal(
+    harness.api.getIndexedDbSnapshot()?.nodes?.[0]?.fields?.title,
+    "事件-await-durable",
+  );
+}
+
+{
+  const harness = await createGraphPersistenceHarness({
     chatId: "chat-message",
     chatMetadata: undefined,
   });

@@ -631,6 +631,133 @@ function getPendingPersistenceGateInfo(runtime) {
   };
 }
 
+async function finalizeRerollCheckpoint(
+  runtime,
+  { targetFloor, rollbackResult, reason = "reroll" } = {},
+) {
+  const graph = runtime.getCurrentGraph?.();
+  const checkpointFloor = toSafeFloor(
+    rollbackResult?.checkpointFloor,
+    toSafeFloor(targetFloor, null),
+  );
+  const lastProcessedFloor = toSafeFloor(
+    runtime.getLastProcessedAssistantFloor?.(),
+    -1,
+  );
+  const pendingPersistence = getPendingPersistenceGateInfo(runtime);
+  const persist = async (persistReason) => {
+    try {
+      return await Promise.resolve(
+        runtime.saveGraphToChat({
+          reason: persistReason,
+          awaitDurable: true,
+        }),
+      );
+    } catch (error) {
+      return { accepted: false, error };
+    }
+  };
+
+  if (!graph || checkpointFloor == null) {
+    return {
+      success: false,
+      resultCode: "reroll.checkpoint.missing",
+      error: "重 Roll 恢复检查点缺失。",
+    };
+  }
+
+  const retainCheckpoint = (result) => {
+    runtime.markHistoryDirty(
+      graph,
+      checkpointFloor,
+      "manual-reroll",
+      "manual-reroll",
+    );
+    graph.historyState.lastRecoveryResult = result;
+  };
+
+  if (lastProcessedFloor < targetFloor || pendingPersistence) {
+    const result = runtime.buildRecoveryResult("pending", {
+      fromFloor: checkpointFloor,
+      toFloor: targetFloor,
+      lastProcessedFloor,
+      detectionSource: "manual-reroll",
+      reason: pendingPersistence
+        ? "reroll extraction persistence is pending"
+        : "reroll extraction did not reach the target floor",
+      resultCode: "reroll.extraction.incomplete",
+    });
+    retainCheckpoint(result);
+    const persistence = await persist(`${reason}-incomplete`);
+    return {
+      success: false,
+      checkpointRetained: true,
+      resultCode: "reroll.extraction.incomplete",
+      error: "重 Roll 后续提取未完整落盘，检查点已保留。",
+      persistence,
+    };
+  }
+
+  const result = runtime.buildRecoveryResult("reroll-complete", {
+    fromFloor: checkpointFloor,
+    toFloor: targetFloor,
+    lastProcessedFloor,
+    path: rollbackResult?.recoveryPath || "unknown",
+    affectedBatchCount: rollbackResult?.affectedBatchCount || 0,
+    detectionSource: "manual-reroll",
+    reason: "manual-reroll",
+    resultCode: "reroll.complete",
+  });
+  retainCheckpoint(result);
+  const chat = runtime.getContext?.()?.chat;
+  if (Array.isArray(chat) && lastProcessedFloor >= 0) {
+    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+  }
+  const checkpointPersistence = await persist(`${reason}-checkpoint`);
+  if (checkpointPersistence?.accepted !== true) {
+    return {
+      success: false,
+      checkpointRetained: true,
+      resultCode: "reroll.checkpoint.persist-failed",
+      error: "重 Roll 结果检查点尚未确认落盘。",
+      persistence: checkpointPersistence,
+    };
+  }
+
+  runtime.clearHistoryDirty(graph, result);
+  if (Array.isArray(chat) && lastProcessedFloor >= 0) {
+    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+  }
+  const completionPersistence = await persist(`${reason}-complete`);
+  if (completionPersistence?.accepted !== true) {
+    retainCheckpoint(
+      runtime.buildRecoveryResult("pending-persistence", {
+        fromFloor: checkpointFloor,
+        toFloor: targetFloor,
+        lastProcessedFloor,
+        detectionSource: "manual-reroll",
+        reason: "reroll completion persistence was not accepted",
+        resultCode: "reroll.completion.persist-failed",
+      }),
+    );
+    await persist(`${reason}-checkpoint-restored`);
+    return {
+      success: false,
+      checkpointRetained: true,
+      resultCode: "reroll.completion.persist-failed",
+      error: "重 Roll 完成标记尚未确认落盘，检查点已恢复。",
+      persistence: completionPersistence,
+    };
+  }
+
+  return {
+    success: true,
+    checkpointRetained: false,
+    resultCode: "reroll.complete",
+    persistence: completionPersistence,
+  };
+}
+
 async function maybeRetryPendingPersistence(runtime, reason = "pending-persist-retry") {
   const gate = getPendingPersistenceGateInfo(runtime);
   if (!gate) {
@@ -1266,7 +1393,12 @@ export async function onManualExtractController(runtime, options = {}) {
     runtime.toastr.warning("上一批持久化尚未确认，请先点“重试持久化”或“重新探测图谱”");
     return;
   }
-  if (!(await runtime.recoverHistoryIfNeeded("manual-extract"))) return;
+  if (
+    options?.skipHistoryRecovery !== true &&
+    !(await runtime.recoverHistoryIfNeeded("manual-extract"))
+  ) {
+    return;
+  }
   if (!runtime.getCurrentGraph()) {
     runtime.setCurrentGraph(
       runtime.normalizeGraphRuntimeState(
@@ -1749,15 +1881,42 @@ export async function onExtractionTaskController(runtime, options = {}) {
   await runManualExtract({
     drainAll: true,
     lockedEndFloor: effectiveLockedEndFloor,
+    skipHistoryRecovery: true,
     suppressIntermediateAutoConsolidation: true,
     taskLabel: "重新提取",
     toastTitle: "ST-BME 重新提取",
     showStartToast: false,
   });
+  let finalization = {
+    success: true,
+    checkpointRetained: false,
+    resultCode: "reroll.complete",
+  };
+  if (rollbackResult?.checkpointRetained === true) {
+    const rerunAssistantTurns = runtime.getAssistantTurns(chat);
+    const rerunTargetFloor =
+      effectiveLockedEndFloor ??
+      rerunAssistantTurns[rerunAssistantTurns.length - 1];
+    finalization = await finalizeRerollCheckpoint(runtime, {
+      targetFloor: rerunTargetFloor,
+      rollbackResult,
+      reason: "rerun-extraction",
+    });
+  }
+  if (!finalization.success) {
+    setExtractionProgressStatus(
+      runtime,
+      "重新提取等待恢复",
+      finalization.error,
+      "warning",
+      { syncRuntime: true },
+    );
+    runtime.toastr?.warning?.(finalization.error, "ST-BME 重新提取");
+  }
 
   return {
-    success: true,
-    rerunPerformed: true,
+    success: finalization.success,
+    rerunPerformed: finalization.success,
     fallbackToLatest: fallbackInfo.fallbackToLatest,
     requestedRange: [rerunTask.requestedStartFloor, rerunTask.requestedEndFloor],
     effectiveDialogueRange,
@@ -1766,8 +1925,16 @@ export async function onExtractionTaskController(runtime, options = {}) {
       effectiveLockedEndFloor,
     ],
     rollbackResult,
+    finalization,
     visibilityWarning,
     reason: fallbackInfo.reason || "",
+    ...(finalization.success
+      ? {}
+      : {
+          resultCode: finalization.resultCode,
+          error: finalization.error,
+          checkpointRetained: true,
+        }),
   };
 }
 
@@ -1876,8 +2043,11 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
       timeOut: 2000,
     });
     await runtime.onManualExtract();
+    const directExtractComplete =
+      runtime.getLastProcessedAssistantFloor() >= targetFloor &&
+      !getPendingPersistenceGateInfo(runtime);
     return {
-      success: true,
+      success: directExtractComplete,
       rollbackPerformed: false,
       extractionTriggered: true,
       requestedFloor: targetFloor,
@@ -1885,7 +2055,12 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
       recoveryPath: "direct-extract",
       affectedBatchCount: 0,
       extractionStatus: runtime.getLastExtractionStatusLevel?.() || "idle",
-      error: "",
+      ...(directExtractComplete
+        ? { error: "" }
+        : {
+            resultCode: "reroll.direct-extract.incomplete",
+            error: "目标楼层提取尚未完整落盘。",
+          }),
     };
   }
 
@@ -1952,11 +2127,36 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
     },
   );
 
-  await runtime.onManualExtract({ drainAll: false, showStartToast: false });
+  await runtime.onManualExtract({
+    drainAll: false,
+    showStartToast: false,
+    skipHistoryRecovery: true,
+  });
+  const finalization =
+    rollbackResult?.checkpointRetained === true
+      ? await finalizeRerollCheckpoint(runtime, {
+          targetFloor,
+          rollbackResult,
+          reason: "reroll",
+        })
+      : {
+          success: true,
+          checkpointRetained: false,
+          resultCode: "reroll.complete",
+        };
   runtime.refreshPanelLiveState();
   return {
     ...rollbackResult,
+    success: finalization.success,
     extractionTriggered: true,
     extractionStatus: runtime.getLastExtractionStatusLevel?.() || "idle",
+    finalization,
+    ...(finalization.success
+      ? { checkpointRetained: false }
+      : {
+          resultCode: finalization.resultCode,
+          error: finalization.error,
+          checkpointRetained: true,
+        }),
   };
 }

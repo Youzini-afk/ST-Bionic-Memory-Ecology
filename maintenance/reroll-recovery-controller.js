@@ -1,3 +1,13 @@
+async function persistRecoveryState(saveGraphToChat, reason) {
+  try {
+    return await Promise.resolve(
+      saveGraphToChat({ reason, awaitDurable: true }),
+    );
+  } catch (error) {
+    return { accepted: false, error };
+  }
+}
+
 export async function rollbackGraphForRerollController(
   runtime,
   { targetFloor, context = runtime.getContext?.() } = {},
@@ -7,14 +17,16 @@ export async function rollbackGraphForRerollController(
     assertRecoveryChatStillActive,
     buildRecoveryResult,
     buildReverseJournalRecoveryPlan,
-    clearHistoryDirty,
     clearInjectionState,
+    cloneGraphSnapshot,
     ensureCurrentGraphRuntimeState,
     findJournalRecoveryPoint,
+    getContext,
     getCurrentChatId,
     getCurrentGraph,
     getEmbeddingConfig,
     isBackendVectorConfig,
+    markHistoryDirty,
     normalizeGraphRuntimeState,
     prepareVectorStateForReplay,
     pruneProcessedMessageHashesFromFloor,
@@ -31,19 +43,30 @@ export async function rollbackGraphForRerollController(
   ensureCurrentGraphRuntimeState();
   let currentGraph = getCurrentGraph();
   const chatId = getCurrentChatId(context);
+  const rerollStartGraph = cloneGraphSnapshot(currentGraph);
+  let checkpointAccepted = false;
   const buildRerollFailure = (
     recoveryPath,
     error,
-    { resultCode = "reroll.rollback.failed", affectedBatchCount = 0 } = {},
+    {
+      resultCode = "reroll.rollback.failed",
+      affectedBatchCount = 0,
+      rollbackPerformed = false,
+      effectiveFromFloor = null,
+      checkpointRetained = false,
+      persistence = null,
+    } = {},
   ) => ({
     success: false,
-    rollbackPerformed: false,
+    rollbackPerformed,
     extractionTriggered: false,
     requestedFloor: targetFloor,
-    effectiveFromFloor: null,
+    effectiveFromFloor,
     recoveryPath,
     affectedBatchCount,
     resultCode,
+    checkpointRetained,
+    persistence,
     error,
   });
   const recoveryPoint = findJournalRecoveryPoint(currentGraph, targetFloor);
@@ -64,7 +87,45 @@ export async function rollbackGraphForRerollController(
   const config = getEmbeddingConfig();
   const recoveryPath = recoveryPoint.path || "unknown";
   const affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
+  const beginRerollCheckpoint = async () => {
+    markHistoryDirty(
+      currentGraph,
+      targetFloor,
+      "manual-reroll",
+      "manual-reroll",
+    );
+    const persistence = await persistRecoveryState(
+      saveGraphToChat,
+      "reroll-checkpoint-start",
+    );
+    if (persistence?.accepted === true) {
+      checkpointAccepted = true;
+      return null;
+    }
+    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+      "pending-persistence",
+      {
+        fromFloor: targetFloor,
+        path: recoveryPath,
+        affectedBatchCount,
+        detectionSource: "manual-reroll",
+        reason: "reroll checkpoint persistence was not accepted",
+        resultCode: "reroll.rollback.checkpoint-persist-failed",
+      },
+    );
+    return buildRerollFailure(
+      recoveryPath,
+      "无法确认重 Roll 回滚检查点已落盘，已保留待恢复状态。",
+      {
+        affectedBatchCount,
+        resultCode: "reroll.rollback.checkpoint-persist-failed",
+        checkpointRetained: true,
+        persistence,
+      },
+    );
+  };
 
+  try {
   if (recoveryPath === "reverse-journal") {
     const recoveryPlan = buildReverseJournalRecoveryPlan(
       recoveryPoint.affectedJournals,
@@ -98,6 +159,11 @@ export async function rollbackGraphForRerollController(
           resultCode: "reroll.rollback.plan-invalid",
         },
       );
+    }
+    const checkpointFailure = await beginRerollCheckpoint();
+    if (checkpointFailure) {
+      refreshPanelLiveState();
+      return checkpointFailure;
     }
     rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
     currentGraph = getCurrentGraph();
@@ -139,6 +205,11 @@ export async function rollbackGraphForRerollController(
       skipBackendPurge: isBackendVectorConfig(config),
     });
   } else if (recoveryPath === "legacy-snapshot") {
+    const checkpointFailure = await beginRerollCheckpoint();
+    if (checkpointFailure) {
+      refreshPanelLiveState();
+      return checkpointFailure;
+    }
     currentGraph = normalizeGraphRuntimeState(
       recoveryPoint.snapshotBefore,
       chatId,
@@ -178,9 +249,15 @@ export async function rollbackGraphForRerollController(
     ? currentGraph.historyState.lastProcessedAssistantFloor + 1
     : 0;
 
-  clearHistoryDirty(
+  markHistoryDirty(
     currentGraph,
-    buildRecoveryResult("reroll-rollback", {
+    targetFloor,
+    "manual-reroll",
+    "manual-reroll",
+  );
+  currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+    "reroll-rollback",
+    {
       fromFloor: targetFloor,
       effectiveFromFloor,
       path: recoveryPath,
@@ -188,7 +265,7 @@ export async function rollbackGraphForRerollController(
       detectionSource: "manual-reroll",
       reason: "manual-reroll",
       resultCode: "reroll.rollback.applied",
-    }),
+    },
   );
   if (
     Array.isArray(context?.chat) &&
@@ -207,8 +284,38 @@ export async function rollbackGraphForRerollController(
   currentGraph.lastProcessedSeq =
     currentGraph.historyState?.lastProcessedAssistantFloor ?? -1;
   currentGraph.vectorIndexState.lastIntegrityIssue = null;
-  saveGraphToChat({ reason: "reroll-rollback-complete" });
+  const rollbackPersistence = await persistRecoveryState(
+    saveGraphToChat,
+    "reroll-rollback-checkpoint",
+  );
   refreshPanelLiveState();
+
+  if (rollbackPersistence?.accepted !== true) {
+    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+      "pending-persistence",
+      {
+        fromFloor: targetFloor,
+        effectiveFromFloor,
+        path: recoveryPath,
+        affectedBatchCount,
+        detectionSource: "manual-reroll",
+        reason: "reroll rollback persistence was not accepted",
+        resultCode: "reroll.rollback.persist-failed",
+      },
+    );
+    return buildRerollFailure(
+      recoveryPath,
+      "回滚已执行，但持久化未确认；检查点已保留，将在下一次恢复时继续。",
+      {
+        affectedBatchCount,
+        rollbackPerformed: true,
+        effectiveFromFloor,
+        resultCode: "reroll.rollback.persist-failed",
+        checkpointRetained: true,
+        persistence: rollbackPersistence,
+      },
+    );
+  }
 
   return {
     success: true,
@@ -219,8 +326,60 @@ export async function rollbackGraphForRerollController(
     recoveryPath,
     affectedBatchCount,
     resultCode: "reroll.rollback.applied",
+    checkpointFloor: targetFloor,
+    checkpointRetained: true,
+    persistence: rollbackPersistence,
     error: "",
   };
+  } catch (error) {
+    let persistence = null;
+    if (checkpointAccepted && getCurrentChatId(getContext()) === chatId) {
+      currentGraph = normalizeGraphRuntimeState(
+        cloneGraphSnapshot(rerollStartGraph),
+        chatId,
+      );
+      setCurrentGraph(currentGraph);
+      setExtractionCount(currentGraph.historyState.extractionCount || 0);
+      markHistoryDirty(
+        currentGraph,
+        targetFloor,
+        "manual-reroll",
+        "manual-reroll",
+      );
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+        error?.name === "AbortError" ? "aborted" : "failed",
+        {
+          fromFloor: targetFloor,
+          path: recoveryPath,
+          affectedBatchCount,
+          detectionSource: "manual-reroll",
+          reason: error?.message || String(error),
+          resultCode:
+            error?.name === "AbortError"
+              ? "reroll.rollback.aborted"
+              : "reroll.rollback.failed",
+        },
+      );
+      persistence = await persistRecoveryState(
+        saveGraphToChat,
+        "reroll-rollback-restored",
+      );
+    }
+    refreshPanelLiveState();
+    return buildRerollFailure(
+      error?.name === "AbortError" ? "aborted" : recoveryPath,
+      error?.message || String(error),
+      {
+        affectedBatchCount,
+        resultCode:
+          error?.name === "AbortError"
+            ? "reroll.rollback.aborted"
+            : "reroll.rollback.failed",
+        checkpointRetained: checkpointAccepted,
+        persistence,
+      },
+    );
+  }
 
 }
 
@@ -237,6 +396,7 @@ export async function recoverHistoryIfNeededController(
     clampRecoveryStartFloor,
     clearHistoryDirty,
     clearInjectionState,
+    cloneGraphSnapshot,
     createEmptyGraph,
     ensureCurrentGraphRuntimeState,
     enterRestoreLock,
@@ -254,6 +414,7 @@ export async function recoverHistoryIfNeededController(
     isBackendVectorConfig,
     isRestoreLockActive,
     leaveRestoreLock,
+    markHistoryDirty,
     maybeResumePendingAutoExtraction,
     normalizeGraphRuntimeState,
     notifyRenderLimitedHistoryRecoveryBlocked,
@@ -323,12 +484,99 @@ export async function recoverHistoryIfNeededController(
     ? dirtyFrom
     : detection.earliestAffectedFloor;
   const initialDirtyFrom = clampRecoveryStartFloor(chat, initialDirtyFromRaw);
+  const recoveryStartGraph = cloneGraphSnapshot(currentGraph);
+  const checkpointReason = String(
+    detection.reason ||
+      currentGraph.historyState?.lastMutationReason ||
+      trigger ||
+      "history-recovery",
+  );
+  const checkpointSource = String(
+    detection.source ||
+      currentGraph.historyState?.lastMutationSource ||
+      "hash-recheck",
+  );
   let replayedBatches = 0;
   let usedFullRebuild = false;
   let recoveryPath = "full-rebuild";
   let affectedBatchCount = 0;
   const historyController = beginStageAbortController("history");
   const historySignal = historyController.signal;
+  const retainCheckpoint = (graph, result = null) => {
+    markHistoryDirty(
+      graph,
+      initialDirtyFrom,
+      checkpointReason,
+      checkpointSource,
+    );
+    if (result) graph.historyState.lastRecoveryResult = result;
+  };
+  const restoreRecoveryStartGraph = () => {
+    if (getCurrentChatId(getContext()) !== chatId) return null;
+    currentGraph = normalizeGraphRuntimeState(
+      cloneGraphSnapshot(recoveryStartGraph),
+      chatId,
+    );
+    setCurrentGraph(currentGraph);
+    setExtractionCount(currentGraph.historyState.extractionCount || 0);
+    return currentGraph;
+  };
+  const finalizeRecoveredState = async (result, reason) => {
+    currentGraph = getCurrentGraph();
+    retainCheckpoint(currentGraph, result);
+    const recoveredLastProcessedFloor = Number.isFinite(
+      currentGraph?.historyState?.lastProcessedAssistantFloor,
+    )
+      ? currentGraph.historyState.lastProcessedAssistantFloor
+      : -1;
+    if (recoveredLastProcessedFloor >= 0) {
+      updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+    }
+
+    const checkpointPersistence = await persistRecoveryState(
+      saveGraphToChat,
+      `${reason}-checkpoint`,
+    );
+    if (checkpointPersistence?.accepted !== true) {
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+        "pending-persistence",
+        {
+          fromFloor: initialDirtyFrom,
+          path: recoveryPath,
+          detectionSource: checkpointSource,
+          reason: "recovered checkpoint persistence was not accepted",
+          resultCode: "history.recovery.checkpoint-persist-failed",
+        },
+      );
+      return false;
+    }
+
+    clearHistoryDirty(currentGraph, result);
+    if (recoveredLastProcessedFloor >= 0) {
+      updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+    }
+    const clearPersistence = await persistRecoveryState(
+      saveGraphToChat,
+      reason,
+    );
+    if (clearPersistence?.accepted === true) return true;
+
+    retainCheckpoint(
+      currentGraph,
+      buildRecoveryResult("pending-persistence", {
+        fromFloor: initialDirtyFrom,
+        path: recoveryPath,
+        detectionSource: checkpointSource,
+        reason: "recovery completion persistence was not accepted",
+        resultCode: "history.recovery.clear-persist-failed",
+      }),
+    );
+    await persistRecoveryState(
+      saveGraphToChat,
+      `${reason}-checkpoint-restored`,
+    );
+    return false;
+  };
 
   updateStageNotice(
     "history",
@@ -345,6 +593,32 @@ export async function recoverHistoryIfNeededController(
 
   try {
     throwIfAborted(historySignal, "历史恢复已终止");
+    retainCheckpoint(currentGraph);
+    const initialCheckpointPersistence = await persistRecoveryState(
+      saveGraphToChat,
+      "history-recovery-checkpoint-start",
+    );
+    if (initialCheckpointPersistence?.accepted !== true) {
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+        "pending-persistence",
+        {
+          fromFloor: initialDirtyFrom,
+          path: "checkpoint",
+          detectionSource: checkpointSource,
+          reason: "history recovery checkpoint persistence was not accepted",
+          resultCode: "history.recovery.checkpoint-start-persist-failed",
+        },
+      );
+      updateStageNotice(
+        "history",
+        "历史恢复等待持久化",
+        "恢复检查点尚未确认落盘，本次未执行回滚。",
+        "warning",
+        { busy: false, persist: false },
+      );
+      refreshPanelLiveState();
+      return false;
+    }
     const recoveryPoint = findJournalRecoveryPoint(
       currentGraph,
       initialDirtyFrom,
@@ -368,6 +642,7 @@ export async function recoverHistoryIfNeededController(
       currentGraph = getCurrentGraph();
       currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
       setCurrentGraph(currentGraph);
+      retainCheckpoint(currentGraph);
       setExtractionCount(currentGraph.historyState.extractionCount || 0);
       applyRecoveryPlanToVectorState(recoveryPlan, initialDirtyFrom);
 
@@ -419,12 +694,14 @@ export async function recoverHistoryIfNeededController(
         chatId,
       );
       setCurrentGraph(currentGraph);
+      retainCheckpoint(currentGraph);
       setExtractionCount(currentGraph.historyState.extractionCount || 0);
       await prepareVectorStateForReplay(false, historySignal);
     } else {
       recoveryPath = "full-rebuild";
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
       setCurrentGraph(currentGraph);
+      retainCheckpoint(currentGraph);
       usedFullRebuild = true;
       setExtractionCount(0);
       await prepareVectorStateForReplay(true, historySignal);
@@ -438,9 +715,10 @@ export async function recoverHistoryIfNeededController(
       chatId,
     );
 
-    clearHistoryDirty(
-      currentGraph,
-      buildRecoveryResult(usedFullRebuild ? "full-rebuild" : "replayed", {
+    currentGraph = getCurrentGraph();
+    const recoveryResult = buildRecoveryResult(
+      usedFullRebuild ? "full-rebuild" : "replayed",
+      {
         fromFloor: initialDirtyFrom,
         batches: replayedBatches,
         path: recoveryPath,
@@ -454,19 +732,29 @@ export async function recoverHistoryIfNeededController(
           detection.reason ||
           currentGraph?.historyState?.lastMutationReason ||
           trigger,
-      }),
+      },
     );
-    const recoveredLastProcessedFloor = Number.isFinite(
-      currentGraph?.historyState?.lastProcessedAssistantFloor,
-    )
-      ? currentGraph.historyState.lastProcessedAssistantFloor
-      : -1;
-    if (recoveredLastProcessedFloor >= 0) {
-      // Recovery replay has rebuilt the graph state; restore processed hashes so
-      // the next hash recheck does not immediately trigger another replay loop.
-      updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
+    if (
+      !(await finalizeRecoveredState(
+        recoveryResult,
+        "history-recovery-complete",
+      ))
+    ) {
+      refreshPanelLiveState();
+      settleExtractionStatusAfterHistoryRecovery(
+        "历史恢复等待持久化",
+        "恢复结果尚未确认落盘，检查点已保留。",
+        "warning",
+      );
+      updateStageNotice(
+        "history",
+        "历史恢复等待持久化",
+        "恢复结果尚未确认落盘，检查点已保留。",
+        "warning",
+        { busy: false, persist: false },
+      );
+      return false;
     }
-    saveGraphToChat({ reason: "history-recovery-complete" });
     refreshPanelLiveState();
     settleExtractionStatusAfterHistoryRecovery(
       "提取完成",
@@ -489,9 +777,8 @@ export async function recoverHistoryIfNeededController(
     return true;
   } catch (error) {
     if (isAbortError(error)) {
-      clearHistoryDirty(
-        currentGraph,
-        buildRecoveryResult("aborted", {
+      currentGraph = restoreRecoveryStartGraph();
+      const abortedResult = buildRecoveryResult("aborted", {
           fromFloor: initialDirtyFrom,
           path: recoveryPath,
           detectionSource:
@@ -503,14 +790,10 @@ export async function recoverHistoryIfNeededController(
           reason: error?.message || "已手动终止当前恢复流程",
           debugReason: `history-recovery-aborted:${recoveryPath}`,
           resultCode: "history.recovery.aborted",
-        }),
-      );
-      currentGraph.vectorIndexState.lastIntegrityIssue = null;
-      currentGraph.vectorIndexState.lastWarning = "";
-      currentGraph.vectorIndexState.pendingRepairFromFloor = null;
-      currentGraph.vectorIndexState.replayRequiredNodeIds = [];
-      currentGraph.vectorIndexState.dirty = false;
-      currentGraph.vectorIndexState.dirtyReason = "";
+        });
+      if (currentGraph) {
+        retainCheckpoint(currentGraph, abortedResult);
+      }
       settleExtractionStatusAfterHistoryRecovery(
         "提取已终止",
         error?.message || "历史恢复已终止",
@@ -526,7 +809,9 @@ export async function recoverHistoryIfNeededController(
           persist: false,
         },
       );
-      saveGraphToChat({ reason: "history-recovery-aborted" });
+      if (currentGraph) {
+        await persistRecoveryState(saveGraphToChat, "history-recovery-aborted");
+      }
       return false;
     }
     console.error("[ST-BME] 历史恢复失败，尝试全量重建:", error);
@@ -534,6 +819,7 @@ export async function recoverHistoryIfNeededController(
     try {
       currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
       setCurrentGraph(currentGraph);
+      retainCheckpoint(currentGraph);
       setExtractionCount(0);
       await prepareVectorStateForReplay(true, historySignal);
       assertRecoveryChatStillActive(chatId, "pre-fallback-replay");
@@ -543,9 +829,8 @@ export async function recoverHistoryIfNeededController(
         historySignal,
         chatId,
       );
-      clearHistoryDirty(
-        currentGraph,
-        buildRecoveryResult("full-rebuild", {
+      currentGraph = getCurrentGraph();
+      const fallbackRecoveryResult = buildRecoveryResult("full-rebuild", {
           fromFloor: 0,
           batches: replayedBatches,
           path: "full-rebuild",
@@ -558,18 +843,29 @@ export async function recoverHistoryIfNeededController(
           reason: `恢复失败后兜底全量重建: ${error?.message || error}`,
           debugReason: `history-recovery-fallback-full-rebuild:${recoveryPath}`,
           resultCode: "history.recovery.fallback-full-rebuild",
-        }),
-      );
-      const recoveredLastProcessedFloor = Number.isFinite(
-        currentGraph?.historyState?.lastProcessedAssistantFloor,
-      )
-        ? currentGraph.historyState.lastProcessedAssistantFloor
-        : -1;
-      if (recoveredLastProcessedFloor >= 0) {
-        updateProcessedHistorySnapshot(chat, recoveredLastProcessedFloor);
-      }
+        });
       currentGraph.vectorIndexState.lastIntegrityIssue = null;
-      saveGraphToChat({ reason: "history-recovery-fallback-rebuild" });
+      if (
+        !(await finalizeRecoveredState(
+          fallbackRecoveryResult,
+          "history-recovery-fallback-rebuild",
+        ))
+      ) {
+        refreshPanelLiveState();
+        settleExtractionStatusAfterHistoryRecovery(
+          "历史恢复等待持久化",
+          "全量重建结果尚未确认落盘，检查点已保留。",
+          "warning",
+        );
+        updateStageNotice(
+          "history",
+          "历史恢复等待持久化",
+          "全量重建结果尚未确认落盘，检查点已保留。",
+          "warning",
+          { busy: false, persist: false },
+        );
+        return false;
+      }
       refreshPanelLiveState();
       settleExtractionStatusAfterHistoryRecovery(
         "提取完成",
@@ -589,9 +885,8 @@ export async function recoverHistoryIfNeededController(
       toastr.warning("历史恢复已退化为全量重建");
       return true;
     } catch (fallbackError) {
-      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-        "failed",
-        {
+      currentGraph = restoreRecoveryStartGraph();
+      const failedResult = buildRecoveryResult("failed", {
           fromFloor: initialDirtyFrom,
           path: recoveryPath,
           detectionSource:
@@ -603,10 +898,11 @@ export async function recoverHistoryIfNeededController(
           reason: String(fallbackError),
           debugReason: `history-recovery-failed:${recoveryPath}`,
           resultCode: "history.recovery.failed",
-        },
-      );
-      currentGraph.vectorIndexState.lastIntegrityIssue = null;
-      saveGraphToChat({ reason: "history-recovery-failed" });
+        });
+      if (currentGraph) {
+        retainCheckpoint(currentGraph, failedResult);
+        await persistRecoveryState(saveGraphToChat, "history-recovery-failed");
+      }
       refreshPanelLiveState();
       settleExtractionStatusAfterHistoryRecovery(
         "提取失败",

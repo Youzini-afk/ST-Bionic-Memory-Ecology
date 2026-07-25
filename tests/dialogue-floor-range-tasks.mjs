@@ -97,6 +97,7 @@ const chat = [
   assert.deepEqual(calls.rollback, [2]);
   assert.equal(calls.manual.length, 1);
   assert.equal(calls.manual[0].lockedEndFloor, null);
+  assert.equal(calls.manual[0].skipHistoryRecovery, true);
   assert.equal(calls.manual[0].taskLabel, "重新提取");
   assert.equal(calls.manual[0].showStartToast, false);
   assert.equal(calls.extractionStatus[0]?.text, "重新提取准备中");
@@ -158,6 +159,7 @@ const chat = [
   assert.equal(result.fallbackToLatest, false);
   assert.deepEqual(calls.rollback, [6]);
   assert.equal(calls.manual[0].lockedEndFloor, 6);
+  assert.equal(calls.manual[0].skipHistoryRecovery, true);
   assert.equal(calls.manual[0].suppressIntermediateAutoConsolidation, true);
   assert.equal(calls.manual[0].showStartToast, false);
   assert.equal(calls.extractionStatus[0]?.text, "重新提取准备中");
