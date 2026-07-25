@@ -45,6 +45,7 @@ import {
   MODULE_NAME,
 } from "../graph/graph-persistence.js";
 import {
+  buildRecallHistoryFingerprint,
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
   markPersistedRecallManualEdit,
@@ -5630,6 +5631,9 @@ async function testGenerationRecallBeforeCombineCanUseProvisionalSendIntentBindi
   assert.equal(harness.runRecallCalls[0].overrideUserMessage, "发送前输入");
   assert.equal(harness.runRecallCalls[0].overrideSource, "send-intent");
   assert.equal(harness.runRecallCalls[0].overrideSourceLabel, "发送意图");
+  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
+  assert.equal(harness.runRecallCalls[0].awaitingUserMessage, true);
+  assert.equal(harness.runRecallCalls[0].includeSyntheticUserMessage, true);
   assert.equal(
     harness.runRecallCalls[0].overrideReason,
     "send-intent-captured",
@@ -6987,7 +6991,7 @@ async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
   assert.equal(harness.runRecallCalls.length, 1);
-  assert.equal(harness.runRecallCalls[0].overrideUserMessage, "旧的 chat tail");
+  assert.equal(harness.runRecallCalls[0].overrideUserMessage, "刚触发发送的新输入");
   assert.equal(harness.runRecallCalls[0].overrideSource, "send-intent");
   assert.equal(harness.runRecallCalls[0].overrideSourceLabel, "发送意图");
   assert.equal(
@@ -7007,9 +7011,10 @@ async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
   ][0];
   assert.equal(
     transaction.frozenRecallOptions.overrideUserMessage,
-    "旧的 chat tail",
+    "刚触发发送的新输入",
   );
   assert.equal(transaction.frozenRecallOptions.lockedSource, "send-intent");
+  assert.equal(transaction.frozenRecallOptions.targetUserMessageIndex, null);
   assert.equal(transaction.frozenRecallOptions.lockedSourceLabel, "发送意图");
   assert.equal(
     transaction.frozenRecallOptions.lockedReason,
@@ -7201,23 +7206,24 @@ async function testHistoryGenerationReusesPersistedRecallForStableUserFloor() {
     {
       is_user: true,
       mes: "稳定 user 楼层",
-      extra: {
-        bme_recall: buildPersistedRecallRecord({
-          injectionText: "persisted-memory",
-          selectedNodeIds: ["node-persisted-1"],
-          recallInput: "发送前权威输入",
-          recallSource: "send-intent",
-          hookName: "GENERATION_AFTER_COMMANDS",
-          tokenEstimate: 12,
-          manuallyEdited: false,
-          authoritativeInputUsed: true,
-          boundUserFloorText: "稳定 user 楼层",
-          nowIso: "2026-01-01T00:00:00.000Z",
-        }),
-      },
     },
     { is_user: false, mes: "assistant-tail" },
   ];
+  chat[0].extra = {
+    bme_recall: buildPersistedRecallRecord({
+      injectionText: "persisted-memory",
+      selectedNodeIds: ["node-persisted-1"],
+      recallInput: "发送前权威输入",
+      recallSource: "send-intent",
+      hookName: "GENERATION_AFTER_COMMANDS",
+      tokenEstimate: 12,
+      manuallyEdited: false,
+      authoritativeInputUsed: true,
+      boundUserFloorText: "稳定 user 楼层",
+      historyFingerprint: buildRecallHistoryFingerprint(chat, 0),
+      nowIso: "2026-01-01T00:00:00.000Z",
+    }),
+  };
   let retrieveCalls = 0;
   let metadataSaveCalls = 0;
   let recallUiRefreshCalls = 0;
@@ -7630,7 +7636,7 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
     assert.equal(resolution.source, "fresh");
     assert.equal(resolution.targetUserMessageIndex, 0);
     assert.equal(resolution.authoritativeInputUsed, true);
-    assert.equal(resolution.boundUserFloorText, "稳定楼层输入");
+    assert.equal(resolution.boundUserFloorText, "当前输入");
     assert.equal(
       harness.chat[0]?.extra?.bme_recall?.injectionText,
       "fresh-memory",
@@ -7643,7 +7649,7 @@ async function testGenerationRecallFinalInjectionRebindsLatestMatchingUserFloor(
     assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
     assert.equal(
       harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
-      "稳定楼层输入",
+      "当前输入",
     );
     assert.equal(harness.metadataSaveCalls > 0, true);
   }
@@ -7769,7 +7775,7 @@ async function testGenerationRecallFinalInjectionBackfillsPersistedRecord() {
   assert.equal(harness.chat[0]?.extra?.bme_recall?.authoritativeInputUsed, true);
   assert.equal(
     harness.chat[0]?.extra?.bme_recall?.boundUserFloorText,
-    "稳定楼层输入",
+    "最终阶段补写目标",
   );
   assert.equal(harness.metadataSaveCalls > 0, true);
 }

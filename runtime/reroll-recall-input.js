@@ -183,6 +183,22 @@ export function createRerollRecallInput(deps = {}) {
 
     const selectedCandidate = sourceCandidates[0] || null;
     if (!selectedCandidate?.text) return null;
+    const usesStableChatFloor = [
+      "chat-tail-user",
+      "chat-latest-user",
+    ].includes(selectedCandidate.source);
+    const sentIntentMessageId = Number.isFinite(pendingSendIntent?.messageId)
+      ? Math.floor(Number(pendingSendIntent.messageId))
+      : null;
+    const confirmedSentIntentTarget =
+      selectedCandidate.source === "send-intent" &&
+      Number.isFinite(sentIntentMessageId) &&
+      sentIntentMessageId === targetUserMessageIndex &&
+      chat?.[sentIntentMessageId]?.is_user
+        ? sentIntentMessageId
+        : null;
+    const awaitingUserMessage =
+      !usesStableChatFloor && !Number.isFinite(confirmedSentIntentTarget);
 
     const trivialInputResult = deps.isTrivialUserInput(selectedCandidate.text);
 
@@ -203,12 +219,19 @@ export function createRerollRecallInput(deps = {}) {
     return {
       overrideUserMessage: selectedCandidate.text,
       generationType: "normal",
-      targetUserMessageIndex,
+      targetUserMessageIndex: awaitingUserMessage
+        ? null
+        : confirmedSentIntentTarget ?? targetUserMessageIndex,
       overrideSource: selectedCandidate.source,
       overrideSourceLabel: selectedCandidate.sourceLabel,
       overrideReason: selectedCandidate.reason,
       sourceCandidates,
-      includeSyntheticUserMessage: selectedCandidate.includeSyntheticUserMessage,
+      includeSyntheticUserMessage: awaitingUserMessage
+        ? true
+        : Number.isFinite(confirmedSentIntentTarget)
+          ? false
+          : selectedCandidate.includeSyntheticUserMessage,
+      awaitingUserMessage,
     };
   }
 

@@ -198,20 +198,33 @@ export function createRecallInputState(deps = {}) {
     if (!normalized) return createRecallInputRecord();
 
     const hash = hashRecallInput(normalized);
+    const recordedAt = Date.now();
+    const normalizedMessageId = Number.isFinite(messageId) ? messageId : null;
     const nextRecord = createRecallInputRecord({
       text: normalized,
       hash,
-      messageId: Number.isFinite(messageId) ? messageId : null,
+      messageId: normalizedMessageId,
       source,
-      at: Date.now(),
+      at: recordedAt,
     });
     setLastRecallSentUserMessage(nextRecord);
+
+    const pendingRecallSendIntent = getPendingRecallSendIntent();
+    if (isFreshRecallInputRecord(pendingRecallSendIntent)) {
+      setPendingRecallSendIntent(
+        createRecallInputRecord({
+          ...pendingRecallSendIntent,
+          messageId: normalizedMessageId,
+          sentAt: recordedAt,
+        }),
+      );
+    }
     if (typeof deps.recordMessageTraceSnapshot === "function") {
       deps.recordMessageTraceSnapshot({
         lastSentUserMessage: {
           text: normalized,
           hash,
-          messageId: Number.isFinite(messageId) ? messageId : null,
+          messageId: normalizedMessageId,
           source,
           updatedAt: new Date().toISOString(),
         },

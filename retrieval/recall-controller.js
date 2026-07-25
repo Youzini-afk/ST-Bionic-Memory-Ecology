@@ -2,6 +2,7 @@
 
 import { debugLog } from "../runtime/debug-logging.js";
 import { isSystemMessageForExtraction } from "../maintenance/chat-history.js";
+import { validatePersistedRecallForUserMessage } from "./recall-persistence.js";
 
 export function buildRecallRecentMessagesController(
   chat,
@@ -153,11 +154,9 @@ export function buildPersistedReuseRecallInput(recallInput = {}, record = {}, ru
 
 function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
   const generationType = normalizeRecallGenerationType(recallInput?.generationType);
-
   let targetUserMessageIndex = normalizeRecallTargetUserMessageIndex(
     recallInput?.targetUserMessageIndex,
   );
-
   const readPersistedRecallFromUserMessage = runtime.readPersistedRecallFromUserMessage;
   if (typeof readPersistedRecallFromUserMessage !== "function") return null;
 
@@ -177,25 +176,8 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
     for (let index = chat.length - 1; index >= 0; index--) {
       const message = chat[index];
       if (!message?.is_user) continue;
-      const candidateRecord = readPersistedRecallFromUserMessage(chat, index);
-      if (!candidateRecord?.injectionText) continue;
       const candidateUserFloorText = normalizeText(message?.mes || "");
-      const candidateBoundUserFloorText = normalizeText(
-        candidateRecord?.boundUserFloorText || "",
-      );
-      if (
-        candidateBoundUserFloorText &&
-        candidateUserFloorText !== candidateBoundUserFloorText
-      ) {
-        continue;
-      }
-      const candidateRecallInput = normalizeText(candidateRecord?.recallInput || "");
-      if (
-        currentRecallInputText === candidateUserFloorText ||
-        (candidateBoundUserFloorText &&
-          currentRecallInputText === candidateBoundUserFloorText) ||
-        (candidateRecallInput && currentRecallInputText === candidateRecallInput)
-      ) {
+      if (currentRecallInputText === candidateUserFloorText) {
         targetUserMessageIndex = index;
         break;
       }
@@ -208,69 +190,20 @@ function resolveReusablePersistedRecallRecord(chat, recallInput, runtime) {
 
   const targetMessage = Array.isArray(chat) ? chat[targetUserMessageIndex] : null;
   if (!targetMessage?.is_user) return null;
-
   const record = readPersistedRecallFromUserMessage(chat, targetUserMessageIndex);
-  if (!record?.injectionText) {
+  const currentUserFloorText = normalizeText(targetMessage.mes || "");
+  if (currentRecallInputText && currentRecallInputText !== currentUserFloorText) {
     return null;
   }
-
-  const currentUserFloorText = normalizeText(targetMessage?.mes || "");
-  const recordRecallInput = normalizeText(record?.recallInput || "");
-  const boundUserFloorText = normalizeText(record?.boundUserFloorText || "");
-
-  const matchesBoundUserFloor = Boolean(
-    currentUserFloorText &&
-      boundUserFloorText &&
-      currentUserFloorText === boundUserFloorText,
+  const validation = validatePersistedRecallForUserMessage(
+    chat,
+    targetUserMessageIndex,
+    record,
   );
-  const matchesRecallInput = Boolean(
-    currentRecallInputText &&
-      recordRecallInput &&
-      currentRecallInputText === recordRecallInput,
-  );
-  const matchesCurrentUserFloor = Boolean(
-    currentUserFloorText &&
-      boundUserFloorText &&
-      currentUserFloorText === boundUserFloorText,
-  );
-  const recordRecallInputMismatch = Boolean(
-    recordRecallInput &&
-      currentUserFloorText &&
-      currentUserFloorText !== recordRecallInput &&
-      currentRecallInputText !== recordRecallInput,
-  );
-  const boundUserFloorMismatch = Boolean(
-    boundUserFloorText && currentUserFloorText !== boundUserFloorText,
-  );
-  if (boundUserFloorMismatch) return null;
-
-  const matchesPersistedRecord = record.authoritativeInputUsed
-    ? matchesBoundUserFloor
-    : matchesRecallInput || matchesCurrentUserFloor;
-  const canReuseUnboundTargetRecord = Boolean(
-    currentUserFloorText &&
-      !boundUserFloorText &&
-      !recordRecallInput &&
-      !isActiveInputSource &&
-      String(record?.injectionText || "").trim(),
-  );
-  const canTrustUserFloorRecord = Boolean(
-    (!isActiveInputSource || isNoNewUserGeneration) &&
-      !boundUserFloorText &&
-      !recordRecallInputMismatch &&
-      (generationType !== "normal" || isTrustedUserFloorRecallSource(recallSource)),
-  );
-
-  if (
-    !matchesPersistedRecord &&
-    !canReuseUnboundTargetRecord &&
-    !canTrustUserFloorRecord
-  ) {
-    return null;
-  }
+  if (!validation.valid) return null;
 
   return {
-    record,
+    record: validation.record,
     targetUserMessageIndex,
   };
 }
@@ -313,6 +246,7 @@ export function resolveRecallInputController(
       boundUserFloorText: runtime.normalizeRecallInputText(
         override?.boundUserFloorText || "",
       ),
+      awaitingUserMessage: Boolean(override?.awaitingUserMessage),
       sourceCandidates: Array.isArray(override?.sourceCandidates)
         ? override.sourceCandidates.map((candidate) => ({ ...candidate }))
         : [],
@@ -374,6 +308,7 @@ export function resolveRecallInputController(
     reason: userMessage ? `${source || "unknown"}-selected` : "no-recall-input",
     authoritativeInputUsed: false,
     boundUserFloorText: tailUserText || latestUserText || "",
+    awaitingUserMessage: false,
     sourceCandidates: [],
     recentMessages: runtime.buildRecallRecentMessages(
       chat,
@@ -652,11 +587,9 @@ export async function runRecallController(runtime, options = {}) {
     });
   }
 
-  const earlyPersistedReuse = resolveReusablePersistedRecallRecord(
-    chat,
-    recallInput,
-    runtime,
-  );
+  const earlyPersistedReuse = options.forceFreshRecall
+    ? null
+    : resolveReusablePersistedRecallRecord(chat, recallInput, runtime);
   if (earlyPersistedReuse) {
     const effectiveRecallInput = buildPersistedReuseRecallInput(
       recallInput,

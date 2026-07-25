@@ -129,6 +129,7 @@ function resolveRecallPersistenceTargetUserMessageIndex(
     explicitTargetUserMessageIndex = null,
     candidateTexts = [],
     preferredRecord = null,
+    requireStableTarget = false,
   } = {},
 ) {
   if (!Array.isArray(chat) || chat.length === 0) return null;
@@ -141,6 +142,7 @@ function resolveRecallPersistenceTargetUserMessageIndex(
   if (Number.isFinite(explicitIndex) && chat[explicitIndex]?.is_user) {
     return explicitIndex;
   }
+  if (requireStableTarget) return null;
 
   const candidateHashes = buildRecallTargetCandidateHashes(candidateTexts);
   const latestUserIndex = resolveGenerationTargetUserMessageIndex(chat, {
@@ -639,6 +641,8 @@ export async function createGenerationRecallHarness(options = {}) {
     createRecallInputRecord,
     ensurePersistedRecallRecordForGeneration: (...args) =>
       finalRecallInjectionRuntime.ensurePersistedRecallRecordForGeneration(...args),
+    bindGenerationRecallTransactionToUserMessage: (...args) =>
+      finalRecallInjectionRuntime.bindGenerationRecallTransactionToUserMessage(...args),
     freezeHostGenerationInputSnapshot: (...args) =>
       recallInputState.freezeHostGenerationInputSnapshot(...args),
     getContext,
@@ -823,6 +827,8 @@ export async function createGenerationRecallHarness(options = {}) {
       finalRecallInjectionRuntime.persistRecallInjectionRecord(...args),
     ensurePersistedRecallRecordForGeneration: (...args) =>
       finalRecallInjectionRuntime.ensurePersistedRecallRecordForGeneration(...args),
+    bindGenerationRecallTransactionToUserMessage: (...args) =>
+      finalRecallInjectionRuntime.bindGenerationRecallTransactionToUserMessage(...args),
     reapplyPersistedRecallBlock: (...args) =>
       finalRecallInjectionRuntime.reapplyPersistedRecallBlock(...args),
     findRecentGenerationRecallTransactionForChat: (...args) =>

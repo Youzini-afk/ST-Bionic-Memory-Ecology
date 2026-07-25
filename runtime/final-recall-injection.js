@@ -1,3 +1,8 @@
+import {
+  buildRecallHistoryFingerprint,
+  validatePersistedRecallForUserMessage,
+} from "../retrieval/recall-persistence.js";
+
 export function createFinalRecallInjection(deps = {}) {
   const normalizeRecallInputText = (value = "") =>
     deps.normalizeRecallInputText?.(value) ?? String(value || "").trim();
@@ -13,6 +18,56 @@ export function createFinalRecallInjection(deps = {}) {
   const setRuntimeStatus = (value) => {
     deps.setRuntimeStatus?.(value);
   };
+
+  function writeRecallRecordToStableUserFloor(
+    chat,
+    targetUserMessageIndex,
+    payload = {},
+  ) {
+    if (
+      !Array.isArray(chat) ||
+      !Number.isFinite(targetUserMessageIndex) ||
+      !chat[targetUserMessageIndex]?.is_user
+    ) {
+      return null;
+    }
+
+    const targetUserFloorText = normalizeRecallInputText(
+      chat[targetUserMessageIndex].mes || "",
+    );
+    const existingRecord = deps.readPersistedRecallFromUserMessage(
+      chat,
+      targetUserMessageIndex,
+    );
+    const record = deps.buildPersistedRecallRecord(
+      {
+        ...payload,
+        boundUserFloorText: targetUserFloorText,
+        historyFingerprint: buildRecallHistoryFingerprint(
+          chat,
+          targetUserMessageIndex,
+        ),
+      },
+      existingRecord,
+    );
+    if (!String(record?.injectionText || "").trim()) return null;
+    if (
+      !deps.writePersistedRecallToUserMessage(
+        chat,
+        targetUserMessageIndex,
+        record,
+      )
+    ) {
+      return null;
+    }
+
+    deps.triggerChatMetadataSave(getContext(), { immediate: false });
+    deps.schedulePersistedRecallMessageUiRefresh();
+    return {
+      index: targetUserMessageIndex,
+      record,
+    };
+  }
 
   function persistRecallInjectionRecord({
     recallInput = {},
@@ -37,6 +92,7 @@ export function createFinalRecallInjection(deps = {}) {
           lastRecallSentUserMessage?.text,
         ],
         preferredRecord: lastRecallSentUserMessage,
+        requireStableTarget: Boolean(recallInput?.awaitingUserMessage),
       },
     );
 
@@ -58,13 +114,9 @@ export function createFinalRecallInjection(deps = {}) {
       return null;
     }
 
-    const targetUserFloorText = normalizeRecallInputText(
-      chat[resolvedTargetIndex]?.mes || "",
-    );
-    const boundUserFloorText = normalizeRecallInputText(
-      recallInput?.boundUserFloorText || targetUserFloorText,
-    );
-    const record = deps.buildPersistedRecallRecord(
+    const persisted = writeRecallRecordToStableUserFloor(
+      chat,
+      resolvedTargetIndex,
       {
         injectionText,
         selectedNodeIds: result?.selectedNodeIds || [],
@@ -74,11 +126,9 @@ export function createFinalRecallInjection(deps = {}) {
         tokenEstimate,
         manuallyEdited: false,
         authoritativeInputUsed: Boolean(recallInput?.authoritativeInputUsed),
-        boundUserFloorText,
       },
-      deps.readPersistedRecallFromUserMessage(chat, resolvedTargetIndex),
     );
-    if (!String(record?.injectionText || "").trim()) {
+    if (!persisted) {
       deps.debugPersistedRecallPersistence?.("无有效 injectionText，跳过持久化", {
         targetUserMessageIndex: resolvedTargetIndex,
         selectedNodeCount: Array.isArray(result?.selectedNodeIds)
@@ -87,30 +137,18 @@ export function createFinalRecallInjection(deps = {}) {
       });
       return null;
     }
-    if (!deps.writePersistedRecallToUserMessage(chat, resolvedTargetIndex, record)) {
-      deps.debugPersistedRecallPersistence?.("写入 user 楼层失败", {
-        targetUserMessageIndex: resolvedTargetIndex,
-      });
-      return null;
-    }
-
-    deps.triggerChatMetadataSave(getContext(), { immediate: false });
-    deps.schedulePersistedRecallMessageUiRefresh();
     deps.debugPersistedRecallPersistence?.(
       "召回记录已写入 user 楼层",
       {
         targetUserMessageIndex: resolvedTargetIndex,
-        injectionTextLength: String(record?.injectionText || "").length,
-        selectedNodeCount: Array.isArray(record?.selectedNodeIds)
-          ? record.selectedNodeIds.length
+        injectionTextLength: String(persisted.record?.injectionText || "").length,
+        selectedNodeCount: Array.isArray(persisted.record?.selectedNodeIds)
+          ? persisted.record.selectedNodeIds.length
           : 0,
       },
       `persist-success:${resolvedTargetIndex}`,
     );
-    return {
-      index: resolvedTargetIndex,
-      record,
-    };
+    return persisted;
   }
 
   function ensurePersistedRecallRecordForGeneration({
@@ -119,6 +157,7 @@ export function createFinalRecallInjection(deps = {}) {
     transaction = null,
     recallOptions = null,
     hookName = "",
+    stableTargetUserMessageIndex = null,
   } = {}) {
     const injectionText = String(recallResult?.injectionText || "").trim();
     if (
@@ -150,14 +189,25 @@ export function createFinalRecallInjection(deps = {}) {
         ? transaction.frozenRecallOptions
         : null;
     const lastRecallSentUserMessage = getLastRecallSentUserMessage();
+    const boundStableTargetUserMessageIndex = Number.isFinite(
+      transaction?.stableTargetUserMessageIndex,
+    )
+      ? Math.floor(Number(transaction.stableTargetUserMessageIndex))
+      : Number.isFinite(stableTargetUserMessageIndex)
+        ? Math.floor(Number(stableTargetUserMessageIndex))
+        : null;
+    const awaitingUserMessage = Boolean(
+      frozenRecallOptions?.awaitingUserMessage || recallOptions?.awaitingUserMessage,
+    );
     const targetUserMessageIndex = deps.resolveRecallPersistenceTargetUserMessageIndex(
       chat,
       {
         generationType,
         explicitTargetUserMessageIndex:
-          frozenRecallOptions?.targetUserMessageIndex ??
-          recallOptions?.targetUserMessageIndex ??
+          boundStableTargetUserMessageIndex ??
           recallOptions?.explicitTargetUserMessageIndex ??
+          recallOptions?.targetUserMessageIndex ??
+          frozenRecallOptions?.targetUserMessageIndex ??
           null,
         candidateTexts: [
           frozenRecallOptions?.overrideUserMessage,
@@ -172,6 +222,9 @@ export function createFinalRecallInjection(deps = {}) {
           lastRecallSentUserMessage?.text,
         ],
         preferredRecord: lastRecallSentUserMessage,
+        requireStableTarget:
+          awaitingUserMessage &&
+          !Number.isFinite(boundStableTargetUserMessageIndex),
       },
     );
 
@@ -204,20 +257,30 @@ export function createFinalRecallInjection(deps = {}) {
     const targetUserFloorText = normalizeRecallInputText(
       chat[targetUserMessageIndex]?.mes || "",
     );
-    const nextBoundUserFloorText = normalizeRecallInputText(
-      recallResult?.boundUserFloorText ||
-        frozenRecallOptions?.boundUserFloorText ||
-        recallOptions?.boundUserFloorText ||
-        targetUserFloorText ||
-        "",
+    const nextHistoryFingerprint = buildRecallHistoryFingerprint(
+      chat,
+      targetUserMessageIndex,
     );
     const existingBoundUserFloorText = normalizeRecallInputText(
       existingRecord?.boundUserFloorText || "",
     );
     const existingMetadataUpToDate =
       Boolean(existingRecord?.authoritativeInputUsed) === nextAuthoritativeInputUsed &&
-      (!nextBoundUserFloorText ||
-        existingBoundUserFloorText === nextBoundUserFloorText);
+      existingBoundUserFloorText === targetUserFloorText &&
+      String(existingRecord?.historyFingerprint || "") === nextHistoryFingerprint;
+    const existingValidation = validatePersistedRecallForUserMessage(
+      chat,
+      targetUserMessageIndex,
+      existingRecord,
+    );
+    if (existingRecord?.manuallyEdited && existingValidation.valid) {
+      return {
+        persisted: false,
+        reason: "manual-edit-preserved",
+        targetUserMessageIndex,
+        record: existingRecord,
+      };
+    }
     if (
       existingRecord &&
       String(existingRecord.injectionText || "").trim() === injectionText &&
@@ -233,7 +296,9 @@ export function createFinalRecallInjection(deps = {}) {
       };
     }
 
-    const nextRecord = deps.buildPersistedRecallRecord(
+    const persisted = writeRecallRecordToStableUserFloor(
+      chat,
+      targetUserMessageIndex,
       {
         injectionText,
         selectedNodeIds,
@@ -262,12 +327,10 @@ export function createFinalRecallInjection(deps = {}) {
         tokenEstimate: deps.estimateTokens(injectionText),
         manuallyEdited: false,
         authoritativeInputUsed: nextAuthoritativeInputUsed,
-        boundUserFloorText: nextBoundUserFloorText,
       },
-      existingRecord,
     );
 
-    if (!deps.writePersistedRecallToUserMessage(chat, targetUserMessageIndex, nextRecord)) {
+    if (!persisted) {
       return {
         persisted: false,
         reason: "write-failed",
@@ -276,8 +339,6 @@ export function createFinalRecallInjection(deps = {}) {
       };
     }
 
-    deps.triggerChatMetadataSave(getContext(), { immediate: false });
-    deps.schedulePersistedRecallMessageUiRefresh();
     deps.debugPersistedRecallPersistence?.(
       "最终阶段已补写召回记录",
       {
@@ -300,8 +361,52 @@ export function createFinalRecallInjection(deps = {}) {
       persisted: true,
       reason: "backfilled",
       targetUserMessageIndex,
-      record: nextRecord,
+      record: persisted.record,
     };
+  }
+
+  function bindGenerationRecallTransactionToUserMessage(
+    transaction,
+    userMessageIndex,
+  ) {
+    const chat = getContext()?.chat;
+    const targetUserMessageIndex = Number.isFinite(userMessageIndex)
+      ? Math.floor(Number(userMessageIndex))
+      : null;
+    if (
+      !transaction ||
+      !Array.isArray(chat) ||
+      !Number.isFinite(targetUserMessageIndex) ||
+      !chat[targetUserMessageIndex]?.is_user
+    ) {
+      return {
+        persisted: false,
+        reason: "target-unresolved",
+        targetUserMessageIndex: null,
+        record: null,
+      };
+    }
+
+    transaction.stableTargetUserMessageIndex = targetUserMessageIndex;
+    if (
+      transaction.frozenRecallOptions &&
+      typeof transaction.frozenRecallOptions === "object"
+    ) {
+      transaction.frozenRecallOptions.boundUserFloorText =
+        normalizeRecallInputText(chat[targetUserMessageIndex].mes || "");
+    }
+    transaction.updatedAt = Date.now();
+    return ensurePersistedRecallRecordForGeneration({
+      generationType: transaction.generationType || "normal",
+      recallResult: deps.getGenerationRecallTransactionResult(transaction),
+      transaction,
+      recallOptions: transaction.frozenRecallOptions || null,
+      hookName:
+        transaction.lastRecallResult?.hookName ||
+        transaction.lastRecallMeta?.hookName ||
+        "",
+      stableTargetUserMessageIndex: targetUserMessageIndex,
+    });
   }
 
   function rewriteRecallPayloadWithInjection(
@@ -531,30 +636,17 @@ export function createFinalRecallInjection(deps = {}) {
       return { applied: false, reason: "no-parent-floor" };
     }
 
-    const targetMessage = chat[targetUserMessageIndex];
-    if (!targetMessage?.is_user) {
-      return { applied: false, reason: "parent-not-user" };
-    }
-
-    const record = deps.readPersistedRecallFromUserMessage(
+    const validation = validatePersistedRecallForUserMessage(
       chat,
       targetUserMessageIndex,
+      deps.readPersistedRecallFromUserMessage(chat, targetUserMessageIndex),
     );
-    if (!record?.injectionText) {
-      return { applied: false, reason: "no-record" };
+    if (!validation.valid) {
+      return { applied: false, reason: validation.reason };
     }
 
-    const currentFloorText = normalizeRecallInputText(targetMessage.mes || "");
+    const record = validation.record;
     const bound = normalizeRecallInputText(record.boundUserFloorText || "");
-    const recInput = normalizeRecallInputText(record.recallInput || "");
-    if (bound) {
-      if (bound !== currentFloorText) {
-        return { applied: false, reason: "bound-mismatch" };
-      }
-    } else if (recInput && recInput !== currentFloorText) {
-      return { applied: false, reason: "legacy-recall-input-mismatch" };
-    }
-
     const injectionText = String(record.injectionText || "").trim();
     let transport = {
       applied: false,
@@ -805,6 +897,7 @@ export function createFinalRecallInjection(deps = {}) {
     targetUserMessageIndex = deps.resolveRecallPersistenceTargetUserMessageIndex(chat, {
       generationType,
       explicitTargetUserMessageIndex:
+        transaction?.stableTargetUserMessageIndex ??
         transaction?.frozenRecallOptions?.targetUserMessageIndex,
       candidateTexts: [
         transaction?.frozenRecallOptions?.overrideUserMessage,
@@ -814,17 +907,36 @@ export function createFinalRecallInjection(deps = {}) {
         lastRecallSentUserMessage?.text,
       ],
       preferredRecord: lastRecallSentUserMessage,
+      requireStableTarget:
+        Boolean(transaction?.frozenRecallOptions?.awaitingUserMessage) &&
+        !Number.isFinite(transaction?.stableTargetUserMessageIndex),
     });
     if (Number.isFinite(ensuredPersistence?.targetUserMessageIndex)) {
       targetUserMessageIndex = ensuredPersistence.targetUserMessageIndex;
     }
 
-    const persistedRecord = Number.isFinite(targetUserMessageIndex)
+    const persistedRecordCandidate = Number.isFinite(targetUserMessageIndex)
       ? deps.readPersistedRecallFromUserMessage(chat, targetUserMessageIndex)
       : null;
+    const persistedValidation = Number.isFinite(targetUserMessageIndex)
+      ? validatePersistedRecallForUserMessage(
+          chat,
+          targetUserMessageIndex,
+          persistedRecordCandidate,
+        )
+      : { valid: false, record: null };
+    const stableBoundUserFloorText = Number.isFinite(targetUserMessageIndex)
+      ? normalizeRecallInputText(chat[targetUserMessageIndex]?.mes || "")
+      : normalizeRecallInputText(
+          recallResult?.boundUserFloorText ||
+            transaction?.frozenRecallOptions?.boundUserFloorText ||
+            "",
+        );
     resolved = deps.resolveFinalRecallInjectionSource({
       freshRecallResult: recallResult,
-      persistedRecord,
+      persistedRecord: persistedValidation.valid
+        ? persistedValidation.record
+        : null,
     });
 
     if (resolved.source === "fresh" && deliveryMode === "deferred") {
@@ -944,11 +1056,7 @@ export function createFinalRecallInjection(deps = {}) {
         recallResult?.authoritativeInputUsed ??
           transaction?.frozenRecallOptions?.authoritativeInputUsed,
       ),
-      boundUserFloorText: String(
-        recallResult?.boundUserFloorText ||
-          transaction?.frozenRecallOptions?.boundUserFloorText ||
-          "",
-      ),
+      boundUserFloorText: stableBoundUserFloorText,
     });
 
     deps.refreshPanelLiveState();
@@ -970,11 +1078,7 @@ export function createFinalRecallInjection(deps = {}) {
         recallResult?.authoritativeInputUsed ??
           transaction?.frozenRecallOptions?.authoritativeInputUsed,
       ),
-      boundUserFloorText: String(
-        recallResult?.boundUserFloorText ||
-          transaction?.frozenRecallOptions?.boundUserFloorText ||
-          "",
-      ),
+      boundUserFloorText: stableBoundUserFloorText,
     };
     deps.storeGenerationRecallTransactionFinalResolution(transaction, finalResolution);
     return finalResolution;
@@ -983,6 +1087,7 @@ export function createFinalRecallInjection(deps = {}) {
   return {
     persistRecallInjectionRecord,
     ensurePersistedRecallRecordForGeneration,
+    bindGenerationRecallTransactionToUserMessage,
     rewriteRecallPayloadWithInjection,
     rewriteRecallPayloadWithAuthoritativeUserInput,
     reapplyPersistedRecallBlock,

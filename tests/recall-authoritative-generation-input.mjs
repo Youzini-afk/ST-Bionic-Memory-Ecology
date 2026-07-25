@@ -33,7 +33,7 @@ async function testSendIntentCanRemainAuthoritativeQueryWhenFlagEnabled() {
   assert.equal(harness.runRecallCalls.length, 1);
   assert.equal(harness.runRecallCalls[0].overrideUserMessage, "刚触发发送的新输入");
   assert.equal(harness.runRecallCalls[0].overrideSource, "send-intent");
-  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
+  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
   assert.equal(harness.runRecallCalls[0].includeSyntheticUserMessage, true);
 
   const transaction = [...harness.result.generationRecallTransactions.values()][0];
@@ -43,9 +43,9 @@ async function testSendIntentCanRemainAuthoritativeQueryWhenFlagEnabled() {
     "刚触发发送的新输入",
   );
   assert.equal(transaction.frozenRecallOptions.lockedSource, "send-intent");
-  assert.equal(transaction.frozenRecallOptions.targetUserMessageIndex, 0);
+  assert.equal(transaction.frozenRecallOptions.targetUserMessageIndex, null);
   assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
-  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "旧的 chat tail");
+  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "");
   assert.equal(transaction.frozenRecallOptions.includeSyntheticUserMessage, true);
 }
 
@@ -100,7 +100,7 @@ async function testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled() {
   assert.equal(recallContext.recallOptions.authoritativeInputUsed, true);
   assert.equal(
     recallContext.recallOptions.boundUserFloorText,
-    "楼层里的稳定用户输入",
+    "",
   );
   assert.equal(recallContext.recallOptions.includeSyntheticUserMessage, true);
   assert.ok(recallContext.recallOptions.cachedRecallPayload);
@@ -117,7 +117,7 @@ async function testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled() {
   assert.equal(harness.runRecallCalls[0].authoritativeInputUsed, true);
   assert.equal(
     harness.runRecallCalls[0].boundUserFloorText,
-    "楼层里的稳定用户输入",
+    "",
   );
   assert.equal(harness.runRecallCalls[0].includeSyntheticUserMessage, true);
   assert.ok(harness.runRecallCalls[0].cachedRecallPayload);
@@ -150,7 +150,7 @@ async function testAuthoritativeSendIntentStaysFrozenAcrossHooksWhenFlagEnabled(
   assert.equal(harness.runRecallCalls[0].overrideUserMessage, "第一次权威输入");
   assert.equal(harness.runRecallCalls[0].overrideSource, "send-intent");
   assert.equal(harness.runRecallCalls[0].authoritativeInputUsed, true);
-  assert.equal(harness.runRecallCalls[0].boundUserFloorText, "稳定 chat tail");
+  assert.equal(harness.runRecallCalls[0].boundUserFloorText, "");
 
   const transaction = [...harness.result.generationRecallTransactions.values()][0];
   assert.ok(transaction);
@@ -159,7 +159,7 @@ async function testAuthoritativeSendIntentStaysFrozenAcrossHooksWhenFlagEnabled(
     "第一次权威输入",
   );
   assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
-  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "稳定 chat tail");
+  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "");
   assert.equal(transaction.frozenRecallOptions.includeSyntheticUserMessage, true);
 }
 
@@ -185,7 +185,7 @@ async function testHostSnapshotCanRemainAuthoritativeQueryWhenFlagEnabled() {
     harness.runRecallCalls[0].overrideSource,
     "host-generation-lifecycle",
   );
-  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
+  assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
   assert.equal(harness.runRecallCalls[0].includeSyntheticUserMessage, true);
   assert.equal(
     JSON.stringify(
@@ -201,9 +201,9 @@ async function testHostSnapshotCanRemainAuthoritativeQueryWhenFlagEnabled() {
     transaction.frozenRecallOptions.lockedSource,
     "host-generation-lifecycle",
   );
-  assert.equal(transaction.frozenRecallOptions.targetUserMessageIndex, 0);
+  assert.equal(transaction.frozenRecallOptions.targetUserMessageIndex, null);
   assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
-  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "旧的 chat tail");
+  assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "");
   assert.equal(transaction.frozenRecallOptions.includeSyntheticUserMessage, true);
 }
 
@@ -679,29 +679,16 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
     "planner 原始输入",
   );
 
-  // Persist the fresh recall result and verify hasRecall would be true.
-  const freshRecallResult = {
-    status: "completed",
-    didRecall: true,
-    injectionText: "注入:planner 原始输入",
-    selectedNodeIds: ["node-fresh-1"],
-    recallInput: "planner 原始输入",
-    userMessage: "planner 原始输入",
-    source: "planner-handoff",
-    hookName: "GENERATION_AFTER_COMMANDS",
-  };
-  const persistResult = harness.result.ensurePersistedRecallRecordForGeneration({
-    generationType: "normal",
-    recallResult: freshRecallResult,
-    transaction: [...harness.result.generationRecallTransactions.values()][0],
-    recallOptions: harness.runRecallCalls[0],
-    hookName: "GENERATION_AFTER_COMMANDS",
-  });
+  // MESSAGE_SENT supplies the stable floor after recall has completed.
+  harness.chat.push({ is_user: true, mes: "planner 原始输入" });
+  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const persistResult =
+    harness.result.bindGenerationRecallTransactionToUserMessage(transaction, 1);
 
   assert.equal(
     persistResult.persisted,
     true,
-    "Fresh recall record must be persisted (so hasRecall would be true and the recall card would display)",
+    "Fresh recall must attach after MESSAGE_SENT supplies the stable user floor",
   );
   assert.ok(
     String(persistResult.record?.injectionText || "").trim(),

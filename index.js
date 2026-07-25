@@ -299,6 +299,7 @@ import {
   updateRecallCardData,
 } from "./ui/recall-message-ui.js?v=recall-tabs-v4";
 import {
+  buildRecallHistoryFingerprint,
   buildPersistedRecallRecord,
   bumpPersistedRecallGenerationCount,
   markPersistedRecallManualEdit,
@@ -5210,60 +5211,26 @@ function rebindRecallRecordToNewUserMessage(newUserMessageIndex) {
     !Number.isFinite(newUserMessageIndex) ||
     !chat[newUserMessageIndex]?.is_user
   ) {
-    return;
+    return null;
   }
-  if (readPersistedRecallFromUserMessage(chat, newUserMessageIndex)) {
-    return;
-  }
+  const activeGenerationId = String(
+    generationContextTracker.get?.({ allowStale: true })?.id || "",
+  ).trim();
+  if (!activeGenerationId) return null;
+
   const recentTransaction = findRecentGenerationRecallTransactionForChat();
-  const recallResult = getGenerationRecallTransactionResult(recentTransaction);
   if (
-    !recallResult ||
-    recallResult.status !== "completed" ||
-    !recallResult.didRecall ||
-    !String(recallResult.injectionText || "").trim()
+    !recentTransaction ||
+    recentTransaction.generationType !== "normal" ||
+    String(recentTransaction.generationId || "") !== activeGenerationId
   ) {
-    return;
+    return null;
   }
-  const frozenOpts = recentTransaction?.frozenRecallOptions;
-  const record = buildPersistedRecallRecord(
-    {
-      injectionText: String(recallResult.injectionText || "").trim(),
-      selectedNodeIds: recallResult.selectedNodeIds || [],
-      recallInput: String(
-        recallResult.recallInput ||
-          recallResult.userMessage ||
-          frozenOpts?.overrideUserMessage ||
-          frozenOpts?.userMessage ||
-          "",
-      ),
-      recallSource: String(
-        recallResult.source ||
-          frozenOpts?.lockedSource ||
-          frozenOpts?.overrideSource ||
-          "",
-      ),
-      hookName: String(
-        recallResult.hookName ||
-          recentTransaction?.lastRecallMeta?.hookName ||
-          "",
-      ),
-      tokenEstimate: estimateTokens(
-        String(recallResult.injectionText || "").trim(),
-      ),
-      manuallyEdited: false,
-      authoritativeInputUsed: Boolean(
-        recallResult.authoritativeInputUsed ?? frozenOpts?.authoritativeInputUsed,
-      ),
-      boundUserFloorText: String(
-        recallResult.boundUserFloorText || frozenOpts?.boundUserFloorText || "",
-      ),
-    },
-    null,
+
+  return finalRecallInjectionRuntime.bindGenerationRecallTransactionToUserMessage(
+    recentTransaction,
+    newUserMessageIndex,
   );
-  if (writePersistedRecallToUserMessage(chat, newUserMessageIndex, record)) {
-    triggerChatMetadataSave(getContext(), { immediate: false });
-  }
 }
 
 function resolveRecallPersistenceTargetUserMessageIndex(
@@ -5273,6 +5240,7 @@ function resolveRecallPersistenceTargetUserMessageIndex(
     explicitTargetUserMessageIndex = null,
     candidateTexts = [],
     preferredRecord = null,
+    requireStableTarget = false,
   } = {},
 ) {
   if (!Array.isArray(chat) || chat.length === 0) return null;
@@ -5285,6 +5253,7 @@ function resolveRecallPersistenceTargetUserMessageIndex(
   if (Number.isFinite(explicitIndex) && chat[explicitIndex]?.is_user) {
     return explicitIndex;
   }
+  if (requireStableTarget) return null;
 
   const candidateHashes = buildRecallTargetCandidateHashes(candidateTexts);
   const latestUserIndex = resolveGenerationTargetUserMessageIndex(chat, {
@@ -5383,6 +5352,7 @@ function ensurePersistedRecallRecordForGeneration({
   transaction = null,
   recallOptions = null,
   hookName = "",
+  stableTargetUserMessageIndex = null,
 } = {}) {
   return finalRecallInjectionRuntime.ensurePersistedRecallRecordForGeneration({
     generationType,
@@ -5390,6 +5360,7 @@ function ensurePersistedRecallRecordForGeneration({
     transaction,
     recallOptions,
     hookName,
+    stableTargetUserMessageIndex,
   });
 }
 function removeMessageRecallRecord(messageIndex) {
@@ -5644,6 +5615,7 @@ async function rerunRecallForMessage(messageIndex) {
     targetUserMessageIndex: messageIndex,
     includeSyntheticUserMessage: false,
     hookName: "MESSAGE_RECALL_BADGE_RERUN",
+    forceFreshRecall: true,
   });
   applyFinalRecallInjectionForGeneration({
     generationType: "history",
@@ -14843,6 +14815,10 @@ function persistPlannerRecallHandoffToUserMessage(newUserMessageIndex) {
     manuallyEdited: false,
     authoritativeInputUsed: true,
     boundUserFloorText: targetUserFloorText,
+    historyFingerprint: buildRecallHistoryFingerprint(
+      chat,
+      newUserMessageIndex,
+    ),
   });
   if (!writePersistedRecallToUserMessage(chat, newUserMessageIndex, record)) {
     return false;

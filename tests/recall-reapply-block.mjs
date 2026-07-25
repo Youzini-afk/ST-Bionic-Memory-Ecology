@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createFinalRecallInjection } from "../runtime/final-recall-injection.js";
+import { buildRecallHistoryFingerprint } from "../retrieval/recall-persistence.js";
 
 function normalizeRecallInputText(value = "") {
   return String(value || "").trim();
@@ -75,6 +76,9 @@ function createHarness({
 function userMessage(mes = "", record = null) {
   const message = { is_user: true, mes };
   if (record) {
+    if (Number(record.version) >= 2 && !record.historyFingerprint) {
+      record.historyFingerprint = buildRecallHistoryFingerprint([message], 0);
+    }
     message.extra = { bme_recall: record };
   }
   return message;
@@ -82,6 +86,7 @@ function userMessage(mes = "", record = null) {
 
 function recallRecord(overrides = {}) {
   return {
+    version: 2,
     injectionText: "[recall] stable memory",
     selectedNodeIds: ["node-a"],
     recallInput: "stable floor",
@@ -155,6 +160,28 @@ function recallRecord(overrides = {}) {
 }
 
 {
+  const chat = [
+    userMessage("earlier user"),
+    { is_user: false, mes: "earlier assistant", is_system: false },
+    userMessage("stable floor"),
+  ];
+  const record = recallRecord();
+  record.historyFingerprint = buildRecallHistoryFingerprint(chat, 2);
+  chat[2].extra = { bme_recall: record };
+  chat[1].mes = "edited earlier assistant";
+  const { calls, runtime } = createHarness({ chat, parentIndex: 2 });
+
+  const result = runtime.reapplyPersistedRecallBlock({
+    generationType: "regenerate",
+    generationContext: { kind: "no-new-user", type: "regenerate" },
+  });
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, "history-fingerprint-mismatch");
+  assert.deepEqual(calls.applied, []);
+}
+
+{
   const chat = [userMessage("stable floor")];
   const { calls, runtime } = createHarness({ chat, parentIndex: 0 });
 
@@ -171,6 +198,7 @@ function recallRecord(overrides = {}) {
 {
   const chat = [
     userMessage("legacy floor", recallRecord({
+      version: 1,
       injectionText: "legacy memory",
       recallInput: "legacy floor",
       boundUserFloorText: "",
@@ -183,14 +211,15 @@ function recallRecord(overrides = {}) {
     generationContext: { kind: "no-new-user", type: "regenerate" },
   });
 
-  assert.equal(result.applied, true);
-  assert.equal(result.source, "persisted");
-  assert.deepEqual(calls.applied, ["legacy memory"]);
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, "missing-history-fingerprint");
+  assert.deepEqual(calls.applied, []);
 }
 
 {
   const chat = [
     userMessage("edited legacy floor", recallRecord({
+      version: 1,
       injectionText: "stale legacy memory",
       recallInput: "old legacy floor",
       boundUserFloorText: "",
@@ -205,6 +234,27 @@ function recallRecord(overrides = {}) {
 
   assert.equal(result.applied, false);
   assert.equal(result.reason, "legacy-recall-input-mismatch");
+  assert.deepEqual(calls.applied, []);
+}
+
+{
+  const chat = [
+    userMessage("future floor", recallRecord({
+      version: 99,
+      injectionText: "future memory",
+      recallInput: "future floor",
+      boundUserFloorText: "future floor",
+    })),
+  ];
+  const { calls, runtime } = createHarness({ chat, parentIndex: 0 });
+
+  const result = runtime.reapplyPersistedRecallBlock({
+    generationType: "regenerate",
+    generationContext: { kind: "no-new-user", type: "regenerate" },
+  });
+
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, "unsupported-recall-version");
   assert.deepEqual(calls.applied, []);
 }
 

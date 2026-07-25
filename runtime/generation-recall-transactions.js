@@ -189,13 +189,13 @@ export function createGenerationRecallTransactions(deps = {}) {
           .filter((candidate) => candidate.text && candidate.source)
       : [];
 
-    let targetUserMessageIndex = Number.isFinite(
-      recallOptions?.targetUserMessageIndex,
-    )
-      ? Math.floor(Number(recallOptions.targetUserMessageIndex))
-      : deps.resolveGenerationTargetUserMessageIndex(chat, {
-          generationType: normalizedGenerationType,
-        });
+    let targetUserMessageIndex = recallOptions?.awaitingUserMessage
+      ? null
+      : Number.isFinite(recallOptions?.targetUserMessageIndex)
+        ? Math.floor(Number(recallOptions.targetUserMessageIndex))
+        : deps.resolveGenerationTargetUserMessageIndex(chat, {
+            generationType: normalizedGenerationType,
+          });
 
     if (!Number.isFinite(targetUserMessageIndex)) {
       if (
@@ -203,6 +203,8 @@ export function createGenerationRecallTransactions(deps = {}) {
           "normal" &&
         overrideUserMessage
       ) {
+        const authoritativeInputUsed =
+          shouldUseAuthoritativeGenerationRecallInput(recallOptions);
         return {
           generationType: normalizedGenerationType,
           targetUserMessageIndex: null,
@@ -214,11 +216,10 @@ export function createGenerationRecallTransactions(deps = {}) {
           lockedSource: source,
           lockedSourceLabel: sourceLabel,
           lockedReason: sourceReason,
-          authoritativeInputUsed: false,
+          authoritativeInputUsed,
           boundUserFloorText: "",
-          includeSyntheticUserMessage: Boolean(
-            recallOptions?.includeSyntheticUserMessage,
-          ),
+          includeSyntheticUserMessage: true,
+          awaitingUserMessage: Boolean(recallOptions?.awaitingUserMessage),
         };
       }
       return null;
@@ -271,6 +272,7 @@ export function createGenerationRecallTransactions(deps = {}) {
       authoritativeInputUsed: preserveAuthoritativeText,
       boundUserFloorText: targetUserMessageText,
       includeSyntheticUserMessage: preserveAuthoritativeText,
+      awaitingUserMessage: Boolean(recallOptions?.awaitingUserMessage),
     };
   }
 
@@ -512,6 +514,8 @@ export function createGenerationRecallTransactions(deps = {}) {
           overrideSourceLabel:
             plannerRecallHandoff.sourceLabel || "Planner handoff",
           overrideReason: "planner-handoff-reuse",
+          targetUserMessageIndex: null,
+          awaitingUserMessage: true,
           sourceCandidates: [
             {
               text: plannerRecallHandoff.rawUserInput,

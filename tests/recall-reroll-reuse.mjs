@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import {
+  buildRecallHistoryFingerprint,
   buildPersistedRecallRecord,
   readPersistedRecallFromUserMessage,
   writePersistedRecallToUserMessage,
@@ -24,6 +25,13 @@ import {
   isFreshRecallInputRecord,
 } from "../ui/ui-status.js";
 import { defaultSettings } from "../runtime/settings-defaults.js";
+
+function buildBoundRecallRecord(chat, userMessageIndex, payload = {}) {
+  return buildPersistedRecallRecord({
+    ...payload,
+    historyFingerprint: buildRecallHistoryFingerprint(chat, userMessageIndex),
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════
 // 1. ensurePersistedRecallRecordForGeneration: empty recallInput override
@@ -239,6 +247,141 @@ assert.equal(
 
 console.log("  ✓ ensurePersistedRecallRecordForGeneration skips when recallInput is populated");
 
+writePersistedRecallToUserMessage(harness.chat, 0, {
+  ...readPersistedRecallFromUserMessage(harness.chat, 0),
+  injectionText: "手工编辑后的召回",
+  manuallyEdited: true,
+});
+const manualPreserveResult = harness.result.ensurePersistedRecallRecordForGeneration({
+  generationType: "regenerate",
+  recallResult: {
+    ...mockRecallResult,
+    injectionText: "迟到的自动召回不应覆盖手工编辑",
+  },
+  transaction: { frozenRecallOptions },
+  recallOptions: frozenRecallOptions,
+  hookName: "GENERATION_AFTER_COMMANDS",
+});
+assert.equal(manualPreserveResult.reason, "manual-edit-preserved");
+assert.equal(
+  readPersistedRecallFromUserMessage(harness.chat, 0)?.injectionText,
+  "手工编辑后的召回",
+);
+
+console.log("  ✓ late generation finalization preserves a valid manual edit");
+
+const resultFirstHarness = await createGenerationRecallHarness({ realApplyFinal: true });
+resultFirstHarness.chat = [
+  { is_user: true, mes: "repeated text" },
+  { is_user: false, mes: "old assistant", is_system: false },
+];
+const pendingNormalOptions = {
+  generationType: "normal",
+  targetUserMessageIndex: null,
+  overrideUserMessage: "repeated text",
+  overrideSource: "send-intent",
+  awaitingUserMessage: true,
+};
+const pendingNormalResult = {
+  status: "completed",
+  didRecall: true,
+  injectionText: "memory for the new repeated message",
+  selectedNodeIds: ["node-new-repeat"],
+  recallInput: "repeated text",
+  source: "send-intent",
+};
+const prematureWrite = resultFirstHarness.result.ensurePersistedRecallRecordForGeneration({
+  generationType: "normal",
+  recallResult: pendingNormalResult,
+  transaction: { frozenRecallOptions: pendingNormalOptions },
+  recallOptions: pendingNormalOptions,
+});
+assert.equal(prematureWrite.reason, "target-unresolved");
+assert.equal(readPersistedRecallFromUserMessage(resultFirstHarness.chat, 0), null);
+
+resultFirstHarness.chat.push({ is_user: true, mes: "repeated text" });
+const resultFirstTransaction = {
+  generationType: "normal",
+  frozenRecallOptions: pendingNormalOptions,
+  lastRecallResult: pendingNormalResult,
+};
+const resultFirstWrite =
+  resultFirstHarness.result.bindGenerationRecallTransactionToUserMessage(
+    resultFirstTransaction,
+    2,
+  );
+assert.equal(resultFirstWrite.targetUserMessageIndex, 2);
+assert.equal(readPersistedRecallFromUserMessage(resultFirstHarness.chat, 0), null);
+assert.equal(
+  readPersistedRecallFromUserMessage(resultFirstHarness.chat, 2)?.injectionText,
+  "memory for the new repeated message",
+);
+
+const messageFirstHarness = await createGenerationRecallHarness({ realApplyFinal: true });
+messageFirstHarness.chat = [
+  { is_user: true, mes: "old floor" },
+  { is_user: false, mes: "old assistant", is_system: false },
+];
+messageFirstHarness.result.recordRecallSendIntent(
+  "new stable floor",
+  "send-intent",
+);
+messageFirstHarness.chat.push({ is_user: true, mes: "new stable floor" });
+messageFirstHarness.invokeOnMessageSent(2);
+assert.equal(messageFirstHarness.result.getPendingRecallSendIntent().messageId, 2);
+
+await messageFirstHarness.result.onGenerationAfterCommands("normal", {});
+assert.equal(messageFirstHarness.runRecallCalls.length, 1);
+assert.equal(messageFirstHarness.runRecallCalls[0].targetUserMessageIndex, 2);
+assert.equal(
+  readPersistedRecallFromUserMessage(messageFirstHarness.chat, 2)?.recallInput,
+  "new stable floor",
+);
+
+console.log("  ✓ result-first and message-first both attach once to the stable user floor");
+
+const authoritativePendingHarness = await createGenerationRecallHarness();
+Object.assign(authoritativePendingHarness.settings, {
+  ...defaultSettings,
+  enabled: true,
+  recallEnabled: true,
+  recallUseAuthoritativeGenerationInput: true,
+});
+authoritativePendingHarness.chat = [{ is_user: true, mes: "previous user floor" }];
+authoritativePendingHarness.result.recordRecallSendIntent(
+  "authoritative pending user input",
+  "send-intent",
+);
+const authoritativePendingOptions =
+  authoritativePendingHarness.result.buildGenerationAfterCommandsRecallInput(
+    "normal",
+    {},
+    authoritativePendingHarness.chat,
+  );
+const authoritativePendingContext =
+  authoritativePendingHarness.result.createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "normal",
+    recallOptions: authoritativePendingOptions,
+  });
+assert.equal(
+  authoritativePendingContext.transaction.frozenRecallOptions
+    .targetUserMessageIndex,
+  null,
+);
+assert.equal(
+  authoritativePendingContext.transaction.frozenRecallOptions
+    .authoritativeInputUsed,
+  true,
+);
+assert.equal(
+  authoritativePendingContext.transaction.frozenRecallOptions
+    .includeSyntheticUserMessage,
+  true,
+);
+
+console.log("  ✓ pending authoritative input stays unbound until MESSAGE_SENT");
+
 harness.chat = [
   { is_user: true, mes: "继续写摩耶山夜景" },
   { is_user: false, mes: "前一次回复。", is_system: false },
@@ -299,7 +442,7 @@ const rerollChat = [
   { is_user: false, mes: "好的，明天约好了。", is_system: false },
 ];
 
-const validRecord = buildPersistedRecallRecord({
+const validRecord = buildBoundRecallRecord(rerollChat, 0, {
   injectionText: "注入:明日去摩耶山看夜景",
   selectedNodeIds: ["node-a"],
   recallInput: "发送意图中的扩展文本，不等于当前用户楼层",
@@ -457,11 +600,56 @@ assert.equal(
 
 console.log("  ✓ runRecallController reuses persisted record on regenerate");
 
+const mutatedPrefixChat = [
+  { is_user: true, mes: "earlier user" },
+  { is_user: false, mes: "earlier assistant", is_system: false },
+  { is_user: true, mes: "stable reroll parent" },
+  { is_user: false, mes: "assistant to replace", is_system: false },
+];
+writePersistedRecallToUserMessage(
+  mutatedPrefixChat,
+  2,
+  buildBoundRecallRecord(mutatedPrefixChat, 2, {
+    injectionText: "persisted before prefix edit",
+    selectedNodeIds: ["node-prefix-old"],
+    recallInput: "stable reroll parent",
+    recallSource: "chat-last-user",
+    hookName: "GENERATION_AFTER_COMMANDS",
+    tokenEstimate: 4,
+    boundUserFloorText: "stable reroll parent",
+  }),
+);
+mutatedPrefixChat[1].mes = "edited earlier assistant";
+let mutatedPrefixRetrieveCalled = false;
+const mutatedPrefixRuntime = {
+  ...rerollRuntime,
+  getContext: () => ({ chat: mutatedPrefixChat, chatId: "chat-mutated-prefix" }),
+  retrieve: async () => {
+    mutatedPrefixRetrieveCalled = true;
+    return {
+      injectionText: "fresh after prefix edit",
+      selectedNodeIds: ["node-prefix-new"],
+    };
+  },
+};
+const mutatedPrefixResult = await runRecallController(mutatedPrefixRuntime, {
+  overrideUserMessage: "stable reroll parent",
+  generationType: "regenerate",
+  targetUserMessageIndex: 2,
+  overrideSource: "chat-last-user",
+  hookName: "GENERATION_AFTER_COMMANDS",
+  deliveryMode: "immediate",
+});
+assert.equal(mutatedPrefixRetrieveCalled, true);
+assert.equal(mutatedPrefixResult.reason, "召回完成");
+
+console.log("  ✓ reroll refreshes recall after an earlier history floor changes");
+
 const normalTypedReuseChat = [
   { is_user: true, mes: "重 Roll 但宿主仍标 normal" },
   { is_user: false, mes: "上一条回复。", is_system: false },
 ];
-const normalTypedReuseRecord = buildPersistedRecallRecord({
+const normalTypedReuseRecord = buildBoundRecallRecord(normalTypedReuseChat, 0, {
   injectionText: "注入:重 Roll 但宿主仍标 normal",
   selectedNodeIds: ["node-normal-type"],
   recallInput: "旧捕获文本",
@@ -522,7 +710,7 @@ rerollInputHarness.chat = [
 writePersistedRecallToUserMessage(
   rerollInputHarness.chat,
   0,
-  buildPersistedRecallRecord({
+  buildBoundRecallRecord(rerollInputHarness.chat, 0, {
     injectionText: "注入:重 roll replacement 应复用这一楼",
     selectedNodeIds: ["node-reroll-input"],
     recallInput: "重 roll replacement 应复用这一楼",
@@ -669,7 +857,7 @@ const activeInputBoundChat = [
   { is_user: true, mes: "主动新输入绑定记录也不应复用" },
   { is_user: false, mes: "上一条回复。", is_system: false },
 ];
-const activeInputBoundRecord = buildPersistedRecallRecord({
+const activeInputBoundRecord = buildBoundRecallRecord(activeInputBoundChat, 0, {
   injectionText: "旧注入:主动新输入绑定记录也不应复用",
   selectedNodeIds: ["node-active-bound-old"],
   recallInput: "主动新输入绑定记录也不应复用",
@@ -725,7 +913,7 @@ const mismatchedBoundChat = [
   { is_user: true, mes: "已经编辑过的新楼层" },
   { is_user: false, mes: "上一条回复。", is_system: false },
 ];
-const mismatchedBoundRecord = buildPersistedRecallRecord({
+const mismatchedBoundRecord = buildBoundRecallRecord(mismatchedBoundChat, 0, {
   injectionText: "旧注入:已经编辑过的新楼层",
   selectedNodeIds: ["node-mismatch-old"],
   recallInput: "已经编辑过的新楼层",
@@ -834,16 +1022,16 @@ const noReuseResult = await runRecallController(noReuseRuntime, {
 assert.equal(noReuseResult.status, "completed", "no-reuse should complete");
 assert.equal(
   noReuseRetrieveCalled,
-  false,
-  "retrieve() should NOT be called when target user floor has a persisted recall record",
+  true,
+  "legacy records without a history fingerprint must refresh once",
 );
 assert.equal(
   noReuseResult.reason,
-  "persisted-user-floor-reused",
-  "empty recallInput legacy records should still be reused from the user floor",
+  "召回完成",
+  "unverifiable legacy records must not bypass fresh recall",
 );
 
-console.log("  ✓ runRecallController reuses user-floor record with empty recallInput");
+console.log("  ✓ runRecallController refreshes legacy records without a history fingerprint");
 
 // ═══════════════════════════════════════════════════════════════
 // 5. runRecallController: normal generation below an assistant reuses user-floor record
@@ -853,7 +1041,7 @@ const assistantTailChat = [
   { is_user: true, mes: "今晚去海边看烟花" },
   { is_user: false, mes: "好，我会准备好相机。", is_system: false },
 ];
-const assistantTailRecord = buildPersistedRecallRecord({
+const assistantTailRecord = buildBoundRecallRecord(assistantTailChat, 0, {
   injectionText: "注入:今晚去海边看烟花",
   selectedNodeIds: ["node-fireworks"],
   recallInput: "今晚去海边看烟花",
