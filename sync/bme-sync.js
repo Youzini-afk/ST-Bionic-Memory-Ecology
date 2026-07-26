@@ -13,7 +13,6 @@ const BME_REMOTE_SYNC_NODE_CHUNK_SIZE = 2000;
 const BME_REMOTE_SYNC_EDGE_CHUNK_SIZE = 4000;
 const BME_REMOTE_SYNC_TOMBSTONE_CHUNK_SIZE = 2000;
 const BME_REMOTE_SYNC_CHUNK_GC_GRACE_MS = 24 * 60 * 60 * 1000;
-const BME_REMOTE_SYNC_CHUNK_GC_MAX_PENDING = 512;
 const BME_BACKUP_FILE_PREFIX = "ST-BME_backup_";
 const BME_BACKUP_MANIFEST_FILENAME = "ST-BME_BackupManifest.json";
 const BME_BACKUP_SCHEMA_VERSION = 1;
@@ -488,7 +487,8 @@ async function writeRemoteJsonFile(pathOrFilename = "", serializedPayload = "", 
   const serverPath = normalizeRemoteServerPath(pathOrFilename);
   const fileName = resolveRemoteFileName(serverPath);
   if (!serverPath || !fileName) throw new Error("remote filename is required");
-  const adapter = getAuthorityBlobAdapter(options);
+  const targetBackend = String(options.remoteWriteBackend || "").trim();
+  const adapter = targetBackend === "user-files" ? null : getAuthorityBlobAdapter(options);
   if (adapter) {
     const startedAt = readSyncTimingNow();
     try {
@@ -524,6 +524,7 @@ async function writeRemoteJsonFile(pathOrFilename = "", serializedPayload = "", 
           backend: "authority-blob",
         };
       }
+      throw new Error("authority blob write rejected");
     } catch (error) {
       const elapsedMs = readSyncTimingNow() - startedAt;
       recordAuthorityBlobFileEvent(options, {
@@ -535,8 +536,11 @@ async function writeRemoteJsonFile(pathOrFilename = "", serializedPayload = "", 
         error: error instanceof Error ? error.message : String(error || ""),
         elapsedMs: normalizeSyncTimingMs(elapsedMs),
       });
-      if (!readAuthorityBlobFailOpen(options)) throw error;
+      if (targetBackend === "authority-blob" || !readAuthorityBlobFailOpen(options)) throw error;
     }
+  }
+  if (targetBackend === "authority-blob") {
+    throw new Error("authority blob write unavailable");
   }
 
   const fetchImpl = getFetch(options);
@@ -578,7 +582,11 @@ async function readRemoteJsonFileResult(pathOrFilename = "", options = {}) {
     };
   }
 
-  const authorityResult = await readAuthorityBlobJsonFile(serverPath, options);
+  const targetBackend = String(options.remoteReadBackend || "").trim();
+  const authorityResult =
+    targetBackend === "user-files"
+      ? { available: false, exists: false, reason: "authority-blob-disabled" }
+      : await readAuthorityBlobJsonFile(serverPath, options);
   if (authorityResult.exists) {
     return {
       ok: true,
@@ -587,6 +595,22 @@ async function readRemoteJsonFileResult(pathOrFilename = "", options = {}) {
       path: authorityResult.path || serverPath,
       filename: fileName,
       payload: authorityResult.payload,
+      backend: "authority-blob",
+      timings: authorityResult.timings || {},
+    };
+  }
+  if (targetBackend === "authority-blob") {
+    return {
+      ok: false,
+      status: authorityResult.reason === "authority-blob-error" ? 0 : 404,
+      reason:
+        authorityResult.reason === "authority-blob-error"
+          ? "authority-blob-error"
+          : "not-found",
+      path: authorityResult.path || serverPath,
+      filename: fileName,
+      payload: null,
+      error: authorityResult.error || null,
       backend: "authority-blob",
       timings: authorityResult.timings || {},
     };
@@ -697,7 +721,8 @@ async function deleteRemoteJsonFile(pathOrFilename = "", options = {}) {
     };
   }
 
-  const adapter = getAuthorityBlobAdapter(options);
+  const targetBackend = String(options.remoteDeleteBackend || "").trim();
+  const adapter = targetBackend === "user-files" ? null : getAuthorityBlobAdapter(options);
   let authorityDeleted = false;
   if (adapter) {
     const startedAt = readSyncTimingNow();
@@ -707,6 +732,7 @@ async function deleteRemoteJsonFile(pathOrFilename = "", options = {}) {
         namespace: options.authorityBlobNamespace,
       });
       const elapsedMs = readSyncTimingNow() - startedAt;
+      if (result?.ok === false) throw new Error("authority blob delete rejected");
       authorityDeleted = result?.deleted === true;
       recordAuthorityBlobFileEvent(options, {
         action: "delete",
@@ -717,19 +743,21 @@ async function deleteRemoteJsonFile(pathOrFilename = "", options = {}) {
         elapsedMs: normalizeSyncTimingMs(elapsedMs),
       });
       if (authorityDeleted) {
-        try {
-          const fetchImpl = getFetch(options);
-          await fetchImpl("/api/files/delete", {
-            method: "POST",
-            headers: {
-              ...getRequestHeadersSafe(options),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              path: `/${serverPath}`,
-            }),
-          }).catch(() => null);
-        } catch {
+        if (targetBackend !== "authority-blob") {
+          try {
+            const fetchImpl = getFetch(options);
+            await fetchImpl("/api/files/delete", {
+              method: "POST",
+              headers: {
+                ...getRequestHeadersSafe(options),
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                path: `/${serverPath}`,
+              }),
+            }).catch(() => null);
+          } catch {
+          }
         }
         return {
           deleted: true,
@@ -749,7 +777,16 @@ async function deleteRemoteJsonFile(pathOrFilename = "", options = {}) {
         error: error instanceof Error ? error.message : String(error || ""),
         elapsedMs: normalizeSyncTimingMs(elapsedMs),
       });
-      if (!readAuthorityBlobFailOpen(options)) throw error;
+      if (targetBackend === "authority-blob" || !readAuthorityBlobFailOpen(options)) throw error;
+    }
+    if (targetBackend === "authority-blob") {
+      return {
+        deleted: false,
+        reason: "not-found",
+        path: serverPath,
+        filename: fileName,
+        backend: "authority-blob",
+      };
     }
   }
 
@@ -1343,17 +1380,26 @@ function collectRemoteSyncChunkFilenames(manifest = {}, baseFilename = "") {
   return filenames;
 }
 
-async function readPreviousRemoteSyncManifest(filename = "", options = {}) {
+async function readPreviousRemoteSyncHead(filename = "", options = {}) {
   const result = await readRemoteJsonFileResult(filename, options);
-  if (result.status === 404) return null;
+  if (result.status === 404) {
+    return {
+      payload: null,
+      manifest: null,
+      backend: String(options.remoteReadBackend || ""),
+    };
+  }
   if (!result.ok) {
-    console.warn("[ST-BME] 读取旧同步 manifest 失败，跳过旧 chunk 清理:", result.reason || result.error || result.status);
-    return null;
+    throw result.error || new Error(result.reason || `HTTP ${result.status || "unknown"}`);
   }
-  if (Number(result.payload?.formatVersion || 0) !== BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
-    return null;
-  }
-  return result.payload;
+  return {
+    payload: result.payload,
+    manifest:
+      Number(result.payload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2
+        ? result.payload
+        : null,
+    backend: String(result.backend || ""),
+  };
 }
 
 function normalizeRemoteSyncChunkGcPendingEntry(entry = {}, baseFilename = "") {
@@ -1390,6 +1436,7 @@ function buildRemoteSyncChunkGcState(
   nextManifest = null,
   baseFilename = "",
   options = {},
+  retiredFilenames = [],
 ) {
   if (Number(nextManifest?.formatVersion || 0) !== BME_REMOTE_SYNC_FORMAT_VERSION_V2) return null;
 
@@ -1400,6 +1447,9 @@ function buildRemoteSyncChunkGcState(
   );
   const nextChunks = collectRemoteSyncChunkFilenames(nextManifest, baseFilename);
   const pendingByFilename = readRemoteSyncChunkGcPending(previousManifest, baseFilename);
+  for (const filename of retiredFilenames) {
+    pendingByFilename.delete(resolveRemoteFileName(filename));
+  }
   for (const filename of nextChunks) {
     pendingByFilename.delete(filename);
   }
@@ -1418,8 +1468,7 @@ function buildRemoteSyncChunkGcState(
 
   const pending = [...pendingByFilename.values()]
     .filter((entry) => !nextChunks.has(entry.filename))
-    .sort((left, right) => left.eligibleAt - right.eligibleAt || left.filename.localeCompare(right.filename))
-    .slice(0, BME_REMOTE_SYNC_CHUNK_GC_MAX_PENDING);
+    .sort((left, right) => left.eligibleAt - right.eligibleAt || left.filename.localeCompare(right.filename));
 
   return {
     version: 1,
@@ -1429,7 +1478,7 @@ function buildRemoteSyncChunkGcState(
   };
 }
 
-function areRemoteSyncManifestsEquivalent(left = {}, right = {}) {
+function areRemoteSyncHeadsEquivalent(left = {}, right = {}) {
   return stableSerialize(left) === stableSerialize(right);
 }
 
@@ -1437,6 +1486,8 @@ async function cleanupEligibleRemoteSyncChunks(
   expectedManifest = null,
   baseFilename = "",
   options = {},
+  keepFilenames = [],
+  expectedBackend = "",
 ) {
   const cleanupStartedAt = readSyncTimingNow();
   const empty = (reason = "not-needed") => ({
@@ -1444,12 +1495,12 @@ async function cleanupEligibleRemoteSyncChunks(
     deleted: 0,
     skipped: 0,
     failed: 0,
+    retired: [],
     reason,
     ms: normalizeSyncTimingMs(readSyncTimingNow() - cleanupStartedAt),
   });
 
   if (options.disableRemoteSyncChunkCleanup === true) return empty("disabled");
-  if (getAuthorityBlobAdapter(options)) return empty("authority-blob-skip");
   if (Number(expectedManifest?.formatVersion || 0) !== BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
     return empty("non-v2-manifest");
   }
@@ -1457,27 +1508,54 @@ async function cleanupEligibleRemoteSyncChunks(
   const pending = readRemoteSyncChunkGcPending(expectedManifest, baseFilename);
   if (!pending.size) return empty("no-pending-chunks");
 
-  const currentResult = await readRemoteJsonFileResult(baseFilename, options);
+  const currentResult = await readRemoteJsonFileResult(baseFilename, {
+    ...options,
+    remoteReadBackend: expectedBackend,
+  });
   if (!currentResult.ok) return empty(currentResult.reason || "head-read-failed");
-  if (!areRemoteSyncManifestsEquivalent(currentResult.payload, expectedManifest)) {
+  if (!areRemoteSyncHeadsEquivalent(currentResult.payload, expectedManifest)) {
     return empty("remote-head-changed");
   }
 
   const nowMs = normalizeTimestamp(options.nowMs ?? options.currentTimeMs, Date.now());
   const currentChunks = collectRemoteSyncChunkFilenames(currentResult.payload, baseFilename);
+  const keep = new Set([...keepFilenames].map((filename) => resolveRemoteFileName(filename)));
   const eligibleChunks = [...pending.values()]
     .filter((entry) => entry.eligibleAt <= nowMs)
-    .filter((entry) => !currentChunks.has(entry.filename));
+    .filter((entry) => !currentChunks.has(entry.filename))
+    .filter((entry) => !keep.has(entry.filename));
 
   let deleted = 0;
   let skipped = 0;
   let failed = 0;
+  let headChanged = false;
+  const retired = [];
 
-  for (const entry of eligibleChunks) {
+  for (let index = 0; index < eligibleChunks.length; index += 1) {
+    const entry = eligibleChunks[index];
     try {
-      const result = await deleteRemoteJsonFile(entry.filename, options);
-      if (result.deleted) deleted += 1;
-      else skipped += 1;
+      // ponytail: ST user-files has no conditional delete; rechecking the head only narrows
+      // this race. Server-side CAS/conditional delete is required for linearizable GC.
+      const latestHead = await readRemoteJsonFileResult(baseFilename, {
+        ...options,
+        remoteReadBackend: expectedBackend,
+      });
+      if (!latestHead.ok || !areRemoteSyncHeadsEquivalent(latestHead.payload, expectedManifest)) {
+        skipped += eligibleChunks.length - index;
+        headChanged = true;
+        break;
+      }
+      const result = await deleteRemoteJsonFile(entry.filename, {
+        ...options,
+        remoteDeleteBackend: expectedBackend,
+      });
+      if (result.deleted) {
+        deleted += 1;
+        retired.push(entry.filename);
+      } else {
+        skipped += 1;
+        if (result.reason === "not-found") retired.push(entry.filename);
+      }
     } catch (error) {
       failed += 1;
       console.warn("[ST-BME] 清理旧同步 chunk 失败:", {
@@ -1492,8 +1570,59 @@ async function cleanupEligibleRemoteSyncChunks(
     deleted,
     skipped,
     failed,
+    retired,
+    reason: failed > 0 ? "partial" : headChanged ? "remote-head-changed" : "completed",
     ms: normalizeSyncTimingMs(readSyncTimingNow() - cleanupStartedAt),
   };
+}
+
+function hasEligibleRemoteSyncChunks(
+  manifest = null,
+  baseFilename = "",
+  options = {},
+) {
+  if (
+    options.disableRemoteSyncChunkCleanup === true
+  ) {
+    return false;
+  }
+  const nowMs = normalizeTimestamp(options.nowMs ?? options.currentTimeMs, Date.now());
+  const currentChunks = collectRemoteSyncChunkFilenames(manifest, baseFilename);
+  return [...readRemoteSyncChunkGcPending(manifest, baseFilename).values()]
+    .some((entry) => entry.eligibleAt <= nowMs && !currentChunks.has(entry.filename));
+}
+
+async function compensateAbandonedRemoteSyncChunks(
+  chunks = [],
+  baseFilename = "",
+  options = {},
+) {
+  const hasAuthorityAdapter = Boolean(getAuthorityBlobAdapter(options));
+  const abandoned = new Map();
+  for (const chunk of chunks) {
+    const filename = resolveRemoteFileName(chunk?.filename || chunk);
+    const backend = String(chunk?.backend || "").trim();
+    if (!isRemoteSyncChunkFilenameForBase(filename, baseFilename)) continue;
+    if (hasAuthorityAdapter && !backend) continue;
+    abandoned.set(filename, backend || "user-files");
+  }
+  if (!abandoned.size) return;
+
+  for (const [filename, backend] of abandoned) {
+    const currentResult = await readRemoteJsonFileResult(baseFilename, {
+      ...options,
+      remoteReadBackend: backend,
+    });
+    if (!currentResult.ok && currentResult.status !== 404) continue;
+    if (collectRemoteSyncChunkFilenames(currentResult.payload, baseFilename).has(filename)) continue;
+    try {
+      await deleteRemoteJsonFile(filename, {
+        ...options,
+        remoteDeleteBackend: backend,
+      });
+    } catch {
+    }
+  }
 }
 
 function chunkArray(records = [], chunkSize = 1000) {
@@ -2406,24 +2535,6 @@ async function invokeSyncAppliedHook(options = {}, payload = {}) {
   }
 }
 
-async function sanitizeFilename(fileName, options = {}) {
-  const finalFallback = normalizeRemoteFilenameCandidate(
-    fileName,
-    "ST-BME_sync_unknown.json",
-  );
-
-  if (options.disableRemoteSanitize) {
-    return finalFallback;
-  }
-
-  try {
-    const sanitized = await requestSanitizedFilename(fileName, options);
-    return normalizeRemoteFilenameCandidate(sanitized, finalFallback);
-  } catch {
-    return finalFallback;
-  }
-}
-
 async function requestSanitizedFilename(fileName, options = {}) {
   if (options.disableRemoteSanitize) {
     return String(fileName || "");
@@ -2473,13 +2584,7 @@ async function resolveSyncFilename(chatId, options = {}) {
     throw new Error("chatId 不能为空");
   }
 
-  if (sanitizedFilenameByChatId.has(normalizedChatId)) {
-    return sanitizedFilenameByChatId.get(normalizedChatId);
-  }
-
-  const rawFileName = buildSyncFilename(normalizedChatId);
-  const sanitized = await sanitizeFilename(rawFileName, options);
-  const finalName = normalizeRemoteFilenameCandidate(sanitized, rawFileName);
+  const finalName = buildSyncFilename(normalizedChatId);
   rememberResolvedSyncFilename(normalizedChatId, finalName);
   return finalName;
 }
@@ -2502,10 +2607,7 @@ async function resolveSyncFilenameCandidates(chatId, options = {}) {
   }
 
   const primaryRawFileName = buildSyncFilename(normalizedChatId);
-  const primarySanitized = await sanitizeFilename(primaryRawFileName, options);
-  pushCandidate(
-    normalizeRemoteFilenameCandidate(primarySanitized, primaryRawFileName),
-  );
+  pushCandidate(primaryRawFileName);
 
   const legacyRawFileName = buildLegacyRawSyncFilename(normalizedChatId);
   if (legacyRawFileName !== primaryRawFileName) {
@@ -2594,6 +2696,7 @@ async function readRemoteSnapshot(chatId, options = {}) {
           {
             ...options,
             filename,
+            remoteReadBackend: result.backend,
           },
         );
         snapshot = manifestResult.snapshot;
@@ -2610,6 +2713,11 @@ async function readRemoteSnapshot(chatId, options = {}) {
         status: "ok",
         filename,
         snapshot,
+        backend: String(result.backend || ""),
+        manifest:
+          Number(remotePayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2
+            ? remotePayload
+            : null,
         timings: finalizeSyncTimings(
           { resolveCandidatesMs, networkMs, parseMs, chunkReadMs, normalizeMs, authorityBlobMs },
           readStartedAt,
@@ -2728,8 +2836,26 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   const normalizedSnapshot = normalizeSyncSnapshot(snapshot, normalizedChatId);
   const filename = await resolveSyncFilename(normalizedChatId, options);
+  let remoteBackend = "user-files";
+  if (getAuthorityBlobAdapter(options)) {
+    const authorityProbe = await readRemoteJsonFileResult(filename, {
+      ...options,
+      remoteReadBackend: "authority-blob",
+    });
+    if (authorityProbe.ok || authorityProbe.status === 404) {
+      remoteBackend = "authority-blob";
+    } else if (!readAuthorityBlobFailOpen(options)) {
+      throw authorityProbe.error || new Error(authorityProbe.reason || "authority-blob-error");
+    }
+  }
+  const remoteOptions = {
+    ...options,
+    remoteReadBackend: remoteBackend,
+    remoteWriteBackend: remoteBackend,
+  };
   const previousManifestReadStartedAt = readSyncTimingNow();
-  const previousManifest = await readPreviousRemoteSyncManifest(filename, options);
+  const previousHead = await readPreviousRemoteSyncHead(filename, remoteOptions);
+  const previousManifest = previousHead.manifest;
   const previousManifestReadMs = readSyncTimingNow() - previousManifestReadStartedAt;
   const envelopeBuildStartedAt = readSyncTimingNow();
   const syncEnvelope = buildRemoteSyncEnvelopeV2(
@@ -2737,34 +2863,93 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     normalizedChatId,
     filename,
   );
+  const nextChunkFilenames = collectRemoteSyncChunkFilenames(syncEnvelope.manifest, filename);
+  const cleanupResult = await cleanupEligibleRemoteSyncChunks(
+    previousManifest,
+    filename,
+    remoteOptions,
+    nextChunkFilenames,
+    previousHead.backend,
+  );
   syncEnvelope.manifest.chunkGc = buildRemoteSyncChunkGcState(
     previousManifest,
     syncEnvelope.manifest,
     filename,
     options,
+    cleanupResult.retired,
   );
   const envelopeBuildMs = readSyncTimingNow() - envelopeBuildStartedAt;
   let chunkSerializeMs = 0;
   let chunkUploadMs = 0;
-  for (const chunk of syncEnvelope.chunks) {
-    const serializeStartedAt = readSyncTimingNow();
-    const chunkPayload = JSON.stringify(chunk.payload, null, 2);
-    chunkSerializeMs += readSyncTimingNow() - serializeStartedAt;
-    const uploadStartedAt = readSyncTimingNow();
-    await writeRemoteJsonFile(chunk.filename, chunkPayload, options);
-    chunkUploadMs += readSyncTimingNow() - uploadStartedAt;
+  let manifestSerializeMs = 0;
+  let manifestUploadMs = 0;
+  let uploadResult = null;
+  let manifestPublished = false;
+  const protectedChunks = new Set([
+    ...collectRemoteSyncChunkFilenames(previousManifest, filename),
+    ...readRemoteSyncChunkGcPending(previousManifest, filename).keys(),
+  ]);
+  const attemptedNewChunks = new Map();
+
+  try {
+    for (const chunk of syncEnvelope.chunks) {
+      if (!protectedChunks.has(chunk.filename)) attemptedNewChunks.set(chunk.filename, "");
+      const serializeStartedAt = readSyncTimingNow();
+      const chunkPayload = JSON.stringify(chunk.payload, null, 2);
+      chunkSerializeMs += readSyncTimingNow() - serializeStartedAt;
+      const uploadStartedAt = readSyncTimingNow();
+      const chunkUploadResult = await writeRemoteJsonFile(
+        chunk.filename,
+        chunkPayload,
+        remoteOptions,
+      );
+      if (attemptedNewChunks.has(chunk.filename)) {
+        attemptedNewChunks.set(chunk.filename, String(chunkUploadResult?.backend || ""));
+      }
+      chunkUploadMs += readSyncTimingNow() - uploadStartedAt;
+    }
+
+    const headBeforePublish = await readRemoteJsonFileResult(filename, remoteOptions);
+    if (!headBeforePublish.ok && headBeforePublish.status !== 404) {
+      throw headBeforePublish.error || new Error(headBeforePublish.reason || "remote-head-read-failed");
+    }
+    const headBeforePublishPayload = headBeforePublish.ok ? headBeforePublish.payload : null;
+    if (!areRemoteSyncHeadsEquivalent(headBeforePublishPayload, previousHead.payload)) {
+      throw Object.assign(new Error("remote sync head changed during upload"), {
+        code: "REMOTE_SYNC_HEAD_CHANGED",
+      });
+    }
+
+    const manifestSerializeStartedAt = readSyncTimingNow();
+    const manifestPayload = JSON.stringify(syncEnvelope.manifest, null, 2);
+    manifestSerializeMs = readSyncTimingNow() - manifestSerializeStartedAt;
+    const manifestUploadStartedAt = readSyncTimingNow();
+    uploadResult = await writeRemoteJsonFile(filename, manifestPayload, remoteOptions);
+    manifestPublished = true;
+    manifestUploadMs = readSyncTimingNow() - manifestUploadStartedAt;
+
+    const publishedHead = await readRemoteJsonFileResult(filename, remoteOptions);
+    if (!publishedHead.ok || !areRemoteSyncHeadsEquivalent(publishedHead.payload, syncEnvelope.manifest)) {
+      throw Object.assign(new Error("remote sync head was replaced after upload"), {
+        code: "REMOTE_SYNC_HEAD_REPLACED",
+      });
+    }
+  } catch (error) {
+    // Once another writer is observed, or this head write returned successfully, deleting
+    // staged chunks can corrupt the winning head. The backend needs conditional delete to
+    // make that cleanup safe; leave those rare orphans for explicit/server-side cleanup.
+    if (!manifestPublished && error?.code !== "REMOTE_SYNC_HEAD_CHANGED") {
+      await compensateAbandonedRemoteSyncChunks(
+        [...attemptedNewChunks].map(([chunkFilename, backend]) => ({
+          filename: chunkFilename,
+          backend,
+        })),
+        filename,
+        remoteOptions,
+      );
+    }
+    throw error;
   }
-  const manifestSerializeStartedAt = readSyncTimingNow();
-  const manifestPayload = JSON.stringify(syncEnvelope.manifest, null, 2);
-  const manifestSerializeMs = readSyncTimingNow() - manifestSerializeStartedAt;
-  const manifestUploadStartedAt = readSyncTimingNow();
-  const uploadResult = await writeRemoteJsonFile(filename, manifestPayload, options);
-  const manifestUploadMs = readSyncTimingNow() - manifestUploadStartedAt;
-  const cleanupResult = await cleanupEligibleRemoteSyncChunks(
-    syncEnvelope.manifest,
-    filename,
-    options,
-  );
 
   return {
     filename,
@@ -3732,6 +3917,21 @@ export async function syncNow(chatId, options = {}) {
     }
 
     if (localRevision === remoteRevision && !localDirty && !options.forceMerge) {
+      if (
+        hasEligibleRemoteSyncChunks(
+          remoteResult.manifest,
+          remoteResult.filename,
+          options,
+        )
+      ) {
+        const uploadResult = await upload(normalizedChatId, options);
+        return {
+          synced: Boolean(uploadResult.uploaded),
+          chatId: normalizedChatId,
+          action: uploadResult.uploaded ? "cleanup" : "none",
+          ...uploadResult,
+        };
+      }
       return {
         synced: true,
         chatId: normalizedChatId,
@@ -3926,22 +4126,41 @@ async function deleteRemoteSyncFileUnlocked(chatId, options = {}) {
       normalizedChatId,
       options,
     );
+    const remoteBackends = getAuthorityBlobAdapter(options)
+      ? ["authority-blob", "user-files"]
+      : ["user-files"];
+    const targets = filenames.flatMap((filename) =>
+      remoteBackends.map((backend) => ({ filename, backend }))
+    );
     let lastNotFoundFilename = filenames[0] || "";
+    const deletedFilenames = [];
+    const deletedBackends = [];
+    const cleanupTotals = {
+      attempted: 0,
+      deleted: 0,
+      skipped: 0,
+      failed: 0,
+    };
+    const cleanupReasons = [];
+    let firstFailure = null;
 
-    for (const filename of filenames) {
+    for (const { filename, backend } of targets) {
+      const remoteOptions = {
+        ...options,
+        remoteReadBackend: backend,
+        remoteDeleteBackend: backend,
+      };
       const chunkFilenamesToDelete = new Set();
       let cleanupAttempted = 0;
       let cleanupDeleted = 0;
       let cleanupSkipped = 0;
       let cleanupFailed = 0;
       let cleanupReason = "not-needed";
-      const manifestReadResult = await readRemoteJsonFileResult(filename, options);
+      const manifestReadResult = await readRemoteJsonFileResult(filename, remoteOptions);
       if (manifestReadResult.status === 404) {
         cleanupReason = "manifest-not-found";
       } else if (!manifestReadResult.ok) {
-        return {
-          deleted: false,
-          chatId: normalizedChatId,
+        firstFailure ||= {
           filename,
           reason: "manifest-read-error",
           status: manifestReadResult.status,
@@ -3954,6 +4173,7 @@ async function deleteRemoteSyncFileUnlocked(chatId, options = {}) {
             reason: manifestReadResult.reason || "manifest-read-error",
           },
         };
+        continue;
       } else {
         const manifestPayload = manifestReadResult.payload;
         if (Number(manifestPayload?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2) {
@@ -3968,13 +4188,23 @@ async function deleteRemoteSyncFileUnlocked(chatId, options = {}) {
           cleanupReason = "non-v2-manifest";
         }
       }
-      const deleteResult = await deleteRemoteJsonFile(filename, options);
+      let deleteResult;
+      try {
+        deleteResult = await deleteRemoteJsonFile(filename, remoteOptions);
+      } catch (error) {
+        firstFailure ||= {
+          filename,
+          reason: "delete-error",
+          error,
+        };
+        continue;
+      }
       if (!deleteResult.deleted) {
         lastNotFoundFilename = filename;
         continue;
       }
 
-      const headAfterDelete = await readRemoteJsonFileResult(filename, options);
+      const headAfterDelete = await readRemoteJsonFileResult(filename, remoteOptions);
       if (headAfterDelete.ok) {
         cleanupReason = "remote-head-recreated";
       } else if (headAfterDelete.status !== 404) {
@@ -3987,7 +4217,7 @@ async function deleteRemoteSyncFileUnlocked(chatId, options = {}) {
         for (const chunkFilename of chunkFilenamesToDelete) {
           cleanupAttempted += 1;
           try {
-            const chunkDeleteResult = await deleteRemoteJsonFile(chunkFilename, options);
+            const chunkDeleteResult = await deleteRemoteJsonFile(chunkFilename, remoteOptions);
             if (chunkDeleteResult.deleted) cleanupDeleted += 1;
             else cleanupSkipped += 1;
           } catch {
@@ -3996,19 +4226,41 @@ async function deleteRemoteSyncFileUnlocked(chatId, options = {}) {
         }
       }
 
+      if (!deletedFilenames.includes(filename)) deletedFilenames.push(filename);
+      deletedBackends.push(String(deleteResult.backend || ""));
+      cleanupTotals.attempted += cleanupAttempted;
+      cleanupTotals.deleted += cleanupDeleted;
+      cleanupTotals.skipped += cleanupSkipped;
+      cleanupTotals.failed += cleanupFailed;
+      cleanupReasons.push(cleanupReason);
+    }
+
+    if (deletedFilenames.length) {
       sanitizedFilenameByChatId.delete(normalizedChatId);
       return {
         deleted: true,
         chatId: normalizedChatId,
-        filename,
-        backend: String(deleteResult.backend || ""),
+        filename: deletedFilenames[0],
+        filenames: deletedFilenames,
+        backend: deletedBackends[0],
+        reason: firstFailure ? "partial" : "deleted",
         cleanup: {
-          attempted: cleanupAttempted,
-          deleted: cleanupDeleted,
-          skipped: cleanupSkipped,
-          failed: cleanupFailed,
-          reason: cleanupReason,
+          ...cleanupTotals,
+          reason:
+            cleanupReasons.length === 1
+              ? cleanupReasons[0]
+              : firstFailure
+                ? "partial"
+                : "multiple-candidates",
         },
+      };
+    }
+
+    if (firstFailure) {
+      return {
+        deleted: false,
+        chatId: normalizedChatId,
+        ...firstFailure,
       };
     }
 

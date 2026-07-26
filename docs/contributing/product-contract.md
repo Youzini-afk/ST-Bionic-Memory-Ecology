@@ -35,7 +35,7 @@ This contract protects the complete ST-BME product while its internals are repla
 - A chat has one durable graph authority at a time. An unavailable Authority-owned graph fails closed instead of silently writing another primary.
 - A successful save means the selected durable authority accepted the revision. Caches, metadata, diagnostics, backups, and Cloud Sync do not turn a failed primary commit into success.
 - Cloud Sync is the multi-device replication layer for browser-local persistence, not a separate storage mode. Local commits remain valid while offline; remote upload, download, and merge converge per chat.
-- The remote sync head is stable per chat, published only after all referenced chunks exist. Unreferenced remote chunks must be recoverable after interrupted uploads and garbage collection must keep remote file growth bounded on every supported backend.
+- The remote sync head is stable per chat, published only after all referenced chunks exist, and a head is read with chunks from the same backend. Superseded chunks stay in an untruncated durable GC ledger until deletion succeeds or absence is confirmed, and idle automatic checks retire due garbage without requiring another graph mutation. Interrupted publications receive best-effort cleanup by known filename; the browser must not claim CAS, linearizability, or discovery of unreferenced historical orphans when the backend API provides none.
 
 ## Authority boundary
 
