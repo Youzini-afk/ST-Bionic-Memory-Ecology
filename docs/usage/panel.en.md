@@ -85,7 +85,7 @@ The config page contains these workspaces:
 
 - **Feature toggles**
   - Main capabilities such as extraction, recall, consolidation, summary, reflection, compression, forgetting, and probabilistic recall.
-  - Cloud storage mode.
+  - Cloud Sync behavior; local OPFS / IndexedDB primary storage always remains enabled.
   - World info filtering.
   - Hide old turns and limit rendered chat turns.
 

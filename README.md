@@ -135,7 +135,7 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 | 范围重建 | 操作 → 向量操作 | 只重建指定楼层范围相关节点 |
 | 直连重嵌 | 操作 → 向量操作 | 使用直连 embedding 配置重嵌 |
 | 导出 / 导入 / 重建图谱 | 操作 → 图谱管理 | 图谱管理与危险操作 |
-| 备份 / 恢复云端 | 配置 → 云端存储模式 | 手动模式下主动上传/恢复 |
+| 备份 / 恢复云端 | 配置 → 云端同步 | 手动备份方式下主动上传/恢复当前聊天副本 |
 | 取消全部隐藏 | 配置 → 隐藏旧楼层 | 恢复 ST-BME 隐藏的楼层 |
 
 > 切换 embedding 模式或模型后，建议执行"重建向量"。各操作的细节和危险提示见 [配置参考](docs/usage/configuration.md) 和 [面板导览](docs/usage/panel.md)。
@@ -145,7 +145,7 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ## 数据存储与历史安全（要点）
 
 - **本地优先**：主存储使用 IndexedDB，按聊天隔离（`STBME_{chatId}`），热路径用增量提交。
-- **云端镜像**：复用 SillyTavern 文件 API，支持自动/手动模式，不需要自定义后端。
+- **云端副本**：Cloud Sync 位于本地主存储之上，复用 SillyTavern 文件 API，支持自动同步/手动备份，不需要自定义后端。
 - **历史安全**：检测删楼/编辑/swipe，优先回滚重放、必要时全量重建；对渲染切片截断有保护，避免误清空。
 - **向前兼容**：耐久快照顶层结构冻结、宽容解析、就地升级——扩展数据结构是"加字段"，不是大迁移。
 

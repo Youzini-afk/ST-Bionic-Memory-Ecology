@@ -5,6 +5,7 @@ const MENU_ENTRY_RETRY_MS = 400;
 const MENU_ENTRY_MAX_ATTEMPTS = 30;
 const OPTIONS_MENU_ENTRY_ID = "option_st_bme_panel";
 const EXTENSIONS_MENU_ENTRY_ID = "st_bme_extensions_menu_entry";
+const panelBridgeInitPromises = new WeakMap();
 
 function resolvePanelTheme(settings) {
   return settings?.panelTheme || "crimson";
@@ -148,6 +149,9 @@ function injectFloatingBootstrap(runtime) {
   }
   fab.dataset.bmeBridgeBound = "true";
   fab.addEventListener("click", async () => {
+    // panel.js owns pointer/drag/single/double-click behavior after init. The
+    // bridge click is only a cold-start fallback for the bootstrap FAB.
+    if (fab.dataset.bmeFabBound === "true") return;
     try {
       await ensurePanelBridgeReady(runtime);
       openPanelController(runtime);
@@ -197,10 +201,23 @@ async function ensurePanelBridgeReady(runtime) {
     return runtime.getPanelModule();
   }
 
+  const pendingInit = panelBridgeInitPromises.get(runtime);
+  if (pendingInit) return pendingInit;
+
+  const initPromise = initializePanelBridge(runtime);
+  panelBridgeInitPromises.set(runtime, initPromise);
+  try {
+    return await initPromise;
+  } finally {
+    if (panelBridgeInitPromises.get(runtime) === initPromise) {
+      panelBridgeInitPromises.delete(runtime);
+    }
+  }
+}
+
+async function initializePanelBridge(runtime) {
   const panelModule = await runtime.importPanelModule();
   const themesModule = await runtime.importThemesModule();
-  runtime.setPanelModule(panelModule);
-  runtime.setThemesModule(themesModule);
 
   const settings = runtime.getSettings();
   const theme = resolvePanelTheme(settings);
@@ -238,6 +255,9 @@ async function ensurePanelBridgeReady(runtime) {
     },
     actions: runtime.actions,
   });
+
+  runtime.setPanelModule(panelModule);
+  runtime.setThemesModule(themesModule);
 
   return panelModule;
 }
