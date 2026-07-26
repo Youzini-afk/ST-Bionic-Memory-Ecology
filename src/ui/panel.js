@@ -195,7 +195,7 @@ export function mountPanel(runtime, { documentLike = globalThis.document } = {})
     element(document, "st-bme-v9-summary").innerHTML = "";
     const summary = element(document, "st-bme-v9-summary");
     for (const [label, value] of [
-      ["聊天", snapshot.chatKey],
+      ["聊天", snapshot.chatId || snapshot.chatKey],
       ["修订", `${snapshot.head.revision} / graph ${snapshot.head.graphRevision}`],
       ["处理至", snapshot.head.processedThrough],
       ["节点", snapshot.graph.nodes.length],
@@ -276,7 +276,7 @@ export function mountPanel(runtime, { documentLike = globalThis.document } = {})
   element(document, "st-bme-v9-export").addEventListener("click", async () => {
     try {
       const text = await runtime.exportGraph();
-      downloadText(document, `st-bme-v9-${latest?.chatKey || "graph"}.json`, text);
+      downloadText(document, `st-bme-v9-${latest?.chatId || latest?.chatKey || "graph"}.json`, text);
       showOperation("图谱已导出");
     } catch (error) {
       showOperation(errorText(error), true);

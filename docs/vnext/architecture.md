@@ -49,6 +49,8 @@ Primary 是安装级选择：`indexeddb` 或 `authority`。运行时不得自动
 
 - 每次事件处理时重新读取 ST context；
 - 将宿主事件转换为不可变的聊天或生成快照；
+- `chatId` 只是由角色/群组与聊天文件名组成的宿主 locator，不得直接充当持久化主键；
+- `chatKey` 是写入当前聊天 metadata 的 BME 随机身份；普通重命名保留该身份，分支、checkpoint 和仍保留源文件的副本必须获得新身份；
 - 以 ST 提供的 generation type 判定 `fresh`、`no-new-user` 或 `skip`；
 - 不保存业务状态，不把 ST 的聊天保存动作当作 BME 持久化确认。
 

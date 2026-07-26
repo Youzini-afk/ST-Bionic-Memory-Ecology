@@ -5,6 +5,7 @@ import { getHistoryPrefixHash } from "../../src/core/history.js";
 import { MemoryStateStore } from "../../src/core/memory-store.js";
 import { GenerationCoordinator } from "../../src/generation/generation-coordinator.js";
 import {
+  CHAT_IDENTITY_METADATA_KEY,
   classifyGeneration,
   StHostAdapter,
 } from "../../src/host/st-host-adapter.js";
@@ -28,17 +29,45 @@ const assistantMessage = (text, extra = {}) => ({
   ...extra,
 });
 
-function createRuntime(recall, { domains = null, vectors = null, logger = quietLogger } = {}) {
+const identity = (chatKey, {
+  chatId = chatKey,
+  ownerType = "character",
+  ownerId = "assistant.png",
+} = {}) => ({
+  version: 1,
+  chatKey,
+  ownerType,
+  ownerId,
+  chatId,
+});
+
+function createRuntime(recall, {
+  domains = null,
+  vectors = null,
+  logger = quietLogger,
+  hostOptions = {},
+} = {}) {
   const state = {
     chatId: "chat-a",
     chat: [],
+    chatMetadata: { [CHAT_IDENTITY_METADATA_KEY]: identity("chat-a") },
+    characters: [{ avatar: "assistant.png" }],
     injections: [],
   };
   const context = {
     get chatId() { return state.chatId; },
     get chat() { return state.chat; },
+    get chatMetadata() { return state.chatMetadata; },
+    get characters() { return state.characters; },
+    characterId: 0,
+    groupId: "",
     name1: "User",
     name2: "Assistant",
+    getRequestHeaders() { return {}; },
+    updateChatMetadata(values) {
+      state.chatMetadata = { ...state.chatMetadata, ...values };
+    },
+    async saveMetadata() {},
     setExtensionPrompt(...args) {
       state.injections.push(args);
     },
@@ -47,7 +76,7 @@ function createRuntime(recall, { domains = null, vectors = null, logger = quietL
   let id = 0;
   const store = new MemoryStateStore({ now: () => ++clock, id: () => `tx-${++id}` });
   const engine = new ConversationEngine({ store });
-  const host = new StHostAdapter({ getContext: () => context, logger });
+  const host = new StHostAdapter({ getContext: () => context, logger, ...hostOptions });
   const coordinator = new GenerationCoordinator({
     engine,
     host,
@@ -81,12 +110,127 @@ test("host snapshots use stable message ids and ignore unrelated metadata", () =
     assistantMessage("reply", { swipe_id: 9 }),
   );
   const snapshot = runtime.host.snapshotConversation();
+  assert.equal(snapshot.chatKey, "chat-a");
+  assert.equal(snapshot.chatId, "chat-a");
   assert.deepEqual(snapshot.messages.map(({ role, text, hostIndex }) => ({ role, text, hostIndex })), [
     { role: "user", text: "same", hostIndex: 0 },
     { role: "assistant", text: "reply", hostIndex: 2 },
   ]);
   assert.equal(runtime.host.findUserByHostIndex(snapshot, 0).text, "same");
   assert.equal(runtime.host.findUserByHostIndex(snapshot, 1), null);
+});
+
+test("chat identities survive rename but split copied chats", async () => {
+  const ids = ["first", "copy"];
+  const files = new Set(["original"]);
+  const runtime = createRuntime(async () => ({}), {
+    hostOptions: {
+      randomUUID: () => ids.shift(),
+      fetchImpl: async (_url, options) => {
+        assert.equal(JSON.parse(options.body).avatar_url, "assistant.png");
+        return {
+          ok: true,
+          async json() {
+            return [...files].map((fileId) => ({ file_id: fileId, file_name: `${fileId}.jsonl` }));
+          },
+        };
+      },
+    },
+  });
+  runtime.state.chatId = "original";
+  runtime.state.chatMetadata = {};
+  assert.equal(await runtime.host.ensureConversationIdentity(), "st-bme-v9:first");
+  const originalIdentity = structuredClone(
+    runtime.state.chatMetadata[CHAT_IDENTITY_METADATA_KEY],
+  );
+
+  files.delete("original");
+  files.add("renamed");
+  runtime.state.chatId = "renamed";
+  assert.equal(await runtime.host.ensureConversationIdentity(), "st-bme-v9:first");
+  assert.equal(runtime.host.snapshotConversation().chatId, "renamed");
+
+  files.add("copy");
+  runtime.state.chatId = "copy";
+  runtime.state.chatMetadata = {
+    [CHAT_IDENTITY_METADATA_KEY]: {
+      ...originalIdentity,
+      chatId: "renamed",
+    },
+  };
+  assert.equal(await runtime.host.ensureConversationIdentity(), "st-bme-v9:copy");
+  assert.notEqual(runtime.host.snapshotConversation().chatKey, "st-bme-v9:first");
+});
+
+test("same chat filename on different character cards gets different identities", async () => {
+  const ids = ["alice", "bob"];
+  const runtime = createRuntime(async () => ({}), {
+    hostOptions: { randomUUID: () => ids.shift() },
+  });
+  runtime.state.chatId = "same-name";
+  runtime.state.chatMetadata = {};
+  runtime.state.characters = [{ avatar: "alice.png" }];
+  assert.equal(await runtime.host.ensureConversationIdentity(), "st-bme-v9:alice");
+
+  runtime.state.chatMetadata = {};
+  runtime.state.characters = [{ avatar: "bob.png" }];
+  assert.equal(await runtime.host.ensureConversationIdentity(), "st-bme-v9:bob");
+});
+
+test("group chat identities survive rename and split copied chats", async () => {
+  const ids = ["group-main", "group-copy"];
+  const state = {
+    chatId: "group-original",
+    groupId: "group-1",
+    groups: [{ id: "group-1", chats: ["group-original"] }],
+    chatMetadata: {},
+    chat: [],
+  };
+  const context = {
+    get chatId() { return state.chatId; },
+    get groupId() { return state.groupId; },
+    get groups() { return state.groups; },
+    get chatMetadata() { return state.chatMetadata; },
+    get chat() { return state.chat; },
+    updateChatMetadata(values) {
+      state.chatMetadata = { ...state.chatMetadata, ...values };
+    },
+    async saveMetadata() {},
+  };
+  const host = new StHostAdapter({
+    getContext: () => context,
+    randomUUID: () => ids.shift(),
+    logger: quietLogger,
+  });
+  assert.equal(await host.ensureConversationIdentity(), "st-bme-v9:group-main");
+
+  state.chatId = "group-renamed";
+  state.groups[0].chats = ["group-renamed"];
+  assert.equal(await host.ensureConversationIdentity(), "st-bme-v9:group-main");
+
+  state.chatId = "group-copy";
+  state.groups[0].chats.push("group-copy");
+  assert.equal(await host.ensureConversationIdentity(), "st-bme-v9:group-copy");
+});
+
+test("a filename alone never becomes a persistence key", async () => {
+  const context = {
+    chatId: "filename-only",
+    chat: [],
+    characterId: 0,
+    characters: [{ avatar: "assistant.png" }],
+    chatMetadata: {},
+  };
+  const host = new StHostAdapter({
+    getContext: () => context,
+    randomUUID: () => "unused",
+    logger: quietLogger,
+  });
+  assert.equal(host.snapshotConversation().chatKey, "");
+  await assert.rejects(
+    host.ensureConversationIdentity(),
+    /chat metadata persistence is unavailable/,
+  );
 });
 
 test("host binding observes MESSAGE_UPDATED and schedules assistant work off the ST event", async () => {
@@ -244,7 +388,13 @@ test("a late recall from chat A cannot inject or persist after switching to chat
   const pending = runtime.coordinator.onMessageSent(0);
   await started;
 
-  runtime.state.chatId = "chat-b";
+  runtime.state.characters = [{ avatar: "other.png" }];
+  runtime.state.chatMetadata = {
+    [CHAT_IDENTITY_METADATA_KEY]: identity("chat-b", {
+      chatId: "chat-a",
+      ownerId: "other.png",
+    }),
+  };
   runtime.state.chat = [userMessage("chat b")];
   await runtime.coordinator.onChatChanged();
   releaseRecall();
