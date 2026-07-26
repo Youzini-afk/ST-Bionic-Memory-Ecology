@@ -444,6 +444,24 @@ export function createGenerationRecallTransactions(deps = {}) {
     return 1;
   }
 
+  function isPlannerTurnHandoffForRecall(handoff, recallOptions = {}) {
+    const augmentedMessage = normalizeRecallInputText(
+      handoff?.plannerAugmentedMessage || "",
+    );
+    if (!augmentedMessage) return false;
+    const candidates = [
+      recallOptions?.overrideUserMessage,
+      recallOptions?.userMessage,
+      recallOptions?.boundUserFloorText,
+      ...(Array.isArray(recallOptions?.sourceCandidates)
+        ? recallOptions.sourceCandidates.map((candidate) => candidate?.text)
+        : []),
+    ];
+    return candidates.some(
+      (candidate) => normalizeRecallInputText(candidate || "") === augmentedMessage,
+    );
+  }
+
   function createGenerationRecallContext({
     hookName,
     generationType = "normal",
@@ -458,26 +476,44 @@ export function createGenerationRecallTransactions(deps = {}) {
     const effectiveGenerationType = normalizeGenerationRecallTransactionType(
       recallOptions?.generationType || generationType,
     );
-    const plannerRecallHandoff =
+    const pendingPlannerHandoff =
       effectiveGenerationType === "normal"
-        ? deps.peekPlannerRecallHandoff(normalizedChatId)
+        ? deps.peekPlannerTurnHandoff(normalizedChatId)
         : null;
-    const effectiveRecallOptions = plannerRecallHandoff
+    let plannerTurnHandoff = isPlannerTurnHandoffForRecall(
+      pendingPlannerHandoff,
+      recallOptions,
+    )
+      ? pendingPlannerHandoff
+      : null;
+    if (pendingPlannerHandoff && !plannerTurnHandoff) {
+      deps.clearPlannerTurnHandoffsForChat?.(normalizedChatId);
+    }
+    if (plannerTurnHandoff) {
+      plannerTurnHandoff = deps.markPlannerTurnHandoffMatched?.(normalizedChatId, {
+        handoffId: plannerTurnHandoff.id,
+        generationId: getActiveGenerationId(),
+      }) || null;
+      if (!plannerTurnHandoff) {
+        deps.clearPlannerTurnHandoffsForChat?.(normalizedChatId);
+      }
+    }
+    const effectiveRecallOptions = plannerTurnHandoff
       ? {
           ...(recallOptions || {}),
-          overrideUserMessage: plannerRecallHandoff.rawUserInput,
-          overrideSource: plannerRecallHandoff.source || "planner-handoff",
+          overrideUserMessage: plannerTurnHandoff.rawUserInput,
+          overrideSource: plannerTurnHandoff.source || "planner-handoff",
           overrideSourceLabel:
-            plannerRecallHandoff.sourceLabel || "Planner handoff",
+            plannerTurnHandoff.sourceLabel || "Planner handoff",
           overrideReason: "planner-handoff-reuse",
           targetUserMessageIndex: null,
           awaitingUserMessage: true,
           sourceCandidates: [
             {
-              text: plannerRecallHandoff.rawUserInput,
-              source: plannerRecallHandoff.source || "planner-handoff",
+              text: plannerTurnHandoff.rawUserInput,
+              source: plannerTurnHandoff.source || "planner-handoff",
               sourceLabel:
-                plannerRecallHandoff.sourceLabel || "Planner handoff",
+                plannerTurnHandoff.sourceLabel || "Planner handoff",
               reason: "planner-handoff-reuse",
               includeSyntheticUserMessage: false,
             },
@@ -623,19 +659,19 @@ export function createGenerationRecallTransactions(deps = {}) {
     // would be short-circuited by an empty cached payload and produce no
     // recall record / no recall card (see docs/features/ena-planner.md:76).
     if (
-      plannerRecallHandoff?.result &&
-      String(plannerRecallHandoff.injectionText || "").trim()
+      plannerTurnHandoff?.result &&
+      String(plannerTurnHandoff.injectionText || "").trim()
     ) {
       boundRecallOptions.cachedRecallPayload = {
-        handoffId: plannerRecallHandoff.id,
-        chatId: plannerRecallHandoff.chatId,
-        result: plannerRecallHandoff.result,
-        recentMessages: Array.isArray(plannerRecallHandoff.recentMessages)
-          ? plannerRecallHandoff.recentMessages.map((item) => String(item || ""))
+        handoffId: plannerTurnHandoff.id,
+        chatId: plannerTurnHandoff.chatId,
+        result: plannerTurnHandoff.result,
+        recentMessages: Array.isArray(plannerTurnHandoff.recentMessages)
+          ? plannerTurnHandoff.recentMessages.map((item) => String(item || ""))
           : [],
-        injectionText: String(plannerRecallHandoff.injectionText || ""),
-        source: plannerRecallHandoff.source || "planner-handoff",
-        sourceLabel: plannerRecallHandoff.sourceLabel || "Planner handoff",
+        injectionText: String(plannerTurnHandoff.injectionText || ""),
+        source: plannerTurnHandoff.source || "planner-handoff",
+        sourceLabel: plannerTurnHandoff.sourceLabel || "Planner handoff",
         reason: "planner-handoff-reuse",
       };
     }

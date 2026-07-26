@@ -35,7 +35,8 @@ function createTransactionHarness({ startGeneration = true } = {}) {
     hashRecallInput,
     normalizeChatIdCandidate: (value = "") => String(value ?? "").trim(),
     normalizeRecallInputText: (value = "") => String(value ?? "").trim(),
-    peekPlannerRecallHandoff: () => null,
+    peekPlannerTurnHandoff: () => null,
+    markPlannerTurnHandoffMatched: () => null,
     resolveGenerationTargetUserMessageIndex: (candidateChat = []) => {
       for (let index = candidateChat.length - 1; index >= 0; index--) {
         if (candidateChat[index]?.is_user) return index;

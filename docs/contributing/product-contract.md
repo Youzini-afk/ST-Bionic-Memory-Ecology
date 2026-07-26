@@ -26,7 +26,9 @@ This contract protects the complete ST-BME product while its internals are repla
 - Replacing or deleting an assistant turn reverses that turn's graph effects before the replacement is committed. Failure leaves a durable dirty checkpoint and must not acknowledge success.
 - Extraction and recovery operate on a frozen chat snapshot. Switching chats or changing the same chat across an async boundary aborts the stale transaction.
 - An overswipe placeholder is persisted as awaiting replacement; it is never extracted as an empty assistant turn.
-- ENA is explicitly enabled. It plans fresh user sends from the raw user input, augments rather than replaces that input, and cannot suppress normal recall when planner recall is empty.
+- ENA is explicitly enabled. It plans only fresh user sends from the raw user input, augments rather than replaces that input, and cannot suppress normal recall when planner recall is empty.
+- ENA planning is leased to one conversation and one unchanged input. Chat switches cancel it; ordinary planner failures fail open by sending the original text. Reroll never reads or consumes a pending planner turn.
+- One planner turn handoff carries optional recall and plot data. The normal generation validates it before reuse, and `MESSAGE_SENT` persists both records to the new user floor even when ST Regex or macro expansion transformed the stored message text.
 
 ## Persistence and replication
 

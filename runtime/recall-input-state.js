@@ -250,13 +250,12 @@ export function createRecallInputState(deps = {}) {
     clearPendingRecallSendIntent();
     setLastRecallSentUserMessage(createRecallInputRecord());
     clearPendingHostGenerationInputSnapshot();
-    deps.clearPendingRerollRecallReuse?.("recall-input-tracking-cleared");
     if (typeof deps.recordMessageTraceSnapshot === "function") {
       deps.recordMessageTraceSnapshot({
         lastSentUserMessage: null,
       });
     }
-    deps.clearPlannerRecallHandoffsForChat?.("", { clearAll: true });
+    deps.clearPlannerTurnHandoffsForChat?.("", { clearAll: true });
   }
 
   return {

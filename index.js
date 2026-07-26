@@ -1746,9 +1746,8 @@ const recallInputState = createRecallInputState({
     writeConversationInput("pendingRecallSendIntent", record),
   setCurrentGenerationTrivialSkip: (record) =>
     conversationSession.setTrivialSkip(record),
-  clearPendingRerollRecallReuse: (...args) => clearPendingRerollRecallReuse(...args),
-  clearPlannerRecallHandoffsForChat: (...args) =>
-    clearPlannerRecallHandoffsForChat(...args),
+  clearPlannerTurnHandoffsForChat: (...args) =>
+    clearPlannerTurnHandoffsForChat(...args),
   TRIVIAL_GENERATION_SKIP_TTL_MS,
 });
 const rerollRecallInput = createRerollRecallInput({
@@ -1814,6 +1813,7 @@ let skipBeforeCombineRecallUntil = 0;
 let mvuExtraAnalysisGuardUntil = 0;
 let lastPreGenerationRecallKey = "";
 let lastPreGenerationRecallAt = 0;
+let enaPlannerApi = null;
 const generationRecallTransactionRuntime = createGenerationRecallTransactions({
   getContext,
   getCurrentChatId,
@@ -1830,7 +1830,11 @@ const generationRecallTransactionRuntime = createGenerationRecallTransactions({
   hashRecallInput,
   normalizeChatIdCandidate,
   normalizeRecallInputText,
-  peekPlannerRecallHandoff: (...args) => peekPlannerRecallHandoff(...args),
+  clearPlannerTurnHandoffsForChat: (...args) =>
+    clearPlannerTurnHandoffsForChat(...args),
+  markPlannerTurnHandoffMatched: (...args) =>
+    rerollRecallInput.markPlannerTurnHandoffMatched(...args),
+  peekPlannerTurnHandoff: (...args) => peekPlannerTurnHandoff(...args),
   resolveGenerationTargetUserMessageIndex: (...args) =>
     resolveGenerationTargetUserMessageIndex(...args),
   shouldRunRecallForTransaction,
@@ -15021,10 +15025,6 @@ function getLastNonSystemChatMessage(chat) {
   return null;
 }
 
-function clearPendingRerollRecallReuse(reason = "") {
-  return rerollRecallInput.clearPendingRerollRecallReuse(reason);
-}
-
 function buildRecallRecentMessages(chat, limit, syntheticUserMessage = "") {
   return buildRecallRecentMessagesController(
     chat,
@@ -15086,48 +15086,30 @@ function buildHistoryGenerationRecallInput(chat) {
   return rerollRecallInput.buildHistoryGenerationRecallInput(chat);
 }
 
-function cleanupPlannerRecallHandoffs(now = Date.now()) {
-  return rerollRecallInput.cleanupPlannerRecallHandoffs(now);
-}
-
-function peekPlannerRecallHandoff(
+function peekPlannerTurnHandoff(
   chatId = getCurrentChatId(),
   now = Date.now(),
 ) {
-  return rerollRecallInput.peekPlannerRecallHandoff(chatId, now);
+  return rerollRecallInput.peekPlannerTurnHandoff(chatId, now);
 }
 
-function peekConsumedPlannerRecallHandoff(
-  chatId = getCurrentChatId(),
-  now = Date.now(),
-) {
-  return rerollRecallInput.peekConsumedPlannerRecallHandoff?.(chatId, now) || null;
-}
-
-function clearPlannerRecallHandoffsForChat(
+function clearPlannerTurnHandoffsForChat(
   chatId = getCurrentChatId(),
   { clearAll = false } = {},
 ) {
-  return rerollRecallInput.clearPlannerRecallHandoffsForChat(chatId, {
+  return rerollRecallInput.clearPlannerTurnHandoffsForChat(chatId, {
     clearAll,
   });
 }
 
-function consumePlannerRecallHandoff(
-  chatId = getCurrentChatId(),
-  { handoffId = "" } = {},
-) {
-  return rerollRecallInput.consumePlannerRecallHandoff(chatId, { handoffId });
-}
-
-function preparePlannerRecallHandoff({
+function preparePlannerTurnHandoff({
   rawUserInput = "",
   plannerAugmentedMessage = "",
   plannerRecall = null,
   plannerPlotRecord = null,
   chatId = getCurrentChatId(),
 } = {}) {
-  return rerollRecallInput.preparePlannerRecallHandoff({
+  return rerollRecallInput.preparePlannerTurnHandoff({
     rawUserInput,
     plannerAugmentedMessage,
     plannerRecall,
@@ -15136,17 +15118,7 @@ function preparePlannerRecallHandoff({
   });
 }
 
-function preparePlannerPlotRecordHandoff(plannerPlotRecord = null) {
-  if (!plannerPlotRecord || typeof plannerPlotRecord !== "object") {
-    return null;
-  }
-  return rerollRecallInput.preparePlannerPlotRecordHandoff({
-    ...plannerPlotRecord,
-    chatId: getCurrentChatId(),
-  });
-}
-
-function persistPlannerRecallHandoffToUserMessage(newUserMessageIndex) {
+function persistPlannerTurnHandoffToUserMessage(newUserMessageIndex) {
   const context = getContext();
   const chat = context?.chat;
   if (
@@ -15156,68 +15128,59 @@ function persistPlannerRecallHandoffToUserMessage(newUserMessageIndex) {
   ) {
     return false;
   }
-  if (readPersistedRecallFromUserMessage(chat, newUserMessageIndex)) {
-    return false;
-  }
   const chatId = context?.chatId || getCurrentChatId();
-  const handoff = peekPlannerRecallHandoff(chatId) || peekConsumedPlannerRecallHandoff(chatId);
-  const injectionText = String(handoff?.injectionText || "").trim();
-  const result = handoff?.result || null;
-  if (!handoff || !injectionText || !result) {
-    return false;
-  }
+  const handoff = rerollRecallInput.consumePlannerTurnHandoffForGeneration(
+    chatId,
+    conversationSession.getGeneration()?.id,
+  );
+  if (!handoff) return false;
+
   const targetUserFloorText = normalizeRecallInputText(
     chat[newUserMessageIndex]?.mes || "",
   );
-  const record = buildPersistedRecallRecord({
-    injectionText,
-    selectedNodeIds: result?.selectedNodeIds || [],
-    recallInput: String(handoff.rawUserInput || ""),
-    recallSource: String(handoff.source || "planner-handoff"),
-    hookName: "MESSAGE_SENT",
-    tokenEstimate: estimateTokens(injectionText),
-    manuallyEdited: false,
-    authoritativeInputUsed: true,
-    boundUserFloorText: targetUserFloorText,
-    historyFingerprint: buildRecallHistoryFingerprint(
+
+  let wroteRecall = false;
+  const injectionText = String(handoff?.injectionText || "").trim();
+  const result = handoff?.result || null;
+  if (
+    injectionText &&
+    result &&
+    !readPersistedRecallFromUserMessage(chat, newUserMessageIndex)
+  ) {
+    wroteRecall = writePersistedRecallToUserMessage(
       chat,
       newUserMessageIndex,
-    ),
-  });
-  if (!writePersistedRecallToUserMessage(chat, newUserMessageIndex, record)) {
-    return false;
+      buildPersistedRecallRecord({
+        injectionText,
+        selectedNodeIds: result?.selectedNodeIds || [],
+        recallInput: String(handoff.rawUserInput || ""),
+        recallSource: String(handoff.source || "planner-handoff"),
+        hookName: "MESSAGE_SENT",
+        tokenEstimate: estimateTokens(injectionText),
+        manuallyEdited: false,
+        authoritativeInputUsed: true,
+        boundUserFloorText: targetUserFloorText,
+        historyFingerprint: buildRecallHistoryFingerprint(
+          chat,
+          newUserMessageIndex,
+        ),
+      }),
+    );
   }
-  rerollRecallInput.clearPlannerRecallOnlyForChat?.(chatId);
-  triggerChatMetadataSave(context, { immediate: false });
-  return true;
-}
 
-function persistPlannerPlotRecordToUserMessage(newUserMessageIndex) {
-  const context = getContext();
-  const chat = context?.chat;
-  if (
-    !Array.isArray(chat) ||
-    !Number.isFinite(newUserMessageIndex) ||
-    !chat[newUserMessageIndex]?.is_user
-  ) {
-    return false;
-  }
-  const chatId = context?.chatId || getCurrentChatId();
-  const plotHandoff = rerollRecallInput.peekPlannerPlotRecordHandoff?.(chatId);
-  const handoff = peekPlannerRecallHandoff(chatId);
-  const plannerPlotRecord = plotHandoff || handoff?.plannerPlotRecord;
-  if (!plannerPlotRecord || typeof plannerPlotRecord !== "object") {
-    return false;
-  }
-  const wrote = writeStructuredPlotRecordToMessage(chat[newUserMessageIndex], {
-    ...plannerPlotRecord,
-    recallHandoffId: handoff?.id || plannerPlotRecord.recallHandoffId || "",
-  });
-  if (wrote) {
-    rerollRecallInput.consumePlannerPlotRecordHandoff?.(chatId);
+  const plannerPlotRecord = handoff.plannerPlotRecord;
+  const wrotePlot = Boolean(
+    plannerPlotRecord &&
+      writeStructuredPlotRecordToMessage(chat[newUserMessageIndex], {
+        ...plannerPlotRecord,
+        recallHandoffId:
+          handoff.id || plannerPlotRecord.recallHandoffId || "",
+      }),
+  );
+  if (wroteRecall || wrotePlot) {
     triggerChatMetadataSave(context, { immediate: false });
   }
-  return wrote;
+  return wroteRecall || wrotePlot;
 }
 
 function buildPreGenerationRecallKey(type, options = {}) {
@@ -16343,6 +16306,8 @@ async function runPlannerRecallForEna({
     {
       buildRecallRecentMessages,
       buildRecallRetrieveOptions,
+      captureConversationLease: (...args) =>
+        conversationSession.captureLease(...args),
       clampInt,
       console,
       createAbortError,
@@ -16355,6 +16320,8 @@ async function runPlannerRecallForEna({
       getSettings,
       isGraphMetadataWriteAllowed,
       isGraphReadableForRecall,
+      isConversationLeaseCurrent: (...args) =>
+        conversationSession.isLeaseCurrent(...args),
       isTrivialUserInput,
       normalizeRecallInputText,
       recoverHistoryIfNeeded,
@@ -16395,7 +16362,6 @@ async function runRecall(options = {}) {
         conversationSession.captureLease(...args),
       clampInt,
       console,
-      consumePlannerRecallHandoff,
       createAbortError,
       createRecallInputRecord,
       createRecallRunResult,
@@ -16444,6 +16410,7 @@ async function runRecall(options = {}) {
 // ==================== 事件钩子 ====================
 
 function onChatChanged() {
+  enaPlannerApi?.cancelPlanning?.("chat-changed");
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = 0;
   conversationSession.enterChat(resolveCurrentChatIdentity(), {
@@ -16514,6 +16481,7 @@ function onChatChanged() {
 }
 
 function onChatLoaded() {
+  enaPlannerApi?.cancelPlanning?.("chat-loaded");
   conversationSession.enterChat(resolveCurrentChatIdentity(), {
     reason: "chat-loaded",
   });
@@ -16556,8 +16524,7 @@ function onMessageSent(messageId) {
       getContext,
       isTrivialUserInput,
       markCurrentGenerationTrivialSkip,
-      persistPlannerRecallHandoffToUserMessage,
-      persistPlannerPlotRecordToUserMessage,
+      persistPlannerTurnHandoffToUserMessage,
       recordRecallSentUserMessage,
       rebindRecallRecordToNewUserMessage,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
@@ -18248,6 +18215,7 @@ async function onCompactLukerSidecar() {
   await initializePanelBridgeController({
     $,
     actions: {
+      getPlannerApi: () => enaPlannerApi,
       syncGraphLoad: async () => {
         const refreshPlan = buildPanelOpenLocalStoreRefreshPlan();
         if (refreshPlan.shouldRefresh) {
@@ -18423,15 +18391,23 @@ async function onCompactLukerSidecar() {
   schedulePersistedRecallMessageUiRefresh(120);
   try {
     const { initEnaPlanner } = await import("./ena-planner/ena-planner.js");
-    await initEnaPlanner({
+    enaPlannerApi = await initEnaPlanner({
+      captureConversationLease: (...args) =>
+        conversationSession.captureLease(...args),
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
       getPlannerRecallTimeoutMs,
+      isConversationLeaseCurrent: (...args) =>
+        conversationSession.isLeaseCurrent(...args),
       isTrivialUserInput,
-      preparePlannerPlotRecordHandoff,
-      preparePlannerRecallHandoff,
+      preparePlannerTurnHandoff,
       runPlannerRecallForEna,
+      shouldSendOnEnter: () => {
+        const decision = getContext()?.shouldSendOnEnter?.();
+        return decision == null ? true : decision === true;
+      },
     });
+    _panelModule?.refreshPlannerState?.();
     debugLog("[ST-BME] Ena Planner module loaded");
   } catch (error) {
     console.warn("[ST-BME] Ena Planner module load failed:", error);

@@ -327,8 +327,7 @@ export function onMessageSentController(runtime, messageId) {
     resolvedMessageId,
     message.mes || "",
   );
-  runtime.persistPlannerRecallHandoffToUserMessage?.(resolvedMessageId);
-  runtime.persistPlannerPlotRecordToUserMessage?.(resolvedMessageId);
+  runtime.persistPlannerTurnHandoffToUserMessage?.(resolvedMessageId);
   // GENERATION_AFTER_COMMANDS 在 sendMessageAsUser 之前触发，此时新用户消息
   // 尚未进入 chat，recall 记录会被写到上一条 user 上。这里用户消息刚入场，
   // transaction 仍在桥接窗口内，立即把记录重新绑定到正确的楼层。

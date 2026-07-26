@@ -96,7 +96,7 @@ The config page contains these workspaces:
   - Prompt blocks, generation parameters, regex, world info, and EJS templates for each task type.
 
 - **ENA Planner**
-  - API, model, planning config, and task preset entry point for ENA Planner.
+  - Explicit enablement, BME LLM preset, planning context/filter options, tests and logs, plus the `planner` task preset entry point.
 
 - **Panel appearance**
   - Theme, notification style, debug logs, and Native acceleration.

@@ -556,12 +556,8 @@ export async function runRecallController(runtime, options = {}) {
       ? options.cachedRecallPayload
       : null;
 
-  // Tightened: an empty/whitespace injectionText means the cached planner
-  // result selected zero nodes (e.g. formatInjection returned ""). Reusing it
-  // would short-circuit recall with an empty memory block — recall record
-  // would not persist and the recall card would not display. Fall through to
-  // fresh retrieval instead so planner and recall coexist (see
-  // docs/features/ena-planner.md:44-50,76).
+  // Never let an empty planner cache suppress fresh recall or its persisted
+  // recall card.
   if (
     cachedRecallPayload?.result &&
     String(cachedRecallPayload.injectionText || "").trim()

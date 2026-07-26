@@ -34,7 +34,7 @@ Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/
 - **Summarization & maintenance** — Small summaries, summary rollup, reflection, consolidation, automatic compression, active forgetting — all logged and reversible.
 - **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
 - **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
-- **ENA Planner integration** — Pre-send story planning, integrated into the config page and the `planner` task preset.
+- **ENA Planner integration** — Explicitly enabled, default-off pre-send story planning for fresh user turns, sharing BME recall and the `planner` task profile.
 - **Persistence & sync** — Local-first (IndexedDB), with cloud mirroring, backup/restore, rebuild, and repair.
 - **History safety** — Detects message deletion / edits / swipes, automatically rolls back affected batches and recovers from the change point; protects against truncated "render only the last N" views.
 - **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.

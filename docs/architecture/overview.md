@@ -19,7 +19,7 @@ index.js              主入口：事件钩子、设置管理、流程调度、�
 ├── runtime/          运行时状态、设置默认值、身份解析、注入式控制器/工厂
 ├── host/             SillyTavern 宿主适配（事件绑定、上下文、原生渲染）
 ├── ui/               面板、自定义 Canvas 图谱渲染、消息级 UI、召回卡片
-├── ena-planner/      ENA Planner（独立规划子系统）
+├── ena-planner/      ENA Planner（BME 内置的可选规划子系统）
 └── native/           Native/WASM 加速（灰度，fail-open 回退 JS）
 ```
 

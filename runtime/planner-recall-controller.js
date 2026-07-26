@@ -35,6 +35,40 @@ export async function runPlannerRecallForEnaController(runtime = {}, {
       : runtime.createAbortError("Ena Planner recall aborted");
   }
 
+  const conversationLease = runtime.captureConversationLease?.() || null;
+  const assertRunCurrent = (graph = null) => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : runtime.createAbortError("Ena Planner recall aborted");
+    }
+    if (
+      conversationLease &&
+      !runtime.isConversationLeaseCurrent?.(conversationLease, {
+        requireGeneration: false,
+      })
+    ) {
+      throw runtime.createAbortError("Ena Planner conversation changed");
+    }
+    if (graph && runtime.getCurrentGraph() !== graph) {
+      throw runtime.createAbortError("Ena Planner graph changed");
+    }
+  };
+
+  if (runtime.isGraphMetadataWriteAllowed()) {
+    const recovered = await runtime.recoverHistoryIfNeeded("pre-ena-planner-recall");
+    assertRunCurrent();
+    if (!recovered) {
+      return {
+        ok: false,
+        reason: "history-recovery-not-ready",
+        memoryBlock: "",
+        recentMessages: [],
+        result: null,
+      };
+    }
+  }
+
   const currentGraph = runtime.getCurrentGraph();
   if (!currentGraph || !runtime.isGraphReadableForRecall()) {
     return {
@@ -59,26 +93,8 @@ export async function runPlannerRecallForEnaController(runtime = {}, {
     };
   }
 
-  if (runtime.isGraphMetadataWriteAllowed()) {
-    const recovered = await runtime.recoverHistoryIfNeeded("pre-ena-planner-recall");
-    if (!recovered) {
-      return {
-        ok: false,
-        reason: "history-recovery-not-ready",
-        memoryBlock: "",
-        recentMessages: [],
-        result: null,
-      };
-    }
-  }
-
-  if (signal?.aborted) {
-    throw signal.reason instanceof Error
-      ? signal.reason
-      : runtime.createAbortError("Ena Planner recall aborted");
-  }
-
   await runtime.ensureVectorReadyIfNeeded("pre-ena-planner-recall", signal);
+  assertRunCurrent(currentGraph);
 
   const context = runtime.getContext();
   const chat = context?.chat ?? [];
@@ -106,14 +122,11 @@ export async function runPlannerRecallForEnaController(runtime = {}, {
     signal,
     options,
   });
+  assertRunCurrent(currentGraph);
   const memoryBlock = runtime.formatInjection(result, schema).trim();
 
-  // Belt-and-braces: when formatInjection produced an empty memory block
-  // (e.g. retrieval selected zero nodes), do NOT advertise a usable handoff
-  // result. Callers (ena-planner-runtime-utils.js:65) gate on
-  // `plannerRecall?.result` truthiness; nulling it here prevents an empty
-  // cached payload from short-circuiting the main recall. The main recall
-  // should run fresh instead (docs/features/ena-planner.md:44-50,76).
+  // An empty planner recall is not reusable; the normal generation must
+  // continue through fresh recall instead of caching an empty injection.
   return {
     ok: Boolean(memoryBlock),
     reason: memoryBlock ? "completed" : "empty-memory-block",

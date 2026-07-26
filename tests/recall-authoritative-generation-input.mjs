@@ -56,7 +56,7 @@ async function testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled() {
   };
   harness.chat = [{ is_user: true, mes: "楼层里的稳定用户输入" }];
 
-  const handoff = harness.result.preparePlannerRecallHandoff({
+  const handoff = harness.result.preparePlannerTurnHandoff({
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
@@ -90,7 +90,10 @@ async function testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled() {
   const recallContext = harness.result.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
     generationType: "normal",
-    recallOptions: {},
+    recallOptions: {
+      overrideUserMessage: "planner 增强后的输入",
+      overrideSource: "send-intent",
+    },
     chatId: "chat-main",
   });
 
@@ -108,6 +111,16 @@ async function testPlannerHandoffCanRemainAuthoritativeQueryWhenFlagEnabled() {
     recallContext.recallOptions.cachedRecallPayload.source,
     "planner-handoff",
   );
+  assert.ok(
+    harness.result.peekPlannerTurnHandoff("chat-main")?.matchedGenerationId,
+    "validated planner input must be tied to the active generation",
+  );
+  harness.pendingRecallSendIntent = {
+    text: "planner 增强后的输入",
+    hash: "hash-planner-augmented",
+    at: Date.now(),
+    source: "dom-intent",
+  };
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
@@ -537,7 +550,7 @@ async function testPlannerRecallForEnaNullsResultOnEmptyMemoryBlock() {
   );
 }
 
-// ─── Test D: preparePlannerRecallHandoff + createGenerationRecallContext skip cachedRecallPayload when injectionText empty (Fix 3)
+// ─── Test D: an empty planner recall keeps the turn mapping without suppressing fresh recall
 async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() {
   const harness = await createGenerationRecallHarness();
   harness.extension_settings[MODULE_NAME] = {
@@ -545,10 +558,7 @@ async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() 
   };
   harness.chat = [{ is_user: true, mes: "稳定 chat tail" }];
 
-  // Directly prepare a handoff carrying an empty memoryBlock — simulates
-  // a caller that bypassed Fix 2 (e.g. a future code path). Fix 3 must
-  // still prevent cachedRecallPayload from being set on the recall options.
-  const handoff = harness.result.preparePlannerRecallHandoff({
+  const handoff = harness.result.preparePlannerTurnHandoff({
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
@@ -560,24 +570,25 @@ async function testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload() 
         meta: { retrieval: { vectorHits: 0 } },
       },
     },
+    plannerPlotRecord: { plotText: "<plot>继续推进</plot>" },
     chatId: "chat-main",
   });
 
-  // preparePlannerRecallHandoff still returns a handoff object (it only
-  // bails on missing result / chatId / rawUserInput). The empty
-  // memoryBlock is tolerated at the handoff layer; the gate lives in
-  // createGenerationRecallContext (Fix 3) and runRecallController (Fix 1).
-  assert.ok(handoff, "preparePlannerRecallHandoff should still return a handoff object");
+  assert.ok(handoff, "plot data keeps the planner turn mapping alive");
   assert.equal(handoff.injectionText, "");
 
   const recallContext = harness.result.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
     generationType: "normal",
-    recallOptions: {},
+    recallOptions: {
+      overrideUserMessage: "planner 增强后的输入",
+      overrideSource: "send-intent",
+    },
     chatId: "chat-main",
   });
 
   assert.equal(recallContext.shouldRun, true);
+  assert.equal(recallContext.recallOptions.overrideUserMessage, "planner 原始输入");
   assert.equal(
     recallContext.recallOptions.cachedRecallPayload,
     undefined,
@@ -593,7 +604,7 @@ async function testHandoffWithNonEmptyInjectionTextSetsCachedRecallPayload() {
   };
   harness.chat = [{ is_user: true, mes: "稳定 chat tail" }];
 
-  const handoff = harness.result.preparePlannerRecallHandoff({
+  const handoff = harness.result.preparePlannerTurnHandoff({
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
@@ -614,7 +625,10 @@ async function testHandoffWithNonEmptyInjectionTextSetsCachedRecallPayload() {
   const recallContext = harness.result.createGenerationRecallContext({
     hookName: "GENERATION_AFTER_COMMANDS",
     generationType: "normal",
-    recallOptions: {},
+    recallOptions: {
+      overrideUserMessage: "planner 增强后的输入",
+      overrideSource: "send-intent",
+    },
     chatId: "chat-main",
   });
 
@@ -648,7 +662,7 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
   // memoryBlock. After Fixes 1+3, createGenerationRecallContext does NOT
   // set cachedRecallPayload, so the main recall falls through to the
   // harness's `runRecall` mock which returns a non-empty injectionText.
-  harness.result.preparePlannerRecallHandoff({
+  harness.result.preparePlannerTurnHandoff({
     rawUserInput: "planner 原始输入",
     plannerAugmentedMessage: "planner 增强后的输入",
     plannerRecall: {
@@ -659,8 +673,15 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
         stats: { coreCount: 0, recallCount: 0 },
       },
     },
+    plannerPlotRecord: { plotText: "<plot>继续推进</plot>" },
     chatId: "chat-main",
   });
+  harness.pendingRecallSendIntent = {
+    text: "planner 增强后的输入",
+    hash: "hash-planner-augmented",
+    at: Date.now(),
+    source: "dom-intent",
+  };
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
@@ -703,11 +724,104 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
   );
 }
 
+async function testRerollDoesNotReadOrConsumePlannerTurnHandoff() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "稳定的历史用户楼层" }];
+  const handoff = harness.result.preparePlannerTurnHandoff({
+    rawUserInput: "planner 原始输入",
+    plannerAugmentedMessage: "planner 增强后的输入",
+    plannerRecall: {
+      memoryBlock: "规划记忆块",
+      result: { selectedNodeIds: ["node-planner-1"] },
+    },
+    plannerPlotRecord: { plotText: "<plot>规划</plot>" },
+    chatId: "chat-main",
+  });
+
+  const recallContext = harness.result.createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "regenerate",
+    recallOptions: {
+      generationType: "regenerate",
+      overrideUserMessage: "稳定的历史用户楼层",
+      overrideSource: "chat-last-user",
+      targetUserMessageIndex: 0,
+    },
+    chatId: "chat-main",
+  });
+
+  assert.equal(recallContext.recallOptions.overrideUserMessage, "稳定的历史用户楼层");
+  assert.equal(recallContext.recallOptions.cachedRecallPayload, undefined);
+  assert.equal(harness.result.peekPlannerTurnHandoff("chat-main")?.id, handoff.id);
+  assert.equal(
+    harness.result.peekPlannerTurnHandoff("chat-main")?.matchedGenerationId || "",
+    "",
+    "reroll must not claim the pending planner turn",
+  );
+}
+
+async function testPlannerHandoffCannotMoveToAnotherFreshGeneration() {
+  const harness = await createGenerationRecallHarness();
+  harness.chat = [{ is_user: true, mes: "稳定的用户楼层" }];
+  harness.result.preparePlannerTurnHandoff({
+    rawUserInput: "planner 原始输入",
+    plannerAugmentedMessage: "planner 增强后的输入",
+    plannerPlotRecord: { plotText: "<plot>规划</plot>" },
+    chatId: "chat-main",
+  });
+
+  const first = harness.result.createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "normal",
+    recallOptions: { overrideUserMessage: "planner 增强后的输入" },
+    chatId: "chat-main",
+  });
+  assert.equal(first.recallOptions.overrideUserMessage, "planner 原始输入");
+
+  harness.result.clearGeneration("test-next-generation");
+  harness.result.beginGeneration("normal");
+  const second = harness.result.createGenerationRecallContext({
+    hookName: "GENERATION_AFTER_COMMANDS",
+    generationType: "normal",
+    recallOptions: { overrideUserMessage: "planner 增强后的输入" },
+    chatId: "chat-main",
+  });
+  assert.equal(second.recallOptions.overrideUserMessage, "稳定的用户楼层");
+  assert.equal(second.recallOptions.cachedRecallPayload, undefined);
+  assert.equal(harness.result.peekPlannerTurnHandoff("chat-main"), null);
+}
+
+async function testPlannerRecallAbortsWhenConversationChanges() {
+  const harness = await createGenerationRecallHarness();
+  harness.extension_settings[MODULE_NAME] = {
+    ...defaultSettings,
+    enabled: true,
+    recallEnabled: true,
+  };
+  harness.currentGraph = {
+    nodes: [{ id: "node-a" }],
+    edges: [],
+    historyState: {},
+  };
+  harness.retrieveImpl = async () => {
+    harness.enterConversation("chat-other");
+    return { injectionText: "不应跨聊天返回" };
+  };
+
+  await assert.rejects(
+    harness.result.runPlannerRecallForEna({ rawUserInput: "继续剧情" }),
+    (error) => error?.name === "AbortError" && /conversation changed/i.test(error.message),
+  );
+}
+
 await testCachedPayloadWithEmptyInjectionTextFallsThroughToFreshRecall();
 await testCachedPayloadWithNonEmptyInjectionTextShortCircuits();
 await testPlannerRecallForEnaNullsResultOnEmptyMemoryBlock();
 await testHandoffWithEmptyInjectionTextDoesNotSetCachedRecallPayload();
 await testHandoffWithNonEmptyInjectionTextSetsCachedRecallPayload();
 await testFreshRecallAfterEmptyHandoffProducesPersistableRecord();
+await testRerollDoesNotReadOrConsumePlannerTurnHandoff();
+await testPlannerHandoffCannotMoveToAnotherFreshGeneration();
+await testPlannerRecallAbortsWhenConversationChanges();
 
 console.log("recall-authoritative-generation-input tests passed");

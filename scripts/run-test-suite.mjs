@@ -6,12 +6,14 @@ const TEST_ROOT = path.resolve(process.cwd(), "tests");
 const EXCLUDED_TESTS = new Set(["triviumdb-poc.mjs"]);
 const PRODUCT_CONTRACT_TESTS = [
   "authority-companion-module.mjs",
+  "ena-planner-plots.mjs",
   "event-binding-priority.mjs",
   "identity-resolver.mjs",
   "indexeddb-sync.mjs",
   "luker-host-adapter.mjs",
   "message-updated-lightweight.mjs",
   "panel-bridge.mjs",
+  "panel-ena-debug.mjs",
   "product-surface-contract.mjs",
   "recall-authoritative-generation-input.mjs",
   "recall-reapply-block.mjs",

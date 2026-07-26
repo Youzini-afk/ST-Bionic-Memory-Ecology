@@ -1688,16 +1688,22 @@ function _refreshPlannerLauncher() {
   try {
     refreshPlannerSections({
       getSettings: _getSettings,
+      getPlannerApi: _actionHandlers.getPlannerApi,
     });
   } catch (err) {
     console.warn("[ST-BME] planner section refresh failed:", err);
   }
 }
 
+export function refreshPlannerState() {
+  _refreshPlannerLauncher();
+}
+
 function _bindPlannerLauncher() {
   try {
     initPlannerSections(panelEl || document, {
       getSettings: _getSettings,
+      getPlannerApi: _actionHandlers.getPlannerApi,
     });
   } catch (err) {
     console.warn("[ST-BME] planner section init failed:", err);

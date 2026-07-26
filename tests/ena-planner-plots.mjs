@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 
 import {
   applyPlannerResultAndSend,
+  createDefaultEnaPlannerConfig,
   extractLastNPlots,
   formatPlotsBlock,
+  normalizeEnaPlannerConfig,
+  shouldInterceptPlannerEnter,
   shouldInterceptPlannerSend,
 } from '../ena-planner/ena-planner-runtime-utils.js';
 import { createRerollRecallInput } from '../runtime/reroll-recall-input.js';
@@ -161,28 +164,27 @@ import {
   const order = [];
   const textarea = { value: 'raw' };
   const button = { click: () => order.push('click') };
-  const plannerState = { bypassNextSend: false, lastInjectedText: '' };
+  const plannerState = { bypassNextSend: false };
   const plannerRecall = { result: { selected: ['memory-a'] } };
   const runtime = {
-    preparePlannerPlotRecordHandoff(payload) {
-      order.push('plot-handoff');
-      assert.equal('plannerRecall' in payload, false, 'plot handoff must not carry planner recall payload');
+    preparePlannerTurnHandoff(payload) {
+      order.push('handoff');
       assert.deepEqual(payload, {
         rawUserInput: 'raw input',
         plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
-        plotText: '<plot>next</plot>',
+        plannerRecall,
+        plannerPlotRecord: {
+          rawUserInput: 'raw input',
+          plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
+          plotText: '<plot>next</plot>',
+        },
+        chatId: 'chat-a',
       });
-    },
-    preparePlannerRecallHandoff(payload) {
-      order.push('handoff');
-      assert.equal(payload.rawUserInput, 'raw input');
-      assert.equal(payload.plannerAugmentedMessage, 'raw input\n\n<plot>next</plot>');
-      assert.equal(payload.plannerRecall, plannerRecall);
-      assert.deepEqual(payload.plannerPlotRecord, {
-        rawUserInput: 'raw input',
-        plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
-        plotText: '<plot>next</plot>',
-      });
+      return {
+        result: plannerRecall.result,
+        injectionText: 'planner memory',
+        plannerPlotRecord: payload.plannerPlotRecord,
+      };
     },
   };
 
@@ -195,32 +197,27 @@ import {
     plannerPlotRecord: { plotText: '<plot>next</plot>' },
     runtime,
     plannerState,
+    chatId: 'chat-a',
   });
 
-  assert.deepEqual(order, ['plot-handoff', 'handoff', 'click']);
+  assert.deepEqual(order, ['handoff', 'click']);
   assert.equal(result.applied, true);
   assert.equal(result.handoffPrepared, true);
+  assert.equal(result.recallPrepared, true);
+  assert.equal(result.plotPrepared, true);
   assert.equal(textarea.value, 'raw input\n\n<plot>next</plot>');
-  assert.equal(plannerState.lastInjectedText, textarea.value);
-  assert.equal(plannerState.bypassNextSend, true);
+  assert.equal(plannerState.bypassNextSend, false);
 }
 
 {
   const order = [];
   const textarea = { value: 'raw' };
   const button = { click: () => order.push('click') };
-  const plannerState = { bypassNextSend: false, lastInjectedText: '' };
+  const plannerState = { bypassNextSend: false };
   const runtime = {
-    preparePlannerPlotRecordHandoff(payload) {
-      order.push('plot-handoff');
-      assert.deepEqual(payload, {
-        rawUserInput: 'raw input',
-        plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
-        plotText: '<plot>next</plot>',
-      });
-    },
-    preparePlannerRecallHandoff() {
-      order.push('recall-handoff');
+    preparePlannerTurnHandoff(payload) {
+      order.push('handoff');
+      return { plannerPlotRecord: payload.plannerPlotRecord };
     },
   };
 
@@ -235,13 +232,34 @@ import {
     plannerState,
   });
 
-  assert.deepEqual(order, ['plot-handoff', 'click']);
+  assert.deepEqual(order, ['handoff', 'click']);
   assert.equal(result.applied, true);
-  assert.equal(result.plotHandoffPrepared, true);
-  assert.equal(result.handoffPrepared, false);
+  assert.equal(result.handoffPrepared, true);
+  assert.equal(result.plotPrepared, true);
+  assert.equal(result.recallPrepared, false);
   assert.equal(textarea.value, 'raw input\n\n<plot>next</plot>');
-  assert.equal(plannerState.lastInjectedText, textarea.value);
-  assert.equal(plannerState.bypassNextSend, true);
+  assert.equal(plannerState.bypassNextSend, false);
+}
+
+{
+  const defaults = createDefaultEnaPlannerConfig();
+  assert.equal(defaults.enabled, false, 'planner must be explicit opt-in');
+  assert.equal(normalizeEnaPlannerConfig({}).enabled, false);
+  assert.equal(normalizeEnaPlannerConfig({ enabled: 1 }).enabled, false);
+  assert.equal(normalizeEnaPlannerConfig({ enabled: true }).enabled, true);
+  assert.deepEqual(normalizeEnaPlannerConfig({ api: { llmPreset: '  planner  ', baseUrl: 'legacy' } }).api, {
+    llmPreset: 'planner',
+  });
+}
+
+{
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter' }, true), true);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter', isComposing: true }, true), false);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter', shiftKey: true }, true), false);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter', ctrlKey: true }, true), false);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter', altKey: true }, true), false);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'Enter' }, false), false);
+  assert.equal(shouldInterceptPlannerEnter({ key: 'a' }, true), false);
 }
 
 {
@@ -318,18 +336,17 @@ import {
     normalizeRecallInputText: (value) => String(value || '').trim(),
     hashRecallInput: (value) => `hash:${String(value || '').length}`,
   });
-  const handoff = runtime.preparePlannerPlotRecordHandoff({
+  const handoff = runtime.preparePlannerTurnHandoff({
     chatId: 'chat-a',
     rawUserInput: 'raw input',
     plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
-    plotText: '<plot>next</plot>',
+    plannerPlotRecord: { plotText: '<plot>next</plot>' },
   });
-  assert.ok(handoff?.id?.includes(':plot:'));
-  assert.equal(handoff.plotText, '<plot>next</plot>');
-  assert.equal(runtime.peekPlannerRecallHandoff('chat-a'), null);
-  assert.equal(runtime.peekPlannerPlotRecordHandoff('chat-a')?.plotText, '<plot>next</plot>');
-  assert.equal(runtime.consumePlannerPlotRecordHandoff('chat-a')?.plotText, '<plot>next</plot>');
-  assert.equal(runtime.peekPlannerPlotRecordHandoff('chat-a'), null);
+  assert.ok(handoff?.id?.startsWith('chat-a:hash:'));
+  assert.equal(handoff.plannerPlotRecord.plotText, '<plot>next</plot>');
+  assert.equal(runtime.peekPlannerTurnHandoff('chat-a')?.plannerPlotRecord?.plotText, '<plot>next</plot>');
+  assert.equal(runtime.consumePlannerTurnHandoff('chat-a')?.plannerPlotRecord?.plotText, '<plot>next</plot>');
+  assert.equal(runtime.peekPlannerTurnHandoff('chat-a'), null);
 }
 
 {
@@ -341,21 +358,81 @@ import {
     formatInjection: (result) => result?.injectionText || '',
     getSchema: () => ({}),
   });
-  runtime.preparePlannerRecallHandoff({
+  runtime.preparePlannerTurnHandoff({
     chatId: 'chat-a',
     rawUserInput: 'raw input',
+    plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
     plannerRecall: {
       ok: true,
       memoryBlock: 'planner memory',
       result: { injectionText: 'planner memory', selectedNodeIds: ['n1'] },
     },
   });
-  assert.equal(runtime.peekPlannerRecallHandoff('chat-a')?.injectionText, 'planner memory');
-  assert.equal(runtime.consumePlannerRecallHandoff('chat-a')?.injectionText, 'planner memory');
-  assert.equal(runtime.peekPlannerRecallHandoff('chat-a'), null, 'consumed recall handoff must not be reused by generation recall');
-  assert.equal(runtime.peekConsumedPlannerRecallHandoff('chat-a')?.injectionText, 'planner memory', 'consumed handoff remains available for MESSAGE_SENT persistence');
-  assert.equal(runtime.clearPlannerRecallOnlyForChat('chat-a'), 1);
-  assert.equal(runtime.peekConsumedPlannerRecallHandoff('chat-a'), null);
+  assert.equal(runtime.peekPlannerTurnHandoff('chat-a')?.injectionText, 'planner memory');
+  assert.equal(runtime.clearPlannerTurnHandoffsForChat('chat-a'), 1);
+  assert.equal(runtime.peekPlannerTurnHandoff('chat-a'), null);
+}
+
+{
+  const runtime = createRerollRecallInput({
+    getCurrentChatId: () => 'chat-a',
+    normalizeChatIdCandidate: (value) => String(value || '').trim(),
+    normalizeRecallInputText: (value) => String(value || '').trim(),
+    hashRecallInput: () => 'hash',
+  });
+  const prepare = () => runtime.preparePlannerTurnHandoff({
+    chatId: 'chat-a',
+    rawUserInput: 'raw input',
+    plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
+    plannerPlotRecord: { plotText: '<plot>next</plot>' },
+  });
+
+  const stale = prepare();
+  assert.equal(
+    runtime.markPlannerTurnHandoffMatched('chat-a', {
+      handoffId: stale.id,
+      generationId: 'generation-1',
+    })?.matchedGenerationId,
+    'generation-1',
+  );
+  assert.equal(
+    runtime.markPlannerTurnHandoffMatched('chat-a', {
+      handoffId: stale.id,
+      generationId: 'generation-2',
+    }),
+    null,
+    'one planner handoff cannot be rebound to a later generation',
+  );
+  assert.equal(runtime.consumePlannerTurnHandoffForGeneration('chat-a', 'generation-2'), null);
+  assert.equal(runtime.peekPlannerTurnHandoff('chat-a'), null);
+
+  const current = prepare();
+  runtime.markPlannerTurnHandoffMatched('chat-a', {
+    handoffId: current.id,
+    generationId: 'generation-3',
+  });
+  assert.equal(
+    runtime.consumePlannerTurnHandoffForGeneration('chat-a', 'generation-3')?.id,
+    current.id,
+    'MESSAGE_SENT can consume only the handoff matched to its generation',
+  );
+}
+
+{
+  const runtime = createRerollRecallInput({
+    getCurrentChatId: () => 'chat-a',
+    normalizeChatIdCandidate: (value) => String(value || '').trim(),
+    normalizeRecallInputText: (value) => String(value || '').trim(),
+    hashRecallInput: () => 'hash',
+    formatInjection: () => '',
+    getSchema: () => ({}),
+  });
+  assert.equal(runtime.preparePlannerTurnHandoff({
+    chatId: 'chat-a',
+    rawUserInput: 'raw input',
+    plannerAugmentedMessage: 'raw input',
+    plannerRecall: { result: { selectedNodeIds: [] }, memoryBlock: '' },
+  }), null, 'empty planner recall must not suppress the normal recall');
 }
 
 {

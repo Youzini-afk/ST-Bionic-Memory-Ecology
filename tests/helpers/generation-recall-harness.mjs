@@ -266,6 +266,7 @@ export async function createGenerationRecallHarness(options = {}) {
     metadataSaveCalls: 0,
     recallUiRefreshCalls: 0,
     retrieveCalls: [],
+    retrieveImpl: null,
     isExtracting: false,
     isRecoveringHistory: false,
   };
@@ -284,6 +285,11 @@ export async function createGenerationRecallHarness(options = {}) {
     hostChatId: getCurrentChatId(),
   });
   conversationSession.beginGeneration("normal");
+  harness.enterConversation = (chatId) =>
+    conversationSession.enterChat(
+      { chatId, hostChatId: chatId },
+      { forceNewEpoch: true, reason: "test-chat-change" },
+    );
   const readConversationInput = (name) =>
     conversationSession.getInput(name) || createRecallInputRecord();
   const writeConversationInput = (name, record) =>
@@ -412,8 +418,11 @@ export async function createGenerationRecallHarness(options = {}) {
     activeCharacterPovOwner: harness.currentGraph?.historyState?.activeCharacterPovOwner || "",
     activeUserPovOwner: harness.currentGraph?.historyState?.activeUserPovOwner || context.name1 || "",
   });
-  const retrieve = (...args) => {
+  const retrieve = async (...args) => {
     harness.retrieveCalls.push(args);
+    if (typeof harness.retrieveImpl === "function") {
+      return await harness.retrieveImpl(...args);
+    }
     return { entries: [], items: [], nodes: [] };
   };
   const formatInjection = (result = null) =>
@@ -459,10 +468,8 @@ export async function createGenerationRecallHarness(options = {}) {
   let finalRecallInjectionRuntime;
   let autoExtractionDeferRuntime;
 
-  const clearPendingRerollRecallReuse = (reason = "") =>
-    rerollRecallInput.clearPendingRerollRecallReuse(reason);
-  const clearPlannerRecallHandoffsForChat = (chatId = getCurrentChatId(), opts = {}) =>
-    rerollRecallInput.clearPlannerRecallHandoffsForChat(chatId, opts);
+  const clearPlannerTurnHandoffsForChat = (chatId = getCurrentChatId(), opts = {}) =>
+    rerollRecallInput.clearPlannerTurnHandoffsForChat(chatId, opts);
 
   recallInputState = createRecallInputState({
     createRecallInputRecord,
@@ -487,8 +494,7 @@ export async function createGenerationRecallHarness(options = {}) {
       writeConversationInput("pendingRecallSendIntent", record),
     setCurrentGenerationTrivialSkip: (record) =>
       conversationSession.setTrivialSkip(record),
-    clearPendingRerollRecallReuse,
-    clearPlannerRecallHandoffsForChat,
+    clearPlannerTurnHandoffsForChat,
     TRIVIAL_GENERATION_SKIP_TTL_MS,
   });
 
@@ -543,8 +549,11 @@ export async function createGenerationRecallHarness(options = {}) {
     hashRecallInput,
     normalizeChatIdCandidate,
     normalizeRecallInputText,
-    peekPlannerRecallHandoff: (...args) =>
-      rerollRecallInput.peekPlannerRecallHandoff(...args),
+    peekPlannerTurnHandoff: (...args) =>
+      rerollRecallInput.peekPlannerTurnHandoff(...args),
+    clearPlannerTurnHandoffsForChat,
+    markPlannerTurnHandoffMatched: (...args) =>
+      rerollRecallInput.markPlannerTurnHandoffMatched(...args),
     resolveGenerationTargetUserMessageIndex,
     shouldRunRecallForTransaction,
   });
@@ -890,7 +899,6 @@ export async function createGenerationRecallHarness(options = {}) {
       recallInputState.getPendingHostGenerationInputSnapshot(...args),
     clearPendingHostGenerationInputSnapshot: (...args) =>
       recallInputState.clearPendingHostGenerationInputSnapshot(...args),
-    clearPendingRerollRecallReuse,
     recordRecallSendIntent: (...args) =>
       recallInputState.recordRecallSendIntent(...args),
     clearPendingRecallSendIntent: (...args) =>
@@ -918,13 +926,18 @@ export async function createGenerationRecallHarness(options = {}) {
     getPendingAutoExtraction: (...args) =>
       autoExtractionDeferRuntime.getPendingAutoExtraction(...args),
     getIsHostGenerationRunning: () => isHostGenerationRunning,
-    preparePlannerRecallHandoff: (...args) =>
-      rerollRecallInput.preparePlannerRecallHandoff(...args),
+    preparePlannerTurnHandoff: (...args) =>
+      rerollRecallInput.preparePlannerTurnHandoff(...args),
+    peekPlannerTurnHandoff: (...args) =>
+      rerollRecallInput.peekPlannerTurnHandoff(...args),
+    clearPlannerTurnHandoffsForChat,
     runPlannerRecallForEna: (args = {}) =>
       runPlannerRecallForEnaController(
         {
           buildRecallRecentMessages,
           buildRecallRetrieveOptions,
+          captureConversationLease: (...args) =>
+            conversationSession.captureLease(...args),
           clampInt,
           console,
           createAbortError,
@@ -937,6 +950,8 @@ export async function createGenerationRecallHarness(options = {}) {
           getSettings,
           isGraphMetadataWriteAllowed,
           isGraphReadableForRecall,
+          isConversationLeaseCurrent: (...args) =>
+            conversationSession.isLeaseCurrent(...args),
           isTrivialUserInput,
           normalizeRecallInputText,
           recoverHistoryIfNeeded,

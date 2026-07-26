@@ -182,8 +182,9 @@ ENA Planner is now integrated through the `planner` task preset. For deeper impl
 
 Recommendations:
 
-- Configure the base API and enabled state in "Config → ENA Planner".
-- Adjust the planning prompt structure and generation parameters in "Config → Task presets → planner".
+- Explicitly enable ENA and select a BME LLM preset under "Config → ENA Planner"; leave it empty to follow the current global BME LLM.
+- Adjust the only active planning prompt structure and generation parameters under "Config → Task presets → planner".
+- Reroll never runs ENA again; it reuses the parent user turn's persisted recall.
 
 ### Hide old turns and render limit
 

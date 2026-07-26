@@ -6120,7 +6120,7 @@ async function testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid() {
   assert.equal(refreshCalls, 1);
 }
 
-async function testMessageSentPersistsPlannerRecallBeforePlotRecord() {
+async function testMessageSentPersistsPlannerTurnBeforeRecallRebind() {
   const order = [];
   let refreshCalls = 0;
 
@@ -6134,12 +6134,8 @@ async function testMessageSentPersistsPlannerRecallBeforePlotRecord() {
       recordRecallSentUserMessage(messageId, text, source = "message-sent") {
         order.push(["record", messageId, text, source]);
       },
-      persistPlannerRecallHandoffToUserMessage(messageId) {
-        order.push(["planner-recall", messageId]);
-        return true;
-      },
-      persistPlannerPlotRecordToUserMessage(messageId) {
-        order.push(["plot", messageId]);
+      persistPlannerTurnHandoffToUserMessage(messageId) {
+        order.push(["planner-turn", messageId]);
         return true;
       },
       rebindRecallRecordToNewUserMessage(messageId) {
@@ -6154,8 +6150,7 @@ async function testMessageSentPersistsPlannerRecallBeforePlotRecord() {
 
   assert.deepEqual(order, [
     ["record", 0, "用户原文\n\n<plot>规划</plot>", "message-sent"],
-    ["planner-recall", 0],
-    ["plot", 0],
+    ["planner-turn", 0],
     ["rebind", 0],
   ]);
   assert.equal(refreshCalls, 1);
@@ -9964,7 +9959,7 @@ await testSwipeFailureSchedulesHistoryRecoveryFallback();
 await testOverswipeCheckpointFailureWaitsForReplacement();
 await testRegenerateDeleteCheckpointsImmediatelyWithoutRecallInvalidation();
 await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
-await testMessageSentPersistsPlannerRecallBeforePlotRecord();
+await testMessageSentPersistsPlannerTurnBeforeRecallRebind();
 await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
