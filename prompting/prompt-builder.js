@@ -1,7 +1,11 @@
 // ST-BME: Prompt Builder
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
-import { debugLog, debugWarn } from "../runtime/debug-logging.js";
+import {
+  debugLog,
+  debugWarn,
+  ensureRuntimeDebugStateBucket,
+} from "../runtime/debug-logging.js";
 import { getActiveTaskProfile } from "./prompt-profiles.js";
 import {
   createEmptyInjectionSanitizerDebug,
@@ -106,26 +110,9 @@ function cloneRuntimeDebugValue(value, fallback = null) {
   }
 }
 
-function getRuntimeDebugState() {
-  const stateKey = "__stBmeRuntimeDebugState";
-  if (
-    !globalThis[stateKey] ||
-    typeof globalThis[stateKey] !== "object"
-  ) {
-    globalThis[stateKey] = {
-      hostCapabilities: null,
-      taskPromptBuilds: {},
-      taskLlmRequests: {},
-      injections: {},
-      updatedAt: "",
-    };
-  }
-  return globalThis[stateKey];
-}
-
 function recordTaskPromptBuild(taskType, snapshot = {}) {
   const normalizedTaskType = String(taskType || "").trim() || "unknown";
-  const state = getRuntimeDebugState();
+  const state = ensureRuntimeDebugStateBucket("taskPromptBuilds");
   state.taskPromptBuilds[normalizedTaskType] = {
     updatedAt: new Date().toISOString(),
     ...sanitizePromptBuildDebugSnapshot(snapshot),

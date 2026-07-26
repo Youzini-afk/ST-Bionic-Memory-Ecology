@@ -4,7 +4,11 @@
 import { getRequestHeaders } from "../../../../../script.js";
 import { extension_settings } from "../../../../extensions.js";
 import { chat_completion_sources, sendOpenAIRequest } from "../../../../openai.js";
-import { debugLog, debugWarn } from "../runtime/debug-logging.js";
+import {
+  debugLog,
+  debugWarn,
+  ensureRuntimeDebugStateBucket,
+} from "../runtime/debug-logging.js";
 import { resolveTaskGenerationOptions } from "../runtime/generation-options.js";
 import {
   resolveDedicatedLlmProviderConfig,
@@ -392,24 +396,6 @@ function summarizeTaskTimelineEntry(taskType, snapshot = {}) {
   };
 }
 
-function getRuntimeDebugState() {
-  const stateKey = "__stBmeRuntimeDebugState";
-  if (
-    !globalThis[stateKey] ||
-    typeof globalThis[stateKey] !== "object"
-  ) {
-    globalThis[stateKey] = {
-      hostCapabilities: null,
-      taskPromptBuilds: {},
-      taskLlmRequests: {},
-      injections: {},
-      taskTimeline: [],
-      updatedAt: "",
-    };
-  }
-  return globalThis[stateKey];
-}
-
 function preserveStreamingDebugFields(previousSnapshot = {}, nextSnapshot = {}) {
   const merged = {
     ...cloneRuntimeDebugValue(previousSnapshot, {}),
@@ -439,7 +425,7 @@ function preserveStreamingDebugFields(previousSnapshot = {}, nextSnapshot = {}) 
 
 function recordTaskLlmRequest(taskType, snapshot = {}, options = {}) {
   const normalizedTaskType = String(taskType || "").trim() || "unknown";
-  const state = getRuntimeDebugState();
+  const state = ensureRuntimeDebugStateBucket("taskLlmRequests");
   const shouldMerge = options?.merge === true;
   const existingSnapshot = cloneRuntimeDebugValue(
     state.taskLlmRequests[normalizedTaskType],

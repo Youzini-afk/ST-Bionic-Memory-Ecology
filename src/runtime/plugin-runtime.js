@@ -19,6 +19,13 @@ import { normalizeSettings, patchSettings } from "./settings.js";
 export const GRAPH_TRANSFER_FORMAT = "st-bme-v9-graph";
 export const GRAPH_TRANSFER_VERSION = 1;
 
+class NoActiveChatError extends Error {
+  constructor() {
+    super("no active SillyTavern chat");
+    this.name = "NoActiveChatError";
+  }
+}
+
 const HISTORY_CONTEXT_KEYS = Object.freeze([
   "lastExtractedRegion",
   "activeRegion",
@@ -257,7 +264,7 @@ export async function createPluginRuntime(options = {}) {
 
   async function activeContext() {
     const snapshot = host.snapshotConversation();
-    if (!snapshot.chatKey) throw new Error("no active SillyTavern chat");
+    if (!snapshot.chatKey) throw new NoActiveChatError();
     let lease = engine.getActiveLease();
     if (!lease || lease.chatKey !== snapshot.chatKey || !engine.isLeaseActive(lease)) {
       await generation.onChatChanged();
@@ -386,7 +393,11 @@ export async function createPluginRuntime(options = {}) {
           vectorJobs: [...current.state.vectorJobs.values()].map(clone),
         };
       } catch (error) {
-        notify({ availability: "blocked", activity: "idle", detail: "", error });
+        if (error?.name === "NoActiveChatError") {
+          notify({ availability: "ready", activity: "idle", detail: "no-chat", error: null });
+        } else {
+          notify({ availability: "blocked", activity: "idle", detail: "", error });
+        }
         throw error;
       }
     },

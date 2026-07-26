@@ -187,6 +187,8 @@ export function mountPanel(runtime, { documentLike = globalThis.document } = {})
     element(document, "st-bme-v9-regex").value = JSON.stringify(settings.globalTaskRegex, null, 2);
   };
 
+  fillSettings(runtime.getSettings());
+
   const renderSnapshot = (snapshot) => {
     latest = snapshot;
     renderStatus(snapshot.status);

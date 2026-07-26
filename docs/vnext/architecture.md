@@ -1,4 +1,4 @@
-# ST-BME vNext 架构基线
+# ST-BME v9 架构基线
 
 状态：Accepted
 
@@ -8,7 +8,7 @@
 
 ## 1. 目标
 
-vNext 保留 BME 的产品能力，重写其有状态内核。重写首先解决以下问题：
+v9 保留 BME 的产品能力，重写其有状态内核。重写首先解决以下问题：
 
 - 持久化存在多个互相竞争的事实源；
 - 删除、编辑、swipe 和 reroll 后，图谱与楼层历史不能可靠对应；
@@ -17,11 +17,11 @@ vNext 保留 BME 的产品能力，重写其有状态内核。重写首先解决
 - 异步任务完成时可能已经切换聊天，却仍读取或写入“当前”全局状态；
 - ENA、普通召回与 reroll 的生命周期被临时 handoff 和 TTL 状态缠绕。
 
-vNext 不是缩减版 BME。提取、图关系、维护、检索、向量、任务预设、ENA 和可视化仍属于产品范围；但只有完成新事务接入的功能才允许进入新入口。
+v9 不是缩减版 BME。提取、图关系、维护、检索、向量、任务预设、ENA 和可视化仍属于产品范围；但只有完成新事务接入的功能才允许进入新入口。
 
 ## 2. Clean break
 
-vNext 不实现旧运行时兼容：
+v9 不实现旧运行时兼容：
 
 - 不读取、不迁移旧 graph snapshot、settings 或 chat metadata；
 - 不读取 `message.extra.bme_recall` 或 `message.extra.st_bme_plot`；
@@ -348,7 +348,7 @@ Authority Primary 使用与 IndexedDB 相同的提交契约和行为测试。优
 
 ## 14. 完成定义
 
-vNext 只有在以下条件同时满足时才能切换 manifest 入口：
+v9 只有在以下条件同时满足时才能切换 manifest 入口：
 
 - 所有保留功能已通过 ConversationEngine 和 StateStore，无直接写 graph/storage 的旁路；
 - IndexedDB 与 Authority 通过共享契约测试；

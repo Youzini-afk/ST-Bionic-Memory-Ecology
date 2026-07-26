@@ -11,6 +11,7 @@ import {
   normalizeSettings,
 } from "../../src/runtime/settings.js";
 import { resolveRecallCandidateSelection } from "../../prompting/prompt-node-references.js";
+import { ensureRuntimeDebugStateBucket } from "../../runtime/debug-logging.js";
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
@@ -101,6 +102,45 @@ test("v9 settings are a clean namespace and ENA defaults explicitly off", () => 
   assert.throws(() => normalizeSettings({
     globalTaskRegex: { ...defaults.globalTaskRegex, stages: { finalPrompt: true } },
   }), /unsupported regex stage/);
+});
+
+test("runtime debug buckets survive partial initialization by another subsystem", () => {
+  const key = "__stBmeRuntimeDebugState";
+  const previous = globalThis[key];
+  try {
+    globalThis[key] = { graphLayout: { nodeCount: 1 } };
+    const state = ensureRuntimeDebugStateBucket("taskPromptBuilds");
+    assert.deepEqual(state.graphLayout, { nodeCount: 1 });
+    assert.deepEqual(state.taskPromptBuilds, {});
+    state.taskLlmRequests = [];
+    assert.deepEqual(ensureRuntimeDebugStateBucket("taskLlmRequests").taskLlmRequests, {});
+  } finally {
+    if (previous === undefined) delete globalThis[key];
+    else globalThis[key] = previous;
+  }
+});
+
+test("no active chat stays idle instead of impersonating a Primary failure", async () => {
+  const { state, context, documentLike } = hostFixture();
+  state.chatId = "";
+  state.chat = [];
+  const runtime = await createPluginRuntime({
+    getContext: () => context,
+    documentLike,
+    settings: createDefaultSettings(),
+    store: new MemoryStateStore(),
+    vectorApi: vectorApi(),
+    domains: { async processAssistant() { return { status: "idle" }; } },
+  });
+  await runtime.start();
+  assert.deepEqual(
+    { availability: runtime.getStatus().availability, detail: runtime.getStatus().detail },
+    { availability: "ready", detail: "no-chat" },
+  );
+  await assert.rejects(runtime.snapshot(), { name: "NoActiveChatError" });
+  assert.equal(runtime.getStatus().availability, "ready");
+  assert.equal(runtime.getStatus().error, null);
+  await runtime.dispose();
 });
 
 test("production runtime pins one Primary and writes graph changes through its outbox", async () => {
