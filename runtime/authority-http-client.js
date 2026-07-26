@@ -62,11 +62,11 @@ function buildDefaultSessionInitConfig(source = {}) {
       events: { channels: true },
       modules: {
         execute: [
+          `${BME_AUTHORITY_MODULE_ID}:state.read`,
+          `${BME_AUTHORITY_MODULE_ID}:state.command`,
           `${BME_AUTHORITY_MODULE_ID}:vector.manifest`,
           `${BME_AUTHORITY_MODULE_ID}:vector.apply`,
           `${BME_AUTHORITY_MODULE_ID}:recall.candidates`,
-          `${BME_AUTHORITY_MODULE_ID}:graph.commitDelta`,
-          `${BME_AUTHORITY_MODULE_ID}:extraction.commitBatch`,
         ],
       },
     },
