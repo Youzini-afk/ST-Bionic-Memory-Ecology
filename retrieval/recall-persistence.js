@@ -1,6 +1,6 @@
 // ST-BME: 持久化召回记录纯函数
 
-import { resolveGenerationParentUserFloor } from "../runtime/generation-context.js";
+import { resolveGenerationParentUserFloor } from "../runtime/conversation-session.js";
 import { stableHashString } from "../runtime/runtime-state.js";
 
 export const BME_RECALL_EXTRA_KEY = "bme_recall";

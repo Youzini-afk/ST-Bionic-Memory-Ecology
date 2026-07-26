@@ -36,7 +36,7 @@ async function testSendIntentCanRemainAuthoritativeQueryWhenFlagEnabled() {
   assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, null);
   assert.equal(harness.runRecallCalls[0].includeSyntheticUserMessage, true);
 
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.ok(transaction);
   assert.equal(
     transaction.frozenRecallOptions.overrideUserMessage,
@@ -152,7 +152,7 @@ async function testAuthoritativeSendIntentStaysFrozenAcrossHooksWhenFlagEnabled(
   assert.equal(harness.runRecallCalls[0].authoritativeInputUsed, true);
   assert.equal(harness.runRecallCalls[0].boundUserFloorText, "");
 
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.ok(transaction);
   assert.equal(
     transaction.frozenRecallOptions.overrideUserMessage,
@@ -194,7 +194,7 @@ async function testHostSnapshotCanRemainAuthoritativeQueryWhenFlagEnabled() {
     JSON.stringify(["host-generation-lifecycle", "chat-tail-user"]),
   );
 
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.ok(transaction);
   assert.equal(transaction.frozenRecallOptions.overrideUserMessage, "宿主快照输入");
   assert.equal(
@@ -681,7 +681,7 @@ async function testFreshRecallAfterEmptyHandoffProducesPersistableRecord() {
 
   // MESSAGE_SENT supplies the stable floor after recall has completed.
   harness.chat.push({ is_user: true, mes: "planner 原始输入" });
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   const persistResult =
     harness.result.bindGenerationRecallTransactionToUserMessage(transaction, 1);
 

@@ -512,7 +512,13 @@ export async function runRecallController(runtime, options = {}) {
 
   const recallChatId = String(context?.chatId || "").trim();
   const recallGraph = runtime.getCurrentGraph();
+  const conversationLease = runtime.captureConversationLease?.() || null;
   const isRecallContextCurrent = () => {
+    if (conversationLease && runtime.isConversationLeaseCurrent) {
+      return runtime.isConversationLeaseCurrent(conversationLease, {
+        requireGeneration: Boolean(conversationLease.generationId),
+      });
+    }
     const activeContext = runtime.getContext();
     const activeChatId = String(activeContext?.chatId || "").trim();
     if (recallChatId && activeChatId) return activeChatId === recallChatId;

@@ -163,7 +163,7 @@ import {
 } from "./runtime/identity-resolver.js";
 import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js";
-import { createGenerationContextTracker } from "./runtime/generation-context.js";
+import { createConversationSession } from "./runtime/conversation-session.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
 import { createAutoExtractionDefer } from "./runtime/auto-extraction-defer.js";
@@ -1658,29 +1658,39 @@ const backgroundVectorSyncCoalescer =
       };
 const lastStatusToastAt = {};
 const dismissedStageNoticeSignatures = new Map();
-let pendingRecallSendIntent = createRecallInputRecord();
-let lastRecallSentUserMessage = createRecallInputRecord();
-let pendingHostGenerationInputSnapshot = createRecallInputRecord();
+const conversationSession = createConversationSession({
+  rerollInferenceWindowMs: GENERATION_RECALL_TRANSACTION_TTL_MS,
+});
+conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  reason: "runtime-init",
+});
+const readConversationInput = (name) =>
+  conversationSession.getInput(name) || createRecallInputRecord();
+const writeConversationInput = (name, record) =>
+  conversationSession.setInput(name, record || createRecallInputRecord());
 const recallInputState = createRecallInputState({
   createRecallInputRecord,
   getCurrentChatId,
-  getLastRecallSentUserMessage: () => lastRecallSentUserMessage,
-  getPendingHostGenerationInputSnapshot: () => pendingHostGenerationInputSnapshot,
-  getPendingRecallSendIntent: () => pendingRecallSendIntent,
+  getLastRecallSentUserMessage: () =>
+    readConversationInput("lastRecallSentUserMessage"),
+  getPendingHostGenerationInputSnapshot: () =>
+    readConversationInput("pendingHostGenerationInputSnapshot"),
+  getPendingRecallSendIntent: () =>
+    readConversationInput("pendingRecallSendIntent"),
+  getCurrentGenerationTrivialSkip: () => conversationSession.getTrivialSkip(),
   hashRecallInput,
   isFreshRecallInputRecord,
   normalizeChatIdCandidate,
   normalizeRecallInputText,
   recordMessageTraceSnapshot: (patch) => recordMessageTraceSnapshot(patch),
-  setLastRecallSentUserMessage: (record) => {
-    lastRecallSentUserMessage = record;
-  },
-  setPendingHostGenerationInputSnapshot: (record) => {
-    pendingHostGenerationInputSnapshot = record;
-  },
-  setPendingRecallSendIntent: (record) => {
-    pendingRecallSendIntent = record;
-  },
+  setLastRecallSentUserMessage: (record) =>
+    writeConversationInput("lastRecallSentUserMessage", record),
+  setPendingHostGenerationInputSnapshot: (record) =>
+    writeConversationInput("pendingHostGenerationInputSnapshot", record),
+  setPendingRecallSendIntent: (record) =>
+    writeConversationInput("pendingRecallSendIntent", record),
+  setCurrentGenerationTrivialSkip: (record) =>
+    conversationSession.setTrivialSkip(record),
   clearPendingRerollRecallReuse: (...args) => clearPendingRerollRecallReuse(...args),
   clearPlannerRecallHandoffsForChat: (...args) =>
     clearPlannerRecallHandoffsForChat(...args),
@@ -1701,9 +1711,11 @@ const rerollRecallInput = createRerollRecallInput({
   getCurrentGenerationTrivialSkip: (...args) =>
     getCurrentGenerationTrivialSkip(...args),
   getLastNonSystemChatMessage: (...args) => getLastNonSystemChatMessage(...args),
-  getLastRecallSentUserMessage: () => lastRecallSentUserMessage,
+  getLastRecallSentUserMessage: () =>
+    readConversationInput("lastRecallSentUserMessage"),
   getLatestUserChatMessage: (...args) => getLatestUserChatMessage(...args),
-  getPendingRecallSendIntent: () => pendingRecallSendIntent,
+  getPendingRecallSendIntent: () =>
+    readConversationInput("pendingRecallSendIntent"),
   getSchema: (...args) => getSchema(...args),
   getSendTextareaValue: (...args) => getSendTextareaValue(...args),
   hashRecallInput,
@@ -1750,8 +1762,13 @@ let lastPreGenerationRecallAt = 0;
 const generationRecallTransactionRuntime = createGenerationRecallTransactions({
   getContext,
   getCurrentChatId,
-  getActiveGenerationId: () =>
-    generationContextTracker.get?.({ allowStale: true })?.id || "",
+  getActiveGenerationId: () => conversationSession.getGeneration()?.id || "",
+  getGenerationRecallTransaction: () =>
+    conversationSession.getRecallTransaction(),
+  setGenerationRecallTransaction: (transaction) =>
+    conversationSession.setRecallTransaction(transaction),
+  clearGenerationRecallTransaction: () =>
+    conversationSession.clearRecallTransaction(),
   getRecallUserMessageSourceLabel: (...args) =>
     getRecallUserMessageSourceLabel(...args),
   getSettings,
@@ -1762,14 +1779,6 @@ const generationRecallTransactionRuntime = createGenerationRecallTransactions({
   resolveGenerationTargetUserMessageIndex: (...args) =>
     resolveGenerationTargetUserMessageIndex(...args),
   shouldRunRecallForTransaction,
-  GENERATION_RECALL_TRANSACTION_TTL_MS,
-  GENERATION_RECALL_HOOK_BRIDGE_MS,
-});
-const generationRecallTransactions =
-  generationRecallTransactionRuntime.generationRecallTransactions;
-const generationContextTracker = createGenerationContextTracker({
-  getCurrentChatId,
-  ttlMs: GENERATION_RECALL_TRANSACTION_TTL_MS,
 });
 const finalRecallInjectionRuntime = createFinalRecallInjection({
   applyModuleInjectionPrompt: (...args) => applyModuleInjectionPrompt(...args),
@@ -1787,7 +1796,8 @@ const finalRecallInjectionRuntime = createFinalRecallInjection({
   getGenerationRecallTransactionResult: (...args) =>
     getGenerationRecallTransactionResult(...args),
   getLastInjectionContent: () => lastInjectionContent,
-  getLastRecallSentUserMessage: () => lastRecallSentUserMessage,
+  getLastRecallSentUserMessage: () =>
+    readConversationInput("lastRecallSentUserMessage"),
   getRuntimeStatus: () => runtimeStatus,
   getSettings,
   normalizeRecallInputText,
@@ -5214,7 +5224,7 @@ function rebindRecallRecordToNewUserMessage(newUserMessageIndex) {
     return null;
   }
   const activeGenerationId = String(
-    generationContextTracker.get?.({ allowStale: true })?.id || "",
+    conversationSession.getGeneration()?.id || "",
   ).trim();
   if (!activeGenerationId) return null;
 
@@ -14792,9 +14802,13 @@ function resolveRecallInput(chat, recentContextMessageLimit, override = null) {
       getLatestUserChatMessage,
       getRecallUserMessageSourceLabel,
       isFreshRecallInputRecord,
-      lastRecallSentUserMessage,
+      lastRecallSentUserMessage: readConversationInput(
+        "lastRecallSentUserMessage",
+      ),
       normalizeRecallInputText,
-      pendingRecallSendIntent,
+      pendingRecallSendIntent: readConversationInput(
+        "pendingRecallSendIntent",
+      ),
     },
   );
 }
@@ -14963,30 +14977,6 @@ function buildPreGenerationRecallKey(type, options = {}) {
   );
 }
 
-function cleanupGenerationRecallTransactions(now = Date.now()) {
-  return generationRecallTransactionRuntime.cleanupGenerationRecallTransactions(now);
-}
-
-function getGenerationRecallPeerHookName(hookName = "") {
-  return generationRecallTransactionRuntime.getGenerationRecallPeerHookName(hookName);
-}
-
-function isGenerationRecallTransactionWithinBridgeWindow(
-  transaction,
-  now = Date.now(),
-) {
-  return generationRecallTransactionRuntime.isGenerationRecallTransactionWithinBridgeWindow(
-    transaction,
-    now,
-  );
-}
-
-function normalizeGenerationRecallTransactionType(generationType = "normal") {
-  return generationRecallTransactionRuntime.normalizeGenerationRecallTransactionType(
-    generationType,
-  );
-}
-
 function resolveGenerationRecallDeliveryMode(
   hookName,
   generationType = "normal",
@@ -14999,81 +14989,11 @@ function resolveGenerationRecallDeliveryMode(
   );
 }
 
-function shouldUseAuthoritativeGenerationRecallInput(recallOptions = {}) {
-  return generationRecallTransactionRuntime.shouldUseAuthoritativeGenerationRecallInput(
-    recallOptions,
-  );
-}
-
-function shouldPreserveAuthoritativeGenerationRecallText(
-  source,
-  overrideUserMessage,
-  targetUserMessageText,
-  recallOptions = {},
-) {
-  return generationRecallTransactionRuntime.shouldPreserveAuthoritativeGenerationRecallText(
-    source,
-    overrideUserMessage,
-    targetUserMessageText,
-    recallOptions,
-  );
-}
-
-function freezeGenerationRecallOptionsForTransaction(
-  chat,
-  generationType = "normal",
-  recallOptions = {},
-) {
-  return generationRecallTransactionRuntime.freezeGenerationRecallOptionsForTransaction(
-    chat,
-    generationType,
-    recallOptions,
-  );
-}
-
-function buildGenerationRecallTransactionId(chatId, generationType, recallKey) {
-  return generationRecallTransactionRuntime.buildGenerationRecallTransactionId(
-    chatId,
-    generationType,
-    recallKey,
-  );
-}
-
-function beginGenerationRecallTransaction({
-  chatId,
-  generationType = "normal",
-  recallKey = "",
-  forceNew = false,
-} = {}) {
-  return generationRecallTransactionRuntime.beginGenerationRecallTransaction({
-    chatId,
-    generationType,
-    recallKey,
-    forceNew,
-  });
-}
-
 function findRecentGenerationRecallTransactionForChat(
   chatId = getCurrentChatId(),
-  now = Date.now(),
 ) {
   return generationRecallTransactionRuntime.findRecentGenerationRecallTransactionForChat(
     chatId,
-    now,
-  );
-}
-
-function shouldReuseRecentGenerationRecallTransaction(
-  transaction,
-  hookName,
-  recallKey = "",
-  now = Date.now(),
-) {
-  return generationRecallTransactionRuntime.shouldReuseRecentGenerationRecallTransaction(
-    transaction,
-    hookName,
-    recallKey,
-    now,
   );
 }
 
@@ -16141,6 +16061,8 @@ async function runRecall(options = {}) {
       beginStageAbortController,
       bumpPersistedRecallGenerationCount,
       buildRecallRetrieveOptions,
+      captureConversationLease: (...args) =>
+        conversationSession.captureLease(...args),
       clampInt,
       console,
       consumePlannerRecallHandoff,
@@ -16159,6 +16081,8 @@ async function runRecall(options = {}) {
       getSchema,
       getSettings,
       isAbortError,
+      isConversationLeaseCurrent: (...args) =>
+        conversationSession.isLeaseCurrent(...args),
       isGraphMetadataWriteAllowed,
       isGraphReadable,
       isGraphReadableForRecall,
@@ -16177,7 +16101,7 @@ async function runRecall(options = {}) {
       },
       setLastRecallStatus,
       setPendingRecallSendIntent: (value) => {
-        pendingRecallSendIntent = value;
+        writeConversationInput("pendingRecallSendIntent", value);
       },
       toastr,
       triggerChatMetadataSave,
@@ -16192,7 +16116,10 @@ async function runRecall(options = {}) {
 function onChatChanged() {
   isHostGenerationRunning = false;
   lastHostGenerationEndedAt = 0;
-  generationContextTracker.clear("chat-changed");
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    forceNewEpoch: true,
+    reason: "chat-changed",
+  });
   clearDeferredHistoryMutationRecheck();
   const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
   updateGraphPersistenceState({
@@ -16257,6 +16184,9 @@ function onChatChanged() {
 }
 
 function onChatLoaded() {
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    reason: "chat-loaded",
+  });
   const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
   updateGraphPersistenceState({
     hostProfile: adapter.hostProfile,
@@ -16332,15 +16262,18 @@ function onCharacterMessageRendered(messageId = null, type = "") {
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    reason: "message-deleted",
+  });
   const result = onMessageDeletedController(
     {
-      getGenerationContext: (...args) => generationContextTracker.get(...args),
+      getGenerationContext: () => conversationSession.getGeneration(),
       getContext,
       invalidateRecallAfterHistoryMutation,
       markGenerationContextExpectedMutation: (...args) =>
-        generationContextTracker.markExpectedMutation(...args),
+        conversationSession.markExpectedMutation(...args),
       noteAssistantTailDelete: (...args) =>
-        generationContextTracker.noteAssistantTailDelete(...args),
+        conversationSession.noteAssistantTailDelete(...args),
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
       scheduleDeferredHistoryMutationRecheck,
       scheduleHistoryMutationRecheck,
@@ -16385,7 +16318,10 @@ function onMessageUpdated(messageId, meta = null) {
 }
 
 async function onMessageSwiped(messageId, meta = null) {
-  generationContextTracker.noteSwipe(messageId, meta);
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    reason: "message-swiped",
+  });
+  conversationSession.noteSwipe(messageId, meta);
   const result = await onMessageSwipedController(
     {
       invalidateRecallAfterHistoryMutation,
@@ -16496,11 +16432,17 @@ function onGenerationBeforeApiRequest(payload = {}) {
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    reason: "generation-started",
+  });
   const generationType = String(type || "normal").trim() || "normal";
+  const pendingRecallSendIntent = readConversationInput(
+    "pendingRecallSendIntent",
+  );
   const freshInputHint = Boolean(
     pendingRecallSendIntent?.text || pendingRecallSendIntent?.rawText,
   );
-  generationContextTracker.begin(
+  conversationSession.beginGeneration(
     generationType,
     {
       ...params,
@@ -16528,7 +16470,8 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
       clearPendingRecallSendIntent,
       freezeHostGenerationInputSnapshot,
       getContext,
-      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      getPendingRecallSendIntent: () =>
+        readConversationInput("pendingRecallSendIntent"),
       getSendTextareaValue,
       isFreshRecallInputRecord,
       isTavernHelperPromptViewerRefreshActive,
@@ -16575,11 +16518,14 @@ function onGenerationEnded(_chatLength = null) {
     scheduleMessageHideApply("generation-ended", 180);
   }
   flushDeferredHistoryMutationRecheck("generation-ended");
-  generationContextTracker.clear("generation-ended");
+  conversationSession.clearGeneration("generation-ended");
 }
 
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
-  generationContextTracker.update(type, params, {
+  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+    reason: "generation-after-commands",
+  });
+  conversationSession.updateGeneration(type, params, {
     dryRun,
     phase: "GENERATION_AFTER_COMMANDS",
   });
@@ -16593,12 +16539,13 @@ async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
       ensurePersistedRecallRecordForGeneration,
-      getGenerationContext: (...args) => generationContextTracker.get(...args),
+      getGenerationContext: () => conversationSession.getGeneration(),
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
       getCurrentChatId,
-      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      getPendingRecallSendIntent: () =>
+        readConversationInput("pendingRecallSendIntent"),
       isFreshRecallInputRecord,
       isMvuExtraAnalysisGuardActive,
       isTavernHelperPromptViewerRefreshActive,
@@ -16628,12 +16575,13 @@ async function onBeforeCombinePrompts(promptData = null) {
       consumeDryRunPromptPreview,
       consumeHostGenerationInputSnapshot,
       createGenerationRecallContext,
-      getGenerationContext: (...args) => generationContextTracker.get(...args),
+      getGenerationContext: () => conversationSession.getGeneration(),
       getContext,
       getGenerationRecallHookStateFromResult,
       getGenerationRecallTransactionResult,
       getCurrentChatId,
-      getPendingRecallSendIntent: () => pendingRecallSendIntent,
+      getPendingRecallSendIntent: () =>
+        readConversationInput("pendingRecallSendIntent"),
       isFreshRecallInputRecord,
       isMvuExtraAnalysisGuardActive,
       isTavernHelperPromptViewerRefreshActive,
@@ -16660,7 +16608,8 @@ function onMessageReceived(messageId = null, type = "") {
     getIsHostGenerationRunning: () => isHostGenerationRunning,
     getLastProcessedAssistantFloor,
     getPendingHostGenerationInputSnapshot,
-    getPendingRecallSendIntent: () => pendingRecallSendIntent,
+    getPendingRecallSendIntent: () =>
+      readConversationInput("pendingRecallSendIntent"),
     getSettings,
     isAssistantChatMessage,
     isFreshRecallInputRecord,
@@ -16674,10 +16623,10 @@ function onMessageReceived(messageId = null, type = "") {
     runExtraction,
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     setPendingHostGenerationInputSnapshot: (record) => {
-      pendingHostGenerationInputSnapshot = record;
+      writeConversationInput("pendingHostGenerationInputSnapshot", record);
     },
     setPendingRecallSendIntent: (record) => {
-      pendingRecallSendIntent = record;
+      writeConversationInput("pendingRecallSendIntent", record);
     },
   }, messageId, type);
 

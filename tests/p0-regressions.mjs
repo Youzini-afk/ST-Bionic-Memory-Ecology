@@ -5575,7 +5575,7 @@ async function testGenerationRecallHistoryModesUseSameBindingAcrossHooks() {
     );
     assert.equal(
       harness.runRecallCalls[0].hookName,
-      "GENERATION_AFTER_COMMANDS",
+      "GENERATE_BEFORE_COMBINE_PROMPTS",
     );
     assert.equal(harness.runRecallCalls[0].targetUserMessageIndex, 0);
     assert.equal(harness.runRecallCalls[0].overrideUserMessage, userMessage);
@@ -5707,6 +5707,7 @@ async function testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration(
   harness.chat = [{ is_user: true, mes: "同 key 连续生成" }];
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
+  harness.result.beginGeneration("normal");
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
   assert.equal(harness.runRecallCalls.length, 2);
@@ -5716,16 +5717,12 @@ async function testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration(
   );
 }
 
-async function testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow() {
+async function testGenerationRecallSameKeyCanRunAgainAfterGenerationBoundary() {
   const harness = await createGenerationRecallHarness();
   harness.chat = [{ is_user: true, mes: "同 key 重复生成" }];
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
-  const transaction = [
-    ...harness.result.generationRecallTransactions.values(),
-  ][0];
-  transaction.updatedAt = Date.now() - 5000;
-  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+  harness.result.beginGeneration("normal");
   await harness.result.onGenerationAfterCommands("normal", {}, false);
 
   assert.equal(harness.runRecallCalls.length, 2);
@@ -5786,10 +5783,8 @@ async function testGenerationRecallSkippedStateDoesNotLoopToBeforeCombine() {
   await harness.result.onBeforeCombinePrompts();
 
   assert.equal(harness.runRecallCalls.length, 1);
-  assert.equal(harness.result.generationRecallTransactions.size, 1);
-  const transaction = [
-    ...harness.result.generationRecallTransactions.values(),
-  ][0];
+  assert.ok(harness.result.getGenerationRecallTransaction());
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.equal(transaction.hookStates.GENERATION_AFTER_COMMANDS, "skipped");
 }
 
@@ -5799,7 +5794,7 @@ async function testGenerationRecallSentMessageClearsStaleTransactionForSameKey()
 
   await harness.result.onGenerationAfterCommands("normal", {}, false);
   assert.equal(harness.runRecallCalls.length, 1);
-  assert.equal(harness.result.generationRecallTransactions.size, 1);
+  assert.ok(harness.result.getGenerationRecallTransaction());
 
   harness.recordRecallSentUserMessage(0, "同 key 发送后重开");
   await harness.result.onGenerationAfterCommands("normal", {}, false);
@@ -6952,7 +6947,7 @@ async function testGenerationRecallDeferredRewriteMutatesFinalMesSendAuthoritati
     harness.runRecallCalls[0].hookName,
     "GENERATION_AFTER_COMMANDS",
   );
-  const transaction = [...harness.result.generationRecallTransactions.values()][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.ok(transaction);
   assert.equal(transaction.frozenRecallOptions.authoritativeInputUsed, true);
   assert.equal(transaction.frozenRecallOptions.boundUserFloorText, "楼层稳定输入");
@@ -7006,9 +7001,7 @@ async function testGenerationRecallSendIntentBeatsChatTailAndStaysObservable() {
     ),
     JSON.stringify(["send-intent", "chat-tail-user"]),
   );
-  const transaction = [
-    ...harness.result.generationRecallTransactions.values(),
-  ][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.equal(
     transaction.frozenRecallOptions.overrideUserMessage,
     "刚触发发送的新输入",
@@ -7083,9 +7076,7 @@ async function testGenerationRecallLockedSourceDoesNotDriftWithinTransaction() {
 
   assert.equal(harness.runRecallCalls.length, 1);
   assert.equal(harness.runRecallCalls[0].overrideUserMessage, "事务漂移输入-B");
-  const transaction = [
-    ...harness.result.generationRecallTransactions.values(),
-  ][0];
+  const transaction = harness.result.getGenerationRecallTransaction();
   assert.equal(
     transaction.frozenRecallOptions.overrideUserMessage,
     "事务漂移输入-B",
@@ -7819,7 +7810,7 @@ async function testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh()
     lockedSource: "send-intent",
     hookName: "GENERATION_AFTER_COMMANDS",
   };
-  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+  harness.result.setGenerationRecallTransaction(transaction);
   harness.result.markGenerationRecallTransactionHookState(
     transaction,
     "GENERATION_AFTER_COMMANDS",
@@ -7835,7 +7826,7 @@ async function testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh()
     hookName: "GENERATION_AFTER_COMMANDS",
   };
   transaction.updatedAt = Date.now();
-  harness.result.generationRecallTransactions.set(transaction.id, transaction);
+  harness.result.setGenerationRecallTransaction(transaction);
 
   harness.result.onGenerationEnded();
 
@@ -9654,7 +9645,7 @@ await testGenerationRecallSendIntentBeatsChatTailAndStaysObservable();
 await testGenerationRecallSendIntentWinsOverHostSnapshotStably();
 await testGenerationRecallLockedSourceDoesNotDriftWithinTransaction();
 await testGenerationRecallSameKeyCanRunAgainImmediatelyAsNewGeneration();
-await testGenerationRecallSameKeyCanRunAgainAfterBridgeWindow();
+await testGenerationRecallSameKeyCanRunAgainAfterGenerationBoundary();
 await testBeforeCombineRecallNotSkippedWhenGraphLoadingButRuntimeGraphReadable();
 await testGenerationRecallBeforeCombineRunsStandalone();
 await testGenerationRecallDryRunPreviewDoesNotTriggerBeforeCombineRecall();

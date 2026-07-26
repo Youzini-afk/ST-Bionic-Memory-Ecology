@@ -386,7 +386,7 @@ harness.chat = [
   { is_user: true, mes: "继续写摩耶山夜景" },
   { is_user: false, mes: "前一次回复。", is_system: false },
 ];
-harness.result.cleanupGenerationRecallTransactions(Date.now() + 60000);
+harness.result.beginGeneration("regenerate");
 const afterCommandsRecallOptions = harness.result.buildGenerationAfterCommandsRecallInput(
   "regenerate",
   {},
@@ -1116,11 +1116,21 @@ const lateRecallGraphA = { nodes: [], edges: [] };
 const lateRecallGraphB = { nodes: [], edges: [] };
 let activeRecallContext = { chat: lateRecallChatA, chatId: "chat-a" };
 let activeRecallGraph = lateRecallGraphA;
+let activeRecallEpoch = 1;
 const lateRecallStatuses = [];
 const lateRecallRuntime = {
   ...rerollRuntime,
   getContext: () => activeRecallContext,
   getCurrentGraph: () => activeRecallGraph,
+  captureConversationLease: () => ({
+    chatId: "chat-a",
+    epoch: activeRecallEpoch,
+    generationId: "generation-a",
+  }),
+  isConversationLeaseCurrent: (lease) =>
+    lease.chatId === activeRecallContext.chatId &&
+    lease.epoch === activeRecallEpoch &&
+    lease.generationId === "generation-a",
   setLastRecallStatus: (label) => {
     lateRecallStatuses.push(String(label || ""));
   },
@@ -1151,7 +1161,8 @@ const lateRecallPending = runRecallController(lateRecallRuntime, {
   deliveryMode: "immediate",
 });
 await lateRecallStarted;
-activeRecallContext = { chat: lateRecallChatB, chatId: "chat-b" };
+activeRecallEpoch += 1;
+activeRecallContext = { chat: lateRecallChatB, chatId: "chat-a" };
 activeRecallGraph = lateRecallGraphB;
 const statusCountAtChatSwitch = lateRecallStatuses.length;
 releaseLateRecall({
