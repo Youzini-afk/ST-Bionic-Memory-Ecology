@@ -46,6 +46,7 @@
     "bench:native": "npm run bench:graph-layout && npm run bench:persist-delta",
     "test:indexeddb": "npm run test:indexeddb-persistence && npm run test:indexeddb-sync && npm run test:indexeddb-migration",
     "test:persistence-matrix": "npm run test:p0 && npm run test:runtime-history && npm run test:graph-persistence && npm run test:indexeddb",
+    "test:product-contract": "node scripts/run-test-suite.mjs --product-contract",
     "test:stable": "node scripts/run-test-suite.mjs",
     "test:authority:e2e": "node tests/e2e/authority-server-primary.mjs",
     "test:authority:e2e:diagnostics": "node tests/e2e/authority-diagnostics-roundtrip.mjs",

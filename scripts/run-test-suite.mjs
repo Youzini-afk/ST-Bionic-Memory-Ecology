@@ -4,6 +4,19 @@ import { spawn } from "node:child_process";
 
 const TEST_ROOT = path.resolve(process.cwd(), "tests");
 const EXCLUDED_TESTS = new Set(["triviumdb-poc.mjs"]);
+const PRODUCT_CONTRACT_TESTS = [
+  "authority-companion-module.mjs",
+  "event-binding-priority.mjs",
+  "identity-resolver.mjs",
+  "indexeddb-sync.mjs",
+  "luker-host-adapter.mjs",
+  "message-updated-lightweight.mjs",
+  "panel-bridge.mjs",
+  "product-surface-contract.mjs",
+  "recall-authoritative-generation-input.mjs",
+  "recall-reapply-block.mjs",
+  "recall-reroll-reuse.mjs",
+];
 
 function toPosixPath(filePath) {
   return filePath.split(path.sep).join("/");
@@ -42,9 +55,21 @@ async function runNodeFile(relativePath) {
 }
 
 async function main() {
-  const tests = await collectStableTests();
+  const stableTests = await collectStableTests();
+  const productContractOnly = process.argv.includes("--product-contract");
+  const tests = productContractOnly
+    ? PRODUCT_CONTRACT_TESTS.filter((name) => stableTests.includes(name))
+    : stableTests;
+
+  if (productContractOnly && tests.length !== PRODUCT_CONTRACT_TESTS.length) {
+    const missing = PRODUCT_CONTRACT_TESTS.filter((name) => !stableTests.includes(name));
+    throw new Error(`missing product contract tests: ${missing.join(", ")}`);
+  }
+
   console.log(
-    `[ST-BME][test-suite] running ${tests.length} stable tests (excluded: ${Array.from(EXCLUDED_TESTS).join(", ")})`,
+    productContractOnly
+      ? `[ST-BME][test-suite] running ${tests.length} product contract tests`
+      : `[ST-BME][test-suite] running ${tests.length} stable tests (excluded: ${Array.from(EXCLUDED_TESTS).join(", ")})`,
   );
 
   for (const testName of tests) {
