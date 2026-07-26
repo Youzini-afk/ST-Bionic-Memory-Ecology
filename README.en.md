@@ -1,178 +1,138 @@
 # ST-BME — SillyTavern Bionic Memory Ecology
 
-> Let the AI truly remember your story.
+> Let the AI remember your story—and return to the right past when that story is rewritten.
 
 [中文](README.md) · **English**
 
-ST-BME (Bionic Memory Ecology) is a **SillyTavern third-party frontend extension**. It distills the characters, events, locations, rules, plot threads, reflections, and summaries that appear over a long chat into a visual memory graph, then automatically recalls the most relevant memories and injects them into the prompt before each generation.
+ST-BME (Bionic Memory Ecology) is a third-party SillyTavern extension. It extracts characters, events, locations, rules, plot threads, and subjective knowledge from long chats into a visual memory graph, then recalls the most relevant information before the next generation.
 
----
+v9 rewrites the stateful core. Chat history, graph changes, recall results, plot planning, and vector work now share one transaction model. When a floor is deleted or edited, a swipe is selected, or a response is rerolled, BME first identifies the active history branch and then decides exactly what to roll back or replay.
 
-## Documentation
-
-This README is a **slim entry point**. The details live in [`docs/`](docs/README.md):
-
-| What you want | Where to look |
-| --- | --- |
-| Usage: configuration, panel, troubleshooting, storage | [`docs/usage/`](docs/usage/) |
-| Architecture, control plane, data formats | [`docs/architecture/`](docs/architecture/) |
-| Algorithm internals (retrieval / extraction / vectors) | [`docs/algorithms/`](docs/algorithms/) |
-| How each feature works and its boundaries | [`docs/features/`](docs/features/) |
-| Development, testing, contribution conventions | [`docs/contributing/`](docs/contributing/) |
-
-Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/usage/panel.md) · [Troubleshooting](docs/usage/troubleshooting.md) · [Memory model](docs/features/memory-model.md) · [History safety](docs/features/history-safety.md)
-
-> Developer docs (architecture / algorithms / features / contributing) are currently Chinese-only. The English docs cover the README and the `docs/usage/` user manual.
-
----
+> [!IMPORTANT]
+> v9 is a clean break. It does not read, migrate, or write back graphs, settings, message metadata, OPFS data, Luker data, shadow snapshots, or vector collections from v8 or earlier. Back up the old installation and its data before upgrading if you need to retain access to them.
 
 ## Core capabilities
 
-- **Automatic memory extraction** — After each AI reply, ST-BME extracts structured nodes and relations from the conversation (characters, events, locations, rules, plot threads, reflections, subjective memories), using a default two-stage objective + subjective/POV commit pipeline and excluding reasoning tags like `think`/`analysis`/`reasoning`.
-- **Multi-layer hybrid recall** — Before generation, relevant memories are recalled through vector prefilter, graph diffusion, lexical boosting, multi-intent splitting, DPP diversity sampling, and optional LLM reranking; per-message persistent recall cards are supported.
-- **Cognitive architecture** — Character POV / user POV / objective world memory, spatial region weighting, and a story timeline.
-- **Summarization & maintenance** — Small summaries, summary rollup, reflection, consolidation, automatic compression, active forgetting — all logged and reversible.
-- **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
-- **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
-- **ENA Planner integration** — Pre-send story planning, integrated into the config page and the `planner` task preset.
-- **Persistence & sync** — Local-first (IndexedDB), with cloud mirroring, backup/restore, rebuild, and repair.
-- **History safety** — Detects message deletion / edits / swipes, automatically rolls back affected batches and recovers from the change point; protects against truncated "render only the last N" views.
-- **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.
+- **Automatic memory extraction**: after an assistant response is committed, BME extracts structured nodes, relations, cognitive ownership, and story time according to the active settings.
+- **Hybrid memory recall**: combines vector prefiltering, graph diffusion, lexical boosting, context blending, multi-intent retrieval, and optional LLM reranking into the final injection text.
+- **Reliable history rollback**: edits, deletes, and selecting an existing swipe locate the history fork and undo only the transaction suffix after it.
+- **Stable rerolls**: regenerate, new-swipe generation, and continue replay the parent user's persisted RecallRecord exactly when no new user turn exists.
+- **Cognitive memory model**: supports objective world knowledge, character POV, user POV, regions, temporal relations, summaries, and reflections.
+- **Automatic maintenance**: consolidation, hierarchical summaries, reflection, sleep cycles, and compression commit as separate stages so one failure cannot corrupt earlier completed work.
+- **Plot planning**: ENA is BME's optional internal plot planner. It is disabled by default and runs only for a fresh user send after explicit enablement.
+- **Visualization and management**: includes a Canvas graph, node editing, transaction records, graph import/export, graph clearing, and vector rebuilding.
+- **Two persistence Primaries**: IndexedDB is the default; ST-Delegation-of-authority can provide the Authority Primary.
 
----
+## Fresh sends, rerolls, and history changes
 
-## How it works
-
-ST-BME can be understood as three pipelines: **write** (conversation → memory), **read** (memory → injection), and **safety** (history change → recovery).
+| Operation | Recall behavior | ENA behavior | Durable result |
+| --- | --- | --- | --- |
+| Fresh user send | Creates a new RecallRecord | Runs only when explicitly enabled | RecallRecord; PlannerRecord only when ENA ran |
+| Regenerate / generate a new swipe / continue | Replays the parent user's RecallRecord exactly; retrieves again only if the record is missing or invalid | Never runs and never reads an old PlannerRecord | No temporary handoff state |
+| Edit / delete / select an existing swipe | Reconciles the new history prefix, then rolls back post-fork records and graph changes | Post-fork PlannerRecords are removed too | Pre-fork transactions remain intact |
+| Switch chats | Activates that chat's own state namespace | Cancels late planning from the previous chat | Async results cannot be written into the new chat |
 
 ```mermaid
 flowchart LR
-    subgraph Write["Write: conversation → memory"]
-        A["AI reply"] --> B["Structured message preprocessing"]
-        B --> C["LLM objective extraction + subjective/POV extraction"]
-        C --> D["Nearest-neighbor reconciliation + cognitive scoping"]
-        D --> E["Write graph + vector sync + timeline"]
-        E --> F["Consolidate / compress / summarize / reflect"]
-    end
-
-    subgraph Read["Read: memory → injection"]
-        G["User about to generate"] --> H["Multi-intent + context-blended query"]
-        H --> I["Vector prefilter + graph diffusion + lexical boost"]
-        I --> J["Cognitive boundary filter + hybrid scoring"]
-        J --> K["Optional LLM rerank + bucketed injection"]
-    end
-
-    subgraph Safe["Safety: history change → recovery"]
-        L["Delete / edit / swipe"] --> M["Message hash detection"]
-        M --> N["Locate affected turns"]
-        N --> O["Roll back batches and vectors"]
-        O --> P["Re-extract from the change point"]
-    end
-
-    F -.-> G
-    P -.-> E
+    A["SillyTavern chat history"] --> B["History-prefix reconciliation"]
+    B --> C["RecallRecord / PlannerRecord"]
+    B --> D["Extraction and maintenance ChangeSets"]
+    C --> E["Atomic TurnTransaction"]
+    D --> E
+    E --> F["One Primary"]
+    E --> G["Durable VectorJob"]
+    G --> H["Rebuildable vector index"]
 ```
 
-- **Write**: the conversation is normalized into structured messages (reasoning tags excluded by default) → the LLM emits structured graph operations → nodes are written, vectors synced, timeline updated → post-processing (consolidation, compression, summary, reflection, forgetting).
-- **Read**: resolve the recall target → vector prefilter + graph diffusion + lexical boost → rank and filter by fusing multiple signals → bucketed injection into the prompt, optionally writing a persistent recall card.
-- **Safety**: a hash is recorded for each processed message; when a history change is detected, ST-BME prefers rollback-and-replay from the maintenance log, falling back to a full rebuild only when a safe rollback is not possible.
-
-> Algorithm details (formulas, parameters, thresholds) are in [`docs/algorithms/`](docs/algorithms/); architecture and data paths are in [`docs/architecture/overview.md`](docs/architecture/overview.md).
-
----
+The graph is business state; the vector index is derived data. If vector work fails, its committed VectorJob remains available for safe replay or rebuilding. Vectors never become a second graph source of truth.
 
 ## Installation
 
-### Option 1: install via SillyTavern extensions
+### Default installation: IndexedDB Primary
 
-Open SillyTavern → Extensions → Install third-party extension, and enter the repository URL:
+In SillyTavern, open “Extensions → Install Extension” and enter:
 
 ```text
 https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology
 ```
 
-Refresh the page after installation.
+Refresh the page after installation. The defaults are: BME enabled, IndexedDB Primary, automatic extraction enabled, normal user recall enabled, and ENA disabled.
 
-> Paste the repository root URL, not a GitHub sub-page URL.
+### Authority Primary
 
-### Option 2: manual installation
+Authority mode also requires [ST-Delegation-of-authority](https://github.com/Youzini-afk/ST-Delegation-of-authority). Authority discovers BME's `.authority` module from the server extension directory when SillyTavern starts, so BME must be a physical directory at:
 
-```bash
-cd SillyTavern/data/default-user/extensions/third-party
-git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
+```text
+SillyTavern/public/scripts/extensions/third-party/st-bme
 ```
 
-Then restart or refresh SillyTavern.
+Do not use a symlink or junction for `st-bme`, `.authority`, `module.json`, or `server.cjs`. Restart SillyTavern after installing or updating both plugins, select `authority` in BME settings, and reload the page.
 
----
+The two Primaries do not migrate data, dual-write, or copy data automatically. If Authority is unavailable, BME reports the selected Primary as blocked instead of silently falling back to IndexedDB.
 
 ## Quick start
 
-1. **Open the panel** — Click "Memory Graph" in the top-left menu.
-2. **Enable the plugin** — Config → Feature toggles, confirm the main switch is on.
-3. **Configure the model** — Leave the memory LLM blank to reuse the current chat model; or fill in an independent OpenAI-compatible URL/key/model under "API config".
-4. **Configure embedding** — Backend mode is recommended (reuses SillyTavern's configured vector provider); direct mode also works but you must handle CORS yourself.
-5. **Start chatting** — Just chat normally. Extraction runs after each AI reply, and recall runs before the next generation.
-6. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
+1. Open a chat and click the BME button in the bottom-right corner.
+2. In Settings, confirm the Primary, automatic extraction, and normal recall options.
+3. Configure the embedding transport, model, Task Profiles, and regex as needed. BME can still use graph and lexical signals without vectors, but recall quality will be reduced.
+4. Chat normally. Assistant responses are extracted after commit; fresh user generations recall memory beforehand.
+5. Enable ENA only when you want pre-send plot planning. Normal chat and rerolls do not depend on ENA.
 
-> Minimum viable setup: enable the plugin and ensure the current chat model works. Recall quality drops noticeably when embedding is unavailable, so configure it early.
->
-> See [Configuration](docs/usage/configuration.md) for full settings and [Panel guide](docs/usage/panel.md) for what each panel area does.
+## Panel
 
----
+| Page or action | Purpose |
+| --- | --- |
+| Overview | Inspect the chat namespace, status, revision, processing progress, and record counts |
+| Extract latest response | Force processing of the latest assistant response in the current chat |
+| Rebuild vectors | Commit a durable rebuild job and refresh the current derived index |
+| Graph | Browse nodes and relations; edit importance, archive state, and fields; or delete a node |
+| Transaction records | Inspect RecallRecords, PlannerRecords, and pending VectorJobs |
+| Export / import graph | Transfer a current v9 graph; only the current v9 export format is accepted |
+| Clear graph | Clear the current chat graph as a transaction that follows history rollback |
+| Settings | Manage Primary, ENA, extraction, recall, embedding, Task Profiles, and regex |
 
-## Common actions
+Changes to Primary, enabled state, or prompt injection position require a page reload. Other settings apply after saving.
 
-| Action | Location | Description |
-| --- | --- | --- |
-| Re-extract | Actions → Memory ops | Extract unprocessed turns or rerun a range |
-| Manual compress | Actions → Memory ops | Merge redundant high-level nodes |
-| Generate small summary | Actions → Memory ops | Produce a staged summary for the recent text window |
-| Run summary rollup | Actions → Memory ops | Fold multiple active summaries into a higher-level one |
-| Rebuild summary state | Actions → Memory ops | Rebuild summaryState from extraction batches |
-| Force evolution | Actions → Memory ops | Let new memories actively affect old ones |
-| Run forgetting | Actions → Memory ops | Archive or down-weight low-value nodes |
-| Undo recent maintenance | Actions → Memory ops | Roll back the most recent reversible maintenance |
-| Rebuild vectors | Actions → Vector ops | Rebuild all node embeddings |
-| Range rebuild | Actions → Vector ops | Rebuild only nodes related to a turn range |
-| Direct re-embed | Actions → Vector ops | Re-embed using the direct embedding config |
-| Export / import / rebuild graph | Actions → Graph management | Graph management and destructive ops |
-| Backup / restore cloud | Config → Cloud storage mode | Manually upload/restore in manual mode |
-| Unhide all | Config → Hide old turns | Restore turns hidden by ST-BME |
+## Storage and consistency
 
-> After switching embedding mode or model, run "Rebuild vectors". Per-action details and danger notes are in [Configuration](docs/usage/configuration.md) and [Panel guide](docs/usage/panel.md).
+- The IndexedDB Primary uses the new `STBME_v9` database with an isolated namespace per chat.
+- The Authority Primary commits SQL state transactions through BME's `.authority` module and keeps derived Trivium vectors in a separate `bme-v9:` namespace.
+- Settings are stored in SillyTavern under `extension_settings.st_bme_v9`.
+- RecallRecords and PlannerRecords belong to the Primary and are not written into chat-message `message.extra`.
+- The Primary is pinned at page startup; a change takes effect only after saving and reloading.
+- A Primary failure never triggers runtime switching, dual writes, or automatic data copying.
 
----
+## Frequently asked questions
 
-## Data storage & history safety (highlights)
+### My old graph disappeared after updating
 
-- **Local-first**: primary storage uses IndexedDB, isolated per chat (`STBME_{chatId}`), with incremental commits on the hot path.
-- **Cloud mirroring**: reuses SillyTavern's file API, supports auto/manual modes, requires no custom backend.
-- **History safety**: detects delete/edit/swipe, prefers rollback-and-replay, falls back to full rebuild when needed; protects against render-truncated views to avoid wrongly clearing the graph.
-- **Forward compatibility**: durable snapshots have a frozen top-level shape, tolerant parsing, and upgrade-on-read — extending the data structure means "add a field", not a big migration.
+This is expected for the v9 clean break. The old database is not read as a v9 Primary and is not migrated automatically. v9 graph import accepts only the v9 export format.
 
-> See [Storage & sync](docs/usage/storage-and-sync.md), [History safety](docs/features/history-safety.md), and [Data formats & forward compatibility](docs/architecture/storage-and-formats.md).
+### Why does reroll not call ENA again?
 
----
+This is an explicit lifecycle rule. ENA plans fresh user input; a reroll must reuse the already-decided RecallRecord rather than replanning and changing the meaning of the same user floor.
 
-## Having trouble?
+### The Primary is marked blocked
 
-Step-by-step troubleshooting for common situations (panel won't open, no auto-extraction, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.md).
+Fix the selected Primary instead of waiting for an automatic fallback. IndexedDB requires working browser storage. Authority requires the Authority plugin, BME companion module, permissions, and `/api/plugins/authority` service to be available.
 
----
+### Can BME work without embeddings?
 
-## Known limitations
+It can continue using graph, lexical, and other available signals, but vector recall will be unavailable. Direct embedding requests may also be blocked by browser CORS policy.
 
-- **Memory quality depends on the LLM** — if the extraction model misunderstands, the memory will be wrong too.
-- **Embedding sets the recall floor** — without high-quality vectors, recall leans more on lexical and graph structure.
-- **Direct mode may be affected by CORS** — browser security policy may block requests.
-- **Very long chats still have a cost** — hiding/render limits/summary rollup reduce pressure but can't eliminate all overhead.
-- **History recovery prioritizes correctness** — it falls back to a full rebuild when the log is insufficient, which can be slow.
-- **Third-party themes may affect recall card mounting** — cards may skip mounting if a theme removes the standard message DOM or turn-index attributes.
-- **Native acceleration is a rollout capability** — it fails open to JS by default and can be force-disabled in the panel.
+## Documentation and development
 
----
+- [Documentation index](docs/README.md)
+- [v9 architecture baseline, data model, and acceptance matrix](docs/vnext/architecture.md)
+
+```bash
+npm ci
+npm run check
+npm test
+```
+
+Real-host testing must use an isolated SillyTavern data directory, port, and test chat. Never reuse a personal instance.
 
 ## License
 
-AGPLv3 — see [LICENSE](./LICENSE).
+[GNU AGPL-3.0](LICENSE)

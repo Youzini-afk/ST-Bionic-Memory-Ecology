@@ -1,5 +1,19 @@
-const MODULE_NAME = "st_bme";
+const MODULE_NAME = "st_bme_v9";
 const GLOBAL_DEBUG_FLAG_KEY = "__stBmeDebugLoggingEnabled";
+const RUNTIME_DEBUG_STATE_KEY = "__stBmeRuntimeDebugState";
+
+export function ensureRuntimeDebugStateBucket(bucketName) {
+  let state = globalThis[RUNTIME_DEBUG_STATE_KEY];
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    state = {};
+    globalThis[RUNTIME_DEBUG_STATE_KEY] = state;
+  }
+  const bucket = state[bucketName];
+  if (!bucket || typeof bucket !== "object" || Array.isArray(bucket)) {
+    state[bucketName] = {};
+  }
+  return state;
+}
 
 function resolveModuleSettings(settings = null) {
   if (settings && typeof settings === "object") {

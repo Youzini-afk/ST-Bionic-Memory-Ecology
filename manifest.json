@@ -4,8 +4,8 @@
   "requires": [],
   "optional": [],
   "js": "index.js",
-  "css": "style.css",
+  "css": "src/ui/panel.css",
   "author": "Youzini",
-  "version": "8.0.4",
+  "version": "9.0.0",
   "homePage": "https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology"
 }
