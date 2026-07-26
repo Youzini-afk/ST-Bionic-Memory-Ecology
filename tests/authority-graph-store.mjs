@@ -652,6 +652,51 @@ async function testCommitExtractionBatchStableBatchIdIgnoresRandomJournalId() {
   assert.notEqual(first.input.batchId, third.input.batchId, "semantic extraction changes must produce a different durable batchId");
 }
 
+async function testCommitExtractionBatchRetriesSameIdempotentEnvelope() {
+  const client = createBmeGraphModuleClientMock({
+    headResult: { ok: true, revision: 9, headHash: "sha256:head9" },
+  });
+  const succeed = client.bmeExtractionCommitBatch.bind(client);
+  let attempt = 0;
+  client.bmeExtractionCommitBatch = async (input, options = {}) => {
+    attempt += 1;
+    if (attempt === 1) {
+      client.calls.bmeExtractionCommitBatch.push({ input, options });
+      throw new AuthorityHttpError("response lost", { status: 503 });
+    }
+    return await succeed(input, options);
+  };
+  const store = new AuthorityGraphStore("authority-chat-extraction-retry", {
+    sqlClient: new MockAuthoritySqlClient(),
+    bmeExtractionCommitBatchReady: true,
+    isAuthorityModuleExtractionCommitBatchReady: true,
+    bmeGraphModuleClient: client,
+  });
+  await store.open();
+
+  const result = await store.commitExtractionBatch({
+    persistDelta: { upsertNodes: [{ id: "node-retry", type: "event" }] },
+    committedBatchJournalEntry: { processedRange: [4, 6] },
+    processedRange: [4, 6],
+    previousLastProcessedFloor: 3,
+    lastProcessedAssistantFloor: 6,
+    extractionCountBefore: 10,
+    extractionCountAfter: 11,
+  });
+
+  assert.equal(result.accepted, true);
+  assert.equal(client.calls.bmeExtractionCommitBatch.length, 2);
+  assert.deepEqual(
+    client.calls.bmeExtractionCommitBatch[1].input,
+    client.calls.bmeExtractionCommitBatch[0].input,
+  );
+  assert.equal(
+    client.calls.bmeExtractionCommitBatch[1].options.idempotencyKey,
+    client.calls.bmeExtractionCommitBatch[0].options.idempotencyKey,
+  );
+  assert.equal(client.calls.bmeGraphGetHead.length, 1);
+}
+
 async function testCommitExtractionBatchConflictAndUnavailableNoFallback() {
   const conflictError = new AuthorityHttpError("conflict", { status: 409, code: "transaction_conflict", payload: { code: "transaction_conflict", details: { serverRevision: 10, baseRevision: 9 } } });
   const conflictClient = createBmeGraphModuleClientMock({ extractionError: conflictError, headResult: { ok: true, revision: 9 } });
@@ -952,6 +997,7 @@ await testCommitDeltaModuleNotReadyThrowsForAuthorityOwned();
 await testGetHeadUsesModule();
 await testCommitExtractionBatchSuccess();
 await testCommitExtractionBatchStableBatchIdIgnoresRandomJournalId();
+await testCommitExtractionBatchRetriesSameIdempotentEnvelope();
 await testCommitExtractionBatchConflictAndUnavailableNoFallback();
 
 console.log(`${PREFIX} all tests passed`);

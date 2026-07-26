@@ -586,6 +586,13 @@ function isBmeGraphCommitConflictError(error = null) {
   return code === "transaction_conflict";
 }
 
+function isRetryableAuthorityTransportError(error = null) {
+  if (!error || isBmeGraphCommitConflictError(error)) return false;
+  if (error?.name === "AbortError") return false;
+  const status = Number(error?.status || error?.payload?.status || 0);
+  return !status || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
 function sha1Hash(input) {
   // JS fallback: FNV-1a 32-bit, hex-prefixed. Not cryptographically secure,
   // but stable across a single chat+revision+delta shape which is all
@@ -1050,11 +1057,24 @@ export class AuthorityGraphStore {
         ...(this.options.database ? { database: this.options.database } : {}),
       };
 
-      const response = await client.bmeExtractionCommitBatch(transactionInput, {
+      const requestOptions = {
         idempotencyKey,
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-      });
+      };
+      let response = null;
+      try {
+        response = await client.bmeExtractionCommitBatch(
+          transactionInput,
+          requestOptions,
+        );
+      } catch (error) {
+        if (!isRetryableAuthorityTransportError(error)) throw error;
+        response = await client.bmeExtractionCommitBatch(
+          transactionInput,
+          requestOptions,
+        );
+      }
       const revision = normalizeRevision(response?.revision);
       const committedAtMs = Number.isFinite(Number(response?.committedAt))
         ? Number(response.committedAt)

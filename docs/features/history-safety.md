@@ -4,6 +4,12 @@ ST-BME 的记忆图谱依赖"楼层 → 已提取"的映射。但宿主聊天历
 
 实现散布在 `maintenance/chat-history.js`、`maintenance/reroll-recovery-controller.js`、`index.js` 的历史检测路径，以及 [`../architecture/control-plane.md`](../architecture/control-plane.md) 描述的身份/持久化控制平面。
 
+## 楼层指针与图谱一起提交
+
+自动或手动提取先在当前图谱的 detached 副本上完成节点、边和同步维护。processed floor、消息 hash、`extractionCount` 与 batch journal 也只写入待提交快照；主存储返回 `accepted` 后，整张快照才一次性发布到当前聊天。
+
+因此，持久化失败或进入 pending 时，当前会话中的节点、processed floor/hash、journal 和计数都保持在上一个已确认版本。待提交快照按聊天身份保存在恢复材料中；重试只使用该聊天的快照，切换到别的聊天后不会借用新聊天的运行图谱，也不会把晚到结果发布过去。
+
 ## 历史变动恢复
 
 当检测到聊天历史与图谱记录不一致（楼层被编辑/删除/重排），ST-BME 尝试恢复：

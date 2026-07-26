@@ -4729,7 +4729,7 @@ async function testBalancedModeDefersExtractionMaintenancePostProcess() {
 }
 
 async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
-  const graph = {
+  let graph = {
     nodes: [],
     edges: [],
     historyState: { extractionCount: 0 },
@@ -4806,6 +4806,9 @@ async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
       };
     },
     setBatchStageOutcome,
+    setCurrentGraph(nextGraph) {
+      graph = nextGraph;
+    },
     setLastExtractionStatus: () => {},
     shouldAdvanceProcessedHistory: () => true,
     throwIfAborted: () => {},
@@ -4830,7 +4833,7 @@ async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
 }
 
 async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
-  const graph = {
+  let graph = {
     nodes: [],
     edges: [],
     historyState: { extractionCount: 0 },
@@ -4911,6 +4914,9 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
       };
     },
     setBatchStageOutcome,
+    setCurrentGraph(nextGraph) {
+      graph = nextGraph;
+    },
     setLastExtractionStatus: () => {},
     shouldAdvanceProcessedHistory: () => true,
     throwIfAborted: () => {},

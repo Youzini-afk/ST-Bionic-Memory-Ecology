@@ -1061,6 +1061,8 @@ function persistGraphCommitMarker(
     accepted = false,
     lastProcessedAssistantFloor = null,
     extractionCount: nextExtractionCount = null,
+    graph = currentGraph,
+    chatId: explicitChatId = "",
     immediate = true,
   } = {},
 ) {
@@ -1075,7 +1077,8 @@ function persistGraphCommitMarker(
     });
   }
 
-  const chatId = getCurrentChatId(context);
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+  const chatId = normalizeChatIdCandidate(explicitChatId || activeChatId);
   if (!chatId) {
     return buildGraphPersistResult({
       saved: false,
@@ -1086,8 +1089,23 @@ function persistGraphCommitMarker(
       storageTier,
     });
   }
+  const identity = resolveCurrentChatIdentity(context);
+  if (
+    activeChatId &&
+    !areChatIdsEquivalentForResolvedIdentity(chatId, activeChatId, identity) &&
+    !areChatIdsEquivalentForResolvedIdentity(activeChatId, chatId, identity)
+  ) {
+    return buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "commit-marker-target-not-active",
+      revision,
+      storageTier,
+    });
+  }
 
-  const marker = buildGraphCommitMarker(currentGraph, {
+  const marker = buildGraphCommitMarker(graph, {
     revision,
     storageTier,
     accepted,
@@ -1664,6 +1682,42 @@ const conversationSession = createConversationSession({
 conversationSession.enterChat(resolveCurrentChatIdentity(), {
   reason: "runtime-init",
 });
+function isConversationTargetCurrent(
+  chatId,
+  lease,
+  chatStateTarget = null,
+) {
+  if (
+    !conversationSession.isLeaseCurrent(lease, {
+      requireGeneration: false,
+    })
+  ) {
+    return false;
+  }
+  const activeContext = getContext();
+  const activeTargetKey = serializeBmeChatStateTarget(
+    resolveCurrentChatStateTarget(activeContext),
+  );
+  const targetKey = serializeBmeChatStateTarget(chatStateTarget);
+  if (targetKey && activeTargetKey !== targetKey) return false;
+  const normalizedChatId = normalizeChatIdCandidate(chatId);
+  const activeChatId = normalizeChatIdCandidate(getCurrentChatId(activeContext));
+  const identity = resolveCurrentChatIdentity(activeContext);
+  return Boolean(
+    normalizedChatId &&
+      activeChatId &&
+      (areChatIdsEquivalentForResolvedIdentity(
+        normalizedChatId,
+        activeChatId,
+        identity,
+      ) ||
+        areChatIdsEquivalentForResolvedIdentity(
+          activeChatId,
+          normalizedChatId,
+          identity,
+        )),
+  );
+}
 const readConversationInput = (name) =>
   conversationSession.getInput(name) || createRecallInputRecord();
 const writeConversationInput = (name, record) =>
@@ -3033,6 +3087,9 @@ async function writeAuthorityLukerCheckpointBlob(
     };
   }
   const normalizedChatId = normalizeChatIdCandidate(chatId || checkpoint.chatId);
+  const publicationLease = conversationSession.captureLease();
+  const canPublishResult = () =>
+    isConversationTargetCurrent(normalizedChatId, publicationLease);
   const safeChatId = buildAuthorityBlobSafeSlug(normalizedChatId);
   const hash = buildAuthorityBlobFileHash(normalizedChatId || safeChatId);
   const path = `user/files/ST-BME_luker_checkpoint_${safeChatId}-${hash}.json`;
@@ -3055,12 +3112,14 @@ async function writeAuthorityLukerCheckpointBlob(
       reason: String(reason || ""),
       revision: Number(checkpoint?.revision || 0),
     };
-    recordAuthorityBlobSnapshot(event);
-    updateGraphPersistenceState({
-      authorityBlobCheckpointPath: event.path,
-      authorityBlobCheckpointRevision: event.revision,
-      authorityBlobCheckpointUpdatedAt: new Date().toISOString(),
-    });
+    if (canPublishResult()) {
+      recordAuthorityBlobSnapshot(event);
+      updateGraphPersistenceState({
+        authorityBlobCheckpointPath: event.path,
+        authorityBlobCheckpointRevision: event.revision,
+        authorityBlobCheckpointUpdatedAt: new Date().toISOString(),
+      });
+    }
     return {
       ok: event.ok,
       path: event.path,
@@ -3068,15 +3127,17 @@ async function writeAuthorityLukerCheckpointBlob(
     };
   } catch (error) {
     const message = error?.message || String(error) || "Authority Blob checkpoint failed";
-    recordAuthorityBlobSnapshot({
-      action: "checkpoint-write",
-      ok: false,
-      backend: "authority-blob",
-      path,
-      reason: String(reason || ""),
-      error: message,
-      revision: Number(checkpoint?.revision || 0),
-    });
+    if (canPublishResult()) {
+      recordAuthorityBlobSnapshot({
+        action: "checkpoint-write",
+        ok: false,
+        backend: "authority-blob",
+        path,
+        reason: String(reason || ""),
+        error: message,
+        revision: Number(checkpoint?.revision || 0),
+      });
+    }
     return {
       ok: false,
       path,
@@ -3102,6 +3163,9 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
       reason: "missing-chat-id",
     };
   }
+  const publicationLease = conversationSession.captureLease();
+  const canPublishResult = () =>
+    isConversationTargetCurrent(normalizedChatId, publicationLease);
   const safeChatId = buildAuthorityBlobSafeSlug(normalizedChatId);
   const hash = buildAuthorityBlobFileHash(normalizedChatId || safeChatId);
   const path = `user/files/ST-BME_luker_checkpoint_${safeChatId}-${hash}.json`;
@@ -3109,19 +3173,21 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
     const adapter = getAuthorityBlobAdapter();
     const result = await adapter.readJson(path, options);
     const exists = Boolean(result?.exists && result?.payload);
-    recordAuthorityBlobSnapshot({
-      action: "checkpoint-read",
-      ok: result?.ok !== false,
-      backend: "authority-blob",
-      path: result?.path || path,
-      reason: exists ? "checkpoint-found" : "checkpoint-missing",
-      revision: Number(result?.payload?.revision || 0),
-    });
-    updateGraphPersistenceState({
-      authorityBlobCheckpointPath: result?.path || path,
-      authorityBlobCheckpointRevision: Number(result?.payload?.revision || 0),
-      authorityBlobCheckpointUpdatedAt: new Date().toISOString(),
-    });
+    if (canPublishResult()) {
+      recordAuthorityBlobSnapshot({
+        action: "checkpoint-read",
+        ok: result?.ok !== false,
+        backend: "authority-blob",
+        path: result?.path || path,
+        reason: exists ? "checkpoint-found" : "checkpoint-missing",
+        revision: Number(result?.payload?.revision || 0),
+      });
+      updateGraphPersistenceState({
+        authorityBlobCheckpointPath: result?.path || path,
+        authorityBlobCheckpointRevision: Number(result?.payload?.revision || 0),
+        authorityBlobCheckpointUpdatedAt: new Date().toISOString(),
+      });
+    }
     return {
       ok: result?.ok !== false,
       exists,
@@ -3131,14 +3197,16 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
     };
   } catch (error) {
     const message = error?.message || String(error) || "Authority Blob checkpoint read failed";
-    recordAuthorityBlobSnapshot({
-      action: "checkpoint-read",
-      ok: false,
-      backend: "authority-blob",
-      path,
-      reason: "authority-blob-checkpoint-read-error",
-      error: message,
-    });
+    if (canPublishResult()) {
+      recordAuthorityBlobSnapshot({
+        action: "checkpoint-read",
+        ok: false,
+        backend: "authority-blob",
+        path,
+        reason: "authority-blob-checkpoint-read-error",
+        error: message,
+      });
+    }
     return {
       ok: false,
       exists: false,
@@ -3467,6 +3535,17 @@ async function rebuildAuthorityTrivium(options = {}) {
       purge: options.purge !== false,
       signal: options.signal,
     });
+    if (jobResult?.stale) {
+      return {
+        success: jobResult.submitted === true,
+        submitted: jobResult.submitted === true,
+        stale: true,
+        terminal: false,
+        mode: "job",
+        job: jobResult.job || null,
+        error: jobResult.error || "",
+      };
+    }
     if (jobResult?.submitted) {
       saveGraphToChat({ reason: `${reason}-job-submitted` });
       return {
@@ -3854,15 +3933,22 @@ async function submitAuthorityVectorRebuildJob({
 
   ensureCurrentGraphRuntimeState();
   const chatId = getCurrentChatId();
+  const taskGraph = currentGraph;
+  const conversationLease = conversationSession.captureLease();
+  const isTaskCurrent = () =>
+    currentGraph === taskGraph &&
+    conversationSession.isLeaseCurrent(conversationLease, {
+      requireGeneration: false,
+    });
   const collectionId =
-    currentGraph?.vectorIndexState?.collectionId || buildVectorCollectionId(chatId);
+    taskGraph?.vectorIndexState?.collectionId || buildVectorCollectionId(chatId);
   const idempotencyKey = buildAuthorityJobIdempotencyKey({
     kind,
     chatId,
     collectionId,
     revision:
-      currentGraph?.meta?.revision ||
-      currentGraph?.historyState?.extractionCount ||
+      taskGraph?.meta?.revision ||
+      taskGraph?.historyState?.extractionCount ||
       graphPersistenceState?.revision ||
       0,
     range,
@@ -3876,7 +3962,7 @@ async function submitAuthorityVectorRebuildJob({
     purge: Boolean(purge),
     range: range || null,
     graphRevision:
-      currentGraph?.meta?.revision || graphPersistenceState?.revision || 0,
+      taskGraph?.meta?.revision || graphPersistenceState?.revision || 0,
     idempotencyKey,
   };
 
@@ -3886,13 +3972,23 @@ async function submitAuthorityVectorRebuildJob({
       idempotencyKey,
       signal,
     });
+    if (!isTaskCurrent()) {
+      return {
+        submitted: true,
+        fallbackRequired: false,
+        stale: true,
+        job,
+        stats: getVectorIndexStats(taskGraph),
+        insertedHashes: [],
+      };
+    }
     recordAuthorityJobSnapshot(job, { kind, queueState: "running" });
-    if (currentGraph?.vectorIndexState) {
-      currentGraph.vectorIndexState.dirty = true;
-      currentGraph.vectorIndexState.dirtyReason = "authority-vector-rebuild-job-submitted";
-      currentGraph.vectorIndexState.lastWarning =
+    if (taskGraph?.vectorIndexState) {
+      taskGraph.vectorIndexState.dirty = true;
+      taskGraph.vectorIndexState.dirtyReason = "authority-vector-rebuild-job-submitted";
+      taskGraph.vectorIndexState.lastWarning =
         "Authority 向量重建 Job 已提交，等待服务端完成";
-      currentGraph.vectorIndexState.lastRebuildJob =
+      taskGraph.vectorIndexState.lastRebuildJob =
         cloneRuntimeDebugValue(job, null);
     }
     setLastVectorStatus(
@@ -3902,16 +3998,29 @@ async function submitAuthorityVectorRebuildJob({
       { syncRuntime: true },
     );
     void refreshAuthorityRecentJobs({ reason: "authority-job-submitted" });
-    void startTrackingAuthorityJob(job, { kind, chatId });
+    void startTrackingAuthorityJob(job, {
+      kind,
+      chatId,
+      graph: taskGraph,
+      lease: conversationLease,
+    });
     return {
       submitted: true,
       fallbackRequired: false,
       job,
-      stats: getVectorIndexStats(currentGraph),
+      stats: getVectorIndexStats(taskGraph),
       insertedHashes: [],
     };
   } catch (error) {
     const message = error?.message || String(error) || "Authority Job 提交失败";
+    if (!isTaskCurrent()) {
+      return {
+        submitted: false,
+        fallbackRequired: false,
+        stale: true,
+        error: message,
+      };
+    }
     recordAuthorityJobSnapshot(null, {
       kind,
       queueState: "fallback",
@@ -3963,17 +4072,17 @@ function buildAuthorityJobStatusMeta(job = null, fallbackKind = "") {
     .join(" · ");
 }
 
-function syncAuthorityVectorJobState(job = null) {
-  if (!currentGraph?.vectorIndexState) return;
+function syncAuthorityVectorJobState(job = null, graph = currentGraph) {
+  if (!graph?.vectorIndexState) return;
   const normalizedJob =
     job && typeof job === "object" && !Array.isArray(job) ? job : {};
-  currentGraph.vectorIndexState.lastRebuildJob =
+  graph.vectorIndexState.lastRebuildJob =
     cloneRuntimeDebugValue(normalizedJob, null);
-  currentGraph.vectorIndexState.lastAuthorityJobId = String(normalizedJob.id || "");
-  currentGraph.vectorIndexState.lastAuthorityJobStatus = String(
+  graph.vectorIndexState.lastAuthorityJobId = String(normalizedJob.id || "");
+  graph.vectorIndexState.lastAuthorityJobStatus = String(
     normalizedJob.status || "",
   );
-  currentGraph.vectorIndexState.lastAuthorityJobProgress = Number(
+  graph.vectorIndexState.lastAuthorityJobProgress = Number(
     normalizedJob.progress || 0,
   );
   if (!normalizedJob.id) {
@@ -3981,23 +4090,23 @@ function syncAuthorityVectorJobState(job = null) {
   }
   if (normalizedJob.terminal) {
     if (normalizedJob.success) {
-      currentGraph.vectorIndexState.dirty = false;
-      currentGraph.vectorIndexState.dirtyReason = "";
-      currentGraph.vectorIndexState.lastWarning = "";
+      graph.vectorIndexState.dirty = false;
+      graph.vectorIndexState.dirtyReason = "";
+      graph.vectorIndexState.lastWarning = "";
     } else {
-      currentGraph.vectorIndexState.dirty = true;
-      currentGraph.vectorIndexState.dirtyReason =
+      graph.vectorIndexState.dirty = true;
+      graph.vectorIndexState.dirtyReason =
         String(normalizedJob.status || "failed") || "failed";
-      currentGraph.vectorIndexState.lastWarning =
+      graph.vectorIndexState.lastWarning =
         String(normalizedJob.error || normalizedJob.status || "Authority Job 失败") ||
         "Authority Job 失败";
     }
     return;
   }
-  currentGraph.vectorIndexState.dirty = true;
-  currentGraph.vectorIndexState.dirtyReason =
+  graph.vectorIndexState.dirty = true;
+  graph.vectorIndexState.dirtyReason =
     "authority-vector-rebuild-job-running";
-  currentGraph.vectorIndexState.lastWarning =
+  graph.vectorIndexState.lastWarning =
     buildAuthorityJobStatusMeta(normalizedJob, normalizedJob.kind) ||
     "Authority Job 运行中";
 }
@@ -4013,6 +4122,32 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
   if (!jobId || !trackedChatId) {
     return null;
   }
+  const trackedGraph = options.graph || currentGraph;
+  const trackedLease = options.lease || conversationSession.captureLease();
+  const isTrackedContextActive = () => {
+    const context = getContext();
+    const activeChatId =
+      normalizeChatIdCandidate(getCurrentChatId(context)) ||
+      normalizeChatIdCandidate(graphPersistenceState.chatId);
+    const identity = resolveCurrentChatIdentity(context);
+    return Boolean(
+      currentGraph === trackedGraph &&
+        conversationSession.isLeaseCurrent(trackedLease, {
+          requireGeneration: false,
+        }) &&
+        activeChatId &&
+        (areChatIdsEquivalentForResolvedIdentity(
+          trackedChatId,
+          activeChatId,
+          identity,
+        ) ||
+          areChatIdsEquivalentForResolvedIdentity(
+            activeChatId,
+            trackedChatId,
+            identity,
+          )),
+    );
+  };
 
   stopTrackingAuthorityJob("authority-job-replaced");
   const controller = new AbortController();
@@ -4027,6 +4162,10 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
   );
 
   const applyTrackedJobUpdate = async (nextJob, state = {}) => {
+    if (!isTrackedContextActive()) {
+      controller.abort(createAbortTrackingError("authority-job-chat-changed"));
+      return;
+    }
     const normalizedNextJob =
       nextJob && typeof nextJob === "object" && !Array.isArray(nextJob) ? nextJob : {};
     const queueState = normalizedNextJob.terminal
@@ -4040,7 +4179,7 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
       kind: effectiveKind || normalizedNextJob.kind || "",
       queueState,
     });
-    syncAuthorityVectorJobState(normalizedNextJob);
+    syncAuthorityVectorJobState(normalizedNextJob, trackedGraph);
     const meta = buildAuthorityJobStatusMeta(
       normalizedNextJob,
       effectiveKind || normalizedNextJob.kind,
@@ -4057,16 +4196,11 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
           ? "authority-job-completed"
           : "authority-job-failed",
       });
-      const activeChatId =
-        normalizeChatIdCandidate(getCurrentChatId()) ||
-        normalizeChatIdCandidate(graphPersistenceState.chatId);
-      if (activeChatId && activeChatId === trackedChatId) {
-        saveGraphToChat({
-          reason: normalizedNextJob.success
-            ? "authority-vector-rebuild-job-completed"
-            : "authority-vector-rebuild-job-failed",
-        });
-      }
+      saveGraphToChat({
+        reason: normalizedNextJob.success
+          ? "authority-vector-rebuild-job-completed"
+          : "authority-vector-rebuild-job-failed",
+      });
     } else {
       setLastVectorStatus(
         state.phase === "initial" ? "Authority Job 已提交" : "Authority Job 运行中",
@@ -4091,10 +4225,7 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
           }
         : null,
     loadJob: async (targetJobId) => {
-      const activeChatId =
-        normalizeChatIdCandidate(getCurrentChatId()) ||
-        normalizeChatIdCandidate(graphPersistenceState.chatId);
-      if (activeChatId && activeChatId !== trackedChatId) {
+      if (!isTrackedContextActive()) {
         controller.abort(createAbortTrackingError("authority-job-chat-changed"));
         throw controller.signal.reason;
       }
@@ -4103,7 +4234,10 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
     },
     onUpdate: applyTrackedJobUpdate,
     onModeChange: async ({ mode, reason }) => {
-      if (authorityJobPollAbortController !== controller) {
+      if (
+        authorityJobPollAbortController !== controller ||
+        !isTrackedContextActive()
+      ) {
         return;
       }
       setAuthorityJobTrackingState(mode, reason);
@@ -4112,7 +4246,10 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
   })
     .catch((error) => {
       if (isAbortError(error)) {
-        if (authorityJobPollAbortController === controller) {
+        if (
+          authorityJobPollAbortController === controller &&
+          isTrackedContextActive()
+        ) {
           const abortReason = String(
             controller.signal?.reason?.message || controller.signal?.reason || "authority-job-tracking-stopped",
           );
@@ -4122,6 +4259,9 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
         return null;
       }
       const message = error?.message || String(error) || "Authority Job 状态轮询失败";
+      if (!isTrackedContextActive()) {
+        return null;
+      }
       const failedJob = {
         ...normalizedJob,
         id: jobId,
@@ -4135,7 +4275,7 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
         kind: effectiveKind || normalizedJob.kind || "",
         queueState: "error",
       });
-      syncAuthorityVectorJobState(failedJob);
+      syncAuthorityVectorJobState(failedJob, trackedGraph);
       setAuthorityJobTrackingState("error", message);
       setLastVectorStatus(
         "Authority Job 失败",
@@ -4158,20 +4298,34 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
 }
 
 async function requeueAuthorityJob(jobId, options = {}) {
+  const taskGraph = currentGraph;
+  const chatId = getCurrentChatId();
+  const lease = conversationSession.captureLease();
+  const isTaskCurrent = () =>
+    currentGraph === taskGraph &&
+    conversationSession.isLeaseCurrent(lease, { requireGeneration: false });
   try {
     const adapter = getAuthorityJobAdapter();
     const job = await adapter.requeue(jobId, options);
+    if (!isTaskCurrent()) {
+      return { success: true, stale: true, job };
+    }
     recordAuthorityJobSnapshot(job, { queueState: "running" });
-    syncAuthorityVectorJobState(job);
+    syncAuthorityVectorJobState(job, taskGraph);
     saveGraphToChat({ reason: "authority-vector-rebuild-job-requeued" });
     void refreshAuthorityRecentJobs({ reason: "authority-job-requeued" });
     void startTrackingAuthorityJob(job, {
       kind: job?.kind || graphPersistenceState.authorityLastJobKind,
-      chatId: getCurrentChatId(),
+      chatId,
+      graph: taskGraph,
+      lease,
     });
     return { success: true, job };
   } catch (error) {
     const message = error?.message || String(error) || "Authority Job 重试失败";
+    if (!isTaskCurrent()) {
+      return { success: false, stale: true, error: message };
+    }
     recordAuthorityJobSnapshot(null, { queueState: "error", error: message });
     return { success: false, error: message };
   }
@@ -7977,6 +8131,15 @@ async function compactLukerGraphSidecarV2(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
+  const compactionLease = conversationSession.captureLease();
+  const isTargetActive = () =>
+    isConversationTargetCurrent(
+      normalizedChatId,
+      compactionLease,
+      normalizedTarget,
+    );
+  const updateTargetPersistenceState = (patch) =>
+    isTargetActive() ? updateGraphPersistenceState(patch) : graphPersistenceState;
   if (
     !normalizedChatId ||
     !graph ||
@@ -7991,17 +8154,15 @@ async function compactLukerGraphSidecarV2(
   return await queueLukerSidecarWrite(normalizedChatId, async () => {
     const normalizedIntegrity =
       normalizeChatIdCandidate(integrity) ||
-      getChatMetadataIntegrity(context) ||
-      graphPersistenceState.metadataIntegrity;
+      normalizeChatIdCandidate(getGraphPersistenceMeta(graph)?.integrity) ||
+      getChatMetadataIntegrity(context);
     const revisionFloor = Math.max(
       1,
       Number(revision || 0),
       Number(getGraphPersistedRevision(graph) || 0),
-      Number(graphPersistenceState.lukerManifestRevision || 0),
-      Number(graphPersistenceState.revision || 0),
     );
     const startedAt = Date.now();
-    updateGraphPersistenceState({
+    updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
         cacheMirrorState: graphPersistenceState.cacheMirrorState,
         lastPersistReason: reason,
@@ -8026,7 +8187,7 @@ async function compactLukerGraphSidecarV2(
       chatStateTarget: normalizedTarget,
     });
     if (!checkpointResult?.ok || !checkpointResult?.checkpoint) {
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         opfsCompactionState: buildLukerJournalCompactionState("error", {
           lastAt: startedAt,
           lastReason: reason,
@@ -8058,7 +8219,7 @@ async function compactLukerGraphSidecarV2(
       chatStateTarget: normalizedTarget,
     });
     if (!journalResult?.ok || !journalResult?.journal) {
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         opfsCompactionState: buildLukerJournalCompactionState("error", {
           lastAt: startedAt,
           lastReason: reason,
@@ -8101,7 +8262,7 @@ async function compactLukerGraphSidecarV2(
       chatStateTarget: normalizedTarget,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         opfsCompactionState: buildLukerJournalCompactionState("error", {
           lastAt: startedAt,
           lastReason: reason,
@@ -8119,7 +8280,7 @@ async function compactLukerGraphSidecarV2(
     }
 
     cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
-    updateGraphPersistenceState({
+    updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
         cacheMirrorState: graphPersistenceState.cacheMirrorState,
         lastPersistReason: reason,
@@ -8166,6 +8327,7 @@ function scheduleLukerGraphSidecarCompaction(
   if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(queueKey)) {
     return;
   }
+  const compactionLease = conversationSession.captureLease();
   updateGraphPersistenceState({
     opfsCompactionState: buildLukerJournalCompactionState("queued", {
       queued: true,
@@ -8180,13 +8342,21 @@ function scheduleLukerGraphSidecarCompaction(
     }))
     .catch((error) => {
       console.warn("[ST-BME] Luker sidecar 压实失败:", error);
-      updateGraphPersistenceState({
-        opfsCompactionState: buildLukerJournalCompactionState("error", {
-          lastAt: Date.now(),
-          lastReason: String(options?.reason || "luker-chat-state-compaction"),
-          error: error?.message || String(error),
-        }),
-      });
+      if (
+        isConversationTargetCurrent(
+          normalizedChatId,
+          compactionLease,
+          options?.chatStateTarget,
+        )
+      ) {
+        updateGraphPersistenceState({
+          opfsCompactionState: buildLukerJournalCompactionState("error", {
+            lastAt: Date.now(),
+            lastReason: String(options?.reason || "luker-chat-state-compaction"),
+            error: error?.message || String(error),
+          }),
+        });
+      }
       return null;
     })
     .finally(() => {
@@ -8239,6 +8409,11 @@ async function persistGraphToLukerSidecarV2(
       storageTier: "luker-chat-state",
     };
   }
+  const persistenceLease = conversationSession.captureLease();
+  const isTargetActive = () =>
+    isConversationTargetCurrent(chatId, persistenceLease, normalizedTarget);
+  const updateTargetPersistenceState = (patch) =>
+    isTargetActive() ? updateGraphPersistenceState(patch) : graphPersistenceState;
 
   const resolvedIdentity = resolveCurrentChatIdentity(context);
   const currentTargetKey = serializeBmeChatStateTarget(
@@ -8294,7 +8469,7 @@ async function persistGraphToLukerSidecarV2(
         source: `${reason}:luker-sidecar-base`,
       });
       if (!baseResult?.ok || !baseResult?.snapshot) {
-        updateGraphPersistenceState({
+        updateTargetPersistenceState({
           ...buildLukerManifestStatePatch(previousManifest, {
             persistMismatchReason:
               baseResult?.reason || "luker-sidecar-base-load-failed",
@@ -8418,10 +8593,10 @@ async function persistGraphToLukerSidecarV2(
         };
       }
       cacheChatStateManifest(chatId, manifestResult.manifest);
-      if (shouldRememberAlias) {
+      if (shouldRememberAlias && isTargetActive()) {
         rememberResolvedGraphIdentityAlias(context, chatId);
       }
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         ...buildLukerManifestStatePatch(manifestResult.manifest, {
           cacheMirrorState:
             mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
@@ -8457,7 +8632,7 @@ async function persistGraphToLukerSidecarV2(
         persistMismatchReason: "",
         persistDiagnosticTier: "none",
       });
-      if (mode !== "mirror") {
+      if (mode !== "mirror" && isTargetActive()) {
         clearPendingGraphPersistRetry();
       }
       return {
@@ -8489,7 +8664,7 @@ async function persistGraphToLukerSidecarV2(
       chatStateTarget: normalizedTarget,
     });
     if (!journalResult?.ok || !journalResult?.journal || !journalResult?.entry) {
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         dualWriteLastResult: {
           action: "save",
           target: "luker-chat-state",
@@ -8548,7 +8723,7 @@ async function persistGraphToLukerSidecarV2(
       chatStateTarget: normalizedTarget,
     });
     if (!manifestResult?.ok || !manifestResult?.manifest) {
-      updateGraphPersistenceState({
+      updateTargetPersistenceState({
         ...buildLukerManifestStatePatch(previousManifest, {
           persistMismatchReason: "luker-manifest-pending-after-journal",
           lastPersistReason: reason,
@@ -8580,10 +8755,10 @@ async function persistGraphToLukerSidecarV2(
     }
 
     cacheChatStateManifest(chatId, manifestResult.manifest);
-    if (shouldRememberAlias) {
+    if (shouldRememberAlias && isTargetActive()) {
       rememberResolvedGraphIdentityAlias(context, chatId);
     }
-    updateGraphPersistenceState({
+    updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
         cacheMirrorState:
           mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
@@ -8626,10 +8801,13 @@ async function persistGraphToLukerSidecarV2(
       persistMismatchReason: "",
       persistDiagnosticTier: "none",
     });
-    if (mode !== "mirror") {
+    if (mode !== "mirror" && isTargetActive()) {
       clearPendingGraphPersistRetry();
     }
-    if (shouldQueueLukerSidecarCompaction(manifestResult.manifest)) {
+    if (
+      isTargetActive() &&
+      shouldQueueLukerSidecarCompaction(manifestResult.manifest)
+    ) {
       scheduleLukerGraphSidecarCompaction(chatId, {
         graph: cloneGraphForPersistence(graph, chatId),
         revision: manifestResult.manifest.headRevision,
@@ -12056,6 +12234,31 @@ async function persistGraphToConfiguredDurableTier(
   } = {},
 ) {
   const preferredLocalStore = getPreferredGraphLocalStorePresentationSync();
+  const persistedExtractionCount = Number.isFinite(
+    Number(graph?.historyState?.extractionCount),
+  )
+    ? Number(graph.historyState.extractionCount)
+    : Number(extractionCount || 0);
+  const isPersistTargetActive = () => {
+    const activeContext = getContext();
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId(activeContext));
+    const targetChatId = normalizeChatIdCandidate(chatId);
+    const identity = resolveCurrentChatIdentity(activeContext);
+    return Boolean(
+      activeChatId &&
+        targetChatId &&
+        (areChatIdsEquivalentForResolvedIdentity(
+          targetChatId,
+          activeChatId,
+          identity,
+        ) ||
+          areChatIdsEquivalentForResolvedIdentity(
+            activeChatId,
+            targetChatId,
+            identity,
+          )),
+    );
+  };
   const persistenceEnvironment = buildPersistenceEnvironment(
     context,
     preferredLocalStore,
@@ -12075,7 +12278,7 @@ async function persistGraphToConfiguredDurableTier(
       storageTier: "luker-chat-state",
       accepted: true,
       lastProcessedAssistantFloor,
-      extractionCount,
+      extractionCount: persistedExtractionCount,
       mode: "primary",
       persistDelta,
       chatStateTarget,
@@ -12089,7 +12292,9 @@ async function persistGraphToConfiguredDurableTier(
         storageTier: "luker-chat-state",
         accepted: true,
         lastProcessedAssistantFloor,
-        extractionCount,
+        extractionCount: persistedExtractionCount,
+        graph,
+        chatId,
         immediate: true,
       });
       stampGraphPersistenceMeta(graph, {
@@ -12100,7 +12305,7 @@ async function persistGraphToConfiguredDurableTier(
           getChatMetadataIntegrity(context) ||
           graphPersistenceState.metadataIntegrity,
       });
-      updateGraphPersistenceState({
+      if (isPersistTargetActive()) updateGraphPersistenceState({
         hostProfile: persistenceEnvironment.hostProfile,
         primaryStorageTier: persistenceEnvironment.primaryStorageTier,
         cacheStorageTier: persistenceEnvironment.cacheStorageTier,
@@ -12137,7 +12342,7 @@ async function persistGraphToConfiguredDurableTier(
             Number(graphPersistenceState.indexedDbRevision || 0),
         ),
       });
-      clearPendingGraphPersistRetry();
+      if (isPersistTargetActive()) clearPendingGraphPersistRetry();
       if (persistenceEnvironment.cacheStorageTier !== "none") {
         queueGraphPersistToIndexedDb(chatId, graph, {
           revision: acceptedRevision,
@@ -12171,6 +12376,20 @@ async function persistGraphToConfiguredDurableTier(
         ),
       });
     }
+    return buildGraphPersistResult({
+      saved: false,
+      queued: chatStateResult?.queued === true,
+      blocked: chatStateResult?.blocked === true,
+      accepted: false,
+      recoverable: chatStateResult?.recoverable === true,
+      reason: chatStateResult?.reason || `${reason}:luker-primary-save-failed`,
+      revision: Number(chatStateResult?.revision || revision || 0),
+      saveMode: String(chatStateResult?.saveMode || "luker-chat-state"),
+      storageTier: "luker-chat-state",
+      acceptedBy: "none",
+      primaryTier: persistenceEnvironment.primaryStorageTier,
+      cacheTier: persistenceEnvironment.cacheStorageTier,
+    });
   }
 
   let indexedDbResult = null;
@@ -12205,10 +12424,12 @@ async function persistGraphToConfiguredDurableTier(
       storageTier: indexedDbResult.storageTier || localStoreTier,
       accepted: true,
       lastProcessedAssistantFloor,
-      extractionCount,
+      extractionCount: persistedExtractionCount,
+      graph,
+      chatId,
       immediate: true,
     });
-    clearPendingGraphPersistRetry();
+    if (isPersistTargetActive()) clearPendingGraphPersistRetry();
     return buildGraphPersistResult({
       saved: true,
       accepted: true,
@@ -12226,87 +12447,14 @@ async function persistGraphToConfiguredDurableTier(
     return indexedDbResult;
   }
 
-  if (canUseHostGraphChatStatePersistence(context)) {
-    const chatStateResult = await persistGraphToHostChatState(context, {
-      graph,
-      chatId,
-      revision,
-      reason: `${reason}:chat-state-fallback`,
-      storageTier: "chat-state",
-      accepted: true,
-      lastProcessedAssistantFloor,
-      extractionCount,
-      mode: "primary",
-      persistDelta,
-      chatStateTarget,
-      graphDetached,
-    });
-    if (chatStateResult?.saved) {
-      const acceptedRevision = Number(chatStateResult.revision || revision);
-      persistGraphCommitMarker(context, {
-        reason: `${reason}:chat-state-fallback`,
-        revision: acceptedRevision,
-        storageTier: "chat-state",
-        accepted: true,
-        lastProcessedAssistantFloor,
-        extractionCount,
-        immediate: true,
-      });
-      updateGraphPersistenceState({
-        hostProfile: persistenceEnvironment.hostProfile,
-        primaryStorageTier: persistenceEnvironment.primaryStorageTier,
-        cacheStorageTier: persistenceEnvironment.cacheStorageTier,
-        revision: Math.max(
-          Number(graphPersistenceState.revision || 0),
-          acceptedRevision,
-        ),
-        pendingPersist: false,
-        persistMismatchReason: "",
-        lastAcceptedRevision: Math.max(
-          Number(graphPersistenceState.lastAcceptedRevision || 0),
-          acceptedRevision,
-        ),
-        acceptedStorageTier: "chat-state",
-        acceptedBy: "chat-state",
-        lastRecoverableStorageTier: "none",
-        lastPersistReason: `${reason}:chat-state-fallback`,
-        lastPersistMode: String(chatStateResult.saveMode || "chat-state"),
-        queuedPersistRevision: 0,
-        queuedPersistChatId: "",
-        queuedPersistMode: "",
-        queuedPersistRotateIntegrity: false,
-        queuedPersistReason: "",
-        persistDiagnosticTier: "none",
-      });
-      clearPendingGraphPersistRetry();
-      queueGraphPersistToIndexedDb(chatId, graph, {
-        revision: acceptedRevision,
-        reason: `${reason}:chat-state-fallback:promote-indexeddb`,
-        persistDelta,
-        graphDetached,
-      });
-      return buildGraphPersistResult({
-        saved: true,
-        accepted: true,
-        reason: `${reason}:chat-state-fallback`,
-        revision: acceptedRevision,
-        saveMode: String(chatStateResult.saveMode || "chat-state"),
-        storageTier: "chat-state",
-        acceptedBy: "chat-state",
-        primaryTier: persistenceEnvironment.primaryStorageTier,
-        cacheTier: persistenceEnvironment.cacheStorageTier,
-      });
-    }
-  }
-
   return null;
 }
 
-function resolvePendingPersistLastProcessedAssistantFloor() {
+function resolvePendingPersistLastProcessedAssistantFloor(graph = currentGraph) {
   const processedRange = Array.isArray(
-    currentGraph?.historyState?.lastBatchStatus?.processedRange,
+    graph?.historyState?.lastBatchStatus?.processedRange,
   )
-    ? currentGraph.historyState.lastBatchStatus.processedRange
+    ? graph.historyState.lastBatchStatus.processedRange
     : [];
   const rangeEnd = Number(processedRange[1]);
   if (Number.isFinite(rangeEnd) && rangeEnd >= 0) {
@@ -12354,14 +12502,48 @@ function resolvePendingPersistGraphSource(chatId = "") {
     }
   }
 
-  return {
-    graph: currentGraph,
-    source: "runtime",
-    revision: Math.max(
-      Number(getGraphPersistedRevision(currentGraph) || 0),
-      targetRevision,
-    ),
-  };
+  const metadataGraph = readLegacyGraphFromChatMetadata(
+    normalizedChatId,
+    getContext(),
+  );
+  const metadataRevision = Number(getGraphPersistedRevision(metadataGraph) || 0);
+  if (metadataGraph && metadataRevision >= targetRevision) {
+    return {
+      graph: metadataGraph,
+      source: "metadata-full",
+      revision: metadataRevision,
+    };
+  }
+
+  const runtimeGraphChatId = normalizeChatIdCandidate(
+    currentGraph?.historyState?.chatId,
+  );
+  const identity = resolveCurrentChatIdentity(getContext());
+  if (
+    currentGraph &&
+    runtimeGraphChatId &&
+    (areChatIdsEquivalentForResolvedIdentity(
+      normalizedChatId,
+      runtimeGraphChatId,
+      identity,
+    ) ||
+      areChatIdsEquivalentForResolvedIdentity(
+        runtimeGraphChatId,
+        normalizedChatId,
+        identity,
+      ))
+  ) {
+    return {
+      graph: currentGraph,
+      source: "runtime",
+      revision: Math.max(
+        Number(getGraphPersistedRevision(currentGraph) || 0),
+        targetRevision,
+      ),
+    };
+  }
+
+  return null;
 }
 
 function applyAcceptedPendingPersistState(
@@ -12376,42 +12558,50 @@ function applyAcceptedPendingPersistState(
   const persistenceRecord = buildBatchPersistenceRecordFromPersistResult(
     persistResult,
   );
-  const batchStatus = currentGraph?.historyState?.lastBatchStatus;
+  const pendingBatchStatus = currentGraph?.historyState?.lastBatchStatus;
+  let promotedPersistedGraph = false;
+
+  if (
+    persistenceRecord.accepted === true &&
+    persistedGraph &&
+    typeof persistedGraph === "object" &&
+    !Array.isArray(persistedGraph)
+  ) {
+    const promotedChatId = normalizeChatIdCandidate(
+      persistedGraph?.historyState?.chatId ||
+        graphPersistenceState.queuedPersistChatId ||
+        graphPersistenceState.chatId ||
+        getCurrentChatId(),
+    );
+    currentGraph = normalizeGraphRuntimeState(
+      cloneGraphSnapshot(persistedGraph),
+      promotedChatId,
+    );
+    stampGraphPersistenceMeta(currentGraph, {
+      revision: persistenceRecord.revision,
+      reason: persistenceRecord.reason || "pending-persist-accepted",
+      chatId: promotedChatId,
+      integrity: graphPersistenceState.metadataIntegrity,
+    });
+    extractionCount = Number(
+      currentGraph?.historyState?.extractionCount || extractionCount || 0,
+    );
+    const latestBatchEntry = Array.isArray(currentGraph.batchJournal)
+      ? currentGraph.batchJournal[currentGraph.batchJournal.length - 1]
+      : null;
+    updateLastExtractedItems(latestBatchEntry?.createdNodeIds || []);
+    promotedPersistedGraph = true;
+  }
+
+  const batchStatus =
+    pendingBatchStatus && typeof pendingBatchStatus === "object"
+      ? pendingBatchStatus
+      : currentGraph?.historyState?.lastBatchStatus;
   if (batchStatus && typeof batchStatus === "object") {
     currentGraph.historyState.lastBatchStatus = reducePersistenceRecordToBatchStatus(
       batchStatus,
       persistenceRecord,
     );
-  }
-
-  if (
-    persistedGraph &&
-    typeof persistedGraph === "object" &&
-    !Array.isArray(persistedGraph)
-  ) {
-    const persistedHistory =
-      persistedGraph.historyState &&
-      typeof persistedGraph.historyState === "object" &&
-      !Array.isArray(persistedGraph.historyState)
-        ? persistedGraph.historyState
-        : null;
-    if (persistedHistory) {
-      currentGraph.historyState.processedMessageHashVersion =
-        persistedHistory.processedMessageHashVersion ??
-        currentGraph.historyState.processedMessageHashVersion;
-      currentGraph.historyState.processedMessageHashes = cloneRuntimeDebugValue(
-        persistedHistory.processedMessageHashes || {},
-        currentGraph.historyState.processedMessageHashes || {},
-      );
-      currentGraph.historyState.processedMessageHashesNeedRefresh =
-        persistedHistory.processedMessageHashesNeedRefresh === true;
-    }
-    if (Array.isArray(persistedGraph.batchJournal)) {
-      currentGraph.batchJournal = cloneRuntimeDebugValue(
-        persistedGraph.batchJournal,
-        currentGraph.batchJournal || [],
-      );
-    }
   }
 
   if (
@@ -12421,9 +12611,9 @@ function applyAcceptedPendingPersistState(
   ) {
     const chat = Array.isArray(getContext()?.chat) ? getContext().chat : [];
     const safeFloor = Math.floor(Number(lastProcessedAssistantFloor));
-    if (typeof updateProcessedHistorySnapshot === "function") {
+    if (!promotedPersistedGraph && typeof updateProcessedHistorySnapshot === "function") {
       updateProcessedHistorySnapshot(chat, safeFloor);
-    } else {
+    } else if (!promotedPersistedGraph) {
       currentGraph.historyState.lastProcessedAssistantFloor = safeFloor;
       currentGraph.lastProcessedSeq = safeFloor;
     }
@@ -12518,6 +12708,10 @@ function maybeClearAcceptedPendingPersistState(
   if (plan.action !== "clear-stale-pending") {
     return false;
   }
+  const pendingGraphSource = resolvePendingPersistGraphSource(queuedChatId);
+  if (!pendingGraphSource?.graph) {
+    return false;
+  }
 
   const acceptedResult = buildGraphPersistResult({
     saved: true,
@@ -12529,7 +12723,10 @@ function maybeClearAcceptedPendingPersistState(
     acceptedBy: plan.tier,
   });
   applyAcceptedPendingPersistState(acceptedResult, {
-    lastProcessedAssistantFloor: resolvePendingPersistLastProcessedAssistantFloor(),
+    lastProcessedAssistantFloor: resolvePendingPersistLastProcessedAssistantFloor(
+      pendingGraphSource.graph,
+    ),
+    persistedGraph: pendingGraphSource.graph,
   });
   clearPendingGraphPersistRetry();
   return true;
@@ -12555,6 +12752,7 @@ function schedulePendingGraphPersistRetry(
   if (!targetChatId) {
     return false;
   }
+  const conversationLease = conversationSession.captureLease();
 
   const normalizedAttempt = Math.max(0, Math.floor(Number(attempt) || 0));
   if (normalizedAttempt >= PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS) {
@@ -12572,10 +12770,19 @@ function schedulePendingGraphPersistRetry(
 
   pendingGraphPersistRetryTimer = setTimeout(() => {
     pendingGraphPersistRetryTimer = null;
+    if (
+      pendingGraphPersistRetryChatId !== targetChatId ||
+      !conversationSession.isLeaseCurrent(conversationLease, {
+        requireGeneration: false,
+      })
+    ) {
+      return;
+    }
     void retryPendingGraphPersist({
       reason: `${reason}:attempt-${normalizedAttempt + 1}`,
       retryAttempt: normalizedAttempt,
       scheduleRetryOnFailure: true,
+      targetChatId,
     }).catch((error) => {
       console.warn("[ST-BME] 待确认持久化自动重试失败:", error);
     });
@@ -12730,10 +12937,17 @@ async function retryPendingGraphPersist({
   retryAttempt = 0,
   scheduleRetryOnFailure = false,
   ignoreRestoreLock = false,
+  targetChatId = "",
 } = {}) {
   return await retryPendingGraphPersistImpl(
     createGraphPersistenceIoRuntime(),
-    { reason, retryAttempt, scheduleRetryOnFailure, ignoreRestoreLock },
+    {
+      reason,
+      retryAttempt,
+      scheduleRetryOnFailure,
+      ignoreRestoreLock,
+      targetChatId,
+    },
   );
 }
 
@@ -13379,13 +13593,14 @@ function recordMaintenanceAction({
   beforeSnapshot,
   mode = "manual",
   summary = "",
+  graph = currentGraph,
 } = {}) {
-  if (!currentGraph || !beforeSnapshot) return null;
-  ensureCurrentGraphRuntimeState();
+  if (!graph || !beforeSnapshot) return null;
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || getCurrentChatId());
 
   const entry = createMaintenanceJournalEntry(
     beforeSnapshot,
-    cloneGraphSnapshot(currentGraph),
+    cloneGraphSnapshot(graph),
     {
       action,
       mode,
@@ -13394,17 +13609,19 @@ function recordMaintenanceAction({
   );
   if (!entry) return null;
 
-  appendMaintenanceJournal(currentGraph, entry);
-  recordMaintenanceDebugSnapshot({
-    lastAction: {
-      id: entry.id,
-      action: entry.action,
-      mode: entry.mode,
-      summary: entry.summary,
-      createdAt: entry.createdAt,
-      maintenanceJournalSize: currentGraph.maintenanceJournal?.length || 0,
-    },
-  });
+  appendMaintenanceJournal(graph, entry);
+  if (graph === currentGraph) {
+    recordMaintenanceDebugSnapshot({
+      lastAction: {
+        id: entry.id,
+        action: entry.action,
+        mode: entry.mode,
+        summary: entry.summary,
+        createdAt: entry.createdAt,
+        maintenanceJournalSize: graph.maintenanceJournal?.length || 0,
+      },
+    });
+  }
   return entry;
 }
 
@@ -13429,12 +13646,19 @@ function undoLastMaintenanceAction() {
   return result;
 }
 
+function markGraphVectorStateDirty(
+  graph,
+  reason = "向量状态已标记为待重建",
+) {
+  if (!graph) return;
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || getCurrentChatId());
+  graph.vectorIndexState.dirty = true;
+  graph.vectorIndexState.dirtyReason = reason;
+  graph.vectorIndexState.lastWarning = reason;
+}
+
 function markVectorStateDirty(reason = "向量状态已标记为待重建") {
-  if (!currentGraph) return;
-  ensureCurrentGraphRuntimeState();
-  currentGraph.vectorIndexState.dirty = true;
-  currentGraph.vectorIndexState.dirtyReason = reason;
-  currentGraph.vectorIndexState.lastWarning = reason;
+  markGraphVectorStateDirty(currentGraph, reason);
 }
 
 function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
@@ -13927,10 +14151,19 @@ function computePostProcessArtifacts(
 }
 
 async function syncVectorState(options = {}) {
+  const targetGraph =
+    options?.graph && typeof options.graph === "object" ? options.graph : null;
+  const controllerOptions = { ...(options || {}) };
+  delete controllerOptions.graph;
   return await syncVectorStateController(
     {
-      ensureCurrentGraphRuntimeState,
-      getCurrentGraph: () => currentGraph,
+      ensureCurrentGraphRuntimeState: targetGraph
+        ? () => normalizeGraphRuntimeState(
+            targetGraph,
+            targetGraph?.historyState?.chatId || controllerOptions.expectedChatId || "",
+          )
+        : ensureCurrentGraphRuntimeState,
+      getCurrentGraph: () => targetGraph || currentGraph,
       setLastVectorStatus,
       getEmbeddingConfig,
       validateVectorConfig,
@@ -13938,13 +14171,15 @@ async function syncVectorState(options = {}) {
       syncGraphVectorIndex,
       resolveOperationalChatId,
       getContext,
-      markVectorStateDirty,
+      markVectorStateDirty: targetGraph
+        ? (reason) => markGraphVectorStateDirty(targetGraph, reason)
+        : markVectorStateDirty,
       isAbortError,
       getRequestHeaders:
         typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
       console,
     },
-    options,
+    controllerOptions,
   );
 }
 
@@ -15103,17 +15338,32 @@ async function handleExtractionSuccess(
   taskContext = null,
 ) {
   const taskGraph = taskContext?.graph || currentGraph;
+  const taskBaseGraph = taskContext?.baseGraph || currentGraph;
+  let taskExtractionCount = Number.isFinite(
+    Number(taskContext?.extractionCountBefore),
+  )
+    ? Number(taskContext.extractionCountBefore)
+    : Number(extractionCount || 0);
   const taskChatId = normalizeChatIdCandidate(
     taskContext?.chatId || getCurrentChatId(),
   );
+  const taskLease = taskContext?.conversationLease || null;
   const taskHostContext = getContext();
   const isTaskContextActive = () =>
-    currentGraph === taskGraph &&
-    (!taskChatId ||
-      normalizeChatIdCandidate(getCurrentChatId()) === taskChatId);
+    currentGraph === taskBaseGraph &&
+    (taskLease
+      ? conversationSession.isLeaseCurrent(taskLease, {
+          requireGeneration: false,
+        })
+      : !taskChatId ||
+        normalizeChatIdCandidate(getCurrentChatId()) === taskChatId);
   const syncTaskVectorState = (options = {}) =>
     isTaskContextActive()
-      ? syncVectorState({ ...options, expectedChatId: taskChatId })
+      ? syncVectorState({
+          ...options,
+          graph: taskGraph,
+          expectedChatId: taskChatId,
+        })
       : Promise.resolve({
           aborted: true,
           stale: true,
@@ -15126,7 +15376,8 @@ async function handleExtractionSuccess(
       consolidateMemories,
       createAbortError,
       createBatchStatusSkeleton,
-      ensureCurrentGraphRuntimeState,
+      ensureCurrentGraphRuntimeState: () =>
+        normalizeGraphRuntimeState(taskGraph, taskChatId),
       evaluateAutoConsolidationGate,
       evaluateAutoCompressionSchedule,
       finalizeBatchStatus,
@@ -15152,18 +15403,20 @@ async function handleExtractionSuccess(
       sleepCycle,
       syncVectorState: syncTaskVectorState,
       throwIfAborted,
-      updateLastExtractedItems,
+      updateLastExtractedItems: () => null,
       // imported/local maintenance fns
       analyzeAutoConsolidationGate,
       cloneMaintenanceSnapshot: cloneGraphSnapshot,
       persistMaintenanceAction: (...args) =>
-        isTaskContextActive() ? recordMaintenanceAction(...args) : null,
+        isTaskContextActive()
+          ? recordMaintenanceAction({ ...(args[0] || {}), graph: taskGraph })
+          : null,
       runSummaryPostProcess: runSummaryPostProcessPlanCommit,
       summarizeMaintenance: buildMaintenanceSummary,
       // state accessors
-      getExtractionCount: () => extractionCount,
-      setExtractionCount: (n) => { extractionCount = n; },
-      getCurrentGraph: () => currentGraph,
+      getExtractionCount: () => taskExtractionCount,
+      setExtractionCount: (n) => { taskExtractionCount = n; },
+      getCurrentGraph: () => taskGraph,
       // consts
       EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
     },
@@ -15492,10 +15745,13 @@ async function executeExtractionBatch({
       createAbortError,
       createBatchJournalEntry,
       createBatchStatusSkeleton,
+      captureConversationLease: (...args) =>
+        conversationSession.captureLease(...args),
       ensureCurrentGraphRuntimeState,
       extractMemories,
       finalizeBatchStatus,
-      getCurrentGraph: () => taskGraph,
+      getContext,
+      getCurrentGraph: () => currentGraph,
       getCurrentChatId,
       getEmbeddingConfig,
       getExtractionCount: () => extractionCount,
@@ -15503,13 +15759,20 @@ async function executeExtractionBatch({
       getSettings,
       getSchema,
       handleExtractionSuccess,
+      isConversationLeaseCurrent: (...args) =>
+        conversationSession.isLeaseCurrent(...args),
       persistExtractionBatchResult,
+      resolveCurrentChatStateTarget,
       scheduleBackgroundMaintenancePostProcess,
       scheduleBackgroundVectorSync,
       setBatchStageOutcome,
+      setCurrentGraph: (graph) => { currentGraph = graph; },
+      setExtractionCount: (value) => { extractionCount = value; },
       setLastExtractionStatus,
+      stampGraphPersistenceMeta,
       shouldAdvanceProcessedHistory,
       throwIfAborted,
+      updateLastExtractedItems,
       updateProcessedHistorySnapshot,
     },
     {

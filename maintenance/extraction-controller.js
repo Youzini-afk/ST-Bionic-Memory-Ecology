@@ -97,10 +97,8 @@ function normalizePersistenceStateRecord(persistResult = null) {
   const queued = persistResult?.queued === true;
   const blocked = persistResult?.blocked === true;
   let outcome = "failed";
-  if (accepted && String(persistResult?.storageTier || "") === "indexeddb") {
+  if (accepted) {
     outcome = "saved";
-  } else if (accepted) {
-    outcome = "fallback";
   } else if (queued) {
     outcome = "queued";
   } else if (blocked) {
@@ -977,14 +975,26 @@ export async function executeExtractionBatchController(
   runtime.throwIfAborted(signal, "提取已终止");
 
   const currentGraph = runtime.getCurrentGraph();
+  const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
+  const workingGraph = runtime.cloneGraphSnapshot(beforeSnapshot);
+  const conversationLease = runtime.captureConversationLease?.() || null;
   const batchChatId = String(
     runtime.getCurrentChatId?.() || currentGraph?.historyState?.chatId || "",
   ).trim();
+  const batchChatStateTarget = cloneSerializable(
+    runtime.resolveCurrentChatStateTarget?.(runtime.getContext?.()) || null,
+    null,
+  );
   const isBatchContextCurrent = () => {
     const activeChatId = String(runtime.getCurrentChatId?.() || "").trim();
+    const conversationCurrent = conversationLease
+      ? runtime.isConversationLeaseCurrent?.(conversationLease, {
+          requireGeneration: false,
+        }) !== false
+      : !batchChatId || !activeChatId || activeChatId === batchChatId;
     return (
       runtime.getCurrentGraph() === currentGraph &&
-      (!batchChatId || !activeChatId || activeChatId === batchChatId)
+      conversationCurrent
     );
   };
   const assertBatchContextCurrent = () => {
@@ -998,7 +1008,6 @@ export async function executeExtractionBatchController(
   };
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const extractionCountBefore = runtime.getExtractionCount();
-  const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
   const messages = runtime.buildExtractionMessages(chat, startIdx, endIdx, settings);
   const batchStatus = runtime.createBatchStatusSkeleton({
     processedRange: [startIdx, endIdx],
@@ -1013,7 +1022,7 @@ export async function executeExtractionBatchController(
   );
 
   const result = await runtime.extractMemories({
-    graph: currentGraph,
+    graph: workingGraph,
     messages,
     startSeq: startIdx,
     endSeq: endIdx,
@@ -1071,25 +1080,36 @@ export async function executeExtractionBatchController(
     signal,
     batchStatus,
     postProcessContext,
-    { graph: currentGraph, chatId: batchChatId },
+    {
+      graph: workingGraph,
+      baseGraph: currentGraph,
+      chatId: batchChatId,
+      extractionCountBefore,
+      conversationLease,
+    },
   );
   assertBatchContextCurrent();
   const batchStatusRef = effects?.batchStatus || batchStatus;
   const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
-    graph: currentGraph,
+    graph: workingGraph,
     chat,
     settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
     postProcessArtifacts: runtime.computePostProcessArtifacts(
       beforeSnapshot,
-      currentGraph,
+      workingGraph,
       effects?.postProcessArtifacts || [],
     ),
     vectorHashesInserted: effects?.vectorHashesInserted || [],
     extractionCountBefore,
   });
   assertBatchContextCurrent();
+  const extractionCountAfter = Number.isFinite(
+    Number(workingGraph?.historyState?.extractionCount),
+  )
+    ? Number(workingGraph.historyState.extractionCount)
+    : extractionCountBefore;
   const persistResult = await runtime.persistExtractionBatchResult({
     reason: "extraction-batch-complete",
     lastProcessedAssistantFloor: endIdx,
@@ -1099,7 +1119,7 @@ export async function executeExtractionBatchController(
     committedBatchJournalEntry: committedPersistState.committedBatchJournalEntry,
     processedRange: [startIdx, endIdx],
     extractionCountBefore,
-    extractionCountAfter: runtime.getExtractionCount(),
+    extractionCountAfter,
     previousLastProcessedFloor: lastProcessed,
     messageHashes: buildMessageHashesForRange(
       committedPersistState.committedAfterSnapshot || committedPersistState.persistGraphSnapshot,
@@ -1108,11 +1128,32 @@ export async function executeExtractionBatchController(
     pruneMessageHashesFromFloor: startIdx,
     vectorDirty: Array.isArray(effects?.vectorHashesInserted) && effects.vectorHashesInserted.length > 0,
     dirtyFromFloor: startIdx,
+    chatStateTarget: batchChatStateTarget,
   });
   assertBatchContextCurrent();
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
   batchStatusRef.historyAdvanceAllowed = persistence.accepted === true;
+  let publishedGraph = currentGraph;
+  if (persistence.accepted === true) {
+    const committedGraph =
+      committedPersistState.persistGraphSnapshot ||
+      committedPersistState.committedAfterSnapshot ||
+      workingGraph;
+    runtime.stampGraphPersistenceMeta?.(committedGraph, {
+      revision: persistence.revision,
+      reason: "extraction-batch-complete",
+      chatId: batchChatId,
+    });
+    if (typeof runtime.setCurrentGraph !== "function") {
+      throw new Error("extraction-runtime-set-current-graph-unavailable");
+    }
+    runtime.setCurrentGraph(committedGraph);
+    runtime.setExtractionCount?.(extractionCountAfter);
+    runtime.ensureCurrentGraphRuntimeState();
+    publishedGraph = runtime.getCurrentGraph();
+    runtime.updateLastExtractedItems?.(result?.newNodeIds || []);
+  }
   let backgroundMaintenanceQueue = null;
   if (
     persistence.accepted === true &&
@@ -1169,10 +1210,10 @@ export async function executeExtractionBatchController(
   }
   const finalizedBatchStatus = runtime.finalizeBatchStatus(
     batchStatusRef,
-    runtime.getExtractionCount(),
+    extractionCountAfter,
   );
 
-  currentGraph.historyState.lastBatchStatus = {
+  publishedGraph.historyState.lastBatchStatus = {
     ...finalizedBatchStatus,
     persistence,
     historyAdvanceAllowed: persistence.accepted === true,
@@ -1181,24 +1222,9 @@ export async function executeExtractionBatchController(
       historyAdvanceAllowed: persistence.accepted === true,
     }),
   };
+  const publishedBatchStatus = publishedGraph.historyState.lastBatchStatus;
 
-  if (currentGraph.historyState.lastBatchStatus.historyAdvanced) {
-    runtime.updateProcessedHistorySnapshot(chat, endIdx);
-    if (committedPersistState.committedBatchJournalEntry) {
-      runtime.appendBatchJournal(
-        currentGraph,
-        cloneSerializable(
-          committedPersistState.committedBatchJournalEntry,
-          committedPersistState.committedBatchJournalEntry,
-        ),
-      );
-    }
-  } else if (!persistence.accepted && !isAuthorityBlockedPersistence(persistence)) {
-    // 即使持久化未被接受，仍在内存中推进 lastProcessedAssistantFloor，
-    // 防止同一会话内对已经抽取过的楼层重复提取。
-    // 此时不追加 batchJournal（保持回滚完整性）。
-    // 如果用户重载，floor 和图谱都会回退到最后持久化状态，保持一致。
-    runtime.updateProcessedHistorySnapshot(chat, endIdx);
+  if (!persistence.accepted && !isAuthorityBlockedPersistence(persistence)) {
     runtime.setLastExtractionStatus(
       "提取待恢复",
       `楼层 ${startIdx}-${endIdx} 已抽取，但持久化状态为 ${persistence.outcome || "failed"}${persistence.reason ? ` · ${persistence.reason}` : ""}`,
@@ -1221,7 +1247,7 @@ export async function executeExtractionBatchController(
       backgroundMaintenanceQueue,
       backgroundVectorSyncQueue,
     },
-    batchStatus: finalizedBatchStatus,
+    batchStatus: publishedBatchStatus,
     persistResult,
     historyAdvanceAllowed: persistence.accepted === true,
     error: finalizedBatchStatus.completed

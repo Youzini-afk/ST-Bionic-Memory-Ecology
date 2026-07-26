@@ -859,6 +859,7 @@ export async function persistExtractionBatchResultImpl(runtime, {
   pruneMessageHashesFromFloor = null,
   vectorDirty = undefined,
   dirtyFromFloor = undefined,
+  chatStateTarget = null,
 } = {}) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {
@@ -1101,6 +1102,7 @@ export async function persistExtractionBatchResultImpl(runtime, {
         graphSnapshot,
         persistSnapshot,
         graphDetached: persistGraphDetached,
+        chatStateTarget,
       },
     );
   } catch (error) {
@@ -1133,7 +1135,11 @@ export async function persistExtractionBatchResultImpl(runtime, {
     recoverableTier = "shadow";
   }
 
-  if (!authorityLocked && canPersistGraphToMetadataFallback(context, persistGraph)) {
+  if (
+    !authorityLocked &&
+    isPersistTargetActive() &&
+    canPersistGraphToMetadataFallback(context, persistGraph)
+  ) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,

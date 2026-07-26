@@ -2412,8 +2412,8 @@ async function createGraphPersistenceHarness({
       runtimeContext.updateGraphPersistenceState({ persistMismatchReason: diagnostic.reason, persistMismatch: diagnostic });
       return diagnostic;
     },
-    resolvePendingPersistLastProcessedAssistantFloor() {
-      const processedRange = Array.isArray(currentGraph?.historyState?.lastBatchStatus?.processedRange) ? currentGraph.historyState.lastBatchStatus.processedRange : [];
+    resolvePendingPersistLastProcessedAssistantFloor(graph = currentGraph) {
+      const processedRange = Array.isArray(graph?.historyState?.lastBatchStatus?.processedRange) ? graph.historyState.lastBatchStatus.processedRange : [];
       const rangeEnd = Number(processedRange[1]);
       if (Number.isFinite(rangeEnd) && rangeEnd >= 0) return Math.floor(rangeEnd);
       const rangeStart = Number(processedRange[0]);
@@ -2423,35 +2423,52 @@ async function createGraphPersistenceHarness({
     resolvePendingPersistGraphSource(chatId = "") {
       const normalizedChatId = normalizeChatIdCandidate(chatId || graphPersistenceState.queuedPersistChatId || graphPersistenceState.chatId);
       const targetRevision = Math.max(Number(graphPersistenceState.queuedPersistRevision || 0), Number(graphPersistenceState.revision || 0));
-      const shadowSnapshot = normalizedChatId ? readGraphShadowSnapshot(normalizedChatId) : null;
+      const shadowSnapshot = normalizedChatId ? runtimeContext.readGraphShadowSnapshot(normalizedChatId) : null;
       if (shadowSnapshot && Number(shadowSnapshot.revision || 0) >= targetRevision && typeof shadowSnapshot.serializedGraph === "string" && shadowSnapshot.serializedGraph) {
         try {
           const shadowGraph = normalizeGraphRuntimeState(deserializeGraph(shadowSnapshot.serializedGraph), normalizedChatId);
           return { graph: shadowGraph, source: "shadow", revision: Number(shadowSnapshot.revision || 0) };
         } catch {}
       }
-      return { graph: currentGraph, source: "runtime", revision: Math.max(Number(getGraphPersistedRevision(currentGraph) || 0), targetRevision) };
+      const metadataGraph = runtimeContext.getContext()?.chatMetadata?.[GRAPH_METADATA_KEY] || null;
+      const metadataRevision = Number(getGraphPersistedRevision(metadataGraph) || 0);
+      if (metadataGraph && metadataRevision >= targetRevision) {
+        return { graph: normalizeGraphRuntimeState(cloneRuntimeDebugValue(metadataGraph, metadataGraph), normalizedChatId), source: "metadata-full", revision: metadataRevision };
+      }
+      const runtimeGraphChatId = normalizeChatIdCandidate(currentGraph?.historyState?.chatId);
+      const identity = runtimeContext.resolveCurrentChatIdentity(runtimeContext.getContext());
+      if (
+        currentGraph &&
+        runtimeGraphChatId &&
+        (runtimeContext.areChatIdsEquivalentForResolvedIdentity(normalizedChatId, runtimeGraphChatId, identity) ||
+          runtimeContext.areChatIdsEquivalentForResolvedIdentity(runtimeGraphChatId, normalizedChatId, identity))
+      ) {
+        return { graph: currentGraph, source: "runtime", revision: Math.max(Number(getGraphPersistedRevision(currentGraph) || 0), targetRevision) };
+      }
+      return null;
     },
     applyAcceptedPendingPersistState(persistResult, { lastProcessedAssistantFloor = runtimeContext.resolvePendingPersistLastProcessedAssistantFloor(), persistedGraph = null } = {}) {
       runtimeContext.ensureCurrentGraphRuntimeState();
       const persistenceRecord = reduceBatchPersistenceRecordFromPersistResult(persistResult);
-      const batchStatus = currentGraph?.historyState?.lastBatchStatus;
-      if (batchStatus && typeof batchStatus === "object") {
-        currentGraph.historyState.lastBatchStatus = reducePersistenceRecordToBatchStatus(batchStatus, persistenceRecord);
+      const pendingBatchStatus = currentGraph?.historyState?.lastBatchStatus;
+      let promotedPersistedGraph = false;
+      if (persistenceRecord.accepted === true && persistedGraph && typeof persistedGraph === "object" && !Array.isArray(persistedGraph)) {
+        const promotedChatId = normalizeChatIdCandidate(persistedGraph?.historyState?.chatId || graphPersistenceState.queuedPersistChatId || graphPersistenceState.chatId || runtimeContext.getCurrentChatId());
+        currentGraph = normalizeGraphRuntimeState(cloneRuntimeDebugValue(persistedGraph, persistedGraph), promotedChatId);
+        stampGraphPersistenceMeta(currentGraph, { revision: persistenceRecord.revision, reason: persistenceRecord.reason || "pending-persist-accepted", chatId: promotedChatId, integrity: graphPersistenceState.metadataIntegrity });
+        extractionCount = Number(currentGraph?.historyState?.extractionCount || extractionCount || 0);
+        const latestBatchEntry = Array.isArray(currentGraph.batchJournal) ? currentGraph.batchJournal[currentGraph.batchJournal.length - 1] : null;
+        lastExtractedItems = Array.isArray(latestBatchEntry?.createdNodeIds) ? latestBatchEntry.createdNodeIds.map((id) => ({ id })) : [];
+        promotedPersistedGraph = true;
       }
-      if (persistedGraph && typeof persistedGraph === "object" && !Array.isArray(persistedGraph)) {
-        const persistedHistory = persistedGraph.historyState && typeof persistedGraph.historyState === "object" && !Array.isArray(persistedGraph.historyState) ? persistedGraph.historyState : null;
-        if (persistedHistory) {
-          currentGraph.historyState.processedMessageHashVersion = persistedHistory.processedMessageHashVersion ?? currentGraph.historyState.processedMessageHashVersion;
-          currentGraph.historyState.processedMessageHashes = cloneRuntimeDebugValue(persistedHistory.processedMessageHashes || {}, currentGraph.historyState.processedMessageHashes || {});
-          currentGraph.historyState.processedMessageHashesNeedRefresh = persistedHistory.processedMessageHashesNeedRefresh === true;
-        }
-        if (Array.isArray(persistedGraph.batchJournal)) currentGraph.batchJournal = cloneRuntimeDebugValue(persistedGraph.batchJournal, currentGraph.batchJournal || []);
-      }
+      const batchStatus = pendingBatchStatus && typeof pendingBatchStatus === "object" ? pendingBatchStatus : currentGraph?.historyState?.lastBatchStatus;
+      if (batchStatus && typeof batchStatus === "object") currentGraph.historyState.lastBatchStatus = reducePersistenceRecordToBatchStatus(batchStatus, persistenceRecord);
       if (persistenceRecord.accepted === true && Number.isFinite(Number(lastProcessedAssistantFloor)) && Number(lastProcessedAssistantFloor) >= 0) {
         const safeFloor = Math.floor(Number(lastProcessedAssistantFloor));
-        currentGraph.historyState.lastProcessedAssistantFloor = safeFloor;
-        currentGraph.lastProcessedSeq = safeFloor;
+        if (!promotedPersistedGraph) {
+          currentGraph.historyState.lastProcessedAssistantFloor = safeFloor;
+          currentGraph.lastProcessedSeq = safeFloor;
+        }
       }
       if (persistenceRecord.accepted === true) {
         runtimeContext.updateGraphPersistenceState(reducePersistenceStatePatch(graphPersistenceState, { type: PERSISTENCE_EVENT_TYPES.ACCEPTED, persistenceRecord, clearQueued: false }));
@@ -2474,8 +2491,10 @@ async function createGraphPersistenceHarness({
       const markerAcceptedForQueuedChat = markerAcceptedRevision > 0 && markerChatId && (runtimeContext.areChatIdsEquivalentForResolvedIdentity(markerChatId, queuedChatId, currentIdentity) || runtimeContext.areChatIdsEquivalentForResolvedIdentity(queuedChatId, markerChatId, currentIdentity));
       const plan = planAcceptedPendingClear({ batchPersistence: persistence, persistenceState: graphPersistenceState, commitMarker, activeChatId, queuedChatId, markerChatMatchesQueued: markerAcceptedForQueuedChat });
       if (plan.action !== "clear-stale-pending") return false;
+      const pendingGraphSource = runtimeContext.resolvePendingPersistGraphSource(queuedChatId);
+      if (!pendingGraphSource?.graph) return false;
       const acceptedResult = runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason: `${String(source || "accepted-pending-persist-reconcile")}:accepted-revision`, revision: plan.targetRevision, saveMode: "accepted-revision-reconcile", storageTier: plan.tier, acceptedBy: plan.tier });
-      runtimeContext.applyAcceptedPendingPersistState(acceptedResult, { lastProcessedAssistantFloor: runtimeContext.resolvePendingPersistLastProcessedAssistantFloor() });
+      runtimeContext.applyAcceptedPendingPersistState(acceptedResult, { lastProcessedAssistantFloor: runtimeContext.resolvePendingPersistLastProcessedAssistantFloor(pendingGraphSource.graph), persistedGraph: pendingGraphSource.graph });
       runtimeContext.clearPendingGraphPersistRetry();
       return true;
     },
@@ -2606,7 +2625,7 @@ async function createGraphPersistenceHarness({
           runtimeContext.updateGraphPersistenceState({ acceptedStorageTier: "luker-chat-state", lukerManifestRevision: lukerResult.revision, cacheTier: "none", acceptedRevision: lukerResult.revision });
           return runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason, revision: lukerResult.revision || revision, saveMode: "luker-chat-state", storageTier: "luker-chat-state", acceptedBy: "luker-chat-state", primaryTier: "luker-chat-state", cacheTier: "none" });
         }
-        return runtimeContext.buildGraphPersistResult({ saved: false, accepted: false, reason, revision, storageTier: "luker-chat-state", acceptedBy: "none" });
+        return runtimeContext.buildGraphPersistResult({ saved: false, queued: lukerResult?.queued === true, blocked: lukerResult?.blocked === true, accepted: false, recoverable: lukerResult?.recoverable === true, reason: lukerResult?.reason || `${reason}:luker-primary-save-failed`, revision: Number(lukerResult?.revision || revision || 0), saveMode: String(lukerResult?.saveMode || "luker-chat-state"), storageTier: "luker-chat-state", acceptedBy: "none", primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
       }
       let indexedDbResult = null;
       try {
@@ -2621,12 +2640,6 @@ async function createGraphPersistenceHarness({
         return runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason, revision: indexedDbResult.revision || revision, saveMode: String(indexedDbResult.saveMode || "indexeddb-delta"), storageTier: indexedDbResult.storageTier || localStoreTier, acceptedBy: indexedDbResult.storageTier || localStoreTier, primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
       }
       if (isAuthorityBlockedPersistenceResult(indexedDbResult)) return indexedDbResult;
-      if (runtimeContext.__enableConfiguredDurableTierChatStateFallback === true && runtimeContext.canUseHostGraphChatStatePersistence(context)) {
-        const chatStateResult = await runtimeContext.persistGraphToHostChatState(context, { graph, chatId, revision, reason: `${reason}:chat-state-fallback`, storageTier: "chat-state", accepted: true, lastProcessedAssistantFloor, extractionCount, mode: "primary", persistDelta, chatStateTarget, graphDetached });
-        if (chatStateResult?.saved) {
-          return runtimeContext.buildGraphPersistResult({ saved: true, accepted: true, reason: `${reason}:chat-state-fallback`, revision: chatStateResult.revision || revision, saveMode: String(chatStateResult.saveMode || "chat-state"), storageTier: "chat-state", acceptedBy: "chat-state", primaryTier: persistenceEnvironment.primaryStorageTier, cacheTier: persistenceEnvironment.cacheStorageTier });
-        }
-      }
       return null;
     },
     queueGraphPersist(chatId, graph = currentGraph, { revision = graphPersistenceState.revision, reason = "queued-persist", mode = "metadata-fallback", rotateIntegrity = false, storageTier = "metadata-full" } = {}) {
@@ -2637,11 +2650,7 @@ async function createGraphPersistenceHarness({
       return persistenceRecord;
     },
     async retryPendingGraphPersist(options = {}) {
-      const result = await retryPendingGraphPersistImpl(runtimeContext, options);
-      if (result?.accepted === true && currentGraph && String(graphPersistenceState.chatId || "") === "chat-pending-persist-retry") {
-        currentGraph.batchJournal = [{ id: "journal-queued-1" }];
-      }
-      return result;
+      return await retryPendingGraphPersistImpl(runtimeContext, options);
     },
     maybeFlushQueuedGraphPersist(reason = "queued-persist-flush") {
       return maybeFlushQueuedGraphPersistImpl(runtimeContext, reason);
@@ -5644,7 +5653,7 @@ async function createGraphPersistenceHarness({
     pendingPersist: true,
     writesBlocked: false,
   });
-  harness.api.writeGraphShadowSnapshot(
+  harness.runtimeContext.writeGraphShadowSnapshot(
     "chat-pending-persist-retry",
     committedGraph,
     {
@@ -5685,6 +5694,121 @@ async function createGraphPersistenceHarness({
   assert.equal(
     harness.api.getCurrentGraph().batchJournal?.[0]?.id,
     "journal-queued-1",
+  );
+}
+
+{
+  const chatId = "chat-pending-retry-switch-a";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  const runtimeGraph = createMeaningfulGraph(chatId, "runtime-a");
+  const committedGraph = createMeaningfulGraph(chatId, "committed-a");
+  committedGraph.historyState.lastProcessedAssistantFloor = 1;
+  committedGraph.lastProcessedSeq = 1;
+  committedGraph.historyState.lastBatchStatus = {
+    processedRange: [1, 1],
+    persistence: { accepted: false, outcome: "queued", revision: 6 },
+  };
+  harness.api.setCurrentGraph(runtimeGraph);
+  harness.api.setGraphPersistenceState({
+    loadState: "loaded",
+    chatId,
+    revision: 6,
+    queuedPersistRevision: 6,
+    queuedPersistChatId: chatId,
+    queuedPersistMode: "immediate",
+    pendingPersist: true,
+    writesBlocked: false,
+  });
+  harness.runtimeContext.writeGraphShadowSnapshot(chatId, committedGraph, {
+    revision: 6,
+    reason: "pending-retry-switch-seed",
+  });
+
+  let releasePersist;
+  let notifyPersistStarted;
+  const persistStarted = new Promise((resolve) => {
+    notifyPersistStarted = resolve;
+  });
+  let metadataWrites = 0;
+  let queueWrites = 0;
+  const originalPersistGraphToConfiguredDurableTier =
+    harness.runtimeContext.persistGraphToConfiguredDurableTier;
+  const originalPersistGraphToChatMetadata =
+    harness.runtimeContext.persistGraphToChatMetadata;
+  const originalQueueGraphPersist = harness.runtimeContext.queueGraphPersist;
+  harness.runtimeContext.persistGraphToConfiguredDurableTier = async () => {
+    notifyPersistStarted();
+    return await new Promise((resolve) => {
+      releasePersist = resolve;
+    });
+  };
+  harness.runtimeContext.persistGraphToChatMetadata = (...args) => {
+    metadataWrites += 1;
+    return originalPersistGraphToChatMetadata(...args);
+  };
+  harness.runtimeContext.queueGraphPersist = (...args) => {
+    queueWrites += 1;
+    return originalQueueGraphPersist(...args);
+  };
+
+  const pending = harness.api.retryPendingGraphPersist({
+    reason: "pending-retry-switch",
+  });
+  await persistStarted;
+  const graphB = createMeaningfulGraph("chat-pending-retry-switch-b", "runtime-b");
+  harness.runtimeContext.__globalChatId = "chat-pending-retry-switch-b";
+  harness.runtimeContext.__chatContext.chatId = "chat-pending-retry-switch-b";
+  harness.runtimeContext.__chatContext.chatMetadata = {
+    integrity: "meta-chat-pending-retry-switch-b",
+  };
+  harness.api.setCurrentGraph(graphB);
+  harness.api.setGraphPersistenceState({
+    chatId: "chat-pending-retry-switch-b",
+    revision: 2,
+    pendingPersist: false,
+    queuedPersistRevision: 0,
+    queuedPersistChatId: "",
+    queuedPersistMode: "",
+    lastPersistReason: "chat-b-sentinel",
+  });
+  releasePersist(
+    harness.runtimeContext.buildGraphPersistResult({
+      saved: false,
+      accepted: false,
+      reason: "primary-write-failed",
+      revision: 6,
+      storageTier: "none",
+    }),
+  );
+  const result = await pending;
+
+  harness.runtimeContext.persistGraphToConfiguredDurableTier =
+    originalPersistGraphToConfiguredDurableTier;
+  harness.runtimeContext.persistGraphToChatMetadata =
+    originalPersistGraphToChatMetadata;
+  harness.runtimeContext.queueGraphPersist = originalQueueGraphPersist;
+  assert.equal(result.accepted, false);
+  assert.equal(result.queued, false);
+  assert.equal(result.reason, "pending-retry-switch:chat-switched");
+  assert.equal(metadataWrites, 0);
+  assert.equal(queueWrites, 0);
+  assert.equal(harness.api.getCurrentGraph(), graphB);
+  assert.equal(
+    harness.api.getGraphPersistenceState().lastPersistReason,
+    "chat-b-sentinel",
+  );
+  assert.equal(harness.api.getGraphPersistenceState().pendingPersist, false);
+  const shadowA = harness.runtimeContext.readGraphShadowSnapshot(chatId);
+  assert.equal(shadowA?.revision, 6);
+  assert.equal(
+    deserializeGraph(shadowA.serializedGraph).nodes[0]?.fields?.title?.endsWith(
+      "-committed-a",
+    ),
+    true,
   );
 }
 
@@ -6936,6 +7060,67 @@ async function createGraphPersistenceHarness({
 }
 
 {
+  const chatId = "chat-luker-primary-failure";
+  const harness = await createGraphPersistenceHarness({
+    chatId,
+    globalChatId: chatId,
+    characterId: "char-luker-primary-failure",
+    chatMetadata: { integrity: `meta-${chatId}` },
+  });
+  harness.runtimeContext.Luker = {
+    getContext() {
+      return harness.runtimeContext.__chatContext;
+    },
+  };
+  const graph = createMeaningfulGraph(chatId, "luker-primary-failure");
+  harness.api.setCurrentGraph(graph);
+  let localWrites = 0;
+  const originalBuildPersistenceEnvironment =
+    harness.runtimeContext.buildPersistenceEnvironment;
+  const originalPersistGraphToHostChatState =
+    harness.runtimeContext.persistGraphToHostChatState;
+  const originalSaveGraphToIndexedDb = harness.runtimeContext.saveGraphToIndexedDb;
+  harness.runtimeContext.persistGraphToHostChatState = async () => ({
+    saved: false,
+    accepted: false,
+    reason: "luker-primary-write-failed",
+    revision: 4,
+    storageTier: "luker-chat-state",
+  });
+  harness.runtimeContext.buildPersistenceEnvironment = () => ({
+    hostProfile: "luker",
+    primaryStorageTier: "luker-chat-state",
+    cacheStorageTier: "indexeddb",
+  });
+  harness.runtimeContext.saveGraphToIndexedDb = async () => {
+    localWrites += 1;
+    return harness.runtimeContext.buildGraphPersistResult({
+      saved: true,
+      accepted: true,
+      revision: 4,
+      storageTier: "indexeddb",
+    });
+  };
+
+  const result = await harness.runtimeContext.persistGraphToConfiguredDurableTier(
+    harness.runtimeContext.getContext(),
+    graph,
+    { chatId, revision: 4, reason: "luker-primary-failure" },
+  );
+
+  harness.runtimeContext.persistGraphToHostChatState =
+    originalPersistGraphToHostChatState;
+  harness.runtimeContext.buildPersistenceEnvironment =
+    originalBuildPersistenceEnvironment;
+  harness.runtimeContext.saveGraphToIndexedDb = originalSaveGraphToIndexedDb;
+  assert.equal(result.accepted, false);
+  assert.equal(result.reason, "luker-primary-write-failed");
+  assert.equal(result.storageTier, "luker-chat-state");
+  assert.equal(result.primaryTier, "luker-chat-state");
+  assert.equal(localWrites, 0, "failed Luker primary must not accept a local cache write");
+}
+
+{
   const chatId = "chat-luker-authority-sql-primary";
   const persistenceChatId = "meta-luker-authority-sql-primary";
   const harness = await createGraphPersistenceHarness({
@@ -7832,7 +8017,6 @@ function isAuthorityBlockedPersistenceResult(result = null) {
     chatMetadata: { integrity: `meta-${chatId}` },
   });
   harness.api.setCurrentGraph(graph);
-  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = true;
 
   let chatStateCalls = 0;
   const originalSaveGraphToIndexedDb = harness.runtimeContext.saveGraphToIndexedDb;
@@ -7860,7 +8044,6 @@ function isAuthorityBlockedPersistenceResult(result = null) {
 
   harness.runtimeContext.saveGraphToIndexedDb = originalSaveGraphToIndexedDb;
   harness.runtimeContext.persistGraphToHostChatState = originalPersistGraphToHostChatState;
-  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = false;
 
   assert.equal(result.accepted, false);
   assert.equal(result.blocked, true);
@@ -7880,7 +8063,6 @@ function isAuthorityBlockedPersistenceResult(result = null) {
     chatMetadata: { integrity: `meta-${chatId}` },
   });
   harness.api.setCurrentGraph(graph);
-  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = true;
 
   let chatStateCalls = 0;
   const originalSaveGraphToIndexedDb = harness.runtimeContext.saveGraphToIndexedDb;
@@ -7901,7 +8083,6 @@ function isAuthorityBlockedPersistenceResult(result = null) {
 
   harness.runtimeContext.saveGraphToIndexedDb = originalSaveGraphToIndexedDb;
   harness.runtimeContext.persistGraphToHostChatState = originalPersistGraphToHostChatState;
-  harness.runtimeContext.__enableConfiguredDurableTierChatStateFallback = false;
 
   assert.equal(result.accepted, false);
   assert.equal(result.blocked, true);

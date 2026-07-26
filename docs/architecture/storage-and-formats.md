@@ -18,6 +18,14 @@ ST-BME 的图谱数据可能存在多种位置，取决于宿主环境和服务�
 
 **关键设计：** Luker 宿主下，浏览器全图镜像默认关闭（`cacheStorageTier = none`），避免把大图谱重复写进 IndexedDB/OPFS。只有用户显式"重建本地缓存"才写浏览器缓存。
 
+### 单一耐久主源与回合提交
+
+每次写入只选择一个耐久主源：Authority SQL、Luker chat-state、OPFS 或 IndexedDB。选定后，另一个存储层不能在主写失败时偷偷变成“已接受”的兜底；例如 Luker 主写失败时，本地缓存不能冒充成功，Authority 已接管后也不能回退到浏览器或 Luker。`metadata-full` 和 shadow 只能保存恢复材料。
+
+一次提取回合把图谱增量、`extractionCount`、processed floor/hash、batch journal 和向量 dirty 状态放进同一份待提交快照。底层的原子边界分别由 Authority SQL transaction、IndexedDB transaction、OPFS WAL→manifest 提交或 Luker sidecar journal→manifest 提供。只有主源返回 `accepted` 后，这份完整快照才会替换当前会话中的运行图谱；失败或排队时，运行图谱和楼层指针都不前移。
+
+chat metadata 中的 commit marker 是主写成功后的恢复锚点，不属于底层事务本身，也不能代替主源的成功结果。异步 marker、pending retry 和副本任务都绑定发起时的聊天目标；切换聊天后可以继续完成原目标的耐久写，但不能把结果发布到新聊天。
+
 ## 快照契约
 
 耐久快照的顶层结构被**冻结**为固定的六个键（实现见 `sync/graph-snapshot-schema.js`）：

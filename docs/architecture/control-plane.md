@@ -39,6 +39,12 @@
 
 > 身份是每次操作解析一次、显式传递的，不是从全局随用随取。
 
+### ConversationSession 与异步租约
+
+`runtime/conversation-session.js` 按聊天会话持有 canonical identity、epoch、当前 generation、冻结输入和本轮召回事务。宿主 chatId 被 integrity 提升为稳定身份时，同一宿主 locator 可在不换 epoch 的情况下完成身份提升；真正切换聊天才递增 epoch 并清空代际状态。
+
+跨 `await`、timer 或后台回调的任务在开始时捕获 session lease，发布运行图谱、更新 UI 或写宿主 chat-state 前再次校验。耐久层可以继续完成发起聊天的 detached 写入，但 lease 失效后不得修改后来活动的聊天。
+
 ## 持久化确认状态机
 
 持久化确认逻辑收敛在 `sync/persistence-reducer.js`，是**纯函数**：无 IO、无图谱变更、无 UI 副作用。
@@ -64,6 +70,12 @@
 
 历史上的语义修复（Phase 2 引入不变量、Phase 5 把调用点改为显式事件）都保留在该文件头注释里。
 
+### 原子回合发布
+
+提取器和同步维护只修改 detached working graph。待提交快照同时包含图谱变更、`extractionCount`、processed floor/hash、batch journal 与向量 dirty 状态；只有规范主存储确认后才通过一次 `setCurrentGraph` 发布。pending、失败或聊天切换都不会部分推进 live graph。
+
+pending retry 必须从排队聊天自己的 shadow、metadata recovery snapshot 或同身份运行图谱取源；找不到就 fail closed。重试成功时也只有排队聊天仍为活动聊天才发布整张快照，不能只补 floor/hash，更不能借用另一个聊天的 `currentGraph`。
+
 ## 图谱可写性门禁
 
 `sync/graph-mutation-gate.js` 决定"现在能不能改图谱"，避免在加载中/恢复中/未进入聊天时误写。
@@ -78,7 +90,7 @@
 ## 向量门禁与 reroll 代际上下文
 
 - `vector/vector-gate.js` — 向量准备/修复前置门禁，决定 skip / repair / blocked / sync。
-- `runtime/generation-context.js` — 记录宿主本轮生成的 `type`（`normal` / `swipe` / `regenerate` / `continue` 等），并解析本轮应绑定的父 user 楼层。
+- `runtime/conversation-session.js` — 记录宿主本轮生成的 `type`（`normal` / `swipe` / `regenerate` / `continue` 等）、父 user 楼层、冻结输入与同代召回事务。
 - `runtime/reroll-recall-input.js` — 基于代际上下文构造召回输入，并保存 planner recall handoff / plot record handoff；不再用一次性 marker 猜测 reroll。
 - `retrieval/recall-controller.js` — 召回控制器；来源/类型/持久复用输入构造是纯 helper，检索执行和注入副作用仍留在控制器热路径里。
 
