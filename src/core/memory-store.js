@@ -1,6 +1,7 @@
 import {
   applyChangeSet,
   createGraphCollections,
+  normalizeChangeSet,
 } from "./change-set.js";
 import {
   createConversationHead,
@@ -12,6 +13,11 @@ import {
   isRecallBoundToHistory,
   prepareRecallCreate,
 } from "./recall-record.js";
+import {
+  isPlannerBoundToHistory,
+  preparePlannerCreate,
+} from "./planner-record.js";
+import { assertTurnKeyBinding } from "./history.js";
 
 export {
   HistoryBasisConflictError,
@@ -24,6 +30,7 @@ function createConversation(chatKey) {
     collections: createGraphCollections(),
     transactions: [],
     recallRecords: new Map(),
+    plannerRecords: new Map(),
     vectorJobs: new Map(),
   };
 }
@@ -79,24 +86,124 @@ export class MemoryStateStore {
     return record ? clone(record) : null;
   }
 
-  async createRecall(command = {}) {
+  async readPlanner(chatKeyInput, turnKeyInput) {
+    const chatKey = requireChatKey(chatKeyInput);
+    const turnKey = String(turnKeyInput || "").trim();
+    if (!turnKey) throw new TypeError("turnKey is required");
+    const record = this.#states.get(chatKey)?.plannerRecords.get(turnKey) || null;
+    return record ? clone(record) : null;
+  }
+
+  async createTurnRecords(command = {}) {
     const chatKey = requireChatKey(command.chatKey);
-    const current = this.#states.get(chatKey) || createConversation(chatKey);
-    const turnKey = String(command.record?.turnKey || "").trim();
-    const plan = prepareRecallCreate(
-      current.head,
-      current.recallRecords.get(turnKey) || null,
-      command,
-      { now: this.#now },
-    );
-    if (!plan.created) {
-      return { created: false, head: clone(plan.nextHead), record: clone(plan.record) };
+    if (!command.plannerRecord && !command.recallRecord) {
+      throw new TypeError("plannerRecord or recallRecord is required");
     }
+    if (
+      command.plannerRecord &&
+      command.recallRecord &&
+      String(command.plannerRecord.turnKey || "").trim() !==
+        String(command.recallRecord.turnKey || "").trim()
+    ) {
+      throw new TypeError("plannerRecord and recallRecord must identify the same turn");
+    }
+    if (command.plannerRecord) {
+      await assertTurnKeyBinding(
+        chatKey,
+        command.plannerRecord.historyPrefixHash,
+        command.plannerRecord.turnKey,
+      );
+    }
+    if (command.recallRecord) {
+      await assertTurnKeyBinding(
+        chatKey,
+        command.recallRecord.historyPrefixHash,
+        command.recallRecord.turnKey,
+      );
+    }
+
+    const current = this.#states.get(chatKey) || createConversation(chatKey);
     const draft = clone(current);
-    draft.recallRecords.set(plan.record.turnKey, plan.record);
-    draft.head = plan.nextHead;
-    this.#states.set(chatKey, draft);
-    return { created: true, head: clone(plan.nextHead), record: clone(plan.record) };
+    const recallTurnKey = String(command.recallRecord?.turnKey || "").trim();
+    const existingRecall = recallTurnKey
+      ? current.recallRecords.get(recallTurnKey) || null
+      : null;
+    const requestedChanges = normalizeChangeSet(command.changeSet || { changes: [] });
+    if (requestedChanges.changes.length > 0 && !command.recallRecord) {
+      throw new TypeError("recallRecord is required for recall access changes");
+    }
+
+    let nextHead = current.head;
+    let expectedRevision = command.expectedRevision;
+    let transaction = null;
+    if (!existingRecall && requestedChanges.changes.length > 0) {
+      const plan = prepareCommit(nextHead, {
+        chatKey,
+        expectedRevision,
+        operation: "recall-access",
+        basisHistoryLength: command.basisHistoryLength,
+        basisHistoryHash: command.basisHistoryHash,
+        processedThroughAfter: nextHead.processedThrough,
+        changeSet: requestedChanges,
+        enqueueVectorJob: false,
+      }, { now: this.#now, id: this.#id });
+      if (current.transactions.some(({ id }) => id === plan.transaction.id)) {
+        throw new TypeError(`duplicate transaction id ${plan.transaction.id}`);
+      }
+      applyChangeSet(draft.collections, plan.changeSet, "forward");
+      draft.transactions.push(plan.transaction);
+      transaction = plan.transaction;
+      nextHead = plan.nextHead;
+      expectedRevision = nextHead.revision;
+    }
+    let planner = null;
+    let recall = null;
+    if (command.plannerRecord) {
+      const turnKey = String(command.plannerRecord.turnKey || "").trim();
+      planner = preparePlannerCreate(
+        nextHead,
+        current.plannerRecords.get(turnKey) || null,
+        {
+          chatKey,
+          expectedRevision,
+          record: command.plannerRecord,
+        },
+        { now: this.#now },
+      );
+      nextHead = planner.nextHead;
+      expectedRevision = nextHead.revision;
+    }
+    if (command.recallRecord) {
+      const turnKey = String(command.recallRecord.turnKey || "").trim();
+      recall = prepareRecallCreate(
+        nextHead,
+        current.recallRecords.get(turnKey) || null,
+        {
+          chatKey,
+          expectedRevision,
+          record: command.recallRecord,
+        },
+        { now: this.#now },
+      );
+      nextHead = recall.nextHead;
+    }
+
+    if (transaction || planner?.created || recall?.created) {
+      if (planner?.created) draft.plannerRecords.set(planner.record.turnKey, planner.record);
+      if (recall?.created) draft.recallRecords.set(recall.record.turnKey, recall.record);
+      draft.head = nextHead;
+      this.#states.set(chatKey, draft);
+    }
+    return {
+      head: clone(nextHead),
+      transaction: transaction ? clone(transaction) : null,
+      planner: planner
+        ? { created: planner.created, record: clone(planner.record) }
+        : null,
+      recall: recall
+        ? { created: recall.created, record: clone(recall.record) }
+        : null,
+    };
   }
 
   async reconcileHistory(command = {}) {
@@ -121,6 +228,9 @@ export class MemoryStateStore {
     draft.transactions = plan.remainingTransactions;
     for (const [turnKey, record] of draft.recallRecords) {
       if (!isRecallBoundToHistory(record, plan.history)) draft.recallRecords.delete(turnKey);
+    }
+    for (const [turnKey, record] of draft.plannerRecords) {
+      if (!isPlannerBoundToHistory(record, plan.history)) draft.plannerRecords.delete(turnKey);
     }
     if (plan.vectorJob) draft.vectorJobs.set(plan.vectorJob.id, plan.vectorJob);
     draft.head = plan.nextHead;

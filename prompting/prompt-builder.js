@@ -1767,10 +1767,18 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     }
   }
 
+  const plannerWorldbookText = [
+    resolvedWorldInfo.worldInfoBefore,
+    resolvedWorldInfo.worldInfoAfter,
+  ].filter((value) => String(value || "").trim()).join("\n\n").trim();
   const resolvedContext = {
     ...sanitizedInputContext,
     ...emptyWorldInfo,
     ...resolvedWorldInfo,
+    plannerWorldbook: String(sanitizedInputContext.plannerWorldbook || "").trim() ||
+      (plannerWorldbookText
+        ? `<worldbook>\n${plannerWorldbookText}\n</worldbook>`
+        : ""),
   };
   const worldInfoResolution = buildWorldInfoResolution(resolvedContext);
 

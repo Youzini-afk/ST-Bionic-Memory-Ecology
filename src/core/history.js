@@ -104,3 +104,10 @@ export async function buildTurnKey(chatKey, historyPrefixHash) {
   }
   return sha256Hex(`st-bme:vnext:turn\0${normalizedChatKey}\0${normalizedPrefixHash}`);
 }
+
+export async function assertTurnKeyBinding(chatKey, historyPrefixHash, turnKey) {
+  const actual = String(turnKey || "").trim();
+  const expected = await buildTurnKey(chatKey, historyPrefixHash);
+  if (actual !== expected) throw new TypeError("turnKey does not match chat history binding");
+  return actual;
+}

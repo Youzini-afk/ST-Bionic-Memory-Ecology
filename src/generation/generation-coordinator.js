@@ -3,7 +3,7 @@ import {
   getHistoryPrefixHash,
   historyBasisMatches,
 } from "../core/history.js";
-import { normalizeChangeSet } from "../core/change-set.js";
+import { normalizeRecallResult } from "../core/recall-record.js";
 import { classifyGeneration } from "../host/st-host-adapter.js";
 
 export class RecallStaleError extends Error {
@@ -14,39 +14,36 @@ export class RecallStaleError extends Error {
   }
 }
 
-function normalizeRecallResult(value = {}) {
-  const selectedNodeIds = Array.isArray(value.selectedNodeIds)
-    ? value.selectedNodeIds.map((id) => String(id ?? "").trim()).filter(Boolean)
-    : [];
-  const changeSet = normalizeChangeSet(value.changeSet || { changes: [] });
-  return {
-    selectedNodeIds: [...new Set(selectedNodeIds)],
-    injectionText: String(value.injectionText ?? ""),
-    tokenEstimate: Number.isFinite(Number(value.tokenEstimate))
-      ? Math.max(0, Number(value.tokenEstimate))
-      : 0,
-    changeSet,
-  };
-}
-
 export class GenerationCoordinator {
   #engine;
   #host;
   #recall;
+  #planner;
   #domains;
   #vectors;
   #logger;
   #generation = null;
   #generationNumber = 0;
 
-  constructor({ engine, host, recall, domains = null, vectors = null, logger = console } = {}) {
-    if (!engine?.activate || !engine?.reconcile || !engine?.createRecall) {
+  constructor({
+    engine,
+    host,
+    recall,
+    planner = null,
+    domains = null,
+    vectors = null,
+    logger = console,
+  } = {}) {
+    if (!engine?.activate || !engine?.reconcile || !engine?.createTurnRecords) {
       throw new TypeError("ConversationEngine is required");
     }
     if (!host?.snapshotConversation || !host?.setRecallInjection) {
       throw new TypeError("ST HostAdapter is required");
     }
     if (typeof recall !== "function") throw new TypeError("recall provider is required");
+    if (planner && (!planner.bindGeneration || !planner.takePending || !planner.cancelPending)) {
+      throw new TypeError("planner must implement the pending-send contract");
+    }
     if (domains && typeof domains.processAssistant !== "function") {
       throw new TypeError("domains must implement processAssistant");
     }
@@ -56,6 +53,7 @@ export class GenerationCoordinator {
     this.#engine = engine;
     this.#host = host;
     this.#recall = recall;
+    this.#planner = planner;
     this.#domains = domains;
     this.#vectors = vectors;
     this.#logger = logger;
@@ -63,6 +61,7 @@ export class GenerationCoordinator {
 
   async onChatChanged() {
     this.#generation = null;
+    this.#planner?.cancelPending("chat-change");
     this.#safeClearInjection();
     const snapshot = this.#host.snapshotConversation();
     if (!snapshot.chatKey) {
@@ -90,6 +89,11 @@ export class GenerationCoordinator {
       result: null,
     };
     this.#generation = generation;
+    this.#planner?.bindGeneration({
+      lease,
+      generationId: generation.id,
+      kind: generation.kind,
+    });
     if (generation.kind !== "skip") {
       await this.#engine.reconcile(lease, snapshot.messages);
     }
@@ -166,6 +170,7 @@ export class GenerationCoordinator {
   }
 
   async onHistoryChanged() {
+    this.#planner?.cancelPending("history-change");
     this.#safeClearInjection();
     const snapshot = this.#host.snapshotConversation();
     if (!snapshot.chatKey) return { status: "no-chat" };
@@ -175,6 +180,7 @@ export class GenerationCoordinator {
 
   onGenerationFinished(reason = "ended") {
     this.#generation = null;
+    this.#planner?.cancelPending(`generation-${reason}`);
     this.#safeClearInjection();
     return { status: "finished", reason };
   }
@@ -183,17 +189,42 @@ export class GenerationCoordinator {
     try {
       const history = this.#host.historyThrough(snapshot, user);
       this.#assertCurrent(generation);
-      const recalled = await this.#retrieveStable(generation, user.text, history, "fresh");
-      const record = await this.#persistRecall(
-        generation,
+      const historyIdentity = reconciliation.head.history.slice(0, history.length);
+      const pending = this.#planner?.takePending({
+        lease: generation.lease,
         user,
-        reconciliation.head.history.slice(0, history.length),
-        recalled,
-      );
-      this.#assertCurrent(generation);
-      this.#host.setRecallInjection(record.injectionText);
-      generation.result = { status: "ready", source: "fresh", ...record };
-      return generation.result;
+        generationId: generation.id,
+      }) || null;
+      if (pending) {
+        const reused = await this.#persistPreparedPlannerRecall(
+          generation,
+          historyIdentity,
+          pending,
+        );
+        if (reused) {
+          this.#assertCurrent(generation);
+          this.#host.setRecallInjection(reused.injectionText);
+          generation.result = { status: "ready", source: "planner-reuse", ...reused };
+          return generation.result;
+        }
+        await this.#persistPlannerOnly(generation, historyIdentity, pending);
+        return await this.#completeFreshRecall({
+          generation,
+          history,
+          historyIdentity,
+          input: pending.rawUserInput,
+          reason: "fresh-after-planner",
+          source: "fresh",
+        });
+      }
+      return await this.#completeFreshRecall({
+        generation,
+        history,
+        historyIdentity,
+        input: user.text,
+        reason: "fresh",
+        source: "fresh",
+      });
     } catch (error) {
       return this.#failGeneration(generation, error);
     }
@@ -216,20 +247,51 @@ export class GenerationCoordinator {
         return generation.result;
       }
 
-      const recalled = await this.#retrieveStable(generation, user.text, history, "reroll-fallback");
-      const record = await this.#persistRecall(
+      return await this.#completeFreshRecall({
         generation,
-        user,
-        reconciliation.head.history,
-        recalled,
-      );
-      this.#assertCurrent(generation);
-      this.#host.setRecallInjection(record.injectionText);
-      generation.result = { status: "ready", source: "fresh-fallback", ...record };
-      return generation.result;
+        history,
+        historyIdentity: reconciliation.head.history,
+        input: user.text,
+        reason: "reroll-fallback",
+        source: "fresh-fallback",
+      });
     } catch (error) {
       return this.#failGeneration(generation, error);
     }
+  }
+
+  async #completeFreshRecall({
+    generation,
+    history,
+    historyIdentity,
+    input,
+    reason,
+    source,
+  }) {
+    const record = await this.#retrieveAndPersist(
+      generation,
+      history,
+      historyIdentity,
+      input,
+      reason,
+    );
+    this.#assertCurrent(generation);
+    this.#host.setRecallInjection(record.injectionText);
+    generation.result = { status: "ready", source, ...record };
+    return generation.result;
+  }
+
+  async #retrieveAndPersist(generation, history, historyIdentity, input, reason) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const recalled = await this.#retrieveStable(generation, input, history, reason);
+      try {
+        return await this.#persistRecall(generation, historyIdentity, recalled);
+      } catch (error) {
+        if (attempt === 0 && error?.name === "RevisionConflictError") continue;
+        throw error;
+      }
+    }
+    throw new RecallStaleError(generation.chatKey);
   }
 
   async #retrieveStable(generation, input, history, reason) {
@@ -251,24 +313,14 @@ export class GenerationCoordinator {
       this.#assertCurrent(generation);
       const current = await this.#engine.read(generation.lease);
       if (current.head.revision === baseRevision) {
-        if (result.changeSet.changes.length === 0) {
-          return { ...result, graphRevision };
-        }
-        try {
-          const committed = await this.#engine.commit(generation.lease, {
-            expectedRevision: baseRevision,
-            operation: "recall-access",
-            basisHistoryLength,
-            basisHistoryHash,
-            processedThroughAfter: current.head.processedThrough,
-            changeSet: result.changeSet,
-            enqueueVectorJob: false,
-          }, { requiresActive: true });
-          return { ...result, graphRevision: committed.head.graphRevision };
-        } catch (error) {
-          if (attempt === 0 && error?.name === "RevisionConflictError") continue;
-          throw error;
-        }
+        return {
+          ...result,
+          graphRevision,
+          expectedRevision: baseRevision,
+          basisHistoryLength,
+          basisHistoryHash,
+          recallInput: input,
+        };
       }
       if (!historyBasisMatches(
         current.head.history,
@@ -277,34 +329,143 @@ export class GenerationCoordinator {
       )) {
         throw new RecallStaleError(generation.chatKey);
       }
-      if (
-        current.head.graphRevision === graphRevision &&
-        result.changeSet.changes.length === 0
-      ) {
-        return { ...result, graphRevision };
+      if (current.head.graphRevision === graphRevision) {
+        return {
+          ...result,
+          graphRevision,
+          expectedRevision: current.head.revision,
+          basisHistoryLength,
+          basisHistoryHash,
+          recallInput: input,
+        };
       }
       if (attempt === 1) throw new RecallStaleError(generation.chatKey);
     }
     throw new RecallStaleError(generation.chatKey);
   }
 
-  async #persistRecall(generation, user, historyIdentity, recalled) {
+  async #persistRecall(generation, historyIdentity, recalled) {
+    const binding = await this.#buildTurnBinding(generation, historyIdentity);
+    const graphRevision = recalled.graphRevision +
+      (recalled.changeSet.changes.length > 0 ? 1 : 0);
+    const result = await this.#engine.createTurnRecords(generation.lease, {
+      expectedRevision: recalled.expectedRevision,
+      basisHistoryLength: recalled.basisHistoryLength,
+      basisHistoryHash: recalled.basisHistoryHash,
+      changeSet: recalled.changeSet,
+      recallRecord: {
+        turnKey: binding.turnKey,
+        chatKey: generation.chatKey,
+        boundUserMessageHash: binding.userIdentity.messageHash,
+        historyPrefixHash: binding.historyPrefixHash,
+        recallInput: recalled.recallInput,
+        selectedNodeIds: recalled.selectedNodeIds,
+        injectionText: recalled.injectionText,
+        tokenEstimate: recalled.tokenEstimate,
+        graphRevision,
+      },
+    });
+    return result.recall.record;
+  }
+
+  async #persistPreparedPlannerRecall(generation, historyIdentity, pending) {
+    const recalled = pending.recallCandidate;
+    if (!recalled?.injectionText?.trim()) return null;
+    const binding = await this.#buildTurnBinding(generation, historyIdentity);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      this.#assertCurrent(generation);
+      const state = await this.#engine.read(generation.lease);
+      const basisHistoryLength = historyIdentity.length;
+      const basisHistoryHash = binding.historyPrefixHash;
+      if (!historyBasisMatches(state.head.history, basisHistoryLength, basisHistoryHash)) {
+        throw new RecallStaleError(generation.chatKey);
+      }
+      if (state.head.graphRevision !== recalled.graphRevision) return null;
+      const graphRevision = state.head.graphRevision +
+        (recalled.changeSet.changes.length > 0 ? 1 : 0);
+      try {
+        const result = await this.#engine.createTurnRecords(generation.lease, {
+          expectedRevision: state.head.revision,
+          basisHistoryLength,
+          basisHistoryHash,
+          changeSet: recalled.changeSet,
+          plannerRecord: this.#buildPlannerRecord(
+            generation,
+            binding,
+            pending,
+            binding.turnKey,
+          ),
+          recallRecord: {
+            turnKey: binding.turnKey,
+            chatKey: generation.chatKey,
+            boundUserMessageHash: binding.userIdentity.messageHash,
+            historyPrefixHash: binding.historyPrefixHash,
+            recallInput: pending.rawUserInput,
+            selectedNodeIds: recalled.selectedNodeIds,
+            injectionText: recalled.injectionText,
+            tokenEstimate: recalled.tokenEstimate,
+            graphRevision,
+          },
+        });
+        return result.recall.record;
+      } catch (error) {
+        if (attempt === 0 && error?.name === "RevisionConflictError") continue;
+        throw error;
+      }
+    }
+    throw new RecallStaleError(generation.chatKey);
+  }
+
+  async #persistPlannerOnly(generation, historyIdentity, pending) {
+    const binding = await this.#buildTurnBinding(generation, historyIdentity);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      this.#assertCurrent(generation);
+      const state = await this.#engine.read(generation.lease);
+      if (!historyBasisMatches(
+        state.head.history,
+        historyIdentity.length,
+        binding.historyPrefixHash,
+      )) {
+        throw new RecallStaleError(generation.chatKey);
+      }
+      try {
+        const result = await this.#engine.createTurnRecords(generation.lease, {
+          expectedRevision: state.head.revision,
+          plannerRecord: this.#buildPlannerRecord(generation, binding, pending, ""),
+        });
+        return result.planner.record;
+      } catch (error) {
+        if (attempt === 0 && error?.name === "RevisionConflictError") continue;
+        throw error;
+      }
+    }
+    throw new RecallStaleError(generation.chatKey);
+  }
+
+  async #buildTurnBinding(generation, historyIdentity) {
     const userIdentity = historyIdentity.at(-1);
     if (!userIdentity) throw new Error("user history identity is missing");
     const historyPrefixHash = getHistoryPrefixHash(historyIdentity);
-    const turnKey = await buildTurnKey(generation.chatKey, historyPrefixHash);
-    const result = await this.#engine.createRecall(generation.lease, {
-      turnKey,
-      chatKey: generation.chatKey,
-      boundUserMessageHash: userIdentity.messageHash,
+    return {
+      userIdentity,
       historyPrefixHash,
-      recallInput: user.text,
-      selectedNodeIds: recalled.selectedNodeIds,
-      injectionText: recalled.injectionText,
-      tokenEstimate: recalled.tokenEstimate,
-      graphRevision: recalled.graphRevision,
-    });
-    return result.record;
+      turnKey: await buildTurnKey(generation.chatKey, historyPrefixHash),
+    };
+  }
+
+  #buildPlannerRecord(generation, binding, pending, recallTurnKey) {
+    return {
+      turnKey: binding.turnKey,
+      chatKey: generation.chatKey,
+      boundUserMessageHash: binding.userIdentity.messageHash,
+      historyPrefixHash: binding.historyPrefixHash,
+      rawUserInput: pending.rawUserInput,
+      augmentedUserMessage: pending.augmentedUserMessage,
+      plotText: pending.plotText,
+      plotBlocks: pending.plotBlocks,
+      promptProfileId: pending.promptProfileId,
+      recallTurnKey,
+    };
   }
 
   async #ensureLease(snapshot) {

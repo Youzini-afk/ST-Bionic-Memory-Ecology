@@ -54,17 +54,21 @@ export class StHostAdapter {
   #getCurrentChatId;
   #prompt;
   #logger;
+  #document;
+  #plannerReplay = false;
 
   constructor({
     getContext,
     getCurrentChatId = null,
     prompt = {},
+    documentLike = globalThis.document,
     logger = console,
   } = {}) {
     if (typeof getContext !== "function") throw new TypeError("getContext is required");
     this.#getContext = getContext;
     this.#getCurrentChatId = getCurrentChatId;
     this.#logger = logger;
+    this.#document = documentLike;
     this.#prompt = {
       key: String(prompt.key || RECALL_PROMPT_KEY),
       position: Number.isFinite(Number(prompt.position)) ? Number(prompt.position) : 1,
@@ -137,6 +141,79 @@ export class StHostAdapter {
 
   clearRecallInjection() {
     this.setRecallInjection("");
+  }
+
+  resumeUserSend(value, expectedValue = undefined) {
+    const textarea = this.#document?.getElementById?.("send_textarea");
+    const button = this.#document?.getElementById?.("send_but") ||
+      this.#document?.getElementById?.("send_button");
+    if (!textarea || typeof button?.click !== "function") {
+      throw new Error("SillyTavern send controls are unavailable");
+    }
+    if (expectedValue !== undefined && textarea.value !== String(expectedValue ?? "")) {
+      return false;
+    }
+    textarea.value = String(value ?? "");
+    this.#plannerReplay = true;
+    try {
+      button.click();
+    } finally {
+      this.#plannerReplay = false;
+    }
+    return true;
+  }
+
+  bindPlannerSend(coordinator) {
+    if (
+      typeof coordinator?.decideUserSend !== "function" ||
+      typeof coordinator?.handleUserSend !== "function"
+    ) {
+      throw new TypeError("PlannerSendCoordinator is required");
+    }
+    if (!this.#document?.addEventListener) {
+      throw new Error("SillyTavern document is unavailable");
+    }
+    const intercept = (event) => {
+      if (this.#plannerReplay) return;
+      const stopButton = this.#document.getElementById("mes_stop");
+      if (stopButton?.style?.display && stopButton.style.display !== "none") return;
+      const textarea = this.#document.getElementById("send_textarea");
+      if (!textarea) return;
+      const decision = coordinator.decideUserSend(textarea.value);
+      if (!decision.intercept) return;
+      event.preventDefault?.();
+      event.stopImmediatePropagation?.();
+      Promise.resolve(coordinator.handleUserSend(textarea.value, decision)).catch((error) => {
+        this.#logger?.error?.("[ST-BME v9] planner send interception failed", error);
+      });
+    };
+    const onClick = (event) => {
+      const button = this.#document.getElementById("send_but") ||
+        this.#document.getElementById("send_button");
+      if (!button || (event.target !== button && !button.contains?.(event.target))) return;
+      intercept(event);
+    };
+    const onKeydown = (event) => {
+      const textarea = this.#document.getElementById("send_textarea");
+      const shouldSendOnEnter = this.#getContext()?.shouldSendOnEnter;
+      if (
+        event.target !== textarea ||
+        event.key !== "Enter" ||
+        event.shiftKey ||
+        event.altKey ||
+        event.metaKey ||
+        event.isComposing ||
+        typeof shouldSendOnEnter !== "function" ||
+        !shouldSendOnEnter()
+      ) return;
+      intercept(event);
+    };
+    this.#document.addEventListener("click", onClick, true);
+    this.#document.addEventListener("keydown", onKeydown, true);
+    return () => {
+      this.#document.removeEventListener?.("click", onClick, true);
+      this.#document.removeEventListener?.("keydown", onKeydown, true);
+    };
   }
 
   bind(coordinator) {

@@ -1,4 +1,4 @@
-import { recordsEqual } from "./change-set.js";
+import { normalizeChangeSet, recordsEqual } from "./change-set.js";
 import {
   HistoryBasisConflictError,
   requireChatKey,
@@ -45,6 +45,18 @@ function normalizeTokenEstimate(value) {
     throw new TypeError("tokenEstimate must be a non-negative finite number");
   }
   return estimate;
+}
+
+export function normalizeRecallResult(value = {}) {
+  const selectedNodeIds = Array.isArray(value.selectedNodeIds)
+    ? value.selectedNodeIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
+  return {
+    selectedNodeIds: [...new Set(selectedNodeIds)],
+    injectionText: String(value.injectionText ?? ""),
+    tokenEstimate: normalizeTokenEstimate(value.tokenEstimate),
+    changeSet: normalizeChangeSet(value.changeSet || { changes: [] }),
+  };
 }
 
 function recallContent(record) {

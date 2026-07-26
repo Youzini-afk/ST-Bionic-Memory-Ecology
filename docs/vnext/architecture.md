@@ -163,6 +163,8 @@ PlannerRecord 仅在 ENA 实际运行并产生规划时存在：
 {
   turnKey,
   chatKey,
+  boundUserMessageHash,
+  historyPrefixHash,
   rawUserInput,
   augmentedUserMessage,
   plotText,
@@ -173,7 +175,7 @@ PlannerRecord 仅在 ENA 实际运行并产生规划时存在：
 }
 ```
 
-PlannerRecord 用于以后显式 ENA 规划的剧情历史，不参与 reroll 决策，也不是常驻 `storyPlan` 状态。
+PlannerRecord 用于以后显式 ENA 规划的剧情历史，不参与 reroll 决策，也不是常驻 `storyPlan` 状态。它用与 RecallRecord 相同的 user 楼层指纹规则独立校验；`recallTurnKey` 只在本轮实际复用了非空 planner recall 时填写。
 
 ### 5.7 VectorJob
 

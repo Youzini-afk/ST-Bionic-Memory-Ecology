@@ -2,6 +2,7 @@ import {
   applyChangeSet,
   createGraphCollections,
   GRAPH_COLLECTIONS,
+  normalizeChangeSet,
 } from "../core/change-set.js";
 import {
   createConversationHead,
@@ -13,6 +14,11 @@ import {
   isRecallBoundToHistory,
   prepareRecallCreate,
 } from "../core/recall-record.js";
+import {
+  isPlannerBoundToHistory,
+  preparePlannerCreate,
+} from "../core/planner-record.js";
+import { assertTurnKeyBinding } from "../core/history.js";
 import { loadDexie } from "./dexie-loader.js";
 
 export const INDEXED_DB_NAME = "STBME_v9";
@@ -79,6 +85,7 @@ export class IndexedDbStateStore {
       db.table("graphRecords"),
       db.table("transactions"),
       db.table("recallRecords"),
+      db.table("plannerRecords"),
       db.table("vectorJobs"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
@@ -93,6 +100,11 @@ export class IndexedDbStateStore {
           .where("chatKey")
           .equals(chatKey)
           .toArray();
+        const plannerRecords = await db
+          .table("plannerRecords")
+          .where("chatKey")
+          .equals(chatKey)
+          .toArray();
         const vectorJobs = await db
           .table("vectorJobs")
           .where("chatKey")
@@ -104,6 +116,9 @@ export class IndexedDbStateStore {
           transactions: clone(transactions),
           recallRecords: new Map(
             recallRecords.map((record) => [record.turnKey, clone(record)]),
+          ),
+          plannerRecords: new Map(
+            plannerRecords.map((record) => [record.turnKey, clone(record)]),
           ),
           vectorJobs: new Map(vectorJobs.map((job) => [job.id, clone(job)])),
         };
@@ -170,27 +185,144 @@ export class IndexedDbStateStore {
     return record?.chatKey === chatKey ? clone(record) : null;
   }
 
-  async createRecall(command = {}) {
+  async readPlanner(chatKeyInput, turnKeyInput) {
+    const chatKey = requireChatKey(chatKeyInput);
+    const turnKey = String(turnKeyInput || "").trim();
+    if (!turnKey) throw new TypeError("turnKey is required");
+    const db = await this.#dbPromise;
+    const record = await db.table("plannerRecords").get(turnKey);
+    return record?.chatKey === chatKey ? clone(record) : null;
+  }
+
+  async createTurnRecords(command = {}) {
     const chatKey = requireChatKey(command.chatKey);
-    const turnKey = String(command.record?.turnKey || "").trim();
+    if (!command.plannerRecord && !command.recallRecord) {
+      throw new TypeError("plannerRecord or recallRecord is required");
+    }
+    if (
+      command.plannerRecord &&
+      command.recallRecord &&
+      String(command.plannerRecord.turnKey || "").trim() !==
+        String(command.recallRecord.turnKey || "").trim()
+    ) {
+      throw new TypeError("plannerRecord and recallRecord must identify the same turn");
+    }
+    if (command.plannerRecord) {
+      await assertTurnKeyBinding(
+        chatKey,
+        command.plannerRecord.historyPrefixHash,
+        command.plannerRecord.turnKey,
+      );
+    }
+    if (command.recallRecord) {
+      await assertTurnKeyBinding(
+        chatKey,
+        command.recallRecord.historyPrefixHash,
+        command.recallRecord.turnKey,
+      );
+    }
     const db = await this.#dbPromise;
     let response;
     await db.transaction(
       "rw",
       db.table("heads"),
+      db.table("graphRecords"),
+      db.table("transactions"),
       db.table("recallRecords"),
+      db.table("plannerRecords"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
-        const existing = turnKey ? await db.table("recallRecords").get(turnKey) : null;
-        const plan = prepareRecallCreate(head, existing, command, { now: this.#now });
-        if (plan.created) {
-          await db.table("recallRecords").add(clone(plan.record));
-          await db.table("heads").put(clone(plan.nextHead));
+        let nextHead = head;
+        let expectedRevision = command.expectedRevision;
+        const recallTurnKey = String(command.recallRecord?.turnKey || "").trim();
+        const existingRecall = recallTurnKey
+          ? await db.table("recallRecords").get(recallTurnKey)
+          : null;
+        const requestedChanges = normalizeChangeSet(command.changeSet || { changes: [] });
+        if (requestedChanges.changes.length > 0 && !command.recallRecord) {
+          throw new TypeError("recallRecord is required for recall access changes");
+        }
+        let transaction = null;
+        if (!existingRecall && requestedChanges.changes.length > 0) {
+          const plan = prepareCommit(nextHead, {
+            chatKey,
+            expectedRevision,
+            operation: "recall-access",
+            basisHistoryLength: command.basisHistoryLength,
+            basisHistoryHash: command.basisHistoryHash,
+            processedThroughAfter: nextHead.processedThrough,
+            changeSet: requestedChanges,
+            enqueueVectorJob: false,
+          }, { now: this.#now, id: this.#id });
+          const keys = plan.changeSet.changes.map(({ collection, id }) =>
+            recordKey(chatKey, collection, id));
+          const stored = await db.table("graphRecords").bulkGet(keys);
+          const collections = createGraphCollections();
+          stored.forEach((record, index) => {
+            if (!record) return;
+            const change = plan.changeSet.changes[index];
+            collections[change.collection].set(change.id, clone(record.value));
+          });
+          applyChangeSet(collections, plan.changeSet, "forward");
+          const puts = plan.changeSet.changes
+            .filter(({ after }) => after !== null)
+            .map(({ collection, id, after }) => ({
+              chatKey,
+              collection,
+              id,
+              value: clone(after),
+            }));
+          const deletes = plan.changeSet.changes
+            .filter(({ after }) => after === null)
+            .map(({ collection, id }) => recordKey(chatKey, collection, id));
+          if (puts.length > 0) await db.table("graphRecords").bulkPut(puts);
+          if (deletes.length > 0) await db.table("graphRecords").bulkDelete(deletes);
+          await db.table("transactions").add(clone(plan.transaction));
+          transaction = plan.transaction;
+          nextHead = plan.nextHead;
+          expectedRevision = nextHead.revision;
+        }
+        let planner = null;
+        let recall = null;
+        if (command.plannerRecord) {
+          const turnKey = String(command.plannerRecord.turnKey || "").trim();
+          const existing = turnKey ? await db.table("plannerRecords").get(turnKey) : null;
+          planner = preparePlannerCreate(
+            nextHead,
+            existing,
+            { chatKey, expectedRevision, record: command.plannerRecord },
+            { now: this.#now },
+          );
+          nextHead = planner.nextHead;
+          expectedRevision = nextHead.revision;
+        }
+        if (command.recallRecord) {
+          const turnKey = String(command.recallRecord.turnKey || "").trim();
+          const existing = turnKey === recallTurnKey
+            ? existingRecall
+            : (turnKey ? await db.table("recallRecords").get(turnKey) : null);
+          recall = prepareRecallCreate(
+            nextHead,
+            existing,
+            { chatKey, expectedRevision, record: command.recallRecord },
+            { now: this.#now },
+          );
+          nextHead = recall.nextHead;
+        }
+        if (planner?.created) await db.table("plannerRecords").add(clone(planner.record));
+        if (recall?.created) await db.table("recallRecords").add(clone(recall.record));
+        if (transaction || planner?.created || recall?.created) {
+          await db.table("heads").put(clone(nextHead));
         }
         response = {
-          created: plan.created,
-          head: clone(plan.nextHead),
-          record: clone(plan.record),
+          head: clone(nextHead),
+          transaction: transaction ? clone(transaction) : null,
+          planner: planner
+            ? { created: planner.created, record: clone(planner.record) }
+            : null,
+          recall: recall
+            ? { created: recall.created, record: clone(recall.record) }
+            : null,
         };
       },
     );
@@ -207,6 +339,7 @@ export class IndexedDbStateStore {
       db.table("graphRecords"),
       db.table("transactions"),
       db.table("recallRecords"),
+      db.table("plannerRecords"),
       db.table("vectorJobs"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
@@ -276,6 +409,17 @@ export class IndexedDbStateStore {
           .map(({ turnKey }) => turnKey);
         if (invalidRecallKeys.length > 0) {
           await db.table("recallRecords").bulkDelete(invalidRecallKeys);
+        }
+        const plannerRecords = await db
+          .table("plannerRecords")
+          .where("chatKey")
+          .equals(chatKey)
+          .toArray();
+        const invalidPlannerKeys = plannerRecords
+          .filter((record) => !isPlannerBoundToHistory(record, plan.history))
+          .map(({ turnKey }) => turnKey);
+        if (invalidPlannerKeys.length > 0) {
+          await db.table("plannerRecords").bulkDelete(invalidPlannerKeys);
         }
         if (plan.vectorJob) await db.table("vectorJobs").add(clone(plan.vectorJob));
         await db.table("heads").put(clone(plan.nextHead));

@@ -2514,10 +2514,19 @@ export async function callLLM(systemPrompt, userPrompt, options = {}) {
   const promptExecutionSummary = buildPromptExecutionSummary(
     options.debugContext || null,
   );
-  const assembledMessages = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: userPrompt },
-  ];
+  const promptMessages = (Array.isArray(options.promptMessages)
+    ? options.promptMessages
+    : []).map(normalizeLlmDebugMessage).filter(Boolean);
+  const additionalMessages = (Array.isArray(options.additionalMessages)
+    ? options.additionalMessages
+    : []).map(normalizeLlmDebugMessage).filter(Boolean);
+  const assembledMessages = promptMessages.length > 0
+    ? [...additionalMessages, ...promptMessages]
+    : [
+        { role: "system", content: systemPrompt },
+        ...additionalMessages,
+        { role: "user", content: userPrompt },
+      ];
   const requestCleaning = applyTaskFinalInputRegex(taskType, assembledMessages);
   const promptExecutionSnapshot = attachRequestCleaningToPromptExecution(
     promptExecutionSummary,
@@ -2535,6 +2544,10 @@ export async function callLLM(systemPrompt, userPrompt, options = {}) {
       signal: options.signal,
       taskType,
       requestSource: privateRequestSource,
+      onStreamProgress: options.onStreamProgress,
+      maxCompletionTokens: Number.isFinite(options.maxCompletionTokens)
+        ? options.maxCompletionTokens
+        : null,
     });
     const responseText =
       typeof response?.content === "string" ? response.content : "";
