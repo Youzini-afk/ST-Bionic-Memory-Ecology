@@ -13,6 +13,7 @@ const SOURCE_ROOTS = [
   "retrieval",
   "runtime",
   "scripts",
+  "src",
   "sync",
   "ui",
   "vector",
@@ -47,14 +48,7 @@ function toPosixPath(filePath) {
 }
 
 async function runNodeCheck(filePath) {
-  // Force ES module parsing. This repo's `.js` files are ESM (import/export,
-  // and the browser loads them as modules), but package.json has no
-  // `"type": "module"`, so `node --check file.js` parses them as CommonJS/script
-  // and silently accepts invalid ESM syntax (e.g. an arrow function pasted inside
-  // an `import { ... }` block — which shipped a broken index.js once). Node only
-  // allows `--input-type=module` with stdin input, not a file argument, so we
-  // pipe the file content through stdin. `--check` validates syntax only and does
-  // not resolve imports, so no module-resolution hook is needed here.
+  // Stdin keeps syntax checking independent from module resolution and browser-only imports.
   const source = await readFile(filePath, "utf8");
   return await new Promise((resolve, reject) => {
     const child = spawn(
