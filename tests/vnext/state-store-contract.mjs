@@ -483,5 +483,30 @@ export function stateStoreContractCases() {
         assert.equal((await store.listVectorJobs(chatKey, { status: "completed" })).length, 2);
       },
     },
+    {
+      name: "a manual rebuild creates a durable vector job without rewriting graph records",
+      async run(store) {
+        const chatKey = "force-vector";
+        const before = await store.readConversation(chatKey);
+        const result = await store.commit({
+          chatKey,
+          expectedRevision: before.head.revision,
+          operation: "vector-rebuild",
+          basisHistoryLength: 0,
+          basisHistoryHash: getHistoryPrefixHash([], 0),
+          processedThroughAfter: -1,
+          vectorModelScope: "backend:model-a",
+          enqueueVectorJob: true,
+          forceVectorJob: true,
+          changeSet: { changes: [] },
+        });
+        assert.equal(result.vectorJob.reason, "vector-rebuild");
+        assert.equal(result.head.graphRevision, before.head.graphRevision);
+        assert.equal((await store.listVectorJobs(chatKey)).length, 1);
+        const after = await store.readConversation(chatKey);
+        assert.equal(after.collections.nodes.size, 0);
+        assert.equal(after.transactions[0].changes.length, 0);
+      },
+    },
   ];
 }

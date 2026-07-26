@@ -24,6 +24,7 @@ export class GenerationCoordinator {
   #logger;
   #generation = null;
   #generationNumber = 0;
+  #reprocessTimer = null;
 
   constructor({
     engine,
@@ -60,6 +61,7 @@ export class GenerationCoordinator {
   }
 
   async onChatChanged() {
+    this.#cancelReprocess();
     this.#generation = null;
     this.#planner?.cancelPending("chat-change");
     this.#safeClearInjection();
@@ -74,6 +76,7 @@ export class GenerationCoordinator {
   }
 
   async onGenerationStarted(type, params = {}, dryRun = false) {
+    this.#cancelReprocess();
     this.#safeClearInjection();
     const snapshot = this.#host.snapshotConversation();
     const lease = await this.#ensureLease(snapshot);
@@ -100,8 +103,22 @@ export class GenerationCoordinator {
     return { id: generation.id, type: generation.type, kind: generation.kind };
   }
 
-  onGenerationAfterCommands() {
-    return { status: "deferred-to-stable-history" };
+  async onGenerationAfterCommands() {
+    const generation = this.#generation;
+    if (!generation || generation.kind === "skip") {
+      this.#safeClearInjection();
+      return { status: "skipped" };
+    }
+    if (generation.kind === "fresh-candidate" || generation.kind === "fresh") {
+      return { status: "waiting-for-message-sent" };
+    }
+    if (!generation.preparation) {
+      generation.preparation = this.#prepareNoNewUser(
+        generation,
+        this.#host.snapshotConversation(),
+      );
+    }
+    return await generation.preparation;
   }
 
   async onMessageSent(messageId) {
@@ -133,9 +150,8 @@ export class GenerationCoordinator {
       return { status: "skipped" };
     }
     if (!generation.preparation) {
-      const snapshot = this.#host.snapshotConversation();
-      generation.kind = "no-new-user";
-      generation.preparation = this.#prepareNoNewUser(generation, snapshot);
+      this.#safeClearInjection();
+      return { status: "not-prepared" };
     }
     const result = await generation.preparation;
     if (result.status !== "ready") return result;
@@ -169,13 +185,20 @@ export class GenerationCoordinator {
     return { ...reconciliation, domains, vectors };
   }
 
-  async onHistoryChanged() {
+  async onHistoryChanged(reason = "history change", ...args) {
     this.#planner?.cancelPending("history-change");
     this.#safeClearInjection();
     const snapshot = this.#host.snapshotConversation();
     if (!snapshot.chatKey) return { status: "no-chat" };
     const lease = await this.#ensureLease(snapshot);
-    return this.#engine.reconcile(lease, snapshot.messages);
+    const result = await this.#engine.reconcile(lease, snapshot.messages);
+    if (["message edited", "message updated", "message swiped", "message swipe deleted"]
+      .includes(String(reason))) {
+      const value = args[0];
+      const messageId = value && typeof value === "object" ? value.messageId : value;
+      this.#scheduleAssistantReprocess(messageId);
+    }
+    return result;
   }
 
   onGenerationFinished(reason = "ended") {
@@ -183,6 +206,24 @@ export class GenerationCoordinator {
     this.#planner?.cancelPending(`generation-${reason}`);
     this.#safeClearInjection();
     return { status: "finished", reason };
+  }
+
+  #scheduleAssistantReprocess(messageId) {
+    this.#cancelReprocess();
+    const hostIndex = Number(messageId);
+    if (!Number.isSafeInteger(hostIndex) || hostIndex < 0) return;
+    this.#reprocessTimer = setTimeout(() => {
+      this.#reprocessTimer = null;
+      Promise.resolve(this.onMessageReceived(hostIndex)).catch((error) => {
+        this.#logger?.error?.("[ST-BME v9] assistant reprocessing failed", error);
+      });
+    }, 0);
+  }
+
+  #cancelReprocess() {
+    if (this.#reprocessTimer === null) return;
+    clearTimeout(this.#reprocessTimer);
+    this.#reprocessTimer = null;
   }
 
   async #prepareFresh(generation, snapshot, user, reconciliation) {

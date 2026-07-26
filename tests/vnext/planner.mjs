@@ -503,7 +503,7 @@ test("reroll reads only RecallRecord and never consumes planner state", async ()
   const takesBefore = runtime.bridge.takeCalls;
   const plannerBefore = [...(await runtime.store.readConversation("chat-a")).plannerRecords.values()][0];
   await runtime.generation.onGenerationStarted("regenerate");
-  const reroll = await runtime.generation.onBeforeCombinePrompts();
+  const reroll = await runtime.generation.onGenerationAfterCommands();
   const plannerAfter = [...(await runtime.store.readConversation("chat-a")).plannerRecords.values()][0];
   assert.equal(reroll.source, "replay");
   assert.equal(reroll.injectionText, prepared.injectionText);

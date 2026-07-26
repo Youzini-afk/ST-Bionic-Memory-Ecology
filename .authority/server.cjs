@@ -4,8 +4,9 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-const STATE_DATABASE = 'st_bme_vnext';
-const VECTOR_DATABASE = 'st_bme_vnext_vectors';
+const STATE_DATABASE = 'st_bme_v9';
+const VECTOR_DATABASE = 'st_bme_v9_vectors';
+const VECTOR_BATCH_SIZE = 1000;
 const MAX_SQL_STATEMENTS = 100;
 const SQL_PARAMETER_BUDGET = 900;
 const STATE_OPERATIONS = new Set([
@@ -105,6 +106,25 @@ const STATE_MIGRATIONS = [{
       SELECT RAISE(ABORT, 'bme_store_conflict');
     END;
   `,
+}, {
+  id: '002_vector_manifests',
+  statement: `
+    CREATE TABLE vector_manifests (
+      namespace TEXT PRIMARY KEY,
+      vector_database TEXT NOT NULL,
+      collection_id TEXT NOT NULL,
+      chat_key TEXT NOT NULL,
+      model_scope TEXT NOT NULL,
+      graph_revision INTEGER NOT NULL,
+      vector_space_id TEXT NOT NULL,
+      observed_dim INTEGER NOT NULL,
+      external_ids_json TEXT NOT NULL,
+      node_count INTEGER NOT NULL,
+      edge_count INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+    CREATE INDEX vector_manifests_chat ON vector_manifests(chat_key);
+  `,
 }];
 
 function toArray(value) {
@@ -199,7 +219,7 @@ async function ensureStateSchema(txCtx) {
   if (!txCtx || !txCtx.sql || typeof txCtx.sql.migrate !== 'function') {
     throw new Error('BME state transactions require sql.private');
   }
-  await txCtx.sql.migrate(STATE_DATABASE, STATE_MIGRATIONS, 'bme_vnext_migrations');
+  await txCtx.sql.migrate(STATE_DATABASE, STATE_MIGRATIONS, 'bme_v9_migrations');
 }
 
 function assertStoredRecord(record, chatKey, label) {
@@ -519,9 +539,24 @@ async function handleStateCommand(txCtx, input, request, core) {
   });
 }
 
+function requireNonNegativeInteger(value, label) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new TypeError(label + ' must be a non-negative safe integer');
+  }
+  return number;
+}
+
 function vectorNamespace(input) {
-  const scope = String(input && (input.collectionId || input.chatId || input.namespace) || 'default').trim();
-  return 'bme-vnext:' + (scope || 'default');
+  return 'bme-v9:' + requireString(input && input.collectionId, 'collectionId', 2048);
+}
+
+function vectorDatabase(vectorSpaceId, observedDim) {
+  if (!vectorSpaceId || !observedDim) return VECTOR_DATABASE;
+  return VECTOR_DATABASE + '_' + crypto.createHash('sha256')
+    .update(String(vectorSpaceId) + ':' + String(observedDim))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 function normalizeVector(value, label) {
@@ -533,163 +568,402 @@ function normalizeVector(value, label) {
   });
 }
 
-function vectorItems(input) {
-  const items = toArray(input && input.items);
-  if (!items.length) throw new TypeError('vector.apply requires at least one item');
+function normalizeVectorScope(input) {
+  const collectionId = requireString(input.collectionId, 'collectionId', 2048);
+  const chatId = requireString(input.chatId, 'chatId', 1024);
+  const modelScope = requireString(input.modelScope, 'modelScope', 8192);
+  const graphRevision = requireNonNegativeInteger(input.graphRevision, 'graphRevision');
+  const vectorSpaceId = String(input.vectorSpaceId || '').trim();
+  const observedDim = requireNonNegativeInteger(input.observedDim || 0, 'observedDim');
+  return {
+    collectionId,
+    chatId,
+    modelScope,
+    graphRevision,
+    vectorSpaceId,
+    observedDim,
+    namespace: vectorNamespace({ collectionId }),
+  };
+}
+
+function normalizeVectorApply(input) {
+  const scope = normalizeVectorScope(input);
+  const ids = new Set();
   let dimension = 0;
-  const namespace = vectorNamespace(input);
-  const mapped = items.map(function (item, index) {
+  const items = toArray(input.items).map(function (item, index) {
     const externalId = requireString(item && (item.externalId || item.nodeId || item.id), 'items[' + index + '].externalId');
+    if (ids.has(externalId)) throw new TypeError('duplicate vector item ' + externalId);
+    ids.add(externalId);
     const vector = normalizeVector(item && (item.vector || item.embedding), 'items[' + index + '].vector');
     if (!dimension) dimension = vector.length;
     if (vector.length !== dimension) throw new TypeError('vector.apply item dimensions must match');
+    const sourcePayload = item && item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+      ? item.payload
+      : {};
     return {
       externalId,
-      namespace,
+      namespace: scope.namespace,
       vector,
-      payload: {
+      payload: Object.assign({}, sourcePayload, {
         externalId,
         nodeId: externalId,
-        text: String(item && item.text || item && item.payload && item.payload.text || ''),
-        contentHash: String(item && item.hash || item && item.payload && item.payload.contentHash || ''),
-        index: Number(item && item.index || item && item.payload && item.payload.index || 0) || 0,
-        collectionId: String(input && input.collectionId || ''),
-        chatId: String(input && input.chatId || ''),
-        modelScope: String(input && input.modelScope || ''),
-        graphRevision: Math.max(0, Math.trunc(Number(input && input.graphRevision) || 0)),
-        vectorSpaceId: String(input && input.vectorSpaceId || ''),
-      },
+        text: String(item && item.text || sourcePayload.text || ''),
+        contentHash: String(item && item.hash || sourcePayload.contentHash || ''),
+        index: Number(item && item.index || sourcePayload.index || 0) || 0,
+        bmeNamespace: scope.namespace,
+        collectionId: scope.collectionId,
+        chatId: scope.chatId,
+        modelScope: scope.modelScope,
+        graphRevision: scope.graphRevision,
+        vectorSpaceId: scope.vectorSpaceId,
+        observedDim: dimension,
+      }),
     };
   });
-  const observedDim = Math.max(0, Math.trunc(Number(input && input.observedDim) || 0));
-  if (observedDim && observedDim !== dimension) throw new TypeError('vector.apply observedDim does not match item vectors');
-  return { items: mapped, dimension, namespace };
-}
-
-function vectorLinks(input, namespace) {
-  return toArray(input && input.links).map(function (link, index) {
+  if (items.length && scope.observedDim !== dimension) {
+    throw new TypeError('vector.apply observedDim does not match item vectors');
+  }
+  if (items.length && !scope.vectorSpaceId) {
+    throw new TypeError('vectorSpaceId is required for non-empty vector.apply');
+  }
+  const links = toArray(input.links).map(function (link, index) {
     const source = requireString(link && (link.fromId || link.src || link.sourceId), 'links[' + index + '].source');
     const target = requireString(link && (link.toId || link.dst || link.targetId), 'links[' + index + '].target');
+    if (!ids.has(source) || !ids.has(target)) {
+      throw new TypeError('vector.apply links must reference submitted items');
+    }
+    const weight = Number(link && (link.weight ?? link.strength ?? 1));
+    if (!Number.isFinite(weight)) throw new TypeError('links[' + index + '].weight must be finite');
     return {
-      src: { externalId: source, namespace },
-      dst: { externalId: target, namespace },
-      label: String(link && (link.relation || link.label) || 'related'),
-      weight: Number(link && (link.weight ?? link.strength ?? 1)) || 1,
+      src: { externalId: source, namespace: scope.namespace },
+      dst: { externalId: target, namespace: scope.namespace },
+      label: String(link && (link.relation || link.label) || 'related').slice(0, 256),
+      weight,
     };
   });
+  const database = vectorDatabase(scope.vectorSpaceId, scope.observedDim);
+  return Object.assign(scope, { items, links, ids: Array.from(ids), dimension, database });
+}
+
+function publicVectorManifest(manifest) {
+  if (!manifest) return null;
+  return {
+    database: manifest.database,
+    namespace: manifest.namespace,
+    collectionId: manifest.collectionId,
+    chatId: manifest.chatId,
+    modelScope: manifest.modelScope,
+    graphRevision: manifest.graphRevision,
+    vectorSpaceId: manifest.vectorSpaceId,
+    observedDim: manifest.observedDim,
+    nodeCount: manifest.nodeCount,
+    edgeCount: manifest.edgeCount,
+    appliedAt: manifest.appliedAt,
+  };
+}
+
+async function readVectorManifest(txCtx, namespace) {
+  const rows = normalizeRows(await txCtx.sql.query(
+    STATE_DATABASE,
+    'SELECT vector_database, collection_id, chat_key, model_scope, graph_revision, vector_space_id, observed_dim, external_ids_json, node_count, edge_count, applied_at FROM vector_manifests WHERE namespace = ? LIMIT 1',
+    [namespace],
+  ));
+  if (!rows[0]) return null;
+  const row = rows[0];
+  const externalIds = parseStored(row.external_ids_json, 'vector manifest ids');
+  if (!Array.isArray(externalIds) || externalIds.some(function (id) { return typeof id !== 'string' || !id; })) {
+    throw new Error('BME Primary is corrupt: invalid vector manifest ids');
+  }
+  return {
+    database: requireString(row.vector_database, 'stored vector database'),
+    namespace,
+    collectionId: requireString(row.collection_id, 'stored collection id'),
+    chatId: requireString(row.chat_key, 'stored chat key'),
+    modelScope: requireString(row.model_scope, 'stored model scope', 8192),
+    graphRevision: storedInteger(row.graph_revision, 'vector graph revision', 0),
+    vectorSpaceId: String(row.vector_space_id || ''),
+    observedDim: storedInteger(row.observed_dim, 'vector observed dimension', 0),
+    externalIds,
+    nodeCount: storedInteger(row.node_count, 'vector node count', 0),
+    edgeCount: storedInteger(row.edge_count, 'vector edge count', 0),
+    appliedAt: requireString(row.applied_at, 'vector applied_at'),
+  };
+}
+
+async function writeVectorManifest(txCtx, manifest) {
+  await txCtx.sql.exec(
+    STATE_DATABASE,
+    'INSERT INTO vector_manifests (namespace, vector_database, collection_id, chat_key, model_scope, graph_revision, vector_space_id, observed_dim, external_ids_json, node_count, edge_count, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(namespace) DO UPDATE SET vector_database = excluded.vector_database, collection_id = excluded.collection_id, chat_key = excluded.chat_key, model_scope = excluded.model_scope, graph_revision = excluded.graph_revision, vector_space_id = excluded.vector_space_id, observed_dim = excluded.observed_dim, external_ids_json = excluded.external_ids_json, node_count = excluded.node_count, edge_count = excluded.edge_count, applied_at = excluded.applied_at',
+    [
+      manifest.namespace,
+      manifest.database,
+      manifest.collectionId,
+      manifest.chatId,
+      manifest.modelScope,
+      manifest.graphRevision,
+      manifest.vectorSpaceId,
+      manifest.observedDim,
+      JSON.stringify(manifest.externalIds),
+      manifest.nodeCount,
+      manifest.edgeCount,
+      manifest.appliedAt,
+    ],
+  );
+}
+
+function chunks(values) {
+  const result = [];
+  for (let index = 0; index < values.length; index += VECTOR_BATCH_SIZE) {
+    result.push(values.slice(index, index + VECTOR_BATCH_SIZE));
+  }
+  return result;
+}
+
+function emptyMutationSummary() {
+  return { totalCount: 0, successCount: 0, failureCount: 0 };
+}
+
+function addMutationSummary(total, value) {
+  total.totalCount += Number(value && value.totalCount || 0);
+  total.successCount += Number(value && value.successCount || 0);
+  total.failureCount += Number(value && value.failureCount || 0);
+  if (Number(value && value.failureCount || 0) > 0) {
+    throw new Error('derived vector mutation completed with partial failures');
+  }
+}
+
+async function deleteExistingVectorItems(txCtx, database, namespace, externalIds) {
+  const summary = emptyMutationSummary();
+  for (const batch of chunks(Array.from(new Set(externalIds)))) {
+    const resolved = await txCtx.trivium.resolveMany({
+      database,
+      items: batch.map(function (externalId) { return { externalId, namespace }; }),
+    });
+    const existing = toArray(resolved && resolved.items)
+      .filter(function (item) { return Number.isSafeInteger(Number(item && item.id)) && Number(item.id) > 0; })
+      .map(function (item) { return { id: Number(item.id) }; });
+    if (!existing.length) continue;
+    addMutationSummary(summary, await txCtx.trivium.bulkDelete({ database, items: existing }));
+  }
+  return summary;
 }
 
 async function handleVectorApply(txCtx, input, request) {
   input = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const normalized = vectorItems(input);
-  const links = vectorLinks(input, normalized.namespace);
+  const normalized = normalizeVectorApply(input);
   const key = requireString(request && request.idempotencyKey, 'idempotencyKey', 1024);
   const requestFingerprint = fingerprint(input);
+  await ensureStateSchema(txCtx);
   return await txCtx.locks.withLock('vector:' + normalized.namespace, { timeoutMs: 30000 }, async function () {
     return await txCtx.idempotency.run(key, requestFingerprint, async function () {
-      const upsert = await txCtx.trivium.bulkUpsert({
-        database: VECTOR_DATABASE,
-        dim: normalized.dimension,
-        items: normalized.items,
-      });
-      const linked = links.length
-        ? await txCtx.trivium.bulkLink({ database: VECTOR_DATABASE, items: links })
-        : { totalCount: 0, successCount: 0, failureCount: 0, failures: [] };
-      const result = {
-        ok: Number(upsert.failureCount || 0) === 0 && Number(linked.failureCount || 0) === 0,
-        database: VECTOR_DATABASE,
+      const previous = await readVectorManifest(txCtx, normalized.namespace);
+      const deleted = emptyMutationSummary();
+      if (previous) {
+        addMutationSummary(deleted, await deleteExistingVectorItems(
+          txCtx,
+          previous.database,
+          normalized.namespace,
+          previous.externalIds,
+        ));
+      }
+      if (!previous || previous.database !== normalized.database) {
+        addMutationSummary(deleted, await deleteExistingVectorItems(
+          txCtx,
+          normalized.database,
+          normalized.namespace,
+          normalized.ids,
+        ));
+      }
+
+      const upsert = emptyMutationSummary();
+      for (const batch of chunks(normalized.items)) {
+        addMutationSummary(upsert, await txCtx.trivium.bulkUpsert({
+          database: normalized.database,
+          dim: normalized.dimension,
+          items: batch,
+        }));
+      }
+      const linked = emptyMutationSummary();
+      for (const batch of chunks(normalized.links)) {
+        addMutationSummary(linked, await txCtx.trivium.bulkLink({
+          database: normalized.database,
+          items: batch,
+        }));
+      }
+      const manifest = {
+        database: normalized.database,
         namespace: normalized.namespace,
-        observedDim: normalized.dimension,
-        manifest: {
-          database: VECTOR_DATABASE,
-          namespace: normalized.namespace,
-          observedDim: normalized.dimension,
-          collectionId: String(input.collectionId || ''),
-          chatId: String(input.chatId || ''),
-          modelScope: String(input.modelScope || ''),
-          graphRevision: Math.max(0, Math.trunc(Number(input.graphRevision) || 0)),
-          vectorSpaceId: String(input.vectorSpaceId || ''),
-        },
-        upsert,
-        links: linked,
-        skippedLinkCount: 0,
+        collectionId: normalized.collectionId,
+        chatId: normalized.chatId,
+        modelScope: normalized.modelScope,
+        graphRevision: normalized.graphRevision,
+        vectorSpaceId: normalized.vectorSpaceId,
+        observedDim: normalized.observedDim,
+        externalIds: normalized.ids,
+        nodeCount: normalized.items.length,
+        edgeCount: normalized.links.length,
         appliedAt: new Date().toISOString(),
       };
-      if (!result.ok) throw new Error('vector.apply completed with partial failures');
-      return result;
+      await writeVectorManifest(txCtx, manifest);
+      return {
+        ok: true,
+        database: normalized.database,
+        namespace: normalized.namespace,
+        observedDim: normalized.observedDim,
+        manifest: publicVectorManifest(manifest),
+        deleted,
+        upsert,
+        links: linked,
+      };
     });
   });
 }
 
-function sanitizeCandidate(hit, source) {
+function manifestMatchesScope(manifest, scope) {
+  return Boolean(
+    manifest &&
+    manifest.collectionId === scope.collectionId &&
+    manifest.chatId === scope.chatId &&
+    manifest.modelScope === scope.modelScope &&
+    manifest.graphRevision === scope.graphRevision &&
+    manifest.vectorSpaceId === scope.vectorSpaceId &&
+    manifest.observedDim === scope.observedDim
+  );
+}
+
+function sanitizeCandidate(hit, source, scope) {
   if (!hit || typeof hit !== 'object') return null;
-  const externalId = String(hit.externalId || hit.nodeId || hit.id || '').trim();
-  if (!externalId) return null;
+  const externalId = String(hit.externalId || hit.nodeId || '').trim();
+  const namespace = String(hit.namespace || '').trim();
+  if (!externalId || namespace !== scope.namespace) return null;
+  if (source === 'search') {
+    const payload = hit.payload && typeof hit.payload === 'object' && !Array.isArray(hit.payload)
+      ? hit.payload
+      : {};
+    if (
+      payload.bmeNamespace !== scope.namespace ||
+      payload.modelScope !== scope.modelScope ||
+      Number(payload.graphRevision) !== scope.graphRevision ||
+      payload.vectorSpaceId !== scope.vectorSpaceId
+    ) return null;
+  }
   const value = {
     externalId,
     score: Math.max(0, Number(hit.score != null ? hit.score : hit.similarity) || 0),
     source,
+    namespace,
   };
   const internalId = Number(hit.id != null ? hit.id : hit.internalId);
   if (Number.isFinite(internalId) && internalId > 0) value.internalId = internalId;
-  const namespace = String(hit.namespace || '').trim();
-  if (namespace) value.namespace = namespace;
   return value;
+}
+
+async function handleVectorManifest(txCtx, input) {
+  input = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const namespace = vectorNamespace(input);
+  await ensureStateSchema(txCtx);
+  const manifest = await readVectorManifest(txCtx, namespace);
+  const stat = manifest
+    ? await txCtx.trivium.stat({
+        database: manifest.database,
+        includeMappingIntegrity: Boolean(input.includeMappingIntegrity),
+      })
+    : null;
+  return { ok: true, database: manifest && manifest.database || '', manifest: publicVectorManifest(manifest), stat };
 }
 
 async function handleRecallCandidates(txCtx, input, logger) {
   input = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
-  const texts = toArray(input.queryTexts).map(String).filter(function (value) { return value.trim(); });
-  const vectors = toArray(input.queryVectors).map(function (value, index) {
-    return normalizeVector(value, 'queryVectors[' + index + ']');
-  });
-  if (!texts.length && !vectors.length) throw new TypeError('recall.candidates requires a query');
-  const observedDim = Math.max(0, Math.trunc(Number(input.observedDim) || 0));
-  if (observedDim && vectors.some(function (vector) { return vector.length !== observedDim; })) {
-    throw new TypeError('recall.candidates query vector dimension mismatch');
+  const scope = normalizeVectorScope(input);
+  if (!scope.vectorSpaceId || !scope.observedDim) {
+    throw new TypeError('recall.candidates requires vectorSpaceId and observedDim');
   }
+  const rawTexts = toArray(input.queryTexts);
+  const rawVectors = toArray(input.queryVectors);
+  if (!rawTexts.length || rawTexts.length !== rawVectors.length) {
+    throw new TypeError('recall.candidates requires aligned queryTexts and queryVectors');
+  }
+  const texts = rawTexts.map(function (value, index) {
+    const text = String(value || '').trim();
+    if (!text) throw new TypeError('queryTexts[' + index + '] must not be empty');
+    return text;
+  });
+  const vectors = rawVectors.map(function (value, index) {
+    const vector = normalizeVector(value, 'queryVectors[' + index + ']');
+    if (vector.length !== scope.observedDim) {
+      throw new TypeError('recall.candidates query vector dimension mismatch');
+    }
+    return vector;
+  });
+  await ensureStateSchema(txCtx);
+  const manifest = await readVectorManifest(txCtx, scope.namespace);
+  if (!manifestMatchesScope(manifest, scope)) {
+    return {
+      ok: true,
+      status: 'stale',
+      database: manifest && manifest.database || '',
+      namespace: scope.namespace,
+      manifest: publicVectorManifest(manifest),
+      candidates: [],
+      queryCount: texts.length,
+    };
+  }
+
   const topK = Math.min(200, Math.max(1, Math.trunc(Number(input.topK) || 10)));
   const expandDepth = Math.min(5, Math.max(0, Math.trunc(Number(input.expandDepth) || 0)));
-  const expectedNamespace = vectorNamespace(input);
-  const candidates = [];
-  const seen = new Set();
-  const count = Math.max(texts.length, vectors.length);
-  for (let index = 0; index < count; index += 1) {
-    const request = { database: VECTOR_DATABASE, topK, expandDepth: 0 };
-    if (texts[index]) request.queryText = texts[index];
-    if (vectors[index]) request.vector = vectors[index];
-    if (Number.isFinite(Number(input.minScore))) request.minScore = Number(input.minScore);
-    if (Number.isFinite(Number(input.hybridAlpha))) request.hybridAlpha = Number(input.hybridAlpha);
-    if (input.payloadFilter && typeof input.payloadFilter === 'object' && !Array.isArray(input.payloadFilter)) {
-      request.payloadFilter = input.payloadFilter;
+  const requiredFilter = [
+    { bmeNamespace: { $eq: scope.namespace } },
+    { modelScope: { $eq: scope.modelScope } },
+    { graphRevision: { $eq: scope.graphRevision } },
+    { vectorSpaceId: { $eq: scope.vectorSpaceId } },
+  ];
+  if (input.payloadFilter !== undefined) {
+    if (!input.payloadFilter || typeof input.payloadFilter !== 'object' || Array.isArray(input.payloadFilter)) {
+      throw new TypeError('payloadFilter must be an object');
     }
-    const hits = toArray(await txCtx.trivium.searchHybrid(request));
-    for (const hit of hits) {
-      const candidate = sanitizeCandidate(hit, 'search');
-      if (candidate && candidate.namespace === expectedNamespace && !seen.has(candidate.externalId)) {
-        seen.add(candidate.externalId);
-        candidates.push(candidate);
-      }
+    requiredFilter.push(input.payloadFilter);
+  }
+  const byId = new Map();
+  for (let index = 0; index < texts.length; index += 1) {
+    const searchRequest = {
+      database: manifest.database,
+      queryText: texts[index],
+      vector: vectors[index],
+      topK,
+      expandDepth: 0,
+      payloadFilter: { $and: requiredFilter },
+    };
+    if (Number.isFinite(Number(input.minScore))) searchRequest.minScore = Number(input.minScore);
+    if (Number.isFinite(Number(input.hybridAlpha))) searchRequest.hybridAlpha = Number(input.hybridAlpha);
+    for (const hit of toArray(await txCtx.trivium.searchHybrid(searchRequest))) {
+      const candidate = sanitizeCandidate(hit, 'search', scope);
+      if (!candidate) continue;
+      const previous = byId.get(candidate.externalId);
+      if (!previous || candidate.score > previous.score) byId.set(candidate.externalId, candidate);
     }
   }
-  if (expandDepth && candidates.length) {
+  const ranked = Array.from(byId.values()).sort(function (left, right) {
+    return right.score - left.score || left.externalId.localeCompare(right.externalId);
+  });
+  if (expandDepth && ranked.length) {
     try {
       const resolved = await txCtx.trivium.resolveMany({
-        database: VECTOR_DATABASE,
-        items: candidates.slice(0, topK).map(function (item) {
-          return { externalId: item.externalId, namespace: item.namespace || vectorNamespace(input) };
+        database: manifest.database,
+        items: ranked.slice(0, topK).map(function (item) {
+          return { externalId: item.externalId, namespace: scope.namespace };
         }),
       });
       for (const item of toArray(resolved && resolved.items)) {
         const internalId = Number(item && item.id);
-        if (!Number.isFinite(internalId) || internalId <= 0) continue;
-        const neighbors = await txCtx.trivium.neighbors({ database: VECTOR_DATABASE, id: internalId, depth: expandDepth });
+        if (!Number.isSafeInteger(internalId) || internalId <= 0) continue;
+        const neighbors = await txCtx.trivium.neighbors({
+          database: manifest.database,
+          id: internalId,
+          depth: expandDepth,
+        });
         for (const node of toArray(neighbors && (neighbors.nodes || neighbors.neighbors))) {
-          const candidate = sanitizeCandidate(node, 'expand');
-          if (candidate && candidate.namespace === expectedNamespace && !seen.has(candidate.externalId)) {
-            seen.add(candidate.externalId);
-            candidates.push(candidate);
-          }
+          const candidate = sanitizeCandidate(node, 'expand', scope);
+          if (candidate && !byId.has(candidate.externalId)) byId.set(candidate.externalId, candidate);
         }
       }
     } catch (error) {
@@ -698,16 +972,14 @@ async function handleRecallCandidates(txCtx, input, logger) {
   }
   return {
     ok: true,
-    database: VECTOR_DATABASE,
-    namespace: vectorNamespace(input),
-    collectionId: String(input.collectionId || ''),
-    chatId: String(input.chatId || ''),
-    graphRevision: Math.max(0, Math.trunc(Number(input.graphRevision) || 0)),
-    modelScope: String(input.modelScope || ''),
-    vectorSpaceId: String(input.vectorSpaceId || ''),
-    observedDim,
-    candidates,
-    queryCount: count,
+    status: 'ready',
+    database: manifest.database,
+    namespace: scope.namespace,
+    manifest: publicVectorManifest(manifest),
+    candidates: Array.from(byId.values())
+      .sort(function (left, right) { return right.score - left.score || left.externalId.localeCompare(right.externalId); })
+      .slice(0, topK),
+    queryCount: texts.length,
     searchedAt: new Date().toISOString(),
   };
 }
@@ -745,26 +1017,7 @@ module.exports.activate = async function activate(ctx) {
   });
   ctx.registerTransaction('vector.manifest', {
     handler: async function (txCtx, input) {
-      const stat = await txCtx.trivium.stat({
-        database: VECTOR_DATABASE,
-        includeMappingIntegrity: Boolean(input && input.includeMappingIntegrity),
-      });
-      return {
-        result: {
-          ok: true,
-          database: VECTOR_DATABASE,
-          manifest: {
-            ...stat,
-            database: VECTOR_DATABASE,
-            collectionId: String(input && input.collectionId || ''),
-            chatId: String(input && input.chatId || ''),
-            modelScope: String(input && input.modelScope || ''),
-            graphRevision: Math.max(0, Math.trunc(Number(input && input.graphRevision) || 0)),
-            vectorSpaceId: String(input && input.vectorSpaceId || ''),
-            observedDim: Math.max(0, Math.trunc(Number(input && input.observedDim) || 0)),
-          },
-        },
-      };
+      return { result: await handleVectorManifest(txCtx, input) };
     },
   });
   ctx.registerTransaction('vector.apply', {
@@ -777,7 +1030,7 @@ module.exports.activate = async function activate(ctx) {
       return { result: await handleRecallCandidates(txCtx, input, ctx.logger) };
     },
   });
-  if (ctx.logger && ctx.logger.info) ctx.logger.info('[st-bme] vNext companion module activated');
+  if (ctx.logger && ctx.logger.info) ctx.logger.info('[st-bme] v9 companion module activated');
 };
 
 module.exports.STATE_DATABASE = STATE_DATABASE;

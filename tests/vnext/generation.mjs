@@ -28,7 +28,7 @@ const assistantMessage = (text, extra = {}) => ({
   ...extra,
 });
 
-function createRuntime(recall, { domains = null, vectors = null } = {}) {
+function createRuntime(recall, { domains = null, vectors = null, logger = quietLogger } = {}) {
   const state = {
     chatId: "chat-a",
     chat: [],
@@ -47,14 +47,14 @@ function createRuntime(recall, { domains = null, vectors = null } = {}) {
   let id = 0;
   const store = new MemoryStateStore({ now: () => ++clock, id: () => `tx-${++id}` });
   const engine = new ConversationEngine({ store });
-  const host = new StHostAdapter({ getContext: () => context, logger: quietLogger });
+  const host = new StHostAdapter({ getContext: () => context, logger });
   const coordinator = new GenerationCoordinator({
     engine,
     host,
     recall,
     domains,
     vectors,
-    logger: quietLogger,
+    logger,
   });
   return { state, context, store, engine, host, coordinator };
 }
@@ -87,6 +87,72 @@ test("host snapshots use stable message ids and ignore unrelated metadata", () =
   ]);
   assert.equal(runtime.host.findUserByHostIndex(snapshot, 0).text, "same");
   assert.equal(runtime.host.findUserByHostIndex(snapshot, 1), null);
+});
+
+test("host binding observes MESSAGE_UPDATED and schedules assistant work off the ST event", async () => {
+  const handlers = new Map();
+  const state = {
+    chatId: "chat-a",
+    chat: [userMessage("question"), assistantMessage("answer")],
+  };
+  const context = {
+    ...state,
+    eventTypes: {
+      MESSAGE_RECEIVED: "received",
+      MESSAGE_UPDATED: "updated",
+    },
+    eventSource: {
+      on(name, listener) { handlers.set(name, listener); },
+      off(name) { handlers.delete(name); },
+    },
+  };
+  const calls = [];
+  const host = new StHostAdapter({ getContext: () => context, logger: quietLogger });
+  const cleanup = host.bind({
+    async onMessageReceived(messageId) {
+      calls.push(["received", messageId]);
+    },
+    async onHistoryChanged(reason, messageId) {
+      calls.push([reason, messageId]);
+    },
+  });
+
+  assert.equal(typeof handlers.get("updated"), "function");
+  assert.deepEqual(await handlers.get("received")(1), { status: "scheduled" });
+  assert.deepEqual(calls, []);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, [["received", 1]]);
+  await handlers.get("updated")(1);
+  assert.deepEqual(calls.at(-1), ["message updated", 1]);
+  cleanup();
+  assert.equal(handlers.size, 0);
+});
+
+test("makeFirst listeners are removable with the current ST EventEmitter contract", () => {
+  const handlers = new Map();
+  const context = {
+    chatId: "chat-a",
+    chat: [],
+    eventTypes: {
+      GENERATION_AFTER_COMMANDS: "after-commands",
+      GENERATE_BEFORE_COMBINE_PROMPTS: "before-combine",
+    },
+    eventSource: {
+      on() {},
+      makeFirst(name, listener) { handlers.set(name, listener); },
+      removeListener(name, listener) {
+        if (handlers.get(name) === listener) handlers.delete(name);
+      },
+    },
+  };
+  const host = new StHostAdapter({ getContext: () => context, logger: quietLogger });
+  const cleanup = host.bind({
+    onGenerationAfterCommands() {},
+    onBeforeCombinePrompts() {},
+  });
+  assert.deepEqual([...handlers.keys()].sort(), ["after-commands", "before-combine"]);
+  cleanup();
+  assert.equal(handlers.size, 0);
 });
 
 test("reroll replays the exact first recall and rolls back the old assistant transaction", async () => {
@@ -126,7 +192,7 @@ test("reroll replays the exact first recall and rolls back the old assistant tra
 
   runtime.state.chat[1] = assistantMessage("");
   await runtime.coordinator.onGenerationStarted("swipe");
-  const reroll = await runtime.coordinator.onBeforeCombinePrompts();
+  const reroll = await runtime.coordinator.onGenerationAfterCommands();
   conversation = await runtime.store.readConversation("chat-a");
   assert.equal(reroll.source, "replay", reroll.error?.stack);
   assert.equal(reroll.injectionText, fresh.injectionText);
@@ -134,11 +200,12 @@ test("reroll replays the exact first recall and rolls back the old assistant tra
   assert.equal(recallCalls, 1);
   assert.equal(conversation.collections.nodes.has("old-answer"), false);
   assert.equal(nonEmptyInjections(runtime).at(-1), "MEMORY:question");
+  assert.equal((await runtime.coordinator.onBeforeCombinePrompts()).source, "replay");
 
   runtime.coordinator.onGenerationFinished();
   await runtime.coordinator.onGenerationStarted("normal");
-  const inferredReroll = await runtime.coordinator.onBeforeCombinePrompts();
-  assert.equal(inferredReroll.source, "replay");
+  const missingUser = await runtime.coordinator.onBeforeCombinePrompts();
+  assert.equal(missingUser.status, "not-prepared");
   assert.equal(recallCalls, 1);
 });
 
@@ -151,12 +218,12 @@ test("a missing reroll record performs one fresh fallback and persists it", asyn
   runtime.state.chat.push(userMessage("orphan"));
   await runtime.coordinator.onChatChanged();
   await runtime.coordinator.onGenerationStarted("regenerate");
-  const fallback = await runtime.coordinator.onBeforeCombinePrompts();
+  const fallback = await runtime.coordinator.onGenerationAfterCommands();
   assert.equal(fallback.source, "fresh-fallback");
   runtime.coordinator.onGenerationFinished();
 
   await runtime.coordinator.onGenerationStarted("regenerate");
-  const replay = await runtime.coordinator.onBeforeCombinePrompts();
+  const replay = await runtime.coordinator.onGenerationAfterCommands();
   assert.equal(replay.source, "replay");
   assert.equal(replay.injectionText, fallback.injectionText);
   assert.equal(recallCalls, 1);
@@ -204,7 +271,7 @@ test("editing the parent user invalidates the old recall before reroll fallback"
   runtime.state.chat[0] = userMessage("edited");
   await runtime.coordinator.onHistoryChanged("edited", 0);
   await runtime.coordinator.onGenerationStarted("regenerate");
-  const result = await runtime.coordinator.onBeforeCombinePrompts();
+  const result = await runtime.coordinator.onGenerationAfterCommands();
   assert.equal(result.source, "fresh-fallback");
   assert.equal(result.injectionText, "R2:edited");
   assert.equal(recallCalls, 2);
@@ -278,7 +345,7 @@ test("fresh recall effects commit once, reroll replays, and a parent edit rolls 
   runtime.coordinator.onGenerationFinished();
 
   await runtime.coordinator.onGenerationStarted("regenerate");
-  assert.equal((await runtime.coordinator.onBeforeCombinePrompts()).source, "replay");
+  assert.equal((await runtime.coordinator.onGenerationAfterCommands()).source, "replay");
   assert.equal(recallCalls, 1);
   assert.equal((await runtime.store.readConversation("chat-a")).collections.nodes.get("memory").accessCount, 1);
   runtime.coordinator.onGenerationFinished();
@@ -310,6 +377,39 @@ test("an assistant receipt runs domains before draining committed vector jobs", 
   assert.deepEqual(order, ["domains:chat-a:1", "vectors:chat-a"]);
   assert.equal(result.domains.status, "completed");
   assert.equal(result.vectors.status, "completed");
+});
+
+test("assistant swipe edits are reprocessed, while overswipe generation cancels the stale task", async () => {
+  const processed = [];
+  let processedResolve;
+  const firstProcessed = new Promise((resolve) => { processedResolve = resolve; });
+  const loggedErrors = [];
+  const runtime = createRuntime(async () => ({}), {
+    domains: {
+      async processAssistant({ messageId }) {
+        processed.push(messageId);
+        processedResolve();
+        return { status: "completed" };
+      },
+    },
+    logger: { error(...args) { loggedErrors.push(args); }, warn() {} },
+  });
+  runtime.state.chat.push(userMessage("question"), assistantMessage("swipe one"));
+  await runtime.coordinator.onChatChanged();
+
+  await runtime.coordinator.onHistoryChanged("message swiped", 1);
+  await Promise.race([
+    firstProcessed,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("reprocess timed out")), 100)),
+  ]);
+  assert.deepEqual(processed, [1]);
+  assert.deepEqual(loggedErrors, []);
+
+  runtime.state.chat[1] = assistantMessage("");
+  await runtime.coordinator.onHistoryChanged("message swiped", 1);
+  await runtime.coordinator.onGenerationStarted("swipe");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(processed, [1]);
 });
 
 let passed = 0;

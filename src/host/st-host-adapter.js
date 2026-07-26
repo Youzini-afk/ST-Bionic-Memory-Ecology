@@ -223,6 +223,7 @@ export class StHostAdapter {
     if (!eventSource?.on) throw new Error("SillyTavern eventSource is unavailable");
 
     const cleanups = [];
+    const backgroundTimers = new Set();
     const safe = (name, listener) => async (...args) => {
       try {
         return await listener(...args);
@@ -239,6 +240,8 @@ export class StHostAdapter {
         if (typeof cleanup === "function") cleanups.push(cleanup);
         else if (typeof eventSource.off === "function") {
           cleanups.push(() => eventSource.off(eventName, wrapped));
+        } else if (typeof eventSource.removeListener === "function") {
+          cleanups.push(() => eventSource.removeListener(eventName, wrapped));
         }
         return;
       }
@@ -248,6 +251,18 @@ export class StHostAdapter {
       } else if (typeof eventSource.removeListener === "function") {
         cleanups.push(() => eventSource.removeListener(eventName, wrapped));
       }
+    };
+    const background = (name, listener) => (...args) => {
+      const timer = setTimeout(async () => {
+        backgroundTimers.delete(timer);
+        try {
+          await listener(...args);
+        } catch (error) {
+          this.#logger?.error?.(`[ST-BME v9] ${name} failed`, error);
+        }
+      }, 0);
+      backgroundTimers.add(timer);
+      return { status: "scheduled" };
     };
 
     bind(eventTypes.CHAT_CHANGED, "chat change", () => coordinator.onChatChanged());
@@ -260,14 +275,18 @@ export class StHostAdapter {
       coordinator.onBeforeCombinePrompts(promptData), true);
     bind(eventTypes.MESSAGE_SENT, "message sent", (messageId) =>
       coordinator.onMessageSent(messageId));
-    bind(eventTypes.MESSAGE_RECEIVED, "message received", (messageId, type) =>
-      coordinator.onMessageReceived(messageId, type));
-    for (const [eventName, name] of [
+    bind(eventTypes.MESSAGE_RECEIVED, "message received", background(
+      "message received",
+      (messageId, type) => coordinator.onMessageReceived(messageId, type),
+    ));
+    const historyEvents = new Map([
       [eventTypes.MESSAGE_DELETED, "message deleted"],
       [eventTypes.MESSAGE_EDITED, "message edited"],
+      [eventTypes.MESSAGE_UPDATED, "message updated"],
       [eventTypes.MESSAGE_SWIPED, "message swiped"],
       [eventTypes.MESSAGE_SWIPE_DELETED, "message swipe deleted"],
-    ]) {
+    ].filter(([eventName]) => eventName));
+    for (const [eventName, name] of historyEvents) {
       bind(eventName, name, (...args) => coordinator.onHistoryChanged(name, ...args));
     }
     bind(eventTypes.GENERATION_STOPPED, "generation stopped", () =>
@@ -276,6 +295,8 @@ export class StHostAdapter {
       coordinator.onGenerationFinished("ended"));
 
     return () => {
+      for (const timer of backgroundTimers) clearTimeout(timer);
+      backgroundTimers.clear();
       for (const cleanup of cleanups.splice(0)) cleanup();
     };
   }

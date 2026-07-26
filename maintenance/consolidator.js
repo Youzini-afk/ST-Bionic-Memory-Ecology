@@ -568,7 +568,7 @@ export async function consolidateMemories({
   const consolidationSystemPrompt = applyTaskRegex(
     settings,
     "consolidation",
-    "finalPrompt",
+    "input.finalPrompt",
     consolidationPromptBuild.systemPrompt ||
       customPrompt ||
       CONSOLIDATION_SYSTEM_PROMPT,

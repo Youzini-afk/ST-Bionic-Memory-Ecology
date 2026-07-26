@@ -65,6 +65,7 @@ export class VectorJobWorker {
         chatId: chatKey,
         force: true,
         purge: true,
+        idempotencyKey: `vector-job:${jobs.at(-1).id}:${state.head.graphRevision}`,
         signal,
       });
       if (sync?.error) throw new Error(sync.error);

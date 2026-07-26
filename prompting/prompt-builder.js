@@ -2,7 +2,7 @@
 // 统一负责任务预设块排序、变量渲染，以及世界书/EJS 上下文接入。
 
 import { debugLog, debugWarn } from "../runtime/debug-logging.js";
-import { getActiveTaskProfile, getLegacyPromptForTask } from "./prompt-profiles.js";
+import { getActiveTaskProfile } from "./prompt-profiles.js";
 import {
   createEmptyInjectionSanitizerDebug,
   PROMPT_CONTENT_ORIGIN,
@@ -1676,7 +1676,6 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
   if (!profile) {
     throw new Error(`Unsupported task type: ${String(taskType || "").trim() || "(empty)"}`);
   }
-  const legacyPrompt = getLegacyPromptForTask(settings, taskType);
   const promptRegexInput = { entries: [] };
   const mvuPromptDebug = createEmptyMvuPromptDebug();
   const taskInputDebug =
@@ -1804,9 +1803,7 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
     const blockOwnership = describeBlockContentOwnership(block);
     let content = "";
 
-    if (block.type === "legacyPrompt") {
-      content = legacyPrompt || block.content || "";
-    } else if (block.type === "builtin") {
+    if (block.type === "builtin") {
       if (block.content) {
         content = interpolateVariables(block.content, resolvedContext);
       } else if (block.sourceKey) {
@@ -1991,7 +1988,6 @@ export async function buildTaskPrompt(settings = {}, taskType, context = {}) {
       taskType,
       profileId: profile?.id || "",
       profileName: profile?.name || "",
-      usedLegacyPrompt: Boolean(legacyPrompt),
       blockCount: blocks.length,
       renderedBlockCount: renderedBlocks.length,
       worldInfoRequested,

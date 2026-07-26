@@ -112,10 +112,28 @@ class LockHarness {
   }
 }
 
+class IdempotencyHarness {
+  results = new Map();
+
+  async run(key, fingerprint, task) {
+    const cached = this.results.get(key);
+    if (cached) {
+      if (cached.fingerprint !== fingerprint) {
+        throw new Error("idempotency conflict");
+      }
+      return cached.result;
+    }
+    const result = await task();
+    this.results.set(key, { fingerprint, result });
+    return result;
+  }
+}
+
 async function createHarness(triviumOverrides = {}) {
   const handlers = new Map();
   const sql = new SqlHarness();
   const locks = new LockHarness();
+  const idempotency = new IdempotencyHarness();
   await authorityModule.activate({
     moduleDir: path.join(extensionRoot, ".authority"),
     logger: { info() {}, warn() {}, error() {} },
@@ -126,11 +144,12 @@ async function createHarness(triviumOverrides = {}) {
   const txCtx = {
     sql,
     locks,
-    idempotency: { async run(_key, _fingerprint, task) { return await task(); } },
+    idempotency,
     trivium: {
       async stat() { return { exists: false, nodeCount: 0, edgeCount: 0 }; },
       async bulkUpsert() { throw new Error("unexpected vector write"); },
       async bulkLink() { throw new Error("unexpected vector link"); },
+      async bulkDelete() { throw new Error("unexpected vector delete"); },
       async searchHybrid() { return []; },
       async resolveMany() { return { items: [] }; },
       async neighbors() { return { nodes: [] }; },
@@ -234,7 +253,8 @@ for (const contract of stateStoreContractCases()) {
 
 {
   const calls = [];
-  const namespace = "bme-vnext:collection-a";
+  const namespace = "bme-v9:collection-a";
+  const ids = new Map();
   const harness = await createHarness({
     async stat(request) {
       calls.push(["stat", request]);
@@ -242,18 +262,64 @@ for (const contract of stateStoreContractCases()) {
     },
     async bulkUpsert(request) {
       calls.push(["upsert", request]);
-      return { totalCount: 1, successCount: 1, failureCount: 0, failures: [] };
+      for (const item of request.items) ids.set(item.externalId, ids.size + 1);
+      return {
+        totalCount: request.items.length,
+        successCount: request.items.length,
+        failureCount: 0,
+        failures: [],
+      };
     },
     async bulkLink(request) {
       calls.push(["link", request]);
-      return { totalCount: 1, successCount: 1, failureCount: 0, failures: [] };
+      return {
+        totalCount: request.items.length,
+        successCount: request.items.length,
+        failureCount: 0,
+        failures: [],
+      };
     },
     async searchHybrid(request) {
       calls.push(["search", request]);
       return [
-        { id: 1, externalId: "valid", namespace, score: 0.9, payload: { secret: "never return" } },
-        { id: 2, externalId: "other-chat", namespace: "bme-vnext:collection-b", score: 1 },
+        {
+          id: 1,
+          externalId: "valid",
+          namespace,
+          score: 0.9,
+          payload: {
+            bmeNamespace: namespace,
+            modelScope: "provider:model",
+            graphRevision: 3,
+            vectorSpaceId: "space-a",
+            secret: "never return",
+          },
+        },
+        { id: 2, externalId: "other-chat", namespace: "bme-v9:collection-b", score: 1 },
       ];
+    },
+    async resolveMany(request) {
+      calls.push(["resolve", request]);
+      return {
+        items: request.items.map((item, index) => ({
+          index,
+          id: ids.get(item.externalId) || null,
+          externalId: item.externalId,
+          namespace: item.namespace,
+        })),
+      };
+    },
+    async bulkDelete(request) {
+      calls.push(["delete", request]);
+      for (const item of request.items) {
+        for (const [externalId, id] of ids) if (id === item.id) ids.delete(externalId);
+      }
+      return {
+        totalCount: request.items.length,
+        successCount: request.items.length,
+        failureCount: 0,
+        failures: [],
+      };
     },
   });
   try {
@@ -262,27 +328,52 @@ for (const contract of stateStoreContractCases()) {
       "vector.manifest",
       { collectionId: "collection-a", observedDim: 2 },
     );
-    assert.equal(manifest.result.database, "st_bme_vnext_vectors");
-    assert.equal(manifest.result.manifest.observedDim, 2);
+    assert.equal(manifest.result.database, "");
+    assert.equal(manifest.result.manifest, null);
 
+    const initialApplyInput = {
+      collectionId: "collection-a",
+      chatId: "chat-a",
+      graphRevision: 3,
+      modelScope: "provider:model",
+      vectorSpaceId: "space-a",
+      observedDim: 2,
+      items: [{ externalId: "valid", vector: [0.25, 0.75], text: "memory" }],
+      links: [{ fromId: "valid", toId: "valid", relation: "self" }],
+    };
     const applied = await harness.client.requestModuleTransaction(
       "third-party.st-bme",
       "vector.apply",
-      {
-        collectionId: "collection-a",
-        chatId: "chat-a",
-        graphRevision: 3,
-        modelScope: "provider:model",
-        vectorSpaceId: "space-a",
-        observedDim: 2,
-        items: [{ externalId: "valid", vector: [0.25, 0.75], text: "memory" }],
-        links: [{ fromId: "valid", toId: "valid", relation: "self" }],
-      },
+      initialApplyInput,
       { idempotencyKey: "vector-job-1" },
     );
     assert.equal(applied.result.ok, true);
     assert.equal(applied.result.namespace, namespace);
+    assert.match(applied.result.database, /^st_bme_v9_vectors_/);
     assert.equal(calls.find(([name]) => name === "upsert")[1].items[0].payload.chatId, "chat-a");
+    assert.equal(calls.find(([name]) => name === "upsert")[1].items[0].payload.bmeNamespace, namespace);
+    const mutationCallsAfterApply = calls.filter(([name]) =>
+      ["delete", "link", "resolve", "upsert"].includes(name)
+    ).length;
+    const replay = await harness.client.requestModuleTransaction(
+      "third-party.st-bme",
+      "vector.apply",
+      initialApplyInput,
+      { idempotencyKey: "vector-job-1" },
+    );
+    assert.deepEqual(replay.result, applied.result);
+    assert.equal(
+      calls.filter(([name]) => ["delete", "link", "resolve", "upsert"].includes(name)).length,
+      mutationCallsAfterApply,
+    );
+
+    const actualManifest = await harness.client.requestModuleTransaction(
+      "third-party.st-bme",
+      "vector.manifest",
+      { collectionId: "collection-a" },
+    );
+    assert.equal(actualManifest.result.manifest.graphRevision, 3);
+    assert.equal(actualManifest.result.manifest.nodeCount, 1);
 
     const recalled = await harness.client.requestModuleTransaction(
       "third-party.st-bme",
@@ -290,6 +381,9 @@ for (const contract of stateStoreContractCases()) {
       {
         collectionId: "collection-a",
         chatId: "chat-a",
+        graphRevision: 3,
+        modelScope: "provider:model",
+        vectorSpaceId: "space-a",
         observedDim: 2,
         queryTexts: ["memory"],
         queryVectors: [[0.25, 0.75]],
@@ -304,10 +398,108 @@ for (const contract of stateStoreContractCases()) {
       namespace,
     }]);
     assert.deepEqual(calls.find(([name]) => name === "search")[1].payloadFilter, {
-      ownerKey: ["character-a"],
+      $and: [
+        { bmeNamespace: { $eq: namespace } },
+        { modelScope: { $eq: "provider:model" } },
+        { graphRevision: { $eq: 3 } },
+        { vectorSpaceId: { $eq: "space-a" } },
+        { ownerKey: ["character-a"] },
+      ],
     });
+
+    const searchCalls = calls.filter(([name]) => name === "search").length;
+    const stale = await harness.client.requestModuleTransaction(
+      "third-party.st-bme",
+      "recall.candidates",
+      {
+        collectionId: "collection-a",
+        chatId: "chat-a",
+        graphRevision: 4,
+        modelScope: "provider:model",
+        vectorSpaceId: "space-a",
+        observedDim: 2,
+        queryTexts: ["memory"],
+        queryVectors: [[0.25, 0.75]],
+      },
+    );
+    assert.equal(stale.result.status, "stale");
+    assert.deepEqual(stale.result.candidates, []);
+    assert.equal(calls.filter(([name]) => name === "search").length, searchCalls);
+
+    const replacementStart = calls.length;
+    const replacementItems = Array.from({ length: 1001 }, (_, index) => ({
+      externalId: `node-${index}`,
+      vector: [index / 1001, 1 - index / 1001],
+      text: `memory-${index}`,
+    }));
+    const replacementLinks = replacementItems.map((item) => ({
+      fromId: item.externalId,
+      toId: item.externalId,
+      relation: "self",
+    }));
+    const replaced = await harness.client.requestModuleTransaction(
+      "third-party.st-bme",
+      "vector.apply",
+      {
+        ...initialApplyInput,
+        graphRevision: 4,
+        items: replacementItems,
+        links: replacementLinks,
+      },
+      { idempotencyKey: "vector-job-2" },
+    );
+    const replacementCalls = calls.slice(replacementStart);
+    assert.deepEqual(
+      replacementCalls.filter(([name]) => name === "upsert").map(([, request]) => request.items.length),
+      [1000, 1],
+    );
+    assert.deepEqual(
+      replacementCalls.filter(([name]) => name === "link").map(([, request]) => request.items.length),
+      [1000, 1],
+    );
+    assert.equal(replacementCalls.some(([name]) => name === "delete"), true);
+    assert.equal(replaced.result.manifest.nodeCount, 1001);
+    assert.equal(replaced.result.manifest.edgeCount, 1001);
+    assert.equal(ids.has("valid"), false);
+
+    const emptyStart = calls.length;
+    const emptied = await harness.client.requestModuleTransaction(
+      "third-party.st-bme",
+      "vector.apply",
+      {
+        ...initialApplyInput,
+        graphRevision: 5,
+        items: [],
+        links: [],
+      },
+      { idempotencyKey: "vector-job-3" },
+    );
+    const emptyCalls = calls.slice(emptyStart);
+    assert.equal(emptyCalls.some(([name]) => name === "delete"), true);
+    assert.equal(emptyCalls.some(([name]) => name === "upsert" || name === "link"), false);
+    assert.equal(ids.size, 0);
+    assert.equal(emptied.result.manifest.nodeCount, 0);
+    assert.equal(emptied.result.manifest.edgeCount, 0);
+
+    await assert.rejects(
+      harness.client.requestModuleTransaction(
+        "third-party.st-bme",
+        "recall.candidates",
+        {
+          collectionId: "collection-a",
+          chatId: "chat-a",
+          graphRevision: 3,
+          modelScope: "provider:model",
+          vectorSpaceId: "space-a",
+          observedDim: 2,
+          queryTexts: ["memory"],
+          queryVectors: [],
+        },
+      ),
+      /aligned queryTexts and queryVectors/,
+    );
     passed += 1;
-    console.log(`ok ${passed} - derived vectors stay in the vNext namespace and recall returns sanitized same-scope candidates`);
+    console.log(`ok ${passed} - derived vectors replay, batch, replace, clear, and gate recall by manifest`);
   } finally {
     harness.close();
   }
@@ -321,8 +513,8 @@ assert.deepEqual(Object.keys(manifest.transactions).sort(), [
   "vector.apply",
   "vector.manifest",
 ]);
-assert.equal(authorityModule.STATE_DATABASE, "st_bme_vnext");
-assert.equal(authorityModule.VECTOR_DATABASE, "st_bme_vnext_vectors");
+assert.equal(authorityModule.STATE_DATABASE, "st_bme_v9");
+assert.equal(authorityModule.VECTOR_DATABASE, "st_bme_v9_vectors");
 passed += 1;
-console.log(`ok ${passed} - companion manifest exposes only the vNext state and derived-index surface`);
-console.log(`vNext authority: ${passed}/${passed} passed`);
+console.log(`ok ${passed} - companion manifest exposes only the v9 state and derived-index surface`);
+console.log(`v9 authority: ${passed}/${passed} passed`);

@@ -1,4 +1,4 @@
-const MODULE_NAME = "st_bme";
+const MODULE_NAME = "st_bme_v9";
 const GLOBAL_DEBUG_FLAG_KEY = "__stBmeDebugLoggingEnabled";
 
 function resolveModuleSettings(settings = null) {

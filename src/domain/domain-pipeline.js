@@ -165,7 +165,7 @@ export class DomainPipeline {
       return { status: "ignored", reason: "received-message-is-not-assistant", stages: [] };
     }
 
-    const state = await this.#engine.read(lease, { requiresActive: false });
+    const state = await this.#engine.read(lease);
     const plan = autoExtractionPlan(chat, state.head.processedThrough, settings, force);
     if (!plan.canRun) return { status: "deferred", reason: plan.reason, stages: [] };
     if (receivedPosition >= 0 && plan.end > receivedPosition) {
@@ -325,7 +325,7 @@ export class DomainPipeline {
   }) {
     this.#emit(lease, operation, "running");
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const state = await this.#engine.read(lease, { requiresActive: false });
+      const state = await this.#engine.read(lease);
       if (!historyBasisMatches(state.head.history, basisHistoryLength, basisHistoryHash)) {
         const error = new Error(`history basis changed before ${operation}`);
         error.name = "HistoryBasisConflictError";
@@ -359,7 +359,7 @@ export class DomainPipeline {
           changeSet: planned.changeSet,
           vectorModelScope,
           enqueueVectorJob: touchesVector,
-        }, { requiresActive: false });
+        });
         this.#emit(lease, operation, "committed");
         return { status: "committed", ...planned, ...committed };
       } catch (error) {

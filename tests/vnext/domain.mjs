@@ -118,9 +118,12 @@ test("a local graph draft becomes normalized records without mutating the snapsh
     changeSet: planned.changeSet,
   });
   const graph = materializeGraph(await store.readConversation("draft"));
+  const committedState = await store.readConversation("draft");
   assert.deepEqual(graph.nodes.map(({ id }) => id), ["b", "a"]);
   assert.equal(graph.edges[0].id, "e");
   assert.equal(graph.historyState.extractionCount, 1);
+  assert.equal(graph.revision, committedState.head.graphRevision);
+  assert.equal(Object.hasOwn(committedState.collections.graphState.get("runtime"), "revision"), false);
 });
 
 test("extraction and every maintenance phase commit separately and roll back as one suffix", async () => {
@@ -208,6 +211,41 @@ test("an assistant edit while extraction is running rejects the late draft", asy
   await engine.reconcile(lease, messages("edited"));
   release();
   await assert.rejects(pending, /history basis changed/);
+  assert.equal((await store.readConversation("chat-a")).collections.nodes.size, 0);
+});
+
+test("switching chats rejects a late extraction even when its history did not change", async () => {
+  const { store, engine } = runtime();
+  const lease = engine.activate("chat-a");
+  const snapshot = { chatKey: "chat-a", messages: messages() };
+  await engine.reconcile(lease, snapshot.messages);
+  let release;
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  const base = fakeOperations();
+  const pipeline = new DomainPipeline({
+    engine,
+    operations: fakeOperations({
+      async extractMemories(args) {
+        started();
+        await new Promise((resolve) => { release = resolve; });
+        return base.extractMemories(args);
+      },
+    }),
+    getSettings: () => ({
+      enabled: true,
+      extractAutoEnabled: true,
+      extractEvery: 1,
+      enableHierarchicalSummary: false,
+      enableAutoCompression: false,
+    }),
+    getEmbeddingConfig: () => ({ mode: "direct" }),
+  });
+  const pending = pipeline.processAssistant({ lease, snapshot, messageId: 1 });
+  await startedPromise;
+  engine.activate("chat-b");
+  release();
+  await assert.rejects(pending, { name: "LeaseExpiredError" });
   assert.equal((await store.readConversation("chat-a")).collections.nodes.size, 0);
 });
 

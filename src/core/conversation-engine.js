@@ -28,7 +28,7 @@ export class ConversationEngine {
       !store?.readRecall ||
       !store?.createTurnRecords
     ) {
-      throw new TypeError("store must implement the vNext state operations");
+      throw new TypeError("store must implement the v9 state operations");
     }
     this.#store = store;
   }
@@ -94,7 +94,7 @@ export class ConversationEngine {
     );
   }
 
-  async commit(lease, command, { requiresActive = false } = {}) {
+  async commit(lease, command, { requiresActive = true } = {}) {
     return this.enqueue(
       lease,
       () => this.#store.commit({ ...command, chatKey: lease.chatKey }),

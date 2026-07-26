@@ -1,0 +1,221 @@
+#st-bme-v9-root {
+  --bme-accent: #e94560;
+  --bme-panel: #17171b;
+  --bme-surface: #232329;
+  --bme-border: rgba(255, 255, 255, 0.14);
+  --bme-text: #ece9ef;
+  color: var(--bme-text);
+}
+
+.st-bme-v9-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 86px;
+  z-index: 2998;
+  width: 44px;
+  height: 44px;
+  border: 1px solid color-mix(in srgb, var(--bme-accent), white 18%);
+  border-radius: 50%;
+  background: var(--bme-panel);
+  color: var(--bme-accent);
+  box-shadow: 0 8px 28px #0008;
+  cursor: pointer;
+}
+
+.st-bme-v9-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  padding: max(12px, 3vh) max(10px, 3vw);
+  background: #000a;
+  backdrop-filter: blur(4px);
+}
+
+.st-bme-v9-overlay[hidden],
+[data-bme-page][hidden],
+.st-bme-v9-node-editor[hidden] {
+  display: none !important;
+}
+
+.st-bme-v9-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: min(1120px, 100%);
+  height: min(900px, 94vh);
+  margin: auto;
+  overflow: hidden;
+  border: 1px solid var(--bme-border);
+  border-radius: 14px;
+  background: var(--bme-panel);
+  box-shadow: 0 24px 90px #000c;
+}
+
+.st-bme-v9-header,
+.st-bme-v9-tabs,
+.st-bme-v9-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.st-bme-v9-header {
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--bme-border);
+}
+
+.st-bme-v9-header h2,
+.st-bme-v9-header p,
+.st-bme-v9-content h3 {
+  margin: 0;
+}
+
+.st-bme-v9-status {
+  margin-top: 4px !important;
+  color: #aaa6b0;
+  font-size: 0.86rem;
+}
+
+.st-bme-v9-status[data-availability="blocked"],
+.st-bme-v9-operation[data-failed="true"] {
+  color: #ff8585;
+}
+
+.st-bme-v9-header button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 2rem;
+  cursor: pointer;
+}
+
+.st-bme-v9-tabs {
+  padding: 8px 14px 0;
+  border-bottom: 1px solid var(--bme-border);
+}
+
+.st-bme-v9-tabs button,
+.st-bme-v9-actions button,
+.st-bme-v9-file,
+.st-bme-v9-settings button,
+.st-bme-v9-node-editor button {
+  padding: 8px 11px;
+  border: 1px solid var(--bme-border);
+  border-radius: 7px;
+  background: var(--bme-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.st-bme-v9-tabs button[aria-selected="true"] {
+  border-color: var(--bme-accent);
+  color: var(--bme-accent);
+}
+
+.st-bme-v9-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.st-bme-v9-actions {
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.st-bme-v9-actions .danger,
+.st-bme-v9-node-editor .danger {
+  border-color: #b34747;
+  color: #ff9b9b;
+}
+
+.st-bme-v9-file input {
+  display: none;
+}
+
+.st-bme-v9-summary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 14px;
+  padding: 14px;
+  border: 1px solid var(--bme-border);
+  border-radius: 9px;
+  background: var(--bme-surface);
+}
+
+.st-bme-v9-summary dt {
+  color: #aaa6b0;
+}
+
+.st-bme-v9-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.st-bme-v9-operation,
+[data-bme-page="records"] pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: #0e0e11;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.st-bme-v9-graph-shell {
+  height: min(58vh, 580px);
+  min-height: 320px;
+  overflow: hidden;
+  border: 1px solid var(--bme-border);
+  border-radius: 9px;
+  background: #0e0e11;
+}
+
+.st-bme-v9-graph-shell canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.st-bme-v9-node-editor,
+.st-bme-v9-settings {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.st-bme-v9-settings fieldset {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--bme-border);
+  border-radius: 9px;
+}
+
+.st-bme-v9-settings label,
+.st-bme-v9-node-editor label {
+  display: grid;
+  gap: 5px;
+}
+
+.st-bme-v9-settings input:not([type="checkbox"]),
+.st-bme-v9-settings select,
+.st-bme-v9-settings textarea,
+.st-bme-v9-node-editor input:not([type="checkbox"]),
+.st-bme-v9-node-editor textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--bme-border);
+  border-radius: 6px;
+  background: #101014;
+  color: inherit;
+}
+
+@media (max-width: 640px) {
+  .st-bme-v9-overlay { padding: 0; }
+  .st-bme-v9-panel { height: 100vh; border-radius: 0; }
+  .st-bme-v9-content { padding: 10px; }
+  .st-bme-v9-graph-shell { min-height: 260px; }
+}

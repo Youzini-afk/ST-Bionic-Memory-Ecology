@@ -102,7 +102,7 @@ export async function buildTurnKey(chatKey, historyPrefixHash) {
   if (!normalizedChatKey || !normalizedPrefixHash) {
     throw new TypeError("chatKey and historyPrefixHash are required");
   }
-  return sha256Hex(`st-bme:vnext:turn\0${normalizedChatKey}\0${normalizedPrefixHash}`);
+  return sha256Hex(`st-bme:v9:turn\0${normalizedChatKey}\0${normalizedPrefixHash}`);
 }
 
 export async function assertTurnKeyBinding(chatKey, historyPrefixHash, turnKey) {

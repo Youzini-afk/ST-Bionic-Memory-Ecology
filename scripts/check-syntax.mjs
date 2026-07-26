@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 
 const SOURCE_ROOTS = [
+  ".authority/server.cjs",
   "index.js",
   "ena-planner",
   "graph",
@@ -14,7 +15,6 @@ const SOURCE_ROOTS = [
   "runtime",
   "scripts",
   "src",
-  "sync",
   "ui",
   "vector",
   "vendor/wasm",

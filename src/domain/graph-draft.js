@@ -43,6 +43,7 @@ export function materializeGraph(state) {
     : createEmptyGraph();
   graph.historyState ||= {};
   graph.historyState.chatId = String(state?.head?.chatKey || graph.historyState.chatId || "");
+  graph.revision = Number(state?.head?.graphRevision || 0);
   graph.nodes = orderedRecords(
     state?.collections?.nodes || new Map(),
     runtime?.nodeOrder,
@@ -61,7 +62,8 @@ export function graphRecords(graph) {
   const nodes = recordMap(Array.isArray(graph.nodes) ? graph.nodes : [], "node");
   const edges = recordMap(Array.isArray(graph.edges) ? graph.edges : [], "edge");
   const runtime = jsonClone(Object.fromEntries(
-    Object.entries(graph).filter(([key]) => key !== "nodes" && key !== "edges"),
+    Object.entries(graph).filter(([key]) =>
+      key !== "nodes" && key !== "edges" && key !== "revision"),
   ));
   runtime.id = GRAPH_RUNTIME_ID;
   runtime.nodeOrder = [...nodes.keys()];

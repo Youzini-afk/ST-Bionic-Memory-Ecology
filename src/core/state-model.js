@@ -84,7 +84,12 @@ export function prepareCommit(head, command = {}, { now = Date.now, id = () => c
   }
 
   const changeSet = normalizeChangeSet(command.changeSet || { changes: [] });
-  if (changeSet.changes.length === 0 && processedThroughAfter === processedThroughBefore) {
+  const forceVectorJob = command.forceVectorJob === true;
+  if (
+    changeSet.changes.length === 0 &&
+    processedThroughAfter === processedThroughBefore &&
+    !forceVectorJob
+  ) {
     throw new TypeError("commit must change graph state or processedThrough");
   }
 
@@ -95,8 +100,10 @@ export function prepareCommit(head, command = {}, { now = Date.now, id = () => c
   const vectorModelScope = Object.hasOwn(command, "vectorModelScope")
     ? String(command.vectorModelScope || "").trim()
     : String(head.vectorModelScope || "").trim();
-  const vectorAffected = command.enqueueVectorJob === true && changeSet.changes.some(
-    ({ collection }) => collection === "nodes" || collection === "edges",
+  const vectorAffected = command.enqueueVectorJob === true && (
+    forceVectorJob || changeSet.changes.some(
+      ({ collection }) => collection === "nodes" || collection === "edges",
+    )
   );
   if (vectorAffected && !vectorModelScope) {
     throw new TypeError("vectorModelScope is required for vector jobs");

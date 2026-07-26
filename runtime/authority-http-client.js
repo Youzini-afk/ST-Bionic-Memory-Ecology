@@ -1,4 +1,10 @@
-import { normalizeAuthorityBaseUrl } from "./authority-capabilities.js";
+const DEFAULT_AUTHORITY_BASE_URL = "/api/plugins/authority";
+
+export function normalizeAuthorityBaseUrl(value = DEFAULT_AUTHORITY_BASE_URL) {
+  const text = String(value || DEFAULT_AUTHORITY_BASE_URL).trim();
+  if (!text) return DEFAULT_AUTHORITY_BASE_URL;
+  return text.replace(/\/+$/, "");
+}
 
 export const AUTHORITY_PROTOCOL_AUTO = "auto";
 export const AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06 = "server-plugin-v06";
