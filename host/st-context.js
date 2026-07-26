@@ -124,7 +124,7 @@ function buildStructuredSnapshot(ctx = {}) {
     host: {
       meta: {
         onlineStatus: ctx.onlineStatus || "",
-        selectedGroupId: ctx.selectedGroupId ?? null,
+        selectedGroupId: ctx.selectedGroupId ?? ctx.groupId ?? null,
       },
       capabilities: {
         hasGetContext: typeof getContext === "function",

@@ -150,6 +150,8 @@ function buildDefaultSessionInitConfig(source = {}) {
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:vector.apply`,
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:recall.candidates`,
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:graph.commitDelta`,
+          `${BME_AUTHORITY_MODULE_ID_LOCAL}:graph.getHead`,
+          `${BME_AUTHORITY_MODULE_ID_LOCAL}:graph.loadSnapshot`,
           `${BME_AUTHORITY_MODULE_ID_LOCAL}:extraction.commitBatch`,
         ],
       },
@@ -371,6 +373,7 @@ const BME_VECTOR_MANIFEST_TRANSACTION = "vector.manifest";
 const BME_VECTOR_APPLY_TRANSACTION = "vector.apply";
 const BME_RECALL_CANDIDATES_TRANSACTION = "recall.candidates";
 const BME_GRAPH_COMMIT_DELTA_TRANSACTION = "graph.commitDelta";
+const BME_GRAPH_GET_HEAD_TRANSACTION = "graph.getHead";
 export const BME_EXTRACTION_COMMIT_BATCH_TRANSACTION = "extraction.commitBatch";
 
 /**
@@ -414,6 +417,8 @@ export function deriveModuleReadiness(modulesPayload = {}) {
   const hasVectorApply = Boolean(transactions[BME_VECTOR_APPLY_TRANSACTION]);
   const hasRecallCandidates = Boolean(transactions[BME_RECALL_CANDIDATES_TRANSACTION]);
   const hasGraphCommitDelta = Boolean(transactions[BME_GRAPH_COMMIT_DELTA_TRANSACTION]);
+  // Atomic commits recover conflicts through graph.getHead.
+  const hasGraphGetHead = Boolean(transactions[BME_GRAPH_GET_HEAD_TRANSACTION]);
   const hasExtractionCommitBatch = Boolean(transactions[BME_EXTRACTION_COMMIT_BATCH_TRANSACTION]);
 
   return {
@@ -422,7 +427,10 @@ export function deriveModuleReadiness(modulesPayload = {}) {
     bmeVectorManifestReady: bmeModuleReady && hasVectorManifest,
     bmeVectorApplyReady: bmeModuleReady && hasVectorApply,
     bmeCandidateSearchReady: bmeModuleReady && hasRecallCandidates,
-    bmeGraphCommitReady: bmeModuleReady && hasGraphCommitDelta,
+    bmeGraphCommitReady:
+      bmeModuleReady &&
+      hasGraphCommitDelta &&
+      hasGraphGetHead,
     bmeExtractionCommitBatchReady: bmeModuleReady && hasExtractionCommitBatch,
   };
 }

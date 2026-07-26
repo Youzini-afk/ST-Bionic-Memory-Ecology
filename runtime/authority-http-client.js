@@ -66,6 +66,8 @@ function buildDefaultSessionInitConfig(source = {}) {
           `${BME_AUTHORITY_MODULE_ID}:vector.apply`,
           `${BME_AUTHORITY_MODULE_ID}:recall.candidates`,
           `${BME_AUTHORITY_MODULE_ID}:graph.commitDelta`,
+          `${BME_AUTHORITY_MODULE_ID}:graph.getHead`,
+          `${BME_AUTHORITY_MODULE_ID}:graph.loadSnapshot`,
           `${BME_AUTHORITY_MODULE_ID}:extraction.commitBatch`,
         ],
       },

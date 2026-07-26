@@ -317,6 +317,9 @@ function jsonResponse(status, payload) {
   assert.ok(perms.modules.execute.includes("third-party.st-bme:vector.manifest"), "must declare vector.manifest execute");
   assert.ok(perms.modules.execute.includes("third-party.st-bme:vector.apply"), "must declare vector.apply execute");
   assert.ok(perms.modules.execute.includes("third-party.st-bme:recall.candidates"), "must declare recall.candidates execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.commitDelta"), "must declare graph.commitDelta execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.getHead"), "must declare graph.getHead execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.loadSnapshot"), "must declare graph.loadSnapshot execute");
   assert.ok(perms.modules.execute.includes("third-party.st-bme:extraction.commitBatch"), "must declare extraction.commitBatch execute");
   // Existing permissions preserved.
   assert.equal(perms.storage.kv, true);
@@ -408,7 +411,7 @@ function jsonResponse(status, payload) {
   assert.equal(response.result.candidates[0].externalId, "node-a");
 }
 
-// Phase F: session init body includes graph.commitDelta in modules.execute declarations.
+// Phase F: session init body includes the complete atomic graph transaction set.
 {
   let sessionInitBody = null;
   const client = new AuthorityHttpClient({
@@ -426,6 +429,8 @@ function jsonResponse(status, payload) {
   assert.ok(sessionInitBody, "session init body should have been sent");
   const perms = sessionInitBody.declaredPermissions;
   assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.commitDelta"), "must declare graph.commitDelta execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.getHead"), "must declare graph.getHead execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.loadSnapshot"), "must declare graph.loadSnapshot execute");
 }
 
 // Phase F: requestModuleTransaction posts to /modules/third-party.st-bme/transactions/graph.commitDelta

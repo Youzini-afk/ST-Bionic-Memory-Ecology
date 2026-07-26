@@ -1,3 +1,8 @@
+import {
+  isLikelyMvuWorldInfoContent,
+  isMvuTaggedWorldInfoNameOrComment,
+} from '../prompting/mvu-compat.js';
+
 function normalizeName(value) {
   return String(value || '').trim();
 }
@@ -161,4 +166,24 @@ export function isPlannerWorldbookEntryEnabled(entry = {}) {
 
 export function isPlannerWorldbookEntryConstant(entry = {}) {
   return entry?.constant === true || entry?.type === 'constant';
+}
+
+function isPlannerMvuWorldbookEntry(entry = {}) {
+  return (
+    isMvuTaggedWorldInfoNameOrComment(
+      entry?.name || entry?.title || '',
+      entry?.comment || '',
+    ) || isLikelyMvuWorldInfoContent(entry?.content || '')
+  );
+}
+
+export function shouldExcludePlannerWorldbookEntry(
+  entry = {},
+  { nameExcludes = [], useDefaultMvuFilter = true } = {},
+) {
+  const comment = String(entry?.comment || entry?.name || entry?.title || '');
+  if (nameExcludes.some((pattern) => pattern && comment.includes(pattern))) {
+    return true;
+  }
+  return useDefaultMvuFilter && isPlannerMvuWorldbookEntry(entry);
 }

@@ -87,7 +87,7 @@ try {
           { is_user: true, mes: "最后一句" },
         ],
         onlineStatus: "gpt-test",
-        selectedGroupId: 42,
+        groupId: 42,
       };
     },
   };
@@ -121,6 +121,7 @@ try {
   assert.equal(hostSnapshot.snapshot.variables.local.location, "library");
   assert.equal(hostSnapshot.snapshot.chat.lastUserMessage, "最后一句");
   assert.equal(hostSnapshot.snapshot.chat.id, "chat-from-global");
+  assert.equal(hostSnapshot.snapshot.host.meta.selectedGroupId, 42);
   assert.equal(
     hostSnapshot.snapshot.chat.messages[1]?.is_system,
     false,

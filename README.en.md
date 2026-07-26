@@ -98,7 +98,7 @@ Refresh the page after installation.
 ### Option 2: manual installation
 
 ```bash
-cd SillyTavern/data/default-user/extensions/third-party
+cd SillyTavern/data/default-user/extensions
 git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 

@@ -22,6 +22,7 @@ import {
   isPlannerWorldbookEntryConstant,
   isPlannerWorldbookEntryEnabled,
   normalizePlannerWorldbookEntries,
+  shouldExcludePlannerWorldbookEntry,
 } from '../ena-planner/ena-planner-worldbook-utils.js';
 
 {
@@ -207,6 +208,38 @@ import {
   assert.equal(result.plotPrepared, true);
   assert.equal(textarea.value, 'raw input\n\n<plot>next</plot>');
   assert.equal(plannerState.bypassNextSend, false);
+}
+
+{
+  const defaultFilter = { nameExcludes: [], useDefaultMvuFilter: true };
+  assert.equal(
+    shouldExcludePlannerWorldbookEntry({ name: '[mvu_plot] 剧情状态' }, defaultFilter),
+    true,
+  );
+  assert.equal(
+    shouldExcludePlannerWorldbookEntry({ comment: '[initvar] 初始变量' }, defaultFilter),
+    true,
+  );
+  assert.equal(
+    shouldExcludePlannerWorldbookEntry({
+      content: 'stat_data: { mood: calm }\ndisplay_data: { mood: calm }',
+    }, defaultFilter),
+    true,
+  );
+  assert.equal(
+    shouldExcludePlannerWorldbookEntry(
+      { name: '[mvu_plot] custom mode keeps explicit content' },
+      { nameExcludes: [], useDefaultMvuFilter: false },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldExcludePlannerWorldbookEntry(
+      { comment: 'manual-block entry' },
+      { nameExcludes: ['manual-block'], useDefaultMvuFilter: false },
+    ),
+    true,
+  );
 }
 
 {

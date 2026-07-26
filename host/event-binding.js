@@ -33,6 +33,13 @@ function isTavernHelperPromptViewerSyntheticGeneration(runtime) {
   return !runtime.isFreshRecallInputRecord?.(pendingSendIntent);
 }
 
+function resolveEventListenerCleanup(runtime, eventName, listener, cleanup) {
+  if (typeof cleanup === "function") return cleanup;
+  const remove = runtime.eventSource?.off || runtime.eventSource?.removeListener;
+  if (typeof remove !== "function") return cleanup ?? null;
+  return () => Reflect.apply(remove, runtime.eventSource, [eventName, listener]);
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const eventName = runtime.eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS;
   const eventSourceMakeFirst = runtime.eventSource?.makeFirst;
@@ -41,12 +48,17 @@ export function registerBeforeCombinePromptsController(runtime, listener) {
       ? eventSourceMakeFirst.bind(runtime.eventSource)
       : runtime.getEventMakeFirst?.();
   if (typeof makeFirst === "function") {
-    return makeFirst(eventName, listener);
+    return resolveEventListenerCleanup(
+      runtime,
+      eventName,
+      listener,
+      makeFirst(eventName, listener),
+    );
   }
 
   runtime.console.warn("[ST-BME] eventMakeFirst 不可用，回退到普通事件注册");
   runtime.eventSource.on(eventName, listener);
-  return null;
+  return resolveEventListenerCleanup(runtime, eventName, listener, null);
 }
 
 export function registerGenerationAfterCommandsController(runtime, listener) {
@@ -58,14 +70,14 @@ export function registerGenerationAfterCommandsController(runtime, listener) {
       : runtime.getEventMakeFirst?.();
   if (typeof makeFirst === "function") {
     const cleanup = makeFirst(eventName, listener);
-    return cleanup;
+    return resolveEventListenerCleanup(runtime, eventName, listener, cleanup);
   }
 
   runtime.console.warn(
     "[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册",
   );
   runtime.eventSource.on(eventName, listener);
-  return null;
+  return resolveEventListenerCleanup(runtime, eventName, listener, null);
 }
 
 export function scheduleSendIntentHookRetryController(runtime, delayMs = 400) {

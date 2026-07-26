@@ -13,6 +13,7 @@ import {
     isPlannerWorldbookEntryConstant,
     isPlannerWorldbookEntryEnabled,
     normalizePlannerWorldbookEntries,
+    shouldExcludePlannerWorldbookEntry,
 } from './ena-planner-worldbook-utils.js';
 import { readPlannerPlotHistory } from './planner-plot-history.js';
 import { getActiveTaskProfile } from '../prompting/prompt-profiles.js';
@@ -649,15 +650,15 @@ async function buildWorldbookBlock(scanText) {
     // Filter: not disabled
     let entries = allEntries.filter(isPlannerWorldbookEntryEnabled);
 
-    // Filter: exclude entries whose name contains any of the configured exclude patterns
+    // Filter explicit exclusions and, in the default BME mode, MVU-owned entries.
     const nameExcludes = s.worldbookExcludeNames ?? ['mvu_update'];
-    entries = entries.filter(e => {
-        const comment = String(e?.comment || e?.name || e?.title || '');
-        for (const pat of nameExcludes) {
-            if (pat && comment.includes(pat)) return false;
-        }
-        return true;
-    });
+    const useDefaultMvuFilter = String(
+        _bmeRuntime?.getSettings?.()?.worldInfoFilterMode || 'default',
+    ).trim() !== 'custom';
+    entries = entries.filter(e => !shouldExcludePlannerWorldbookEntry(e, {
+        nameExcludes,
+        useDefaultMvuFilter,
+    }));
 
     // Filter: exclude position=4 if configured
     if (s.excludeWorldbookPosition4) {

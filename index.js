@@ -8901,11 +8901,22 @@ async function loadGraphFromLukerSidecarV2(
     };
   }
   cacheChatStateManifest(normalizedChatId, manifest);
+  const buildChatSwitchedResult = () => ({
+    success: false,
+    loaded: false,
+    reason: "luker-chat-state-chat-switched",
+    chatId: normalizedChatId,
+    attemptIndex,
+    revision: Number(manifest.headRevision || 0),
+  });
 
   const localSnapshot = await readLocalCacheSnapshotForChat(
     normalizedChatId,
     `${source}:luker-local-cache-read`,
   );
+  if (normalizeChatIdCandidate(getCurrentChatId()) !== normalizedChatId) {
+    return buildChatSwitchedResult();
+  }
   const localSnapshotRevision = Number(localSnapshot?.meta?.revision || 0);
   const localSnapshotIntegrity = normalizeChatIdCandidate(localSnapshot?.meta?.integrity);
   if (
@@ -9022,15 +9033,8 @@ async function loadGraphFromLukerSidecarV2(
       revision: Number(manifest.headRevision || 0),
     };
   }
-  if (getCurrentChatId() !== normalizedChatId) {
-    return {
-      success: false,
-      loaded: false,
-      reason: "luker-chat-state-chat-switched",
-      chatId: normalizedChatId,
-      attemptIndex,
-      revision: Number(manifest.headRevision || 0),
-    };
+  if (normalizeChatIdCandidate(getCurrentChatId()) !== normalizedChatId) {
+    return buildChatSwitchedResult();
   }
 
   const loadResult = applyIndexedDbSnapshotToRuntime(normalizedChatId, snapshot, {
@@ -18129,7 +18133,7 @@ async function onRepairLukerSidecar() {
   }
 
   if (
-    (!currentGraph || normalizeChatIdCandidate(currentGraph?.historyState?.chatId) !== normalizeChatIdCandidate(chatId)) &&
+    (!currentGraph || normalizeChatIdCandidate(getGraphOwnedChatId(currentGraph)) !== normalizeChatIdCandidate(chatId)) &&
     !(await loadGraphFromLukerSidecarV2(chatId, {
       source: "panel-manual-luker-sidecar-repair",
       allowOverride: true,
@@ -18174,6 +18178,19 @@ async function onCompactLukerSidecar() {
   if (!chatId || !currentGraph) {
     toastr.warning("当前没有可压实的图谱");
     return { handledToast: true, reason: "missing-graph" };
+  }
+
+  if (
+    normalizeChatIdCandidate(getGraphOwnedChatId(currentGraph)) !==
+      normalizeChatIdCandidate(chatId) &&
+    !(await loadGraphFromLukerSidecarV2(chatId, {
+      source: "panel-manual-luker-sidecar-compact",
+      allowOverride: true,
+      chatStateTarget,
+    }))?.loaded
+  ) {
+    toastr.warning("当前图谱不属于这个聊天，且无法从 Luker 主 sidecar 重新加载，未执行压实");
+    return { handledToast: true, reason: "sidecar-load-failed" };
   }
 
   const result = await compactLukerGraphSidecarV2(context, {
@@ -18397,6 +18414,7 @@ async function onCompactLukerSidecar() {
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
       getPlannerRecallTimeoutMs,
+      getSettings,
       isConversationLeaseCurrent: (...args) =>
         conversationSession.isLeaseCurrent(...args),
       isTrivialUserInput,
