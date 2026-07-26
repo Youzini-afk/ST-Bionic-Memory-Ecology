@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { buildPersistDelta } from "../sync/bme-db.js";
+import { PROCESSED_MESSAGE_HASH_VERSION } from "../runtime/runtime-state.js";
 import {
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
   OpfsGraphStore,
@@ -24,7 +25,7 @@ function createRuntimeGraphLikeSnapshot({
       chatId,
       lastProcessedAssistantFloor: lastProcessedFloor,
       extractionCount,
-      processedMessageHashVersion: 2,
+      processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
       processedMessageHashes: {},
       processedMessageHashesNeedRefresh: false,
       historyDirtyFrom: null,

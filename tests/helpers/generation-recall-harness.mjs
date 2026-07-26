@@ -600,6 +600,7 @@ export async function createGenerationRecallHarness(options = {}) {
     ensureGraphMutationReady: () => true,
     getContext,
     getCurrentChatId,
+    getCurrentGraph: () => harness.currentGraph,
     getGraphPersistenceState: () => graphPersistenceState,
     getIsExtracting: () => harness.isExtracting,
     getIsHostGenerationRunning: () => isHostGenerationRunning,

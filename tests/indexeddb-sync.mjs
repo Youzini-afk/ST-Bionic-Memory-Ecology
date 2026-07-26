@@ -22,7 +22,10 @@ import {
   syncNow,
   upload,
 } from "../sync/bme-sync.js";
-import { MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY } from "../runtime/runtime-state.js";
+import {
+  MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
+  PROCESSED_MESSAGE_HASH_VERSION,
+} from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-sync]";
 
@@ -900,7 +903,7 @@ async function testManualBackupAndRestoreFlow() {
         chatId: "chat-backup-flow",
         lastProcessedAssistantFloor: 4,
         extractionCount: 2,
-        processedMessageHashVersion: 2,
+        processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
         processedMessageHashes: {
           0: "hash-0",
           1: "hash-1",

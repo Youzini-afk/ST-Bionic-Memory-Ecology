@@ -26,6 +26,7 @@ import {
   onChatChangedController,
   onGenerationAfterCommandsController,
   onGenerationStartedController,
+  onMessageDeletedController,
   onMessageSentController,
   onMessageReceivedController,
   onMessageSwipedController,
@@ -184,8 +185,10 @@ const {
 const { consolidateMemories } = await import("../maintenance/consolidator.js");
 const { retrieve } = await import("../retrieval/retriever.js");
 const {
+  buildChatHistoryFingerprint,
   createBatchJournalEntry,
   buildReverseJournalRecoveryPlan,
+  detectHistoryMutation,
   normalizeGraphRuntimeState,
   rollbackBatch,
 } = await import("../runtime/runtime-state.js");
@@ -666,7 +669,12 @@ function createHistoryRecoveryHarness() {
       : { accepted: true, saved: true };
   },
   clearInjectionState() {},
-  assertRecoveryChatStillActive() {},
+  assertRecoveryHistoryStillCurrent(_chatId, expectedFingerprint) {
+    if (buildChatHistoryFingerprint(context.chat) === expectedFingerprint) {
+      return true;
+    }
+    throw context.createAbortError("history-changed-during-recovery");
+  },
   refreshPanelLiveState() {
     context.refreshPanelCalls += 1;
   },
@@ -686,9 +694,10 @@ function createHistoryRecoveryHarness() {
   const runtime = {
     applyRecoveryPlanToVectorState: (...args) =>
       context.applyRecoveryPlanToVectorState(...args),
-    assertRecoveryChatStillActive: (...args) =>
-      context.assertRecoveryChatStillActive(...args),
+    assertRecoveryHistoryStillCurrent: (...args) =>
+      context.assertRecoveryHistoryStillCurrent(...args),
     beginStageAbortController: (...args) => context.beginStageAbortController(...args),
+    buildChatHistoryFingerprint,
     buildRecoveryResult: (...args) => context.buildRecoveryResult(...args),
     buildReverseJournalRecoveryPlan: (...args) =>
       context.buildReverseJournalRecoveryPlan(...args),
@@ -823,7 +832,11 @@ function createRerollHarness() {
     },
     getAssistantTurns(chat = []) {
       return chat.flatMap((message, index) =>
-        !message?.is_user && !message?.is_system ? [index] : [],
+        !message?.is_user &&
+        !message?.is_system &&
+        String(message?.mes ?? "").trim()
+          ? [index]
+          : [],
       );
     },
     getLastProcessedAssistantFloor() {
@@ -965,8 +978,13 @@ function createRerollHarness() {
     createUiStatus,
     onRerollController,
     isAbortError: (e) => e?.name === "AbortError",
-    assertRecoveryChatStillActive() {
-      // no-op in test
+    assertRecoveryHistoryStillCurrent(_chatId, expectedFingerprint) {
+      if (buildChatHistoryFingerprint(context.chat) === expectedFingerprint) {
+        return true;
+      }
+      const error = new Error("history-changed-during-reroll");
+      error.name = "AbortError";
+      throw error;
     },
     toastr: {
       info() {},
@@ -977,14 +995,16 @@ function createRerollHarness() {
   const runtime = {
     applyRecoveryPlanToVectorState: (...args) =>
       context.applyRecoveryPlanToVectorState(...args),
-    assertRecoveryChatStillActive: (...args) =>
-      context.assertRecoveryChatStillActive(...args),
+    assertRecoveryHistoryStillCurrent: (...args) =>
+      context.assertRecoveryHistoryStillCurrent(...args),
+    buildChatHistoryFingerprint,
     buildRecoveryResult: (...args) => context.buildRecoveryResult(...args),
     buildReverseJournalRecoveryPlan: (...args) =>
       context.buildReverseJournalRecoveryPlan(...args),
     clearHistoryDirty: (...args) => context.clearHistoryDirty(...args),
     clearInjectionState: (...args) => context.clearInjectionState(...args),
     cloneGraphSnapshot: (...args) => context.cloneGraphSnapshot(...args),
+    detectHistoryMutation,
     ensureCurrentGraphRuntimeState: (...args) =>
       context.ensureCurrentGraphRuntimeState(...args),
     findJournalRecoveryPoint: (...args) =>
@@ -4749,6 +4769,7 @@ async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
     buildPersistDelta: () => null,
     buildExtractionMessages: () => [],
     cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value)),
+    buildChatHistoryFingerprint,
     computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
     console,
     createBatchJournalEntry: (_before, _after, options) => ({
@@ -4853,6 +4874,7 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
     buildPersistDelta: () => null,
     buildExtractionMessages: () => [],
     cloneGraphSnapshot: (value) => JSON.parse(JSON.stringify(value)),
+    buildChatHistoryFingerprint,
     computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
     console,
     createBatchJournalEntry: (_before, _after, options) => ({
@@ -5964,6 +5986,7 @@ async function testSwipeRoutesToRerollWithoutHistoryRecoveryFallback() {
 
 async function testSwipeFailureSchedulesHistoryRecoveryFallback() {
   const calls = [];
+  const checkpoints = [];
   const result = await onMessageSwipedController(
     {
       async onReroll() {
@@ -5971,6 +5994,9 @@ async function testSwipeFailureSchedulesHistoryRecoveryFallback() {
       },
       scheduleHistoryMutationRecheck(...args) {
         calls.push(args);
+      },
+      checkpointHistoryMutation(...args) {
+        checkpoints.push(args);
       },
       refreshPersistedRecallMessageUi() {},
       console: { warn() {}, error() {} },
@@ -5983,6 +6009,82 @@ async function testSwipeFailureSchedulesHistoryRecoveryFallback() {
   assert.deepEqual(calls, [
     ["message-swiped", 9, { reason: "host-swipe" }],
   ]);
+  assert.deepEqual(checkpoints, [
+    ["message-swiped", 9, { reason: "host-swipe" }],
+  ]);
+}
+
+async function testOverswipeCheckpointFailureWaitsForReplacement() {
+  const rechecks = [];
+  const checkpoints = [];
+  const result = await onMessageSwipedController(
+    {
+      async onReroll() {
+        return {
+          success: false,
+          recoveryPath: "awaiting-replacement",
+          error: "checkpoint unavailable",
+        };
+      },
+      scheduleHistoryMutationRecheck(...args) {
+        rechecks.push(args);
+      },
+      checkpointHistoryMutation(...args) {
+        checkpoints.push(args);
+      },
+      refreshPersistedRecallMessageUi() {},
+      console: { warn() {}, error() {} },
+    },
+    9,
+    { reason: "host-overswipe" },
+  );
+
+  assert.equal(result.success, false);
+  assert.deepEqual(rechecks, []);
+  assert.deepEqual(checkpoints, [
+    ["message-swiped", 9, { reason: "host-overswipe" }],
+  ]);
+}
+
+async function testRegenerateDeleteCheckpointsImmediatelyWithoutRecallInvalidation() {
+  const checkpoints = [];
+  const deferred = [];
+  let invalidations = 0;
+
+  const result = onMessageDeletedController(
+    {
+      getContext: () => ({
+        chat: [
+          { is_user: false, mes: "greeting" },
+          { is_user: true, mes: "parent user" },
+        ],
+      }),
+      getGenerationContext: () => ({
+        kind: "no-new-user",
+        type: "regenerate",
+      }),
+      invalidateRecallAfterHistoryMutation() {
+        invalidations += 1;
+      },
+      checkpointHistoryMutation(...args) {
+        checkpoints.push(args);
+      },
+      scheduleDeferredHistoryMutationRecheck(...args) {
+        deferred.push(args);
+      },
+      markGenerationContextExpectedMutation() {},
+      noteAssistantTailDelete() {},
+      refreshPersistedRecallMessageUi() {},
+    },
+    2,
+    null,
+  );
+
+  assert.equal(result.expectedRegenerateDelete, true);
+  assert.equal(result.invalidated, false);
+  assert.equal(invalidations, 0);
+  assert.deepEqual(checkpoints, [["message-deleted-regenerate", 2, null]]);
+  assert.deepEqual(deferred, [["message-deleted-regenerate", 2, null]]);
 }
 
 async function testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid() {
@@ -6223,6 +6325,81 @@ async function testMessageReceivedSkipsWhenAutoExtractionDisabled() {
   assert.equal(runExtractionCalls, 0);
   assert.deepEqual(deferredReasons, []);
   assert.equal(refreshCalls, 1);
+}
+
+async function testMessageReceivedQueuesDirtyOverswipeReplacementRecovery() {
+  const calls = [];
+  let recoveryCalls = 0;
+  const chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "replacement" },
+  ];
+  const graph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      historyDirtyFrom: 1,
+    },
+  };
+
+  onMessageReceivedController(
+    {
+      getGraphPersistenceState: () => ({ loadState: "loaded", dbReady: true }),
+      getCurrentGraph: () => graph,
+      getPendingRecallSendIntent: () => ({ text: "", at: 0 }),
+      isFreshRecallInputRecord: () => true,
+      createRecallInputRecord: () => ({ text: "", at: 0 }),
+      setPendingRecallSendIntent() {},
+      getContext: () => ({ chat }),
+      getSettings: () => ({
+        enabled: true,
+        extractAutoEnabled: false,
+        extractEvery: 1,
+      }),
+      getLastProcessedAssistantFloor: () => 1,
+      isAssistantChatMessage(message) {
+        return Boolean(message) && !message.is_user && !message.is_system;
+      },
+      resolveAutoExtractionPlan: () => ({
+        canRun: false,
+        reason: "no-unprocessed-assistant-turns",
+        plannedBatchEndFloor: null,
+        strategy: "normal",
+      }),
+      runExtraction: async (options) => {
+        calls.push(options);
+        await runExtractionController(
+          {
+            getIsExtracting: () => false,
+            getCurrentGraph: () => graph,
+            getContext: () => ({ chat }),
+            getSettings: () => ({
+              enabled: true,
+              extractAutoEnabled: false,
+            }),
+            getLastProcessedAssistantFloor: () => 1,
+            ensureGraphMutationReady: () => true,
+            recoverHistoryIfNeeded: async () => {
+              recoveryCalls += 1;
+              return true;
+            },
+          },
+          options,
+        );
+      },
+      console: { debug() {}, error() {} },
+      notifyExtractionIssue() {},
+      refreshPersistedRecallMessageUi() {},
+    },
+    1,
+    "swipe",
+  );
+
+  await waitForTick();
+
+  assert.deepEqual(calls, [
+    { lockedEndFloor: 1, triggerSource: "message-received" },
+  ]);
+  assert.equal(recoveryCalls, 1);
 }
 
 async function testMessageReceivedDefersExtractionDuringHostGeneration() {
@@ -6511,6 +6688,46 @@ async function testGenerationEndedResumesPendingAutoExtractionAfterSettle() {
   await new Promise((resolve) => setTimeout(resolve, 180));
 
   assert.equal(harness.runExtractionCalls.length, 1);
+  harness.result.clearPendingAutoExtraction();
+}
+
+async function testGenerationEndedResumesDirtyRecoveryWhenAutoExtractionDisabled() {
+  const harness = await createGenerationRecallHarness();
+  harness.settings = {
+    enabled: true,
+    extractAutoEnabled: false,
+  };
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "replacement" },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      historyDirtyFrom: 1,
+    },
+  };
+  harness.result.setGraphPersistenceState({
+    loadState: "loaded",
+    dbReady: true,
+    chatId: "chat-main",
+  });
+
+  harness.result.onGenerationStarted("normal", {}, false);
+  harness.invokeOnMessageReceived(1, "swipe");
+  await waitForTick();
+
+  assert.equal(harness.runExtractionCalls.length, 0);
+  assert.equal(
+    harness.result.getPendingAutoExtraction().reason,
+    "generation-running",
+  );
+
+  harness.result.onGenerationEnded();
+  await new Promise((resolve) => setTimeout(resolve, 180));
+
+  assert.equal(harness.runExtractionCalls.length, 1);
+  assert.equal(harness.runExtractionCalls[0]?.[0]?.lockedEndFloor, 1);
   harness.result.clearPendingAutoExtraction();
 }
 
@@ -8120,9 +8337,7 @@ async function testRerollAbortRestoresTransactionStartGraph() {
     affectedJournals: [{ id: "journal-1" }],
   });
   harness.prepareVectorStateForReplayImpl = async () => {
-    const error = new Error("chat switched");
-    error.name = "AbortError";
-    throw error;
+    harness.chat[1].mes = "same chat changed while rollback was awaiting";
   };
 
   const result = await harness.result.onReroll({ fromFloor: 3 });
@@ -8198,6 +8413,53 @@ async function testHistoryRecoveryAbortRetainsRecoveryCheckpoint() {
   assert.equal(
     harness.currentGraph.vectorIndexState.dirtyReason,
     "history-recovery-replay",
+  );
+}
+
+async function testHistoryRecoveryAbortsWhenSameChatChangesDuringAwait() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  let replayCalls = 0;
+  harness.prepareVectorStateForReplayImpl = async () => {
+    harness.chat[1].mes = "edited during vector preparation";
+  };
+  harness.replayExtractionFromHistoryImpl = async () => {
+    replayCalls += 1;
+    return 0;
+  };
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-edited",
+  );
+
+  assert.equal(result, false);
+  assert.equal(replayCalls, 0);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "original-node");
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.recovery.aborted",
+  );
+  assert.ok(
+    harness.saveGraphToChatCallOptions.some(
+      (options) => options.reason === "history-recovery-aborted",
+    ),
   );
 }
 
@@ -8647,6 +8909,43 @@ async function testRerollRejectsMissingRecoveryPoint() {
   assert.equal(result.resultCode, "reroll.rollback.unavailable");
   assert.equal(harness.onManualExtractCalls, 0);
   assert.equal(harness.saveGraphToChatCalls, 0);
+}
+
+async function testOverswipeWaitsForReplacementWithoutDiscardingParentRecall() {
+  const harness = await createRerollHarness();
+  const parentRecall = {
+    version: 2,
+    userText: "u1",
+    injectionText: "persisted recall",
+  };
+  harness.chat = [
+    { is_user: true, mes: "u1", extra: { bme_recall: parentRecall } },
+    { is_user: false, mes: "", swipe_id: 1 },
+  ];
+  harness.currentGraph = {
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 0: "hash-0", 1: "hash-1" },
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 1,
+  };
+
+  const result = await harness.result.onReroll({ fromFloor: 1 });
+
+  assert.equal(result.success, true);
+  assert.equal(result.recoveryPath, "awaiting-replacement");
+  assert.equal(result.resultCode, "reroll.awaiting-replacement");
+  assert.equal(result.rollbackPerformed, false);
+  assert.equal(result.extractionTriggered, false);
+  assert.equal(result.checkpointRetained, true);
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
+  assert.equal(harness.saveGraphToChatCalls, 1);
+  assert.equal(harness.saveGraphToChatCallOptions[0]?.awaitDurable, true);
+  assert.equal(harness.rollbackAffectedJournalsCalls.length, 0);
+  assert.equal(harness.onManualExtractCalls, 0);
+  assert.equal(harness.chat[0].extra.bme_recall, parentRecall);
 }
 
 async function testRerollFallsBackToDirectExtractForUnprocessedFloor() {
@@ -9662,12 +9961,15 @@ await testRegisterCoreEventHooksIsIdempotent();
 await testChatChangedDoesNotClearCoreEventBindings();
 await testSwipeRoutesToRerollWithoutHistoryRecoveryFallback();
 await testSwipeFailureSchedulesHistoryRecoveryFallback();
+await testOverswipeCheckpointFailureWaitsForReplacement();
+await testRegenerateDeleteCheckpointsImmediatelyWithoutRecallInvalidation();
 await testMessageSentFallsBackToLatestUserWhenHostMessageIdInvalid();
 await testMessageSentPersistsPlannerRecallBeforePlotRecord();
 await testUserMessageRenderedRefreshesRecallUiAfterRealDomRender();
 await testCharacterMessageRenderedRefreshesRecallUiAfterAssistantRender();
 await testMessageReceivedQueuesExtractionWithoutRuntimeQueueMicrotask();
 await testMessageReceivedSkipsWhenAutoExtractionDisabled();
+await testMessageReceivedQueuesDirtyOverswipeReplacementRecovery();
 await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();
@@ -9676,6 +9978,7 @@ await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testLagModeSmartTriggerOnlyScoresEligibleWindow();
 await testLagModeRespectsExtractEveryAgainstEligibleWindow();
 await testGenerationEndedResumesPendingAutoExtractionAfterSettle();
+await testGenerationEndedResumesDirtyRecoveryWhenAutoExtractionDisabled();
 await testLagModePendingResumeKeepsLockedPreviousAssistantAfterLatestDisappears();
 await testAutoExtractionDefersWhenGraphNotReady();
 await testAutoExtractionDefersWhenAlreadyExtracting();
@@ -9729,6 +10032,7 @@ await testHistoryRecoveryStandardSuffixReplayDoesNotEmitCompletionToast();
 await testHistoryRecoveryPausesWhenRenderLimitedChatSlice();
 await testHistoryRecoveryFullRebuildStillWarnsUser();
 await testHistoryRecoveryAbortRetainsRecoveryCheckpoint();
+await testHistoryRecoveryAbortsWhenSameChatChangesDuringAwait();
 await testHistoryRecoveryDoesNotMutateBeforeCheckpointPersists();
 await testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
@@ -9738,6 +10042,7 @@ await testRerollRejectsInvalidReverseJournalPlanFailClosed();
 await testRerollDoesNotMutateBeforeCheckpointPersists();
 await testRerollAbortRestoresTransactionStartGraph();
 await testRerollRejectsMissingRecoveryPoint();
+await testOverswipeWaitsForReplacementWithoutDiscardingParentRecall();
 await testRerollFallsBackToDirectExtractForUnprocessedFloor();
 await testRerollPreservesPrefixHashesWhenReextractDoesNotAdvance();
 await testLlmDebugSnapshotRedactsSecretsBeforeStorage();

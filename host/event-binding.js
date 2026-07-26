@@ -447,6 +447,11 @@ export function onMessageDeletedController(
       generationContext?.type === "regenerate" &&
       assistantTailDelete,
   );
+  const mutationTrigger = expectedRegenerateDelete
+    ? "message-deleted-regenerate"
+    : assistantTailDelete
+      ? "message-deleted-assistant-tail"
+      : "message-deleted";
   if (assistantTailDelete) {
     runtime.noteAssistantTailDelete?.({ chatLengthOrMessageId, meta });
   }
@@ -456,18 +461,23 @@ export function onMessageDeletedController(
       meta,
     });
     runtime.scheduleDeferredHistoryMutationRecheck?.(
-      expectedRegenerateDelete ? "message-deleted-regenerate" : "message-deleted-assistant-tail",
+      mutationTrigger,
       chatLengthOrMessageId,
       meta,
     );
   } else {
     runtime.invalidateRecallAfterHistoryMutation("消息已删除");
     runtime.scheduleHistoryMutationRecheck(
-      "message-deleted",
+      mutationTrigger,
       chatLengthOrMessageId,
       meta,
     );
   }
+  runtime.checkpointHistoryMutation?.(
+    mutationTrigger,
+    chatLengthOrMessageId,
+    meta,
+  );
   runtime.refreshPersistedRecallMessageUi?.();
   return {
     invalidated: !(expectedRegenerateDelete || assistantTailDelete),
@@ -487,6 +497,7 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
     runtime.removeMessageRecallRecord?.(Math.floor(parsedMessageId));
   }
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
+  runtime.checkpointHistoryMutation?.("message-edited", messageId, meta);
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
 }
@@ -542,11 +553,14 @@ export async function onMessageSwipedController(runtime, messageId, meta = null)
     );
   }
   if (result?.success !== true) {
-    runtime.scheduleHistoryMutationRecheck?.(
-      "message-swiped",
-      messageId,
-      meta,
-    );
+    runtime.checkpointHistoryMutation?.("message-swiped", messageId, meta);
+    if (result?.recoveryPath !== "awaiting-replacement") {
+      runtime.scheduleHistoryMutationRecheck?.(
+        "message-swiped",
+        messageId,
+        meta,
+      );
+    }
   }
   runtime.refreshPersistedRecallMessageUi?.();
   return result;
@@ -1009,7 +1023,10 @@ export function onMessageReceivedController(
             lastProcessedAssistantFloor,
           })
         : null;
-    if (!autoExtractionPlan?.canRun) {
+    const historyRecoveryPending = Number.isFinite(
+      runtime.getCurrentGraph()?.historyState?.historyDirtyFrom,
+    );
+    if (!autoExtractionPlan?.canRun && !historyRecoveryPending) {
       runtime.console?.debug?.(
         "[ST-BME] assistant message received, auto extraction not runnable yet",
         {
@@ -1044,13 +1061,17 @@ export function onMessageReceivedController(
           messageId: Number.isFinite(Number(targetMessageIndex))
             ? Number(targetMessageIndex)
             : null,
-          targetEndFloor: toSafeFloor(autoExtractionPlan.plannedBatchEndFloor, null),
+          targetEndFloor: toSafeFloor(
+            autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
+            null,
+          ),
         },
       );
       runtime.deferAutoExtraction("generation-running", {
         messageId: targetMessageIndex,
-        targetEndFloor: autoExtractionPlan.plannedBatchEndFloor,
-        strategy: autoExtractionPlan.strategy,
+        targetEndFloor:
+          autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
+        strategy: autoExtractionPlan?.strategy || "normal",
       });
       runtime.refreshPersistedRecallMessageUi?.();
       return;
@@ -1058,7 +1079,8 @@ export function onMessageReceivedController(
     enqueueMicrotask(() => {
       void runtime
         .runExtraction({
-          lockedEndFloor: autoExtractionPlan.plannedBatchEndFloor,
+          lockedEndFloor:
+            autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
           triggerSource: "message-received",
         })
         .catch((error) => {

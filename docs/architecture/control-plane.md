@@ -45,6 +45,8 @@
 
 跨 `await`、timer 或后台回调的任务在开始时捕获 session lease，发布运行图谱、更新 UI 或写宿主 chat-state 前再次校验。耐久层可以继续完成发起聊天的 detached 写入，但 lease 失效后不得修改后来活动的聊天。
 
+提取与历史恢复还捕获聊天内容 fingerprint。session lease 防跨聊天晚到，history fingerprint 防同一聊天在异步任务期间再次编辑；任一失效都不能发布 working graph。
+
 ## 持久化确认状态机
 
 持久化确认逻辑收敛在 `sync/persistence-reducer.js`，是**纯函数**：无 IO、无图谱变更、无 UI 副作用。
@@ -84,7 +86,7 @@ pending retry 必须从排队聊天自己的 shadow、metadata recovery snapshot
 
 - `ensureGraphMutationReady` — 操作前的总门禁
 - `getGraphMutationBlockReason` — 给用户的暂停原因文案
-- `assertRecoveryChatStillActive` — 异步恢复过程中，校验聊天没被切走（切走则抛 abort）
+- `assertRecoveryHistoryStillCurrent` — 异步恢复过程中同时校验聊天身份与冻结的历史 fingerprint（切换聊天或同聊天再次变化都抛 abort）
 - `getGraphPersistenceLiveState` — 把内部状态投影成面板/调试可读形态
 
 ## 向量门禁与 reroll 代际上下文
@@ -106,6 +108,8 @@ no-new-user 的稳定路径分两段：
 
 1. `GENERATION_AFTER_COMMANDS` 不做召回计算，直接跳过并把工作推迟到 before-combine。
 2. `GENERATE_BEFORE_COMBINE_PROMPTS` 先调用 `reapplyPersistedRecallBlock`，从父 user 楼层的 `message.extra.bme_recall` 确定性重放召回块；命中后立即返回，不进入 transaction / `runRecall`。若没有记录或记录已陈旧，再落回既有 transaction + compute 兼容路径。
+
+overswipe 的空 assistant 占位不触发空文本回滚/提取。它只留下 durable `awaiting-replacement` checkpoint；替换回复到达后，自动历史恢复负责回滚旧图谱效果并重放，新代际仍复用父 user 的持久召回。
 
 旧的召回事务机制仍保留为 fresh normal 和 fallback compute 的基础设施；它不再是 reroll 已存召回注入的唯一门闸。
 

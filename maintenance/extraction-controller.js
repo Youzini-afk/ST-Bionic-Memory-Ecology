@@ -977,6 +977,9 @@ export async function executeExtractionBatchController(
   const currentGraph = runtime.getCurrentGraph();
   const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
   const workingGraph = runtime.cloneGraphSnapshot(beforeSnapshot);
+  const batchChat = runtime.cloneGraphSnapshot(Array.isArray(chat) ? chat : []);
+  const batchHistoryFingerprint =
+    runtime.buildChatHistoryFingerprint(batchChat);
   const conversationLease = runtime.captureConversationLease?.() || null;
   const batchChatId = String(
     runtime.getCurrentChatId?.() || currentGraph?.historyState?.chatId || "",
@@ -985,18 +988,25 @@ export async function executeExtractionBatchController(
     runtime.resolveCurrentChatStateTarget?.(runtime.getContext?.()) || null,
     null,
   );
-  const isBatchContextCurrent = () => {
+  const getBatchContextState = (checkHistory = true) => {
     const activeChatId = String(runtime.getCurrentChatId?.() || "").trim();
     const conversationCurrent = conversationLease
       ? runtime.isConversationLeaseCurrent?.(conversationLease, {
           requireGeneration: false,
         }) !== false
       : !batchChatId || !activeChatId || activeChatId === batchChatId;
-    return (
-      runtime.getCurrentGraph() === currentGraph &&
-      conversationCurrent
-    );
+    const activeChat = runtime.getContext?.()?.chat ?? chat;
+    return {
+      graphCurrent: runtime.getCurrentGraph() === currentGraph,
+      conversationCurrent,
+      historyCurrent:
+        !checkHistory ||
+        runtime.buildChatHistoryFingerprint(activeChat) ===
+          batchHistoryFingerprint,
+    };
   };
+  const isBatchContextCurrent = (checkHistory = true) =>
+    Object.values(getBatchContextState(checkHistory)).every(Boolean);
   const assertBatchContextCurrent = () => {
     runtime.throwIfAborted(signal, "extraction-context-changed");
     if (isBatchContextCurrent()) return;
@@ -1008,7 +1018,12 @@ export async function executeExtractionBatchController(
   };
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const extractionCountBefore = runtime.getExtractionCount();
-  const messages = runtime.buildExtractionMessages(chat, startIdx, endIdx, settings);
+  const messages = runtime.buildExtractionMessages(
+    batchChat,
+    startIdx,
+    endIdx,
+    settings,
+  );
   const batchStatus = runtime.createBatchStatusSkeleton({
     processedRange: [startIdx, endIdx],
     extractionCountBefore,
@@ -1032,7 +1047,7 @@ export async function executeExtractionBatchController(
     settings,
     signal,
     onStreamProgress: ({ previewText, receivedChars }) => {
-      if (signal?.aborted || !isBatchContextCurrent()) return;
+      if (signal?.aborted || !isBatchContextCurrent(false)) return;
       const preview =
         previewText?.length > 60 ? "…" + previewText.slice(-60) : previewText || "";
       runtime.setLastExtractionStatus(
@@ -1092,7 +1107,7 @@ export async function executeExtractionBatchController(
   const batchStatusRef = effects?.batchStatus || batchStatus;
   const committedPersistState = await buildCommittedBatchPersistSnapshot(runtime, {
     graph: workingGraph,
-    chat,
+    chat: batchChat,
     settings,
     beforeSnapshot,
     processedRange: [startIdx, endIdx],
@@ -1130,6 +1145,38 @@ export async function executeExtractionBatchController(
     dirtyFromFloor: startIdx,
     chatStateTarget: batchChatStateTarget,
   });
+  const postPersistContext = getBatchContextState();
+  if (
+    postPersistContext.graphCurrent &&
+    postPersistContext.conversationCurrent &&
+    !postPersistContext.historyCurrent
+  ) {
+    const retainedFloor = Number.isFinite(
+      currentGraph?.historyState?.historyDirtyFrom,
+    )
+      ? currentGraph.historyState.historyDirtyFrom
+      : 0;
+    runtime.markHistoryDirty(
+      currentGraph,
+      retainedFloor,
+      "extraction-history-changed-during-persist",
+      "extraction-history-lease",
+    );
+    try {
+      await Promise.resolve(
+        runtime.saveGraphToChat({
+          reason: "extraction-stale-history-checkpoint",
+          awaitDurable: true,
+          captureShadow: true,
+        }),
+      );
+    } catch (error) {
+      runtime.console?.warn?.(
+        "[ST-BME] stale extraction checkpoint persistence failed:",
+        error,
+      );
+    }
+  }
   assertBatchContextCurrent();
   const persistence = normalizePersistenceStateRecord(persistResult);
   batchStatusRef.persistence = persistence;
@@ -1281,7 +1328,7 @@ export async function runExtractionController(runtime, options = {}) {
     return;
   }
 
-  if (!settings.enabled || settings.extractAutoEnabled === false) return;
+  if (!settings.enabled) return;
   if (!runtime.ensureGraphMutationReady("自动提取", { notify: false })) {
     runtime.console?.debug?.("[ST-BME] auto extraction blocked: graph-not-ready", {
       loadState: runtime.getGraphPersistenceState?.()?.loadState || "",
@@ -1339,6 +1386,8 @@ export async function runExtractionController(runtime, options = {}) {
     }
     return;
   }
+
+  if (settings.extractAutoEnabled === false) return;
 
   if (!chat || chat.length === 0) return;
   if (!plan.canRun || plan.startIdx == null || plan.endIdx == null) {
@@ -2088,6 +2137,64 @@ export async function onRerollController(runtime, { fromFloor } = {}) {
 
   const lastProcessed = runtime.getLastProcessedAssistantFloor();
   const alreadyExtracted = targetFloor <= lastProcessed;
+
+  if (alreadyExtracted && !String(chat[targetFloor]?.mes ?? "").trim()) {
+    const graph = runtime.getCurrentGraph();
+    runtime.markHistoryDirty(
+      graph,
+      targetFloor,
+      "reroll-awaiting-replacement",
+      "message-swiped",
+    );
+    graph.historyState.lastRecoveryResult = runtime.buildRecoveryResult(
+      "awaiting-replacement",
+      {
+        fromFloor: targetFloor,
+        path: "awaiting-replacement",
+        detectionSource: "message-swiped",
+        reason: "overswipe placeholder is waiting for the replacement reply",
+        resultCode: "reroll.awaiting-replacement",
+      },
+    );
+    let persistence;
+    try {
+      persistence = await Promise.resolve(
+        runtime.saveGraphToChat({
+          reason: "reroll-awaiting-replacement",
+          awaitDurable: true,
+        }),
+      );
+    } catch (error) {
+      persistence = { accepted: false, error };
+    }
+    const accepted = persistence?.accepted === true;
+    setExtractionProgressStatus(
+      runtime,
+      accepted ? "等待新的 AI 回复" : "重 Roll 检查点等待持久化",
+      accepted
+        ? `楼层 ${targetFloor} 的旧图谱影响将在新回复到达后回退并重放`
+        : "无法确认等待替换检查点已落盘",
+      accepted ? "warning" : "error",
+      { syncRuntime: true },
+    );
+    runtime.refreshPanelLiveState?.();
+    return {
+      success: accepted,
+      rollbackPerformed: false,
+      extractionTriggered: false,
+      requestedFloor: targetFloor,
+      effectiveFromFloor: targetFloor,
+      recoveryPath: "awaiting-replacement",
+      affectedBatchCount: 0,
+      resultCode: accepted
+        ? "reroll.awaiting-replacement"
+        : "reroll.awaiting-replacement.persist-failed",
+      checkpointFloor: targetFloor,
+      checkpointRetained: true,
+      persistence,
+      error: accepted ? "" : "等待替换检查点未确认落盘。",
+    };
+  }
 
   if (!alreadyExtracted) {
     runtime.toastr?.info?.("该楼层尚未提取，直接执行提取…", "ST-BME 重 Roll", {

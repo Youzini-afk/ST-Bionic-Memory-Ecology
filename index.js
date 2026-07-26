@@ -370,6 +370,7 @@ import {
   applyProcessedHistorySnapshotToGraph,
   appendBatchJournal,
   appendMaintenanceJournal,
+  buildChatHistoryFingerprint,
   buildRecoveryResult,
   buildReverseJournalRecoveryPlan,
   clearHistoryDirty,
@@ -1888,6 +1889,7 @@ const autoExtractionDeferRuntime = createAutoExtractionDefer({
   ensureGraphMutationReady: (...args) => ensureGraphMutationReady(...args),
   getContext,
   getCurrentChatId,
+  getCurrentGraph: () => currentGraph,
   getGraphPersistenceState: () => graphPersistenceState,
   getIsExtracting: () => isExtracting,
   getIsHostGenerationRunning: () => isHostGenerationRunning,
@@ -4846,6 +4848,19 @@ function assertRecoveryChatStillActive(expectedChatId, label = "") {
   return assertRecoveryChatStillActiveImpl(
     createGraphMutationGateRuntime(),
     expectedChatId, label,
+  );
+}
+
+function assertRecoveryHistoryStillCurrent(
+  expectedChatId,
+  expectedHistoryFingerprint,
+  label = "",
+) {
+  assertRecoveryChatStillActive(expectedChatId, label);
+  const activeFingerprint = buildChatHistoryFingerprint(getContext()?.chat);
+  if (activeFingerprint === expectedHistoryFingerprint) return true;
+  throw createAbortError(
+    `历史恢复期间聊天内容再次变化${label ? ` (${label})` : ""}`,
   );
 }
 
@@ -15558,6 +15573,14 @@ function flushDeferredHistoryMutationRecheck(reason = "generation-boundary") {
   return true;
 }
 
+function persistHistoryDirtyCheckpoint(reason) {
+  void Promise.resolve()
+    .then(() => saveGraphToChat({ reason, awaitDurable: true }))
+    .catch((error) => {
+      console.warn("[ST-BME] 历史脏检查点持久化失败，等待恢复流程重试:", error);
+    });
+}
+
 function inspectHistoryMutation(
   trigger = "history-change",
   primaryArg = null,
@@ -15580,10 +15603,47 @@ function inspectHistoryMutation(
       skipped: true,
     };
   }
+  const metaDetection = resolveDirtyFloorFromMutationMeta(
+    trigger,
+    primaryArg,
+    meta,
+    chat,
+  );
+  const metaReason = String(trigger || "").includes("message-deleted")
+    ? `${trigger} 元数据检测到删除边界变动`
+    : `${trigger} 元数据检测到楼层变动`;
   if (
     Array.isArray(chat) &&
     currentGraph.historyState?.processedMessageHashesNeedRefresh === true
   ) {
+    const lastProcessedFloor = getLastProcessedAssistantFloor();
+    const migrationDirtyFloor =
+      Number.isFinite(metaDetection?.floor) &&
+      metaDetection.floor <= lastProcessedFloor
+        ? metaDetection.floor
+        : !Number.isFinite(metaDetection?.floor) && lastProcessedFloor >= 0
+          ? 0
+          : null;
+    if (Number.isFinite(migrationDirtyFloor)) {
+      const migrationReason = metaDetection
+        ? metaReason
+        : `${trigger} 发生在历史哈希升级期间，执行保守恢复`;
+      clearInjectionState();
+      markHistoryDirty(
+        currentGraph,
+        migrationDirtyFloor,
+        migrationReason,
+        metaDetection?.source || "hash-version-migration",
+      );
+      persistHistoryDirtyCheckpoint("history-dirty-hash-version-migration");
+      notifyHistoryDirty(migrationDirtyFloor, migrationReason);
+      return {
+        dirty: true,
+        earliestAffectedFloor: migrationDirtyFloor,
+        reason: migrationReason,
+        source: metaDetection?.source || "hash-version-migration",
+      };
+    }
     rebindProcessedHistoryStateToChat(
       currentGraph,
       chat,
@@ -15602,15 +15662,6 @@ function inspectHistoryMutation(
     }
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
   }
-  const metaDetection = resolveDirtyFloorFromMutationMeta(
-    trigger,
-    primaryArg,
-    meta,
-    chat,
-  );
-  const metaReason = String(trigger || "").includes("message-deleted")
-    ? `${trigger} 元数据检测到删除边界变动`
-    : `${trigger} 元数据检测到楼层变动`;
   if (
     metaDetection &&
     Number.isFinite(metaDetection.floor) &&
@@ -15623,7 +15674,7 @@ function inspectHistoryMutation(
       metaReason,
       metaDetection.source,
     );
-    saveGraphToChat({ reason: "history-dirty-meta-detection" });
+    persistHistoryDirtyCheckpoint("history-dirty-meta-detection");
     notifyHistoryDirty(metaDetection.floor, metaReason);
     return {
       dirty: true,
@@ -15642,7 +15693,7 @@ function inspectHistoryMutation(
       detection.reason || trigger,
       "hash-recheck",
     );
-    saveGraphToChat({ reason: "history-dirty-hash-recheck" });
+    persistHistoryDirtyCheckpoint("history-dirty-hash-recheck");
     notifyHistoryDirty(detection.earliestAffectedFloor, detection.reason);
     return {
       ...detection,
@@ -15737,6 +15788,7 @@ async function executeExtractionBatch({
     {
       appendBatchJournal,
       applyProcessedHistorySnapshotToGraph,
+      buildChatHistoryFingerprint,
       buildPersistDelta,
       buildExtractionMessages,
       cloneGraphSnapshot,
@@ -15761,10 +15813,12 @@ async function executeExtractionBatch({
       handleExtractionSuccess,
       isConversationLeaseCurrent: (...args) =>
         conversationSession.isLeaseCurrent(...args),
+      markHistoryDirty,
       persistExtractionBatchResult,
       resolveCurrentChatStateTarget,
       scheduleBackgroundMaintenancePostProcess,
       scheduleBackgroundVectorSync,
+      saveGraphToChat,
       setBatchStageOutcome,
       setCurrentGraph: (graph) => { currentGraph = graph; },
       setExtractionCount: (value) => { extractionCount = value; },
@@ -15792,12 +15846,17 @@ async function replayExtractionFromHistory(
   settings,
   signal = undefined,
   expectedChatId = undefined,
+  expectedHistoryFingerprint = undefined,
 ) {
   let replayedBatches = 0;
 
   while (true) {
     throwIfAborted(signal, "历史恢复已终止");
-    assertRecoveryChatStillActive(expectedChatId, "replay-loop");
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-loop",
+    );
     const pendingAssistantTurns = getAssistantTurns(chat).filter(
       (index) => index > getLastProcessedAssistantFloor(),
     );
@@ -15815,6 +15874,11 @@ async function replayExtractionFromHistory(
       settings,
       signal,
     });
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-batch-complete",
+    );
 
     if (!batchResult.success) {
       throw new Error(
@@ -15885,11 +15949,13 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
   return await rollbackGraphForRerollController(
     {
       applyRecoveryPlanToVectorState,
-      assertRecoveryChatStillActive,
+      assertRecoveryHistoryStillCurrent,
+      buildChatHistoryFingerprint,
       buildRecoveryResult,
       buildReverseJournalRecoveryPlan,
       clearInjectionState,
       cloneGraphSnapshot,
+      detectHistoryMutation,
       ensureCurrentGraphRuntimeState,
       findJournalRecoveryPoint,
       getContext,
@@ -16018,8 +16084,9 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
   return await recoverHistoryIfNeededController(
     {
       applyRecoveryPlanToVectorState,
-      assertRecoveryChatStillActive,
+      assertRecoveryHistoryStillCurrent,
       beginStageAbortController,
+      buildChatHistoryFingerprint,
       buildRecoveryResult,
       buildReverseJournalRecoveryPlan,
       clampRecoveryStartFloor,
@@ -16530,6 +16597,7 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
   });
   const result = onMessageDeletedController(
     {
+      checkpointHistoryMutation: inspectHistoryMutation,
       getGenerationContext: () => conversationSession.getGeneration(),
       getContext,
       invalidateRecallAfterHistoryMutation,
@@ -16553,6 +16621,7 @@ function onMessageDeleted(chatLengthOrMessageId, meta = null) {
 function onMessageEdited(messageId, meta = null) {
   const result = onMessageEditedController(
     {
+      checkpointHistoryMutation: inspectHistoryMutation,
       invalidateRecallAfterHistoryMutation,
       isMvuExtraAnalysisGuardActive,
       removeMessageRecallRecord,
@@ -16587,6 +16656,7 @@ async function onMessageSwiped(messageId, meta = null) {
   conversationSession.noteSwipe(messageId, meta);
   const result = await onMessageSwipedController(
     {
+      checkpointHistoryMutation: inspectHistoryMutation,
       invalidateRecallAfterHistoryMutation,
       onReroll,
       refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,

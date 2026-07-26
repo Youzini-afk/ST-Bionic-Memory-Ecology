@@ -243,6 +243,9 @@ export function createAutoExtractionDefer(deps = {}) {
     const resumeContext = getContext();
     const resumeChat = resumeContext?.chat;
     const settings = getSettings();
+    const historyRecoveryPending = Number.isFinite(
+      deps.getCurrentGraph?.()?.historyState?.historyDirtyFrom,
+    );
     let lockedEndFloor = Number.isFinite(Number(pendingAutoExtraction.targetEndFloor))
       ? Math.floor(Number(pendingAutoExtraction.targetEndFloor))
       : null;
@@ -271,7 +274,12 @@ export function createAutoExtractionDefer(deps = {}) {
       }
     }
 
-    if (Array.isArray(resumeChat) && resumeChat.length > 0 && lockedEndFloor != null) {
+    if (
+      !historyRecoveryPending &&
+      Array.isArray(resumeChat) &&
+      resumeChat.length > 0 &&
+      lockedEndFloor != null
+    ) {
       const lockedPlan = deps.resolveAutoExtractionPlan({
         chat: resumeChat,
         settings,
@@ -293,7 +301,7 @@ export function createAutoExtractionDefer(deps = {}) {
 
     const pendingRequest = { ...pendingAutoExtraction };
     clearPendingAutoExtraction();
-    if (lockedEndFloor == null) {
+    if (lockedEndFloor == null && !historyRecoveryPending) {
       const currentPlan = deps.resolveAutoExtractionPlan({
         chat: resumeChat,
         settings,
