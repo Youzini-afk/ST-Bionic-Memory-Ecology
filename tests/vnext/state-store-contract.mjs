@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import {
+  buildTurnKey,
   getHistoryPrefixHash,
   snapshotHistory,
 } from "../../src/core/history.js";
@@ -137,6 +138,54 @@ export function stateStoreContractCases() {
         });
         assert.equal(result.head.graphRevision, graphRevision);
         assert.equal(result.rolledBackTransactions.length, 0);
+      },
+    },
+    {
+      name: "recall records are immutable and follow their bound user prefix",
+      async run(store) {
+        const chatKey = "recall";
+        const history = await snapshotHistory(semanticMessages(["user", "one"]));
+        let result = await store.reconcileHistory({
+          chatKey,
+          expectedRevision: 0,
+          history,
+        });
+        const turnKey = await buildTurnKey(chatKey, getHistoryPrefixHash(history, 1));
+        const record = {
+          turnKey,
+          chatKey,
+          boundUserMessageHash: history[0].messageHash,
+          historyPrefixHash: history[0].prefixHash,
+          recallInput: "one",
+          selectedNodeIds: ["memory-1"],
+          injectionText: "remembered exactly",
+          tokenEstimate: 3,
+          graphRevision: result.head.graphRevision,
+        };
+        result = await store.createRecall({
+          chatKey,
+          expectedRevision: result.head.revision,
+          record,
+        });
+        assert.equal(result.created, true);
+        assert.equal(result.head.revision, 2);
+        assert.deepEqual((await store.readRecall(chatKey, turnKey)).selectedNodeIds, ["memory-1"]);
+
+        const duplicate = await store.createRecall({
+          chatKey,
+          expectedRevision: result.head.revision,
+          record,
+        });
+        assert.equal(duplicate.created, false);
+        assert.equal(duplicate.head.revision, result.head.revision);
+
+        const edited = await snapshotHistory(semanticMessages(["user", "changed"]));
+        await store.reconcileHistory({
+          chatKey,
+          expectedRevision: result.head.revision,
+          history: edited,
+        });
+        assert.equal(await store.readRecall(chatKey, turnKey), null);
       },
     },
     {

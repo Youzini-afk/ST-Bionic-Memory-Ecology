@@ -52,7 +52,7 @@
     "test:authority:e2e:restore": "node tests/e2e/authority-checkpoint-restore.mjs",
     "test:authority:e2e:all": "npm run test:authority:e2e && npm run test:authority:e2e:diagnostics && npm run test:authority:e2e:restore",
     "test:authority-companion-module": "node tests/authority-companion-module.mjs",
-    "test:vnext": "node tests/vnext/core.mjs && node tests/vnext/indexeddb.mjs",
+    "test:vnext": "node tests/vnext/core.mjs && node tests/vnext/indexeddb.mjs && node tests/vnext/generation.mjs",
     "test:all": "npm run test:stable",
     "check": "node scripts/check-syntax.mjs"
   },

@@ -21,7 +21,13 @@ export class ConversationEngine {
   #queues = new Map();
 
   constructor({ store } = {}) {
-    if (!store?.readConversation || !store?.commit || !store?.reconcileHistory) {
+    if (
+      !store?.readConversation ||
+      !store?.commit ||
+      !store?.reconcileHistory ||
+      !store?.readRecall ||
+      !store?.createRecall
+    ) {
       throw new TypeError("store must implement the vNext state operations");
     }
     this.#store = store;
@@ -92,6 +98,28 @@ export class ConversationEngine {
     return this.enqueue(
       lease,
       () => this.#store.commit({ ...command, chatKey: lease.chatKey }),
+      { requiresActive },
+    );
+  }
+
+  async readRecall(lease, turnKey, { requiresActive = true } = {}) {
+    if (requiresActive) this.assertLeaseActive(lease);
+    const record = await this.#store.readRecall(requireChatKey(lease?.chatKey), turnKey);
+    if (requiresActive) this.assertLeaseActive(lease);
+    return record;
+  }
+
+  async createRecall(lease, record, { requiresActive = true } = {}) {
+    return this.enqueue(
+      lease,
+      async () => {
+        const state = await this.#store.readConversation(lease.chatKey);
+        return this.#store.createRecall({
+          chatKey: lease.chatKey,
+          expectedRevision: state.head.revision,
+          record,
+        });
+      },
       { requiresActive },
     );
   }

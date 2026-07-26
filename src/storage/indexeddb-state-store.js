@@ -9,6 +9,10 @@ import {
   prepareHistoryReconciliation,
   requireChatKey,
 } from "../core/state-model.js";
+import {
+  isRecallBoundToHistory,
+  prepareRecallCreate,
+} from "../core/recall-record.js";
 import { loadDexie } from "./dexie-loader.js";
 
 export const INDEXED_DB_NAME = "STBME_v9";
@@ -26,14 +30,6 @@ const schema = Object.freeze({
 
 function clone(value) {
   return structuredClone(value);
-}
-
-function emptyConversation(chatKey) {
-  return {
-    head: createConversationHead(chatKey),
-    collections: createGraphCollections(),
-    transactions: [],
-  };
 }
 
 function recordKey(chatKey, collection, id) {
@@ -82,6 +78,7 @@ export class IndexedDbStateStore {
       db.table("heads"),
       db.table("graphRecords"),
       db.table("transactions"),
+      db.table("recallRecords"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
         const records = await db.table("graphRecords").where("chatKey").equals(chatKey).toArray();
@@ -90,10 +87,18 @@ export class IndexedDbStateStore {
           .where("chatKey")
           .equals(chatKey)
           .sortBy("committedRevision");
+        const recallRecords = await db
+          .table("recallRecords")
+          .where("chatKey")
+          .equals(chatKey)
+          .toArray();
         return {
           head: clone(head),
           collections: hydrateCollections(chatKey, records),
           transactions: clone(transactions),
+          recallRecords: new Map(
+            recallRecords.map((record) => [record.turnKey, clone(record)]),
+          ),
         };
       },
     );
@@ -146,6 +151,42 @@ export class IndexedDbStateStore {
     return response;
   }
 
+  async readRecall(chatKeyInput, turnKeyInput) {
+    const chatKey = requireChatKey(chatKeyInput);
+    const turnKey = String(turnKeyInput || "").trim();
+    if (!turnKey) throw new TypeError("turnKey is required");
+    const db = await this.#dbPromise;
+    const record = await db.table("recallRecords").get(turnKey);
+    return record?.chatKey === chatKey ? clone(record) : null;
+  }
+
+  async createRecall(command = {}) {
+    const chatKey = requireChatKey(command.chatKey);
+    const turnKey = String(command.record?.turnKey || "").trim();
+    const db = await this.#dbPromise;
+    let response;
+    await db.transaction(
+      "rw",
+      db.table("heads"),
+      db.table("recallRecords"),
+      async () => {
+        const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
+        const existing = turnKey ? await db.table("recallRecords").get(turnKey) : null;
+        const plan = prepareRecallCreate(head, existing, command, { now: this.#now });
+        if (plan.created) {
+          await db.table("recallRecords").add(clone(plan.record));
+          await db.table("heads").put(clone(plan.nextHead));
+        }
+        response = {
+          created: plan.created,
+          head: clone(plan.nextHead),
+          record: clone(plan.record),
+        };
+      },
+    );
+    return response;
+  }
+
   async reconcileHistory(command = {}) {
     const chatKey = requireChatKey(command.chatKey);
     const db = await this.#dbPromise;
@@ -155,6 +196,7 @@ export class IndexedDbStateStore {
       db.table("heads"),
       db.table("graphRecords"),
       db.table("transactions"),
+      db.table("recallRecords"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
         const transactions = await db
@@ -211,6 +253,17 @@ export class IndexedDbStateStore {
             plan.rolledBackTransactions.map(({ committedRevision }) =>
               [chatKey, committedRevision]),
           );
+        }
+        const recallRecords = await db
+          .table("recallRecords")
+          .where("chatKey")
+          .equals(chatKey)
+          .toArray();
+        const invalidRecallKeys = recallRecords
+          .filter((record) => !isRecallBoundToHistory(record, plan.history))
+          .map(({ turnKey }) => turnKey);
+        if (invalidRecallKeys.length > 0) {
+          await db.table("recallRecords").bulkDelete(invalidRecallKeys);
         }
         await db.table("heads").put(clone(plan.nextHead));
       },
