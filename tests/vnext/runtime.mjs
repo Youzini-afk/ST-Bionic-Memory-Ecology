@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { MemoryStateStore } from "../../src/core/memory-store.js";
+import { CHAT_IDENTITY_METADATA_KEY } from "../../src/host/st-host-adapter.js";
 import {
   createPluginRuntime,
   GRAPH_TRANSFER_FORMAT,
@@ -20,6 +21,15 @@ function hostFixture() {
   const listeners = new Map();
   const state = {
     chatId: "runtime-chat",
+    chatMetadata: {
+      [CHAT_IDENTITY_METADATA_KEY]: {
+        version: 1,
+        chatKey: "runtime-chat",
+        ownerType: "character",
+        ownerId: "assistant.png",
+        chatId: "runtime-chat",
+      },
+    },
     chat: [
       { is_user: true, name: "User", mes: "question" },
       { is_user: false, name: "Assistant", mes: "answer" },
@@ -28,6 +38,10 @@ function hostFixture() {
   const context = {
     get chatId() { return state.chatId; },
     get chat() { return state.chat; },
+    get chatMetadata() { return state.chatMetadata; },
+    characters: [{ avatar: "assistant.png" }],
+    characterId: 0,
+    groupId: "",
     name1: "User",
     name2: "Assistant",
     setExtensionPrompt() {},
@@ -191,6 +205,7 @@ test("production runtime pins one Primary and writes graph changes through its o
   };
   await runtime.importGraph(transfer);
   let snapshot = await runtime.snapshot();
+  assert.equal(snapshot.chatId, "runtime-chat");
   assert.equal(snapshot.graph.nodes[0].fields.summary, "memory");
   assert.equal(snapshot.vectorJobs.filter(({ status }) => status === "pending").length, 1);
 

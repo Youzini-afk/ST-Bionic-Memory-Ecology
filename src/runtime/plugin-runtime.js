@@ -263,6 +263,7 @@ export async function createPluginRuntime(options = {}) {
   let cleanups = [];
 
   async function activeContext() {
+    await host.ensureConversationIdentity();
     const snapshot = host.snapshotConversation();
     if (!snapshot.chatKey) throw new NoActiveChatError();
     let lease = engine.getActiveLease();
@@ -344,6 +345,7 @@ export async function createPluginRuntime(options = {}) {
         cleanups = [host.bind(generation), host.bindPlannerSend(planner)];
       }
       try {
+        await host.ensureConversationIdentity();
         const result = await generation.onChatChanged();
         notify({
           availability: "ready",
@@ -386,6 +388,7 @@ export async function createPluginRuntime(options = {}) {
           settings: clone(settings),
           status: clone(status),
           chatKey: current.snapshot.chatKey,
+          chatId: current.snapshot.chatId,
           head: clone(current.state.head),
           graph: current.graph,
           recallRecords: [...current.state.recallRecords.values()].map(clone),

@@ -1,4 +1,7 @@
 export const RECALL_PROMPT_KEY = "st_bme_v9_recall";
+export const CHAT_IDENTITY_METADATA_KEY = "st_bme_v9_identity";
+
+const CHAT_IDENTITY_VERSION = 1;
 
 const NO_NEW_USER_TYPES = new Set(["swipe", "regenerate", "continue"]);
 const SKIPPED_TYPES = new Set(["quiet", "impersonate", "append", "appendfinal"]);
@@ -49,12 +52,59 @@ function freezeMessages(chat, context) {
   return Object.freeze(messages);
 }
 
+function normalizeChatId(value) {
+  return String(value || "").trim().replace(/\.jsonl$/i, "");
+}
+
+function conversationLocator(context, getCurrentChatId) {
+  const chatId = normalizeChatId(context.chatId || getCurrentChatId?.());
+  if (!chatId) return null;
+  const groupId = String(context.groupId || "").trim();
+  if (groupId) return Object.freeze({ ownerType: "group", ownerId: groupId, chatId });
+  const character = context.characters?.[context.characterId];
+  const avatar = String(character?.avatar || "").trim();
+  if (!avatar) return null;
+  return Object.freeze({ ownerType: "character", ownerId: avatar, chatId });
+}
+
+function normalizeIdentity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const identity = {
+    version: Number(value.version),
+    chatKey: String(value.chatKey || "").trim(),
+    ownerType: String(value.ownerType || "").trim(),
+    ownerId: String(value.ownerId || "").trim(),
+    chatId: normalizeChatId(value.chatId),
+  };
+  if (
+    identity.version !== CHAT_IDENTITY_VERSION ||
+    !identity.chatKey || identity.chatKey.length > 256 ||
+    !/^[A-Za-z0-9:._-]+$/.test(identity.chatKey) ||
+    !["character", "group"].includes(identity.ownerType) ||
+    !identity.ownerId || !identity.chatId
+  ) return null;
+  return Object.freeze(identity);
+}
+
+function sameLocator(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.ownerType === right.ownerType &&
+    left.ownerId === right.ownerId &&
+    left.chatId === right.chatId,
+  );
+}
+
 export class StHostAdapter {
   #getContext;
   #getCurrentChatId;
   #prompt;
   #logger;
   #document;
+  #fetch;
+  #randomUUID;
+  #identityTail = Promise.resolve();
   #plannerReplay = false;
 
   constructor({
@@ -62,6 +112,8 @@ export class StHostAdapter {
     getCurrentChatId = null,
     prompt = {},
     documentLike = globalThis.document,
+    fetchImpl = globalThis.fetch?.bind(globalThis),
+    randomUUID = globalThis.crypto?.randomUUID?.bind(globalThis.crypto),
     logger = console,
   } = {}) {
     if (typeof getContext !== "function") throw new TypeError("getContext is required");
@@ -69,6 +121,8 @@ export class StHostAdapter {
     this.#getCurrentChatId = getCurrentChatId;
     this.#logger = logger;
     this.#document = documentLike;
+    this.#fetch = fetchImpl;
+    this.#randomUUID = randomUUID;
     this.#prompt = {
       key: String(prompt.key || RECALL_PROMPT_KEY),
       position: Number.isFinite(Number(prompt.position)) ? Number(prompt.position) : 1,
@@ -79,15 +133,117 @@ export class StHostAdapter {
 
   snapshotConversation() {
     const context = this.#getContext() || {};
-    const chatKey = String(
-      context.chatId || this.#getCurrentChatId?.() || "",
-    ).trim();
+    const locator = conversationLocator(context, this.#getCurrentChatId);
+    const identity = normalizeIdentity(context.chatMetadata?.[CHAT_IDENTITY_METADATA_KEY]);
+    const chatKey = sameLocator(identity, locator) ? identity.chatKey : "";
     const chat = Array.isArray(context.chat) ? context.chat : [];
     return Object.freeze({
       chatKey,
+      chatId: locator?.chatId || "",
       rawLength: chat.length,
       messages: freezeMessages(chat, context),
     });
+  }
+
+  ensureConversationIdentity() {
+    const pending = this.#identityTail
+      .catch(() => undefined)
+      .then(() => this.#ensureConversationIdentity());
+    this.#identityTail = pending.catch(() => undefined);
+    return pending;
+  }
+
+  async #ensureConversationIdentity() {
+    const initialContext = this.#getContext() || {};
+    const locator = conversationLocator(initialContext, this.#getCurrentChatId);
+    if (!locator) return "";
+
+    const previous = normalizeIdentity(
+      initialContext.chatMetadata?.[CHAT_IDENTITY_METADATA_KEY],
+    );
+    if (sameLocator(previous, locator)) return previous.chatKey;
+
+    let preservePrevious = false;
+    if (
+      previous &&
+      previous.ownerType === locator.ownerType &&
+      previous.ownerId === locator.ownerId
+    ) {
+      // ponytail: ST has no immutable per-file ID; a missing source is a rename until ST provides one.
+      preservePrevious = !(await this.#chatExists(initialContext, previous));
+    }
+
+    const currentContext = this.#getContext() || {};
+    const currentLocator = conversationLocator(currentContext, this.#getCurrentChatId);
+    if (!sameLocator(locator, currentLocator)) return "";
+
+    const chatKey = preservePrevious ? previous.chatKey : this.#createChatKey();
+    const identity = Object.freeze({
+      version: CHAT_IDENTITY_VERSION,
+      chatKey,
+      ...currentLocator,
+    });
+    await this.#persistIdentity(currentContext, identity);
+    const confirmed = normalizeIdentity(
+      (this.#getContext() || {}).chatMetadata?.[CHAT_IDENTITY_METADATA_KEY],
+    );
+    return sameLocator(confirmed, currentLocator) && confirmed.chatKey === chatKey
+      ? chatKey
+      : "";
+  }
+
+  #createChatKey() {
+    if (typeof this.#randomUUID !== "function") {
+      throw new Error("crypto.randomUUID is unavailable");
+    }
+    const id = String(this.#randomUUID() || "").trim();
+    if (!id) throw new Error("crypto.randomUUID returned an empty value");
+    return `st-bme-v9:${id}`;
+  }
+
+  async #chatExists(context, identity) {
+    if (identity.ownerType === "group") {
+      const group = Array.isArray(context.groups)
+        ? context.groups.find(({ id }) => String(id) === identity.ownerId)
+        : null;
+      if (!Array.isArray(group?.chats)) {
+        throw new Error("SillyTavern group chat list is unavailable");
+      }
+      return group.chats.some((chatId) => normalizeChatId(chatId) === identity.chatId);
+    }
+
+    if (typeof this.#fetch !== "function" || typeof context.getRequestHeaders !== "function") {
+      throw new Error("SillyTavern character chat lookup is unavailable");
+    }
+    const response = await this.#fetch("/api/characters/chats", {
+      method: "POST",
+      headers: context.getRequestHeaders(),
+      body: JSON.stringify({ avatar_url: identity.ownerId, simple: true }),
+    });
+    if (!response?.ok) throw new Error("SillyTavern character chat lookup failed");
+    const value = await response.json();
+    if (!Array.isArray(value)) throw new Error("SillyTavern character chat lookup is invalid");
+    return value.some(({ file_id: fileId, file_name: fileName } = {}) =>
+      normalizeChatId(fileId || fileName) === identity.chatId);
+  }
+
+  async #persistIdentity(context, identity) {
+    if (
+      typeof context.updateChatMetadata !== "function" ||
+      typeof context.saveMetadata !== "function"
+    ) {
+      throw new Error("SillyTavern chat metadata persistence is unavailable");
+    }
+    context.updateChatMetadata({ [CHAT_IDENTITY_METADATA_KEY]: identity });
+    const updatedContext = this.#getContext() || {};
+    const updatedLocator = conversationLocator(updatedContext, this.#getCurrentChatId);
+    const updatedIdentity = normalizeIdentity(
+      updatedContext.chatMetadata?.[CHAT_IDENTITY_METADATA_KEY],
+    );
+    if (!sameLocator(updatedIdentity, updatedLocator) || updatedIdentity.chatKey !== identity.chatKey) {
+      throw new Error("SillyTavern chat changed while assigning its BME identity");
+    }
+    await updatedContext.saveMetadata();
   }
 
   findUserByHostIndex(snapshot, hostIndexInput) {
@@ -265,8 +421,13 @@ export class StHostAdapter {
       return { status: "scheduled" };
     };
 
-    bind(eventTypes.CHAT_CHANGED, "chat change", () => coordinator.onChatChanged());
-    bind(eventTypes.CHAT_LOADED, "chat load", () => coordinator.onChatChanged());
+    const onChatChanged = async () => {
+      if (!this.snapshotConversation().chatKey) await coordinator.onChatChanged();
+      await this.ensureConversationIdentity();
+      return coordinator.onChatChanged();
+    };
+    bind(eventTypes.CHAT_CHANGED, "chat change", onChatChanged);
+    bind(eventTypes.CHAT_LOADED, "chat load", onChatChanged);
     bind(eventTypes.GENERATION_STARTED, "generation start", (...args) =>
       coordinator.onGenerationStarted(...args));
     bind(eventTypes.GENERATION_AFTER_COMMANDS, "generation commands", (...args) =>

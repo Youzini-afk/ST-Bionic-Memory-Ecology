@@ -4,7 +4,10 @@ import { ConversationEngine } from "../../src/core/conversation-engine.js";
 import { getHistoryPrefixHash } from "../../src/core/history.js";
 import { MemoryStateStore } from "../../src/core/memory-store.js";
 import { GenerationCoordinator } from "../../src/generation/generation-coordinator.js";
-import { StHostAdapter } from "../../src/host/st-host-adapter.js";
+import {
+  CHAT_IDENTITY_METADATA_KEY,
+  StHostAdapter,
+} from "../../src/host/st-host-adapter.js";
 import {
   decideEnaSend,
   EnaPlannerService,
@@ -21,6 +24,17 @@ const userMessage = (text) => ({
   is_system: false,
   name: "User",
   mes: text,
+});
+
+const identity = (chatKey, {
+  chatId = chatKey,
+  ownerId = "assistant.png",
+} = {}) => ({
+  version: 1,
+  chatKey,
+  ownerType: "character",
+  ownerId,
+  chatId,
 });
 
 class FakeDocument {
@@ -75,11 +89,21 @@ class FakeDocument {
 }
 
 function createRuntime({ recall, plannerRun, enaOptions = { enabled: true } } = {}) {
-  const state = { chatId: "chat-a", chat: [], injections: [] };
+  const state = {
+    chatId: "chat-a",
+    chat: [],
+    chatMetadata: { [CHAT_IDENTITY_METADATA_KEY]: identity("chat-a") },
+    characters: [{ avatar: "assistant.png" }],
+    injections: [],
+  };
   const documentLike = new FakeDocument();
   const context = {
     get chatId() { return state.chatId; },
     get chat() { return state.chat; },
+    get chatMetadata() { return state.chatMetadata; },
+    get characters() { return state.characters; },
+    characterId: 0,
+    groupId: "",
     name1: "User",
     name2: "Assistant",
     setExtensionPrompt(...args) { state.injections.push(args); },
@@ -532,7 +556,13 @@ test("a late planner result cannot resume into another chat", async () => {
   runtime.documentLike.textarea.value = "chat a input";
   const pending = runtime.sendPlanner.handleUserSend("chat a input");
   await waiting;
-  runtime.state.chatId = "chat-b";
+  runtime.state.characters = [{ avatar: "other.png" }];
+  runtime.state.chatMetadata = {
+    [CHAT_IDENTITY_METADATA_KEY]: identity("chat-b", {
+      chatId: "chat-a",
+      ownerId: "other.png",
+    }),
+  };
   runtime.state.chat = [];
   await runtime.generation.onChatChanged();
   release();
