@@ -24,6 +24,7 @@ function createConversation(chatKey) {
     collections: createGraphCollections(),
     transactions: [],
     recallRecords: new Map(),
+    vectorJobs: new Map(),
   };
 }
 
@@ -49,7 +50,7 @@ export class MemoryStateStore {
   async commit(command = {}) {
     const chatKey = requireChatKey(command.chatKey);
     const current = this.#states.get(chatKey) || createConversation(chatKey);
-    const { changeSet, transaction, nextHead } = prepareCommit(current.head, command, {
+    const { changeSet, transaction, nextHead, vectorJob } = prepareCommit(current.head, command, {
       now: this.#now,
       id: this.#id,
     });
@@ -60,9 +61,14 @@ export class MemoryStateStore {
     const draft = clone(current);
     applyChangeSet(draft.collections, changeSet, "forward");
     draft.transactions.push(transaction);
+    if (vectorJob) draft.vectorJobs.set(vectorJob.id, vectorJob);
     draft.head = nextHead;
     this.#states.set(chatKey, draft);
-    return { head: clone(nextHead), transaction: clone(transaction) };
+    return {
+      head: clone(nextHead),
+      transaction: clone(transaction),
+      vectorJob: vectorJob ? clone(vectorJob) : null,
+    };
   }
 
   async readRecall(chatKeyInput, turnKeyInput) {
@@ -116,6 +122,7 @@ export class MemoryStateStore {
     for (const [turnKey, record] of draft.recallRecords) {
       if (!isRecallBoundToHistory(record, plan.history)) draft.recallRecords.delete(turnKey);
     }
+    if (plan.vectorJob) draft.vectorJobs.set(plan.vectorJob.id, plan.vectorJob);
     draft.head = plan.nextHead;
     this.#states.set(chatKey, draft);
     return {
@@ -123,6 +130,43 @@ export class MemoryStateStore {
       commonPrefixLength: plan.commonPrefixLength,
       rolledBackTransactions: clone(plan.rolledBackTransactions),
       head: clone(plan.nextHead),
+      vectorJob: plan.vectorJob ? clone(plan.vectorJob) : null,
     };
+  }
+
+  async listVectorJobs(chatKeyInput, { status = "pending" } = {}) {
+    const chatKey = requireChatKey(chatKeyInput);
+    const expectedStatus = String(status || "").trim();
+    const current = this.#states.get(chatKey) || createConversation(chatKey);
+    return [...current.vectorJobs.values()]
+      .filter((job) => !expectedStatus || job.status === expectedStatus)
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+      .map(clone);
+  }
+
+  async settleVectorJobs(command = {}) {
+    const chatKey = requireChatKey(command.chatKey);
+    const ids = [...new Set((Array.isArray(command.ids) ? command.ids : [])
+      .map((id) => String(id || "").trim()).filter(Boolean))];
+    if (ids.length === 0) throw new TypeError("vector job ids are required");
+    const status = String(command.status || "completed").trim();
+    if (status !== "completed" && status !== "pending") {
+      throw new TypeError("vector job status must be completed or pending");
+    }
+    const current = this.#states.get(chatKey) || createConversation(chatKey);
+    const draft = clone(current);
+    const updatedAt = Number(this.#now());
+    for (const id of ids) {
+      const job = draft.vectorJobs.get(id);
+      if (!job || job.chatKey !== chatKey) throw new TypeError(`unknown vector job ${id}`);
+      job.status = status;
+      job.outcome = String(command.outcome || (status === "completed" ? "synced" : "retry"));
+      job.lastError = String(command.error || "");
+      job.attempts = Math.max(0, Number(job.attempts) || 0) + 1;
+      job.updatedAt = updatedAt;
+      job.completedAt = status === "completed" ? updatedAt : null;
+    }
+    this.#states.set(chatKey, draft);
+    return ids.map((id) => clone(draft.vectorJobs.get(id)));
   }
 }

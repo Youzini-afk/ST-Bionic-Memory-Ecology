@@ -46,6 +46,7 @@ export function createConversationHead(chatKeyInput) {
     revision: 0,
     graphRevision: 0,
     processedThrough: -1,
+    vectorModelScope: "",
     history: [],
     updatedAt: 0,
   };
@@ -91,6 +92,15 @@ export function prepareCommit(head, command = {}, { now = Date.now, id = () => c
   if (!transactionId) throw new TypeError("transaction id is required");
   const committedRevision = expectedRevision + 1;
   const createdAt = timestamp(now);
+  const vectorModelScope = Object.hasOwn(command, "vectorModelScope")
+    ? String(command.vectorModelScope || "").trim()
+    : String(head.vectorModelScope || "").trim();
+  const vectorAffected = command.enqueueVectorJob === true && changeSet.changes.some(
+    ({ collection }) => collection === "nodes" || collection === "edges",
+  );
+  if (vectorAffected && !vectorModelScope) {
+    throw new TypeError("vectorModelScope is required for vector jobs");
+  }
   const transaction = {
     id: transactionId,
     chatKey,
@@ -101,6 +111,8 @@ export function prepareCommit(head, command = {}, { now = Date.now, id = () => c
     basisHistoryHash,
     processedThroughBefore,
     processedThroughAfter,
+    vectorAffected,
+    vectorModelScope,
     changes: changeSet.changes,
     createdAt,
   };
@@ -109,9 +121,25 @@ export function prepareCommit(head, command = {}, { now = Date.now, id = () => c
     revision: committedRevision,
     graphRevision: head.graphRevision + (changeSet.changes.length > 0 ? 1 : 0),
     processedThrough: processedThroughAfter,
+    vectorModelScope,
     updatedAt: createdAt,
   };
-  return { changeSet, transaction, nextHead };
+  const vectorJob = vectorAffected
+    ? {
+        id: `${transactionId}:vector`,
+        chatKey,
+        transactionId,
+        committedRevision,
+        graphRevision: nextHead.graphRevision,
+        modelScope: vectorModelScope,
+        reason: operation,
+        status: "pending",
+        attempts: 0,
+        createdAt,
+        updatedAt: createdAt,
+      }
+    : null;
+  return { changeSet, transaction, nextHead, vectorJob };
 }
 
 export function prepareHistoryReconciliation(
@@ -151,6 +179,7 @@ export function prepareHistoryReconciliation(
       rolledBackTransactions: [],
       remainingTransactions: orderedTransactions,
       nextHead: structuredClone(head),
+      vectorJob: null,
     };
   }
 
@@ -171,6 +200,25 @@ export function prepareHistoryReconciliation(
       (rolledBackTransactions.some((transaction) => transaction.changes.length > 0) ? 1 : 0),
     updatedAt: timestamp(now),
   };
+  const vectorAffected = rolledBackTransactions.some(
+    (transaction) => transaction.vectorAffected === true,
+  );
+  const vectorModelScope = String(nextHead.vectorModelScope || "").trim();
+  const vectorJob = vectorAffected && vectorModelScope
+    ? {
+        id: `rollback:${chatKey}:${nextHead.revision}:vector`,
+        chatKey,
+        transactionId: "",
+        committedRevision: nextHead.revision,
+        graphRevision: nextHead.graphRevision,
+        modelScope: vectorModelScope,
+        reason: "history-rollback",
+        status: "pending",
+        attempts: 0,
+        createdAt: nextHead.updatedAt,
+        updatedAt: nextHead.updatedAt,
+      }
+    : null;
   return {
     changed: true,
     commonPrefixLength,
@@ -178,5 +226,6 @@ export function prepareHistoryReconciliation(
     rolledBackTransactions,
     remainingTransactions,
     nextHead,
+    vectorJob,
   };
 }

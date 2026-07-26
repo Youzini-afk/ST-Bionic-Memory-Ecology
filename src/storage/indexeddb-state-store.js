@@ -79,6 +79,7 @@ export class IndexedDbStateStore {
       db.table("graphRecords"),
       db.table("transactions"),
       db.table("recallRecords"),
+      db.table("vectorJobs"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
         const records = await db.table("graphRecords").where("chatKey").equals(chatKey).toArray();
@@ -92,6 +93,11 @@ export class IndexedDbStateStore {
           .where("chatKey")
           .equals(chatKey)
           .toArray();
+        const vectorJobs = await db
+          .table("vectorJobs")
+          .where("chatKey")
+          .equals(chatKey)
+          .toArray();
         return {
           head: clone(head),
           collections: hydrateCollections(chatKey, records),
@@ -99,6 +105,7 @@ export class IndexedDbStateStore {
           recallRecords: new Map(
             recallRecords.map((record) => [record.turnKey, clone(record)]),
           ),
+          vectorJobs: new Map(vectorJobs.map((job) => [job.id, clone(job)])),
         };
       },
     );
@@ -113,6 +120,7 @@ export class IndexedDbStateStore {
       db.table("heads"),
       db.table("graphRecords"),
       db.table("transactions"),
+      db.table("vectorJobs"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
         const plan = prepareCommit(head, command, { now: this.#now, id: this.#id });
@@ -141,10 +149,12 @@ export class IndexedDbStateStore {
         if (puts.length > 0) await db.table("graphRecords").bulkPut(puts);
         if (deletes.length > 0) await db.table("graphRecords").bulkDelete(deletes);
         await db.table("transactions").add(clone(plan.transaction));
+        if (plan.vectorJob) await db.table("vectorJobs").add(clone(plan.vectorJob));
         await db.table("heads").put(clone(plan.nextHead));
         response = {
           head: clone(plan.nextHead),
           transaction: clone(plan.transaction),
+          vectorJob: plan.vectorJob ? clone(plan.vectorJob) : null,
         };
       },
     );
@@ -197,6 +207,7 @@ export class IndexedDbStateStore {
       db.table("graphRecords"),
       db.table("transactions"),
       db.table("recallRecords"),
+      db.table("vectorJobs"),
       async () => {
         const head = (await db.table("heads").get(chatKey)) || createConversationHead(chatKey);
         const transactions = await db
@@ -212,6 +223,7 @@ export class IndexedDbStateStore {
           commonPrefixLength: plan.commonPrefixLength,
           rolledBackTransactions: clone(plan.rolledBackTransactions),
           head: clone(plan.nextHead),
+          vectorJob: plan.vectorJob ? clone(plan.vectorJob) : null,
         };
         if (!plan.changed) return;
 
@@ -265,10 +277,54 @@ export class IndexedDbStateStore {
         if (invalidRecallKeys.length > 0) {
           await db.table("recallRecords").bulkDelete(invalidRecallKeys);
         }
+        if (plan.vectorJob) await db.table("vectorJobs").add(clone(plan.vectorJob));
         await db.table("heads").put(clone(plan.nextHead));
       },
     );
     return response;
+  }
+
+  async listVectorJobs(chatKeyInput, { status = "pending" } = {}) {
+    const chatKey = requireChatKey(chatKeyInput);
+    const expectedStatus = String(status || "").trim();
+    const db = await this.#dbPromise;
+    const jobs = expectedStatus
+      ? await db.table("vectorJobs").where("[chatKey+status]").equals([chatKey, expectedStatus]).toArray()
+      : await db.table("vectorJobs").where("chatKey").equals(chatKey).toArray();
+    return jobs
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+      .map(clone);
+  }
+
+  async settleVectorJobs(command = {}) {
+    const chatKey = requireChatKey(command.chatKey);
+    const ids = [...new Set((Array.isArray(command.ids) ? command.ids : [])
+      .map((id) => String(id || "").trim()).filter(Boolean))];
+    if (ids.length === 0) throw new TypeError("vector job ids are required");
+    const status = String(command.status || "completed").trim();
+    if (status !== "completed" && status !== "pending") {
+      throw new TypeError("vector job status must be completed or pending");
+    }
+    const db = await this.#dbPromise;
+    let updated = [];
+    await db.transaction("rw", db.table("vectorJobs"), async () => {
+      const jobs = await db.table("vectorJobs").bulkGet(ids);
+      if (jobs.some((job, index) => !job || job.chatKey !== chatKey || job.id !== ids[index])) {
+        throw new TypeError("unknown vector job");
+      }
+      const updatedAt = Number(this.#now());
+      updated = jobs.map((job) => ({
+        ...job,
+        status,
+        outcome: String(command.outcome || (status === "completed" ? "synced" : "retry")),
+        lastError: String(command.error || ""),
+        attempts: Math.max(0, Number(job.attempts) || 0) + 1,
+        updatedAt,
+        completedAt: status === "completed" ? updatedAt : null,
+      }));
+      await db.table("vectorJobs").bulkPut(updated.map(clone));
+    });
+    return updated.map(clone);
   }
 
   async close() {

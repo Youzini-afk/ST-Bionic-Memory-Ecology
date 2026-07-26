@@ -222,5 +222,53 @@ export function stateStoreContractCases() {
         assert.equal(state.transactions.length, 1);
       },
     },
+    {
+      name: "vector jobs are committed with graph changes and rollback repair",
+      async run(store) {
+        const chatKey = "vectors";
+        const history = await snapshotHistory(semanticMessages(
+          ["user", "one"],
+          ["assistant", "answer"],
+        ));
+        let result = await store.reconcileHistory({ chatKey, expectedRevision: 0, history });
+        result = await store.commit({
+          chatKey,
+          expectedRevision: result.head.revision,
+          operation: "extract",
+          basisHistoryLength: 2,
+          basisHistoryHash: getHistoryPrefixHash(history, 2),
+          processedThroughAfter: 1,
+          vectorModelScope: "backend:model-a",
+          enqueueVectorJob: true,
+          changeSet: {
+            changes: [{ collection: "nodes", id: "v1", before: null, after: { id: "v1" } }],
+          },
+        });
+        assert.equal(result.vectorJob.status, "pending");
+        assert.equal((await store.listVectorJobs(chatKey)).length, 1);
+
+        const edited = await snapshotHistory(semanticMessages(
+          ["user", "one"],
+          ["assistant", "changed"],
+        ));
+        result = await store.reconcileHistory({
+          chatKey,
+          expectedRevision: result.head.revision,
+          history: edited,
+        });
+        assert.equal(result.vectorJob.reason, "history-rollback");
+        assert.equal((await store.readConversation(chatKey)).collections.nodes.has("v1"), false);
+        const pending = await store.listVectorJobs(chatKey);
+        assert.equal(pending.length, 2);
+        await store.settleVectorJobs({
+          chatKey,
+          ids: pending.map(({ id }) => id),
+          status: "completed",
+          outcome: "synced",
+        });
+        assert.equal((await store.listVectorJobs(chatKey)).length, 0);
+        assert.equal((await store.listVectorJobs(chatKey, { status: "completed" })).length, 2);
+      },
+    },
   ];
 }

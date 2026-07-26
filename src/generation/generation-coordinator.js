@@ -3,6 +3,7 @@ import {
   getHistoryPrefixHash,
   historyBasisMatches,
 } from "../core/history.js";
+import { normalizeChangeSet } from "../core/change-set.js";
 import { classifyGeneration } from "../host/st-host-adapter.js";
 
 export class RecallStaleError extends Error {
@@ -17,12 +18,14 @@ function normalizeRecallResult(value = {}) {
   const selectedNodeIds = Array.isArray(value.selectedNodeIds)
     ? value.selectedNodeIds.map((id) => String(id ?? "").trim()).filter(Boolean)
     : [];
+  const changeSet = normalizeChangeSet(value.changeSet || { changes: [] });
   return {
     selectedNodeIds: [...new Set(selectedNodeIds)],
     injectionText: String(value.injectionText ?? ""),
     tokenEstimate: Number.isFinite(Number(value.tokenEstimate))
       ? Math.max(0, Number(value.tokenEstimate))
       : 0,
+    changeSet,
   };
 }
 
@@ -30,11 +33,13 @@ export class GenerationCoordinator {
   #engine;
   #host;
   #recall;
+  #domains;
+  #vectors;
   #logger;
   #generation = null;
   #generationNumber = 0;
 
-  constructor({ engine, host, recall, logger = console } = {}) {
+  constructor({ engine, host, recall, domains = null, vectors = null, logger = console } = {}) {
     if (!engine?.activate || !engine?.reconcile || !engine?.createRecall) {
       throw new TypeError("ConversationEngine is required");
     }
@@ -42,9 +47,17 @@ export class GenerationCoordinator {
       throw new TypeError("ST HostAdapter is required");
     }
     if (typeof recall !== "function") throw new TypeError("recall provider is required");
+    if (domains && typeof domains.processAssistant !== "function") {
+      throw new TypeError("domains must implement processAssistant");
+    }
+    if (vectors && typeof vectors.drain !== "function") {
+      throw new TypeError("vectors must implement drain");
+    }
     this.#engine = engine;
     this.#host = host;
     this.#recall = recall;
+    this.#domains = domains;
+    this.#vectors = vectors;
     this.#logger = logger;
   }
 
@@ -127,10 +140,29 @@ export class GenerationCoordinator {
     return result;
   }
 
-  async onMessageReceived() {
+  async onMessageReceived(messageId) {
     const snapshot = this.#host.snapshotConversation();
     const lease = await this.#ensureLease(snapshot);
-    return this.#engine.reconcile(lease, snapshot.messages);
+    const reconciliation = await this.#engine.reconcile(lease, snapshot.messages);
+    const received = snapshot.messages.find(
+      (message) => message.hostIndex === Number(messageId),
+    );
+    if (received?.role !== "assistant") return reconciliation;
+    let domains = null;
+    try {
+      if (this.#domains) {
+        domains = await this.#domains.processAssistant({ lease, snapshot, messageId });
+      }
+    } catch (error) {
+      const aborted = error?.name === "AbortError" || error?.name === "LeaseExpiredError";
+      if (!aborted) this.#logger?.error?.("[ST-BME v9] assistant domains failed", error);
+      domains = { status: aborted ? "aborted" : "failed", error };
+    }
+    let vectors = null;
+    if (this.#vectors) {
+      vectors = await this.#vectors.drain(snapshot.chatKey, { signal: lease.signal });
+    }
+    return { ...reconciliation, domains, vectors };
   }
 
   async onHistoryChanged() {
@@ -218,7 +250,26 @@ export class GenerationCoordinator {
       }));
       this.#assertCurrent(generation);
       const current = await this.#engine.read(generation.lease);
-      if (current.head.revision === baseRevision) return { ...result, graphRevision };
+      if (current.head.revision === baseRevision) {
+        if (result.changeSet.changes.length === 0) {
+          return { ...result, graphRevision };
+        }
+        try {
+          const committed = await this.#engine.commit(generation.lease, {
+            expectedRevision: baseRevision,
+            operation: "recall-access",
+            basisHistoryLength,
+            basisHistoryHash,
+            processedThroughAfter: current.head.processedThrough,
+            changeSet: result.changeSet,
+            enqueueVectorJob: false,
+          }, { requiresActive: true });
+          return { ...result, graphRevision: committed.head.graphRevision };
+        } catch (error) {
+          if (attempt === 0 && error?.name === "RevisionConflictError") continue;
+          throw error;
+        }
+      }
       if (!historyBasisMatches(
         current.head.history,
         basisHistoryLength,
@@ -226,7 +277,12 @@ export class GenerationCoordinator {
       )) {
         throw new RecallStaleError(generation.chatKey);
       }
-      if (current.head.graphRevision === graphRevision) return { ...result, graphRevision };
+      if (
+        current.head.graphRevision === graphRevision &&
+        result.changeSet.changes.length === 0
+      ) {
+        return { ...result, graphRevision };
+      }
       if (attempt === 1) throw new RecallStaleError(generation.chatKey);
     }
     throw new RecallStaleError(generation.chatKey);

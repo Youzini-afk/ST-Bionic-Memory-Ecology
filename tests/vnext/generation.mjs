@@ -28,7 +28,7 @@ const assistantMessage = (text, extra = {}) => ({
   ...extra,
 });
 
-function createRuntime(recall) {
+function createRuntime(recall, { domains = null, vectors = null } = {}) {
   const state = {
     chatId: "chat-a",
     chat: [],
@@ -52,6 +52,8 @@ function createRuntime(recall) {
     engine,
     host,
     recall,
+    domains,
+    vectors,
     logger: quietLogger,
   });
   return { state, context, store, engine, host, coordinator };
@@ -230,6 +232,84 @@ test("a manual edit while recall is running prevents the late result from inject
   assert.equal(result.status, "aborted");
   assert.equal(nonEmptyInjections(runtime).includes("STALE"), false);
   assert.equal((await runtime.store.readConversation("chat-a")).recallRecords.size, 0);
+});
+
+test("fresh recall effects commit once, reroll replays, and a parent edit rolls them back", async () => {
+  let recallCalls = 0;
+  const runtime = createRuntime(async ({ state }) => {
+    recallCalls += 1;
+    const before = state.collections.nodes.get("memory");
+    return {
+      selectedNodeIds: ["memory"],
+      injectionText: "EFFECT",
+      tokenEstimate: 1,
+      changeSet: {
+        changes: [{
+          collection: "nodes",
+          id: "memory",
+          before,
+          after: { ...before, accessCount: before.accessCount + 1 },
+        }],
+      },
+    };
+  });
+  await runtime.coordinator.onChatChanged();
+  await runtime.store.commit({
+    chatKey: "chat-a",
+    expectedRevision: 0,
+    operation: "seed",
+    basisHistoryLength: 0,
+    basisHistoryHash: getHistoryPrefixHash([], 0),
+    processedThroughAfter: -1,
+    changeSet: {
+      changes: [{
+        collection: "nodes",
+        id: "memory",
+        before: null,
+        after: { id: "memory", accessCount: 0 },
+      }],
+    },
+  });
+
+  await runtime.coordinator.onGenerationStarted("normal");
+  runtime.state.chat.push(userMessage("question"));
+  await runtime.coordinator.onMessageSent(0);
+  assert.equal((await runtime.store.readConversation("chat-a")).collections.nodes.get("memory").accessCount, 1);
+  runtime.coordinator.onGenerationFinished();
+
+  await runtime.coordinator.onGenerationStarted("regenerate");
+  assert.equal((await runtime.coordinator.onBeforeCombinePrompts()).source, "replay");
+  assert.equal(recallCalls, 1);
+  assert.equal((await runtime.store.readConversation("chat-a")).collections.nodes.get("memory").accessCount, 1);
+  runtime.coordinator.onGenerationFinished();
+
+  runtime.state.chat[0] = userMessage("edited");
+  await runtime.coordinator.onHistoryChanged("edited", 0);
+  assert.equal((await runtime.store.readConversation("chat-a")).collections.nodes.get("memory").accessCount, 0);
+});
+
+test("an assistant receipt runs domains before draining committed vector jobs", async () => {
+  const order = [];
+  const runtime = createRuntime(async () => ({}), {
+    domains: {
+      async processAssistant({ snapshot, messageId }) {
+        order.push(`domains:${snapshot.chatKey}:${messageId}`);
+        return { status: "completed" };
+      },
+    },
+    vectors: {
+      async drain(chatKey) {
+        order.push(`vectors:${chatKey}`);
+        return { status: "completed" };
+      },
+    },
+  });
+  runtime.state.chat.push(userMessage("question"), assistantMessage("answer"));
+  await runtime.coordinator.onChatChanged();
+  const result = await runtime.coordinator.onMessageReceived(1);
+  assert.deepEqual(order, ["domains:chat-a:1", "vectors:chat-a"]);
+  assert.equal(result.domains.status, "completed");
+  assert.equal(result.vectors.status, "completed");
 });
 
 let passed = 0;
