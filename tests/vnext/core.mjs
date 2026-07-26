@@ -15,16 +15,14 @@ import {
   getHistoryPrefixHash,
   snapshotHistory,
 } from "../../src/core/history.js";
+import { MemoryStateStore } from "../../src/core/memory-store.js";
 import {
-  MemoryStateStore,
-  RevisionConflictError,
-} from "../../src/core/memory-store.js";
+  semanticMessages as messages,
+  stateStoreContractCases,
+} from "./state-store-contract.mjs";
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
-
-const messages = (...pairs) =>
-  pairs.map(([role, text], index) => ({ role, text, speaker: `${role}-${index % 2}` }));
 
 function deterministicStore() {
   let clock = 1000;
@@ -94,104 +92,9 @@ test("ChangeSet rejects duplicate and stale record mutations", () => {
   );
 });
 
-test("history divergence rolls back the invalid transaction suffix", async () => {
-  const store = deterministicStore();
-  const chatKey = "chat-a";
-  const originalHistory = await snapshotHistory(messages(
-    ["user", "u1"],
-    ["assistant", "a1"],
-    ["user", "u2"],
-    ["assistant", "a2"],
-  ));
-  let result = await store.reconcileHistory({ chatKey, expectedRevision: 0, history: originalHistory });
-  assert.equal(result.state.head.revision, 1);
-
-  result = await store.commit({
-    chatKey,
-    expectedRevision: 1,
-    operation: "extract",
-    basisHistoryLength: 2,
-    basisHistoryHash: getHistoryPrefixHash(originalHistory, 2),
-    processedThroughAfter: 1,
-    changeSet: {
-      changes: [{ collection: "nodes", id: "n1", before: null, after: { id: "n1", text: "a1" } }],
-    },
-  });
-  assert.equal(result.state.head.revision, 2);
-
-  result = await store.commit({
-    chatKey,
-    expectedRevision: 2,
-    operation: "consolidate",
-    basisHistoryLength: 4,
-    basisHistoryHash: getHistoryPrefixHash(originalHistory, 4),
-    processedThroughAfter: 3,
-    changeSet: {
-      changes: [
-        { collection: "nodes", id: "n1", before: { id: "n1", text: "a1" }, after: { id: "n1", text: "a1+a2" } },
-        { collection: "nodes", id: "n2", before: null, after: { id: "n2", text: "a2" } },
-      ],
-    },
-  });
-  assert.equal(result.state.head.revision, 3);
-
-  await assert.rejects(
-    store.commit({
-      chatKey,
-      expectedRevision: 2,
-      operation: "stale",
-      basisHistoryLength: 4,
-      basisHistoryHash: getHistoryPrefixHash(originalHistory, 4),
-      processedThroughAfter: 3,
-      changeSet: { changes: [{ collection: "nodes", id: "x", before: null, after: { id: "x" } }] },
-    }),
-    RevisionConflictError,
-  );
-
-  const rerolledHistory = await snapshotHistory(messages(
-    ["user", "u1"],
-    ["assistant", "a1"],
-    ["user", "u2"],
-    ["assistant", "a2-reroll"],
-  ));
-  result = await store.reconcileHistory({ chatKey, expectedRevision: 3, history: rerolledHistory });
-  assert.equal(result.commonPrefixLength, 3);
-  assert.deepEqual(result.rolledBackTransactions.map((tx) => tx.id), ["tx-2"]);
-  assert.deepEqual(result.state.collections.nodes.get("n1"), { id: "n1", text: "a1" });
-  assert.equal(result.state.collections.nodes.has("n2"), false);
-  assert.equal(result.state.head.processedThrough, 1);
-
-  const editedEarlierHistory = await snapshotHistory(messages(
-    ["user", "u1"],
-    ["assistant", "a1-edited"],
-    ["user", "u2"],
-    ["assistant", "a2-reroll"],
-  ));
-  result = await store.reconcileHistory({
-    chatKey,
-    expectedRevision: result.state.head.revision,
-    history: editedEarlierHistory,
-  });
-  assert.equal(result.commonPrefixLength, 1);
-  assert.deepEqual(result.rolledBackTransactions.map((tx) => tx.id), ["tx-1"]);
-  assert.equal(result.state.collections.nodes.size, 0);
-  assert.equal(result.state.head.processedThrough, -1);
-});
-
-test("a history-only tail change leaves graphRevision untouched", async () => {
-  const store = deterministicStore();
-  const first = await snapshotHistory(messages(["user", "one"]));
-  const second = await snapshotHistory(messages(["user", "one"], ["assistant", "unprocessed"]));
-  let result = await store.reconcileHistory({ chatKey: "tail", expectedRevision: 0, history: first });
-  const graphRevision = result.state.head.graphRevision;
-  result = await store.reconcileHistory({
-    chatKey: "tail",
-    expectedRevision: result.state.head.revision,
-    history: second,
-  });
-  assert.equal(result.state.head.graphRevision, graphRevision);
-  assert.equal(result.rolledBackTransactions.length, 0);
-});
+for (const contract of stateStoreContractCases()) {
+  test(`memory store: ${contract.name}`, () => contract.run(deterministicStore()));
+}
 
 test("engine serializes a chat and never retargets a late task to the active chat", async () => {
   const store = deterministicStore();
@@ -199,7 +102,7 @@ test("engine serializes a chat and never retargets a late task to the active cha
   const leaseA = engine.activate("chat-a");
   const historyA = messages(["user", "hello"]);
   const reconcileA = await engine.reconcile(leaseA, historyA);
-  const basisHash = reconcileA.state.head.history[0].prefixHash;
+  const basisHash = reconcileA.head.history[0].prefixHash;
 
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
