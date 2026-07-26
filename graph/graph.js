@@ -1,12 +1,17 @@
 // ST-BME: 图数据模型
-// 管理节点、边的 CRUD 操作
+// 管理节点、边的 CRUD 操作，以及序列化到 chat_metadata
 
 import {
   createDefaultBatchJournal,
   createDefaultHistoryState,
   createDefaultMaintenanceJournal,
   createDefaultVectorIndexState,
+  markGraphPersistEdgeDelete,
+  markGraphPersistEdgeUpsert,
+  markGraphPersistNodeDelete,
+  markGraphPersistNodeUpsert,
   normalizeGraphRuntimeState,
+  PROCESSED_MESSAGE_HASH_VERSION,
 } from "../runtime/runtime-state.js";
 import {
   hasSameScopeIdentity,
@@ -23,13 +28,17 @@ import {
   createDefaultStoryTime,
   createDefaultStoryTimeSpan,
   createDefaultTimelineState,
+  normalizeGraphStoryTimeline,
   normalizeNodeStoryTimeline,
   normalizeStoryTime,
   normalizeStoryTimeSpan,
 } from "./story-timeline.js";
 import {
   createDefaultSummaryState,
+  importLegacySynopsisToSummaryState,
+  normalizeGraphSummaryState,
 } from "./summary-state.js";
+import { debugLog } from "../runtime/debug-logging.js";
 
 /**
  * 图状态版本号
@@ -133,9 +142,11 @@ export function addNode(graph, node) {
     const lastNode = sameTypeNodes[sameTypeNodes.length - 1];
     lastNode.nextId = node.id;
     node.prevId = lastNode.id;
+    markGraphPersistNodeUpsert(graph, lastNode, "add-node-link", "graph.addNode");
   }
 
   graph.nodes.push(node);
+  markGraphPersistNodeUpsert(graph, node, "add-node", "graph.addNode");
   return node;
 }
 
@@ -187,6 +198,7 @@ export function updateNode(graph, nodeId, updates) {
 
   Object.assign(node, updates);
   node.updatedAt = nextUpdatedAt;
+  markGraphPersistNodeUpsert(graph, node, "update-node", "graph.updateNode");
   return true;
 }
 
@@ -210,17 +222,19 @@ export function removeNode(graph, nodeId, visited = new Set()) {
     const prev = getNode(graph, node.prevId);
     if (prev) {
       prev.nextId = node.nextId;
+      markGraphPersistNodeUpsert(graph, prev, "remove-node-link-prev", "graph.removeNode");
     }
   }
   if (node.nextId) {
     const next = getNode(graph, node.nextId);
     if (next) {
       next.prevId = node.prevId;
+      markGraphPersistNodeUpsert(graph, next, "remove-node-link-next", "graph.removeNode");
     }
   }
 
   // 递归删除子节点（带环保护）
-  for (const childId of Array.isArray(node.childIds) ? node.childIds : []) {
+  for (const childId of node.childIds) {
     removeNode(graph, childId, visited);
   }
 
@@ -228,8 +242,8 @@ export function removeNode(graph, nodeId, visited = new Set()) {
   if (node.parentId) {
     const parent = getNode(graph, node.parentId);
     if (parent) {
-      parent.childIds = (Array.isArray(parent.childIds) ? parent.childIds : [])
-        .filter((id) => id !== normalizedNodeId);
+      parent.childIds = parent.childIds.filter((id) => id !== normalizedNodeId);
+      markGraphPersistNodeUpsert(graph, parent, "remove-node-parent-detach", "graph.removeNode");
     }
   }
 
@@ -244,6 +258,7 @@ export function removeNode(graph, nodeId, visited = new Set()) {
     candidate.childIds = candidate.childIds.filter(
       (id) => id !== normalizedNodeId,
     );
+    markGraphPersistNodeUpsert(graph, candidate, "remove-node-child-detach", "graph.removeNode");
   }
 
   // 删除相关边
@@ -255,10 +270,12 @@ export function removeNode(graph, nodeId, visited = new Set()) {
     (e) => e.fromId !== normalizedNodeId && e.toId !== normalizedNodeId,
   );
   for (const edgeId of deletedEdgeIds) {
+    markGraphPersistEdgeDelete(graph, edgeId, "remove-node-edge-cascade", "graph.removeNode");
   }
 
   // 删除节点本身
   graph.nodes = graph.nodes.filter((n) => n.id !== normalizedNodeId);
+  markGraphPersistNodeDelete(graph, normalizedNodeId, "remove-node", "graph.removeNode");
 
   return true;
 }
@@ -396,6 +413,7 @@ export function addEdge(graph, edge) {
         Number(existing.expiredAt || 0),
       );
     }
+    markGraphPersistEdgeUpsert(graph, existing, "merge-edge", "graph.addEdge");
     return existing;
   }
 
@@ -407,6 +425,7 @@ export function addEdge(graph, edge) {
   }
 
   graph.edges.push(edge);
+  markGraphPersistEdgeUpsert(graph, edge, "add-edge", "graph.addEdge");
   return edge;
 }
 
@@ -420,6 +439,7 @@ export function removeEdge(graph, edgeId) {
   const idx = graph.edges.findIndex((e) => e.id === edgeId);
   if (idx === -1) return false;
   graph.edges.splice(idx, 1);
+  markGraphPersistEdgeDelete(graph, edgeId, "remove-edge", "graph.removeEdge");
   return true;
 }
 
@@ -565,7 +585,7 @@ function isEdgeActive(edge, now = Date.now()) {
  * 将边标记为失效（不删除，保留历史）
  * @param {object} edge
  */
-export function invalidateEdge(edge) {
+export function invalidateEdge(edge, graph = null) {
   if (!edge) return;
   const now = Date.now();
   if (!edge.invalidAt) {
@@ -575,6 +595,9 @@ export function invalidateEdge(edge) {
     Number(edge.updatedAt || 0),
     Number(edge.invalidAt || now),
   );
+  if (graph) {
+    markGraphPersistEdgeUpsert(graph, edge, "invalidate-edge", "graph.invalidateEdge");
+  }
 }
 
 /**
@@ -598,4 +621,294 @@ export function getGraphStats(graph) {
     lastProcessedSeq: graph.lastProcessedSeq,
     typeCounts,
   };
+}
+
+// ==================== 序列化 ====================
+
+/**
+ * 序列化图状态为 JSON 字符串
+ * @param {GraphState} graph
+ * @returns {string}
+ */
+export function serializeGraph(graph) {
+  return JSON.stringify(graph);
+}
+
+/**
+ * 从 JSON 反序列化图状态
+ * @param {string} json
+ * @returns {GraphState}
+ */
+export function deserializeGraph(json) {
+  try {
+    const data = typeof json === "string" ? JSON.parse(json) : json;
+    const shouldImportLegacySynopsis =
+      !data?.summaryState ||
+      typeof data.summaryState !== "object" ||
+      Array.isArray(data.summaryState);
+
+    if (!data || data.version === undefined) {
+      return createEmptyGraph();
+    }
+
+    if (data.version < GRAPH_VERSION) {
+      debugLog(`[ST-BME] 图版本迁移 v${data.version} → v${GRAPH_VERSION}`);
+
+      if (data.version < 2 && data.edges) {
+        for (const edge of data.edges) {
+          if (edge.validAt === undefined)
+            edge.validAt = edge.createdTime || Date.now();
+          if (edge.invalidAt === undefined) edge.invalidAt = null;
+          if (edge.expiredAt === undefined) edge.expiredAt = null;
+        }
+      }
+
+      if (data.version < 3) {
+        if (typeof data.lastProcessedSeq !== "number") {
+          data.lastProcessedSeq = -1;
+        }
+        for (const node of data.nodes || []) {
+          if (!Array.isArray(node.seqRange)) {
+            const seq = Number.isFinite(node.seq) ? node.seq : 0;
+            node.seqRange = [seq, seq];
+          }
+        }
+      }
+
+      if (data.version < 4) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          lastProcessedAssistantFloor: Number.isFinite(data.lastProcessedSeq)
+            ? data.lastProcessedSeq
+            : -1,
+        };
+        data.vectorIndexState = {
+          ...createDefaultVectorIndexState(),
+          ...(data.vectorIndexState || {}),
+          dirty: true,
+          lastWarning: "旧版本图谱已迁移，需要重建向量运行时状态",
+        };
+        data.batchJournal = Array.isArray(data.batchJournal)
+          ? data.batchJournal
+          : createDefaultBatchJournal();
+      }
+
+      if (data.version < 5) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          extractionCount: Number.isFinite(data?.historyState?.extractionCount)
+            ? data.historyState.extractionCount
+            : 0,
+          lastMutationSource: String(
+            data?.historyState?.lastMutationSource || "",
+          ),
+        };
+        data.batchJournal = Array.isArray(data.batchJournal)
+          ? data.batchJournal
+          : createDefaultBatchJournal();
+      }
+
+      if (data.version < 6) {
+        for (const node of data.nodes || []) {
+          node.scope = normalizeMemoryScope(node?.scope);
+        }
+        for (const edge of data.edges || []) {
+          edge.scope = normalizeMemoryScope(edge?.scope);
+        }
+      }
+
+      if (data.version < 7) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          activeRegionSource: String(
+            data?.historyState?.activeRegionSource ||
+              (data?.historyState?.activeRegion ? "history" : ""),
+          ),
+          activeRecallOwnerKey: String(
+            data?.historyState?.activeRecallOwnerKey || "",
+          ),
+          recentRecallOwnerKeys: Array.isArray(
+            data?.historyState?.recentRecallOwnerKeys,
+          )
+            ? data.historyState.recentRecallOwnerKeys
+            : [],
+        };
+        data.maintenanceJournal = Array.isArray(data.maintenanceJournal)
+          ? data.maintenanceJournal
+          : createDefaultMaintenanceJournal();
+        data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
+        data.regionState = createDefaultRegionState(data.regionState);
+      }
+
+      if (data.version < 8) {
+        data.historyState = {
+          ...createDefaultHistoryState(),
+          ...(data.historyState || {}),
+          activeStorySegmentId: String(
+            data?.historyState?.activeStorySegmentId || "",
+          ),
+          activeStoryTimeLabel: String(
+            data?.historyState?.activeStoryTimeLabel || "",
+          ),
+          activeStoryTimeSource: String(
+            data?.historyState?.activeStoryTimeSource ||
+              (data?.historyState?.activeStorySegmentId ||
+              data?.historyState?.activeStoryTimeLabel
+                ? "history"
+                : ""),
+          ),
+          lastExtractedStorySegmentId: String(
+            data?.historyState?.lastExtractedStorySegmentId || "",
+          ),
+        };
+        data.timelineState = createDefaultTimelineState(data.timelineState);
+        for (const node of data.nodes || []) {
+          normalizeNodeStoryTimeline(node);
+        }
+      }
+
+      if (data.version < 9) {
+        data.summaryState = createDefaultSummaryState(data.summaryState);
+      }
+
+      data.version = GRAPH_VERSION;
+    }
+
+    data.nodes = (data.nodes || []).map((node) => {
+      const seq = Number.isFinite(node.seq) ? node.seq : 0;
+      return {
+        level: 0,
+        parentId: null,
+        childIds: [],
+        accessCount: 0,
+        lastAccessTime: node.createdTime || Date.now(),
+        prevId: null,
+        nextId: null,
+        clusters: [],
+        ...node,
+        seq,
+        seqRange: Array.isArray(node.seqRange) ? node.seqRange : [seq, seq],
+        scope: normalizeNodeMemoryScope(node),
+        storyTime: createDefaultStoryTime(node?.storyTime || {}),
+        storyTimeSpan: createDefaultStoryTimeSpan(node?.storyTimeSpan || {}),
+      };
+    });
+    data.edges = (data.edges || []).map((edge) => {
+      const normalizedEdge = {
+        createdTime: Date.now(),
+        validAt: edge?.createdTime || Date.now(),
+        invalidAt: null,
+        expiredAt: null,
+        ...edge,
+      };
+      normalizedEdge.scope = normalizeEdgeMemoryScope(normalizedEdge);
+      return normalizedEdge;
+    });
+    data.lastProcessedSeq = Number.isFinite(data.lastProcessedSeq)
+      ? data.lastProcessedSeq
+      : -1;
+    data.lastRecallResult = Array.isArray(data.lastRecallResult)
+      ? data.lastRecallResult
+      : null;
+    data.historyState = {
+      ...createDefaultHistoryState(),
+      ...(data.historyState || {}),
+      lastProcessedAssistantFloor: Number.isFinite(
+        data?.historyState?.lastProcessedAssistantFloor,
+      )
+        ? data.historyState.lastProcessedAssistantFloor
+        : data.lastProcessedSeq,
+      extractionCount: Number.isFinite(data?.historyState?.extractionCount)
+        ? data.historyState.extractionCount
+        : 0,
+      lastMutationSource: String(data?.historyState?.lastMutationSource || ""),
+    };
+    data.vectorIndexState = {
+      ...createDefaultVectorIndexState(data?.historyState?.chatId || ""),
+      ...(data.vectorIndexState || {}),
+    };
+    data.batchJournal = Array.isArray(data.batchJournal)
+      ? data.batchJournal
+      : createDefaultBatchJournal();
+    data.maintenanceJournal = Array.isArray(data.maintenanceJournal)
+      ? data.maintenanceJournal
+      : createDefaultMaintenanceJournal();
+    data.knowledgeState = createDefaultKnowledgeState(data.knowledgeState);
+    data.regionState = createDefaultRegionState(data.regionState);
+    data.timelineState = createDefaultTimelineState(data.timelineState);
+    data.summaryState = createDefaultSummaryState(data.summaryState);
+    normalizeGraphStoryTimeline(data);
+
+    const normalizedGraph = normalizeGraphRuntimeState(
+      data,
+      data?.historyState?.chatId || "",
+    );
+    normalizeGraphSummaryState(normalizedGraph);
+    if (shouldImportLegacySynopsis) {
+      importLegacySynopsisToSummaryState(normalizedGraph);
+    }
+    return normalizedGraph;
+  } catch (e) {
+    console.error("[ST-BME] 图反序列化失败:", e);
+    return createEmptyGraph();
+  }
+}
+
+/**
+ * 导出图数据（不含 embedding 以减小体积）
+ * @param {GraphState} graph
+ * @returns {string} JSON 字符串
+ */
+export function exportGraph(graph) {
+  const exportData = {
+    ...graph,
+    historyState: {
+      ...createDefaultHistoryState(graph?.historyState?.chatId || ""),
+      ...(graph?.historyState || {}),
+      lastProcessedAssistantFloor:
+        graph?.historyState?.lastProcessedAssistantFloor ??
+        graph?.lastProcessedSeq ??
+        -1,
+    },
+    vectorIndexState: {
+      ...createDefaultVectorIndexState(graph?.historyState?.chatId || ""),
+      dirty: true,
+      lastWarning: "导出图谱不包含运行时向量索引",
+    },
+    batchJournal: createDefaultBatchJournal(),
+    maintenanceJournal: createDefaultMaintenanceJournal(),
+    knowledgeState: createDefaultKnowledgeState(graph?.knowledgeState || {}),
+    regionState: createDefaultRegionState(graph?.regionState || {}),
+    timelineState: createDefaultTimelineState(graph?.timelineState || {}),
+    summaryState: createDefaultSummaryState(graph?.summaryState || {}),
+    nodes: graph.nodes.map((n) => ({ ...n, embedding: null })),
+  };
+  return JSON.stringify(exportData, null, 2);
+}
+
+/**
+ * 导入图数据
+ * @param {string} json
+ * @returns {GraphState}
+ */
+export function importGraph(json) {
+  const graph = normalizeGraphRuntimeState(deserializeGraph(json));
+  // 导入的节点需要重新生成 embedding
+  for (const node of graph.nodes) {
+    node.embedding = null;
+  }
+  graph.batchJournal = createDefaultBatchJournal();
+  graph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
+  graph.historyState.processedMessageHashes = {};
+  graph.historyState.processedMessageHashesNeedRefresh = true;
+  graph.historyState.historyDirtyFrom = null;
+  graph.vectorIndexState.hashToNodeId = {};
+  graph.vectorIndexState.nodeToHash = {};
+  graph.vectorIndexState.dirty = true;
+  graph.vectorIndexState.lastWarning = "导入图谱后需要重建向量索引";
+  return graph;
 }

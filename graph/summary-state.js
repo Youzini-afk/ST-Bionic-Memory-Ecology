@@ -6,7 +6,7 @@ import {
 export const SUMMARY_STATE_VERSION = 1;
 const ACTIVE_STATUS = "active";
 const FOLDED_STATUS = "folded";
-const SUMMARY_KINDS = new Set(["small", "rollup"]);
+const SUMMARY_KINDS = new Set(["small", "rollup", "legacy-import"]);
 
 function summaryId() {
   return `summary-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -38,7 +38,7 @@ export function createDefaultSummaryState(state = {}) {
     entries: Array.isArray(source.entries)
       ? source.entries.map((entry, index) =>
           normalizeSummaryEntry(entry, {
-            fallbackId: `summary-entry-${index + 1}`,
+            fallbackId: `summary-import-${index + 1}`,
           }),
         )
       : [],
@@ -200,6 +200,56 @@ export function resetSummaryState(graph, state = null) {
   if (!graph || typeof graph !== "object") return graph;
   graph.summaryState = createDefaultSummaryState(state || {});
   return graph.summaryState;
+}
+
+export function importLegacySynopsisToSummaryState(graph) {
+  normalizeGraphSummaryState(graph);
+  const summaryState = graph.summaryState;
+  if ((summaryState.entries || []).length > 0) {
+    return null;
+  }
+  const legacySynopsis = (Array.isArray(graph?.nodes) ? graph.nodes : [])
+    .filter((node) => node?.type === "synopsis" && node?.archived !== true)
+    .sort((left, right) => {
+      const leftSeq = Number(left?.seqRange?.[1] ?? left?.seq ?? -1);
+      const rightSeq = Number(right?.seqRange?.[1] ?? right?.seq ?? -1);
+      return rightSeq - leftSeq;
+    })[0];
+  const summaryText = String(legacySynopsis?.fields?.summary || "").trim();
+  if (!legacySynopsis || !summaryText) {
+    return null;
+  }
+  const entry = appendSummaryEntry(graph, {
+    kind: "legacy-import",
+    level: 0,
+    text: summaryText,
+    sourceTask: "synopsis",
+    extractionRange: normalizeNumberRange(legacySynopsis?.seqRange, [
+      Number.isFinite(Number(legacySynopsis?.seq)) ? Number(legacySynopsis.seq) : -1,
+      Number.isFinite(Number(legacySynopsis?.seq)) ? Number(legacySynopsis.seq) : -1,
+    ]),
+    messageRange: normalizeNumberRange(legacySynopsis?.seqRange, [
+      Number.isFinite(Number(legacySynopsis?.seq)) ? Number(legacySynopsis.seq) : -1,
+      Number.isFinite(Number(legacySynopsis?.seq)) ? Number(legacySynopsis.seq) : -1,
+    ]),
+    sourceNodeIds: [String(legacySynopsis.id || "")],
+    storyTimeSpan: legacySynopsis?.storyTimeSpan || createDefaultStoryTimeSpan(),
+  });
+  summaryState.lastSummarizedExtractionCount = Math.max(
+    summaryState.lastSummarizedExtractionCount,
+    Number.isFinite(Number(graph?.historyState?.extractionCount))
+      ? Number(graph.historyState.extractionCount)
+      : 0,
+  );
+  summaryState.lastSummarizedAssistantFloor = Math.max(
+    summaryState.lastSummarizedAssistantFloor,
+    Number.isFinite(Number(legacySynopsis?.seqRange?.[1]))
+      ? Number(legacySynopsis.seqRange[1])
+      : Number.isFinite(Number(legacySynopsis?.seq))
+        ? Number(legacySynopsis.seq)
+        : -1,
+  );
+  return entry;
 }
 
 export function getSummaryEntriesByStatus(graph, status = ACTIVE_STATUS) {

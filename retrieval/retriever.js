@@ -56,10 +56,7 @@ import {
 } from "../graph/story-timeline.js";
 import { getActiveSummaryEntries } from "../graph/summary-state.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
-import {
-  createPromptNodeReferenceMap,
-  resolveRecallCandidateSelection,
-} from "../prompting/prompt-node-references.js";
+import { createPromptNodeReferenceMap } from "../prompting/prompt-node-references.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
 
 function createAbortError(message = "操作已终止") {
@@ -255,6 +252,7 @@ function createRetrievalMeta(enableLLMRecall) {
       fallbackType: "",
       emptySelectionAccepted: false,
       candidateKeyMapPreview: {},
+      legacySelectionUsed: false,
       candidatePool: 0,
       selectedSeedCount: 0,
     },
@@ -279,6 +277,19 @@ function normalizeQueryText(value, maxLength = 400) {
     .trim();
   if (!normalized) return "";
   return normalized.slice(0, Math.max(1, maxLength));
+}
+
+function normalizeRecallSelectionList(values = [], maxLength = 64) {
+  const normalized = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : []) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    normalized.push(text);
+    if (normalized.length >= maxLength) break;
+  }
+  return normalized;
 }
 
 function createRecallCandidateKeyMaps(candidates = []) {
@@ -701,7 +712,7 @@ function finalizeSceneOwnerCandidates(candidateMap, maxCount = 8) {
     .slice(0, Math.max(1, maxCount));
 }
 
-function resolveSceneOwnerByName(graph, rawOwnerName = "") {
+function resolveLegacySceneOwner(graph, rawOwnerName = "") {
   const ownerName = normalizeTrimmedString(rawOwnerName);
   if (!ownerName) return null;
   const ownerCatalog = buildCharacterOwnerCatalog(graph);
@@ -1142,12 +1153,12 @@ export async function retrieve({
   const storyTimeSoftDirecting = options.storyTimeSoftDirecting ?? true;
   const stPromptContext = getSTContextForPrompt();
   const ownerCatalog = buildCharacterOwnerCatalog(graph);
-  const namedOwnerCandidate =
-    resolveSceneOwnerByName(graph, options.activeCharacterPovOwner) ||
-    resolveSceneOwnerByName(graph, graph?.historyState?.activeCharacterPovOwner) ||
-    resolveSceneOwnerByName(graph, stPromptContext?.charName);
+  const legacyOwnerCandidate =
+    resolveLegacySceneOwner(graph, options.activeCharacterPovOwner) ||
+    resolveLegacySceneOwner(graph, graph?.historyState?.activeCharacterPovOwner) ||
+    resolveLegacySceneOwner(graph, stPromptContext?.charName);
   const activeCharacterPovOwner = String(
-    namedOwnerCandidate?.ownerName || "",
+    legacyOwnerCandidate?.ownerName || "",
   ).trim();
   const activeUserPovOwner = String(
     options.activeUserPovOwner ||
@@ -1156,12 +1167,12 @@ export async function retrieve({
       "",
   ).trim();
   const preliminarySceneOwnerCandidates = mergeSceneOwnerCandidateLists(
-    namedOwnerCandidate
+    legacyOwnerCandidate
       ? [
           {
-            ...namedOwnerCandidate,
+            ...legacyOwnerCandidate,
             score: 0.6,
-            sources: ["unique-name-match"],
+            sources: ["legacy-unique-match"],
             reasons: ["唯一映射到图内具体角色"],
           },
         ]
@@ -1962,6 +1973,7 @@ export async function retrieve({
       fallbackType: llmResult.fallbackType || "",
       emptySelectionAccepted: llmResult.emptySelectionAccepted === true,
       candidateKeyMapPreview: { ...(llmResult.candidateKeyMapPreview || {}) },
+      legacySelectionUsed: llmResult.legacySelectionUsed === true,
       candidatePool: llmCandidates.length,
       selectedSeedCount: llmResult.selectedNodeIds.length,
     };
@@ -2319,7 +2331,7 @@ async function llmRecall(
   const systemPrompt = applyTaskRegex(
     settings,
     "recall",
-    "input.finalPrompt",
+    "finalPrompt",
     recallPromptBuild.systemPrompt || customPrompt || [
       "你是一个记忆召回分析器。",
       "根据用户最新输入和对话上下文，从候选记忆节点中选择最相关的节点。",
@@ -2399,25 +2411,61 @@ async function llmRecall(
     ]),
   );
 
-  const {
-    hasSelectedKeysField,
-    selectedKeysIsArray,
-    rawSelectedKeys,
-    resolvedSelectedKeys,
-    resolvedSelectedNodeIds,
-  } = resolveRecallCandidateSelection(result, candidateKeyToNodeId, maxNodes);
-  const selectionProtocol = "candidate-keys-v1";
+  const hasSelectedKeysField =
+    result && Object.prototype.hasOwnProperty.call(result, "selected_keys");
+  const hasSelectedIdsField =
+    result && Object.prototype.hasOwnProperty.call(result, "selected_ids");
+  const rawSelectedKeys = Array.isArray(result?.selected_keys)
+    ? normalizeRecallSelectionList(result.selected_keys, maxNodes * 4)
+    : [];
+  const rawSelectedIds = Array.isArray(result?.selected_ids)
+    ? normalizeRecallSelectionList(result.selected_ids, maxNodes * 4)
+    : [];
+  const selectionProtocol = hasSelectedKeysField
+    ? "candidate-keys-v1"
+    : hasSelectedIdsField
+      ? "legacy-selected-ids"
+      : "candidate-keys-v1";
+  const legacySelectionUsed =
+    !hasSelectedKeysField && hasSelectedIdsField && Array.isArray(result?.selected_ids);
 
+  let resolvedSelectedKeys = [];
+  let resolvedSelectedNodeIds = [];
   let fallbackReason = "";
   let fallbackType = "";
 
   if (hasSelectedKeysField) {
-    if (!selectedKeysIsArray) {
+    if (!Array.isArray(result?.selected_keys)) {
       fallbackType = "invalid-candidate";
       fallbackReason = "LLM 返回的 selected_keys 结构无效，已回退到评分排序";
     } else if (rawSelectedKeys.length === 0) {
       fallbackType = "empty-selection";
       fallbackReason = "LLM 返回了空的 selected_keys，已回退到评分排序";
+    } else {
+      resolvedSelectedKeys = rawSelectedKeys
+        .filter((key) => candidateKeyToNodeId[key])
+        .slice(0, maxNodes);
+      resolvedSelectedNodeIds = uniqueNodeIds(
+        resolvedSelectedKeys
+          .map((key) => candidateKeyToNodeId[key])
+          .filter(Boolean),
+      ).slice(0, maxNodes);
+    }
+  } else if (hasSelectedIdsField) {
+    if (!Array.isArray(result?.selected_ids)) {
+      fallbackType = "invalid-candidate";
+      fallbackReason = "LLM 返回的 selected_ids 结构无效，已回退到评分排序";
+    } else if (rawSelectedIds.length === 0) {
+      fallbackType = "empty-selection";
+      fallbackReason = "LLM 返回了空的 selected_ids，已回退到评分排序";
+    } else {
+      resolvedSelectedNodeIds = uniqueNodeIds(
+        rawSelectedIds.filter((id) => candidates.some((c) => c.nodeId === id)),
+      ).slice(0, maxNodes);
+      resolvedSelectedKeys = resolvedSelectedNodeIds
+        .map((nodeId) => nodeIdToCandidateKey[nodeId])
+        .filter(Boolean)
+        .slice(0, maxNodes);
     }
   } else if (llmResult?.ok) {
     fallbackType = "invalid-candidate";
@@ -2431,13 +2479,19 @@ async function llmRecall(
       activeOwnerKeys,
       activeOwnerScores,
       sceneOwnerResolutionMode: activeOwnerKeys.length > 0 ? "llm" : "fallback",
-      reason: resolvedSelectedNodeIds.length < rawSelectedKeys.length
-        ? "LLM 返回了部分无效或超限 selected_keys，已保留可解析结果"
-        : "LLM 主导演选择完成",
+      reason:
+        selectionProtocol === "legacy-selected-ids"
+          ? resolvedSelectedNodeIds.length < rawSelectedIds.length
+            ? "LLM 返回了部分无效或超限 selected_ids，已保留可解析结果"
+            : "LLM 主导演选择完成（legacy selected_ids）"
+          : resolvedSelectedNodeIds.length < rawSelectedKeys.length
+            ? "LLM 返回了部分无效或超限 selected_keys，已保留可解析结果"
+            : "LLM 主导演选择完成",
       selectionProtocol,
       rawSelectedKeys,
       resolvedSelectedKeys,
       resolvedSelectedNodeIds,
+      legacySelectionUsed,
       emptySelectionAccepted: false,
       candidateKeyMapPreview: candidateKeyToCandidateMeta,
       fallbackReason: "",
@@ -2446,8 +2500,8 @@ async function llmRecall(
 
   // LLM 失败时回退到纯评分排序
   fallbackReason ||= llmResult?.ok
-    ? hasSelectedKeysField
-      ? "LLM 返回的候选短键无法映射到当前候选，已回退到评分排序"
+    ? hasSelectedKeysField || hasSelectedIdsField
+      ? "LLM 返回的候选短键或候选 ID 无法映射到当前候选，已回退到评分排序"
       : "LLM 返回了无法识别的 JSON 结构，已回退到评分排序"
     : buildRecallFallbackReason(llmResult);
   fallbackType ||= llmResult?.ok
@@ -2465,6 +2519,7 @@ async function llmRecall(
     rawSelectedKeys,
     resolvedSelectedKeys,
     resolvedSelectedNodeIds,
+    legacySelectionUsed,
     emptySelectionAccepted: false,
     candidateKeyMapPreview: candidateKeyToCandidateMeta,
     fallbackReason,

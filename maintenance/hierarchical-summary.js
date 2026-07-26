@@ -368,7 +368,7 @@ async function callSummaryTask({
   const systemPrompt = applyTaskRegex(
     settings,
     taskType,
-    "input.finalPrompt",
+    "finalPrompt",
     promptBuild.systemPrompt || fallbackSystemPrompt,
     regexInput,
     "system",

@@ -1,0 +1,3662 @@
+<div id="st-bme-panel-overlay">
+  <div id="st-bme-panel">
+    <div class="bme-panel-header">
+      <div class="bme-panel-title">
+        <i class="fa-solid fa-brain"></i>
+        <span data-i18n="panel.title">ST-BME 记忆图谱</span>
+        <span class="bme-panel-subtitle" id="bme-panel-status"
+          >SYSTEM_ACTIVE</span
+        >
+      </div>
+      <button
+        class="bme-fab-toggle-btn"
+        id="bme-fab-toggle-btn"
+        title="显示/隐藏悬浮球" data-i18n-title="panel.header.fabToggleTitle"
+        type="button"
+      >
+        <i class="fa-solid fa-circle-dot"></i>
+      </button>
+      <div class="bme-theme-picker">
+        <button
+          class="bme-theme-picker-btn"
+          id="bme-theme-picker-btn"
+          title="切换主题" data-i18n-title="panel.header.themePickerTitle"
+          type="button"
+        >
+          <i class="fa-solid fa-palette"></i>
+        </button>
+        <div class="bme-theme-dropdown" id="bme-theme-dropdown">
+          <button class="bme-theme-option" data-theme="crimson" type="button">
+            <span class="bme-theme-swatch" style="background: #e94560"></span
+            ><span data-i18n="theme.crimson">赤红合成</span>
+          </button>
+          <button class="bme-theme-option" data-theme="cyan" type="button">
+            <span class="bme-theme-swatch" style="background: #00e5ff"></span
+            ><span data-i18n="theme.cyan">霓虹青蓝</span>
+          </button>
+          <button class="bme-theme-option" data-theme="amber" type="button">
+            <span class="bme-theme-swatch" style="background: #ffb300"></span
+            ><span data-i18n="theme.amber">琥珀终端</span>
+          </button>
+          <button class="bme-theme-option" data-theme="violet" type="button">
+            <span class="bme-theme-swatch" style="background: #b388ff"></span
+            ><span data-i18n="theme.violet">紫雾迷离</span>
+          </button>
+          <button class="bme-theme-option" data-theme="paperDawn" type="button">
+            <span class="bme-theme-swatch" style="background: #0d9488"></span
+            ><span data-i18n="theme.paperDawn">晨光纸感</span>
+          </button>
+          <button class="bme-theme-option" data-theme="glacierSky" type="button">
+            <span class="bme-theme-swatch" style="background: #2563eb"></span
+            ><span data-i18n="theme.glacierSky">冰川晴空</span>
+          </button>
+        </div>
+      </div>
+      <button
+        class="bme-panel-close"
+        id="bme-panel-close"
+        title="关闭" data-i18n-title="common.close"
+        type="button"
+      >
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+    </div>
+
+    <div class="bme-panel-body">
+      <div class="bme-panel-sidebar">
+        <div class="bme-tab-list">
+          <button class="bme-tab-btn active" data-tab="dashboard" type="button">
+            <i class="fa-solid fa-chart-simple"></i>
+            <span data-i18n="panel.tab.dashboard">总览</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="task" type="button">
+            <i class="fa-solid fa-list-check"></i>
+            <span data-i18n="panel.tab.tasks">任务</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="actions" type="button">
+            <i class="fa-solid fa-gear"></i>
+            <span data-i18n="panel.tab.actions">操作</span>
+          </button>
+          <button class="bme-tab-btn" data-tab="config" type="button">
+            <i class="fa-solid fa-sliders"></i>
+            <span data-i18n="panel.tab.settings">配置</span>
+          </button>
+        </div>
+
+        <div class="bme-config-sidebar" id="bme-config-sidebar">
+          <div class="bme-config-sidebar-header">
+            <div class="bme-config-sidebar-kicker" data-i18n="panel.sidebar.configKicker">配置工作区</div>
+            <div class="bme-config-sidebar-title" data-i18n="panel.sidebar.configTitle">ST-BME 设置</div>
+            <div class="bme-config-sidebar-help" data-i18n="panel.sidebar.configHelp">
+              左侧切换配置页，右侧查看对应的完整设置表单。
+            </div>
+          </div>
+          <div class="bme-config-nav bme-config-nav-desktop">
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="api"
+              type="button"
+            >
+              <i class="fa-solid fa-plug"></i>
+              <span data-i18n="panel.configNav.api">API 配置</span>
+            </button>
+            <button
+              class="bme-config-nav-btn active"
+              data-config-section="toggles"
+              type="button"
+            >
+              <i class="fa-solid fa-toggle-on"></i>
+              <span data-i18n="panel.configNav.toggles">功能开关</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="advanced"
+              type="button"
+            >
+              <i class="fa-solid fa-sliders"></i>
+              <span data-i18n="panel.configNav.advanced">详细参数</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="prompts"
+              type="button"
+            >
+              <i class="fa-solid fa-scroll"></i>
+              <span data-i18n="panel.configNav.prompts">任务预设</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="planner"
+              type="button"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span data-i18n="panel.configNav.planner">ENA 规划器</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="appearance"
+              type="button"
+            >
+              <i class="fa-solid fa-palette"></i>
+              <span data-i18n="panel.configNav.appearance">面板外观</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="cleanup"
+              type="button"
+            >
+              <i class="fa-solid fa-broom"></i>
+              <span data-i18n="panel.configNav.cleanup">数据清理</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="bme-task-sidebar" id="bme-task-sidebar">
+          <div class="bme-task-sidebar-header">
+            <div class="bme-task-sidebar-kicker" data-i18n="panel.sidebar.taskKicker">任务监控</div>
+            <div class="bme-task-sidebar-title" data-i18n="panel.sidebar.taskTitle">ST-BME 任务流</div>
+            <div class="bme-task-sidebar-help" data-i18n="panel.sidebar.taskHelp">
+              左侧切换监控视图，右侧查看实时任务状态。
+            </div>
+          </div>
+          <div class="bme-task-nav bme-task-nav-desktop">
+            <button
+              class="bme-task-nav-btn active"
+              data-task-section="pipeline"
+              type="button"
+            >
+              <i class="fa-solid fa-gauge-high"></i>
+              <span data-i18n="panel.taskNav.pipeline">管线总览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="timeline"
+              type="button"
+            >
+              <i class="fa-solid fa-timeline"></i>
+              <span data-i18n="panel.taskNav.timeline">任务流水</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="memory"
+              type="button"
+            >
+              <i class="fa-solid fa-brain"></i>
+              <span data-i18n="panel.taskNav.memory">记忆浏览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="injection"
+              type="button"
+            >
+              <i class="fa-solid fa-syringe"></i>
+              <span data-i18n="panel.taskNav.injection">注入预览</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="trace"
+              type="button"
+            >
+              <i class="fa-solid fa-route"></i>
+              <span data-i18n="panel.taskNav.trace">消息追踪</span>
+            </button>
+            <button
+              class="bme-task-nav-btn"
+              data-task-section="persistence"
+              type="button"
+            >
+              <i class="fa-solid fa-database"></i>
+              <span data-i18n="panel.taskNav.persistence">持久化</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="bme-tab-content">
+          <div class="bme-tab-pane active" id="bme-pane-dashboard">
+            <div class="bme-stats-grid">
+              <div class="bme-stat-card">
+                <div class="bme-stat-label" data-i18n="panel.dashboard.activeNodes">活跃节点</div>
+                <div class="bme-stat-value" id="bme-stat-nodes">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label" data-i18n="panel.dashboard.edgeCount">边连接</div>
+                <div class="bme-stat-value" id="bme-stat-edges">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label" data-i18n="panel.dashboard.archived">已归档</div>
+                <div class="bme-stat-value" id="bme-stat-archived">0</div>
+              </div>
+              <div class="bme-stat-card">
+                <div class="bme-stat-label" data-i18n="panel.dashboard.fragRate">碎片率</div>
+                <div class="bme-stat-value warning" id="bme-stat-frag">0%</div>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header" data-i18n="panel.dashboard.runStatus">运行状态</div>
+              <div class="bme-config-row">
+                <label data-i18n="panel.dashboard.label.currentChat">当前聊天</label>
+                <div class="bme-recent-meta" id="bme-status-chat-id">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>历史状态</label>
+                <div class="bme-recent-meta" id="bme-status-history">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>向量状态</label>
+                <div class="bme-recent-meta" id="bme-status-vector">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>最近恢复</label>
+                <div class="bme-recent-meta" id="bme-status-recovery">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>最近提取</label>
+                <div class="bme-recent-meta" id="bme-status-last-extract">
+                  —
+                </div>
+              </div>
+              <div class="bme-config-row">
+                <label>最近持久化</label>
+                <div class="bme-recent-meta" id="bme-status-last-persist">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>后台维护</label>
+                <div class="bme-recent-meta" id="bme-status-background-maintenance">—</div>
+              </div>
+              <div class="bme-config-help" id="bme-persist-repair-help" hidden></div>
+              <div class="bme-config-row">
+                <label>最近向量</label>
+                <div class="bme-recent-meta" id="bme-status-last-vector">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>Authority Job</label>
+                <div class="bme-recent-meta" id="bme-status-authority-job">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label>最近召回</label>
+                <div class="bme-recent-meta" id="bme-status-last-recall">—</div>
+              </div>
+            </div>
+
+            <div class="bme-config-card">
+              <div class="bme-section-header" data-i18n="panel.dashboard.cognitionSpace">认知 / 空间</div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-user" style="margin-right:4px;opacity:0.5"></i>当前场景锚点</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-owner">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-location-dot" style="margin-right:4px;opacity:0.5"></i>当前地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-active-region">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-diagram-project" style="margin-right:4px;opacity:0.5"></i>邻接地区</label>
+                <div class="bme-recent-meta" id="bme-cognition-adjacent-regions">—</div>
+              </div>
+              <div class="bme-config-row">
+                <label><i class="fa-solid fa-users" style="margin-right:4px;opacity:0.5"></i>认知角色数</label>
+                <div class="bme-recent-meta" id="bme-cognition-owner-count">0</div>
+              </div>
+              <button
+                class="bme-config-secondary-btn bme-cognition-jump-btn"
+                id="bme-cognition-jump-to-view"
+                type="button"
+              >
+                <i class="fa-solid fa-brain"></i>
+                <span data-i18n="panel.dashboard.viewFullCognition">在认知视图中查看完整认知 →</span>
+              </button>
+            </div>
+
+            <div class="bme-section-header" data-i18n="panel.dashboard.recentExtract">最近提取</div>
+            <ul class="bme-recent-list" id="bme-recent-extract"></ul>
+
+            <div class="bme-section-header" data-i18n="panel.dashboard.recentRecall">最近召回</div>
+            <ul class="bme-recent-list" id="bme-recent-recall"></ul>
+          </div>
+
+          <div class="bme-tab-pane" id="bme-pane-actions">
+            <div class="bme-action-groups">
+              <div class="bme-action-guard-banner" id="bme-action-guard-banner" hidden></div>
+              <!-- 记忆操作 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title" data-i18n="panel.actions.memoryGroup">记忆操作</span>
+                  <span class="bme-action-group-sub" data-i18n="panel.actions.memoryGroupSub">调用 LLM 处理记忆节点</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-extract" type="button">
+                    <i class="fa-solid fa-rotate"></i>
+                    <span data-i18n="panel.actions.reExtract">重新提取</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-compress" type="button">
+                    <i class="fa-solid fa-compress"></i>
+                    <span data-i18n="panel.actions.manualCompress">手动压缩</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-synopsis" type="button">
+                    <i class="fa-solid fa-scroll"></i>
+                    <span data-i18n="panel.actions.generateSynopsis">生成小总结</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-summary-rollup" type="button">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <span data-i18n="panel.actions.summaryRollup">执行总结折叠</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-summary-rebuild" type="button">
+                    <i class="fa-solid fa-sitemap"></i>
+                    <span data-i18n="panel.actions.rebuildSummaryState">重建总结状态</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-evolve" type="button">
+                    <i class="fa-solid fa-dna"></i>
+                    <span data-i18n="panel.actions.forceEvolve">强制进化</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-sleep" type="button">
+                    <i class="fa-solid fa-moon"></i>
+                    <span data-i18n="panel.actions.executeSleep">执行遗忘</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-undo-maintenance" type="button">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span data-i18n="panel.actions.undoMaintenance">撤销最近维护</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    重新提取：按总楼层计数（用户+AI，首条 greeting 为 0）。真正 system 不计入，且不受隐藏助手影响。
+                  </div>
+                  <div class="bme-config-row" style="margin-top:8px">
+                    <label for="bme-extract-mode">提取模式</label>
+                    <select id="bme-extract-mode" class="bme-config-select">
+                      <option value="pending">提取未处理</option>
+                      <option value="rerun">重新提取范围</option>
+                    </select>
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-extract-start-floor">起始楼层</label>
+                      <input
+                        id="bme-extract-start-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 当前重提" data-i18n-placeholder="panel.actions.extractStartPlaceholder"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-extract-end-floor">终止楼层</label>
+                      <input
+                        id="bme-extract-end-floor"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                        placeholder="留空 = 到最新" data-i18n-placeholder="panel.actions.extractEndPlaceholder"
+                      />
+                    </div>
+                  </div>
+                  <div class="bme-config-help" style="margin-top:8px">
+                    重新提取范围：起始/终止都留空 = 当前重提；只填起始 = 从起始到最新。
+                  </div>
+                  <div class="bme-config-help" style="margin-top:12px">
+                    重建总结状态：和上面的起始/终止楼层共用同一组范围；留空时按当前总结相关范围重建。
+                  </div>
+                </div>
+              </div>
+
+              <!-- 向量操作 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title" data-i18n="panel.actions.vectorGroup">向量操作</span>
+                  <span class="bme-action-group-sub" data-i18n="panel.actions.vectorGroupSub">调用 Embedding API 计算节点向量</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-vector-rebuild" type="button">
+                    <i class="fa-solid fa-database"></i>
+                    <span data-i18n="panel.actions.rebuildVector">重建向量</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-vector-range" type="button">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <span data-i18n="panel.actions.rangeRebuild">范围重建</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-vector-reembed" type="button">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    <span data-i18n="panel.actions.directReembed">直连重嵌</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    范围重建：仅重建与指定楼层范围相交的节点向量。留空时默认按整段聊天处理。
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-range-start">起始楼层</label>
+                      <input
+                        id="bme-range-start"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-range-end">结束楼层</label>
+                      <input
+                        id="bme-range-end"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 图谱管理 -->
+              <div class="bme-action-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title" data-i18n="panel.actions.graphGroup">图谱管理</span>
+                  <span class="bme-action-group-sub" data-i18n="panel.actions.graphGroupSub">导入导出与危险操作</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-export" type="button">
+                    <i class="fa-solid fa-file-export"></i>
+                    <span data-i18n="panel.actions.exportGraph">导出图谱</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-import" type="button">
+                    <i class="fa-solid fa-file-import"></i>
+                    <span data-i18n="panel.actions.importGraph">导入图谱</span>
+                  </button>
+                  <button class="bme-action-btn danger" id="bme-act-rebuild" type="button">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span data-i18n="panel.actions.rebuildGraph">重建图谱</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="bme-action-group" id="bme-luker-sidecar-group">
+                <div class="bme-action-group-header">
+                  <span class="bme-action-group-title" data-i18n="panel.actions.persistGroup">持久化修复</span>
+                  <span class="bme-action-group-sub" data-i18n="panel.actions.persistGroupSub">本地持久化与 Luker 主 sidecar 的统一修复区域</span>
+                </div>
+                <div class="bme-action-grid">
+                  <button class="bme-action-btn" id="bme-act-retry-persist" type="button">
+                    <i class="fa-solid fa-arrows-rotate"></i>
+                    <span data-i18n="panel.actions.retryPersist">重试持久化</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-probe-graph-load" type="button">
+                    <i class="fa-solid fa-satellite-dish"></i>
+                    <span data-i18n="panel.actions.reprobeGraph">重新探测图谱</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-rebuild-luker-cache" type="button">
+                    <i class="fa-solid fa-database"></i>
+                    <span data-i18n="panel.actions.rebuildLocalCache">重建本地缓存</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-repair-luker-sidecar" type="button">
+                    <i class="fa-solid fa-screwdriver-wrench"></i>
+                    <span data-i18n="panel.actions.repairSidecar">修复主 Sidecar</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-compact-luker-sidecar" type="button">
+                    <i class="fa-solid fa-box-archive"></i>
+                    <span data-i18n="panel.actions.compactSidecar">压实主 Sidecar</span>
+                  </button>
+                  <button class="bme-action-btn" id="bme-act-export-diagnostics" type="button">
+                    <i class="fa-solid fa-file-waveform"></i>
+                    <span data-i18n="panel.actions.exportDiagnostics">导出诊断包</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help" id="bme-actions-persist-repair-help"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bme-tab-pane" id="bme-pane-config">
+            <div class="bme-config-placeholder">
+              <div class="bme-config-placeholder-title" data-i18n="panel.configPlaceholder.title">
+                配置已切换到右侧工作区
+              </div>
+              <div class="bme-config-placeholder-help" data-i18n="panel.configPlaceholder.help">
+                左侧子导航负责切页，右侧显示完整的配置表单。
+              </div>
+            </div>
+          </div>
+
+          <div class="bme-tab-pane" id="bme-pane-graph">
+            <div class="bme-graph-subtabs">
+              <button class="bme-graph-subtab active" data-mobile-graph-view="graph" type="button">
+                <i class="fa-solid fa-diagram-project"></i>
+                <span data-i18n="panel.graphView.realtime">实时图谱</span>
+              </button>
+              <button class="bme-graph-subtab" data-mobile-graph-view="cognition" type="button">
+                <i class="fa-solid fa-brain"></i>
+                <span data-i18n="panel.graphView.cognition">认知视图</span>
+              </button>
+              <button class="bme-graph-subtab" data-mobile-graph-view="summary" type="button">
+                <i class="fa-solid fa-layer-group"></i>
+                <span data-i18n="panel.graphView.summary">总结视图</span>
+              </button>
+            </div>
+
+            <div class="bme-graph-view-content">
+              <div class="bme-mobile-graph-pane active" id="bme-mobile-graph-pane" data-mobile-graph-view="graph">
+                <div class="bme-mobile-canvas-wrap">
+                  <canvas id="bme-mobile-graph-canvas"></canvas>
+                  <div class="bme-graph-overlay" id="bme-mobile-graph-overlay" hidden>
+                      <div class="bme-graph-overlay__text" id="bme-mobile-graph-overlay-text" data-i18n="panel.graphOverlay.loading">
+                      正在加载当前聊天图谱
+                    </div>
+                  </div>
+                  <div class="bme-mobile-graph-float-controls">
+                    <button id="bme-mobile-render-toggle" title="暂停图谱渲染" data-i18n-title="panel.graphToolbar.pauseTitle" type="button">
+                      <i class="fa-solid fa-pause"></i>
+                    </button>
+                    <button id="bme-mobile-zoom-in" title="放大" data-i18n-title="panel.graphToolbar.zoomInTitle" type="button">
+                      <i class="fa-solid fa-plus"></i>
+                    </button>
+                    <button id="bme-mobile-zoom-out" title="缩小" data-i18n-title="panel.graphToolbar.zoomOutTitle" type="button">
+                      <i class="fa-solid fa-minus"></i>
+                    </button>
+                    <button id="bme-mobile-zoom-reset" title="重置" data-i18n-title="panel.graphToolbar.resetTitle" type="button">
+                      <i class="fa-solid fa-arrows-rotate"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="bme-graph-legend" id="bme-mobile-graph-legend"></div>
+                <div class="bme-graph-statusbar">
+                  <span><span class="bme-status-dot"></span><span id="bme-mobile-status-text">READY</span></span>
+                  <span id="bme-mobile-status-meta">NODES: 0 | EDGES: 0</span>
+                  <span id="bme-mobile-graph-layout-meta" class="bme-graph-layout-meta">LAYOUT: --</span>
+                </div>
+              </div>
+
+              <div class="bme-mobile-graph-pane" id="bme-mobile-cognition-pane" data-mobile-graph-view="cognition">
+                <div class="bme-cognition-workspace" id="bme-mobile-cognition-full">
+                  <div class="bme-cog-status-strip" id="bme-mobile-cog-status-strip"></div>
+                  <div class="bme-cog-body">
+                    <div class="bme-cog-column bme-cog-column--owners">
+                      <div class="bme-cog-section-title" data-i18n="panel.cognition.ownerList">
+                        <i class="fa-solid fa-users"></i> 角色认知清单
+                      </div>
+                      <div class="bme-cog-owner-scroll" id="bme-mobile-cog-owner-list"></div>
+                      <div class="bme-cog-owner-detail" id="bme-mobile-cog-owner-detail"></div>
+                    </div>
+                    <div class="bme-cog-column bme-cog-column--space">
+                      <div class="bme-cog-section-title" data-i18n="panel.cognition.spaceConsole">
+                        <i class="fa-solid fa-map-location-dot"></i> 空间控制台
+                      </div>
+                      <div class="bme-cog-space-tools" id="bme-mobile-cog-space-tools"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bme-mobile-graph-pane" id="bme-mobile-summary-pane-full" data-mobile-graph-view="summary">
+                <div class="bme-cognition-workspace" id="bme-mobile-summary-full"></div>
+              </div>
+            </div>
+
+            <div
+              class="bme-node-detail-scrim"
+              id="bme-mobile-node-detail-scrim"
+              hidden
+            ></div>
+            <div class="bme-node-detail" id="bme-mobile-node-detail">
+              <div class="bme-node-detail-header">
+                <h3 id="bme-mobile-detail-title" data-i18n="panel.nodeDetail.title">节点详情</h3>
+                <div class="bme-node-detail-actions">
+                  <button class="bme-detail-action-btn bme-detail-action-danger" id="bme-mobile-detail-delete" type="button" title="删除节点" data-i18n-title="panel.nodeDetail.delete">
+                    <i class="fa-solid fa-trash"></i>
+                  </button>
+                  <button class="bme-detail-action-btn" id="bme-mobile-detail-save" type="button" title="保存修改" data-i18n-title="panel.nodeDetail.save">
+                    <i class="fa-solid fa-floppy-disk"></i>
+                  </button>
+                  <button class="bme-panel-close" id="bme-mobile-detail-close" type="button" title="关闭" data-i18n-title="common.close">
+                    <i class="fa-solid fa-xmark"></i>
+                  </button>
+                </div>
+              </div>
+              <div id="bme-mobile-detail-body"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bme-resize-handle" id="bme-resize-handle"></div>
+
+      <div class="bme-panel-main">
+        <div class="bme-graph-workspace" id="bme-graph-workspace">
+          <div class="bme-graph-toolbar">
+            <div class="bme-graph-view-tabs">
+              <button class="bme-graph-view-tab active" data-graph-view="graph" type="button">
+                <i class="fa-solid fa-diagram-project"></i>
+                <span data-i18n="panel.graphView.realtime">实时图谱</span>
+              </button>
+              <button class="bme-graph-view-tab" data-graph-view="cognition" type="button">
+                <i class="fa-solid fa-brain"></i>
+                <span data-i18n="panel.graphView.cognition">认知视图</span>
+              </button>
+              <button class="bme-graph-view-tab" data-graph-view="summary" type="button">
+                <i class="fa-solid fa-layer-group"></i>
+                <span data-i18n="panel.graphView.summary">总结视图</span>
+              </button>
+            </div>
+            <div class="bme-graph-controls">
+              <button id="bme-graph-render-toggle" title="暂停图谱渲染" data-i18n-title="panel.graphToolbar.pauseTitle" type="button">
+                <i class="fa-solid fa-pause"></i>
+              </button>
+              <button id="bme-graph-zoom-in" title="放大" data-i18n-title="panel.graphToolbar.zoomInTitle" type="button">
+                <i class="fa-solid fa-plus"></i>
+              </button>
+              <button id="bme-graph-zoom-out" title="缩小" data-i18n-title="panel.graphToolbar.zoomOutTitle" type="button">
+                <i class="fa-solid fa-minus"></i>
+              </button>
+              <button id="bme-graph-reset" title="重置" data-i18n-title="panel.graphToolbar.resetTitle" type="button">
+                <i class="fa-solid fa-arrows-rotate"></i>
+              </button>
+            </div>
+          </div>
+
+          <canvas id="bme-graph-canvas"></canvas>
+          <div class="bme-graph-overlay" id="bme-graph-overlay" hidden>
+            <div class="bme-graph-overlay__text" id="bme-graph-overlay-text" data-i18n="panel.graphOverlay.loading">
+              正在加载当前聊天图谱
+            </div>
+          </div>
+
+          <div class="bme-graph-legend" id="bme-graph-legend"></div>
+
+          <div class="bme-graph-statusbar">
+            <span
+              ><span class="bme-status-dot"></span
+              ><span id="bme-status-text">READY</span></span
+            >
+            <span id="bme-status-meta">NODES: 0 | EDGES: 0</span>
+            <span id="bme-graph-layout-meta" class="bme-graph-layout-meta">LAYOUT: --</span>
+          </div>
+
+
+          <div class="bme-cognition-workspace" id="bme-cognition-workspace" hidden>
+            <div class="bme-cog-status-strip" id="bme-cog-status-strip"></div>
+            <div class="bme-cog-body">
+              <div class="bme-cog-column bme-cog-column--owners">
+                <div class="bme-cog-section-title" data-i18n="panel.cognition.ownerList">
+                  <i class="fa-solid fa-users"></i> 角色认知清单
+                </div>
+                <div class="bme-cog-owner-scroll" id="bme-cog-owner-list"></div>
+                <div class="bme-cog-owner-detail" id="bme-cog-owner-detail"></div>
+              </div>
+              <div class="bme-cog-column bme-cog-column--space">
+                <div class="bme-cog-section-title" data-i18n="panel.cognition.spaceConsole">
+                  <i class="fa-solid fa-map-location-dot"></i> 空间控制台
+                </div>
+                <div class="bme-cog-space-tools" id="bme-cog-space-tools"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bme-cognition-workspace" id="bme-summary-workspace" hidden></div>
+
+          <div class="bme-node-detail" id="bme-node-detail">
+            <div class="bme-node-detail-header">
+              <h3 id="bme-detail-title" data-i18n="panel.nodeDetail.title">节点详情</h3>
+              <div class="bme-node-detail-actions">
+                <button
+                  class="bme-detail-action-btn bme-detail-action-danger"
+                  id="bme-detail-delete"
+                  type="button"
+                  title="删除节点" data-i18n-title="panel.nodeDetail.delete"
+                >
+                  <i class="fa-solid fa-trash"></i>
+                </button>
+                <button
+                  class="bme-detail-action-btn"
+                  id="bme-detail-save"
+                  type="button"
+                  title="保存修改" data-i18n-title="panel.nodeDetail.save"
+                >
+                  <i class="fa-solid fa-floppy-disk"></i>
+                </button>
+                <button
+                  class="bme-panel-close"
+                  id="bme-detail-close"
+                  type="button"
+                  title="关闭" data-i18n-title="common.close"
+                >
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              </div>
+            </div>
+            <div id="bme-detail-body"></div>
+          </div>
+        </div>
+
+        <div class="bme-config-workspace" id="bme-config-workspace">
+          <div class="bme-config-workspace-header">
+            <div>
+              <div class="bme-config-workspace-kicker" data-i18n="panel.configWorkspace.kicker">配置</div>
+              <h2 class="bme-config-workspace-title" data-i18n="panel.configWorkspace.title">ST-BME 配置工作区</h2>
+              <p class="bme-config-workspace-desc" data-i18n="panel.configWorkspace.desc">
+                在这里集中配置第二记忆模型、功能开关、细粒度参数、任务预设和面板主题。
+              </p>
+            </div>
+            <div class="bme-config-workspace-actions"></div>
+          </div>
+
+          <div class="bme-config-nav bme-config-nav-mobile">
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="api"
+              type="button"
+            >
+              <i class="fa-solid fa-plug"></i>
+              <span data-i18n="panel.configNav.api">API 配置</span>
+            </button>
+            <button
+              class="bme-config-nav-btn active"
+              data-config-section="toggles"
+              type="button"
+            >
+              <i class="fa-solid fa-toggle-on"></i>
+              <span data-i18n="panel.configNav.toggles">功能开关</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="advanced"
+              type="button"
+            >
+              <i class="fa-solid fa-sliders"></i>
+              <span data-i18n="panel.configNav.advanced">详细参数</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="prompts"
+              type="button"
+            >
+              <i class="fa-solid fa-scroll"></i>
+              <span data-i18n="panel.configNav.prompts">任务预设</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="planner"
+              type="button"
+            >
+              <i class="fa-solid fa-wand-magic-sparkles"></i>
+              <span data-i18n="panel.configNav.planner">ENA 规划器</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="appearance"
+              type="button"
+            >
+              <i class="fa-solid fa-palette"></i>
+              <span data-i18n="panel.configNav.appearance">面板外观</span>
+            </button>
+            <button
+              class="bme-config-nav-btn"
+              data-config-section="cleanup"
+              type="button"
+            >
+              <i class="fa-solid fa-broom"></i>
+              <span data-i18n="panel.configNav.cleanup">数据清理</span>
+            </button>
+          </div>
+
+          <div class="bme-config-sections">
+            <section
+              class="bme-config-section"
+              data-config-section="api"
+            >
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.apiKicker">API 配置</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.apiTitle">模型连接与向量接入</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.apiDesc">
+                  统一管理独立记忆 LLM 和 Embedding
+                  的连接方式，保留现有后端代理与直连兜底逻辑。
+                </p>
+              </div>
+
+              <div class="bme-config-grid bme-config-grid-2">
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">记忆 LLM</div>
+                      <div class="bme-config-card-subtitle">
+                        留空时复用当前聊天模型；填写后会自动识别常见渠道，未识别时按自定义 OpenAI 兼容接口处理。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row bme-llm-preset-row">
+                    <label for="bme-llm-preset-select">LLM 配置模板</label>
+                    <div class="bme-llm-preset-controls">
+                      <select
+                        id="bme-llm-preset-select"
+                        class="bme-config-input"
+                      >
+                        <option value="">-- 手动模式 --</option>
+                      </select>
+                      <div class="bme-llm-preset-actions">
+                        <button
+                          id="bme-llm-preset-save"
+                          class="bme-config-secondary-btn"
+                          title="覆盖保存当前模板" data-i18n-title="panel.preset.saveTitle"
+                          type="button"
+                        >
+                          <i class="fa-solid fa-floppy-disk"></i>
+                          <span data-i18n="common.save">保存</span>
+                        </button>
+                        <button
+                          id="bme-llm-preset-save-as"
+                          class="bme-config-secondary-btn"
+                          title="另存为新模板" data-i18n-title="panel.preset.saveAsTitle"
+                          type="button"
+                        >
+                          <i class="fa-solid fa-file-circle-plus"></i>
+                          <span data-i18n="panel.preset.saveAs">另存为</span>
+                        </button>
+                        <button
+                          id="bme-llm-preset-delete"
+                          class="bme-config-secondary-btn"
+                          title="删除当前模板" data-i18n-title="panel.preset.deleteTitle"
+                          type="button"
+                        >
+                          <i class="fa-solid fa-trash-can"></i>
+                          <span data-i18n="common.delete">删除</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-llm-url">LLM API 地址</label>
+                    <input
+                      id="bme-setting-llm-url"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="https://api.openai.com/v1"
+                    />
+                  </div>
+                  <div class="bme-config-help" id="bme-memory-llm-provider-help">
+                    留空时复用当前聊天模型。支持自动识别 OpenAI 兼容渠道、Anthropic Claude、Google AI Studio / Gemini；填写完整 endpoint 时会自动规整为可复用的 base URL。
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-llm-key">LLM API Key</label>
+                    <input
+                      id="bme-setting-llm-key"
+                      class="bme-config-input"
+                      type="password"
+                      placeholder="sk-..."
+                    />
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-llm-model">LLM 模型</label>
+                    <input
+                      id="bme-setting-llm-model"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="gpt-4.1-mini / qwen-max / deepseek-chat"
+                    />
+                  </div>
+                  <div class="bme-model-fetch-block">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-fetch-llm-models"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-rotate"></i>
+                      <span data-i18n="panel.api.fetchModels">拉取模型</span>
+                    </button>
+                    <select
+                      id="bme-select-llm-model"
+                      class="bme-config-input bme-model-select"
+                      style="display: none"
+                    >
+                      <option value="">从拉取结果中选择模型</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-test-btn"
+                      id="bme-test-llm"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-plug"></i>
+                      <span data-i18n="panel.api.testLlm">测试记忆 LLM</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">Embedding</div>
+                      <div class="bme-config-card-subtitle">
+                        后端模式优先复用酒馆向量源，直连模式保留独立
+                        URL/Key/Model。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-embed-mode">向量模式</label>
+                    <select
+                      id="bme-setting-embed-mode"
+                      class="bme-config-input"
+                    >
+                      <option value="backend">后端索引</option>
+                      <option value="direct">直连兜底</option>
+                    </select>
+                  </div>
+
+                  <div id="bme-embed-backend-fields">
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-backend-source"
+                        >后端向量源</label
+                      >
+                      <select
+                        id="bme-setting-embed-backend-source"
+                        class="bme-config-input"
+                      >
+                        <option value="openai">OpenAI</option>
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="cohere">Cohere</option>
+                        <option value="mistral">Mistral</option>
+                        <option value="electronhub">Electron Hub</option>
+                        <option value="chutes">Chutes</option>
+                        <option value="nanogpt">NanoGPT</option>
+                        <option value="ollama">Ollama</option>
+                        <option value="llamacpp">llama.cpp</option>
+                        <option value="vllm">vLLM</option>
+                      </select>
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-backend-model"
+                        >后端模型</label
+                      >
+                      <input
+                        id="bme-setting-embed-backend-model"
+                        class="bme-config-input"
+                        type="text"
+                        placeholder="text-embedding-3-small / nomic-embed-text / BAAI/bge-m3"
+                      />
+                    </div>
+                    <div class="bme-model-fetch-block">
+                      <button
+                         class="bme-config-secondary-btn"
+                         id="bme-fetch-embed-backend-models"
+                         type="button"
+                       >
+                         <i class="fa-solid fa-rotate"></i>
+                         <span data-i18n="panel.api.fetchModels">拉取模型</span>
+                       </button>
+                      <select
+                        id="bme-select-embed-backend-model"
+                        class="bme-config-input bme-model-select"
+                        style="display: none"
+                      >
+                        <option value="">从拉取结果中选择模型</option>
+                      </select>
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-backend-url"
+                        >后端 API 地址</label
+                      >
+                      <input
+                        id="bme-setting-embed-backend-url"
+                        class="bme-config-input"
+                        type="text"
+                          placeholder="仅 Ollama / llama.cpp / vLLM 需要填写" data-i18n-placeholder="panel.api.embedBackendUrlPlaceholder"
+                      />
+                    </div>
+                    <div class="bme-config-row inline">
+                      <label
+                        class="checkbox_label"
+                        for="bme-setting-embed-auto-suffix"
+                      >
+                        <input
+                          id="bme-setting-embed-auto-suffix"
+                          type="checkbox"
+                        />
+                        <span>自动补全 /embeddings 后缀</span>
+                      </label>
+                    </div>
+                    <div class="bme-config-help">
+                      如果当前页面是 HTTPS 而你填的是
+                      HTTP，本地浏览器可能会拦截混合内容；远程部署时请优先使用
+                      HTTPS 或宿主可访问的同源入口。
+                    </div>
+                  </div>
+
+                  <div id="bme-embed-direct-fields">
+                    <div class="bme-config-help">
+                      直连模式会使用下面这组独立配置。
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-url"
+                        >Embedding API 地址</label
+                      >
+                      <input
+                        id="bme-setting-embed-url"
+                        class="bme-config-input"
+                        type="text"
+                        placeholder="https://api.openai.com/v1"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-key"
+                        >Embedding API Key</label
+                      >
+                      <input
+                        id="bme-setting-embed-key"
+                        class="bme-config-input"
+                        type="password"
+                        placeholder="sk-..."
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-setting-embed-model"
+                        >Embedding 模型</label
+                      >
+                      <input
+                        id="bme-setting-embed-model"
+                        class="bme-config-input"
+                        type="text"
+                        placeholder="text-embedding-3-small"
+                      />
+                    </div>
+                    <div class="bme-model-fetch-block">
+                      <button
+                         class="bme-config-secondary-btn"
+                         id="bme-fetch-embed-direct-models"
+                         type="button"
+                       >
+                         <i class="fa-solid fa-rotate"></i>
+                         <span data-i18n="panel.api.fetchModels">拉取模型</span>
+                       </button>
+                      <select
+                        id="bme-select-embed-direct-model"
+                        class="bme-config-input bme-model-select"
+                        style="display: none"
+                      >
+                        <option value="">从拉取结果中选择模型</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-test-btn"
+                      id="bme-test-embedding"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-plug"></i>
+                      <span data-i18n="panel.api.testEmbedding">测试 Embedding</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <details
+                class="bme-config-card bme-collapsible-card"
+                id="bme-advanced-network-settings"
+              >
+                <summary class="bme-config-card-head bme-collapsible-summary">
+                  <div>
+                    <div class="bme-config-card-title">高级网络设置</div>
+                    <div class="bme-config-card-subtitle">
+                      默认折叠；统一控制
+                      LLM、Embedding、后端向量与本地向量请求超时。
+                    </div>
+                  </div>
+                  <span class="bme-collapsible-indicator" aria-hidden="true">
+                    <i class="fa-solid fa-chevron-down"></i>
+                  </span>
+                </summary>
+                <div class="bme-config-row">
+                  <label for="bme-setting-timeout-ms">统一超时（毫秒）</label>
+                  <input
+                    id="bme-setting-timeout-ms"
+                    class="bme-config-input"
+                    type="number"
+                    min="1000"
+                    step="1000"
+                    placeholder="300000"
+                  />
+                </div>
+                <div class="bme-config-help">
+                  默认值为 300000ms（5
+                  分钟）。留空或填写无效值时会回退到默认值。
+                </div>
+              </details>
+            </section>
+
+            <section class="bme-config-section active" data-config-section="toggles">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.togglesKicker">功能开关</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.togglesTitle">主链路与增强能力</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.togglesDesc">
+                  先决定哪些能力参与记忆链路，再到详细参数里微调各模块行为。
+                </p>
+              </div>
+
+              <div class="bme-capability-master">
+                <label class="bme-capability-card bme-capability-card-master" for="bme-setting-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-power-off"></i></span>
+                    <input id="bme-setting-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">插件总开关</div>
+                  <div class="bme-cap-desc">
+                    关闭后停用 ST-BME 的自动提取、召回、向量、维护与手动操作；配置面板仍可打开，方便你随时重新启用或调整设置。
+                  </div>
+                </label>
+              </div>
+
+              <div class="bme-capability-grid">
+                <label class="bme-capability-card" for="bme-setting-recall-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-magnifying-glass"></i></span>
+                    <input id="bme-setting-recall-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">生成前召回</div>
+                  <div class="bme-cap-desc">在生成前检索相关记忆并注入 prompt。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-extract-auto-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
+                    <input id="bme-setting-extract-auto-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">生成后提取</div>
+                  <div class="bme-cap-desc">AI 回复生成后自动抽取新记忆并写入图谱。</div>
+                </label>
+                <div
+                  class="bme-capability-card bme-capability-card-mode"
+                  id="bme-maintenance-mode-card"
+                  role="group"
+                  aria-label="维护执行模式" data-i18n-aria-label="panel.toggles.maintenanceModeAria"
+                  title="1 严格串行；2 均衡加速；3 快速后台（最终一致）" data-i18n-title="panel.toggles.maintenanceModeTitle"
+                >
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon bme-mode-gauge" aria-hidden="true"></span>
+                    <div class="bme-mode-segmented" id="bme-setting-maintenance-execution-mode">
+                      <button type="button" data-mode="strict" aria-label="1 严格串行" data-i18n-aria-label="panel.toggles.modeStrictAria">1</button>
+                      <button type="button" data-mode="balanced" aria-label="2 均衡加速" data-i18n-aria-label="panel.toggles.modeBalancedAria">2</button>
+                      <button type="button" data-mode="fast" aria-label="3 快速后台" data-i18n-aria-label="panel.toggles.modeFastAria">3</button>
+                    </div>
+                  </div>
+                  <div class="bme-cap-title">并发模式</div>
+                  <div class="bme-cap-desc" id="bme-maintenance-mode-desc">1 严格串行：全部同步执行。</div>
+                </div>
+                <label class="bme-capability-card" for="bme-setting-consolidation-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-code-merge"></i></span>
+                    <input id="bme-setting-consolidation-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">记忆整合</div>
+                  <div class="bme-cap-desc">去重/冲突检测 + 反向修正既有记忆 + 建立关联边。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-synopsis-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-scroll"></i></span>
+                    <input id="bme-setting-synopsis-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">层级总结</div>
+                  <div class="bme-cap-desc">按提取节奏生成原文锚定小总结，并自动折叠成更高层总结。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-visibility-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-shield-halved"></i></span>
+                    <input id="bme-setting-visibility-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">认知边界</div>
+                  <div class="bme-cap-desc">限制角色只访问自己可感知的记忆。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-cross-recall-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-diagram-project"></i></span>
+                    <input id="bme-setting-cross-recall-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">交叉检索</div>
+                  <div class="bme-cap-desc">扩展到多跳邻域和跨线索召回。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-smart-trigger-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-bolt"></i></span>
+                    <input id="bme-setting-smart-trigger-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">惊奇触发</div>
+                  <div class="bme-cap-desc">在高信息量或指定模式时提升提取敏感度。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-sleep-cycle-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-moon"></i></span>
+                    <input id="bme-setting-sleep-cycle-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">主动遗忘</div>
+                  <div class="bme-cap-desc">周期性清理低价值节点（归档）。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-auto-compression-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-compress"></i></span>
+                    <input id="bme-setting-auto-compression-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">自动压缩</div>
+                  <div class="bme-cap-desc">按提取周期做层级压缩，减少同类记忆越积越散。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-prob-recall-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-dice"></i></span>
+                    <input id="bme-setting-prob-recall-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">概率召回</div>
+                  <div class="bme-cap-desc">允许少量弱相关记忆以概率方式入围。</div>
+                </label>
+                <label class="bme-capability-card" for="bme-setting-reflection-enabled">
+                  <div class="bme-cap-header">
+                    <span class="bme-cap-icon"><i class="fa-solid fa-lightbulb"></i></span>
+                    <input id="bme-setting-reflection-enabled" type="checkbox" />
+                  </div>
+                  <div class="bme-cap-title">反思</div>
+                  <div class="bme-cap-desc">按周期生成长期叙事反思与关注点。</div>
+                </label>
+              </div>
+
+              <div class="bme-config-card" style="margin-top: 20px;">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">云端存储模式</div>
+                    <div class="bme-config-card-subtitle">
+                      自动模式沿用当前镜像同步；手动模式停止自动云端写入，改为按当前聊天手动备份与恢复。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-config-row">
+                  <label for="bme-setting-cloud-storage-mode">存储模式</label>
+                  <select
+                    id="bme-setting-cloud-storage-mode"
+                    class="bme-config-input"
+                  >
+                    <option value="automatic">自动储存</option>
+                    <option value="manual">手动储存</option>
+                  </select>
+                </div>
+                <div class="bme-config-help" id="bme-cloud-storage-mode-help">
+                  自动储存会继续按当前镜像逻辑同步；手动储存只保留本地写入，需要你主动备份和恢复。
+                </div>
+                <div
+                  class="bme-config-help"
+                  id="bme-cloud-storage-mode-status"
+                  style="display: none; margin-top: 8px;"
+                ></div>
+                <div
+                  id="bme-cloud-backup-manual-actions"
+                  class="bme-config-actions"
+                  style="display: none; margin-top: 12px; flex-wrap: wrap;"
+                >
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-backup-to-cloud"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <span data-i18n="panel.toggles.backupToCloud">备份到云端</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-restore-from-cloud"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-down"></i>
+                    <span data-i18n="panel.toggles.restoreFromCloud">从云端获取备份</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-manage-server-backups"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-box-archive"></i>
+                    <span data-i18n="panel.toggles.manageServerBackups">管理服务器备份</span>
+                  </button>
+                  <button
+                    class="bme-config-secondary-btn"
+                    id="bme-act-rollback-last-restore"
+                    type="button"
+                    disabled
+                  >
+                    <i class="fa-solid fa-rotate-left"></i>
+                    <span data-i18n="panel.toggles.rollbackLastRestore">回滚上次恢复</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="bme-config-grid bme-config-grid-2" style="margin-top: 20px;">
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">世界书过滤</div>
+                      <div class="bme-config-card-subtitle">
+                        控制 ST-BME 读取世界书条目时的过滤策略。默认模式自动过滤 MVU 相关条目；自定义模式仅按条目名称关键词过滤。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-wi-filter-mode">过滤模式</label>
+                    <select
+                      id="bme-setting-wi-filter-mode"
+                      class="bme-config-input"
+                    >
+                      <option value="default">默认（自动过滤 MVU 条目）</option>
+                      <option value="custom">自定义（按名称关键词过滤）</option>
+                    </select>
+                  </div>
+                  <div id="bme-wi-filter-custom-section" style="display: none">
+                    <div class="bme-config-row">
+                      <label for="bme-setting-wi-filter-keywords"
+                        >过滤关键词</label
+                      >
+                      <input
+                        id="bme-setting-wi-filter-keywords"
+                        class="bme-config-input"
+                        type="text"
+                        placeholder="用逗号分隔，如：BME,mvu,测试" data-i18n-placeholder="panel.toggles.wiFilterKeywordsPlaceholder"
+                      />
+                    </div>
+                    <div class="bme-config-help">
+                      条目名称中包含任一关键词即跳过（不区分大小写）。留空则不过滤任何条目（仅跳过已禁用的条目）。
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">隐藏旧楼层</div>
+                      <div class="bme-config-card-subtitle">
+                        不删除聊天内容，只是把较早楼层临时标成系统消息，让主回复和 ST-BME 自己读取聊天时一起跳过它们。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-hide-old-messages-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title" data-i18n="panel.toggles.hideOldMessages">启用旧楼层隐藏</span>
+                      <span class="bme-toggle-desc">
+                        适合长聊天控 token。切聊天会自动重新应用，不会删除原楼层。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-hide-old-messages-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-hide-old-messages-keep-last-n">
+                      保留最近 N 条消息
+                    </label>
+                    <input
+                      id="bme-setting-hide-old-messages-keep-last-n"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="200"
+                      placeholder="0 = 不隐藏" data-i18n-placeholder="panel.toggles.hideOldKeepLastNPlaceholder"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    设置修改后会自动生效。`0` 表示不隐藏；“取消全部隐藏”会立即把当前聊天里由 ST-BME 隐藏的楼层恢复。
+                  </div>
+                  <div class="bme-config-help">
+                    当前隐藏：<strong id="bme-hide-old-messages-hidden-count">0</strong>
+                    层；<span id="bme-hide-old-messages-status-detail" data-i18n="panel.toggles.hideOldStatusNotApplied">未应用</span>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-hide-old-messages-render-limit-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title" data-i18n="panel.toggles.limitRenderFloors">限制聊天区渲染楼层</span>
+                      <span class="bme-toggle-desc">
+                        只控制前端最多加载最近多少层；不等于隐藏，未隐藏楼层仍可能进入上下文。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-hide-old-messages-render-limit">
+                      最多渲染最近 N 条消息
+                    </label>
+                    <input
+                      id="bme-setting-hide-old-messages-render-limit"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="1000"
+                      placeholder="0 = 不限制渲染" data-i18n-placeholder="panel.toggles.renderLimitPlaceholder"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    用于减少超长聊天界面卡顿；真正节省上下文 token 仍由上方“旧楼层隐藏”负责。
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-apply-hide-settings"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-eye-slash"></i>
+                      <span data-i18n="panel.toggles.reapplyHide">重新应用当前隐藏</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-clear-hide-settings"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-eye"></i>
+                      <span data-i18n="panel.toggles.clearAllHide">取消全部隐藏</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">提示信息</div>
+                      <div class="bme-config-card-subtitle">
+                        控制提取、召回等顶部通知的显示样式。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-notice-display-mode">显示模式</label>
+                    <select
+                      id="bme-setting-notice-display-mode"
+                      class="bme-config-input"
+                    >
+                      <option value="normal">正常</option>
+                      <option value="compact">精简（仅显示标题）</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-help">
+                    精简模式会将工作中的提示压缩为标题卡片；错误和警告仍显示完整内容，避免关键信息被隐藏。
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">调试日志</div>
+                      <div class="bme-config-card-subtitle">
+                        默认关闭，需要排查问题时再临时打开浏览器控制台日志。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-debug-logging-enabled"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title" data-i18n="panel.toggles.enableDebugLog">启用调试日志</span>
+                      <span class="bme-toggle-desc">
+                        只在开启后输出内部诊断日志与流程跟踪，可能包含脱敏后的 prompt 组装摘要。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-debug-logging-enabled"
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">Native 性能加速</div>
+                      <div class="bme-config-card-subtitle">
+                        控制图布局、图谱增量写回与加载 hydrate 是否尝试使用 Worker / WASM 加速；默认按阈值自动命中。
+                      </div>
+                    </div>
+                  </div>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-graph-native-force-disable"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title" data-i18n="panel.toggles.forceDisableNative">全局强制关闭 Native</span>
+                      <span class="bme-toggle-desc">
+                        打开后会统一禁止 layout / persist / hydrate 的 native 路径，直接走 JS 回退。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-graph-native-force-disable"
+                      type="checkbox"
+                    />
+                  </label>
+                  <label
+                    class="bme-toggle-item"
+                    for="bme-setting-native-engine-fail-open"
+                  >
+                    <span class="bme-toggle-copy">
+                      <span class="bme-toggle-title" data-i18n="panel.toggles.failOpenFallback">Fail-open 回退</span>
+                      <span class="bme-toggle-desc">
+                        native 模块不可用或执行失败时，自动回退到 JS；关闭后会按严格模式抛错。
+                      </span>
+                    </span>
+                    <input
+                      id="bme-setting-native-engine-fail-open"
+                      type="checkbox"
+                    />
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-graph-use-native-layout"
+                  >
+                    <input
+                      id="bme-setting-graph-use-native-layout"
+                      type="checkbox"
+                    />
+                    <span data-i18n="panel.toggles.nativeLayoutWorker">图布局使用 native Worker / WASM</span>
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-persist-use-native-delta"
+                  >
+                    <input
+                      id="bme-setting-persist-use-native-delta"
+                      type="checkbox"
+                    />
+                    <span data-i18n="panel.toggles.nativePersistDelta">Persist Delta 使用 native 加速</span>
+                  </label>
+                  <label
+                    class="bme-inline-checkbox"
+                    for="bme-setting-load-use-native-hydrate"
+                  >
+                    <input
+                      id="bme-setting-load-use-native-hydrate"
+                      type="checkbox"
+                    />
+                    <span data-i18n="panel.toggles.nativeHydrate">快照 Hydrate 使用 native 加速</span>
+                  </label>
+                  <div class="bme-config-help" id="bme-native-rollout-status">
+                    当前会在这里显示 native rollout 总状态与最近一次命中/回退摘要。
+                  </div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-layout-status"
+                    style="margin-top: 6px;"
+                  ></div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-persist-status"
+                    style="margin-top: 4px;"
+                  ></div>
+                  <div
+                    class="bme-config-help"
+                    id="bme-native-hydrate-status"
+                    style="margin-top: 4px;"
+                  ></div>
+                  <details
+                    class="bme-config-subdetails bme-collapsible-card"
+                    id="bme-native-rollout-threshold-settings"
+                  >
+                    <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                      <div>
+                        <div class="bme-config-subgroup-title">阈值与超时</div>
+                        <div class="bme-config-subgroup-desc">
+                          调整 layout / persist / hydrate 什么时候值得尝试 native；通常保持默认即可。
+                        </div>
+                      </div>
+                      <span class="bme-collapsible-indicator" aria-hidden="true">
+                        <i class="fa-solid fa-chevron-down"></i>
+                      </span>
+                    </summary>
+                    <div class="bme-config-subgroup">
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-threshold-nodes">
+                          布局节点阈值
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-threshold-nodes"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="20000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-threshold-edges">
+                          布局边阈值
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-threshold-edges"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-native-layout-worker-timeout-ms">
+                          Layout Worker 超时（ms）
+                        </label>
+                        <input
+                          id="bme-setting-graph-native-layout-worker-timeout-ms"
+                          class="bme-config-input"
+                          type="number"
+                          min="40"
+                          max="15000"
+                          step="10"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-records">
+                          Persist 记录数阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-records"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-structural-delta">
+                          Persist 结构变化阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-structural-delta"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-persist-native-delta-threshold-serialized-chars">
+                          Persist 序列化体积阈值
+                        </label>
+                        <input
+                          id="bme-setting-persist-native-delta-threshold-serialized-chars"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="50000000"
+                          step="1000"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-load-native-hydrate-threshold-records">
+                          Hydrate 记录数阈值
+                        </label>
+                        <input
+                          id="bme-setting-load-native-hydrate-threshold-records"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="200000"
+                        />
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">美化用户输入</div>
+                      <div class="bme-config-card-subtitle">
+                        控制 Recall Card 是否接管本轮用户输入的展示方式，不影响实际召回与注入。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-setting-recall-card-user-input-display-mode">
+                      显示模式
+                    </label>
+                    <select
+                      id="bme-setting-recall-card-user-input-display-mode"
+                      class="bme-config-input"
+                    >
+                      <option value="off">关闭美化，仅显示原始输入</option>
+                      <option value="beautify_only">
+                        由 Recall Card 接管显示，并隐藏原始输入
+                      </option>
+                      <option value="mirror">Recall Card 与原始输入同时显示</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-help">
+                    只调整聊天楼层里的显示方式，不改变记忆召回、注入 prompt 或消息实际发送内容。
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="bme-config-section" data-config-section="advanced">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.advancedKicker">详细参数</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.advancedTitle">细粒度行为与评分策略</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.advancedDesc">
+                  这里承接旧设置页里的高级项。若对应功能关闭，参数会置灰并提示先到“功能开关”启用。
+                </p>
+              </div>
+
+              <div class="bme-stripe-section">
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">提取</div>
+                    <div class="bme-stripe-label-desc">
+                      控制自动提取的频率和按轮计的上下文窗口。默认 2
+                      轮，通常约等于向前补 4 层普通消息。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div class="bme-config-card">
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-every"
+                          >每 N 条回复提取</label
+                        >
+                        <input
+                          id="bme-setting-extract-every"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-context-turns"
+                          >提取上下文轮数</label
+                        >
+                        <input
+                          id="bme-setting-extract-context-turns"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="20"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-extract-auto-delay-latest-assistant"
+                      >
+                        <input
+                          id="bme-setting-extract-auto-delay-latest-assistant"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.extractDelayLatest">自动提取晚一楼</span>
+                      </label>
+                      <div class="bme-config-help">
+                        开启后，最新 AI 楼先不自动提取，要等下一条 AI 楼出现后，才提取前一批内容。提取未处理和范围重提不受影响。
+                      </div>
+                      <details
+                        class="bme-config-subdetails bme-collapsible-card"
+                        id="bme-extract-advanced-settings"
+                      >
+                        <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                          <div>
+                            <div class="bme-config-subgroup-title">提取高级项</div>
+                            <div class="bme-config-subgroup-desc">
+                              控制提取 prompt 的表达方式，以及结构化 recentMessages 的裁剪。通常保持默认即可。
+                            </div>
+                          </div>
+                          <span class="bme-collapsible-indicator" aria-hidden="true">
+                            <i class="fa-solid fa-chevron-down"></i>
+                          </span>
+                        </summary>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-row">
+                            <label for="bme-setting-extract-recent-message-cap"
+                              >结构化消息上限（0 = 不限）</label
+                            >
+                            <input
+                              id="bme-setting-extract-recent-message-cap"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="200"
+                            />
+                          </div>
+                          <div class="bme-config-help">
+                            只限制提取 prompt 里的 structured recentMessages 条数，不影响实际提取切片范围。
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-extract-prompt-structured-mode"
+                              >提取输入格式</label
+                            >
+                            <select
+                              id="bme-setting-extract-prompt-structured-mode"
+                              class="bme-config-input"
+                            >
+                              <option value="both">混合（transcript + structured）</option>
+                              <option value="transcript">仅 transcript</option>
+                              <option value="structured">仅 structured</option>
+                            </select>
+                          </div>
+                          <div class="bme-config-help">
+                            控制 LLM 在提取时看到的是纯 transcript、结构化 recentMessages，还是两者同时提供。通常保持“混合”即可。
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-extract-split-execution-mode"
+                              >客观/主观提取方式</label
+                            >
+                            <select
+                              id="bme-setting-extract-split-execution-mode"
+                              class="bme-config-input"
+                            >
+                              <option value="parallel">并发（默认，更快）</option>
+                              <option value="serial">串行（限流时使用）</option>
+                            </select>
+                          </div>
+                          <div class="bme-config-help">
+                            默认并发请求客观提取与主观 POV 提取，以降低等待时间；如果提供商限流，可切换为串行。
+                          </div>
+                        </div>
+                      </details>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-extract-worldbook-mode"
+                          >提取时世界书</label
+                        >
+                        <select
+                          id="bme-setting-extract-worldbook-mode"
+                          class="bme-config-input"
+                        >
+                          <option value="active">启用（解析激活条目）</option>
+                          <option value="none">禁用</option>
+                        </select>
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-extract-include-summaries"
+                      >
+                        <input
+                          id="bme-setting-extract-include-summaries"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.extractIncludeSummaries">提取时包含活跃总结</span>
+                      </label>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-extract-include-story-time"
+                      >
+                        <input
+                          id="bme-setting-extract-include-story-time"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.extractIncludeStoryTime">提取时包含故事时间线</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">召回与注入</div>
+                    <div class="bme-stripe-label-desc">
+                      控制最终注入层级。当前注入走
+                      IN_CHAT@Depth，数值越大越靠前。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="recallEnabled"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-inject-depth"
+                          >注入深度（数值越大越靠前）</label
+                        >
+                        <input
+                          id="bme-setting-inject-depth"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="9999"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-use-authoritative-generation-input"
+                      >
+                        <input
+                          id="bme-setting-recall-use-authoritative-generation-input"
+                          type="checkbox"
+                        />
+                        <span>使用权威 generation 输入（实验性）</span>
+                      </label>
+                      <div class="bme-config-help">
+                        开启后，召回查询将优先使用更接近真实发送入口的文本（如 send-intent、宿主快照、planner handoff），而非回退到 chat tail 或 textarea。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">向量预筛</div>
+                    <div class="bme-stripe-label-desc">
+                      控制是否启用向量候选检索，以及向量阶段输出的 Top-K
+                      宽度。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card bme-stage-card"
+                      data-guard-settings="recallEnabled"
+                      data-stage-toggle-id="bme-setting-recall-vector-prefilter-enabled"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-vector-prefilter-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-vector-prefilter-enabled"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.enableVectorPrefilter">启用向量预筛</span>
+                      </label>
+                      <div class="bme-config-row bme-stage-param">
+                        <label for="bme-setting-recall-top-k">向量预筛 Top-K</label>
+                        <input
+                          id="bme-setting-recall-top-k"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="100"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">图扩散</div>
+                    <div class="bme-stripe-label-desc">
+                      控制是否沿图结构继续扩散候选，以及扩散阶段保留的候选上限。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card bme-stage-card"
+                      data-guard-settings="recallEnabled"
+                      data-stage-toggle-id="bme-setting-recall-graph-diffusion-enabled"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-graph-diffusion-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-graph-diffusion-enabled"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.enableGraphDiffusion">启用图扩散</span>
+                      </label>
+                      <div class="bme-config-row bme-stage-param">
+                        <label for="bme-setting-recall-diffusion-top-k"
+                          >图扩散 Top-K</label
+                        >
+                        <input
+                          id="bme-setting-recall-diffusion-top-k"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="300"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">召回增强</div>
+                    <div class="bme-stripe-label-desc">
+                      先调多意图、扩散回拉和时间链；更后面的候选整理与弱信号补抓收进折叠里。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="recallEnabled"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-multi-intent-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-multi-intent-enabled"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.enableMultiIntent">启用多意图拆分</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-multi-intent-max-segments"
+                          >最多拆分段数</label
+                        >
+                        <input
+                          id="bme-setting-recall-multi-intent-max-segments"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="8"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-teleport-alpha"
+                          >扩散回拉强度</label
+                        >
+                        <input
+                          id="bme-setting-recall-teleport-alpha"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-temporal-links-enabled"
+                      >
+                        <input
+                          id="bme-setting-recall-temporal-links-enabled"
+                          type="checkbox"
+                        />
+                        <span data-i18n="panel.toggles.enableTemporalLinks">启用时间链合成边</span>
+                      </label>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-recall-temporal-link-strength"
+                          >时间链强度</label
+                        >
+                        <input
+                          id="bme-setting-recall-temporal-link-strength"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                        />
+                      </div>
+                      <details
+                        class="bme-config-subdetails bme-collapsible-card"
+                        id="bme-recall-advanced-settings"
+                      >
+                        <summary class="bme-collapsible-summary bme-config-subdetails-summary">
+                          <div>
+                            <div class="bme-config-subgroup-title">更多高级项</div>
+                            <div class="bme-config-subgroup-desc">
+                              收纳上下文混合查询、文字补分，以及 DPP、共现补强和弱信号残差召回。
+                            </div>
+                          </div>
+                          <span class="bme-collapsible-indicator" aria-hidden="true">
+                            <i class="fa-solid fa-chevron-down"></i>
+                          </span>
+                        </summary>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-subgroup-title">作用域记忆</div>
+                          <div class="bme-config-subgroup-desc">
+                            让召回优先理解“谁怎么记得这件事”和“当前地区的客观事实”，避免所有记忆都用上帝视角混在一起。
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-scoped-memory-enabled"
+                          >
+                            <input
+                              id="bme-setting-scoped-memory-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableScopedMemory">启用作用域记忆召回</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-pov-memory-enabled"
+                          >
+                            <input
+                              id="bme-setting-pov-memory-enabled"
+                              type="checkbox"
+                            />
+                            <span>启用角色 / 用户 POV 记忆</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-region-scoped-objective-enabled"
+                          >
+                            <input
+                              id="bme-setting-region-scoped-objective-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableRegionObjective">启用地区客观层加权</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-cognitive-memory-enabled"
+                          >
+                            <input
+                              id="bme-setting-cognitive-memory-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableCognitiveMemory">启用多角色认知层</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-spatial-adjacency-enabled"
+                          >
+                            <input
+                              id="bme-setting-spatial-adjacency-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableSpatialAdjacency">启用地区邻接图</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-enable-story-timeline"
+                          >
+                            <input
+                              id="bme-setting-enable-story-timeline"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableStoryTimeline">启用剧情时间层</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-story-time-soft-directing"
+                          >
+                            <input
+                              id="bme-setting-story-time-soft-directing"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableStoryTimeSoftDirecting">启用剧情时间软导演</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-story-time-label"
+                          >
+                            <input
+                              id="bme-setting-inject-story-time-label"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.injectStoryTimeLabel">注入时间标签</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-character-pov-weight"
+                              >角色 POV 权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-character-pov-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="3"
+                              step="0.05"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-user-pov-weight"
+                              >用户 POV 权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-user-pov-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="3"
+                              step="0.05"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-objective-current-region-weight"
+                              >当前地区客观权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-objective-current-region-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="3"
+                              step="0.05"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-objective-adjacent-region-weight"
+                              >邻近地区客观权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-objective-adjacent-region-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="3"
+                              step="0.05"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-objective-global-weight"
+                              >全局客观权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-objective-global-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="3"
+                              step="0.05"
+                            />
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-user-pov-memory"
+                          >
+                            <input
+                              id="bme-setting-inject-user-pov-memory"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.injectUserPovMemory">注入用户 POV 记忆</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-objective-global-memory"
+                          >
+                            <input
+                              id="bme-setting-inject-objective-global-memory"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.injectObjectiveGlobalMemory">注入少量全局客观记忆</span>
+                          </label>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-inject-low-confidence-objective-memory"
+                          >
+                            <input
+                              id="bme-setting-inject-low-confidence-objective-memory"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.injectLowConfidenceObjective">允许低置信客观记忆直接注入</span>
+                          </label>
+                        </div>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-subgroup-title">查询纠偏</div>
+                          <div class="bme-config-subgroup-desc">
+                            让召回在“那后来呢”“他为什么这么做”这类追问里，也能借最近上下文稳一点。
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-recall-context-query-blend-enabled"
+                          >
+                            <input
+                              id="bme-setting-recall-context-query-blend-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableContextQueryBlend">启用上下文混合查询</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-context-assistant-weight"
+                              >最近 assistant 权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-context-assistant-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-context-previous-user-weight"
+                              >上一条 user 权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-context-previous-user-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                            />
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-recall-lexical-boost-enabled"
+                          >
+                            <input
+                              id="bme-setting-recall-lexical-boost-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableLexicalBoost">启用文字命中补分</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-lexical-weight"
+                              >文字补分权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-lexical-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                            />
+                          </div>
+                        </div>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-subgroup-title">DPP 与共现补强</div>
+                          <div class="bme-config-subgroup-desc">
+                            用来减少重复候选，并在需要时轻推经常一起出现的相关节点。
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-recall-diversity-enabled"
+                          >
+                            <input
+                              id="bme-setting-recall-diversity-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableDppDiversity">启用 DPP 多样性去重</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-dpp-candidate-multiplier"
+                              >DPP 候选倍率</label
+                            >
+                            <input
+                              id="bme-setting-recall-dpp-candidate-multiplier"
+                              class="bme-config-input"
+                              type="number"
+                              min="1"
+                              max="10"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-dpp-quality-weight"
+                              >DPP 质量权重</label
+                            >
+                            <input
+                              id="bme-setting-recall-dpp-quality-weight"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="10"
+                              step="0.1"
+                            />
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-recall-cooccurrence-enabled"
+                          >
+                            <input
+                              id="bme-setting-recall-cooccurrence-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableCooccurrence">启用共现补强</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-cooccurrence-scale"
+                              >共现补强系数</label
+                            >
+                            <input
+                              id="bme-setting-recall-cooccurrence-scale"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="10"
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-cooccurrence-max-neighbors"
+                              >每个锚点最多补强邻居</label
+                            >
+                            <input
+                              id="bme-setting-recall-cooccurrence-max-neighbors"
+                              class="bme-config-input"
+                              type="number"
+                              min="1"
+                              max="50"
+                            />
+                          </div>
+                        </div>
+                        <div class="bme-config-subgroup">
+                          <div class="bme-config-subgroup-title">弱信号召回</div>
+                          <div class="bme-config-subgroup-desc">
+                            仅在直连 embedding 且本地有足够向量时使用，用于补抓被主主题压住的弱线索。
+                          </div>
+                          <label
+                            class="bme-inline-checkbox"
+                            for="bme-setting-recall-residual-enabled"
+                          >
+                            <input
+                              id="bme-setting-recall-residual-enabled"
+                              type="checkbox"
+                            />
+                            <span data-i18n="panel.toggles.enableResidualRecall">启用弱信号残差召回</span>
+                          </label>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-residual-basis-max-nodes"
+                              >语义基底节点上限</label
+                            >
+                            <input
+                              id="bme-setting-recall-residual-basis-max-nodes"
+                              class="bme-config-input"
+                              type="number"
+                              min="2"
+                              max="64"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-nmf-topics"
+                              >NMF 主题数</label
+                            >
+                            <input
+                              id="bme-setting-recall-nmf-topics"
+                              class="bme-config-input"
+                              type="number"
+                              min="2"
+                              max="64"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-nmf-novelty-threshold"
+                              >新颖度阈值</label
+                            >
+                            <input
+                              id="bme-setting-recall-nmf-novelty-threshold"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-residual-threshold"
+                              >残差阈值</label
+                            >
+                            <input
+                              id="bme-setting-recall-residual-threshold"
+                              class="bme-config-input"
+                              type="number"
+                              min="0"
+                              max="10"
+                              step="0.01"
+                            />
+                          </div>
+                          <div class="bme-config-row">
+                            <label for="bme-setting-recall-residual-top-k"
+                              >残差二次检索 Top-K</label
+                            >
+                            <input
+                              id="bme-setting-recall-residual-top-k"
+                              class="bme-config-input"
+                              type="number"
+                              min="1"
+                              max="20"
+                            />
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">混合评分</div>
+                    <div class="bme-stripe-label-desc">
+                      评分层始终运行；下面 3
+                      个权重共同决定图扩散、向量相似和重要度在召回中的占比。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="recallEnabled"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-graph-weight">图扩散权重</label>
+                        <input
+                          id="bme-setting-graph-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-vector-weight">向量权重</label>
+                        <input
+                          id="bme-setting-vector-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-importance-weight"
+                          >重要度权重</label
+                        >
+                        <input
+                          id="bme-setting-importance-weight"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">LLM 精确召回</div>
+                    <div class="bme-stripe-label-desc">
+                      控制是否启用 LLM 精排，以及传给 LLM
+                      的上下文消息数、候选池大小与最终保留上限。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card bme-stage-card"
+                      data-guard-settings="recallEnabled"
+                      data-stage-toggle-id="bme-setting-recall-llm"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <label
+                        class="bme-inline-checkbox"
+                        for="bme-setting-recall-llm"
+                      >
+                        <input id="bme-setting-recall-llm" type="checkbox" />
+                        <span data-i18n="panel.toggles.enableLlmRefine">启用 LLM 精排</span>
+                      </label>
+                      <div class="bme-config-row bme-stage-param">
+                        <label for="bme-setting-recall-llm-context-messages"
+                          >LLM 精排上下文消息数</label
+                        >
+                        <input
+                          id="bme-setting-recall-llm-context-messages"
+                          class="bme-config-input"
+                          type="number"
+                          min="0"
+                          max="20"
+                        />
+                      </div>
+                      <div class="bme-config-row bme-stage-param">
+                        <label for="bme-setting-recall-llm-candidate-pool"
+                          >LLM 精排候选池</label
+                        >
+                        <input
+                          id="bme-setting-recall-llm-candidate-pool"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="100"
+                        />
+                      </div>
+                      <div class="bme-config-row bme-stage-param">
+                        <label for="bme-setting-recall-max-nodes"
+                          >LLM 最终选择上限</label
+                        >
+                        <input
+                          id="bme-setting-recall-max-nodes"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">记忆整合</div>
+                    <div class="bme-stripe-label-desc">
+                      控制近邻搜索规模和冲突判定阈值。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableConsolidation"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-consolidation-neighbor-count"
+                          >近邻数量</label
+                        >
+                        <input
+                          id="bme-setting-consolidation-neighbor-count"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="20"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-consolidation-threshold"
+                          >冲突判定阈值</label
+                        >
+                        <input
+                          id="bme-setting-consolidation-threshold"
+                          class="bme-config-input"
+                          type="number"
+                          min="0.5"
+                          max="0.99"
+                          step="0.01"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">层级总结</div>
+                    <div class="bme-stripe-label-desc">
+                      控制小总结触发周期；大总结会按 3 条同层小总结自动折叠。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableHierarchicalSummary"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-synopsis-every"
+                          >每 N 次提取生成小总结</label
+                        >
+                        <input
+                          id="bme-setting-synopsis-every"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="100"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">惊奇触发</div>
+                    <div class="bme-stripe-label-desc">
+                      高信息量触发规则和阈值。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableSmartTrigger"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-trigger-patterns"
+                          >自定义触发模式</label
+                        >
+                        <input
+                          id="bme-setting-trigger-patterns"
+                          class="bme-config-input"
+                          type="text"
+                          placeholder="突然,真相,秘密,背叛 或正则" data-i18n-placeholder="panel.toggles.triggerPatternsPlaceholder"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-smart-trigger-threshold"
+                          >触发阈值</label
+                        >
+                        <input
+                          id="bme-setting-smart-trigger-threshold"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="10"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">睡眠遗忘</div>
+                    <div class="bme-stripe-label-desc">
+                      配置遗忘阈值和执行周期。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableSleepCycle"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-forget-threshold">遗忘阈值</label>
+                        <input
+                          id="bme-setting-forget-threshold"
+                          class="bme-config-input"
+                          type="number"
+                          min="0.1"
+                          max="1"
+                          step="0.05"
+                        />
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-sleep-every">每 N 次提取执行</label>
+                        <input
+                          id="bme-setting-sleep-every"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="200"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">自动整合触发</div>
+                    <div class="bme-stripe-label-desc">
+                      本批新增节点不足时，仍会检查是否与旧记忆高度重复；命中后照样自动整合。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div class="bme-config-card">
+                      <div class="bme-config-row">
+                        <label for="bme-setting-consolidation-auto-min-new-nodes"
+                          >最少新增节点数</label
+                        >
+                        <input
+                          id="bme-setting-consolidation-auto-min-new-nodes"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="50"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">自动压缩周期</div>
+                    <div class="bme-stripe-label-desc">
+                      按提取次数计数；只有到周期点时才会尝试自动压缩。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableAutoCompression"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-compression-every"
+                          >每 N 次提取尝试一次</label
+                        >
+                        <input
+                          id="bme-setting-compression-every"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">概率召回</div>
+                    <div class="bme-stripe-label-desc">
+                      调整弱相关记忆被纳入召回的概率。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableProbRecall"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-prob-recall-chance">触发概率</label>
+                        <input
+                          id="bme-setting-prob-recall-chance"
+                          class="bme-config-input"
+                          type="number"
+                          min="0.01"
+                          max="0.5"
+                          step="0.01"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bme-stripe-row">
+                  <div class="bme-stripe-label">
+                    <div class="bme-stripe-label-title">反思</div>
+                    <div class="bme-stripe-label-desc">
+                      控制叙事反思节点的生成间隔。
+                    </div>
+                  </div>
+                  <div class="bme-stripe-content">
+                    <div
+                      class="bme-config-card bme-guarded-card"
+                      data-guard-settings="enableReflection"
+                    >
+                      <div class="bme-config-guard-note">
+                        在“功能开关”中启用后生效。
+                      </div>
+                      <div class="bme-config-row">
+                        <label for="bme-setting-reflect-every"
+                          >每 N 次提取生成</label
+                        >
+                        <input
+                          id="bme-setting-reflect-every"
+                          class="bme-config-input"
+                          type="number"
+                          min="1"
+                          max="200"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="bme-config-section" data-config-section="prompts">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.promptsKicker">任务预设</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.promptsTitle">任务预设工作区</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.promptsDesc">
+                  在这里为每个任务维护独立预设，统一配置 prompt 编排、生成参数和正则规则。
+                </p>
+              </div>
+              <div id="bme-task-profile-workspace" class="bme-task-profile-workspace"></div>
+              <input
+                id="bme-task-profile-import"
+                type="file"
+                accept=".json,application/json"
+                hidden
+              />
+              <input
+                id="bme-task-profile-import-all"
+                type="file"
+                accept=".json,application/json"
+                hidden
+              />
+            </section>
+
+            <section class="bme-config-section" data-config-section="planner">
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.plannerKicker">ENA 规划器</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.plannerTitle">剧情规划 · LLM 接入</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.plannerDesc">
+                  发送前自动拦截并调用规划 LLM，从角色卡、世界书、BME 记忆、历史 plot 中收集上下文，生成
+                  <code>&lt;plot&gt;</code> 和 <code>&lt;note&gt;</code> 追加到你的输入。
+                </p>
+                <div class="bme-planner-status-strip" id="bme-planner-status-strip">
+                  <span class="bme-planner-status-chip" id="bme-planner-state-chip">加载中…</span>
+                  <span class="bme-planner-status-chip" id="bme-planner-save-chip" data-tone="idle" data-i18n="planner.status.ready">就绪</span>
+                </div>
+              </div>
+
+              <div class="bme-config-grid">
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">基本设置</div>
+                      <div class="bme-config-card-subtitle">
+                        启用后，发送消息将先走规划 LLM；输入中已存在 <code>&lt;plot&gt;</code> 标签时自动跳过。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-enabled">启用规划器</label>
+                    <select id="bme-planner-enabled" class="bme-config-input">
+                      <option value="true">开启</option>
+                      <option value="false">关闭</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-skip-plot">跳过已有规划的输入</label>
+                    <select id="bme-planner-skip-plot" class="bme-config-input">
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-help">
+                    检测到输入里已有 <code>&lt;plot&gt;</code> 标签时跳过规划，避免重复拼接。
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">快速测试</div>
+                      <div class="bme-config-card-subtitle">
+                        输入一段剧情描述，立即调用规划 LLM 试跑一次，日志会写入下方“调试 &amp; 日志”。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-test-input">测试输入（留空使用默认）</label>
+                    <textarea
+                      id="bme-planner-test-input"
+                      class="bme-config-input bme-planner-textarea"
+                      rows="3"
+                      placeholder="输入一段剧情描述，测试规划器输出..." data-i18n-placeholder="panel.planner.testInputPlaceholder"
+                    ></textarea>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-test-btn"
+                      id="bme-planner-run-test"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-flask"></i>
+                      <span data-i18n="panel.planner.runTest">运行规划测试</span>
+                    </button>
+                  </div>
+                  <div class="bme-planner-status-text" id="bme-planner-test-status"></div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">规划 LLM · 连接</div>
+                      <div class="bme-config-card-subtitle">
+                        默认跟随当前全局 BME API，也可以切换到任意已保存的 API 预设。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row bme-llm-preset-row">
+                    <label for="bme-planner-llm-preset-select">API 预设</label>
+                    <div class="bme-llm-preset-controls">
+                      <select
+                        id="bme-planner-llm-preset-select"
+                        class="bme-config-input"
+                      >
+                        <option value="">-- 跟随全局（当前 BME API） --</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="bme-config-help">
+                    留空表示直接跟随当前全局 API；选择某个预设后，规划器会固定使用那套 URL / Key / Model。
+                  </div>
+                  <div class="bme-planner-status-text" id="bme-planner-api-status"></div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">生成参数 · Prompt 编排</div>
+                      <div class="bme-config-card-subtitle">
+                        这两部分现在统一收敛到任务预设里的“规划”任务，避免 ENA 面板和任务面板各维护一套配置。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-help">
+                    现在每个规划预设都可以同时携带自己的生成参数和 Prompt block。ENA 这里仍然只负责连接配置、上下文来源、输出过滤和调试日志。
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-open-task-presets"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-list-check"></i>
+                      <span>打开任务预设 · 规划</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">上下文 · 世界书</div>
+                      <div class="bme-config-card-subtitle">
+                        默认读取角色卡绑定的世界书；可选择是否附加全局世界书。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-include-global-wb">读取全局世界书</label>
+                    <select id="bme-planner-include-global-wb" class="bme-config-input">
+                      <option value="false">否</option>
+                      <option value="true">是</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-wb-pos4">排除 position=4 的条目</label>
+                    <select id="bme-planner-wb-pos4" class="bme-config-input">
+                      <option value="true">是</option>
+                      <option value="false">否</option>
+                    </select>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-wb-exclude-names"
+                      >按条目名称关键词排除（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-wb-exclude-names"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="mvu_update, system, ..."
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">上下文 · 聊天与历史</div>
+                      <div class="bme-config-card-subtitle">
+                        控制从历史消息中提取的 plot 数量，以及过滤 AI 回复里的干扰标签。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-keep-tags"
+                      >保留的规划输出标签（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-keep-tags"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="plot, note, plot-log, state"
+                    />
+                  </div>
+                  <div class="bme-config-help">
+                    仅支持英文标签（如 plot, note, memory）。留空表示不按标签过滤（仅去除
+                    <code>&lt;think&gt;</code>）。无效标签会自动忽略。
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-exclude-tags"
+                      >清理 AI 回复中的干扰标签（逗号分隔）</label
+                    >
+                    <input
+                      id="bme-planner-exclude-tags"
+                      class="bme-config-input"
+                      type="text"
+                      placeholder="行动选项, UpdateVariable, StatusPlaceHolderImpl" data-i18n-placeholder="panel.planner.excludeTagsPlaceholder"
+                    />
+                  </div>
+                  <div class="bme-config-row">
+                    <label for="bme-planner-plot-n">携带最近 N 条历史 plot</label>
+                    <input
+                      id="bme-planner-plot-n"
+                      class="bme-config-input"
+                      type="number"
+                      min="0"
+                      max="10"
+                      step="1"
+                    />
+                  </div>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">调试 · 诊断</div>
+                      <div class="bme-config-card-subtitle">
+                        直接诊断世界书/角色卡读取是否正常，定位上下文拼装问题。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-debug-wb"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-book"></i>
+                      <span data-i18n="panel.planner.debugWorldBook">诊断世界书</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-debug-char"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-user"></i>
+                      <span data-i18n="panel.planner.debugCharCard">诊断角色卡</span>
+                    </button>
+                  </div>
+                  <pre class="bme-planner-debug-output" id="bme-planner-debug-output" hidden></pre>
+                </div>
+
+                <div class="bme-config-card">
+                  <div class="bme-config-card-head">
+                    <div>
+                      <div class="bme-config-card-title">调试 · 日志</div>
+                      <div class="bme-config-card-subtitle">
+                        保留最近的规划调用，便于查看请求消息、原始回复与过滤结果。
+                      </div>
+                    </div>
+                  </div>
+                  <div class="bme-planner-param-grid">
+                    <div class="bme-config-row">
+                      <label for="bme-planner-logs-persist">持久化日志</label>
+                      <select id="bme-planner-logs-persist" class="bme-config-input">
+                        <option value="true">是</option>
+                        <option value="false">否</option>
+                      </select>
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-planner-logs-max">最大日志条数</label>
+                      <input
+                        id="bme-planner-logs-max"
+                        class="bme-config-input"
+                        type="number"
+                        min="1"
+                        max="200"
+                        step="1"
+                      />
+                    </div>
+                  </div>
+                  <div class="bme-config-actions">
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-logs-refresh"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-rotate"></i>
+                      <span data-i18n="panel.planner.refresh">刷新</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn"
+                      id="bme-planner-logs-export"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-file-arrow-down"></i>
+                      <span data-i18n="panel.planner.exportJson">导出 JSON</span>
+                    </button>
+                    <button
+                      class="bme-config-secondary-btn bme-config-danger-btn"
+                      id="bme-planner-logs-clear"
+                      type="button"
+                    >
+                      <i class="fa-solid fa-trash-can"></i>
+                      <span data-i18n="panel.planner.clearLogs">清空日志</span>
+                    </button>
+                  </div>
+                  <div id="bme-planner-log-body" class="bme-planner-log-list">
+                    <div class="bme-planner-log-empty">暂无日志</div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="bme-config-section"
+              data-config-section="appearance"
+            >
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.appearanceKicker">面板外观</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.appearanceTitle">主题与视觉同步</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.appearanceDesc">
+                  这里的主题选择会和顶部调色盘快捷入口保持同步，并立即刷新图谱配色。
+                </p>
+              </div>
+
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title" data-i18n="panel.appearance.locale.title">界面语言</div>
+                    <div class="bme-config-card-subtitle" data-i18n="panel.appearance.locale.subtitle">
+                      只切换 BME 前端界面，不翻译聊天内容、记忆节点或提示词。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-config-row">
+                  <label for="bme-setting-ui-locale" data-i18n="i18n.locale.setting.label">界面语言</label>
+                  <select id="bme-setting-ui-locale" class="bme-config-select">
+                    <option value="auto" data-i18n="i18n.locale.auto">自动</option>
+                    <option value="zh-CN" data-i18n="i18n.locale.zhCN">简体中文</option>
+                    <option value="en-US" data-i18n="i18n.locale.enUS">English</option>
+                  </select>
+                  <div class="bme-config-help" data-i18n="i18n.locale.setting.help">
+                    只影响 ST-BME 面板、提示和状态文案，不会翻译聊天内容、记忆节点或提示词。
+                  </div>
+                </div>
+              </div>
+
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title" data-i18n="panel.appearance.theme.title">面板主题</div>
+                    <div class="bme-config-card-subtitle" data-i18n="panel.appearance.theme.subtitle">
+                      选择最适合当前故事氛围和阅读习惯的面板风格。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-theme-card-grid">
+                  <button
+                    class="bme-theme-card"
+                    data-theme="crimson"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #e94560"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.crimson">赤红合成</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.crimson.desc"
+                        >高对比、强调变化和警示感。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                  <button
+                    class="bme-theme-card"
+                    data-theme="cyan"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #00e5ff"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.cyan">霓虹青蓝</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.cyan.desc"
+                        >更冷静的检视感，适合长时间排查。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                  <button
+                    class="bme-theme-card"
+                    data-theme="amber"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #ffb300"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.amber">琥珀终端</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.amber.desc"
+                        >更像复古终端，阅读层次稳定。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                  <button
+                    class="bme-theme-card"
+                    data-theme="violet"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #b388ff"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.violet">紫雾迷离</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.violet.desc"
+                        >更柔和的夜间质感，适合沉浸式浏览。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                  <button
+                    class="bme-theme-card"
+                    data-theme="paperDawn"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #0d9488"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.paperDawn">晨光纸感</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.paperDawn.desc"
+                        >亮色暖纸面，青绿主色与琥珀强调，白天阅读友好。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                  <button
+                    class="bme-theme-card"
+                    data-theme="glacierSky"
+                    type="button"
+                  >
+                    <span
+                      class="bme-theme-card-swatch"
+                      style="background: #2563eb"
+                    ></span>
+                    <span class="bme-theme-card-copy">
+                      <span class="bme-theme-card-title" data-i18n="theme.glacierSky">冰川晴空</span>
+                      <span class="bme-theme-card-desc" data-i18n="theme.glacierSky.desc"
+                        >亮色冷灰底与饱和蓝，适合与系统浅色界面同屏。</span
+                      >
+                    </span>
+                    <span class="bme-theme-card-check"
+                      ><i class="fa-solid fa-check"></i
+                    ></span>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section
+              class="bme-config-section"
+              data-config-section="cleanup"
+            >
+              <div class="bme-config-section-head">
+                <div class="bme-config-section-kicker" data-i18n="panel.configSection.cleanupKicker">数据清理</div>
+                <h3 class="bme-config-section-title" data-i18n="panel.configSection.cleanupTitle">图谱、缓存与存储清理</h3>
+                <p class="bme-config-section-desc" data-i18n="panel.configSection.cleanupDesc">
+                  在这里执行高危清理操作。所有操作均需二次确认，部分操作不可撤销。
+                </p>
+              </div>
+
+              <!-- 图谱清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">图谱清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空整个图谱或删除指定楼层范围内的记忆节点。操作不可撤销。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-clear-graph"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span data-i18n="panel.cleanup.clearGraph">清空当前图谱</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-clear-graph-range"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-scissors"></i>
+                    <span data-i18n="panel.cleanup.clearGraphRange">按楼层范围清理</span>
+                  </button>
+                </div>
+                <div class="bme-action-group-extra">
+                  <div class="bme-config-help">
+                    按楼层范围清理：删除指定楼层范围内的所有节点和相关边。留空则不执行。
+                  </div>
+                  <div class="bme-action-range-row">
+                    <div class="bme-config-row">
+                      <label for="bme-cleanup-range-start">起始楼层</label>
+                      <input
+                        id="bme-cleanup-range-start"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                    <div class="bme-config-row">
+                      <label for="bme-cleanup-range-end">结束楼层</label>
+                      <input
+                        id="bme-cleanup-range-end"
+                        class="bme-config-input"
+                        type="number"
+                        min="0"
+                        max="999999"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">总结状态清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空当前聊天的层级总结状态，不影响图谱节点与聊天原文。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-summary-clear"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-eraser"></i>
+                    <span data-i18n="panel.cleanup.clearSummaryState">清空当前聊天总结状态</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 缓存清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">缓存清理</div>
+                    <div class="bme-config-card-subtitle">
+                      清空运行时向量缓存或提取历史。不影响已持久化的图谱节点。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn"
+                    id="bme-act-clear-vector-cache"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-database"></i>
+                    <span data-i18n="panel.cleanup.clearVectorCache">清空向量缓存</span>
+                  </button>
+                  <button
+                    class="bme-action-btn"
+                    id="bme-act-clear-batch-journal"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    <span data-i18n="panel.cleanup.clearExtractHistory">清空提取历史</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 数据存储清理 -->
+              <div class="bme-config-card">
+                <div class="bme-config-card-head">
+                  <div>
+                    <div class="bme-config-card-title">数据存储清理</div>
+                    <div class="bme-config-card-subtitle">
+                      删除本地 OPFS / IndexedDB 图谱存储，或清理服务端同步数据。
+                    </div>
+                  </div>
+                </div>
+                <div class="bme-action-grid">
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-current-idb"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-hard-drive"></i>
+                    <span data-i18n="panel.cleanup.deleteCurrentIdb">清空当前聊天本地存储</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-all-idb"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-explosion"></i>
+                    <span data-i18n="panel.cleanup.deleteAllIdb">清空全部 BME 本地存储</span>
+                  </button>
+                  <button
+                    class="bme-action-btn danger"
+                    id="bme-act-delete-server-sync"
+                    type="button"
+                  >
+                    <i class="fa-solid fa-cloud-arrow-down"></i>
+                    <span data-i18n="panel.cleanup.deleteServerSync">清空服务端同步数据</span>
+                  </button>
+                </div>
+                <div class="bme-config-help bme-cleanup-warning-text">
+                  <i class="fa-solid fa-triangle-exclamation"></i>
+                  「清空全部 BME 本地存储」和「清空服务端同步数据」需要输入 DELETE 确认。
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="bme-task-workspace" id="bme-task-workspace">
+          <div class="bme-task-workspace-header">
+            <div>
+              <div class="bme-task-workspace-kicker" id="bme-task-ws-kicker" data-i18n="panel.taskWorkspace.kicker">任务监控</div>
+              <h2 class="bme-task-workspace-title" id="bme-task-ws-title" data-i18n="panel.taskWorkspace.title">ST-BME 任务流工作区</h2>
+              <p class="bme-task-workspace-desc" id="bme-task-ws-desc" data-i18n="panel.taskWorkspace.desc">
+                实时查看所有任务管线的运行状态与当前批次进度。
+              </p>
+            </div>
+          </div>
+
+          <div class="bme-task-nav-mobile" id="bme-task-nav-mobile">
+            <button class="bme-task-nav-pill active" data-task-section="pipeline" type="button" data-i18n="panel.mobileNav.pipeline">管线</button>
+            <button class="bme-task-nav-pill" data-task-section="timeline" type="button" data-i18n="panel.mobileNav.timeline">流水</button>
+            <button class="bme-task-nav-pill" data-task-section="memory" type="button" data-i18n="panel.mobileNav.memory">记忆</button>
+            <button class="bme-task-nav-pill" data-task-section="injection" type="button" data-i18n="panel.mobileNav.injection">注入</button>
+            <button class="bme-task-nav-pill" data-task-section="trace" type="button" data-i18n="panel.mobileNav.trace">追踪</button>
+            <button class="bme-task-nav-pill" data-task-section="persistence" type="button" data-i18n="panel.mobileNav.persistence">持久化</button>
+          </div>
+
+          <div class="bme-task-workspace-body">
+            <div class="bme-task-section active" data-task-section="pipeline" id="bme-task-pipeline"></div>
+            <div class="bme-task-section" data-task-section="timeline" id="bme-task-timeline"></div>
+            <div class="bme-task-section" data-task-section="memory" id="bme-task-memory"></div>
+            <div class="bme-task-section" data-task-section="injection" id="bme-task-injection"></div>
+            <div class="bme-task-section" data-task-section="trace" id="bme-task-trace"></div>
+            <div class="bme-task-section" data-task-section="persistence" id="bme-task-persistence"></div>
+          </div>
+
+          <div class="bme-memory-popup-scrim" id="bme-memory-popup-scrim" hidden></div>
+          <div class="bme-memory-popup" id="bme-memory-popup">
+            <div class="bme-memory-popup__header">
+              <h3 class="bme-memory-popup__title" id="bme-memory-popup-title" data-i18n="panel.memoryPopup.title">节点详情</h3>
+              <div class="bme-memory-popup__actions">
+                <button class="bme-detail-action-btn" id="bme-memory-popup-save" type="button" title="保存修改" data-i18n-title="panel.nodeDetail.save">
+                  <i class="fa-solid fa-floppy-disk"></i>
+                </button>
+                <button class="bme-detail-action-btn bme-detail-action-danger" id="bme-memory-popup-delete" type="button" title="删除节点" data-i18n-title="panel.nodeDetail.delete">
+                  <i class="fa-solid fa-trash"></i>
+                </button>
+                <button class="bme-panel-close" id="bme-memory-popup-close" type="button" title="关闭" data-i18n-title="common.close">
+                  <i class="fa-solid fa-xmark"></i>
+                </button>
+              </div>
+            </div>
+            <div class="bme-memory-popup__badges" id="bme-memory-popup-badges"></div>
+            <div class="bme-memory-popup__body" id="bme-memory-popup-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        class="bme-mobile-content"
+        id="bme-mobile-content"
+        style="display: none"
+      ></div>
+    </div>
+
+    <div class="bme-panel-tabbar">
+      <button class="bme-tab-btn" data-tab="graph" type="button">
+        <i class="fa-solid fa-diagram-project"></i>
+        <span data-i18n="panel.tab.graph">图谱</span>
+      </button>
+      <button class="bme-tab-btn active" data-tab="dashboard" type="button">
+        <i class="fa-solid fa-chart-simple"></i>
+        <span data-i18n="panel.tab.dashboard">总览</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="task" type="button">
+        <i class="fa-solid fa-list-check"></i>
+        <span data-i18n="panel.tab.tasks">任务</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="actions" type="button">
+        <i class="fa-solid fa-gear"></i>
+        <span data-i18n="panel.tab.actions">操作</span>
+      </button>
+      <button class="bme-tab-btn" data-tab="config" type="button">
+        <i class="fa-solid fa-sliders"></i>
+        <span data-i18n="panel.tab.settings">配置</span>
+      </button>
+    </div>
+  </div>
+
+      <div class="bme-fullscreen-graph-overlay" id="bme-fullscreen-graph" hidden>
+        <div class="bme-fullscreen-graph-toolbar">
+          <div class="bme-graph-toolbar-title">
+            <i class="fa-solid fa-diagram-project"></i>
+            <span data-i18n="panel.fullscreenGraph.title">实时图谱（全屏）</span>
+          </div>
+          <div class="bme-fullscreen-graph-controls">
+            <button id="bme-fs-zoom-in" title="放大" data-i18n-title="panel.fsToolbar.zoomInTitle" type="button">
+              <i class="fa-solid fa-plus"></i>
+            </button>
+            <button id="bme-fs-zoom-out" title="缩小" data-i18n-title="panel.fsToolbar.zoomOutTitle" type="button">
+              <i class="fa-solid fa-minus"></i>
+            </button>
+            <button id="bme-fs-close" title="关闭" data-i18n-title="panel.fsToolbar.closeTitle" type="button">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+        </div>
+        <canvas id="bme-fullscreen-graph-canvas"></canvas>
+      </div>
+
+</div>

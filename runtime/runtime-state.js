@@ -1,3 +1,4 @@
+// ST-BME: 运行时状态与历史恢复辅助
 import {
   normalizeEdgeMemoryScope,
   normalizeNodeMemoryScope,
@@ -9,26 +10,40 @@ import {
 } from "../graph/knowledge-state.js";
 import {
   createDefaultTimelineState,
+  normalizeTimelineState,
   normalizeGraphStoryTimeline,
 } from "../graph/story-timeline.js";
 import {
   createDefaultSummaryState,
+  importLegacySynopsisToSummaryState,
   normalizeGraphSummaryState,
 } from "../graph/summary-state.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
-export const PROCESSED_MESSAGE_HASH_VERSION = 3;
+export const BATCH_JOURNAL_VERSION = 2;
+export const PROCESSED_MESSAGE_HASH_VERSION = 2;
+const graphPersistDirtyStateByGraph = new WeakMap();
+export const MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY =
+  "manualBackupBatchJournalCoverage";
 
 export function buildVectorCollectionId(chatId) {
-  return `st-bme-v9::${chatId || "unknown-chat"}`;
+  return `st-bme::${chatId || "unknown-chat"}`;
 }
 
 export function createDefaultHistoryState(chatId = "") {
   return {
-    chatId: String(chatId || ""),
+    chatId,
     lastProcessedAssistantFloor: -1,
+    processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+    processedMessageHashes: {},
+    processedMessageHashesNeedRefresh: false,
+    historyDirtyFrom: null,
+    lastMutationReason: "",
+    lastMutationSource: "",
     extractionCount: 0,
+    lastRecoveryResult: null,
+    lastBatchStatus: null,
     lastExtractedRegion: "",
     activeRegion: "",
     activeRegionSource: "",
@@ -40,12 +55,13 @@ export function createDefaultHistoryState(chatId = "") {
     activeUserPovOwner: "",
     activeRecallOwnerKey: "",
     recentRecallOwnerKeys: [],
+    [MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY]: null,
   };
 }
 
 export function createDefaultVectorIndexState(chatId = "") {
   return {
-    mode: "direct",
+    mode: "backend",
     collectionId: buildVectorCollectionId(chatId),
     source: "",
     modelScope: "",
@@ -56,7 +72,12 @@ export function createDefaultVectorIndexState(chatId = "") {
     dirtyReason: "",
     pendingRepairFromFloor: null,
     lastSyncAt: 0,
-    lastStats: { total: 0, indexed: 0, stale: 0, pending: 0 },
+    lastStats: {
+      total: 0,
+      indexed: 0,
+      stale: 0,
+      pending: 0,
+    },
     currentVectorSpace: null,
     manifest: null,
     lastWarning: "",
@@ -72,124 +93,1858 @@ export function createDefaultMaintenanceJournal() {
   return [];
 }
 
-function plainObject(value, fallback = {}) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : fallback;
-}
+function normalizeManualBackupBatchJournalCoverage(value = null) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
 
-function finiteInteger(value, fallback, minimum = Number.MIN_SAFE_INTEGER) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(minimum, Math.trunc(number)) : fallback;
-}
-
-function uniqueStrings(value, limit = Number.MAX_SAFE_INTEGER) {
-  return [...new Set((Array.isArray(value) ? value : [])
-    .map((entry) => String(entry || "").trim())
-    .filter(Boolean))].slice(0, limit);
-}
-
-function normalizeHistoryState(value, chatId, lastProcessedSeq) {
-  const history = {
-    ...createDefaultHistoryState(chatId),
-    ...plainObject(value),
+  const earliestRetainedFloor = Number(value.earliestRetainedFloor);
+  const retainedCount = Number(value.retainedCount);
+  return {
+    truncated: value.truncated === true,
+    earliestRetainedFloor: Number.isFinite(earliestRetainedFloor)
+      ? Math.max(0, Math.floor(earliestRetainedFloor))
+      : null,
+    retainedCount: Number.isFinite(retainedCount)
+      ? Math.max(0, Math.floor(retainedCount))
+      : 0,
   };
-  history.chatId = String(chatId || history.chatId || "");
-  history.lastProcessedAssistantFloor = finiteInteger(
-    history.lastProcessedAssistantFloor,
-    finiteInteger(lastProcessedSeq, -1),
-    -1,
-  );
-  history.extractionCount = finiteInteger(history.extractionCount, 0, 0);
-  for (const key of [
-    "lastExtractedRegion",
-    "activeRegion",
-    "activeRegionSource",
-    "activeStorySegmentId",
-    "activeStoryTimeLabel",
-    "activeStoryTimeSource",
-    "lastExtractedStorySegmentId",
-    "activeCharacterPovOwner",
-    "activeUserPovOwner",
-    "activeRecallOwnerKey",
-  ]) history[key] = String(history[key] || "");
-  history.recentRecallOwnerKeys = uniqueStrings(history.recentRecallOwnerKeys, 8);
-  return history;
 }
 
-function normalizeVectorIndexState(value, chatId) {
-  const defaults = createDefaultVectorIndexState(chatId);
-  const state = { ...defaults, ...plainObject(value) };
-  state.hashToNodeId = { ...plainObject(state.hashToNodeId) };
-  state.nodeToHash = { ...plainObject(state.nodeToHash) };
-  state.lastStats = { ...defaults.lastStats, ...plainObject(state.lastStats) };
-  state.replayRequiredNodeIds = uniqueStrings(state.replayRequiredNodeIds);
-  state.pendingRepairFromFloor = Number.isFinite(Number(state.pendingRepairFromFloor))
-    ? Math.max(0, Math.trunc(Number(state.pendingRepairFromFloor)))
+function getEarliestJournalCoverageStartFloor(journals = []) {
+  let earliestFloor = null;
+  for (const journal of Array.isArray(journals) ? journals : []) {
+    const range = Array.isArray(journal?.processedRange)
+      ? journal.processedRange
+      : [];
+    const startFloor = Number(range[0]);
+    if (!Number.isFinite(startFloor)) continue;
+    const normalizedFloor = Math.max(0, Math.floor(startFloor));
+    earliestFloor =
+      earliestFloor == null
+        ? normalizedFloor
+        : Math.min(earliestFloor, normalizedFloor);
+  }
+  return earliestFloor;
+}
+
+function hasContiguousJournalCoverageThroughFloor(journals = [], targetFloor = null) {
+  const normalizedTargetFloor = Number.isFinite(Number(targetFloor))
+    ? Math.max(0, Math.floor(Number(targetFloor)))
     : null;
-  for (const key of ["mode", "source", "modelScope", "dirtyReason", "lastWarning"]) {
-    state[key] = String(state[key] || "");
+  if (!Number.isFinite(normalizedTargetFloor)) {
+    return false;
   }
-  for (const key of ["currentVectorSpace", "manifest", "lastIntegrityIssue"]) {
-    state[key] = state[key] === null ? null : plainObject(state[key], null);
+
+  const ranges = (Array.isArray(journals) ? journals : [])
+    .map((journal) => {
+      const range = Array.isArray(journal?.processedRange)
+        ? journal.processedRange
+        : [];
+      const startFloor = Number(range[0]);
+      const endFloor = Number(range[1]);
+      if (!Number.isFinite(startFloor) || !Number.isFinite(endFloor)) {
+        return null;
+      }
+      return {
+        start: Math.max(0, Math.floor(startFloor)),
+        end: Math.max(0, Math.floor(endFloor)),
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+
+  if (ranges.length === 0) {
+    return false;
   }
-  const collectionId = buildVectorCollectionId(chatId);
-  if (state.collectionId && state.collectionId !== collectionId) {
-    state.hashToNodeId = {};
-    state.nodeToHash = {};
-    state.replayRequiredNodeIds = [];
-    state.currentVectorSpace = null;
-    state.manifest = null;
-    state.dirty = true;
-    state.dirtyReason = "chat-id-changed";
-    state.lastWarning = "chat namespace changed; vector rebuild required";
+
+  let coveredUntil = null;
+  for (const range of ranges) {
+    if (coveredUntil == null) {
+      if (range.start > normalizedTargetFloor) {
+        return false;
+      }
+      coveredUntil = range.end;
+    } else if (range.start > coveredUntil + 1) {
+      return coveredUntil >= normalizedTargetFloor;
+    } else {
+      coveredUntil = Math.max(coveredUntil, range.end);
+    }
+
+    if (coveredUntil >= normalizedTargetFloor) {
+      return true;
+    }
   }
-  state.collectionId = collectionId;
+
+  return false;
+}
+
+function reconcileManualBackupBatchJournalCoverage(coverage = null, journals = []) {
+  const normalizedCoverage = normalizeManualBackupBatchJournalCoverage(coverage);
+  if (!normalizedCoverage) {
+    return null;
+  }
+
+  const manualCoverageFloor =
+    normalizedCoverage.truncated === true &&
+    Number.isFinite(normalizedCoverage.earliestRetainedFloor)
+      ? normalizedCoverage.earliestRetainedFloor
+      : null;
+  const actualCoverageFloor = getEarliestJournalCoverageStartFloor(journals);
+
+  if (
+    normalizedCoverage.truncated === true &&
+    Number.isFinite(actualCoverageFloor) &&
+    Number.isFinite(manualCoverageFloor) &&
+    actualCoverageFloor < manualCoverageFloor &&
+    hasContiguousJournalCoverageThroughFloor(journals, manualCoverageFloor)
+  ) {
+    return null;
+  }
+
+  return normalizedCoverage;
+}
+
+function getRequiredJournalCoverageStartFloor(graph, journals = []) {
+  const actualCoverageFloor = getEarliestJournalCoverageStartFloor(journals);
+  const manualCoverage = reconcileManualBackupBatchJournalCoverage(
+    graph?.historyState?.[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+    journals,
+  );
+  const manualCoverageFloor =
+    manualCoverage?.truncated === true &&
+    Number.isFinite(manualCoverage?.earliestRetainedFloor)
+      ? manualCoverage.earliestRetainedFloor
+      : null;
+
+  if (
+    Number.isFinite(actualCoverageFloor) &&
+    Number.isFinite(manualCoverageFloor)
+  ) {
+    return Math.max(actualCoverageFloor, manualCoverageFloor);
+  }
+  if (Number.isFinite(actualCoverageFloor)) return actualCoverageFloor;
+  if (Number.isFinite(manualCoverageFloor)) return manualCoverageFloor;
+  return null;
+}
+
+function createGraphPersistDirtyState() {
+  return {
+    version: 0,
+    nodeUpserts: new Map(),
+    edgeUpserts: new Map(),
+    nodeDeletes: new Map(),
+    edgeDeletes: new Map(),
+    runtimeMetaDirty: false,
+    runtimeMetaVersion: 0,
+    fullSnapshotRequired: false,
+    fullSnapshotVersion: 0,
+    lastReason: "",
+    lastSource: "",
+    lastMutationAt: 0,
+  };
+}
+
+function getGraphPersistDirtyStateInternal(graph, create = false) {
+  if (!graph || typeof graph !== "object") {
+    return null;
+  }
+  let state = graphPersistDirtyStateByGraph.get(graph) || null;
+  if (!state && create) {
+    state = createGraphPersistDirtyState();
+    graphPersistDirtyStateByGraph.set(graph, state);
+  }
   return state;
 }
 
-export function normalizeGraphRuntimeState(graph, chatId = "") {
-  if (!graph || typeof graph !== "object" || Array.isArray(graph)) {
-    throw new TypeError("graph must be an object");
+function bumpGraphPersistDirtyVersion(state, reason = "", source = "") {
+  if (!state || typeof state !== "object") return 0;
+  state.version = Math.max(0, Math.floor(Number(state.version || 0))) + 1;
+  state.lastReason = String(reason || "").trim();
+  state.lastSource = String(source || "").trim();
+  state.lastMutationAt = Date.now();
+  return state.version;
+}
+
+function buildRecordLookupById(records = []) {
+  const lookup = new Map();
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!record || typeof record !== "object" || Array.isArray(record)) continue;
+    const id = String(record.id || "").trim();
+    if (!id || lookup.has(id)) continue;
+    lookup.set(id, record);
   }
-  graph.nodes = (Array.isArray(graph.nodes) ? graph.nodes : [])
-    .filter((node) => node && typeof node === "object");
-  graph.edges = (Array.isArray(graph.edges) ? graph.edges : [])
-    .filter((edge) => edge && typeof edge === "object");
-  graph.historyState = normalizeHistoryState(
-    graph.historyState,
-    chatId,
-    graph.lastProcessedSeq,
+  return lookup;
+}
+
+function normalizeDirtyRecordId(recordOrId, recordLookup = null) {
+  if (recordOrId && typeof recordOrId === "object" && !Array.isArray(recordOrId)) {
+    return String(recordOrId.id || "").trim();
+  }
+  const normalizedId = String(recordOrId || "").trim();
+  if (!normalizedId || !(recordLookup instanceof Map)) return normalizedId;
+  return recordLookup.has(normalizedId) ? normalizedId : "";
+}
+
+export function getGraphPersistDirtyStateSnapshot(graph) {
+  const state = getGraphPersistDirtyStateInternal(graph);
+  if (!state) return null;
+  return {
+    version: Math.max(0, Math.floor(Number(state.version || 0))),
+    nodeUpsertIds: Array.from(state.nodeUpserts.keys()),
+    edgeUpsertIds: Array.from(state.edgeUpserts.keys()),
+    deleteNodeIds: Array.from(state.nodeDeletes.keys()),
+    deleteEdgeIds: Array.from(state.edgeDeletes.keys()),
+    runtimeMetaDirty: state.runtimeMetaDirty === true,
+    runtimeMetaVersion: Math.max(0, Math.floor(Number(state.runtimeMetaVersion || 0))),
+    fullSnapshotRequired: state.fullSnapshotRequired === true,
+    fullSnapshotVersion: Math.max(0, Math.floor(Number(state.fullSnapshotVersion || 0))),
+    lastReason: String(state.lastReason || ""),
+    lastSource: String(state.lastSource || ""),
+    lastMutationAt: Math.max(0, Math.floor(Number(state.lastMutationAt || 0))),
+  };
+}
+
+export function hasGraphPersistDirtyState(graph) {
+  const snapshot = getGraphPersistDirtyStateSnapshot(graph);
+  if (!snapshot) return false;
+  return (
+    snapshot.nodeUpsertIds.length > 0 ||
+    snapshot.edgeUpsertIds.length > 0 ||
+    snapshot.deleteNodeIds.length > 0 ||
+    snapshot.deleteEdgeIds.length > 0 ||
+    snapshot.runtimeMetaDirty === true ||
+    snapshot.fullSnapshotRequired === true
   );
-  graph.vectorIndexState = normalizeVectorIndexState(
-    graph.vectorIndexState,
-    graph.historyState.chatId,
+}
+
+export function cloneGraphPersistDirtyState(sourceGraph, targetGraph) {
+  const sourceState = getGraphPersistDirtyStateInternal(sourceGraph);
+  if (!sourceState || !targetGraph || typeof targetGraph !== "object") {
+    return targetGraph;
+  }
+  const targetState = createGraphPersistDirtyState();
+  const nodeById = buildRecordLookupById(targetGraph.nodes);
+  const edgeById = buildRecordLookupById(targetGraph.edges);
+
+  targetState.version = Math.max(0, Math.floor(Number(sourceState.version || 0)));
+  targetState.runtimeMetaDirty = sourceState.runtimeMetaDirty === true;
+  targetState.runtimeMetaVersion = Math.max(
+    0,
+    Math.floor(Number(sourceState.runtimeMetaVersion || 0)),
   );
-  for (const node of graph.nodes) normalizeNodeMemoryScope(node);
-  for (const edge of graph.edges) normalizeEdgeMemoryScope(edge);
-  graph.batchJournal = (Array.isArray(graph.batchJournal) ? graph.batchJournal : [])
-    .filter((entry) => entry && typeof entry === "object")
-    .slice(-BATCH_JOURNAL_LIMIT);
-  graph.maintenanceJournal = (Array.isArray(graph.maintenanceJournal)
+  targetState.fullSnapshotRequired = sourceState.fullSnapshotRequired === true;
+  targetState.fullSnapshotVersion = Math.max(
+    0,
+    Math.floor(Number(sourceState.fullSnapshotVersion || 0)),
+  );
+  targetState.lastReason = String(sourceState.lastReason || "");
+  targetState.lastSource = String(sourceState.lastSource || "");
+  targetState.lastMutationAt = Math.max(
+    0,
+    Math.floor(Number(sourceState.lastMutationAt || 0)),
+  );
+
+  for (const [id, entry] of sourceState.nodeUpserts.entries()) {
+    const record = nodeById.get(id);
+    if (!record) continue;
+    targetState.nodeUpserts.set(id, {
+      version: Math.max(0, Math.floor(Number(entry?.version || 0))),
+      record,
+    });
+  }
+  for (const [id, entry] of sourceState.edgeUpserts.entries()) {
+    const record = edgeById.get(id);
+    if (!record) continue;
+    targetState.edgeUpserts.set(id, {
+      version: Math.max(0, Math.floor(Number(entry?.version || 0))),
+      record,
+    });
+  }
+  for (const [id, version] of sourceState.nodeDeletes.entries()) {
+    targetState.nodeDeletes.set(id, Math.max(0, Math.floor(Number(version || 0))));
+  }
+  for (const [id, version] of sourceState.edgeDeletes.entries()) {
+    targetState.edgeDeletes.set(id, Math.max(0, Math.floor(Number(version || 0))));
+  }
+
+  graphPersistDirtyStateByGraph.set(targetGraph, targetState);
+  return targetGraph;
+}
+
+export function pruneGraphPersistDirtyState(graph, committedVersion = 0) {
+  const state = getGraphPersistDirtyStateInternal(graph);
+  const normalizedCommittedVersion = Math.max(
+    0,
+    Math.floor(Number(committedVersion || 0)),
+  );
+  if (!state || normalizedCommittedVersion <= 0) {
+    return getGraphPersistDirtyStateSnapshot(graph);
+  }
+
+  for (const [id, entry] of state.nodeUpserts.entries()) {
+    if (Math.max(0, Math.floor(Number(entry?.version || 0))) <= normalizedCommittedVersion) {
+      state.nodeUpserts.delete(id);
+    }
+  }
+  for (const [id, entry] of state.edgeUpserts.entries()) {
+    if (Math.max(0, Math.floor(Number(entry?.version || 0))) <= normalizedCommittedVersion) {
+      state.edgeUpserts.delete(id);
+    }
+  }
+  for (const [id, version] of state.nodeDeletes.entries()) {
+    if (Math.max(0, Math.floor(Number(version || 0))) <= normalizedCommittedVersion) {
+      state.nodeDeletes.delete(id);
+    }
+  }
+  for (const [id, version] of state.edgeDeletes.entries()) {
+    if (Math.max(0, Math.floor(Number(version || 0))) <= normalizedCommittedVersion) {
+      state.edgeDeletes.delete(id);
+    }
+  }
+  if (state.runtimeMetaDirty && state.runtimeMetaVersion <= normalizedCommittedVersion) {
+    state.runtimeMetaDirty = false;
+    state.runtimeMetaVersion = 0;
+  }
+  if (
+    state.fullSnapshotRequired &&
+    state.fullSnapshotVersion <= normalizedCommittedVersion
+  ) {
+    state.fullSnapshotRequired = false;
+    state.fullSnapshotVersion = 0;
+  }
+  if (!hasGraphPersistDirtyState(graph)) {
+    state.lastReason = "";
+    state.lastSource = "";
+    state.lastMutationAt = 0;
+  }
+  return getGraphPersistDirtyStateSnapshot(graph);
+}
+
+export function markGraphPersistNodeUpsert(
+  graph,
+  recordOrId,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const recordLookup = buildRecordLookupById(graph?.nodes);
+  const normalizedId = normalizeDirtyRecordId(recordOrId, recordLookup);
+  const record =
+    recordOrId && typeof recordOrId === "object" && !Array.isArray(recordOrId)
+      ? recordOrId
+      : recordLookup.get(normalizedId) || null;
+  if (!normalizedId || !record) return false;
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.nodeUpserts.set(normalizedId, { version, record });
+  state.nodeDeletes.delete(normalizedId);
+  return true;
+}
+
+export function markGraphPersistEdgeUpsert(
+  graph,
+  recordOrId,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const recordLookup = buildRecordLookupById(graph?.edges);
+  const normalizedId = normalizeDirtyRecordId(recordOrId, recordLookup);
+  const record =
+    recordOrId && typeof recordOrId === "object" && !Array.isArray(recordOrId)
+      ? recordOrId
+      : recordLookup.get(normalizedId) || null;
+  if (!normalizedId || !record) return false;
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.edgeUpserts.set(normalizedId, { version, record });
+  state.edgeDeletes.delete(normalizedId);
+  return true;
+}
+
+export function markGraphPersistNodeDelete(
+  graph,
+  nodeId,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const normalizedId = String(nodeId || "").trim();
+  if (!normalizedId) return false;
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.nodeUpserts.delete(normalizedId);
+  state.nodeDeletes.set(normalizedId, version);
+  return true;
+}
+
+export function markGraphPersistEdgeDelete(
+  graph,
+  edgeId,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const normalizedId = String(edgeId || "").trim();
+  if (!normalizedId) return false;
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.edgeUpserts.delete(normalizedId);
+  state.edgeDeletes.set(normalizedId, version);
+  return true;
+}
+
+export function markGraphPersistRuntimeMetaDirty(
+  graph,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.runtimeMetaDirty = true;
+  state.runtimeMetaVersion = version;
+  return true;
+}
+
+export function markGraphPersistFullSnapshotRequired(
+  graph,
+  reason = "",
+  source = "",
+) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const state = getGraphPersistDirtyStateInternal(graph, true);
+  const version = bumpGraphPersistDirtyVersion(state, reason, source);
+  state.runtimeMetaDirty = true;
+  state.runtimeMetaVersion = version;
+  state.fullSnapshotRequired = true;
+  state.fullSnapshotVersion = version;
+  return true;
+}
+
+export function normalizeGraphRuntimeState(graph, chatId = "", options = {}) {
+  if (!graph || typeof graph !== "object") {
+    return graph;
+  }
+  const skipRecordFieldNormalization =
+    options?.skipRecordFieldNormalization === true;
+  const recordNormalizationContext =
+    options?.recordNormalizationContext &&
+    typeof options.recordNormalizationContext === "object" &&
+    !Array.isArray(options.recordNormalizationContext)
+      ? options.recordNormalizationContext
+      : null;
+  const normalizedNodeIds = new Set(
+    Array.isArray(recordNormalizationContext?.normalizedNodeIds)
+      ? recordNormalizationContext.normalizedNodeIds
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      : [],
+  );
+  const normalizedEdgeIds = new Set(
+    Array.isArray(recordNormalizationContext?.normalizedEdgeIds)
+      ? recordNormalizationContext.normalizedEdgeIds
+          .map((value) => String(value || "").trim())
+          .filter(Boolean)
+      : [],
+  );
+  const hadSummaryState =
+    graph.summaryState &&
+    typeof graph.summaryState === "object" &&
+    !Array.isArray(graph.summaryState);
+
+  const historyState = {
+    ...createDefaultHistoryState(chatId),
+    ...(graph.historyState || {}),
+  };
+  historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] =
+    normalizeManualBackupBatchJournalCoverage(
+      historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+    );
+  const vectorIndexState = {
+    ...createDefaultVectorIndexState(chatId),
+    ...(graph.vectorIndexState || {}),
+  };
+
+  historyState.chatId = chatId || historyState.chatId || "";
+  if (!Number.isFinite(historyState.lastProcessedAssistantFloor)) {
+    historyState.lastProcessedAssistantFloor = Number.isFinite(
+      graph.lastProcessedSeq,
+    )
+      ? graph.lastProcessedSeq
+      : -1;
+  }
+  if (!Number.isFinite(historyState.extractionCount)) {
+    historyState.extractionCount = 0;
+  }
+  if (typeof historyState.lastMutationSource !== "string") {
+    historyState.lastMutationSource = "";
+  }
+  if (
+    !historyState.lastBatchStatus ||
+    typeof historyState.lastBatchStatus !== "object" ||
+    Array.isArray(historyState.lastBatchStatus)
+  ) {
+    historyState.lastBatchStatus = null;
+  } else {
+    historyState.lastBatchStatus = {
+      ...historyState.lastBatchStatus,
+      historyAdvanced:
+        historyState.lastBatchStatus.historyAdvanced === true,
+      historyAdvanceAllowed:
+        historyState.lastBatchStatus.historyAdvanceAllowed === true,
+      persistence:
+        historyState.lastBatchStatus.persistence &&
+        typeof historyState.lastBatchStatus.persistence === "object" &&
+        !Array.isArray(historyState.lastBatchStatus.persistence)
+          ? {
+              outcome: String(
+                historyState.lastBatchStatus.persistence.outcome || "failed",
+              ),
+              accepted:
+                historyState.lastBatchStatus.persistence.accepted === true,
+              storageTier: String(
+                historyState.lastBatchStatus.persistence.storageTier || "none",
+              ),
+              reason: String(
+                historyState.lastBatchStatus.persistence.reason || "",
+              ),
+              revision: Number.isFinite(
+                Number(historyState.lastBatchStatus.persistence.revision),
+              )
+                ? Number(historyState.lastBatchStatus.persistence.revision)
+                : 0,
+              saveMode: String(
+                historyState.lastBatchStatus.persistence.saveMode || "",
+              ),
+              recoverable:
+                historyState.lastBatchStatus.persistence.recoverable === true,
+              saved:
+                historyState.lastBatchStatus.persistence.saved === true,
+              queued:
+                historyState.lastBatchStatus.persistence.queued === true,
+              blocked:
+                historyState.lastBatchStatus.persistence.blocked === true,
+              attempted:
+                historyState.lastBatchStatus.persistence.attempted === true ||
+                Number(historyState.lastBatchStatus.persistence.revision) > 0 ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.storageTier || "",
+                  ).trim() &&
+                    String(
+                      historyState.lastBatchStatus.persistence.storageTier || "",
+                    ) !== "none",
+                ) ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.saveMode || "",
+                  ).trim(),
+                ) ||
+                Boolean(
+                  String(
+                    historyState.lastBatchStatus.persistence.reason || "",
+                  ).trim(),
+                ) ||
+                historyState.lastBatchStatus.persistence.saved === true ||
+                historyState.lastBatchStatus.persistence.queued === true ||
+                historyState.lastBatchStatus.persistence.blocked === true,
+            }
+          : null,
+    };
+  }
+  if (typeof historyState.lastExtractedRegion !== "string") {
+    historyState.lastExtractedRegion = "";
+  }
+  if (typeof historyState.activeRegion !== "string") {
+    historyState.activeRegion = historyState.lastExtractedRegion || "";
+  }
+  if (typeof historyState.activeRegionSource !== "string") {
+    historyState.activeRegionSource = historyState.activeRegion ? "history" : "";
+  }
+  if (typeof historyState.activeStorySegmentId !== "string") {
+    historyState.activeStorySegmentId = "";
+  }
+  if (typeof historyState.activeStoryTimeLabel !== "string") {
+    historyState.activeStoryTimeLabel = "";
+  }
+  if (typeof historyState.activeStoryTimeSource !== "string") {
+    historyState.activeStoryTimeSource =
+      historyState.activeStorySegmentId || historyState.activeStoryTimeLabel
+        ? "history"
+        : "";
+  }
+  if (typeof historyState.lastExtractedStorySegmentId !== "string") {
+    historyState.lastExtractedStorySegmentId = "";
+  }
+  if (typeof historyState.activeCharacterPovOwner !== "string") {
+    historyState.activeCharacterPovOwner = "";
+  }
+  if (typeof historyState.activeUserPovOwner !== "string") {
+    historyState.activeUserPovOwner = "";
+  }
+  if (typeof historyState.activeRecallOwnerKey !== "string") {
+    historyState.activeRecallOwnerKey = "";
+  }
+  if (!Array.isArray(historyState.recentRecallOwnerKeys)) {
+    historyState.recentRecallOwnerKeys = [];
+  } else {
+    historyState.recentRecallOwnerKeys = [
+      ...new Set(
+        historyState.recentRecallOwnerKeys
+          .map((value) => String(value || "").trim())
+          .filter(Boolean),
+      ),
+    ].slice(0, 8);
+  }
+
+  if (
+    !historyState.processedMessageHashes ||
+    typeof historyState.processedMessageHashes !== "object" ||
+    Array.isArray(historyState.processedMessageHashes)
+  ) {
+    historyState.processedMessageHashes = {};
+  }
+  if (!Number.isFinite(historyState.processedMessageHashVersion)) {
+    historyState.processedMessageHashVersion = 1;
+  }
+  historyState.processedMessageHashVersion = Math.max(
+    1,
+    Math.floor(historyState.processedMessageHashVersion),
+  );
+  historyState.processedMessageHashesNeedRefresh =
+    historyState.processedMessageHashesNeedRefresh === true;
+  if (
+    historyState.processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION
+  ) {
+    historyState.processedMessageHashes = {};
+    historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+    historyState.processedMessageHashesNeedRefresh = true;
+  }
+  const lastProcessedAssistantFloor = Number(
+    historyState.lastProcessedAssistantFloor,
+  );
+  if (
+    historyState.processedMessageHashesNeedRefresh !== true &&
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0 &&
+    Object.keys(historyState.processedMessageHashes).length === 0
+  ) {
+    historyState.processedMessageHashesNeedRefresh = true;
+  }
+
+  if (
+    !vectorIndexState.hashToNodeId ||
+    typeof vectorIndexState.hashToNodeId !== "object" ||
+    Array.isArray(vectorIndexState.hashToNodeId)
+  ) {
+    vectorIndexState.hashToNodeId = {};
+  }
+  if (
+    !vectorIndexState.nodeToHash ||
+    typeof vectorIndexState.nodeToHash !== "object" ||
+    Array.isArray(vectorIndexState.nodeToHash)
+  ) {
+    vectorIndexState.nodeToHash = {};
+  }
+  if (
+    !vectorIndexState.lastStats ||
+    typeof vectorIndexState.lastStats !== "object"
+  ) {
+    vectorIndexState.lastStats =
+      createDefaultVectorIndexState(chatId).lastStats;
+  }
+  if (
+    vectorIndexState.currentVectorSpace != null &&
+    (typeof vectorIndexState.currentVectorSpace !== "object" ||
+      Array.isArray(vectorIndexState.currentVectorSpace))
+  ) {
+    vectorIndexState.currentVectorSpace = null;
+  }
+  if (
+    vectorIndexState.manifest != null &&
+    (typeof vectorIndexState.manifest !== "object" ||
+      Array.isArray(vectorIndexState.manifest))
+  ) {
+    vectorIndexState.manifest = null;
+  }
+  if (!Array.isArray(vectorIndexState.replayRequiredNodeIds)) {
+    vectorIndexState.replayRequiredNodeIds = [];
+  } else {
+    vectorIndexState.replayRequiredNodeIds = [
+      ...new Set(vectorIndexState.replayRequiredNodeIds.filter(Boolean)),
+    ];
+  }
+  if (typeof vectorIndexState.dirtyReason !== "string") {
+    vectorIndexState.dirtyReason = "";
+  }
+  if (!Number.isFinite(vectorIndexState.pendingRepairFromFloor)) {
+    vectorIndexState.pendingRepairFromFloor = null;
+  }
+  if (
+    vectorIndexState.lastIntegrityIssue != null &&
+    (typeof vectorIndexState.lastIntegrityIssue !== "object" ||
+      Array.isArray(vectorIndexState.lastIntegrityIssue))
+  ) {
+    vectorIndexState.lastIntegrityIssue = null;
+  }
+
+  const previousCollectionId = vectorIndexState.collectionId;
+  vectorIndexState.collectionId = buildVectorCollectionId(
+    chatId || historyState.chatId,
+  );
+
+  if (
+    previousCollectionId &&
+    previousCollectionId !== vectorIndexState.collectionId
+  ) {
+    vectorIndexState.hashToNodeId = {};
+    vectorIndexState.nodeToHash = {};
+    vectorIndexState.replayRequiredNodeIds = [];
+    vectorIndexState.currentVectorSpace = null;
+    vectorIndexState.manifest = null;
+    vectorIndexState.dirty = true;
+    vectorIndexState.dirtyReason = "chat-id-changed";
+    vectorIndexState.pendingRepairFromFloor = 0;
+    vectorIndexState.lastWarning = "聊天标识变化，向量索引已标记为待重建";
+  }
+
+  graph.historyState = historyState;
+  graph.vectorIndexState = vectorIndexState;
+  if (!skipRecordFieldNormalization && Array.isArray(graph.nodes)) {
+    graph.nodes.forEach((node) => {
+      const previousScope = node?.scope;
+      const nextScope = normalizeNodeMemoryScope(node);
+      if (previousScope !== nextScope) {
+        const nodeId = String(node?.id || "").trim();
+        if (nodeId) {
+          normalizedNodeIds.add(nodeId);
+        }
+      }
+    });
+  }
+  if (!skipRecordFieldNormalization && Array.isArray(graph.edges)) {
+    graph.edges.forEach((edge) => {
+      const previousScope = edge?.scope;
+      const nextScope = normalizeEdgeMemoryScope(edge);
+      if (previousScope !== nextScope) {
+        const edgeId = String(edge?.id || "").trim();
+        if (edgeId) {
+          normalizedEdgeIds.add(edgeId);
+        }
+      }
+    });
+  }
+  if (recordNormalizationContext) {
+    recordNormalizationContext.normalizedNodeIds = [...normalizedNodeIds];
+    recordNormalizationContext.normalizedEdgeIds = [...normalizedEdgeIds];
+  }
+  graph.batchJournal = Array.isArray(graph.batchJournal)
+    ? graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT)
+    : createDefaultBatchJournal();
+  historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] =
+    reconcileManualBackupBatchJournalCoverage(
+      historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+      graph.batchJournal,
+    );
+  graph.maintenanceJournal = Array.isArray(graph.maintenanceJournal)
     ? graph.maintenanceJournal
-    : [])
-    .filter((entry) => entry && typeof entry === "object")
-    .slice(-MAINTENANCE_JOURNAL_LIMIT);
+        .filter((entry) => entry && typeof entry === "object")
+        .slice(-MAINTENANCE_JOURNAL_LIMIT)
+    : createDefaultMaintenanceJournal();
   graph.knowledgeState = createDefaultKnowledgeState(graph.knowledgeState);
   graph.regionState = createDefaultRegionState(graph.regionState);
-  graph.timelineState = createDefaultTimelineState(graph.timelineState);
+  graph.timelineState = skipRecordFieldNormalization
+    ? normalizeTimelineState(graph.timelineState)
+    : createDefaultTimelineState(graph.timelineState);
   graph.summaryState = createDefaultSummaryState(graph.summaryState);
   normalizeGraphCognitiveState(graph);
-  normalizeGraphStoryTimeline(graph);
+  if (skipRecordFieldNormalization) {
+    graph.timelineState = normalizeTimelineState(graph.timelineState);
+  } else {
+    normalizeGraphStoryTimeline(graph);
+  }
   normalizeGraphSummaryState(graph);
-  graph.lastProcessedSeq = graph.historyState.lastProcessedAssistantFloor;
+  if (!hadSummaryState) {
+    importLegacySynopsisToSummaryState(graph);
+  }
+  graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
   return graph;
 }
 
-// v9 persistence diffs normalized records directly; graph CRUD no longer tracks a second dirty journal.
+export function cloneGraphSnapshot(graph) {
+  const snapshot = JSON.parse(JSON.stringify(graph));
+
+  if (Array.isArray(snapshot.batchJournal)) {
+    snapshot.batchJournal = snapshot.batchJournal.map((journal) => {
+      if (!journal?.snapshotBefore) return journal;
+      return {
+        ...journal,
+        snapshotBefore: {
+          ...journal.snapshotBefore,
+          batchJournal: [],
+        },
+      };
+    });
+  }
+
+  return snapshot;
+}
+
 export function stableHashString(text) {
   let hash = 2166136261;
   for (const char of String(text || "")) {
     hash ^= char.charCodeAt(0);
     hash = Math.imul(hash, 16777619);
   }
-  return hash >>> 0;
+  return Math.abs(hash >>> 0);
+}
+
+export function buildMessageHash(message) {
+  const swipeId = Number.isFinite(message?.swipe_id) ? message.swipe_id : null;
+  const payload = JSON.stringify({
+    isUser: Boolean(message?.is_user),
+    text: String(message?.mes || ""),
+    swipeId,
+  });
+  return String(stableHashString(payload));
+}
+
+export function snapshotProcessedMessageHashes(
+  chat,
+  lastProcessedAssistantFloor,
+) {
+  const result = {};
+  if (!Array.isArray(chat) || lastProcessedAssistantFloor < 0) {
+    return result;
+  }
+
+  const upperBound = Math.min(lastProcessedAssistantFloor, chat.length - 1);
+  for (let index = 0; index <= upperBound; index++) {
+    result[index] = buildMessageHash(chat[index]);
+  }
+  return result;
+}
+
+export function applyProcessedHistorySnapshotToGraph(
+  graph,
+  chat,
+  lastProcessedAssistantFloor,
+) {
+  if (!graph || typeof graph !== "object") {
+    return graph;
+  }
+
+  const historyState =
+    graph.historyState && typeof graph.historyState === "object"
+      ? graph.historyState
+      : createDefaultHistoryState(graph?.historyState?.chatId || "");
+  graph.historyState = historyState;
+
+  const safeLastProcessedAssistantFloor = Number.isFinite(
+    Number(lastProcessedAssistantFloor),
+  )
+    ? Math.floor(Number(lastProcessedAssistantFloor))
+    : -1;
+
+  historyState.lastProcessedAssistantFloor = safeLastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+  historyState.processedMessageHashes =
+    safeLastProcessedAssistantFloor >= 0
+      ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
+      : {};
+  historyState.processedMessageHashesNeedRefresh = false;
+  graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
+  markGraphPersistRuntimeMetaDirty(
+    graph,
+    "processed-history-snapshot",
+    "runtime.history",
+  );
+  return graph;
+}
+
+export function rebindProcessedHistoryStateToChat(
+  graph,
+  chat,
+  assistantTurns = [],
+) {
+  if (!graph || typeof graph !== "object") {
+    return {
+      rebound: false,
+      reason: "missing-graph",
+      lastProcessedAssistantFloor: -1,
+      maxAssistantFloor: -1,
+      clamped: false,
+    };
+  }
+
+  const historyState =
+    graph.historyState && typeof graph.historyState === "object"
+      ? graph.historyState
+      : createDefaultHistoryState();
+  graph.historyState = historyState;
+
+  const normalizedAssistantTurns = Array.isArray(assistantTurns)
+    ? assistantTurns
+        .map((value) => Number.parseInt(value, 10))
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b)
+    : [];
+  const maxAssistantFloor =
+    normalizedAssistantTurns.length > 0
+      ? normalizedAssistantTurns[normalizedAssistantTurns.length - 1]
+      : -1;
+  const rawLastProcessedAssistantFloor = Number.isFinite(
+    historyState.lastProcessedAssistantFloor,
+  )
+    ? Math.floor(historyState.lastProcessedAssistantFloor)
+    : -1;
+
+  let safeLastProcessedAssistantFloor = rawLastProcessedAssistantFloor;
+  if (!Array.isArray(chat) || chat.length === 0 || maxAssistantFloor < 0) {
+    safeLastProcessedAssistantFloor = -1;
+  } else if (safeLastProcessedAssistantFloor > maxAssistantFloor) {
+    safeLastProcessedAssistantFloor = maxAssistantFloor;
+  }
+
+  historyState.lastProcessedAssistantFloor = safeLastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = PROCESSED_MESSAGE_HASH_VERSION;
+  historyState.processedMessageHashes =
+    safeLastProcessedAssistantFloor >= 0
+      ? snapshotProcessedMessageHashes(chat, safeLastProcessedAssistantFloor)
+      : {};
+  historyState.processedMessageHashesNeedRefresh = false;
+  graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
+  markGraphPersistRuntimeMetaDirty(
+    graph,
+    "history-state-rebound",
+    "runtime.history",
+  );
+
+  return {
+    rebound: true,
+    reason:
+      safeLastProcessedAssistantFloor < 0
+        ? "no-processed-assistant-floor"
+        : "ok",
+    lastProcessedAssistantFloor: safeLastProcessedAssistantFloor,
+    maxAssistantFloor,
+    clamped:
+      safeLastProcessedAssistantFloor !== rawLastProcessedAssistantFloor,
+  };
+}
+
+export function detectHistoryMutation(chat, historyState) {
+  const lastProcessedAssistantFloor =
+    historyState?.lastProcessedAssistantFloor ?? -1;
+  const processedMessageHashVersion = Number.isFinite(
+    historyState?.processedMessageHashVersion,
+  )
+    ? Math.max(1, Math.floor(historyState.processedMessageHashVersion))
+    : 1;
+  const processedMessageHashesNeedRefresh =
+    historyState?.processedMessageHashesNeedRefresh === true;
+
+  const processedMessageHashes =
+    historyState?.processedMessageHashes &&
+    typeof historyState.processedMessageHashes === "object" &&
+    !Array.isArray(historyState.processedMessageHashes)
+      ? historyState.processedMessageHashes
+      : {};
+
+  if (!Array.isArray(chat) || lastProcessedAssistantFloor < 0) {
+    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
+  if (
+    processedMessageHashesNeedRefresh ||
+    processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION
+  ) {
+    return { dirty: false, earliestAffectedFloor: null, reason: "" };
+  }
+
+  if (lastProcessedAssistantFloor >= chat.length) {
+    return {
+      dirty: true,
+      earliestAffectedFloor: chat.length,
+      reason: "已处理楼层超出当前聊天长度，检测到历史截断",
+    };
+  }
+
+  const trackedFloors = Object.keys(processedMessageHashes)
+    .map((value) => Number.parseInt(value, 10))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  if (trackedFloors.length === 0 && lastProcessedAssistantFloor >= 0) {
+    return {
+      dirty: true,
+      earliestAffectedFloor: 0,
+      reason: "已处理楼层存在，但 processedMessageHashes 缺失，执行保守重放",
+    };
+  }
+
+  for (let floor = 0; floor <= lastProcessedAssistantFloor; floor++) {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        processedMessageHashes,
+        String(floor),
+      )
+    ) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 缺少已处理哈希，执行保守重放`,
+      };
+    }
+  }
+
+  for (const floor of trackedFloors) {
+    if (floor >= chat.length) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 已不存在，检测到历史删除/截断`,
+      };
+    }
+
+    const currentHash = buildMessageHash(chat[floor]);
+    if (currentHash !== processedMessageHashes[floor]) {
+      return {
+        dirty: true,
+        earliestAffectedFloor: floor,
+        reason: `楼层 ${floor} 内容或 swipe 已变化`,
+      };
+    }
+  }
+
+  return { dirty: false, earliestAffectedFloor: null, reason: "" };
+}
+
+export function markHistoryDirty(graph, floor, reason = "", source = "") {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const currentDirtyFrom = graph.historyState.historyDirtyFrom;
+
+  if (!Number.isFinite(floor)) {
+    floor = graph.historyState.lastProcessedAssistantFloor;
+  }
+
+  graph.historyState.historyDirtyFrom = Number.isFinite(currentDirtyFrom)
+    ? Math.min(currentDirtyFrom, floor)
+    : floor;
+  graph.historyState.lastMutationReason = String(reason || "").trim();
+  graph.historyState.lastMutationSource = String(source || "").trim();
+  graph.historyState.lastRecoveryResult = {
+    status: "pending",
+    at: Date.now(),
+    fromFloor: graph.historyState.historyDirtyFrom,
+    reason: graph.historyState.lastMutationReason,
+    detectionSource: graph.historyState.lastMutationSource || "",
+  };
+  markGraphPersistRuntimeMetaDirty(graph, reason || "history-dirty", source || "runtime.history");
+}
+
+export function clearHistoryDirty(graph, result = null) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  graph.historyState.historyDirtyFrom = null;
+  graph.historyState.lastMutationReason = "";
+  graph.historyState.lastMutationSource = "";
+  const lastProcessedAssistantFloor = Number(
+    graph.historyState.lastProcessedAssistantFloor,
+  );
+  graph.historyState.processedMessageHashVersion =
+    PROCESSED_MESSAGE_HASH_VERSION;
+  graph.historyState.processedMessageHashes = {};
+  graph.historyState.processedMessageHashesNeedRefresh =
+    Number.isFinite(lastProcessedAssistantFloor) &&
+    lastProcessedAssistantFloor >= 0;
+  if (result) {
+    graph.historyState.lastRecoveryResult = result;
+  }
+  markGraphPersistRuntimeMetaDirty(graph, "history-dirty-cleared", "runtime.history");
+}
+
+function buildNodeMap(nodes = []) {
+  return new Map(nodes.map((node) => [node.id, node]));
+}
+
+function buildEdgeMap(edges = []) {
+  return new Map(edges.map((edge) => [edge.id, edge]));
+}
+
+function hasMeaningfulNodeChange(beforeNode, afterNode) {
+  return JSON.stringify(beforeNode) !== JSON.stringify(afterNode);
+}
+
+function hasMeaningfulEdgeChange(beforeEdge, afterEdge) {
+  return JSON.stringify(beforeEdge) !== JSON.stringify(afterEdge);
+}
+
+function clonePlain(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeStringArray(values) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.filter(Boolean).map((value) => String(value)))];
+}
+
+function normalizeMappingArray(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const mappings = [];
+  for (const entry of values) {
+    if (!entry || typeof entry !== "object") continue;
+    const nodeId = entry.nodeId ? String(entry.nodeId) : "";
+    const previousHash = entry.previousHash ? String(entry.previousHash) : "";
+    const nextHash = entry.nextHash ? String(entry.nextHash) : "";
+    if (!nodeId && !previousHash && !nextHash) continue;
+    const key = JSON.stringify([nodeId, previousHash, nextHash]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    mappings.push({ nodeId, previousHash, nextHash });
+  }
+  return mappings;
+}
+
+function buildVectorDelta(snapshotBefore, snapshotAfter, meta = {}) {
+  const beforeState = snapshotBefore?.vectorIndexState || {};
+  const afterState = snapshotAfter?.vectorIndexState || {};
+  const beforeNodeToHash = beforeState.nodeToHash || {};
+  const afterNodeToHash = afterState.nodeToHash || {};
+  const beforeHashSet = new Set(
+    Object.values(beforeState.hashToNodeId || {}).filter(Boolean),
+  );
+  const afterHashSet = new Set(
+    Object.values(afterState.hashToNodeId || {}).filter(Boolean),
+  );
+  const insertedHashes = new Set(
+    normalizeStringArray(meta.vectorHashesInserted),
+  );
+  const removedHashes = new Set(normalizeStringArray(meta.vectorHashesRemoved));
+  const touchedNodeIds = new Set(
+    normalizeStringArray(meta.vectorTouchedNodeIds),
+  );
+  const replayRequiredNodeIds = new Set(
+    normalizeStringArray(meta.vectorReplayRequiredNodeIds),
+  );
+  const backendDeleteHashes = new Set(
+    normalizeStringArray(meta.vectorBackendDeleteHashes),
+  );
+  const replacedMappings = normalizeMappingArray(meta.vectorReplacedMappings);
+  const nodeIds = new Set([
+    ...Object.keys(beforeNodeToHash),
+    ...Object.keys(afterNodeToHash),
+  ]);
+
+  for (const hash of Object.keys(afterState.hashToNodeId || {})) {
+    if (!beforeHashSet.has(hash)) insertedHashes.add(hash);
+  }
+  for (const hash of Object.keys(beforeState.hashToNodeId || {})) {
+    if (!afterHashSet.has(hash)) removedHashes.add(hash);
+  }
+
+  for (const nodeId of nodeIds) {
+    const previousHash = beforeNodeToHash[nodeId]
+      ? String(beforeNodeToHash[nodeId])
+      : "";
+    const nextHash = afterNodeToHash[nodeId]
+      ? String(afterNodeToHash[nodeId])
+      : "";
+    if (previousHash === nextHash) continue;
+    touchedNodeIds.add(String(nodeId));
+    if (previousHash) {
+      removedHashes.add(previousHash);
+      backendDeleteHashes.add(previousHash);
+    }
+    if (nextHash) {
+      insertedHashes.add(nextHash);
+    }
+    if (previousHash || nextHash) {
+      const key = JSON.stringify([String(nodeId), previousHash, nextHash]);
+      const exists = replacedMappings.some(
+        (entry) =>
+          JSON.stringify([entry.nodeId, entry.previousHash, entry.nextHash]) ===
+          key,
+      );
+      if (!exists) {
+        replacedMappings.push({
+          nodeId: String(nodeId),
+          previousHash,
+          nextHash,
+        });
+      }
+    }
+  }
+
+  for (const nodeId of normalizeStringArray(afterState.replayRequiredNodeIds)) {
+    replayRequiredNodeIds.add(nodeId);
+  }
+
+  return {
+    insertedHashes: [...insertedHashes],
+    removedHashes: [...removedHashes],
+    replacedMappings,
+    touchedNodeIds: [...touchedNodeIds],
+    replayRequiredNodeIds: [...replayRequiredNodeIds],
+    backendDeleteHashes: [...backendDeleteHashes],
+  };
+}
+
+function buildJournalStateBefore(snapshotBefore, meta = {}) {
+  return {
+    lastProcessedAssistantFloor:
+      snapshotBefore?.historyState?.lastProcessedAssistantFloor ??
+      snapshotBefore?.lastProcessedSeq ??
+      -1,
+    processedMessageHashVersion: Number.isFinite(
+      snapshotBefore?.historyState?.processedMessageHashVersion,
+    )
+      ? Math.max(
+          1,
+          Math.floor(snapshotBefore.historyState.processedMessageHashVersion),
+        )
+      : PROCESSED_MESSAGE_HASH_VERSION,
+    processedMessageHashes: clonePlain(
+      snapshotBefore?.historyState?.processedMessageHashes || {},
+    ),
+    processedMessageHashesNeedRefresh:
+      snapshotBefore?.historyState?.processedMessageHashesNeedRefresh === true,
+    historyDirtyFrom: Number.isFinite(
+      snapshotBefore?.historyState?.historyDirtyFrom,
+    )
+      ? snapshotBefore.historyState.historyDirtyFrom
+      : null,
+    vectorIndexState: clonePlain(snapshotBefore?.vectorIndexState || {}),
+    knowledgeState: clonePlain(
+      snapshotBefore?.knowledgeState || createDefaultKnowledgeState(),
+    ),
+    regionState: clonePlain(
+      snapshotBefore?.regionState || createDefaultRegionState(),
+    ),
+    timelineState: clonePlain(
+      snapshotBefore?.timelineState || createDefaultTimelineState(),
+    ),
+    summaryState: clonePlain(
+      snapshotBefore?.summaryState || createDefaultSummaryState(),
+    ),
+    lastRecallResult: Array.isArray(snapshotBefore?.lastRecallResult)
+      ? [...snapshotBefore.lastRecallResult]
+      : null,
+    extractionCount: Number.isFinite(meta.extractionCountBefore)
+      ? meta.extractionCountBefore
+      : (snapshotBefore?.historyState?.extractionCount ?? 0),
+  };
+}
+
+export function createBatchJournalEntry(
+  snapshotBefore,
+  snapshotAfter,
+  meta = {},
+) {
+  const beforeNodes = buildNodeMap(snapshotBefore?.nodes || []);
+  const afterNodes = buildNodeMap(snapshotAfter?.nodes || []);
+  const beforeEdges = buildEdgeMap(snapshotBefore?.edges || []);
+  const afterEdges = buildEdgeMap(snapshotAfter?.edges || []);
+
+  const createdNodeIds = [];
+  const createdEdgeIds = [];
+  const previousNodeSnapshots = [];
+  const previousEdgeSnapshots = [];
+
+  for (const [nodeId, afterNode] of afterNodes.entries()) {
+    if (!beforeNodes.has(nodeId)) {
+      createdNodeIds.push(nodeId);
+      continue;
+    }
+
+    const beforeNode = beforeNodes.get(nodeId);
+    if (!hasMeaningfulNodeChange(beforeNode, afterNode)) continue;
+    previousNodeSnapshots.push(cloneGraphSnapshot(beforeNode));
+  }
+
+  for (const [edgeId, afterEdge] of afterEdges.entries()) {
+    if (!beforeEdges.has(edgeId)) {
+      createdEdgeIds.push(edgeId);
+      continue;
+    }
+
+    const beforeEdge = beforeEdges.get(edgeId);
+    if (!hasMeaningfulEdgeChange(beforeEdge, afterEdge)) continue;
+    previousEdgeSnapshots.push(cloneGraphSnapshot(beforeEdge));
+  }
+
+  const entry = {
+    id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    journalVersion: BATCH_JOURNAL_VERSION,
+    createdAt: Date.now(),
+    processedRange: meta.processedRange || [-1, -1],
+    processedDialogueRange: Array.isArray(meta.processedDialogueRange)
+      ? meta.processedDialogueRange
+      : [-1, -1],
+    sourceChatIndexRange: Array.isArray(meta.sourceChatIndexRange)
+      ? meta.sourceChatIndexRange
+      : [-1, -1],
+    createdNodeIds,
+    createdEdgeIds,
+    previousNodeSnapshots,
+    previousEdgeSnapshots,
+    touchedNodeIds: normalizeStringArray(
+      meta.touchedNodeIds || [
+        ...createdNodeIds,
+        ...previousNodeSnapshots.map((node) => node?.id),
+      ],
+    ),
+    stateBefore: buildJournalStateBefore(snapshotBefore, meta),
+    vectorDelta: buildVectorDelta(snapshotBefore, snapshotAfter, meta),
+    postProcessArtifacts: Array.isArray(meta.postProcessArtifacts)
+      ? meta.postProcessArtifacts
+      : [],
+  };
+
+  if (meta.includeLegacySnapshotBefore) {
+    entry.snapshotBefore = snapshotBefore;
+  }
+
+  return entry;
+}
+
+export function appendBatchJournal(graph, entry) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  graph.batchJournal.push(entry);
+  if (graph.batchJournal.length > BATCH_JOURNAL_LIMIT) {
+    graph.batchJournal = graph.batchJournal.slice(-BATCH_JOURNAL_LIMIT);
+  }
+  graph.historyState[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY] =
+    reconcileManualBackupBatchJournalCoverage(
+      graph.historyState?.[MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY],
+      graph.batchJournal,
+    );
+  markGraphPersistRuntimeMetaDirty(
+    graph,
+    "batch-journal-appended",
+    "runtime.batch-journal",
+  );
+}
+
+export function createMaintenanceJournalEntry(
+  snapshotBefore,
+  snapshotAfter,
+  meta = {},
+) {
+  const normalizedChatId = String(
+    meta.chatId ||
+      snapshotAfter?.historyState?.chatId ||
+      snapshotBefore?.historyState?.chatId ||
+      "",
+  ).trim();
+  const normalizedBefore = normalizeGraphRuntimeState(
+    cloneGraphSnapshot(snapshotBefore || { nodes: [], edges: [] }),
+    normalizedChatId,
+  );
+  const normalizedAfter = normalizeGraphRuntimeState(
+    cloneGraphSnapshot(snapshotAfter || { nodes: [], edges: [] }),
+    normalizedChatId,
+  );
+
+  const beforeNodes = buildNodeMap(normalizedBefore?.nodes || []);
+  const afterNodes = buildNodeMap(normalizedAfter?.nodes || []);
+  const beforeEdges = buildEdgeMap(normalizedBefore?.edges || []);
+  const afterEdges = buildEdgeMap(normalizedAfter?.edges || []);
+
+  const restoreNodes = [];
+  const restoreEdges = [];
+  const deleteNodeIds = [];
+  const deleteEdgeIds = [];
+  const postNodes = [];
+  const postEdges = [];
+
+  for (const [nodeId, beforeNode] of beforeNodes.entries()) {
+    const afterNode = afterNodes.get(nodeId);
+    if (!afterNode) {
+      restoreNodes.push(cloneGraphSnapshot(beforeNode));
+      continue;
+    }
+    if (!hasMeaningfulNodeChange(beforeNode, afterNode)) continue;
+    restoreNodes.push(cloneGraphSnapshot(beforeNode));
+    postNodes.push(cloneGraphSnapshot(afterNode));
+  }
+
+  for (const [nodeId, afterNode] of afterNodes.entries()) {
+    if (beforeNodes.has(nodeId)) continue;
+    deleteNodeIds.push(nodeId);
+    postNodes.push(cloneGraphSnapshot(afterNode));
+  }
+
+  for (const [edgeId, beforeEdge] of beforeEdges.entries()) {
+    const afterEdge = afterEdges.get(edgeId);
+    if (!afterEdge) {
+      restoreEdges.push(cloneGraphSnapshot(beforeEdge));
+      continue;
+    }
+    if (!hasMeaningfulEdgeChange(beforeEdge, afterEdge)) continue;
+    restoreEdges.push(cloneGraphSnapshot(beforeEdge));
+    postEdges.push(cloneGraphSnapshot(afterEdge));
+  }
+
+  for (const [edgeId, afterEdge] of afterEdges.entries()) {
+    if (beforeEdges.has(edgeId)) continue;
+    deleteEdgeIds.push(edgeId);
+    postEdges.push(cloneGraphSnapshot(afterEdge));
+  }
+
+  if (
+    restoreNodes.length === 0 &&
+    restoreEdges.length === 0 &&
+    deleteNodeIds.length === 0 &&
+    deleteEdgeIds.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    id: `maintenance-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    action: String(meta.action || "unknown"),
+    mode:
+      meta.mode === "auto" || meta.mode === "manual" ? meta.mode : "manual",
+    summary: String(meta.summary || ""),
+    inversePatch: {
+      restoreNodes,
+      restoreEdges,
+      deleteNodeIds,
+      deleteEdgeIds,
+    },
+    postCheck: {
+      nodes: postNodes,
+      edges: postEdges,
+    },
+  };
+}
+
+export function appendMaintenanceJournal(graph, entry) {
+  if (!entry || typeof entry !== "object") return;
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  graph.maintenanceJournal.push(entry);
+  if (graph.maintenanceJournal.length > MAINTENANCE_JOURNAL_LIMIT) {
+    graph.maintenanceJournal = graph.maintenanceJournal.slice(
+      -MAINTENANCE_JOURNAL_LIMIT,
+    );
+  }
+  markGraphPersistRuntimeMetaDirty(
+    graph,
+    "maintenance-journal-appended",
+    "runtime.maintenance",
+  );
+}
+
+export function getLatestMaintenanceJournalEntry(graph) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const journal = Array.isArray(graph?.maintenanceJournal)
+    ? graph.maintenanceJournal
+    : [];
+  return journal.length > 0 ? journal[journal.length - 1] : null;
+}
+
+function validateMaintenanceUndoState(graph, entry) {
+  const currentNodes = buildNodeMap(graph?.nodes || []);
+  const currentEdges = buildEdgeMap(graph?.edges || []);
+  const expectedNodes = entry?.postCheck?.nodes || [];
+  const expectedEdges = entry?.postCheck?.edges || [];
+
+  for (const snapshot of expectedNodes) {
+    const current = currentNodes.get(snapshot?.id);
+    if (!current) {
+      return {
+        ok: false,
+        reason: `节点 ${snapshot?.id || "unknown"} 已被后续操作改写`,
+      };
+    }
+    if (JSON.stringify(current) !== JSON.stringify(snapshot)) {
+      return {
+        ok: false,
+        reason: `节点 ${snapshot?.id || "unknown"} 当前状态已变化，无法安全撤销`,
+      };
+    }
+  }
+
+  for (const snapshot of expectedEdges) {
+    const current = currentEdges.get(snapshot?.id);
+    if (!current) {
+      return {
+        ok: false,
+        reason: `边 ${snapshot?.id || "unknown"} 已被后续操作改写`,
+      };
+    }
+    if (JSON.stringify(current) !== JSON.stringify(snapshot)) {
+      return {
+        ok: false,
+        reason: `边 ${snapshot?.id || "unknown"} 当前状态已变化，无法安全撤销`,
+      };
+    }
+  }
+
+  return { ok: true, reason: "" };
+}
+
+export function applyMaintenanceInversePatch(graph, inversePatch = {}) {
+  if (!graph || !inversePatch || typeof inversePatch !== "object") {
+    return graph;
+  }
+
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+
+  const deleteNodeIds = new Set(inversePatch.deleteNodeIds || []);
+  const deleteEdgeIds = new Set(inversePatch.deleteEdgeIds || []);
+  const restoreNodes = Array.isArray(inversePatch.restoreNodes)
+    ? inversePatch.restoreNodes
+    : [];
+  const restoreEdges = Array.isArray(inversePatch.restoreEdges)
+    ? inversePatch.restoreEdges
+    : [];
+
+  graph.edges = (graph.edges || []).filter(
+    (edge) =>
+      !deleteEdgeIds.has(edge.id) &&
+      !deleteNodeIds.has(edge.fromId) &&
+      !deleteNodeIds.has(edge.toId),
+  );
+  graph.nodes = (graph.nodes || []).filter((node) => !deleteNodeIds.has(node.id));
+
+  for (const nodeSnapshot of restoreNodes) {
+    upsertById(graph.nodes, cloneGraphSnapshot(nodeSnapshot));
+  }
+  for (const edgeSnapshot of restoreEdges) {
+    upsertById(graph.edges, cloneGraphSnapshot(edgeSnapshot));
+  }
+
+  sanitizeGraphReferences(graph);
+  markGraphPersistFullSnapshotRequired(
+    graph,
+    "maintenance-inverse-patch",
+    "runtime.maintenance",
+  );
+  return graph;
+}
+
+export function undoLatestMaintenance(graph) {
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+  const entry = getLatestMaintenanceJournalEntry(graph);
+  if (!entry) {
+    return {
+      ok: false,
+      reason: "当前没有可撤销的维护记录",
+      entry: null,
+    };
+  }
+
+  const validation = validateMaintenanceUndoState(graph, entry);
+  if (!validation.ok) {
+    return {
+      ok: false,
+      reason: validation.reason,
+      entry,
+    };
+  }
+
+  applyMaintenanceInversePatch(graph, entry.inversePatch || {});
+  graph.maintenanceJournal = graph.maintenanceJournal.slice(0, -1);
+  markGraphPersistRuntimeMetaDirty(graph, "maintenance-undo", "runtime.maintenance");
+
+  return {
+    ok: true,
+    reason: "",
+    entry,
+    remaining: graph.maintenanceJournal.length,
+  };
+}
+
+function upsertById(list, item) {
+  const index = list.findIndex((entry) => entry.id === item.id);
+  if (index >= 0) {
+    list[index] = item;
+  } else {
+    list.push(item);
+  }
+}
+
+function sanitizeGraphReferences(graph) {
+  const nodeIds = new Set((graph?.nodes || []).map((node) => node.id));
+  graph.nodes = (graph.nodes || []).map((node) => ({
+    ...node,
+    parentId: nodeIds.has(node.parentId) ? node.parentId : null,
+    childIds: Array.isArray(node.childIds)
+      ? node.childIds.filter((id) => nodeIds.has(id))
+      : [],
+    prevId: nodeIds.has(node.prevId) ? node.prevId : null,
+    nextId: nodeIds.has(node.nextId) ? node.nextId : null,
+  }));
+  graph.edges = (graph.edges || []).filter(
+    (edge) => nodeIds.has(edge.fromId) && nodeIds.has(edge.toId),
+  );
+}
+
+function applyJournalStateBefore(graph, stateBefore = {}) {
+  const historyState = {
+    ...createDefaultHistoryState(graph?.historyState?.chatId || ""),
+    ...(graph.historyState || {}),
+  };
+  historyState.lastProcessedAssistantFloor = Number.isFinite(
+    stateBefore.lastProcessedAssistantFloor,
+  )
+    ? stateBefore.lastProcessedAssistantFloor
+    : historyState.lastProcessedAssistantFloor;
+  historyState.processedMessageHashVersion = Number.isFinite(
+    stateBefore.processedMessageHashVersion,
+  )
+    ? Math.max(1, Math.floor(stateBefore.processedMessageHashVersion))
+    : historyState.processedMessageHashVersion;
+  historyState.processedMessageHashes = clonePlain(
+    stateBefore.processedMessageHashes || {},
+  );
+  historyState.processedMessageHashesNeedRefresh =
+    stateBefore.processedMessageHashesNeedRefresh === true;
+  historyState.historyDirtyFrom = Number.isFinite(stateBefore.historyDirtyFrom)
+    ? stateBefore.historyDirtyFrom
+    : null;
+  historyState.extractionCount = Number.isFinite(stateBefore.extractionCount)
+    ? stateBefore.extractionCount
+    : historyState.extractionCount;
+  graph.historyState = historyState;
+
+  graph.vectorIndexState = {
+    ...createDefaultVectorIndexState(graph?.historyState?.chatId || ""),
+    ...clonePlain(stateBefore.vectorIndexState || {}),
+  };
+  graph.knowledgeState = createDefaultKnowledgeState(
+    clonePlain(stateBefore.knowledgeState || {}),
+  );
+  graph.regionState = createDefaultRegionState(
+    clonePlain(stateBefore.regionState || {}),
+  );
+  graph.timelineState = createDefaultTimelineState(
+    clonePlain(stateBefore.timelineState || {}),
+  );
+  graph.summaryState = createDefaultSummaryState(
+    clonePlain(stateBefore.summaryState || {}),
+  );
+  normalizeGraphCognitiveState(graph);
+  normalizeGraphStoryTimeline(graph);
+  normalizeGraphSummaryState(graph);
+  graph.lastRecallResult = Array.isArray(stateBefore.lastRecallResult)
+    ? [...stateBefore.lastRecallResult]
+    : null;
+  graph.lastProcessedSeq = historyState.lastProcessedAssistantFloor;
+}
+
+export function rollbackBatch(graph, journal) {
+  if (!graph || !journal) return graph;
+
+  normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || "");
+
+  const createdNodeIds = new Set(journal.createdNodeIds || []);
+  const createdEdgeIds = new Set(journal.createdEdgeIds || []);
+  const previousNodeSnapshots =
+    journal.previousNodeSnapshots ||
+    journal.updatedNodeSnapshots ||
+    journal.archivedNodeSnapshots ||
+    [];
+  const previousEdgeSnapshots =
+    journal.previousEdgeSnapshots || journal.invalidatedEdgeSnapshots || [];
+
+  graph.edges = (graph.edges || []).filter(
+    (edge) =>
+      !createdEdgeIds.has(edge.id) &&
+      !createdNodeIds.has(edge.fromId) &&
+      !createdNodeIds.has(edge.toId),
+  );
+  graph.nodes = (graph.nodes || []).filter(
+    (node) => !createdNodeIds.has(node.id),
+  );
+
+  for (const nodeSnapshot of previousNodeSnapshots) {
+    upsertById(graph.nodes, cloneGraphSnapshot(nodeSnapshot));
+  }
+  for (const edgeSnapshot of previousEdgeSnapshots) {
+    upsertById(graph.edges, cloneGraphSnapshot(edgeSnapshot));
+  }
+
+  applyJournalStateBefore(graph, journal.stateBefore || {});
+  sanitizeGraphReferences(graph);
+  markGraphPersistFullSnapshotRequired(graph, "rollback-batch", "runtime.batch-journal");
+  return graph;
+}
+
+export function findJournalRecoveryPoint(graph, dirtyFromFloor) {
+  const journals = Array.isArray(graph?.batchJournal) ? graph.batchJournal : [];
+  const requiredCoverageFloor = getRequiredJournalCoverageStartFloor(
+    graph,
+    journals,
+  );
+  if (
+    Number.isFinite(dirtyFromFloor) &&
+    Number.isFinite(requiredCoverageFloor) &&
+    dirtyFromFloor < requiredCoverageFloor
+  ) {
+    return null;
+  }
+  const affectedIndex = journals.findIndex((journal) => {
+    const range = Array.isArray(journal?.processedRange)
+      ? journal.processedRange
+      : [-1, -1];
+    return Number.isFinite(range[1]) && range[1] >= dirtyFromFloor;
+  });
+
+  if (affectedIndex < 0) return null;
+
+  const affectedJournals = journals.slice(affectedIndex);
+  const canReverse = affectedJournals.every(
+    (journal) => Number(journal?.journalVersion || 0) >= BATCH_JOURNAL_VERSION,
+  );
+  if (canReverse) {
+    return {
+      path: "reverse-journal",
+      affectedIndex,
+      affectedJournals: affectedJournals.map((journal) =>
+        cloneGraphSnapshot(journal),
+      ),
+      affectedBatchCount: affectedJournals.length,
+    };
+  }
+
+  const journal = journals[affectedIndex];
+  if (journal?.snapshotBefore) {
+    return {
+      path: "legacy-snapshot",
+      affectedIndex,
+      journal: cloneGraphSnapshot(journal),
+      snapshotBefore: cloneGraphSnapshot(journal.snapshotBefore),
+      affectedBatchCount: affectedJournals.length,
+    };
+  }
+
+  return null;
+}
+
+export function buildReverseJournalRecoveryPlan(
+  affectedJournals = [],
+  dirtyFromFloor = null,
+) {
+  const backendDeleteHashes = new Set();
+  const replayRequiredNodeIds = new Set();
+  const touchedNodeIds = new Set();
+  let hasLegacyGap = false;
+  let minProcessedFloor = Number.isFinite(dirtyFromFloor)
+    ? dirtyFromFloor
+    : null;
+  let invalidJournalReason = "";
+
+  if (!Array.isArray(affectedJournals) || affectedJournals.length === 0) {
+    invalidJournalReason = "affected-journals-empty";
+  }
+
+  for (const journal of affectedJournals) {
+    const vectorDelta = journal?.vectorDelta || {};
+    const insertedHashes = normalizeStringArray(
+      vectorDelta.insertedHashes || journal?.vectorHashesInserted || [],
+    );
+    const removedHashes = normalizeStringArray(vectorDelta.removedHashes);
+    const backendDeletes = normalizeStringArray(
+      vectorDelta.backendDeleteHashes,
+    );
+    const touchedNodes = normalizeStringArray(vectorDelta.touchedNodeIds);
+    const replayNodes = normalizeStringArray(vectorDelta.replayRequiredNodeIds);
+    const replacedMappings = normalizeMappingArray(
+      vectorDelta.replacedMappings,
+    );
+    const range = Array.isArray(journal?.processedRange)
+      ? journal.processedRange
+      : [-1, -1];
+
+    if (
+      !invalidJournalReason &&
+      (!Number.isFinite(range[0]) || !Number.isFinite(range[1]))
+    ) {
+      invalidJournalReason = "processed-range-missing";
+    }
+
+    if (Number.isFinite(range[0])) {
+      minProcessedFloor = Number.isFinite(minProcessedFloor)
+        ? Math.min(minProcessedFloor, range[0])
+        : range[0];
+    }
+
+    for (const hash of insertedHashes) {
+      backendDeleteHashes.add(hash);
+    }
+    for (const hash of removedHashes) {
+      backendDeleteHashes.add(hash);
+    }
+    for (const hash of backendDeletes) {
+      backendDeleteHashes.add(hash);
+    }
+    for (const nodeId of touchedNodes) {
+      touchedNodeIds.add(nodeId);
+      replayRequiredNodeIds.add(nodeId);
+    }
+    for (const nodeId of replayNodes) {
+      replayRequiredNodeIds.add(nodeId);
+    }
+    for (const entry of replacedMappings) {
+      if (entry.nodeId) {
+        touchedNodeIds.add(entry.nodeId);
+        replayRequiredNodeIds.add(entry.nodeId);
+      }
+      if (entry.previousHash) backendDeleteHashes.add(entry.previousHash);
+      if (entry.nextHash) backendDeleteHashes.add(entry.nextHash);
+    }
+
+    if (
+      !Array.isArray(vectorDelta.removedHashes) ||
+      !Array.isArray(vectorDelta.replacedMappings) ||
+      !Array.isArray(vectorDelta.touchedNodeIds) ||
+      !Array.isArray(vectorDelta.replayRequiredNodeIds) ||
+      !Array.isArray(vectorDelta.backendDeleteHashes)
+    ) {
+      hasLegacyGap = true;
+    }
+  }
+
+  const pendingRepairFromFloor = Number.isFinite(minProcessedFloor)
+    ? minProcessedFloor
+    : null;
+
+  return {
+    backendDeleteHashes: [...backendDeleteHashes],
+    replayRequiredNodeIds: [...replayRequiredNodeIds],
+    touchedNodeIds: [...touchedNodeIds],
+    pendingRepairFromFloor,
+    legacyGapFallback: hasLegacyGap,
+    dirtyReason: hasLegacyGap ? "legacy-gap" : "history-recovery-replay",
+    valid:
+      !invalidJournalReason &&
+      Number.isFinite(pendingRepairFromFloor) &&
+      pendingRepairFromFloor >= 0,
+    invalidReason:
+      invalidJournalReason ||
+      (!Number.isFinite(pendingRepairFromFloor)
+        ? "pending-repair-floor-missing"
+        : pendingRepairFromFloor < 0
+          ? "pending-repair-floor-negative"
+          : ""),
+  };
+}
+
+export function buildRecoveryResult(status, extra = {}) {
+  return {
+    status,
+    at: Date.now(),
+    debugReason:
+      typeof extra?.debugReason === "string" && extra.debugReason.trim()
+        ? extra.debugReason.trim()
+        : typeof extra?.reason === "string"
+          ? extra.reason
+          : "",
+    ...extra,
+  };
 }

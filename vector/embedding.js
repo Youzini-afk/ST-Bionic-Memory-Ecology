@@ -10,7 +10,7 @@ import { getRequestHeaders } from "../../../../../script.js";
 import { extension_settings } from "../../../../extensions.js";
 import { resolveConfiguredTimeoutMs } from "../runtime/request-timeout.js";
 
-const MODULE_NAME = "st_bme_v9";
+const MODULE_NAME = "st_bme";
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000;
 const DEFAULT_EMBEDDING_BATCH_SIZE = 10;
 const MAX_EMBEDDING_BATCH_SIZE = 100;

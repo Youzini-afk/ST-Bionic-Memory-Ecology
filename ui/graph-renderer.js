@@ -121,6 +121,24 @@ function recordGraphLayoutDebugSnapshot(snapshot = null) {
     state.updatedAt = new Date().toISOString();
 }
 
+/** 兼容旧版 forceConfig（召回卡片等） */
+function layoutKeysFromForceConfig(fc) {
+    if (!fc || typeof fc !== 'object') return {};
+    const o = {};
+    if (fc.minNodeRadius != null) o.minNodeRadius = fc.minNodeRadius;
+    if (fc.maxNodeRadius != null) o.maxNodeRadius = fc.maxNodeRadius;
+    if (fc.labelFontSize != null) o.labelFontSize = fc.labelFontSize;
+    if (fc.gridSpacing != null) o.gridSpacing = fc.gridSpacing;
+    if (fc.gridColor != null) o.gridColor = fc.gridColor;
+    if (fc.maxIterations != null) {
+        o.neuralIterations = Math.min(
+            160,
+            Math.max(32, Math.round(fc.maxIterations * 0.85)),
+        );
+    }
+    return o;
+}
+
 function roundRectPath(ctx, x, y, w, h, r) {
     const W = Math.max(0, Number(w) || 0);
     const H = Math.max(0, Number(h) || 0);
@@ -299,16 +317,19 @@ function countRawNodesByScope(nodes, userPovAliasSet = null) {
 export class GraphRenderer {
     /**
      * @param {HTMLCanvasElement} canvas
-     * @param {object} [options] - 配置对象
+     * @param {string|object} [options] - 主题名称字符串（向后兼容）或配置对象
      *   options.theme {string} - 主题名称
      *   options.layoutConfig {object} - 布局参数覆盖
+     *   options.forceConfig {object} - 兼容旧力导向配置（仅读取节点半径、网格、局部松弛次数等）
      *   options.onNodeClick {function} - 节点点击回调
      *   options.onNodeDoubleClick {function} - 节点双击回调
      */
-    constructor(canvas, options = {}) {
-        const themeName = options.theme || 'crimson';
-        const layoutOverride = options.layoutConfig || {};
-        const runtimeConfig = options.runtimeConfig || {};
+    constructor(canvas, options = 'crimson') {
+        const isLegacy = typeof options === 'string';
+        const themeName = isLegacy ? options : (options?.theme || 'crimson');
+        const layoutOverride = isLegacy ? {} : (options?.layoutConfig || {});
+        const fromForce = isLegacy ? {} : layoutKeysFromForceConfig(options?.forceConfig);
+        const runtimeConfig = isLegacy ? {} : (options?.runtimeConfig || {});
 
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
@@ -320,10 +341,10 @@ export class GraphRenderer {
         this.edgeRelationColors = getEdgeRelationColors(themeName);
         this.transientHighlightColors = getTransientHighlightColors(themeName);
         this.themeName = themeName;
-        this.config = { ...DEFAULT_LAYOUT_CONFIG, ...layoutOverride };
+        this.config = { ...DEFAULT_LAYOUT_CONFIG, ...fromForce, ...layoutOverride };
         this.runtimeConfig = normalizeGraphNativeRuntimeOptions(runtimeConfig);
         this._userPovAliasSet = buildUserPovAliasNormalizedSet(
-            options.userPovAliases,
+            isLegacy ? null : options?.userPovAliases,
         );
         this._nativeLayoutBridge = null;
         this._layoutSolveRevision = 0;
@@ -383,9 +404,9 @@ export class GraphRenderer {
         this.enabled = true;
 
         // Callbacks
-        this.onNodeSelect = options.onNodeSelect || null;
-        this.onNodeClick = options.onNodeClick || null;
-        this.onNodeDoubleClick = options.onNodeDoubleClick || null;
+        this.onNodeSelect = isLegacy ? null : (options?.onNodeSelect || null);
+        this.onNodeClick = isLegacy ? null : (options?.onNodeClick || null);
+        this.onNodeDoubleClick = isLegacy ? null : (options?.onNodeDoubleClick || null);
 
         this._bindEvents();
         this._resizeObserver = new ResizeObserver(() => this._resize());

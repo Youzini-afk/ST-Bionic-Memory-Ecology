@@ -1,0 +1,30 @@
+// UI terminology reference for ST-BME i18n. This is documentation data for
+// translators and tests, not a runtime prompt/schema source.
+
+export const UI_I18N_GLOSSARY = Object.freeze({
+  "记忆图谱": "Memory Graph",
+  "记忆节点": "Memory Node",
+  "召回": "Recall",
+  "提取": "Extraction",
+  "注入": "Injection",
+  "注入预览": "Injection Preview",
+  "历史恢复": "History Recovery",
+  "图谱持久化": "Graph Persistence",
+  "检查点": "Checkpoint",
+  "副本同步": "Replica Sync",
+  "向量": "Vector",
+  "向量重建": "Vector Rebuild",
+  "向量空间": "Vector Space",
+  "向量清单": "Vector Manifest",
+  "嵌入服务商": "Embedding Provider",
+  "服务端增强": "Server Enhancement",
+  "纯前端模式": "Frontend-only Mode",
+  "权威输入": "Authoritative Input",
+  "角色 POV": "Character POV",
+  "用户 POV": "User POV",
+  "客观层": "Objective Layer",
+  "楼层": "Turn",
+  "持久召回": "Persisted Recall",
+  "召回卡片": "Recall Card",
+  "记忆浏览器": "Memory Browser",
+});

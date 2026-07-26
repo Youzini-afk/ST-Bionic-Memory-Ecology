@@ -1,10 +1,4 @@
-const DEFAULT_AUTHORITY_BASE_URL = "/api/plugins/authority";
-
-export function normalizeAuthorityBaseUrl(value = DEFAULT_AUTHORITY_BASE_URL) {
-  const text = String(value || DEFAULT_AUTHORITY_BASE_URL).trim();
-  if (!text) return DEFAULT_AUTHORITY_BASE_URL;
-  return text.replace(/\/+$/, "");
-}
+import { normalizeAuthorityBaseUrl } from "./authority-capabilities.js";
 
 export const AUTHORITY_PROTOCOL_AUTO = "auto";
 export const AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06 = "server-plugin-v06";
@@ -68,11 +62,11 @@ function buildDefaultSessionInitConfig(source = {}) {
       events: { channels: true },
       modules: {
         execute: [
-          `${BME_AUTHORITY_MODULE_ID}:state.read`,
-          `${BME_AUTHORITY_MODULE_ID}:state.command`,
           `${BME_AUTHORITY_MODULE_ID}:vector.manifest`,
           `${BME_AUTHORITY_MODULE_ID}:vector.apply`,
           `${BME_AUTHORITY_MODULE_ID}:recall.candidates`,
+          `${BME_AUTHORITY_MODULE_ID}:graph.commitDelta`,
+          `${BME_AUTHORITY_MODULE_ID}:extraction.commitBatch`,
         ],
       },
     },

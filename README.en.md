@@ -4,273 +4,175 @@
 
 [中文](README.md) · **English**
 
-ST-BME (Bionic Memory Ecology) is a **third-party SillyTavern frontend extension**. It organizes characters, events, locations, rules, plot threads, reflections, and subjective memories from long chats into a continuously evolving memory graph, then recalls the information most relevant to the current situation before generation.
+ST-BME (Bionic Memory Ecology) is a **SillyTavern third-party frontend extension**. It distills the characters, events, locations, rules, plot threads, reflections, and summaries that appear over a long chat into a visual memory graph, then automatically recalls the most relevant memories and injects them into the prompt before each generation.
 
-It is not merely a tool that compresses old chat into one summary. BME distinguishes objective facts from character perspectives, preserves relationships, story time, and cognitive boundaries, and lets memories consolidate, summarize, reflect, and compress as the story develops. When chat history is edited, deleted, or rerolled, the memory state returns to the matching point in that history.
+---
+
+## Documentation
+
+This README is a **slim entry point**. The details live in [`docs/`](docs/README.md):
+
+| What you want | Where to look |
+| --- | --- |
+| Usage: configuration, panel, troubleshooting, storage | [`docs/usage/`](docs/usage/) |
+| Architecture, control plane, data formats | [`docs/architecture/`](docs/architecture/) |
+| Algorithm internals (retrieval / extraction / vectors) | [`docs/algorithms/`](docs/algorithms/) |
+| How each feature works and its boundaries | [`docs/features/`](docs/features/) |
+| Development, testing, contribution conventions | [`docs/contributing/`](docs/contributing/) |
+
+Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/usage/panel.md) · [Troubleshooting](docs/usage/troubleshooting.md) · [Memory model](docs/features/memory-model.md) · [History safety](docs/features/history-safety.md)
+
+> Developer docs (architecture / algorithms / features / contributing) are currently Chinese-only. The English docs cover the README and the `docs/usage/` user manual.
 
 ---
 
 ## Core capabilities
 
-- **Objective + subjective extraction** — After an assistant response, BME extracts events, character state, locations, rules, and plot threads from the current dialogue batch, then creates emotional, biased, or mistaken POV memories only for characters who actually experienced it.
-- **Multi-layer hybrid recall** — Combines vector prefiltering, graph diffusion, lexical boosting, context blending, multi-intent splitting, temporal relations, cognitive scope, DPP diversity sampling, and optional LLM reranking.
-- **Cognitive memory architecture** — Keeps objective world knowledge, character POV, and user POV separate. A character can recall only what they have reason to know, including uncertain or mistaken beliefs.
-- **Story space and time** — Tracks active regions, spatial adjacency, story-time labels, and temporal updates so “mentioned later in chat” is not confused with “happened later in the story.”
-- **Memory consolidation and evolution** — New memories can be compared with old nodes, merged, or connected through update, contradiction, and evolution relations instead of becoming isolated duplicates.
-- **Hierarchical summaries and compression** — Stage summaries roll up into higher-level context. Older memories lose expendable detail while retaining causality, irreversible outcomes, relationship changes, and unresolved threads.
-- **Reflection and optional forgetting** — Generates narrative reflections on a schedule and can run sleep-cycle and low-value-memory processing so the graph does not grow without bound.
-- **ENA plot planning** — An optional pre-send planner that reads character cards, World Info, recent chat, BME memory, and previous plans to guide the next response's plot direction and writing priorities.
-- **Unified task profiles** — Objective extraction, subjective extraction, recall, consolidation, compression, summaries, reflection, and planning all use Task Profiles that compose prompt blocks, generation options, World Info, regex, and template variables.
-- **Visualization and management** — Includes a Canvas graph for browsing relations, editing, archiving, and deleting memories, plus graph import/export and vector rebuilding.
-- **History consistency** — When floors are deleted or edited, an existing swipe is selected, a response is regenerated, or chats are switched, the graph, recall records, planning records, and derived vectors reconcile with the actual chat history.
-- **Two persistence options** — Uses browser IndexedDB by default, or works with ST-Delegation-of-authority to place state transactions and derived vectors under the Authority Primary.
-
----
-
-## Memory model
-
-BME maintains these memory types by default:
-
-| Type | What it records | Behavior |
-| --- | --- | --- |
-| `event` | What happened, participants, causes, and outcomes | Supports hierarchical compression while preserving turning points and unresolved consequences |
-| `character` | Traits, current state, goals, inventory, and long-term notes | Updates the current state of the same character as the story changes |
-| `location` | A place's state, features, resources, and dangers | Can carry region paths and adjacency relationships |
-| `rule` | World rules, constraints, scope, and active status | Participates in recall as a durable constraint |
-| `thread` | Main plots, subplots, unresolved hooks, and progress | Supports stage rollups and completion state |
-| `synopsis` | High-level summaries of established events | Provides stable background for very long chats |
-| `reflection` | Higher-level insight into patterns, contradictions, and possible direction | Recalled when relevant to the present situation |
-| `pov_memory` | How one character or the user remembers something | Preserves emotion, attitude, belief, misunderstanding, and certainty |
-
-Edges express more than generic similarity. They can represent participation, location, plot advancement, state updates, contradiction, memory evolution, and temporal replacement. This lets BME recall a connected situation instead of merely matching a handful of similar sentences.
-
-### How memory grows
-
-1. After an assistant response is committed, BME reads the unprocessed dialogue range.
-2. Objective extraction creates world-layer nodes, relations, region updates, and story time.
-3. Subjective extraction creates POV memories and visibility updates only for owners with a valid cognitive basis.
-4. Each result becomes a graph change and commits as its own transaction.
-5. Consolidation, summaries, reflection, sleep, and compression run as separate later stages; one failure does not undo stages that already succeeded.
-6. Graph changes create durable vector jobs. The vector index can be replayed or rebuilt and never becomes a second graph source of truth.
-
----
-
-## Recall and generation
-
-When a fresh user message is about to generate, BME blends the input with recent context and retrieves memory using every available vector, graph, lexical, temporal, spatial, and cognitive signal. Candidates may be reranked by an LLM, then organized into final injection text containing durable constraints, relevant memories, and POV context.
-
-Recall also participates in the memory ecology: nodes that are genuinely accessed can receive access reinforcement, making useful long-term memories more likely to surface again.
-
-### Fresh sends, rerolls, and history changes
-
-| Scenario | BME behavior |
-| --- | --- |
-| Fresh user send | Completes recall for that user floor and persists the final injection text |
-| Regenerate / generate a new swipe / continue | Replays the parent user's saved recall exactly; retrieves again only if that record is missing or invalid |
-| Edit a user or assistant message | Reverses later memory transactions from the first changed floor, then continues from the new history |
-| Delete floors | Keeps memory belonging to the common history prefix and removes graph, recall, and planning results produced by the deleted suffix |
-| Select an existing swipe | Treats the selected swipe as the real history branch and rolls back results from the old branch |
-| Switch chats | Uses that chat's isolated memory namespace; late work from the previous chat cannot write into the current one |
-
-The final recall is stored in a `RecallRecord` bound to the corresponding user history prefix. It is not held in a one-shot page variable or written into message `extra`; this is what makes reroll reuse stable.
-
----
-
-## ENA plot planning
-
-ENA is BME's plot-planning function, not a replacement for ordinary recall.
-
-- It is disabled by default and must be enabled explicitly.
-- It intercepts only fresh user sends; regenerate, new-swipe generation, and continue do not replan.
-- Planning can read the character card, World Info, BME recall, recent chat, raw player input, and previous plot plans.
-- Its `<plot>` and `<note>` output participates in the current generation and is persisted as a `PlannerRecord` bound to the raw user input.
-- Ordinary user floors can always use BME recall without enabling ENA.
-- If edits or deletions fork history, post-fork PlannerRecords roll back with the other transactions.
-
-This boundary prevents the same user floor from being silently replanned in a different direction during reroll, while preserving director-style guidance when the player intentionally advances the story.
+- **Automatic memory extraction** — After each AI reply, ST-BME extracts structured nodes and relations from the conversation (characters, events, locations, rules, plot threads, reflections, subjective memories), using a default two-stage objective + subjective/POV commit pipeline and excluding reasoning tags like `think`/`analysis`/`reasoning`.
+- **Multi-layer hybrid recall** — Before generation, relevant memories are recalled through vector prefilter, graph diffusion, lexical boosting, multi-intent splitting, DPP diversity sampling, and optional LLM reranking; per-message persistent recall cards are supported.
+- **Cognitive architecture** — Character POV / user POV / objective world memory, spatial region weighting, and a story timeline.
+- **Summarization & maintenance** — Small summaries, summary rollup, reflection, consolidation, automatic compression, active forgetting — all logged and reversible.
+- **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
+- **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
+- **ENA Planner integration** — Pre-send story planning, integrated into the config page and the `planner` task preset.
+- **Persistence & sync** — Local-first (IndexedDB), with cloud mirroring, backup/restore, rebuild, and repair.
+- **History safety** — Detects message deletion / edits / swipes, automatically rolls back affected batches and recovers from the change point; protects against truncated "render only the last N" views.
+- **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.
 
 ---
 
 ## How it works
 
+ST-BME can be understood as three pipelines: **write** (conversation → memory), **read** (memory → injection), and **safety** (history change → recovery).
+
 ```mermaid
 flowchart LR
-    subgraph Write["Write: dialogue → memory ecology"]
-        A["Assistant response"] --> B["Objective / subjective extraction"]
-        B --> C["Graph, relations, space-time, cognition"]
-        C --> D["Consolidate / summarize / reflect / compress"]
+    subgraph Write["Write: conversation → memory"]
+        A["AI reply"] --> B["Structured message preprocessing"]
+        B --> C["LLM objective extraction + subjective/POV extraction"]
+        C --> D["Nearest-neighbor reconciliation + cognitive scoping"]
+        D --> E["Write graph + vector sync + timeline"]
+        E --> F["Consolidate / compress / summarize / reflect"]
     end
 
-    subgraph Read["Read: situation → memory injection"]
-        E["Fresh user input"] --> F["Vector + diffusion + lexical + cognitive retrieval"]
-        F --> G["Optional LLM rerank"]
-        G --> H["RecallRecord and prompt injection"]
+    subgraph Read["Read: memory → injection"]
+        G["User about to generate"] --> H["Multi-intent + context-blended query"]
+        H --> I["Vector prefilter + graph diffusion + lexical boost"]
+        I --> J["Cognitive boundary filter + hybrid scoring"]
+        J --> K["Optional LLM rerank + bucketed injection"]
     end
 
-    subgraph Plan["Optional planning"]
-        I["ENA explicitly enabled"] --> J["Plot direction and writing notes"]
-        J --> E
+    subgraph Safe["Safety: history change → recovery"]
+        L["Delete / edit / swipe"] --> M["Message hash detection"]
+        M --> N["Locate affected turns"]
+        N --> O["Roll back batches and vectors"]
+        O --> P["Re-extract from the change point"]
     end
 
-    subgraph Safe["History safety"]
-        K["Edit / delete / swipe"] --> L["Locate history fork"]
-        L --> M["Roll back transaction suffix"]
-        M --> B
-    end
-
-    D -.-> F
+    F -.-> G
+    P -.-> E
 ```
 
-Internally, each stage commits atomically through `TurnTransaction + ChangeSet`. A transaction records which chat-history prefix it used, which nodes and records changed, and how to reverse those changes. History recovery therefore does not have to guess which of several snapshots is the real one.
+- **Write**: the conversation is normalized into structured messages (reasoning tags excluded by default) → the LLM emits structured graph operations → nodes are written, vectors synced, timeline updated → post-processing (consolidation, compression, summary, reflection, forgetting).
+- **Read**: resolve the recall target → vector prefilter + graph diffusion + lexical boost → rank and filter by fusing multiple signals → bucketed injection into the prompt, optionally writing a persistent recall card.
+- **Safety**: a hash is recorded for each processed message; when a history change is detected, ST-BME prefers rollback-and-replay from the maintenance log, falling back to a full rebuild only when a safe rollback is not possible.
+
+> Algorithm details (formulas, parameters, thresholds) are in [`docs/algorithms/`](docs/algorithms/); architecture and data paths are in [`docs/architecture/overview.md`](docs/architecture/overview.md).
 
 ---
 
 ## Installation
 
-### Install through SillyTavern
+### Option 1: install via SillyTavern extensions
 
-Open SillyTavern → Extensions → Install Extension and enter:
+Open SillyTavern → Extensions → Install third-party extension, and enter the repository URL:
 
 ```text
 https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology
 ```
 
-Refresh the page after installation. BME, automatic extraction, and normal user recall are enabled by default; data uses IndexedDB, while ENA is disabled by default.
+Refresh the page after installation.
 
-### Use the Authority Primary
+> Paste the repository root URL, not a GitHub sub-page URL.
 
-Authority mode also requires [ST-Delegation-of-authority](https://github.com/Youzini-afk/ST-Delegation-of-authority). Authority discovers BME's server module when SillyTavern starts, so BME must be a physical directory at:
+### Option 2: manual installation
 
-```text
-SillyTavern/public/scripts/extensions/third-party/st-bme
+```bash
+cd SillyTavern/data/default-user/extensions/third-party
+git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 
-Do not use a symlink or junction for `st-bme`, `.authority`, `module.json`, or `server.cjs`. Restart SillyTavern after installation or update, select `authority` in BME settings, save, and reload the page.
-
-> **Upgrade note:** The current major version uses new settings and data spaces and does not automatically read or migrate data from an older major version. Back up the old installation and its data before upgrading if you need continued access to it.
+Then restart or refresh SillyTavern.
 
 ---
 
 ## Quick start
 
-1. **Open a chat** — Enter the character or group chat that should use long-term memory.
-2. **Open the BME panel** — Click the brain-shaped BME button in the bottom-right corner.
-3. **Check runtime status** — Overview should show `indexeddb · ready`, or the Authority Primary you intentionally configured.
-4. **Configure task models** — A Task Profile can reuse the current SillyTavern route or select a separate OpenAI-compatible model and generation options for a task.
-5. **Configure embeddings** — Use the SillyTavern backend or a direct embedding API. Direct mode requires the service to allow browser CORS.
-6. **Start chatting** — Assistant responses are extracted after commit; fresh user generations recall memory beforehand.
-7. **Inspect the graph** — Browse nodes and relations under Graph, and inspect recall, planning, and vector work under Transaction Records.
-8. **Enable ENA only when needed** — Turn it on only when you want plot planning before a fresh send.
+1. **Open the panel** — Click "Memory Graph" in the top-left menu.
+2. **Enable the plugin** — Config → Feature toggles, confirm the main switch is on.
+3. **Configure the model** — Leave the memory LLM blank to reuse the current chat model; or fill in an independent OpenAI-compatible URL/key/model under "API config".
+4. **Configure embedding** — Backend mode is recommended (reuses SillyTavern's configured vector provider); direct mode also works but you must handle CORS yourself.
+5. **Start chatting** — Just chat normally. Extraction runs after each AI reply, and recall runs before the next generation.
+6. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
 
-Without working embeddings, BME can still use graph, lexical, and other signals, but recall quality and candidate coverage will be reduced.
-
----
-
-## Panel and common actions
-
-| Page or action | Description |
-| --- | --- |
-| Overview | Current Primary, runtime status, chat identity, revision, processing progress, and record counts |
-| Refresh | Read the current chat's durable state again |
-| Extract latest response | Force processing of the latest assistant response for recovery or configuration debugging |
-| Rebuild vectors | Create a durable rebuild job and bring the selected Primary's derived vectors back in line with the graph |
-| Export graph | Export the current chat's graph, cognition, regions, timeline, and summary state without embeddings |
-| Import graph | Import a graph exported by the current version and automatically schedule vector rebuilding |
-| Clear graph | Clear the current chat graph as a rollback-capable transaction without affecting other chats |
-| Graph | Browse nodes and edges; edit importance, archived state, and fields; or delete a node |
-| Transaction records | Inspect RecallRecords, PlannerRecords, and VectorJobs |
-| Settings | Manage Primary, ENA, extraction frequency, recall limits, embeddings, Task Profiles, and global regex |
-
-Primary, BME enabled state, and prompt injection position are pinned at page startup and require a reload after changing. Other panel settings apply after saving.
+> Minimum viable setup: enable the plugin and ensure the current chat model works. Recall quality drops noticeably when embedding is unavailable, so configure it early.
+>
+> See [Configuration](docs/usage/configuration.md) for full settings and [Panel guide](docs/usage/panel.md) for what each panel area does.
 
 ---
 
-## Configuration highlights
+## Common actions
 
-| Group | Purpose |
-| --- | --- |
-| Primary | Selects IndexedDB or Authority as the sole source of truth; they do not dual-write, auto-migrate, or silently switch on failure |
-| Automatic extraction | Controls assistant processing, extraction intervals, context, and excluded tags |
-| Normal recall | Controls pre-generation recall for fresh user turns, candidate counts, and final injection limits |
-| Embeddings | Selects backend or direct transport, model, dimensions, and batch size |
-| Task Profiles | Configures prompt blocks, model routing, generation options, input sources, and World Info behavior per task |
-| Global Regex | Inherits SillyTavern regex and can add local cleaning rules at defined task stages |
-| Cognition and space-time | Controls POV, region scopes, spatial adjacency, story time, and recall weights for cognitive layers |
-| Maintenance | Controls consolidation, hierarchical summaries, reflection, sleep cycles, compression, and their schedules |
-| ENA | Controls plot planning, planning recall, and the `planner` Task Profile |
+| Action | Location | Description |
+| --- | --- | --- |
+| Re-extract | Actions → Memory ops | Extract unprocessed turns or rerun a range |
+| Manual compress | Actions → Memory ops | Merge redundant high-level nodes |
+| Generate small summary | Actions → Memory ops | Produce a staged summary for the recent text window |
+| Run summary rollup | Actions → Memory ops | Fold multiple active summaries into a higher-level one |
+| Rebuild summary state | Actions → Memory ops | Rebuild summaryState from extraction batches |
+| Force evolution | Actions → Memory ops | Let new memories actively affect old ones |
+| Run forgetting | Actions → Memory ops | Archive or down-weight low-value nodes |
+| Undo recent maintenance | Actions → Memory ops | Roll back the most recent reversible maintenance |
+| Rebuild vectors | Actions → Vector ops | Rebuild all node embeddings |
+| Range rebuild | Actions → Vector ops | Rebuild only nodes related to a turn range |
+| Direct re-embed | Actions → Vector ops | Re-embed using the direct embedding config |
+| Export / import / rebuild graph | Actions → Graph management | Graph management and destructive ops |
+| Backup / restore cloud | Config → Cloud storage mode | Manually upload/restore in manual mode |
+| Unhide all | Config → Hide old turns | Restore turns hidden by ST-BME |
 
-Task Profiles cover `extract_objective`, `extract_subjective`, `recall`, `consolidation`, `compress`, `synopsis`, `reflection`, `summary_rollup`, and `planner`. Each task can have its own message-block order, World Info, regex, and generation configuration.
-
----
-
-## Data storage and consistency
-
-- **Chat isolation** — Every chat has its own state namespace; switching characters or chats does not share graph transactions.
-- **IndexedDB** — The default Primary, stored in the browser's `STBME_v9` database.
-- **Authority** — Commits SQL state transactions through BME's companion module and manages derived Trivium vectors under an isolated `bme-v9:` namespace.
-- **One source of truth** — Only the selected Primary is used for a page lifetime. A failure reports blocked instead of silently reading or writing another store.
-- **Exact rollback** — History changes reverse only transactions after the fork; pre-fork graph, recall, and planning state remains intact.
-- **Derived vectors** — Graph commits enqueue VectorJobs; a vector failure cannot create state that competes with the graph.
-- **Concurrency safety** — Commits compare versions, while chat switches, manual edits, or new revisions invalidate stale async work.
-- **Settings isolation** — Current settings live under `extension_settings.st_bme_v9` and do not read an older settings namespace.
+> After switching embedding mode or model, run "Rebuild vectors". Per-action details and danger notes are in [Configuration](docs/usage/configuration.md) and [Panel guide](docs/usage/panel.md).
 
 ---
 
-## Troubleshooting
+## Data storage & history safety (highlights)
 
-### The panel reports blocked
+- **Local-first**: primary storage uses IndexedDB, isolated per chat (`STBME_{chatId}`), with incremental commits on the hot path.
+- **Cloud mirroring**: reuses SillyTavern's file API, supports auto/manual modes, requires no custom backend.
+- **History safety**: detects delete/edit/swipe, prefers rollback-and-replay, falls back to full rebuild when needed; protects against render-truncated views to avoid wrongly clearing the graph.
+- **Forward compatibility**: durable snapshots have a frozen top-level shape, tolerant parsing, and upgrade-on-read — extending the data structure means "add a field", not a big migration.
 
-Inspect the selected Primary. IndexedDB needs working browser storage. Authority requires the Authority plugin, BME companion module, permissions, and `/api/plugins/authority` service. BME does not hide Primary failure behind automatic fallback.
+> See [Storage & sync](docs/usage/storage-and-sync.md), [History safety](docs/features/history-safety.md), and [Data formats & forward compatibility](docs/architecture/storage-and-formats.md).
 
-### Assistant responses are not extracted automatically
+---
 
-Confirm that BME and automatic assistant extraction are enabled, the response is committed to chat history, and the model used by the Task Profile is available. Use Extract latest response to see the failing stage and its error in the panel.
+## Having trouble?
 
-### Recall is sparse or irrelevant
-
-First check whether the graph contains nodes, then inspect embedding configuration, model changes, the recall-node limit, and the `recall` Task Profile. Run Rebuild vectors after changing embedding model or dimensions.
-
-### Reroll does not run ENA again
-
-This is expected. Reroll uses the parent user's already-decided recall instead of replanning the same input. ENA handles only a fresh user send.
-
-### Direct embedding requests fail
-
-Verify the API URL, key, model, and response format, then check the browser console for CORS failures. Use SillyTavern backend transport when the provider cannot enable browser CORS.
-
-### The old graph is not visible after updating
-
-The current major version uses a new data space. Older-major data is not migrated automatically, and an old export cannot be imported as a current graph.
+Step-by-step troubleshooting for common situations (panel won't open, no auto-extraction, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.md).
 
 ---
 
 ## Known limitations
 
-- **Memory quality depends on the LLM** — If the extraction model misunderstands the plot, a perspective, or story time, the graph inherits that mistake.
-- **Embeddings set the recall floor** — Without a suitable vector model, recall relies more heavily on lexical and graph structure.
-- **Direct APIs are constrained by the browser** — CORS, HTTPS mixed-content rules, and proxy policy can block direct requests.
-- **Very long chats still have a cost** — Hierarchical summaries and compression control memory size, but extraction, maintenance, and recall still consume model and compute resources.
-- **Advanced configuration is technical** — Task Profiles and global regex are currently edited as JSON; keep a known-good copy before changing them.
-- **Primary data is independent** — Switching Primary is not migration. To move a current graph, export it from the old Primary and import it into the new one.
-- **Only the current graph format imports** — Older structures are rejected so they cannot re-enter the source of truth through compatibility code.
-
----
-
-## Documentation and development
-
-- [Documentation index](docs/README.md)
-- [Architecture baseline, data model, transaction protocol, and acceptance matrix](docs/vnext/architecture.md)
-
-```bash
-npm ci
-npm run check
-npm test
-```
-
-Real-host verification must use an isolated SillyTavern data directory, port, and test chat. Never reuse a personal instance.
+- **Memory quality depends on the LLM** — if the extraction model misunderstands, the memory will be wrong too.
+- **Embedding sets the recall floor** — without high-quality vectors, recall leans more on lexical and graph structure.
+- **Direct mode may be affected by CORS** — browser security policy may block requests.
+- **Very long chats still have a cost** — hiding/render limits/summary rollup reduce pressure but can't eliminate all overhead.
+- **History recovery prioritizes correctness** — it falls back to a full rebuild when the log is insufficient, which can be slow.
+- **Third-party themes may affect recall card mounting** — cards may skip mounting if a theme removes the standard message DOM or turn-index attributes.
+- **Native acceleration is a rollout capability** — it fails open to JS by default and can be force-disabled in the panel.
 
 ---
 
 ## License
 
-[GNU AGPL-3.0](LICENSE)
+AGPLv3 — see [LICENSE](./LICENSE).

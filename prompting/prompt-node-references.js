@@ -18,44 +18,6 @@ export function resolvePromptNodeId(value = {}) {
   return String(value?.nodeId || node?.id || "").trim();
 }
 
-export function resolveRecallCandidateSelection(
-  result,
-  candidateKeyToNodeId = {},
-  maxNodes = 8,
-) {
-  const limit = Math.max(1, Math.floor(Number(maxNodes) || 1));
-  const hasSelectedKeysField = Boolean(
-    result && Object.prototype.hasOwnProperty.call(result, "selected_keys"),
-  );
-  const selectedKeysIsArray = Array.isArray(result?.selected_keys);
-  const rawSelectedKeys = [];
-  const seenKeys = new Set();
-  for (const value of selectedKeysIsArray ? result.selected_keys : []) {
-    const key = String(value || "").trim();
-    if (!key || seenKeys.has(key)) continue;
-    seenKeys.add(key);
-    rawSelectedKeys.push(key);
-    if (rawSelectedKeys.length >= limit * 4) break;
-  }
-  const resolvedSelectedKeys = rawSelectedKeys
-    .filter((key) => candidateKeyToNodeId[key])
-    .slice(0, limit);
-  const resolvedSelectedNodeIds = [
-    ...new Set(
-      resolvedSelectedKeys
-        .map((key) => String(candidateKeyToNodeId[key] || "").trim())
-        .filter(Boolean),
-    ),
-  ].slice(0, limit);
-  return {
-    hasSelectedKeysField,
-    selectedKeysIsArray,
-    rawSelectedKeys,
-    resolvedSelectedKeys,
-    resolvedSelectedNodeIds,
-  };
-}
-
 export function getPromptNodeLabel(value = {}, { maxLength = 32 } = {}) {
   const node = resolvePromptNode(value);
   const fallbackId = typeof node?.id === "string" ? node.id.slice(0, 8) : "";

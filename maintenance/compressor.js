@@ -563,7 +563,7 @@ async function summarizeBatch(
   const systemPrompt = applyTaskRegex(
     settings,
     "compress",
-    "input.finalPrompt",
+    "finalPrompt",
     compressPromptBuild.systemPrompt ||
       customPrompt ||
       [

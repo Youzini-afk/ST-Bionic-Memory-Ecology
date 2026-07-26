@@ -259,6 +259,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "extractObjectivePrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "extract_subjective": {
@@ -530,6 +535,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "extractSubjectivePrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "recall": {
@@ -777,6 +787,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "recallPrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "consolidation": {
@@ -976,6 +991,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "consolidationPrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "compress": {
@@ -1187,6 +1207,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "compressPrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "synopsis": {
@@ -1414,6 +1439,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "synopsisPrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "reflection": {
@@ -1649,6 +1679,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "reflectionPrompt",
+      "legacyPromptSnapshot": ""
     }
   },
   "summary_rollup": {
@@ -1816,6 +1851,11 @@ export const DEFAULT_TASK_PROFILE_TEMPLATES = {
         "output": false
       },
       "localRules": []
+    },
+    "metadata": {
+      "migratedFromLegacy": false,
+      "legacyPromptField": "summaryRollupPrompt",
+      "legacyPromptSnapshot": ""
     }
   }
 };

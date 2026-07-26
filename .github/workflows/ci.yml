@@ -31,7 +31,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
           cache: npm
 
       - name: Install dependencies
@@ -51,5 +51,5 @@ jobs:
       - name: Syntax check
         run: npm run check
 
-      - name: Run v9 test suite
-        run: npm test
+      - name: Run stable test suite
+        run: npm run test:stable

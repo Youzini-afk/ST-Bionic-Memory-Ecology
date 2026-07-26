@@ -1423,7 +1423,7 @@ export async function extractMemories({
     const stageSystemPrompt = applyTaskRegex(
       settings,
       stageTaskType,
-      "input.finalPrompt",
+      "finalPrompt",
       stagePromptBuild.systemPrompt ||
         buildDefaultExtractPrompt(schema),
       stageRegexInput,
@@ -1756,7 +1756,7 @@ function handleUpdate(
             e.fromId === op.sourceNodeId)),
     );
     for (const e of oldEdges) {
-      invalidateEdge(e);
+      invalidateEdge(e, graph);
     }
 
     if (op.sourceNodeId && op.sourceNodeId !== op.nodeId) {
@@ -1884,7 +1884,7 @@ function invalidateLinksBetween(graph, sourceId, targetId, relation = "related")
     const sameDirection = edge.fromId === sourceId && edge.toId === targetId;
     const reverseDirection = edge.fromId === targetId && edge.toId === sourceId;
     if (!sameDirection && !reverseDirection) continue;
-    invalidateEdge(edge);
+    invalidateEdge(edge, graph);
     changed += 1;
   }
   return changed;
@@ -2406,7 +2406,7 @@ export async function generateSynopsis({
   const synopsisSystemPrompt = applyTaskRegex(
     settings,
     "synopsis",
-    "input.finalPrompt",
+    "finalPrompt",
     synopsisPromptBuild.systemPrompt ||
       customPrompt ||
       [
@@ -2571,7 +2571,7 @@ export async function generateReflection({
   const reflectionSystemPrompt = applyTaskRegex(
     settings,
     "reflection",
-    "input.finalPrompt",
+    "finalPrompt",
     reflectionPromptBuild.systemPrompt ||
       customPrompt ||
       [

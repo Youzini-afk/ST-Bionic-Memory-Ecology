@@ -1,0 +1,333 @@
+import {
+  createDefaultGlobalTaskRegex,
+  createDefaultTaskProfiles,
+} from "../prompting/prompt-profiles.js";
+
+function clampIntValue(value, fallback = 0, min = 0, max = 9999) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(numeric)));
+}
+
+const NATIVE_ROLLOUT_VERSION = 2;
+const LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS = 12000;
+const DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS = 30000;
+
+export const defaultSettings = {
+  enabled: true,
+  debugLoggingEnabled: false,
+  timeoutMs: 300000,
+  hideOldMessagesEnabled: false,
+  hideOldMessagesKeepLastN: 12,
+  hideOldMessagesRenderLimitEnabled: true,
+  hideOldMessagesRenderLimit: 10,
+
+  // 提取设置
+  extractAutoEnabled: true,
+  extractEvery: 1,
+  extractContextTurns: 2,
+  extractAutoDelayLatestAssistant: false,
+  extractAssistantExtractTags: "",
+  extractAssistantExcludeTags: "think,analysis,reasoning",
+  extractAssistantExtractRules: [],
+  extractAssistantExcludeRules: [],
+  extractRecentMessageCap: 0,
+  extractPromptStructuredMode: "both",
+  extractSplitExecutionMode: "parallel",
+  extractWorldbookMode: "active",
+  extractIncludeStoryTime: true,
+  extractIncludeSummaries: true,
+  extractActionMode: "pending",
+
+  // 召回设置
+  recallEnabled: true,
+  recallCardUserInputDisplayMode: "beautify_only",
+  worldInfoFilterMode: "default",
+  worldInfoFilterCustomKeywords: "",
+  recallTopK: 20,
+  recallMaxNodes: 12,
+  recallEnableLLM: true,
+  recallEnableVectorPrefilter: true,
+  recallEnableGraphDiffusion: true,
+  recallDiffusionTopK: 100,
+  recallLlmCandidatePool: 30,
+  recallLlmContextMessages: 4,
+  recallUseAuthoritativeGenerationInput: false,
+  recallEnableMultiIntent: true,
+  recallMultiIntentMaxSegments: 4,
+  recallEnableContextQueryBlend: true,
+  recallContextAssistantWeight: 0.2,
+  recallContextPreviousUserWeight: 0.1,
+  recallEnableLexicalBoost: true,
+  recallLexicalWeight: 0.18,
+  recallTeleportAlpha: 0.15,
+  recallEnableTemporalLinks: true,
+  recallTemporalLinkStrength: 0.2,
+  recallEnableDiversitySampling: true,
+  recallDppCandidateMultiplier: 3,
+  recallDppQualityWeight: 1.0,
+  recallEnableCooccurrenceBoost: false,
+  recallCooccurrenceScale: 0.1,
+  recallCooccurrenceMaxNeighbors: 10,
+  recallEnableResidualRecall: false,
+  recallResidualBasisMaxNodes: 24,
+  recallNmfTopics: 15,
+  recallNmfNoveltyThreshold: 0.4,
+  recallResidualThreshold: 0.3,
+  recallResidualTopK: 5,
+  enableScopedMemory: true,
+  enablePovMemory: true,
+  enableRegionScopedObjective: true,
+  enableCognitiveMemory: true,
+  enableSpatialAdjacency: true,
+  injectLowConfidenceObjectiveMemory: false,
+  enableStoryTimeline: true,
+  injectStoryTimeLabel: true,
+  storyTimeSoftDirecting: true,
+  recallCharacterPovWeight: 1.25,
+  recallUserPovWeight: 1.05,
+  recallObjectiveCurrentRegionWeight: 1.15,
+  recallObjectiveAdjacentRegionWeight: 0.9,
+  recallObjectiveGlobalWeight: 0.75,
+  injectUserPovMemory: true,
+  injectObjectiveGlobalMemory: true,
+
+  // 注入设置
+  injectPosition: "atDepth",
+  injectDepth: 9999,
+  injectRole: 0,
+
+  // 混合评分权重
+  graphWeight: 0.6,
+  vectorWeight: 0.3,
+  importanceWeight: 0.1,
+
+  // 记忆 LLM（留空时复用当前酒馆模型）
+  llmApiUrl: "",
+  llmApiKey: "",
+  llmModel: "",
+  llmPresets: {},
+  llmActivePreset: "",
+
+  // Embedding API 配置
+  embeddingApiUrl: "",
+  embeddingApiKey: "",
+  embeddingModel: "text-embedding-3-small",
+  embeddingTransportMode: "direct",
+  embeddingBackendSource: "openai",
+  embeddingBackendModel: "text-embedding-3-small",
+  embeddingBackendApiUrl: "",
+  embeddingAutoSuffix: true,
+
+  authorityEnabled: "auto",
+  authorityBaseUrl: "/api/plugins/authority",
+  authorityPrimaryWhenAvailable: true,
+  authorityStorageMode: "auto-server-primary",
+  authorityVectorMode: "auto-primary",
+  authoritySqlPrimary: true,
+  authorityTriviumPrimary: true,
+  authorityGraphQueryEnabled: true,
+  authorityJobsEnabled: true,
+  authorityBlobCheckpointEnabled: true,
+  authorityBrowserCacheMode: "minimal",
+  authorityOfflineWritePolicy: "queue-local-dirty",
+  authorityOfflineQueueMaxBytes: 1048576,
+  authorityOfflineQueueMaxItems: 128,
+  authorityOfflineQueueMaxAgeMs: 3600000,
+  authorityVectorSyncChunkSize: 1000,
+  authorityVectorFailOpen: true,
+  authorityDiagnosticsEnabled: true,
+  authorityProbeIntervalMs: 60000,
+
+  // Native 性能加速（灰度）
+  graphUseNativeLayout: true,
+  graphNativeLayoutThresholdNodes: 280,
+  graphNativeLayoutThresholdEdges: 1600,
+  graphNativeLayoutWorkerTimeoutMs: 260,
+  persistUseNativeDelta: true,
+  persistNativeDeltaThresholdRecords: 20000,
+  persistNativeDeltaThresholdStructuralDelta: 600,
+  persistNativeDeltaThresholdSerializedChars: 4000000,
+  persistNativeDeltaBridgeMode: "json",
+  loadUseNativeHydrate: true,
+  loadNativeHydrateThresholdRecords: DEFAULT_NATIVE_HYDRATE_THRESHOLD_RECORDS,
+  nativeRolloutVersion: NATIVE_ROLLOUT_VERSION,
+  nativeEngineFailOpen: true,
+  graphNativeForceDisable: false,
+
+  // Schema
+  nodeTypeSchema: null,
+
+  // 自定义提示词
+  extractObjectivePrompt: "",
+  extractSubjectivePrompt: "",
+  recallPrompt: "",
+  consolidationPrompt: "",
+  compressPrompt: "",
+  synopsisPrompt: "",
+  summaryRollupPrompt: "",
+  reflectionPrompt: "",
+  taskProfilesVersion: 3,
+  taskProfiles: createDefaultTaskProfiles(),
+  globalTaskRegex: createDefaultGlobalTaskRegex(),
+
+  // ====== v2 增强设置 ======
+  enableConsolidation: true,
+  consolidationNeighborCount: 5,
+  consolidationThreshold: 0.85,
+  enableSynopsis: true,
+  synopsisEveryN: 5,
+  enableHierarchicalSummary: true,
+  smallSummaryEveryNExtractions: 3,
+  summaryRollupFanIn: 3,
+  enableVisibility: true,
+  enableCrossRecall: true,
+  enableSmartTrigger: false,
+  triggerPatterns: "",
+  smartTriggerThreshold: 2,
+  enableSleepCycle: false,
+  forgetThreshold: 0.5,
+  sleepEveryN: 10,
+  enableProbRecall: false,
+  probRecallChance: 0.15,
+  enableReflection: true,
+  reflectEveryN: 10,
+  consolidationAutoMinNewNodes: 2,
+  enableAutoCompression: true,
+  compressionEveryN: 10,
+  maintenanceExecutionMode: "strict",
+  parallelVectorQueryConcurrency: 3,
+  parallelNeighborQueryConcurrency: 3,
+  parallelLlmConcurrency: 2,
+  backgroundMaintenanceMaxRetries: 2,
+  backgroundMaintenanceRetryBaseMs: 800,
+  backgroundMaintenanceMaxQueueItems: 24,
+
+  // UI 面板
+  uiLocale: "auto",
+  noticeDisplayMode: "normal",
+  panelTheme: "crimson",
+  graphLocalStorageMode: "auto",
+  cloudStorageMode: "automatic",
+};
+
+const DEFAULT_SETTING_KEYS = Object.freeze(Object.keys(defaultSettings));
+
+export function migrateLegacyAutoMaintenanceSettings(loaded = {}) {
+  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
+    return {};
+  }
+
+  const migrated = { ...loaded };
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      migrated,
+      "consolidationAutoMinNewNodes",
+    ) &&
+    Object.prototype.hasOwnProperty.call(migrated, "maintenanceAutoMinNewNodes")
+  ) {
+    migrated.consolidationAutoMinNewNodes = clampIntValue(
+      migrated.maintenanceAutoMinNewNodes,
+      defaultSettings.consolidationAutoMinNewNodes,
+      1,
+      50,
+    );
+  }
+  if (!Object.prototype.hasOwnProperty.call(migrated, "enableAutoCompression")) {
+    const parsedEveryN = Math.floor(Number(migrated.compressionEveryN));
+    migrated.enableAutoCompression = !(
+      Number.isFinite(parsedEveryN) && parsedEveryN <= 0
+    );
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(migrated, "compressionEveryN") &&
+    Math.floor(Number(migrated.compressionEveryN)) <= 0
+  ) {
+    migrated.compressionEveryN = defaultSettings.compressionEveryN;
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(migrated, "enableHierarchicalSummary") &&
+    Object.prototype.hasOwnProperty.call(migrated, "enableSynopsis")
+  ) {
+    migrated.enableHierarchicalSummary = Boolean(migrated.enableSynopsis);
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      migrated,
+      "smallSummaryEveryNExtractions",
+    ) &&
+    Object.prototype.hasOwnProperty.call(migrated, "synopsisEveryN")
+  ) {
+    migrated.smallSummaryEveryNExtractions = clampIntValue(
+      migrated.synopsisEveryN,
+      defaultSettings.smallSummaryEveryNExtractions,
+      1,
+      100,
+    );
+  }
+  if (
+    !Object.prototype.hasOwnProperty.call(migrated, "summaryRollupFanIn")
+  ) {
+    migrated.summaryRollupFanIn = defaultSettings.summaryRollupFanIn;
+  }
+  delete migrated.maintenanceAutoMinNewNodes;
+  return migrated;
+}
+
+export function migrateNativeRolloutSettings(loaded = {}) {
+  if (!loaded || typeof loaded !== "object" || Array.isArray(loaded)) {
+    return {};
+  }
+
+  const migrated = { ...loaded };
+  const rolloutVersion = clampIntValue(
+    migrated.nativeRolloutVersion,
+    0,
+    0,
+    NATIVE_ROLLOUT_VERSION,
+  );
+  if (rolloutVersion < 1) {
+    migrated.graphUseNativeLayout = defaultSettings.graphUseNativeLayout;
+    migrated.persistUseNativeDelta = defaultSettings.persistUseNativeDelta;
+    migrated.loadUseNativeHydrate = defaultSettings.loadUseNativeHydrate;
+  }
+  if (
+    rolloutVersion < 2 &&
+    (!Object.prototype.hasOwnProperty.call(
+      migrated,
+      "loadNativeHydrateThresholdRecords",
+    ) ||
+      clampIntValue(
+        migrated.loadNativeHydrateThresholdRecords,
+        LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS,
+        0,
+        1000000,
+      ) === LEGACY_NATIVE_HYDRATE_THRESHOLD_RECORDS)
+  ) {
+    migrated.loadNativeHydrateThresholdRecords =
+      defaultSettings.loadNativeHydrateThresholdRecords;
+  }
+  migrated.nativeRolloutVersion = NATIVE_ROLLOUT_VERSION;
+  return migrated;
+}
+
+export function mergePersistedSettings(loaded = {}) {
+  const compatibleLoaded = migrateNativeRolloutSettings(
+    migrateLegacyAutoMaintenanceSettings(loaded),
+  );
+  const merged = { ...defaultSettings };
+  for (const key of DEFAULT_SETTING_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(compatibleLoaded, key)) {
+      merged[key] = compatibleLoaded[key];
+    }
+  }
+  return merged;
+}
+
+export function getPersistedSettingsSnapshot(settings = defaultSettings) {
+  const persisted = {};
+  for (const key of DEFAULT_SETTING_KEYS) {
+    persisted[key] = settings[key];
+  }
+  return persisted;
+}

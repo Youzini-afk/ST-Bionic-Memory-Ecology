@@ -2,18 +2,28 @@
 // 此模块中的函数均不依赖 index.js 模块级可变状态，
 // 可被 index.js 及其他模块安全导入。
 
+import { clampInt } from "../ui/ui-status.js";
 import { sanitizePlannerMessageText } from "../runtime/planner-tag-utils.js";
-
-function clampInt(value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
-}
+import { rollbackBatch } from "../runtime/runtime-state.js";
+import { isInManagedHideRange } from "../ui/hide-engine.js";
 
 export function isBmeManagedHiddenMessage(
   message,
-  _options = {},
+  { index = null, chat = null } = {},
 ) {
-  return message?.extra?.isSmallSys === true;
+  if (
+    Number.isFinite(index) &&
+    index > 0 &&
+    isInManagedHideRange(index, chat)
+  ) {
+    return true;
+  }
+
+  return Boolean(
+    message?.extra &&
+      typeof message.extra === "object" &&
+      message.extra.__st_bme_hide_managed === true,
+  );
 }
 
 export function isDialogueGreetingMessage(
@@ -433,4 +443,28 @@ export function clampRecoveryStartFloor(chat, floor) {
   }
 
   return Math.max(floor, minExtractableFloor);
+}
+
+export function rollbackAffectedJournals(graph, affectedJournals = []) {
+  for (let index = affectedJournals.length - 1; index >= 0; index--) {
+    rollbackBatch(graph, affectedJournals[index]);
+  }
+  graph.batchJournal = Array.isArray(graph.batchJournal)
+    ? graph.batchJournal.slice(
+        0,
+        Math.max(0, graph.batchJournal.length - affectedJournals.length),
+      )
+    : [];
+}
+
+export function pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
+  if (!graph?.historyState?.processedMessageHashes) return;
+  if (!Number.isFinite(fromFloor)) return;
+
+  const hashes = graph.historyState.processedMessageHashes;
+  for (const key of Object.keys(hashes)) {
+    if (Number(key) >= fromFloor) {
+      delete hashes[key];
+    }
+  }
 }

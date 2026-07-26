@@ -21,8 +21,8 @@ export function normalizeAliasMatchKey(value) {
 
 export function collectAliasMatchVariants(raw) {
   const variants = [];
-  const exact = normalizeKeyForAlias(raw);
-  if (exact) variants.push(exact);
+  const legacy = normalizeKeyForAlias(raw);
+  if (legacy) variants.push(legacy);
   const soft = normalizeAliasMatchKey(raw);
   if (soft) {
     variants.push(soft);

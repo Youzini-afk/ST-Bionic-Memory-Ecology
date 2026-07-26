@@ -1,4 +1,4 @@
-import { sanitizeMvuContent } from "./mvu-sanitizer.js";
+import { sanitizeMvuContent } from "./mvu-compat.js";
 import { applyHostRegexReuse } from "./task-regex.js";
 
 export const PROMPT_CONTENT_ORIGIN = Object.freeze({

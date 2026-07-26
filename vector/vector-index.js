@@ -16,11 +16,15 @@ import {
   AUTHORITY_VECTOR_MODE,
   AUTHORITY_VECTOR_SOURCE,
   applyAuthorityBmeVectorManifest,
+  deleteAuthorityTriviumNodes,
   fetchAuthorityBmeVectorManifest,
   isAuthorityVectorConfig,
   normalizeAuthorityVectorConfig,
+  purgeAuthorityTriviumNamespace,
   searchAuthorityTriviumNodes,
+  syncAuthorityTriviumLinks,
   testAuthorityTriviumConnection,
+  upsertAuthorityTriviumEntries,
 } from "./authority-vector-primary-adapter.js";
 
 export {
@@ -609,15 +613,7 @@ function updateVectorManifest(graph, config, {
 } = {}) {
   if (!graph?.vectorIndexState) return null;
   const vectorSpace = observedDim > 0
-    ? deriveVectorSpace(config, observedDim, isAuthorityVectorConfig(config)
-        ? {
-            providerKind: config.embeddingMode === "backend"
-              ? "st-backend"
-              : "direct-openai-compatible",
-            embeddingMode: "client",
-            apiUrl: config.apiUrl,
-          }
-        : {})
+    ? deriveVectorSpace(config, observedDim)
     : null;
   const manifest = createVectorManifest({
     backend,
@@ -654,6 +650,16 @@ function markLocalVectorManifestStale(graph, config, reason = "vector-space-chan
   state.lastWarning = reason === "dimension-changed"
     ? "向量模型维度变化，索引已标记为待重建"
     : "向量模型配置变化，索引已标记为待重建";
+}
+
+function isVectorApplyCompatibilityError(error = null) {
+  const detailCategory = String(error?.payload?.details?.category || error?.details?.category || "").trim();
+  const message = String(error?.message || "").toLowerCase();
+  return detailCategory === "vector-dimension-mismatch" ||
+    detailCategory === "vector-space-mismatch" ||
+    message.includes("dimension mismatch") ||
+    message.includes("vectorspaceid mismatch") ||
+    message.includes("single vector dimension");
 }
 
 function markBackendVectorStateDirty(
@@ -818,7 +824,6 @@ export async function syncGraphVectorIndex(
     triviumClient = undefined,
     headerProvider = undefined,
     fetchImpl = undefined,
-    idempotencyKey = undefined,
   } = {},
 ) {
   if (!graph || !config) {
@@ -897,63 +902,203 @@ export async function syncGraphVectorIndex(
       collectionId,
       chatId: effectiveChatId,
       modelScope: getVectorModelScope(config),
-      revision: graph?.revision || 0,
+      revision: graph?.meta?.revision || graph?.revision || 0,
       signal,
       triviumClient,
       headerProvider,
       fetchImpl,
-      idempotencyKey,
     };
+    const scopeChanged =
+      state.mode !== "authority" ||
+      state.source !== (config.source || "authority-trivium") ||
+      state.modelScope !== getVectorModelScope(config) ||
+      state.collectionId !== collectionId;
+    const fullReset = purge || state.dirty || scopeChanged;
 
     try {
-      const embeddingResult = await ensureEntryEmbeddings(
-        graph,
-        desiredEntries,
-        config,
-        signal,
-      );
-      embeddingsRequested = embeddingResult.requested;
-      embedBatchMs = embeddingResult.elapsedMs;
-      if (embeddingResult.failures > 0) {
-        throw createEmbeddingProviderError(embeddingResult.failures);
+      if (fullReset) {
+        const embeddingResult = await ensureEntryEmbeddings(graph, desiredEntries, config, signal);
+        embeddingsRequested += embeddingResult.requested;
+        embedBatchMs += embeddingResult.elapsedMs;
+        if (embeddingResult.failures > 0) {
+          throw createEmbeddingProviderError(embeddingResult.failures);
+        }
+        let appliedViaBme = false;
+        if (config.bmeVectorApplyReady === true) {
+          try {
+            const applyStartedAt = nowMs();
+            const applyResult = await applyAuthorityBmeVectorManifest(
+              graph,
+              config,
+              desiredEntries,
+              authorityOptions,
+            );
+            authorityUpsertMs += nowMs() - applyStartedAt;
+            authorityUpsertDiagnostics = applyResult?.diagnostics || null;
+            const observedDim = Number(applyResult?.manifest?.observedDim || getEmbeddingDimensionFromEntries(graph, desiredEntries) || 0);
+            if (observedDim > 0) {
+              updateVectorManifest(graph, config, {
+                backend: "authority",
+                chatId: effectiveChatId,
+                collectionId,
+                graphRevision: graph?.meta?.revision || graph?.revision || 0,
+                desiredEntries,
+                observedDim,
+                status: "clean",
+              });
+            }
+            authorityLinkDiagnostics = {
+              operation: "bmeVectorApply:links",
+              totalItems: Number(applyResult?.diagnostics?.linkItems || 0),
+              linked: Number(applyResult?.diagnostics?.linked || 0),
+              totalMs: 0,
+            };
+            resetVectorMappings(graph, config, effectiveChatId);
+            appliedViaBme = true;
+          } catch (applyError) {
+            if (isAbortError(applyError)) throw applyError;
+            if (isVectorApplyCompatibilityError(applyError)) throw applyError;
+            console.warn("[ST-BME] BME 服务端向量 apply 失败，回退 Authority Trivium 旧路径:", applyError);
+          }
+        }
+        if (!appliedViaBme) {
+          const purgeStartedAt = nowMs();
+          const purgeResult = await purgeAuthorityTriviumNamespace(config, authorityOptions);
+          authorityPurgeMs += nowMs() - purgeStartedAt;
+          authorityPurgeDiagnostics = purgeResult?.diagnostics || null;
+          if (purgeResult?.truncated) {
+            throw new Error(`Authority Trivium purge truncated after ${purgeResult.pages || 0} page(s)`);
+          }
+          resetVectorMappings(graph, config, effectiveChatId);
+          const upsertStartedAt = nowMs();
+          const upsertResult = await upsertAuthorityTriviumEntries(
+            graph,
+            config,
+            desiredEntries,
+            authorityOptions,
+          );
+          authorityUpsertMs += nowMs() - upsertStartedAt;
+          authorityUpsertDiagnostics = upsertResult?.diagnostics || null;
+        }
+        for (const entry of desiredEntries) {
+          state.hashToNodeId[entry.hash] = entry.nodeId;
+          state.nodeToHash[entry.nodeId] = entry.hash;
+          insertedHashes.push(entry.hash);
+        }
+      } else {
+        const nodeIdsToDelete = [];
+        const entriesToUpsert = [];
+        const queuedNodeIds = new Set();
+
+        if (force && hasConcreteRange) {
+          for (const entry of desiredEntries) {
+            entriesToUpsert.push(entry);
+            queuedNodeIds.add(entry.nodeId);
+          }
+        }
+
+        for (const [nodeId, hash] of Object.entries(state.nodeToHash || {})) {
+          if (hasConcreteRange && !rangedNodeIds.has(nodeId)) {
+            continue;
+          }
+          const desired = desiredByNodeId.get(nodeId);
+          if (!desired) {
+            nodeIdsToDelete.push(nodeId);
+            delete state.nodeToHash[nodeId];
+            delete state.hashToNodeId[hash];
+          } else if (desired.hash !== hash && !queuedNodeIds.has(nodeId)) {
+            entriesToUpsert.push(desired);
+            queuedNodeIds.add(nodeId);
+            delete state.hashToNodeId[hash];
+          }
+        }
+
+        for (const entry of desiredEntries) {
+          if (force && hasConcreteRange) continue;
+          if (state.nodeToHash[entry.nodeId] === entry.hash) continue;
+          if (queuedNodeIds.has(entry.nodeId)) continue;
+          entriesToUpsert.push(entry);
+          queuedNodeIds.add(entry.nodeId);
+        }
+
+        const embeddingResult = await ensureEntryEmbeddings(graph, entriesToUpsert, config, signal);
+        embeddingsRequested += embeddingResult.requested;
+        embedBatchMs += embeddingResult.elapsedMs;
+        if (embeddingResult.failures > 0) {
+          throw createEmbeddingProviderError(embeddingResult.failures);
+        }
+        deletedNodeCount = nodeIdsToDelete.length;
+        let appliedViaBme = false;
+        if (config.bmeVectorApplyReady === true && nodeIdsToDelete.length === 0) {
+          try {
+            const applyStartedAt = nowMs();
+            const applyResult = await applyAuthorityBmeVectorManifest(
+              graph,
+              config,
+              entriesToUpsert,
+              authorityOptions,
+            );
+            authorityUpsertMs += nowMs() - applyStartedAt;
+            authorityUpsertDiagnostics = applyResult?.diagnostics || null;
+            const observedDim = Number(applyResult?.manifest?.observedDim || getEmbeddingDimensionFromEntries(graph, entriesToUpsert) || 0);
+            if (observedDim > 0) {
+              updateVectorManifest(graph, config, {
+                backend: "authority",
+                chatId: effectiveChatId,
+                collectionId,
+                graphRevision: graph?.meta?.revision || graph?.revision || 0,
+                desiredEntries,
+                observedDim,
+                status: "clean",
+              });
+            }
+            authorityLinkDiagnostics = {
+              operation: "bmeVectorApply:links",
+              totalItems: Number(applyResult?.diagnostics?.linkItems || 0),
+              linked: Number(applyResult?.diagnostics?.linked || 0),
+              totalMs: 0,
+            };
+            appliedViaBme = true;
+          } catch (applyError) {
+            if (isAbortError(applyError)) throw applyError;
+            if (isVectorApplyCompatibilityError(applyError)) throw applyError;
+            console.warn("[ST-BME] BME 服务端向量 apply 失败，回退 Authority Trivium 旧路径:", applyError);
+          }
+        }
+        if (!appliedViaBme) {
+          const deleteStartedAt = nowMs();
+          const deleteResult = await deleteAuthorityTriviumNodes(config, nodeIdsToDelete, authorityOptions);
+          authorityDeleteMs += nowMs() - deleteStartedAt;
+          authorityDeleteDiagnostics = deleteResult?.diagnostics || null;
+          const upsertStartedAt = nowMs();
+          const upsertResult = await upsertAuthorityTriviumEntries(
+            graph,
+            config,
+            entriesToUpsert,
+            authorityOptions,
+          );
+          authorityUpsertMs += nowMs() - upsertStartedAt;
+          authorityUpsertDiagnostics = upsertResult?.diagnostics || null;
+        }
+
+        for (const entry of entriesToUpsert) {
+          state.hashToNodeId[entry.hash] = entry.nodeId;
+          state.nodeToHash[entry.nodeId] = entry.hash;
+          insertedHashes.push(entry.hash);
+        }
       }
 
-      const applyStartedAt = nowMs();
-      const applyResult = await applyAuthorityBmeVectorManifest(
-        graph,
-        config,
-        desiredEntries,
-        authorityOptions,
-      );
-      authorityUpsertMs = nowMs() - applyStartedAt;
-      authorityUpsertDiagnostics = applyResult?.diagnostics || null;
-      authorityLinkDiagnostics = {
-        operation: "vector.apply:links",
-        totalItems: Number(applyResult?.diagnostics?.linkItems || 0),
-        linked: Number(applyResult?.diagnostics?.linked || 0),
-      };
-
-      resetVectorMappings(graph, config, effectiveChatId);
-      for (const entry of desiredEntries) {
-        state.hashToNodeId[entry.hash] = entry.nodeId;
-        state.nodeToHash[entry.nodeId] = entry.hash;
-        insertedHashes.push(entry.hash);
+      if (!authorityLinkDiagnostics || authorityLinkDiagnostics.operation !== "bmeVectorApply:links") {
+        const linkStartedAt = nowMs();
+        const linkResult = await syncAuthorityTriviumLinks(graph, config, authorityOptions);
+        authorityLinkMs += nowMs() - linkStartedAt;
+        authorityLinkDiagnostics = linkResult?.diagnostics || null;
       }
-      const observedDim = Number(
-        applyResult?.manifest?.observedDim ||
-        getEmbeddingDimensionFromEntries(graph, desiredEntries) ||
-        0,
-      );
-      if (observedDim > 0) {
-        updateVectorManifest(graph, config, {
-          backend: "authority",
-          chatId: effectiveChatId,
-          collectionId,
-          graphRevision: graph?.revision || 0,
-          desiredEntries,
-          observedDim,
-          status: "clean",
-        });
+
+      for (const node of graph.nodes || []) {
+        if (Array.isArray(node.embedding) && node.embedding.length > 0) {
+          node.embedding = null;
+        }
       }
       state.mode = "authority";
       state.source = config.source || "authority-trivium";
@@ -963,16 +1108,20 @@ export async function syncGraphVectorIndex(
       state.lastWarning = "";
     } catch (error) {
       if (isAbortError(error)) throw error;
-      const message = error?.message || String(error) || "Authority vector sync failed";
+      const message = error?.message || String(error) || "Authority Trivium 同步失败";
       const errorCategory = getErrorCategory(error);
       const errorDomain = getErrorDomain(error, errorCategory ? "authority" : "");
+      const dirtyReason = errorDomain === "embedding"
+        ? "embedding-provider-sync-failed"
+        : "authority-trivium-sync-failed";
+      const warningPrefix = errorDomain === "embedding"
+        ? "Embedding provider 同步失败"
+        : "Authority Trivium 同步失败";
       markAuthorityVectorStateDirty(
         graph,
         config,
-        errorDomain === "embedding"
-          ? "embedding-provider-sync-failed"
-          : "authority-vector-sync-failed",
-        message,
+        dirtyReason,
+        `${warningPrefix}（${message}），已标记待重建`,
         { errorCategory, errorDomain },
       );
       state.lastSyncAt = Date.now();
@@ -982,17 +1131,23 @@ export async function syncGraphVectorIndex(
         error: message,
         ...(errorCategory ? { errorCategory } : {}),
         ...(errorDomain ? { errorDomain } : {}),
+        ...(errorCategory && errorDomain === "authority" ? { authorityErrorCategory: errorCategory, authorityErrorDomain: errorDomain } : {}),
         desiredEntries: Number(desiredBuildDiagnostics.entryCount || desiredEntries.length),
         desiredBuildMs: roundMs(desiredBuildMs),
+        authorityPurgeMs: roundMs(authorityPurgeMs),
+        authorityDeleteMs: roundMs(authorityDeleteMs),
         authorityUpsertMs: roundMs(authorityUpsertMs),
+        authorityLinkMs: roundMs(authorityLinkMs),
         authorityDiagnostics: {
+          purge: authorityPurgeDiagnostics,
+          delete: authorityDeleteDiagnostics,
           upsert: error?.authorityDiagnostics || authorityUpsertDiagnostics,
           link: authorityLinkDiagnostics,
         },
         totalMs: roundMs(nowMs() - syncStartedAt),
         updatedAt: Date.now(),
       };
-      return {
+      const result = {
         insertedHashes,
         stats: state.lastStats,
         timings: state.lastTimings,
@@ -1000,6 +1155,10 @@ export async function syncGraphVectorIndex(
         ...(errorCategory ? { errorCategory } : {}),
         ...(errorDomain ? { errorDomain } : {}),
       };
+      if (config.failOpen === false) {
+        throw error;
+      }
+      return result;
     }
   } else if (isBackendVectorConfig(config)) {
     const scopeChanged =
@@ -1428,28 +1587,24 @@ export async function findSimilarNodesByText(
 
   if (isAuthorityVectorConfig(config)) {
     const state = graph?.vectorIndexState || {};
-    const currentDim = Number(state.currentVectorSpace?.observedDim || state.manifest?.observedDim || 0);
-    const currentVectorSpace = currentDim > 0
-      ? deriveVectorSpace(config, currentDim, {
-          providerKind: config.embeddingMode === "backend"
-            ? "st-backend"
-            : "direct-openai-compatible",
-          embeddingMode: "client",
-          apiUrl: config.apiUrl,
-        })
-      : state.currentVectorSpace;
-    if (!isVectorManifestCompatible(state.manifest, currentVectorSpace)) {
-      recordSearchTimings({
-        success: false,
-        reason: "authority-vector-space-mismatch",
-        resultCount: 0,
-      });
-      if (!readOnly) {
-        state.dirty = true;
-        state.dirtyReason = "authority-vector-space-mismatch";
-        state.lastWarning = "Authority 向量空间不匹配，已等待重建";
+    if (config.bmeVectorApplyReady === true || config.bmeVectorManifestReady === true) {
+      const currentDim = Number(state.currentVectorSpace?.observedDim || state.manifest?.observedDim || 0);
+      const currentVectorSpace = currentDim > 0
+        ? deriveVectorSpace(config, currentDim)
+        : state.currentVectorSpace;
+      if (!isVectorManifestCompatible(state.manifest, currentVectorSpace)) {
+        recordSearchTimings({
+          success: false,
+          reason: "authority-vector-space-mismatch",
+          resultCount: 0,
+        });
+        if (!readOnly) {
+          state.dirty = true;
+          state.dirtyReason = "authority-vector-space-mismatch";
+          state.lastWarning = "Authority 向量空间不匹配，已切换到非向量召回并等待重建";
+        }
+        return [];
       }
-      return [];
     }
     const requestStartedAt = nowMs();
     try {
