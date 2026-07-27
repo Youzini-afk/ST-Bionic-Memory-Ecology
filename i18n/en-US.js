@@ -310,6 +310,7 @@ export default {
   "recall.card.deleteConfirm": "Delete this persisted recall injection?",
   "recall.card.confirmDeleteShort": "Delete?",
   "recall.card.empty.graphNotReady": "Graph is not ready",
+  "recall.card.empty.noRecall": "No memories were recalled for this turn",
   "recall.card.empty.nodesMissing": "Recalled nodes no longer exist or the graph was rebuilt",
   "recall.card.removePlot": "Remove Plot",
   "recall.card.removedPlot": "Plot planning removed",

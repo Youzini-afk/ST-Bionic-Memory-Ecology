@@ -20,7 +20,7 @@ function _hostUserPovAliasHintsForRecallCanvas() {
 
 // ==================== 常量 ====================
 
-export const RECALL_CARD_UI_VERSION = "recall-tabs-v4";
+export const RECALL_CARD_UI_VERSION = "recall-tabs-v5";
 
 export const RECALL_CARD_FORCE_CONFIG = {
   repulsion: 1200,
@@ -606,8 +606,8 @@ function buildRecallPane({
     if (typeof HTMLElement === "undefined" || !(meta instanceof HTMLElement)) {
       meta.textContent = metaText;
     }
-    const showEnaSource = isPlannerRecallSource(activeRecord);
-    if (sourceLabel) {
+    const showEnaSource = !hasPlot && isPlannerRecallSource(activeRecord);
+    if (sourceLabel && !hasPlot) {
       const sourceTag = el(
         "span",
         `bme-recall-meta-tag${showEnaSource ? " is-ena" : ""}`,
@@ -625,7 +625,7 @@ function buildRecallPane({
     pane.appendChild(meta);
 
     const injectionPreviewBlock = buildInjectionPreviewBlock(activeRecord || {}, {
-      forcePlain: false,
+      forcePlain: hasPlot,
     });
     if (injectionPreviewBlock) {
       pane.appendChild(injectionPreviewBlock);
@@ -667,7 +667,7 @@ function buildRecallPane({
 
     pane.appendChild(actions);
   } else {
-    pane.appendChild(el("div", "bme-recall-empty", t("recall.card.empty.graphNotReady")));
+    pane.appendChild(el("div", "bme-recall-empty", t("recall.card.empty.noRecall")));
   }
 
   return pane;
@@ -761,7 +761,9 @@ export function createRecallCardElement({
     : 0;
   const recallBadgeText = initialNodeCount > 0
     ? t("recall.card.memoryCount", { count: initialNodeCount })
-    : t("recall.card.memoryReady");
+    : hasRecall
+      ? t("recall.card.memoryReady")
+      : t("recall.card.memoryCount", { count: 0 });
   const recallTabIcon = el("span", "bme-recall-tab-icon", "🧠");
   const recallTabTitle = el("span", "bme-recall-tab-title", t("recall.tab.recall"));
   const recallBadge = el("span", "bme-recall-tab-badge bme-recall-count-badge", recallBadgeText);
@@ -819,10 +821,8 @@ export function createRecallCardElement({
   }
 
   function updateBarState() {
-    const showRecall = hasRecall || !hasPlot;
-    const showPlanner = hasPlot || !hasRecall;
-    recallTab.hidden = !showRecall;
-    plannerTab.hidden = !showPlanner;
+    recallTab.hidden = false;
+    plannerTab.hidden = !hasPlot;
     recallTab.classList.toggle("active", activeTab === "recall");
     plannerTab.classList.toggle("active", activeTab === "planner");
     recallTab.setAttribute("aria-pressed", activeTab === "recall" ? "true" : "false");
@@ -834,7 +834,9 @@ export function createRecallCardElement({
     if (recallBadge) {
       recallBadge.textContent = nodeCount > 0
         ? t("recall.card.memoryCount", { count: nodeCount })
-        : t("recall.card.memoryReady");
+        : hasRecall
+          ? t("recall.card.memoryReady")
+          : t("recall.card.memoryCount", { count: 0 });
     }
 
     const currentEstimate = activeTab === "planner" && hasPlotRecordContent(activePlotRecord)
@@ -886,10 +888,7 @@ export function createRecallCardElement({
 
   function switchTab(tabName) {
     if (tabName !== "recall" && tabName !== "planner") return;
-    const requestedAvailable =
-      (tabName === "recall" && (hasRecall || !hasPlot)) ||
-      (tabName === "planner" && (hasPlot || !hasRecall));
-    if (!requestedAvailable) return;
+    if (tabName === "planner" && !hasPlot) return;
 
     const wasExpanded = card.classList.contains("expanded");
     const sameTab = tabName === activeTab;
@@ -931,17 +930,7 @@ export function createRecallCardElement({
     hasRecall = nextHasRecall;
     hasPlot = nextHasPlot;
 
-    const dataUpdate =
-      Object.prototype.hasOwnProperty.call(next, "record") ||
-      Object.prototype.hasOwnProperty.call(next, "plotRecord");
-    if (dataUpdate) {
-      activeTab = nextHasPlot ? "planner" : nextHasRecall ? "recall" : activeTab;
-    } else {
-      const currentAvailable =
-        (activeTab === "planner" && nextHasPlot) ||
-        (activeTab === "recall" && nextHasRecall);
-      activeTab = currentAvailable ? activeTab : nextHasPlot ? "planner" : "recall";
-    }
+    if (activeTab === "planner" && !nextHasPlot) activeTab = "recall";
 
     card.dataset.updatedAt = String(activeRecord?.updatedAt || "");
     card.dataset.activeTab = activeTab;
