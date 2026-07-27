@@ -37,7 +37,7 @@
   - 追踪楼层、提取范围、召回来源和持久记录。
 
 - **持久化**
-  - 查看 IndexedDB、同步、恢复、sidecar、native hydrate 等诊断信息。
+  - 查看当前主存储、Cloud Sync、恢复、sidecar、native hydrate 等诊断信息。
 
 ### 操作
 
@@ -85,7 +85,7 @@
 
 - **功能开关**
   - 提取、召回、整合、总结、反思、压缩、遗忘、概率召回等主能力。
-  - 云端同步方式；本地 OPFS / IndexedDB 主存储始终启用。
+  - 云端同步方式；普通 ST 自动选择 OPFS / IndexedDB，Authority SQL 或 Luker chat-state 成为主存储时自动 Cloud Sync 停用，手动服务器备份仍可选。
   - 世界书过滤。
   - 隐藏旧楼层与聊天区渲染限制。
 

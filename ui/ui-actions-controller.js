@@ -1450,11 +1450,6 @@ export async function onDeleteAllIdbController(runtime) {
     const bmeDbs = databases.filter((db) =>
       String(db.name || "").startsWith("STBME_"),
     );
-    if (bmeDbs.length === 0) {
-      runtime.toastr.info("没有找到 BME 本地缓存数据库");
-      return { handledToast: true };
-    }
-
     let deletedCount = 0;
     for (const db of bmeDbs) {
       try {
@@ -1462,7 +1457,7 @@ export async function onDeleteAllIdbController(runtime) {
           const req = indexedDB.deleteDatabase(db.name);
           req.onsuccess = () => resolve();
           req.onerror = () => reject(req.error);
-          req.onblocked = () => resolve();
+          req.onblocked = () => reject(new Error("indexeddb-delete-blocked"));
         });
         deletedCount += 1;
       } catch {
@@ -1470,6 +1465,10 @@ export async function onDeleteAllIdbController(runtime) {
       }
     }
     const opfsResult = await runtime.deleteAllOpfsStorage?.();
+    const opfsDeleted = opfsResult?.deleted === true;
+    const opfsMissing = opfsResult?.reason === "not-found";
+    const opfsFailed = !opfsDeleted && !opfsMissing;
+    const opfsStatus = opfsDeleted ? "已处理" : opfsMissing ? "无" : `失败（${opfsResult?.reason || "unknown"}）`;
 
     runtime.clearAllCachedIndexedDbSnapshots?.();
     const activeChatId = runtime.getCurrentChatId?.();
@@ -1502,12 +1501,18 @@ export async function onDeleteAllIdbController(runtime) {
       });
     }
     runtime.refreshPanelLiveState?.();
-    if (bmeDbs.length === 0 && opfsResult?.deleted !== true) {
+    if (bmeDbs.length === 0 && opfsMissing) {
       runtime.toastr.info("没有找到 BME 本地图谱存储");
       return { handledToast: true };
     }
+    if (deletedCount < bmeDbs.length || opfsFailed) {
+      runtime.toastr.warning(
+        `部分本地图谱存储未能删除：IndexedDB ${deletedCount}/${bmeDbs.length}，OPFS ${opfsStatus}。请关闭其他标签页并检查浏览器存储权限后重试。`,
+      );
+      return { handledToast: true };
+    }
     runtime.toastr.success(
-      `已清空 BME 本地图谱存储：IndexedDB ${deletedCount}/${bmeDbs.length}，OPFS ${opfsResult?.deleted ? "已处理" : "无"}`,
+      `已清空 BME 本地图谱存储：IndexedDB ${deletedCount}/${bmeDbs.length}，OPFS ${opfsStatus}`,
     );
   } catch (error) {
     runtime.toastr.error(`删除失败: ${error?.message || error}`);

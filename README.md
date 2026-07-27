@@ -10,7 +10,7 @@ ST-BME（Bionic Memory Ecology）是一个 **SillyTavern 第三方前端扩展**
 
 ## 文档导航
 
-本 README 是**精简入口**。详细内容都在 [`docs/`](docs/README.md)：
+本 README 提供完整的产品概览与快速入口；配置细节、内部原理和维护约定在 [`docs/`](docs/README.md)：
 
 | 你想做什么 | 去哪看 |
 | --- | --- |
@@ -33,8 +33,8 @@ ST-BME（Bionic Memory Ecology）是一个 **SillyTavern 第三方前端扩展**
 - **图谱可视化** — 内置 Canvas 力导向图谱，支持实时/认知/总结视图和移动端视图。
 - **任务预设系统** — 提取、召回、压缩、总结、反思、整合、规划统一走 task profile，支持正则、世界书、EJS 渲染。
 - **ENA Planner 集成** — 默认关闭、显式启用的发送前剧情规划；只介入新 user 消息，并与 BME 召回及 `planner` 任务预设共享同一回合语义。
-- **持久化与同步** — 本地优先（IndexedDB），支持云端镜像、备份/恢复、重建、修复。
-- **历史安全** — 检测删楼/编辑/swipe，自动回滚受影响批次并从变动点恢复；对"只渲染最近 N 条"的截断视图有保护。
+- **持久化与同步** — 记忆按聊天记录而非角色卡隔离；普通 ST 自动选择 OPFS / IndexedDB，兼容 Luker chat-state 与 Authority SQL，并提供浏览器本地存储的 Cloud Sync、独立备份/恢复、重建和修复。
+- **历史安全** — 检测删楼/编辑/swipe/reroll，自动回滚受影响批次并从变动点恢复；reroll 在回滚旧助手效果的同时复用父 user 楼层的持久召回，不重复运行 ENA；对"只渲染最近 N 条"的截断视图有保护。
 - **长聊天优化** — 隐藏旧楼层控制 token，限制渲染楼层降低卡顿，关键计算支持 Native/WASM 灰度加速。
 
 ---
@@ -144,8 +144,8 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 
 ## 数据存储与历史安全（要点）
 
-- **本地优先**：主存储使用 IndexedDB，按聊天隔离（`STBME_{chatId}`），热路径用增量提交。
-- **云端副本**：Cloud Sync 位于本地主存储之上，复用 SillyTavern 文件 API，支持自动同步/手动备份，不需要自定义后端。
+- **按聊天隔离的主存储**：每张聊天记录独立绑定一个耐久主源，同一角色卡的多张聊天不会共享记忆。普通 SillyTavern 自动选择 OPFS / IndexedDB；Luker 使用 chat-state；Authority 可用时由 SQL 成为规范主源。
+- **跨设备与备份**：Cloud Sync 只复制浏览器本地的 OPFS / IndexedDB；Authority SQL 本身已经跨设备共享，不再叠加第二份 Cloud Sync。手动服务器备份与自动镜像是独立对象。
 - **历史安全**：检测删楼/编辑/swipe，优先回滚重放、必要时全量重建；对渲染切片截断有保护，避免误清空。
 - **向前兼容**：耐久快照顶层结构冻结、宽容解析、就地升级——扩展数据结构是"加字段"，不是大迁移。
 

@@ -46,6 +46,17 @@ export function uiTypeLabel(type) {
   return translated === key ? normalized : translated;
 }
 
+export function uiCloudStorageModeHelpText(mode = "automatic", primaryStorageTier = "") {
+  const primary = String(primaryStorageTier || "");
+  if (primary === "authority-sql") return t("panel.cloudSync.authorityHelp");
+  if (primary === "luker-chat-state") return t("panel.cloudSync.lukerHelp");
+  return t(
+    mode === "manual"
+      ? "panel.cloudSync.manualHelp"
+      : "panel.cloudSync.automaticHelp",
+  );
+}
+
 export function normalizeOwnerUiType(ownerType = "") {
   const normalized = String(ownerType || "").trim();
   if (normalized === "user") return "user";

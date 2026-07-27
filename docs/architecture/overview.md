@@ -153,7 +153,6 @@ ST-BME/
 │   ├── identity-resolver.js        # 身份解析核心
 │   ├── runtime-state.js
 │   ├── conversation-workspace.js   # 当前聊天运行时状态与任务租约
-│   ├── generation-context.js       # 宿主生成 type 跟踪 + 父 user 楼解析
 │   ├── recall-input-state.js       # 召回 input/intent/trivial-skip 状态工厂
 │   ├── reroll-recall-input.js      # reroll/continue 召回输入 + planner handoff 输入工厂
 │   ├── generation-recall-transactions.js # 生成召回事务生命周期工厂
@@ -218,9 +217,10 @@ ST-BME/
 
 | SillyTavern 事件 | ST-BME 行为 |
 | --- | --- |
-| `CHAT_CHANGED` | 加载当前聊天图谱，恢复持久状态，应用隐藏/渲染限制 |
-| `GENERATION_AFTER_COMMANDS` | 助手回复后触发自动提取 |
-| `GENERATE_BEFORE_COMBINE_PROMPTS` | 生成前召回并注入 |
-| `MESSAGE_SENT` | 捕获发送意图和权威用户输入 |
-| `MESSAGE_RECEIVED` | 更新自动提取队列和持久化状态 |
+| `CHAT_CHANGED` / `CHAT_LOADED` | 切换会话身份，加载该聊天图谱，恢复持久状态并应用隐藏/渲染限制 |
+| `GENERATION_STARTED` | 记录宿主 generation type，并为 fresh normal generation 冻结权威用户输入 |
+| `GENERATION_AFTER_COMMANDS` | fresh generation 建立并运行召回事务；reroll/continue 等 no-new-user generation 延后到最终注入阶段 |
+| `GENERATE_BEFORE_COMBINE_PROMPTS` | 确定性重放父 user 楼层的持久召回，或完成 fallback recall 与最终注入 |
+| `MESSAGE_SENT` | 把本轮召回和可选 ENA plot 绑定到刚写入的 user 楼层 |
+| `MESSAGE_RECEIVED` | 助手回复落层后更新并调度自动提取队列 |
 | 编辑 / 删除 / Swipe | 检测历史变化并恢复 |

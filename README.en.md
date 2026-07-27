@@ -10,7 +10,7 @@ ST-BME (Bionic Memory Ecology) is a **SillyTavern third-party frontend extension
 
 ## Documentation
 
-This README is a **slim entry point**. The details live in [`docs/`](docs/README.md):
+This README provides the complete product overview and quick entry points. Configuration details, internals, and maintenance conventions live in [`docs/`](docs/README.md):
 
 | What you want | Where to look |
 | --- | --- |
@@ -20,7 +20,7 @@ This README is a **slim entry point**. The details live in [`docs/`](docs/README
 | How each feature works and its boundaries | [`docs/features/`](docs/features/) |
 | Development, testing, contribution conventions | [`docs/contributing/`](docs/contributing/) |
 
-Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/usage/panel.md) · [Troubleshooting](docs/usage/troubleshooting.md) · [Memory model](docs/features/memory-model.md) · [History safety](docs/features/history-safety.md)
+Quick links: [Configuration](docs/usage/configuration.en.md) · [Panel guide](docs/usage/panel.en.md) · [Troubleshooting](docs/usage/troubleshooting.en.md) · [Memory model](docs/features/memory-model.md) · [History safety](docs/features/history-safety.md)
 
 > Developer docs (architecture / algorithms / features / contributing) are currently Chinese-only. The English docs cover the README and the `docs/usage/` user manual.
 
@@ -35,8 +35,8 @@ Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/
 - **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
 - **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
 - **ENA Planner integration** — Explicitly enabled, default-off pre-send story planning for fresh user turns, sharing BME recall and the `planner` task profile.
-- **Persistence & sync** — Local-first (IndexedDB), with cloud mirroring, backup/restore, rebuild, and repair.
-- **History safety** — Detects message deletion / edits / swipes, automatically rolls back affected batches and recovers from the change point; protects against truncated "render only the last N" views.
+- **Persistence & sync** — Memory is isolated by chat record, not character card. Standard ST selects OPFS / IndexedDB automatically, with Luker chat-state and Authority SQL support plus Cloud Sync for browser-local storage, independent backup/restore, rebuild, and repair.
+- **History safety** — Detects message deletion / edits / swipes / rerolls and recovers from the change point. A reroll rolls back the old assistant effects while reusing the parent user turn's persisted recall without rerunning ENA; truncated "render only the last N" views are protected.
 - **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.
 
 ---
@@ -117,7 +117,7 @@ Then restart or refresh SillyTavern.
 
 > Minimum viable setup: enable the plugin and ensure the current chat model works. Recall quality drops noticeably when embedding is unavailable, so configure it early.
 >
-> See [Configuration](docs/usage/configuration.md) for full settings and [Panel guide](docs/usage/panel.md) for what each panel area does.
+> See [Configuration](docs/usage/configuration.en.md) for full settings and [Panel guide](docs/usage/panel.en.md) for what each panel area does.
 
 ---
 
@@ -140,24 +140,24 @@ Then restart or refresh SillyTavern.
 | Backup / restore cloud | Config → Cloud Sync | Upload/restore the current chat replica in manual-backup mode |
 | Unhide all | Config → Hide old turns | Restore turns hidden by ST-BME |
 
-> After switching embedding mode or model, run "Rebuild vectors". Per-action details and danger notes are in [Configuration](docs/usage/configuration.md) and [Panel guide](docs/usage/panel.md).
+> After switching embedding mode or model, run "Rebuild vectors". Per-action details and danger notes are in [Configuration](docs/usage/configuration.en.md) and [Panel guide](docs/usage/panel.en.md).
 
 ---
 
 ## Data storage & history safety (highlights)
 
-- **Local-first**: primary storage uses IndexedDB, isolated per chat (`STBME_{chatId}`), with incremental commits on the hot path.
-- **Cloud replica**: Cloud Sync sits above local primary storage, reuses SillyTavern's file API, supports automatic sync/manual backup, and requires no custom backend.
+- **One primary per chat**: every chat record binds its own durable primary, so multiple chats opened from one character card never share memory. Standard SillyTavern selects OPFS / IndexedDB; Luker uses chat-state; Authority SQL becomes canonical when available.
+- **Multi-device replication and backups**: Cloud Sync only replicates browser-local OPFS / IndexedDB. Authority SQL is already shared across devices and does not get a second Cloud Sync layer. Manual server backups are separate from the automatic mirror.
 - **History safety**: detects delete/edit/swipe, prefers rollback-and-replay, falls back to full rebuild when needed; protects against render-truncated views to avoid wrongly clearing the graph.
 - **Forward compatibility**: durable snapshots have a frozen top-level shape, tolerant parsing, and upgrade-on-read — extending the data structure means "add a field", not a big migration.
 
-> See [Storage & sync](docs/usage/storage-and-sync.md), [History safety](docs/features/history-safety.md), and [Data formats & forward compatibility](docs/architecture/storage-and-formats.md).
+> See [Storage & sync](docs/usage/storage-and-sync.en.md), [History safety](docs/features/history-safety.md), and [Data formats & forward compatibility](docs/architecture/storage-and-formats.md).
 
 ---
 
 ## Having trouble?
 
-Step-by-step troubleshooting for common situations (panel won't open, no auto-extraction, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.md).
+Step-by-step troubleshooting for common situations (panel won't open, no auto-extraction, poor recall, nodes appear cleared, recall cards missing, direct embedding fails, etc.) is in [Troubleshooting](docs/usage/troubleshooting.en.md).
 
 ---
 

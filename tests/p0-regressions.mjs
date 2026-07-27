@@ -83,6 +83,7 @@ import {
 import {
   onClearGraphController,
   onClearVectorCacheController,
+  onDeleteAllIdbController,
   onDeleteCurrentIdbController,
   onManualCompressController,
   onManualEvolveController,
@@ -4645,6 +4646,79 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   assert.ok(statusTexts.includes("向量同步等待持久化"));
   assert.equal(vectorSyncCalls, 0);
   assert.equal(effects.committedVectorSync?.enabled, true);
+}
+
+async function testDeleteAllLocalStorageStillDeletesOpfsWithoutIndexedDb() {
+  const originalIndexedDb = globalThis.indexedDB;
+  let opfsDeleteCalls = 0;
+  const toastMessages = [];
+  globalThis.indexedDB = {
+    async databases() {
+      return [];
+    },
+  };
+
+  try {
+    const runtime = {
+      prompt: () => "DELETE",
+      closeAllBmeDbs: async () => {},
+      deleteAllOpfsStorage: async () => {
+        opfsDeleteCalls += 1;
+        return { deleted: true };
+      },
+      clearAllCachedIndexedDbSnapshots() {},
+      getCurrentChatId: () => "",
+      refreshPanelLiveState() {},
+      toastr: {
+        info: (message) => toastMessages.push(["info", message]),
+        success: (message) => toastMessages.push(["success", message]),
+        warning: (message) => toastMessages.push(["warning", message]),
+        error: (message) => toastMessages.push(["error", message]),
+      },
+    };
+    const result = await onDeleteAllIdbController(runtime);
+
+    assert.equal(result?.handledToast, true);
+    assert.equal(opfsDeleteCalls, 1, "OPFS-only storage must still be deleted");
+    assert.ok(
+      toastMessages.some(([level, message]) =>
+        level === "success" && /OPFS 已处理/.test(String(message || ""))),
+    );
+
+    toastMessages.length = 0;
+    globalThis.indexedDB = {
+      async databases() {
+        return [{ name: "STBME_blocked" }];
+      },
+      deleteDatabase() {
+        const request = {};
+        queueMicrotask(() => request.onblocked?.());
+        return request;
+      },
+    };
+    await onDeleteAllIdbController(runtime);
+    assert.ok(
+      toastMessages.some(([level, message]) =>
+        level === "warning" && /IndexedDB 0\/1/.test(String(message || ""))),
+      "a blocked IndexedDB delete must not be reported as successful",
+    );
+
+    toastMessages.length = 0;
+    globalThis.indexedDB = { databases: async () => [] };
+    runtime.deleteAllOpfsStorage = async () => ({
+      deleted: false,
+      reason: "delete-failed",
+      error: new Error("permission denied"),
+    });
+    await onDeleteAllIdbController(runtime);
+    assert.ok(
+      toastMessages.some(([level, message]) =>
+        level === "warning" && /OPFS 失败（delete-failed）/.test(String(message || ""))),
+      "an OPFS delete failure must not be reported as missing or successful",
+    );
+  } finally {
+    globalThis.indexedDB = originalIndexedDb;
+  }
 }
 
 async function testDirtyRangedVectorSyncRebuildsWholeVectorSpace() {
@@ -10216,6 +10290,7 @@ await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
 await testDirtyRangedVectorSyncRebuildsWholeVectorSpace();
 await testBackendVectorQueryFailureMarksStateDirty();
 await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
+await testDeleteAllLocalStorageStillDeletesOpfsWithoutIndexedDb();
 await testCompressTypeAcceptsTopLevelFieldsResult();
 await testExtractorFailsOnUnknownOperation();
 await testExtractorNormalizesFlatCreateOperation();
@@ -10282,7 +10357,6 @@ await testMessageReceivedDefersExtractionDuringHostGeneration();
 await testMessageReceivedLagModeWaitsSilentlyForNextAssistant();
 await testMessageReceivedLagModeQueuesPreviousAssistantOnly();
 await testClearGraphClearsRecoveryAnchorsAndPersistsEmptyMetadata();
-await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testLagModeSmartTriggerOnlyScoresEligibleWindow();
 await testLagModeRespectsExtractEveryAgainstEligibleWindow();
 await testGenerationEndedResumesPendingAutoExtractionAfterSettle();
