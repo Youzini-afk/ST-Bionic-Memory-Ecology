@@ -1,8 +1,6 @@
 import { debugLog } from "../runtime/debug-logging.js";
 import { callLLMForJSON } from "../llm/llm.js";
 import {
-  buildTaskExecutionDebugContext,
-  buildTaskLlmPayload,
   buildTaskPrompt,
 } from "../prompting/prompt-builder.js";
 import { applyTaskRegex } from "../prompting/task-regex.js";
@@ -27,49 +25,12 @@ import {
 import { getNode, getActiveNodes } from "../graph/graph.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
 import { normalizeMemoryScope } from "../graph/memory-scope.js";
-
-function createAbortError(message = "操作已终止") {
-  const error = new Error(message);
-  error.name = "AbortError";
-  return error;
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) {
-    throw signal.reason instanceof Error ? signal.reason : createAbortError();
-  }
-}
-
-function createTaskLlmDebugContext(promptBuild, regexInput) {
-  return typeof buildTaskExecutionDebugContext === "function"
-    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
-    : null;
-}
-
-function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
-  if (typeof buildTaskLlmPayload === "function") {
-    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
-  }
-
-  return {
-    systemPrompt: String(promptBuild?.systemPrompt || ""),
-    userPrompt: String(fallbackUserPrompt || ""),
-    promptMessages: [],
-    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
-      ? promptBuild.privateTaskMessages
-      : [],
-  };
-}
-
-function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
-  const hasPromptMessages =
-    Array.isArray(promptPayload?.promptMessages) &&
-    promptPayload.promptMessages.length > 0;
-  if (hasPromptMessages) {
-    return String(promptPayload?.systemPrompt || "");
-  }
-  return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
-}
+import {
+  createTaskLlmDebugContext,
+  resolveTaskLlmSystemPrompt,
+  resolveTaskPromptPayload,
+  throwIfAborted,
+} from "./task-llm.js";
 
 function clampInt(value, fallback = 0, min = 0, max = 999999) {
   const parsed = Math.floor(Number(value));

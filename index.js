@@ -9,14 +9,14 @@ import {
   getRequestHeaders,
   saveMetadata,
   saveSettingsDebounced,
-} from "../../../../script.js";
+} from "./host/st-script.js";
 import {
   extension_settings,
   getContext,
   saveMetadataDebounced,
-} from "../../../extensions.js";
+} from "./host/st-extensions.js";
 
-import { BmeChatManager } from "./sync/bme-chat-manager.js";
+import { ConversationRepository } from "./sync/conversation-repository.js";
 import {
   BmeDatabase,
   buildBmeDbName,
@@ -74,11 +74,13 @@ import {
   reducePersistenceStatePatch,
 } from "./sync/persistence-reducer.js";
 import {
+  applyRecoveryPlanToGraphVectorState,
   buildExtractionMessages,
   clampRecoveryStartFloor,
   getAssistantTurns,
   isAssistantChatMessage,
   isSystemMessageForExtraction,
+  prepareGraphVectorStateForReplay,
   pruneProcessedMessageHashesFromFloor,
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
@@ -120,12 +122,22 @@ import {
   BME_HOST_PROFILE_LUKER,
   getBmeHostAdapter,
   isBmeLightweightHostMode,
+  isLukerHostContext,
   normalizeBmeChatStateTarget,
   resolveBmeHostProfile,
   resolveChatStateTargetChatId,
   resolveCurrentBmeChatStateTarget,
   serializeBmeChatStateTarget,
 } from "./host/runtime-host-adapter.js";
+import {
+  getEventMakeFirst,
+  getHostCurrentChatId,
+  getHostDocument,
+  getHostMutationObserver,
+  getHostWindow,
+  readHostMvuExtraAnalysisFlag,
+  readSendTextareaValue,
+} from "./host/st-runtime.js";
 import {
   recoverHistoryIfNeededController,
   rollbackGraphForRerollController,
@@ -135,10 +147,20 @@ import {
   shouldAdvanceProcessedHistory as shouldAdvanceProcessedHistoryController,
 } from "./maintenance/extraction-success-controller.js";
 import {
+  clonePlanCommitValue,
+  getSummaryStageLabel,
+  runCompressionPostProcessPlanCommit,
+  runReflectionPostProcessPlanCommit,
+  runSummaryPostProcessPlanCommit,
+  scheduleBackgroundMaintenancePostProcessController,
+} from "./maintenance/post-process-controller.js";
+import {
   executeExtractionBatchController,
   onExtractionTaskController,
   onManualExtractController,
   onRerollController,
+  recordGraphMutationController,
+  replayExtractionFromHistoryController,
   resolveAutoExtractionPlanController,
   runExtractionController,
 } from "./maintenance/extraction-controller.js";
@@ -164,25 +186,18 @@ import {
 import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js";
 import { createConversationSession } from "./runtime/conversation-session.js";
+import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
 import { createAutoExtractionDefer } from "./runtime/auto-extraction-defer.js";
 import { runPlannerRecallForEnaController } from "./runtime/planner-recall-controller.js";
-import {
-  extractMemories,
-  generateReflection,
-} from "./maintenance/extractor.js";
+import { extractMemories } from "./maintenance/extractor.js";
 import {
   generateSmallSummary,
   rebuildHierarchicalSummaryState,
   resetHierarchicalSummaryState,
   rollupSummaryFrontier,
-  runHierarchicalSummaryPostProcess,
 } from "./maintenance/hierarchical-summary.js";
-import {
-  createDefaultSummaryState,
-  normalizeGraphSummaryState,
-} from "./graph/summary-state.js";
 import {
   appendLukerGraphJournalEntryV2,
   buildGraphCommitMarker,
@@ -244,8 +259,6 @@ import {
   unhideAll,
 } from "./ui/hide-engine.js";
 import {
-  addEdge,
-  addNode,
   createEmptyGraph,
   deserializeGraph,
   exportGraph,
@@ -359,6 +372,7 @@ import {
   loadGraphFromChatImpl,
   maybeCaptureGraphShadowSnapshotImpl,
   onRebuildLocalCacheFromLukerSidecarImpl,
+  persistDetachedGraphSnapshotImpl,
   persistExtractionBatchResultImpl,
   saveGraphToChatImpl,
   shouldUseAuthorityGraphStoreImpl,
@@ -577,11 +591,7 @@ function syncBmeHostRuntimeFlags(context = getContext()) {
 
 function readGlobalCurrentChatId() {
   try {
-    return normalizeChatIdCandidate(
-      globalThis.SillyTavern?.getCurrentChatId?.() ||
-        globalThis.getCurrentChatId?.() ||
-        "",
-    );
+    return normalizeChatIdCandidate(getHostCurrentChatId());
   } catch {
     return "";
   }
@@ -639,23 +649,23 @@ function getCurrentChatId(context = getContext()) {
   return resolveCurrentChatIdentity(context).chatId;
 }
 
-function getRuntimeGraphChatIdFallback(graph = currentGraph) {
+function getRuntimeGraphChatIdFallback(graph = conversationWorkspace.graph) {
   const graphMeta = getGraphPersistenceMeta(graph) || {};
   return resolveRuntimeGraphFallbackIdentityCore({
     graph,
     graphMeta,
-    persistenceState: graphPersistenceState,
+    persistenceState: conversationWorkspace.graphPersistenceState,
   }).chatId;
 }
 
-function getGraphOwnedChatId(graph = currentGraph) {
+function getGraphOwnedChatId(graph = conversationWorkspace.graph) {
   const graphMeta = getGraphPersistenceMeta(graph) || {};
   return resolveGraphOwnerIdentityCore({ graph, graphMeta }).chatId;
 }
 
 function resolveOperationalChatId(
   context = getContext(),
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
   explicitChatId = "",
 ) {
   return (
@@ -667,7 +677,7 @@ function resolveOperationalChatId(
 
 function resolvePersistenceChatId(
   context = getContext(),
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
   explicitChatId = "",
 ) {
   return resolvePersistenceChatIdCore({
@@ -675,9 +685,9 @@ function resolvePersistenceChatId(
     activeIdentity: resolveCurrentChatIdentity(context),
     graph,
     graphMeta: getGraphPersistenceMeta(graph) || {},
-    currentGraph,
-    currentGraphMeta: getGraphPersistenceMeta(currentGraph) || {},
-    persistenceState: graphPersistenceState,
+    currentGraph: conversationWorkspace.graph,
+    currentGraphMeta: getGraphPersistenceMeta(conversationWorkspace.graph) || {},
+    persistenceState: conversationWorkspace.graphPersistenceState,
     context,
   });
 }
@@ -766,10 +776,10 @@ function clearCurrentChatCommitMarker(
     lastPersistMode: `commit-marker-clear:${saveMode}`,
     acceptedStorageTier: shouldResetAcceptedRevision
       ? "none"
-      : String(graphPersistenceState.acceptedStorageTier || "none"),
+      : String(conversationWorkspace.graphPersistenceState.acceptedStorageTier || "none"),
     lastAcceptedRevision: shouldResetAcceptedRevision
       ? 0
-      : Number(graphPersistenceState.lastAcceptedRevision || 0),
+      : Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
   });
 
   return {
@@ -812,25 +822,25 @@ function clearCurrentChatMetadataGraphFallback(
     ),
     lastPersistMode: `metadata-full-clear:${saveMode}`,
     lastRecoverableStorageTier:
-      graphPersistenceState.lastRecoverableStorageTier === "metadata-full"
+      conversationWorkspace.graphPersistenceState.lastRecoverableStorageTier === "metadata-full"
         ? "none"
-        : graphPersistenceState.lastRecoverableStorageTier,
+        : conversationWorkspace.graphPersistenceState.lastRecoverableStorageTier,
     pendingPersist:
-      clearPendingPersist === true ? false : graphPersistenceState.pendingPersist,
+      clearPendingPersist === true ? false : conversationWorkspace.graphPersistenceState.pendingPersist,
     writesBlocked:
-      clearPendingPersist === true ? false : graphPersistenceState.writesBlocked,
+      clearPendingPersist === true ? false : conversationWorkspace.graphPersistenceState.writesBlocked,
     queuedPersistRevision:
-      clearPendingPersist === true ? 0 : graphPersistenceState.queuedPersistRevision,
+      clearPendingPersist === true ? 0 : conversationWorkspace.graphPersistenceState.queuedPersistRevision,
     queuedPersistChatId:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistChatId,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistChatId,
     queuedPersistMode:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistMode,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistMode,
     queuedPersistRotateIntegrity:
       clearPendingPersist === true
         ? false
-        : graphPersistenceState.queuedPersistRotateIntegrity,
+        : conversationWorkspace.graphPersistenceState.queuedPersistRotateIntegrity,
     queuedPersistReason:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistReason,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistReason,
   });
   if (clearPendingPersist === true) {
     clearPendingGraphPersistRetry();
@@ -890,23 +900,23 @@ function clearCurrentChatRecoveryAnchors(
     shadowSnapshotUpdatedAt: "",
     shadowSnapshotReason: "",
     lastRecoverableStorageTier:
-      shadowCleared || metadataResult?.cleared ? "none" : graphPersistenceState.lastRecoverableStorageTier,
+      shadowCleared || metadataResult?.cleared ? "none" : conversationWorkspace.graphPersistenceState.lastRecoverableStorageTier,
     pendingPersist:
-      clearPendingPersist === true ? false : graphPersistenceState.pendingPersist,
+      clearPendingPersist === true ? false : conversationWorkspace.graphPersistenceState.pendingPersist,
     writesBlocked:
-      clearPendingPersist === true ? false : graphPersistenceState.writesBlocked,
+      clearPendingPersist === true ? false : conversationWorkspace.graphPersistenceState.writesBlocked,
     queuedPersistRevision:
-      clearPendingPersist === true ? 0 : graphPersistenceState.queuedPersistRevision,
+      clearPendingPersist === true ? 0 : conversationWorkspace.graphPersistenceState.queuedPersistRevision,
     queuedPersistChatId:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistChatId,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistChatId,
     queuedPersistMode:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistMode,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistMode,
     queuedPersistRotateIntegrity:
       clearPendingPersist === true
         ? false
-        : graphPersistenceState.queuedPersistRotateIntegrity,
+        : conversationWorkspace.graphPersistenceState.queuedPersistRotateIntegrity,
     queuedPersistReason:
-      clearPendingPersist === true ? "" : graphPersistenceState.queuedPersistReason,
+      clearPendingPersist === true ? "" : conversationWorkspace.graphPersistenceState.queuedPersistReason,
   });
   if (clearPendingPersist === true) {
     clearPendingGraphPersistRetry();
@@ -932,20 +942,20 @@ function isRecoveryOnlyPersistTier(storageTier = "none") {
 
 function resolvePersistRevisionFloor(
   requestedRevision = 0,
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
 ) {
   return Math.max(
     normalizeIndexedDbRevision(requestedRevision),
-    normalizeIndexedDbRevision(graphPersistenceState.revision),
-    normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
-    normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.revision),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.lastPersistedRevision),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.queuedPersistRevision),
     normalizeIndexedDbRevision(graph ? getGraphPersistedRevision(graph) : 0),
   );
 }
 
 function allocateRequestedPersistRevision(
   requestedRevision = 0,
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
 ) {
   return Math.max(1, resolvePersistRevisionFloor(requestedRevision, graph) + 1);
 }
@@ -966,18 +976,18 @@ function normalizeRestoreLockState(lock = null) {
 }
 
 function isRestoreLockActive() {
-  return normalizeRestoreLockState(graphPersistenceState.restoreLock).active;
+  return normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock).active;
 }
 
 function getRestoreLockMessage(operationLabel = "当前操作") {
-  const lock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  const lock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
   if (!lock.active) return "";
   const details = [lock.reason, lock.source].filter(Boolean).join(" / ");
   return `${operationLabel}已暂停：当前处于恢复锁${details ? `（${details}）` : ""}`;
 }
 
 function enterRestoreLock(source = "runtime", reason = "") {
-  const currentLock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
   const nextLock = {
     active: true,
     depth: currentLock.depth + 1,
@@ -992,7 +1002,7 @@ function enterRestoreLock(source = "runtime", reason = "") {
 }
 
 function leaveRestoreLock(source = "runtime") {
-  const currentLock = normalizeRestoreLockState(graphPersistenceState.restoreLock);
+  const currentLock = normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock);
   if (!currentLock.active) {
     return currentLock;
   }
@@ -1057,12 +1067,12 @@ function persistGraphCommitMarker(
   context = getContext(),
   {
     reason = "graph-commit-marker",
-    revision = graphPersistenceState.revision,
+    revision = conversationWorkspace.graphPersistenceState.revision,
     storageTier = "none",
     accepted = false,
     lastProcessedAssistantFloor = null,
     extractionCount: nextExtractionCount = null,
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     chatId: explicitChatId = "",
     immediate = true,
   } = {},
@@ -1169,7 +1179,7 @@ function applyPersistMismatchBlockedState(
   return {
     success: false,
     loaded: false,
-    loadState: graphPersistenceState.loadState,
+    loadState: conversationWorkspace.graphPersistenceState.loadState,
     reason:
       diagnostic.reason ||
       String(
@@ -1296,11 +1306,6 @@ function readRuntimeDebugSnapshot() {
 
 // ==================== 状态 ====================
 
-let currentGraph = null;
-let isExtracting = false;
-let isRecalling = false;
-let activeRecallPromise = null;
-let recallRunSequence = 0;
 let nativePersistDeltaInstallPromise = null;
 let nativeHydrateInstallPromise = null;
 
@@ -1319,15 +1324,15 @@ function createGraphMutationGateRuntime() {
     getAuthorityRuntimeSnapshot,
     getContext,
     getCurrentChatId,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getBmeLocalStoreCapabilitySnapshot: () => bmeLocalStoreCapabilitySnapshot,
     getGraphMutationBlockReason,
-    getGraphPersistenceState: () => graphPersistenceState,
+    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
     getPreferredGraphLocalStorePresentationSync,
     getRequestedGraphLocalStorageMode,
     getRestoreLockMessage,
     getRuntimeDebugState,
-    getRuntimeStatus: () => runtimeStatus,
+    getRuntimeStatus: () => conversationWorkspace.runtimeStatus,
     getSettings,
     hasMeaningfulRuntimeGraphForChat,
     hasRuntimeGraphMutationContext,
@@ -1383,7 +1388,7 @@ function createGraphLoadPersistRuntime() {
     deserializeGraph,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     detectStaleIndexedDbSnapshotAgainstRuntime,
-    ensureBmeChatManager,
+    ensureConversationRepository,
     ensureCurrentGraphRuntimeState,
     exportAuthoritySqlSnapshotForCheckpoint,
     getAcceptedCommitMarkerRevision,
@@ -1392,27 +1397,27 @@ function createGraphLoadPersistRuntime() {
     getChatMetadataIntegrity,
     getContext,
     getCurrentChatId,
-    getCurrentGraph: () => currentGraph,
-    setCurrentGraph: (graph) => { currentGraph = graph; },
-    getExtractionCount: () => extractionCount,
-    setExtractionCount: (value) => { extractionCount = value; },
+    getCurrentGraph: () => conversationWorkspace.graph,
+    setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
+    getExtractionCount: () => conversationWorkspace.extractionCount,
+    setExtractionCount: (value) => { conversationWorkspace.extractionCount = value; },
     getGraphPersistedRevision,
     getGraphPersistenceMeta,
-    getGraphPersistenceState: () => graphPersistenceState,
-    getLastExtractedItems: () => lastExtractedItems,
-    setLastExtractedItems: (value) => { lastExtractedItems = value; },
-    getLastRecalledItems: () => lastRecalledItems,
-    setLastRecalledItems: (value) => { lastRecalledItems = value; },
-    getLastInjectionContent: () => lastInjectionContent,
-    setLastInjectionContent: (value) => { lastInjectionContent = value; },
-    getRuntimeStatus: () => runtimeStatus,
-    setRuntimeStatus: (value) => { runtimeStatus = value; },
-    getLastExtractionStatus: () => lastExtractionStatus,
-    setLastExtractionStatus: (value) => { lastExtractionStatus = value; },
-    getLastVectorStatus: () => lastVectorStatus,
-    setLastVectorStatus: (value) => { lastVectorStatus = value; },
-    getLastRecallStatus: () => lastRecallStatus,
-    setLastRecallStatus: (value) => { lastRecallStatus = value; },
+    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+    getLastExtractedItems: () => conversationWorkspace.lastExtractedItems,
+    setLastExtractedItems: (value) => { conversationWorkspace.lastExtractedItems = value; },
+    getLastRecalledItems: () => conversationWorkspace.lastRecalledItems,
+    setLastRecalledItems: (value) => { conversationWorkspace.lastRecalledItems = value; },
+    getLastInjectionContent: () => conversationWorkspace.lastInjectionContent,
+    setLastInjectionContent: (value) => { conversationWorkspace.lastInjectionContent = value; },
+    getRuntimeStatus: () => conversationWorkspace.runtimeStatus,
+    setRuntimeStatus: (value) => { conversationWorkspace.runtimeStatus = value; },
+    getLastExtractionStatus: () => conversationWorkspace.lastExtractionStatus,
+    setLastExtractionStatus: (value) => { conversationWorkspace.lastExtractionStatus = value; },
+    getLastVectorStatus: () => conversationWorkspace.lastVectorStatus,
+    setLastVectorStatus: (value) => { conversationWorkspace.lastVectorStatus = value; },
+    getLastRecallStatus: () => conversationWorkspace.lastRecallStatus,
+    setLastRecallStatus: (value) => { conversationWorkspace.lastRecallStatus = value; },
     getPreferredGraphLocalStorePresentationSync,
     getRequestHeaders,
     getSettings,
@@ -1501,16 +1506,16 @@ function createGraphPersistenceIoRuntime() {
     createShadowComparisonGraph,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     detectStaleIndexedDbSnapshotAgainstRuntime,
-    ensureBmeChatManager,
+    ensureConversationRepository,
     ensureCurrentGraphRuntimeState,
     evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
     getChatMetadataIntegrity,
     getContext,
     getCurrentChatId,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getGraphPersistedRevision,
-    getGraphPersistenceState: () => graphPersistenceState,
+    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
     getNativeHydrateInstallPromise: () => nativeHydrateInstallPromise,
     getNativePersistDeltaInstallPromise: () => nativePersistDeltaInstallPromise,
     getPreferredGraphLocalStorePresentationSync,
@@ -1559,14 +1564,14 @@ function createGraphPersistenceIoRuntime() {
     resolveSnapshotGraphStorePresentation,
     schedulePendingGraphPersistRetry,
     scheduleUpload,
-    setCurrentGraph: (nextGraph) => { currentGraph = nextGraph; },
+    setCurrentGraph: (nextGraph) => { conversationWorkspace.graph = nextGraph; },
     setGraphPersistenceState: (nextStateOrPatch = {}) => {
-      graphPersistenceState = {
-        ...graphPersistenceState,
+      conversationWorkspace.graphPersistenceState = {
+        ...conversationWorkspace.graphPersistenceState,
         ...(nextStateOrPatch || {}),
       };
       syncGraphPersistenceDebugState();
-      return graphPersistenceState;
+      return conversationWorkspace.graphPersistenceState;
     },
     setNativeHydrateInstallPromise: (promise) => { nativeHydrateInstallPromise = promise; },
     setNativePersistDeltaInstallPromise: (promise) => { nativePersistDeltaInstallPromise = promise; },
@@ -1578,12 +1583,7 @@ function createGraphPersistenceIoRuntime() {
     updatePersistDeltaDiagnostics,
   };
 }
-let lastInjectionContent = "";
-let lastExtractedItems = []; // 最近提取的节点（面板展示用）
-let lastRecalledItems = []; // 最近召回的节点（面板展示用）
-let extractionCount = 0; // v2: 提取次数计数器（定期触发概要/遗忘/反思）
 let serverSettingsSaveTimer = null;
-let isRecoveringHistory = false;
 let lastRecallFallbackNoticeAt = 0;
 let lastExtractionWarningAt = 0;
 const LOCAL_VECTOR_TIMEOUT_MS = 300000;
@@ -1624,11 +1624,6 @@ function createInitialUiStatus(kind = "runtime") {
     level: "idle",
   });
 }
-let runtimeStatus = createInitialUiStatus("runtime");
-let lastExtractionStatus = createInitialUiStatus("extraction");
-let lastVectorStatus = createInitialUiStatus("vector");
-let lastRecallStatus = createInitialUiStatus("recall");
-let graphPersistenceState = createGraphPersistenceState();
 let authorityCapabilityState = createDefaultAuthorityCapabilityState();
 let authorityBrowserState = createAuthorityBrowserState();
 let authorityProbePromise = null;
@@ -1680,7 +1675,13 @@ const dismissedStageNoticeSignatures = new Map();
 const conversationSession = createConversationSession({
   rerollInferenceWindowMs: GENERATION_RECALL_TRANSACTION_TTL_MS,
 });
-conversationSession.enterChat(resolveCurrentChatIdentity(), {
+const conversationWorkspace = createConversationWorkspace({
+  session: conversationSession,
+  createPersistenceState: createGraphPersistenceState,
+  createStatus: createInitialUiStatus,
+  clearTimeout,
+});
+conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
   reason: "runtime-init",
 });
 function isConversationTargetCurrent(
@@ -1689,7 +1690,7 @@ function isConversationTargetCurrent(
   chatStateTarget = null,
 ) {
   if (
-    !conversationSession.isLeaseCurrent(lease, {
+    !conversationWorkspace.isLeaseCurrent(lease, {
       requireGeneration: false,
     })
   ) {
@@ -1751,15 +1752,17 @@ const recallInputState = createRecallInputState({
   TRIVIAL_GENERATION_SKIP_TTL_MS,
 });
 const rerollRecallInput = createRerollRecallInput({
+  buildPersistedRecallRecord,
+  buildRecallHistoryFingerprint,
   clearPendingHostGenerationInputSnapshot: (...args) =>
     clearPendingHostGenerationInputSnapshot(...args),
   clearPendingRecallSendIntent: (...args) => clearPendingRecallSendIntent(...args),
   console,
   createTrivialRecallSkipSentinel: (...args) =>
     createTrivialRecallSkipSentinel(...args),
-  findLatestUserChatMessageWithIndex: (...args) =>
-    findLatestUserChatMessageWithIndex(...args),
+  estimateTokens,
   formatInjection: (...args) => formatInjection(...args),
+  getActiveGenerationId: () => conversationSession.getGeneration()?.id || "",
   getContext,
   getCurrentChatId,
   getCurrentGenerationTrivialSkip: (...args) =>
@@ -1783,7 +1786,9 @@ const rerollRecallInput = createRerollRecallInput({
     readPersistedRecallFromUserMessage(...args),
   resolveGenerationTargetUserMessageIndex: (...args) =>
     resolveGenerationTargetUserMessageIndex(...args),
-  GENERATION_RECALL_TRANSACTION_TTL_MS,
+  triggerChatMetadataSave,
+  writePersistedRecallToUserMessage,
+  writeStructuredPlotRecordToMessage,
   PLANNER_RECALL_HANDOFF_TTL_MS,
 });
 let coreEventBindingState = {
@@ -1793,13 +1798,6 @@ let coreEventBindingState = {
 };
 let sendIntentHookCleanup = [];
 let sendIntentHookRetryTimer = null;
-let pendingHistoryRecoveryTimer = null;
-let pendingHistoryRecoveryTrigger = "";
-let pendingHistoryMutationCheckTimers = [];
-let pendingDeferredHistoryMutationRecheckTimer = null;
-let pendingDeferredHistoryMutationRecheckPayload = null;
-let pendingGraphLoadRetryTimer = null;
-let pendingGraphLoadRetryChatId = "";
 let pendingGraphPersistRetryTimer = null;
 let pendingGraphPersistRetryChatId = "";
 let pendingGraphPersistRetryAttempt = 0;
@@ -1807,12 +1805,6 @@ let authorityJobPollAbortController = null;
 let authorityJobPollJobId = "";
 let authorityJobPollChatId = "";
 let authorityJobPollPromise = null;
-let isHostGenerationRunning = false;
-let lastHostGenerationEndedAt = 0;
-let skipBeforeCombineRecallUntil = 0;
-let mvuExtraAnalysisGuardUntil = 0;
-let lastPreGenerationRecallKey = "";
-let lastPreGenerationRecallAt = 0;
 let enaPlannerApi = null;
 const generationRecallTransactionRuntime = createGenerationRecallTransactions({
   getContext,
@@ -1854,11 +1846,30 @@ const finalRecallInjectionRuntime = createFinalRecallInjection({
   getContext,
   getGenerationRecallTransactionResult: (...args) =>
     getGenerationRecallTransactionResult(...args),
-  getLastInjectionContent: () => lastInjectionContent,
+  getLastInjectionContent: () => conversationWorkspace.lastInjectionContent,
   getLastRecallSentUserMessage: () =>
     readConversationInput("lastRecallSentUserMessage"),
-  getRuntimeStatus: () => runtimeStatus,
+  getRuntimeStatus: () => conversationWorkspace.runtimeStatus,
   getSettings,
+  isRecallChatIdCurrent: (expectedChatId = "") => {
+    const context = getContext();
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+    const normalizedExpectedChatId = normalizeChatIdCandidate(expectedChatId);
+    if (!normalizedExpectedChatId || !activeChatId) return false;
+    const identity = resolveCurrentChatIdentity(context);
+    return (
+      areChatIdsEquivalentForResolvedIdentity(
+        normalizedExpectedChatId,
+        activeChatId,
+        identity,
+      ) ||
+      areChatIdsEquivalentForResolvedIdentity(
+        activeChatId,
+        normalizedExpectedChatId,
+        identity,
+      )
+    );
+  },
   normalizeRecallInputText,
   normalizeRecallNodeIdList: (...args) => normalizeRecallNodeIdList(...args),
   readGenerationRecallTransactionFinalResolution: (...args) =>
@@ -1876,10 +1887,10 @@ const finalRecallInjectionRuntime = createFinalRecallInjection({
   schedulePersistedRecallMessageUiRefresh: (...args) =>
     schedulePersistedRecallMessageUiRefresh(...args),
   setLastInjectionContent: (value = "") => {
-    lastInjectionContent = String(value || "");
+    conversationWorkspace.lastInjectionContent = String(value || "");
   },
   setRuntimeStatus: (status) => {
-    runtimeStatus = status;
+    conversationWorkspace.runtimeStatus = status;
   },
   storeGenerationRecallTransactionFinalResolution: (...args) =>
     storeGenerationRecallTransactionFinalResolution(...args),
@@ -1893,12 +1904,12 @@ const autoExtractionDeferRuntime = createAutoExtractionDefer({
   ensureGraphMutationReady: (...args) => ensureGraphMutationReady(...args),
   getContext,
   getCurrentChatId,
-  getCurrentGraph: () => currentGraph,
-  getGraphPersistenceState: () => graphPersistenceState,
-  getIsExtracting: () => isExtracting,
-  getIsHostGenerationRunning: () => isHostGenerationRunning,
-  getIsRecoveringHistory: () => isRecoveringHistory,
-  getLastHostGenerationEndedAt: () => lastHostGenerationEndedAt,
+  getCurrentGraph: () => conversationWorkspace.graph,
+  getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+  getIsExtracting: () => conversationWorkspace.isExtracting,
+  getIsHostGenerationRunning: () => conversationWorkspace.hostGeneration.running,
+  getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
+  getLastHostGenerationEndedAt: () => conversationWorkspace.hostGeneration.endedAt,
   getSettings,
   isAssistantChatMessage: (...args) => isAssistantChatMessage(...args),
   isRestoreLockActive: (...args) => isRestoreLockActive(...args),
@@ -1927,9 +1938,13 @@ const PERSISTED_RECALL_UI_DIAGNOSTIC_THROTTLE_MS = 1500;
 const recallMessageUiController = createRecallMessageUiController({
   getContext,
   getSettings,
-  getCurrentGraph: () => currentGraph,
-  get document() { return globalThis.document; },
-  get MutationObserver() { return globalThis.MutationObserver; },
+  getCurrentGraph: () => conversationWorkspace.graph,
+  get document() {
+    return getHostDocument();
+  },
+  get MutationObserver() {
+    return getHostMutationObserver();
+  },
   console,
   setTimeout,
   clearTimeout,
@@ -1963,8 +1978,8 @@ const stageAbortControllers = {
   recall: null,
   history: null,
 };
-let bmeChatManager = null;
-let bmeChatManagerUnavailableWarned = false;
+let conversationRepository = null;
+let conversationRepositoryUnavailableWarned = false;
 let bmeLocalStoreCapabilityPromise = null;
 let bmeLocalStoreCapabilitySnapshot = {
   checked: false,
@@ -1996,7 +2011,7 @@ const BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET = new Set([
   GRAPH_LOAD_STATES.SHADOW_RESTORED,
 ]);
 
-function isGraphLoadStateDbReady(loadState = graphPersistenceState.loadState) {
+function isGraphLoadStateDbReady(loadState = conversationWorkspace.graphPersistenceState.loadState) {
   return (
     loadState === GRAPH_LOAD_STATES.LOADED ||
     loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED
@@ -2063,8 +2078,7 @@ function resolvePersistenceHostProfile(context = getContext()) {
   }
   const activeContext =
     context && typeof context === "object" ? context : getContext();
-  const hasLukerApi =
-    !!globalThis.Luker && typeof globalThis.Luker?.getContext === "function";
+  const hasLukerApi = isLukerHostContext(activeContext);
   if (
     hasLukerApi &&
     canUseGraphChatState(activeContext) &&
@@ -2314,10 +2328,9 @@ async function refreshAuthorityRuntimeState({
     authorityLastRefreshSource: String(source || "authority-refresh"),
   });
 
+  const hostWindow = getHostWindow();
   const allowRelativeUrl =
-    typeof window === "object" &&
-    Boolean(window?.location) &&
-    typeof window.location.href === "string";
+    Boolean(hostWindow?.location) && typeof hostWindow.location.href === "string";
   authorityProbePromise = probeAuthorityCapabilities({
     settings,
     fetchImpl:
@@ -2383,13 +2396,13 @@ function syncGraphPersistenceDebugState() {
 }
 
 function updateGraphPersistenceState(patch = {}) {
-  graphPersistenceState = {
-    ...graphPersistenceState,
+  conversationWorkspace.graphPersistenceState = {
+    ...conversationWorkspace.graphPersistenceState,
     ...(patch || {}),
     updatedAt: new Date().toISOString(),
   };
   syncGraphPersistenceDebugState();
-  return graphPersistenceState;
+  return conversationWorkspace.graphPersistenceState;
 }
 
 function getAuthorityJobAdapter(options = {}) {
@@ -2424,7 +2437,7 @@ function isAuthorityJobTypeSupported(capability = {}, kind = "") {
 function mergeAuthorityRecentJobsIntoState(incomingJobs = [], options = {}) {
   const updatedAt = String(options.updatedAt || new Date().toISOString());
   const nextRecentJobs = mergeAuthorityRecentJobs(
-    options.replace === true ? [] : graphPersistenceState.authorityRecentJobs,
+    options.replace === true ? [] : conversationWorkspace.graphPersistenceState.authorityRecentJobs,
     incomingJobs,
     {
       limit: Number.isFinite(Number(options.limit))
@@ -2439,15 +2452,15 @@ function mergeAuthorityRecentJobsIntoState(incomingJobs = [], options = {}) {
     authorityRecentJobsError:
       options.error !== undefined
         ? String(options.error || "")
-        : String(graphPersistenceState.authorityRecentJobsError || ""),
+        : String(conversationWorkspace.graphPersistenceState.authorityRecentJobsError || ""),
     authorityRecentJobsNextCursor:
       options.nextCursor !== undefined
         ? String(options.nextCursor || "")
-        : String(graphPersistenceState.authorityRecentJobsNextCursor || ""),
+        : String(conversationWorkspace.graphPersistenceState.authorityRecentJobsNextCursor || ""),
     authorityRecentJobsHasMore:
       options.hasMore !== undefined
         ? Boolean(options.hasMore)
-        : Boolean(graphPersistenceState.authorityRecentJobsHasMore),
+        : Boolean(conversationWorkspace.graphPersistenceState.authorityRecentJobsHasMore),
   });
   return nextRecentJobs;
 }
@@ -2465,7 +2478,7 @@ async function refreshAuthorityRecentJobs(options = {}) {
   const { capability } = getAuthorityRuntimeSnapshot(settings);
   const updatedAt = new Date().toISOString();
   const currentChatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   const limit = Number.isFinite(Number(options.limit))
     ? Math.max(1, Math.floor(Number(options.limit)))
@@ -2546,7 +2559,7 @@ function recordAuthorityJobSnapshot(job = null, options = {}) {
     ? {
         authorityRecentJobs: cloneRuntimeDebugValue(
           mergeAuthorityRecentJobs(
-            graphPersistenceState.authorityRecentJobs,
+            conversationWorkspace.graphPersistenceState.authorityRecentJobs,
             [
               {
                 ...normalizedJob,
@@ -2570,7 +2583,7 @@ function recordAuthorityJobSnapshot(job = null, options = {}) {
         authorityRecentJobsError:
           options.recentJobsError !== undefined
             ? String(options.recentJobsError || "")
-            : String(graphPersistenceState.authorityRecentJobsError || ""),
+            : String(conversationWorkspace.graphPersistenceState.authorityRecentJobsError || ""),
       }
     : options.recentJobsError !== undefined
       ? {
@@ -2712,19 +2725,19 @@ function buildAuthorityPerformanceBaselineSnapshot(options = {}) {
     chatId:
       normalizeChatIdCandidate(options.chatId) ||
       normalizeChatIdCandidate(getCurrentChatId()) ||
-      normalizeChatIdCandidate(graphPersistenceState.chatId),
+      normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId),
     graphPersistence: liveGraphPersistence,
-    graph: currentGraph,
+    graph: conversationWorkspace.graph,
     consistencyAudit: liveGraphPersistence.authorityConsistencyAudit,
   });
 }
 
 function captureAuthorityPerformanceBaseline(options = {}) {
   const previousBaseline =
-    graphPersistenceState.authorityPerformanceBaseline &&
-    typeof graphPersistenceState.authorityPerformanceBaseline === "object" &&
-    !Array.isArray(graphPersistenceState.authorityPerformanceBaseline)
-      ? graphPersistenceState.authorityPerformanceBaseline
+    conversationWorkspace.graphPersistenceState.authorityPerformanceBaseline &&
+    typeof conversationWorkspace.graphPersistenceState.authorityPerformanceBaseline === "object" &&
+    !Array.isArray(conversationWorkspace.graphPersistenceState.authorityPerformanceBaseline)
+      ? conversationWorkspace.graphPersistenceState.authorityPerformanceBaseline
       : null;
   const baseline = buildAuthorityPerformanceBaselineSnapshot(options);
   const comparison = buildAuthorityPerformanceBaselineComparison(previousBaseline, baseline);
@@ -2752,7 +2765,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
     };
   }
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!chatId) {
     return {
@@ -2771,7 +2784,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
   const baseline = buildAuthorityPerformanceBaseline({
     chatId,
     graphPersistence: liveGraphPersistence,
-    graph: currentGraph,
+    graph: conversationWorkspace.graph,
     consistencyAudit: liveGraphPersistence.authorityConsistencyAudit,
   });
   const baselineComparison = buildAuthorityPerformanceBaselineComparison(previousBaseline, baseline);
@@ -2779,7 +2792,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
     chatId,
     reason,
     settings,
-    runtimeStatus,
+    runtimeStatus: conversationWorkspace.runtimeStatus,
     runtimeDebug: readRuntimeDebugSnapshot(),
     graphPersistence: {
       ...liveGraphPersistence,
@@ -2787,14 +2800,14 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       authorityPerformanceBaselineUpdatedAt: String(baseline?.capturedAt || ""),
       authorityPerformanceBaselineReason: reason,
     },
-    graph: currentGraph,
-    lastExtractionStatus,
-    lastVectorStatus,
-    lastRecallStatus,
-    lastBatchStatus: cloneRuntimeDebugValue(currentGraph?.historyState?.lastBatchStatus, null),
-    lastInjection: lastInjectionContent,
-    lastExtract: lastExtractedItems,
-    lastRecall: lastRecalledItems,
+    graph: conversationWorkspace.graph,
+    lastExtractionStatus: conversationWorkspace.lastExtractionStatus,
+    lastVectorStatus: conversationWorkspace.lastVectorStatus,
+    lastRecallStatus: conversationWorkspace.lastRecallStatus,
+    lastBatchStatus: cloneRuntimeDebugValue(conversationWorkspace.graph?.historyState?.lastBatchStatus, null),
+    lastInjection: conversationWorkspace.lastInjectionContent,
+    lastExtract: conversationWorkspace.lastExtractedItems,
+    lastRecall: conversationWorkspace.lastRecalledItems,
     performanceBaseline: baseline,
     performanceBaselineComparison: baselineComparison,
   });
@@ -2849,8 +2862,8 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
         };
     const nextArtifactEntries = manifestResult?.entries || [
       manifestEntry,
-      ...((Array.isArray(graphPersistenceState.authorityDiagnosticsArtifacts)
-        ? graphPersistenceState.authorityDiagnosticsArtifacts
+      ...((Array.isArray(conversationWorkspace.graphPersistenceState.authorityDiagnosticsArtifacts)
+        ? conversationWorkspace.graphPersistenceState.authorityDiagnosticsArtifacts
         : []
       ).filter((entry) => String(entry?.path || "") !== manifestEntry.path)),
     ];
@@ -2879,7 +2892,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
       authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
       authorityDiagnosticsLastPrunedCount: Number(retentionResult?.count || 0),
       authorityDiagnosticsLastPrunedAt:
-        Number(retentionResult?.count || 0) > 0 ? updatedAt : String(graphPersistenceState.authorityDiagnosticsLastPrunedAt || ""),
+        Number(retentionResult?.count || 0) > 0 ? updatedAt : String(conversationWorkspace.graphPersistenceState.authorityDiagnosticsLastPrunedAt || ""),
       authorityDiagnosticsLastPruneError: String(retentionResult?.error || ""),
     });
     if (options.refreshHost !== false) {
@@ -2914,7 +2927,7 @@ async function exportAuthorityDiagnosticsBundle(options = {}) {
 
 async function refreshAuthorityDiagnosticsArtifacts(options = {}) {
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!chatId) {
     return {
@@ -3007,7 +3020,7 @@ async function readAuthorityDiagnosticsArtifact(path = "", options = {}) {
 async function deleteAuthorityDiagnosticsArtifact(path = "", options = {}) {
   const normalizedPath = String(path || "").trim();
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!normalizedPath) {
     return {
@@ -3030,10 +3043,10 @@ async function deleteAuthorityDiagnosticsArtifact(path = "", options = {}) {
       : null;
     const updatedAt = new Date().toISOString();
     const wasLatestArtifact =
-      String(graphPersistenceState.authorityDiagnosticsBundlePath || "") === normalizedPath;
+      String(conversationWorkspace.graphPersistenceState.authorityDiagnosticsBundlePath || "") === normalizedPath;
     const nextArtifactEntries = manifestResult?.entries ||
-      (Array.isArray(graphPersistenceState.authorityDiagnosticsArtifacts)
-        ? graphPersistenceState.authorityDiagnosticsArtifacts
+      (Array.isArray(conversationWorkspace.graphPersistenceState.authorityDiagnosticsArtifacts)
+        ? conversationWorkspace.graphPersistenceState.authorityDiagnosticsArtifacts
         : []
       ).filter((entry) => String(entry?.path || "") !== normalizedPath);
     updateGraphPersistenceState({
@@ -3044,10 +3057,10 @@ async function deleteAuthorityDiagnosticsArtifact(path = "", options = {}) {
       ),
       authorityDiagnosticsArtifactsError: "",
       authorityDiagnosticsRetentionLimit: AUTHORITY_DIAGNOSTICS_MANIFEST_LIMIT,
-      authorityDiagnosticsBundlePath: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundlePath,
-      authorityDiagnosticsBundleReason: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleReason,
-      authorityDiagnosticsBundleUpdatedAt: wasLatestArtifact ? "" : graphPersistenceState.authorityDiagnosticsBundleUpdatedAt,
-      authorityDiagnosticsBundleSize: wasLatestArtifact ? 0 : graphPersistenceState.authorityDiagnosticsBundleSize,
+      authorityDiagnosticsBundlePath: wasLatestArtifact ? "" : conversationWorkspace.graphPersistenceState.authorityDiagnosticsBundlePath,
+      authorityDiagnosticsBundleReason: wasLatestArtifact ? "" : conversationWorkspace.graphPersistenceState.authorityDiagnosticsBundleReason,
+      authorityDiagnosticsBundleUpdatedAt: wasLatestArtifact ? "" : conversationWorkspace.graphPersistenceState.authorityDiagnosticsBundleUpdatedAt,
+      authorityDiagnosticsBundleSize: wasLatestArtifact ? 0 : conversationWorkspace.graphPersistenceState.authorityDiagnosticsBundleSize,
     });
     recordAuthorityBlobSnapshot({
       action: "diagnostics-delete",
@@ -3093,7 +3106,7 @@ async function writeAuthorityLukerCheckpointBlob(
     };
   }
   const normalizedChatId = normalizeChatIdCandidate(chatId || checkpoint.chatId);
-  const publicationLease = conversationSession.captureLease();
+  const publicationLease = conversationWorkspace.captureLease();
   const canPublishResult = () =>
     isConversationTargetCurrent(normalizedChatId, publicationLease);
   const safeChatId = buildAuthorityBlobSafeSlug(normalizedChatId);
@@ -3169,7 +3182,7 @@ async function readAuthorityLukerCheckpointBlob(chatId = "", options = {}) {
       reason: "missing-chat-id",
     };
   }
-  const publicationLease = conversationSession.captureLease();
+  const publicationLease = conversationWorkspace.captureLease();
   const canPublishResult = () =>
     isConversationTargetCurrent(normalizedChatId, publicationLease);
   const safeChatId = buildAuthorityBlobSafeSlug(normalizedChatId);
@@ -3303,7 +3316,7 @@ async function runAuthorityConsistencyAudit(options = {}) {
   const { capability } = getAuthorityRuntimeSnapshot(settings);
   const updatedAt = new Date().toISOString();
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!chatId) {
     return {
@@ -3322,7 +3335,7 @@ async function runAuthorityConsistencyAudit(options = {}) {
   try {
     const collectionId =
       normalizeChatIdCandidate(options.collectionId) ||
-      normalizeChatIdCandidate(currentGraph?.vectorIndexState?.collectionId) ||
+      normalizeChatIdCandidate(conversationWorkspace.graph?.vectorIndexState?.collectionId) ||
       buildVectorCollectionId(chatId);
     const [sqlProbe, triviumProbe, blobProbe] = await Promise.all([
       capability.storagePrimaryReady
@@ -3350,15 +3363,15 @@ async function runAuthorityConsistencyAudit(options = {}) {
       chatId,
       collectionId,
       capability,
-      runtimeGraph: currentGraph,
-      graphPersistenceState,
+      runtimeGraph: conversationWorkspace.graph,
+      graphPersistenceState: conversationWorkspace.graphPersistenceState,
       sqlSnapshot: sqlProbe.value,
       sqlError: sqlProbe.error,
       triviumStat: triviumProbe.value,
       triviumError: triviumProbe.error,
       blobResult: blobProbe.value,
       blobError: blobProbe.error,
-      lastJob: graphPersistenceState.authorityLastJob,
+      lastJob: conversationWorkspace.graphPersistenceState.authorityLastJob,
     });
     updateGraphPersistenceState({
       authorityConsistencyState: audit.summary.level,
@@ -3392,7 +3405,7 @@ async function restoreAuthorityCheckpointFromBlob(options = {}) {
   const { capability } = getAuthorityRuntimeSnapshot(settings);
   const updatedAt = new Date().toISOString();
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!chatId) {
     return {
@@ -3590,7 +3603,7 @@ async function rebuildAuthorityTrivium(options = {}) {
         mode: "local-fallback",
         fallbackError: jobResult.error,
         result: fallbackResult,
-        stats: fallbackResult?.stats || getVectorIndexStats(currentGraph),
+        stats: fallbackResult?.stats || getVectorIndexStats(conversationWorkspace.graph),
       };
     }
   }
@@ -3621,14 +3634,14 @@ async function rebuildAuthorityTrivium(options = {}) {
     terminal: true,
     mode: "local",
     result,
-    stats: result?.stats || getVectorIndexStats(currentGraph),
+    stats: result?.stats || getVectorIndexStats(conversationWorkspace.graph),
   };
 }
 
 async function runAuthorityConsistencyRepairPlan(options = {}) {
   const updatedAt = new Date().toISOString();
   const chatId = normalizeChatIdCandidate(
-    options.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    options.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   if (!chatId) {
     return {
@@ -3640,10 +3653,10 @@ async function runAuthorityConsistencyRepairPlan(options = {}) {
   let audit =
     options.audit && typeof options.audit === "object" && !Array.isArray(options.audit)
       ? options.audit
-      : graphPersistenceState.authorityConsistencyAudit &&
-          typeof graphPersistenceState.authorityConsistencyAudit === "object" &&
-          !Array.isArray(graphPersistenceState.authorityConsistencyAudit)
-        ? graphPersistenceState.authorityConsistencyAudit
+      : conversationWorkspace.graphPersistenceState.authorityConsistencyAudit &&
+          typeof conversationWorkspace.graphPersistenceState.authorityConsistencyAudit === "object" &&
+          !Array.isArray(conversationWorkspace.graphPersistenceState.authorityConsistencyAudit)
+        ? conversationWorkspace.graphPersistenceState.authorityConsistencyAudit
         : null;
   if (!audit) {
     const auditResult = await runAuthorityConsistencyAudit({
@@ -3939,11 +3952,11 @@ async function submitAuthorityVectorRebuildJob({
 
   ensureCurrentGraphRuntimeState();
   const chatId = getCurrentChatId();
-  const taskGraph = currentGraph;
-  const conversationLease = conversationSession.captureLease();
+  const taskGraph = conversationWorkspace.graph;
+  const conversationLease = conversationWorkspace.captureLease();
   const isTaskCurrent = () =>
-    currentGraph === taskGraph &&
-    conversationSession.isLeaseCurrent(conversationLease, {
+    conversationWorkspace.graph === taskGraph &&
+    conversationWorkspace.isLeaseCurrent(conversationLease, {
       requireGeneration: false,
     });
   const collectionId =
@@ -3955,7 +3968,7 @@ async function submitAuthorityVectorRebuildJob({
     revision:
       taskGraph?.meta?.revision ||
       taskGraph?.historyState?.extractionCount ||
-      graphPersistenceState?.revision ||
+      conversationWorkspace.graphPersistenceState?.revision ||
       0,
     range,
   });
@@ -3968,7 +3981,7 @@ async function submitAuthorityVectorRebuildJob({
     purge: Boolean(purge),
     range: range || null,
     graphRevision:
-      taskGraph?.meta?.revision || graphPersistenceState?.revision || 0,
+      taskGraph?.meta?.revision || conversationWorkspace.graphPersistenceState?.revision || 0,
     idempotencyKey,
   };
 
@@ -4078,7 +4091,7 @@ function buildAuthorityJobStatusMeta(job = null, fallbackKind = "") {
     .join(" · ");
 }
 
-function syncAuthorityVectorJobState(job = null, graph = currentGraph) {
+function syncAuthorityVectorJobState(job = null, graph = conversationWorkspace.graph) {
   if (!graph?.vectorIndexState) return;
   const normalizedJob =
     job && typeof job === "object" && !Array.isArray(job) ? job : {};
@@ -4124,21 +4137,21 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
   const trackedChatId =
     normalizeChatIdCandidate(options.chatId) ||
     normalizeChatIdCandidate(getCurrentChatId()) ||
-    normalizeChatIdCandidate(graphPersistenceState.chatId);
+    normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
   if (!jobId || !trackedChatId) {
     return null;
   }
-  const trackedGraph = options.graph || currentGraph;
-  const trackedLease = options.lease || conversationSession.captureLease();
+  const trackedGraph = options.graph || conversationWorkspace.graph;
+  const trackedLease = options.lease || conversationWorkspace.captureLease();
   const isTrackedContextActive = () => {
     const context = getContext();
     const activeChatId =
       normalizeChatIdCandidate(getCurrentChatId(context)) ||
-      normalizeChatIdCandidate(graphPersistenceState.chatId);
+      normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
     const identity = resolveCurrentChatIdentity(context);
     return Boolean(
-      currentGraph === trackedGraph &&
-        conversationSession.isLeaseCurrent(trackedLease, {
+      conversationWorkspace.graph === trackedGraph &&
+        conversationWorkspace.isLeaseCurrent(trackedLease, {
           requireGeneration: false,
         }) &&
         activeChatId &&
@@ -4304,12 +4317,12 @@ async function startTrackingAuthorityJob(job = null, options = {}) {
 }
 
 async function requeueAuthorityJob(jobId, options = {}) {
-  const taskGraph = currentGraph;
+  const taskGraph = conversationWorkspace.graph;
   const chatId = getCurrentChatId();
-  const lease = conversationSession.captureLease();
+  const lease = conversationWorkspace.captureLease();
   const isTaskCurrent = () =>
-    currentGraph === taskGraph &&
-    conversationSession.isLeaseCurrent(lease, { requireGeneration: false });
+    conversationWorkspace.graph === taskGraph &&
+    conversationWorkspace.isLeaseCurrent(lease, { requireGeneration: false });
   try {
     const adapter = getAuthorityJobAdapter();
     const job = await adapter.requeue(jobId, options);
@@ -4321,7 +4334,7 @@ async function requeueAuthorityJob(jobId, options = {}) {
     saveGraphToChat({ reason: "authority-vector-rebuild-job-requeued" });
     void refreshAuthorityRecentJobs({ reason: "authority-job-requeued" });
     void startTrackingAuthorityJob(job, {
-      kind: job?.kind || graphPersistenceState.authorityLastJobKind,
+      kind: job?.kind || conversationWorkspace.graphPersistenceState.authorityLastJobKind,
       chatId,
       graph: taskGraph,
       lease,
@@ -4351,21 +4364,21 @@ function recordLukerHookPhase(phase = "", detail = {}) {
     lastHookPhase: String(phase || ""),
     chatStateTarget:
       cloneRuntimeDebugValue(detail?.chatStateTarget, null) ||
-      graphPersistenceState.chatStateTarget ||
+      conversationWorkspace.graphPersistenceState.chatStateTarget ||
       resolveCurrentChatStateTarget(getContext()),
     lightweightHostMode:
       detail?.lightweightHostMode ??
-      graphPersistenceState.lightweightHostMode ??
+      conversationWorkspace.graphPersistenceState.lightweightHostMode ??
       isBmeLightweightHostMode(getContext()),
   });
 }
 
 function updateLukerProjectionState(patch = {}) {
   const previous =
-    graphPersistenceState.projectionState &&
-    typeof graphPersistenceState.projectionState === "object" &&
-    !Array.isArray(graphPersistenceState.projectionState)
-      ? graphPersistenceState.projectionState
+    conversationWorkspace.graphPersistenceState.projectionState &&
+    typeof conversationWorkspace.graphPersistenceState.projectionState === "object" &&
+    !Array.isArray(conversationWorkspace.graphPersistenceState.projectionState)
+      ? conversationWorkspace.graphPersistenceState.projectionState
       : {
           runtime: { status: "idle", updatedAt: 0, reason: "" },
           persistent: { status: "idle", updatedAt: 0, reason: "" },
@@ -4403,10 +4416,10 @@ function updatePersistDeltaDiagnostics(snapshot = null) {
   const nextSnapshot =
     snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
       ? {
-          ...(graphPersistenceState.persistDelta &&
-          typeof graphPersistenceState.persistDelta === "object" &&
-          !Array.isArray(graphPersistenceState.persistDelta)
-            ? cloneRuntimeDebugValue(graphPersistenceState.persistDelta, {})
+          ...(conversationWorkspace.graphPersistenceState.persistDelta &&
+          typeof conversationWorkspace.graphPersistenceState.persistDelta === "object" &&
+          !Array.isArray(conversationWorkspace.graphPersistenceState.persistDelta)
+            ? cloneRuntimeDebugValue(conversationWorkspace.graphPersistenceState.persistDelta, {})
             : {}),
           ...cloneRuntimeDebugValue(snapshot, {}),
           updatedAt: new Date().toISOString(),
@@ -4420,10 +4433,10 @@ function updateLoadDiagnostics(snapshot = null) {
   const nextSnapshot =
     snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
       ? {
-          ...(graphPersistenceState.loadDiagnostics &&
-          typeof graphPersistenceState.loadDiagnostics === "object" &&
-          !Array.isArray(graphPersistenceState.loadDiagnostics)
-            ? cloneRuntimeDebugValue(graphPersistenceState.loadDiagnostics, {})
+          ...(conversationWorkspace.graphPersistenceState.loadDiagnostics &&
+          typeof conversationWorkspace.graphPersistenceState.loadDiagnostics === "object" &&
+          !Array.isArray(conversationWorkspace.graphPersistenceState.loadDiagnostics)
+            ? cloneRuntimeDebugValue(conversationWorkspace.graphPersistenceState.loadDiagnostics, {})
             : {}),
           ...cloneRuntimeDebugValue(snapshot, {}),
           updatedAt: new Date().toISOString(),
@@ -4436,21 +4449,21 @@ function updateLoadDiagnostics(snapshot = null) {
 function bumpGraphRevision(reason = "graph-mutation") {
   const nextRevision =
     Math.max(
-      graphPersistenceState.revision || 0,
-      graphPersistenceState.lastPersistedRevision || 0,
-      graphPersistenceState.queuedPersistRevision || 0,
+      conversationWorkspace.graphPersistenceState.revision || 0,
+      conversationWorkspace.graphPersistenceState.lastPersistedRevision || 0,
+      conversationWorkspace.graphPersistenceState.queuedPersistRevision || 0,
     ) + 1;
   updateGraphPersistenceState({
     revision: nextRevision,
     lastPersistReason: String(
-      reason || graphPersistenceState.lastPersistReason || "",
+      reason || conversationWorkspace.graphPersistenceState.lastPersistReason || "",
     ),
   });
   return nextRevision;
 }
 
 function isGraphMetadataWriteAllowed(
-  loadState = graphPersistenceState.loadState,
+  loadState = conversationWorkspace.graphPersistenceState.loadState,
 ) {
   return (
     loadState === GRAPH_LOAD_STATES.LOADED ||
@@ -4458,32 +4471,32 @@ function isGraphMetadataWriteAllowed(
   );
 }
 
-function isGraphReadable(loadState = graphPersistenceState.loadState) {
+function isGraphReadable(loadState = conversationWorkspace.graphPersistenceState.loadState) {
   return (
     loadState === GRAPH_LOAD_STATES.LOADED ||
     loadState === GRAPH_LOAD_STATES.EMPTY_CONFIRMED ||
     loadState === GRAPH_LOAD_STATES.SHADOW_RESTORED ||
     (loadState === GRAPH_LOAD_STATES.BLOCKED &&
-      graphPersistenceState.shadowSnapshotUsed)
+      conversationWorkspace.graphPersistenceState.shadowSnapshotUsed)
   );
 }
 
 function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   if (
-    !currentGraph ||
-    typeof currentGraph !== "object" ||
-    !Array.isArray(currentGraph.nodes) ||
-    !Array.isArray(currentGraph.edges) ||
-    !currentGraph.historyState ||
-    typeof currentGraph.historyState !== "object" ||
-    Array.isArray(currentGraph.historyState)
+    !conversationWorkspace.graph ||
+    typeof conversationWorkspace.graph !== "object" ||
+    !Array.isArray(conversationWorkspace.graph.nodes) ||
+    !Array.isArray(conversationWorkspace.graph.edges) ||
+    !conversationWorkspace.graph.historyState ||
+    typeof conversationWorkspace.graph.historyState !== "object" ||
+    Array.isArray(conversationWorkspace.graph.historyState)
   ) {
     return false;
   }
 
   const activeChatId = normalizeChatIdCandidate(chatId);
   const runtimeChatId = normalizeChatIdCandidate(
-    currentGraph.historyState.chatId,
+    conversationWorkspace.graph.historyState.chatId,
   );
 
   // chatId 匹配验证：如果两者都有，必须一致
@@ -4494,7 +4507,7 @@ function hasReadableRuntimeGraphForRecall(chatId = getCurrentChatId()) {
   // 兜底：chatId 不可用（ST 插件环境可能无法获取 chatId），
   // 只要 currentGraph 结构完整且有节点数据，就允许召回。
   // 这对应用户能在 UI 看到图谱，但 getCurrentChatId() 返回空的场景。
-  return currentGraph.nodes.length > 0 || currentGraph.edges.length > 0;
+  return conversationWorkspace.graph.nodes.length > 0 || conversationWorkspace.graph.edges.length > 0;
 }
 
 function hasMeaningfulRuntimeGraphForChat(
@@ -4502,20 +4515,20 @@ function hasMeaningfulRuntimeGraphForChat(
   identity = resolveCurrentChatIdentity(getContext()),
 ) {
   if (
-    !currentGraph ||
-    typeof currentGraph !== "object" ||
-    !Array.isArray(currentGraph.nodes) ||
-    !Array.isArray(currentGraph.edges) ||
-    !currentGraph.historyState ||
-    typeof currentGraph.historyState !== "object" ||
-    Array.isArray(currentGraph.historyState)
+    !conversationWorkspace.graph ||
+    typeof conversationWorkspace.graph !== "object" ||
+    !Array.isArray(conversationWorkspace.graph.nodes) ||
+    !Array.isArray(conversationWorkspace.graph.edges) ||
+    !conversationWorkspace.graph.historyState ||
+    typeof conversationWorkspace.graph.historyState !== "object" ||
+    Array.isArray(conversationWorkspace.graph.historyState)
   ) {
     return false;
   }
 
   const normalizedTargetChatId = normalizeChatIdCandidate(chatId);
   const runtimeChatId = normalizeChatIdCandidate(
-    currentGraph.historyState.chatId,
+    conversationWorkspace.graph.historyState.chatId,
   );
 
   if (normalizedTargetChatId && runtimeChatId) {
@@ -4540,12 +4553,12 @@ function hasMeaningfulRuntimeGraphForChat(
     return false;
   }
 
-  return !isGraphEffectivelyEmpty(currentGraph);
+  return !isGraphEffectivelyEmpty(conversationWorkspace.graph);
 }
 
 function hasRuntimeGraphMutationContext(
   context = getContext(),
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
   { allowNoChatState = false } = {},
 ) {
   if (
@@ -4564,7 +4577,7 @@ function hasRuntimeGraphMutationContext(
     graph,
     activeIdentity: identity,
     graphOwnedChatId,
-    persistenceState: graphPersistenceState,
+    persistenceState: conversationWorkspace.graphPersistenceState,
     aliasCandidates: getGraphIdentityAliasCandidates({
       integrity: identity.integrity,
       hostChatId: identity.hostChatId,
@@ -4583,7 +4596,7 @@ function repairRuntimeGraphIdentityFromPersistence(
   operationLabel = "当前操作",
   {
     context = getContext(),
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     reason = "runtime-graph-identity-repair",
   } = {},
 ) {
@@ -4599,9 +4612,9 @@ function repairRuntimeGraphIdentityFromPersistence(
   }
 
   const graphOwnedChatId = getGraphOwnedChatId(graph);
-  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const stateChatId = normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
   const identity = resolveCurrentChatIdentity(context);
-  const markerChatId = normalizeChatIdCandidate(graphPersistenceState.commitMarker?.chatId);
+  const markerChatId = normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.commitMarker?.chatId);
   const repairPlan = planRuntimeGraphIdentityRepairCore({
     graph,
     graphOwnedChatId,
@@ -4626,11 +4639,11 @@ function repairRuntimeGraphIdentityFromPersistence(
 
   graph.historyState.chatId = repairPlan.chatId;
   stampGraphPersistenceMeta(graph, {
-    revision: graphPersistenceState.revision || graph?.meta?.revision || graph?.revision || 0,
+    revision: conversationWorkspace.graphPersistenceState.revision || graph?.meta?.revision || graph?.revision || 0,
     reason: String(reason || operationLabel || "runtime-graph-identity-repair"),
     chatId: repairPlan.chatId,
     integrity:
-      normalizeChatIdCandidate(graphPersistenceState.commitMarker?.integrity) ||
+      normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.commitMarker?.integrity) ||
       getChatMetadataIntegrity(context),
   });
   debugDebug("[ST-BME] 已补齐运行时图谱聊天身份", {
@@ -4642,7 +4655,7 @@ function repairRuntimeGraphIdentityFromPersistence(
 }
 
 function isGraphReadableForRecall(
-  loadState = graphPersistenceState.loadState,
+  loadState = conversationWorkspace.graphPersistenceState.loadState,
   chatId = getCurrentChatId(),
 ) {
   if (isGraphReadable(loadState)) {
@@ -4657,8 +4670,8 @@ function isGraphReadableForRecall(
 }
 
 function createGraphLoadUiStatus() {
-  const state = graphPersistenceState.loadState;
-  const chatId = graphPersistenceState.chatId || getCurrentChatId();
+  const state = conversationWorkspace.graphPersistenceState.loadState;
+  const chatId = conversationWorkspace.graphPersistenceState.chatId || getCurrentChatId();
   switch (state) {
     case GRAPH_LOAD_STATES.NO_CHAT:
       if (hasMeaningfulRuntimeGraphForChat(chatId)) {
@@ -4780,24 +4793,24 @@ function applyGraphLoadState(
     shadowSnapshotRevision = 0,
     shadowSnapshotUpdatedAt = "",
     shadowSnapshotReason = "",
-    revision = graphPersistenceState.revision,
-    lastPersistedRevision = graphPersistenceState.lastPersistedRevision,
-    queuedPersistRevision = graphPersistenceState.queuedPersistRevision,
-    pendingPersist = graphPersistenceState.pendingPersist,
+    revision = conversationWorkspace.graphPersistenceState.revision,
+    lastPersistedRevision = conversationWorkspace.graphPersistenceState.lastPersistedRevision,
+    queuedPersistRevision = conversationWorkspace.graphPersistenceState.queuedPersistRevision,
+    pendingPersist = conversationWorkspace.graphPersistenceState.pendingPersist,
     dbReady = isGraphLoadStateDbReady(loadState),
     writesBlocked = !isGraphMetadataWriteAllowed(loadState),
-    storagePrimary = graphPersistenceState.storagePrimary || "indexeddb",
+    storagePrimary = conversationWorkspace.graphPersistenceState.storagePrimary || "indexeddb",
     storageMode =
-      graphPersistenceState.storageMode || BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
-    hostProfile = graphPersistenceState.hostProfile || resolvePersistenceHostProfile(),
+      conversationWorkspace.graphPersistenceState.storageMode || BME_GRAPH_LOCAL_STORAGE_MODE_INDEXEDDB,
+    hostProfile = conversationWorkspace.graphPersistenceState.hostProfile || resolvePersistenceHostProfile(),
     primaryStorageTier =
-      graphPersistenceState.primaryStorageTier ||
+      conversationWorkspace.graphPersistenceState.primaryStorageTier ||
       buildPersistenceEnvironment(getContext(), {
         storagePrimary,
         storageMode,
       }).primaryStorageTier,
     cacheStorageTier =
-      graphPersistenceState.cacheStorageTier ||
+      conversationWorkspace.graphPersistenceState.cacheStorageTier ||
       buildPersistenceEnvironment(getContext(), {
         storagePrimary,
         storageMode,
@@ -4927,10 +4940,10 @@ function abortRecallStageWithReason(reason = "召回已终止") {
 }
 
 async function waitForActiveRecallToSettle(timeoutMs = 1800) {
-  const pending = activeRecallPromise;
+  const pending = conversationWorkspace.activeRecallPromise;
   if (!pending) {
     return {
-      settled: !isRecalling,
+      settled: !conversationWorkspace.isRecalling,
       timedOut: false,
     };
   }
@@ -4946,8 +4959,8 @@ async function waitForActiveRecallToSettle(timeoutMs = 1800) {
   ]);
 
   return {
-    settled: settled || !isRecalling,
-    timedOut: !settled && isRecalling,
+    settled: settled || !conversationWorkspace.isRecalling,
+    timedOut: !settled && conversationWorkspace.isRecalling,
   };
 }
 
@@ -4990,11 +5003,11 @@ function abortAllRunningStages() {
 function getStageUiStatus(stage) {
   switch (stage) {
     case "extraction":
-      return lastExtractionStatus;
+      return conversationWorkspace.lastExtractionStatus;
     case "vector":
-      return lastVectorStatus;
+      return conversationWorkspace.lastVectorStatus;
     case "recall":
-      return lastRecallStatus;
+      return conversationWorkspace.lastRecallStatus;
     default:
       return null;
   }
@@ -5123,13 +5136,13 @@ function toPanelNodeItem(node, meta = "") {
 }
 
 function updateLastExtractedItems(nodeIds = []) {
-  if (!currentGraph || !Array.isArray(nodeIds)) {
-    lastExtractedItems = [];
+  if (!conversationWorkspace.graph || !Array.isArray(nodeIds)) {
+    conversationWorkspace.lastExtractedItems = [];
     return;
   }
 
-  lastExtractedItems = nodeIds
-    .map((id) => getNode(currentGraph, id))
+  conversationWorkspace.lastExtractedItems = nodeIds
+    .map((id) => getNode(conversationWorkspace.graph, id))
     .filter(Boolean)
     .slice(-5)
     .reverse()
@@ -5144,13 +5157,13 @@ function updateLastExtractedItems(nodeIds = []) {
 }
 
 function updateLastRecalledItems(nodeIds = []) {
-  if (!currentGraph || !Array.isArray(nodeIds)) {
-    lastRecalledItems = [];
+  if (!conversationWorkspace.graph || !Array.isArray(nodeIds)) {
+    conversationWorkspace.lastRecalledItems = [];
     return;
   }
 
-  lastRecalledItems = normalizeRecallNodeIdList(nodeIds)
-    .map((id) => getNode(currentGraph, id))
+  conversationWorkspace.lastRecalledItems = normalizeRecallNodeIdList(nodeIds)
+    .map((id) => getNode(conversationWorkspace.graph, id))
     .filter(Boolean)
     .slice(0, 8)
     .map((node) =>
@@ -5204,7 +5217,7 @@ function getLatestPersistedRecallDisplayRecord(chat = getContext()?.chat) {
 function restoreRecallUiStateFromPersistence(chat = getContext()?.chat) {
   const latestPersisted = getLatestPersistedRecallDisplayRecord(chat);
   const graphRecallNodeIds = normalizeRecallNodeIdList(
-    currentGraph?.lastRecallResult,
+    conversationWorkspace.graph?.lastRecallResult,
   );
   const persistedNodeIds = normalizeRecallNodeIdList(
     latestPersisted?.record?.selectedNodeIds,
@@ -5214,15 +5227,15 @@ function restoreRecallUiStateFromPersistence(chat = getContext()?.chat) {
     : persistedNodeIds;
 
   updateLastRecalledItems(effectiveNodeIds);
-  lastInjectionContent = String(latestPersisted?.record?.injectionText || "").trim();
+  conversationWorkspace.lastInjectionContent = String(latestPersisted?.record?.injectionText || "").trim();
 
   return {
-    restored: Boolean(lastInjectionContent || effectiveNodeIds.length),
+    restored: Boolean(conversationWorkspace.lastInjectionContent || effectiveNodeIds.length),
     latestPersistedMessageIndex: Number.isFinite(latestPersisted?.messageIndex)
       ? latestPersisted.messageIndex
       : null,
     selectedNodeIds: effectiveNodeIds,
-    injectionTextLength: lastInjectionContent.length,
+    injectionTextLength: conversationWorkspace.lastInjectionContent.length,
   };
 }
 
@@ -5587,7 +5600,7 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
 }
 
 function syncEditedUserMessageDom(messageIndex, nextText) {
-  const chatRoot = document?.getElementById?.("chat");
+  const chatRoot = getHostDocument()?.getElementById?.("chat");
   if (!chatRoot?.querySelectorAll) return false;
 
   for (const messageElement of Array.from(chatRoot.querySelectorAll(".mes") || [])) {
@@ -5800,15 +5813,11 @@ async function rerunRecallForMessage(messageIndex) {
     hookName: "MESSAGE_RECALL_BADGE_RERUN",
     forceFreshRecall: true,
   });
-  applyFinalRecallInjectionForGeneration({
-    generationType: "history",
-    freshRecallResult: result,
-  });
   return result;
 }
 
 function getSendTextareaValue() {
-  return String(document.getElementById("send_textarea")?.value ?? "");
+  return readSendTextareaValue();
 }
 
 function scheduleSendIntentHookRetry(delayMs = 400) {
@@ -5832,7 +5841,7 @@ function registerBeforeCombinePrompts(listener) {
       console,
       eventSource,
       eventTypes: event_types,
-      getEventMakeFirst: () => globalThis.eventMakeFirst,
+      getEventMakeFirst,
     },
     listener,
   );
@@ -5844,7 +5853,7 @@ function registerGenerationAfterCommands(listener) {
       console,
       eventSource,
       eventTypes: event_types,
-      getEventMakeFirst: () => globalThis.eventMakeFirst,
+      getEventMakeFirst,
     },
     listener,
   );
@@ -5855,7 +5864,7 @@ function installSendIntentHooks() {
     console,
     consumeSendIntentHookCleanup: () =>
       sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length),
-    document,
+    document: getHostDocument(),
     getSendTextareaValue,
     pushSendIntentHookCleanup: (cleanup) => {
       sendIntentHookCleanup.push(cleanup);
@@ -6231,12 +6240,9 @@ async function resolvePreferredGraphLocalStorePresentation(
   return buildIndexedDbStorePresentation();
 }
 
-async function createPreferredGraphLocalStore(
-  chatId,
-  settings = getSettings(),
-) {
+async function createPreferredGraphLocalStore(chatId, settings = getSettings(), preferredStore = null) {
   const preferredLocalStore =
-    await resolvePreferredGraphLocalStorePresentation(settings);
+    preferredStore || (await resolvePreferredGraphLocalStorePresentation(settings));
   if (
     preferredLocalStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND &&
     typeof AuthorityGraphStore === "function"
@@ -6298,28 +6304,23 @@ async function refreshCurrentChatLocalStoreBinding(
     opfsCompactionState: null,
   };
   let opfsWriteLockState = cloneRuntimeDebugValue(
-    graphPersistenceState.opfsWriteLockState,
+    conversationWorkspace.graphPersistenceState.opfsWriteLockState,
     null,
   );
   let reopenError = "";
-
-  if (
-    reopenCurrentDb === true &&
-    normalizedChatId &&
-    bmeChatManager &&
-    typeof bmeChatManager.getCurrentChatId === "function" &&
-    typeof bmeChatManager.closeCurrent === "function" &&
-    bmeChatManager.getCurrentChatId() === normalizedChatId
-  ) {
-    await bmeChatManager.closeCurrent();
-  }
+  const canRebind = reopenCurrentDb === true && conversationWorkspace.graphPersistenceState.pendingPersist !== true;
 
   if (normalizedChatId) {
     clearCachedIndexedDbSnapshot(normalizedChatId);
     try {
-      const manager = ensureBmeChatManager();
-      if (manager) {
-        const db = await manager.getCurrentDb(normalizedChatId);
+      const repository = ensureConversationRepository();
+      if (repository) {
+        const db = canRebind
+          ? await repository.rebind(
+              normalizedChatId,
+              repository.getBinding(normalizedChatId)?.presentation || preferredLocalStore,
+            )
+          : await repository.getStore(normalizedChatId);
         resolvedLocalStore = resolveDbGraphStorePresentation(db);
         localStoreDiagnostics = readLocalStoreDiagnosticsSync(
           db,
@@ -6459,7 +6460,7 @@ function getHighestTrackedProcessedHistoryFloor(historyState = {}) {
 
 function getRenderLimitedHistoryRecoveryGuard(
   chat,
-  { settings = null, historyState = currentGraph?.historyState } = {},
+  { settings = null, historyState = conversationWorkspace.graph?.historyState } = {},
 ) {
   return getRenderLimitedHistoryRecoveryGuardCore(chat, {
     settings,
@@ -6787,7 +6788,7 @@ function buildRecoveredSnapshotForChatIdentity(
   const effectiveRevision = Math.max(
     1,
     normalizeIndexedDbRevision(
-      revision || graphPersistenceState.revision || getGraphPersistedRevision(graph),
+      revision || conversationWorkspace.graphPersistenceState.revision || getGraphPersistedRevision(graph),
     ),
   );
 
@@ -6870,7 +6871,7 @@ function detectStaleIndexedDbSnapshotAgainstRuntime(
   { identity = resolveCurrentChatIdentity(getContext()) } = {},
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
-  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot) || !currentGraph) {
+  if (!normalizedChatId || !isIndexedDbSnapshotMeaningful(snapshot) || !conversationWorkspace.graph) {
     return {
       stale: false,
       reason: "",
@@ -6878,9 +6879,9 @@ function detectStaleIndexedDbSnapshotAgainstRuntime(
   }
 
   const runtimeChatId = normalizeChatIdCandidate(
-    currentGraph?.historyState?.chatId ||
-      getGraphPersistenceMeta(currentGraph)?.chatId ||
-      graphPersistenceState.chatId,
+    conversationWorkspace.graph?.historyState?.chatId ||
+      getGraphPersistenceMeta(conversationWorkspace.graph)?.chatId ||
+      conversationWorkspace.graphPersistenceState.chatId,
   );
   if (
     !runtimeChatId ||
@@ -6897,10 +6898,10 @@ function detectStaleIndexedDbSnapshotAgainstRuntime(
   }
 
   const runtimeRevision = Math.max(
-    normalizeIndexedDbRevision(graphPersistenceState.revision),
-    normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
-    normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
-    getGraphPersistedRevision(currentGraph),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.revision),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.lastPersistedRevision),
+    normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.queuedPersistRevision),
+    getGraphPersistedRevision(conversationWorkspace.graph),
   );
   const snapshotRevision = normalizeIndexedDbRevision(snapshot?.meta?.revision);
   if (runtimeRevision > snapshotRevision) {
@@ -6922,18 +6923,18 @@ function detectStaleIndexedDbSnapshotAgainstRuntime(
   }
 
   const runtimeLastProcessedFloor = Number.isFinite(
-    Number(currentGraph?.historyState?.lastProcessedAssistantFloor),
+    Number(conversationWorkspace.graph?.historyState?.lastProcessedAssistantFloor),
   )
-    ? Number(currentGraph.historyState.lastProcessedAssistantFloor)
-    : Number.isFinite(Number(currentGraph?.lastProcessedSeq))
-      ? Number(currentGraph.lastProcessedSeq)
+    ? Number(conversationWorkspace.graph.historyState.lastProcessedAssistantFloor)
+    : Number.isFinite(Number(conversationWorkspace.graph?.lastProcessedSeq))
+      ? Number(conversationWorkspace.graph.lastProcessedSeq)
       : -1;
   const runtimeExtractionCount = Number.isFinite(
-    Number(currentGraph?.historyState?.extractionCount),
+    Number(conversationWorkspace.graph?.historyState?.extractionCount),
   )
-    ? Number(currentGraph.historyState.extractionCount)
-    : Number.isFinite(Number(extractionCount))
-      ? Number(extractionCount)
+    ? Number(conversationWorkspace.graph.historyState.extractionCount)
+    : Number.isFinite(Number(conversationWorkspace.extractionCount))
+      ? Number(conversationWorkspace.extractionCount)
       : 0;
   const snapshotHistoryState = getIndexedDbSnapshotHistoryState(snapshot);
 
@@ -7051,7 +7052,7 @@ function applyShadowSnapshotToRuntime(
     return {
       success: false,
       loaded: false,
-      loadState: graphPersistenceState.loadState,
+      loadState: conversationWorkspace.graphPersistenceState.loadState,
       reason: "shadow-invalid",
       chatId: normalizedChatId || "",
       attemptIndex,
@@ -7066,7 +7067,7 @@ function applyShadowSnapshotToRuntime(
     return {
       success: false,
       loaded: false,
-      loadState: graphPersistenceState.loadState,
+      loadState: conversationWorkspace.graphPersistenceState.loadState,
       reason: "shadow-chat-switched",
       chatId: normalizedChatId,
       attemptIndex,
@@ -7084,7 +7085,7 @@ function applyShadowSnapshotToRuntime(
     return {
       success: false,
       loaded: false,
-      loadState: graphPersistenceState.loadState,
+      loadState: conversationWorkspace.graphPersistenceState.loadState,
       reason: "shadow-deserialize-failed",
       detail: error?.message || String(error),
       chatId: normalizedChatId,
@@ -7103,34 +7104,34 @@ function applyShadowSnapshotToRuntime(
     integrity:
       String(shadowSnapshot.integrity || "").trim() ||
       getChatMetadataIntegrity(getContext()) ||
-      graphPersistenceState.metadataIntegrity,
+      conversationWorkspace.graphPersistenceState.metadataIntegrity,
   });
 
-  currentGraph = shadowGraph;
-  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
-    ? currentGraph.historyState.extractionCount
+  conversationWorkspace.graph = shadowGraph;
+  conversationWorkspace.extractionCount = Number.isFinite(conversationWorkspace.graph?.historyState?.extractionCount)
+    ? conversationWorkspace.graph.historyState.extractionCount
     : 0;
-  lastExtractedItems = [];
+  conversationWorkspace.lastExtractedItems = [];
   const restoredRecallUi = restoreRecallUiStateFromPersistence(
     getContext()?.chat,
   );
-  runtimeStatus = createUiStatus(
+  conversationWorkspace.runtimeStatus = createUiStatus(
     "图谱临时恢复",
     "已从本次会话临时快照恢复最近图谱，正在补写 IndexedDB",
     "warning",
   );
-  lastExtractionStatus = createUiStatus(
+  conversationWorkspace.lastExtractionStatus = createUiStatus(
     "待命",
     "已从会话快照恢复最近图谱，等待下一次提取",
     "idle",
   );
-  lastVectorStatus = createUiStatus(
+  conversationWorkspace.lastVectorStatus = createUiStatus(
     "待命",
-    currentGraph.vectorIndexState?.lastWarning ||
+    conversationWorkspace.graph.vectorIndexState?.lastWarning ||
       "已从会话快照恢复最近图谱，等待下一次向量任务",
     "idle",
   );
-  lastRecallStatus = createUiStatus(
+  conversationWorkspace.lastRecallStatus = createUiStatus(
     "待命",
     restoredRecallUi.restored
       ? "已从持久化召回记录恢复显示，并已恢复最近图谱"
@@ -7144,11 +7145,11 @@ function applyShadowSnapshotToRuntime(
     attemptIndex,
     revision: shadowRevision,
     lastPersistedRevision: Math.max(
-      normalizeIndexedDbRevision(graphPersistenceState.lastPersistedRevision),
+      normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.lastPersistedRevision),
       shadowRevision,
     ),
     queuedPersistRevision: Math.max(
-      normalizeIndexedDbRevision(graphPersistenceState.queuedPersistRevision),
+      normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.queuedPersistRevision),
       shadowRevision,
     ),
     queuedPersistChatId: normalizedChatId,
@@ -7169,7 +7170,7 @@ function applyShadowSnapshotToRuntime(
     indexedDbLastError: "",
     metadataIntegrity:
       getChatMetadataIntegrity(getContext()) ||
-      graphPersistenceState.metadataIntegrity,
+      conversationWorkspace.graphPersistenceState.metadataIntegrity,
     dualWriteLastResult: {
       action: "load",
       source: `${String(source || "shadow-restore")}:shadow`,
@@ -7184,7 +7185,7 @@ function applyShadowSnapshotToRuntime(
   rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
   if (promoteToIndexedDb) {
-    queueGraphPersistToIndexedDb(normalizedChatId, currentGraph, {
+    queueGraphPersistToIndexedDb(normalizedChatId, conversationWorkspace.graph, {
       revision: shadowRevision,
       reason: `shadow-restore-promote:${String(source || "shadow-restore")}`,
     });
@@ -7279,12 +7280,12 @@ async function syncIndexedDbMetaToPersistenceState(
   }
 
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) {
+    const repository = ensureConversationRepository();
+    if (!repository) {
       return null;
     }
 
-    const db = await manager.getCurrentDb(normalizedChatId);
+    const db = await repository.getStore(normalizedChatId);
     if (!db) {
       return null;
     }
@@ -7367,13 +7368,13 @@ async function syncIndexedDbMetaToPersistenceState(
       lastBackupFilename: String(lastBackupFilename || ""),
       remoteSyncFormatVersion:
         Number(remoteSyncFormatVersion || 0) ||
-        Number(graphPersistenceState.remoteSyncFormatVersion || 0) ||
+        Number(conversationWorkspace.graphPersistenceState.remoteSyncFormatVersion || 0) ||
         1,
       lastSyncError: String(lastSyncError || ""),
       opfsWriteLockState:
         typeof db.getWriteLockSnapshot === "function"
           ? cloneRuntimeDebugValue(db.getWriteLockSnapshot(), null)
-          : graphPersistenceState.opfsWriteLockState,
+          : conversationWorkspace.graphPersistenceState.opfsWriteLockState,
     };
 
     updateGraphPersistenceState(patch);
@@ -7448,34 +7449,36 @@ async function runBmeAutoSyncForChat(source = "unknown", chatId = "") {
   }
 }
 
-function ensureBmeChatManager() {
-  if (typeof BmeChatManager !== "function") {
-    if (!bmeChatManagerUnavailableWarned) {
-      console.warn("[ST-BME] BmeChatManager 不可用，IndexedDB 能力暂时停用");
-      bmeChatManagerUnavailableWarned = true;
+function ensureConversationRepository() {
+  if (typeof ConversationRepository !== "function") {
+    if (!conversationRepositoryUnavailableWarned) {
+      console.warn("[ST-BME] ConversationRepository 不可用，图谱持久化暂时停用");
+      conversationRepositoryUnavailableWarned = true;
     }
     return null;
   }
 
-  if (!bmeChatManager) {
-    bmeChatManager = new BmeChatManager({
-      databaseFactory: async (chatId) =>
-        await createPreferredGraphLocalStore(chatId),
-      selectorKeyResolver: async () =>
-        buildGraphLocalStoreSelectorKey(
-          await resolvePreferredGraphLocalStorePresentation(),
+  if (!conversationRepository) {
+    conversationRepository = new ConversationRepository({
+      resolveBinding: resolvePreferredGraphLocalStorePresentation,
+      bindingKey: buildGraphLocalStoreSelectorKey,
+      storeFactory: async (chatId, binding) =>
+        await createPreferredGraphLocalStore(
+          chatId,
+          getSettings(),
+          binding.presentation,
         ),
     });
   }
-  return bmeChatManager;
+  return conversationRepository;
 }
 
 function recordLocalPersistEarlyFailure(
   reason = "indexeddb-unavailable",
   {
     chatId = "",
-    storagePrimary = graphPersistenceState.storagePrimary || "indexeddb",
-    storageMode = graphPersistenceState.storageMode || "indexeddb",
+    storagePrimary = conversationWorkspace.graphPersistenceState.storagePrimary || "indexeddb",
+    storageMode = conversationWorkspace.graphPersistenceState.storageMode || "indexeddb",
     revision = 0,
   } = {},
 ) {
@@ -7508,12 +7511,12 @@ function scheduleBmeIndexedDbTask(task) {
     Promise.resolve()
       .then(task)
       .catch((error) => {
-        console.warn("[ST-BME] IndexedDB 后台任务失败:", error);
+        console.warn("[ST-BME] 持久化后台任务失败:", error);
       });
   });
 }
 
-async function syncBmeChatManagerWithCurrentChat(
+async function syncConversationRepositoryWithCurrentChat(
   source = "unknown",
   context = getContext(),
 ) {
@@ -7529,20 +7532,20 @@ async function syncBmeChatManagerWithCurrentChat(
     });
   }
 
-  const manager = ensureBmeChatManager();
-  if (!manager) {
+  const repository = ensureConversationRepository();
+  if (!repository) {
     return {
       chatId: "",
       opened: false,
       skipped: true,
-      reason: "manager-unavailable",
+      reason: "conversation-repository-unavailable",
     };
   }
   const chatId = getCurrentChatId(context);
 
   if (!chatId) {
-    await manager.closeCurrent();
-    debugDebug("[ST-BME] IndexedDB 会话已关闭（无活动聊天）", {
+    await repository.closeCurrent();
+    debugDebug("[ST-BME] 会话存储已关闭（无活动聊天）", {
       source,
     });
     return {
@@ -7552,8 +7555,8 @@ async function syncBmeChatManagerWithCurrentChat(
     };
   }
 
-  const db = await manager.switchChat(chatId);
-  debugDebug("[ST-BME] IndexedDB 会话已同步", {
+  const db = await repository.switchChat(chatId);
+  debugDebug("[ST-BME] 会话存储已同步", {
     source,
     chatId,
   });
@@ -7570,7 +7573,7 @@ function scheduleBmeIndexedDbWarmup(source = "init") {
     if (preferredLocalStore.storagePrimary === "indexeddb") {
       await ensureDexieLoaded();
     }
-    await syncBmeChatManagerWithCurrentChat(source);
+    await syncConversationRepositoryWithCurrentChat(source);
   });
 }
 
@@ -7870,15 +7873,15 @@ function selectPreferredCommitMarker(...candidates) {
 function buildLukerManifestStatePatch(
   manifest = null,
   {
-    cacheMirrorState = graphPersistenceState.cacheMirrorState,
+    cacheMirrorState = conversationWorkspace.graphPersistenceState.cacheMirrorState,
     cacheLag = null,
-    persistMismatchReason = graphPersistenceState.persistMismatchReason,
-    lastPersistReason = graphPersistenceState.lastPersistReason,
-    lastPersistMode = graphPersistenceState.lastPersistMode,
-    persistDiagnosticTier = graphPersistenceState.persistDiagnosticTier,
-    dualWriteLastResult = graphPersistenceState.dualWriteLastResult,
-    acceptedStorageTier = graphPersistenceState.acceptedStorageTier,
-    acceptedBy = graphPersistenceState.acceptedBy,
+    persistMismatchReason = conversationWorkspace.graphPersistenceState.persistMismatchReason,
+    lastPersistReason = conversationWorkspace.graphPersistenceState.lastPersistReason,
+    lastPersistMode = conversationWorkspace.graphPersistenceState.lastPersistMode,
+    persistDiagnosticTier = conversationWorkspace.graphPersistenceState.persistDiagnosticTier,
+    dualWriteLastResult = conversationWorkspace.graphPersistenceState.dualWriteLastResult,
+    acceptedStorageTier = conversationWorkspace.graphPersistenceState.acceptedStorageTier,
+    acceptedBy = conversationWorkspace.graphPersistenceState.acceptedBy,
   } = {},
 ) {
   const normalizedManifest =
@@ -7886,15 +7889,15 @@ function buildLukerManifestStatePatch(
       ? manifest
       : null;
   const manifestRevision = Number(normalizedManifest?.headRevision || 0);
-  const cacheRevision = Number(graphPersistenceState.indexedDbRevision || 0);
+  const cacheRevision = Number(conversationWorkspace.graphPersistenceState.indexedDbRevision || 0);
   return {
     hostProfile: "luker",
     primaryStorageTier: "luker-chat-state",
     chatStateTarget:
-      cloneRuntimeDebugValue(graphPersistenceState.chatStateTarget, null) ||
+      cloneRuntimeDebugValue(conversationWorkspace.graphPersistenceState.chatStateTarget, null) ||
       resolveCurrentChatStateTarget(getContext()),
     lightweightHostMode:
-      graphPersistenceState.lightweightHostMode ??
+      conversationWorkspace.graphPersistenceState.lightweightHostMode ??
       isBmeLightweightHostMode(getContext()),
     cacheStorageTier: buildPersistenceEnvironment(
       getContext(),
@@ -7902,7 +7905,7 @@ function buildLukerManifestStatePatch(
     ).cacheStorageTier,
     cacheMirrorState,
     lastAcceptedRevision: Math.max(
-      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
       manifestRevision,
     ),
     acceptedStorageTier,
@@ -7933,9 +7936,9 @@ async function readLocalCacheSnapshotForChat(chatId, source = "luker-sidecar-loa
   if (cached) return cached;
 
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) return null;
-    const db = await manager.getCurrentDb(normalizedChatId);
+    const repository = ensureConversationRepository();
+    if (!repository) return null;
+    const db = await repository.getStore(normalizedChatId);
     const snapshot = await db.exportSnapshot({ includeTombstones: false });
     return snapshot;
   } catch (error) {
@@ -8027,7 +8030,7 @@ function buildSnapshotFromLukerSidecarState(
           integrity:
             sidecar.checkpoint.integrity ||
             normalizedManifest.integrity ||
-            graphPersistenceState.metadataIntegrity,
+            conversationWorkspace.graphPersistenceState.metadataIntegrity,
           storagePrimary: "chat-state",
           storageMode: "luker-chat-state",
           lastMutationReason: String(
@@ -8064,7 +8067,7 @@ function buildSnapshotFromLukerSidecarState(
       chatId: normalizedChatId,
       revision: 0,
       meta: {
-        integrity: normalizedManifest.integrity || graphPersistenceState.metadataIntegrity,
+        integrity: normalizedManifest.integrity || conversationWorkspace.graphPersistenceState.metadataIntegrity,
         storagePrimary: "chat-state",
         storageMode: "luker-chat-state",
         lastMutationReason: `${source}:luker-empty-base`,
@@ -8140,9 +8143,9 @@ function buildSnapshotFromLukerSidecarState(
 async function compactLukerGraphSidecarV2(
   context = getContext(),
   {
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     chatId = getCurrentChatId(context),
-    revision = graphPersistenceState.lukerManifestRevision || graphPersistenceState.revision,
+    revision = conversationWorkspace.graphPersistenceState.lukerManifestRevision || conversationWorkspace.graphPersistenceState.revision,
     reason = "luker-chat-state-compaction",
     integrity = "",
     chatStateTarget = null,
@@ -8150,7 +8153,7 @@ async function compactLukerGraphSidecarV2(
 ) {
   const normalizedChatId = normalizeChatIdCandidate(chatId);
   const normalizedTarget = resolveCurrentChatStateTarget(context, chatStateTarget);
-  const compactionLease = conversationSession.captureLease();
+  const compactionLease = conversationWorkspace.captureLease();
   const isTargetActive = () =>
     isConversationTargetCurrent(
       normalizedChatId,
@@ -8158,7 +8161,7 @@ async function compactLukerGraphSidecarV2(
       normalizedTarget,
     );
   const updateTargetPersistenceState = (patch) =>
-    isTargetActive() ? updateGraphPersistenceState(patch) : graphPersistenceState;
+    isTargetActive() ? updateGraphPersistenceState(patch) : conversationWorkspace.graphPersistenceState;
   if (
     !normalizedChatId ||
     !graph ||
@@ -8183,7 +8186,7 @@ async function compactLukerGraphSidecarV2(
     const startedAt = Date.now();
     updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(readCachedChatStateManifest(normalizedChatId), {
-        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        cacheMirrorState: conversationWorkspace.graphPersistenceState.cacheMirrorState,
         lastPersistReason: reason,
         lastPersistMode: "luker-chat-state-v2-compacting",
       }),
@@ -8301,7 +8304,7 @@ async function compactLukerGraphSidecarV2(
     cacheChatStateManifest(normalizedChatId, manifestResult.manifest);
     updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
-        cacheMirrorState: graphPersistenceState.cacheMirrorState,
+        cacheMirrorState: conversationWorkspace.graphPersistenceState.cacheMirrorState,
         lastPersistReason: reason,
         lastPersistMode: "luker-chat-state-v2-compacted",
         acceptedStorageTier: "luker-chat-state",
@@ -8346,7 +8349,7 @@ function scheduleLukerGraphSidecarCompaction(
   if (!normalizedChatId || bmeLukerSidecarCompactionByChatId.has(queueKey)) {
     return;
   }
-  const compactionLease = conversationSession.captureLease();
+  const compactionLease = conversationWorkspace.captureLease();
   updateGraphPersistenceState({
     opfsCompactionState: buildLukerJournalCompactionState("queued", {
       queued: true,
@@ -8389,9 +8392,9 @@ function scheduleLukerGraphSidecarCompaction(
 async function persistGraphToLukerSidecarV2(
   context = getContext(),
   {
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     chatId: explicitChatId = "",
-    revision = graphPersistenceState.revision,
+    revision = conversationWorkspace.graphPersistenceState.revision,
     reason = "luker-chat-state-save",
     accepted = true,
     lastProcessedAssistantFloor = null,
@@ -8428,11 +8431,11 @@ async function persistGraphToLukerSidecarV2(
       storageTier: "luker-chat-state",
     };
   }
-  const persistenceLease = conversationSession.captureLease();
+  const persistenceLease = conversationWorkspace.captureLease();
   const isTargetActive = () =>
     isConversationTargetCurrent(chatId, persistenceLease, normalizedTarget);
   const updateTargetPersistenceState = (patch) =>
-    isTargetActive() ? updateGraphPersistenceState(patch) : graphPersistenceState;
+    isTargetActive() ? updateGraphPersistenceState(patch) : conversationWorkspace.graphPersistenceState;
 
   const resolvedIdentity = resolveCurrentChatIdentity(context);
   const currentTargetKey = serializeBmeChatStateTarget(
@@ -8445,7 +8448,7 @@ async function persistGraphToLukerSidecarV2(
     getGraphPersistenceMeta(graph)?.integrity ||
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
-    graphPersistenceState.metadataIntegrity;
+    conversationWorkspace.graphPersistenceState.metadataIntegrity;
 
   return await queueLukerSidecarWrite(chatId, async () => {
     const directDelta =
@@ -8618,15 +8621,15 @@ async function persistGraphToLukerSidecarV2(
       updateTargetPersistenceState({
         ...buildLukerManifestStatePatch(manifestResult.manifest, {
           cacheMirrorState:
-            mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
+            mode === "mirror" ? "saved" : conversationWorkspace.graphPersistenceState.cacheMirrorState,
           lastPersistReason: String(reason || ""),
           lastPersistMode: "luker-chat-state-v2-bootstrap",
           acceptedStorageTier:
             accepted === true
               ? "luker-chat-state"
-              : graphPersistenceState.acceptedStorageTier,
+              : conversationWorkspace.graphPersistenceState.acceptedStorageTier,
           acceptedBy:
-            accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+            accepted === true ? "luker-chat-state" : conversationWorkspace.graphPersistenceState.acceptedBy,
           dualWriteLastResult: {
             action: mode === "mirror" ? "cache-mirror" : "save",
             target: "luker-chat-state",
@@ -8639,14 +8642,14 @@ async function persistGraphToLukerSidecarV2(
           },
         }),
         metadataIntegrity: String(
-          nextIntegrity || graphPersistenceState.metadataIntegrity || "",
+          nextIntegrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || "",
         ),
         revision: Number(effectiveRevision || 0),
         lastPersistedRevision: Number(effectiveRevision || 0),
         lastAcceptedRevision:
           accepted === true
             ? Number(effectiveRevision || 0)
-            : Number(graphPersistenceState.lastAcceptedRevision || 0),
+            : Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
         pendingPersist: false,
         persistMismatchReason: "",
         persistDiagnosticTier: "none",
@@ -8780,7 +8783,7 @@ async function persistGraphToLukerSidecarV2(
     updateTargetPersistenceState({
       ...buildLukerManifestStatePatch(manifestResult.manifest, {
         cacheMirrorState:
-          mode === "mirror" ? "saved" : graphPersistenceState.cacheMirrorState,
+          mode === "mirror" ? "saved" : conversationWorkspace.graphPersistenceState.cacheMirrorState,
         lastPersistReason: String(reason || ""),
         lastPersistMode:
           mode === "mirror"
@@ -8789,9 +8792,9 @@ async function persistGraphToLukerSidecarV2(
         acceptedStorageTier:
           accepted === true
             ? "luker-chat-state"
-            : graphPersistenceState.acceptedStorageTier,
+            : conversationWorkspace.graphPersistenceState.acceptedStorageTier,
         acceptedBy:
-          accepted === true ? "luker-chat-state" : graphPersistenceState.acceptedBy,
+          accepted === true ? "luker-chat-state" : conversationWorkspace.graphPersistenceState.acceptedBy,
         dualWriteLastResult: {
           action: mode === "mirror" ? "cache-mirror" : "save",
           target: "luker-chat-state",
@@ -8806,7 +8809,7 @@ async function persistGraphToLukerSidecarV2(
         },
       }),
       metadataIntegrity: String(
-        nextIntegrity || graphPersistenceState.metadataIntegrity || "",
+        nextIntegrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || "",
       ),
       revision: Number(manifestResult.manifest.headRevision || effectiveRevision || 0),
       lastPersistedRevision: Number(
@@ -8815,7 +8818,7 @@ async function persistGraphToLukerSidecarV2(
       lastAcceptedRevision:
         accepted === true
           ? Number(manifestResult.manifest.headRevision || effectiveRevision || 0)
-          : Number(graphPersistenceState.lastAcceptedRevision || 0),
+          : Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
       pendingPersist: false,
       persistMismatchReason: "",
       persistDiagnosticTier: "none",
@@ -8942,7 +8945,7 @@ async function loadGraphFromLukerSidecarV2(
           acceptedBy: "luker-chat-state",
         }),
         metadataIntegrity: String(
-          manifest.integrity || graphPersistenceState.metadataIntegrity || "",
+          manifest.integrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || "",
         ),
         reason: `${source}:luker-local-cache-hit`,
       });
@@ -9019,10 +9022,10 @@ async function loadGraphFromLukerSidecarV2(
   const snapshot = baseResult.snapshot;
   const shouldAllowOverride =
     allowOverride ||
-    BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(graphPersistenceState.loadState) ||
-    graphPersistenceState.storagePrimary === "chat-state" ||
+    BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(conversationWorkspace.graphPersistenceState.loadState) ||
+    conversationWorkspace.graphPersistenceState.storagePrimary === "chat-state" ||
     Number(manifest.headRevision || 0) >=
-      normalizeIndexedDbRevision(graphPersistenceState.revision);
+      normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.revision);
   if (!shouldAllowOverride) {
     return {
       success: false,
@@ -9052,17 +9055,17 @@ async function loadGraphFromLukerSidecarV2(
           localSnapshotRevision > 0 &&
           localSnapshotRevision >= Number(manifest.headRevision || 0)
             ? "saved"
-            : graphPersistenceState.cacheMirrorState,
+            : conversationWorkspace.graphPersistenceState.cacheMirrorState,
         acceptedStorageTier: "luker-chat-state",
         acceptedBy: "luker-chat-state",
       }),
       chatStateTarget: cloneRuntimeDebugValue(normalizedTarget, null),
       metadataIntegrity: String(
-        manifest.integrity || graphPersistenceState.metadataIntegrity || "",
+        manifest.integrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || "",
       ),
       reason: `${source}:luker-chat-state`,
       revision: Math.max(
-        Number(graphPersistenceState.revision || 0),
+        Number(conversationWorkspace.graphPersistenceState.revision || 0),
         Number(manifest.headRevision || 0),
       ),
     });
@@ -9073,9 +9076,9 @@ async function loadGraphFromLukerSidecarV2(
 async function persistGraphToHostChatState(
   context = getContext(),
   {
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     chatId: explicitChatId = "",
-    revision = graphPersistenceState.revision,
+    revision = conversationWorkspace.graphPersistenceState.revision,
     reason = "graph-chat-state",
     storageTier = "chat-state",
     accepted = true,
@@ -9141,7 +9144,7 @@ async function persistGraphToHostChatState(
   const nextIntegrity =
     getChatMetadataIntegrity(context) ||
     normalizeChatIdCandidate(resolvedIdentity?.integrity) ||
-    graphPersistenceState.metadataIntegrity;
+    conversationWorkspace.graphPersistenceState.metadataIntegrity;
   const persistedGraph =
     graphDetached === true
       ? normalizeGraphRuntimeState(graph, chatId)
@@ -9204,26 +9207,26 @@ async function persistGraphToHostChatState(
         ? writeResult?.updated === false
           ? "saved"
           : "saved"
-        : graphPersistenceState.cacheMirrorState,
-    metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
+        : conversationWorkspace.graphPersistenceState.cacheMirrorState,
+    metadataIntegrity: String(nextIntegrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || ""),
     lastPersistReason: String(reason || ""),
     lastPersistMode:
       mode === "mirror" ? "chat-state-mirror" : "chat-state",
     lastAcceptedRevision:
       accepted === true
         ? Math.max(
-            Number(graphPersistenceState.lastAcceptedRevision || 0),
+            Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
             Number(writeResult.snapshot.revision || revision || 0),
           )
-        : Number(graphPersistenceState.lastAcceptedRevision || 0),
+        : Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
     acceptedStorageTier:
       accepted === true
         ? normalizePersistenceStorageTier(effectiveStorageTier)
-        : graphPersistenceState.acceptedStorageTier,
+        : conversationWorkspace.graphPersistenceState.acceptedStorageTier,
     acceptedBy:
       accepted === true
         ? normalizePersistenceStorageTier(effectiveStorageTier)
-        : graphPersistenceState.acceptedBy,
+        : conversationWorkspace.graphPersistenceState.acceptedBy,
     dualWriteLastResult: {
       action: mode === "mirror" ? "cache-mirror" : "save",
       target: "chat-state",
@@ -9369,7 +9372,7 @@ async function loadGraphFromChatState(
   const integrity =
     normalizeChatIdCandidate(payload.integrity) ||
     getChatMetadataIntegrity(context) ||
-    graphPersistenceState.metadataIntegrity;
+    conversationWorkspace.graphPersistenceState.metadataIntegrity;
   stampGraphPersistenceMeta(chatStateGraph, {
     revision,
     reason: `chat-state:${String(source || "chat-state-probe")}`,
@@ -9439,9 +9442,9 @@ async function loadGraphFromChatState(
 
   const shouldAllowOverride =
     allowOverride ||
-    BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(graphPersistenceState.loadState) ||
-    graphPersistenceState.storagePrimary === "chat-state" ||
-    revision >= normalizeIndexedDbRevision(graphPersistenceState.revision);
+    BME_INDEXEDDB_FALLBACK_LOAD_STATE_SET.has(conversationWorkspace.graphPersistenceState.loadState) ||
+    conversationWorkspace.graphPersistenceState.storagePrimary === "chat-state" ||
+    revision >= normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.revision);
   if (!shouldAllowOverride) {
     return {
       success: false,
@@ -9871,17 +9874,17 @@ function buildLegacyGraphIdentityCandidates(
     addCandidate(aliasCandidate);
   }
 
-  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
+  const currentGraphMeta = getGraphPersistenceMeta(conversationWorkspace.graph) || {};
   const runtimeGraphIntegrity = normalizeChatIdCandidate(
-    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
+    currentGraphMeta.integrity || conversationWorkspace.graphPersistenceState.metadataIntegrity,
   );
   if (
     identity.integrity &&
     runtimeGraphIntegrity &&
     runtimeGraphIntegrity === identity.integrity
   ) {
-    addCandidate(graphPersistenceState.chatId);
-    addCandidate(currentGraph?.historyState?.chatId);
+    addCandidate(conversationWorkspace.graphPersistenceState.chatId);
+    addCandidate(conversationWorkspace.graph?.historyState?.chatId);
     addCandidate(currentGraphMeta.chatId);
   }
 
@@ -9913,16 +9916,16 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
     };
   }
 
-  const manager = ensureBmeChatManager();
-  if (!manager) {
+  const repository = ensureConversationRepository();
+  if (!repository) {
     return {
       migrated: false,
-      reason: "identity-recovery-manager-unavailable",
+      reason: "identity-recovery-repository-unavailable",
       chatId: normalizedChatId,
     };
   }
 
-  const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+  const targetDb = db || (await repository.getStore(normalizedChatId));
   if (!targetDb) {
     return {
       migrated: false,
@@ -10037,28 +10040,28 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
     };
   };
 
-  const currentGraphMeta = getGraphPersistenceMeta(currentGraph) || {};
+  const currentGraphMeta = getGraphPersistenceMeta(conversationWorkspace.graph) || {};
   const runtimeGraphIntegrity = normalizeChatIdCandidate(
-    currentGraphMeta.integrity || graphPersistenceState.metadataIntegrity,
+    currentGraphMeta.integrity || conversationWorkspace.graphPersistenceState.metadataIntegrity,
   );
   const runtimeGraphChatId = normalizeChatIdCandidate(
-    currentGraph?.historyState?.chatId ||
+    conversationWorkspace.graph?.historyState?.chatId ||
       currentGraphMeta.chatId ||
-      graphPersistenceState.chatId,
+      conversationWorkspace.graphPersistenceState.chatId,
   );
 
   if (
-    currentGraph &&
-    !isGraphEffectivelyEmpty(currentGraph) &&
+    conversationWorkspace.graph &&
+    !isGraphEffectivelyEmpty(conversationWorkspace.graph) &&
     runtimeGraphIntegrity &&
     runtimeGraphIntegrity === identity.integrity &&
     runtimeGraphChatId &&
     runtimeGraphChatId !== normalizedChatId
   ) {
-    return await finalizeMigration(currentGraph, {
+    return await finalizeMigration(conversationWorkspace.graph, {
       revision: Math.max(
-        graphPersistenceState.revision || 0,
-        getGraphPersistedRevision(currentGraph),
+        conversationWorkspace.graphPersistenceState.revision || 0,
+        getGraphPersistedRevision(conversationWorkspace.graph),
         1,
       ),
       legacyChatId: runtimeGraphChatId,
@@ -10164,16 +10167,16 @@ async function maybeMigrateLegacyGraphToIndexedDb(
 
   const migrationTask = (async () => {
     try {
-      const manager = ensureBmeChatManager();
-      if (!manager) {
+      const repository = ensureConversationRepository();
+      if (!repository) {
         return {
           migrated: false,
-          reason: "migration-manager-unavailable",
+          reason: "migration-repository-unavailable",
           chatId: normalizedChatId,
         };
       }
 
-      const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+      const targetDb = db || (await repository.getStore(normalizedChatId));
       if (!targetDb) {
         return {
           migrated: false,
@@ -10938,18 +10941,18 @@ function applyIndexedDbEmptyToRuntime(
     };
   }
 
-  currentGraph = normalizeGraphRuntimeState(
+  conversationWorkspace.graph = normalizeGraphRuntimeState(
     createEmptyGraph(),
     normalizedChatId,
   );
-  extractionCount = 0;
-  lastExtractedItems = [];
-  lastRecalledItems = [];
-  lastInjectionContent = "";
-  runtimeStatus = createUiStatus("待命", "当前聊天还没有图谱", "idle");
-  lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
-  lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
-  lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
+  conversationWorkspace.extractionCount = 0;
+  conversationWorkspace.lastExtractedItems = [];
+  conversationWorkspace.lastRecalledItems = [];
+  conversationWorkspace.lastInjectionContent = "";
+  conversationWorkspace.runtimeStatus = createUiStatus("待命", "当前聊天还没有图谱", "idle");
+  conversationWorkspace.lastExtractionStatus = createUiStatus("待命", "当前聊天尚未执行提取", "idle");
+  conversationWorkspace.lastVectorStatus = createUiStatus("待命", "当前聊天尚未执行向量任务", "idle");
+  conversationWorkspace.lastRecallStatus = createUiStatus("待命", "当前聊天尚未建立记忆图谱", "idle");
   const activeStore = getPreferredGraphLocalStorePresentationSync();
 
   applyGraphLoadState(GRAPH_LOAD_STATES.EMPTY_CONFIRMED, {
@@ -11024,13 +11027,13 @@ function queueRuntimeGraphLocalStoreRepair(
     };
   }
 
-  const graphSnapshot = cloneGraphForPersistence(currentGraph, normalizedChatId);
+  const graphSnapshot = cloneGraphForPersistence(conversationWorkspace.graph, normalizedChatId);
   const requestedRevision = Math.max(
     1,
     Number(getGraphPersistedRevision(graphSnapshot) || 0),
-    Number(graphPersistenceState.revision || 0),
-    Number(graphPersistenceState.lastAcceptedRevision || 0),
-    Number(graphPersistenceState.lastPersistedRevision || 0),
+    Number(conversationWorkspace.graphPersistenceState.revision || 0),
+    Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
+    Number(conversationWorkspace.graphPersistenceState.lastPersistedRevision || 0),
   );
   const repairReason = `${String(source || "runtime-local-store-repair")}:repair-local-store`;
   bmeIndexedDbRuntimeRepairInFlightByChatId.add(normalizedChatId);
@@ -11049,18 +11052,18 @@ function queueRuntimeGraphLocalStoreRepair(
       });
       if (
         result?.accepted !== true &&
-        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        conversationWorkspace.graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
         hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
       ) {
         applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
           chatId: normalizedChatId,
           reason: result?.reason || "runtime-local-store-repair-failed",
           revision: Math.max(
-            Number(graphPersistenceState.revision || 0),
+            Number(conversationWorkspace.graphPersistenceState.revision || 0),
             Number(result?.revision || requestedRevision),
           ),
           lastPersistedRevision: Math.max(
-            Number(graphPersistenceState.lastPersistedRevision || 0),
+            Number(conversationWorkspace.graphPersistenceState.lastPersistedRevision || 0),
             Number(result?.revision || 0),
           ),
           pendingPersist: false,
@@ -11070,7 +11073,7 @@ function queueRuntimeGraphLocalStoreRepair(
       }
     } catch (error) {
       if (
-        graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
+        conversationWorkspace.graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING &&
         hasMeaningfulRuntimeGraphForChat(normalizedChatId, identity)
       ) {
         applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
@@ -11315,11 +11318,11 @@ function applyIndexedDbSnapshotToRuntime(
   );
   if (staleDecision.stale) {
     const persistencePatch = {
-      storagePrimary: graphPersistenceState.storagePrimary || storagePrimary,
-      storageMode: graphPersistenceState.storageMode || storageMode,
+      storagePrimary: conversationWorkspace.graphPersistenceState.storagePrimary || storagePrimary,
+      storageMode: conversationWorkspace.graphPersistenceState.storageMode || storageMode,
       metadataIntegrity:
         getChatMetadataIntegrity(getContext()) ||
-        graphPersistenceState.metadataIntegrity,
+        conversationWorkspace.graphPersistenceState.metadataIntegrity,
       indexedDbLastError: "",
       dualWriteLastResult: {
         action: "load",
@@ -11334,7 +11337,7 @@ function applyIndexedDbSnapshotToRuntime(
     };
     if (storagePrimary === "indexeddb") {
       persistencePatch.indexedDbRevision = Math.max(
-        graphPersistenceState.indexedDbRevision || 0,
+        conversationWorkspace.graphPersistenceState.indexedDbRevision || 0,
         revision,
       );
     }
@@ -11505,8 +11508,8 @@ function applyIndexedDbSnapshotToRuntime(
     return result;
   }
   const applyRuntimeStartedAt = readLoadDiagnosticsNow();
-  currentGraph = graphFromSnapshot;
-  stampGraphPersistenceMeta(currentGraph, {
+  conversationWorkspace.graph = graphFromSnapshot;
+  stampGraphPersistenceMeta(conversationWorkspace.graph, {
     revision,
     reason: `${reasonPrefix}:${String(source || reasonPrefix)}`,
     chatId: normalizedChatId,
@@ -11518,8 +11521,8 @@ function applyIndexedDbSnapshotToRuntime(
   const currentCommitMarkerChatId = normalizeChatIdCandidate(currentCommitMarker?.chatId);
   const currentIdentity = resolveCurrentChatIdentity(getContext());
   const legacyBatchRepair = repairLegacyLastBatchPersistenceStatus({
-    batchStatus: currentGraph.historyState?.lastBatchStatus || null,
-    persistenceState: graphPersistenceState,
+    batchStatus: conversationWorkspace.graph.historyState?.lastBatchStatus || null,
+    persistenceState: conversationWorkspace.graphPersistenceState,
     commitMarker: currentCommitMarker,
     activeChatId: normalizedChatId,
     commitMarkerChatMatchesActive:
@@ -11535,31 +11538,31 @@ function applyIndexedDbSnapshotToRuntime(
           currentIdentity,
         )),
   });
-  if (legacyBatchRepair.repaired && currentGraph.historyState) {
-    currentGraph.historyState.lastBatchStatus = legacyBatchRepair.batchStatus;
+  if (legacyBatchRepair.repaired && conversationWorkspace.graph.historyState) {
+    conversationWorkspace.graph.historyState.lastBatchStatus = legacyBatchRepair.batchStatus;
   }
-  currentGraph.vectorIndexState.lastIntegrityIssue = null;
+  conversationWorkspace.graph.vectorIndexState.lastIntegrityIssue = null;
 
-  extractionCount = Number.isFinite(currentGraph?.historyState?.extractionCount)
-    ? currentGraph.historyState.extractionCount
+  conversationWorkspace.extractionCount = Number.isFinite(conversationWorkspace.graph?.historyState?.extractionCount)
+    ? conversationWorkspace.graph.historyState.extractionCount
     : 0;
-  lastExtractedItems = [];
+  conversationWorkspace.lastExtractedItems = [];
   const restoredRecallUi = restoreRecallUiStateFromPersistence(
     getContext()?.chat,
   );
-  runtimeStatus = createUiStatus("待命", `已从${statusLabel}加载聊天图谱`, "idle");
-  lastExtractionStatus = createUiStatus(
+  conversationWorkspace.runtimeStatus = createUiStatus("待命", `已从${statusLabel}加载聊天图谱`, "idle");
+  conversationWorkspace.lastExtractionStatus = createUiStatus(
     "待命",
     `已从${statusLabel}加载聊天图谱，等待下一次提取`,
     "idle",
   );
-  lastVectorStatus = createUiStatus(
+  conversationWorkspace.lastVectorStatus = createUiStatus(
     "待命",
-    currentGraph.vectorIndexState?.lastWarning ||
+    conversationWorkspace.graph.vectorIndexState?.lastWarning ||
       `已从${statusLabel}加载聊天图谱，等待下一次向量任务`,
     "idle",
   );
-  lastRecallStatus = createUiStatus(
+  conversationWorkspace.lastRecallStatus = createUiStatus(
     "待命",
     restoredRecallUi.restored
       ? "已从持久化召回记录恢复显示，等待下一次召回"
@@ -11573,7 +11576,7 @@ function applyIndexedDbSnapshotToRuntime(
     attemptIndex,
     revision,
     lastPersistedRevision: Math.max(
-      graphPersistenceState.lastPersistedRevision || 0,
+      conversationWorkspace.graphPersistenceState.lastPersistedRevision || 0,
       revision,
     ),
     queuedPersistRevision: 0,
@@ -11591,10 +11594,10 @@ function applyIndexedDbSnapshotToRuntime(
     persistMismatchReason: "",
     metadataIntegrity:
       getChatMetadataIntegrity(getContext()) ||
-        graphPersistenceState.metadataIntegrity,
-    indexedDbLastError: storagePrimary === "indexeddb" ? "" : graphPersistenceState.indexedDbLastError,
+        conversationWorkspace.graphPersistenceState.metadataIntegrity,
+    indexedDbLastError: storagePrimary === "indexeddb" ? "" : conversationWorkspace.graphPersistenceState.indexedDbLastError,
     lastAcceptedRevision: Math.max(
-      Number(graphPersistenceState.lastAcceptedRevision || 0),
+      Number(conversationWorkspace.graphPersistenceState.lastAcceptedRevision || 0),
       revision,
     ),
     lastSyncError: "",
@@ -11612,18 +11615,18 @@ function applyIndexedDbSnapshotToRuntime(
   }
   updateGraphPersistenceState(persistencePatch);
   const shouldPersistPostLoadRepairs =
-    hasGraphPersistDirtyState(currentGraph) || legacyBatchRepair.repaired === true;
+    hasGraphPersistDirtyState(conversationWorkspace.graph) || legacyBatchRepair.repaired === true;
   rememberResolvedGraphIdentityAlias(getContext(), normalizedChatId);
 
   if (shouldPersistPostLoadRepairs) {
     const repairedNodeCount = Number(hydrateDiagnostics?.scopeRepairNodeCount) || 0;
     const repairedEdgeCount = Number(hydrateDiagnostics?.scopeRepairEdgeCount) || 0;
     void Promise.resolve().then(() => {
-      if (currentGraph !== graphFromSnapshot) {
+      if (conversationWorkspace.graph !== graphFromSnapshot) {
         return;
       }
       if (
-        normalizeChatIdCandidate(currentGraph?.historyState?.chatId) !== normalizedChatId
+        normalizeChatIdCandidate(conversationWorkspace.graph?.historyState?.chatId) !== normalizedChatId
       ) {
         return;
       }
@@ -11651,7 +11654,7 @@ function applyIndexedDbSnapshotToRuntime(
     chatId: normalizedChatId,
     source,
     revision,
-    ...getGraphStats(currentGraph),
+    ...getGraphStats(conversationWorkspace.graph),
   });
 
   const result = {
@@ -11882,22 +11885,22 @@ function applyModuleInjectionPrompt(content = "", settings = getSettings()) {
 }
 
 function ensureCurrentGraphRuntimeState({ chatId = getCurrentChatId() } = {}) {
-  if (!currentGraph) {
-    currentGraph = createEmptyGraph();
+  if (!conversationWorkspace.graph) {
+    conversationWorkspace.graph = createEmptyGraph();
   }
 
-  currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
-  return currentGraph;
+  conversationWorkspace.graph = normalizeGraphRuntimeState(conversationWorkspace.graph, chatId);
+  return conversationWorkspace.graph;
 }
 
 function clearPendingGraphLoadRetry({ resetChatId = true } = {}) {
-  if (pendingGraphLoadRetryTimer) {
-    clearTimeout(pendingGraphLoadRetryTimer);
-    pendingGraphLoadRetryTimer = null;
+  if (conversationWorkspace.timers.graphLoadRetry) {
+    clearTimeout(conversationWorkspace.timers.graphLoadRetry);
+    conversationWorkspace.timers.graphLoadRetry = null;
   }
 
   if (resetChatId) {
-    pendingGraphLoadRetryChatId = "";
+    conversationWorkspace.timers.graphLoadRetryChatId = "";
   }
 }
 
@@ -11905,7 +11908,7 @@ function isGraphLoadRetryPending(chatId = getCurrentChatId()) {
   const normalizedChatId = String(chatId || "");
   return (
     Boolean(normalizedChatId) &&
-    pendingGraphLoadRetryChatId === normalizedChatId
+    conversationWorkspace.timers.graphLoadRetryChatId === normalizedChatId
   );
 }
 
@@ -11967,69 +11970,43 @@ function markDryRunPromptPreview(ttlMs = GENERATION_RECALL_HOOK_BRIDGE_MS) {
     100,
     Math.floor(Number(ttlMs) || GENERATION_RECALL_HOOK_BRIDGE_MS),
   );
-  skipBeforeCombineRecallUntil = Date.now() + resolvedTtlMs;
-  return skipBeforeCombineRecallUntil;
+  conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil = Date.now() + resolvedTtlMs;
+  return conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil;
 }
 
 function clearDryRunPromptPreview() {
-  const hadPendingSkip = skipBeforeCombineRecallUntil > Date.now();
-  skipBeforeCombineRecallUntil = 0;
+  const hadPendingSkip = conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil > Date.now();
+  conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil = 0;
   return hadPendingSkip;
 }
 
 function consumeDryRunPromptPreview(now = Date.now()) {
-  if (skipBeforeCombineRecallUntil <= now) {
-    if (skipBeforeCombineRecallUntil !== 0) {
-      skipBeforeCombineRecallUntil = 0;
+  if (conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil <= now) {
+    if (conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil !== 0) {
+      conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil = 0;
     }
     return false;
   }
 
-  skipBeforeCombineRecallUntil = 0;
+  conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil = 0;
   return true;
 }
 
 function readMvuExtraAnalysisFlag() {
-  try {
-    const sameFrameMvu = globalThis?.window?.Mvu;
-    if (typeof sameFrameMvu?.isDuringExtraAnalysis === "function") {
-      return Boolean(sameFrameMvu.isDuringExtraAnalysis());
-    }
-  } catch {}
-
-  try {
-    const parentMvu = globalThis?.window?.parent?.Mvu;
-    if (typeof parentMvu?.isDuringExtraAnalysis === "function") {
-      return Boolean(parentMvu.isDuringExtraAnalysis());
-    }
-  } catch {}
-
-  try {
-    const getActivePinia =
-      globalThis?.window?.getActivePinia ??
-      globalThis?.window?.parent?.getActivePinia;
-    if (typeof getActivePinia === "function") {
-      const pinia = getActivePinia();
-      return Boolean(
-        pinia?.state?.value?.["MVU变量框架"]?.runtimes?.is_during_extra_analysis,
-      );
-    }
-  } catch {}
-
-  return false;
+  return readHostMvuExtraAnalysisFlag();
 }
 
 function isMvuExtraAnalysisGuardActive(now = Date.now()) {
   if (readMvuExtraAnalysisFlag()) {
-    mvuExtraAnalysisGuardUntil = Math.max(
-      mvuExtraAnalysisGuardUntil,
+    conversationWorkspace.hostGeneration.mvuExtraAnalysisGuardUntil = Math.max(
+      conversationWorkspace.hostGeneration.mvuExtraAnalysisGuardUntil,
       now + MVU_EXTRA_ANALYSIS_GUARD_TTL_MS,
     );
   }
 
-  if (mvuExtraAnalysisGuardUntil <= now) {
-    if (mvuExtraAnalysisGuardUntil !== 0) {
-      mvuExtraAnalysisGuardUntil = 0;
+  if (conversationWorkspace.hostGeneration.mvuExtraAnalysisGuardUntil <= now) {
+    if (conversationWorkspace.hostGeneration.mvuExtraAnalysisGuardUntil !== 0) {
+      conversationWorkspace.hostGeneration.mvuExtraAnalysisGuardUntil = 0;
     }
     return false;
   }
@@ -12039,7 +12016,7 @@ function isMvuExtraAnalysisGuardActive(now = Date.now()) {
 
 function isTavernHelperPromptViewerRefreshActive() {
   try {
-    const doc = globalThis?.document;
+    const doc = getHostDocument();
     if (!doc?.querySelectorAll) return false;
 
     const dialogs = Array.from(doc.querySelectorAll('[role="dialog"]'));
@@ -12100,18 +12077,18 @@ function buildGraphPersistResult({
   recoverable = false,
   storageTier = "none",
   acceptedBy = "none",
-  primaryTier = graphPersistenceState.primaryStorageTier,
-  cacheTier = graphPersistenceState.cacheStorageTier,
+  primaryTier = conversationWorkspace.graphPersistenceState.primaryStorageTier,
+  cacheTier = conversationWorkspace.graphPersistenceState.cacheStorageTier,
   cacheMirrored = false,
-  diagnosticTier = graphPersistenceState.persistDiagnosticTier,
+  diagnosticTier = conversationWorkspace.graphPersistenceState.persistDiagnosticTier,
   reason = "",
-  loadState = graphPersistenceState.loadState,
-  revision = graphPersistenceState.revision,
-  saveMode = graphPersistenceState.lastPersistMode,
-  manifestRevision = graphPersistenceState.lukerManifestRevision || 0,
-  journalDepth = graphPersistenceState.lukerJournalDepth || 0,
-  checkpointRevision = graphPersistenceState.lukerCheckpointRevision || 0,
-  cacheLag = graphPersistenceState.cacheLag || 0,
+  loadState = conversationWorkspace.graphPersistenceState.loadState,
+  revision = conversationWorkspace.graphPersistenceState.revision,
+  saveMode = conversationWorkspace.graphPersistenceState.lastPersistMode,
+  manifestRevision = conversationWorkspace.graphPersistenceState.lukerManifestRevision || 0,
+  journalDepth = conversationWorkspace.graphPersistenceState.lukerJournalDepth || 0,
+  checkpointRevision = conversationWorkspace.graphPersistenceState.lukerCheckpointRevision || 0,
+  cacheLag = conversationWorkspace.graphPersistenceState.cacheLag || 0,
 } = {}) {
   return {
     saved,
@@ -12162,9 +12139,9 @@ function isAuthorityBlockedPersistenceResult(result = null) {
 function maybeCaptureGraphShadowSnapshot(
   reason = "runtime-shadow",
   {
-    graph = currentGraph,
-    chatId = graphPersistenceState.chatId || getCurrentChatId(),
-    revision = graphPersistenceState.revision,
+    graph = conversationWorkspace.graph,
+    chatId = conversationWorkspace.graphPersistenceState.chatId || getCurrentChatId(),
+    revision = conversationWorkspace.graphPersistenceState.revision,
   } = {},
 ) {
   return maybeCaptureGraphShadowSnapshotImpl(
@@ -12187,7 +12164,7 @@ function clearPendingGraphPersistRetry({ resetChatId = true } = {}) {
 
 function canPersistGraphToMetadataFallback(
   context = getContext(),
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
 ) {
   if (isGraphMetadataWriteAllowed()) {
     return true;
@@ -12202,7 +12179,7 @@ function canPersistGraphToMetadataFallback(
   const runtimeGraphChatId = normalizeChatIdCandidate(
     graph?.historyState?.chatId,
   );
-  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const stateChatId = normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
   const sameRuntimeChat =
     !runtimeGraphChatId ||
     areChatIdsEquivalentForResolvedIdentity(
@@ -12229,7 +12206,7 @@ function canPersistGraphToMetadataFallback(
     );
 
   return (
-    graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT &&
+    conversationWorkspace.graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT &&
     sameRuntimeChat &&
     sameStateChat &&
     typeof graph === "object" &&
@@ -12261,7 +12238,7 @@ async function persistGraphToConfiguredDurableTier(
     Number(graph?.historyState?.extractionCount),
   )
     ? Number(graph.historyState.extractionCount)
-    : Number(extractionCount || 0);
+    : Number(conversationWorkspace.extractionCount || 0);
   const isPersistTargetActive = () => {
     const activeContext = getContext();
     const activeChatId = normalizeChatIdCandidate(getCurrentChatId(activeContext));
@@ -12326,7 +12303,7 @@ async function persistGraphToConfiguredDurableTier(
         chatId,
         integrity:
           getChatMetadataIntegrity(context) ||
-          graphPersistenceState.metadataIntegrity,
+          conversationWorkspace.graphPersistenceState.metadataIntegrity,
       });
       if (isPersistTargetActive()) updateGraphPersistenceState({
         hostProfile: persistenceEnvironment.hostProfile,
@@ -12362,7 +12339,7 @@ async function persistGraphToConfiguredDurableTier(
         cacheLag: Math.max(
           0,
           Number(chatStateResult?.manifestRevision || acceptedRevision) -
-            Number(graphPersistenceState.indexedDbRevision || 0),
+            Number(conversationWorkspace.graphPersistenceState.indexedDbRevision || 0),
         ),
       });
       if (isPersistTargetActive()) clearPendingGraphPersistRetry();
@@ -12395,7 +12372,7 @@ async function persistGraphToConfiguredDurableTier(
         cacheLag: Math.max(
           0,
           Number(chatStateResult?.manifestRevision || acceptedRevision) -
-            Number(graphPersistenceState.indexedDbRevision || 0),
+            Number(conversationWorkspace.graphPersistenceState.indexedDbRevision || 0),
         ),
       });
     }
@@ -12473,7 +12450,7 @@ async function persistGraphToConfiguredDurableTier(
   return null;
 }
 
-function resolvePendingPersistLastProcessedAssistantFloor(graph = currentGraph) {
+function resolvePendingPersistLastProcessedAssistantFloor(graph = conversationWorkspace.graph) {
   const processedRange = Array.isArray(
     graph?.historyState?.lastBatchStatus?.processedRange,
   )
@@ -12494,11 +12471,11 @@ function resolvePendingPersistLastProcessedAssistantFloor(graph = currentGraph) 
 
 function resolvePendingPersistGraphSource(chatId = "") {
   const normalizedChatId = normalizeChatIdCandidate(
-    chatId || graphPersistenceState.queuedPersistChatId || graphPersistenceState.chatId,
+    chatId || conversationWorkspace.graphPersistenceState.queuedPersistChatId || conversationWorkspace.graphPersistenceState.chatId,
   );
   const targetRevision = Math.max(
-    Number(graphPersistenceState.queuedPersistRevision || 0),
-    Number(graphPersistenceState.revision || 0),
+    Number(conversationWorkspace.graphPersistenceState.queuedPersistRevision || 0),
+    Number(conversationWorkspace.graphPersistenceState.revision || 0),
   );
   const shadowSnapshot = normalizedChatId
     ? readGraphShadowSnapshot(normalizedChatId)
@@ -12539,11 +12516,11 @@ function resolvePendingPersistGraphSource(chatId = "") {
   }
 
   const runtimeGraphChatId = normalizeChatIdCandidate(
-    currentGraph?.historyState?.chatId,
+    conversationWorkspace.graph?.historyState?.chatId,
   );
   const identity = resolveCurrentChatIdentity(getContext());
   if (
-    currentGraph &&
+    conversationWorkspace.graph &&
     runtimeGraphChatId &&
     (areChatIdsEquivalentForResolvedIdentity(
       normalizedChatId,
@@ -12557,10 +12534,10 @@ function resolvePendingPersistGraphSource(chatId = "") {
       ))
   ) {
     return {
-      graph: currentGraph,
+      graph: conversationWorkspace.graph,
       source: "runtime",
       revision: Math.max(
-        Number(getGraphPersistedRevision(currentGraph) || 0),
+        Number(getGraphPersistedRevision(conversationWorkspace.graph) || 0),
         targetRevision,
       ),
     };
@@ -12581,7 +12558,7 @@ function applyAcceptedPendingPersistState(
   const persistenceRecord = buildBatchPersistenceRecordFromPersistResult(
     persistResult,
   );
-  const pendingBatchStatus = currentGraph?.historyState?.lastBatchStatus;
+  const pendingBatchStatus = conversationWorkspace.graph?.historyState?.lastBatchStatus;
   let promotedPersistedGraph = false;
 
   if (
@@ -12592,25 +12569,25 @@ function applyAcceptedPendingPersistState(
   ) {
     const promotedChatId = normalizeChatIdCandidate(
       persistedGraph?.historyState?.chatId ||
-        graphPersistenceState.queuedPersistChatId ||
-        graphPersistenceState.chatId ||
+        conversationWorkspace.graphPersistenceState.queuedPersistChatId ||
+        conversationWorkspace.graphPersistenceState.chatId ||
         getCurrentChatId(),
     );
-    currentGraph = normalizeGraphRuntimeState(
+    conversationWorkspace.graph = normalizeGraphRuntimeState(
       cloneGraphSnapshot(persistedGraph),
       promotedChatId,
     );
-    stampGraphPersistenceMeta(currentGraph, {
+    stampGraphPersistenceMeta(conversationWorkspace.graph, {
       revision: persistenceRecord.revision,
       reason: persistenceRecord.reason || "pending-persist-accepted",
       chatId: promotedChatId,
-      integrity: graphPersistenceState.metadataIntegrity,
+      integrity: conversationWorkspace.graphPersistenceState.metadataIntegrity,
     });
-    extractionCount = Number(
-      currentGraph?.historyState?.extractionCount || extractionCount || 0,
+    conversationWorkspace.extractionCount = Number(
+      conversationWorkspace.graph?.historyState?.extractionCount || conversationWorkspace.extractionCount || 0,
     );
-    const latestBatchEntry = Array.isArray(currentGraph.batchJournal)
-      ? currentGraph.batchJournal[currentGraph.batchJournal.length - 1]
+    const latestBatchEntry = Array.isArray(conversationWorkspace.graph.batchJournal)
+      ? conversationWorkspace.graph.batchJournal[conversationWorkspace.graph.batchJournal.length - 1]
       : null;
     updateLastExtractedItems(latestBatchEntry?.createdNodeIds || []);
     promotedPersistedGraph = true;
@@ -12619,9 +12596,9 @@ function applyAcceptedPendingPersistState(
   const batchStatus =
     pendingBatchStatus && typeof pendingBatchStatus === "object"
       ? pendingBatchStatus
-      : currentGraph?.historyState?.lastBatchStatus;
+      : conversationWorkspace.graph?.historyState?.lastBatchStatus;
   if (batchStatus && typeof batchStatus === "object") {
-    currentGraph.historyState.lastBatchStatus = reducePersistenceRecordToBatchStatus(
+    conversationWorkspace.graph.historyState.lastBatchStatus = reducePersistenceRecordToBatchStatus(
       batchStatus,
       persistenceRecord,
     );
@@ -12637,14 +12614,14 @@ function applyAcceptedPendingPersistState(
     if (!promotedPersistedGraph && typeof updateProcessedHistorySnapshot === "function") {
       updateProcessedHistorySnapshot(chat, safeFloor);
     } else if (!promotedPersistedGraph) {
-      currentGraph.historyState.lastProcessedAssistantFloor = safeFloor;
-      currentGraph.lastProcessedSeq = safeFloor;
+      conversationWorkspace.graph.historyState.lastProcessedAssistantFloor = safeFloor;
+      conversationWorkspace.graph.lastProcessedSeq = safeFloor;
     }
   }
 
   if (persistenceRecord.accepted === true) {
     updateGraphPersistenceState(
-      reducePersistenceStatePatch(graphPersistenceState, {
+      reducePersistenceStatePatch(conversationWorkspace.graphPersistenceState, {
         type: PERSISTENCE_EVENT_TYPES.ACCEPTED,
         persistenceRecord,
         clearQueued: false,
@@ -12677,19 +12654,19 @@ function maybeClearAcceptedPendingPersistState(
   source = "accepted-pending-persist-reconcile",
 ) {
   ensureCurrentGraphRuntimeState();
-  if (graphPersistenceState.pendingPersist !== true) {
+  if (conversationWorkspace.graphPersistenceState.pendingPersist !== true) {
     return false;
   }
 
-  const batchStatus = currentGraph?.historyState?.lastBatchStatus || null;
+  const batchStatus = conversationWorkspace.graph?.historyState?.lastBatchStatus || null;
   const persistence = batchStatus?.persistence || null;
 
   const commitMarker = syncCommitMarkerToPersistenceState(getContext());
   const context = getContext();
   const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
   const queuedChatId = normalizeChatIdCandidate(
-    graphPersistenceState.queuedPersistChatId ||
-      graphPersistenceState.chatId ||
+    conversationWorkspace.graphPersistenceState.queuedPersistChatId ||
+      conversationWorkspace.graphPersistenceState.chatId ||
       activeChatId,
   );
   const currentIdentity = resolveCurrentChatIdentity(context);
@@ -12722,7 +12699,7 @@ function maybeClearAcceptedPendingPersistState(
       ));
   const plan = planAcceptedPendingClear({
     batchPersistence: persistence,
-    persistenceState: graphPersistenceState,
+    persistenceState: conversationWorkspace.graphPersistenceState,
     commitMarker,
     activeChatId,
     queuedChatId,
@@ -12762,20 +12739,20 @@ function schedulePendingGraphPersistRetry(
   if (isRestoreLockActive()) {
     return false;
   }
-  if (!graphPersistenceState.pendingPersist) {
+  if (!conversationWorkspace.graphPersistenceState.pendingPersist) {
     clearPendingGraphPersistRetry();
     return false;
   }
 
   const targetChatId = normalizeChatIdCandidate(
-    graphPersistenceState.queuedPersistChatId ||
-      graphPersistenceState.chatId ||
+    conversationWorkspace.graphPersistenceState.queuedPersistChatId ||
+      conversationWorkspace.graphPersistenceState.chatId ||
       getCurrentChatId(),
   );
   if (!targetChatId) {
     return false;
   }
-  const conversationLease = conversationSession.captureLease();
+  const conversationLease = conversationWorkspace.captureLease();
 
   const normalizedAttempt = Math.max(0, Math.floor(Number(attempt) || 0));
   if (normalizedAttempt >= PENDING_GRAPH_PERSIST_MAX_RETRY_ATTEMPTS) {
@@ -12795,7 +12772,7 @@ function schedulePendingGraphPersistRetry(
     pendingGraphPersistRetryTimer = null;
     if (
       pendingGraphPersistRetryChatId !== targetChatId ||
-      !conversationSession.isLeaseCurrent(conversationLease, {
+      !conversationWorkspace.isLeaseCurrent(conversationLease, {
         requireGeneration: false,
       })
     ) {
@@ -12818,9 +12795,9 @@ function persistGraphToChatMetadata(
   context = getContext(),
   {
     reason = "graph-persist",
-    revision = graphPersistenceState.revision,
+    revision = conversationWorkspace.graphPersistenceState.revision,
     immediate = false,
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
   } = {},
 ) {
   if (!context || !graph) {
@@ -12863,8 +12840,8 @@ function persistGraphToChatMetadata(
   updateGraphPersistenceState({
     lastPersistReason: String(reason || ""),
     lastPersistMode: `metadata-full:${saveMode}`,
-    metadataIntegrity: String(nextIntegrity || graphPersistenceState.metadataIntegrity || ""),
-    indexedDbLastError: graphPersistenceState.indexedDbLastError || "",
+    metadataIntegrity: String(nextIntegrity || conversationWorkspace.graphPersistenceState.metadataIntegrity || ""),
+    indexedDbLastError: conversationWorkspace.graphPersistenceState.indexedDbLastError || "",
     lastRecoverableStorageTier: "metadata-full",
     dualWriteLastResult: {
       action: "save",
@@ -12884,7 +12861,7 @@ function persistGraphToChatMetadata(
     accepted: false,
     recoverable: true,
     reason,
-    loadState: graphPersistenceState.loadState,
+    loadState: conversationWorkspace.graphPersistenceState.loadState,
     revision,
     saveMode,
     storageTier: "metadata-full",
@@ -12893,17 +12870,17 @@ function persistGraphToChatMetadata(
 
 function queueGraphPersist(
   reason = "graph-persist-blocked",
-  revision = graphPersistenceState.revision,
+  revision = conversationWorkspace.graphPersistenceState.revision,
   {
     immediate = true,
-    graph = currentGraph,
+    graph = conversationWorkspace.graph,
     chatId = undefined,
     captureShadow = true,
     recoverableTier = "none",
   } = {},
 ) {
   const queuedChatId =
-    String(chatId || graphPersistenceState.chatId || getCurrentChatId()) || "";
+    String(chatId || conversationWorkspace.graphPersistenceState.chatId || getCurrentChatId()) || "";
   const normalizedRevision = Math.max(
     1,
     allocateRequestedPersistRevision(revision, graph),
@@ -12924,7 +12901,7 @@ function queueGraphPersist(
   }
 
   updateGraphPersistenceState(
-    reducePersistenceStatePatch(graphPersistenceState, {
+    reducePersistenceStatePatch(conversationWorkspace.graphPersistenceState, {
       type: PERSISTENCE_EVENT_TYPES.QUEUED,
       reason,
       revision: normalizedRevision,
@@ -12941,7 +12918,7 @@ function queueGraphPersist(
     accepted: false,
     recoverable: isRecoveryOnlyPersistTier(effectiveRecoverableTier),
     reason,
-    loadState: graphPersistenceState.loadState,
+    loadState: conversationWorkspace.graphPersistenceState.loadState,
     revision: normalizedRevision,
     saveMode: immediate ? "immediate" : "debounced",
     storageTier: effectiveRecoverableTier !== "none" ? effectiveRecoverableTier : "none",
@@ -12981,6 +12958,13 @@ async function persistExtractionBatchResult(options = {}) {
   );
 }
 
+async function persistDetachedRecoveryGraph(graph, options = {}) {
+  return await persistDetachedGraphSnapshotImpl(createGraphLoadPersistRuntime(), {
+    graph,
+    ...options,
+  });
+}
+
 function scheduleGraphLoadRetry(
   chatId,
   reason = "metadata-pending",
@@ -12998,14 +12982,14 @@ function scheduleGraphLoadRetry(
   }
 
   clearPendingGraphLoadRetry({ resetChatId: false });
-  pendingGraphLoadRetryChatId =
+  conversationWorkspace.timers.graphLoadRetryChatId =
     normalizedChatId || (allowPendingChat ? GRAPH_LOAD_PENDING_CHAT_ID : "");
   debugDebug(
     `[ST-BME] 图谱元数据尚未就绪，${delayMs}ms 后重试加载（chat=${normalizedChatId || "pending"}，attempt=${attemptIndex + 1}，reason=${reason}）`,
   );
 
-  pendingGraphLoadRetryTimer = setTimeout(() => {
-    pendingGraphLoadRetryTimer = null;
+  conversationWorkspace.timers.graphLoadRetry = setTimeout(() => {
+    conversationWorkspace.timers.graphLoadRetry = null;
     const currentChatId = getCurrentChatId();
     if (
       normalizedExpectedChatId &&
@@ -13061,11 +13045,11 @@ function reconcileIndexedDbProbeFailureState(
     return result;
   }
 
-  if (graphPersistenceState.loadState !== GRAPH_LOAD_STATES.LOADING) {
+  if (conversationWorkspace.graphPersistenceState.loadState !== GRAPH_LOAD_STATES.LOADING) {
     return result;
   }
 
-  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const stateChatId = normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
   if (stateChatId && stateChatId !== normalizedChatId) {
     return result;
   }
@@ -13093,7 +13077,7 @@ function reconcileIndexedDbProbeFailureState(
     dbReady: false,
     writesBlocked: true,
   });
-  runtimeStatus = createGraphLoadUiStatus();
+  conversationWorkspace.runtimeStatus = createGraphLoadUiStatus();
   refreshPanelLiveState();
 
   return {
@@ -13112,7 +13096,7 @@ function shouldSyncGraphLoadFromLiveContext(
 
   const chatIdentity = resolveCurrentChatIdentity(context);
   const liveChatId = chatIdentity.chatId;
-  const stateChatId = normalizeChatIdCandidate(graphPersistenceState.chatId);
+  const stateChatId = normalizeChatIdCandidate(conversationWorkspace.graphPersistenceState.chatId);
 
   if (
     !areChatIdsEquivalentForResolvedIdentity(
@@ -13126,12 +13110,12 @@ function shouldSyncGraphLoadFromLiveContext(
 
   if (
     !liveChatId &&
-    graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT
+    conversationWorkspace.graphPersistenceState.loadState !== GRAPH_LOAD_STATES.NO_CHAT
   ) {
     return true;
   }
 
-  if (liveChatId && !graphPersistenceState.dbReady) return true;
+  if (liveChatId && !conversationWorkspace.graphPersistenceState.dbReady) return true;
 
   return false;
 }
@@ -13158,13 +13142,13 @@ function clearInjectionState(options = {}) {
     preserveRecallStatus = false,
     preserveRuntimeStatus = preserveRecallStatus,
   } = options;
-  lastInjectionContent = "";
-  lastRecalledItems = [];
+  conversationWorkspace.lastInjectionContent = "";
+  conversationWorkspace.lastRecalledItems = [];
   if (!preserveRecallStatus) {
-    lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+    conversationWorkspace.lastRecallStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
   }
   if (!preserveRuntimeStatus) {
-    runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
+    conversationWorkspace.runtimeStatus = createUiStatus("待命", "当前无有效注入内容", "idle");
   }
   recordInjectionSnapshot("recall", {
     injectionText: "",
@@ -13177,7 +13161,7 @@ function clearInjectionState(options = {}) {
       mode: "cleared",
     },
   });
-  if (!isRecalling && !preserveRecallStatus) {
+  if (!conversationWorkspace.isRecalling && !preserveRecallStatus) {
     dismissStageNotice("recall");
   }
 
@@ -13210,7 +13194,7 @@ function notifyStatusToast(key, kind, message, title = "ST-BME") {
 }
 
 function setRuntimeStatus(text, meta, level = "info") {
-  runtimeStatus = createUiStatus(text, meta, level);
+  conversationWorkspace.runtimeStatus = createUiStatus(text, meta, level);
   refreshPanelLiveState();
   // 同步悬浮球状态
   const fabStatus = level === "info" ? "idle" : level;
@@ -13228,7 +13212,7 @@ function setLastExtractionStatus(
     noticeMarquee = false,
   } = {},
 ) {
-  lastExtractionStatus = createUiStatus(text, meta, level);
+  conversationWorkspace.lastExtractionStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13254,7 +13238,7 @@ function setLastVectorStatus(
   level = "info",
   { syncRuntime = false, toastKind = "", toastTitle = "ST-BME 向量" } = {},
 ) {
-  lastVectorStatus = createUiStatus(text, meta, level);
+  conversationWorkspace.lastVectorStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13284,7 +13268,7 @@ function setLastRecallStatus(
     noticeMarquee = false,
   } = {},
 ) {
-  lastRecallStatus = createUiStatus(text, meta, level);
+  conversationWorkspace.lastRecallStatus = createUiStatus(text, meta, level);
   if (syncRuntime) {
     setRuntimeStatus(text, meta, level);
   } else {
@@ -13361,46 +13345,46 @@ async function fetchLocalWithTimeout(
 
 function snapshotRuntimeUiState() {
   return {
-    extractionCount,
-    lastInjectionContent,
-    lastExtractedItems: Array.isArray(lastExtractedItems)
-      ? lastExtractedItems.map((item) => ({ ...item }))
+    extractionCount: conversationWorkspace.extractionCount,
+    lastInjectionContent: conversationWorkspace.lastInjectionContent,
+    lastExtractedItems: Array.isArray(conversationWorkspace.lastExtractedItems)
+      ? conversationWorkspace.lastExtractedItems.map((item) => ({ ...item }))
       : [],
-    lastRecalledItems: Array.isArray(lastRecalledItems)
-      ? lastRecalledItems.map((item) => ({ ...item }))
+    lastRecalledItems: Array.isArray(conversationWorkspace.lastRecalledItems)
+      ? conversationWorkspace.lastRecalledItems.map((item) => ({ ...item }))
       : [],
-    runtimeStatus: { ...(runtimeStatus || {}) },
-    lastExtractionStatus: { ...(lastExtractionStatus || {}) },
-    lastVectorStatus: { ...(lastVectorStatus || {}) },
-    lastRecallStatus: { ...(lastRecallStatus || {}) },
+    runtimeStatus: { ...(conversationWorkspace.runtimeStatus || {}) },
+    lastExtractionStatus: { ...(conversationWorkspace.lastExtractionStatus || {}) },
+    lastVectorStatus: { ...(conversationWorkspace.lastVectorStatus || {}) },
+    lastRecallStatus: { ...(conversationWorkspace.lastRecallStatus || {}) },
     graphPersistenceState: getGraphPersistenceLiveState(),
   };
 }
 
 function restoreRuntimeUiState(snapshot = {}) {
-  extractionCount = Number.isFinite(snapshot.extractionCount)
+  conversationWorkspace.extractionCount = Number.isFinite(snapshot.extractionCount)
     ? snapshot.extractionCount
     : 0;
-  lastInjectionContent = String(snapshot.lastInjectionContent || "");
-  lastExtractedItems = Array.isArray(snapshot.lastExtractedItems)
+  conversationWorkspace.lastInjectionContent = String(snapshot.lastInjectionContent || "");
+  conversationWorkspace.lastExtractedItems = Array.isArray(snapshot.lastExtractedItems)
     ? snapshot.lastExtractedItems.map((item) => ({ ...item }))
     : [];
-  lastRecalledItems = Array.isArray(snapshot.lastRecalledItems)
+  conversationWorkspace.lastRecalledItems = Array.isArray(snapshot.lastRecalledItems)
     ? snapshot.lastRecalledItems.map((item) => ({ ...item }))
     : [];
-  runtimeStatus = {
+  conversationWorkspace.runtimeStatus = {
     ...createInitialUiStatus("runtime"),
     ...(snapshot.runtimeStatus || {}),
   };
-  lastExtractionStatus = {
+  conversationWorkspace.lastExtractionStatus = {
     ...createInitialUiStatus("extraction"),
     ...(snapshot.lastExtractionStatus || {}),
   };
-  lastVectorStatus = {
+  conversationWorkspace.lastVectorStatus = {
     ...createInitialUiStatus("vector"),
     ...(snapshot.lastVectorStatus || {}),
   };
-  lastRecallStatus = {
+  conversationWorkspace.lastRecallStatus = {
     ...createInitialUiStatus("recall"),
     ...(snapshot.lastRecallStatus || {}),
   };
@@ -13412,13 +13396,13 @@ function restoreRuntimeUiState(snapshot = {}) {
 
 function getLastProcessedAssistantFloor() {
   const historyFloor = Number(
-    currentGraph?.historyState?.lastProcessedAssistantFloor,
+    conversationWorkspace.graph?.historyState?.lastProcessedAssistantFloor,
   );
   if (Number.isFinite(historyFloor)) {
     return historyFloor;
   }
 
-  const legacySeq = Number(currentGraph?.lastProcessedSeq);
+  const legacySeq = Number(conversationWorkspace.graph?.lastProcessedSeq);
   if (Number.isFinite(legacySeq)) return legacySeq;
   return -1;
 }
@@ -13429,63 +13413,34 @@ async function recordGraphMutation({
   artifactTags = [],
   syncRange = null,
   signal = undefined,
-  extractionCountBefore = extractionCount,
+  extractionCountBefore = conversationWorkspace.extractionCount,
 } = {}) {
-  ensureCurrentGraphRuntimeState();
-  const mutationGraph = currentGraph;
-  const mutationChatId = normalizeChatIdCandidate(getCurrentChatId());
-  const mutationLastProcessedFloor = getLastProcessedAssistantFloor();
-  const mutationRevision =
-    Math.max(
-      normalizeIndexedDbRevision(graphPersistenceState.revision),
-      normalizeIndexedDbRevision(getGraphPersistedRevision(mutationGraph)),
-    ) + 1;
-  const vectorSync = await syncVectorState({
-    force: true,
-    purge: isBackendVectorConfig(getEmbeddingConfig()) && !syncRange,
-    range: syncRange,
-    signal,
-  });
-  const contextChanged =
-    currentGraph !== mutationGraph ||
-    normalizeChatIdCandidate(getCurrentChatId()) !== mutationChatId;
-  const afterSnapshot = cloneGraphSnapshot(mutationGraph);
-  const effectiveRange = Array.isArray(processedRange)
-    ? processedRange
-    : [mutationLastProcessedFloor, mutationLastProcessedFloor];
-
-  appendBatchJournal(
-    mutationGraph,
-    createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
-      processedRange: effectiveRange,
-      postProcessArtifacts: computePostProcessArtifacts(
-        beforeSnapshot,
-        afterSnapshot,
-        artifactTags,
-      ),
-      vectorHashesInserted: vectorSync?.insertedHashes || [],
+  return await recordGraphMutationController(
+    {
+      appendBatchJournal,
+      cloneGraphSnapshot,
+      computePostProcessArtifacts,
+      createBatchJournalEntry,
+      ensureCurrentGraphRuntimeState,
+      getCurrentChatId,
+      getCurrentGraph: () => conversationWorkspace.graph,
+      getEmbeddingConfig,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
+      getLastProcessedAssistantFloor,
+      isBackendVectorConfig,
+      normalizeChatIdCandidate,
+      saveGraphToChat,
+      syncVectorState,
+    },
+    {
+      beforeSnapshot,
+      processedRange,
+      artifactTags,
+      syncRange,
+      signal,
       extractionCountBefore,
-    }),
+    },
   );
-  if (contextChanged) {
-    const recoverable = maybeCaptureGraphShadowSnapshot(
-      "graph-mutation-context-changed",
-      {
-        graph: mutationGraph,
-        chatId: mutationChatId,
-        revision: mutationRevision,
-      },
-    );
-    return {
-      ...(vectorSync && typeof vectorSync === "object" ? vectorSync : {}),
-      aborted: true,
-      stale: true,
-      recoverable,
-      error: vectorSync?.error || "graph-mutation-context-changed",
-    };
-  }
-  saveGraphToChat({ reason: "record-graph-mutation" });
-  return vectorSync;
 }
 
 function noteMaintenanceGate(status, action, reason) {
@@ -13616,7 +13571,7 @@ function recordMaintenanceAction({
   beforeSnapshot,
   mode = "manual",
   summary = "",
-  graph = currentGraph,
+  graph = conversationWorkspace.graph,
 } = {}) {
   if (!graph || !beforeSnapshot) return null;
   normalizeGraphRuntimeState(graph, graph?.historyState?.chatId || getCurrentChatId());
@@ -13633,7 +13588,7 @@ function recordMaintenanceAction({
   if (!entry) return null;
 
   appendMaintenanceJournal(graph, entry);
-  if (graph === currentGraph) {
+  if (graph === conversationWorkspace.graph) {
     recordMaintenanceDebugSnapshot({
       lastAction: {
         id: entry.id,
@@ -13649,12 +13604,12 @@ function recordMaintenanceAction({
 }
 
 function undoLastMaintenanceAction() {
-  if (!currentGraph) {
+  if (!conversationWorkspace.graph) {
     return { ok: false, reason: "当前没有加载的图谱", entry: null };
   }
 
   ensureCurrentGraphRuntimeState();
-  const result = undoLatestMaintenance(currentGraph);
+  const result = undoLatestMaintenance(conversationWorkspace.graph);
   recordMaintenanceDebugSnapshot({
     lastUndoResult: {
       ok: Boolean(result?.ok),
@@ -13662,7 +13617,7 @@ function undoLastMaintenanceAction() {
       action: result?.entry?.action || "",
       summary: result?.entry?.summary || "",
       createdAt: result?.entry?.createdAt || 0,
-      maintenanceJournalSize: currentGraph.maintenanceJournal?.length || 0,
+      maintenanceJournalSize: conversationWorkspace.graph.maintenanceJournal?.length || 0,
       updatedAt: new Date().toISOString(),
     },
   });
@@ -13681,13 +13636,18 @@ function markGraphVectorStateDirty(
 }
 
 function markVectorStateDirty(reason = "向量状态已标记为待重建") {
-  markGraphVectorStateDirty(currentGraph, reason);
+  markGraphVectorStateDirty(conversationWorkspace.graph, reason);
 }
 
-function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
-  ensureCurrentGraphRuntimeState();
+function updateProcessedHistorySnapshot(
+  chat,
+  lastProcessedAssistantFloor,
+  graph = conversationWorkspace.graph,
+) {
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) ensureCurrentGraphRuntimeState();
   applyProcessedHistorySnapshotToGraph(
-    currentGraph,
+    graph,
     chat,
     lastProcessedAssistantFloor,
   );
@@ -13697,379 +13657,12 @@ function shouldAdvanceProcessedHistory(batchStatus) {
   return shouldAdvanceProcessedHistoryController(batchStatus);
 }
 
-function resolveMaintenancePostProcessConcurrency(settings = {}) {
-  if (typeof resolveConcurrencyConfig === "function") {
-    try {
-      return resolveConcurrencyConfig(settings);
-    } catch {
-    }
-  }
-  const mode = String(settings?.maintenanceExecutionMode || "strict")
-    .trim()
-    .toLowerCase();
-  const strict = mode !== "balanced" && mode !== "fast";
-  return {
-    mode: strict ? "strict" : mode,
-    level: strict ? 1 : mode === "balanced" ? 2 : 3,
-    backgroundMaintenanceMaxRetries: Math.max(
-      0,
-      Math.min(10, Math.floor(Number(settings?.backgroundMaintenanceMaxRetries ?? 2)) || 0),
-    ),
-    backgroundMaintenanceRetryBaseMs: Math.max(
-      50,
-      Math.min(60000, Math.floor(Number(settings?.backgroundMaintenanceRetryBaseMs ?? 800)) || 800),
-    ),
-    backgroundMaintenanceMaxQueueItems: Math.max(
-      1,
-      Math.min(256, Math.floor(Number(settings?.backgroundMaintenanceMaxQueueItems ?? 24)) || 24),
-    ),
-  };
-}
-
 function shouldDeferExtractionVectorSync(settings = {}) {
-  return resolveMaintenancePostProcessConcurrency(settings).mode !== "strict";
+  return resolveConcurrencyConfig(settings).mode !== "strict";
 }
 
 function shouldDeferExtractionMaintenance(settings = {}) {
-  return resolveMaintenancePostProcessConcurrency(settings).mode !== "strict";
-}
-
-function clonePlanCommitValue(value, fallback = null) {
-  try {
-    if (typeof cloneRuntimeDebugValue === "function") {
-      return cloneRuntimeDebugValue(value, fallback);
-    }
-  } catch {
-  }
-  try {
-    return JSON.parse(JSON.stringify(value ?? fallback));
-  } catch {
-    return fallback;
-  }
-}
-
-function arePlanCommitValuesEqual(left, right) {
-  try {
-    return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
-  } catch {
-    return false;
-  }
-}
-
-function normalizeSummaryStateForPlan(state = {}) {
-  try {
-    if (typeof createDefaultSummaryState === "function") {
-      return createDefaultSummaryState(state);
-    }
-  } catch {
-  }
-  const source =
-    state && typeof state === "object" && !Array.isArray(state) ? state : {};
-  return {
-    version: Number(source.version || 1) || 1,
-    enabled: source.enabled !== false,
-    entries: Array.isArray(source.entries)
-      ? clonePlanCommitValue(source.entries, [])
-      : [],
-    activeEntryIds: Array.isArray(source.activeEntryIds)
-      ? [...new Set(source.activeEntryIds.map((id) => String(id || "").trim()).filter(Boolean))]
-      : [],
-    lastSummarizedExtractionCount: Number.isFinite(
-      Number(source.lastSummarizedExtractionCount),
-    )
-      ? Math.max(0, Number(source.lastSummarizedExtractionCount))
-      : 0,
-    lastSummarizedAssistantFloor: Number.isFinite(
-      Number(source.lastSummarizedAssistantFloor),
-    )
-      ? Number(source.lastSummarizedAssistantFloor)
-      : -1,
-  };
-}
-
-function normalizeGraphSummaryStateForPlan(graph) {
-  if (!graph || typeof graph !== "object") return graph;
-  try {
-    if (typeof normalizeGraphSummaryState === "function") {
-      return normalizeGraphSummaryState(graph);
-    }
-  } catch {
-  }
-  graph.summaryState = normalizeSummaryStateForPlan(graph.summaryState);
-  return graph;
-}
-
-function commitPlannedSummaryState(targetGraph, beforeState = {}, draftState = {}) {
-  if (!targetGraph || typeof targetGraph !== "object") {
-    return {
-      summaryEntriesAdded: 0,
-      summaryEntriesUpdated: 0,
-      summaryEntriesFolded: 0,
-    };
-  }
-  normalizeGraphSummaryStateForPlan(targetGraph);
-  const before = normalizeSummaryStateForPlan(beforeState);
-  const draft = normalizeSummaryStateForPlan(draftState);
-  const target = normalizeSummaryStateForPlan(targetGraph.summaryState);
-  const beforeMap = new Map(before.entries.map((entry) => [entry.id, entry]));
-  const targetMap = new Map(target.entries.map((entry) => [entry.id, entry]));
-  const activeIds = new Set(target.activeEntryIds || []);
-  let summaryEntriesAdded = 0;
-  let summaryEntriesUpdated = 0;
-  let summaryEntriesFolded = 0;
-
-  for (const draftEntry of draft.entries) {
-    const entryId = String(draftEntry?.id || "").trim();
-    if (!entryId) continue;
-    const beforeEntry = beforeMap.get(entryId) || null;
-    if (beforeEntry && arePlanCommitValuesEqual(beforeEntry, draftEntry)) {
-      continue;
-    }
-    const clonedEntry = clonePlanCommitValue(draftEntry, draftEntry);
-    const targetEntry = targetMap.get(entryId) || null;
-    if (targetEntry) {
-      Object.assign(targetEntry, clonedEntry);
-      summaryEntriesUpdated += 1;
-    } else {
-      target.entries.push(clonedEntry);
-      targetMap.set(entryId, clonedEntry);
-      summaryEntriesAdded += 1;
-    }
-    if (String(clonedEntry.status || "active") === "folded") {
-      activeIds.delete(entryId);
-      if (beforeEntry && String(beforeEntry.status || "active") !== "folded") {
-        summaryEntriesFolded += 1;
-      }
-    } else {
-      activeIds.add(entryId);
-    }
-  }
-
-  target.lastSummarizedExtractionCount = Math.max(
-    Number(target.lastSummarizedExtractionCount || 0),
-    Number(draft.lastSummarizedExtractionCount || 0),
-  );
-  target.lastSummarizedAssistantFloor = Math.max(
-    Number(target.lastSummarizedAssistantFloor ?? -1),
-    Number(draft.lastSummarizedAssistantFloor ?? -1),
-  );
-  target.activeEntryIds = [...activeIds].filter(
-    (entryId) => String(targetMap.get(entryId)?.status || "active") !== "folded",
-  );
-  targetGraph.summaryState = target;
-  normalizeGraphSummaryStateForPlan(targetGraph);
-  return {
-    summaryEntriesAdded,
-    summaryEntriesUpdated,
-    summaryEntriesFolded,
-  };
-}
-
-function commitPlannedGraphChanges({
-  targetGraph = currentGraph,
-  beforeSnapshot = null,
-  draftGraph = null,
-  includeSummaryState = true,
-} = {}) {
-  const stats = {
-    nodesAdded: 0,
-    nodesUpdated: 0,
-    edgesAdded: 0,
-    summaryEntriesAdded: 0,
-    summaryEntriesUpdated: 0,
-    summaryEntriesFolded: 0,
-  };
-  if (!targetGraph || !beforeSnapshot || !draftGraph) return stats;
-  targetGraph.nodes ||= [];
-  targetGraph.edges ||= [];
-  const beforeNodes = new Map(
-    (beforeSnapshot.nodes || []).map((node) => [String(node?.id || ""), node]),
-  );
-  const targetNodes = new Map(
-    (targetGraph.nodes || []).map((node) => [String(node?.id || ""), node]),
-  );
-
-  for (const draftNode of draftGraph.nodes || []) {
-    const nodeId = String(draftNode?.id || "").trim();
-    if (!nodeId) continue;
-    const beforeNode = beforeNodes.get(nodeId) || null;
-    if (beforeNode && arePlanCommitValuesEqual(beforeNode, draftNode)) continue;
-    const clonedNode = clonePlanCommitValue(draftNode, draftNode);
-    const targetNode = targetNodes.get(nodeId) || null;
-    if (!targetNode) {
-      if (typeof addNode === "function") {
-        addNode(targetGraph, clonedNode);
-      } else {
-        targetGraph.nodes.push(clonedNode);
-      }
-      targetNodes.set(nodeId, clonedNode);
-      stats.nodesAdded += 1;
-    } else {
-      if (typeof updateNode === "function") {
-        updateNode(targetGraph, nodeId, clonePlanCommitValue(clonedNode, clonedNode));
-      } else {
-        Object.assign(targetNode, clonedNode);
-      }
-      stats.nodesUpdated += 1;
-    }
-  }
-
-  const beforeEdgeIds = new Set(
-    (beforeSnapshot.edges || []).map((edge) => String(edge?.id || "").trim()),
-  );
-  const targetEdgeIds = new Set(
-    (targetGraph.edges || []).map((edge) => String(edge?.id || "").trim()),
-  );
-  for (const draftEdge of draftGraph.edges || []) {
-    const edgeId = String(draftEdge?.id || "").trim();
-    if (!edgeId || beforeEdgeIds.has(edgeId) || targetEdgeIds.has(edgeId)) continue;
-    const clonedEdge = clonePlanCommitValue(draftEdge, draftEdge);
-    if (typeof addEdge === "function") {
-      addEdge(targetGraph, clonedEdge);
-    } else {
-      targetGraph.edges.push(clonedEdge);
-    }
-    targetEdgeIds.add(edgeId);
-    stats.edgesAdded += 1;
-  }
-
-  if (includeSummaryState) {
-    Object.assign(
-      stats,
-      commitPlannedSummaryState(
-        targetGraph,
-        beforeSnapshot.summaryState,
-        draftGraph.summaryState,
-      ),
-    );
-  }
-  return stats;
-}
-
-function getSummaryPostProcessRunner() {
-  if (typeof runHierarchicalSummaryPostProcess === "function") {
-    return runHierarchicalSummaryPostProcess;
-  }
-  if (typeof generateSynopsis === "function") {
-    return async (params = {}) => {
-      await generateSynopsis({
-        graph: params.graph,
-        schema: typeof getSchema === "function" ? getSchema() : [],
-        currentSeq: params.currentAssistantFloor,
-        settings: params.settings,
-        signal: params.signal,
-      });
-      return {
-        created: true,
-        smallSummary: { created: true, reason: "" },
-        rollup: null,
-      };
-    };
-  }
-  return async () => ({
-    created: false,
-    smallSummary: {
-      created: false,
-      reason: "层级总结运行器不可用，已跳过",
-    },
-    rollup: null,
-  });
-}
-
-function getSummaryStageLabel() {
-  if (typeof runHierarchicalSummaryPostProcess === "function") return "层级总结";
-  if (typeof generateSynopsis === "function") return "旧式全局概要生成";
-  return "层级总结";
-}
-
-async function runSummaryPostProcessPlanCommit(params = {}) {
-  const runner = getSummaryPostProcessRunner();
-  const settings = params.settings || {};
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    return await runner(params);
-  }
-  const beforeSnapshot = clonePlanCommitValue(params.graph, params.graph);
-  const draftGraph = clonePlanCommitValue(params.graph, params.graph);
-  const result = await runner({
-    ...params,
-    graph: draftGraph,
-  });
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: params.graph,
-    beforeSnapshot,
-    draftGraph,
-  });
-  return {
-    ...(result && typeof result === "object" && !Array.isArray(result)
-      ? result
-      : { created: Boolean(result) }),
-    planCommit,
-  };
-}
-
-async function runReflectionPostProcessPlanCommit(params = {}) {
-  const settings = params.settings || {};
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    const reflectionId = await generateReflection(params);
-    return { reflectionId, planCommit: null };
-  }
-  const beforeSnapshot = clonePlanCommitValue(params.graph, params.graph);
-  const draftGraph = clonePlanCommitValue(params.graph, params.graph);
-  const reflectionId = await generateReflection({
-    ...params,
-    graph: draftGraph,
-  });
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: params.graph,
-    beforeSnapshot,
-    draftGraph,
-  });
-  return { reflectionId, planCommit };
-}
-
-async function runCompressionPostProcessPlanCommit({
-  graph,
-  schema = [],
-  embeddingConfig = null,
-  force = false,
-  customPrompt = undefined,
-  signal = undefined,
-  settings = {},
-} = {}) {
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    return await compressAll(
-      graph,
-      schema,
-      embeddingConfig,
-      force,
-      customPrompt,
-      signal,
-      settings,
-    );
-  }
-  const beforeSnapshot = clonePlanCommitValue(graph, graph);
-  const draftGraph = clonePlanCommitValue(graph, graph);
-  const result = await compressAll(
-    draftGraph,
-    schema,
-    embeddingConfig,
-    force,
-    customPrompt,
-    signal,
-    settings,
-  );
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: graph,
-    beforeSnapshot,
-    draftGraph,
-    includeSummaryState: false,
-  });
-  return {
-    ...(result && typeof result === "object" && !Array.isArray(result)
-      ? result
-      : { created: 0, archived: 0 }),
-    planCommit,
-  };
+  return resolveConcurrencyConfig(settings).mode !== "strict";
 }
 
 function updateBackgroundMaintenanceQueueState(snapshot = null) {
@@ -14113,7 +13706,7 @@ function updateBackgroundMaintenanceQueueState(snapshot = null) {
 }
 
 function enqueueBackgroundMaintenanceTask(name, run, settings = {}, options = {}) {
-  const concurrency = resolveMaintenancePostProcessConcurrency(settings);
+  const concurrency = resolveConcurrencyConfig(settings);
   const queue =
     typeof backgroundMaintenanceQueue !== "undefined"
       ? backgroundMaintenanceQueue
@@ -14186,7 +13779,7 @@ async function syncVectorState(options = {}) {
             targetGraph?.historyState?.chatId || controllerOptions.expectedChatId || "",
           )
         : ensureCurrentGraphRuntimeState,
-      getCurrentGraph: () => targetGraph || currentGraph,
+      getCurrentGraph: () => targetGraph || conversationWorkspace.graph,
       setLastVectorStatus,
       getEmbeddingConfig,
       validateVectorConfig,
@@ -14211,12 +13804,12 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
     task && typeof task === "object" && !Array.isArray(task) ? task : {};
   const config = getEmbeddingConfig();
   const chatId = normalizeChatIdCandidate(
-    normalizedTask.chatId || getCurrentChatId() || graphPersistenceState.chatId,
+    normalizedTask.chatId || getCurrentChatId() || conversationWorkspace.graphPersistenceState.chatId,
   );
   const mode =
     String(
       normalizedTask.mode ||
-        resolveMaintenancePostProcessConcurrency(settings).mode ||
+        resolveConcurrencyConfig(settings).mode ||
         "balanced",
     ).trim() || "balanced";
   const coalesced = backgroundVectorSyncCoalescer.enqueue({
@@ -14297,156 +13890,27 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
   }
   return queuedResult;
 }
-function hasPlanCommitChanges(planCommit = null) {
-  if (!planCommit || typeof planCommit !== "object") return false;
-  return [
-    "nodesAdded",
-    "nodesUpdated",
-    "edgesAdded",
-    "summaryEntriesAdded",
-    "summaryEntriesUpdated",
-    "summaryEntriesFolded",
-  ].some((key) => Number(planCommit[key] || 0) > 0);
-}
-
 function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
-  const taskList = Array.isArray(tasks)
-    ? tasks.filter((task) => task && typeof task === "object" && task.type)
-    : [];
-  if (!taskList.length) {
-    return {
-      queued: false,
-      reason: "no-background-maintenance-tasks",
-      snapshot: updateBackgroundMaintenanceQueueState(null),
-    };
-  }
-  const scheduledSettings = clonePlanCommitValue(settings, settings) || settings;
-  const scheduledChatId = normalizeChatIdCandidate(getCurrentChatId());
-  const scheduledGraph = currentGraph;
-  const scheduledExtractionCount = extractionCount;
-  const isScheduledContextActive = () =>
-    currentGraph === scheduledGraph &&
-    normalizeChatIdCandidate(getCurrentChatId()) === scheduledChatId;
-  const staleResult = () => ({
-    skipped: true,
-    reason: "stale-background-post-process",
-  });
-  const mode = resolveMaintenancePostProcessConcurrency(scheduledSettings).mode;
-  const taskId = taskList.map((task) => String(task.id || task.type)).join("+");
-  return enqueueBackgroundMaintenanceTask(
-    "post-process",
-    async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      if (!isScheduledContextActive()) return staleResult();
-      ensureCurrentGraphRuntimeState();
-      const details = [];
-      let changed = false;
-      if (typeof setLastExtractionStatus === "function") {
-        setLastExtractionStatus(
-          "后台维护中",
-          `${mode} 模式 · 正在执行 ${taskList.map((task) => task.type).join(" / ")}`,
-          "running",
-          { syncRuntime: false },
-        );
-      }
-      for (const task of taskList) {
-        const type = String(task.type || "").trim();
-        const payload =
-          task.payload && typeof task.payload === "object" && !Array.isArray(task.payload)
-            ? task.payload
-            : {};
-        if (type === "summary") {
-          const result = await runSummaryPostProcessPlanCommit({
-            graph: scheduledGraph,
-            chat: Array.isArray(payload.chat)
-              ? payload.chat
-              : typeof getContext === "function" && Array.isArray(getContext()?.chat)
-                ? getContext().chat
-                : [],
-            settings: scheduledSettings,
-            currentExtractionCount:
-              Number(payload.currentExtractionCount || 0) ||
-              scheduledExtractionCount,
-            currentAssistantFloor: Number(payload.currentAssistantFloor ?? -1),
-            currentRange: Array.isArray(payload.currentRange) ? payload.currentRange : null,
-            currentNodeIds: Array.isArray(payload.currentNodeIds) ? payload.currentNodeIds : [],
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Boolean(result?.smallSummary?.created) ||
-            Number(result?.rollup?.createdCount || 0) > 0 ||
-            hasPlanCommitChanges(result?.planCommit);
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        } else if (type === "reflection") {
-          const result = await runReflectionPostProcessPlanCommit({
-            graph: scheduledGraph,
-            currentSeq: Number(payload.currentSeq ?? -1),
-            schema: getSchema(),
-            embeddingConfig: getEmbeddingConfig(),
-            settings: scheduledSettings,
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Boolean(result?.reflectionId) || hasPlanCommitChanges(result?.planCommit);
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        } else if (type === "compression") {
-          const beforeSnapshot =
-            typeof cloneGraphSnapshot === "function"
-              ? cloneGraphSnapshot(scheduledGraph)
-              : clonePlanCommitValue(scheduledGraph, scheduledGraph);
-          const result = await runCompressionPostProcessPlanCommit({
-            graph: scheduledGraph,
-            schema: getSchema(),
-            embeddingConfig: getEmbeddingConfig(),
-            force: Boolean(payload.force),
-            customPrompt: payload.customPrompt ?? undefined,
-            settings: scheduledSettings,
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Number(result?.created || 0) > 0 ||
-            Number(result?.archived || 0) > 0 ||
-            hasPlanCommitChanges(result?.planCommit);
-          if (taskChanged) {
-            const compressionSummary =
-              typeof buildMaintenanceSummary === "function"
-                ? buildMaintenanceSummary("compress", result, "auto")
-                : `自动压缩：新增 ${result?.created || 0}，归档 ${result?.archived || 0}`;
-            if (typeof recordMaintenanceAction === "function") {
-              recordMaintenanceAction({
-                action: "compress",
-                beforeSnapshot,
-                mode: "auto",
-                summary: compressionSummary,
-              });
-            }
-          }
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        }
-      }
-      if (!isScheduledContextActive()) return staleResult();
-      if (changed) {
-        saveGraphToChat({
-          reason: `background-post-process:${taskList.map((task) => task.type).join("+")}`,
-        });
-      }
-      if (typeof setLastExtractionStatus === "function") {
-        setLastExtractionStatus(
-          changed ? "后台维护完成" : "后台维护跳过",
-          changed ? "后台维护已完成并持久化" : "后台维护未产生可持久化变化",
-          changed ? "success" : "warning",
-          { syncRuntime: false },
-        );
-      }
-      return { changed, details };
-    },
-    scheduledSettings,
+  return scheduleBackgroundMaintenancePostProcessController(
     {
-      id: `post-process:${taskId}`,
+      buildMaintenanceSummary,
+      cloneGraphSnapshot,
+      enqueueBackgroundMaintenanceTask,
+      ensureCurrentGraphRuntimeState,
+      getContext,
+      getCurrentChatId,
+      getCurrentGraph: () => conversationWorkspace.graph,
+      getEmbeddingConfig,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
+      getSchema,
+      normalizeChatId: normalizeChatIdCandidate,
+      recordMaintenanceAction,
+      saveGraphToChat,
+      setLastExtractionStatus,
+      updateBackgroundMaintenanceQueueState,
     },
+    tasks,
+    settings,
   );
 }
 
@@ -14454,17 +13918,17 @@ async function ensureVectorReadyIfNeeded(
   reason = "vector-ready-check",
   signal = undefined,
 ) {
-  if (!currentGraph) return;
+  if (!conversationWorkspace.graph) return;
   let metadataWriteAllowed = isGraphMetadataWriteAllowed();
-  let mutationContextAllowed = hasRuntimeGraphMutationContext(getContext(), currentGraph, {
+  let mutationContextAllowed = hasRuntimeGraphMutationContext(getContext(), conversationWorkspace.graph, {
     allowNoChatState: true,
   });
   let gate = planVectorReadyCheck({
-    hasGraph: Boolean(currentGraph),
+    hasGraph: Boolean(conversationWorkspace.graph),
     metadataWriteAllowed,
     mutationContextAllowed,
     repairAttempted: false,
-    dirty: currentGraph?.vectorIndexState?.dirty === true,
+    dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
     configValid: true,
   });
   if (gate.action === "skip" || gate.action === "block") return;
@@ -14474,22 +13938,22 @@ async function ensureVectorReadyIfNeeded(
       reason: "vector-ready-fallback",
     });
     metadataWriteAllowed = isGraphMetadataWriteAllowed();
-    mutationContextAllowed = hasRuntimeGraphMutationContext(getContext(), currentGraph, {
+    mutationContextAllowed = hasRuntimeGraphMutationContext(getContext(), conversationWorkspace.graph, {
       allowNoChatState: true,
     });
     gate = planVectorReadyCheck({
-      hasGraph: Boolean(currentGraph),
+      hasGraph: Boolean(conversationWorkspace.graph),
       metadataWriteAllowed,
       mutationContextAllowed,
       repairAttempted: true,
-      dirty: currentGraph?.vectorIndexState?.dirty === true,
+      dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
       configValid: true,
     });
     if (gate.action === "skip" || gate.action === "block") return;
   }
 
   ensureCurrentGraphRuntimeState({
-    chatId: getGraphOwnedChatId(currentGraph) || getCurrentChatId(),
+    chatId: getGraphOwnedChatId(conversationWorkspace.graph) || getCurrentChatId(),
   });
 
   const config = getEmbeddingConfig();
@@ -14497,11 +13961,11 @@ async function ensureVectorReadyIfNeeded(
   // Permission/identity gate has already passed above; this final plan only
   // decides whether dirty state + config validity should trigger sync.
   gate = planVectorReadyCheck({
-    hasGraph: Boolean(currentGraph),
+    hasGraph: Boolean(conversationWorkspace.graph),
     metadataWriteAllowed: true,
     mutationContextAllowed: true,
     repairAttempted: true,
-    dirty: currentGraph?.vectorIndexState?.dirty === true,
+    dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
     configValid: validation.valid,
   });
   if (gate.action !== "sync") return;
@@ -14514,45 +13978,45 @@ async function ensureVectorReadyIfNeeded(
 
   if (result?.aborted) return result;
   if (result?.error) {
-    currentGraph.vectorIndexState.lastWarning = result.error;
+    conversationWorkspace.graph.vectorIndexState.lastWarning = result.error;
     saveGraphToChat({ reason: "vector-auto-repair-failed" });
     console.warn("[ST-BME] 向量状态自动修复失败:", reason, result.error);
     return result;
   }
 
-  currentGraph.vectorIndexState.lastWarning = "";
+  conversationWorkspace.graph.vectorIndexState.lastWarning = "";
   saveGraphToChat({ reason: "vector-auto-repair-succeeded" });
   debugLog("[ST-BME] 向量状态已自动修复:", reason, result.stats);
   return result;
 }
 
 async function resetVectorStateForConfigChange(reason = "向量配置已变更") {
-  if (!currentGraph) return;
+  if (!conversationWorkspace.graph) return;
   ensureCurrentGraphRuntimeState();
   markVectorStateDirty(reason);
-  for (const node of currentGraph.nodes || []) {
+  for (const node of conversationWorkspace.graph.nodes || []) {
     if (Array.isArray(node?.embedding) && node.embedding.length > 0) {
       node.embedding = null;
     }
   }
-  currentGraph.vectorIndexState.hashToNodeId = {};
-  currentGraph.vectorIndexState.nodeToHash = {};
-  currentGraph.vectorIndexState.currentVectorSpace = null;
+  conversationWorkspace.graph.vectorIndexState.hashToNodeId = {};
+  conversationWorkspace.graph.vectorIndexState.nodeToHash = {};
+  conversationWorkspace.graph.vectorIndexState.currentVectorSpace = null;
   if (
-    currentGraph.vectorIndexState.manifest &&
-    typeof currentGraph.vectorIndexState.manifest === "object"
+    conversationWorkspace.graph.vectorIndexState.manifest &&
+    typeof conversationWorkspace.graph.vectorIndexState.manifest === "object"
   ) {
-    currentGraph.vectorIndexState.manifest = {
-      ...currentGraph.vectorIndexState.manifest,
+    conversationWorkspace.graph.vectorIndexState.manifest = {
+      ...conversationWorkspace.graph.vectorIndexState.manifest,
       status: "stale",
       lastError: "vector-config-changed",
     };
   }
-  currentGraph.vectorIndexState.lastStats = {
-    total: Array.isArray(currentGraph.nodes) ? currentGraph.nodes.length : 0,
+  conversationWorkspace.graph.vectorIndexState.lastStats = {
+    total: Array.isArray(conversationWorkspace.graph.nodes) ? conversationWorkspace.graph.nodes.length : 0,
     indexed: 0,
     stale: 0,
-    pending: Array.isArray(currentGraph.nodes) ? currentGraph.nodes.length : 0,
+    pending: Array.isArray(conversationWorkspace.graph.nodes) ? conversationWorkspace.graph.nodes.length : 0,
   };
   setLastVectorStatus(
     "向量需要重建",
@@ -14700,24 +14164,24 @@ function updateModuleSettings(patch = {}) {
     dismissAllStageNotices();
     try {
       applyModuleInjectionPrompt("", settings);
-      lastInjectionContent = "";
-      lastRecalledItems = [];
-      runtimeStatus = createUiStatus(
+      conversationWorkspace.lastInjectionContent = "";
+      conversationWorkspace.lastRecalledItems = [];
+      conversationWorkspace.runtimeStatus = createUiStatus(
         "已停用",
         "插件已关闭，注入内容已清空",
         "idle",
       );
-      lastExtractionStatus = createUiStatus(
+      conversationWorkspace.lastExtractionStatus = createUiStatus(
         "已停用",
         "插件已关闭，自动提取已停止",
         "idle",
       );
-      lastVectorStatus = createUiStatus(
+      conversationWorkspace.lastVectorStatus = createUiStatus(
         "已停用",
         "插件已关闭，向量任务已停止",
         "idle",
       );
-      lastRecallStatus = createUiStatus(
+      conversationWorkspace.lastRecallStatus = createUiStatus(
         "已停用",
         "插件已关闭，注入内容已清空",
         "idle",
@@ -14772,10 +14236,14 @@ function updateModuleSettings(patch = {}) {
   if (previousGraphLocalStorageMode !== currentGraphLocalStorageMode) {
     clearAllCachedIndexedDbSnapshots();
     scheduleBmeIndexedDbTask(async () => {
-      if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
-        await bmeChatManager.closeAll();
+      if (
+        conversationWorkspace.graphPersistenceState.pendingPersist !== true &&
+        conversationRepository &&
+        typeof conversationRepository.closeAll === "function"
+      ) {
+        await conversationRepository.closeAll();
       }
-      await syncBmeChatManagerWithCurrentChat(
+      await syncConversationRepositoryWithCurrentChat(
         "settings:graph-local-storage-mode-changed",
       );
     });
@@ -14880,10 +14348,10 @@ function buildPersistObservabilitySummary(diagnostics = null) {
       ? diagnostics
       : {};
   const previous =
-    graphPersistenceState.persistObservability &&
-    typeof graphPersistenceState.persistObservability === "object" &&
-    !Array.isArray(graphPersistenceState.persistObservability)
-      ? cloneRuntimeDebugValue(graphPersistenceState.persistObservability, {})
+    conversationWorkspace.graphPersistenceState.persistObservability &&
+    typeof conversationWorkspace.graphPersistenceState.persistObservability === "object" &&
+    !Array.isArray(conversationWorkspace.graphPersistenceState.persistObservability)
+      ? cloneRuntimeDebugValue(conversationWorkspace.graphPersistenceState.persistObservability, {})
       : {};
   const totalMs = normalizePersistDeltaDiagnosticsMs(
     source.totalMs || source.buildMs || 0,
@@ -14979,7 +14447,7 @@ function handleGraphShadowSnapshotPageHide() {
 }
 
 function handleGraphShadowSnapshotVisibilityChange() {
-  if (document.visibilityState === "hidden") {
+  if (getHostDocument()?.visibilityState === "hidden") {
     saveGraphToChat({
       reason: "visibility-hidden-passive-persist",
       markMutation: false,
@@ -15123,68 +14591,9 @@ function preparePlannerTurnHandoff({
 }
 
 function persistPlannerTurnHandoffToUserMessage(newUserMessageIndex) {
-  const context = getContext();
-  const chat = context?.chat;
-  if (
-    !Array.isArray(chat) ||
-    !Number.isFinite(newUserMessageIndex) ||
-    !chat[newUserMessageIndex]?.is_user
-  ) {
-    return false;
-  }
-  const chatId = context?.chatId || getCurrentChatId();
-  const handoff = rerollRecallInput.consumePlannerTurnHandoffForGeneration(
-    chatId,
-    conversationSession.getGeneration()?.id,
+  return rerollRecallInput.persistPlannerTurnHandoffToUserMessage(
+    newUserMessageIndex,
   );
-  if (!handoff) return false;
-
-  const targetUserFloorText = normalizeRecallInputText(
-    chat[newUserMessageIndex]?.mes || "",
-  );
-
-  let wroteRecall = false;
-  const injectionText = String(handoff?.injectionText || "").trim();
-  const result = handoff?.result || null;
-  if (
-    injectionText &&
-    result &&
-    !readPersistedRecallFromUserMessage(chat, newUserMessageIndex)
-  ) {
-    wroteRecall = writePersistedRecallToUserMessage(
-      chat,
-      newUserMessageIndex,
-      buildPersistedRecallRecord({
-        injectionText,
-        selectedNodeIds: result?.selectedNodeIds || [],
-        recallInput: String(handoff.rawUserInput || ""),
-        recallSource: String(handoff.source || "planner-handoff"),
-        hookName: "MESSAGE_SENT",
-        tokenEstimate: estimateTokens(injectionText),
-        manuallyEdited: false,
-        authoritativeInputUsed: true,
-        boundUserFloorText: targetUserFloorText,
-        historyFingerprint: buildRecallHistoryFingerprint(
-          chat,
-          newUserMessageIndex,
-        ),
-      }),
-    );
-  }
-
-  const plannerPlotRecord = handoff.plannerPlotRecord;
-  const wrotePlot = Boolean(
-    plannerPlotRecord &&
-      writeStructuredPlotRecordToMessage(chat[newUserMessageIndex], {
-        ...plannerPlotRecord,
-        recallHandoffId:
-          handoff.id || plannerPlotRecord.recallHandoffId || "",
-      }),
-  );
-  if (wroteRecall || wrotePlot) {
-    triggerChatMetadataSave(context, { immediate: false });
-  }
-  return wroteRecall || wrotePlot;
 }
 
 function buildPreGenerationRecallKey(type, options = {}) {
@@ -15259,7 +14668,7 @@ function invalidateRecallAfterHistoryMutation(reason = "聊天记录已变更") 
   }
 
   const hadActiveRecall = Boolean(
-    isRecalling ||
+    conversationWorkspace.isRecalling ||
     (stageAbortControllers.recall &&
       !stageAbortControllers.recall.signal?.aborted),
   );
@@ -15307,7 +14716,7 @@ function getCurrentChatSeq(context = getContext()) {
   if (Array.isArray(chat) && chat.length > 0) {
     return chat.length - 1;
   }
-  return currentGraph?.lastProcessedSeq ?? 0;
+  return conversationWorkspace.graph?.lastProcessedSeq ?? 0;
 }
 
 async function handleExtractionSuccess(
@@ -15319,22 +14728,22 @@ async function handleExtractionSuccess(
   postProcessContext = null,
   taskContext = null,
 ) {
-  const taskGraph = taskContext?.graph || currentGraph;
-  const taskBaseGraph = taskContext?.baseGraph || currentGraph;
+  const taskGraph = taskContext?.graph || conversationWorkspace.graph;
+  const taskBaseGraph = taskContext?.baseGraph || conversationWorkspace.graph;
   let taskExtractionCount = Number.isFinite(
     Number(taskContext?.extractionCountBefore),
   )
     ? Number(taskContext.extractionCountBefore)
-    : Number(extractionCount || 0);
+    : Number(conversationWorkspace.extractionCount || 0);
   const taskChatId = normalizeChatIdCandidate(
     taskContext?.chatId || getCurrentChatId(),
   );
   const taskLease = taskContext?.conversationLease || null;
   const taskHostContext = getContext();
   const isTaskContextActive = () =>
-    currentGraph === taskBaseGraph &&
+    conversationWorkspace.graph === taskBaseGraph &&
     (taskLease
-      ? conversationSession.isLeaseCurrent(taskLease, {
+      ? conversationWorkspace.isLeaseCurrent(taskLease, {
           requireGeneration: false,
         })
       : !taskChatId ||
@@ -15372,7 +14781,7 @@ async function handleExtractionSuccess(
       isAbortError,
       noteMaintenanceGate,
       pushBatchStageArtifact,
-      resolveMaintenancePostProcessConcurrency,
+      resolveMaintenancePostProcessConcurrency: resolveConcurrencyConfig,
       runCompressionPostProcessPlanCommit,
       runReflectionPostProcessPlanCommit,
       setBatchStageOutcome,
@@ -15410,10 +14819,10 @@ function notifyHistoryDirty(dirtyFrom, reason) {
 }
 
 function clearPendingHistoryMutationChecks() {
-  for (const timer of pendingHistoryMutationCheckTimers) {
+  for (const timer of conversationWorkspace.timers.historyMutationChecks) {
     clearTimeout(timer);
   }
-  pendingHistoryMutationCheckTimers = [];
+  conversationWorkspace.timers.historyMutationChecks = [];
 }
 
 function scheduleImmediateHistoryRecovery(
@@ -15423,12 +14832,12 @@ function scheduleImmediateHistoryRecovery(
   if (!getSettings().enabled) return;
 
   const scheduledChatId = getCurrentChatId();
-  pendingHistoryRecoveryTrigger = trigger;
-  clearTimeout(pendingHistoryRecoveryTimer);
-  pendingHistoryRecoveryTimer = setTimeout(() => {
-    pendingHistoryRecoveryTimer = null;
-    const effectiveTrigger = pendingHistoryRecoveryTrigger || trigger;
-    pendingHistoryRecoveryTrigger = "";
+  conversationWorkspace.timers.historyRecoveryTrigger = trigger;
+  clearTimeout(conversationWorkspace.timers.historyRecovery);
+  conversationWorkspace.timers.historyRecovery = setTimeout(() => {
+    conversationWorkspace.timers.historyRecovery = null;
+    const effectiveTrigger = conversationWorkspace.timers.historyRecoveryTrigger || trigger;
+    conversationWorkspace.timers.historyRecoveryTrigger = "";
     if (!getSettings().enabled) return;
     if (getCurrentChatId() !== scheduledChatId) return;
 
@@ -15462,9 +14871,9 @@ function scheduleHistoryMutationRecheck(
 
   const scheduledChatId = getCurrentChatId();
   clearPendingHistoryMutationChecks();
-  clearTimeout(pendingHistoryRecoveryTimer);
-  pendingHistoryRecoveryTimer = null;
-  pendingHistoryRecoveryTrigger = "";
+  clearTimeout(conversationWorkspace.timers.historyRecovery);
+  conversationWorkspace.timers.historyRecovery = null;
+  conversationWorkspace.timers.historyRecoveryTrigger = "";
 
   updateStageNotice(
     "history",
@@ -15479,8 +14888,8 @@ function scheduleHistoryMutationRecheck(
 
   for (const delayMs of HISTORY_MUTATION_RETRY_DELAYS_MS) {
     const timer = setTimeout(() => {
-      pendingHistoryMutationCheckTimers =
-        pendingHistoryMutationCheckTimers.filter(
+      conversationWorkspace.timers.historyMutationChecks =
+        conversationWorkspace.timers.historyMutationChecks.filter(
           (candidate) => candidate !== timer,
         );
       if (!getSettings().enabled) return;
@@ -15493,26 +14902,26 @@ function scheduleHistoryMutationRecheck(
       );
       if (
         detection.dirty ||
-        Number.isFinite(currentGraph?.historyState?.historyDirtyFrom)
+        Number.isFinite(conversationWorkspace.graph?.historyState?.historyDirtyFrom)
       ) {
         clearPendingHistoryMutationChecks();
         scheduleImmediateHistoryRecovery(trigger, 0);
-      } else if (pendingHistoryMutationCheckTimers.length === 0) {
+      } else if (conversationWorkspace.timers.historyMutationChecks.length === 0) {
         dismissStageNotice("history");
         refreshPanelLiveState();
       }
     }, delayMs);
 
-    pendingHistoryMutationCheckTimers.push(timer);
+    conversationWorkspace.timers.historyMutationChecks.push(timer);
   }
 }
 
 function clearDeferredHistoryMutationRecheck() {
-  if (pendingDeferredHistoryMutationRecheckTimer) {
-    clearTimeout(pendingDeferredHistoryMutationRecheckTimer);
+  if (conversationWorkspace.timers.deferredHistoryMutationRecheck) {
+    clearTimeout(conversationWorkspace.timers.deferredHistoryMutationRecheck);
   }
-  pendingDeferredHistoryMutationRecheckTimer = null;
-  pendingDeferredHistoryMutationRecheckPayload = null;
+  conversationWorkspace.timers.deferredHistoryMutationRecheck = null;
+  conversationWorkspace.timers.deferredHistoryMutationPayload = null;
 }
 
 function scheduleDeferredHistoryMutationRecheck(
@@ -15523,9 +14932,9 @@ function scheduleDeferredHistoryMutationRecheck(
 ) {
   if (!getSettings().enabled) return;
   clearDeferredHistoryMutationRecheck();
-  pendingDeferredHistoryMutationRecheckPayload = { trigger, primaryArg, meta };
-  pendingDeferredHistoryMutationRecheckTimer = setTimeout(() => {
-    const payload = pendingDeferredHistoryMutationRecheckPayload;
+  conversationWorkspace.timers.deferredHistoryMutationPayload = { trigger, primaryArg, meta };
+  conversationWorkspace.timers.deferredHistoryMutationRecheck = setTimeout(() => {
+    const payload = conversationWorkspace.timers.deferredHistoryMutationPayload;
     clearDeferredHistoryMutationRecheck();
     if (!payload) return;
     scheduleHistoryMutationRecheck(payload.trigger, payload.primaryArg, payload.meta);
@@ -15533,7 +14942,7 @@ function scheduleDeferredHistoryMutationRecheck(
 }
 
 function flushDeferredHistoryMutationRecheck(reason = "generation-boundary") {
-  const payload = pendingDeferredHistoryMutationRecheckPayload;
+  const payload = conversationWorkspace.timers.deferredHistoryMutationPayload;
   if (!payload) return false;
   clearDeferredHistoryMutationRecheck();
   scheduleHistoryMutationRecheck(`${payload.trigger}:${reason}`, payload.primaryArg, payload.meta);
@@ -15553,7 +14962,7 @@ function inspectHistoryMutation(
   primaryArg = null,
   meta = null,
 ) {
-  if (!currentGraph)
+  if (!conversationWorkspace.graph)
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
 
   ensureCurrentGraphRuntimeState();
@@ -15581,7 +14990,7 @@ function inspectHistoryMutation(
     : `${trigger} 元数据检测到楼层变动`;
   if (
     Array.isArray(chat) &&
-    currentGraph.historyState?.processedMessageHashesNeedRefresh === true
+    conversationWorkspace.graph.historyState?.processedMessageHashesNeedRefresh === true
   ) {
     const lastProcessedFloor = getLastProcessedAssistantFloor();
     const migrationDirtyFloor =
@@ -15597,7 +15006,7 @@ function inspectHistoryMutation(
         : `${trigger} 发生在历史哈希升级期间，执行保守恢复`;
       clearInjectionState();
       markHistoryDirty(
-        currentGraph,
+        conversationWorkspace.graph,
         migrationDirtyFloor,
         migrationReason,
         metaDetection?.source || "hash-version-migration",
@@ -15612,7 +15021,7 @@ function inspectHistoryMutation(
       };
     }
     rebindProcessedHistoryStateToChat(
-      currentGraph,
+      conversationWorkspace.graph,
       chat,
       getAssistantTurns(chat),
     );
@@ -15621,7 +15030,7 @@ function inspectHistoryMutation(
       {
         trigger,
         lastProcessedAssistantFloor:
-          currentGraph.historyState.lastProcessedAssistantFloor ?? -1,
+          conversationWorkspace.graph.historyState.lastProcessedAssistantFloor ?? -1,
       },
     );
     if (isGraphMetadataWriteAllowed()) {
@@ -15636,7 +15045,7 @@ function inspectHistoryMutation(
   ) {
     clearInjectionState();
     markHistoryDirty(
-      currentGraph,
+      conversationWorkspace.graph,
       metaDetection.floor,
       metaReason,
       metaDetection.source,
@@ -15650,12 +15059,12 @@ function inspectHistoryMutation(
       source: metaDetection.source,
     };
   }
-  const detection = detectHistoryMutation(chat, currentGraph.historyState);
+  const detection = detectHistoryMutation(chat, conversationWorkspace.graph.historyState);
 
   if (detection.dirty) {
     clearInjectionState();
     markHistoryDirty(
-      currentGraph,
+      conversationWorkspace.graph,
       detection.earliestAffectedFloor,
       detection.reason || trigger,
       "hash-recheck",
@@ -15675,15 +15084,18 @@ function inspectHistoryMutation(
   return detection;
 }
 
-async function purgeCurrentVectorCollection(signal = undefined) {
-  if (!currentGraph?.vectorIndexState?.collectionId) return;
+async function purgeCurrentVectorCollection(
+  signal = undefined,
+  graph = conversationWorkspace.graph,
+) {
+  if (!graph?.vectorIndexState?.collectionId) return;
 
   const response = await fetchLocalWithTimeout("/api/vector/purge", {
     method: "POST",
     headers: getRequestHeaders(),
     signal,
     body: JSON.stringify({
-      collectionId: currentGraph.vectorIndexState.collectionId,
+      collectionId: graph.vectorIndexState.collectionId,
     }),
   });
 
@@ -15696,50 +15108,41 @@ async function purgeCurrentVectorCollection(signal = undefined) {
 async function prepareVectorStateForReplay(
   fullReset = false,
   signal = undefined,
-  { skipBackendPurge = false } = {},
+  {
+    skipBackendPurge = false,
+    resetBackendMappings = !skipBackendPurge,
+    graph = conversationWorkspace.graph,
+  } = {},
 ) {
-  ensureCurrentGraphRuntimeState();
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) {
+    ensureCurrentGraphRuntimeState();
+  } else {
+    normalizeGraphRuntimeState(
+      graph,
+      graph?.historyState?.chatId || getCurrentChatId(),
+    );
+  }
   const config = getEmbeddingConfig();
-
-  if (isBackendVectorConfig(config)) {
+  const backend = isBackendVectorConfig(config);
+  if (backend) {
     if (!skipBackendPurge) {
       try {
-        await purgeCurrentVectorCollection(signal);
+        await purgeCurrentVectorCollection(signal, graph);
       } catch (error) {
         if (isAbortError(error)) {
           throw error;
         }
         console.warn("[ST-BME] 清理后端向量索引失败，继续本地恢复:", error);
       }
-      currentGraph.vectorIndexState.hashToNodeId = {};
-      currentGraph.vectorIndexState.nodeToHash = {};
     }
-    currentGraph.vectorIndexState.dirty = true;
-    if (!currentGraph.vectorIndexState.dirtyReason) {
-      currentGraph.vectorIndexState.dirtyReason = skipBackendPurge
-        ? "history-recovery-replay"
-        : "history-recovery-reset";
-    }
-    if (fullReset) {
-      currentGraph.vectorIndexState.replayRequiredNodeIds = [];
-      currentGraph.vectorIndexState.pendingRepairFromFloor = 0;
-    }
-    currentGraph.vectorIndexState.lastWarning = skipBackendPurge
-      ? "历史恢复后需要修复受影响后缀的后端向量索引"
-      : "历史恢复后需要重建后端向量索引";
-    return;
   }
-
-  if (fullReset) {
-    currentGraph.vectorIndexState.hashToNodeId = {};
-    currentGraph.vectorIndexState.nodeToHash = {};
-    currentGraph.vectorIndexState.replayRequiredNodeIds = [];
-    currentGraph.vectorIndexState.dirty = true;
-    currentGraph.vectorIndexState.dirtyReason = "history-recovery-reset";
-    currentGraph.vectorIndexState.pendingRepairFromFloor = 0;
-    currentGraph.vectorIndexState.lastWarning =
-      "历史恢复后需要重嵌当前聊天向量";
-  }
+  prepareGraphVectorStateForReplay(graph, {
+    backend,
+    fullReset,
+    skipBackendPurge,
+    resetBackendMappings,
+  });
 }
 
 async function executeExtractionBatch({
@@ -15765,21 +15168,23 @@ async function executeExtractionBatch({
       createBatchJournalEntry,
       createBatchStatusSkeleton,
       captureConversationLease: (...args) =>
-        conversationSession.captureLease(...args),
+        conversationWorkspace.captureLease(...args),
       ensureCurrentGraphRuntimeState,
       extractMemories,
       finalizeBatchStatus,
       getContext,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getCurrentChatId,
       getEmbeddingConfig,
-      getExtractionCount: () => extractionCount,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
       getLastProcessedAssistantFloor,
       getSettings,
       getSchema,
+      getVectorIndexStats,
       handleExtractionSuccess,
+      isAbortError,
       isConversationLeaseCurrent: (...args) =>
-        conversationSession.isLeaseCurrent(...args),
+        conversationWorkspace.isLeaseCurrent(...args),
       markHistoryDirty,
       persistExtractionBatchResult,
       resolveCurrentChatStateTarget,
@@ -15787,14 +15192,16 @@ async function executeExtractionBatch({
       scheduleBackgroundVectorSync,
       saveGraphToChat,
       setBatchStageOutcome,
-      setCurrentGraph: (graph) => { currentGraph = graph; },
-      setExtractionCount: (value) => { extractionCount = value; },
+      setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
+      setExtractionCount: (value) => { conversationWorkspace.extractionCount = value; },
       setLastExtractionStatus,
       stampGraphPersistenceMeta,
+      syncVectorState,
       shouldAdvanceProcessedHistory,
       throwIfAborted,
       updateLastExtractedItems,
       updateProcessedHistorySnapshot,
+      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
     },
     {
       chat,
@@ -15815,101 +15222,44 @@ async function replayExtractionFromHistory(
   expectedChatId = undefined,
   expectedHistoryFingerprint = undefined,
 ) {
-  let replayedBatches = 0;
-
-  while (true) {
-    throwIfAborted(signal, "历史恢复已终止");
-    assertRecoveryHistoryStillCurrent(
-      expectedChatId,
-      expectedHistoryFingerprint,
-      "replay-loop",
-    );
-    const pendingAssistantTurns = getAssistantTurns(chat).filter(
-      (index) => index > getLastProcessedAssistantFloor(),
-    );
-    if (pendingAssistantTurns.length === 0) break;
-
-    const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
-    const batchAssistantTurns = pendingAssistantTurns.slice(0, extractEvery);
-    const startIdx = batchAssistantTurns[0];
-    const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
-
-    const batchResult = await executeExtractionBatch({
+  return await replayExtractionFromHistoryController(
+    {
+      assertRecoveryHistoryStillCurrent,
+      clampInt,
+      executeExtractionBatch,
+      getAssistantTurns,
+      getLastProcessedAssistantFloor,
+      throwIfAborted,
+    },
+    {
       chat,
-      startIdx,
-      endIdx,
       settings,
       signal,
-    });
-    assertRecoveryHistoryStillCurrent(
       expectedChatId,
       expectedHistoryFingerprint,
-      "replay-batch-complete",
-    );
-
-    if (!batchResult.success) {
-      throw new Error(
-        batchResult.error ||
-          batchResult?.result?.error ||
-          "历史恢复回放过程中出现提取失败",
-      );
-    }
-
-    replayedBatches++;
-  }
-
-  return replayedBatches;
+    },
+  );
 }
 
 function applyRecoveryPlanToVectorState(
   recoveryPlan,
   dirtyFallbackFloor = null,
+  graph = conversationWorkspace.graph,
 ) {
-  ensureCurrentGraphRuntimeState();
-  const vectorState = currentGraph.vectorIndexState;
-  const replayRequiredNodeIds = new Set(
-    Array.isArray(vectorState.replayRequiredNodeIds)
-      ? vectorState.replayRequiredNodeIds.filter(Boolean)
-      : [],
-  );
-
-  for (const nodeId of recoveryPlan?.replayRequiredNodeIds || []) {
-    if (nodeId) replayRequiredNodeIds.add(nodeId);
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) {
+    ensureCurrentGraphRuntimeState();
+  } else {
+    normalizeGraphRuntimeState(
+      graph,
+      graph?.historyState?.chatId || getCurrentChatId(),
+    );
   }
-
-  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
-    ? dirtyFallbackFloor
-    : currentGraph.historyState?.historyDirtyFrom;
-  const pendingRepairFromFloor = Number.isFinite(
-    recoveryPlan?.pendingRepairFromFloor,
-  )
-    ? recoveryPlan.pendingRepairFromFloor
-    : Number.isFinite(fallbackFloor)
-      ? fallbackFloor
-      : null;
-
-  vectorState.replayRequiredNodeIds = [...replayRequiredNodeIds];
-  vectorState.dirty = true;
-  vectorState.dirtyReason =
-    recoveryPlan?.dirtyReason ||
-    vectorState.dirtyReason ||
-    "history-recovery-replay";
-  vectorState.pendingRepairFromFloor = pendingRepairFromFloor;
-  vectorState.lastIntegrityIssue =
-    recoveryPlan?.valid === false
-      ? {
-          scope: "history-recovery-plan",
-          reason: String(recoveryPlan.invalidReason || "invalid-recovery-plan"),
-          dirtyFallbackFloor: Number.isFinite(fallbackFloor)
-            ? fallbackFloor
-            : null,
-          pendingRepairFromFloor,
-          at: Date.now(),
-        }
-      : null;
-  vectorState.lastWarning = recoveryPlan?.legacyGapFallback
-    ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
-    : "历史恢复后需要修复受影响后缀的向量索引";
+  applyRecoveryPlanToGraphVectorState(
+    graph,
+    recoveryPlan,
+    dirtyFallbackFloor,
+  );
 }
 
 async function rollbackGraphForReroll(targetFloor, context = getContext()) {
@@ -15927,19 +15277,20 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       findJournalRecoveryPoint,
       getContext,
       getCurrentChatId,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
       isBackendVectorConfig,
       markHistoryDirty,
       normalizeGraphRuntimeState,
+      persistDetachedRecoveryGraph,
       prepareVectorStateForReplay,
       pruneProcessedMessageHashesFromFloor,
       refreshPanelLiveState,
       rollbackAffectedJournals,
       saveGraphToChat,
-      setCurrentGraph: (graph) => { currentGraph = graph; },
-      setExtractionCount: (count) => { extractionCount = count; },
-      setLastExtractedItems: (items) => { lastExtractedItems = items; },
+      setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
+      setExtractionCount: (count) => { conversationWorkspace.extractionCount = count; },
+      setLastExtractedItems: (items) => { conversationWorkspace.lastExtractedItems = items; },
       setRuntimeStatus,
       tryDeleteBackendVectorHashesForRecovery,
       updateProcessedHistorySnapshot,
@@ -16026,12 +15377,12 @@ async function tryDeleteBackendVectorHashesForRecovery(
       hashCount: hashes.length,
       error,
     });
-    if (currentGraph?.vectorIndexState) {
-      currentGraph.vectorIndexState.dirty = true;
-      currentGraph.vectorIndexState.dirtyReason =
-        currentGraph.vectorIndexState.dirtyReason ||
+    if (conversationWorkspace.graph?.vectorIndexState) {
+      conversationWorkspace.graph.vectorIndexState.dirty = true;
+      conversationWorkspace.graph.vectorIndexState.dirtyReason =
+        conversationWorkspace.graph.vectorIndexState.dirtyReason ||
         "history-recovery-replay";
-      currentGraph.vectorIndexState.lastWarning =
+      conversationWorkspace.graph.vectorIndexState.lastWarning =
         "向量恢复预清理失败，已跳过并标记为后续修复";
     }
     return {
@@ -16068,10 +15419,10 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       finishStageAbortController,
       getContext,
       getCurrentChatId,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
-      getExtractionCount: () => extractionCount,
-      getIsRecoveringHistory: () => isRecoveringHistory,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
+      getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
       getRenderLimitedHistoryRecoveryGuard,
       getSettings,
       inspectHistoryMutation,
@@ -16083,15 +15434,16 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       maybeResumePendingAutoExtraction,
       normalizeGraphRuntimeState,
       notifyRenderLimitedHistoryRecoveryBlocked,
+      persistDetachedRecoveryGraph,
       prepareVectorStateForReplay,
       queueMicrotask: globalThis.queueMicrotask?.bind?.(globalThis),
       refreshPanelLiveState,
       replayExtractionFromHistory,
       rollbackAffectedJournals,
       saveGraphToChat,
-      setCurrentGraph: (graph) => { currentGraph = graph; },
-      setExtractionCount: (count) => { extractionCount = count; },
-      setIsRecoveringHistory: (value) => { isRecoveringHistory = value; },
+      setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
+      setExtractionCount: (count) => { conversationWorkspace.extractionCount = count; },
+      setIsRecoveringHistory: (value) => { conversationWorkspace.isRecoveringHistory = value; },
       settleExtractionStatusAfterHistoryRecovery,
       throwIfAborted,
       toastr,
@@ -16108,8 +15460,8 @@ function settleExtractionStatusAfterHistoryRecovery(
   level = "success",
 ) {
   const statusSnapshot =
-    typeof lastExtractionStatus === "object" && lastExtractionStatus
-      ? lastExtractionStatus
+    typeof conversationWorkspace.lastExtractionStatus === "object" && conversationWorkspace.lastExtractionStatus
+      ? conversationWorkspace.lastExtractionStatus
       : null;
   if (!statusSnapshot || typeof setLastExtractionStatus !== "function") {
     return;
@@ -16148,11 +15500,11 @@ async function runExtraction() {
     finishStageAbortController,
     getAssistantTurns,
     getContext,
-    getCurrentGraph: () => currentGraph,
-    getGraphPersistenceState: () => graphPersistenceState,
+    getCurrentGraph: () => conversationWorkspace.graph,
+    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
     getGraphMutationBlockReason,
-    getIsExtracting: () => isExtracting,
-    getIsRecoveringHistory: () => isRecoveringHistory,
+    getIsExtracting: () => conversationWorkspace.isExtracting,
+    getIsRecoveringHistory: () => conversationWorkspace.isRecoveringHistory,
     getLastProcessedAssistantFloor,
     getSettings,
     getSmartTriggerDecision,
@@ -16162,7 +15514,7 @@ async function runExtraction() {
     resolveAutoExtractionPlan,
     retryPendingGraphPersist,
     setIsExtracting: (value) => {
-      isExtracting = value;
+      conversationWorkspace.isExtracting = value;
     },
     setLastExtractionStatus,
   }, options);
@@ -16186,10 +15538,10 @@ function applyRecallInjection(settings, recallInput, recentMessages, result) {
       recordInjectionSnapshot,
       saveGraphToChat,
       setCurrentGraphLastRecallResult: (selectedNodeIds) => {
-        currentGraph.lastRecallResult = selectedNodeIds;
+        conversationWorkspace.graph.lastRecallResult = selectedNodeIds;
       },
       setLastInjectionContent: (value) => {
-        lastInjectionContent = value;
+        conversationWorkspace.lastInjectionContent = value;
       },
       setLastRecallFallbackNoticeAt: (value) => {
         lastRecallFallbackNoticeAt = value;
@@ -16285,17 +15637,17 @@ function buildRecallRetrieveOptions(settings, context) {
     injectLowConfidenceObjectiveMemory:
       settings.injectLowConfidenceObjectiveMemory ?? false,
     activeRegion:
-      currentGraph?.historyState?.activeRegion ||
-      currentGraph?.historyState?.lastExtractedRegion ||
+      conversationWorkspace.graph?.historyState?.activeRegion ||
+      conversationWorkspace.graph?.historyState?.lastExtractedRegion ||
       "",
     activeStorySegmentId:
-      currentGraph?.historyState?.activeStorySegmentId || "",
+      conversationWorkspace.graph?.historyState?.activeStorySegmentId || "",
     activeStoryTimeLabel:
-      currentGraph?.historyState?.activeStoryTimeLabel || "",
+      conversationWorkspace.graph?.historyState?.activeStoryTimeLabel || "",
     activeCharacterPovOwner:
-      currentGraph?.historyState?.activeCharacterPovOwner || "",
+      conversationWorkspace.graph?.historyState?.activeCharacterPovOwner || "",
     activeUserPovOwner:
-      currentGraph?.historyState?.activeUserPovOwner ||
+      conversationWorkspace.graph?.historyState?.activeUserPovOwner ||
       context.name1 ||
       "",
   };
@@ -16311,21 +15663,21 @@ async function runPlannerRecallForEna({
       buildRecallRecentMessages,
       buildRecallRetrieveOptions,
       captureConversationLease: (...args) =>
-        conversationSession.captureLease(...args),
+        conversationWorkspace.captureLease(...args),
       clampInt,
       console,
       createAbortError,
       ensureVectorReadyIfNeeded,
       formatInjection,
       getContext,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
       getSchema,
       getSettings,
       isGraphMetadataWriteAllowed,
       isGraphReadableForRecall,
       isConversationLeaseCurrent: (...args) =>
-        conversationSession.isLeaseCurrent(...args),
+        conversationWorkspace.isLeaseCurrent(...args),
       isTrivialUserInput,
       normalizeRecallInputText,
       recoverHistoryIfNeeded,
@@ -16350,7 +15702,7 @@ async function runRecall(options = {}) {
     return createRecallRunResult("skipped", {
       reason: "restore-lock-active",
       restoreLock: cloneRuntimeDebugValue(
-        normalizeRestoreLockState(graphPersistenceState.restoreLock),
+        normalizeRestoreLockState(conversationWorkspace.graphPersistenceState.restoreLock),
         null,
       ),
     });
@@ -16363,7 +15715,7 @@ async function runRecall(options = {}) {
       bumpPersistedRecallGenerationCount,
       buildRecallRetrieveOptions,
       captureConversationLease: (...args) =>
-        conversationSession.captureLease(...args),
+        conversationWorkspace.captureLease(...args),
       clampInt,
       console,
       createAbortError,
@@ -16371,22 +15723,23 @@ async function runRecall(options = {}) {
       createRecallRunResult,
       ensureVectorReadyIfNeeded,
       finishStageAbortController,
-      getActiveRecallPromise: () => activeRecallPromise,
+      getActiveRecallPromise: () => conversationWorkspace.activeRecallPromise,
       getContext,
-      getCurrentGraph: () => currentGraph,
+      getCurrentChatId,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
       getGraphMutationBlockReason,
-      getIsRecalling: () => isRecalling,
+      getIsRecalling: () => conversationWorkspace.isRecalling,
       getRecallHookLabel,
       getSchema,
       getSettings,
       isAbortError,
       isConversationLeaseCurrent: (...args) =>
-        conversationSession.isLeaseCurrent(...args),
+        conversationWorkspace.isLeaseCurrent(...args),
       isGraphMetadataWriteAllowed,
       isGraphReadable,
       isGraphReadableForRecall,
-      nextRecallRunSequence: () => ++recallRunSequence,
+      nextRecallRunSequence: () => ++conversationWorkspace.recallRunSequence,
       readPersistedRecallFromUserMessage,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
@@ -16394,10 +15747,10 @@ async function runRecall(options = {}) {
       retrieve,
       schedulePersistedRecallMessageUiRefresh,
       setActiveRecallPromise: (value) => {
-        activeRecallPromise = value;
+        conversationWorkspace.activeRecallPromise = value;
       },
       setIsRecalling: (value) => {
-        isRecalling = value;
+        conversationWorkspace.isRecalling = value;
       },
       setLastRecallStatus,
       setPendingRecallSendIntent: (value) => {
@@ -16415,9 +15768,9 @@ async function runRecall(options = {}) {
 
 function onChatChanged() {
   enaPlannerApi?.cancelPlanning?.("chat-changed");
-  isHostGenerationRunning = false;
-  lastHostGenerationEndedAt = 0;
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.hostGeneration.running = false;
+  conversationWorkspace.hostGeneration.endedAt = 0;
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     forceNewEpoch: true,
     reason: "chat-changed",
   });
@@ -16444,29 +15797,29 @@ function onChatChanged() {
     clearRecallInputTracking,
     clearTimeout,
     dismissAllStageNotices,
-    getPendingHistoryRecoveryTimer: () => pendingHistoryRecoveryTimer,
+    getPendingHistoryRecoveryTimer: () => conversationWorkspace.timers.historyRecovery,
     installSendIntentHooks,
     refreshPersistedRecallMessageUi: schedulePersistedRecallMessageUiRefresh,
     setLastPreGenerationRecallAt: (value) => {
-      lastPreGenerationRecallAt = value;
+      conversationWorkspace.hostGeneration.lastPreGenerationRecallAt = value;
     },
     setLastPreGenerationRecallKey: (value) => {
-      lastPreGenerationRecallKey = value;
+      conversationWorkspace.hostGeneration.lastPreGenerationRecallKey = value;
     },
     setPendingHistoryRecoveryTimer: (value) => {
-      pendingHistoryRecoveryTimer = value;
+      conversationWorkspace.timers.historyRecovery = value;
     },
     setPendingHistoryRecoveryTrigger: (value) => {
-      pendingHistoryRecoveryTrigger = value;
+      conversationWorkspace.timers.historyRecoveryTrigger = value;
     },
     setSkipBeforeCombineRecallUntil: (value) => {
-      skipBeforeCombineRecallUntil = value;
+      conversationWorkspace.hostGeneration.skipBeforeCombineRecallUntil = value;
     },
     syncGraphLoadFromLiveContext,
   });
 
   scheduleBmeIndexedDbTask(async () => {
-    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-changed");
+    const syncResult = await syncConversationRepositoryWithCurrentChat("chat-changed");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-changed", syncResult.chatId);
       await loadGraphFromIndexedDb(syncResult.chatId, {
@@ -16486,7 +15839,7 @@ function onChatChanged() {
 
 function onChatLoaded() {
   enaPlannerApi?.cancelPlanning?.("chat-loaded");
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "chat-loaded",
   });
   const { target, lightweightHostMode, adapter } = syncBmeHostRuntimeFlags(getContext());
@@ -16501,7 +15854,7 @@ function onChatLoaded() {
   });
 
   scheduleBmeIndexedDbTask(async () => {
-    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-loaded");
+    const syncResult = await syncConversationRepositoryWithCurrentChat("chat-loaded");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-loaded", syncResult.chatId);
       await loadGraphFromIndexedDb(syncResult.chatId, {
@@ -16563,7 +15916,7 @@ function onCharacterMessageRendered(messageId = null, type = "") {
 }
 
 function onMessageDeleted(chatLengthOrMessageId, meta = null) {
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "message-deleted",
   });
   const result = onMessageDeletedController(
@@ -16621,7 +15974,7 @@ function onMessageUpdated(messageId, meta = null) {
 }
 
 async function onMessageSwiped(messageId, meta = null) {
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "message-swiped",
   });
   conversationSession.noteSwipe(messageId, meta);
@@ -16650,7 +16003,7 @@ function onGenerationContextReady(payload = {}) {
   });
   updateLukerProjectionState({
     runtime: {
-      ...(graphPersistenceState.projectionState?.runtime || {}),
+      ...(conversationWorkspace.graphPersistenceState.projectionState?.runtime || {}),
       status: "context-ready",
       updatedAt: Date.now(),
       reason: "generation-context-ready",
@@ -16680,7 +16033,7 @@ function onGenerationAfterWorldInfoScan(payload = {}) {
     chatStateTarget: target,
     lightweightHostMode,
   });
-  if (String(graphPersistenceState.projectionState?.runtime?.status || "") === "pending") {
+  if (String(conversationWorkspace.graphPersistenceState.projectionState?.runtime?.status || "") === "pending") {
     payload.__stBmeProjectionRequestedRescan = true;
   }
   return {
@@ -16698,18 +16051,18 @@ function onGenerationWorldInfoFinalized(payload = {}) {
 
   if (
     isLukerPrimaryPersistenceHost(getContext()) &&
-    graphPersistenceState.projectionState?.runtime?.status === "pending"
+    conversationWorkspace.graphPersistenceState.projectionState?.runtime?.status === "pending"
   ) {
     payload.requestRescan = true;
     const reason =
-      graphPersistenceState.projectionState?.runtime?.reason ||
+      conversationWorkspace.graphPersistenceState.projectionState?.runtime?.reason ||
       "runtime-projection-pending";
     updateGraphPersistenceState({
       lastRequestRescanReason: String(reason || ""),
     });
     updateLukerProjectionState({
       runtime: {
-        ...(graphPersistenceState.projectionState?.runtime || {}),
+        ...(conversationWorkspace.graphPersistenceState.projectionState?.runtime || {}),
         status: "rescan-requested",
         updatedAt: Date.now(),
         reason,
@@ -16736,7 +16089,7 @@ function onGenerationBeforeApiRequest(payload = {}) {
 }
 
 function onGenerationStarted(type, params = {}, dryRun = false) {
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "generation-started",
   });
   const generationType = String(type || "normal").trim() || "normal";
@@ -16763,8 +16116,8 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
     !params?.quiet_prompt &&
     generationType === "normal"
   ) {
-    isHostGenerationRunning = true;
-    lastHostGenerationEndedAt = 0;
+    conversationWorkspace.hostGeneration.running = true;
+    conversationWorkspace.hostGeneration.endedAt = 0;
   }
   return onGenerationStartedController(
     {
@@ -16791,12 +16144,12 @@ function onGenerationStarted(type, params = {}, dryRun = false) {
 }
 
 function onGenerationEnded(_chatLength = null) {
-  isHostGenerationRunning = false;
-  lastHostGenerationEndedAt = Date.now();
+  conversationWorkspace.hostGeneration.running = false;
+  conversationWorkspace.hostGeneration.endedAt = Date.now();
   if (isLukerPrimaryPersistenceHost(getContext())) {
     updateLukerProjectionState({
       runtime: {
-        ...(graphPersistenceState.projectionState?.runtime || {}),
+        ...(conversationWorkspace.graphPersistenceState.projectionState?.runtime || {}),
         status: "idle",
         updatedAt: Date.now(),
         reason: "generation-ended",
@@ -16826,7 +16179,7 @@ function onGenerationEnded(_chatLength = null) {
 }
 
 async function onGenerationAfterCommands(type, params = {}, dryRun = false) {
-  conversationSession.enterChat(resolveCurrentChatIdentity(), {
+  conversationWorkspace.enterChat(resolveCurrentChatIdentity(), {
     reason: "generation-after-commands",
   });
   conversationSession.updateGeneration(type, params, {
@@ -16907,9 +16260,9 @@ function onMessageReceived(messageId = null, type = "") {
     createRecallInputRecord,
     deferAutoExtraction,
     getContext,
-    getCurrentGraph: () => currentGraph,
-    getGraphPersistenceState: () => graphPersistenceState,
-    getIsHostGenerationRunning: () => isHostGenerationRunning,
+    getCurrentGraph: () => conversationWorkspace.graph,
+    getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+    getIsHostGenerationRunning: () => conversationWorkspace.hostGeneration.running,
     getLastProcessedAssistantFloor,
     getPendingHostGenerationInputSnapshot,
     getPendingRecallSendIntent: () =>
@@ -16953,7 +16306,7 @@ function onMessageReceived(messageId = null, type = "") {
 
 async function onViewGraph() {
   return await onViewGraphController({
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getGraphStats,
     toastr,
   });
@@ -16983,7 +16336,7 @@ async function onRebuild() {
           }),
         getContext,
         getCurrentChatId,
-        getCurrentGraph: () => currentGraph,
+        getCurrentGraph: () => conversationWorkspace.graph,
         getSettings,
         normalizeGraphRuntimeState,
         prepareVectorStateForReplay,
@@ -16993,7 +16346,7 @@ async function onRebuild() {
         saveGraphToChat,
         updateProcessedHistorySnapshot,
         setCurrentGraph: (graph) => {
-          currentGraph = graph;
+          conversationWorkspace.graph = graph;
         },
         setLastExtractionStatus,
         setRuntimeStatus,
@@ -17009,7 +16362,7 @@ async function onManualCompress() {
     cloneGraphSnapshot,
     compressAll,
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getEmbeddingConfig,
     getSchema,
     getSettings,
@@ -17025,13 +16378,13 @@ async function onManualCompress() {
 function onSavePanelGraphNode(payload = {}) {
   const nodeId = String(payload.nodeId || "");
   const updates = payload.updates;
-  if (!nodeId || !updates || typeof updates !== "object" || !currentGraph) {
+  if (!nodeId || !updates || typeof updates !== "object" || !conversationWorkspace.graph) {
     return { ok: false, error: "invalid-payload" };
   }
-  if (!getNode(currentGraph, nodeId)) {
+  if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
-  const updated = updateNode(currentGraph, nodeId, updates);
+  const updated = updateNode(conversationWorkspace.graph, nodeId, updates);
   if (!updated) {
     return { ok: false, error: "update-failed" };
   }
@@ -17045,13 +16398,13 @@ function onSavePanelGraphNode(payload = {}) {
 
 function onDeletePanelGraphNode(payload = {}) {
   const nodeId = String(payload.nodeId || "");
-  if (!nodeId || !currentGraph) {
+  if (!nodeId || !conversationWorkspace.graph) {
     return { ok: false, error: "invalid-payload" };
   }
-  if (!getNode(currentGraph, nodeId)) {
+  if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
-  const removed = removeNode(currentGraph, nodeId);
+  const removed = removeNode(conversationWorkspace.graph, nodeId);
   if (!removed) {
     return { ok: false, error: "delete-failed" };
   }
@@ -17070,7 +16423,7 @@ function onApplyPanelKnowledgeOverride(payload = {}) {
   const ownerName = String(payload.ownerName || "");
   const mode = String(payload.mode || "").trim();
 
-  if (!currentGraph || !nodeId || !ownerKey) {
+  if (!conversationWorkspace.graph || !nodeId || !ownerKey) {
     return { ok: false, error: "invalid-payload" };
   }
   if (!ensureGraphMutationReady("认知覆盖", { notify: false })) {
@@ -17079,11 +16432,11 @@ function onApplyPanelKnowledgeOverride(payload = {}) {
   if (!["known", "hidden", "mistaken"].includes(mode)) {
     return { ok: false, error: "invalid-mode" };
   }
-  if (!getNode(currentGraph, nodeId)) {
+  if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
 
-  const result = applyManualKnowledgeOverride(currentGraph, {
+  const result = applyManualKnowledgeOverride(conversationWorkspace.graph, {
     ownerKey,
     ownerType,
     ownerName,
@@ -17110,17 +16463,17 @@ function onClearPanelKnowledgeOverride(payload = {}) {
   const ownerType = String(payload.ownerType || "");
   const ownerName = String(payload.ownerName || "");
 
-  if (!currentGraph || !nodeId || !ownerKey) {
+  if (!conversationWorkspace.graph || !nodeId || !ownerKey) {
     return { ok: false, error: "invalid-payload" };
   }
   if (!ensureGraphMutationReady("认知覆盖清理", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
-  if (!getNode(currentGraph, nodeId)) {
+  if (!getNode(conversationWorkspace.graph, nodeId)) {
     return { ok: false, error: "node-not-found" };
   }
 
-  const result = clearManualKnowledgeOverride(currentGraph, {
+  const result = clearManualKnowledgeOverride(conversationWorkspace.graph, {
     ownerKey,
     ownerType,
     ownerName,
@@ -17143,14 +16496,14 @@ function onClearPanelKnowledgeOverride(payload = {}) {
 function onRenamePanelKnowledgeOwner(payload = {}) {
   const ownerKey = String(payload.ownerKey || "").trim();
   const nextName = String(payload.nextName || "").trim();
-  if (!currentGraph || !ownerKey || !nextName) {
+  if (!conversationWorkspace.graph || !ownerKey || !nextName) {
     return { ok: false, error: "invalid-payload" };
   }
   if (!ensureGraphMutationReady("角色认知重命名", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
 
-  const result = renameKnowledgeOwner(currentGraph, ownerKey, nextName);
+  const result = renameKnowledgeOwner(conversationWorkspace.graph, ownerKey, nextName);
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "rename-owner-failed" };
   }
@@ -17169,14 +16522,14 @@ function onRenamePanelKnowledgeOwner(payload = {}) {
 function onMergePanelKnowledgeOwners(payload = {}) {
   const sourceOwnerKey = String(payload.sourceOwnerKey || payload.ownerKey || "").trim();
   const targetOwnerKey = String(payload.targetOwnerKey || "").trim();
-  if (!currentGraph || !sourceOwnerKey || !targetOwnerKey) {
+  if (!conversationWorkspace.graph || !sourceOwnerKey || !targetOwnerKey) {
     return { ok: false, error: "invalid-payload" };
   }
   if (!ensureGraphMutationReady("角色认知合并", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
 
-  const result = mergeKnowledgeOwners(currentGraph, {
+  const result = mergeKnowledgeOwners(conversationWorkspace.graph, {
     sourceOwnerKey,
     targetOwnerKey,
   });
@@ -17198,14 +16551,14 @@ function onMergePanelKnowledgeOwners(payload = {}) {
 function onDeletePanelKnowledgeOwner(payload = {}) {
   const ownerKey = String(payload.ownerKey || "").trim();
   const mode = String(payload.mode || "owner-only").trim() || "owner-only";
-  if (!currentGraph || !ownerKey) {
+  if (!conversationWorkspace.graph || !ownerKey) {
     return { ok: false, error: "invalid-payload" };
   }
   if (!ensureGraphMutationReady("角色认知删除", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
 
-  const result = deleteKnowledgeOwner(currentGraph, ownerKey, { mode });
+  const result = deleteKnowledgeOwner(conversationWorkspace.graph, ownerKey, { mode });
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "delete-owner-failed" };
   }
@@ -17225,14 +16578,14 @@ function onDeletePanelKnowledgeOwner(payload = {}) {
 
 function onSetPanelActiveRegion(payload = {}) {
   const region = String(payload.region || "").trim();
-  if (!currentGraph) {
+  if (!conversationWorkspace.graph) {
     return { ok: false, error: "missing-graph" };
   }
   if (!ensureGraphMutationReady("地区覆盖", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
 
-  const result = setManualActiveRegion(currentGraph, region);
+  const result = setManualActiveRegion(conversationWorkspace.graph, region);
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "set-region-failed" };
   }
@@ -17251,13 +16604,13 @@ function onSetPanelActiveRegion(payload = {}) {
 
 function onSetPanelActiveStoryTime(payload = {}) {
   const label = String(payload.label || "").trim();
-  if (!currentGraph) {
+  if (!conversationWorkspace.graph) {
     return { ok: false, error: "missing-graph" };
   }
   if (!ensureGraphMutationReady("剧情时间覆盖", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
-  const result = setManualActiveStorySegment(currentGraph, { label });
+  const result = setManualActiveStorySegment(conversationWorkspace.graph, { label });
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "set-story-time-failed" };
   }
@@ -17275,13 +16628,13 @@ function onSetPanelActiveStoryTime(payload = {}) {
 }
 
 function onClearPanelActiveStoryTime() {
-  if (!currentGraph) {
+  if (!conversationWorkspace.graph) {
     return { ok: false, error: "missing-graph" };
   }
   if (!ensureGraphMutationReady("剧情时间覆盖清理", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
-  const result = clearManualActiveStorySegment(currentGraph);
+  const result = clearManualActiveStorySegment(conversationWorkspace.graph);
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "clear-story-time-failed" };
   }
@@ -17298,8 +16651,8 @@ function onClearPanelActiveStoryTime() {
 
 function onUpdatePanelRegionAdjacency(payload = {}) {
   const fallbackRegion =
-    currentGraph?.historyState?.activeRegion ||
-    currentGraph?.regionState?.manualActiveRegion ||
+    conversationWorkspace.graph?.historyState?.activeRegion ||
+    conversationWorkspace.graph?.regionState?.manualActiveRegion ||
     "";
   const region = String(payload.region || fallbackRegion).trim();
   const adjacent = Array.isArray(payload.adjacent)
@@ -17309,14 +16662,14 @@ function onUpdatePanelRegionAdjacency(payload = {}) {
         .map((value) => String(value || "").trim())
         .filter(Boolean);
 
-  if (!currentGraph || !region) {
+  if (!conversationWorkspace.graph || !region) {
     return { ok: false, error: "missing-region" };
   }
   if (!ensureGraphMutationReady("地区邻接编辑", { notify: false })) {
     return { ok: false, error: "graph-write-blocked" };
   }
 
-  const result = updateRegionAdjacencyManual(currentGraph, region, adjacent);
+  const result = updateRegionAdjacencyManual(conversationWorkspace.graph, region, adjacent);
   if (!result?.ok) {
     return { ok: false, error: result?.reason || "update-adjacency-failed" };
   }
@@ -17333,9 +16686,9 @@ function onUpdatePanelRegionAdjacency(payload = {}) {
 
 async function onExportGraph() {
   return await onExportGraphController({
-    document,
+    document: getHostDocument(),
     exportGraph,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     toastr,
   });
 }
@@ -17348,7 +16701,7 @@ async function onImportGraph() {
       await onImportGraphController({
         clearInjectionState,
         clearTimeout,
-        document,
+        document: getHostDocument(),
         ensureGraphMutationReady: (operationLabel, options = {}) =>
           ensureGraphMutationReady(operationLabel, {
             ...(options || {}),
@@ -17363,25 +16716,25 @@ async function onImportGraph() {
         rebindProcessedHistoryStateToChat,
         saveGraphToChat,
         setCurrentGraph: (graph) => {
-          currentGraph = graph;
+          conversationWorkspace.graph = graph;
         },
         setExtractionCount: (value) => {
-          extractionCount = value;
+          conversationWorkspace.extractionCount = value;
         },
         setLastExtractedItems: (items) => {
-          lastExtractedItems = items;
+          conversationWorkspace.lastExtractedItems = items;
         },
         toastr,
         updateLastRecalledItems,
-        window,
+        window: getHostWindow(),
       }),
   );
 }
 
 async function onViewLastInjection() {
   return await onViewLastInjectionController({
-    document,
-    getLastInjectionContent: () => lastInjectionContent,
+    document: getHostDocument(),
+    getLastInjectionContent: () => conversationWorkspace.lastInjectionContent,
     toastr,
   });
 }
@@ -17436,9 +16789,9 @@ async function onManualExtract(options = {}) {
       getAssistantTurns,
       getContext,
       getCurrentChatId,
-      getCurrentGraph: () => currentGraph,
-      getGraphPersistenceState: () => graphPersistenceState,
-      getIsExtracting: () => isExtracting,
+      getCurrentGraph: () => conversationWorkspace.graph,
+      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+      getIsExtracting: () => conversationWorkspace.isExtracting,
       getLastProcessedAssistantFloor,
       getSettings,
       isAbortError,
@@ -17447,10 +16800,10 @@ async function onManualExtract(options = {}) {
       refreshPanelLiveState,
       retryPendingGraphPersist,
       setCurrentGraph: (graph) => {
-        currentGraph = graph;
+        conversationWorkspace.graph = graph;
       },
       setIsExtracting: (value) => {
-        isExtracting = value;
+        conversationWorkspace.isExtracting = value;
       },
       setLastExtractionStatus,
       toastr,
@@ -17466,6 +16819,7 @@ async function onExtractionTask(options = {}) {
       buildRecoveryResult,
       clampInt,
       clearHistoryDirty,
+      cloneGraphSnapshot,
       console,
       createEmptyGraph,
       ensureGraphMutationReady,
@@ -17474,27 +16828,28 @@ async function onExtractionTask(options = {}) {
       getAssistantTurns,
       getContext,
       getCurrentChatId,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getGraphMutationBlockReason,
-      getGraphPersistenceState: () => graphPersistenceState,
-      getIsExtracting: () => isExtracting,
-      getLastExtractionStatusLevel: () => lastExtractionStatus?.level || "idle",
+      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+      getIsExtracting: () => conversationWorkspace.isExtracting,
+      getLastExtractionStatusLevel: () => conversationWorkspace.lastExtractionStatus?.level || "idle",
       getLastProcessedAssistantFloor,
       getSettings,
       isAbortError,
       markHistoryDirty,
       normalizeGraphRuntimeState,
       onManualExtract,
+      persistDetachedRecoveryGraph,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
       retryPendingGraphPersist,
       rollbackGraphForReroll,
       saveGraphToChat,
       setCurrentGraph: (graph) => {
-        currentGraph = graph;
+        conversationWorkspace.graph = graph;
       },
       setIsExtracting: (value) => {
-        isExtracting = value;
+        conversationWorkspace.isExtracting = value;
       },
       setLastExtractionStatus,
       setRuntimeStatus,
@@ -17511,21 +16866,27 @@ async function onReroll({ fromFloor } = {}) {
       console,
       buildRecoveryResult,
       clearHistoryDirty,
+      cloneGraphSnapshot,
       ensureGraphMutationReady,
       getAssistantTurns,
       getContext,
-      getCurrentGraph: () => currentGraph,
+      getCurrentGraph: () => conversationWorkspace.graph,
       getGraphMutationBlockReason,
-      getGraphPersistenceState: () => graphPersistenceState,
-      getIsExtracting: () => isExtracting,
-      getLastExtractionStatusLevel: () => lastExtractionStatus?.level || "idle",
+      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
+      getIsExtracting: () => conversationWorkspace.isExtracting,
+      getLastExtractionStatusLevel: () => conversationWorkspace.lastExtractionStatus?.level || "idle",
       getLastProcessedAssistantFloor,
       isAbortError,
       markHistoryDirty,
+      normalizeGraphRuntimeState,
       onManualExtract,
+      persistDetachedRecoveryGraph,
       refreshPanelLiveState,
       rollbackGraphForReroll,
       saveGraphToChat,
+      setCurrentGraph: (graph) => {
+        conversationWorkspace.graph = graph;
+      },
       setLastExtractionStatus,
       setRuntimeStatus,
       toastr,
@@ -17540,7 +16901,7 @@ async function onManualSleep() {
     buildMaintenanceSummary,
     cloneGraphSnapshot,
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getSettings,
     refreshPanelLiveState,
     recordMaintenanceAction,
@@ -17556,7 +16917,7 @@ async function onManualSynopsis() {
     ensureGraphMutationReady,
     generateSmallSummary,
     getCurrentChatSeq,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getContext,
     getSettings,
     refreshPanelLiveState,
@@ -17569,7 +16930,7 @@ async function onManualSynopsis() {
 async function onManualSummaryRollup() {
   return await onManualSummaryRollupController({
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getSettings,
     refreshPanelLiveState,
     rollupSummaryFrontier,
@@ -17592,7 +16953,7 @@ async function onRebuildSummaryState(options = {}) {
               ignoreRestoreLock: true,
             }),
           getContext,
-          getCurrentGraph: () => currentGraph,
+          getCurrentGraph: () => conversationWorkspace.graph,
           getSettings,
           rebuildHierarchicalSummaryState,
           refreshPanelLiveState,
@@ -17609,7 +16970,7 @@ async function onClearSummaryState() {
   return await onClearSummaryStateController({
     confirm: (msg) => (typeof globalThis.confirm === "function" ? globalThis.confirm(msg) : false),
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     refreshPanelLiveState,
     resetHierarchicalSummaryState,
     saveGraphToChat,
@@ -17624,9 +16985,9 @@ async function onManualEvolve() {
     cloneGraphSnapshot,
     consolidateMemories,
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     getEmbeddingConfig,
-    getLastExtractedItems: () => lastExtractedItems,
+    getLastExtractedItems: () => conversationWorkspace.lastExtractedItems,
     getSettings,
     refreshPanelLiveState,
     recordMaintenanceAction,
@@ -17640,7 +17001,7 @@ async function onManualEvolve() {
 async function onUndoLastMaintenance() {
   return await onUndoLastMaintenanceController({
     ensureGraphMutationReady,
-    getCurrentGraph: () => currentGraph,
+    getCurrentGraph: () => conversationWorkspace.graph,
     markVectorStateDirty,
     refreshPanelLiveState,
     saveGraphToChat,
@@ -17658,7 +17019,7 @@ async function onRebuildVectorIndex(range = null) {
       ensureGraphMutationReady,
       finishStageAbortController,
       getEmbeddingConfig,
-      getGraphPersistenceState: () => graphPersistenceState,
+      getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
       getGraphMutationBlockReason,
       isAuthorityVectorConfig,
       isBackendVectorConfig,
@@ -17748,13 +17109,13 @@ const _cleanupRuntime = () => ({
   ensureGraphMutationReady,
   exportDiagnosticsBundle: async (options = {}) => await exportAuthorityDiagnosticsBundle(options),
   getCurrentChatId,
-  getCurrentGraph: () => currentGraph,
+  getCurrentGraph: () => conversationWorkspace.graph,
   setLastVectorStatus,
   markVectorStateDirty: (reason) => {
-    if (currentGraph?.vectorIndexState) {
-      currentGraph.vectorIndexState.dirty = true;
-      currentGraph.vectorIndexState.dirtyReason = reason;
-      currentGraph.vectorIndexState.lastWarning = reason;
+    if (conversationWorkspace.graph?.vectorIndexState) {
+      conversationWorkspace.graph.vectorIndexState.dirty = true;
+      conversationWorkspace.graph.vectorIndexState.dirtyReason = reason;
+      conversationWorkspace.graph.vectorIndexState.lastWarning = reason;
     }
   },
   normalizeGraphRuntimeState,
@@ -17762,32 +17123,32 @@ const _cleanupRuntime = () => ({
   removeNode: (graph, nodeId) => removeNode(graph, nodeId),
   saveGraphToChat,
   syncGraphLoadFromLiveContext,
-  setCurrentGraph: (graph) => { currentGraph = graph; },
+  setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
   setRuntimeStatus,
   setExtractionCount: (count) => {
-    if (currentGraph?.historyState) {
-      currentGraph.historyState.extractionCount = count;
+    if (conversationWorkspace.graph?.historyState) {
+      conversationWorkspace.graph.historyState.extractionCount = count;
     }
   },
-  setLastExtractedItems: () => { lastExtractedItems = []; },
+  setLastExtractedItems: () => { conversationWorkspace.lastExtractedItems = []; },
   buildBmeDbName,
   buildRestoreSafetyDbName: (chatId) =>
     buildBmeDbName(buildRestoreSafetyChatId(chatId)),
   buildRestoreSafetyChatId,
   closeBmeDb: async (chatId) => {
     const normalizedChatId = normalizeChatIdCandidate(chatId);
-    if (!normalizedChatId || !bmeChatManager) return;
+    if (!normalizedChatId || !conversationRepository) return;
     if (
-      typeof bmeChatManager.getCurrentChatId === "function" &&
-      bmeChatManager.getCurrentChatId() === normalizedChatId &&
-      typeof bmeChatManager.closeCurrent === "function"
+      typeof conversationRepository.getCurrentChatId === "function" &&
+      conversationRepository.getCurrentChatId() === normalizedChatId &&
+      typeof conversationRepository.closeCurrent === "function"
     ) {
-      await bmeChatManager.closeCurrent();
+      await conversationRepository.closeCurrent();
     }
   },
   closeAllBmeDbs: async () => {
-    if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
-      await bmeChatManager.closeAll();
+    if (conversationRepository && typeof conversationRepository.closeAll === "function") {
+      await conversationRepository.closeAll();
     }
   },
   clearCachedIndexedDbSnapshot,
@@ -17803,7 +17164,7 @@ const _cleanupRuntime = () => ({
     fetch: globalThis.fetch?.bind(globalThis),
     getRequestHeaders: typeof getRequestHeaders === "function" ? getRequestHeaders : undefined,
   }),
-  getGraphPersistenceState: () => graphPersistenceState,
+  getGraphPersistenceState: () => conversationWorkspace.graphPersistenceState,
   getSettings,
   toastr,
 });
@@ -18063,7 +17424,7 @@ async function onRetryPendingPersist() {
     reopenCurrentDb: true,
     source: "panel-manual-persist-retry",
   });
-  const hadPending = graphPersistenceState.pendingPersist === true;
+  const hadPending = conversationWorkspace.graphPersistenceState.pendingPersist === true;
   const result = await retryPendingGraphPersist({
     reason: "panel-manual-persist-retry",
     scheduleRetryOnFailure: false,
@@ -18099,14 +17460,14 @@ async function onProbeGraphLoad() {
   });
   refreshPanelLiveState();
 
-  if (graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING) {
+  if (conversationWorkspace.graphPersistenceState.loadState === GRAPH_LOAD_STATES.LOADING) {
     toastr.info("已重新探测当前聊天图谱，正在等待本地持久化加载");
     return { handledToast: true, result };
   }
 
-  if (graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED) {
+  if (conversationWorkspace.graphPersistenceState.loadState === GRAPH_LOAD_STATES.BLOCKED) {
     toastr.warning(
-      `当前图谱仍处于保护模式: ${graphPersistenceState.reason || "metadata not ready"}`,
+      `当前图谱仍处于保护模式: ${conversationWorkspace.graphPersistenceState.reason || "metadata not ready"}`,
     );
     return { handledToast: true, result };
   }
@@ -18133,7 +17494,7 @@ async function onRepairLukerSidecar() {
   }
 
   if (
-    (!currentGraph || normalizeChatIdCandidate(getGraphOwnedChatId(currentGraph)) !== normalizeChatIdCandidate(chatId)) &&
+    (!conversationWorkspace.graph || normalizeChatIdCandidate(getGraphOwnedChatId(conversationWorkspace.graph)) !== normalizeChatIdCandidate(chatId)) &&
     !(await loadGraphFromLukerSidecarV2(chatId, {
       source: "panel-manual-luker-sidecar-repair",
       allowOverride: true,
@@ -18145,16 +17506,16 @@ async function onRepairLukerSidecar() {
   }
 
   const result = await compactLukerGraphSidecarV2(context, {
-    graph: cloneGraphForPersistence(currentGraph, chatId),
+    graph: cloneGraphForPersistence(conversationWorkspace.graph, chatId),
     chatId,
     revision: Math.max(
-      Number(graphPersistenceState.lukerManifestRevision || 0),
-      Number(getGraphPersistedRevision(currentGraph) || 0),
-      Number(graphPersistenceState.revision || 0),
+      Number(conversationWorkspace.graphPersistenceState.lukerManifestRevision || 0),
+      Number(getGraphPersistedRevision(conversationWorkspace.graph) || 0),
+      Number(conversationWorkspace.graphPersistenceState.revision || 0),
     ),
     reason: "panel-manual-luker-sidecar-repair",
     integrity:
-      getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+      getChatMetadataIntegrity(context) || conversationWorkspace.graphPersistenceState.metadataIntegrity,
     chatStateTarget,
   });
   refreshPanelLiveState();
@@ -18175,13 +17536,13 @@ async function onCompactLukerSidecar() {
     return { handledToast: true, reason: "not-luker" };
   }
   const chatId = getCurrentChatId(context);
-  if (!chatId || !currentGraph) {
+  if (!chatId || !conversationWorkspace.graph) {
     toastr.warning("当前没有可压实的图谱");
     return { handledToast: true, reason: "missing-graph" };
   }
 
   if (
-    normalizeChatIdCandidate(getGraphOwnedChatId(currentGraph)) !==
+    normalizeChatIdCandidate(getGraphOwnedChatId(conversationWorkspace.graph)) !==
       normalizeChatIdCandidate(chatId) &&
     !(await loadGraphFromLukerSidecarV2(chatId, {
       source: "panel-manual-luker-sidecar-compact",
@@ -18194,16 +17555,16 @@ async function onCompactLukerSidecar() {
   }
 
   const result = await compactLukerGraphSidecarV2(context, {
-    graph: cloneGraphForPersistence(currentGraph, chatId),
+    graph: cloneGraphForPersistence(conversationWorkspace.graph, chatId),
     chatId,
     revision: Math.max(
-      Number(graphPersistenceState.lukerManifestRevision || 0),
-      Number(getGraphPersistedRevision(currentGraph) || 0),
-      Number(graphPersistenceState.revision || 0),
+      Number(conversationWorkspace.graphPersistenceState.lukerManifestRevision || 0),
+      Number(getGraphPersistedRevision(conversationWorkspace.graph) || 0),
+      Number(conversationWorkspace.graphPersistenceState.revision || 0),
     ),
     reason: "panel-manual-luker-sidecar-compact",
     integrity:
-      getChatMetadataIntegrity(context) || graphPersistenceState.metadataIntegrity,
+      getChatMetadataIntegrity(context) || conversationWorkspace.graphPersistenceState.metadataIntegrity,
     chatStateTarget,
   });
   refreshPanelLiveState();
@@ -18313,18 +17674,18 @@ async function onCompactLukerSidecar() {
       getRestoreSafetyStatus: onGetRestoreSafetySnapshotStatus,
     },
     console,
-    document,
-    getGraph: () => currentGraph,
+    document: getHostDocument(),
+    getGraph: () => conversationWorkspace.graph,
     getGraphPersistenceState: () => getGraphPersistenceLiveState(),
     getHideStateSnapshot: () => getMessageHideStateSnapshotForPanel(),
     getLastBatchStatus: () =>
-      currentGraph?.historyState?.lastBatchStatus || null,
-    getLastExtract: () => lastExtractedItems,
-    getLastExtractionStatus: () => lastExtractionStatus,
-    getLastInjection: () => lastInjectionContent,
-    getLastRecall: () => lastRecalledItems,
-    getLastRecallStatus: () => lastRecallStatus,
-    getLastVectorStatus: () => lastVectorStatus,
+      conversationWorkspace.graph?.historyState?.lastBatchStatus || null,
+    getLastExtract: () => conversationWorkspace.lastExtractedItems,
+    getLastExtractionStatus: () => conversationWorkspace.lastExtractionStatus,
+    getLastInjection: () => conversationWorkspace.lastInjectionContent,
+    getLastRecall: () => conversationWorkspace.lastRecalledItems,
+    getLastRecallStatus: () => conversationWorkspace.lastRecallStatus,
+    getLastVectorStatus: () => conversationWorkspace.lastVectorStatus,
     getPanelModule: () => _panelModule,
     getRuntimeDebugSnapshot: (options = {}) =>
       getPanelRuntimeDebugSnapshot(options),
@@ -18343,7 +17704,7 @@ async function onCompactLukerSidecar() {
   });
 
   try {
-    ensureBmeChatManager();
+    ensureConversationRepository();
     scheduleBmeIndexedDbWarmup("init");
     initializeHostCapabilityBridge();
     installSendIntentHooks();
@@ -18386,7 +17747,7 @@ async function onCompactLukerSidecar() {
 
     // 加载当前聊天的图谱
     scheduleBmeIndexedDbTask(async () => {
-      const syncResult = await syncBmeChatManagerWithCurrentChat("initial-load");
+      const syncResult = await syncConversationRepositoryWithCurrentChat("initial-load");
       if (!syncResult?.chatId) {
         syncGraphLoadFromLiveContext({
           source: "initial-load:no-chat",
@@ -18410,13 +17771,13 @@ async function onCompactLukerSidecar() {
     const { initEnaPlanner } = await import("./ena-planner/ena-planner.js");
     enaPlannerApi = await initEnaPlanner({
       captureConversationLease: (...args) =>
-        conversationSession.captureLease(...args),
+        conversationWorkspace.captureLease(...args),
       getContext,
       getExtensionPath: () => `scripts/extensions/third-party/${MODULE_NAME}`,
       getPlannerRecallTimeoutMs,
       getSettings,
       isConversationLeaseCurrent: (...args) =>
-        conversationSession.isLeaseCurrent(...args),
+        conversationWorkspace.isLeaseCurrent(...args),
       isTrivialUserInput,
       preparePlannerTurnHandoff,
       runPlannerRecallForEna,

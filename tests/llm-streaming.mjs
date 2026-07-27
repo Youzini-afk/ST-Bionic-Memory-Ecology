@@ -338,6 +338,68 @@ async function testDedicatedStreamingAbortDoesNotLeaveActiveState() {
   }
 }
 
+async function testDedicatedStreamingIdleTimeoutCancelsReader() {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  let fetchCount = 0;
+  let cancelCount = 0;
+
+  globalThis.setTimeout = (handler, delay, ...args) =>
+    originalSetTimeout(handler, Number(delay) === 30000 ? 0 : delay, ...args);
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: {
+        getReader() {
+          return {
+            read() {
+              return new Promise(() => {});
+            },
+            cancel() {
+              cancelCount += 1;
+              return Promise.resolve();
+            },
+            releaseLock() {},
+          };
+        },
+      },
+      text: async () => "",
+    };
+  };
+
+  try {
+    await withStreamingSettings({ stream: true }, async () => {
+      const result = await llm.callLLMForJSON({
+        systemPrompt: "system",
+        userPrompt: "user",
+        maxRetries: 0,
+        taskType: "extract_objective",
+        requestSource: "test:stream-idle-timeout",
+        returnFailureDetails: true,
+      });
+
+      assert.equal(result.ok, false);
+      assert.equal(result.errorType, "timeout");
+      assert.match(result.failureReason, /超时/);
+      assert.equal(fetchCount, 1);
+      assert.equal(cancelCount, 1);
+
+      const snapshot = getSnapshot("extract_objective");
+      assert.ok(snapshot);
+      assert.equal(snapshot.streamActive ?? false, false);
+      assert.equal(snapshot.streamCompleted ?? false, false);
+      assert.equal(snapshot.streamFallback ?? false, false);
+      assert.equal(snapshot.streamFinishReason ?? "timeout", "timeout");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+}
+
 async function testJsonRetryKeepsProfileCompletionTokens() {
   const originalFetch = globalThis.fetch;
   let fetchCount = 0;
@@ -490,6 +552,7 @@ async function testAnthropicRouteUsesReverseProxyAndDisablesStreaming() {
 await testDedicatedStreamingSuccess();
 await testDedicatedStreamingFallsBackToNonStream();
 await testDedicatedStreamingAbortDoesNotLeaveActiveState();
+await testDedicatedStreamingIdleTimeoutCancelsReader();
 await testJsonRetryKeepsProfileCompletionTokens();
 await testAnthropicRouteUsesReverseProxyAndDisablesStreaming();
 

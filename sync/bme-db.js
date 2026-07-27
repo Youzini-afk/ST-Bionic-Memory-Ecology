@@ -3669,6 +3669,41 @@ export class BmeDatabase {
     return Object.fromEntries(entries);
   }
 
+  async patchMetaIfRevision(
+    expectedRevision,
+    matchingRecord = {},
+    mismatchingRecord = {},
+  ) {
+    const db = await this.open();
+    const expected = normalizeRevision(expectedRevision);
+    const nowMs = Date.now();
+    let currentRevision = 0;
+    let matched = false;
+    let appliedEntries = [];
+
+    await db.transaction("rw", db.table("meta"), async () => {
+      currentRevision = normalizeRevision(
+        (await db.table("meta").get("revision"))?.value,
+      );
+      matched = currentRevision === expected;
+      const selectedRecord = matched ? matchingRecord : mismatchingRecord;
+      appliedEntries = Object.entries(
+        selectedRecord && typeof selectedRecord === "object" && !Array.isArray(selectedRecord)
+          ? selectedRecord
+          : {},
+      ).filter(([key]) => normalizeRecordId(key));
+      for (const [key, value] of appliedEntries) {
+        await this._setMetaInTx(db, key, value, nowMs);
+      }
+    });
+
+    return {
+      matched,
+      currentRevision,
+      applied: Object.fromEntries(appliedEntries),
+    };
+  }
+
   async getRevision() {
     const revision = await this.getMeta("revision", 0);
     return normalizeRevision(revision);
@@ -4349,6 +4384,14 @@ export class BmeDatabase {
     const normalizedSnapshot = sanitizeSnapshot(snapshot);
     const mode = normalizeMode(options.mode);
     const shouldMarkSyncDirty = options.markSyncDirty !== false;
+    const hasExpectedRevision = Number.isFinite(Number(options.expectedRevision));
+    const expectedRevision = normalizeRevision(options.expectedRevision);
+    const requireSyncClean = options.requireSyncClean === true;
+    const preserveMetaKeys = [...new Set(
+      (Array.isArray(options.preserveMetaKeys) ? options.preserveMetaKeys : [])
+        .map((key) => normalizeRecordId(key))
+        .filter(Boolean),
+    )];
     const nowMs = Date.now();
 
     let nextRevision = 0;
@@ -4358,6 +4401,7 @@ export class BmeDatabase {
       tombstones: 0,
     };
     let revisionFloor = 0;
+    let preservedMeta = {};
 
     await db.transaction(
       "rw",
@@ -4366,9 +4410,35 @@ export class BmeDatabase {
       db.table("tombstones"),
       db.table("meta"),
       async () => {
-        revisionFloor = normalizeRevision(
-          (await db.table("meta").get("revision"))?.value,
-        );
+        const [revisionRow, syncDirtyRow] = await Promise.all([
+          db.table("meta").get("revision"),
+          requireSyncClean ? db.table("meta").get("syncDirty") : null,
+        ]);
+        revisionFloor = normalizeRevision(revisionRow?.value);
+        if (
+          (hasExpectedRevision && revisionFloor !== expectedRevision) ||
+          (requireSyncClean && Boolean(syncDirtyRow?.value))
+        ) {
+          throw Object.assign(
+            new Error("local snapshot changed before remote import"),
+            {
+              code: "LOCAL_SNAPSHOT_CHANGED",
+              expectedRevision,
+              currentRevision: revisionFloor,
+            },
+          );
+        }
+
+        if (mode === "replace" && preserveMetaKeys.length > 0) {
+          const preservedRows = await Promise.all(
+            preserveMetaKeys.map((key) => db.table("meta").get(key)),
+          );
+          preservedMeta = Object.fromEntries(
+            preservedRows
+              .filter((row) => row && Object.prototype.hasOwnProperty.call(row, "value"))
+              .map((row) => [row.key, row.value]),
+          );
+        }
 
         if (mode === "replace") {
           await Promise.all([
@@ -4408,6 +4478,7 @@ export class BmeDatabase {
             : {}),
           ...normalizedSnapshot.meta,
           ...(normalizedSnapshot.state || {}),
+          ...preservedMeta,
           chatId: this.chatId,
           schemaVersion: BME_DB_SCHEMA_VERSION,
         };

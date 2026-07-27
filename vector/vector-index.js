@@ -1,6 +1,6 @@
 // ST-BME: 向量模式、后端索引与直连兜底
 
-import { getRequestHeaders } from "../../../../../script.js";
+import { getRequestHeaders } from "../host/st-script.js";
 import { embedBatch, embedText, searchSimilar } from "./embedding.js";
 import { getActiveNodes } from "../graph/graph.js";
 import { describeMemoryScope, normalizeMemoryScope } from "../graph/memory-scope.js";
@@ -863,12 +863,29 @@ export async function syncGraphVectorIndex(
   const collectionId = buildVectorCollectionId(
     chatId || graph?.historyState?.chatId,
   );
+  const requestedRangeIsConcrete =
+    range && Number.isFinite(range.start) && Number.isFinite(range.end);
+  const expectedSource =
+    syncMode === "authority"
+      ? config.source || AUTHORITY_VECTOR_SOURCE
+      : syncMode === "backend"
+        ? config.source
+        : "direct";
+  const rangeNeedsFullRebuild =
+    requestedRangeIsConcrete &&
+    (purge ||
+      state.dirty ||
+      state.mode !== syncMode ||
+      state.modelScope !== getVectorModelScope(config) ||
+      state.collectionId !== collectionId ||
+      (syncMode !== "direct" && state.source !== expectedSource));
+  const effectiveRange = rangeNeedsFullRebuild ? null : range;
   const desiredBuildDiagnostics = {};
   const desiredBuildStartedAt = nowMs();
   const desiredEntries = buildDesiredVectorEntries(
     graph,
     config,
-    range,
+    effectiveRange,
     desiredBuildDiagnostics,
   );
   const desiredBuildMs = nowMs() - desiredBuildStartedAt;
@@ -892,7 +909,9 @@ export async function syncGraphVectorIndex(
   let deletedNodeCount = 0;
   let embeddingsRequested = 0;
   const hasConcreteRange =
-    range && Number.isFinite(range.start) && Number.isFinite(range.end);
+    effectiveRange &&
+    Number.isFinite(effectiveRange.start) &&
+    Number.isFinite(effectiveRange.end);
   const rangedNodeIds = new Set(desiredEntries.map((entry) => entry.nodeId));
 
   if (isAuthorityVectorConfig(config)) {

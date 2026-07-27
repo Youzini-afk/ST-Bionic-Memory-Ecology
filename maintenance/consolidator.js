@@ -16,8 +16,6 @@ import {
   isStoryTimeCompatible,
 } from "../graph/story-timeline.js";
 import {
-  buildTaskExecutionDebugContext,
-  buildTaskLlmPayload,
   buildTaskPrompt,
 } from "../prompting/prompt-builder.js";
 import { getSTContextForPrompt } from "../host/st-context.js";
@@ -30,42 +28,14 @@ import {
   validateVectorConfig,
 } from "../vector/vector-index.js";
 import { resolveConcurrencyConfig, runLimited } from "../runtime/concurrency.js";
-
-function createAbortError(message = "操作已终止") {
-  const error = new Error(message);
-  error.name = "AbortError";
-  return error;
-}
-
-function createTaskLlmDebugContext(promptBuild, regexInput) {
-  return typeof buildTaskExecutionDebugContext === "function"
-    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
-    : null;
-}
-
-function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
-  if (typeof buildTaskLlmPayload === "function") {
-    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
-  }
-
-  return {
-    systemPrompt: String(promptBuild?.systemPrompt || ""),
-    userPrompt: String(fallbackUserPrompt || ""),
-    promptMessages: [],
-    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
-      ? promptBuild.privateTaskMessages
-      : [],
-  };
-}
+import {
+  createTaskLlmDebugContext,
+  resolveTaskPromptPayload,
+  throwIfAborted,
+} from "./task-llm.js";
 
 function isAbortError(error) {
   return error?.name === "AbortError";
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) {
-    throw signal.reason instanceof Error ? signal.reason : createAbortError();
-  }
 }
 
 /**

@@ -62,6 +62,7 @@ const OPFS_MANIFEST_META_KEYS = new Set([
   "restoreSafetySnapshotExists",
   "restoreSafetySnapshotCreatedAt",
   "restoreSafetySnapshotChatId",
+  "remoteSyncCleanupPendingV1",
 ]);
 const OPFS_AUX_META_KEYS = new Set([
   BME_RUNTIME_BATCH_JOURNAL_META_KEY,
@@ -2280,18 +2281,34 @@ export class OpfsGraphStore {
     };
   }
 
-  async patchMeta(record) {
+  async patchMeta(record, options = {}) {
     if (!record || typeof record !== "object" || Array.isArray(record)) {
       return {};
     }
-    const entries = Object.entries(record)
+    const matchingEntries = Object.entries(record)
       .map(([rawKey, value]) => [normalizeRecordId(rawKey), toPlainData(value, value)])
       .filter(([key]) => Boolean(key));
-    if (!entries.length) {
+    const mismatchingEntries = Object.entries(
+      options.mismatchingRecord &&
+        typeof options.mismatchingRecord === "object" &&
+        !Array.isArray(options.mismatchingRecord)
+        ? options.mismatchingRecord
+        : {},
+    )
+      .map(([rawKey, value]) => [normalizeRecordId(rawKey), toPlainData(value, value)])
+      .filter(([key]) => Boolean(key));
+    const hasExpectedRevision = Number.isFinite(Number(options.expectedRevision));
+    if (!matchingEntries.length && (!hasExpectedRevision || !mismatchingEntries.length)) {
       return {};
     }
     return await this._runSerializedWrite("patchMeta", async () => {
       const manifest = await this._ensureV2Ready({ awaitWrites: false });
+      const currentRevision = normalizeRevision(
+        manifest?.headRevision || manifest?.meta?.revision,
+      );
+      const matched = !hasExpectedRevision ||
+        currentRevision === normalizeRevision(options.expectedRevision);
+      const entries = matched ? matchingEntries : mismatchingEntries;
       const manifestPatch = {};
       const runtimePatch = {};
       for (const [key, value] of entries) {
@@ -2353,7 +2370,21 @@ export class OpfsGraphStore {
           this._snapshotCache.state.extractionCount;
       }
 
-      return Object.fromEntries(entries);
+      const applied = Object.fromEntries(entries);
+      return hasExpectedRevision
+        ? { matched, currentRevision, applied }
+        : applied;
+    });
+  }
+
+  async patchMetaIfRevision(
+    expectedRevision,
+    matchingRecord = {},
+    mismatchingRecord = {},
+  ) {
+    return await this.patchMeta(matchingRecord, {
+      expectedRevision,
+      mismatchingRecord,
     });
   }
 
@@ -2854,10 +2885,38 @@ export class OpfsGraphStore {
 
   async importSnapshot(snapshot, options = {}) {
     return await this._runSerializedWrite("importSnapshot", async () => {
-      await this._ensureV2Ready({ awaitWrites: false });
+      const currentManifest = await this._ensureV2Ready({ awaitWrites: false });
       const normalizedSnapshot = sanitizeSnapshot(snapshot);
       const mode = normalizeMode(options.mode);
       const shouldMarkSyncDirty = options.markSyncDirty !== false;
+      const hasExpectedRevision = Number.isFinite(Number(options.expectedRevision));
+      const expectedRevision = normalizeRevision(options.expectedRevision);
+      const currentRevision = normalizeRevision(
+        currentManifest?.headRevision || currentManifest?.meta?.revision,
+      );
+      if (
+        (hasExpectedRevision && currentRevision !== expectedRevision) ||
+        (options.requireSyncClean === true && Boolean(currentManifest?.meta?.syncDirty))
+      ) {
+        throw Object.assign(
+          new Error("local snapshot changed before remote import"),
+          {
+            code: "LOCAL_SNAPSHOT_CHANGED",
+            expectedRevision,
+            currentRevision,
+          },
+        );
+      }
+      const preserveMetaKeys = [...new Set(
+        (Array.isArray(options.preserveMetaKeys) ? options.preserveMetaKeys : [])
+          .map((key) => normalizeRecordId(key))
+          .filter(Boolean),
+      )];
+      const preservedMeta = Object.fromEntries(
+        preserveMetaKeys
+          .filter((key) => Object.prototype.hasOwnProperty.call(currentManifest?.meta || {}, key))
+          .map((key) => [key, currentManifest.meta[key]]),
+      );
       const nowMs = Date.now();
       const currentSnapshot =
         mode === "replace" ? null : await this._loadSnapshot({ awaitWrites: false });
@@ -2886,7 +2945,6 @@ export class OpfsGraphStore {
                 normalizedSnapshot.tombstones,
               ),
             };
-      const currentRevision = normalizeRevision(currentSnapshot?.meta?.revision);
       const incomingRevision = normalizeRevision(normalizedSnapshot.meta?.revision);
       const explicitRevision = normalizeRevision(options.revision);
       const requestedRevision = Number.isFinite(Number(options.revision))
@@ -2897,6 +2955,7 @@ export class OpfsGraphStore {
       const nextRevision = Math.max(currentRevision + 1, requestedRevision);
       nextSnapshot.meta = {
         ...nextSnapshot.meta,
+        ...preservedMeta,
         chatId: this.chatId,
         revision: nextRevision,
         lastModified: nowMs,

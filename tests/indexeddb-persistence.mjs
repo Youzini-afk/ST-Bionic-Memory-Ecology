@@ -13,11 +13,12 @@ import {
   buildSnapshotFromGraph,
   ensureDexieLoaded,
 } from "../sync/bme-db.js";
-import { BmeChatManager } from "../sync/bme-chat-manager.js";
+import { ConversationRepository } from "../sync/conversation-repository.js";
 import { createEmptyGraph } from "../graph/graph.js";
 import { getGraphPersistDirtyStateSnapshot } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-persistence]";
+const LOCAL_CLEANUP_META_KEY = "remoteSyncCleanupPendingV1";
 
 const chatIdsForCleanup = new Set([
   "chat-a",
@@ -27,6 +28,7 @@ const chatIdsForCleanup = new Set([
   "chat-manager-selector",
   "chat-export-without-tombstones",
   "chat-replace-reset",
+  "chat-import-cas",
   "chat-commit-delta-cas",
 ]);
 
@@ -356,6 +358,85 @@ async function testReplaceImportResetsStaleMeta() {
   await db.close();
 }
 
+async function testReplaceImportRejectsStaleLocalRevision() {
+  const chatId = "chat-import-cas";
+  const db = new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
+  await db.open();
+  await db.bulkUpsertNodes([
+    { id: "local-node", type: "event", updatedAt: Date.now() },
+  ]);
+  const currentRevision = await db.getRevision();
+  const remoteSnapshot = {
+    meta: { chatId, revision: currentRevision + 1 },
+    state: { lastProcessedFloor: -1, extractionCount: 0 },
+    nodes: [{ id: "remote-node", type: "event", updatedAt: Date.now() }],
+    edges: [],
+    tombstones: [],
+  };
+
+  await assert.rejects(
+    db.importSnapshot(remoteSnapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      expectedRevision: currentRevision - 1,
+    }),
+    (error) => error?.code === "LOCAL_SNAPSHOT_CHANGED",
+  );
+  assert.deepEqual((await db.listNodes()).map((node) => node.id), ["local-node"]);
+
+  await db.setMeta("syncDirty", true);
+  await assert.rejects(
+    db.importSnapshot(remoteSnapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      expectedRevision: currentRevision,
+      requireSyncClean: true,
+    }),
+    (error) => error?.code === "LOCAL_SNAPSHOT_CHANGED",
+  );
+  assert.deepEqual((await db.listNodes()).map((node) => node.id), ["local-node"]);
+
+  const matchedAck = await db.patchMetaIfRevision(
+    currentRevision,
+    { syncDirty: false, syncDirtyReason: "" },
+    { syncDirty: true, syncDirtyReason: "stale" },
+  );
+  assert.equal(matchedAck.matched, true);
+
+  await db.bulkUpsertNodes([
+    { id: "newer-local-node", type: "event", updatedAt: Date.now() },
+  ]);
+  const mismatchedAck = await db.patchMetaIfRevision(
+    currentRevision,
+    { syncDirty: false, syncDirtyReason: "" },
+    { syncDirty: true, syncDirtyReason: "newer-local-revision" },
+  );
+  assert.equal(mismatchedAck.matched, false);
+  assert.equal(await db.getMeta("syncDirty", false), true);
+  assert.equal(
+    await db.getMeta("syncDirtyReason", ""),
+    "newer-local-revision",
+  );
+
+  const cleanupLedger = [{ filename: "known-staged-chunk", backend: "user-files" }];
+  await db.setMeta(LOCAL_CLEANUP_META_KEY, cleanupLedger);
+  await db.setMeta("syncDirty", false);
+  const revisionBeforeImport = await db.getRevision();
+  await db.importSnapshot(remoteSnapshot, {
+    mode: "replace",
+    preserveRevision: true,
+    expectedRevision: revisionBeforeImport,
+    preserveMetaKeys: [LOCAL_CLEANUP_META_KEY],
+    markSyncDirty: false,
+  });
+  assert.deepEqual(
+    await db.getMeta(LOCAL_CLEANUP_META_KEY, []),
+    cleanupLedger,
+    "replace import must preserve local cleanup recovery state in the same transaction",
+  );
+  await db.close();
+}
+
 async function testRevisionMonotonicity() {
   const db = new BmeDatabase("chat-a", { dexieClass: globalThis.Dexie });
   await db.open();
@@ -545,8 +626,10 @@ async function testChatIsolationAndManager() {
   await dbA.close();
   await dbB.close();
 
-  const manager = new BmeChatManager({
-    databaseFactory: (chatId) => {
+  const manager = new ConversationRepository({
+    resolveBinding: () => ({ key: "indexeddb:indexeddb" }),
+    bindingKey: (presentation) => presentation.key,
+    storeFactory: (chatId) => {
       chatIdsForCleanup.add(chatId);
       return new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
     },
@@ -579,7 +662,7 @@ async function testChatIsolationAndManager() {
   const managerDbBNodes = await managerDbB.listNodes({ reverse: false });
   assert.ok(managerDbBNodes.some((item) => item.id === "manager-node-b"));
 
-  const reopenedA = await manager.getCurrentDb("chat-manager-a");
+  const reopenedA = await manager.getStore("chat-manager-a");
   const reopenedANodes = await reopenedA.listNodes({ reverse: false });
   assert.ok(reopenedANodes.some((item) => item.id === "manager-node-a"));
   assert.ok(!reopenedANodes.some((item) => item.id === "manager-node-b"));
@@ -588,13 +671,14 @@ async function testChatIsolationAndManager() {
   assert.equal(manager.getCurrentChatId(), "");
 }
 
-async function testManagerRecreatesDbWhenSelectorKeyChanges() {
+async function testRepositoryRebindIsExplicit() {
   let selectorKey = "indexeddb:indexeddb";
   let instanceCounter = 0;
   const closeLog = [];
-  const manager = new BmeChatManager({
-    selectorKeyResolver: async () => selectorKey,
-    databaseFactory: async (chatId) => {
+  const manager = new ConversationRepository({
+    resolveBinding: async () => ({ key: selectorKey }),
+    bindingKey: (presentation) => presentation.key,
+    storeFactory: async (chatId) => {
       instanceCounter += 1;
       const instanceId = instanceCounter;
       return {
@@ -614,17 +698,21 @@ async function testManagerRecreatesDbWhenSelectorKeyChanges() {
     },
   });
 
-  const dbA = await manager.getCurrentDb("chat-manager-selector");
+  const dbA = await manager.getStore("chat-manager-selector");
   assert.equal(dbA.instanceId, 1);
   assert.equal(dbA.openCount, 1);
 
-  const reopenedSameSelector = await manager.getCurrentDb("chat-manager-selector");
+  const reopenedSameSelector = await manager.getStore("chat-manager-selector");
   assert.equal(reopenedSameSelector, dbA);
-  assert.equal(dbA.openCount, 2);
+  assert.equal(dbA.openCount, 1);
   assert.deepEqual(closeLog, []);
 
   selectorKey = "opfs:opfs-shadow";
-  const dbB = await manager.getCurrentDb("chat-manager-selector");
+  const stillBoundToA = await manager.getStore("chat-manager-selector");
+  assert.equal(stillBoundToA, dbA);
+  assert.deepEqual(closeLog, []);
+
+  const dbB = await manager.rebind("chat-manager-selector");
   assert.notEqual(dbB, dbA);
   assert.equal(dbB.instanceId, 2);
   assert.equal(dbB.openCount, 1);
@@ -935,11 +1023,12 @@ async function main() {
   await testSnapshotExportWithoutTombstones();
   await testSnapshotProbeExport();
   await testReplaceImportResetsStaleMeta();
+  await testReplaceImportRejectsStaleLocalRevision();
   await testRevisionMonotonicity();
   await testCommitDeltaRejectsStaleBaseRevision();
   await testTombstonePrune();
   await testChatIsolationAndManager();
-  await testManagerRecreatesDbWhenSelectorKeyChanges();
+  await testRepositoryRebindIsExplicit();
   await testGraphSnapshotConverters();
 
   await cleanupDatabases();

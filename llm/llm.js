@@ -1,9 +1,9 @@
 // ST-BME: LLM 调用封装
 // 包装 ST 的 sendOpenAIRequest，提供结构化 JSON 输出和重试机制
 
-import { getRequestHeaders } from "../../../../../script.js";
-import { extension_settings } from "../../../../extensions.js";
-import { chat_completion_sources, sendOpenAIRequest } from "../../../../openai.js";
+import { getRequestHeaders } from "../host/st-script.js";
+import { extension_settings } from "../host/st-extensions.js";
+import { chat_completion_sources, sendOpenAIRequest } from "../host/st-openai.js";
 import { debugLog, debugWarn } from "../runtime/debug-logging.js";
 import { resolveTaskGenerationOptions } from "../runtime/generation-options.js";
 import {
@@ -1639,6 +1639,29 @@ function isAbortError(error) {
   return error?.name === "AbortError";
 }
 
+async function readStreamChunk(reader, signal) {
+  if (!signal) return await reader.read();
+  if (signal.aborted) {
+    throw signal.reason || new DOMException("Aborted", "AbortError");
+  }
+
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () =>
+      reject(signal.reason || new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const result = await Promise.race([reader.read(), aborted]);
+    if (signal.aborted) {
+      throw signal.reason || new DOMException("Aborted", "AbortError");
+    }
+    return result;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function parseDedicatedStreamingResponse(
   response,
   { taskKey = "", streamState = null, onStreamProgress = null, idleTimeoutMs = LLM_STREAM_IDLE_TIMEOUT_MS } = {},
@@ -1664,21 +1687,21 @@ async function parseDedicatedStreamingResponse(
   streamState.finishedAt = "";
   recordTaskLlmStreamState(taskKey, streamState, {}, { force: true });
 
-  let lastChunkAt = Date.now();
   const idleAbortController = new AbortController();
   let idleTimer = null;
 
   const resetIdleTimer = () => {
-    lastChunkAt = Date.now();
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
+      const timeoutError = new DOMException(
+        `LLM 流式响应空闲超时 (${Math.round(idleTimeoutMs / 1000)}s 未收到数据)`,
+        "AbortError",
+      );
       try {
-        idleAbortController.abort(
-          new DOMException(
-            `LLM 流式响应空闲超时 (${Math.round(idleTimeoutMs / 1000)}s 未收到数据)`,
-            "AbortError",
-          ),
-        );
+        idleAbortController.abort(timeoutError);
+      } catch {}
+      try {
+        void Promise.resolve(reader.cancel?.(timeoutError)).catch(() => {});
       } catch {}
     }, idleTimeoutMs);
   };
@@ -1693,16 +1716,13 @@ async function parseDedicatedStreamingResponse(
   resetIdleTimer();
 
   try {
-    const combinedSignal = idleAbortController.signal;
     while (true) {
       let readResult;
       try {
-        readResult = await reader.read();
+        readResult = await readStreamChunk(reader, idleAbortController.signal);
       } catch (readError) {
         if (idleAbortController.signal.aborted) {
-          throw new Error(
-            `LLM 流式响应空闲超时 (${Math.round(idleTimeoutMs / 1000)}s 未收到数据)`,
-          );
+          throw idleAbortController.signal.reason || readError;
         }
         throw readError;
       }
@@ -1839,7 +1859,9 @@ async function parseDedicatedStreamingResponse(
     streamState.active = false;
     streamState.completed = false;
     streamState.finishedAt = nowIso();
-    if (isAbortError(error)) {
+    if (idleAbortController.signal.aborted) {
+      streamState.finishReason = "timeout";
+    } else if (isAbortError(error)) {
       streamState.finishReason = "aborted";
     }
     recordTaskLlmStreamState(taskKey, streamState, {}, { force: true });

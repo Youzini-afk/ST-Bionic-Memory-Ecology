@@ -1,4 +1,4 @@
-import { getRequestHeaders } from "../../../../../script.js";
+import { getRequestHeaders } from "../host/st-script.js";
 
 function debounce(fn, ms) {
   let timer = null;

@@ -16,7 +16,11 @@ import {
 } from "../runtime/runtime-state.js";
 import { createEmptyGraph } from "../graph/graph.js";
 import { normalizeKnowledgeState } from "../graph/knowledge-state.js";
-import { resolveDirtyFloorFromMutationMeta } from "../maintenance/chat-history.js";
+import {
+  applyRecoveryPlanToGraphVectorState,
+  prepareGraphVectorStateForReplay,
+  resolveDirtyFloorFromMutationMeta,
+} from "../maintenance/chat-history.js";
 
 const chat = [
   { is_user: true, mes: "你好" },
@@ -407,5 +411,25 @@ assert.equal(
   Object.keys(graph.knowledgeState?.owners || {}).length,
   0,
 );
+
+const vectorRecoveryGraph = createEmptyGraph();
+vectorRecoveryGraph.historyState.historyDirtyFrom = 4;
+vectorRecoveryGraph.vectorIndexState.hashToNodeId = { old: "node-old" };
+vectorRecoveryGraph.vectorIndexState.nodeToHash = { "node-old": "old" };
+prepareGraphVectorStateForReplay(vectorRecoveryGraph, {
+  backend: true,
+  skipBackendPurge: true,
+  resetBackendMappings: false,
+});
+applyRecoveryPlanToGraphVectorState(vectorRecoveryGraph, {
+  replayRequiredNodeIds: ["node-new"],
+  pendingRepairFromFloor: 3,
+  dirtyReason: "history-recovery-replay",
+});
+assert.equal(vectorRecoveryGraph.vectorIndexState.hashToNodeId.old, "node-old");
+assert.deepEqual(vectorRecoveryGraph.vectorIndexState.replayRequiredNodeIds, [
+  "node-new",
+]);
+assert.equal(vectorRecoveryGraph.vectorIndexState.pendingRepairFromFloor, 3);
 
 console.log("runtime-history tests passed");

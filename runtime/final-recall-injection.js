@@ -709,6 +709,41 @@ export function createFinalRecallInjection(deps = {}) {
     promptData = null,
     hookName = "",
   } = {}) {
+    const recallResult =
+      freshRecallResult ||
+      deps.getGenerationRecallTransactionResult(transaction) ||
+      null;
+    const expectedChatId = String(
+      transaction?.chatId || recallResult?.chatId || "",
+    ).trim();
+    if (
+      expectedChatId &&
+      typeof deps.isRecallChatIdCurrent === "function" &&
+      deps.isRecallChatIdCurrent(expectedChatId) === false
+    ) {
+      return {
+        source: "none",
+        isFallback: false,
+        targetUserMessageIndex: null,
+        usedText: "",
+        deliveryMode: "none",
+        applicationMode: "none",
+        rewrite: {
+          applied: false,
+          path: "",
+          field: "",
+          reason: "recall-context-changed",
+        },
+        transport: {
+          applied: false,
+          source: "none",
+          mode: "none",
+        },
+        aborted: true,
+        stale: true,
+        reason: "recall-context-changed",
+      };
+    }
     const existingFinalResolution =
       deps.readGenerationRecallTransactionFinalResolution(transaction);
     if (existingFinalResolution) {
@@ -807,10 +842,6 @@ export function createFinalRecallInjection(deps = {}) {
       return existingFinalResolution;
     }
 
-    const recallResult =
-      freshRecallResult ||
-      deps.getGenerationRecallTransactionResult(transaction) ||
-      null;
     const hookResolvedDeliveryMode =
       String(
         deps.resolveGenerationRecallDeliveryMode(

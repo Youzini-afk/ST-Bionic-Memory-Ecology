@@ -655,6 +655,24 @@ async function finalizeRerollCheckpoint(
       return { accepted: false, error };
     }
   };
+  const persistDetached = async (targetGraph, persistReason) => {
+    if (typeof runtime.persistDetachedRecoveryGraph !== "function") {
+      return {
+        accepted: false,
+        reason: "detached-recovery-persistence-unavailable",
+      };
+    }
+    try {
+      return await Promise.resolve(
+        runtime.persistDetachedRecoveryGraph(targetGraph, {
+          reason: persistReason,
+          context: runtime.getContext?.(),
+        }),
+      );
+    } catch (error) {
+      return { accepted: false, error };
+    }
+  };
 
   if (!graph || checkpointFloor == null) {
     return {
@@ -664,14 +682,14 @@ async function finalizeRerollCheckpoint(
     };
   }
 
-  const retainCheckpoint = (result) => {
+  const retainCheckpoint = (result, targetGraph = graph) => {
     runtime.markHistoryDirty(
-      graph,
+      targetGraph,
       checkpointFloor,
       "manual-reroll",
       "manual-reroll",
     );
-    graph.historyState.lastRecoveryResult = result;
+    targetGraph.historyState.lastRecoveryResult = result;
   };
 
   if (lastProcessedFloor < targetFloor || pendingPersistence) {
@@ -706,27 +724,31 @@ async function finalizeRerollCheckpoint(
     reason: "manual-reroll",
     resultCode: "reroll.complete",
   });
-  retainCheckpoint(result);
+  const completionGraph = runtime.normalizeGraphRuntimeState(
+    runtime.cloneGraphSnapshot(graph),
+    graph?.historyState?.chatId || "",
+  );
+  retainCheckpoint(result, completionGraph);
   const chat = runtime.getContext?.()?.chat;
   if (Array.isArray(chat) && lastProcessedFloor >= 0) {
-    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+    runtime.updateProcessedHistorySnapshot?.(
+      chat,
+      lastProcessedFloor,
+      completionGraph,
+    );
   }
-  const checkpointPersistence = await persist(`${reason}-checkpoint`);
-  if (checkpointPersistence?.accepted !== true) {
-    return {
-      success: false,
-      checkpointRetained: true,
-      resultCode: "reroll.checkpoint.persist-failed",
-      error: "重 Roll 结果检查点尚未确认落盘。",
-      persistence: checkpointPersistence,
-    };
-  }
-
-  runtime.clearHistoryDirty(graph, result);
+  runtime.clearHistoryDirty(completionGraph, result);
   if (Array.isArray(chat) && lastProcessedFloor >= 0) {
-    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+    runtime.updateProcessedHistorySnapshot?.(
+      chat,
+      lastProcessedFloor,
+      completionGraph,
+    );
   }
-  const completionPersistence = await persist(`${reason}-complete`);
+  const completionPersistence = await persistDetached(
+    completionGraph,
+    `${reason}-complete`,
+  );
   if (completionPersistence?.accepted !== true) {
     retainCheckpoint(
       runtime.buildRecoveryResult("pending-persistence", {
@@ -738,7 +760,6 @@ async function finalizeRerollCheckpoint(
         resultCode: "reroll.completion.persist-failed",
       }),
     );
-    await persist(`${reason}-checkpoint-restored`);
     return {
       success: false,
       checkpointRetained: true,
@@ -746,6 +767,9 @@ async function finalizeRerollCheckpoint(
       error: "重 Roll 完成标记尚未确认落盘，检查点已恢复。",
       persistence: completionPersistence,
     };
+  }
+  if (runtime.getCurrentGraph?.() === graph) {
+    runtime.setCurrentGraph(completionGraph);
   }
 
   return {
@@ -959,6 +983,265 @@ export function resolveAutoExtractionPlanController(
   };
 }
 
+export async function replayExtractionFromHistoryController(
+  runtime,
+  {
+    chat = [],
+    settings = {},
+    signal = undefined,
+    expectedChatId = undefined,
+    expectedHistoryFingerprint = undefined,
+  } = {},
+) {
+  const {
+    assertRecoveryHistoryStillCurrent,
+    clampInt,
+    executeExtractionBatch,
+    getAssistantTurns,
+    getLastProcessedAssistantFloor,
+    throwIfAborted,
+  } = runtime;
+  let replayedBatches = 0;
+
+  while (true) {
+    throwIfAborted(signal, "历史恢复已终止");
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-loop",
+    );
+    const pendingAssistantTurns = getAssistantTurns(chat).filter(
+      (index) => index > getLastProcessedAssistantFloor(),
+    );
+    if (pendingAssistantTurns.length === 0) break;
+
+    const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
+    const batchAssistantTurns = pendingAssistantTurns.slice(0, extractEvery);
+    const batchResult = await executeExtractionBatch({
+      chat,
+      startIdx: batchAssistantTurns[0],
+      endIdx: batchAssistantTurns[batchAssistantTurns.length - 1],
+      settings,
+      signal,
+    });
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-batch-complete",
+    );
+
+    if (!batchResult.success) {
+      throw new Error(
+        batchResult.error ||
+          batchResult?.result?.error ||
+          "历史恢复回放过程中出现提取失败",
+      );
+    }
+    replayedBatches += 1;
+  }
+
+  return replayedBatches;
+}
+
+async function runCommittedExtractionVectorSync(
+  runtime,
+  { task, graph, chatId, signal } = {},
+) {
+  const timeoutMs = Math.max(
+    1,
+    Number(runtime.EXTRACTION_VECTOR_SYNC_TIMEOUT_MS) || 300000,
+  );
+  const timeoutController = new AbortController();
+  const timeoutMessage = `向量同步超时 (${Math.round(timeoutMs / 1000)}s)`;
+  const timeout = setTimeout(
+    () => timeoutController.abort(new DOMException(timeoutMessage, "AbortError")),
+    timeoutMs,
+  );
+  let vectorSignal = timeoutController.signal;
+  let detachParentAbort = null;
+  if (signal) {
+    try {
+      if (typeof AbortSignal.any === "function") {
+        vectorSignal = AbortSignal.any([signal, timeoutController.signal]);
+      } else if (typeof signal.addEventListener === "function") {
+        const forwardAbort = () => timeoutController.abort(signal.reason);
+        signal.addEventListener("abort", forwardAbort, { once: true });
+        detachParentAbort = () =>
+          signal.removeEventListener?.("abort", forwardAbort);
+      }
+    } catch {}
+  }
+
+  try {
+    return await runtime.syncVectorState({
+      graph,
+      expectedChatId: chatId,
+      range: task?.range || null,
+      signal: vectorSignal,
+    });
+  } catch (error) {
+    return {
+      insertedHashes: [],
+      stats: runtime.getVectorIndexStats?.(graph) || null,
+      error:
+        timeoutController.signal.aborted && !signal?.aborted
+          ? timeoutMessage
+          : error?.message || String(error) || "向量同步阶段失败",
+      aborted: runtime.isAbortError?.(error) === true,
+    };
+  } finally {
+    clearTimeout(timeout);
+    detachParentAbort?.();
+  }
+}
+
+export async function recordGraphMutationController(
+  runtime,
+  {
+    beforeSnapshot,
+    processedRange = null,
+    artifactTags = [],
+    syncRange = null,
+    signal = undefined,
+    extractionCountBefore = runtime.getExtractionCount?.() || 0,
+  } = {},
+) {
+  runtime.ensureCurrentGraphRuntimeState();
+  const graph = runtime.getCurrentGraph();
+  const chatId = runtime.normalizeChatIdCandidate(runtime.getCurrentChatId());
+  const lastProcessedFloor = runtime.getLastProcessedAssistantFloor();
+  const isCurrent = () =>
+    runtime.getCurrentGraph() === graph &&
+    runtime.normalizeChatIdCandidate(runtime.getCurrentChatId()) === chatId;
+
+  graph.vectorIndexState ||= {};
+  graph.vectorIndexState.dirty = true;
+  graph.vectorIndexState.dirtyReason = "graph-mutation-awaiting-vector-sync";
+  const afterSnapshot = runtime.cloneGraphSnapshot(graph);
+  const effectiveRange = Array.isArray(processedRange)
+    ? processedRange
+    : [lastProcessedFloor, lastProcessedFloor];
+  const journalEntry = runtime.createBatchJournalEntry(
+    beforeSnapshot,
+    afterSnapshot,
+    {
+      processedRange: effectiveRange,
+      postProcessArtifacts: runtime.computePostProcessArtifacts(
+        beforeSnapshot,
+        afterSnapshot,
+        artifactTags,
+      ),
+      vectorHashesInserted: [],
+      extractionCountBefore,
+    },
+  );
+  runtime.appendBatchJournal(graph, journalEntry);
+
+  let persistence;
+  try {
+    persistence = await Promise.resolve(
+      runtime.saveGraphToChat({
+        reason: "record-graph-mutation",
+        awaitDurable: true,
+        captureShadow: true,
+      }),
+    );
+  } catch (error) {
+    persistence = {
+      accepted: false,
+      error: error?.message || String(error),
+    };
+  }
+  if (!isCurrent()) {
+    return {
+      aborted: true,
+      stale: true,
+      persistence,
+      error: "graph-mutation-context-changed",
+    };
+  }
+  if (persistence?.accepted !== true) {
+    return {
+      skipped: true,
+      persistence,
+      error:
+        persistence?.error ||
+        persistence?.reason ||
+        "graph-mutation-persist-not-accepted",
+    };
+  }
+
+  let vectorSync;
+  try {
+    vectorSync = await runtime.syncVectorState({
+      force: true,
+      purge:
+        runtime.isBackendVectorConfig(runtime.getEmbeddingConfig()) && !syncRange,
+      range: syncRange,
+      signal,
+      graph,
+      expectedChatId: chatId,
+    });
+  } catch (error) {
+    vectorSync = {
+      insertedHashes: [],
+      error: error?.message || String(error),
+    };
+    graph.vectorIndexState.dirty = true;
+    graph.vectorIndexState.dirtyReason = "graph-mutation-vector-sync-failed";
+    graph.vectorIndexState.lastWarning = vectorSync.error;
+  }
+  const vectorJournal = runtime.createBatchJournalEntry(
+    beforeSnapshot,
+    graph,
+    {
+      processedRange: effectiveRange,
+      postProcessArtifacts: journalEntry.postProcessArtifacts,
+      vectorHashesInserted: vectorSync?.insertedHashes || [],
+      extractionCountBefore,
+    },
+  );
+  journalEntry.vectorDelta = vectorJournal.vectorDelta;
+  if (!isCurrent()) {
+    return {
+      ...(vectorSync || {}),
+      aborted: true,
+      stale: true,
+      persistence,
+      error: vectorSync?.error || "graph-mutation-context-changed",
+    };
+  }
+
+  let vectorPersistence;
+  try {
+    vectorPersistence = await Promise.resolve(
+      runtime.saveGraphToChat({
+        reason: "record-graph-mutation-vector-sync",
+        awaitDurable: true,
+        captureShadow: true,
+      }),
+    );
+  } catch (error) {
+    vectorPersistence = {
+      accepted: false,
+      error: error?.message || String(error),
+    };
+  }
+  if (vectorPersistence?.accepted !== true) {
+    graph.vectorIndexState.dirty = true;
+    graph.vectorIndexState.dirtyReason = "vector-sync-state-persist-pending";
+    graph.vectorIndexState.lastWarning =
+      vectorPersistence?.error ||
+      vectorPersistence?.reason ||
+      "向量同步状态尚未被持久层接受";
+  }
+  return {
+    ...(vectorSync || {}),
+    persistence,
+    vectorPersistence,
+  };
+}
+
 export async function executeExtractionBatchController(
   runtime,
   {
@@ -975,6 +1258,7 @@ export async function executeExtractionBatchController(
   runtime.throwIfAborted(signal, "提取已终止");
 
   const currentGraph = runtime.getCurrentGraph();
+  let expectedRuntimeGraph = currentGraph;
   const beforeSnapshot = runtime.cloneGraphSnapshot(currentGraph);
   const workingGraph = runtime.cloneGraphSnapshot(beforeSnapshot);
   const batchChat = runtime.cloneGraphSnapshot(Array.isArray(chat) ? chat : []);
@@ -997,7 +1281,7 @@ export async function executeExtractionBatchController(
       : !batchChatId || !activeChatId || activeChatId === batchChatId;
     const activeChat = runtime.getContext?.()?.chat ?? chat;
     return {
-      graphCurrent: runtime.getCurrentGraph() === currentGraph,
+      graphCurrent: runtime.getCurrentGraph() === expectedRuntimeGraph,
       conversationCurrent,
       historyCurrent:
         !checkHistory ||
@@ -1141,7 +1425,7 @@ export async function executeExtractionBatchController(
       [startIdx, endIdx],
     ),
     pruneMessageHashesFromFloor: startIdx,
-    vectorDirty: Array.isArray(effects?.vectorHashesInserted) && effects.vectorHashesInserted.length > 0,
+    vectorDirty: workingGraph?.vectorIndexState?.dirty === true,
     dirtyFromFloor: startIdx,
     chatStateTarget: batchChatStateTarget,
   });
@@ -1199,7 +1483,119 @@ export async function executeExtractionBatchController(
     runtime.setExtractionCount?.(extractionCountAfter);
     runtime.ensureCurrentGraphRuntimeState();
     publishedGraph = runtime.getCurrentGraph();
+    expectedRuntimeGraph = publishedGraph;
     runtime.updateLastExtractedItems?.(result?.newNodeIds || []);
+  }
+  let committedVectorSyncResult = null;
+  let committedVectorPersistResult = null;
+  if (
+    persistence.accepted === true &&
+    effects?.committedVectorSync?.enabled === true &&
+    typeof runtime.syncVectorState === "function"
+  ) {
+    batchStatusRef.committedVectorSyncState = "running";
+    committedVectorSyncResult = await runCommittedExtractionVectorSync(runtime, {
+      task: effects.committedVectorSync,
+      graph: publishedGraph,
+      chatId: batchChatId,
+      signal,
+    });
+    const insertedHashes = Array.isArray(
+      committedVectorSyncResult?.insertedHashes,
+    )
+      ? committedVectorSyncResult.insertedHashes
+      : [];
+    effects.vectorHashesInserted = insertedHashes;
+    effects.vectorStats =
+      committedVectorSyncResult?.stats ||
+      runtime.getVectorIndexStats?.(publishedGraph) ||
+      null;
+
+    const journalId = String(
+      committedPersistState.committedBatchJournalEntry?.id || "",
+    );
+    const committedJournal = Array.isArray(publishedGraph?.batchJournal)
+      ? publishedGraph.batchJournal.find(
+          (entry) => String(entry?.id || "") === journalId,
+        )
+      : null;
+    if (committedJournal && typeof runtime.createBatchJournalEntry === "function") {
+      const vectorJournal = runtime.createBatchJournalEntry(
+        beforeSnapshot,
+        publishedGraph,
+        {
+          processedRange: committedJournal.processedRange,
+          processedDialogueRange: committedJournal.processedDialogueRange,
+          sourceChatIndexRange: committedJournal.sourceChatIndexRange,
+          postProcessArtifacts: committedJournal.postProcessArtifacts,
+          vectorHashesInserted: insertedHashes,
+          extractionCountBefore,
+        },
+      );
+      committedJournal.vectorDelta = vectorJournal.vectorDelta;
+    }
+
+    const vectorError = String(
+      committedVectorSyncResult?.error ||
+        (committedVectorSyncResult?.aborted ? "向量同步已终止" : ""),
+    ).trim();
+    effects.vectorError = vectorError;
+    batchStatusRef.committedVectorSyncState = vectorError
+      ? "repair-pending"
+      : "completed";
+    if (vectorError) {
+      publishedGraph.vectorIndexState ||= {};
+      publishedGraph.vectorIndexState.dirty = true;
+      publishedGraph.vectorIndexState.dirtyReason =
+        publishedGraph.vectorIndexState.dirtyReason ||
+        "post-commit-vector-sync-failed";
+      publishedGraph.vectorIndexState.lastWarning = vectorError;
+      const warnings = batchStatusRef?.stages?.finalize?.warnings;
+      if (Array.isArray(warnings) && !warnings.includes(vectorError)) {
+        warnings.push(`向量同步待修复: ${vectorError}`);
+      }
+    }
+
+    if (isBatchContextCurrent()) {
+      try {
+        committedVectorPersistResult = await Promise.resolve(
+          runtime.saveGraphToChat({
+            reason: "extraction-vector-sync-complete",
+            awaitDurable: true,
+            captureShadow: true,
+          }),
+        );
+      } catch (error) {
+        committedVectorPersistResult = {
+          accepted: false,
+          error: error?.message || String(error),
+        };
+      }
+      if (committedVectorPersistResult?.accepted !== true) {
+        publishedGraph.vectorIndexState ||= {};
+        publishedGraph.vectorIndexState.dirty = true;
+        publishedGraph.vectorIndexState.dirtyReason =
+          "vector-sync-state-persist-pending";
+        const warning =
+          committedVectorPersistResult?.error ||
+          committedVectorPersistResult?.reason ||
+          "向量同步状态尚未被持久层接受";
+        publishedGraph.vectorIndexState.lastWarning = warning;
+        batchStatusRef.committedVectorSyncState = "persist-pending";
+        const warnings = batchStatusRef?.stages?.finalize?.warnings;
+        if (Array.isArray(warnings) && !warnings.includes(warning)) {
+          warnings.push(warning);
+        }
+      }
+    } else {
+      publishedGraph.vectorIndexState ||= {};
+      publishedGraph.vectorIndexState.dirty = true;
+      publishedGraph.vectorIndexState.dirtyReason =
+        "vector-sync-context-changed-after-commit";
+      batchStatusRef.committedVectorSyncState = "stale-after-commit";
+    }
+  } else if (effects?.committedVectorSync?.enabled === true) {
+    batchStatusRef.committedVectorSyncState = "blocked-by-persistence";
   }
   let backgroundMaintenanceQueue = null;
   if (
@@ -1291,6 +1687,8 @@ export async function executeExtractionBatchController(
     effects: {
       ...(effects || {}),
       persistResult,
+      committedVectorSyncResult,
+      committedVectorPersistResult,
       backgroundMaintenanceQueue,
       backgroundVectorSyncQueue,
     },

@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const root = process.cwd();
-const [manifestSource, panelHtml, panelSource, styleCss] = await Promise.all([
+const [manifestSource, panelHtml, panelSource, uiLabelSource, styleCss] = await Promise.all([
   readFile(path.join(root, "manifest.json"), "utf8"),
   readFile(path.join(root, "ui", "panel.html"), "utf8"),
   readFile(path.join(root, "ui", "panel.js"), "utf8"),
+  readFile(path.join(root, "ui", "ui-label-formatter.js"), "utf8"),
   readFile(path.join(root, "style.css"), "utf8"),
 ]);
 
@@ -122,9 +123,27 @@ for (const key of [
   assert.ok(panelHtml.includes(`data-i18n="${key}"`), `missing Cloud Sync surface ${key}`);
 }
 
-for (const key of ["panel.cloudSync.automaticHelp", "panel.cloudSync.manualHelp"]) {
-  assert.ok(panelSource.includes(`t("${key}")`), `missing dynamic Cloud Sync surface ${key}`);
+for (const key of [
+  "panel.cloudSync.automaticHelp",
+  "panel.cloudSync.manualHelp",
+  "panel.cloudSync.authorityHelp",
+  "panel.cloudSync.lukerHelp",
+]) {
+  assert.ok(uiLabelSource.includes(`"${key}"`), `missing dynamic Cloud Sync surface ${key}`);
 }
+
+assert.ok(
+  uiLabelSource.includes('primary === "authority-sql"'),
+  "Cloud Sync help must recognize Authority SQL primary storage",
+);
+assert.ok(
+  uiLabelSource.includes('primary === "luker-chat-state"'),
+  "Cloud Sync help must recognize Luker chat-state primary storage",
+);
+assert.ok(
+  panelSource.includes("uiCloudStorageModeHelpText("),
+  "Cloud Sync UI must consume the storage-aware help formatter",
+);
 
 for (const selector of ["#st-bme-panel-overlay", "#st-bme-panel", "#bme-floating-ball"]) {
   assert.ok(styleCss.includes(selector), `missing product style ${selector}`);

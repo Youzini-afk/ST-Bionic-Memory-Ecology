@@ -75,4 +75,46 @@ assert.equal(snapshot.state.lastProcessedFloor, 9);
 assert.equal(snapshot.state.extractionCount, 4);
 assert.equal(snapshot.nodes.length, 1);
 
+const matchedAck = await store.patchMetaIfRevision(
+  3,
+  { syncDirty: false, syncDirtyReason: "" },
+  { syncDirty: true, syncDirtyReason: "stale" },
+);
+assert.equal(matchedAck.matched, true);
+await store.importSnapshot(await store.exportSnapshot(), { mode: "merge" });
+const mismatchedAck = await store.patchMetaIfRevision(
+  3,
+  { syncDirty: false, syncDirtyReason: "" },
+  { syncDirty: true, syncDirtyReason: "newer-local-revision" },
+);
+assert.equal(mismatchedAck.matched, false);
+assert.equal(await store.getMeta("syncDirtyReason", ""), "newer-local-revision");
+
+const cleanupKey = "remoteSyncCleanupPendingV1";
+const cleanupLedger = [{ filename: "known-staged-chunk", backend: "user-files" }];
+await store.patchMeta({ [cleanupKey]: cleanupLedger, syncDirty: false });
+const replacement = {
+  meta: { revision: 5 },
+  state: { lastProcessedFloor: 3, extractionCount: 2 },
+  nodes: [{ id: "remote-node", type: "event", updatedAt: 5 }],
+  edges: [],
+  tombstones: [],
+};
+await assert.rejects(
+  store.importSnapshot(replacement, {
+    mode: "replace",
+    preserveRevision: true,
+    expectedRevision: 3,
+  }),
+  (error) => error?.code === "LOCAL_SNAPSHOT_CHANGED",
+);
+await store.importSnapshot(replacement, {
+  mode: "replace",
+  preserveRevision: true,
+  expectedRevision: 4,
+  preserveMetaKeys: [cleanupKey],
+  markSyncDirty: false,
+});
+assert.deepEqual(await store.getMeta(cleanupKey, []), cleanupLedger);
+
 console.log("opfs-meta-fast-path tests passed");

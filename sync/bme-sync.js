@@ -13,6 +13,7 @@ const BME_REMOTE_SYNC_NODE_CHUNK_SIZE = 2000;
 const BME_REMOTE_SYNC_EDGE_CHUNK_SIZE = 4000;
 const BME_REMOTE_SYNC_TOMBSTONE_CHUNK_SIZE = 2000;
 const BME_REMOTE_SYNC_CHUNK_GC_GRACE_MS = 24 * 60 * 60 * 1000;
+const BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY = "remoteSyncCleanupPendingV1";
 const BME_BACKUP_FILE_PREFIX = "ST-BME_backup_";
 const BME_BACKUP_MANIFEST_FILENAME = "ST-BME_BackupManifest.json";
 const BME_BACKUP_SCHEMA_VERSION = 1;
@@ -95,6 +96,20 @@ function createStableFilenameHash(input = "") {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+function createRemoteSyncPublicationId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID().replace(/-/g, "");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 48);
+}
+
+function normalizeRemoteSyncPublicationId(value = "") {
+  const normalized = String(value || "").trim();
+  return /^[A-Za-z0-9]{12,64}$/.test(normalized) ? normalized : "";
 }
 
 function normalizeRemoteFilenameCandidate(fileName, fallbackValue = "ST-BME_sync_unknown.json") {
@@ -1208,7 +1223,7 @@ export async function rollbackFromRestoreSafetySnapshot(chatId, options = {}) {
             const hasEdges = Array.isArray(snapshot.edges) && snapshot.edges.length > 0;
             if (hasNodes || hasEdges) {
               const db = await getDb(normalizedChatId, options);
-              await db.importSnapshot(snapshot, {
+              await importSyncSnapshotPreservingCleanup(db, snapshot, {
                 mode: "replace",
                 preserveRevision: true,
                 revision: normalizeRevision(snapshot.meta?.revision),
@@ -1253,7 +1268,7 @@ export async function rollbackFromRestoreSafetySnapshot(chatId, options = {}) {
         normalizedChatId,
       );
       const db = await getDb(normalizedChatId, options);
-      await db.importSnapshot(snapshot, {
+      await importSyncSnapshotPreservingCleanup(db, snapshot, {
         mode: "replace",
         preserveRevision: true,
         revision: normalizeRevision(snapshot.meta?.revision),
@@ -1325,6 +1340,7 @@ function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
     snapshot?.meta && typeof snapshot.meta === "object" && !Array.isArray(snapshot.meta)
       ? { ...snapshot.meta }
       : {};
+  delete incomingMeta[BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY];
 
   const meta = {
     ...incomingMeta,
@@ -1349,12 +1365,15 @@ function normalizeSyncSnapshot(snapshot = {}, chatId = "") {
   };
 }
 
-function buildRemoteChunkFilename(baseFilename, kind, index, payload) {
+function buildRemoteChunkFilename(baseFilename, kind, index, payload, publicationId = "") {
   const normalizedBase = String(baseFilename || "sync.json").replace(/\.json$/i, "");
   const normalizedKind = String(kind || "chunk").trim().toLowerCase() || "chunk";
+  const normalizedPublicationId = normalizeRemoteSyncPublicationId(publicationId);
   const serialized = JSON.stringify(payload);
-  const hash = createStableFilenameHash(`${normalizedBase}:${normalizedKind}:${serialized}`);
-  return `${normalizedBase}.__${normalizedKind}.${String(index).padStart(3, "0")}.${hash}.json`;
+  const hash = createStableFilenameHash(
+    `${normalizedBase}:${normalizedKind}:${normalizedPublicationId}:${serialized}`,
+  );
+  return `${normalizedBase}.__${normalizedKind}.${String(index).padStart(3, "0")}.${normalizedPublicationId}.${hash}.json`;
 }
 
 function isRemoteSyncChunkFilenameForBase(filename = "", baseFilename = "") {
@@ -1363,7 +1382,23 @@ function isRemoteSyncChunkFilenameForBase(filename = "", baseFilename = "") {
   if (!normalizedFilename || !normalizedBase) return false;
   const escapedBase = normalizedBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(
-    `^${escapedBase}\\.__(nodes|edges|tombstones|runtime-meta)\\.\\d{3}\\.[A-Za-z0-9]+\\.json$`,
+    `^${escapedBase}\\.__(nodes|edges|tombstones|runtime-meta)\\.\\d+\\.(?:[A-Za-z0-9]+\\.)?[A-Za-z0-9]+\\.json$`,
+  ).test(normalizedFilename);
+}
+
+function isPublicationScopedRemoteSyncChunkFilename(
+  filename = "",
+  baseFilename = "",
+  publicationId = "",
+) {
+  const normalizedFilename = normalizeRemoteFileName(filename);
+  const normalizedBase = normalizeRemoteFileName(baseFilename).replace(/\.json$/i, "");
+  const normalizedPublicationId = normalizeRemoteSyncPublicationId(publicationId);
+  if (!normalizedFilename || !normalizedBase || !normalizedPublicationId) return false;
+  const escapedBase = normalizedBase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedPublicationId = normalizedPublicationId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(
+    `^${escapedBase}\\.__(nodes|edges|tombstones|runtime-meta)\\.\\d+\\.${escapedPublicationId}\\.[A-Za-z0-9]+\\.json$`,
   ).test(normalizedFilename);
 }
 
@@ -1407,8 +1442,10 @@ function normalizeRemoteSyncChunkGcPendingEntry(entry = {}, baseFilename = "") {
   if (!isRemoteSyncChunkFilenameForBase(filename, baseFilename)) return null;
   const firstSeenAt = normalizeTimestamp(entry?.firstSeenAt, Date.now());
   const eligibleAt = normalizeTimestamp(entry?.eligibleAt, firstSeenAt + BME_REMOTE_SYNC_CHUNK_GC_GRACE_MS);
+  const publicationId = normalizeRemoteSyncPublicationId(entry?.publicationId);
   return {
     filename,
+    publicationId,
     firstSeenAt,
     eligibleAt,
     sourceRevision: normalizeRevision(entry?.sourceRevision),
@@ -1431,6 +1468,98 @@ function readRemoteSyncChunkGcPending(manifest = {}, baseFilename = "") {
   return pendingByFilename;
 }
 
+function normalizeLocalRemoteSyncCleanupEntry(entry = {}) {
+  const baseFilename = resolveRemoteFileName(entry?.baseFilename || "");
+  const filename = resolveRemoteFileName(entry?.filename || "");
+  const backend = String(entry?.backend || "").trim();
+  const publicationId = normalizeRemoteSyncPublicationId(entry?.publicationId);
+  if (
+    !baseFilename ||
+    !["authority-blob", "user-files"].includes(backend) ||
+    !isPublicationScopedRemoteSyncChunkFilename(
+      filename,
+      baseFilename,
+      publicationId,
+    )
+  ) {
+    return null;
+  }
+  const firstSeenAt = normalizeTimestamp(entry?.firstSeenAt, Date.now());
+  return {
+    baseFilename,
+    filename,
+    backend,
+    publicationId,
+    firstSeenAt,
+    eligibleAt: normalizeTimestamp(
+      entry?.eligibleAt,
+      firstSeenAt + BME_REMOTE_SYNC_CHUNK_GC_GRACE_MS,
+    ),
+    sourceRevision: normalizeRevision(entry?.sourceRevision),
+  };
+}
+
+function buildLocalRemoteSyncCleanupKey(entry = {}) {
+  return `${entry.backend}\n${entry.baseFilename}\n${entry.filename}`;
+}
+
+function reduceLocalRemoteSyncCleanupPending(
+  current = [],
+  { add = [], retire = [] } = {},
+) {
+  const pendingByKey = new Map();
+  for (const entry of Array.isArray(current) ? current : []) {
+    const normalized = normalizeLocalRemoteSyncCleanupEntry(entry);
+    if (normalized) {
+      pendingByKey.set(buildLocalRemoteSyncCleanupKey(normalized), normalized);
+    }
+  }
+  for (const entry of Array.isArray(retire) ? retire : []) {
+    const normalized = normalizeLocalRemoteSyncCleanupEntry(entry);
+    if (normalized) pendingByKey.delete(buildLocalRemoteSyncCleanupKey(normalized));
+  }
+  for (const entry of Array.isArray(add) ? add : []) {
+    const normalized = normalizeLocalRemoteSyncCleanupEntry(entry);
+    if (!normalized) continue;
+    const key = buildLocalRemoteSyncCleanupKey(normalized);
+    const existing = pendingByKey.get(key);
+    if (!existing || normalized.firstSeenAt < existing.firstSeenAt) {
+      pendingByKey.set(key, normalized);
+    }
+  }
+  return [...pendingByKey.values()].sort(
+    (left, right) =>
+      left.eligibleAt - right.eligibleAt ||
+      left.baseFilename.localeCompare(right.baseFilename) ||
+      left.filename.localeCompare(right.filename),
+  );
+}
+
+function selectLocalRemoteSyncCleanupPending(
+  pending = [],
+  baseFilename = "",
+  backend = "",
+) {
+  const normalizedBaseFilename = resolveRemoteFileName(baseFilename);
+  const normalizedBackend = String(backend || "").trim();
+  return reduceLocalRemoteSyncCleanupPending(pending).filter(
+    (entry) =>
+      entry.baseFilename === normalizedBaseFilename &&
+      entry.backend === normalizedBackend,
+  );
+}
+
+function attachRemoteSyncCleanupCandidates(error, candidates = []) {
+  const normalizedError =
+    error instanceof Error ? error : new Error(String(error || "remote sync upload failed"));
+  const pending = reduceLocalRemoteSyncCleanupPending(
+    normalizedError.remoteSyncCleanupCandidates,
+    { add: candidates },
+  );
+  if (pending.length > 0) normalizedError.remoteSyncCleanupCandidates = pending;
+  return normalizedError;
+}
+
 function buildRemoteSyncChunkGcState(
   previousManifest = null,
   nextManifest = null,
@@ -1447,6 +1576,16 @@ function buildRemoteSyncChunkGcState(
   );
   const nextChunks = collectRemoteSyncChunkFilenames(nextManifest, baseFilename);
   const pendingByFilename = readRemoteSyncChunkGcPending(previousManifest, baseFilename);
+  for (const entry of Array.isArray(options.remoteSyncCleanupPending)
+    ? options.remoteSyncCleanupPending
+    : []) {
+    const normalized = normalizeRemoteSyncChunkGcPendingEntry(entry, baseFilename);
+    if (!normalized) continue;
+    const existing = pendingByFilename.get(normalized.filename);
+    if (!existing || normalized.firstSeenAt < existing.firstSeenAt) {
+      pendingByFilename.set(normalized.filename, normalized);
+    }
+  }
   for (const filename of retiredFilenames) {
     pendingByFilename.delete(resolveRemoteFileName(filename));
   }
@@ -1456,10 +1595,20 @@ function buildRemoteSyncChunkGcState(
 
   const previousChunks = collectRemoteSyncChunkFilenames(previousManifest, baseFilename);
   const previousRevision = normalizeRevision(previousManifest?.meta?.revision);
+  const previousPublicationId = normalizeRemoteSyncPublicationId(
+    previousManifest?.publicationId,
+  );
   for (const filename of previousChunks) {
     if (nextChunks.has(filename) || pendingByFilename.has(filename)) continue;
     pendingByFilename.set(filename, {
       filename,
+      publicationId: isPublicationScopedRemoteSyncChunkFilename(
+        filename,
+        baseFilename,
+        previousPublicationId,
+      )
+        ? previousPublicationId
+        : "",
       firstSeenAt: nowMs,
       eligibleAt: nowMs + graceMs,
       sourceRevision: previousRevision,
@@ -1522,6 +1671,11 @@ async function cleanupEligibleRemoteSyncChunks(
   const keep = new Set([...keepFilenames].map((filename) => resolveRemoteFileName(filename)));
   const eligibleChunks = [...pending.values()]
     .filter((entry) => entry.eligibleAt <= nowMs)
+    .filter((entry) => isPublicationScopedRemoteSyncChunkFilename(
+      entry.filename,
+      baseFilename,
+      entry.publicationId,
+    ))
     .filter((entry) => !currentChunks.has(entry.filename))
     .filter((entry) => !keep.has(entry.filename));
 
@@ -1534,8 +1688,8 @@ async function cleanupEligibleRemoteSyncChunks(
   for (let index = 0; index < eligibleChunks.length; index += 1) {
     const entry = eligibleChunks[index];
     try {
-      // ponytail: ST user-files has no conditional delete; rechecking the head only narrows
-      // this race. Server-side CAS/conditional delete is required for linearizable GC.
+      // Publication-scoped filenames are never reused by later uploads. Rechecking the
+      // head still protects a late publication of the same staged attempt.
       const latestHead = await readRemoteJsonFileResult(baseFilename, {
         ...options,
         remoteReadBackend: expectedBackend,
@@ -1589,7 +1743,16 @@ function hasEligibleRemoteSyncChunks(
   const nowMs = normalizeTimestamp(options.nowMs ?? options.currentTimeMs, Date.now());
   const currentChunks = collectRemoteSyncChunkFilenames(manifest, baseFilename);
   return [...readRemoteSyncChunkGcPending(manifest, baseFilename).values()]
-    .some((entry) => entry.eligibleAt <= nowMs && !currentChunks.has(entry.filename));
+    .some(
+      (entry) =>
+        entry.eligibleAt <= nowMs &&
+        !currentChunks.has(entry.filename) &&
+        isPublicationScopedRemoteSyncChunkFilename(
+          entry.filename,
+          baseFilename,
+          entry.publicationId,
+        ),
+    );
 }
 
 async function compensateAbandonedRemoteSyncChunks(
@@ -1602,27 +1765,41 @@ async function compensateAbandonedRemoteSyncChunks(
   for (const chunk of chunks) {
     const filename = resolveRemoteFileName(chunk?.filename || chunk);
     const backend = String(chunk?.backend || "").trim();
-    if (!isRemoteSyncChunkFilenameForBase(filename, baseFilename)) continue;
+    const publicationId = normalizeRemoteSyncPublicationId(chunk?.publicationId);
+    if (!isPublicationScopedRemoteSyncChunkFilename(filename, baseFilename, publicationId)) continue;
     if (hasAuthorityAdapter && !backend) continue;
-    abandoned.set(filename, backend || "user-files");
+    abandoned.set(filename, {
+      backend: backend || "user-files",
+      publicationId,
+    });
   }
-  if (!abandoned.size) return;
+  if (!abandoned.size) return [];
 
-  for (const [filename, backend] of abandoned) {
+  const retained = [];
+  for (const [filename, candidate] of abandoned) {
+    const { backend, publicationId } = candidate;
     const currentResult = await readRemoteJsonFileResult(baseFilename, {
       ...options,
       remoteReadBackend: backend,
     });
-    if (!currentResult.ok && currentResult.status !== 404) continue;
+    if (!currentResult.ok && currentResult.status !== 404) {
+      retained.push({ filename, backend, publicationId });
+      continue;
+    }
     if (collectRemoteSyncChunkFilenames(currentResult.payload, baseFilename).has(filename)) continue;
     try {
-      await deleteRemoteJsonFile(filename, {
+      const result = await deleteRemoteJsonFile(filename, {
         ...options,
         remoteDeleteBackend: backend,
       });
+      if (!result.deleted && result.reason !== "not-found") {
+        retained.push({ filename, backend, publicationId });
+      }
     } catch {
+      retained.push({ filename, backend, publicationId });
     }
   }
+  return retained;
 }
 
 function chunkArray(records = [], chunkSize = 1000) {
@@ -1635,8 +1812,15 @@ function chunkArray(records = [], chunkSize = 1000) {
   return chunks;
 }
 
-function buildRemoteSyncEnvelopeV2(snapshot = {}, chatId = "", filename = "") {
+function buildRemoteSyncEnvelopeV2(
+  snapshot = {},
+  chatId = "",
+  filename = "",
+  publicationId = createRemoteSyncPublicationId(),
+) {
   const normalizedSnapshot = normalizeSyncSnapshot(snapshot, chatId);
+  const normalizedPublicationId = normalizeRemoteSyncPublicationId(publicationId) ||
+    createRemoteSyncPublicationId();
   const runtimeMeta = toSerializableData(normalizedSnapshot.meta, {});
   const manifestMeta = {
     chatId: normalizedSnapshot.meta.chatId,
@@ -1676,6 +1860,7 @@ function buildRemoteSyncEnvelopeV2(snapshot = {}, chatId = "", filename = "") {
       chunk.kind,
       chunk.index,
       payload,
+      normalizedPublicationId,
     );
     return {
       kind: chunk.kind,
@@ -1689,6 +1874,7 @@ function buildRemoteSyncEnvelopeV2(snapshot = {}, chatId = "", filename = "") {
     manifest: {
       kind: "st-bme-sync",
       formatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+      publicationId: normalizedPublicationId,
       chatId: normalizedSnapshot.meta.chatId,
       meta: manifestMeta,
       state: toSerializableData(normalizedSnapshot.state, {
@@ -2503,6 +2689,13 @@ async function readDbMeta(db, key, fallbackValue = null) {
   return fallbackValue;
 }
 
+async function readDbRevision(db, fallbackValue = 0) {
+  if (typeof db?.getRevision === "function") {
+    return normalizeRevision(await db.getRevision());
+  }
+  return normalizeRevision(await readDbMeta(db, "revision", fallbackValue));
+}
+
 async function patchDbMeta(db, patch = {}) {
   if (!db || !patch || typeof patch !== "object") return;
   if (typeof db.patchMeta === "function") {
@@ -2515,6 +2708,54 @@ async function patchDbMeta(db, patch = {}) {
       await db.setMeta(key, value);
     }
   }
+}
+
+async function patchDbMetaIfRevision(
+  db,
+  expectedRevision,
+  matchingPatch = {},
+  mismatchingPatch = {},
+) {
+  if (typeof db?.patchMetaIfRevision === "function") {
+    return await db.patchMetaIfRevision(
+      normalizeRevision(expectedRevision),
+      matchingPatch,
+      mismatchingPatch,
+    );
+  }
+
+  const currentRevision = await readDbRevision(db, expectedRevision);
+  await patchDbMeta(db, {
+    ...mismatchingPatch,
+    syncDirty: true,
+    syncDirtyReason:
+      mismatchingPatch.syncDirtyReason || "cloud-sync-revision-guard-unavailable",
+  });
+  return {
+    matched: false,
+    currentRevision,
+    applied: mismatchingPatch,
+  };
+}
+
+function isAuthorityPrimaryDb(db) {
+  return String(db?.storeKind || "").trim().toLowerCase() === "authority";
+}
+
+async function readLocalRemoteSyncCleanupPending(db) {
+  return reduceLocalRemoteSyncCleanupPending(
+    await readDbMeta(db, BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY, []),
+  );
+}
+
+async function importSyncSnapshotPreservingCleanup(db, snapshot, options = {}) {
+  return await db.importSnapshot(snapshot, {
+    ...options,
+    preserveMetaKeys: [
+      ...(Array.isArray(options.preserveMetaKeys) ? options.preserveMetaKeys : []),
+      BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY,
+    ],
+  });
 }
 
 async function invokeSyncAppliedHook(options = {}, payload = {}) {
@@ -2853,15 +3094,33 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     remoteReadBackend: remoteBackend,
     remoteWriteBackend: remoteBackend,
   };
+  const localCleanupPending = selectLocalRemoteSyncCleanupPending(
+    options.remoteSyncCleanupPending,
+    filename,
+    remoteBackend,
+  );
   const previousManifestReadStartedAt = readSyncTimingNow();
   const previousHead = await readPreviousRemoteSyncHead(filename, remoteOptions);
   const previousManifest = previousHead.manifest;
   const previousManifestReadMs = readSyncTimingNow() - previousManifestReadStartedAt;
   const envelopeBuildStartedAt = readSyncTimingNow();
-  const syncEnvelope = buildRemoteSyncEnvelopeV2(
-    normalizedSnapshot,
-    normalizedChatId,
-    filename,
+  const reuseRemoteChunks =
+    options.remoteSyncCleanupOnly === true &&
+    Number(previousManifest?.formatVersion || 0) === BME_REMOTE_SYNC_FORMAT_VERSION_V2 &&
+    normalizeRevision(previousManifest?.meta?.revision) ===
+      normalizeRevision(normalizedSnapshot.meta?.revision);
+  const syncEnvelope = reuseRemoteChunks
+    ? {
+        manifest: toSerializableData(previousManifest, previousManifest),
+        chunks: [],
+      }
+    : buildRemoteSyncEnvelopeV2(
+        normalizedSnapshot,
+        normalizedChatId,
+        filename,
+      );
+  const publicationId = normalizeRemoteSyncPublicationId(
+    syncEnvelope.manifest.publicationId,
   );
   const nextChunkFilenames = collectRemoteSyncChunkFilenames(syncEnvelope.manifest, filename);
   const cleanupResult = await cleanupEligibleRemoteSyncChunks(
@@ -2875,7 +3134,10 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     previousManifest,
     syncEnvelope.manifest,
     filename,
-    options,
+    {
+      ...options,
+      remoteSyncCleanupPending: localCleanupPending,
+    },
     cleanupResult.retired,
   );
   const envelopeBuildMs = readSyncTimingNow() - envelopeBuildStartedAt;
@@ -2888,12 +3150,18 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
   const protectedChunks = new Set([
     ...collectRemoteSyncChunkFilenames(previousManifest, filename),
     ...readRemoteSyncChunkGcPending(previousManifest, filename).keys(),
+    ...localCleanupPending.map((entry) => entry.filename),
   ]);
   const attemptedNewChunks = new Map();
 
   try {
     for (const chunk of syncEnvelope.chunks) {
-      if (!protectedChunks.has(chunk.filename)) attemptedNewChunks.set(chunk.filename, "");
+      if (!protectedChunks.has(chunk.filename)) {
+        attemptedNewChunks.set(chunk.filename, {
+          backend: remoteBackend,
+          publicationId,
+        });
+      }
       const serializeStartedAt = readSyncTimingNow();
       const chunkPayload = JSON.stringify(chunk.payload, null, 2);
       chunkSerializeMs += readSyncTimingNow() - serializeStartedAt;
@@ -2904,7 +3172,10 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
         remoteOptions,
       );
       if (attemptedNewChunks.has(chunk.filename)) {
-        attemptedNewChunks.set(chunk.filename, String(chunkUploadResult?.backend || ""));
+        attemptedNewChunks.set(chunk.filename, {
+          backend: String(chunkUploadResult?.backend || remoteBackend),
+          publicationId,
+        });
       }
       chunkUploadMs += readSyncTimingNow() - uploadStartedAt;
     }
@@ -2935,20 +3206,47 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
       });
     }
   } catch (error) {
-    // Once another writer is observed, or this head write returned successfully, deleting
-    // staged chunks can corrupt the winning head. The backend needs conditional delete to
-    // make that cleanup safe; leave those rare orphans for explicit/server-side cleanup.
+    // A published or concurrently observed head still wins. Publication-scoped chunk names
+    // prevent later uploads from reusing this attempt's filenames, so retained failures can
+    // be adopted into a later head and deleted after the grace period.
+    const attemptedCleanup = [...attemptedNewChunks].map(
+      ([chunkFilename, candidate]) => ({
+        filename: chunkFilename,
+        backend: candidate.backend,
+        publicationId: candidate.publicationId,
+      }),
+    );
+    let retainedCleanup = attemptedCleanup;
     if (!manifestPublished && error?.code !== "REMOTE_SYNC_HEAD_CHANGED") {
-      await compensateAbandonedRemoteSyncChunks(
-        [...attemptedNewChunks].map(([chunkFilename, backend]) => ({
-          filename: chunkFilename,
-          backend,
-        })),
+      retainedCleanup = await compensateAbandonedRemoteSyncChunks(
+        attemptedCleanup,
         filename,
         remoteOptions,
       );
     }
-    throw error;
+    const firstSeenAt = normalizeTimestamp(
+      options.nowMs ?? options.currentTimeMs,
+      Date.now(),
+    );
+    const graceMs = Math.max(
+      0,
+      Math.floor(
+        Number(
+          options.remoteSyncChunkGcGraceMs ??
+            BME_REMOTE_SYNC_CHUNK_GC_GRACE_MS,
+        ) || 0,
+      ),
+    );
+    throw attachRemoteSyncCleanupCandidates(
+      error,
+      retainedCleanup.map((entry) => ({
+        ...entry,
+        baseFilename: filename,
+        firstSeenAt,
+        eligibleAt: firstSeenAt + graceMs,
+        sourceRevision: normalizeRevision(normalizedSnapshot.meta.revision),
+      })),
+    );
   }
 
   return {
@@ -2957,6 +3255,8 @@ async function writeSnapshotToRemote(snapshot, chatId, options = {}) {
     backend: String(uploadResult?.backend || ""),
     payload: syncEnvelope.manifest,
     cleanup: cleanupResult,
+    reusedRemoteChunks: reuseRemoteChunks,
+    adoptedCleanupCandidates: localCleanupPending,
     timings: finalizeSyncTimings(
       {
         previousManifestReadMs,
@@ -2988,7 +3288,14 @@ function withChatSyncLock(chatId, task) {
   }
 
   const taskPromise = Promise.resolve()
-    .then(task)
+    .then(async () => {
+      const lockManager = globalThis.navigator?.locks;
+      if (typeof lockManager?.request !== "function") return await task();
+      return await lockManager.request(
+        `st-bme-cloud-sync:${createStableFilenameHash(normalizedChatId)}`,
+        task,
+      );
+    })
     .catch((error) => {
       console.warn("[ST-BME] 同步任务失败:", error);
       return {
@@ -3321,7 +3628,7 @@ export async function restoreFromServer(chatId, options = {}) {
     const safetySnapshotMs = readSyncTimingNow() - safetySnapshotStartedAt;
 
     const importStartedAt = readSyncTimingNow();
-    await db.importSnapshot(snapshot, {
+    await importSyncSnapshotPreservingCleanup(db, snapshot, {
       mode: "replace",
       preserveRevision: true,
       revision: normalizeRevision(snapshot.meta.revision),
@@ -3458,7 +3765,7 @@ export async function deleteServerBackup(chatId, options = {}) {
   }
 }
 
-export async function upload(chatId, options = {}) {
+async function uploadUnlocked(chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   if (!normalizedChatId) {
     return {
@@ -3470,8 +3777,19 @@ export async function upload(chatId, options = {}) {
   }
 
   const uploadStartedAt = readSyncTimingNow();
+  let db = null;
+  let localCleanupPending = [];
   try {
-    const db = await getDb(normalizedChatId, options);
+    db = await getDb(normalizedChatId, options);
+    if (isAuthorityPrimaryDb(db)) {
+      return {
+        uploaded: false,
+        chatId: normalizedChatId,
+        reason: "authority-primary-not-replicated",
+        timings: finalizeSyncTimings({}, uploadStartedAt),
+      };
+    }
+    localCleanupPending = await readLocalRemoteSyncCleanupPending(db);
     const exportStartedAt = readSyncTimingNow();
     const localSnapshot = normalizeSyncSnapshot(await db.exportSnapshot(), normalizedChatId);
     const exportMs = readSyncTimingNow() - exportStartedAt;
@@ -3482,28 +3800,62 @@ export async function upload(chatId, options = {}) {
     localSnapshot.meta.chatId = normalizedChatId;
     localSnapshot.meta.lastModified = normalizeTimestamp(localSnapshot.meta.lastModified, nowMs);
 
-    const uploadResult = await writeSnapshotToRemote(localSnapshot, normalizedChatId, options);
+    const uploadResult = await writeSnapshotToRemote(
+      localSnapshot,
+      normalizedChatId,
+      {
+        ...options,
+        remoteSyncCleanupPending: localCleanupPending,
+      },
+    );
     const uploadTimings = uploadResult?.timings || {};
-
+    const remainingCleanupPending = reduceLocalRemoteSyncCleanupPending(
+      localCleanupPending,
+      { retire: uploadResult?.adoptedCleanupCandidates },
+    );
+    const uploadedRevision = normalizeRevision(localSnapshot.meta.revision);
     const metaPatchStartedAt = readSyncTimingNow();
-    await patchDbMeta(db, {
-      deviceId,
-      lastSyncUploadedAt: nowMs,
-      lastSyncedRevision: normalizeRevision(localSnapshot.meta.revision),
-      syncDirty: false,
-      syncDirtyReason: "",
-      lastModified: localSnapshot.meta.lastModified,
-      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
-    });
+    const acknowledgement = await patchDbMetaIfRevision(
+      db,
+      uploadedRevision,
+      {
+        deviceId,
+        lastSyncUploadedAt: nowMs,
+        lastSyncedRevision: uploadedRevision,
+        syncDirty: false,
+        syncDirtyReason: "",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+        [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]: remainingCleanupPending,
+      },
+      {
+        deviceId,
+        lastSyncUploadedAt: nowMs,
+        lastSyncedRevision: uploadedRevision,
+        syncDirty: true,
+        syncDirtyReason: "local-revision-advanced-during-upload",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+        [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]: remainingCleanupPending,
+      },
+    );
+    const currentLocalRevision = normalizeRevision(
+      acknowledgement?.currentRevision,
+    );
+    const pendingLocalChanges = acknowledgement?.matched !== true;
     const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
+    if (pendingLocalChanges && isAutomaticCloudMode(options)) {
+      scheduleUpload(normalizedChatId, options);
+    }
 
     return {
       uploaded: true,
       chatId: normalizedChatId,
       filename: uploadResult.filename,
       remotePath: uploadResult.path,
-      revision: normalizeRevision(localSnapshot.meta.revision),
+      revision: uploadedRevision,
+      currentLocalRevision,
+      pendingLocalChanges,
       cleanup: uploadResult.cleanup || null,
+      cleanupPending: remainingCleanupPending.length,
       timings: finalizeSyncTimings(
         {
           exportMs,
@@ -3522,17 +3874,42 @@ export async function upload(chatId, options = {}) {
     };
   } catch (error) {
     console.warn("[ST-BME] 上传同步文件失败:", error);
+    const remainingCleanupPending = reduceLocalRemoteSyncCleanupPending(
+      localCleanupPending,
+      { add: error?.remoteSyncCleanupCandidates },
+    );
+    if (db) {
+      try {
+        await patchDbMeta(db, {
+          syncDirty: true,
+          syncDirtyReason: "cloud-upload-failed",
+          [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]: remainingCleanupPending,
+        });
+      } catch (metaError) {
+        console.warn("[ST-BME] 记录同步失败状态失败:", metaError);
+      }
+    }
     return {
       uploaded: false,
       chatId: normalizedChatId,
       reason: "upload-error",
       error,
+      cleanupPending: remainingCleanupPending.length,
       timings: finalizeSyncTimings({}, uploadStartedAt),
     };
   }
 }
 
-export async function download(chatId, options = {}) {
+export async function upload(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) return await uploadUnlocked(chatId, options);
+  return await withChatSyncLock(
+    normalizedChatId,
+    async () => await uploadUnlocked(normalizedChatId, options),
+  );
+}
+
+async function downloadUnlocked(chatId, options = {}) {
   const normalizedChatId = normalizeChatId(chatId);
   if (!normalizedChatId) {
     return {
@@ -3547,6 +3924,15 @@ export async function download(chatId, options = {}) {
   const downloadStartedAt = readSyncTimingNow();
   try {
     const db = await getDb(normalizedChatId, options);
+    if (isAuthorityPrimaryDb(db)) {
+      return {
+        downloaded: false,
+        exists: false,
+        chatId: normalizedChatId,
+        reason: "authority-primary-not-replicated",
+        timings: finalizeSyncTimings({}, downloadStartedAt),
+      };
+    }
     const remoteResult = await readRemoteSnapshot(normalizedChatId, options);
     const remoteTimings = remoteResult?.timings || {};
 
@@ -3578,24 +3964,49 @@ export async function download(chatId, options = {}) {
     const remoteRevision = normalizeRevision(remoteSnapshot.meta.revision);
 
     const importStartedAt = readSyncTimingNow();
-    await db.importSnapshot(remoteSnapshot, {
+    const importResult = await importSyncSnapshotPreservingCleanup(db, remoteSnapshot, {
       mode: "replace",
       preserveRevision: true,
       revision: remoteRevision,
       markSyncDirty: false,
+      ...(Number.isFinite(Number(options.expectedLocalRevision))
+        ? { expectedRevision: normalizeRevision(options.expectedLocalRevision) }
+        : {}),
+      requireSyncClean: options.requireCleanLocal === true,
     });
     const importMs = readSyncTimingNow() - importStartedAt;
+    const importedRevision = normalizeRevision(importResult?.revision);
 
     const metaPatchStartedAt = readSyncTimingNow();
-    await patchDbMeta(db, {
-      deviceId: getOrCreateDeviceId(),
-      lastSyncDownloadedAt: Date.now(),
-      lastSyncedRevision: remoteRevision,
-      syncDirty: false,
-      syncDirtyReason: "",
-      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
-    });
+    const downloadedAt = Date.now();
+    const acknowledgement = await patchDbMetaIfRevision(
+      db,
+      importedRevision,
+      {
+        deviceId: getOrCreateDeviceId(),
+        lastSyncDownloadedAt: downloadedAt,
+        lastSyncedRevision: remoteRevision,
+        syncDirty: false,
+        syncDirtyReason: "",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+      },
+      {
+        deviceId: getOrCreateDeviceId(),
+        lastSyncDownloadedAt: downloadedAt,
+        lastSyncedRevision: remoteRevision,
+        syncDirty: true,
+        syncDirtyReason: "local-revision-advanced-during-download",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+      },
+    );
+    const currentLocalRevision = normalizeRevision(
+      acknowledgement?.currentRevision,
+    );
+    const pendingLocalChanges = acknowledgement?.matched !== true;
     const metaPatchMs = readSyncTimingNow() - metaPatchStartedAt;
+    if (pendingLocalChanges && isAutomaticCloudMode(options)) {
+      scheduleUpload(normalizedChatId, options);
+    }
 
     const hookStartedAt = readSyncTimingNow();
     await invokeSyncAppliedHook(options, {
@@ -3611,6 +4022,8 @@ export async function download(chatId, options = {}) {
       chatId: normalizedChatId,
       filename: remoteResult.filename,
       revision: remoteRevision,
+      currentLocalRevision,
+      pendingLocalChanges,
       timings: finalizeSyncTimings(
         {
           resolveCandidatesMs: Number(remoteTimings.resolveCandidatesMs || 0),
@@ -3627,15 +4040,25 @@ export async function download(chatId, options = {}) {
     };
   } catch (error) {
     console.warn("[ST-BME] 下载同步文件失败:", error);
+    const localChanged = error?.code === "LOCAL_SNAPSHOT_CHANGED";
     return {
       downloaded: false,
-      exists: false,
+      exists: localChanged,
       chatId: normalizedChatId,
-      reason: "download-error",
+      reason: localChanged ? "local-changed-during-download" : "download-error",
       error,
       timings: finalizeSyncTimings({}, downloadStartedAt),
     };
   }
+}
+
+export async function download(chatId, options = {}) {
+  const normalizedChatId = normalizeChatId(chatId);
+  if (!normalizedChatId) return await downloadUnlocked(chatId, options);
+  return await withChatSyncLock(
+    normalizedChatId,
+    async () => await downloadUnlocked(normalizedChatId, options),
+  );
 }
 
 export function mergeSnapshots(localSnapshot, remoteSnapshot, options = {}) {
@@ -3869,9 +4292,18 @@ export async function syncNow(chatId, options = {}) {
 
   return await withChatSyncLock(normalizedChatId, async () => {
     const db = await getDb(normalizedChatId, options);
+    if (isAuthorityPrimaryDb(db)) {
+      return {
+        synced: true,
+        chatId: normalizedChatId,
+        action: "noop",
+        reason: "authority-primary-not-replicated",
+      };
+    }
     const localSnapshot = normalizeSyncSnapshot(await db.exportSnapshot(), normalizedChatId);
     const localRevision = normalizeRevision(localSnapshot.meta.revision);
     const localDirty = Boolean(await db.getMeta("syncDirty", false));
+    const localCleanupPending = await readLocalRemoteSyncCleanupPending(db);
 
     const remoteResult = await readRemoteSnapshot(normalizedChatId, options);
     if (!remoteResult.exists || !remoteResult.snapshot) {
@@ -3884,9 +4316,11 @@ export async function syncNow(chatId, options = {}) {
         };
       }
 
-      const uploadResult = await upload(normalizedChatId, options);
+      const uploadResult = await uploadUnlocked(normalizedChatId, options);
       return {
-        synced: Boolean(uploadResult.uploaded),
+        synced: Boolean(
+          uploadResult.uploaded && !uploadResult.pendingLocalChanges,
+        ),
         chatId: normalizedChatId,
         action: uploadResult.uploaded ? "upload" : "none",
         ...uploadResult,
@@ -3897,9 +4331,15 @@ export async function syncNow(chatId, options = {}) {
     const remoteRevision = normalizeRevision(remoteSnapshot.meta.revision);
 
     if (remoteRevision > localRevision && !localDirty) {
-      const downloadResult = await download(normalizedChatId, options);
+      const downloadResult = await downloadUnlocked(normalizedChatId, {
+        ...options,
+        expectedLocalRevision: localRevision,
+        requireCleanLocal: true,
+      });
       return {
-        synced: Boolean(downloadResult.downloaded),
+        synced: Boolean(
+          downloadResult.downloaded && !downloadResult.pendingLocalChanges,
+        ),
         chatId: normalizedChatId,
         action: downloadResult.downloaded ? "download" : "none",
         ...downloadResult,
@@ -3907,9 +4347,11 @@ export async function syncNow(chatId, options = {}) {
     }
 
     if (localRevision > remoteRevision && !options.forceMerge) {
-      const uploadResult = await upload(normalizedChatId, options);
+      const uploadResult = await uploadUnlocked(normalizedChatId, options);
       return {
-        synced: Boolean(uploadResult.uploaded),
+        synced: Boolean(
+          uploadResult.uploaded && !uploadResult.pendingLocalChanges,
+        ),
         chatId: normalizedChatId,
         action: uploadResult.uploaded ? "upload" : "none",
         ...uploadResult,
@@ -3917,16 +4359,27 @@ export async function syncNow(chatId, options = {}) {
     }
 
     if (localRevision === remoteRevision && !localDirty && !options.forceMerge) {
+      const hasLocalCleanupPending = selectLocalRemoteSyncCleanupPending(
+        localCleanupPending,
+        buildSyncFilename(normalizedChatId),
+        remoteResult.backend,
+      ).length > 0;
       if (
+        hasLocalCleanupPending ||
         hasEligibleRemoteSyncChunks(
           remoteResult.manifest,
           remoteResult.filename,
           options,
         )
       ) {
-        const uploadResult = await upload(normalizedChatId, options);
+        const uploadResult = await uploadUnlocked(normalizedChatId, {
+          ...options,
+          remoteSyncCleanupOnly: true,
+        });
         return {
-          synced: Boolean(uploadResult.uploaded),
+          synced: Boolean(
+            uploadResult.uploaded && !uploadResult.pendingLocalChanges,
+          ),
           chatId: normalizedChatId,
           action: uploadResult.uploaded ? "cleanup" : "none",
           ...uploadResult,
@@ -3948,47 +4401,97 @@ export async function syncNow(chatId, options = {}) {
       "后端向量索引已从远端合并恢复，需要在当前环境重建",
     );
 
-    await db.importSnapshot(mergedSnapshot, {
+    const mergeImportResult = await importSyncSnapshotPreservingCleanup(db, mergedSnapshot, {
       mode: "replace",
       preserveRevision: true,
       revision: mergedSnapshot.meta.revision,
-      markSyncDirty: false,
+      markSyncDirty: true,
+      expectedRevision: localRevision,
     });
+    const mergedRevision = normalizeRevision(mergeImportResult?.revision);
+    mergedSnapshot.meta.revision = mergedRevision;
 
     await patchDbMeta(db, {
       deviceId: getOrCreateDeviceId(),
       lastSyncDownloadedAt: Date.now(),
-      lastSyncedRevision: normalizeRevision(mergedSnapshot.meta.revision),
-      syncDirty: false,
-      syncDirtyReason: "",
+      lastSyncedRevision: remoteRevision,
+      syncDirty: true,
+      syncDirtyReason: "cloud-merge-upload-pending",
       lastProcessedFloor: mergedSnapshot.state.lastProcessedFloor,
       extractionCount: mergedSnapshot.state.extractionCount,
       remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
     });
 
-    const uploadResult = await writeSnapshotToRemote(mergedSnapshot, normalizedChatId, options);
+    let uploadResult;
+    try {
+      uploadResult = await writeSnapshotToRemote(
+        mergedSnapshot,
+        normalizedChatId,
+        {
+          ...options,
+          remoteSyncCleanupPending: localCleanupPending,
+        },
+      );
+    } catch (error) {
+      await patchDbMeta(db, {
+        syncDirty: true,
+        syncDirtyReason: "cloud-merge-upload-failed",
+        [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]:
+          reduceLocalRemoteSyncCleanupPending(localCleanupPending, {
+            add: error?.remoteSyncCleanupCandidates,
+          }),
+      });
+      throw error;
+    }
+    const remainingCleanupPending = reduceLocalRemoteSyncCleanupPending(
+      localCleanupPending,
+      { retire: uploadResult?.adoptedCleanupCandidates },
+    );
 
-    await patchDbMeta(db, {
-      lastSyncUploadedAt: Date.now(),
-      lastSyncedRevision: normalizeRevision(mergedSnapshot.meta.revision),
-      syncDirty: false,
-      syncDirtyReason: "",
-      remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
-    });
+    const uploadedAt = Date.now();
+    const acknowledgement = await patchDbMetaIfRevision(
+      db,
+      mergedRevision,
+      {
+        lastSyncUploadedAt: uploadedAt,
+        lastSyncedRevision: mergedRevision,
+        syncDirty: false,
+        syncDirtyReason: "",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+        [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]: remainingCleanupPending,
+      },
+      {
+        lastSyncUploadedAt: uploadedAt,
+        lastSyncedRevision: mergedRevision,
+        syncDirty: true,
+        syncDirtyReason: "local-revision-advanced-during-upload",
+        remoteSyncFormatVersion: BME_REMOTE_SYNC_FORMAT_VERSION_V2,
+        [BME_REMOTE_SYNC_LOCAL_CLEANUP_META_KEY]: remainingCleanupPending,
+      },
+    );
+    const currentLocalRevision = normalizeRevision(
+      acknowledgement?.currentRevision,
+    );
+    const pendingLocalChanges = acknowledgement?.matched !== true;
+    if (pendingLocalChanges && isAutomaticCloudMode(options)) {
+      scheduleUpload(normalizedChatId, options);
+    }
 
     await invokeSyncAppliedHook(options, {
       chatId: normalizedChatId,
       action: "merge",
-      revision: normalizeRevision(mergedSnapshot.meta.revision),
+      revision: mergedRevision,
     });
 
     return {
-      synced: true,
+      synced: !pendingLocalChanges,
       chatId: normalizedChatId,
       action: "merge",
+      revision: mergedRevision,
+      currentLocalRevision,
+      pendingLocalChanges,
       filename: uploadResult.filename,
       remotePath: uploadResult.path,
-      revision: normalizeRevision(mergedSnapshot.meta.revision),
     };
   });
 }
@@ -4022,7 +4525,7 @@ export function scheduleUpload(chatId, options = {}) {
 
   const timer = setTimeout(() => {
     uploadDebounceTimerByChatId.delete(normalizedChatId);
-    withChatSyncLock(normalizedChatId, async () => await upload(normalizedChatId, options));
+    upload(normalizedChatId, options);
   }, debounceMs);
 
   uploadDebounceTimerByChatId.set(normalizedChatId, timer);

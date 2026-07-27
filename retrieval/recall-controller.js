@@ -510,7 +510,9 @@ export async function runRecallController(runtime, options = {}) {
     });
   }
 
-  const recallChatId = String(context?.chatId || "").trim();
+  const recallChatId = String(
+    runtime.getCurrentChatId?.(context) || context?.chatId || "",
+  ).trim();
   const recallGraph = runtime.getCurrentGraph();
   const conversationLease = runtime.captureConversationLease?.() || null;
   const isRecallContextCurrent = () => {
@@ -520,7 +522,9 @@ export async function runRecallController(runtime, options = {}) {
       });
     }
     const activeContext = runtime.getContext();
-    const activeChatId = String(activeContext?.chatId || "").trim();
+    const activeChatId = String(
+      runtime.getCurrentChatId?.(activeContext) || activeContext?.chatId || "",
+    ).trim();
     if (recallChatId && activeChatId) return activeChatId === recallChatId;
     return (
       activeContext?.chat === chat || runtime.getCurrentGraph() === recallGraph
@@ -574,6 +578,7 @@ export async function runRecallController(runtime, options = {}) {
       cachedResult,
     );
     return runtime.createRecallRunResult("completed", {
+      chatId: recallChatId,
       reason: cachedRecallPayload.reason || "planner-handoff-reused",
       selectedNodeIds: cachedResult.selectedNodeIds || [],
       injectionText: applied?.injectionText || "",
@@ -628,6 +633,7 @@ export async function runRecallController(runtime, options = {}) {
       runtime.schedulePersistedRecallMessageUiRefresh?.();
     }
     return runtime.createRecallRunResult("completed", {
+      chatId: recallChatId,
       reason: "persisted-user-floor-reused",
       selectedNodeIds: reusedResult.selectedNodeIds || [],
       injectionText: applied?.injectionText || reusedResult.injectionText || "",
@@ -772,6 +778,7 @@ export async function runRecallController(runtime, options = {}) {
         result,
       );
       return runtime.createRecallRunResult("completed", {
+        chatId: recallChatId,
         reason: "召回完成",
         selectedNodeIds: result.selectedNodeIds || [],
         injectionText: applied?.injectionText || "",

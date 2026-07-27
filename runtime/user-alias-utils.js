@@ -1,3 +1,5 @@
+import { readGlobalHostContext } from "../host/st-runtime.js";
+
 function normalizeKeyForAlias(value) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -84,17 +86,7 @@ export function aliasSetMatchesValue(aliasSet, value) {
 }
 
 function safeReadHostContext() {
-  const candidates = [
-    globalThis.SillyTavern?.getContext?.(),
-    globalThis.getContext?.(),
-    globalThis.__stBmeTestContext,
-  ];
-  for (const candidate of candidates) {
-    if (candidate && typeof candidate === "object") {
-      return candidate;
-    }
-  }
-  return null;
+  return readGlobalHostContext();
 }
 
 function pushAliasHint(target, value) {

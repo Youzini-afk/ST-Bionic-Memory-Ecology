@@ -45,6 +45,16 @@ export function createUiStatus(text = "", meta = "", level = "idle") {
   };
 }
 
+export function reportPanelGraphLoadFailure(error, updateStatus) {
+  const message = t("panel.graphLoad.refreshFailed", {
+    error: error?.message || String(error),
+  });
+  console.error("[ST-BME] panel graph load refresh failed:", error);
+  globalThis.toastr?.error?.(message, "ST-BME");
+  updateStatus?.("error", message);
+  return message;
+}
+
 export function createGraphPersistenceState() {
   return {
     loadState: "no-chat",

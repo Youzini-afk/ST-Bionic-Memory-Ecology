@@ -7,14 +7,9 @@ import {
   classifyGraphRefresh,
   resolveVisibleGraphWorkspaceMode,
 } from "./panel-graph-refresh-utils.js";
-import {
-  initPlannerSections,
-  refreshPlannerSections,
-} from "./panel-ena-sections.js";
+import { initPlannerSections, refreshPlannerSections } from "./panel-ena-sections.js";
 import { getNodeDisplayName } from "../graph/node-labels.js";
-import {
-  normalizeMemoryScope,
-} from "../graph/memory-scope.js";
+import { normalizeMemoryScope } from "../graph/memory-scope.js";
 import { listKnowledgeOwners } from "../graph/knowledge-state.js";
 import { getHostUserAliasHints } from "../runtime/user-alias-utils.js";
 import {
@@ -75,11 +70,13 @@ import {
   normalizeOwnerUiType,
   uiBuildScopeMetaText,
   uiBuildRegionLine,
+  uiCloudStorageModeHelpText,
   uiMemoryNodeTypeClass,
   uiOwnerTypeLabel,
   uiScopeBadgeText,
   uiTypeLabel,
 } from "./ui-label-formatter.js";
+import { reportPanelGraphLoadFailure } from "./ui-status.js";
 
 let defaultPromptCache = null;
 
@@ -1478,7 +1475,10 @@ export function openPanel() {
   if (!overlayEl) return;
   ensureOverlayMountedAtRoot();
   syncViewportCssVars();
-  _actionHandlers.syncGraphLoad?.();
+  void Promise.resolve()
+    .then(() => _actionHandlers.syncGraphLoad?.())
+    .then(_refreshRuntimeStatus)
+    .catch((error) => reportPanelGraphLoadFailure(error, updateFloatingBallStatus));
   overlayEl.classList.add("active");
 
   _restorePanelSize();
@@ -8196,7 +8196,7 @@ function _refreshConfigTab() {
   );
   _setInputValue(
     "bme-setting-load-native-hydrate-threshold-records",
-    settings.loadNativeHydrateThresholdRecords ?? 12000,
+    settings.loadNativeHydrateThresholdRecords ?? 30000,
   );
 
   _setInputValue("bme-setting-llm-url", settings.llmApiUrl || "");
@@ -8809,7 +8809,7 @@ function _bindConfigControls() {
   );
   bindNumber(
     "bme-setting-load-native-hydrate-threshold-records",
-    12000,
+    30000,
     0,
     200000,
     (value) => _patchSettings({ loadNativeHydrateThresholdRecords: value }),
@@ -14371,6 +14371,7 @@ async function _refreshCloudBackupManualUi(settings = _getSettings?.() || {}) {
 
 function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
   const mode = String(settings?.cloudStorageMode || "automatic");
+  const loadInfo = _getGraphPersistenceSnapshot();
   const manualActions = document.getElementById(
     "bme-cloud-backup-manual-actions",
   );
@@ -14379,12 +14380,9 @@ function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
     manualActions.style.display = mode === "manual" ? "" : "none";
   }
   if (helpText) {
-    helpText.textContent =
-      mode === "manual"
-        ? t("panel.cloudSync.manualHelp")
-        : t("panel.cloudSync.automaticHelp");
+    helpText.textContent = uiCloudStorageModeHelpText(mode, loadInfo?.primaryStorageTier);
   }
-  _renderCloudStorageModeStatus(settings, _getGraphPersistenceSnapshot());
+  _renderCloudStorageModeStatus(settings, loadInfo);
   void _refreshCloudBackupManualUi(settings);
 }
 
@@ -14401,6 +14399,7 @@ function _refreshRuntimeStatus() {
   _setText("bme-mobile-status-text", text);
   _setText("bme-mobile-status-meta", displayMeta);
   _setText("bme-panel-status", text);
+  _setText("bme-cloud-storage-mode-help", uiCloudStorageModeHelpText(_getSettings?.()?.cloudStorageMode, graphPersistence.primaryStorageTier));
   _renderCloudStorageModeStatus(_getSettings?.() || {}, graphPersistence);
   _refreshGraphAvailabilityState();
 }

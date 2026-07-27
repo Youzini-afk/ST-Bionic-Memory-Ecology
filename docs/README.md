@@ -1,6 +1,6 @@
 # ST-BME 文档
 
-这里是 ST-Bionic-Memory-Ecology（ST-BME）的完整文档。仓库根目录的 [`README.md`](../README.md) 是精简入口（介绍、安装、快速上手、导航），细节都在这里。
+这里是 ST-Bionic-Memory-Ecology（ST-BME）的完整文档。仓库根目录的 [`README.md`](../README.md) 提供完整产品概览、安装和快速上手；配置、机制与维护细节在这里展开。
 
 - 想**用好插件**（配置、面板、排障、存储）→ 看 [`usage/`](#usage--使用手册)
 - 想**理解内部原理**（架构、算法、功能机制）或**参与维护** → 看后面几节
@@ -8,7 +8,7 @@
 ## 文档地图
 
 ### usage/ — 使用手册
-面向用户："怎么配、怎么用、出问题怎么查"。从精简后的 README 下沉的详细内容。中英双语（`.md` 中文 / `.en.md` English）。
+面向用户："怎么配、怎么用、出问题怎么查"。它们展开根 README 中的产品概览。中英双语（`.md` 中文 / `.en.md` English）。
 
 - [`configuration.md`](usage/configuration.md) · [EN](usage/configuration.en.md) — 完整配置参考：记忆 LLM、Embedding、提取/召回/认知/维护设置、任务预设、ENA、隐藏/渲染、Native
 - [`panel.md`](usage/panel.md) · [EN](usage/panel.en.md) — 面板导览：总览、任务、操作、配置、图谱区域

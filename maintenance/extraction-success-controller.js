@@ -27,7 +27,6 @@ export async function handleExtractionSuccessController(
   const {
     clonePlanCommitValue,
     consolidateMemories,
-    createAbortError,
     createBatchStatusSkeleton,
     ensureCurrentGraphRuntimeState,
     finalizeBatchStatus,
@@ -47,13 +46,11 @@ export async function handleExtractionSuccessController(
     shouldDeferExtractionMaintenance,
     shouldDeferExtractionVectorSync,
     sleepCycle,
-    syncVectorState,
     throwIfAborted,
     updateLastExtractedItems,
     getExtractionCount,
     setExtractionCount,
     getCurrentGraph,
-    EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
   } = runtime;
 
   status = status || createBatchStatusSkeleton({
@@ -600,7 +597,7 @@ export async function handleExtractionSuccessController(
     console.error("[ST-BME] 记忆压缩失败:", error);
   }
 
-  let vectorSync = null;
+  let committedVectorSync = null;
   let backgroundVectorSync = null;
   const vectorSyncRangeSource = Array.isArray(result?.processedRange)
     ? result.processedRange
@@ -617,11 +614,11 @@ export async function handleExtractionSuccessController(
       Number(vectorSyncRangeSource[1] ?? endIdx),
     ),
   };
+  ensureCurrentGraphRuntimeState();
+  currentGraph.vectorIndexState ||= {};
+  currentGraph.vectorIndexState.dirty = true;
   if (shouldDeferExtractionVectorSync(settings)) {
     const concurrency = resolveMaintenancePostProcessConcurrency(settings);
-    ensureCurrentGraphRuntimeState();
-    currentGraph.vectorIndexState ||= {};
-    currentGraph.vectorIndexState.dirty = true;
     currentGraph.vectorIndexState.dirtyReason = "background-vector-sync-queued";
     currentGraph.vectorIndexState.lastWarning =
       `${concurrency.mode} 模式已将本批向量同步放入后台队列`;
@@ -650,73 +647,29 @@ export async function handleExtractionSuccessController(
     pushBatchStageArtifact(status, "finalize", "vector-sync-queued");
     setBatchStageOutcome(status, "finalize", "success");
   } else {
-    try {
-      updateExtractionPostProcessStatus(
-        "向量同步中",
-        "正在同步本批提取后的向量索引",
+    currentGraph.vectorIndexState.dirtyReason =
+      "vector-sync-awaiting-primary-commit";
+    currentGraph.vectorIndexState.lastWarning =
+      "本批次向量同步正在等待主图持久化确认";
+    committedVectorSync = {
+      enabled: true,
+      reason: "vector-sync-after-primary-commit",
+      range: vectorSyncRange,
+    };
+    updateExtractionPostProcessStatus(
+      "向量同步等待持久化",
+      "主图持久化确认后再同步本批次向量索引",
+    );
+    if (typeof setLastVectorStatus === "function") {
+      setLastVectorStatus(
+        "向量同步等待持久化",
+        "strict 模式 · 等待主图持久化确认",
+        "running",
+        { syncRuntime: false },
       );
-      const vectorSyncTimeoutController = new AbortController();
-      const vectorSyncTimeout = setTimeout(
-        () => vectorSyncTimeoutController.abort(
-          new DOMException(
-            `向量同步超时 (${Math.round(EXTRACTION_VECTOR_SYNC_TIMEOUT_MS / 1000)}s)`,
-            "AbortError",
-          ),
-        ),
-        EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
-      );
-      let vectorSyncSignal = vectorSyncTimeoutController.signal;
-      if (signal) {
-        try {
-          if (typeof AbortSignal.any === "function") {
-            vectorSyncSignal = AbortSignal.any([signal, vectorSyncTimeoutController.signal]);
-          }
-        } catch {}
-      }
-      try {
-        vectorSync = await syncVectorState({ signal: vectorSyncSignal });
-      } finally {
-        clearTimeout(vectorSyncTimeout);
-      }
-    } catch (error) {
-      if (isAbortError(error)) {
-        const isVectorSyncTimeout = error?.name === "AbortError" &&
-          typeof error?.message === "string" &&
-          error.message.includes("向量同步超时");
-        if (!isVectorSyncTimeout) throw error;
-      }
-      const message = error?.message || String(error) || "向量同步阶段失败";
-      setBatchStageOutcome(
-        status,
-        "finalize",
-        "failed",
-        `向量同步失败: ${message}`,
-      );
-      return {
-        postProcessArtifacts,
-        vectorHashesInserted: [],
-        vectorStats: getVectorIndexStats(currentGraph),
-        vectorError: message,
-        warnings: status.warnings,
-        batchStatus: finalizeBatchStatus(status, extractionCount),
-        backgroundVectorSync: null,
-        backgroundMaintenance: deferredMaintenance,
-      };
     }
-
-    if (vectorSync?.aborted) {
-      throw createAbortError(vectorSync.error || "提取已终止");
-    }
-    if (vectorSync?.error) {
-      setBatchStageOutcome(
-        status,
-        "finalize",
-        "failed",
-        `向量同步失败: ${vectorSync.error}`,
-      );
-    } else {
-      setBatchStageOutcome(status, "finalize", "success");
-    }
+    pushBatchStageArtifact(status, "finalize", "vector-sync-after-commit");
+    setBatchStageOutcome(status, "finalize", "success");
   }
 
   status.maintenanceJournalSize =
@@ -733,11 +686,12 @@ export async function handleExtractionSuccessController(
 
   return {
     postProcessArtifacts,
-    vectorHashesInserted: vectorSync?.insertedHashes || [],
-    vectorStats: vectorSync?.stats || getVectorIndexStats(currentGraph),
-    vectorError: vectorSync?.error || "",
+    vectorHashesInserted: [],
+    vectorStats: getVectorIndexStats(currentGraph),
+    vectorError: "",
     warnings: status.warnings,
     batchStatus: finalizeBatchStatus(status, extractionCount),
+    committedVectorSync,
     backgroundVectorSync,
     backgroundMaintenance: deferredMaintenance,
   };
