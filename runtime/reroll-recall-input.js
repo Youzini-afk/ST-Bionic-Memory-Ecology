@@ -342,13 +342,25 @@ export function createRerollRecallInput(deps = {}) {
   function consumePlannerTurnHandoffForGeneration(
     chatId = getCurrentChatId(),
     generationId = "",
+    userMessageText = "",
   ) {
-    const handoff = consumePlannerTurnHandoff(chatId);
+    const normalizedChatId = normalizeChatIdCandidate(chatId);
+    if (!normalizedChatId) return null;
+    const handoff = peekPlannerTurnHandoff(normalizedChatId);
+    if (!handoff) return null;
     const matchedGenerationId = String(handoff?.matchedGenerationId || "").trim();
     const activeGenerationId = String(generationId || "").trim();
-    return matchedGenerationId && matchedGenerationId === activeGenerationId
-      ? handoff
-      : null;
+    const matchesGeneration = Boolean(
+      matchedGenerationId && matchedGenerationId === activeGenerationId,
+    );
+    const matchesUserMessage = Boolean(
+      normalizeRecallInputText(userMessageText) &&
+        normalizeRecallInputText(userMessageText) ===
+          normalizeRecallInputText(handoff.plannerAugmentedMessage),
+    );
+    if (!matchesGeneration && !matchesUserMessage) return null;
+    plannerTurnHandoffs.delete(normalizedChatId);
+    return handoff;
   }
 
   function preparePlannerTurnHandoff({
@@ -358,7 +370,9 @@ export function createRerollRecallInput(deps = {}) {
     plannerPlotRecord = null,
     chatId = getCurrentChatId(),
   } = {}) {
-    const normalizedChatId = normalizeChatIdCandidate(chatId);
+    const normalizedChatId = normalizeChatIdCandidate(
+      getCurrentChatId() || chatId,
+    );
     const normalizedRawUserInput = normalizeRecallInputText(rawUserInput);
     const normalizedPlannerAugmentedMessage = normalizeRecallInputText(
       plannerAugmentedMessage,
@@ -430,21 +444,26 @@ export function createRerollRecallInput(deps = {}) {
     ) {
       return false;
     }
+    const targetUserFloorText = normalizeRecallInputText(
+      chat[newUserMessageIndex]?.mes || "",
+    );
     // Handoffs are keyed by BME's canonical chat identity, not the host filename.
     const chatId = getCurrentChatId();
     const handoff = consumePlannerTurnHandoffForGeneration(
       chatId,
       deps.getActiveGenerationId?.(),
+      targetUserFloorText,
     );
     if (!handoff) return false;
 
-    const targetUserFloorText = normalizeRecallInputText(
-      chat[newUserMessageIndex]?.mes || "",
-    );
     const injectionText = String(handoff?.injectionText || "").trim();
     const result = handoff?.result || null;
+    const recallWasMatched = Boolean(
+      String(handoff?.matchedGenerationId || "").trim(),
+    );
     let wroteRecall = false;
     if (
+      recallWasMatched &&
       injectionText &&
       result &&
       !deps.readPersistedRecallFromUserMessage?.(chat, newUserMessageIndex)

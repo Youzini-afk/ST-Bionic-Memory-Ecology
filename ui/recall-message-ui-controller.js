@@ -1,6 +1,9 @@
 import {
   hashPlannerPlotInput,
+  recoverStructuredPlotRecordFromPlannerRecall,
   readStructuredPlotRecordFromMessage,
+  ST_BME_PLOT_RECOVERY_SUPPRESSED_KEY,
+  writeStructuredPlotRecordToMessage,
 } from "../ena-planner/planner-plot-history.js";
 import { t } from "../i18n/index.js";
 
@@ -12,6 +15,10 @@ export function createRecallMessageUiController(deps = {}) {
   const persistedRecallPersistDiagnosticTimestamps = new Map();
   const readPlotRecordFromMessage =
     deps.readStructuredPlotRecordFromMessage || readStructuredPlotRecordFromMessage;
+  const recoverPlotRecordFromPlannerRecall =
+    deps.recoverStructuredPlotRecordFromPlannerRecall || recoverStructuredPlotRecordFromPlannerRecall;
+  const writePlotRecordToMessage =
+    deps.writeStructuredPlotRecordToMessage || writeStructuredPlotRecordToMessage;
 
   function hasPlotRecordContent(plotRecord) {
     if (!plotRecord || typeof plotRecord !== "object") return false;
@@ -79,6 +86,7 @@ function removePlotRecordFromUserMessage(messageIndex) {
     return false;
   }
   delete message.extra.st_bme_plot;
+  message.extra[ST_BME_PLOT_RECOVERY_SUPPRESSED_KEY] = true;
   deps.triggerChatMetadataSave(getContextValue(), { immediate: false });
   return true;
 }
@@ -477,6 +485,7 @@ function refreshPersistedRecallMessageUi() {
     anchorFailureIndices: [],
     skippedNonUserIndices: [],
   };
+  let recoveredPlotCount = 0;
 
   for (let messageIndex = 0; messageIndex < chat.length; messageIndex++) {
     const message = chat[messageIndex];
@@ -509,7 +518,20 @@ function refreshPersistedRecallMessageUi() {
     }
 
     const record = deps.readPersistedRecallFromUserMessage(chat, messageIndex);
-    const plotRecord = readPlotRecordFromMessage(message);
+    let plotRecord = readPlotRecordFromMessage(message);
+    if (
+      !plotRecord &&
+      message.extra?.[ST_BME_PLOT_RECOVERY_SUPPRESSED_KEY] !== true
+    ) {
+      const recoveredPlotRecord = recoverPlotRecordFromPlannerRecall(message, record);
+      if (
+        recoveredPlotRecord &&
+        writePlotRecordToMessage(message, recoveredPlotRecord)
+      ) {
+        plotRecord = readPlotRecordFromMessage(message);
+        recoveredPlotCount += 1;
+      }
+    }
     const hasRecall = Boolean(record?.injectionText);
     const hasPlot = hasPlotRecordContent(plotRecord);
     if (!hasRecall && !hasPlot) {
@@ -597,6 +619,9 @@ function refreshPersistedRecallMessageUi() {
     summary.renderedCount += 1;
   }
 
+  if (recoveredPlotCount > 0) {
+    deps.triggerChatMetadataSave?.(context, { immediate: false });
+  }
   summary.status = summarizePersistedRecallRefreshStatus(summary);
   if (summary.status === "missing_recall_record") {
     debugPersistedRecallUi("当前无有效持久召回记录可渲染");

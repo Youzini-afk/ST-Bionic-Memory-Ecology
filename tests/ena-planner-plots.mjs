@@ -12,6 +12,7 @@ import {
 import { createRerollRecallInput } from '../runtime/reroll-recall-input.js';
 import {
   createStructuredPlotRecord,
+  recoverStructuredPlotRecordFromPlannerRecall,
   readPlannerPlotHistory,
   writeStructuredPlotRecordToMatchingUserMessage,
   writeStructuredPlotRecordToMessage,
@@ -369,6 +370,35 @@ import {
 }
 
 {
+  const message = {
+    is_user: true,
+    mes: 'raw input\n\n<plot>recovered plan</plot>\n<note>recovered note</note>',
+    extra: {},
+  };
+  const recallRecord = {
+    recallSource: 'planner-handoff',
+    recallInput: 'raw input',
+    boundUserFloorText: message.mes,
+    injectionText: 'planner memory',
+    createdAt: '2026-07-27T00:00:00.000Z',
+  };
+  const recovered = recoverStructuredPlotRecordFromPlannerRecall(message, recallRecord);
+  assert.equal(
+    recovered?.plotText,
+    '<plot>recovered plan</plot>\n<note>recovered note</note>',
+  );
+  assert.deepEqual(recovered?.plotBlocks, ['<plot>recovered plan</plot>']);
+  assert.equal(
+    recoverStructuredPlotRecordFromPlannerRecall(message, {
+      ...recallRecord,
+      recallSource: 'chat-tail-user',
+    }),
+    null,
+    'only a persisted planner handoff can authorize recovery from message text',
+  );
+}
+
+{
   const runtime = createRerollRecallInput({
     getCurrentChatId: () => 'chat-a',
     normalizeChatIdCandidate: (value) => String(value || '').trim(),
@@ -443,7 +473,11 @@ import {
     'one planner handoff cannot be rebound to a later generation',
   );
   assert.equal(runtime.consumePlannerTurnHandoffForGeneration('chat-a', 'generation-2'), null);
-  assert.equal(runtime.peekPlannerTurnHandoff('chat-a'), null);
+  assert.equal(
+    runtime.peekPlannerTurnHandoff('chat-a')?.id,
+    stale.id,
+    'a generation mismatch must not destroy a handoff before MESSAGE_SENT can verify its floor',
+  );
 
   const current = prepare();
   runtime.markPlannerTurnHandoffMatched('chat-a', {
@@ -466,14 +500,14 @@ import {
   const runtime = createRerollRecallInput({
     getCurrentChatId: () => 'integrity-chat-id',
     getContext: () => ({ chatId: 'host-chat-id', chat }),
-    getActiveGenerationId: () => 'generation-1',
+    getActiveGenerationId: () => '',
     normalizeChatIdCandidate: (value) => String(value || '').trim(),
     normalizeRecallInputText: (value) => String(value || '').trim(),
     hashRecallInput: () => 'hash',
     writeStructuredPlotRecordToMessage,
   });
   const handoff = runtime.preparePlannerTurnHandoff({
-    chatId: 'integrity-chat-id',
+    chatId: 'host-chat-id',
     rawUserInput: 'raw input',
     plannerAugmentedMessage: chat[0].mes,
     plannerPlotRecord: { plotText: '<plot>next</plot>' },
@@ -485,6 +519,11 @@ import {
 
   assert.equal(runtime.persistPlannerTurnHandoffToUserMessage(0), true);
   assert.equal(chat[0].extra.st_bme_plot.plotText, '<plot>next</plot>');
+  assert.equal(
+    runtime.peekPlannerTurnHandoff('integrity-chat-id'),
+    null,
+    'the exact ENA user floor can commit the handoff after the generation window closes',
+  );
 }
 
 {

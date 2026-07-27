@@ -1723,6 +1723,66 @@ async function testRecallCardMountsOnStandardUserMessageDom() {
   }
 }
 
+async function testRecallCardRecoversPlannerPlotFromMatchedHandoffFloor() {
+  const mes = "raw input\n\n<plot>recovered plan</plot>\n<note>recovered note</note>";
+  const chat = [
+    {
+      is_user: true,
+      mes,
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "planner memory",
+          recallInput: "raw input",
+          recallSource: "planner-handoff",
+          boundUserFloorText: mes,
+          nowIso: "2026-07-27T00:00:00.000Z",
+        }),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+  let saveCalls = 0;
+  harness.context.triggerChatMetadataSave = () => {
+    saveCalls += 1;
+    return "debounced";
+  };
+
+  try {
+    const summary = harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(summary.status, "rendered");
+    assert.equal(
+      chat[0].extra.st_bme_plot?.plotText,
+      "<plot>recovered plan</plot>\n<note>recovered note</note>",
+    );
+    assert.equal(saveCalls, 1, "recovered plot should be persisted once");
+    const card = harness.chatRoot.querySelector(".bme-recall-card");
+    const plannerTab = card.querySelector(".bme-recall-tab-planner");
+    assert.equal(plannerTab.hidden, false);
+    plannerTab.click();
+    assert.ok(card.querySelector(".bme-recall-planner-pane"));
+
+    const removeBtn = card.querySelector(".bme-recall-action-btn.danger");
+    removeBtn.click();
+    removeBtn.click();
+    harness.api.refreshPersistedRecallMessageUi();
+    assert.equal(chat[0].extra.st_bme_plot, undefined);
+    assert.equal(chat[0].extra.st_bme_plot_recovery_suppressed, true);
+    assert.equal(
+      harness.chatRoot.querySelector(".bme-recall-tab-planner").hidden,
+      true,
+      "an explicitly removed recovered plot must not be restored again",
+    );
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 async function testRecallCardSkipsMountWithoutStableMessageIndex() {
   const chat = [
     {
@@ -10476,6 +10536,7 @@ await testGenerationRecallFinalInjectionBackfillsPersistedRecord();
 await testGenerationRecallImmediateAfterCommandsBackfillsPersistedRecord();
 await testGenerationEndedBackfillsRecentRecallAndSchedulesHideRefresh();
 await testRecallCardMountsOnStandardUserMessageDom();
+await testRecallCardRecoversPlannerPlotFromMatchedHandoffFloor();
 await testRecallCardSkipsMountWithoutStableMessageIndex();
 await testRecallCardDelayedDomInsertionEventuallyRenders();
 await testRecallCardDelayedStableMessageIndexEventuallyRenders();

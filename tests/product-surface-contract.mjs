@@ -13,8 +13,8 @@ const [manifestSource, panelHtml, panelSource, uiLabelSource, styleCss] = await 
 
 const manifest = JSON.parse(manifestSource);
 assert.equal(manifest.display_name, "ST-BME Memory Graph");
-assert.equal(manifest.js, "index.js?v=recall-tabs-v8");
-assert.equal(manifest.css, "style.css?v=recall-tabs-v8");
+assert.equal(manifest.js, "index.js?v=recall-tabs-v9");
+assert.equal(manifest.css, "style.css?v=recall-tabs-v9");
 
 const requiredPanelIds = [
   "st-bme-panel-overlay",

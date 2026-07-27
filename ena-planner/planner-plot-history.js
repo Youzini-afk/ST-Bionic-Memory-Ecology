@@ -5,6 +5,7 @@ import {
 
 export const ST_BME_PLOT_HISTORY_KEY = 'st_bme_plot';
 export const ST_BME_PLOT_HISTORY_VERSION = 1;
+export const ST_BME_PLOT_RECOVERY_SUPPRESSED_KEY = 'st_bme_plot_recovery_suppressed';
 
 export function hashPlannerPlotInput(text = '') {
     let hash = 2166136261;
@@ -65,6 +66,36 @@ export function normalizeStructuredPlotRecord(value) {
 
 export function readStructuredPlotRecordFromMessage(message) {
     return normalizeStructuredPlotRecord(message?.extra?.[ST_BME_PLOT_HISTORY_KEY]);
+}
+
+export function recoverStructuredPlotRecordFromPlannerRecall(message, recallRecord) {
+    if (!message?.is_user || String(recallRecord?.recallSource || '') !== 'planner-handoff') {
+        return null;
+    }
+    const augmentedMessage = String(message.mes || '').trim();
+    const rawUserInput = String(recallRecord?.recallInput || '').trim();
+    const boundUserFloorText = String(recallRecord?.boundUserFloorText || '').trim();
+    if (
+        !augmentedMessage
+        || !rawUserInput
+        || (boundUserFloorText && boundUserFloorText !== augmentedMessage)
+    ) {
+        return null;
+    }
+    const plannerTagIndex = augmentedMessage.search(/<(?:plot|note|plot-log|state)\b/i);
+    if (plannerTagIndex < 0 || augmentedMessage.slice(0, plannerTagIndex).trim() !== rawUserInput) {
+        return null;
+    }
+    const plotText = augmentedMessage.slice(plannerTagIndex).trim();
+    if (!/<plot\b[^>]*>[\s\S]*?<\/plot>/i.test(plotText)) return null;
+    const createdAt = Date.parse(String(recallRecord?.createdAt || ''));
+    return createStructuredPlotRecord({
+        rawUserInput,
+        plannerAugmentedMessage: augmentedMessage,
+        plannerRecallInjectionText: String(recallRecord?.injectionText || '').trim(),
+        plotText,
+        createdAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    });
 }
 
 export function collectStructuredPlotRecords(chat, count = 2) {
@@ -133,6 +164,7 @@ export function writeStructuredPlotRecordToMessage(message, recordInput) {
     message.extra = message.extra && typeof message.extra === 'object'
         ? message.extra
         : {};
+    delete message.extra[ST_BME_PLOT_RECOVERY_SUPPRESSED_KEY];
     message.extra[ST_BME_PLOT_HISTORY_KEY] = record;
     return true;
 }

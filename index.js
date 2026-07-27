@@ -184,7 +184,7 @@ import {
   resolveRuntimeGraphFallbackIdentityCore,
 } from "./runtime/identity-resolver.js";
 import { createRecallInputState } from "./runtime/recall-input-state.js";
-import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v8";
+import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
 import { createConversationWorkspace } from "./runtime/conversation-workspace.js";
 import { createGenerationRecallTransactions } from "./runtime/generation-recall-transactions.js";
@@ -305,12 +305,12 @@ import {
   resolveRecallInputController,
   runRecallController,
 } from "./retrieval/recall-controller.js";
-import { createRecallMessageUiController } from "./ui/recall-message-ui-controller.js?v=recall-tabs-v8";
+import { createRecallMessageUiController } from "./ui/recall-message-ui-controller.js?v=recall-tabs-v9";
 import {
   createRecallCardElement,
   openRecallSidebar,
   updateRecallCardData,
-} from "./ui/recall-message-ui.js?v=recall-tabs-v8";
+} from "./ui/recall-message-ui.js?v=recall-tabs-v9";
 import {
   buildRecallHistoryFingerprint,
   buildPersistedRecallRecord,
