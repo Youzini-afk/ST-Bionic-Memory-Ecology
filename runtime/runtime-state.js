@@ -22,7 +22,7 @@ import {
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
 export const BATCH_JOURNAL_VERSION = 2;
-export const PROCESSED_MESSAGE_HASH_VERSION = 2;
+export const PROCESSED_MESSAGE_HASH_VERSION = 3;
 const graphPersistDirtyStateByGraph = new WeakMap();
 export const MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY =
   "manualBackupBatchJournalCoverage";
@@ -903,12 +903,33 @@ export function stableHashString(text) {
 
 export function buildMessageHash(message) {
   const swipeId = Number.isFinite(message?.swipe_id) ? message.swipe_id : null;
+  const managedHidden = message?.extra?.__st_bme_hide_managed === true;
+  const role = message?.is_user
+    ? "user"
+    : message?.is_system && !managedHidden
+      ? "system"
+      : "assistant";
   const payload = JSON.stringify({
-    isUser: Boolean(message?.is_user),
+    role,
     text: String(message?.mes || ""),
+    name: String(message?.name || "").trim(),
     swipeId,
   });
   return String(stableHashString(payload));
+}
+
+export function buildChatHistoryFingerprint(chat = []) {
+  const messageHashes = Array.isArray(chat)
+    ? chat.map((message) => buildMessageHash(message))
+    : [];
+  return String(
+    stableHashString(
+      JSON.stringify({
+        version: PROCESSED_MESSAGE_HASH_VERSION,
+        messageHashes,
+      }),
+    ),
+  );
 }
 
 export function snapshotProcessedMessageHashes(
@@ -1061,14 +1082,6 @@ export function detectHistoryMutation(chat, historyState) {
     processedMessageHashVersion !== PROCESSED_MESSAGE_HASH_VERSION
   ) {
     return { dirty: false, earliestAffectedFloor: null, reason: "" };
-  }
-
-  if (lastProcessedAssistantFloor >= chat.length) {
-    return {
-      dirty: true,
-      earliestAffectedFloor: chat.length,
-      reason: "已处理楼层超出当前聊天长度，检测到历史截断",
-    };
   }
 
   const trackedFloors = Object.keys(processedMessageHashes)

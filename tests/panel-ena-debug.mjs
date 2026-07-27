@@ -92,7 +92,6 @@ function addElement(document, id) {
 }
 
 const previousDocument = globalThis.document;
-const previousPlannerApi = globalThis.stBmeEnaPlanner;
 
 try {
   const document = new FakeDocument();
@@ -100,20 +99,58 @@ try {
 
   const worldbookButton = addElement(document, "bme-planner-debug-wb");
   const charButton = addElement(document, "bme-planner-debug-char");
+  const runTestButton = addElement(document, "bme-planner-run-test");
+  const testInput = addElement(document, "bme-planner-test-input");
+  const testStatus = addElement(document, "bme-planner-test-status");
   const output = addElement(document, "bme-planner-debug-output");
+  const enabled = addElement(document, "bme-planner-enabled");
+  const skipPlot = addElement(document, "bme-planner-skip-plot");
+  enabled.value = "true";
   addElement(document, "bme-planner-state-chip");
   addElement(document, "bme-planner-save-chip");
 
-  delete globalThis.stBmeEnaPlanner;
-  const { initPlannerSections, cleanupPlannerSections } = await import("../ui/panel-ena-sections.js");
+  const {
+    initPlannerSections,
+    refreshPlannerSections,
+    cleanupPlannerSections,
+  } = await import("../ui/panel-ena-sections.js");
+  let plannerApi = null;
 
-  initPlannerSections(document);
+  initPlannerSections(document, { getPlannerApi: () => plannerApi });
   assert.match(output.textContent, /^$/, "debug output starts empty");
+  assert.equal(enabled.value, "false", "missing planner runtime fails closed in the UI");
 
-  globalThis.stBmeEnaPlanner = {
+  let testedInput = null;
+  let subscribed = 0;
+  let savedPatch = null;
+  plannerApi = {
+    getConfig: () => ({ enabled: true, skipIfPlotPresent: true }),
+    getLogs: () => [],
+    subscribe: () => {
+      subscribed += 1;
+      return () => {};
+    },
+    patchConfig: async (patch) => {
+      savedPatch = patch;
+      return { ok: false, error: "test stop" };
+    },
     debugWorldbook: async () => ({ ok: true, output: "worldbook diagnostics ready" }),
     debugChar: () => ({ ok: false, output: "character lookup failed: missing context" }),
+    runTest: async (text) => {
+      testedInput = text;
+      return { ok: true };
+    },
   };
+
+  refreshPlannerSections({ getPlannerApi: () => plannerApi });
+  assert.equal(enabled.value, "true", "late planner runtime refreshes persisted config");
+  assert.equal(subscribed, 1, "late planner runtime establishes its subscription");
+
+  skipPlot.value = "false";
+  for (const handler of skipPlot.listeners.get("change") || []) {
+    await handler({ target: skipPlot });
+  }
+  assert.equal(savedPatch?.enabled, true, "saving another field preserves loaded enabled state");
 
   await worldbookButton.click();
   assert.equal(output.textContent, "worldbook diagnostics ready");
@@ -122,12 +159,15 @@ try {
   assert.match(output.textContent, /Diagnostics failed|诊断失败/);
   assert.match(output.textContent, /missing context/);
 
+  testInput.value = "fresh planner input";
+  await runTestButton.click();
+  assert.equal(testedInput, "fresh planner input", "late planner runtime is used by bound controls");
+  assert.ok(testStatus.textContent, "planner test status is updated");
+
   cleanupPlannerSections();
 } finally {
   if (previousDocument === undefined) delete globalThis.document;
   else globalThis.document = previousDocument;
-  if (previousPlannerApi === undefined) delete globalThis.stBmeEnaPlanner;
-  else globalThis.stBmeEnaPlanner = previousPlannerApi;
 }
 
 console.log("panel ENA debug tests passed");

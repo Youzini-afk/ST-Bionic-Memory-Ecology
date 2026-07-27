@@ -1,6 +1,4 @@
 export function createRecallInputState(deps = {}) {
-  let currentGenerationTrivialSkip = null;
-
   const getPendingRecallSendIntent = () =>
     deps.getPendingRecallSendIntent?.() ?? deps.createRecallInputRecord?.();
   const setPendingRecallSendIntent = (record) => {
@@ -29,6 +27,10 @@ export function createRecallInputState(deps = {}) {
   const hashRecallInput = (value = "") => deps.hashRecallInput?.(value) ?? "";
   const isFreshRecallInputRecord = (record) =>
     deps.isFreshRecallInputRecord?.(record) ?? Boolean(record?.text);
+  const getCurrentGenerationTrivialSkipRecord = () =>
+    deps.getCurrentGenerationTrivialSkip?.() || null;
+  const setCurrentGenerationTrivialSkipRecord = (record = null) =>
+    deps.setCurrentGenerationTrivialSkip?.(record) ?? record;
   const getTrivialGenerationSkipTtlMs = () =>
     Number.isFinite(Number(deps.TRIVIAL_GENERATION_SKIP_TTL_MS))
       ? Number(deps.TRIVIAL_GENERATION_SKIP_TTL_MS)
@@ -90,6 +92,8 @@ export function createRecallInputState(deps = {}) {
     chatId = getCurrentChatId(),
     now = Date.now(),
   ) {
+    const currentGenerationTrivialSkip =
+      getCurrentGenerationTrivialSkipRecord();
     if (!currentGenerationTrivialSkip) return null;
 
     const setAtMs = Number(currentGenerationTrivialSkip.setAtMs) || 0;
@@ -97,7 +101,7 @@ export function createRecallInputState(deps = {}) {
       !setAtMs ||
       now - setAtMs > getTrivialGenerationSkipTtlMs()
     ) {
-      currentGenerationTrivialSkip = null;
+      setCurrentGenerationTrivialSkipRecord(null);
       return null;
     }
 
@@ -117,7 +121,7 @@ export function createRecallInputState(deps = {}) {
     chatId = getCurrentChatId(),
     chatLength = 0,
   } = {}) {
-    currentGenerationTrivialSkip = {
+    const currentGenerationTrivialSkip = {
       chatId: normalizeChatIdCandidate(chatId),
       setAtMs: Date.now(),
       reason: String(reason || ""),
@@ -126,12 +130,14 @@ export function createRecallInputState(deps = {}) {
         Math.floor(Number(chatLength) || 0),
       ),
     };
-    return currentGenerationTrivialSkip;
+    return setCurrentGenerationTrivialSkipRecord(
+      currentGenerationTrivialSkip,
+    );
   }
 
   function clearCurrentGenerationTrivialSkip(_reason = "") {
-    const previous = currentGenerationTrivialSkip;
-    currentGenerationTrivialSkip = null;
+    const previous = getCurrentGenerationTrivialSkipRecord();
+    setCurrentGenerationTrivialSkipRecord(null);
     return previous;
   }
 
@@ -157,7 +163,7 @@ export function createRecallInputState(deps = {}) {
       return false;
     }
 
-    currentGenerationTrivialSkip = null;
+    setCurrentGenerationTrivialSkipRecord(null);
     return true;
   }
 
@@ -244,13 +250,12 @@ export function createRecallInputState(deps = {}) {
     clearPendingRecallSendIntent();
     setLastRecallSentUserMessage(createRecallInputRecord());
     clearPendingHostGenerationInputSnapshot();
-    deps.clearPendingRerollRecallReuse?.("recall-input-tracking-cleared");
     if (typeof deps.recordMessageTraceSnapshot === "function") {
       deps.recordMessageTraceSnapshot({
         lastSentUserMessage: null,
       });
     }
-    deps.clearPlannerRecallHandoffsForChat?.("", { clearAll: true });
+    deps.clearPlannerTurnHandoffsForChat?.("", { clearAll: true });
   }
 
   return {

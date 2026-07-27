@@ -42,6 +42,7 @@ export class MemoryOpfsFileHandle {
             setTimeout(resolve, Number(parent.writeDelayMs)),
           );
         }
+        await parent.onClose?.({ directory: parent, name, buffer });
         parent.files.set(name, buffer);
       },
     };
@@ -49,11 +50,12 @@ export class MemoryOpfsFileHandle {
 }
 
 export class MemoryOpfsDirectoryHandle {
-  constructor(name = "", { writeDelayMs = 0 } = {}) {
+  constructor(name = "", { writeDelayMs = 0, onClose = null } = {}) {
     this.name = String(name || "");
     this.directories = new Map();
     this.files = new Map();
     this.writeDelayMs = Number(writeDelayMs) || 0;
+    this.onClose = typeof onClose === "function" ? onClose : null;
   }
 
   async getDirectoryHandle(name, options = {}) {
@@ -65,6 +67,7 @@ export class MemoryOpfsDirectoryHandle {
       }
       directory = new MemoryOpfsDirectoryHandle(normalizedName, {
         writeDelayMs: this.writeDelayMs,
+        onClose: this.onClose,
       });
       this.directories.set(normalizedName, directory);
     }

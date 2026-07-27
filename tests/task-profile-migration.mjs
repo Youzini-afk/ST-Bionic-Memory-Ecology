@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  LEGACY_PLANNER_SYSTEM_PROMPT,
-  PLANNER_ASSISTANT_SEED,
-} from "../ena-planner/ena-planner-presets.js";
-import {
   createDefaultTaskProfiles,
   ensureTaskProfiles,
   getActiveTaskProfile,
@@ -189,220 +185,32 @@ assert.equal(defaults.planner.profiles[0].generation.temperature, 1);
 
 const currentDefaultPlanner = defaults.planner.profiles[0];
 const cloneValue = (value) => JSON.parse(JSON.stringify(value));
-
-function buildLegacyPlannerDefaultLikeBlocks() {
-  return [
-    {
-      id: "planner-legacy-default-system",
-      name: "Ena Planner System",
-      type: "custom",
-      enabled: true,
-      role: "system",
-      sourceKey: "",
-      sourceField: "",
-      content: LEGACY_PLANNER_SYSTEM_PROMPT,
-      injectionMode: "relative",
-      order: 0,
-    },
-    {
-      id: "planner-legacy-default-char",
-      name: "角色卡",
-      type: "builtin",
-      enabled: true,
-      role: "system",
-      sourceKey: "plannerCharacterCard",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 1,
-    },
-    {
-      id: "planner-legacy-default-worldbook",
-      name: "世界书",
-      type: "builtin",
-      enabled: true,
-      role: "system",
-      sourceKey: "plannerWorldbook",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 2,
-    },
-    {
-      id: "planner-legacy-default-recent-chat",
-      name: "最近聊天",
-      type: "builtin",
-      enabled: true,
-      role: "system",
-      sourceKey: "plannerRecentChat",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 3,
-    },
-    {
-      id: "planner-legacy-default-memory",
-      name: "BME 记忆",
-      type: "builtin",
-      enabled: true,
-      role: "system",
-      sourceKey: "plannerMemory",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 4,
-    },
-    {
-      id: "planner-legacy-default-previous-plots",
-      name: "历史 plot",
-      type: "builtin",
-      enabled: true,
-      role: "system",
-      sourceKey: "plannerPreviousPlots",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 5,
-    },
-    {
-      id: "planner-legacy-default-user-input",
-      name: "玩家输入",
-      type: "builtin",
-      enabled: true,
-      role: "user",
-      sourceKey: "plannerUserInput",
-      sourceField: "",
-      content: "",
-      injectionMode: "relative",
-      order: 6,
-    },
-    {
-      id: "planner-legacy-default-seed",
-      name: "Assistant Seed",
-      type: "custom",
-      enabled: true,
-      role: "assistant",
-      sourceKey: "",
-      sourceField: "",
-      content: PLANNER_ASSISTANT_SEED,
-      injectionMode: "relative",
-      order: 7,
-    },
-  ];
-}
-
-function createLegacyPlannerDefaultLikeProfile(overrides = {}) {
-  return {
-    id: "planner-legacy-default-like",
-    taskType: "planner",
-    builtin: false,
-    name: "ENA 当前配置",
-    promptMode: "block-based",
-    enabled: true,
-    updatedAt: "2026-04-23T00:00:00.000Z",
-    blocks: buildLegacyPlannerDefaultLikeBlocks(),
-    generation: cloneValue(currentDefaultPlanner.generation),
-    metadata: {
-      migratedFromLegacy: true,
-      enaLegacySource: "legacy-working-copy",
-    },
-    ...overrides,
-    blocks: Array.isArray(overrides.blocks)
-      ? overrides.blocks
-      : buildLegacyPlannerDefaultLikeBlocks(),
-    generation: {
-      ...cloneValue(currentDefaultPlanner.generation),
-      ...(overrides.generation || {}),
-    },
-    metadata: {
-      migratedFromLegacy: true,
-      enaLegacySource: "legacy-working-copy",
-      ...(overrides.metadata || {}),
-    },
-  };
-}
-
-const legacyPlannerDefaultLikeProfile = createLegacyPlannerDefaultLikeProfile();
-const alignedLegacyPlannerDefaults = ensureTaskProfiles({
-  taskProfilesVersion: 3,
-  taskProfiles: {
-    planner: {
-      activeProfileId: legacyPlannerDefaultLikeProfile.id,
-      profiles: [cloneValue(currentDefaultPlanner), legacyPlannerDefaultLikeProfile],
-    },
-  },
-});
-const alignedLegacyPlannerProfile = alignedLegacyPlannerDefaults.planner.profiles.find(
-  (profile) => profile.id === legacyPlannerDefaultLikeProfile.id,
-);
-assert.equal(alignedLegacyPlannerDefaults.planner.activeProfileId, "default");
-assert.deepEqual(
-  alignedLegacyPlannerProfile.blocks.map((block) => block.sourceKey || block.id),
-  currentDefaultPlanner.blocks.map((block) => block.sourceKey || block.id),
-);
-assert.equal(alignedLegacyPlannerProfile.metadata.plannerLegacyDefaultAligned, true);
-
-const legacyPlannerCustomGenerationProfile = createLegacyPlannerDefaultLikeProfile({
-  id: "planner-legacy-custom-generation",
+const customPlanner = {
+  ...cloneValue(currentDefaultPlanner),
+  id: "planner-custom",
+  builtin: false,
+  blocks: cloneValue(currentDefaultPlanner.blocks),
   generation: {
+    ...cloneValue(currentDefaultPlanner.generation),
     temperature: 0.7,
   },
-});
-const alignedLegacyPlannerCustomGeneration = ensureTaskProfiles({
+};
+customPlanner.blocks[0].content = "用户自己的规划抬头";
+const preservedCustomPlanner = ensureTaskProfiles({
   taskProfilesVersion: 3,
   taskProfiles: {
     planner: {
-      activeProfileId: legacyPlannerCustomGenerationProfile.id,
-      profiles: [
-        cloneValue(currentDefaultPlanner),
-        legacyPlannerCustomGenerationProfile,
-      ],
+      activeProfileId: customPlanner.id,
+      profiles: [cloneValue(currentDefaultPlanner), customPlanner],
     },
   },
 });
-const alignedLegacyPlannerCustomGenerationProfile =
-  alignedLegacyPlannerCustomGeneration.planner.profiles.find(
-    (profile) => profile.id === legacyPlannerCustomGenerationProfile.id,
+const preservedCustomPlannerProfile = preservedCustomPlanner.planner.profiles.find(
+    (profile) => profile.id === customPlanner.id,
   );
-assert.equal(
-  alignedLegacyPlannerCustomGeneration.planner.activeProfileId,
-  legacyPlannerCustomGenerationProfile.id,
-);
-assert.deepEqual(
-  alignedLegacyPlannerCustomGenerationProfile.blocks.map(
-    (block) => block.sourceKey || block.id,
-  ),
-  currentDefaultPlanner.blocks.map((block) => block.sourceKey || block.id),
-);
-assert.equal(alignedLegacyPlannerCustomGenerationProfile.generation.temperature, 0.7);
-
-const customizedLegacyPlannerBlocks = buildLegacyPlannerDefaultLikeBlocks();
-customizedLegacyPlannerBlocks[0].content = `${customizedLegacyPlannerBlocks[0].content}\n\n自定义补充`; 
-const customizedLegacyPlannerProfile = createLegacyPlannerDefaultLikeProfile({
-  id: "planner-legacy-customized",
-  blocks: customizedLegacyPlannerBlocks,
-});
-const preservedCustomizedLegacyPlanner = ensureTaskProfiles({
-  taskProfilesVersion: 3,
-  taskProfiles: {
-    planner: {
-      activeProfileId: customizedLegacyPlannerProfile.id,
-      profiles: [cloneValue(currentDefaultPlanner), customizedLegacyPlannerProfile],
-    },
-  },
-});
-const preservedCustomizedLegacyPlannerProfile =
-  preservedCustomizedLegacyPlanner.planner.profiles.find(
-    (profile) => profile.id === customizedLegacyPlannerProfile.id,
-  );
-assert.equal(
-  preservedCustomizedLegacyPlanner.planner.activeProfileId,
-  customizedLegacyPlannerProfile.id,
-);
-assert.match(
-  preservedCustomizedLegacyPlannerProfile.blocks[0].content,
-  /自定义补充/,
-);
+assert.equal(preservedCustomPlanner.planner.activeProfileId, customPlanner.id);
+assert.equal(preservedCustomPlannerProfile.blocks[0].content, "用户自己的规划抬头");
+assert.equal(preservedCustomPlannerProfile.generation.temperature, 0.7);
 
 const upgradedLegacyDefault = getActiveTaskProfile(
   {

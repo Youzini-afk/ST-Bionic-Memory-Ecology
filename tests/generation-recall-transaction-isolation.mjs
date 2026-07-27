@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createConversationSession } from "../runtime/conversation-session.js";
 import { createGenerationRecallTransactions } from "../runtime/generation-recall-transactions.js";
 import {
   hashRecallInput,
@@ -9,42 +10,49 @@ const CHAT_ID = "chat-generation-transaction-isolation";
 const GENERATION_AFTER_COMMANDS = "GENERATION_AFTER_COMMANDS";
 const GENERATE_BEFORE_COMBINE_PROMPTS = "GENERATE_BEFORE_COMBINE_PROMPTS";
 
-function createTransactionHarness({ activeGenerationId = "gen-A" } = {}) {
-  let currentActiveGenerationId = activeGenerationId;
+function createTransactionHarness({ startGeneration = true } = {}) {
+  let clock = 1000;
   const chat = [
     { is_user: true, mes: "first stable user floor" },
     { is_user: false, mes: "first assistant reply", is_system: false },
     { is_user: true, mes: "second fresh user floor" },
     { is_user: false, mes: "second assistant reply", is_system: false },
   ];
+  const session = createConversationSession({ now: () => clock });
+  session.enterChat({ chatId: CHAT_ID, hostChatId: CHAT_ID });
+  if (startGeneration) session.beginGeneration("normal");
 
   const runtime = createGenerationRecallTransactions({
     getContext: () => ({ chatId: CHAT_ID, chat }),
     getCurrentChatId: () => CHAT_ID,
-    getActiveGenerationId: () => currentActiveGenerationId,
+    getActiveGenerationId: () => session.getGeneration()?.id || "",
+    getGenerationRecallTransaction: () => session.getRecallTransaction(),
+    setGenerationRecallTransaction: (transaction) =>
+      session.setRecallTransaction(transaction),
+    clearGenerationRecallTransaction: () => session.clearRecallTransaction(),
     getRecallUserMessageSourceLabel: (source = "") => String(source || ""),
     getSettings: () => ({ recallUseAuthoritativeGenerationInput: false }),
     hashRecallInput,
     normalizeChatIdCandidate: (value = "") => String(value ?? "").trim(),
     normalizeRecallInputText: (value = "") => String(value ?? "").trim(),
-    peekPlannerRecallHandoff: () => null,
-    resolveGenerationTargetUserMessageIndex: (candidateChat = [], options = {}) => {
-      const normalizedType = String(options?.generationType || "normal").trim() || "normal";
+    peekPlannerTurnHandoff: () => null,
+    markPlannerTurnHandoffMatched: () => null,
+    resolveGenerationTargetUserMessageIndex: (candidateChat = []) => {
       for (let index = candidateChat.length - 1; index >= 0; index--) {
         if (candidateChat[index]?.is_user) return index;
       }
-      return normalizedType === "normal" ? null : null;
+      return null;
     },
     shouldRunRecallForTransaction,
-    GENERATION_RECALL_TRANSACTION_TTL_MS: 15000,
-    GENERATION_RECALL_HOOK_BRIDGE_MS: 1200,
   });
 
   return {
-    chat,
     runtime,
-    setActiveGenerationId(value = "") {
-      currentActiveGenerationId = String(value || "").trim();
+    session,
+    startGeneration(type = "normal") {
+      session.clearGeneration("test-next-generation");
+      clock += 1;
+      return session.beginGeneration(type);
     },
   };
 }
@@ -79,10 +87,10 @@ function createRegenerateAfterCommandsContext(runtime) {
   });
 }
 
-function createPeerBeforeCombineContext(runtime, recallOptions = {}) {
+function createPeerBeforeCombineContext(runtime) {
   return runtime.createGenerationRecallContext({
     hookName: GENERATE_BEFORE_COMBINE_PROMPTS,
-    generationType: recallOptions.generationType || "normal",
+    generationType: "normal",
     recallOptions: {
       generationType: "normal",
       targetUserMessageIndex: 2,
@@ -90,24 +98,17 @@ function createPeerBeforeCombineContext(runtime, recallOptions = {}) {
       overrideSource: "chat-tail-user",
       overrideSourceLabel: "chat-tail-user",
       overrideReason: "test-peer-generation",
-      ...recallOptions,
     },
   });
 }
 
 {
-  const { runtime, setActiveGenerationId } = createTransactionHarness({
-    activeGenerationId: "gen-A",
-  });
-
+  const { runtime, session, startGeneration } = createTransactionHarness();
+  const generationAId = session.getGeneration().id;
   const normalContext = createNormalAfterCommandsContext(runtime);
-  assert.ok(normalContext.transaction, "normal generation should create a transaction");
-  assert.equal(normalContext.shouldRun, true, "normal after-commands should run initially");
-  assert.equal(
-    normalContext.transaction.generationId,
-    "gen-A",
-    "normal transaction should be stamped with generation A",
-  );
+  assert.ok(normalContext.transaction);
+  assert.equal(normalContext.shouldRun, true);
+  assert.equal(normalContext.transaction.generationId, generationAId);
 
   runtime.markGenerationRecallTransactionHookState(
     normalContext.transaction,
@@ -130,129 +131,54 @@ function createPeerBeforeCombineContext(runtime, recallOptions = {}) {
     { hookName: GENERATION_AFTER_COMMANDS, deliveryMode: "immediate" },
   );
 
-  setActiveGenerationId("gen-B");
+  const generationB = startGeneration("regenerate");
   const regenerateContext = createRegenerateAfterCommandsContext(runtime);
-
-  assert.ok(regenerateContext.transaction, "regenerate should create a transaction");
-  assert.notEqual(
-    regenerateContext.transaction.id,
-    normalContext.transaction.id,
-    "regenerate must not reuse the previous normal generation transaction",
-  );
-  assert.equal(
-    regenerateContext.transaction.generationId,
-    "gen-B",
-    "regenerate transaction should be stamped with generation B",
-  );
-  assert.equal(
-    regenerateContext.generationType,
-    "regenerate",
-    "regenerate context should keep the requested generation type",
-  );
-  assert.equal(
-    regenerateContext.transaction.generationType,
-    "history",
-    "the transaction bucket for regenerate is normalized to history",
-  );
-  assert.equal(
-    regenerateContext.recallOptions.targetUserMessageIndex,
-    0,
-    "regenerate recall options should bind to the requested target user floor",
-  );
+  assert.ok(regenerateContext.transaction);
+  assert.notEqual(regenerateContext.transaction.id, normalContext.transaction.id);
+  assert.equal(regenerateContext.transaction.generationId, generationB.id);
+  assert.equal(regenerateContext.generationType, "regenerate");
+  assert.equal(regenerateContext.transaction.generationType, "history");
+  assert.equal(regenerateContext.recallOptions.targetUserMessageIndex, 0);
   assert.equal(
     regenerateContext.recallOptions.overrideUserMessage,
     "first stable user floor",
-    "regenerate must not inherit the normal transaction's frozen user message",
   );
   assert.equal(
     runtime.getGenerationRecallTransactionResult(regenerateContext.transaction),
     null,
-    "regenerate must not inherit the normal transaction's stored fresh result",
   );
-  assert.equal(
-    regenerateContext.shouldRun,
-    true,
-    "regenerate should run recall instead of being short-circuited by old peer hook states",
-  );
-
-  console.log("  ✓ cross-generation regenerate creates an isolated recall transaction");
+  assert.equal(regenerateContext.shouldRun, true);
+  console.log("  ok cross-generation recall transaction isolation");
 }
 
 {
-  const { runtime } = createTransactionHarness({ activeGenerationId: "gen-A" });
-
+  const { runtime, session } = createTransactionHarness();
+  const generationId = session.getGeneration().id;
   const afterCommandsContext = createNormalAfterCommandsContext(runtime);
-  assert.ok(afterCommandsContext.transaction, "after-commands should create a transaction");
-  assert.equal(afterCommandsContext.transaction.generationId, "gen-A");
+  assert.ok(afterCommandsContext.transaction);
+  assert.equal(afterCommandsContext.transaction.generationId, generationId);
 
-  runtime.markGenerationRecallTransactionHookState(
-    afterCommandsContext.transaction,
-    GENERATION_AFTER_COMMANDS,
-    "running",
-  );
   runtime.markGenerationRecallTransactionHookState(
     afterCommandsContext.transaction,
     GENERATION_AFTER_COMMANDS,
     "completed",
   );
-
   const beforeCombineContext = createPeerBeforeCombineContext(runtime);
-
-  assert.ok(beforeCombineContext.transaction, "before-combine should return a transaction");
   assert.equal(
-    beforeCombineContext.transaction.id,
+    beforeCombineContext.transaction?.id,
     afterCommandsContext.transaction.id,
-    "same-generation peer hook should reuse the after-commands transaction",
   );
-  assert.equal(
-    beforeCombineContext.transaction.generationId,
-    "gen-A",
-    "same-generation peer bridge should preserve the generation id",
-  );
-
-  console.log("  ✓ same-generation peer hook bridge still reuses the transaction");
+  assert.equal(beforeCombineContext.transaction?.generationId, generationId);
+  console.log("  ok same-generation peer hook transaction reuse");
 }
 
 {
-  const { runtime } = createTransactionHarness({ activeGenerationId: "" });
-
-  const legacyContext = createNormalAfterCommandsContext(runtime);
-  assert.ok(legacyContext.transaction, "legacy no-generation-id path should create a transaction");
-  assert.equal(
-    legacyContext.transaction.generationId,
-    "",
-    "legacy transaction should carry an empty generation id",
-  );
-
-  runtime.markGenerationRecallTransactionHookState(
-    legacyContext.transaction,
-    GENERATION_AFTER_COMMANDS,
-    "completed",
-  );
-
-  const recentTransaction = runtime.findRecentGenerationRecallTransactionForChat(CHAT_ID);
-  assert.equal(
-    recentTransaction?.id,
-    legacyContext.transaction.id,
-    "empty active generation id should still find the recent same-chat transaction",
-  );
-
-  const legacyPeerContext = createPeerBeforeCombineContext(runtime, {
-    generationType: "regenerate",
-    targetUserMessageIndex: 0,
-    overrideUserMessage: "first stable user floor",
-    overrideSource: "chat-last-user",
-    overrideSourceLabel: "chat-last-user",
-    overrideReason: "test-legacy-regenerate-peer",
-  });
-
-  assert.equal(
-    legacyPeerContext.transaction?.id,
-    legacyContext.transaction.id,
-    "empty generation id should preserve legacy same-chat peer bridging behavior",
-  );
-
-  console.log("  ✓ empty generation id preserves legacy same-chat bridging");
+  const { runtime } = createTransactionHarness({ startGeneration: false });
+  const context = createNormalAfterCommandsContext(runtime);
+  assert.equal(context.transaction, null);
+  assert.equal(context.shouldRun, false);
+  assert.equal(context.guardReason, "transaction-unavailable");
+  console.log("  ok no floating transaction without an active generation");
 }
 
 console.log("generation-recall-transaction-isolation tests passed");

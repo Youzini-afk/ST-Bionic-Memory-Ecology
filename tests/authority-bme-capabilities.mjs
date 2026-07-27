@@ -524,7 +524,7 @@ assert.equal(legacy.bmeProtocolVersion, 0);
   assert.equal(state.bmeVectorApplyReady, true);
 }
 
-// Phase F: deriveModuleReadiness with loaded record + graph.commitDelta sets bmeGraphCommitReady.
+// Phase F: the atomic graph path requires commit and conflict-recovery head reads.
 {
   const readiness = deriveModuleReadiness({
     modules: [],
@@ -536,13 +536,41 @@ assert.equal(legacy.bmeProtocolVersion, 0);
           id: BME_AUTHORITY_MODULE_ID,
           transactions: {
             "graph.commitDelta": { name: "graph.commitDelta" },
+            "graph.getHead": { name: "graph.getHead" },
+            "graph.loadSnapshot": { name: "graph.loadSnapshot" },
           },
         },
       },
     ],
   });
   assert.equal(readiness.bmeModuleReady, true, "module should be loaded");
-  assert.equal(readiness.bmeGraphCommitReady, true, "bmeGraphCommitReady must be true when graph.commitDelta declared and module is loaded");
+  assert.equal(readiness.bmeGraphCommitReady, true, "bmeGraphCommitReady requires commitDelta and getHead");
+}
+
+{
+  const readiness = deriveModuleReadiness({
+    modules: [{
+      id: BME_AUTHORITY_MODULE_ID,
+      transactions: {
+        "graph.commitDelta": { name: "graph.commitDelta" },
+        "graph.loadSnapshot": { name: "graph.loadSnapshot" },
+      },
+    }],
+  });
+  assert.equal(readiness.bmeGraphCommitReady, false, "getHead is required for conflict recovery");
+}
+
+{
+  const readiness = deriveModuleReadiness({
+    modules: [{
+      id: BME_AUTHORITY_MODULE_ID,
+      transactions: {
+        "graph.commitDelta": { name: "graph.commitDelta" },
+        "graph.getHead": { name: "graph.getHead" },
+      },
+    }],
+  });
+  assert.equal(readiness.bmeGraphCommitReady, true, "unused loadSnapshot must not block graph commits");
 }
 
 // Phase F: deriveModuleReadiness with load_error record does NOT set bmeGraphCommitReady.
@@ -629,7 +657,7 @@ assert.equal(legacy.bmeProtocolVersion, 0);
   assert.equal(state.bmeGraphCommitReady, false, "default state must seed bmeGraphCommitReady = false");
 }
 
-// Phase F: session init body includes graph.commitDelta in modules.execute declarations.
+// Phase F: session init body includes the complete atomic graph transaction set.
 {
   let sessionInitBody = null;
   const fetchImpl = async (url, options = {}) => {
@@ -659,6 +687,8 @@ assert.equal(legacy.bmeProtocolVersion, 0);
   assert.ok(sessionInitBody, "session init body should have been sent");
   const perms = sessionInitBody.declaredPermissions;
   assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.commitDelta"), "session init must declare graph.commitDelta execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.getHead"), "session init must declare graph.getHead execute");
+  assert.ok(perms.modules.execute.includes("third-party.st-bme:graph.loadSnapshot"), "session init must declare graph.loadSnapshot execute");
   assert.ok(typeof state === "object");
 }
 

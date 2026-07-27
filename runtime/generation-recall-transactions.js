@@ -1,6 +1,4 @@
 export function createGenerationRecallTransactions(deps = {}) {
-  const generationRecallTransactions = new Map();
-
   const normalizeChatIdCandidate = (value = "") =>
     deps.normalizeChatIdCandidate?.(value) ?? String(value ?? "").trim();
   const normalizeRecallInputText = (value = "") =>
@@ -9,14 +7,12 @@ export function createGenerationRecallTransactions(deps = {}) {
   const getContext = (...args) => deps.getContext?.(...args);
   const getActiveGenerationId = () =>
     String(deps.getActiveGenerationId?.() || "").trim();
-  const getGenerationRecallTransactionTtlMs = () =>
-    Number.isFinite(Number(deps.GENERATION_RECALL_TRANSACTION_TTL_MS))
-      ? Number(deps.GENERATION_RECALL_TRANSACTION_TTL_MS)
-      : 15000;
-  const getGenerationRecallHookBridgeMs = () =>
-    Number.isFinite(Number(deps.GENERATION_RECALL_HOOK_BRIDGE_MS))
-      ? Number(deps.GENERATION_RECALL_HOOK_BRIDGE_MS)
-      : 1200;
+  const getCurrentTransaction = () =>
+    deps.getGenerationRecallTransaction?.() || null;
+  const setCurrentTransaction = (transaction = null) =>
+    deps.setGenerationRecallTransaction?.(transaction) ?? transaction;
+  const clearCurrentTransaction = () =>
+    deps.clearGenerationRecallTransaction?.() || null;
 
   function buildPreGenerationRecallKey(type, options = {}) {
     const targetUserMessageIndex = Number.isFinite(options.targetUserMessageIndex)
@@ -38,20 +34,6 @@ export function createGenerationRecallTransactions(deps = {}) {
     ].join(":");
   }
 
-  function cleanupGenerationRecallTransactions(now = Date.now()) {
-    for (const [
-      transactionId,
-      transaction,
-    ] of generationRecallTransactions.entries()) {
-      if (
-        !transaction ||
-        now - (transaction.updatedAt || 0) > getGenerationRecallTransactionTtlMs()
-      ) {
-        generationRecallTransactions.delete(transactionId);
-      }
-    }
-  }
-
   function getGenerationRecallPeerHookName(hookName = "") {
     const normalized = String(hookName || "").trim();
     if (normalized === "GENERATION_AFTER_COMMANDS") {
@@ -61,17 +43,6 @@ export function createGenerationRecallTransactions(deps = {}) {
       return "GENERATION_AFTER_COMMANDS";
     }
     return "";
-  }
-
-  function isGenerationRecallTransactionWithinBridgeWindow(
-    transaction,
-    now = Date.now(),
-  ) {
-    if (!transaction) return false;
-    return (
-      now - Number(transaction.updatedAt || transaction.createdAt || 0) <=
-      getGenerationRecallHookBridgeMs()
-    );
   }
 
   function normalizeGenerationRecallTransactionType(generationType = "normal") {
@@ -276,9 +247,15 @@ export function createGenerationRecallTransactions(deps = {}) {
     };
   }
 
-  function buildGenerationRecallTransactionId(chatId, generationType, recallKey) {
+  function buildGenerationRecallTransactionId(
+    chatId,
+    generationType,
+    recallKey,
+    generationId = getActiveGenerationId(),
+  ) {
     return [
       String(chatId || ""),
+      String(generationId || ""),
       String(generationType || "normal").trim() || "normal",
       String(recallKey || ""),
     ].join(":");
@@ -294,25 +271,20 @@ export function createGenerationRecallTransactions(deps = {}) {
     const normalizedGenerationType =
       String(generationType || "normal").trim() || "normal";
     const normalizedRecallKey = String(recallKey || "");
-    if (!normalizedChatId || !normalizedRecallKey) return null;
-
-    cleanupGenerationRecallTransactions();
+    const generationId = getActiveGenerationId();
+    if (!normalizedChatId || !normalizedRecallKey || !generationId) return null;
     const transactionId = buildGenerationRecallTransactionId(
       normalizedChatId,
       normalizedGenerationType,
       normalizedRecallKey,
+      generationId,
     );
 
     const now = Date.now();
-    const existingTransaction =
-      generationRecallTransactions.get(transactionId) || null;
-    if (
-      existingTransaction &&
-      isGenerationRecallTransactionWithinBridgeWindow(existingTransaction, now) &&
-      !forceNew
-    ) {
+    const existingTransaction = getCurrentTransaction();
+    if (existingTransaction?.id === transactionId && !forceNew) {
       existingTransaction.updatedAt = now;
-      generationRecallTransactions.set(transactionId, existingTransaction);
+      setCurrentTransaction(existingTransaction);
       return existingTransaction;
     }
 
@@ -321,19 +293,18 @@ export function createGenerationRecallTransactions(deps = {}) {
       chatId: normalizedChatId,
       generationType: normalizedGenerationType,
       recallKey: normalizedRecallKey,
-      generationId: getActiveGenerationId(),
+      generationId,
       hookStates: {},
       createdAt: now,
       frozenRecallOptions: null,
     };
     transaction.updatedAt = now;
-    generationRecallTransactions.set(transactionId, transaction);
+    setCurrentTransaction(transaction);
     return transaction;
   }
 
   function findRecentGenerationRecallTransactionForChat(
     chatId = getCurrentChatId(),
-    now = Date.now(),
   ) {
     const normalizedChatId = normalizeChatIdCandidate(chatId);
     if (!normalizedChatId) return null;
@@ -341,40 +312,31 @@ export function createGenerationRecallTransactions(deps = {}) {
     // 跨代际隔离：当宿主提供了当前生成代际 id 时，只桥接“同一次生成”的事务。
     // 这阻止上一轮 normal 生成遗留的事务被本轮 reroll 复用，从而保证
     // reroll 真正进入 runRecall → 持久召回复用门禁，而不是继承旧的 fresh 结果。
-    const activeGenerationId = getActiveGenerationId();
-
-    let latestTransaction = null;
-    for (const transaction of generationRecallTransactions.values()) {
-      if (!transaction || String(transaction.chatId || "") !== normalizedChatId)
-        continue;
-      if (!isGenerationRecallTransactionWithinBridgeWindow(transaction, now))
-        continue;
-      if (activeGenerationId) {
-        const transactionGenerationId = String(transaction.generationId || "").trim();
-        if (transactionGenerationId && transactionGenerationId !== activeGenerationId) {
-          continue;
-        }
-      }
-      if (
-        !latestTransaction ||
-        Number(transaction.updatedAt || 0) >
-          Number(latestTransaction.updatedAt || 0)
-      ) {
-        latestTransaction = transaction;
-      }
+    const transaction = getCurrentTransaction();
+    if (!transaction || String(transaction.chatId || "") !== normalizedChatId) {
+      return null;
     }
-
-    return latestTransaction;
+    const activeGenerationId = getActiveGenerationId();
+    if (
+      activeGenerationId &&
+      String(transaction.generationId || "") !== activeGenerationId
+    ) {
+      return null;
+    }
+    return transaction;
   }
 
   function shouldReuseRecentGenerationRecallTransaction(
     transaction,
     hookName,
     recallKey = "",
-    now = Date.now(),
   ) {
     if (!transaction || !hookName) return false;
-    if (!isGenerationRecallTransactionWithinBridgeWindow(transaction, now)) {
+    const activeGenerationId = getActiveGenerationId();
+    if (
+      activeGenerationId &&
+      String(transaction.generationId || "") !== activeGenerationId
+    ) {
       return false;
     }
 
@@ -422,7 +384,7 @@ export function createGenerationRecallTransactions(deps = {}) {
     transaction.hookStates ||= {};
     transaction.hookStates[hookName] = state;
     transaction.updatedAt = Date.now();
-    generationRecallTransactions.set(transaction.id, transaction);
+    setCurrentTransaction(transaction);
     return transaction;
   }
 
@@ -445,7 +407,7 @@ export function createGenerationRecallTransactions(deps = {}) {
       "";
     transaction.finalResolution = null;
     transaction.updatedAt = Date.now();
-    generationRecallTransactions.set(transaction.id, transaction);
+    setCurrentTransaction(transaction);
     return transaction;
   }
 
@@ -460,7 +422,7 @@ export function createGenerationRecallTransactions(deps = {}) {
     if (!transaction?.id) return transaction;
     transaction.finalResolution = finalResolution ? { ...finalResolution } : null;
     transaction.updatedAt = Date.now();
-    generationRecallTransactions.set(transaction.id, transaction);
+    setCurrentTransaction(transaction);
     return transaction;
   }
 
@@ -468,24 +430,36 @@ export function createGenerationRecallTransactions(deps = {}) {
     chatId = getCurrentChatId(),
     { clearAll = false } = {},
   ) {
-    let removed = 0;
     const normalizedChatId = String(chatId || "");
-    if (clearAll || !normalizedChatId) {
-      removed = generationRecallTransactions.size;
-      generationRecallTransactions.clear();
-      return removed;
+    const transaction = getCurrentTransaction();
+    if (!transaction) return 0;
+    if (
+      !clearAll &&
+      normalizedChatId &&
+      String(transaction.chatId || "") !== normalizedChatId
+    ) {
+      return 0;
     }
+    clearCurrentTransaction();
+    return 1;
+  }
 
-    for (const [
-      transactionId,
-      transaction,
-    ] of generationRecallTransactions.entries()) {
-      if (String(transaction?.chatId || "") !== normalizedChatId) continue;
-      generationRecallTransactions.delete(transactionId);
-      removed += 1;
-    }
-
-    return removed;
+  function isPlannerTurnHandoffForRecall(handoff, recallOptions = {}) {
+    const augmentedMessage = normalizeRecallInputText(
+      handoff?.plannerAugmentedMessage || "",
+    );
+    if (!augmentedMessage) return false;
+    const candidates = [
+      recallOptions?.overrideUserMessage,
+      recallOptions?.userMessage,
+      recallOptions?.boundUserFloorText,
+      ...(Array.isArray(recallOptions?.sourceCandidates)
+        ? recallOptions.sourceCandidates.map((candidate) => candidate?.text)
+        : []),
+    ];
+    return candidates.some(
+      (candidate) => normalizeRecallInputText(candidate || "") === augmentedMessage,
+    );
   }
 
   function createGenerationRecallContext({
@@ -502,26 +476,44 @@ export function createGenerationRecallTransactions(deps = {}) {
     const effectiveGenerationType = normalizeGenerationRecallTransactionType(
       recallOptions?.generationType || generationType,
     );
-    const plannerRecallHandoff =
+    const pendingPlannerHandoff =
       effectiveGenerationType === "normal"
-        ? deps.peekPlannerRecallHandoff(normalizedChatId)
+        ? deps.peekPlannerTurnHandoff(normalizedChatId)
         : null;
-    const effectiveRecallOptions = plannerRecallHandoff
+    let plannerTurnHandoff = isPlannerTurnHandoffForRecall(
+      pendingPlannerHandoff,
+      recallOptions,
+    )
+      ? pendingPlannerHandoff
+      : null;
+    if (pendingPlannerHandoff && !plannerTurnHandoff) {
+      deps.clearPlannerTurnHandoffsForChat?.(normalizedChatId);
+    }
+    if (plannerTurnHandoff) {
+      plannerTurnHandoff = deps.markPlannerTurnHandoffMatched?.(normalizedChatId, {
+        handoffId: plannerTurnHandoff.id,
+        generationId: getActiveGenerationId(),
+      }) || null;
+      if (!plannerTurnHandoff) {
+        deps.clearPlannerTurnHandoffsForChat?.(normalizedChatId);
+      }
+    }
+    const effectiveRecallOptions = plannerTurnHandoff
       ? {
           ...(recallOptions || {}),
-          overrideUserMessage: plannerRecallHandoff.rawUserInput,
-          overrideSource: plannerRecallHandoff.source || "planner-handoff",
+          overrideUserMessage: plannerTurnHandoff.rawUserInput,
+          overrideSource: plannerTurnHandoff.source || "planner-handoff",
           overrideSourceLabel:
-            plannerRecallHandoff.sourceLabel || "Planner handoff",
+            plannerTurnHandoff.sourceLabel || "Planner handoff",
           overrideReason: "planner-handoff-reuse",
           targetUserMessageIndex: null,
           awaitingUserMessage: true,
           sourceCandidates: [
             {
-              text: plannerRecallHandoff.rawUserInput,
-              source: plannerRecallHandoff.source || "planner-handoff",
+              text: plannerTurnHandoff.rawUserInput,
+              source: plannerTurnHandoff.source || "planner-handoff",
               sourceLabel:
-                plannerRecallHandoff.sourceLabel || "Planner handoff",
+                plannerTurnHandoff.sourceLabel || "Planner handoff",
               reason: "planner-handoff-reuse",
               includeSyntheticUserMessage: false,
             },
@@ -573,7 +565,6 @@ export function createGenerationRecallTransactions(deps = {}) {
     const now = Date.now();
     const recentTransaction = findRecentGenerationRecallTransactionForChat(
       normalizedChatId,
-      now,
     );
     let transaction = recentTransaction;
     if (
@@ -581,7 +572,6 @@ export function createGenerationRecallTransactions(deps = {}) {
         transaction,
         hookName,
         fallbackRecallKey,
-        now,
       )
     ) {
       transaction = beginGenerationRecallTransaction({
@@ -656,7 +646,7 @@ export function createGenerationRecallTransactions(deps = {}) {
       transaction.generationType = transactionGenerationType;
     }
     transaction.updatedAt = now;
-    generationRecallTransactions.set(transaction.id, transaction);
+    setCurrentTransaction(transaction);
 
     const boundRecallOptions = {
       ...(transaction.frozenRecallOptions || frozenRecallOptions),
@@ -669,19 +659,19 @@ export function createGenerationRecallTransactions(deps = {}) {
     // would be short-circuited by an empty cached payload and produce no
     // recall record / no recall card (see docs/features/ena-planner.md:76).
     if (
-      plannerRecallHandoff?.result &&
-      String(plannerRecallHandoff.injectionText || "").trim()
+      plannerTurnHandoff?.result &&
+      String(plannerTurnHandoff.injectionText || "").trim()
     ) {
       boundRecallOptions.cachedRecallPayload = {
-        handoffId: plannerRecallHandoff.id,
-        chatId: plannerRecallHandoff.chatId,
-        result: plannerRecallHandoff.result,
-        recentMessages: Array.isArray(plannerRecallHandoff.recentMessages)
-          ? plannerRecallHandoff.recentMessages.map((item) => String(item || ""))
+        handoffId: plannerTurnHandoff.id,
+        chatId: plannerTurnHandoff.chatId,
+        result: plannerTurnHandoff.result,
+        recentMessages: Array.isArray(plannerTurnHandoff.recentMessages)
+          ? plannerTurnHandoff.recentMessages.map((item) => String(item || ""))
           : [],
-        injectionText: String(plannerRecallHandoff.injectionText || ""),
-        source: plannerRecallHandoff.source || "planner-handoff",
-        sourceLabel: plannerRecallHandoff.sourceLabel || "Planner handoff",
+        injectionText: String(plannerTurnHandoff.injectionText || ""),
+        source: plannerTurnHandoff.source || "planner-handoff",
+        sourceLabel: plannerTurnHandoff.sourceLabel || "Planner handoff",
         reason: "planner-handoff-reuse",
       };
     }
@@ -701,20 +691,10 @@ export function createGenerationRecallTransactions(deps = {}) {
   }
 
   return {
-    generationRecallTransactions,
     buildPreGenerationRecallKey,
-    cleanupGenerationRecallTransactions,
-    getGenerationRecallPeerHookName,
-    isGenerationRecallTransactionWithinBridgeWindow,
-    normalizeGenerationRecallTransactionType,
     resolveGenerationRecallDeliveryMode,
-    shouldUseAuthoritativeGenerationRecallInput,
-    shouldPreserveAuthoritativeGenerationRecallText,
-    freezeGenerationRecallOptionsForTransaction,
-    buildGenerationRecallTransactionId,
     beginGenerationRecallTransaction,
     findRecentGenerationRecallTransactionForChat,
-    shouldReuseRecentGenerationRecallTransaction,
     markGenerationRecallTransactionHookState,
     getGenerationRecallTransactionResult,
     storeGenerationRecallTransactionResult,

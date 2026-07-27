@@ -34,7 +34,7 @@ Quick links: [Configuration](docs/usage/configuration.md) · [Panel guide](docs/
 - **Summarization & maintenance** — Small summaries, summary rollup, reflection, consolidation, automatic compression, active forgetting — all logged and reversible.
 - **Graph visualization** — A built-in canvas force-directed graph with realtime / cognitive / summary views and a mobile view.
 - **Task preset system** — Extraction, recall, compression, summary, reflection, consolidation, and planning all run through a unified task profile, with regex, world info, and EJS rendering.
-- **ENA Planner integration** — Pre-send story planning, integrated into the config page and the `planner` task preset.
+- **ENA Planner integration** — Explicitly enabled, default-off pre-send story planning for fresh user turns, sharing BME recall and the `planner` task profile.
 - **Persistence & sync** — Local-first (IndexedDB), with cloud mirroring, backup/restore, rebuild, and repair.
 - **History safety** — Detects message deletion / edits / swipes, automatically rolls back affected batches and recovers from the change point; protects against truncated "render only the last N" views.
 - **Long-chat optimization** — Hide old turns to control tokens, limit rendered turns to reduce lag, and accelerate key computations with a Native/WASM rollout.
@@ -98,7 +98,7 @@ Refresh the page after installation.
 ### Option 2: manual installation
 
 ```bash
-cd SillyTavern/data/default-user/extensions/third-party
+cd SillyTavern/data/default-user/extensions
 git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 
@@ -137,7 +137,7 @@ Then restart or refresh SillyTavern.
 | Range rebuild | Actions → Vector ops | Rebuild only nodes related to a turn range |
 | Direct re-embed | Actions → Vector ops | Re-embed using the direct embedding config |
 | Export / import / rebuild graph | Actions → Graph management | Graph management and destructive ops |
-| Backup / restore cloud | Config → Cloud storage mode | Manually upload/restore in manual mode |
+| Backup / restore cloud | Config → Cloud Sync | Upload/restore the current chat replica in manual-backup mode |
 | Unhide all | Config → Hide old turns | Restore turns hidden by ST-BME |
 
 > After switching embedding mode or model, run "Rebuild vectors". Per-action details and danger notes are in [Configuration](docs/usage/configuration.md) and [Panel guide](docs/usage/panel.md).
@@ -147,7 +147,7 @@ Then restart or refresh SillyTavern.
 ## Data storage & history safety (highlights)
 
 - **Local-first**: primary storage uses IndexedDB, isolated per chat (`STBME_{chatId}`), with incremental commits on the hot path.
-- **Cloud mirroring**: reuses SillyTavern's file API, supports auto/manual modes, requires no custom backend.
+- **Cloud replica**: Cloud Sync sits above local primary storage, reuses SillyTavern's file API, supports automatic sync/manual backup, and requires no custom backend.
 - **History safety**: detects delete/edit/swipe, prefers rollback-and-replay, falls back to full rebuild when needed; protects against render-truncated views to avoid wrongly clearing the graph.
 - **Forward compatibility**: durable snapshots have a frozen top-level shape, tolerant parsing, and upgrade-on-read — extending the data structure means "add a field", not a big migration.
 

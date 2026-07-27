@@ -1133,6 +1133,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
   retryAttempt = 0,
   scheduleRetryOnFailure = false,
   ignoreRestoreLock = false,
+  targetChatId = "",
 } = {}) {
   const graphPersistenceState = createGraphPersistenceStateProxy(runtime);
   const currentGraph = runtime.getCurrentGraph?.() || null;
@@ -1272,12 +1273,31 @@ export async function retryPendingGraphPersistImpl(runtime, {
   const context = getContext();
   let authorityLocked = isAuthorityPersistenceLocked(graphPersistenceState);
   const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+  const requestedTargetChatId = normalizeChatIdCandidate(targetChatId);
   const queuedChatId = normalizeChatIdCandidate(
     graphPersistenceState.queuedPersistChatId ||
       graphPersistenceState.chatId ||
       activeChatId,
   );
   const currentIdentity = resolveCurrentChatIdentity(context);
+  const isQueuedTargetActive = () => {
+    const activeContext = getContext();
+    const nextActiveChatId = normalizeChatIdCandidate(getCurrentChatId(activeContext));
+    const nextIdentity = resolveCurrentChatIdentity(activeContext);
+    return Boolean(
+      nextActiveChatId &&
+        (areChatIdsEquivalentForResolvedIdentity(
+          queuedChatId,
+          nextActiveChatId,
+          nextIdentity,
+        ) ||
+          areChatIdsEquivalentForResolvedIdentity(
+            nextActiveChatId,
+            queuedChatId,
+            nextIdentity,
+          )),
+    );
+  };
   if (!currentGraph || !context || !activeChatId || !queuedChatId) {
     if (scheduleRetryOnFailure) {
       schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
@@ -1298,6 +1318,17 @@ export async function retryPendingGraphPersistImpl(runtime, {
   }
 
   if (
+    (requestedTargetChatId &&
+      !areChatIdsEquivalentForResolvedIdentity(
+        requestedTargetChatId,
+        queuedChatId,
+        currentIdentity,
+      ) &&
+      !areChatIdsEquivalentForResolvedIdentity(
+        queuedChatId,
+        requestedTargetChatId,
+        currentIdentity,
+      )) ||
     !areChatIdsEquivalentForResolvedIdentity(
       queuedChatId,
       activeChatId,
@@ -1335,7 +1366,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
     isGraphLocalStorageModeOpfs(requestedLocalStoreMode)
   ) {
     await refreshCurrentChatLocalStoreBinding({
-      chatId: activeChatId,
+      chatId: queuedChatId,
       forceCapabilityRefresh: true,
       reopenCurrentDb: true,
       source: reason,
@@ -1345,7 +1376,26 @@ export async function retryPendingGraphPersistImpl(runtime, {
   const pendingPersistGraphSource = resolvePendingPersistGraphSource(
     queuedChatId,
   );
-  const pendingPersistGraph = pendingPersistGraphSource?.graph || currentGraph;
+  const pendingPersistGraph = pendingPersistGraphSource?.graph || null;
+  if (!pendingPersistGraph) {
+    if (scheduleRetryOnFailure) {
+      schedulePendingGraphPersistRetry(reason, Number(retryAttempt) + 1);
+    }
+    return buildGraphPersistResult({
+      saved: false,
+      queued: true,
+      blocked: true,
+      accepted: false,
+      recoverable: false,
+      reason: "pending-persist-source-unavailable",
+      revision: Math.max(
+        Number(graphPersistenceState.queuedPersistRevision || 0),
+        Number(graphPersistenceState.revision || 0),
+      ),
+      saveMode: graphPersistenceState.queuedPersistMode,
+      storageTier: "none",
+    });
+  }
   const pendingPersistGraphDetached =
     Boolean(pendingPersistGraph) &&
     typeof pendingPersistGraph === "object" &&
@@ -1358,14 +1408,14 @@ export async function retryPendingGraphPersistImpl(runtime, {
     Number(getGraphPersistedRevision(pendingPersistGraph) || 0),
   );
   const lastProcessedAssistantFloor =
-    resolvePendingPersistLastProcessedAssistantFloor();
+    resolvePendingPersistLastProcessedAssistantFloor(pendingPersistGraph);
   let acceptedPersistResult = null;
   try {
     acceptedPersistResult = await persistGraphToConfiguredDurableTier(
       context,
       pendingPersistGraph,
       {
-        chatId: activeChatId,
+        chatId: queuedChatId,
         revision: targetRevision,
         reason,
         lastProcessedAssistantFloor,
@@ -1387,18 +1437,45 @@ export async function retryPendingGraphPersistImpl(runtime, {
   }
   authorityLocked = authorityLocked || isAuthorityPersistenceLocked(graphPersistenceState) || isAuthorityLockedPersistResult(acceptedPersistResult);
   if (acceptedPersistResult?.accepted) {
-    applyAcceptedPendingPersistState(acceptedPersistResult, {
-      lastProcessedAssistantFloor,
-      persistedGraph: pendingPersistGraph,
-    });
-    void maybeResumePendingAutoExtraction(
-      `pending-persist-resolved:${acceptedPersistResult.acceptedBy || acceptedPersistResult.storageTier || "accepted"}`,
-    );
+    if (isQueuedTargetActive()) {
+      applyAcceptedPendingPersistState(acceptedPersistResult, {
+        lastProcessedAssistantFloor,
+        persistedGraph: pendingPersistGraph,
+      });
+      void maybeResumePendingAutoExtraction(
+        `pending-persist-resolved:${acceptedPersistResult.acceptedBy || acceptedPersistResult.storageTier || "accepted"}`,
+      );
+    }
     return acceptedPersistResult;
   }
 
+  if (!isQueuedTargetActive()) {
+    const recoverable =
+      !authorityLocked &&
+      maybeCaptureGraphShadowSnapshot(`${reason}:chat-switched`, {
+        graph: pendingPersistGraph,
+        chatId: queuedChatId,
+        revision: targetRevision,
+      });
+    return buildGraphPersistResult({
+      saved: false,
+      queued: false,
+      blocked: true,
+      accepted: false,
+      recoverable,
+      reason: `${reason}:chat-switched`,
+      revision: targetRevision,
+      saveMode: graphPersistenceState.queuedPersistMode,
+      storageTier: recoverable ? "shadow" : "none",
+    });
+  }
+
   let recoverableTier = "none";
-  if (!authorityLocked && canPersistGraphToMetadataFallback(context, pendingPersistGraph)) {
+  if (
+    !authorityLocked &&
+    isQueuedTargetActive() &&
+    canPersistGraphToMetadataFallback(context, pendingPersistGraph)
+  ) {
     const metadataReason = `${reason}:metadata-full-fallback`;
     const metadataResult = persistGraphToChatMetadata(context, {
       reason: metadataReason,
@@ -1416,7 +1493,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
     !authorityLocked &&
     maybeCaptureGraphShadowSnapshot(`${reason}:shadow-fallback`, {
       graph: pendingPersistGraph,
-      chatId: activeChatId,
+      chatId: queuedChatId,
       revision: targetRevision,
     })
   ) {
@@ -1427,7 +1504,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
   const queuedResult = queueGraphPersist(queuedReason, targetRevision, {
     immediate: graphPersistenceState.queuedPersistMode !== "debounced",
     graph: pendingPersistGraph,
-    chatId: activeChatId,
+    chatId: queuedChatId,
     captureShadow: !authorityLocked && recoverableTier === "none",
     recoverableTier,
   });

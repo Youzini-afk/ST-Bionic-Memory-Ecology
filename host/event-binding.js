@@ -33,6 +33,13 @@ function isTavernHelperPromptViewerSyntheticGeneration(runtime) {
   return !runtime.isFreshRecallInputRecord?.(pendingSendIntent);
 }
 
+function resolveEventListenerCleanup(runtime, eventName, listener, cleanup) {
+  if (typeof cleanup === "function") return cleanup;
+  const remove = runtime.eventSource?.off || runtime.eventSource?.removeListener;
+  if (typeof remove !== "function") return cleanup ?? null;
+  return () => Reflect.apply(remove, runtime.eventSource, [eventName, listener]);
+}
+
 export function registerBeforeCombinePromptsController(runtime, listener) {
   const eventName = runtime.eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS;
   const eventSourceMakeFirst = runtime.eventSource?.makeFirst;
@@ -41,12 +48,17 @@ export function registerBeforeCombinePromptsController(runtime, listener) {
       ? eventSourceMakeFirst.bind(runtime.eventSource)
       : runtime.getEventMakeFirst?.();
   if (typeof makeFirst === "function") {
-    return makeFirst(eventName, listener);
+    return resolveEventListenerCleanup(
+      runtime,
+      eventName,
+      listener,
+      makeFirst(eventName, listener),
+    );
   }
 
   runtime.console.warn("[ST-BME] eventMakeFirst 不可用，回退到普通事件注册");
   runtime.eventSource.on(eventName, listener);
-  return null;
+  return resolveEventListenerCleanup(runtime, eventName, listener, null);
 }
 
 export function registerGenerationAfterCommandsController(runtime, listener) {
@@ -58,14 +70,14 @@ export function registerGenerationAfterCommandsController(runtime, listener) {
       : runtime.getEventMakeFirst?.();
   if (typeof makeFirst === "function") {
     const cleanup = makeFirst(eventName, listener);
-    return cleanup;
+    return resolveEventListenerCleanup(runtime, eventName, listener, cleanup);
   }
 
   runtime.console.warn(
     "[ST-BME] eventMakeFirst 不可用，GENERATION_AFTER_COMMANDS 回退到普通事件注册",
   );
   runtime.eventSource.on(eventName, listener);
-  return null;
+  return resolveEventListenerCleanup(runtime, eventName, listener, null);
 }
 
 export function scheduleSendIntentHookRetryController(runtime, delayMs = 400) {
@@ -327,8 +339,7 @@ export function onMessageSentController(runtime, messageId) {
     resolvedMessageId,
     message.mes || "",
   );
-  runtime.persistPlannerRecallHandoffToUserMessage?.(resolvedMessageId);
-  runtime.persistPlannerPlotRecordToUserMessage?.(resolvedMessageId);
+  runtime.persistPlannerTurnHandoffToUserMessage?.(resolvedMessageId);
   // GENERATION_AFTER_COMMANDS 在 sendMessageAsUser 之前触发，此时新用户消息
   // 尚未进入 chat，recall 记录会被写到上一条 user 上。这里用户消息刚入场，
   // transaction 仍在桥接窗口内，立即把记录重新绑定到正确的楼层。
@@ -447,6 +458,11 @@ export function onMessageDeletedController(
       generationContext?.type === "regenerate" &&
       assistantTailDelete,
   );
+  const mutationTrigger = expectedRegenerateDelete
+    ? "message-deleted-regenerate"
+    : assistantTailDelete
+      ? "message-deleted-assistant-tail"
+      : "message-deleted";
   if (assistantTailDelete) {
     runtime.noteAssistantTailDelete?.({ chatLengthOrMessageId, meta });
   }
@@ -456,18 +472,23 @@ export function onMessageDeletedController(
       meta,
     });
     runtime.scheduleDeferredHistoryMutationRecheck?.(
-      expectedRegenerateDelete ? "message-deleted-regenerate" : "message-deleted-assistant-tail",
+      mutationTrigger,
       chatLengthOrMessageId,
       meta,
     );
   } else {
     runtime.invalidateRecallAfterHistoryMutation("消息已删除");
     runtime.scheduleHistoryMutationRecheck(
-      "message-deleted",
+      mutationTrigger,
       chatLengthOrMessageId,
       meta,
     );
   }
+  runtime.checkpointHistoryMutation?.(
+    mutationTrigger,
+    chatLengthOrMessageId,
+    meta,
+  );
   runtime.refreshPersistedRecallMessageUi?.();
   return {
     invalidated: !(expectedRegenerateDelete || assistantTailDelete),
@@ -487,6 +508,7 @@ export function onMessageEditedController(runtime, messageId, meta = null) {
     runtime.removeMessageRecallRecord?.(Math.floor(parsedMessageId));
   }
   runtime.invalidateRecallAfterHistoryMutation("消息已编辑");
+  runtime.checkpointHistoryMutation?.("message-edited", messageId, meta);
   runtime.scheduleHistoryMutationRecheck("message-edited", messageId, meta);
   runtime.refreshPersistedRecallMessageUi?.();
 }
@@ -542,11 +564,14 @@ export async function onMessageSwipedController(runtime, messageId, meta = null)
     );
   }
   if (result?.success !== true) {
-    runtime.scheduleHistoryMutationRecheck?.(
-      "message-swiped",
-      messageId,
-      meta,
-    );
+    runtime.checkpointHistoryMutation?.("message-swiped", messageId, meta);
+    if (result?.recoveryPath !== "awaiting-replacement") {
+      runtime.scheduleHistoryMutationRecheck?.(
+        "message-swiped",
+        messageId,
+        meta,
+      );
+    }
   }
   runtime.refreshPersistedRecallMessageUi?.();
   return result;
@@ -1009,7 +1034,10 @@ export function onMessageReceivedController(
             lastProcessedAssistantFloor,
           })
         : null;
-    if (!autoExtractionPlan?.canRun) {
+    const historyRecoveryPending = Number.isFinite(
+      runtime.getCurrentGraph()?.historyState?.historyDirtyFrom,
+    );
+    if (!autoExtractionPlan?.canRun && !historyRecoveryPending) {
       runtime.console?.debug?.(
         "[ST-BME] assistant message received, auto extraction not runnable yet",
         {
@@ -1044,13 +1072,17 @@ export function onMessageReceivedController(
           messageId: Number.isFinite(Number(targetMessageIndex))
             ? Number(targetMessageIndex)
             : null,
-          targetEndFloor: toSafeFloor(autoExtractionPlan.plannedBatchEndFloor, null),
+          targetEndFloor: toSafeFloor(
+            autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
+            null,
+          ),
         },
       );
       runtime.deferAutoExtraction("generation-running", {
         messageId: targetMessageIndex,
-        targetEndFloor: autoExtractionPlan.plannedBatchEndFloor,
-        strategy: autoExtractionPlan.strategy,
+        targetEndFloor:
+          autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
+        strategy: autoExtractionPlan?.strategy || "normal",
       });
       runtime.refreshPersistedRecallMessageUi?.();
       return;
@@ -1058,7 +1090,8 @@ export function onMessageReceivedController(
     enqueueMicrotask(() => {
       void runtime
         .runExtraction({
-          lockedEndFloor: autoExtractionPlan.plannedBatchEndFloor,
+          lockedEndFloor:
+            autoExtractionPlan?.plannedBatchEndFloor ?? targetMessageIndex,
           triggerSource: "message-received",
         })
         .catch((error) => {

@@ -39,6 +39,14 @@
 
 > 身份是每次操作解析一次、显式传递的，不是从全局随用随取。
 
+### ConversationSession 与异步租约
+
+`runtime/conversation-session.js` 按聊天会话持有 canonical identity、epoch、当前 generation、冻结输入和本轮召回事务。宿主 chatId 被 integrity 提升为稳定身份时，同一宿主 locator 可在不换 epoch 的情况下完成身份提升；真正切换聊天才递增 epoch 并清空代际状态。
+
+跨 `await`、timer 或后台回调的任务在开始时捕获 session lease，发布运行图谱、更新 UI 或写宿主 chat-state 前再次校验。耐久层可以继续完成发起聊天的 detached 写入，但 lease 失效后不得修改后来活动的聊天。
+
+提取与历史恢复还捕获聊天内容 fingerprint。session lease 防跨聊天晚到，history fingerprint 防同一聊天在异步任务期间再次编辑；任一失效都不能发布 working graph。
+
 ## 持久化确认状态机
 
 持久化确认逻辑收敛在 `sync/persistence-reducer.js`，是**纯函数**：无 IO、无图谱变更、无 UI 副作用。
@@ -64,6 +72,12 @@
 
 历史上的语义修复（Phase 2 引入不变量、Phase 5 把调用点改为显式事件）都保留在该文件头注释里。
 
+### 原子回合发布
+
+提取器和同步维护只修改 detached working graph。待提交快照同时包含图谱变更、`extractionCount`、processed floor/hash、batch journal 与向量 dirty 状态；只有规范主存储确认后才通过一次 `setCurrentGraph` 发布。pending、失败或聊天切换都不会部分推进 live graph。
+
+pending retry 必须从排队聊天自己的 shadow、metadata recovery snapshot 或同身份运行图谱取源；找不到就 fail closed。重试成功时也只有排队聊天仍为活动聊天才发布整张快照，不能只补 floor/hash，更不能借用另一个聊天的 `currentGraph`。
+
 ## 图谱可写性门禁
 
 `sync/graph-mutation-gate.js` 决定"现在能不能改图谱"，避免在加载中/恢复中/未进入聊天时误写。
@@ -72,14 +86,14 @@
 
 - `ensureGraphMutationReady` — 操作前的总门禁
 - `getGraphMutationBlockReason` — 给用户的暂停原因文案
-- `assertRecoveryChatStillActive` — 异步恢复过程中，校验聊天没被切走（切走则抛 abort）
+- `assertRecoveryHistoryStillCurrent` — 异步恢复过程中同时校验聊天身份与冻结的历史 fingerprint（切换聊天或同聊天再次变化都抛 abort）
 - `getGraphPersistenceLiveState` — 把内部状态投影成面板/调试可读形态
 
 ## 向量门禁与 reroll 代际上下文
 
 - `vector/vector-gate.js` — 向量准备/修复前置门禁，决定 skip / repair / blocked / sync。
-- `runtime/generation-context.js` — 记录宿主本轮生成的 `type`（`normal` / `swipe` / `regenerate` / `continue` 等），并解析本轮应绑定的父 user 楼层。
-- `runtime/reroll-recall-input.js` — 基于代际上下文构造召回输入，并保存 planner recall handoff / plot record handoff；不再用一次性 marker 猜测 reroll。
+- `runtime/conversation-session.js` — 记录宿主本轮生成的 `type`（`normal` / `swipe` / `regenerate` / `continue` 等）、父 user 楼层、冻结输入与同代召回事务。
+- `runtime/reroll-recall-input.js` — 基于代际上下文构造召回输入，并按聊天保存单个 planner turn handoff；不再用一次性 marker 猜测 reroll。
 - `retrieval/recall-controller.js` — 召回控制器；来源/类型/持久复用输入构造是纯 helper，检索执行和注入副作用仍留在控制器热路径里。
 
 **reroll 不变量：**
@@ -95,9 +109,11 @@ no-new-user 的稳定路径分两段：
 1. `GENERATION_AFTER_COMMANDS` 不做召回计算，直接跳过并把工作推迟到 before-combine。
 2. `GENERATE_BEFORE_COMBINE_PROMPTS` 先调用 `reapplyPersistedRecallBlock`，从父 user 楼层的 `message.extra.bme_recall` 确定性重放召回块；命中后立即返回，不进入 transaction / `runRecall`。若没有记录或记录已陈旧，再落回既有 transaction + compute 兼容路径。
 
+overswipe 的空 assistant 占位不触发空文本回滚/提取。它只留下 durable `awaiting-replacement` checkpoint；替换回复到达后，自动历史恢复负责回滚旧图谱效果并重放，新代际仍复用父 user 的持久召回。
+
 旧的召回事务机制仍保留为 fresh normal 和 fallback compute 的基础设施；它不再是 reroll 已存召回注入的唯一门闸。
 
-ENA Planner 另有一条 plot record handoff：它只负责把 planner 产出的剧情推进记录绑定到新 user 楼层的 `message.extra.st_bme_plot`，不参与召回决策。这样剧情历史持久化不依赖 planner recall 是否成功。
+ENA Planner 只建立一个 planner turn handoff，同时携带原始输入、增强输入、可选 recall 与可选 plot。fresh normal generation 校验增强输入后可复用 recall；空 recall 不会阻断正常召回；reroll 不读取这条交接。`MESSAGE_SENT` 用同一 generation 的匹配证据把 recall 与 `message.extra.st_bme_plot` 一次绑定到新 user 楼层。
 
 ## 副本一致性模型
 

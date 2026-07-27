@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   MANUAL_BACKUP_BATCH_JOURNAL_COVERAGE_KEY,
   appendBatchJournal,
+  buildChatHistoryFingerprint,
   clearHistoryDirty,
   cloneGraphSnapshot,
   createBatchJournalEntry,
@@ -15,6 +16,7 @@ import {
 } from "../runtime/runtime-state.js";
 import { createEmptyGraph } from "../graph/graph.js";
 import { normalizeKnowledgeState } from "../graph/knowledge-state.js";
+import { resolveDirtyFloorFromMutationMeta } from "../maintenance/chat-history.js";
 
 const chat = [
   { is_user: true, mes: "你好" },
@@ -78,7 +80,50 @@ const realSystemFlipDetection = detectHistoryMutation(realSystemFlipChat, {
   processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
   processedMessageHashes: hashes,
 });
-assert.equal(realSystemFlipDetection.dirty, false);
+assert.equal(realSystemFlipDetection.dirty, true);
+assert.equal(realSystemFlipDetection.earliestAffectedFloor, 1);
+
+const renamedChat = structuredClone(chat);
+renamedChat[1].name = "另一个说话者";
+const renamedDetection = detectHistoryMutation(renamedChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+  processedMessageHashes: hashes,
+});
+assert.equal(renamedDetection.dirty, true);
+assert.equal(renamedDetection.earliestAffectedFloor, 1);
+
+assert.equal(
+  buildChatHistoryFingerprint(bmeHiddenChat),
+  buildChatHistoryFingerprint(chat),
+);
+assert.notEqual(
+  buildChatHistoryFingerprint(editedChat),
+  buildChatHistoryFingerprint(chat),
+);
+
+assert.equal(
+  resolveDirtyFloorFromMutationMeta(
+    "message-deleted-regenerate",
+    3,
+    null,
+    chat.slice(0, 3),
+  ),
+  null,
+);
+assert.deepEqual(
+  resolveDirtyFloorFromMutationMeta("message-edited", 1, null, chat),
+  { floor: 1, source: "message-edited-meta" },
+);
+
+const middleDeletedChat = chat.toSpliced(1, 1);
+const middleDeleteDetection = detectHistoryMutation(middleDeletedChat, {
+  lastProcessedAssistantFloor: 3,
+  processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
+  processedMessageHashes: hashes,
+});
+assert.equal(middleDeleteDetection.dirty, true);
+assert.equal(middleDeleteDetection.earliestAffectedFloor, 1);
 
 const migratedGraph = normalizeGraphRuntimeState({
   historyState: {

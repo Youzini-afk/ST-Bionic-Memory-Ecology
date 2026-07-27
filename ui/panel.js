@@ -1301,7 +1301,8 @@ function _setFabVisible(visible) {
 
 function _bindFabToggle() {
   const btn = panelEl?.querySelector("#bme-fab-toggle-btn");
-  if (!btn) return;
+  if (!btn || btn.dataset.bmeBound === "true") return;
+  btn.dataset.bmeBound = "true";
   btn.setAttribute("data-active", String(_getFabVisible()));
   btn.addEventListener("click", () => {
     const next = !_getFabVisible();
@@ -1632,6 +1633,8 @@ function _refreshHideOldMessagesStatus(settings = _getSettings?.() || {}) {
 // ==================== Tab 切换 ====================
 
 function _bindTabs() {
+  if (!panelEl || panelEl.dataset.bmeTabsBound === "true") return;
+  panelEl.dataset.bmeTabsBound = "true";
   panelEl?.querySelectorAll(".bme-tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const tabId = btn.dataset.tab;
@@ -1688,16 +1691,22 @@ function _refreshPlannerLauncher() {
   try {
     refreshPlannerSections({
       getSettings: _getSettings,
+      getPlannerApi: _actionHandlers.getPlannerApi,
     });
   } catch (err) {
     console.warn("[ST-BME] planner section refresh failed:", err);
   }
 }
 
+export function refreshPlannerState() {
+  _refreshPlannerLauncher();
+}
+
 function _bindPlannerLauncher() {
   try {
     initPlannerSections(panelEl || document, {
       getSettings: _getSettings,
+      getPlannerApi: _actionHandlers.getPlannerApi,
     });
   } catch (err) {
     console.warn("[ST-BME] planner section init failed:", err);
@@ -1724,6 +1733,8 @@ const TASK_SECTION_META = {
 };
 
 function _bindTaskNavigation() {
+  if (!panelEl || panelEl.dataset.bmeTaskNavigationBound === "true") return;
+  panelEl.dataset.bmeTaskNavigationBound = "true";
   panelEl?.querySelectorAll(".bme-task-nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       _switchTaskSection(btn.dataset.taskSection);
@@ -3127,6 +3138,9 @@ function _closeMemoryPopup() {
 }
 
 function _bindMemoryPopup() {
+  const popup = document.getElementById("bme-memory-popup");
+  if (!popup || popup.dataset.bmeBound === "true") return;
+  popup.dataset.bmeBound = "true";
   const closeBtn = document.getElementById("bme-memory-popup-close");
   const scrim = document.getElementById("bme-memory-popup-scrim");
   const saveBtn = document.getElementById("bme-memory-popup-save");
@@ -6004,6 +6018,8 @@ function _refreshGraphLayoutDiagnosticsUi() {
 }
 
 function _bindGraphControls() {
+  if (!panelEl || panelEl.dataset.bmeGraphControlsBound === "true") return;
+  panelEl.dataset.bmeGraphControlsBound = "true";
   document
     .getElementById("bme-graph-render-toggle")
     ?.addEventListener("click", () => _toggleGraphRenderingEnabled());
@@ -6780,6 +6796,8 @@ function _deleteNodeDetail() {
 }
 
 function _bindClose() {
+  if (!panelEl || panelEl.dataset.bmeCloseBound === "true") return;
+  panelEl.dataset.bmeCloseBound = "true";
   document
     .getElementById("bme-panel-close")
     ?.addEventListener("click", closePanel);
@@ -6800,7 +6818,8 @@ function _bindClose() {
 function _bindResizeHandle() {
   const handle = document.getElementById("bme-resize-handle");
   const sidebar = panelEl?.querySelector(".bme-panel-sidebar");
-  if (!handle || !sidebar) return;
+  if (!handle || !sidebar || handle.dataset.bmeBound === "true") return;
+  handle.dataset.bmeBound = "true";
 
   let dragging = false;
   let startX = 0;
@@ -6837,7 +6856,11 @@ const PANEL_SIZE_KEY = "st-bme-panel-size";
 let _panelResizeTimer = null;
 
 function _bindPanelResize() {
-  if (!panelEl || typeof ResizeObserver === "undefined") return;
+  if (
+    !panelEl ||
+    typeof ResizeObserver === "undefined" ||
+    panelEl.dataset.bmeResizeObserverBound === "true"
+  ) return;
   const observer = new ResizeObserver(() => {
     clearTimeout(_panelResizeTimer);
     _panelResizeTimer = setTimeout(() => {
@@ -6852,6 +6875,7 @@ function _bindPanelResize() {
     }, 300);
   });
   observer.observe(panelEl);
+  panelEl.dataset.bmeResizeObserverBound = "true";
 }
 
 function _restorePanelSize() {
@@ -7211,6 +7235,8 @@ function _bindDashboardControls() {
 // ==================== 操作绑定 ====================
 
 function _bindActions() {
+  if (!panelEl || panelEl.dataset.bmeActionsBound === "true") return;
+  panelEl.dataset.bmeActionsBound = "true";
   const bindings = {
     "bme-act-compress": "compress",
     "bme-act-sleep": "sleep",
@@ -14355,8 +14381,8 @@ function _refreshCloudStorageModeUi(settings = _getSettings?.() || {}) {
   if (helpText) {
     helpText.textContent =
       mode === "manual"
-        ? "\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730 OPFS / IndexedDB \u5199\u5165\uff0c\u4e0d\u4f1a\u81ea\u52a8\u4e0a\u4f20\u6216\u8986\u76d6\u4e91\u7aef\u3002\u9700\u8981\u63a5\u529b\u65f6\uff0c\u8bf7\u624b\u52a8\u70b9\u51fb\u4e0b\u65b9\u6309\u94ae\u3002"
-        : "\u81ea\u52a8\u50a8\u5b58\u4f1a\u7ee7\u7eed\u6cbf\u7528\u5f53\u524d\u955c\u50cf\u540c\u6b65\u903b\u8f91\u4e0e\u95f4\u9694\uff1b\u624b\u52a8\u50a8\u5b58\u53ea\u4fdd\u7559\u672c\u5730\u5199\u5165\uff0c\u9700\u8981\u4f60\u4e3b\u52a8\u5907\u4efd\u548c\u6062\u590d\u3002";
+        ? t("panel.cloudSync.manualHelp")
+        : t("panel.cloudSync.automaticHelp");
   }
   _renderCloudStorageModeStatus(settings, _getGraphPersistenceSnapshot());
   void _refreshCloudBackupManualUi(settings);

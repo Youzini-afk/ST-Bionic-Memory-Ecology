@@ -142,27 +142,3 @@ class StorageFile {
 export const EnaPlannerStorage = new StorageFile("STBME_EnaPlanner.json", {
   debounceMs: 800,
 });
-
-export async function migrateFromLWBIfNeeded() {
-  const existing = await EnaPlannerStorage.get("config", null);
-  if (existing) return false;
-
-  try {
-    const res = await fetch("/user/files/LittleWhiteBox_EnaPlanner.json", {
-      headers: getRequestHeaders(),
-      cache: "no-cache",
-    });
-    if (!res.ok) return false;
-    const text = await res.text();
-    const old = text ? JSON.parse(text) : null;
-    if (!old?.config) return false;
-
-    await EnaPlannerStorage.set("config", old.config);
-    await EnaPlannerStorage.set("logs", Array.isArray(old.logs) ? old.logs : []);
-    await EnaPlannerStorage.saveNow({ silent: false });
-    return true;
-  } catch (error) {
-    console.warn("[Ena] LWB config migration failed:", error);
-    return false;
-  }
-}

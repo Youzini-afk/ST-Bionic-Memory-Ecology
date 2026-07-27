@@ -1,7 +1,5 @@
 export function createRerollRecallInput(deps = {}) {
-  const plannerRecallHandoffs = new Map();
-  const consumedPlannerRecallHandoffs = new Map();
-  const plannerPlotRecordHandoffs = new Map();
+  const plannerTurnHandoffs = new Map();
 
   const getCurrentChatId = (...args) => deps.getCurrentChatId?.(...args);
   const normalizeChatIdCandidate = (value = "") =>
@@ -17,10 +15,6 @@ export function createRerollRecallInput(deps = {}) {
     Number.isFinite(Number(deps.PLANNER_RECALL_HANDOFF_TTL_MS))
       ? Number(deps.PLANNER_RECALL_HANDOFF_TTL_MS)
       : 60000;
-
-  function clearPendingRerollRecallReuse(reason = "") {
-    return null;
-  }
 
   function buildGenerationAfterCommandsRecallInput(type, params = {}, chat) {
     if (params?.automatic_trigger || params?.quiet_prompt) {
@@ -264,143 +258,100 @@ export function createRerollRecallInput(deps = {}) {
     };
   }
 
-  function cleanupPlannerRecallHandoffs(now = Date.now()) {
-    const pruneRecallHandoffMap = (map) => {
-      for (const [chatId, handoff] of map.entries()) {
-        if (
-          !handoff ||
-          String(handoff.chatId || "") !== String(chatId || "") ||
-          now - Number(handoff.updatedAt || handoff.createdAt || 0) >
-            getPlannerRecallHandoffTtlMs()
-        ) {
-          map.delete(chatId);
-        }
-      }
-    };
-
-    pruneRecallHandoffMap(plannerRecallHandoffs);
-    pruneRecallHandoffMap(consumedPlannerRecallHandoffs);
-    for (const [chatId, handoff] of plannerPlotRecordHandoffs.entries()) {
+  function cleanupPlannerTurnHandoffs(now = Date.now()) {
+    for (const [chatId, handoff] of plannerTurnHandoffs.entries()) {
       if (
         !handoff ||
         String(handoff.chatId || "") !== String(chatId || "") ||
         now - Number(handoff.updatedAt || handoff.createdAt || 0) >
           getPlannerRecallHandoffTtlMs()
       ) {
-        plannerPlotRecordHandoffs.delete(chatId);
+        plannerTurnHandoffs.delete(chatId);
       }
     }
   }
 
-  function peekPlannerRecallHandoffFromMap(
-    map,
+  function peekPlannerTurnHandoff(
     chatId = getCurrentChatId(),
     now = Date.now(),
   ) {
-    cleanupPlannerRecallHandoffs(now);
+    cleanupPlannerTurnHandoffs(now);
     const normalizedChatId = normalizeChatIdCandidate(chatId);
     if (!normalizedChatId) return null;
 
-    const handoff = map.get(normalizedChatId) || null;
+    const handoff = plannerTurnHandoffs.get(normalizedChatId) || null;
     if (!handoff) return null;
     if (
       now - Number(handoff.updatedAt || handoff.createdAt || 0) >
       getPlannerRecallHandoffTtlMs()
     ) {
-      map.delete(normalizedChatId);
+      plannerTurnHandoffs.delete(normalizedChatId);
       return null;
     }
     return handoff;
   }
 
-  function peekPlannerRecallHandoff(
-    chatId = getCurrentChatId(),
-    now = Date.now(),
-  ) {
-    return peekPlannerRecallHandoffFromMap(plannerRecallHandoffs, chatId, now);
-  }
-
-  function peekConsumedPlannerRecallHandoff(
-    chatId = getCurrentChatId(),
-    now = Date.now(),
-  ) {
-    return peekPlannerRecallHandoffFromMap(consumedPlannerRecallHandoffs, chatId, now);
-  }
-
-  function clearPlannerRecallHandoffsForChat(
+  function clearPlannerTurnHandoffsForChat(
     chatId = getCurrentChatId(),
     { clearAll = false } = {},
   ) {
-    cleanupPlannerRecallHandoffs();
+    cleanupPlannerTurnHandoffs();
     if (clearAll) {
-      const removed = plannerRecallHandoffs.size + consumedPlannerRecallHandoffs.size + plannerPlotRecordHandoffs.size;
-      plannerRecallHandoffs.clear();
-      consumedPlannerRecallHandoffs.clear();
-      plannerPlotRecordHandoffs.clear();
+      const removed = plannerTurnHandoffs.size;
+      plannerTurnHandoffs.clear();
       return removed;
     }
 
     const normalizedChatId = normalizeChatIdCandidate(chatId);
     if (!normalizedChatId) return 0;
-    let removed = 0;
-    if (plannerRecallHandoffs.delete(normalizedChatId)) removed += 1;
-    if (consumedPlannerRecallHandoffs.delete(normalizedChatId)) removed += 1;
-    if (plannerPlotRecordHandoffs.delete(normalizedChatId)) removed += 1;
-    return removed;
+    return plannerTurnHandoffs.delete(normalizedChatId) ? 1 : 0;
   }
 
-  function clearPlannerRecallOnlyForChat(chatId = getCurrentChatId()) {
-    cleanupPlannerRecallHandoffs();
-    const normalizedChatId = normalizeChatIdCandidate(chatId);
-    if (!normalizedChatId) return 0;
-    let removed = 0;
-    if (plannerRecallHandoffs.delete(normalizedChatId)) removed += 1;
-    if (consumedPlannerRecallHandoffs.delete(normalizedChatId)) removed += 1;
-    return removed;
-  }
-
-  function peekPlannerPlotRecordHandoff(
-    chatId = getCurrentChatId(),
-    now = Date.now(),
-  ) {
-    cleanupPlannerRecallHandoffs(now);
+  function consumePlannerTurnHandoff(chatId = getCurrentChatId()) {
     const normalizedChatId = normalizeChatIdCandidate(chatId);
     if (!normalizedChatId) return null;
-    return plannerPlotRecordHandoffs.get(normalizedChatId) || null;
-  }
-
-  function consumePlannerPlotRecordHandoff(chatId = getCurrentChatId()) {
-    const normalizedChatId = normalizeChatIdCandidate(chatId);
-    if (!normalizedChatId) return null;
-    const handoff = peekPlannerPlotRecordHandoff(normalizedChatId);
+    const handoff = peekPlannerTurnHandoff(normalizedChatId);
     if (!handoff) return null;
-    plannerPlotRecordHandoffs.delete(normalizedChatId);
+    plannerTurnHandoffs.delete(normalizedChatId);
     return handoff;
   }
 
-  function consumePlannerRecallHandoff(
+  function markPlannerTurnHandoffMatched(
     chatId = getCurrentChatId(),
-    { handoffId = "" } = {},
+    { handoffId = "", generationId = "" } = {},
   ) {
-    const normalizedChatId = normalizeChatIdCandidate(chatId);
-    if (!normalizedChatId) return null;
-
-    const handoff = peekPlannerRecallHandoff(normalizedChatId);
-    if (!handoff) return null;
-    if (handoffId && String(handoff.id || "") !== String(handoffId || "")) {
+    const handoff = peekPlannerTurnHandoff(chatId);
+    if (!handoff || (handoffId && String(handoff.id || "") !== String(handoffId))) {
       return null;
     }
-
-    plannerRecallHandoffs.delete(normalizedChatId);
-    consumedPlannerRecallHandoffs.set(normalizedChatId, {
-      ...handoff,
-      consumedAt: Date.now(),
-      updatedAt: Date.now(),
-    });
+    const nextGenerationId = String(generationId || "").trim();
+    const matchedGenerationId = String(handoff.matchedGenerationId || "").trim();
+    if (
+      !nextGenerationId ||
+      (matchedGenerationId && matchedGenerationId !== nextGenerationId)
+    ) {
+      return null;
+    }
+    const matchedAt = Date.now();
+    handoff.matchedGenerationId = nextGenerationId;
+    handoff.matchedAt = matchedAt;
+    handoff.updatedAt = matchedAt;
     return handoff;
   }
 
-  function preparePlannerRecallHandoff({
+  function consumePlannerTurnHandoffForGeneration(
+    chatId = getCurrentChatId(),
+    generationId = "",
+  ) {
+    const handoff = consumePlannerTurnHandoff(chatId);
+    const matchedGenerationId = String(handoff?.matchedGenerationId || "").trim();
+    const activeGenerationId = String(generationId || "").trim();
+    return matchedGenerationId && matchedGenerationId === activeGenerationId
+      ? handoff
+      : null;
+  }
+
+  function preparePlannerTurnHandoff({
     rawUserInput = "",
     plannerAugmentedMessage = "",
     plannerRecall = null,
@@ -412,16 +363,39 @@ export function createRerollRecallInput(deps = {}) {
     const normalizedPlannerAugmentedMessage = normalizeRecallInputText(
       plannerAugmentedMessage,
     );
-    const result = plannerRecall?.result || null;
-    if (!normalizedChatId || !normalizedRawUserInput || !result) {
+    if (
+      !normalizedChatId ||
+      !normalizedRawUserInput ||
+      !normalizedPlannerAugmentedMessage
+    ) {
       return null;
     }
 
-    cleanupPlannerRecallHandoffs();
+    const rawResult = plannerRecall?.result || null;
+    const injectionText = rawResult
+      ? normalizeRecallInputText(
+          plannerRecall?.memoryBlock ||
+            deps.formatInjection?.(rawResult, deps.getSchema?.()) ||
+            "",
+        )
+      : "";
+    const result = injectionText ? rawResult : null;
+    const plotText = normalizeRecallInputText(plannerPlotRecord?.plotText || "");
+    const normalizedPlotRecord = plotText
+      ? {
+          ...(plannerPlotRecord || {}),
+          rawUserInput: normalizedRawUserInput,
+          plannerAugmentedMessage: normalizedPlannerAugmentedMessage,
+          plotText,
+          plotBlocks: Array.isArray(plannerPlotRecord?.plotBlocks)
+            ? [...plannerPlotRecord.plotBlocks]
+            : null,
+        }
+      : null;
+    if (!result && !normalizedPlotRecord) return null;
+
+    cleanupPlannerTurnHandoffs();
     const createdAt = Date.now();
-    const injectionText = normalizeRecallInputText(
-      plannerRecall?.memoryBlock || deps.formatInjection(result, deps.getSchema()),
-    );
     const handoff = {
       id: [
         normalizedChatId,
@@ -436,74 +410,26 @@ export function createRerollRecallInput(deps = {}) {
         ? plannerRecall.recentMessages.map((item) => String(item || ""))
         : [],
       injectionText,
-      plannerPlotRecord:
-        plannerPlotRecord && typeof plannerPlotRecord === "object"
-          ? { ...plannerPlotRecord }
-          : null,
+      plannerPlotRecord: normalizedPlotRecord,
       source: "planner-handoff",
       sourceLabel: "Planner handoff",
       createdAt,
       updatedAt: createdAt,
     };
-    plannerRecallHandoffs.set(normalizedChatId, handoff);
-    return handoff;
-  }
-
-  function preparePlannerPlotRecordHandoff({
-    rawUserInput = "",
-    plannerAugmentedMessage = "",
-    plotText = "",
-    plotBlocks = null,
-    promptProfileId = "",
-    taskResults = [],
-    chatId = getCurrentChatId(),
-  } = {}) {
-    const normalizedChatId = normalizeChatIdCandidate(chatId);
-    const normalizedRawUserInput = normalizeRecallInputText(rawUserInput);
-    const normalizedPlannerAugmentedMessage = normalizeRecallInputText(
-      plannerAugmentedMessage,
-    );
-    const normalizedPlotText = normalizeRecallInputText(plotText);
-    if (!normalizedChatId || !normalizedRawUserInput || !normalizedPlotText) {
-      return null;
-    }
-    cleanupPlannerRecallHandoffs();
-    const createdAt = Date.now();
-    const handoff = {
-      id: [
-        normalizedChatId,
-        hashRecallInput(normalizedRawUserInput),
-        "plot",
-        createdAt,
-      ].join(":"),
-      chatId: normalizedChatId,
-      rawUserInput: normalizedRawUserInput,
-      plannerAugmentedMessage: normalizedPlannerAugmentedMessage,
-      plotText: normalizedPlotText,
-      plotBlocks: Array.isArray(plotBlocks) ? [...plotBlocks] : null,
-      promptProfileId: String(promptProfileId || ""),
-      taskResults: Array.isArray(taskResults) ? taskResults : [],
-      createdAt,
-      updatedAt: createdAt,
-    };
-    plannerPlotRecordHandoffs.set(normalizedChatId, handoff);
+    plannerTurnHandoffs.set(normalizedChatId, handoff);
     return handoff;
   }
 
   return {
-    clearPendingRerollRecallReuse,
     buildNormalGenerationRecallInput,
     buildHistoryGenerationRecallInput,
     buildGenerationAfterCommandsRecallInput,
-    preparePlannerRecallHandoff,
-    preparePlannerPlotRecordHandoff,
-    peekPlannerPlotRecordHandoff,
-    consumePlannerPlotRecordHandoff,
-    cleanupPlannerRecallHandoffs,
-    peekPlannerRecallHandoff,
-    peekConsumedPlannerRecallHandoff,
-    clearPlannerRecallOnlyForChat,
-    clearPlannerRecallHandoffsForChat,
-    consumePlannerRecallHandoff,
+    preparePlannerTurnHandoff,
+    peekPlannerTurnHandoff,
+    consumePlannerTurnHandoff,
+    consumePlannerTurnHandoffForGeneration,
+    markPlannerTurnHandoffMatched,
+    cleanupPlannerTurnHandoffs,
+    clearPlannerTurnHandoffsForChat,
   };
 }

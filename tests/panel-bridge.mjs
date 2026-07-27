@@ -118,10 +118,12 @@ function appendElement(document, parent, tagName, { id, className, style } = {})
   return element;
 }
 
-function buildDocument({ includeExtensionsMenu = true } = {}) {
+function buildDocument({ includeExtensionsMenu = true, includePanel = true } = {}) {
   const document = new FakeDocument();
-  const overlay = appendElement(document, document.body, "div", { id: "st-bme-panel-overlay" });
-  appendElement(document, overlay, "div", { id: "st-bme-panel" });
+  if (includePanel) {
+    const overlay = appendElement(document, document.body, "div", { id: "st-bme-panel-overlay" });
+    appendElement(document, overlay, "div", { id: "st-bme-panel" });
+  }
   const options = appendElement(document, document.body, "div", { id: "options" });
   const optionsContent = appendElement(document, options, "div", { className: "options-content" });
   appendElement(document, optionsContent, "a", { id: "option_toggle_logprobs" });
@@ -156,6 +158,48 @@ function buildRuntime(document, initialSettings = {}) {
   };
 }
 
+function buildColdRuntime(document, { failFirstInit = false } = {}) {
+  let panelModule;
+  let themesModule;
+  let settings = {};
+  const calls = { importedPanel: 0, importedThemes: 0, initialized: 0, opened: 0 };
+  const importedPanelModule = {
+    openPanel: () => { calls.opened += 1; },
+    initPanel: async () => {
+      calls.initialized += 1;
+      if (!document.getElementById("st-bme-panel-overlay")) {
+        const overlay = appendElement(document, document.body, "div", { id: "st-bme-panel-overlay" });
+        appendElement(document, overlay, "div", { id: "st-bme-panel" });
+      }
+      if (failFirstInit && calls.initialized === 1) throw new Error("init failed");
+    },
+  };
+  const importedThemesModule = { applyTheme: () => {} };
+  return {
+    calls,
+    console: failFirstInit ? { error() {}, warn() {} } : console,
+    document,
+    getPanelModule: () => panelModule,
+    getThemesModule: () => themesModule,
+    setPanelModule: (value) => { panelModule = value; },
+    setThemesModule: (value) => { themesModule = value; },
+    importPanelModule: async () => {
+      calls.importedPanel += 1;
+      return importedPanelModule;
+    },
+    importThemesModule: async () => {
+      calls.importedThemes += 1;
+      return importedThemesModule;
+    },
+    getSettings: () => settings,
+    updateSettings: (patch) => {
+      settings = { ...settings, ...patch };
+      return settings;
+    },
+    $: () => ({ hide: () => {}, css: () => {} }),
+  };
+}
+
 const { initializePanelBridgeController } = await import("../ui/panel-bridge.js");
 
 {
@@ -174,6 +218,13 @@ const { initializePanelBridgeController } = await import("../ui/panel-bridge.js"
   await wandEntry.click();
   assert.equal(runtime.calls.opened, 1, "magic-wand entry opens BME panel");
   assert.ok(runtime.calls.hidden.includes("#extensionsMenu"), "magic-wand entry closes extensions menu");
+
+  const fab = document.getElementById("bme-floating-ball");
+  await fab.click();
+  assert.equal(runtime.calls.opened, 2, "bootstrap FAB opens the panel before panel pointer handling takes over");
+  fab.dataset.bmeFabBound = "true";
+  await fab.click();
+  assert.equal(runtime.calls.opened, 2, "bridge FAB click stands down after panel pointer handling takes over");
 }
 
 {
@@ -194,6 +245,46 @@ const { initializePanelBridgeController } = await import("../ui/panel-bridge.js"
   assert.match(optionsEntry.innerHTML, /记忆图谱/, "legacy menu entry refreshes when locale changes");
   assert.match(wandEntry.innerHTML, /记忆图谱/, "magic-wand entry refreshes when locale changes");
   assert.match(fab.innerHTML, /BME 记忆图谱/, "floating bootstrap refreshes when locale changes");
+}
+
+{
+  const document = buildDocument({ includePanel: false });
+  const runtime = buildColdRuntime(document);
+
+  await Promise.all([
+    initializePanelBridgeController(runtime),
+    initializePanelBridgeController(runtime),
+  ]);
+
+  assert.equal(runtime.calls.importedPanel, 1, "concurrent bridge callers share one panel import");
+  assert.equal(runtime.calls.importedThemes, 1, "concurrent bridge callers share one theme import");
+  assert.equal(runtime.calls.initialized, 1, "concurrent bridge callers share one panel initialization");
+}
+
+{
+  const runtimeA = buildColdRuntime(buildDocument({ includePanel: false }));
+  const runtimeB = buildColdRuntime(buildDocument({ includePanel: false }));
+
+  await Promise.all([
+    initializePanelBridgeController(runtimeA),
+    initializePanelBridgeController(runtimeB),
+  ]);
+
+  assert.equal(runtimeA.calls.initialized, 1, "runtime A owns its panel initialization");
+  assert.equal(runtimeB.calls.initialized, 1, "runtime B owns its panel initialization");
+  assert.ok(runtimeA.getPanelModule()?.openPanel, "runtime A publishes its own panel module");
+  assert.ok(runtimeB.getPanelModule()?.openPanel, "runtime B publishes its own panel module");
+}
+
+{
+  const document = buildDocument({ includePanel: false });
+  const runtime = buildColdRuntime(document, { failFirstInit: true });
+
+  await initializePanelBridgeController(runtime);
+  assert.equal(runtime.getPanelModule(), undefined, "failed initialization is not published as ready");
+  await initializePanelBridgeController(runtime);
+  assert.equal(runtime.calls.initialized, 2, "a failed partial initialization remains retryable");
+  assert.ok(runtime.getPanelModule()?.openPanel, "successful retry publishes the panel module");
 }
 
 {

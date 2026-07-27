@@ -13,15 +13,21 @@ This page is split out from the [README](../../README.en.md) with ST-BME data st
 
 ### Cloud mirroring
 
-Cloud sync uses SillyTavern's existing file API and requires no custom backend route.
+Cloud Sync is the multi-device replication layer for browser-local storage, not another primary storage mode. Local commits remain valid offline; after reconnecting, each chat resumes upload, download, or merge under its own stable chat identity. It uses SillyTavern's existing file API and requires no custom backend route.
 
 - Automatic mode:
-  - After local writes, sync according to the current mirroring logic.
+  - A successful local write schedules the remote mirror; chat changes and returning to a visible page also check the remote copy.
+  - Each chat has one stable head. The head is published only after every new chunk exists; an observed concurrent replacement aborts the publication and keeps the local copy dirty. It does not risk deleting chunks that the winning publication may reuse.
+  - Chunks abandoned by an old head first enter a default 24-hour grace ledger. A later automatic sync check retires them even without another graph change. Failed deletes remain for retry; successfully deleted or already-missing entries leave the ledger after the next head is published successfully.
 
 - Manual mode:
   - Local writes still work normally.
   - Does not write to the cloud automatically.
   - Requires clicking "backup to cloud" or "fetch backup from cloud".
+
+Manual backup files and the automatic Cloud Sync mirror are separate objects. "Manage server backups" manages only manual backups. "Clear server sync data" makes a best-effort attempt to remove the current chat's discoverable sync head, current chunks, GC-ledger chunks, and both current and legacy naming trees when present; it does not modify local IndexedDB. Cleanup may be partial while another device is syncing or when the network/backend fails.
+
+SillyTavern's user-files API has no directory listing, conditional write, or conditional delete, so the extension neither guess-deletes unknown filename prefixes nor presents cross-device overwrites as a strict transaction. Failure cleanup is best-effort over filenames known to the current publication. Failed cleanup and historical orphans that have lost every head/ledger reference cannot be discovered reliably in the browser and require server-side file management.
 
 ### Compatibility and fallback
 

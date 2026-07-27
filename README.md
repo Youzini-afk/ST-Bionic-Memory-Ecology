@@ -32,7 +32,7 @@ ST-BME（Bionic Memory Ecology）是一个 **SillyTavern 第三方前端扩展**
 - **总结与维护** — 小总结、总结折叠、反思、整合、自动压缩、主动遗忘，带日志和回滚。
 - **图谱可视化** — 内置 Canvas 力导向图谱，支持实时/认知/总结视图和移动端视图。
 - **任务预设系统** — 提取、召回、压缩、总结、反思、整合、规划统一走 task profile，支持正则、世界书、EJS 渲染。
-- **ENA Planner 集成** — 发送前剧情规划，整合到配置页和 `planner` 任务预设。
+- **ENA Planner 集成** — 默认关闭、显式启用的发送前剧情规划；只介入新 user 消息，并与 BME 召回及 `planner` 任务预设共享同一回合语义。
 - **持久化与同步** — 本地优先（IndexedDB），支持云端镜像、备份/恢复、重建、修复。
 - **历史安全** — 检测删楼/编辑/swipe，自动回滚受影响批次并从变动点恢复；对"只渲染最近 N 条"的截断视图有保护。
 - **长聊天优化** — 隐藏旧楼层控制 token，限制渲染楼层降低卡顿，关键计算支持 Native/WASM 灰度加速。
@@ -96,7 +96,7 @@ https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology
 ### 方法二：手动安装
 
 ```bash
-cd SillyTavern/data/default-user/extensions/third-party
+cd SillyTavern/data/default-user/extensions
 git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ```
 
@@ -135,7 +135,7 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 | 范围重建 | 操作 → 向量操作 | 只重建指定楼层范围相关节点 |
 | 直连重嵌 | 操作 → 向量操作 | 使用直连 embedding 配置重嵌 |
 | 导出 / 导入 / 重建图谱 | 操作 → 图谱管理 | 图谱管理与危险操作 |
-| 备份 / 恢复云端 | 配置 → 云端存储模式 | 手动模式下主动上传/恢复 |
+| 备份 / 恢复云端 | 配置 → 云端同步 | 手动备份方式下主动上传/恢复当前聊天副本 |
 | 取消全部隐藏 | 配置 → 隐藏旧楼层 | 恢复 ST-BME 隐藏的楼层 |
 
 > 切换 embedding 模式或模型后，建议执行"重建向量"。各操作的细节和危险提示见 [配置参考](docs/usage/configuration.md) 和 [面板导览](docs/usage/panel.md)。
@@ -145,7 +145,7 @@ git clone https://github.com/Youzini-afk/ST-Bionic-Memory-Ecology.git st-bme
 ## 数据存储与历史安全（要点）
 
 - **本地优先**：主存储使用 IndexedDB，按聊天隔离（`STBME_{chatId}`），热路径用增量提交。
-- **云端镜像**：复用 SillyTavern 文件 API，支持自动/手动模式，不需要自定义后端。
+- **云端副本**：Cloud Sync 位于本地主存储之上，复用 SillyTavern 文件 API，支持自动同步/手动备份，不需要自定义后端。
 - **历史安全**：检测删楼/编辑/swipe，优先回滚重放、必要时全量重建；对渲染切片截断有保护，避免误清空。
 - **向前兼容**：耐久快照顶层结构冻结、宽容解析、就地升级——扩展数据结构是"加字段"，不是大迁移。
 

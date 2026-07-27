@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 import { buildPersistDelta } from "../sync/bme-db.js";
+import { PROCESSED_MESSAGE_HASH_VERSION } from "../runtime/runtime-state.js";
 import {
   BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
   OpfsGraphStore,
@@ -24,7 +25,7 @@ function createRuntimeGraphLikeSnapshot({
       chatId,
       lastProcessedAssistantFloor: lastProcessedFloor,
       extractionCount,
-      processedMessageHashVersion: 2,
+      processedMessageHashVersion: PROCESSED_MESSAGE_HASH_VERSION,
       processedMessageHashes: {},
       processedMessageHashesNeedRefresh: false,
       historyDirtyFrom: null,
@@ -429,9 +430,83 @@ async function testCommitDeltaRejectsStaleBaseRevision() {
   );
 }
 
+async function testWalWithoutManifestNeverPublishesPartialCommit() {
+  let failNextManifest = false;
+  const rootDirectory = createMemoryOpfsRoot({
+    onClose({ name }) {
+      if (failNextManifest && name === "manifest.json") {
+        failNextManifest = false;
+        throw new Error("injected-manifest-close-failure");
+      }
+    },
+  });
+  const createStore = () =>
+    new OpfsGraphStore("chat-opfs-partial-manifest", {
+      rootDirectoryFactory: async () => rootDirectory,
+      storeMode: BME_GRAPH_LOCAL_STORAGE_MODE_OPFS_PRIMARY,
+    });
+  const store = createStore();
+  await store.open();
+  await store.importSnapshot(
+    {
+      meta: { revision: 1 },
+      state: { lastProcessedFloor: 1, extractionCount: 1 },
+      nodes: [{ id: "seed", type: "event", updatedAt: 1 }],
+      edges: [],
+      tombstones: [],
+    },
+    { mode: "replace", preserveRevision: true },
+  );
+
+  failNextManifest = true;
+  await assert.rejects(
+    store.commitDelta(
+      {
+        upsertNodes: [{ id: "partial", type: "event", updatedAt: 2 }],
+        runtimeMetaPatch: {
+          lastProcessedFloor: 2,
+          extractionCount: 2,
+        },
+      },
+      { baseRevision: 1, requestedRevision: 2, reason: "partial-write" },
+    ),
+    /injected-manifest-close-failure/,
+  );
+
+  const reopened = createStore();
+  await reopened.open();
+  const afterFailure = await reopened.exportSnapshot();
+  assert.equal(afterFailure.meta.revision, 1);
+  assert.equal(afterFailure.state.lastProcessedFloor, 1);
+  assert.equal(afterFailure.state.extractionCount, 1);
+  assert.deepEqual(afterFailure.nodes.map((node) => node.id), ["seed"]);
+
+  await reopened.commitDelta(
+    {
+      upsertNodes: [{ id: "accepted", type: "event", updatedAt: 3 }],
+      runtimeMetaPatch: {
+        lastProcessedFloor: 2,
+        extractionCount: 2,
+      },
+    },
+    { baseRevision: 1, requestedRevision: 2, reason: "accepted-write" },
+  );
+  const finalStore = createStore();
+  await finalStore.open();
+  const finalSnapshot = await finalStore.exportSnapshot();
+  assert.equal(finalSnapshot.meta.revision, 2);
+  assert.equal(finalSnapshot.state.lastProcessedFloor, 2);
+  assert.equal(finalSnapshot.state.extractionCount, 2);
+  assert.deepEqual(
+    finalSnapshot.nodes.map((node) => node.id).sort(),
+    ["accepted", "seed"],
+  );
+}
+
 await testCommitDeltaAndPatchMetaSerialize();
 await testImportSnapshotAndClearAllSerialize();
 await testGraphLikeDeltaPreservesHistoryFrontier();
 await testCommitDeltaDiagnosticsSplitWalAndManifestStages();
 await testCommitDeltaRejectsStaleBaseRevision();
+await testWalWithoutManifestNeverPublishesPartialCommit();
 console.log("opfs-write-serialization tests passed");

@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 
 import { executeExtractionBatchController } from "../maintenance/extraction-controller.js";
+import { buildChatHistoryFingerprint } from "../runtime/runtime-state.js";
 import {
   createBatchStatusSkeleton,
   finalizeBatchStatus,
   setBatchStageOutcome,
 } from "../ui/ui-status.js";
 
-function createRuntime(persistResult) {
+function createRuntime(persistResult, { checkpointError = null } = {}) {
   const graph = {
     nodes: [],
     edges: [],
-    historyState: { chatId: "chat-test" },
+    historyState: {
+      chatId: "chat-test",
+      extractionCount: 6,
+      processedMessageHashes: { 4: "old-hash" },
+    },
     batchJournal: [],
   };
   let activeGraph = graph;
@@ -19,6 +24,9 @@ function createRuntime(persistResult) {
   let processedHistoryUpdates = 0;
   let persistedGraphSnapshot = null;
   let lastPersistDeltaOptions = null;
+  let extractionCount = 6;
+  let staleCheckpointSaves = 0;
+  let staleCheckpointSaveOptions = null;
 
   return {
     graph,
@@ -28,6 +36,9 @@ function createRuntime(persistResult) {
     throwIfAborted() {},
     getCurrentGraph() {
       return activeGraph;
+    },
+    setCurrentGraph(graph) {
+      activeGraph = graph;
     },
     getCurrentChatId() {
       return activeChatId;
@@ -45,10 +56,29 @@ function createRuntime(persistResult) {
       return 4;
     },
     getExtractionCount() {
-      return 6;
+      return extractionCount;
+    },
+    setExtractionCount(value) {
+      extractionCount = Number(value || 0);
     },
     cloneGraphSnapshot(value) {
       return JSON.parse(JSON.stringify(value));
+    },
+    buildChatHistoryFingerprint,
+    markHistoryDirty(targetGraph, floor, reason = "", source = "") {
+      targetGraph.historyState ||= {};
+      const currentFloor = targetGraph.historyState.historyDirtyFrom;
+      targetGraph.historyState.historyDirtyFrom = Number.isFinite(currentFloor)
+        ? Math.min(currentFloor, floor)
+        : floor;
+      targetGraph.historyState.lastMutationReason = reason;
+      targetGraph.historyState.lastMutationSource = source;
+    },
+    async saveGraphToChat(options = {}) {
+      staleCheckpointSaves += 1;
+      staleCheckpointSaveOptions = { ...options };
+      if (checkpointError) throw checkpointError;
+      return { accepted: true, saved: true };
     },
     buildPersistDelta(_beforeSnapshot, _afterSnapshot, options = {}) {
       lastPersistDeltaOptions = { ...(options || {}) };
@@ -70,7 +100,8 @@ function createRuntime(persistResult) {
       return [{ seq: 5, role: "assistant", content: "测试消息" }];
     },
     createBatchStatusSkeleton,
-    async extractMemories() {
+    async extractMemories({ graph: targetGraph }) {
+      targetGraph.nodes.push({ id: "node-1", type: "event" });
       return {
         success: true,
         newNodes: 1,
@@ -88,7 +119,16 @@ function createRuntime(persistResult) {
     },
     setLastExtractionStatus() {},
     setBatchStageOutcome,
-    async handleExtractionSuccess(result, _endIdx, _settings, _signal, batchStatus) {
+    async handleExtractionSuccess(
+      result,
+      _endIdx,
+      _settings,
+      _signal,
+      batchStatus,
+      _postProcessContext,
+      taskContext,
+    ) {
+      taskContext.graph.historyState.extractionCount = extractionCount + 1;
       setBatchStageOutcome(batchStatus, "finalize", "success");
       return {
         postProcessArtifacts: [],
@@ -120,11 +160,17 @@ function createRuntime(persistResult) {
     },
     applyProcessedHistorySnapshotToGraph(targetGraph, _chat, floor) {
       targetGraph.historyState.lastProcessedAssistantFloor = floor;
+      targetGraph.historyState.processedMessageHashes = {
+        ...targetGraph.historyState.processedMessageHashes,
+        [floor]: `hash-${floor}`,
+      };
       targetGraph.lastProcessedSeq = floor;
     },
     getGraphPersistenceState() {
       return { chatId: "chat-test" };
     },
+    stampGraphPersistenceMeta() {},
+    updateLastExtractedItems() {},
     console,
     get processedHistoryUpdates() {
       return processedHistoryUpdates;
@@ -134,6 +180,12 @@ function createRuntime(persistResult) {
     },
     get lastPersistDeltaOptions() {
       return lastPersistDeltaOptions;
+    },
+    get staleCheckpointSaves() {
+      return staleCheckpointSaves;
+    },
+    get staleCheckpointSaveOptions() {
+      return staleCheckpointSaveOptions;
     },
   };
 }
@@ -158,20 +210,26 @@ function createRuntime(persistResult) {
 
   assert.equal(result.success, true);
   assert.equal(result.historyAdvanceAllowed, false);
-  assert.equal(runtime.processedHistoryUpdates, 1);
+  assert.equal(runtime.processedHistoryUpdates, 0);
   assert.equal(
-    runtime.graph.historyState.lastBatchStatus.persistence.outcome,
+    runtime.getCurrentGraph().historyState.lastBatchStatus.persistence.outcome,
     "queued",
   );
   assert.equal(
-    runtime.graph.historyState.lastBatchStatus.historyAdvanceAllowed,
+    runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanceAllowed,
     false,
   );
   assert.equal(
-    runtime.graph.historyState.lastBatchStatus.historyAdvanced,
+    runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanced,
     false,
   );
-  assert.equal(runtime.graph.batchJournal.length, 0);
+  assert.equal(runtime.getCurrentGraph().batchJournal.length, 0);
+  assert.equal(runtime.getCurrentGraph().nodes.length, 0);
+  assert.equal(runtime.getCurrentGraph().historyState.extractionCount, 6);
+  assert.deepEqual(
+    runtime.getCurrentGraph().historyState.processedMessageHashes,
+    { 4: "old-hash" },
+  );
   assert.equal(
     runtime.persistedGraphSnapshot?.historyState?.lastProcessedAssistantFloor,
     5,
@@ -179,6 +237,12 @@ function createRuntime(persistResult) {
   assert.equal(
     runtime.persistedGraphSnapshot?.batchJournal?.length,
     1,
+  );
+  assert.equal(runtime.persistedGraphSnapshot?.nodes?.length, 1);
+  assert.equal(runtime.persistedGraphSnapshot?.historyState?.extractionCount, 7);
+  assert.equal(
+    runtime.persistedGraphSnapshot?.historyState?.processedMessageHashes?.[5],
+    "hash-5",
   );
 }
 
@@ -202,13 +266,13 @@ function createRuntime(persistResult) {
 
   assert.equal(result.success, true);
   assert.equal(result.historyAdvanceAllowed, true);
-  assert.equal(runtime.processedHistoryUpdates, 1);
+  assert.equal(runtime.processedHistoryUpdates, 0);
   assert.equal(
-    runtime.graph.historyState.lastBatchStatus.persistence.outcome,
+    runtime.getCurrentGraph().historyState.lastBatchStatus.persistence.outcome,
     "saved",
   );
   assert.equal(
-    runtime.graph.historyState.lastBatchStatus.historyAdvanceAllowed,
+    runtime.getCurrentGraph().historyState.lastBatchStatus.historyAdvanceAllowed,
     true,
   );
   assert.equal(
@@ -218,6 +282,17 @@ function createRuntime(persistResult) {
   assert.equal(
     runtime.persistedGraphSnapshot?.batchJournal?.length,
     1,
+  );
+  assert.equal(runtime.getCurrentGraph().nodes.length, 1);
+  assert.equal(runtime.getCurrentGraph().batchJournal.length, 1);
+  assert.equal(runtime.getCurrentGraph().historyState.extractionCount, 7);
+  assert.equal(
+    runtime.getCurrentGraph().historyState.processedMessageHashes?.[5],
+    "hash-5",
+  );
+  assert.equal(
+    runtime.getCurrentGraph().historyState.lastProcessedAssistantFloor,
+    5,
   );
 }
 
@@ -232,11 +307,14 @@ function createRuntime(persistResult) {
     saveMode: "",
     storageTier: "none",
   });
-  runtime.extractMemories = async () => ({
-    success: false,
-    error: "提取 LLM 未返回有效操作",
-    processedRange: [4, 4],
-  });
+  runtime.extractMemories = async ({ graph: targetGraph }) => {
+    targetGraph.nodes.push({ id: "partial-node", type: "event" });
+    return {
+      success: false,
+      error: "提取 LLM 未返回有效操作",
+      processedRange: [4, 4],
+    };
+  };
   const result = await executeExtractionBatchController(runtime, {
     chat: [{ is_user: false, mes: "测试" }],
     startIdx: 5,
@@ -248,7 +326,8 @@ function createRuntime(persistResult) {
   assert.equal(result.batchStatus.completed, false);
   assert.equal(result.batchStatus.stages.core.outcome, "failed");
   assert.equal(result.batchStatus.stages.finalize.outcome, "failed");
-  assert.equal(runtime.graph.historyState.lastBatchStatus.persistence, null);
+  assert.equal(runtime.getCurrentGraph().historyState.lastBatchStatus.persistence, null);
+  assert.equal(runtime.getCurrentGraph().nodes.length, 0);
 }
 
 {
@@ -405,6 +484,162 @@ function createRuntime(persistResult) {
   assert.equal(persistCalls, 0);
   assert.equal(extractionStatusCalls, 0);
   assert.equal(graphB.historyState.lastBatchStatus, undefined);
+}
+
+{
+  let releasePersist;
+  let notifyPersistStarted;
+  const persistStarted = new Promise((resolve) => {
+    notifyPersistStarted = resolve;
+  });
+  const runtime = createRuntime(null);
+  runtime.persistExtractionBatchResult = async () => {
+    notifyPersistStarted();
+    return await new Promise((resolve) => {
+      releasePersist = resolve;
+    });
+  };
+
+  const pending = executeExtractionBatchController(runtime, {
+    chat: [{ is_user: false, mes: "chat A" }],
+    startIdx: 5,
+    endIdx: 5,
+    settings: {},
+  });
+  await persistStarted;
+  const graphB = {
+    nodes: [{ id: "node-b" }],
+    edges: [],
+    historyState: { chatId: "chat-b", extractionCount: 2 },
+    batchJournal: [],
+  };
+  runtime.setActiveContext(graphB, "chat-b");
+  releasePersist({
+    saved: true,
+    accepted: true,
+    revision: 12,
+    storageTier: "indexeddb",
+  });
+
+  await assert.rejects(
+    pending,
+    (error) =>
+      error?.name === "AbortError" &&
+      error?.message === "extraction-context-changed",
+  );
+  assert.deepEqual(graphB.nodes, [{ id: "node-b" }]);
+  assert.equal(graphB.historyState.extractionCount, 2);
+  assert.equal(graphB.historyState.lastProcessedAssistantFloor, undefined);
+  assert.equal(runtime.graph.nodes.length, 0);
+  assert.equal(runtime.graph.historyState.extractionCount, 6);
+  assert.deepEqual(runtime.graph.historyState.processedMessageHashes, {
+    4: "old-hash",
+  });
+}
+
+{
+  let releaseExtraction;
+  let notifyStarted;
+  let handleSuccessCalls = 0;
+  let persistCalls = 0;
+  const started = new Promise((resolve) => {
+    notifyStarted = resolve;
+  });
+  const runtime = createRuntime({ accepted: true, saved: true });
+  runtime.extractMemories = async () => {
+    notifyStarted();
+    return await new Promise((resolve) => {
+      releaseExtraction = resolve;
+    });
+  };
+  runtime.handleExtractionSuccess = async () => {
+    handleSuccessCalls += 1;
+    return {};
+  };
+  runtime.persistExtractionBatchResult = async () => {
+    persistCalls += 1;
+    return { accepted: true, saved: true };
+  };
+  const chat = [{ is_user: false, mes: "原回复" }];
+
+  const pending = executeExtractionBatchController(runtime, {
+    chat,
+    startIdx: 0,
+    endIdx: 0,
+    settings: {},
+  });
+  await started;
+  chat[0].mes = "提取期间被编辑";
+  releaseExtraction({
+    success: true,
+    newNodes: 1,
+    updatedNodes: 0,
+    newEdges: 0,
+    newNodeIds: ["stale-node"],
+    processedRange: [0, 0],
+  });
+
+  await assert.rejects(
+    pending,
+    (error) =>
+      error?.name === "AbortError" &&
+      error?.message === "extraction-context-changed",
+  );
+  assert.equal(handleSuccessCalls, 0);
+  assert.equal(persistCalls, 0);
+}
+
+{
+  let releasePersist;
+  let notifyPersistStarted;
+  const persistStarted = new Promise((resolve) => {
+    notifyPersistStarted = resolve;
+  });
+  const runtime = createRuntime(null, {
+    checkpointError: new Error("checkpoint unavailable"),
+  });
+  runtime.console = { warn() {} };
+  runtime.persistExtractionBatchResult = async () => {
+    notifyPersistStarted();
+    return await new Promise((resolve) => {
+      releasePersist = resolve;
+    });
+  };
+  const chat = [{ is_user: false, mes: "原回复" }];
+
+  const pending = executeExtractionBatchController(runtime, {
+    chat,
+    startIdx: 0,
+    endIdx: 0,
+    settings: {},
+  });
+  await persistStarted;
+  chat[0].mes = "durable commit 等待期间被编辑";
+  releasePersist({
+    saved: true,
+    accepted: true,
+    revision: 13,
+    storageTier: "indexeddb",
+  });
+
+  await assert.rejects(
+    pending,
+    (error) =>
+      error?.name === "AbortError" &&
+      error?.message === "extraction-context-changed",
+  );
+  assert.equal(runtime.staleCheckpointSaves, 1);
+  assert.deepEqual(runtime.staleCheckpointSaveOptions, {
+    reason: "extraction-stale-history-checkpoint",
+    awaitDurable: true,
+    captureShadow: true,
+  });
+  assert.equal(runtime.graph.historyState.historyDirtyFrom, 0);
+  assert.equal(
+    runtime.graph.historyState.lastMutationSource,
+    "extraction-history-lease",
+  );
+  assert.equal(runtime.graph.nodes.length, 0);
 }
 
 console.log("extraction-persistence-gating tests passed");

@@ -85,7 +85,7 @@ The config page contains these workspaces:
 
 - **Feature toggles**
   - Main capabilities such as extraction, recall, consolidation, summary, reflection, compression, forgetting, and probabilistic recall.
-  - Cloud storage mode.
+  - Cloud Sync behavior; local OPFS / IndexedDB primary storage always remains enabled.
   - World info filtering.
   - Hide old turns and limit rendered chat turns.
 
@@ -96,7 +96,7 @@ The config page contains these workspaces:
   - Prompt blocks, generation parameters, regex, world info, and EJS templates for each task type.
 
 - **ENA Planner**
-  - API, model, planning config, and task preset entry point for ENA Planner.
+  - Explicit enablement, BME LLM preset, planning context/filter options, tests and logs, plus the `planner` task preset entry point.
 
 - **Panel appearance**
   - Theme, notification style, debug logs, and Native acceleration.

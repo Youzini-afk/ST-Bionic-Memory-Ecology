@@ -25,7 +25,9 @@ function testEventSourceMakeFirstWinsAndIsBound() {
     makeFirst(eventName, listener) {
       assert.equal(this, eventSource);
       calls.push({ eventName, listener });
-      return () => calls.push({ cleanup: eventName });
+    },
+    removeListener(eventName, listener) {
+      calls.push({ removed: eventName, listener });
     },
     on() {
       throw new Error("ordinary .on should not be used when makeFirst exists");
@@ -53,6 +55,12 @@ function testEventSourceMakeFirstWinsAndIsBound() {
     { eventName: "after-commands", listener: afterListener },
   ]);
   assert.deepEqual(fallbackCalls, []);
+  beforeCleanup();
+  afterCleanup();
+  assert.deepEqual(calls.slice(2), [
+    { removed: "before-combine", listener: beforeListener },
+    { removed: "after-commands", listener: afterListener },
+  ]);
 }
 
 function testRuntimeMakeFirstFallback() {
@@ -91,22 +99,28 @@ function testOrdinaryOnFallback() {
     on(eventName, listener) {
       calls.push({ eventName, listener });
     },
+    off(eventName, listener) {
+      assert.equal(this, eventSource);
+      calls.push({ removed: eventName, listener });
+    },
   };
   const runtime = createRuntime(eventSource);
   const beforeListener = () => {};
   const afterListener = () => {};
 
-  assert.equal(
-    registerBeforeCombinePromptsController(runtime, beforeListener),
-    null,
-  );
-  assert.equal(
-    registerGenerationAfterCommandsController(runtime, afterListener),
-    null,
-  );
+  const beforeCleanup = registerBeforeCombinePromptsController(runtime, beforeListener);
+  const afterCleanup = registerGenerationAfterCommandsController(runtime, afterListener);
+  assert.equal(typeof beforeCleanup, "function");
+  assert.equal(typeof afterCleanup, "function");
   assert.deepEqual(calls, [
     { eventName: "before-combine", listener: beforeListener },
     { eventName: "after-commands", listener: afterListener },
+  ]);
+  beforeCleanup();
+  afterCleanup();
+  assert.deepEqual(calls.slice(2), [
+    { removed: "before-combine", listener: beforeListener },
+    { removed: "after-commands", listener: afterListener },
   ]);
 }
 
