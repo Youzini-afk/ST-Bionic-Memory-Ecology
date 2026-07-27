@@ -18,6 +18,7 @@ import { createEmptyGraph } from "../graph/graph.js";
 import { getGraphPersistDirtyStateSnapshot } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-persistence]";
+const LOCAL_CLEANUP_META_KEY = "remoteSyncCleanupPendingV1";
 
 const chatIdsForCleanup = new Set([
   "chat-a",
@@ -27,6 +28,7 @@ const chatIdsForCleanup = new Set([
   "chat-manager-selector",
   "chat-export-without-tombstones",
   "chat-replace-reset",
+  "chat-import-cas",
   "chat-commit-delta-cas",
 ]);
 
@@ -353,6 +355,85 @@ async function testReplaceImportResetsStaleMeta() {
   assert.equal(await db.getMeta("customLeakField", "__missing__"), "__missing__");
   assert.equal(await db.getMeta("syncDirty", true), false);
 
+  await db.close();
+}
+
+async function testReplaceImportRejectsStaleLocalRevision() {
+  const chatId = "chat-import-cas";
+  const db = new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
+  await db.open();
+  await db.bulkUpsertNodes([
+    { id: "local-node", type: "event", updatedAt: Date.now() },
+  ]);
+  const currentRevision = await db.getRevision();
+  const remoteSnapshot = {
+    meta: { chatId, revision: currentRevision + 1 },
+    state: { lastProcessedFloor: -1, extractionCount: 0 },
+    nodes: [{ id: "remote-node", type: "event", updatedAt: Date.now() }],
+    edges: [],
+    tombstones: [],
+  };
+
+  await assert.rejects(
+    db.importSnapshot(remoteSnapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      expectedRevision: currentRevision - 1,
+    }),
+    (error) => error?.code === "LOCAL_SNAPSHOT_CHANGED",
+  );
+  assert.deepEqual((await db.listNodes()).map((node) => node.id), ["local-node"]);
+
+  await db.setMeta("syncDirty", true);
+  await assert.rejects(
+    db.importSnapshot(remoteSnapshot, {
+      mode: "replace",
+      preserveRevision: true,
+      expectedRevision: currentRevision,
+      requireSyncClean: true,
+    }),
+    (error) => error?.code === "LOCAL_SNAPSHOT_CHANGED",
+  );
+  assert.deepEqual((await db.listNodes()).map((node) => node.id), ["local-node"]);
+
+  const matchedAck = await db.patchMetaIfRevision(
+    currentRevision,
+    { syncDirty: false, syncDirtyReason: "" },
+    { syncDirty: true, syncDirtyReason: "stale" },
+  );
+  assert.equal(matchedAck.matched, true);
+
+  await db.bulkUpsertNodes([
+    { id: "newer-local-node", type: "event", updatedAt: Date.now() },
+  ]);
+  const mismatchedAck = await db.patchMetaIfRevision(
+    currentRevision,
+    { syncDirty: false, syncDirtyReason: "" },
+    { syncDirty: true, syncDirtyReason: "newer-local-revision" },
+  );
+  assert.equal(mismatchedAck.matched, false);
+  assert.equal(await db.getMeta("syncDirty", false), true);
+  assert.equal(
+    await db.getMeta("syncDirtyReason", ""),
+    "newer-local-revision",
+  );
+
+  const cleanupLedger = [{ filename: "known-staged-chunk", backend: "user-files" }];
+  await db.setMeta(LOCAL_CLEANUP_META_KEY, cleanupLedger);
+  await db.setMeta("syncDirty", false);
+  const revisionBeforeImport = await db.getRevision();
+  await db.importSnapshot(remoteSnapshot, {
+    mode: "replace",
+    preserveRevision: true,
+    expectedRevision: revisionBeforeImport,
+    preserveMetaKeys: [LOCAL_CLEANUP_META_KEY],
+    markSyncDirty: false,
+  });
+  assert.deepEqual(
+    await db.getMeta(LOCAL_CLEANUP_META_KEY, []),
+    cleanupLedger,
+    "replace import must preserve local cleanup recovery state in the same transaction",
+  );
   await db.close();
 }
 
@@ -942,6 +1023,7 @@ async function main() {
   await testSnapshotExportWithoutTombstones();
   await testSnapshotProbeExport();
   await testReplaceImportResetsStaleMeta();
+  await testReplaceImportRejectsStaleLocalRevision();
   await testRevisionMonotonicity();
   await testCommitDeltaRejectsStaleBaseRevision();
   await testTombstonePrune();

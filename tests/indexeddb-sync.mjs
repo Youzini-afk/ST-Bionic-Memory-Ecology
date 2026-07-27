@@ -28,6 +28,7 @@ import {
 } from "../runtime/runtime-state.js";
 
 const PREFIX = "[ST-BME][indexeddb-sync]";
+const LOCAL_CLEANUP_META_KEY = "remoteSyncCleanupPendingV1";
 
 class MemoryStorage {
   constructor() {
@@ -50,6 +51,7 @@ class MemoryStorage {
 class FakeDb {
   constructor(chatId, snapshot = null) {
     this.chatId = chatId;
+    this.storeKind = "indexeddb";
     this.snapshot = snapshot || {
       meta: {
         schemaVersion: 1,
@@ -77,6 +79,8 @@ class FakeDb {
     ]);
     this.lastImportPayload = null;
     this.lastImportOptions = null;
+    this.beforePatchMeta = null;
+    this.beforeRevisionGuard = null;
   }
 
   async exportSnapshot() {
@@ -84,12 +88,48 @@ class FakeDb {
   }
 
   async importSnapshot(snapshot, options = {}) {
+    const currentRevision = await this.getRevision();
+    if (
+      (Number.isFinite(Number(options.expectedRevision)) &&
+        currentRevision !== Number(options.expectedRevision)) ||
+      (options.requireSyncClean === true &&
+        Boolean(await this.getMeta("syncDirty", false)))
+    ) {
+      throw Object.assign(new Error("local snapshot changed before remote import"), {
+        code: "LOCAL_SNAPSHOT_CHANGED",
+      });
+    }
     this.lastImportPayload = JSON.parse(JSON.stringify(snapshot));
     this.lastImportOptions = { ...options };
-    this.snapshot = JSON.parse(JSON.stringify(snapshot));
+    const preservedMeta = Object.fromEntries(
+      (Array.isArray(options.preserveMetaKeys) ? options.preserveMetaKeys : [])
+        .filter((key) => this.meta.has(key))
+        .map((key) => [key, this.meta.get(key)]),
+    );
+    this.snapshot = JSON.parse(JSON.stringify({
+      ...snapshot,
+      meta: {
+        ...(snapshot?.meta || {}),
+        ...preservedMeta,
+      },
+    }));
+    const importedRevision = Math.max(
+      currentRevision + 1,
+      Number(options.revision ?? snapshot?.meta?.revision ?? 0) || 0,
+    );
+    this.snapshot.meta.revision = importedRevision;
+    for (const [key, value] of Object.entries(this.snapshot.meta || {})) {
+      this.meta.set(key, value);
+    }
+    this.meta.set("revision", importedRevision);
+    this.meta.set("syncDirty", options.markSyncDirty !== false);
+    this.meta.set(
+      "syncDirtyReason",
+      options.markSyncDirty !== false ? "importSnapshot" : "",
+    );
     return {
       mode: options.mode || "replace",
-      revision: snapshot?.meta?.revision || 0,
+      revision: importedRevision,
       imported: {
         nodes: Array.isArray(snapshot?.nodes) ? snapshot.nodes.length : 0,
         edges: Array.isArray(snapshot?.edges) ? snapshot.edges.length : 0,
@@ -102,10 +142,34 @@ class FakeDb {
     return this.meta.has(key) ? this.meta.get(key) : fallback;
   }
 
+  async getRevision() {
+    return Number(this.meta.get("revision") ?? this.snapshot?.meta?.revision ?? 0) || 0;
+  }
+
   async patchMeta(record = {}) {
+    if (typeof this.beforePatchMeta === "function") {
+      await this.beforePatchMeta(record);
+    }
     for (const [key, value] of Object.entries(record)) {
       this.meta.set(key, value);
     }
+  }
+
+  async patchMetaIfRevision(expectedRevision, matchingRecord = {}, mismatchingRecord = {}) {
+    if (typeof this.beforeRevisionGuard === "function") {
+      await this.beforeRevisionGuard();
+    }
+    const currentRevision = await this.getRevision();
+    const matched = currentRevision === Number(expectedRevision);
+    const selected = matched ? matchingRecord : mismatchingRecord;
+    for (const [key, value] of Object.entries(selected)) {
+      this.meta.set(key, value);
+    }
+    return {
+      matched,
+      currentRevision,
+      applied: { ...selected },
+    };
   }
 
   async setMeta(key, value) {
@@ -334,6 +398,9 @@ async function testUploadPayloadMetaFirstAndDebounce() {
   );
 
   const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  dbByChatId.get("chat-upload").snapshot.meta[LOCAL_CLEANUP_META_KEY] = [
+    { filename: "must-stay-local" },
+  ];
   const uploadResult = await upload("chat-upload", runtime);
   assert.equal(uploadResult.uploaded, true);
   assert.equal(logs.uploadCalls, 1);
@@ -348,6 +415,14 @@ async function testUploadPayloadMetaFirstAndDebounce() {
   assert.equal(uploadedPayload.meta.revision, 9);
   assert.equal(Array.isArray(uploadedPayload.chunks), true);
   assert.equal(uploadedPayload.chunks.length > 0, true);
+  const runtimeMetaChunk = logs.uploadedChunkPayloads.find(
+    (entry) => entry.payload?.kind === "runtime-meta",
+  );
+  assert.equal(
+    runtimeMetaChunk.payload.records[0][LOCAL_CLEANUP_META_KEY],
+    undefined,
+    "local cleanup recovery state must not replicate as graph metadata",
+  );
 
   scheduleUpload("chat-upload", {
     ...runtime,
@@ -372,6 +447,41 @@ async function testUploadBuildsStableStSafeFilename() {
   assert.match(uploadResult.filename, /^ST-BME_sync_[A-Za-z0-9._-]+\.json$/);
   assert.equal(uploadResult.filename.length <= 180, true);
   assert.match(logs.uploadedPayloads[0].name, /^[A-Za-z0-9._-]+$/);
+}
+
+async function testUploadDoesNotClearNewerLocalRevision() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-upload-local-advance";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 1;
+  db.meta.set("revision", 1);
+  db.meta.set("syncDirty", true);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  db.beforeRevisionGuard = async () => {
+    db.beforeRevisionGuard = null;
+    db.meta.set("revision", 2);
+    db.meta.set("syncDirty", true);
+    db.snapshot.meta.revision = 2;
+  };
+
+  const result = await upload(chatId, {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    cloudStorageMode: "manual",
+  });
+
+  assert.equal(result.uploaded, true);
+  assert.equal(result.revision, 1);
+  assert.equal(result.currentLocalRevision, 2);
+  assert.equal(result.pendingLocalChanges, true);
+  assert.equal(db.meta.get("syncDirty"), true);
+  assert.equal(
+    db.meta.get("syncDirtyReason"),
+    "local-revision-advanced-during-upload",
+  );
+  assert.equal(db.meta.get("lastSyncedRevision"), 1);
+  assert.equal(remoteFiles.get(manifestName).meta.revision, 1);
 }
 
 async function testUploadDefersAndThenCleansStaleRemoteChunks() {
@@ -433,13 +543,14 @@ async function testUploadDefersAndThenCleansStaleRemoteChunks() {
   const staleChunks = [...firstChunks].filter((filename) => !secondChunks.has(filename));
   const sharedChunks = [...firstChunks].filter((filename) => secondChunks.has(filename));
 
-  assert.ok(staleChunks.length > 0, "changed edge/runtime metadata should create stale chunk files");
-  assert.ok(sharedChunks.length > 0, "unchanged nodes should keep at least one shared chunk");
+  assert.equal(
+    staleChunks.length,
+    firstChunks.size,
+    "every publication must use isolated chunk names so later GC cannot delete a reused winner chunk",
+  );
+  assert.equal(sharedChunks.length, 0);
   for (const filename of staleChunks) {
     assert.equal(remoteFiles.has(filename), true, `stale chunk remains during grace period: ${filename}`);
-  }
-  for (const filename of sharedChunks) {
-    assert.equal(remoteFiles.has(filename), true, `shared chunk should remain: ${filename}`);
   }
   for (const filename of secondChunks) {
     assert.equal(remoteFiles.has(filename), true, `current chunk should remain: ${filename}`);
@@ -455,6 +566,7 @@ async function testUploadDefersAndThenCleansStaleRemoteChunks() {
   assert.equal(Number.isFinite(secondUpload.timings?.previousManifestReadMs), true);
   assert.equal(Number.isFinite(secondUpload.timings?.chunkCleanupMs), true);
 
+  const chunkUploadCallsBeforeCleanup = logs.uploadChunkCalls;
   const thirdUpload = await syncNow(chatId, {
     ...runtime,
     nowMs: 8_000,
@@ -462,6 +574,11 @@ async function testUploadDefersAndThenCleansStaleRemoteChunks() {
   });
   assert.equal(thirdUpload.uploaded, true);
   assert.equal(thirdUpload.action, "cleanup", "an idle sync should retire due chunks without a graph change");
+  assert.equal(
+    logs.uploadChunkCalls,
+    chunkUploadCallsBeforeCleanup,
+    "head-only GC must not rotate the current publication's chunks",
+  );
   const thirdManifest = remoteFiles.get(manifestName);
   for (const filename of staleChunks) {
     assert.equal(remoteFiles.has(filename), false, `eligible stale chunk should be deleted: ${filename}`);
@@ -484,12 +601,16 @@ async function testUploadKeepsCompleteGcLedgerBeyondLegacyCap() {
   dbByChatId.set(chatId, db);
 
   const manifestName = `ST-BME_sync_${chatId}.json`;
-  const pending = Array.from({ length: 520 }, (_, index) => ({
-    filename: `ST-BME_sync_${chatId}.__nodes.${String(index).padStart(3, "0")}.stale${index}.json`,
-    firstSeenAt: 1,
-    eligibleAt: 100_000,
-    sourceRevision: 1,
-  }));
+  const pending = Array.from({ length: 520 }, (_, index) => {
+    const publicationId = `publication${String(index).padStart(4, "0")}`;
+    return {
+      filename: `ST-BME_sync_${chatId}.__nodes.${String(index).padStart(3, "0")}.${publicationId}.stale${index}.json`,
+      publicationId,
+      firstSeenAt: 1,
+      eligibleAt: 100_000,
+      sourceRevision: 1,
+    };
+  });
   remoteFiles.set(manifestName, {
     kind: "st-bme-sync",
     formatVersion: 2,
@@ -510,6 +631,41 @@ async function testUploadKeepsCompleteGcLedgerBeyondLegacyCap() {
   assert.equal(remoteFiles.get(manifestName).chunkGc.pending.length, pending.length);
 }
 
+async function testLegacyUnscopedGcEntryIsNotAutoDeleted() {
+  const { fetch, remoteFiles, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-legacy-unscoped-gc";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 2;
+  db.meta.set("revision", 2);
+  db.meta.set("syncDirty", false);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  const legacyChunk = `ST-BME_sync_${chatId}.__edges.000.legacyhash.json`;
+  remoteFiles.set(legacyChunk, { kind: "edges", index: 0, records: [] });
+  remoteFiles.set(manifestName, {
+    kind: "st-bme-sync",
+    formatVersion: 2,
+    chatId,
+    meta: { chatId, revision: 2, lastModified: 2 },
+    state: { lastProcessedFloor: -1, extractionCount: 0 },
+    chunks: [],
+    chunkGc: {
+      version: 1,
+      pending: [{ filename: legacyChunk, firstSeenAt: 1, eligibleAt: 2 }],
+    },
+  });
+
+  const result = await syncNow(chatId, {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    nowMs: 10,
+  });
+
+  assert.equal(result.action, "noop");
+  assert.equal(remoteFiles.has(legacyChunk), true);
+  assert.equal(logs.deleteCalls, 0);
+}
+
 async function testUploadRetriesFailedChunkGcAndRetiresMissingChunk() {
   const { fetch, remoteFiles } = createMockFetchEnvironment();
   const dbByChatId = new Map();
@@ -518,7 +674,8 @@ async function testUploadRetriesFailedChunkGcAndRetiresMissingChunk() {
   db.snapshot.meta.revision = 2;
   dbByChatId.set(chatId, db);
   const manifestName = `ST-BME_sync_${chatId}.json`;
-  const pendingFilename = `ST-BME_sync_${chatId}.__edges.000.retry1.json`;
+  const publicationId = "publicationretry1";
+  const pendingFilename = `ST-BME_sync_${chatId}.__edges.000.${publicationId}.retry1.json`;
   remoteFiles.set(pendingFilename, { kind: "edges", index: 0, records: [] });
   remoteFiles.set(manifestName, {
     kind: "st-bme-sync",
@@ -531,7 +688,7 @@ async function testUploadRetriesFailedChunkGcAndRetiresMissingChunk() {
       version: 1,
       updatedAt: 1,
       graceMs: 1,
-      pending: [{ filename: pendingFilename, firstSeenAt: 1, eligibleAt: 2, sourceRevision: 1 }],
+      pending: [{ filename: pendingFilename, publicationId, firstSeenAt: 1, eligibleAt: 2, sourceRevision: 1 }],
     },
   });
 
@@ -589,6 +746,60 @@ async function testManifestUploadFailureCompensatesNewChunks() {
     false,
     "chunks from an unpublished head must be compensated",
   );
+}
+
+async function testFailedCompensationIsRecoveredByNextManifest() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-compensation-recovery";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 1;
+  db.snapshot.nodes = [{ id: "node-v1", updatedAt: 1 }];
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  const failingFetch = async (url, options = {}) => {
+    const method = String(options.method || "GET").toUpperCase();
+    if (url === "/api/files/upload" && method === "POST") {
+      const body = JSON.parse(String(options.body || "{}"));
+      if (body.name === manifestName) {
+        return createJsonResponse(500, "manifest write failed");
+      }
+    }
+    if (url === "/api/files/delete" && method === "POST") {
+      return createJsonResponse(500, "cleanup delete failed");
+    }
+    return await fetch(url, options);
+  };
+
+  const failed = await upload(
+    chatId,
+    {
+      ...buildRuntimeOptions({ dbByChatId, fetch: failingFetch }),
+      remoteSyncChunkGcGraceMs: 0,
+    },
+  );
+  const localPending = db.meta.get(LOCAL_CLEANUP_META_KEY) || [];
+  assert.equal(failed.uploaded, false);
+  assert.ok(localPending.length > 0, "failed compensation must remain locally recoverable");
+  assert.equal(db.meta.get("syncDirty"), true);
+
+  db.snapshot.meta.revision = 2;
+  db.snapshot.meta.lastModified = 2;
+  db.snapshot.nodes = [{ id: "node-v2", updatedAt: 2 }];
+  const recovered = await upload(chatId, {
+    ...buildRuntimeOptions({ dbByChatId, fetch }),
+    nowMs: Math.max(...localPending.map((entry) => entry.eligibleAt)) + 1,
+    remoteSyncChunkGcGraceMs: 0,
+  });
+  const recoveredManifest = remoteFiles.get(manifestName);
+  const recoveredNames = new Set(localPending.map((entry) => entry.filename));
+  const adoptedNames = (recoveredManifest.chunkGc?.pending || [])
+    .map((entry) => entry.filename)
+    .filter((filename) => recoveredNames.has(filename));
+
+  assert.equal(recovered.uploaded, true);
+  assert.ok(adoptedNames.length > 0, "next head must adopt known abandoned chunks into GC");
+  assert.deepEqual(db.meta.get(LOCAL_CLEANUP_META_KEY), []);
 }
 
 async function testPreviousHeadReadFailureDoesNotPublish() {
@@ -659,7 +870,10 @@ async function testConcurrentHeadChangeDoesNotRaceWinnerCleanup() {
 
   const second = await upload(
     chatId,
-    buildRuntimeOptions({ dbByChatId, fetch: guardedFetch }),
+    {
+      ...buildRuntimeOptions({ dbByChatId, fetch: guardedFetch }),
+      remoteSyncChunkGcGraceMs: 0,
+    },
   );
   assert.equal(second.uploaded, false);
   assert.equal(remoteFiles.get(first.filename).meta.revision, 3);
@@ -669,6 +883,34 @@ async function testConcurrentHeadChangeDoesNotRaceWinnerCleanup() {
   );
   for (const filename of currentChunks) assert.equal(storedChunks.has(filename), true);
   assert.equal(storedChunks.size > currentChunks.size, true, "observed concurrency must favor winner safety over risky cleanup");
+  const localPending = db.meta.get(LOCAL_CLEANUP_META_KEY) || [];
+  assert.ok(localPending.length > 0, "observed concurrent chunks must remain locally recoverable");
+  assert.equal(db.meta.get("syncDirty"), true);
+
+  db.snapshot.meta.revision = 4;
+  db.snapshot.meta.lastModified = 4;
+  const recoveryNow = Math.max(...localPending.map((entry) => entry.eligibleAt)) + 1;
+  const recovered = await upload(chatId, {
+    ...runtime,
+    nowMs: recoveryNow,
+    remoteSyncChunkGcGraceMs: 0,
+  });
+  assert.equal(recovered.uploaded, true);
+  assert.deepEqual(db.meta.get(LOCAL_CLEANUP_META_KEY), []);
+  const recoveredManifest = remoteFiles.get(first.filename);
+  const localPendingNames = new Set(localPending.map((entry) => entry.filename));
+  const adoptedNames = (recoveredManifest.chunkGc?.pending || [])
+    .map((entry) => entry.filename)
+    .filter((filename) => localPendingNames.has(filename));
+  assert.ok(adoptedNames.length > 0);
+
+  const cleanup = await syncNow(chatId, {
+    ...runtime,
+    nowMs: recoveryNow + 1,
+    remoteSyncChunkGcGraceMs: 0,
+  });
+  assert.equal(cleanup.action, "cleanup");
+  for (const filename of adoptedNames) assert.equal(remoteFiles.has(filename), false);
 }
 
 async function testHeadCheckFailureAfterChunkUploadCompensates() {
@@ -889,12 +1131,13 @@ async function testAuthorityBlobGcIsScopedToAuthorityBackend() {
     return await authorityDelete(path);
   };
 
-  const third = await upload(chatId, { ...runtime, nowMs: 300 });
+  const third = await syncNow(chatId, { ...runtime, nowMs: 300 });
   assert.equal(third.uploaded, true);
+  assert.equal(third.action, "cleanup");
   assert.equal(third.cleanup.failed, 1);
   assert.equal(authority.blobs.get(manifestPath).chunkGc.pending.length, 1);
 
-  const fourth = await upload(chatId, { ...runtime, nowMs: 400 });
+  const fourth = await syncNow(chatId, { ...runtime, nowMs: 400 });
   assert.equal(fourth.uploaded, true);
   assert.equal(fourth.cleanup.deleted, 1);
   for (const filename of staleChunks) assert.equal(authority.blobs.has(`user/files/${filename}`), false);
@@ -974,7 +1217,8 @@ async function testAuthorityFailOpenGcStaysOnUserFiles() {
   db.snapshot.meta.revision = 2;
   dbByChatId.set(chatId, db);
   const manifestName = `ST-BME_sync_${chatId}.json`;
-  const pendingFilename = `ST-BME_sync_${chatId}.__edges.000.stale1.json`;
+  const publicationId = "publicationstale1";
+  const pendingFilename = `ST-BME_sync_${chatId}.__edges.000.${publicationId}.stale1.json`;
   remoteFiles.set(pendingFilename, { kind: "edges", index: 0, records: [] });
   remoteFiles.set(manifestName, {
     kind: "st-bme-sync",
@@ -987,7 +1231,7 @@ async function testAuthorityFailOpenGcStaysOnUserFiles() {
       version: 1,
       updatedAt: 1,
       graceMs: 1,
-      pending: [{ filename: pendingFilename, firstSeenAt: 1, eligibleAt: 2, sourceRevision: 1 }],
+      pending: [{ filename: pendingFilename, publicationId, firstSeenAt: 1, eligibleAt: 2, sourceRevision: 1 }],
     },
   });
   const failingAuthority = {
@@ -1565,7 +1809,7 @@ async function testManualBackupAndRestoreFlow() {
     runtime,
   );
   assert.equal(rollbackResult.restored, true);
-  assert.equal(db.snapshot.meta.revision, 1);
+  assert.ok(db.snapshot.meta.revision > 1, "rollback import keeps the local revision monotonic");
   assert.equal(db.snapshot.nodes.length, 0);
   assert.equal(db.meta.get("syncDirty"), true);
   assert.ok(Number(db.meta.get("lastBackupRollbackAt")) > 0);
@@ -2242,6 +2486,275 @@ async function testSyncNowRemoteReadErrorPath() {
   assert.equal(result.reason, "http-error");
 }
 
+async function testAutomaticDownloadCannotReplaceNewerLocalCommit() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-download-local-race";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 1;
+  db.snapshot.nodes = [{ id: "local-before", updatedAt: 1 }];
+  db.meta.set("revision", 1);
+  db.meta.set("syncDirty", false);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  remoteFiles.set(manifestName, {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 3,
+      lastModified: 30,
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "remote", updatedAt: 30 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  let headReads = 0;
+  const racingFetch = async (url, options = {}) => {
+    if (
+      String(url).startsWith(`/user/files/${manifestName}`) &&
+      String(options.method || "GET").toUpperCase() === "GET"
+    ) {
+      headReads += 1;
+      if (headReads === 2) {
+        db.meta.set("revision", 2);
+        db.meta.set("syncDirty", true);
+        db.snapshot.meta.revision = 2;
+        db.snapshot.nodes = [{ id: "local-after", updatedAt: 40 }];
+      }
+    }
+    return await fetch(url, options);
+  };
+
+  const result = await syncNow(
+    chatId,
+    buildRuntimeOptions({ dbByChatId, fetch: racingFetch }),
+  );
+
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, "local-changed-during-download");
+  assert.equal(db.snapshot.meta.revision, 2);
+  assert.deepEqual(db.snapshot.nodes.map((node) => node.id), ["local-after"]);
+  assert.equal(db.meta.get("syncDirty"), true);
+}
+
+async function testDownloadDoesNotClearCommitAfterImport() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-download-post-import-race";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 1;
+  db.meta.set("revision", 1);
+  db.meta.set("syncDirty", false);
+  dbByChatId.set(chatId, db);
+  remoteFiles.set(`ST-BME_sync_${chatId}.json`, {
+    meta: { chatId, revision: 3, lastModified: 30 },
+    nodes: [{ id: "remote", updatedAt: 30 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  db.beforeRevisionGuard = async () => {
+    db.beforeRevisionGuard = null;
+    db.meta.set("revision", 4);
+    db.meta.set("syncDirty", true);
+    db.snapshot.meta.revision = 4;
+  };
+
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+  const result = await syncNow(chatId, runtime);
+
+  assert.equal(result.downloaded, true);
+  assert.equal(result.synced, false);
+  assert.equal(result.pendingLocalChanges, true);
+  assert.equal(result.currentLocalRevision, 4);
+  assert.equal(db.meta.get("syncDirty"), true);
+  assert.equal(
+    db.meta.get("syncDirtyReason"),
+    "local-revision-advanced-during-download",
+  );
+  await deleteRemoteSyncFile(chatId, runtime);
+}
+
+async function testMergeCannotReplaceNewerLocalCommit() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-merge-local-race";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 2;
+  db.snapshot.nodes = [{ id: "local-before", updatedAt: 2 }];
+  db.meta.set("revision", 2);
+  db.meta.set("syncDirty", true);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  remoteFiles.set(manifestName, {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 2,
+      lastModified: 20,
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "remote", updatedAt: 20 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  const racingFetch = async (url, options = {}) => {
+    if (
+      String(url).startsWith(`/user/files/${manifestName}`) &&
+      String(options.method || "GET").toUpperCase() === "GET"
+    ) {
+      db.meta.set("revision", 3);
+      db.meta.set("syncDirty", true);
+      db.snapshot.meta.revision = 3;
+      db.snapshot.nodes = [{ id: "local-after", updatedAt: 30 }];
+    }
+    return await fetch(url, options);
+  };
+
+  const result = await syncNow(
+    chatId,
+    buildRuntimeOptions({ dbByChatId, fetch: racingFetch }),
+  );
+
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, "sync-error");
+  assert.equal(result.error?.code, "LOCAL_SNAPSHOT_CHANGED");
+  assert.equal(db.snapshot.meta.revision, 3);
+  assert.deepEqual(db.snapshot.nodes.map((node) => node.id), ["local-after"]);
+}
+
+async function testMergeUploadFailureKeepsLocalReplicaDirty() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-merge-upload-failure";
+  const db = new FakeDb(chatId, {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 2,
+      lastModified: 20,
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "local-node", updatedAt: 20 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 1, extractionCount: 1 },
+  });
+  db.meta.set("syncDirty", true);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  remoteFiles.set(manifestName, {
+    meta: {
+      schemaVersion: 1,
+      chatId,
+      revision: 2,
+      lastModified: 25,
+      nodeCount: 1,
+      edgeCount: 0,
+      tombstoneCount: 0,
+    },
+    nodes: [{ id: "remote-node", updatedAt: 25 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  const failingFetch = async (url, options = {}) => {
+    if (url === "/api/files/upload" && String(options.method || "GET").toUpperCase() === "POST") {
+      const body = JSON.parse(String(options.body || "{}"));
+      if (body.name === manifestName) {
+        return createJsonResponse(500, "merge manifest write failed");
+      }
+    }
+    return await fetch(url, options);
+  };
+  let hookCalls = 0;
+
+  const result = await syncNow(chatId, {
+    ...buildRuntimeOptions({ dbByChatId, fetch: failingFetch }),
+    onSyncApplied: async () => {
+      hookCalls += 1;
+    },
+  });
+
+  assert.equal(result.synced, false);
+  assert.equal(result.reason, "sync-error");
+  assert.equal(db.meta.get("syncDirty"), true);
+  assert.equal(db.meta.get("syncDirtyReason"), "cloud-merge-upload-failed");
+  assert.deepEqual(
+    new Set(db.snapshot.nodes.map((node) => node.id)),
+    new Set(["local-node", "remote-node"]),
+  );
+  assert.equal(hookCalls, 0);
+}
+
+async function testMergeUploadDoesNotClearNewerLocalCommit() {
+  const { fetch, remoteFiles } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-merge-post-import-race";
+  const db = new FakeDb(chatId);
+  db.snapshot.meta.revision = 2;
+  db.snapshot.nodes = [{ id: "local", updatedAt: 20 }];
+  db.meta.set("revision", 2);
+  db.meta.set("syncDirty", true);
+  dbByChatId.set(chatId, db);
+  const manifestName = `ST-BME_sync_${chatId}.json`;
+  remoteFiles.set(manifestName, {
+    meta: { chatId, revision: 2, lastModified: 25 },
+    nodes: [{ id: "remote", updatedAt: 25 }],
+    edges: [],
+    tombstones: [],
+    state: { lastProcessedFloor: 2, extractionCount: 1 },
+  });
+  db.beforeRevisionGuard = async () => {
+    db.beforeRevisionGuard = null;
+    db.meta.set("revision", 4);
+    db.meta.set("syncDirty", true);
+    db.snapshot.meta.revision = 4;
+  };
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+
+  const result = await syncNow(chatId, runtime);
+
+  assert.equal(result.action, "merge");
+  assert.equal(result.synced, false);
+  assert.equal(result.pendingLocalChanges, true);
+  assert.equal(result.revision, 3);
+  assert.equal(result.currentLocalRevision, 4);
+  assert.equal(db.meta.get("syncDirty"), true);
+  assert.equal(remoteFiles.get(manifestName).meta.revision, 3);
+  await deleteRemoteSyncFile(chatId, runtime);
+}
+
+async function testAuthorityPrimarySkipsCloudReplica() {
+  const { fetch, logs } = createMockFetchEnvironment();
+  const dbByChatId = new Map();
+  const chatId = "chat-authority-primary-cloud-skip";
+  const db = new FakeDb(chatId);
+  db.storeKind = "authority";
+  dbByChatId.set(chatId, db);
+  const runtime = buildRuntimeOptions({ dbByChatId, fetch });
+
+  const uploadResult = await upload(chatId, runtime);
+  const downloadResult = await download(chatId, runtime);
+  const syncResult = await syncNow(chatId, runtime);
+
+  assert.equal(uploadResult.reason, "authority-primary-not-replicated");
+  assert.equal(downloadResult.reason, "authority-primary-not-replicated");
+  assert.equal(syncResult.reason, "authority-primary-not-replicated");
+  assert.equal(syncResult.synced, true);
+  assert.equal(logs.uploadCalls, 0);
+  assert.equal(logs.getCalls, 0);
+}
+
 async function testSyncAppliedHook() {
   const { fetch, remoteFiles } = createMockFetchEnvironment();
   const dbByChatId = new Map();
@@ -2387,10 +2900,13 @@ async function main() {
   await testRemoteStatusMissing();
   await testUploadPayloadMetaFirstAndDebounce();
   await testUploadBuildsStableStSafeFilename();
+  await testUploadDoesNotClearNewerLocalRevision();
   await testUploadDefersAndThenCleansStaleRemoteChunks();
   await testUploadKeepsCompleteGcLedgerBeyondLegacyCap();
+  await testLegacyUnscopedGcEntryIsNotAutoDeleted();
   await testUploadRetriesFailedChunkGcAndRetiresMissingChunk();
   await testManifestUploadFailureCompensatesNewChunks();
+  await testFailedCompensationIsRecoveredByNextManifest();
   await testPreviousHeadReadFailureDoesNotPublish();
   await testConcurrentHeadChangeDoesNotRaceWinnerCleanup();
   await testHeadCheckFailureAfterChunkUploadCompensates();
@@ -2423,6 +2939,12 @@ async function main() {
   await testDeleteRemoteSyncFileCleansBothRemoteBackends();
   await testAutoSyncOnVisibility();
   await testSyncNowRemoteReadErrorPath();
+  await testAutomaticDownloadCannotReplaceNewerLocalCommit();
+  await testDownloadDoesNotClearCommitAfterImport();
+  await testMergeCannotReplaceNewerLocalCommit();
+  await testMergeUploadFailureKeepsLocalReplicaDirty();
+  await testMergeUploadDoesNotClearNewerLocalCommit();
+  await testAuthorityPrimarySkipsCloudReplica();
   await testSyncAppliedHook();
   console.log("indexeddb-sync tests passed");
 }

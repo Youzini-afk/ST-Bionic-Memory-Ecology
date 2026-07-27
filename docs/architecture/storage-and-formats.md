@@ -28,11 +28,13 @@ chat metadata 中的 commit marker 是主写成功后的恢复锚点，不属于
 
 ### Cloud Sync 副本协议
 
-Cloud Sync 不参与上述主提交确认。它按稳定聊天身份维护一个远端 head 和内容寻址 chunk：先写完整 chunk，再覆盖稳定 head；发布前后都重新读取 head，能观察到的并发替换会使本次发布失败，本地 dirty 状态留待后续同步。一次发布只使用 Authority Blob 或 SillyTavern user-files 中的一个后端；从哪个后端读到 head，也只从该后端读取其 chunk，不能组合跨后端 manifest/chunk。
+Cloud Sync 不参与上述主提交确认，只复制 IndexedDB / OPFS 本地主存储；Authority SQL 已是共享主源，不再套第二层 Cloud Sync。每次发布生成独立 publication id，并按稳定聊天身份维护一个远端 head 和该 publication 专属的不可变 chunk：先写完整 chunk，再覆盖稳定 head；发布前后都重新读取 head，能观察到的并发替换会使本次发布失败，本地 dirty 状态留待后续同步。一次发布只使用 Authority Blob 或 SillyTavern user-files 中的一个后端；从哪个后端读到 head，也只从该后端读取其 chunk，不能组合跨后端 manifest/chunk。
 
-旧 head 不再引用的 chunk 会进入 head 内的 GC 账本，默认保留 24 小时。账本不截断；到期条目在后续上传或无变化的自动同步检查中删除，失败条目继续保留，成功/404 条目随下一次 head 成功发布退休。chunk 已写而 head 发布失败时，失败路径会按已知文件名和实际写入后端尽力补偿；一旦观察到竞争发布或本次 head 写入已经成功，就跳过可能伤害胜者的即时补偿。补偿失败或被安全策略跳过都可能留下浏览器之后无法枚举的孤儿。
+旧 head 不再引用的 publication 专属 chunk 会进入 head 内的 GC 账本，默认保留 24 小时。新 publication 永不复用旧 publication 的文件名，因此“复核 head 后、实际 delete 前”的竞争发布也不会重新引用被删文件。账本不截断；到期条目在后续上传或无变化的自动同步检查中删除，失败条目继续保留，成功/404 条目随下一次 head 成功发布退休。旧版没有 publication 隔离证据的 chunk 条目只保留、不由浏览器自动删除。chunk 已写而 head 发布失败时，失败路径会按已知文件名和实际写入后端尽力补偿；未能补偿的已知 chunk 会按聊天、head 文件名、publication 和后端记入浏览器本地主存储，后续成功发布先把它们并入远端 GC 账本，再按同一宽限和复核规则回收；这份本地恢复账本不会复制进图谱快照。
 
-SillyTavern user-files 没有 list、条件写入或条件删除，因此未知历史孤儿不可安全枚举，跨设备竞争只能通过宽限期和操作前后的 head 校验收窄；远端语义是乐观的 last-writer-wins，不是线性事务。浏览器端删除只使用当前/旧稳定 head 及其显式 chunk/GC 引用作为证据，绝不按前缀推测删除。
+复制任务不能反向破坏本地主源。上传完成后的 revision 确认与 dirty 更新必须在本地主存储的同一事务/串行写锁内完成：若上传期间本地已前进，只确认实际上传的旧 revision，并继续保持 `syncDirty`。自动下载与 merge 在替换本地快照时使用同一事务/写锁内的 expected-revision 门禁；门禁失配说明本地刚有新提交，本次远端应用必须放弃。merge 从落本地的一刻起到远端发布成功前始终保持 dirty；发布失败或发布期间出现新本地提交，都不能把合并结果误标成已同步。
+
+SillyTavern user-files 没有 list、条件写入或条件删除，因此未知历史孤儿不可安全枚举，跨设备竞争只能通过宽限期和操作前后的 head 校验收窄；远端语义是乐观的 last-writer-wins，不是线性事务。本设备能恢复的是自己持久登记的已知失败文件，不是任意远端孤儿。浏览器端删除只使用当前/旧稳定 head、其显式 chunk/GC 引用及本地已知失败账本作为证据，绝不按前缀推测删除。
 
 ## 快照契约
 

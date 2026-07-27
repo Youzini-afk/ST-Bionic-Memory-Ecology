@@ -50,6 +50,7 @@ class FakeDb {
       },
     };
     this.meta = new Map([
+      ["revision", Number(this.snapshot.meta?.revision || 0)],
       ["syncDirty", false],
       ["syncDirtyReason", ""],
       ["lastSyncedRevision", 0],
@@ -61,9 +62,17 @@ class FakeDb {
     return JSON.parse(JSON.stringify(this.snapshot));
   }
 
-  async importSnapshot(snapshot) {
+  async importSnapshot(snapshot, options = {}) {
     this.lastImportPayload = JSON.parse(JSON.stringify(snapshot));
     this.snapshot = JSON.parse(JSON.stringify(snapshot));
+    const revision = Math.max(
+      (await this.getRevision()) + 1,
+      Number(options.revision ?? snapshot?.meta?.revision ?? 0) || 0,
+    );
+    this.snapshot.meta.revision = revision;
+    this.meta.set("revision", revision);
+    this.meta.set("syncDirty", options.markSyncDirty !== false);
+    return { revision };
   }
 
   async getMeta(key, fallback = null) {
@@ -74,6 +83,18 @@ class FakeDb {
     for (const [key, value] of Object.entries(record)) {
       this.meta.set(key, value);
     }
+  }
+
+  async getRevision() {
+    return Number(this.meta.get("revision") || 0);
+  }
+
+  async patchMetaIfRevision(expectedRevision, matchingRecord = {}, mismatchingRecord = {}) {
+    const currentRevision = await this.getRevision();
+    const matched = currentRevision === Number(expectedRevision);
+    const selected = matched ? matchingRecord : mismatchingRecord;
+    await this.patchMeta(selected);
+    return { matched, currentRevision, applied: { ...selected } };
   }
 
   async setMeta(key, value) {
