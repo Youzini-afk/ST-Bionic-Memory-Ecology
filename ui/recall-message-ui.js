@@ -1,7 +1,7 @@
 // ST-BME: 消息级召回卡片 UI
 // 纯 DOM 构建模块，不含模块级 mutable state
 
-import { getContext } from "../../../../extensions.js";
+import { getContext } from "../host/st-extensions.js";
 import { GraphRenderer } from "./graph-renderer.js";
 import { t } from "../i18n/index.js";
 

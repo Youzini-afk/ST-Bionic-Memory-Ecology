@@ -9,12 +9,12 @@ import {
   getRequestHeaders,
   saveMetadata,
   saveSettingsDebounced,
-} from "../../../../script.js";
+} from "./host/st-script.js";
 import {
   extension_settings,
   getContext,
   saveMetadataDebounced,
-} from "../../../extensions.js";
+} from "./host/st-extensions.js";
 
 import { BmeChatManager } from "./sync/bme-chat-manager.js";
 import {
@@ -120,12 +120,22 @@ import {
   BME_HOST_PROFILE_LUKER,
   getBmeHostAdapter,
   isBmeLightweightHostMode,
+  isLukerHostContext,
   normalizeBmeChatStateTarget,
   resolveBmeHostProfile,
   resolveChatStateTargetChatId,
   resolveCurrentBmeChatStateTarget,
   serializeBmeChatStateTarget,
 } from "./host/runtime-host-adapter.js";
+import {
+  getEventMakeFirst,
+  getHostCurrentChatId,
+  getHostDocument,
+  getHostMutationObserver,
+  getHostWindow,
+  readHostMvuExtraAnalysisFlag,
+  readSendTextareaValue,
+} from "./host/st-runtime.js";
 import {
   recoverHistoryIfNeededController,
   rollbackGraphForRerollController,
@@ -577,11 +587,7 @@ function syncBmeHostRuntimeFlags(context = getContext()) {
 
 function readGlobalCurrentChatId() {
   try {
-    return normalizeChatIdCandidate(
-      globalThis.SillyTavern?.getCurrentChatId?.() ||
-        globalThis.getCurrentChatId?.() ||
-        "",
-    );
+    return normalizeChatIdCandidate(getHostCurrentChatId());
   } catch {
     return "";
   }
@@ -1928,8 +1934,12 @@ const recallMessageUiController = createRecallMessageUiController({
   getContext,
   getSettings,
   getCurrentGraph: () => currentGraph,
-  get document() { return globalThis.document; },
-  get MutationObserver() { return globalThis.MutationObserver; },
+  get document() {
+    return getHostDocument();
+  },
+  get MutationObserver() {
+    return getHostMutationObserver();
+  },
   console,
   setTimeout,
   clearTimeout,
@@ -2063,8 +2073,7 @@ function resolvePersistenceHostProfile(context = getContext()) {
   }
   const activeContext =
     context && typeof context === "object" ? context : getContext();
-  const hasLukerApi =
-    !!globalThis.Luker && typeof globalThis.Luker?.getContext === "function";
+  const hasLukerApi = isLukerHostContext(activeContext);
   if (
     hasLukerApi &&
     canUseGraphChatState(activeContext) &&
@@ -2314,10 +2323,9 @@ async function refreshAuthorityRuntimeState({
     authorityLastRefreshSource: String(source || "authority-refresh"),
   });
 
+  const hostWindow = getHostWindow();
   const allowRelativeUrl =
-    typeof window === "object" &&
-    Boolean(window?.location) &&
-    typeof window.location.href === "string";
+    Boolean(hostWindow?.location) && typeof hostWindow.location.href === "string";
   authorityProbePromise = probeAuthorityCapabilities({
     settings,
     fetchImpl:
@@ -5587,7 +5595,7 @@ function editMessageRecallRecord(messageIndex, nextInjectionText) {
 }
 
 function syncEditedUserMessageDom(messageIndex, nextText) {
-  const chatRoot = document?.getElementById?.("chat");
+  const chatRoot = getHostDocument()?.getElementById?.("chat");
   if (!chatRoot?.querySelectorAll) return false;
 
   for (const messageElement of Array.from(chatRoot.querySelectorAll(".mes") || [])) {
@@ -5808,7 +5816,7 @@ async function rerunRecallForMessage(messageIndex) {
 }
 
 function getSendTextareaValue() {
-  return String(document.getElementById("send_textarea")?.value ?? "");
+  return readSendTextareaValue();
 }
 
 function scheduleSendIntentHookRetry(delayMs = 400) {
@@ -5832,7 +5840,7 @@ function registerBeforeCombinePrompts(listener) {
       console,
       eventSource,
       eventTypes: event_types,
-      getEventMakeFirst: () => globalThis.eventMakeFirst,
+      getEventMakeFirst,
     },
     listener,
   );
@@ -5844,7 +5852,7 @@ function registerGenerationAfterCommands(listener) {
       console,
       eventSource,
       eventTypes: event_types,
-      getEventMakeFirst: () => globalThis.eventMakeFirst,
+      getEventMakeFirst,
     },
     listener,
   );
@@ -5855,7 +5863,7 @@ function installSendIntentHooks() {
     console,
     consumeSendIntentHookCleanup: () =>
       sendIntentHookCleanup.splice(0, sendIntentHookCleanup.length),
-    document,
+    document: getHostDocument(),
     getSendTextareaValue,
     pushSendIntentHookCleanup: (cleanup) => {
       sendIntentHookCleanup.push(cleanup);
@@ -11990,33 +11998,7 @@ function consumeDryRunPromptPreview(now = Date.now()) {
 }
 
 function readMvuExtraAnalysisFlag() {
-  try {
-    const sameFrameMvu = globalThis?.window?.Mvu;
-    if (typeof sameFrameMvu?.isDuringExtraAnalysis === "function") {
-      return Boolean(sameFrameMvu.isDuringExtraAnalysis());
-    }
-  } catch {}
-
-  try {
-    const parentMvu = globalThis?.window?.parent?.Mvu;
-    if (typeof parentMvu?.isDuringExtraAnalysis === "function") {
-      return Boolean(parentMvu.isDuringExtraAnalysis());
-    }
-  } catch {}
-
-  try {
-    const getActivePinia =
-      globalThis?.window?.getActivePinia ??
-      globalThis?.window?.parent?.getActivePinia;
-    if (typeof getActivePinia === "function") {
-      const pinia = getActivePinia();
-      return Boolean(
-        pinia?.state?.value?.["MVU变量框架"]?.runtimes?.is_during_extra_analysis,
-      );
-    }
-  } catch {}
-
-  return false;
+  return readHostMvuExtraAnalysisFlag();
 }
 
 function isMvuExtraAnalysisGuardActive(now = Date.now()) {
@@ -12039,7 +12021,7 @@ function isMvuExtraAnalysisGuardActive(now = Date.now()) {
 
 function isTavernHelperPromptViewerRefreshActive() {
   try {
-    const doc = globalThis?.document;
+    const doc = getHostDocument();
     if (!doc?.querySelectorAll) return false;
 
     const dialogs = Array.from(doc.querySelectorAll('[role="dialog"]'));
@@ -14979,7 +14961,7 @@ function handleGraphShadowSnapshotPageHide() {
 }
 
 function handleGraphShadowSnapshotVisibilityChange() {
-  if (document.visibilityState === "hidden") {
+  if (getHostDocument()?.visibilityState === "hidden") {
     saveGraphToChat({
       reason: "visibility-hidden-passive-persist",
       markMutation: false,
@@ -17333,7 +17315,7 @@ function onUpdatePanelRegionAdjacency(payload = {}) {
 
 async function onExportGraph() {
   return await onExportGraphController({
-    document,
+    document: getHostDocument(),
     exportGraph,
     getCurrentGraph: () => currentGraph,
     toastr,
@@ -17348,7 +17330,7 @@ async function onImportGraph() {
       await onImportGraphController({
         clearInjectionState,
         clearTimeout,
-        document,
+        document: getHostDocument(),
         ensureGraphMutationReady: (operationLabel, options = {}) =>
           ensureGraphMutationReady(operationLabel, {
             ...(options || {}),
@@ -17373,14 +17355,14 @@ async function onImportGraph() {
         },
         toastr,
         updateLastRecalledItems,
-        window,
+        window: getHostWindow(),
       }),
   );
 }
 
 async function onViewLastInjection() {
   return await onViewLastInjectionController({
-    document,
+    document: getHostDocument(),
     getLastInjectionContent: () => lastInjectionContent,
     toastr,
   });
@@ -18313,7 +18295,7 @@ async function onCompactLukerSidecar() {
       getRestoreSafetyStatus: onGetRestoreSafetySnapshotStatus,
     },
     console,
-    document,
+    document: getHostDocument(),
     getGraph: () => currentGraph,
     getGraphPersistenceState: () => getGraphPersistenceLiveState(),
     getHideStateSnapshot: () => getMessageHideStateSnapshotForPanel(),

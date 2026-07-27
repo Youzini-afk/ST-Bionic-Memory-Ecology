@@ -2,6 +2,8 @@
 // Uses the host's native /hide and /unhide slash commands instead of
 // mutating chat messages into is_system=true.
 
+import { resolveHostSlashCommandExecutor } from "../host/st-runtime.js";
+
 const hideState = {
   managedChatRef: null,
   managedChatKey: null,
@@ -76,15 +78,7 @@ function getSlashExecutor(runtime = {}) {
     return context.executeSlashCommands.bind(context);
   }
 
-  if (typeof globalThis.executeSlashCommands === "function") {
-    return globalThis.executeSlashCommands.bind(globalThis);
-  }
-
-  if (typeof globalThis.executeSlashCommandsOnChatInput === "function") {
-    return globalThis.executeSlashCommandsOnChatInput.bind(globalThis);
-  }
-
-  return null;
+  return resolveHostSlashCommandExecutor();
 }
 
 async function executeSlashCommand(command, runtime = {}) {

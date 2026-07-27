@@ -7,25 +7,12 @@ const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 
 // These are migration budgets, not approved architecture. Each phase removes
 // entries as the matching host access moves behind host/. A stale entry fails.
-const LEGACY_DIRECT_HOST_IMPORTS = new Set([
-  "ena-planner/ena-planner-storage.js",
-  "ena-planner/ena-planner.js",
-  "index.js",
-  "llm/llm.js",
-  "prompting/task-regex.js",
-  "ui/recall-message-ui.js",
-  "vector/embedding.js",
-  "vector/vector-index.js",
-]);
+const LEGACY_DIRECT_HOST_IMPORTS = new Set();
 
-const LEGACY_DIRECT_HOST_GLOBALS = new Set([
-  "index.js",
-  "prompting/task-worldinfo.js",
-  "runtime/user-alias-utils.js",
-]);
+const LEGACY_DIRECT_HOST_GLOBALS = new Set();
 
 const MAX_COORDINATOR_LINES = Object.freeze({
-  "index.js": 18_434,
+  "index.js": 18_416,
   "ui/panel.js": 14_976,
 });
 
@@ -56,7 +43,9 @@ function importsSillyTavernInternals(source) {
 }
 
 function readsHostGlobals(source) {
-  return /\bglobalThis\.(?:SillyTavern|Luker|TavernHelper)\b/.test(source);
+  return /\b(?:globalThis|window)\.(?:SillyTavern|Luker|TavernHelper|Mvu|EjsTemplate|chat_metadata|this_chid|characters)\b/.test(
+    source,
+  );
 }
 
 function assertShrinkingBudget({ files, offenders, allowlist, label }) {

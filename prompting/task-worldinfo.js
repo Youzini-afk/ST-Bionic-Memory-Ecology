@@ -19,6 +19,12 @@ import {
   sanitizeMvuContent,
 } from "./mvu-compat.js";
 import { debugDebug } from "../runtime/debug-logging.js";
+import { getContext } from "../host/st-extensions.js";
+import {
+  getHostCurrentChatId,
+  getHostGlobalFunction,
+  hasHostEjsTemplate,
+} from "../host/st-runtime.js";
 
 const WI_POSITION = {
   before: 0,
@@ -301,15 +307,14 @@ function buildCustomFilterDebugSummary(
 
 function getStContext() {
   try {
-    return globalThis.SillyTavern?.getContext?.() || {};
+    return getContext?.() || {};
   } catch {
     return {};
   }
 }
 
 function getLegacyWorldbookApi(name) {
-  const fn = globalThis[name];
-  return typeof fn === "function" ? fn : null;
+  return getHostGlobalFunction(name);
 }
 
 async function getWorldbookHost() {
@@ -1028,7 +1033,7 @@ async function collectAllWorldbookEntries(
   debug.requestedWorldbooks = requestedWorldbooks;
 
   const cacheKey = JSON.stringify({
-    chatId: ctx.chatId || globalThis.getCurrentChatId?.() || "",
+    chatId: ctx.chatId || getHostCurrentChatId(ctx),
     characterId: ctx.characterId ?? "",
     requestedWorldbooks,
     sourceLabel,
@@ -1605,7 +1610,7 @@ export async function resolveTaskWorldInfo({
       ...result.debug.customRender,
       stNativeRuntimeAvailable:
         result.debug.customRender.stNativeRuntimeAvailable ||
-        Boolean(globalThis.window?.EjsTemplate || globalThis.EjsTemplate),
+        hasHostEjsTemplate(),
       envPrepared: Boolean(customRenderEnv),
     };
 

@@ -1,5 +1,24 @@
-import { extension_settings } from '../../../../extensions.js';
-import { getRequestHeaders, substituteParamsExtended } from '../../../../../script.js';
+import { extension_settings } from '../host/st-extensions.js';
+import { getRequestHeaders, substituteParamsExtended } from '../host/st-script.js';
+import {
+    addPlannerSendListeners,
+    getPlannerCharacterGlobalsDebug,
+    getPlannerChatMetadataVariables,
+    getPlannerCurrentCharacter,
+    getPlannerHostChat,
+    getPlannerHostContext,
+    getPlannerHostEjs,
+    getPlannerHostEjsTemplate,
+    getPlannerHostWindowLike,
+    getPlannerLatestMessageVariables,
+    getPlannerSendButton,
+    getPlannerSendTextarea,
+    getPlannerTavernHelper,
+    getPlannerWorldInfoModule,
+    removePlannerSendListeners,
+    setPlannerSendBusy,
+    showPlannerHostError,
+} from '../host/ena-planner-host.js';
 import { EnaPlannerStorage } from './ena-planner-storage.js';
 import {
     applyPlannerResultAndSend,
@@ -155,7 +174,7 @@ async function saveConfigNow() {
 }
 
 function toastErr(msg) {
-    if (window.toastr?.error) return window.toastr.error(msg);
+    if (showPlannerHostError(msg)) return;
     console.error('[EnaPlanner]', msg);
 }
 
@@ -322,10 +341,7 @@ function buildUrl(path, apiConfig = resolvePlannerApiConfig()) {
 }
 
 function setSendUIBusy(busy) {
-    const sendBtn = document.getElementById('send_but') || document.getElementById('send_button');
-    const textarea = document.getElementById('send_textarea');
-    if (sendBtn) sendBtn.disabled = !!busy;
-    if (textarea) textarea.disabled = !!busy;
+    setPlannerSendBusy(busy);
 }
 
 function safeStringify(val) {
@@ -340,47 +356,19 @@ function safeStringify(val) {
  * --------------------------
  */
 function getContextSafe() {
-    try { return window.SillyTavern?.getContext?.() ?? null; } catch { return null; }
+    return getPlannerHostContext();
 }
 
-let stWorldInfoModulePromise = null;
 async function getStWorldInfoModuleSafe() {
-    if (!stWorldInfoModulePromise) {
-        stWorldInfoModulePromise = import('/scripts/world-info.js').catch(() => null);
-    }
-    return stWorldInfoModulePromise;
+    return await getPlannerWorldInfoModule();
 }
 
 function getTavernHelperSafe() {
-    try {
-        return window.TavernHelper || window.SillyTavern?.TavernHelper || null;
-    } catch {
-        return null;
-    }
+    return getPlannerTavernHelper();
 }
 
 function getCurrentCharSafe() {
-    try {
-        // Method 1: via getContext()
-        const ctx = getContextSafe();
-        if (ctx) {
-            const cid = ctx.characterId ?? ctx.this_chid;
-            const chars = ctx.characters;
-            if (chars && cid != null && chars[cid]) return chars[cid];
-        }
-        // Method 2: global this_chid + characters
-        const st = window.SillyTavern;
-        if (st) {
-            const chid = st.this_chid ?? window.this_chid;
-            const chars = st.characters ?? window.characters;
-            if (chars && chid != null && chars[chid]) return chars[chid];
-        }
-        // Method 3: bare globals (some ST versions)
-        if (window.this_chid != null && window.characters) {
-            return window.characters[window.this_chid] ?? null;
-        }
-    } catch { }
-    return null;
+    return getPlannerCurrentCharacter();
 }
 
 /**
@@ -489,7 +477,7 @@ async function getCharacterWorldbooks() {
         context: ctx,
         character: charObj,
         tavernHelper: getTavernHelperSafe(),
-        windowLike: typeof window !== 'undefined' ? window : null,
+        windowLike: getPlannerHostWindowLike(),
     });
 
     debugLog('[EnaPlanner] Character worldbook names found:', worldNames);
@@ -503,7 +491,7 @@ async function getGlobalWorldbooks() {
         context: ctx,
         tavernHelper: getTavernHelperSafe(),
         worldInfoModule,
-        windowLike: typeof window !== 'undefined' ? window : null,
+        windowLike: getPlannerHostWindowLike(),
     });
     debugLog('[EnaPlanner] Global worldbook names found:', worldNames);
     return worldNames;
@@ -726,7 +714,8 @@ function getChatVariables() {
   } catch {}
   if (!Object.keys(vars).length) {
     try {
-      if (window.chat_metadata?.variables) vars = { ...window.chat_metadata.variables };
+      const hostVariables = getPlannerChatMetadataVariables();
+      if (hostVariables) vars = { ...hostVariables };
     } catch {}
   }
   if (!Object.keys(vars).length) {
@@ -826,15 +815,15 @@ export function renderEjsTemplate(template, ctx, templateLabel = '') {
         return template;
     }
 
-    // Try window.ejs first (ST loads this library)
-    if (window.ejs?.render) {
+    const hostEjs = getPlannerHostEjs();
+    if (hostEjs?.render) {
         try {
             const renderCtx = ctx && typeof ctx === 'object' ? { ...ctx } : ctx;
             if (renderCtx && typeof renderCtx === 'object') {
                 delete renderCtx.__append;
                 delete renderCtx.print;
             }
-            return window.ejs.render(template, renderCtx, {
+            return hostEjs.render(template, renderCtx, {
                 async: false,
                 outputFunctionName: 'print',
             });
@@ -845,7 +834,7 @@ export function renderEjsTemplate(template, ctx, templateLabel = '') {
     }
 
     // Safe degradation when ejs is not available.
-    console.warn(`[EnaPlanner] window.ejs not available${labelSuffix}, template returned as-is.`);
+    console.warn(`[EnaPlanner] host EJS not available${labelSuffix}, template returned as-is.`);
     return template;
 }
 
@@ -856,7 +845,7 @@ export function renderEjsTemplate(template, ctx, templateLabel = '') {
  */
 async function prepareEjsEnv() {
     try {
-        const et = window.EjsTemplate;
+        const et = getPlannerHostEjsTemplate();
         if (!et) return null;
         const fn = et.prepareContext || et.preparecontext;
         if (typeof fn !== 'function') return null;
@@ -866,7 +855,7 @@ async function prepareEjsEnv() {
 
 async function evalEjsIfPossible(text, env) {
     try {
-        const et = window.EjsTemplate;
+        const et = getPlannerHostEjsTemplate();
         if (!et || !env) return text;
         const fn = et.evalTemplate || et.evaltemplate;
         if (typeof fn !== 'function') return text;
@@ -909,18 +898,7 @@ function resolveFormatMessageVariableMacros(text, messageVars) {
 }
 
 function getLatestMessageVarTable() {
-    try {
-        if (window.Mvu?.getMvuData) {
-            return window.Mvu.getMvuData({ type: 'message', message_id: 'latest' });
-        }
-    } catch { }
-    try {
-        const getVars = window.TavernHelper?.getVariables || window.Mvu?.getMvuData;
-        if (typeof getVars === 'function') {
-            return getVars({ type: 'message', message_id: 'latest' });
-        }
-    } catch { }
-    return {};
+    return getPlannerLatestMessageVariables();
 }
 
 async function renderTemplateAll(text, env, messageVars) {
@@ -1104,11 +1082,12 @@ function debugCharForUi() {
     const charObj = getCurrentCharSafe();
     if (!charObj) {
         const ctx = getContextSafe();
+        const globals = getPlannerCharacterGlobalsDebug();
         return [
             '⚠️ 未检测到角色。',
             `ctx: ${!!ctx}, ctx.characterId: ${ctx?.characterId}, ctx.this_chid: ${ctx?.this_chid}`,
-            `window.this_chid: ${window.this_chid}`,
-            `window.characters count: ${window.characters?.length ?? 'N/A'}`
+            `host character id: ${globals.characterId}`,
+            `host character count: ${globals.characterCount}`
         ].join('\n');
     }
     const block = formatCharCardBlock(charObj);
@@ -1283,7 +1262,7 @@ async function buildPlannerMessages(rawUserInput, options = {}) {
     throwIfPlannerAborted(options.signal);
     const s = ensureSettings();
     const ctx = getContextSafe();
-    const chat = ctx?.chat ?? window.SillyTavern?.chat ?? [];
+    const chat = ctx?.chat ?? getPlannerHostChat();
     const charObj = getCurrentCharSafe();
     const env = await prepareEjsEnv();
     const messageVars = getLatestMessageVarTable();
@@ -1479,8 +1458,8 @@ async function runPlanningOnce(rawUserInput, silent = false, options = {}) {
  * Intercept send
  * --------------------------
  */
-function getSendTextarea() { return document.getElementById('send_textarea'); }
-function getSendButton() { return document.getElementById('send_but') || document.getElementById('send_button'); }
+function getSendTextarea() { return getPlannerSendTextarea(); }
+function getSendButton() { return getPlannerSendButton(); }
 
 function isTrivialPlannerInput(text) {
     return _bmeRuntime?.isTrivialUserInput?.(text)?.trivial === true;
@@ -1656,15 +1635,13 @@ function installSendInterceptors() {
         e.stopImmediatePropagation();
         doInterceptAndPlanThenSend().catch(err => toastErr(String(err?.message ?? err)));
     };
-    document.addEventListener('click', sendClickHandler, true);
-    document.addEventListener('keydown', sendKeydownHandler, true);
+    addPlannerSendListeners(sendClickHandler, sendKeydownHandler);
     sendListenersInstalled = true;
 }
 
 function uninstallSendInterceptors() {
     if (!sendListenersInstalled) return;
-    if (sendClickHandler) document.removeEventListener('click', sendClickHandler, true);
-    if (sendKeydownHandler) document.removeEventListener('keydown', sendKeydownHandler, true);
+    removePlannerSendListeners(sendClickHandler, sendKeydownHandler);
     sendClickHandler = null;
     sendKeydownHandler = null;
     sendListenersInstalled = false;
