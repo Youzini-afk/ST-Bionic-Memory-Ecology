@@ -458,6 +458,36 @@ import {
 }
 
 {
+  const chat = [{
+    is_user: true,
+    mes: 'raw input\n\n<plot>next</plot>',
+    extra: {},
+  }];
+  const runtime = createRerollRecallInput({
+    getCurrentChatId: () => 'integrity-chat-id',
+    getContext: () => ({ chatId: 'host-chat-id', chat }),
+    getActiveGenerationId: () => 'generation-1',
+    normalizeChatIdCandidate: (value) => String(value || '').trim(),
+    normalizeRecallInputText: (value) => String(value || '').trim(),
+    hashRecallInput: () => 'hash',
+    writeStructuredPlotRecordToMessage,
+  });
+  const handoff = runtime.preparePlannerTurnHandoff({
+    chatId: 'integrity-chat-id',
+    rawUserInput: 'raw input',
+    plannerAugmentedMessage: chat[0].mes,
+    plannerPlotRecord: { plotText: '<plot>next</plot>' },
+  });
+  runtime.markPlannerTurnHandoffMatched('integrity-chat-id', {
+    handoffId: handoff.id,
+    generationId: 'generation-1',
+  });
+
+  assert.equal(runtime.persistPlannerTurnHandoffToUserMessage(0), true);
+  assert.equal(chat[0].extra.st_bme_plot.plotText, '<plot>next</plot>');
+}
+
+{
   const runtime = createRerollRecallInput({
     getCurrentChatId: () => 'chat-a',
     normalizeChatIdCandidate: (value) => String(value || '').trim(),

@@ -430,7 +430,8 @@ export function createRerollRecallInput(deps = {}) {
     ) {
       return false;
     }
-    const chatId = context?.chatId || getCurrentChatId();
+    // Handoffs are keyed by BME's canonical chat identity, not the host filename.
+    const chatId = getCurrentChatId();
     const handoff = consumePlannerTurnHandoffForGeneration(
       chatId,
       deps.getActiveGenerationId?.(),

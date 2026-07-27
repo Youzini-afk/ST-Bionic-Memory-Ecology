@@ -13,8 +13,8 @@ const [manifestSource, panelHtml, panelSource, uiLabelSource, styleCss] = await 
 
 const manifest = JSON.parse(manifestSource);
 assert.equal(manifest.display_name, "ST-BME Memory Graph");
-assert.equal(manifest.js, "index.js?v=recall-tabs-v7");
-assert.equal(manifest.css, "style.css");
+assert.equal(manifest.js, "index.js?v=recall-tabs-v8");
+assert.equal(manifest.css, "style.css?v=recall-tabs-v8");
 
 const requiredPanelIds = [
   "st-bme-panel-overlay",
@@ -148,5 +148,10 @@ assert.ok(
 for (const selector of ["#st-bme-panel-overlay", "#st-bme-panel", "#bme-floating-ball"]) {
   assert.ok(styleCss.includes(selector), `missing product style ${selector}`);
 }
+assert.match(
+  styleCss,
+  /\.bme-recall-tab\[hidden\]\s*\{\s*display:\s*none;/,
+  "hidden Recall Card tabs must not be displayed",
+);
 
 console.log("product-surface-contract tests passed");

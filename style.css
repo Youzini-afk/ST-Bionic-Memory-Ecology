@@ -6247,6 +6247,10 @@
   white-space: nowrap;
 }
 
+.bme-recall-tab[hidden] {
+  display: none;
+}
+
 .bme-recall-tab > * {
   pointer-events: none;
 }

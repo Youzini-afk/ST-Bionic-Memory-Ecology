@@ -20,7 +20,7 @@ function _hostUserPovAliasHintsForRecallCanvas() {
 
 // ==================== 常量 ====================
 
-export const RECALL_CARD_UI_VERSION = "recall-tabs-v7";
+export const RECALL_CARD_UI_VERSION = "recall-tabs-v8";
 
 export const RECALL_CARD_FORCE_CONFIG = {
   repulsion: 1200,
