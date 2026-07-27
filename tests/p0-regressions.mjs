@@ -4601,16 +4601,20 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
     reason: "",
   });
   harness.compressAll = async () => ({ created: 1, archived: 2 });
-  harness.syncVectorState = async () => ({
-    insertedHashes: ["hash-stage"],
-    stats: { pending: 0, indexed: 3 },
-  });
+  let vectorSyncCalls = 0;
+  harness.syncVectorState = async () => {
+    vectorSyncCalls += 1;
+    return {
+      insertedHashes: ["hash-stage"],
+      stats: { pending: 0, indexed: 3 },
+    };
+  };
 
   const batchStatus = createBatchStatusSkeleton({
     processedRange: [8, 8],
     extractionCountBefore: 0,
   });
-  await handleExtractionSuccess(
+  const effects = await handleExtractionSuccess(
     {
       newNodeIds: ["node-stage"],
     },
@@ -4638,7 +4642,48 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   assert.ok(statusTexts.includes("反思生成中"));
   assert.ok(statusTexts.includes("主动遗忘中"));
   assert.ok(statusTexts.includes("自动压缩中"));
-  assert.ok(statusTexts.includes("向量同步中"));
+  assert.ok(statusTexts.includes("向量同步等待持久化"));
+  assert.equal(vectorSyncCalls, 0);
+  assert.equal(effects.committedVectorSync?.enabled, true);
+}
+
+async function testDirtyRangedVectorSyncRebuildsWholeVectorSpace() {
+  const graph = createEmptyGraph();
+  const first = makeEvent(1, "向量范围事件1");
+  const second = makeEvent(2, "向量范围事件2");
+  addNode(graph, first);
+  addNode(graph, second);
+  graph.vectorIndexState.dirty = true;
+  let embeddedCount = 0;
+
+  const restoreOverrides = pushTestOverrides({
+    embedding: {
+      async embedBatch(texts) {
+        embeddedCount = texts.length;
+        return texts.map((_, index) => [index + 0.1, index + 0.2]);
+      },
+    },
+  });
+
+  try {
+    await syncGraphVectorIndex(
+      graph,
+      {
+        mode: "direct",
+        source: "direct",
+        apiUrl: "https://example.com/v1",
+        model: "text-embedding-3-small",
+      },
+      { range: { start: 2, end: 2 } },
+    );
+
+    assert.equal(embeddedCount, 2);
+    assert.ok(graph.vectorIndexState.nodeToHash[first.id]);
+    assert.ok(graph.vectorIndexState.nodeToHash[second.id]);
+    assert.equal(graph.vectorIndexState.dirty, false);
+  } finally {
+    restoreOverrides();
+  }
 }
 
 async function testBalancedModeDefersExtractionVectorSync() {
@@ -5482,7 +5527,7 @@ async function testAutoCompressionSkipsWhenNotScheduledOrNoCandidates() {
   );
 }
 
-async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
+async function testBatchStatusWaitsForPrimaryCommitBeforeVectorFinalize() {
   const harness = await createBatchStageHarness();
   const { createBatchStatusSkeleton, handleExtractionSuccess } = harness.result;
   harness.currentGraph = {
@@ -5493,11 +5538,11 @@ async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
     harness.currentGraph.historyState ||= {};
     harness.currentGraph.vectorIndexState ||= {};
   };
-  harness.syncVectorState = async () => ({
-    insertedHashes: [],
-    stats: { pending: 1 },
-    error: "vector finalize down",
-  });
+  let vectorSyncCalls = 0;
+  harness.syncVectorState = async () => {
+    vectorSyncCalls += 1;
+    return { error: "must not run before persistence" };
+  };
 
   const batchStatus = createBatchStatusSkeleton({
     processedRange: [6, 7],
@@ -5520,11 +5565,11 @@ async function testBatchStatusFinalizeFailureIsNotCompleteSuccess() {
   );
 
   assert.equal(effects.batchStatus.stages.core.outcome, "success");
-  assert.equal(effects.batchStatus.stages.finalize.outcome, "failed");
-  assert.equal(effects.batchStatus.outcome, "failed");
-  assert.equal(effects.batchStatus.completed, false);
-  assert.equal(effects.batchStatus.consistency, "weak");
-  assert.equal(effects.vectorError, "vector finalize down");
+  assert.equal(effects.batchStatus.stages.finalize.outcome, "success");
+  assert.equal(effects.batchStatus.outcome, "success");
+  assert.equal(effects.batchStatus.completed, true);
+  assert.equal(vectorSyncCalls, 0);
+  assert.equal(effects.committedVectorSync?.enabled, true);
 }
 
 async function testProcessedHistoryAdvanceTracksCoreExtractionSuccess() {
@@ -10168,6 +10213,7 @@ async function testManualSleepExplainsThatItIsLocalOnlyWhenNothingChanges() {
 
 await testCompressorMigratesEdgesToCompressedNode();
 await testVectorIndexKeepsDirtyOnDirectPartialEmbeddingFailure();
+await testDirtyRangedVectorSyncRebuildsWholeVectorSpace();
 await testBackendVectorQueryFailureMarksStateDirty();
 await testDeleteCurrentIdbClearsCommitMarkerBeforeReload();
 await testCompressTypeAcceptsTopLevelFieldsResult();
@@ -10198,7 +10244,7 @@ await testAutoConsolidationSuppressedForBulkExtractionBatch();
 await testAutoConsolidationUsesDeferredBulkCandidates();
 await testAutoCompressionRunsOnlyOnConfiguredInterval();
 await testAutoCompressionSkipsWhenNotScheduledOrNoCandidates();
-await testBatchStatusFinalizeFailureIsNotCompleteSuccess();
+await testBatchStatusWaitsForPrimaryCommitBeforeVectorFinalize();
 await testProcessedHistoryAdvanceTracksCoreExtractionSuccess();
 await testGenerationRecallTransactionDedupesDoubleHookBySameKey();
 await testGenerationRecallTransactionDedupesReverseHookOrder();

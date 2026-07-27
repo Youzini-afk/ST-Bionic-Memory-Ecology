@@ -14,6 +14,11 @@ const CHECKS = [
     modulePath: "sync/graph-mutation-gate.js",
     builderName: "createGraphMutationGateRuntime",
   },
+  {
+    modulePath: "runtime/reroll-recall-input.js",
+    factoryName: "createRerollRecallInput",
+    dependencyObjectName: "deps",
+  },
 ];
 
 function readProjectFile(relativePath) {
@@ -110,17 +115,27 @@ function findMatchingBrace(strippedSource, openIndex) {
   throw new Error(`No matching closing brace for offset ${openIndex}`);
 }
 
-function extractRuntimeKeys(moduleSource) {
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractRuntimeKeys(moduleSource, dependencyObjectName = "runtime") {
   const stripped = stripCommentsAndStrings(moduleSource);
-  const unsupportedComputedAccess = /\bruntime\s*(?:\?\.)?\s*\[/.exec(stripped);
+  const dependencyPattern = escapeRegExp(dependencyObjectName);
+  const unsupportedComputedAccess = new RegExp(
+    `\\b${dependencyPattern}\\s*(?:\\?\\.)?\\s*\\[`,
+  ).exec(stripped);
   if (unsupportedComputedAccess) {
     throw new Error(
       `Unsupported computed runtime dependency access near offset ${unsupportedComputedAccess.index}. ` +
-        "Use direct runtime.someDependency access so completeness can be checked.",
+        `Use direct ${dependencyObjectName}.someDependency access so completeness can be checked.`,
     );
   }
   const keys = new Set();
-  const runtimePropertyPattern = /\bruntime\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)/g;
+  const runtimePropertyPattern = new RegExp(
+    `\\b${dependencyPattern}\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)`,
+    "g",
+  );
   let match = null;
 
   while ((match = runtimePropertyPattern.exec(stripped))) {
@@ -164,6 +179,17 @@ function extractBuilderReturnObjectRange(indexSource, builderName) {
   throw new Error(`Could not locate returned object literal for ${builderName}`);
 }
 
+function extractFactoryCallObjectRange(indexSource, factoryName) {
+  const stripped = stripCommentsAndStrings(indexSource);
+  const factoryPattern = new RegExp(`\\b${escapeRegExp(factoryName)}\\s*\\(\\s*\\{`);
+  const factoryMatch = factoryPattern.exec(stripped);
+  if (!factoryMatch) {
+    throw new Error(`Could not locate factory call ${factoryName}`);
+  }
+  const open = stripped.indexOf("{", factoryMatch.index);
+  return { open, close: findMatchingBrace(stripped, open), stripped };
+}
+
 function splitTopLevelObjectEntries(strippedSource, open, close) {
   const entries = [];
   let depth = 0;
@@ -183,8 +209,7 @@ function splitTopLevelObjectEntries(strippedSource, open, close) {
   return entries;
 }
 
-function extractBuilderProvidedKeys(indexSource, builderName) {
-  const { open, close, stripped } = extractBuilderReturnObjectRange(indexSource, builderName);
+function extractProvidedKeysFromObjectRange({ open, close, stripped }) {
   const entries = splitTopLevelObjectEntries(stripped, open, close);
   const keys = new Set();
 
@@ -213,24 +238,47 @@ function extractBuilderProvidedKeys(indexSource, builderName) {
   return keys;
 }
 
+function extractBuilderProvidedKeys(indexSource, builderName) {
+  return extractProvidedKeysFromObjectRange(
+    extractBuilderReturnObjectRange(indexSource, builderName),
+  );
+}
+
+function extractFactoryProvidedKeys(indexSource, factoryName) {
+  return extractProvidedKeysFromObjectRange(
+    extractFactoryCallObjectRange(indexSource, factoryName),
+  );
+}
+
 function diffSets(left, right) {
   return [...left].filter((value) => !right.has(value)).sort();
 }
 
-function assertRuntimeDepsComplete({ modulePath, builderName, moduleSource, indexSource }) {
-  const requiredKeys = extractRuntimeKeys(moduleSource);
-  const providedKeys = extractBuilderProvidedKeys(indexSource, builderName);
+function assertRuntimeDepsComplete({
+  modulePath,
+  builderName,
+  factoryName,
+  dependencyObjectName = "runtime",
+  moduleSource,
+  indexSource,
+}) {
+  const providerName = builderName || factoryName;
+  const requiredKeys = extractRuntimeKeys(moduleSource, dependencyObjectName);
+  const providedKeys = factoryName
+    ? extractFactoryProvidedKeys(indexSource, factoryName)
+    : extractBuilderProvidedKeys(indexSource, builderName);
   const missingKeys = diffSets(requiredKeys, providedKeys);
 
   if (missingKeys.length > 0) {
     throw new Error(
-      `${modulePath} requires runtime deps missing from ${builderName}: ${missingKeys.join(", ")}`,
+      `${modulePath} requires runtime deps missing from ${providerName}: ${missingKeys.join(", ")}`,
     );
   }
 
   return {
     requiredKeys,
     providedKeys,
+    providerName,
     unusedProvidedKeys: diffSets(providedKeys, requiredKeys),
   };
 }
@@ -288,7 +336,7 @@ for (const check of CHECKS) {
 
   if (result.unusedProvidedKeys.length > 0) {
     console.info(
-      `[runtime-deps] ${check.builderName} provides unused keys for ${check.modulePath}: ${result.unusedProvidedKeys.join(", ")}`,
+      `[runtime-deps] ${result.providerName} provides unused keys for ${check.modulePath}: ${result.unusedProvidedKeys.join(", ")}`,
     );
   }
 }

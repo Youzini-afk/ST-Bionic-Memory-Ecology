@@ -159,6 +159,7 @@ import {
   onExtractionTaskController,
   onManualExtractController,
   onRerollController,
+  recordGraphMutationController,
   replayExtractionFromHistoryController,
   resolveAutoExtractionPlanController,
   runExtractionController,
@@ -1751,15 +1752,17 @@ const recallInputState = createRecallInputState({
   TRIVIAL_GENERATION_SKIP_TTL_MS,
 });
 const rerollRecallInput = createRerollRecallInput({
+  buildPersistedRecallRecord,
+  buildRecallHistoryFingerprint,
   clearPendingHostGenerationInputSnapshot: (...args) =>
     clearPendingHostGenerationInputSnapshot(...args),
   clearPendingRecallSendIntent: (...args) => clearPendingRecallSendIntent(...args),
   console,
   createTrivialRecallSkipSentinel: (...args) =>
     createTrivialRecallSkipSentinel(...args),
-  findLatestUserChatMessageWithIndex: (...args) =>
-    findLatestUserChatMessageWithIndex(...args),
+  estimateTokens,
   formatInjection: (...args) => formatInjection(...args),
+  getActiveGenerationId: () => conversationSession.getGeneration()?.id || "",
   getContext,
   getCurrentChatId,
   getCurrentGenerationTrivialSkip: (...args) =>
@@ -1783,7 +1786,9 @@ const rerollRecallInput = createRerollRecallInput({
     readPersistedRecallFromUserMessage(...args),
   resolveGenerationTargetUserMessageIndex: (...args) =>
     resolveGenerationTargetUserMessageIndex(...args),
-  GENERATION_RECALL_TRANSACTION_TTL_MS,
+  triggerChatMetadataSave,
+  writePersistedRecallToUserMessage,
+  writeStructuredPlotRecordToMessage,
   PLANNER_RECALL_HANDOFF_TTL_MS,
 });
 let coreEventBindingState = {
@@ -1846,6 +1851,25 @@ const finalRecallInjectionRuntime = createFinalRecallInjection({
     readConversationInput("lastRecallSentUserMessage"),
   getRuntimeStatus: () => conversationWorkspace.runtimeStatus,
   getSettings,
+  isRecallChatIdCurrent: (expectedChatId = "") => {
+    const context = getContext();
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId(context));
+    const normalizedExpectedChatId = normalizeChatIdCandidate(expectedChatId);
+    if (!normalizedExpectedChatId || !activeChatId) return false;
+    const identity = resolveCurrentChatIdentity(context);
+    return (
+      areChatIdsEquivalentForResolvedIdentity(
+        normalizedExpectedChatId,
+        activeChatId,
+        identity,
+      ) ||
+      areChatIdsEquivalentForResolvedIdentity(
+        activeChatId,
+        normalizedExpectedChatId,
+        identity,
+      )
+    );
+  },
   normalizeRecallInputText,
   normalizeRecallNodeIdList: (...args) => normalizeRecallNodeIdList(...args),
   readGenerationRecallTransactionFinalResolution: (...args) =>
@@ -5788,10 +5812,6 @@ async function rerunRecallForMessage(messageIndex) {
     includeSyntheticUserMessage: false,
     hookName: "MESSAGE_RECALL_BADGE_RERUN",
     forceFreshRecall: true,
-  });
-  applyFinalRecallInjectionForGeneration({
-    generationType: "history",
-    freshRecallResult: result,
   });
   return result;
 }
@@ -13395,61 +13415,32 @@ async function recordGraphMutation({
   signal = undefined,
   extractionCountBefore = conversationWorkspace.extractionCount,
 } = {}) {
-  ensureCurrentGraphRuntimeState();
-  const mutationGraph = conversationWorkspace.graph;
-  const mutationChatId = normalizeChatIdCandidate(getCurrentChatId());
-  const mutationLastProcessedFloor = getLastProcessedAssistantFloor();
-  const mutationRevision =
-    Math.max(
-      normalizeIndexedDbRevision(conversationWorkspace.graphPersistenceState.revision),
-      normalizeIndexedDbRevision(getGraphPersistedRevision(mutationGraph)),
-    ) + 1;
-  const vectorSync = await syncVectorState({
-    force: true,
-    purge: isBackendVectorConfig(getEmbeddingConfig()) && !syncRange,
-    range: syncRange,
-    signal,
-  });
-  const contextChanged =
-    conversationWorkspace.graph !== mutationGraph ||
-    normalizeChatIdCandidate(getCurrentChatId()) !== mutationChatId;
-  const afterSnapshot = cloneGraphSnapshot(mutationGraph);
-  const effectiveRange = Array.isArray(processedRange)
-    ? processedRange
-    : [mutationLastProcessedFloor, mutationLastProcessedFloor];
-
-  appendBatchJournal(
-    mutationGraph,
-    createBatchJournalEntry(beforeSnapshot, afterSnapshot, {
-      processedRange: effectiveRange,
-      postProcessArtifacts: computePostProcessArtifacts(
-        beforeSnapshot,
-        afterSnapshot,
-        artifactTags,
-      ),
-      vectorHashesInserted: vectorSync?.insertedHashes || [],
+  return await recordGraphMutationController(
+    {
+      appendBatchJournal,
+      cloneGraphSnapshot,
+      computePostProcessArtifacts,
+      createBatchJournalEntry,
+      ensureCurrentGraphRuntimeState,
+      getCurrentChatId,
+      getCurrentGraph: () => conversationWorkspace.graph,
+      getEmbeddingConfig,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
+      getLastProcessedAssistantFloor,
+      isBackendVectorConfig,
+      normalizeChatIdCandidate,
+      saveGraphToChat,
+      syncVectorState,
+    },
+    {
+      beforeSnapshot,
+      processedRange,
+      artifactTags,
+      syncRange,
+      signal,
       extractionCountBefore,
-    }),
+    },
   );
-  if (contextChanged) {
-    const recoverable = maybeCaptureGraphShadowSnapshot(
-      "graph-mutation-context-changed",
-      {
-        graph: mutationGraph,
-        chatId: mutationChatId,
-        revision: mutationRevision,
-      },
-    );
-    return {
-      ...(vectorSync && typeof vectorSync === "object" ? vectorSync : {}),
-      aborted: true,
-      stale: true,
-      recoverable,
-      error: vectorSync?.error || "graph-mutation-context-changed",
-    };
-  }
-  saveGraphToChat({ reason: "record-graph-mutation" });
-  return vectorSync;
 }
 
 function noteMaintenanceGate(status, action, reason) {
@@ -14600,68 +14591,9 @@ function preparePlannerTurnHandoff({
 }
 
 function persistPlannerTurnHandoffToUserMessage(newUserMessageIndex) {
-  const context = getContext();
-  const chat = context?.chat;
-  if (
-    !Array.isArray(chat) ||
-    !Number.isFinite(newUserMessageIndex) ||
-    !chat[newUserMessageIndex]?.is_user
-  ) {
-    return false;
-  }
-  const chatId = context?.chatId || getCurrentChatId();
-  const handoff = rerollRecallInput.consumePlannerTurnHandoffForGeneration(
-    chatId,
-    conversationSession.getGeneration()?.id,
+  return rerollRecallInput.persistPlannerTurnHandoffToUserMessage(
+    newUserMessageIndex,
   );
-  if (!handoff) return false;
-
-  const targetUserFloorText = normalizeRecallInputText(
-    chat[newUserMessageIndex]?.mes || "",
-  );
-
-  let wroteRecall = false;
-  const injectionText = String(handoff?.injectionText || "").trim();
-  const result = handoff?.result || null;
-  if (
-    injectionText &&
-    result &&
-    !readPersistedRecallFromUserMessage(chat, newUserMessageIndex)
-  ) {
-    wroteRecall = writePersistedRecallToUserMessage(
-      chat,
-      newUserMessageIndex,
-      buildPersistedRecallRecord({
-        injectionText,
-        selectedNodeIds: result?.selectedNodeIds || [],
-        recallInput: String(handoff.rawUserInput || ""),
-        recallSource: String(handoff.source || "planner-handoff"),
-        hookName: "MESSAGE_SENT",
-        tokenEstimate: estimateTokens(injectionText),
-        manuallyEdited: false,
-        authoritativeInputUsed: true,
-        boundUserFloorText: targetUserFloorText,
-        historyFingerprint: buildRecallHistoryFingerprint(
-          chat,
-          newUserMessageIndex,
-        ),
-      }),
-    );
-  }
-
-  const plannerPlotRecord = handoff.plannerPlotRecord;
-  const wrotePlot = Boolean(
-    plannerPlotRecord &&
-      writeStructuredPlotRecordToMessage(chat[newUserMessageIndex], {
-        ...plannerPlotRecord,
-        recallHandoffId:
-          handoff.id || plannerPlotRecord.recallHandoffId || "",
-      }),
-  );
-  if (wroteRecall || wrotePlot) {
-    triggerChatMetadataSave(context, { immediate: false });
-  }
-  return wroteRecall || wrotePlot;
 }
 
 function buildPreGenerationRecallKey(type, options = {}) {
@@ -15248,7 +15180,9 @@ async function executeExtractionBatch({
       getLastProcessedAssistantFloor,
       getSettings,
       getSchema,
+      getVectorIndexStats,
       handleExtractionSuccess,
+      isAbortError,
       isConversationLeaseCurrent: (...args) =>
         conversationWorkspace.isLeaseCurrent(...args),
       markHistoryDirty,
@@ -15262,10 +15196,12 @@ async function executeExtractionBatch({
       setExtractionCount: (value) => { conversationWorkspace.extractionCount = value; },
       setLastExtractionStatus,
       stampGraphPersistenceMeta,
+      syncVectorState,
       shouldAdvanceProcessedHistory,
       throwIfAborted,
       updateLastExtractedItems,
       updateProcessedHistorySnapshot,
+      EXTRACTION_VECTOR_SYNC_TIMEOUT_MS,
     },
     {
       chat,
@@ -15789,6 +15725,7 @@ async function runRecall(options = {}) {
       finishStageAbortController,
       getActiveRecallPromise: () => conversationWorkspace.activeRecallPromise,
       getContext,
+      getCurrentChatId,
       getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
       getGraphMutationBlockReason,

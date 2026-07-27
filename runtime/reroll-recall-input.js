@@ -420,6 +420,73 @@ export function createRerollRecallInput(deps = {}) {
     return handoff;
   }
 
+  function persistPlannerTurnHandoffToUserMessage(newUserMessageIndex) {
+    const context = deps.getContext?.();
+    const chat = context?.chat;
+    if (
+      !Array.isArray(chat) ||
+      !Number.isFinite(newUserMessageIndex) ||
+      !chat[newUserMessageIndex]?.is_user
+    ) {
+      return false;
+    }
+    const chatId = context?.chatId || getCurrentChatId();
+    const handoff = consumePlannerTurnHandoffForGeneration(
+      chatId,
+      deps.getActiveGenerationId?.(),
+    );
+    if (!handoff) return false;
+
+    const targetUserFloorText = normalizeRecallInputText(
+      chat[newUserMessageIndex]?.mes || "",
+    );
+    const injectionText = String(handoff?.injectionText || "").trim();
+    const result = handoff?.result || null;
+    let wroteRecall = false;
+    if (
+      injectionText &&
+      result &&
+      !deps.readPersistedRecallFromUserMessage?.(chat, newUserMessageIndex)
+    ) {
+      wroteRecall = Boolean(
+        deps.writePersistedRecallToUserMessage?.(
+          chat,
+          newUserMessageIndex,
+          deps.buildPersistedRecallRecord?.({
+            injectionText,
+            selectedNodeIds: result?.selectedNodeIds || [],
+            recallInput: String(handoff.rawUserInput || ""),
+            recallSource: String(handoff.source || "planner-handoff"),
+            hookName: "MESSAGE_SENT",
+            tokenEstimate: deps.estimateTokens?.(injectionText) || 0,
+            manuallyEdited: false,
+            authoritativeInputUsed: true,
+            boundUserFloorText: targetUserFloorText,
+            historyFingerprint:
+              deps.buildRecallHistoryFingerprint?.(
+                chat,
+                newUserMessageIndex,
+              ) || "",
+          }),
+        ),
+      );
+    }
+
+    const plannerPlotRecord = handoff.plannerPlotRecord;
+    const wrotePlot = Boolean(
+      plannerPlotRecord &&
+        deps.writeStructuredPlotRecordToMessage?.(chat[newUserMessageIndex], {
+          ...plannerPlotRecord,
+          recallHandoffId:
+            handoff.id || plannerPlotRecord.recallHandoffId || "",
+        }),
+    );
+    if (wroteRecall || wrotePlot) {
+      deps.triggerChatMetadataSave?.(context, { immediate: false });
+    }
+    return wroteRecall || wrotePlot;
+  }
+
   return {
     buildNormalGenerationRecallInput,
     buildHistoryGenerationRecallInput,
@@ -431,5 +498,6 @@ export function createRerollRecallInput(deps = {}) {
     markPlannerTurnHandoffMatched,
     cleanupPlannerTurnHandoffs,
     clearPlannerTurnHandoffsForChat,
+    persistPlannerTurnHandoffToUserMessage,
   };
 }

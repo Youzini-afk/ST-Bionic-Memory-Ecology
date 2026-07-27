@@ -269,12 +269,13 @@ export async function createGenerationRecallHarness(options = {}) {
     retrieveImpl: null,
     isExtracting: false,
     isRecoveringHistory: false,
+    activeChatId: "chat-main",
   };
 
   const normalizeChatIdCandidate = (value = "") => String(value ?? "").trim();
-  const getCurrentChatId = () => "chat-main";
+  const getCurrentChatId = () => harness.activeChatId;
   const getContext = () => ({
-    chatId: "chat-main",
+    chatId: harness.activeChatId,
     chat: harness.chat,
   });
   const conversationSession = createConversationSession({
@@ -285,11 +286,13 @@ export async function createGenerationRecallHarness(options = {}) {
     hostChatId: getCurrentChatId(),
   });
   conversationSession.beginGeneration("normal");
-  harness.enterConversation = (chatId) =>
-    conversationSession.enterChat(
+  harness.enterConversation = (chatId) => {
+    harness.activeChatId = String(chatId || "");
+    return conversationSession.enterChat(
       { chatId, hostChatId: chatId },
       { forceNewEpoch: true, reason: "test-chat-change" },
     );
+  };
   const readConversationInput = (name) =>
     conversationSession.getInput(name) || createRecallInputRecord();
   const writeConversationInput = (name, record) =>
@@ -577,6 +580,9 @@ export async function createGenerationRecallHarness(options = {}) {
       readConversationInput("lastRecallSentUserMessage"),
     getRuntimeStatus: () => runtimeStatus,
     getSettings,
+    isRecallChatIdCurrent: (chatId) =>
+      normalizeChatIdCandidate(chatId) ===
+      normalizeChatIdCandidate(getCurrentChatId()),
     normalizeRecallInputText,
     normalizeRecallNodeIdList,
     readGenerationRecallTransactionFinalResolution: (...args) =>
