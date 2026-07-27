@@ -47,21 +47,20 @@
 
 Embedding 是智能召回的核心。
 
-#### 后端模式
+#### 直连 Embedding API（默认）
 
-推荐优先使用后端模式：
-
-- 复用 SillyTavern 后端的 embedding provider。
-- 通常不需要浏览器直接持有 embedding API Key。
-- 可使用 SillyTavern 已支持的 OpenAI、Cohere、Mistral、Ollama、LlamaCpp、vLLM 等来源。
-
-#### 直连模式
-
-直连模式由浏览器直接请求 embedding 服务：
+直连模式由浏览器直接请求独立的 embedding 服务：
 
 - 需要填写 API 地址、Key 和模型。
 - 可能遇到 CORS 限制。
 - 适合自建网关或独立 embedding 服务。
+
+#### SillyTavern 后端索引
+
+后端索引模式复用 SillyTavern 后端的 embedding provider：
+
+- 通常不需要浏览器直接持有 embedding API Key。
+- 仅能使用 SillyTavern 已支持的 OpenAI、Cohere、Mistral、Ollama、LlamaCpp、vLLM 等来源。
 
 > 切换 embedding 模式或模型后，建议执行“重建向量”。
 

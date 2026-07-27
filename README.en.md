@@ -111,7 +111,7 @@ Then restart or refresh SillyTavern.
 1. **Open the panel** — Click "Memory Graph" in the top-left menu.
 2. **Enable the plugin** — Config → Feature toggles, confirm the main switch is on.
 3. **Configure the model** — Leave the memory LLM blank to reuse the current chat model; or fill in an independent OpenAI-compatible URL/key/model under "API config".
-4. **Configure embedding** — Backend mode is recommended (reuses SillyTavern's configured vector provider); direct mode also works but you must handle CORS yourself.
+4. **Configure embedding** — The direct Embedding API is the default and can connect to an independent external embedding service. You can also switch to the SillyTavern backend index, which is limited to vector sources supported by the host. Direct connections require browser CORS access.
 5. **Start chatting** — Just chat normally. Extraction runs after each AI reply, and recall runs before the next generation.
 6. **Check results** — "Overview" for status, "Tasks → Memory browser" for nodes, the graph area for the relation network; a recall card may appear under user messages.
 

@@ -110,7 +110,7 @@ export default {
 
   "panel.configSection.apiKicker": "API 配置",
   "panel.configSection.apiTitle": "模型连接与向量接入",
-  "panel.configSection.apiDesc": "统一管理独立记忆 LLM 和 Embedding 的连接方式，保留现有后端代理与直连兜底逻辑。",
+  "panel.configSection.apiDesc": "统一管理独立记忆 LLM 和 Embedding 的连接方式；Embedding 默认使用直连 API，也可复用 SillyTavern 后端索引。",
   "panel.configSection.togglesKicker": "功能开关",
   "panel.configSection.togglesTitle": "主链路与增强能力",
   "panel.configSection.togglesDesc": "先决定哪些能力参与记忆链路，再到详细参数里微调各模块行为。",

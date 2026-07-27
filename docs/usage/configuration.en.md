@@ -47,21 +47,20 @@ Security recommendations:
 
 Embedding is the core of smart recall.
 
-#### Backend mode
+#### Direct Embedding API (default)
 
-Backend mode is recommended first:
-
-- Reuse SillyTavern backend's embedding provider.
-- Usually avoids storing the embedding API key directly in the browser.
-- Can use sources already supported by SillyTavern, such as OpenAI, Cohere, Mistral, Ollama, LlamaCpp, and vLLM.
-
-#### Direct mode
-
-In direct mode, the browser requests the embedding service directly:
+In direct mode, the browser requests an independent embedding service directly:
 
 - Requires filling in the API URL, key, and model.
 - May hit CORS restrictions.
 - Suitable for a self-hosted gateway or independent embedding service.
+
+#### SillyTavern backend index
+
+Backend index mode reuses SillyTavern's embedding provider:
+
+- Usually avoids storing the embedding API key directly in the browser.
+- Limited to sources supported by SillyTavern, such as OpenAI, Cohere, Mistral, Ollama, LlamaCpp, and vLLM.
 
 > After switching embedding mode or model, run "rebuild vectors".
 

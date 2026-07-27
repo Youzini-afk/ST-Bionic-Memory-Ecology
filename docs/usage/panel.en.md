@@ -81,7 +81,7 @@ The config page contains these workspaces:
 
 - **API config**
   - Memory LLM.
-  - Embedding backend mode/direct mode.
+  - The default direct Embedding API / SillyTavern backend index mode.
 
 - **Feature toggles**
   - Main capabilities such as extraction, recall, consolidation, summary, reflection, compression, forgetting, and probabilistic recall.

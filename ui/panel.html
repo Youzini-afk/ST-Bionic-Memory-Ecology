@@ -811,7 +811,8 @@
                 <h3 class="bme-config-section-title" data-i18n="panel.configSection.apiTitle">模型连接与向量接入</h3>
                 <p class="bme-config-section-desc" data-i18n="panel.configSection.apiDesc">
                   统一管理独立记忆 LLM 和 Embedding
-                  的连接方式，保留现有后端代理与直连兜底逻辑。
+                  的连接方式；Embedding 默认使用直连 API，也可复用
+                  SillyTavern 后端索引。
                 </p>
               </div>
 
@@ -929,8 +930,9 @@
                     <div>
                       <div class="bme-config-card-title">Embedding</div>
                       <div class="bme-config-card-subtitle">
-                        后端模式优先复用酒馆向量源，直连模式保留独立
-                        URL/Key/Model。
+                        默认使用直连 Embedding API，可配置独立
+                        URL/Key/Model；后端索引模式复用 SillyTavern
+                        支持的向量源。
                       </div>
                     </div>
                   </div>
@@ -940,8 +942,8 @@
                       id="bme-setting-embed-mode"
                       class="bme-config-input"
                     >
-                      <option value="backend">后端索引</option>
-                      <option value="direct">直连兜底</option>
+                      <option value="direct">直连 Embedding API（默认）</option>
+                      <option value="backend">SillyTavern 后端索引</option>
                     </select>
                   </div>
 
@@ -1026,7 +1028,7 @@
 
                   <div id="bme-embed-direct-fields">
                     <div class="bme-config-help">
-                      直连模式会使用下面这组独立配置。
+                      直连 Embedding API 使用下面这组独立配置。
                     </div>
                     <div class="bme-config-row">
                       <label for="bme-setting-embed-url"

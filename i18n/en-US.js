@@ -110,7 +110,7 @@ export default {
 
   "panel.configSection.apiKicker": "API Config",
   "panel.configSection.apiTitle": "Model Connection & Vector Access",
-  "panel.configSection.apiDesc": "Manage independent memory LLM and Embedding connections, preserving existing backend proxies and direct fallback logic.",
+  "panel.configSection.apiDesc": "Manage independent memory LLM and Embedding connections. Embedding uses the direct API by default, with the SillyTavern backend index also available.",
   "panel.configSection.togglesKicker": "Feature Toggles",
   "panel.configSection.togglesTitle": "Main Pipeline & Enhanced Capabilities",
   "panel.configSection.togglesDesc": "First decide which capabilities participate in the memory pipeline, then fine-tune each module's behavior in Advanced Params.",
