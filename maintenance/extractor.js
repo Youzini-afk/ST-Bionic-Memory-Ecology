@@ -37,8 +37,6 @@ import {
 } from "../graph/story-timeline.js";
 import { getActiveSummaryEntries } from "../graph/summary-state.js";
 import {
-  buildTaskExecutionDebugContext,
-  buildTaskLlmPayload,
   buildTaskPrompt,
 } from "../prompting/prompt-builder.js";
 import { RELATION_TYPES } from "../graph/schema.js";
@@ -46,6 +44,12 @@ import { applyTaskRegex } from "../prompting/task-regex.js";
 import { getSTContextForPrompt, getSTContextSnapshot } from "../host/st-context.js";
 import { buildExtractionInputContext } from "./extraction-context.js";
 import { buildTaskGraphStats } from "./task-graph-stats.js";
+import {
+  createTaskLlmDebugContext,
+  resolveTaskLlmSystemPrompt,
+  resolveTaskPromptPayload,
+  throwIfAborted,
+} from "./task-llm.js";
 import {
   aliasSetMatchesValue,
   buildUserPovAliasNormalizedSet,
@@ -60,18 +64,6 @@ const VALID_EXTRACTION_OPERATION_ACTIONS = new Set([
   "_skip",
 ]);
 
-function createAbortError(message = "操作已终止") {
-  const error = new Error(message);
-  error.name = "AbortError";
-  return error;
-}
-
-function createTaskLlmDebugContext(promptBuild, regexInput) {
-  return typeof buildTaskExecutionDebugContext === "function"
-    ? buildTaskExecutionDebugContext(promptBuild, { regexInput })
-    : null;
-}
-
 function createExtractTaskLlmDebugContext(promptBuild, regexInput, inputContext = null) {
   const debugContext = createTaskLlmDebugContext(promptBuild, regexInput);
   if (!inputContext || typeof inputContext !== "object") {
@@ -81,31 +73,6 @@ function createExtractTaskLlmDebugContext(promptBuild, regexInput, inputContext 
     ...debugContext,
     inputContext,
   };
-}
-
-function resolveTaskPromptPayload(promptBuild, fallbackUserPrompt = "") {
-  if (typeof buildTaskLlmPayload === "function") {
-    return buildTaskLlmPayload(promptBuild, fallbackUserPrompt);
-  }
-
-  return {
-    systemPrompt: String(promptBuild?.systemPrompt || ""),
-    userPrompt: String(fallbackUserPrompt || ""),
-    promptMessages: [],
-    additionalMessages: Array.isArray(promptBuild?.privateTaskMessages)
-      ? promptBuild.privateTaskMessages
-      : [],
-  };
-}
-
-function resolveTaskLlmSystemPrompt(promptPayload, fallbackSystemPrompt = "") {
-  const hasPromptMessages =
-    Array.isArray(promptPayload?.promptMessages) &&
-    promptPayload.promptMessages.length > 0;
-  if (hasPromptMessages) {
-    return String(promptPayload?.systemPrompt || "");
-  }
-  return String(promptPayload?.systemPrompt || fallbackSystemPrompt || "");
 }
 
 function buildActiveSummariesText(graph) {
@@ -198,12 +165,6 @@ function buildReflectionRankingQueryText({
 
 function isAbortError(error) {
   return error?.name === "AbortError";
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) {
-    throw signal.reason instanceof Error ? signal.reason : createAbortError();
-  }
 }
 
 const EXTRACTION_RESULT_CONTAINER_KEYS = [

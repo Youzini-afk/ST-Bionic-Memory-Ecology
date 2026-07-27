@@ -147,10 +147,19 @@ import {
   shouldAdvanceProcessedHistory as shouldAdvanceProcessedHistoryController,
 } from "./maintenance/extraction-success-controller.js";
 import {
+  clonePlanCommitValue,
+  getSummaryStageLabel,
+  runCompressionPostProcessPlanCommit,
+  runReflectionPostProcessPlanCommit,
+  runSummaryPostProcessPlanCommit,
+  scheduleBackgroundMaintenancePostProcessController,
+} from "./maintenance/post-process-controller.js";
+import {
   executeExtractionBatchController,
   onExtractionTaskController,
   onManualExtractController,
   onRerollController,
+  replayExtractionFromHistoryController,
   resolveAutoExtractionPlanController,
   runExtractionController,
 } from "./maintenance/extraction-controller.js";
@@ -181,21 +190,13 @@ import { createGenerationRecallTransactions } from "./runtime/generation-recall-
 import { createFinalRecallInjection } from "./runtime/final-recall-injection.js";
 import { createAutoExtractionDefer } from "./runtime/auto-extraction-defer.js";
 import { runPlannerRecallForEnaController } from "./runtime/planner-recall-controller.js";
-import {
-  extractMemories,
-  generateReflection,
-} from "./maintenance/extractor.js";
+import { extractMemories } from "./maintenance/extractor.js";
 import {
   generateSmallSummary,
   rebuildHierarchicalSummaryState,
   resetHierarchicalSummaryState,
   rollupSummaryFrontier,
-  runHierarchicalSummaryPostProcess,
 } from "./maintenance/hierarchical-summary.js";
-import {
-  createDefaultSummaryState,
-  normalizeGraphSummaryState,
-} from "./graph/summary-state.js";
 import {
   appendLukerGraphJournalEntryV2,
   buildGraphCommitMarker,
@@ -257,8 +258,6 @@ import {
   unhideAll,
 } from "./ui/hide-engine.js";
 import {
-  addEdge,
-  addNode,
   createEmptyGraph,
   deserializeGraph,
   exportGraph,
@@ -13667,379 +13666,12 @@ function shouldAdvanceProcessedHistory(batchStatus) {
   return shouldAdvanceProcessedHistoryController(batchStatus);
 }
 
-function resolveMaintenancePostProcessConcurrency(settings = {}) {
-  if (typeof resolveConcurrencyConfig === "function") {
-    try {
-      return resolveConcurrencyConfig(settings);
-    } catch {
-    }
-  }
-  const mode = String(settings?.maintenanceExecutionMode || "strict")
-    .trim()
-    .toLowerCase();
-  const strict = mode !== "balanced" && mode !== "fast";
-  return {
-    mode: strict ? "strict" : mode,
-    level: strict ? 1 : mode === "balanced" ? 2 : 3,
-    backgroundMaintenanceMaxRetries: Math.max(
-      0,
-      Math.min(10, Math.floor(Number(settings?.backgroundMaintenanceMaxRetries ?? 2)) || 0),
-    ),
-    backgroundMaintenanceRetryBaseMs: Math.max(
-      50,
-      Math.min(60000, Math.floor(Number(settings?.backgroundMaintenanceRetryBaseMs ?? 800)) || 800),
-    ),
-    backgroundMaintenanceMaxQueueItems: Math.max(
-      1,
-      Math.min(256, Math.floor(Number(settings?.backgroundMaintenanceMaxQueueItems ?? 24)) || 24),
-    ),
-  };
-}
-
 function shouldDeferExtractionVectorSync(settings = {}) {
-  return resolveMaintenancePostProcessConcurrency(settings).mode !== "strict";
+  return resolveConcurrencyConfig(settings).mode !== "strict";
 }
 
 function shouldDeferExtractionMaintenance(settings = {}) {
-  return resolveMaintenancePostProcessConcurrency(settings).mode !== "strict";
-}
-
-function clonePlanCommitValue(value, fallback = null) {
-  try {
-    if (typeof cloneRuntimeDebugValue === "function") {
-      return cloneRuntimeDebugValue(value, fallback);
-    }
-  } catch {
-  }
-  try {
-    return JSON.parse(JSON.stringify(value ?? fallback));
-  } catch {
-    return fallback;
-  }
-}
-
-function arePlanCommitValuesEqual(left, right) {
-  try {
-    return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
-  } catch {
-    return false;
-  }
-}
-
-function normalizeSummaryStateForPlan(state = {}) {
-  try {
-    if (typeof createDefaultSummaryState === "function") {
-      return createDefaultSummaryState(state);
-    }
-  } catch {
-  }
-  const source =
-    state && typeof state === "object" && !Array.isArray(state) ? state : {};
-  return {
-    version: Number(source.version || 1) || 1,
-    enabled: source.enabled !== false,
-    entries: Array.isArray(source.entries)
-      ? clonePlanCommitValue(source.entries, [])
-      : [],
-    activeEntryIds: Array.isArray(source.activeEntryIds)
-      ? [...new Set(source.activeEntryIds.map((id) => String(id || "").trim()).filter(Boolean))]
-      : [],
-    lastSummarizedExtractionCount: Number.isFinite(
-      Number(source.lastSummarizedExtractionCount),
-    )
-      ? Math.max(0, Number(source.lastSummarizedExtractionCount))
-      : 0,
-    lastSummarizedAssistantFloor: Number.isFinite(
-      Number(source.lastSummarizedAssistantFloor),
-    )
-      ? Number(source.lastSummarizedAssistantFloor)
-      : -1,
-  };
-}
-
-function normalizeGraphSummaryStateForPlan(graph) {
-  if (!graph || typeof graph !== "object") return graph;
-  try {
-    if (typeof normalizeGraphSummaryState === "function") {
-      return normalizeGraphSummaryState(graph);
-    }
-  } catch {
-  }
-  graph.summaryState = normalizeSummaryStateForPlan(graph.summaryState);
-  return graph;
-}
-
-function commitPlannedSummaryState(targetGraph, beforeState = {}, draftState = {}) {
-  if (!targetGraph || typeof targetGraph !== "object") {
-    return {
-      summaryEntriesAdded: 0,
-      summaryEntriesUpdated: 0,
-      summaryEntriesFolded: 0,
-    };
-  }
-  normalizeGraphSummaryStateForPlan(targetGraph);
-  const before = normalizeSummaryStateForPlan(beforeState);
-  const draft = normalizeSummaryStateForPlan(draftState);
-  const target = normalizeSummaryStateForPlan(targetGraph.summaryState);
-  const beforeMap = new Map(before.entries.map((entry) => [entry.id, entry]));
-  const targetMap = new Map(target.entries.map((entry) => [entry.id, entry]));
-  const activeIds = new Set(target.activeEntryIds || []);
-  let summaryEntriesAdded = 0;
-  let summaryEntriesUpdated = 0;
-  let summaryEntriesFolded = 0;
-
-  for (const draftEntry of draft.entries) {
-    const entryId = String(draftEntry?.id || "").trim();
-    if (!entryId) continue;
-    const beforeEntry = beforeMap.get(entryId) || null;
-    if (beforeEntry && arePlanCommitValuesEqual(beforeEntry, draftEntry)) {
-      continue;
-    }
-    const clonedEntry = clonePlanCommitValue(draftEntry, draftEntry);
-    const targetEntry = targetMap.get(entryId) || null;
-    if (targetEntry) {
-      Object.assign(targetEntry, clonedEntry);
-      summaryEntriesUpdated += 1;
-    } else {
-      target.entries.push(clonedEntry);
-      targetMap.set(entryId, clonedEntry);
-      summaryEntriesAdded += 1;
-    }
-    if (String(clonedEntry.status || "active") === "folded") {
-      activeIds.delete(entryId);
-      if (beforeEntry && String(beforeEntry.status || "active") !== "folded") {
-        summaryEntriesFolded += 1;
-      }
-    } else {
-      activeIds.add(entryId);
-    }
-  }
-
-  target.lastSummarizedExtractionCount = Math.max(
-    Number(target.lastSummarizedExtractionCount || 0),
-    Number(draft.lastSummarizedExtractionCount || 0),
-  );
-  target.lastSummarizedAssistantFloor = Math.max(
-    Number(target.lastSummarizedAssistantFloor ?? -1),
-    Number(draft.lastSummarizedAssistantFloor ?? -1),
-  );
-  target.activeEntryIds = [...activeIds].filter(
-    (entryId) => String(targetMap.get(entryId)?.status || "active") !== "folded",
-  );
-  targetGraph.summaryState = target;
-  normalizeGraphSummaryStateForPlan(targetGraph);
-  return {
-    summaryEntriesAdded,
-    summaryEntriesUpdated,
-    summaryEntriesFolded,
-  };
-}
-
-function commitPlannedGraphChanges({
-  targetGraph = conversationWorkspace.graph,
-  beforeSnapshot = null,
-  draftGraph = null,
-  includeSummaryState = true,
-} = {}) {
-  const stats = {
-    nodesAdded: 0,
-    nodesUpdated: 0,
-    edgesAdded: 0,
-    summaryEntriesAdded: 0,
-    summaryEntriesUpdated: 0,
-    summaryEntriesFolded: 0,
-  };
-  if (!targetGraph || !beforeSnapshot || !draftGraph) return stats;
-  targetGraph.nodes ||= [];
-  targetGraph.edges ||= [];
-  const beforeNodes = new Map(
-    (beforeSnapshot.nodes || []).map((node) => [String(node?.id || ""), node]),
-  );
-  const targetNodes = new Map(
-    (targetGraph.nodes || []).map((node) => [String(node?.id || ""), node]),
-  );
-
-  for (const draftNode of draftGraph.nodes || []) {
-    const nodeId = String(draftNode?.id || "").trim();
-    if (!nodeId) continue;
-    const beforeNode = beforeNodes.get(nodeId) || null;
-    if (beforeNode && arePlanCommitValuesEqual(beforeNode, draftNode)) continue;
-    const clonedNode = clonePlanCommitValue(draftNode, draftNode);
-    const targetNode = targetNodes.get(nodeId) || null;
-    if (!targetNode) {
-      if (typeof addNode === "function") {
-        addNode(targetGraph, clonedNode);
-      } else {
-        targetGraph.nodes.push(clonedNode);
-      }
-      targetNodes.set(nodeId, clonedNode);
-      stats.nodesAdded += 1;
-    } else {
-      if (typeof updateNode === "function") {
-        updateNode(targetGraph, nodeId, clonePlanCommitValue(clonedNode, clonedNode));
-      } else {
-        Object.assign(targetNode, clonedNode);
-      }
-      stats.nodesUpdated += 1;
-    }
-  }
-
-  const beforeEdgeIds = new Set(
-    (beforeSnapshot.edges || []).map((edge) => String(edge?.id || "").trim()),
-  );
-  const targetEdgeIds = new Set(
-    (targetGraph.edges || []).map((edge) => String(edge?.id || "").trim()),
-  );
-  for (const draftEdge of draftGraph.edges || []) {
-    const edgeId = String(draftEdge?.id || "").trim();
-    if (!edgeId || beforeEdgeIds.has(edgeId) || targetEdgeIds.has(edgeId)) continue;
-    const clonedEdge = clonePlanCommitValue(draftEdge, draftEdge);
-    if (typeof addEdge === "function") {
-      addEdge(targetGraph, clonedEdge);
-    } else {
-      targetGraph.edges.push(clonedEdge);
-    }
-    targetEdgeIds.add(edgeId);
-    stats.edgesAdded += 1;
-  }
-
-  if (includeSummaryState) {
-    Object.assign(
-      stats,
-      commitPlannedSummaryState(
-        targetGraph,
-        beforeSnapshot.summaryState,
-        draftGraph.summaryState,
-      ),
-    );
-  }
-  return stats;
-}
-
-function getSummaryPostProcessRunner() {
-  if (typeof runHierarchicalSummaryPostProcess === "function") {
-    return runHierarchicalSummaryPostProcess;
-  }
-  if (typeof generateSynopsis === "function") {
-    return async (params = {}) => {
-      await generateSynopsis({
-        graph: params.graph,
-        schema: typeof getSchema === "function" ? getSchema() : [],
-        currentSeq: params.currentAssistantFloor,
-        settings: params.settings,
-        signal: params.signal,
-      });
-      return {
-        created: true,
-        smallSummary: { created: true, reason: "" },
-        rollup: null,
-      };
-    };
-  }
-  return async () => ({
-    created: false,
-    smallSummary: {
-      created: false,
-      reason: "层级总结运行器不可用，已跳过",
-    },
-    rollup: null,
-  });
-}
-
-function getSummaryStageLabel() {
-  if (typeof runHierarchicalSummaryPostProcess === "function") return "层级总结";
-  if (typeof generateSynopsis === "function") return "旧式全局概要生成";
-  return "层级总结";
-}
-
-async function runSummaryPostProcessPlanCommit(params = {}) {
-  const runner = getSummaryPostProcessRunner();
-  const settings = params.settings || {};
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    return await runner(params);
-  }
-  const beforeSnapshot = clonePlanCommitValue(params.graph, params.graph);
-  const draftGraph = clonePlanCommitValue(params.graph, params.graph);
-  const result = await runner({
-    ...params,
-    graph: draftGraph,
-  });
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: params.graph,
-    beforeSnapshot,
-    draftGraph,
-  });
-  return {
-    ...(result && typeof result === "object" && !Array.isArray(result)
-      ? result
-      : { created: Boolean(result) }),
-    planCommit,
-  };
-}
-
-async function runReflectionPostProcessPlanCommit(params = {}) {
-  const settings = params.settings || {};
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    const reflectionId = await generateReflection(params);
-    return { reflectionId, planCommit: null };
-  }
-  const beforeSnapshot = clonePlanCommitValue(params.graph, params.graph);
-  const draftGraph = clonePlanCommitValue(params.graph, params.graph);
-  const reflectionId = await generateReflection({
-    ...params,
-    graph: draftGraph,
-  });
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: params.graph,
-    beforeSnapshot,
-    draftGraph,
-  });
-  return { reflectionId, planCommit };
-}
-
-async function runCompressionPostProcessPlanCommit({
-  graph,
-  schema = [],
-  embeddingConfig = null,
-  force = false,
-  customPrompt = undefined,
-  signal = undefined,
-  settings = {},
-} = {}) {
-  if (resolveMaintenancePostProcessConcurrency(settings).mode === "strict") {
-    return await compressAll(
-      graph,
-      schema,
-      embeddingConfig,
-      force,
-      customPrompt,
-      signal,
-      settings,
-    );
-  }
-  const beforeSnapshot = clonePlanCommitValue(graph, graph);
-  const draftGraph = clonePlanCommitValue(graph, graph);
-  const result = await compressAll(
-    draftGraph,
-    schema,
-    embeddingConfig,
-    force,
-    customPrompt,
-    signal,
-    settings,
-  );
-  const planCommit = commitPlannedGraphChanges({
-    targetGraph: graph,
-    beforeSnapshot,
-    draftGraph,
-    includeSummaryState: false,
-  });
-  return {
-    ...(result && typeof result === "object" && !Array.isArray(result)
-      ? result
-      : { created: 0, archived: 0 }),
-    planCommit,
-  };
+  return resolveConcurrencyConfig(settings).mode !== "strict";
 }
 
 function updateBackgroundMaintenanceQueueState(snapshot = null) {
@@ -14083,7 +13715,7 @@ function updateBackgroundMaintenanceQueueState(snapshot = null) {
 }
 
 function enqueueBackgroundMaintenanceTask(name, run, settings = {}, options = {}) {
-  const concurrency = resolveMaintenancePostProcessConcurrency(settings);
+  const concurrency = resolveConcurrencyConfig(settings);
   const queue =
     typeof backgroundMaintenanceQueue !== "undefined"
       ? backgroundMaintenanceQueue
@@ -14186,7 +13818,7 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
   const mode =
     String(
       normalizedTask.mode ||
-        resolveMaintenancePostProcessConcurrency(settings).mode ||
+        resolveConcurrencyConfig(settings).mode ||
         "balanced",
     ).trim() || "balanced";
   const coalesced = backgroundVectorSyncCoalescer.enqueue({
@@ -14267,156 +13899,27 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
   }
   return queuedResult;
 }
-function hasPlanCommitChanges(planCommit = null) {
-  if (!planCommit || typeof planCommit !== "object") return false;
-  return [
-    "nodesAdded",
-    "nodesUpdated",
-    "edgesAdded",
-    "summaryEntriesAdded",
-    "summaryEntriesUpdated",
-    "summaryEntriesFolded",
-  ].some((key) => Number(planCommit[key] || 0) > 0);
-}
-
 function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
-  const taskList = Array.isArray(tasks)
-    ? tasks.filter((task) => task && typeof task === "object" && task.type)
-    : [];
-  if (!taskList.length) {
-    return {
-      queued: false,
-      reason: "no-background-maintenance-tasks",
-      snapshot: updateBackgroundMaintenanceQueueState(null),
-    };
-  }
-  const scheduledSettings = clonePlanCommitValue(settings, settings) || settings;
-  const scheduledChatId = normalizeChatIdCandidate(getCurrentChatId());
-  const scheduledGraph = conversationWorkspace.graph;
-  const scheduledExtractionCount = conversationWorkspace.extractionCount;
-  const isScheduledContextActive = () =>
-    conversationWorkspace.graph === scheduledGraph &&
-    normalizeChatIdCandidate(getCurrentChatId()) === scheduledChatId;
-  const staleResult = () => ({
-    skipped: true,
-    reason: "stale-background-post-process",
-  });
-  const mode = resolveMaintenancePostProcessConcurrency(scheduledSettings).mode;
-  const taskId = taskList.map((task) => String(task.id || task.type)).join("+");
-  return enqueueBackgroundMaintenanceTask(
-    "post-process",
-    async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      if (!isScheduledContextActive()) return staleResult();
-      ensureCurrentGraphRuntimeState();
-      const details = [];
-      let changed = false;
-      if (typeof setLastExtractionStatus === "function") {
-        setLastExtractionStatus(
-          "后台维护中",
-          `${mode} 模式 · 正在执行 ${taskList.map((task) => task.type).join(" / ")}`,
-          "running",
-          { syncRuntime: false },
-        );
-      }
-      for (const task of taskList) {
-        const type = String(task.type || "").trim();
-        const payload =
-          task.payload && typeof task.payload === "object" && !Array.isArray(task.payload)
-            ? task.payload
-            : {};
-        if (type === "summary") {
-          const result = await runSummaryPostProcessPlanCommit({
-            graph: scheduledGraph,
-            chat: Array.isArray(payload.chat)
-              ? payload.chat
-              : typeof getContext === "function" && Array.isArray(getContext()?.chat)
-                ? getContext().chat
-                : [],
-            settings: scheduledSettings,
-            currentExtractionCount:
-              Number(payload.currentExtractionCount || 0) ||
-              scheduledExtractionCount,
-            currentAssistantFloor: Number(payload.currentAssistantFloor ?? -1),
-            currentRange: Array.isArray(payload.currentRange) ? payload.currentRange : null,
-            currentNodeIds: Array.isArray(payload.currentNodeIds) ? payload.currentNodeIds : [],
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Boolean(result?.smallSummary?.created) ||
-            Number(result?.rollup?.createdCount || 0) > 0 ||
-            hasPlanCommitChanges(result?.planCommit);
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        } else if (type === "reflection") {
-          const result = await runReflectionPostProcessPlanCommit({
-            graph: scheduledGraph,
-            currentSeq: Number(payload.currentSeq ?? -1),
-            schema: getSchema(),
-            embeddingConfig: getEmbeddingConfig(),
-            settings: scheduledSettings,
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Boolean(result?.reflectionId) || hasPlanCommitChanges(result?.planCommit);
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        } else if (type === "compression") {
-          const beforeSnapshot =
-            typeof cloneGraphSnapshot === "function"
-              ? cloneGraphSnapshot(scheduledGraph)
-              : clonePlanCommitValue(scheduledGraph, scheduledGraph);
-          const result = await runCompressionPostProcessPlanCommit({
-            graph: scheduledGraph,
-            schema: getSchema(),
-            embeddingConfig: getEmbeddingConfig(),
-            force: Boolean(payload.force),
-            customPrompt: payload.customPrompt ?? undefined,
-            settings: scheduledSettings,
-          });
-          if (!isScheduledContextActive()) return staleResult();
-          const taskChanged =
-            Number(result?.created || 0) > 0 ||
-            Number(result?.archived || 0) > 0 ||
-            hasPlanCommitChanges(result?.planCommit);
-          if (taskChanged) {
-            const compressionSummary =
-              typeof buildMaintenanceSummary === "function"
-                ? buildMaintenanceSummary("compress", result, "auto")
-                : `自动压缩：新增 ${result?.created || 0}，归档 ${result?.archived || 0}`;
-            if (typeof recordMaintenanceAction === "function") {
-              recordMaintenanceAction({
-                action: "compress",
-                beforeSnapshot,
-                mode: "auto",
-                summary: compressionSummary,
-              });
-            }
-          }
-          changed = changed || taskChanged;
-          details.push({ type, changed: taskChanged, result });
-        }
-      }
-      if (!isScheduledContextActive()) return staleResult();
-      if (changed) {
-        saveGraphToChat({
-          reason: `background-post-process:${taskList.map((task) => task.type).join("+")}`,
-        });
-      }
-      if (typeof setLastExtractionStatus === "function") {
-        setLastExtractionStatus(
-          changed ? "后台维护完成" : "后台维护跳过",
-          changed ? "后台维护已完成并持久化" : "后台维护未产生可持久化变化",
-          changed ? "success" : "warning",
-          { syncRuntime: false },
-        );
-      }
-      return { changed, details };
-    },
-    scheduledSettings,
+  return scheduleBackgroundMaintenancePostProcessController(
     {
-      id: `post-process:${taskId}`,
+      buildMaintenanceSummary,
+      cloneGraphSnapshot,
+      enqueueBackgroundMaintenanceTask,
+      ensureCurrentGraphRuntimeState,
+      getContext,
+      getCurrentChatId,
+      getCurrentGraph: () => conversationWorkspace.graph,
+      getEmbeddingConfig,
+      getExtractionCount: () => conversationWorkspace.extractionCount,
+      getSchema,
+      normalizeChatId: normalizeChatIdCandidate,
+      recordMaintenanceAction,
+      saveGraphToChat,
+      setLastExtractionStatus,
+      updateBackgroundMaintenanceQueueState,
     },
+    tasks,
+    settings,
   );
 }
 
@@ -15346,7 +14849,7 @@ async function handleExtractionSuccess(
       isAbortError,
       noteMaintenanceGate,
       pushBatchStageArtifact,
-      resolveMaintenancePostProcessConcurrency,
+      resolveMaintenancePostProcessConcurrency: resolveConcurrencyConfig,
       runCompressionPostProcessPlanCommit,
       runReflectionPostProcessPlanCommit,
       setBatchStageOutcome,
@@ -15783,50 +15286,23 @@ async function replayExtractionFromHistory(
   expectedChatId = undefined,
   expectedHistoryFingerprint = undefined,
 ) {
-  let replayedBatches = 0;
-
-  while (true) {
-    throwIfAborted(signal, "历史恢复已终止");
-    assertRecoveryHistoryStillCurrent(
-      expectedChatId,
-      expectedHistoryFingerprint,
-      "replay-loop",
-    );
-    const pendingAssistantTurns = getAssistantTurns(chat).filter(
-      (index) => index > getLastProcessedAssistantFloor(),
-    );
-    if (pendingAssistantTurns.length === 0) break;
-
-    const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
-    const batchAssistantTurns = pendingAssistantTurns.slice(0, extractEvery);
-    const startIdx = batchAssistantTurns[0];
-    const endIdx = batchAssistantTurns[batchAssistantTurns.length - 1];
-
-    const batchResult = await executeExtractionBatch({
+  return await replayExtractionFromHistoryController(
+    {
+      assertRecoveryHistoryStillCurrent,
+      clampInt,
+      executeExtractionBatch,
+      getAssistantTurns,
+      getLastProcessedAssistantFloor,
+      throwIfAborted,
+    },
+    {
       chat,
-      startIdx,
-      endIdx,
       settings,
       signal,
-    });
-    assertRecoveryHistoryStillCurrent(
       expectedChatId,
       expectedHistoryFingerprint,
-      "replay-batch-complete",
-    );
-
-    if (!batchResult.success) {
-      throw new Error(
-        batchResult.error ||
-          batchResult?.result?.error ||
-          "历史恢复回放过程中出现提取失败",
-      );
-    }
-
-    replayedBatches++;
-  }
-
-  return replayedBatches;
+    },
+  );
 }
 
 function applyRecoveryPlanToVectorState(

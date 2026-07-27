@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 
-import { executeExtractionBatchController } from "../maintenance/extraction-controller.js";
+import {
+  executeExtractionBatchController,
+  replayExtractionFromHistoryController,
+} from "../maintenance/extraction-controller.js";
 import { buildChatHistoryFingerprint } from "../runtime/runtime-state.js";
 import {
   createBatchStatusSkeleton,
@@ -640,6 +643,48 @@ function createRuntime(persistResult, { checkpointError = null } = {}) {
     "extraction-history-lease",
   );
   assert.equal(runtime.graph.nodes.length, 0);
+}
+
+{
+  let lastProcessedFloor = -1;
+  const batches = [];
+  const leaseChecks = [];
+  const replayed = await replayExtractionFromHistoryController(
+    {
+      assertRecoveryHistoryStillCurrent: (chatId, fingerprint, stage) => {
+        leaseChecks.push([chatId, fingerprint, stage]);
+      },
+      clampInt: (value, fallback, min, max) =>
+        Math.max(min, Math.min(max, Number(value) || fallback)),
+      executeExtractionBatch: async (options) => {
+        batches.push([options.startIdx, options.endIdx]);
+        lastProcessedFloor = options.endIdx;
+        return { success: true };
+      },
+      getAssistantTurns: () => [1, 3, 5],
+      getLastProcessedAssistantFloor: () => lastProcessedFloor,
+      throwIfAborted: () => {},
+    },
+    {
+      chat: [{}, {}, {}, {}, {}, {}],
+      settings: { extractEvery: 2 },
+      expectedChatId: "chat-replay",
+      expectedHistoryFingerprint: "fingerprint-replay",
+    },
+  );
+
+  assert.equal(replayed, 2);
+  assert.deepEqual(batches, [[1, 3], [5, 5]]);
+  assert.deepEqual(
+    leaseChecks.map((item) => item[2]),
+    ["replay-loop", "replay-batch-complete", "replay-loop", "replay-batch-complete", "replay-loop"],
+  );
+  assert.ok(
+    leaseChecks.every(
+      ([chatId, fingerprint]) =>
+        chatId === "chat-replay" && fingerprint === "fingerprint-replay",
+    ),
+  );
 }
 
 console.log("extraction-persistence-gating tests passed");

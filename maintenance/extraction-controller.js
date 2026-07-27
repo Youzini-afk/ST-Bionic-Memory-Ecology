@@ -983,6 +983,66 @@ export function resolveAutoExtractionPlanController(
   };
 }
 
+export async function replayExtractionFromHistoryController(
+  runtime,
+  {
+    chat = [],
+    settings = {},
+    signal = undefined,
+    expectedChatId = undefined,
+    expectedHistoryFingerprint = undefined,
+  } = {},
+) {
+  const {
+    assertRecoveryHistoryStillCurrent,
+    clampInt,
+    executeExtractionBatch,
+    getAssistantTurns,
+    getLastProcessedAssistantFloor,
+    throwIfAborted,
+  } = runtime;
+  let replayedBatches = 0;
+
+  while (true) {
+    throwIfAborted(signal, "历史恢复已终止");
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-loop",
+    );
+    const pendingAssistantTurns = getAssistantTurns(chat).filter(
+      (index) => index > getLastProcessedAssistantFloor(),
+    );
+    if (pendingAssistantTurns.length === 0) break;
+
+    const extractEvery = clampInt(settings.extractEvery, 1, 1, 50);
+    const batchAssistantTurns = pendingAssistantTurns.slice(0, extractEvery);
+    const batchResult = await executeExtractionBatch({
+      chat,
+      startIdx: batchAssistantTurns[0],
+      endIdx: batchAssistantTurns[batchAssistantTurns.length - 1],
+      settings,
+      signal,
+    });
+    assertRecoveryHistoryStillCurrent(
+      expectedChatId,
+      expectedHistoryFingerprint,
+      "replay-batch-complete",
+    );
+
+    if (!batchResult.success) {
+      throw new Error(
+        batchResult.error ||
+          batchResult?.result?.error ||
+          "历史恢复回放过程中出现提取失败",
+      );
+    }
+    replayedBatches += 1;
+  }
+
+  return replayedBatches;
+}
+
 export async function executeExtractionBatchController(
   runtime,
   {
