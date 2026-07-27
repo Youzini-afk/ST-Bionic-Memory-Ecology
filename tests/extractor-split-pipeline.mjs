@@ -67,6 +67,16 @@ const { DEFAULT_NODE_SCHEMA } = await import("../graph/schema.js");
 const { extractMemories } = await import("../maintenance/extractor.js");
 const { defaultSettings } = await import("../runtime/settings-defaults.js");
 
+function waitForSignal(signalPromise, failureMessage) {
+  let timeoutId;
+  return Promise.race([
+    signalPromise,
+    new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error(failureMessage)), 5000);
+    }),
+  ]).finally(() => clearTimeout(timeoutId));
+}
+
 function setTestOverrides(overrides = {}) {
   globalThis.__stBmeTestOverrides = overrides;
   return () => {
@@ -402,6 +412,8 @@ for (const legacyPatch of [
   const objectivePromise = new Promise((resolve) => { objectiveResolve = resolve; });
   let subjectiveResolve;
   const subjectivePromise = new Promise((resolve) => { subjectiveResolve = resolve; });
+  let bothStartedResolve;
+  const bothStartedPromise = new Promise((resolve) => { bothStartedResolve = resolve; });
 
   const startOrder = [];
   const restore = setTestOverrides({
@@ -409,12 +421,14 @@ for (const legacyPatch of [
       async callLLMForJSON(payload = {}) {
         if (payload.taskType === "extract_objective") {
           objectiveStarted = true;
+          if (subjectiveStarted) bothStartedResolve();
           startOrder.push("objective_start");
           await objectivePromise;
           return objectivePayload();
         }
         if (payload.taskType === "extract_subjective") {
           subjectiveStarted = true;
+          if (objectiveStarted) bothStartedResolve();
           startOrder.push("subjective_start");
           await subjectivePromise;
           return subjectivePayload();
@@ -432,8 +446,7 @@ for (const legacyPatch of [
       settings: { ...defaultSettings, extractSplitExecutionMode: "parallel" },
     });
 
-    // Let the event loop turn so both stages can start.
-    await new Promise((r) => setTimeout(r, 0));
+    await waitForSignal(bothStartedPromise, "parallel stages did not both start");
 
     // Both should have started before we resolve either.
     assert.ok(objectiveStarted, "parallel: objective should have started");
@@ -494,12 +507,15 @@ for (const legacyPatch of [
   let subjectiveStarted = false;
   let objectiveResolve;
   const objectivePromise = new Promise((resolve) => { objectiveResolve = resolve; });
+  let objectiveStartedResolve;
+  const objectiveStartedPromise = new Promise((resolve) => { objectiveStartedResolve = resolve; });
 
   const restore = setTestOverrides({
     llm: {
       async callLLMForJSON(payload = {}) {
         if (payload.taskType === "extract_objective") {
           objectiveStarted = true;
+          objectiveStartedResolve();
           await objectivePromise;
           return objectivePayload();
         }
@@ -520,8 +536,7 @@ for (const legacyPatch of [
       settings: { ...defaultSettings, extractSplitExecutionMode: "serial" },
     });
 
-    // Let the event loop turn.
-    await new Promise((r) => setTimeout(r, 0));
+    await waitForSignal(objectiveStartedPromise, "serial objective stage did not start");
 
     assert.ok(objectiveStarted, "serial: objective should have started");
     assert.ok(!subjectiveStarted, "serial: subjective should NOT have started while objective is pending");
