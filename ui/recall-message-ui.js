@@ -20,7 +20,7 @@ function _hostUserPovAliasHintsForRecallCanvas() {
 
 // ==================== 常量 ====================
 
-export const RECALL_CARD_UI_VERSION = "recall-tabs-v5";
+export const RECALL_CARD_UI_VERSION = "recall-tabs-v6";
 
 export const RECALL_CARD_FORCE_CONFIG = {
   repulsion: 1200,
@@ -200,6 +200,7 @@ function summarizePlotRecordForSignature(plotRecord) {
       : [],
     rawUserInput: String(plotRecord.rawUserInput || ""),
     plannerAugmentedMessage: String(plotRecord.plannerAugmentedMessage || ""),
+    plannerRecallInjectionText: String(plotRecord.plannerRecallInjectionText || ""),
     promptProfileId: String(plotRecord.promptProfileId || ""),
     recallHandoffId: String(plotRecord.recallHandoffId || ""),
     taskResults: Array.isArray(plotRecord.taskResults)
@@ -474,6 +475,13 @@ function buildPlannerPane(
     return pane;
   }
 
+  const plannerRecallPreview = buildInjectionPreviewBlock({
+    injectionText: plotRecord?.plannerRecallInjectionText,
+    recallSource: "planner-handoff",
+    hookName: "ena-planner",
+  });
+  if (plannerRecallPreview) pane.appendChild(plannerRecallPreview);
+
   const tagged = extractTaggedPlannerBlocks(plotRecord);
   appendPlannerPlotList(
     pane,
@@ -554,7 +562,6 @@ function buildRecallPane({
   themeName,
   activeCallbacks,
   messageIndex,
-  hasPlot = false,
 }) {
   const pane = el("div", "bme-recall-pane bme-recall-recall-pane");
 
@@ -601,19 +608,9 @@ function buildRecallPane({
 
     // 元信息行
     const meta = el("div", "bme-recall-meta");
-    const sourceLabel = buildRecallSourceLabel(activeRecord || {});
     const metaText = formatMetaLine(activeRecord || {});
     if (typeof HTMLElement === "undefined" || !(meta instanceof HTMLElement)) {
       meta.textContent = metaText;
-    }
-    const showEnaSource = !hasPlot && isPlannerRecallSource(activeRecord);
-    if (sourceLabel && !hasPlot) {
-      const sourceTag = el(
-        "span",
-        `bme-recall-meta-tag${showEnaSource ? " is-ena" : ""}`,
-        showEnaSource ? `🧭 ${sourceLabel}` : sourceLabel,
-      );
-      meta.appendChild(sourceTag);
     }
     if (metaText) {
       meta.appendChild(el("span", "bme-recall-meta-text", metaText));
@@ -625,7 +622,7 @@ function buildRecallPane({
     pane.appendChild(meta);
 
     const injectionPreviewBlock = buildInjectionPreviewBlock(activeRecord || {}, {
-      forcePlain: hasPlot,
+      forcePlain: true,
     });
     if (injectionPreviewBlock) {
       pane.appendChild(injectionPreviewBlock);
@@ -866,7 +863,6 @@ export function createRecallCardElement({
         themeName,
         activeCallbacks,
         messageIndex,
-        hasPlot,
       });
     }
     body.appendChild(pane);

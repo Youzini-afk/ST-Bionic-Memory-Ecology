@@ -110,6 +110,7 @@ export function applyPlannerResultAndSend({
             ...plannerPlotRecord,
             rawUserInput: raw,
             plannerAugmentedMessage: merged,
+            plannerRecallInjectionText: String(plannerRecall?.memoryBlock || '').trim(),
         }
         : null;
 

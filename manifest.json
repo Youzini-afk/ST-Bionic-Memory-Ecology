@@ -3,7 +3,7 @@
   "loading_order": 150,
   "requires": [],
   "optional": [],
-  "js": "index.js",
+  "js": "index.js?v=recall-tabs-v6",
   "css": "style.css",
   "author": "Youzini",
   "version": "8.0.8",

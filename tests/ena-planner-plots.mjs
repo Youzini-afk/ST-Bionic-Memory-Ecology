@@ -166,7 +166,10 @@ import {
   const textarea = { value: 'raw' };
   const button = { click: () => order.push('click') };
   const plannerState = { bypassNextSend: false };
-  const plannerRecall = { result: { selected: ['memory-a'] } };
+  const plannerRecall = {
+    memoryBlock: 'planner memory',
+    result: { selected: ['memory-a'] },
+  };
   const runtime = {
     preparePlannerTurnHandoff(payload) {
       order.push('handoff');
@@ -177,6 +180,7 @@ import {
         plannerPlotRecord: {
           rawUserInput: 'raw input',
           plannerAugmentedMessage: 'raw input\n\n<plot>next</plot>',
+          plannerRecallInjectionText: 'planner memory',
           plotText: '<plot>next</plot>',
         },
         chatId: 'chat-a',
@@ -324,8 +328,10 @@ import {
   writeStructuredPlotRecordToMessage(chat[2], createStructuredPlotRecord({
     rawUserInput: 'raw latest',
     plannerAugmentedMessage: 'raw latest\n\n<note>private</note>\n<plot>structured</plot>\n<state>hidden</state>',
+    plannerRecallInjectionText: 'planner memory snapshot',
     plotText: '<note>private</note>\n<plot>structured</plot>\n<state>hidden</state>',
   }));
+  assert.equal(chat[2].extra.st_bme_plot.plannerRecallInjectionText, 'planner memory snapshot');
   const history = readPlannerPlotHistory(chat, { count: 2 });
   assert.equal(history.source, 'structured+legacy');
   assert.deepEqual(history.plots, ['<plot>structured</plot>', '<plot>legacy stale</plot>']);

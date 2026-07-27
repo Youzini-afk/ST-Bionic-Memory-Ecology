@@ -71,6 +71,7 @@ message.extra.st_bme_plot = {
   version: 1,
   rawUserInput,
   plannerAugmentedMessage,
+  plannerRecallInjectionText, // 规划阶段实际收到的记忆注入快照
   plotText,
   plotBlocks,
   inputHash,

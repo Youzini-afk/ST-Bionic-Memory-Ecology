@@ -18,6 +18,7 @@ export function hashPlannerPlotInput(text = '') {
 export function createStructuredPlotRecord({
     rawUserInput = '',
     plannerAugmentedMessage = '',
+    plannerRecallInjectionText = '',
     plotText = '',
     plotBlocks = null,
     promptProfileId = '',
@@ -36,6 +37,7 @@ export function createStructuredPlotRecord({
         inputHash: String(inputHash || hashPlannerPlotInput(normalizedRaw)),
         rawUserInput: normalizedRaw,
         plannerAugmentedMessage: String(plannerAugmentedMessage || '').trim(),
+        plannerRecallInjectionText: String(plannerRecallInjectionText || '').trim(),
         plotText: normalizedPlot,
         plotBlocks: blocks,
         promptProfileId: String(promptProfileId || ''),

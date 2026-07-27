@@ -2469,7 +2469,7 @@ async function testRecallCardEditSyncsPlannerAndRecallRawInput() {
   }
 }
 
-async function testRecallCardShowsEnaSourceChipAndExpandedPreview() {
+async function testPlannerSourcedRecallWithoutPlotUsesPlainRecallPreview() {
   const chat = [
     {
       is_user: true,
@@ -2499,15 +2499,16 @@ async function testRecallCardShowsEnaSourceChipAndExpandedPreview() {
     card.querySelector(".bme-recall-bar")?.click();
 
     const enaTag = card.querySelector(".bme-recall-meta-tag.is-ena");
-    assert.equal(Boolean(enaTag), true);
-    assert.equal(enaTag?.textContent, "🧭 ENA Planner");
+    assert.equal(enaTag, null);
 
-    const preview = card.querySelector(".bme-recall-injection-preview.is-ena");
+    const preview = card.querySelector(".bme-recall-injection-preview");
     assert.equal(Boolean(preview), true);
-    assert.equal(preview.classList.contains("expanded"), true);
-    assert.equal(
-      preview.querySelector(".bme-recall-injection-note")?.textContent,
-      "由 Ena Planner 触发的本轮记忆块",
+    assert.equal(preview.classList.contains("is-ena"), false);
+    assert.equal(preview.classList.contains("expanded"), false);
+    assert.equal(preview.querySelector(".bme-recall-injection-note"), null);
+    assert.ok(
+      !preview.querySelector(".bme-recall-injection-toggle")?.innerHTML.includes("ENA"),
+      "recall pane must not present planner branding",
     );
   } finally {
     harness.restoreGlobals();
@@ -2579,6 +2580,7 @@ function buildPlotRecord(overrides = {}) {
     plannerAugmentedMessage: Object.prototype.hasOwnProperty.call(overrides, "plannerAugmentedMessage")
       ? overrides.plannerAugmentedMessage
       : "plot user input\n\n<plot>Hero enters the ruins.</plot>",
+    plannerRecallInjectionText: overrides.plannerRecallInjectionText || "",
     promptProfileId: overrides.promptProfileId || "default",
     taskResults: overrides.taskResults || [
       { taskName: "plot-generation", status: "completed" },
@@ -2681,6 +2683,7 @@ async function testRecallAndPlannerTabsKeepContentSeparate() {
         }),
         st_bme_plot: buildPlotRecord({
           rawUserInput: "plot user input",
+          plannerRecallInjectionText: "[Memory - Recalled]\n规划阶段召回注入",
           plotText: "<plot>plan</plot>",
         }),
       },
@@ -2711,11 +2714,27 @@ async function testRecallAndPlannerTabsKeepContentSeparate() {
       "recall tab should use the plain memory injection label",
     );
     assert.equal(card.querySelector(".bme-recall-injection-note"), null);
+    assert.ok(
+      Array.from(card.querySelectorAll(".bme-recall-injection-line"))
+        .some((line) => line.textContent.includes("普通召回注入")),
+      "recall tab should render the normal recall injection",
+    );
     assert.equal(card.querySelector(".bme-recall-planner-pane"), null);
 
     card.querySelector(".bme-recall-tab-planner")?.click();
     assert.equal(card.querySelector(".bme-recall-recall-pane"), null);
     assert.ok(card.querySelector(".bme-recall-planner-pane"));
+    const enaPreview = card.querySelector(".bme-recall-injection-preview.is-ena");
+    assert.ok(enaPreview, "planner tab should render the ENA injection preview");
+    assert.ok(
+      Array.from(enaPreview.querySelectorAll(".bme-recall-injection-line"))
+        .some((line) => line.textContent.includes("规划阶段召回注入")),
+      "planner tab should use the planner recall snapshot",
+    );
+    assert.ok(
+      enaPreview.querySelector(".bme-recall-injection-toggle")?.innerHTML.includes("ENA"),
+      "planner injection preview should keep the ENA label",
+    );
     assert.ok(
       card.querySelector(".bme-recall-planner-plot-item")?.textContent.includes("plan"),
     );
@@ -10424,7 +10443,7 @@ await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();
 await testRecallCardSupportsManagedUserInputEditing();
 await testRecallCardEditSyncsPlannerAndRecallRawInput();
-await testRecallCardShowsEnaSourceChipAndExpandedPreview();
+await testPlannerSourcedRecallWithoutPlotUsesPlainRecallPreview();
 await testRecallCardBeautifiesInjectionPreviewSections();
 await testRecallCardWithRecallAndPlotShowsBothTabs();
 await testRecallCardWithPlotShowsRawUserInputOnly();
