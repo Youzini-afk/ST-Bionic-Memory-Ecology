@@ -13,7 +13,7 @@ import {
   buildSnapshotFromGraph,
   ensureDexieLoaded,
 } from "../sync/bme-db.js";
-import { BmeChatManager } from "../sync/bme-chat-manager.js";
+import { ConversationRepository } from "../sync/conversation-repository.js";
 import { createEmptyGraph } from "../graph/graph.js";
 import { getGraphPersistDirtyStateSnapshot } from "../runtime/runtime-state.js";
 
@@ -545,8 +545,10 @@ async function testChatIsolationAndManager() {
   await dbA.close();
   await dbB.close();
 
-  const manager = new BmeChatManager({
-    databaseFactory: (chatId) => {
+  const manager = new ConversationRepository({
+    resolveBinding: () => ({ key: "indexeddb:indexeddb" }),
+    bindingKey: (presentation) => presentation.key,
+    storeFactory: (chatId) => {
       chatIdsForCleanup.add(chatId);
       return new BmeDatabase(chatId, { dexieClass: globalThis.Dexie });
     },
@@ -579,7 +581,7 @@ async function testChatIsolationAndManager() {
   const managerDbBNodes = await managerDbB.listNodes({ reverse: false });
   assert.ok(managerDbBNodes.some((item) => item.id === "manager-node-b"));
 
-  const reopenedA = await manager.getCurrentDb("chat-manager-a");
+  const reopenedA = await manager.getStore("chat-manager-a");
   const reopenedANodes = await reopenedA.listNodes({ reverse: false });
   assert.ok(reopenedANodes.some((item) => item.id === "manager-node-a"));
   assert.ok(!reopenedANodes.some((item) => item.id === "manager-node-b"));
@@ -588,13 +590,14 @@ async function testChatIsolationAndManager() {
   assert.equal(manager.getCurrentChatId(), "");
 }
 
-async function testManagerRecreatesDbWhenSelectorKeyChanges() {
+async function testRepositoryRebindIsExplicit() {
   let selectorKey = "indexeddb:indexeddb";
   let instanceCounter = 0;
   const closeLog = [];
-  const manager = new BmeChatManager({
-    selectorKeyResolver: async () => selectorKey,
-    databaseFactory: async (chatId) => {
+  const manager = new ConversationRepository({
+    resolveBinding: async () => ({ key: selectorKey }),
+    bindingKey: (presentation) => presentation.key,
+    storeFactory: async (chatId) => {
       instanceCounter += 1;
       const instanceId = instanceCounter;
       return {
@@ -614,17 +617,21 @@ async function testManagerRecreatesDbWhenSelectorKeyChanges() {
     },
   });
 
-  const dbA = await manager.getCurrentDb("chat-manager-selector");
+  const dbA = await manager.getStore("chat-manager-selector");
   assert.equal(dbA.instanceId, 1);
   assert.equal(dbA.openCount, 1);
 
-  const reopenedSameSelector = await manager.getCurrentDb("chat-manager-selector");
+  const reopenedSameSelector = await manager.getStore("chat-manager-selector");
   assert.equal(reopenedSameSelector, dbA);
-  assert.equal(dbA.openCount, 2);
+  assert.equal(dbA.openCount, 1);
   assert.deepEqual(closeLog, []);
 
   selectorKey = "opfs:opfs-shadow";
-  const dbB = await manager.getCurrentDb("chat-manager-selector");
+  const stillBoundToA = await manager.getStore("chat-manager-selector");
+  assert.equal(stillBoundToA, dbA);
+  assert.deepEqual(closeLog, []);
+
+  const dbB = await manager.rebind("chat-manager-selector");
   assert.notEqual(dbB, dbA);
   assert.equal(dbB.instanceId, 2);
   assert.equal(dbB.openCount, 1);
@@ -939,7 +946,7 @@ async function main() {
   await testCommitDeltaRejectsStaleBaseRevision();
   await testTombstonePrune();
   await testChatIsolationAndManager();
-  await testManagerRecreatesDbWhenSelectorKeyChanges();
+  await testRepositoryRebindIsExplicit();
   await testGraphSnapshotConverters();
 
   await cleanupDatabases();

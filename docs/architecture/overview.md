@@ -152,6 +152,7 @@ ST-BME/
 ├── runtime/                       # 运行时状态和设置
 │   ├── identity-resolver.js        # 身份解析核心
 │   ├── runtime-state.js
+│   ├── conversation-workspace.js   # 当前聊天运行时状态与任务租约
 │   ├── generation-context.js       # 宿主生成 type 跟踪 + 父 user 楼解析
 │   ├── recall-input-state.js       # 召回 input/intent/trivial-skip 状态工厂
 │   ├── reroll-recall-input.js      # reroll/continue 召回输入 + planner handoff 输入工厂
@@ -171,11 +172,12 @@ ST-BME/
 │   ├── bme-db.js                  # IndexedDB 数据层
 │   ├── bme-opfs-store.js          # OPFS/sidecar 存储
 │   ├── bme-sync.js                # 云端镜像与备份恢复
-│   ├── bme-chat-manager.js        # chatId → 数据库生命周期
+│   ├── conversation-repository.js # chatId → 固定主存储绑定与生命周期
 │   ├── persistence-reducer.js      # 持久化 accepted/queued/pending reducer
-│   ├── graph-persistence-io.js     # IndexedDB 图谱 save/load/queue/retry（注入式）
+│   ├── graph-persistence-io.js     # 图谱主存储 save/load/queue/retry（注入式）
 │   ├── graph-load-persist.js       # 图谱加载/持久化/authority 编排（注入式）
 │   ├── graph-mutation-gate.js      # 图谱变更门禁 + 持久化 live-state 投影（注入式）
+│   ├── legacy-graph-importer.js    # 旧 OPFS/IndexedDB/metadata 单次导入顺序
 │   ├── legacy-persistence-repair.js # 旧状态安全修复策略
 │   ├── graph-snapshot-schema.js    # 耐久快照契约：冻结顶层键 + 宽容解析
 │   └── graph-snapshot-upgrade.js   # 快照 upgrade-on-read 就地升级链

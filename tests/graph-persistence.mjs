@@ -1950,6 +1950,13 @@ async function createGraphPersistenceHarness({
       }
       return bmeChatManager;
     },
+    ensureConversationRepository() {
+      const manager = runtimeContext.ensureBmeChatManager();
+      if (!manager) return null;
+      return {
+        getStore: (...args) => manager.getCurrentDb(...args),
+      };
+    },
     async createPreferredGraphLocalStore(chatId, settings = runtimeContext.getSettings()) {
       const preferredLocalStore = await runtimeContext.resolvePreferredGraphLocalStorePresentation(settings);
       if (preferredLocalStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND) return new runtimeContext.AuthorityGraphStore(chatId);
@@ -2779,7 +2786,7 @@ async function createGraphPersistenceHarness({
           runtimeContext.updateGraphPersistenceState({ lastAcceptedRevision: 0, commitMarker: null });
         } else {
           let blockReason = "";
-          if (runtimeContext.BmeChatManager == null) blockReason = "indexeddb-manager-unavailable";
+          if (runtimeContext.BmeChatManager == null) blockReason = "conversation-repository-unavailable";
           else if (runtimeContext.__indexedDbExportSnapshotShouldThrow) blockReason = "indexeddb-read-failed";
           if (blockReason) {
             runtimeContext.applyGraphLoadState(GRAPH_LOAD_STATES.BLOCKED, {
@@ -4743,7 +4750,7 @@ async function createGraphPersistenceHarness({
   );
   assert.equal(
     harness.api.getGraphPersistenceState().reason,
-    "indexeddb-manager-unavailable",
+    "conversation-repository-unavailable",
   );
 }
 
@@ -4767,10 +4774,10 @@ async function createGraphPersistenceHarness({
   );
 
   assert.equal(result.saved, false);
-  assert.equal(result.reason, "indexeddb-manager-unavailable");
+  assert.equal(result.reason, "conversation-repository-unavailable");
   assert.equal(
     harness.api.getGraphPersistenceState().indexedDbLastError,
-    "indexeddb-manager-unavailable",
+    "conversation-repository-unavailable",
   );
 }
 

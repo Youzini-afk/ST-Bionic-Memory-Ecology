@@ -5,6 +5,7 @@ import {
   GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
   normalizeGraphAuthorityMeta,
 } from "./authority-graph-mode.js";
+import { runLegacyGraphImportOnce } from "./legacy-graph-importer.js";
 
 function createGraphPersistenceStateProxy(runtime = {}) {
   return new Proxy({}, {
@@ -161,7 +162,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
   const createShadowComparisonGraph = runtime.createShadowComparisonGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const evaluateNativeHydrateGate = runtime.evaluateNativeHydrateGate;
   const evaluatePersistNativeDeltaGate = runtime.evaluatePersistNativeDeltaGate;
@@ -277,12 +278,12 @@ export async function loadGraphFromIndexedDbImpl(runtime,
 
   let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) {
+    const repository = ensureConversationRepository();
+    if (!repository) {
       const result = {
         success: false,
         loaded: false,
-        reason: "indexeddb-manager-unavailable",
+        reason: "conversation-repository-unavailable",
         chatId: normalizedChatId,
         attemptIndex,
       };
@@ -295,7 +296,7 @@ export async function loadGraphFromIndexedDbImpl(runtime,
       });
       return result;
     }
-    const db = await manager.getCurrentDb(normalizedChatId);
+    const db = await repository.getStore(normalizedChatId);
     if (!isLoadTargetActive()) return buildChatSwitchedResult();
     localStore = resolveDbGraphStorePresentation(db);
 
@@ -362,51 +363,34 @@ export async function loadGraphFromIndexedDbImpl(runtime,
       });
     }
 
-    const opfsMigrationResult = identityRecoveryResult?.migrated
-      ? {
-          migrated: false,
-          reason: "identity-recovery-already-applied",
-          chatId: normalizedChatId,
-        }
-      : await maybeImportLegacyOpfsSnapshotToLocalStore(
-          normalizedChatId,
-          db,
-          {
+    let opfsMigrationResult = {
+      migrated: false,
+      reason: "identity-recovery-already-applied",
+      chatId: normalizedChatId,
+    };
+    let localStoreMigrationResult = opfsMigrationResult;
+    let migrationResult = opfsMigrationResult;
+    if (!identityRecoveryResult?.migrated) {
+      const importPlan = await runLegacyGraphImportOnce({
+        chatId: normalizedChatId,
+        importOpfs: () =>
+          maybeImportLegacyOpfsSnapshotToLocalStore(normalizedChatId, db, {
             source,
-          },
-        );
-
-    const localStoreMigrationResult =
-      identityRecoveryResult?.migrated || opfsMigrationResult?.migrated
-        ? {
-            migrated: false,
-            reason: opfsMigrationResult?.migrated
-              ? "opfs-migration-already-applied"
-              : "identity-recovery-already-applied",
-            chatId: normalizedChatId,
-          }
-        : await maybeImportLegacyIndexedDbSnapshotToLocalStore(
-            normalizedChatId,
+          }),
+        importIndexedDb: () =>
+          maybeImportLegacyIndexedDbSnapshotToLocalStore(normalizedChatId, db, {
+            source,
+          }),
+        importMetadata: () =>
+          maybeMigrateLegacyGraphToIndexedDb(normalizedChatId, getContext(), {
+            source,
             db,
-            {
-              source,
-            },
-          );
-
-    const migrationResult =
-      identityRecoveryResult?.migrated ||
-      opfsMigrationResult?.migrated ||
-      localStoreMigrationResult?.migrated ||
-      localStoreMigrationResult?.reason === "migration-local-store-failed"
-        ? localStoreMigrationResult
-        : await maybeMigrateLegacyGraphToIndexedDb(
-            normalizedChatId,
-            getContext(),
-            {
-              source,
-              db,
-            },
-        );
+          }),
+      });
+      opfsMigrationResult = importPlan.opfsResult;
+      localStoreMigrationResult = importPlan.indexedDbResult;
+      migrationResult = importPlan.result;
+    }
     if (!isLoadTargetActive()) return buildChatSwitchedResult(localStore.reasonPrefix);
 
     if (migrationResult?.migrated) {
@@ -1016,7 +1000,7 @@ export function maybeFlushQueuedGraphPersistImpl(runtime, reason = "queued-graph
   const createShadowComparisonGraph = runtime.createShadowComparisonGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const evaluateNativeHydrateGate = runtime.evaluateNativeHydrateGate;
   const evaluatePersistNativeDeltaGate = runtime.evaluatePersistNativeDeltaGate;
@@ -1168,7 +1152,7 @@ export async function retryPendingGraphPersistImpl(runtime, {
   const createShadowComparisonGraph = runtime.createShadowComparisonGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const evaluateNativeHydrateGate = runtime.evaluateNativeHydrateGate;
   const evaluatePersistNativeDeltaGate = runtime.evaluatePersistNativeDeltaGate;
@@ -1618,7 +1602,7 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
   const createShadowComparisonGraph = runtime.createShadowComparisonGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const evaluateNativeHydrateGate = runtime.evaluateNativeHydrateGate;
   const evaluatePersistNativeDeltaGate = runtime.evaluatePersistNativeDeltaGate;
@@ -1711,20 +1695,20 @@ async function saveGraphToIndexedDbCoreImpl(runtime,
   let db = null;
   let localStore = getPreferredGraphLocalStorePresentationSync();
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) {
-      recordLocalPersistEarlyFailureIfActive("indexeddb-manager-unavailable", {
+    const repository = ensureConversationRepository();
+    if (!repository) {
+      recordLocalPersistEarlyFailureIfActive("conversation-repository-unavailable", {
         chatId: normalizedChatId,
         revision,
       });
       return {
         saved: false,
         chatId: normalizedChatId,
-        reason: "indexeddb-manager-unavailable",
+        reason: "conversation-repository-unavailable",
         revision: normalizeIndexedDbRevision(revision),
       };
     }
-    db = await manager.getCurrentDb(normalizedChatId);
+    db = await repository.getStore(normalizedChatId);
     if (!db) {
       recordLocalPersistEarlyFailureIfActive("indexeddb-db-unavailable", {
         chatId: normalizedChatId,

@@ -98,9 +98,9 @@ function createSmokeRuntime() {
         return value == null ? fallback : JSON.parse(JSON.stringify(value));
       },
       console,
-      ensureBmeChatManager() {
+      ensureConversationRepository() {
         return {
-          async getCurrentDb() {
+          async getStore() {
             return {
               async exportSnapshot() {
                 return {

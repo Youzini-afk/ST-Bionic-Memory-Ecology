@@ -128,7 +128,7 @@ export function shouldUseAuthorityJobsImpl(runtime, config = null, kind = AUTHOR
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -248,7 +248,7 @@ export function shouldUseAuthorityGraphStoreImpl(runtime, settings = runtime.get
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -366,7 +366,7 @@ export async function writeAuthorityCheckpointFromCurrentGraphImpl(runtime, opti
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -605,7 +605,7 @@ export function buildBmeSyncRuntimeOptionsImpl(runtime, extra = {}) {
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -668,11 +668,11 @@ export function buildBmeSyncRuntimeOptionsImpl(runtime, extra = {}) {
   const { capability } = getAuthorityRuntimeSnapshot(settings);
   const defaultOptions = {
     getDb: async (chatId) => {
-      const manager = ensureBmeChatManager();
-      if (!manager) {
-        throw new Error("BmeChatManager 不可用");
+      const repository = ensureConversationRepository();
+      if (!repository) {
+        throw new Error("ConversationRepository 不可用");
       }
-      return await manager.getCurrentDb(chatId);
+      return await repository.getStore(chatId);
     },
     getSafetyDb: async (chatId) => {
       const safetyChatId = buildRestoreSafetyChatId(chatId);
@@ -775,7 +775,7 @@ export function maybeCaptureGraphShadowSnapshotImpl(runtime,
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -909,7 +909,7 @@ export async function persistExtractionBatchResultImpl(runtime, {
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -1017,9 +1017,9 @@ export async function persistExtractionBatchResultImpl(runtime, {
   let extractionDb = null;
   if (hasExtractionCommitBatchData({ persistDelta, committedBatchJournalEntry })) {
     try {
-      const manager = ensureBmeChatManager?.();
-      extractionDb = typeof manager?.getCurrentDb === "function"
-        ? await manager.getCurrentDb(chatId)
+      const repository = ensureConversationRepository?.();
+      extractionDb = typeof repository?.getStore === "function"
+        ? await repository.getStore(chatId)
         : await createPreferredGraphLocalStore(chatId);
       const authorityExtractionMeta = resolveAuthorityExtractionMeta(graphPersistenceState, persistSnapshot, extractionDb);
       if (authorityExtractionMeta.authorityOwned && shouldRouteExtractionCommitBatch(runtime, graphPersistenceState, persistSnapshot, extractionDb, {
@@ -1248,7 +1248,7 @@ export function syncGraphLoadFromLiveContextImpl(runtime, options = {}) {
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -1498,7 +1498,7 @@ export function loadGraphFromChatImpl(runtime, options = {}) {
   const deserializeGraph = runtime.deserializeGraph;
   const detectIndexedDbSnapshotCommitMarkerMismatch = runtime.detectIndexedDbSnapshotCommitMarkerMismatch;
   const detectStaleIndexedDbSnapshotAgainstRuntime = runtime.detectStaleIndexedDbSnapshotAgainstRuntime;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const exportAuthoritySqlSnapshotForCheckpoint = runtime.exportAuthoritySqlSnapshotForCheckpoint;
   const getAcceptedCommitMarkerRevision = runtime.getAcceptedCommitMarkerRevision;
@@ -2064,7 +2064,7 @@ export function saveGraphToChatImpl(runtime, options = {}) {
   const buildPersistenceEnvironment = runtime.buildPersistenceEnvironment;
   const canPersistGraphToMetadataFallback = runtime.canPersistGraphToMetadataFallback;
   const cloneGraphForPersistence = runtime.cloneGraphForPersistence;
-  const ensureBmeChatManager = runtime.ensureBmeChatManager;
+  const ensureConversationRepository = runtime.ensureConversationRepository;
   const ensureCurrentGraphRuntimeState = runtime.ensureCurrentGraphRuntimeState;
   const getContext = runtime.getContext;
   const getGraphPersistedRevision = runtime.getGraphPersistedRevision;
@@ -2143,7 +2143,7 @@ export function saveGraphToChatImpl(runtime, options = {}) {
     : null;
 
   const metadataFallbackEnabled =
-    Boolean(persistMetadata) || !ensureBmeChatManager();
+    Boolean(persistMetadata) || !ensureConversationRepository();
 
   if (!markMutation) {
     const hasMeaningfulGraphData = !isGraphEffectivelyEmpty(currentGraph);

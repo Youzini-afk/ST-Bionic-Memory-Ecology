@@ -16,7 +16,7 @@ import {
   saveMetadataDebounced,
 } from "./host/st-extensions.js";
 
-import { BmeChatManager } from "./sync/bme-chat-manager.js";
+import { ConversationRepository } from "./sync/conversation-repository.js";
 import {
   BmeDatabase,
   buildBmeDbName,
@@ -1385,7 +1385,7 @@ function createGraphLoadPersistRuntime() {
     deserializeGraph,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     detectStaleIndexedDbSnapshotAgainstRuntime,
-    ensureBmeChatManager,
+    ensureConversationRepository,
     ensureCurrentGraphRuntimeState,
     exportAuthoritySqlSnapshotForCheckpoint,
     getAcceptedCommitMarkerRevision,
@@ -1503,7 +1503,7 @@ function createGraphPersistenceIoRuntime() {
     createShadowComparisonGraph,
     detectIndexedDbSnapshotCommitMarkerMismatch,
     detectStaleIndexedDbSnapshotAgainstRuntime,
-    ensureBmeChatManager,
+    ensureConversationRepository,
     ensureCurrentGraphRuntimeState,
     evaluateNativeHydrateGate,
     evaluatePersistNativeDeltaGate,
@@ -1952,8 +1952,8 @@ const stageAbortControllers = {
   recall: null,
   history: null,
 };
-let bmeChatManager = null;
-let bmeChatManagerUnavailableWarned = false;
+let conversationRepository = null;
+let conversationRepositoryUnavailableWarned = false;
 let bmeLocalStoreCapabilityPromise = null;
 let bmeLocalStoreCapabilitySnapshot = {
   checked: false,
@@ -6218,12 +6218,9 @@ async function resolvePreferredGraphLocalStorePresentation(
   return buildIndexedDbStorePresentation();
 }
 
-async function createPreferredGraphLocalStore(
-  chatId,
-  settings = getSettings(),
-) {
+async function createPreferredGraphLocalStore(chatId, settings = getSettings(), preferredStore = null) {
   const preferredLocalStore =
-    await resolvePreferredGraphLocalStorePresentation(settings);
+    preferredStore || (await resolvePreferredGraphLocalStorePresentation(settings));
   if (
     preferredLocalStore.storagePrimary === AUTHORITY_GRAPH_STORE_KIND &&
     typeof AuthorityGraphStore === "function"
@@ -6289,24 +6286,19 @@ async function refreshCurrentChatLocalStoreBinding(
     null,
   );
   let reopenError = "";
-
-  if (
-    reopenCurrentDb === true &&
-    normalizedChatId &&
-    bmeChatManager &&
-    typeof bmeChatManager.getCurrentChatId === "function" &&
-    typeof bmeChatManager.closeCurrent === "function" &&
-    bmeChatManager.getCurrentChatId() === normalizedChatId
-  ) {
-    await bmeChatManager.closeCurrent();
-  }
+  const canRebind = reopenCurrentDb === true && conversationWorkspace.graphPersistenceState.pendingPersist !== true;
 
   if (normalizedChatId) {
     clearCachedIndexedDbSnapshot(normalizedChatId);
     try {
-      const manager = ensureBmeChatManager();
-      if (manager) {
-        const db = await manager.getCurrentDb(normalizedChatId);
+      const repository = ensureConversationRepository();
+      if (repository) {
+        const db = canRebind
+          ? await repository.rebind(
+              normalizedChatId,
+              repository.getBinding(normalizedChatId)?.presentation || preferredLocalStore,
+            )
+          : await repository.getStore(normalizedChatId);
         resolvedLocalStore = resolveDbGraphStorePresentation(db);
         localStoreDiagnostics = readLocalStoreDiagnosticsSync(
           db,
@@ -7266,12 +7258,12 @@ async function syncIndexedDbMetaToPersistenceState(
   }
 
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) {
+    const repository = ensureConversationRepository();
+    if (!repository) {
       return null;
     }
 
-    const db = await manager.getCurrentDb(normalizedChatId);
+    const db = await repository.getStore(normalizedChatId);
     if (!db) {
       return null;
     }
@@ -7435,26 +7427,28 @@ async function runBmeAutoSyncForChat(source = "unknown", chatId = "") {
   }
 }
 
-function ensureBmeChatManager() {
-  if (typeof BmeChatManager !== "function") {
-    if (!bmeChatManagerUnavailableWarned) {
-      console.warn("[ST-BME] BmeChatManager 不可用，IndexedDB 能力暂时停用");
-      bmeChatManagerUnavailableWarned = true;
+function ensureConversationRepository() {
+  if (typeof ConversationRepository !== "function") {
+    if (!conversationRepositoryUnavailableWarned) {
+      console.warn("[ST-BME] ConversationRepository 不可用，图谱持久化暂时停用");
+      conversationRepositoryUnavailableWarned = true;
     }
     return null;
   }
 
-  if (!bmeChatManager) {
-    bmeChatManager = new BmeChatManager({
-      databaseFactory: async (chatId) =>
-        await createPreferredGraphLocalStore(chatId),
-      selectorKeyResolver: async () =>
-        buildGraphLocalStoreSelectorKey(
-          await resolvePreferredGraphLocalStorePresentation(),
+  if (!conversationRepository) {
+    conversationRepository = new ConversationRepository({
+      resolveBinding: resolvePreferredGraphLocalStorePresentation,
+      bindingKey: buildGraphLocalStoreSelectorKey,
+      storeFactory: async (chatId, binding) =>
+        await createPreferredGraphLocalStore(
+          chatId,
+          getSettings(),
+          binding.presentation,
         ),
     });
   }
-  return bmeChatManager;
+  return conversationRepository;
 }
 
 function recordLocalPersistEarlyFailure(
@@ -7495,12 +7489,12 @@ function scheduleBmeIndexedDbTask(task) {
     Promise.resolve()
       .then(task)
       .catch((error) => {
-        console.warn("[ST-BME] IndexedDB 后台任务失败:", error);
+        console.warn("[ST-BME] 持久化后台任务失败:", error);
       });
   });
 }
 
-async function syncBmeChatManagerWithCurrentChat(
+async function syncConversationRepositoryWithCurrentChat(
   source = "unknown",
   context = getContext(),
 ) {
@@ -7516,20 +7510,20 @@ async function syncBmeChatManagerWithCurrentChat(
     });
   }
 
-  const manager = ensureBmeChatManager();
-  if (!manager) {
+  const repository = ensureConversationRepository();
+  if (!repository) {
     return {
       chatId: "",
       opened: false,
       skipped: true,
-      reason: "manager-unavailable",
+      reason: "conversation-repository-unavailable",
     };
   }
   const chatId = getCurrentChatId(context);
 
   if (!chatId) {
-    await manager.closeCurrent();
-    debugDebug("[ST-BME] IndexedDB 会话已关闭（无活动聊天）", {
+    await repository.closeCurrent();
+    debugDebug("[ST-BME] 会话存储已关闭（无活动聊天）", {
       source,
     });
     return {
@@ -7539,8 +7533,8 @@ async function syncBmeChatManagerWithCurrentChat(
     };
   }
 
-  const db = await manager.switchChat(chatId);
-  debugDebug("[ST-BME] IndexedDB 会话已同步", {
+  const db = await repository.switchChat(chatId);
+  debugDebug("[ST-BME] 会话存储已同步", {
     source,
     chatId,
   });
@@ -7557,7 +7551,7 @@ function scheduleBmeIndexedDbWarmup(source = "init") {
     if (preferredLocalStore.storagePrimary === "indexeddb") {
       await ensureDexieLoaded();
     }
-    await syncBmeChatManagerWithCurrentChat(source);
+    await syncConversationRepositoryWithCurrentChat(source);
   });
 }
 
@@ -7920,9 +7914,9 @@ async function readLocalCacheSnapshotForChat(chatId, source = "luker-sidecar-loa
   if (cached) return cached;
 
   try {
-    const manager = ensureBmeChatManager();
-    if (!manager) return null;
-    const db = await manager.getCurrentDb(normalizedChatId);
+    const repository = ensureConversationRepository();
+    if (!repository) return null;
+    const db = await repository.getStore(normalizedChatId);
     const snapshot = await db.exportSnapshot({ includeTombstones: false });
     return snapshot;
   } catch (error) {
@@ -9900,16 +9894,16 @@ async function maybeRecoverIndexedDbGraphFromStableIdentity(
     };
   }
 
-  const manager = ensureBmeChatManager();
-  if (!manager) {
+  const repository = ensureConversationRepository();
+  if (!repository) {
     return {
       migrated: false,
-      reason: "identity-recovery-manager-unavailable",
+      reason: "identity-recovery-repository-unavailable",
       chatId: normalizedChatId,
     };
   }
 
-  const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+  const targetDb = db || (await repository.getStore(normalizedChatId));
   if (!targetDb) {
     return {
       migrated: false,
@@ -10151,16 +10145,16 @@ async function maybeMigrateLegacyGraphToIndexedDb(
 
   const migrationTask = (async () => {
     try {
-      const manager = ensureBmeChatManager();
-      if (!manager) {
+      const repository = ensureConversationRepository();
+      if (!repository) {
         return {
           migrated: false,
-          reason: "migration-manager-unavailable",
+          reason: "migration-repository-unavailable",
           chatId: normalizedChatId,
         };
       }
 
-      const targetDb = db || (await manager.getCurrentDb(normalizedChatId));
+      const targetDb = db || (await repository.getStore(normalizedChatId));
       if (!targetDb) {
         return {
           migrated: false,
@@ -14733,10 +14727,14 @@ function updateModuleSettings(patch = {}) {
   if (previousGraphLocalStorageMode !== currentGraphLocalStorageMode) {
     clearAllCachedIndexedDbSnapshots();
     scheduleBmeIndexedDbTask(async () => {
-      if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
-        await bmeChatManager.closeAll();
+      if (
+        conversationWorkspace.graphPersistenceState.pendingPersist !== true &&
+        conversationRepository &&
+        typeof conversationRepository.closeAll === "function"
+      ) {
+        await conversationRepository.closeAll();
       }
-      await syncBmeChatManagerWithCurrentChat(
+      await syncConversationRepositoryWithCurrentChat(
         "settings:graph-local-storage-mode-changed",
       );
     });
@@ -16427,7 +16425,7 @@ function onChatChanged() {
   });
 
   scheduleBmeIndexedDbTask(async () => {
-    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-changed");
+    const syncResult = await syncConversationRepositoryWithCurrentChat("chat-changed");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-changed", syncResult.chatId);
       await loadGraphFromIndexedDb(syncResult.chatId, {
@@ -16462,7 +16460,7 @@ function onChatLoaded() {
   });
 
   scheduleBmeIndexedDbTask(async () => {
-    const syncResult = await syncBmeChatManagerWithCurrentChat("chat-loaded");
+    const syncResult = await syncConversationRepositoryWithCurrentChat("chat-loaded");
     if (syncResult?.chatId) {
       await runBmeAutoSyncForChat("chat-loaded", syncResult.chatId);
       await loadGraphFromIndexedDb(syncResult.chatId, {
@@ -17737,18 +17735,18 @@ const _cleanupRuntime = () => ({
   buildRestoreSafetyChatId,
   closeBmeDb: async (chatId) => {
     const normalizedChatId = normalizeChatIdCandidate(chatId);
-    if (!normalizedChatId || !bmeChatManager) return;
+    if (!normalizedChatId || !conversationRepository) return;
     if (
-      typeof bmeChatManager.getCurrentChatId === "function" &&
-      bmeChatManager.getCurrentChatId() === normalizedChatId &&
-      typeof bmeChatManager.closeCurrent === "function"
+      typeof conversationRepository.getCurrentChatId === "function" &&
+      conversationRepository.getCurrentChatId() === normalizedChatId &&
+      typeof conversationRepository.closeCurrent === "function"
     ) {
-      await bmeChatManager.closeCurrent();
+      await conversationRepository.closeCurrent();
     }
   },
   closeAllBmeDbs: async () => {
-    if (bmeChatManager && typeof bmeChatManager.closeAll === "function") {
-      await bmeChatManager.closeAll();
+    if (conversationRepository && typeof conversationRepository.closeAll === "function") {
+      await conversationRepository.closeAll();
     }
   },
   clearCachedIndexedDbSnapshot,
@@ -18304,7 +18302,7 @@ async function onCompactLukerSidecar() {
   });
 
   try {
-    ensureBmeChatManager();
+    ensureConversationRepository();
     scheduleBmeIndexedDbWarmup("init");
     initializeHostCapabilityBridge();
     installSendIntentHooks();
@@ -18347,7 +18345,7 @@ async function onCompactLukerSidecar() {
 
     // 加载当前聊天的图谱
     scheduleBmeIndexedDbTask(async () => {
-      const syncResult = await syncBmeChatManagerWithCurrentChat("initial-load");
+      const syncResult = await syncConversationRepositoryWithCurrentChat("initial-load");
       if (!syncResult?.chatId) {
         syncGraphLoadFromLiveContext({
           source: "initial-load:no-chat",
