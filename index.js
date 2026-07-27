@@ -305,12 +305,12 @@ import {
   resolveRecallInputController,
   runRecallController,
 } from "./retrieval/recall-controller.js";
-import { createRecallMessageUiController } from "./ui/recall-message-ui-controller.js?v=recall-tabs-v6";
+import { createRecallMessageUiController } from "./ui/recall-message-ui-controller.js?v=recall-tabs-v7";
 import {
   createRecallCardElement,
   openRecallSidebar,
   updateRecallCardData,
-} from "./ui/recall-message-ui.js?v=recall-tabs-v6";
+} from "./ui/recall-message-ui.js?v=recall-tabs-v7";
 import {
   buildRecallHistoryFingerprint,
   buildPersistedRecallRecord,

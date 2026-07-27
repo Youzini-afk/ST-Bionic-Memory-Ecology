@@ -20,7 +20,7 @@ function _hostUserPovAliasHintsForRecallCanvas() {
 
 // ==================== 常量 ====================
 
-export const RECALL_CARD_UI_VERSION = "recall-tabs-v6";
+export const RECALL_CARD_UI_VERSION = "recall-tabs-v7";
 
 export const RECALL_CARD_FORCE_CONFIG = {
   repulsion: 1200,
@@ -1111,23 +1111,21 @@ export function createRecallCardElement({
  */
 export function updateRecallCardData(cardElement, record, options = {}) {
   if (!cardElement || !record) return;
-  if (cardElement.dataset?.bmeUiVersion !== RECALL_CARD_UI_VERSION) {
+  if (
+    cardElement.dataset?.bmeUiVersion !== RECALL_CARD_UI_VERSION ||
+    typeof cardElement._bmeUpdateRecallCard !== "function"
+  ) {
     return false;
   }
 
-  if (typeof cardElement._bmeUpdateRecallCard === "function") {
-    cardElement._bmeUpdateRecallCard({
-      record,
-      plotRecord: options?.plotRecord,
-      userMessageText: options?.userMessageText,
-      userInputDisplayMode: options?.userInputDisplayMode,
-      graph: options?.graph,
-      callbacks: options?.callbacks,
-    });
-    return true;
-  }
-
-  cardElement.dataset.updatedAt = String(record.updatedAt || "");
+  cardElement._bmeUpdateRecallCard({
+    record,
+    plotRecord: options?.plotRecord,
+    userMessageText: options?.userMessageText,
+    userInputDisplayMode: options?.userInputDisplayMode,
+    graph: options?.graph,
+    callbacks: options?.callbacks,
+  });
   return true;
 }
 

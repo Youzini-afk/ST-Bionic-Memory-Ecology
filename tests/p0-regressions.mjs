@@ -2156,6 +2156,53 @@ async function testRecallCardRefreshRebuildsStaleUiVersionCard() {
   }
 }
 
+async function testRecallCardRefreshRebuildsCurrentVersionCardWithoutRuntime() {
+  const chat = [
+    {
+      is_user: true,
+      mes: "plot user input",
+      extra: {
+        bme_recall: buildPersistedRecallRecord({
+          injectionText: "recall-0",
+          selectedNodeIds: ["n1"],
+          nowIso: "2026-01-01T00:00:00.000Z",
+        }),
+        st_bme_plot: buildPlotRecord(),
+      },
+    },
+  ];
+  const harness = await createRecallUiHarness({ chat });
+  const messageElement = createMessageElement(harness.document, 0, {
+    stableId: true,
+    withMesBlock: true,
+    isUser: true,
+  });
+  harness.chatRoot.appendChild(messageElement);
+
+  try {
+    harness.api.refreshPersistedRecallMessageUi();
+    const liveCard = harness.chatRoot.querySelector(".bme-recall-card");
+    const shellCard = harness.document.createElement("div");
+    shellCard.classList.add("bme-recall-card");
+    shellCard.dataset.messageIndex = "0";
+    shellCard.dataset.bmeUiVersion = liveCard.dataset.bmeUiVersion;
+    liveCard.remove();
+    messageElement.querySelector(".mes_block")?.appendChild(shellCard);
+
+    harness.api.refreshPersistedRecallMessageUi();
+
+    const rebuiltCard = harness.chatRoot.querySelector(".bme-recall-card");
+    assert.notEqual(rebuiltCard, shellCard, "unhydrated current-version card should be replaced");
+    assert.equal(typeof rebuiltCard._bmeUpdateRecallCard, "function");
+    rebuiltCard.querySelector(".bme-recall-tab-recall")?.click();
+    rebuiltCard.querySelector(".bme-recall-tab-planner")?.click();
+    assert.equal(rebuiltCard.dataset.activeTab, "planner");
+    assert.ok(rebuiltCard.querySelector(".bme-recall-planner-pane"));
+  } finally {
+    harness.restoreGlobals();
+  }
+}
+
 async function testRecallCardExpandedContentRerendersAfterRecordUpdate() {
   const chat = [
     {
@@ -10438,6 +10485,7 @@ await testRecallCardPrefersBetterDuplicateMessageAnchor();
 await testRecallCardDoesNotMountOnNonUserFloor();
 await testRecallCardRefreshCleansLegacyBadgeAndAvoidsDuplicates();
 await testRecallCardRefreshRebuildsStaleUiVersionCard();
+await testRecallCardRefreshRebuildsCurrentVersionCardWithoutRuntime();
 await testRecallCardExpandedContentRerendersAfterRecordUpdate();
 await testRecallCardUserTextRefreshesWithoutCardRecreate();
 await testRecallCardDisplayModeToggleRestoresOriginalUserText();

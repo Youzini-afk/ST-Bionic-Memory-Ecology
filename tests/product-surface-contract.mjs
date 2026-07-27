@@ -13,7 +13,7 @@ const [manifestSource, panelHtml, panelSource, uiLabelSource, styleCss] = await 
 
 const manifest = JSON.parse(manifestSource);
 assert.equal(manifest.display_name, "ST-BME Memory Graph");
-assert.equal(manifest.js, "index.js?v=recall-tabs-v6");
+assert.equal(manifest.js, "index.js?v=recall-tabs-v7");
 assert.equal(manifest.css, "style.css");
 
 const requiredPanelIds = [
