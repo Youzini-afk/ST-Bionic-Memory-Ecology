@@ -655,6 +655,24 @@ async function finalizeRerollCheckpoint(
       return { accepted: false, error };
     }
   };
+  const persistDetached = async (targetGraph, persistReason) => {
+    if (typeof runtime.persistDetachedRecoveryGraph !== "function") {
+      return {
+        accepted: false,
+        reason: "detached-recovery-persistence-unavailable",
+      };
+    }
+    try {
+      return await Promise.resolve(
+        runtime.persistDetachedRecoveryGraph(targetGraph, {
+          reason: persistReason,
+          context: runtime.getContext?.(),
+        }),
+      );
+    } catch (error) {
+      return { accepted: false, error };
+    }
+  };
 
   if (!graph || checkpointFloor == null) {
     return {
@@ -664,14 +682,14 @@ async function finalizeRerollCheckpoint(
     };
   }
 
-  const retainCheckpoint = (result) => {
+  const retainCheckpoint = (result, targetGraph = graph) => {
     runtime.markHistoryDirty(
-      graph,
+      targetGraph,
       checkpointFloor,
       "manual-reroll",
       "manual-reroll",
     );
-    graph.historyState.lastRecoveryResult = result;
+    targetGraph.historyState.lastRecoveryResult = result;
   };
 
   if (lastProcessedFloor < targetFloor || pendingPersistence) {
@@ -706,27 +724,31 @@ async function finalizeRerollCheckpoint(
     reason: "manual-reroll",
     resultCode: "reroll.complete",
   });
-  retainCheckpoint(result);
+  const completionGraph = runtime.normalizeGraphRuntimeState(
+    runtime.cloneGraphSnapshot(graph),
+    graph?.historyState?.chatId || "",
+  );
+  retainCheckpoint(result, completionGraph);
   const chat = runtime.getContext?.()?.chat;
   if (Array.isArray(chat) && lastProcessedFloor >= 0) {
-    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+    runtime.updateProcessedHistorySnapshot?.(
+      chat,
+      lastProcessedFloor,
+      completionGraph,
+    );
   }
-  const checkpointPersistence = await persist(`${reason}-checkpoint`);
-  if (checkpointPersistence?.accepted !== true) {
-    return {
-      success: false,
-      checkpointRetained: true,
-      resultCode: "reroll.checkpoint.persist-failed",
-      error: "重 Roll 结果检查点尚未确认落盘。",
-      persistence: checkpointPersistence,
-    };
-  }
-
-  runtime.clearHistoryDirty(graph, result);
+  runtime.clearHistoryDirty(completionGraph, result);
   if (Array.isArray(chat) && lastProcessedFloor >= 0) {
-    runtime.updateProcessedHistorySnapshot?.(chat, lastProcessedFloor);
+    runtime.updateProcessedHistorySnapshot?.(
+      chat,
+      lastProcessedFloor,
+      completionGraph,
+    );
   }
-  const completionPersistence = await persist(`${reason}-complete`);
+  const completionPersistence = await persistDetached(
+    completionGraph,
+    `${reason}-complete`,
+  );
   if (completionPersistence?.accepted !== true) {
     retainCheckpoint(
       runtime.buildRecoveryResult("pending-persistence", {
@@ -738,7 +760,6 @@ async function finalizeRerollCheckpoint(
         resultCode: "reroll.completion.persist-failed",
       }),
     );
-    await persist(`${reason}-checkpoint-restored`);
     return {
       success: false,
       checkpointRetained: true,
@@ -746,6 +767,9 @@ async function finalizeRerollCheckpoint(
       error: "重 Roll 完成标记尚未确认落盘，检查点已恢复。",
       persistence: completionPersistence,
     };
+  }
+  if (runtime.getCurrentGraph?.() === graph) {
+    runtime.setCurrentGraph(completionGraph);
   }
 
   return {

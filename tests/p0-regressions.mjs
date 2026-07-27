@@ -474,6 +474,7 @@ function createHistoryRecoveryHarness() {
   Date,
   result: null,
   currentGraph: null,
+  activeChatId: "chat-main",
   extractionCount: 0,
   isRecoveringHistory: false,
   chat: [],
@@ -482,6 +483,8 @@ function createHistoryRecoveryHarness() {
   saveGraphToChatCalls: 0,
   saveGraphToChatCallOptions: [],
   saveGraphToChatResults: [],
+  persistDetachedRecoveryGraphCalls: [],
+  persistDetachedRecoveryGraphResults: [],
   refreshPanelCalls: 0,
   renderLimitBlockedCalls: [],
   notices: [],
@@ -524,11 +527,11 @@ function createHistoryRecoveryHarness() {
   getContext() {
     return {
       chat: context.chat,
-      chatId: "chat-main",
+      chatId: context.activeChatId,
     };
   },
-  getCurrentChatId() {
-    return "chat-main";
+  getCurrentChatId(current = context.getContext()) {
+    return current?.chatId || context.activeChatId;
   },
   clampRecoveryStartFloor(chat, floor) {
     return Math.max(0, Number(floor) || 0);
@@ -623,15 +626,19 @@ function createHistoryRecoveryHarness() {
     }
     return 0;
   },
-  updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
+  updateProcessedHistorySnapshot(
+    chat,
+    lastProcessedAssistantFloor,
+    graph = context.currentGraph,
+  ) {
     context.updatedProcessedHistorySnapshot = {
       chatLength: Array.isArray(chat) ? chat.length : 0,
       lastProcessedAssistantFloor,
     };
-    context.currentGraph.historyState ||= {};
-    context.currentGraph.historyState.lastProcessedAssistantFloor =
+    graph.historyState ||= {};
+    graph.historyState.lastProcessedAssistantFloor =
       lastProcessedAssistantFloor;
-    context.currentGraph.historyState.processedMessageHashes =
+    graph.historyState.processedMessageHashes =
       lastProcessedAssistantFloor >= 0
         ? { [lastProcessedAssistantFloor]: `hash-${lastProcessedAssistantFloor}` }
         : {};
@@ -668,9 +675,21 @@ function createHistoryRecoveryHarness() {
       ? context.saveGraphToChatResults.shift()
       : { accepted: true, saved: true };
   },
+  persistDetachedRecoveryGraph(graph, options = {}) {
+    context.persistDetachedRecoveryGraphCalls.push({ graph, options });
+    if (typeof context.persistDetachedRecoveryGraphImpl === "function") {
+      return context.persistDetachedRecoveryGraphImpl(graph, options);
+    }
+    return context.persistDetachedRecoveryGraphResults.length > 0
+      ? context.persistDetachedRecoveryGraphResults.shift()
+      : { accepted: true, saved: true };
+  },
   clearInjectionState() {},
-  assertRecoveryHistoryStillCurrent(_chatId, expectedFingerprint) {
-    if (buildChatHistoryFingerprint(context.chat) === expectedFingerprint) {
+  assertRecoveryHistoryStillCurrent(chatId, expectedFingerprint) {
+    if (
+      context.activeChatId === chatId &&
+      buildChatHistoryFingerprint(context.chat) === expectedFingerprint
+    ) {
       return true;
     }
     throw context.createAbortError("history-changed-during-recovery");
@@ -735,6 +754,8 @@ function createHistoryRecoveryHarness() {
       context.notifyRenderLimitedHistoryRecoveryBlocked(...args),
     prepareVectorStateForReplay: (...args) =>
       context.prepareVectorStateForReplay(...args),
+    persistDetachedRecoveryGraph: (...args) =>
+      context.persistDetachedRecoveryGraph(...args),
     queueMicrotask,
     refreshPanelLiveState: (...args) => context.refreshPanelLiveState(...args),
     replayExtractionFromHistory: (...args) =>
@@ -798,6 +819,7 @@ function createRerollHarness() {
     Date,
     result: null,
     currentGraph: null,
+    activeChatId: "chat-main",
     isExtracting: false,
     extractionCount: 0,
     lastExtractedItems: ["stale-node"],
@@ -811,6 +833,8 @@ function createRerollHarness() {
     saveGraphToChatCalls: 0,
     saveGraphToChatCallOptions: [],
     saveGraphToChatResults: [],
+    persistDetachedRecoveryGraphCalls: [],
+    persistDetachedRecoveryGraphResults: [],
     refreshPanelCalls: 0,
     clearInjectionCalls: 0,
     onManualExtractCalls: 0,
@@ -824,11 +848,11 @@ function createRerollHarness() {
     getContext() {
       return {
         chat: context.chat,
-        chatId: "chat-main",
+        chatId: context.activeChatId,
       };
     },
-    getCurrentChatId() {
-      return "chat-main";
+    getCurrentChatId(current = context.getContext()) {
+      return current?.chatId || context.activeChatId;
     },
     getAssistantTurns(chat = []) {
       return chat.flatMap((message, index) =>
@@ -865,7 +889,8 @@ function createRerollHarness() {
     rollbackAffectedJournals(graph, journals) {
       context.rollbackAffectedJournalsCalls.push({ graph, journals });
       if (context.postRollbackGraph) {
-        context.currentGraph = context.postRollbackGraph;
+        for (const key of Object.keys(graph)) delete graph[key];
+        Object.assign(graph, context.cloneGraphSnapshot(context.postRollbackGraph));
       }
     },
     normalizeGraphRuntimeState(graph) {
@@ -883,19 +908,23 @@ function createRerollHarness() {
     async deleteBackendVectorHashesForRecovery(...args) {
       context.deletedHashesCalls.push(args);
     },
-    updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
+    updateProcessedHistorySnapshot(
+      chat,
+      lastProcessedAssistantFloor,
+      graph = context.currentGraph,
+    ) {
       context.updatedProcessedHistorySnapshot = {
         chatLength: Array.isArray(chat) ? chat.length : 0,
         lastProcessedAssistantFloor,
       };
-      context.currentGraph.historyState ||= {};
-      context.currentGraph.historyState.lastProcessedAssistantFloor =
+      graph.historyState ||= {};
+      graph.historyState.lastProcessedAssistantFloor =
         lastProcessedAssistantFloor;
-      context.currentGraph.historyState.processedMessageHashes =
+      graph.historyState.processedMessageHashes =
         lastProcessedAssistantFloor >= 0
           ? { [lastProcessedAssistantFloor]: `hash-${lastProcessedAssistantFloor}` }
           : {};
-      context.currentGraph.lastProcessedSeq = lastProcessedAssistantFloor;
+      graph.lastProcessedSeq = lastProcessedAssistantFloor;
     },
     pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
       return pruneProcessedMessageHashesFromFloor(graph, fromFloor);
@@ -938,6 +967,15 @@ function createRerollHarness() {
         ? context.saveGraphToChatResults.shift()
         : { accepted: true, saved: true };
     },
+    persistDetachedRecoveryGraph(graph, options = {}) {
+      context.persistDetachedRecoveryGraphCalls.push({ graph, options });
+      if (typeof context.persistDetachedRecoveryGraphImpl === "function") {
+        return context.persistDetachedRecoveryGraphImpl(graph, options);
+      }
+      return context.persistDetachedRecoveryGraphResults.length > 0
+        ? context.persistDetachedRecoveryGraphResults.shift()
+        : { accepted: true, saved: true };
+    },
     refreshPanelLiveState() {
       context.refreshPanelCalls += 1;
     },
@@ -978,8 +1016,11 @@ function createRerollHarness() {
     createUiStatus,
     onRerollController,
     isAbortError: (e) => e?.name === "AbortError",
-    assertRecoveryHistoryStillCurrent(_chatId, expectedFingerprint) {
-      if (buildChatHistoryFingerprint(context.chat) === expectedFingerprint) {
+    assertRecoveryHistoryStillCurrent(chatId, expectedFingerprint) {
+      if (
+        context.activeChatId === chatId &&
+        buildChatHistoryFingerprint(context.chat) === expectedFingerprint
+      ) {
         return true;
       }
       const error = new Error("history-changed-during-reroll");
@@ -1028,6 +1069,8 @@ function createRerollHarness() {
     onManualExtract: (...args) => context.onManualExtract(...args),
     prepareVectorStateForReplay: (...args) =>
       context.prepareVectorStateForReplay(...args),
+    persistDetachedRecoveryGraph: (...args) =>
+      context.persistDetachedRecoveryGraph(...args),
     pruneProcessedMessageHashesFromFloor: (...args) =>
       context.pruneProcessedMessageHashesFromFloor(...args),
     refreshPanelLiveState: (...args) => context.refreshPanelLiveState(...args),
@@ -8185,7 +8228,8 @@ async function testRerollUsesBatchBoundaryRollbackAndPersistsState() {
   assert.equal(harness.deletedHashesCalls.length, 1);
   assert.equal(harness.prepareVectorStateCalls.length, 1);
   assert.equal(harness.prepareVectorStateCalls[0][2].skipBackendPurge, true);
-  assert.equal(harness.saveGraphToChatCalls, 4);
+  assert.equal(harness.saveGraphToChatCalls, 1);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 2);
   assert.equal(harness.refreshPanelCalls, 2);
   assert.equal(harness.clearInjectionCalls, 1);
   assert.equal(harness.onManualExtractCalls, 1);
@@ -8298,6 +8342,177 @@ async function testRerollDoesNotMutateBeforeCheckpointPersists() {
   assert.equal(harness.onManualExtractCalls, 0);
   assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 3);
   assert.equal(harness.saveGraphToChatCallOptions[0]?.awaitDurable, true);
+}
+
+async function testRerollDoesNotPublishRejectedRollbackCandidate() {
+  const harness = await createRerollHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  const originalGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: { 1: "hash-1", 3: "hash-3" },
+      extractionCount: 2,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 3,
+  };
+  harness.currentGraph = originalGraph;
+  harness.postRollbackGraph = {
+    nodes: [{ id: "rolled-back-node" }],
+    historyState: { lastProcessedAssistantFloor: 1, extractionCount: 1 },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "journal-1" }],
+  });
+  harness.persistDetachedRecoveryGraphResults.push({
+    accepted: false,
+    reason: "candidate-write-failed",
+  });
+
+  const result = await harness.result.onReroll({ fromFloor: 3 });
+
+  assert.equal(result.success, false);
+  assert.equal(result.resultCode, "reroll.rollback.persist-failed");
+  assert.equal(result.rollbackPerformed, false);
+  assert.equal(harness.currentGraph, originalGraph);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "original-node");
+  assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 3);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 1);
+  assert.notEqual(
+    harness.persistDetachedRecoveryGraphCalls[0].graph,
+    harness.currentGraph,
+  );
+  assert.equal(
+    harness.persistDetachedRecoveryGraphCalls[0].graph.nodes[0]?.id,
+    "rolled-back-node",
+  );
+  assert.equal(harness.deletedHashesCalls.length, 0);
+  assert.equal(harness.onManualExtractCalls, 0);
+}
+
+async function testRerollLateAcceptedCandidateDoesNotOverwriteNewChat() {
+  const harness = await createRerollHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "chat-a-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: { 1: "hash-1", 3: "hash-3" },
+      extractionCount: 2,
+    },
+    vectorIndexState: { collectionId: "chat-a-col" },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 3,
+  };
+  harness.postRollbackGraph = {
+    nodes: [{ id: "chat-a-rollback-node" }],
+    historyState: { lastProcessedAssistantFloor: 1, extractionCount: 1 },
+    vectorIndexState: { collectionId: "chat-a-col" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "journal-1" }],
+  });
+  const chatBGraph = {
+    nodes: [{ id: "chat-b-node" }],
+    historyState: { lastProcessedAssistantFloor: -1, extractionCount: 0 },
+    vectorIndexState: { collectionId: "chat-b-col" },
+    batchJournal: [],
+    lastProcessedSeq: -1,
+  };
+  harness.persistDetachedRecoveryGraphImpl = async () => {
+    harness.activeChatId = "chat-b";
+    harness.chat = [{ is_user: true, mes: "chat b" }];
+    harness.currentGraph = chatBGraph;
+    return { accepted: true, saved: true };
+  };
+
+  const result = await harness.result.onReroll({ fromFloor: 3 });
+
+  assert.equal(result.success, false);
+  assert.equal(result.resultCode, "reroll.rollback.aborted");
+  assert.equal(result.rollbackPerformed, false);
+  assert.equal(harness.currentGraph, chatBGraph);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "chat-b-node");
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 1);
+  assert.equal(harness.deletedHashesCalls.length, 0);
+  assert.equal(harness.onManualExtractCalls, 0);
+}
+
+async function testRerollLateCompletionDoesNotOverwriteNewChat() {
+  const harness = await createRerollHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+    { is_user: true, mes: "u2" },
+    { is_user: false, mes: "a2" },
+  ];
+  harness.currentGraph = {
+    nodes: [{ id: "chat-a-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 3,
+      processedMessageHashes: { 1: "hash-1", 3: "hash-3" },
+      extractionCount: 2,
+    },
+    vectorIndexState: { collectionId: "chat-a-col" },
+    batchJournal: [{ id: "journal-1" }],
+    lastProcessedSeq: 3,
+  };
+  harness.postRollbackGraph = {
+    nodes: [{ id: "chat-a-rollback-node" }],
+    historyState: { lastProcessedAssistantFloor: 1, extractionCount: 1 },
+    vectorIndexState: { collectionId: "chat-a-col" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.findJournalRecoveryPointImpl = () => ({
+    path: "reverse-journal",
+    affectedBatchCount: 1,
+    affectedJournals: [{ id: "journal-1" }],
+  });
+  const chatBGraph = {
+    nodes: [{ id: "chat-b-node" }],
+    historyState: { lastProcessedAssistantFloor: -1, extractionCount: 0 },
+    vectorIndexState: { collectionId: "chat-b-col" },
+    batchJournal: [],
+    lastProcessedSeq: -1,
+  };
+  harness.persistDetachedRecoveryGraphImpl = async () => {
+    if (harness.persistDetachedRecoveryGraphCalls.length === 2) {
+      harness.activeChatId = "chat-b";
+      harness.chat = [{ is_user: true, mes: "chat b" }];
+      harness.currentGraph = chatBGraph;
+    }
+    return { accepted: true, saved: true };
+  };
+
+  const result = await harness.result.onReroll({ fromFloor: 3 });
+
+  assert.equal(result.success, true);
+  assert.equal(harness.currentGraph, chatBGraph);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "chat-b-node");
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 2);
+  assert.equal(harness.onManualExtractCalls, 1);
 }
 
 async function testRerollAbortRestoresTransactionStartGraph() {
@@ -8497,6 +8712,58 @@ async function testHistoryRecoveryDoesNotMutateBeforeCheckpointPersists() {
   assert.equal(harness.saveGraphToChatCallOptions[0]?.awaitDurable, true);
 }
 
+async function testHistoryRecoveryDoesNotPublishRejectedBaseCandidate() {
+  const harness = await createHistoryRecoveryHarness();
+  harness.chat = [
+    { is_user: true, mes: "u1" },
+    { is_user: false, mes: "a1" },
+  ];
+  const originalGraph = {
+    nodes: [{ id: "original-node" }],
+    historyState: {
+      lastProcessedAssistantFloor: 1,
+      processedMessageHashes: { 1: "hash-1" },
+      historyDirtyFrom: 1,
+      lastMutationSource: "message-edited",
+      extractionCount: 1,
+    },
+    vectorIndexState: { collectionId: "col-1" },
+    batchJournal: [],
+    lastProcessedSeq: 1,
+  };
+  harness.currentGraph = originalGraph;
+  let replayCalls = 0;
+  harness.replayExtractionFromHistoryImpl = async () => {
+    replayCalls += 1;
+    return 0;
+  };
+  harness.persistDetachedRecoveryGraphResults.push({
+    accepted: false,
+    reason: "candidate-write-failed",
+  });
+
+  const result = await harness.result.recoverFromHistoryMutation(
+    "message-edited",
+  );
+
+  assert.equal(result, false);
+  assert.equal(harness.currentGraph, originalGraph);
+  assert.equal(harness.currentGraph.nodes[0]?.id, "original-node");
+  assert.equal(
+    harness.currentGraph.historyState.lastRecoveryResult.resultCode,
+    "history.recovery.base-persist-failed",
+  );
+  assert.equal(harness.saveGraphToChatCalls, 1);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 1);
+  assert.notEqual(
+    harness.persistDetachedRecoveryGraphCalls[0].graph,
+    harness.currentGraph,
+  );
+  assert.equal(harness.prepareVectorStateCalls.length, 1);
+  assert.equal(harness.prepareVectorStateCalls[0][2].skipBackendPurge, true);
+  assert.equal(replayCalls, 0);
+}
+
 async function testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails() {
   const harness = await createHistoryRecoveryHarness();
   harness.chat = [
@@ -8520,11 +8787,10 @@ async function testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails() {
     harness.currentGraph.lastProcessedSeq = 1;
     return 1;
   };
-  harness.saveGraphToChatResults.push(
-    { accepted: true },
+  harness.saveGraphToChatResults.push({ accepted: true });
+  harness.persistDetachedRecoveryGraphResults.push(
     { accepted: true },
     { accepted: false, reason: "clear-write-failed" },
-    { accepted: true },
   );
 
   const result = await harness.result.recoverFromHistoryMutation(
@@ -8532,7 +8798,8 @@ async function testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails() {
   );
 
   assert.equal(result, false);
-  assert.equal(harness.saveGraphToChatCalls, 4);
+  assert.equal(harness.saveGraphToChatCalls, 1);
+  assert.equal(harness.persistDetachedRecoveryGraphCalls.length, 2);
   assert.equal(harness.currentGraph.historyState.historyDirtyFrom, 1);
   assert.equal(
     harness.currentGraph.historyState.lastRecoveryResult.resultCode,
@@ -10029,12 +10296,16 @@ await testHistoryRecoveryFullRebuildStillWarnsUser();
 await testHistoryRecoveryAbortRetainsRecoveryCheckpoint();
 await testHistoryRecoveryAbortsWhenSameChatChangesDuringAwait();
 await testHistoryRecoveryDoesNotMutateBeforeCheckpointPersists();
+await testHistoryRecoveryDoesNotPublishRejectedBaseCandidate();
 await testHistoryRecoveryReinstatesCheckpointWhenClearPersistFails();
 await testHistoryRecoveryFallbackFullRebuildCarriesResultCode();
 await testHistoryRecoverySuccessRestoresProcessedHashesAfterReplay();
 await testHistoryRecoveryFailureCarriesResultCode();
 await testRerollRejectsInvalidReverseJournalPlanFailClosed();
 await testRerollDoesNotMutateBeforeCheckpointPersists();
+await testRerollDoesNotPublishRejectedRollbackCandidate();
+await testRerollLateAcceptedCandidateDoesNotOverwriteNewChat();
+await testRerollLateCompletionDoesNotOverwriteNewChat();
 await testRerollAbortRestoresTransactionStartGraph();
 await testRerollRejectsMissingRecoveryPoint();
 await testOverswipeWaitsForReplacementWithoutDiscardingParentRecall();

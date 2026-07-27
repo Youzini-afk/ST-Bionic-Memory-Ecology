@@ -468,3 +468,95 @@ export function pruneProcessedMessageHashesFromFloor(graph, fromFloor) {
     }
   }
 }
+
+export function prepareGraphVectorStateForReplay(
+  graph,
+  {
+    backend = false,
+    fullReset = false,
+    skipBackendPurge = false,
+    resetBackendMappings = !skipBackendPurge,
+  } = {},
+) {
+  const vectorState = graph?.vectorIndexState;
+  if (!vectorState) return;
+
+  if (backend) {
+    if (resetBackendMappings) {
+      vectorState.hashToNodeId = {};
+      vectorState.nodeToHash = {};
+    }
+    vectorState.dirty = true;
+    vectorState.dirtyReason ||= skipBackendPurge
+      ? "history-recovery-replay"
+      : "history-recovery-reset";
+    if (fullReset) {
+      vectorState.replayRequiredNodeIds = [];
+      vectorState.pendingRepairFromFloor = 0;
+    }
+    vectorState.lastWarning = skipBackendPurge
+      ? "历史恢复后需要修复受影响后缀的后端向量索引"
+      : "历史恢复后需要重建后端向量索引";
+    return;
+  }
+
+  if (!fullReset) return;
+  vectorState.hashToNodeId = {};
+  vectorState.nodeToHash = {};
+  vectorState.replayRequiredNodeIds = [];
+  vectorState.dirty = true;
+  vectorState.dirtyReason = "history-recovery-reset";
+  vectorState.pendingRepairFromFloor = 0;
+  vectorState.lastWarning = "历史恢复后需要重嵌当前聊天向量";
+}
+
+export function applyRecoveryPlanToGraphVectorState(
+  graph,
+  recoveryPlan,
+  dirtyFallbackFloor = null,
+) {
+  const vectorState = graph?.vectorIndexState;
+  if (!vectorState) return;
+  const replayRequiredNodeIds = new Set(
+    Array.isArray(vectorState.replayRequiredNodeIds)
+      ? vectorState.replayRequiredNodeIds.filter(Boolean)
+      : [],
+  );
+  for (const nodeId of recoveryPlan?.replayRequiredNodeIds || []) {
+    if (nodeId) replayRequiredNodeIds.add(nodeId);
+  }
+
+  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
+    ? dirtyFallbackFloor
+    : graph.historyState?.historyDirtyFrom;
+  const pendingRepairFromFloor = Number.isFinite(
+    recoveryPlan?.pendingRepairFromFloor,
+  )
+    ? recoveryPlan.pendingRepairFromFloor
+    : Number.isFinite(fallbackFloor)
+      ? fallbackFloor
+      : null;
+
+  vectorState.replayRequiredNodeIds = [...replayRequiredNodeIds];
+  vectorState.dirty = true;
+  vectorState.dirtyReason =
+    recoveryPlan?.dirtyReason ||
+    vectorState.dirtyReason ||
+    "history-recovery-replay";
+  vectorState.pendingRepairFromFloor = pendingRepairFromFloor;
+  vectorState.lastIntegrityIssue =
+    recoveryPlan?.valid === false
+      ? {
+          scope: "history-recovery-plan",
+          reason: String(recoveryPlan.invalidReason || "invalid-recovery-plan"),
+          dirtyFallbackFloor: Number.isFinite(fallbackFloor)
+            ? fallbackFloor
+            : null,
+          pendingRepairFromFloor,
+          at: Date.now(),
+        }
+      : null;
+  vectorState.lastWarning = recoveryPlan?.legacyGapFallback
+    ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
+    : "历史恢复后需要修复受影响后缀的向量索引";
+}

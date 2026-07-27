@@ -1199,6 +1199,69 @@ export async function persistExtractionBatchResultImpl(runtime, {
 
 }
 
+export async function persistDetachedGraphSnapshotImpl(
+  runtime,
+  { graph = null, reason = "detached-graph-snapshot", context = null } = {},
+) {
+  const activeContext = context || runtime.getContext?.();
+  if (!activeContext || !graph || typeof graph !== "object") {
+    return runtime.buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-context-or-graph",
+      storageTier: "none",
+    });
+  }
+
+  const chatId = runtime.resolvePersistenceChatId(activeContext, graph);
+  if (!chatId) {
+    return runtime.buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: "missing-chat-id",
+      storageTier: "none",
+    });
+  }
+
+  const revision = runtime.allocateRequestedPersistRevision(0, graph);
+  try {
+    return (
+      (await runtime.persistGraphToConfiguredDurableTier(activeContext, graph, {
+        chatId,
+        revision,
+        reason,
+        lastProcessedAssistantFloor: Number.isFinite(
+          Number(graph?.historyState?.lastProcessedAssistantFloor),
+        )
+          ? Number(graph.historyState.lastProcessedAssistantFloor)
+          : null,
+        graphSnapshot: graph,
+        chatStateTarget: runtime.resolveCurrentChatStateTarget?.(activeContext),
+        graphDetached: true,
+      })) ||
+      runtime.buildGraphPersistResult({
+        saved: false,
+        accepted: false,
+        reason: `${reason}:primary-not-accepted`,
+        revision,
+        storageTier: "none",
+      })
+    );
+  } catch (error) {
+    return runtime.buildGraphPersistResult({
+      saved: false,
+      blocked: true,
+      accepted: false,
+      reason: String(error?.code || `${reason}:primary-failed`),
+      revision,
+      storageTier: "none",
+      error,
+    });
+  }
+}
+
 export function syncGraphLoadFromLiveContextImpl(runtime, options = {}) {
   const graphPersistenceState = new Proxy({}, {
     get(_target, key) {

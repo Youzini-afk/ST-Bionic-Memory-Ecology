@@ -74,11 +74,13 @@ import {
   reducePersistenceStatePatch,
 } from "./sync/persistence-reducer.js";
 import {
+  applyRecoveryPlanToGraphVectorState,
   buildExtractionMessages,
   clampRecoveryStartFloor,
   getAssistantTurns,
   isAssistantChatMessage,
   isSystemMessageForExtraction,
+  prepareGraphVectorStateForReplay,
   pruneProcessedMessageHashesFromFloor,
   resolveDirtyFloorFromMutationMeta,
   rollbackAffectedJournals,
@@ -370,6 +372,7 @@ import {
   loadGraphFromChatImpl,
   maybeCaptureGraphShadowSnapshotImpl,
   onRebuildLocalCacheFromLukerSidecarImpl,
+  persistDetachedGraphSnapshotImpl,
   persistExtractionBatchResultImpl,
   saveGraphToChatImpl,
   shouldUseAuthorityGraphStoreImpl,
@@ -12936,6 +12939,13 @@ async function persistExtractionBatchResult(options = {}) {
   );
 }
 
+async function persistDetachedRecoveryGraph(graph, options = {}) {
+  return await persistDetachedGraphSnapshotImpl(createGraphLoadPersistRuntime(), {
+    graph,
+    ...options,
+  });
+}
+
 function scheduleGraphLoadRetry(
   chatId,
   reason = "metadata-pending",
@@ -13639,10 +13649,15 @@ function markVectorStateDirty(reason = "向量状态已标记为待重建") {
   markGraphVectorStateDirty(conversationWorkspace.graph, reason);
 }
 
-function updateProcessedHistorySnapshot(chat, lastProcessedAssistantFloor) {
-  ensureCurrentGraphRuntimeState();
+function updateProcessedHistorySnapshot(
+  chat,
+  lastProcessedAssistantFloor,
+  graph = conversationWorkspace.graph,
+) {
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) ensureCurrentGraphRuntimeState();
   applyProcessedHistorySnapshotToGraph(
-    conversationWorkspace.graph,
+    graph,
     chat,
     lastProcessedAssistantFloor,
   );
@@ -15634,15 +15649,18 @@ function inspectHistoryMutation(
   return detection;
 }
 
-async function purgeCurrentVectorCollection(signal = undefined) {
-  if (!conversationWorkspace.graph?.vectorIndexState?.collectionId) return;
+async function purgeCurrentVectorCollection(
+  signal = undefined,
+  graph = conversationWorkspace.graph,
+) {
+  if (!graph?.vectorIndexState?.collectionId) return;
 
   const response = await fetchLocalWithTimeout("/api/vector/purge", {
     method: "POST",
     headers: getRequestHeaders(),
     signal,
     body: JSON.stringify({
-      collectionId: conversationWorkspace.graph.vectorIndexState.collectionId,
+      collectionId: graph.vectorIndexState.collectionId,
     }),
   });
 
@@ -15655,50 +15673,41 @@ async function purgeCurrentVectorCollection(signal = undefined) {
 async function prepareVectorStateForReplay(
   fullReset = false,
   signal = undefined,
-  { skipBackendPurge = false } = {},
+  {
+    skipBackendPurge = false,
+    resetBackendMappings = !skipBackendPurge,
+    graph = conversationWorkspace.graph,
+  } = {},
 ) {
-  ensureCurrentGraphRuntimeState();
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) {
+    ensureCurrentGraphRuntimeState();
+  } else {
+    normalizeGraphRuntimeState(
+      graph,
+      graph?.historyState?.chatId || getCurrentChatId(),
+    );
+  }
   const config = getEmbeddingConfig();
-
-  if (isBackendVectorConfig(config)) {
+  const backend = isBackendVectorConfig(config);
+  if (backend) {
     if (!skipBackendPurge) {
       try {
-        await purgeCurrentVectorCollection(signal);
+        await purgeCurrentVectorCollection(signal, graph);
       } catch (error) {
         if (isAbortError(error)) {
           throw error;
         }
         console.warn("[ST-BME] 清理后端向量索引失败，继续本地恢复:", error);
       }
-      conversationWorkspace.graph.vectorIndexState.hashToNodeId = {};
-      conversationWorkspace.graph.vectorIndexState.nodeToHash = {};
     }
-    conversationWorkspace.graph.vectorIndexState.dirty = true;
-    if (!conversationWorkspace.graph.vectorIndexState.dirtyReason) {
-      conversationWorkspace.graph.vectorIndexState.dirtyReason = skipBackendPurge
-        ? "history-recovery-replay"
-        : "history-recovery-reset";
-    }
-    if (fullReset) {
-      conversationWorkspace.graph.vectorIndexState.replayRequiredNodeIds = [];
-      conversationWorkspace.graph.vectorIndexState.pendingRepairFromFloor = 0;
-    }
-    conversationWorkspace.graph.vectorIndexState.lastWarning = skipBackendPurge
-      ? "历史恢复后需要修复受影响后缀的后端向量索引"
-      : "历史恢复后需要重建后端向量索引";
-    return;
   }
-
-  if (fullReset) {
-    conversationWorkspace.graph.vectorIndexState.hashToNodeId = {};
-    conversationWorkspace.graph.vectorIndexState.nodeToHash = {};
-    conversationWorkspace.graph.vectorIndexState.replayRequiredNodeIds = [];
-    conversationWorkspace.graph.vectorIndexState.dirty = true;
-    conversationWorkspace.graph.vectorIndexState.dirtyReason = "history-recovery-reset";
-    conversationWorkspace.graph.vectorIndexState.pendingRepairFromFloor = 0;
-    conversationWorkspace.graph.vectorIndexState.lastWarning =
-      "历史恢复后需要重嵌当前聊天向量";
-  }
+  prepareGraphVectorStateForReplay(graph, {
+    backend,
+    fullReset,
+    skipBackendPurge,
+    resetBackendMappings,
+  });
 }
 
 async function executeExtractionBatch({
@@ -15823,52 +15832,22 @@ async function replayExtractionFromHistory(
 function applyRecoveryPlanToVectorState(
   recoveryPlan,
   dirtyFallbackFloor = null,
+  graph = conversationWorkspace.graph,
 ) {
-  ensureCurrentGraphRuntimeState();
-  const vectorState = conversationWorkspace.graph.vectorIndexState;
-  const replayRequiredNodeIds = new Set(
-    Array.isArray(vectorState.replayRequiredNodeIds)
-      ? vectorState.replayRequiredNodeIds.filter(Boolean)
-      : [],
-  );
-
-  for (const nodeId of recoveryPlan?.replayRequiredNodeIds || []) {
-    if (nodeId) replayRequiredNodeIds.add(nodeId);
+  if (!graph) return;
+  if (graph === conversationWorkspace.graph) {
+    ensureCurrentGraphRuntimeState();
+  } else {
+    normalizeGraphRuntimeState(
+      graph,
+      graph?.historyState?.chatId || getCurrentChatId(),
+    );
   }
-
-  const fallbackFloor = Number.isFinite(dirtyFallbackFloor)
-    ? dirtyFallbackFloor
-    : conversationWorkspace.graph.historyState?.historyDirtyFrom;
-  const pendingRepairFromFloor = Number.isFinite(
-    recoveryPlan?.pendingRepairFromFloor,
-  )
-    ? recoveryPlan.pendingRepairFromFloor
-    : Number.isFinite(fallbackFloor)
-      ? fallbackFloor
-      : null;
-
-  vectorState.replayRequiredNodeIds = [...replayRequiredNodeIds];
-  vectorState.dirty = true;
-  vectorState.dirtyReason =
-    recoveryPlan?.dirtyReason ||
-    vectorState.dirtyReason ||
-    "history-recovery-replay";
-  vectorState.pendingRepairFromFloor = pendingRepairFromFloor;
-  vectorState.lastIntegrityIssue =
-    recoveryPlan?.valid === false
-      ? {
-          scope: "history-recovery-plan",
-          reason: String(recoveryPlan.invalidReason || "invalid-recovery-plan"),
-          dirtyFallbackFloor: Number.isFinite(fallbackFloor)
-            ? fallbackFloor
-            : null,
-          pendingRepairFromFloor,
-          at: Date.now(),
-        }
-      : null;
-  vectorState.lastWarning = recoveryPlan?.legacyGapFallback
-    ? "历史恢复检测到 legacy-gap，向量索引需按受影响后缀修复"
-    : "历史恢复后需要修复受影响后缀的向量索引";
+  applyRecoveryPlanToGraphVectorState(
+    graph,
+    recoveryPlan,
+    dirtyFallbackFloor,
+  );
 }
 
 async function rollbackGraphForReroll(targetFloor, context = getContext()) {
@@ -15891,6 +15870,7 @@ async function rollbackGraphForReroll(targetFloor, context = getContext()) {
       isBackendVectorConfig,
       markHistoryDirty,
       normalizeGraphRuntimeState,
+      persistDetachedRecoveryGraph,
       prepareVectorStateForReplay,
       pruneProcessedMessageHashesFromFloor,
       refreshPanelLiveState,
@@ -16042,6 +16022,7 @@ async function recoverHistoryIfNeeded(trigger = "history-recovery") {
       maybeResumePendingAutoExtraction,
       normalizeGraphRuntimeState,
       notifyRenderLimitedHistoryRecoveryBlocked,
+      persistDetachedRecoveryGraph,
       prepareVectorStateForReplay,
       queueMicrotask: globalThis.queueMicrotask?.bind?.(globalThis),
       refreshPanelLiveState,
@@ -17425,6 +17406,7 @@ async function onExtractionTask(options = {}) {
       buildRecoveryResult,
       clampInt,
       clearHistoryDirty,
+      cloneGraphSnapshot,
       console,
       createEmptyGraph,
       ensureGraphMutationReady,
@@ -17444,6 +17426,7 @@ async function onExtractionTask(options = {}) {
       markHistoryDirty,
       normalizeGraphRuntimeState,
       onManualExtract,
+      persistDetachedRecoveryGraph,
       recoverHistoryIfNeeded,
       refreshPanelLiveState,
       retryPendingGraphPersist,
@@ -17470,6 +17453,7 @@ async function onReroll({ fromFloor } = {}) {
       console,
       buildRecoveryResult,
       clearHistoryDirty,
+      cloneGraphSnapshot,
       ensureGraphMutationReady,
       getAssistantTurns,
       getContext,
@@ -17481,10 +17465,15 @@ async function onReroll({ fromFloor } = {}) {
       getLastProcessedAssistantFloor,
       isAbortError,
       markHistoryDirty,
+      normalizeGraphRuntimeState,
       onManualExtract,
+      persistDetachedRecoveryGraph,
       refreshPanelLiveState,
       rollbackGraphForReroll,
       saveGraphToChat,
+      setCurrentGraph: (graph) => {
+        conversationWorkspace.graph = graph;
+      },
       setLastExtractionStatus,
       setRuntimeStatus,
       toastr,

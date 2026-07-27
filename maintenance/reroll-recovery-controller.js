@@ -8,6 +8,28 @@ async function persistRecoveryState(saveGraphToChat, reason) {
   }
 }
 
+async function persistDetachedRecoveryState(
+  persistDetachedRecoveryGraph,
+  graph,
+  reason,
+  context,
+) {
+  if (typeof persistDetachedRecoveryGraph !== "function") {
+    return {
+      accepted: false,
+      blocked: true,
+      reason: "detached-recovery-persistence-unavailable",
+    };
+  }
+  try {
+    return await Promise.resolve(
+      persistDetachedRecoveryGraph(graph, { reason, context }),
+    );
+  } catch (error) {
+    return { accepted: false, error };
+  }
+}
+
 export async function rollbackGraphForRerollController(
   runtime,
   { targetFloor, context = runtime.getContext?.() } = {},
@@ -30,6 +52,7 @@ export async function rollbackGraphForRerollController(
     isBackendVectorConfig,
     markHistoryDirty,
     normalizeGraphRuntimeState,
+    persistDetachedRecoveryGraph,
     prepareVectorStateForReplay,
     pruneProcessedMessageHashesFromFloor,
     refreshPanelLiveState,
@@ -53,6 +76,9 @@ export async function rollbackGraphForRerollController(
     assertRecoveryHistoryStillCurrent(chatId, historyFingerprint, label);
   const rerollStartGraph = cloneGraphSnapshot(currentGraph);
   let checkpointAccepted = false;
+  let candidateAccepted = false;
+  let candidatePublished = false;
+  let effectiveFromFloor = null;
   const buildRerollFailure = (
     recoveryPath,
     error,
@@ -95,6 +121,66 @@ export async function rollbackGraphForRerollController(
   const config = getEmbeddingConfig();
   const recoveryPath = recoveryPoint.path || "unknown";
   const affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
+  let recoveryPlan = null;
+  if (recoveryPath === "reverse-journal") {
+    recoveryPlan = buildReverseJournalRecoveryPlan(
+      recoveryPoint.affectedJournals,
+      targetFloor,
+    );
+    if (recoveryPlan?.valid === false) {
+      const invalidReason = String(
+        recoveryPlan.invalidReason || "unknown",
+      ).trim();
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+        "reroll-rollback-rejected",
+        {
+          fromFloor: targetFloor,
+          effectiveFromFloor: null,
+          path: "reverse-journal",
+          affectedBatchCount,
+          detectionSource: "manual-reroll",
+          reason: `回滚计划完整性校验失败: ${invalidReason}`,
+          debugReason: `reroll-rollback-plan-invalid:${invalidReason}`,
+          resultCode: "reroll.rollback.plan-invalid",
+          invalidReason,
+        },
+      );
+      saveGraphToChat({ reason: "reroll-rollback-rejected" });
+      refreshPanelLiveState();
+      return buildRerollFailure(
+        "reverse-journal-rejected",
+        `回滚计划完整性校验失败: ${invalidReason}`,
+        {
+          affectedBatchCount,
+          resultCode: "reroll.rollback.plan-invalid",
+        },
+      );
+    }
+  } else if (recoveryPath !== "legacy-snapshot") {
+    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+      "reroll-rollback-rejected",
+      {
+        fromFloor: targetFloor,
+        effectiveFromFloor: null,
+        path: recoveryPath,
+        affectedBatchCount,
+        detectionSource: "manual-reroll",
+        reason: `不支持的回滚路径: ${recoveryPath}`,
+        debugReason: `reroll-rollback-unsupported:${recoveryPath}`,
+        resultCode: "reroll.rollback.path-unsupported",
+      },
+    );
+    saveGraphToChat({ reason: "reroll-rollback-rejected" });
+    refreshPanelLiveState();
+    return buildRerollFailure(
+      recoveryPath,
+      `不支持的回滚路径: ${recoveryPath}`,
+      {
+        affectedBatchCount,
+        resultCode: "reroll.rollback.path-unsupported",
+      },
+    );
+  }
   const beginRerollCheckpoint = async () => {
     assertHistoryCurrent("reroll-checkpoint-start");
     markHistoryDirty(
@@ -136,72 +222,23 @@ export async function rollbackGraphForRerollController(
   };
 
   try {
-  if (recoveryPath === "reverse-journal") {
-    const recoveryPlan = buildReverseJournalRecoveryPlan(
-      recoveryPoint.affectedJournals,
-      targetFloor,
-    );
-    if (recoveryPlan?.valid === false) {
-      const invalidReason = String(
-        recoveryPlan.invalidReason || "unknown",
-      ).trim();
-      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-        "reroll-rollback-rejected",
-        {
-          fromFloor: targetFloor,
-          effectiveFromFloor: null,
-          path: "reverse-journal",
-          affectedBatchCount,
-          detectionSource: "manual-reroll",
-          reason: `回滚计划完整性校验失败: ${invalidReason}`,
-          debugReason: `reroll-rollback-plan-invalid:${invalidReason}`,
-          resultCode: "reroll.rollback.plan-invalid",
-          invalidReason,
-        },
-      );
-      saveGraphToChat({ reason: "reroll-rollback-rejected" });
-      refreshPanelLiveState();
-      return buildRerollFailure(
-        "reverse-journal-rejected",
-        `回滚计划完整性校验失败: ${invalidReason}`,
-        {
-          affectedBatchCount,
-          resultCode: "reroll.rollback.plan-invalid",
-        },
-      );
-    }
     const checkpointFailure = await beginRerollCheckpoint();
     if (checkpointFailure) {
       refreshPanelLiveState();
       return checkpointFailure;
     }
-    rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
-    currentGraph = getCurrentGraph();
-    currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
-    setCurrentGraph(currentGraph);
-    setExtractionCount(currentGraph.historyState.extractionCount || 0);
-    applyRecoveryPlanToVectorState(recoveryPlan, targetFloor);
+    let workingGraph =
+      recoveryPath === "legacy-snapshot"
+        ? normalizeGraphRuntimeState(
+            cloneGraphSnapshot(recoveryPoint.snapshotBefore),
+            chatId,
+          )
+        : normalizeGraphRuntimeState(cloneGraphSnapshot(currentGraph), chatId);
 
-    if (
-      isBackendVectorConfig(config) &&
-      recoveryPlan.backendDeleteHashes.length > 0
-    ) {
-      setRuntimeStatus(
-        "重新提取准备中",
-        `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
-        "running",
-      );
-      assertHistoryCurrent("reroll-pre-vector");
-      await tryDeleteBackendVectorHashesForRecovery(
-        currentGraph.vectorIndexState.collectionId,
-        config,
-        recoveryPlan.backendDeleteHashes,
-        undefined,
-        {
-          source: "reroll",
-        },
-      );
-      assertHistoryCurrent("reroll-post-vector");
+    if (recoveryPath === "reverse-journal") {
+      rollbackAffectedJournals(workingGraph, recoveryPoint.affectedJournals);
+      workingGraph = normalizeGraphRuntimeState(workingGraph, chatId);
+      applyRecoveryPlanToVectorState(recoveryPlan, targetFloor, workingGraph);
     }
 
     if (isBackendVectorConfig(config)) {
@@ -213,149 +250,148 @@ export async function rollbackGraphForRerollController(
     }
     assertHistoryCurrent("reroll-pre-prepare");
     await prepareVectorStateForReplay(false, undefined, {
-      skipBackendPurge: isBackendVectorConfig(config),
+      skipBackendPurge: true,
+      resetBackendMappings: recoveryPath === "legacy-snapshot",
+      graph: workingGraph,
     });
     assertHistoryCurrent("reroll-post-prepare");
-  } else if (recoveryPath === "legacy-snapshot") {
-    const checkpointFailure = await beginRerollCheckpoint();
-    if (checkpointFailure) {
-      refreshPanelLiveState();
-      return checkpointFailure;
-    }
-    currentGraph = normalizeGraphRuntimeState(
-      recoveryPoint.snapshotBefore,
-      chatId,
+
+    effectiveFromFloor = Number.isFinite(
+      workingGraph.historyState?.lastProcessedAssistantFloor,
+    )
+      ? workingGraph.historyState.lastProcessedAssistantFloor + 1
+      : 0;
+
+    markHistoryDirty(
+      workingGraph,
+      targetFloor,
+      "manual-reroll",
+      "manual-reroll",
     );
+    workingGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+      "reroll-rollback",
+      {
+        fromFloor: targetFloor,
+        effectiveFromFloor,
+        path: recoveryPath,
+        affectedBatchCount,
+        detectionSource: "manual-reroll",
+        reason: "manual-reroll",
+        resultCode: "reroll.rollback.applied",
+      },
+    );
+    if (
+      chatSnapshot.length > 0 &&
+      Number.isFinite(workingGraph.historyState?.lastProcessedAssistantFloor) &&
+      workingGraph.historyState.lastProcessedAssistantFloor >= 0
+    ) {
+      // Preserve the rolled-back prefix immediately so a failed follow-up
+      // re-extraction does not look like a generic "missing processed hashes"
+      // corruption on the next history integrity check.
+      updateProcessedHistorySnapshot(
+        chatSnapshot,
+        workingGraph.historyState.lastProcessedAssistantFloor,
+        workingGraph,
+      );
+    }
+    pruneProcessedMessageHashesFromFloor(workingGraph, effectiveFromFloor);
+    workingGraph.lastProcessedSeq =
+      workingGraph.historyState?.lastProcessedAssistantFloor ?? -1;
+    workingGraph.vectorIndexState.lastIntegrityIssue = null;
+    assertHistoryCurrent("reroll-pre-rollback-persist");
+    const rollbackPersistence = await persistDetachedRecoveryState(
+      persistDetachedRecoveryGraph,
+      workingGraph,
+      "reroll-rollback-checkpoint",
+      context,
+    );
+
+    if (rollbackPersistence?.accepted !== true) {
+      currentGraph = getCurrentGraph();
+      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
+        "pending-persistence",
+        {
+          fromFloor: targetFloor,
+          effectiveFromFloor,
+          path: recoveryPath,
+          affectedBatchCount,
+          detectionSource: "manual-reroll",
+          reason: "reroll rollback persistence was not accepted",
+          resultCode: "reroll.rollback.persist-failed",
+        },
+      );
+      return buildRerollFailure(
+        recoveryPath,
+        "回滚候选未确认落盘，未发布到当前图谱；检查点已保留。",
+        {
+          affectedBatchCount,
+          rollbackPerformed: false,
+          effectiveFromFloor,
+          resultCode: "reroll.rollback.persist-failed",
+          checkpointRetained: true,
+          persistence: rollbackPersistence,
+        },
+      );
+    }
+
+    candidateAccepted = true;
+    assertHistoryCurrent("reroll-post-rollback-persist");
+    currentGraph = workingGraph;
     setCurrentGraph(currentGraph);
     setExtractionCount(currentGraph.historyState.extractionCount || 0);
-    assertHistoryCurrent("reroll-pre-legacy-prepare");
-    await prepareVectorStateForReplay(false);
-    assertHistoryCurrent("reroll-post-legacy-prepare");
-  } else {
-    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-      "reroll-rollback-rejected",
-      {
-        fromFloor: targetFloor,
-        effectiveFromFloor: null,
-        path: recoveryPath,
-        affectedBatchCount,
-        detectionSource: "manual-reroll",
-        reason: `不支持的回滚路径: ${recoveryPath}`,
-        debugReason: `reroll-rollback-unsupported:${recoveryPath}`,
-        resultCode: "reroll.rollback.path-unsupported",
-      },
-    );
-    saveGraphToChat({ reason: "reroll-rollback-rejected" });
+    candidatePublished = true;
+
+    if (
+      recoveryPath === "reverse-journal" &&
+      isBackendVectorConfig(config) &&
+      recoveryPlan.backendDeleteHashes.length > 0
+    ) {
+      setRuntimeStatus(
+        "重新提取准备中",
+        `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+        "running",
+      );
+      await tryDeleteBackendVectorHashesForRecovery(
+        currentGraph.vectorIndexState.collectionId,
+        config,
+        recoveryPlan.backendDeleteHashes,
+        undefined,
+        { source: "reroll" },
+      );
+      assertHistoryCurrent("reroll-post-vector");
+    } else if (
+      recoveryPath === "legacy-snapshot" &&
+      isBackendVectorConfig(config)
+    ) {
+      await prepareVectorStateForReplay(false, undefined, {
+        skipBackendPurge: false,
+        resetBackendMappings: false,
+        graph: currentGraph,
+      });
+      assertHistoryCurrent("reroll-post-vector");
+    }
     refreshPanelLiveState();
-    return buildRerollFailure(
-      recoveryPath,
-      `不支持的回滚路径: ${recoveryPath}`,
-      {
-        affectedBatchCount,
-        resultCode: "reroll.rollback.path-unsupported",
-      },
-    );
-  }
 
-  const effectiveFromFloor = Number.isFinite(
-    currentGraph.historyState?.lastProcessedAssistantFloor,
-  )
-    ? currentGraph.historyState.lastProcessedAssistantFloor + 1
-    : 0;
-
-  markHistoryDirty(
-    currentGraph,
-    targetFloor,
-    "manual-reroll",
-    "manual-reroll",
-  );
-  currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-    "reroll-rollback",
-    {
-      fromFloor: targetFloor,
+    return {
+      success: true,
+      rollbackPerformed: true,
+      extractionTriggered: false,
+      requestedFloor: targetFloor,
       effectiveFromFloor,
-      path: recoveryPath,
-      affectedBatchCount,
-      detectionSource: "manual-reroll",
-      reason: "manual-reroll",
-      resultCode: "reroll.rollback.applied",
-    },
-  );
-  if (
-    chatSnapshot.length > 0 &&
-    Number.isFinite(currentGraph.historyState?.lastProcessedAssistantFloor) &&
-    currentGraph.historyState.lastProcessedAssistantFloor >= 0
-  ) {
-    // Preserve the rolled-back prefix immediately so a failed follow-up
-    // re-extraction does not look like a generic "missing processed hashes"
-    // corruption on the next history integrity check.
-    updateProcessedHistorySnapshot(
-      chatSnapshot,
-      currentGraph.historyState.lastProcessedAssistantFloor,
-    );
-  }
-  pruneProcessedMessageHashesFromFloor(currentGraph, effectiveFromFloor);
-  currentGraph.lastProcessedSeq =
-    currentGraph.historyState?.lastProcessedAssistantFloor ?? -1;
-  currentGraph.vectorIndexState.lastIntegrityIssue = null;
-  assertHistoryCurrent("reroll-pre-rollback-persist");
-  const rollbackPersistence = await persistRecoveryState(
-    saveGraphToChat,
-    "reroll-rollback-checkpoint",
-  );
-  assertHistoryCurrent("reroll-post-rollback-persist");
-  refreshPanelLiveState();
-
-  if (rollbackPersistence?.accepted !== true) {
-    currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-      "pending-persistence",
-      {
-        fromFloor: targetFloor,
-        effectiveFromFloor,
-        path: recoveryPath,
-        affectedBatchCount,
-        detectionSource: "manual-reroll",
-        reason: "reroll rollback persistence was not accepted",
-        resultCode: "reroll.rollback.persist-failed",
-      },
-    );
-    return buildRerollFailure(
       recoveryPath,
-      "回滚已执行，但持久化未确认；检查点已保留，将在下一次恢复时继续。",
-      {
-        affectedBatchCount,
-        rollbackPerformed: true,
-        effectiveFromFloor,
-        resultCode: "reroll.rollback.persist-failed",
-        checkpointRetained: true,
-        persistence: rollbackPersistence,
-      },
-    );
-  }
-
-  return {
-    success: true,
-    rollbackPerformed: true,
-    extractionTriggered: false,
-    requestedFloor: targetFloor,
-    effectiveFromFloor,
-    recoveryPath,
-    affectedBatchCount,
-    resultCode: "reroll.rollback.applied",
-    checkpointFloor: targetFloor,
-    checkpointRetained: true,
-    persistence: rollbackPersistence,
-    error: "",
-  };
+      affectedBatchCount,
+      resultCode: "reroll.rollback.applied",
+      checkpointFloor: targetFloor,
+      checkpointRetained: true,
+      persistence: rollbackPersistence,
+      error: "",
+    };
   } catch (error) {
     let persistence = null;
     if (checkpointAccepted && getCurrentChatId(getContext()) === chatId) {
-      currentGraph = normalizeGraphRuntimeState(
-        cloneGraphSnapshot(rerollStartGraph),
-        chatId,
-      );
-      setCurrentGraph(currentGraph);
-      setExtractionCount(currentGraph.historyState.extractionCount || 0);
+      currentGraph = candidateAccepted
+        ? normalizeGraphRuntimeState(cloneGraphSnapshot(rerollStartGraph), chatId)
+        : getCurrentGraph();
       const concurrentDetection = detectHistoryMutation(
         getContext()?.chat,
         currentGraph.historyState,
@@ -384,10 +420,33 @@ export async function rollbackGraphForRerollController(
               : "reroll.rollback.failed",
         },
       );
-      persistence = await persistRecoveryState(
-        saveGraphToChat,
-        "reroll-rollback-restored",
-      );
+      if (candidateAccepted) {
+        currentGraph.vectorIndexState.dirty = true;
+        currentGraph.vectorIndexState.dirtyReason =
+          currentGraph.vectorIndexState.dirtyReason ||
+          "history-recovery-compensated";
+        currentGraph.vectorIndexState.lastWarning =
+          "重 Roll 已补偿恢复，向量索引需要修复";
+        persistence = await persistDetachedRecoveryState(
+          persistDetachedRecoveryGraph,
+          currentGraph,
+          "reroll-rollback-restored",
+          context,
+        );
+        if (persistence?.accepted === true) {
+          setCurrentGraph(currentGraph);
+          setExtractionCount(currentGraph.historyState.extractionCount || 0);
+          candidateAccepted = false;
+          candidatePublished = false;
+        } else {
+          currentGraph = getCurrentGraph();
+        }
+      } else {
+        persistence = await persistRecoveryState(
+          saveGraphToChat,
+          "reroll-rollback-restored",
+        );
+      }
     }
     refreshPanelLiveState();
     return buildRerollFailure(
@@ -399,7 +458,9 @@ export async function rollbackGraphForRerollController(
           error?.name === "AbortError"
             ? "reroll.rollback.aborted"
             : "reroll.rollback.failed",
-        checkpointRetained: checkpointAccepted,
+        rollbackPerformed: candidatePublished,
+        effectiveFromFloor,
+        checkpointRetained: checkpointAccepted || candidateAccepted,
         persistence,
       },
     );
@@ -443,6 +504,7 @@ export async function recoverHistoryIfNeededController(
     maybeResumePendingAutoExtraction,
     normalizeGraphRuntimeState,
     notifyRenderLimitedHistoryRecoveryBlocked,
+    persistDetachedRecoveryGraph,
     prepareVectorStateForReplay,
     refreshPanelLiveState,
     replayExtractionFromHistory,
@@ -532,6 +594,7 @@ export async function recoverHistoryIfNeededController(
   let usedFullRebuild = false;
   let recoveryPath = "full-rebuild";
   let affectedBatchCount = 0;
+  let recoveryBaseAccepted = false;
   const historyController = beginStageAbortController("history");
   const historySignal = historyController.signal;
   const retainCheckpoint = (graph, result = null) => {
@@ -543,64 +606,99 @@ export async function recoverHistoryIfNeededController(
     );
     if (result) graph.historyState.lastRecoveryResult = result;
   };
-  const restoreRecoveryStartGraph = () => {
+  const publishAcceptedGraph = (graph) => {
+    currentGraph = graph;
+    setCurrentGraph(graph);
+    setExtractionCount(graph?.historyState?.extractionCount || 0);
+    return graph;
+  };
+  const persistAndPublishRecoveryBase = async (graph, reason) => {
+    assertHistoryCurrent(`${reason}-start`);
+    const persistence = await persistDetachedRecoveryState(
+      persistDetachedRecoveryGraph,
+      graph,
+      reason,
+      context,
+    );
+    if (persistence?.accepted !== true) return persistence;
+    recoveryBaseAccepted = true;
+    assertHistoryCurrent(`${reason}-persisted`);
+    publishAcceptedGraph(graph);
+    return persistence;
+  };
+  const compensateRecoveryStartGraph = async (result, reason) => {
     if (getCurrentChatId(getContext()) !== chatId) return null;
-    currentGraph = normalizeGraphRuntimeState(
+    if (!recoveryBaseAccepted) {
+      currentGraph = getCurrentGraph();
+      retainCheckpoint(currentGraph, result);
+      return await persistRecoveryState(saveGraphToChat, reason);
+    }
+
+    const restoredGraph = normalizeGraphRuntimeState(
       cloneGraphSnapshot(recoveryStartGraph),
       chatId,
     );
-    setCurrentGraph(currentGraph);
-    setExtractionCount(currentGraph.historyState.extractionCount || 0);
-    return currentGraph;
+    retainCheckpoint(restoredGraph, result);
+    restoredGraph.vectorIndexState.dirty = true;
+    restoredGraph.vectorIndexState.dirtyReason =
+      restoredGraph.vectorIndexState.dirtyReason ||
+      "history-recovery-compensated";
+    restoredGraph.vectorIndexState.lastWarning =
+      "历史恢复已补偿回到起始图谱，向量索引需要修复";
+    const persistence = await persistDetachedRecoveryState(
+      persistDetachedRecoveryGraph,
+      restoredGraph,
+      reason,
+      context,
+    );
+    if (persistence?.accepted === true) {
+      publishAcceptedGraph(restoredGraph);
+      recoveryBaseAccepted = false;
+    } else {
+      currentGraph = getCurrentGraph();
+      retainCheckpoint(currentGraph, result);
+    }
+    return persistence;
   };
   const finalizeRecoveredState = async (result, reason) => {
     assertHistoryCurrent(`${reason}-start`);
     currentGraph = getCurrentGraph();
-    retainCheckpoint(currentGraph, result);
+    const completionGraph = normalizeGraphRuntimeState(
+      cloneGraphSnapshot(currentGraph),
+      chatId,
+    );
+    retainCheckpoint(completionGraph, result);
     const recoveredLastProcessedFloor = Number.isFinite(
-      currentGraph?.historyState?.lastProcessedAssistantFloor,
+      completionGraph?.historyState?.lastProcessedAssistantFloor,
     )
-      ? currentGraph.historyState.lastProcessedAssistantFloor
+      ? completionGraph.historyState.lastProcessedAssistantFloor
       : -1;
     if (recoveredLastProcessedFloor >= 0) {
       updateProcessedHistorySnapshot(
         chatSnapshot,
         recoveredLastProcessedFloor,
+        completionGraph,
       );
     }
-
-    const checkpointPersistence = await persistRecoveryState(
-      saveGraphToChat,
-      `${reason}-checkpoint`,
-    );
-    assertHistoryCurrent(`${reason}-checkpoint-persisted`);
-    if (checkpointPersistence?.accepted !== true) {
-      currentGraph.historyState.lastRecoveryResult = buildRecoveryResult(
-        "pending-persistence",
-        {
-          fromFloor: initialDirtyFrom,
-          path: recoveryPath,
-          detectionSource: checkpointSource,
-          reason: "recovered checkpoint persistence was not accepted",
-          resultCode: "history.recovery.checkpoint-persist-failed",
-        },
-      );
-      return false;
-    }
-
-    clearHistoryDirty(currentGraph, result);
+    clearHistoryDirty(completionGraph, result);
     if (recoveredLastProcessedFloor >= 0) {
       updateProcessedHistorySnapshot(
         chatSnapshot,
         recoveredLastProcessedFloor,
+        completionGraph,
       );
     }
-    const clearPersistence = await persistRecoveryState(
-      saveGraphToChat,
+    const completionPersistence = await persistDetachedRecoveryState(
+      persistDetachedRecoveryGraph,
+      completionGraph,
       reason,
+      context,
     );
     assertHistoryCurrent(`${reason}-clear-persisted`);
-    if (clearPersistence?.accepted === true) return true;
+    if (completionPersistence?.accepted === true) {
+      publishAcceptedGraph(completionGraph);
+      return true;
+    }
 
     retainCheckpoint(
       currentGraph,
@@ -611,10 +709,6 @@ export async function recoverHistoryIfNeededController(
         reason: "recovery completion persistence was not accepted",
         resultCode: "history.recovery.clear-persist-failed",
       }),
-    );
-    await persistRecoveryState(
-      saveGraphToChat,
-      `${reason}-checkpoint-restored`,
     );
     return false;
   };
@@ -666,11 +760,13 @@ export async function recoverHistoryIfNeededController(
       currentGraph,
       initialDirtyFrom,
     );
+    const config = getEmbeddingConfig();
+    let recoveryPlan = null;
+    let recoveryGraph = null;
     if (recoveryPoint?.path === "reverse-journal") {
       recoveryPath = "reverse-journal";
       affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
-      const config = getEmbeddingConfig();
-      const recoveryPlan = buildReverseJournalRecoveryPlan(
+      recoveryPlan = buildReverseJournalRecoveryPlan(
         recoveryPoint.affectedJournals,
         initialDirtyFrom,
       );
@@ -681,80 +777,105 @@ export async function recoverHistoryIfNeededController(
           }`,
         );
       }
-      rollbackAffectedJournals(currentGraph, recoveryPoint.affectedJournals);
-      currentGraph = getCurrentGraph();
-      currentGraph = normalizeGraphRuntimeState(currentGraph, chatId);
-      setCurrentGraph(currentGraph);
-      retainCheckpoint(currentGraph);
-      setExtractionCount(currentGraph.historyState.extractionCount || 0);
-      applyRecoveryPlanToVectorState(recoveryPlan, initialDirtyFrom);
-
-      if (
-        isBackendVectorConfig(config) &&
-        recoveryPlan.backendDeleteHashes.length > 0
-      ) {
-        updateStageNotice(
-          "history",
-          "历史恢复中",
-          `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
-          "running",
-          {
-            persist: true,
-            busy: true,
-          },
-        );
-        assertHistoryCurrent("pre-backend-delete");
-        await tryDeleteBackendVectorHashesForRecovery(
-          currentGraph.vectorIndexState.collectionId,
-          config,
-          recoveryPlan.backendDeleteHashes,
-          historySignal,
-          {
-            source: "history-recovery",
-          },
-        );
-        assertHistoryCurrent("post-backend-delete");
-      }
-      if (isBackendVectorConfig(config)) {
-        updateStageNotice(
-          "history",
-          "历史恢复中",
-          "正在准备向量回放状态",
-          "running",
-          {
-            persist: true,
-            busy: true,
-          },
-        );
-      }
-      assertHistoryCurrent("pre-vector-prepare");
-      await prepareVectorStateForReplay(false, historySignal, {
-        skipBackendPurge: isBackendVectorConfig(config),
-      });
-      assertHistoryCurrent("post-vector-prepare");
+      recoveryGraph = normalizeGraphRuntimeState(
+        cloneGraphSnapshot(currentGraph),
+        chatId,
+      );
+      rollbackAffectedJournals(
+        recoveryGraph,
+        recoveryPoint.affectedJournals,
+      );
+      recoveryGraph = normalizeGraphRuntimeState(recoveryGraph, chatId);
+      applyRecoveryPlanToVectorState(
+        recoveryPlan,
+        initialDirtyFrom,
+        recoveryGraph,
+      );
     } else if (recoveryPoint?.path === "legacy-snapshot") {
       recoveryPath = "legacy-snapshot";
       affectedBatchCount = recoveryPoint.affectedBatchCount || 0;
-      currentGraph = normalizeGraphRuntimeState(
-        recoveryPoint.snapshotBefore,
+      recoveryGraph = normalizeGraphRuntimeState(
+        cloneGraphSnapshot(recoveryPoint.snapshotBefore),
         chatId,
       );
-      setCurrentGraph(currentGraph);
-      retainCheckpoint(currentGraph);
-      setExtractionCount(currentGraph.historyState.extractionCount || 0);
-      assertHistoryCurrent("pre-legacy-vector-prepare");
-      await prepareVectorStateForReplay(false, historySignal);
-      assertHistoryCurrent("post-legacy-vector-prepare");
     } else {
       recoveryPath = "full-rebuild";
-      currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
-      setCurrentGraph(currentGraph);
-      retainCheckpoint(currentGraph);
+      recoveryGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
       usedFullRebuild = true;
-      setExtractionCount(0);
-      assertHistoryCurrent("pre-rebuild-vector-prepare");
-      await prepareVectorStateForReplay(true, historySignal);
-      assertHistoryCurrent("post-rebuild-vector-prepare");
+    }
+
+    retainCheckpoint(recoveryGraph);
+    if (isBackendVectorConfig(config)) {
+      updateStageNotice(
+        "history",
+        "历史恢复中",
+        "正在准备向量回放状态",
+        "running",
+        { persist: true, busy: true },
+      );
+    }
+    assertHistoryCurrent("pre-vector-prepare");
+    await prepareVectorStateForReplay(usedFullRebuild, historySignal, {
+      skipBackendPurge: true,
+      resetBackendMappings: recoveryPath !== "reverse-journal",
+      graph: recoveryGraph,
+    });
+    assertHistoryCurrent("post-vector-prepare");
+
+    const recoveryBasePersistence = await persistAndPublishRecoveryBase(
+      recoveryGraph,
+      `history-recovery-base:${recoveryPath}`,
+    );
+    if (recoveryBasePersistence?.accepted !== true) {
+      currentGraph = getCurrentGraph();
+      retainCheckpoint(
+        currentGraph,
+        buildRecoveryResult("pending-persistence", {
+          fromFloor: initialDirtyFrom,
+          path: recoveryPath,
+          detectionSource: checkpointSource,
+          reason: "recovery base persistence was not accepted",
+          resultCode: "history.recovery.base-persist-failed",
+        }),
+      );
+      updateStageNotice(
+        "history",
+        "历史恢复等待持久化",
+        "回退候选尚未确认落盘，当前图谱未发布候选状态。",
+        "warning",
+        { busy: false, persist: false },
+      );
+      refreshPanelLiveState();
+      return false;
+    }
+
+    if (
+      recoveryPath === "reverse-journal" &&
+      isBackendVectorConfig(config) &&
+      recoveryPlan.backendDeleteHashes.length > 0
+    ) {
+      updateStageNotice(
+        "history",
+        "历史恢复中",
+        `正在整理向量恢复状态（${recoveryPlan.backendDeleteHashes.length} 项）`,
+        "running",
+        { persist: true, busy: true },
+      );
+      await tryDeleteBackendVectorHashesForRecovery(
+        currentGraph.vectorIndexState.collectionId,
+        config,
+        recoveryPlan.backendDeleteHashes,
+        historySignal,
+        { source: "history-recovery" },
+      );
+      assertHistoryCurrent("post-backend-delete");
+    } else if (isBackendVectorConfig(config)) {
+      await prepareVectorStateForReplay(usedFullRebuild, historySignal, {
+        skipBackendPurge: false,
+        resetBackendMappings: false,
+        graph: currentGraph,
+      });
+      assertHistoryCurrent("post-backend-purge");
     }
 
     assertHistoryCurrent("pre-replay");
@@ -828,10 +949,7 @@ export async function recoverHistoryIfNeededController(
     return true;
   } catch (error) {
     if (isAbortError(error)) {
-      currentGraph = restoreRecoveryStartGraph();
-      if (currentGraph) {
-        inspectHistoryMutation(`${trigger}:concurrent-change`);
-      }
+      currentGraph = getCurrentGraph();
       const abortedResult = buildRecoveryResult("aborted", {
           fromFloor: initialDirtyFrom,
           path: recoveryPath,
@@ -845,8 +963,12 @@ export async function recoverHistoryIfNeededController(
           debugReason: `history-recovery-aborted:${recoveryPath}`,
           resultCode: "history.recovery.aborted",
         });
-      if (currentGraph) {
-        retainCheckpoint(currentGraph, abortedResult);
+      await compensateRecoveryStartGraph(
+        abortedResult,
+        "history-recovery-aborted",
+      );
+      if (getCurrentChatId(getContext()) === chatId) {
+        inspectHistoryMutation(`${trigger}:concurrent-change`);
       }
       settleExtractionStatusAfterHistoryRecovery(
         "提取已终止",
@@ -863,21 +985,38 @@ export async function recoverHistoryIfNeededController(
           persist: false,
         },
       );
-      if (currentGraph) {
-        await persistRecoveryState(saveGraphToChat, "history-recovery-aborted");
-      }
       return false;
     }
     console.error("[ST-BME] 历史恢复失败，尝试全量重建:", error);
 
     try {
-      currentGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
-      setCurrentGraph(currentGraph);
-      retainCheckpoint(currentGraph);
-      setExtractionCount(0);
+      const fallbackGraph = normalizeGraphRuntimeState(createEmptyGraph(), chatId);
+      retainCheckpoint(fallbackGraph);
       assertHistoryCurrent("pre-fallback-vector-prepare");
-      await prepareVectorStateForReplay(true, historySignal);
+      await prepareVectorStateForReplay(true, historySignal, {
+        skipBackendPurge: true,
+        resetBackendMappings: true,
+        graph: fallbackGraph,
+      });
       assertHistoryCurrent("post-fallback-vector-prepare");
+      const fallbackBasePersistence = await persistAndPublishRecoveryBase(
+        fallbackGraph,
+        "history-recovery-fallback-base",
+      );
+      if (fallbackBasePersistence?.accepted !== true) {
+        throw new Error(
+          fallbackBasePersistence?.reason ||
+            "fallback recovery base persistence was not accepted",
+        );
+      }
+      if (isBackendVectorConfig(getEmbeddingConfig())) {
+        await prepareVectorStateForReplay(true, historySignal, {
+          skipBackendPurge: false,
+          resetBackendMappings: false,
+          graph: currentGraph,
+        });
+        assertHistoryCurrent("post-fallback-backend-purge");
+      }
       assertHistoryCurrent("pre-fallback-replay");
       replayedBatches = await replayExtractionFromHistory(
         chatSnapshot,
@@ -942,7 +1081,7 @@ export async function recoverHistoryIfNeededController(
       toastr.warning("历史恢复已退化为全量重建");
       return true;
     } catch (fallbackError) {
-      currentGraph = restoreRecoveryStartGraph();
+      currentGraph = getCurrentGraph();
       const failedResult = buildRecoveryResult("failed", {
           fromFloor: initialDirtyFrom,
           path: recoveryPath,
@@ -956,10 +1095,10 @@ export async function recoverHistoryIfNeededController(
           debugReason: `history-recovery-failed:${recoveryPath}`,
           resultCode: "history.recovery.failed",
         });
-      if (currentGraph) {
-        retainCheckpoint(currentGraph, failedResult);
-        await persistRecoveryState(saveGraphToChat, "history-recovery-failed");
-      }
+      await compensateRecoveryStartGraph(
+        failedResult,
+        "history-recovery-failed",
+      );
       refreshPanelLiveState();
       settleExtractionStatusAfterHistoryRecovery(
         "提取失败",
