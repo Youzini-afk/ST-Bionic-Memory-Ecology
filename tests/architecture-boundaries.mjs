@@ -12,7 +12,7 @@ const LEGACY_DIRECT_HOST_IMPORTS = new Set();
 const LEGACY_DIRECT_HOST_GLOBALS = new Set();
 
 const MAX_COORDINATOR_LINES = Object.freeze({
-  "index.js": 18_416,
+  "index.js": 18_395,
   "ui/panel.js": 14_976,
 });
 
