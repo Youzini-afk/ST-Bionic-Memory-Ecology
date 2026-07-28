@@ -13845,15 +13845,20 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
         if (backgroundVectorSyncCoalescer.isStale(scheduledTask, activeChatId)) {
           return { skipped: true, reason: "stale-background-vector-sync" };
         }
-        setLastVectorStatus(
-          "后台向量同步中",
-          `${scheduledTask.mode} 模式 · 正在同步提取后的向量索引`,
-          "running",
-          { syncRuntime: false },
-        );
+        const silentConsolidationSync =
+          scheduledTask.reason === "background-vector-sync-after-consolidation";
+        if (!silentConsolidationSync) {
+          setLastVectorStatus(
+            "后台向量同步中",
+            `${scheduledTask.mode} 模式 · 正在同步提取后的向量索引`,
+            "running",
+            { syncRuntime: false },
+          );
+        }
         const result = await syncVectorState({
           range: scheduledTask.range,
           expectedChatId: scheduledTask.chatId,
+          silentStatus: silentConsolidationSync,
         });
         const completedChatId = normalizeChatIdCandidate(getCurrentChatId());
         if (
@@ -13893,20 +13898,28 @@ function scheduleBackgroundVectorSync(task = null, settings = {}) {
 function scheduleBackgroundMaintenancePostProcess(tasks = [], settings = {}) {
   return scheduleBackgroundMaintenancePostProcessController(
     {
+      analyzeAutoConsolidationGate,
+      buildChatHistoryFingerprint,
       buildMaintenanceSummary,
       cloneGraphSnapshot,
+      consolidateMemories,
+      createBatchJournalEntry,
       enqueueBackgroundMaintenanceTask,
+      evaluateAutoConsolidationGate,
       ensureCurrentGraphRuntimeState,
       getContext,
       getCurrentChatId,
       getCurrentGraph: () => conversationWorkspace.graph,
       getEmbeddingConfig,
       getExtractionCount: () => conversationWorkspace.extractionCount,
+      getIsExtracting: () => conversationWorkspace.isExtracting,
       getSchema,
       normalizeChatId: normalizeChatIdCandidate,
       recordMaintenanceAction,
       saveGraphToChat,
+      scheduleBackgroundVectorSync,
       setLastExtractionStatus,
+      setCurrentGraph: (graph) => { conversationWorkspace.graph = graph; },
       updateBackgroundMaintenanceQueueState,
     },
     tasks,
@@ -13919,6 +13932,24 @@ async function ensureVectorReadyIfNeeded(
   signal = undefined,
 ) {
   if (!conversationWorkspace.graph) return;
+  const isBackgroundConsolidationVectorSyncPending = () => {
+    if (
+      String(conversationWorkspace.graph?.vectorIndexState?.dirtyReason || "") !==
+      "background-consolidation-vector-sync-queued"
+    ) {
+      return false;
+    }
+    const activeChatId = normalizeChatIdCandidate(getCurrentChatId());
+    return [
+      backgroundVectorSyncCoalescer.getActive?.(),
+      backgroundVectorSyncCoalescer.getPending?.(),
+    ].some(
+      (task) =>
+        task &&
+        !task.stale &&
+        (!activeChatId || !task.chatId || task.chatId === activeChatId),
+    );
+  };
   let metadataWriteAllowed = isGraphMetadataWriteAllowed();
   let mutationContextAllowed = hasRuntimeGraphMutationContext(getContext(), conversationWorkspace.graph, {
     allowNoChatState: true,
@@ -13930,6 +13961,7 @@ async function ensureVectorReadyIfNeeded(
     repairAttempted: false,
     dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
     configValid: true,
+    backgroundSyncPending: isBackgroundConsolidationVectorSyncPending(),
   });
   if (gate.action === "skip" || gate.action === "block") return;
 
@@ -13948,6 +13980,7 @@ async function ensureVectorReadyIfNeeded(
       repairAttempted: true,
       dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
       configValid: true,
+      backgroundSyncPending: isBackgroundConsolidationVectorSyncPending(),
     });
     if (gate.action === "skip" || gate.action === "block") return;
   }
@@ -13967,6 +14000,7 @@ async function ensureVectorReadyIfNeeded(
     repairAttempted: true,
     dirty: conversationWorkspace.graph?.vectorIndexState?.dirty === true,
     configValid: validation.valid,
+    backgroundSyncPending: isBackgroundConsolidationVectorSyncPending(),
   });
   if (gate.action !== "sync") return;
 

@@ -26,7 +26,6 @@ export async function handleExtractionSuccessController(
 ) {
   const {
     clonePlanCommitValue,
-    consolidateMemories,
     createBatchStatusSkeleton,
     ensureCurrentGraphRuntimeState,
     finalizeBatchStatus,
@@ -61,63 +60,6 @@ export async function handleExtractionSuccessController(
   const newNodeCount = Array.isArray(result?.newNodeIds)
     ? result.newNodeIds.length
     : 0;
-  const resolveAutoConsolidationGate =
-    typeof runtime.evaluateAutoConsolidationGate === "function"
-      ? runtime.evaluateAutoConsolidationGate
-      : (count, analysis = null, localSettings = {}) => {
-          const minNewNodes = Math.max(
-            1,
-            Math.min(
-              50,
-              Math.floor(
-                Number(localSettings?.consolidationAutoMinNewNodes ?? 2),
-              ) || 2,
-            ),
-          );
-          const safeCount = Math.max(0, Number(count) || 0);
-          if (safeCount >= minNewNodes) {
-            return {
-              shouldRun: true,
-              minNewNodes,
-              reason: `本批新增 ${safeCount} 个节点，达到自动整合门槛 ${minNewNodes}`,
-              matchedScore: null,
-              matchedNodeId: "",
-            };
-          }
-          if (analysis?.triggered) {
-            return {
-              shouldRun: true,
-              minNewNodes,
-              reason:
-                String(analysis.reason || "").trim() ||
-                "检测到高重复风险，已触发自动整合",
-              matchedScore: Number.isFinite(Number(analysis?.matchedScore))
-                ? Number(analysis.matchedScore)
-                : null,
-              matchedNodeId: String(analysis?.matchedNodeId || ""),
-            };
-          }
-          return {
-            shouldRun: false,
-            minNewNodes,
-            reason:
-              String(analysis?.reason || "").trim() ||
-              `本批新增少且无明显重复风险，跳过自动整合`,
-            matchedScore: Number.isFinite(Number(analysis?.matchedScore))
-              ? Number(analysis.matchedScore)
-              : null,
-            matchedNodeId: String(analysis?.matchedNodeId || ""),
-          };
-        };
-  const analyzeConsolidationGate =
-    typeof runtime.analyzeAutoConsolidationGate === "function"
-      ? runtime.analyzeAutoConsolidationGate
-      : async () => ({
-          triggered: false,
-          reason: "本批新增少且无明显重复风险，跳过自动整合",
-          matchedScore: null,
-          matchedNodeId: "",
-        });
   const resolveAutoCompressionSchedule =
     typeof runtime.evaluateAutoCompressionSchedule === "function"
       ? runtime.evaluateAutoCompressionSchedule
@@ -286,86 +228,19 @@ export async function handleExtractionSuccessController(
       applyMaintenanceGateNote(status, "consolidate", reason);
       pushBatchStageArtifact(status, "structural", "consolidation-skipped");
     } else {
-      let consolidationAnalysis = null;
-      const minNewNodes = Math.max(
-        1,
-        Math.min(
-          50,
-          Math.floor(Number(settings?.consolidationAutoMinNewNodes ?? 2)) || 2,
-        ),
-      );
-      if (consolidationCandidateCount < minNewNodes) {
-        updateExtractionPostProcessStatus(
-          "整合判定中",
-          `本窗口候选 ${consolidationCandidateCount} 个节点，正在检查是否需要自动整合/进化`,
-        );
-        consolidationAnalysis = await analyzeConsolidationGate({
-          graph: currentGraph,
+      enqueueDeferredMaintenance({
+        type: "consolidate",
+        reason: "background-consolidation-after-extraction",
+        payload: {
           newNodeIds: consolidationCandidateNodeIds,
-          embeddingConfig: getEmbeddingConfig(),
-          schema: getSchema(),
-          conflictThreshold: settings.consolidationThreshold,
-          signal,
-        });
-      }
-      const gate = resolveAutoConsolidationGate(
-        consolidationCandidateCount,
-        consolidationAnalysis,
-        settings,
-      );
-      status.consolidationGateTriggered = Boolean(gate.shouldRun);
-      status.consolidationGateReason = String(gate.reason || "");
-      status.consolidationGateSimilarity = Number.isFinite(
-        Number(gate.matchedScore),
-      )
-        ? Number(gate.matchedScore)
-        : null;
-      status.consolidationGateMatchedNodeId = String(gate.matchedNodeId || "");
-      if (!gate.shouldRun) {
-        applyMaintenanceGateNote(status, "consolidate", gate.reason);
-        pushBatchStageArtifact(status, "structural", "consolidation-skipped");
-      } else {
-        try {
-          updateExtractionPostProcessStatus(
-            "整合/进化中",
-            String(gate.reason || "").trim() || "正在自动整合新旧记忆",
-          );
-          const beforeSnapshot = cloneMaintenanceSnapshot(currentGraph);
-          const consolidationResult = await consolidateMemories({
-            graph: currentGraph,
-            newNodeIds: consolidationCandidateNodeIds,
-            embeddingConfig: getEmbeddingConfig(),
-            options: {
-              neighborCount: settings.consolidationNeighborCount,
-              conflictThreshold: settings.consolidationThreshold,
-            },
-            settings,
-            signal,
-          });
-          persistMaintenanceAction({
-            action: "consolidate",
-            beforeSnapshot,
-            mode: "auto",
-            summary: summarizeMaintenance(
-              "consolidate",
-              consolidationResult,
-              "auto",
-            ),
-          });
-          postProcessArtifacts.push("consolidation");
-          pushBatchStageArtifact(status, "structural", "consolidation");
-        } catch (e) {
-          if (isAbortError(e)) throw e;
-          const message = e?.message || String(e) || "记忆整合阶段失败";
-          setBatchStageOutcome(
-            status,
-            "structural",
-            "partial",
-            `记忆整合失败: ${message}`,
-          );
-          console.error("[ST-BME] 记忆整合失败:", e);
-        }
-      }
+          processedRange: Array.isArray(result?.processedRange)
+            ? result.processedRange
+            : [endIdx, endIdx],
+        },
+      });
+      status.consolidationState = "queued";
+      status.consolidationCandidateCount = consolidationCandidateCount;
+      pushBatchStageArtifact(status, "structural", "consolidation-queued");
     }
   }
 

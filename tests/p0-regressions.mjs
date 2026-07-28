@@ -4795,7 +4795,7 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
 
   const statusTexts = harness.extractionStatuses.map((entry) => entry[0]);
   assert.ok(statusTexts.includes("提取收尾中"));
-  assert.ok(statusTexts.includes("整合/进化中"));
+  assert.equal(statusTexts.includes("整合/进化中"), false);
   assert.ok(statusTexts.includes("旧式全局概要更新中"));
   assert.ok(statusTexts.includes("反思生成中"));
   assert.ok(statusTexts.includes("主动遗忘中"));
@@ -4803,6 +4803,10 @@ async function testExtractionPostProcessStatusesExposeMaintenancePhases() {
   assert.ok(statusTexts.includes("向量同步等待持久化"));
   assert.equal(vectorSyncCalls, 0);
   assert.equal(effects.committedVectorSync?.enabled, true);
+  assert.deepEqual(
+    effects.backgroundMaintenance.map((task) => task.type),
+    ["consolidate"],
+  );
 }
 
 async function testDeleteAllLocalStorageStillDeletesOpfsWithoutIndexedDb() {
@@ -4981,6 +4985,7 @@ async function testBalancedModeDefersExtractionMaintenancePostProcess() {
   let synopsisCalls = 0;
   let reflectionCalls = 0;
   let compressionCalls = 0;
+  let consolidateCalls = 0;
   let vectorSyncCalls = 0;
   harness.currentGraph = {
     nodes: [],
@@ -4996,6 +5001,10 @@ async function testBalancedModeDefersExtractionMaintenancePostProcess() {
     synopsisCalls += 1;
     harness.currentGraph.nodes.push({ id: "synopsis-queued", type: "synopsis" });
     return { ok: true };
+  };
+  harness.consolidateMemories = async () => {
+    consolidateCalls += 1;
+    return { merged: 1 };
   };
   harness.generateReflection = async () => {
     reflectionCalls += 1;
@@ -5031,7 +5040,8 @@ async function testBalancedModeDefersExtractionMaintenancePostProcess() {
     21,
     {
       maintenanceExecutionMode: "balanced",
-      enableConsolidation: false,
+      enableConsolidation: true,
+      consolidationAutoMinNewNodes: 1,
       enableHierarchicalSummary: true,
       enableReflection: true,
       reflectEveryN: 1,
@@ -5047,10 +5057,11 @@ async function testBalancedModeDefersExtractionMaintenancePostProcess() {
   assert.equal(synopsisCalls, 0);
   assert.equal(reflectionCalls, 0);
   assert.equal(compressionCalls, 0);
+  assert.equal(consolidateCalls, 0);
   assert.equal(vectorSyncCalls, 0);
   assert.deepEqual(
     Array.from(effects.backgroundMaintenance, (task) => task.type),
-    ["summary", "reflection", "compression"],
+    ["consolidate", "summary", "reflection", "compression"],
   );
   assert.equal(effects.batchStatus.backgroundMaintenanceQueued, true);
   assert.equal(effects.batchStatus.backgroundMaintenanceMode, "balanced");
@@ -5092,6 +5103,7 @@ async function testBackgroundVectorSyncScheduledAfterAcceptedPersistence() {
     computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
     console,
     createBatchJournalEntry: (_before, _after, options) => ({
+      id: "batch:test",
       type: "batch",
       ...options,
     }),
@@ -5197,6 +5209,7 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
     computePostProcessArtifacts: (_before, _after, artifacts = []) => artifacts,
     console,
     createBatchJournalEntry: (_before, _after, options) => ({
+      id: "batch:test",
       type: "batch",
       ...options,
     }),
@@ -5222,6 +5235,7 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
       status.backgroundMaintenanceQueued = true;
       status.backgroundMaintenanceMode = "balanced";
       status.backgroundMaintenanceTasks = [
+        { id: "consolidate:test", type: "consolidate", reason: "test" },
         { id: "summary:test", type: "summary", reason: "test" },
         { id: "reflection:test", type: "reflection", reason: "test" },
       ];
@@ -5232,6 +5246,12 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
         vectorError: "",
         batchStatus: finalizeBatchStatus(status, 1),
         backgroundMaintenance: [
+          {
+            id: "consolidate:test",
+            type: "consolidate",
+            reason: "test",
+            payload: { newNodeIds: ["node-bg-maintenance"] },
+          },
           { id: "summary:test", type: "summary", reason: "test", payload: {} },
           { id: "reflection:test", type: "reflection", reason: "test", payload: {} },
         ],
@@ -5278,8 +5298,12 @@ async function testBackgroundMaintenanceScheduledAfterAcceptedPersistence() {
   assert.equal(scheduleCalls, 1);
   assert.deepEqual(
     scheduledTasks.map((task) => task.type),
-    ["summary", "reflection"],
+    ["consolidate", "summary", "reflection"],
   );
+  assert.equal(scheduledTasks[0].payload.batchJournalId, "batch:test");
+  assert.deepEqual(scheduledTasks[0].payload.sourceChatIndexRange, [2, 2]);
+  assert.equal(typeof scheduledTasks[0].payload.sourceHistoryFingerprint, "string");
+  assert.ok(scheduledTasks[0].payload.sourceHistoryFingerprint.length > 0);
   assert.equal(result.batchStatus.backgroundMaintenanceState, "queued");
   assert.equal(result.effects.backgroundMaintenanceQueue?.queued, true);
 }
@@ -5347,18 +5371,11 @@ async function testAutoConsolidationRunsOnHighDuplicateRiskSingleNode() {
     batchStatus,
   );
 
-  assert.equal(gateCalls, 1);
-  assert.equal(consolidateCalls, 1);
-  assert.equal(effects.batchStatus.consolidationGateTriggered, true);
-  assert.equal(
-    effects.batchStatus.consolidationGateMatchedNodeId,
-    "old-1",
-  );
-  assert.equal(effects.batchStatus.consolidationGateSimilarity, 0.93);
-  assert.match(
-    effects.batchStatus.consolidationGateReason,
-    /高度相似/,
-  );
+  assert.equal(gateCalls, 0);
+  assert.equal(consolidateCalls, 0);
+  assert.equal(effects.batchStatus.consolidationState, "queued");
+  assert.equal(effects.batchStatus.consolidationCandidateCount, 1);
+  assert.deepEqual(effects.backgroundMaintenance.map((task) => task.type), ["consolidate"]);
   assert.equal(effects.batchStatus.autoCompressionScheduled, false);
   assert.match(
     effects.batchStatus.autoCompressionSkippedReason,
@@ -5426,20 +5443,10 @@ async function testAutoConsolidationSkipsLowRiskSingleNode() {
   );
 
   assert.equal(consolidateCalls, 0);
-  assert.equal(effects.batchStatus.consolidationGateTriggered, false);
+  assert.equal(effects.batchStatus.consolidationState, "queued");
+  assert.equal(effects.batchStatus.consolidationCandidateCount, 1);
   assert.equal(
-    effects.batchStatus.consolidationGateMatchedNodeId,
-    "old-2",
-  );
-  assert.equal(effects.batchStatus.consolidationGateSimilarity, 0.42);
-  assert.match(
-    effects.batchStatus.consolidationGateReason,
-    /跳过自动整合/,
-  );
-  assert.equal(
-    effects.batchStatus.stages.structural.artifacts.includes(
-      "consolidation-skipped",
-    ),
+    effects.batchStatus.stages.structural.artifacts.includes("consolidation-queued"),
     true,
   );
 }
@@ -5533,9 +5540,9 @@ async function testAutoConsolidationUsesDeferredBulkCandidates() {
     harness.currentGraph.historyState ||= {};
     harness.currentGraph.vectorIndexState ||= {};
   };
-  let candidateIds = [];
+  let consolidateCalls = 0;
   harness.consolidateMemories = async ({ newNodeIds = [] } = {}) => {
-    candidateIds = [...newNodeIds];
+    consolidateCalls += 1;
     return {
       merged: 1,
       skipped: 0,
@@ -5578,10 +5585,13 @@ async function testAutoConsolidationUsesDeferredBulkCandidates() {
     },
   );
 
-  assert.deepEqual(candidateIds, ["node-old", "node-deferred", "node-current"]);
-  assert.equal(effects.batchStatus.consolidationGateTriggered, true);
+  assert.equal(consolidateCalls, 0);
+  assert.deepEqual(
+    effects.backgroundMaintenance.find((task) => task.type === "consolidate")?.payload?.newNodeIds,
+    ["node-old", "node-deferred", "node-current"],
+  );
   assert.equal(
-    effects.batchStatus.stages.structural.artifacts.includes("consolidation"),
+    effects.batchStatus.stages.structural.artifacts.includes("consolidation-queued"),
     true,
   );
 }

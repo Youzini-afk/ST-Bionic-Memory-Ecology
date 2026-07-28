@@ -29,6 +29,7 @@
  * @param {{start: number, end: number}|null} [options.range]
  * @param {AbortSignal} [options.signal]
  * @param {string} [options.expectedChatId]
+ * @param {boolean} [options.silentStatus]
  */
 export async function syncVectorStateController(runtime, options = {}) {
   const {
@@ -49,15 +50,20 @@ export async function syncVectorStateController(runtime, options = {}) {
   // Status setters are invoked via `runtime` (method-call style) so the runtime
   // object stays the single owner of status state, matching the extraction and
   // rebuild controllers.
-  const setLastVectorStatus = (...args) => runtime.setLastVectorStatus(...args);
-
   const {
     force = false,
     purge = false,
     range = null,
     signal = undefined,
     expectedChatId = "",
+    silentStatus = false,
   } = options || {};
+  const setLastVectorStatus = (...args) => {
+    const level = String(args[2] || "");
+    if (!silentStatus || level === "warning" || level === "error") {
+      runtime.setLastVectorStatus(...args);
+    }
+  };
 
   ensureCurrentGraphRuntimeState();
   const currentGraph = getCurrentGraph();

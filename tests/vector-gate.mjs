@@ -52,6 +52,17 @@ assert.deepEqual(
     hasGraph: true,
     metadataWriteAllowed: true,
     dirty: true,
+    backgroundSyncPending: true,
+    configValid: true,
+  }),
+  { action: "skip", reason: "background-vector-sync-pending" },
+);
+
+assert.deepEqual(
+  planVectorReadyCheck({
+    hasGraph: true,
+    metadataWriteAllowed: true,
+    dirty: true,
     configValid: true,
   }),
   { action: "sync", reason: "vector-dirty" },

@@ -11,6 +11,7 @@ export function planVectorReadyCheck({
   repairAttempted = false,
   dirty = false,
   configValid = false,
+  backgroundSyncPending = false,
 } = {}) {
   if (!hasGraph) return { action: "skip", reason: "missing-graph" };
 
@@ -22,6 +23,9 @@ export function planVectorReadyCheck({
   }
 
   if (!dirty) return { action: "skip", reason: "vector-clean" };
+  if (backgroundSyncPending) {
+    return { action: "skip", reason: "background-vector-sync-pending" };
+  }
   if (!configValid) return { action: "skip", reason: "invalid-vector-config" };
 
   return { action: "sync", reason: "vector-dirty" };

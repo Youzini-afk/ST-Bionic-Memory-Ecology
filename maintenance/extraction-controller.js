@@ -1597,15 +1597,48 @@ export async function executeExtractionBatchController(
   } else if (effects?.committedVectorSync?.enabled === true) {
     batchStatusRef.committedVectorSyncState = "blocked-by-persistence";
   }
+  const committedBatchJournalId = String(
+    committedPersistState.committedBatchJournalEntry?.id || "",
+  );
+  const committedSourceChatIndexRange = Array.isArray(
+    committedPersistState.committedBatchJournalEntry?.sourceChatIndexRange,
+  )
+    ? committedPersistState.committedBatchJournalEntry.sourceChatIndexRange
+    : [startIdx, endIdx];
+  const committedSourceStart = Number(committedSourceChatIndexRange[0]);
+  const committedSourceEnd = Number(committedSourceChatIndexRange[1]);
+  const committedSourceHistoryFingerprint =
+    Number.isFinite(committedSourceStart) && Number.isFinite(committedSourceEnd)
+      ? runtime.buildChatHistoryFingerprint(
+          batchChat.slice(
+            Math.max(0, Math.floor(committedSourceStart)),
+            Math.max(0, Math.floor(committedSourceEnd)) + 1,
+          ),
+        )
+      : "";
+  const backgroundMaintenanceTasks = Array.isArray(effects?.backgroundMaintenance)
+    ? effects.backgroundMaintenance.map((task) =>
+        String(task?.type || "") === "consolidate"
+          ? {
+              ...task,
+              payload: {
+                ...(task?.payload || {}),
+                batchJournalId: committedBatchJournalId,
+                sourceChatIndexRange: committedSourceChatIndexRange,
+                sourceHistoryFingerprint: committedSourceHistoryFingerprint,
+              },
+            }
+          : task,
+      )
+    : [];
   let backgroundMaintenanceQueue = null;
   if (
     persistence.accepted === true &&
-    Array.isArray(effects?.backgroundMaintenance) &&
-    effects.backgroundMaintenance.length > 0 &&
+    backgroundMaintenanceTasks.length > 0 &&
     typeof runtime.scheduleBackgroundMaintenancePostProcess === "function"
   ) {
     backgroundMaintenanceQueue = runtime.scheduleBackgroundMaintenancePostProcess(
-      effects.backgroundMaintenance,
+      backgroundMaintenanceTasks,
       settings,
     );
     batchStatusRef.backgroundMaintenanceState =
@@ -1621,8 +1654,7 @@ export async function executeExtractionBatchController(
       );
     }
   } else if (
-    Array.isArray(effects?.backgroundMaintenance) &&
-    effects.backgroundMaintenance.length > 0
+    backgroundMaintenanceTasks.length > 0
   ) {
     batchStatusRef.backgroundMaintenanceState = "blocked-by-persistence";
   }
