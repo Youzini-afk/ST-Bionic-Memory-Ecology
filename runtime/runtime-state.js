@@ -22,10 +22,10 @@ import {
   buildHostLineage,
   buildProcessedMessageRecord,
   buildStructuralMessageIdentity,
-  captureHostTransactionContext,
   normalizeHostLineage,
   normalizeProcessedMessageRecord,
 } from "./host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 
 const BATCH_JOURNAL_LIMIT = 96;
 const MAINTENANCE_JOURNAL_LIMIT = 20;
@@ -998,12 +998,7 @@ export function applyProcessedHistorySnapshotToGraph(
       : {};
   historyState.processedMessageHashesNeedRefresh = false;
   const capturedHostLineage = buildHostLineage(
-    captureHostTransactionContext({
-      context: {
-        chat,
-        chatMetadata: globalThis.SillyTavern?.getContext?.()?.chatMetadata,
-      },
-    }),
+    captureCurrentHostTransactionContext(),
   );
   if (capturedHostLineage) historyState.hostLineage = capturedHostLineage;
   graph.lastProcessedSeq = safeLastProcessedAssistantFloor;
@@ -1067,12 +1062,7 @@ export function rebindProcessedHistoryStateToChat(
       : {};
   historyState.processedMessageHashesNeedRefresh = false;
   const capturedHostLineage = buildHostLineage(
-    captureHostTransactionContext({
-      context: {
-        chat,
-        chatMetadata: globalThis.SillyTavern?.getContext?.()?.chatMetadata,
-      },
-    }),
+    captureCurrentHostTransactionContext(),
   );
   if (capturedHostLineage) historyState.hostLineage = capturedHostLineage;
   graph.lastProcessedSeq = safeLastProcessedAssistantFloor;

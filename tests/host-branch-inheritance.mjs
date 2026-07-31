@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 
+import { createEmptyGraph } from "../graph/graph.js";
+import {
+  buildGraphFromSnapshot,
+  buildSnapshotFromGraph,
+} from "../sync/bme-db.js";
+import { createHostBranchInheritanceController } from "../runtime/host-branch-inheritance-controller.js";
 import { inheritHostBranchGraph } from "../runtime/host-branch-inheritance.js";
 import { resolveCurrentChatIdentityCore } from "../runtime/identity-resolver.js";
 
@@ -106,5 +112,71 @@ const existing = await inheritHostBranchGraph({
 });
 assert.equal(existing.reason, "target-already-initialized");
 assert.equal(derived, false);
+
+const controllerSourceGraph = createEmptyGraph();
+controllerSourceGraph.historyState.chatId = "parent-lineage-owner";
+controllerSourceGraph.historyState.hostLineage = {
+  conversationId: "conversation-parent",
+  branchId: "branch-parent",
+  hostRevision: 9,
+};
+controllerSourceGraph.nodes = [
+  { id: "keep-node", type: "event", seq: 1, seqRange: [0, 1] },
+  { id: "cut-node", type: "event", seq: 3, seqRange: [2, 3] },
+];
+controllerSourceGraph.edges = [
+  { id: "cut-edge", fromId: "keep-node", toId: "cut-node", relation: "next" },
+];
+const sourceSnapshot = buildSnapshotFromGraph(controllerSourceGraph, {
+  chatId: "parent-lineage-owner",
+  revision: 9,
+});
+let targetSnapshot = null;
+const controllerCalls = [];
+const sourceDb = {
+  async exportSnapshot(options) {
+    controllerCalls.push(["source-export", options]);
+    return sourceSnapshot;
+  },
+};
+const targetDb = {
+  async isEmpty() {
+    return { empty: true };
+  },
+  async importSnapshot(snapshot, options) {
+    controllerCalls.push(["target-import", options]);
+    targetSnapshot = snapshot;
+    return { revision: 1 };
+  },
+  async exportSnapshot() {
+    return targetSnapshot;
+  },
+};
+const controller = createHostBranchInheritanceController({
+  getContext: () => context,
+  resolveCurrentIdentity: () => identity,
+  getRepository: () => ({
+    getStoreForChat: async (chatId) =>
+      chatId === "parent-lineage-owner" ? sourceDb : targetDb,
+  }),
+  getGraphOwnedChatId: (graph) => graph?.historyState?.chatId,
+  buildGraphFromSnapshot,
+  buildSnapshotFromGraph,
+  isAuthorityStore: () => false,
+  cacheLocalSnapshot: (chatId) => controllerCalls.push(["cache", chatId]),
+  rememberIdentityAlias: (entry) => controllerCalls.push(["alias", entry]),
+  persistCommitMarker: (_context, marker) => controllerCalls.push(["marker", marker]),
+});
+const controlled = await controller.ensure(identity, null);
+assert.equal(controlled.inherited, true);
+assert.deepEqual(
+  controllerCalls.find(([kind]) => kind === "source-export")[1],
+  { includeTombstones: true, allowCrossLineageRead: true },
+);
+assert.deepEqual(targetSnapshot.nodes.map((node) => node.id), ["keep-node"]);
+assert.deepEqual(targetSnapshot.edges, []);
+assert.equal(targetSnapshot.meta.hostBranchId, "branch-child");
+assert.equal(controllerCalls.filter(([kind]) => kind === "alias").length, 1);
+assert.equal(controllerCalls.filter(([kind]) => kind === "marker").length, 1);
 
 console.log("host-branch-inheritance tests passed");

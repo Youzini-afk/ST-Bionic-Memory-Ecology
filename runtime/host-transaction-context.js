@@ -117,7 +117,7 @@ function buildContextFromMetadata(context = null) {
 
 export function captureHostTransactionContext({
   context = null,
-  bridge = globalThis.STAuthorityHostBridge,
+  bridge = null,
 } = {}) {
   if (typeof bridge?.captureTransactionContext === "function") {
     try {

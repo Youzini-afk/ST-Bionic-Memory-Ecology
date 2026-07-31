@@ -1,8 +1,6 @@
 import { normalizeAuthorityBaseUrl } from "./authority-capabilities.js";
-import {
-  captureHostTransactionContext,
-  normalizeHostTransactionContext,
-} from "./host-transaction-context.js";
+import { normalizeHostTransactionContext } from "./host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 
 export const AUTHORITY_PROTOCOL_AUTO = "auto";
 export const AUTHORITY_PROTOCOL_SERVER_PLUGIN_V06 = "server-plugin-v06";
@@ -277,9 +275,7 @@ export class AuthorityHttpClient {
     const hostContext = options.hostContext === null
       ? null
       : normalizeHostTransactionContext(options.hostContext) ||
-        captureHostTransactionContext({
-          context: globalThis.SillyTavern?.getContext?.() || null,
-        });
+        captureCurrentHostTransactionContext();
     const body = {
       input: input ?? {},
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),

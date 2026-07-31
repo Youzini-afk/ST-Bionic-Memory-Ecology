@@ -1,7 +1,125 @@
+import { cloneGraphForPersistence } from "../graph/graph-persistence.js";
 import { normalizeHostLineage } from "./host-transaction-context.js";
+import { normalizeGraphRuntimeState } from "./runtime-state.js";
 
 function normalizeIdentifier(value = "") {
   return String(value ?? "").trim();
+}
+
+function getNodeBranchCutoffSeq(node = null) {
+  if (!node || typeof node !== "object") return -1;
+  if (Array.isArray(node.seqRange) && Number.isFinite(Number(node.seqRange[1]))) {
+    return Number(node.seqRange[1]);
+  }
+  return Number.isFinite(Number(node.seq)) ? Number(node.seq) : -1;
+}
+
+function pruneProcessedMessageRecordsFromFloor(graph = null, fromFloor = NaN) {
+  const records = graph?.historyState?.processedMessageHashes;
+  if (!records || !Number.isFinite(Number(fromFloor))) return;
+  for (const key of Object.keys(records)) {
+    if (Number(key) >= Number(fromFloor)) delete records[key];
+  }
+}
+
+export function deriveBranchGraphFromSourceGraph(
+  sourceGraph = null,
+  {
+    targetChatId = "",
+    cutoffFloor = null,
+    assistantMessageCount = null,
+  } = {},
+) {
+  if (!sourceGraph) return null;
+  const nextChatId =
+    normalizeIdentifier(targetChatId) ||
+    normalizeIdentifier(sourceGraph?.historyState?.chatId);
+  const branchGraph = cloneGraphForPersistence(sourceGraph, nextChatId);
+
+  const safeCutoff =
+    Number.isFinite(Number(cutoffFloor)) && Number(cutoffFloor) >= 0
+      ? Math.floor(Number(cutoffFloor))
+      : null;
+  if (safeCutoff != null) {
+    const allowedNodeIds = new Set(
+      (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : [])
+        .filter((node) => {
+          const nodeCutoffSeq = getNodeBranchCutoffSeq(node);
+          return nodeCutoffSeq < 0 || nodeCutoffSeq <= safeCutoff;
+        })
+        .map((node) => String(node.id || "")),
+    );
+
+    branchGraph.nodes = (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : []).filter(
+      (node) => allowedNodeIds.has(String(node.id || "")),
+    );
+    branchGraph.edges = (Array.isArray(branchGraph.edges) ? branchGraph.edges : []).filter(
+      (edge) =>
+        allowedNodeIds.has(String(edge?.fromId || "")) &&
+        allowedNodeIds.has(String(edge?.toId || "")),
+    );
+    branchGraph.batchJournal = (Array.isArray(branchGraph.batchJournal)
+      ? branchGraph.batchJournal
+      : []
+    ).filter((journal) => {
+      const rangeEnd = Number(journal?.processedRange?.[1]);
+      return !Number.isFinite(rangeEnd) || rangeEnd <= safeCutoff;
+    });
+
+    const summaryEntries = Array.isArray(branchGraph.summaryState?.entries)
+      ? branchGraph.summaryState.entries
+      : [];
+    branchGraph.summaryState.entries = summaryEntries.filter((entry) => {
+      const messageRangeEnd = Number(entry?.messageRange?.[1]);
+      return !Number.isFinite(messageRangeEnd) || messageRangeEnd <= safeCutoff;
+    });
+    branchGraph.summaryState.activeEntryIds = (branchGraph.summaryState.activeEntryIds || [])
+      .filter((entryId) =>
+        branchGraph.summaryState.entries.some((entry) => entry.id === entryId),
+      );
+    branchGraph.summaryState.lastSummarizedAssistantFloor = Math.max(
+      -1,
+      ...branchGraph.summaryState.entries.map((entry) =>
+        Number.isFinite(Number(entry?.messageRange?.[1]))
+          ? Number(entry.messageRange[1])
+          : -1,
+      ),
+    );
+
+    pruneProcessedMessageRecordsFromFloor(branchGraph, safeCutoff + 1);
+    branchGraph.historyState.lastProcessedAssistantFloor = Math.min(
+      Number(branchGraph.historyState.lastProcessedAssistantFloor ?? safeCutoff),
+      safeCutoff,
+    );
+    if (
+      Array.isArray(branchGraph.historyState?.lastBatchStatus?.processedRange) &&
+      Number(branchGraph.historyState.lastBatchStatus.processedRange[1]) > safeCutoff
+    ) {
+      branchGraph.historyState.lastBatchStatus = null;
+    }
+  }
+
+  const extractionCountCeiling =
+    Number.isFinite(Number(assistantMessageCount)) && Number(assistantMessageCount) >= 0
+      ? Math.floor(Number(assistantMessageCount))
+      : Number.isFinite(Number(branchGraph.historyState.extractionCount))
+        ? Number(branchGraph.historyState.extractionCount)
+        : 0;
+  branchGraph.historyState.chatId = nextChatId;
+  branchGraph.historyState.extractionCount = Math.max(
+    0,
+    Math.min(
+      Number(branchGraph.historyState.extractionCount || 0),
+      extractionCountCeiling,
+    ),
+  );
+  branchGraph.historyState.lastRecoveryResult = null;
+  branchGraph.historyState.lastBatchStatus = null;
+  branchGraph.historyState.historyDirtyFrom = null;
+  branchGraph.historyState.lastMutationSource = "chat-branch-created";
+  branchGraph.historyState.lastMutationReason = "chat-branch-created";
+  branchGraph.lastRecallResult = null;
+  return normalizeGraphRuntimeState(branchGraph, nextChatId);
 }
 
 export function getHostBranchParentLineage(identity = null) {

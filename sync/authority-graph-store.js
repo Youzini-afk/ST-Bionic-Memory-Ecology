@@ -10,9 +10,9 @@ import { normalizeAuthorityBaseUrl } from "../runtime/authority-capabilities.js"
 import { AuthorityHttpClient } from "../runtime/authority-http-client.js";
 import {
   buildHostTransactionFence,
-  captureHostTransactionContext,
   normalizeHostTransactionContext,
 } from "../runtime/host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 import {
   GRAPH_OPERATIONAL_MODE_AUTHORITY_DEGRADED,
   GRAPH_OPERATIONAL_MODE_AUTHORITY_PRIMARY,
@@ -1035,9 +1035,7 @@ export class AuthorityGraphStore {
     const client = this._getBmeGraphModuleClient();
     const hostContext =
       normalizeHostTransactionContext(options.hostContext || source.hostContext) ||
-      captureHostTransactionContext({
-        context: globalThis.SillyTavern?.getContext?.() || null,
-      });
+      captureCurrentHostTransactionContext();
     const hostTransaction =
       source.hostTransaction && typeof source.hostTransaction === "object"
         ? source.hostTransaction
@@ -1770,9 +1768,7 @@ export class AuthorityGraphStore {
         const hostContext = allowCrossLineageRead
           ? null
           : normalizeHostTransactionContext(normalizedOptions.hostContext) ||
-            captureHostTransactionContext({
-              context: globalThis.SillyTavern?.getContext?.() || null,
-            });
+            captureCurrentHostTransactionContext();
         const response = await client.bmeGraphLoadSnapshot(
           {
             chatId: this.chatId,

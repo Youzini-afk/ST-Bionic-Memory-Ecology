@@ -186,12 +186,13 @@ import {
 import {
   areHostContextsInSameBranch,
   buildHostTransactionFence,
-  captureHostTransactionContext,
 } from "./runtime/host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "./host/authority-transaction-context.js";
 import {
-  inheritHostBranchGraph,
+  deriveBranchGraphFromSourceGraph,
   isSameHostLineage,
 } from "./runtime/host-branch-inheritance.js";
+import { createHostBranchInheritanceController } from "./runtime/host-branch-inheritance-controller.js";
 import { createRecallInputState } from "./runtime/recall-input-state.js";
 import { createRerollRecallInput } from "./runtime/reroll-recall-input.js?v=recall-tabs-v9";
 import { createConversationSession } from "./runtime/conversation-session.js";
@@ -2038,10 +2039,24 @@ const bmeIndexedDbLoadInFlightByChatId = new Map();
 const bmeIndexedDbWriteInFlightByChatId = new Map();
 const bmeIndexedDbRuntimeRepairInFlightByChatId = new Set();
 const bmeIndexedDbLegacyMigrationInFlightByChatId = new Map();
-const bmeHostBranchInheritanceInFlightByChatId = new Map();
 const bmeIndexedDbLocalStoreMigrationInFlightByChatId = new Map();
 const bmeIndexedDbOpfsMigrationInFlightByChatId = new Map();
 const bmeIndexedDbLatestQueuedRevisionByChatId = new Map();
+const hostBranchInheritanceController = createHostBranchInheritanceController({
+  getContext,
+  resolveCurrentIdentity: () => resolveCurrentChatIdentity(getContext()),
+  getRepository: () => ensureConversationRepository(),
+  getGraphOwnedChatId,
+  buildGraphFromSnapshot,
+  buildSnapshotFromGraph,
+  isAuthorityStore: (db) =>
+    isAuthorityGraphStorePresentation(resolveDbGraphStorePresentation(db)),
+  cacheLocalSnapshot: cacheIndexedDbSnapshot,
+  captureHostContext: () =>
+    captureCurrentHostTransactionContext({ context: getContext() }),
+  rememberIdentityAlias: rememberGraphIdentityAlias,
+  persistCommitMarker: persistGraphCommitMarker,
+});
 const bmeChatStateManifestCacheByChatId = new Map();
 const bmeChatStateLoadInFlightByChatId = new Map();
 const bmeLukerSidecarCompactionByChatId = new Map();
@@ -9531,298 +9546,11 @@ async function loadGraphFromChatState(
   return loadResult;
 }
 
-function getNodeBranchCutoffSeq(node = null) {
-  if (!node || typeof node !== "object") return -1;
-  if (Array.isArray(node.seqRange) && Number.isFinite(Number(node.seqRange[1]))) {
-    return Number(node.seqRange[1]);
-  }
-  return Number.isFinite(Number(node.seq)) ? Number(node.seq) : -1;
-}
-
-function deriveBranchGraphFromSourceGraph(
-  sourceGraph = null,
-  {
-    targetChatId = "",
-    cutoffFloor = null,
-    assistantMessageCount = null,
-  } = {},
-) {
-  if (!sourceGraph) return null;
-  const nextChatId =
-    normalizeChatIdCandidate(targetChatId) ||
-    normalizeChatIdCandidate(sourceGraph?.historyState?.chatId);
-  const branchGraph = cloneGraphForPersistence(sourceGraph, nextChatId);
-
-  const safeCutoff =
-    Number.isFinite(Number(cutoffFloor)) && Number(cutoffFloor) >= 0
-      ? Math.floor(Number(cutoffFloor))
-      : null;
-  if (safeCutoff != null) {
-    const allowedNodeIds = new Set(
-      (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : [])
-        .filter((node) => {
-          const nodeCutoffSeq = getNodeBranchCutoffSeq(node);
-          return nodeCutoffSeq < 0 || nodeCutoffSeq <= safeCutoff;
-        })
-        .map((node) => String(node.id || "")),
-    );
-
-    branchGraph.nodes = (Array.isArray(branchGraph.nodes) ? branchGraph.nodes : []).filter(
-      (node) => allowedNodeIds.has(String(node.id || "")),
-    );
-    branchGraph.edges = (Array.isArray(branchGraph.edges) ? branchGraph.edges : []).filter(
-      (edge) =>
-        allowedNodeIds.has(String(edge?.fromId || "")) &&
-        allowedNodeIds.has(String(edge?.toId || "")),
-    );
-    branchGraph.batchJournal = (Array.isArray(branchGraph.batchJournal)
-      ? branchGraph.batchJournal
-      : []
-    ).filter((journal) => {
-      const rangeEnd = Number(journal?.processedRange?.[1]);
-      return !Number.isFinite(rangeEnd) || rangeEnd <= safeCutoff;
-    });
-
-    const summaryEntries = Array.isArray(branchGraph.summaryState?.entries)
-      ? branchGraph.summaryState.entries
-      : [];
-    branchGraph.summaryState.entries = summaryEntries.filter((entry) => {
-      const messageRangeEnd = Number(entry?.messageRange?.[1]);
-      return !Number.isFinite(messageRangeEnd) || messageRangeEnd <= safeCutoff;
-    });
-    branchGraph.summaryState.activeEntryIds = (branchGraph.summaryState.activeEntryIds || [])
-      .filter((entryId) =>
-        branchGraph.summaryState.entries.some((entry) => entry.id === entryId),
-      );
-    branchGraph.summaryState.lastSummarizedAssistantFloor = Math.max(
-      -1,
-      ...branchGraph.summaryState.entries.map((entry) =>
-        Number.isFinite(Number(entry?.messageRange?.[1]))
-          ? Number(entry.messageRange[1])
-          : -1,
-      ),
-    );
-
-    pruneProcessedMessageHashesFromFloor(branchGraph, safeCutoff + 1);
-    branchGraph.historyState.lastProcessedAssistantFloor = Math.min(
-      Number(branchGraph.historyState.lastProcessedAssistantFloor ?? safeCutoff),
-      safeCutoff,
-    );
-    if (
-      Array.isArray(branchGraph.historyState?.lastBatchStatus?.processedRange) &&
-      Number(branchGraph.historyState.lastBatchStatus.processedRange[1]) > safeCutoff
-    ) {
-      branchGraph.historyState.lastBatchStatus = null;
-    }
-  }
-
-  const extractionCountCeiling =
-    Number.isFinite(Number(assistantMessageCount)) && Number(assistantMessageCount) >= 0
-      ? Math.floor(Number(assistantMessageCount))
-      : Number.isFinite(Number(branchGraph.historyState.extractionCount))
-        ? Number(branchGraph.historyState.extractionCount)
-        : 0;
-  branchGraph.historyState.chatId = nextChatId;
-  branchGraph.historyState.extractionCount = Math.max(
-    0,
-    Math.min(
-      Number(branchGraph.historyState.extractionCount || 0),
-      extractionCountCeiling,
-    ),
-  );
-  branchGraph.historyState.lastRecoveryResult = null;
-  branchGraph.historyState.lastBatchStatus = null;
-  branchGraph.historyState.historyDirtyFrom = null;
-  branchGraph.historyState.lastMutationSource = "chat-branch-created";
-  branchGraph.historyState.lastMutationReason = "chat-branch-created";
-  branchGraph.lastRecallResult = null;
-  return normalizeGraphRuntimeState(branchGraph, nextChatId);
-}
-
 async function ensureCurrentHostBranchGraphInheritance(
   identity = resolveCurrentChatIdentity(getContext()),
   sourceGraph = null,
 ) {
-  const targetChatId = normalizeChatIdCandidate(identity?.chatId);
-  if (!targetChatId || !identity?.hostLineage?.parentConversationId) {
-    return { inherited: false, skipped: true, reason: "not-host-branch" };
-  }
-  const existing = bmeHostBranchInheritanceInFlightByChatId.get(targetChatId);
-  if (existing) return await existing;
-
-  const task = inheritHostBranchGraph({
-    identity,
-    currentChat: getContext()?.chat || [],
-    sourceGraph,
-    isCurrent: () => {
-      const currentIdentity = resolveCurrentChatIdentity(getContext());
-      return (
-        currentIdentity?.chatId === targetChatId &&
-        isSameHostLineage(currentIdentity?.hostLineage, identity.hostLineage)
-      );
-    },
-    isSourceGraphCompatible(graph, sourceChatId, parentLineage) {
-      if (!graph) return false;
-      const graphLineage = graph?.historyState?.hostLineage;
-      if (graphLineage?.conversationId && graphLineage?.branchId) {
-        return isSameHostLineage(graphLineage, parentLineage);
-      }
-      return normalizeChatIdCandidate(getGraphOwnedChatId(graph)) === sourceChatId;
-    },
-    async isTargetEmpty(chatId) {
-      const repository = ensureConversationRepository();
-      const targetDb = await repository?.getStoreForChat?.(chatId);
-      if (!targetDb || typeof targetDb.isEmpty !== "function") {
-        throw new Error("Host branch target store unavailable");
-      }
-      const status = await targetDb.isEmpty();
-      return status?.empty === true;
-    },
-    async loadSourceGraph(sourceChatId) {
-      const repository = ensureConversationRepository();
-      const sourceDb = await repository?.getStoreForChat?.(sourceChatId);
-      if (!sourceDb || typeof sourceDb.exportSnapshot !== "function") return null;
-      const snapshot = await sourceDb.exportSnapshot({
-        includeTombstones: true,
-        allowCrossLineageRead: true,
-      });
-      return buildGraphFromSnapshot(snapshot, { chatId: sourceChatId });
-    },
-    deriveBranchGraph: deriveBranchGraphFromSourceGraph,
-    async persistBranchGraph(branchGraph, branchContext) {
-      const repository = ensureConversationRepository();
-      const targetDb = await repository?.getStoreForChat?.(branchContext.targetChatId);
-      if (!targetDb || typeof targetDb.importSnapshot !== "function") {
-        return { accepted: false, saved: false, reason: "target-store-unavailable" };
-      }
-      const lineage = branchContext.lineage;
-      const snapshot = buildSnapshotFromGraph(branchGraph, {
-        chatId: branchContext.targetChatId,
-        revision: 1,
-        meta: {
-          hostConversationId: lineage.conversationId,
-          hostBranchId: lineage.branchId,
-          hostRevision: lineage.hostRevision,
-          hostCommitEventId: lineage.commitEventId || "",
-          hostCommitTransactionId: lineage.commitTransactionId || "",
-          branchParentConversationId: branchContext.parentLineage.conversationId,
-          branchParentBranchId: branchContext.parentLineage.branchId,
-          branchParentRevision: branchContext.parentLineage.hostRevision,
-          branchParentPersistenceChatId: branchContext.sourceChatId,
-          branchInheritedAt: new Date().toISOString(),
-        },
-      });
-      const authorityTarget = isAuthorityGraphStorePresentation(
-        resolveDbGraphStorePresentation(targetDb),
-      );
-      let imported = null;
-      if (authorityTarget && typeof targetDb.commitDelta === "function") {
-        const runtimeMetaPatch = {
-          ...(snapshot.meta || {}),
-          ...(snapshot.state || {}),
-        };
-        for (const key of [
-          "revision",
-          "lastModified",
-          "lastMutationReason",
-          "syncDirty",
-          "syncDirtyReason",
-          "nodeCount",
-          "edgeCount",
-          "tombstoneCount",
-        ]) {
-          delete runtimeMetaPatch[key];
-        }
-        imported = await targetDb.commitDelta(
-          {
-            upsertNodes: snapshot.nodes || [],
-            upsertEdges: snapshot.edges || [],
-            tombstones: snapshot.tombstones || [],
-            deleteNodeIds: [],
-            deleteEdgeIds: [],
-            runtimeMetaPatch,
-          },
-          {
-            baseRevision: 0,
-            reason: "host-branch-inherited",
-            markSyncDirty: true,
-            vectorDirtyHint: true,
-            hostContext: captureHostTransactionContext({ context: getContext() }),
-            idempotencyKey: [
-              "host-branch-inherit",
-              lineage.conversationId,
-              lineage.branchId,
-              branchContext.sourceChatId,
-            ].join(":"),
-          },
-        );
-      } else {
-        imported = await targetDb.importSnapshot(snapshot, {
-          mode: "replace",
-          expectedRevision: 0,
-          markSyncDirty: true,
-        });
-      }
-      const persistedSnapshot = await targetDb.exportSnapshot({
-        includeTombstones: true,
-      });
-      if (!authorityTarget) {
-        cacheIndexedDbSnapshot(branchContext.targetChatId, persistedSnapshot);
-      }
-      const revision = Number(
-        imported?.revision || persistedSnapshot?.meta?.revision || 0,
-      );
-      const storageTier = String(
-        persistedSnapshot?.meta?.storagePrimary ||
-          persistedSnapshot?.meta?.storageMode ||
-          "local",
-      );
-      return {
-        accepted: true,
-        saved: true,
-        revision,
-        storageTier,
-      };
-    },
-    async rememberIdentityAlias(persistenceChatId, lineage, committed = {}) {
-      rememberGraphIdentityAlias({
-        integrity: identity.integrity,
-        hostChatId: identity.hostChatId,
-        persistenceChatId,
-        hostConversationId: lineage.conversationId,
-        hostBranchId: lineage.branchId,
-      });
-      if (committed.stillCurrent && committed.persistence?.saved !== false) {
-        persistGraphCommitMarker(getContext(), {
-          reason: "host-branch-inherited",
-          revision: Number(committed.persistence?.revision || 0),
-          storageTier: String(committed.persistence?.storageTier || "local"),
-          accepted: true,
-          graph: committed.branchGraph,
-          chatId: persistenceChatId,
-          immediate: true,
-        });
-      }
-    },
-  });
-
-  bmeHostBranchInheritanceInFlightByChatId.set(targetChatId, task);
-  try {
-    return await task;
-  } catch (error) {
-    console.warn("[ST-BME] Host branch memory inheritance deferred:", error);
-    return {
-      inherited: false,
-      skipped: false,
-      reason: "host-branch-inheritance-failed",
-      targetChatId,
-      error: error?.message || String(error),
-    };
-  } finally {
-    if (bmeHostBranchInheritanceInFlightByChatId.get(targetChatId) === task) {
-      bmeHostBranchInheritanceInFlightByChatId.delete(targetChatId);
-    }
-  }
+  return await hostBranchInheritanceController.ensure(identity, sourceGraph);
 }
 
 async function readPersistedGraphForChatStateTarget(
@@ -15511,7 +15239,7 @@ async function executeExtractionBatch({
       captureConversationLease: (...args) =>
         conversationWorkspace.captureLease(...args),
       captureHostTransactionContext: () =>
-        captureHostTransactionContext({ context: getContext() }),
+        captureCurrentHostTransactionContext({ context: getContext() }),
       ensureCurrentGraphRuntimeState,
       extractMemories,
       finalizeBatchStatus,

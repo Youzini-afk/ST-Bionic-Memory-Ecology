@@ -4,9 +4,9 @@ import { resolveGenerationParentUserFloor } from "../runtime/conversation-sessio
 import { stableHashString } from "../runtime/runtime-state.js";
 import {
   buildHostLineage,
-  captureHostTransactionContext,
   getMessageUid,
 } from "../runtime/host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 
 export const BME_RECALL_EXTRA_KEY = "bme_recall";
 export const BME_RECALL_VERSION = 4;
@@ -100,9 +100,7 @@ export function validatePersistedRecallForUserMessage(
     return { valid: false, reason: "message-uid-mismatch", record };
   }
   const currentLineage = buildHostLineage(
-    captureHostTransactionContext({
-      context: globalThis.SillyTavern?.getContext?.() || null,
-    }),
+    captureCurrentHostTransactionContext(),
   );
   if (
     record.conversationId &&

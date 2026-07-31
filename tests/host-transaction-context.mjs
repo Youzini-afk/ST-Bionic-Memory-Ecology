@@ -7,6 +7,7 @@ import {
   getMessageUid,
   normalizeHostTransactionContext,
 } from "../runtime/host-transaction-context.js";
+import { captureCurrentHostTransactionContext } from "../host/authority-transaction-context.js";
 import {
   buildChatHistoryFingerprint,
   detectHistoryMutation,
@@ -77,6 +78,21 @@ const capturedFromMetadata = captureHostTransactionContext({
 });
 assert.equal(capturedFromMetadata.conversationId, "conversation-meta");
 assert.equal(capturedFromMetadata.hostRevision, 3);
+globalThis.__stBmeTestContext = metadataContext;
+assert.equal(
+  captureCurrentHostTransactionContext().branchId,
+  "branch-meta",
+  "the host boundary must supply current metadata without leaking ST globals into runtime modules",
+);
+globalThis.STAuthorityHostBridge = {
+  captureTransactionContext: () => hostContext({
+    phase: "event",
+    sourceEventId: "event-bridge",
+  }),
+};
+assert.equal(captureCurrentHostTransactionContext().sourceEventId, "event-bridge");
+delete globalThis.STAuthorityHostBridge;
+delete globalThis.__stBmeTestContext;
 
 const chat = [
   {
