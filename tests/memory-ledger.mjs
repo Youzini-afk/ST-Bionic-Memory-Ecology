@@ -35,6 +35,7 @@ ledger = committed.ledger;
 assert.equal(ledger.revision, 1);
 assert.equal(ledger.records.length, 2);
 assert.equal(committed.replayed, false);
+assert.equal(committed.commit.parentCommitId, "");
 assert.ok(Object.isFrozen(ledger));
 assert.ok(Object.isFrozen(committed.appendedRecords[0]));
 
@@ -81,6 +82,7 @@ committed = appendMemoryLedgerTransaction(ledger, {
   sourceEvidenceIds: [evidenceOne.id],
   now: 3,
 });
+assert.equal(committed.commit.parentCommitId, replay.commit.id);
 ledger = committed.ledger;
 
 const evidenceTwo = createTurnEvidence({

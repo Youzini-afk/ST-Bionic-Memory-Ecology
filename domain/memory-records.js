@@ -25,6 +25,7 @@ function plainObject(value, fallback = {}) {
 }
 
 function optionalFloor(value) {
+  if (value === null || value === undefined || value === "") return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? Math.floor(numeric) : null;
 }
@@ -62,7 +63,16 @@ export function createTurnEvidence(input = {}) {
     normalizedUser: String(input.normalizedUserText ?? userText).trim(),
     normalizedAssistant: String(input.normalizedAssistantText ?? assistantText).trim(),
   };
-  const contentHash = String(input.contentHash || hashDomainValue({ source, content }));
+  // Mutable SillyTavern array indexes are locators, not content identity. Keep
+  // them in `source`, but never let an insertion/deletion change the evidence
+  // id of an otherwise unchanged assistant turn.
+  const contentHash = String(
+    input.contentHash ||
+      hashDomainValue({
+        content,
+        speaker: String(input.metadata?.speaker || "").trim(),
+      }),
+  );
   const id = String(
     input.id ||
       createDomainId("evidence", {
@@ -102,6 +112,33 @@ export function createEvidenceInvalidation(input = {}) {
   );
   return {
     ...baseRecord(MEMORY_RECORD_KIND.EVIDENCE_INVALIDATION, {
+      ...input,
+      id,
+      chatId,
+    }),
+    evidenceId,
+    reason,
+    mutationId,
+    sourceFingerprint: String(input.sourceFingerprint || "").trim(),
+  };
+}
+
+export function createEvidenceActivation(input = {}) {
+  const chatId = requireDomainId(input.chatId, "activation.chatId");
+  const evidenceId = requireDomainId(input.evidenceId, "activation.evidenceId");
+  const reason = String(input.reason || "history-reactivated").trim();
+  const mutationId = String(input.mutationId || "").trim();
+  const id = String(
+    input.id ||
+      createDomainId("activation", {
+        chatId,
+        evidenceId,
+        reason,
+        mutationId,
+      }),
+  );
+  return {
+    ...baseRecord(MEMORY_RECORD_KIND.EVIDENCE_ACTIVATION, {
       ...input,
       id,
       chatId,
@@ -320,6 +357,7 @@ export function createLedgerCommitRecord(input = {}) {
     }),
     revision,
     baseRevision: Math.max(0, Math.floor(Number(input.baseRevision) || 0)),
+    parentCommitId: String(input.parentCommitId || "").trim(),
     idempotencyKey,
     payloadFingerprint: requireDomainId(
       input.payloadFingerprint,

@@ -39,10 +39,9 @@ export class ConversationRepository {
     return { binding: normalizedBinding, store };
   }
 
-  async getStore(chatId = this._currentChatId, { binding = null } = {}) {
+  async getStoreForChat(chatId, { binding = null } = {}) {
     const normalizedChatId = normalizeChatId(chatId);
     if (!normalizedChatId) return null;
-    this._currentChatId = normalizedChatId;
 
     let entry = this._entries.get(normalizedChatId);
     if (!entry) {
@@ -65,6 +64,13 @@ export class ConversationRepository {
     }
   }
 
+  async getStore(chatId = this._currentChatId, { binding = null } = {}) {
+    const normalizedChatId = normalizeChatId(chatId);
+    if (!normalizedChatId) return null;
+    this._currentChatId = normalizedChatId;
+    return await this.getStoreForChat(normalizedChatId, { binding });
+  }
+
   async switchChat(chatId) {
     const normalizedChatId = normalizeChatId(chatId);
     if (!normalizedChatId) {
@@ -72,7 +78,7 @@ export class ConversationRepository {
       return null;
     }
     this._currentChatId = normalizedChatId;
-    return await this.getStore(normalizedChatId);
+    return await this.getStoreForChat(normalizedChatId);
   }
 
   async rebind(chatId = this._currentChatId, binding = null) {

@@ -48,6 +48,44 @@ export function assertMemoryLedger(ledger) {
   if (!Array.isArray(ledger.records)) {
     throw new MemoryLedgerValidationError("ledger.records must be an array");
   }
+  const issues = [];
+  const recordIds = new Set();
+  let commitCount = 0;
+  let parentCommitId = "";
+  for (const record of ledger.records) {
+    const id = String(record?.id || "").trim();
+    const kind = String(record?.kind || "").trim();
+    if (!id) issues.push("ledger record id is required");
+    else if (recordIds.has(id)) issues.push(`duplicate ledger record id: ${id}`);
+    else recordIds.add(id);
+    if (!isMemoryRecordKind(kind)) issues.push(`invalid ledger record kind: ${kind}`);
+    if (String(record?.chatId || "").trim() !== ledger.chatId) {
+      issues.push(`ledger record ${id || "<unknown>"} belongs to another chat`);
+    }
+    if (kind === MEMORY_RECORD_KIND.COMMIT) {
+      commitCount += 1;
+      if (
+        Number(record.revision) !== commitCount ||
+        Number(record.baseRevision) !== commitCount - 1 ||
+        String(record.parentCommitId || "") !== parentCommitId
+      ) {
+        issues.push(`ledger commit chain is invalid at revision ${commitCount}`);
+      }
+      parentCommitId = id;
+    } else if (
+      !Number.isInteger(Number(record?.ledgerRevision)) ||
+      Number(record.ledgerRevision) <= 0 ||
+      Number(record.ledgerRevision) > Number(ledger.revision)
+    ) {
+      issues.push(`ledger record ${id || "<unknown>"} has invalid revision`);
+    }
+  }
+  if (commitCount !== Number(ledger.revision)) {
+    issues.push(`ledger revision ${ledger.revision} does not match ${commitCount} commits`);
+  }
+  if (issues.length > 0) {
+    throw new MemoryLedgerValidationError("memory ledger integrity check failed", issues);
+  }
   return ledger;
 }
 
@@ -56,6 +94,7 @@ export function buildMemoryLedgerIndex(ledger) {
   const recordsById = new Map();
   const recordsByKind = new Map();
   const commitsByIdempotencyKey = new Map();
+  const commitsByRevision = new Map();
   for (const record of ledger.records) {
     const id = String(record?.id || "").trim();
     if (!id) continue;
@@ -66,9 +105,16 @@ export function buildMemoryLedgerIndex(ledger) {
     recordsByKind.set(kind, bucket);
     if (kind === MEMORY_RECORD_KIND.COMMIT && record.idempotencyKey) {
       commitsByIdempotencyKey.set(String(record.idempotencyKey), record);
+      commitsByRevision.set(Number(record.revision), record);
     }
   }
-  return { recordsById, recordsByKind, commitsByIdempotencyKey };
+  return {
+    recordsById,
+    recordsByKind,
+    commitsByIdempotencyKey,
+    commitsByRevision,
+    headCommit: commitsByRevision.get(Number(ledger.revision)) || null,
+  };
 }
 
 function validateRecordShape(record, ledger, index, appendedById) {
@@ -93,7 +139,10 @@ function validateRecordReferences(records, index) {
   const available = new Map(index.recordsById);
   for (const record of records) available.set(record.id, record);
   for (const record of records) {
-    if (record.kind === MEMORY_RECORD_KIND.EVIDENCE_INVALIDATION) {
+    if (
+      record.kind === MEMORY_RECORD_KIND.EVIDENCE_INVALIDATION ||
+      record.kind === MEMORY_RECORD_KIND.EVIDENCE_ACTIVATION
+    ) {
       const evidence = available.get(record.evidenceId);
       if (evidence?.kind !== MEMORY_RECORD_KIND.EVIDENCE) {
         issues.push(`invalidation ${record.id} references missing evidence ${record.evidenceId}`);
@@ -247,6 +296,7 @@ export function appendMemoryLedgerTransaction(
       chatId: ledger.chatId,
       revision,
       baseRevision: Number(ledger.revision),
+      parentCommitId: index.headCommit?.id || "",
       idempotencyKey: normalizedIdempotencyKey,
       payloadFingerprint,
       appendedRecordIds: appendedRecords.map((record) => record.id),

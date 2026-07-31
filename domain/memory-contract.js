@@ -9,6 +9,7 @@ export const MEMORY_LEDGER_VERSION = 1;
 export const MEMORY_RECORD_KIND = Object.freeze({
   EVIDENCE: "evidence",
   EVIDENCE_INVALIDATION: "evidence_invalidation",
+  EVIDENCE_ACTIVATION: "evidence_activation",
   MEMORY_REVISION: "memory_revision",
   RELATION_REVISION: "relation_revision",
   COMMIT: "commit",
@@ -111,4 +112,3 @@ export function createEmptyMemoryLedger({ chatId, now = Date.now() } = {}) {
     records: [],
   };
 }
-

@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 
 const SOURCE_ROOTS = [
   "index.js",
+  "application",
+  "domain",
   "ena-planner",
   "graph",
   "host",
@@ -13,6 +15,7 @@ const SOURCE_ROOTS = [
   "retrieval",
   "runtime",
   "scripts",
+  "storage",
   "sync",
   "ui",
   "vector",

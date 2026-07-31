@@ -47,6 +47,21 @@ without rerunning either Agent.
   crash. Durable inbox work remains pending and resumes from the last safe
   checkpoint.
 
+The ledger revision is independent from the physical graph-store revision.
+Each immutable ledger record is stored under its own nested metadata key and a
+small head points to the latest commit. A write checks the physical store CAS
+and the ledger parent commit. Unrelated projection writes may advance the
+physical revision and be retried; a changed ledger head is a semantic conflict.
+This avoids rewriting the complete ledger on every turn and lets IndexedDB,
+OPFS, and the Authority module share the same atomic boundary.
+
+History reconciliation compares the complete current set of assistant-turn
+evidence with the ledger. Mutable SillyTavern array indexes remain locators
+only. Delete, edit, reroll, and swipe append evidence disposition records;
+selecting an older swipe reactivates its earlier evidence instead of extracting
+it again. A branch receives a distinct chat identity, retains its lineage, and
+imports only the evidence and memory revisions valid at its cutoff.
+
 ## Context and limits
 
 BME model presets own the model and its context-window size. Context compaction
@@ -68,4 +83,3 @@ runtime has one owner for each behavior. After product-contract parity, the old
 extraction, maintenance, recall, and history mutation paths are removed rather
 than retained as a fallback. Any old-data support is a one-time importer outside
 the live runtime.
-

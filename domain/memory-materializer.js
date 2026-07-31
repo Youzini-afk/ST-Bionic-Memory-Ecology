@@ -27,9 +27,16 @@ export function materializeEvidenceState(ledger) {
   const evidence = index.recordsByKind.get(MEMORY_RECORD_KIND.EVIDENCE) || [];
   const invalidations =
     index.recordsByKind.get(MEMORY_RECORD_KIND.EVIDENCE_INVALIDATION) || [];
-  const latestInvalidationByEvidenceId = latestBy(
-    invalidations,
+  const activations =
+    index.recordsByKind.get(MEMORY_RECORD_KIND.EVIDENCE_ACTIVATION) || [];
+  const latestDispositionByEvidenceId = latestBy(
+    [...invalidations, ...activations],
     (record) => record.evidenceId,
+  );
+  const latestInvalidationByEvidenceId = new Map(
+    [...latestDispositionByEvidenceId].filter(
+      ([, record]) => record.kind === MEMORY_RECORD_KIND.EVIDENCE_INVALIDATION,
+    ),
   );
   const activeEvidence = [];
   const invalidEvidence = [];
@@ -43,6 +50,7 @@ export function materializeEvidenceState(ledger) {
     activeEvidenceIds: new Set(activeEvidence.map((record) => record.id)),
     invalidEvidence,
     latestInvalidationByEvidenceId,
+    latestDispositionByEvidenceId,
   };
 }
 
