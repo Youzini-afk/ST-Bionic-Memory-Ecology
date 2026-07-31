@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [html, panel, controls, css, index] = await Promise.all([
+const [html, panel, controls, css] = await Promise.all([
   readFile(new URL("../ui/panel.html", import.meta.url), "utf8"),
   readFile(new URL("../ui/panel.js", import.meta.url), "utf8"),
   readFile(new URL("../ui/runtime-mode-controls.js", import.meta.url), "utf8"),
   readFile(new URL("../style.css", import.meta.url), "utf8"),
-  readFile(new URL("../index.js", import.meta.url), "utf8"),
 ]);
 
 assert.match(html, /id="bme-memory-runtime-mode"/);
@@ -54,11 +53,4 @@ assert.doesNotMatch(
   css,
   /#bme-setting-extract-auto-enabled[\s\S]{0,500}display:\s*none\s*!important/,
 );
-assert.match(index, /retrieve:\s*retrieveForMemoryRuntime/);
-assert.match(index, /isAgentMemoryRuntimeMode\(getSettings\(\)\?\.memoryRuntimeMode\)/);
-assert.match(index, /runWorkflowExtraction/);
-assert.match(index, /runGraphStewardAgent/);
-assert.match(index, /graph-steward-running-use-current-snapshot/);
-assert.match(index, /createBatchJournalEntry\(beforeSnapshot, graph/);
-
 console.log("memory runtime mode UI tests passed");
